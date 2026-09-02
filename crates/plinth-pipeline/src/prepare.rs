@@ -887,6 +887,7 @@ pub fn prepare(request: PrepareRequest) -> Result<PrepareReport, PipelineError> 
                 // Refused by name before it was ever opened, so the pre-pass
                 // never saw it.
                 repair: None,
+                orientation: None,
                 outcome: ModelPreparationOutcome::Failed {
                     exit_code: PipelineExitCode::Input,
                     detail: format!(
@@ -965,12 +966,16 @@ fn prepare_one(
     // say what was edited, or the refusal is being reported against geometry
     // the reader cannot reconstruct.
     let mut repair: Option<plinth_mesh::RepairEvidence> = None;
+    // Every disposition BELOW the orientation stage: the model never got a
+    // rotation, so the field says the record does not hold one rather than
+    // claiming identity, which is a rotation the stage can also choose.
     let report = |repair: &Option<plinth_mesh::RepairEvidence>, assumed_print_size, outcome| {
         ModelPreparationReport {
             model: model.clone(),
             source_path: source_path.to_path_buf(),
             assumed_print_size,
             repair: repair.clone(),
+            orientation: None,
             outcome,
         }
     };
@@ -1125,6 +1130,24 @@ fn prepare_one(
     ) {
         Ok(oriented) => oriented,
         Err(stop) => return report(&repair, assumed, failure(&stop)),
+    };
+    // **The chosen orientation, read once and carried on every disposition
+    // from here down.** The closure is SHADOWED rather than given a fourth
+    // parameter so that the eleven call sites above and below stay as they
+    // are, and so that "no orientation was chosen yet" is enforced by which
+    // closure is in scope instead of by remembering to pass `None`.
+    let orientation = Some(crate::OrientationDisclosure::from_report(
+        oriented.history().orientation(),
+    ));
+    let report = |repair: &Option<plinth_mesh::RepairEvidence>, assumed_print_size, outcome| {
+        ModelPreparationReport {
+            model: model.clone(),
+            source_path: source_path.to_path_buf(),
+            assumed_print_size,
+            repair: repair.clone(),
+            orientation: orientation.clone(),
+            outcome,
+        }
     };
     if stop_after == Some(StageStop::Orient) {
         return report(
@@ -2839,6 +2862,7 @@ mod tests {
                     uncovered_area_mm2: 3.5,
                     worst_gap: plinth_support::CoverageClosureGap::NoRoutedContact,
                     face_ids: vec![11, 12],
+                    search_outcome: None,
                 }],
                 total_uncovered_mm2: 3.5,
                 closure_reason: Some("NoImprovingRepair".to_owned()),
@@ -2897,6 +2921,7 @@ mod tests {
                     uncovered_area_mm2: 3.5,
                     worst_gap: plinth_support::CoverageClosureGap::NoRoutedContact,
                     face_ids: vec![11, 12],
+                    search_outcome: None,
                 }],
                 total_uncovered_mm2: 3.5,
                 closure_reason: Some("NoImprovingRepair".to_owned()),

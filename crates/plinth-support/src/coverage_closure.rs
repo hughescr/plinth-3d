@@ -304,7 +304,30 @@ pub enum CoverageClosureReason {
     /// spent the pool". This one can only mean the first. Which routes remain
     /// and why is per-route evidence ([`RouteRepairOutcome`]), not a
     /// whole-model verdict.
+    ///
+    /// **It means the POOL was empty, never that a screen emptied it.** A
+    /// ranking the attestation pre-screen reduced to nothing reports
+    /// [`Self::AllCandidatesScreened`] instead, and the two must not be
+    /// confusable: this one says the plan offered no row, that one says the
+    /// plan offered rows and the geometry could not grade them.
     NothingToTry,
+    /// **The attestation pre-screen removed every candidate the plan offered**,
+    /// so the first repair step had nothing left to transact.
+    ///
+    /// Distinct from [`Self::NothingToTry`] by measurement, not by taste. On
+    /// `Round 25` the plan offered **61** rows and the screen refused all 61 as
+    /// `undecidable_geometry`; reporting that as "there was never anything to
+    /// try" states the opposite of what happened and sends the reader to the
+    /// repair pool when the thing to look at is the placement search. The
+    /// counts travel ON the reason because the reason is what the coverage-gap
+    /// warning prints — a number an operator has to go and find on another line
+    /// is a number that is not in the warning.
+    AllCandidatesScreened {
+        /// Rows the screen was offered on that first ranking.
+        offered: usize,
+        /// What it refused them for, by cause name.
+        dropped_by: BTreeMap<String, usize>,
+    },
     /// **SPEC-A4 §B.7.** The honest end of a greedy search: every candidate was
     /// tried and rolled back, or the best remaining candidate's GLOBAL score is
     /// 0.00 mm² and cannot cover anything (§B.3's zero-score guard).
@@ -359,11 +382,32 @@ pub enum RouteRepairOutcome {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum BlockedCause {
     /// Every eligible row was tried; each was rolled back.
+    ///
+    /// The four counts partition the route's pool: `occupied + screened +
+    /// ledgered == pool_rows`. `screened` is what the attestation pre-screen
+    /// removed before ranking — rows that were never tried and were never
+    /// occupied either, and which used to be silently added to `occupied`.
     PoolExhausted {
         pool_rows: usize,
         occupied: usize,
+        screened: usize,
         ledgered: usize,
     },
+    /// **The attestation pre-screen took this route's whole ranking.** Every
+    /// row it had left after the plan-side exclusions was refused at the seat,
+    /// so no trial was ever spent here and no score was ever compared.
+    ///
+    /// It is its own class because the alternative was
+    /// [`Self::NoCandidateCoversAnything`], which reports
+    /// `rows_within_radius` and `nearest_seat_to_uncovered_mm` over an EMPTY
+    /// row set — infinity and zero — and reads as "nothing was near enough".
+    /// That is a reach claim about a pool nothing measured for reach, and
+    /// ruling R14 forbids exactly that. What actually happened is a
+    /// PLACEMENT-search result: these seats could not be graded, and a seat a
+    /// fraction of a millimetre away might be. The run report's
+    /// `prescreen.dropped_by_cause` names the cause; this says how many rows on
+    /// THIS route it cost.
+    PoolScreened { pool_rows: usize, screened: usize },
     /// No eligible row scores above 0.00 mm² against the current uncovered set.
     ///
     /// This IS a measurement — the score — not an inference from a distance.
@@ -590,9 +634,22 @@ pub(crate) fn worse_gap(left: CoverageClosureGap, right: CoverageClosureGap) -> 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct KeyNomination {
     /// Rows still eligible for this key at the moment nomination ran.
+    ///
+    /// **Survivors of the pre-screen, not the offered set.** A row the screen
+    /// removed was never a row the loop could spend a trial on, so counting it
+    /// here would tell §E.1 the route had something to try when it did not.
     pub(crate) eligible_rows: usize,
     /// Rows this attempt actually nominated for this key.
     pub(crate) nominated_rows: usize,
+    /// **The complement: rows the pre-screen REMOVED for this key.**
+    ///
+    /// `eligible_rows + screened_rows` is what the three plan-side exclusions
+    /// left, so a route that vanished from the ranking can say which of the two
+    /// took it. Without this the route's own §E.1 line reads
+    /// `NoCandidateCoversAnything { rows_within_radius: 0,
+    /// nearest_seat_to_uncovered_mm: inf }` — a REACH claim about a pool that
+    /// was never measured for reach, which is exactly what ruling R14 forbids.
+    pub(crate) screened_rows: usize,
 }
 
 /// One route's share of a candidate's GLOBAL score — SPEC-A4 design §D.1's
@@ -650,6 +707,21 @@ pub(crate) struct RankedRepairCandidates {
     /// Each worklist route's own measured UNCENSORED uncovered area, the
     /// quantity rule N3's serve set watches for change.
     pub(crate) route_uncovered_mm2: BTreeMap<(u32, u32), f64>,
+    /// **Whether a screen actually MEASURED this pool.** `false` when no screen
+    /// was passed and `false` when the screen was passed but could not run —
+    /// a starved native admission, a refused batch, a verdict count that did
+    /// not match the seats. The three counters below are then all zero /
+    /// empty, and the caller folds nothing, so "the screen took nothing" and
+    /// "the screen never ran" stay distinguishable on the report.
+    pub(crate) prescreen_measured: bool,
+    /// How many eligible rows the pre-screen was offered. `0` whenever
+    /// `prescreen_measured` is false, because an offer nobody measured is not
+    /// an offer.
+    pub(crate) prescreen_offered: usize,
+    /// Rows the screen REMOVED, by cause name.
+    pub(crate) prescreen_dropped_by_cause: BTreeMap<String, usize>,
+    /// Refusals the screen measured and deliberately kept, by name. Evidence.
+    pub(crate) prescreen_observed_not_acted_on: BTreeMap<String, usize>,
 }
 
 /// One candidate seat's GLOBAL score and the routes that produced it.
@@ -821,6 +893,7 @@ pub(crate) fn rank_repair_candidates(
     radius_mm: f64,
     matrix_budget: usize,
     failed: &BTreeSet<RepairRowId>,
+    screen: Option<&dyn RepairSeatScreen>,
 ) -> Result<RankedRepairCandidates, SpecializedError> {
     let mut excluded: BTreeSet<RepairRowId> = plan
         .occupied_repair_rows()?
@@ -861,6 +934,7 @@ pub(crate) fn rank_repair_candidates(
             id: row.id(),
             key,
             seat_mm: row.candidate().point_mm,
+            normal_mm: row.candidate().normal,
             order: row.order(),
         });
     }
@@ -872,7 +946,59 @@ pub(crate) fn rank_repair_candidates(
         uncovered_samples,
         radius_mm,
         matrix_budget,
+        screen,
     ))
+}
+
+/// **A physics screen over the WHOLE candidate pool, in ONE batched call.**
+///
+/// The three exclusions [`rank_repair_candidates`] applies are bookkeeping —
+/// occupied, ledgered, seat already claimed — and every one of them is a
+/// property of the plan. This is the fourth, and the only one that is physics:
+/// it asks the geometry kernel whether a contact placed at this seat could
+/// attest at all, and a seat that cannot never enters the pool.
+///
+/// **One call per ranking pass, not one per candidate.** A screen that issued a
+/// native query per row would restore exactly the per-item call the batched
+/// verifier exists to prevent, and it would cost more than the trials it saves.
+/// The structural gate in `tests/contact_regression_gate.rs` counts the call
+/// sites of the batch entry point for this reason.
+pub(crate) trait RepairSeatScreen {
+    /// Verdicts for the whole set, index-aligned with `seats`.
+    fn screen(&self, seats: &[ScreenedSeat]) -> RepairSeatScreenVerdicts;
+}
+
+/// One candidate seat as the screen sees it: the geometry, and the load the
+/// contact placed there would be proposed to carry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ScreenedSeat {
+    pub(crate) seat_mm: [f64; 3],
+    /// The frozen candidate's own OUTWARD surface normal.
+    pub(crate) normal_mm: [f64; 3],
+    /// Rule N2's global marginal uncovered area for this seat — the closest
+    /// statement the ranking holds of what a contact here would be asked to
+    /// carry, and therefore what the load law is evaluated on.
+    pub(crate) marginal_area_mm2: f64,
+}
+
+/// What one screening pass decided, per seat, plus what it saw and let pass.
+pub(crate) struct RepairSeatScreenVerdicts {
+    /// **`false` means this pass measured NOTHING** — the screen was asked and
+    /// could not answer, so every row is kept and no counter may be folded from
+    /// it. A pass that measured every seat and refused none reports `true` with
+    /// an all-`None` `per_seat`, which is a different statement and is reported
+    /// as one.
+    pub(crate) measured: bool,
+    /// Index-aligned with the seats: `None` keeps the row, `Some(cause)` drops
+    /// it and names the cause. A screen that cannot answer for a row must
+    /// answer `None` — the consumer reads this by index and treats a missing
+    /// entry as `None`, so a short vector keeps rows rather than misaligning
+    /// them onto their neighbours' verdicts.
+    pub(crate) per_seat: Vec<Option<&'static str>>,
+    /// Refusals the same pass MEASURED and deliberately did not act on,
+    /// counted by name. Evidence only: nothing reads it, and no row is removed
+    /// for appearing here.
+    pub(crate) observed_not_acted_on: BTreeMap<String, usize>,
 }
 
 /// One repair-pool row that survived the three eligibility exclusions, carrying
@@ -888,6 +1014,13 @@ pub(crate) struct EligibleRepairCandidate {
     /// The route that OWNS the row (SPEC §3's one-route rule, untouched).
     pub(crate) key: (u32, u32),
     pub(crate) seat_mm: [f64; 3],
+    /// The frozen candidate's own OUTWARD surface normal — `ContactCandidate::
+    /// normal`, which is the native surface normal for its `face_id` and never
+    /// a vertex normal. Carried so a physics screen can build the member this
+    /// seat would become without re-deriving a normal from the mesh, which is
+    /// how the screen and the mint site would come to measure different
+    /// geometry. Nothing in rules N1-N4 reads it.
+    pub(crate) normal_mm: [f64; 3],
     /// Pool order, the deterministic tie-break SPEC §6 names.
     pub(crate) order: usize,
 }
@@ -927,6 +1060,14 @@ pub(crate) fn rank_eligible_candidates(
     uncovered_samples: &[usize],
     radius_mm: f64,
     matrix_budget: usize,
+    // The physics screen, applied BELOW — after rule N2's score exists and
+    // before anything is ranked or counted. It arrives here rather than in
+    // `rank_repair_candidates` for one measured reason: the load a contact at
+    // this seat would carry is the seat's own N2 score, which does not exist
+    // until `score_candidates_globally` has run, and a screen that sized its
+    // provisional tip from something else would be screening a member the
+    // engine would never build. `None` runs no screen and changes nothing.
+    screen: Option<&dyn RepairSeatScreen>,
 ) -> RankedRepairCandidates {
     let scoring_samples: Vec<usize> = uncovered_samples
         .iter()
@@ -937,9 +1078,60 @@ pub(crate) fn rank_eligible_candidates(
     let scores =
         score_candidates_globally(&seats, samples, &scoring_samples, radius_mm, matrix_budget);
 
+    // **The fourth exclusion — the physics screen.** It is NOT one of rules
+    // N1-N4 and it does not reorder anything: it removes rows the geometry
+    // kernel says could not carry a contact at all, and everything below then
+    // ranks what is left exactly as it always did. N1's promise is unchanged
+    // where it bites — every row that reaches the ranking is scored and every
+    // scored row is ranked, with no cap — and the revert proof
+    // `ranked_rows_are_never_capped_by_the_patch_or_route_count` runs with no
+    // screen at all, so it still fails the moment a CAP reappears.
+    let mut prescreen_measured = false;
+    let mut prescreen_dropped_by_cause: BTreeMap<String, usize> = BTreeMap::new();
+    let mut prescreen_observed_not_acted_on: BTreeMap<String, usize> = BTreeMap::new();
+    let verdicts = screen.map(|screen| {
+        let seats = eligible
+            .iter()
+            .zip(&scores)
+            .map(|(row, score)| ScreenedSeat {
+                seat_mm: row.seat_mm,
+                normal_mm: row.normal_mm,
+                marginal_area_mm2: score.marginal_area_mm2,
+            })
+            .collect::<Vec<_>>();
+        let verdicts = screen.screen(&seats);
+        prescreen_measured = verdicts.measured;
+        prescreen_observed_not_acted_on = verdicts.observed_not_acted_on;
+        verdicts.per_seat
+    });
+    // A pass that measured nothing removes nothing: its verdicts are dropped
+    // rather than trusted, so a screen that failed open cannot take a row with
+    // it.
+    let verdicts = prescreen_measured.then_some(verdicts).flatten();
+    let prescreen_offered = if prescreen_measured { eligible.len() } else { 0 };
+    let keep: Vec<bool> = (0..eligible.len())
+        .map(|index| {
+            let refused = verdicts
+                .as_ref()
+                .and_then(|per_seat| per_seat.get(index).copied().flatten());
+            match refused {
+                Some(cause) => {
+                    *prescreen_dropped_by_cause
+                        .entry(cause.to_owned())
+                        .or_insert(0) += 1;
+                    false
+                }
+                None => true,
+            }
+        })
+        .collect();
+
     let mut ranked: Vec<RankedRepairRow> = eligible
         .iter()
         .zip(scores)
+        .zip(&keep)
+        .filter(|(_, keep)| **keep)
+        .map(|(pair, _)| pair)
         .map(|(row, score)| RankedRepairRow {
             id: row.id,
             key: row.key,
@@ -960,14 +1152,28 @@ pub(crate) fn rank_eligible_candidates(
         .keys()
         .map(|key| (*key, KeyNomination::default()))
         .collect();
-    for row in eligible {
-        per_key.entry(row.key).or_default().eligible_rows += 1;
+    // Survivors and removals, both counted, on the SAME walk. §E.1 must not be
+    // told a route had rows the loop could have spent a trial on when the
+    // screen had already taken them — and it must not be left to infer the
+    // removal from an absence either, which is how a route with an entirely
+    // screened pool came to report a reach claim about zero rows.
+    for (row, keep) in eligible.iter().zip(&keep) {
+        let entry = per_key.entry(row.key).or_default();
+        if *keep {
+            entry.eligible_rows += 1;
+        } else {
+            entry.screened_rows += 1;
+        }
     }
 
     RankedRepairCandidates {
         ranked,
         per_key,
         route_uncovered_mm2,
+        prescreen_measured,
+        prescreen_offered,
+        prescreen_dropped_by_cause,
+        prescreen_observed_not_acted_on,
     }
 }
 
@@ -1469,6 +1675,7 @@ mod tests {
             KeyNomination {
                 eligible_rows: 4,
                 nominated_rows: 2,
+                screened_rows: 0,
             },
         );
         tally.insert((7, 1), KeyNomination::default());
@@ -1573,6 +1780,7 @@ mod tests {
             id: RepairRowId::for_search_rule_test(island_id, component_id, order as u64),
             key: (island_id, component_id),
             seat_mm,
+            normal_mm: [0.0, 0.0, 1.0],
             order,
         }
     }
@@ -1589,6 +1797,10 @@ mod tests {
             ranked,
             per_key: BTreeMap::new(),
             route_uncovered_mm2,
+            prescreen_measured: false,
+            prescreen_offered: 0,
+            prescreen_dropped_by_cause: BTreeMap::new(),
+            prescreen_observed_not_acted_on: BTreeMap::new(),
         }
     }
 
@@ -1999,6 +2211,250 @@ mod tests {
         areas
     }
 
+    // ---------------------------------------------------------------------
+    // The pre-screen, exercised through the same production ranking path.
+    //
+    // **The smallest defect the aggregate assertions cannot see is a
+    // MISALIGNMENT.** `rank_eligible_candidates` zips four sequences —
+    // `eligible`, `scores`, `keep` and the screen's `per_seat` — and a
+    // consumer that read the verdicts at the wrong offset would drop the wrong
+    // rows while every count stayed exactly right: the same number offered, the
+    // same number dropped, the same cause histogram, the same `eligible_rows`
+    // total. So these tests name the rows that must SURVIVE, by identity and by
+    // seat, and would go red on a one-row shift that no counter can feel.
+    // ---------------------------------------------------------------------
+
+    /// A screen that refuses the seats it is told to, chosen by POSITION IN
+    /// SPACE rather than by index.
+    ///
+    /// Naming them by seat is the whole point: the stub cannot collude with an
+    /// off-by-one in the consumer, because it decides from the geometry it is
+    /// handed and the test then checks which rows actually left.
+    struct DropSeatsAtX {
+        drop_x: Vec<f64>,
+        cause: &'static str,
+        /// Return only this many verdicts, to exercise the short-list path.
+        truncate_to: Option<usize>,
+        measured: bool,
+        observed_not_acted_on: BTreeMap<String, usize>,
+    }
+
+    impl DropSeatsAtX {
+        fn refusing(drop_x: Vec<f64>) -> Self {
+            Self {
+                drop_x,
+                cause: "undecidable_geometry",
+                truncate_to: None,
+                measured: true,
+                observed_not_acted_on: BTreeMap::new(),
+            }
+        }
+    }
+
+    impl RepairSeatScreen for DropSeatsAtX {
+        fn screen(&self, seats: &[ScreenedSeat]) -> RepairSeatScreenVerdicts {
+            let mut per_seat: Vec<Option<&'static str>> = seats
+                .iter()
+                .map(|seat| {
+                    self.drop_x
+                        .iter()
+                        .any(|x| (seat.seat_mm[0] - x).abs() < 1e-9)
+                        .then_some(self.cause)
+                })
+                .collect();
+            if let Some(limit) = self.truncate_to {
+                per_seat.truncate(limit);
+            }
+            RepairSeatScreenVerdicts {
+                measured: self.measured,
+                per_seat,
+                observed_not_acted_on: self.observed_not_acted_on.clone(),
+            }
+        }
+    }
+
+    /// Every surviving row's identity and seat, in ranking order.
+    fn survivors(ranked: &RankedRepairCandidates) -> Vec<(u64, f64)> {
+        let mut rows: Vec<(u64, f64)> = ranked
+            .ranked
+            .iter()
+            .map(|row| (row.id.wire().candidate_id, row.seat_mm[0]))
+            .collect();
+        rows.sort_by_key(|row| row.0);
+        rows
+    }
+
+    fn rank_with(screen: Option<&dyn RepairSeatScreen>) -> RankedRepairCandidates {
+        let (rows, samples) = two_route_worklist();
+        let scoring: Vec<usize> = (0..samples.len()).collect();
+        rank_eligible_candidates(
+            &rows,
+            worklist_areas(),
+            &samples,
+            &scoring,
+            R,
+            65_536,
+            screen,
+        )
+    }
+
+    /// **The named rows leave, and only the named rows leave.**
+    ///
+    /// The fixture's ten rows carry `candidate_id == order`, and their seats are
+    /// distinct, so the surviving set pins both the mask's alignment and the
+    /// per-key bookkeeping. The dust route (9, 0) loses its ONLY row, which is
+    /// the case §E.1 has to be able to tell from "this route had no row at all":
+    /// `eligible_rows` goes to zero and `screened_rows` to one, and both are
+    /// asserted rather than inferred from the other.
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "the seats are hand-written fixture constants copied through unchanged"
+    )]
+    fn the_screen_removes_exactly_the_rows_it_named() {
+        // Row `order = 1` on the real hole (seated at x = 14.0) and the dust
+        // route's single row (x = 5.5).
+        let screen = DropSeatsAtX::refusing(vec![14.0, 5.5]);
+        let ranked = rank_with(Some(&screen));
+
+        assert_eq!(
+            survivors(&ranked),
+            vec![
+                (0, 12.0),
+                (2, 16.0),
+                (3, 18.0),
+                (4, 20.0),
+                (5, 22.0),
+                (6, 24.0),
+                (7, 26.0),
+                (8, 28.0),
+            ],
+            "the survivors are the eight rows the screen did not name; a verdict list read at \
+             the wrong offset would drop a different eight and keep every count below identical"
+        );
+
+        let hole = ranked.per_key[&(5, 0)];
+        assert_eq!(
+            (hole.eligible_rows, hole.screened_rows),
+            (8, 1),
+            "the hole route keeps eight and loses one"
+        );
+        let dust = ranked.per_key[&(9, 0)];
+        assert_eq!(
+            (dust.eligible_rows, dust.screened_rows),
+            (0, 1),
+            "the dust route's only row was screened: `eligible_rows == 0` must not be readable \
+             as `the route never had a row`, which is what `screened_rows` says"
+        );
+
+        assert!(ranked.prescreen_measured);
+        assert_eq!(ranked.prescreen_offered, 10);
+        assert_eq!(
+            ranked.prescreen_dropped_by_cause,
+            BTreeMap::from([("undecidable_geometry".to_owned(), 2)]),
+        );
+    }
+
+    /// **No screen: nothing is removed, and nothing is CLAIMED either.**
+    ///
+    /// `prescreen_offered` must read zero rather than the pool size, or a run
+    /// with no screen reports a pass that never happened.
+    #[test]
+    fn no_screen_removes_nothing_and_offers_nothing() {
+        let ranked = rank_with(None);
+        assert_eq!(survivors(&ranked).len(), 10);
+        assert!(!ranked.prescreen_measured);
+        assert_eq!(ranked.prescreen_offered, 0);
+        assert!(ranked.prescreen_dropped_by_cause.is_empty());
+        assert!(ranked
+            .per_key
+            .values()
+            .all(|counts| counts.screened_rows == 0));
+    }
+
+    /// **A pass that measured nothing takes nothing with it.**
+    ///
+    /// The stub names every seat it was given AND reports `measured: false` —
+    /// the shape a starved native admission or a refused batch produces. Every
+    /// row must survive, and the report must not be told a pool was offered.
+    #[test]
+    fn a_screen_that_measured_nothing_keeps_every_row() {
+        let screen = DropSeatsAtX {
+            measured: false,
+            ..DropSeatsAtX::refusing(vec![12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 5.5])
+        };
+        let ranked = rank_with(Some(&screen));
+        assert_eq!(
+            survivors(&ranked).len(),
+            10,
+            "a screen that could not measure must not refuse: every row stays in the pool"
+        );
+        assert!(!ranked.prescreen_measured);
+        assert_eq!(ranked.prescreen_offered, 0);
+        assert!(ranked.prescreen_dropped_by_cause.is_empty());
+        assert!(ranked
+            .per_key
+            .values()
+            .all(|counts| counts.screened_rows == 0));
+    }
+
+    /// **A short verdict list keeps the rows it did not answer for.**
+    ///
+    /// The consumer reads `per_seat` BY INDEX and treats a missing entry as
+    /// "keep". A list shorter than the seat set must therefore lose exactly the
+    /// rows it did answer for — never shift the remaining verdicts onto their
+    /// neighbours, which is the misalignment this whole block exists to catch.
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "the seats are hand-written fixture constants copied through unchanged"
+    )]
+    fn a_short_verdict_list_only_removes_the_rows_it_answered_for() {
+        // Names three seats but answers for only the first two positions, so
+        // the row at x = 16.0 keeps its place despite being named.
+        let screen = DropSeatsAtX {
+            truncate_to: Some(2),
+            ..DropSeatsAtX::refusing(vec![12.0, 14.0, 16.0])
+        };
+        let ranked = rank_with(Some(&screen));
+        assert_eq!(
+            survivors(&ranked),
+            vec![
+                (2, 16.0),
+                (3, 18.0),
+                (4, 20.0),
+                (5, 22.0),
+                (6, 24.0),
+                (7, 26.0),
+                (8, 28.0),
+                (9, 5.5),
+            ],
+            "only the two answered-for rows leave; the third named row was never answered for \
+             and must stay"
+        );
+        assert_eq!(
+            ranked.prescreen_dropped_by_cause,
+            BTreeMap::from([("undecidable_geometry".to_owned(), 2)]),
+            "the histogram counts the drops that happened, not the drops that were named"
+        );
+    }
+
+    /// **What the screen SAW and let pass reaches the ranking unchanged.**
+    #[test]
+    fn observed_but_unacted_verdicts_travel_without_removing_a_row() {
+        let screen = DropSeatsAtX {
+            observed_not_acted_on: BTreeMap::from([("not_attached".to_owned(), 4)]),
+            ..DropSeatsAtX::refusing(Vec::new())
+        };
+        let ranked = rank_with(Some(&screen));
+        assert_eq!(survivors(&ranked).len(), 10);
+        assert!(ranked.prescreen_dropped_by_cause.is_empty());
+        assert_eq!(
+            ranked.prescreen_observed_not_acted_on,
+            BTreeMap::from([("not_attached".to_owned(), 4)]),
+        );
+    }
+
     /// **Rule N1, in the production ranking path.** Every eligible row is
     /// ranked. There are ten of them across two routes and one patch's worth of
     /// area per route, so any cap keyed to the patch count, the route count or
@@ -2015,7 +2471,7 @@ mod tests {
         let (rows, samples) = two_route_worklist();
         let scoring: Vec<usize> = (0..samples.len()).collect();
         let ranked =
-            rank_eligible_candidates(&rows, worklist_areas(), &samples, &scoring, R, 65_536);
+            rank_eligible_candidates(&rows, worklist_areas(), &samples, &scoring, R, 65_536, None);
 
         assert_eq!(
             ranked.ranked.len(),
@@ -2048,7 +2504,7 @@ mod tests {
         let (rows, samples) = two_route_worklist();
         let scoring: Vec<usize> = (0..samples.len()).collect();
         let ranked =
-            rank_eligible_candidates(&rows, worklist_areas(), &samples, &scoring, R, 65_536);
+            rank_eligible_candidates(&rows, worklist_areas(), &samples, &scoring, R, 65_536, None);
 
         let winner = &ranked.ranked[0];
         assert_eq!(

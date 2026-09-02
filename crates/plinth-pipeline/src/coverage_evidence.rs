@@ -137,6 +137,24 @@ pub struct UncoveredIslandSummary {
     /// Sorted, deduplicated face ids belonging to this island's blocking
     /// patches -- exactly what the render highlights, no neighbour bleed.
     pub face_ids: Vec<u32>,
+    /// **§E.1's per-route verdict for this island, when the repair search
+    /// reached one** — `Blocked(PoolScreened { .. })`, `TriedNoImprovement`,
+    /// and the rest, rendered from the class the controller measured.
+    ///
+    /// The whole-model `closure_reason` says why the SEARCH stopped; this says
+    /// what happened to THIS island, and the two are different questions. It
+    /// existed on the refusal path and was dropped on the EMIT path, which is
+    /// the path the 2026-09-01 ruling made the normal one — so a warning about
+    /// a file the owner can open carried the least specific of the two.
+    ///
+    /// `None` when the search never ran, when the run did not go through the
+    /// repair controller, or when more than one route shares this island id:
+    /// picking one of several would be inventing a verdict, and a `None` here
+    /// says "not stated" rather than "nothing happened".
+    ///
+    /// `#[serde(default)]` so evidence written before this field still reads.
+    #[serde(default)]
+    pub search_outcome: Option<String>,
 }
 
 impl UncoveredIslandSummary {
@@ -192,6 +210,10 @@ impl CoverageGapWarning {
             .iter()
             .map(|island| island.uncovered_area_mm2)
             .sum();
+        let mut islands = islands;
+        if let Some(refusal) = closure {
+            attach_search_outcomes(&mut islands, refusal);
+        }
         Some(Self {
             total_uncovered_mm2,
             islands,
@@ -199,6 +221,36 @@ impl CoverageGapWarning {
             closure_attempts: closure.map_or(0, |refusal| refusal.attempts),
         })
     }
+}
+
+/// **Join the controller's per-route verdicts onto the gate's own islands.**
+///
+/// The two lists are measured by different stages — the gate measures the
+/// SEALED snapshot, the controller measured its own search — so they are joined
+/// by island id and nothing else is assumed. An island the controller never
+/// ruled on keeps `None`, and so does an island several routes share: two
+/// components under one id have two verdicts, and choosing between them here
+/// would be this function inventing one.
+fn attach_search_outcomes(islands: &mut [UncoveredIslandSummary], refusal: &CoverageClosureRefusal) {
+    for island in islands.iter_mut() {
+        island.search_outcome = sole_outcome(refusal, island.island_id);
+    }
+}
+
+/// The verdict for `island_id` when exactly ONE of the controller's routes
+/// carries that id, and `None` otherwise. The single join rule, used by both
+/// builders so the refusal path and the emit path cannot disagree about which
+/// verdict belongs to an island.
+fn sole_outcome(refusal: &CoverageClosureRefusal, island_id: u32) -> Option<String> {
+    let mut matches = refusal
+        .islands
+        .iter()
+        .filter(|island| island.island_id == island_id);
+    let only = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    only.outcome.as_ref().map(|outcome| format!("{outcome:?}"))
 }
 
 /// Everything one coverage refusal's evidence persistence produced.
@@ -462,6 +514,10 @@ pub fn islands_from_gate_report(report: &CoverageReport) -> Vec<UncoveredIslandS
                 .remove(&island_id)
                 .map(|set| set.into_iter().collect())
                 .unwrap_or_default(),
+            // The gate measured the sealed snapshot; it has no controller to
+            // ask. `from_gate_report` joins the verdict on afterwards when a
+            // closure record exists.
+            search_outcome: None,
         })
         .collect();
     rank_worst_first(&mut islands);
@@ -492,6 +548,7 @@ pub fn islands_from_closure(refusal: &CoverageClosureRefusal) -> Vec<UncoveredIs
         .map(|(island_id, uncovered_area_mm2)| UncoveredIslandSummary {
             island_id,
             uncovered_area_mm2,
+            search_outcome: sole_outcome(refusal, island_id),
             worst_gap: gaps
                 .remove(&island_id)
                 .unwrap_or(CoverageClosureGap::NoRoutedContact),
@@ -1288,8 +1345,13 @@ pub fn persist_closure_refusal(
         // controller reporting a verdict it reached, not an instrument that
         // failed. SPEC-A4 §B.7's three one-winner reasons join the second group
         // for exactly that reason.
+        // `AllCandidatesScreened` joins them: the attestation pre-screen
+        // MEASURED every candidate seat and refused them, which is a verdict
+        // about the pool, not an instrument that failed. Its counts travel on
+        // the reason itself and reach the warning through `{:?}`.
         plinth_support::CoverageClosureReason::RepairPlanRefused { .. }
         | plinth_support::CoverageClosureReason::NothingToTry
+        | plinth_support::CoverageClosureReason::AllCandidatesScreened { .. }
         | plinth_support::CoverageClosureReason::NoImprovingRepair { .. }
         | plinth_support::CoverageClosureReason::CommitBudgetExhausted { .. } => None,
     };
@@ -1712,6 +1774,7 @@ mod tests {
             uncovered_area_mm2: 1.5,
             worst_gap: CoverageClosureGap::Finite(2.25),
             face_ids: vec![1],
+            search_outcome: None,
         };
         let first = render_island_svg(&mesh, &island, false);
         let second = render_island_svg(&mesh, &island, false);
@@ -1812,6 +1875,7 @@ mod tests {
             uncovered_area_mm2: 1.0,
             worst_gap: CoverageClosureGap::NoRoutedContact,
             face_ids: vec![0, 1],
+            search_outcome: None,
         };
         let svg = render_island_svg(&mesh, &island, false);
         let panels = panels(&svg);
@@ -1867,6 +1931,7 @@ mod tests {
             uncovered_area_mm2: 1.0,
             worst_gap: CoverageClosureGap::NoRoutedContact,
             face_ids: vec![0],
+            search_outcome: None,
         };
         let dir = std::env::temp_dir().join(format!(
             "plinth-coverage-evidence-degrade-{}",

@@ -14431,6 +14431,7 @@ mod tests {
             6.0,
             65_536,
             &empty_ledger,
+            None,
         )
         .unwrap();
         let second = crate::coverage_closure::rank_repair_candidates(
@@ -14440,6 +14441,7 @@ mod tests {
             6.0,
             65_536,
             &empty_ledger,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -14472,7 +14474,7 @@ mod tests {
         let mut ledgered = BTreeSet::new();
         ledgered.insert(already_ranked);
         let excluded = crate::coverage_closure::rank_repair_candidates(
-            &plan, &worklist, &uncovered, 6.0, 65_536, &ledgered,
+            &plan, &worklist, &uncovered, 6.0, 65_536, &ledgered, None,
         )
         .unwrap();
         assert!(
@@ -14563,6 +14565,7 @@ mod tests {
             6.0,
             65_536,
             &empty_ledger,
+            None,
         )
         .unwrap();
         // The same patch, but with only its LAST sample still uncovered: a face
@@ -14575,6 +14578,7 @@ mod tests {
             6.0,
             65_536,
             &empty_ledger,
+            None,
         )
         .unwrap();
         assert!(!all_uncovered.ranked.is_empty() && !residual_only.ranked.is_empty());

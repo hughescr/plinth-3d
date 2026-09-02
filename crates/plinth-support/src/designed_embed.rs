@@ -2151,6 +2151,41 @@ impl DesignedMaskError {
             Self::NearParallelWitness { .. } => 16,
         }
     }
+
+    /// **This cause's snake_case NAME, for a histogram an operator reads.**
+    ///
+    /// `undecidable_geometry` is deliberately the same word
+    /// [`crate::runner`]'s `AbandonedContactDisclosure` already prints for
+    /// [`Self::NearParallelWitness`], and for the same reason it prints it
+    /// there: a run must not have two vocabularies for one refusal. Every
+    /// other variant carries its own name rather than being folded into one
+    /// `unusable_geometry` bucket, because a screen that removes candidates
+    /// has to be able to say WHICH check removed them — a single bucket would
+    /// hide a screen that started refusing on `ResourceLimit` behind a count
+    /// that reads like geometry.
+    #[must_use]
+    pub(crate) const fn cause_name(self) -> &'static str {
+        match self {
+            Self::InvalidExtent => "invalid_extent",
+            Self::ExtentOutOfSpan => "extent_out_of_span",
+            Self::InvalidMemberSpan => "invalid_member_span",
+            Self::OverlappingExtents => "overlapping_extents",
+            Self::StaleBinding => "stale_binding",
+            Self::MissingRequiredExtent { .. } => "missing_required_extent",
+            Self::EndNotDesigned { .. } => "end_not_designed",
+            Self::DuplicateRequest { .. } => "duplicate_request",
+            Self::UnknownMember => "unknown_member",
+            Self::InvalidValidationLimits => "invalid_validation_limits",
+            Self::ResourceLimit => "resource_limit",
+            Self::KernelRefusal => "kernel_refusal",
+            Self::CorruptKernelResult => "corrupt_kernel_result",
+            Self::DisconnectedGeometry { .. } => "disconnected_geometry",
+            Self::EndpointEvidenceOutsideAdmittedSpan { .. } => {
+                "endpoint_evidence_outside_admitted_span"
+            }
+            Self::NearParallelWitness { .. } => "undecidable_geometry",
+        }
+    }
 }
 
 fn validate_extent(

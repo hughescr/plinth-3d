@@ -340,6 +340,46 @@ pub enum RepairStepOutcome {
     MeasurementRefused {
         detail: String,
     },
+    /// **Measured, and the trial's OWN appended contact never became an arm.**
+    ///
+    /// The plan that was measured is the accepted plan plus a contact the
+    /// pipeline threw away — quarantined at attestation, or routed and retired
+    /// with no winning arm — so the thing the trial proposed was never
+    /// actually tested. Reporting that as [`Self::NoImprovement`] said "the
+    /// improvement was measured and it was not one", which is a claim nobody
+    /// made: no improvement was ever put in front of the measurement.
+    ///
+    /// **MEASURED, 2026-09-01, three models, 132 rejected trials.** Round 25
+    /// 61 of 61, `make_raking_blade` 19 of 19, `Morel base` 52 of 55 — and
+    /// `Morel base`'s three NON-condemned trials are exactly its three
+    /// commits. Every one of the 132 was previously filed as `no_improvement`.
+    OwnContactCondemned {
+        condemnation: OwnContactCondemnation,
+    },
+}
+
+/// **What the pipeline did with the ONE contact a repair trial appended**, in
+/// the shape that goes on the wire.
+///
+/// This is `crate::runner::TrialContactDisposition`'s two CONDEMNED arms and
+/// nothing else: `Routed` is not a condemnation and `NotInCadence` means the
+/// contact never appeared, which is a different statement from being thrown
+/// away. It is a projection of a value the routing cadence already sealed —
+/// the same rule every field of [`OwnContactNoWinnerEvidence`] travels under —
+/// so nothing here re-measures a quarantine or re-runs a route.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnContactCondemnation {
+    /// Condemned before any arm was proposed. `remaining_inside_axis_mm` is the
+    /// measured stub-axis re-entry depth when the initial build's condemned
+    /// ledger holds one; `None` means the quarantine had a different cause and
+    /// this refuses to name one it did not measure.
+    Quarantined {
+        remaining_inside_axis_mm: Option<f64>,
+    },
+    /// Routed and retired with no winning arm, carrying the transcript row's
+    /// own sealed reason.
+    UnroutedNoWinner(OwnContactNoWinnerEvidence),
 }
 
 impl RepairStepOutcome {
@@ -369,6 +409,7 @@ impl RepairStepOutcome {
             Self::StageRefusal { .. } => Some(RepairVetoClass::StageRefusal),
             Self::AppendRefused { .. } => Some(RepairVetoClass::AppendRefused),
             Self::MeasurementRefused { .. } => Some(RepairVetoClass::MeasurementRefused),
+            Self::OwnContactCondemned { .. } => Some(RepairVetoClass::OwnContactCondemned),
         }
     }
 }
@@ -931,19 +972,21 @@ pub enum RepairVetoClass {
     StageRefusal,
     AppendRefused,
     MeasurementRefused,
+    OwnContactCondemned,
 }
 
 impl RepairVetoClass {
     /// Every class, exhaustively. The match in [`Self::index`] has no wildcard
     /// arm, so a class added without a slot in [`RepairVetoCounts`] is a
     /// compile error rather than a silently uncounted rejection.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::NoImprovement,
         Self::NoAreaCovered,
         Self::Regression,
         Self::StageRefusal,
         Self::AppendRefused,
         Self::MeasurementRefused,
+        Self::OwnContactCondemned,
     ];
 
     /// How many classes there are — the width of [`RepairVetoCounts`]'s
@@ -961,6 +1004,7 @@ impl RepairVetoClass {
             Self::StageRefusal => 3,
             Self::AppendRefused => 4,
             Self::MeasurementRefused => 5,
+            Self::OwnContactCondemned => 6,
         }
     }
 
@@ -974,6 +1018,7 @@ impl RepairVetoClass {
             Self::StageRefusal => "stage_refusal",
             Self::AppendRefused => "append_refused",
             Self::MeasurementRefused => "measurement_refused",
+            Self::OwnContactCondemned => "own_contact_condemned",
         }
     }
 }
@@ -1582,6 +1627,69 @@ pub struct RepairRunReport {
     /// production default and means no file was opened.
     #[serde(default)]
     pub trail: Option<RepairTrailDisclosure>,
+    /// **What the attestation pre-screen removed from the candidate pool, and
+    /// on what cause.**
+    ///
+    /// A counter like every other field here: no branch reads it. It is the
+    /// only record of a candidate the loop never spent a trial on, so a pool
+    /// that screened down to nothing says so out loud instead of arriving at
+    /// `NothingToTry` with no explanation.
+    /// `#[serde(default)]` so a sidecar written before the screen existed
+    /// still deserializes, and it deserializes to "no screening pass ran".
+    #[serde(default)]
+    pub prescreen: RepairPrescreenDisclosure,
+}
+
+/// **The attestation pre-screen's ledger, summed over every ranking pass.**
+///
+/// `passes` is how many times the pool was screened — once per `rank_or_refuse`
+/// call, so once at entry plus once per COMMIT. `offered` and the drop counts
+/// are SUMS over those passes, which means a row that is still unusable after
+/// a commit is counted again: each pass really did screen it and really did
+/// drop it, and a de-duplicated total would be a different measurement wearing
+/// this one's name. Divide by `passes` for the per-pass figure.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairPrescreenDisclosure {
+    pub passes: usize,
+    /// Eligible rows handed to the screen, summed over passes.
+    pub offered: usize,
+    /// Of those, how many the screen refused, summed over passes.
+    pub dropped: usize,
+    /// The drops by [`crate::designed_embed::DesignedMaskError`] cause name,
+    /// ascending by name so two runs of the same model print the same line.
+    /// Zero entries are omitted, the same way `rejections_by_class` omits
+    /// classes that never fired.
+    pub dropped_by_cause: BTreeMap<String, usize>,
+    /// **What the screen MEASURED and deliberately let through**, by name.
+    ///
+    /// The screen refuses on one class only. `buried_surface` and
+    /// `not_attached` are verdicts about the seat meeting the solid, which the
+    /// routed member's own approach can change and which `initial.rs`'s
+    /// grow-to-attest ladder exists to move; a screen that dropped candidates
+    /// on them would be outrunning its evidence. They are counted because the
+    /// question "why did the screen keep a seat the trial then condemned?" has
+    /// to be answerable from the run log rather than from a rebuild.
+    pub observed_not_acted_on: BTreeMap<String, usize>,
+}
+
+impl RepairPrescreenDisclosure {
+    /// Fold ONE screening pass in. The only mutation site.
+    pub fn fold_pass(
+        &mut self,
+        offered: usize,
+        dropped_by_cause: &BTreeMap<String, usize>,
+        observed_not_acted_on: &BTreeMap<String, usize>,
+    ) {
+        self.passes += 1;
+        self.offered += offered;
+        for (cause, count) in dropped_by_cause {
+            self.dropped += count;
+            *self.dropped_by_cause.entry(cause.clone()).or_insert(0) += count;
+        }
+        for (cause, count) in observed_not_acted_on {
+            *self.observed_not_acted_on.entry(cause.clone()).or_insert(0) += count;
+        }
+    }
 }
 
 impl RepairRunReport {
@@ -1685,7 +1793,7 @@ impl RepairRunReport {
         format!(
             "coverage-repair: trials={} commits={} remaining={} \
              wall_total={}ms wall/trial min={}ms med={}ms max={}ms \
-             diversity_demotions={} of_which_tried={} [{histogram}]{}{}",
+             diversity_demotions={} of_which_tried={} [{histogram}]{}{}{}",
             self.trials,
             self.commits,
             self.candidates_remaining,
@@ -1696,7 +1804,41 @@ impl RepairRunReport {
             self.diversity_demotions,
             self.diversity_demotions_tried,
             self.gate_rise_text(),
+            self.prescreen_text(),
             self.trail_text(),
+        )
+    }
+
+    /// **What the pre-screen cost the pool, on the one line an operator always
+    /// sees.**
+    ///
+    /// Printed on every run that screened at all, drops or none — a screen
+    /// whose cost is only visible when it fires is a screen nobody can tell
+    /// from an absent one, and `offered=N dropped=0` is the statement that
+    /// says the pool was measured and kept. The cause list is omitted when it
+    /// is empty, for the same reason `gate_rise_text` omits an empty rise.
+    fn prescreen_text(&self) -> String {
+        if self.prescreen.passes == 0 {
+            return String::new();
+        }
+        let named = |counts: &BTreeMap<String, usize>, label: &str| {
+            if counts.is_empty() {
+                return String::new();
+            }
+            let body = counts
+                .iter()
+                .map(|(cause, count)| format!("{cause}={count}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!(" {label}[{body}]")
+        };
+        format!(
+            " prescreen offered={} dropped={} passes={}{}{}",
+            self.prescreen.offered,
+            self.prescreen.dropped,
+            self.prescreen.passes,
+            named(&self.prescreen.dropped_by_cause, "dropped_by"),
+            named(&self.prescreen.observed_not_acted_on, "kept_despite"),
         )
     }
 
@@ -2714,6 +2856,11 @@ mod tests {
                 },
                 RepairVetoClass::MeasurementRefused => RepairStepOutcome::MeasurementRefused {
                     detail: "refused".to_owned(),
+                },
+                RepairVetoClass::OwnContactCondemned => RepairStepOutcome::OwnContactCondemned {
+                    condemnation: OwnContactCondemnation::Quarantined {
+                        remaining_inside_axis_mm: Some(0.12),
+                    },
                 },
             }
         };

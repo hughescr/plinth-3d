@@ -510,16 +510,27 @@ fn the_raking_blade_reports_a_measured_class_per_route() {
     // a time instead of killing the model, so the blade routes on the contacts
     // that DID attest and its search is a different, longer one.
     //
-    // **What the assertion is FOR did not move.** The claim is the stop REASON
-    // — the search ends because every remaining candidate scores 0.00 mm²
-    // against the uncovered set (§B.3's guard), not because a budget ran out
-    // and not because there was nothing to try — and `best_remaining_score_mm2`
-    // is still exactly 0.0. The trial count rides along so that a future change
-    // to what the search DOES has to be re-derived rather than absorbed.
+    // **Re-measured 2026-09-02, from 161 trials to 54.** The repair pool is
+    // now screened by the batched seat attestation before it is ranked, and on
+    // this fixture the screen refused **107 of 202** candidate seats with
+    // `undecidable_geometry` — the same `NearParallelWitness` cause the six
+    // knife-edge placements above are quarantined for, reaching the same
+    // knife-edge rays from the seats a trial would have spent a full
+    // prepare → route → rewire → brace → structure → lower → measure pass to
+    // discover. The 107 are seats the loop used to try and always roll back.
+    // Wall time went 35 s → 12 s with the same 0 commits.
+    //
+    // **What the assertion is FOR did not move, twice over.** The claim is the
+    // stop REASON — the search ends because every remaining candidate scores
+    // 0.00 mm² against the uncovered set (§B.3's guard), not because a budget
+    // ran out and not because there was nothing to try — and
+    // `best_remaining_score_mm2` is still exactly 0.0, `attempts` still 0. The
+    // trial count rides along so that a future change to what the search DOES
+    // has to be re-derived rather than absorbed.
     assert_eq!(
         refusal.reason,
         CoverageClosureReason::NoImprovingRepair {
-            candidates_tried: 161,
+            candidates_tried: 54,
             best_remaining_score_mm2: 0.0,
         },
         "the blade's search ends because every remaining candidate scores 0.00 mm² against the \
@@ -603,12 +614,30 @@ fn the_raking_blade_reports_a_measured_class_per_route() {
     // above 0.00 mm² before anything was tried), and it is neither of the two
     // defect classes, whose fixtures live in `runner.rs`'s own `mod tests`
     // because no procedural geometry reproduces task #51 or task #52.
+    //
+    // **Re-derived 2026-09-02, and this one is a CHANGE OF DIAGNOSIS the owner
+    // should see.** With the attestation pre-screen in front of the ranking,
+    // island 5's route no longer spends 31 trials: the screen refuses the seats
+    // whose knife-edge rays cannot be graded, this route spends **5** trials,
+    // and every one of the five ends with the clearance standoff refusing every
+    // feasible arm. `measured_defect_class` claims a class only when EVERY
+    // trial a route spent landed in it, so the route now reports task #51's
+    // shape by measurement instead of "the pool ran out".
+    //
+    // **Both statements are true, and the second is the narrower one.** The
+    // rule has not moved — it has always been able to fire on a route whose
+    // pool still holds untried rows, because the loop can stop for other
+    // reasons first — and the five clearance refusals are the same five that
+    // were inside the old 31. What is genuinely lost from THIS line is the
+    // route's own count of what the screen took: the drop is reported per RUN
+    // on the §A.8 summary (`prescreen ... dropped_by[undecidable_geometry=107]`
+    // of 202 offered) and not per route. That is the follow-up this
+    // re-derivation is recording, not hiding.
     assert_eq!(
         outcome,
-        RouteRepairOutcome::Blocked(BlockedCause::PoolExhausted {
-            pool_rows: 33,
-            occupied: 2,
-            ledgered: 31,
+        RouteRepairOutcome::Blocked(BlockedCause::ClearanceMaskUnsatisfiable {
+            terminals: 5,
+            standoff_mm: 0.6,
         }),
         "the blade's refusing island reports the class its own counters measured; a different \
          class here is a different diagnosis and has to be re-derived rather than re-accepted"

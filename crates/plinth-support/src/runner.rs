@@ -2406,7 +2406,14 @@ pub fn run_support<'a>(
     let mut route_records: BTreeMap<(u32, u32), RouteSearchRecord> = BTreeMap::new();
     let mut tally: BTreeMap<(u32, u32), crate::coverage_closure::KeyNomination> = BTreeMap::new();
 
-    let mut candidates = rank_or_refuse(&plan, &measured, radius_mm, matrix_budget, &mut ledger)?;
+    let mut candidates = rank_or_refuse(
+        &plan,
+        &measured,
+        radius_mm,
+        matrix_budget,
+        &mut ledger,
+        &context,
+    )?;
     stamp_tally(&mut tally, &candidates);
 
     // ---------------------------------------------------- task #67: be loud DURING
@@ -2503,9 +2510,23 @@ pub fn run_support<'a>(
             // Every candidate on the ranking has been ledgered. Under ruling
             // R10 that is one of exactly two honest ends, and it is measured:
             // the pool really did drain.
+            // **"There was nothing to try" and "the screen took everything"
+            // are different statements about opposite facts.** On `Round 25`
+            // the plan offered 61 rows and the pre-screen refused all 61; a
+            // bare `NothingToTry` there says the pool was empty, sends the
+            // reader to the repair pool, and leaves the 61 on a different line
+            // of the log. The counts travel on the reason because the reason is
+            // what the coverage-gap warning prints.
             emit_with_gap_or_refuse!(
                 if candidates.ranked.is_empty() && ledger.report.trials == 0 {
-                    crate::coverage_closure::CoverageClosureReason::NothingToTry
+                    if ledger.report.prescreen.dropped > 0 {
+                        crate::coverage_closure::CoverageClosureReason::AllCandidatesScreened {
+                            offered: ledger.report.prescreen.offered,
+                            dropped_by: ledger.report.prescreen.dropped_by_cause.clone(),
+                        }
+                    } else {
+                        crate::coverage_closure::CoverageClosureReason::NothingToTry
+                    }
                 } else {
                     crate::coverage_closure::CoverageClosureReason::NoImprovingRepair {
                         candidates_tried: ledger.report.trials,
@@ -2671,13 +2692,11 @@ pub fn run_support<'a>(
                 step.own_contact_quarantined = disposition.map(|disposition| {
                     matches!(disposition, TrialContactDisposition::Quarantined { .. })
                 });
-                step.own_contact_condemned = disposition.map(|disposition| {
-                    matches!(
-                        disposition,
-                        TrialContactDisposition::Quarantined { .. }
-                            | TrialContactDisposition::UnroutedNoWinner(_)
-                    )
-                });
+                // Read through the ONE conversion, so the boolean on the step
+                // and the outcome class below cannot come to disagree about
+                // what "condemned" means.
+                step.own_contact_condemned =
+                    disposition.map(|disposition| condemnation(disposition).is_some());
                 // The VALUE the cadence sealed, carried straight onto the step.
                 // Not recomputed here and not summarised on the way: this is
                 // the same `OwnContactNoWinnerEvidence` the disposition holds.
@@ -2714,7 +2733,46 @@ pub fn run_support<'a>(
                 step.ownerless_faces_after = Some(trial_ownerless);
                 step.route_deltas = route_deltas(&measured, &trial_measured);
 
-                let outcome = crate::coverage_repair::repair_step_outcome(&after, &before);
+                // **A condemned trial is not a measured non-improvement.**
+                //
+                // When the pipeline threw this trial's OWN appended contact
+                // away — quarantined at attestation, or routed and retired
+                // with no winning arm — the plan that reached the measurement
+                // is the accepted plan plus nothing, so `repair_step_outcome`
+                // reports `NoImprovement` about an improvement that was never
+                // tested. That is a misclassification, and it is the one the
+                // 2026-09-01 baseline is made of: 132 of 132 rejected trials
+                // across three models filed under `no_improvement` when not
+                // one of them had a contact to improve with.
+                //
+                // **It renames exactly two classes, and the list is the
+                // argument.** `NoImprovement` and `NoAreaCovered` are the two
+                // verdicts that say NOTHING MOVED, which is precisely what a
+                // plan plus a discarded contact produces and precisely the
+                // claim that was wrong. Every other class is a positive
+                // measurement of something that DID happen and is left alone —
+                // `Regression` above all. Design §B-O7.6's own case is that a
+                // condemned contact changes OTHER terminals' outcomes; when it
+                // changes them for the worse the run measured a regression, and
+                // filing that under the condemnation would hide the one effect
+                // §B-O7.6 says to watch for. `Committed` is untouched for the
+                // same reason: a measured improvement is a measurement, and
+                // letting an evidence field veto it is what the physics-first
+                // doctrine forbids of a recorded number.
+                let measured_outcome = crate::coverage_repair::repair_step_outcome(&after, &before);
+                let renameable = matches!(
+                    measured_outcome,
+                    crate::coverage_repair::RepairStepOutcome::NoImprovement { .. }
+                        | crate::coverage_repair::RepairStepOutcome::NoAreaCovered { .. }
+                );
+                let outcome = match disposition.and_then(condemnation) {
+                    Some(condemnation) if renameable => {
+                        crate::coverage_repair::RepairStepOutcome::OwnContactCondemned {
+                            condemnation,
+                        }
+                    }
+                    _ => measured_outcome,
+                };
                 if outcome != crate::coverage_repair::RepairStepOutcome::Committed {
                     context = trial.into_context();
                     context.restore_prepared_digests(digests);
@@ -2752,8 +2810,14 @@ pub fn run_support<'a>(
                 // set, so it is the only thing that needs the whole matrix
                 // rescored. A rejection re-sorts instead (rule N4), which
                 // `choose_winner` does on every call from the disc set.
-                candidates =
-                    rank_or_refuse(&plan, &measured, radius_mm, matrix_budget, &mut ledger)?;
+                candidates = rank_or_refuse(
+                    &plan,
+                    &measured,
+                    radius_mm,
+                    matrix_budget,
+                    &mut ledger,
+                    &context,
+                )?;
                 // The ranking was rebuilt from scratch, so rule N4's accumulated
                 // discs must be recharged onto it. This is the ONLY sweep that
                 // costs rows × discs, and it runs at most once per COMMIT, which
@@ -3107,16 +3171,39 @@ fn rank_or_refuse(
     radius_mm: f64,
     matrix_budget: usize,
     ledger: &mut RepairLedger,
+    context: &SupportRunContext<'_>,
 ) -> Result<crate::coverage_closure::RankedRepairCandidates, SupportRunError> {
-    crate::coverage_closure::rank_repair_candidates(
+    // **The pre-screen runs HERE, and therefore on every ranking** — the one
+    // at entry and the one after each COMMIT — because this is the single
+    // production wrapper both call. It costs exactly ONE batched attestation
+    // per ranking, whatever the pool size, and that stays true after a commit:
+    // a re-rank is a new ranking, so it is one more batch, never one per row.
+    let screen = SeatAttestationScreen::for_context(context);
+    let ranked = crate::coverage_closure::rank_repair_candidates(
         plan,
         &measured.repair_targets,
         &measured.uncovered_samples,
         radius_mm,
         matrix_budget,
         &ledger.ledgered,
-    )
-    .map_err(|error| {
+        screen
+            .as_ref()
+            .map(|screen| screen as &dyn crate::coverage_closure::RepairSeatScreen),
+    );
+    // Folded off the RANKING's own record of what happened, not off "a screen
+    // was passed": a screen that was asked and could not answer measured
+    // nothing, and a pass counted for it would put a zero-drop row in the
+    // report that reads exactly like a clean pool.
+    if let Ok(ranked) = &ranked {
+        if ranked.prescreen_measured {
+            ledger.report.prescreen.fold_pass(
+                ranked.prescreen_offered,
+                &ranked.prescreen_dropped_by_cause,
+                &ranked.prescreen_observed_not_acted_on,
+            );
+        }
+    }
+    ranked.map_err(|error| {
         note_stage_failure("Preparation", &error);
         ledger.finish(None);
         ledger.report.log_summary();
@@ -3138,6 +3225,316 @@ fn rank_or_refuse(
         ))
     })
 }
+
+/// **The repair pool's fourth exclusion: can a contact at this seat attest at
+/// all?** One batched call for the whole pool, before anything is ranked.
+///
+/// # What it is
+///
+/// For every eligible seat it builds the member `initial.rs` would mint there —
+/// the seat pushed `default_contact_depth_mm` INTO the solid along `-normal`
+/// for the terminalward end, `stub_length_mm` out along `+normal` for the
+/// rootward one, the tip sized by the registered load law, the OD-9 probe one
+/// process resolution outward — and hands the whole set to
+/// [`crate::designed_embed::attest_seats_batch`], which is the same verifier
+/// and the same two native calls the brace model rung and the CCO model anchor
+/// already screen their candidates with (FU-88: *a candidate this batch cannot
+/// measure costs the CANDIDATE, not the model*). A seat whose verdict comes
+/// back [`crate::designed_embed::ContactAttestationRefusal::UnusableGeometry`]
+/// is removed from the pool.
+///
+/// # What it is NOT
+///
+/// **It is a SCREEN, not the attestation of record.** The member it measures is
+/// PROVISIONAL: it is built along the frozen candidate's own face normal, and
+/// the load it is sized for is the seat's rule-N2 marginal area rather than the
+/// load partition's share, which does not exist until the contact is placed.
+/// The trial's own routed member is attested by `initial.rs` exactly as before
+/// and that attestation remains authoritative. A seat this screen drops might
+/// have attested from a different approach; the measured justification for
+/// dropping it anyway is that across 132 condemned trials on three models
+/// (Round 25 61/61, `make_raking_blade` 19/19, `Morel base` 52/55) it never
+/// once happened — every condemned trial was rejected, and `Morel base`'s three
+/// commits are exactly its three trials whose own contact was NOT condemned.
+///
+/// **It refuses on `UnusableGeometry` only.** `BuriedSurface` and `NotAttached`
+/// are measured on the same pass and deliberately ignored here: those two are
+/// verdicts about the SEAT meeting the solid, which the routed member's own
+/// approach can change, and `initial.rs`'s grow-to-attest ladder exists to move
+/// exactly the second of them. `UnusableGeometry` is the class that says the
+/// evidence could not be assembled at this seat at this scale at all.
+///
+/// **It fails OPEN.** If the registered constants, the attestation extent, the
+/// native admission or the batch itself refuse, the screen does not run and
+/// every candidate stays in the pool, exactly as before this existed. A screen
+/// that cannot measure must not be allowed to refuse; the run says so on its own
+/// line rather than dropping rows on an unmeasured basis.
+///
+/// **An EMPTY pool is a real answer.** If the screen removes every candidate,
+/// the loop reaches its existing `NothingToTry` end, the model is emitted with
+/// its gaps named, and `prescreen` on the run report says how many seats went
+/// and on what cause. That is the honest outcome and it is reported, not
+/// hidden.
+struct SeatAttestationScreen<'a> {
+    surface: &'a NativeSurface,
+    /// The attested extent AND the OD-9 probe offset: one process resolution,
+    /// the same datum and the same argument as `initial.rs`'s.
+    process_resolution_mm: f64,
+    extent: crate::designed_embed::PositiveFiniteMm,
+    majority_step: crate::designed_embed::PositiveFiniteMm,
+    policy: crate::contact::ContactPolicy,
+    contact_depth_mm: f64,
+    stub_length_mm: f64,
+    min_shoot_r_mm: f64,
+    /// **The smallest tip the registered load law can ever produce** — the
+    /// law's own clamp minimum, read out of it by evaluating it at zero
+    /// carried area rather than by naming a constant here. See
+    /// [`Self::row`] for why the screen measures at THIS radius and not at the
+    /// candidate's load-sized one.
+    min_tip_radius_mm: f64,
+}
+
+impl<'a> SeatAttestationScreen<'a> {
+    /// Assemble the screen from the run's own retained geometry and the
+    /// registered constants, or `None` — see "fails OPEN" above.
+    ///
+    /// **Every `None` says so on its own line.** A screen that is absent and a
+    /// screen that is disabled look identical on the report — both leave
+    /// `prescreen` at zero — so the reason is written to the run log at the
+    /// moment it is decided. Silence here would make an engine that stopped
+    /// screening indistinguishable from one that never started.
+    fn for_context(context: &'a SupportRunContext<'_>) -> Option<Self> {
+        macro_rules! or_say {
+            ($value:expr, $what:literal $(,)?) => {
+                match $value {
+                    Ok(value) => value,
+                    Err(error) => {
+                        crate::coverage_repair::emit_run_line(&format!(
+                            "coverage-repair prescreen: DISABLED for this run — {} ({error});                              every repair candidate stays in the pool",
+                            $what
+                        ));
+                        return None;
+                    }
+                }
+            };
+        }
+        let process_resolution_mm =
+            crate::contact::ContactPolicy::process_resolution_of(context.layers());
+        let extent = or_say!(
+            crate::designed_embed::PositiveFiniteMm::new(process_resolution_mm),
+            "the run's process resolution is not a positive-finite attestation extent",
+        );
+        // One tenth of the claimed extent, exactly as `initial.rs` and
+        // `cco.rs` choose it: the majority step must be able to RESOLVE the
+        // margin being proven.
+        let majority_step = or_say!(
+            crate::designed_embed::PositiveFiniteMm::new(extent.get() / 10.0),
+            "the majority-vote sampling step (one tenth of the extent) is not positive-finite",
+        );
+        let constants = or_say!(m0_constants(), "the registered M0 constants are unavailable");
+        let placeholders = constants.placeholders();
+        let policy = or_say!(
+            crate::cco::seat_contact_policy(process_resolution_mm),
+            "the seat contact policy could not be assembled",
+        );
+        let min_tip_radius_mm = or_say!(
+            crate::perception::registered_tip_radius_mm_for_carried_area(0.0),
+            "the registered load law would not name its minimum tip radius",
+        );
+        Some(Self {
+            surface: context.surface(),
+            process_resolution_mm,
+            extent,
+            majority_step,
+            policy,
+            contact_depth_mm: placeholders.default_contact_depth_mm().diagnostic().get(),
+            stub_length_mm: placeholders.stub_length_mm().diagnostic().get(),
+            min_shoot_r_mm: placeholders.min_shoot_r_mm().diagnostic().get(),
+            min_tip_radius_mm,
+        })
+    }
+
+    /// The one `SeatAttestationRow` a candidate seat becomes, and whether the
+    /// screen is entitled to ACT on the verdict that comes back for it.
+    ///
+    /// Every line of the geometry is `initial.rs`'s stub seed, read off the
+    /// candidate the pool already froze: `p0 = seat - unit * contact_depth`,
+    /// `p1 = seat + unit * stub_length`, `r1 = max(r0, min_shoot_r_mm)`, the
+    /// model contact declared at the TERMINALWARD end because that is the end
+    /// a stub seats into the model, and the probe one process resolution out
+    /// along the same unit normal. Divergence from that recipe would mean the
+    /// screen measuring a member the engine would never build.
+    ///
+    /// **The tip is sized at the law's MINIMUM radius, and that is the whole
+    /// safety argument.** The witness fires nine rays — the centreline plus
+    /// eight rim rays AT THE TIP RADIUS — so what it reaches depends on how
+    /// wide the ring is, and the ring's width depends on a load this ranking
+    /// does not know: the contact's share of the load partition does not exist
+    /// until the contact is placed. Sizing the provisional tip from the seat's
+    /// marginal uncovered area instead was built, run, and **MEASURED WRONG**:
+    /// on `Morel base` it over-sized the ring to ~0.49 mm, refused the seat at
+    /// (-2.318, 0.222, 10.597) as `undecidable_geometry`, and removed the ONE
+    /// candidate whose commit closed the model — 3 commits and 383 s became 2
+    /// commits and 968 s, with island 35 left bare. At the law's minimum the
+    /// ring is as close to the centreline as any tip the engine can build, so
+    /// a refusal here is as nearly a property of the SEAT AND ITS NORMAL as
+    /// this fixed nine-ray witness permits, rather than a property of a load
+    /// nobody has assigned yet.
+    ///
+    /// `carried_mm2` still carries the marginal area, because it feeds PR-4's
+    /// area grading, which this screen does not act on, and reporting a load
+    /// the seat is genuinely being proposed for is more honest than zero.
+    ///
+    /// **The flag is the fail-open rule, per row.** A candidate whose frozen
+    /// normal is degenerate yields a member this screen cannot honestly
+    /// measure. Such a row is still SENT — dropping it from the batch would put
+    /// the verdicts out of step with the seats — and its verdict is then
+    /// discarded, so the candidate stays in the pool. Refusing it instead would
+    /// mean removing a seat because the SCREEN could not be built, not because
+    /// the geometry said anything.
+    fn row(
+        &self,
+        seat: &crate::coverage_closure::ScreenedSeat,
+    ) -> (crate::designed_embed::SeatAttestationRow, bool) {
+        let length = seat
+            .normal_mm
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>()
+            .sqrt();
+        let unit = seat.normal_mm.map(|value| value / length);
+        let r0 = self.min_tip_radius_mm;
+        let buildable = unit.iter().all(|value| value.is_finite()) && r0.is_finite() && r0 > 0.0;
+        let row = crate::designed_embed::SeatAttestationRow {
+            p0_mm: std::array::from_fn(|axis| {
+                seat.seat_mm[axis] - unit[axis] * self.contact_depth_mm
+            }),
+            p1_mm: std::array::from_fn(|axis| {
+                seat.seat_mm[axis] + unit[axis] * self.stub_length_mm
+            }),
+            r0_mm: r0,
+            r1_mm: r0.max(self.min_shoot_r_mm),
+            end: crate::forest::ContactEnd::Terminalward,
+            exterior_probe: std::array::from_fn(|axis| {
+                seat.seat_mm[axis] + unit[axis] * self.process_resolution_mm
+            }),
+            carried_mm2: seat.marginal_area_mm2,
+        };
+        (row, buildable)
+    }
+}
+
+impl crate::coverage_closure::RepairSeatScreen for SeatAttestationScreen<'_> {
+    fn screen(
+        &self,
+        seats: &[crate::coverage_closure::ScreenedSeat],
+    ) -> crate::coverage_closure::RepairSeatScreenVerdicts {
+        use crate::coverage_closure::RepairSeatScreenVerdicts;
+        use crate::designed_embed::ContactAttestationRefusal;
+
+        // The fail-open answer: nothing measured, nothing refused, nothing to
+        // fold. `measured: false` is what keeps a skipped pass out of the
+        // report's `offered` count — an offer nobody measured is not an offer.
+        let keep_all = || RepairSeatScreenVerdicts {
+            measured: false,
+            per_seat: Vec::new(),
+            observed_not_acted_on: BTreeMap::new(),
+        };
+        if seats.is_empty() {
+            // Measured, vacuously and honestly: there were no seats, the screen
+            // ran, and it refused none of them.
+            return RepairSeatScreenVerdicts {
+                measured: true,
+                per_seat: Vec::new(),
+                observed_not_acted_on: BTreeMap::new(),
+            };
+        }
+        let (rows, actionable): (Vec<_>, Vec<bool>) =
+            seats.iter().map(|seat| self.row(seat)).unzip();
+        let Ok(limits) = crate::designed_embed::EndpointMaskValidationLimits::for_batch(
+            self.surface,
+            rows.len(),
+            self.majority_step,
+            SEAT_SCREEN_SAMPLES_PER_SUBSEGMENT,
+        ) else {
+            crate::coverage_repair::emit_run_line(&format!(
+                "coverage-repair prescreen: SKIPPED — the native admission for {} candidate \
+                 seat(s) was refused, so no candidate is screened and the pool is unchanged",
+                rows.len()
+            ));
+            return keep_all();
+        };
+        let outcomes = match crate::designed_embed::attest_seats_batch(
+            self.surface,
+            &rows,
+            self.extent,
+            limits,
+            &self.policy,
+        ) {
+            Ok(outcomes) if outcomes.len() == rows.len() => outcomes,
+            Ok(outcomes) => {
+                crate::coverage_repair::emit_run_line(&format!(
+                    "coverage-repair prescreen: SKIPPED — the seat-attestation batch returned \
+                     {} verdict(s) for {} seat(s), so no candidate is screened",
+                    outcomes.len(),
+                    rows.len()
+                ));
+                return keep_all();
+            }
+            Err(error) => {
+                crate::coverage_repair::emit_run_line(&format!(
+                    "coverage-repair prescreen: SKIPPED — the seat-attestation batch over {} \
+                     seat(s) failed ({error}), so no candidate is screened and the pool is \
+                     unchanged",
+                    rows.len()
+                ));
+                return keep_all();
+            }
+        };
+        // `attest_seats_batch` re-keys every verdict onto the caller's seat
+        // index before returning, so `member` is the index into `seats`. It is
+        // read rather than assumed positional for exactly that reason.
+        let mut per_seat = vec![None; seats.len()];
+        let mut observed_not_acted_on: BTreeMap<String, usize> = BTreeMap::new();
+        for outcome in &outcomes {
+            // A verdict about a member the screen could not honestly build is
+            // read by nobody — see `row`'s fail-open rule.
+            if !actionable.get(outcome.member).copied().unwrap_or(false) {
+                continue;
+            }
+            match outcome.verdict {
+                Err(ContactAttestationRefusal::UnusableGeometry { cause, .. }) => {
+                    if let Some(slot) = per_seat.get_mut(outcome.member) {
+                        *slot = Some(cause.cause_name());
+                    }
+                }
+                // MEASURED, not acted on — see the doc on this type and on
+                // `RepairPrescreenDisclosure::observed_not_acted_on`.
+                Err(ContactAttestationRefusal::BuriedSurface { .. }) => {
+                    *observed_not_acted_on
+                        .entry("buried_surface".to_owned())
+                        .or_insert(0) += 1;
+                }
+                Err(ContactAttestationRefusal::NotAttached { .. }) => {
+                    *observed_not_acted_on
+                        .entry("not_attached".to_owned())
+                        .or_insert(0) += 1;
+                }
+                Ok(_) => {}
+            }
+        }
+        RepairSeatScreenVerdicts {
+            measured: true,
+            per_seat,
+            observed_not_acted_on,
+        }
+    }
+}
+
+/// Matches `designed_embed::ENDPOINT_VALIDATION_OFFSET_RAYS`, for the same
+/// reason `initial.rs`, `brace.rs` and `cco.rs` match it: the witness needs the
+/// eight rim rays and the centreline resolved at the density it samples them.
+const SEAT_SCREEN_SAMPLES_PER_SUBSEGMENT: usize = 8;
 
 /// Build the refusal: the measured stop reason, the per-route outcomes §E.1
 /// names, and the §A.8 report.
@@ -3280,12 +3677,34 @@ fn route_outcome(
         .filter(|row| !ledgered.contains(&row.id))
         .count();
     let record = route_records.get(&key).cloned().unwrap_or_default();
+    // What the attestation pre-screen took from THIS route. `route_rows` is
+    // read off the POST-screen ranking, so without this every screened row
+    // looks like a row that was never eligible — and a route the screen
+    // emptied looks like a route whose candidates covered nothing.
+    let screened = candidates
+        .per_key
+        .get(&key)
+        .map_or(0, |counts| counts.screened_rows);
 
     // The two measured defect classes, each claimed only when EVERY trial this
     // route spent landed in it. A route that mixed causes reports the search
     // outcome instead of picking a favourite.
     if let Some(cause) = measured_defect_class(&record, scales) {
         return RouteRepairOutcome::Blocked(cause);
+    }
+
+    // **Before the zero-score class, and that order is the whole point.** With
+    // no rows left on the ranking the fold below produces `best_score == 0.0`
+    // over an EMPTY set and the branch then reports `rows_within_radius: 0`
+    // with an infinite nearest seat — a reach claim about a pool nothing
+    // measured for reach, which ruling R14 forbids. Round 25's three islands
+    // take exactly this path: 61 rows offered, 61 refused at the seat, nothing
+    // scored because nothing was left to score.
+    if route_rows.is_empty() && screened > 0 {
+        return RouteRepairOutcome::Blocked(BlockedCause::PoolScreened {
+            pool_rows,
+            screened,
+        });
     }
 
     // The zero-score class. It IS a measurement — the score — and the distance
@@ -3328,7 +3747,13 @@ fn route_outcome(
     if remaining == 0 && record.rows_tried > 0 {
         return RouteRepairOutcome::Blocked(BlockedCause::PoolExhausted {
             pool_rows,
-            occupied: pool_rows.saturating_sub(route_rows.len()),
+            // The three named counts partition the pool. `occupied` is what is
+            // LEFT after the ranking's rows and the screen's removals are
+            // taken out; before `screened` existed, every row the screen took
+            // was reported as occupied by an existing contact, which is a
+            // different fact with a different fix.
+            occupied: pool_rows.saturating_sub(route_rows.len() + screened),
+            screened,
             ledgered: route_rows.len(),
         });
     }
@@ -4463,6 +4888,15 @@ impl<'a> SupportRunContext<'a> {
 
     pub(crate) const fn mesh(&self) -> &Mesh {
         &self.mesh
+    }
+    /// The retained native query surface, for a READ.
+    ///
+    /// Deliberately not [`Self::geometry`]: that binds mesh, topology and
+    /// surface together and re-checks the geometry digest because its callers
+    /// go on to MINT against the trio. The repair pre-screen measures and mints
+    /// nothing, so it borrows the surface alone.
+    pub(crate) const fn surface(&self) -> &NativeSurface {
+        &self.surface
     }
     pub(crate) const fn hollow_history(&self) -> &HollowHistory {
         &self.hollow_history
@@ -6341,6 +6775,32 @@ pub(crate) enum TrialContactDisposition {
     UnroutedNoWinner(crate::coverage_repair::OwnContactNoWinnerEvidence),
     /// The contact never appeared in the cadence at all.
     NotInCadence,
+}
+
+/// **The ONE conversion from a trial contact's disposition to a CONDEMNATION.**
+///
+/// `Some` for exactly the two arms that mean the pipeline threw the trial's own
+/// appended contact away, and `None` for the two that do not: `Routed` is the
+/// contact working, and `NotInCadence` is the contact never appearing, which is
+/// a different statement from being discarded and must not be folded in with
+/// it. Both the boolean on the step and the outcome class read this function,
+/// so a variant added to [`TrialContactDisposition`] without a decision here is
+/// a compile error rather than a silently uncondemned trial.
+fn condemnation(
+    disposition: TrialContactDisposition,
+) -> Option<crate::coverage_repair::OwnContactCondemnation> {
+    use crate::coverage_repair::OwnContactCondemnation;
+    match disposition {
+        TrialContactDisposition::Quarantined {
+            remaining_inside_axis_mm,
+        } => Some(OwnContactCondemnation::Quarantined {
+            remaining_inside_axis_mm,
+        }),
+        TrialContactDisposition::UnroutedNoWinner(evidence) => {
+            Some(OwnContactCondemnation::UnroutedNoWinner(evidence))
+        }
+        TrialContactDisposition::Routed | TrialContactDisposition::NotInCadence => None,
+    }
 }
 
 /// **Project one transcript row's sealed no-winner reason onto the wire — a

@@ -383,6 +383,21 @@ fn the_attestation_makes_no_per_contact_native_call() {
              is how a batched stage becomes a per-candidate native call"
         );
     }
+    // The coverage-repair pre-screen is the third caller of the same batched
+    // verifier and the same rule binds it: ONE call for the whole candidate
+    // pool per ranking pass. `code_of` rather than `production_code_of` because
+    // `runner.rs` opens a `#[cfg(test)]` item near the top of the file, which
+    // would truncate the production slice to nothing and make the count vacuous
+    // — the whole-file count is the conservative reading here, and the pool
+    // screen is the file's only site either way.
+    assert_eq!(
+        code_of("runner.rs")
+            .matches("designed_embed::attest_seats_batch(")
+            .count(),
+        1,
+        "`attest_seats_batch` has more than one call site in runner.rs, which \
+         is how the repair pool's screen becomes a per-candidate native call"
+    );
     // Re-pointed 2026-09-01: the entry point was renamed, not moved.
     // `docs/specs/geometry-adjudication.md` §EXT-2's name table replaces
     // `penetration_intervals_batch_bounded` with the classified twin, and the

@@ -850,7 +850,81 @@ pub struct ModelPreparationReport {
     /// any model the pre-pass touched.
     #[serde(default)]
     pub repair: Option<plinth_mesh::RepairEvidence>,
+    /// **How this model was turned before anything was built on it.**
+    ///
+    /// `None` when the model never reached the Orientation stage, which is a
+    /// different statement from "it was not rotated" — identity is a rotation
+    /// like any other and is recorded as one.
+    ///
+    /// **The measured case for the field.** On `Round 25` the engine turned a
+    /// 25 mm x 3.5 mm flat disc UPSIDE DOWN and tilted it 44.9 deg off the
+    /// build axis. Nothing in the run report said so: the only way to learn it
+    /// was to pull the mesh back out of the emitted artifact and fit its
+    /// largest plane. Every number here is READ off
+    /// [`plinth_orient::OrientationReport`], which the orientation stage
+    /// already sealed; nothing re-derives a rotation from a mesh.
+    ///
+    /// `#[serde(default)]` so a report written before this field still
+    /// deserializes, and it deserializes to "the record does not hold this".
+    #[serde(default)]
+    pub orientation: Option<OrientationDisclosure>,
     pub outcome: ModelPreparationOutcome,
+}
+
+/// **The chosen orientation, in the two numbers an operator needs and the
+/// selection the sweep actually committed.**
+///
+/// A DISCLOSURE, never an authority: nothing reads it, no gate compares it, and
+/// the rotation of record stays [`plinth_orient::OrientationReport::transform`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrientationDisclosure {
+    /// The angle between the model's ORIGINAL +Z and the build axis after the
+    /// committed rotation, in degrees. `0` is "the model still stands the way
+    /// it was modelled"; `180` is dead upside down.
+    pub original_up_tilt_deg: f64,
+    /// `true` exactly when `original_up_tilt_deg > 90`, i.e. the model's own
+    /// up now points DOWN the build axis. Redundant with the angle on purpose:
+    /// it is the fact an operator scans for.
+    pub inverted: bool,
+    /// What the orientation stage selected, in its own words —
+    /// `"identity"`, `"X 90.000 deg"`, or the searched up-direction. Rendered
+    /// from [`plinth_orient::BaselineSelection`], not from the matrix, so the
+    /// line says what was CHOSEN rather than what that choice multiplies out
+    /// to.
+    pub selection: String,
+}
+
+impl OrientationDisclosure {
+    /// Read one sealed orientation record. The only construction site.
+    ///
+    /// The tilt is `acos` of the build-frame Z component of the rotated model
+    /// `+Z`, which for a row-major rotation applied as `v_out = R * v_in` — the
+    /// convention `plinth_orient`'s own `rotate_vertex` uses — is
+    /// `rotation[2][2]`. Clamped into `[-1, 1]` before `acos` because a
+    /// rotation matrix's entries can round a few ulps outside it and `acos`
+    /// answers `NaN` there; the clamp changes no angle a reader could measure.
+    #[must_use]
+    pub fn from_report(report: &plinth_orient::OrientationReport) -> Self {
+        let cosine = report.transform.rotation[2][2].get().clamp(-1.0, 1.0);
+        let original_up_tilt_deg = cosine.acos().to_degrees();
+        Self {
+            original_up_tilt_deg,
+            inverted: original_up_tilt_deg > 90.0,
+            selection: match &report.selection {
+                plinth_orient::BaselineSelection::Identity => "identity".to_owned(),
+                plinth_orient::BaselineSelection::AxisDegrees { axis, degrees } => {
+                    format!("{axis:?} {:.3} deg", degrees.get())
+                }
+                plinth_orient::BaselineSelection::UpDirection { up_model_frame } => format!(
+                    "searched up-direction ({:.4}, {:.4}, {:.4}) in the model frame",
+                    up_model_frame[0].get(),
+                    up_model_frame[1].get(),
+                    up_model_frame[2].get(),
+                ),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1646,6 +1720,7 @@ mod tests {
                     source_path: PathBuf::from("models/mini-a.stl"),
                     assumed_print_size: size(32.0),
                     repair: None,
+                    orientation: None,
                     outcome: ModelPreparationOutcome::Artifact {
                         emit: EmitReport {
                             artifact_path: PathBuf::from("out/mini-a.chitubox"),
@@ -1673,6 +1748,7 @@ mod tests {
                     source_path: PathBuf::from("models/mini-b.stl"),
                     assumed_print_size: size(28.0),
                     repair: None,
+                    orientation: None,
                     outcome: ModelPreparationOutcome::Stopped {
                         after: StageStop::Hollow,
                     },
@@ -1734,6 +1810,7 @@ mod tests {
             source_path: PathBuf::from(format!("models/{name}.stl")),
             assumed_print_size: size(30.0),
             repair: None,
+            orientation: None,
             outcome,
         };
         let report = PrepareReport {
@@ -1816,6 +1893,7 @@ mod tests {
             source_path: PathBuf::from(format!("models/{name}.stl")),
             assumed_print_size: None,
             repair: None,
+            orientation: None,
             outcome,
         };
         let sidecar = model(

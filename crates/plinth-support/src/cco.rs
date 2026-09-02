@@ -5079,7 +5079,7 @@ const MODEL_ANCHOR_ATTESTATION_SAMPLES_PER_SUBSEGMENT: usize = 8;
 /// The PR-1..PR-4 policy the CCO stage attests its seats under. Every number is
 /// the registered one; only the process resolution is a property of the run,
 /// which is why it arrives on the anchor route rather than from the registry.
-fn seat_contact_policy(
+pub(crate) fn seat_contact_policy(
     process_resolution_mm: f64,
 ) -> Result<crate::contact::ContactPolicy, CcoError> {
     let constants = m0_constants().map_err(|error| CcoError::Constants(error.to_string()))?;

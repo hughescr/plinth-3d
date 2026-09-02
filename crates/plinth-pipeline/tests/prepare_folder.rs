@@ -1088,13 +1088,35 @@ fn a_model_that_cannot_close_its_coverage_emits_and_names_the_gap() {
     // The assertion below says so directly, against the score, so a future
     // regression that stops on a counter cannot hide behind a nonzero
     // `remaining`.
+    //
+    // **Re-measured 2026-09-02, from `(161, 0)` to `(54, 0)`.** The repair pool
+    // is now screened by the batched seat attestation before it is ranked, and
+    // on this fixture the screen refuses **107 of 202** candidate seats as
+    // `undecidable_geometry` — the very cause the quarantined placements
+    // asserted above are quarantined for, found at the seat instead of after a
+    // full prepare -> route -> rewire -> brace -> structure -> lower -> measure
+    // pass per seat. Those 107 are trials that used to run and always roll
+    // back; the model, its commits (0), its stop reason (§B.3's zero-score
+    // guard) and its emitted file are unchanged, and the loop's wall time fell
+    // from ~35 s to ~12 s. `RepairRunReport::prescreen` is where that is stated
+    // on the run's own record.
     let repair = repair_report
         .as_ref()
         .expect("a model that spent the repair controller states what it spent");
     assert_eq!(
         (repair.trials, repair.commits),
-        (161, 0),
+        (54, 0),
         "the raking blade tries every candidate that could help and commits none: {repair:?}"
+    );
+    assert_eq!(
+        (
+            repair.prescreen.offered,
+            repair.prescreen.dropped,
+            repair.prescreen.dropped_by_cause.get("undecidable_geometry"),
+        ),
+        (202, 107, Some(&107)),
+        "the trials this fixture no longer spends are accounted for by name on the report, not \
+         merely absent from the count: {repair:?}"
     );
     assert!(
         warning

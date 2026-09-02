@@ -297,6 +297,28 @@ fn print_model(model: &ModelPreparationReport) {
         print_size(model.assumed_print_size)
     );
     print_repair(model);
+    // **How the model was turned, on the line above the result.**
+    //
+    // The engine flipped `Round 25` — a 25 mm x 3.5 mm flat disc — upside down
+    // and tilted it 44.9 deg, and the only way to discover that was to pull the
+    // mesh back out of the emitted file and fit its largest plane. Every number
+    // here is READ off the orientation record the sweep already sealed; nothing
+    // is recomputed from geometry. Printed for every model that reached the
+    // stage, identity included: "it was not turned" is a measurement and a line
+    // that appears only on surprising models teaches a reader to expect its
+    // absence.
+    if let Some(orientation) = &model.orientation {
+        println!(
+            "  orientation  original +Z is {:.1} deg off the build axis{}; rotation committed: {}",
+            orientation.original_up_tilt_deg,
+            if orientation.inverted {
+                " (INVERTED — the model's own up now points DOWN)"
+            } else {
+                ""
+            },
+            orientation.selection,
+        );
+    }
     match &model.outcome {
         ModelPreparationOutcome::Artifact {
             emit,
@@ -648,6 +670,15 @@ fn coverage_gap_warning_lines(warning: &plinth_pipeline::CoverageGapWarning) -> 
             island.uncovered_area_mm2,
             island.face_count(),
         ));
+        // §E.1's per-route verdict, indented under its own island. The line
+        // below it says why the SEARCH stopped; this says what happened to THIS
+        // island, and an operator holding a file with three bare islands needs
+        // the second one to know whether to look at the pool, the router or the
+        // placement search. Silent when the controller stated none, because a
+        // blank is a truer report than a guess.
+        if let Some(outcome) = &island.search_outcome {
+            lines.push(format!("      route  {outcome}"));
+        }
     }
     if let Some(reason) = &warning.closure_reason {
         lines.push(format!(
@@ -1011,8 +1042,8 @@ mod tests {
     use geom_kernel::telemetry::{NearParallelCounts, NearParallelSite};
 
     use super::{
-        coverage_lines, coverage_repair_lines, near_parallel_lines, remedies_tried_line,
-        repair_lines,
+        coverage_gap_warning_lines, coverage_lines, coverage_repair_lines, near_parallel_lines,
+        remedies_tried_line, repair_lines,
     };
 
     /// Counts with exactly one site charged.
@@ -1125,6 +1156,7 @@ mod tests {
             source_path: std::path::PathBuf::from("fixture.stl"),
             assumed_print_size: None,
             repair,
+            orientation: None,
             outcome: ModelPreparationOutcome::Stopped {
                 after: plinth_pipeline::StageStop::Decimate,
             },
@@ -1401,7 +1433,56 @@ mod tests {
             uncovered_area_mm2: area,
             worst_gap: gap,
             face_ids: (0..faces as u32).collect(),
+            // The per-route verdict is exercised by its own test below; the
+            // shared helper stays at "not stated" so every other assertion
+            // keeps reading the island line it always read.
+            search_outcome: None,
         }
+    }
+
+    /// **The per-route verdict prints under its own island, and stays silent
+    /// when there is none.**
+    ///
+    /// Measured on `Round 25`: the coverage-repair pre-screen took 45 of that
+    /// island's 46 pool rows, and before this line the warning said only "no
+    /// routed support reached this island at all" — true, and useless for
+    /// deciding whether to look at the pool, the router or the placement
+    /// search. The island-level verdict answers that; the run-level
+    /// `stage` line below it does not, because it is about the SEARCH.
+    #[test]
+    fn a_per_route_verdict_prints_under_its_island_and_only_when_stated() {
+        let mut stated = island(4, 6.878_205, CoverageClosureGap::NoRoutedContact, 45);
+        stated.search_outcome =
+            Some("Blocked(PoolScreened { pool_rows: 46, screened: 45 })".to_owned());
+        let silent = island(2, 0.656_66, CoverageClosureGap::NoRoutedContact, 3);
+        let lines = coverage_gap_warning_lines(&plinth_pipeline::CoverageGapWarning {
+            islands: vec![stated, silent],
+            total_uncovered_mm2: 7.534_865,
+            closure_reason: None,
+            closure_attempts: 0,
+        });
+        let route_lines: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.trim_start().starts_with("route  "))
+            .collect();
+        assert_eq!(
+            route_lines.len(),
+            1,
+            "exactly the island that HAS a verdict gets a route line: {lines:?}"
+        );
+        assert!(
+            route_lines[0].contains("PoolScreened { pool_rows: 46, screened: 45 }"),
+            "the line must carry how many rows the screen took: {lines:?}"
+        );
+        let island_index = lines
+            .iter()
+            .position(|line| line.contains("island 4"))
+            .expect("the island line is printed");
+        assert_eq!(
+            lines[island_index + 1],
+            *route_lines[0],
+            "the verdict belongs to the island directly above it, not to the block: {lines:?}"
+        );
     }
 
     fn with_outcome(outcome: ModelPreparationOutcome) -> ModelPreparationReport {
@@ -1410,6 +1491,7 @@ mod tests {
             source_path: std::path::PathBuf::from("fixture.stl"),
             assumed_print_size: None,
             repair: None,
+            orientation: None,
             outcome,
         }
     }
