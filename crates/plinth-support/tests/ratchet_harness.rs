@@ -21,7 +21,7 @@
 //! 3. **Equivalence checks** — a before/after comparison run at the time of a
 //!    specific change. Not this file's job either.
 //!
-//! **Why these seven and not a support/contact count.** Support count is the
+//! **Why these eight and not a support/contact count.** Support count is the
 //! textbook bad ratchet: it improves by deleting supports until the model
 //! falls off the plate, and it is seeded from per-vertex local z minima, so
 //! it moves under retessellation with no change in plan quality. Every metric
@@ -30,7 +30,7 @@
 //! off, a scar the operator sands by hand, a strip that sags because nothing
 //! is under it.
 //!
-//! ## The seven metrics
+//! ## The eight metrics
 //!
 //! | # | metric | unit | source |
 //! |---|---|---|---|
@@ -41,6 +41,20 @@
 //! | 5 | worst uncovered gap | mm | [`worst_uncovered_gap_mm`] |
 //! | 6 | ownerless model area | mm² | [`ownerless_model_area_mm2`] |
 //! | 7 | abandoned routed load | mm² | [`abandoned_load_mm2`] |
+//! | 8 | unrouted uncovered patches | patches | [`unrouted_uncovered_patches`] |
+//!
+//! **Metric 8 arrived 2026-09-01 with the owner's emit-and-warn ruling, and it
+//! is a CONVERSION rather than an addition.** The same physics was already
+//! measured here — a patch with no routed contact anywhere near it — but it was
+//! a hard panic inside metric 5 that DEMANDED ZERO. Once a region that cannot
+//! be supported emits with a warning instead of withholding the file, demanding
+//! zero would have aborted the gate on every model that legitimately does so,
+//! and the usual reflex — downgrade it to an untracked metric — would have
+//! quietly cost this project the one signal it has that support quality is
+//! getting worse. It is pinned instead: the count is recorded per model and a
+//! rise fails the gate as loudly as the panic did. See
+//! [`unrouted_uncovered_patches`] for why a count is a legitimate ratchet here
+//! when the module doc warns against counts generally.
 //!
 //! **Metric 7 arrived 2026-08-29 with the placement-pin retirement.**
 //! `support_runner_integration.rs` asserted `abandoned_mm2 == 0.0` on the
@@ -54,7 +68,7 @@
 //! per model here, it now tracks EVERY corpus model rather than one fixture,
 //! and it can no longer be silenced by an unrelated re-pin lag.
 //!
-//! All seven are lower-is-better, computed entirely from evidence the public
+//! All eight are lower-is-better, computed entirely from evidence the public
 //! `plinth_support` API already discloses (`EmittedContactDisclosure`,
 //! `FinalLiveMemberEvidence`, `CoverageMeasurement`,
 //! `OwnerlessIslandDisclosure`) — no new field was added to any disclosure
@@ -196,6 +210,13 @@ struct RatchetMetrics {
     /// load. Every row in the committed file carries a measured value.
     #[serde(default)]
     abandoned_load_mm2: f64,
+    /// Metric 8 — the count of uncovered patches with no routed contact.
+    /// `#[serde(default)]` so a file written before this metric existed still
+    /// loads, reading 0.0 — the tightest possible baseline, so an unrecorded
+    /// model cannot silently acquire unrouted patches. Every row in the
+    /// committed file carries a measured value.
+    #[serde(default)]
+    unrouted_uncovered_patches: f64,
 }
 
 impl RatchetMetrics {
@@ -203,7 +224,7 @@ impl RatchetMetrics {
     /// table order from the module doc. One place this list is written, so a
     /// metric added here automatically joins recording, comparison and the
     /// failure report.
-    fn fields(&self) -> [(&'static str, &'static str, f64); 7] {
+    fn fields(&self) -> [(&'static str, &'static str, f64); 8] {
         [
             (
                 "worst_tip_area_ratio",
@@ -228,6 +249,11 @@ impl RatchetMetrics {
                 self.ownerless_model_area_mm2,
             ),
             ("abandoned_load_mm2", "mm^2", self.abandoned_load_mm2),
+            (
+                "unrouted_uncovered_patches",
+                "patches",
+                self.unrouted_uncovered_patches,
+            ),
         ]
     }
 
@@ -593,30 +619,62 @@ fn residual_uncovered_area_mm2(coverage: &CoverageMeasurement) -> f64 {
         .sum()
 }
 
-/// Metric 5 — **max** finite gap over every patch. A patch reporting
-/// [`CoverageGap::NoRoutedContact`] is a hard failure, not a large number —
-/// folding it into the maximum would let an unroutable patch pose as merely a
-/// bad ratchet reading instead of the invariant violation it actually is, so
-/// this panics instead of returning a value for it. That panic is
-/// deliberately NOT the same failure shape as a ratchet regression: the
-/// caller must be able to tell "the plan is unsound" from "the plan is worse
-/// than last time".
-fn worst_uncovered_gap_mm(model: &str, coverage: &CoverageMeasurement) -> f64 {
+/// Metric 5 — **max** finite gap over every patch.
+///
+/// A patch reporting [`CoverageGap::NoRoutedContact`] has no finite distance to
+/// contribute and is deliberately NOT folded into this maximum: doing so would
+/// let an unroutable patch pose as merely a bad distance reading. It is counted
+/// by [`unrouted_uncovered_patches`] instead, which is metric 8.
+fn worst_uncovered_gap_mm(coverage: &CoverageMeasurement) -> f64 {
     let mut worst = 0.0_f64;
     for patch in coverage.evidence().patches() {
-        match patch.worst_gap() {
-            CoverageGap::Finite(gap_mm) => worst = worst.max(gap_mm.get()),
-            CoverageGap::NoRoutedContact => panic!(
-                "INVARIANT VIOLATION, not a ratchet reading: model '{model}' has an uncovered \
-                 patch (island {}, component {}) with NO ROUTED CONTACT anywhere near it. This \
-                 is a hard failure of the closed-load-path invariant, not a large gap value —\
-                 fix the support plan, not this harness.",
-                patch.island_id(),
-                patch.component_id(),
-            ),
+        if let CoverageGap::Finite(gap_mm) = patch.worst_gap() {
+            worst = worst.max(gap_mm.get());
         }
     }
     worst
+}
+
+/// Metric 8 — **count** of uncovered patches with NO ROUTED CONTACT anywhere
+/// near them: load with no path to the plate.
+///
+/// **This used to be a hard panic inside metric 5, and the owner's ruling of
+/// 2026-09-01 is why it is a ratchet instead. Read the distinction before
+/// changing it back or softening it further.**
+///
+/// The ruling changed what the ENGINE DOES: a region that cannot be supported
+/// no longer withholds the file, it emits with the gap named. It did NOT change
+/// what this QUALITY INSTRUMENT ACCEPTS, and collapsing those two would destroy
+/// the project's ability to notice support quality getting worse — which it can
+/// least afford, having very little quality signal as it is.
+///
+/// So the physics is measured exactly as it was. `docs/physics.md`'s
+/// closed-load-path requirement still stands and this is still the number that
+/// says how badly it is violated. What moved is only the shape of the failure:
+/// the old form DEMANDED ZERO and aborted, which after the ruling would have
+/// failed every corpus model that legitimately emits with a gap. The new form
+/// PINS THE MEASURED COUNT and fails loudly the moment it rises — which is the
+/// same tooth, biting on the same physics, in the direction that still means
+/// something.
+///
+/// A run that makes it BETTER also fails, and is fixed by lowering the pin.
+/// That is the normal ratchet motion and it is how this number gets driven back
+/// down to zero deliberately, rather than drifting.
+///
+/// **It is a COUNT, and this file's own module doc warns that counts make bad
+/// ratchets.** The warning is about metric 7, where a count could improve by
+/// refusing one contact that carried 400 mm² instead of two that carried
+/// nothing. It does not apply here: there is no way to improve this count
+/// except by routing a contact to a patch that had none, which is the exact
+/// thing the metric wants more of. The AREA of these patches is already
+/// carried, separately, by metric 4.
+fn unrouted_uncovered_patches(coverage: &CoverageMeasurement) -> f64 {
+    coverage
+        .evidence()
+        .patches()
+        .iter()
+        .filter(|patch| matches!(patch.worst_gap(), CoverageGap::NoRoutedContact))
+        .count() as f64
 }
 
 /// Metric 6 — **sum** of every ownerless island's face area.
@@ -662,7 +720,7 @@ fn normalize_zero(value: f64) -> f64 {
     }
 }
 
-fn metrics_from_evidence(model: &str, evidence: &RunEvidence) -> RatchetMetrics {
+fn metrics_from_evidence(_model: &str, evidence: &RunEvidence) -> RatchetMetrics {
     RatchetMetrics {
         worst_tip_area_ratio: normalize_zero(worst_tip_area_ratio(&evidence.emitted_contacts)),
         total_scar_area_mm2: normalize_zero(total_scar_area_mm2(&evidence.emitted_contacts)),
@@ -672,20 +730,27 @@ fn metrics_from_evidence(model: &str, evidence: &RunEvidence) -> RatchetMetrics 
         residual_uncovered_area_mm2: normalize_zero(residual_uncovered_area_mm2(
             &evidence.coverage,
         )),
-        worst_uncovered_gap_mm: normalize_zero(worst_uncovered_gap_mm(model, &evidence.coverage)),
+        worst_uncovered_gap_mm: normalize_zero(worst_uncovered_gap_mm(&evidence.coverage)),
         ownerless_model_area_mm2: normalize_zero(ownerless_model_area_mm2(
             &evidence.ownerless_islands,
         )),
         abandoned_load_mm2: normalize_zero(abandoned_load_mm2(&evidence.abandoned_contacts)),
+        unrouted_uncovered_patches: normalize_zero(unrouted_uncovered_patches(&evidence.coverage)),
     }
 }
 
-/// **The tolerance rule**, stated once. Every metric here is a floating-point
-/// physical quantity — none of the six registered metrics is an integer
-/// count (a support/contact count was rejected by design precisely because
-/// counts make bad ratchets), so only the floating-point branch of the
-/// adopted rule is implemented: a metric that gets worse by more than
-/// `max(1e-12 * |recorded|, 1e-9)` **in the metric's own unit** fails.
+/// **The tolerance rule**, stated once. Seven of the eight registered metrics
+/// are floating-point physical quantities (a support/contact count was rejected
+/// by design precisely because counts make bad ratchets), so only the
+/// floating-point branch of the adopted rule is implemented: a metric that gets
+/// worse by more than `max(1e-12 * |recorded|, 1e-9)` **in the metric's own
+/// unit** fails.
+///
+/// **Metric 8 is an integer count carried as `f64`, and this rule is still the
+/// right one for it** rather than an exception: every value it can take is
+/// exactly representable, so the `1e-9` absolute floor is far below one whole
+/// patch and the comparison is effectively exact. One more unrouted patch fails;
+/// nothing smaller than one patch exists to be forgiven.
 ///
 /// **Where the two constants come from, not asserted, derived:**
 /// - `1e-12` relative: naive summation of `n` terms in a fixed order carries
@@ -1000,6 +1065,11 @@ fn resolve_metrics(
             measured.abandoned_load_mm2,
             accept_regression,
         ),
+        unrouted_uncovered_patches: resolve_metric_value(
+            previous.unrouted_uncovered_patches,
+            measured.unrouted_uncovered_patches,
+            accept_regression,
+        ),
     }
 }
 
@@ -1164,6 +1234,7 @@ fn uniform_metrics(value: f64) -> RatchetMetrics {
         worst_uncovered_gap_mm: value,
         ownerless_model_area_mm2: value,
         abandoned_load_mm2: value,
+        unrouted_uncovered_patches: value,
     }
 }
 

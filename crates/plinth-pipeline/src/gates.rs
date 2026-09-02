@@ -136,6 +136,28 @@ enum GateVerdict {
     /// `examples/first_artifact.rs`, which used to and therefore described an
     /// artifact carrying live area-law violations as fully gated.
     Warned(LoadWarnings),
+    /// [`PreWriteGate::UncoveredIslands`] ran, measured this snapshot, found
+    /// the coverage verdict NOT accepted, and — per the owner ruling of
+    /// 2026-09-01 — did NOT refuse emission for it.
+    ///
+    /// **The ruling, in the owner's own words:** "if a region can't be
+    /// supported, then EMIT THE MODEL ANYWAYS with the supports that *do* work
+    /// in place, and a loud warning about the fact some area(s) are
+    /// unsupported"; and "Partial success will let me then look at the model
+    /// and fix it manually to print, or have a chance at refining the algorithm
+    /// understanding where it failed. With *nothing* emitted, I can't see
+    /// what's working and what isn't working." An emitted file is evidence
+    /// about the ENGINE as well as a deliverable, and a refusal destroys that
+    /// evidence.
+    ///
+    /// It carries the whole [`CoverageReport`] the hard refusal carried,
+    /// unweakened: the measurement that decides whether a patch is covered is
+    /// the measurement [`verify_coverage`] always took, and this verdict
+    /// changes only what is done with the answer. **A caller must not report
+    /// this as a pass** — the model emitted with named, measured gaps in it,
+    /// and [`PreWriteGateReport::coverage_warned`] is how a caller tells the
+    /// two apart.
+    CoverageWarned(Box<CoverageReport>),
 }
 
 /// The full evidence [`PreWriteGate::Load`] found while in WARNING MODE,
@@ -190,6 +212,11 @@ pub struct PreWriteGateReport {
     coverage: CoverageReport,
     pending: Vec<PreWriteGate>,
     load_warnings: Option<LoadWarnings>,
+    /// True when the coverage gate reached [`GateVerdict::CoverageWarned`] —
+    /// it measured, it did not accept, and it emitted anyway. The measurement
+    /// itself is in `coverage`, which is the same report either way; this is
+    /// the one bit that says which disposition it got.
+    coverage_warned: bool,
 }
 
 impl PreWriteGateReport {
@@ -214,6 +241,15 @@ impl PreWriteGateReport {
     #[must_use]
     pub const fn load_warnings(&self) -> Option<&LoadWarnings> {
         self.load_warnings.as_ref()
+    }
+
+    /// Whether the coverage gate MEASURED this model as not covered and let it
+    /// emit anyway (owner ruling, 2026-09-01). `false` means the coverage
+    /// verdict was accepted. A caller reporting "all gates passed" must check
+    /// this first: the gate ran, and it found something.
+    #[must_use]
+    pub const fn coverage_warned(&self) -> bool {
+        self.coverage_warned
     }
 }
 
@@ -1160,10 +1196,13 @@ fn judge(
             if report.accepted() {
                 Ok(GateVerdict::Passed(Box::new(report)))
             } else {
-                Err(GateRefusal::Refused {
-                    gate,
-                    report: Box::new(report),
-                })
+                // WARNING MODE (owner ruling, 2026-09-01). This was
+                // `GateRefusal::Refused`, and it was the last thing standing
+                // between a measured-but-imperfect layout and a file on disk.
+                // The measurement is unchanged and it is carried out whole;
+                // only the disposition moved. See
+                // [`GateVerdict::CoverageWarned`].
+                Ok(GateVerdict::CoverageWarned(Box::new(report)))
             }
         }
         // The area law on the run's own emitted-contact record, WARNING MODE
@@ -1246,12 +1285,17 @@ fn judge_pre_write_gates(
     let mut coverage = None;
     let mut pending = Vec::new();
     let mut load_warnings = None;
+    let mut coverage_warned = false;
     for gate in PreWriteGate::ALL {
         match judge(gate, artifact, snapshot, request, authority)? {
             GateVerdict::Passed(report) => coverage = Some(*report),
             GateVerdict::Cleared => {}
             GateVerdict::NotYetPorted => pending.push(gate),
             GateVerdict::Warned(warnings) => load_warnings = Some(warnings),
+            GateVerdict::CoverageWarned(report) => {
+                coverage = Some(*report);
+                coverage_warned = true;
+            }
         }
     }
     let coverage = coverage.ok_or(GateRefusal::Unmeasurable {
@@ -1262,6 +1306,7 @@ fn judge_pre_write_gates(
         coverage,
         pending,
         load_warnings,
+        coverage_warned,
     })
 }
 

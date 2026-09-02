@@ -42,6 +42,11 @@ pub use plinth_support::{AbandonedContactDisclosure, GrownContactTipDisclosure};
 // of this crate's surface either way — and §A.8's third destination is the
 // CLI's per-model line, which cannot NAME the type it prints without this.
 pub use plinth_support::RepairRunReport;
+// The coverage gap an EMITTED artifact carries (owner ruling, 2026-09-01). It
+// is the type of a public field on `ModelPreparationOutcome::Artifact`, so it
+// is part of this crate's surface either way, and the CLI has to be able to
+// NAME it to build the warning line a test can read back.
+pub use coverage_evidence::CoverageGapWarning;
 pub use prepare::{
     prepare, registered_decimation_budget, registered_support_request, ChainOutcome, ChainStop,
     GateStop, StagePolicy, SupportedGeometry, ARTIFACT_EXTENSION,
@@ -609,6 +614,26 @@ pub enum ModelPreparationOutcome {
         /// `GateRefusal::load_law_violations`) ever carries one.
         #[serde(default)]
         load_warnings: Option<Box<LoadWarnings>>,
+        /// **WARNING MODE (owner ruling, 2026-09-01).** The coverage gate
+        /// measured this model as NOT covered and let it emit anyway, and this
+        /// is what it measured: every island the file leaves unsupported, its
+        /// area, its worst gap, and why the repair search stopped.
+        ///
+        /// `None` means the coverage verdict was ACCEPTED — not that the
+        /// question went unasked.
+        ///
+        /// The ruling, in the owner's words: "if a region can't be supported,
+        /// then EMIT THE MODEL ANYWAYS with the supports that *do* work in
+        /// place, and a loud warning about the fact some area(s) are
+        /// unsupported", because "with *nothing* emitted, I can't see what's
+        /// working and what isn't working". A refusal hands him nothing he can
+        /// open, inspect, hand-support, or learn from.
+        ///
+        /// `#[serde(default)]` for the same reason every other added field is:
+        /// a report frozen before this existed reads as `None`, which
+        /// understates an old run rather than fabricating anything.
+        #[serde(default)]
+        coverage_warning: Option<Box<CoverageGapWarning>>,
     },
     Stopped {
         after: StageStop,
@@ -748,6 +773,26 @@ impl ModelPreparationOutcome {
             }
             Self::Failed { evidence, .. } => evidence.is_some(),
             Self::Artifact { .. } | Self::Stopped { .. } => false,
+        }
+    }
+
+    /// Whether this model EMITTED with a measured, unclosed coverage gap in it
+    /// (owner ruling, 2026-09-01).
+    ///
+    /// This is the disposition that replaced most of
+    /// [`Self::is_coverage_refusal`]: the same safety verdict, reached by the
+    /// same measurement, now carried on an artifact instead of instead of one.
+    /// It is deliberately a SEPARATE predicate rather than folded into the
+    /// refusal one — a refusal and a warning are different facts about a run,
+    /// and a caller that treats "emitted with a named gap" as "refused" would
+    /// misreport a file that exists.
+    #[must_use]
+    pub const fn has_coverage_gap(&self) -> bool {
+        match self {
+            Self::Artifact {
+                coverage_warning, ..
+            } => coverage_warning.is_some(),
+            Self::Refused { .. } | Self::Failed { .. } | Self::Stopped { .. } => false,
         }
     }
 }
@@ -898,6 +943,25 @@ impl PrepareReport {
         self.models
             .iter()
             .any(|model| model.outcome.is_coverage_refusal())
+    }
+
+    /// Whether ANY model in this run emitted with a measured, unclosed coverage
+    /// gap (owner ruling, 2026-09-01).
+    ///
+    /// The run-level companion to [`Self::has_coverage_refusal`], and it exists
+    /// for the reason that one does: a safety finding must be visible at the
+    /// RUN level and not only on the model that carries it, or an operator
+    /// reading a run of thirty models has to open all thirty to learn that one
+    /// of them is under-supported.
+    ///
+    /// It does NOT move the exit code. That is the point of the ruling — the
+    /// file is a deliverable, not a failure — so the signal is a question a
+    /// caller asks, not a status it trips over.
+    #[must_use]
+    pub fn has_coverage_gap(&self) -> bool {
+        self.models
+            .iter()
+            .any(|model| model.outcome.has_coverage_gap())
     }
 }
 
@@ -1601,6 +1665,7 @@ mod tests {
                         repair_ledger: None,
                         pending_gates: Vec::new(),
                         load_warnings: None,
+                        coverage_warning: None,
                     },
                 },
                 ModelPreparationReport {
@@ -1695,6 +1760,7 @@ mod tests {
                         repair_ledger: None,
                         pending_gates: Vec::new(),
                         load_warnings: None,
+                        coverage_warning: None,
                     },
                 ),
                 model("refused", refused),

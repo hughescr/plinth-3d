@@ -470,17 +470,23 @@ fn a_committed_step_names_the_row_that_closed_the_hole_and_the_routes_it_covered
 /// and OUT of the refusal, island 5's 5.135 mm² above the registered censor and
 /// refusing — were already here verbatim and are unchanged.
 #[test]
-fn the_raking_blade_refuses_with_a_measured_class_per_route() {
-    let error = run(
+fn the_raking_blade_reports_a_measured_class_per_route() {
+    // **Re-derived 2026-09-01 (owner ruling).** This used to be
+    // `.err().expect(...)` and destructure `SupportRunError::CoverageClosure`.
+    // The 5.135 mm² island the frozen repair pool cannot close is still exactly
+    // that, and the controller still measures it exactly as it did; what
+    // changed is that the run SEALS and carries the same
+    // `CoverageClosureRefusal` on the authority instead of returning it as an
+    // error. Every assertion below is the one that was here.
+    let authority = run(
         make_raking_blade().expect("procedural raking blade"),
         "make_raking_blade",
     )
-    .err()
-    .expect("make_raking_blade has a 5.135 mm² island the frozen repair pool cannot close");
-
-    let SupportRunError::CoverageClosure(refusal) = error else {
-        panic!("expected a coverage-closure refusal, got {error:?}");
-    };
+    .expect("an island the repair pool cannot close is a warning on the artifact, not a refusal");
+    let refusal = authority
+        .uncovered_coverage()
+        .expect("make_raking_blade has a 5.135 mm² island the frozen repair pool cannot close")
+        .clone();
 
     // Ruling R6: the field named for the registered bound now carries what that
     // bound bounds — COMMITTED steps. **Measured on this fixture, 2026-08-20,
@@ -495,43 +501,88 @@ fn the_raking_blade_refuses_with_a_measured_class_per_route() {
     // **The stop reason is pinned exactly, not to a set of three.** A refusal
     // that stopped for a different measured end is a different fact about this
     // model and must be re-derived, not absorbed by an `|`.
+    // **Re-measured 2026-09-01, from 45 trials to 161.** The 45 was taken
+    // 2026-08-20 and it is not a disposition change: from `b0157ec` until
+    // 2026-09-01 this 24-face fixture died at PR-8 with
+    // `NearParallelWitness { near_parallel: 6 }` before the repair controller
+    // ran at all, so the pin sat unexercised while the geometry under it moved.
+    // Six of its placements are knife-edge rays that are now quarantined one at
+    // a time instead of killing the model, so the blade routes on the contacts
+    // that DID attest and its search is a different, longer one.
+    //
+    // **What the assertion is FOR did not move.** The claim is the stop REASON
+    // — the search ends because every remaining candidate scores 0.00 mm²
+    // against the uncovered set (§B.3's guard), not because a budget ran out
+    // and not because there was nothing to try — and `best_remaining_score_mm2`
+    // is still exactly 0.0. The trial count rides along so that a future change
+    // to what the search DOES has to be re-derived rather than absorbed.
     assert_eq!(
         refusal.reason,
         CoverageClosureReason::NoImprovingRepair {
-            candidates_tried: 45,
+            candidates_tried: 161,
             best_remaining_score_mm2: 0.0,
         },
-        "measured 2026-08-20: the blade's search ends because every remaining candidate scores \
-         0.00 mm² against the uncovered set (§B.3's guard), after 45 trials — not because a \
-         budget ran out and not because there was nothing to try"
+        "the blade's search ends because every remaining candidate scores 0.00 mm² against the \
+         uncovered set (§B.3's guard) — not because a budget ran out and not because there was \
+         nothing to try"
     );
 
     let censor = plinth_support::registered_coverage_censor_area_mm2()
         .expect("registered A3 coverage censor");
     let mut islands = refusal.islands.clone();
     islands.sort_by_key(|island| island.island_id);
-    assert_eq!(
-        islands
+    // **Re-derived 2026-09-01: the blocking set is four routes, not one.**
+    // Six of this fixture's placements are knife-edge rays that used to kill
+    // the model at PR-8 and are now quarantined one at a time; the load they
+    // carried is no longer carried, so routes 1, 2 and 4 join island 5 as
+    // genuinely uncovered. That is the change this fixture is measuring, and
+    // widening a pinned list to accept it would have thrown the measurement
+    // away.
+    //
+    // **The CENSOR claim — the one this assertion exists for — is unchanged and
+    // is now stated directly rather than through a single-element list.** Every
+    // route in the blocking set must be genuinely above the registered A3
+    // censor; island 3's 0.060 mm² is censored uncertainty and must stay out.
+    // Asserted over ALL of them, so it keeps its tooth however many there are,
+    // and it fails loudly if sub-censor dust ever enters.
+    assert!(
+        !islands.is_empty(),
+        "the blade has genuinely uncovered routes; an empty blocking set measures nothing"
+    );
+    for island in &islands {
+        assert!(
+            island.uncovered_area_mm2 > censor,
+            "every blocking route must be genuinely uncovered, not censored A3 dust: island {} \
+             component {} measures {} mm² against a {censor} mm² censor",
+            island.island_id,
+            island.component_id,
+            island.uncovered_area_mm2
+        );
+    }
+    assert!(
+        !islands
             .iter()
-            .map(|island| (island.island_id, island.component_id))
-            .collect::<Vec<_>>(),
-        vec![(5, 1)],
-        "only the island genuinely above the censor may refuse this model — island 3's \
-         0.060 mm² is censored A3 uncertainty and must stay out of the refusal"
-    );
-    assert!(
-        islands[0].uncovered_area_mm2 > censor,
-        "the refusing island must be above the censor: {} mm² against {censor} mm²",
-        islands[0].uncovered_area_mm2
-    );
-    assert!(
-        (islands[0].uncovered_area_mm2 - 5.135).abs() < 1e-9,
-        "island 5 measures 5.135 mm²; the one-winner controller must refuse the SAME physical \
-         hole the batch controller refuses: {} mm²",
-        islands[0].uncovered_area_mm2
+            .any(|island| island.island_id == 3),
+        "island 3's 0.060 mm² is below the censor and must stay out of the blocking set: \
+         {islands:?}"
     );
 
-    let outcome = islands[0]
+    // **The same physical hole, found by id rather than by position.** Island 5
+    // was the only entry when this was written, so `islands[0]` meant island 5;
+    // it does not any more, and reading position 0 would silently start
+    // asserting about a different route.
+    let island_five = islands
+        .iter()
+        .find(|island| (island.island_id, island.component_id) == (5, 1))
+        .expect("island 5 component 1 is this fixture's standing hole and must still block");
+    assert!(
+        (island_five.uncovered_area_mm2 - 5.135).abs() < 1e-9,
+        "island 5 measures 5.135 mm²; the one-winner controller must report the SAME physical \
+         hole the batch controller refused: {} mm²",
+        island_five.uncovered_area_mm2
+    );
+
+    let outcome = island_five
         .outcome
         .clone()
         .expect("§E.1: every still-uncovered route reports its own measured outcome");
@@ -684,23 +735,45 @@ fn the_raking_blade_refuses_with_a_measured_class_per_route() {
         );
     }
 
-    // **MEASURED on this fixture, 2026-08-22, and stated as a value rather than
-    // a range.** Of the blade's 45 trials, **37 end `UnroutedNoWinner` on their
-    // own appended contact and all 37 are the clearance sub-class**; the other
-    // 8 are outside the class and exercise the `null` half. So both halves of
-    // the disclosure are covered by real geometry here, which is what a
-    // hand-built row cannot do.
+    // **The PURPOSE of the pin, stated first because it is what must not be
+    // lost.** Both halves of the disclosure have to be covered by real
+    // geometry: rows that DID retire their own contact unrouted through the
+    // clearance sub-class, and rows that did not and therefore exercise the
+    // `null` half. A pair that drifted to `(0, 0)` would leave the clearance
+    // half untested while every assertion above stayed green, so it is asserted
+    // directly rather than left implied by the frozen pair below.
+    assert!(
+        no_winner_rows > 0,
+        "no row retired its own contact unrouted, so the clearance half of the disclosure is \
+         untested on the one procedural model that reproduces it"
+    );
+    assert!(
+        rows.len() > no_winner_rows,
+        "every row is a no-winner row, so the `null` half of the disclosure is untested"
+    );
+
+    // **Re-measured 2026-09-01, from `(37, 37)` of 45 trials to `(5, 5)` of
+    // 161.** The 2026-08-22 pair is not a disposition change and was not wrong
+    // when taken: from `b0157ec` until 2026-09-01 this 24-face fixture died at
+    // PR-8 with `NearParallelWitness { near_parallel: 6 }` before the repair
+    // controller ran, so the pin sat unexercised while the geometry under it
+    // moved. Six placements are now quarantined one at a time instead of
+    // killing the model, the blade routes on the contacts that DID attest, and
+    // both the trial count and this class's share of it are different.
     //
-    // A frozen pair, not a lower bound, because a moved number is a moved
-    // diagnosis: if this fixture stops being 37-of-45-all-clearance, the class
-    // the design evidence sized has changed shape on the one procedural model that reproduces
-    // it, and that has to be re-measured rather than re-accepted. (The blade's
-    // 37 and `zombie-3-a`'s 37 are unrelated counts that happen to coincide.)
+    // **The DIAGNOSIS the pair encodes is unchanged: every row that retires its
+    // own contact unrouted does so because the standoff refused every feasible
+    // arm.** That is the `5 == 5` equality, and it is the half that carries
+    // meaning. Still a frozen pair rather than a lower bound, for the reason it
+    // always was: a moved number is a moved diagnosis, and if this fixture
+    // stops being all-clearance the class the design evidence sized has changed
+    // shape on the one procedural model that reproduces it. (The blade's old 37
+    // and `zombie-3-a`'s 37 were unrelated counts that happened to coincide.)
     assert_eq!(
         (no_winner_rows, clearance_refused_rows),
-        (37, 37),
-        "measured 2026-08-22: 37 of the blade's 45 trials retire their own contact unrouted, \
-         and every one of them because the standoff refused every feasible arm"
+        (5, 5),
+        "5 of the blade's trials retire their own contact unrouted, and every one of them \
+         because the standoff refused every feasible arm"
     );
 }
 
@@ -868,18 +941,20 @@ fn the_loop_streams_progress_before_it_prints_its_summary() {
 
     // ---- the refused path, which is the one long enough to pace ----------
     let capture = RunLogCapture::install();
-    let error = run(
+    let authority = run(
         make_raking_blade().expect("procedural raking blade"),
         "make_raking_blade",
     )
-    .err()
-    .expect("make_raking_blade refuses");
+    .expect("the long path seals with its gap named (owner ruling, 2026-09-01)");
     let refused_lines = capture.lines();
     drop(capture);
-    let SupportRunError::CoverageClosure(refusal) = error else {
-        panic!("expected a coverage-closure refusal, got {error:?}");
-    };
-    let refused_report = refusal.repair.expect("a refusal carries its §A.8 report");
+    let refusal = authority
+        .uncovered_coverage()
+        .expect("make_raking_blade's island is still unclosable and still reported")
+        .clone();
+    let refused_report = refusal
+        .repair
+        .expect("the give-up path carries its §A.8 report whether it refuses or warns");
 
     let summary_at = summary_index(&refused_lines);
     let before_summary = progress_lines(&refused_lines[..summary_at]);
@@ -901,11 +976,31 @@ fn the_loop_streams_progress_before_it_prints_its_summary() {
         "the streamed commit count and the reported one are the same counter, and this \
          fixture commits nothing: {last:?} against {refused_report:?}"
     );
+    // **The exact-number tooth, moved off the LAST paced line onto the FIRST.**
+    // It used to read `last.contains("trials=30")`, which held only while this
+    // fixture spent between 30 and 59 trials — one paced line and no more. It
+    // now spends 161 (see the re-derivation on the stop reason above), so the
+    // last line reads `trials=150` and the assertion was pinning the run's
+    // LENGTH while claiming to pin the pacer's PRECISION.
+    //
+    // The claim itself is unchanged and is asserted where it is actually
+    // decided: the FIRST paced line after the entry line must carry exactly the
+    // registered by-trials cadence, because `ProgressPacer::due` fires AT the
+    // trial that trips it and streams the counter's own value rather than a
+    // rounded or re-derived one. That holds however long the loop runs. The
+    // by-clock arm cannot pre-empt it here: 60 s is the interval and this
+    // fixture reaches 30 trials in well under a second.
+    // `before_summary[0]` is the loop's ENTRY line, streamed before the first
+    // trial and always reading `trials=0`; index 1 is the first PACED line,
+    // which is the one the cadence decides.
+    let first_paced = &before_summary[1];
     assert!(
-        last.contains("trials=30"),
+        first_paced.contains("trials=30"),
         "the pacer fires AT the trial that trips it, so the line must carry that trial \
-         count and not a rounded or re-derived one: {last:?}"
+         count and not a rounded or re-derived one: {first_paced:?}"
     );
+    // And the last one is still a real reading of the same counter, never
+    // ahead of the total the summary reports.
     assert!(
         refused_report.trials >= 30,
         "if this fixture stopped spending 30 trials the cadence assertion above has \
@@ -981,18 +1076,20 @@ fn attempt_zero_names_every_stage_it_enters_and_the_trials_stay_quiet() {
     }
 
     let capture = RunLogCapture::install();
-    let error = run(
+    let authority = run(
         make_raking_blade().expect("procedural raking blade"),
         "make_raking_blade",
     )
-    .err()
-    .expect("make_raking_blade refuses");
+    .expect("the long path seals with its gap named (owner ruling, 2026-09-01)");
     let lines = capture.lines();
     drop(capture);
-    let SupportRunError::CoverageClosure(refusal) = error else {
-        panic!("expected a coverage-closure refusal, got {error:?}");
-    };
-    let report = refusal.repair.expect("a refusal carries its §A.8 report");
+    let refusal = authority
+        .uncovered_coverage()
+        .expect("make_raking_blade's island is still unclosable and still reported")
+        .clone();
+    let report = refusal
+        .repair
+        .expect("the give-up path carries its §A.8 report whether it refuses or warns");
 
     // NON-VACUITY. Claim 3 is about trials, so the fixture must spend some.
     assert!(

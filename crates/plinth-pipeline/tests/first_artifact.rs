@@ -150,6 +150,23 @@ fn assert_artifact_is_sound(outcome: &chain::ChainOutcome, audit: &chain::DiskAu
 /// `examples/first_artifact.rs`, which unlike `Scratch` does not unlink first —
 /// would take it for this run's answer.
 ///
+/// **Re-derived 2026-09-01 (owner ruling): the claim survives, the mechanism
+/// that used to deliver it does not.** A coverage shortfall no longer refuses,
+/// so this fixture EMITS, and the old assertion — "the target does not exist" —
+/// was being satisfied by the refusal rather than by any stale-artifact
+/// discipline. Asserting absence after an emission would be simply false, and
+/// flipping it to "the target exists" would assert nothing at all: a surviving
+/// stale file also exists.
+///
+/// So the claim is now made positively — the bytes AT the target are this run's
+/// artifact — which is a strictly stronger statement than the one it replaces.
+/// **Two independent mechanisms deliver it, and neither was the refusal.**
+/// `prepare_one` unlinks the target on the way IN, before any stage can fail,
+/// so every disposition it can produce clears the path; and `plinth_emit::write`
+/// builds a staging sibling and `rename`s it onto the target, which replaces
+/// whatever was there. This test exercises the second, because the chain helper
+/// enters at `run_from_oriented` and never reaches the first.
+///
 /// **Re-pinned off the corpus Sphere onto `make_raking_blade` (2026-08-26).**
 /// The claim is unchanged and so is every assertion; what changed is which
 /// model still produces a coverage refusal to make it with. `3a6526f`
@@ -161,29 +178,58 @@ fn assert_artifact_is_sound(outcome: &chain::ChainOutcome, audit: &chain::DiskAu
 /// procedural, and it needs no provisioned `corpus/models/`, which is task
 /// #16's known hole closed here as a side effect.
 #[test]
-fn a_coverage_refusal_removes_a_stale_artifact_already_at_the_target() {
+fn a_stale_artifact_does_not_survive_a_model_that_emits_with_a_coverage_gap() {
+    const STALE: &[u8] = b"an artifact from an earlier run";
+
     let scratch = Scratch::new("raking-blade-stale");
-    std::fs::write(scratch.path(), b"an artifact from an earlier run")
-        .expect("plant a stale artifact");
+    std::fs::write(scratch.path(), STALE).expect("plant a stale artifact");
 
     let mesh = plinth_mesh::make_raking_blade().expect("procedural raking blade");
-    let refusal = chain::run_procedural_model("make_raking_blade", mesh, scratch.path())
-        .expect_err("make_raking_blade's residual islands have no closing repair-pool candidate");
-    // FU-56: the coverage verdict is spoken by the closure controller, one
-    // stage before the pre-write gate. The claim under test — a stale artifact
-    // does not survive a refusal at this target — is about the path, not about
-    // which stage spoke.
-    assert!(refusal.is_coverage_closure_refusal(), "{refusal}");
+    let outcome = chain::run_procedural_model("make_raking_blade", mesh, scratch.path())
+        .expect("a model with an unclosable island now emits and names the gap");
+
+    // The disposition really is the one this test is about. Without this the
+    // assertions below would also pass on a model that simply covered.
     assert!(
-        !scratch.path().exists(),
-        "a coverage refusal left the previous run artifact at {}",
+        outcome.coverage_warning.is_some(),
+        "this fixture must reach the emit-and-warn path, or it is not testing it"
+    );
+
+    // **The claim, stated positively.** The old test asserted the target was
+    // ABSENT, which a refusal gave for free. There is no refusal now, so the
+    // claim has to be made the harder way: what stands at the target is THIS
+    // run's artifact and not the previous run's file.
+    let on_disk = std::fs::read(scratch.path()).expect("this run's artifact must be at the target");
+    assert_ne!(
+        on_disk.as_slice(),
+        STALE,
+        "the earlier run's file survived at {}",
         scratch.path().display()
     );
+    assert_eq!(
+        on_disk.len() as u64,
+        outcome.emit.artifact_bytes,
+        "the bytes at the target must be the ones this run reports writing"
+    );
+    // And they are a real artifact, re-read from disk by the independent
+    // auditor rather than trusted because they are not the sentinel.
+    let audit = chain::audit_disk_artifact(scratch.path(), "make_raking_blade")
+        .expect("the emitted artifact must re-open and pass the format gate");
+    assert!(audit.format_gate_passed, "{audit:?}");
 }
 
-/// The same refusal on a model that needs no provisioned corpus:
+/// The same island on a model that needs no provisioned corpus:
 /// `make_raking_blade`, whose islands 3 and 5 have `NoRoutedContact` on every
-/// one of the 8 closure attempts.
+/// one of the closure attempts.
+///
+/// **Re-derived 2026-09-01 (owner ruling).** This was
+/// `procedural_raking_blade_is_refused_before_any_file_exists` and it asserted
+/// there was no file. There is a file now, and the island is still exactly as
+/// unclosable as it was: every measurement assertion is kept and re-made
+/// against the artifact's own coverage warning instead of against the error.
+/// The one claim that could not be carried over verbatim is "it never reaches
+/// the pre-write gate" — it now does reach it, and the gate warns rather than
+/// refusing, which is the ruling.
 ///
 /// **This is now the only coverage-refusal fixture in this file.** The corpus
 /// Sphere was the other one until 2026-08-26: `corpus_sphere_drilled_plan_is_
@@ -214,31 +260,70 @@ fn a_coverage_refusal_removes_a_stale_artifact_already_at_the_target() {
 /// too — re-planning the oriented solid after it would substitute a different
 /// artifact for a refusal that is about the plan, not the geometry.
 #[test]
-fn procedural_raking_blade_is_refused_before_any_file_exists() {
+fn procedural_raking_blade_emits_with_its_unclosable_island_named() {
     let scratch = Scratch::new("raking-blade");
     let mesh = plinth_mesh::make_raking_blade().expect("procedural raking blade");
 
-    let refusal = chain::run_procedural_model("make_raking_blade", mesh, scratch.path())
-        .expect_err(
-            "make_raking_blade's residual islands have no closing repair-pool \
-             candidate at the registered radius",
-        );
-    assert!(
-        refusal.is_coverage_closure_refusal(),
-        "make_raking_blade must be refused by coverage closure: {refusal}"
+    let outcome = chain::run_procedural_model("make_raking_blade", mesh, scratch.path()).expect(
+        "an island with no closing repair-pool candidate is a warning, not a refusal",
     );
     assert!(
-        !refusal.is_gates(),
-        "the sealed run refuses before the pre-write gate is ever reached: {refusal}"
-    );
-    assert!(
-        !refusal.is_support_refusal(),
-        "a coverage-closure refusal must not be answered with a substitute geometry: {refusal}"
-    );
-    assert!(
-        !scratch.path().exists(),
-        "a coverage-closure-refused model wrote {}",
+        scratch.path().exists(),
+        "the ruling is that the file gets written; nothing is at {}",
         scratch.path().display()
+    );
+
+    // **The measurement, unweakened.** The island still has no closing
+    // candidate at the registered radius, it is still measured, and it is still
+    // genuinely uncovered rather than censored dust. Nothing here touches the
+    // radius, the censor or any tolerance — the only thing that moved is what
+    // happens to the file.
+    let warning = outcome
+        .coverage_warning
+        .as_ref()
+        .expect("the unclosable island must be named on the artifact that carries it");
+    let censor = plinth_support::registered_coverage_censor_area_mm2()
+        .expect("registered A3 coverage censor");
+    let worst = warning
+        .islands
+        .iter()
+        .map(|island| island.uncovered_area_mm2)
+        .fold(0.0_f64, f64::max);
+    assert!(
+        worst > censor,
+        "the named island must be genuinely uncovered, not censored dust: {worst} mm² against a \
+         {censor} mm² censor"
+    );
+    assert!(
+        warning
+            .islands
+            .iter()
+            .any(|island| island.face_count() > 0),
+        "a named island with no faces names nothing: {warning:?}"
+    );
+    // The stage that gave up, carried onto the artifact. This is the half that
+    // points at code rather than at geometry, and it is the half a refusal used
+    // to deliver through the error type.
+    assert!(
+        warning
+            .closure_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("NoImprovingRepair")),
+        "the warning must name the controller's own stop reason: {warning:?}"
+    );
+
+    // **The geometry was not substituted.** A coverage gap is about the PLAN,
+    // not the geometry, so the run must not answer it by re-planning the
+    // oriented solid — the exact substitution the old refusal's
+    // `!is_support_refusal` assertion protected against. The drilled shell this
+    // fixture seals is what must be in the file.
+    assert!(
+        !matches!(
+            outcome.supported_geometry,
+            plinth_pipeline::SupportedGeometry::DrilledShellRefusedBySupport { .. }
+        ),
+        "a coverage gap must not be answered with a substitute geometry: {:?}",
+        outcome.supported_geometry
     );
 }
 

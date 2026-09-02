@@ -575,6 +575,30 @@ pub struct FinalSupportAuthority<'a> {
     /// changes the plan by exactly ONE contact, the before/after difference IS
     /// that contact's contribution — no inference and no apportionment.
     repair_steps: Vec<crate::coverage_repair::CoverageRepairStep>,
+    /// **The coverage the run could NOT close, on a run that sealed anyway**
+    /// (owner ruling, 2026-09-01).
+    ///
+    /// `None` on a run whose accepted layout covers every island — the ordinary
+    /// case, and the one whose bytes and digest are unchanged by this field
+    /// existing.
+    ///
+    /// `Some` when the repair controller ran out of candidates, or of budget,
+    /// with blocking patches still uncovered. That used to be
+    /// `SupportRunError::CoverageClosure` and no file at all. The ruling is
+    /// that an unsupported region is a WARNING and never a refusal: a file with
+    /// a named gap can be opened, inspected, hand-supported in the slicer, and
+    /// read as evidence about which parts of the placement logic worked. A
+    /// refusal hands the owner nothing and teaches nothing.
+    ///
+    /// **What it carries is what the refusal carried** — the same
+    /// [`crate::coverage_closure::CoverageClosureRefusal`] type, with its
+    /// islands, their uncovered mm², their blocking cause and the repair
+    /// ledger — so nothing was weakened on the way to becoming a warning.
+    ///
+    /// **The islands describe the EMITTED run.** They are re-measured on the
+    /// geometry this authority actually seals, not copied from the state the
+    /// controller was tracking when it gave up; see `seal_uncovered`.
+    uncovered: Option<Box<crate::coverage_closure::CoverageClosureRefusal>>,
 }
 
 /// One rung of the PR-8 growth ladder, as the run report prints it.
@@ -838,6 +862,20 @@ fn contact_attestation_disclosures(
                 crate::designed_embed::ContactAttestationRefusal::NotAttached { .. } => {
                     "not_attached"
                 }
+                // The UNDECIDABLE cause gets its own string, and it is the only
+                // `UnusableGeometry` cause that can reach a PLACED stub's
+                // disclosure at all (`initial::attest_initial_contacts` still
+                // collects the rest into a total build refusal). It is named
+                // apart because the operator's next move differs: an
+                // undecidable ray means this SEAT could not be judged and a
+                // seat a fraction of a millimetre away could have been, so the
+                // gap is a placement-search result and points at the placement
+                // code — where a genuinely unusable geometry would point at the
+                // producer of the evidence.
+                crate::designed_embed::ContactAttestationRefusal::UnusableGeometry {
+                    cause: crate::designed_embed::DesignedMaskError::NearParallelWitness { .. },
+                    ..
+                } => "undecidable_geometry",
                 crate::designed_embed::ContactAttestationRefusal::UnusableGeometry { .. } => {
                     "unusable_geometry"
                 }
@@ -1070,6 +1108,18 @@ impl FinalSupportAuthority<'_> {
         &self.repair_steps
     }
 
+    /// **The coverage this run left open, on a run that emitted anyway.**
+    ///
+    /// `None` means the accepted layout covered every island — not that the
+    /// question went unasked. A caller must not report a `Some` run as fully
+    /// covered: the artifact is real, and so is the gap in it.
+    #[must_use]
+    pub fn uncovered_coverage(
+        &self,
+    ) -> Option<&crate::coverage_closure::CoverageClosureRefusal> {
+        self.uncovered.as_deref()
+    }
+
     /// SPEC-A3-A4 §6's removal ledger for the attempt that sealed: every
     /// regular contact the cadence did not route, with its exact
     /// candidate-pool row, its reason, and the carried area the pre-removal
@@ -1218,7 +1268,100 @@ fn seal_authority<'a>(
         emitted_contacts,
         repair_report,
         repair_steps,
+        uncovered: None,
     }
+}
+
+/// **Emit the model the controller could not finish covering (owner ruling,
+/// 2026-09-01).**
+///
+/// The controller reaches this with an accepted `(plan, context)` and no lowered
+/// run: the accepted run was decomposed back into its two halves so the next
+/// trial could borrow the context, and every trial since then has been rolled
+/// back. So the artifact has to be re-derived, by running the same stage chain
+/// on the same accepted plan. That is one extra chain pass, paid once, only on
+/// the path that used to produce nothing at all.
+///
+/// **The coverage evidence attached to the result is RE-MEASURED on this run,
+/// not carried over from the controller's own bookkeeping.** The controller's
+/// `measured` describes the state it was tracking; this describes the file. If
+/// the two ever disagree, the file's own measurement is the true one, and it is
+/// the one an operator will be looking at in the slicer. Only the parts of the
+/// refusal that are statements about the SEARCH — the reason it stopped, the
+/// attempt count, the repair ledger and the trial steps — are carried through
+/// unchanged, because those are facts about the search and the search really
+/// did happen.
+///
+/// **It can still fail, and then it refuses exactly as before.** If the chain
+/// will not lower the accepted plan, or the coverage of the re-lowered run
+/// cannot be measured, there is no artifact to hand anybody and the original
+/// closure refusal is returned untouched. Emitting a file the run cannot
+/// describe would be worse than refusing: the whole value of the warning is
+/// that it is accurate.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "every argument is one thing the emitted artifact needs and nothing owns jointly: \
+              the refusal being downgraded, the two halves of the accepted run, the steering and \
+              the request they must be re-lowered under, and the two ledger fields that are \
+              MOVED out of the caller's ledger. Bundling them would only move the same list one \
+              line up, exactly as `refuse` above says of its own"
+)]
+fn seal_uncovered<'a>(
+    mut refusal: Box<crate::coverage_closure::CoverageClosureRefusal>,
+    context: SupportRunContext<'a>,
+    plan: SpecializedContactPlan,
+    steering: &crate::legalization::LegalizationSteering,
+    coverage_request: CoverageMeasurementRequest,
+    report: crate::coverage_repair::RepairRunReport,
+    steps: Vec<crate::coverage_repair::CoverageRepairStep>,
+    tally: &BTreeMap<(u32, u32), crate::coverage_closure::KeyNomination>,
+) -> Result<FinalSupportAuthority<'a>, SupportRunError> {
+    let ChainOutcome::Lowered(lowered) = run_stage_chain(context, plan, None, Some(steering))
+    else {
+        crate::coverage_repair::emit_run_line(
+            "coverage: the accepted layout could not be re-lowered for emission, so the \
+             coverage-closure refusal stands and no file is written",
+        );
+        return Err(SupportRunError::CoverageClosure(refusal));
+    };
+    let Ok(measured) = measure_for_controller(&lowered, coverage_request) else {
+        crate::coverage_repair::emit_run_line(
+            "coverage: the re-lowered layout could not be measured, so the coverage-closure \
+             refusal stands and no file is written rather than one whose gap cannot be named",
+        );
+        return Err(SupportRunError::CoverageClosure(refusal));
+    };
+    // **The warning must describe the FILE.** The refusal's islands are the
+    // richer record — each one carries the blocking cause and the route outcome
+    // the search measured for it — so they are kept when the re-lowered run
+    // blocks on the same set, which is what a deterministic chain on an
+    // unchanged plan produces. When the two disagree, the re-measurement wins
+    // and the cause detail is lost, because a cause attached to the wrong
+    // island is worse than no cause at all, and the operator is going to be
+    // looking at the file rather than at the search.
+    let remeasured =
+        crate::coverage_closure::islands_from_blocking(&measured.blocking, tally);
+    let same_islands = |left: &[crate::coverage_closure::CoverageClosureIsland],
+                        right: &[crate::coverage_closure::CoverageClosureIsland]| {
+        left.len() == right.len()
+            && left.iter().zip(right).all(|(one, other)| {
+                one.island_id == other.island_id
+                    && one.component_id == other.component_id
+                    && one.sorted_face_ids == other.sorted_face_ids
+            })
+    };
+    if !same_islands(&refusal.islands, &remeasured) {
+        crate::coverage_repair::emit_run_line(&format!(
+            "coverage: the emitted layout blocks on {} island(s), not the {} the search stopped \
+             on; the warning reports the emitted ones and drops the search's per-island cause",
+            remeasured.len(),
+            refusal.islands.len(),
+        ));
+        refusal.islands = remeasured;
+    }
+    let mut authority = seal_authority(*lowered, &measured.repair_targets, report, steps);
+    authority.uncovered = Some(refusal);
+    Ok(authority)
 }
 
 /// **Task #71's projection** — one row per ROUTED contact of the sealing
@@ -2287,6 +2430,49 @@ pub fn run_support<'a>(
             .progress_line(ledger.remaining(&candidates), 0),
     );
 
+    // **The three ends of this loop, under the owner's ruling of 2026-09-01.**
+    //
+    // Each of them used to be `return Err(refuse(...))` and therefore no file
+    // at all. They still build exactly the same refusal — the reason, the
+    // committed count, the islands, the ledger and the trial stream, all
+    // unweakened — and then hand it to `seal_uncovered`, which re-derives the
+    // accepted layout, re-measures what it leaves open, and seals it as an
+    // artifact carrying the refusal AS A WARNING. If that cannot be done the
+    // refusal is returned and the behaviour is exactly what it was.
+    //
+    // A macro rather than a function because every one of these ends has to
+    // MOVE `context` and `plan` out of the loop, which only a `return` in the
+    // loop body may do.
+    macro_rules! emit_with_gap_or_refuse {
+        ($reason:expr) => {{
+            let refusal = refuse(
+                $reason,
+                committed,
+                &measured,
+                &candidates,
+                &plan,
+                &mut ledger,
+                &route_records,
+                &tally,
+                scales,
+                radius_mm,
+            );
+            return match refusal {
+                SupportRunError::CoverageClosure(closure) => seal_uncovered(
+                    closure,
+                    context,
+                    plan,
+                    &steering,
+                    coverage_request,
+                    ledger.report,
+                    ledger.steps,
+                    &tally,
+                ),
+                other => Err(other),
+            };
+        }};
+    }
+
     loop {
         // Paced from the top of the iteration, which is the one place every
         // path through the body reaches — including the several `continue`s a
@@ -2317,7 +2503,7 @@ pub fn run_support<'a>(
             // Every candidate on the ranking has been ledgered. Under ruling
             // R10 that is one of exactly two honest ends, and it is measured:
             // the pool really did drain.
-            return Err(refuse(
+            emit_with_gap_or_refuse!(
                 if candidates.ranked.is_empty() && ledger.report.trials == 0 {
                     crate::coverage_closure::CoverageClosureReason::NothingToTry
                 } else {
@@ -2325,17 +2511,8 @@ pub fn run_support<'a>(
                         candidates_tried: ledger.report.trials,
                         best_remaining_score_mm2: best_live_mm2,
                     }
-                },
-                committed,
-                &measured,
-                &candidates,
-                &plan,
-                &mut ledger,
-                &route_records,
-                &tally,
-                scales,
-                radius_mm,
-            ));
+                }
+            );
         };
         let winner = candidates.ranked[chosen.index].clone();
 
@@ -2353,27 +2530,18 @@ pub fn run_support<'a>(
         // the best of them covering 13.68 mm² — a candidate that can physically
         // help, which is what Craig's ruling 1 forbids abandoning.
         if best_live_mm2 == 0.0 {
-            return Err(refuse(
+            emit_with_gap_or_refuse!(
                 crate::coverage_closure::CoverageClosureReason::NoImprovingRepair {
                     candidates_tried: ledger.report.trials,
                     best_remaining_score_mm2: best_live_mm2,
-                },
-                committed,
-                &measured,
-                &candidates,
-                &plan,
-                &mut ledger,
-                &route_records,
-                &tally,
-                scales,
-                radius_mm,
-            ));
+                }
+            );
         }
 
         // The ONE counter that decides anything, and rulings R6 and R11 are
         // what make it legitimate: it bounds COMMITTED steps.
         if committed >= commit_budget {
-            return Err(refuse(
+            emit_with_gap_or_refuse!(
                 crate::coverage_closure::CoverageClosureReason::CommitBudgetExhausted {
                     committed,
                     candidates_remaining: candidates
@@ -2381,17 +2549,8 @@ pub fn run_support<'a>(
                         .iter()
                         .filter(|row| !ledger.ledgered.contains(&row.id))
                         .count(),
-                },
-                committed,
-                &measured,
-                &candidates,
-                &plan,
-                &mut ledger,
-                &route_records,
-                &tally,
-                scales,
-                radius_mm,
-            ));
+                }
+            );
         }
 
         // ------------------------------------------------------------ one trial

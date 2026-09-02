@@ -1317,19 +1317,47 @@ fn attest_initial_contacts(
     // candidate proposal that can leave the tournament: it is evidence about a
     // load-carrying member that could not be graded AT ALL — an orphan or
     // out-of-order kernel interval, a non-finite target, a boundary outside the
-    // span the producer is entitled to. Nothing can be said about such a row.
+    // span the producer is entitled to. Nothing can be said about such a row,
+    // and nothing can be said about the PRODUCER of it either, so for those
+    // causes the whole build still stops, exactly as it did before. That total
+    // refusal is load-bearing and is pinned by
+    // `ungradable_evidence_on_a_placed_stub_refuses_the_build`.
     //
-    // `witness_batch` grades PER ROW so a CANDIDATE family
-    // (`attest_seats_batch`) can discard one unmeasurable proposal and still
-    // measure the other thirty-nine, and that is the whole point of #28. Left
-    // unhandled here, the same per-row verdict would reach this caller's
-    // quarantine (`refusal.is_some()` in `build_initial_contacts`) and delete a
-    // placed stub on a measurement nobody made, while the run carried on
-    // quietly — a silent deletion where this path used to stop loudly. So the
-    // inner result is collected back into a TOTAL refusal, with the same failure
-    // this path produced before grading went per-row.
+    // **`NearParallelWitness` is carved out of it (owner ruling, 2026-09-01).**
+    // It is the one cause that is not a statement about the producer, the mesh
+    // or the run. It is a statement about ONE RAY AT ONE PLACEMENT: this ray
+    // happens to run knife-edge parallel to a facet, so whether it crosses
+    // cannot be settled at this scale. A seat a fraction of a millimetre away
+    // is decidable. Collecting it into a total refusal therefore threw away
+    // every support that DID attest, for a property of a placement rather than
+    // of the model — on `Morel base`, five undecidable rows deleted the whole
+    // output of a model with tens of thousands of faces.
+    //
+    // The comment that used to stand here argued that the only alternative to
+    // the total refusal was to let the per-row verdict reach this caller's
+    // quarantine (`refusal.is_some()` in `build_initial_contacts`) and "delete
+    // a placed stub on a measurement nobody made, while the run carried on
+    // quietly — a silent deletion where this path used to stop loudly". The
+    // fear was right and the dichotomy was false. The third disposition — the
+    // one taken now — is to reject the placement LOUDLY AND LOCALLY: it goes to
+    // the OD-4 quarantine `witness_batch` already documents itself as using
+    // ("Refusal is candidate-granular", `designed_embed.rs`), becomes an
+    // `UnattestedInitialStub` like every other refusal, and is therefore
+    // counted, located by seat, sized by the load it abandons, and NAMED by
+    // cause in the runner's `AbandonedContactDisclosure` — as
+    // `undecidable_geometry`, a string distinct from the `unusable_geometry`
+    // the escalating causes would carry if they could reach it. Nothing is
+    // deleted quietly; only the model-wide refusal is dropped.
+    //
+    // Deliberately NARROW. Every other `DesignedMaskError` keeps the old
+    // behaviour, because the argument above applies to this cause and to no
+    // other.
     if let Some(cause) = outcomes.iter().find_map(|outcome| match &outcome.verdict {
-        Err(ContactAttestationRefusal::UnusableGeometry { cause, .. }) => Some(*cause),
+        Err(ContactAttestationRefusal::UnusableGeometry { cause, .. })
+            if !matches!(cause, DesignedMaskError::NearParallelWitness { .. }) =>
+        {
+            Some(*cause)
+        }
         _ => None,
     }) {
         return Err(InitialContactError::Attestation(cause));
@@ -1368,8 +1396,18 @@ fn attest_initial_contacts(
     // * `BuriedSurface` — the OD-9 probe is a point on the surface normal, so
     //   no tip radius moves it. Growing a buried seat would re-ask the same
     //   question and get the same answer. Burial is a mesh fault.
-    // * `UnusableGeometry` — already collected into a TOTAL build refusal
-    //   above, before this point is reached.
+    // * `UnusableGeometry` — every cause but one is already collected into a
+    //   TOTAL build refusal above, before this point is reached. The exception
+    //   is `NearParallelWitness`, which is quarantined per candidate (owner
+    //   ruling, 2026-09-01) and so does reach here. It is still excluded, and
+    //   for a reason rather than by omission: the ladder cures a tip that found
+    //   no solid by making the tip WIDER, and an undecidable crossing is not a
+    //   statement about how much solid the tip reached. Growing it re-asks the
+    //   kernel a question it has already said it cannot settle at this
+    //   placement. What moves an undecidable ray is a different SEAT, not a
+    //   bigger tip, and no reseat exists at this stage —
+    //   `ReseatAvailability::NoAlternativeSeatAtThisStage` is what the
+    //   disclosure says, and it is the truth.
     let growth_requests = seeds
         .iter()
         .enumerate()
@@ -1529,16 +1567,27 @@ fn attestation_digest(
             None => 0,
             Some(ContactAttestationRefusal::BuriedSurface { .. }) => 1,
             Some(ContactAttestationRefusal::NotAttached { .. }) => 2,
-            // #28 — this family attests PLACED members, so `attest_initial_contacts`
-            // collects an ungradable row back into a batch-level
-            // `InitialContactError::Attestation` BEFORE any transcript is
-            // written. No verdict that reaches this digest can therefore carry
-            // this variant. The arm exists so that if that collection is ever
-            // removed, the transcript says so instead of the compiler being
-            // told to look away. The collection itself is pinned by test
-            // `ungradable_evidence_on_a_placed_stub_refuses_the_build`.
+            // #28 — this family attests PLACED members, so
+            // `attest_initial_contacts` collects an ungradable row back into a
+            // batch-level `InitialContactError::Attestation` BEFORE any
+            // transcript is written, for every cause EXCEPT
+            // `NearParallelWitness`. That one is quarantined per candidate
+            // (owner ruling, 2026-09-01) and DOES reach this digest; the other
+            // causes still cannot, and the arm keeps covering them so that if
+            // their collection is ever removed the transcript says so instead
+            // of the compiler being told to look away. The collection is pinned
+            // by test `ungradable_evidence_on_a_placed_stub_refuses_the_build`.
             Some(ContactAttestationRefusal::UnusableGeometry { .. }) => 3,
         });
+        // The CAUSE, not merely "unusable". Appended only inside the unusable
+        // arm, so it adds no byte to a run that has no such refusal and cannot
+        // move a digest recorded before quarantining this cause was possible.
+        // Without it the transcript could not tell an undecidable ray apart
+        // from a cause that is supposed to be impossible on this path, which is
+        // precisely the distinction the new disposition rests on.
+        if let Some(ContactAttestationRefusal::UnusableGeometry { cause, .. }) = refusal {
+            digest.tag(cause.tag());
+        }
         // The deficit's measured radius is digested, not just its presence, so
         // an interface that quietly shrinks is visible even while it stays on
         // the same side of the allowance.

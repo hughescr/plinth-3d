@@ -1355,31 +1355,40 @@ fn closure_repairs_censored_dust_because_that_repair_closes_a_real_hole() {
         },
         support_input(&delicacy, &layers),
     )
-    // **FINDING 1's red starts here** — see the block above the test. Today
-    // this `expect` is what fails, and the message states the finding rather
-    // than the retired suspicion it replaced: the run reaches the two commits
-    // it is supposed to reach and then cannot place a third, because the
-    // island-5 share it keeps being credited for is scored across routes and
-    // measured within one. Blaming the censored worklist here would be a claim
-    // the step stream refutes — the worklist is uncensored on this path and the
-    // model still refuses.
+    // **FINDING 1's red no longer starts here — 2026-09-01. Read this before
+    // treating a green `expect` as the finding being fixed.**
+    //
+    // Until the owner's emit-and-warn ruling this `expect` was what failed:
+    // `run_support` returned `Err(CoverageClosure)` and the message stated the
+    // finding. A coverage shortfall no longer refuses, so the run SEALS and
+    // this line passes — and it passes for a reason that has nothing to do with
+    // FINDING 1, which is why the message below no longer states the finding.
+    // The finding is asserted further down, on the step stream, where it is
+    // actually decided.
+    //
+    // Measured at `d563574`, this same test failed HERE with "the run commits
+    // twice, never moves island 5 by a single sample, and refuses with
+    // NoImprovingRepair after 190 trials". Measured 2026-09-01 it seals after
+    // 274 trials and 3 commits: six of this fixture's placements are knife-edge
+    // rays that used to kill the model at PR-8 and are now quarantined one at a
+    // time, so the contact set — and therefore the search — is different.
     .expect(
-        "FINDING 1: the stub's 0.36 mm² hole must CLOSE from a contact nominated for the \
-         censored dust patch beside it. Measured 2026-08-20 and again 2026-08-21 with task #68 \
-         contract (1) landed: the run commits twice, never moves island 5 by a single sample, \
-         and refuses with NoImprovingRepair after 190 trials. Seven contacts still carry more \
-         than the area law allows one contact to carry; see the amendment above the test",
+        "the sealed run must reach an authority: a coverage shortfall is a warning on the \
+         artifact now, so an Err here is a stage failure and not the coverage verdict",
     );
 
     let steps = authority.repair_steps();
     let committed: Vec<_> = steps.iter().filter(|step| step.commit.is_some()).collect();
-    // MEASURED, not aspirational: this run earns two commits — trial 1 closes
-    // island 10's 1.86 mm² and trial 7 buys back island 4's 0.6998 mm². Pinning
-    // it at 0 would have been a second, independent falsehood in a test that is
-    // already red for one reason; a red fixture has to be red for exactly one.
+    // MEASURED, not aspirational. **Re-measured 2026-09-01, from 2 commits over
+    // 190 trials to 3 over 274**, for the reason given on the `expect` above:
+    // the quarantined knife-edge placements change the contact set this search
+    // runs over. Pinning a number this fixture does not produce would be a
+    // second, independent falsehood in a test that is deliberately red for
+    // ONE reason; a red fixture has to be red for exactly one, and FINDING 1 is
+    // that one.
     assert_eq!(
         authority.coverage_repair_rounds(),
-        2,
+        3,
         "this fixture must close in the measured number of committed steps: {steps:?}"
     );
 
@@ -1395,6 +1404,15 @@ fn closure_repairs_censored_dust_because_that_repair_closes_a_real_hole() {
     // the step stream names the row, its route, and every route its GLOBAL
     // score was credited for, so the sentence §D.2 promised is a read rather
     // than an inference.
+    // **FINDING 1's red lives HERE from 2026-09-01.** It used to fail one
+    // `expect` higher, on the coverage refusal, and that refusal is gone — so
+    // this is now the assertion that states the finding and the one that goes
+    // red for it: no committed step closes a FAILING patch, because the island
+    // share the search keeps being credited for is scored across routes and
+    // measured within one. The fixture is deliberately red and must stay red
+    // until FINDING 1 is fixed; a green run here means the cross-route
+    // nomination finally closed the hole, which is the outcome this fixture
+    // exists to wait for.
     let closer = committed
         .iter()
         .find(|step| {
@@ -1855,10 +1873,10 @@ fn uncovered_rim_tables_attempt_zero_route_area_is_the_same_on_a_second_independ
 ///
 /// The rules, and where each comes from:
 ///
-/// * The refusal reason is one of the three
-///   `ContactAttestationRefusal` variants `runner.rs` can project
-///   (`buried_surface`, `not_attached`, `unusable_geometry`). A fourth string
-///   means a variant was added without its disclosure.
+/// * The refusal reason is one of the four dispositions `runner.rs` can
+///   project (`buried_surface`, `not_attached`, `unusable_geometry`,
+///   `undecidable_geometry`). A fifth string means a disposition was added
+///   without its disclosure.
 /// * `growth_ladder_entered == false` means "no rung was ever proposed", per
 ///   `AbandonedContactDisclosure::growth_ladder_entered`'s own doc, so the
 ///   rung list MUST be empty. The reverse is NOT asserted: `true` with an
@@ -1896,7 +1914,19 @@ fn abandoned_refusals_disclose_a_consistent_ladder_and_reason_whichever_contacts
     )
     .expect("make_toed_slab must close coverage on its first closure attempt");
 
-    const REGISTERED_REFUSALS: [&str; 3] = ["buried_surface", "not_attached", "unusable_geometry"];
+    // Re-derived 2026-09-01. `undecidable_geometry` is the FOURTH registered
+    // string, and it is a new string rather than a fourth variant: it is the
+    // `UnusableGeometry { cause: NearParallelWitness }` projection, split out
+    // when that cause stopped refusing the whole model and started being
+    // quarantined per placement. The rule this constant enforces is unchanged —
+    // a projection that is not on this list means a disposition was added
+    // without a disclosure.
+    const REGISTERED_REFUSALS: [&str; 4] = [
+        "buried_surface",
+        "not_attached",
+        "unusable_geometry",
+        "undecidable_geometry",
+    ];
 
     let mut seen_ids = BTreeSet::new();
     let mut ceiling_by_constant: std::collections::BTreeMap<String, u64> =

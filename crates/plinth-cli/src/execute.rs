@@ -311,6 +311,7 @@ fn print_model(model: &ModelPreparationReport) {
             contacts,
             pending_gates,
             load_warnings,
+            coverage_warning,
             ..
         } => {
             println!(
@@ -484,6 +485,31 @@ fn print_model(model: &ModelPreparationReport) {
                     grown.kept_area_mm2(),
                 );
             }
+            // WARNING MODE (owner ruling, 2026-09-01). The coverage gate used
+            // to REFUSE this model and write nothing; it now measures, reports
+            // and lets the file through. Printed right beside the load-law
+            // warning and in the same shape, because an operator reading
+            // "EMITTED" must not have to wonder whether it means "every region
+            // is supported".
+            //
+            // Every island it names is a place to look in the slicer, with the
+            // area it leaves bare and the reason nothing reached it, so the gap
+            // can be hand-supported or handed back as a defect report.
+            if let Some(warning) = coverage_warning {
+                for line in coverage_gap_warning_lines(warning) {
+                    println!("{line}");
+                }
+            }
+            // The SUMMARY of the same refusals, printed FIRST and grouped by
+            // cause (owner ruling, 2026-09-01). The per-contact lines below are
+            // the record; this is the line an operator can act on without
+            // reading four hundred of them. A run that discards forty
+            // placements has to SAY it discarded forty placements, in one
+            // place, and say where they were and which stage rejected them —
+            // otherwise the emitted file reads as a clean success.
+            for line in support_gap_warning_lines(&contacts.abandoned_contacts) {
+                println!("{line}");
+            }
             // And the refusals growth could NOT cure. Each line is a support
             // that is not there and a routed load nothing carries — the
             // coverage measurement's 6 mm radius cannot see a missing claw tip,
@@ -589,6 +615,155 @@ fn coverage_repair_lines(model: &ModelPreparationReport) -> Vec<String> {
 ///
 /// Radius AND diameter at every site: this registry speaks radius and the
 /// slicer UI speaks diameter, and a number stated in one alone lands 2x wrong.
+/// The loud, located, attributed warning for coverage the emitted file does
+/// NOT have (owner ruling, 2026-09-01).
+///
+/// One header line with the totals, then one line per uncovered island — worst
+/// first, as the summary ranks them — naming the island, its measured bare
+/// area, how many faces it spans and what the closest routed support managed.
+/// The search's own give-up reason is printed once, at the end, because it is a
+/// statement about the ENGINE rather than about any one island and it is the
+/// line that says which code to go and look at.
+fn coverage_gap_warning_lines(warning: &plinth_pipeline::CoverageGapWarning) -> Vec<String> {
+    let mut lines = vec![format!(
+        "  COVERAGE GAP WARNING (not blocking)  {} island(s) are UNSUPPORTED in this file, \
+         {:.6} mm² in total. The file was written anyway so the gap can be inspected \
+         and hand-supported; it is NOT a covered model.",
+        warning.islands.len(),
+        warning.total_uncovered_mm2,
+    )];
+    for island in &warning.islands {
+        let gap = match island.worst_gap {
+            plinth_pipeline::CoverageClosureGap::NoRoutedContact => {
+                "no routed support reached this island at all".to_owned()
+            }
+            plinth_pipeline::CoverageClosureGap::Finite(distance_mm) => format!(
+                "the nearest routed support is {distance_mm:.3} mm away, outside the \
+                 registered coverage radius"
+            ),
+        };
+        lines.push(format!(
+            "    island {}  {:.6} mm² bare across {} face(s)  — {gap}",
+            island.island_id,
+            island.uncovered_area_mm2,
+            island.face_count(),
+        ));
+    }
+    if let Some(reason) = &warning.closure_reason {
+        lines.push(format!(
+            "      stage  coverage-repair controller gave up after {} committed step(s): {reason}",
+            warning.closure_attempts,
+        ));
+    }
+    lines
+}
+
+/// What each refusal string means, in the operator's terms: which stage made
+/// the decision and what test it failed. A gap he can LOCATE is worth
+/// something; a gap he can locate AND attribute to a named stage is worth much
+/// more, because it points at the code to change.
+///
+/// The strings are the ones `plinth-support`'s `contact_attestation_disclosures`
+/// projects. An unrecognised string still prints — with the string itself and
+/// no invented explanation — because a disposition that gained a name without
+/// gaining a sentence here must not become invisible on that account.
+fn refusal_meaning(refusal: &str) -> &'static str {
+    match refusal {
+        "undecidable_geometry" => {
+            "PR-8 contact attestation — a ray/triangle crossing at this seat fell in the \
+             undecidable band, so whether the tip reaches solid could not be settled at this \
+             scale. This is a property of the SEAT, not of the model: a seat a fraction of a mm \
+             away is decidable, so the placement search is what to look at"
+        }
+        "not_attached" => {
+            "PR-8 contact attestation — the tip's probe found no solid at this seat, and the \
+             growth ladder could not reach one under the registered scar ceiling"
+        }
+        "buried_surface" => {
+            "OD-9 exterior probe — the seat lies inside the printed material, so there is no \
+             outer surface here to attach to. This is a mesh fault, and no tip radius moves it"
+        }
+        "unusable_geometry" => {
+            "PR-8 contact attestation — the evidence for this seat could not be graded at all"
+        }
+        _ => {
+            "no explanation is registered for this refusal string; see \
+             `refusal_meaning` in plinth-cli"
+        }
+    }
+}
+
+/// The grouped, counted, located warning for supports the run did NOT build.
+///
+/// Empty when nothing was abandoned, so a clean run stays clean. Everything it
+/// reports is derived from the disclosure list itself — there is no second
+/// counter that could drift from the record below it.
+fn support_gap_warning_lines(
+    abandoned: &[plinth_pipeline::AbandonedContactDisclosure],
+) -> Vec<String> {
+    if abandoned.is_empty() {
+        return Vec::new();
+    }
+    let total_mm2: f64 = abandoned
+        .iter()
+        .map(plinth_pipeline::AbandonedContactDisclosure::abandoned_area_mm2)
+        .sum();
+    let mut lines = vec![format!(
+        "  SUPPORT GAP WARNING (not blocking)  {} placement(s) were REJECTED and not built; \
+         {total_mm2:.4} mm² of routed load is carried by nothing. The file was still written — \
+         these areas are unsupported in it.",
+        abandoned.len()
+    )];
+    // Grouped by cause, worst first by count. `BTreeMap` keeps the grouping
+    // deterministic before the sort, so two runs over the same evidence print
+    // the same lines.
+    let mut by_reason: BTreeMap<&str, Vec<&plinth_pipeline::AbandonedContactDisclosure>> =
+        BTreeMap::new();
+    for contact in abandoned {
+        by_reason.entry(contact.refusal()).or_default().push(contact);
+    }
+    let mut groups = by_reason.into_iter().collect::<Vec<_>>();
+    groups.sort_by(|left, right| right.1.len().cmp(&left.1.len()).then(left.0.cmp(right.0)));
+    for (reason, contacts) in groups {
+        let count = contacts.len();
+        let area: f64 = contacts
+            .iter()
+            .map(|contact| contact.abandoned_area_mm2())
+            .sum();
+        // The centroid of the rejected seats and the furthest seat from it.
+        // Together they say "look HERE, over about this much of the model",
+        // which is what makes the warning usable in a slicer without hunting
+        // through the per-contact lines one at a time.
+        let scale = 1.0 / count as f64;
+        let centre: [f64; 3] = std::array::from_fn(|axis| {
+            contacts
+                .iter()
+                .map(|contact| contact.seat_mm()[axis])
+                .sum::<f64>()
+                * scale
+        });
+        let spread = contacts
+            .iter()
+            .map(|contact| {
+                contact
+                    .seat_mm()
+                    .iter()
+                    .zip(centre)
+                    .map(|(seat, mid)| (seat - mid) * (seat - mid))
+                    .sum::<f64>()
+                    .sqrt()
+            })
+            .fold(0.0_f64, f64::max);
+        lines.push(format!(
+            "    {reason}  {count} placement(s), {area:.4} mm² unsupported, centred near \
+             ({:.3}, {:.3}, {:.3}) mm and spread up to {spread:.3} mm from there",
+            centre[0], centre[1], centre[2],
+        ));
+        lines.push(format!("      cause  {}", refusal_meaning(reason)));
+    }
+    lines
+}
+
 fn remedies_tried_line(contact: &plinth_pipeline::AbandonedContactDisclosure) -> String {
     let law_radius_mm = contact.law_tip_radius_mm();
     let ceiling_radius_mm = contact.growth_ceiling_radius_mm();

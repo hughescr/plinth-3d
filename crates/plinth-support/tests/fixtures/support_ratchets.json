@@ -4,42 +4,57 @@
     "Cylinder": {
       "corpus_sha256": "sha256:7bd60bd7fb83882f2bdc9c977e4f15e55f5cf0342c05c31584c586782505f741",
       "worst_tip_area_ratio": 33.286758545594445,
-      "total_scar_area_mm2": 40.580350626447746,
-      "support_resin_volume_ml": 0.4171381154818849,
+      "total_scar_area_mm2": 38.61138886191544,
+      "support_resin_volume_ml": 0.37597553123785243,
       "residual_uncovered_area_mm2": 0.0,
       "worst_uncovered_gap_mm": 0.0,
       "ownerless_model_area_mm2": 0.0,
-      "abandoned_load_mm2": 0.0
+      "abandoned_load_mm2": 0.0,
+      "unrouted_uncovered_patches": 0.0
     },
     "Sphere": {
       "corpus_sha256": "sha256:48c27bb596a265900a614171d7ffe3a7a4ea80d95f1c620cf3ab00f67fe0a1d5",
-      "worst_tip_area_ratio": 12.000000000000005,
+      "worst_tip_area_ratio": 12.000000000000004,
       "total_scar_area_mm2": 7.852421738071118,
       "support_resin_volume_ml": 0.08707076548309596,
       "residual_uncovered_area_mm2": 0.0,
       "worst_uncovered_gap_mm": 0.0,
       "ownerless_model_area_mm2": 0.0,
-      "abandoned_load_mm2": 0.0
+      "abandoned_load_mm2": 0.0,
+      "unrouted_uncovered_patches": 0.0
     },
     "make_box": {
       "corpus_sha256": "sha256:aada5b79e87461c6f74afe4e16a5f651aed47fd6638a50a225e35760a8010c3b",
-      "worst_tip_area_ratio": 15.915494309189533,
+      "worst_tip_area_ratio": 15.915494309189532,
       "total_scar_area_mm2": 9.487609813841177,
       "support_resin_volume_ml": 0.10112509823397532,
       "residual_uncovered_area_mm2": 0.0,
       "worst_uncovered_gap_mm": 0.0,
       "ownerless_model_area_mm2": 0.0,
-      "abandoned_load_mm2": 0.0
+      "abandoned_load_mm2": 0.0,
+      "unrouted_uncovered_patches": 0.0
     },
     "make_overhang_table": {
       "corpus_sha256": "sha256:a776132a2cc4a43298d9ca646a4265a7ba60ed7d37de7618147ac754dfe8c996",
       "worst_tip_area_ratio": 57295.77951308232,
       "total_scar_area_mm2": 15.751400068868165,
-      "support_resin_volume_ml": 0.47771837193825734,
+      "support_resin_volume_ml": 0.5531697900751197,
       "residual_uncovered_area_mm2": 0.0,
       "worst_uncovered_gap_mm": 0.0,
       "ownerless_model_area_mm2": 0.0,
-      "abandoned_load_mm2": 0.0
+      "abandoned_load_mm2": 0.0,
+      "unrouted_uncovered_patches": 0.0
+    },
+    "make_raking_blade": {
+      "corpus_sha256": "sha256:0979f5812c26b3bd88f6e36bb792573fbdc9c023656c46544f2bffdecddefb97",
+      "worst_tip_area_ratio": 25464.79089470325,
+      "total_scar_area_mm2": 0.15707963267948968,
+      "support_resin_volume_ml": 0.16068054309666405,
+      "residual_uncovered_area_mm2": 20.69933927391636,
+      "worst_uncovered_gap_mm": 6.763818481552331,
+      "ownerless_model_area_mm2": 0.0,
+      "abandoned_load_mm2": 15.13500178414628,
+      "unrouted_uncovered_patches": 5.0
     },
     "make_thin_fin": {
       "corpus_sha256": "sha256:09bec5c6ff8ff169f91438c209b12c3e6d9eb0dbb7e2fd7611e98d1884516c4c",
@@ -49,7 +64,8 @@
       "residual_uncovered_area_mm2": 0.0,
       "worst_uncovered_gap_mm": 0.0,
       "ownerless_model_area_mm2": 0.0,
-      "abandoned_load_mm2": 0.0
+      "abandoned_load_mm2": 0.0,
+      "unrouted_uncovered_patches": 0.0
     },
     "make_toed_slab": {
       "corpus_sha256": "sha256:ceb70f2b549fb131b0f177033401c50879a8fbc6d575b27459c0f9574d9f1169",
@@ -59,7 +75,8 @@
       "residual_uncovered_area_mm2": 0.0,
       "worst_uncovered_gap_mm": 0.0,
       "ownerless_model_area_mm2": 0.0,
-      "abandoned_load_mm2": 0.0
+      "abandoned_load_mm2": 0.0,
+      "unrouted_uncovered_patches": 0.0
     }
   }
 }

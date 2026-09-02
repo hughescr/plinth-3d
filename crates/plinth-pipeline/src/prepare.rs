@@ -779,6 +779,10 @@ pub struct ChainOutcome {
     /// from one that emitted clean, and nothing else in the report would say
     /// so.
     pub load_warnings: Option<crate::gates::LoadWarnings>,
+    /// **WARNING MODE (owner ruling, 2026-09-01).** What the coverage gate
+    /// measured this artifact as leaving unsupported, and why the repair
+    /// search stopped. `None` means the coverage verdict was accepted.
+    pub coverage_warning: Option<crate::coverage_evidence::CoverageGapWarning>,
     pub primitive_count: usize,
     pub lift_mm: f64,
     pub plate_z_mm: f64,
@@ -1920,6 +1924,15 @@ pub fn seal_and_emit(
     // a post-seal lowering or emit failure alike.
     let repair_report = Some(authority.repair_report().clone());
 
+    // **WARNING MODE (owner ruling, 2026-09-01), read at the same last frame
+    // and for the same reason.** When the coverage-repair controller ran out of
+    // candidates or of budget it used to return `Err` and no file existed; it
+    // now seals the accepted layout and carries its own give-up reason on the
+    // authority. That reason dies with the authority one frame from here, and
+    // it is the half of the warning the gate's measurement cannot supply: the
+    // gate says WHAT is uncovered, this says WHY the engine stopped trying.
+    let uncovered_closure = authority.uncovered_coverage().cloned().map(Box::new);
+
     // **SPEC-A4 §D.2, the SEALED half — and this line is the whole of it.**
     //
     // The step stream lives on the authority and dies with it one frame from
@@ -2034,6 +2047,39 @@ pub fn seal_and_emit(
         }
     };
 
+    // **WARNING MODE (owner ruling, 2026-09-01), and FU-57 kept alive across
+    // it.** The coverage gate used to REFUSE an uncovered model, and the
+    // refusal path is where the sidecar and the per-island SVG renders were
+    // written. Now that the same model EMITS, that evidence would have vanished
+    // at exactly the moment it became most useful: the owner has a file he can
+    // open, and the renders are what tell him which part of it to look at. So
+    // the same writer runs here, on the emitted path, from the same gate report
+    // and the same pre-support render mesh.
+    //
+    // A write failure is data, never control flow (the FU-57 rule): the model
+    // is not un-emitted because an evidence file could not be written, and the
+    // failure is carried on the evidence value itself.
+    let coverage_warning = gated
+        .gates
+        .coverage_warned()
+        .then(|| {
+            crate::coverage_evidence::CoverageGapWarning::from_gate_report(
+                gated.gates.coverage(),
+                uncovered_closure.as_deref(),
+            )
+        })
+        .flatten();
+    if coverage_warning.is_some() {
+        let _ = coverage_evidence::persist_gate_refusal(
+            model,
+            target,
+            &render_mesh,
+            Some(crate::PreWriteGate::UncoveredIslands),
+            Some(&supported_geometry),
+            gated.gates.coverage(),
+        );
+    }
+
     Ok(Some(ChainOutcome {
         model: model.clone(),
         source_faces,
@@ -2057,6 +2103,14 @@ pub fn seal_and_emit(
         snapshot_digest: gated.snapshot_digest,
         pending_gates: gated.gates.pending().to_vec(),
         load_warnings: gated.gates.load_warnings().cloned(),
+        // WARNING MODE (owner ruling, 2026-09-01). Built from the GATE's own
+        // measurement of the sealed snapshot, which is the measurement that
+        // describes the bytes about to be written, and named with the reason
+        // the repair search gave up when it was the repair search that got the
+        // run here. `coverage_warned()` is the gate's own bit; the island list
+        // is derived from the report either way, so a report that names no
+        // uncovered island produces no warning and cannot cry wolf.
+        coverage_warning,
         primitive_count: gated.primitive_count,
         lift_mm: gated.lift_mm,
         plate_z_mm: gated.plate_z_mm,
@@ -2111,6 +2165,10 @@ fn artifact_outcome(outcome: ChainOutcome) -> ModelPreparationOutcome {
         // than refused on. `None` means no violation was found. Boxed on the
         // way into the run report's own enum -- see that field's doc.
         load_warnings: outcome.load_warnings.map(Box::new),
+        // WARNING MODE (owner ruling, 2026-09-01): the artifact emitted, and
+        // this is the coverage the gate measured it as NOT having. `None`
+        // means the coverage verdict was accepted, never that it went unasked.
+        coverage_warning: outcome.coverage_warning.map(Box::new),
     }
 }
 
@@ -2770,6 +2828,22 @@ mod tests {
                     fault: crate::gates::LoadLawFault::TipSmallerThanTheAreaLawDemands,
                 }],
             }),
+            // WARNING MODE (owner ruling, 2026-09-01). Non-`None` for the same
+            // reason as the two fields above: this hop is the only thing
+            // between the gate's measurement of an unsupported region and the
+            // report a reader sees, and a dropped field would read back as "the
+            // file covers everything".
+            coverage_warning: Some(crate::coverage_evidence::CoverageGapWarning {
+                islands: vec![crate::coverage_evidence::UncoveredIslandSummary {
+                    island_id: 4,
+                    uncovered_area_mm2: 3.5,
+                    worst_gap: plinth_support::CoverageClosureGap::NoRoutedContact,
+                    face_ids: vec![11, 12],
+                }],
+                total_uncovered_mm2: 3.5,
+                closure_reason: Some("NoImprovingRepair".to_owned()),
+                closure_attempts: 2,
+            }),
             primitive_count: 0,
             lift_mm: 5.0,
             plate_z_mm: 0.0,
@@ -2786,6 +2860,7 @@ mod tests {
             repair_report,
             pending_gates,
             load_warnings,
+            coverage_warning,
             ..
         } = artifact_outcome(outcome)
         else {
@@ -2809,6 +2884,25 @@ mod tests {
                 }],
             })),
             "the Load gate's warning-mode evidence must reach the run report unchanged"
+        );
+        // WARNING MODE (owner ruling, 2026-09-01), same guard one field over:
+        // the coverage gap the artifact carries must reach the report whole.
+        // A dropped field here reads back as a fully covered model, which is
+        // the exact silence the ruling traded a refusal for.
+        assert_eq!(
+            coverage_warning.as_deref(),
+            Some(&crate::coverage_evidence::CoverageGapWarning {
+                islands: vec![crate::coverage_evidence::UncoveredIslandSummary {
+                    island_id: 4,
+                    uncovered_area_mm2: 3.5,
+                    worst_gap: plinth_support::CoverageClosureGap::NoRoutedContact,
+                    face_ids: vec![11, 12],
+                }],
+                total_uncovered_mm2: 3.5,
+                closure_reason: Some("NoImprovingRepair".to_owned()),
+                closure_attempts: 2,
+            }),
+            "the coverage gap an emitted artifact carries must reach the run report unchanged"
         );
         // The disclosure this guard exists to protect: the pending-gate list
         // must reach the report unchanged, not get dropped on this hop and

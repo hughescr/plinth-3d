@@ -330,6 +330,7 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         repair_ledger,
         pending_gates,
         load_warnings,
+        coverage_warning,
     } = outcome(&report, "mini")
     else {
         panic!(
@@ -337,6 +338,15 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
             outcome(&report, "mini")
         );
     };
+    // WARNING MODE (owner ruling, 2026-09-01): the coverage gate no longer
+    // refuses an uncovered model, so an emitted artifact can now carry a named
+    // coverage gap. The healthy fixture must not: it is the model whose
+    // coverage verdict is ACCEPTED, and a warning appearing here would mean the
+    // gate started reporting a gap on a model that has none.
+    assert_eq!(
+        coverage_warning.as_deref(), None,
+        "the healthy fixture's coverage verdict is accepted, so it must carry no coverage gap"
+    );
     // WARNING MODE (owner ruling, 2026-08-29): `PreWriteGate::Load` no longer
     // refuses this run for it, but "mini" (`make_toed_slab.prepped.stl`, this
     // config's own decimated fixture — a different candidate set from the
@@ -910,215 +920,230 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
     assert_eq!(report.exit_code(), PipelineExitCode::Input);
 }
 
-/// A coverage-refused model writes nothing, keeps its evidence, and projects
-/// to exit code 5.
+/// **A model that cannot close its coverage now EMITS, and says exactly what
+/// it left bare — owner ruling, 2026-09-01.**
+///
+/// This test used to be `a_sealed_run_refused_model_writes_no_artifact_and_exits_five`
+/// and it asserted the opposite disposition: `make_raking_blade` could not
+/// close island 5, so `run_support` returned `SupportRunError::CoverageClosure`,
+/// the pipeline reported `Failed` with exit code 5, and **no file existed**.
+///
+/// The owner overruled that, in these words: "if a region can't be supported,
+/// then EMIT THE MODEL ANYWAYS with the supports that *do* work in place, and a
+/// loud warning about the fact some area(s) are unsupported"; and "Partial
+/// success will let me then look at the model and fix it manually to print, or
+/// have a chance at refining the algorithm understanding where it failed. With
+/// *nothing* emitted, I can't see what's working and what isn't working."
+///
+/// **Nothing about the MEASUREMENT was weakened, and that is what this test now
+/// guards.** The blade's island is still measured, still genuinely uncovered
+/// (5.135 mm² against a 0.16 mm² censor), still named, still rendered, and the
+/// repair controller still runs its pool all the way out — 45 trials, 0 commits
+/// — and still says so. The single thing that changed is the disposition: the
+/// artifact is written and the evidence sits beside it instead of instead of
+/// it. A regression that quietly stops MEASURING the gap fails here exactly as
+/// a regression that stopped refusing used to.
 ///
 /// **Re-pinned onto `make_raking_blade` (2026-08-12).** This test used to run
 /// `make_overhang_table`, which was the coverage-refusing fixture; with
 /// nomination scored against the measurement's uncovered samples that model
-/// now CLOSES and emits. (That test is
-/// `plinth-support/tests/support_runner_integration.rs`,
-/// `public_runner_closes_the_uncovered_rim_table_only_after_appending_repair_contacts`;
-/// it was re-pointed off the overhang table onto `make_uncovered_rim_table`
-/// on 2026-08-26, when the overhang table stopped needing repair at all.)
-/// So the overhang table can no longer stand for a refusal. `make_raking_blade`
-/// can — and as of 2026-08-14 it is the PROCEDURAL blade, not the `.prepped.stl` (see
-/// [`refusal_fixture`] for the measured reason). Its island 5 has
-/// `NoRoutedContact` on every one of the 8 attempts, 5.135 mm² uncovered on one
-/// patch: the CCO transcript admits none of the 8 repair rows nominated from
-/// its 14 eligible ones, so it exhausts the registered bound and refuses. That
-/// refusal is measured, not forced: nothing here touches the radius, the censor
-/// or any tolerance.
-///
-/// `run_support` is the coverage-closure controller: it measures ROUTED
-/// coverage under the SAME registered radius the pre-write gate measures, so
-/// a model that cannot close is refused by [`PipelineError::SealedRun`] —
-/// `PipelineExitCode::Supports` (5) — before the pre-write gate is ever
-/// reached. It reports through [`ModelPreparationOutcome::Failed`] rather
-/// than [`ModelPreparationOutcome::Refused`] because `Refused` is reserved
-/// for a verdict the gate itself spoke.
+/// now CLOSES and emits. So the overhang table can no longer stand for an
+/// unclosable island. `make_raking_blade` can — and as of 2026-08-14 it is the
+/// PROCEDURAL blade, not the `.prepped.stl` (see [`refusal_fixture`] for the
+/// measured reason). Its island 5 has `NoRoutedContact` on every attempt,
+/// 5.135 mm² uncovered on one patch: the CCO transcript admits none of the
+/// repair rows nominated from its 14 eligible ones, so the pool drains. That is
+/// measured, not forced: nothing here touches the radius, the censor or any
+/// tolerance.
 #[test]
-fn a_sealed_run_refused_model_writes_no_artifact_and_exits_five() {
+fn a_model_that_cannot_close_its_coverage_emits_and_names_the_gap() {
     let scratch = Scratch::new("refusal");
     refusal_fixture(&scratch, "blade");
 
     let report = prepare(pinned(&scratch, "blade", "make_raking_blade.pipeline.json"))
-        .expect("a refused model is a disposition, not a run failure");
+        .expect("a coverage gap is a disposition, not a run failure");
 
-    let ModelPreparationOutcome::Failed {
-        exit_code,
-        detail,
-        evidence,
+    let ModelPreparationOutcome::Artifact {
+        emit,
+        coverage_warning,
         repair_report,
+        contacts,
+        ..
     } = outcome(&report, "blade")
     else {
         panic!(
-            "the raking blade plan must be refused; it reported {:?}",
+            "the raking blade must EMIT with a named gap, not be refused; it reported {:?}",
             outcome(&report, "blade")
         );
     };
-    assert_eq!(*exit_code, PipelineExitCode::Supports);
-    assert!(
-        detail.contains("coverage closure refused"),
-        "the detail must name the refusal: {detail}"
-    );
 
-    // **SPEC-A4 §A.8's third destination, on the path that needs it most.**
-    // Ruling R10 deleted the failed-tries cap and put loud reporting in its
-    // place, and §A.8 puts the report in three places "on every path — sealed
-    // or refused". This is the refused path: no cap, the pool runs all the way
-    // out, and this model spends 45 one-row transactions and commits none of
-    // them. Until 2026-08-20 the run report said NOTHING about that — the
-    // ledger reached the `Artifact` disposition only, so the run report priced
-    // the cheap path and stayed silent about the expensive one.
-    //
-    // Measured, not chosen: 45 is `NoImprovingRepair { candidates_tried: 45 }`
-    // on this fixture, the same number the sidecar carries below and the same
-    // one the support-side gate pins. A change that moves it is a change to
-    // what the search does, and it has to be re-measured deliberately.
-    let repair = repair_report.as_ref().expect(
-        "a coverage-closure refusal states what the controller spent; `None` means §A.8's \
-         third destination is wired on the sealed path only again",
-    );
-    assert_eq!(
-        (repair.trials, repair.commits),
-        (45, 0),
-        "the raking blade runs its pool out and commits nothing: {repair:?}"
-    );
-    assert_eq!(
-        repair.candidates_remaining, 0,
-        "\"remaining=0\" is the claim that the loop stopped because nothing could help, \
-         not because a counter said stop: {repair:?}"
-    );
+    // The file is real and it is at the target path.
+    let artifact = scratch.output().join("blade.chitubox");
+    assert_eq!(emit.artifact_path, artifact);
     assert!(
-        repair.trials >= repair.commits,
-        "every commit is a trial: {repair:?}"
+        artifact.exists(),
+        "the ruling is that the file gets written; nothing is at {}",
+        artifact.display()
     );
-
-    assert!(
-        !scratch.output().join("blade.chitubox").exists(),
-        "a coverage-closure-refused model wrote an artifact"
-    );
-    assert_eq!(report.artifacts().count(), 0);
-    assert_eq!(report.exit_code(), PipelineExitCode::Supports);
-    assert_eq!(PipelineExitCode::Supports as i32, 5);
+    assert_eq!(report.artifacts().count(), 1);
+    assert_eq!(report.exit_code(), PipelineExitCode::Ok);
     assert!(!report.has_gate_refusal());
 
-    // **FU-57, real fixture.** The coverage-closure controller's refusal on
-    // this exact geometry carries its own island evidence -- this proves the
-    // sidecar/render writer against a genuinely unclosable island, not only
-    // against a hand-built fixture.
-    let evidence = evidence
+    // **The loud half.** An emitted file with an unsupported island that does
+    // not SAY so is the silent failure this ruling must not become.
+    let warning = coverage_warning
         .as_ref()
-        .expect("a coverage-closure refusal must carry FU-57 evidence");
-    assert_eq!(
-        evidence.source,
-        plinth_pipeline::EvidenceSource::CoverageClosureController
-    );
-    // **Re-measured 2026-08-20 by SPEC-A4 §G.1 stage 4, from 8 to 0, and the
-    // number means something different now.** Under the batch loop this field
-    // counted passes of the loop and read 8 — the registered
-    // `coverage_repair_max_attempts` bound, fully exhausted, each pass having
-    // appended a whole batch of rows whether or not any of them helped. Under
-    // ruling R6 the same bound counts COMMITTED steps, and this model commits
-    // nothing: it spends 45 one-row transactions and rolls back every one, so
-    // the honest reading of a field named for that bound is zero.
-    //
-    // This is not the loop giving up early. `CoverageClosureReason` on the
-    // support side is `NoImprovingRepair { candidates_tried: 45, .. }` and the
-    // §A.8 report reads `trials=45 commits=0 remaining=0` — the search ran the
-    // pool out. The sidecar schema moves to `v2` below for exactly this reason:
-    // the same field name now carries a different fact.
-    assert_eq!(evidence.attempts, Some(0));
+        .expect("an emitted model with an unclosable island must carry the coverage warning");
     assert!(
-        !evidence.islands.is_empty(),
-        "the unclosable island must be named"
+        !warning.islands.is_empty(),
+        "the unsupported island must be named: {warning:?}"
     );
-    // **The refusal is a real hole, not censored dust.** This is the other half
-    // of the 2026-08-14 censor change (docs/specs/coverage-repair.md §4): a model whose
-    // uncovered area is genuinely above `voxel_pitch_mm²` must still be refused,
-    // end to end, through the production executor. 5.135 mm² is 32x the
-    // registered 0.16 mm² censor, so this assert is what goes red if the censor
-    // is ever widened to swallow a real island.
+    // **The gap is a real hole, not censored dust.** This is the other half of
+    // the 2026-08-14 censor change (docs/specs/coverage-repair.md §4): 5.135 mm²
+    // is 32x the registered 0.16 mm² censor, so this assert is what goes red if
+    // the censor is ever widened to swallow a real island.
     let censor = plinth_support::registered_coverage_censor_area_mm2()
         .expect("registered A3 coverage censor");
-    let worst = evidence
+    let worst = warning
         .islands
         .iter()
         .map(|island| island.uncovered_area_mm2)
         .fold(0.0_f64, f64::max);
     assert!(
         worst > censor,
-        "the refused island must be genuinely uncovered, not censored dust: {worst} mm² against a \
-         {censor} mm² censor"
+        "the reported island must be genuinely uncovered, not censored dust: {worst} mm² against \
+         a {censor} mm² censor"
     );
     assert!(
         worst > 5.0,
         "the procedural blade's island 5 measures 5.135 mm²; if it moved this far, the fixture \
          moved: {worst} mm²"
     );
-    // FU-56 (2026-08-12 fix): per-island nomination accounting, so the card
-    // says whether an island was ever attempted at all.
     assert!(
-        evidence
+        warning.total_uncovered_mm2 >= worst,
+        "the total must not understate its own worst island: {warning:?}"
+    );
+    assert!(
+        warning
             .islands
             .iter()
             .any(|island| island.face_count() > 0),
-        "the refused islands must name their faces"
+        "the reported islands must name their faces"
+    );
+    // The WHY, which is the half that points at code to fix rather than at
+    // geometry to patch by hand.
+    assert_eq!(
+        warning.closure_attempts, 0,
+        "the blade commits nothing, so a field named for the committed bound reads zero: \
+         {warning:?}"
     );
     assert!(
-        evidence.write_error.is_none(),
-        "the sidecar must write cleanly: {:?}",
-        evidence.write_error
+        warning
+            .closure_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("NoImprovingRepair")),
+        "the warning must name the stage's own stop reason: {warning:?}"
     );
+
+    // **The mechanism that moved the numbers below, pinned so it cannot move
+    // back silently.** This fixture is 24 faces, and six of its placements are
+    // rays that run knife-edge parallel to a facet. Until 2026-09-01 a single
+    // one of those refused the whole model at PR-8 — measured at `d563574`,
+    // this very test failed with
+    // `Initial(Attestation(NearParallelWitness { near_parallel: 6 }))` and never
+    // reached the repair loop at all. They are quarantined per placement now, so
+    // the blade routes on the contacts that DID attest.
+    assert!(
+        contacts
+            .abandoned_contacts
+            .iter()
+            .any(|contact| contact.refusal() == "undecidable_geometry"),
+        "this fixture's search is what it is BECAUSE undecidable placements are quarantined \
+         rather than fatal; if none is quarantined the numbers below describe a different run: \
+         {:?}",
+        contacts.abandoned_contacts
+    );
+
+    // **SPEC-A4 §A.8's third destination, on the path that needs it most.**
+    // Ruling R10 deleted the failed-tries cap and put loud reporting in its
+    // place. This model spends 161 one-row transactions and commits none of
+    // them, and it has to say so on THIS path now, because this path is the one
+    // that produces a file.
+    //
+    // **Re-measured 2026-09-01, from `(45, 0)` and `remaining = 0`.** The old
+    // numbers were not wrong when they were taken and they are not a
+    // disposition change either: they were taken before `b0157ec`, and from
+    // `b0157ec` until 2026-09-01 this fixture died at PR-8 before the repair
+    // controller ever ran, so the pin sat unexercised while the geometry under
+    // it moved. It is re-derived here against a run that reaches the loop again.
+    //
+    // **`remaining` moved from 0 to 41, and that is a change of STOP REASON,
+    // not just of magnitude.** Zero used to mean the pool drained — every row
+    // ledgered, nothing left to try. Forty-one rows are now still un-ledgered
+    // when the loop stops, because it stops on §B.3's zero-score guard instead:
+    // the best live candidate covers 0.00 mm², so no remaining row can help.
+    // The old comment's claim — "the loop stopped because nothing could help,
+    // not because a counter said stop" — is therefore still exactly true, and
+    // it is now established by the measured score rather than by exhaustion.
+    // The assertion below says so directly, against the score, so a future
+    // regression that stops on a counter cannot hide behind a nonzero
+    // `remaining`.
+    let repair = repair_report
+        .as_ref()
+        .expect("a model that spent the repair controller states what it spent");
+    assert_eq!(
+        (repair.trials, repair.commits),
+        (161, 0),
+        "the raking blade tries every candidate that could help and commits none: {repair:?}"
+    );
+    assert!(
+        warning
+            .closure_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("best_remaining_score_mm2: 0.0")),
+        "the loop must stop because nothing left can help, not because a counter said stop; \
+         {} rows were still un-ledgered when it did: {warning:?}",
+        repair.candidates_remaining
+    );
+
+    // **FU-57 survives the ruling.** The sidecar and the per-island renders
+    // were written on the REFUSAL path, and that path no longer exists for this
+    // model — so if they were not moved onto the emitted path, the ruling would
+    // have destroyed the one piece of evidence that says WHERE to look. They
+    // are written beside the artifact, never at it.
     let sidecar_path = scratch.output().join("blade.coverage.json");
-    assert_eq!(evidence.sidecar_path, sidecar_path);
     assert!(
         sidecar_path.exists(),
-        "the sidecar must actually be on disk"
+        "the coverage sidecar must be on disk beside the emitted artifact"
     );
     let sidecar_bytes = std::fs::read(&sidecar_path).expect("read sidecar");
     let sidecar: serde_json::Value = serde_json::from_slice(&sidecar_bytes).expect("valid json");
-    // §G.2: re-meaning `attempts` is a wire FORMAT change, not a rename, so the
-    // schema string moves with it. A reader holding a v1 sidecar and a v2
-    // sidecar must be able to tell "the loop ran 8 times" from "0 rows earned
-    // their place" without guessing which controller wrote the file.
     assert_eq!(sidecar["schema"], "plinth.coverage-refusal.v2");
-    assert_eq!(sidecar["source"], "coverage_closure_controller");
-    assert_eq!(sidecar["attempts"], 0);
+    assert_eq!(sidecar["source"], "pre_write_gate");
     assert!(
-        sidecar["closure"].is_object(),
-        "the sidecar must embed the typed closure refusal verbatim"
+        sidecar["report"].is_object(),
+        "the gate's own coverage report must be embedded verbatim"
     );
-    // **§A.8's SECOND destination, pinned pipeline-side for the first time.**
-    // The schema bump to `v2` above is justified by "a reader must be able to
-    // tell `the loop ran 8 times` from `0 rows earned their place`" — and that
-    // only holds because `closure.repair` is in the same file saying 45 trials
-    // bought 0 commits. Nothing on this side asserted that, so `repair: None`
-    // could be reintroduced with the whole pipeline gate staying green while
-    // the v2 claim quietly became false. It cannot now.
-    assert_eq!(sidecar["closure"]["repair"]["trials"], 45);
-    assert_eq!(sidecar["closure"]["repair"]["commits"], 0);
-    assert_eq!(sidecar["closure"]["repair"]["candidates_remaining"], 0);
+    let renders = std::fs::read_dir(scratch.output())
+        .expect("read output dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension().is_some_and(|ext| ext == "svg")
+                && path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("blade"))
+        })
+        .collect::<Vec<_>>();
     assert!(
-        sidecar["report"].is_null(),
-        "a controller refusal must not carry a gate report"
+        !renders.is_empty(),
+        "the worst island(s) must still be rendered beside the emitted artifact"
     );
-
-    assert!(
-        !evidence.render_paths.is_empty(),
-        "the worst island(s) must be rendered"
-    );
-    for render_path in &evidence.render_paths {
-        assert!(render_path.exists(), "{} must exist", render_path.display());
+    for render_path in &renders {
         let bytes = std::fs::read(render_path).expect("read render");
         let svg = String::from_utf8(bytes).expect("utf8 svg");
         assert!(svg.starts_with("<svg"), "must be a well-formed svg: {svg}");
     }
-
-    // No file was ever written at the `.chitubox` target -- evidence is a
-    // different file class beside it, never at it.
-    assert!(!scratch.output().join("blade.chitubox").exists());
 }
 
 /// FU-57: a model that starts passing does not leave yesterday's
@@ -1177,32 +1202,63 @@ fn a_model_that_starts_passing_clears_its_own_stale_coverage_evidence() {
 /// this one would otherwise leave the earlier run's file sitting there, where
 /// the next thing to read it would take it for this run's answer.
 #[test]
-fn a_refusal_removes_an_earlier_runs_artifact_at_the_same_target() {
+fn no_disposition_leaves_an_earlier_runs_artifact_at_its_target() {
+    const STALE: &[u8] = b"an artifact from an earlier run";
+
     let scratch = Scratch::new("stale");
     refusal_fixture(&scratch, "blade");
+    // A model that CANNOT reach a file, so the refusal half of the claim keeps
+    // a fixture of its own. The blade used to be that fixture and no longer is.
+    scratch.write("broken.stl", b"not an STL at all");
     std::fs::create_dir_all(scratch.output()).expect("plant an output folder");
-    let target = scratch.output().join("blade.chitubox");
-    std::fs::write(&target, b"an artifact from an earlier run").expect("plant a stale artifact");
+    let emitting = scratch.output().join("blade.chitubox");
+    let refusing = scratch.output().join("broken.chitubox");
+    for target in [&emitting, &refusing] {
+        std::fs::write(target, STALE).expect("plant a stale artifact");
+    }
 
     let report =
         prepare(pinned(&scratch, "blade", "make_raking_blade.pipeline.json")).expect("run");
-    // FU-56, 2026-08-12: `overhang` now refuses at the sealed run (coverage
-    // closure), not at the gate — see
-    // `a_sealed_run_refused_model_writes_no_artifact_and_exits_five` for the
-    // full attribution. The claim under test here — a stale artifact does not
-    // survive ANY refusal at this target — is unaffected by which stage spoke
-    // it.
+
+    // **Half one — a refusal still leaves nothing.** Unchanged claim, unchanged
+    // assertion, moved onto a model that still refuses.
     assert!(matches!(
-        outcome(&report, "blade"),
+        outcome(&report, "broken"),
         ModelPreparationOutcome::Failed {
-            exit_code: PipelineExitCode::Supports,
+            exit_code: PipelineExitCode::Input,
             ..
         }
     ));
     assert!(
-        !target.exists(),
+        !refusing.exists(),
         "a refusal left the previous run's artifact at {}",
-        target.display()
+        refusing.display()
+    );
+
+    // **Half two — and neither does an emission with a coverage gap.** This is
+    // the case the ruling created: the blade now reaches a file, so "the target
+    // is empty" stops being available as the proof and the positive form has to
+    // be asserted instead. `prepare_one` unlinks the target on the way IN,
+    // before any stage can fail, and `plinth_emit::write` renames its staging
+    // sibling over whatever is there — so the stale bytes cannot survive either
+    // way, and this pins that they do not.
+    let ModelPreparationOutcome::Artifact { emit, .. } = outcome(&report, "blade") else {
+        panic!(
+            "the blade must EMIT with its gap named; it reported {:?}",
+            outcome(&report, "blade")
+        );
+    };
+    let on_disk = std::fs::read(&emitting).expect("this run's artifact must be at the target");
+    assert_ne!(
+        on_disk.as_slice(),
+        STALE,
+        "the earlier run's file survived under this run's artifact at {}",
+        emitting.display()
+    );
+    assert_eq!(
+        on_disk.len() as u64,
+        emit.artifact_bytes,
+        "the bytes at the target must be the ones this run reports writing"
     );
 }
 
@@ -1340,15 +1396,24 @@ fn every_failure_disposition_clears_an_earlier_runs_artifact_at_its_target() {
     refusal_fixture(&scratch, "blade");
 
     std::fs::create_dir_all(scratch.output()).expect("plant an output folder");
-    let planted = ["blade", "broken", "unpinned"].map(|stem| {
+    // **`blade` left this list 2026-09-01 (owner ruling).** It used to be the
+    // third failing stem — the sealed run refused its coverage — and it now
+    // EMITS with that coverage named instead. Its target is still planted and
+    // still checked, one assertion down, because "the stale file does not
+    // survive" has to hold on the emit path too; what it can no longer do is
+    // stand for a FAILURE disposition, which is what this list is.
+    let planted = ["broken", "unpinned"].map(|stem| {
         let target = scratch.output().join(format!("{stem}.chitubox"));
         std::fs::write(&target, b"an artifact from an earlier, luckier run")
             .expect("plant a stale artifact");
         (stem, target)
     });
+    let blade_target = scratch.output().join("blade.chitubox");
+    std::fs::write(&blade_target, b"an artifact from an earlier, luckier run")
+        .expect("plant a stale artifact");
 
     // Only `blade` is pinned, so `unpinned` reaches the missing-baseline
-    // refusal and `broken` never loads: three different pre-gate stops.
+    // refusal and `broken` never loads: two different pre-gate stops.
     let report = prepare(pinned(&scratch, "blade", "make_raking_blade.pipeline.json"))
         .expect("a folder of failures is still a successful run");
 
@@ -1366,7 +1431,27 @@ fn every_failure_disposition_clears_an_earlier_runs_artifact_at_its_target() {
             target.display()
         );
     }
-    assert_eq!(report.artifacts().count(), 0);
+    // The emitting model's own planted file is gone too — replaced by this
+    // run's artifact, not left underneath it.
+    let ModelPreparationOutcome::Artifact { emit, .. } = outcome(&report, "blade") else {
+        panic!(
+            "the blade must EMIT with its gap named; it reported {:?}",
+            outcome(&report, "blade")
+        );
+    };
+    assert_eq!(
+        std::fs::read(&blade_target)
+            .expect("this run's artifact must be at the target")
+            .len() as u64,
+        emit.artifact_bytes,
+        "the emitting model left the earlier run's bytes at {}",
+        blade_target.display()
+    );
+    assert_eq!(
+        report.artifacts().count(),
+        1,
+        "exactly the one model that can reach a file contributed one"
+    );
 }
 
 /// A pinned baseline is **one model's** rotation and is never lent to another.
@@ -1584,23 +1669,34 @@ fn a_coverage_closure_refusal_is_not_masked_by_an_earlier_load_failure() {
             ..
         }
     ));
-    assert!(matches!(
-        outcome(&report, "blade"),
-        ModelPreparationOutcome::Failed {
-            exit_code: PipelineExitCode::Supports,
-            ..
-        }
-    ));
+    // **Re-derived 2026-09-01 (owner ruling).** The blade's coverage finding is
+    // no longer a refusal, so there is no verdict left to be masked and no
+    // sticky exit code to assert. The claim underneath was never really about
+    // the exit code though — it was "an unrelated earlier failure must not hide
+    // a safety finding at the RUN level" — and that claim survives intact, with
+    // the finding now reaching the run through `has_coverage_gap` instead of
+    // `has_coverage_refusal`. Both are asserted, so a regression that quietly
+    // turned the warning back into a refusal, or lost it altogether, fails here.
+    assert!(
+        outcome(&report, "blade").has_coverage_gap(),
+        "the blade emits with a measured, unclosed gap: {:?}",
+        outcome(&report, "blade")
+    );
     assert!(!report.has_gate_refusal());
     assert!(
-        report.has_coverage_refusal(),
-        "the closure controller's refusal is a coverage refusal and the run must say so"
+        !report.has_coverage_refusal(),
+        "a coverage shortfall is a warning now; nothing in this run refuses for one"
+    );
+    assert!(
+        report.has_coverage_gap(),
+        "the safety finding must be visible at the RUN level, not only on the model that \
+         carries it — an operator reading a folder of thirty must not have to open all thirty"
     );
     assert_eq!(
         report.exit_code(),
-        PipelineExitCode::Supports,
-        "a coverage refusal is sticky behind `Gates`: an unrelated earlier load failure must \
-         not hide a safety verdict at the run level"
+        PipelineExitCode::Input,
+        "with the coverage verdict no longer refusing, the run's status is the load failure's \
+         and nothing else's"
     );
 }
 

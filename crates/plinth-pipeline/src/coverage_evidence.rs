@@ -146,6 +146,61 @@ impl UncoveredIslandSummary {
     }
 }
 
+/// **What an EMITTED file leaves unsupported (owner ruling, 2026-09-01).**
+///
+/// The coverage gate used to refuse a model whose verdict was not accepted, so
+/// this evidence only ever existed beside a missing file. The ruling is that an
+/// unsupported region is a warning and never a refusal, which makes this the
+/// description of something the owner can actually open — so it has to be
+/// specific enough to act on: WHERE the gap is, HOW BIG it is, and WHY the
+/// engine could not close it.
+///
+/// * `islands` — one row per island the file leaves uncovered, worst first,
+///   each with its own measured area, its worst gap and its faces. Measured on
+///   the SEALED snapshot, so it describes the artifact and not an earlier
+///   state of the search.
+/// * `closure_reason` / `closure_attempts` — why the coverage-repair search
+///   stopped and how many committed steps it had spent, when the run reached
+///   emission through the repair controller's give-up path. `None` when the
+///   gap was never handed to that controller.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CoverageGapWarning {
+    pub islands: Vec<UncoveredIslandSummary>,
+    pub total_uncovered_mm2: f64,
+    #[serde(default)]
+    pub closure_reason: Option<String>,
+    #[serde(default)]
+    pub closure_attempts: usize,
+}
+
+impl CoverageGapWarning {
+    /// Build the warning from the gate's own measurement of the sealed
+    /// snapshot, optionally naming the repair search that gave up on it.
+    ///
+    /// Returns `None` when the report names no uncovered island, so a caller
+    /// cannot accidentally announce a gap that was not measured.
+    #[must_use]
+    pub fn from_gate_report(
+        report: &CoverageReport,
+        closure: Option<&CoverageClosureRefusal>,
+    ) -> Option<Self> {
+        let islands = islands_from_gate_report(report);
+        if islands.is_empty() {
+            return None;
+        }
+        let total_uncovered_mm2 = islands
+            .iter()
+            .map(|island| island.uncovered_area_mm2)
+            .sum();
+        Some(Self {
+            total_uncovered_mm2,
+            islands,
+            closure_reason: closure.map(|refusal| format!("{:?}", refusal.reason)),
+            closure_attempts: closure.map_or(0, |refusal| refusal.attempts),
+        })
+    }
+}
+
 /// Everything one coverage refusal's evidence persistence produced.
 ///
 /// **Write failures are data, not control flow.** `render_skipped` and
