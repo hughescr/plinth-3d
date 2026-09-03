@@ -33,3 +33,16 @@ plinth-support = { path = "../plinth-support" }
 # rather than serially.
 rayon = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+# tests/round_bases_ratchet.rs drives the real dense orientation search
+# (plinth_orient::search_and_orient), which takes a `DecimatedModel`; that
+# type, and the `plinth_decimate::run` that builds one, live in
+# plinth-decimate. Test-only -- nothing in src/ depends on this -- and it
+# introduces no cycle: plinth-pipeline depends on both plinth-sweep and
+# plinth-decimate already, but plinth-sweep depending on plinth-pipeline
+# itself (even as a dev-dependency) would be one, which is why this test
+# duplicates prepare.rs's small `registered_decimation_budget` body instead
+# of importing plinth-pipeline. Same pattern as plinth-pipeline's own
+# chitubox_io dev-dependency.
+plinth-decimate = { path = "../plinth-decimate" }

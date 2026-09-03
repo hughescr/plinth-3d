@@ -1198,6 +1198,7 @@ name = "plinth-sweep"
 version = "0.1.0"
 dependencies = [
  "plinth-core",
+ "plinth-decimate",
  "plinth-mesh",
  "plinth-orient",
  "plinth-support",
