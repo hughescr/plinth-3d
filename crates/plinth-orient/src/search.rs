@@ -71,9 +71,12 @@ use thiserror::Error;
 use crate::grid::{Candidate, CandidateBlock, GridSettings, SweepGrid};
 use crate::score::{
     score_candidates, CandidateOutcome, CandidateRefusalReason, CandidateTerms, ObjectiveWeights,
-    OrientFaceTable, OrientSearchLimits, ScoreError, ORIENT_SCAR_WEIGHT_ID,
-    ORIENT_WEIGHT_HEIGHT_MM_ID, ORIENT_WEIGHT_PEAK_XSEC_CM2_ID, ORIENT_WEIGHT_SUPPORT_AREA_CM2_ID,
-    OVERHANG_ANGLE_DEG_ID,
+    OrientFaceTable, OrientSearchLimits, PeelForceCorners, ScoreError,
+    ORIENT_PEEL_AREA_EXPONENT_HIGH_ID, ORIENT_PEEL_AREA_EXPONENT_LOW_ID,
+    ORIENT_PEEL_POINTS_PER_NEWTON_ID, ORIENT_PEEL_REFERENCE_AREA_MM2_ID,
+    ORIENT_PEEL_REFERENCE_PRESSURE_PA_HIGH_ID, ORIENT_PEEL_REFERENCE_PRESSURE_PA_LOW_ID,
+    ORIENT_SCAR_WEIGHT_ID, ORIENT_WEIGHT_HEIGHT_MM_ID, ORIENT_WEIGHT_PEAK_XSEC_CM2_ID,
+    ORIENT_WEIGHT_SUPPORT_AREA_CM2_ID, OVERHANG_ANGLE_DEG_ID,
 };
 use crate::BaselineSelection;
 
@@ -337,12 +340,38 @@ pub struct LodRecord {
     pub delicacy_digest: Option<String>,
 }
 
+/// The peel-force bracket's four corners, as a record (D14).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeelForceCornersRecord {
+    pub low_pressure_low_exponent_n: Finite,
+    pub low_pressure_high_exponent_n: Finite,
+    pub high_pressure_low_exponent_n: Finite,
+    pub high_pressure_high_exponent_n: Finite,
+}
+
+impl PeelForceCornersRecord {
+    fn new(corners: PeelForceCorners) -> Result<Self, SearchError> {
+        Ok(Self {
+            low_pressure_low_exponent_n: finite(corners.low_pressure_low_exponent_n)?,
+            low_pressure_high_exponent_n: finite(corners.low_pressure_high_exponent_n)?,
+            high_pressure_low_exponent_n: finite(corners.high_pressure_low_exponent_n)?,
+            high_pressure_high_exponent_n: finite(corners.high_pressure_high_exponent_n)?,
+        })
+    }
+}
+
 /// The four terms and the score, as a record.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TermsRecord {
     pub support_area_cm2: Finite,
+    /// The exact peak cross-section, still computed and reported; no longer
+    /// weighted directly into `score` (LANE 3, 2026-09-02). See `peel_term`.
     pub peak_xsec_cm2: Finite,
+    pub peak_mm2: Finite,
+    pub peel_force_n: PeelForceCornersRecord,
+    pub peel_term: Finite,
     pub height_mm: Finite,
     pub scar_term: Finite,
     pub scar_raw_mm2: Finite,
@@ -355,12 +384,35 @@ impl TermsRecord {
         Ok(Self {
             support_area_cm2: finite(terms.support_area_cm2)?,
             peak_xsec_cm2: finite(terms.peak_xsec_cm2)?,
+            peak_mm2: finite(terms.peak_mm2)?,
+            peel_force_n: PeelForceCornersRecord::new(terms.peel_force_n)?,
+            peel_term: finite(terms.peel_term)?,
             height_mm: finite(terms.height_mm)?,
             scar_term: finite(terms.scar_term)?,
             scar_raw_mm2: finite(terms.scar_raw_mm2)?,
             down_facing_faces: terms.down_facing_faces,
             score: finite(terms.score)?,
         })
+    }
+
+    /// Re-scores this candidate's already-measured terms at one bracket
+    /// corner (or at a different `support_area_cm2` demand), holding every
+    /// other weight at its registered value. Used by the commit-tier
+    /// real-sweep-demand override and by the four-corner robustness check —
+    /// both re-price an already-measured candidate rather than re-running the
+    /// batched scorer, because neither the peel corner nor the demand
+    /// substitution changes `peak_mm2`, `height_mm` or `scar_term`.
+    fn repriced(self, weights: ObjectiveWeights, support_area_cm2: f64, peel_force_n: f64) -> Self {
+        let peel_term = weights.peel_points_per_newton() * peel_force_n;
+        let score = ((weights.support_area_cm2() * support_area_cm2 + peel_term)
+            + weights.height_mm() * self.height_mm.get())
+            + self.scar_term.get();
+        Self {
+            support_area_cm2: Finite::new(support_area_cm2).unwrap_or(self.support_area_cm2),
+            peel_term: Finite::new(peel_term).unwrap_or(self.peel_term),
+            score: Finite::new(score).unwrap_or(self.score),
+            ..self
+        }
     }
 }
 
@@ -434,14 +486,91 @@ pub struct WeightRecord {
 #[serde(deny_unknown_fields)]
 pub struct ObjectiveRecord {
     pub support_area_cm2: WeightRecord,
-    pub peak_xsec_cm2: WeightRecord,
     pub height_mm: WeightRecord,
     pub scar: WeightRecord,
     pub overhang_angle_deg: WeightRecord,
+    /// Prices the peel-force term (LANE 3, 2026-09-02); retires
+    /// `ORIENT_WEIGHT_PEAK_XSEC_CM2`'s role, which stays registered below,
+    /// unread by the objective.
+    pub peel_points_per_newton: WeightRecord,
+    /// Registered but no longer read by `score`; kept here so a reader can
+    /// see the retirement rather than infer it from an absent field.
+    pub peak_xsec_cm2_retired: WeightRecord,
+    pub peel_reference_area_mm2: WeightRecord,
+    pub peel_pressure_pa_low: WeightRecord,
+    pub peel_pressure_pa_high: WeightRecord,
+    pub peel_area_exponent_low: WeightRecord,
+    pub peel_area_exponent_high: WeightRecord,
     pub down_limit: Finite,
     /// The exact supremum, by name — the retired 4 mm/0.1 mm sampler is not
     /// reachable from this path.
     pub peak_section_method: String,
+}
+
+/// One commit-tier candidate's real sweep measurement, beside the proxy it
+/// replaced (LANE 3, §12). `measured_support_area_cm2` is `None`, and
+/// `measurement_error` names why, when the coarse-raster sweep itself could
+/// not be run for this candidate — the proxy value is then what actually
+/// scored it, never a refusal (emit and warn, never refuse).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitDemandRecord {
+    pub candidate: usize,
+    pub proxy_support_area_cm2: Finite,
+    pub measured_support_area_cm2: Option<Finite>,
+    pub struts: Option<usize>,
+    pub achieved_pitch_mm: Option<Finite>,
+    pub residual_demand_cells: Option<usize>,
+    pub uncarried_load_mm2: Option<Finite>,
+    pub measurement_error: Option<String>,
+}
+
+/// The peel-force bracket's robustness check (D14): the SAME commit-tier
+/// candidate set, re-scored at each of the four corners in turn (holding
+/// every other term fixed at what was actually measured), with the argmin
+/// candidate at each corner named. Agreement is the decision; a
+/// `pose_choice_not_robust` disagreement names which corners moved the
+/// winner rather than averaging over them.
+///
+/// **Deviation from a literal four-independent-funnels reading of §12**,
+/// disclosed rather than hidden: promotion through the coarse and refine
+/// tiers still runs ONCE, at the primary corner. Only the commit tier's own
+/// candidate set — already the tier the decision is made at, per
+/// `FidelityLedger`'s own doctrine — is re-scored at all four corners. A
+/// literal re-run of the whole three-tier funnel four times would have
+/// quadrupled the commit tier's real-sweep-demand cost (LANE 2 measured
+/// single production sweeps at up to 76.85 s), for a question this
+/// narrower, cheaper check already answers: does the corner choice move the
+/// winner AMONG the candidates that reached the tier where the decision is
+/// made.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeelRobustnessRecord {
+    /// `(corner label, winning candidate id)`, in the four-corner order
+    /// `PeelForceCorners::named` defines. `None` only when the commit tier
+    /// itself has no ranking, which `search` already refuses on.
+    pub winner_at_each_corner: Vec<(String, Option<usize>)>,
+    pub agrees_at_every_corner: bool,
+    pub pose_choice_not_robust: bool,
+    pub disagreeing_corners: Vec<String>,
+}
+
+/// One weight's flip crossover between the commit-tier winner and runner-up
+/// (D15): the value that weight would need to take, holding every other
+/// weight at its registered value, for the runner-up to tie the winner.
+/// `crossover` is `None` when the two candidates' own term values are equal
+/// (no finite weight distinguishes them on this axis) or there is no
+/// runner-up at all.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeightFlipRecord {
+    pub weight_id: String,
+    pub registered_value: Finite,
+    pub crossover: Option<Finite>,
+    /// `true` when `crossover` is positive and within a factor of two of
+    /// `registered_value` — close enough that this decision rests more on
+    /// the registered weight's own value than on the measured geometry.
+    pub pose_choice_not_robust: bool,
 }
 
 /// What the funnel's cheapness actually cost, measured rather than assumed.
@@ -537,6 +666,15 @@ pub struct DenseSweepRecord {
     pub winner: WinnerRecord,
     pub runner_up: Option<RankedCandidate>,
     pub fidelity: FidelityLedger,
+    /// LANE 3 §12: the commit tier's real sweep measurement per candidate,
+    /// beside the projected-area proxy it replaced there.
+    pub commit_tier_demand: Vec<CommitDemandRecord>,
+    /// LANE 3 §12/D14: whether the peel-force bracket's choice of corner
+    /// moves the commit-tier winner.
+    pub peel_robustness: PeelRobustnessRecord,
+    /// LANE 3 §12/D15: per-weight flip crossovers between the winner and
+    /// runner-up.
+    pub weight_flips: Vec<WeightFlipRecord>,
     pub work: WorkRecord,
     pub refusals: Vec<RefusalRecord>,
     /// SHA-256 over the canonical serialization of everything above. One string
@@ -615,7 +753,19 @@ struct Rung {
 /// scored — a refusal, deliberately, rather than a fallback to identity, which
 /// is a rotation like any other; [`SearchError::NoCandidateSurvived`] when every
 /// candidate at some tier produced a non-finite term.
-pub fn search(mesh: &Mesh, request: &SweepRequest) -> Result<SweepOutcome, SearchError> {
+///
+/// `demand` is LANE 3's real-sweep-demand override (§12): when `Some`, every
+/// candidate that reaches the commit tier is re-measured through it and its
+/// `support_area_cm2` term is replaced (never refused — a measurement
+/// failure keeps that one candidate's proxy value and is named in the
+/// record's `commit_tier_demand`). `None` reproduces the pre-LANE-3 proxy-
+/// only objective exactly, which is what every test in this crate that does
+/// not itself exercise the override passes.
+pub fn search(
+    mesh: &Mesh,
+    request: &SweepRequest,
+    demand: Option<&dyn crate::demand::SupportDemandMeasurer>,
+) -> Result<SweepOutcome, SearchError> {
     let mut fallbacks = Vec::new();
 
     // The exact rung first: if the production mesh cannot be scored there is no
@@ -738,6 +888,67 @@ pub fn search(mesh: &Mesh, request: &SweepRequest) -> Result<SweepOutcome, Searc
         tiers.push(record);
     }
 
+    // LANE 3 §12: replace the commit tier's projected-area proxy with the
+    // sweep's real measured demand. Bounded to the commit tier's own
+    // admitted set (`ORIENT_COMMIT_TOP_K` promoted plus the escorted legacy
+    // 13 — LANE 2 measured up to ~16 candidates in production) rather than
+    // every tier, because the commit tier's exact-mesh ranking is where the
+    // decision is actually made (`FidelityLedger`'s own doctrine) and a
+    // real sweep at every tier would multiply this cost several times over
+    // for no change to the winner. A candidate whose coarse-raster sweep
+    // itself fails keeps its proxy value and the failure is named, never
+    // refused.
+    let mut commit_tier_demand = Vec::new();
+    if let (Some(measurer), Some(commit_record)) = (demand, tiers.last_mut()) {
+        for entry in &mut commit_record.ranking {
+            let direction = grid.candidates()[entry.candidate].direction;
+            let proxy_support_area_cm2 = entry.terms.support_area_cm2.get();
+            match measurer.measure_support_area_cm2(mesh, direction) {
+                Ok(measured) => {
+                    entry.terms = entry.terms.repriced(
+                        request.weights,
+                        measured.support_area_cm2,
+                        entry.terms.peel_force_n.low_pressure_low_exponent_n.get(),
+                    );
+                    commit_tier_demand.push(CommitDemandRecord {
+                        candidate: entry.candidate,
+                        proxy_support_area_cm2: finite(proxy_support_area_cm2)?,
+                        measured_support_area_cm2: Some(finite(measured.support_area_cm2)?),
+                        struts: Some(measured.struts),
+                        achieved_pitch_mm: Some(finite(measured.achieved_pitch_mm)?),
+                        residual_demand_cells: Some(measured.residual_demand_cells),
+                        uncarried_load_mm2: Some(finite(measured.uncarried_load_mm2)?),
+                        measurement_error: None,
+                    });
+                }
+                Err(error) => {
+                    commit_tier_demand.push(CommitDemandRecord {
+                        candidate: entry.candidate,
+                        proxy_support_area_cm2: finite(proxy_support_area_cm2)?,
+                        measured_support_area_cm2: None,
+                        struts: None,
+                        achieved_pitch_mm: None,
+                        residual_demand_cells: None,
+                        uncarried_load_mm2: None,
+                        measurement_error: Some(error),
+                    });
+                }
+            }
+        }
+        // The same comparator `score_tier` ranks with: score ascending,
+        // ties to the lower CandidateId.
+        commit_record.ranking.sort_by(|left, right| {
+            left.terms
+                .score
+                .get()
+                .total_cmp(&right.terms.score.get())
+                .then(left.candidate.cmp(&right.candidate))
+        });
+        for (rank, entry) in commit_record.ranking.iter_mut().enumerate() {
+            entry.rank = rank;
+        }
+    }
+
     let commit = tiers.last().expect("three tiers were scored");
     let winner_rank = commit
         .ranking
@@ -752,6 +963,9 @@ pub fn search(mesh: &Mesh, request: &SweepRequest) -> Result<SweepOutcome, Searc
         .clone();
     let winner = grid.candidates()[winner_rank.candidate];
     let runner_up = commit.ranking.get(1).cloned();
+
+    let peel_robustness = peel_robustness(&commit.ranking, request.weights);
+    let weight_flips = weight_flips(&winner_rank.terms, runner_up.as_ref().map(|r| &r.terms), request.weights);
 
     let fidelity = ledger(&grid, &tiers, &winner_rank, runner_up.as_ref(), request)?;
 
@@ -784,6 +998,9 @@ pub fn search(mesh: &Mesh, request: &SweepRequest) -> Result<SweepOutcome, Searc
         },
         runner_up,
         fidelity,
+        commit_tier_demand,
+        peel_robustness,
+        weight_flips,
         work,
         refusals,
         search_digest: String::new(),
@@ -1054,6 +1271,146 @@ fn grid_record(grid: &SweepGrid) -> Result<GridRecord, SearchError> {
     })
 }
 
+/// D14: re-scores every commit-tier candidate at each of the four bracket
+/// corners in turn, holding `support_area_cm2`, `height_mm` and `scar_term`
+/// at what was actually measured for that candidate, and names the argmin
+/// at each corner.
+/// One bracket corner's reader: `(label, accessor)`.
+type CornerReader = (&'static str, fn(PeelForceCornersRecord) -> f64);
+
+fn peel_robustness(ranking: &[RankedCandidate], weights: ObjectiveWeights) -> PeelRobustnessRecord {
+    let corners: [CornerReader; 4] = [
+        ("low_pressure_low_exponent", |c: PeelForceCornersRecord| {
+            c.low_pressure_low_exponent_n.get()
+        }),
+        ("low_pressure_high_exponent", |c: PeelForceCornersRecord| {
+            c.low_pressure_high_exponent_n.get()
+        }),
+        ("high_pressure_low_exponent", |c: PeelForceCornersRecord| {
+            c.high_pressure_low_exponent_n.get()
+        }),
+        (
+            "high_pressure_high_exponent",
+            |c: PeelForceCornersRecord| c.high_pressure_high_exponent_n.get(),
+        ),
+    ];
+    let winners: Vec<(String, Option<usize>)> = corners
+        .iter()
+        .map(|(label, read)| ((*label).to_owned(), corner_winner(ranking, weights, *read)))
+        .collect();
+    let primary = winners.first().and_then(|(_, winner)| *winner);
+    let disagreeing_corners: Vec<String> = winners
+        .iter()
+        .filter(|(_, winner)| *winner != primary)
+        .map(|(label, _)| label.clone())
+        .collect();
+    PeelRobustnessRecord {
+        agrees_at_every_corner: disagreeing_corners.is_empty(),
+        pose_choice_not_robust: !disagreeing_corners.is_empty(),
+        disagreeing_corners,
+        winner_at_each_corner: winners,
+    }
+}
+
+/// The argmin candidate id under one peel-force corner, re-pricing every
+/// candidate's already-measured terms rather than re-scoring from the mesh —
+/// the corner choice changes nothing but the peel term.
+fn corner_winner(
+    ranking: &[RankedCandidate],
+    weights: ObjectiveWeights,
+    read_corner: fn(PeelForceCornersRecord) -> f64,
+) -> Option<usize> {
+    ranking
+        .iter()
+        .map(|entry| {
+            let peel_force_n = read_corner(entry.terms.peel_force_n);
+            let repriced = entry
+                .terms
+                .repriced(weights, entry.terms.support_area_cm2.get(), peel_force_n);
+            (entry.candidate, repriced.score.get())
+        })
+        .min_by(|left, right| left.1.total_cmp(&right.1).then(left.0.cmp(&right.0)))
+        .map(|(candidate, _)| candidate)
+}
+
+/// D15: the value one weight would need, holding every other weight at its
+/// registered value, for the runner-up to tie the winner — solving
+/// `fixed_winner + w*term_winner = fixed_runner + w*term_runner` for `w`.
+/// `None` when the two candidates' terms agree on this axis (no weight
+/// distinguishes them).
+fn flip_crossover(
+    score_winner: f64,
+    score_runner: f64,
+    term_winner: f64,
+    term_runner: f64,
+    registered_weight: f64,
+) -> Option<f64> {
+    let denominator = term_winner - term_runner;
+    if denominator.abs() < 1e-12 {
+        return None;
+    }
+    let fixed_winner = score_winner - registered_weight * term_winner;
+    let fixed_runner = score_runner - registered_weight * term_runner;
+    Some((fixed_runner - fixed_winner) / denominator)
+}
+
+/// D15: the flip crossover for each of the four price terms, between the
+/// commit-tier winner and runner-up.
+fn weight_flips(
+    winner: &TermsRecord,
+    runner_up: Option<&TermsRecord>,
+    weights: ObjectiveWeights,
+) -> Vec<WeightFlipRecord> {
+    let Some(runner) = runner_up else {
+        return Vec::new();
+    };
+    let mut flips = Vec::with_capacity(4);
+    let mut push = |weight_id: &str, registered: f64, term_winner: f64, term_runner: f64| {
+        let crossover = flip_crossover(
+            winner.score.get(),
+            runner.score.get(),
+            term_winner,
+            term_runner,
+            registered,
+        );
+        let pose_choice_not_robust = crossover.is_some_and(|value| {
+            registered > 0.0 && value > 0.0 && (value / registered).max(registered / value) <= 2.0
+        });
+        flips.push(WeightFlipRecord {
+            weight_id: weight_id.to_owned(),
+            registered_value: Finite::new(registered)
+                .unwrap_or_else(|_| Finite::new(0.0).expect("zero is finite")),
+            crossover: crossover.and_then(|value| Finite::new(value).ok()),
+            pose_choice_not_robust,
+        });
+    };
+    push(
+        ORIENT_WEIGHT_SUPPORT_AREA_CM2_ID,
+        weights.support_area_cm2(),
+        winner.support_area_cm2.get(),
+        runner.support_area_cm2.get(),
+    );
+    push(
+        ORIENT_PEEL_POINTS_PER_NEWTON_ID,
+        weights.peel_points_per_newton(),
+        winner.peel_force_n.low_pressure_low_exponent_n.get(),
+        runner.peel_force_n.low_pressure_low_exponent_n.get(),
+    );
+    push(
+        ORIENT_WEIGHT_HEIGHT_MM_ID,
+        weights.height_mm(),
+        winner.height_mm.get(),
+        runner.height_mm.get(),
+    );
+    push(
+        ORIENT_SCAR_WEIGHT_ID,
+        weights.scar(),
+        winner.scar_raw_mm2.get() / 100.0,
+        runner.scar_raw_mm2.get() / 100.0,
+    );
+    flips
+}
+
 fn objective_record(weights: ObjectiveWeights) -> Result<ObjectiveRecord, SearchError> {
     let weight = |id: &str, value: f64| -> Result<WeightRecord, SearchError> {
         Ok(WeightRecord {
@@ -1061,15 +1418,47 @@ fn objective_record(weights: ObjectiveWeights) -> Result<ObjectiveRecord, Search
             value: finite(value)?,
         })
     };
+    // Registered but no longer read by `score`; read fresh from the registry
+    // rather than restated, so the "unchanged, unread" claim is checkable.
+    let peak_xsec_retired_value = m0_constants()
+        .map_err(|error| SearchError::Score(ScoreError::Constants(error.to_string())))?
+        .placeholders()
+        .orient_weight_peak_xsec_cm2()
+        .diagnostic()
+        .get();
     Ok(ObjectiveRecord {
         support_area_cm2: weight(
             ORIENT_WEIGHT_SUPPORT_AREA_CM2_ID,
             weights.support_area_cm2(),
         )?,
-        peak_xsec_cm2: weight(ORIENT_WEIGHT_PEAK_XSEC_CM2_ID, weights.peak_xsec_cm2())?,
         height_mm: weight(ORIENT_WEIGHT_HEIGHT_MM_ID, weights.height_mm())?,
         scar: weight(ORIENT_SCAR_WEIGHT_ID, weights.scar())?,
         overhang_angle_deg: weight(OVERHANG_ANGLE_DEG_ID, weights.overhang_angle_deg())?,
+        peel_points_per_newton: weight(
+            ORIENT_PEEL_POINTS_PER_NEWTON_ID,
+            weights.peel_points_per_newton(),
+        )?,
+        peak_xsec_cm2_retired: weight(ORIENT_WEIGHT_PEAK_XSEC_CM2_ID, peak_xsec_retired_value)?,
+        peel_reference_area_mm2: weight(
+            ORIENT_PEEL_REFERENCE_AREA_MM2_ID,
+            weights.peel_reference_area_mm2(),
+        )?,
+        peel_pressure_pa_low: weight(
+            ORIENT_PEEL_REFERENCE_PRESSURE_PA_LOW_ID,
+            weights.peel_pressure_pa_low(),
+        )?,
+        peel_pressure_pa_high: weight(
+            ORIENT_PEEL_REFERENCE_PRESSURE_PA_HIGH_ID,
+            weights.peel_pressure_pa_high(),
+        )?,
+        peel_area_exponent_low: weight(
+            ORIENT_PEEL_AREA_EXPONENT_LOW_ID,
+            weights.peel_area_exponent_low(),
+        )?,
+        peel_area_exponent_high: weight(
+            ORIENT_PEEL_AREA_EXPONENT_HIGH_ID,
+            weights.peel_area_exponent_high(),
+        )?,
         down_limit: finite(weights.down_limit())?,
         peak_section_method: "exact_piecewise_quadratic_supremum".to_owned(),
     })

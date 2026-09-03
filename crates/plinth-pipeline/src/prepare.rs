@@ -798,6 +798,8 @@ pub struct ChainOutcome {
 #[derive(Clone, Debug)]
 pub struct StagePolicy {
     pub orientation: OrientationPolicy,
+    /// Which support engine this run uses. See [`crate::Placement`].
+    pub placement: crate::Placement,
     pub hollow: HollowRequest,
     pub support: SupportRequest,
     pub resources: PrepareResourcePolicy,
@@ -824,6 +826,7 @@ impl StagePolicy {
         };
         Ok(Self {
             orientation: request.orientation.clone(),
+            placement: request.placement,
             hollow: request.hollow.clone(),
             support: request.support.clone(),
             resources,
@@ -1322,7 +1325,12 @@ fn orient_model(
             // The run's resource policy owns the work budget; the registry owns
             // every number that can change a score. Neither owns the other's.
             request.limits = limits;
-            plinth_orient::search_and_orient(decimated, &request).map_err(|source| {
+            // LANE 3 (docs/plans/slice-sweep-core-2026-09-02.md §12): the
+            // orientation stage is shared by both `--placement` engines, so
+            // wiring the real sweep-demand measurer here fixes the double-
+            // charged-flat-pose defect for legacy and sweep placement alike.
+            let demand = plinth_sweep::CoarseSweepDemand;
+            plinth_orient::search_and_orient(decimated, &request, Some(&demand)).map_err(|source| {
                 ChainStop::new(PipelineError::Orient {
                     model: model.clone(),
                     source,
@@ -1849,6 +1857,44 @@ pub fn seal_and_emit(
         .collect::<Vec<_>>();
 
     let input = policy.resources.support_input(&layers, &delicacy, &[]);
+
+    // **The placement selector.** Both engines end at the same
+    // `SupportedModel` -> `plinth_emit::write` boundary, but they do NOT share
+    // the pre-write gate set: `judge_then_emit` judges a
+    // `FinalSupportAuthority`'s verification snapshot, and the sweep produces
+    // no authority. The sweep path therefore emits with ZERO gates run, and
+    // says so by reporting every gate as pending — the same disclosure channel
+    // the legacy path uses for a gate that is not yet ported. See the sweep
+    // path's own comment.
+    if policy.placement == crate::Placement::Sweep {
+        return sweep_and_emit(
+            model,
+            source_faces,
+            prepared_faces,
+            hollowed,
+            supported_geometry,
+            SweepStageInputs {
+                min_z,
+                max_z,
+                layer_pitch_mm,
+                lift_mm: policy.support.lift_mm,
+                max_primitives: input.max_primitives(),
+                max_primitive_bytes: input.max_primitive_bytes(),
+                printer: policy.printer(),
+            },
+            HollowCarryOut {
+                hollow_disposition,
+                cavity_repair,
+                wall,
+                realized_wall,
+                savings_shortfall,
+                filled_back_chambers_ml,
+            },
+            target,
+            stop_after,
+        );
+    }
+
     // A refusal without the bounds it was measured against is not a
     // measurement; carry the model-scaled caps on the failure path, as the
     // census harness does.
@@ -2139,6 +2185,386 @@ pub fn seal_and_emit(
         plate_z_mm: gated.plate_z_mm,
         emit: gated.emit,
     }))
+}
+
+/// The frame numbers the sweep path needs, gathered at the fork so
+/// `sweep_and_emit` does not re-measure the mesh a second time.
+struct SweepStageInputs<'a> {
+    min_z: f64,
+    max_z: f64,
+    layer_pitch_mm: f64,
+    lift_mm: PositiveFinite,
+    max_primitives: usize,
+    max_primitive_bytes: usize,
+    printer: &'a PrinterProfile,
+}
+
+/// The hollow stage's own measurements, read once at the fork because the
+/// hollowed model is consumed below and its report goes with it.
+struct HollowCarryOut {
+    hollow_disposition: HollowDisposition,
+    cavity_repair: Option<plinth_hollow::CavityRepairEvidence>,
+    wall: Option<Finite>,
+    realized_wall: Option<plinth_hollow::RealizedWall>,
+    savings_shortfall: Option<plinth_hollow::SavingsShortfall>,
+    filled_back_chambers_ml: Vec<Finite>,
+}
+
+/// Place a support field with the slice-sweep core and emit one `.chitubox`.
+///
+/// # What this path does NOT do, and why that is stated here rather than
+/// discovered
+///
+/// **No pre-write gate runs.** `judge_then_emit` judges a
+/// `FinalSupportAuthority`'s verification snapshot — routed contacts, live
+/// members, the sealed layout — and the sweep produces none of those. Rather
+/// than fake a snapshot for it to judge, this path emits with zero gates run
+/// and reports **all twelve** as `pending_gates`, which is the run report's
+/// existing channel for "this artifact was authorized on the gates that ran,
+/// not on all twelve". The design of record (§11) predicted the gates would
+/// need no change; they do, and this is the deviation, disclosed.
+///
+/// **No repair ledger, no ownerless-island list, no abandoned/grown contacts.**
+/// Those are measurements the legacy controller takes. The sweep has no repair
+/// loop at all (the up-sweep terminates with the demand set empty or a named
+/// residual), so `None`/empty here means "this engine never ran that search",
+/// not "the search found nothing".
+///
+/// Every shortfall the sweep DOES find is printed in the disclosure block
+/// below and is a warning on an emitted file, never a refusal (owner ruling
+/// 2026-09-01).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the sweep fork carries the frame numbers and the hollow report the caller \
+          already read; grouping them further would only rename the same nine facts"
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "one layer-count cast on a span the mesh bbox already proved finite and positive; \
+          Rust's `as` saturates at the integer bounds and maps NaN to 0, and the result is \
+          clamped to at least 1 below"
+)]
+fn sweep_and_emit(
+    model: &ModelId,
+    source_faces: usize,
+    prepared_faces: usize,
+    hollowed: HollowedModel,
+    supported_geometry: SupportedGeometry,
+    inputs: SweepStageInputs<'_>,
+    hollow: HollowCarryOut,
+    target: &Path,
+    stop_after: Option<StageStop>,
+) -> Result<Option<ChainOutcome>, ChainStop> {
+    let clock = plinth_support::StageClock::start(format!("model {model}"));
+    clock.entering("SliceSweepPlacement");
+
+    // The sweep's own frame: `plate_z = min_z - lift`, exactly as
+    // `crates/plinth-support/src/runner.rs`:2178-2186 computes it, and a layer
+    // plan that stops at the MODEL TOP rather than carrying the sealed-run
+    // gates' `+1.0 mm` headroom and 1,000-layer minimum. Slicing 830 empty
+    // planes for a disc is waste, not error.
+    let plate_z = inputs.min_z - inputs.lift_mm.get();
+    let sweep_layer_count = (((inputs.max_z - plate_z) / inputs.layer_pitch_mm).ceil() as usize)
+        .saturating_add(1)
+        .max(1);
+    let sweep_layers = plinth_core::LayerPlan::new(
+        plate_z,
+        vec![inputs.layer_pitch_mm; sweep_layer_count],
+    )
+    .map_err(|source| {
+        ChainStop::new(PipelineError::LayerPlan {
+            model: model.clone(),
+            source,
+        })
+    })?;
+
+    let policy = plinth_sweep::SweepPolicy::from_registry().map_err(|source| {
+        ChainStop::new(PipelineError::Sweep {
+            model: model.clone(),
+            source,
+        })
+    })?;
+    let started = std::time::Instant::now();
+    let plan = plinth_sweep::run_sweep(hollowed.mesh(), &sweep_layers, &policy).map_err(
+        |source| {
+            ChainStop::new(PipelineError::Sweep {
+                model: model.clone(),
+                source,
+            })
+        },
+    )?;
+    let sweep_seconds = started.elapsed().as_secs_f64();
+
+    let frame = plinth_support::BuildFrame::new(
+        Finite::new(plate_z).unwrap_or_else(|_| {
+            // `plate_z` came out of a finite mesh extent minus a positive
+            // finite lift; the sweep already refused a non-finite bbox.
+            Finite::new(0.0).expect("zero is finite")
+        }),
+        inputs.lift_mm,
+    );
+    let emission = plinth_sweep::to_primitives(
+        &plan,
+        frame,
+        &sweep_layers,
+        inputs.max_primitives,
+        inputs.max_primitive_bytes,
+    )
+    .map_err(|source| {
+        ChainStop::new(PipelineError::SweepLowering {
+            model: model.clone(),
+            source,
+        })
+    })?;
+
+    print_sweep_disclosure(
+        model,
+        &plan,
+        &emission,
+        sweep_seconds,
+        inputs.printer,
+        &sweep_layers,
+    );
+
+    if stop_after == Some(StageStop::Support) {
+        return Ok(None);
+    }
+
+    let primitive_count = emission.primitives.len();
+    let (mesh, hollow_history) = hollowed.into_parts();
+    let history = plinth_support::SupportHistory::from_reports(
+        hollow_history,
+        plinth_support::SupportReport {
+            support_primitive_count: primitive_count,
+            // v1 emits no raft; a `RootFlare` per plate landing stands in, and
+            // that is disclosed above rather than counted as a raft here.
+            raft_primitive_count: 0,
+        },
+        frame,
+    );
+    let supported =
+        plinth_support::SupportedModel::from_parts(mesh, emission.primitives, history).map_err(
+            |source| {
+                ChainStop::new(PipelineError::Support {
+                    model: model.clone(),
+                    source,
+                })
+            },
+        )?;
+
+    clock.entering("EmitWithoutGates");
+    // A failed write leaves no file: `plinth_emit::write` cleans up after
+    // itself on every failure path. An artifact an EARLIER run left at the
+    // same target is cleared the way the gated path clears it, so a refused
+    // model never leaves yesterday's answer sitting beside today's failure.
+    let emit = match plinth_emit::write(
+        &supported,
+        &EmitRequest {
+            target_path: target.to_path_buf(),
+            printer: inputs.printer.clone(),
+        },
+    ) {
+        Ok(report) => report,
+        Err(source) => {
+            let _ = std::fs::remove_file(target);
+            return Err(ChainStop::new(PipelineError::Emit {
+                model: model.clone(),
+                source,
+            }));
+        }
+    };
+
+    Ok(Some(ChainOutcome {
+        model: model.clone(),
+        source_faces,
+        prepared_faces,
+        cavity_repair: hollow.cavity_repair,
+        wall: hollow.wall,
+        realized_wall: hollow.realized_wall,
+        savings_shortfall: hollow.savings_shortfall,
+        filled_back_chambers_ml: hollow.filled_back_chambers_ml,
+        hollow_disposition: hollow.hollow_disposition,
+        supported_geometry,
+        // Empty because this engine never ran the searches that fill them, not
+        // because those searches found nothing. See this function's own doc.
+        ownerless_islands: Vec::new(),
+        repair_report: None,
+        repair_ledger: None,
+        abandoned_contacts: Vec::new(),
+        grown_contact_tips: Vec::new(),
+        routed_contacts: plan.struts.len(),
+        final_live_members: plan.struts.len(),
+        snapshot_digest: sweep_digest_u64(&plan.report.sweep_digest),
+        // **Every gate is pending on this path**, because none of them ran.
+        pending_gates: PreWriteGate::ALL.to_vec(),
+        load_warnings: None,
+        coverage_warning: None,
+        primitive_count,
+        lift_mm: supported.lift_mm().get(),
+        plate_z_mm: supported.plate_z_mm().get(),
+        emit,
+    }))
+}
+
+/// A stable `u64` view of the sweep's own content digest, so the run report's
+/// `snapshot_digest` field names THIS field rather than being left at zero.
+fn sweep_digest_u64(digest: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in digest.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Print the sweep's disclosure block and its full summary.
+///
+/// **This goes to stdout, not into the serialized `.pipeline.json` report.**
+/// The design of record's §13 field list is printed in full and verbatim
+/// below; giving it a typed home inside `ModelPreparationOutcome::Artifact`
+/// means a serde surface and a golden-report migration that LANE 2 did not
+/// take, and pretending it landed in the JSON would be worse than saying where
+/// it did land.
+fn print_sweep_disclosure(
+    model: &ModelId,
+    plan: &plinth_sweep::SweepPlan,
+    emission: &plinth_sweep::SweepEmission,
+    sweep_seconds: f64,
+    printer: &PrinterProfile,
+    layers: &plinth_core::LayerPlan,
+) {
+    let report = &plan.report;
+    println!("[sweep {model}] {}", report.render_disclosure());
+    println!(
+        "[sweep {model}] arms {} (plate {}, model {}, arm {}, interior {}); \
+         seat spacing mean {:.3} mm p95 {:.3} mm max {:.3} mm; \
+         tip radius min {:.4} p50 {:.4} max {:.4} mm (DIAMETER min {:.4} p50 {:.4} max {:.4} mm), \
+         {} at the minimum, {} at the maximum, {} above the owner's growth ceiling; \
+         arms dropped at the minimum load {}",
+        report.struts_total,
+        report.landings.plate,
+        report.landings.model,
+        report.landings.strut,
+        report.landings.interior,
+        report.seat_spacing.mean_mm,
+        report.seat_spacing.p95_mm,
+        report.seat_spacing.max_mm,
+        report.tip_radius.min_mm,
+        report.tip_radius.p50_mm,
+        report.tip_radius.max_mm,
+        2.0 * report.tip_radius.min_mm,
+        2.0 * report.tip_radius.p50_mm,
+        2.0 * report.tip_radius.max_mm,
+        report.tip_radius.count_at_min,
+        report.tip_radius.count_at_max,
+        report.tip_radius.count_above_owner_growth_ceiling,
+        report.counters.strut_removals,
+    );
+    println!(
+        "[sweep {model}] peak layer area {:.4} mm2; total scar {:.4} mm2 (invariant \
+         peak/X_ALLOWED = {:.4} mm2, ratio {:.4}); plate reaction {:.4} mm2; \
+         conservation residual {:.3e}; residual demand {} cells / {:.4} mm2; \
+         uncarried load {:.4} mm2; unrooted landings {}",
+        report.peak_layer_area_mm2,
+        report.total_scar_mm2,
+        report.peak_layer_area_mm2 / 12.0,
+        if report.peak_layer_area_mm2 > 0.0 {
+            report.total_scar_mm2 / (report.peak_layer_area_mm2 / 12.0)
+        } else {
+            f64::NAN
+        },
+        report.plate_reaction_mm2,
+        report.conservation_residual,
+        report.residual_demand_cells,
+        report.residual_demand_mm2,
+        report.uncarried_load_mm2,
+        report.unrooted_landings,
+    );
+    println!(
+        "[sweep {model}] raster {} cells/layer at {:.4} mm pitch over {} layers \
+         ({} coarsening steps); kappa used {:.7}, first loss {:.7}, audit gate {:.7}, \
+         will pass audit span check: {}; u_from_vertical_max {:.5}; \
+         tau_vertical_over_tau_used_max {:.4}; max tau at binding reach {:.4} mm; \
+         chamfer non-convergences {}; registered-but-unread target spacing {:.3} mm",
+        report.cells_per_layer,
+        report.achieved_pitch_mm,
+        report.layers,
+        report.coarsening_steps,
+        report.reach.kappa_used,
+        report.reach.kappa_first_loss,
+        report.reach.kappa_audit_gate,
+        report.will_pass_audit_span_check,
+        report.u_from_vertical_max,
+        report.tau_vertical_over_tau_used_max,
+        report.max_tau_at_binding_reach_mm,
+        report.chamfer_not_converged,
+        report.reach.target_spacing_mm_registered_but_unused,
+    );
+    println!(
+        "[sweep {model}] slenderness p50 {:.1}:1 max {:.1}:1; overloaded arms {}; \
+         model sections over X_ALLOWED {}; peel field {:?} (area {:?}, tilt {:?}); \
+         path hits: reach {} vertical {} spread {} arm-share {} injections {} max-combines {} \
+         raster {} coarsening {} kappa {}/{} lift {}",
+        report.slenderness_p50,
+        report.slenderness_max,
+        report.overloaded_struts.len(),
+        report.model_section_overload.len(),
+        report.peel_field_mode,
+        report.peel_field_stats.beta_area_low_span,
+        report.peel_field_stats.beta_tilt_span,
+        report.counters.reach_tests,
+        report.counters.vertical_inheritance_hits,
+        report.counters.multi_carrier_split_hits,
+        report.counters.strut_share_reads,
+        report.counters.landing_injections,
+        report.counters.max_combine_hits,
+        report.counters.rasteriser_entries,
+        report.counters.coarsening_loop_hits,
+        report.counters.kappa_placement_reads,
+        report.counters.kappa_audit_gate_reads,
+        report.counters.lift_assertions,
+    );
+    println!(
+        "[sweep {model}] lowering: {} arms offered, {} emitted, {} dropped zero-length, \
+         {} dropped invalid geometry, {} plate arms WITHOUT a root flare; \
+         {} emit primitives; plate_z {:.4} mm; layer height {:.4} mm; \
+         plan layers {} at {:.4} mm; printer {}; sweep wall time {:.2} s; digest {}",
+        emission.arms_offered,
+        emission.arms_emitted(),
+        emission.arms_dropped_zero_length,
+        emission.arms_dropped_invalid_geometry,
+        emission.arms_without_root_flare,
+        emission.primitives.len(),
+        plan.plate_z_mm,
+        plan.layer_height_mm,
+        layers.heights_mm().len(),
+        layers.heights_mm().first().copied().unwrap_or_default(),
+        printer.id().as_str(),
+        sweep_seconds,
+        report.sweep_digest,
+    );
+    for overloaded in report.overloaded_struts.iter().take(20) {
+        println!(
+            "[sweep {model}] WARNING overloaded arm {} at layer {}: carries {:.4} mm2, \
+             realized X {:.3} against X_ALLOWED 12",
+            overloaded.strut_id, overloaded.layer, overloaded.carried_mm2, overloaded.realized_x,
+        );
+    }
+    for section in report.model_section_overload.iter().take(20) {
+        println!(
+            "[sweep {model}] WARNING model section at layer {}: {:.4} mm2 of material carries \
+             {:.4} mm2, realized X {:.3}. The engine supports models; it does not redesign them.",
+            section.layer, section.component_area_mm2, section.carried_mm2, section.realized_x,
+        );
+    }
+    if report.residual_demand_cells > 0 {
+        println!(
+            "[sweep {model}] WARNING {} demand cells ({:.4} mm2) no legal arm could reach. \
+             This region is BARE on an emitted file.",
+            report.residual_demand_cells, report.residual_demand_mm2,
+        );
+    }
 }
 
 /// The last hop of a successful chain: everything the run measured, moved into

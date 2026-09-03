@@ -140,6 +140,8 @@ pub fn stage_policy() -> StagePolicy {
         // baseline in `orient` below. The field is the run-level policy
         // `prepare` consults when it does the orienting itself.
         orientation: plinth_pipeline::OrientationPolicy::DenseSweep,
+        // LANE 2: the legacy engine, named rather than defaulted.
+        placement: plinth_pipeline::Placement::Legacy,
         hollow: plinth_hollow::HollowRequest::with_registered_wall_default(printer.clone())
             .expect("registered hollow wall default"),
         support: registered_support_request(&printer).expect("registered lift"),

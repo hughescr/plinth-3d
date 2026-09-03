@@ -1503,6 +1503,123 @@ impl SliceStitchSpace {
 /// where the vertex-only legacy stitcher could not see it -- and the nonzero
 /// union merges them, which is design case D1 arriving on the clean corpus
 /// rather than only on the treant. Nothing was re-pinned to absorb it.
+/// Slice a mesh at explicit z planes and return normalized, hole-owning
+/// cross-sections — one solid per connected component, CCW outer, CW holes,
+/// even-odd and non-zero agreeing.
+///
+/// **This is a door, not a new implementation.** It is exactly the
+/// stitch → orient → normalize chain the print-layer perception path already
+/// runs ([`normalized_slice_layers`], reached from
+/// [`perceive_generic_contacts`]), lifted so a second placement engine can
+/// consume the same cross-sections without reproducing the winding and
+/// hole-ownership rules. Nothing here is new geometry, and `mod orientation`
+/// stays private: `orient_layers_batch` is not re-exported (design of record
+/// D10, `docs/plans/slice-sweep-core-2026-09-02.md` §14).
+///
+/// The caller supplies the planes rather than a [`LayerPlan`] on purpose. The
+/// pipeline's plan carries a +1.0 mm headroom and a 1,000-layer minimum that
+/// belong to the sealed-run gates; a consumer that only wants the model's own
+/// span should say so rather than slice hundreds of empty planes.
+pub fn slice_stack(
+    mesh: &Mesh,
+    planes: &[f64],
+    limits: SliceStackLimits,
+) -> Result<Vec<Vec<SliceSolid>>, GenericPerceptionError> {
+    let surface = NativeSurface::from_indexed(
+        mesh.verts(),
+        mesh.tris(),
+        NativeSurfaceConfig {
+            grid_pitch_mm: limits.surface_grid_pitch_mm(),
+            max_grid_bytes: limits.max_surface_grid_bytes,
+        },
+    )
+    .map_err(|error| GenericPerceptionError::Surface(error.to_string()))?;
+    let sliced = surface
+        .slice_z_batch(
+            planes,
+            PlaneSliceLimits {
+                max_planes: limits.max_planes,
+                max_triangle_plane_tests: limits.max_triangle_plane_tests,
+                max_intersections: limits.max_slice_intersections,
+                max_output_bytes: limits.max_slice_output_bytes,
+            },
+        )
+        .map_err(|error| GenericPerceptionError::Slice(error.to_string()))?;
+    normalized_slice_layers(
+        SliceStitchSpace::PrintLayer,
+        &sliced,
+        surface.geometry().normals(),
+        limits.into_perception_limits(),
+    )
+}
+
+/// The caps [`slice_stack`] charges, and only those.
+///
+/// A separate type from [`GenericPerceptionLimits`] on purpose: this door
+/// reaches the slice, stitch, orient and normalize stages and NONE of the kNN,
+/// island-neighbour or overlap stages, so handing a caller the full
+/// perception-limit surface would ask it to state authority over work that
+/// never runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SliceStackLimits {
+    pub max_planes: usize,
+    pub max_triangle_plane_tests: usize,
+    pub max_slice_intersections: usize,
+    pub max_slice_output_bytes: usize,
+    pub max_loop_vertices: usize,
+    pub max_surface_grid_bytes: usize,
+    /// The kernel surface grid's pitch in µm, so this type stays `Eq`. The
+    /// slicer's own accuracy does not depend on it; it is a parity-grid
+    /// acceleration pitch.
+    pub surface_grid_pitch_um: u32,
+}
+
+impl SliceStackLimits {
+    #[must_use]
+    pub const fn production() -> Self {
+        let production = GenericPerceptionLimits::production(KnnBatchLimits {
+            max_source_points: 0,
+            max_query_points: 0,
+            max_neighbors: 0,
+            max_logical_peak_bytes: 0,
+            max_work: 0,
+        });
+        Self {
+            max_planes: production.max_planes,
+            max_triangle_plane_tests: production.max_triangle_plane_tests,
+            max_slice_intersections: production.max_slice_intersections,
+            max_slice_output_bytes: production.max_slice_output_bytes,
+            max_loop_vertices: production.max_loop_vertices,
+            max_surface_grid_bytes: 2 * 1024 * 1024 * 1024,
+            surface_grid_pitch_um: 400,
+        }
+    }
+
+    #[must_use]
+    fn surface_grid_pitch_mm(self) -> f64 {
+        f64::from(self.surface_grid_pitch_um) / 1000.0
+    }
+
+    fn into_perception_limits(self) -> GenericPerceptionLimits {
+        // The kNN caps are zero because the kNN stage is unreachable from
+        // this door; a nonzero value here would be authority over work that
+        // never runs.
+        let mut limits = GenericPerceptionLimits::production(KnnBatchLimits {
+            max_source_points: 0,
+            max_query_points: 0,
+            max_neighbors: 0,
+            max_logical_peak_bytes: 0,
+            max_work: 0,
+        });
+        limits.max_planes = self.max_planes;
+        limits.max_triangle_plane_tests = self.max_triangle_plane_tests;
+        limits.max_slice_intersections = self.max_slice_intersections;
+        limits.max_slice_output_bytes = self.max_slice_output_bytes;
+        limits.max_loop_vertices = self.max_loop_vertices;
+        limits
+    }
+}
+
 fn normalized_slice_layers(
     space: SliceStitchSpace,
     batch: &geom_kernel::PlaneSliceBatch,

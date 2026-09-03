@@ -1,0 +1,29 @@
+[package]
+name = "plinth-sweep"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# The registry is the only place a number may come from. Nothing in this crate
+# declares a physical constant of its own.
+plinth-core = { path = "../plinth-core" }
+plinth-mesh = { path = "../plinth-mesh" }
+# LANE 3 (docs/plans/slice-sweep-core-2026-09-02.md §12): src/orient_demand.rs
+# implements `plinth_orient::demand::SupportDemandMeasurer`, the trait that
+# lets the orientation objective's support term read real sweep demand
+# without `plinth-orient` depending on this crate (that would cycle back
+# through plinth-support -> plinth-hollow -> plinth-orient; see
+# `plinth_orient::demand`'s own module doc). Nothing `plinth-orient` depends
+# on reaches back here, so this edge introduces no cycle.
+plinth-orient = { path = "../plinth-orient" }
+# For `plinth_support::perception::slice_stack` alone -- the stitch/orient/
+# normalize chain the print-layer path already runs. No legacy placement code
+# is reached from here, and `dyadic::refine_depth`, the per-triangle refinement
+# that is root cause RC3, must never be.
+plinth-support = { path = "../plinth-support" }
+thiserror = { workspace = true }

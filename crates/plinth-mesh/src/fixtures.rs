@@ -1054,3 +1054,398 @@ fn validate_finite(parameter: &'static str, value: f64) -> Result<(), MeshError>
         Err(MeshError::InvalidFiniteFixtureParameter { parameter, value })
     }
 }
+
+// ---------------------------------------------------------------------------
+// Slice-sweep oracle fixtures (LANE 1,
+// `docs/plans/slice-sweep-core-2026-09-02.md` §10).
+//
+// These exist so the sweep's three oracles can be graded from a CLEAN CHECKOUT.
+// The `Round_25/50/100.stl` bases that motivated the work are run outputs and
+// are not in this repository; committing them is LANE 2's job (design decision
+// D11). Until they are, the disc oracle grades a PARAMETRIC MEMBER OF THE SAME
+// FAMILY -- drafted rim, recessed top -- and every area it grades against is
+// measured by the harness from the slice stack, never hand-fed.
+// ---------------------------------------------------------------------------
+
+/// The overhang table with square legs of side `w`, for the model-section
+/// overload witness.
+///
+/// The stock [`make_overhang_table`] does **not** fire the sweep's
+/// `model_section_overload` warning and the oracle says so: at 4 mm legs the
+/// leg carries `X_model = 64.334 / 16 = 4.02`, comfortably under
+/// `X_ALLOWED = 12`. Thin it to 1.5 mm and the same arithmetic gives
+/// `(2.25 + 12.780 + 14.254) / 2.25 = 13.02 > 12`, which is one warning on a
+/// file that is still emitted. Same generator, same family, one dimension
+/// changed — no new geometry code.
+pub fn make_overhang_table_thin(leg_width_mm: f64) -> Result<Mesh, MeshError> {
+    make_overhang_table_with(
+        [leg_width_mm, leg_width_mm, 20.0],
+        [30.0, 30.0, 4.0],
+        0.0,
+    )
+}
+
+/// A hollow box: a `outer` mm cube with `wall` mm walls and a closed cubic
+/// cavity, wound so the cavity's own faces point INTO the void.
+///
+/// The cavity-ceiling oracle. Its ceiling underside can only be reached from
+/// inside, so a placement engine either supports it from the cavity's lower
+/// interior — which is what `docs/physics.md` §"supports may seat on model"
+/// requires — or leaves it bare. A strut punched through the exterior wall is
+/// the wrong answer and this shape is what makes the difference visible.
+pub fn make_cavity_box(outer_mm: f64, wall_mm: f64) -> Result<Mesh, MeshError> {
+    validate_positive("outer", outer_mm)?;
+    validate_positive("wall", wall_mm)?;
+    if 2.0 * wall_mm >= outer_mm {
+        return Err(MeshError::InvalidFiniteFixtureParameter {
+            parameter: "wall",
+            value: wall_mm,
+        });
+    }
+    let inner = outer_mm - 2.0 * wall_mm;
+    let mut verts = Vec::with_capacity(16);
+    let mut tris = Vec::with_capacity(24);
+    append_box(
+        &mut verts,
+        &mut tris,
+        [outer_mm, outer_mm, outer_mm],
+        [0.0, 0.0, outer_mm / 2.0],
+    )?;
+    let base = u32::try_from(verts.len()).map_err(|_| MeshError::FixtureIndexOverflow)?;
+    let half = inner / 2.0;
+    for x in [-half, half] {
+        for y in [-half, half] {
+            for z in [-half, half] {
+                verts.push([x, y, outer_mm / 2.0 + z]);
+            }
+        }
+    }
+    // The cavity is the same box with every triangle reversed: its normals
+    // point into the void, which is what makes the void a void rather than a
+    // second solid.
+    tris.extend(BOX_FACES.map(|face| [base + face[0], base + face[2], base + face[1]]));
+    Mesh::new(verts, tris)
+}
+
+/// A right cylinder of `diameter` mm and `height` mm whose flat caps are
+/// **single fans** from a centre vertex.
+///
+/// Half of the triangulation-invariance pair. See [`make_disc_uniform`].
+pub fn make_disc_fan(diameter_mm: f64, height_mm: f64, segments: usize) -> Result<Mesh, MeshError> {
+    disc(diameter_mm, height_mm, segments, 1)
+}
+
+/// The same cylinder as [`make_disc_fan`], with its caps subdivided into
+/// `rings` concentric rings instead of one fan.
+///
+/// **The triangulation-invariance witness.** The two meshes bound the same
+/// solid and differ only in how many triangles cover the flat faces, so any
+/// placement engine that keys its coverage raster or its load ledger to
+/// TRIANGLES rather than to area will disagree with itself between them. That
+/// is exactly the defect the disc diagnosis of 2026-09-02 named RC3 and RC4,
+/// and sabotage S6 re-introduces it to check that this pair can still see it.
+pub fn make_disc_uniform(
+    diameter_mm: f64,
+    height_mm: f64,
+    segments: usize,
+    rings: usize,
+) -> Result<Mesh, MeshError> {
+    disc(diameter_mm, height_mm, segments, rings.max(2))
+}
+
+fn disc(
+    diameter_mm: f64,
+    height_mm: f64,
+    segments: usize,
+    rings: usize,
+) -> Result<Mesh, MeshError> {
+    validate_positive("diameter", diameter_mm)?;
+    validate_positive("height", height_mm)?;
+    if segments < 3 || rings == 0 {
+        return Err(MeshError::InvalidFiniteFixtureParameter {
+            parameter: "segments",
+            value: segments as f64,
+        });
+    }
+    let radius = diameter_mm / 2.0;
+    let mut verts = Vec::new();
+    let mut tris = Vec::new();
+    append_cap(&mut verts, &mut tris, radius, 0.0, segments, rings, false)?;
+    append_cap(
+        &mut verts, &mut tris, radius, height_mm, segments, rings, true,
+    )?;
+    append_skirt(
+        &mut verts, &mut tris, radius, 0.0, radius, height_mm, segments, true,
+    )?;
+    Mesh::new(verts, tris)
+}
+
+/// A drafted, recessed disc: the parametric member of the `Round_*` base
+/// family the disc oracle grades.
+///
+/// The measured shape of `Round_50.stl`
+/// (`plinth-evidence/disc-diagnosis-2026-09-02/first-principles/FINDINGS.md`
+/// §0) is a **drafted frustum**, `r 24 → 25` over `z −3.5 → 0`, with a 2.5 mm
+/// recess in the top face. That draft is why the bottom layer's demand is the
+/// bottom FACE and not the footprint, and the recess is why the largest solid
+/// cross-section is the layer immediately below the recess and not the bottom
+/// or the rim top. Both facts are what the oracle checks, so the fixture has to
+/// carry them.
+///
+/// `z = 0` is the bottom face. The recess opens downward from the top face.
+pub fn make_recessed_disc(
+    bottom_radius_mm: f64,
+    top_radius_mm: f64,
+    height_mm: f64,
+    recess_depth_mm: f64,
+    recess_radius_mm: f64,
+    segments: usize,
+) -> Result<Mesh, MeshError> {
+    validate_positive("bottom_radius", bottom_radius_mm)?;
+    validate_positive("top_radius", top_radius_mm)?;
+    validate_positive("height", height_mm)?;
+    validate_positive("recess_depth", recess_depth_mm)?;
+    validate_positive("recess_radius", recess_radius_mm)?;
+    if segments < 3 || recess_depth_mm >= height_mm || recess_radius_mm >= top_radius_mm {
+        return Err(MeshError::InvalidFiniteFixtureParameter {
+            parameter: "recess_depth",
+            value: recess_depth_mm,
+        });
+    }
+    let recess_z = height_mm - recess_depth_mm;
+    let mut verts = Vec::new();
+    let mut tris = Vec::new();
+    // Bottom face, a single fan: the demand surface the oracle measures.
+    append_cap(&mut verts, &mut tris, bottom_radius_mm, 0.0, segments, 1, false)?;
+    // Drafted rim, outward normals.
+    append_skirt(
+        &mut verts,
+        &mut tris,
+        bottom_radius_mm,
+        0.0,
+        top_radius_mm,
+        height_mm,
+        segments,
+        true,
+    )?;
+    // Top annulus between the recess lip and the rim.
+    append_annulus(
+        &mut verts,
+        &mut tris,
+        recess_radius_mm,
+        top_radius_mm,
+        height_mm,
+        segments,
+        true,
+    )?;
+    // Recess wall, normals pointing INTO the recess void.
+    append_skirt(
+        &mut verts,
+        &mut tris,
+        recess_radius_mm,
+        recess_z,
+        recess_radius_mm,
+        height_mm,
+        segments,
+        false,
+    )?;
+    // Recess ceiling seen from above: it is the top of the remaining material,
+    // so it faces up.
+    append_cap(
+        &mut verts,
+        &mut tris,
+        recess_radius_mm,
+        recess_z,
+        segments,
+        1,
+        true,
+    )?;
+    Mesh::new(verts, tris)
+}
+
+fn ring_point(radius: f64, z: f64, segment: usize, segments: usize) -> [f64; 3] {
+    let theta = 2.0 * core::f64::consts::PI * segment as f64 / segments as f64;
+    [radius * theta.cos(), radius * theta.sin(), z]
+}
+
+/// A flat circular cap at `z`, `rings` concentric rings deep, facing up when
+/// `up` and down otherwise.
+fn append_cap(
+    verts: &mut Vec<[f64; 3]>,
+    tris: &mut Vec<[u32; 3]>,
+    radius: f64,
+    z: f64,
+    segments: usize,
+    rings: usize,
+    up: bool,
+) -> Result<(), MeshError> {
+    let base = u32::try_from(verts.len()).map_err(|_| MeshError::FixtureIndexOverflow)?;
+    verts.push([0.0, 0.0, z]);
+    for ring in 1..=rings {
+        let r = radius * ring as f64 / rings as f64;
+        for segment in 0..segments {
+            verts.push(ring_point(r, z, segment, segments));
+        }
+    }
+    let index = |ring: usize, segment: usize| -> u32 {
+        base + 1 + u32::try_from((ring - 1) * segments + segment % segments).unwrap_or(u32::MAX)
+    };
+    let mut push = |a: u32, b: u32, c: u32| {
+        // One winding rule for both faces, applied once: the caller says which
+        // way the face looks and the swap happens here, so no call site has to
+        // remember an orientation convention.
+        if up {
+            tris.push([a, b, c]);
+        } else {
+            tris.push([a, c, b]);
+        }
+    };
+    for segment in 0..segments {
+        push(base, index(1, segment), index(1, segment + 1));
+    }
+    for ring in 2..=rings {
+        for segment in 0..segments {
+            push(
+                index(ring - 1, segment),
+                index(ring, segment),
+                index(ring, segment + 1),
+            );
+            push(
+                index(ring - 1, segment),
+                index(ring, segment + 1),
+                index(ring - 1, segment + 1),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A flat annulus at `z` between `inner` and `outer`.
+fn append_annulus(
+    verts: &mut Vec<[f64; 3]>,
+    tris: &mut Vec<[u32; 3]>,
+    inner: f64,
+    outer: f64,
+    z: f64,
+    segments: usize,
+    up: bool,
+) -> Result<(), MeshError> {
+    let base = u32::try_from(verts.len()).map_err(|_| MeshError::FixtureIndexOverflow)?;
+    for segment in 0..segments {
+        verts.push(ring_point(inner, z, segment, segments));
+    }
+    for segment in 0..segments {
+        verts.push(ring_point(outer, z, segment, segments));
+    }
+    let count = u32::try_from(segments).map_err(|_| MeshError::FixtureIndexOverflow)?;
+    for segment in 0..segments {
+        let s = u32::try_from(segment).map_err(|_| MeshError::FixtureIndexOverflow)?;
+        let n = (s + 1) % count;
+        let (i0, i1, o0, o1) = (base + s, base + n, base + count + s, base + count + n);
+        if up {
+            tris.push([i0, o0, o1]);
+            tris.push([i0, o1, i1]);
+        } else {
+            tris.push([i0, o1, o0]);
+            tris.push([i0, i1, o1]);
+        }
+    }
+    Ok(())
+}
+
+/// A frustum wall from `(r0, z0)` to `(r1, z1)`; `outward` selects which side
+/// its normals face.
+#[allow(clippy::too_many_arguments, reason = "one revolution's six geometric parameters plus its winding; grouping them into a struct would hide the call sites rather than clarify them")]
+fn append_skirt(
+    verts: &mut Vec<[f64; 3]>,
+    tris: &mut Vec<[u32; 3]>,
+    r0: f64,
+    z0: f64,
+    r1: f64,
+    z1: f64,
+    segments: usize,
+    outward: bool,
+) -> Result<(), MeshError> {
+    let base = u32::try_from(verts.len()).map_err(|_| MeshError::FixtureIndexOverflow)?;
+    for segment in 0..segments {
+        verts.push(ring_point(r0, z0, segment, segments));
+    }
+    for segment in 0..segments {
+        verts.push(ring_point(r1, z1, segment, segments));
+    }
+    let count = u32::try_from(segments).map_err(|_| MeshError::FixtureIndexOverflow)?;
+    for segment in 0..segments {
+        let s = u32::try_from(segment).map_err(|_| MeshError::FixtureIndexOverflow)?;
+        let n = (s + 1) % count;
+        let (b0, b1, t0, t1) = (base + s, base + n, base + count + s, base + count + n);
+        // Derived, not guessed: with the ring parameterised counter-clockwise
+        // seen from +z, the cross product of (t1 - b0) and (t0 - b0) points
+        // radially OUTWARD, so that is the outward winding and its swap is the
+        // inward one. The unit test below checks the sign on a real cylinder
+        // rather than trusting this paragraph.
+        if outward {
+            tris.push([b0, t1, t0]);
+            tris.push([b0, b1, t1]);
+        } else {
+            tris.push([b0, t0, t1]);
+            tris.push([b0, t1, b1]);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod slice_sweep_fixture_tests {
+    use super::*;
+
+    /// Signed volume by the divergence theorem. Positive means every face
+    /// winds outward; a fixture that comes out inside-out slices with its
+    /// windings inverted and every downstream fill rule reads the void as the
+    /// solid, so this is checked rather than assumed.
+    fn signed_volume(mesh: &Mesh) -> f64 {
+        mesh.tris()
+            .iter()
+            .map(|tri| {
+                let a = mesh.verts()[tri[0] as usize];
+                let b = mesh.verts()[tri[1] as usize];
+                let c = mesh.verts()[tri[2] as usize];
+                dot(a, cross(b, c)) / 6.0
+            })
+            .sum()
+    }
+
+    #[test]
+    fn the_disc_pair_bounds_the_same_solid_with_outward_windings() {
+        let fan = make_disc_fan(30.0, 4.0, 128).unwrap();
+        let uniform = make_disc_uniform(30.0, 4.0, 128, 8).unwrap();
+        let exact = core::f64::consts::PI * 15.0 * 15.0 * 4.0;
+        // A 128-gon inscribes 99.97 % of its circle, so the tolerance is the
+        // faceting and nothing else.
+        assert!((signed_volume(&fan) / exact - 1.0).abs() < 1.0e-3);
+        assert!((signed_volume(&uniform) / signed_volume(&fan) - 1.0).abs() < 1.0e-12);
+        // The point of the pair: same solid, very different triangle counts.
+        assert!(uniform.tris().len() > 4 * fan.tris().len());
+    }
+
+    #[test]
+    fn the_recessed_disc_carries_its_draft_and_its_recess() {
+        let disc = make_recessed_disc(24.0, 25.0, 3.5, 2.5, 22.5, 128).unwrap();
+        let frustum = core::f64::consts::PI * 3.5 / 3.0 * (24.0 * 24.0 + 24.0 * 25.0 + 25.0 * 25.0);
+        let recess = core::f64::consts::PI * 22.5 * 22.5 * 2.5;
+        assert!((signed_volume(&disc) / (frustum - recess) - 1.0).abs() < 1.0e-3);
+    }
+
+    #[test]
+    fn the_cavity_box_encloses_a_void_and_not_a_second_solid() {
+        let box_mesh = make_cavity_box(40.0, 3.0).unwrap();
+        assert!((signed_volume(&box_mesh) - (40.0_f64.powi(3) - 34.0_f64.powi(3))).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn the_thin_table_is_the_stock_table_with_one_dimension_changed() {
+        let thin = make_overhang_table_thin(1.5).unwrap();
+        let stock = make_overhang_table().unwrap();
+        assert_eq!(thin.tris().len(), stock.tris().len());
+        assert!(signed_volume(&thin) < signed_volume(&stock));
+    }
+}

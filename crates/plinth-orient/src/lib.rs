@@ -23,6 +23,7 @@
 //! is chosen here only by winning, never by default.
 #![forbid(unsafe_code)]
 
+pub mod demand;
 pub mod grid;
 mod score;
 pub mod search;
@@ -168,9 +169,10 @@ pub fn run(model: DecimatedModel, request: &OrientRequest) -> Result<OrientedMod
 pub fn search_and_orient(
     model: DecimatedModel,
     request: &SweepRequest,
+    demand: Option<&dyn demand::SupportDemandMeasurer>,
 ) -> Result<OrientedModel, OrientError> {
     let (mesh, decimation) = model.into_parts();
-    let outcome = search::search(&mesh, request).map_err(OrientError::Search)?;
+    let outcome = search::search(&mesh, request, demand).map_err(OrientError::Search)?;
     let selection = outcome.winner().selection;
     let transform = transform_for(selection)?;
     let (mesh, transform) = transform_mesh(mesh, transform)?;
@@ -282,7 +284,7 @@ fn selection_from_report(report: &JsonValue) -> Option<BaselineSelection> {
     }
 }
 
-fn transform_for(selection: BaselineSelection) -> Result<RigidTransform, OrientError> {
+pub(crate) fn transform_for(selection: BaselineSelection) -> Result<RigidTransform, OrientError> {
     let rotation = match selection {
         BaselineSelection::Identity => identity_rotation(),
         BaselineSelection::AxisDegrees { axis, degrees } => rotation(axis, degrees.get())?,
@@ -323,7 +325,37 @@ fn identity_rotation() -> [[f64; 3]; 3] {
     [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
 }
 
-fn transform_mesh(
+/// Orients and recenters a candidate direction exactly as the eventual
+/// winner is oriented and recentered at emit — the same [`transform_for`] /
+/// [`transform_mesh`] pair `run` and `search_and_orient` apply, behind one
+/// narrow public function rather than exposing either directly.
+///
+/// This exists for [`demand::SupportDemandMeasurer`] implementations (LANE 3,
+/// `docs/plans/slice-sweep-core-2026-09-02.md` §12): a candidate's real
+/// sweep-measured support demand is only meaningful if it is measured in the
+/// SAME frame the candidate would actually be built in. `transform_mesh`
+/// itself stays crate-private: it is also the function search proxies are
+/// forbidden to reach (`score::search`'s own module doc, "Search proxies can
+/// never become production geometry"), and this wrapper returns an owned
+/// `Mesh` with no path back to `SearchProxy`, `DecimatedModel` or
+/// `OrientedModel`, so that invariant is unaffected by this crate's new
+/// public surface.
+///
+/// # Errors
+///
+/// [`OrientError::InvalidTransformedMesh`] when the candidate's rotation does
+/// not produce a finite mesh.
+pub fn oriented_recentered_mesh(
+    mesh: &Mesh,
+    candidate: score::UpDirection,
+) -> Result<Mesh, OrientError> {
+    let up_model_frame = finite_vector(candidate.get())?;
+    let transform = transform_for(BaselineSelection::UpDirection { up_model_frame })?;
+    let (transformed, _transform) = transform_mesh(mesh.clone(), transform)?;
+    Ok(transformed)
+}
+
+pub(crate) fn transform_mesh(
     mesh: Mesh,
     mut transform: RigidTransform,
 ) -> Result<(Mesh, RigidTransform), OrientError> {

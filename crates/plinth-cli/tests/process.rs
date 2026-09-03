@@ -67,13 +67,14 @@ fn root_and_prepare_help_pin_the_stable_usage_essentials() {
     assert!(prepare.status.success());
     let stdout = text(&prepare.stdout);
     assert!(stdout.contains(
-        "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|pinned:DIR] [--wall-mm MM] [--no-cache]"
+        "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|pinned:DIR] [--placement legacy|sweep] [--wall-mm MM] [--no-cache]"
     ));
     for essential in [
         "--input-models-dir DIR",
         "--output PROFILE",
         "--out-dir DIR",
         "--orient MODE",
+        "--placement MODE",
         "--wall-mm MM",
         "--no-cache",
     ] {

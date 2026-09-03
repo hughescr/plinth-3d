@@ -418,23 +418,45 @@ fn root_boss_top(
     member: &Member,
     config: LoweringConfig,
 ) -> Result<[Finite; 3], LoweringError> {
+    match root_boss_top_at(
+        member.p0_mm()[2].get(),
+        [member.p1_mm()[0], member.p1_mm()[1]],
+        config,
+    ) {
+        Some(result) => result,
+        None => Err(LoweringError::RootRunTooShort { member: key }),
+    }
+}
+
+/// The plate-root boss arithmetic with no forest identity in it.
+///
+/// Extracted verbatim from [`root_boss_top`], which now delegates here, so the
+/// slice-sweep adapter below computes the SAME boss top as the legacy
+/// lowering rather than a second, drifting copy of it. `None` is the
+/// too-short-run case that [`root_boss_top`] reports as
+/// `RootRunTooShort` — the caller decides what to do about it, because the
+/// sweep warns and emits where the legacy path refuses.
+fn root_boss_top_at(
+    terminal_z_mm: f64,
+    rootward_xy: [Finite; 2],
+    config: LoweringConfig,
+) -> Option<Result<[Finite; 3], LoweringError>> {
     let plate = config.frame.plate_z_mm().get();
     let min_layer_run = config.root_layers as f64 * config.layer_height_mm.get();
     let min_no_bend = config.root_no_bend_mm.get().max(min_layer_run);
-    let available_from_plate = member.p0_mm()[2].get() - plate;
+    let available_from_plate = terminal_z_mm - plate;
     if available_from_plate < min_no_bend - 1e-5 {
-        return Err(LoweringError::RootRunTooShort { member: key });
+        return None;
     }
     let raft_top = plate + config.raft_height_mm.get();
-    let available_above_raft = member.p0_mm()[2].get() - raft_top;
+    let available_above_raft = terminal_z_mm - raft_top;
     let minimum_boss_height = (min_no_bend - config.raft_height_mm.get()).max(0.0);
     let effective =
         minimum_boss_height.max(config.flare_length_mm.get().min(available_above_raft / 2.0));
-    Ok([
-        member.p1_mm()[0],
-        member.p1_mm()[1],
-        finite(raft_top + effective)?,
-    ])
+    Some(
+        finite(raft_top + effective)
+            .map(|top| [rootward_xy[0], rootward_xy[1], top]),
+    )
 }
 
 fn frustum(
@@ -554,6 +576,288 @@ impl DigestWriter {
     const fn finish(self) -> u64 {
         self.0
     }
+}
+
+// ---------------------------------------------------------------------------
+// The slice-sweep adapter's geometry door.
+//
+// `docs/plans/slice-sweep-core-2026-09-02.md` §9.2: "The adapter must not
+// re-derive this geometry by hand." It lives HERE, in the module that already
+// owns the canonical ball, boss and flare arithmetic, rather than in
+// `plinth-sweep`, because `LoweringConfig`, `MemberKey` and `Member` are all
+// crate-private and promoting them would expose the whole forest data model in
+// order to reach four numbers. Nothing below computes a ball pole, a boss top
+// or a flare radius a second time: the poles come from
+// `SphereGeometry::canonical_poles`, the boss top from `root_boss_top_at`
+// (which `root_boss_top` now delegates to), and the flare from the same
+// registered `FLARE_R_FACTOR` the legacy path reads.
+// ---------------------------------------------------------------------------
+
+/// Where one sweep arm's bottom end sits.
+///
+/// The sweep's own `Landing` carries a layer index and an arm id that this
+/// stage has no use for; the only distinction geometry cares about is whether
+/// the plate-root chain applies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SweepArmLanding {
+    /// The build plate: the arm gets the legacy plate-root chain — a boss
+    /// column down to the boss top, then a `RootFlare` down to the raft top.
+    Plate,
+    /// Cured model material or another arm. The arm ends there. v1 emits no
+    /// joint sphere at an arm-onto-arm junction; that is disclosed in the run
+    /// report rather than hidden.
+    Landed,
+}
+
+/// One straight vertical arm as the slice sweep placed and sized it.
+///
+/// *UNITS TRAP*: these are RADII. The registry speaks radius; ChituBox and the
+/// owner speak diameter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SweepArm {
+    /// The seat, on the model's down-facing surface.
+    pub seat_mm: [f64; 3],
+    /// The landing point, directly below the seat.
+    pub base_mm: [f64; 3],
+    /// Radius at the seat — the narrowest section, and the one the area law is
+    /// evaluated at.
+    pub tip_radius_mm: f64,
+    /// Radius at the landing. Never smaller than the tip: carried load is
+    /// non-decreasing downward, so an arm flares toward its root.
+    pub root_radius_mm: f64,
+    pub landing: SweepArmLanding,
+}
+
+/// What lowering one sweep field produced, and everything it had to warn about.
+///
+/// **Emit and warn, never refuse** (owner ruling 2026-09-01): an arm this
+/// stage cannot build is DROPPED and COUNTED, and the rest of the field still
+/// emits.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SweepLowering {
+    pub primitives: Vec<SupportPrimitive>,
+    /// Arms whose seat and landing coincide to within a nanometre. There is no
+    /// geometry to build and none is invented.
+    pub arms_dropped_zero_length: usize,
+    /// Plate arms whose run from the plate is shorter than the registered
+    /// no-bend height, so no root boss fits. They emit as a straight column to
+    /// the raft top with NO flare, and are counted here.
+    pub arms_without_root_flare: usize,
+    /// Arms whose radii or points would not cross the finite boundary, or
+    /// which the emit boundary's own `is_semantically_valid` rejected.
+    pub arms_dropped_invalid_geometry: usize,
+}
+
+/// The failures that are about the REQUEST, never about a model.
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum SweepLoweringError {
+    #[error("sweep lowering requires a non-empty layer plan")]
+    MissingLayerHeight,
+    #[error("sweep lowering does not define variable layer heights")]
+    NonConstantLayerPlan,
+    #[error("sweep lowering requires nonzero work and memory limits")]
+    InvalidLimits,
+    #[error("sweep lowering would exceed its primitive-count limit of {limit}")]
+    PrimitiveLimit { limit: usize },
+    #[error("registered current-parity constants are unavailable: {0}")]
+    RegisteredConstants(String),
+}
+
+impl From<LoweringError> for SweepLoweringError {
+    fn from(error: LoweringError) -> Self {
+        match error {
+            LoweringError::MissingLayerHeight => Self::MissingLayerHeight,
+            LoweringError::NonConstantLayerPlan => Self::NonConstantLayerPlan,
+            LoweringError::RegisteredConstants(message) => Self::RegisteredConstants(message),
+            _ => Self::InvalidLimits,
+        }
+    }
+}
+
+/// Lower a slice-sweep support field to the emit boundary's own primitives.
+///
+/// The chain per arm is the one the legacy lowering already emits for a
+/// plate-rooted column carrying a contact ball:
+///
+/// 1. `ContactSphere` — the tip ball at the seat, poles from
+///    [`SphereGeometry::canonical_poles`], never recomputed here.
+/// 2. `ContactTaper` — the ball centre down to the boss top (plate landing) or
+///    to the landing point (model/arm landing), carrying the registered
+///    `DEFAULT_CONTACT_DEPTH_MM`.
+/// 3. `RootFlare` — plate landings only, boss top down to the raft top.
+///
+/// # Errors
+///
+/// Only about the request: an empty or variable-height layer plan, zero
+/// limits, an unreadable registry, or a field larger than `max_primitives`. A
+/// shortfall in one ARM is a counter on [`SweepLowering`], never an error.
+pub fn lower_sweep_arms(
+    arms: &[SweepArm],
+    frame: BuildFrame,
+    layers: &LayerPlan,
+    max_primitives: usize,
+    max_primitive_bytes: usize,
+) -> Result<SweepLowering, SweepLoweringError> {
+    let config = LoweringConfig::current(frame, layers, max_primitives, max_primitive_bytes)?;
+    let plate = config.frame.plate_z_mm().get();
+    let raft_top = plate + config.raft_height_mm.get();
+    let mut out = SweepLowering {
+        primitives: Vec::with_capacity(arms.len().saturating_mul(3)),
+        ..SweepLowering::default()
+    };
+    for arm in arms {
+        match lower_one_sweep_arm(arm, config, raft_top, &mut out.primitives) {
+            ArmOutcome::Built => {}
+            ArmOutcome::BuiltWithoutFlare => out.arms_without_root_flare += 1,
+            ArmOutcome::ZeroLength => out.arms_dropped_zero_length += 1,
+            ArmOutcome::InvalidGeometry => out.arms_dropped_invalid_geometry += 1,
+        }
+        if out.primitives.len() > max_primitives {
+            return Err(SweepLoweringError::PrimitiveLimit {
+                limit: max_primitives,
+            });
+        }
+    }
+    Ok(out)
+}
+
+enum ArmOutcome {
+    Built,
+    BuiltWithoutFlare,
+    ZeroLength,
+    InvalidGeometry,
+}
+
+fn lower_one_sweep_arm(
+    arm: &SweepArm,
+    config: LoweringConfig,
+    raft_top: f64,
+    out: &mut Vec<SupportPrimitive>,
+) -> ArmOutcome {
+    let delta: [f64; 3] = std::array::from_fn(|index| arm.base_mm[index] - arm.seat_mm[index]);
+    let length = delta.iter().map(|value| value * value).sum::<f64>().sqrt();
+    if !length.is_finite() || length <= ZERO_LENGTH_MM {
+        return ArmOutcome::ZeroLength;
+    }
+    let unit = delta.map(|value| value / length);
+    let Ok(tip_radius) = positive(arm.tip_radius_mm) else {
+        return ArmOutcome::InvalidGeometry;
+    };
+    let Ok(root_radius) = positive(arm.root_radius_mm.max(arm.tip_radius_mm)) else {
+        return ArmOutcome::InvalidGeometry;
+    };
+    let Ok(ball_radius) = positive(config.tip_ball_factor.get() * tip_radius.get()) else {
+        return ArmOutcome::InvalidGeometry;
+    };
+    let center_raw: [f64; 3] =
+        std::array::from_fn(|index| arm.seat_mm[index] + ball_radius.get() * unit[index]);
+    let (Ok(center), Ok(unit_finite), Ok(base)) =
+        (finite3(center_raw), finite3(unit), finite3(arm.base_mm))
+    else {
+        return ArmOutcome::InvalidGeometry;
+    };
+    let Ok(geometry) = SphereGeometry::tip(center, unit_finite) else {
+        return ArmOutcome::InvalidGeometry;
+    };
+    // The producer's own poles. A second implementation of this arithmetic is
+    // exactly the defect `is_semantically_valid` exists to catch.
+    let Ok((sphere_start, sphere_end)) = geometry.canonical_poles(ball_radius) else {
+        return ArmOutcome::InvalidGeometry;
+    };
+    let mut staged: Vec<SupportPrimitive> = Vec::with_capacity(3);
+    staged.push(SupportPrimitive {
+        segment_kind: SupportSegmentKind::ContactSphere,
+        start_mm: sphere_start,
+        end_mm: sphere_end,
+        start_radius_mm: ball_radius,
+        end_radius_mm: ball_radius,
+        contact_depth_mm: None,
+        ring_normal: FrustumRingNormal::SegmentAxis,
+        sphere_geometry: Some(geometry),
+    });
+
+    let outcome = match arm.landing {
+        SweepArmLanding::Landed => {
+            if distance(center, base) <= ZERO_LENGTH_MM {
+                return ArmOutcome::ZeroLength;
+            }
+            staged.push(frustum(
+                SupportSegmentKind::ContactTaper,
+                center,
+                base,
+                tip_radius,
+                root_radius,
+                Some(config.contact_depth_mm),
+                FrustumRingNormal::SegmentAxis,
+            ));
+            ArmOutcome::Built
+        }
+        SweepArmLanding::Plate => {
+            let Ok(raft_z) = finite(raft_top) else {
+                return ArmOutcome::InvalidGeometry;
+            };
+            let raft_point = [base[0], base[1], raft_z];
+            let boss_top =
+                root_boss_top_at(arm.seat_mm[2], [base[0], base[1]], config).and_then(Result::ok);
+            match boss_top {
+                Some(top)
+                    if distance(center, top) > ZERO_LENGTH_MM
+                        && distance(top, raft_point) > ZERO_LENGTH_MM =>
+                {
+                    let Ok(flare_radius) = positive(root_radius.get() * config.flare_factor.get())
+                    else {
+                        return ArmOutcome::InvalidGeometry;
+                    };
+                    staged.push(frustum(
+                        SupportSegmentKind::ContactTaper,
+                        center,
+                        top,
+                        tip_radius,
+                        root_radius,
+                        Some(config.contact_depth_mm),
+                        FrustumRingNormal::PlateZ,
+                    ));
+                    staged.push(frustum(
+                        SupportSegmentKind::RootFlare,
+                        top,
+                        raft_point,
+                        root_radius,
+                        flare_radius,
+                        None,
+                        FrustumRingNormal::SegmentAxis,
+                    ));
+                    ArmOutcome::Built
+                }
+                _ => {
+                    // The run from the plate is shorter than the registered
+                    // no-bend height, or leaves no room between boss top and
+                    // raft, so no flare fits. Emit the straight column and
+                    // WARN: refusing here would destroy the evidence.
+                    if distance(center, raft_point) <= ZERO_LENGTH_MM {
+                        return ArmOutcome::ZeroLength;
+                    }
+                    staged.push(frustum(
+                        SupportSegmentKind::ContactTaper,
+                        center,
+                        raft_point,
+                        tip_radius,
+                        root_radius,
+                        Some(config.contact_depth_mm),
+                        FrustumRingNormal::PlateZ,
+                    ));
+                    ArmOutcome::BuiltWithoutFlare
+                }
+            }
+        }
+    };
+    // The emit boundary's own contract, asked HERE, so one bad arm is dropped
+    // and counted rather than failing the whole field at
+    // `SupportedModel::from_parts` with nothing said about which arm did it.
+    if staged.iter().any(|primitive| !primitive.is_semantically_valid()) {
+        return ArmOutcome::InvalidGeometry;
+    }
+    out.append(&mut staged);
+    outcome
 }
 
 #[cfg(test)]

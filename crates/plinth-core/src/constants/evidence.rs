@@ -29,15 +29,28 @@ pub enum M0EvidenceConstantsError {
 #[derive(Clone, Debug, PartialEq)]
 pub struct M0EvidenceConstants {
     cco_x_pair_load_discount: Derived<f64>,
+    condition_shift_max: Measured<f64>,
     decimation_max_absolute_deviation_mm: Derived<f64>,
     decimation_max_p999_deviation_mm: Derived<f64>,
     decimation_max_p99_deviation_mm: Derived<f64>,
     final_clearance_gap_mm: Measured<f64>,
+    l_first_loss_mm: Measured<f64>,
+    l_span_allowed_mm: Derived<f64>,
+    l_span_crit_mm: Derived<f64>,
+    l_survived_max_mm: Measured<f64>,
+    lamina_reach_ratio: Derived<f64>,
+    lamina_reach_ratio_audit_gate: Derived<f64>,
+    lamina_reach_ratio_first_loss: Derived<f64>,
     layer_height_default_mm: Measured<f64>,
     load_sharing: Measured<LoadSharing>,
     minima_drop_interior_faces: Measured<bool>,
     minima_require_island_birth: Measured<bool>,
     n_eff_cap: Derived<f64>,
+    orient_peel_area_exponent_high: Measured<f64>,
+    orient_peel_area_exponent_low: Measured<f64>,
+    orient_peel_reference_area_mm2: Measured<f64>,
+    orient_peel_reference_pressure_pa_high: Measured<f64>,
+    orient_peel_reference_pressure_pa_low: Measured<f64>,
     p8_chord_canon_micron: Measured<MicronGranularity>,
     p8_pocket_voxel_mm: Measured<f64>,
     pixel_pitch_x_um: Measured<f64>,
@@ -175,12 +188,82 @@ impl M0EvidenceConstants {
         let decimation_max_p99_deviation_value = decimation_max_p999_deviation_value / 2.0;
         let decimation_max_absolute_deviation_value = *print_floor_chord_mm.value();
 
+        // Hoisted for the same reason the decimation bounds are: the lamina
+        // reach ratios and the span allowance are DERIVED and must be computed
+        // from their parents' own values at run time, never transcribed as a
+        // literal (`docs/specs/audit-span-criterion.md`:225-229 states that
+        // rule for exactly this family).
+        let pixel_pitch_x_um = Measured::new(
+            14.0,
+            vendor_source.clone(),
+            None,
+            "The vendor's first pitch maps to project X; retrieval date 2026-07-31 is metadata, while 2025-01-22 is the evidence date.",
+        )?;
+        let layer_height_default_mm = Measured::new(
+            0.050,
+            EvidenceSource::project_record(
+                EvidenceId::new("saturn4-ultra-layer-profile-plate6")?,
+                "docs/engineering-journal/reference/plate-06-results.md",
+                "§1 Layer height",
+                exact_date("2026-07-30")?,
+            )?,
+            None,
+            "Plate 6 project profile layer height; this is not a vendor default.",
+        )?;
+        let overhang_ladder_pool_source = EvidenceSource::calibration_plate(
+            PlateId::from("COUPON-PLATE-1-overhang-tilt"),
+            "docs/specs/audit-span-criterion.md",
+            "§2.5 The bracket (pooling plates 1 and 4)",
+            exact_date("2026-07-29")?,
+        )?;
+        let l_survived_max_mm = Measured::new(
+            2.130_032_25,
+            overhang_ladder_pool_source.clone(),
+            None,
+            "THE LARGEST FLAT-OVERHANG SPAN AT WHICH NO LOSS WAS RECORDED on either unsupported-overhang ladder plate, pooled on the shared length axis at 0.050 mm layer height, this printer, this resin (plate 1 rung 14 = plate 4 rung 6 = 0.7982 * 1.2169^5; plate 4's own cells at that rung are UNREAD). It is the conservative end of the measured loss bracket L_crit in [2.130032, 4.670956] mm, whose onset is bracketed to a single ladder rung [2.130032, 2.592036], width 1.2169x. The specimens were SINGLE-ROOT CANTILEVERS (audit-span-criterion.md §2.1: each finger cantilevered from a rigid spine, no support anywhere), so reading this length as a COVERING RADIUS -- no point of a down-facing region further than this from a carrier -- is the conservative reading, because a point between two carriers is stiffer than a free cantilever end. This is a DESIGN-TIME PLACEMENT input. It is deliberately NOT the audit's gate value L_SPAN_ALLOWED_MM, which divides this by CONDITION_SHIFT_MAX and subtracts two pixel diagonals because a gate exists to refuse a finished file; subtracting uncertainty is right for a gate and wrong for placing a seat (audit-span-criterion.md:196-229 rule 2). Two INDEPENDENT field data points sit inside the measured bracket and far outside the gate's: the owner's own 4.0 mm ChituBox spacing practice (reach 2.3094 mm) and his 47-tip Cylinder print on 706.86 mm2 (reach 2.4074 mm). SUPERSEDED BY any coupon at a second layer thickness or a second overhang angle.",
+        )?;
+        let l_first_loss_mm = Measured::new(
+            2.592_036,
+            EvidenceSource::calibration_plate(
+                PlateId::from("COUPON-PLATE-4-overhang-extended"),
+                "docs/specs/audit-span-criterion.md",
+                "§2.5 first loss recorded at (plate 4, G1aU, 1 of 5)",
+                exact_date("2026-07-29")?,
+            )?,
+            None,
+            "The shortest flat-overhang span at which ANY loss was recorded: plate 4, specimen G1aU, 1 of 5. It is the upper end of the onset bracket whose lower end is L_SURVIVED_MAX_MM. REPORTING ONLY -- no placement or acceptance decision may read it or the ratio derived from it. It exists so a run report can state where the chosen placement value sits inside the measured bracket rather than asserting the choice is safe.",
+        )?;
+        let condition_shift_max = Measured::new(
+            1.53,
+            EvidenceSource::calibration_plate(
+                PlateId::from("COUPON-PLATE-4-overhang-extended"),
+                "docs/engineering-journal/reference/plate-04-results.md",
+                "§3.3 length alone does not determine survival",
+                exact_date("2026-07-29")?,
+            )?,
+            None,
+            "The upper end of the only measured condition-shift magnitude on this printer, 1.31-1.53x, between the favourable condition (plate 1, the side that survived where the two plates overlap and disagree) and the unfavourable one. THE CAUSE IS NOT IDENTIFIED -- plate 4 §3.3 records the effect and §4 records that the inference built on it did not succeed; orientation, Y station and film age are aliased with one another there, so this is a magnitude without a mechanism. The larger end is registered because a larger divisor is the conservative choice for a gate. It is a GATE input only: it divides L_SURVIVED_MAX_MM to produce L_SPAN_CRIT_MM and through it the audit's L_SPAN_ALLOWED_MM. No placement decision reads it.",
+        )?;
+        let l_span_crit_value = *l_survived_max_mm.value() / *condition_shift_max.value();
+        // One in-layer pixel diagonal, the audit's own instrument uncertainty
+        // under a full-containment fill rule; computed from the two registered
+        // pitches rather than transcribed (audit-span-criterion.md:213-218).
+        let pixel_diagonal_mm = (*pixel_pitch_x_um.value() / 1000.0)
+            .hypot(*pixel_pitch_y_um.value() / 1000.0);
+        let l_span_allowed_value = l_span_crit_value - 2.0 * pixel_diagonal_mm;
+        let lamina_reach_ratio_value = *l_survived_max_mm.value() / *layer_height_default_mm.value();
+        let lamina_reach_ratio_first_loss_value =
+            *l_first_loss_mm.value() / *layer_height_default_mm.value();
+        let lamina_reach_ratio_audit_gate_value =
+            l_span_allowed_value / *layer_height_default_mm.value();
+
         Ok(Self {
             cco_x_pair_load_discount: Derived::new(
                 0.840_896_415_253_714_5,
                 std::iter::empty::<&str>(),
                 "Proof-only fourth-root relation: (F/2)^0.25/F^0.25 = 0.5^0.25. The proof is in docs/engineering-journal/reference/physics_transient_peel.md and the relation is implemented in both cco.py and bracing.py.",
             ),
+            condition_shift_max,
             decimation_max_absolute_deviation_mm: Derived::new(
                 decimation_max_absolute_deviation_value,
                 ["PRINT_FLOOR_CHORD_MM"],
@@ -207,17 +290,34 @@ impl M0EvidenceConstants {
                 None,
                 "EXTERNAL REQUIREMENT -- field data, NOT physics. Craig ruling 2026-08-22, field experience: 0.3mm gap features are preserved fine in prints. THE QUANTITY: a TRUE surface-to-surface gap in mm -- the shortest distance from the arm's own SOLID SURFACE to the model surface, i.e. the kernel's axis-to-surface distance MINUS the arm radius at the nearest station. It is not a centreline distance and not a radius; a number carried between the two lands one arm-radius wrong. WHAT IT DECIDES: the FINAL clearance pass, and only that pass -- the one whose verdict actually refuses an arm. Today that is brace::exact_clearance_rows and the grading of load-assigned radii, over BOTH contact-declaring members (struts, model rungs, CCO model anchors) and non-contact members (shoots, transients), which are graded full-length against the whole surface. WHAT IT IS NOT: the placement-family search margin. STANDOFF_MM (0.600 mm) grades CCO candidacy clearance_survival, rewire changed-set validation, and brace evaluate_candidates (owner ruling R-1495, 2026-08-22), where the demand PRUNES a search and refuses nothing final; a candidate it drops leaves the tournament, it does not condemn a contact. The two demands are deliberately different numbers with deliberately different jobs, and the ONE predicate reads whichever its stage registered -- see the two-tier ruling of 2026-08-22 and STANDOFF_MM's own entry. WHY THIS IS THE ONLY REFUSING NUMBER: a search margin may be generous because its cost is a lost candidate; the final demand's cost is a refused model, so it must be the number the owner will actually accept off the plate. No physics derives 0.300 mm and none is claimed for it. It is registered as an honestly-labelled external requirement so that a future coupon measurement of gap-feature preservation supersedes it rather than colliding with it. HONESTY PRECONDITION: this number only means what it says because the clearance test it feeds grades a TRUE gap. Before the honest-exemption change of 2026-08-22 the test skipped a radius-proportional length of every contact-declaring arm and read its verdict at the boundary station, so the graded quantity was neither the true gap nor a fixed function of it; the measured audit (.git/mask-honesty-evidence) found the old rule excusing an arm 0.242 mm INSIDE the model while refusing a same-axis thinner arm with 0.569 mm of real gap. A demanded gap registered against that predicate would have been a number about nothing. STATUS OF THAT PRECONDITION -- MET, as of commits 0a72bc8 and edcadd6, and recorded here rather than assumed (raised as challenge finding B2, 2026-08-22; cleared by honest-exemption-2026-08-22.md section 8 steps 3-6, which is the park its section 10.7 describes). Every contact's seat zone is now FROZEN at its creation site, at all four production mints -- the initial stub mint, brace model rungs, cco model anchors, and cco bifurcation, which inherits its host's zone by move rather than recomputing it -- and all four grading sites (brace::exact_clearance_rows, brace::evaluate_candidates, cco::clearance_survival, rewire::validate_changed_geometry) hand the kernel inset0 = inset1 = 0 and grade the FULL axis against the whole surface MINUS that frozen face set. The retired radius-proportional PR-2 mask reaches no distance call any more: it survives only as the transit window of brace::axis_illegal_rows, the penetration-interval screen, where a length measured from the seat is the right shape because the seat embed IS a length along the axis, and where zeroing it would condemn every seated arm for its own designed embed. The graded quantity is therefore a TRUE gap and this 0.300 is demanded of it. MEASURED through the production final pass by brace::tests::a_thinner_arm_never_grades_worse_than_a_fatter_one_through_the_production_final_pass -- the trip-wire's successor, on the same table-plus-foreign-panel fixture at |cos| = 0.2: a thin arm (r = 0.20 mm) grades -0.45 and is REFUSED, and a fat arm (r = 0.90 mm) on the SAME axis and the SAME surface grades -1.15 and is also REFUSED, so thin >= fat. At the pre-ruling single demand of 0.600 the same two rows read -0.75 and -1.45, both refused. BEFORE the change that pair read -0.45 REFUSED against +0.05 LEGAL (-0.75 against -0.25 at 0.600), which is the inversion this precondition was about: the thin arm did not move and the fat arm went from LEGAL to REFUSED. Under the frozen rule, monotonicity in the radius is a THEOREM rather than a fact about that fixture -- the tested station set is the whole axis and the tested face set is frozen, so the graded clearance is C - r_max - gap. The value is NOT the defect and never moved for it; the predicate was, and it is fixed.",
             )?,
-            layer_height_default_mm: Measured::new(
-                0.050,
-                EvidenceSource::project_record(
-                    EvidenceId::new("saturn4-ultra-layer-profile-plate6")?,
-                    "docs/engineering-journal/reference/plate-06-results.md",
-                    "§1 Layer height",
-                    exact_date("2026-07-30")?,
-                )?,
-                None,
-                "Plate 6 project profile layer height; this is not a vendor default.",
-            )?,
+            l_first_loss_mm,
+            l_span_allowed_mm: Derived::new(
+                l_span_allowed_value,
+                ["L_SPAN_CRIT_MM", "PIXEL_PITCH_X_UM", "PIXEL_PITCH_Y_UM"],
+                "THE AUDIT'S GATE CONSTANT for unsupported span: L_SPAN_CRIT_MM - 2 * d2 = 1.3449762463 mm, where d2 = hypot(PIXEL_PITCH_X_UM, PIXEL_PITCH_Y_UM) / 1000 = 0.0236008474 mm is one in-layer pixel diagonal. The subtraction is the audit's own instrument uncertainty under a full-containment raster fill rule (audit-invariants.md §1.6): the cured region is a subset of the true region, so a measured span understates the true span by at most one pixel footprint at each end, and rule 2 of the audit contract subtracts uncertainty from an allowance rather than adding it. Registered in plinth-core so the ENGINE can state, in a run report, whether the field it placed will pass the audit's own check; the audit crate at tools/plinth-audit computes its own copy from its own inputs and is deliberately not allowed to share this type (Cargo.toml:2-11). PLACEMENT MUST NOT READ THIS. Placement and gating are different jobs: a gate that subtracts a 1.53x unidentified condition shift and two pixel diagonals is right to refuse a finished file and wrong to place a seat, and placing at this value would place 2.5x denser than the measured evidence supports. See the placement-vs-gate ruling request in docs/plans/slice-sweep-core-2026-09-02.md §14 OR-2.",
+            ),
+            l_span_crit_mm: Derived::new(
+                l_span_crit_value,
+                ["L_SURVIVED_MAX_MM", "CONDITION_SHIFT_MAX"],
+                "L_SURVIVED_MAX_MM / CONDITION_SHIFT_MAX = 2.1300322500 / 1.53 = 1.3921779412 mm. Moves the conservative end of the measured loss bracket out of plate 1's favourable condition and into the unfavourable one, using the only measured condition-shift magnitude available and its larger end. An intermediate of the audit's gate value; it decides nothing on its own.",
+            ),
+            l_survived_max_mm,
+            lamina_reach_ratio: Derived::new(
+                lamina_reach_ratio_value,
+                ["L_SURVIVED_MAX_MM", "LAYER_HEIGHT_DEFAULT_MM"],
+                "THE PLACEMENT REACH OF ONE CURED LAMINA PER UNIT OF ITS OWN THICKNESS: L_SURVIVED_MAX_MM / LAYER_HEIGHT_DEFAULT_MM = 2.1300322500 / 0.050 = 42.6006450, dimensionless. Expressed as a RATIO so it can be applied at other cured thicknesses: a cantilever of thickness t under uniform pressure P fails at L_crit = t * sqrt(sigma_f / 3P), which is exactly linear in t, and that linear-in-thickness SHAPE is the only thing the beam model supplies here. It is a COVERING RADIUS, not a bridge span -- see L_SURVIVED_MAX_MM's own note for why the single-root cantilever specimens make that the conservative reading. THE MAGNITUDE DISAGREES WITH THE REGISTRY BY 7.5x AND THAT IS DISCLOSED, NOT RECONCILED: with TENSILE_GREEN_MPA = 0.288 MPa and PEEL_PRESSURE_PA = 3000 Pa the same beam model predicts a ratio of sqrt(288/9) = 5.657, where the plates measured 42.6. Both of those inputs are registered on the diagnostic, non-AcceptSafe side of the ledger, and their own notes call them potentially about four times low, so this is most likely a fact about them rather than about the plates -- but it is unexplained, it is a standing question against any future green-strength coupon, and no constant is invented to close it. THE MEASUREMENT GOVERNS. Consequences that follow arithmetically and are stated so they are never rediscovered as surprises: hex nearest-neighbour spacing sqrt(3) * reach = 3.6892 mm at one lamina, denser than the owner's own 4.0 mm ChituBox practice; hex Voronoi cell area (3*sqrt(3)/2) * reach^2 = 11.7876 mm2 per seat. SUPERSEDED BY any coupon at a second layer thickness or a second overhang angle.",
+            ),
+            lamina_reach_ratio_audit_gate: Derived::new(
+                lamina_reach_ratio_audit_gate_value,
+                ["L_SPAN_ALLOWED_MM", "LAYER_HEIGHT_DEFAULT_MM"],
+                "L_SPAN_ALLOWED_MM / LAYER_HEIGHT_DEFAULT_MM = 1.3449762463 / 0.050 = 26.8995249, dimensionless. What the AUDIT allows when it gates an emitted file, expressed in the same units as LAMINA_REACH_RATIO so the two can be printed side by side. REPORTING ONLY -- no placement or acceptance decision in this engine may read it. It exists so a run report can state whether a placed field will pass its own audit's span check, and so the difference between placing and gating is disclosed rather than discovered.",
+            ),
+            lamina_reach_ratio_first_loss: Derived::new(
+                lamina_reach_ratio_first_loss_value,
+                ["L_FIRST_LOSS_MM", "LAYER_HEIGHT_DEFAULT_MM"],
+                "L_FIRST_LOSS_MM / LAYER_HEIGHT_DEFAULT_MM = 2.592036 / 0.050 = 51.84072, dimensionless. The rung at which the FIRST loss was recorded. REPORTING ONLY -- no decision may read it. It exists so a run report can state where the placement value sits inside the measured bracket [42.6006450, 51.84072] rather than claiming the chosen end is safe.",
+            ),
+            layer_height_default_mm,
             load_sharing,
             minima_drop_interior_faces: Measured::new(
                 true,
@@ -236,6 +336,61 @@ impl M0EvidenceConstants {
                 ["LOAD_SHARING"],
                 "Reads the measured Additive payload's largest tested group size, 6.0; it is not a separate measurement.",
             ),
+            orient_peel_area_exponent_low: Measured::new(
+                0.24,
+                EvidenceSource::project_record(
+                    EvidenceId::new("orient-peel-area-exponent-porosity-manizani-2026-07-22")?,
+                    "docs/evidence/literature/LITERATURE-NOTES.md",
+                    "§1b(i), line 813: Manizani Table 1, four 20 mm lattice discs of differing porosity at a constant outer envelope, FEP 100 µm, speed 50 mm/min -- 2.68x area change -> 1.26x force change",
+                    exact_date("2026-07-22")?,
+                )?,
+                None,
+                "EXTERNAL REQUIREMENT -- literature, NOT measured on this machine and NOT with this resin. The LOW end of the peel area-exponent bracket: n ~ 0.24, from varying POROSITY at a constant outer envelope (Manizani et al., four 20 mm lattice discs, FEP 100 µm, ~0.8 mm/s). Registered per docs/plans/slice-sweep-core-2026-09-02.md §12 D14: the literature gives two exponents from two DIFFERENT experiments and neither is preferred over the other, so both are registered and LANE 3's orientation objective evaluates its peel-force term at all four corners of {this, ORIENT_PEEL_AREA_EXPONENT_HIGH} x {ORIENT_PEEL_REFERENCE_PRESSURE_PA_LOW, ORIENT_PEEL_REFERENCE_PRESSURE_PA_HIGH} rather than picking one. A future coupon at a second geometry supersedes this rather than colliding with it.",
+            )?,
+            orient_peel_area_exponent_high: Measured::new(
+                0.46,
+                EvidenceSource::project_record(
+                    EvidenceId::new("orient-peel-area-exponent-envelope-manizani-2026-07-22")?,
+                    "docs/evidence/literature/LITERATURE-NOTES.md",
+                    "§1b(ii), line 815: Manizani Fig. 4, three pyramids shrinking WITH their envelope over 33 printed layers, FEP 100 µm -- 59x area reduction -> 6.5x force reduction",
+                    exact_date("2026-07-22")?,
+                )?,
+                None,
+                "EXTERNAL REQUIREMENT -- literature, NOT measured on this machine and NOT with this resin. The HIGH end of the peel area-exponent bracket: n ~ 0.46, from shrinking the outer envelope WITH the area (Manizani et al., three pyramids over 33 printed layers, FEP). For a POSE COMPARISON the envelope changes with the candidate direction, so this is the more apt of the two exponents by the design record's own reasoning (docs/plans/slice-sweep-core-2026-09-02.md §12, 'The exponent and pressure are a bracket') -- it is not therefore preferred as the sole value, it is evaluated as one bracket corner alongside ORIENT_PEEL_AREA_EXPONENT_LOW.",
+            )?,
+            orient_peel_reference_area_mm2: Measured::new(
+                314.0,
+                EvidenceSource::project_record(
+                    EvidenceId::new("orient-peel-reference-area-manizani-2026-07-22")?,
+                    "docs/evidence/literature/LITERATURE-NOTES.md",
+                    "§1a and the peel_pressure_pa review, lines 770-774 and 826: Manizani Table 3, solid 20 mm-diameter disc, A = 314.16 mm^2, rounded to 314 in this review's own anchor statement",
+                    exact_date("2026-07-22")?,
+                )?,
+                None,
+                "EXTERNAL REQUIREMENT -- literature, NOT measured on this machine and NOT with this resin. The reference cross-section area the peel-force bracket F(A) = P_ref * A_ref * (A/A_ref)^n is anchored at: a solid 20 mm-diameter disc, 314 mm^2 (314.16 mm^2 unrounded), the same specimen ORIENT_PEEL_REFERENCE_PRESSURE_PA_LOW was measured on and the reference area of the independent Pan et al. series ORIENT_PEEL_REFERENCE_PRESSURE_PA_HIGH reads. Registered per docs/plans/slice-sweep-core-2026-09-02.md §12.",
+            )?,
+            orient_peel_reference_pressure_pa_low: Measured::new(
+                9000.0,
+                EvidenceSource::project_record(
+                    EvidenceId::new("orient-peel-reference-pressure-manizani-2mms-2026-07-22")?,
+                    "docs/evidence/literature/LITERATURE-NOTES.md",
+                    "lines 136 and 772: Manizani Table 3, FEP 100 µm, 2 mm/s (120 mm/min), A = 314 mm^2, derived peel pressure ~9.6 kPa, rounded to the review's own anchor of 9 kPa at line 826",
+                    exact_date("2026-07-22")?,
+                )?,
+                None,
+                "EXTERNAL REQUIREMENT -- literature, NOT measured on this machine and NOT with this resin. The LOW end of the peel reference-pressure bracket: P_ref ~ 9000 Pa at A_ref = ORIENT_PEEL_REFERENCE_AREA_MM2, from Manizani et al.'s own in-situ load-cell measurement on FEP 100 µm at ~2 mm/s, a lift speed comparable to this project's own Saturn 4 practice. This is the review's own recommended anchor ('anchored at P_ref ~ 9 kPa, A_ref = 314 mm^2', LITERATURE-NOTES.md:826), not this project's own PEEL_PRESSURE_PA (3000 Pa, itself flagged in that same review as 'below every peel pressure measured in these papers'). Registered per docs/plans/slice-sweep-core-2026-09-02.md §12 D14 as the low corner of a bracket, alongside ORIENT_PEEL_REFERENCE_PRESSURE_PA_HIGH.",
+            )?,
+            orient_peel_reference_pressure_pa_high: Measured::new(
+                19600.0,
+                EvidenceSource::project_record(
+                    EvidenceId::new("orient-peel-reference-pressure-pan-cylinder-2026-07-22")?,
+                    "docs/evidence/literature/lit-green-peel.md",
+                    "line 28: Pan, He, Xu & Feinerman 2017 (peer-reviewed), solid cylinder at fixed 314 mm^2 cross-section, 1.56 mm/s lift speed, 6.16 N -> 1.96 N/cm^2",
+                    exact_date("2026-07-22")?,
+                )?,
+                None,
+                "EXTERNAL REQUIREMENT -- literature, NOT measured on this machine and NOT with this resin, and measured on 2 mm PDMS-coated glass rather than this project's FEP/nFEP film -- a materially stickier interface class, flagged rather than hidden. The HIGH end of the peel reference-pressure bracket: 6.16 N / 3.14 cm^2 = 1.9618 N/cm^2 = 19.6 kPa, the top of the peer-reviewed Pan et al. cylinder/hexagon/triangle/star series at the SAME 314 mm^2 reference area as ORIENT_PEEL_REFERENCE_PRESSURE_PA_LOW ('1.56-1.96 N/cm^2', lit-green-peel.md:28). Registered per docs/plans/slice-sweep-core-2026-09-02.md §12 D14 as the high corner of a bracket; do not average it with the low corner, evaluate both.",
+            )?,
             p8_chord_canon_micron: Measured::new(
                 MicronGranularity::ONE_MICRON,
                 EvidenceSource::corpus_study(
@@ -258,12 +413,7 @@ impl M0EvidenceConstants {
                 None,
                 "Owner-approved Phase-8 pocket voxel size.",
             )?,
-            pixel_pitch_x_um: Measured::new(
-                14.0,
-                vendor_source.clone(),
-                None,
-                "The vendor's first pitch maps to project X; retrieval date 2026-07-31 is metadata, while 2025-01-22 is the evidence date.",
-            )?,
+            pixel_pitch_x_um,
             pixel_pitch_y_um,
             print_floor_chord_mm,
             saturn_build_volume_mm: Measured::new(
@@ -408,6 +558,51 @@ impl M0EvidenceConstants {
     }
 
     #[must_use]
+    pub const fn condition_shift_max(&self) -> &Measured<f64> {
+        &self.condition_shift_max
+    }
+
+    #[must_use]
+    pub const fn l_first_loss_mm(&self) -> &Measured<f64> {
+        &self.l_first_loss_mm
+    }
+
+    #[must_use]
+    pub const fn l_span_allowed_mm(&self) -> &Derived<f64> {
+        &self.l_span_allowed_mm
+    }
+
+    #[must_use]
+    pub const fn l_span_crit_mm(&self) -> &Derived<f64> {
+        &self.l_span_crit_mm
+    }
+
+    #[must_use]
+    pub const fn l_survived_max_mm(&self) -> &Measured<f64> {
+        &self.l_survived_max_mm
+    }
+
+    /// The placement reach ratio: reach of one cured lamina per unit of its
+    /// own cured thickness. See the registered note; this is the value the
+    /// slice-sweep places against.
+    #[must_use]
+    pub const fn lamina_reach_ratio(&self) -> &Derived<f64> {
+        &self.lamina_reach_ratio
+    }
+
+    /// Reporting only. No decision may read this.
+    #[must_use]
+    pub const fn lamina_reach_ratio_audit_gate(&self) -> &Derived<f64> {
+        &self.lamina_reach_ratio_audit_gate
+    }
+
+    /// Reporting only. No decision may read this.
+    #[must_use]
+    pub const fn lamina_reach_ratio_first_loss(&self) -> &Derived<f64> {
+        &self.lamina_reach_ratio_first_loss
+    }
+
+    #[must_use]
     pub const fn layer_height_default_mm(&self) -> &Measured<f64> {
         &self.layer_height_default_mm
     }
@@ -430,6 +625,42 @@ impl M0EvidenceConstants {
     #[must_use]
     pub const fn n_eff_cap(&self) -> &Derived<f64> {
         &self.n_eff_cap
+    }
+
+    /// The HIGH end of the peel area-exponent bracket, n ~ 0.46 (Manizani,
+    /// envelope shrinking with area). See [`Self::orient_peel_area_exponent_low`].
+    #[must_use]
+    pub const fn orient_peel_area_exponent_high(&self) -> &Measured<f64> {
+        &self.orient_peel_area_exponent_high
+    }
+
+    /// The LOW end of the peel area-exponent bracket, n ~ 0.24 (Manizani,
+    /// porosity at constant envelope). Evaluated alongside
+    /// [`Self::orient_peel_area_exponent_high`]; neither is preferred (§12 D14).
+    #[must_use]
+    pub const fn orient_peel_area_exponent_low(&self) -> &Measured<f64> {
+        &self.orient_peel_area_exponent_low
+    }
+
+    /// The reference cross-section area, 314 mm², the peel-force bracket is
+    /// anchored at.
+    #[must_use]
+    pub const fn orient_peel_reference_area_mm2(&self) -> &Measured<f64> {
+        &self.orient_peel_reference_area_mm2
+    }
+
+    /// The HIGH end of the peel reference-pressure bracket, ~19.6 kPa (Pan et
+    /// al., PDMS, flagged as a stickier interface than this project's FEP/nFEP).
+    #[must_use]
+    pub const fn orient_peel_reference_pressure_pa_high(&self) -> &Measured<f64> {
+        &self.orient_peel_reference_pressure_pa_high
+    }
+
+    /// The LOW end of the peel reference-pressure bracket, ~9 kPa (Manizani,
+    /// FEP, ~2 mm/s -- the review's own recommended anchor).
+    #[must_use]
+    pub const fn orient_peel_reference_pressure_pa_low(&self) -> &Measured<f64> {
+        &self.orient_peel_reference_pressure_pa_low
     }
 
     #[must_use]
@@ -554,13 +785,25 @@ impl M0EvidenceConstants {
     }
 
     /// Returns the complete declaration batch in stable ID order.
-    pub fn descriptors(&self) -> Result<[ConstantDescriptor; 33], RegistryError> {
+    pub fn descriptors(&self) -> Result<[ConstantDescriptor; 46], RegistryError> {
         Ok([
             ConstantDescriptor::from_derived(
                 ConstantId::from("CCO_X_PAIR_LOAD_DISCOUNT"),
                 "1",
                 SCALAR,
                 &self.cco_x_pair_load_discount,
+            )?,
+            // Sorted into place rather than appended. The design of record's
+            // D12 says to append at the end of the declaration order; the
+            // renderer-order test in `tests/constants_evidence.rs` walks
+            // EXPECTED_EVIDENCE_IDS against the SORTED rendered table and
+            // requires monotone positions, so appending would break a test the
+            // design did not account for. Sorted placement satisfies both.
+            ConstantDescriptor::from_measured(
+                ConstantId::from("CONDITION_SHIFT_MAX"),
+                "1",
+                SCALAR,
+                &self.condition_shift_max,
             )?,
             ConstantDescriptor::from_derived(
                 ConstantId::from("DECIMATION_MAX_ABSOLUTE_DEVIATION_MM"),
@@ -586,6 +829,24 @@ impl M0EvidenceConstants {
                 SCALAR,
                 &self.final_clearance_gap_mm,
             )?,
+            ConstantDescriptor::from_derived(
+                ConstantId::from("LAMINA_REACH_RATIO"),
+                "1",
+                SCALAR,
+                &self.lamina_reach_ratio,
+            )?,
+            ConstantDescriptor::from_derived(
+                ConstantId::from("LAMINA_REACH_RATIO_AUDIT_GATE"),
+                "1",
+                SCALAR,
+                &self.lamina_reach_ratio_audit_gate,
+            )?,
+            ConstantDescriptor::from_derived(
+                ConstantId::from("LAMINA_REACH_RATIO_FIRST_LOSS"),
+                "1",
+                SCALAR,
+                &self.lamina_reach_ratio_first_loss,
+            )?,
             ConstantDescriptor::from_measured(
                 ConstantId::from("LAYER_HEIGHT_DEFAULT_MM"),
                 "mm",
@@ -597,6 +858,30 @@ impl M0EvidenceConstants {
                 "1",
                 "load_sharing",
                 &self.load_sharing,
+            )?,
+            ConstantDescriptor::from_measured(
+                ConstantId::from("L_FIRST_LOSS_MM"),
+                "mm",
+                SCALAR,
+                &self.l_first_loss_mm,
+            )?,
+            ConstantDescriptor::from_derived(
+                ConstantId::from("L_SPAN_ALLOWED_MM"),
+                "mm",
+                SCALAR,
+                &self.l_span_allowed_mm,
+            )?,
+            ConstantDescriptor::from_derived(
+                ConstantId::from("L_SPAN_CRIT_MM"),
+                "mm",
+                SCALAR,
+                &self.l_span_crit_mm,
+            )?,
+            ConstantDescriptor::from_measured(
+                ConstantId::from("L_SURVIVED_MAX_MM"),
+                "mm",
+                SCALAR,
+                &self.l_survived_max_mm,
             )?,
             ConstantDescriptor::from_measured(
                 ConstantId::from("MINIMA_DROP_INTERIOR_FACES"),
@@ -615,6 +900,36 @@ impl M0EvidenceConstants {
                 "count",
                 SCALAR,
                 &self.n_eff_cap,
+            )?,
+            ConstantDescriptor::from_measured(
+                ConstantId::from("ORIENT_PEEL_AREA_EXPONENT_HIGH"),
+                "1",
+                SCALAR,
+                &self.orient_peel_area_exponent_high,
+            )?,
+            ConstantDescriptor::from_measured(
+                ConstantId::from("ORIENT_PEEL_AREA_EXPONENT_LOW"),
+                "1",
+                SCALAR,
+                &self.orient_peel_area_exponent_low,
+            )?,
+            ConstantDescriptor::from_measured(
+                ConstantId::from("ORIENT_PEEL_REFERENCE_AREA_MM2"),
+                "mm²",
+                SCALAR,
+                &self.orient_peel_reference_area_mm2,
+            )?,
+            ConstantDescriptor::from_measured(
+                ConstantId::from("ORIENT_PEEL_REFERENCE_PRESSURE_PA_HIGH"),
+                "Pa",
+                SCALAR,
+                &self.orient_peel_reference_pressure_pa_high,
+            )?,
+            ConstantDescriptor::from_measured(
+                ConstantId::from("ORIENT_PEEL_REFERENCE_PRESSURE_PA_LOW"),
+                "Pa",
+                SCALAR,
+                &self.orient_peel_reference_pressure_pa_low,
             )?,
             ConstantDescriptor::from_measured(
                 ConstantId::from("P8_CHORD_CANON_MICRON"),

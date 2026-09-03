@@ -22,11 +22,11 @@ use std::path::PathBuf;
 
 use plinth_core::{M0ConstantsError, PositiveFinite};
 use plinth_hollow::{checked_wall_mm, registered_wall, HollowError, WallSelection};
-use plinth_pipeline::OutputProfile;
+use plinth_pipeline::{OutputProfile, Placement};
 
 pub const ROOT_USAGE: &str = "Usage: plinth <subcommand>\n\nSubcommands:\n  prepare  Prepare every source model in a directory\n\nOptions:\n  -h, --help     Show help\n  -V, --version  Show version";
 
-pub const PREPARE_USAGE: &str = "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|pinned:DIR] [--wall-mm MM] [--no-cache]\n\nOptions:\n  --input-models-dir DIR  Directory containing source models\n  --output PROFILE       Output profile; exactly: saturn4-ultra\n  --out-dir DIR          Destination directory\n  --orient MODE          dense (default) searches every model's build orientation; pinned:DIR replays the rotation DIR/<stem>.pipeline.json records, per model by stem\n  --wall-mm MM           Hollow shell wall thickness in mm, no finer than the frozen hollow voxel pitch; omit for the registered default, raise it for a piece that gets handled\n  --no-cache             Disable cache use for this request\n  -h, --help             Show help";
+pub const PREPARE_USAGE: &str = "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|pinned:DIR] [--placement legacy|sweep] [--wall-mm MM] [--no-cache]\n\nOptions:\n  --input-models-dir DIR  Directory containing source models\n  --output PROFILE       Output profile; exactly: saturn4-ultra\n  --out-dir DIR          Destination directory\n  --orient MODE          dense (default) searches every model's build orientation; pinned:DIR replays the rotation DIR/<stem>.pipeline.json records, per model by stem\n  --placement MODE       legacy (default) is the sealed support run and its pre-write gates; sweep is the EXPERIMENTAL slice-sweep core, which runs NO pre-write gate and does no branching, bracing, joints, raft or clearance checking\n  --wall-mm MM           Hollow shell wall thickness in mm, no finer than the frozen hollow voxel pitch; omit for the registered default, raise it for a piece that gets handled\n  --no-cache             Disable cache use for this request\n  -h, --help             Show help";
 
 /// Whether this request may use a `plinth-pipeline` cache.
 ///
@@ -83,6 +83,35 @@ pub enum OrientSelection {
     Pinned(PathBuf),
 }
 
+/// The support engine the operator selected.
+///
+/// **`--placement legacy` is the default and is what an omitted flag means.**
+/// The legacy path is untouched by this flag existing; `sweep` selects the
+/// experimental slice-sweep core, which runs **no pre-write gate at all** and
+/// skips branching, bracing, joint spheres, raft and every clearance check.
+/// Those absences are printed on every sweep run rather than left to be
+/// discovered in ChituBox.
+///
+/// There is deliberately no `--placement-kappa` or any other numeric knob: the
+/// reach is a registered constant computed from its measured parents at run
+/// time, and a flag for it would be a second authority over a number the
+/// registry already owns.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PlacementSelection {
+    #[default]
+    Legacy,
+    Sweep,
+}
+
+impl From<PlacementSelection> for Placement {
+    fn from(selection: PlacementSelection) -> Self {
+        match selection {
+            PlacementSelection::Legacy => Self::Legacy,
+            PlacementSelection::Sweep => Self::Sweep,
+        }
+    }
+}
+
 /// The complete user-selected CLI state and the compile-time handoff seam for
 /// a later resource resolver. It is intentionally not a partial or fabricated
 /// `PrepareRequest`.
@@ -94,6 +123,8 @@ pub struct PrepareSelection {
     pub input_models_dir: PathBuf,
     pub output_dir: PathBuf,
     pub orientation: OrientSelection,
+    /// Which support engine this run uses. See [`PlacementSelection`].
+    pub placement: PlacementSelection,
     pub output_profile: OutputProfile,
     /// The hollow shell wall the operator selected for every model in this
     /// request, defaulted from `HOLLOW_WALL_DEFAULT_MM` when `--wall-mm` is
@@ -124,6 +155,11 @@ pub enum ParseError {
     UnknownOutputProfile(String),
     NonUnicodeWallMm(OsString),
     NonUnicodeOrientMode(OsString),
+    NonUnicodePlacementMode(OsString),
+    /// `--placement` was given a mode that is not one of the two sanctioned
+    /// spellings. One spelling per concept, so a near-miss is refused rather
+    /// than guessed at — the same rule `--orient` follows.
+    UnknownPlacementMode(String),
     /// `--orient` was given a mode that is not one of the two sanctioned
     /// spellings. There is exactly one spelling per concept, so a near-miss is
     /// refused rather than guessed at.
@@ -167,6 +203,15 @@ impl std::fmt::Display for ParseError {
             Self::UnknownOrientMode(value) => write!(
                 formatter,
                 "unknown orientation mode {value:?}; expected dense or pinned:DIR"
+            ),
+            Self::NonUnicodePlacementMode(value) => write!(
+                formatter,
+                "placement mode is not valid Unicode: {:?}",
+                value.to_string_lossy()
+            ),
+            Self::UnknownPlacementMode(value) => write!(
+                formatter,
+                "unknown placement mode {value:?}; expected legacy or sweep"
             ),
             Self::NonUnicodeOutputProfile(value) => write!(
                 formatter,
@@ -224,6 +269,7 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
     let mut output_profile = None;
     let mut wall_mm = None;
     let mut orientation = None;
+    let mut placement = None;
     let mut cache = CacheMode::Enabled;
     let mut no_cache_seen = false;
     let mut index = 0;
@@ -305,6 +351,20 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
                     },
                 });
             }
+            Some("--placement") => {
+                let raw = take_value("--placement", arguments, &mut index)?;
+                if placement.is_some() {
+                    return Err(ParseError::DuplicateFlag("--placement"));
+                }
+                let value = raw
+                    .to_str()
+                    .ok_or_else(|| ParseError::NonUnicodePlacementMode(raw.clone()))?;
+                placement = Some(match value {
+                    "legacy" => PlacementSelection::Legacy,
+                    "sweep" => PlacementSelection::Sweep,
+                    _ => return Err(ParseError::UnknownPlacementMode(value.to_owned())),
+                });
+            }
             Some("--no-cache") => {
                 if no_cache_seen {
                     return Err(ParseError::DuplicateFlag("--no-cache"));
@@ -325,6 +385,7 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
             .ok_or(ParseError::MissingRequiredFlag("--input-models-dir"))?,
         output_dir: output_dir.ok_or(ParseError::MissingRequiredFlag("--out-dir"))?,
         orientation: orientation.unwrap_or_default(),
+        placement: placement.unwrap_or_default(),
         output_profile: output_profile.ok_or(ParseError::MissingRequiredFlag("--output"))?,
         wall_mm: match wall_mm {
             Some(selected) => selected,
@@ -461,6 +522,63 @@ mod tests {
             parse_args(twice),
             Err(ParseError::DuplicateFlag("--orient"))
         );
+    }
+
+    /// The two sanctioned placement spellings, and nothing between them.
+    ///
+    /// An omitted flag is the LEGACY engine. That matters more than the usual
+    /// default-flag pin: the sweep path runs no pre-write gate at all, so a
+    /// default that drifted to `sweep` would silently un-gate every run in
+    /// this repository.
+    #[test]
+    fn placement_accepts_exactly_legacy_and_sweep_and_defaults_to_legacy() {
+        let with = |mode: &str| {
+            let mut arguments = stable_arguments().to_vec();
+            arguments.extend(["--placement", mode]);
+            parse_args(arguments)
+        };
+
+        assert_eq!(
+            selection(with("legacy").unwrap()).placement,
+            PlacementSelection::Legacy
+        );
+        assert_eq!(
+            selection(with("sweep").unwrap()).placement,
+            PlacementSelection::Sweep
+        );
+        assert_eq!(
+            selection(parse_args(stable_arguments()).unwrap()).placement,
+            PlacementSelection::Legacy,
+            "an omitted --placement must be the gated legacy engine"
+        );
+
+        for rejected in ["", "Sweep", "slice-sweep", "slice_sweep", "new", "Legacy"] {
+            assert_eq!(
+                with(rejected),
+                Err(ParseError::UnknownPlacementMode(rejected.to_owned())),
+                "{rejected:?} must be refused rather than guessed at"
+            );
+        }
+
+        let mut twice = stable_arguments().to_vec();
+        twice.extend(["--placement", "sweep", "--placement", "legacy"]);
+        assert_eq!(
+            parse_args(twice),
+            Err(ParseError::DuplicateFlag("--placement"))
+        );
+    }
+
+    /// The selector reaches the pipeline as the pipeline's own enum, with no
+    /// stringly step in between.
+    #[test]
+    fn the_placement_selection_maps_onto_the_pipeline_enum_both_ways() {
+        assert_eq!(Placement::from(PlacementSelection::Legacy), Placement::Legacy);
+        assert_eq!(Placement::from(PlacementSelection::Sweep), Placement::Sweep);
+        // The pipeline's own default is the gated engine too, so a caller that
+        // builds a `PrepareRequest` with `..Default::default()` cannot land on
+        // the ungated path by omission.
+        assert_eq!(Placement::default(), Placement::Legacy);
+        assert_eq!(PlacementSelection::default(), PlacementSelection::Legacy);
     }
 
     /// `--no-cache` is the ONE cache-off spelling `06-conventions.md` § 6

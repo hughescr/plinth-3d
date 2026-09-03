@@ -25,7 +25,7 @@ use plinth_pipeline::{
     PipelineExitCode, PreWriteGate, PrepareReport, PrepareRequest, SupportedGeometry,
 };
 
-use crate::{CacheMode, OrientSelection, PrepareSelection};
+use crate::{CacheMode, OrientSelection, PlacementSelection, PrepareSelection};
 
 /// Run one parsed `plinth prepare` invocation to completion.
 ///
@@ -72,6 +72,7 @@ fn resolve(selection: &PrepareSelection) -> Result<PrepareRequest, PipelineError
         input_models_dir: selection.input_models_dir.clone(),
         output_dir: selection.output_dir.clone(),
         orientation: resolve_orientation(&selection.orientation)?,
+        placement: selection.placement.into(),
         output_profile: selection.output_profile,
         decimation_budget,
         // The operator's wall, defaulted by the parser from the registry. The
@@ -181,6 +182,22 @@ fn print_report(selection: &PrepareSelection, report: &PrepareReport) {
                 "pinned baselines from {} (per model, by stem)",
                 directory.display()
             ),
+        }
+    );
+
+    // Which support engine placed the field. Two runs of the same model under
+    // the two engines produce the same KIND of artifact, so without this line
+    // a `.chitubox` cannot be told apart from its output — and one of the two
+    // ran no pre-write gate at all.
+    println!(
+        "  placement    {}",
+        match selection.placement {
+            PlacementSelection::Legacy =>
+                "legacy sealed support run (pre-write gates enforced)",
+            PlacementSelection::Sweep =>
+                "slice-sweep core, EXPERIMENTAL: NO pre-write gate ran on any model in \
+                 this run; no branching, bracing, joint spheres, raft or clearance \
+                 checking. Per-model disclosure is printed above each model's line.",
         }
     );
 

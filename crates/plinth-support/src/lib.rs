@@ -172,6 +172,12 @@ pub use coverage_repair::{
     TRIAL_TRAIL_DIR_ENV,
 };
 pub use initial::ContactConstructionLimits;
+/// The slice-sweep adapter's one geometry door — see `lower.rs`. The rest of
+/// `lower` stays crate-private: this exposes the primitive chain, not the
+/// forest data model behind it.
+pub use lower::{
+    lower_sweep_arms, SweepArm, SweepArmLanding, SweepLowering, SweepLoweringError,
+};
 pub use runner::{
     run_support, AbandonedContactDisclosure, EmittedContactDisclosure, FinalLiveMemberEvidence,
     FinalSupportAuthority, GrownContactTipDisclosure, OwnerlessIslandDisclosure,

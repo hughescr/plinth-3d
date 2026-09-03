@@ -16,6 +16,10 @@ plinth-hollow = { path = "../plinth-hollow" }
 plinth-mesh = { path = "../plinth-mesh" }
 plinth-orient = { path = "../plinth-orient" }
 plinth-support = { path = "../plinth-support" }
+# LANE 2: the slice-sweep placement selector. A RUNTIME enum on the request,
+# not a Cargo feature, so both engines live in one binary and can be measured
+# side by side on the same build.
+plinth-sweep = { path = "../plinth-sweep" }
 plinth-verify = { path = "../plinth-verify" }
 serde = { workspace = true }
 # FU-57: the coverage-refusal sidecar is production output, written on the

@@ -131,7 +131,7 @@ fn thread_sweep_child_writes_canonical_scores() {
         ),
         ("toed_slab", make_toed_slab().expect("toed slab fixture")),
     ] {
-        let outcome = search(&mesh, &request).expect("the dense sweep must not refuse a fixture");
+        let outcome = search(&mesh, &request, None).expect("the dense sweep must not refuse a fixture");
         let record = outcome.record();
         report.push_str(&format!(
             "sweep {name} {} winner={} score={:016x}\n",

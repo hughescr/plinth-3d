@@ -69,8 +69,18 @@ fn a_cube_measures_every_term_analytically_including_the_scar() {
     // 100 mm² of floor at delicacy 0.15.
     assert_close(terms.scar_raw_mm2, 15.0, 1e-12, "raw scar");
     assert_close(terms.scar_term, 0.4 * 15.0 / 100.0, 1e-12, "scar term");
-    // 0.5·1 + 3·1 + 0.3·10 + 0.06.
-    assert_close(terms.score, 6.56, 1e-12, "score");
+    // Re-derived 2026-09-02 (LANE 3, docs/plans/slice-sweep-core-2026-09-02.md
+    // §12): the old pin (6.56 = 0.5*1 + 3*1 + 0.3*10 + 0.06) priced the
+    // retired `peak_xsec_cm2` term at `w_peak = 3.0`. It is replaced by a
+    // peel-force term, `points_per_newton * F(peak_mm2)` at the LOW-pressure/
+    // LOW-exponent corner: `F(100 mm2) = c * 100^0.24` with
+    // `c = (9000 Pa * 314e-6 m2) / 314^0.24 = 2.826 / 3.973987... = 0.710979...`,
+    // so `F(100) = 0.710979... * 100^0.24 = 0.710979... * 3.019952...
+    // = 2.147380682642539`. New score = 0.5*1 + 2.147380682642539 + 0.3*10
+    // + 0.06 = 5.707380682642539. This is a measurement, not a hand-typed
+    // number: it is what `score_all` actually returns, asserted to the same
+    // 1e-12 tolerance as the pin it replaces.
+    assert_close(terms.score, 5.707_380_682_642_539, 1e-12, "score");
 
     // Turning the cube on its side is the same cube: every term is unchanged.
     let sideways = score_all(
@@ -108,7 +118,13 @@ fn an_analytic_sphere_pins_the_units_and_the_overhang_cutoff() {
     assert_close(terms.peak_xsec_cm2, peak, peak * 1e-3, "peak cross-section");
     assert_close(terms.support_area_cm2, cap, cap * 2e-2, "support cap");
     assert_close(terms.scar_term, 0.0, 0.0, "scar is off");
-    assert_close(terms.score, 16.34494, 0.05, "scar-free total");
+    // Re-derived 2026-09-02 (LANE 3, §12): the old pin priced the retired
+    // `peak_xsec_cm2` term at `w_peak = 3.0` (`0.5*cap + 3*peak + 0.3*height`).
+    // With the peak-cross-section weight replaced by a peel-force term this
+    // total moves — measured at 9.746388201376032, well outside the old
+    // pin's 0.05 tessellation tolerance because it is now a genuinely
+    // different quantity, not the same one measured more precisely.
+    assert_close(terms.score, 9.746_388_201_376_032, 0.05, "scar-free total");
 }
 
 /// **T6.** Rotating the model about the candidate direction is a null operation

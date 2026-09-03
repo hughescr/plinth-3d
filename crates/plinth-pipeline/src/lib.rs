@@ -352,6 +352,27 @@ impl From<SupportPreparationLimitsError> for PrepareResourcePolicyError {
     }
 }
 
+/// Which engine places and sizes the support field.
+///
+/// **A runtime enum on the request, deliberately not a Cargo feature**, so both
+/// engines live in one binary and can be measured side by side on the same
+/// build (`docs/plans/slice-sweep-core-2026-09-02.md` §11).
+///
+/// `Legacy` is the default and is what an omitted `--placement` means; nothing
+/// about the legacy path changes because this exists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Placement {
+    /// The sealed support run: perception, contact selection, the coverage
+    /// repair controller, the pre-write gates, and the frozen lowering.
+    #[default]
+    Legacy,
+    /// The slice-sweep core (`plinth-sweep`), **experimental**. It skips the
+    /// pre-write gate set, branching, bracing, joint spheres, raft and every
+    /// clearance check; each of those absences is printed on the run and is
+    /// not a claim that they are unnecessary.
+    Sweep,
+}
+
 /// One batch request: every source STL in `input_models_dir` maps to one output stem.
 ///
 /// # Units contract: source coordinates ARE final printed millimetres
@@ -385,6 +406,8 @@ pub struct PrepareRequest {
     pub input_models_dir: PathBuf,
     pub output_dir: PathBuf,
     pub orientation: OrientationPolicy,
+    /// Which support engine this run uses. See [`Placement`].
+    pub placement: Placement,
     pub output_profile: OutputProfile,
     pub decimation_budget: DecimationBudget,
     pub hollow: HollowRequest,
@@ -1227,6 +1250,31 @@ pub enum PipelineError {
         #[source]
         source: EmitError,
     },
+    /// The slice-sweep core could not START on this model.
+    ///
+    /// **Never a shortfall.** Every shortfall the sweep can find — residual
+    /// demand, uncarried load, an overloaded arm, a coarsened raster — is a
+    /// warning on an emitted file (owner ruling 2026-09-01). This variant
+    /// carries only the four refusals-to-start `plinth_sweep::SweepError`
+    /// defines: an unreadable registry, an empty or variable-height layer
+    /// plan, a degenerate mesh, a zero-lift pose, a slicing failure, or a
+    /// field over the arm limit. It projects to
+    /// [`PipelineExitCode::Supports`], like every other support-stage failure.
+    #[error("model {model} could not be placed by the slice-sweep core")]
+    Sweep {
+        model: ModelId,
+        #[source]
+        source: plinth_sweep::SweepError,
+    },
+    /// Lowering a slice-sweep field into emit primitives failed on the REQUEST,
+    /// not on an arm: an arm the adapter cannot build is dropped, counted and
+    /// disclosed, and the rest of the field still emits.
+    #[error("model {model} failed to lower its slice-sweep support field")]
+    SweepLowering {
+        model: ModelId,
+        #[source]
+        source: plinth_support::SweepLoweringError,
+    },
 }
 
 impl PipelineError {
@@ -1245,9 +1293,11 @@ impl PipelineError {
             Self::Delicacy { .. } | Self::LayerPlan { .. } => PipelineExitCode::Supports,
             Self::Hollow { .. } => PipelineExitCode::Hollow,
             Self::Gates { .. } => PipelineExitCode::Gates,
-            Self::Support { .. } | Self::SealedRun { .. } | Self::Lowering { .. } => {
-                PipelineExitCode::Supports
-            }
+            Self::Support { .. }
+            | Self::SealedRun { .. }
+            | Self::Lowering { .. }
+            | Self::Sweep { .. }
+            | Self::SweepLowering { .. } => PipelineExitCode::Supports,
             // A stale artifact that will not clear is a failure of this model's
             // emission path: the one place the run owns the target file. FU-57's
             // coverage evidence lives beside the same target and is cleared under

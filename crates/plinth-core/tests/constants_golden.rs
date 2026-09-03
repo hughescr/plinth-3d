@@ -4,7 +4,7 @@ use std::path::Path;
 
 // This is a hand-maintained cross-component inventory. It deliberately does
 // not read the source ledger or the generated Markdown golden.
-const EXPECTED_CONSTANT_IDS: [&str; 306] = [
+const EXPECTED_CONSTANT_IDS: [&str; 324] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -43,6 +43,7 @@ const EXPECTED_CONSTANT_IDS: [&str; 306] = [
     "COINCIDE_TOL_MM",
     "COLINEAR_ANGLE_DEG",
     "COLINEAR_RADIUS_FRAC",
+    "CONDITION_SHIFT_MAX",
     "CONNECTIVITY_AXIS_ATTACH_TOL_MM",
     "CONNECTIVITY_EMBED_PAD_MM",
     "COVERAGE_RADIUS_FACTOR",
@@ -119,11 +120,18 @@ const EXPECTED_CONSTANT_IDS: [&str; 306] = [
     "ISLAND_MERGE_RADIUS_MM",
     "JOINT_BALL_FACTOR",
     "KAPPA",
+    "LAMINA_REACH_RATIO",
+    "LAMINA_REACH_RATIO_AUDIT_GATE",
+    "LAMINA_REACH_RATIO_FIRST_LOSS",
     "LAYER_HEIGHT_DEFAULT_MM",
     "LIFT_MM",
     "LIFT_TOL_MM",
     "LOAD_SHARING",
+    "L_FIRST_LOSS_MM",
     "L_SCAR_MAX_MM",
+    "L_SPAN_ALLOWED_MM",
+    "L_SPAN_CRIT_MM",
+    "L_SURVIVED_MAX_MM",
     "MATERIAL_COST_PER_MM",
     "MAX_DEFLECTION_MM",
     "MAX_SEGMENT_ANGLE_DEG",
@@ -149,6 +157,12 @@ const EXPECTED_CONSTANT_IDS: [&str; 306] = [
     "ORIENT_COMMIT_TOP_K",
     "ORIENT_DEDUPE_TOLERANCE_DEG",
     "ORIENT_FIBONACCI_COUNT",
+    "ORIENT_PEEL_AREA_EXPONENT_HIGH",
+    "ORIENT_PEEL_AREA_EXPONENT_LOW",
+    "ORIENT_PEEL_POINTS_PER_NEWTON",
+    "ORIENT_PEEL_REFERENCE_AREA_MM2",
+    "ORIENT_PEEL_REFERENCE_PRESSURE_PA_HIGH",
+    "ORIENT_PEEL_REFERENCE_PRESSURE_PA_LOW",
     "ORIENT_PROXY_L1_RATIO",
     "ORIENT_PROXY_L2_OF_L1_RATIO",
     "ORIENT_PROXY_MIN_FACES",
@@ -293,6 +307,10 @@ const EXPECTED_CONSTANT_IDS: [&str; 306] = [
     "SURFACE_TREE_MAX_POINTS",
     "SURFACE_TREE_PITCH_MM",
     "SURFACE_TREE_SEED",
+    "SWEEP_CELL_LAYER_BUDGET",
+    "SWEEP_PEEL_FIELD_MODE",
+    "SWEEP_STRUT_REMOVAL_PASSES",
+    "SWEEP_WORKING_PITCH_MM",
     "TARGET_SPACING_MM",
     "TENSILE_GREEN_MPA",
     "THIN_FEATURE_MM",
@@ -353,7 +371,7 @@ fn global_registry_is_one_complete_atomic_306_constant_publication() {
             }
             counts
         });
-    assert_eq!(classes, [22, 11, 273, 0]);
+    assert_eq!(classes, [30, 16, 278, 0]);
 }
 
 #[test]

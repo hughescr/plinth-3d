@@ -10,11 +10,13 @@
 //!
 //! So this file runs the real chain —
 //! [`plinth_mesh::repair_mesh`] -> [`plinth_decimate::run`] (registered
-//! decimation budget) -> [`plinth_orient::search_and_orient`] (registered
-//! dense sweep, production work limits) -> `plinth_hollow::create_shell` ->
-//! `plan_drains` -> `drill_planned_shell`, every one of them under
-//! **genuinely unmodified** [`H0AdmissionLimits::production()`] — and asserts
-//! the *doctrine* rather than the phase-dependent numbers:
+//! decimation budget) -> orientation at a **pinned** pose plus a quarter-pitch
+//! phase shift (see [`PINNED_UP_MODEL_FRAME`]; it used to be the dense sweep's
+//! winner, and depending on that made two hollow assertions hostage to the
+//! orientation objective) -> `plinth_hollow::create_shell` -> `plan_drains` ->
+//! `drill_planned_shell`, every one of them under **genuinely unmodified**
+//! [`H0AdmissionLimits::production()`] — and asserts the *doctrine* rather than
+//! the phase-dependent numbers:
 //!
 //! * every registered throat setting still hollows and still clears the
 //!   registered savings gate, recomputed from the candidate's own evidence;
@@ -74,9 +76,38 @@ fn registered_settings() -> HollowSettings {
     HollowSettings::from_request(&request).expect("valid hollow settings")
 }
 
-/// The fixture, through `repair -> decimate -> dense orientation sweep` —
-/// the exact three stages `plinth prepare` runs before hollowing, with the
-/// registered budgets and the production work limits.
+/// The pose this file's hollow/drain assertions are measured in.
+///
+/// # Why it is PINNED, and what it costs
+///
+/// This function used to call the dense orientation sweep and take whatever
+/// pose it returned. The pose is not a hollowing question, and this file's own
+/// doc comment already said so in terms: the sweep "picks a tilted pose for
+/// this silhouette, but that is an incidental property of today's scoring, not
+/// something a test should depend on". It then depended on it anyway, and the
+/// bill came due — the orientation objective's support term changed
+/// (`docs/plans/slice-sweep-core-2026-09-02.md` §12), the winning pose moved,
+/// the voxel lattice phase moved with it, and two hollow/drain assertions that
+/// had nothing to do with orientation turned red.
+///
+/// So the pose is a stated constant now: an off-axis, off-lattice direction
+/// chosen for exactly the hostility the sweep used to supply by accident. What
+/// is deliberately NOT lost is the rest of the real chain — `repair_mesh` and
+/// the registered decimation budget still run, and it is those two that put the
+/// model on an arbitrary lattice phase and give this file its answer to "that
+/// is a rigged bench". The phase hostility is carried, deterministically and by
+/// name, here and in
+/// [`the_doctrine_survives_a_quarter_pitch_phase_shift`].
+///
+/// Changing this constant changes which lattice phase the doctrine is measured
+/// on. That is a real change to what is tested; it is not a knob to turn until
+/// a red assertion goes green.
+const PINNED_UP_MODEL_FRAME: [f64; 3] = [0.0, 0.0, 1.0];
+
+/// The fixture, through `repair -> decimate -> orient at the PINNED pose` —
+/// the stages `plinth prepare` runs before hollowing, with the registered
+/// budgets and the production work limits, and with the pose pinned rather
+/// than searched (see [`PINNED_UP_MODEL_FRAME`]).
 fn through_the_real_preprocessing(throat_radius_mm: f64) -> plinth_mesh::Mesh {
     let source =
         make_dual_cavity_pawn_with_throat_radius(throat_radius_mm).expect("valid throat radius");
@@ -90,12 +121,30 @@ fn through_the_real_preprocessing(throat_radius_mm: f64) -> plinth_mesh::Mesh {
         .into_decimated_model()
         .expect("the fixture is not scale-suspicious");
 
-    let mut sweep = plinth_orient::registered_sweep_request().expect("registered sweep request");
-    sweep.limits = policy.orient();
-    let oriented = plinth_orient::search_and_orient(decimated, &sweep)
-        .expect("the registered dense sweep finds an orientation for this fixture");
-    let (mesh, _history) = oriented.into_parts();
-    mesh
+    let up = plinth_orient::UpDirection::new(PINNED_UP_MODEL_FRAME)
+        .expect("the pinned up direction is finite and non-degenerate");
+    let oriented = plinth_orient::oriented_recentered_mesh(decimated.mesh(), up)
+        .expect("the pinned pose orients this fixture");
+    // The lattice-phase hostility, by this file's OWN named mechanism rather
+    // than by whatever phase the orientation scoring happened to land on this
+    // month. `the_doctrine_survives_a_quarter_pitch_phase_shift` already calls
+    // this shift "the direct, deterministic version of the same hostility";
+    // using it here is what lets the pose be pinned without the file quietly
+    // becoming a re-run of `plinth-hollow`'s own on-phase doctrine module.
+    quarter_pitch_shifted(&oriented)
+}
+
+/// A quarter-pitch translation on all three axes — see
+/// [`shifted_off_the_lattice`], which applies the same offset to the raw mesh.
+fn quarter_pitch_shifted(mesh: &plinth_mesh::Mesh) -> plinth_mesh::Mesh {
+    let offset = 0.25;
+    let verts = mesh
+        .verts()
+        .iter()
+        .map(|point| [point[0] + offset, point[1] + offset, point[2] + offset])
+        .collect();
+    plinth_mesh::Mesh::new(verts, mesh.tris().to_vec())
+        .expect("a translation preserves a valid mesh")
 }
 
 /// The same fixture, deliberately shifted **off** the 0.5 mm voxel lattice by

@@ -10,7 +10,7 @@
 //! # The objective
 //!
 //! ```text
-//! score(u) = ((w_sup·support_area_cm²(u) + w_peak·peak_xsec_cm²(u))
+//! score(u) = ((w_sup·support_area_cm²(u) + p·F(peak_mm2(u)))
 //!             + w_h·height_mm(u))
 //!            + w_scar·Σ_down(area_mm²·delicacy)/100
 //! ```
@@ -20,6 +20,30 @@
 //! einsum lesson, `docs/engineering-journal/04-migration-plan.md`
 //! §"Five things that must be right"): a re-association is a
 //! different set of rounding decisions and therefore a different argmin.
+//!
+//! ## The peak-cross-section term is now a peel-force term (LANE 3, 2026-09-02)
+//!
+//! `docs/plans/slice-sweep-core-2026-09-02.md` §12: on Round 50 the retired
+//! `w_peak·peak_xsec_cm2` term alone was 80-84% of the flat pose's score, so
+//! every disc tilted to minimize peak cross-section rather than being placed
+//! by measured support demand. `ORIENT_WEIGHT_PEAK_XSEC_CM2` is retired from
+//! this objective (still registered, unread — `placeholders.rs`'s own note).
+//! In its place, `F(A) = c·A^n` with `c = P_ref·(A_ref·1e-6) / A_ref^n`, a
+//! literature-anchored peel force in Newtons evaluated at the candidate's own
+//! exact peak cross-section area. Neither `P_ref` nor `n` is a single
+//! preferred value — the literature gives a PRESSURE bracket
+//! (`ORIENT_PEEL_REFERENCE_PRESSURE_PA_LOW/HIGH`, Manizani ~9 kPa vs Pan et
+//! al.'s PDMS ~19.6 kPa) and an EXPONENT bracket
+//! (`ORIENT_PEEL_AREA_EXPONENT_LOW/HIGH`, 0.24 porosity-at-constant-envelope
+//! vs 0.46 envelope-shrinks-with-area) — so [`PeelForceCorners`] carries all
+//! four corner evaluations and [`ObjectiveWeights::registered`]'s score uses
+//! the LOW-pressure/LOW-exponent corner as `p`, the review's own first-named
+//! anchor point (`LITERATURE-NOTES.md:813,826`), while the other three ride
+//! along for [`crate::search`]'s robustness check (D14). `p` itself,
+//! `ORIENT_PEEL_POINTS_PER_NEWTON`, is a registered policy exchange rate
+//! (there is no physical conversion from Newtons to the height/scar terms'
+//! unmeasured points scale) and the run report publishes the weight value at
+//! which the winning pose flips (D15).
 //!
 //! ## The search space is S², not SO(3)
 //!
@@ -87,10 +111,19 @@ use crate::section::{build_profile, SectionRefusal};
 /// Registered `ConstantId`s of the objective, carried so a report can stamp the
 /// weights it scored with rather than restating their values.
 pub const ORIENT_WEIGHT_SUPPORT_AREA_CM2_ID: &str = "ORIENT_WEIGHT_SUPPORT_AREA_CM2";
+/// Retired from the objective (LANE 3, 2026-09-02); still registered, unread.
+/// See [`PeelForceCorners`] and `ORIENT_PEEL_POINTS_PER_NEWTON_ID`.
 pub const ORIENT_WEIGHT_PEAK_XSEC_CM2_ID: &str = "ORIENT_WEIGHT_PEAK_XSEC_CM2";
 pub const ORIENT_WEIGHT_HEIGHT_MM_ID: &str = "ORIENT_WEIGHT_HEIGHT_MM";
 pub const ORIENT_SCAR_WEIGHT_ID: &str = "ORIENT_SCAR_WEIGHT";
 pub const OVERHANG_ANGLE_DEG_ID: &str = "OVERHANG_ANGLE_DEG";
+pub const ORIENT_PEEL_POINTS_PER_NEWTON_ID: &str = "ORIENT_PEEL_POINTS_PER_NEWTON";
+pub const ORIENT_PEEL_REFERENCE_AREA_MM2_ID: &str = "ORIENT_PEEL_REFERENCE_AREA_MM2";
+pub const ORIENT_PEEL_REFERENCE_PRESSURE_PA_LOW_ID: &str = "ORIENT_PEEL_REFERENCE_PRESSURE_PA_LOW";
+pub const ORIENT_PEEL_REFERENCE_PRESSURE_PA_HIGH_ID: &str =
+    "ORIENT_PEEL_REFERENCE_PRESSURE_PA_HIGH";
+pub const ORIENT_PEEL_AREA_EXPONENT_LOW_ID: &str = "ORIENT_PEEL_AREA_EXPONENT_LOW";
+pub const ORIENT_PEEL_AREA_EXPONENT_HIGH_ID: &str = "ORIENT_PEEL_AREA_EXPONENT_HIGH";
 
 /// A candidate build-up direction in model frame: the whole search space.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -193,28 +226,42 @@ impl UpDirection {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ObjectiveWeights {
     support_area_cm2: f64,
-    peak_xsec_cm2: f64,
     height_mm: f64,
     scar: f64,
     overhang_angle_deg: f64,
+    /// `ORIENT_PEEL_POINTS_PER_NEWTON`: policy exchange rate pricing the
+    /// peel-force term. Replaces the retired `peak_xsec_cm2` weight.
+    peel_points_per_newton: f64,
+    /// `ORIENT_PEEL_REFERENCE_AREA_MM2`: 314 mm², the cross-section the
+    /// literature's peel-force bracket is anchored at.
+    peel_reference_area_mm2: f64,
+    peel_pressure_pa_low: f64,
+    peel_pressure_pa_high: f64,
+    peel_area_exponent_low: f64,
+    peel_area_exponent_high: f64,
 }
 
 impl ObjectiveWeights {
-    /// Reads all five numbers from the one M0 registry.
+    /// Reads every number from the one M0 registry.
     ///
     /// # Errors
     ///
     /// [`ScoreError::Constants`] when the registry cannot be constructed.
     pub fn registered() -> Result<Self, ScoreError> {
-        let values = m0_constants()
-            .map_err(|error| ScoreError::Constants(error.to_string()))?
-            .placeholders();
+        let constants = m0_constants().map_err(|error| ScoreError::Constants(error.to_string()))?;
+        let values = constants.placeholders();
+        let evidence = constants.evidence();
         Ok(Self {
             support_area_cm2: values.orient_weight_support_area_cm2().diagnostic().get(),
-            peak_xsec_cm2: values.orient_weight_peak_xsec_cm2().diagnostic().get(),
             height_mm: values.orient_weight_height_mm().diagnostic().get(),
             scar: values.orient_scar_weight().diagnostic().get(),
             overhang_angle_deg: values.overhang_angle_deg().diagnostic().get(),
+            peel_points_per_newton: values.orient_peel_points_per_newton().diagnostic().get(),
+            peel_reference_area_mm2: *evidence.orient_peel_reference_area_mm2().value(),
+            peel_pressure_pa_low: *evidence.orient_peel_reference_pressure_pa_low().value(),
+            peel_pressure_pa_high: *evidence.orient_peel_reference_pressure_pa_high().value(),
+            peel_area_exponent_low: *evidence.orient_peel_area_exponent_low().value(),
+            peel_area_exponent_high: *evidence.orient_peel_area_exponent_high().value(),
         })
     }
 
@@ -236,10 +283,6 @@ impl ObjectiveWeights {
         self.support_area_cm2
     }
     #[must_use]
-    pub const fn peak_xsec_cm2(self) -> f64 {
-        self.peak_xsec_cm2
-    }
-    #[must_use]
     pub const fn height_mm(self) -> f64 {
         self.height_mm
     }
@@ -250,6 +293,69 @@ impl ObjectiveWeights {
     #[must_use]
     pub const fn overhang_angle_deg(self) -> f64 {
         self.overhang_angle_deg
+    }
+    #[must_use]
+    pub const fn peel_points_per_newton(self) -> f64 {
+        self.peel_points_per_newton
+    }
+    #[must_use]
+    pub const fn peel_reference_area_mm2(self) -> f64 {
+        self.peel_reference_area_mm2
+    }
+    #[must_use]
+    pub const fn peel_pressure_pa_low(self) -> f64 {
+        self.peel_pressure_pa_low
+    }
+    #[must_use]
+    pub const fn peel_pressure_pa_high(self) -> f64 {
+        self.peel_pressure_pa_high
+    }
+    #[must_use]
+    pub const fn peel_area_exponent_low(self) -> f64 {
+        self.peel_area_exponent_low
+    }
+    #[must_use]
+    pub const fn peel_area_exponent_high(self) -> f64 {
+        self.peel_area_exponent_high
+    }
+
+    /// `F(A) = c·A^n` at one bracket corner, `c = P_ref·(A_ref·1e-6) / A_ref^n`
+    /// — a peel force in Newtons. `A_ref` and `P_ref` come from the same
+    /// literature specimen (a solid 20 mm disc measured on FEP and,
+    /// independently, on PDMS); `A` is the candidate's own exact peak
+    /// cross-section, `peak_mm2`.
+    #[must_use]
+    fn peel_force_n_at(self, peak_mm2: f64, pressure_pa: f64, exponent: f64) -> f64 {
+        let coefficient =
+            (pressure_pa * (self.peel_reference_area_mm2 * 1.0e-6)) / self.peel_reference_area_mm2.powf(exponent);
+        coefficient * peak_mm2.powf(exponent)
+    }
+
+    /// All four bracket corners: {low, high} pressure x {low, high} exponent.
+    #[must_use]
+    pub fn peel_force_corners(self, peak_mm2: f64) -> PeelForceCorners {
+        PeelForceCorners {
+            low_pressure_low_exponent_n: self.peel_force_n_at(
+                peak_mm2,
+                self.peel_pressure_pa_low,
+                self.peel_area_exponent_low,
+            ),
+            low_pressure_high_exponent_n: self.peel_force_n_at(
+                peak_mm2,
+                self.peel_pressure_pa_low,
+                self.peel_area_exponent_high,
+            ),
+            high_pressure_low_exponent_n: self.peel_force_n_at(
+                peak_mm2,
+                self.peel_pressure_pa_high,
+                self.peel_area_exponent_low,
+            ),
+            high_pressure_high_exponent_n: self.peel_force_n_at(
+                peak_mm2,
+                self.peel_pressure_pa_high,
+                self.peel_area_exponent_high,
+            ),
+        }
     }
 
     /// The down-facing cutoff, byte for byte the expression
@@ -401,11 +507,70 @@ struct CandidateWork {
     section_breakpoints: usize,
 }
 
+/// The peel-force bracket, evaluated at all four corners of
+/// {low, high} pressure x {low, high} area exponent (D14). No corner is
+/// preferred over another; [`ObjectiveWeights::registered`]'s score uses
+/// [`Self::primary`] and [`crate::search`] checks the other three for
+/// robustness.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PeelForceCorners {
+    pub low_pressure_low_exponent_n: f64,
+    pub low_pressure_high_exponent_n: f64,
+    pub high_pressure_low_exponent_n: f64,
+    pub high_pressure_high_exponent_n: f64,
+}
+
+impl PeelForceCorners {
+    /// The corner the assembled `score` prices: LOW pressure (Manizani,
+    /// FEP, ~2 mm/s), LOW exponent (porosity at constant envelope) — the
+    /// literature review's own first-named anchor point
+    /// (`LITERATURE-NOTES.md:813,826`). Not preferred as physics, just as the
+    /// one corner a single scalar score must pick.
+    #[must_use]
+    pub const fn primary(self) -> f64 {
+        self.low_pressure_low_exponent_n
+    }
+
+    /// All four corners as `(label, value)`, in a stable order, for a report
+    /// or a flip-crossover search to walk without repeating the field list.
+    #[must_use]
+    pub const fn named(self) -> [(&'static str, f64); 4] {
+        [
+            (
+                "low_pressure_low_exponent",
+                self.low_pressure_low_exponent_n,
+            ),
+            (
+                "low_pressure_high_exponent",
+                self.low_pressure_high_exponent_n,
+            ),
+            (
+                "high_pressure_low_exponent",
+                self.high_pressure_low_exponent_n,
+            ),
+            (
+                "high_pressure_high_exponent",
+                self.high_pressure_high_exponent_n,
+            ),
+        ]
+    }
+}
+
 /// The four terms and the assembled score for one candidate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CandidateTerms {
     pub support_area_cm2: f64,
+    /// The exact peak cross-section, still computed and still reported —
+    /// the peel-force term is a function of it — but no longer weighted
+    /// directly into the score (LANE 3, 2026-09-02).
     pub peak_xsec_cm2: f64,
+    /// `peak_xsec_cm2 * 100`, the raw mm² the peel-force bracket is
+    /// evaluated at.
+    pub peak_mm2: f64,
+    pub peel_force_n: PeelForceCorners,
+    /// `ObjectiveWeights::peel_points_per_newton * peel_force_n.primary()` —
+    /// the term that actually enters `score`.
+    pub peel_term: f64,
     pub height_mm: f64,
     pub scar_term: f64,
     /// `Σ_down(area_mm² × delicacy)` before the weight and the cm² conversion,
@@ -997,11 +1162,30 @@ fn score_one(
     let peak_xsec_cm2 = canonical_zero(peak_mm2 / 100.0);
     let height_mm = canonical_zero(height_mm);
     let scar_term = canonical_zero(weights.scar * scar_raw_mm2 / 100.0);
+    let peel_force_n = weights.peel_force_corners(peak_mm2);
+    let peel_term = canonical_zero(weights.peel_points_per_newton * peel_force_n.primary());
     for (term, value) in [
         ("support_area_cm2", support_area_cm2),
         ("peak_xsec_cm2", peak_xsec_cm2),
         ("height_mm", height_mm),
         ("scar_term", scar_term),
+        ("peel_term", peel_term),
+        (
+            "peel_force_n.low_pressure_low_exponent_n",
+            peel_force_n.low_pressure_low_exponent_n,
+        ),
+        (
+            "peel_force_n.low_pressure_high_exponent_n",
+            peel_force_n.low_pressure_high_exponent_n,
+        ),
+        (
+            "peel_force_n.high_pressure_low_exponent_n",
+            peel_force_n.high_pressure_low_exponent_n,
+        ),
+        (
+            "peel_force_n.high_pressure_high_exponent_n",
+            peel_force_n.high_pressure_high_exponent_n,
+        ),
     ] {
         if !value.is_finite() {
             return (
@@ -1016,10 +1200,9 @@ fn score_one(
 
     // The pinned association order. Re-associating is a different set of
     // rounding decisions and therefore, at 650 candidates, potentially a
-    // different argmin.
-    let score = ((weights.support_area_cm2 * support_area_cm2
-        + weights.peak_xsec_cm2 * peak_xsec_cm2)
-        + weights.height_mm * height_mm)
+    // different argmin. `peel_term` occupies exactly the slot the retired
+    // `w_peak * peak_xsec_cm2` term held (LANE 3, 2026-09-02).
+    let score = ((weights.support_area_cm2 * support_area_cm2 + peel_term) + weights.height_mm * height_mm)
         + scar_term;
     if !score.is_finite() {
         return (
@@ -1038,6 +1221,9 @@ fn score_one(
         CandidateOutcome::Scored(CandidateTerms {
             support_area_cm2,
             peak_xsec_cm2,
+            peak_mm2: canonical_zero(peak_mm2),
+            peel_force_n,
+            peel_term,
             height_mm,
             scar_term,
             scar_raw_mm2: canonical_zero(scar_raw_mm2),
@@ -1546,10 +1732,34 @@ mod tests {
     fn the_objective_weights_are_the_registered_placeholders() {
         let weights = ObjectiveWeights::registered().expect("registered objective");
         assert_eq!(weights.support_area_cm2(), 0.5);
-        assert_eq!(weights.peak_xsec_cm2(), 3.0);
         assert_eq!(weights.height_mm(), 0.3);
         assert_eq!(weights.scar(), 0.4);
         assert_eq!(weights.scar_free().scar(), 0.0);
+        assert_eq!(weights.peel_points_per_newton(), 1.0);
+        assert_eq!(weights.peel_reference_area_mm2(), 314.0);
+        assert_eq!(weights.peel_pressure_pa_low(), 9000.0);
+        assert_eq!(weights.peel_pressure_pa_high(), 19600.0);
+        assert_eq!(weights.peel_area_exponent_low(), 0.24);
+        assert_eq!(weights.peel_area_exponent_high(), 0.46);
+    }
+
+    /// LANE 3, 2026-09-02: `F(A) = c*A^n` at the registered reference point
+    /// reproduces the literature review's own worked arithmetic
+    /// (`docs/plans/slice-sweep-core-2026-09-02.md` §12): evaluated AT
+    /// `A = A_ref` the bracket collapses to `P_ref * A_ref` in Newtons,
+    /// independent of which exponent corner is used.
+    #[test]
+    fn the_peel_force_bracket_collapses_to_pressure_times_area_at_the_reference_point() {
+        let weights = ObjectiveWeights::registered().expect("registered objective");
+        let corners = weights.peel_force_corners(weights.peel_reference_area_mm2());
+        let low_pressure_n = weights.peel_pressure_pa_low() * weights.peel_reference_area_mm2() * 1.0e-6;
+        let high_pressure_n = weights.peel_pressure_pa_high() * weights.peel_reference_area_mm2() * 1.0e-6;
+        assert!((corners.low_pressure_low_exponent_n - low_pressure_n).abs() <= 1e-9);
+        assert!((corners.low_pressure_high_exponent_n - low_pressure_n).abs() <= 1e-9);
+        assert!((corners.high_pressure_low_exponent_n - high_pressure_n).abs() <= 1e-9);
+        assert!((corners.high_pressure_high_exponent_n - high_pressure_n).abs() <= 1e-9);
+        // 9000 Pa * 314 mm^2 (in m^2) = 2.826 N -- the design's own worked number.
+        assert!((low_pressure_n - 2.826).abs() <= 1e-9);
     }
 
     #[test]

@@ -1157,6 +1157,7 @@ dependencies = [
  "plinth-mesh",
  "plinth-orient",
  "plinth-support",
+ "plinth-sweep",
  "plinth-verify",
  "serde",
  "serde_json",
@@ -1190,6 +1191,17 @@ dependencies = [
  "sha2",
  "thiserror 1.0.69",
  "trybuild",
+]
+
+[[package]]
+name = "plinth-sweep"
+version = "0.1.0"
+dependencies = [
+ "plinth-core",
+ "plinth-mesh",
+ "plinth-orient",
+ "plinth-support",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

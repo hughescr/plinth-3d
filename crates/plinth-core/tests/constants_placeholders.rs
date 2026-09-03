@@ -8,7 +8,7 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_PLACEHOLDER_IDS: [&str; 273] = [
+const EXPECTED_PLACEHOLDER_IDS: [&str; 278] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -143,6 +143,7 @@ const EXPECTED_PLACEHOLDER_IDS: [&str; 273] = [
     "ORIENT_COMMIT_TOP_K",
     "ORIENT_DEDUPE_TOLERANCE_DEG",
     "ORIENT_FIBONACCI_COUNT",
+    "ORIENT_PEEL_POINTS_PER_NEWTON",
     "ORIENT_PROXY_L1_RATIO",
     "ORIENT_PROXY_L2_OF_L1_RATIO",
     "ORIENT_PROXY_MIN_FACES",
@@ -270,6 +271,10 @@ const EXPECTED_PLACEHOLDER_IDS: [&str; 273] = [
     "SURFACE_TREE_MAX_POINTS",
     "SURFACE_TREE_PITCH_MM",
     "SURFACE_TREE_SEED",
+    "SWEEP_CELL_LAYER_BUDGET",
+    "SWEEP_PEEL_FIELD_MODE",
+    "SWEEP_STRUT_REMOVAL_PASSES",
+    "SWEEP_WORKING_PITCH_MM",
     "TARGET_SPACING_MM",
     "TENSILE_GREEN_MPA",
     "THIN_FEATURE_MM",
@@ -297,7 +302,7 @@ macro_rules! rows {
     };
 }
 
-static EXPECTED_ROWS: [ExpectedRow; 273] = rows! {
+static EXPECTED_ROWS: [ExpectedRow; 278] = rows! {
     "A_ABS_MM2", "2.0", "mm²", "scalar";
     "BALL_BREACH_EPS_MM", "0.05", "mm", "scalar";
     "BALL_FACTOR_FOOT", "1.4", "1", "scalar";
@@ -432,6 +437,7 @@ static EXPECTED_ROWS: [ExpectedRow; 273] = rows! {
     "ORIENT_COMMIT_TOP_K", "3.0", "count", "scalar";
     "ORIENT_DEDUPE_TOLERANCE_DEG", "1.0", "°", "scalar";
     "ORIENT_FIBONACCI_COUNT", "512.0", "count", "scalar";
+    "ORIENT_PEEL_POINTS_PER_NEWTON", "1.0", "1/N", "scalar";
     "ORIENT_PROXY_L1_RATIO", "0.1", "1", "scalar";
     "ORIENT_PROXY_L2_OF_L1_RATIO", "0.2", "1", "scalar";
     "ORIENT_PROXY_MIN_FACES", "256.0", "count", "scalar";
@@ -559,6 +565,10 @@ static EXPECTED_ROWS: [ExpectedRow; 273] = rows! {
     "SURFACE_TREE_MAX_POINTS", "150000", "count", "scalar";
     "SURFACE_TREE_PITCH_MM", "0.4", "mm", "scalar";
     "SURFACE_TREE_SEED", "0", "count", "scalar";
+    "SWEEP_CELL_LAYER_BUDGET", "2000000000", "count", "scalar";
+    "SWEEP_PEEL_FIELD_MODE", "0", "1", "scalar";
+    "SWEEP_STRUT_REMOVAL_PASSES", "2", "count", "scalar";
+    "SWEEP_WORKING_PITCH_MM", "0.05", "mm", "scalar";
     "TARGET_SPACING_MM", "4.0", "mm", "scalar";
     "TENSILE_GREEN_MPA", "0.288", "MPa", "scalar";
     "THIN_FEATURE_MM", "1.5", "mm", "scalar";
@@ -574,7 +584,7 @@ static EXPECTED_ROWS: [ExpectedRow; 273] = rows! {
 };
 
 fn component() -> M0PlaceholderConstants {
-    M0PlaceholderConstants::new().expect("all 273 placeholder declarations must construct")
+    M0PlaceholderConstants::new().expect("all 278 placeholder declarations must construct")
 }
 
 #[test]
@@ -585,7 +595,7 @@ fn exact_handwritten_membership_is_stable_sorted_and_all_placeholder() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, EXPECTED_PLACEHOLDER_IDS);
-    assert_eq!(descriptors.len(), 273);
+    assert_eq!(descriptors.len(), 278);
     assert!(descriptors
         .windows(2)
         .all(|pair| pair[0].id() < pair[1].id()));
@@ -676,7 +686,7 @@ const fn bound_key(bound: BoundKind) -> &'static str {
 }
 
 #[test]
-fn evidence_and_placeholder_fixture_builds_one_306_entry_structural_batch() {
+fn evidence_and_placeholder_fixture_builds_one_318_entry_structural_batch() {
     let mut descriptors = component()
         .descriptors()
         .unwrap()
@@ -684,14 +694,14 @@ fn evidence_and_placeholder_fixture_builds_one_306_entry_structural_batch() {
         .collect::<Vec<_>>();
     descriptors.extend(M0EvidenceConstants::new().unwrap().descriptors().unwrap());
     let registry = ConstantsRegistry::build_batch(descriptors).unwrap();
-    assert_eq!(registry.len(), 306);
+    assert_eq!(registry.len(), 324);
     assert_eq!(
         registry
             .iter()
             .map(|descriptor| descriptor.id().as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        306
+        324
     );
 }
 

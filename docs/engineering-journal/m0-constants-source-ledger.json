@@ -1489,6 +1489,72 @@
       "provenance_detail": "Placeholder search policy with no measurement; it shapes which candidate is selected and never whether one is accepted (D-25)"
     },
     {
+      "id": "ORIENT_PEEL_AREA_EXPONENT_LOW",
+      "classification": "design_time_physics",
+      "normative": "docs/plans/slice-sweep-core-2026-09-02.md §12 = 0.24, the LOW end of the peel area-exponent bracket",
+      "source_locators": [
+        "docs/evidence/literature/LITERATURE-NOTES.md:813",
+        "crates/plinth-orient/src/score.rs:ObjectiveWeights"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured EvidenceSource kind=ProjectRecord id=orient-peel-area-exponent-porosity-manizani-2026-07-22 record=docs/evidence/literature/LITERATURE-NOTES.md locator=§1b(i), line 813 date=Exact(2026-07-22) err=null. EXTERNAL REQUIREMENT -- literature, not measured on this machine or with this resin. n ≈ 0.24 from Manizani et al. varying porosity at a constant outer envelope. Evaluated alongside ORIENT_PEEL_AREA_EXPONENT_HIGH as one bracket corner; neither is preferred."
+    },
+    {
+      "id": "ORIENT_PEEL_AREA_EXPONENT_HIGH",
+      "classification": "design_time_physics",
+      "normative": "docs/plans/slice-sweep-core-2026-09-02.md §12 = 0.46, the HIGH end of the peel area-exponent bracket",
+      "source_locators": [
+        "docs/evidence/literature/LITERATURE-NOTES.md:815",
+        "crates/plinth-orient/src/score.rs:ObjectiveWeights"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured EvidenceSource kind=ProjectRecord id=orient-peel-area-exponent-envelope-manizani-2026-07-22 record=docs/evidence/literature/LITERATURE-NOTES.md locator=§1b(ii), line 815 date=Exact(2026-07-22) err=null. EXTERNAL REQUIREMENT -- literature, not measured on this machine or with this resin. n ≈ 0.46 from Manizani et al. shrinking the outer envelope with the area; the more apt of the two exponents for a pose comparison, evaluated rather than preferred."
+    },
+    {
+      "id": "ORIENT_PEEL_POINTS_PER_NEWTON",
+      "classification": "runtime_search_weight",
+      "normative": "docs/plans/slice-sweep-core-2026-09-02.md §12 = 1.0, the policy exchange rate pricing the peel-force term in the same points scale as height and scar",
+      "source_locators": [
+        "crates/plinth-orient/src/score.rs:ObjectiveWeights",
+        "crates/plinth-orient/src/search.rs:objective_record"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder policy exchange rate; no physics derives a conversion between Newtons and an unmeasured points scale. Retires ORIENT_WEIGHT_PEAK_XSEC_CM2's role as the sweep's second price term. The run report publishes the weight value at which the winning pose flips (D15); a search weight selects a candidate and never accepts one (D-25)."
+    },
+    {
+      "id": "ORIENT_PEEL_REFERENCE_AREA_MM2",
+      "classification": "design_time_physics",
+      "normative": "docs/plans/slice-sweep-core-2026-09-02.md §12 = 314 mm², the reference cross-section the peel-force bracket is anchored at",
+      "source_locators": [
+        "docs/evidence/literature/LITERATURE-NOTES.md:770-774,826",
+        "crates/plinth-orient/src/score.rs:ObjectiveWeights"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured EvidenceSource kind=ProjectRecord id=orient-peel-reference-area-manizani-2026-07-22 record=docs/evidence/literature/LITERATURE-NOTES.md locator=§1a and the peel_pressure_pa review, lines 770-774 and 826 date=Exact(2026-07-22) err=null. Manizani Table 3, solid 20 mm-diameter disc, 314.16 mm² rounded to 314."
+    },
+    {
+      "id": "ORIENT_PEEL_REFERENCE_PRESSURE_PA_LOW",
+      "classification": "design_time_physics",
+      "normative": "docs/plans/slice-sweep-core-2026-09-02.md §12 = 9000 Pa, the LOW end of the peel reference-pressure bracket",
+      "source_locators": [
+        "docs/evidence/literature/LITERATURE-NOTES.md:136,772,826",
+        "crates/plinth-orient/src/score.rs:ObjectiveWeights"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured EvidenceSource kind=ProjectRecord id=orient-peel-reference-pressure-manizani-2mms-2026-07-22 record=docs/evidence/literature/LITERATURE-NOTES.md locator=lines 136 and 772 date=Exact(2026-07-22) err=null. EXTERNAL REQUIREMENT -- literature, not measured on this machine or with this resin. Manizani Table 3, FEP 100 µm, 2 mm/s, ~9.6 kPa, the review's own recommended anchor; NOT this project's PEEL_PRESSURE_PA placeholder (3000 Pa)."
+    },
+    {
+      "id": "ORIENT_PEEL_REFERENCE_PRESSURE_PA_HIGH",
+      "classification": "design_time_physics",
+      "normative": "docs/plans/slice-sweep-core-2026-09-02.md §12 = 19600 Pa, the HIGH end of the peel reference-pressure bracket",
+      "source_locators": [
+        "docs/evidence/literature/lit-green-peel.md:28",
+        "crates/plinth-orient/src/score.rs:ObjectiveWeights"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured EvidenceSource kind=ProjectRecord id=orient-peel-reference-pressure-pan-cylinder-2026-07-22 record=docs/evidence/literature/lit-green-peel.md locator=line 28 date=Exact(2026-07-22) err=null. Pan et al. 2017 (peer-reviewed), solid cylinder, 314 mm², 6.16 N = 19.6 kPa; measured on PDMS, a stickier interface than this project's FEP/nFEP, flagged not hidden."
+    },
+    {
       "id": "ORIENT_PROXY_L1_RATIO",
       "classification": "runtime_search_policy",
       "normative": "02-target-architecture.md §6 = the ~10% refine proxy; numerically the retired hollow.orient_search proxy density (target_reduction 0.9), reused so the legacy-compat comparison scores on the same geometry",
@@ -1578,13 +1644,13 @@
     {
       "id": "ORIENT_WEIGHT_PEAK_XSEC_CM2",
       "classification": "runtime_search_weight",
-      "normative": "03-physics-and-constants.md §3.8 = 3.0, the peak cross-section coefficient of the retired hollow.orient_search scalarization; the weight is inherited, the quantity it prices is not — the dense sweep computes the exact supremum rather than the retired 4 mm stepped sample",
+      "normative": "RETIRED FROM THE OBJECTIVE 2026-09-02 (docs/plans/slice-sweep-core-2026-09-02.md §12). Was 03-physics-and-constants.md §3.8 = 3.0, the peak cross-section coefficient of the retired hollow.orient_search scalarization; on Round 50 this term alone was 80-84% of the flat pose's score, causing every disc to tilt. Replaced by a peel-force term priced by ORIENT_PEEL_POINTS_PER_NEWTON. Value UNCHANGED at 3.0, stays registered, unread by the objective.",
       "source_locators": [
         "scripts/support_placement/hollow.py:orient_search score",
         "crates/plinth-orient/src/score.rs:ObjectiveWeights"
       ],
       "provenance_wrapper": "Placeholder",
-      "provenance_detail": "Placeholder carried over with no measurement; a search weight selects a candidate and never accepts one (D-25)"
+      "provenance_detail": "Placeholder; RETIRED and unread by ObjectiveWeights::registered() as of 2026-09-02. A search weight selects a candidate and never accepts one (D-25)"
     },
     {
       "id": "ORIENT_WEIGHT_SUPPORT_AREA_CM2",
@@ -3189,6 +3255,141 @@
       ],
       "normative": "03-physics-and-constants.md §3.10.11 = 536870912",
       "provenance_detail": "Rust-era support-pipeline execution authority, NEW at FU-32 phase J5 (2026-08-09) beside SUPPORT_ROUTE_CCO_MAX_SEAT_EVALUATIONS and derived by the same stated rule. Bounds the AnchorSeatRefusal evidence rows the routing cadence retains run-wide: a sample can enter one terminal's refusal list at most once, so retained rows per terminal are bounded by pool_rows and the run-wide worst case is the same cadence_len x pool_rows product. Single specimen, n = 1, per R4/FU-23. MEASURED at this tip (census table T0_route_cco_charge, 2026-08-09): the treant completed its whole cadence for the first time and retained 162,719,910 rows -- 80.8 % of its charge and 30.3 % of this cap, and 2.3x the ~70.1 M the design's M2 growth law projected, recorded here as a correction to that projection and not to the cap, which was derived from the worst case. DISCLOSED, NOT RATIFIED: at the 30.3 B per retained refusal measured in M3 this cap admits approximately 16.3 GB of retained refusal evidence -- above the ~4.9 GB the treant's rows imply, and below but not comfortably below the 90 GB watchdog arm and the ~100 GB machine ceiling. Design open question 4 records the underlying question this registration does not answer and deliberately leaves the refusal list untouched, because summarising it would move every transcript digest. No cap was raised, lowered or touched."
+    },
+    {
+      "id": "L_SURVIVED_MAX_MM",
+      "classification": "design_time_physics",
+      "normative": "docs/specs/audit-span-criterion.md §2.5-§2.6 = Measured CalibrationPlate COUPON-PLATE-1-overhang-tilt, 2.1300322500 mm, err null",
+      "source_locators": [
+        "docs/specs/audit-span-criterion.md:§2.5 The bracket",
+        "docs/specs/audit-span-criterion.md:§2.6 The conservative end, and the constant",
+        "docs/engineering-journal/reference/plate-01-results.md",
+        "docs/engineering-journal/reference/plate-04-results.md"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured EvidenceSource kind=CalibrationPlate plate=COUPON-PLATE-1-overhang-tilt record=docs/specs/audit-span-criterion.md locator=§2.5 The bracket (pooling plates 1 and 4) date=Exact(2026-07-29) err=null. Largest flat-overhang span with zero recorded loss on either unsupported-overhang ladder plate, pooled at 0.050 mm layer height. Read as a COVERING RADIUS for placement, which is the conservative reading of single-root cantilever specimens."
+    },
+    {
+      "id": "L_FIRST_LOSS_MM",
+      "classification": "reporting_only",
+      "normative": "docs/specs/audit-span-criterion.md §2.5 = Measured CalibrationPlate COUPON-PLATE-4-overhang-extended, 2.592036 mm, err null",
+      "source_locators": [
+        "docs/specs/audit-span-criterion.md:§2.5 first loss recorded at",
+        "docs/engineering-journal/reference/plate-04-results.md"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured EvidenceSource kind=CalibrationPlate plate=COUPON-PLATE-4-overhang-extended record=docs/specs/audit-span-criterion.md locator=§2.5 first loss recorded at (plate 4, G1aU, 1 of 5) date=Exact(2026-07-29) err=null. REPORTING ONLY: the upper end of the onset bracket, so a run report can state where the placement value sits inside the measured bracket."
+    },
+    {
+      "id": "CONDITION_SHIFT_MAX",
+      "classification": "gate_input",
+      "normative": "docs/engineering-journal/reference/plate-04-results.md §3.3 = Measured CalibrationPlate COUPON-PLATE-4-overhang-extended, 1.53, err null",
+      "source_locators": [
+        "docs/engineering-journal/reference/plate-04-results.md:§3.3",
+        "docs/specs/audit-span-criterion.md:§2.4 and §2.6"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured EvidenceSource kind=CalibrationPlate plate=COUPON-PLATE-4-overhang-extended record=docs/engineering-journal/reference/plate-04-results.md locator=§3.3 length alone does not determine survival date=Exact(2026-07-29) err=null. Upper end of the only measured condition-shift magnitude on this printer, 1.31-1.53x; the CAUSE IS NOT IDENTIFIED. Gate input only: it divides L_SURVIVED_MAX_MM to make L_SPAN_CRIT_MM. No placement decision reads it."
+    },
+    {
+      "id": "L_SPAN_CRIT_MM",
+      "classification": "gate_input",
+      "normative": "docs/specs/audit-span-criterion.md §2.6 = Derived L_SURVIVED_MAX_MM / CONDITION_SHIFT_MAX = 2.1300322500 / 1.53 = 1.3921779412 mm from=[L_SURVIVED_MAX_MM, CONDITION_SHIFT_MAX]",
+      "source_locators": [
+        "docs/specs/audit-span-criterion.md:§2.6 The conservative end, and the constant"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived from=[L_SURVIVED_MAX_MM, CONDITION_SHIFT_MAX] relation=L_SURVIVED_MAX_MM / CONDITION_SHIFT_MAX, computed at run time and never hard-coded. An intermediate of the audit's gate value; it decides nothing on its own."
+    },
+    {
+      "id": "L_SPAN_ALLOWED_MM",
+      "classification": "gate_value",
+      "normative": "docs/specs/audit-span-criterion.md §2.6 = Derived L_SPAN_CRIT_MM - 2*d2 = 1.3449762463 mm from=[L_SPAN_CRIT_MM, PIXEL_PITCH_X_UM, PIXEL_PITCH_Y_UM]",
+      "source_locators": [
+        "docs/specs/audit-span-criterion.md:§2.6 THE GATE CONSTANT",
+        "docs/specs/audit-invariants.md:§1.6 full-containment fill rule",
+        "tools/plinth-audit/src/context.rs:SPAN_L_SURVIVED_MAX_MM"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived from=[L_SPAN_CRIT_MM, PIXEL_PITCH_X_UM, PIXEL_PITCH_Y_UM] relation=L_SPAN_CRIT_MM - 2 * hypot(PIXEL_PITCH_X_UM, PIXEL_PITCH_Y_UM)/1000, computed at run time. Registered in plinth-core so the ENGINE can state whether a placed field passes the audit's own span check; the excluded audit crate keeps its own independent copy by design. PLACEMENT MUST NOT READ THIS."
+    },
+    {
+      "id": "LAMINA_REACH_RATIO",
+      "classification": "design_time_physics",
+      "normative": "docs/plans/slice-sweep-core-2026-09-02.md §5.5 = Derived L_SURVIVED_MAX_MM / LAYER_HEIGHT_DEFAULT_MM = 2.1300322500 / 0.050 = 42.6006450 from=[L_SURVIVED_MAX_MM, LAYER_HEIGHT_DEFAULT_MM]",
+      "source_locators": [
+        "docs/plans/slice-sweep-core-2026-09-02.md:§5.5 Constants to register",
+        "docs/specs/audit-span-criterion.md:§2.5-§2.6",
+        "docs/physics.md:§ support arm load physics"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived from=[L_SURVIVED_MAX_MM, LAYER_HEIGHT_DEFAULT_MM] relation=quotient, computed at run time and never rounded. Reach of one cured lamina per unit of its own thickness; the linear-in-thickness form is the cantilever scaling L_crit = t*sqrt(sigma_f/3P). The MAGNITUDE disagrees with the registered TENSILE_GREEN_MPA / PEEL_PRESSURE_PA pair by 7.5x, both Placeholders; disclosed, not reconciled. SUPERSEDED BY any coupon at a second layer thickness or overhang angle."
+    },
+    {
+      "id": "LAMINA_REACH_RATIO_FIRST_LOSS",
+      "classification": "reporting_only",
+      "normative": "docs/plans/slice-sweep-core-2026-09-02.md §5.5 = Derived L_FIRST_LOSS_MM / LAYER_HEIGHT_DEFAULT_MM = 51.84072 from=[L_FIRST_LOSS_MM, LAYER_HEIGHT_DEFAULT_MM]",
+      "source_locators": [
+        "docs/plans/slice-sweep-core-2026-09-02.md:§5.5 Constants to register",
+        "docs/specs/audit-span-criterion.md:§2.5"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived from=[L_FIRST_LOSS_MM, LAYER_HEIGHT_DEFAULT_MM] relation=quotient, computed at run time. REPORTING ONLY: no decision may read it."
+    },
+    {
+      "id": "LAMINA_REACH_RATIO_AUDIT_GATE",
+      "classification": "reporting_only",
+      "normative": "docs/plans/slice-sweep-core-2026-09-02.md §5.5 = Derived L_SPAN_ALLOWED_MM / LAYER_HEIGHT_DEFAULT_MM = 26.8995249 from=[L_SPAN_ALLOWED_MM, LAYER_HEIGHT_DEFAULT_MM]",
+      "source_locators": [
+        "docs/plans/slice-sweep-core-2026-09-02.md:§5.5 and §14 OR-2",
+        "docs/specs/audit-span-criterion.md:§2.6"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived from=[L_SPAN_ALLOWED_MM, LAYER_HEIGHT_DEFAULT_MM] relation=quotient, computed at run time. REPORTING ONLY: what the AUDIT allows, expressed in the same units as LAMINA_REACH_RATIO so a run report can print both and state whether the placed field will pass its own audit."
+    },
+    {
+      "id": "SWEEP_CELL_LAYER_BUDGET",
+      "classification": "resource_budget",
+      "normative": "docs/plans/slice-sweep-core-2026-09-02.md §5.5 = Placeholder 2000000000 cell-layers",
+      "source_locators": [
+        "docs/plans/slice-sweep-core-2026-09-02.md:§4.2 Working raster",
+        "plinth-evidence/disc-diagnosis-2026-09-02/DISC-DIAGNOSIS.md:RC3"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder; non-AcceptSafe. IT COARSENS; IT NEVER REFUSES. On exceeding it the working pitch doubles and the achieved pitch is reported."
+    },
+    {
+      "id": "SWEEP_PEEL_FIELD_MODE",
+      "classification": "policy_switch",
+      "normative": "docs/plans/slice-sweep-core-2026-09-02.md §C7 and §5.5 = Placeholder 0 (Uniform)",
+      "source_locators": [
+        "docs/plans/slice-sweep-core-2026-09-02.md:§C7 Peel field off by default",
+        "docs/physics.md:69-75",
+        "docs/physics.md:150-158"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder; non-AcceptSafe. Encoding 0=Uniform, 1=AreaLaw, 2=AreaLawTilt. Uniform means alpha is identically 1 and the sweep reduces exactly to the registered area law. The other modes are computed and reported but decide nothing."
+    },
+    {
+      "id": "SWEEP_STRUT_REMOVAL_PASSES",
+      "classification": "search_bound",
+      "normative": "docs/plans/slice-sweep-core-2026-09-02.md §5.5 and §6.6 = Placeholder 2 passes",
+      "source_locators": [
+        "docs/plans/slice-sweep-core-2026-09-02.md:§6.6 Removal and redistribution"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder; non-AcceptSafe. PRUNES ONLY: a strut whose demand cells would otherwise go uncovered is KEPT, so this can never create a bare island."
+    },
+    {
+      "id": "SWEEP_WORKING_PITCH_MM",
+      "classification": "discretization",
+      "normative": "docs/plans/slice-sweep-core-2026-09-02.md §4.2 and §5.5 = Placeholder 0.050 mm cell side",
+      "source_locators": [
+        "docs/plans/slice-sweep-core-2026-09-02.md:§4.2 Working raster",
+        "tools/plinth-audit/src/consts.rs:d3"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder; non-AcceptSafe. A discretization that does move outputs; bounded by argument, reported as the achieved pitch, and pinned by a pitch-halving invariance test. Derived in FORM from a Placeholder parent (TIP_RADIUS_DEFAULT_MM) so it is registered as a Placeholder, not Derived."
     }
   ],
   "aliases": [

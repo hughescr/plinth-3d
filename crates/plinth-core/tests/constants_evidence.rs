@@ -6,17 +6,30 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_EVIDENCE_IDS: [&str; 33] = [
+const EXPECTED_EVIDENCE_IDS: [&str; 46] = [
     "CCO_X_PAIR_LOAD_DISCOUNT",
+    "CONDITION_SHIFT_MAX",
     "DECIMATION_MAX_ABSOLUTE_DEVIATION_MM",
     "DECIMATION_MAX_P999_DEVIATION_MM",
     "DECIMATION_MAX_P99_DEVIATION_MM",
     "FINAL_CLEARANCE_GAP_MM",
+    "LAMINA_REACH_RATIO",
+    "LAMINA_REACH_RATIO_AUDIT_GATE",
+    "LAMINA_REACH_RATIO_FIRST_LOSS",
     "LAYER_HEIGHT_DEFAULT_MM",
     "LOAD_SHARING",
+    "L_FIRST_LOSS_MM",
+    "L_SPAN_ALLOWED_MM",
+    "L_SPAN_CRIT_MM",
+    "L_SURVIVED_MAX_MM",
     "MINIMA_DROP_INTERIOR_FACES",
     "MINIMA_REQUIRE_ISLAND_BIRTH",
     "N_EFF_CAP",
+    "ORIENT_PEEL_AREA_EXPONENT_HIGH",
+    "ORIENT_PEEL_AREA_EXPONENT_LOW",
+    "ORIENT_PEEL_REFERENCE_AREA_MM2",
+    "ORIENT_PEEL_REFERENCE_PRESSURE_PA_HIGH",
+    "ORIENT_PEEL_REFERENCE_PRESSURE_PA_LOW",
     "P8_CHORD_CANON_MICRON",
     "P8_POCKET_VOXEL_MM",
     "PIXEL_PITCH_X_UM",
@@ -42,17 +55,30 @@ const EXPECTED_EVIDENCE_IDS: [&str; 33] = [
     "X_STAR_CYLINDER",
 ];
 
-const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 33] = [
+const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 46] = [
     ("CCO_X_PAIR_LOAD_DISCOUNT", "1", "scalar"),
+    ("CONDITION_SHIFT_MAX", "1", "scalar"),
     ("DECIMATION_MAX_ABSOLUTE_DEVIATION_MM", "mm", "scalar"),
     ("DECIMATION_MAX_P999_DEVIATION_MM", "mm", "scalar"),
     ("DECIMATION_MAX_P99_DEVIATION_MM", "mm", "scalar"),
     ("FINAL_CLEARANCE_GAP_MM", "mm", "scalar"),
+    ("LAMINA_REACH_RATIO", "1", "scalar"),
+    ("LAMINA_REACH_RATIO_AUDIT_GATE", "1", "scalar"),
+    ("LAMINA_REACH_RATIO_FIRST_LOSS", "1", "scalar"),
     ("LAYER_HEIGHT_DEFAULT_MM", "mm", "scalar"),
     ("LOAD_SHARING", "1", "load_sharing"),
+    ("L_FIRST_LOSS_MM", "mm", "scalar"),
+    ("L_SPAN_ALLOWED_MM", "mm", "scalar"),
+    ("L_SPAN_CRIT_MM", "mm", "scalar"),
+    ("L_SURVIVED_MAX_MM", "mm", "scalar"),
     ("MINIMA_DROP_INTERIOR_FACES", "1", "scalar"),
     ("MINIMA_REQUIRE_ISLAND_BIRTH", "1", "scalar"),
     ("N_EFF_CAP", "count", "scalar"),
+    ("ORIENT_PEEL_AREA_EXPONENT_HIGH", "1", "scalar"),
+    ("ORIENT_PEEL_AREA_EXPONENT_LOW", "1", "scalar"),
+    ("ORIENT_PEEL_REFERENCE_AREA_MM2", "mm²", "scalar"),
+    ("ORIENT_PEEL_REFERENCE_PRESSURE_PA_HIGH", "Pa", "scalar"),
+    ("ORIENT_PEEL_REFERENCE_PRESSURE_PA_LOW", "Pa", "scalar"),
     ("P8_CHORD_CANON_MICRON", "µm", "scalar"),
     ("P8_POCKET_VOXEL_MM", "mm", "scalar"),
     ("PIXEL_PITCH_X_UM", "µm", "scalar"),
@@ -112,7 +138,7 @@ struct ExpectedSource {
     date: &'static str,
 }
 
-const EXPECTED_SOURCES: [ExpectedSource; 22] = [
+const EXPECTED_SOURCES: [ExpectedSource; 30] = [
     ExpectedSource {
         constant: "FINAL_CLEARANCE_GAP_MM",
         kind: "owner_decision",
@@ -314,6 +340,78 @@ const EXPECTED_SOURCES: [ExpectedSource; 22] = [
         precision: "exact",
         date: "2026-07-31",
     },
+    ExpectedSource {
+        constant: "L_SURVIVED_MAX_MM",
+        kind: "calibration_plate",
+        identity: "COUPON-PLATE-1-overhang-tilt",
+        record: "docs/specs/audit-span-criterion.md",
+        locator: "§2.5 The bracket (pooling plates 1 and 4)",
+        precision: "exact",
+        date: "2026-07-29",
+    },
+    ExpectedSource {
+        constant: "L_FIRST_LOSS_MM",
+        kind: "calibration_plate",
+        identity: "COUPON-PLATE-4-overhang-extended",
+        record: "docs/specs/audit-span-criterion.md",
+        locator: "§2.5 first loss recorded at (plate 4, G1aU, 1 of 5)",
+        precision: "exact",
+        date: "2026-07-29",
+    },
+    ExpectedSource {
+        constant: "CONDITION_SHIFT_MAX",
+        kind: "calibration_plate",
+        identity: "COUPON-PLATE-4-overhang-extended",
+        record: "docs/engineering-journal/reference/plate-04-results.md",
+        locator: "§3.3 length alone does not determine survival",
+        precision: "exact",
+        date: "2026-07-29",
+    },
+    ExpectedSource {
+        constant: "ORIENT_PEEL_AREA_EXPONENT_LOW",
+        kind: "project_record",
+        identity: "orient-peel-area-exponent-porosity-manizani-2026-07-22",
+        record: "docs/evidence/literature/LITERATURE-NOTES.md",
+        locator: "§1b(i), line 813: Manizani Table 1, four 20 mm lattice discs of differing porosity at a constant outer envelope, FEP 100 µm, speed 50 mm/min -- 2.68x area change -> 1.26x force change",
+        precision: "exact",
+        date: "2026-07-22",
+    },
+    ExpectedSource {
+        constant: "ORIENT_PEEL_AREA_EXPONENT_HIGH",
+        kind: "project_record",
+        identity: "orient-peel-area-exponent-envelope-manizani-2026-07-22",
+        record: "docs/evidence/literature/LITERATURE-NOTES.md",
+        locator: "§1b(ii), line 815: Manizani Fig. 4, three pyramids shrinking WITH their envelope over 33 printed layers, FEP 100 µm -- 59x area reduction -> 6.5x force reduction",
+        precision: "exact",
+        date: "2026-07-22",
+    },
+    ExpectedSource {
+        constant: "ORIENT_PEEL_REFERENCE_AREA_MM2",
+        kind: "project_record",
+        identity: "orient-peel-reference-area-manizani-2026-07-22",
+        record: "docs/evidence/literature/LITERATURE-NOTES.md",
+        locator: "§1a and the peel_pressure_pa review, lines 770-774 and 826: Manizani Table 3, solid 20 mm-diameter disc, A = 314.16 mm^2, rounded to 314 in this review's own anchor statement",
+        precision: "exact",
+        date: "2026-07-22",
+    },
+    ExpectedSource {
+        constant: "ORIENT_PEEL_REFERENCE_PRESSURE_PA_LOW",
+        kind: "project_record",
+        identity: "orient-peel-reference-pressure-manizani-2mms-2026-07-22",
+        record: "docs/evidence/literature/LITERATURE-NOTES.md",
+        locator: "lines 136 and 772: Manizani Table 3, FEP 100 µm, 2 mm/s (120 mm/min), A = 314 mm^2, derived peel pressure ~9.6 kPa, rounded to the review's own anchor of 9 kPa at line 826",
+        precision: "exact",
+        date: "2026-07-22",
+    },
+    ExpectedSource {
+        constant: "ORIENT_PEEL_REFERENCE_PRESSURE_PA_HIGH",
+        kind: "project_record",
+        identity: "orient-peel-reference-pressure-pan-cylinder-2026-07-22",
+        record: "docs/evidence/literature/lit-green-peel.md",
+        locator: "line 28: Pan, He, Xu & Feinerman 2017 (peer-reviewed), solid cylinder at fixed 314 mm^2 cross-section, 1.56 mm/s lift speed, 6.16 N -> 1.96 N/cm^2",
+        precision: "exact",
+        date: "2026-07-22",
+    },
 ];
 
 fn component() -> M0EvidenceConstants {
@@ -342,7 +440,7 @@ fn declaration_batch_has_exact_membership_order_shapes_and_provenance_counts() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(actual_ids, EXPECTED_EVIDENCE_IDS);
-    assert_eq!(descriptors.len(), 33);
+    assert_eq!(descriptors.len(), 46);
 
     for (descriptor, (id, unit, shape)) in descriptors.iter().zip(EXPECTED_DESCRIPTOR_CONTRACT) {
         assert_eq!(descriptor.id().as_str(), id, "ID contract drift for {id}");
@@ -358,7 +456,7 @@ fn declaration_batch_has_exact_membership_order_shapes_and_provenance_counts() {
         .iter()
         .filter(|descriptor| descriptor.provenance().class() == RegistryProvenanceClass::Derived)
         .count();
-    assert_eq!((measured, derived), (22, 11));
+    assert_eq!((measured, derived), (30, 16));
     assert!(descriptors.iter().all(|descriptor| !matches!(
         descriptor.provenance().class(),
         RegistryProvenanceClass::Placeholder | RegistryProvenanceClass::Pending
@@ -1212,4 +1310,65 @@ fn the_two_tier_demanded_gaps_are_a_pruning_0_6_and_a_refusing_0_3() {
              label is exactly how a pruning margin gets read as a refusing gate"
         );
     }
+}
+
+/// The lamina reach ratios and the span allowance must be COMPUTED from their
+/// registered parents, never transcribed.
+///
+/// This test deliberately re-derives each value from the parent descriptors the
+/// registry itself publishes and compares bit-for-bit, rather than pinning a
+/// decimal literal. A literal pin passes just as well when someone hard-codes
+/// 42.6006450 and lets a parent move underneath it, which is the exact failure
+/// `docs/specs/audit-span-criterion.md`:225-229 forbids for this family.
+#[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "bit-for-bit re-derivation from the registry's own parent values is the point of this \
+          test; a tolerance here would admit the transcribed literal it exists to refuse"
+)]
+fn the_reach_ratios_are_recomputed_from_their_registered_parents_bit_for_bit() {
+    let descriptors = component().descriptors().unwrap();
+
+    let l_survived = scalar(&descriptors, "L_SURVIVED_MAX_MM");
+    let l_first_loss = scalar(&descriptors, "L_FIRST_LOSS_MM");
+    let condition_shift = scalar(&descriptors, "CONDITION_SHIFT_MAX");
+    let layer_height = scalar(&descriptors, "LAYER_HEIGHT_DEFAULT_MM");
+    let pitch_x_um = scalar(&descriptors, "PIXEL_PITCH_X_UM");
+    let pitch_y_um = scalar(&descriptors, "PIXEL_PITCH_Y_UM");
+
+    let span_crit = l_survived / condition_shift;
+    assert_eq!(scalar(&descriptors, "L_SPAN_CRIT_MM"), span_crit);
+
+    let pixel_diagonal = (pitch_x_um / 1000.0).hypot(pitch_y_um / 1000.0);
+    let span_allowed = span_crit - 2.0 * pixel_diagonal;
+    assert_eq!(scalar(&descriptors, "L_SPAN_ALLOWED_MM"), span_allowed);
+
+    assert_eq!(
+        scalar(&descriptors, "LAMINA_REACH_RATIO"),
+        l_survived / layer_height
+    );
+    assert_eq!(
+        scalar(&descriptors, "LAMINA_REACH_RATIO_FIRST_LOSS"),
+        l_first_loss / layer_height
+    );
+    assert_eq!(
+        scalar(&descriptors, "LAMINA_REACH_RATIO_AUDIT_GATE"),
+        span_allowed / layer_height
+    );
+
+    // The magnitudes the design of record and every run report quote. These are
+    // a READING CHECK on the derivation above, not the derivation: they are
+    // asserted to four significant figures precisely so they cannot stand in
+    // for the bit-for-bit identities.
+    assert!((scalar(&descriptors, "LAMINA_REACH_RATIO") - 42.600_645).abs() < 5e-6);
+    assert!((scalar(&descriptors, "LAMINA_REACH_RATIO_FIRST_LOSS") - 51.840_72).abs() < 5e-5);
+    assert!((scalar(&descriptors, "LAMINA_REACH_RATIO_AUDIT_GATE") - 26.899_525).abs() < 5e-6);
+    assert!((scalar(&descriptors, "L_SPAN_ALLOWED_MM") - 1.344_976_246).abs() < 5e-9);
+
+    // The placement value is strictly inside the measured bracket and strictly
+    // above the gate. If this ever inverts, placement has started reading the
+    // gate's number (sabotage S8's lesion) or the parents have moved.
+    let placement = scalar(&descriptors, "LAMINA_REACH_RATIO");
+    assert!(placement > scalar(&descriptors, "LAMINA_REACH_RATIO_AUDIT_GATE"));
+    assert!(placement < scalar(&descriptors, "LAMINA_REACH_RATIO_FIRST_LOSS"));
 }

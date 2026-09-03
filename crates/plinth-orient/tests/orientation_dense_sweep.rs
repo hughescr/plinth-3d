@@ -48,7 +48,7 @@ fn request() -> SweepRequest {
 #[test]
 fn a_cube_ties_six_ways_and_identity_wins() {
     let mesh = make_box_default().expect("cube fixture");
-    let outcome = search(&mesh, &request()).expect("a cube is scorable");
+    let outcome = search(&mesh, &request(), None).expect("a cube is scorable");
 
     assert_eq!(outcome.winner().id, 0, "identity is CandidateId 0");
     assert_eq!(outcome.winner().selection, BaselineSelection::Identity);
@@ -95,7 +95,7 @@ fn the_dense_winner_is_never_worse_than_the_best_legacy_candidate() {
         "Sphere.prepped.stl",
     ] {
         let mesh = committed(name);
-        let outcome = search(&mesh, &request()).expect("a committed fixture is scorable");
+        let outcome = search(&mesh, &request(), None).expect("a committed fixture is scorable");
 
         let table = OrientFaceTable::build(&mesh, EXACT_LOD).expect("exact table");
         let weights = ObjectiveWeights::registered().expect("registered objective");
@@ -142,7 +142,7 @@ fn the_dense_winner_is_never_worse_than_the_best_legacy_candidate() {
 #[test]
 fn the_sphere_commits_to_the_pose_its_proxies_ranked_478th() {
     let mesh = committed("Sphere.prepped.stl");
-    let outcome = search(&mesh, &request()).expect("the sphere is scorable");
+    let outcome = search(&mesh, &request(), None).expect("the sphere is scorable");
     let record = outcome.record();
 
     assert_eq!(
@@ -241,7 +241,7 @@ fn the_fibonacci_lattice_is_a_frozen_golden() {
 #[test]
 fn a_model_below_the_proxy_floor_names_its_fallbacks() {
     let mesh = make_box([4.0, 4.0, 4.0], [0.0, 0.0, 0.0]).expect("a small box");
-    let outcome = search(&mesh, &request()).expect("a small box is still scorable");
+    let outcome = search(&mesh, &request(), None).expect("a small box is still scorable");
     let record = outcome.record();
 
     assert_eq!(
@@ -297,8 +297,8 @@ fn a_model_below_the_proxy_floor_names_its_fallbacks() {
 #[test]
 fn two_searches_over_one_mesh_agree_bit_for_bit() {
     let mesh = committed("make_toed_slab.prepped.stl");
-    let first = search(&mesh, &request()).expect("first search");
-    let second = search(&mesh, &request()).expect("second search");
+    let first = search(&mesh, &request(), None).expect("first search");
+    let second = search(&mesh, &request(), None).expect("second search");
     assert_eq!(first.record().search_digest, second.record().search_digest);
     assert_eq!(first.record(), second.record());
     assert_eq!(first.record().search_digest.len(), 64);
@@ -313,7 +313,7 @@ fn two_searches_over_one_mesh_agree_bit_for_bit() {
 )]
 fn the_three_tiers_promote_the_recorded_widths() {
     let mesh = committed("Sphere.prepped.stl");
-    let outcome = search(&mesh, &request()).expect("the sphere is scorable");
+    let outcome = search(&mesh, &request(), None).expect("the sphere is scorable");
     let record = outcome.record();
     let request = request();
 
@@ -370,7 +370,7 @@ fn the_three_tiers_promote_the_recorded_widths() {
 )]
 fn the_recorded_transform_is_the_rotation_the_winning_direction_defines() {
     let mesh = committed("make_raking_blade.prepped.stl");
-    let outcome = search(&mesh, &request()).expect("the raking blade is scorable");
+    let outcome = search(&mesh, &request(), None).expect("the raking blade is scorable");
     let record = outcome.record();
     let direction = outcome.winner().direction;
 
@@ -430,7 +430,7 @@ fn a_scar_free_sweep_never_builds_a_delicacy_field() {
         ..request()
     };
     assert!(scar_free.scar_free());
-    let outcome = search(&mesh, &scar_free).expect("a committed fixture is scorable");
+    let outcome = search(&mesh, &scar_free, None).expect("a committed fixture is scorable");
     let record = outcome.record();
 
     for lod in &record.lods {
@@ -450,7 +450,7 @@ fn a_scar_free_sweep_never_builds_a_delicacy_field() {
     // And the registered sweep, which does want the number, does carry it — so
     // the assertion above is a property of the zero weight and not of the LOD
     // record shape.
-    let weighted = search(&mesh, &request()).expect("a committed fixture is scorable");
+    let weighted = search(&mesh, &request(), None).expect("a committed fixture is scorable");
     assert!(weighted
         .record()
         .lods

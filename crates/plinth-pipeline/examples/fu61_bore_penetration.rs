@@ -266,8 +266,8 @@ fn measure_model(
     let mut sweep =
         plinth_orient::registered_sweep_request().map_err(|e| format!("orient: {e}"))?;
     sweep.limits = policy.orient();
-    let oriented =
-        plinth_orient::search_and_orient(decimated, &sweep).map_err(|e| format!("orient: {e}"))?;
+    let oriented = plinth_orient::search_and_orient(decimated, &sweep, None)
+        .map_err(|e| format!("orient: {e}"))?;
     let (solid, _history) = oriented.into_parts();
 
     let constants = plinth_core::m0_constants().map_err(|e| format!("constants: {e}"))?;
