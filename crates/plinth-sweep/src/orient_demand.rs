@@ -1,5 +1,5 @@
 //! The concrete `plinth_orient::demand::SupportDemandMeasurer`, wired to the
-//! real coarse-raster sweep (LANE 3, `docs/plans/slice-sweep-core-2026-09-02.md`
+//! real slice sweep (LANE 3, `docs/plans/slice-sweep-core-2026-09-02.md`
 //! §12).
 //!
 //! This lives in `plinth-sweep`, not `plinth-orient`, because `plinth-orient`
@@ -10,71 +10,191 @@
 //! `plinth-mesh`, `geom_kernel`) reaches back to `plinth-sweep` — so the
 //! trait lives upstream and this implementation lives downstream, the usual
 //! shape of a dependency-inversion seam. `plinth-pipeline`, which already
-//! depends on both crates, wires a [`CoarseSweepDemand`] into
+//! depends on both crates, wires a [`SweepDemand`] into
 //! `plinth_orient::search_and_orient`.
 //!
-//! # Why coarser, and why that is a disclosed cost decision and not a physics one
+//! # What the burden IS, and why it is the arm count
 //!
-//! Running the sweep at the production `SWEEP_WORKING_PITCH_MM` for every
-//! commit-tier candidate (bounded at `ORIENT_COMMIT_TOP_K` plus the escorted
-//! legacy 13 — LANE 1/2's own measurement: up to ~16 candidates per model) is
-//! affordable on the discs (single-digit seconds each) but not on a tall or
-//! high-face-count model: LANE 2 measured 76.85 s for one production sweep of
-//! the Weeping Treant, and [`CoarseSweepDemand`] runs one sweep per admitted
-//! candidate, serially, inside the orientation stage of every prepare run.
-//! Coarsening the XY raster pitch (never the Z layer height, which sets
-//! `kappa * height` and must stay at the production value or the reach
-//! physics itself would be distorted, not merely made cheaper) cuts
-//! `cells_per_layer` roughly with the square of the pitch ratio while leaving
-//! the layer count — the true driver of wall clock on a tall pose — alone.
+//! The objective's support term asks one question: how much support does
+//! this pose cost the person holding the print? Three candidate answers were
+//! measured side by side on the discs, at the production pitch
+//! (`tests/pose_demand_probe.rs` re-measures all three in-suite so this
+//! paragraph cannot go stale):
+//!
+//! | pose | demand mm² | arms | scar mm² |
+//! |---|---|---|---|
+//! | Round 50 flat | 1812.41 | 243 | 163.017 |
+//! | Round 50 flipped 180° | 1778.12 | 283 | 162.837 |
+//! | Round 50 tilted 10° | 21.29 | 495 | 165.080 |
+//! | Round 25 flat | 416.85 | 70 | 40.596 |
+//! | Round 25 flipped 180° | 417.39 | 88 | 40.518 |
+//! | Round 25 tilted 3.6° | 29.84 | 117 | 40.956 |
+//!
+//! * **`demand_area_mm2` is refuted.** It counts model area with no rooted
+//!   carrier AT ITS OWN BIRTH LAYER. A flat down-face is born all at once
+//!   with nothing under it, so all of it enters the demand set; a sloped one
+//!   is born crescent by crescent, each within one lateral step of the
+//!   already-rooted crescent below, so almost none of it does — while the
+//!   greedy then places an arm per tiny patch and ends up with TWICE the
+//!   arms. It is anti-correlated with the burden across the tilt axis, which
+//!   is why substituting it tilted every disc in the acceptance set and laid
+//!   the overhang table on its side.
+//! * **`total_scar_mm2` cannot rank poses, by the area law itself.**
+//!   `SweepPlan::total_scar_mm2`'s own invariant is
+//!   `Σ π r² = peak_layer_area / X_ALLOWED`, *independent of how many arms
+//!   share the load*: the total tip contact area is set by the load that has
+//!   to be carried, not by the pose that carries it. The table shows exactly
+//!   that — Round 25's four poses span 40.518 to 41.232 mm², a 1.8 % band,
+//!   while their arm counts span 70 to 121, a 73 % one — and inside that
+//!   narrow band it ranks the 180° flip BACKWARDS (40.518 flipped against
+//!   40.596 flat) on both discs. A quantity the physics holds nearly
+//!   constant across poses is not a quantity that can choose one.
+//! * **The arm count ranks every measured comparison correctly** at the
+//!   production pitch: 70 < 88 < 117 < 121 on Round 25, 243 < 283 < 495 on
+//!   Round 50. It is also the burden the owner actually pays: each arm is a
+//!   separate contact to clip, a separate scar to sand and a separate chance
+//!   to mar the model, and the number of them is the free variable the total
+//!   scar area is not.
+//!
+//! # The unit bridge, and the ruling that is NOT being pre-empted
+//!
+//! The objective's support weight `ORIENT_WEIGHT_SUPPORT_AREA_CM2` is
+//! registered against an AREA in cm², so a raw count cannot be handed to it
+//! without silently redefining the weight's unit. The burden is therefore
+//! reported as the scar-equivalent area
+//!
+//! ```text
+//! burden_cm2 = arms * pi * TIP_RADIUS_DEFAULT_MM^2 / 100
+//! ```
+//!
+//! — the scar this pose would wear if every one of its arms were the
+//! smallest tip the generator can make. Three things about that, stated
+//! rather than buried:
+//!
+//! 1. It is a UNIT CONVERSION, not a weight. The factor is the same positive
+//!    constant for every pose of every model, so it cannot change which pose
+//!    ranks ahead of which; it can only change the units the count arrives
+//!    in. `TIP_RADIUS_DEFAULT_MM` supplies it because it is the registered
+//!    generation radius — the per-arm scar the engine starts from — and the
+//!    smallest per-arm scar that is physically available, so the term claims
+//!    the least authority the count's own ordering can be stated in.
+//! 2. The obvious alternative bridge, `arms * mean tip area`, is
+//!    ARITHMETICALLY IDENTICAL to `total_scar_mm2` (`Σ π r²` is the count
+//!    times the mean of `π r²` by definition), so it would hand back the
+//!    quantity the area law holds nearly constant. It is not available as a
+//!    bridge; that is a fact about the two quantities, not a preference.
+//! 3. **What remains open is the EXCHANGE RATE, and it is not decided here.**
+//!    No measurement in this project relates "one support arm to remove" to
+//!    "one millimetre of model height" or "one Newton of peel", so the
+//!    relative authority of the support term against `w_h` and the peel term
+//!    is a ruling nobody has made. The choice above deliberately makes the
+//!    support term SMALL rather than picking a factor that would make it
+//!    win; where it does decide a pose it decides one the other terms are
+//!    indifferent to (a 180° flip moves neither the height nor the peak),
+//!    and where it does not, `weight_flips` already publishes the value of
+//!    each weight at which the winner flips. No constant was tuned to make
+//!    an acceptance check pass.
+//!
+//! # Two rasters, and why the cheap one may not crown a pose
+//!
+//! `Prefilter` runs at `working_pitch * DEMAND_PITCH_MULTIPLIER`, `Production`
+//! at the registered `SWEEP_WORKING_PITCH_MM` itself. The layer height is
+//! never coarsened in either — it sets `kappa * height`, so moving it would
+//! distort the reach physics rather than merely make it cheaper — and
+//! coarsening the XY pitch cuts `cells_per_layer` roughly with the square of
+//! the pitch ratio while leaving the layer count, the true driver of wall
+//! clock on a tall pose, alone.
+//!
+//! The coarse raster is a real measurement and a WRONG ranker: measured at
+//! 0.5 mm, Round 25's flat pose takes 102 arms and its 180° flip takes 88 —
+//! the reverse of the production-pitch order. That is the whole reason the
+//! caller re-measures its finalists here; a prefilter that ranked correctly
+//! would have made the second stage unnecessary.
 //! [`DEMAND_PITCH_MULTIPLIER`] is registered nowhere: it is a hand-picked
-//! cost/fidelity trade the pitch-halving invariance test
-//! (`tests/pitch_invariance.rs`, a 2x pitch change moved a disc's strut count
-//! 3.4%) licenses, stated here as a deviation from a literal "run the
-//! production sweep on every candidate" reading of the design rather than
-//! hidden inside a constant that would misleadingly claim registry
-//! provenance for a pure performance knob.
+//! cost/fidelity trade on a stage that now only prunes, stated here as a
+//! deviation from a literal "run the production sweep on every candidate"
+//! reading of the design rather than hidden inside a constant that would
+//! misleadingly claim registry provenance for a pure performance knob.
+
+use std::time::Instant;
 
 use plinth_core::{m0_constants, LayerPlan};
 use plinth_mesh::Mesh;
-use plinth_orient::demand::{MeasuredSupportDemand, SupportDemandMeasurer};
+use plinth_orient::demand::{DemandFidelity, MeasuredSupportDemand, SupportDemandMeasurer};
 use plinth_orient::UpDirection;
 
 use crate::{run_sweep, SweepPolicy};
 
-/// See the module doc's "Why coarser" section.
+/// See the module doc's "Two rasters" section.
 const DEMAND_PITCH_MULTIPLIER: f64 = 10.0;
 
 /// The one production [`SupportDemandMeasurer`]. Zero-sized: every number it
 /// needs is read fresh from the registry on each call, so two instances can
 /// never disagree.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct CoarseSweepDemand;
+pub struct SweepDemand;
 
-impl SupportDemandMeasurer for CoarseSweepDemand {
-    fn measure_support_area_cm2(
-        &self,
+/// Every registry number one batch of measurements needs, read ONCE per
+/// batch. Reading the registry per candidate would be a scalar call in the
+/// hot path of a stage that runs up to sixteen sweeps.
+struct DemandSettings {
+    lift_mm: f64,
+    layer_height_mm: f64,
+    tip_radius_mm: f64,
+    policy: SweepPolicy,
+}
+
+impl DemandSettings {
+    fn read(fidelity: DemandFidelity) -> Result<Self, String> {
+        let constants = m0_constants().map_err(|error| error.to_string())?;
+        let policy = SweepPolicy::from_registry().map_err(|error| error.to_string())?;
+        let policy = match fidelity {
+            DemandFidelity::Prefilter => {
+                let coarse_pitch = policy.working_pitch_mm * DEMAND_PITCH_MULTIPLIER;
+                policy.with_working_pitch_mm(coarse_pitch)
+            }
+            // The registered working pitch, untouched: this is the same
+            // raster `sweep_and_emit` plans the emitted field on.
+            DemandFidelity::Production => policy,
+        };
+        Ok(Self {
+            lift_mm: constants.placeholders().lift_mm().diagnostic().get(),
+            layer_height_mm: *constants.evidence().layer_height_default_mm().value(),
+            tip_radius_mm: constants
+                .placeholders()
+                .tip_radius_default_mm()
+                .diagnostic()
+                .get(),
+            policy,
+        })
+    }
+}
+
+impl SweepDemand {
+    /// One candidate, one sweep. The batch entry point owns the loop so a
+    /// single failing pose cannot end the batch.
+    fn measure_one(
         mesh: &Mesh,
         candidate: UpDirection,
+        fidelity: DemandFidelity,
+        settings: &DemandSettings,
     ) -> Result<MeasuredSupportDemand, String> {
         // Oriented exactly as the eventual winner would be
         // (`plinth_orient::oriented_recentered_mesh` is the same
         // `transform_for`/`transform_mesh` pair `search_and_orient` applies
         // to the committed winner), so a candidate measured well here is
         // measured in the frame it would actually be built in.
-        let transformed =
-            plinth_orient::oriented_recentered_mesh(mesh, candidate).map_err(|error| error.to_string())?;
+        let transformed = plinth_orient::oriented_recentered_mesh(mesh, candidate)
+            .map_err(|error| error.to_string())?;
 
-        let constants = m0_constants().map_err(|error| error.to_string())?;
-        let lift_mm = constants.placeholders().lift_mm().diagnostic().get();
-        let layer_height_mm = *constants.evidence().layer_height_default_mm().value();
+        let layer_height_mm = settings.layer_height_mm;
 
         // `oriented_recentered_mesh` recenters translation so the
         // transformed mesh's own minimum Z is exactly 0
         // (`plinth-orient`'s `transform_mesh`: `translation = [.., -min[2]]`),
         // so the plate sits at `-lift_mm` for every candidate without
         // re-deriving its own minimum here.
-        let plate_z = -lift_mm;
+        let plate_z = -settings.lift_mm;
         let max_z = max_z_mm(&transformed)?;
         #[expect(
             clippy::cast_possible_truncation,
@@ -89,45 +209,74 @@ impl SupportDemandMeasurer for CoarseSweepDemand {
         let layers = LayerPlan::new(plate_z, vec![layer_height_mm; layer_count])
             .map_err(|error| error.to_string())?;
 
-        let policy = SweepPolicy::from_registry().map_err(|error| error.to_string())?;
-        let coarse_pitch = policy.working_pitch_mm * DEMAND_PITCH_MULTIPLIER;
-        let coarse_policy = policy.with_working_pitch_mm(coarse_pitch);
-
-        let plan = run_sweep(&transformed, &layers, &coarse_policy).map_err(|error| error.to_string())?;
+        let plan =
+            run_sweep(&transformed, &layers, &settings.policy).map_err(|error| error.to_string())?;
         Ok(MeasuredSupportDemand {
-            // # This is the scar, and the scar is a WEAK proxy for demand
-            //
-            // §C2 states `total scar = peak_mm2 / X_ALLOWED` and the oracles
-            // measure that identity at ratio 1.00-1.13, so scoring a pose by
-            // its scar is very nearly scoring it by its peak cross-section —
-            // the `w_peak * peak_xsec_cm2` term §12 retired, re-entering under
-            // the name of the term that replaced it. Measured consequences, both
-            // ways:
-            //
-            // * It cannot see a 180° flip at all. Round 25's identity pose
-            //   (60 arms) and its flipped pose (83 arms) return the SAME peak
-            //   (432.3175 mm²) and the SAME scar (40.5440 mm²) to four decimals.
-            // * It rewards tilting, because tilting shrinks the peak: Round 100
-            //   at 10° has a 682.85 mm² peak against 7630.94 mm² flat.
-            //
-            // **`plan.report.demand_area_mm2` — the model area the up-sweep
-            // actually found unrooted — was built and substituted here, and it
-            // is measurably WORSE.** It removed Round 25's flip, and then tilted
-            // every model in the acceptance set by 10°: Round 25 to 4 arms,
-            // Round 50 to 13, Round 100 to 48, and `make_overhang_table` off its
-            // correct identity pose to 27 arms against 140. The reason is
-            // upstream of this line: while `reach::weight` spends the cured
-            // thickness `τ`, a tilted underside is reached from its low edge and
-            // measures almost no demand, so ANY faithful demand measure prefers
-            // the tilt. The demand quantity and the `τ` ruling are one decision,
-            // not two, and the scar stays here until that ruling is taken.
-            support_area_cm2: plan.total_scar_mm2() / 100.0,
+            support_area_cm2: burden_cm2(plan.struts.len(), settings.tip_radius_mm),
             struts: plan.struts.len(),
+            total_scar_mm2: plan.report.total_scar_mm2,
             achieved_pitch_mm: plan.report.achieved_pitch_mm,
             layers: plan.layers,
             residual_demand_cells: plan.report.residual_demand_cells,
             uncarried_load_mm2: plan.report.uncarried_load_mm2,
+            fidelity,
         })
+    }
+}
+
+/// The unit bridge from an arm count to the cm² the registered support weight
+/// is denominated in. See the module doc: one fixed positive factor for every
+/// pose, so it converts and never ranks.
+#[must_use]
+pub fn burden_cm2(struts: usize, tip_radius_mm: f64) -> f64 {
+    struts as f64 * core::f64::consts::PI * tip_radius_mm * tip_radius_mm / 100.0
+}
+
+impl SupportDemandMeasurer for SweepDemand {
+    fn measure_support_demand(
+        &self,
+        mesh: &Mesh,
+        candidates: &[UpDirection],
+        fidelity: DemandFidelity,
+    ) -> Vec<Result<MeasuredSupportDemand, String>> {
+        let started = Instant::now();
+        let settings = match DemandSettings::read(fidelity) {
+            Ok(settings) => settings,
+            // Emit and warn: one named failure per candidate, so the caller
+            // keeps its proxy for all of them rather than the search refusing.
+            Err(error) => return candidates.iter().map(|_| Err(error.clone())).collect(),
+        };
+        let measured: Vec<Result<MeasuredSupportDemand, String>> = candidates
+            .iter()
+            .map(|candidate| Self::measure_one(mesh, *candidate, fidelity, &settings))
+            .collect();
+        // Disclosure, not a record: the cost of this stage is printed where a
+        // reader of the run log will see it, and is deliberately kept OUT of
+        // the sealed `DenseSweepRecord`, whose digest must not depend on a
+        // clock.
+        let poses: Vec<String> = candidates
+            .iter()
+            .zip(&measured)
+            .map(|(candidate, result)| {
+                let up = candidate.get();
+                let (arms, burden) = match result {
+                    Ok(one) => (one.struts.to_string(), format!("{:.5}", one.support_area_cm2)),
+                    Err(_) => ("err".to_owned(), "err".to_owned()),
+                };
+                format!(
+                    "({:+.4},{:+.4},{:+.4}) arms {arms} burden {burden} cm2",
+                    up[0], up[1], up[2]
+                )
+            })
+            .collect();
+        eprintln!(
+            "[orient-demand] {} sweep of {} pose(s) in {:.2} s: {}",
+            fidelity.label(),
+            candidates.len(),
+            started.elapsed().as_secs_f64(),
+            poses.join("; "),
+        );
+        measured
     }
 }
 

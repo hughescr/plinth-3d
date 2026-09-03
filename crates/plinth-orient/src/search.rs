@@ -76,7 +76,7 @@ use crate::score::{
     ORIENT_PEEL_POINTS_PER_NEWTON_ID, ORIENT_PEEL_REFERENCE_AREA_MM2_ID,
     ORIENT_PEEL_REFERENCE_PRESSURE_PA_HIGH_ID, ORIENT_PEEL_REFERENCE_PRESSURE_PA_LOW_ID,
     ORIENT_SCAR_WEIGHT_ID, ORIENT_WEIGHT_HEIGHT_MM_ID, ORIENT_WEIGHT_PEAK_XSEC_CM2_ID,
-    ORIENT_WEIGHT_SUPPORT_AREA_CM2_ID, OVERHANG_ANGLE_DEG_ID,
+    ORIENT_WEIGHT_SUPPORT_AREA_CM2_ID, OVERHANG_ANGLE_DEG_ID, UpDirection,
 };
 use crate::BaselineSelection;
 
@@ -509,20 +509,117 @@ pub struct ObjectiveRecord {
 
 /// One commit-tier candidate's real sweep measurement, beside the proxy it
 /// replaced (LANE 3, §12). `measured_support_area_cm2` is `None`, and
-/// `measurement_error` names why, when the coarse-raster sweep itself could
-/// not be run for this candidate — the proxy value is then what actually
-/// scored it, never a refusal (emit and warn, never refuse).
+/// `measurement_error` names why, when the sweep itself could not be run for
+/// this candidate — the proxy value is then what actually scored it, never a
+/// refusal (emit and warn, never refuse).
+///
+/// Two rasters can produce this row, and `fidelity` says which one did.
+/// Every admitted candidate is measured at
+/// [`crate::demand::DemandFidelity::Prefilter`]; only the top
+/// `ORIENT_COMMIT_TOP_K` of those are re-measured at
+/// [`crate::demand::DemandFidelity::Production`], and for those the
+/// prefilter's own numbers are kept in `prefilter_*` so the two rasters can
+/// be compared in the record rather than in someone's memory.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommitDemandRecord {
     pub candidate: usize,
     pub proxy_support_area_cm2: Finite,
+    /// The burden that actually priced this candidate's support term.
     pub measured_support_area_cm2: Option<Finite>,
     pub struts: Option<usize>,
+    pub total_scar_mm2: Option<Finite>,
     pub achieved_pitch_mm: Option<Finite>,
     pub residual_demand_cells: Option<usize>,
     pub uncarried_load_mm2: Option<Finite>,
+    /// `"prefilter"` or `"production"` — which raster the numbers above were
+    /// measured on. `None` only when no measurement succeeded at all.
+    pub fidelity: Option<String>,
+    /// What the prefilter raster said for this candidate, kept even after a
+    /// production measurement replaced it.
+    pub prefilter_support_area_cm2: Option<Finite>,
+    pub prefilter_struts: Option<usize>,
     pub measurement_error: Option<String>,
+}
+
+impl CommitDemandRecord {
+    /// A row for a candidate nothing has measured yet.
+    fn unmeasured(candidate: usize, proxy_support_area_cm2: Finite) -> Self {
+        Self {
+            candidate,
+            proxy_support_area_cm2,
+            measured_support_area_cm2: None,
+            struts: None,
+            total_scar_mm2: None,
+            achieved_pitch_mm: None,
+            residual_demand_cells: None,
+            uncarried_load_mm2: None,
+            fidelity: None,
+            prefilter_support_area_cm2: None,
+            prefilter_struts: None,
+            measurement_error: None,
+        }
+    }
+
+    /// `true` when this candidate carries a production-raster burden, which
+    /// is the only fidelity allowed to crown a pose.
+    fn measured_at_production(&self) -> bool {
+        self.fidelity.as_deref() == Some(crate::demand::DemandFidelity::Production.label())
+    }
+}
+
+/// What a row records when the measurer returned fewer results than it was
+/// handed candidates. The batch contract says the vector is index-parallel,
+/// so a short return is treated as a per-candidate failure rather than
+/// silently attributing one pose's sweep to another.
+const SHORT_DEMAND_BATCH: &str =
+    "the demand measurer returned fewer measurements than candidates; this pose kept its proxy";
+
+/// Copies one measurement into its row. The prefilter fields are the
+/// caller's to set, because only the caller knows whether this measurement
+/// IS the prefilter or the production pass that replaced it.
+fn fill_measured(
+    row: &mut CommitDemandRecord,
+    measured: &crate::demand::MeasuredSupportDemand,
+) -> Result<(), SearchError> {
+    row.measured_support_area_cm2 = Some(finite(measured.support_area_cm2)?);
+    row.struts = Some(measured.struts);
+    row.total_scar_mm2 = Some(finite(measured.total_scar_mm2)?);
+    row.achieved_pitch_mm = Some(finite(measured.achieved_pitch_mm)?);
+    row.residual_demand_cells = Some(measured.residual_demand_cells);
+    row.uncarried_load_mm2 = Some(finite(measured.uncarried_load_mm2)?);
+    row.fidelity = Some(measured.fidelity.label().to_owned());
+    row.measurement_error = None;
+    Ok(())
+}
+
+/// Re-sorts and re-ranks the commit tier after a demand pass.
+///
+/// The comparator is `score_tier`'s — score ascending, ties to the lower
+/// `CandidateId` — with ONE precedence in front of it: a candidate carrying a
+/// production-raster burden sorts ahead of one carrying only a prefilter
+/// burden, whatever the two scores say. That is `FidelityLedger`'s own
+/// doctrine (an exact number outranks a surrogate one) applied to the
+/// quantity the surrogate is measured to get wrong: the coarse raster ranks
+/// a disc's 180° flip backwards, so letting a coarse score beat a production
+/// score would reintroduce the very error the second stage exists to
+/// remove. The full ranking is still published, so the prefilter-only
+/// candidates and their scores stay visible below the finalists.
+fn rerank_commit(ranking: &mut [RankedCandidate], rows: &[CommitDemandRecord]) {
+    let production = |candidate: usize| -> bool {
+        rows.iter()
+            .find(|row| row.candidate == candidate)
+            .is_some_and(CommitDemandRecord::measured_at_production)
+    };
+    ranking.sort_by(|left, right| {
+        production(right.candidate)
+            .cmp(&production(left.candidate))
+            .then(left.terms.score.get().total_cmp(&right.terms.score.get()))
+            .then(left.candidate.cmp(&right.candidate))
+    });
+    for (rank, entry) in ranking.iter_mut().enumerate() {
+        entry.rank = rank;
+    }
 }
 
 /// The peel-force bracket's robustness check (D14): the SAME commit-tier
@@ -889,64 +986,97 @@ pub fn search(
     }
 
     // LANE 3 §12: replace the commit tier's projected-area proxy with the
-    // sweep's real measured demand. Bounded to the commit tier's own
-    // admitted set (`ORIENT_COMMIT_TOP_K` promoted plus the escorted legacy
-    // 13 — LANE 2 measured up to ~16 candidates in production) rather than
-    // every tier, because the commit tier's exact-mesh ranking is where the
-    // decision is actually made (`FidelityLedger`'s own doctrine) and a
-    // real sweep at every tier would multiply this cost several times over
-    // for no change to the winner. A candidate whose coarse-raster sweep
-    // itself fails keeps its proxy value and the failure is named, never
-    // refused.
-    let mut commit_tier_demand = Vec::new();
+    // sweep's real measured SUPPORT BURDEN, in two stages.
+    //
+    // Stage 1 measures every candidate the commit tier admitted
+    // (`ORIENT_COMMIT_TOP_K` promoted plus the escorted legacy 13 — up to ~16
+    // in production) on the cheap coarsened raster. Stage 2 re-measures the
+    // top `ORIENT_COMMIT_TOP_K` of those at the PRODUCTION pitch, the raster
+    // the emitted support field is actually planned on.
+    //
+    // Both bounds come from the search's own funnel widths and neither
+    // decides anything: widening either costs sweeps and cannot make a pose
+    // better. What the split buys is the one thing the coarse raster cannot
+    // give — measured, at the coarse pitch a 25 mm disc's 180° flip takes 88
+    // arms against the correct pose's 102, and at the production pitch it
+    // takes 88 against 70. So a prefilter number keeps a pose in the running
+    // and a production number crowns it, which is why the final comparator
+    // sorts production-measured candidates ahead of prefilter-only ones.
+    //
+    // A candidate whose sweep fails keeps its proxy value and the failure is
+    // named, never refused.
+    let mut commit_tier_demand: Vec<CommitDemandRecord> = Vec::new();
     if let (Some(measurer), Some(commit_record)) = (demand, tiers.last_mut()) {
-        for entry in &mut commit_record.ranking {
-            let direction = grid.candidates()[entry.candidate].direction;
-            let proxy_support_area_cm2 = entry.terms.support_area_cm2.get();
-            match measurer.measure_support_area_cm2(mesh, direction) {
-                Ok(measured) => {
+        // ---- stage 1: the prefilter, over the whole admitted set ----------
+        let admitted_directions: Vec<UpDirection> = commit_record
+            .ranking
+            .iter()
+            .map(|entry| grid.candidates()[entry.candidate].direction)
+            .collect();
+        let prefiltered = measurer.measure_support_demand(
+            mesh,
+            &admitted_directions,
+            crate::demand::DemandFidelity::Prefilter,
+        );
+        for (index, entry) in commit_record.ranking.iter_mut().enumerate() {
+            let mut row = CommitDemandRecord::unmeasured(
+                entry.candidate,
+                finite(entry.terms.support_area_cm2.get())?,
+            );
+            match prefiltered.get(index) {
+                Some(Ok(measured)) => {
                     entry.terms = entry.terms.repriced(
                         request.weights,
                         measured.support_area_cm2,
                         entry.terms.peel_force_n.low_pressure_low_exponent_n.get(),
                     );
-                    commit_tier_demand.push(CommitDemandRecord {
-                        candidate: entry.candidate,
-                        proxy_support_area_cm2: finite(proxy_support_area_cm2)?,
-                        measured_support_area_cm2: Some(finite(measured.support_area_cm2)?),
-                        struts: Some(measured.struts),
-                        achieved_pitch_mm: Some(finite(measured.achieved_pitch_mm)?),
-                        residual_demand_cells: Some(measured.residual_demand_cells),
-                        uncarried_load_mm2: Some(finite(measured.uncarried_load_mm2)?),
-                        measurement_error: None,
-                    });
+                    fill_measured(&mut row, measured)?;
+                    row.prefilter_support_area_cm2 = row.measured_support_area_cm2;
+                    row.prefilter_struts = row.struts;
                 }
-                Err(error) => {
-                    commit_tier_demand.push(CommitDemandRecord {
-                        candidate: entry.candidate,
-                        proxy_support_area_cm2: finite(proxy_support_area_cm2)?,
-                        measured_support_area_cm2: None,
-                        struts: None,
-                        achieved_pitch_mm: None,
-                        residual_demand_cells: None,
-                        uncarried_load_mm2: None,
-                        measurement_error: Some(error),
-                    });
+                Some(Err(error)) => row.measurement_error = Some(error.clone()),
+                None => row.measurement_error = Some(SHORT_DEMAND_BATCH.to_owned()),
+            }
+            commit_tier_demand.push(row);
+        }
+        rerank_commit(&mut commit_record.ranking, &commit_tier_demand);
+
+        // ---- stage 2: the finalists, at the production pitch --------------
+        let finalists = request.ladder.commit_top_k().min(commit_record.ranking.len());
+        let finalist_directions: Vec<UpDirection> = commit_record.ranking[..finalists]
+            .iter()
+            .map(|entry| grid.candidates()[entry.candidate].direction)
+            .collect();
+        let produced = measurer.measure_support_demand(
+            mesh,
+            &finalist_directions,
+            crate::demand::DemandFidelity::Production,
+        );
+        for (index, entry) in commit_record.ranking[..finalists].iter_mut().enumerate() {
+            let Some(row) = commit_tier_demand
+                .iter_mut()
+                .find(|row| row.candidate == entry.candidate)
+            else {
+                continue;
+            };
+            match produced.get(index) {
+                Some(Ok(measured)) => {
+                    entry.terms = entry.terms.repriced(
+                        request.weights,
+                        measured.support_area_cm2,
+                        entry.terms.peel_force_n.low_pressure_low_exponent_n.get(),
+                    );
+                    let prefilter_area = row.prefilter_support_area_cm2;
+                    let prefilter_struts = row.prefilter_struts;
+                    fill_measured(row, measured)?;
+                    row.prefilter_support_area_cm2 = prefilter_area;
+                    row.prefilter_struts = prefilter_struts;
                 }
+                Some(Err(error)) => row.measurement_error = Some(error.clone()),
+                None => row.measurement_error = Some(SHORT_DEMAND_BATCH.to_owned()),
             }
         }
-        // The same comparator `score_tier` ranks with: score ascending,
-        // ties to the lower CandidateId.
-        commit_record.ranking.sort_by(|left, right| {
-            left.terms
-                .score
-                .get()
-                .total_cmp(&right.terms.score.get())
-                .then(left.candidate.cmp(&right.candidate))
-        });
-        for (rank, entry) in commit_record.ranking.iter_mut().enumerate() {
-            entry.rank = rank;
-        }
+        rerank_commit(&mut commit_record.ranking, &commit_tier_demand);
     }
 
     let commit = tiers.last().expect("three tiers were scored");

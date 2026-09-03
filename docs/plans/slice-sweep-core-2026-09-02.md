@@ -1024,6 +1024,56 @@ Round 50 the peak term alone is 80–84 % of the flat pose's score, so every dis
    No interim proxy (§C9). The weight `w_sup = 0.5` is unchanged in value; only the quantity it
    multiplies changes.
 
+#### AMENDMENT 2026-09-03 — which quantity, and on which raster
+
+Both halves of item 2 as written above were tried and both were wrong. What replaced them was
+measured, and the measurements are re-run in `crates/plinth-sweep/tests/pose_demand_probe.rs`
+so this section cannot go stale.
+
+**The quantity is the ARM COUNT, not `demand_area_mm2` and not `total_scar_mm2`.**
+
+| pose (production pitch 0.05 mm) | demand mm² | arms | scar mm² |
+|---|---|---|---|
+| Round 50 flat | 1812.41 | 243 | 163.017 |
+| Round 50 flipped 180° | 1778.12 | 283 | 162.837 |
+| Round 50 tilted 10° | 21.29 | 495 | 165.080 |
+| Round 25 flat | 416.85 | 70 | 40.596 |
+| Round 25 flipped 180° | 417.39 | 88 | 40.518 |
+| Round 25 tilted 3.6° | 29.84 | 117 | 40.956 |
+
+`demand_area_mm2` counts model area with no rooted carrier *at its own birth layer*, so a flat
+down-face contributes all of itself and a sloped one almost nothing — it is anti-correlated with
+the burden, and substituting it tilted every disc and laid the overhang table on its side.
+`total_scar_mm2` cannot rank poses at all: `SweepPlan::total_scar_mm2`'s own invariant is
+`Σ π r² = peak_layer_area / X_ALLOWED`, *independent of how many arms share the load*, so the
+area law holds it nearly constant across poses (Round 25's four poses span 1.8 %, their arm
+counts 73 %) and inside that band it ranks the 180° flip backwards on both discs. The arm count
+ranks every measured comparison correctly and is the burden the owner actually pays.
+
+**Unit bridge, and the open ruling.** The registered weight is denominated in cm², so the
+burden is reported as `arms · π · TIP_RADIUS_DEFAULT_MM² / 100` — one fixed positive factor for
+every pose, hence a unit conversion that cannot re-rank anything. `arms · mean tip area` is not
+available as an alternative bridge: it is arithmetically identical to `total_scar_mm2`. **No
+exchange rate between "one arm to remove" and a millimetre of height or a Newton of peel has
+been measured, and none was invented here**; `weight_flips` publishes the crossover instead.
+
+**The raster is the PRODUCTION pitch, on `ORIENT_COMMIT_TOP_K` finalists.** The coarse raster is
+a real measurement and a wrong ranker — at 0.5 mm, Round 25's flat pose takes 102 arms and its
+180° flip 88, the reverse of the production order — so it is demoted to a second prefilter over
+the commit tier's whole admitted set, and only the top `ORIENT_COMMIT_TOP_K` are re-swept at
+`SWEEP_WORKING_PITCH_MM`. A production-measured candidate sorts ahead of a prefilter-only one
+regardless of score, so a coarse number can keep a pose in the running and never crown it.
+Measured cost of the second stage, per model: 3.05 s (Round 25), 15.28 s (Round 50), 28.39 s
+(Round 100), 15.26 s (overhang table), 37.38 s (Cylinder), 99.68 s (Weeping Treant).
+
+**Acceptance, measured on the emitted meshes:** Round 25/50/100 all flat (no tilt), overhang
+table at identity, Cylinder and Treant emit. Round 50 and Round 100 are recess UP. **Round 25 is
+recess DOWN**, and the cause is *not* the support term: on a 180° flip the height, peak and peel
+terms are identical to the last digit, the support term prefers the correct pose by 0.00071
+points, and `ORIENT_SCAR_WEIGHT`'s scar term prefers the flip by 0.04482 — a factor of 63.
+`ORIENT_WEIGHT_SUPPORT_AREA_CM2` would have to be ≈31.7 instead of 0.5 to overturn it. That is
+an open question against the scar term, not a number to tune here.
+
 Coefficient, from the literature's own suggested form
 (`docs/evidence/literature/LITERATURE-NOTES.md:826`, `lit-green-peel.md`):
 

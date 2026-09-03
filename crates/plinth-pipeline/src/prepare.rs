@@ -1329,7 +1329,7 @@ fn orient_model(
             // orientation stage is shared by both `--placement` engines, so
             // wiring the real sweep-demand measurer here fixes the double-
             // charged-flat-pose defect for legacy and sweep placement alike.
-            let demand = plinth_sweep::CoarseSweepDemand;
+            let demand = plinth_sweep::SweepDemand;
             plinth_orient::search_and_orient(decimated, &request, Some(&demand)).map_err(|source| {
                 ChainStop::new(PipelineError::Orient {
                     model: model.clone(),
@@ -2486,7 +2486,9 @@ fn print_sweep_disclosure(
          ({} coarsening steps); kappa used {:.7}, first loss {:.7}, audit gate {:.7}, \
          will pass audit span check: {}; u_from_vertical_max {:.5}; \
          tau_vertical_over_tau_used_max {:.4}; max tau at binding reach {:.4} mm; \
-         chamfer non-convergences {}; registered-but-unread target spacing {:.3} mm",
+         chamfer non-convergences {}; route non-convergences {}; \
+         arms inserted by load {} of {} ({} insertion rounds, {} layers not converged); \
+         registered-but-unread target spacing {:.3} mm",
         report.cells_per_layer,
         report.achieved_pitch_mm,
         report.layers,
@@ -2499,6 +2501,11 @@ fn print_sweep_disclosure(
         report.tau_vertical_over_tau_used_max,
         report.max_tau_at_binding_reach_mm,
         report.chamfer_not_converged,
+        report.route_not_converged,
+        report.arms_inserted_by_load,
+        report.struts_total,
+        report.insertion_rounds,
+        report.insertion_not_converged,
         report.reach.target_spacing_mm_registered_but_unused,
     );
     println!(

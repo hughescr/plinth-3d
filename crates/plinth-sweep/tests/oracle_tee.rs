@@ -60,10 +60,33 @@ fn the_slab_load_walks_inward_to_the_legs_and_conserves_through_them() {
         report.uncarried_load_mm2
     );
 
-    // ---- the fringe is self-rooted: no arm sits inside it -------------------
-    // This is the reach test doing its work. An arm within one reach radius of
-    // a leg means the sweep did not see that the leg already carries that
-    // patch, and a sweep that cannot see it has no reach criterion at all.
+    // ---- the fringe is covered like everything else, not clustered ---------
+    //
+    // # Re-derived 2026-09-03, under the owner's one-lamina ruling
+    //
+    // This assertion was `inside_fringe == 0`: the slab's underside within one
+    // reach radius of a leg is carried by the leg, so no arm belongs there.
+    // That holds while `reach::weight` spends the cured thickness `τ`, because
+    // then the run from the arms under a leg out to the leg's own edge — about
+    // 2 mm through a 4 mm-square, 20 mm-tall solid post — costs almost nothing
+    // and the leg's cells arrive at the slab with `U ≈ 0`, leaving a full
+    // lamina of budget for the fringe.
+    //
+    // Under the ruling that run is priced at the one-lamina rate like every
+    // other lateral run. The leg's own bottom layer is 4 × 4 mm and is covered
+    // by two arms, so its worst-covered cell already sits at `U` close to 1;
+    // the climb up the leg is free but gives nothing back, so at the slab there
+    // is no budget left and the fringe is demand like the rest of the
+    // underside. That is the price of the ruling, in the OVER-support
+    // direction, and it is measured rather than argued: 12 arms.
+    //
+    // What must still be true — and is the thing this assertion existed to
+    // catch — is that the fringe is covered at the SAME density as everywhere
+    // else. An engine that had lost its reach criterion would pile arms up
+    // against the legs. The fringe tested here is the leg square dilated by
+    // `0.75 ρ`, an area of `4·w·d + π·d²` per leg; one hex covering of the four
+    // is `4 · 33.58 / 11.79 = 11.4` arms, and the harness's own upper band for
+    // a boundary-dominated region is 1.7 of that.
     let reach = lamina_reach_mm();
     let slab_bottom_layer = plan
         .struts
@@ -83,9 +106,20 @@ fn the_slab_load_walks_inward_to_the_legs_and_conserves_through_them() {
             })
         })
         .count();
-    assert_eq!(
-        inside_fringe, 0,
-        "{inside_fringe} arms were placed inside a leg's own self-rooted fringe"
+    let fringe_test_band = 0.75 * reach;
+    let fringe_test_area_mm2 = 4.0
+        * (4.0 * LEG_WIDTH_MM * fringe_test_band
+            + core::f64::consts::PI * fringe_test_band * fringe_test_band);
+    let one_covering = fringe_test_area_mm2 / hex_cell_area_mm2();
+    println!(
+        "leg fringe band {fringe_test_band:.4} mm, tested area {fringe_test_area_mm2:.2} mm2, \
+         one hex covering {one_covering:.1} arms, measured {inside_fringe}"
+    );
+    assert!(
+        inside_fringe as f64 <= one_covering * bands::STRUT_COUNT.1,
+        "{inside_fringe} arms sit inside the legs' fringes against {:.1} the lattice would put \
+         there; the sweep is clustering arms at the legs instead of covering them",
+        one_covering * bands::STRUT_COUNT.1,
     );
 
     // ---- strut count ------------------------------------------------------

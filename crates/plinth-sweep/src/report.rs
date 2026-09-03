@@ -156,6 +156,31 @@ pub struct SweepRunReport {
     /// reported rather than asserted because "emit and warn, never refuse"
     /// applies to a defect discovered mid-run just as much as to a shortfall.
     pub sweeps_disagree: bool,
+    /// Layers whose load-routing field hit its sweep bound without reaching a
+    /// fixed point.
+    ///
+    /// **Computed since the routing field existed and, until now, read by
+    /// nothing.** It is not the same error as `chamfer_not_converged`, and the
+    /// difference is the direction: an unconverged CHAMFER reads high and
+    /// over-supports, while an unconverged ROUTE leaves a load's distance to
+    /// its carrier too high, so the load falls into `uncarried_load_mm2` and
+    /// the field is UNDER-supported. The Cylinder's 379 non-convergences are
+    /// the harmless kind; this counter is the one that would have named the
+    /// other kind, and it was invisible.
+    pub route_not_converged: u64,
+    /// Arms the DOWN-sweep added because the registered area law asked for the
+    /// section (`crate::down_sweep::insert_for_load`). Reach placed the rest.
+    pub arms_inserted_by_load: usize,
+    /// Layers where an arm still collected more routed load than one tip may
+    /// carry after the bounded insertion rounds — either because the rounds ran
+    /// out or because the geometry offered nowhere to put another arm. A
+    /// warning on an emitted file; the arms themselves are named in
+    /// `overloaded_struts`.
+    pub insertion_not_converged: u64,
+    /// Insertion rounds executed, summed over layers. A path-hit counter:
+    /// `arms_inserted_by_load == 0` must not be readable as "no arm needed one"
+    /// when it in fact means "the step never ran".
+    pub insertion_rounds: u64,
     pub unrooted_landings: usize,
     pub struts_at_minimum_radius: usize,
     pub overloaded_struts: Vec<OverloadedStrut>,
@@ -249,8 +274,10 @@ impl SweepRunReport {
              mm2; {} overloaded arms; {} arms above the owner's 0.400 mm-radius growth ceiling; \
              {} model sections carrying more than X_ALLOWED; {} arms surviving at the minimum tip \
              radius; {} coarsening steps to an achieved pitch of {:.4} mm; {} chamfer \
-             non-convergences; {} unrooted landings; slenderness p50 {:.1}:1, max {:.1}:1; \
-             reach decisions binding at cured thickness up to {:.4} mm.",
+             non-convergences (they read HIGH and OVER-support); {} routing non-convergences \
+             (they lose load and UNDER-support); {} layers where the area law still wanted a \
+             carrier it could not place; {} unrooted landings; slenderness p50 {:.1}:1, max \
+             {:.1}:1; reach decisions binding at cured thickness up to {:.4} mm.",
             self.residual_demand_cells,
             self.residual_demand_mm2,
             self.uncarried_load_mm2,
@@ -261,10 +288,24 @@ impl SweepRunReport {
             self.coarsening_steps,
             self.achieved_pitch_mm,
             self.chamfer_not_converged,
+            self.route_not_converged,
+            self.insertion_not_converged,
             self.unrooted_landings,
             self.slenderness_p50,
             self.slenderness_max,
             self.max_tau_at_binding_reach_mm,
+        )
+        .expect("writing to a String cannot fail");
+        writeln!(
+            out,
+            "Arms are placed by TWO criteria, both measured. Reach put in {} of them (cured \
+             material must never span more than one lamina's reach to a carrier); the area law \
+             put in the other {} (a tip carries at most X_ALLOWED * pi * r_max^2 = 37.6991 mm2, \
+             and where the routed load exceeded that the down-sweep added the carriers the law \
+             asks for and routed again, {} rounds in total).",
+            self.struts_total.saturating_sub(self.arms_inserted_by_load),
+            self.arms_inserted_by_load,
+            self.insertion_rounds,
         )
         .expect("writing to a String cannot fail");
         if self.sweeps_disagree {

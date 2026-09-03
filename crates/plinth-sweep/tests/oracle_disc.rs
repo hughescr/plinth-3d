@@ -178,12 +178,52 @@ fn the_disc_is_supported_by_a_plate_rooted_field_at_the_measured_spacing() {
 }
 
 #[test]
-fn the_rim_ramp_needs_no_supports_of_its_own() {
-    // The rim rises 3.487 mm over 70 layers while moving 1.0 mm outward. The
-    // reach potential charges that climb about 0.15 against a limit of 1, so
-    // the rim is self-rooted and demands nothing. A single-lamina-only reading
-    // would charge 70/42.6 = 1.64 and wrongly demand rim supports, which is why
-    // this is a test and not a remark.
+fn the_drafted_rim_costs_a_rim_strip_and_no_interior_arms() {
+    // # Re-derived 2026-09-03, under the owner's one-lamina ruling
+    //
+    // This test was `the_rim_ramp_needs_no_supports_of_its_own` and asserted
+    // ZERO arms above the bottom layer, on §C4's arithmetic: "a
+    // single-lamina-only variant would charge 70/42.6 = 1.64 for the same climb
+    // and wrongly demand rim supports". **That arithmetic is wrong, and it is
+    // wrong in the direction that made the τ-spent form look necessary.**
+    //
+    // The rim is drafted `θ = atan(1.000 / 3.487) = 16.0°` off vertical. Per
+    // layer it steps `h·tanθ = 0.05 × 0.28679 = 0.0143 mm`, not a whole lamina,
+    // and over its 70 layers that accumulates to `1.0038 mm` against
+    // `κ·h = 2.1300 mm`. The single-lamina charge for the rim's own climb is
+    // therefore **0.471, not 1.64** — §C4 charged one full lamina step per
+    // layer, which is the cost of a rim that creeps 0.05 mm a layer, not
+    // 0.0143 mm. The rim does not unroot on its own account under EITHER form,
+    // and the arithmetic below asserts it.
+    //
+    // Arms nevertheless appear on the rim under the one-lamina rule, and the
+    // reason is the covering, not the ramp: the hex lattice is pitched at
+    // exactly the guaranteed reach, so the worst-covered cell of the bottom
+    // layer sits at `U = 1.000` with nothing left over, and the first rim arm
+    // goes in TWO layers up — after 0.029 mm of creep, not 2.13 mm. That is a
+    // fact about a zero-margin covering. What this test now pins is that the
+    // price is confined to the rim strip and bounded by that strip's own
+    // covering: no arm wanders into the disc's interior, and the rim is not
+    // over-run with them.
+    let reach = lamina_reach_mm();
+    const RIM_RISE_MM: f64 = 3.487;
+    const RIM_RUN_MM: f64 = 1.000;
+    const RIM_LAYERS: f64 = 70.0;
+    let per_layer_step_mm = (RIM_RUN_MM / RIM_RISE_MM) * (RIM_RISE_MM / RIM_LAYERS);
+    let accumulated_mm = per_layer_step_mm * RIM_LAYERS;
+    println!(
+        "rim draft {:.2} deg off vertical, per-layer step {per_layer_step_mm:.6} mm, accumulated \
+         run {accumulated_mm:.4} mm against one lamina's reach {reach:.4} mm = {:.3} of the \
+         limit",
+        (RIM_RUN_MM / RIM_RISE_MM).atan().to_degrees(),
+        accumulated_mm / reach,
+    );
+    assert!(
+        accumulated_mm < reach,
+        "the rim's own accumulated run {accumulated_mm:.4} mm is not below one lamina's reach \
+         {reach:.4} mm; §C4's 1.64 would then have been right after all"
+    );
+
     let plan = sweep(&round_50(), 0.05);
     let bottom_layer = plan
         .struts
@@ -191,15 +231,64 @@ fn the_rim_ramp_needs_no_supports_of_its_own() {
         .map(|strut| strut.k_top)
         .min()
         .expect("a disc has struts");
-    let above_the_bottom = plan
+    let above: Vec<&plinth_sweep::SweepStrut> = plan
         .struts
         .iter()
         .filter(|strut| strut.k_top > bottom_layer)
-        .count();
-    assert_eq!(
-        above_the_bottom, 0,
-        "{above_the_bottom} arms were placed above the bottom layer; the rim and the recess \
-         must be self-rooted"
+        .collect();
+    let radius_of = |strut: &plinth_sweep::SweepStrut| strut.center_mm[0].hypot(strut.center_mm[1]);
+    let innermost = above.iter().copied().map(radius_of).fold(f64::INFINITY, f64::min);
+    println!(
+        "arms above the bottom layer: {} (innermost at r {:.3} mm, seat layers {:?}..{:?})",
+        above.len(),
+        innermost,
+        above.iter().map(|strut| strut.k_top).min(),
+        above.iter().map(|strut| strut.k_top).max(),
+    );
+
+    // ---- they are RIM arms, not interior demand ---------------------------
+    //
+    // The bottom face reaches r = 24.0. Anything seated above the bottom layer
+    // and further in than one reach radius from that edge would be the disc's
+    // own interior unrooting, which would be a defect and not a rim price.
+    for strut in &above {
+        let radius = radius_of(strut);
+        assert!(
+            radius > 24.0 - reach,
+            "an arm above the bottom layer sits at r {radius:.3} mm, inside the bottom face's \
+             own covering; the interior must stay rooted"
+        );
+        assert!(
+            matches!(strut.landing, Landing::Plate),
+            "a rim arm landed on {:?}; the drafted rim overhangs free space and its arms go to \
+             the plate",
+            strut.landing,
+        );
+    }
+
+    // ---- and there are no more of them than the strip needs ---------------
+    //
+    // The rim's XY projection is an annulus from r = 24 to r = 25: a strip of
+    // width w = 1.0 mm and mean circumference 2π·24.5 = 153.94 mm. Covering a
+    // strip of width `w` with discs of radius `ρ` centred on its midline puts
+    // them at most `2·sqrt(ρ² − (w/2)²)` apart, so one covering of this strip
+    // is `153.94 / 4.141 = 37.2` arms. This is a strip covering and NOT the hex
+    // cell count, because a 1 mm strip is narrower than the lattice pitch and
+    // the lattice never applies to it.
+    let strip_width_mm = 1.0_f64;
+    let mean_circumference_mm = 2.0 * core::f64::consts::PI * 24.5;
+    let along_mm = 2.0 * (reach * reach - (strip_width_mm / 2.0).powi(2)).sqrt();
+    let one_covering = mean_circumference_mm / along_mm;
+    println!(
+        "rim strip covering: {mean_circumference_mm:.2} mm of midline at {along_mm:.3} mm \
+         spacing = {one_covering:.1} arms; measured {}",
+        above.len(),
+    );
+    assert!(
+        above.len() as f64 <= one_covering,
+        "{} arms on a rim strip one covering of which is {one_covering:.1}; the rim is being \
+         re-covered on every layer instead of staying rooted from the layer below",
+        above.len(),
     );
 }
 

@@ -83,6 +83,66 @@ pub struct DownSweepOutcome {
     /// load it could have routed and says so, rather than routing load along a
     /// path it never proved.
     pub route_not_converged: u64,
+    /// Arms this down-sweep added because the AREA LAW asked for them — see
+    /// [`insert_for_load`]. Zero on a field where reach already placed enough
+    /// section, so it also tells "the path never ran" apart from "the path ran
+    /// and found nothing to do" when read beside `insertion_rounds`.
+    pub arms_inserted_by_load: u64,
+    /// Layers that still had an arm collecting more routed load than one tip
+    /// may carry after the bounded insertion rounds. A WARNING, never a
+    /// refusal: the arms that could go in went in, the rest is named in
+    /// `overloaded`.
+    pub insertion_not_converged: u64,
+    /// Insertion rounds actually executed, summed over layers. A path-hit
+    /// counter: without it, `arms_inserted_by_load == 0` cannot be told apart
+    /// from an insertion step that never ran.
+    pub insertion_rounds: u64,
+}
+
+/// Whether the down-sweep may add arms of its own, and how many arms the whole
+/// field may hold.
+///
+/// **This is not a threshold and it decides nothing.** The trigger for adding
+/// an arm is the registered area law itself — a tip may carry
+/// `X_ALLOWED · π · r_max²` and no more — and `max_rounds` bounds a search
+/// whose non-convergence is REPORTED (`insertion_not_converged`) rather than
+/// hidden. `max_struts` is the caller's existing resource authority
+/// (`crate::SweepLimits`), passed through so a field the insertion grows
+/// cannot outrun it.
+#[derive(Clone, Copy, Debug)]
+pub struct InsertionPolicy {
+    pub enabled: bool,
+    pub max_struts: usize,
+    /// Bounded rounds per layer. Each round computes the number of carriers
+    /// the area law asks for and puts that many in at once, so one round
+    /// normally suffices and further rounds only handle the case where the
+    /// first round's own arms are themselves over the limit.
+    pub max_rounds: usize,
+}
+
+impl InsertionPolicy {
+    /// The production authority: insertion on, four rounds, the caller's own
+    /// strut cap.
+    #[must_use]
+    pub const fn new(max_struts: usize) -> Self {
+        Self {
+            enabled: true,
+            max_struts,
+            max_rounds: 4,
+        }
+    }
+
+    /// Insertion off — reach places the field alone. Used by the measurement
+    /// that shows what load-driven insertion changes, and by nothing in the
+    /// production path.
+    #[must_use]
+    pub const fn disabled() -> Self {
+        Self {
+            enabled: false,
+            max_struts: 0,
+            max_rounds: 0,
+        }
+    }
 }
 
 /// Sizing inputs, every one read from the registry by the caller.
@@ -105,7 +165,27 @@ pub struct SizingPolicy {
 }
 
 /// Run the whole down-sweep over `struts`, filling their radius and carried
-/// profiles.
+/// profiles, and ADDING arms wherever the area law asks for section the
+/// up-sweep's reach criterion never had a reason to place.
+///
+/// # Two placement criteria, one field
+///
+/// Reach answers "can cured material span from here to a carrier". The area
+/// law answers "can this arm carry what is routed through it". They are
+/// different questions and the up-sweep can only ask the first: at the top of
+/// the up-sweep no load has been routed yet, so nothing there knows that a
+/// covering which is correct for reach concentrates 123 mm² of peel on one
+/// tip whose registered maximum is `X_ALLOWED · π · r_max² = 37.699 mm²`.
+/// Before this step the engine's only answer was to clamp the radius at
+/// `r_max` and warn — 1800 warned arm-layers on the laid-over Cylinder, 514 on
+/// `oracle_ramp` — which is an honest warning about a field the engine could
+/// have fixed and did not.
+///
+/// The trigger is the area law and nothing else. No threshold is introduced:
+/// an arm gets siblings exactly when the load routed to it at some layer
+/// exceeds what one tip may carry, and it gets `ceil(routed / ℓ_max) − 1` of
+/// them, spaced by the hex spacing that puts that many carriers on the
+/// footprint the load actually came from.
 ///
 /// # Panics
 ///
@@ -116,8 +196,9 @@ pub struct SizingPolicy {
 pub fn run(
     grid: &Grid,
     slices: &[Vec<SliceSolid>],
-    struts: &mut [SweepStrut],
+    struts: &mut Vec<SweepStrut>,
     sizing: SizingPolicy,
+    insertion: InsertionPolicy,
 ) -> DownSweepOutcome {
     let cells = grid.cells();
     let area = grid.cell_area_mm2();
@@ -135,12 +216,31 @@ pub fn run(
     // its way down into layer k. All false above the top layer, where there is
     // no load to route.
     let mut cover_above = vec![false; cells];
+    // Layer k+1's CARRIERS, as opposed to its cover: model that carried plus every
+    // arm alive there. Only the injection accounting reads it — see the max step.
+    let mut carriers_above = vec![false; cells];
     let mut nearest = vec![u32::MAX; cells];
     let mut distance = vec![f32::INFINITY; cells];
     let mut distance_prev = vec![f32::INFINITY; cells];
     let mut pending = vec![0.0_f64; struts.len()];
     let mut labels = vec![u32::MAX; cells];
     let mut parent = Vec::new();
+    // Insertion scratch, allocated once. Arms this sweep adds are "growing"
+    // until their column meets something: their landing is discovered by the
+    // descent itself, which is the same "first thing you hit going down" rule
+    // `up_sweep::descend` applies, read off the layers this pass is already
+    // walking instead of off a history that only exists going up.
+    let mut growing: Vec<usize> = Vec::new();
+    let mut landing_target = vec![u32::MAX; cells];
+    let mut insert = InsertScratch::new(cells);
+    let mut layer_arms: Vec<LayerArm> = Vec::new();
+    // The largest peel one tip may legally carry, from the registered area law
+    // and the registered maximum radius. `crates/plinth-support/src/
+    // perception.rs`:610-612 computes the same quantity for the legacy engine.
+    let l_max = sizing.x_allowed
+        * core::f64::consts::PI
+        * sizing.tip_radius_max_mm
+        * sizing.tip_radius_max_mm;
 
     // Struts are indexed by the layer they are alive on. A strut occupies
     // [k_bottom, k_top] inclusive; at k_top it coexists with the model cell it
@@ -169,11 +269,22 @@ pub fn run(
         }
 
         carriers.copy_from_slice(&masks.carry);
+        landing_target.fill(u32::MAX);
         for &id in &alive_by_layer[layer] {
-            carriers[struts[id as usize].cell] = true;
+            let cell = struts[id as usize].cell;
+            carriers[cell] = true;
+            // What a growing arm lands ON if its column meets this one. Only
+            // arms whose extent is already fixed are landing targets; a growing
+            // arm can never be one, because an insertion candidate must not be
+            // a carrier and a growing arm's cell always is.
+            landing_target[cell] = id;
+        }
+        for &index in &growing {
+            carriers[struts[index].cell] = true;
         }
 
-        // --- spread the incoming raster into this layer's carriers ----------
+        // --- spread the incoming raster into this layer's carriers, and add
+        //     the carriers the AREA LAW asks for ---------------------------
         //
         // The load in `load_in` sits on layer k+1's cured cells. It travels
         // laterally THROUGH layer k+1's own material — `cover_above` — to a
@@ -185,59 +296,181 @@ pub fn run(
         // thickness, so neither implied the other. Same metric, same cover,
         // same one-lamina bound, and now the up-sweep's rootedness implies this
         // routability by construction (`reach::recompute_potential`).
-        load_out.iter_mut().for_each(|value| *value = 0.0);
-        let mut incoming = 0.0_f64;
-        let mut placed = 0.0_f64;
-        let mut lost = 0.0_f64;
-        let route = route_within_cover(
-            grid,
-            &cover_above,
-            &carriers,
-            &mut distance,
-            &mut nearest,
-            &mut distance_prev,
-        );
-        if !route.converged {
-            outcome.route_not_converged += 1;
-        }
-        let any_root = route.any_root;
-        for cell in 0..cells {
-            let load = load_in[cell];
-            if load <= 0.0 {
-                continue;
-            }
-            incoming += load;
-            if carriers[cell] {
-                load_out[cell] += load;
-                placed += load;
-                continue;
-            }
-            outcome.spread_search_hits += 1;
-            let target = if any_root { nearest[cell] } else { u32::MAX };
-            let reachable = target != u32::MAX
-                && f64::from(distance[cell]) <= sizing.lamina_reach_mm + grid.pitch_mm();
-            if reachable {
-                // Nearest first, share by area. One raster cell of carrier has
-                // exactly the source cell's own area, so the accumulation
-                // stops at the first carrier and its weight is `area / area`.
-                // The division is kept explicit because it is the
-                // renormalisation sabotage S3 removes.
-                let accumulated = area;
-                let weight = area / accumulated;
-                load_out[target as usize] += load * weight;
-                placed += load * weight;
-            } else {
-                lost += load;
-                outcome.uncarried_lowest_layer = Some(layer);
-                let gap = if target == u32::MAX {
-                    f64::INFINITY
+        //
+        // The rounds are the LOAD criterion joining the reach criterion. A
+        // round routes the load, sees how much of it lands on each arm, and —
+        // where one arm collects more than `ℓ_max = X_ALLOWED · π · r_max²` —
+        // puts the extra carriers the area law asks for into that arm's own
+        // routed footprint and routes again. Arriving at a fixed point is the
+        // normal case in one round, because the round inserts the whole
+        // shortfall at once rather than one arm at a time; the bound exists for
+        // the case where the new arms are themselves over the limit, and
+        // hitting it is REPORTED (`insertion_not_converged`), never a refusal.
+        let mut incoming;
+        let mut placed;
+        let mut lost;
+        let mut spread_hits;
+        let mut max_hits;
+        let mut injected_here;
+        let mut worst_gap;
+        let mut any_lost;
+        let mut route_converged;
+        let mut round = 0_usize;
+        loop {
+            load_out.iter_mut().for_each(|value| *value = 0.0);
+            incoming = 0.0;
+            placed = 0.0;
+            lost = 0.0;
+            spread_hits = 0_u64;
+            max_hits = 0_u64;
+            injected_here = 0.0_f64;
+            worst_gap = 0.0;
+            any_lost = false;
+            let route = route_within_cover(
+                grid,
+                &cover_above,
+                &carriers,
+                &mut distance,
+                &mut nearest,
+                &mut distance_prev,
+            );
+            route_converged = route.converged;
+            let any_root = route.any_root;
+            for cell in 0..cells {
+                let load = load_in[cell];
+                if load <= 0.0 {
+                    continue;
+                }
+                incoming += load;
+                if carriers[cell] {
+                    load_out[cell] += load;
+                    placed += load;
+                    continue;
+                }
+                spread_hits += 1;
+                let target = if any_root { nearest[cell] } else { u32::MAX };
+                let reachable = target != u32::MAX
+                    && f64::from(distance[cell]) <= sizing.lamina_reach_mm + grid.pitch_mm();
+                if reachable {
+                    // Nearest first, share by area. One raster cell of carrier
+                    // has exactly the source cell's own area, so the
+                    // accumulation stops at the first carrier and its weight is
+                    // `area / area`. The division is kept explicit because it
+                    // is the renormalisation sabotage S3 removes.
+                    let accumulated = area;
+                    let weight = area / accumulated;
+                    load_out[target as usize] += load * weight;
+                    placed += load * weight;
                 } else {
-                    f64::from(distance[cell])
-                };
-                if gap > outcome.uncarried_worst_gap_mm {
-                    outcome.uncarried_worst_gap_mm = gap;
+                    lost += load;
+                    any_lost = true;
+                    let gap = if target == u32::MAX {
+                        f64::INFINITY
+                    } else {
+                        f64::from(distance[cell])
+                    };
+                    if gap > worst_gap {
+                        worst_gap = gap;
+                    }
                 }
             }
+
+            // --- this layer's own peel event, and the maximum ---------------
+            //
+            // What the max ADDS over what arrived is this layer's newly
+            // injected load, and its running total is the conservation quantity
+            // every oracle grades against: everything injected must arrive
+            // somewhere, and nothing else ever enters the system. On a
+            // flat-bottomed model only the topmost layer of each column
+            // injects, so the total is that model's largest cross-section and
+            // this is §C2's identity verbatim. On a SLOPED underside each layer
+            // births a new crescent that injects too, so the total is the
+            // model's XY silhouette instead — larger than the peak layer, and
+            // correctly so, because those are different peel events carried by
+            // different arms.
+            //
+            // The injection is counted only where the column did NOT carry one
+            // layer up, which is the derivation's own words — "a column injects
+            // its own event exactly once, at the top of each contiguous cured
+            // run". For MODEL material the gate changes nothing and cannot: a
+            // column that carried above arrives with at least `own`, so
+            // `combined - load_out` is already zero there. For an ARM cell it
+            // changes everything, and that is the accounting defect it fixes:
+            // an arm ZEROES its own cell every layer when it reads its share,
+            // so without the gate the cell looks freshly born on the next layer
+            // down and injects `own` again, once per layer, for the whole
+            // length of the arm. `max` then discards all but one of those, so
+            // they never reach the plate — and `injected_load_mm2`, which the
+            // oracles grade the plate reaction and the scar against, was
+            // inflated by every one of them. On `oracle_ramp` the inflation was
+            // 708.99 mm2 against a 20-degree-tilted Round 25's XY silhouette of
+            // about 491 mm2, and it grew with the arm count, which is exactly
+            // the wrong direction for a conservation total.
+            let own = area * sizing.alpha;
+            for cell in 0..cells {
+                if carriers[cell] {
+                    let combined = load_out[cell].max(own);
+                    if !carriers_above[cell] {
+                        injected_here += combined - load_out[cell];
+                    }
+                    load_out[cell] = combined;
+                    max_hits += 1;
+                } else {
+                    load_out[cell] = 0.0;
+                }
+            }
+
+            if !insertion.enabled {
+                break;
+            }
+            // Counted HERE, after the enable gate, so it is a witness that the
+            // area law was consulted on this layer and not merely that the
+            // down-sweep looped.
+            outcome.insertion_rounds += 1;
+            insert.hosts.clear();
+            for &id in &alive_by_layer[layer] {
+                insert.hosts.push(struts[id as usize].cell);
+            }
+            for &index in &growing {
+                insert.hosts.push(struts[index].cell);
+            }
+            if !insert.hosts.iter().any(|&cell| load_out[cell] > l_max) {
+                break;
+            }
+            if round >= insertion.max_rounds {
+                outcome.insertion_not_converged += 1;
+                break;
+            }
+            let added = insert_for_load(
+                grid,
+                layer,
+                &masks.cover,
+                &cover_above,
+                &mut carriers,
+                &load_in,
+                &load_out,
+                &nearest,
+                &distance,
+                l_max,
+                area,
+                insertion.max_struts,
+                struts,
+                &mut growing,
+                &mut pending,
+                &mut insert,
+            );
+            if added == 0 {
+                // The area law wants more section here and the geometry offers
+                // nowhere to put it. Emit and warn: the arms that remain over
+                // the limit are named one by one in `overloaded`.
+                outcome.insertion_not_converged += 1;
+                break;
+            }
+            outcome.arms_inserted_by_load += added;
+            round += 1;
+        }
+        if !route_converged {
+            outcome.route_not_converged += 1;
         }
         let residual = (placed + lost - incoming).abs();
         let tolerance = 1.0e-9 * incoming.max(1.0);
@@ -248,38 +481,69 @@ pub fn run(
         );
         outcome.conservation_residual = outcome.conservation_residual.max(residual);
         outcome.uncarried_load_mm2 += lost;
-
-        // --- this layer's own peel event, and the maximum -------------------
-        //
-        // What the max ADDS over what arrived is this layer's newly injected
-        // load, and its running total is the conservation quantity every oracle
-        // grades against: everything injected must arrive somewhere, and
-        // nothing else ever enters the system. On a flat-bottomed model only
-        // the topmost layer of each column injects, so the total is that
-        // model's largest cross-section and this is §C2's identity verbatim. On
-        // a SLOPED underside each layer births a new crescent that injects too,
-        // so the total is the model's XY silhouette instead — larger than the
-        // peak layer, and correctly so, because those are different peel events
-        // carried by different arms.
-        let own = area * sizing.alpha;
-        for cell in 0..cells {
-            if carriers[cell] {
-                let combined = load_out[cell].max(own);
-                outcome.injected_load_mm2 += combined - load_out[cell];
-                load_out[cell] = combined;
-                outcome.max_combine_hits += 1;
-            } else {
-                load_out[cell] = 0.0;
+        outcome.spread_search_hits += spread_hits;
+        outcome.max_combine_hits += max_hits;
+        outcome.injected_load_mm2 += injected_here;
+        if any_lost {
+            outcome.uncarried_lowest_layer = Some(layer);
+            if worst_gap > outcome.uncarried_worst_gap_mm {
+                outcome.uncarried_worst_gap_mm = worst_gap;
             }
         }
 
         // --- struts are columns; terminations first so a parent sees its
         //     children's load before it reads its own share -------------------
+        //
+        // A growing arm's ledger is written top-down while it grows, so its
+        // slot counts DOWN from the seat and is reversed into the
+        // `k_bottom`-upward layout every other reader expects the moment it
+        // lands.
+        layer_arms.clear();
+        for &index in growing.iter().rev() {
+            let strut = &struts[index];
+            let cell = strut.cell;
+            let slot = strut.k_top - 1 - layer;
+            let (terminating, landing) = if masks.carry[cell] {
+                (true, Landing::Model { layer })
+            } else if landing_target[cell] != u32::MAX {
+                (
+                    true,
+                    Landing::Strut {
+                        id: landing_target[cell],
+                        layer,
+                    },
+                )
+            } else if layer == 0 {
+                (true, Landing::Plate)
+            } else {
+                (false, Landing::Plate)
+            };
+            layer_arms.push(LayerArm {
+                index,
+                slot,
+                previous_slot: slot.checked_sub(1),
+                terminating,
+                landing,
+                is_growing: true,
+            });
+        }
+        for &id in &alive_by_layer[layer] {
+            let index = id as usize;
+            let strut = &struts[index];
+            layer_arms.push(LayerArm {
+                index,
+                slot: layer - strut.k_bottom,
+                previous_slot: Some(layer - strut.k_bottom + 1),
+                terminating: strut.k_bottom == layer,
+                landing: strut.landing,
+                is_growing: false,
+            });
+        }
         for pass in 0..2 {
-            for &id in &alive_by_layer[layer] {
-                let index = id as usize;
-                let terminating = struts[index].k_bottom == layer;
-                if (pass == 0) != terminating {
+            for arm_order in 0..layer_arms.len() {
+                let arm = layer_arms[arm_order];
+                let index = arm.index;
+                if (pass == 0) != arm.terminating {
                     continue;
                 }
                 let cell = struts[index].cell;
@@ -287,12 +551,15 @@ pub fn run(
                 pending[index] = 0.0;
                 load_out[cell] = 0.0;
                 outcome.strut_share_reads += 1;
-                let slot = layer - struts[index].k_bottom;
-                let previous = if slot + 1 < struts[index].carried_mm2.len() {
-                    struts[index].carried_mm2[slot + 1]
-                } else {
-                    0.0
-                };
+                let slot = arm.slot;
+                if struts[index].carried_mm2.len() <= slot {
+                    struts[index].carried_mm2.resize(slot + 1, 0.0);
+                    struts[index].radius_mm.resize(slot + 1, 0.0);
+                }
+                let previous = arm
+                    .previous_slot
+                    .and_then(|previous| struts[index].carried_mm2.get(previous).copied())
+                    .unwrap_or(0.0);
                 // MAX over events, not sum -- the same rule the model raster
                 // obeys twenty lines up. `previous` is this arm's design load
                 // from every event ABOVE this layer; `share` is the load that
@@ -332,8 +599,8 @@ pub fn run(
                                 * sizing.tip_radius_max_mm),
                     });
                 }
-                if terminating {
-                    match struts[index].landing {
+                if arm.terminating {
+                    match arm.landing {
                         Landing::Plate => outcome.plate_reaction_mm2 += carried,
                         Landing::Model { .. } => {
                             // Injected at the footprint BEFORE this layer
@@ -348,9 +615,23 @@ pub fn run(
                             outcome.landing_injections += 1;
                         }
                     }
+                    if arm.is_growing {
+                        // The descent found its landing. Fix the arm's extent
+                        // and flip its ledger into the `k_bottom`-upward
+                        // layout, which is the layout every other reader —
+                        // `tip_radius_mm`, `tip_load_mm2`, the adapter — has
+                        // always assumed.
+                        struts[index].k_bottom = layer;
+                        struts[index].landing = arm.landing;
+                        struts[index].carried_mm2.reverse();
+                        struts[index].radius_mm.reverse();
+                    }
                 }
             }
         }
+        // Growing arms that landed leave the growing set, in one retain rather
+        // than a per-arm removal.
+        growing.retain(|&index| struts[index].k_bottom == usize::MAX);
 
         // --- the model's own section is checked, never resized --------------
         if model_cells > 0 {
@@ -370,6 +651,7 @@ pub fn run(
         std::mem::swap(&mut load_in, &mut load_out);
         // This layer's cover is the next iteration's "above".
         cover_above.copy_from_slice(&masks.cover);
+        carriers_above.copy_from_slice(&carriers);
     }
 
     // Anything still in the raster at the bottom of the stack reached the
@@ -379,6 +661,234 @@ pub fn run(
         outcome.min_layer_area_mm2 = 0.0;
     }
     outcome
+}
+
+/// One arm's participation in ONE layer, resolved once and then read twice
+/// (terminations first, everything else second).
+#[derive(Clone, Copy, Debug)]
+struct LayerArm {
+    index: usize,
+    /// Index into the arm's own ledger. Counts UP from `k_bottom` for an arm
+    /// whose extent is already fixed, and DOWN from the seat for one that is
+    /// still growing; the ledger is reversed the moment it lands.
+    slot: usize,
+    previous_slot: Option<usize>,
+    terminating: bool,
+    landing: Landing,
+    is_growing: bool,
+}
+
+/// Per-layer scratch for the load-driven insertion, allocated once per run.
+struct InsertScratch {
+    /// Cells of the arms alive at this layer, in the order they are read.
+    hosts: Vec<usize>,
+    /// `host_slot[cell]` is the index into `hosts` of the arm sitting in that
+    /// cell, or `u32::MAX`. Lets the footprints of EVERY overloaded arm be
+    /// collected in ONE pass over the raster instead of one pass per arm.
+    host_slot: Vec<u32>,
+    buckets: Vec<Vec<usize>>,
+    accepted: Vec<usize>,
+}
+
+impl InsertScratch {
+    fn new(cells: usize) -> Self {
+        Self {
+            hosts: Vec::new(),
+            host_slot: vec![u32::MAX; cells],
+            buckets: Vec::new(),
+            accepted: Vec::new(),
+        }
+    }
+}
+
+/// Put in the carriers the AREA LAW asks for, where reach never had a reason to.
+///
+/// # The trigger is the law, not a threshold
+///
+/// An arm is relieved exactly when the load ROUTED to it at this layer exceeds
+/// `ℓ_max = X_ALLOWED · π · r_max²`, the largest peel one tip may legally
+/// carry. That is the registered area law read at the registered maximum
+/// radius and nothing else; there is no tuned number here to move.
+///
+/// Only the ROUTED part is relievable, and that is why it is the trigger rather
+/// than the arm's total carried load. An arm can also be over the limit because
+/// of what it inherited from higher layers (`previous`) or because a child arm
+/// landed on it (`pending`); neither of those is load this layer's geometry can
+/// redistribute, and inserting siblings for them would add arms that carry
+/// nothing. Inherited overload is relieved where it was born — at the highest
+/// layer where the arm's own routed share went over, which this pass reaches
+/// first because it walks DOWNWARD.
+///
+/// # How many, and where
+///
+/// `n = ceil(routed / ℓ_max)` carriers are wanted where there is now one, so
+/// `n − 1` go in. They are chosen from the arm's own routed footprint — the
+/// cells whose load the routing field currently sends to this arm — because a
+/// carrier anywhere else cannot take that load. The footprint is further
+/// restricted to cells that are a genuine down-face at this layer
+/// (`cover_above && !cover_here`), so the tip seats against cured material
+/// above it and stands in free space itself, which is what every arm the
+/// up-sweep places also does.
+///
+/// Spacing is a hex lattice, and its pitch is DERIVED rather than borrowed:
+/// `n` carriers spread over the footprint's own area `A` sit at the hex
+/// nearest-neighbour spacing `sqrt(2A / (√3 n))`, because a hex cell of
+/// spacing `s` has area `√3 s² / 2`. Equivalently it is the spacing at which
+/// one arm carries exactly `ℓ_max` at this footprint's measured load density,
+/// so it is the area law again in the plane rather than a second rule. Using
+/// the UP-sweep's reach spacing here would be wrong in the only direction that
+/// matters: reach spacing is fixed at `√3 ρ ≈ 3.4 mm` and every footprint cell
+/// is by construction within one lamina reach `ρ = 2.13 mm` of the arm, so a
+/// reach-spaced rule can never place a single sibling.
+///
+/// Candidates are ordered by routed load, then by distance from the arm being
+/// relieved (farthest first — the load that has travelled furthest is the load
+/// a new carrier most surely takes), then by cell index, so the choice is
+/// deterministic and does not depend on floating point beyond the two
+/// quantities it is actually about.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one layer's insertion genuinely reads the grid, its layer index, two cover masks, the \
+          carrier mask it updates, the load raster on both sides of the spread, the routing \
+          field's two outputs, the area law's limit, the cell area and the strut cap, and writes \
+          the strut list, the growing set and the pending ledger; a struct would move the \
+          argument list rather than shorten it"
+)]
+fn insert_for_load(
+    grid: &Grid,
+    layer: usize,
+    cover_here: &[bool],
+    cover_above: &[bool],
+    carriers: &mut [bool],
+    load_in: &[f64],
+    load_out: &[f64],
+    nearest: &[u32],
+    distance: &[f32],
+    l_max: f64,
+    cell_area_mm2: f64,
+    max_struts: usize,
+    struts: &mut Vec<SweepStrut>,
+    growing: &mut Vec<usize>,
+    pending: &mut Vec<f64>,
+    scratch: &mut InsertScratch,
+) -> u64 {
+    if l_max <= 0.0 {
+        return 0;
+    }
+    // One pass to index the hosts, one pass over the raster to bucket every
+    // overloaded arm's footprint at once. No per-arm scan of the grid.
+    scratch.buckets.clear();
+    scratch.buckets.resize(scratch.hosts.len(), Vec::new());
+    let mut any_overloaded = false;
+    for (slot, &cell) in scratch.hosts.iter().enumerate() {
+        if load_out[cell] > l_max {
+            scratch.host_slot[cell] = u32::try_from(slot).unwrap_or(u32::MAX);
+            any_overloaded = true;
+        }
+    }
+    if !any_overloaded {
+        return 0;
+    }
+    for cell in 0..grid.cells() {
+        if load_in[cell] <= 0.0 || carriers[cell] || !cover_above[cell] || cover_here[cell] {
+            continue;
+        }
+        let target = nearest[cell];
+        if target == u32::MAX {
+            continue;
+        }
+        let slot = scratch.host_slot[target as usize];
+        if slot == u32::MAX {
+            continue;
+        }
+        scratch.buckets[slot as usize].push(cell);
+    }
+
+    let mut inserted = 0_u64;
+    for slot in 0..scratch.hosts.len() {
+        let host_cell = scratch.hosts[slot];
+        if scratch.host_slot[host_cell] == u32::MAX {
+            continue;
+        }
+        scratch.host_slot[host_cell] = u32::MAX;
+        let routed = load_out[host_cell];
+        let footprint = core::mem::take(&mut scratch.buckets[slot]);
+        if footprint.is_empty() {
+            continue;
+        }
+        let wanted = (routed / l_max).ceil().max(1.0);
+        #[expect(
+            clippy::cast_sign_loss,
+            reason = "a ratio of two positive loads, ceil-ed and floored at 1"
+        )]
+        let wanted_carriers = wanted as usize;
+        let extra = wanted_carriers.saturating_sub(1).min(footprint.len());
+        if extra == 0 {
+            continue;
+        }
+        let footprint_area = footprint.len() as f64 * cell_area_mm2;
+        let separation_mm = (2.0 * footprint_area
+            / (3.0_f64.sqrt() * wanted))
+            .sqrt()
+            .max(grid.pitch_mm());
+        let mut order = footprint;
+        order.sort_unstable_by(|&a, &b| {
+            load_in[b]
+                .total_cmp(&load_in[a])
+                .then_with(|| distance[b].total_cmp(&distance[a]))
+                .then_with(|| a.cmp(&b))
+        });
+        scratch.accepted.clear();
+        for &cell in &order {
+            if scratch.accepted.len() >= extra || struts.len() >= max_struts {
+                break;
+            }
+            if crate::chamfer_distance_mm(grid, cell, host_cell) < separation_mm {
+                continue;
+            }
+            if scratch
+                .accepted
+                .iter()
+                .any(|&taken| crate::chamfer_distance_mm(grid, cell, taken) < separation_mm)
+            {
+                continue;
+            }
+            scratch.accepted.push(cell);
+        }
+        for &cell in &scratch.accepted {
+            let id = u32::try_from(struts.len()).unwrap_or(u32::MAX);
+            struts.push(SweepStrut {
+                id,
+                cell,
+                center_mm: [
+                    grid.center_x_mm(grid.col_of(cell)),
+                    grid.center_y_mm(grid.row_of(cell)),
+                ],
+                k_top: layer + 1,
+                // Still growing: the descent decides where this stops, the
+                // same way `up_sweep::descend` does, and until it does there is
+                // no honest value to put here.
+                k_bottom: usize::MAX,
+                landing: Landing::Plate,
+                interior: false,
+                radius_mm: Vec::new(),
+                carried_mm2: Vec::new(),
+                // Placed by the area law, not by reach: it roots no demand
+                // cell, and the removal pass must not be told otherwise.
+                covered_demand: Vec::new(),
+                inserted_by_load: true,
+            });
+            growing.push(struts.len() - 1);
+            pending.push(0.0);
+            carriers[cell] = true;
+            inserted += 1;
+        }
+    }
+    // Leave the index clean for the next round.
+    for &cell in &scratch.hosts {
+        scratch.host_slot[cell] = u32::MAX;
+    }
+    inserted
 }
 
 /// Which layers an arm is a CARRIER on.

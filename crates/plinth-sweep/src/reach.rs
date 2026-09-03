@@ -390,39 +390,56 @@ pub fn recompute_potential(
 /// future green-strength coupon that measures the thickness law can be spent
 /// deliberately rather than inherited by accident.
 ///
-/// # And why it is nonetheless SPENT here — measured, not preferred
+/// # The owner's ruling, 2026-09-03: one lamina, and arms placed by LOAD
 ///
-/// The one-lamina form above was built and measured, and it fails §C4's own
-/// rim-ramp check by a wide margin: Round 50's rim, drafted 16° off vertical,
-/// takes **23 arms of its own** (`oracle_disc::the_rim_ramp_needs_no_supports_
-/// of_its_own`, measured red). The reason is not the 1.0 mm the rim creeps —
-/// that is only `0.47` — but that the bottom layer's covering already leaves
-/// cells sitting at `U` just under 1, so any further run at all unroots them.
+/// The fix lane put this to the owner as a choice — license the thickness law
+/// with a coupon at a second thickness, or place arms by LOAD as well as by
+/// reach — and the ruling was the second. `τ` is spent NOWHERE from here on.
+/// Two things follow, and both were needed before the one-lamina form could
+/// stand:
 ///
-/// So all three forms of this step were measured and every one of them is wrong
-/// somewhere:
+/// * **The two sweeps now use one predicate.** The down-sweep bounds a load's
+///   lateral travel at one lamina (`down_sweep::route_within_cover`); while
+///   this function priced a step at `1/(κ·τ)` the up-sweep was strictly more
+///   permissive in the plane, so `residual_demand == 0` never implied
+///   `uncarried_load == 0` and the engine could print both about one field.
+///   Same metric, same domain, same bound, one predicate.
+/// * **Being over-reached is no longer the same thing as being under-carried.**
+///   The one-lamina form places more arms; the down-sweep's load-driven
+///   insertion (`down_sweep::insert_for_load`) is what makes the arms it places
+///   carry what is routed through them, instead of clamping at `r_max` and
+///   warning.
 ///
-/// | form | ramp on a slope | drafted rim | pose choice |
-/// |---|---|---|---|
-/// | `τ` spent (§5.2, shipped) | 10 arms under a tilted 100 mm disc, all warned overloaded | 0 arms, correct | thickness decides it |
-/// | `τ` reported only | arms all along the slope | **23 arms, wrong** | demand decides it |
-/// | rootedness re-seeded per layer | 1 arm, and S2 in all but name | 0 arms | — |
+/// # What the one-lamina form does to §C4's rim ramp, arithmetically
 ///
-/// **Shipped: `τ` spent, the design of record's own §5.2 form**, because it is
-/// the only one of the three that keeps every oracle in the design's acceptance
-/// set green. What is NOT true is §C4's claim that the scaling "never sets a
-/// number in this document's acceptance set": it sets the build pose of two of
-/// the three discs, and it does so by extrapolating a `κ` measured on 50 µm
-/// laminae to a 3.5 mm section — a factor of 70. That is an owner ruling
-/// (license the thickness law, or place arms by LOAD as well as by reach), and
-/// it is reported as one rather than settled by whichever variant a lane
-/// happened to pick.
-fn weight(state: &ReachState, kappa: f64, cell: usize) -> f32 {
-    let tau = state.tau_used_mm[cell].max(state.lamina_mm);
-    if tau <= 0.0 {
+/// Round 50's rim is drafted `θ = atan(1.0 / 3.487) = 16.0°` off vertical: it
+/// rises 3.487 mm over 70 layers of `h = 0.05 mm` while moving 1.000 mm
+/// outward. Per layer it steps `h·tanθ = 0.05 × 0.2868 = 0.014340 mm`, and over
+/// its whole height that accumulates to `70 × 0.014340 = 1.0038 mm` against
+/// `κ·h = 42.6006450 × 0.05 = 2.1300323 mm` of one lamina's reach — a cost of
+/// **0.471, not 1.64**. §C4's "a single-lamina-only variant would charge
+/// 70/42.6 = 1.64" charges the rim one FULL lamina step per layer, which is the
+/// cost of 70 layers each creeping 0.05 mm, not 0.0143 mm. The rim does not
+/// unroot on its own account under either form, and the arithmetic says so
+/// before any code runs.
+///
+/// What the fix lane measured as "23 rim arms" is therefore not the rim's own
+/// run: it is the bottom layer's covering being spent to its last millimetre
+/// first. A hex covering pitched at exactly `√3·ρ` leaves its worst interstice
+/// at `U = 1.000` by construction, so a cell that starts the climb already at
+/// the limit unroots on the first lateral step, wherever that step is. That is
+/// a fact about a zero-margin covering, not about the rim.
+fn weight(state: &ReachState, kappa: f64, _cell: usize) -> f32 {
+    // One lamina, everywhere. `state.tau_used_mm` is still advanced and still
+    // published (`tau_vertical_over_tau_used_max`,
+    // `max_tau_at_binding_reach_mm`), so a future green-strength coupon at a
+    // second thickness can license the scaling deliberately rather than have it
+    // inherited by accident. Sabotage S1 is what proves this is read.
+    let lamina = state.lamina_mm;
+    if lamina <= 0.0 {
         return f32::INFINITY;
     }
-    (1.0 / (kappa as f32 * tau)).max(0.0)
+    (1.0 / (kappa as f32 * lamina)).max(0.0)
 }
 
 fn chamfer_forward(grid: &Grid, cover: &[bool], kappa: f64, state: &mut ReachState) {
@@ -795,26 +812,36 @@ mod tests {
             0.0,
             "a 2.8 mm step is beyond the measured reach {reach_mm:.4} mm and must unroot at once"
         );
-        // And the counterpart, stated so it is a RULING and not an accident: a
-        // 4 mm-THICK band creeping at the same rate NEVER unroots, because
-        // `1/(κ·τ)` prices travel through 80 laminae of cured section at 1/80th
-        // of a lamina's cost. That is the design of record's §5.2 form and §C4's
-        // decision, and it is what keeps a drafted rim from asking for arms.
+        // And the counterpart, stated so it is a RULING and not an accident.
         //
-        // It is also the ONE place in this crate where a decision is taken
-        // outside the regime `κ` was measured in — single 50 µm laminae, here
-        // extrapolated to a 3.5 mm section, a factor of 70 — and it decides more
-        // than §C4 expected: it is why a tilted disc is reached from ten arms at
-        // its low edge, and why the orientation objective, scoring poses by
-        // measured demand, prefers the tilt. Anyone who narrows the
-        // extrapolation will see this assertion go red, and should know they are
-        // changing a ruling rather than a detail.
-        let thick = run_until_unrooted((4.0 / grid.pitch_mm()).round() as usize, grid.pitch_mm());
+        // **Owner's ruling, 2026-09-03: thickness buys nothing here.** This
+        // assertion used to require a 4 mm-THICK band to run FOREVER, because
+        // `1/(κ·τ)` prices travel through 80 laminae of cured section at 1/80th
+        // of a lamina's cost — the design of record's §5.2 form and §C4's
+        // decision. That was the one place in this crate where a decision was
+        // taken outside the regime `κ` was measured in (single 50 µm laminae,
+        // extrapolated to a 3.5 mm section, a factor of 70), and it decided
+        // build poses. The ruling clamps every lateral step to one lamina and
+        // pays for the arms that costs with load-driven insertion in the
+        // down-sweep instead.
+        //
+        // So a thick band now runs exactly as far as a thin one — and the
+        // expected distance is a HAND-DERIVED number, not the thin case's:
+        // the band's leading cell starts `(cells/2 − 1)·p = 1.9500 mm` from the
+        // seed at its centre, which is `0.9155` of the reach already spent, so
+        // only `ρ − 1.95 = 0.1800 mm` of run is left, and at one cell a layer it
+        // unroots on the fourth step, after `3 × 0.05 = 0.1500 mm` travelled.
+        // Anyone who restores the thickness bonus will see this go red, and
+        // should know they are changing a ruling rather than a detail.
+        let thick_cells = (4.0 / grid.pitch_mm()).round() as usize;
+        let thick = run_until_unrooted(thick_cells, grid.pitch_mm());
+        let offset_mm = (thick_cells / 2 - 1) as f64 * grid.pitch_mm();
+        let predicted_mm = ((reach_mm - offset_mm) / grid.pitch_mm()).floor() * grid.pitch_mm();
         assert!(
-            thick.is_infinite(),
-            "a 4 mm-thick ramp ran only {thick:.4} mm before unrooting; §5.2 prices a step at \
-             1/(kappa*tau), so 80 laminae of cured section span 80x what one does and this band \
-             must never unroot"
+            thick.is_finite() && (thick - predicted_mm).abs() <= grid.pitch_mm(),
+            "a 4 mm-thick band ran {thick:.4} mm before unrooting against the {predicted_mm:.4} \
+             mm one lamina's reach {reach_mm:.4} mm leaves after the band's own {offset_mm:.4} \
+             mm half-width; thickness must buy nothing"
         );
     }
 }

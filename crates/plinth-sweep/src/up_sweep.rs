@@ -276,6 +276,7 @@ pub fn place_layer(
             radius_mm: Vec::new(),
             carried_mm2: Vec::new(),
             covered_demand: covered,
+            inserted_by_load: false,
         });
         history.top_strut[cell] = u32::try_from(layer + 1).unwrap_or(u32::MAX);
         history.top_strut_id[cell] = id;

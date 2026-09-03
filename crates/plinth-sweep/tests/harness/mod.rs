@@ -111,15 +111,22 @@ pub fn x_allowed() -> f64 {
 
 /// Run the sweep on one mesh at an explicit working pitch, with lift applied.
 pub fn sweep(mesh: &Mesh, pitch_mm: f64) -> SweepPlan {
+    let policy = SweepPolicy::from_registry()
+        .expect("the registry supplies every number the sweep reads")
+        .with_working_pitch_mm(pitch_mm);
+    sweep_with(mesh, pitch_mm, &policy)
+}
+
+/// The same run, with a policy the caller has already built. One layer plan,
+/// one lift, one place — so a comparison of two policies cannot accidentally
+/// compare two layer plans as well.
+pub fn sweep_with(mesh: &Mesh, _pitch_mm: f64, policy: &SweepPolicy) -> SweepPlan {
     let height = layer_height_mm();
     let (min_z, max_z) = z_span(mesh);
     let plate_z = min_z - LIFT_MM;
     let layers = (((max_z - plate_z) / height).ceil() as usize).max(1);
     let plan = LayerPlan::new(plate_z, vec![height; layers]).expect("a uniform layer plan");
-    let policy = SweepPolicy::from_registry()
-        .expect("the registry supplies every number the sweep reads")
-        .with_working_pitch_mm(pitch_mm);
-    run_sweep(mesh, &plan, &policy).expect("the sweep emits and warns; it never refuses")
+    run_sweep(mesh, &plan, policy).expect("the sweep emits and warns; it never refuses")
 }
 
 pub fn z_span(mesh: &Mesh) -> (f64, f64) {

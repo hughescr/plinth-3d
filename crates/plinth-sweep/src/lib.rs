@@ -59,7 +59,7 @@ use thiserror::Error;
 
 pub use adapter::{arms_of, to_primitives, SweepEmission};
 pub use limits::SweepLimits;
-pub use orient_demand::CoarseSweepDemand;
+pub use orient_demand::{burden_cm2, SweepDemand};
 pub use peel::{PeelFieldMode, PeelFieldStats};
 pub use report::{PathHits, SweepRunReport};
 
@@ -111,6 +111,12 @@ pub struct SweepStrut {
     /// Demand cells this arm newly rooted when it went in. The removal pass
     /// asks whether a survivor still covers each of them.
     pub covered_demand: Vec<usize>,
+    /// Placed by the down-sweep because the registered area law asked for the
+    /// section, not by the up-sweep because reach asked for the cover. Such an
+    /// arm roots no demand cell — `covered_demand` is empty by construction —
+    /// so the removal pass's coverage test would always let it go; what keeps
+    /// it is its own load, which is the criterion that put it there.
+    pub inserted_by_load: bool,
 }
 
 impl SweepStrut {
@@ -215,6 +221,12 @@ pub struct SweepPolicy {
     pub working_pitch_mm: f64,
     pub strut_removal_passes: u32,
     pub peel_field_mode: PeelFieldMode,
+    /// Whether the down-sweep may add arms the AREA LAW asks for, on top of
+    /// the ones reach asked for. **On in production and in every oracle.** The
+    /// knob exists so a test can measure what the insertion changes rather
+    /// than assert that it does something; nothing in the pipeline turns it
+    /// off.
+    pub insert_by_load: bool,
     pub limits: SweepLimits,
 }
 
@@ -252,6 +264,7 @@ impl SweepPolicy {
             )
             .unwrap_or(u32::MAX),
             peel_field_mode: PeelFieldMode::from_registry(placeholders),
+            insert_by_load: true,
             limits: SweepLimits {
                 cell_layer_budget: placeholders.sweep_cell_layer_budget().diagnostic().get(),
                 ..SweepLimits::production()
@@ -265,6 +278,15 @@ impl SweepPolicy {
     #[must_use]
     pub const fn with_working_pitch_mm(mut self, pitch_mm: f64) -> Self {
         self.working_pitch_mm = pitch_mm;
+        self
+    }
+
+    /// Place by reach ALONE, the way the core did before the owner's 2026-09-03
+    /// ruling. For measurement only: it is what the load-driven insertion is
+    /// graded against.
+    #[must_use]
+    pub const fn without_load_insertion(mut self) -> Self {
+        self.insert_by_load = false;
         self
     }
 }
@@ -379,7 +401,23 @@ pub fn run_sweep(
     };
     let minimum_load =
         policy.x_allowed * core::f64::consts::PI * policy.tip_radius_min_mm.powi(2);
-    let mut outcome = down_sweep::run(&grid, &slices, &mut struts, sizing);
+    // **One balanced pass, both directions.** The same loop adds arms the area
+    // law asks for and drops arms it cannot justify, so a strut is neither
+    // starved nor duplicated. The two criteria cannot fight over one arm: the
+    // insertion trigger is a routed load above
+    // `ℓ_max = X_ALLOWED·π·r_max² = 37.6991 mm²` and the removal trigger is a
+    // tip load below `ℓ_min = X_ALLOWED·π·r_min² = 0.0942 mm²`, which is 400x
+    // smaller, so no arm can satisfy both and the loop cannot oscillate.
+    // Re-entering the down-sweep with the inserted arms already in place is
+    // also what stops it duplicating them: an arm that is now relieved no
+    // longer trips the trigger, so the second call inserts nothing where the
+    // first one already did.
+    let insertion = if policy.insert_by_load {
+        down_sweep::InsertionPolicy::new(policy.limits.max_struts)
+    } else {
+        down_sweep::InsertionPolicy::disabled()
+    };
+    let mut outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion);
     let mut removals = 0_u64;
     for _ in 0..policy.strut_removal_passes {
         let removed = remove_under_loaded(&grid, &mut struts, minimum_load, lamina_reach_mm);
@@ -387,7 +425,15 @@ pub fn run_sweep(
             break;
         }
         removals += removed as u64;
-        outcome = down_sweep::run(&grid, &slices, &mut struts, sizing);
+        outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion);
+    }
+    // The interior test again, now that the down-sweep has added arms of its
+    // own. Same test, same column history; running it twice is cheaper than
+    // giving the down-sweep a reason to know about the up-sweep's history.
+    for strut in &mut struts {
+        strut.interior = matches!(strut.landing, Landing::Model { .. })
+            && usize::try_from(history.column_max_model[strut.cell]).unwrap_or(0)
+                > strut.k_top + 1;
     }
 
     let report = build_report(
@@ -492,7 +538,7 @@ fn remove_under_loaded(
 /// than the chamfer distance — would delete an arm whose demand cells are only
 /// Euclidean-covered, and that is precisely how a pruning constant creates a
 /// bare island.
-fn chamfer_distance_mm(grid: &Grid, a: usize, b: usize) -> f64 {
+pub(crate) fn chamfer_distance_mm(grid: &Grid, a: usize, b: usize) -> f64 {
     let rows = grid.row_of(a).abs_diff(grid.row_of(b));
     let cols = grid.col_of(a).abs_diff(grid.col_of(b));
     let (long, short) = if rows > cols { (rows, cols) } else { (cols, rows) };
@@ -658,6 +704,10 @@ fn build_report(
         uncarried_lowest_layer: outcome.uncarried_lowest_layer,
         uncarried_worst_gap_mm: outcome.uncarried_worst_gap_mm,
         sweeps_disagree: residual_demand_cells == 0 && outcome.uncarried_load_mm2 > 0.0,
+        route_not_converged: outcome.route_not_converged,
+        arms_inserted_by_load: struts.iter().filter(|strut| strut.inserted_by_load).count(),
+        insertion_not_converged: outcome.insertion_not_converged,
+        insertion_rounds: outcome.insertion_rounds,
         unrooted_landings,
         struts_at_minimum_radius: tip_radius.count_at_min,
         overloaded_struts: outcome.overloaded.clone(),
