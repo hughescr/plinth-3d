@@ -1201,6 +1201,7 @@ dependencies = [
  "plinth-mesh",
  "plinth-orient",
  "plinth-support",
+ "rayon",
  "thiserror 1.0.69",
 ]
 

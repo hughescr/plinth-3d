@@ -26,4 +26,10 @@ plinth-orient = { path = "../plinth-orient" }
 # is reached from here, and `dyadic::refine_depth`, the per-triangle refinement
 # that is root cause RC3, must never be.
 plinth-support = { path = "../plinth-support" }
+# Item 5 of the 2026-09-03 slice-sweep review follow-ups: the finalist
+# production sweeps in `orient_demand.rs` are index-parallel and share no
+# mutable state, so they run through the workspace's existing rayon
+# dependency (already used by plinth-support, plinth-orient and plinth-layers)
+# rather than serially.
+rayon = { workspace = true }
 thiserror = { workspace = true }

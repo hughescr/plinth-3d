@@ -41,7 +41,8 @@
 //!   the overhang table on its side.
 //! * **`total_scar_mm2` cannot rank poses, by the area law itself.**
 //!   `SweepPlan::total_scar_mm2`'s own invariant is
-//!   `Σ π r² = peak_layer_area / X_ALLOWED`, *independent of how many arms
+//!   `Σ π r² = injected_load / X_ALLOWED` (equal to `peak_layer_area /
+//!   X_ALLOWED` only on flat-bottomed models), *independent of how many arms
 //!   share the load*: the total tip contact area is set by the load that has
 //!   to be carried, not by the pose that carries it. The table shows exactly
 //!   that — Round 25's four poses span 40.518 to 41.232 mm², a 1.8 % band,
@@ -122,6 +123,7 @@ use plinth_core::{m0_constants, LayerPlan};
 use plinth_mesh::Mesh;
 use plinth_orient::demand::{DemandFidelity, MeasuredSupportDemand, SupportDemandMeasurer};
 use plinth_orient::UpDirection;
+use rayon::prelude::*;
 
 use crate::{run_sweep, SweepPolicy};
 
@@ -246,8 +248,18 @@ impl SupportDemandMeasurer for SweepDemand {
             // keeps its proxy for all of them rather than the search refusing.
             Err(error) => return candidates.iter().map(|_| Err(error.clone())).collect(),
         };
+        // The registry was already read ONCE above into `settings`; every
+        // candidate in the batch shares that one read rather than a per-pose
+        // registry call. Each pose's own sweep (`measure_one`) allocates its
+        // own scratch and touches no state shared with any other pose, so the
+        // batch is embarrassingly parallel: `into_par_iter` is index-parallel
+        // and `collect` on a slice-backed rayon iterator preserves the
+        // original candidate order, so the result vector lines up with
+        // `candidates` exactly as the serial `.map` did (proved bit-identical
+        // to the serial path by
+        // `plinth-sweep/tests/orient_demand_parallel.rs`).
         let measured: Vec<Result<MeasuredSupportDemand, String>> = candidates
-            .iter()
+            .par_iter()
             .map(|candidate| Self::measure_one(mesh, *candidate, fidelity, &settings))
             .collect();
         // Disclosure, not a record: the cost of this stage is printed where a

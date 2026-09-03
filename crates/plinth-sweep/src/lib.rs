@@ -114,8 +114,10 @@ pub struct SweepStrut {
     /// Placed by the down-sweep because the registered area law asked for the
     /// section, not by the up-sweep because reach asked for the cover. Such an
     /// arm roots no demand cell — `covered_demand` is empty by construction —
-    /// so the removal pass's coverage test would always let it go; what keeps
-    /// it is its own load, which is the criterion that put it there.
+    /// so the removal pass's coverage test would be vacuously true for it and
+    /// give it no protection at all; `remove_under_loaded` excludes any
+    /// `inserted_by_load` arm from removal outright rather than let a
+    /// vacuous coverage test decide it (see that function's doc for why).
     pub inserted_by_load: bool,
 }
 
@@ -154,8 +156,10 @@ impl SweepPlan {
     /// `Σ π r²` over the tips — the scar the model wears.
     ///
     /// The invariant this is graded against is
-    /// `Σ π r² = peak_layer_area / X_ALLOWED`, independent of how many arms
-    /// share the load (`docs/physics.md`:100-118).
+    /// `Σ π r² = injected_load / X_ALLOWED` (equal to `peak_layer_area /
+    /// X_ALLOWED` only on flat-bottomed models, where every arm is fed by one
+    /// birth layer; `docs/physics.md`:100-118), independent of how many arms
+    /// share the load.
     #[must_use]
     pub fn total_scar_mm2(&self) -> f64 {
         self.struts
@@ -403,15 +407,25 @@ pub fn run_sweep(
         policy.x_allowed * core::f64::consts::PI * policy.tip_radius_min_mm.powi(2);
     // **One balanced pass, both directions.** The same loop adds arms the area
     // law asks for and drops arms it cannot justify, so a strut is neither
-    // starved nor duplicated. The two criteria cannot fight over one arm: the
-    // insertion trigger is a routed load above
+    // starved nor duplicated. The two criteria cannot fight over one arm AT
+    // THE SAME MEASUREMENT: the insertion trigger is a routed load above
     // `ℓ_max = X_ALLOWED·π·r_max² = 37.6991 mm²` and the removal trigger is a
     // tip load below `ℓ_min = X_ALLOWED·π·r_min² = 0.0942 mm²`, which is 400x
-    // smaller, so no arm can satisfy both and the loop cannot oscillate.
-    // Re-entering the down-sweep with the inserted arms already in place is
-    // also what stops it duplicating them: an arm that is now relieved no
-    // longer trips the trigger, so the second call inserts nothing where the
-    // first one already did.
+    // smaller, so no arm can read both at once. That 400x gap does NOT by
+    // itself prove the LOOP cannot oscillate across passes: each removal pass
+    // re-runs the down-sweep with insertion still enabled, on a different
+    // strut set, so an arm dropped this pass because ITS OWN load read low
+    // could in principle come back next pass if the load it had been
+    // carrying lands on a neighbour and pushes that one over `ℓ_max`. What
+    // actually rules this out is `remove_under_loaded` refusing to remove any
+    // `inserted_by_load` arm at all, regardless of its current load (see that
+    // function's doc) — not the trigger gap. Re-entering the down-sweep with
+    // the surviving inserted arms already in place is what stops it
+    // DUPLICATING them: an arm that is now relieved no longer trips the
+    // trigger, so the second call inserts nothing where the first one
+    // already did. The loop is still bounded by `SWEEP_STRUT_REMOVAL_PASSES`
+    // and `InsertionPolicy::max_rounds`, and hitting either bound is reported
+    // (`insertion_rounds_exhausted`), not hidden.
     let insertion = if policy.insert_by_load {
         down_sweep::InsertionPolicy::new(policy.limits.max_struts)
     } else {
@@ -465,10 +479,27 @@ pub fn run_sweep(
 /// hand their load to their neighbours.
 ///
 /// **This can never create a bare island**, which is what makes
-/// `SWEEP_STRUT_REMOVAL_PASSES` unable to decide an outcome: an arm is deleted
-/// only if EVERY demand cell it rooted is still within one lamina's reach of a
-/// survivor at the same layer. A hairline arm is better than a bare island, so
-/// otherwise it is kept and reported with its load.
+/// `SWEEP_STRUT_REMOVAL_PASSES` unable to decide an outcome: a REACH-placed arm
+/// is deleted only if EVERY demand cell it rooted is still within one lamina's
+/// reach of a survivor at the same layer. A hairline arm is better than a bare
+/// island, so otherwise it is kept and reported with its load.
+///
+/// A LOAD-placed arm (`inserted_by_load`) is never a candidate here, full
+/// stop — it is excluded below rather than let the coverage test decide it.
+/// It roots no demand cell, so `covered_demand` is empty by construction and
+/// the coverage test above is vacuously true for it: nothing stops it being
+/// dropped the moment its OWN tip load reads low, with no check on whether the
+/// overload it exists to relieve is still there. That is a real gap, not a
+/// hypothetical one: the down-sweep is re-run with insertion still enabled
+/// after every removal pass (`sweep`'s loop, above), so a dropped load-arm can
+/// come straight back the next pass if the load it was carrying lands on
+/// another arm and pushes it over `ℓ_max` again — an insert/remove cycle
+/// bounded only by `SWEEP_STRUT_REMOVAL_PASSES`, not by the 400x gap between
+/// `ℓ_min` and `ℓ_max` (that gap only rules out one arm tripping both triggers
+/// in the SAME measurement; it says nothing across two different down-sweep
+/// calls with a different strut set in between). Excluding load-placed arms
+/// here removes the cycle rather than merely bounding it: the area law placed
+/// them for a reason a load-magnitude threshold cannot re-litigate.
 fn remove_under_loaded(
     grid: &Grid,
     struts: &mut Vec<SweepStrut>,
@@ -478,7 +509,7 @@ fn remove_under_loaded(
     let candidates: Vec<usize> = struts
         .iter()
         .enumerate()
-        .filter(|(_, strut)| strut.tip_load_mm2() < minimum_load_mm2)
+        .filter(|(_, strut)| !strut.inserted_by_load && strut.tip_load_mm2() < minimum_load_mm2)
         .map(|(index, _)| index)
         .collect();
     if candidates.is_empty() {
@@ -706,7 +737,8 @@ fn build_report(
         sweeps_disagree: residual_demand_cells == 0 && outcome.uncarried_load_mm2 > 0.0,
         route_not_converged: outcome.route_not_converged,
         arms_inserted_by_load: struts.iter().filter(|strut| strut.inserted_by_load).count(),
-        insertion_not_converged: outcome.insertion_not_converged,
+        insertion_rounds_exhausted: outcome.insertion_rounds_exhausted,
+        insertion_geometry_exhausted: outcome.insertion_geometry_exhausted,
         insertion_rounds: outcome.insertion_rounds,
         unrooted_landings,
         struts_at_minimum_radius: tip_radius.count_at_min,
@@ -810,4 +842,81 @@ fn digest(struts: &[SweepStrut]) -> String {
         }
     }
     format!("{accumulator:016x}")
+}
+
+#[cfg(test)]
+mod removal_tests {
+    use super::{plan_grid, remove_under_loaded, Landing, SweepStrut};
+
+    /// Owner follow-up (2026-09-03, item 4 of the slice-sweep review): a
+    /// LOAD-placed arm has empty `covered_demand` by construction, so the
+    /// coverage test `remove_under_loaded` runs for a REACH-placed arm is
+    /// vacuously true for it and gives it no protection at all. Before the
+    /// fix this arm would have been removed the moment its own tip load read
+    /// below `minimum_load_mm2`, with nothing checking whether the overload
+    /// it exists to relieve was still there — an insert/remove cycle across
+    /// removal passes, bounded only by `SWEEP_STRUT_REMOVAL_PASSES`. This
+    /// proves the fix: a load-inserted arm below the removal threshold
+    /// survives the pass regardless.
+    #[test]
+    fn an_inserted_arm_survives_the_removal_pass_even_when_its_own_load_reads_low() {
+        let (grid, _) = plan_grid(0.0, 0.0, 10.0, 10.0, 1, 1.0, 1.0, 1_000_000);
+        let minimum_load_mm2 = 1.0;
+        let mut struts = vec![SweepStrut {
+            id: 0,
+            cell: 0,
+            center_mm: [0.0, 0.0],
+            k_top: 5,
+            k_bottom: 0,
+            landing: Landing::Plate,
+            interior: false,
+            radius_mm: vec![0.1],
+            // Below minimum_load_mm2: this is exactly the state that made a
+            // load-inserted arm a removal candidate before the fix.
+            carried_mm2: vec![0.5],
+            covered_demand: Vec::new(),
+            inserted_by_load: true,
+        }];
+
+        let removed = remove_under_loaded(&grid, &mut struts, minimum_load_mm2, 5.0);
+
+        assert_eq!(
+            removed, 0,
+            "a load-inserted arm below the removal threshold must never be a removal candidate"
+        );
+        assert_eq!(
+            struts.len(),
+            1,
+            "the load-inserted arm must survive the removal pass"
+        );
+        assert!(struts[0].inserted_by_load);
+    }
+
+    /// The counterpart: a REACH-placed arm (`inserted_by_load: false`) below
+    /// the threshold, with no demand cells to protect it, is still removed —
+    /// the fix must not blanket-protect every low-load arm, only the
+    /// load-placed ones.
+    #[test]
+    fn a_reach_placed_arm_with_no_demand_to_protect_it_is_still_removed() {
+        let (grid, _) = plan_grid(0.0, 0.0, 10.0, 10.0, 1, 1.0, 1.0, 1_000_000);
+        let minimum_load_mm2 = 1.0;
+        let mut struts = vec![SweepStrut {
+            id: 0,
+            cell: 0,
+            center_mm: [0.0, 0.0],
+            k_top: 5,
+            k_bottom: 0,
+            landing: Landing::Plate,
+            interior: false,
+            radius_mm: vec![0.1],
+            carried_mm2: vec![0.5],
+            covered_demand: Vec::new(),
+            inserted_by_load: false,
+        }];
+
+        let removed = remove_under_loaded(&grid, &mut struts, minimum_load_mm2, 5.0);
+
+        assert_eq!(removed, 1, "a reach-placed arm below the threshold with nothing to protect it should still be removed");
+        assert!(struts.is_empty());
+    }
 }

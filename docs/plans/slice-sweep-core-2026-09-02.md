@@ -1045,7 +1045,9 @@ so this section cannot go stale.
 down-face contributes all of itself and a sloped one almost nothing — it is anti-correlated with
 the burden, and substituting it tilted every disc and laid the overhang table on its side.
 `total_scar_mm2` cannot rank poses at all: `SweepPlan::total_scar_mm2`'s own invariant is
-`Σ π r² = peak_layer_area / X_ALLOWED`, *independent of how many arms share the load*, so the
+`Σ π r² = injected_load / X_ALLOWED` (equal to `peak_layer_area / X_ALLOWED` only on
+flat-bottomed models — the fixtures measured here — since a sloped underside injects load on
+more than one layer), *independent of how many arms share the load*, so the
 area law holds it nearly constant across poses (Round 25's four poses span 1.8 %, their arm
 counts 73 %) and inside that band it ranks the 180° flip backwards on both discs. The arm count
 ranks every measured comparison correctly and is the burden the owner actually pays.
@@ -1211,7 +1213,8 @@ Full report field list: `achieved_pitch_mm`, `coarsening_steps`, `layers`, `cell
 `struts{total, by_landing{plate, model, strut}, interior_landings}`,
 `seat_spacing{mean, p95, max}`, `tip_radius{min, p50, max, count_at_min, count_at_max}`,
 `slenderness{p50, max}`, `peak_layer_area_mm2`, `total_scar_mm2` (which must equal
-`peak_layer_area_mm2 / X_ALLOWED` — the invariant of `docs/physics.md:100-118`),
+`injected_load_mm2 / X_ALLOWED` — the invariant of `docs/physics.md:100-118` — and that equals
+`peak_layer_area_mm2 / X_ALLOWED` only on flat-bottomed models),
 `residual_demand_cells`, `residual_demand_mm2`, `uncarried_load_mm2`, `overloaded_struts[]`,
 `tips_above_owner_growth_ceiling[]`, `model_section_overload[]`, `landing_delicacy` histogram,
 `beta_area_stats`, `beta_tilt_stats` (reporting only), `conservation_residual`, `sweep_digest`,

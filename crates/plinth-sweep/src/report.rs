@@ -171,12 +171,19 @@ pub struct SweepRunReport {
     /// Arms the DOWN-sweep added because the registered area law asked for the
     /// section (`crate::down_sweep::insert_for_load`). Reach placed the rest.
     pub arms_inserted_by_load: usize,
-    /// Layers where an arm still collected more routed load than one tip may
-    /// carry after the bounded insertion rounds — either because the rounds ran
-    /// out or because the geometry offered nowhere to put another arm. A
+    /// Layers where the bounded round search hit `max_rounds` while the area
+    /// law still wanted more carriers — an ARTIFICIAL limit, not a physical
+    /// one. Error direction: UNDER-supported; the layer might still have had
+    /// room, `max_rounds` was just not raised far enough to find it. A
     /// warning on an emitted file; the arms themselves are named in
     /// `overloaded_struts`.
-    pub insertion_not_converged: u64,
+    pub insertion_rounds_exhausted: u64,
+    /// Layers where a round ran and found NOWHERE left to place another
+    /// carrier while the area law still wanted more — a physical exhaustion
+    /// of the geometry, not a bound. Error direction: genuinely
+    /// over-the-limit; more rounds would not have changed this. A warning on
+    /// an emitted file; the arms themselves are named in `overloaded_struts`.
+    pub insertion_geometry_exhausted: u64,
     /// Insertion rounds executed, summed over layers. A path-hit counter:
     /// `arms_inserted_by_load == 0` must not be readable as "no arm needed one"
     /// when it in fact means "the step never ran".
@@ -275,9 +282,12 @@ impl SweepRunReport {
              {} model sections carrying more than X_ALLOWED; {} arms surviving at the minimum tip \
              radius; {} coarsening steps to an achieved pitch of {:.4} mm; {} chamfer \
              non-convergences (they read HIGH and OVER-support); {} routing non-convergences \
-             (they lose load and UNDER-support); {} layers where the area law still wanted a \
-             carrier it could not place; {} unrooted landings; slenderness p50 {:.1}:1, max \
-             {:.1}:1; reach decisions binding at cured thickness up to {:.4} mm.",
+             (they lose load and UNDER-support); {} layers where insertion hit the round BOUND \
+             with the area law still wanting more (UNDER-support risk -- raising max_rounds \
+             might still find room); {} layers where insertion found NO GEOMETRY left to place a \
+             carrier (genuinely over the limit; more rounds would not help); {} unrooted \
+             landings; slenderness p50 {:.1}:1, max {:.1}:1; reach decisions binding at cured \
+             thickness up to {:.4} mm.",
             self.residual_demand_cells,
             self.residual_demand_mm2,
             self.uncarried_load_mm2,
@@ -289,7 +299,8 @@ impl SweepRunReport {
             self.achieved_pitch_mm,
             self.chamfer_not_converged,
             self.route_not_converged,
-            self.insertion_not_converged,
+            self.insertion_rounds_exhausted,
+            self.insertion_geometry_exhausted,
             self.unrooted_landings,
             self.slenderness_p50,
             self.slenderness_max,
@@ -306,6 +317,21 @@ impl SweepRunReport {
             self.struts_total.saturating_sub(self.arms_inserted_by_load),
             self.arms_inserted_by_load,
             self.insertion_rounds,
+        )
+        .expect("writing to a String cannot fail");
+        writeln!(
+            out,
+            "Conservation: injected peel {:.4} mm2 / plate reaction {:.4} mm2 / ratio {:.4}. \
+             Every mm2 the down-sweep ever put into the load raster must arrive at the plate; \
+             this is the check, on a model whose load may reach the plate through a model or arm \
+             landing where the peak-layer identity does not apply.",
+            self.injected_load_mm2,
+            self.plate_reaction_mm2,
+            if self.injected_load_mm2 > 0.0 {
+                self.plate_reaction_mm2 / self.injected_load_mm2
+            } else {
+                f64::NAN
+            },
         )
         .expect("writing to a String cannot fail");
         if self.sweeps_disagree {

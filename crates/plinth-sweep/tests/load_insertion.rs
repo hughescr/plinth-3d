@@ -67,7 +67,7 @@ fn the_area_law_places_arms_reach_never_asked_for_and_the_shortfall_falls() {
         println!(
             "{name}: arms {} (inserted by load {}), scar {:.4} mm2 of {required:.4} mm2 required \
              (ratio {:.4}), overloaded arm-layers {}, worst realized X {:.3}, insertion rounds \
-             {}, layers not converged {}",
+             {}, layers round-bound-exhausted {}, layers geometry-exhausted {}",
             plan.report.struts_total,
             plan.report.arms_inserted_by_load,
             plan.report.total_scar_mm2,
@@ -79,7 +79,8 @@ fn the_area_law_places_arms_reach_never_asked_for_and_the_shortfall_falls() {
                 .map(|arm| arm.realized_x)
                 .fold(0.0_f64, f64::max),
             plan.report.insertion_rounds,
-            plan.report.insertion_not_converged,
+            plan.report.insertion_rounds_exhausted,
+            plan.report.insertion_geometry_exhausted,
         );
         (required, plan.report.total_scar_mm2 / required)
     };

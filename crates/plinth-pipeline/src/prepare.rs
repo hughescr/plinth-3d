@@ -2487,8 +2487,9 @@ fn print_sweep_disclosure(
          will pass audit span check: {}; u_from_vertical_max {:.5}; \
          tau_vertical_over_tau_used_max {:.4}; max tau at binding reach {:.4} mm; \
          chamfer non-convergences {}; route non-convergences {}; \
-         arms inserted by load {} of {} ({} insertion rounds, {} layers not converged); \
-         registered-but-unread target spacing {:.3} mm",
+         arms inserted by load {} of {} ({} insertion rounds, {} layers round-bound-exhausted \
+         [UNDER-support risk], {} layers geometry-exhausted [over the limit, more rounds would \
+         not help]); registered-but-unread target spacing {:.3} mm",
         report.cells_per_layer,
         report.achieved_pitch_mm,
         report.layers,
@@ -2505,7 +2506,8 @@ fn print_sweep_disclosure(
         report.arms_inserted_by_load,
         report.struts_total,
         report.insertion_rounds,
-        report.insertion_not_converged,
+        report.insertion_rounds_exhausted,
+        report.insertion_geometry_exhausted,
         report.reach.target_spacing_mm_registered_but_unused,
     );
     println!(

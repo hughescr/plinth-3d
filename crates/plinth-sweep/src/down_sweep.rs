@@ -88,11 +88,24 @@ pub struct DownSweepOutcome {
     /// section, so it also tells "the path never ran" apart from "the path ran
     /// and found nothing to do" when read beside `insertion_rounds`.
     pub arms_inserted_by_load: u64,
-    /// Layers that still had an arm collecting more routed load than one tip
-    /// may carry after the bounded insertion rounds. A WARNING, never a
-    /// refusal: the arms that could go in went in, the rest is named in
-    /// `overloaded`.
-    pub insertion_not_converged: u64,
+    /// Layers where the bounded search hit `InsertionPolicy::max_rounds`
+    /// while the area law still wanted more carriers, i.e. an ARTIFICIAL
+    /// limit was hit, not a physical one. Error direction: UNDER-supported —
+    /// more rounds might still have found a footprint, so a nonzero count
+    /// here is a search bound to loosen (`max_rounds`), not evidence that the
+    /// geometry has no room. Disjoint from `insertion_geometry_exhausted`;
+    /// their sum is the count the old, conflated `insertion_not_converged`
+    /// reported.
+    pub insertion_rounds_exhausted: u64,
+    /// Layers where a round ran and [`insert_for_load`] placed zero arms
+    /// while the area law still wanted more carriers, i.e. the search found
+    /// NOWHERE left to put another carrier — a physical exhaustion, not a
+    /// bound. Error direction: genuinely OVER-supported at that layer; more
+    /// rounds would not help, and the arms that remain over the limit are
+    /// named in `overloaded`. Disjoint from `insertion_rounds_exhausted`;
+    /// their sum is the count the old, conflated `insertion_not_converged`
+    /// reported.
+    pub insertion_geometry_exhausted: u64,
     /// Insertion rounds actually executed, summed over layers. A path-hit
     /// counter: without it, `arms_inserted_by_load == 0` cannot be told apart
     /// from an insertion step that never ran.
@@ -105,8 +118,10 @@ pub struct DownSweepOutcome {
 /// **This is not a threshold and it decides nothing.** The trigger for adding
 /// an arm is the registered area law itself — a tip may carry
 /// `X_ALLOWED · π · r_max²` and no more — and `max_rounds` bounds a search
-/// whose non-convergence is REPORTED (`insertion_not_converged`) rather than
-/// hidden. `max_struts` is the caller's existing resource authority
+/// whose non-convergence is REPORTED, split by cause
+/// (`DownSweepOutcome::insertion_rounds_exhausted` for the bound,
+/// `insertion_geometry_exhausted` for the physics), rather than hidden or
+/// conflated. `max_struts` is the caller's existing resource authority
 /// (`crate::SweepLimits`), passed through so a field the insertion grows
 /// cannot outrun it.
 #[derive(Clone, Copy, Debug)]
@@ -305,7 +320,8 @@ pub fn run(
         // normal case in one round, because the round inserts the whole
         // shortfall at once rather than one arm at a time; the bound exists for
         // the case where the new arms are themselves over the limit, and
-        // hitting it is REPORTED (`insertion_not_converged`), never a refusal.
+        // hitting it is REPORTED (`insertion_rounds_exhausted`), never a
+        // refusal.
         let mut incoming;
         let mut placed;
         let mut lost;
@@ -438,7 +454,11 @@ pub fn run(
                 break;
             }
             if round >= insertion.max_rounds {
-                outcome.insertion_not_converged += 1;
+                // Rounds-exhausted: the max_rounds BOUND was hit, not the
+                // geometry. Whether more rounds would have found a footprint
+                // is unknown -- this is reported separately from a genuine
+                // geometry exhaustion so the two are never conflated.
+                outcome.insertion_rounds_exhausted += 1;
                 break;
             }
             let added = insert_for_load(
@@ -460,10 +480,11 @@ pub fn run(
                 &mut insert,
             );
             if added == 0 {
-                // The area law wants more section here and the geometry offers
-                // nowhere to put it. Emit and warn: the arms that remain over
-                // the limit are named one by one in `overloaded`.
-                outcome.insertion_not_converged += 1;
+                // Geometry-exhausted: the area law wants more section here and
+                // the search found nowhere to put it -- a physical limit, not
+                // the round bound above. Emit and warn: the arms that remain
+                // over the limit are named one by one in `overloaded`.
+                outcome.insertion_geometry_exhausted += 1;
                 break;
             }
             outcome.arms_inserted_by_load += added;

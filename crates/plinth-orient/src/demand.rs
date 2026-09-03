@@ -101,7 +101,8 @@ pub struct MeasuredSupportDemand {
     /// `Σ π r²` over the tips. Published because it is the quantity the
     /// burden was chosen OVER, and because the area law makes it very nearly
     /// a pose invariant (`SweepPlan::total_scar_mm2`'s own doc:
-    /// `Σ π r² = peak_layer_area / X_ALLOWED`, independent of how many arms
+    /// `Σ π r² = injected_load / X_ALLOWED`, equal to `peak_layer_area /
+    /// X_ALLOWED` only on flat-bottomed models, independent of how many arms
     /// share the load) — which is exactly why it cannot rank poses.
     pub total_scar_mm2: f64,
     pub achieved_pitch_mm: f64,
