@@ -1199,6 +1199,7 @@ version = "0.1.0"
 dependencies = [
  "plinth-core",
  "plinth-decimate",
+ "plinth-hollow",
  "plinth-mesh",
  "plinth-orient",
  "plinth-support",

@@ -2285,15 +2285,46 @@ fn sweep_and_emit(
             source,
         })
     })?;
+    // The drains this model was drilled with, handed to placement so the field
+    // is built AROUND the resin's way out rather than across it. The hollow
+    // stage runs after orientation, so these coordinates and the mesh the sweep
+    // is about to slice are already one frame and no transform is applied here
+    // -- if that ordering ever changes, this is the line that has to change
+    // with it.
+    let drains: Vec<plinth_sweep::DrainSpec> = hollowed
+        .history()
+        .hollow()
+        .drains()
+        .iter()
+        .map(|drain| {
+            plinth_sweep::DrainSpec::from_bore(
+                [
+                    drain.entrance_mm[0].get(),
+                    drain.entrance_mm[1].get(),
+                    drain.entrance_mm[2].get(),
+                ],
+                [
+                    drain.exit_mm[0].get(),
+                    drain.exit_mm[1].get(),
+                    drain.exit_mm[2].get(),
+                ],
+                drain.radius_mm.get(),
+            )
+        })
+        .collect();
     let started = std::time::Instant::now();
-    let plan = plinth_sweep::run_sweep(hollowed.mesh(), &sweep_layers, &policy).map_err(
-        |source| {
-            ChainStop::new(PipelineError::Sweep {
-                model: model.clone(),
-                source,
-            })
-        },
-    )?;
+    let plan = plinth_sweep::run_sweep_with_drains(
+        hollowed.mesh(),
+        &sweep_layers,
+        &policy,
+        &drains,
+    )
+    .map_err(|source| {
+        ChainStop::new(PipelineError::Sweep {
+            model: model.clone(),
+            source,
+        })
+    })?;
     let sweep_seconds = started.elapsed().as_secs_f64();
 
     let frame = plinth_support::BuildFrame::new(

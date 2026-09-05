@@ -43,6 +43,7 @@
 
 pub mod adapter;
 pub mod down_sweep;
+pub mod drain;
 pub mod grid;
 pub mod limits;
 pub mod orient_demand;
@@ -58,6 +59,7 @@ use plinth_support::perception::{slice_stack, SliceStackLimits};
 use thiserror::Error;
 
 pub use adapter::{arms_of, to_primitives, SweepEmission};
+pub use drain::{DrainKeepOut, DrainSpec, DrainVerdict, EscapeReport};
 pub use limits::SweepLimits;
 pub use orient_demand::{burden_cm2, SweepDemand};
 pub use peel::{PeelFieldMode, PeelFieldStats};
@@ -223,6 +225,13 @@ pub struct SweepPolicy {
     pub target_spacing_mm_registered_but_unused: f64,
     pub beam_model_kappa: f64,
     pub working_pitch_mm: f64,
+    /// `STANDOFF_MM`, the registered placement-family gap. Read here for the
+    /// drain keep-out, which is a placement search like any other.
+    pub standoff_mm: f64,
+    /// `HOLLOW_PITCH_MM`. The drain-escape flood is decided at the SAME pitch
+    /// the drill stage decides "does the bore fit here" at, so the two cannot
+    /// disagree about one question.
+    pub passage_voxel_pitch_mm: f64,
     pub strut_removal_passes: u32,
     pub peel_field_mode: PeelFieldMode,
     /// Whether the down-sweep may add arms the AREA LAW asks for, on top of
@@ -231,6 +240,11 @@ pub struct SweepPolicy {
     /// than assert that it does something; nothing in the pipeline turns it
     /// off.
     pub insert_by_load: bool,
+    /// Whether placement must route around every drain's escape cylinder.
+    /// **On in production.** The knob exists so the sabotage drill can delete
+    /// the keep-out and show that the drain then reads ENCLOSED -- a test that
+    /// asserts the check FIRES rather than that it is merely present.
+    pub drain_keep_out: bool,
     pub limits: SweepLimits,
 }
 
@@ -263,12 +277,15 @@ impl SweepPolicy {
                 .get(),
             beam_model_kappa,
             working_pitch_mm: placeholders.sweep_working_pitch_mm().diagnostic().get(),
+            standoff_mm: placeholders.standoff_mm().diagnostic().get(),
+            passage_voxel_pitch_mm: placeholders.hollow_pitch_mm().diagnostic().get(),
             strut_removal_passes: u32::try_from(
                 placeholders.sweep_strut_removal_passes().diagnostic().get(),
             )
             .unwrap_or(u32::MAX),
             peel_field_mode: PeelFieldMode::from_registry(placeholders),
             insert_by_load: true,
+            drain_keep_out: true,
             limits: SweepLimits {
                 cell_layer_budget: placeholders.sweep_cell_layer_budget().diagnostic().get(),
                 ..SweepLimits::production()
@@ -293,6 +310,15 @@ impl SweepPolicy {
         self.insert_by_load = false;
         self
     }
+
+    /// Place with no regard for where the resin leaves. **Sabotage only** -- it
+    /// is what the drain-connectivity test deletes to prove the keep-out is
+    /// what keeps the outlet open, and nothing in the pipeline sets it.
+    #[must_use]
+    pub const fn without_drain_keep_out(mut self) -> Self {
+        self.drain_keep_out = false;
+        self
+    }
 }
 
 /// Place and size a support field for one oriented, lifted mesh.
@@ -306,6 +332,22 @@ pub fn run_sweep(
     mesh: &Mesh,
     plan: &LayerPlan,
     policy: &SweepPolicy,
+) -> Result<SweepPlan, SweepError> {
+    run_sweep_with_drains(mesh, plan, policy, &[])
+}
+
+/// Place and size a support field, knowing where this model's drains come out.
+///
+/// The only difference from [`run_sweep`] is that the field is placed around
+/// every drain's escape cylinder rather than through it, and that the emitted
+/// plan carries a per-drain `connected` / `enclosed` verdict. With an empty
+/// `drains` slice the two are the same computation and produce the same bytes,
+/// which is what `run_sweep` above relies on.
+pub fn run_sweep_with_drains(
+    mesh: &Mesh,
+    plan: &LayerPlan,
+    policy: &SweepPolicy,
+    drains: &[DrainSpec],
 ) -> Result<SweepPlan, SweepError> {
     let (min_z, max_z, min_x, max_x, min_y, max_y) = bounds(mesh)?;
     let plate_z = plan.z0_mm();
@@ -338,6 +380,24 @@ pub fn run_sweep(
     let slices = slice_stack(mesh, &planes, slice_limits(policy))
         .map_err(|error| SweepError::Slice(error.to_string()))?;
 
+    // The drain keep-out is built BEFORE any arm is placed, because a keep-out
+    // consulted after placement is a repair, and a repair that deletes arms
+    // leaves the demand it was covering with nothing. Empty when there are no
+    // drains, and then it allocates nothing and admits everything.
+    let keep_out = if policy.drain_keep_out {
+        drain::DrainKeepOut::build(
+            &grid,
+            drains,
+            policy.standoff_mm,
+            policy.tip_radius_max_mm,
+            layers,
+            plate_z,
+            height,
+        )
+    } else {
+        drain::DrainKeepOut::none()
+    };
+
     // ---------------------------------------------------------------- upward
     let lamina_reach_mm = policy.kappa * height;
     let mut reach = ReachState::new(&grid);
@@ -349,6 +409,7 @@ pub fn run_sweep(
     let mut demand_cells_total = 0_usize;
     let mut residual_demand_cells = 0_usize;
     let mut unrooted_landings = 0_usize;
+    let mut keep_out_refusals = 0_usize;
     let mut rasteriser_entries = 0_u64;
 
     for (layer, solids) in slices.iter().enumerate().take(layers) {
@@ -367,6 +428,7 @@ pub fn run_sweep(
             &grid,
             layer,
             &masks.cover,
+            &keep_out,
             policy.kappa,
             &mut reach,
             &mut history,
@@ -377,6 +439,7 @@ pub fn run_sweep(
         demand_cells_total += outcome.demand_cells;
         residual_demand_cells += outcome.residual_demand;
         unrooted_landings += outcome.unrooted_landings;
+        keep_out_refusals += outcome.keep_out_refusals;
         up_sweep::commit_layer_history(layer, &masks.cover, &reach, &mut history);
         reach::commit_layer(&mut reach, &masks.carry);
     }
@@ -431,7 +494,7 @@ pub fn run_sweep(
     } else {
         down_sweep::InsertionPolicy::disabled()
     };
-    let mut outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion);
+    let mut outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
     let mut removals = 0_u64;
     for _ in 0..policy.strut_removal_passes {
         let removed = remove_under_loaded(&grid, &mut struts, minimum_load, lamina_reach_mm);
@@ -439,7 +502,7 @@ pub fn run_sweep(
             break;
         }
         removals += removed as u64;
-        outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion);
+        outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
     }
     // The interior test again, now that the down-sweep has added arms of its
     // own. Same test, same column history; running it twice is cheaper than
@@ -450,7 +513,22 @@ pub fn run_sweep(
                 > strut.k_top + 1;
     }
 
-    let report = build_report(
+    // The escape check runs on the FINISHED field, struts and all, because a
+    // check that ran before sizing would be answering about a field nobody
+    // prints. Its verdict is published and warned on; it never withdraws an
+    // arm and never refuses a model.
+    let escape = drain::check_escape(
+        &grid,
+        &slices,
+        &struts,
+        drains,
+        plate_z,
+        height,
+        policy.passage_voxel_pitch_mm,
+        policy.tip_radius_max_mm,
+    );
+
+    let mut report = build_report(
         &grid,
         layers,
         grid_plan.coarsening_steps,
@@ -465,6 +543,10 @@ pub fn run_sweep(
         lift_assertions,
         removals,
     );
+    report.drain_keep_out_cells = keep_out.blocked_cells();
+    report.drain_keep_out_refusals = keep_out.refusals();
+    report.drain_seat_refusals = keep_out_refusals;
+    report.escape = escape;
     Ok(SweepPlan {
         grid,
         layers,
@@ -695,6 +777,12 @@ fn build_report(
         .sum();
 
     SweepRunReport {
+        // Filled by the caller, which is the only place that knows the drains:
+        // this function is handed the sweep's own measurements and nothing else.
+        drain_keep_out_cells: 0,
+        drain_keep_out_refusals: 0,
+        drain_seat_refusals: 0,
+        escape: crate::drain::EscapeReport::default(),
         achieved_pitch_mm: grid.pitch_mm(),
         coarsening_steps,
         layers,

@@ -21,6 +21,14 @@ plinth-mesh = { path = "../plinth-mesh" }
 # `plinth_orient::demand`'s own module doc). Nothing `plinth-orient` depends
 # on reaches back here, so this edge introduces no cycle.
 plinth-orient = { path = "../plinth-orient" }
+# For `plinth_hollow::passage` alone -- the drill stage's own conservative
+# voxel EDT and its own `r + pitch/2` clearance rule, so the drain-escape
+# check decides "does the bore fit through here" with the same machinery, the
+# same threshold and the same registered pitch the drill stage decided the
+# identical question with. No cycle: plinth-support (already a dependency
+# here) depends on plinth-hollow, and nothing plinth-hollow depends on reaches
+# back into this crate.
+plinth-hollow = { path = "../plinth-hollow" }
 # For `plinth_support::perception::slice_stack` alone -- the stitch/orient/
 # normalize chain the print-layer path already runs. No legacy placement code
 # is reached from here, and `dyadic::refine_depth`, the per-triangle refinement

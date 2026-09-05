@@ -22,7 +22,7 @@
 
 use plinth_core::{m0_constants, LayerPlan};
 use plinth_mesh::Mesh;
-use plinth_sweep::{run_sweep, SweepPlan, SweepPolicy};
+use plinth_sweep::{run_sweep_with_drains, DrainSpec, SweepPlan, SweepPolicy};
 
 /// The registered lift. Always applied: a zero-lift pose is never a candidate.
 pub const LIFT_MM: f64 = 5.0;
@@ -121,12 +121,20 @@ pub fn sweep(mesh: &Mesh, pitch_mm: f64) -> SweepPlan {
 /// one lift, one place — so a comparison of two policies cannot accidentally
 /// compare two layer plans as well.
 pub fn sweep_with(mesh: &Mesh, _pitch_mm: f64, policy: &SweepPolicy) -> SweepPlan {
+    sweep_with_drains(mesh, policy, &[])
+}
+
+/// The same run again, with this model's drilled drains handed to placement.
+/// One layer plan and one lift, exactly as above, so a comparison of two drain
+/// lists cannot accidentally compare two frames as well.
+pub fn sweep_with_drains(mesh: &Mesh, policy: &SweepPolicy, drains: &[DrainSpec]) -> SweepPlan {
     let height = layer_height_mm();
     let (min_z, max_z) = z_span(mesh);
     let plate_z = min_z - LIFT_MM;
     let layers = (((max_z - plate_z) / height).ceil() as usize).max(1);
     let plan = LayerPlan::new(plate_z, vec![height; layers]).expect("a uniform layer plan");
-    run_sweep(mesh, &plan, policy).expect("the sweep emits and warns; it never refuses")
+    run_sweep_with_drains(mesh, &plan, policy, drains)
+        .expect("the sweep emits and warns; it never refuses")
 }
 
 pub fn z_span(mesh: &Mesh) -> (f64, f64) {

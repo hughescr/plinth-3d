@@ -19,6 +19,7 @@ mod cavity_field;
 pub mod drains;
 pub mod drilling;
 mod flow;
+pub mod passage;
 mod well_composed;
 
 pub use cavity_field::{CavityField, CavityFieldRetainedAllocations};

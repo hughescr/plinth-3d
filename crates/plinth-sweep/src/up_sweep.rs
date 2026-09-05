@@ -20,6 +20,7 @@
     reason = "batch-first: these loops walk several parallel per-cell rasters at one index"
 )]
 
+use crate::drain::DrainKeepOut;
 use crate::grid::Grid;
 use crate::reach::ReachState;
 use crate::{Landing, SweepStrut};
@@ -114,6 +115,11 @@ pub struct LayerOutcome {
     /// Landings whose model cell was not itself rooted. Emitted anyway and
     /// reported, because refusing here would destroy the diagnostic.
     pub unrooted_landings: usize,
+    /// Demand cells this layer could not seat because every seat that would
+    /// have rooted them stands inside a drain escape cylinder. A WARNING, and
+    /// also the path-hit witness that the keep-out was consulted on a layer
+    /// where it actually bound.
+    pub keep_out_refusals: usize,
 }
 
 /// Place struts on one layer.
@@ -131,6 +137,7 @@ pub fn place_layer(
     grid: &Grid,
     layer: usize,
     cover: &[bool],
+    keep_out: &DrainKeepOut,
     kappa: f64,
     reach: &mut ReachState,
     history: &mut ColumnHistory,
@@ -143,6 +150,7 @@ pub fn place_layer(
         demand_cells: 0,
         residual_demand: 0,
         unrooted_landings: 0,
+        keep_out_refusals: 0,
     };
 
     let mut demand_total = 0_usize;
@@ -204,6 +212,13 @@ pub fn place_layer(
             if !scratch.demand_bits[seed] {
                 continue;
             }
+            // A lattice point inside a drain's escape cylinder is simply not
+            // used. The demand it would have covered stays in the set and the
+            // pivot pass below looks for a legal seat for it; only if none
+            // exists does it survive as reported residual demand.
+            if !keep_out.admits(seed, layer) {
+                continue;
+            }
             seed
         } else {
             while pivot_cursor < grid.cells() && !scratch.demand_bits[pivot_cursor] {
@@ -217,11 +232,20 @@ pub fn place_layer(
             // reach. Seating on it directly roots it by construction, which is
             // what makes this loop terminate.
             let chosen = if pivot == last_pivot {
-                pivot
+                keep_out.admits(pivot, layer).then_some(pivot)
             } else {
-                best_seat_for(grid, cover, history, scratch, pivot)
+                best_seat_for(grid, cover, history, scratch, keep_out, layer, pivot)
             };
             last_pivot = pivot;
+            let Some(chosen) = chosen else {
+                // Every seat that could root this cell stands where the resin
+                // has to leave. EMIT AND WARN: step past it, leave its demand
+                // bit set so the residual-demand count at the end of this
+                // function reports it, and never refuse the model over it.
+                outcome.keep_out_refusals += 1;
+                pivot_cursor += 1;
+                continue;
+            };
             chosen
         };
         let (landing, k_bottom, rooted_landing) = descend(history, cell, layer);
@@ -374,14 +398,20 @@ fn best_seat_for(
     cover: &[bool],
     history: &ColumnHistory,
     scratch: &GreedyScratch,
+    keep_out: &DrainKeepOut,
+    layer: usize,
     pivot: usize,
-) -> usize {
+) -> Option<usize> {
     let cols = grid.cols();
     let rows = grid.rows();
     let reach = scratch.reach_cells;
     let pivot_row = pivot / cols;
     let pivot_col = pivot % cols;
-    let mut best = pivot;
+    // The pivot remains the default, and still wins every tie at the lowest
+    // key, which is what keeps a field with no drains byte-identical. It is
+    // only dropped when the keep-out refuses it, and then `None` propagates so
+    // the caller reports residual demand instead of seating in the cylinder.
+    let mut best: Option<usize> = keep_out.admits(pivot, layer).then_some(pivot);
     let mut best_key = (0_u32, false, 0_u32);
     for row in pivot_row.saturating_sub(reach)..=(pivot_row + reach).min(rows - 1) {
         let half = scratch.half_widths[row.abs_diff(pivot_row)];
@@ -394,15 +424,18 @@ fn best_seat_for(
             if !cover[candidate] || !scratch.demand_bits[candidate] {
                 continue;
             }
+            if !keep_out.admits(candidate, layer) {
+                continue;
+            }
             let score = score_at(grid, &scratch.prefix, &scratch.half_widths, candidate);
             let key = (
                 score,
                 history.top_strut[candidate] > 0,
                 history.top_model[candidate],
             );
-            if key > best_key {
+            if best.is_none() || key > best_key {
                 best_key = key;
-                best = candidate;
+                best = Some(candidate);
             }
         }
     }

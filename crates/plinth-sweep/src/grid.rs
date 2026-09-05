@@ -91,6 +91,31 @@ impl Grid {
     }
 }
 
+/// A raster laid out directly, rather than by the budget loop.
+///
+/// The drain-escape check needs the same scanline rasteriser on a COARSER
+/// lattice than the sweep's own — the registered hollowing pitch, so the
+/// passage question is decided at the resolution the drill stage decides it at
+/// — over a footprint the escape lattice has already chosen. Re-deriving that
+/// footprint from a bounding box would let the two disagree by a cell; taking
+/// it as given cannot.
+#[must_use]
+pub const fn lay_out_at(
+    origin_x_mm: f64,
+    origin_y_mm: f64,
+    pitch_mm: f64,
+    cols: usize,
+    rows: usize,
+) -> Grid {
+    Grid {
+        pitch_mm,
+        origin_x_mm,
+        origin_y_mm,
+        cols,
+        rows,
+    }
+}
+
 /// What the budget loop did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GridPlan {

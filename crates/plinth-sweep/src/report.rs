@@ -196,6 +196,19 @@ pub struct SweepRunReport {
     pub peel_field_mode: PeelFieldMode,
     pub peel_field_stats: PeelFieldStats,
     pub sweep_digest: String,
+    /// Working cells some drain escape cylinder covers. Zero on a model with
+    /// no drains, and then the keep-out was not consulted at all.
+    pub drain_keep_out_cells: usize,
+    /// Placement candidates the keep-out refused. A path-hit witness: without
+    /// it, "every drain is connected" cannot be told apart from "the keep-out
+    /// never bound on anything".
+    pub drain_keep_out_refusals: u64,
+    /// Demand cells left unseated because every seat that would have rooted
+    /// them stood inside a drain escape cylinder. A WARNING, and it is already
+    /// included in `residual_demand_cells`.
+    pub drain_seat_refusals: usize,
+    /// What the escape flood found, per drain, on the FINISHED field.
+    pub escape: crate::drain::EscapeReport,
     /// Path-hit counters. A green oracle must never be able to mean "the path
     /// never ran" (the witness-must-exercise-the-path lesson).
     pub counters: PathHits,
@@ -319,6 +332,73 @@ impl SweepRunReport {
             self.insertion_rounds,
         )
         .expect("writing to a String cannot fail");
+        if self.escape.verdicts.is_empty() {
+            writeln!(
+                out,
+                "Drains: this model has none the placement was told about, so no escape check \
+                 ran. That is NOT a claim that no drain exists -- it is the absence of one."
+            )
+            .expect("writing to a String cannot fail");
+        } else {
+            writeln!(
+                out,
+                "Drains: {} checked, {} ENCLOSED. The check floods the empty space around the \
+                 FINISHED field -- model, arms and plate all counted as solid -- at a {:.3} mm \
+                 voxel pitch (HOLLOW_PITCH_MM, the pitch the drill stage decides the same \
+                 question at) over {} voxels, {} of them solid, and asks whether a ball of the \
+                 bore's own radius can travel from each outlet to the outside of the build. \
+                 Keep-out: {} working cells, {} placement candidates refused, {} demand cells \
+                 left unseated because every seat that would have rooted them stood in a drain \
+                 cylinder (already counted in residual demand above).",
+                self.escape.verdicts.len(),
+                self.escape.enclosed(),
+                self.escape.voxel_pitch_mm,
+                self.escape.voxels,
+                self.escape.solid_voxels,
+                self.drain_keep_out_cells,
+                self.drain_keep_out_refusals,
+                self.drain_seat_refusals,
+            )
+            .expect("writing to a String cannot fail");
+            for verdict in &self.escape.verdicts {
+                if verdict.connected {
+                    writeln!(
+                        out,
+                        "  drain at ({:.3}, {:.3}, {:.3}) mm, bore radius {:.3} mm: CONNECTED \
+                         (widest free radius found near the outlet {:.3} mm against the {:.3} mm \
+                         this bore needs; {} voxels probed).",
+                        verdict.outlet_mm[0],
+                        verdict.outlet_mm[1],
+                        verdict.outlet_mm[2],
+                        verdict.radius_mm,
+                        verdict.best_clearance_mm,
+                        verdict.required_clearance_mm,
+                        verdict.probed_voxels,
+                    )
+                    .expect("writing to a String cannot fail");
+                } else {
+                    writeln!(
+                        out,
+                        "  WARNING drain at ({:.3}, {:.3}, {:.3}) mm, bore radius {:.3} mm: \
+                         ENCLOSED. No path at least {:.3} mm in free radius runs from this \
+                         outlet to the outside of the build; the widest free radius anywhere \
+                         near the mouth is {:.3} mm ({} voxels probed). The resin in this cavity \
+                         has nowhere to go: the supports around the outlet have made a second \
+                         hollow space, which would itself need a drain. THE FILE IS STILL \
+                         EMITTED -- this is a warning about the field, not a verdict on the \
+                         model.",
+                        verdict.outlet_mm[0],
+                        verdict.outlet_mm[1],
+                        verdict.outlet_mm[2],
+                        verdict.radius_mm,
+                        verdict.required_clearance_mm,
+                        verdict.best_clearance_mm,
+                        verdict.probed_voxels,
+                    )
+                    .expect("writing to a String cannot fail");
+                }
+            }
+        }
         writeln!(
             out,
             "Conservation: injected peel {:.4} mm2 / plate reaction {:.4} mm2 / ratio {:.4}. \

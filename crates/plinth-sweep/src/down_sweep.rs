@@ -40,6 +40,7 @@
 
 use plinth_support::perception::SliceSolid;
 
+use crate::drain::DrainKeepOut;
 use crate::grid::Grid;
 use crate::raster::{rasterize_into, LayerMasks, RasterScratch};
 use crate::report::{ModelSectionOverload, OverloadedStrut};
@@ -214,6 +215,7 @@ pub fn run(
     struts: &mut Vec<SweepStrut>,
     sizing: SizingPolicy,
     insertion: InsertionPolicy,
+    keep_out: &DrainKeepOut,
 ) -> DownSweepOutcome {
     let cells = grid.cells();
     let area = grid.cell_area_mm2();
@@ -464,6 +466,7 @@ pub fn run(
             let added = insert_for_load(
                 grid,
                 layer,
+                keep_out,
                 &masks.cover,
                 &cover_above,
                 &mut carriers,
@@ -778,6 +781,7 @@ impl InsertScratch {
 fn insert_for_load(
     grid: &Grid,
     layer: usize,
+    keep_out: &DrainKeepOut,
     cover_here: &[bool],
     cover_above: &[bool],
     carriers: &mut [bool],
@@ -812,6 +816,13 @@ fn insert_for_load(
     }
     for cell in 0..grid.cells() {
         if load_in[cell] <= 0.0 || carriers[cell] || !cover_above[cell] || cover_here[cell] {
+            continue;
+        }
+        // The area law does not get to overrule the drain. An arm the load
+        // wants here would stand in, or descend through, the cylinder the resin
+        // leaves by; the overload it would have relieved is reported instead
+        // (`overloaded`), which is the emit-and-warn outcome.
+        if !keep_out.admits(cell, layer) {
             continue;
         }
         let target = nearest[cell];
