@@ -132,7 +132,7 @@ pub fn evaluate_display(
         unusable,
     } = welded_angle_defect(mesh, &geometry).map_err(DisplayError::Topology)?;
     let curvature_by_face = curvature_by_face(mesh, &geometry, &topology, &defect, &unusable);
-    let neighbourhood = neighbourhood_pass(&geometry, &topology, &curvature_by_face, settings);
+    let neighbourhood = neighbourhood_pass(mesh, &geometry, &topology, &curvature_by_face, settings);
 
     let mut values = Vec::with_capacity(face_count);
     for (face, &visible) in visibility.iter().enumerate() {
@@ -424,7 +424,23 @@ struct Neighbourhood {
 /// detail**; the committed orientation score is computed at the Exact LOD, and
 /// the published per-model summary is what makes a coarse reading visible
 /// rather than silent.
+///
+/// # A face larger than `R_detail` counts only its border band
+///
+/// The detail term is defined per unit area at the perceptual scale
+/// `R_detail`.  A point deeper than `R_detail` inside a flat triangle sees
+/// nothing but its own plane, so it carries no detail whatever its
+/// neighbours do; only the band within `R_detail` of the face's edges can
+/// see across them.  The neighbourhood ratio above is therefore scaled by the
+/// band fraction `min(1, perimeter x R_detail / area)`, which is exactly 1 on
+/// any triangle smaller than the scale (a production mesh) and falls as a
+/// triangle grows past it.  Without this a 20 mm slab top made of two
+/// triangles read as articulated surface because its only neighbours were its
+/// own side walls, and that spurious detail on a large area out-voted a
+/// genuinely delicate blade authored on the underside (make_raking_blade,
+/// 2026-09-04).  No new constant: the band is the radius the term already has.
 fn neighbourhood_pass(
+    mesh: &Mesh,
     geometry: &FaceGeometryPass,
     topology: &crate::FaceTopology,
     curvature_by_face: &[f64],
@@ -435,6 +451,7 @@ fn neighbourhood_pass(
 
     let mut detail = vec![0.0_f64; face_count];
     let mut curvature = vec![0.0_f64; face_count];
+    let band_fraction = border_band_fraction(mesh, geometry, settings.detail_radius_mm());
 
     // Shared scratch, reused across faces: a visited stamp keyed by the source
     // face index (so it is cleared in O(visited), never O(faces)) and one
@@ -496,7 +513,7 @@ fn neighbourhood_pass(
         }
 
         if area_total > 0.0 {
-            detail[face] = articulation_total / area_total;
+            detail[face] = articulation_total / area_total * band_fraction[face];
         }
         curvature[face] = curvature_total;
         for &touched in &visited {
@@ -580,5 +597,70 @@ mod tests {
                     < 1e-12
             );
         }
+    }
+}
+
+/// Fraction of each face's area that lies within `radius_mm` of one of its
+/// own edges, bounded above by the strip estimate `perimeter x radius / area`
+/// and clamped to `[0, 1]`. Exactly 1 for every triangle whose inradius is
+/// below `radius_mm`, which is every triangle of a production-density mesh.
+fn border_band_fraction(mesh: &Mesh, geometry: &FaceGeometryPass, radius_mm: f64) -> Vec<f64> {
+    let verts = mesh.verts();
+    mesh.tris()
+        .iter()
+        .enumerate()
+        .map(|(face, triangle)| {
+            if geometry.degenerate[face] || geometry.areas_mm2[face] <= 0.0 {
+                return 0.0;
+            }
+            let a = verts[triangle[0] as usize];
+            let b = verts[triangle[1] as usize];
+            let c = verts[triangle[2] as usize];
+            let perimeter = norm(sub(b, a)) + norm(sub(c, b)) + norm(sub(a, c));
+            (perimeter * radius_mm / geometry.areas_mm2[face]).clamp(0.0, 1.0)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod band_tests {
+    use super::*;
+    use crate::make_box_default;
+
+    /// **The same flat face is less "detail" the larger it is.** A box and the
+    /// same box scaled ten times share every dihedral, so under a per-triangle
+    /// reading they would score alike; but a 10x face is mostly interior that
+    /// sees nothing beyond its own plane, and its top must read well below the
+    /// small box's. This is the make_raking_blade defect of 2026-09-04 in
+    /// miniature: a two-triangle slab top scoring as carving.
+    #[test]
+    fn a_large_flat_face_carries_less_detail_than_the_same_face_small() {
+        let small = make_box_default().expect("box");
+        let big = Mesh::new(
+            small.verts().iter().map(|v| [v[0] * 10.0, v[1] * 10.0, v[2] * 10.0]).collect(),
+            small.tris().to_vec(),
+        )
+        .expect("scaled box");
+        let settings = DisplaySettings::production().expect("display settings");
+        let config = DisplayBuildConfig::production(1_000_000).expect("display config");
+        let top_detail = |mesh: &Mesh| {
+            let field = evaluate_display(mesh, "l0", settings, config).expect("display field");
+            let geometry = FaceGeometryPass::run(mesh);
+            field
+                .face_values()
+                .iter()
+                .enumerate()
+                .filter(|(face, _)| geometry.normals[*face][2] > 0.9)
+                .map(|(_, value)| value.detail())
+                .fold(0.0_f64, f64::max)
+        };
+        let (small_top, big_top) = (top_detail(&small), top_detail(&big));
+        println!("box top detail: small {small_top:.6}, 10x {big_top:.6}");
+        assert!(small_top > 0.0, "the small box's top must see its own side walls");
+        assert!(
+            big_top < 0.5 * small_top,
+            "10x box top detail {big_top:.6} is not well below the small box's {small_top:.6}; \
+             a face far larger than the detail radius is being read as articulated surface"
+        );
     }
 }
