@@ -117,31 +117,36 @@
 //! reading of the design rather than hidden inside a constant that would
 //! misleadingly claim registry provenance for a pure performance knob.
 //!
-//! # The production pass also prices where the arms LAND
+//! # The production pass also prices where the arms LAND, and what they CARRY
 //!
-//! A production measurement carries a second quantity the prefilter does not:
+//! A production measurement carries two quantities the prefilter does not:
 //! the MODEL-LANDING SCAR, `Σ π r_seat² × fragility × (1 + D)` over the arms
 //! that seat on the model, measured by [`crate::model_landing`] against the
-//! very `OrientFaceTable` the objective was scored with. It goes back through
-//! [`MeasuredSupportDemand::landing_scar_raw_mm2`] and is folded into the
+//! very `OrientFaceTable` the objective was scored with; and the TIP-CONTACT
+//! SCAR, the same product over the faces the arms' TIPS carry (excluding one
+//! the analytic down-facing fold already counts — [`crate::tip_landing`]'s
+//! own doc has the choice and the measurement behind it), measured by
+//! [`crate::tip_landing`] against the same table. Both go back through
+//! [`MeasuredSupportDemand::landing_scar_raw_mm2`] and
+//! [`MeasuredSupportDemand::tip_scar_raw_mm2`] and are folded into the
 //! objective's existing scar term at the existing registered weight; this
-//! module adds no constant of its own for it.
+//! module adds no constant of its own for either.
 //!
-//! It is measured at [`DemandFidelity::Production`] and nowhere else, for the
-//! same reason the burden may only be crowned there: a coarse raster's arms
-//! are not the emitted field's arms, so where they land says nothing about
-//! where anything will land. A prefilter row therefore carries a stated
-//! absence, not a zero.
+//! Both are measured at [`DemandFidelity::Production`] and nowhere else, for
+//! the same reason the burden may only be crowned there: a coarse raster's
+//! arms are not the emitted field's arms, so where they land or what they
+//! carry says nothing about where anything will land or carry. A prefilter
+//! row therefore carries a stated absence, not a zero.
 
 use std::time::Instant;
 
 use plinth_core::{m0_constants, LayerPlan};
 use plinth_mesh::Mesh;
 use plinth_orient::demand::{DemandFidelity, MeasuredSupportDemand, SupportDemandMeasurer};
-use plinth_orient::{OrientFaceTable, UpDirection};
+use plinth_orient::{ObjectiveWeights, OrientFaceTable, UpDirection};
 use rayon::prelude::*;
 
-use crate::{model_landing, run_sweep, SweepPolicy};
+use crate::{model_landing, run_sweep, tip_landing, SweepPolicy};
 
 /// See the module doc's "Two rasters" section.
 const DEMAND_PITCH_MULTIPLIER: f64 = 10.0;
@@ -163,31 +168,61 @@ pub enum ModelLandingScarPolicy {
     Suppressed,
 }
 
+/// Whether a production measurement prices what an arm's TIP carries.
+///
+/// **A policy, not a constant**, symmetric to [`ModelLandingScarPolicy`] at
+/// the other end of the arm. [`Self::Suppressed`] lets a test ask "which pose
+/// would this model take if the tip-contact scar were not in the objective at
+/// all" against the real engine, and yields a stated absence
+/// (`tip_scar_raw_mm2: None`), never a zero.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TipContactScarPolicy {
+    #[default]
+    Measured,
+    Suppressed,
+}
+
 /// The one production [`SupportDemandMeasurer`]. Every number it needs is read
 /// fresh from the registry on each call, so two instances can never disagree
-/// about a constant; the one thing it carries is the policy above.
+/// about a constant; the two things it carries are the policies above.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SweepDemand {
     landing_scar: ModelLandingScarPolicy,
+    tip_scar: TipContactScarPolicy,
 }
 
 impl SweepDemand {
-    /// The production measurer: real burden, and the model-landing scar
-    /// measured on the production raster.
+    /// The production measurer: real burden, the model-landing scar and the
+    /// tip-contact scar, both measured on the production raster.
     #[must_use]
     pub const fn production() -> Self {
         Self {
             landing_scar: ModelLandingScarPolicy::Measured,
+            tip_scar: TipContactScarPolicy::Measured,
         }
     }
 
     /// The same measurer with the model-landing scar withheld, so a test can
     /// measure what that term is worth by removing it rather than by
-    /// re-deriving it. See [`ModelLandingScarPolicy`].
+    /// re-deriving it. See [`ModelLandingScarPolicy`]. The tip-contact scar
+    /// stays measured.
     #[must_use]
     pub const fn without_model_landing_scar() -> Self {
         Self {
             landing_scar: ModelLandingScarPolicy::Suppressed,
+            tip_scar: TipContactScarPolicy::Measured,
+        }
+    }
+
+    /// The same measurer with the tip-contact scar withheld, so a test can
+    /// measure what THAT term is worth by removing it rather than by
+    /// re-deriving it. See [`TipContactScarPolicy`]. The model-landing scar
+    /// stays measured.
+    #[must_use]
+    pub const fn without_tip_contact_scar() -> Self {
+        Self {
+            landing_scar: ModelLandingScarPolicy::Measured,
+            tip_scar: TipContactScarPolicy::Suppressed,
         }
     }
 }
@@ -199,6 +234,12 @@ struct DemandSettings {
     lift_mm: f64,
     layer_height_mm: f64,
     tip_radius_mm: f64,
+    /// The same `-(OVERHANG_ANGLE_DEG.to_radians().sin())` the objective's
+    /// down-facing fold evaluates (`plinth_orient::score::ObjectiveWeights::
+    /// down_limit`), read once per batch so the tip-contact scar's
+    /// "already counted" test agrees with the analytic fold's own registered
+    /// number rather than a second read of it.
+    down_limit: f64,
     policy: SweepPolicy,
 }
 
@@ -206,6 +247,7 @@ impl DemandSettings {
     fn read(fidelity: DemandFidelity) -> Result<Self, String> {
         let constants = m0_constants().map_err(|error| error.to_string())?;
         let policy = SweepPolicy::from_registry().map_err(|error| error.to_string())?;
+        let weights = ObjectiveWeights::registered().map_err(|error| error.to_string())?;
         let policy = match fidelity {
             DemandFidelity::Prefilter => {
                 let coarse_pitch = policy.working_pitch_mm * DEMAND_PITCH_MULTIPLIER;
@@ -223,6 +265,7 @@ impl DemandSettings {
                 .tip_radius_default_mm()
                 .diagnostic()
                 .get(),
+            down_limit: weights.down_limit(),
             policy,
         })
     }
@@ -238,6 +281,7 @@ impl SweepDemand {
         fidelity: DemandFidelity,
         settings: &DemandSettings,
         landing_scar: ModelLandingScarPolicy,
+        tip_scar: TipContactScarPolicy,
     ) -> Result<MeasuredSupportDemand, String> {
         // Oriented exactly as the eventual winner would be
         // (`plinth_orient::oriented_recentered_mesh` is the same
@@ -294,6 +338,21 @@ impl SweepDemand {
             }
             _ => None,
         };
+        // The tip-contact scar, under the identical fidelity precedence and
+        // for the identical reason: a coarse raster's tips are not the
+        // emitted field's tips.
+        let tip = match (fidelity, tip_scar) {
+            (DemandFidelity::Production, TipContactScarPolicy::Measured) => {
+                tip_landing::tip_contact_scar(
+                    &transformed,
+                    &plan,
+                    table.delicacy(),
+                    table.display(),
+                    settings.down_limit,
+                )
+            }
+            _ => None,
+        };
         Ok(MeasuredSupportDemand {
             support_area_cm2: burden_cm2(plan.struts.len(), settings.tip_radius_mm),
             struts: plan.struts.len(),
@@ -304,6 +363,7 @@ impl SweepDemand {
             uncarried_load_mm2: plan.report.uncarried_load_mm2,
             model_landings: plan.report.landings.model,
             landing_scar_raw_mm2: landing.as_ref().map(|scar| scar.raw_mm2),
+            tip_scar_raw_mm2: tip.as_ref().map(|scar| scar.raw_mm2),
             fidelity,
         })
     }
@@ -352,6 +412,7 @@ impl SupportDemandMeasurer for SweepDemand {
                     fidelity,
                     &settings,
                     self.landing_scar,
+                    self.tip_scar,
                 )
             })
             .collect();
@@ -364,7 +425,7 @@ impl SupportDemandMeasurer for SweepDemand {
             .zip(&measured)
             .map(|(candidate, result)| {
                 let up = candidate.get();
-                let (arms, burden, landing) = match result {
+                let (arms, burden, landing, tip) = match result {
                     Ok(one) => (
                         one.struts.to_string(),
                         format!("{:.5}", one.support_area_cm2),
@@ -380,11 +441,20 @@ impl SupportDemandMeasurer for SweepDemand {
                                 )
                             },
                         ),
+                        one.tip_scar_raw_mm2.map_or_else(
+                            || "tip scar unmeasured".to_owned(),
+                            |scar| format!("tip scar {scar:.5} mm2"),
+                        ),
                     ),
-                    Err(_) => ("err".to_owned(), "err".to_owned(), "err".to_owned()),
+                    Err(_) => (
+                        "err".to_owned(),
+                        "err".to_owned(),
+                        "err".to_owned(),
+                        "err".to_owned(),
+                    ),
                 };
                 format!(
-                    "({:+.4},{:+.4},{:+.4}) arms {arms} burden {burden} cm2, {landing}",
+                    "({:+.4},{:+.4},{:+.4}) arms {arms} burden {burden} cm2, {landing}, {tip}",
                     up[0], up[1], up[2]
                 )
             })

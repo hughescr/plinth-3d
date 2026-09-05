@@ -253,6 +253,12 @@ fn a_zero_landing_scar_changes_no_committed_number_on_a_disc() {
 /// ones a production sweep priced (where the landing half is present) and the
 /// ones only the prefilter reached (where it is absent, and the identity is the
 /// two-half one).
+///
+/// **Measured with the tip-contact scar withheld** (`without_tip_contact_scar`),
+/// so this test still isolates the THREE halves it names: `scar_raw`'s fifth
+/// named half (`plinth_sweep::tip_landing`, `tests/tip_contact_scar.rs`) is a
+/// separate, independently withholdable term, and folding it in here would
+/// make this identity a four-half one under a three-half name.
 #[test]
 #[expect(
     clippy::float_cmp,
@@ -263,8 +269,8 @@ fn a_zero_landing_scar_changes_no_committed_number_on_a_disc() {
 fn the_scar_raw_is_exactly_its_three_named_halves() {
     let mesh = plinth_mesh::make_raking_blade().expect("the raking blade fixture");
     let request = SweepRequest::registered().expect("the registered sweep configuration");
-    let outcome =
-        search(&mesh, &request, Some(&SweepDemand::production())).expect("a scorable fixture");
+    let outcome = search(&mesh, &request, Some(&SweepDemand::without_tip_contact_scar()))
+        .expect("a scorable fixture");
     let commit = outcome.record().tiers.last().expect("a commit tier").clone();
 
     let mut with_landing = 0_usize;

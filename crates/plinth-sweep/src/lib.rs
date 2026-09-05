@@ -53,6 +53,7 @@ pub mod peel;
 pub mod raster;
 pub mod reach;
 pub mod report;
+pub mod tip_landing;
 pub mod up_sweep;
 
 use plinth_core::{m0_constants, LayerPlan};
@@ -67,6 +68,7 @@ pub use model_landing::{model_landing_scar, model_landings, ModelLanding, ModelL
 pub use orient_demand::{burden_cm2, SweepDemand};
 pub use peel::{PeelFieldMode, PeelFieldStats};
 pub use report::{PathHits, SweepRunReport};
+pub use tip_landing::{tip_contact_scar, tip_landings, TipCharge, TipContactScar, TipLanding};
 
 use grid::{plan_grid, Grid};
 use raster::{rasterize_into, LayerMasks, RasterScratch};

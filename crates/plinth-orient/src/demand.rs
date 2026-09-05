@@ -127,6 +127,16 @@ pub struct MeasuredSupportDemand {
     /// `Some(0.0)` asserts that a production sweep ran and nothing it placed
     /// touched the model.
     pub landing_scar_raw_mm2: Option<f64>,
+    /// `Σ` over this pose's arms of `π r_tip² × fragility × (1 + D)` of the
+    /// face each one's TIP carries — the mirror of
+    /// [`Self::landing_scar_raw_mm2`], priced at the other end of the arm,
+    /// and excluding a tip charged against a face the analytic down-facing
+    /// fold already counts (see `plinth_sweep::tip_landing`'s module doc for
+    /// the double-counting choice and the measurement behind it).
+    ///
+    /// **[`None`] is a stated absence, never a zero**, following the same
+    /// rule as [`Self::landing_scar_raw_mm2`].
+    pub tip_scar_raw_mm2: Option<f64>,
     /// Which raster this row was measured on. A row is only allowed to crown
     /// a pose when this is [`DemandFidelity::Production`].
     pub fidelity: DemandFidelity,

@@ -32,6 +32,8 @@ fn measured(support_area_cm2: f64, fidelity: DemandFidelity) -> MeasuredSupportD
         // what a measurer that never looked at a support field must say.
         model_landings: 0,
         landing_scar_raw_mm2: None,
+        // The double reports no tip contact either, for the same reason.
+        tip_scar_raw_mm2: None,
         fidelity,
     }
 }

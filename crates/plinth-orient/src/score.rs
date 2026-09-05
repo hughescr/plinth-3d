@@ -45,21 +45,27 @@
 //! unmeasured points scale) and the run report publishes the weight value at
 //! which the winning pose flips (D15).
 //!
-//! ## The scar term has a third half, and this module cannot measure it
+//! ## The scar term has a fourth half, and this module cannot measure either
 //!
 //! `Σ_down(...)` above prices the model's own down-facing area. It says
-//! nothing about where the support field SEATS: on `make_raking_blade` the two
-//! flip poses tie on every term here (65.42 mm² of fragility in both, because
-//! the 85°-raked blade is within 5° of vertical and never enters the
+//! nothing about where the support field SEATS or STANDS: on `make_raking_blade`
+//! the two flip poses tie on every term here (65.42 mm² of fragility in both,
+//! because the 85°-raked blade is within 5° of vertical and never enters the
 //! down-facing fold), and the pose that put a strut ON the blade won by three
-//! arms of measured burden. The missing quantity is the MODEL-LANDING scar —
-//! `Σ` over the arms that land on the model of `π r_seat² × fragility ×
-//! (1 + D)` of the landed face, the same product in the same units under the
-//! same `ORIENT_SCAR_WEIGHT` — and it is measurable only from a real support
-//! field. So it is measured in `plinth_sweep::model_landing`, arrives through
-//! [`crate::demand::MeasuredSupportDemand`], and is folded into `scar_raw_mm2`
-//! by [`crate::search`] at the commit tier's production stage. Here it is
-//! [`CandidateTerms::landing_scar_raw_mm2`] `= None`: a stated absence.
+//! arms of measured burden. Two missing quantities follow, both measurable
+//! only from a real support field and both folded in at the same commit-tier
+//! stage: the MODEL-LANDING scar — `Σ` over the arms that land on the model
+//! of `π r_seat² × fragility × (1 + D)` of the landed face — and the
+//! TIP-CONTACT scar — the same product over the faces the arms' TIPS carry,
+//! excluding a face the fold above already counts (`plinth_sweep::tip_landing`'s
+//! own doc has the double-counting choice and the measurement behind it). Both
+//! are the same product in the same units under the same `ORIENT_SCAR_WEIGHT`.
+//! They are measured in `plinth_sweep::model_landing` and
+//! `plinth_sweep::tip_landing`, arrive through
+//! [`crate::demand::MeasuredSupportDemand`], and are folded into `scar_raw_mm2`
+//! by [`crate::search`] at the commit tier's production stage. Here they are
+//! [`CandidateTerms::landing_scar_raw_mm2`] and
+//! [`CandidateTerms::tip_scar_raw_mm2`] `= None`: a stated absence.
 //!
 //! ## The search space is S², not SO(3)
 //!
@@ -628,6 +634,20 @@ pub struct CandidateTerms {
     /// where it reads as "not measured" rather than "measured, and nothing
     /// landed".
     pub landing_scar_raw_mm2: Option<f64>,
+    /// `Σ_tips(π r_tip² × fragility × (1 + display))` of the face each arm's
+    /// TIP carries — the mirror of [`Self::landing_scar_raw_mm2`], priced at
+    /// the other end of the arm, and the reason a support field standing on
+    /// the model's own delicate down-facing surface (not merely seated on
+    /// it) enters the objective at all.
+    ///
+    /// **[`None`] is a stated absence, not a zero**, for the identical
+    /// reason [`Self::landing_scar_raw_mm2`] is: this module cannot see a
+    /// support field. It is `None` here for every candidate; only a
+    /// PRODUCTION-fidelity sweep
+    /// (`plinth_orient::demand::DemandFidelity::Production`) knows where an
+    /// arm's tip carries, and the commit tier folds that measurement in
+    /// afterwards (`crate::search::TermsRecord::repriced`).
+    pub tip_scar_raw_mm2: Option<f64>,
     pub down_facing_faces: usize,
     pub score: f64,
 }
@@ -1506,6 +1526,9 @@ fn score_one(
             display_raw_mm2: canonical_zero(display_raw_mm2),
             // Structurally absent: see the field's own doc. No sweep has run.
             landing_scar_raw_mm2: None,
+            // Structurally absent for the same reason: no sweep has run, so
+            // nothing has a tip to carry a face.
+            tip_scar_raw_mm2: None,
             down_facing_faces,
             score: canonical_zero(score),
         }),
