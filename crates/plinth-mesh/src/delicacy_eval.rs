@@ -75,7 +75,7 @@ use crate::delicacy::{
     FaceTable,
 };
 use crate::{
-    build_face_topology, Mesh, WeldPolicy, TOPOLOGY_CUT_BOUNDARY, TOPOLOGY_CUT_DEGENERATE,
+    build_face_topology, Mesh, TopologyError, WeldPolicy, TOPOLOGY_CUT_BOUNDARY, TOPOLOGY_CUT_DEGENERATE,
     TOPOLOGY_CUT_DUPLICATE, TOPOLOGY_CUT_NONMANIFOLD, TOPOLOGY_CUT_POINT_ONLY,
     TOPOLOGY_CUT_SAME_DIRECTION,
 };
@@ -163,19 +163,27 @@ pub fn evaluate_delicacy(
 /// `normals` are unit length except on a degenerate face, where the normal is
 /// not defined at all; `degenerate` says which, so no later pass has to
 /// rediscover it from a magnitude comparison.
-struct FaceGeometryPass {
-    centroids: Vec<V3>,
-    normals: Vec<V3>,
-    degenerate: Vec<bool>,
+/// **Shared with [`crate::display_eval`]** (2026-09-04). The display-face
+/// evaluator needs the same three source-order arrays plus per-face area, and
+/// deriving them twice from the same mesh would be two spellings of one
+/// normal — the exact class of drift `geometry-canon.md` §1 exists to
+/// prevent. `areas_mm2` is written here and read only by the display
+/// evaluator; delicacy's own proxies do not weight by area.
+pub(crate) struct FaceGeometryPass {
+    pub(crate) centroids: Vec<V3>,
+    pub(crate) normals: Vec<V3>,
+    pub(crate) degenerate: Vec<bool>,
+    pub(crate) areas_mm2: Vec<f64>,
 }
 
 impl FaceGeometryPass {
-    fn run(mesh: &Mesh) -> Self {
+    pub(crate) fn run(mesh: &Mesh) -> Self {
         let verts = mesh.verts();
         let tris = mesh.tris();
         let mut centroids = Vec::with_capacity(tris.len());
         let mut normals = Vec::with_capacity(tris.len());
         let mut degenerate = Vec::with_capacity(tris.len());
+        let mut areas_mm2 = Vec::with_capacity(tris.len());
         for triangle in tris {
             let a = verts[triangle[0] as usize];
             let b = verts[triangle[1] as usize];
@@ -195,7 +203,9 @@ impl FaceGeometryPass {
             // component, because the kernel multiplies by one reciprocal where
             // this file divided three times (kernel `normalize` doc, "Spelling,
             // and the ULP it costs").
-            if let Some(unit) = normalize(cross(e1, e2)) {
+            let raw = cross(e1, e2);
+            areas_mm2.push(0.5 * norm(raw));
+            if let Some(unit) = normalize(raw) {
                 normals.push(unit);
                 degenerate.push(false);
             } else {
@@ -210,24 +220,32 @@ impl FaceGeometryPass {
             centroids,
             normals,
             degenerate,
+            areas_mm2,
         }
     }
 }
 
-/// The curvature proxy: normalized absolute angle defect, welded, averaged
-/// over each face's three corners.
+/// The welded angle defect `2π − Σ incident corner angles`, per welded vertex.
 ///
-/// The weld is [`WeldPolicy::ExactBits`] and is not the caller's choice. A
-/// binary STL is a triangle soup with three vertices per facet, so under
-/// `WeldPolicy::None` no two faces would share a vertex, every edge would look
-/// like a boundary and the whole field would collapse to zero curvature — a
-/// silent, plausible-looking wrong answer. `Epsilon` would go the other way and
-/// introduce a welding tolerance this evaluator has no measurement for. Exact
-/// welding is the only policy under which the angle-defect identity means what
-/// it says, so it is stated here rather than taken as a parameter.
-fn curvature_by_face(mesh: &Mesh, geometry: &FaceGeometryPass) -> Result<Vec<f64>, DelicacyError> {
-    let topology =
-        build_face_topology(mesh, WeldPolicy::ExactBits).map_err(DelicacyError::Topology)?;
+/// Extracted from [`curvature_by_face`] on 2026-09-04 so the display-face
+/// evaluator can read the SIGN of the same measurement (a positive defect is
+/// an elliptic, outward-bulging vertex — the tip of a protrusion; a groove is
+/// developable and reads ~0) without a second, differently-spelled curvature
+/// in this crate. The arithmetic, its order and its exclusion rules are
+/// unchanged: `defect` holds the raw signed value for every welded vertex,
+/// `unusable` marks the vertices whose incident faces do not close one
+/// manifold disc, and both consumers apply their own reading on top.
+pub(crate) struct WeldedAngleDefect {
+    pub(crate) topology: crate::FaceTopology,
+    pub(crate) defect: Vec<f64>,
+    pub(crate) unusable: Vec<bool>,
+}
+
+pub(crate) fn welded_angle_defect(
+    mesh: &Mesh,
+    geometry: &FaceGeometryPass,
+) -> Result<WeldedAngleDefect, TopologyError> {
+    let topology = build_face_topology(mesh, WeldPolicy::ExactBits)?;
     let welded_of_source = topology.source_vertex_to_welded();
     let welded_count = topology.welded_vertex_count() as usize;
     let cuts = topology.cut_flags();
@@ -269,6 +287,41 @@ fn curvature_by_face(mesh: &Mesh, geometry: &FaceGeometryPass) -> Result<Vec<f64
         }
     }
 
+    let mut defect = Vec::with_capacity(welded_count);
+    for sum in angle_sum {
+        defect.push(std::f64::consts::TAU - sum);
+    }
+    Ok(WeldedAngleDefect {
+        topology,
+        defect,
+        unusable,
+    })
+}
+
+/// The curvature proxy: normalized absolute angle defect, welded, averaged
+/// over each face's three corners.
+///
+/// The weld is [`WeldPolicy::ExactBits`] and is not the caller's choice. A
+/// binary STL is a triangle soup with three vertices per facet, so under
+/// `WeldPolicy::None` no two faces would share a vertex, every edge would look
+/// like a boundary and the whole field would collapse to zero curvature — a
+/// silent, plausible-looking wrong answer. `Epsilon` would go the other way and
+/// introduce a welding tolerance this evaluator has no measurement for. Exact
+/// welding is the only policy under which the angle-defect identity means what
+/// it says, so it is stated here rather than taken as a parameter.
+fn curvature_by_face(mesh: &Mesh, geometry: &FaceGeometryPass) -> Result<Vec<f64>, DelicacyError> {
+    // The accumulation itself now lives in `welded_angle_defect`, shared with
+    // the display-face evaluator. Everything below is the READING delicacy
+    // takes of it — normalized ABSOLUTE defect — and is unchanged.
+    let WeldedAngleDefect {
+        topology,
+        defect,
+        unusable,
+    } = welded_angle_defect(mesh, geometry).map_err(DelicacyError::Topology)?;
+    let welded_of_source = topology.source_vertex_to_welded();
+    let welded_count = defect.len();
+    let tris = mesh.tris();
+
     // `|2π − Σ angles| / 2π`.  A closed convex vertex has a defect in
     // `[0, 2π)`, so the quotient lands in `[0, 1)` without a clamp; the `min`
     // covers a saddle whose incident angles exceed `4π`, which is a real if
@@ -279,7 +332,7 @@ fn curvature_by_face(mesh: &Mesh, geometry: &FaceGeometryPass) -> Result<Vec<f64
             vertex_curvature.push(0.0);
             continue;
         }
-        let defect = std::f64::consts::TAU - angle_sum[vertex];
+        let defect = defect[vertex];
         if !defect.is_finite() {
             vertex_curvature.push(0.0);
             continue;

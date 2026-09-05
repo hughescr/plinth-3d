@@ -100,10 +100,12 @@
 use geom_kernel::vec3;
 use plinth_core::m0_constants;
 use plinth_mesh::{
-    build_face_topology, evaluate_delicacy, mesh_fingerprint, DelicacyBuildConfig, DelicacyError,
-    DelicacyField, DelicacySettings, Mesh, TopologyError, WeldPolicy,
+    build_face_topology, evaluate_delicacy, evaluate_display, mesh_fingerprint,
+    DelicacyBuildConfig, DelicacyError, DelicacyField, DelicacySettings, DisplayBuildConfig,
+    DisplayError, DisplayField, DisplaySettings, Mesh, TopologyError, WeldPolicy,
 };
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::section::{build_profile, SectionRefusal};
@@ -116,6 +118,13 @@ pub const ORIENT_WEIGHT_SUPPORT_AREA_CM2_ID: &str = "ORIENT_WEIGHT_SUPPORT_AREA_
 pub const ORIENT_WEIGHT_PEAK_XSEC_CM2_ID: &str = "ORIENT_WEIGHT_PEAK_XSEC_CM2";
 pub const ORIENT_WEIGHT_HEIGHT_MM_ID: &str = "ORIENT_WEIGHT_HEIGHT_MM";
 pub const ORIENT_SCAR_WEIGHT_ID: &str = "ORIENT_SCAR_WEIGHT";
+/// The display-face field's own registered numbers, carried so a report can
+/// stamp what the scar term's display factor was measured with. **No new
+/// WEIGHT is registered for the display factor and none is read**: the scar
+/// term keeps [`ORIENT_SCAR_WEIGHT_ID`] unchanged and the field enters as a
+/// dimensionless multiplier `1 + D`.
+pub const DISPLAY_VIEW_DIRECTIONS_ID: &str = "DISPLAY_VIEW_DIRECTIONS";
+pub const DISPLAY_DETAIL_TIP_MULTIPLE_ID: &str = "DISPLAY_DETAIL_TIP_MULTIPLE";
 pub const OVERHANG_ANGLE_DEG_ID: &str = "OVERHANG_ANGLE_DEG";
 pub const ORIENT_PEEL_POINTS_PER_NEWTON_ID: &str = "ORIENT_PEEL_POINTS_PER_NEWTON";
 pub const ORIENT_PEEL_REFERENCE_AREA_MM2_ID: &str = "ORIENT_PEEL_REFERENCE_AREA_MM2";
@@ -573,11 +582,140 @@ pub struct CandidateTerms {
     pub peel_term: f64,
     pub height_mm: f64,
     pub scar_term: f64,
-    /// `Σ_down(area_mm² × delicacy)` before the weight and the cm² conversion,
-    /// carried so a report can show the measurement separately from its price.
+    /// `Σ_down(area_mm² × fragility × (1 + display))` before the weight and the
+    /// cm² conversion, carried so a report can show the measurement separately
+    /// from its price. Equal to `fragility_raw_mm2 + display_raw_mm2` by
+    /// construction.
     pub scar_raw_mm2: f64,
+    /// `Σ_down(area_mm² × fragility)`: the quantity the scar term measured
+    /// before the display-face field existed, published unchanged.
+    /// **Fragility and display are two named quantities, not one blended
+    /// number** (owner ruling, 2026-09-03), and this is the fragility half.
+    pub fragility_raw_mm2: f64,
+    /// `Σ_down(area_mm² × fragility × display)`: the display half, the
+    /// INCREMENT the display-face field adds. Zero exactly when no face that
+    /// this pose turns downward carries display value, which is what makes
+    /// `D = 0` reproduce the pre-display objective rather than approximate it.
+    pub display_raw_mm2: f64,
     pub down_facing_faces: usize,
     pub score: f64,
+}
+
+/// **The per-model display-face map, summarised so it can be INSPECTED before
+/// it steers anything** (owner ruling, 2026-09-03).
+///
+/// Everything here is a measurement of one `(mesh, LOD)` pair's display field,
+/// read off the scoring table. It is a DISCLOSURE: nothing consumes it, no
+/// gate compares it, and the field of record stays the digest-bound
+/// [`plinth_mesh::DisplayField`] the table was assembled from.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayFieldSummary {
+    /// The digest of the field this summarises, so a summary can never be
+    /// read against a different measurement.
+    pub digest: String,
+    pub faces: usize,
+    pub total_area_mm2: f64,
+    /// The plain per-face mean of D.
+    pub mean: f64,
+    /// The AREA-WEIGHTED mean of D, which is the figure comparable to the
+    /// scar term: the scar fold weights every face by its area.
+    pub area_weighted_mean: f64,
+    /// Ten equal bins over `[0, 1]`, each holding the FRACTION OF TOTAL AREA
+    /// whose D falls in that bin. Bin 0 is `[0, 0.1)`; the last bin is closed
+    /// at 1.
+    pub area_weighted_histogram: [f64; 10],
+    /// The area-weighted mean of D over the faces whose AUTHORED normal points
+    /// up (`n_z > 1/sqrt(2)`) and down (`n_z < -1/sqrt(2)`), the two numbers
+    /// that say whether the authored up-signal actually separated this model.
+    pub authored_up_area_weighted_mean: f64,
+    pub authored_down_area_weighted_mean: f64,
+    /// The eight faces with the highest D, in descending D then ascending
+    /// face index, with each factor beside the product.
+    pub top_faces: Vec<DisplayFaceSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayFaceSummary {
+    pub face: usize,
+    pub display: f64,
+    pub area_mm2: f64,
+    pub authored_normal_z: f64,
+}
+
+/// How many faces [`DisplayFieldSummary::top_faces`] lists. A report width,
+/// not a measurement: it cannot change a value, only how many of them a reader
+/// sees, so it is a literal here rather than a registry entry.
+const DISPLAY_SUMMARY_TOP_FACES: usize = 8;
+
+impl OrientFaceTable {
+    /// Summarise this table's display field, or `None` when no field was
+    /// built — a stated absence, never a summary of zeros.
+    #[must_use]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "one histogram bin index from a value the DisplayFaceValue contract has already \
+                  clamped into [0, 1]; the floor is non-negative and below 10 by construction and \
+                  the min(9) pins the closed end"
+    )]
+    pub fn display_summary(&self) -> Option<DisplayFieldSummary> {
+        let digest = self.display_digest.clone()?;
+        if self.display.len() != self.areas_mm2.len() {
+            return None;
+        }
+        let axis = std::f64::consts::FRAC_1_SQRT_2;
+        let mut total_area = 0.0_f64;
+        let mut weighted = 0.0_f64;
+        let mut plain = 0.0_f64;
+        let mut histogram = [0.0_f64; 10];
+        let (mut up_area, mut up_weighted) = (0.0_f64, 0.0_f64);
+        let (mut down_area, mut down_weighted) = (0.0_f64, 0.0_f64);
+        let mut ranked: Vec<(f64, usize)> = Vec::with_capacity(self.display.len());
+        for (face, &display) in self.display.iter().enumerate() {
+            let area = self.areas_mm2[face];
+            total_area += area;
+            weighted += area * display;
+            plain += display;
+            let bin = ((display * 10.0).floor().max(0.0) as usize).min(9);
+            histogram[bin] += area;
+            let normal_z = self.normals[face][2];
+            if normal_z > axis {
+                up_area += area;
+                up_weighted += area * display;
+            } else if normal_z < -axis {
+                down_area += area;
+                down_weighted += area * display;
+            }
+            ranked.push((display, face));
+        }
+        ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        let scale = |value: f64, by: f64| if by > 0.0 { value / by } else { 0.0 };
+        for bucket in &mut histogram {
+            *bucket = scale(*bucket, total_area);
+        }
+        Some(DisplayFieldSummary {
+            digest,
+            faces: self.display.len(),
+            total_area_mm2: total_area,
+            mean: scale(plain, self.display.len() as f64),
+            area_weighted_mean: scale(weighted, total_area),
+            area_weighted_histogram: histogram,
+            authored_up_area_weighted_mean: scale(up_weighted, up_area),
+            authored_down_area_weighted_mean: scale(down_weighted, down_area),
+            top_faces: ranked
+                .into_iter()
+                .take(DISPLAY_SUMMARY_TOP_FACES)
+                .map(|(display, face)| DisplayFaceSummary {
+                    face,
+                    display,
+                    area_mm2: self.areas_mm2[face],
+                    authored_normal_z: self.normals[face][2],
+                })
+                .collect(),
+        })
+    }
 }
 
 /// A candidate excluded from ranking, with the reason it was excluded. Never a
@@ -651,6 +789,13 @@ pub struct OrientFaceTable {
     /// `None` when the field was never built because the scar weight is
     /// structurally zero — a stated absence, not a digest of zeros.
     delicacy_digest: Option<String>,
+    /// The display-face field D, in source face order, or EMPTY when no field
+    /// was built. An empty display vector is a stated absence and is read as
+    /// the multiplier `1 + 0`, which is the pre-display objective exactly.
+    display: Vec<f64>,
+    /// `None` when no display field was built — the same stated-absence rule
+    /// [`Self::delicacy_digest`] follows.
+    display_digest: Option<String>,
     boundary_edges: usize,
     nonmanifold_edges: usize,
 }
@@ -669,9 +814,20 @@ impl OrientFaceTable {
         let lod = lod.into();
         let settings = DelicacySettings::production().map_err(ScoreError::Delicacy)?;
         let config = DelicacyBuildConfig::production(mesh.tris().len());
-        let field =
+        let fragility =
             evaluate_delicacy(mesh, lod.clone(), settings, config).map_err(ScoreError::Delicacy)?;
-        Self::with_delicacy(mesh, lod, &field)
+        // The display-face field is measured HERE, on the same `(mesh, LOD)`
+        // pair, in the mesh's AUTHORED frame — this table is orientation
+        // invariant and the sweep never rotates a mesh (D-4), so "the frame
+        // the table was built in" and "the frame the file was authored in"
+        // are the same frame, structurally. There is no constructor anywhere
+        // that could hand this table a field measured in a posed frame.
+        let display_settings = DisplaySettings::production().map_err(ScoreError::Display)?;
+        let display_config =
+            DisplayBuildConfig::production(mesh.tris().len()).map_err(ScoreError::Display)?;
+        let display = evaluate_display(mesh, lod.clone(), display_settings, display_config)
+            .map_err(ScoreError::Display)?;
+        Self::assemble(mesh, lod, Some(&fragility), Some(&display))
     }
 
     /// Builds the table with **no** delicacy field at all, for a sweep whose
@@ -693,7 +849,7 @@ impl OrientFaceTable {
     ///
     /// The closure and topology refusals of [`OrientFaceTable::build`].
     pub fn without_delicacy(mesh: &Mesh, lod: impl Into<String>) -> Result<Self, ScoreError> {
-        Self::assemble(mesh, lod.into(), None)
+        Self::assemble(mesh, lod.into(), None, None)
     }
 
     /// Builds the table around a delicacy field that was already measured.
@@ -713,13 +869,35 @@ impl OrientFaceTable {
         lod: impl Into<String>,
         field: &DelicacyField,
     ) -> Result<Self, ScoreError> {
-        Self::assemble(mesh, lod.into(), Some(field))
+        Self::assemble(mesh, lod.into(), Some(field), None)
+    }
+
+    /// Builds the table around a fragility field AND a display-face field that
+    /// were both already measured.
+    ///
+    /// Both are checked against this mesh and this LOD, for the same reason
+    /// [`Self::with_delicacy`] checks one: a field measured on another object
+    /// must be inexpressible here, not merely discouraged.
+    ///
+    /// # Errors
+    ///
+    /// The refusals of [`Self::with_delicacy`], plus
+    /// [`ScoreError::DisplayLodMismatch`] when the display field names another
+    /// LOD and [`ScoreError::Display`] when it was measured on another mesh.
+    pub fn with_fields(
+        mesh: &Mesh,
+        lod: impl Into<String>,
+        fragility: &DelicacyField,
+        display: &DisplayField,
+    ) -> Result<Self, ScoreError> {
+        Self::assemble(mesh, lod.into(), Some(fragility), Some(display))
     }
 
     fn assemble(
         mesh: &Mesh,
         lod: String,
         field: Option<&DelicacyField>,
+        display: Option<&DisplayField>,
     ) -> Result<Self, ScoreError> {
         if let Some(field) = field {
             if field.face_table().lod() != lod {
@@ -729,6 +907,15 @@ impl OrientFaceTable {
                 });
             }
             field.validate_mesh(mesh).map_err(ScoreError::Delicacy)?;
+        }
+        if let Some(display) = display {
+            if display.face_table().lod() != lod {
+                return Err(ScoreError::DisplayLodMismatch {
+                    expected: lod,
+                    actual: display.face_table().lod().to_string(),
+                });
+            }
+            display.validate_mesh(mesh).map_err(ScoreError::Display)?;
         }
 
         // Welded topology, once. `WeldPolicy::ExactBits` is stated here rather
@@ -800,6 +987,14 @@ impl OrientFaceTable {
                     .collect()
             }),
             delicacy_digest: field.map(|field| field.digest().to_string()),
+            display: display.map_or_else(Vec::new, |display| {
+                display
+                    .face_values()
+                    .iter()
+                    .map(|value| value.weight())
+                    .collect()
+            }),
+            display_digest: display.map(|display| display.digest().to_string()),
             boundary_edges: counts.boundary_edges,
             nonmanifold_edges: counts.nonmanifold_edges,
         })
@@ -818,6 +1013,18 @@ impl OrientFaceTable {
     #[must_use]
     pub fn delicacy_digest(&self) -> Option<&str> {
         self.delicacy_digest.as_deref()
+    }
+    /// The digest of the display-face field this table was built around, or
+    /// `None` when no display field was built.
+    #[must_use]
+    pub fn display_digest(&self) -> Option<&str> {
+        self.display_digest.as_deref()
+    }
+    /// The display-face field D in source face order, or an empty slice when
+    /// no field was built.
+    #[must_use]
+    pub fn display(&self) -> &[f64] {
+        &self.display
     }
     #[must_use]
     pub fn face_count(&self) -> usize {
@@ -1099,7 +1306,8 @@ fn score_one(
     // delicacy field is not read *at all*, so a scar-free score is independent of
     // it structurally, not by multiplying by zero.
     let mut support_area_mm2 = 0.0_f64;
-    let mut scar_raw_mm2 = 0.0_f64;
+    let mut fragility_raw_mm2 = 0.0_f64;
+    let mut display_raw_mm2 = 0.0_f64;
     let mut down_facing_faces = 0_usize;
     if weights.scar == 0.0 {
         for face in 0..table.tris.len() {
@@ -1108,15 +1316,39 @@ fn score_one(
                 down_facing_faces += 1;
             }
         }
-    } else {
+    } else if table.display.is_empty() {
+        // No display field was built for this table. The absence is read as
+        // the multiplier `1 + 0` and is spelled as a SEPARATE loop rather than
+        // as an index into an empty vector, for the same structural reason the
+        // scar-free branch is hoisted: the pre-display objective must be
+        // reproduced by not reading a field, not by multiplying one by zero.
         for face in 0..table.tris.len() {
             if nz[face * stride + column] < down_limit {
                 support_area_mm2 += table.areas_mm2[face];
-                scar_raw_mm2 += table.areas_mm2[face] * table.delicacy[face];
+                fragility_raw_mm2 += table.areas_mm2[face] * table.delicacy[face];
+                down_facing_faces += 1;
+            }
+        }
+    } else {
+        // `Σ_down(area × fragility × (1 + D))`, accumulated as its two named
+        // halves. **The association is pinned to reproduce the pre-display
+        // fold bit for bit when D is zero**: the fragility half is the
+        // identical `area * delicacy` product in the identical order, and the
+        // display half is a separate sum that adds `0.0` per face when the
+        // field is zero. Distributing `(1 + D)` inside the multiply instead
+        // would round differently and could move an argmin at 650 candidates
+        // for a field that says nothing.
+        for face in 0..table.tris.len() {
+            if nz[face * stride + column] < down_limit {
+                support_area_mm2 += table.areas_mm2[face];
+                let fragility = table.areas_mm2[face] * table.delicacy[face];
+                fragility_raw_mm2 += fragility;
+                display_raw_mm2 += fragility * table.display[face];
                 down_facing_faces += 1;
             }
         }
     }
+    let scar_raw_mm2 = fragility_raw_mm2 + display_raw_mm2;
 
     let Projection {
         plane,
@@ -1227,6 +1459,8 @@ fn score_one(
             height_mm,
             scar_term,
             scar_raw_mm2: canonical_zero(scar_raw_mm2),
+            fragility_raw_mm2: canonical_zero(fragility_raw_mm2),
+            display_raw_mm2: canonical_zero(display_raw_mm2),
             down_facing_faces,
             score: canonical_zero(score),
         }),
@@ -1347,6 +1581,10 @@ pub enum ScoreError {
     DelicacyLodMismatch { expected: String, actual: String },
     #[error("orientation delicacy field is unavailable: {0}")]
     Delicacy(DelicacyError),
+    #[error("display field names LOD {actual}, but the table is scoring LOD {expected}")]
+    DisplayLodMismatch { expected: String, actual: String },
+    #[error("orientation display-face field is unavailable: {0}")]
+    Display(DisplayError),
     #[error("orientation mesh topology error: {0}")]
     Topology(TopologyError),
     #[error(

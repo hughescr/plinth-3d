@@ -31,12 +31,13 @@ mod section;
 
 pub use score::{
     score_candidates, section_area_mm2_at, CandidateOutcome, CandidateRefusal,
-    CandidateRefusalReason, CandidateTerms, ObjectiveWeights, OrientFaceTable, OrientSearchLimits,
-    ScoreError, ScoreMeter, ScorePlan, ScoredCandidates, UpDirection, ORIENT_SCAR_WEIGHT_ID,
-    ORIENT_WEIGHT_HEIGHT_MM_ID, ORIENT_WEIGHT_PEAK_XSEC_CM2_ID, ORIENT_WEIGHT_SUPPORT_AREA_CM2_ID,
-    OVERHANG_ANGLE_DEG_ID,
+    CandidateRefusalReason, CandidateTerms, DisplayFaceSummary, DisplayFieldSummary,
+    ObjectiveWeights, OrientFaceTable, OrientSearchLimits, ScoreError, ScoreMeter, ScorePlan,
+    ScoredCandidates, UpDirection, DISPLAY_DETAIL_TIP_MULTIPLE_ID, DISPLAY_VIEW_DIRECTIONS_ID,
+    ORIENT_SCAR_WEIGHT_ID, ORIENT_WEIGHT_HEIGHT_MM_ID, ORIENT_WEIGHT_PEAK_XSEC_CM2_ID,
+    ORIENT_WEIGHT_SUPPORT_AREA_CM2_ID, OVERHANG_ANGLE_DEG_ID,
 };
-pub use search::{DenseSweepRecord, SearchError, SweepOutcome, SweepRequest};
+pub use search::{DenseSweepRecord, LodRecord, SearchError, SweepOutcome, SweepRequest, EXACT_LOD};
 
 use plinth_core::Finite;
 use plinth_decimate::{DecimatedModel, DecimationAudit};

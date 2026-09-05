@@ -8,6 +8,8 @@
 
 mod delicacy;
 mod delicacy_eval;
+mod display;
+mod display_eval;
 mod fixtures;
 mod io;
 mod repair;
@@ -19,6 +21,11 @@ pub use delicacy::{
     FaceTable, DELICACY_FIELD_SCHEMA, DELICACY_FIELD_SCHEMA_VERSION,
 };
 pub use delicacy_eval::evaluate_delicacy;
+pub use display::{
+    DisplayBuildConfig, DisplayError, DisplayFaceValue, DisplayField, DisplaySettings,
+    DISPLAY_FIELD_SCHEMA, DISPLAY_FIELD_SCHEMA_VERSION,
+};
+pub use display_eval::evaluate_display;
 pub use fixtures::{
     dual_cavity_junction_heights_mm, dual_cavity_pawn_analytic_volume_mm3, make_box,
     make_box_default, make_doubled_sheet_box, make_dual_cavity_pawn,

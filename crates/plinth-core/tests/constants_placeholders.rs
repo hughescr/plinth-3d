@@ -8,7 +8,7 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_PLACEHOLDER_IDS: [&str; 278] = [
+const EXPECTED_PLACEHOLDER_IDS: [&str; 280] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -70,6 +70,8 @@ const EXPECTED_PLACEHOLDER_IDS: [&str; 278] = [
     "DEFAULT_CONTACT_DEPTH_MM",
     "DELICACY_CURVATURE_WEIGHT",
     "DELICACY_THINNESS_WEIGHT",
+    "DISPLAY_DETAIL_TIP_MULTIPLE",
+    "DISPLAY_VIEW_DIRECTIONS",
     "EMIT_REQUIRE_PASSED_GATES_DEFAULT",
     "ENCLOSURE_PROOF_TOL_MM",
     "ENCLOSURE_TOL_MM",
@@ -302,7 +304,7 @@ macro_rules! rows {
     };
 }
 
-static EXPECTED_ROWS: [ExpectedRow; 278] = rows! {
+static EXPECTED_ROWS: [ExpectedRow; 280] = rows! {
     "A_ABS_MM2", "2.0", "mm²", "scalar";
     "BALL_BREACH_EPS_MM", "0.05", "mm", "scalar";
     "BALL_FACTOR_FOOT", "1.4", "1", "scalar";
@@ -364,6 +366,8 @@ static EXPECTED_ROWS: [ExpectedRow; 278] = rows! {
     "DEFAULT_CONTACT_DEPTH_MM", "0.3", "mm", "scalar";
     "DELICACY_CURVATURE_WEIGHT", "0.6", "1", "scalar";
     "DELICACY_THINNESS_WEIGHT", "0.4", "1", "scalar";
+    "DISPLAY_DETAIL_TIP_MULTIPLE", "2.0", "1", "scalar";
+    "DISPLAY_VIEW_DIRECTIONS", "64", "count", "scalar";
     "EMIT_REQUIRE_PASSED_GATES_DEFAULT", "true", "1", "scalar";
     "ENCLOSURE_PROOF_TOL_MM", "0.018", "mm", "scalar";
     "ENCLOSURE_TOL_MM", "0.02", "mm", "scalar";
@@ -584,7 +588,7 @@ static EXPECTED_ROWS: [ExpectedRow; 278] = rows! {
 };
 
 fn component() -> M0PlaceholderConstants {
-    M0PlaceholderConstants::new().expect("all 278 placeholder declarations must construct")
+    M0PlaceholderConstants::new().expect("all 280 placeholder declarations must construct")
 }
 
 #[test]
@@ -595,7 +599,7 @@ fn exact_handwritten_membership_is_stable_sorted_and_all_placeholder() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, EXPECTED_PLACEHOLDER_IDS);
-    assert_eq!(descriptors.len(), 278);
+    assert_eq!(descriptors.len(), 280);
     assert!(descriptors
         .windows(2)
         .all(|pair| pair[0].id() < pair[1].id()));
@@ -686,7 +690,7 @@ const fn bound_key(bound: BoundKind) -> &'static str {
 }
 
 #[test]
-fn evidence_and_placeholder_fixture_builds_one_318_entry_structural_batch() {
+fn evidence_and_placeholder_fixture_builds_one_326_entry_structural_batch() {
     let mut descriptors = component()
         .descriptors()
         .unwrap()
@@ -694,14 +698,14 @@ fn evidence_and_placeholder_fixture_builds_one_318_entry_structural_batch() {
         .collect::<Vec<_>>();
     descriptors.extend(M0EvidenceConstants::new().unwrap().descriptors().unwrap());
     let registry = ConstantsRegistry::build_batch(descriptors).unwrap();
-    assert_eq!(registry.len(), 324);
+    assert_eq!(registry.len(), 326);
     assert_eq!(
         registry
             .iter()
             .map(|descriptor| descriptor.id().as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        324
+        326
     );
 }
 

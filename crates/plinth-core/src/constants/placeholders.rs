@@ -984,7 +984,7 @@ macro_rules! placeholder_declarations {
                 }
             )+
 
-            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 278], RegistryError> {
+            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 280], RegistryError> {
                 Ok([
                     $(ConstantDescriptor::from_placeholder(
                         ConstantId::from($id),
@@ -1121,6 +1121,10 @@ placeholder_declarations! {
     "DELICACY_CURVATURE_WEIGHT", "1", "scalar", "Curvature proxy blend weight.";
     delicacy_thinness_weight: UnitFraction = UnitFraction::new(0.4)?;
     "DELICACY_THINNESS_WEIGHT", "1", "scalar", "Thinness proxy blend weight.";
+    display_detail_tip_multiple: PositiveFinite = PositiveFinite::new(2.0)?;
+    "DISPLAY_DETAIL_TIP_MULTIPLE", "1", "scalar", "Display-face field (2026-09-04, owner rulings of 2026-09-03): the multiple of the SCAR RADIUS at which surface-normal articulation is aggregated into the display-detail signal. R_detail = this x TIP_RADIUS_MAX_GROWN_SCAR_MM = 2 x 0.400 mm = 0.800 mm, and the tip-discount comparison radius R_small is TIP_RADIUS_MAX_GROWN_SCAR_MM itself. The LENGTH is inherited, not invented: TIP_RADIUS_MAX_GROWN_SCAR_MM is Measured owner field data for the largest scar a support tip may leave, so R_small is the radius of the worst scar one arm can make and R_detail is a neighbourhood strictly wider than it. The MULTIPLE is a Placeholder and is honestly labelled as one: 2 is the smallest whole multiple that separates the two scales at all (at 1 the tip-collapse comparison is between a radius and itself and can never fire), and a larger multiple blurs genuine detail into its unarticulated surroundings. Nothing in the physics record derives it. It DOES move an outcome -- it changes D, and D multiplies the orientation scar term -- so it is disclosed rather than pruning-only, in the manner ORIENT_PEEL_POINTS_PER_NEWTON already establishes for a placeholder that prices a real term.";
+    display_view_directions: NonZeroU64 = nonzero(64)?;
+    "DISPLAY_VIEW_DIRECTIONS", "count", "scalar", "Display-face field (2026-09-04): the number of Fibonacci-lattice view directions sampled over the AUTHORED upper hemisphere when measuring per-face visibility. A QUADRATURE RESOLUTION, in the same class as ORIENT_FIBONACCI_COUNT, not a threshold: the quantity it estimates is the cosine-weighted unoccluded solid angle above the face, which is an integral, and refining the direction set can only refine the estimate. 64 directions over a hemisphere give the same ~10 deg nearest-neighbour spacing at which ORIENT_FIBONACCI_COUNT's 512-over-the-sphere grid is registered, at 1/8th the ray cost -- and the ray cost is per FACE, not per model, so this number multiplies the whole exact-LOD mesh. The recorded gate is the same K-doubling gate ORIENT_FIBONACCI_COUNT carries: a doubling that moves a per-model D summary or a committed pose is the discovery that 64 is too coarse, and the measurement is published in the run's evidence rather than assumed.";
     emit_require_passed_gates_default: bool = true;
     "EMIT_REQUIRE_PASSED_GATES_DEFAULT", "1", "scalar", "Emission authorization default; blocking defects always refuse emission.";
     enclosure_proof_tol_mm: PositiveFinite = PositiveFinite::new(0.018)?;

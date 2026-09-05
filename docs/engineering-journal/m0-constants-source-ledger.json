@@ -668,6 +668,26 @@
       "provenance_detail": "Placeholder"
     },
     {
+      "id": "DISPLAY_DETAIL_TIP_MULTIPLE",
+      "classification": "search_objective",
+      "normative": "docs/plans/slice-sweep-core-2026-09-02.md display-face amendment (2026-09-04) = 2.0, dimensionless",
+      "source_locators": [
+        "crates/plinth-mesh/src/display.rs:DisplaySettings::production"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Multiple of TIP_RADIUS_MAX_GROWN_SCAR_MM giving the display-detail neighbourhood radius R_detail (2 x 0.400 = 0.800 mm); the LENGTH is inherited from a Measured owner field datum, the MULTIPLE is an undeviced placeholder and 2 is the smallest whole multiple at which the tip-collapse comparison can fire at all. It moves D and therefore prices the orientation scar term; disclosed, not pruning-only."
+    },
+    {
+      "id": "DISPLAY_VIEW_DIRECTIONS",
+      "classification": "search_objective",
+      "normative": "docs/plans/slice-sweep-core-2026-09-02.md display-face amendment (2026-09-04) = 64 directions",
+      "source_locators": [
+        "crates/plinth-mesh/src/display_eval.rs:hemisphere_directions"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Fibonacci-lattice quadrature resolution over the AUTHORED upper hemisphere for the display visibility factor. Same class as ORIENT_FIBONACCI_COUNT (a grid density, not a threshold) and carries the same K-doubling gate: a doubling that moves a per-model D summary or a committed pose is the discovery that 64 is too coarse."
+    },
+    {
       "id": "EMIT_REQUIRE_PASSED_GATES_DEFAULT",
       "classification": "runtime_emit_gate",
       "provenance_wrapper": "Placeholder",

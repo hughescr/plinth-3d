@@ -335,6 +335,41 @@ fn print_model(model: &ModelPreparationReport) {
             },
             orientation.selection,
         );
+        // **The display-face map, published before it is trusted** (owner
+        // ruling, 2026-09-03). The orientation scar term is
+        // `Sum_down(area x fragility x (1 + D))`, and D is measured on the
+        // model in its AUTHORED frame. An operator must be able to see what
+        // the map SAID about this model without re-running anything, so the
+        // summary is printed for every searched model, high values or not:
+        // "the map found almost nothing" is a measurement too.
+        if let Some(display) = &orientation.display {
+            println!(
+                "  display face map  D area-weighted mean {:.4} (per-face mean {:.4}) over {} \
+                 faces / {:.1} mm2; authored-up faces {:.4} vs authored-down faces {:.4}; field \
+                 {}",
+                display.area_weighted_mean,
+                display.mean,
+                display.faces,
+                display.total_area_mm2,
+                display.authored_up_area_weighted_mean,
+                display.authored_down_area_weighted_mean,
+                &display.digest[..12.min(display.digest.len())],
+            );
+            println!(
+                "    area-weighted histogram of D, ten bins over [0, 1] (% of area):{}",
+                display
+                    .area_weighted_histogram
+                    .iter()
+                    .map(|share| format!(" {:.2}", share * 100.0))
+                    .collect::<String>()
+            );
+            for face in &display.top_faces {
+                println!(
+                    "    highest D  face {:>7}  D {:.4}  area {:.5} mm2  authored n_z {:+.4}",
+                    face.face, face.display, face.area_mm2, face.authored_normal_z,
+                );
+            }
+        }
     }
     match &model.outcome {
         ModelPreparationOutcome::Artifact {

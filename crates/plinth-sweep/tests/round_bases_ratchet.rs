@@ -3,8 +3,34 @@
 //!
 //! The owner's gate for this project (2026-09-02/03 rulings) is that
 //! `Round 25/50/100` — flat discs, 3.5 mm thick, with a 2.5 mm recess on
-//! top — emit in seconds, FLAT (no tilt), recess UP, underside supported at
-//! regular spacing, zero uncarried load, no refusal. `oracle_disc.rs` and
+//! the authored top — emit in seconds, FLAT (no tilt), the correct way up,
+//! underside supported at regular spacing, zero uncarried load, no refusal.
+//!
+//! # THE RECORD, CORRECTED 2026-09-04 (owner's ChituBox verdict, 2026-09-03)
+//!
+//! **`Round 25` is NOT upside down, and never was.** The owner opened the
+//! emitted files and ruled:
+//!
+//! > "Round_25 is actually *not* upside-down after all! It has that inner
+//! > circle thing on the underside, I think maybe to reduce buckling or
+//! > something as a stiffener ... The flat side is up, where the mini gets
+//! > glued."
+//!
+//! So the pose this file records for `Round 25` — searched up-direction
+//! `(0, 0, -1)`, the annular face at `z_min` — is CORRECT: the stiffener ring
+//! is DOWN against the plate and the flat glue face is UP. The "pinned known
+//! defect" framing that used to be in this header and in the assertion below
+//! was WRONG about the outcome, not merely cautious about it, and it has been
+//! removed rather than softened. What remains is a plain measurement: this
+//! disc is flat, and its wide flat face is UP.
+//!
+//! Note what did NOT change: `Round 50` and `Round 100` are correct at
+//! identity, recess UP, and the owner judged them good. All three STLs are
+//! AUTHORED the same way round (measured: the annulus is at the authored
+//! `z` maximum on all three, `corpus/models/Round_*.stl`), so the authored
+//! frame does not tell these three apart — two keep it and one flips. That is
+//! why the display-face field D is a PRODUCT with a detail term rather than an
+//! authored-up signal on its own; see `crates/plinth-mesh/src/display_eval.rs`. `oracle_disc.rs` and
 //! `pose_demand_probe.rs` already grade the PLACEMENT physics at a pinned
 //! identity pose; neither runs the orientation search that decides whether
 //! the disc lands identity-up or flipped in the first place, and the
@@ -54,7 +80,7 @@
 //! | the reach test or the vertical-inheritance branch in `crates/plinth-sweep/src/reach.rs` is bypassed (S1/S2 in `sabotage.rs`) | `residual_demand_cells == 0` / `uncarried_load_mm2 == 0` on all three discs |
 //! | the lattice is repitched at the FULL reach radius `ρ` instead of the octagon inradius `ρ/1.0824` (restoring the un-widened §7.4 reading) | the strut-count band (would fall below the 0.9× floor on the interior-dominated Round 100) |
 //! | the reach/potential form reverts to spending cured thickness τ (the ~70× kappa extrapolation named in the 2026-09-02 commit) instead of the one-lamina clamp | the seat-spacing p95 bound (√3·ρ) and the strut-count band together, since spacing is what τ-spending was shown to distort |
-//! | Round 25's pinned-defect assertion (`recess_up == false`) | reddens the day the scar-term fix lands and Round 25 orients correctly — **this one going red is success, not regression**, which is why its assertion carries the doc comment below rather than a bare `assert!` |
+//! | Round 25's handedness assertion (`recess_up == false`, i.e. the wide flat glue face UP) | reddens if anything turns this disc over; per the owner's 2026-09-03 ChituBox verdict this is a CORRECTNESS assertion like R50/R100's, not a pinned defect |
 //!
 //! # A NEGATIVE sabotage result, measured rather than assumed (2026-09-03)
 //!
@@ -68,8 +94,7 @@
 //! those terms already penalize a tilt/flip on their own for R50 and R100 —
 //! their identity selection and 243/878 arm counts came back bit-identical
 //! under the mutation. Round 25 was likewise unmoved (it was already
-//! recess-down before the mutation, for the same pre-existing reason this
-//! file pins it). **What this means:** this ratchet does not, by itself,
+//! ring-down before the mutation, and ring-down is the correct pose). **What this means:** this ratchet does not, by itself,
 //! guard the support-term unit bridge for R50/R100 — it guards the observable
 //! OUTCOME (pose, arm count, spacing) those terms currently produce, and a
 //! defect that changes the support term's FORM without moving that outcome
@@ -98,11 +123,19 @@ struct Disc {
     recess_radius_mm: f64,
     segments: usize,
     /// The pose the DENSE SEARCH is expected to commit to, MEASURED, not
-    /// wished for. `true` for Round 50/100 (identity, recess up, the
-    /// design's gate). `false` for Round 25 — the open scar-term defect
-    /// named in the 2026-09-02/03 commits, pinned at its current truthful
-    /// state so a silent regression back to it (from a future fixed state)
-    /// is caught, and a fix is visible as this field flipping deliberately.
+    /// wished for.
+    ///
+    /// The measurement is purely geometric — "the flat face at `z_min` has
+    /// MORE area than the flat face at `z_max`" — and the two values mean
+    /// different physical things on these two families, which is why each is
+    /// named at its own fixture rather than here:
+    ///
+    /// * `true` for Round 50/100: identity, recess UP, the wide solid face
+    ///   down on the plate. The design's gate, judged good by the owner.
+    /// * `false` for Round 25: **stiffener ring DOWN, flat glue face UP —
+    ///   correct, per the owner's ChituBox verdict 2026-09-03.** Not a
+    ///   defect and not a pin: an assertion that this disc keeps landing the
+    ///   right way up.
     expect_recess_up: bool,
     /// `None` for a correctly recess-up disc: its arm-count band is DERIVED
     /// from the hex covering of its demand face (see the assertion site).
@@ -113,8 +146,8 @@ struct Disc {
     /// that "must be supported from the cavity's lower interior" (owner
     /// ruling, `supports-may-seat-on-model`) — three load paths a single hex-
     /// or strip-covering formula does not capture cleanly. Rather than invent
-    /// a multi-term formula for a geometry that is itself the open defect
-    /// (and due to be deleted by the ruling this file's header names), the
+    /// a multi-term formula for the ring-down geometry (which the owner has
+    /// now ruled CORRECT, so it is here to stay), the
     /// band is anchored to TODAY'S MEASUREMENT, at the same harness-licensed
     /// multiplicative width `bands::STRUT_COUNT` uses — a real ratchet
     /// against a gross regression, honestly not claiming a physics
@@ -132,6 +165,8 @@ fn round_25() -> Disc {
         top_radius_mm: 12.5,
         recess_radius_mm: 10.0,
         segments: 96,
+        // Stiffener ring DOWN, flat glue face UP — correct, per the owner's
+        // ChituBox verdict 2026-09-03.
         expect_recess_up: false,
         // Measured 2026-09-03 (see ratchet/run1.log): 88 arms, spacing mean
         // 2.215 / p95 3.400 mm, residual 0, uncarried 0.
@@ -310,7 +345,7 @@ fn is_identity_within_search_tolerance(selection: &BaselineSelection) -> Option<
 }
 
 #[test]
-fn round_bases_stay_flat_supported_and_round_25s_inversion_stays_pinned() {
+fn round_bases_stay_flat_supported_and_land_the_right_way_up() {
     let dedupe_tolerance_deg = GridSettings::registered()
         .expect("registered grid settings")
         .dedupe_tolerance_deg();
@@ -343,7 +378,16 @@ fn round_bases_stay_flat_supported_and_round_25s_inversion_stays_pinned() {
             uncarried = report.uncarried_load_mm2,
         );
 
-        // ---- (2b) pose: identity within the search's own tolerance, R50/R100 only
+        // ---- (2b) pose: identity within the search's own tolerance -------
+        //
+        // R50/R100 only, and the exclusion is about the ANSWER, not about
+        // confidence in it: their correct pose IS identity, so identity is
+        // assertable. Round 25's correct pose is a 180 deg flip (owner's
+        // ChituBox verdict 2026-09-03: stiffener ring down, flat glue face
+        // up), and a flip is not near-identity by any tolerance. Round 25 is
+        // graded on the two properties that are its correctness — FLAT, at
+        // (2c)'s flat-face-at-both-extremes check, and RING DOWN, at (2c)'s
+        // handedness assertion — not on a rotation angle.
         if disc.expect_recess_up {
             let angle = angle_off_vertical_deg.unwrap_or_else(|| {
                 panic!(
@@ -380,15 +424,14 @@ fn round_bases_stay_flat_supported_and_round_25s_inversion_stays_pinned() {
         );
         assert_eq!(
             recess_up, disc.expect_recess_up,
-            "{}: recess handedness moved. {} — if this is Round 25 turning `true`, the scar-term \
-             defect named in this file's header has been fixed: update `expect_recess_up` \
-             deliberately, do not silence this assertion.",
+            "{}: handedness moved. {} — this is an owner-ruled CORRECTNESS assertion for every \
+             disc in this file; do not silence it.",
             disc.name,
             if disc.expect_recess_up {
-                "R50/R100 must stay recess UP; this is the owner's gate, not the open defect"
+                "R50/R100 must stay recess UP, wide solid face down on the plate; the owner's gate"
             } else {
-                "Round 25 is PINNED recess DOWN, the open orientation-scar-term defect awaiting an \
-                 owner ruling (see this file's header)"
+                "Round 25 must stay stiffener-ring DOWN with the flat glue face UP — correct, per \
+                 the owner's ChituBox verdict 2026-09-03"
             },
         );
 

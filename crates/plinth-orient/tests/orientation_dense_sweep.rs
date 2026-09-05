@@ -36,20 +36,53 @@ fn request() -> SweepRequest {
 
 /// **T8 — the tie-break, on a shape whose ties are exact.**
 ///
-/// A cube has six face-down poses that agree in every term to the last bit:
-/// same down-facing area, same section at every height, same height, same
-/// delicacy. Six candidates attain the minimum, and exactly one of them is
-/// authored-up. It must win, because the legacy writer seeded `best` with
-/// `np.eye(4)` and two committed baselines (`Cylinder`, `make_box`) record the
-/// identity outcome that seed produced.
+/// A cube's six face-down poses agree in every term of the PRE-DISPLAY
+/// objective to the last bit: same down-facing area, same section at every
+/// height, same height, same delicacy. Six candidates attain the minimum, and
+/// exactly one of them is authored-up. It must win, because the legacy writer
+/// seeded `best` with `np.eye(4)` and two committed baselines (`Cylinder`,
+/// `make_box`) record the identity outcome that seed produced.
 ///
 /// This is what makes identity-as-`CandidateId`-0 load-bearing rather than
 /// tidy: change the enumeration order and this test fails.
+///
+/// # AMENDED 2026-09-04: where the tie now lives
+///
+/// The display-face field (owner ruling 2026-09-03) is deliberately NOT
+/// rotation invariant — its whole content is which way the AUTHORED file
+/// points — so under the full objective a cube's six face-down poses no longer
+/// tie: the authored top carries display value the sides and the underside do
+/// not, and identity now wins ON MERIT rather than on the tie-break. That is
+/// the intended behaviour, so this test asserts BOTH halves separately:
+///
+/// * under the full objective, identity still wins, and the runner-up is now
+///   strictly worse rather than equal — asserted, so a regression to a tie
+///   would be caught too;
+/// * the TIE-BREAK ITSELF is proven where a tie still exists, on the same
+///   cube under a scar-free objective, which builds neither field and is the
+///   exact configuration `03-physics-and-constants.md` §3.8 requires to
+///   reproduce the pre-scar search structurally.
 #[test]
 fn a_cube_ties_six_ways_and_identity_wins() {
     let mesh = make_box_default().expect("cube fixture");
     let outcome = search(&mesh, &request(), None).expect("a cube is scorable");
 
+    assert_eq!(outcome.winner().id, 0, "identity is CandidateId 0");
+    assert_eq!(outcome.winner().selection, BaselineSelection::Identity);
+    assert_eq!(outcome.winner().block, CandidateBlock::Legacy);
+    let full = outcome.record();
+    let full_runner_up = full.runner_up.as_ref().expect("a cube has a runner-up");
+    assert!(
+        full_runner_up.terms.score.get() > full.winner.terms.score.get(),
+        "under the full objective the display field must separate the cube's authored top from \
+         its other five faces: runner-up {} against winner {}",
+        full_runner_up.terms.score.get(),
+        full.winner.terms.score.get(),
+    );
+
+    let mut scar_free = request();
+    scar_free.weights = scar_free.weights.scar_free();
+    let outcome = search(&mesh, &scar_free, None).expect("a cube is scorable scar-free");
     assert_eq!(outcome.winner().id, 0, "identity is CandidateId 0");
     assert_eq!(outcome.winner().selection, BaselineSelection::Identity);
     assert_eq!(outcome.winner().block, CandidateBlock::Legacy);

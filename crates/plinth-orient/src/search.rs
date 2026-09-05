@@ -338,6 +338,15 @@ pub struct LodRecord {
     /// arithmetic: a scar-free run's `search_digest` cannot depend on delicacy
     /// bytes, because there are none in the record to depend on.
     pub delicacy_digest: Option<String>,
+    /// **The display-face map for this LOD, summarised** (owner ruling,
+    /// 2026-09-03: publish D so it can be inspected BEFORE it steers
+    /// anything). `null` on a scar-free run, where no field is built at all,
+    /// for the same structural reason `delicacy_digest` is `null` there.
+    ///
+    /// `#[serde(default)]` so a record written before this field still
+    /// deserializes, and it deserializes to "the record does not hold this".
+    #[serde(default)]
+    pub display: Option<crate::DisplayFieldSummary>,
 }
 
 /// The peel-force bracket's four corners, as a record (D14).
@@ -1313,6 +1322,7 @@ fn rung(
         boundary_edges: table.boundary_edges(),
         nonmanifold_edges: table.nonmanifold_edges(),
         delicacy_digest: table.delicacy_digest().map(str::to_owned),
+        display: table.display_summary(),
     };
     Ok(Rung {
         lod,

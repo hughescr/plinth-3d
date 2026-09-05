@@ -82,13 +82,60 @@ fn a_cube_measures_every_term_analytically_including_the_scar() {
     // 1e-12 tolerance as the pin it replaces.
     assert_close(terms.score, 5.707_380_682_642_539, 1e-12, "score");
 
-    // Turning the cube on its side is the same cube: every term is unchanged.
+    // The scar term's two published halves, and which one carries the cube.
+    // The identity pose turns down the cube's authored FLOOR, which the
+    // authored upper hemisphere cannot see, so its display value is exactly
+    // zero and the whole scar term is fragility.
+    assert_close(terms.fragility_raw_mm2, 15.0, 1e-12, "fragility half");
+    assert_eq!(
+        terms.display_raw_mm2.to_bits(),
+        0.0_f64.to_bits(),
+        "the cube's authored floor is invisible from above, so its display half must be exactly 0"
+    );
+
+    // AMENDED 2026-09-04. Turning the cube on its side is the same cube in
+    // every term the pre-display objective had — and NOT in the display term,
+    // which is exactly what the display-face field is for: a side wall is
+    // visible from the authored upper hemisphere and the authored floor is
+    // not. So the three geometric terms are still asserted equal, the
+    // fragility half is still asserted equal, and the score difference is
+    // asserted to be the display half priced at the unchanged registered scar
+    // weight — a derivation, not a re-pinned number.
     let sideways = score_all(
         &table,
         &[UpDirection::new([1.0, 0.0, 0.0]).expect("unit x")],
         weights,
     )[0];
-    assert_close(sideways.score, terms.score, 1e-12, "score about x");
+    assert_close(
+        sideways.support_area_cm2,
+        terms.support_area_cm2,
+        1e-12,
+        "support area about x",
+    );
+    assert_close(
+        sideways.peak_xsec_cm2,
+        terms.peak_xsec_cm2,
+        1e-12,
+        "peak cross-section about x",
+    );
+    assert_close(sideways.height_mm, terms.height_mm, 1e-12, "height about x");
+    assert_close(
+        sideways.fragility_raw_mm2,
+        terms.fragility_raw_mm2,
+        1e-12,
+        "fragility about x",
+    );
+    assert!(
+        sideways.display_raw_mm2 > 0.0,
+        "a cube's side wall IS visible from the authored upper hemisphere; a zero display half \
+         here would mean the field never reached this pose"
+    );
+    assert_close(
+        sideways.score - terms.score,
+        weights.scar() * sideways.display_raw_mm2 / 100.0,
+        1e-12,
+        "score about x differs by exactly the display half at the registered scar weight",
+    );
 }
 
 /// **T3.** A 20 mm sphere pins the units and the cutoff analytically: height is

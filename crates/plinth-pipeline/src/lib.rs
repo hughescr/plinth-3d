@@ -916,6 +916,18 @@ pub struct OrientationDisclosure {
     /// line says what was CHOSEN rather than what that choice multiplies out
     /// to.
     pub selection: String,
+    /// **The display-face map that scored this model, at the EXACT LOD where
+    /// the committed score was computed** (owner ruling, 2026-09-03: the map
+    /// is published so it can be inspected before it steers anything).
+    ///
+    /// `None` on a pinned baseline (no search ran, so no field was measured)
+    /// and on a scar-free run (no field is built at all). Read off the sealed
+    /// [`plinth_orient::LodRecord`]; nothing here re-measures a mesh.
+    ///
+    /// `#[serde(default)]` so a report written before this field still
+    /// deserializes.
+    #[serde(default)]
+    pub display: Option<plinth_orient::DisplayFieldSummary>,
 }
 
 impl OrientationDisclosure {
@@ -931,9 +943,18 @@ impl OrientationDisclosure {
     pub fn from_report(report: &plinth_orient::OrientationReport) -> Self {
         let cosine = report.transform.rotation[2][2].get().clamp(-1.0, 1.0);
         let original_up_tilt_deg = cosine.acos().to_degrees();
+        let display = match &report.provenance {
+            plinth_orient::OrientationProvenance::DenseSweep(record) => record
+                .lods
+                .iter()
+                .find(|lod| lod.lod == plinth_orient::EXACT_LOD)
+                .and_then(|lod| lod.display.clone()),
+            plinth_orient::OrientationProvenance::Pinned { .. } => None,
+        };
         Self {
             original_up_tilt_deg,
             inverted: original_up_tilt_deg > 90.0,
+            display,
             selection: match &report.selection {
                 plinth_orient::BaselineSelection::Identity => "identity".to_owned(),
                 plinth_orient::BaselineSelection::AxisDegrees { axis, degrees } => {
