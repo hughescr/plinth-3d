@@ -209,6 +209,25 @@ pub struct SweepRunReport {
     pub drain_seat_refusals: usize,
     /// What the escape flood found, per drain, on the FINISHED field.
     pub escape: crate::drain::EscapeReport,
+    /// Arms whose descent LEANED instead of dropping straight down, because
+    /// leaning was strictly cheaper under the arm's own material cost with the
+    /// leaned part priced by the registered overhang weight.
+    pub arms_leaned: usize,
+    /// Of those, the ones that leaned onto ANOTHER ARM and merged into it. The
+    /// merged trunk carries the summed load under the area law.
+    pub arms_merged: usize,
+    /// Cheaper leans that were found and then refused because the path they
+    /// needed ran through model material, another arm, or a drain cylinder.
+    /// The witness that the path check bites rather than waving everything
+    /// through.
+    pub lean_paths_blocked: usize,
+    /// Merges undone because the parent trunk they loaded would have had to
+    /// exceed the registered maximum tip radius to carry the sum.
+    pub merges_refused_by_radius: usize,
+    /// The largest sideways move one layer of descent may make, in mm --
+    /// `h * cot(OVERHANG_ANGLE_DEG - OVERHANG_WEIGHT_TRANSITION_DEG/2)`. Zero
+    /// when the lean is disabled, which is the sabotage state.
+    pub lean_max_step_mm: f64,
     /// Path-hit counters. A green oracle must never be able to mean "the path
     /// never ran" (the witness-must-exercise-the-path lesson).
     pub counters: PathHits,
@@ -230,6 +249,10 @@ pub struct PathHits {
     pub kappa_audit_gate_reads: u64,
     pub lift_assertions: u64,
     pub strut_removals: u64,
+    /// Candidate landings the descent's lean search priced. Zero means the
+    /// search never ran, which a merge count of zero on its own cannot tell
+    /// you.
+    pub lean_candidates_priced: u64,
 }
 
 impl SweepRunReport {

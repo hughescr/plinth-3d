@@ -45,6 +45,7 @@ pub mod adapter;
 pub mod down_sweep;
 pub mod drain;
 pub mod grid;
+pub mod lean;
 pub mod limits;
 pub mod orient_demand;
 pub mod peel;
@@ -121,6 +122,31 @@ pub struct SweepStrut {
     /// `inserted_by_load` arm from removal outright rather than let a
     /// vacuous coverage test decide it (see that function's doc for why).
     pub inserted_by_load: bool,
+    /// The cell this arm's axis occupies at each layer, indexed exactly as
+    /// `radius_mm` is (`slot = layer - k_bottom`).
+    ///
+    /// **EMPTY MEANS STRAIGHT DOWN**, which is every arm the descent found no
+    /// cheaper lean for, and every arm this engine produced before 2026-09-04.
+    /// A straight arm allocates nothing here, so the common case pays no
+    /// memory and every reader that wants the cell at a layer goes through
+    /// [`SweepStrut::cell_at`] rather than reading `cell` directly.
+    ///
+    /// While a down-sweep arm is still growing the path is written TOP-DOWN
+    /// beside its ledger, and is reversed with the ledger the moment it lands.
+    pub path: Vec<u32>,
+    /// The straight-down descent this arm WOULD have taken, recorded at
+    /// placement, and `None` for an arm that did not lean.
+    ///
+    /// It is recorded rather than recomputed because [`up_sweep::ColumnHistory`]
+    /// is a RUNNING state, not a record: by the end of the up-sweep every
+    /// column's `top_model` holds the topmost model layer in that column
+    /// overall — which may be far ABOVE this arm's seat — and the arm has
+    /// stamped its own seat column with its own `k_top + 1`. Re-descending
+    /// against that history lands the arm on ITSELF at its own seat layer, a
+    /// zero-height stub. That defect was latent from 2026-09-04 (it fired zero
+    /// times on eight models, which is unmeasured, not safe) and this field is
+    /// the fix.
+    pub straight_fallback: Option<(Landing, usize)>,
 }
 
 impl SweepStrut {
@@ -129,6 +155,35 @@ impl SweepStrut {
     #[must_use]
     pub fn tip_radius_mm(&self) -> f64 {
         self.radius_mm.last().copied().unwrap_or(0.0)
+    }
+
+    /// The cell the axis occupies at `layer`.
+    ///
+    /// The seat cell for a straight arm, and the leaned path's own entry
+    /// otherwise. Out of range reads fall back to the seat cell rather than
+    /// panicking: a reader outside `[k_bottom, k_top)` is asking about a layer
+    /// this arm is not alive on, and the seat is the honest answer for the
+    /// interior and spacing tests that do exactly that.
+    #[must_use]
+    pub fn cell_at(&self, layer: usize) -> usize {
+        if self.path.is_empty() || self.k_bottom == usize::MAX || layer < self.k_bottom {
+            return self.cell;
+        }
+        self.path
+            .get(layer - self.k_bottom)
+            .map_or(self.cell, |cell| *cell as usize)
+    }
+
+    /// The cell the axis occupies where it lands.
+    #[must_use]
+    pub fn base_cell(&self) -> usize {
+        self.path.first().map_or(self.cell, |cell| *cell as usize)
+    }
+
+    /// Whether the descent leaned this arm rather than dropping it straight.
+    #[must_use]
+    pub fn is_leaned(&self) -> bool {
+        !self.path.is_empty() && self.base_cell() != self.cell
     }
 
     /// Total load this arm carries at its tip.
@@ -240,6 +295,15 @@ pub struct SweepPolicy {
     /// than assert that it does something; nothing in the pipeline turns it
     /// off.
     pub insert_by_load: bool,
+    /// `OVERHANG_ANGLE_DEG`, the centre of the logistic overhang weight the
+    /// descent prices a lean by.
+    pub overhang_centre_deg: f64,
+    /// `OVERHANG_WEIGHT_TRANSITION_DEG`, that logistic's 10-to-90 width.
+    pub overhang_transition_deg: f64,
+    /// Whether a descent may lean at all. **Sabotage knob**: with it false
+    /// every arm drops straight down from its seat, which is exactly how this
+    /// engine behaved before 2026-09-04.
+    pub lean: bool,
     /// Whether placement must route around every drain's escape cylinder.
     /// **On in production.** The knob exists so the sabotage drill can delete
     /// the keep-out and show that the drain then reads ENCLOSED -- a test that
@@ -285,6 +349,12 @@ impl SweepPolicy {
             .unwrap_or(u32::MAX),
             peel_field_mode: PeelFieldMode::from_registry(placeholders),
             insert_by_load: true,
+            overhang_centre_deg: placeholders.overhang_angle_deg().diagnostic().get(),
+            overhang_transition_deg: placeholders
+                .overhang_weight_transition_deg()
+                .diagnostic()
+                .get(),
+            lean: true,
             drain_keep_out: true,
             limits: SweepLimits {
                 cell_layer_budget: placeholders.sweep_cell_layer_budget().diagnostic().get(),
@@ -317,6 +387,18 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_drain_keep_out(mut self) -> Self {
         self.drain_keep_out = false;
+        self
+    }
+
+    /// Descend straight down from every seat, the way this engine did before
+    /// the owner's 2026-09-03 note ("all of the supports only descend directly
+    /// vertically -- none angle down to merge trunks"). **Sabotage only**: it
+    /// is what the merge and gallery tests delete to prove the lean is what
+    /// merges the trunks and what keeps a drain gallery's arms alive, and
+    /// nothing in the pipeline sets it.
+    #[must_use]
+    pub const fn without_lean(mut self) -> Self {
+        self.lean = false;
         self
     }
 }
@@ -410,6 +492,18 @@ pub fn run_sweep_with_drains(
     let mut residual_demand_cells = 0_usize;
     let mut unrooted_landings = 0_usize;
     let mut keep_out_refusals = 0_usize;
+    let mut arms_leaned = 0_usize;
+    let mut arms_merged = 0_usize;
+    let mut lean_paths_blocked = 0_usize;
+    let mut lean_candidates_priced = 0_u64;
+    // The angle law, evaluated once for this plan's layer height and then read
+    // by every descent. Disabled by the sabotage knob, which reduces the
+    // descent to the straight-down descent this engine had before.
+    let law = if policy.lean {
+        lean::LeanLaw::new(height, policy.overhang_centre_deg, policy.overhang_transition_deg)
+    } else {
+        lean::LeanLaw::disabled(height)
+    };
     let mut rasteriser_entries = 0_u64;
 
     for (layer, solids) in slices.iter().enumerate().take(layers) {
@@ -429,6 +523,7 @@ pub fn run_sweep_with_drains(
             layer,
             &masks.cover,
             &keep_out,
+            &law,
             policy.kappa,
             &mut reach,
             &mut history,
@@ -440,6 +535,10 @@ pub fn run_sweep_with_drains(
         residual_demand_cells += outcome.residual_demand;
         unrooted_landings += outcome.unrooted_landings;
         keep_out_refusals += outcome.keep_out_refusals;
+        arms_leaned += outcome.arms_leaned;
+        arms_merged += outcome.arms_merged;
+        lean_paths_blocked += outcome.lean_paths_blocked;
+        lean_candidates_priced += outcome.lean_candidates_priced;
         up_sweep::commit_layer_history(layer, &masks.cover, &reach, &mut history);
         reach::commit_layer(&mut reach, &masks.carry);
     }
@@ -513,6 +612,28 @@ pub fn run_sweep_with_drains(
                 > strut.k_top + 1;
     }
 
+    // --- merges the trunk cannot carry are undone -------------------------
+    //
+    // A merge hands the parent the SUM of both loads, and the area law sizes
+    // the parent from that sum. Where the sum needs more section than the
+    // registered maximum tip radius allows, the merge is not admissible: the
+    // owner's instruction is "if the merged radius would exceed the 1.0 mm
+    // maximum, do not merge". The check is here rather than in the descent
+    // because the descent runs before any load is routed and cannot know the
+    // sum. Un-merging is MONOTONE -- an arm put back straight has an empty
+    // path and the descent never runs again -- so this loop cannot oscillate,
+    // and it is bounded by the same registered pass count the removal loop
+    // uses.
+    let mut merges_refused_by_radius = 0_usize;
+    for _ in 0..policy.strut_removal_passes {
+        let undone = unmerge_overgrown(&mut struts, policy.tip_radius_max_mm);
+        if undone == 0 {
+            break;
+        }
+        merges_refused_by_radius += undone;
+        outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
+    }
+
     // The escape check runs on the FINISHED field, struts and all, because a
     // check that ran before sizing would be answering about a field nobody
     // prints. Its verdict is published and warned on; it never withdraws an
@@ -547,6 +668,12 @@ pub fn run_sweep_with_drains(
     report.drain_keep_out_refusals = keep_out.refusals();
     report.drain_seat_refusals = keep_out_refusals;
     report.escape = escape;
+    report.arms_leaned = arms_leaned;
+    report.arms_merged = arms_merged;
+    report.lean_paths_blocked = lean_paths_blocked;
+    report.merges_refused_by_radius = merges_refused_by_radius;
+    report.lean_max_step_mm = law.max_step_mm();
+    report.counters.lean_candidates_priced = lean_candidates_priced;
     Ok(SweepPlan {
         grid,
         layers,
@@ -555,6 +682,53 @@ pub fn run_sweep_with_drains(
         struts,
         report,
     })
+}
+
+/// Put back straight any arm that merged into a trunk the area law cannot grow
+/// far enough to carry the sum.
+///
+/// The test is the registered maximum tip radius itself, read at the layer the
+/// child lands on: the parent's radius there is `size_arm`'s clamped value, so
+/// a parent sitting AT the maximum is one the law wanted to make bigger and
+/// could not. Only arms the UP-SWEEP leaned are put back, because only they
+/// have a straight-down descent in the column history to be put back to; a
+/// load-inserted arm's descent is grown by the down-sweep and is not in this
+/// history at all.
+fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> usize {
+    let overgrown: Vec<(usize, Landing, usize)> = struts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, strut)| {
+            if strut.inserted_by_load || strut.path.is_empty() {
+                return None;
+            }
+            let Landing::Strut { id, layer } = strut.landing else {
+                return None;
+            };
+            let parent = struts.get(id as usize)?;
+            if parent.k_bottom == usize::MAX || layer < parent.k_bottom {
+                return None;
+            }
+            let radius = *parent.radius_mm.get(layer - parent.k_bottom)?;
+            let (landing, k_bottom) = strut.straight_fallback?;
+            // A fallback that is not strictly below the seat would be a
+            // zero-height stub, which is the defect this field exists to
+            // prevent; refuse the un-merge rather than emit one.
+            (radius >= tip_radius_max_mm && k_bottom < strut.k_top)
+                .then_some((index, landing, k_bottom))
+        })
+        .collect();
+    for &(index, landing, k_bottom) in &overgrown {
+        struts[index].landing = landing;
+        struts[index].k_bottom = k_bottom;
+        struts[index].path.clear();
+        // `carried_mm2` and `radius_mm` are now STALE: they describe a member
+        // that stopped at the trunk. The caller's loop (lib.rs:616) re-runs
+        // `down_sweep::run` after every non-zero return, which clears and
+        // refills both from `ledger_len`, so the invariant is "an un-merge is
+        // never observed from outside that loop".
+    }
+    overgrown.len()
 }
 
 /// Drop arms carrying less than the smallest printable tip can justify, and
@@ -598,7 +772,24 @@ fn remove_under_loaded(
         return 0;
     }
     let mut doomed = vec![false; struts.len()];
+    // An arm ANOTHER arm lands on is never a removal candidate. Before the
+    // descent could lean, a `Landing::Strut` was rare and the orphan fallback
+    // below quietly re-pointed the child at the plate while leaving its
+    // `k_bottom` at the vanished parent's top -- an arm claiming a plate
+    // landing while stopping in mid-air. Merging makes that landing common, so
+    // the parent is protected instead of the child being falsified.
+    let mut is_a_parent = vec![false; struts.len()];
+    for strut in struts.iter() {
+        if let Landing::Strut { id, .. } = strut.landing {
+            if let Some(flag) = is_a_parent.get_mut(id as usize) {
+                *flag = true;
+            }
+        }
+    }
     for &candidate in &candidates {
+        if is_a_parent[candidate] {
+            continue;
+        }
         let covered = struts[candidate].covered_demand.clone();
         let layer = struts[candidate].k_top;
         let still_covered = covered.iter().all(|&cell| {
@@ -638,6 +829,16 @@ fn remove_under_loaded(
                 Landing::Strut { id: mapped, layer }
             };
         }
+        // The recorded fallback names a strut id too, and a stale id there
+        // would put an un-merge onto a vanished parent.
+        if let Some((Landing::Strut { id, layer }, k_bottom)) = strut.straight_fallback {
+            let mapped = remap[id as usize];
+            strut.straight_fallback = if mapped == u32::MAX {
+                None
+            } else {
+                Some((Landing::Strut { id: mapped, layer }, k_bottom))
+            };
+        }
     }
     *struts = kept;
     removed
@@ -658,7 +859,7 @@ pub(crate) fn chamfer_distance_mm(grid: &Grid, a: usize, b: usize) -> f64 {
     grid.pitch_mm() * ((long - short) as f64 + core::f64::consts::SQRT_2 * short as f64)
 }
 
-fn cell_distance_mm(grid: &Grid, a: usize, b: usize) -> f64 {
+pub(crate) fn cell_distance_mm(grid: &Grid, a: usize, b: usize) -> f64 {
     let dx = grid.center_x_mm(grid.col_of(a)) - grid.center_x_mm(grid.col_of(b));
     let dy = grid.center_y_mm(grid.row_of(a)) - grid.center_y_mm(grid.row_of(b));
     dx.hypot(dy)
@@ -783,6 +984,11 @@ fn build_report(
         drain_keep_out_refusals: 0,
         drain_seat_refusals: 0,
         escape: crate::drain::EscapeReport::default(),
+        arms_leaned: 0,
+        arms_merged: 0,
+        lean_paths_blocked: 0,
+        merges_refused_by_radius: 0,
+        lean_max_step_mm: 0.0,
         achieved_pitch_mm: grid.pitch_mm(),
         coarsening_steps,
         layers,
@@ -856,6 +1062,7 @@ fn build_report(
             kappa_audit_gate_reads: 1,
             lift_assertions,
             strut_removals: removals,
+            lean_candidates_priced: 0,
         },
     }
 }
@@ -915,6 +1122,13 @@ fn digest(struts: &[SweepStrut]) -> String {
     };
     for strut in struts {
         absorb(strut.cell as u64);
+        // The leaned path, so a descent that moved sideways can never share a
+        // digest with the straight descent it replaced. A straight arm's path
+        // is empty and absorbs nothing, which is what keeps every unleaned
+        // field's digest exactly what it was.
+        for cell in &strut.path {
+            absorb(u64::from(*cell));
+        }
         absorb(strut.k_top as u64);
         absorb(strut.k_bottom as u64);
         absorb(match strut.landing {
@@ -934,7 +1148,89 @@ fn digest(struts: &[SweepStrut]) -> String {
 
 #[cfg(test)]
 mod removal_tests {
-    use super::{plan_grid, remove_under_loaded, Landing, SweepStrut};
+    use super::{plan_grid, remove_under_loaded, unmerge_overgrown, Landing, SweepStrut};
+
+    fn arm(id: u32, cell: usize, k_top: usize, k_bottom: usize) -> SweepStrut {
+        SweepStrut {
+            id,
+            cell,
+            center_mm: [0.0, 0.0],
+            k_top,
+            k_bottom,
+            landing: Landing::Plate,
+            interior: false,
+            radius_mm: Vec::new(),
+            carried_mm2: Vec::new(),
+            covered_demand: Vec::new(),
+            inserted_by_load: false,
+            path: Vec::new(),
+            straight_fallback: None,
+        }
+    }
+
+    /// DEFECT 2, 2026-09-04. `unmerge_overgrown` used to re-descend against the
+    /// FINAL column history, in which the arm has stamped its own seat column
+    /// with its own `k_top + 1` — so the re-descent read that stamp and landed
+    /// the arm on ITSELF at its own seat layer, a zero-height stub. It had
+    /// fired zero times on eight models, which is unmeasured rather than safe.
+    /// The un-merge now reads the straight descent RECORDED AT PLACEMENT.
+    #[test]
+    fn an_unmerged_arm_lands_below_its_own_seat_and_never_on_itself() {
+        let tip_radius_max_mm = 1.0;
+        // The trunk, clamped at the maximum radius at the layer the child lands
+        // on: the area law wanted more section there and could not have it.
+        let mut parent = arm(0, 0, 40, 10);
+        parent.radius_mm = vec![tip_radius_max_mm; 30];
+        parent.carried_mm2 = vec![50.0; 30];
+        // The child: seated at 60, merged onto the trunk's shaft at 30.
+        let mut child = arm(1, 7, 60, 30);
+        child.landing = Landing::Strut { id: 0, layer: 30 };
+        child.path = vec![7; 30];
+        child.straight_fallback = Some((Landing::Plate, 0));
+        let mut struts = vec![parent, child];
+
+        let undone = unmerge_overgrown(&mut struts, tip_radius_max_mm);
+
+        assert_eq!(undone, 1, "the merge onto a clamped trunk must be undone");
+        let child = &struts[1];
+        assert_eq!(child.landing, Landing::Plate);
+        assert_eq!(child.k_bottom, 0);
+        assert!(
+            child.k_bottom < child.k_top,
+            "an un-merged arm must still have height; {} .. {} is a stub",
+            child.k_bottom,
+            child.k_top
+        );
+        assert!(
+            !matches!(child.landing, Landing::Strut { id, .. } if id == child.id),
+            "an un-merged arm must never land on itself"
+        );
+        assert!(child.path.is_empty(), "an un-merged arm descends straight");
+    }
+
+    /// The counterpart: a trunk that is NOT clamped keeps its child, and an arm
+    /// with no recorded fallback is never un-merged into a stub.
+    #[test]
+    fn a_trunk_with_room_to_grow_keeps_its_child_and_a_fallbackless_arm_is_left_alone() {
+        let mut parent = arm(0, 0, 40, 10);
+        parent.radius_mm = vec![0.4; 30];
+        let mut child = arm(1, 7, 60, 30);
+        child.landing = Landing::Strut { id: 0, layer: 30 };
+        child.path = vec![7; 30];
+        child.straight_fallback = Some((Landing::Plate, 0));
+        let mut struts = vec![parent.clone(), child.clone()];
+        assert_eq!(unmerge_overgrown(&mut struts, 1.0), 0);
+        assert_eq!(struts[1].landing, Landing::Strut { id: 0, layer: 30 });
+
+        parent.radius_mm = vec![1.0; 30];
+        child.straight_fallback = None;
+        let mut struts = vec![parent, child];
+        assert_eq!(
+            unmerge_overgrown(&mut struts, 1.0),
+            0,
+            "with no recorded straight descent there is nothing to put the arm back to"
+        );
+    }
 
     /// Owner follow-up (2026-09-03, item 4 of the slice-sweep review): a
     /// LOAD-placed arm has empty `covered_demand` by construction, so the
@@ -964,6 +1260,8 @@ mod removal_tests {
             carried_mm2: vec![0.5],
             covered_demand: Vec::new(),
             inserted_by_load: true,
+            path: Vec::new(),
+            straight_fallback: None,
         }];
 
         let removed = remove_under_loaded(&grid, &mut struts, minimum_load_mm2, 5.0);
@@ -1000,6 +1298,8 @@ mod removal_tests {
             carried_mm2: vec![0.5],
             covered_demand: Vec::new(),
             inserted_by_load: false,
+            path: Vec::new(),
+            straight_fallback: None,
         }];
 
         let removed = remove_under_loaded(&grid, &mut struts, minimum_load_mm2, 5.0);

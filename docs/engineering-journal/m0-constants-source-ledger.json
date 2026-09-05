@@ -1694,6 +1694,16 @@
       "provenance_detail": "non-AcceptSafe legacy tool convention; it is not a measurement or binding derivation"
     },
     {
+      "id": "OVERHANG_WEIGHT_TRANSITION_DEG",
+      "classification": "runtime_perception",
+      "normative": "Owner ruling 2026-09-02 = 25.0 deg; the 10-to-90 width of the logistic overhang weight centred on OVERHANG_ANGLE_DEG",
+      "source_locators": [
+        "crates/plinth-sweep/src/lean.rs"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "non-AcceptSafe best guess from existing data; the only angle-varying evidence is literature (e-Stage per-model criticals 30/41/46/49/55 deg, median 46), no coupon in this repo has ever varied overhang angle, and the owner refused a new plate"
+    },
+    {
       "id": "P8_BALL_SLIDE_MAX_MM",
       "classification": "runtime_search",
       "normative": "03-physics-and-constants.md §3.10 = 2.0 mm",

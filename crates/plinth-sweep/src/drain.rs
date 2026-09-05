@@ -492,20 +492,33 @@ pub fn check_escape(
             // and let a bore-wide ball through a throat that is really 0.45 mm.
             // Over-stating solid is the direction this check must err in.
             let radius = radius + 0.5 * core::f64::consts::SQRT_2 * voxel_pitch_mm;
-            let lo_x = (((strut.center_mm[0] - radius - origin_x) / voxel_pitch_mm).floor())
+            // The arm's centre AT THIS LAYER. A leaned arm is a different
+            // column at every layer, and stamping its seat column all the way
+            // down would both wall off a passage the resin really has and open
+            // one it really does not.
+            let center_mm = if strut.path.is_empty() {
+                strut.center_mm
+            } else {
+                let here = strut.cell_at(layer);
+                [
+                    grid.center_x_mm(grid.col_of(here)),
+                    grid.center_y_mm(grid.row_of(here)),
+                ]
+            };
+            let lo_x = (((center_mm[0] - radius - origin_x) / voxel_pitch_mm).floor())
                 .max(0.0) as usize;
-            let hi_x = ((((strut.center_mm[0] + radius - origin_x) / voxel_pitch_mm).ceil())
+            let hi_x = ((((center_mm[0] + radius - origin_x) / voxel_pitch_mm).ceil())
                 .max(0.0) as usize)
                 .min(nx.saturating_sub(1));
-            let lo_y = (((strut.center_mm[1] - radius - origin_y) / voxel_pitch_mm).floor())
+            let lo_y = (((center_mm[1] - radius - origin_y) / voxel_pitch_mm).floor())
                 .max(0.0) as usize;
-            let hi_y = ((((strut.center_mm[1] + radius - origin_y) / voxel_pitch_mm).ceil())
+            let hi_y = ((((center_mm[1] + radius - origin_y) / voxel_pitch_mm).ceil())
                 .max(0.0) as usize)
                 .min(ny.saturating_sub(1));
             for y in lo_y..=hi_y {
-                let dy = origin_y + (y as f64 + 0.5) * voxel_pitch_mm - strut.center_mm[1];
+                let dy = origin_y + (y as f64 + 0.5) * voxel_pitch_mm - center_mm[1];
                 for x in lo_x..=hi_x {
-                    let dx = origin_x + (x as f64 + 0.5) * voxel_pitch_mm - strut.center_mm[0];
+                    let dx = origin_x + (x as f64 + 0.5) * voxel_pitch_mm - center_mm[0];
                     if dx.mul_add(dx, dy * dy) <= radius * radius {
                         for z in rows.clone() {
                             solid[passage.index(z, y, x)] = true;

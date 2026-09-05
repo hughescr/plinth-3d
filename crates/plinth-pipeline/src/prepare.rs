@@ -2520,7 +2520,7 @@ fn print_sweep_disclosure(
          chamfer non-convergences {}; route non-convergences {}; \
          arms inserted by load {} of {} ({} insertion rounds, {} layers round-bound-exhausted \
          [UNDER-support risk], {} layers geometry-exhausted [over the limit, more rounds would \
-         not help]); registered-but-unread target spacing {:.3} mm",
+         not help]); descent: {} arms leaned of {} (max sideways move {:.4} mm per layer),          {} of those merged onto another arm, {} cheaper leans refused for want of a clear path,          {} merges undone because the trunk could not grow enough;          registered-but-unread target spacing {:.3} mm",
         report.cells_per_layer,
         report.achieved_pitch_mm,
         report.layers,
@@ -2539,6 +2539,12 @@ fn print_sweep_disclosure(
         report.insertion_rounds,
         report.insertion_rounds_exhausted,
         report.insertion_geometry_exhausted,
+        report.arms_leaned,
+        report.struts_total,
+        report.lean_max_step_mm,
+        report.arms_merged,
+        report.lean_paths_blocked,
+        report.merges_refused_by_radius,
         report.reach.target_spacing_mm_registered_but_unused,
     );
     println!(

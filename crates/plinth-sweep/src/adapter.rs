@@ -101,6 +101,7 @@ pub fn to_primitives(
 pub fn arms_of(plan: &SweepPlan) -> Vec<SweepArm> {
     let height = plan.layer_height_mm;
     let plate = plan.plate_z_mm;
+    let grid = &plan.grid;
     plan.struts
         .iter()
         .map(|strut| {
@@ -108,9 +109,23 @@ pub fn arms_of(plan: &SweepPlan) -> Vec<SweepArm> {
             let y = strut.center_mm[1];
             let seat_z = plate + strut.k_top as f64 * height;
             let base_z = plate + strut.k_bottom as f64 * height;
+            // A leaned arm's base sits under a DIFFERENT column from its seat.
+            // The emit boundary has always taken two arbitrary points, so a
+            // leaning member needs no new primitive: the same tip ball, taper,
+            // boss and root flare are lowered along the member direction, which
+            // `lower_stub` already uses in place of a face normal.
+            let base_cell = strut.base_cell();
+            let (base_x, base_y) = if base_cell == strut.cell {
+                (x, y)
+            } else {
+                (
+                    grid.center_x_mm(grid.col_of(base_cell)),
+                    grid.center_y_mm(grid.row_of(base_cell)),
+                )
+            };
             SweepArm {
                 seat_mm: [x, y, seat_z],
-                base_mm: [x, y, base_z],
+                base_mm: [base_x, base_y, base_z],
                 tip_radius_mm: strut.tip_radius_mm(),
                 root_radius_mm: strut.radius_mm.first().copied().unwrap_or_default(),
                 landing: match strut.landing {

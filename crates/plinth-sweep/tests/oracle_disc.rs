@@ -121,18 +121,51 @@ fn the_disc_is_supported_by_a_plate_rooted_field_at_the_measured_spacing() {
         "plate reaction between the peak event and the peak event plus the arms' own material",
     );
 
-    // ---- every landing is the plate, every arm is exactly the lift ----------
-    assert_eq!(
-        report.landings.plate, report.struts_total,
-        "a flat disc has nothing to land on but the plate"
-    );
+    // ---- the FLAT FACE's arms all go to the plate ---------------------------
+    //
+    // AMENDED 2026-09-04, when the descent learned to lean. The flat bottom
+    // face is at one layer with nothing under it, so every arm seated on it
+    // still has nothing to land on but the plate, and that is asserted below
+    // arm by arm. The DRAFTED RIM is a different matter: its arms are seated
+    // above the bottom layer over free space, and one of them may now lean the
+    // fraction of a millimetre inward that puts it on the bottom face instead
+    // of running the whole lift to the plate. Asserting "every arm lands on
+    // the plate" would be asserting that no arm may ever lean, which is the
+    // behaviour the owner asked to be rid of; what the oracle grades instead
+    // is that no FLAT-FACE arm leans, and that no arm lands on nothing.
+    let bottom_layer = plan
+        .struts
+        .iter()
+        .map(|strut| strut.k_top)
+        .min()
+        .expect("a disc has struts");
+    let mut flat_face_arms = 0_usize;
     for strut in &plan.struts {
-        assert!(
-            matches!(strut.landing, Landing::Plate),
-            "strut {} did not land on the plate",
-            strut.id
-        );
+        if strut.k_top == bottom_layer {
+            flat_face_arms += 1;
+            assert!(
+                matches!(strut.landing, Landing::Plate),
+                "strut {} is seated on the flat bottom face and did not land on the plate; on a \
+                 flat face no lean can ever be cheaper than straight down",
+                strut.id
+            );
+            assert!(
+                !strut.is_leaned(),
+                "strut {} is seated on the flat bottom face and LEANED; on a flat face every \
+                 column's landing is at the same layer, so no lean can shorten anything",
+                strut.id
+            );
+        }
     }
+    assert!(
+        flat_face_arms > 0,
+        "no arm is seated on the flat bottom face; the partition below is vacuous"
+    );
+    assert_eq!(
+        report.landings.plate + report.landings.model + report.landings.strut,
+        report.struts_total,
+        "every arm must land on the plate, the model or another arm"
+    );
 
     // ---- spacing -----------------------------------------------------------
     // Graded on the p95, not the mean, and the reason is a measurement rather
@@ -258,10 +291,16 @@ fn the_drafted_rim_costs_a_rim_strip_and_no_interior_arms() {
             "an arm above the bottom layer sits at r {radius:.3} mm, inside the bottom face's \
              own covering; the interior must stay rooted"
         );
+        // AMENDED 2026-09-04: a rim arm overhangs free space, so its landing is
+        // the plate unless a lean puts it on the bottom face a fraction of a
+        // millimetre inboard -- which is shorter, and is priced as such. What
+        // may never happen is a rim arm landing on ANOTHER ARM here, because
+        // the only arms below it are the flat face's, whose tops are at the
+        // bottom layer and therefore no higher than its own straight descent.
         assert!(
-            matches!(strut.landing, Landing::Plate),
-            "a rim arm landed on {:?}; the drafted rim overhangs free space and its arms go to \
-             the plate",
+            matches!(strut.landing, Landing::Plate | Landing::Model { .. }),
+            "a rim arm landed on {:?}; the drafted rim overhangs free space, so its arm goes to \
+             the plate or onto the bottom face below it",
             strut.landing,
         );
     }

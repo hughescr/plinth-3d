@@ -107,6 +107,11 @@ pub struct DownSweepOutcome {
     /// their sum is the count the old, conflated `insertion_not_converged`
     /// reported.
     pub insertion_geometry_exhausted: u64,
+    /// Layers where the child-before-trunk ordering could not be topologically
+    /// sorted. Physically impossible (a member cannot land on itself through a
+    /// chain); reported rather than asserted so a defect here is visible in a
+    /// run report instead of taking the process down.
+    pub merge_order_cycles: u64,
     /// Insertion rounds actually executed, summed over layers. A path-hit
     /// counter: without it, `arms_inserted_by_load == 0` cannot be told apart
     /// from an insertion step that never ran.
@@ -251,6 +256,10 @@ pub fn run(
     let mut landing_target = vec![u32::MAX; cells];
     let mut insert = InsertScratch::new(cells);
     let mut layer_arms: Vec<LayerArm> = Vec::new();
+    // Pass-0 ordering scratch, allocated once per run.
+    let mut pass_order: Vec<usize> = Vec::new();
+    let mut pass_indegree: Vec<u32> = Vec::new();
+    let mut pass_slot: Vec<u32> = Vec::new();
     // The largest peel one tip may legally carry, from the registered area law
     // and the registered maximum radius. `crates/plinth-support/src/
     // perception.rs`:610-612 computes the same quantity for the legacy engine.
@@ -288,7 +297,11 @@ pub fn run(
         carriers.copy_from_slice(&masks.carry);
         landing_target.fill(u32::MAX);
         for &id in &alive_by_layer[layer] {
-            let cell = struts[id as usize].cell;
+            // The arm's cell AT THIS LAYER, not its seat cell: a leaned arm
+            // occupies a different column at every layer it crosses, and
+            // marking its seat column all the way down would collect load in a
+            // column the arm is not in.
+            let cell = struts[id as usize].cell_at(layer);
             carriers[cell] = true;
             // What a growing arm lands ON if its column meets this one. Only
             // arms whose extent is already fixed are landing targets; a growing
@@ -296,8 +309,17 @@ pub fn run(
             // a carrier and a growing arm's cell always is.
             landing_target[cell] = id;
         }
+        // Every arm still growing steps down one layer before this layer is
+        // read. Straight down is the whole of the step today; the path exists
+        // so a growing arm can lean the same way a seated one does.
         for &index in &growing {
-            carriers[struts[index].cell] = true;
+            let next = growing_cell(&struts[index]);
+            struts[index]
+                .path
+                .push(u32::try_from(next).unwrap_or(u32::MAX));
+        }
+        for &index in &growing {
+            carriers[growing_cell(&struts[index])] = true;
         }
 
         // --- spread the incoming raster into this layer's carriers, and add
@@ -447,10 +469,10 @@ pub fn run(
             outcome.insertion_rounds += 1;
             insert.hosts.clear();
             for &id in &alive_by_layer[layer] {
-                insert.hosts.push(struts[id as usize].cell);
+                insert.hosts.push(struts[id as usize].cell_at(layer));
             }
             for &index in &growing {
-                insert.hosts.push(struts[index].cell);
+                insert.hosts.push(growing_cell(&struts[index]));
             }
             if !insert.hosts.iter().any(|&cell| load_out[cell] > l_max) {
                 break;
@@ -525,7 +547,7 @@ pub fn run(
         layer_arms.clear();
         for &index in growing.iter().rev() {
             let strut = &struts[index];
-            let cell = strut.cell;
+            let cell = growing_cell(strut);
             let slot = strut.k_top - 1 - layer;
             let (terminating, landing) = if masks.carry[cell] {
                 (true, Landing::Model { layer })
@@ -563,15 +585,115 @@ pub fn run(
                 is_growing: false,
             });
         }
+        // A CHILD MUST BE READ BEFORE THE TRUNK IT LANDS ON. Both are
+        // terminating arms, so both are in pass 0, and the pass 0 order was
+        // "growing arms, then alive arms by id". A FIXED child whose id is
+        // higher than its parent's -- which a re-run of this sweep produces the
+        // moment a grown arm is fixed and re-read -- was then processed AFTER
+        // the parent had already drained `pending`, and its load was written
+        // into a slot nobody would ever read again. Silent, and unbounded.
+        //
+        // The order is derived rather than assumed: an edge runs from a child
+        // to the parent it lands on WHEN THAT PARENT ALSO TERMINATES ON THIS
+        // LAYER (a parent that does not is read one layer further down, where
+        // `pending` still holds the child's load), and Kahn's algorithm emits
+        // children first. A cycle is physically impossible -- a member cannot
+        // land on itself through a chain -- and if one ever appeared the
+        // leftovers are appended in their original order rather than dropped,
+        // because a lost arm is worse than a mis-ordered one.
+        pass_order.clear();
+        pass_indegree.clear();
+        for (position, arm) in layer_arms.iter().enumerate() {
+            if arm.terminating {
+                pass_order.push(position);
+            }
+        }
+        pass_indegree.resize(pass_order.len(), 0_u32);
+        if pass_order.len() > 1 {
+            pass_slot.clear();
+            pass_slot.resize(struts.len(), u32::MAX);
+            for (slot, &position) in pass_order.iter().enumerate() {
+                pass_slot[layer_arms[position].index] = u32::try_from(slot).unwrap_or(u32::MAX);
+            }
+            for &position in pass_order.iter() {
+                if let Landing::Strut { id, layer: at } = layer_arms[position].landing {
+                    if at == layer {
+                        if let Some(&parent_slot) = pass_slot.get(id as usize) {
+                            if parent_slot != u32::MAX {
+                                pass_indegree[parent_slot as usize] += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            let mut emitted = Vec::with_capacity(pass_order.len());
+            let mut queue: Vec<usize> = (0..pass_order.len())
+                .filter(|&slot| pass_indegree[slot] == 0)
+                .collect();
+            let mut head = 0_usize;
+            while head < queue.len() {
+                let slot = queue[head];
+                head += 1;
+                emitted.push(pass_order[slot]);
+                if let Landing::Strut { id, layer: at } = layer_arms[pass_order[slot]].landing {
+                    if at == layer {
+                        if let Some(&parent_slot) = pass_slot.get(id as usize) {
+                            if parent_slot != u32::MAX {
+                                let parent_slot = parent_slot as usize;
+                                pass_indegree[parent_slot] -= 1;
+                                if pass_indegree[parent_slot] == 0 {
+                                    queue.push(parent_slot);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if emitted.len() < pass_order.len() {
+                for slot in 0..pass_order.len() {
+                    if pass_indegree[slot] != 0 {
+                        emitted.push(pass_order[slot]);
+                    }
+                }
+                outcome.merge_order_cycles += 1;
+            }
+            pass_order.clone_from(&emitted);
+        }
         for pass in 0..2 {
-            for arm_order in 0..layer_arms.len() {
+            for step in 0..layer_arms.len() {
+                let arm_order = if pass == 0 {
+                    match pass_order.get(step) {
+                        Some(&position) => position,
+                        None => break,
+                    }
+                } else {
+                    step
+                };
                 let arm = layer_arms[arm_order];
                 let index = arm.index;
                 if (pass == 0) != arm.terminating {
                     continue;
                 }
-                let cell = struts[index].cell;
-                let share = load_out[cell] + pending[index];
+                let cell = if arm.is_growing {
+                    growing_cell(&struts[index])
+                } else {
+                    struts[index].cell_at(layer)
+                };
+                // TWO DIFFERENT QUANTITIES, AND FOLDING THEM TOGETHER WAS A
+                // DEFECT. `own` is what this layer's own peel event routes to
+                // this arm's cell -- one of a sequence of events the arm must
+                // survive the LARGEST of. `merged` is what a child arm that
+                // landed on this trunk hands it, and that is not an event of
+                // this arm's at all: it is a second load arriving at the same
+                // instant, through a different member. Until 2026-09-04 both
+                // went into one `share` and were MAXed against the load from
+                // above, so a trunk already carrying more than its child handed
+                // it took ZERO from the merge and printed under-sized, with
+                // nothing red: the layer conservation assertion is computed
+                // before this point, and `overloaded` reads the same
+                // under-stated number.
+                let own = load_out[cell];
+                let merged = pending[index];
                 pending[index] = 0.0;
                 load_out[cell] = 0.0;
                 outcome.strut_share_reads += 1;
@@ -604,9 +726,17 @@ pub fn run(
                 // must turn `oracle_ramp` red.
                 //
                 // `max` keeps the profile non-decreasing downward exactly as
-                // `+` did (`max(previous, share) >= previous`), so `size_arm`'s
-                // flare property and the monotonicity assertion are unchanged.
-                let carried = previous.max(share);
+                // `+` did (`max(previous, own) >= previous`), so `size_arm`'s
+                // flare property and the monotonicity assertion are unchanged;
+                // and `merged` is non-negative, so adding it keeps that too.
+                //
+                // The max is over THIS ARM'S OWN events; a merged child's load
+                // is summed on top of the winner, because both members are
+                // loaded by the same peel event and the junction carries their
+                // sum. Sabotage: dropping `+ merged` restores the defect and
+                // must turn `a_merge_onto_a_trunk_already_carrying_more_still_grows_it`
+                // red.
+                let carried = combine_carried(previous, own, merged);
                 struts[index].carried_mm2[slot] = carried;
                 let radius = size_arm(carried, sizing);
                 struts[index].radius_mm[slot] = radius;
@@ -649,6 +779,10 @@ pub fn run(
                         struts[index].landing = arm.landing;
                         struts[index].carried_mm2.reverse();
                         struts[index].radius_mm.reverse();
+                        // The path was written top-down beside the ledger and
+                        // is flipped with it, so `cell_at` reads the same
+                        // `k_bottom`-upward layout as `radius_mm`.
+                        struts[index].path.reverse();
                     }
                 }
             }
@@ -685,6 +819,18 @@ pub fn run(
         outcome.min_layer_area_mm2 = 0.0;
     }
     outcome
+}
+
+/// The cell a still-growing arm occupies at the layer it has just stepped to.
+///
+/// A growing arm's path is written TOP-DOWN, so its last entry is its current
+/// one; `SweepStrut::cell_at` cannot serve here because `k_bottom` is still
+/// `usize::MAX` until the descent lands.
+fn growing_cell(strut: &SweepStrut) -> usize {
+    strut
+        .path
+        .last()
+        .map_or(strut.cell, |cell| *cell as usize)
 }
 
 /// One arm's participation in ONE layer, resolved once and then read twice
@@ -909,6 +1055,14 @@ fn insert_for_load(
                 // cell, and the removal pass must not be told otherwise.
                 covered_demand: Vec::new(),
                 inserted_by_load: true,
+                // Written TOP-DOWN while the arm grows, reversed with the
+                // ledger the moment it lands.
+                path: vec![u32::try_from(cell).unwrap_or(u32::MAX)],
+                // A down-sweep arm's descent is grown here, not read out of the
+                // up-sweep's column history, so there is no recorded straight
+                // descent to put it back to and the merge-relief pass leaves it
+                // alone by construction.
+                straight_fallback: None,
             });
             growing.push(struts.len() - 1);
             pending.push(0.0);
@@ -943,6 +1097,28 @@ fn strut_layers(strut: &SweepStrut, layers: usize, alive: &mut [Vec<u32>]) {
 fn ledger_len(strut: &SweepStrut, layers: usize) -> usize {
     let top = strut.k_top.min(layers).saturating_sub(1);
     top.saturating_sub(strut.k_bottom) + 1
+}
+
+/// What one arm carries at one layer, from the three quantities that reach it.
+///
+/// * `previous` — this arm's design load from every peel event ABOVE this layer.
+/// * `own` — what THIS layer's peel event routes to this arm's own cell.
+/// * `merged` — what a child arm that landed on this trunk hands it.
+///
+/// `previous` and `own` are the SAME arm's successive events and a print never
+/// peels two layers at once, so the arm must survive the larger of them, not
+/// their sum. `merged` is not an event of this arm's at all: it is a second
+/// load arriving at the same instant through a different member, and a junction
+/// carries the sum of the members that meet in it.
+///
+/// Folding `merged` into `own` and MAXing all three was the shape of this code
+/// until 2026-09-04, and it is a silent under-size: a trunk already carrying
+/// more from above than its child hands it took ZERO from the merge, with the
+/// layer conservation assertion computed before this point and `overloaded`
+/// reading the same under-stated number. `a_merge_is_added_to_the_trunk...`
+/// below is the drill, and removing `+ merged` here turns it red.
+pub(crate) fn combine_carried(previous: f64, own: f64, merged: f64) -> f64 {
+    previous.max(own) + merged
 }
 
 /// `A = ℓ / X_ALLOWED`, then `r = sqrt(A/π)` inside the registered clamps.
@@ -1176,5 +1352,81 @@ fn union(parent: &mut [u32], a: u32, b: u32) {
     if ra != rb {
         let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
         parent[hi as usize] = lo;
+    }
+}
+
+#[cfg(test)]
+mod merge_load_tests {
+    use super::{combine_carried, size_arm, SizingPolicy};
+
+    fn sizing() -> SizingPolicy {
+        SizingPolicy {
+            x_allowed: 12.0,
+            tip_radius_min_mm: 0.05,
+            tip_radius_max_mm: 1.0,
+            owner_growth_ceiling_mm: 0.4,
+            alpha: 1.0,
+            lamina_reach_mm: 2.13,
+        }
+    }
+
+    /// THE DEFECT, AND ITS SABOTAGE. A trunk already carrying 20 mm² from above
+    /// takes a child handing it 8 mm² at a layer whose own event is only
+    /// 4 mm². The junction must carry 28 mm², and the radius must be exactly
+    /// the area law's answer for 28. Under the old `previous.max(own + merged)`
+    /// the trunk read 20 and printed at the radius for 20: the merge bought it
+    /// nothing, and nothing anywhere went red. Removing `+ merged` from
+    /// `combine_carried` reproduces that and turns this test red on both
+    /// assertions.
+    #[test]
+    fn a_merge_is_added_to_the_trunk_even_when_the_trunk_already_carries_more() {
+        let previous = 20.0;
+        let own = 4.0;
+        let merged = 8.0;
+        let carried = combine_carried(previous, own, merged);
+        assert!(
+            (carried - 28.0).abs() < 1.0e-12,
+            "a junction carries the sum of the members that meet in it; got {carried}"
+        );
+        let sizing = sizing();
+        let grown = size_arm(carried, sizing);
+        let ungrown = size_arm(previous, sizing);
+        let expected = (28.0 / sizing.x_allowed / core::f64::consts::PI).sqrt();
+        assert!(
+            (grown - expected).abs() < 1.0e-12,
+            "the trunk must grow to exactly the area law's radius for the sum: {grown} vs {expected}"
+        );
+        assert!(
+            grown > ungrown,
+            "the merge must grow the trunk; {grown} is no larger than the {ungrown} it had"
+        );
+    }
+
+    /// And the max is still a max over the arm's OWN events, so the fix does
+    /// not quietly reintroduce sabotage S11's summing of peel events.
+    #[test]
+    fn the_arms_own_events_are_still_maxed_and_never_summed() {
+        assert!((combine_carried(50.0, 10.0, 0.0) - 50.0).abs() < 1.0e-12);
+        assert!((combine_carried(10.0, 50.0, 0.0) - 50.0).abs() < 1.0e-12);
+        // 500 layers of a 1 mm² event on a 40 mm² arm stay 40 mm², not 500.
+        let mut carried = 40.0;
+        for _ in 0..500 {
+            carried = combine_carried(carried, 1.0, 0.0);
+        }
+        assert!((carried - 40.0).abs() < 1.0e-12, "peel events must not sum");
+    }
+
+    /// The profile must stay non-decreasing downward, which is what
+    /// `size_arm`'s flare property and the monotonicity assertion rest on.
+    #[test]
+    fn the_carried_profile_never_decreases_downward() {
+        for &(previous, own, merged) in &[
+            (0.0, 0.0, 0.0),
+            (50.0, 0.0, 0.0),
+            (50.0, 10.0, 8.0),
+            (0.0, 3.0, 90.0),
+        ] {
+            assert!(combine_carried(previous, own, merged) >= previous);
+        }
     }
 }

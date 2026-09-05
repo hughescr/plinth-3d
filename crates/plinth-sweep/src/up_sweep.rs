@@ -22,6 +22,7 @@
 
 use crate::drain::DrainKeepOut;
 use crate::grid::Grid;
+use crate::lean::LeanLaw;
 use crate::reach::ReachState;
 use crate::{Landing, SweepStrut};
 
@@ -65,6 +66,9 @@ pub struct GreedyScratch {
     reach_mm: f64,
     queue: Vec<usize>,
     touched: Vec<usize>,
+    /// Reused across every descent so the lean search allocates once per run
+    /// rather than once per arm.
+    lean_candidates: Vec<super::up_sweep::LeanCandidate>,
 }
 
 impl GreedyScratch {
@@ -93,6 +97,7 @@ impl GreedyScratch {
             reach_mm,
             queue: Vec::new(),
             touched: Vec::new(),
+            lean_candidates: Vec::new(),
         }
     }
 
@@ -120,6 +125,22 @@ pub struct LayerOutcome {
     /// also the path-hit witness that the keep-out was consulted on a layer
     /// where it actually bound.
     pub keep_out_refusals: usize,
+    /// Arms whose descent leaned rather than dropping straight down, because
+    /// leaning was cheaper under the SAME objective — arm material, with the
+    /// leaned part priced by the registered overhang weight.
+    pub arms_leaned: usize,
+    /// Arms that leaned onto ANOTHER ARM. The merged trunk carries the summed
+    /// load through the existing `Landing::Strut` injection, so its section
+    /// grows under the area law exactly as if the load had been its own.
+    pub arms_merged: usize,
+    /// Descents where a cheaper lean was found and then REFUSED, because the
+    /// path it needed ran through model material, through another arm, or
+    /// through a drain's escape cylinder. The witness that the path check
+    /// actually bites; a WARNING quantity, never a refusal.
+    pub lean_paths_blocked: usize,
+    /// Candidate landings the lean search priced. The path-hit witness that
+    /// the search ran at all.
+    pub lean_candidates_priced: u64,
 }
 
 /// Place struts on one layer.
@@ -138,6 +159,7 @@ pub fn place_layer(
     layer: usize,
     cover: &[bool],
     keep_out: &DrainKeepOut,
+    law: &LeanLaw,
     kappa: f64,
     reach: &mut ReachState,
     history: &mut ColumnHistory,
@@ -151,6 +173,10 @@ pub fn place_layer(
         residual_demand: 0,
         unrooted_landings: 0,
         keep_out_refusals: 0,
+        arms_leaned: 0,
+        arms_merged: 0,
+        lean_paths_blocked: 0,
+        lean_candidates_priced: 0,
     };
 
     let mut demand_total = 0_usize;
@@ -248,7 +274,17 @@ pub fn place_layer(
             };
             chosen
         };
-        let (landing, k_bottom, rooted_landing) = descend(history, cell, layer);
+        let (landing, k_bottom, rooted_landing, path) = descend_leaning(
+            grid,
+            history,
+            keep_out,
+            law,
+            separation_mm,
+            cell,
+            layer,
+            &mut scratch.lean_candidates,
+            &mut outcome,
+        );
         if !rooted_landing {
             outcome.unrooted_landings += 1;
         }
@@ -301,9 +337,37 @@ pub fn place_layer(
             carried_mm2: Vec::new(),
             covered_demand: covered,
             inserted_by_load: false,
+            // Recorded ONLY for a leaned arm, and recorded NOW, because the
+            // column history this reads is a running state that will not say
+            // the same thing again once the sweep has passed this layer.
+            straight_fallback: (!path.is_empty()).then(|| {
+                let (landing, bottom, _) = descend(history, cell, layer);
+                (landing, bottom)
+            }),
+            path,
         });
-        history.top_strut[cell] = u32::try_from(layer + 1).unwrap_or(u32::MAX);
-        history.top_strut_id[cell] = id;
+        // Every column the arm passes through now holds an arm, not just its
+        // seat column: a leaned arm that only stamped its seat would let the
+        // next descent route straight through its shaft.
+        let stamp = u32::try_from(layer + 1).unwrap_or(u32::MAX);
+        let placed = struts.last().expect("the arm just pushed");
+        if placed.path.is_empty() {
+            history.top_strut[cell] = stamp;
+            history.top_strut_id[cell] = id;
+        } else {
+            for (slot, &occupied) in placed.path.iter().enumerate() {
+                let occupied = occupied as usize;
+                let here = u32::try_from(k_bottom + slot + 1).unwrap_or(u32::MAX);
+                if history.top_strut[occupied] < here {
+                    history.top_strut[occupied] = here;
+                    history.top_strut_id[occupied] = id;
+                }
+            }
+            if history.top_strut[cell] < stamp {
+                history.top_strut[cell] = stamp;
+                history.top_strut_id[cell] = id;
+            }
+        }
 
         if dirty_lo > dirty_hi {
             continue;
@@ -451,6 +515,296 @@ fn best_seat_for(
 /// vertical descent can physically reach. Nothing here tilts: a tilted arm's
 /// cross-section is an ellipse and rasterising it is a second geometry problem
 /// v1 does not open.
+/// What a landing still owes, in mm of load path, after the arm stops.
+///
+/// **A LANDING IS NOT ALWAYS A SINK, AND PRICING IT AS ONE IS A MEASURED
+/// DEFECT.** The plate reacts a load and ends its path; another arm has
+/// already paid for its own way down and the merge adds no new path; but model
+/// material only HANDS THE LOAD ON — it must still travel from the strike face
+/// to the plate, through whatever is under it.
+///
+/// Ignoring that was measured on 2026-09-04 and it is degenerate. Priced on arm
+/// length alone, the cheapest descent from anywhere on a sphere's underside is
+/// a one-lamina stub onto the sphere's own surface a fraction of a millimetre
+/// inboard: the Sphere went from 116 arms with 114.20 mm² reaching the plate to
+/// 19 plate arms and 107.50 mm², its median slenderness collapsed to 0.5:1
+/// (arms half as long as they are wide are discs, not supports), its emitted
+/// primitives fell 314 → 251 as the stubs lost their root flares, its uncarried
+/// load ROSE 371.54 → 378.21 mm², and its total scar ROSE 10.75 → 12.51 mm² —
+/// the engine buying a shorter arm with a new scar, which is the other half of
+/// the objective the length alone cannot see.
+///
+/// The charge is the honest LOWER bound on what a model landing defers: the
+/// strike face's own height above the plate, `k_bottom · h`, because no path
+/// from there to the plate can be shorter than straight down. It is a
+/// derivation from the frame, not a weight, and it has no tunable part.
+///
+/// Its consequence is stated rather than discovered: a straight descent costs
+/// exactly `layer · h` whether it ends on the plate or on the model, so an
+/// up-sweep lean can only ever win by ending on the PLATE or by MERGING onto
+/// another arm. Landing higher up the model surface is the down-sweep's job,
+/// where the arm exists to relieve a specific overload and its landing is
+/// chosen by the load, not by its length.
+fn deferred_path_mm(landing: Landing, k_bottom: usize, layer_height_mm: f64) -> f64 {
+    match landing {
+        Landing::Plate | Landing::Strut { .. } => 0.0,
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a layer index bounded by the plan's own layer count is exact in f64"
+        )]
+        Landing::Model { .. } => k_bottom as f64 * layer_height_mm,
+    }
+}
+
+/// One candidate landing for a descent, priced but not yet path-checked.
+#[derive(Clone, Copy, Debug)]
+struct LeanCandidate {
+    cost_mm: f64,
+    /// `0` merge onto an arm, `1` land on the model, `2` land on the plate.
+    /// Only ever a tie-break, and it is stated here rather than left to the
+    /// order the scan happens to visit cells in.
+    class: u8,
+    cell: usize,
+    k_bottom: usize,
+    landing: Landing,
+    rooted: bool,
+}
+
+/// The descent, with the lean the owner asked for on 2026-09-03.
+///
+/// Straight down is computed first and is the answer unless some leaning
+/// descent is STRICTLY cheaper under the arm's own material cost. Ties go to
+/// straight down, which is what keeps a flat disc — where every column's top
+/// is at the same layer, so no lean can shorten anything — byte-identical.
+///
+/// # Why the search is a cone and not a disc
+///
+/// Any descent's cost is at least the straight-line distance it covers, so a
+/// candidate further from the seat than the straight descent's own length can
+/// never be cheaper; and the law admits at most `max_step` of sideways travel
+/// per layer, so a candidate that lands `m` layers down must be within
+/// `m · max_step`. Those two bounds are what stop this being a whole-grid
+/// search: the visited box is capped by the arm's own length, and the accepted
+/// set is a cone.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the descent reads the grid, the history, the keep-out, the law, its own seat and \
+          layer, its search bound and the outcome it reports into; a struct would move the \
+          argument list rather than shorten it"
+)]
+fn descend_leaning(
+    grid: &Grid,
+    history: &ColumnHistory,
+    keep_out: &DrainKeepOut,
+    law: &LeanLaw,
+    search_radius_mm: f64,
+    cell: usize,
+    layer: usize,
+    scratch: &mut Vec<LeanCandidate>,
+    outcome: &mut LayerOutcome,
+) -> (Landing, usize, bool, Vec<u32>) {
+    let (straight_landing, straight_bottom, straight_rooted) = descend(history, cell, layer);
+    let straight_layers = layer.saturating_sub(straight_bottom);
+    let Some(straight_length) = law.descent_cost_mm(straight_layers, 0.0) else {
+        return (straight_landing, straight_bottom, straight_rooted, Vec::new());
+    };
+    let straight_cost =
+        straight_length + deferred_path_mm(straight_landing, straight_bottom, law.layer_height_mm());
+    if !law.leans() {
+        return (straight_landing, straight_bottom, straight_rooted, Vec::new());
+    }
+
+    // The box the two bounds above allow. `straight_cost` is the straight
+    // descent's length, and no cheaper descent can travel further sideways
+    // than that.
+    let radius_mm = search_radius_mm.min(straight_cost);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a non-negative finite length divided by the grid pitch, floored to a loop bound"
+    )]
+    let radius_cells = (radius_mm / grid.pitch_mm()).floor().max(0.0) as usize;
+    if radius_cells == 0 {
+        return (straight_landing, straight_bottom, straight_rooted, Vec::new());
+    }
+    let cols = grid.cols();
+    let seat_row = grid.row_of(cell);
+    let seat_col = grid.col_of(cell);
+    let row_lo = seat_row.saturating_sub(radius_cells);
+    let row_hi = (seat_row + radius_cells).min(grid.rows() - 1);
+    let col_lo = seat_col.saturating_sub(radius_cells);
+    let col_hi = (seat_col + radius_cells).min(cols - 1);
+
+    scratch.clear();
+    for row in row_lo..=row_hi {
+        let base = row * cols;
+        for col in col_lo..=col_hi {
+            let candidate = base + col;
+            if candidate == cell {
+                continue;
+            }
+            let strut_top = history.top_strut[candidate];
+            let model_top = history.top_model[candidate];
+            // Only a landing STRICTLY HIGHER than the straight descent's can be
+            // cheaper: every leaned layer costs at least a vertical one, so
+            // crossing the same number of layers can never win. Two array reads
+            // reject the overwhelming majority of the box here, which is what
+            // makes the scan affordable.
+            let (landing, k_bottom, rooted, class) = if strut_top > 0 && strut_top >= model_top {
+                let landing_layer = strut_top as usize - 1;
+                (
+                    Landing::Strut {
+                        id: history.top_strut_id[candidate],
+                        layer: landing_layer,
+                    },
+                    landing_layer,
+                    true,
+                    0_u8,
+                )
+            } else if model_top > 0 {
+                let landing_layer = model_top as usize - 1;
+                (
+                    Landing::Model {
+                        layer: landing_layer,
+                    },
+                    landing_layer,
+                    history.top_model_rooted[candidate],
+                    1_u8,
+                )
+            } else {
+                (Landing::Plate, 0, true, 2_u8)
+            };
+            if k_bottom <= straight_bottom {
+                continue;
+            }
+            let descent_layers = layer.saturating_sub(k_bottom);
+            let lateral_mm = crate::cell_distance_mm(grid, cell, candidate);
+            let Some(length_mm) = law.descent_cost_mm(descent_layers, lateral_mm) else {
+                continue;
+            };
+            let cost_mm = length_mm + deferred_path_mm(landing, k_bottom, law.layer_height_mm());
+            outcome.lean_candidates_priced += 1;
+            if cost_mm >= straight_cost {
+                continue;
+            }
+            scratch.push(LeanCandidate {
+                cost_mm,
+                class,
+                cell: candidate,
+                k_bottom,
+                landing,
+                rooted,
+            });
+        }
+    }
+    if scratch.is_empty() {
+        return (straight_landing, straight_bottom, straight_rooted, Vec::new());
+    }
+    // Cheapest first; a tie goes to the merge, then to the model, then to the
+    // plate, then to the lower cell index. Every step of that order is total,
+    // so the winner does not depend on the scan order.
+    scratch.sort_unstable_by(|a, b| {
+        a.cost_mm
+            .total_cmp(&b.cost_mm)
+            .then_with(|| a.class.cmp(&b.class))
+            .then_with(|| a.cell.cmp(&b.cell))
+    });
+
+    let mut blocked = false;
+    for candidate in scratch.iter() {
+        if let Some(path) = lean_path(grid, history, keep_out, layer, cell, candidate) {
+            outcome.arms_leaned += 1;
+            if candidate.class == 0 {
+                outcome.arms_merged += 1;
+            }
+            return (candidate.landing, candidate.k_bottom, candidate.rooted, path);
+        }
+        blocked = true;
+    }
+    if blocked {
+        outcome.lean_paths_blocked += 1;
+    }
+    (straight_landing, straight_bottom, straight_rooted, Vec::new())
+}
+
+/// The cells a leaning descent would occupy, or `None` if it cannot have them.
+///
+/// The path is the straight segment from the seat to the landing — the cheapest
+/// shape for a given pair of endpoints, because the per-layer cost is convex in
+/// the step (see [`LeanLaw::descent_cost_mm`]) — sampled once per layer. It is
+/// rejected when any layer of it would stand inside model material, inside
+/// another arm, or inside a drain's escape cylinder. The landing layer itself
+/// is exempt from the occupancy test: striking one lamina into the surface is
+/// what a landing IS (`docs/physics.md`:284-324).
+fn lean_path(
+    grid: &Grid,
+    history: &ColumnHistory,
+    keep_out: &DrainKeepOut,
+    layer: usize,
+    seat_cell: usize,
+    candidate: &LeanCandidate,
+) -> Option<Vec<u32>> {
+    let cols = grid.cols();
+    let span = layer - candidate.k_bottom;
+    let seat_row = grid.row_of(seat_cell);
+    let seat_col = grid.col_of(seat_cell);
+    let base_row = grid.row_of(candidate.cell);
+    let base_col = grid.col_of(candidate.cell);
+    let mut path = Vec::with_capacity(span);
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "layer and cell indices bounded by the plan's own extents are exact in f64"
+    )]
+    let span_f = span as f64;
+    for slot in 0..span {
+        let here = candidate.k_bottom + slot;
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a slot index bounded by the layer count is exact in f64"
+        )]
+        let fraction = slot as f64 / span_f;
+        #[expect(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "an interpolation between two in-range grid indices, rounded back onto the \
+                  grid and then clamped by construction"
+        )]
+        let row = ((base_row as f64) + ((seat_row as f64) - (base_row as f64)) * fraction)
+            .round()
+            .max(0.0) as usize;
+        #[expect(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "an interpolation between two in-range grid indices, rounded back onto the \
+                  grid and then clamped by construction"
+        )]
+        let col = ((base_col as f64) + ((seat_col as f64) - (base_col as f64)) * fraction)
+            .round()
+            .max(0.0) as usize;
+        let row = row.min(grid.rows() - 1);
+        let col = col.min(cols - 1);
+        let here_cell = row * cols + col;
+        if !keep_out.admits(here_cell, here) {
+            return None;
+        }
+        if slot > 0 {
+            // Nothing may already stand at this layer or above it in this
+            // column: `top_model` and `top_strut` hold layer + 1 of the topmost
+            // occupant, so `> here` is exactly "occupied at or above here".
+            if history.top_model[here_cell] as usize > here {
+                return None;
+            }
+            if history.top_strut[here_cell] as usize > here {
+                return None;
+            }
+        }
+        path.push(u32::try_from(here_cell).unwrap_or(u32::MAX));
+    }
+    Some(path)
+}
+
 fn descend(history: &ColumnHistory, cell: usize, layer: usize) -> (Landing, usize, bool) {
     let strut_top = history.top_strut[cell];
     let model_top = history.top_model[cell];
@@ -538,4 +892,234 @@ fn score_at(grid: &Grid, prefix: &[u32], half_widths: &[usize], cell: usize) -> 
         total += prefix[base + hi] - prefix[base + lo];
     }
     total
+}
+
+#[cfg(test)]
+mod descent_tests {
+    use super::{descend_leaning, ColumnHistory, LayerOutcome};
+    use crate::drain::DrainKeepOut;
+    use crate::grid::plan_grid;
+    use crate::lean::LeanLaw;
+    use crate::Landing;
+
+    const H: f64 = 0.05;
+
+    fn outcome() -> LayerOutcome {
+        LayerOutcome {
+            demand_cells: 0,
+            residual_demand: 0,
+            unrooted_landings: 0,
+            keep_out_refusals: 0,
+            arms_leaned: 0,
+            arms_merged: 0,
+            lean_paths_blocked: 0,
+            lean_candidates_priced: 0,
+        }
+    }
+
+    /// A grid one working pitch across, the same 0.05 mm the corpus runs at.
+    fn grid() -> crate::grid::Grid {
+        plan_grid(0.0, 0.0, 2.0, 2.0, 400, H, 0.0, 1_000_000_000).0
+    }
+
+    /// THE MECHANISM, AND ITS SABOTAGE. A seat 200 layers above the plate with
+    /// a neighbouring arm's top 10 layers below it and 0.4 mm to one side: the
+    /// merge is 10 leaned layers instead of 200 vertical ones, so it wins by an
+    /// order of magnitude. With `LeanLaw::disabled` — the same geometry, the
+    /// same history, the same keep-out — the descent must fall back to the
+    /// plate and the merge count must go to zero. A test that only asserted
+    /// the merge would pass on a descent that merged unconditionally.
+    #[test]
+    fn a_seat_merges_onto_a_neighbouring_trunk_and_the_disabled_law_sends_it_to_the_plate() {
+        let grid = grid();
+        let mut history = ColumnHistory::new(&grid);
+        let seat = grid.index(20, 20);
+        // The neighbour: 8 cells away is 0.4 mm at the 0.05 mm pitch, and its
+        // top is 10 layers down, so 0.04 mm of sideways move per layer against
+        // the 0.0785 mm the law allows.
+        let neighbour = grid.index(20, 28);
+        history.top_strut[neighbour] = 191;
+        history.top_strut_id[neighbour] = 7;
+
+        let mut scratch = Vec::new();
+        let mut counts = outcome();
+        let law = LeanLaw::new(H, 45.0, 25.0);
+        let (landing, k_bottom, _, path) = descend_leaning(
+            &grid,
+            &history,
+            &DrainKeepOut::none(),
+            &law,
+            4.0,
+            seat,
+            200,
+            &mut scratch,
+            &mut counts,
+        );
+        assert_eq!(
+            landing,
+            Landing::Strut { id: 7, layer: 190 },
+            "the descent should have merged onto the neighbouring trunk"
+        );
+        assert_eq!(k_bottom, 190);
+        assert_eq!(counts.arms_merged, 1, "the merge must be counted");
+        assert_eq!(counts.arms_leaned, 1);
+        assert_eq!(path.len(), 10, "ten layers of descent, one cell each");
+        assert_eq!(
+            path.first().copied().map(|cell| cell as usize),
+            Some(neighbour),
+            "the path must end in the neighbour's own column"
+        );
+        assert_eq!(
+            path.last().copied().map(|cell| cell as usize),
+            Some(grid.index(20, 21)),
+            "and start one step off the seat"
+        );
+
+        let mut sabotaged = outcome();
+        let (landing, k_bottom, _, path) = descend_leaning(
+            &grid,
+            &history,
+            &DrainKeepOut::none(),
+            &LeanLaw::disabled(H),
+            4.0,
+            seat,
+            200,
+            &mut scratch,
+            &mut sabotaged,
+        );
+        assert_eq!(
+            landing,
+            Landing::Plate,
+            "with the lean disabled the descent must drop straight down to the plate"
+        );
+        assert_eq!(k_bottom, 0);
+        assert!(path.is_empty(), "a straight arm carries no path");
+        assert_eq!(
+            sabotaged.arms_merged, 0,
+            "SABOTAGE: disabling the lean must take the merge count to zero"
+        );
+        assert_eq!(sabotaged.arms_leaned, 0);
+    }
+
+    /// The same geometry with the neighbour's top too far to one side for the
+    /// available layers. `0.8 mm` over 10 layers is `0.08 mm` per layer against
+    /// the `0.0785 mm` the registered law admits, so the angle refuses it and
+    /// the descent goes straight down. This is what makes the first test a
+    /// statement about the ANGLE LAW rather than about the search radius.
+    #[test]
+    fn a_trunk_the_angle_law_cannot_reach_is_not_merged_onto() {
+        let grid = grid();
+        let mut history = ColumnHistory::new(&grid);
+        let seat = grid.index(20, 20);
+        let neighbour = grid.index(20, 37);
+        history.top_strut[neighbour] = 191;
+        history.top_strut_id[neighbour] = 7;
+
+        let mut scratch = Vec::new();
+        let mut counts = outcome();
+        let (landing, _, _, path) = descend_leaning(
+            &grid,
+            &history,
+            &DrainKeepOut::none(),
+            &LeanLaw::new(H, 45.0, 25.0),
+            4.0,
+            seat,
+            200,
+            &mut scratch,
+            &mut counts,
+        );
+        assert_eq!(landing, Landing::Plate);
+        assert!(path.is_empty());
+        assert_eq!(counts.arms_merged, 0);
+    }
+
+    /// A KEEP-OUT IN THE WAY. The merge of the first test, with a drain
+    /// cylinder standing across the path: the lean is refused, the arm goes
+    /// straight down, and `lean_paths_blocked` is the witness that the path
+    /// check is what refused it rather than the price.
+    #[test]
+    fn a_lean_whose_path_crosses_a_keep_out_is_refused_and_counted() {
+        let grid = grid();
+        let mut history = ColumnHistory::new(&grid);
+        let seat = grid.index(20, 20);
+        let neighbour = grid.index(20, 28);
+        history.top_strut[neighbour] = 191;
+        history.top_strut_id[neighbour] = 7;
+        let keep_out = DrainKeepOut::build(
+            &grid,
+            &[crate::drain::DrainSpec {
+                outlet_mm: [grid.center_x_mm(24), grid.center_y_mm(20), 0.0],
+                radius_mm: 0.15,
+                outward_axis: [0.0, 0.0, -1.0],
+            }],
+            0.0,
+            0.0,
+            400,
+            0.0,
+            H,
+        );
+
+        let mut scratch = Vec::new();
+        let mut counts = outcome();
+        let (landing, _, _, path) = descend_leaning(
+            &grid,
+            &history,
+            &keep_out,
+            &LeanLaw::new(H, 45.0, 25.0),
+            4.0,
+            seat,
+            200,
+            &mut scratch,
+            &mut counts,
+        );
+        assert_eq!(
+            landing,
+            Landing::Plate,
+            "a lean whose path crosses the resin's way out must be refused"
+        );
+        assert!(path.is_empty());
+        assert_eq!(counts.arms_merged, 0);
+        assert_eq!(
+            counts.lean_paths_blocked, 1,
+            "the refusal must be counted as a blocked path, not silently priced away"
+        );
+    }
+
+    /// A MODEL LANDING IS NEVER WORTH LEANING FOR. The neighbour column holds
+    /// model rather than an arm, 10 layers down: priced on arm length alone
+    /// this is the cheapest descent in sight and it is exactly the degenerate
+    /// stub measured on 2026-09-04. With the deferred load path charged, it
+    /// costs the same `layer * h` the straight descent does and the tie goes
+    /// straight down.
+    #[test]
+    fn a_model_landing_a_lean_away_never_beats_the_straight_descent() {
+        let grid = grid();
+        let mut history = ColumnHistory::new(&grid);
+        let seat = grid.index(20, 20);
+        let neighbour = grid.index(20, 28);
+        history.top_model[neighbour] = 191;
+        history.top_model_rooted[neighbour] = true;
+
+        let mut scratch = Vec::new();
+        let mut counts = outcome();
+        let (landing, k_bottom, _, path) = descend_leaning(
+            &grid,
+            &history,
+            &DrainKeepOut::none(),
+            &LeanLaw::new(H, 45.0, 25.0),
+            4.0,
+            seat,
+            200,
+            &mut scratch,
+            &mut counts,
+        );
+        assert_eq!(landing, Landing::Plate);
+        assert_eq!(k_bottom, 0);
+        assert!(path.is_empty());
+        assert_eq!(counts.arms_leaned, 0);
+        assert!(
+            counts.lean_candidates_priced > 0,
+            "the candidate must have been PRICED and rejected, not skipped before pricing"
+        );
+    }
 }

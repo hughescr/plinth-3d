@@ -984,7 +984,7 @@ macro_rules! placeholder_declarations {
                 }
             )+
 
-            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 280], RegistryError> {
+            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 281], RegistryError> {
                 Ok([
                     $(ConstantDescriptor::from_placeholder(
                         ConstantId::from($id),
@@ -1306,6 +1306,8 @@ placeholder_declarations! {
     "ORIENT_WEIGHT_SUPPORT_AREA_CM2", "1/cm²", "scalar", "Dense-sweep objective weight on down-facing support area. Same knowing carry-over as ORIENT_WEIGHT_HEIGHT_MM, and the same non-acceptance status. The area it multiplies is a PROXY derivable without running the support engine: the overhang mask alone, deliberately without the engine's exterior, near-plate and grounded-column filters, so its bias against realized support area is a measured quantity rather than an asserted equality.";
     overhang_angle_deg: PositiveFinite = PositiveFinite::new(45.0)?;
     "OVERHANG_ANGLE_DEG", "°", "scalar", "Legacy tool convention lacking the required geometric-extent criterion.";
+    overhang_weight_transition_deg: PositiveFinite = PositiveFinite::new(25.0)?;
+    "OVERHANG_WEIGHT_TRANSITION_DEG", "°", "scalar", "PLACEHOLDER, AND IT DECIDES OUTCOMES. The 10-to-90 percent width of the logistic overhang weight w(theta) whose centre is OVERHANG_ANGLE_DEG. Owner ruling 2026-09-02 (memory note overhang-limit-estimate-2026-09-02): no coupon in this repo has EVER varied overhang angle -- plate 7 is pre-registered with no results -- and the owner refused a new plate, so this family is a best guess from existing data, adversarially reviewed, and is labelled a heuristic rather than a measurement. The only angle-varying evidence is literature: e-Stage per-model criticals 30/41/46/49/55 deg, median 46 (LITERATURE-NOTES.md:934-945), which is where the 45 deg centre and this 25 deg width come from -- full weight at or below 32.5 deg, none at or above 57.5 deg. The engine reads it in exactly one place, crates/plinth-sweep/src/lean.rs, to price a descending arm lean and to derive the shallowest lean the law admits at all, h * cot(centre - width/2). SUPERSEDED BY any coupon that varies overhang angle at fixed reach; until then, disabling the lean (SweepPolicy::without_lean) is the sabotage that measures what this number buys.";
     p8_ball_slide_max_mm: PositiveFinite = PositiveFinite::new(2.0)?;
     "P8_BALL_SLIDE_MAX_MM", "mm", "scalar", "Phase-8 ball-slide search reach.";
     p8_ball_slide_step_mm: PositiveFinite = PositiveFinite::new(0.25)?;
