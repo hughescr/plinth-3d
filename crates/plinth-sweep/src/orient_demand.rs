@@ -116,25 +116,81 @@
 //! deviation from a literal "run the production sweep on every candidate"
 //! reading of the design rather than hidden inside a constant that would
 //! misleadingly claim registry provenance for a pure performance knob.
+//!
+//! # The production pass also prices where the arms LAND
+//!
+//! A production measurement carries a second quantity the prefilter does not:
+//! the MODEL-LANDING SCAR, `Σ π r_seat² × fragility × (1 + D)` over the arms
+//! that seat on the model, measured by [`crate::model_landing`] against the
+//! very `OrientFaceTable` the objective was scored with. It goes back through
+//! [`MeasuredSupportDemand::landing_scar_raw_mm2`] and is folded into the
+//! objective's existing scar term at the existing registered weight; this
+//! module adds no constant of its own for it.
+//!
+//! It is measured at [`DemandFidelity::Production`] and nowhere else, for the
+//! same reason the burden may only be crowned there: a coarse raster's arms
+//! are not the emitted field's arms, so where they land says nothing about
+//! where anything will land. A prefilter row therefore carries a stated
+//! absence, not a zero.
 
 use std::time::Instant;
 
 use plinth_core::{m0_constants, LayerPlan};
 use plinth_mesh::Mesh;
 use plinth_orient::demand::{DemandFidelity, MeasuredSupportDemand, SupportDemandMeasurer};
-use plinth_orient::UpDirection;
+use plinth_orient::{OrientFaceTable, UpDirection};
 use rayon::prelude::*;
 
-use crate::{run_sweep, SweepPolicy};
+use crate::{model_landing, run_sweep, SweepPolicy};
 
 /// See the module doc's "Two rasters" section.
 const DEMAND_PITCH_MULTIPLIER: f64 = 10.0;
 
-/// The one production [`SupportDemandMeasurer`]. Zero-sized: every number it
-/// needs is read fresh from the registry on each call, so two instances can
-/// never disagree.
+/// Whether a production measurement prices where its arms LAND on the model.
+///
+/// **A policy, not a constant.** [`Self::Measured`] is the production
+/// behaviour and the [`Default`]; [`Self::Suppressed`] exists so a test can
+/// ask the counterfactual question "which pose would this model take if the
+/// model-landing scar were not in the objective at all" against the real
+/// engine, without a constant to edit or a weight to zero. Suppressing it
+/// yields a stated absence (`landing_scar_raw_mm2: None`), which is exactly
+/// what a run that never measured one carries, so the suppressed path is a
+/// path the search already knows how to take.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ModelLandingScarPolicy {
+    #[default]
+    Measured,
+    Suppressed,
+}
+
+/// The one production [`SupportDemandMeasurer`]. Every number it needs is read
+/// fresh from the registry on each call, so two instances can never disagree
+/// about a constant; the one thing it carries is the policy above.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct SweepDemand;
+pub struct SweepDemand {
+    landing_scar: ModelLandingScarPolicy,
+}
+
+impl SweepDemand {
+    /// The production measurer: real burden, and the model-landing scar
+    /// measured on the production raster.
+    #[must_use]
+    pub const fn production() -> Self {
+        Self {
+            landing_scar: ModelLandingScarPolicy::Measured,
+        }
+    }
+
+    /// The same measurer with the model-landing scar withheld, so a test can
+    /// measure what that term is worth by removing it rather than by
+    /// re-deriving it. See [`ModelLandingScarPolicy`].
+    #[must_use]
+    pub const fn without_model_landing_scar() -> Self {
+        Self {
+            landing_scar: ModelLandingScarPolicy::Suppressed,
+        }
+    }
+}
 
 /// Every registry number one batch of measurements needs, read ONCE per
 /// batch. Reading the registry per candidate would be a scalar call in the
@@ -177,9 +233,11 @@ impl SweepDemand {
     /// single failing pose cannot end the batch.
     fn measure_one(
         mesh: &Mesh,
+        table: &OrientFaceTable,
         candidate: UpDirection,
         fidelity: DemandFidelity,
         settings: &DemandSettings,
+        landing_scar: ModelLandingScarPolicy,
     ) -> Result<MeasuredSupportDemand, String> {
         // Oriented exactly as the eventual winner would be
         // (`plinth_orient::oriented_recentered_mesh` is the same
@@ -213,6 +271,29 @@ impl SweepDemand {
 
         let plan =
             run_sweep(&transformed, &layers, &settings.policy).map_err(|error| error.to_string())?;
+
+        // The model-landing scar, on the PRODUCTION raster only. Two reasons
+        // it is not measured at `Prefilter`: the coarse raster's arms are not
+        // the emitted field's arms, so where they land is not where anything
+        // will land; and the fidelity precedence in `plinth_orient::search`
+        // means a prefilter row may only prune, never crown, so a scar it
+        // measured could not be allowed to decide anyway.
+        //
+        // The fields come from the table the objective was SCORED against,
+        // never re-evaluated here, and the face order of `transformed` is the
+        // face order of `mesh` (orienting rotates vertices and never reorders
+        // triangles), which is the table's own order.
+        let landing = match (fidelity, landing_scar) {
+            (DemandFidelity::Production, ModelLandingScarPolicy::Measured) => {
+                model_landing::model_landing_scar(
+                    &transformed,
+                    &plan,
+                    table.delicacy(),
+                    table.display(),
+                )
+            }
+            _ => None,
+        };
         Ok(MeasuredSupportDemand {
             support_area_cm2: burden_cm2(plan.struts.len(), settings.tip_radius_mm),
             struts: plan.struts.len(),
@@ -221,6 +302,8 @@ impl SweepDemand {
             layers: plan.layers,
             residual_demand_cells: plan.report.residual_demand_cells,
             uncarried_load_mm2: plan.report.uncarried_load_mm2,
+            model_landings: plan.report.landings.model,
+            landing_scar_raw_mm2: landing.as_ref().map(|scar| scar.raw_mm2),
             fidelity,
         })
     }
@@ -238,6 +321,7 @@ impl SupportDemandMeasurer for SweepDemand {
     fn measure_support_demand(
         &self,
         mesh: &Mesh,
+        table: &OrientFaceTable,
         candidates: &[UpDirection],
         fidelity: DemandFidelity,
     ) -> Vec<Result<MeasuredSupportDemand, String>> {
@@ -260,7 +344,16 @@ impl SupportDemandMeasurer for SweepDemand {
         // `plinth-sweep/tests/orient_demand_parallel.rs`).
         let measured: Vec<Result<MeasuredSupportDemand, String>> = candidates
             .par_iter()
-            .map(|candidate| Self::measure_one(mesh, *candidate, fidelity, &settings))
+            .map(|candidate| {
+                Self::measure_one(
+                    mesh,
+                    table,
+                    *candidate,
+                    fidelity,
+                    &settings,
+                    self.landing_scar,
+                )
+            })
             .collect();
         // Disclosure, not a record: the cost of this stage is printed where a
         // reader of the run log will see it, and is deliberately kept OUT of
@@ -271,12 +364,27 @@ impl SupportDemandMeasurer for SweepDemand {
             .zip(&measured)
             .map(|(candidate, result)| {
                 let up = candidate.get();
-                let (arms, burden) = match result {
-                    Ok(one) => (one.struts.to_string(), format!("{:.5}", one.support_area_cm2)),
-                    Err(_) => ("err".to_owned(), "err".to_owned()),
+                let (arms, burden, landing) = match result {
+                    Ok(one) => (
+                        one.struts.to_string(),
+                        format!("{:.5}", one.support_area_cm2),
+                        // A stated absence prints as one: "not measured" and
+                        // "measured, nothing landed" must never look alike in
+                        // the log a reader diagnoses a pose from.
+                        one.landing_scar_raw_mm2.map_or_else(
+                            || format!("{} model landings, scar unmeasured", one.model_landings),
+                            |scar| {
+                                format!(
+                                    "{} model landings, landing scar {scar:.5} mm2",
+                                    one.model_landings
+                                )
+                            },
+                        ),
+                    ),
+                    Err(_) => ("err".to_owned(), "err".to_owned(), "err".to_owned()),
                 };
                 format!(
-                    "({:+.4},{:+.4},{:+.4}) arms {arms} burden {burden} cm2",
+                    "({:+.4},{:+.4},{:+.4}) arms {arms} burden {burden} cm2, {landing}",
                     up[0], up[1], up[2]
                 )
             })

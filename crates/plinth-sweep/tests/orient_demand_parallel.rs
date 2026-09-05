@@ -16,6 +16,7 @@
 use plinth_mesh::make_recessed_disc;
 use plinth_orient::demand::{DemandFidelity, SupportDemandMeasurer};
 use plinth_orient::UpDirection;
+use plinth_orient::OrientFaceTable;
 use plinth_sweep::SweepDemand;
 
 /// A handful of the same up-directions the dense sweep's prefilter actually
@@ -40,15 +41,18 @@ fn candidates() -> Vec<UpDirection> {
 )]
 fn the_parallel_batch_is_bit_identical_to_one_candidate_at_a_time() {
     let mesh = make_recessed_disc(11.5, 12.5, 3.5, 2.5, 10.0, 96).expect("the Round 25 profile");
-    let measurer = SweepDemand;
+    let measurer = SweepDemand::production();
     // Prefilter, not Production: the fixture only needs to prove the batch
     // and the one-at-a-time calls agree, and the coarser raster keeps the
-    // test cheap. The code path exercised is identical either way --
-    // `measure_one` does not branch on fidelity beyond which pitch it reads.
+    // test cheap. `measure_one` branches on fidelity twice -- which pitch it
+    // reads, and whether it prices model landings -- and neither branch is a
+    // shared-state one, so the batch-vs-serial question this test asks is the
+    // same question at either fidelity.
     let fidelity = DemandFidelity::Prefilter;
     let candidates = candidates();
 
-    let batch = measurer.measure_support_demand(&mesh, &candidates, fidelity);
+    let table = OrientFaceTable::build(&mesh, "exact").expect("a closed fixture always scores");
+    let batch = measurer.measure_support_demand(&mesh, &table, &candidates, fidelity);
     assert_eq!(batch.len(), candidates.len(), "the batch dropped or duplicated a candidate");
 
     let serial: Vec<_> = candidates
@@ -56,7 +60,7 @@ fn the_parallel_batch_is_bit_identical_to_one_candidate_at_a_time() {
         .map(|&candidate| {
             let one = std::slice::from_ref(&candidate);
             measurer
-                .measure_support_demand(&mesh, one, fidelity)
+                .measure_support_demand(&mesh, &table, one, fidelity)
                 .into_iter()
                 .next()
                 .expect("one candidate in, one result out")

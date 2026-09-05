@@ -248,7 +248,7 @@ fn orient_dense(mesh: &Mesh, name: &str) -> OrientedModel {
         .unwrap_or_else(|scale| panic!("{name}: scale sanity must pass: {scale:?}"));
 
     let request = registered_sweep_request().expect("the registered sweep request");
-    let demand = SweepDemand;
+    let demand = SweepDemand::production();
     search_and_orient(decimated, &request, Some(&demand))
         .unwrap_or_else(|error| panic!("{name}: the dense orientation search must not refuse: {error}"))
 }

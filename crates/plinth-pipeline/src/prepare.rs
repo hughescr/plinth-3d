@@ -1329,7 +1329,7 @@ fn orient_model(
             // orientation stage is shared by both `--placement` engines, so
             // wiring the real sweep-demand measurer here fixes the double-
             // charged-flat-pose defect for legacy and sweep placement alike.
-            let demand = plinth_sweep::SweepDemand;
+            let demand = plinth_sweep::SweepDemand::production();
             plinth_orient::search_and_orient(decimated, &request, Some(&demand)).map_err(|source| {
                 ChainStop::new(PipelineError::Orient {
                     model: model.clone(),

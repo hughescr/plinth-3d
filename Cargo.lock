@@ -1197,6 +1197,7 @@ dependencies = [
 name = "plinth-sweep"
 version = "0.1.0"
 dependencies = [
+ "geom_kernel",
  "plinth-core",
  "plinth-decimate",
  "plinth-hollow",

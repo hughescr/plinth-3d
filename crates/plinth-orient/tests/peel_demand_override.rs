@@ -14,7 +14,7 @@ use std::cell::RefCell;
 use plinth_mesh::{make_overhang_table, Mesh};
 use plinth_orient::demand::{DemandFidelity, MeasuredSupportDemand, SupportDemandMeasurer};
 use plinth_orient::search::{search, SweepRequest};
-use plinth_orient::UpDirection;
+use plinth_orient::{OrientFaceTable, UpDirection};
 
 fn measured(support_area_cm2: f64, fidelity: DemandFidelity) -> MeasuredSupportDemand {
     MeasuredSupportDemand {
@@ -28,6 +28,10 @@ fn measured(support_area_cm2: f64, fidelity: DemandFidelity) -> MeasuredSupportD
         layers: 10,
         residual_demand_cells: 0,
         uncarried_load_mm2: 0.0,
+        // The double reports no landing at all: a stated absence, which is
+        // what a measurer that never looked at a support field must say.
+        model_landings: 0,
+        landing_scar_raw_mm2: None,
         fidelity,
     }
 }
@@ -41,6 +45,7 @@ impl SupportDemandMeasurer for FixedDemand {
     fn measure_support_demand(
         &self,
         _mesh: &Mesh,
+        _table: &OrientFaceTable,
         candidates: &[UpDirection],
         fidelity: DemandFidelity,
     ) -> Vec<Result<MeasuredSupportDemand, String>> {
@@ -57,6 +62,7 @@ impl SupportDemandMeasurer for AlwaysFails {
     fn measure_support_demand(
         &self,
         _mesh: &Mesh,
+        _table: &OrientFaceTable,
         candidates: &[UpDirection],
         _fidelity: DemandFidelity,
     ) -> Vec<Result<MeasuredSupportDemand, String>> {
@@ -80,6 +86,7 @@ impl SupportDemandMeasurer for PricierAtProduction {
     fn measure_support_demand(
         &self,
         _mesh: &Mesh,
+        _table: &OrientFaceTable,
         candidates: &[UpDirection],
         fidelity: DemandFidelity,
     ) -> Vec<Result<MeasuredSupportDemand, String>> {

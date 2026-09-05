@@ -9,6 +9,12 @@ publish = false
 workspace = true
 
 [dependencies]
+# For `geom_kernel::closest_on_tri` alone -- the workspace's canonical
+# point-vs-triangle closest point, which src/model_landing.rs uses to charge a
+# support seat against the face it lands on. Writing a second point-vs-triangle
+# distance in this crate is exactly what the no-private-vector-algebra
+# discipline forbids. No cycle: geom_kernel depends on no `plinth-*` crate.
+geom_kernel = { path = "../../rust/geom_kernel" }
 # The registry is the only place a number may come from. Nothing in this crate
 # declares a physical constant of its own.
 plinth-core = { path = "../plinth-core" }

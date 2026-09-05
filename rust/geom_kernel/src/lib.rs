@@ -87,6 +87,14 @@ use sha2::{Digest, Sha256};
 /// Both answer for every input and refuse nothing, so a caller's refusal stays
 /// at the caller. Read the degenerate-input contracts before calling.
 pub use closest::{segment_segment_distance, segment_segment_distance_min};
+/// The closest point ON a triangle to a point — the Ericson region walk this
+/// kernel's own nearest-face traversal (`NativeSurface::nearest_one`) already
+/// calls at every leaf.
+///
+/// Exported so a caller that needs the SAME primitive over a small, explicit
+/// face set does not hand-roll a second point-vs-triangle distance. It is a
+/// pure function of the four points and refuses nothing.
+pub use closest::closest_on_tri;
 /// The Möller acceptance slack every ray result of this kernel carries BY
 /// CONTRACT.
 ///

@@ -383,7 +383,20 @@ pub struct TermsRecord {
     pub peel_term: Finite,
     pub height_mm: Finite,
     pub scar_term: Finite,
+    /// The WHOLE scar measurement: `fragility + display + landing`, where the
+    /// landing half is present only for a candidate a production sweep
+    /// measured.
     pub scar_raw_mm2: Finite,
+    /// The two halves the scorer measured off the model's own down-facing
+    /// area, published beside the landing half so the identity
+    /// `scar_raw = fragility + display + landing` can be read off one record
+    /// instead of re-derived from the mesh.
+    pub fragility_raw_mm2: Finite,
+    pub display_raw_mm2: Finite,
+    /// `Σ_model-landings(π r_seat² × fragility × (1 + D))`, or [`None`] when
+    /// no production sweep measured this candidate — a stated absence, never
+    /// a zero (`crate::demand::MeasuredSupportDemand`'s own rule).
+    pub landing_scar_raw_mm2: Option<Finite>,
     pub down_facing_faces: usize,
     pub score: Finite,
 }
@@ -399,6 +412,9 @@ impl TermsRecord {
             height_mm: finite(terms.height_mm)?,
             scar_term: finite(terms.scar_term)?,
             scar_raw_mm2: finite(terms.scar_raw_mm2)?,
+            fragility_raw_mm2: finite(terms.fragility_raw_mm2)?,
+            display_raw_mm2: finite(terms.display_raw_mm2)?,
+            landing_scar_raw_mm2: terms.landing_scar_raw_mm2.map(finite).transpose()?,
             down_facing_faces: terms.down_facing_faces,
             score: finite(terms.score)?,
         })
@@ -410,15 +426,60 @@ impl TermsRecord {
     /// real-sweep-demand override and by the four-corner robustness check —
     /// both re-price an already-measured candidate rather than re-running the
     /// batched scorer, because neither the peel corner nor the demand
-    /// substitution changes `peak_mm2`, `height_mm` or `scar_term`.
-    fn repriced(self, weights: ObjectiveWeights, support_area_cm2: f64, peel_force_n: f64) -> Self {
+    /// substitution changes `peak_mm2` or `height_mm`.
+    ///
+    /// `landing_scar_raw_mm2` is the ONE thing here that can move the scar
+    /// term. `None` leaves `scar_term`, `scar_raw_mm2` and
+    /// `landing_scar_raw_mm2` exactly as they are, which is what the
+    /// prefilter stage and the robustness check both pass. `Some(l)` folds a
+    /// production sweep's measured model-landing scar into the scar term at
+    /// the SAME registered `ORIENT_SCAR_WEIGHT` and the same association
+    /// `score::score_one` uses (`weights.scar * raw / 100`), so `l = 0.0`
+    /// reproduces the pre-landing score bit for bit rather than approximately
+    /// — `raw + 0.0 == raw` in IEEE, and the quotient that follows is the
+    /// identical expression on the identical operand.
+    ///
+    /// It may be folded in **once**: `self.landing_scar_raw_mm2` is `None`
+    /// on every path that reaches a `Some` here, because only the commit
+    /// tier's production stage passes one and it visits each finalist once.
+    fn repriced(
+        self,
+        weights: ObjectiveWeights,
+        support_area_cm2: f64,
+        peel_force_n: f64,
+        landing_scar_raw_mm2: Option<f64>,
+    ) -> Self {
+        debug_assert!(
+            landing_scar_raw_mm2.is_none() || self.landing_scar_raw_mm2.is_none(),
+            "a model-landing scar would be folded into this candidate twice"
+        );
         let peel_term = weights.peel_points_per_newton() * peel_force_n;
+        let (scar_raw_mm2, scar_term, landing) = match landing_scar_raw_mm2
+            .and_then(|landing| Finite::new(landing).ok())
+        {
+            Some(landing) => {
+                let raw = self.scar_raw_mm2.get() + landing.get();
+                let term = weights.scar() * raw / 100.0;
+                (
+                    Finite::new(raw).unwrap_or(self.scar_raw_mm2),
+                    Finite::new(term).unwrap_or(self.scar_term),
+                    Some(landing),
+                )
+            }
+            // Either nothing was measured, or what was measured is not a
+            // finite number: both keep the scar term the scorer produced,
+            // which is emit-and-warn rather than a refusal.
+            None => (self.scar_raw_mm2, self.scar_term, self.landing_scar_raw_mm2),
+        };
         let score = ((weights.support_area_cm2() * support_area_cm2 + peel_term)
             + weights.height_mm() * self.height_mm.get())
-            + self.scar_term.get();
+            + scar_term.get();
         Self {
             support_area_cm2: Finite::new(support_area_cm2).unwrap_or(self.support_area_cm2),
             peel_term: Finite::new(peel_term).unwrap_or(self.peel_term),
+            scar_term,
+            scar_raw_mm2,
+            landing_scar_raw_mm2: landing,
             score: Finite::new(score).unwrap_or(self.score),
             ..self
         }
@@ -541,6 +602,13 @@ pub struct CommitDemandRecord {
     pub achieved_pitch_mm: Option<Finite>,
     pub residual_demand_cells: Option<usize>,
     pub uncarried_load_mm2: Option<Finite>,
+    /// How many of this pose's arms seated on the model, and the scar they
+    /// leave there. The count is published beside the scar so a `0.0` scar is
+    /// read as "nothing landed" rather than inferred. The scar is `None`
+    /// whenever the row's `fidelity` is `"prefilter"`: only a production
+    /// sweep's landings are the landings the emitted file will have.
+    pub model_landings: Option<usize>,
+    pub landing_scar_raw_mm2: Option<Finite>,
     /// `"prefilter"` or `"production"` — which raster the numbers above were
     /// measured on. `None` only when no measurement succeeded at all.
     pub fidelity: Option<String>,
@@ -563,6 +631,8 @@ impl CommitDemandRecord {
             achieved_pitch_mm: None,
             residual_demand_cells: None,
             uncarried_load_mm2: None,
+            model_landings: None,
+            landing_scar_raw_mm2: None,
             fidelity: None,
             prefilter_support_area_cm2: None,
             prefilter_struts: None,
@@ -597,6 +667,8 @@ fn fill_measured(
     row.achieved_pitch_mm = Some(finite(measured.achieved_pitch_mm)?);
     row.residual_demand_cells = Some(measured.residual_demand_cells);
     row.uncarried_load_mm2 = Some(finite(measured.uncarried_load_mm2)?);
+    row.model_landings = Some(measured.model_landings);
+    row.landing_scar_raw_mm2 = measured.landing_scar_raw_mm2.map(finite).transpose()?;
     row.fidelity = Some(measured.fidelity.label().to_owned());
     row.measurement_error = None;
     Ok(())
@@ -1024,6 +1096,7 @@ pub fn search(
             .collect();
         let prefiltered = measurer.measure_support_demand(
             mesh,
+            &exact.table,
             &admitted_directions,
             crate::demand::DemandFidelity::Prefilter,
         );
@@ -1038,6 +1111,10 @@ pub fn search(
                         request.weights,
                         measured.support_area_cm2,
                         entry.terms.peel_force_n.low_pressure_low_exponent_n.get(),
+                        // The coarse raster prunes and never prices the scar:
+                        // where a coarse arm lands is not where the emitted
+                        // field's arm lands.
+                        None,
                     );
                     fill_measured(&mut row, measured)?;
                     row.prefilter_support_area_cm2 = row.measured_support_area_cm2;
@@ -1058,6 +1135,7 @@ pub fn search(
             .collect();
         let produced = measurer.measure_support_demand(
             mesh,
+            &exact.table,
             &finalist_directions,
             crate::demand::DemandFidelity::Production,
         );
@@ -1074,6 +1152,9 @@ pub fn search(
                         request.weights,
                         measured.support_area_cm2,
                         entry.terms.peel_force_n.low_pressure_low_exponent_n.get(),
+                        // The one place the measured model-landing scar is
+                        // folded in, and the one fidelity allowed to price it.
+                        measured.landing_scar_raw_mm2,
                     );
                     let prefilter_area = row.prefilter_support_area_cm2;
                     let prefilter_struts = row.prefilter_struts;
@@ -1466,7 +1547,14 @@ fn corner_winner(
             let peel_force_n = read_corner(entry.terms.peel_force_n);
             let repriced = entry
                 .terms
-                .repriced(weights, entry.terms.support_area_cm2.get(), peel_force_n);
+                // The scar term, landing half included, is already in these
+                // terms and a corner cannot move it.
+                .repriced(
+                    weights,
+                    entry.terms.support_area_cm2.get(),
+                    peel_force_n,
+                    None,
+                );
             (entry.candidate, repriced.score.get())
         })
         .min_by(|left, right| left.1.total_cmp(&right.1).then(left.0.cmp(&right.0)))

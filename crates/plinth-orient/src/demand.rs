@@ -50,7 +50,7 @@ use serde::{Deserialize, Serialize};
 
 use plinth_mesh::Mesh;
 
-use crate::score::UpDirection;
+use crate::score::{OrientFaceTable, UpDirection};
 
 /// Which raster the burden behind one number was measured on.
 ///
@@ -109,6 +109,24 @@ pub struct MeasuredSupportDemand {
     pub layers: usize,
     pub residual_demand_cells: usize,
     pub uncarried_load_mm2: f64,
+    /// How many of this pose's arms seat on the MODEL rather than on the
+    /// plate or on another arm. Published raw beside the scar below so a
+    /// zero scar can be read as "nothing landed on the model" rather than
+    /// guessed at.
+    pub model_landings: usize,
+    /// `Σ` over those landings of `π r_seat² × fragility × (1 + D)` of the
+    /// face each one seats on, in mm² — the scar this pose's SUPPORT FIELD
+    /// leaves on the model, in the same units and under the same
+    /// `ORIENT_SCAR_WEIGHT` as the objective's down-facing scar.
+    ///
+    /// **[`None`] is a stated absence, never a zero.** It is `None` for a
+    /// [`DemandFidelity::Prefilter`] row by construction — the coarse raster
+    /// exists to prune, and a landing measured on it is not the landing the
+    /// emitted file will have — and `None` when the table this pose was
+    /// scored against carries no fragility field to weight a seat by. Only a
+    /// `Some(0.0)` asserts that a production sweep ran and nothing it placed
+    /// touched the model.
+    pub landing_scar_raw_mm2: Option<f64>,
     /// Which raster this row was measured on. A row is only allowed to crown
     /// a pose when this is [`DemandFidelity::Production`].
     pub fidelity: DemandFidelity,
@@ -136,10 +154,17 @@ pub struct MeasuredSupportDemand {
 /// rather than a typed enum specifically so this trait never has to name a
 /// `plinth-sweep` error type, which would reintroduce the dependency this
 /// trait exists to invert.
+/// `table` is the scoring table for `mesh` at the tier that is measuring —
+/// the commit tier's Exact table, whose face order IS `mesh.tris()`'s order.
+/// It is handed over so an implementation that prices where the arms LAND can
+/// read the fragility and display fields the objective was scored against
+/// instead of measuring second copies of them. An implementation that does
+/// not price landings ignores it.
 pub trait SupportDemandMeasurer {
     fn measure_support_demand(
         &self,
         mesh: &Mesh,
+        table: &OrientFaceTable,
         candidates: &[UpDirection],
         fidelity: DemandFidelity,
     ) -> Vec<Result<MeasuredSupportDemand, String>>;

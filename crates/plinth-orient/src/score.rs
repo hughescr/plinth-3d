@@ -45,6 +45,22 @@
 //! unmeasured points scale) and the run report publishes the weight value at
 //! which the winning pose flips (D15).
 //!
+//! ## The scar term has a third half, and this module cannot measure it
+//!
+//! `Σ_down(...)` above prices the model's own down-facing area. It says
+//! nothing about where the support field SEATS: on `make_raking_blade` the two
+//! flip poses tie on every term here (65.42 mm² of fragility in both, because
+//! the 85°-raked blade is within 5° of vertical and never enters the
+//! down-facing fold), and the pose that put a strut ON the blade won by three
+//! arms of measured burden. The missing quantity is the MODEL-LANDING scar —
+//! `Σ` over the arms that land on the model of `π r_seat² × fragility ×
+//! (1 + D)` of the landed face, the same product in the same units under the
+//! same `ORIENT_SCAR_WEIGHT` — and it is measurable only from a real support
+//! field. So it is measured in `plinth_sweep::model_landing`, arrives through
+//! [`crate::demand::MeasuredSupportDemand`], and is folded into `scar_raw_mm2`
+//! by [`crate::search`] at the commit tier's production stage. Here it is
+//! [`CandidateTerms::landing_scar_raw_mm2`] `= None`: a stated absence.
+//!
 //! ## The search space is S², not SO(3)
 //!
 //! A candidate is a unit **build-up direction in model frame**, `u = Rᵀẑ`, and
@@ -597,6 +613,21 @@ pub struct CandidateTerms {
     /// this pose turns downward carries display value, which is what makes
     /// `D = 0` reproduce the pre-display objective rather than approximate it.
     pub display_raw_mm2: f64,
+    /// `Σ_model-landings(π r_seat² × fragility × (1 + display))` of the landed
+    /// face: the scar the SUPPORT FIELD leaves on the model, as opposed to the
+    /// two halves above, which price the model's own down-facing area.
+    ///
+    /// **[`None`] is a stated absence, not a zero** — the same rule
+    /// [`OrientFaceTable::display`] follows. It is `None` here for every
+    /// candidate, because nothing this module measures can see a support
+    /// field: only a PRODUCTION-fidelity sweep
+    /// (`plinth_orient::demand::DemandFidelity::Production`) knows where the
+    /// arms land, and the commit tier folds that measurement in afterwards
+    /// (`crate::search::TermsRecord::repriced`). A candidate no production
+    /// sweep reached therefore carries `None` all the way into the record,
+    /// where it reads as "not measured" rather than "measured, and nothing
+    /// landed".
+    pub landing_scar_raw_mm2: Option<f64>,
     pub down_facing_faces: usize,
     pub score: f64,
 }
@@ -1025,6 +1056,18 @@ impl OrientFaceTable {
     #[must_use]
     pub fn display(&self) -> &[f64] {
         &self.display
+    }
+    /// The fragility (delicacy) field in source face order, or an empty slice
+    /// when no field was built — the same stated-absence rule
+    /// [`Self::display`] follows.
+    ///
+    /// Published for the same reason `display` is: the model-landing scar
+    /// (`plinth_sweep::model_landing`) weights each seat by the delicacy of
+    /// the face it lands on, and it must read the field THIS table was scored
+    /// against rather than re-evaluate one of its own.
+    #[must_use]
+    pub fn delicacy(&self) -> &[f64] {
+        &self.delicacy
     }
     #[must_use]
     pub fn face_count(&self) -> usize {
@@ -1461,6 +1504,8 @@ fn score_one(
             scar_raw_mm2: canonical_zero(scar_raw_mm2),
             fragility_raw_mm2: canonical_zero(fragility_raw_mm2),
             display_raw_mm2: canonical_zero(display_raw_mm2),
+            // Structurally absent: see the field's own doc. No sweep has run.
+            landing_scar_raw_mm2: None,
             down_facing_faces,
             score: canonical_zero(score),
         }),

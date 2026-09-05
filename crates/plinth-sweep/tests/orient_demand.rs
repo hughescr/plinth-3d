@@ -9,8 +9,15 @@
 use plinth_core::m0_constants;
 use plinth_mesh::make_overhang_table;
 use plinth_orient::demand::{DemandFidelity, SupportDemandMeasurer};
-use plinth_orient::UpDirection;
+use plinth_orient::{OrientFaceTable, UpDirection};
 use plinth_sweep::{burden_cm2, SweepDemand};
+
+/// The scoring table the commit tier hands the measurer. Built here exactly as
+/// `plinth_orient::search` builds its Exact rung, so the fragility and display
+/// fields the landing scar reads are the fields the objective is scored with.
+fn scoring_table(mesh: &plinth_mesh::Mesh) -> OrientFaceTable {
+    OrientFaceTable::build(mesh, "exact").expect("a closed fixture always scores")
+}
 
 /// The identity pose of a T-shaped overhang fixture needs real support under
 /// the down-facing slab, so a correctly wired measurer must report a
@@ -19,7 +26,7 @@ use plinth_sweep::{burden_cm2, SweepDemand};
 fn the_sweep_demand_measures_a_real_overhang() {
     let mesh = make_overhang_table().expect("overhang table fixture");
     let results =
-        SweepDemand.measure_support_demand(&mesh, &[UpDirection::MODEL_UP], DemandFidelity::Prefilter);
+        SweepDemand::production().measure_support_demand(&mesh, &scoring_table(&mesh), &[UpDirection::MODEL_UP], DemandFidelity::Prefilter);
 
     assert_eq!(results.len(), 1, "the batch contract is index-parallel");
     let measured = results[0]
@@ -60,7 +67,7 @@ fn the_burden_is_the_arm_count_through_one_fixed_unit_bridge() {
         .diagnostic()
         .get();
     let results =
-        SweepDemand.measure_support_demand(&mesh, &[UpDirection::MODEL_UP], DemandFidelity::Prefilter);
+        SweepDemand::production().measure_support_demand(&mesh, &scoring_table(&mesh), &[UpDirection::MODEL_UP], DemandFidelity::Prefilter);
     let measured = results[0].as_ref().expect("a measurable fixture");
 
     assert_eq!(
@@ -86,8 +93,8 @@ fn the_burden_is_the_arm_count_through_one_fixed_unit_bridge() {
 fn the_production_fidelity_sweeps_a_finer_raster_than_the_prefilter() {
     let mesh = make_overhang_table().expect("overhang table fixture");
     let poses = [UpDirection::MODEL_UP];
-    let prefilter = SweepDemand.measure_support_demand(&mesh, &poses, DemandFidelity::Prefilter);
-    let production = SweepDemand.measure_support_demand(&mesh, &poses, DemandFidelity::Production);
+    let prefilter = SweepDemand::production().measure_support_demand(&mesh, &scoring_table(&mesh), &poses, DemandFidelity::Prefilter);
+    let production = SweepDemand::production().measure_support_demand(&mesh, &scoring_table(&mesh), &poses, DemandFidelity::Production);
 
     let coarse = prefilter[0].as_ref().expect("prefilter measures");
     let fine = production[0].as_ref().expect("production measures");
@@ -115,7 +122,7 @@ fn different_poses_measure_different_burdens() {
         UpDirection::MODEL_UP,
         UpDirection::new([1.0, 0.0, 0.0]).expect("unit x direction"),
     ];
-    let measured = SweepDemand.measure_support_demand(&mesh, &poses, DemandFidelity::Prefilter);
+    let measured = SweepDemand::production().measure_support_demand(&mesh, &scoring_table(&mesh), &poses, DemandFidelity::Prefilter);
 
     assert_eq!(measured.len(), poses.len());
     let identity = measured[0].as_ref().expect("identity pose must measure");
