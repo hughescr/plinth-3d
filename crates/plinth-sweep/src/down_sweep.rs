@@ -241,6 +241,11 @@ pub fn run(
     // Layer k+1's CARRIERS, as opposed to its cover: model that carried plus every
     // arm alive there. Only the injection accounting reads it — see the max step.
     let mut carriers_above = vec![false; cells];
+    // Cells where an ARM already stood one layer up, in its own axis rather
+    // than in this column: the continuation flag the injection gate reads
+    // beside `carriers_above` so a leaned arm counts one event, not one per
+    // column it crosses.
+    let mut continues_above = vec![false; cells];
     let mut nearest = vec![u32::MAX; cells];
     let mut distance = vec![f32::INFINITY; cells];
     let mut distance_prev = vec![f32::INFINITY; cells];
@@ -295,6 +300,7 @@ pub fn run(
         }
 
         carriers.copy_from_slice(&masks.carry);
+        continues_above.fill(false);
         landing_target.fill(u32::MAX);
         for &id in &alive_by_layer[layer] {
             // The arm's cell AT THIS LAYER, not its seat cell: a leaned arm
@@ -303,6 +309,24 @@ pub fn run(
             // column the arm is not in.
             let cell = struts[id as usize].cell_at(layer);
             carriers[cell] = true;
+            // A LEANED ARM IS ONE MEMBER, NOT A NEW ONE PER COLUMN, AND THE
+            // INJECTION GATE HAS TO KNOW IT. The gate below counts an event
+            // only where the column did not carry one layer up, which is what
+            // stops a vertical arm injecting `own` once per layer for its whole
+            // length. A leaned arm defeats that test by construction: it stands
+            // in a DIFFERENT column at every layer it crosses, so its cell here
+            // reads "nothing above me" and injects again, and again. The
+            // inflation is invisible in the emitted file — the gate feeds
+            // `injected_load_mm2` alone, and `max` discards the duplicates
+            // before they can reach the plate — but it drove the pipeline's
+            // conservation ratio to 0.9869 on `make_thin_fin` with nothing
+            // actually lost, which is a lying metric of exactly the kind the
+            // gate was written to end. The arm's OWN cell one layer up is where
+            // its material was; if that carried, this cell continues the same
+            // cured run.
+            if carriers_above[struts[id as usize].cell_at(layer + 1)] {
+                continues_above[cell] = true;
+            }
             // What a growing arm lands ON if its column meets this one. Only
             // arms whose extent is already fixed are landing targets; a growing
             // arm can never be one, because an insertion candidate must not be
@@ -450,7 +474,7 @@ pub fn run(
             for cell in 0..cells {
                 if carriers[cell] {
                     let combined = load_out[cell].max(own);
-                    if !carriers_above[cell] {
+                    if !carriers_above[cell] && !continues_above[cell] {
                         injected_here += combined - load_out[cell];
                     }
                     load_out[cell] = combined;

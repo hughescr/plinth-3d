@@ -2576,6 +2576,20 @@ fn print_sweep_disclosure(
         report.reach.target_spacing_mm_registered_but_unused,
     );
     println!(
+        "[sweep {model}] resin: support volume {:.3} mm3 over {} arms; plate contacts {} \
+         holding {:.4} mm2 of root area; junctions {} at a parent's top / {} MID-SHAFT \
+         ({} chosen mid-shaft by the descent, before un-merging and removal); \
+         shaft index {} spans",
+        report.support_volume_mm3,
+        report.struts_total,
+        report.landings.plate,
+        report.plate_contact_area_mm2,
+        report.junctions_at_parent_top,
+        report.junctions_mid_shaft,
+        report.descent_junctions_mid_shaft,
+        report.shaft_spans_recorded,
+    );
+    println!(
         "[sweep {model}] slenderness p50 {:.1}:1 max {:.1}:1; overloaded arms {}; \
          model sections over X_ALLOWED {}; peel field {:?} (area {:?}, tilt {:?}); \
          path hits: reach {} vertical {} spread {} arm-share {} injections {} max-combines {} \
