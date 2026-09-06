@@ -2513,7 +2513,7 @@ fn print_sweep_disclosure(
         println!(
             "[sweep {model}] tip seat depth min {depth_min:.4} p50 {depth_p50:.4} \
              max {depth_max:.4} mm over {} seated tips; {} at the law minimum; \
-             {} truncated by a thin wall; cut-disc radius min {cut_min:.4} mm against \
+             {} CLIPPED at a thin wall's far face; cut-disc radius min {cut_min:.4} mm against \
              tip radius min {tip_min:.4} mm; tips below the a>=r_tip guarantee: {below}",
             emission.tip_seat_depth_mm.len(),
             emission.tips_at_law_minimum,

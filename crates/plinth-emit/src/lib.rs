@@ -634,7 +634,26 @@ fn record_frame_and_soup(
     let triangles = match primitive.segment_kind {
         // Frozen semantics: type 7 owns the contact sphere; type 9 owns a
         // standalone joint sphere; types 1 and 3 are frusta.
-        SupportSegmentKind::ContactSphere => sphere_triangles(midpoint(start, end), r_start)?,
+        // THE CLIP (owner ruling, 2026-09-05). A seated tip goes to the full
+        // depth the contact-area law asks for; where that puts part of the ball
+        // above the far face of the cured model run it strikes, that part is
+        // not emitted and the opening is capped. The plane arrives in WORLD Z
+        // on the ball's own `SphereGeometry` and is rebased here into the
+        // record's model-centred frame, the same subtraction `start`/`end`
+        // already carry.
+        SupportSegmentKind::ContactSphere => {
+            let ball_center = midpoint(start, end);
+            match primitive
+                .sphere_geometry
+                .as_ref()
+                .and_then(plinth_support::SphereGeometry::clip_above_z_mm)
+            {
+                Some(clip_world_z) => {
+                    sphere_triangles_clipped(ball_center, r_start, clip_world_z.get() - center[2])?
+                }
+                None => sphere_triangles(ball_center, r_start)?,
+            }
+        }
         SupportSegmentKind::JointSphere => sphere_triangles(midpoint(start, end), r_start)?,
         SupportSegmentKind::RaftPad => raft_pad_triangles(start, r_start, r_end, raft_sides)?,
         SupportSegmentKind::RaftBridge => raft_bridge_triangles(start, end, r_start, r_end)?,
@@ -884,6 +903,187 @@ fn sphere_triangles(center: [f64; 3], radius: f64) -> Result<Vec<SoupTriangle>, 
         }
     }
     Ok(triangles)
+}
+
+/// The SAME ball, with everything above the horizontal plane `clip_z` removed
+/// and the opening closed by a flat cap — the smallest primitive that satisfies
+/// the owner's ruling of 2026-09-05 ("truncate the geometry beyond the model's
+/// surface so the tip cannot protrude on the other side of any thin model
+/// layer") without shrinking the ball and losing the contact disc the seat law
+/// sized.
+///
+/// **Reuses the tessellation.** The latitude/longitude triangles come from
+/// [`sphere_triangles`] unchanged, in its order. A triangle wholly at or below
+/// the plane is pushed through BIT-IDENTICAL; a triangle wholly above it is
+/// dropped; only a straddling triangle is cut, and the cut piece is closed by a
+/// fan over the on-plane boundary. So a ball that does not reach the plane at
+/// all emits exactly the soup it emitted before this function existed, which is
+/// what makes the no-clip case provably unmoved.
+///
+/// **Watertight by construction.** The two intersection points of a cut edge are
+/// interpolated from that edge's endpoints in a CANONICAL order (the lexically
+/// smaller endpoint first), so the two triangles that share an edge compute the
+/// same point to the bit and no crack can open between them; and the
+/// intersection's own Z is SET to `clip_z` rather than interpolated, so the cap
+/// is exactly planar and its vertices match the body's to the bit. Each cut
+/// triangle contributes exactly one directed boundary edge `p -> q`, and the cap
+/// fan emits `(q, p, apex)` for it, which is the one opposite traversal a closed
+/// mesh needs. `wind_soups_outward` then decides the whole soup's orientation
+/// from its signed volume, exactly as it does for a whole ball.
+///
+/// A plane at or above the ball's top returns the whole ball; a plane at or
+/// below its bottom returns nothing, which the caller must not ask for (a ball
+/// entirely above the far face of what it strikes is an arm with no seat at
+/// all).
+#[expect(
+    clippy::float_cmp,
+    reason = "exact equality is the POINT here: a vertex counts as on the clip plane only \
+              when its Z is bit-for-bit the plane, which is guaranteed because every \
+              crossing sets its own Z to `clip_z` rather than interpolating it. A \
+              tolerance would classify two triangles differently on the same shared edge \
+              and open the crack this function exists to prevent."
+)]
+fn sphere_triangles_clipped(
+    center: [f64; 3],
+    radius: f64,
+    clip_z: f64,
+) -> Result<Vec<SoupTriangle>, EmitError> {
+    let whole = sphere_triangles(center, radius)?;
+    if !clip_z.is_finite() {
+        return Err(EmitError::RecordEncodingRejected);
+    }
+    if clip_z >= center[2] + radius {
+        return Ok(whole);
+    }
+    let mut kept: Vec<SoupTriangle> = Vec::with_capacity(whole.len() + SPHERE_LONGITUDES);
+    for triangle in &whole {
+        let above = triangle.map(|vertex| vertex[2] > clip_z);
+        if !above[0] && !above[1] && !above[2] {
+            kept.push(*triangle);
+            continue;
+        }
+        if above[0] && above[1] && above[2] {
+            continue;
+        }
+        // Sutherland-Hodgman against the half-space `z <= clip_z`, over one
+        // triangle, keeping the original winding.
+        let mut polygon: Vec<[f64; 3]> = Vec::with_capacity(4);
+        for corner in 0..3 {
+            let current = triangle[corner];
+            let next = triangle[(corner + 1) % 3];
+            if !above[corner] {
+                polygon.push(current);
+            }
+            if above[corner] != above[(corner + 1) % 3] {
+                polygon.push(plane_crossing(current, next, clip_z));
+            }
+        }
+        // A corner sitting exactly on the plane makes its own crossing, so the
+        // walk above can emit the same point twice; drop the duplicate rather
+        // than emit a zero-area triangle.
+        polygon.dedup();
+        if polygon.len() > 1 && polygon[0] == polygon[polygon.len() - 1] {
+            polygon.pop();
+        }
+        if polygon.len() < 3 {
+            continue;
+        }
+        for corner in 1..polygon.len() - 1 {
+            kept.push([polygon[0], polygon[corner], polygon[corner + 1]]);
+        }
+    }
+    // THE CAP, derived from the kept geometry rather than from the cutting
+    // step. Every directed edge that lies IN the plane and has no opposite
+    // traversal among the kept triangles is a piece of the opening's rim, and
+    // gets one fan triangle back to the disc's centre; the fan's own spoke
+    // edges pair up with its neighbours', so the result is closed. Reading the
+    // rim off the kept soup this way also closes the case a per-triangle
+    // boundary walk misses: a clip plane that lands exactly on a latitude ring,
+    // where no triangle straddles at all and the ring itself is the opening.
+    let mut traversals: std::collections::HashMap<([u64; 3], [u64; 3]), usize> =
+        std::collections::HashMap::new();
+    for triangle in &kept {
+        for corner in 0..3 {
+            let from = triangle[corner];
+            let to = triangle[(corner + 1) % 3];
+            if from[2] == clip_z && to[2] == clip_z {
+                *traversals
+                    .entry((edge_key(from), edge_key(to)))
+                    .or_default() += 1;
+            }
+        }
+    }
+    let apex = [center[0], center[1], clip_z];
+    let rim: Vec<SoupTriangle> = kept
+        .iter()
+        .flat_map(|triangle| {
+            (0..3).filter_map(move |corner| {
+                let from = triangle[corner];
+                let to = triangle[(corner + 1) % 3];
+                (from[2] == clip_z && to[2] == clip_z).then_some((from, to))
+            })
+        })
+        .filter(|(from, to)| {
+            traversals
+                .get(&(edge_key(*to), edge_key(*from)))
+                .is_none_or(|count| *count == 0)
+        })
+        .map(|(from, to)| [to, from, apex])
+        .collect();
+    kept.extend(rim);
+    Ok(kept)
+}
+
+/// A point's identity for edge pairing: bit patterns, with the sign of zero
+/// normalized because `0.0` and `-0.0` are the same point and the sphere
+/// generator produces both.
+fn edge_key(point: [f64; 3]) -> [u64; 3] {
+    point.map(|value| if value == 0.0 { 0.0 } else { value }.to_bits())
+}
+
+/// Where the segment `a -> b` crosses the horizontal plane `z = clip_z`.
+///
+/// Interpolated from the endpoints in a CANONICAL order so the two triangles
+/// sharing this edge get the same point to the bit, and with the crossing's own
+/// Z SET to the plane rather than interpolated so the cap is exactly planar.
+#[expect(
+    clippy::float_cmp,
+    reason = "an endpoint IS the crossing only when it lies exactly on the plane; a \
+              tolerance here would return a point a rounding step off the plane and \
+              unseal the cap."
+)]
+fn plane_crossing(a: [f64; 3], b: [f64; 3], clip_z: f64) -> [f64; 3] {
+    // An endpoint already ON the plane IS the crossing. Interpolating toward
+    // it instead would land a rounding step away and open a crack, and the
+    // answer here is order-independent by construction.
+    if a[2] == clip_z {
+        return [a[0], a[1], clip_z];
+    }
+    if b[2] == clip_z {
+        return [b[0], b[1], clip_z];
+    }
+    let (lo, hi) = if bit_key(a) <= bit_key(b) {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let span = hi[2] - lo[2];
+    let t = if span == 0.0 {
+        0.0
+    } else {
+        (clip_z - lo[2]) / span
+    };
+    [
+        lo[0] + (hi[0] - lo[0]) * t,
+        lo[1] + (hi[1] - lo[1]) * t,
+        clip_z,
+    ]
+}
+
+/// A total order over points by their bit patterns — used only to pick a
+/// canonical endpoint order, never to compare magnitudes.
+fn bit_key(point: [f64; 3]) -> [u64; 3] {
+    point.map(f64::to_bits)
 }
 
 /// Same multiply associativity as the original per-vertex trig
@@ -1868,6 +2068,175 @@ mod tests {
                 normalize_zero(-cos_mirror),
                 "latitude index {k}'s cos is not the exact negation of mirror {mirror_k}'s cos"
             );
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // The clipped tip ball (owner ruling, 2026-09-05).
+    // -----------------------------------------------------------------
+
+    /// Every directed edge of a soup, as bit keys, so "closed" can be stated
+    /// as an exact count rather than a tolerance.
+    fn directed_edges(triangles: &[SoupTriangle]) -> Vec<([u64; 3], [u64; 3])> {
+        let key = |point: [f64; 3]| point.map(|value| normalize_zero(value).to_bits());
+        triangles
+            .iter()
+            .flat_map(|triangle| {
+                (0..3).map(move |corner| {
+                    (key(triangle[corner]), key(triangle[(corner + 1) % 3]))
+                })
+            })
+            .collect()
+    }
+
+    /// A closed manifold traverses every edge exactly once in each direction.
+    fn assert_watertight(triangles: &[SoupTriangle], what: &str) {
+        let mut counts: std::collections::HashMap<([u64; 3], [u64; 3]), i64> =
+            std::collections::HashMap::new();
+        for (from, to) in directed_edges(triangles) {
+            *counts.entry((from, to)).or_default() += 1;
+        }
+        for ((from, to), forward) in &counts {
+            let backward = counts.get(&(*to, *from)).copied().unwrap_or(0);
+            assert_eq!(
+                *forward, 1,
+                "{what}: an edge is traversed {forward} times in one direction; a closed \
+                 mesh traverses each exactly once"
+            );
+            assert_eq!(
+                backward, 1,
+                "{what}: an edge has {backward} opposite traversals; a closed mesh has \
+                 exactly one, so this is an open crack"
+            );
+        }
+    }
+
+    /// THE CLIP ITSELF. A ball cut by a plane through it must keep nothing
+    /// above the plane, must stay closed, and must leave every triangle that
+    /// the plane does not touch exactly where it was.
+    #[test]
+    fn a_clipped_tip_ball_keeps_nothing_above_the_plane_and_stays_closed() {
+        for center in SPHERE_TEST_CENTERS {
+            for &radius in &SPHERE_TEST_RADII {
+                let whole = sphere_triangles(center, radius).expect("valid radius");
+                // Four planes across the ball: just under the top pole, above
+                // the equator, on the equator, and below it.
+                for fraction in [0.95, 0.5, 0.0, -0.5] {
+                    let clip_z = center[2] + radius * fraction;
+                    let clipped = sphere_triangles_clipped(center, radius, clip_z)
+                        .expect("a plane through the ball is clippable");
+                    assert!(
+                        !clipped.is_empty(),
+                        "a plane through the ball must leave geometry behind"
+                    );
+                    for (index, triangle) in clipped.iter().enumerate() {
+                        for (corner, vertex) in triangle.iter().enumerate() {
+                            assert!(
+                                vertex[2] <= clip_z + 1e-12,
+                                "triangle {index} corner {corner} stands at z {} above the \
+                                 clip plane {clip_z} — the tip has protruded through the far \
+                                 face this clip exists to respect",
+                                vertex[2]
+                            );
+                        }
+                    }
+                    assert_watertight(&clipped, "the clipped ball");
+
+                    // REUSE, not re-tessellation: every triangle of the whole
+                    // ball that lies entirely at or below the plane survives
+                    // BIT-IDENTICAL, in order.
+                    let untouched: Vec<[[u64; 3]; 3]> = whole
+                        .iter()
+                        .filter(|triangle| triangle.iter().all(|vertex| vertex[2] <= clip_z))
+                        .map(|triangle| triangle.map(point_bits))
+                        .collect();
+                    let survivors: Vec<[[u64; 3]; 3]> = clipped
+                        .iter()
+                        .map(|triangle| triangle.map(point_bits))
+                        .collect();
+                    assert!(
+                        !untouched.is_empty(),
+                        "the fixture must leave some triangle untouched, or this assertion \
+                         proves nothing"
+                    );
+                    // Every untouched triangle appears in the clipped soup,
+                    // bit-identical AND in its original relative order — a
+                    // two-pointer subsequence walk, because the cut pieces are
+                    // interleaved where the plane crosses.
+                    let mut wanted = untouched.iter();
+                    let mut next = wanted.next();
+                    for survivor in &survivors {
+                        if Some(survivor) == next {
+                            next = wanted.next();
+                        }
+                    }
+                    assert!(
+                        next.is_none(),
+                        "an untouched triangle moved or vanished; the clip must reuse the \
+                         existing tessellation, not rebuild it"
+                    );
+                }
+            }
+        }
+    }
+
+    /// SABOTAGE: the clip disabled. Feeding the same ball through the
+    /// UNCLIPPED generator — which is exactly what this crate did before the
+    /// ruling of 2026-09-05, and what a regression would restore — must put
+    /// vertices above the plane. Without this, the assertion above could be
+    /// passing because the ball never reached the plane at all.
+    #[test]
+    fn disabling_the_clip_puts_vertices_above_the_plane() {
+        let center = [1.5, -2.0, 11.0];
+        let radius = 2.2;
+        let clip_z = center[2] + radius * 0.5;
+        let unclipped = sphere_triangles(center, radius).expect("valid radius");
+        let above = unclipped
+            .iter()
+            .flatten()
+            .filter(|vertex| vertex[2] > clip_z + 1e-12)
+            .count();
+        assert!(
+            above > 0,
+            "the unclipped ball must stand above the plane, or the clip test is vacuous"
+        );
+        let clipped =
+            sphere_triangles_clipped(center, radius, clip_z).expect("a plane through the ball");
+        assert_eq!(
+            clipped
+                .iter()
+                .flatten()
+                .filter(|vertex| vertex[2] > clip_z + 1e-12)
+                .count(),
+            0,
+            "the clip must remove every one of those {above} vertices"
+        );
+    }
+
+    /// A plane at or above the ball's top is not a clip. It must return the
+    /// whole ball, byte for byte, so an arm that never reaches its far face
+    /// emits exactly what it emitted before this function existed.
+    #[test]
+    fn a_plane_above_the_ball_returns_the_whole_ball_unchanged() {
+        for center in SPHERE_TEST_CENTERS {
+            for &radius in &SPHERE_TEST_RADII {
+                let whole = sphere_triangles(center, radius).expect("valid radius");
+                for clip_z in [center[2] + radius, center[2] + radius * 4.0] {
+                    let clipped =
+                        sphere_triangles_clipped(center, radius, clip_z).expect("valid radius");
+                    assert_eq!(
+                        clipped
+                            .iter()
+                            .map(|triangle| triangle.map(point_bits))
+                            .collect::<Vec<_>>(),
+                        whole
+                            .iter()
+                            .map(|triangle| triangle.map(point_bits))
+                            .collect::<Vec<_>>(),
+                        "a plane at or above the top pole must leave the ball untouched"
+                    );
+                }
+            }
         }
     }
 

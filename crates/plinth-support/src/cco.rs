@@ -5085,7 +5085,7 @@ pub(crate) fn seat_contact_policy(
     let constants = m0_constants().map_err(|error| CcoError::Constants(error.to_string()))?;
     let p = constants.placeholders();
     Ok(crate::contact::ContactPolicy {
-        floor_depth_mm: p.default_contact_depth_mm().diagnostic().get(),
+        pixel_pitch_mm: crate::contact::registered_pixel_pitch_mm(constants),
         process_resolution_mm,
         standoff_mm: p.standoff_mm().diagnostic().get(),
         // PLACEMENT. `clearance_survival` grades a candidate tournament: the

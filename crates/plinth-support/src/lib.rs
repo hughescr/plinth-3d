@@ -178,6 +178,9 @@ pub use initial::ContactConstructionLimits;
 pub use lower::{
     lower_sweep_arms, SweepArm, SweepArmLanding, SweepLowering, SweepLoweringError,
 };
+/// TEST-ONLY, behind the quarantined `seat-minimum-probe` feature.
+#[cfg(feature = "seat-minimum-probe")]
+pub use lower::lower_sweep_arms_with_pinned_seat_minimum;
 pub use runner::{
     run_support, AbandonedContactDisclosure, EmittedContactDisclosure, FinalLiveMemberEvidence,
     FinalSupportAuthority, GrownContactTipDisclosure, OwnerlessIslandDisclosure,
@@ -235,6 +238,10 @@ enum SphereGeometryKind {
         center_mm: [Finite; 3],
         outward_axis_unit: [Finite; 3],
         exact_record_poles: Option<(PositiveFinite, [Finite; 3], [Finite; 3])>,
+        /// World Z above which this ball's MESH is not emitted — the far face
+        /// of the cured model run the tip strikes. `None` is the ordinary
+        /// whole ball.
+        clip_above_z_mm: Option<Finite>,
     },
     Joint {
         center_mm: [Finite; 3],
@@ -261,7 +268,54 @@ impl SphereGeometry {
             center_mm,
             outward_axis_unit,
             exact_record_poles: None,
+            clip_above_z_mm: None,
         }))
+    }
+
+    /// The same ball, with everything above world Z `clip_z_mm` removed from
+    /// the emitted MESH and the opening closed by a flat cap.
+    ///
+    /// **Why the geometry is cut and not shrunk** (owner ruling, 2026-09-05):
+    /// *"Push the support tip into the model as deeply as it needs to go to
+    /// reach the contact area that is needed, then TRUNCATE the geometry beyond
+    /// the model's surface so the tip cannot protrude on the other side of any
+    /// thin model layer."* A smaller ball would deliver a smaller cut disc,
+    /// which is the contact area the law sized; a clipped ball delivers the
+    /// same disc and stops at the far face.
+    ///
+    /// **What does NOT change.** The semantic centre, axis and radius are
+    /// untouched, so [`Self::canonical_poles`] still reports the whole ball's
+    /// two metadata poles and the record's own `start`/`end`/`r` fields are
+    /// exactly what they were. Only the triangle soup is cut.
+    ///
+    /// Rejects a clip on a joint sphere: a joint ball is not seated in the
+    /// model and has no far face to strike.
+    pub fn clipped_above_z(self, clip_z_mm: Finite) -> Result<Self, SupportError> {
+        match self.0 {
+            SphereGeometryKind::Tip {
+                center_mm,
+                outward_axis_unit,
+                exact_record_poles,
+                ..
+            } => Ok(Self(SphereGeometryKind::Tip {
+                center_mm,
+                outward_axis_unit,
+                exact_record_poles,
+                clip_above_z_mm: Some(clip_z_mm),
+            })),
+            SphereGeometryKind::Joint { .. } => Err(SupportError::InvalidPrimitive),
+        }
+    }
+
+    /// World Z above which this ball's mesh is cut off, if it is cut at all.
+    #[must_use]
+    pub fn clip_above_z_mm(&self) -> Option<Finite> {
+        match &self.0 {
+            SphereGeometryKind::Tip {
+                clip_above_z_mm, ..
+            } => *clip_above_z_mm,
+            SphereGeometryKind::Joint { .. } => None,
+        }
     }
 
     /// Bind a contact sphere to the Python record arithmetic: its metadata poles are authored
@@ -286,6 +340,7 @@ impl SphereGeometry {
             center_mm,
             outward_axis_unit,
             exact_record_poles: Some((radius, start_mm, end_mm)),
+            clip_above_z_mm: None,
         }))
     }
 
@@ -320,6 +375,7 @@ impl SphereGeometry {
                 center_mm,
                 outward_axis_unit,
                 exact_record_poles,
+                ..
             } => {
                 if let Some((bound_radius, start, end)) = exact_record_poles {
                     if *bound_radius
@@ -390,6 +446,7 @@ impl SphereGeometry {
                 center_mm,
                 outward_axis_unit,
                 exact_record_poles,
+                ..
             } => {
                 finite(center_mm)
                     && finite(outward_axis_unit)

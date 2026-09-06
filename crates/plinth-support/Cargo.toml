@@ -13,6 +13,12 @@ workspace = true
 # cannot reach a production build (MAJOR-8). Off by default; the census example
 # below requires it. Enable with `--features census`.
 census = []
+# Test-only probe (2026-09-05). Lets a test re-run the sweep lowering with the
+# PR-1(a) rasterisation allowance PINNED to another value, so the one term the
+# owner's ruling of that date moved can be isolated from every other emitted
+# byte. Quarantined exactly the way `census` is: off by default, enabled only by
+# plinth-sweep's dev-dependency, and never present in a production build.
+seat-minimum-probe = []
 
 [dependencies]
 geom_kernel = { path = "../../rust/geom_kernel" }

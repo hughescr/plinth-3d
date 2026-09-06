@@ -1286,7 +1286,7 @@ fn contact_policy(config: &Config) -> Result<crate::contact::ContactPolicy, Rewi
     let constants = m0_constants().map_err(|e| RewireError::Constants(e.to_string()))?;
     let p = constants.placeholders();
     Ok(crate::contact::ContactPolicy {
-        floor_depth_mm: p.default_contact_depth_mm().diagnostic().get(),
+        pixel_pitch_mm: crate::contact::registered_pixel_pitch_mm(constants),
         process_resolution_mm: config.process_resolution_mm,
         standoff_mm: p.standoff_mm().diagnostic().get(),
         // PLACEMENT. `validate_changed_geometry` screens a changed set inside a

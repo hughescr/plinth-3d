@@ -27,7 +27,14 @@ const ZERO_LENGTH_MM: f64 = 1e-9;
 pub(crate) struct LoweringConfig {
     frame: BuildFrame,
     layer_height_mm: PositiveFinite,
+    /// `DEFAULT_CONTACT_DEPTH_MM`, and since 2026-09-05 a FORMAT FIELD ONLY:
+    /// the number written into the ChituBox type-1 taper record's contact-depth
+    /// slot. It no longer decides any seat — see [`seat_tip`].
     contact_depth_mm: PositiveFinite,
+    /// One addressable pixel in plane, in mm, from the registered printer
+    /// profile — the in-plane half of the PR-1(a) rasterisation allowance
+    /// (`contact::rasterisation_allowance_mm`).
+    pixel_pitch_mm: f64,
     tip_ball_factor: PositiveFinite,
     root_layers: u64,
     root_no_bend_mm: PositiveFinite,
@@ -73,6 +80,7 @@ impl LoweringConfig {
             frame,
             layer_height_mm,
             contact_depth_mm: *policy.default_contact_depth_mm().diagnostic(),
+            pixel_pitch_mm: crate::contact::registered_pixel_pitch_mm(constants),
             tip_ball_factor: *policy.ball_factor_stub().diagnostic(),
             root_layers: policy.chitubox_root_layers().diagnostic().get(),
             root_no_bend_mm: *policy.chitubox_root_height_mm().diagnostic(),
@@ -639,13 +647,19 @@ pub struct SweepArm {
     /// Cured model thickness standing ABOVE `seat_mm` in this arm's own seat
     /// column, in mm, as the sweep's own layer rasters measured it.
     ///
-    /// This is the land-at-strike bound applied at the TIP end: a ball may be
-    /// seated no deeper than the material it strikes is thick, so it can never
-    /// exit the far face of a thin skin. Where it binds, the seat is
-    /// TRUNCATED to the available depth (owner ruling 2026-08-30: truncate,
-    /// never retract) and counted in
-    /// [`SweepLowering::tips_truncated_by_thin_wall`] — the arm is never
+    /// This is the land-at-strike bound applied at the TIP end, and since the
+    /// owner's ruling of 2026-09-05 it bounds the GEOMETRY, not the seat. The
+    /// tip is driven to the full depth the area law asks for; the far face of
+    /// this cured run — `seat_mm[2] + available_seat_depth_mm` — becomes a CLIP
+    /// PLANE on the emitted ball, so the part that would have stood proud of a
+    /// thin skin is removed and the opening capped. Nothing exits the far face;
+    /// nothing is retracted; the clip is counted in
+    /// [`SweepLowering::tips_truncated_by_thin_wall`] and the arm is never
     /// dropped.
+    ///
+    /// `0` means "unmeasured", and the clip plane is then the seat surface
+    /// itself: the ball keeps its full depth and contributes its full cut disc
+    /// of contact, with nothing at all emitted inside the model.
     pub available_seat_depth_mm: f64,
     pub landing: SweepArmLanding,
 }
@@ -668,13 +682,18 @@ pub struct SweepLowering {
     /// Arms whose radii or points would not cross the finite boundary, or
     /// which the emit boundary's own `is_semantically_valid` rejected.
     pub arms_dropped_invalid_geometry: usize,
-    /// Tips whose seat was cut short because the model material above the seat
-    /// is thinner than the law asked for. TRUNCATED, never retracted and never
-    /// dropped: the ball is seated to every micron that is actually there.
+    /// Tips whose emitted BALL was CLIPPED at the far face of the cured run it
+    /// strikes, because the model there is thinner than the ball's own reach.
+    ///
+    /// Since the owner's ruling of 2026-09-05 this counts a clip, not a
+    /// shortfall: the seat is at full law depth in every one of these cases and
+    /// the contact area is the one the law asked for. What the thin wall took
+    /// away is the part of the ball that would have stood proud of the far
+    /// face, which is geometry the print never wanted.
     pub tips_truncated_by_thin_wall: usize,
-    /// Tips the law seated at its own smallest term — the registered
-    /// `DEFAULT_CONTACT_DEPTH_MM` — because neither the resolution/flank term
-    /// nor the ball-cap term asked for more.
+    /// Tips the law seated at its own smallest term — the DERIVED
+    /// rasterisation allowance, one layer in Z plus one pixel in plane —
+    /// because neither the flank term nor the ball-cap term asked for more.
     pub tips_at_law_minimum: usize,
     /// Every tip's DELIVERED seat depth, normal-measured, in arm order.
     ///
@@ -786,7 +805,56 @@ pub fn lower_sweep_arms(
     max_primitives: usize,
     max_primitive_bytes: usize,
 ) -> Result<SweepLowering, SweepLoweringError> {
-    let config = LoweringConfig::current(frame, layers, max_primitives, max_primitive_bytes)?;
+    lower_sweep_arms_of(arms, frame, layers, max_primitives, max_primitive_bytes, None)
+}
+
+/// [`lower_sweep_arms`], with the PR-1(a) rasterisation allowance PINNED.
+///
+/// TEST-ONLY, behind the `seat-minimum-probe` feature, which no production
+/// build enables. It exists so a test can re-run the identical lowering with
+/// the law's smallest term set to some other number — the retired 0.100 mm, say
+/// — and prove that the arms the term does NOT bind emit bit-identical
+/// geometry. Without it, "nothing but the allowance moved" is a claim rather
+/// than a measurement.
+///
+/// # Errors
+///
+/// The same request-shaped errors [`lower_sweep_arms`] returns.
+#[cfg(feature = "seat-minimum-probe")]
+pub fn lower_sweep_arms_with_pinned_seat_minimum(
+    arms: &[SweepArm],
+    frame: BuildFrame,
+    layers: &LayerPlan,
+    max_primitives: usize,
+    max_primitive_bytes: usize,
+    seat_minimum_mm: f64,
+) -> Result<SweepLowering, SweepLoweringError> {
+    lower_sweep_arms_of(
+        arms,
+        frame,
+        layers,
+        max_primitives,
+        max_primitive_bytes,
+        Some(seat_minimum_mm),
+    )
+}
+
+fn lower_sweep_arms_of(
+    arms: &[SweepArm],
+    frame: BuildFrame,
+    layers: &LayerPlan,
+    max_primitives: usize,
+    max_primitive_bytes: usize,
+    pinned_seat_minimum_mm: Option<f64>,
+) -> Result<SweepLowering, SweepLoweringError> {
+    let mut config = LoweringConfig::current(frame, layers, max_primitives, max_primitive_bytes)?;
+    if let Some(minimum_mm) = pinned_seat_minimum_mm {
+        // The allowance is `layer_height + pixel_pitch`, so pinning the sum is
+        // pinning the pitch. Solved through the same identity the production
+        // path adds, never by a second formula.
+        config.pixel_pitch_mm = minimum_mm - config.layer_height_mm.get();
+    }
+    let config = config;
     let plate = config.frame.plate_z_mm().get();
     let raft_top = plate + config.raft_height_mm.get();
     let mut out = SweepLowering {
@@ -808,7 +876,7 @@ pub fn lower_sweep_arms(
             out.tip_seat_depth_mm.push(seat.depth_mm);
             out.tip_cut_radius_mm.push(seat.cut_radius_mm);
             out.tip_radius_mm.push(seat.tip_radius_mm);
-            out.tips_truncated_by_thin_wall += usize::from(seat.truncated);
+            out.tips_truncated_by_thin_wall += usize::from(seat.clipped);
             out.tips_at_law_minimum += usize::from(seat.at_law_minimum);
         }
         if out.primitives.len() > max_primitives {
@@ -836,8 +904,12 @@ struct TipSeat {
     /// minimal separating cut, not `r_tip`.
     cut_radius_mm: f64,
     tip_radius_mm: f64,
-    /// The thin-wall bound cut the law's depth short.
-    truncated: bool,
+    /// World Z of the far face of the cured model run standing above the seat
+    /// — the plane no emitted support geometry may cross.
+    far_face_z_mm: f64,
+    /// The ball reached above that far face, so its geometry was CUT there and
+    /// the opening capped. The seat itself is at full law depth either way.
+    clipped: bool,
     /// The law's smallest term — the registered contact depth — was the
     /// binding one.
     at_law_minimum: bool,
@@ -871,10 +943,28 @@ impl ArmLowering {
 /// case this defect was reported on — a vertical arm under a horizontal
 /// underside, `θ = 0` — the two are the same move.
 ///
-/// **The thin-wall bound.** The pole may rise no further than the cured model
-/// standing above the seat in this arm's own column, so a ball can never exit
-/// the far face of a thin skin (land-at-strike). Where that binds the seat is
-/// TRUNCATED to what is there and flagged; the arm still emits.
+/// **A GRAZING seat cannot get there along its own axis**, and until
+/// 2026-09-05 it simply stopped short: the travel is capped at the ball's own
+/// diameter (a nearly tangential axis would otherwise ask to slide the ball an
+/// unbounded distance along the surface for almost no depth), so the delivered
+/// depth fell to `2·R·|cos θ|` and with it the delivered contact area. That was
+/// the whole of the residual `a ≥ r_tip` shortfall on the Cylinder and the
+/// Morel base — not a thin wall. Under the owner's ruling the tip goes as deep
+/// as the AREA needs, so whatever the axis cannot deliver is now made up along
+/// the face's own inward normal, exactly the move `contact::seat_endpoint`
+/// makes for every legacy seated family. An arm at `|cos θ| ≥ 0.5` never
+/// reaches this (its axial travel is inside the diameter cap by construction),
+/// so no ordinary seat moves for this reason.
+///
+/// **The thin-wall bound is a CLIP, not a retraction** (owner ruling,
+/// 2026-09-05). The tip goes to the FULL depth the area term asks for, whatever
+/// the skin above it is; what the thin wall bounds is the emitted GEOMETRY, not
+/// the seat. Where the ball would reach above the far face of the cured run
+/// standing over the seat, that far face is reported as a CLIP PLANE on the
+/// ball's own [`SphereGeometry`], and the emit boundary removes the geometry
+/// above it and caps the opening. Land-at-strike still holds — nothing exits
+/// the far face — but it now holds by cutting the ball rather than by starving
+/// the contact.
 fn seat_tip(
     arm: &SweepArm,
     unit: [f64; 3],
@@ -886,9 +976,18 @@ fn seat_tip(
     // normal.
     let outward = geom_kernel::vec3::normalize(arm.seat_normal_mm).unwrap_or(unit);
     let abs_cos = geom_kernel::vec3::dot(unit, outward).abs().min(1.0);
-    let floor_depth_mm = config.contact_depth_mm.get();
+    // PR-1(a) DERIVED, not typed: one layer in Z plus one pixel in plane, the
+    // only separation the printer cannot place two solids inside of. The
+    // registered `DEFAULT_CONTACT_DEPTH_MM` used to stand here and was retired
+    // from this role by the owner's ruling of 2026-09-05 ("'contact depth'
+    // 0.1 mm is a fake number ... the important thing is contact surface
+    // area"); it survives only as the ChituBox taper record's own field.
+    let allowance_mm = crate::contact::rasterisation_allowance_mm(
+        config.layer_height_mm.get(),
+        config.pixel_pitch_mm,
+    );
     let law_depth_mm = crate::contact::seat_depth_of(
-        floor_depth_mm,
+        config.pixel_pitch_mm,
         config.layer_height_mm.get(),
         config.tip_ball_factor.get(),
         abs_cos,
@@ -916,45 +1015,50 @@ fn seat_tip(
     } else {
         f64::INFINITY
     };
-    // The arm descends from its seat, so travelling against `unit` RAISES the
-    // pole; the rise is bounded by the cured column above the seat. A leaned
-    // arm also travels sideways, and bounding its VERTICAL rise by the
-    // column's own vertical extent is the conservative reading of the same
-    // raster.
-    let rise_per_axial = -unit[2];
-    let axial_bound_mm = if rise_per_axial > 0.0 {
-        arm.available_seat_depth_mm / rise_per_axial
-    } else {
-        0.0
-    };
-    let axial_mm = axial_for_target_mm
-        .min(2.0 * equator_mm)
-        .min(axial_bound_mm)
-        .max(0.0);
+    // NOTHING BOUNDS THE TRAVEL BUT THE LAW ITSELF. Until 2026-09-05 the
+    // available cured thickness was a third `min` here, which RETRACTED the
+    // tip out of a thin skin and starved the contact the area law had asked
+    // for; the owner's ruling of that date replaced retraction with clipping,
+    // and the thickness is now read below as a clip plane on the emitted ball.
+    let axial_mm = axial_for_target_mm.min(2.0 * equator_mm).max(0.0);
     let axial_mm = if axial_mm.is_finite() { axial_mm } else { 0.0 };
-    let depth_mm = axial_mm * abs_cos;
-    let seated = std::array::from_fn(|index| arm.seat_mm[index] - unit[index] * axial_mm);
+    // WHATEVER THE AXIS COULD NOT DELIVER, the normal does. Moving against the
+    // outward normal adds depth one for one, so this lands the pole at exactly
+    // the depth the area law asked for and the shortfall closes. It is zero for
+    // every arm whose axial travel already reached the target, which is every
+    // arm at `|cos| >= 0.5`.
+    let axial_depth_mm = axial_mm * abs_cos;
+    let normal_completion_mm = (target_depth_mm - axial_depth_mm).max(0.0);
+    let depth_mm = axial_depth_mm + normal_completion_mm;
+    let seated = std::array::from_fn(|index| {
+        arm.seat_mm[index] - unit[index] * axial_mm - outward[index] * normal_completion_mm
+    });
     // THE DELIVERED MINIMAL SEPARATING CUT at the seat plane — the disc the
     // model surface actually takes through the emitted ball, which is what the
     // area law has to be evaluated on. It is not `r_tip`, and it is measured
     // here rather than assumed anywhere.
     let cut_radius_mm =
         crate::contact::ball_cut_radius_mm(tip_radius_mm, depth_mm, config.tip_ball_factor.get());
+    // THE FAR FACE of the cured run standing above this seat, in world Z. The
+    // sweep counted those laminae in this arm's own tip column, so this plane
+    // is where the model STOPS: no emitted support geometry may stand above it
+    // (land-at-strike). It is reported for every arm; whether it actually cuts
+    // this arm's ball is decided by `lower_one_sweep_arm`, which is where the
+    // ball's centre and radius are known.
+    let far_face_z_mm = arm.seat_mm[2] + arm.available_seat_depth_mm;
     (
         seated,
         TipSeat {
             depth_mm,
             cut_radius_mm,
             tip_radius_mm,
-            // A shortfall against the depth this seat was ASKED for. The
-            // equator cap is not a shortfall — it is the law satisfied by a
-            // shallower seat that cuts a wider disc — so the target it is
-            // measured against already carries it. What does fire here is the
-            // thin-wall bound, and a genuinely grazing seat.
-            truncated: depth_mm < target_depth_mm - 1e-12,
-            // `law_depth_mm` is a `max` over three terms of which the floor is
-            // one, so it can never be below the floor; `<=` is equality.
-            at_law_minimum: law_depth_mm <= floor_depth_mm,
+            far_face_z_mm,
+            // Filled by the caller once the ball exists.
+            clipped: false,
+            // `law_depth_mm` is a `max` over three terms of which the
+            // rasterisation allowance is one, so it can never be below the
+            // allowance; `<=` is equality.
+            at_law_minimum: law_depth_mm <= allowance_mm,
         },
     )
 }
@@ -986,7 +1090,7 @@ fn lower_one_sweep_arm(
     // driven INTO the model by the seat law every other seating family in this
     // crate reads (`contact::seat_depth_of`), bounded by the material that is
     // there.
-    let (seated_seat, tip_seat) = seat_tip(arm, unit, tip_radius.get(), config);
+    let (seated_seat, mut tip_seat) = seat_tip(arm, unit, tip_radius.get(), config);
     let center_raw: [f64; 3] =
         std::array::from_fn(|index| seated_seat[index] + ball_radius.get() * unit[index]);
     let (Ok(center), Ok(unit_finite), Ok(base)) =
@@ -996,6 +1100,35 @@ fn lower_one_sweep_arm(
     };
     let Ok(geometry) = SphereGeometry::tip(center, unit_finite) else {
         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
+    };
+    // CLIP, NEVER RETRACT (owner ruling, 2026-09-05). The ball is at the full
+    // depth the area law asked for; if any of it now stands above the far face
+    // of the cured run it strikes, that part is not emitted. The test is on the
+    // ball's own topmost point — `centre_z + R`, which for a leaned arm is
+    // ABOVE its seat-side pole — so a tilted tip cannot slip past it.
+    let ball_top_z_mm = center[2].get() + ball_radius.get();
+    let ball_bottom_z_mm = center[2].get() - ball_radius.get();
+    let geometry = if ball_top_z_mm > tip_seat.far_face_z_mm {
+        // A clip plane at or below the ball's own bottom would erase the tip
+        // entirely. The seat law cannot produce one — the travel is capped at
+        // the ball's diameter and the plane never falls below the seat surface,
+        // which leaves at least the ball's own radius under it — so reaching
+        // here means a caller handed in a seat and a thickness that disagree.
+        // Emit and warn: this ARM is dropped and counted, the field still
+        // emits, and no ball is silently left protruding.
+        if tip_seat.far_face_z_mm <= ball_bottom_z_mm {
+            return ArmLowering::refused(ArmOutcome::InvalidGeometry);
+        }
+        let Ok(clip_z) = Finite::new(tip_seat.far_face_z_mm) else {
+            return ArmLowering::refused(ArmOutcome::InvalidGeometry);
+        };
+        let Ok(clipped) = geometry.clipped_above_z(clip_z) else {
+            return ArmLowering::refused(ArmOutcome::InvalidGeometry);
+        };
+        tip_seat.clipped = true;
+        clipped
+    } else {
+        geometry
     };
     // The producer's own poles. A second implementation of this arithmetic is
     // exactly the defect `is_semantically_valid` exists to catch.

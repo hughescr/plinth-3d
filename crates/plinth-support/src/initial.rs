@@ -591,9 +591,9 @@ pub(crate) fn build_initial_contacts(
     )?;
     geometry.validate_mesh(mesh)?;
     let contacts = plan.contacts();
-    let policy = m0_constants()
-        .map_err(|error| InitialContactError::Constants(error.to_string()))?
-        .placeholders();
+    let constants =
+        m0_constants().map_err(|error| InitialContactError::Constants(error.to_string()))?;
+    let policy = constants.placeholders();
     let contact_count = contacts.len();
     let interval_cap = usize::try_from(policy.initial_axis_majority_cap().diagnostic().get())
         .map_err(|_| InitialContactError::ResourceOverflow("majority cap"))?;
@@ -773,7 +773,10 @@ pub(crate) fn build_initial_contacts(
     // own native work through `EndpointMaskValidationLimits::for_batch` and
     // never spent the construction charge.
     let contact_policy = ContactPolicy {
-        floor_depth_mm: contact_depth_mm,
+        // PR-1(a) in-plane term, from the registered printer profile; the
+        // typed DEFAULT_CONTACT_DEPTH_MM no longer decides a seat (owner
+        // ruling 2026-09-05).
+        pixel_pitch_mm: crate::contact::registered_pixel_pitch_mm(constants),
         process_resolution_mm: attestation_margin_mm,
         standoff_mm: policy.standoff_mm().diagnostic().get(),
         // This policy ATTESTS seats; it never grades a clearance distance, so

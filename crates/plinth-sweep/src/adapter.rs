@@ -22,9 +22,12 @@
 //! the tip ball's pole sat exactly on that plane: a point contact carrying no
 //! area, which is what the owner saw in ChituBox on the Sphere and the Morel
 //! base. [`plinth_support::lower_sweep_arms`] now drives the pole INTO the
-//! model from this plane by the seat law of `docs/physics.md` §9, bounded by
-//! the cured thickness this module hands it in
-//! [`plinth_support::SweepArm::available_seat_depth_mm`].
+//! model from this plane by the seat law of `docs/physics.md` §9 — to the FULL
+//! depth the contact-area term asks for. The cured thickness this module hands
+//! it in [`plinth_support::SweepArm::available_seat_depth_mm`] no longer
+//! shortens that seat; since the owner's ruling of 2026-09-05 it is a CLIP
+//! PLANE on the emitted ball, so a tip in a thin skin keeps its contact area
+//! and simply stops at the far face.
 //!
 //! A `Landing::Plate` arm has `k_bottom = 0`, so its base is exactly the plate.
 //! A `Landing::Model` or `Landing::Strut` arm has `k_bottom` at the HIGHEST
@@ -47,9 +50,11 @@ pub struct SweepEmission {
     pub arms_dropped_zero_length: usize,
     pub arms_without_root_flare: usize,
     pub arms_dropped_invalid_geometry: usize,
-    /// Tips seated to less than the law asked for, because the model above the
-    /// seat is thinner than the law's depth. TRUNCATED, never retracted, never
-    /// dropped.
+    /// Tips whose emitted BALL was CLIPPED at the far face of the cured run it
+    /// strikes. The SEAT is at full law depth in every one of these cases
+    /// (owner ruling 2026-09-05: clip the geometry, never retract the tip);
+    /// what the thin wall removed is the part of the ball that would have
+    /// stood proud on the far side.
     pub tips_truncated_by_thin_wall: usize,
     /// Tips the law seated at its own smallest term.
     pub tips_at_law_minimum: usize,
@@ -184,7 +189,7 @@ pub fn arms_of(plan: &SweepPlan) -> Vec<SweepArm> {
                 // Both measured by the sweep at its own finished seat
                 // (`run_sweep_with_drains`); nothing is re-derived here. The
                 // lowering drives the tip ball into the model along the arm to
-                // the law's depth, bounded by this thickness.
+                // the law's FULL depth and CLIPS the ball at this thickness.
                 seat_normal_mm: strut.seat_normal,
                 available_seat_depth_mm: f64::from(strut.seat_solid_layers) * height,
                 landing: match strut.landing {

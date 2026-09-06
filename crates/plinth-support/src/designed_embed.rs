@@ -2316,7 +2316,9 @@ mod tests {
 
     fn attestation_policy() -> ContactPolicy {
         ContactPolicy {
-            floor_depth_mm: 0.3,
+            // One registered Saturn 4 Ultra pixel (19 um, the coarser axis), the
+            // in-plane half of the PR-1(a) rasterisation allowance.
+            pixel_pitch_mm: 0.019,
             process_resolution_mm: 0.05,
             standoff_mm: 0.6,
             demanded_gap_mm: 0.6,

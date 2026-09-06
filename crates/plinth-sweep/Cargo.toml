@@ -60,3 +60,8 @@ thiserror = { workspace = true }
 # of importing plinth-pipeline. Same pattern as plinth-pipeline's own
 # chitubox_io dev-dependency.
 plinth-decimate = { path = "../plinth-decimate" }
+# tests/tip_seating.rs pins the PR-1(a) rasterisation allowance to the retired
+# 0.100 mm number to prove that nothing but that one term moved. The feature is
+# test-only and is turned on here rather than in [dependencies] above, so no
+# production build can reach it.
+plinth-support = { path = "../plinth-support", features = ["seat-minimum-probe"] }

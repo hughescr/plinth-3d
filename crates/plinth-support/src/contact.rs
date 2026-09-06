@@ -207,12 +207,23 @@ pub(crate) fn ball_cut_radius_mm(r_tip_mm: f64, seat_depth_mm: f64, ball_factor:
 /// already carries (`process_resolution_mm`).  No value is invented here.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ContactPolicy {
-    /// `default_contact_depth_mm` — the smallest seat depth the law accepts
-    /// (0.100 mm since the owner's ruling of 2026-08-30 was landed in the
-    /// registry on 2026-09-05, down from 0.300 mm). It answers the
-    /// rasterisation gap, not adhesion; the contact AREA is the ball-cap
-    /// term's job.
-    pub(crate) floor_depth_mm: f64,
+    /// ONE ADDRESSABLE PIXEL IN PLANE, in mm — the in-plane half of the
+    /// rasterisation allowance [`rasterisation_allowance_mm`] derives, and the
+    /// only reason a seat goes below the ideal contact plane at all.
+    ///
+    /// It replaced `floor_depth_mm` (which carried the registered
+    /// `DEFAULT_CONTACT_DEPTH_MM`) on 2026-09-05 under the owner's ruling of
+    /// that date: *"'contact depth' 0.1 mm is a fake number — once supports
+    /// overlap the model they are the same voxels ... penetration depth is
+    /// always effectively 0 mm; the important thing is contact surface area."*
+    /// A typed depth may no longer decide a seat. What is left is arithmetic
+    /// the printer forces: two solids cannot be placed closer than one pixel
+    /// in plane and one layer in Z, so an intended overlap smaller than that
+    /// may rasterise to no overlap at all.
+    ///
+    /// Sourced from the registered Saturn 4 Ultra pitches by
+    /// [`registered_pixel_pitch_mm`]; never typed at a call site.
+    pub(crate) pixel_pitch_mm: f64,
     /// `max(LayerPlan::heights_mm())` — the run's own process resolution.
     ///
     /// This is BOTH the PR-1(a) slicer-resolution seat floor and the PR-2
@@ -341,16 +352,67 @@ pub(crate) struct ContactExtents {
     pub(crate) clamp_limited: bool,
 }
 
+/// ONE ADDRESSABLE PIXEL IN PLANE, in mm, DERIVED from the two registered
+/// Saturn 4 Ultra pixel pitches.
+///
+/// `max(PIXEL_PITCH_X_UM, PIXEL_PITCH_Y_UM) / 1000` — the µm→mm conversion the
+/// registry's own derivations use (`constants/evidence.rs`, where
+/// `pixel_diagonal_mm` and `decimation_max_p999_deviation_mm` are built the
+/// same way), and the LARGER of the two axes because "one pixel in plane" has
+/// to hold on whichever axis is coarser. On this printer that is the Y pitch,
+/// 19 µm, against 14 µm in X.
+///
+/// No new typed number: this is a projection of two registered measurements,
+/// computed where it is read.
+pub(crate) fn registered_pixel_pitch_mm(constants: &plinth_core::M0Constants) -> f64 {
+    let printer = constants.saturn4_ultra();
+    printer
+        .pixel_pitch_x_um()
+        .value()
+        .max(*printer.pixel_pitch_y_um().value())
+        / 1000.0
+}
+
+/// PR-1(a) — THE RASTERISATION ALLOWANCE, and the whole of what used to be a
+/// typed "contact depth".
+///
+/// `allowance = layer_height + pixel_pitch`.
+///
+/// **Why this is the only depth term that is not about area.** Owner's ruling,
+/// 2026-09-05: once a support overlaps the model the two are the same voxels,
+/// so penetration depth is effectively 0 mm and CONTACT AREA is the quantity
+/// that matters. The one thing depth still has to answer is a manufacturing
+/// fact, not a physics preference: the printer cannot place two solids closer
+/// than **one layer in Z and one pixel in plane**, so an intended overlap
+/// smaller than that can rasterise to no overlap — the two solids print as
+/// separate objects. Seating by that sum guarantees the overlap survives
+/// rasterisation on either axis, whatever the local orientation of the seat.
+///
+/// Both terms are registered and both arrive as values, never as literals:
+/// `process_resolution_mm` is `max(LayerPlan::heights_mm())` for THIS run, and
+/// `pixel_pitch_mm` comes from [`registered_pixel_pitch_mm`]. At the Saturn 4
+/// Ultra defaults that is `0.050 + 0.019 = 0.069 mm`, against the 0.100 mm
+/// typed constant it replaced.
+pub(crate) fn rasterisation_allowance_mm(process_resolution_mm: f64, pixel_pitch_mm: f64) -> f64 {
+    process_resolution_mm + pixel_pitch_mm
+}
+
 /// PR-1 — the designed seat depth `h` for one contact end.
 ///
-/// `h = max(floor_depth, process_resolution + r_end*sin(theta), ball_seat)`.
+/// `h = max(rasterisation_allowance, process_resolution + r_end*sin(theta), ball_seat)`.
 ///
 /// Three independent requirements, each binding in a different regime:
-/// (a) the fused region must be at least one layer deep or the slicer cannot
-/// render it; (b) a frustum end at incidence `theta` has its end disc tilted,
-/// and only `h >= r_end*sin(theta)` engages the ENTIRE cross-section rather
-/// than smearing a partial bond; (c) for a ball-tipped stub the cut disc at
-/// the seat plane must not be the narrowest section of the load path.
+/// (a) the two solids must overlap by more than the printer's own placement
+/// quantum — one layer in Z plus one pixel in plane — or the intended overlap
+/// may not rasterise at all; (b) a frustum end at incidence `theta` has its end
+/// disc tilted, and only `h >= r_end*sin(theta)` engages the ENTIRE
+/// cross-section rather than smearing a partial bond; (c) for a ball-tipped
+/// stub the cut disc at the seat plane must not be the narrowest section of the
+/// load path.
+///
+/// Only (c) decides CONTACT AREA, and after the owner's ruling of 2026-09-05
+/// it is the only clause allowed to: (a) and (b) are statements about what the
+/// printer can resolve.
 pub(crate) fn seat_depth_mm(
     abs_cos: f64,
     end_radius_mm: f64,
@@ -358,7 +420,7 @@ pub(crate) fn seat_depth_mm(
     ball_tipped: bool,
 ) -> f64 {
     seat_depth_of(
-        policy.floor_depth_mm,
+        policy.pixel_pitch_mm,
         policy.process_resolution_mm,
         policy.ball_factor_stub,
         abs_cos,
@@ -378,20 +440,24 @@ pub(crate) fn seat_depth_mm(
 /// second policy there would mean a second place that decides what "the seat
 /// depth" is. One law, two callers, no copy.
 pub(crate) fn seat_depth_of(
-    floor_depth_mm: f64,
+    pixel_pitch_mm: f64,
     process_resolution_mm: f64,
     ball_factor: f64,
     abs_cos: f64,
     end_radius_mm: f64,
     ball_tipped: bool,
 ) -> f64 {
+    // (a) DERIVED HERE, from the run's own layer height and the registered
+    // pixel pitch — see `rasterisation_allowance_mm` for why this is the only
+    // non-area reason a seat goes below the contact plane at all.
+    let allowance = rasterisation_allowance_mm(process_resolution_mm, pixel_pitch_mm);
     let flank = process_resolution_mm + end_radius_mm * sin_from_cos(abs_cos);
     let ball = if ball_tipped {
         ball_seat_factor(ball_factor) * end_radius_mm
     } else {
         0.0
     };
-    floor_depth_mm.max(flank).max(ball)
+    allowance.max(flank).max(ball)
 }
 
 /// PR-1 step (2) — push the surface point `p_surface` inward along `normal` by
@@ -612,18 +678,26 @@ mod tests {
     use geom_kernel::{NativeSurface, NativeSurfaceConfig};
 
     const BALL_FACTOR: f64 = 1.5;
-    /// The registered smallest seat depth, mirrored here so the tests below
-    /// grade the regime the engine actually runs in.
-    const FLOOR_DEPTH_MM: f64 = 0.1;
+    /// The corpus layer height, and the Z half of the rasterisation allowance.
+    const PROCESS_RESOLUTION_MM: f64 = 0.05;
+    /// One registered Saturn 4 Ultra pixel on its coarser axis (Y, 19 µm), and
+    /// the in-plane half of the allowance.
+    const PIXEL_PITCH_MM: f64 = 0.019;
+    /// The law's own smallest term under this policy — DERIVED here through the
+    /// production function, never typed, so these tests cannot keep grading a
+    /// regime the engine has left.
+    fn seat_minimum_mm() -> f64 {
+        rasterisation_allowance_mm(PROCESS_RESOLUTION_MM, PIXEL_PITCH_MM)
+    }
 
     fn policy() -> ContactPolicy {
         ContactPolicy {
-            // 0.100 mm, tracking the registry after the owner's ruling of
-            // 2026-08-30 was landed on 2026-09-05. Burial is not adhesion, so
-            // the smallest depth answers a rasterisation gap (one pixel, one
-            // layer) and nothing more.
-            floor_depth_mm: FLOOR_DEPTH_MM,
-            process_resolution_mm: 0.05,
+            // The typed DEFAULT_CONTACT_DEPTH_MM stood here until 2026-09-05,
+            // when the owner ruled that a fake depth may not decide a seat.
+            // What is left is what the printer cannot place inside of: one
+            // pixel in plane, one layer in Z.
+            pixel_pitch_mm: PIXEL_PITCH_MM,
+            process_resolution_mm: PROCESS_RESOLUTION_MM,
             standoff_mm: 0.6,
             demanded_gap_mm: 0.6,
             min_free_span_mm: 0.05,
@@ -646,13 +720,17 @@ mod tests {
         // At the retired 0.300 mm the break-even sat at 0.785 mm radius — above
         // the registered maximum tip radius of 1.0 mm for all but the fattest
         // arms, so the ball clause almost never bound and the depth term was
-        // doing work the physics never asked of it. At the ruled 0.100 mm the
-        // break-even falls to 0.262 mm, which is BELOW the median tip radius on
-        // every model in the corpus: the ball-cap term is now the binding one
-        // for most tips, which is the regime the law was designed for.
-        let r_break = FLOOR_DEPTH_MM / ball_seat_factor(BALL_FACTOR);
-        assert!((r_break - 0.261_803_398_874_989_5).abs() < 1e-12, "{r_break}");
-        let a = ball_cut_radius_mm(r_break, FLOOR_DEPTH_MM, BALL_FACTOR);
+        // doing work the physics never asked of it. At the 0.100 mm that
+        // replaced it the break-even fell to 0.262 mm, and at the DERIVED
+        // allowance the owner's ruling of 2026-09-05 put in its place
+        // (0.069 mm on this profile) it falls again to 0.181 mm — below the
+        // MINIMUM registered tip radius band and below the median tip radius on
+        // every model in the corpus. The ball-cap term, the only clause that
+        // decides contact AREA, is now the binding one for very nearly every
+        // tip, which is the regime the law was designed for.
+        let r_break = seat_minimum_mm() / ball_seat_factor(BALL_FACTOR);
+        assert!((r_break - 0.180_644_345_223_742_79).abs() < 1e-12, "{r_break}");
+        let a = ball_cut_radius_mm(r_break, seat_minimum_mm(), BALL_FACTOR);
         assert!(
             (a - r_break).abs() < 1e-12,
             "cut disc {a} vs shaft {r_break}"
@@ -672,16 +750,25 @@ mod tests {
     fn seat_depth_takes_the_binding_regime() {
         let p = policy();
         // Normal incidence, small tip, no ball: the registered minimum binds.
-        assert!((seat_depth_mm(1.0, 0.2, &p, false) - FLOOR_DEPTH_MM).abs() < 1e-12);
-        // The same tip WITH a ball: at 0.2 mm radius the ball cap asks for
-        // 0.0764 mm, below the minimum, so the minimum still binds — the
-        // break-even above is where that changes hands.
-        assert!((seat_depth_mm(1.0, 0.2, &p, true) - FLOOR_DEPTH_MM).abs() < 1e-12);
+        assert!((seat_depth_mm(1.0, 0.2, &p, false) - seat_minimum_mm()).abs() < 1e-12);
+        // A tip BELOW the break-even, with a ball: at 0.15 mm radius the ball
+        // cap asks for 0.0573 mm, below the 0.069 mm minimum, so the minimum
+        // still binds — the break-even above is where that changes hands. This
+        // radius was 0.2 mm while the minimum was the typed 0.100 mm; the
+        // derived allowance is shallower, so 0.2 mm is now on the BALL side of
+        // the break-even and the fixture had to be re-cut to keep grading the
+        // regime it names.
+        assert!((seat_depth_mm(1.0, 0.15, &p, true) - seat_minimum_mm()).abs() < 1e-12);
+        assert!(
+            ball_seat_factor(BALL_FACTOR) * 0.15 < seat_minimum_mm(),
+            "the fixture radius must sit below the break-even, or this case grades the \
+             ball clause instead of the minimum"
+        );
         // A tip past the break-even: the BALL CAP binds, and at the ruled
         // 0.100 mm minimum that is the common case rather than the rare one.
         let h = seat_depth_mm(1.0, 0.5, &p, true);
         assert!((h - ball_seat_factor(BALL_FACTOR) * 0.5).abs() < 1e-12, "{h}");
-        assert!(h > FLOOR_DEPTH_MM, "the ball cap must be the binding term");
+        assert!(h > seat_minimum_mm(), "the ball cap must be the binding term");
         // Normal incidence, ball-tipped at r = 1.0: the ball cap binds.
         let h = seat_depth_mm(1.0, 1.0, &p, true);
         assert!((h - ball_seat_factor(BALL_FACTOR)).abs() < 1e-12);
@@ -963,15 +1050,17 @@ mod tests {
         // against the retired 0.30 mm.
         //
         // The rootward number was 1.40 mm while the registry carried a 0.300 mm
-        // smallest seat depth; the owner's ruling of 2026-08-30 landed 0.100 mm
-        // on 2026-09-05 and the seated mask carries `h` directly, so it falls by
-        // exactly that 0.200 mm. The CLAIM this test makes is unchanged and is
-        // what its name states — the converged mask still exceeds the retired
-        // flat pair (1.20 > 0.60 rootward, 1.10 > 0.30 terminalward) at every
-        // incidence. Only the pinned value moved, and it moved DOWN because the
-        // seat is shallower, not because anything was loosened.
+        // smallest seat depth, and 1.20 mm at the 0.100 mm that replaced it.
+        // The seated mask carries `h` directly, so when the owner's ruling of
+        // 2026-09-05 replaced that typed depth with the derived rasterisation
+        // allowance (0.069 mm here) it fell again by exactly that 0.031 mm, to
+        // 1.169 mm. The CLAIM this test makes is unchanged and is what its name
+        // states — the converged mask still exceeds the retired flat pair
+        // (1.169 > 0.60 rootward, 1.10 > 0.30 terminalward) at every incidence.
+        // Only the pinned value moved, and it moved DOWN because the seat is
+        // shallower, not because anything was loosened.
         assert!(
-            (placed_mask_inset_mm(ContactSeating::Seated, 1.0, 0.35, 0.45, &p).unwrap() - 1.20)
+            (placed_mask_inset_mm(ContactSeating::Seated, 1.0, 0.35, 0.45, &p).unwrap() - 1.169)
                 .abs()
                 < 1e-12
         );
@@ -987,15 +1076,16 @@ mod tests {
     #[test]
     fn emergence_is_one_predicate_and_admit_delegates_to_it() {
         let p = policy();
-        // The seated mask at these radii is 1.20 mm, down from 1.40 mm when the
-        // registry carried a 0.300 mm smallest seat depth (owner ruling
-        // 2026-08-30, landed 2026-09-05). The lengths below track it exactly;
-        // the predicate under test is unchanged.
-        assert!(emerges(1.20, 1.25, &p));
-        assert!(!emerges(1.20, 1.2499, &p));
+        // The seated mask at these radii is 1.169 mm: 1.40 mm when the registry
+        // carried a 0.300 mm typed seat depth, 1.20 mm at the 0.100 mm that
+        // replaced it, and 1.169 mm now that the owner ruling of 2026-09-05 has
+        // put the derived rasterisation allowance in its place. The lengths
+        // below track it exactly; the predicate under test is unchanged.
+        assert!(emerges(1.169, 1.22, &p));
+        assert!(!emerges(1.169, 1.2189, &p));
         // The boundary is exactly `mask + min_free_span`.
-        assert!(emerges(1.20, 1.20 + p.min_free_span_mm, &p));
-        assert!(!emerges(1.20, 1.20 + p.min_free_span_mm - 1e-12, &p));
+        assert!(emerges(1.169, 1.169 + p.min_free_span_mm, &p));
+        assert!(!emerges(1.169, 1.169 + p.min_free_span_mm - 1e-12, &p));
 
         // `admit` must refuse exactly where `emerges` says no, with the mask it
         // actually computed.
@@ -1005,16 +1095,16 @@ mod tests {
             member_r_max_mm: 0.45,
             abs_cos_incidence: 1.0,
             carried_mm2: 0.0,
-            member_length_mm: 1.24,
+            member_length_mm: 1.21,
         };
         let mask = placed_mask_inset_mm(ContactSeating::Seated, 1.0, 0.35, 0.45, &p).unwrap();
-        assert!(!emerges(mask, 1.24, &p));
+        assert!(!emerges(mask, 1.21, &p));
         assert!(matches!(
-            admit(&site, &p, 1.0, 1.24, 0.0, false, false),
+            admit(&site, &p, 1.0, 1.21, 0.0, false, false),
             Err(ContactRefusal::GrazingIncidence { .. })
         ));
-        assert!(emerges(mask, 1.26, &p));
-        assert!(admit(&site, &p, 1.0, 1.26, 0.0, false, false).is_ok());
+        assert!(emerges(mask, 1.23, &p));
+        assert!(admit(&site, &p, 1.0, 1.23, 0.0, false, false).is_ok());
     }
 
     #[test]
@@ -1051,28 +1141,28 @@ mod tests {
     }
 
     #[test]
-    fn derived_rung_minimum_is_1_30_mm_and_the_registered_band_is_unreachable() {
+    fn derived_rung_minimum_is_1_269_mm_and_the_registered_band_is_unreachable() {
         // RC-15 reconciliation.  With brace_r_mm = 0.5 at normal incidence the
-        // mask is 1.25 mm and PR-3 needs 0.05 mm of free span, so the shortest
-        // admissible rung at ANY incidence is 1.30 mm.  The registered
+        // mask is 1.219 mm and PR-3 needs 0.05 mm of free span, so the shortest
+        // admissible rung at ANY incidence is 1.269 mm.  The registered
         // `bracing_model_rung_min_length_mm` = 1.0 is a candidate-GENERATION
-        // minimum, deliberately not raised; the band [1.0, 1.30) is simply
+        // minimum, deliberately not raised; the band [1.0, 1.269) is simply
         // unreachable, which is what this test pins.
         //
-        // It was 1.50 mm while the registry carried a 0.300 mm smallest seat
-        // depth. The owner's ruling of 2026-08-30 landed 0.100 mm on
-        // 2026-09-05, the seated mask shrank by that 0.200 mm, and the derived
-        // minimum followed it down. The seat depth is now READ FROM THE POLICY
-        // rather than written out as a literal, so this pin can no longer drift
-        // away from the registry the way it just did.
+        // It was 1.50 mm at the retired 0.300 mm typed seat depth and 1.30 mm at
+        // the 0.100 mm that replaced it. The owner ruling of 2026-09-05 put the
+        // derived rasterisation allowance in that term's place, the seated mask
+        // shrank with it, and the derived minimum followed it down again. The
+        // seat depth is READ FROM THE POLICY here rather than written out as a
+        // literal, so this pin cannot drift away from the law.
         let p = policy();
         let seat = seat_depth_mm(1.0, 0.5, &p, false);
-        assert!((seat - FLOOR_DEPTH_MM).abs() < 1e-12, "{seat}");
+        assert!((seat - seat_minimum_mm()).abs() < 1e-12, "{seat}");
         let mask = mask_extent_mm(seat, 0.5, 1.0, &p).expect("mask");
-        assert!((mask - 1.25).abs() < 1e-12, "{mask}");
-        assert!((mask + p.min_free_span_mm - 1.30).abs() < 1e-12);
+        assert!((mask - 1.219).abs() < 1e-12, "{mask}");
+        assert!((mask + p.min_free_span_mm - 1.269).abs() < 1e-12);
 
-        for length in [1.0_f64, 1.1, 1.2, 1.25, 1.29, 1.299_999] {
+        for length in [1.0_f64, 1.1, 1.2, 1.25, 1.26, 1.268_999] {
             let site = ContactSite {
                 end: ContactEnd::Rootward,
                 end_radius_mm: 0.5,
@@ -1094,9 +1184,9 @@ mod tests {
             member_r_max_mm: 0.5,
             abs_cos_incidence: 1.0,
             carried_mm2: 0.0,
-            member_length_mm: 1.3001,
+            member_length_mm: 1.2691,
         };
-        assert!(admit(&site, &p, 1.0, 1.3001, 0.0, false, false).is_ok());
+        assert!(admit(&site, &p, 1.0, 1.2691, 0.0, false, false).is_ok());
     }
 
     #[test]

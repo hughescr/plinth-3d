@@ -173,7 +173,14 @@ struct BraceConfig {
     model_brace_max_length_mm: f64,
     twin_single_xy_mm: f64,
     max_unbraced_radius_mm: f64,
-    contact_depth_mm: f64,
+    /// One addressable pixel in plane, in mm, from the registered printer
+    /// profile — the in-plane half of the PR-1(a) rasterisation allowance.
+    ///
+    /// It replaced `contact_depth_mm` (the registered `DEFAULT_CONTACT_DEPTH_MM`)
+    /// on 2026-09-05: under the owner's ruling of that date a typed depth may
+    /// no longer decide a seat, and what is left is what the printer can
+    /// resolve. See `contact::rasterisation_allowance_mm`.
+    pixel_pitch_mm: f64,
     /// `STANDOFF_MM` — the PR-2 mask's standoff term, and the PLACEMENT-stage
     /// demanded gap.
     standoff_mm: f64,
@@ -215,9 +222,19 @@ impl BraceConfig {
     /// (`attest_seats_batch`, `contact::admit`) read no demanded gap at all;
     /// they take the FINAL policy because the contact they are admitting will
     /// be graded by the final pass.
+    /// The seat depth the PR-1 law's minimum term asks for under THIS run's
+    /// process resolution — one layer in Z plus one pixel in plane.
+    ///
+    /// Derived through `contact::rasterisation_allowance_mm` rather than
+    /// restated, so a fixture that seats a point by hand seats it by the same
+    /// law the engine uses.
+    fn seat_minimum_mm(&self) -> f64 {
+        contact::rasterisation_allowance_mm(self.process_resolution_mm, self.pixel_pitch_mm)
+    }
+
     fn contact_policy(&self, stage: contact::ClearanceStage) -> ContactPolicy {
         ContactPolicy {
-            floor_depth_mm: self.contact_depth_mm,
+            pixel_pitch_mm: self.pixel_pitch_mm,
             process_resolution_mm: self.process_resolution_mm,
             standoff_mm: self.standoff_mm,
             demanded_gap_mm: match stage {
@@ -260,7 +277,7 @@ impl BraceConfig {
             model_brace_max_length_mm: p.model_brace_max_len_mm().diagnostic().get(),
             twin_single_xy_mm: p.twin_single_brace_xy_mm().diagnostic().get(),
             max_unbraced_radius_mm: p.max_unbraced_shaft_r_mm().diagnostic().get(),
-            contact_depth_mm: p.default_contact_depth_mm().diagnostic().get(),
+            pixel_pitch_mm: contact::registered_pixel_pitch_mm(constants),
             standoff_mm: p.standoff_mm().diagnostic().get(),
             final_clearance_gap_mm: *constants.evidence().final_clearance_gap_mm().value(),
             ball_factor_foot: p.ball_factor_foot().diagnostic().get(),
@@ -4768,7 +4785,7 @@ mod tests {
         // Companion self-margin, with the same radii and each arm's own re-cut
         // zone, on a clean tessellated seat where only self-surface can decide.
         let (self_surface, self_topology) = fine_seat_slab(0.25);
-        let self_p0 = [0.0, 0.0, -config.contact_depth_mm];
+        let self_p0 = [0.0, 0.0, -config.seat_minimum_mm()];
         let self_p1 = [0.0, 0.0, 3.0];
         let (mut self_forest, self_keys) = f1_ladder_forest(
             &self_surface,
@@ -5155,7 +5172,7 @@ mod tests {
         const RADIUS_MM: f64 = 0.4;
         // Seated one designed contact depth into the table, whose top face is
         // exactly `z = 0`, and standing straight up out of it.
-        let p0 = [0.0, 0.0, -config.contact_depth_mm];
+        let p0 = [0.0, 0.0, -config.seat_minimum_mm()];
         let p1 = [0.0, 0.0, 5.0];
 
         let (_, _, face_ids, _) = surface.project(&[p0]);
@@ -5208,7 +5225,7 @@ mod tests {
             "a member seated its designed {} mm into the model must stay LEGAL — \
              it is inside the material it is seated in on purpose. Kernel said \
              {with_zone}.",
-            config.contact_depth_mm
+            config.seat_minimum_mm()
         );
         assert!(
             without_zone < 0.0,
@@ -5315,7 +5332,7 @@ mod tests {
                         // The PR-2 mask, set generously enough to cover the
                         // whole designed embed, so the TRANSIT screen is not
                         // what decides here and the demand is.
-                        inset0: config.contact_depth_mm + config.min_illegal_len_mm,
+                        inset0: config.seat_minimum_mm() + config.min_illegal_len_mm,
                         inset1: 0.0,
                         #[cfg(feature = "census")]
                         contact: None,
@@ -5402,7 +5419,7 @@ mod tests {
         let seat_radius_mm = constants.placeholders().min_shoot_r_mm().diagnostic().get();
         const PITCH_MM: f64 = 0.25;
         let (surface, topology) = fine_seat_slab(PITCH_MM);
-        let p0 = [0.0, 0.0, -config.contact_depth_mm];
+        let p0 = [0.0, 0.0, -config.seat_minimum_mm()];
         let p1 = [0.0, 0.0, 3.0];
         let ladder = F1_GROWTH_MM
             .iter()
@@ -5568,7 +5585,7 @@ mod tests {
         let seat_radius_mm = constants.placeholders().min_shoot_r_mm().diagnostic().get();
         const PITCH_MM: f64 = 0.25;
         let (surface, topology) = fine_seat_slab(PITCH_MM);
-        let p0 = [0.0, 0.0, -config.contact_depth_mm];
+        let p0 = [0.0, 0.0, -config.seat_minimum_mm()];
         let p1 = [0.0, 0.0, 3.0];
 
         // THE SABOTAGE: build the ladder and DO NOT call
@@ -5704,7 +5721,7 @@ mod tests {
         // ROOTWARD contact: `p1` is the seat, `p0` stands off in the air —
         // the geometry `apply_model_anchor` mints, upside down from the
         // `Terminalward` fixtures above.
-        let p1 = [0.0, 0.0, -config.contact_depth_mm];
+        let p1 = [0.0, 0.0, -config.seat_minimum_mm()];
         let p0 = [0.0, 0.0, 3.0];
         const FREE_END_MM: f64 = 0.35;
         const CONTACT_END_MM: f64 = 0.90;
@@ -5809,18 +5826,20 @@ mod tests {
     ///
     /// The measured challenge fixture moves the free end from `[0,0,3]` to
     /// `[2.5,0,3]` over the 0.25 mm slab. The old axis cuts 116 faces; the final
-    /// axis cuts 139. This runs the production re-cut and requires both its count
+    /// axis cuts 135. This runs the production re-cut and requires both its count
     /// and its stored shape to follow the final axis. A radius-only change gate
-    /// returns zero and leaves the 116-face zone behind. The final count was 140 while the registry
-    /// carried a 0.300 mm contact depth; `p0` is built from that constant, so the
-    /// owner ruling of 2026-08-30 (landed 2026-09-05) moved the seat up and the
-    /// swung band now cuts 139. The 116 control is unchanged, and so is the claim.
+    /// returns zero and leaves the 116-face zone behind. The final count was 140 while
+    /// the registry carried a 0.300 mm contact depth and 139 at the 0.100 mm that
+    /// replaced it; `p0` is now built from the DERIVED rasterisation allowance
+    /// (owner ruling 2026-09-05, 0.069 mm on this profile), the seat moved up
+    /// again, and the swung band cuts 135. The 116 control has not moved through
+    /// any of it, and neither has the claim.
     #[test]
-    fn an_axis_swing_without_a_radius_change_re_cuts_the_zone_from_116_to_139_faces() {
+    fn an_axis_swing_without_a_radius_change_re_cuts_the_zone_from_116_to_135_faces() {
         let config = BraceConfig::current(0.05).unwrap();
         let (surface, topology) = fine_seat_slab(0.25);
         let radius_mm = 0.35_f64;
-        let p0 = [0.0, 0.0, -config.contact_depth_mm];
+        let p0 = [0.0, 0.0, -config.seat_minimum_mm()];
         let p1_before = [0.0, 0.0, 3.0];
         let p1_after = [2.5, 0.0, 3.0];
         let (_, _, face_ids, _) = surface.project(&[p0]);
@@ -5842,7 +5861,7 @@ mod tests {
         let created = freeze(p1_before);
         let fresh = freeze(p1_after);
         assert_eq!(created.zone().len(), 116, "challenge control");
-        assert_eq!(fresh.zone().len(), 139, "challenge control");
+        assert_eq!(fresh.zone().len(), 135, "challenge control");
 
         let mut forest = Forest::new();
         let key = forest.add_member(Member::new(MemberSpec {
@@ -5901,7 +5920,7 @@ mod tests {
         let config = BraceConfig::current(0.05).unwrap();
         let (surface, topology) = fine_seat_slab(0.25);
         let radius_mm = 0.35_f64;
-        let p0 = [0.0, 0.0, -config.contact_depth_mm];
+        let p0 = [0.0, 0.0, -config.seat_minimum_mm()];
         let p1_before = [3.0, 0.0, 3.0];
         let p1_after = [0.2, 0.0, 0.15];
         let (_, _, face_ids, _) = surface.project(&[p0]);
@@ -6005,7 +6024,7 @@ mod tests {
         const RADIUS_MM: f64 = 0.4;
         // Seated at the top face and continuing straight DOWN through the slab —
         // 2.7 mm of material past the designed embed the mask covers.
-        let p0 = [0.0, 0.0, -config.contact_depth_mm];
+        let p0 = [0.0, 0.0, -config.seat_minimum_mm()];
         let p1 = [0.0, 0.0, -3.0];
         let (_, _, face_ids, _) = surface.project(&[p0]);
         let seat_face_id = u32::try_from(face_ids[0]).expect("the seat projects onto a face");
@@ -6208,8 +6227,8 @@ mod tests {
 
         // Seated its designed depth into the table (top face at `z = 0`) and
         // standing 2 mm out of it.
-        let p0 = [0.0, 0.0, -config.contact_depth_mm];
-        let p1 = [0.0, 0.0, 2.0 - config.contact_depth_mm];
+        let p0 = [0.0, 0.0, -config.seat_minimum_mm()];
+        let p1 = [0.0, 0.0, 2.0 - config.seat_minimum_mm()];
         let (_, _, face_ids, _) = surface.project(&[p0]);
         let seat_face_id = u32::try_from(face_ids[0]).expect("the seat projects onto a face");
         let zone = crate::seat_zone::freeze_production_seat_zones(
@@ -7634,12 +7653,12 @@ mod tests {
         )
         .unwrap();
         assert!(
-            (seated - unseated - config.contact_depth_mm).abs() < 1.0e-9,
+            (seated - unseated - config.seat_minimum_mm()).abs() < 1.0e-9,
             "MAJOR-6: at |cos| = 1 a SEATED end's mask must carry exactly one \
              seat depth ({}) more than an unseated one's — the mask reflects the \
              member's actual seating state. unseated = {unseated}, seated = \
              {seated}",
-            config.contact_depth_mm
+            config.seat_minimum_mm()
         );
 
         // HALF TWO — and the exact pass no longer reads that difference.

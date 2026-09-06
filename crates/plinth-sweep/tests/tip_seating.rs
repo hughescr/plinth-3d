@@ -15,24 +15,36 @@
 //! production lowering, on fixtures whose geometry makes the answer
 //! predictable.
 //!
+//! **And the tip must go to its FULL depth even in a thin skin.** The owner
+//! ruled again on 2026-09-05, after seeing the first fix: *"'contact depth'
+//! 0.1 mm is a fake number — once supports overlap the model they are the same
+//! voxels ... Push the support tip into the model as deeply as it needs to go
+//! to reach the contact area that is needed, then TRUNCATE the geometry beyond
+//! the model's surface so the tip cannot protrude on the other side of any thin
+//! model layer."* So the thin-wall bound moved off the SEAT and onto the
+//! emitted GEOMETRY, and the law's smallest term stopped being a typed number.
+//!
 //! | test | what it asserts | how it is kept from passing vacuously |
 //! |---|---|---|
-//! | `flat_disc_tips_seat_by_the_law` | every pole is inside by at least the registered contact depth, and every delivered cut disc carries `a ≥ r_tip` | it counts the arms it graded and fails on an empty field; the sabotage below turns it red |
-//! | `zero_available_depth_restores_the_defect` | zeroing the seating input reproduces the pole-on-the-surface geometry exactly | it re-asserts the FIRST test's own predicate and requires it to fail |
-//! | `thin_skin_truncates_and_never_exits` | a skin thinner than the law's depth is seated to what is there, counted, and never pierced | it requires the truncation counter to FIRE, so a fixture that stopped being thin fails |
+//! | `flat_disc_tips_seat_by_the_law` | every pole is inside by at least the law's own depth, and every delivered cut disc carries `a ≥ r_tip` | it counts the arms it graded and fails on an empty field; the sabotage below turns it red |
+//! | `zero_available_depth_clips_but_never_retracts` | zeroing the seating input changes the CLIP, never the seat | it requires every seat to stay at full depth AND every ball to be clipped |
+//! | `thin_skin_seats_in_full_and_clips_at_the_far_face` | a skin thinner than the ball is seated to the law's full depth, and the ball is clipped exactly at the skin's top face | it requires the skin to be thinner than the law's depth, and the clip counter to FIRE |
+//! | `a_thick_disc_never_clips_and_moves_only_by_the_allowance` | on thick material nothing clips, and re-running with the retired 0.100 mm pinned moves ONLY the arms that term binds | it requires both populations to be non-empty |
 //!
 //! Nothing here restates the seat law. The law's own numbers come from the
 //! registry, and the assertions are on consequences a reader can check against
-//! `docs/physics.md` §9 without re-deriving the formula: "deeper than the
-//! registered contact depth", "the cut is no narrower than the tip", "the pole
-//! never leaves the material".
+//! `docs/physics.md` §9 without re-deriving the formula: "at least as deep as
+//! the law asks", "the cut is no narrower than the tip", "no geometry above the
+//! far face".
 
 // Layer counts from finite model-scale lengths, in test-local arithmetic.
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
 use plinth_core::{m0_constants, Finite, LayerPlan, PositiveFinite};
 use plinth_mesh::{make_disc_uniform, Mesh};
-use plinth_support::{lower_sweep_arms, BuildFrame, SupportSegmentKind, SweepArm, SweepLowering};
+use plinth_support::{
+    lower_sweep_arms, BuildFrame, SphereGeometry, SupportSegmentKind, SweepArm, SweepLowering,
+};
 use plinth_sweep::{arms_of, to_primitives, SweepEmission, SweepPlan, SweepPolicy};
 
 const LIFT_MM: f64 = 5.0;
@@ -47,9 +59,30 @@ fn layer_height_mm() -> f64 {
         .value()
 }
 
-/// The registered smallest seat depth — the law's own minimum term, read from
-/// the registry rather than typed here.
-fn registered_contact_depth_mm() -> f64 {
+/// The law's own smallest term — the DERIVED rasterisation allowance, one
+/// layer in Z plus one addressable pixel in plane.
+///
+/// Both halves come from the registry. The typed `DEFAULT_CONTACT_DEPTH_MM`
+/// stood here until the owner's ruling of 2026-09-05 retired it from deciding
+/// seats; it survives only as the ChituBox taper record's own field.
+fn seat_minimum_mm() -> f64 {
+    layer_height_mm() + registered_pixel_pitch_mm()
+}
+
+/// One addressable pixel on the coarser in-plane axis of the registered
+/// printer profile, in mm.
+fn registered_pixel_pitch_mm() -> f64 {
+    let printer = m0_constants().expect("registry").saturn4_ultra();
+    printer
+        .pixel_pitch_x_um()
+        .value()
+        .max(*printer.pixel_pitch_y_um().value())
+        / 1000.0
+}
+
+/// The retired typed depth, read from the registry so the probe below pins the
+/// number the engine actually carried rather than a literal.
+fn retired_contact_depth_mm() -> f64 {
     m0_constants()
         .expect("registry")
         .placeholders()
@@ -74,7 +107,15 @@ fn registered_ball_factor() -> f64 {
 /// equator where that is shallower — the point past which more burial cuts a
 /// NARROWER disc, not a wider one.
 fn required_depth_mm(tip_radius_mm: f64) -> f64 {
-    registered_contact_depth_mm().min(registered_ball_factor() * tip_radius_mm)
+    seat_minimum_mm().min(registered_ball_factor() * tip_radius_mm)
+}
+
+/// The ball-cap clause's own depth for a tip of this radius:
+/// `(f − sqrt(f² − 1)) · r_tip`, the depth at which the cut disc equals the
+/// shaft. Derived from the registered ball factor, never typed.
+fn ball_clause_depth_mm(tip_radius_mm: f64) -> f64 {
+    let factor = registered_ball_factor();
+    (factor - (factor * factor - 1.0).max(0.0).sqrt()) * tip_radius_mm
 }
 
 fn z_span(mesh: &Mesh) -> (f64, f64) {
@@ -162,7 +203,7 @@ fn flat_disc_tips_seat_by_the_law() {
     );
     assert_eq!(
         emission.tips_truncated_by_thin_wall, 0,
-        "a 3.5 mm disc is nowhere near thin enough to truncate a seat"
+        "a 3.5 mm disc is nowhere near thin enough to clip a ball"
     );
 
     let mut deepest_below_surface = f64::INFINITY;
@@ -210,22 +251,31 @@ fn flat_disc_tips_seat_by_the_law() {
 }
 
 // ---------------------------------------------------------------------------
-// (b) Sabotage: restore zero seating and require (a) to go red.
+// (b) Sabotage: zero the seating input, and require the CLIP to move, not the
+//     seat.
 // ---------------------------------------------------------------------------
 
 /// The knob is the seating INPUT, not a production flag: `available_seat_depth_mm`
-/// is what the sweep measured of the material above each seat, and zeroing it
-/// truncates every seat to nothing. That is exactly the pre-fix geometry — the
-/// pole on the lamina plane — reached through the same production lowering.
+/// is what the sweep measured of the material above each seat.
+///
+/// Before the owner's ruling of 2026-09-05 zeroing it retracted every tip back
+/// onto the lamina plane — the original point-contact defect, restored. Under
+/// the ruling it may do no such thing: the seat stays at the full depth the
+/// area law asked for, and what zeroing changes is where the emitted ball is
+/// CUT. This test is the guard on that: a seat that still moves when the
+/// thickness moves is a retraction, and retraction is what the ruling forbids.
 #[test]
-fn zero_available_depth_restores_the_defect() {
+fn zero_available_depth_clips_but_never_retracts() {
     let mesh = flat_disc();
     let (plan, layers, frame, _) = plan_of(&mesh);
-    let sabotaged: Vec<SweepArm> = arms_of(&plan)
-        .into_iter()
+    let arms = arms_of(&plan);
+    let honest = lower_sweep_arms(&arms, frame, &layers, MAX_PRIMITIVES, MAX_PRIMITIVE_BYTES)
+        .expect("the lowering refuses only about the request");
+    let sabotaged: Vec<SweepArm> = arms
+        .iter()
         .map(|arm| SweepArm {
             available_seat_depth_mm: 0.0,
-            ..arm
+            ..*arm
         })
         .collect();
     let lowered = lower_sweep_arms(
@@ -241,83 +291,288 @@ fn zero_available_depth_restores_the_defect() {
         !lowered.tip_seat_depth_mm.is_empty(),
         "the sabotage must still build arms; a field of zero arms proves nothing"
     );
-    // (a)'s own predicate, re-asserted here and REQUIRED to fail.
-    let still_passing = lowered
+    assert_eq!(
+        lowered.tip_seat_depth_mm, honest.tip_seat_depth_mm,
+        "zeroing the available thickness moved a SEAT. Under the owner's ruling of \
+         2026-09-05 the tip goes to the depth the contact area needs whatever the skin \
+         above it is; only the emitted geometry is cut"
+    );
+    // (a)'s own predicate must STILL hold with the thickness zeroed.
+    let short = lowered
         .tip_seat_depth_mm
         .iter()
         .zip(&lowered.tip_radius_mm)
-        .filter(|(depth, tip)| **depth >= required_depth_mm(**tip) - 1e-9)
+        .filter(|(depth, tip)| **depth < required_depth_mm(**tip) - 1e-9)
         .count();
     assert_eq!(
-        still_passing, 0,
-        "with the seating input zeroed, no tip may still meet the law's depth — \
-         {still_passing} did, so the assertion in `flat_disc_tips_seat_by_the_law` \
-         is not testing the seating at all"
+        short, 0,
+        "{short} tips fell short of the law's depth with the thickness zeroed — that is \
+         the retraction the ruling replaced with a clip"
     );
-    assert!(
-        lowered.tip_seat_depth_mm.iter().all(|depth| *depth == 0.0),
-        "the sabotage restores EXACTLY the pre-fix geometry: a pole on the lamina plane"
+    assert_eq!(
+        lowered.tips_below_area_guarantee(),
+        0,
+        "a clipped tip still carries its full cut disc; the area guarantee cannot depend \
+         on how thick the skin above it is"
     );
+    // And the clip DID fire, on every arm: with no material above the seat, no
+    // part of any ball may be emitted above the seat plane.
     assert_eq!(
         lowered.tips_truncated_by_thin_wall,
         lowered.tip_seat_depth_mm.len(),
-        "every one of those seats is a truncation, and every one must be counted"
+        "with zero material above the seat every ball must be clipped at the seat plane"
+    );
+    for (index, primitive) in lowered
+        .primitives
+        .iter()
+        .filter(|primitive| primitive.segment_kind == SupportSegmentKind::ContactSphere)
+        .enumerate()
+    {
+        let clip = primitive
+            .sphere_geometry
+            .as_ref()
+            .and_then(SphereGeometry::clip_above_z_mm);
+        assert!(
+            clip.is_some(),
+            "tip {index} reached the emit boundary with no clip plane, so its ball would \
+             be written whole and would stand proud of the surface"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (c) A skin thinner than the ball: seat in full, clip at the far face.
+// ---------------------------------------------------------------------------
+
+/// A 20 mm disc 0.06 mm thick — ONE lamina at the registered layer height,
+/// against a law whose smallest term is the derived rasterisation allowance.
+///
+/// The skin was 0.15 mm while the registry carried a 0.300 mm typed depth, and
+/// 0.06 mm since 2026-09-05. It has to stay thinner than the law's own minimum
+/// or this test grades nothing, and the assertion below fails loudly if it ever
+/// stops being so.
+///
+/// What the fixture proves changed on 2026-09-05: the seat is NO LONGER cut
+/// back to the skin. It goes to the full law depth, the ball is clipped at the
+/// skin's own top face, and the area guarantee holds where it used to fail.
+#[test]
+fn thin_skin_seats_in_full_and_clips_at_the_far_face() {
+    let skin_mm = 0.06;
+    let mesh = make_disc_uniform(20.0, skin_mm, 64, 4).expect("a thin-skin fixture");
+    let (plan, layers, frame, min_z) = plan_of(&mesh);
+    let arms = arms_of(&plan);
+    let emission = lower(&plan, &layers, frame);
+
+    assert!(
+        !emission.tip_seat_depth_mm.is_empty(),
+        "the thin skin must still field arms; emit and warn, never refuse"
     );
     assert!(
-        lowered.tips_below_area_guarantee() > 0,
-        "a zero-depth seat cuts a zero-radius disc, which cannot carry the tip's own section"
+        skin_mm < seat_minimum_mm(),
+        "this fixture only grades a clip while its skin is thinner than the law's own \
+         minimum depth ({} mm)",
+        seat_minimum_mm()
+    );
+    assert!(
+        emission.tips_truncated_by_thin_wall > 0,
+        "the clip must FIRE here; zero clips means the far face is not being read"
+    );
+
+    // THE RULING ITSELF: full depth, not skin depth.
+    let mut seated_past_the_skin = 0_usize;
+    for (index, (arm, depth)) in arms.iter().zip(&emission.tip_seat_depth_mm).enumerate() {
+        let required_mm = required_depth_mm(arm.tip_radius_mm);
+        assert!(
+            *depth >= required_mm - 1e-9,
+            "arm {index}: seated {depth:.6} mm, short of the {required_mm:.6} mm the law \
+             asks of a {:.6} mm tip. A thin skin may cut the GEOMETRY, never the seat",
+            arm.tip_radius_mm
+        );
+        if *depth > skin_mm + 1e-9 {
+            seated_past_the_skin += 1;
+        }
+    }
+    assert!(
+        seated_past_the_skin > 0,
+        "no seat went deeper than the skin, so this fixture is not exercising the clip \
+         at all — it would pass under the retracting behaviour the ruling replaced"
+    );
+
+    // AND THE AREA GUARANTEE, which used to fail on exactly this fixture family.
+    assert_eq!(
+        emission.tips_below_area_guarantee_count(),
+        0,
+        "a clipped tip carries the cut disc the law sized; cut radii {:?} against tips {:?}",
+        SweepLowering::distribution(&emission.tip_cut_radius_mm),
+        SweepLowering::distribution(&emission.tip_radius_mm),
+    );
+
+    // THE CLIP PLANE, on the emitted ball, at the skin's own far face. The
+    // mesh-level consequence — no triangle above it, and the cut ball still
+    // closed — is graded in `plinth-emit`'s own unit tests, on the primitive
+    // this one proves production hands over.
+    let top_face = min_z + skin_mm;
+    let mut clipped = 0_usize;
+    for (index, primitive) in emission
+        .primitives
+        .iter()
+        .filter(|primitive| primitive.segment_kind == SupportSegmentKind::ContactSphere)
+        .enumerate()
+    {
+        let Some(clip) = primitive
+            .sphere_geometry
+            .as_ref()
+            .and_then(SphereGeometry::clip_above_z_mm)
+        else {
+            continue;
+        };
+        clipped += 1;
+        assert!(
+            clip.get() <= top_face + layer_height_mm() + 1e-9,
+            "tip {index}: the clip plane at z {:.6} stands above the skin's top face \
+             {top_face:.6}, so geometry could still be emitted outside the model",
+            clip.get()
+        );
+    }
+    assert_eq!(
+        clipped, emission.tips_truncated_by_thin_wall,
+        "every counted clip must carry a clip plane on its own emitted ball"
     );
 }
 
 // ---------------------------------------------------------------------------
-// (c) A skin thinner than the law's depth.
+// (d) Thick material: nothing clips, and only the allowance term moved.
 // ---------------------------------------------------------------------------
 
-/// A 20 mm disc 0.06 mm thick — ONE lamina at the registered layer height,
-/// against a law whose smallest term is the registered contact depth. The seat
-/// has to truncate, and the pole must stop inside the skin.
+/// The 26eaab7 comparison, run rather than asserted.
 ///
-/// The skin was 0.15 mm while the registry carried 0.300 mm. It was thinned on
-/// 2026-09-05 when the owner's ruling of 2026-08-30 landed and the minimum
-/// became 0.100 mm: at 0.15 mm this fixture would no longer be thin enough to
-/// truncate anything and the test would have gone quietly vacuous. The
-/// assertion below is what makes that impossible — it fails loudly if the skin
-/// ever stops being thinner than the law's own minimum.
+/// On a 3.5 mm disc no ball can reach a far face, so the clip must never fire
+/// and every emitted primitive must be exactly what the seat law alone
+/// produces. The one thing this commit changed for such a model is PR-1(a): the
+/// law's smallest term went from the typed 0.100 mm to the derived allowance.
+/// So the test re-runs the identical lowering with that term PINNED back to
+/// 0.100 mm (the `seat-minimum-probe` feature, which no production build
+/// enables) and requires:
+///
+/// * every arm whose BALL clause binds — the term this commit did not touch —
+///   to emit bit-identical geometry under both; and
+/// * every arm whose minimum term binds to move, and to move only along its own
+///   axis.
+///
+/// Both populations are required to be non-empty, so neither half can pass by
+/// examining nothing.
 #[test]
-fn thin_skin_truncates_and_never_exits() {
-    let skin_mm = 0.06;
-    let mesh = make_disc_uniform(20.0, skin_mm, 64, 4).expect("a thin-skin fixture");
-    let (plan, layers, frame, min_z) = plan_of(&mesh);
-    let emission = lower(&plan, &layers, frame);
-    let poles = tip_poles(&emission);
+fn a_thick_disc_never_clips_and_moves_only_by_the_allowance() {
+    let mesh = flat_disc();
+    let (plan, layers, frame, _) = plan_of(&mesh);
+    let arms = arms_of(&plan);
+    let now = lower_sweep_arms(&arms, frame, &layers, MAX_PRIMITIVES, MAX_PRIMITIVE_BYTES)
+        .expect("the lowering refuses only about the request");
+    let pinned = plinth_support::lower_sweep_arms_with_pinned_seat_minimum(
+        &arms,
+        frame,
+        &layers,
+        MAX_PRIMITIVES,
+        MAX_PRIMITIVE_BYTES,
+        retired_contact_depth_mm(),
+    )
+    .expect("the lowering refuses only about the request");
 
-    assert!(
-        !poles.is_empty(),
-        "the thin skin must still field arms; emit and warn, never refuse"
+    assert_eq!(
+        now.tips_truncated_by_thin_wall, 0,
+        "a 3.5 mm disc has no far face any ball can reach; the clip must not fire"
     );
     assert!(
-        skin_mm < registered_contact_depth_mm(),
-        "this fixture is only a truncation test while its skin is thinner than the law's \
-         own minimum depth ({} mm)",
-        registered_contact_depth_mm()
+        now.primitives
+            .iter()
+            .filter(|primitive| primitive.segment_kind == SupportSegmentKind::ContactSphere)
+            .all(|primitive| primitive
+                .sphere_geometry
+                .as_ref()
+                .and_then(SphereGeometry::clip_above_z_mm)
+                .is_none()),
+        "an unclipped model must carry no clip plane on any ball, or the emitter will cut \
+         geometry nobody asked it to cut"
     );
+    assert_eq!(
+        now.primitives.len(),
+        pinned.primitives.len(),
+        "moving the law's smallest term may move geometry; it may not add or drop a \
+         primitive"
+    );
+
+    // The law takes a MAXIMUM over its terms, so lowering one term can only
+    // lower a seat, and by no more than that term moved. Stated as a
+    // consequence rather than by recomputing the maximum here, which is the
+    // trap a test that re-implements production logic falls into.
+    let step_mm = retired_contact_depth_mm() - seat_minimum_mm();
     assert!(
-        emission.tips_truncated_by_thin_wall > 0,
-        "the thin-wall bound must FIRE here; zero truncations means the bound is not wired"
+        step_mm > 0.0,
+        "the derived allowance {} mm must be SHALLOWER than the typed depth {} mm it \
+         replaced, or this comparison is grading the wrong direction",
+        seat_minimum_mm(),
+        retired_contact_depth_mm()
     );
-    for (index, depth) in emission.tip_seat_depth_mm.iter().enumerate() {
+    let mut moved = 0_usize;
+    let mut unmoved = 0_usize;
+    for (index, (here, there)) in now
+        .tip_seat_depth_mm
+        .iter()
+        .zip(&pinned.tip_seat_depth_mm)
+        .enumerate()
+    {
         assert!(
-            *depth <= skin_mm + 1e-9,
-            "arm {index}: seated {depth:.6} mm into a {skin_mm} mm skin"
+            *here <= *there + 1e-12,
+            "arm {index}: lowering the law's smallest term deepened a seat, from {there} \
+             to {here}. A maximum cannot do that"
         );
+        assert!(
+            *there - *here <= step_mm + 1e-12,
+            "arm {index}: the seat moved {} mm, more than the {step_mm} mm the term \
+             itself moved, so something other than PR-1(a) changed",
+            *there - *here
+        );
+        if *there - *here > 1e-12 {
+            moved += 1;
+        } else {
+            unmoved += 1;
+            // An unmoved arm is one another term binds, and the only way that
+            // holds is if its depth already exceeded the term that moved.
+            assert!(
+                *here >= retired_contact_depth_mm() - 1e-12
+                    || (*here - ball_clause_depth_mm(now.tip_radius_mm[index])).abs() < 1e-12,
+                "arm {index} did not move, yet its depth {here} is below the retired \
+                 {} mm and is not its own ball clause's depth — so nothing explains why \
+                 the term that moved did not move it",
+                retired_contact_depth_mm()
+            );
+        }
     }
-    let top_face = min_z + skin_mm;
-    for (index, pole) in poles.iter().enumerate() {
-        assert!(
-            pole[2] <= top_face + 1e-9,
-            "arm {index}: the tip pole at z {:.6} has come out through the skin's top face \
-             at {top_face:.6} — a seat never exits the far face of what it strikes",
-            pole[2]
-        );
+    assert!(
+        moved > 0 && unmoved > 0,
+        "this comparison needs BOTH populations to say anything: {moved} arms moved with \
+         the term and {unmoved} were bound by another term"
+    );
+
+    // AND THE GEOMETRY, not just the depth: an arm whose seat did not move must
+    // emit a bit-identical tip ball under both.
+    let spheres = |lowering: &SweepLowering| -> Vec<[u64; 3]> {
+        lowering
+            .primitives
+            .iter()
+            .filter(|primitive| primitive.segment_kind == SupportSegmentKind::ContactSphere)
+            .map(|primitive| primitive.start_mm.map(|value| value.get().to_bits()))
+            .collect()
+    };
+    let (here_poles, there_poles) = (spheres(&now), spheres(&pinned));
+    assert_eq!(here_poles.len(), now.tip_seat_depth_mm.len());
+    for (index, (here, there)) in here_poles.iter().zip(&there_poles).enumerate() {
+        let unchanged = pinned.tip_seat_depth_mm[index] - now.tip_seat_depth_mm[index] <= 1e-12;
+        if unchanged {
+            assert_eq!(
+                here, there,
+                "arm {index}'s seat did not move, so its emitted ball must be identical"
+            );
+        }
     }
 }
