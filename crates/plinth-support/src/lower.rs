@@ -974,8 +974,19 @@ fn seat_tip(
     // An unmeasured normal falls back to the arm's own axis (theta = 0),
     // exactly as `lower_stub` uses the member direction in place of a face
     // normal.
-    let outward = geom_kernel::vec3::normalize(arm.seat_normal_mm).unwrap_or(unit);
-    let abs_cos = geom_kernel::vec3::dot(unit, outward).abs().min(1.0);
+    // The carried face is down-facing and the arm runs seat -> base, so its
+    // OUTWARD normal points the same way as `unit`. A caller handing in the
+    // inward normal would otherwise pass unnoticed through `abs()` below and
+    // then drive the grazing completion OUT of the model at full magnitude
+    // (reviewer finding, 2026-09-05), so the sign is fixed here rather than
+    // trusted.
+    let measured = geom_kernel::vec3::normalize(arm.seat_normal_mm).unwrap_or(unit);
+    let outward = if geom_kernel::vec3::dot(unit, measured) < 0.0 {
+        measured.map(|component| -component)
+    } else {
+        measured
+    };
+    let abs_cos = geom_kernel::vec3::dot(unit, outward).min(1.0);
     // PR-1(a) DERIVED, not typed: one layer in Z plus one pixel in plane, the
     // only separation the printer cannot place two solids inside of. The
     // registered `DEFAULT_CONTACT_DEPTH_MM` used to stand here and was retired

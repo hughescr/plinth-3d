@@ -955,6 +955,14 @@ fn sphere_triangles_clipped(
     if clip_z >= center[2] + radius {
         return Ok(whole);
     }
+    // A plane at or below the bottom pole would keep nothing: every polygon
+    // collapses and the rim is empty, and a zero-triangle sphere record would
+    // otherwise pass the disk audit, which checks poles and radius but never
+    // the soup. The producer already refuses this seat (lower.rs); refusing it
+    // here too keeps the boundary honest (reviewer finding, 2026-09-05).
+    if clip_z <= center[2] - radius {
+        return Err(EmitError::RecordEncodingRejected);
+    }
     let mut kept: Vec<SoupTriangle> = Vec::with_capacity(whole.len() + SPHERE_LONGITUDES);
     for triangle in &whole {
         let above = triangle.map(|vertex| vertex[2] > clip_z);
@@ -2216,6 +2224,22 @@ mod tests {
     /// A plane at or above the ball's top is not a clip. It must return the
     /// whole ball, byte for byte, so an arm that never reaches its far face
     /// emits exactly what it emitted before this function existed.
+    /// A plane at or below the bottom pole keeps nothing, and an empty sphere
+    /// record must be refused at the boundary rather than written.
+    #[test]
+    fn a_plane_at_or_below_the_bottom_pole_is_refused() {
+        for center in SPHERE_TEST_CENTERS {
+            for &radius in &SPHERE_TEST_RADII {
+                for clip_z in [center[2] - radius, center[2] - radius * 3.0] {
+                    assert!(
+                        sphere_triangles_clipped(center, radius, clip_z).is_err(),
+                        "a plane at {clip_z} under a ball of radius {radius} was not refused"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_plane_above_the_ball_returns_the_whole_ball_unchanged() {
         for center in SPHERE_TEST_CENTERS {
