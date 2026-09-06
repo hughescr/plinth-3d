@@ -206,7 +206,26 @@ fn flat_disc_tips_seat_by_the_law() {
         "a 3.5 mm disc is nowhere near thin enough to clip a ball"
     );
 
+    // # Re-cut 2026-09-06, after the production cause was found and fixed
+    //
+    // This loop went red on arm 196 at 0.0585 mm against the 0.0690 mm its own
+    // tip radius asked for. The tip was neither merged wrongly nor mis-sized:
+    // the arm LEANED 57 degrees off vertical, its nearest mesh face was the
+    // vertical rim wall (`tip_landing::tip_seat_normals` refuses a face that is
+    // not down-facing), so its seat normal went unmeasured — and the lowering
+    // then substituted THE ARM'S OWN AXIS for the missing normal. That
+    // substitution is exact for a vertical arm and loses a factor of
+    // `cos(tilt)` for every other one, so the law asked for 0.1070 mm of
+    // burial along the axis and the model received 0.0585 mm of it. The
+    // fallback is now straight down (`lower.rs`, `seat_tip`), which is the
+    // direction the law's smallest term — one layer in Z — is denominated in.
+    //
+    // So the assertion below is unchanged in form and is now a THEOREM rather
+    // than a coincidence, and two stronger claims are asserted beside it: the
+    // burial covers the tilted end disc's own projection, and the leaned
+    // population that broke it is non-empty.
     let mut deepest_below_surface = f64::INFINITY;
+    let mut leaned_arms = 0_usize;
     for (index, (arm, pole)) in arms.iter().zip(&poles).enumerate() {
         // THE DEFECT'S OWN MEASUREMENT: the pole against the model surface the
         // adapter handed the lowering. Before this fix it was exactly zero.
@@ -216,6 +235,30 @@ fn flat_disc_tips_seat_by_the_law() {
             embed_mm >= required_mm - 1e-9,
             "arm {index}: the tip pole stands {embed_mm:.6} mm inside the model, below the \
              {required_mm:.6} mm this arm's own tip radius {:.6} mm asks for",
+            arm.tip_radius_mm
+        );
+        // THE TILT CLAUSE, delivered rather than assumed. This disc's carried
+        // face is horizontal, so an arm running `tilt` off vertical presents an
+        // end disc whose projection on that face is `r_tip · sin(tilt)` deep;
+        // burial shallower than that engages part of the cross-section and
+        // smears the rest (`docs/physics.md` §9, clause (b)). A leaned arm is
+        // exactly what the old axis fallback under-delivered, so this is the
+        // claim that would go red again if it came back.
+        let axis = [
+            arm.base_mm[0] - arm.seat_mm[0],
+            arm.base_mm[1] - arm.seat_mm[1],
+            arm.base_mm[2] - arm.seat_mm[2],
+        ];
+        let length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+        let sin_tilt = (axis[0] * axis[0] + axis[1] * axis[1]).sqrt() / length;
+        if sin_tilt > 1e-9 {
+            leaned_arms += 1;
+        }
+        assert!(
+            embed_mm >= arm.tip_radius_mm * sin_tilt - 1e-9,
+            "arm {index}: buried {embed_mm:.6} mm under a horizontal face while leaning with \
+             sin(tilt) {sin_tilt:.6} and a tip radius of {:.6} mm, so part of its end disc never \
+             meets the model",
             arm.tip_radius_mm
         );
         // And against the model's own lowest surface, which is what the owner
@@ -247,6 +290,15 @@ fn flat_disc_tips_seat_by_the_law() {
     assert!(
         deepest_below_surface.is_finite(),
         "the loop above must have graded at least one arm"
+    );
+    assert!(
+        leaned_arms > 0,
+        "no arm on this disc leaned, so the tilt clause above — the one the axis fallback broke \
+         — was graded on nothing"
+    );
+    println!(
+        "graded {} arms, {leaned_arms} of them leaned; shallowest burial {deepest_below_surface:.6} mm",
+        arms.len()
     );
 }
 
@@ -538,12 +590,37 @@ fn a_thick_disc_never_clips_and_moves_only_by_the_allowance() {
             unmoved += 1;
             // An unmoved arm is one another term binds, and the only way that
             // holds is if its depth already exceeded the term that moved.
+            //
+            // THE INCIDENCE CLAUSE JOINED THIS LIST ON 2026-09-06, and it did
+            // so because the fix of that date made it reachable rather than
+            // because the test was too strict. While an unmeasured seat normal
+            // fell back to the arm's own axis, every incidence read zero and
+            // the flank term was `process_resolution` flat; with the fallback
+            // corrected to the vertical, a leaned arm reads a real `sin(theta)`
+            // and `process_resolution + r_tip·sin(theta)` can be the binding
+            // term -- and, where that term exceeds the ball's own equator, the
+            // EQUATOR CAP is what binds instead. Arm 203 is one of those: a
+            // minimum-radius tip leaning at sin(theta) = 0.837 asks for
+            // 0.0919 mm and is held at its equator, 0.0750 mm.
+            let arm = &arms[index];
+            let axis = [
+                arm.base_mm[0] - arm.seat_mm[0],
+                arm.base_mm[1] - arm.seat_mm[1],
+                arm.base_mm[2] - arm.seat_mm[2],
+            ];
+            let length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+            let sin_tilt = (axis[0] * axis[0] + axis[1] * axis[1]).sqrt() / length;
+            let flank_mm = layer_height_mm() + now.tip_radius_mm[index] * sin_tilt;
+            let equator_mm = registered_ball_factor() * now.tip_radius_mm[index];
             assert!(
                 *here >= retired_contact_depth_mm() - 1e-12
-                    || (*here - ball_clause_depth_mm(now.tip_radius_mm[index])).abs() < 1e-12,
+                    || (*here - ball_clause_depth_mm(now.tip_radius_mm[index])).abs() < 1e-12
+                    || (*here - flank_mm).abs() < 1e-12
+                    || (*here - equator_mm).abs() < 1e-12,
                 "arm {index} did not move, yet its depth {here} is below the retired \
-                 {} mm and is not its own ball clause's depth — so nothing explains why \
-                 the term that moved did not move it",
+                 {} mm and is none of its own ball clause's depth, its own incidence \
+                 clause's {flank_mm} mm, or its own ball equator at {equator_mm} mm — so \
+                 nothing explains why the term that moved did not move it",
                 retired_contact_depth_mm()
             );
         }

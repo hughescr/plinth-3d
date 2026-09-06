@@ -2472,7 +2472,8 @@ fn print_sweep_disclosure(
          seat spacing mean {:.3} mm p95 {:.3} mm max {:.3} mm; \
          tip radius min {:.4} p50 {:.4} max {:.4} mm (DIAMETER min {:.4} p50 {:.4} max {:.4} mm), \
          {} at the minimum, {} at the maximum, {} above the owner's growth ceiling; \
-         arms dropped at the minimum load {}",
+         arms dropped at the minimum load {} (kept by the span test {}, removal passes rolled \
+         back {})",
         report.struts_total,
         report.landings.plate,
         report.landings.model,
@@ -2491,6 +2492,8 @@ fn print_sweep_disclosure(
         report.tip_radius.count_at_max,
         report.tip_radius.count_above_owner_growth_ceiling,
         report.counters.strut_removals,
+        report.counters.strut_removals_refused_by_span,
+        report.counters.removal_passes_rolled_back,
     );
     // The tip SEAT, published per run rather than assumed. The `a >= r_tip`
     // guarantee is the last line: the cut disc the seat plane actually takes

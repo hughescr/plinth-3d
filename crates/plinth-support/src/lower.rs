@@ -971,16 +971,30 @@ fn seat_tip(
     tip_radius_mm: f64,
     config: LoweringConfig,
 ) -> ([f64; 3], TipSeat) {
-    // An unmeasured normal falls back to the arm's own axis (theta = 0),
-    // exactly as `lower_stub` uses the member direction in place of a face
-    // normal.
+    // AN UNMEASURED NORMAL FALLS BACK TO STRAIGHT DOWN, NOT TO THE ARM'S OWN
+    // AXIS — corrected 2026-09-06.
+    //
+    // The axis fallback said "theta = 0" and so asked the seat law for a depth
+    // measured along the ARM. While every arm was vertical the two directions
+    // were the same vector and the substitution was exact. A LEANED arm
+    // delivers only `depth * cos(tilt)` of DOWNWARD burial for the same axial
+    // travel, and the rasterisation allowance the law's smallest term is made
+    // of — one layer in Z plus one pixel in plane — is a statement about Z. On
+    // the flat 50 mm disc arm 196 leaned 57 degrees off vertical, its nearest
+    // mesh face was the vertical rim wall (so the normal went unmeasured, see
+    // `tip_landing::tip_seat_normals`), and its pole ended 0.0585 mm inside a
+    // model the law had asked for 0.0690 mm of: a starved contact reported as
+    // a full one. Falling back to the vertical restores the identity between
+    // "the depth the law asked for" and "the depth the model actually gets",
+    // and it is a no-op for every vertical arm, whose axis IS this vector.
+    const STRAIGHT_DOWN: [f64; 3] = [0.0, 0.0, -1.0];
     // The carried face is down-facing and the arm runs seat -> base, so its
     // OUTWARD normal points the same way as `unit`. A caller handing in the
     // inward normal would otherwise pass unnoticed through `abs()` below and
     // then drive the grazing completion OUT of the model at full magnitude
     // (reviewer finding, 2026-09-05), so the sign is fixed here rather than
     // trusted.
-    let measured = geom_kernel::vec3::normalize(arm.seat_normal_mm).unwrap_or(unit);
+    let measured = geom_kernel::vec3::normalize(arm.seat_normal_mm).unwrap_or(STRAIGHT_DOWN);
     let outward = if geom_kernel::vec3::dot(unit, measured) < 0.0 {
         measured.map(|component| -component)
     } else {

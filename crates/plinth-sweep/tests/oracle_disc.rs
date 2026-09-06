@@ -27,9 +27,11 @@
 
 mod harness;
 
-use harness::{bands, hex_cell_area_mm2, lamina_reach_mm, sweep, within, within_band, x_allowed};
+use harness::{
+    bands, hex_cell_area_mm2, lamina_reach_mm, sweep, sweep_with, within, within_band, x_allowed,
+};
 use plinth_mesh::{make_disc_fan, make_disc_uniform, make_recessed_disc};
-use plinth_sweep::Landing;
+use plinth_sweep::{Landing, SweepPolicy};
 
 /// The Round 50 profile, measured from the source STL and reproduced here.
 fn round_50() -> plinth_mesh::Mesh {
@@ -121,39 +123,53 @@ fn the_disc_is_supported_by_a_plate_rooted_field_at_the_measured_spacing() {
         "plate reaction between the peak event and the peak event plus the arms' own material",
     );
 
-    // ---- the FLAT FACE's arms all go to the plate ---------------------------
-    //
-    // AMENDED 2026-09-04, when the descent learned to lean. The flat bottom
-    // face is at one layer with nothing under it, so every arm seated on it
-    // still has nothing to land on but the plate, and that is asserted below
-    // arm by arm. The DRAFTED RIM is a different matter: its arms are seated
-    // above the bottom layer over free space, and one of them may now lean the
-    // fraction of a millimetre inward that puts it on the bottom face instead
-    // of running the whole lift to the plate. Asserting "every arm lands on
-    // the plate" would be asserting that no arm may ever lean, which is the
-    // behaviour the owner asked to be rid of; what the oracle grades instead
-    // is that no FLAT-FACE arm leans, and that no arm lands on nothing.
+    // ---- WHERE A FLAT FACE'S ARMS MAY LAND --------------------------------
     let bottom_layer = plan
         .struts
         .iter()
         .map(|strut| strut.k_top)
         .min()
         .expect("a disc has struts");
+    // # RE-CUT 2026-09-06, as a stronger claim on the same physics
+    //
+    // The old assertion was "on a flat face no lean can ever be cheaper than
+    // straight down", arm by arm. That was TRUE OF THE OLD RULE, not of flat
+    // faces: while a merge target had to be a neighbour's TOP, every arm on a
+    // flat face topped out at the same layer, so no target was ever reachable
+    // and the claim held for free. Under the shaft rule a neighbour `d` mm
+    // away is landable part-way down its shaft, and the greedy packs this rim
+    // closer than the break-even distance, so leans happen and are supposed
+    // to.
+    //
+    // What is asserted instead is the property that actually distinguishes a
+    // correct field from a broken one on a flat face: **a lean here may only
+    // ever land on another ARM.** There is nothing under a flat bottom face
+    // but air and the plate, so a lean that reported a MODEL landing would be
+    // reporting a surface that is not there — the exact failure the old
+    // assertion would have caught, kept and sharpened.
     let mut flat_face_arms = 0_usize;
+    let mut flat_face_leans = 0_usize;
     for strut in &plan.struts {
         if strut.k_top == bottom_layer {
             flat_face_arms += 1;
+            if strut.is_leaned() {
+                flat_face_leans += 1;
+            }
             assert!(
-                matches!(strut.landing, Landing::Plate),
-                "strut {} is seated on the flat bottom face and did not land on the plate; on a \
-                 flat face no lean can ever be cheaper than straight down",
-                strut.id
+                !matches!(strut.landing, Landing::Model { .. }),
+                "strut {} is seated on the flat bottom face and landed on MODEL at {:?}; there is \
+                 nothing under a flat bottom face but air and the plate",
+                strut.id,
+                strut.landing
             );
             assert!(
-                !strut.is_leaned(),
-                "strut {} is seated on the flat bottom face and LEANED; on a flat face every \
-                 column's landing is at the same layer, so no lean can shorten anything",
-                strut.id
+                strut.is_leaned() == matches!(strut.landing, Landing::Strut { .. }),
+                "strut {} leaned {} but landed on {:?}; on a flat face the only reason to leave \
+                 your own column is to reach another arm's shaft, and the only way to reach one \
+                 is to leave your column",
+                strut.id,
+                strut.is_leaned(),
+                strut.landing
             );
         }
     }
@@ -161,10 +177,68 @@ fn the_disc_is_supported_by_a_plate_rooted_field_at_the_measured_spacing() {
         flat_face_arms > 0,
         "no arm is seated on the flat bottom face; the partition below is vacuous"
     );
+    assert!(
+        flat_face_leans > 0,
+        "no arm on the flat bottom face leaned, so the claim above was graded on nothing; if \
+         this fires the descent has stopped merging and the invariance below is vacuous too"
+    );
     assert_eq!(
         report.landings.plate + report.landings.model + report.landings.strut,
         report.struts_total,
         "every arm must land on the plate, the model or another arm"
+    );
+    assert_eq!(
+        report.landings.strut,
+        plan.struts
+            .iter()
+            .filter(|strut| matches!(strut.landing, Landing::Strut { .. }))
+            .count(),
+        "the published census must count the field it describes"
+    );
+
+    // ---- WHAT MERGING MOVES, AND WHAT IT CANNOT MOVE ----------------------
+    //
+    // The plate holds the same total load whatever the arms do above it, and
+    // the area law sizes every root from the load it carries, so `Σ π r_root²`
+    // over the plate-landing arms is an INVARIANT of the landing rule: merging
+    // halves the number of roots and doubles their section. That is a
+    // falsifiable prediction about a quantity nobody tuned, and it is asserted
+    // here against the same fixture run with the rule switched off.
+    let straight = sweep_with(
+        &round_50(),
+        0.05,
+        &SweepPolicy::from_registry()
+            .expect("the registry supplies every number the sweep reads")
+            .with_working_pitch_mm(0.05)
+            .without_shaft_landings(),
+    );
+    println!(
+        "shaft landings ON: {} plate contacts, {:.6} mm2 of plate contact area; OFF: {} and \
+         {:.6} mm2",
+        report.landings.plate,
+        report.plate_contact_area_mm2,
+        straight.report.landings.plate,
+        straight.report.plate_contact_area_mm2,
+    );
+    assert_eq!(
+        straight.report.landings.strut, 0,
+        "the knob must actually put the engine back on the straight descent"
+    );
+    assert!(
+        report.landings.plate < straight.report.landings.plate,
+        "merging must take arms OFF the plate: {} contacts with the rule on against {} with it \
+         off",
+        report.landings.plate,
+        straight.report.landings.plate,
+    );
+    let area_gap = (report.plate_contact_area_mm2 - straight.report.plate_contact_area_mm2).abs();
+    assert!(
+        area_gap <= 1.0e-4 * straight.report.plate_contact_area_mm2.max(1.0),
+        "plate contact AREA moved by {area_gap:.6} mm2 between the two landing rules ({:.6} on, \
+         {:.6} off); the plate holds the same load either way, so the area it holds it over is \
+         not the rule's to change",
+        report.plate_contact_area_mm2,
+        straight.report.plate_contact_area_mm2,
     );
 
     // ---- spacing -----------------------------------------------------------

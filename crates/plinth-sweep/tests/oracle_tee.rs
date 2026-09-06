@@ -193,15 +193,98 @@ fn the_slab_load_walks_inward_to_the_legs_and_conserves_through_them() {
         report.model_section_overload.len()
     );
 
-    // ---- every arm reaches the plate ---------------------------------------
+    // ---- WHERE THE SLAB'S ARMS MAY LAND ------------------------------------
+    //
+    // # Re-cut 2026-09-06, as a stronger claim than the one it replaces
+    //
+    // This read "every arm lands on the plate; nothing on this fixture is
+    // above anything else", and it went red the moment a descent could land
+    // part-way down a neighbour's shaft: 98 of the slab's arms now merge into
+    // trunks. Nothing about the fixture changed — what was false was the
+    // inference from "no MODEL is above anything else" to "no ARM is either".
+    //
+    // The claim that survives, and it is the sharper one, is that the slab's
+    // flat underside offers a lean NOTHING BUT ANOTHER ARM to land on. A model
+    // landing under this slab would be a landing on a surface that is not
+    // there, and a lean that reported a plate landing would be a lean that
+    // went nowhere. Both are asserted arm by arm, and the census is required
+    // to partition.
+    let mut leaned = 0_usize;
     for strut in &plan.struts {
         assert!(
-            matches!(strut.landing, Landing::Plate),
-            "arm {} landed on {:?}; nothing on this fixture is above anything else",
+            !matches!(strut.landing, Landing::Model { .. }),
+            "arm {} landed on MODEL at {:?}; there is nothing under this slab but its four legs, \
+             the air between them and the plate",
             strut.id,
             strut.landing
         );
+        assert!(
+            strut.is_leaned() == matches!(strut.landing, Landing::Strut { .. }),
+            "arm {} leaned {} and landed on {:?}; leaving your own column and reaching another \
+             arm's shaft are the same event on a flat underside",
+            strut.id,
+            strut.is_leaned(),
+            strut.landing
+        );
+        if strut.is_leaned() {
+            leaned += 1;
+        }
     }
+    assert!(
+        leaned > 0,
+        "no arm under the slab leaned, so the claims above were graded on nothing and the \
+         invariance below is vacuous"
+    );
+    assert_eq!(
+        report.landings.plate + report.landings.model + report.landings.strut,
+        report.struts_total,
+        "every arm must land on the plate, the model or another arm"
+    );
+
+    // ---- WHAT MERGING MOVES, AND WHAT IT CANNOT MOVE -----------------------
+    //
+    // The four legs and the plate together hold the slab's peel whatever the
+    // arms above them do, and the area law sizes every root from the load it
+    // carries. So `Σ π r_root²` over the plate-landing arms is an invariant of
+    // the LANDING RULE — merging halves the number of roots and doubles their
+    // section — and that is asserted here against the same fixture run with
+    // the rule switched off. It is a prediction about a quantity nobody tuned.
+    let straight = harness::sweep_with(
+        &make_overhang_table().unwrap(),
+        0.05,
+        &plinth_sweep::SweepPolicy::from_registry()
+            .expect("the registry supplies every number the sweep reads")
+            .with_working_pitch_mm(0.05)
+            .without_shaft_landings(),
+    );
+    println!(
+        "shaft landings ON: {} plate contacts, {:.6} mm2 of plate contact area; OFF: {} and \
+         {:.6} mm2",
+        report.landings.plate,
+        report.plate_contact_area_mm2,
+        straight.report.landings.plate,
+        straight.report.plate_contact_area_mm2,
+    );
+    assert_eq!(
+        straight.report.landings.strut, 0,
+        "the knob must actually put the engine back on the straight descent"
+    );
+    assert!(
+        report.landings.plate < straight.report.landings.plate,
+        "merging must take arms OFF the plate: {} contacts with the rule on against {} with it \
+         off",
+        report.landings.plate,
+        straight.report.landings.plate,
+    );
+    let area_gap = (report.plate_contact_area_mm2 - straight.report.plate_contact_area_mm2).abs();
+    assert!(
+        area_gap <= 1.0e-4 * straight.report.plate_contact_area_mm2.max(1.0),
+        "plate contact AREA moved by {area_gap:.6} mm2 between the two landing rules ({:.6} on, \
+         {:.6} off); the plate holds the same load either way, so the area it holds it over is \
+         not the rule's to change",
+        report.plate_contact_area_mm2,
+        straight.report.plate_contact_area_mm2,
+    );
 }
 
 #[test]

@@ -83,9 +83,74 @@ fn the_cavity_ceiling_is_carried_from_inside_and_the_plate_sees_a_maximum() {
         model_landings > 0,
         "the cavity ceiling got no arm landing on model; it can only be reached from inside"
     );
+    // ---- `interior` is a fact about the LANDING, DERIVED HERE --------------
+    //
+    // # Re-cut 2026-09-06, as a stronger claim than the count it replaces
+    //
+    // This assertion used to read `interior_arms == model_landings` and it went
+    // red at 37 of 49 when the descent learned to land part-way down another
+    // arm's shaft. Two production defects were behind that, both fixed, and
+    // both are graded below rather than accommodated:
+    //
+    // 1. `interior` was evaluated at the arm's SEAT column and seat layer.
+    //    Every arm under every overhang has model above its seat — that is
+    //    what makes a face down-facing — so the seat form answered "interior"
+    //    for exterior scars, and for a leaned arm it answered about a column
+    //    the arm's base is not even in. It is now asked at the LANDING, which
+    //    is where a scar is actually worn.
+    // 2. It was computed before `unmerge_overgrown`, which MOVES ARMS OFF
+    //    TRUNKS and therefore changes landings. The 12 arms that read false
+    //    were exactly the un-merged ones, flagged from a landing they no
+    //    longer had.
+    //
+    // The expected count is derived from the fixture's own solid, arm by arm,
+    // and never pasted: this box is CLOSED, so every point strictly inside its
+    // outer footprint and below its top face has cured material standing over
+    // it, and every landing therefore wears a scar nobody will see. An arm
+    // landing on a shelf with open sky above it would be counted false by the
+    // same derivation, which is what makes this a test of the rule rather than
+    // of this box.
+    let height = harness::layer_height_mm();
+    let (min_z, _) = harness::z_span(&make_cavity_box(OUTER_MM, WALL_MM).unwrap());
+    let plate_z = min_z - harness::LIFT_MM;
+    let half_outer = OUTER_MM / 2.0;
+    let mut expected_interior = 0_usize;
+    for strut in &plan.struts {
+        let Landing::Model { layer } = strut.landing else {
+            continue;
+        };
+        let base = strut.base_cell();
+        let x = plan.grid.center_x_mm(plan.grid.col_of(base));
+        let y = plan.grid.center_y_mm(plan.grid.row_of(base));
+        let z = plate_z + (layer as f64 + 0.5) * height;
+        // Material stands over this landing iff it is under the box's own top
+        // face and inside the box's footprint.
+        let covered = x.abs() < half_outer && y.abs() < half_outer && z < min_z + OUTER_MM;
+        if covered {
+            expected_interior += 1;
+        }
+    }
     assert_eq!(
-        interior_arms, model_landings,
-        "every model landing under a closed ceiling is an interior one, whose scar nobody sees"
+        expected_interior, model_landings,
+        "the fixture's own geometry says every model landing in a closed box is covered; if this \
+         fails the derivation below is grading the wrong thing"
+    );
+    assert_eq!(
+        interior_arms, expected_interior,
+        "`interior` must agree, arm by arm, with the fixture's own answer about what stands over \
+         each LANDING"
+    );
+    assert_eq!(
+        report.landings.interior, expected_interior,
+        "the published census must agree with the field it describes"
+    );
+    // Anti-vacuity for defect (2): the un-merge loop must actually have fired
+    // on this fixture, or the "recomputed after un-merging" half of the fix is
+    // being graded on nothing.
+    assert!(
+        report.merges_refused_by_radius > 0,
+        "no merge was undone on the cavity box, so the interior census was never re-asked after \
+         a landing moved; this fixture no longer exercises the 2026-09-06 fix"
     );
     assert_eq!(report.landings.interior, interior_arms);
     // The cavity is 34 mm tall, so an interior arm is long. The design records
@@ -96,16 +161,49 @@ fn the_cavity_ceiling_is_carried_from_inside_and_the_plate_sees_a_maximum() {
         "a 34 mm interior arm must show up in the slenderness histogram"
     );
 
-    // ---- counts ------------------------------------------------------------
+    // ---- counts, over the TREE and not over the roots alone ----------------
+    //
+    // # Re-cut 2026-09-06
+    //
+    // This band used to be graded on `model_landings` alone, which was the
+    // whole cavity field while every arm ran straight down. Once an arm may
+    // land part-way down a neighbour's shaft the cavity field is a TREE: 49 of
+    // its members reach the cavity floor themselves and the rest reach it
+    // through one of those 49. Counting only the roots would report the field
+    // shrinking by two thirds when nothing left the cavity, so the count
+    // resolves each arm to the landing its load ultimately arrives at.
+    let root_is_model = |mut index: usize| -> bool {
+        // The landing graph is a forest (a merge is always onto an arm that is
+        // already placed), so the walk terminates; the bound is belt and
+        // braces against a future cycle rather than a live risk.
+        for _ in 0..plan.struts.len() {
+            match plan.struts[index].landing {
+                Landing::Model { .. } => return true,
+                Landing::Plate => return false,
+                Landing::Strut { id, .. } => index = id as usize,
+            }
+        }
+        false
+    };
+    let cavity_field = (0..plan.struts.len()).filter(|index| root_is_model(*index)).count();
+    println!(
+        "cavity field {cavity_field} arms over {model_landings} floor landings ({} of them \
+         merged onto another member)",
+        cavity_field - model_landings
+    );
+    assert!(
+        cavity_field >= model_landings,
+        "every floor landing is its own tree's root, so the tree cannot be smaller than the roots"
+    );
     within_band(
-        model_landings as f64,
+        cavity_field as f64,
         cavity_hex * bands::STRUT_COUNT.0,
         cavity_hex * 3.0,
         "cavity-ceiling arms against the hex covering of the INTERIOR demand",
     );
     assert!(
-        (model_landings as f64) < naive_floor_only * 3.0,
-        "the cavity field ignored the wall-rooted fringe: {model_landings} arms against a \
+        (cavity_field as f64) < naive_floor_only * 3.0,
+        "the cavity field ignored the wall-rooted fringe: {cavity_field} arms against a \
          floor-only baseline of {naive_floor_only}"
     );
 

@@ -241,13 +241,25 @@ fn withholding_the_tip_scar_on_a_disc_carries_none_not_zero() {
 /// the ones a production sweep priced (where both halves are present) and
 /// the ones only the prefilter reached (where both are absent, and the
 /// identity is the two-half one).
+/// # Re-cut 2026-09-06: a relative tolerance, and a guard that earns it
+///
+/// The old form asserted BIT equality and went red at 66.79549650485664
+/// against 66.79549650485666 — two ULP on a number of order 67, i.e. one part
+/// in 3e15. Nothing was added to `scar_raw`: the shaft-landing work changed
+/// which candidate poses reach the commit tier, and four `f64` sums added in a
+/// different ASSOCIATION do not agree to the last bit. Floating-point addition
+/// is not associative, so bit equality was never the property being claimed —
+/// it was a coincidence of the old association, and a coincidence is not a
+/// test.
+///
+/// The tolerance is therefore 1e-9 RELATIVE, the same the area guarantee
+/// already carries. What stops the tolerance hiding a fifth, unnamed
+/// contribution — the defect this test exists to catch — is the drill added
+/// beside it: every named half is dropped in turn and the identity must break
+/// by MORE than the tolerance every time a non-zero half is dropped. A missing
+/// term is a term-sized error, twelve orders of magnitude above 1e-9 relative,
+/// so the loosened comparison can still only ever pass on a complete sum.
 #[test]
-#[expect(
-    clippy::float_cmp,
-    reason = "the claim under test IS bit equality: scar_raw is the sum of its four named halves \
-              and of nothing else. A tolerance would let a fifth, unnamed contribution hide inside \
-              it, which is the defect this test exists to catch"
-)]
 fn the_scar_raw_is_exactly_its_four_named_halves() {
     let mesh = plinth_mesh::make_raking_blade().expect("the raking blade fixture");
     let request = SweepRequest::registered().expect("the registered sweep configuration");
@@ -256,24 +268,57 @@ fn the_scar_raw_is_exactly_its_four_named_halves() {
     let commit = outcome.record().tiers.last().expect("a commit tier").clone();
 
     let mut with_tip = 0_usize;
+    let mut drills = 0_usize;
     for entry in &commit.ranking {
         let landing = entry.terms.landing_scar_raw_mm2.map_or(0.0, plinth_core::Finite::get);
         let tip = entry.terms.tip_scar_raw_mm2.map_or(0.0, plinth_core::Finite::get);
         if entry.terms.tip_scar_raw_mm2.is_some() {
             with_tip += 1;
         }
-        let halves = entry.terms.fragility_raw_mm2.get() + entry.terms.display_raw_mm2.get();
-        assert_eq!(
-            entry.terms.scar_raw_mm2.get(),
-            halves + landing + tip,
-            "candidate {}'s scar_raw is not its four named halves",
-            entry.candidate
+        let fragility = entry.terms.fragility_raw_mm2.get();
+        let display = entry.terms.display_raw_mm2.get();
+        let whole = entry.terms.scar_raw_mm2.get();
+        let sum = fragility + display + landing + tip;
+        let tolerance = 1.0e-9 * whole.abs().max(1.0);
+        assert!(
+            (whole - sum).abs() <= tolerance,
+            "candidate {}'s scar_raw {whole} is not its four named halves {sum} (fragility \
+             {fragility}, display {display}, landing {landing}, tip {tip}); the gap is {} \
+             against a tolerance of {tolerance}",
+            entry.candidate,
+            (whole - sum).abs()
         );
+        // THE DRILL THAT PAYS FOR THE TOLERANCE. Withhold each named half in
+        // turn: every one that is not itself zero must move the identity far
+        // outside the band, so a term going missing can never be mistaken for
+        // the association noise the band exists to absorb.
+        for (name, without) in [
+            ("fragility", sum - fragility),
+            ("display", sum - display),
+            ("landing", sum - landing),
+            ("tip", sum - tip),
+        ] {
+            if (sum - without).abs() <= tolerance {
+                continue;
+            }
+            drills += 1;
+            assert!(
+                (whole - without).abs() > tolerance,
+                "candidate {}: dropping the {name} half left the identity inside the \
+                 1e-9 band, so the band could hide a missing term",
+                entry.candidate
+            );
+        }
     }
     assert!(
         with_tip > 0,
         "no candidate carried a tip half, so the identity was only ever checked with a zero"
     );
+    assert!(
+        drills > 0,
+        "no non-zero half was ever withheld, so the tolerance was never shown to be safe"
+    );
+    println!("checked {} candidates, {drills} withholding drills", commit.ranking.len());
 }
 
 /// (d) The sabotage: withhold the term and the committed numbers move.

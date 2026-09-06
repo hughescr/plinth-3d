@@ -52,12 +52,44 @@ fn bore_radius_mm() -> f64 {
         .get()
 }
 
+/// **The bore this fixture has to be adversarial against, derived from the
+/// registered pitch — rebuilt 2026-09-06.**
+///
+/// The two sabotage tests below assert that WITHOUT the keep-out the plain hex
+/// field walls the mouth in. At the registered bore of 1.250 mm that premise
+/// stopped being true when the descent learned to land part-way down a
+/// neighbour's shaft: pulling arms off the plate and into trunks opens lanes
+/// through the field by itself, and the plain field measured a best clearance
+/// of 1.5811 mm against the 1.5000 mm that bore requires. A premise that is
+/// false makes the tests below prove nothing, so the fixture is rebuilt rather
+/// than the assertion loosened.
+///
+/// The bore is not picked to fail; it is DERIVED so that no hex field at the
+/// registered pitch can pass it, whatever the landing rule does:
+///
+/// * the lattice is pitched at `√3 · ρ` (`docs/physics.md`:128-135), so the
+///   widest free half-gap between two neighbouring arms is `√3·ρ/2` less the
+///   arms' own radius;
+/// * every arm carries at least the registered minimum tip radius, so that
+///   half-gap is at most `√3·ρ/2 − r_min` for ANY field this engine places;
+/// * the escape check calls a passage wide enough when its free radius reaches
+///   `r_bore + ½·voxel pitch` (`plinth_hollow::flow`).
+///
+/// Taking `r_bore = √3·ρ/2 − r_min` therefore requires MORE clearance than the
+/// lattice can ever leave, by exactly half a voxel plus whatever section the
+/// arms carry above the minimum. The keep-out, which clears a cylinder around
+/// the bore itself, is unaffected by the choice — which is the whole point.
+fn adversarial_bore_radius_mm() -> f64 {
+    let policy = SweepPolicy::from_registry().expect("registry");
+    let lattice_pitch_mm = 3.0_f64.sqrt() * harness::lamina_reach_mm();
+    lattice_pitch_mm / 2.0 - policy.tip_radius_min_mm
+}
+
 /// A drain through the middle of the flat underside, pointing straight down —
 /// the Sphere's own case, with the sphere's curvature taken out so the fixture
 /// tests the support field and nothing else.
 fn downward_drain() -> DrainSpec {
-    let radius = bore_radius_mm();
-    DrainSpec::from_bore([0.0, 0.0, 14.0], [0.0, 0.0, 12.0], radius)
+    DrainSpec::from_bore([0.0, 0.0, 14.0], [0.0, 0.0, 12.0], adversarial_bore_radius_mm())
 }
 
 #[test]
@@ -118,6 +150,38 @@ fn deleting_the_keep_out_walls_the_outlet_in() {
          fixture is not adversarial and the test below proves nothing: {:?}",
         escape.verdicts[0]
     );
+
+    // ---- AND A NEW POSITIVE CLAIM, MEASURED HERE 2026-09-06 ---------------
+    //
+    // The premise above had to be rebuilt because MERGING opens the field by
+    // itself: an arm that lands on a neighbour's shaft is an arm that no
+    // longer stands between the mouth and the outside. That is a real effect
+    // and worth a claim of its own rather than only a reason to re-derive the
+    // bore, so the same plain field is run with the landing rule switched off
+    // and the two clearances compared. It is the only place in this suite that
+    // grades the landing rule as a DRAINAGE mechanism.
+    let straight = harness::sweep_with_drains(
+        &flat_underside_slab(),
+        &sabotaged.without_shaft_landings(),
+        &[drain],
+    );
+    let open = escape.verdicts[0].best_clearance_mm;
+    let closed = straight.report.escape.verdicts[0].best_clearance_mm;
+    println!(
+        "plain field, no keep-out: best clearance {open:.4} mm with shaft landings, {closed:.4} \
+         mm without ({} arms against {})",
+        plan.struts.len(),
+        straight.struts.len(),
+    );
+    assert_eq!(
+        straight.report.landings.strut, 0,
+        "the knob must actually put the engine back on the straight descent"
+    );
+    assert!(
+        open > closed,
+        "pulling arms off the plate and into trunks must widen the way out, not narrow it: \
+         {open} mm with shaft landings against {closed} mm without"
+    );
 }
 
 /// The keep-out's own claim, and ONLY its own claim: the mouth is clear.
@@ -153,8 +217,17 @@ fn the_keep_out_clears_the_mouth_and_the_rest_is_reported() {
     );
     let with = kept.report.escape.verdicts[0];
     let without = sabotaged.report.escape.verdicts[0];
+    // THE PREMISE, stated as the verdict itself rather than as a proxy for it
+    // (2026-09-06). This used to compare `best_clearance` against
+    // `required_clearance`, which is the widest free radius ANY probe around
+    // the outlet reads — including probes that lead nowhere. With the derived
+    // bore the plain field leaves a 2.0616 mm pocket at the mouth that does
+    // not reach the outside at all: walled in, with a clearance number above
+    // the requirement. `connected` is the quantity the owner cares about and
+    // the one the keep-out exists to change, so it is what the premise is
+    // asserted on.
     assert!(
-        without.best_clearance_mm < without.required_clearance_mm,
+        !without.connected,
         "without the keep-out the mouth must be walled in, or this fixture proves nothing: \
          {without:?}"
     );

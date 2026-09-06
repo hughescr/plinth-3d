@@ -381,6 +381,12 @@ pub struct SweepPolicy {
     /// the keep-out and show that the drain then reads ENCLOSED -- a test that
     /// asserts the check FIRES rather than that it is merely present.
     pub drain_keep_out: bool,
+    /// Whether the removal check must prove that EVERY layer of an arm's
+    /// carried span stays covered before it deletes the arm, rather than its
+    /// seat layer alone. **On in production.** The knob exists so the drill
+    /// can put the seat-only rule back and watch the same arm be deleted with
+    /// a gap opening under it (`refuse_uncovered_spans`).
+    pub removal_span_check: bool,
     pub limits: SweepLimits,
 }
 
@@ -429,6 +435,7 @@ impl SweepPolicy {
             lean: true,
             shaft_landings: true,
             drain_keep_out: true,
+            removal_span_check: true,
             limits: SweepLimits {
                 cell_layer_budget: placeholders.sweep_cell_layer_budget().diagnostic().get(),
                 ..SweepLimits::production()
@@ -483,6 +490,16 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_shaft_landings(mut self) -> Self {
         self.shaft_landings = false;
+        self
+    }
+
+    /// Decide removability from the arm's SEAT layer alone -- the rule this
+    /// engine had until 2026-09-06, and the one that let five Morel-base arms
+    /// go with 23.22 mm2 of load left uncarried under them. **Sabotage
+    /// only**; nothing in the pipeline sets it.
+    #[must_use]
+    pub const fn with_seat_only_removal(mut self) -> Self {
+        self.removal_span_check = false;
         self
     }
 }
@@ -637,11 +654,7 @@ pub fn run_sweep_with_drains(
 
     // The interior test looks UP, so it can only be answered once the upward
     // pass knows how high each column's model reaches.
-    for strut in &mut struts {
-        strut.interior = matches!(strut.landing, Landing::Model { .. })
-            && usize::try_from(history.column_max_model[strut.cell]).unwrap_or(0)
-                > strut.k_top + 1;
-    }
+    set_interior(&mut struts, &history);
 
     // -------------------------------------------------------------- downward
     let sizing = down_sweep::SizingPolicy {
@@ -682,22 +695,45 @@ pub fn run_sweep_with_drains(
     };
     let mut outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
     let mut removals = 0_u64;
+    let mut removals_refused_by_span = 0_u64;
+    let mut removal_passes_rolled_back = 0_u64;
     for _ in 0..policy.strut_removal_passes {
-        let removed = remove_under_loaded(&grid, &mut struts, minimum_load, lamina_reach_mm);
+        // THE PASS IS UNDONE AS A WHOLE IF IT MAKES THE FIELD WORSE. The
+        // span test below is a coverage argument over arms alone; the
+        // down-sweep is the only thing that actually knows what the load did.
+        // Keeping the previous field beside the new one costs one clone per
+        // pass and turns "never if its removal raises `uncarried_load`" from
+        // an intention into a property the run can be graded on.
+        let before_struts = struts.clone();
+        let before_outcome = outcome.clone();
+        let removed = remove_under_loaded(
+            &grid,
+            &mut struts,
+            minimum_load,
+            lamina_reach_mm,
+            layers,
+            policy.removal_span_check,
+            &mut removals_refused_by_span,
+        );
         if removed == 0 {
             break;
         }
-        removals += removed as u64;
         outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
+        let worse = outcome.uncarried_load_mm2
+            > before_outcome.uncarried_load_mm2
+                + 1.0e-9 * before_outcome.uncarried_load_mm2.abs().max(1.0);
+        if worse {
+            struts = before_struts;
+            outcome = before_outcome;
+            removal_passes_rolled_back += 1;
+            break;
+        }
+        removals += removed as u64;
     }
     // The interior test again, now that the down-sweep has added arms of its
     // own. Same test, same column history; running it twice is cheaper than
     // giving the down-sweep a reason to know about the up-sweep's history.
-    for strut in &mut struts {
-        strut.interior = matches!(strut.landing, Landing::Model { .. })
-            && usize::try_from(history.column_max_model[strut.cell]).unwrap_or(0)
-                > strut.k_top + 1;
-    }
+    set_interior(&mut struts, &history);
 
     // --- merges the trunk cannot carry are undone -------------------------
     //
@@ -720,6 +756,16 @@ pub fn run_sweep_with_drains(
         merges_refused_by_radius += undone;
         outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
     }
+
+    // AND ONCE MORE, ON THE FINISHED FIELD. `unmerge_overgrown` moves an arm
+    // off its trunk and onto whatever the descent recorded as its straight
+    // fallback, so it CHANGES LANDINGS — and until 2026-09-06 the interior
+    // census was never recomputed after it, leaving every un-merged arm
+    // flagged from the landing it no longer has. On the cavity oracle that
+    // was 12 of 49 model landings reading `interior = false` while sitting on
+    // the cavity floor. Merges were rare before shaft landings, so the hole
+    // was there and never bit.
+    set_interior(&mut struts, &history);
 
     // The escape check runs on the FINISHED field, struts and all, because a
     // check that ran before sizing would be answering about a field nobody
@@ -750,6 +796,8 @@ pub fn run_sweep_with_drains(
         rasteriser_entries,
         lift_assertions,
         removals,
+        removals_refused_by_span,
+        removal_passes_rolled_back,
     );
     report.drain_keep_out_cells = keep_out.blocked_cells();
     report.drain_keep_out_refusals = keep_out.refusals();
@@ -905,6 +953,29 @@ fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> usize
     overgrown.len()
 }
 
+/// Flag the arms whose scar nobody will ever see.
+///
+/// **The question is asked at the LANDING, not at the seat**, and that is a
+/// correction of 2026-09-06 rather than a rephrasing. A scar is worn where an
+/// arm's base touches the model, so "is it hidden?" is "does model stand above
+/// the point where this arm stopped?" — `column_max_model` at the arm's own
+/// LANDING column, against the layer it landed on. The seat form this replaces
+/// asked whether model stood above the arm's SEAT, which is true of every arm
+/// under every overhang by construction (that is what makes a face
+/// down-facing), so it answered "interior" for exterior scars and, once the
+/// descent could lean, answered about a column the arm's base is not even in.
+fn set_interior(struts: &mut [SweepStrut], history: &up_sweep::ColumnHistory) {
+    for strut in struts.iter_mut() {
+        strut.interior = match strut.landing {
+            Landing::Model { layer } => {
+                usize::try_from(history.column_max_model[strut.base_cell()]).unwrap_or(0)
+                    > layer + 1
+            }
+            Landing::Plate | Landing::Strut { .. } => false,
+        };
+    }
+}
+
 /// Drop arms carrying less than the smallest printable tip can justify, and
 /// hand their load to their neighbours.
 ///
@@ -935,6 +1006,9 @@ fn remove_under_loaded(
     struts: &mut Vec<SweepStrut>,
     minimum_load_mm2: f64,
     reach_mm: f64,
+    layers: usize,
+    span_check: bool,
+    refused_by_span: &mut u64,
 ) -> usize {
     let candidates: Vec<usize> = struts
         .iter()
@@ -978,6 +1052,9 @@ fn remove_under_loaded(
             doomed[candidate] = true;
         }
     }
+    if span_check {
+        *refused_by_span += refuse_uncovered_spans(grid, struts, &mut doomed, reach_mm, layers);
+    }
     let removed = doomed.iter().filter(|flag| **flag).count();
     if removed == 0 {
         return 0;
@@ -1016,6 +1093,101 @@ fn remove_under_loaded(
     }
     *struts = kept;
     removed
+}
+
+/// Un-doom every candidate whose removal would leave a layer of its own
+/// CARRIED SPAN with no carrier in reach, and say how many it saved.
+///
+/// # The defect this closes
+///
+/// `remove_under_loaded` decided removability from the arm's SEAT layer alone:
+/// "are this arm's demand cells still within reach of another arm seated at
+/// the same layer?". An arm is a carrier on EVERY layer it passes through, not
+/// only the one it seats on, and the down-sweep routes load into it at each of
+/// them. Once the descent could lean, load re-split, five more Morel-base arms
+/// fell under the minimum-load line, and deleting them opened a gap on layers
+/// BELOW their seats that the seat test cannot see: `uncarried_load` went
+/// 0.00 → 23.22 mm² with the seat test reporting every removal as safe.
+///
+/// # What is asked instead
+///
+/// For every layer of a candidate's span, some SURVIVING arm must stand within
+/// one lamina's reach of the candidate's own axis at that layer, in the same
+/// 8-neighbour chamfer metric the down-sweep routes in
+/// (`down_sweep::route_within_cover`). If any layer has none, the candidate is
+/// kept.
+///
+/// # Batch-first, and why the interaction between candidates is not a hole
+///
+/// The survivor occupancy is built ONCE per removal pass, over the set that
+/// would remain if EVERY tentatively doomed arm went at once, and all
+/// candidates are tested against that one index. So the joint counterfactual
+/// — "removing A and B together uncovers what removing either alone would
+/// not" — is the case actually evaluated, not a per-arm one that misses it.
+/// Un-dooming afterwards only ADDS carriers back, so every coverage claim
+/// proved against the smaller survivor set still holds against the larger one:
+/// the pass is conservative in the safe direction (it can keep an arm that
+/// would in fact have been fine) and can never delete one it proved necessary.
+/// No re-pass is needed for soundness, and the caller's registered pass count
+/// still bounds the loop.
+///
+/// # What it deliberately does NOT count as a carrier
+///
+/// Model material. A candidate running down beside a wall may well have its
+/// load taken by that wall, and this test will keep it anyway. That is the
+/// over-support direction, it costs at most a hairline arm, and the alternative
+/// is re-rasterising the whole slice stack once per removal pass to answer a
+/// question that the down-sweep's own `uncarried_load` guard (in `run_sweep`)
+/// already answers exactly.
+fn refuse_uncovered_spans(
+    grid: &Grid,
+    struts: &[SweepStrut],
+    doomed: &mut [bool],
+    reach_mm: f64,
+    layers: usize,
+) -> u64 {
+    if layers == 0 || !doomed.iter().any(|flag| *flag) {
+        return 0;
+    }
+    // One index for the whole pass: the cells every SURVIVING arm occupies, by
+    // layer. Built from the set that would remain if every doomed arm went.
+    let mut survivors_by_layer: Vec<Vec<u32>> = vec![Vec::new(); layers];
+    for (index, strut) in struts.iter().enumerate() {
+        if doomed[index] || strut.k_bottom == usize::MAX {
+            continue;
+        }
+        let top = strut.k_top.min(layers - 1);
+        for (layer, here) in survivors_by_layer
+            .iter_mut()
+            .enumerate()
+            .take(top + 1)
+            .skip(strut.k_bottom)
+        {
+            here.push(u32::try_from(strut.cell_at(layer)).unwrap_or(u32::MAX));
+        }
+    }
+    let mut refused = 0_u64;
+    for index in 0..struts.len() {
+        if !doomed[index] {
+            continue;
+        }
+        let strut = &struts[index];
+        if strut.k_bottom == usize::MAX {
+            continue;
+        }
+        let top = strut.k_top.min(layers - 1);
+        let covered_everywhere = (strut.k_bottom..=top).all(|layer| {
+            let here = strut.cell_at(layer);
+            survivors_by_layer[layer]
+                .iter()
+                .any(|cell| chamfer_distance_mm(grid, here, *cell as usize) <= reach_mm)
+        });
+        if !covered_everywhere {
+            doomed[index] = false;
+            refused += 1;
+        }
+    }
+    refused
 }
 
 /// Distance in the SAME 8-neighbour chamfer metric the reach potential and the
@@ -1106,6 +1278,8 @@ fn build_report(
     rasteriser_entries: u64,
     lift_assertions: u64,
     removals: u64,
+    removals_refused_by_span: u64,
+    removal_passes_rolled_back: u64,
 ) -> SweepRunReport {
     let mut landings = report::LandingCounts::default();
     let mut radii: Vec<f64> = Vec::with_capacity(struts.len());
@@ -1267,6 +1441,8 @@ fn build_report(
             kappa_audit_gate_reads: 1,
             lift_assertions,
             strut_removals: removals,
+            strut_removals_refused_by_span: removals_refused_by_span,
+            removal_passes_rolled_back,
             lean_candidates_priced: 0,
         },
     }
@@ -1473,7 +1649,9 @@ mod removal_tests {
             straight_fallback: None,
         }];
 
-        let removed = remove_under_loaded(&grid, &mut struts, minimum_load_mm2, 5.0);
+        let mut refused = 0_u64;
+        let removed =
+            remove_under_loaded(&grid, &mut struts, minimum_load_mm2, 5.0, 6, true, &mut refused);
 
         assert_eq!(
             removed, 0,
@@ -1487,35 +1665,104 @@ mod removal_tests {
         assert!(struts[0].inserted_by_load);
     }
 
-    /// The counterpart: a REACH-placed arm (`inserted_by_load: false`) below
-    /// the threshold, with no demand cells to protect it, is still removed —
-    /// the fix must not blanket-protect every low-load arm, only the
-    /// load-placed ones.
-    #[test]
-    fn a_reach_placed_arm_with_no_demand_to_protect_it_is_still_removed() {
-        let (grid, _) = plan_grid(0.0, 0.0, 10.0, 10.0, 1, 1.0, 1.0, 1_000_000);
-        let minimum_load_mm2 = 1.0;
-        let mut struts = vec![SweepStrut {
-            id: 0,
-            cell: 0,
+    /// One under-loaded arm at `cell 0`, and one healthy neighbour whose span
+    /// the caller chooses. `neighbour_bottom == 0` puts a carrier beside the
+    /// candidate on every layer it occupies; anything higher leaves the bottom
+    /// of the candidate's span with nothing in reach.
+    fn removal_pair(neighbour_bottom: usize) -> Vec<SweepStrut> {
+        let bare = |id: u32, cell: usize, k_bottom: usize, carried: f64| SweepStrut {
+            id,
+            cell,
             center_mm: [0.0, 0.0],
             k_top: 5,
-            k_bottom: 0,
+            k_bottom,
             landing: Landing::Plate,
             interior: false,
             radius_mm: vec![0.1],
-            carried_mm2: vec![0.5],
+            carried_mm2: vec![carried],
             covered_demand: Vec::new(),
             inserted_by_load: false,
             path: Vec::new(),
             seat_solid_layers: 0,
             seat_normal: [0.0; 3],
             straight_fallback: None,
-        }];
+        };
+        // The candidate reads below the minimum load; the neighbour reads well
+        // above it, so only one of the two is ever a candidate.
+        vec![bare(0, 0, 0, 0.5), bare(1, 1, neighbour_bottom, 10.0)]
+    }
 
-        let removed = remove_under_loaded(&grid, &mut struts, minimum_load_mm2, 5.0);
+    /// The counterpart: a REACH-placed arm (`inserted_by_load: false`) below
+    /// the threshold, with no demand cells to protect it, is still removed —
+    /// the fix must not blanket-protect every low-load arm, only the
+    /// load-placed ones. Its neighbour stands beside it on every layer of its
+    /// span, so the span test of 2026-09-06 has nothing to object to.
+    #[test]
+    fn a_reach_placed_arm_with_no_demand_to_protect_it_is_still_removed() {
+        let (grid, _) = plan_grid(0.0, 0.0, 10.0, 10.0, 1, 1.0, 1.0, 1_000_000);
+        let minimum_load_mm2 = 1.0;
+        let mut struts = removal_pair(0);
+
+        let mut refused = 0_u64;
+        let removed =
+            remove_under_loaded(&grid, &mut struts, minimum_load_mm2, 5.0, 6, true, &mut refused);
 
         assert_eq!(removed, 1, "a reach-placed arm below the threshold with nothing to protect it should still be removed");
-        assert!(struts.is_empty());
+        assert_eq!(refused, 0, "nothing was left uncovered, so nothing was refused");
+        assert_eq!(struts.len(), 1);
+        assert_eq!(struts[0].cell, 1, "the healthy neighbour is what survives");
+    }
+
+    /// **THE MOREL DRILL, and its sabotage in the same test.**
+    ///
+    /// The same pair, with the neighbour's own base three layers higher. The
+    /// candidate's SEAT layer is still covered — layer 5, one cell away — so
+    /// the seat-only rule of 2026-09-04 deletes it and leaves layers 0, 1 and
+    /// 2 of its carried span with no carrier within reach. That is the shape
+    /// of the Morel-base regression: `uncarried_load` 0.00 → 23.22 mm² with
+    /// every removal reported safe.
+    ///
+    /// With the span test the arm is KEPT and counted in
+    /// `strut_removals_refused_by_span`; with `span_check` off — the sabotage,
+    /// which is the production knob `SweepPolicy::with_seat_only_removal`
+    /// reads — the same arm on the same fixture is deleted. A fix that merely
+    /// protected everything would fail the previous test; one that changed
+    /// nothing fails this one.
+    #[test]
+    fn an_arm_whose_span_loses_its_carrier_below_the_seat_is_kept_and_the_seat_only_rule_drops_it()
+    {
+        let (grid, _) = plan_grid(0.0, 0.0, 10.0, 10.0, 1, 1.0, 1.0, 1_000_000);
+        let minimum_load_mm2 = 1.0;
+
+        let mut struts = removal_pair(3);
+        let mut refused = 0_u64;
+        let removed =
+            remove_under_loaded(&grid, &mut struts, minimum_load_mm2, 5.0, 6, true, &mut refused);
+        assert_eq!(
+            removed, 0,
+            "layers 0..2 of this arm's span have no carrier within reach once it goes; it must \
+             be kept"
+        );
+        assert_eq!(refused, 1, "and the keep must be counted, not silent");
+        assert_eq!(struts.len(), 2);
+
+        let mut sabotaged = removal_pair(3);
+        let mut sabotaged_refused = 0_u64;
+        let sabotaged_removed = remove_under_loaded(
+            &grid,
+            &mut sabotaged,
+            minimum_load_mm2,
+            5.0,
+            6,
+            false,
+            &mut sabotaged_refused,
+        );
+        assert_eq!(
+            sabotaged_removed, 1,
+            "the seat-only rule must still delete it, or this drill is not exercising the \
+             difference the fix makes"
+        );
+        assert_eq!(sabotaged_refused, 0);
+        assert_eq!(sabotaged.len(), 1);
     }
 }

@@ -273,6 +273,14 @@ pub struct PathHits {
     pub kappa_audit_gate_reads: u64,
     pub lift_assertions: u64,
     pub strut_removals: u64,
+    /// Arms the seat-only rule would have deleted and the span test kept,
+    /// because a layer of their carried span would have been left with no
+    /// carrier in reach. The witness that the check BITES in production.
+    pub strut_removals_refused_by_span: u64,
+    /// Removal passes undone whole because the down-sweep read MORE uncarried
+    /// load afterwards than before. Non-zero is a warning about the field, not
+    /// an error: the field kept is the one that carried more.
+    pub removal_passes_rolled_back: u64,
     /// Candidate landings the descent's lean search priced. Zero means the
     /// search never ran, which a merge count of zero on its own cannot tell
     /// you.
