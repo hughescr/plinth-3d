@@ -26,10 +26,52 @@ use crate::lean::LeanLaw;
 use crate::reach::ReachState;
 use crate::{Landing, SweepStrut};
 
-/// Column history the descent reads. Every entry names the HIGHEST layer
-/// strictly below the current one at which that column held something, which
-/// is what makes "the column is clear down to the landing" true by
+/// One arm's SHAFT, where it occupies one column: the closed layer interval
+/// `[k_bottom, k_top]` and the arm that owns it.
+///
+/// A straight arm contributes exactly one of these; a leaned arm contributes
+/// one per run of layers it spends in the same column, which is a run-length
+/// encoding of its own path and never one entry per layer.
+///
+/// `next` chains the spans that share a column into an intrusive singly-linked
+/// list whose head is [`ColumnHistory::shaft_head`]; `u32::MAX` ends it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShaftSpan {
+    pub k_bottom: u32,
+    pub k_top: u32,
+    pub id: u32,
+    pub next: u32,
+}
+
+/// Column history the descent reads. Every `top_*` entry names the HIGHEST
+/// layer strictly below the current one at which that column held something,
+/// which is what makes "the column is clear down to the landing" true by
 /// construction rather than by a second scan.
+///
+/// # Why a column also knows the SHAFTS that cross it, and not only their tops
+///
+/// Until 2026-09-05 a column knew one thing about arms: the highest layer any
+/// arm reached in it. A descent could therefore only ever land on an arm's
+/// TOP, and the owner's ruling of that day is that "the base needs to land
+/// ANYWHERE on the support arm". The two are not the same rule, and the
+/// difference is not academic: an arm's top is USELESS to a neighbour seated
+/// ABOVE it but too far away to reach it, because closing a lateral gap `d`
+/// needs at least `d / max_step` layers of descent and the top is only a few
+/// layers down. That neighbour used to give up and run 200 layers to the
+/// plate, alongside a trunk it was touching the whole way. With the interval
+/// known, it lands on that same trunk's SHAFT at whatever layer the angle law
+/// can actually reach, and the two become one tree.
+///
+/// # The shape, and why this one
+///
+/// A per-layer occupancy raster was the alternative. It is `cells x layers`,
+/// and on Round 100 that is 4.3 M cells over 170 layers — 2.9 GB for the ids
+/// alone, before anything is placed. The spans are one entry per (arm, column
+/// run): 878 entries on Round 100, because 878 of its arms are straight and a
+/// straight arm crosses one column. The head vector is the only per-cell cost
+/// and it is one `u32`, the same as `top_strut_id` beside it. Reading is one
+/// `u32` load for the overwhelmingly common empty column, which is what keeps
+/// the descent's cone scan the same cost it was.
 pub struct ColumnHistory {
     /// Layer + 1 of the topmost model cell below; 0 means none.
     pub top_model: Vec<u32>,
@@ -41,6 +83,11 @@ pub struct ColumnHistory {
     /// Highest layer + 1 at which this column ever held model, filled in a
     /// post-pass because the interior test needs to look UP.
     pub column_max_model: Vec<u32>,
+    /// Head of each column's shaft-span chain; `u32::MAX` means no arm crosses
+    /// this column at any layer.
+    pub shaft_head: Vec<u32>,
+    /// Every `(arm, column run)` occupancy interval, in one flat arena.
+    pub shaft_spans: Vec<ShaftSpan>,
 }
 
 impl ColumnHistory {
@@ -53,7 +100,127 @@ impl ColumnHistory {
             top_strut: vec![0; cells],
             top_strut_id: vec![0; cells],
             column_max_model: vec![0; cells],
+            shaft_head: vec![u32::MAX; cells],
+            shaft_spans: Vec::new(),
         }
+    }
+
+    /// Record where one finished arm's shaft stands, column by column.
+    ///
+    /// `path` is the arm's own [`crate::SweepStrut::path`] — empty for a
+    /// straight arm, and otherwise the cell at each layer from `k_bottom`
+    /// upward. The arm's own seat layer `k_top` stands in `seat_cell`, which is
+    /// where `cell_at` puts it too, so the two agree by construction.
+    ///
+    /// Runs of equal cells are folded into ONE span, so a leaned arm costs one
+    /// entry per column it crosses rather than one per layer.
+    pub fn stamp_shaft(&mut self, id: u32, k_bottom: usize, k_top: usize, seat_cell: usize, path: &[u32]) {
+        if k_top < k_bottom {
+            return;
+        }
+        let mut run_cell = usize::MAX;
+        let mut run_from = k_bottom;
+        for layer in k_bottom..=k_top {
+            let here = path
+                .get(layer - k_bottom)
+                .map_or(seat_cell, |cell| *cell as usize);
+            if here == run_cell {
+                continue;
+            }
+            if run_cell != usize::MAX {
+                self.push_span(run_cell, id, run_from, layer - 1);
+            }
+            run_cell = here;
+            run_from = layer;
+        }
+        if run_cell != usize::MAX {
+            self.push_span(run_cell, id, run_from, k_top);
+        }
+    }
+
+    fn push_span(&mut self, cell: usize, id: u32, k_bottom: usize, k_top: usize) {
+        let Some(head) = self.shaft_head.get_mut(cell) else {
+            return;
+        };
+        let next = *head;
+        let slot = u32::try_from(self.shaft_spans.len()).unwrap_or(u32::MAX);
+        if slot == u32::MAX {
+            // The arena is full. EMIT AND WARN: an unrecorded span costs a
+            // later descent a landing it could have had, and never falsifies
+            // one it takes.
+            return;
+        }
+        *head = slot;
+        self.shaft_spans.push(ShaftSpan {
+            k_bottom: u32::try_from(k_bottom).unwrap_or(u32::MAX),
+            k_top: u32::try_from(k_top).unwrap_or(u32::MAX),
+            id,
+            next,
+        });
+    }
+
+    /// The HIGHEST layer at or below `ceiling` at which some arm's shaft stands
+    /// in this column, with the arm that owns it.
+    ///
+    /// This is the whole of the shaft-landing rule. `ceiling` is the highest
+    /// layer the descending arm may land at — its own seat layer minus the
+    /// layers the angle law needs to close the lateral gap — so the answer is
+    /// the cheapest landing on this column, because a descent that crosses more
+    /// layers for the same lateral move always costs more
+    /// ([`crate::lean::LeanLaw::descent_cost_mm`] is increasing in the layer
+    /// count).
+    /// Returns the arm's id, the landing layer, and that span's own top, so the
+    /// caller can say whether the junction is at the parent's top or inside its
+    /// shaft without a second lookup.
+    #[must_use]
+    pub fn shaft_landing(&self, cell: usize, ceiling: usize) -> Option<(u32, usize, usize)> {
+        let mut slot = *self.shaft_head.get(cell)?;
+        let mut best: Option<(u32, usize, usize)> = None;
+        while slot != u32::MAX {
+            let span = self.shaft_spans[slot as usize];
+            slot = span.next;
+            let bottom = span.k_bottom as usize;
+            if bottom > ceiling {
+                continue;
+            }
+            let top = span.k_top as usize;
+            let here = top.min(ceiling);
+            if best.is_none_or(|(_, layer, _)| here > layer) {
+                best = Some((span.id, here, top));
+            }
+        }
+        best
+    }
+
+    /// Whether an arm OTHER than `except` stands in this column at this layer.
+    ///
+    /// The path check asks this rather than "does any arm top out above here",
+    /// which is what `top_strut` answers. The two agree exactly for a straight
+    /// arm rooted at the plate; they differ for an arm that starts mid-air,
+    /// where the top-based test blocks the empty layers BELOW it as well.
+    ///
+    /// `except` is the arm being landed on. A member may pass through the
+    /// member it merges into — that overlap is the junction, not a collision —
+    /// and refusing it would reject every shallow approach to a trunk, since
+    /// the last layers of a shallow lean necessarily lie in the trunk's own
+    /// column.
+    #[must_use]
+    pub fn shaft_blocks(&self, cell: usize, layer: usize, except: Option<u32>) -> bool {
+        let Some(&head) = self.shaft_head.get(cell) else {
+            return false;
+        };
+        let mut slot = head;
+        while slot != u32::MAX {
+            let span = self.shaft_spans[slot as usize];
+            slot = span.next;
+            if Some(span.id) == except {
+                continue;
+            }
+            if (span.k_bottom as usize) <= layer && layer <= span.k_top as usize {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -138,6 +305,11 @@ pub struct LayerOutcome {
     /// through a drain's escape cylinder. The witness that the path check
     /// actually bites; a WARNING quantity, never a refusal.
     pub lean_paths_blocked: usize,
+    /// Merges whose junction is STRICTLY INSIDE the parent's shaft, above its
+    /// base and below its seat. The parent is split in effect: its radius
+    /// profile grows from the junction downward and is untouched above it.
+    /// The path-hit witness that shaft landings fire at all.
+    pub junctions_mid_shaft: usize,
     /// Candidate landings the lean search priced. The path-hit witness that
     /// the search ran at all.
     pub lean_candidates_priced: u64,
@@ -160,6 +332,7 @@ pub fn place_layer(
     cover: &[bool],
     keep_out: &DrainKeepOut,
     law: &LeanLaw,
+    shaft_landings: bool,
     kappa: f64,
     reach: &mut ReachState,
     history: &mut ColumnHistory,
@@ -176,6 +349,7 @@ pub fn place_layer(
         arms_leaned: 0,
         arms_merged: 0,
         lean_paths_blocked: 0,
+        junctions_mid_shaft: 0,
         lean_candidates_priced: 0,
     };
 
@@ -279,6 +453,7 @@ pub fn place_layer(
             history,
             keep_out,
             law,
+            shaft_landings,
             separation_mm,
             cell,
             layer,
@@ -370,6 +545,11 @@ pub fn place_layer(
                 history.top_strut_id[cell] = id;
             }
         }
+        // And the SHAFT, layer interval by layer interval, so a later descent
+        // can land anywhere on it and not only at its top. Nothing is copied:
+        // the arm's own path is read in place.
+        let placed = struts.last().expect("the arm just pushed");
+        history.stamp_shaft(id, k_bottom, layer, cell, &placed.path);
 
         if dirty_lo > dirty_hi {
             continue;
@@ -570,6 +750,9 @@ struct LeanCandidate {
     k_bottom: usize,
     landing: Landing,
     rooted: bool,
+    /// For a merge, whether the junction is at the parent shaft's own top.
+    /// `false` means the junction is inside the shaft.
+    at_parent_top: bool,
 }
 
 /// The descent, with the lean the owner asked for on 2026-09-03.
@@ -599,6 +782,7 @@ fn descend_leaning(
     history: &ColumnHistory,
     keep_out: &DrainKeepOut,
     law: &LeanLaw,
+    shaft_landings: bool,
     search_radius_mm: f64,
     cell: usize,
     layer: usize,
@@ -645,42 +829,97 @@ fn descend_leaning(
             if candidate == cell {
                 continue;
             }
-            let strut_top = history.top_strut[candidate];
-            let model_top = history.top_model[candidate];
-            // Only a landing STRICTLY HIGHER than the straight descent's can be
-            // cheaper: every leaned layer costs at least a vertical one, so
-            // crossing the same number of layers can never win. Two array reads
-            // reject the overwhelming majority of the box here, which is what
-            // makes the scan affordable.
-            let (landing, k_bottom, rooted, class) = if strut_top > 0 && strut_top >= model_top {
-                let landing_layer = strut_top as usize - 1;
-                (
-                    Landing::Strut {
-                        id: history.top_strut_id[candidate],
-                        layer: landing_layer,
-                    },
-                    landing_layer,
-                    true,
-                    0_u8,
-                )
-            } else if model_top > 0 {
-                let landing_layer = model_top as usize - 1;
-                (
-                    Landing::Model {
-                        layer: landing_layer,
-                    },
-                    landing_layer,
-                    history.top_model_rooted[candidate],
-                    1_u8,
-                )
-            } else {
-                (Landing::Plate, 0, true, 2_u8)
+            let lateral_mm = crate::cell_distance_mm(grid, cell, candidate);
+            // THE ANGLE LAW DECIDES HOW FAR DOWN THIS COLUMN THE LANDING MUST
+            // BE, AND THEN THE COLUMN IS ASKED WHAT STANDS THERE. That order is
+            // the whole of the shaft-landing rule. Closing `lateral_mm` needs at
+            // least `lateral_mm / max_step` layers of descent, so no landing
+            // above `layer - drop` is reachable however inviting it looks; and
+            // among the layers that ARE reachable the HIGHEST is the cheapest,
+            // because the descent cost is increasing in the layer count at a
+            // fixed lateral move.
+            let drop = law.layers_to_reach(lateral_mm);
+            let ceiling = match layer.checked_sub(drop) {
+                Some(ceiling) if drop > 0 => ceiling,
+                _ => continue,
             };
-            if k_bottom <= straight_bottom {
+            let model_top = history.top_model[candidate];
+            let reachable_model =
+                (model_top > 0 && model_top as usize - 1 <= ceiling).then(|| model_top as usize - 1);
+            let (shaft, model_layer) = if shaft_landings {
+                (history.shaft_landing(candidate, ceiling), reachable_model)
+            } else {
+                // The knob restores the top-only rule this engine had between
+                // 2026-09-04 and the owner's 2026-09-05 ruling, EXACTLY: a
+                // column offered its single topmost occupant and nothing else,
+                // so an arm's top was invisible whenever model material stood
+                // ANYWHERE higher in the same column — even model far out of
+                // the angle law's reach, and even with the arm's own shaft
+                // squarely within it. That blindness is part of what this lane
+                // removes; reproducing it here is what makes the before/after
+                // comparison a comparison.
+                let strut_top = history.top_strut[candidate];
+                if strut_top > 0 && strut_top >= model_top {
+                    let top = strut_top as usize - 1;
+                    (
+                        (top <= ceiling).then(|| (history.top_strut_id[candidate], top, top)),
+                        None,
+                    )
+                } else {
+                    (None, reachable_model)
+                }
+            };
+            // Two array reads still reject the overwhelming majority of the
+            // box: an empty column has no shaft head and no model top.
+            // An arm wins over model material at the same or a higher layer,
+            // which is the tie the top-only rule broke the same way
+            // (`top_strut >= top_model`).
+            let take_shaft = match (shaft, model_layer) {
+                (Some((_, at, _)), Some(model_at)) => at >= model_at,
+                (Some(_), None) => true,
+                (None, _) => false,
+            };
+            let (landing, k_bottom, rooted, class, at_parent_top) =
+                if let (true, Some((id, at, span_top))) = (take_shaft, shaft) {
+                    (
+                        Landing::Strut { id, layer: at },
+                        at,
+                        true,
+                        0_u8,
+                        at == span_top,
+                    )
+                } else if let Some(at) = model_layer {
+                    (
+                        Landing::Model { layer: at },
+                        at,
+                        history.top_model_rooted[candidate],
+                        1_u8,
+                        false,
+                    )
+                } else {
+                    if history.shaft_head[candidate] != u32::MAX || model_top > 0 {
+                        // Occupied, but not at any layer this descent can
+                        // reach. The plate under it is NOT a candidate: the
+                        // path would have to pass through what stands there.
+                        continue;
+                    }
+                    (Landing::Plate, 0, true, 2_u8, false)
+                };
+            // A sound lower bound on any descent to this landing — every layer
+            // costs at least a vertical one — so a candidate that cannot beat
+            // the straight descent even at that bound is dropped before it is
+            // priced. This replaces the old "must land HIGHER than the straight
+            // descent" test, which stopped being sound the moment a landing
+            // could be chosen part-way down a shaft rather than at its top.
+            let descent_layers = layer.saturating_sub(k_bottom);
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a layer count bounded by the plan's own layer count is exact in f64"
+            )]
+            let bare_mm = descent_layers as f64 * law.layer_height_mm();
+            if bare_mm >= straight_cost {
                 continue;
             }
-            let descent_layers = layer.saturating_sub(k_bottom);
-            let lateral_mm = crate::cell_distance_mm(grid, cell, candidate);
             let Some(length_mm) = law.descent_cost_mm(descent_layers, lateral_mm) else {
                 continue;
             };
@@ -696,6 +935,7 @@ fn descend_leaning(
                 k_bottom,
                 landing,
                 rooted,
+                at_parent_top,
             });
         }
     }
@@ -718,6 +958,9 @@ fn descend_leaning(
             outcome.arms_leaned += 1;
             if candidate.class == 0 {
                 outcome.arms_merged += 1;
+                if !candidate.at_parent_top {
+                    outcome.junctions_mid_shaft += 1;
+                }
             }
             return (candidate.landing, candidate.k_bottom, candidate.rooted, path);
         }
@@ -752,6 +995,15 @@ fn lean_path(
     let seat_col = grid.col_of(seat_cell);
     let base_row = grid.row_of(candidate.cell);
     let base_col = grid.col_of(candidate.cell);
+    // The member this descent merges into, if any. Its own material is not an
+    // obstacle to the member joining it: the last layers of a shallow approach
+    // necessarily lie inside the trunk's own column, and that overlap IS the
+    // junction. Every OTHER arm still blocks, which is what keeps this a check
+    // rather than a formality.
+    let parent = match candidate.landing {
+        Landing::Strut { id, .. } => Some(id),
+        Landing::Plate | Landing::Model { .. } => None,
+    };
     let mut path = Vec::with_capacity(span);
     #[expect(
         clippy::cast_precision_loss,
@@ -792,13 +1044,18 @@ fn lean_path(
             return None;
         }
         if slot > 0 {
-            // Nothing may already stand at this layer or above it in this
-            // column: `top_model` and `top_strut` hold layer + 1 of the topmost
-            // occupant, so `> here` is exactly "occupied at or above here".
+            // No model may already stand at this layer or above it in this
+            // column: `top_model` holds layer + 1 of the topmost model cell, so
+            // `> here` is exactly "cured at or above here".
             if history.top_model[here_cell] as usize > here {
                 return None;
             }
-            if history.top_strut[here_cell] as usize > here {
+            // Arms are asked the sharper question — "is an arm ACTUALLY here,
+            // at this layer" — because a landing part-way down a shaft leaves
+            // the trunk standing far above the path, and the top-based test
+            // would refuse every such approach on the strength of material that
+            // is nowhere near it.
+            if history.shaft_blocks(here_cell, here, parent) {
                 return None;
             }
         }
@@ -898,7 +1155,7 @@ fn score_at(grid: &Grid, prefix: &[u32], half_widths: &[usize], cell: usize) -> 
 
 #[cfg(test)]
 mod descent_tests {
-    use super::{descend_leaning, ColumnHistory, LayerOutcome};
+    use super::{descend_leaning, lean_path, ColumnHistory, LayerOutcome, LeanCandidate};
     use crate::drain::DrainKeepOut;
     use crate::grid::plan_grid;
     use crate::lean::LeanLaw;
@@ -915,8 +1172,25 @@ mod descent_tests {
             arms_leaned: 0,
             arms_merged: 0,
             lean_paths_blocked: 0,
+            junctions_mid_shaft: 0,
             lean_candidates_priced: 0,
         }
+    }
+
+    /// A straight arm standing in one column from `k_bottom` to `k_top`,
+    /// recorded the way `place_layer` records one: its TOP for the old
+    /// top-only rule, and its whole SHAFT for the new one. Writing both is
+    /// what lets one fixture be read by both rules.
+    fn straight_arm(
+        history: &mut ColumnHistory,
+        id: u32,
+        cell: usize,
+        k_bottom: usize,
+        k_top: usize,
+    ) {
+        history.top_strut[cell] = u32::try_from(k_top + 1).expect("a small layer index");
+        history.top_strut_id[cell] = id;
+        history.stamp_shaft(id, k_bottom, k_top, cell, &[]);
     }
 
     /// A grid one working pitch across, the same 0.05 mm the corpus runs at.
@@ -940,8 +1214,7 @@ mod descent_tests {
         // top is 10 layers down, so 0.04 mm of sideways move per layer against
         // the 0.0785 mm the law allows.
         let neighbour = grid.index(20, 28);
-        history.top_strut[neighbour] = 191;
-        history.top_strut_id[neighbour] = 7;
+        straight_arm(&mut history, 7, neighbour, 0, 190);
 
         let mut scratch = Vec::new();
         let mut counts = outcome();
@@ -951,6 +1224,7 @@ mod descent_tests {
             &history,
             &DrainKeepOut::none(),
             &law,
+            true,
             4.0,
             seat,
             200,
@@ -983,6 +1257,7 @@ mod descent_tests {
             &history,
             &DrainKeepOut::none(),
             &LeanLaw::disabled(H),
+            true,
             4.0,
             seat,
             200,
@@ -1003,19 +1278,21 @@ mod descent_tests {
         assert_eq!(sabotaged.arms_leaned, 0);
     }
 
-    /// The same geometry with the neighbour's top too far to one side for the
-    /// available layers. `0.8 mm` over 10 layers is `0.08 mm` per layer against
-    /// the `0.0785 mm` the registered law admits, so the angle refuses it and
-    /// the descent goes straight down. This is what makes the first test a
-    /// statement about the ANGLE LAW rather than about the search radius.
+    /// The same geometry with the neighbour's whole SHAFT too far to one side
+    /// for the layers available. `0.85 mm` needs 11 layers at the `0.0785 mm`
+    /// the registered law admits, and this trunk stands only at layer 190 — it
+    /// has no shaft below its own top to catch a descent lower down. So the
+    /// angle refuses it and the arm goes straight down. This is what makes the
+    /// merge tests statements about the ANGLE LAW rather than about the search
+    /// radius: a trunk 0.85 mm away IS merged onto when its shaft runs down
+    /// (`a_seat_lands_mid_shaft_...` below), and is refused when it does not.
     #[test]
     fn a_trunk_the_angle_law_cannot_reach_is_not_merged_onto() {
         let grid = grid();
         let mut history = ColumnHistory::new(&grid);
         let seat = grid.index(20, 20);
         let neighbour = grid.index(20, 37);
-        history.top_strut[neighbour] = 191;
-        history.top_strut_id[neighbour] = 7;
+        straight_arm(&mut history, 7, neighbour, 190, 190);
 
         let mut scratch = Vec::new();
         let mut counts = outcome();
@@ -1024,6 +1301,7 @@ mod descent_tests {
             &history,
             &DrainKeepOut::none(),
             &LeanLaw::new(H, 45.0, 25.0),
+            true,
             4.0,
             seat,
             200,
@@ -1045,8 +1323,7 @@ mod descent_tests {
         let mut history = ColumnHistory::new(&grid);
         let seat = grid.index(20, 20);
         let neighbour = grid.index(20, 28);
-        history.top_strut[neighbour] = 191;
-        history.top_strut_id[neighbour] = 7;
+        straight_arm(&mut history, 7, neighbour, 0, 190);
         let keep_out = DrainKeepOut::build(
             &grid,
             &[crate::drain::DrainSpec {
@@ -1068,6 +1345,7 @@ mod descent_tests {
             &history,
             &keep_out,
             &LeanLaw::new(H, 45.0, 25.0),
+            true,
             4.0,
             seat,
             200,
@@ -1109,6 +1387,7 @@ mod descent_tests {
             &history,
             &DrainKeepOut::none(),
             &LeanLaw::new(H, 45.0, 25.0),
+            true,
             4.0,
             seat,
             200,
@@ -1122,6 +1401,265 @@ mod descent_tests {
         assert!(
             counts.lean_candidates_priced > 0,
             "the candidate must have been PRICED and rejected, not skipped before pricing"
+        );
+    }
+
+    /// **THE 2026-09-05 MECHANISM, AND ITS SABOTAGE.** A seat 200 layers up
+    /// with a neighbouring trunk 0.4 mm to one side whose TOP is one single
+    /// layer below the seat. Under the top-only rule that trunk is useless:
+    /// closing 0.4 mm in one layer needs 0.4 mm of sideways move against the
+    /// 0.0785 mm the law admits, so the arm gave up and ran all 200 layers to
+    /// the plate — beside a trunk it was touching the whole way. The trunk's
+    /// SHAFT runs from the plate to that top, so the same law reaches it six
+    /// layers down, and the junction is STRICTLY INSIDE the parent.
+    ///
+    /// The sabotage is the knob, not the geometry: `shaft_landings = false`
+    /// restores the top-only rule with the same grid, the same history, the
+    /// same law and the same keep-out, and the same arm must go to the plate.
+    #[test]
+    fn a_seat_lands_mid_shaft_on_a_trunk_whose_top_it_cannot_reach() {
+        let grid = grid();
+        let mut history = ColumnHistory::new(&grid);
+        let seat = grid.index(20, 20);
+        let neighbour = grid.index(20, 28);
+        // 8 cells is 0.4 mm at the 0.05 mm pitch; the top is at layer 199, one
+        // layer below the seat, and the shaft runs all the way to the plate.
+        straight_arm(&mut history, 7, neighbour, 0, 199);
+
+        let mut scratch = Vec::new();
+        let mut counts = outcome();
+        let law = LeanLaw::new(H, 45.0, 25.0);
+        let (landing, k_bottom, _, path) = descend_leaning(
+            &grid,
+            &history,
+            &DrainKeepOut::none(),
+            &law,
+            true,
+            4.0,
+            seat,
+            200,
+            &mut scratch,
+            &mut counts,
+        );
+        // `ceil(0.4 / 0.0785) = 6`, so the highest layer the law can reach is
+        // 200 - 6 = 194, and the shaft is there.
+        let Landing::Strut { id, layer: junction } = landing else {
+            panic!("the descent must have merged, and it landed on {landing:?}")
+        };
+        assert_eq!(id, 7);
+        assert_eq!(junction, 194);
+        assert_eq!(k_bottom, junction);
+        // The parent's own extent, read back rather than restated: the junction
+        // must be STRICTLY between its base and its top.
+        let (parent_bottom, parent_top) = (0_usize, 199_usize);
+        assert!(
+            parent_bottom < junction && junction < parent_top,
+            "the junction {junction} must be strictly inside [{parent_bottom}, {parent_top}]"
+        );
+        assert_eq!(counts.junctions_mid_shaft, 1, "and be counted as mid-shaft");
+        assert_eq!(counts.arms_merged, 1);
+        assert_eq!(path.len(), 6, "six layers of descent");
+        assert_eq!(
+            path.first().copied().map(|cell| cell as usize),
+            Some(neighbour),
+            "the path must end in the parent's own column"
+        );
+
+        let mut sabotaged = outcome();
+        let (landing, k_bottom, _, path) = descend_leaning(
+            &grid,
+            &history,
+            &DrainKeepOut::none(),
+            &law,
+            false,
+            4.0,
+            seat,
+            200,
+            &mut scratch,
+            &mut sabotaged,
+        );
+        assert_eq!(
+            landing,
+            Landing::Plate,
+            "SABOTAGE: with shaft landings off the same arm must run to the plate"
+        );
+        assert_eq!(k_bottom, 0);
+        assert!(path.is_empty());
+        assert_eq!(sabotaged.arms_merged, 0);
+        assert_eq!(sabotaged.junctions_mid_shaft, 0);
+    }
+
+    /// A LANDING ON A TRUNK'S TOP IS STILL A TOP LANDING. The first test's
+    /// geometry — the trunk's top 10 layers below the seat and well within
+    /// reach — must still land THERE and be counted as a top junction, not
+    /// pushed down the shaft. The rule is "the highest reachable layer", and
+    /// this is what says so.
+    #[test]
+    fn a_reachable_top_is_still_preferred_to_anywhere_lower_on_the_same_shaft() {
+        let grid = grid();
+        let mut history = ColumnHistory::new(&grid);
+        let seat = grid.index(20, 20);
+        let neighbour = grid.index(20, 28);
+        straight_arm(&mut history, 7, neighbour, 0, 190);
+
+        let mut scratch = Vec::new();
+        let mut counts = outcome();
+        let (landing, _, _, _) = descend_leaning(
+            &grid,
+            &history,
+            &DrainKeepOut::none(),
+            &LeanLaw::new(H, 45.0, 25.0),
+            true,
+            4.0,
+            seat,
+            200,
+            &mut scratch,
+            &mut counts,
+        );
+        assert_eq!(landing, Landing::Strut { id: 7, layer: 190 });
+        assert_eq!(
+            counts.junctions_mid_shaft, 0,
+            "a landing at the parent's own top is not a mid-shaft junction"
+        );
+    }
+
+    /// **THE PATH CHECK BITES ON A THIRD ARM.** The six-layer approach of the
+    /// test above, handed to [`lean_path`] directly, with and without a third
+    /// arm's shaft standing in the corridor it has to cross.
+    ///
+    /// It is asked at this level ON PURPOSE. In a whole descent a third arm
+    /// sitting in the corridor is almost never a blocker, because it is a
+    /// BETTER merge target: a minimum-drop path traces the reach ceiling
+    /// exactly, so any shaft it touches is landable at the very layer it
+    /// touches it, and the search takes the nearer member instead. Asserting
+    /// the refusal through the search would therefore be asserting the
+    /// ordering, not the check; asserting it here asserts the check.
+    #[test]
+    fn a_lean_whose_path_crosses_a_third_shaft_is_refused() {
+        let grid = grid();
+        let mut clear = ColumnHistory::new(&grid);
+        let seat = grid.index(20, 20);
+        let neighbour = grid.index(20, 28);
+        straight_arm(&mut clear, 7, neighbour, 0, 199);
+        let candidate = LeanCandidate {
+            cost_mm: 0.0,
+            class: 0,
+            cell: neighbour,
+            k_bottom: 194,
+            landing: Landing::Strut { id: 7, layer: 194 },
+            rooted: true,
+            at_parent_top: false,
+        };
+        let path = lean_path(&grid, &clear, &DrainKeepOut::none(), 200, seat, &candidate)
+            .expect("a clear corridor admits the approach");
+        assert_eq!(path.len(), 6);
+        assert_eq!(
+            path.first().copied().map(|cell| cell as usize),
+            Some(neighbour),
+            "and the parent's own column is not an obstacle to the member joining it"
+        );
+
+        let mut blocked = ColumnHistory::new(&grid);
+        straight_arm(&mut blocked, 7, neighbour, 0, 199);
+        for column in 21..=27 {
+            straight_arm(&mut blocked, 9, grid.index(20, column), 0, 210);
+        }
+        assert!(
+            lean_path(&grid, &blocked, &DrainKeepOut::none(), 200, seat, &candidate).is_none(),
+            "a path that would tunnel through a THIRD arm must be refused"
+        );
+    }
+
+    /// **A COLUMN THAT HOLDS TWO ARMS OFFERS THE ONE THE LAW CAN REACH.**
+    /// `top_strut` is one `u32` per column, so a leaned arm crossing high above
+    /// a straight trunk hid that trunk completely: the column answered "an arm
+    /// tops out at 199", the law could not reach 199, and the trunk running
+    /// from the plate to layer 100 underneath it was never offered. The span
+    /// index answers per interval, so it is.
+    #[test]
+    fn a_column_with_two_arms_in_it_offers_the_one_the_law_can_reach() {
+        let grid = grid();
+        let mut history = ColumnHistory::new(&grid);
+        let seat = grid.index(20, 20);
+        let neighbour = grid.index(20, 28);
+        straight_arm(&mut history, 7, neighbour, 0, 100);
+        straight_arm(&mut history, 8, neighbour, 199, 199);
+
+        let mut scratch = Vec::new();
+        let mut counts = outcome();
+        let law = LeanLaw::new(H, 45.0, 25.0);
+        let (landing, _, _, _) = descend_leaning(
+            &grid,
+            &history,
+            &DrainKeepOut::none(),
+            &law,
+            true,
+            4.0,
+            seat,
+            200,
+            &mut scratch,
+            &mut counts,
+        );
+        assert_eq!(
+            landing,
+            Landing::Strut { id: 7, layer: 100 },
+            "the reachable arm is the lower one, and the column must offer it"
+        );
+        assert_eq!(counts.arms_merged, 1);
+
+        let mut sabotaged = outcome();
+        let (landing, _, _, _) = descend_leaning(
+            &grid,
+            &history,
+            &DrainKeepOut::none(),
+            &law,
+            false,
+            4.0,
+            seat,
+            200,
+            &mut scratch,
+            &mut sabotaged,
+        );
+        assert_eq!(
+            landing,
+            Landing::Plate,
+            "SABOTAGE: the top-only rule sees only the arm at 199 and cannot reach it"
+        );
+        assert_eq!(sabotaged.arms_merged, 0);
+    }
+
+    /// The shaft index is a RUN-LENGTH encoding, and its cost is the claim the
+    /// data-structure choice rests on: one entry per column a member crosses,
+    /// never one per layer.
+    #[test]
+    fn the_shaft_index_costs_one_span_per_column_not_one_per_layer() {
+        let grid = grid();
+        let mut history = ColumnHistory::new(&grid);
+        history.stamp_shaft(0, 0, 200, grid.index(20, 20), &[]);
+        assert_eq!(
+            history.shaft_spans.len(),
+            1,
+            "a 201-layer straight arm is ONE span"
+        );
+        let path: Vec<u32> = (0..4)
+            .flat_map(|step| {
+                core::iter::repeat_n(
+                    u32::try_from(grid.index(20, 30 + step)).expect("a small cell index"),
+                    3,
+                )
+            })
+            .collect();
+        history.stamp_shaft(1, 0, 12, grid.index(20, 34), &path);
+        assert_eq!(
+            history.shaft_spans.len(),
+            1 + 5,
+            "a 13-layer arm crossing four columns and seating in a fifth is FIVE spans"
+        );
+        assert!(history.shaft_blocks(grid.index(20, 31), 4, None));
+        assert!(!history.shaft_blocks(grid.index(20, 31), 9, None));
+        assert!(
+            !history.shaft_blocks(grid.index(20, 31), 4, Some(1)),
+            "the member being landed on is exempt"
         );
     }
 }

@@ -219,6 +219,49 @@ impl SweepStrut {
     pub fn length_mm(&self, layer_height_mm: f64) -> f64 {
         (self.k_top - self.k_bottom) as f64 * layer_height_mm
     }
+
+    /// The resin this arm costs, in mm³: `π r²` integrated along its own axis.
+    ///
+    /// One term per ledger slot, because the radius is constant within a layer
+    /// and the ledger is indexed by exactly that. A leaned layer is measured
+    /// along its SLANT — `hypot(h, sideways)` — because that is the material a
+    /// leaning layer actually needs; measuring it by its rise would understate
+    /// the very descents the lean law is being graded on. The top slot has no
+    /// layer above it to lean toward and is measured at `h`.
+    ///
+    /// This is the arm alone. The tip ball, the boss and the root flare are the
+    /// lowering's primitives and are not counted here, which is stated so the
+    /// number is never mistaken for the emitted file's own volume.
+    #[must_use]
+    pub fn volume_mm3(&self, grid: &grid::Grid, layer_height_mm: f64) -> f64 {
+        let mut total = 0.0;
+        for (slot, radius) in self.radius_mm.iter().enumerate() {
+            let here = self.k_bottom.saturating_add(slot);
+            let sideways = if self.path.is_empty() {
+                0.0
+            } else {
+                cell_distance_mm(grid, self.cell_at(here), self.cell_at(here + 1))
+            };
+            let segment = if slot + 1 == self.radius_mm.len() {
+                layer_height_mm
+            } else {
+                layer_height_mm.hypot(sideways)
+            };
+            total += core::f64::consts::PI * radius * radius * segment;
+        }
+        total
+    }
+
+    /// `π r_root²` — the area this arm presents where it stops.
+    ///
+    /// Read at the ROOT and not the tip: the root is the widest section (the
+    /// carried load is non-decreasing downward), and it is what a plate landing
+    /// asks the plate to hold.
+    #[must_use]
+    pub fn root_contact_area_mm2(&self) -> f64 {
+        let radius = self.radius_mm.first().copied().unwrap_or(0.0);
+        core::f64::consts::PI * radius * radius
+    }
 }
 
 /// The one plan a sweep produces.
@@ -327,6 +370,12 @@ pub struct SweepPolicy {
     /// every arm drops straight down from its seat, which is exactly how this
     /// engine behaved before 2026-09-04.
     pub lean: bool,
+    /// Whether a descent may land part-way down another arm's SHAFT, and not
+    /// only on its top. **On in production.** The knob exists so a test can
+    /// show that a mid-shaft junction is what a given arm chose, by putting the
+    /// engine back on the top-only rule and watching the same arm go to the
+    /// plate; nothing in the pipeline turns it off.
+    pub shaft_landings: bool,
     /// Whether placement must route around every drain's escape cylinder.
     /// **On in production.** The knob exists so the sabotage drill can delete
     /// the keep-out and show that the drain then reads ENCLOSED -- a test that
@@ -378,6 +427,7 @@ impl SweepPolicy {
                 .diagnostic()
                 .get(),
             lean: true,
+            shaft_landings: true,
             drain_keep_out: true,
             limits: SweepLimits {
                 cell_layer_budget: placeholders.sweep_cell_layer_budget().diagnostic().get(),
@@ -422,6 +472,17 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_lean(mut self) -> Self {
         self.lean = false;
+        self
+    }
+
+    /// Land only on an arm's TOP, never part-way down its shaft -- the rule
+    /// this engine had between 2026-09-04 and the owner's 2026-09-05 ruling
+    /// that "the base needs to land ANYWHERE on the support arm". **Sabotage
+    /// only**: it is what the mid-shaft junction test deletes to show that the
+    /// same arm then falls to the plate, and nothing in the pipeline sets it.
+    #[must_use]
+    pub const fn without_shaft_landings(mut self) -> Self {
+        self.shaft_landings = false;
         self
     }
 }
@@ -518,6 +579,7 @@ pub fn run_sweep_with_drains(
     let mut arms_leaned = 0_usize;
     let mut arms_merged = 0_usize;
     let mut lean_paths_blocked = 0_usize;
+    let mut junctions_mid_shaft_descent = 0_usize;
     let mut lean_candidates_priced = 0_u64;
     // The angle law, evaluated once for this plan's layer height and then read
     // by every descent. Disabled by the sabotage knob, which reduces the
@@ -547,6 +609,7 @@ pub fn run_sweep_with_drains(
             &masks.cover,
             &keep_out,
             &law,
+            policy.shaft_landings,
             policy.kappa,
             &mut reach,
             &mut history,
@@ -561,6 +624,7 @@ pub fn run_sweep_with_drains(
         arms_leaned += outcome.arms_leaned;
         arms_merged += outcome.arms_merged;
         lean_paths_blocked += outcome.lean_paths_blocked;
+        junctions_mid_shaft_descent += outcome.junctions_mid_shaft;
         lean_candidates_priced += outcome.lean_candidates_priced;
         up_sweep::commit_layer_history(layer, &masks.cover, &reach, &mut history);
         reach::commit_layer(&mut reach, &masks.carry);
@@ -696,6 +760,8 @@ pub fn run_sweep_with_drains(
     report.lean_paths_blocked = lean_paths_blocked;
     report.merges_refused_by_radius = merges_refused_by_radius;
     report.lean_max_step_mm = law.max_step_mm();
+    report.descent_junctions_mid_shaft = junctions_mid_shaft_descent;
+    report.shaft_spans_recorded = history.shaft_spans.len();
     report.counters.lean_candidates_priced = lean_candidates_priced;
 
     // ------------------------------------------------ what each tip seats INTO
@@ -1084,6 +1150,31 @@ fn build_report(
         .iter()
         .map(|radius| core::f64::consts::PI * radius * radius)
         .sum();
+    // The three quantities the 2026-09-05 shaft-landing lane is graded on, all
+    // read off the FINISHED field in one pass rather than accumulated during
+    // placement, so un-merging and removal cannot leave them describing a field
+    // nobody prints.
+    let mut support_volume_mm3 = 0.0;
+    let mut plate_contact_area_mm2 = 0.0;
+    let mut junctions_at_parent_top = 0_usize;
+    let mut junctions_mid_shaft = 0_usize;
+    for strut in struts {
+        support_volume_mm3 += strut.volume_mm3(grid, height);
+        match strut.landing {
+            Landing::Plate => plate_contact_area_mm2 += strut.root_contact_area_mm2(),
+            Landing::Strut { id, layer } => {
+                let at_top = struts
+                    .get(id as usize)
+                    .is_some_and(|parent| layer >= parent.k_top);
+                if at_top {
+                    junctions_at_parent_top += 1;
+                } else {
+                    junctions_mid_shaft += 1;
+                }
+            }
+            Landing::Model { .. } => {}
+        }
+    }
 
     SweepRunReport {
         // Filled by the caller, which is the only place that knows the drains:
@@ -1097,6 +1188,12 @@ fn build_report(
         lean_paths_blocked: 0,
         merges_refused_by_radius: 0,
         lean_max_step_mm: 0.0,
+        descent_junctions_mid_shaft: 0,
+        shaft_spans_recorded: 0,
+        junctions_at_parent_top,
+        junctions_mid_shaft,
+        support_volume_mm3,
+        plate_contact_area_mm2,
         achieved_pitch_mm: grid.pitch_mm(),
         coarsening_steps,
         layers,

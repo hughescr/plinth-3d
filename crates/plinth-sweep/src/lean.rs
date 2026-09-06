@@ -165,6 +165,67 @@ impl LeanLaw {
         self.layer_height_mm.hypot(step) * (1.0 + self.weight_at_step(step))
     }
 
+    /// The FEWEST layers of descent that can close a lateral gap of
+    /// `lateral_mm`, or `0` when this law can never close it.
+    ///
+    /// This is the law read the other way round, and it is what makes a landing
+    /// part-way down a shaft findable at all. The descent search knows the
+    /// lateral distance to a column before it knows what stands in that column,
+    /// so it asks the law "how far down must I be, at the very least" and then
+    /// asks the column what it has at or below that layer. Reading the column
+    /// first and the law second is what confined this engine to landing on an
+    /// arm's TOP: a top a few layers below a seat that is a whole hex spacing
+    /// away is simply not reachable, and the candidate died as "no path"
+    /// instead of becoming a landing further down the same trunk.
+    ///
+    /// A descent of `n` layers moves at most `n * max_step`, so `n` is
+    /// `ceil(lateral / max_step)`, and never fewer than one layer. The ceiling
+    /// is verified against [`Self::descent_cost_mm`]'s own admissibility test
+    /// rather than trusted, because a division and a `ceil` can land a hair on
+    /// the wrong side of it and a candidate that the law admits but the pricing
+    /// refuses would be dropped in silence.
+    #[must_use]
+    pub fn layers_to_reach(&self, lateral_mm: f64) -> usize {
+        if !lateral_mm.is_finite() || lateral_mm <= 0.0 {
+            return 1;
+        }
+        if !self.leans() {
+            return 0;
+        }
+        let exact = lateral_mm / self.max_step_mm;
+        if !exact.is_finite() {
+            return 0;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a finite non-negative ratio of two lengths, rounded up to a layer count"
+        )]
+        let mut layers = (exact.ceil() as usize).max(1);
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a layer count bounded by the plan's own layer count is exact in f64"
+        )]
+        let mut step = lateral_mm / layers as f64;
+        // At most one correction in practice; bounded so a pathological input
+        // cannot spin.
+        let mut guard = 0;
+        while step > self.max_step_mm && guard < 4 {
+            layers += 1;
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a layer count bounded by the plan's own layer count is exact in f64"
+            )]
+            let next = lateral_mm / layers as f64;
+            step = next;
+            guard += 1;
+        }
+        if step > self.max_step_mm {
+            return 0;
+        }
+        layers
+    }
+
     /// The cost of a whole descent of `layers` layers that moves `lateral_mm`
     /// sideways in total, spreading the move evenly.
     ///

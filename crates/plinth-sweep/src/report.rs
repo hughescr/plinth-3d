@@ -228,6 +228,30 @@ pub struct SweepRunReport {
     /// `h * cot(OVERHANG_ANGLE_DEG - OVERHANG_WEIGHT_TRANSITION_DEG/2)`. Zero
     /// when the lean is disabled, which is the sabotage state.
     pub lean_max_step_mm: f64,
+    /// Junctions in the FINISHED field whose landing layer is the parent arm's
+    /// own top — the only junction this engine could make before 2026-09-05.
+    pub junctions_at_parent_top: usize,
+    /// Junctions in the FINISHED field whose landing layer is strictly inside
+    /// the parent's shaft. The parent is split in effect: the area law grows
+    /// its section from the junction DOWNWARD and leaves it untouched above.
+    pub junctions_mid_shaft: usize,
+    /// Junctions the DESCENT chose mid-shaft, before un-merging and removal had
+    /// their say. The path-hit witness for the shaft-landing rule itself: it
+    /// can be non-zero where the finished census is zero, and that difference
+    /// is a fact about the later passes, not about the descent.
+    pub descent_junctions_mid_shaft: usize,
+    /// `(arm, column run)` intervals the column history recorded — the measured
+    /// size of the shaft index, published so its cost is a number rather than
+    /// a claim.
+    pub shaft_spans_recorded: usize,
+    /// **The resin the supports cost**, in mm³: `π r²` integrated along every
+    /// arm's own axis, layer by layer, with a leaned layer measured along its
+    /// slant rather than its rise.
+    pub support_volume_mm3: f64,
+    /// `Σ π r_root²` over the arms that land on the PLATE — the area the field
+    /// asks the plate to hold, and the thing a merge removes when it takes an
+    /// arm off the plate and onto a trunk.
+    pub plate_contact_area_mm2: f64,
     /// Path-hit counters. A green oracle must never be able to mean "the path
     /// never ran" (the witness-must-exercise-the-path lesson).
     pub counters: PathHits,
