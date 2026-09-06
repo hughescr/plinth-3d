@@ -1062,6 +1062,8 @@ fn insert_for_load(
                 // up-sweep's column history, so there is no recorded straight
                 // descent to put it back to and the merge-relief pass leaves it
                 // alone by construction.
+                seat_solid_layers: 0,
+                seat_normal: [0.0; 3],
                 straight_fallback: None,
             });
             growing.push(struts.len() - 1);

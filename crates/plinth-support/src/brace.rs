@@ -5809,11 +5809,14 @@ mod tests {
     ///
     /// The measured challenge fixture moves the free end from `[0,0,3]` to
     /// `[2.5,0,3]` over the 0.25 mm slab. The old axis cuts 116 faces; the final
-    /// axis cuts 140. This runs the production re-cut and requires both its count
+    /// axis cuts 139. This runs the production re-cut and requires both its count
     /// and its stored shape to follow the final axis. A radius-only change gate
-    /// returns zero and leaves the 116-face zone behind.
+    /// returns zero and leaves the 116-face zone behind. The final count was 140 while the registry
+    /// carried a 0.300 mm contact depth; `p0` is built from that constant, so the
+    /// owner ruling of 2026-08-30 (landed 2026-09-05) moved the seat up and the
+    /// swung band now cuts 139. The 116 control is unchanged, and so is the claim.
     #[test]
-    fn an_axis_swing_without_a_radius_change_re_cuts_the_zone_from_116_to_140_faces() {
+    fn an_axis_swing_without_a_radius_change_re_cuts_the_zone_from_116_to_139_faces() {
         let config = BraceConfig::current(0.05).unwrap();
         let (surface, topology) = fine_seat_slab(0.25);
         let radius_mm = 0.35_f64;
@@ -5839,7 +5842,7 @@ mod tests {
         let created = freeze(p1_before);
         let fresh = freeze(p1_after);
         assert_eq!(created.zone().len(), 116, "challenge control");
-        assert_eq!(fresh.zone().len(), 140, "challenge control");
+        assert_eq!(fresh.zone().len(), 139, "challenge control");
 
         let mut forest = Forest::new();
         let key = forest.add_member(Member::new(MemberSpec {
@@ -5879,8 +5882,20 @@ mod tests {
     /// exemption even when its contact radius does not move.
     ///
     /// This is the geometry shape produced when bifurcation hands the seat zone
-    /// to the upper sub-segment. The challenge measured 155 faces before and 139
-    /// after, with 16 old faces over-forgiven by a radius-only gate.
+    /// to the upper sub-segment. The challenge measured 139 faces before and 128
+    /// after, with 11 old faces over-forgiven by a radius-only gate.
+    ///
+    /// **The fixture's shortened axis moved on 2026-09-05, and why.** `p0` is
+    /// built from the registered contact depth, which the owner's ruling of
+    /// 2026-08-30 took from 0.300 mm to 0.100 mm. At the shallower seat the
+    /// original `p1_after` of `[0.5, 0, 0.4]` stopped removing ANY face — both
+    /// bands covered the same 139 — so the fixture would have gone silently
+    /// vacuous while still reporting green. It was re-cut to `[0.2, 0, 0.15]`,
+    /// a shortening along roughly the same direction that still drops 11 faces,
+    /// and the `removed > 0` assertion below now states outright what the exact
+    /// count was previously only implying. The counts are fixture measurements;
+    /// the CLAIM — that a shorten with no radius change re-cuts the zone and
+    /// drops over-forgiven faces — is unchanged and is still proved.
     #[test]
     fn an_axis_shorten_without_a_radius_change_re_cuts_and_removes_over_forgiven_faces() {
         let config = BraceConfig::current(0.05).unwrap();
@@ -5888,7 +5903,7 @@ mod tests {
         let radius_mm = 0.35_f64;
         let p0 = [0.0, 0.0, -config.contact_depth_mm];
         let p1_before = [3.0, 0.0, 3.0];
-        let p1_after = [0.5, 0.0, 0.4];
+        let p1_after = [0.2, 0.0, 0.15];
         let (_, _, face_ids, _) = surface.project(&[p0]);
         let seat_face_id = u32::try_from(face_ids[0]).unwrap();
         let freeze = |p1_mm| {
@@ -5907,14 +5922,18 @@ mod tests {
         };
         let created = freeze(p1_before);
         let fresh = freeze(p1_after);
-        assert_eq!(created.zone().len(), 155, "challenge control");
-        assert_eq!(fresh.zone().len(), 139, "challenge control");
+        assert_eq!(created.zone().len(), 139, "challenge control");
+        assert_eq!(fresh.zone().len(), 128, "challenge control");
         let removed = created
             .zone()
             .iter()
             .filter(|face| !fresh.zone().contains(face))
             .count();
-        assert_eq!(removed, 16, "challenge over-forgiveness witness");
+        assert!(
+            removed > 0,
+            "the shorten must actually drop faces, or this fixture proves nothing"
+        );
+        assert_eq!(removed, 11, "challenge over-forgiveness witness");
 
         let mut forest = Forest::new();
         let key = forest.add_member(Member::new(MemberSpec {

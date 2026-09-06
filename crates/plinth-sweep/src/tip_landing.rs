@@ -115,7 +115,8 @@ use geom_kernel::{closest_on_tri, vec3};
 use plinth_mesh::Mesh;
 use rayon::prelude::*;
 
-use crate::SweepPlan;
+use crate::grid::Grid;
+use crate::{SweepPlan, SweepStrut};
 
 /// One arm's tip, in the frame the sweep planned.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -174,10 +175,30 @@ pub struct TipContactScar {
 /// Every arm of this plan, at its own tip, in strut order.
 #[must_use]
 pub fn tip_landings(plan: &SweepPlan) -> Vec<TipLanding> {
-    let mut landings = Vec::with_capacity(plan.struts.len());
-    for (index, strut) in plan.struts.iter().enumerate() {
+    tip_landings_of(
+        &plan.grid,
+        &plan.struts,
+        plan.plate_z_mm,
+        plan.layer_height_mm,
+    )
+}
+
+/// The same landings, over the pieces rather than the finished plan, so
+/// `run_sweep` can ask for them BEFORE it has a [`SweepPlan`] to hand.
+///
+/// [`tip_landings`] delegates here, so there is one derivation of a tip point
+/// and not two.
+#[must_use]
+pub fn tip_landings_of(
+    grid: &Grid,
+    struts: &[SweepStrut],
+    plate_z_mm: f64,
+    layer_height_mm: f64,
+) -> Vec<TipLanding> {
+    let mut landings = Vec::with_capacity(struts.len());
+    for (index, strut) in struts.iter().enumerate() {
         let cell = strut.cell_at(strut.k_top);
-        if cell >= plan.grid.cells() {
+        if cell >= grid.cells() {
             continue;
         }
         // The same slicing-plane derivation `model_landing::model_landings`
@@ -187,18 +208,114 @@ pub fn tip_landings(plan: &SweepPlan) -> Vec<TipLanding> {
             clippy::cast_precision_loss,
             reason = "a layer index, bounded by the sweep's own layer count at ~1e4, is exact in f64"
         )]
-        let z_mm = plan.plate_z_mm + (strut.k_top as f64 + 0.5) * plan.layer_height_mm;
+        let z_mm = plate_z_mm + (strut.k_top as f64 + 0.5) * layer_height_mm;
         landings.push(TipLanding {
             strut: index,
             point_mm: [
-                plan.grid.center_x_mm(plan.grid.col_of(cell)),
-                plan.grid.center_y_mm(plan.grid.row_of(cell)),
+                grid.center_x_mm(grid.col_of(cell)),
+                grid.center_y_mm(grid.row_of(cell)),
                 z_mm,
             ],
             radius_mm: strut.tip_radius_mm(),
         });
     }
     landings
+}
+
+/// The OUTWARD unit normal of the face each arm's tip carries, in STRUT order
+/// (not landing order), `[0, 0, 0]` where no face was found.
+///
+/// This is the seat law's `theta` input: the tip is driven into the model
+/// along its own axis to a depth measured against this normal
+/// (`plinth_support::SweepArm::seat_normal_mm`).
+///
+/// **Batching.** One read of the vertex triples, one parallel `landings ×
+/// faces` closest-point pass, one scatter — exactly the shape
+/// [`tip_contact_scar`] uses, and sharing [`nearest_faces`] with it so the
+/// face a tip is CHARGED against and the face it is SEATED against can never
+/// be two different answers. Nothing is queried per arm.
+///
+/// The mesh must be the ORIENTED mesh the plan was planned on.
+#[must_use]
+pub fn tip_seat_normals(
+    mesh: &Mesh,
+    grid: &Grid,
+    struts: &[SweepStrut],
+    plate_z_mm: f64,
+    layer_height_mm: f64,
+) -> Vec<[f64; 3]> {
+    let mut normals = vec![[0.0_f64; 3]; struts.len()];
+    let landings = tip_landings_of(grid, struts, plate_z_mm, layer_height_mm);
+    if landings.is_empty() {
+        return normals;
+    }
+    let triangles = triangles_of(mesh);
+    let nearest = nearest_faces(&triangles, &landings);
+    for (landing, found) in landings.iter().zip(&nearest) {
+        let Some((face, _)) = *found else { continue };
+        let [a, b, c] = triangles[face];
+        // The mesh is outward-oriented, so the face normal already points AWAY
+        // from the material — which is the direction seating moves against.
+        let Some(unit) = vec3::normalize(vec3::cross(vec3::sub(b, a), vec3::sub(c, a))) else {
+            continue;
+        };
+        // A tip carries a DOWN-FACING face by construction (this module's own
+        // doc). A nearest face that is not down-facing is a wall the tip
+        // happens to stand beside, not the surface it carries, and using it
+        // would put a near-zero cosine into the seat law for a seat that is
+        // in fact square-on. Left unmeasured, so the lowering falls back to
+        // the arm's own axis.
+        if unit[2] >= 0.0 {
+            continue;
+        }
+        if let Some(slot) = normals.get_mut(landing.strut) {
+            *slot = unit;
+        }
+    }
+    normals
+}
+
+/// One read of the mesh's vertex triples, in face order.
+fn triangles_of(mesh: &Mesh) -> Vec<[[f64; 3]; 3]> {
+    let verts = mesh.verts();
+    mesh.tris()
+        .iter()
+        .map(|triangle| {
+            [
+                verts[triangle[0] as usize],
+                verts[triangle[1] as usize],
+                verts[triangle[2] as usize],
+            ]
+        })
+        .collect()
+}
+
+/// The nearest face to each landing, and the distance to it, in landing order.
+///
+/// One parallel pass over `landings × faces`. Shared by the tip SCAR and the
+/// tip SEAT so both are answered about the same face.
+fn nearest_faces(
+    triangles: &[[[f64; 3]; 3]],
+    landings: &[TipLanding],
+) -> Vec<Option<(usize, f64)>> {
+    landings
+        .par_iter()
+        .map(|landing| {
+            let mut best_distance = f64::INFINITY;
+            let mut best_face: Option<usize> = None;
+            for (face, triangle) in triangles.iter().enumerate() {
+                let closest =
+                    closest_on_tri(landing.point_mm, triangle[0], triangle[1], triangle[2]);
+                let offset = vec3::sub(landing.point_mm, closest);
+                let distance = vec3::dot(offset, offset);
+                if distance < best_distance {
+                    best_distance = distance;
+                    best_face = Some(face);
+                }
+            }
+            best_face.map(|face| (face, best_distance.sqrt()))
+        })
+        .collect()
 }
 
 /// The tip-contact scar of one finished plan, against the fields the
@@ -239,14 +356,9 @@ pub fn tip_contact_scar(
     // batch: the closest-point query needs the triangle, the down-facing
     // test needs its normal, and both are read here once rather than once
     // per landing.
-    let verts = mesh.verts();
-    let mut triangles: Vec<[[f64; 3]; 3]> = Vec::with_capacity(faces);
+    let triangles = triangles_of(mesh);
     let mut normal_z: Vec<f64> = Vec::with_capacity(faces);
-    for triangle in mesh.tris() {
-        let a = verts[triangle[0] as usize];
-        let b = verts[triangle[1] as usize];
-        let c = verts[triangle[2] as usize];
-        triangles.push([a, b, c]);
+    for [a, b, c] in triangles.iter().copied() {
         // The identical spelling `plinth_orient::score::score_one` builds its
         // own per-candidate normals with (cross, then divide by its own
         // norm) rather than `geom_kernel`'s reciprocal-multiply `normalize`,
@@ -261,30 +373,17 @@ pub fn tip_contact_scar(
         normal_z.push(if length.is_finite() && length > 0.0 { cross[2] / length } else { 1.0 });
     }
 
-    let charged: Vec<Option<TipCharge>> = landings
-        .par_iter()
-        .map(|landing| {
-            let mut best_distance = f64::INFINITY;
-            let mut best_face: Option<usize> = None;
-            for (face, triangle) in triangles.iter().enumerate() {
-                let closest =
-                    closest_on_tri(landing.point_mm, triangle[0], triangle[1], triangle[2]);
-                let dx = landing.point_mm[0] - closest[0];
-                let dy = landing.point_mm[1] - closest[1];
-                let dz = landing.point_mm[2] - closest[2];
-                let distance = dx * dx + dy * dy + dz * dz;
-                if distance < best_distance {
-                    best_distance = distance;
-                    best_face = Some(face);
-                }
-            }
-            best_face.map(|face| {
+    let charged: Vec<Option<TipCharge>> = nearest_faces(&triangles, &landings)
+        .into_iter()
+        .zip(&landings)
+        .map(|(found, landing)| {
+            found.map(|(face, distance_mm)| {
                 let contact = core::f64::consts::PI * landing.radius_mm * landing.radius_mm;
                 let fragile = contact * fragility[face];
                 TipCharge {
                     strut: landing.strut,
                     face,
-                    distance_mm: best_distance.sqrt(),
+                    distance_mm,
                     scar_mm2: fragile + fragile * display.get(face).copied().unwrap_or(0.0),
                     already_counted: normal_z[face] < down_limit,
                 }

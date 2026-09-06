@@ -17,6 +17,15 @@
 //! base  = bottom face of the arm  = plate_z + k_bottom * h
 //! ```
 //!
+//! `seat` is the model SURFACE — the bottom plane of the first cured model
+//! lamina — and not the finished tip pole. Until 2026-09-05 it was both, so
+//! the tip ball's pole sat exactly on that plane: a point contact carrying no
+//! area, which is what the owner saw in ChituBox on the Sphere and the Morel
+//! base. [`plinth_support::lower_sweep_arms`] now drives the pole INTO the
+//! model from this plane by the seat law of `docs/physics.md` §9, bounded by
+//! the cured thickness this module hands it in
+//! [`plinth_support::SweepArm::available_seat_depth_mm`].
+//!
 //! A `Landing::Plate` arm has `k_bottom = 0`, so its base is exactly the plate.
 //! A `Landing::Model` or `Landing::Strut` arm has `k_bottom` at the HIGHEST
 //! occupied layer below the seat, so it stops one lamina inside the strike
@@ -38,6 +47,18 @@ pub struct SweepEmission {
     pub arms_dropped_zero_length: usize,
     pub arms_without_root_flare: usize,
     pub arms_dropped_invalid_geometry: usize,
+    /// Tips seated to less than the law asked for, because the model above the
+    /// seat is thinner than the law's depth. TRUNCATED, never retracted, never
+    /// dropped.
+    pub tips_truncated_by_thin_wall: usize,
+    /// Tips the law seated at its own smallest term.
+    pub tips_at_law_minimum: usize,
+    /// Per-tip delivered seat depth, cut-disc radius and tip radius, in arm
+    /// order — the evidence for the `a ≥ r_tip` guarantee, published rather
+    /// than assumed.
+    pub tip_seat_depth_mm: Vec<f64>,
+    pub tip_cut_radius_mm: Vec<f64>,
+    pub tip_radius_mm: Vec<f64>,
 }
 
 impl SweepEmission {
@@ -47,6 +68,28 @@ impl SweepEmission {
     #[must_use]
     pub const fn arms_emitted(&self) -> usize {
         self.arms_offered - self.arms_dropped_zero_length - self.arms_dropped_invalid_geometry
+    }
+
+    /// Tips whose DELIVERED cut disc came out narrower than their own tip —
+    /// the `a ≥ r_tip` guarantee failing.
+    ///
+    /// Zero is the guarantee holding. A nonzero count is real information, not
+    /// a defect to hide: on a wall too thin to seat into, the truncated seat
+    /// genuinely cannot cut the disc the area law wants, and
+    /// [`Self::tips_truncated_by_thin_wall`] says so beside it.
+    /// The comparison carries the same tiny relative tolerance
+    /// [`plinth_support::SweepLowering::tips_below_area_guarantee`] uses, and
+    /// for the same reason: the ball clause designs `a` to EQUAL `r_tip` at its
+    /// break-even depth, so exact equality is the common case and float
+    /// rounding straddles it. A shortfall has to be real to be counted.
+    #[must_use]
+    pub fn tips_below_area_guarantee_count(&self) -> usize {
+        let slack = 1.0 - plinth_support::SweepLowering::AREA_GUARANTEE_TOLERANCE;
+        self.tip_cut_radius_mm
+            .iter()
+            .zip(&self.tip_radius_mm)
+            .filter(|(cut, tip)| **cut < **tip * slack)
+            .count()
     }
 }
 
@@ -73,6 +116,11 @@ pub fn to_primitives(
         arms_dropped_zero_length,
         arms_without_root_flare,
         arms_dropped_invalid_geometry,
+        tips_truncated_by_thin_wall,
+        tips_at_law_minimum,
+        tip_seat_depth_mm,
+        tip_cut_radius_mm,
+        tip_radius_mm,
     } = lower_sweep_arms(
         &arms,
         frame,
@@ -86,6 +134,11 @@ pub fn to_primitives(
         arms_dropped_zero_length,
         arms_without_root_flare,
         arms_dropped_invalid_geometry,
+        tips_truncated_by_thin_wall,
+        tips_at_law_minimum,
+        tip_seat_depth_mm,
+        tip_cut_radius_mm,
+        tip_radius_mm,
     })
 }
 
@@ -128,6 +181,12 @@ pub fn arms_of(plan: &SweepPlan) -> Vec<SweepArm> {
                 base_mm: [base_x, base_y, base_z],
                 tip_radius_mm: strut.tip_radius_mm(),
                 root_radius_mm: strut.radius_mm.first().copied().unwrap_or_default(),
+                // Both measured by the sweep at its own finished seat
+                // (`run_sweep_with_drains`); nothing is re-derived here. The
+                // lowering drives the tip ball into the model along the arm to
+                // the law's depth, bounded by this thickness.
+                seat_normal_mm: strut.seat_normal,
+                available_seat_depth_mm: f64::from(strut.seat_solid_layers) * height,
                 landing: match strut.landing {
                     Landing::Plate => SweepArmLanding::Plate,
                     Landing::Model { .. } | Landing::Strut { .. } => SweepArmLanding::Landed,

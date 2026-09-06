@@ -2492,6 +2492,34 @@ fn print_sweep_disclosure(
         report.tip_radius.count_above_owner_growth_ceiling,
         report.counters.strut_removals,
     );
+    // The tip SEAT, published per run rather than assumed. The `a >= r_tip`
+    // guarantee is the last line: the cut disc the seat plane actually takes
+    // through each ball, against the tip it has to be no narrower than.
+    {
+        use plinth_support::SweepLowering;
+        let depth = SweepLowering::distribution(&emission.tip_seat_depth_mm);
+        let cut_min = emission
+            .tip_cut_radius_mm
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let tip_min = emission
+            .tip_radius_mm
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let below = emission.tips_below_area_guarantee_count();
+        let (depth_min, depth_p50, depth_max) = depth.unwrap_or((f64::NAN, f64::NAN, f64::NAN));
+        println!(
+            "[sweep {model}] tip seat depth min {depth_min:.4} p50 {depth_p50:.4} \
+             max {depth_max:.4} mm over {} seated tips; {} at the law minimum; \
+             {} truncated by a thin wall; cut-disc radius min {cut_min:.4} mm against \
+             tip radius min {tip_min:.4} mm; tips below the a>=r_tip guarantee: {below}",
+            emission.tip_seat_depth_mm.len(),
+            emission.tips_at_law_minimum,
+            emission.tips_truncated_by_thin_wall,
+        );
+    }
     println!(
         "[sweep {model}] peak layer area {:.4} mm2; total scar {:.4} mm2 (invariant \
          peak/X_ALLOWED = {:.4} mm2, ratio {:.4}); plate reaction {:.4} mm2; \

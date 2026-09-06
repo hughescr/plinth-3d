@@ -151,6 +151,25 @@ pub struct SweepStrut {
     /// times on eight models, which is unmeasured, not safe) and this field is
     /// the fix.
     pub straight_fallback: Option<(Landing, usize)>,
+    /// Cured model laminae standing at and above this arm's own `k_top`, in
+    /// its own tip column — the thickness the tip has to seat INTO.
+    ///
+    /// Filled by [`seat_solid_layers`] once the strut set is final, because
+    /// the down-sweep both adds and removes arms and a value captured earlier
+    /// would belong to a field nobody prints. `0` means "unmeasured", and the
+    /// lowering then seats nothing rather than guessing: an arm that reads
+    /// zero is counted in `tips_truncated_by_thin_wall`, never dropped.
+    ///
+    /// It is DERIVED from the model and the arm's own seat, so it is
+    /// deliberately absent from [`digest`]: the plan digest names the
+    /// PLACEMENT, and this field moves no arm.
+    pub seat_solid_layers: u32,
+    /// Outward unit normal of the model face this tip carries, filled by
+    /// [`tip_seat_normals`] once the strut set is final. `[0, 0, 0]` means
+    /// unmeasured, and the lowering falls back to the arm's own axis.
+    ///
+    /// Derived, like [`Self::seat_solid_layers`], and likewise not digested.
+    pub seat_normal: [f64; 3],
 }
 
 impl SweepStrut {
@@ -678,6 +697,22 @@ pub fn run_sweep_with_drains(
     report.merges_refused_by_radius = merges_refused_by_radius;
     report.lean_max_step_mm = law.max_step_mm();
     report.counters.lean_candidates_priced = lean_candidates_priced;
+
+    // ------------------------------------------------ what each tip seats INTO
+    //
+    // Both of these are properties of the MODEL at an arm's finished seat, so
+    // they are measured once here, after insertion, removal and un-merging
+    // have settled the strut set, and never during a pass that is still moving
+    // arms around. Neither moves an arm; both are read by the lowering when it
+    // drives the tip ball into the model.
+    let solid_layers = seat_solid_layers(&grid, &slices, &struts, layers);
+    let seat_normals =
+        tip_landing::tip_seat_normals(mesh, &grid, &struts, plate_z, height);
+    for (index, strut) in struts.iter_mut().enumerate() {
+        strut.seat_solid_layers = solid_layers.get(index).copied().unwrap_or(0);
+        strut.seat_normal = seat_normals.get(index).copied().unwrap_or([0.0; 3]);
+    }
+
     Ok(SweepPlan {
         grid,
         layers,
@@ -686,6 +721,75 @@ pub fn run_sweep_with_drains(
         struts,
         report,
     })
+}
+
+/// How many cured laminae stand at and above each arm's own `k_top`, in its
+/// own tip column — the thickness a tip has to seat into, in layers.
+///
+/// **Why it is measured and not assumed.** The seat plane is the BOTTOM of
+/// lamina `k_top`, so an arm under a 0.15 mm skin has three laminae of model
+/// above it at a 0.05 mm layer height and nothing more. Driving the tip ball
+/// deeper than that would push its pole out through the far face, which the
+/// land-at-strike ruling forbids at either end. The lowering truncates to this
+/// number and counts the truncation; it never retracts and never drops the arm.
+///
+/// **Batching.** ONE rasterisation pass over the layer stack, in ascending
+/// order, with every arm still counting advanced together — no per-arm slice
+/// query and no second stack. An arm is opened at its own `k_top`, counts
+/// while its tip column stays covered, and closes at the first gap, so the
+/// whole pass is `O(layers · raster + Σ run)`.
+///
+/// **Which mask, and which way the error runs.** It counts `cover`, the
+/// any-overlap mask, because `cover` is what decided this arm's `k_top` in the
+/// first place and a bound measured against a different mask than the seat
+/// would be answering about a different column. `cover` rounds OUTWARD, so at
+/// the very top of a run it can credit one lamina that is only partly there —
+/// an over-statement bounded by one layer height (0.05 mm at the registered
+/// default). `carry` would round the other way, but it is eroded by one cell in
+/// Y and would read ZERO for every rim column, which is the defect this whole
+/// change exists to end, returned at the rim.
+fn seat_solid_layers(
+    grid: &Grid,
+    slices: &[Vec<plinth_support::perception::SliceSolid>],
+    struts: &[SweepStrut],
+    layers: usize,
+) -> Vec<u32> {
+    let mut runs = vec![0_u32; struts.len()];
+    if struts.is_empty() {
+        return runs;
+    }
+    // Arms bucketed by the layer they open at, so the pass opens them in one
+    // indexed lookup rather than scanning the strut vector per layer.
+    let mut opening_at: Vec<Vec<usize>> = vec![Vec::new(); layers];
+    for (index, strut) in struts.iter().enumerate() {
+        if let Some(bucket) = opening_at.get_mut(strut.k_top) {
+            bucket.push(index);
+        }
+    }
+    let mut scratch = RasterScratch::new(grid);
+    let mut masks = LayerMasks::default();
+    let mut open: Vec<usize> = Vec::new();
+    let mut still_open: Vec<usize> = Vec::new();
+    for (layer, solids) in slices.iter().enumerate().take(layers) {
+        if let Some(bucket) = opening_at.get(layer) {
+            open.extend_from_slice(bucket);
+        }
+        if open.is_empty() {
+            continue;
+        }
+        rasterize_into(grid, solids, &mut scratch, &mut masks);
+        still_open.clear();
+        for &index in &open {
+            let strut = &struts[index];
+            let cell = strut.cell_at(strut.k_top);
+            if masks.cover.get(cell).copied().unwrap_or(false) {
+                runs[index] += 1;
+                still_open.push(index);
+            }
+        }
+        std::mem::swap(&mut open, &mut still_open);
+    }
+    runs
 }
 
 /// Put back straight any arm that merged into a trunk the area law cannot grow
@@ -1168,6 +1272,8 @@ mod removal_tests {
             covered_demand: Vec::new(),
             inserted_by_load: false,
             path: Vec::new(),
+            seat_solid_layers: 0,
+            seat_normal: [0.0; 3],
             straight_fallback: None,
         }
     }
@@ -1265,6 +1371,8 @@ mod removal_tests {
             covered_demand: Vec::new(),
             inserted_by_load: true,
             path: Vec::new(),
+            seat_solid_layers: 0,
+            seat_normal: [0.0; 3],
             straight_fallback: None,
         }];
 
@@ -1303,6 +1411,8 @@ mod removal_tests {
             covered_demand: Vec::new(),
             inserted_by_load: false,
             path: Vec::new(),
+            seat_solid_layers: 0,
+            seat_normal: [0.0; 3],
             straight_fallback: None,
         }];
 

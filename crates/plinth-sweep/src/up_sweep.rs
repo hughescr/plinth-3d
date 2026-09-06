@@ -340,6 +340,8 @@ pub fn place_layer(
             // Recorded ONLY for a leaned arm, and recorded NOW, because the
             // column history this reads is a running state that will not say
             // the same thing again once the sweep has passed this layer.
+            seat_solid_layers: 0,
+            seat_normal: [0.0; 3],
             straight_fallback: (!path.is_empty()).then(|| {
                 let (landing, bottom, _) = descend(history, cell, layer);
                 (landing, bottom)

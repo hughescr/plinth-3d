@@ -615,7 +615,10 @@ pub enum SweepArmLanding {
 /// owner speak diameter.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SweepArm {
-    /// The seat, on the model's down-facing surface.
+    /// The seat, on the model's down-facing surface — the BOTTOM plane of the
+    /// first cured model lamina in this column. The tip is seated INTO the
+    /// model from here by [`contact::seat_depth_of`]; this field is the
+    /// surface, never the finished pole.
     pub seat_mm: [f64; 3],
     /// The landing point, directly below the seat.
     pub base_mm: [f64; 3],
@@ -625,6 +628,25 @@ pub struct SweepArm {
     /// Radius at the landing. Never smaller than the tip: carried load is
     /// non-decreasing downward, so an arm flares toward its root.
     pub root_radius_mm: f64,
+    /// OUTWARD unit normal of the model face this tip carries — the direction
+    /// that points AWAY from the material, so seating moves against it.
+    ///
+    /// It sets `theta` in the seat law's full-cross-section term. A zero or
+    /// non-finite vector means "unmeasured", and the arm's own axis stands in,
+    /// which is `theta = 0` — exactly what `lower_stub` does when it uses the
+    /// member direction in place of a face normal.
+    pub seat_normal_mm: [f64; 3],
+    /// Cured model thickness standing ABOVE `seat_mm` in this arm's own seat
+    /// column, in mm, as the sweep's own layer rasters measured it.
+    ///
+    /// This is the land-at-strike bound applied at the TIP end: a ball may be
+    /// seated no deeper than the material it strikes is thick, so it can never
+    /// exit the far face of a thin skin. Where it binds, the seat is
+    /// TRUNCATED to the available depth (owner ruling 2026-08-30: truncate,
+    /// never retract) and counted in
+    /// [`SweepLowering::tips_truncated_by_thin_wall`] — the arm is never
+    /// dropped.
+    pub available_seat_depth_mm: f64,
     pub landing: SweepArmLanding,
 }
 
@@ -646,6 +668,72 @@ pub struct SweepLowering {
     /// Arms whose radii or points would not cross the finite boundary, or
     /// which the emit boundary's own `is_semantically_valid` rejected.
     pub arms_dropped_invalid_geometry: usize,
+    /// Tips whose seat was cut short because the model material above the seat
+    /// is thinner than the law asked for. TRUNCATED, never retracted and never
+    /// dropped: the ball is seated to every micron that is actually there.
+    pub tips_truncated_by_thin_wall: usize,
+    /// Tips the law seated at its own smallest term — the registered
+    /// `DEFAULT_CONTACT_DEPTH_MM` — because neither the resolution/flank term
+    /// nor the ball-cap term asked for more.
+    pub tips_at_law_minimum: usize,
+    /// Every tip's DELIVERED seat depth, normal-measured, in arm order.
+    ///
+    /// Published rather than summarised in place so the caller can render the
+    /// distribution it wants and a test can assert on the raw numbers. Empty
+    /// exactly when no arm was built.
+    pub tip_seat_depth_mm: Vec<f64>,
+    /// Every tip's DELIVERED cut-disc radius `a = sqrt(2·f·r_tip·h − h²)` at
+    /// its own delivered depth, in the same order — the ACTUAL minimal
+    /// separating cut the area law is evaluated on. The `a ≥ r_tip` guarantee
+    /// is checked against this, never assumed.
+    pub tip_cut_radius_mm: Vec<f64>,
+    /// Every tip's radius, in the same order, so `a` and `r_tip` can be
+    /// compared arm by arm without a second pass over the primitives.
+    pub tip_radius_mm: Vec<f64>,
+}
+
+impl SweepLowering {
+    /// `(min, p50, max)` of a per-arm series, or `None` when no arm was built.
+    ///
+    /// One sort of a copy, not a per-arm scan per statistic.
+    #[must_use]
+    pub fn distribution(series: &[f64]) -> Option<(f64, f64, f64)> {
+        if series.is_empty() {
+            return None;
+        }
+        let mut sorted = series.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        Some((
+            sorted[0],
+            sorted[sorted.len() / 2],
+            sorted[sorted.len() - 1],
+        ))
+    }
+
+    /// The arms whose delivered cut disc is NARROWER than their own tip — the
+    /// `a ≥ r_tip` guarantee failing. Zero is the guarantee holding, and it is
+    /// counted rather than assumed.
+    ///
+    /// **Why the comparison carries a tolerance.** The ball clause is designed
+    /// to make `a` EQUAL `r_tip` at its own break-even depth
+    /// (`BALL_SEAT_FACTOR · r_tip`), and since the smallest seat depth became
+    /// 0.100 mm that clause is the binding term for most tips — so the common
+    /// case is exact equality, which float rounding straddles in both
+    /// directions. A bare `<` counts those ULPs as failures and reports noise
+    /// where the law is being met precisely. The tolerance is relative and
+    /// tiny: a shortfall has to be real to be counted.
+    #[must_use]
+    pub fn tips_below_area_guarantee(&self) -> usize {
+        self.tip_cut_radius_mm
+            .iter()
+            .zip(&self.tip_radius_mm)
+            .filter(|(cut, tip)| **cut < **tip * (1.0 - Self::AREA_GUARANTEE_TOLERANCE))
+            .count()
+    }
+
+    /// The relative slack in the `a ≥ r_tip` comparison — float noise around an
+    /// equality the law designs for, and nothing more.
+    pub const AREA_GUARANTEE_TOLERANCE: f64 = 1.0e-9;
 }
 
 /// The failures that are about the REQUEST, never about a model.
@@ -703,14 +791,25 @@ pub fn lower_sweep_arms(
     let raft_top = plate + config.raft_height_mm.get();
     let mut out = SweepLowering {
         primitives: Vec::with_capacity(arms.len().saturating_mul(3)),
+        tip_seat_depth_mm: Vec::with_capacity(arms.len()),
+        tip_cut_radius_mm: Vec::with_capacity(arms.len()),
+        tip_radius_mm: Vec::with_capacity(arms.len()),
         ..SweepLowering::default()
     };
     for arm in arms {
-        match lower_one_sweep_arm(arm, config, raft_top, &mut out.primitives) {
+        let lowered = lower_one_sweep_arm(arm, config, raft_top, &mut out.primitives);
+        match lowered.outcome {
             ArmOutcome::Built => {}
             ArmOutcome::BuiltWithoutFlare => out.arms_without_root_flare += 1,
             ArmOutcome::ZeroLength => out.arms_dropped_zero_length += 1,
             ArmOutcome::InvalidGeometry => out.arms_dropped_invalid_geometry += 1,
+        }
+        if let Some(seat) = lowered.seat {
+            out.tip_seat_depth_mm.push(seat.depth_mm);
+            out.tip_cut_radius_mm.push(seat.cut_radius_mm);
+            out.tip_radius_mm.push(seat.tip_radius_mm);
+            out.tips_truncated_by_thin_wall += usize::from(seat.truncated);
+            out.tips_at_law_minimum += usize::from(seat.at_law_minimum);
         }
         if out.primitives.len() > max_primitives {
             return Err(SweepLoweringError::PrimitiveLimit {
@@ -728,41 +827,180 @@ enum ArmOutcome {
     InvalidGeometry,
 }
 
+/// What one arm's tip seat actually delivered, recorded only for an arm that
+/// reached the file.
+struct TipSeat {
+    /// The delivered depth, measured along the carried face's own normal.
+    depth_mm: f64,
+    /// `a = sqrt(2·f·r_tip·h − h²)` at that delivered depth — the ACTUAL
+    /// minimal separating cut, not `r_tip`.
+    cut_radius_mm: f64,
+    tip_radius_mm: f64,
+    /// The thin-wall bound cut the law's depth short.
+    truncated: bool,
+    /// The law's smallest term — the registered contact depth — was the
+    /// binding one.
+    at_law_minimum: bool,
+}
+
+struct ArmLowering {
+    outcome: ArmOutcome,
+    seat: Option<TipSeat>,
+}
+
+impl ArmLowering {
+    const fn refused(outcome: ArmOutcome) -> Self {
+        Self {
+            outcome,
+            seat: None,
+        }
+    }
+}
+
+/// The tip seat for one arm, by the law in `docs/physics.md` §9, bounded by
+/// the material that is actually there.
+///
+/// `unit` runs seat → base, so it points OUT of the model along the arm, and
+/// seating moves against it. Returns `(seated_point, TipSeat)`.
+///
+/// **Direction.** The law's `h` is measured along the carried face's normal
+/// (`contact::seat_endpoint`'s own convention), but a sweep arm is a placed
+/// COLUMN: moving its tip off its own axis would bend a member the placement
+/// pass already routed and cleared. So the tip travels along the ARM AXIS by
+/// `h / |cos θ|`, which lands the pole at normal-depth exactly `h`. For the
+/// case this defect was reported on — a vertical arm under a horizontal
+/// underside, `θ = 0` — the two are the same move.
+///
+/// **The thin-wall bound.** The pole may rise no further than the cured model
+/// standing above the seat in this arm's own column, so a ball can never exit
+/// the far face of a thin skin (land-at-strike). Where that binds the seat is
+/// TRUNCATED to what is there and flagged; the arm still emits.
+fn seat_tip(
+    arm: &SweepArm,
+    unit: [f64; 3],
+    tip_radius_mm: f64,
+    config: LoweringConfig,
+) -> ([f64; 3], TipSeat) {
+    // An unmeasured normal falls back to the arm's own axis (theta = 0),
+    // exactly as `lower_stub` uses the member direction in place of a face
+    // normal.
+    let outward = geom_kernel::vec3::normalize(arm.seat_normal_mm).unwrap_or(unit);
+    let abs_cos = geom_kernel::vec3::dot(unit, outward).abs().min(1.0);
+    let floor_depth_mm = config.contact_depth_mm.get();
+    let law_depth_mm = crate::contact::seat_depth_of(
+        floor_depth_mm,
+        config.layer_height_mm.get(),
+        config.tip_ball_factor.get(),
+        abs_cos,
+        tip_radius_mm,
+        true,
+    );
+    // **The seat is never driven past its own ball's equator.** The disc the
+    // seat plane cuts through the ball is `a² = 2·f·r·h − h²`, which PEAKS at
+    // `h = f·r` — the ball radius — and narrows again beyond it. Burial deeper
+    // than that buys less contact, not more, while the scar keeps growing:
+    // exactly the owner's ruling of 2026-08-30 that burial is not adhesion,
+    // that depth stays small, and that rasterised CONTACT AREA governs. It is
+    // a property of the emitted ball, not a new number, and it is what makes
+    // `a ≥ r_tip` hold at BOTH ends of the law's range rather than only the
+    // shallow one.
+    let equator_mm = config.tip_ball_factor.get() * tip_radius_mm;
+    let target_depth_mm = law_depth_mm.min(equator_mm);
+    // Axial travel that delivers NORMAL depth `target_depth_mm`, bounded by the
+    // ball's own length along the arm. A nearly-parallel seat would otherwise
+    // ask to travel to infinity along an axis that never gets any deeper; past
+    // its own diameter the ball is wholly inside the model in any case, and
+    // only the shaft still crosses the surface.
+    let axial_for_target_mm = if abs_cos > 0.0 {
+        target_depth_mm / abs_cos
+    } else {
+        f64::INFINITY
+    };
+    // The arm descends from its seat, so travelling against `unit` RAISES the
+    // pole; the rise is bounded by the cured column above the seat. A leaned
+    // arm also travels sideways, and bounding its VERTICAL rise by the
+    // column's own vertical extent is the conservative reading of the same
+    // raster.
+    let rise_per_axial = -unit[2];
+    let axial_bound_mm = if rise_per_axial > 0.0 {
+        arm.available_seat_depth_mm / rise_per_axial
+    } else {
+        0.0
+    };
+    let axial_mm = axial_for_target_mm
+        .min(2.0 * equator_mm)
+        .min(axial_bound_mm)
+        .max(0.0);
+    let axial_mm = if axial_mm.is_finite() { axial_mm } else { 0.0 };
+    let depth_mm = axial_mm * abs_cos;
+    let seated = std::array::from_fn(|index| arm.seat_mm[index] - unit[index] * axial_mm);
+    // THE DELIVERED MINIMAL SEPARATING CUT at the seat plane — the disc the
+    // model surface actually takes through the emitted ball, which is what the
+    // area law has to be evaluated on. It is not `r_tip`, and it is measured
+    // here rather than assumed anywhere.
+    let cut_radius_mm =
+        crate::contact::ball_cut_radius_mm(tip_radius_mm, depth_mm, config.tip_ball_factor.get());
+    (
+        seated,
+        TipSeat {
+            depth_mm,
+            cut_radius_mm,
+            tip_radius_mm,
+            // A shortfall against the depth this seat was ASKED for. The
+            // equator cap is not a shortfall — it is the law satisfied by a
+            // shallower seat that cuts a wider disc — so the target it is
+            // measured against already carries it. What does fire here is the
+            // thin-wall bound, and a genuinely grazing seat.
+            truncated: depth_mm < target_depth_mm - 1e-12,
+            // `law_depth_mm` is a `max` over three terms of which the floor is
+            // one, so it can never be below the floor; `<=` is equality.
+            at_law_minimum: law_depth_mm <= floor_depth_mm,
+        },
+    )
+}
+
 fn lower_one_sweep_arm(
     arm: &SweepArm,
     config: LoweringConfig,
     raft_top: f64,
     out: &mut Vec<SupportPrimitive>,
-) -> ArmOutcome {
+) -> ArmLowering {
     let delta: [f64; 3] = std::array::from_fn(|index| arm.base_mm[index] - arm.seat_mm[index]);
     let length = delta.iter().map(|value| value * value).sum::<f64>().sqrt();
     if !length.is_finite() || length <= ZERO_LENGTH_MM {
-        return ArmOutcome::ZeroLength;
+        return ArmLowering::refused(ArmOutcome::ZeroLength);
     }
     let unit = delta.map(|value| value / length);
     let Ok(tip_radius) = positive(arm.tip_radius_mm) else {
-        return ArmOutcome::InvalidGeometry;
+        return ArmLowering::refused(ArmOutcome::InvalidGeometry);
     };
     let Ok(root_radius) = positive(arm.root_radius_mm.max(arm.tip_radius_mm)) else {
-        return ArmOutcome::InvalidGeometry;
+        return ArmLowering::refused(ArmOutcome::InvalidGeometry);
     };
     let Ok(ball_radius) = positive(config.tip_ball_factor.get() * tip_radius.get()) else {
-        return ArmOutcome::InvalidGeometry;
+        return ArmLowering::refused(ArmOutcome::InvalidGeometry);
     };
+    // THE SEAT. Until 2026-09-05 the ball's pole sat exactly on `arm.seat_mm`
+    // — the BOTTOM plane of the first cured model lamina — so the tip touched
+    // the model at a single point and carried an area of zero. It is now
+    // driven INTO the model by the seat law every other seating family in this
+    // crate reads (`contact::seat_depth_of`), bounded by the material that is
+    // there.
+    let (seated_seat, tip_seat) = seat_tip(arm, unit, tip_radius.get(), config);
     let center_raw: [f64; 3] =
-        std::array::from_fn(|index| arm.seat_mm[index] + ball_radius.get() * unit[index]);
+        std::array::from_fn(|index| seated_seat[index] + ball_radius.get() * unit[index]);
     let (Ok(center), Ok(unit_finite), Ok(base)) =
         (finite3(center_raw), finite3(unit), finite3(arm.base_mm))
     else {
-        return ArmOutcome::InvalidGeometry;
+        return ArmLowering::refused(ArmOutcome::InvalidGeometry);
     };
     let Ok(geometry) = SphereGeometry::tip(center, unit_finite) else {
-        return ArmOutcome::InvalidGeometry;
+        return ArmLowering::refused(ArmOutcome::InvalidGeometry);
     };
     // The producer's own poles. A second implementation of this arithmetic is
     // exactly the defect `is_semantically_valid` exists to catch.
     let Ok((sphere_start, sphere_end)) = geometry.canonical_poles(ball_radius) else {
-        return ArmOutcome::InvalidGeometry;
+        return ArmLowering::refused(ArmOutcome::InvalidGeometry);
     };
     let mut staged: Vec<SupportPrimitive> = Vec::with_capacity(3);
     staged.push(SupportPrimitive {
@@ -779,7 +1017,7 @@ fn lower_one_sweep_arm(
     let outcome = match arm.landing {
         SweepArmLanding::Landed => {
             if distance(center, base) <= ZERO_LENGTH_MM {
-                return ArmOutcome::ZeroLength;
+                return ArmLowering::refused(ArmOutcome::ZeroLength);
             }
             staged.push(frustum(
                 SupportSegmentKind::ContactTaper,
@@ -794,11 +1032,13 @@ fn lower_one_sweep_arm(
         }
         SweepArmLanding::Plate => {
             let Ok(raft_z) = finite(raft_top) else {
-                return ArmOutcome::InvalidGeometry;
+                return ArmLowering::refused(ArmOutcome::InvalidGeometry);
             };
             let raft_point = [base[0], base[1], raft_z];
+            // The SEATED terminal z, exactly as the legacy path reads
+            // `member.p0_mm()[2]` — which `initial.rs` already minted embedded.
             let boss_top =
-                root_boss_top_at(arm.seat_mm[2], [base[0], base[1]], config).and_then(Result::ok);
+                root_boss_top_at(seated_seat[2], [base[0], base[1]], config).and_then(Result::ok);
             match boss_top {
                 Some(top)
                     if distance(center, top) > ZERO_LENGTH_MM
@@ -806,7 +1046,7 @@ fn lower_one_sweep_arm(
                 {
                     let Ok(flare_radius) = positive(root_radius.get() * config.flare_factor.get())
                     else {
-                        return ArmOutcome::InvalidGeometry;
+                        return ArmLowering::refused(ArmOutcome::InvalidGeometry);
                     };
                     staged.push(frustum(
                         SupportSegmentKind::ContactTaper,
@@ -834,7 +1074,7 @@ fn lower_one_sweep_arm(
                     // raft, so no flare fits. Emit the straight column and
                     // WARN: refusing here would destroy the evidence.
                     if distance(center, raft_point) <= ZERO_LENGTH_MM {
-                        return ArmOutcome::ZeroLength;
+                        return ArmLowering::refused(ArmOutcome::ZeroLength);
                     }
                     staged.push(frustum(
                         SupportSegmentKind::ContactTaper,
@@ -854,10 +1094,13 @@ fn lower_one_sweep_arm(
     // and counted rather than failing the whole field at
     // `SupportedModel::from_parts` with nothing said about which arm did it.
     if staged.iter().any(|primitive| !primitive.is_semantically_valid()) {
-        return ArmOutcome::InvalidGeometry;
+        return ArmLowering::refused(ArmOutcome::InvalidGeometry);
     }
     out.append(&mut staged);
-    outcome
+    ArmLowering {
+        outcome,
+        seat: Some(tip_seat),
+    }
 }
 
 #[cfg(test)]

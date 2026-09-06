@@ -207,7 +207,11 @@ pub(crate) fn ball_cut_radius_mm(r_tip_mm: f64, seat_depth_mm: f64, ball_factor:
 /// already carries (`process_resolution_mm`).  No value is invented here.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ContactPolicy {
-    /// `default_contact_depth_mm` — the floor seat depth (0.3 mm).
+    /// `default_contact_depth_mm` — the smallest seat depth the law accepts
+    /// (0.100 mm since the owner's ruling of 2026-08-30 was landed in the
+    /// registry on 2026-09-05, down from 0.300 mm). It answers the
+    /// rasterisation gap, not adhesion; the contact AREA is the ball-cap
+    /// term's job.
     pub(crate) floor_depth_mm: f64,
     /// `max(LayerPlan::heights_mm())` — the run's own process resolution.
     ///
@@ -353,13 +357,41 @@ pub(crate) fn seat_depth_mm(
     policy: &ContactPolicy,
     ball_tipped: bool,
 ) -> f64 {
-    let flank = policy.process_resolution_mm + end_radius_mm * sin_from_cos(abs_cos);
+    seat_depth_of(
+        policy.floor_depth_mm,
+        policy.process_resolution_mm,
+        policy.ball_factor_stub,
+        abs_cos,
+        end_radius_mm,
+        ball_tipped,
+    )
+}
+
+/// The SAME law, over the three registered numbers it actually reads rather
+/// than over a whole [`ContactPolicy`].
+///
+/// [`seat_depth_mm`] delegates here with its terms in their original order, so
+/// the legacy seating families (`brace.rs`, `cco.rs`) compute the identical
+/// `f64` they always did — this extraction moves no legacy byte. The slice-
+/// sweep lowering (`lower.rs`, `lower_sweep_arms`) calls this form directly
+/// because it holds a `LoweringConfig`, not a `ContactPolicy`, and building a
+/// second policy there would mean a second place that decides what "the seat
+/// depth" is. One law, two callers, no copy.
+pub(crate) fn seat_depth_of(
+    floor_depth_mm: f64,
+    process_resolution_mm: f64,
+    ball_factor: f64,
+    abs_cos: f64,
+    end_radius_mm: f64,
+    ball_tipped: bool,
+) -> f64 {
+    let flank = process_resolution_mm + end_radius_mm * sin_from_cos(abs_cos);
     let ball = if ball_tipped {
-        ball_seat_factor(policy.ball_factor_stub) * end_radius_mm
+        ball_seat_factor(ball_factor) * end_radius_mm
     } else {
         0.0
     };
-    policy.floor_depth_mm.max(flank).max(ball)
+    floor_depth_mm.max(flank).max(ball)
 }
 
 /// PR-1 step (2) — push the surface point `p_surface` inward along `normal` by
@@ -580,10 +612,17 @@ mod tests {
     use geom_kernel::{NativeSurface, NativeSurfaceConfig};
 
     const BALL_FACTOR: f64 = 1.5;
+    /// The registered smallest seat depth, mirrored here so the tests below
+    /// grade the regime the engine actually runs in.
+    const FLOOR_DEPTH_MM: f64 = 0.1;
 
     fn policy() -> ContactPolicy {
         ContactPolicy {
-            floor_depth_mm: 0.3,
+            // 0.100 mm, tracking the registry after the owner's ruling of
+            // 2026-08-30 was landed on 2026-09-05. Burial is not adhesion, so
+            // the smallest depth answers a rasterisation gap (one pixel, one
+            // layer) and nothing more.
+            floor_depth_mm: FLOOR_DEPTH_MM,
             process_resolution_mm: 0.05,
             standoff_mm: 0.6,
             demanded_gap_mm: 0.6,
@@ -600,11 +639,20 @@ mod tests {
 
     #[test]
     fn break_even_tip_radius_is_where_cut_disc_equals_the_shaft() {
-        // h = 0.3 (the registered floor) equals the ball seat requirement at
-        // r_tip = 0.3 / 0.381966..., and there the cut disc equals r_tip.
-        let r_break = 0.3 / ball_seat_factor(BALL_FACTOR);
-        assert!((r_break - 0.785_410_196_624_968).abs() < 1e-12);
-        let a = ball_cut_radius_mm(r_break, 0.3, BALL_FACTOR);
+        // The registered smallest depth equals the ball seat requirement at
+        // r_tip = depth / 0.381966..., and there the cut disc equals r_tip.
+        // Below that radius the depth term binds; above it the BALL CAP does.
+        //
+        // At the retired 0.300 mm the break-even sat at 0.785 mm radius — above
+        // the registered maximum tip radius of 1.0 mm for all but the fattest
+        // arms, so the ball clause almost never bound and the depth term was
+        // doing work the physics never asked of it. At the ruled 0.100 mm the
+        // break-even falls to 0.262 mm, which is BELOW the median tip radius on
+        // every model in the corpus: the ball-cap term is now the binding one
+        // for most tips, which is the regime the law was designed for.
+        let r_break = FLOOR_DEPTH_MM / ball_seat_factor(BALL_FACTOR);
+        assert!((r_break - 0.261_803_398_874_989_5).abs() < 1e-12, "{r_break}");
+        let a = ball_cut_radius_mm(r_break, FLOOR_DEPTH_MM, BALL_FACTOR);
         assert!(
             (a - r_break).abs() < 1e-12,
             "cut disc {a} vs shaft {r_break}"
@@ -623,8 +671,17 @@ mod tests {
     #[test]
     fn seat_depth_takes_the_binding_regime() {
         let p = policy();
-        // Normal incidence, small tip: the registered floor binds.
-        assert!((seat_depth_mm(1.0, 0.2, &p, false) - 0.3).abs() < 1e-12);
+        // Normal incidence, small tip, no ball: the registered minimum binds.
+        assert!((seat_depth_mm(1.0, 0.2, &p, false) - FLOOR_DEPTH_MM).abs() < 1e-12);
+        // The same tip WITH a ball: at 0.2 mm radius the ball cap asks for
+        // 0.0764 mm, below the minimum, so the minimum still binds — the
+        // break-even above is where that changes hands.
+        assert!((seat_depth_mm(1.0, 0.2, &p, true) - FLOOR_DEPTH_MM).abs() < 1e-12);
+        // A tip past the break-even: the BALL CAP binds, and at the ruled
+        // 0.100 mm minimum that is the common case rather than the rare one.
+        let h = seat_depth_mm(1.0, 0.5, &p, true);
+        assert!((h - ball_seat_factor(BALL_FACTOR) * 0.5).abs() < 1e-12, "{h}");
+        assert!(h > FLOOR_DEPTH_MM, "the ball cap must be the binding term");
         // Normal incidence, ball-tipped at r = 1.0: the ball cap binds.
         let h = seat_depth_mm(1.0, 1.0, &p, true);
         assert!((h - ball_seat_factor(BALL_FACTOR)).abs() < 1e-12);
@@ -901,11 +958,20 @@ mod tests {
                 }
             }
         }
-        // At normal incidence with the CCO anchor's own radii: 1.40 mm
+        // At normal incidence with the CCO anchor's own radii: 1.20 mm
         // rootward against the retired 0.60 mm, and 1.10 mm terminalward
         // against the retired 0.30 mm.
+        //
+        // The rootward number was 1.40 mm while the registry carried a 0.300 mm
+        // smallest seat depth; the owner's ruling of 2026-08-30 landed 0.100 mm
+        // on 2026-09-05 and the seated mask carries `h` directly, so it falls by
+        // exactly that 0.200 mm. The CLAIM this test makes is unchanged and is
+        // what its name states — the converged mask still exceeds the retired
+        // flat pair (1.20 > 0.60 rootward, 1.10 > 0.30 terminalward) at every
+        // incidence. Only the pinned value moved, and it moved DOWN because the
+        // seat is shallower, not because anything was loosened.
         assert!(
-            (placed_mask_inset_mm(ContactSeating::Seated, 1.0, 0.35, 0.45, &p).unwrap() - 1.40)
+            (placed_mask_inset_mm(ContactSeating::Seated, 1.0, 0.35, 0.45, &p).unwrap() - 1.20)
                 .abs()
                 < 1e-12
         );
@@ -921,11 +987,15 @@ mod tests {
     #[test]
     fn emergence_is_one_predicate_and_admit_delegates_to_it() {
         let p = policy();
-        assert!(emerges(1.40, 1.45, &p));
-        assert!(!emerges(1.40, 1.4499, &p));
+        // The seated mask at these radii is 1.20 mm, down from 1.40 mm when the
+        // registry carried a 0.300 mm smallest seat depth (owner ruling
+        // 2026-08-30, landed 2026-09-05). The lengths below track it exactly;
+        // the predicate under test is unchanged.
+        assert!(emerges(1.20, 1.25, &p));
+        assert!(!emerges(1.20, 1.2499, &p));
         // The boundary is exactly `mask + min_free_span`.
-        assert!(emerges(1.40, 1.40 + p.min_free_span_mm, &p));
-        assert!(!emerges(1.40, 1.40 + p.min_free_span_mm - 1e-12, &p));
+        assert!(emerges(1.20, 1.20 + p.min_free_span_mm, &p));
+        assert!(!emerges(1.20, 1.20 + p.min_free_span_mm - 1e-12, &p));
 
         // `admit` must refuse exactly where `emerges` says no, with the mask it
         // actually computed.
@@ -935,16 +1005,16 @@ mod tests {
             member_r_max_mm: 0.45,
             abs_cos_incidence: 1.0,
             carried_mm2: 0.0,
-            member_length_mm: 1.44,
+            member_length_mm: 1.24,
         };
         let mask = placed_mask_inset_mm(ContactSeating::Seated, 1.0, 0.35, 0.45, &p).unwrap();
-        assert!(!emerges(mask, 1.44, &p));
+        assert!(!emerges(mask, 1.24, &p));
         assert!(matches!(
-            admit(&site, &p, 1.0, 1.44, 0.0, false, false),
+            admit(&site, &p, 1.0, 1.24, 0.0, false, false),
             Err(ContactRefusal::GrazingIncidence { .. })
         ));
-        assert!(emerges(mask, 1.46, &p));
-        assert!(admit(&site, &p, 1.0, 1.46, 0.0, false, false).is_ok());
+        assert!(emerges(mask, 1.26, &p));
+        assert!(admit(&site, &p, 1.0, 1.26, 0.0, false, false).is_ok());
     }
 
     #[test]
@@ -981,19 +1051,28 @@ mod tests {
     }
 
     #[test]
-    fn derived_rung_floor_is_1_50_mm_and_the_registered_band_is_unreachable() {
+    fn derived_rung_minimum_is_1_30_mm_and_the_registered_band_is_unreachable() {
         // RC-15 reconciliation.  With brace_r_mm = 0.5 at normal incidence the
-        // mask is 1.45 mm and PR-3 needs 0.05 mm of free span, so the shortest
-        // admissible rung at ANY incidence is 1.50 mm.  The registered
+        // mask is 1.25 mm and PR-3 needs 0.05 mm of free span, so the shortest
+        // admissible rung at ANY incidence is 1.30 mm.  The registered
         // `bracing_model_rung_min_length_mm` = 1.0 is a candidate-GENERATION
-        // floor, deliberately not raised; the band [1.0, 1.50) is simply
+        // minimum, deliberately not raised; the band [1.0, 1.30) is simply
         // unreachable, which is what this test pins.
+        //
+        // It was 1.50 mm while the registry carried a 0.300 mm smallest seat
+        // depth. The owner's ruling of 2026-08-30 landed 0.100 mm on
+        // 2026-09-05, the seated mask shrank by that 0.200 mm, and the derived
+        // minimum followed it down. The seat depth is now READ FROM THE POLICY
+        // rather than written out as a literal, so this pin can no longer drift
+        // away from the registry the way it just did.
         let p = policy();
-        let mask = mask_extent_mm(0.3, 0.5, 1.0, &p).expect("mask");
-        assert!((mask - 1.45).abs() < 1e-12);
-        assert!((mask + p.min_free_span_mm - 1.50).abs() < 1e-12);
+        let seat = seat_depth_mm(1.0, 0.5, &p, false);
+        assert!((seat - FLOOR_DEPTH_MM).abs() < 1e-12, "{seat}");
+        let mask = mask_extent_mm(seat, 0.5, 1.0, &p).expect("mask");
+        assert!((mask - 1.25).abs() < 1e-12, "{mask}");
+        assert!((mask + p.min_free_span_mm - 1.30).abs() < 1e-12);
 
-        for length in [1.0_f64, 1.1, 1.25, 1.4, 1.49, 1.499_999] {
+        for length in [1.0_f64, 1.1, 1.2, 1.25, 1.29, 1.299_999] {
             let site = ContactSite {
                 end: ContactEnd::Rootward,
                 end_radius_mm: 0.5,
@@ -1008,16 +1087,16 @@ mod tests {
                 "L = {length} must be inadmissible, got {verdict:?}"
             );
         }
-        // Just above the floor it admits.
+        // Just above the minimum it admits.
         let site = ContactSite {
             end: ContactEnd::Rootward,
             end_radius_mm: 0.5,
             member_r_max_mm: 0.5,
             abs_cos_incidence: 1.0,
             carried_mm2: 0.0,
-            member_length_mm: 1.5001,
+            member_length_mm: 1.3001,
         };
-        assert!(admit(&site, &p, 1.0, 1.5001, 0.0, false, false).is_ok());
+        assert!(admit(&site, &p, 1.0, 1.3001, 0.0, false, false).is_ok());
     }
 
     #[test]

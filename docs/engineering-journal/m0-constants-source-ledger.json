@@ -640,12 +640,14 @@
     {
       "id": "DEFAULT_CONTACT_DEPTH_MM",
       "classification": "runtime_generation_profile",
-      "normative": "03-physics-and-constants.md §3.2 = 0.3 mm; stable declaration name",
+      "normative": "Owner ruling 2026-08-30 = 0.100 mm, landed in the registry 2026-09-05; supersedes 03-physics-and-constants.md §3.2 = 0.3 mm, which carried the Python-era value. Stable declaration name.",
       "source_locators": [
-        "scripts/support_placement/config.py:contact_depth_mm"
+        "docs/specs/audit-invariants.md:114-131",
+        "docs/evidence/audit-baseline-2026-08-30.md",
+        "scripts/support_placement/config.py:contact_depth_mm (retired 0.300 mm)"
       ],
       "provenance_wrapper": "Placeholder",
-      "provenance_detail": "Placeholder"
+      "provenance_detail": "Placeholder. Burial is not adhesion: cured resin cures the same at any depth, so this number answers only the rasterisation gap, which is bounded by one pixel in plane and one layer in Z. 0.300 mm was 3-6x that bound and paid for the excess twice, in a wider scar and a harder snap-off. The contact AREA the seat law protects is carried by the ball-cap term (BALL_SEAT_FACTOR x r_tip), not by this depth."
     },
     {
       "id": "DELICACY_CURVATURE_WEIGHT",

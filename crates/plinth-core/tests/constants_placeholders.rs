@@ -364,7 +364,12 @@ static EXPECTED_ROWS: [ExpectedRow; 281] = rows! {
     "DECIMATION_SEED_ERROR_MM", "0.05", "mm", "scalar";
     "DECIMATION_UTILITY_MIN_INPUT_FACES", "32768", "count", "scalar";
     "DECIMATION_VERTEX_GROUP_FACTOR", "10.0", "1", "scalar";
-    "DEFAULT_CONTACT_DEPTH_MM", "0.3", "mm", "scalar";
+    // 0.100 mm, not the 0.300 mm this pin held until 2026-09-05: OWNER RULING
+    // of 2026-08-30, landed in the registry on 2026-09-05. Burial is not
+    // adhesion; the only failure a seat depth prevents is a rasterisation gap
+    // bounded by one pixel and one layer, and 0.300 was 3-6x that. TIGHTENED,
+    // never loosened -- the pin still fixes an exact value.
+    "DEFAULT_CONTACT_DEPTH_MM", "0.1", "mm", "scalar";
     "DELICACY_CURVATURE_WEIGHT", "0.6", "1", "scalar";
     "DELICACY_THINNESS_WEIGHT", "0.4", "1", "scalar";
     "DISPLAY_DETAIL_TIP_MULTIPLE", "2.0", "1", "scalar";
@@ -1020,7 +1025,10 @@ fn performance_types_are_disabled_strict_and_reject_invalid_enabled_values() {
 fn named_accessors_preserve_lift_contact_bridge_and_search_distinctions() {
     let constants = component();
     assert_eq!(constants.lift_mm().diagnostic().get(), 5.0);
-    assert_eq!(constants.default_contact_depth_mm().diagnostic().get(), 0.3);
+    // Owner ruling 2026-08-30, landed 2026-09-05: 0.100 mm, down from 0.300.
+    // Burial is not adhesion, so the depth answers only the rasterisation gap
+    // (one pixel, one layer) and the ball-cap term carries the contact AREA.
+    assert_eq!(constants.default_contact_depth_mm().diagnostic().get(), 0.1);
     assert_eq!(constants.bridge_free_gap_mm().diagnostic().get(), 1.0);
     assert_eq!(
         constants.bridge_sag_span_approx_mm().diagnostic().span_mm(),
