@@ -261,6 +261,9 @@ pub struct SweepRunReport {
     /// have reached a further carrier instead. Zero means the rule changed no
     /// routing on this model, which is what tells an inert rule apart from an
     /// absent one.
+    /// Load deposited on a non-carrier column (a wrong routing root); part of
+    /// `uncarried_load_mm2`, named so it can never hide inside it.
+    pub misrouted_load_mm2: f64,
     pub tip_column_root_load_mm2: f64,
     /// Path-hit counters. A green oracle must never be able to mean "the path
     /// never ran" (the witness-must-exercise-the-path lesson).

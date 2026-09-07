@@ -128,6 +128,11 @@ pub struct DownSweepOutcome {
     /// Zero is the honest reading "the rule changed no routing", which is what
     /// tells an inert rule apart from an absent one.
     pub tip_column_root_load_mm2: f64,
+    /// Load, in mm², that the routing field deposited on a column holding no
+    /// carrier. Always a defect in the roots offered, never a physical
+    /// outcome; it is included in `uncarried_load_mm2` and named here so a
+    /// wrong root can never read as conserved.
+    pub misrouted_load_mm2: f64,
 }
 
 /// Whether the down-sweep may add arms of its own, and how many arms the whole
@@ -428,6 +433,7 @@ pub fn run(
         let mut placed;
         let mut lost;
         let mut tip_root_load;
+        let mut misrouted;
         let mut spread_hits;
         let mut max_hits;
         let mut injected_here;
@@ -441,6 +447,7 @@ pub fn run(
             placed = 0.0;
             lost = 0.0;
             tip_root_load = 0.0;
+            misrouted = 0.0;
             spread_hits = 0_u64;
             max_hits = 0_u64;
             injected_here = 0.0_f64;
@@ -545,6 +552,14 @@ pub fn run(
                     load_out[cell] = combined;
                     max_hits += 1;
                 } else {
+                    // Load can only be deposited on a carrier; anything that
+                    // reached a non-carrier column was MISROUTED and is lost
+                    // load, counted as such rather than zeroed in silence
+                    // (reviewer finding 2026-09-06: a root naming the wrong
+                    // column read green on every conservation check).
+                    if load_out[cell] > 0.0 {
+                        misrouted += load_out[cell];
+                    }
                     load_out[cell] = 0.0;
                 }
             }
@@ -615,12 +630,13 @@ pub fn run(
              conserved within one peel event"
         );
         outcome.conservation_residual = outcome.conservation_residual.max(residual);
-        outcome.uncarried_load_mm2 += lost;
+        outcome.uncarried_load_mm2 += lost + misrouted;
+        outcome.misrouted_load_mm2 += misrouted;
         outcome.tip_column_root_load_mm2 += tip_root_load;
         outcome.spread_search_hits += spread_hits;
         outcome.max_combine_hits += max_hits;
         outcome.injected_load_mm2 += injected_here;
-        if any_lost {
+        if any_lost || misrouted > 0.0 {
             outcome.uncarried_lowest_layer = Some(layer);
             if worst_gap > outcome.uncarried_worst_gap_mm {
                 outcome.uncarried_worst_gap_mm = worst_gap;

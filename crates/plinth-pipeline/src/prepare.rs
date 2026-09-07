@@ -2527,7 +2527,7 @@ fn print_sweep_disclosure(
         "[sweep {model}] peak layer area {:.4} mm2; total scar {:.4} mm2 (invariant \
          peak/X_ALLOWED = {:.4} mm2, ratio {:.4}); plate reaction {:.4} mm2; \
          conservation residual {:.3e}; residual demand {} cells / {:.4} mm2; \
-         uncarried load {:.4} mm2; unrooted landings {}",
+         uncarried load {:.4} mm2 (misrouted {:.4} mm2); unrooted landings {}",
         report.peak_layer_area_mm2,
         report.total_scar_mm2,
         report.peak_layer_area_mm2 / 12.0,
@@ -2541,6 +2541,7 @@ fn print_sweep_disclosure(
         report.residual_demand_cells,
         report.residual_demand_mm2,
         report.uncarried_load_mm2,
+        report.misrouted_load_mm2,
         report.unrooted_landings,
     );
     println!(

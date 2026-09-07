@@ -1392,6 +1392,7 @@ fn build_report(
         plate_contact_area_mm2,
         tip_column_roots_offered: outcome.tip_column_roots_offered,
         tip_column_root_load_mm2: outcome.tip_column_root_load_mm2,
+        misrouted_load_mm2: outcome.misrouted_load_mm2,
         achieved_pitch_mm: grid.pitch_mm(),
         coarsening_steps,
         layers,
