@@ -357,6 +357,15 @@ pub fn run(
             // marking its seat column all the way down would collect load in a
             // column the arm is not in.
             let cell = struts[id as usize].cell_at(layer);
+            // Only an ARM carries peel load. A brace or a mast is lateral
+            // stiffening: it has no tip ball and, by its own admissibility, no
+            // model above its columns, so it must never be offered as a
+            // carrier or a routing root (reviewer finding 2026-09-06: without
+            // this filter a brace under cover would be grown by the area law
+            // and emitted load-bearing with no contact geometry at either end).
+            if struts[id as usize].kind != crate::StrutKind::Arm {
+                continue;
+            }
             carriers[cell] = true;
             // A LEANED ARM IS ONE MEMBER, NOT A NEW ONE PER COLUMN, AND THE
             // INJECTION GATE HAS TO KNOW IT. The gate below counts an event
@@ -1180,6 +1189,7 @@ fn insert_for_load(
                 seat_solid_layers: 0,
                 seat_normal: [0.0; 3],
                 straight_fallback: None,
+                fallback_path: Vec::new(),
             });
             growing.push(struts.len() - 1);
             pending.push(0.0);

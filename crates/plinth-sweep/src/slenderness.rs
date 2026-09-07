@@ -497,6 +497,7 @@ pub fn apply_remedies(
             // this lane forces drove 1828 overloaded arm-layers that nothing
             // could undo.
             strut.straight_fallback = Some((strut.landing, strut.k_bottom));
+            strut.fallback_path = std::mem::take(&mut strut.path);
             strut.landing = landing;
             strut.k_bottom = k_bottom;
             strut.path = path;
@@ -1097,6 +1098,7 @@ fn push_brace(
         seat_solid_layers: 0,
         seat_normal: [0.0; 3],
         straight_fallback: None,
+        fallback_path: Vec::new(),
     });
 }
 
@@ -1200,6 +1202,7 @@ fn try_mast(
         seat_solid_layers: 0,
         seat_normal: [0.0; 3],
         straight_fallback: None,
+        fallback_path: Vec::new(),
     });
     // The mast has to be visible to the cross that ties to it.
     let mut index_with_mast = ColumnHistory::new(grid);

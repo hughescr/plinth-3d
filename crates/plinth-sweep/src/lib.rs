@@ -207,6 +207,10 @@ pub struct SweepStrut {
     /// times on eight models, which is unmeasured, not safe) and this field is
     /// the fix.
     pub straight_fallback: Option<(Landing, usize)>,
+    /// The descent path that went with `straight_fallback` when a forced
+    /// merge recorded it, so an un-merge restores the member the placement
+    /// chose (possibly leaned) rather than a vertical column it never used.
+    pub fallback_path: Vec<u32>,
     /// Cured model laminae standing at and above this arm's own `k_top`, in
     /// its own tip column — the thickness the tip has to seat INTO.
     ///
@@ -1171,7 +1175,7 @@ fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> usize
     for &(index, landing, k_bottom) in &overgrown {
         struts[index].landing = landing;
         struts[index].k_bottom = k_bottom;
-        struts[index].path.clear();
+        struts[index].path = std::mem::take(&mut struts[index].fallback_path);
         // `carried_mm2` and `radius_mm` are now STALE: they describe a member
         // that stopped at the trunk. The caller's loop (lib.rs:616) re-runs
         // `down_sweep::run` after every non-zero return, which clears and
@@ -1803,6 +1807,7 @@ mod removal_tests {
             seat_solid_layers: 0,
             seat_normal: [0.0; 3],
             straight_fallback: None,
+            fallback_path: Vec::new(),
         }
     }
 
@@ -1905,6 +1910,7 @@ mod removal_tests {
             seat_solid_layers: 0,
             seat_normal: [0.0; 3],
             straight_fallback: None,
+            fallback_path: Vec::new(),
         }];
 
         let mut refused = 0_u64;
@@ -1947,6 +1953,7 @@ mod removal_tests {
             seat_solid_layers: 0,
             seat_normal: [0.0; 3],
             straight_fallback: None,
+            fallback_path: Vec::new(),
         };
         // The candidate reads below the minimum load; the neighbour reads well
         // above it, so only one of the two is ever a candidate.

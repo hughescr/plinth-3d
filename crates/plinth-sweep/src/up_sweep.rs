@@ -597,6 +597,7 @@ pub fn place_layer(
             // the same thing again once the sweep has passed this layer.
             seat_solid_layers: 0,
             seat_normal: [0.0; 3],
+            fallback_path: Vec::new(),
             straight_fallback: (!path.is_empty()).then(|| {
                 let (landing, bottom, _) = descend(history, cell, layer);
                 (landing, bottom)
