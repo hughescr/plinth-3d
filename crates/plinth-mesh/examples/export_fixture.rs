@@ -33,7 +33,7 @@ type Builder = fn() -> Result<Mesh, MeshError>;
 /// NOT here: their cone and offset geometry carries f64 coordinates that are not
 /// exactly representable in f32, so `write_binary_stl` refuses them by design,
 /// and their provisioned `corpus/models/*.stl` are what the measurements use.
-const FIXTURES: [(&str, Builder); 6] = [
+const FIXTURES: [(&str, Builder); 7] = [
     ("make_box", plinth_mesh::make_box_default),
     ("make_overhang_table", plinth_mesh::make_overhang_table),
     ("make_uncovered_rim_table", plinth_mesh::make_uncovered_rim_table),
@@ -41,6 +41,8 @@ const FIXTURES: [(&str, Builder); 6] = [
     ("make_tall_stilt_plate", plinth_mesh::make_tall_stilt_plate),
     ("make_lonely_peak", plinth_mesh::make_lonely_peak),
     ("make_brace_pair", plinth_mesh::make_brace_pair),
+    // The congestion lane's own (2026-09-06).
+    ("make_laid_tube", plinth_mesh::make_laid_tube),
 ];
 
 fn main() -> ExitCode {

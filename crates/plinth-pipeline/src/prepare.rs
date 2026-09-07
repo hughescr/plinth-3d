@@ -2596,6 +2596,50 @@ fn print_sweep_disclosure(
         report.tip_column_roots_offered,
         report.tip_column_root_load_mm2,
     );
+    // **THE CONGESTION LANE, PUBLISHED PER RUN** (owner ruling, 2026-09-06:
+    // "spread some of the load back upwards to higher-landing supports"). The
+    // footprint's crowding before and after, what each remedy did, and how much
+    // section actually left the model's own silhouette.
+    let jam = &report.congestion_lane;
+    println!(
+        "[sweep {model}] congestion lane: {} plate roots; congestion {:.4} -> {:.4} at lane exit \
+         -> {:.4} on the finished field (under the silhouette {:.4} -> {:.4} -> {:.4}); \
+         overlapping root pairs {} -> {} -> {}; cells under \
+         3+ roots {} -> {} (deepest stack {} -> {}); remedies over {} round(s): {} roots \
+         leaned outward, {} flank arms inserted at shelf layer {} ({} cover cells), \
+         {:.4} mm2 of section moved outside the silhouette, {:.4} mm2 of load carried to \
+         the plate by the flank arms; {} outward cells refused, {} flank seats refused{}",
+        jam.after.all.roots,
+        jam.before.all.ratio,
+        jam.at_lane_exit.all.ratio,
+        jam.after.all.ratio,
+        jam.before.under_silhouette.ratio,
+        jam.at_lane_exit.under_silhouette.ratio,
+        jam.after.under_silhouette.ratio,
+        jam.before.all.overlap_pairs,
+        jam.at_lane_exit.all.overlap_pairs,
+        jam.after.all.overlap_pairs,
+        jam.before.all.stack_max,
+        jam.after.all.stack_max,
+        jam.before.all.stack_depth_max,
+        jam.after.all.stack_depth_max,
+        jam.rounds_used,
+        jam.arms_leaned,
+        jam.arms_inserted,
+        jam.shelf_layer,
+        jam.shelf_cover_cells,
+        jam.section_moved_outside_silhouette_mm2,
+        jam.flank_load_at_plate_mm2,
+        jam.outward_cells_refused,
+        jam.flank_seats_refused,
+        if !jam.enabled {
+            " [LANE DISABLED]"
+        } else if jam.still_congested {
+            " [STILL CONGESTED: a WARNING on an emitted file, never a refusal]"
+        } else {
+            ""
+        },
+    );
     // **THE SLENDERNESS LANE, PUBLISHED PER RUN** (owner ruling, 2026-09-05).
     // The ratio in force, what was over the limit before any remedy, what each
     // remedy did, and the worst run left standing against its own limit — so

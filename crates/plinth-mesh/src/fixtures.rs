@@ -1452,6 +1452,133 @@ pub fn make_brace_pair() -> Result<Mesh, MeshError> {
     make_peaks_with([2.0, 2.0, 30.0], [6.0, 6.0, 2.0], &[-5.0, 5.0])
 }
 
+/// **The CONGESTION case (2026-09-06): a horizontal tube, 20 mm across and
+/// 40 mm long, standing on two 3 mm feet so that no orientation search can lay
+/// it any flatter than it already is.**
+///
+/// This is the Cylinder's own defect, made into a fixture. A body lying on its
+/// side routes its whole peel load down through itself to the LINE where it is
+/// lowest, and the area law then puts `peak / X_ALLOWED` of arm section on that
+/// line however the arms are arranged. Merging cannot thin it — a merge
+/// re-routes load and never removes it, and the section a load needs is a
+/// property of the load. So the roots stack, and the owner sees "chock-full of
+/// overlapping thick supports" at the bottom of the piece.
+///
+/// The feet are what make the fixture honest. Without them the orientation
+/// search stands the tube on an end and the crowded line never exists; on two
+/// 3 mm feet the flat-bottomed pose is the only one that is not a much worse
+/// overhang, so the case is a property of the MODEL rather than of the search.
+///
+/// The tube is a 32-sided prism whose section is turned half a step, so it has
+/// a flat bottom strip about 1.96 mm wide for the feet to meet face to face —
+/// the same face-to-face contact [`make_overhang_table`] uses between its legs
+/// and its top, and never an overlap the parity fill would have to resolve.
+/// Every coordinate is snapped to an exact `f32`, because `write_binary_stl`
+/// refuses anything else and a fixture that cannot be exported cannot be run
+/// through the production CLI.
+pub fn make_laid_tube() -> Result<Mesh, MeshError> {
+    make_laid_tube_with(10.0, 40.0, 3.0, 32)
+}
+
+/// The generator behind [`make_laid_tube`], so the fixture's dimensions are
+/// arguments rather than literals buried in a mesh.
+///
+/// `sections` is the prism's side count and must be a positive multiple of 4,
+/// which is what puts a flat facet at the bottom and keeps the section
+/// symmetric about both axes.
+pub fn make_laid_tube_with(
+    radius_mm: f64,
+    length_mm: f64,
+    foot_height_mm: f64,
+    sections: usize,
+) -> Result<Mesh, MeshError> {
+    validate_positive("tube.radius", radius_mm)?;
+    validate_positive("tube.length", length_mm)?;
+    validate_positive("tube.foot_height", foot_height_mm)?;
+    if sections < 8 || !sections.is_multiple_of(4) {
+        return Err(MeshError::InvalidPositiveFixtureParameter {
+            parameter: "tube.sections",
+            value: sections as f64,
+        });
+    }
+    // Exactly representable in f32, or `write_binary_stl` refuses the fixture.
+    // Snapping is done ONCE, here, so no coordinate downstream can be a value
+    // that survives in f64 and dies at the file boundary.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the truncation IS the operation: `write_binary_stl` refuses any coordinate that \
+              does not round-trip through f32, so every vertex is snapped to the nearest f32 here \
+              rather than dying at the file boundary"
+    )]
+    let snap = |value: f64| f64::from(value as f32);
+
+    let half_length = snap(length_mm / 2.0);
+    let axis_z = snap(foot_height_mm + radius_mm * (core::f64::consts::PI / sections as f64).cos());
+    let step = 2.0 * core::f64::consts::PI / sections as f64;
+    // Half a step of turn, so the lowest two vertices sit at the same height
+    // and the prism has a flat bottom facet rather than a bottom EDGE.
+    let ring: Vec<[f64; 2]> = (0..sections)
+        .map(|section| {
+            let theta = -core::f64::consts::FRAC_PI_2 + (section as f64 + 0.5) * step;
+            [snap(radius_mm * theta.cos()), snap(axis_z + radius_mm * theta.sin())]
+        })
+        .collect();
+    let bottom_half_width = ring
+        .iter()
+        .map(|point| point[0].abs())
+        .fold(0.0_f64, f64::max)
+        .min(snap(radius_mm * (step / 2.0).sin()));
+
+    let mut verts: Vec<[f64; 3]> = Vec::with_capacity(2 * sections + 16);
+    let mut tris: Vec<[u32; 3]> = Vec::with_capacity(4 * sections + 24);
+    // Two rings: the far end first, then the near end, so a side quad is
+    // `(far[i], far[i+1], near[i+1], near[i])`.
+    for end in [-half_length, half_length] {
+        for point in &ring {
+            verts.push([point[0], end, point[1]]);
+        }
+    }
+    let wrap = |section: usize| u32::try_from((section + 1) % sections).unwrap_or(0);
+    for section in 0..sections {
+        let here = u32::try_from(section).map_err(|_| MeshError::FixtureIndexOverflow)?;
+        let next = wrap(section);
+        let far_here = here;
+        let far_next = next;
+        let near_here = here + u32::try_from(sections).unwrap_or(0);
+        let near_next = next + u32::try_from(sections).unwrap_or(0);
+        tris.push([far_here, near_here, near_next]);
+        tris.push([far_here, near_next, far_next]);
+    }
+    // The two end caps, as fans about vertex 0 of each ring. A convex section
+    // makes a fan a valid triangulation without any further test.
+    for section in 1..sections - 1 {
+        let here = u32::try_from(section).map_err(|_| MeshError::FixtureIndexOverflow)?;
+        let offset = u32::try_from(sections).unwrap_or(0);
+        // The far cap faces -Y and the near cap +Y, so the two fans wind
+        // OPPOSITE ways round the same ring. Getting this backwards makes a
+        // mesh that closes and is inside-out, which the hollow stage refuses as
+        // "not one closed, consistently oriented solid" — measured, 2026-09-06.
+        tris.push([0, here, here + 1]);
+        tris.push([offset, offset + here + 1, offset + here]);
+    }
+
+    // The two feet, meeting the flat bottom strip face to face.
+    let foot = [
+        snap(bottom_half_width),
+        snap(length_mm / 8.0),
+        snap(foot_height_mm),
+    ];
+    for centre_y in [snap(-length_mm * 0.3), snap(length_mm * 0.3)] {
+        append_box(
+            &mut verts,
+            &mut tris,
+            foot,
+            [0.0, centre_y, snap(foot_height_mm / 2.0)],
+        )?;
+    }
+    Mesh::new(verts, tris)
+}
+
 /// One stalk-and-cap peak per entry in `centres_x`, all on the same plate.
 ///
 /// The generator behind [`make_lonely_peak`] and [`make_brace_pair`], so the

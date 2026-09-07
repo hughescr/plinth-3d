@@ -42,6 +42,7 @@
 #![forbid(unsafe_code)]
 
 pub mod adapter;
+pub mod congestion;
 pub mod down_sweep;
 pub mod drain;
 pub mod grid;
@@ -63,6 +64,7 @@ use plinth_support::perception::{slice_stack, SliceStackLimits};
 use thiserror::Error;
 
 pub use adapter::{arms_of, to_primitives, SweepEmission};
+pub use congestion::{CongestionCensus, CongestionOutcome, CongestionReport};
 pub use drain::{DrainKeepOut, DrainSpec, DrainVerdict, EscapeReport};
 pub use limits::SweepLimits;
 pub use model_landing::{model_landing_scar, model_landings, ModelLanding, ModelLandingScar};
@@ -459,6 +461,24 @@ pub struct SweepPolicy {
     /// `SLENDERNESS_LIMIT_RATIO`, the largest unbraced-run length over radius a
     /// member may run before a lateral tie is required.
     pub slenderness_ratio: f64,
+    /// `FLARE_R_FACTOR`, the registered factor the emitter applies to a plate
+    /// arm's root radius when it lays the root flare down. The congestion
+    /// census measures the disc the emitter ACTUALLY puts on the plate, so it
+    /// reads the same number the lowering does rather than the bare radius.
+    pub flare_r_factor: f64,
+    /// Whether the congestion lane runs at all. **Sabotage knob**: with it
+    /// false no footprint is measured for crowding, no root is re-landed and
+    /// no flank arm is inserted, which is the field this engine placed before
+    /// 2026-09-06.
+    pub congestion: bool,
+    /// Whether remedy 1 -- re-landing a stacked plate root on clear plate
+    /// outside the silhouette -- may fire. **On in production.** The drill
+    /// turns it off and watches the footprint stay congested.
+    pub congestion_outward_lean: bool,
+    /// Whether remedy 2 -- new arms seated on the body's flanks -- may fire.
+    /// **On in production.** The drill turns it off and watches the warning
+    /// survive, with NEVER fewer arms than before.
+    pub congestion_flank_arms: bool,
     /// Whether the slenderness lane runs at all. **Sabotage knob**: with it
     /// false no run is measured, no remedy is applied and the field is exactly
     /// the field this engine placed before 2026-09-06, which is what the
@@ -526,6 +546,10 @@ impl SweepPolicy {
             removal_span_check: true,
             tip_column_roots: true,
             slenderness_ratio: placeholders.slenderness_limit_ratio().diagnostic().get(),
+            flare_r_factor: placeholders.flare_r_factor().diagnostic().get(),
+            congestion: true,
+            congestion_outward_lean: true,
+            congestion_flank_arms: true,
             slenderness: true,
             slenderness_merge: true,
             slenderness_brace: true,
@@ -643,6 +667,34 @@ impl SweepPolicy {
         self.slenderness_merge = false;
         self.slenderness_brace = false;
         self.slenderness_mast = false;
+        self
+    }
+
+    /// Measure the plate's congestion but change nothing — the field this
+    /// engine placed before 2026-09-06. **Sabotage and comparison only**: it is
+    /// what the "the lane is a no-op on a disc" byte-identity check is taken
+    /// against, and nothing in the pipeline sets it.
+    #[must_use]
+    pub const fn without_congestion(mut self) -> Self {
+        self.congestion = false;
+        self
+    }
+
+    /// Refuse remedy 1, the outward lean. **Sabotage only**: the drill sets it
+    /// and the footprint must stay congested, or the flank arms must be forced
+    /// to carry the relief instead.
+    #[must_use]
+    pub const fn without_congestion_outward_lean(mut self) -> Self {
+        self.congestion_outward_lean = false;
+        self
+    }
+
+    /// Refuse remedy 2, the flank arms. **Sabotage only**: the drill sets it
+    /// and a still-congested footprint must come out as a WARNING on an
+    /// emitted file, with NEVER fewer arms than the field had before.
+    #[must_use]
+    pub const fn without_congestion_flank_arms(mut self) -> Self {
+        self.congestion_flank_arms = false;
         self
     }
 }
@@ -911,6 +963,60 @@ pub fn run_sweep_with_drains(
     // was there and never bit.
     set_interior(&mut struts, &history);
 
+    // --- congestion: spread the footprint, then shed load to the flanks ----
+    //
+    // BEFORE the slenderness lane, deliberately. This lane MOVES a root
+    // sideways and INSERTS long leaning arms, both of which change what is
+    // slender and what is tied; running it afterwards would leave every member
+    // it touched un-measured against `S` until the next run of the engine.
+    // Slenderness is the last word on the geometry, so it goes last.
+    //
+    // Bounded by the SAME round count the down-sweep's load insertion is
+    // bounded by (`InsertionPolicy::max_rounds`), with the same down-sweep
+    // re-run after every round, because a moved root and an inserted arm are
+    // both un-sized until it runs.
+    let congestion_context = congestion::CongestionContext {
+        grid: &grid,
+        history: &history,
+        keep_out: &keep_out,
+        lean: &law,
+        layer_height_mm: height,
+        layers,
+        flare_factor: policy.flare_r_factor,
+        tip_radius_min_mm: policy.tip_radius_min_mm,
+        hex_separation_mm: up_sweep::hex_separation_mm(lamina_reach_mm),
+        outward_lean: policy.congestion_outward_lean,
+        flank_arms: policy.congestion_flank_arms,
+        max_struts: policy.limits.max_struts,
+    };
+    let mut congestion_outcome = congestion::CongestionOutcome {
+        enabled: policy.congestion,
+        before: congestion::measure(&grid, &history, &struts, policy.flare_r_factor),
+        ..congestion::CongestionOutcome::default()
+    };
+    if policy.congestion {
+        for _ in 0..congestion::rounds_allowed(insertion) {
+            let census = congestion::measure(&grid, &history, &struts, policy.flare_r_factor);
+            if !census.all.congested() {
+                break;
+            }
+            let moved =
+                congestion::apply_remedies(&congestion_context, &mut struts, &mut congestion_outcome);
+            if moved == 0 {
+                break;
+            }
+            congestion_outcome.rounds_used += 1;
+            outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
+            set_interior(&mut struts, &history);
+        }
+    }
+    // What THIS lane left, before slenderness has its say. Published beside the
+    // finished-field census so the two are never confused: masts are
+    // plate-rooted too, and the difference between these two numbers is what
+    // the slenderness lane put on the plate afterwards.
+    congestion_outcome.at_lane_exit =
+        congestion::measure(&grid, &history, &struts, policy.flare_r_factor);
+
     // --- slenderness: merge, then |X|, then a mast, then a warning ---------
     //
     // Here, and not inside `down_sweep::run`, for the reason `slenderness.rs`
@@ -998,6 +1104,21 @@ pub fn run_sweep_with_drains(
         }
     }
 
+    // The congestion census AFTER, from the same function that measured it
+    // before, read off the FINISHED field — so what is published describes the
+    // footprint this file actually lays on the plate rather than the one the
+    // lane left mid-iterate. The load the flank arms moved is read the same
+    // way: their own carried ledger where they meet the plate.
+    congestion_outcome.after = congestion::measure(&grid, &history, &struts, policy.flare_r_factor);
+    congestion_outcome.still_congested = congestion_outcome.after.all.congested();
+    congestion_outcome.flank_load_at_plate_mm2 = congestion_outcome
+        .inserted_ids
+        .iter()
+        .filter_map(|id| struts.get(*id as usize))
+        .filter(|strut| matches!(strut.landing, Landing::Plate))
+        .filter_map(|strut| strut.carried_mm2.first().copied())
+        .sum();
+
     // The escape check runs on the FINISHED field, struts and all, because a
     // check that ran before sizing would be answering about a field nobody
     // prints. Its verdict is published and warned on; it never withdraws an
@@ -1042,6 +1163,7 @@ pub fn run_sweep_with_drains(
     report.descent_junctions_mid_shaft = junctions_mid_shaft_descent;
     report.shaft_spans_recorded = history.shaft_spans.len();
     report.slenderness_lane = slenderness_outcome;
+    report.congestion_lane = congestion_outcome;
     report.counters.lean_candidates_priced = lean_candidates_priced;
 
     // ------------------------------------------------ what each tip seats INTO
@@ -1611,6 +1733,7 @@ fn build_report(
         descent_junctions_mid_shaft: 0,
         shaft_spans_recorded: 0,
         slenderness_lane: crate::slenderness::SlendernessOutcome::default(),
+        congestion_lane: crate::congestion::CongestionOutcome::default(),
         junctions_at_parent_top,
         junctions_mid_shaft,
         support_volume_mm3,

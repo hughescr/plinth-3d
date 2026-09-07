@@ -672,7 +672,7 @@ fn chamfer_isotropy() -> f64 {
 /// `√3 · ρ` is the spacing at which discs of radius `ρ` exactly cover the plane
 /// (`docs/physics.md`:128-135); `ρ` here is the registered reach reduced to the
 /// radius the chamfer metric actually guarantees.
-fn hex_separation_mm(reach_mm: f64) -> f64 {
+pub(crate) fn hex_separation_mm(reach_mm: f64) -> f64 {
     3.0_f64.sqrt() * reach_mm / chamfer_isotropy()
 }
 

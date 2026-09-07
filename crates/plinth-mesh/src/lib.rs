@@ -31,6 +31,7 @@ pub use fixtures::{
     make_box_default, make_doubled_sheet_box, make_dual_cavity_pawn,
     make_dual_cavity_pawn_with_throat_radius, make_duplicated_face_box, make_dust_shard_box,
     make_brace_pair, make_cavity_box, make_disc_fan, make_disc_uniform, make_edge_shared_boxes,
+    make_laid_tube, make_laid_tube_with,
     make_lonely_peak, make_overhang_table,
     make_overhang_table_thin, make_overhang_table_with, make_pinched_boxes, make_recessed_disc,
     make_raking_blade, make_raking_blade_with, make_thin_fin, make_thin_fin_with, make_toed_slab,

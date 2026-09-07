@@ -247,6 +247,10 @@ pub struct SweepRunReport {
     /// The slenderness lane, published in full so the operator can see what
     /// the constraint did rather than infer it (owner's ruling of 2026-09-05).
     pub slenderness_lane: crate::slenderness::SlendernessOutcome,
+    /// The congestion lane, published in full for the same reason: the operator
+    /// sees what the footprint measured and what the remedies did, rather than
+    /// inferring it from an arm count.
+    pub congestion_lane: crate::congestion::CongestionOutcome,
     /// **The resin the supports cost**, in mm³: `π r²` integrated along every
     /// arm's own axis, layer by layer, with a leaned layer measured along its
     /// slant rather than its rise.
