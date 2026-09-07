@@ -160,9 +160,13 @@ fn deleting_the_keep_out_walls_the_outlet_in() {
     // bore, so the same plain field is run with the landing rule switched off
     // and the two clearances compared. It is the only place in this suite that
     // grades the landing rule as a DRAINAGE mechanism.
+    // The slenderness lane is deleted on BOTH sides (2026-09-06): with it on,
+    // switching shaft landings off leaves more members over their own limit and
+    // the lane answers with braces, which land on shafts by construction and
+    // would make this knob look broken. The claim here is about the DESCENT.
     let straight = harness::sweep_with_drains(
         &flat_underside_slab(),
-        &sabotaged.without_shaft_landings(),
+        &sabotaged.without_shaft_landings().without_slenderness(),
         &[drain],
     );
     let open = escape.verdicts[0].best_clearance_mm;

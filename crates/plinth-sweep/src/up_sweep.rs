@@ -83,6 +83,21 @@ pub struct ColumnHistory {
     /// Highest layer + 1 at which this column ever held model, filled in a
     /// post-pass because the interior test needs to look UP.
     pub column_max_model: Vec<u32>,
+    /// Head of each column's MODEL-span chain; `u32::MAX` means this column
+    /// never held cured material at any layer.
+    ///
+    /// The same run-length shape [`Self::shaft_head`] uses, and for the same
+    /// reason: a per-(cell, layer) occupancy bitmap is 91 MB on Round 100
+    /// before anything is placed, while a contiguous cured run costs one entry
+    /// however many layers it spans. It exists because `top_model` is a RUNNING
+    /// state — by the end of the up-sweep it holds each column's topmost model
+    /// layer OVERALL — so a pass that runs after the sweep (the slenderness
+    /// lane) cannot use it to ask "is there model HERE, at this layer" and
+    /// would refuse every path on the strength of material far above it.
+    pub model_head: Vec<u32>,
+    /// Every `(column, contiguous cured run)` interval, in one flat arena.
+    /// `ShaftSpan::id` is unused here and is always zero.
+    pub model_spans: Vec<ShaftSpan>,
     /// Head of each column's shaft-span chain; `u32::MAX` means no arm crosses
     /// this column at any layer.
     pub shaft_head: Vec<u32>,
@@ -102,6 +117,8 @@ impl ColumnHistory {
             column_max_model: vec![0; cells],
             shaft_head: vec![u32::MAX; cells],
             shaft_spans: Vec::new(),
+            model_head: vec![u32::MAX; cells],
+            model_spans: Vec::new(),
         }
     }
 
@@ -190,6 +207,66 @@ impl ColumnHistory {
             }
         }
         best
+    }
+
+    /// Whether CURED MODEL stands in this column at exactly this layer.
+    ///
+    /// The sharp question [`Self::shaft_blocks`] asks about arms, asked about
+    /// the model. `top_model` answers a different one — "is there model at or
+    /// above here" — which is the right question DURING the up-sweep, where
+    /// the history has only been told about the layers already passed, and the
+    /// wrong one afterwards, where every column under the model answers yes.
+    #[must_use]
+    pub fn model_blocks(&self, cell: usize, layer: usize) -> bool {
+        let Some(&head) = self.model_head.get(cell) else {
+            return false;
+        };
+        let mut slot = head;
+        while slot != u32::MAX {
+            let span = self.model_spans[slot as usize];
+            slot = span.next;
+            if (span.k_bottom as usize) <= layer && layer <= span.k_top as usize {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Record one layer's cured cells as model spans, extending the run each
+    /// column is already in rather than opening a new one.
+    ///
+    /// Called from [`commit_layer_history`] BEFORE `top_model` is restamped,
+    /// because "was this column cured one layer up" is exactly what the old
+    /// stamp still says.
+    fn stamp_model(&mut self, layer: usize, cover: &[bool]) {
+        let k = u32::try_from(layer).unwrap_or(u32::MAX);
+        for cell in 0..cover.len() {
+            if !cover[cell] {
+                continue;
+            }
+            let head = self.model_head[cell];
+            // `top_model` holds layer + 1 of the topmost cured cell below, so
+            // it reads exactly `layer` when the layer immediately under this
+            // one was cured and this run continues.
+            if head != u32::MAX && self.top_model[cell] == k {
+                self.model_spans[head as usize].k_top = k;
+                continue;
+            }
+            let slot = u32::try_from(self.model_spans.len()).unwrap_or(u32::MAX);
+            if slot == u32::MAX {
+                // The arena is full. EMIT AND WARN: an unrecorded run makes a
+                // later path check MORE permissive, never less, and the run
+                // report's own residual counters are what would show it.
+                continue;
+            }
+            self.model_spans.push(ShaftSpan {
+                k_bottom: k,
+                k_top: k,
+                id: 0,
+                next: head,
+            });
+            self.model_head[cell] = slot;
+        }
     }
 
     /// Whether an arm OTHER than `except` stands in this column at this layer.
@@ -504,6 +581,9 @@ pub fn place_layer(
                 grid.center_x_mm(cell % cols),
                 grid.center_y_mm(cell / cols),
             ],
+            kind: crate::StrutKind::Arm,
+            min_radius_mm: 0.0,
+            seat_on_strut: None,
             k_top: layer,
             k_bottom,
             landing,
@@ -1100,6 +1180,7 @@ pub fn commit_layer_history(
     reach: &ReachState,
     history: &mut ColumnHistory,
 ) {
+    history.stamp_model(layer, cover);
     let stamp = u32::try_from(layer + 1).unwrap_or(u32::MAX);
     for cell in 0..cover.len() {
         if cover[cell] {

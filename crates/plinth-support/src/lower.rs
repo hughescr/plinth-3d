@@ -662,6 +662,16 @@ pub struct SweepArm {
     /// of contact, with nothing at all emitted inside the model.
     pub available_seat_depth_mm: f64,
     pub landing: SweepArmLanding,
+    /// Whether this member's TOP is a seat INTO the model.
+    ///
+    /// True for every support arm, which is what the tip ball exists for. False
+    /// for the two members the slenderness lane adds: a brace's top seats on
+    /// another arm's shaft, and a mast's top stands in free space. Neither
+    /// touches the model, so neither is given a ball -- a ball there would be a
+    /// contact sphere against nothing, and on a brace it would also be a lump
+    /// the owner has to cut off a member that was never meant to be removed
+    /// separately.
+    pub seats_into_model: bool,
 }
 
 /// What lowering one sweep field produced, and everything it had to warn about.
@@ -1109,69 +1119,85 @@ fn lower_one_sweep_arm(
     let Ok(ball_radius) = positive(config.tip_ball_factor.get() * tip_radius.get()) else {
         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
     };
-    // THE SEAT. Until 2026-09-05 the ball's pole sat exactly on `arm.seat_mm`
-    // — the BOTTOM plane of the first cured model lamina — so the tip touched
-    // the model at a single point and carried an area of zero. It is now
-    // driven INTO the model by the seat law every other seating family in this
-    // crate reads (`contact::seat_depth_of`), bounded by the material that is
-    // there.
-    let (seated_seat, mut tip_seat) = seat_tip(arm, unit, tip_radius.get(), config);
-    let center_raw: [f64; 3] =
-        std::array::from_fn(|index| seated_seat[index] + ball_radius.get() * unit[index]);
-    let (Ok(center), Ok(unit_finite), Ok(base)) =
-        (finite3(center_raw), finite3(unit), finite3(arm.base_mm))
-    else {
-        return ArmLowering::refused(ArmOutcome::InvalidGeometry);
-    };
-    let Ok(geometry) = SphereGeometry::tip(center, unit_finite) else {
-        return ArmLowering::refused(ArmOutcome::InvalidGeometry);
-    };
-    // CLIP, NEVER RETRACT (owner ruling, 2026-09-05). The ball is at the full
-    // depth the area law asked for; if any of it now stands above the far face
-    // of the cured run it strikes, that part is not emitted. The test is on the
-    // ball's own topmost point — `centre_z + R`, which for a leaned arm is
-    // ABOVE its seat-side pole — so a tilted tip cannot slip past it.
-    let ball_top_z_mm = center[2].get() + ball_radius.get();
-    let ball_bottom_z_mm = center[2].get() - ball_radius.get();
-    let geometry = if ball_top_z_mm > tip_seat.far_face_z_mm {
-        // A clip plane at or below the ball's own bottom would erase the tip
-        // entirely. The seat law cannot produce one — the travel is capped at
-        // the ball's diameter and the plane never falls below the seat surface,
-        // which leaves at least the ball's own radius under it — so reaching
-        // here means a caller handed in a seat and a thickness that disagree.
-        // Emit and warn: this ARM is dropped and counted, the field still
-        // emits, and no ball is silently left protruding.
-        if tip_seat.far_face_z_mm <= ball_bottom_z_mm {
-            return ArmLowering::refused(ArmOutcome::InvalidGeometry);
-        }
-        let Ok(clip_z) = Finite::new(tip_seat.far_face_z_mm) else {
-            return ArmLowering::refused(ArmOutcome::InvalidGeometry);
-        };
-        let Ok(clipped) = geometry.clipped_above_z(clip_z) else {
-            return ArmLowering::refused(ArmOutcome::InvalidGeometry);
-        };
-        tip_seat.clipped = true;
-        clipped
-    } else {
-        geometry
-    };
-    // The producer's own poles. A second implementation of this arithmetic is
-    // exactly the defect `is_semantically_valid` exists to catch.
-    let Ok((sphere_start, sphere_end)) = geometry.canonical_poles(ball_radius) else {
-        return ArmLowering::refused(ArmOutcome::InvalidGeometry);
-    };
+    // A MEMBER THAT NEVER TOUCHES THE MODEL GETS NO BALL (2026-09-06). A
+    // brace's top seats on another arm's shaft and a mast's top stands in free
+    // space; there is no model surface for a contact sphere to bear on, and
+    // emitting one would put a lump on a member that is not a support tip. The
+    // taper then starts at the seat point itself. Every support arm takes the
+    // branch below unchanged, so this is the identity on every field the
+    // slenderness lane did not touch.
     let mut staged: Vec<SupportPrimitive> = Vec::with_capacity(3);
-    staged.push(SupportPrimitive {
-        segment_kind: SupportSegmentKind::ContactSphere,
-        start_mm: sphere_start,
-        end_mm: sphere_end,
-        start_radius_mm: ball_radius,
-        end_radius_mm: ball_radius,
-        contact_depth_mm: None,
-        ring_normal: FrustumRingNormal::SegmentAxis,
-        sphere_geometry: Some(geometry),
-    });
+    let (seated_seat, center, seat) = if arm.seats_into_model {
+        // THE SEAT. Until 2026-09-05 the ball's pole sat exactly on `arm.seat_mm`
+        // — the BOTTOM plane of the first cured model lamina — so the tip touched
+        // the model at a single point and carried an area of zero. It is now
+        // driven INTO the model by the seat law every other seating family in this
+        // crate reads (`contact::seat_depth_of`), bounded by the material that is
+        // there.
+        let (seated_seat, mut tip_seat) = seat_tip(arm, unit, tip_radius.get(), config);
+        let center_raw: [f64; 3] =
+            std::array::from_fn(|index| seated_seat[index] + ball_radius.get() * unit[index]);
+        let (Ok(center), Ok(unit_finite)) = (finite3(center_raw), finite3(unit)) else {
+            return ArmLowering::refused(ArmOutcome::InvalidGeometry);
+        };
+        let Ok(geometry) = SphereGeometry::tip(center, unit_finite) else {
+            return ArmLowering::refused(ArmOutcome::InvalidGeometry);
+        };
+        // CLIP, NEVER RETRACT (owner ruling, 2026-09-05). The ball is at the full
+        // depth the area law asked for; if any of it now stands above the far face
+        // of the cured run it strikes, that part is not emitted. The test is on the
+        // ball's own topmost point — `centre_z + R`, which for a leaned arm is
+        // ABOVE its seat-side pole — so a tilted tip cannot slip past it.
+        let ball_top_z_mm = center[2].get() + ball_radius.get();
+        let ball_bottom_z_mm = center[2].get() - ball_radius.get();
+        let geometry = if ball_top_z_mm > tip_seat.far_face_z_mm {
+            // A clip plane at or below the ball's own bottom would erase the tip
+            // entirely. The seat law cannot produce one — the travel is capped at
+            // the ball's diameter and the plane never falls below the seat surface,
+            // which leaves at least the ball's own radius under it — so reaching
+            // here means a caller handed in a seat and a thickness that disagree.
+            // Emit and warn: this ARM is dropped and counted, the field still
+            // emits, and no ball is silently left protruding.
+            if tip_seat.far_face_z_mm <= ball_bottom_z_mm {
+                return ArmLowering::refused(ArmOutcome::InvalidGeometry);
+            }
+            let Ok(clip_z) = Finite::new(tip_seat.far_face_z_mm) else {
+                return ArmLowering::refused(ArmOutcome::InvalidGeometry);
+            };
+            let Ok(clipped) = geometry.clipped_above_z(clip_z) else {
+                return ArmLowering::refused(ArmOutcome::InvalidGeometry);
+            };
+            tip_seat.clipped = true;
+            clipped
+        } else {
+            geometry
+        };
+        // The producer's own poles. A second implementation of this arithmetic is
+        // exactly the defect `is_semantically_valid` exists to catch.
+        let Ok((sphere_start, sphere_end)) = geometry.canonical_poles(ball_radius) else {
+            return ArmLowering::refused(ArmOutcome::InvalidGeometry);
+        };
+        staged.push(SupportPrimitive {
+            segment_kind: SupportSegmentKind::ContactSphere,
+            start_mm: sphere_start,
+            end_mm: sphere_end,
+            start_radius_mm: ball_radius,
+            end_radius_mm: ball_radius,
+            contact_depth_mm: None,
+            ring_normal: FrustumRingNormal::SegmentAxis,
+            sphere_geometry: Some(geometry),
+        });
 
+        (seated_seat, center, Some(tip_seat))
+    } else {
+        let Ok(center) = finite3(arm.seat_mm) else {
+            return ArmLowering::refused(ArmOutcome::InvalidGeometry);
+        };
+        (arm.seat_mm, center, None)
+    };
+    let Ok(base) = finite3(arm.base_mm) else {
+        return ArmLowering::refused(ArmOutcome::InvalidGeometry);
+    };
     let outcome = match arm.landing {
         SweepArmLanding::Landed => {
             if distance(center, base) <= ZERO_LENGTH_MM {
@@ -1255,10 +1281,7 @@ fn lower_one_sweep_arm(
         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
     }
     out.append(&mut staged);
-    ArmLowering {
-        outcome,
-        seat: Some(tip_seat),
-    }
+    ArmLowering { outcome, seat }
 }
 
 #[cfg(test)]

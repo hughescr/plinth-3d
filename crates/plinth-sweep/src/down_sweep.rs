@@ -844,7 +844,13 @@ pub fn run(
                 // red.
                 let carried = combine_carried(previous, own, merged);
                 struts[index].carried_mm2[slot] = carried;
-                let radius = size_arm(carried, sizing);
+                // THE AREA LAW SIZES AN ARM; A BRACE AND A MAST ARE SIZED BY THEIR
+                // OWN STRAIGHTNESS. `min_radius_mm` is zero for every support
+                // arm, so this `max` is the identity on every field the
+                // slenderness lane did not touch. Where it is not zero it is a
+                // MINIMUM and never a cap: a brace that some load does reach
+                // still grows under the area law above it.
+                let radius = size_arm(carried, sizing).max(struts[index].min_radius_mm);
                 struts[index].radius_mm[slot] = radius;
                 if carried > sizing.x_allowed * core::f64::consts::PI * sizing.tip_radius_max_mm
                     * sizing.tip_radius_max_mm
@@ -1148,6 +1154,9 @@ fn insert_for_load(
                     grid.center_x_mm(grid.col_of(cell)),
                     grid.center_y_mm(grid.row_of(cell)),
                 ],
+                kind: crate::StrutKind::Arm,
+                min_radius_mm: 0.0,
+                seat_on_strut: None,
                 k_top: layer + 1,
                 // Still growing: the descent decides where this stops, the
                 // same way `up_sweep::descend` does, and until it does there is

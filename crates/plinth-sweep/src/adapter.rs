@@ -196,6 +196,11 @@ pub fn arms_of(plan: &SweepPlan) -> Vec<SweepArm> {
                     Landing::Plate => SweepArmLanding::Plate,
                     Landing::Model { .. } | Landing::Strut { .. } => SweepArmLanding::Landed,
                 },
+                // A brace seats on another arm and a mast tops out in free
+                // space; neither may be given a tip ball. Every arm the reach
+                // and the area law place seats into the model and is
+                // unchanged.
+                seats_into_model: strut.kind == crate::StrutKind::Arm,
             }
         })
         .collect()

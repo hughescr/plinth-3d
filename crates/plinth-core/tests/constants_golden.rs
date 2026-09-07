@@ -4,7 +4,7 @@ use std::path::Path;
 
 // This is a hand-maintained cross-component inventory. It deliberately does
 // not read the source ledger or the generated Markdown golden.
-const EXPECTED_CONSTANT_IDS: [&str; 327] = [
+const EXPECTED_CONSTANT_IDS: [&str; 328] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -228,6 +228,7 @@ const EXPECTED_CONSTANT_IDS: [&str; 327] = [
     "SATURN_RELEASE_FILM_THICKNESS_MM",
     "SATURN_RELEASE_FRONT_SWEEP_DIRECTION",
     "SCAR_COST_WEIGHT",
+    "SLENDERNESS_LIMIT_RATIO",
     "SLICE_UNION_MAX_ABS_MM",
     "SLICE_UNION_QUANTUM_MM",
     "SPACING_FLOOR_MM",
@@ -374,7 +375,7 @@ fn global_registry_is_one_complete_atomic_306_constant_publication() {
             }
             counts
         });
-    assert_eq!(classes, [30, 16, 281, 0]);
+    assert_eq!(classes, [30, 16, 282, 0]);
 }
 
 #[test]

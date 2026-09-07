@@ -244,6 +244,9 @@ pub struct SweepRunReport {
     /// size of the shaft index, published so its cost is a number rather than
     /// a claim.
     pub shaft_spans_recorded: usize,
+    /// The slenderness lane, published in full so the operator can see what
+    /// the constraint did rather than infer it (owner's ruling of 2026-09-05).
+    pub slenderness_lane: crate::slenderness::SlendernessOutcome,
     /// **The resin the supports cost**, in mm³: `π r²` integrated along every
     /// arm's own axis, layer by layer, with a leaned layer measured along its
     /// slant rather than its rise.

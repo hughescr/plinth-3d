@@ -2596,6 +2596,49 @@ fn print_sweep_disclosure(
         report.tip_column_roots_offered,
         report.tip_column_root_load_mm2,
     );
+    // **THE SLENDERNESS LANE, PUBLISHED PER RUN** (owner ruling, 2026-09-05).
+    // The ratio in force, what was over the limit before any remedy, what each
+    // remedy did, and the worst run left standing against its own limit — so
+    // the operator can see what the constraint decided instead of inferring it
+    // from an arm count.
+    let lane = &report.slenderness_lane;
+    println!(
+        "[sweep {model}] slenderness lane: S = {:.1} in force; brace reach {:.3} mm at the \
+         thinnest brace, {:.3} mm at the thickest; {} arms over the limit before remedies \
+         ({} runs); remedies: {} merges forced, {} |X| braces added, {} masts dropped, \
+         {} warnings; {} brace bands refused, {} mast cells refused, {} forced merges put \
+         back by the radius ceiling; longest unbraced run remaining {:.3} mm against its own limit of {:.3} mm{}",
+        lane.ratio,
+        lane.thin_brace_reach_mm,
+        lane.thick_brace_reach_mm,
+        lane.arms_over_limit_before,
+        lane.runs_over_limit_before,
+        lane.merges_forced,
+        lane.braces_added,
+        lane.masts_dropped,
+        lane.warnings.len(),
+        lane.brace_bands_refused,
+        lane.mast_cells_refused,
+        lane.merges_undone_by_radius,
+        lane.longest_run_mm,
+        lane.longest_run_limit_mm,
+        if lane.longest_run_mm > lane.longest_run_limit_mm {
+            " [OVER: a WARNING on an emitted file, never a refusal]"
+        } else {
+            ""
+        },
+    );
+    for warning in lane.warnings.iter().take(20) {
+        println!(
+            "[sweep {model}]   unbraced_run_over_limit: arm {} layers {}..{} runs {:.3} mm \
+             against a limit of {:.3} mm",
+            warning.strut_id,
+            warning.k_lo,
+            warning.k_top,
+            warning.length_mm,
+            warning.limit_mm,
+        );
+    }
     println!(
         "[sweep {model}] slenderness p50 {:.1}:1 max {:.1}:1; overloaded arms {}; \
          model sections over X_ALLOWED {}; peel field {:?} (area {:?}, tilt {:?}); \

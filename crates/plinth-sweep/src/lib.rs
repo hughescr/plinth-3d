@@ -53,6 +53,7 @@ pub mod peel;
 pub mod raster;
 pub mod reach;
 pub mod report;
+pub mod slenderness;
 pub mod tip_landing;
 pub mod up_sweep;
 
@@ -68,6 +69,10 @@ pub use model_landing::{model_landing_scar, model_landings, ModelLanding, ModelL
 pub use orient_demand::{burden_cm2, SweepDemand};
 pub use peel::{PeelFieldMode, PeelFieldStats};
 pub use report::{PathHits, SweepRunReport};
+pub use slenderness::{
+    unbraced_runs, SlendernessContext, SlendernessLaw, SlendernessOutcome, UnbracedRun,
+    UnbracedWarning,
+};
 pub use tip_landing::{tip_contact_scar, tip_landings, TipCharge, TipContactScar, TipLanding};
 
 use grid::{plan_grid, Grid};
@@ -88,6 +93,32 @@ pub enum Landing {
     Strut { id: u32, layer: usize },
 }
 
+/// What ROLE a placed member has, which decides what the emit boundary builds
+/// for it and whether the model ever sees it.
+///
+/// The slenderness lane (2026-09-06) adds two members that are not support
+/// arms: a diagonal that ties two shafts together, and a plate-rooted post that
+/// exists only to be tied to. Both are ordinary struts in the load ledger and
+/// in the descent — no new record type, exactly as the plan of record asks —
+/// but neither TOUCHES THE MODEL, so neither may be given a tip ball, and
+/// neither leaves a scar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum StrutKind {
+    /// A support arm: it seats into the model and carries peel load.
+    #[default]
+    Arm,
+    /// One diagonal of an `|X|` cross-brace. Its top seats ON another arm's
+    /// shaft and its bottom lands on a second arm's shaft; it carries no peel
+    /// load of its own beyond its own material, and it gets no tip ball and no
+    /// root flare at emit.
+    Brace,
+    /// A plate-rooted post dropped where nothing else was within brace reach,
+    /// so that a slender arm has something to brace TO. Its top stands in free
+    /// space, so it gets no tip ball; its bottom is the plate, so it keeps the
+    /// plate-root chain and its flare.
+    Mast,
+}
+
 /// One placed arm.
 ///
 /// A strut is analytic and rasterised on demand; it never exists as a stored
@@ -101,6 +132,31 @@ pub struct SweepStrut {
     pub id: u32,
     pub cell: usize,
     pub center_mm: [f64; 2],
+    /// What this member IS. `Arm` for every strut the reach and the area law
+    /// place; `Brace` and `Mast` only ever come from the slenderness lane.
+    pub kind: StrutKind,
+    /// A radius this member may never be sized BELOW, in mm, whatever load the
+    /// area law routes to it.
+    ///
+    /// `0` for every support arm: an arm's section is the area law's answer and
+    /// nothing else. A brace and a mast carry almost no peel load, so the area
+    /// law would give them the smallest printable tip and their OWN slenderness
+    /// would then be violated by construction — a 4 mm diagonal at a 0.05 mm
+    /// radius is 80:1. This field is that self-consistency, applied at the one
+    /// place the radius is chosen (`down_sweep::run`), and it is a MINIMUM, so
+    /// a brace that some load does reach still grows under the area law.
+    pub min_radius_mm: f64,
+    /// For a brace, the arm its TOP seats on. `None` for everything else.
+    ///
+    /// The bottom end of a brace is its `landing`, which the ledger already
+    /// records; the top end is a lateral tie on a second shaft that no other
+    /// field names, and the whole point of an `|X|` is that both shafts are
+    /// tied at both ends of the band. Recording it here is what lets the
+    /// unbraced-run measurement be recomputed from the finished strut set
+    /// alone, by a test or by the run report, rather than trusted from a
+    /// counter kept while the braces were being placed.
+    pub seat_on_strut: Option<u32>,
+
     pub k_top: usize,
     pub k_bottom: usize,
     pub landing: Landing,
@@ -396,6 +452,25 @@ pub struct SweepPolicy {
     /// and watch the load the arm's own tip holds go uncarried
     /// (`down_sweep::run`).
     pub tip_column_roots: bool,
+    /// `SLENDERNESS_LIMIT_RATIO`, the largest unbraced-run length over radius a
+    /// member may run before a lateral tie is required.
+    pub slenderness_ratio: f64,
+    /// Whether the slenderness lane runs at all. **Sabotage knob**: with it
+    /// false no run is measured, no remedy is applied and the field is exactly
+    /// the field this engine placed before 2026-09-06, which is what the
+    /// byte-identity comparison for the flat discs is taken against.
+    pub slenderness: bool,
+    /// Whether remedy 1 -- re-choosing a descent onto a reachable shaft -- may
+    /// fire. **On in production.** The drill turns it off and watches the same
+    /// arms be tied by `|X|` braces instead.
+    pub slenderness_merge: bool,
+    /// Whether remedy 2 -- the `|X|` cross-brace -- may fire. **On in
+    /// production.** The drill turns it off and watches masts appear.
+    pub slenderness_brace: bool,
+    /// Whether remedy 3 -- dropping a new plate-rooted mast -- may fire.
+    /// **On in production.** The drill turns it off and watches the runs come
+    /// out as warnings, with NEVER fewer arms than before.
+    pub slenderness_mast: bool,
     pub limits: SweepLimits,
 }
 
@@ -446,6 +521,11 @@ impl SweepPolicy {
             drain_keep_out: true,
             removal_span_check: true,
             tip_column_roots: true,
+            slenderness_ratio: placeholders.slenderness_limit_ratio().diagnostic().get(),
+            slenderness: true,
+            slenderness_merge: true,
+            slenderness_brace: true,
+            slenderness_mast: true,
             limits: SweepLimits {
                 cell_layer_budget: placeholders.sweep_cell_layer_budget().diagnostic().get(),
                 ..SweepLimits::production()
@@ -521,6 +601,44 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_tip_column_roots(mut self) -> Self {
         self.tip_column_roots = false;
+        self
+    }
+
+    /// Measure no unbraced run and apply no remedy -- the engine as it stood
+    /// before the owner's 2026-09-05 ruling that long thin verticals "with no
+    /// lateral support will be very unlikely to stay straight". **Sabotage and
+    /// comparison only**; nothing in the pipeline sets it.
+    #[must_use]
+    pub const fn without_slenderness(mut self) -> Self {
+        self.slenderness = false;
+        self
+    }
+
+    /// Refuse remedy 1. **Sabotage only**: the drill sets it and the same arms
+    /// must come out braced instead of merged.
+    #[must_use]
+    pub const fn without_slenderness_merge(mut self) -> Self {
+        self.slenderness_merge = false;
+        self
+    }
+
+    /// Refuse remedies 1 and 2. **Sabotage only**: the drill sets it and the
+    /// same arms must come out with masts dropped beside them.
+    #[must_use]
+    pub const fn without_slenderness_brace(mut self) -> Self {
+        self.slenderness_merge = false;
+        self.slenderness_brace = false;
+        self
+    }
+
+    /// Refuse every remedy but the warning. **Sabotage only**: the drill sets
+    /// it and the runs must come out as named warnings on an emitted file,
+    /// with NEVER fewer arms than the field had before.
+    #[must_use]
+    pub const fn without_slenderness_mast(mut self) -> Self {
+        self.slenderness_merge = false;
+        self.slenderness_brace = false;
+        self.slenderness_mast = false;
         self
     }
 }
@@ -789,6 +907,93 @@ pub fn run_sweep_with_drains(
     // was there and never bit.
     set_interior(&mut struts, &history);
 
+    // --- slenderness: merge, then |X|, then a mast, then a warning ---------
+    //
+    // Here, and not inside `down_sweep::run`, for the reason `slenderness.rs`
+    // states at length: the constraint needs SIZED radii and whole-arm ties,
+    // and remedy 1 re-chooses a descent against the up-sweep's own column
+    // history. This is the iterate that already re-runs the down-sweep after
+    // it moves arms, so a brace is sized and its junction splits its shaft's
+    // ledger by the same pass that sizes everything else.
+    let slenderness_law = if policy.slenderness {
+        slenderness::SlendernessLaw::new(
+            policy.slenderness_ratio,
+            policy.tip_radius_min_mm,
+            policy.tip_radius_max_mm,
+            policy.overhang_centre_deg - 0.5 * policy.overhang_transition_deg,
+        )
+    } else {
+        slenderness::SlendernessLaw::disabled()
+    };
+    let slenderness_context = slenderness::SlendernessContext {
+        grid: &grid,
+        history: &history,
+        keep_out: &keep_out,
+        lean: &law,
+        law: &slenderness_law,
+        shaft_landings: policy.shaft_landings,
+        layer_height_mm: height,
+        layers,
+        merge: policy.slenderness_merge,
+        brace: policy.slenderness_brace,
+        mast: policy.slenderness_mast,
+        max_struts: policy.limits.max_struts,
+    };
+    let mut slenderness_merges_undone = 0_usize;
+    let struts_before_slenderness = struts.len();
+    let slenderness_outcome = slenderness::apply_remedies(&slenderness_context, &mut struts);
+    if slenderness_outcome.merges_forced > 0 || struts.len() > struts_before_slenderness {
+        // Anything the lane moved or added has a stale ledger; the same
+        // down-sweep that sized the field sizes the braces and the masts, and
+        // splits both shafts at every junction the crosses made.
+        outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
+        // AND THE SAME RADIUS CEILING THE OWNER RULED ON, APPLIED TO THE
+        // MERGES THIS LANE FORCED. `unmerge_overgrown` ran before the lane, so
+        // it never saw them; a forced merge hands its trunk the SUM of both
+        // loads, and where the area law cannot grow the trunk far enough the
+        // merge is not admissible however slender the member was. Measured on
+        // `make_overhang_table`, 2026-09-06: nine forced merges drove 1828
+        // overloaded arm-layers, against zero before the lane. The arm goes
+        // back to the descent it recorded, and its run is then reported as a
+        // warning — emit and warn, never refuse.
+        for _ in 0..policy.strut_removal_passes {
+            let undone = unmerge_overgrown(&mut struts, policy.tip_radius_max_mm);
+            if undone == 0 {
+                break;
+            }
+            merges_refused_by_radius += undone;
+            slenderness_merges_undone += undone;
+            outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
+        }
+        set_interior(&mut struts, &history);
+    }
+    // Measured on the FINISHED field, after the re-run, so the published run
+    // lengths belong to the arms this file actually contains.
+    let slenderness_after =
+        slenderness::unbraced_runs(&grid, &struts, height, &slenderness_law);
+    let mut slenderness_outcome = slenderness_outcome;
+    slenderness_outcome.longest_run_mm = 0.0;
+    slenderness_outcome.longest_run_limit_mm = 0.0;
+    slenderness_outcome.merges_undone_by_radius = slenderness_merges_undone;
+    slenderness_outcome.warnings.clear();
+    for run in &slenderness_after {
+        if run.length_mm > slenderness_outcome.longest_run_mm {
+            slenderness_outcome.longest_run_mm = run.length_mm;
+            slenderness_outcome.longest_run_limit_mm = run.limit_mm;
+        }
+        if run.over_limit() {
+            slenderness_outcome
+                .warnings
+                .push(slenderness::UnbracedWarning {
+                    strut_id: run.strut_id,
+                    k_lo: run.k_lo,
+                    k_top: run.k_top,
+                    length_mm: run.length_mm,
+                    limit_mm: run.limit_mm,
+                });
+        }
+    }
+
     // The escape check runs on the FINISHED field, struts and all, because a
     // check that ran before sizing would be answering about a field nobody
     // prints. Its verdict is published and warned on; it never withdraws an
@@ -832,6 +1037,7 @@ pub fn run_sweep_with_drains(
     report.lean_max_step_mm = law.max_step_mm();
     report.descent_junctions_mid_shaft = junctions_mid_shaft_descent;
     report.shaft_spans_recorded = history.shaft_spans.len();
+    report.slenderness_lane = slenderness_outcome;
     report.counters.lean_candidates_priced = lean_candidates_priced;
 
     // ------------------------------------------------ what each tip seats INTO
@@ -1342,9 +1548,17 @@ fn build_report(
             .count(),
     };
     let seat_spacing = spacing_stats(grid, struts);
-    let total_scar: f64 = radii
+    // THE SCAR IS WHAT THE MODEL WEARS, so a member that never touches the
+    // model contributes none. A brace seats on an arm and a mast stands in
+    // free space; neither is given a tip ball at emit, and counting either
+    // here would report a scar on a surface nothing touched.
+    let total_scar: f64 = struts
         .iter()
-        .map(|radius| core::f64::consts::PI * radius * radius)
+        .filter(|strut| strut.kind == crate::StrutKind::Arm)
+        .map(|strut| {
+            let radius = strut.tip_radius_mm();
+            core::f64::consts::PI * radius * radius
+        })
         .sum();
     // The three quantities the 2026-09-05 shaft-landing lane is graded on, all
     // read off the FINISHED field in one pass rather than accumulated during
@@ -1356,9 +1570,15 @@ fn build_report(
     let mut junctions_mid_shaft = 0_usize;
     for strut in struts {
         support_volume_mm3 += strut.volume_mm3(grid, height);
+        // THE JUNCTION CENSUS IS ABOUT THE DESCENT. An `|X|` diagonal lands on
+        // a shaft BY CONSTRUCTION -- that is what a brace IS -- so counting one
+        // here would report the slenderness lane as a descent decision and
+        // would survive the descent's own sabotage knob. The braces are
+        // published in their own right on `slenderness_lane`.
+        let censused = strut.kind == crate::StrutKind::Arm;
         match strut.landing {
             Landing::Plate => plate_contact_area_mm2 += strut.root_contact_area_mm2(),
-            Landing::Strut { id, layer } => {
+            Landing::Strut { id, layer } if censused => {
                 let at_top = struts
                     .get(id as usize)
                     .is_some_and(|parent| layer >= parent.k_top);
@@ -1368,7 +1588,7 @@ fn build_report(
                     junctions_mid_shaft += 1;
                 }
             }
-            Landing::Model { .. } => {}
+            Landing::Model { .. } | Landing::Strut { .. } => {}
         }
     }
 
@@ -1386,6 +1606,7 @@ fn build_report(
         lean_max_step_mm: 0.0,
         descent_junctions_mid_shaft: 0,
         shaft_spans_recorded: 0,
+        slenderness_lane: crate::slenderness::SlendernessOutcome::default(),
         junctions_at_parent_top,
         junctions_mid_shaft,
         support_volume_mm3,
@@ -1434,7 +1655,13 @@ fn build_report(
         uncarried_worst_gap_mm: outcome.uncarried_worst_gap_mm,
         sweeps_disagree: residual_demand_cells == 0 && outcome.uncarried_load_mm2 > 0.0,
         route_not_converged: outcome.route_not_converged,
-        arms_inserted_by_load: struts.iter().filter(|strut| strut.inserted_by_load).count(),
+        // ARMS, not members: a brace and a mast carry the same protective flag
+        // so the removal pass leaves them alone, and counting them here would
+        // report the slenderness lane as load-driven insertion.
+        arms_inserted_by_load: struts
+            .iter()
+            .filter(|strut| strut.inserted_by_load && strut.kind == crate::StrutKind::Arm)
+            .count(),
         insertion_rounds_exhausted: outcome.insertion_rounds_exhausted,
         insertion_geometry_exhausted: outcome.insertion_geometry_exhausted,
         insertion_rounds: outcome.insertion_rounds,
@@ -1561,6 +1788,9 @@ mod removal_tests {
             id,
             cell,
             center_mm: [0.0, 0.0],
+            kind: crate::StrutKind::Arm,
+            min_radius_mm: 0.0,
+            seat_on_strut: None,
             k_top,
             k_bottom,
             landing: Landing::Plate,
@@ -1658,6 +1888,9 @@ mod removal_tests {
             id: 0,
             cell: 0,
             center_mm: [0.0, 0.0],
+            kind: crate::StrutKind::Arm,
+            min_radius_mm: 0.0,
+            seat_on_strut: None,
             k_top: 5,
             k_bottom: 0,
             landing: Landing::Plate,
@@ -1699,6 +1932,9 @@ mod removal_tests {
             id,
             cell,
             center_mm: [0.0, 0.0],
+            kind: crate::StrutKind::Arm,
+            min_radius_mm: 0.0,
+            seat_on_strut: None,
             k_top: 5,
             k_bottom,
             landing: Landing::Plate,

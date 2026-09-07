@@ -31,6 +31,10 @@ fn round_25() -> plinth_mesh::Mesh {
 fn mid_shaft_junctions(plan: &SweepPlan) -> Vec<(&SweepStrut, &SweepStrut, usize)> {
     plan.struts
         .iter()
+        // SUPPORT ARMS ONLY (2026-09-06): an `|X|` diagonal lands on a shaft by
+        // CONSTRUCTION, so counting one here would report the slenderness lane
+        // as a descent decision and would survive the sabotage knob below.
+        .filter(|child| child.kind == plinth_sweep::StrutKind::Arm)
         .filter_map(|child| {
             let Landing::Strut { id, layer } = child.landing else {
                 return None;

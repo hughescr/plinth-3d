@@ -469,18 +469,37 @@ fn round_bases_stay_flat_supported_and_land_the_right_way_up() {
             let hex_count = (demand_face_mm2 / hex_cell_area_mm2()).ceil();
             (hex_count, hex_count * bands::STRUT_COUNT.0, hex_count * bands::STRUT_COUNT.1)
         };
+        // **COUNTED OVER SUPPORT ARMS, NOT OVER MEMBERS** (2026-09-06). The
+        // prediction is a HEX COVERING of a demand face: it says how many
+        // things must touch the model, and it has nothing to say about the
+        // diagonals and masts the slenderness lane adds, which touch no model
+        // at all. Counting `struts_total` here read 350 on Round 50 against a
+        // 243-arm field carrying 50 crosses and 7 masts, and turned a covering
+        // prediction into an accidental cap on bracing.
+        let placed_arms = plan
+            .struts
+            .iter()
+            .filter(|strut| strut.kind == plinth_sweep::StrutKind::Arm)
+            .count();
         assert!(
-            (report.struts_total as f64) >= low && (report.struts_total as f64) <= high,
-            "{}: {} arms against a prediction of {predicted:.1} ({}), band [{low:.1}, {high:.1}] — \
-             same licensed boundary factor as `crates/plinth-sweep/tests/harness/mod.rs`'s \
-             `bands::STRUT_COUNT`",
+            (placed_arms as f64) >= low && (placed_arms as f64) <= high,
+            "{}: {placed_arms} arms against a prediction of {predicted:.1} ({}), band \
+             [{low:.1}, {high:.1}] — same licensed boundary factor as \
+             `crates/plinth-sweep/tests/harness/mod.rs`'s `bands::STRUT_COUNT`",
             disc.name,
-            report.struts_total,
             if disc.pinned_arms.is_some() {
                 "pinned to today's measurement, see Disc::pinned_arms"
             } else {
                 "hex covering of the drafted bottom face"
             },
+        );
+        // And the members that are NOT arms are exactly the ones the lane
+        // published, so a brace can never hide inside this count.
+        assert_eq!(
+            report.struts_total - placed_arms,
+            2 * report.slenderness_lane.braces_added + report.slenderness_lane.masts_dropped,
+            "{}: the members that are not arms and the remedies published disagree",
+            disc.name,
         );
 
         // ---- (5) seat spacing p95 against the kappa-derived lattice pitch --

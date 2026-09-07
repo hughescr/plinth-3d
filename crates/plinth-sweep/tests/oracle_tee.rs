@@ -249,19 +249,33 @@ fn the_slab_load_walks_inward_to_the_legs_and_conserves_through_them() {
     // the LANDING RULE — merging halves the number of roots and doubles their
     // section — and that is asserted here against the same fixture run with
     // the rule switched off. It is a prediction about a quantity nobody tuned.
+    // **BOTH SIDES RUN WITH THE SLENDERNESS LANE OFF** (2026-09-06). Switching
+    // shaft landings off leaves more members over their own slenderness limit,
+    // so the lane answers with more masts, and a mast is a new plate contact
+    // carrying its own root area. This claim is about the LANDING RULE, so the
+    // second variable is held rather than absorbed.
+    let merging = harness::sweep_with(
+        &make_overhang_table().unwrap(),
+        0.05,
+        &plinth_sweep::SweepPolicy::from_registry()
+            .expect("the registry supplies every number the sweep reads")
+            .with_working_pitch_mm(0.05)
+            .without_slenderness(),
+    );
     let straight = harness::sweep_with(
         &make_overhang_table().unwrap(),
         0.05,
         &plinth_sweep::SweepPolicy::from_registry()
             .expect("the registry supplies every number the sweep reads")
             .with_working_pitch_mm(0.05)
+            .without_slenderness()
             .without_shaft_landings(),
     );
     println!(
         "shaft landings ON: {} plate contacts, {:.6} mm2 of plate contact area; OFF: {} and \
          {:.6} mm2",
-        report.landings.plate,
-        report.plate_contact_area_mm2,
+        merging.report.landings.plate,
+        merging.report.plate_contact_area_mm2,
         straight.report.landings.plate,
         straight.report.plate_contact_area_mm2,
     );
@@ -270,19 +284,20 @@ fn the_slab_load_walks_inward_to_the_legs_and_conserves_through_them() {
         "the knob must actually put the engine back on the straight descent"
     );
     assert!(
-        report.landings.plate < straight.report.landings.plate,
+        merging.report.landings.plate < straight.report.landings.plate,
         "merging must take arms OFF the plate: {} contacts with the rule on against {} with it \
          off",
-        report.landings.plate,
+        merging.report.landings.plate,
         straight.report.landings.plate,
     );
-    let area_gap = (report.plate_contact_area_mm2 - straight.report.plate_contact_area_mm2).abs();
+    let area_gap =
+        (merging.report.plate_contact_area_mm2 - straight.report.plate_contact_area_mm2).abs();
     assert!(
         area_gap <= 1.0e-4 * straight.report.plate_contact_area_mm2.max(1.0),
         "plate contact AREA moved by {area_gap:.6} mm2 between the two landing rules ({:.6} on, \
          {:.6} off); the plate holds the same load either way, so the area it holds it over is \
          not the rule's to change",
-        report.plate_contact_area_mm2,
+        merging.report.plate_contact_area_mm2,
         straight.report.plate_contact_area_mm2,
     );
 }

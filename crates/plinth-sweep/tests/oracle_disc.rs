@@ -76,11 +76,20 @@ fn the_disc_is_supported_by_a_plate_rooted_field_at_the_measured_spacing() {
     // footprint. pi*24^2 = 1809.6 mm2.
     let bottom_face_mm2 = core::f64::consts::PI * 24.0 * 24.0;
     let hex_count = (bottom_face_mm2 / hex_cell_area_mm2()).ceil();
+    // **SUPPORT ARMS, NOT MEMBERS** (2026-09-06). A hex covering predicts how
+    // many things must TOUCH THE MODEL; the diagonals and masts the
+    // slenderness lane adds touch none of it, and counting them here would
+    // turn a covering prediction into an accidental cap on bracing.
+    let placed_arms = plan
+        .struts
+        .iter()
+        .filter(|strut| strut.kind == plinth_sweep::StrutKind::Arm)
+        .count();
     within_band(
-        report.struts_total as f64,
+        placed_arms as f64,
         hex_count * bands::STRUT_COUNT.0,
         hex_count * bands::STRUT_COUNT.1,
-        "strut count against the hex covering of the measured bottom face",
+        "arm count against the hex covering of the measured bottom face",
     );
 
     // ---- conservation: the PEAK layer, not the bottom and not the footprint -
@@ -124,9 +133,14 @@ fn the_disc_is_supported_by_a_plate_rooted_field_at_the_measured_spacing() {
     );
 
     // ---- WHERE A FLAT FACE'S ARMS MAY LAND --------------------------------
+    // The lowest SEAT among support arms (2026-09-06). A brace or a mast tops
+    // out wherever the member it ties needs it, which is below every seat on a
+    // disc; taking the minimum over all members moved this datum down and then
+    // reported ordinary bottom-face arms as "above the bottom layer".
     let bottom_layer = plan
         .struts
         .iter()
+        .filter(|strut| strut.kind == plinth_sweep::StrutKind::Arm && !strut.inserted_by_load)
         .map(|strut| strut.k_top)
         .min()
         .expect("a disc has struts");
@@ -204,19 +218,35 @@ fn the_disc_is_supported_by_a_plate_rooted_field_at_the_measured_spacing() {
     // halves the number of roots and doubles their section. That is a
     // falsifiable prediction about a quantity nobody tuned, and it is asserted
     // here against the same fixture run with the rule switched off.
+    // **BOTH SIDES OF THIS COMPARISON RUN WITH THE SLENDERNESS LANE OFF**
+    // (2026-09-06), and that is what makes it a comparison of the LANDING RULE
+    // rather than of two different fields. With the lane on, switching shaft
+    // landings off leaves more members over their own slenderness limit, so the
+    // lane answers with more masts — and a mast is a new plate contact carrying
+    // its own root area. The invariant below is about what merging does to the
+    // plate, so the second variable is held rather than absorbed.
+    let merging = sweep_with(
+        &round_50(),
+        0.05,
+        &SweepPolicy::from_registry()
+            .expect("the registry supplies every number the sweep reads")
+            .with_working_pitch_mm(0.05)
+            .without_slenderness(),
+    );
     let straight = sweep_with(
         &round_50(),
         0.05,
         &SweepPolicy::from_registry()
             .expect("the registry supplies every number the sweep reads")
             .with_working_pitch_mm(0.05)
+            .without_slenderness()
             .without_shaft_landings(),
     );
     println!(
         "shaft landings ON: {} plate contacts, {:.6} mm2 of plate contact area; OFF: {} and \
          {:.6} mm2",
-        report.landings.plate,
-        report.plate_contact_area_mm2,
+        merging.report.landings.plate,
+        merging.report.plate_contact_area_mm2,
         straight.report.landings.plate,
         straight.report.plate_contact_area_mm2,
     );
@@ -225,19 +255,20 @@ fn the_disc_is_supported_by_a_plate_rooted_field_at_the_measured_spacing() {
         "the knob must actually put the engine back on the straight descent"
     );
     assert!(
-        report.landings.plate < straight.report.landings.plate,
+        merging.report.landings.plate < straight.report.landings.plate,
         "merging must take arms OFF the plate: {} contacts with the rule on against {} with it \
          off",
-        report.landings.plate,
+        merging.report.landings.plate,
         straight.report.landings.plate,
     );
-    let area_gap = (report.plate_contact_area_mm2 - straight.report.plate_contact_area_mm2).abs();
+    let area_gap =
+        (merging.report.plate_contact_area_mm2 - straight.report.plate_contact_area_mm2).abs();
     assert!(
         area_gap <= 1.0e-4 * straight.report.plate_contact_area_mm2.max(1.0),
         "plate contact AREA moved by {area_gap:.6} mm2 between the two landing rules ({:.6} on, \
          {:.6} off); the plate holds the same load either way, so the area it holds it over is \
          not the rule's to change",
-        report.plate_contact_area_mm2,
+        merging.report.plate_contact_area_mm2,
         straight.report.plate_contact_area_mm2,
     );
 
@@ -332,16 +363,31 @@ fn the_drafted_rim_costs_a_rim_strip_and_no_interior_arms() {
     );
 
     let plan = sweep(&round_50(), 0.05);
+    // **THE LOWEST SEAT AMONG REACH-PLACED SUPPORT ARMS** (2026-09-06). This
+    // datum is what "the bottom face" means to this claim, and only an arm the
+    // COVER asked for belongs in it: a brace or a mast tops out wherever the
+    // member it ties needs it, and a load-inserted arm goes where the area law
+    // wants section. Taking the minimum over every member instead moved the
+    // datum from layer 100 to layer 34 and then reported the disc's ordinary
+    // bottom-face arms as "above the bottom layer".
     let bottom_layer = plan
         .struts
         .iter()
+        .filter(|strut| strut.kind == plinth_sweep::StrutKind::Arm && !strut.inserted_by_load)
         .map(|strut| strut.k_top)
         .min()
         .expect("a disc has struts");
+    // SUPPORT ARMS ONLY (2026-09-06): this claim is about where the DEMAND is,
+    // and a brace or a mast answers no demand -- it stands wherever the member
+    // it ties needs it, which on a disc is inboard of the rim by construction.
     let above: Vec<&plinth_sweep::SweepStrut> = plan
         .struts
         .iter()
-        .filter(|strut| strut.k_top > bottom_layer)
+        .filter(|strut| {
+            strut.k_top > bottom_layer
+                && strut.kind == plinth_sweep::StrutKind::Arm
+                && !strut.inserted_by_load
+        })
         .collect();
     let radius_of = |strut: &plinth_sweep::SweepStrut| strut.center_mm[0].hypot(strut.center_mm[1]);
     let innermost = above.iter().copied().map(radius_of).fold(f64::INFINITY, f64::min);
@@ -371,13 +417,65 @@ fn the_drafted_rim_costs_a_rim_strip_and_no_interior_arms() {
         // may never happen is a rim arm landing on ANOTHER ARM here, because
         // the only arms below it are the flat face's, whose tops are at the
         // bottom layer and therefore no higher than its own straight descent.
+        // AMENDED AGAIN 2026-09-06: the slenderness lane may FORCE such a
+        // landing, and that is the whole of remedy 1 -- a rim arm at the
+        // smallest printable tip runs five millimetres unbraced, and the
+        // cheapest tie is a neighbouring shaft. The claim is split: with the
+        // constraint OFF no rim arm lands on another arm (asserted below, which
+        // is what keeps this from being vacuous), and with it on the ones that
+        // do are no more than the merges the lane published.
+        if plan.report.slenderness_lane.merges_forced == 0 {
+            assert!(
+                matches!(strut.landing, Landing::Plate | Landing::Model { .. }),
+                "a rim arm landed on {:?} with no merge forced; the drafted rim overhangs free \
+                 space, so its arm goes to the plate or onto the bottom face below it",
+                strut.landing,
+            );
+        }
+    }
+
+    // **AND WITH THE CONSTRAINT OFF, NOT ONE OF THEM LANDS ON AN ARM.** The
+    // claim above is conditional, so this is what keeps it from being vacuous:
+    // the same fixture, the same rim, the slenderness lane deleted, and every
+    // rim arm goes to the plate or to the bottom face. Any rim arm that lands
+    // on another arm in the production field is therefore the constraint's
+    // doing and nothing else's, and there are no more of them than the lane
+    // published.
+    let unconstrained = sweep_with(
+        &round_50(),
+        0.05,
+        &SweepPolicy::from_registry()
+            .expect("the registry supplies every number the sweep reads")
+            .with_working_pitch_mm(0.05)
+            .without_slenderness(),
+    );
+    let unconstrained_bottom = unconstrained
+        .struts
+        .iter()
+        .filter(|strut| strut.kind == plinth_sweep::StrutKind::Arm && !strut.inserted_by_load)
+        .map(|strut| strut.k_top)
+        .min()
+        .expect("a disc has struts");
+    for strut in unconstrained.struts.iter().filter(|strut| {
+        strut.k_top > unconstrained_bottom
+            && strut.kind == plinth_sweep::StrutKind::Arm
+            && !strut.inserted_by_load
+    }) {
         assert!(
             matches!(strut.landing, Landing::Plate | Landing::Model { .. }),
-            "a rim arm landed on {:?}; the drafted rim overhangs free space, so its arm goes to \
-             the plate or onto the bottom face below it",
+            "with the constraint OFF a rim arm still landed on {:?}",
             strut.landing,
         );
     }
+    let merged_rim_arms = above
+        .iter()
+        .filter(|strut| matches!(strut.landing, Landing::Strut { .. }))
+        .count();
+    assert!(
+        merged_rim_arms <= plan.report.slenderness_lane.merges_forced,
+        "{merged_rim_arms} rim arms landed on an arm against {} merges the lane published",
+        plan.report.slenderness_lane.merges_forced,
+    );
 
     // ---- and there are no more of them than the strip needs ---------------
     //

@@ -1394,6 +1394,100 @@ fn append_skirt(
     Ok(())
 }
 
+
+
+/// **The slenderness lane's broad case (2026-09-06): a 30 x 30 x 4 mm plate
+/// held 30 mm above the plate on four 2 mm legs, so that EVERY arm under it is
+/// long and thin.**
+///
+/// Same family and same generator as [`make_overhang_table`] — four legs, one
+/// top, no new geometry code — with the legs stretched from 20 mm to 30 mm and
+/// narrowed from 4 mm to 2 mm. The 2 mm legs are what make it printable at all:
+/// a plate floating 30 mm up on nothing is an island, and an island's arms are
+/// the engine's own invention rather than a property of the model.
+///
+/// What it is FOR: under a 30 x 30 mm underside at the registered hex spacing
+/// the up-sweep places dozens of arms, every one of them descending about 30 mm
+/// to the plate, and the area law gives most of them the smallest printable
+/// tip. At `S = 50` and `r = 0.05 mm` that is a limit of 2.5 mm against a 30 mm
+/// run — twelve times over — so remedies 1 and 2 both fire, broadly, on one
+/// small model. It is the piece the owner should eyeball first to judge whether
+/// `S = 50` produces a field that looks like something he would print.
+pub fn make_tall_stilt_plate() -> Result<Mesh, MeshError> {
+    make_overhang_table_with([2.0, 2.0, 30.0], [30.0, 30.0, 4.0], 0.0)
+}
+
+/// **The MAST case (2026-09-06): one 6 mm square overhang 30 mm up on a 2 mm
+/// stalk, with nothing else anywhere near it.**
+///
+/// The overhang's underside is a 6 x 6 mm square ring around a 2 x 2 mm stalk,
+/// 30 mm above the plate. The arms the up-sweep puts under that ring are 30 mm
+/// long, thin, and — this is the whole point of the fixture — they have NO
+/// neighbouring shaft to brace to except each other and the stalk's own
+/// footprint, and the model's own material stands between them. Remedy 2 has
+/// nothing to reach, so remedy 3 has to fire: a new plate-rooted mast is
+/// dropped beside the peak and an `|X|` ties the two.
+///
+/// Nothing else stands within 20 mm of it, which is what makes "no neighbour in
+/// reach" a property of the model rather than of the placement.
+pub fn make_lonely_peak() -> Result<Mesh, MeshError> {
+    make_peaks_with([2.0, 2.0, 30.0], [6.0, 6.0, 2.0], &[0.0])
+}
+
+/// **The `|X|` case (2026-09-06): two 6 mm square overhangs 30 mm up on 2 mm
+/// stalks, their undersides 4 mm apart.**
+///
+/// [`make_lonely_peak`] twice, 10 mm between centres, so that 6 mm of overhang
+/// on each side leaves a 4 mm gap between the two undersides. The arms under
+/// the two rims face each other across that gap with clear air between them, so
+/// a shaft IS within brace reach and remedy 2 fires: two crossing diagonals,
+/// each inside the overhang law, no horizontal span.
+///
+/// The 4 mm gap is chosen against the geometry and not against a target count:
+/// a diagonal across 4 mm at the saturated overhang angle is 4.74 mm long, which
+/// needs a 0.095 mm brace radius to satisfy its own slenderness limit — inside
+/// the registered radius clamps at both ends, so the case is admissible without
+/// anything being loosened for it.
+pub fn make_brace_pair() -> Result<Mesh, MeshError> {
+    make_peaks_with([2.0, 2.0, 30.0], [6.0, 6.0, 2.0], &[-5.0, 5.0])
+}
+
+/// One stalk-and-cap peak per entry in `centres_x`, all on the same plate.
+///
+/// The generator behind [`make_lonely_peak`] and [`make_brace_pair`], so the
+/// two fixtures differ in their layout and in nothing else.
+pub fn make_peaks_with(
+    stalk: [f64; 3],
+    cap: [f64; 3],
+    centres_x: &[f64],
+) -> Result<Mesh, MeshError> {
+    validate_dimensions("stalk", stalk)?;
+    validate_dimensions("cap", cap)?;
+    let mut verts = Vec::with_capacity(16 * centres_x.len());
+    let mut tris = Vec::with_capacity(24 * centres_x.len());
+    for (index, x) in centres_x.iter().enumerate() {
+        validate_finite("centre_x", *x)?;
+        if index > 0 && *x <= centres_x[index - 1] {
+            // Strictly increasing centres, so two peaks can never be asked to
+            // occupy the same place and quietly produce a self-intersecting
+            // mesh the census would then have to repair.
+            return Err(MeshError::InvalidPositiveFixtureParameter {
+                parameter: "centres_x.spacing",
+                value: *x - centres_x[index - 1],
+            });
+        }
+        append_box(&mut verts, &mut tris, stalk, [*x, 0.0, stalk[2] / 2.0])?;
+        append_box(
+            &mut verts,
+            &mut tris,
+            cap,
+            [*x, 0.0, stalk[2] + cap[2] / 2.0],
+        )?;
+    }
+    Mesh::new(verts, tris)
+}
+
+
 #[cfg(test)]
 mod slice_sweep_fixture_tests {
     use super::*;
