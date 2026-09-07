@@ -387,6 +387,15 @@ pub struct SweepPolicy {
     /// can put the seat-only rule back and watch the same arm be deleted with
     /// a gap opening under it (`refuse_uncovered_spans`).
     pub removal_span_check: bool,
+    /// Whether an arm offers the down-sweep's routing field the column its own
+    /// axis occupies ONE LAYER UP, and not only the column it occupies here.
+    /// **On in production.** For a straight arm the two columns are the same
+    /// cell and the flag decides nothing; for a LEANED arm they differ, and the
+    /// column one layer up is the one the up-sweep rooted when it placed the
+    /// arm. The knob exists so the drill can put the seat-blind accounting back
+    /// and watch the load the arm's own tip holds go uncarried
+    /// (`down_sweep::run`).
+    pub tip_column_roots: bool,
     pub limits: SweepLimits,
 }
 
@@ -436,6 +445,7 @@ impl SweepPolicy {
             shaft_landings: true,
             drain_keep_out: true,
             removal_span_check: true,
+            tip_column_roots: true,
             limits: SweepLimits {
                 cell_layer_budget: placeholders.sweep_cell_layer_budget().diagnostic().get(),
                 ..SweepLimits::production()
@@ -500,6 +510,17 @@ impl SweepPolicy {
     #[must_use]
     pub const fn with_seat_only_removal(mut self) -> Self {
         self.removal_span_check = false;
+        self
+    }
+
+    /// Let an arm root only the column it stands in AT this layer, never the
+    /// column its own axis occupies one layer up -- the accounting this engine
+    /// had until 2026-09-06, and the one that left 23.22 mm2 of the Morel
+    /// base's layer-108 load with no carrier at all. **Sabotage only**;
+    /// nothing in the pipeline sets it.
+    #[must_use]
+    pub const fn without_tip_column_roots(mut self) -> Self {
+        self.tip_column_roots = false;
         self
     }
 }
@@ -664,6 +685,7 @@ pub fn run_sweep_with_drains(
         owner_growth_ceiling_mm: policy.owner_growth_ceiling_mm,
         alpha: peel::alpha(policy.peel_field_mode),
         lamina_reach_mm,
+        tip_column_roots: policy.tip_column_roots,
     };
     let minimum_load =
         policy.x_allowed * core::f64::consts::PI * policy.tip_radius_min_mm.powi(2);
@@ -1368,6 +1390,8 @@ fn build_report(
         junctions_mid_shaft,
         support_volume_mm3,
         plate_contact_area_mm2,
+        tip_column_roots_offered: outcome.tip_column_roots_offered,
+        tip_column_root_load_mm2: outcome.tip_column_root_load_mm2,
         achieved_pitch_mm: grid.pitch_mm(),
         coarsening_steps,
         layers,

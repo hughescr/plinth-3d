@@ -2582,7 +2582,8 @@ fn print_sweep_disclosure(
         "[sweep {model}] resin: support volume {:.3} mm3 over {} arms; plate contacts {} \
          holding {:.4} mm2 of root area; junctions {} at a parent's top / {} MID-SHAFT \
          ({} chosen mid-shaft by the descent, before un-merging and removal); \
-         shaft index {} spans",
+         shaft index {} spans; {} tip-column roots offered, carrying {:.4} mm2 that no other \
+         carrier could have taken",
         report.support_volume_mm3,
         report.struts_total,
         report.landings.plate,
@@ -2591,6 +2592,8 @@ fn print_sweep_disclosure(
         report.junctions_mid_shaft,
         report.descent_junctions_mid_shaft,
         report.shaft_spans_recorded,
+        report.tip_column_roots_offered,
+        report.tip_column_root_load_mm2,
     );
     println!(
         "[sweep {model}] slenderness p50 {:.1}:1 max {:.1}:1; overloaded arms {}; \

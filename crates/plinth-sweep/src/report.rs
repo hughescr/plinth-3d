@@ -252,6 +252,16 @@ pub struct SweepRunReport {
     /// asks the plate to hold, and the thing a merge removes when it takes an
     /// arm off the plate and onto a trunk.
     pub plate_contact_area_mm2: f64,
+    /// `(layer, column)` pairs where a LEANED arm offered the routing field the
+    /// column its own axis occupies one layer up. The path-hit witness for the
+    /// tip-column root rule; zero on a field where nothing leaned.
+    pub tip_column_roots_offered: u64,
+    /// Load, in mm², whose nearest root was one of those tip columns — an UPPER
+    /// bound on what the seat-blind accounting lost, since some of it would
+    /// have reached a further carrier instead. Zero means the rule changed no
+    /// routing on this model, which is what tells an inert rule apart from an
+    /// absent one.
+    pub tip_column_root_load_mm2: f64,
     /// Path-hit counters. A green oracle must never be able to mean "the path
     /// never ran" (the witness-must-exercise-the-path lesson).
     pub counters: PathHits,

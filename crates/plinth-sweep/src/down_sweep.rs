@@ -116,6 +116,18 @@ pub struct DownSweepOutcome {
     /// counter: without it, `arms_inserted_by_load == 0` cannot be told apart
     /// from an insertion step that never ran.
     pub insertion_rounds: u64,
+    /// `(layer, cell)` pairs where a LEANED arm's own axis one layer up was
+    /// offered to the routing field as a root, i.e. where the arm stands in a
+    /// different column here than it does over the material it holds. Zero on a
+    /// field with no leaned arm, so it tells "no arm leaned" apart from "the
+    /// tip-column rule never ran".
+    pub tip_column_roots_offered: u64,
+    /// Load, in mm², whose nearest root was one of those tip columns. An UPPER
+    /// bound on what the seat-blind accounting lost: some of it would have
+    /// reached a further carrier instead, and the rest had no carrier at all.
+    /// Zero is the honest reading "the rule changed no routing", which is what
+    /// tells an inert rule apart from an absent one.
+    pub tip_column_root_load_mm2: f64,
 }
 
 /// Whether the down-sweep may add arms of its own, and how many arms the whole
@@ -183,6 +195,10 @@ pub struct SizingPolicy {
     /// the two sweeps still price the same journey the same way — see
     /// `reach::recompute_potential`.
     pub lamina_reach_mm: f64,
+    /// Whether an arm roots the column its own axis occupies ONE LAYER UP as
+    /// well as the column it occupies here. See
+    /// [`crate::SweepPolicy::tip_column_roots`]; `false` is the sabotage form.
+    pub tip_column_roots: bool,
 }
 
 /// Run the whole down-sweep over `struts`, filling their radius and carried
@@ -246,6 +262,33 @@ pub fn run(
     // beside `carriers_above` so a leaned arm counts one event, not one per
     // column it crosses.
     let mut continues_above = vec![false; cells];
+    // WHERE AN ARM'S AXIS STANDS ONE LAYER UP, AND WHICH COLUMN THAT ARM IS IN
+    // HERE. `u32::MAX` everywhere else.
+    //
+    // For a straight arm the two are the same cell and this array changes
+    // nothing. For a LEANED arm they differ, and the difference is the whole of
+    // the defect it exists to close: the arm's TIP stands in the seat column at
+    // `k_top` -- which is the column the up-sweep rooted when it placed the arm
+    // -- while the arm's body one layer down stands somewhere else, usually
+    // OUTSIDE the model's own footprint at `k_top`. The routing field's root
+    // test is `cover_above[cell] && carriers[cell]`, so that body column is
+    // rejected as a root, and every cell the arm rooted in the up-sweep then
+    // reads "no carrier anywhere I can walk to" -- an infinite gap, not a
+    // marginal one. Measured on the Morel base at layer 107: 1433 of 1450 lost
+    // cells were rooted by one of eight leaned arms, each of which reads
+    // `carrier true, cover_above false` one layer under its own seat.
+    //
+    // The entry is an ALIAS, not a carrier: the load lands on the arm and the
+    // arm reads its share at `cell_at(layer)`, so the routing field is told
+    // "root here, deposit there" rather than being told the arm is in two
+    // columns at once. Marking it a carrier instead would collect load in a
+    // cell no arm ever reads, and carry it down a column with nothing in it.
+    let mut tip_root = vec![u32::MAX; cells];
+    // Whether each cell's chosen root is one of those tip columns. Carried with
+    // `nearest` through the chamfer walk, so the accounting names every mm²
+    // that reached its arm through the new rule and not only the cells sitting
+    // directly on a tip.
+    let mut via_tip = vec![false; cells];
     let mut nearest = vec![u32::MAX; cells];
     let mut distance = vec![f32::INFINITY; cells];
     let mut distance_prev = vec![f32::INFINITY; cells];
@@ -302,6 +345,7 @@ pub fn run(
         carriers.copy_from_slice(&masks.carry);
         continues_above.fill(false);
         landing_target.fill(u32::MAX);
+        tip_root.fill(u32::MAX);
         for &id in &alive_by_layer[layer] {
             // The arm's cell AT THIS LAYER, not its seat cell: a leaned arm
             // occupies a different column at every layer it crosses, and
@@ -324,8 +368,18 @@ pub fn run(
             // gate was written to end. The arm's OWN cell one layer up is where
             // its material was; if that carried, this cell continues the same
             // cured run.
-            if carriers_above[struts[id as usize].cell_at(layer + 1)] {
+            let above = struts[id as usize].cell_at(layer + 1);
+            if carriers_above[above] {
                 continues_above[cell] = true;
+            }
+            // AND THE SAME CELL IS WHERE THIS ARM HOLDS SOMETHING UP. The
+            // material at `above` on layer k+1 rests on this arm's own axis,
+            // with no lateral travel to pay for; the arm is where the up-sweep
+            // rooted that column, and this is the down-sweep saying so. First
+            // arm wins, in `alive_by_layer` order, which is arm id order.
+            if sizing.tip_column_roots && above != cell && tip_root[above] == u32::MAX {
+                tip_root[above] = u32::try_from(cell).unwrap_or(u32::MAX);
+                outcome.tip_column_roots_offered += 1;
             }
             // What a growing arm lands ON if its column meets this one. Only
             // arms whose extent is already fixed are landing targets; a growing
@@ -373,6 +427,7 @@ pub fn run(
         let mut incoming;
         let mut placed;
         let mut lost;
+        let mut tip_root_load;
         let mut spread_hits;
         let mut max_hits;
         let mut injected_here;
@@ -385,6 +440,7 @@ pub fn run(
             incoming = 0.0;
             placed = 0.0;
             lost = 0.0;
+            tip_root_load = 0.0;
             spread_hits = 0_u64;
             max_hits = 0_u64;
             injected_here = 0.0_f64;
@@ -394,8 +450,10 @@ pub fn run(
                 grid,
                 &cover_above,
                 &carriers,
+                &tip_root,
                 &mut distance,
                 &mut nearest,
+                &mut via_tip,
                 &mut distance_prev,
             );
             route_converged = route.converged;
@@ -425,6 +483,13 @@ pub fn run(
                     let weight = area / accumulated;
                     load_out[target as usize] += load * weight;
                     placed += load * weight;
+                    if via_tip[cell] {
+                        // The root this load found is a leaned arm's own axis
+                        // one layer up. Under the seat-blind accounting that
+                        // root did not exist, so this mm² either travelled
+                        // further to some other carrier or was lost outright.
+                        tip_root_load += load * weight;
+                    }
                 } else {
                     lost += load;
                     any_lost = true;
@@ -551,6 +616,7 @@ pub fn run(
         );
         outcome.conservation_residual = outcome.conservation_residual.max(residual);
         outcome.uncarried_load_mm2 += lost;
+        outcome.tip_column_root_load_mm2 += tip_root_load;
         outcome.spread_search_hits += spread_hits;
         outcome.max_combine_hits += max_hits;
         outcome.injected_load_mm2 += injected_here;
@@ -1183,12 +1249,22 @@ fn size_arm(carried_mm2: f64, sizing: SizingPolicy) -> f64 {
 /// sweeps until the field stops moving, under the same bound and the same
 /// "report, never refuse" rule as `reach::recompute_potential`, and the caller
 /// counts the layers that hit the bound.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one routing field reads the grid, the cover it walks in, the two root sets it may \
+          start from, and writes the three parallel per-cell rasters that ARE its answer \
+          (distance, nearest, and which of the two root sets that nearest came from); bundling \
+          the rasters into a struct would move the argument list rather than shorten it, and \
+          they are reused across every layer so they cannot be returned by value"
+)]
 fn route_within_cover(
     grid: &Grid,
     cover_above: &[bool],
     carriers: &[bool],
+    tip_root: &[u32],
     distance: &mut [f32],
     nearest: &mut [u32],
+    via_tip: &mut [bool],
     previous: &mut [f32],
 ) -> RouteOutcome {
     let cols = grid.cols();
@@ -1197,9 +1273,20 @@ fn route_within_cover(
     let diagonal = pitch * core::f32::consts::SQRT_2;
     let mut any_root = false;
     for cell in 0..grid.cells() {
+        via_tip[cell] = false;
         if cover_above[cell] && carriers[cell] {
             distance[cell] = 0.0;
             nearest[cell] = u32::try_from(cell).unwrap_or(u32::MAX);
+            any_root = true;
+        } else if tip_root[cell] != u32::MAX {
+            // A LEANED ARM'S OWN AXIS, ONE LAYER UP. The load in this column
+            // rests on that arm with no lateral travel at all, so the root sits
+            // at distance zero and names the column the arm actually occupies
+            // here. The plain carrier test wins where both apply, so this can
+            // only ADD roots -- it never redirects load that already had one.
+            distance[cell] = 0.0;
+            nearest[cell] = tip_root[cell];
+            via_tip[cell] = true;
             any_root = true;
         } else {
             distance[cell] = f32::INFINITY;
@@ -1212,11 +1299,20 @@ fn route_within_cover(
             converged: true,
         };
     }
-    let relax = |cell: usize, from: usize, step: f32, distance: &mut [f32], nearest: &mut [u32]| {
+    let relax = |cell: usize,
+                 from: usize,
+                 step: f32,
+                 distance: &mut [f32],
+                 nearest: &mut [u32],
+                 via_tip: &mut [bool]| {
         let candidate = distance[from] + step;
         if candidate < distance[cell] {
             distance[cell] = candidate;
             nearest[cell] = nearest[from];
+            // The attribution travels with the root, so a cell served BY a
+            // tip-column root through the cover is counted as such and not only
+            // the cell that sits directly on the arm.
+            via_tip[cell] = via_tip[from];
         }
     };
     const MAX_SWEEP_ROUNDS: usize = 8;
@@ -1230,17 +1326,17 @@ fn route_within_cover(
                     continue;
                 }
                 if col > 0 && cover_above[cell - 1] {
-                    relax(cell, cell - 1, pitch, distance, nearest);
+                    relax(cell, cell - 1, pitch, distance, nearest, via_tip);
                 }
                 if row > 0 {
                     if cover_above[cell - cols] {
-                        relax(cell, cell - cols, pitch, distance, nearest);
+                        relax(cell, cell - cols, pitch, distance, nearest, via_tip);
                     }
                     if col > 0 && cover_above[cell - cols - 1] {
-                        relax(cell, cell - cols - 1, diagonal, distance, nearest);
+                        relax(cell, cell - cols - 1, diagonal, distance, nearest, via_tip);
                     }
                     if col + 1 < cols && cover_above[cell - cols + 1] {
-                        relax(cell, cell - cols + 1, diagonal, distance, nearest);
+                        relax(cell, cell - cols + 1, diagonal, distance, nearest, via_tip);
                     }
                 }
             }
@@ -1252,17 +1348,17 @@ fn route_within_cover(
                     continue;
                 }
                 if col + 1 < cols && cover_above[cell + 1] {
-                    relax(cell, cell + 1, pitch, distance, nearest);
+                    relax(cell, cell + 1, pitch, distance, nearest, via_tip);
                 }
                 if row + 1 < rows {
                     if cover_above[cell + cols] {
-                        relax(cell, cell + cols, pitch, distance, nearest);
+                        relax(cell, cell + cols, pitch, distance, nearest, via_tip);
                     }
                     if col + 1 < cols && cover_above[cell + cols + 1] {
-                        relax(cell, cell + cols + 1, diagonal, distance, nearest);
+                        relax(cell, cell + cols + 1, diagonal, distance, nearest, via_tip);
                     }
                     if col > 0 && cover_above[cell + cols - 1] {
-                        relax(cell, cell + cols - 1, diagonal, distance, nearest);
+                        relax(cell, cell + cols - 1, diagonal, distance, nearest, via_tip);
                     }
                 }
             }
@@ -1393,6 +1489,7 @@ mod merge_load_tests {
             owner_growth_ceiling_mm: 0.4,
             alpha: 1.0,
             lamina_reach_mm: 2.13,
+            tip_column_roots: true,
         }
     }
 
