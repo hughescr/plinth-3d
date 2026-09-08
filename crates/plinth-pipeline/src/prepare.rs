@@ -2607,8 +2607,11 @@ fn print_sweep_disclosure(
          overlapping root pairs {} -> {} -> {}; cells under \
          3+ roots {} -> {} (deepest stack {} -> {}); remedies over {} round(s): {} roots \
          leaned outward, {} flank arms inserted at shelf layer {} ({} cover cells), \
-         {:.4} mm2 of section moved outside the silhouette, {:.4} mm2 of load carried to \
-         the plate by the flank arms; {} outward cells refused, {} flank seats refused{}",
+         {:.4} mm2 of section moved outside the silhouette, {:.4} mm2 of load still carried to \
+         the plate by flank arms ({} of them re-landed off the plate); flank root radius \
+         estimate {:.4} mm used (mean placed root {:.4} mm, hex-cell area law {:.4} mm), \
+         {} flank roots still overlapping after sizing; {} outward cells refused, \
+         {} flank seats refused{}",
         jam.after.all.roots,
         jam.before.all.ratio,
         jam.at_lane_exit.all.ratio,
@@ -2629,7 +2632,12 @@ fn print_sweep_disclosure(
         jam.shelf_layer,
         jam.shelf_cover_cells,
         jam.section_moved_outside_silhouette_mm2,
-        jam.flank_load_at_plate_mm2,
+        jam.flank_load_still_at_plate_mm2,
+        jam.flank_arms_moved_off_plate,
+        jam.flank_radius_used_mm,
+        jam.flank_radius_mean_placed_mm,
+        jam.flank_radius_area_law_mm,
+        jam.flank_roots_overlapping_after_sizing,
         jam.outward_cells_refused,
         jam.flank_seats_refused,
         if !jam.enabled {
@@ -2649,8 +2657,9 @@ fn print_sweep_disclosure(
     println!(
         "[sweep {model}] slenderness lane: S = {:.1} in force; brace reach {:.3} mm at the \
          thinnest brace, {:.3} mm at the thickest; {} arms over the limit before remedies \
-         ({} runs); remedies: {} merges forced, {} |X| braces added, {} masts dropped, \
-         {} warnings; {} brace bands refused, {} mast cells refused, {} forced merges put \
+         ({} runs); remedies: {} merges forced, {} |X| braces added, {} masts PLACED, \
+         {} warnings; {} brace bands refused, {} masts REFUSED for want of a clear plate cell, \
+         {} mast roots still lapping another root after sizing, {} forced merges put \
          back by the radius ceiling; longest unbraced run remaining {:.3} mm against its own limit of {:.3} mm{}",
         lane.ratio,
         lane.thin_brace_reach_mm,
@@ -2663,6 +2672,7 @@ fn print_sweep_disclosure(
         lane.warnings.len(),
         lane.brace_bands_refused,
         lane.mast_cells_refused,
+        lane.mast_roots_overlapping_after_sizing,
         lane.merges_undone_by_radius,
         lane.longest_run_mm,
         lane.longest_run_limit_mm,

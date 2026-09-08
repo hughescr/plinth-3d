@@ -86,8 +86,13 @@ use crate::{Landing, StrutKind, SweepStrut};
 const NO_OVERLAP: f64 = 1.0;
 
 /// One plate root, as the emitter will actually lay it down.
+///
+/// `pub(crate)` because the SLENDERNESS lane has to answer the same question
+/// this lane answers — would this plate cell's flared disc touch a root that is
+/// already there — and the rule has to be the same rule. The fields stay
+/// private so the only ways to make one are [`root_discs`] and [`push_disc`].
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct RootDisc {
+pub(crate) struct RootDisc {
     id: u32,
     cell: usize,
     x_mm: f64,
@@ -163,10 +168,32 @@ pub struct CongestionOutcome {
     /// `Σ π r_root²` of the arm sections whose ROOT moved from inside the
     /// silhouette to outside it. The area law's own quantity, not the flare.
     pub section_moved_outside_silhouette_mm2: f64,
-    /// Load, in mm² of reference peel, that the flank arms are carrying WHERE
-    /// THEY MEET THE PLATE, read off the finished field. This is the load that
-    /// actually moved onto the new paths.
-    pub flank_load_at_plate_mm2: f64,
+    /// Load, in mm² of reference peel, carried by the flank arms THAT STILL
+    /// LAND ON THE PLATE on the finished field, read at their own root.
+    ///
+    /// **The name says exactly what it counts, and it is not all of them.** An
+    /// inserted arm the later down-sweep re-landed on a trunk (`Landing::Strut`)
+    /// contributes NOTHING here, because it no longer meets the plate at all;
+    /// how many of them there are is [`Self::flank_arms_moved_off_plate`]. The
+    /// field was called `flank_load_at_plate_mm2` until 2026-09-06 and silently
+    /// dropped those arms, so a re-landed field read as "less load moved" when
+    /// the load had in fact moved further.
+    pub flank_load_still_at_plate_mm2: f64,
+    /// Inserted flank arms whose landing a later pass moved OFF the plate, so
+    /// they are outside `flank_load_still_at_plate_mm2` by construction.
+    pub flank_arms_moved_off_plate: usize,
+    /// Inserted flank roots whose FLARED disc still overlaps another plate root
+    /// once the round's down-sweep has sized the field — the error the
+    /// pre-sizing radius estimate left behind. Non-zero is a WARNING; the next
+    /// round sees these as ordinary stacked plate roots and remedy 1 applies.
+    pub flank_roots_overlapping_after_sizing: usize,
+    /// The two pre-sizing radius estimates, both computed every run so the
+    /// choice between them is auditable from the report rather than from the
+    /// source. Bare (un-flared) radii, mm.
+    pub flank_radius_mean_placed_mm: f64,
+    pub flank_radius_area_law_mm: f64,
+    /// The one actually registered, bare, mm.
+    pub flank_radius_used_mm: f64,
     /// Searches that found no admissible plate cell outside the silhouette.
     pub outward_cells_refused: usize,
     /// Flank seats the path check or the non-overlap rule refused.
@@ -194,6 +221,10 @@ pub struct CongestionContext<'a> {
     pub tip_radius_min_mm: f64,
     /// Nearest-neighbour spacing of the hex covering the up-sweep placed at.
     pub hex_separation_mm: f64,
+    /// `X_ALLOWED` — the peel a unit of arm section may legally carry. The area
+    /// law's own divisor, read here so a flank arm can be registered at the
+    /// radius the LAW asks for instead of at the smallest printable tip.
+    pub x_allowed: f64,
     /// Sabotage knob: remedy 1.
     pub outward_lean: bool,
     /// Sabotage knob: remedy 2.
@@ -231,7 +262,7 @@ pub fn measure(
 /// A `Brace` is excluded because it gets no root flare and never lands on the
 /// plate; an `Arm` and a `Mast` both keep the plate-root chain, so both are
 /// counted.
-fn root_discs(
+pub(crate) fn root_discs(
     grid: &Grid,
     history: &ColumnHistory,
     struts: &[SweepStrut],
@@ -534,7 +565,8 @@ fn insert_flank_arms(
     outcome: &mut CongestionOutcome,
 ) -> usize {
     let shelves = underside_layers(context.history, context.layers);
-    let radius = context.tip_radius_min_mm * context.flare_factor;
+    let bare = flank_root_radius_mm(context, &placed[..], outcome);
+    let radius = bare * context.flare_factor;
     let mut moved = 0_usize;
     // THE SHELF IS THE HIGHEST LAYER WHOSE COVER ADMITS THE HEX PITCH, and it
     // is found by walking DOWN from the top of the model rather than by naming
@@ -555,12 +587,99 @@ fn insert_flank_arms(
         }
         outcome.shelf_layer = shelf;
         outcome.shelf_cover_cells = cover_cells;
-        moved = seat_flank_arms(context, index, struts, placed, outcome, shelf, radius, &seats);
+        moved = seat_flank_arms(
+            context, index, struts, placed, outcome, shelf, radius, bare, &seats,
+        );
         if moved > 0 {
             break;
         }
     }
     moved
+}
+
+/// Which pre-sizing estimate of a flank root's radius is in force.
+///
+/// **Why an estimate is needed at all.** A flank arm is created here and sized
+/// by the down-sweep at the END of the round, so at the moment its plate cell
+/// is chosen its radius does not exist yet. Until 2026-09-06 the placeholder
+/// was `TIP_RADIUS_DEFAULT_MM`, the SMALLEST radius any arm can have, which
+/// makes the clearance test optimistic by construction: every disc is
+/// registered too small, the search accepts cells that are too close, and the
+/// sizing pass then grows the discs into one another. That is the same defect
+/// the mast search had, in a different lane.
+///
+/// Both candidates below are derived — neither is a number chosen for the
+/// purpose — and both are computed every run and published, so which one is in
+/// force is a fact readable off the report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "exactly one variant is in force at a time and the other is the alternative it was \
+          measured against; deleting the loser would delete the record of the choice, and \
+          re-measuring means flipping FLANK_RADIUS_ESTIMATE and nothing else"
+)]
+enum FlankRadiusEstimate {
+    /// **(a) the field's own answer.** The mean sized root radius of the plate
+    /// roots this model already has. It asks no physics and needs no divisor;
+    /// it says a new root will look like the roots already there.
+    MeanPlacedRoot,
+    /// **(b) the area law's answer.** One hex cell of the covering is the patch
+    /// one seat is responsible for, so its share of the layer's peel event is
+    /// its own area; `A = share / X_ALLOWED` and `r = sqrt(A/π)` is then the
+    /// section the law asks that arm to have.
+    HexCellAreaLaw,
+}
+
+/// **The estimate in force, chosen by MEASUREMENT and not by argument.** Both
+/// were built, both were run through the production CLI on `make_laid_tube` and
+/// the `Cylinder`, and the numbers are in the lane report beside this commit.
+const FLANK_RADIUS_ESTIMATE: FlankRadiusEstimate = FlankRadiusEstimate::MeanPlacedRoot;
+
+/// Both pre-sizing estimates of a flank root's BARE radius, with the one in
+/// force returned and all three recorded on the outcome.
+fn flank_root_radius_mm(
+    context: &CongestionContext<'_>,
+    placed: &[RootDisc],
+    outcome: &mut CongestionOutcome,
+) -> f64 {
+    let minimum = context.tip_radius_min_mm;
+    // (a) the mean SIZED root radius already on this plate. `RootDisc` carries
+    // the flared radius, so the flare is divided back out to get the arm's own.
+    let flare = if context.flare_factor.is_finite() && context.flare_factor > 0.0 {
+        context.flare_factor
+    } else {
+        1.0
+    };
+    let mean = if placed.is_empty() {
+        minimum
+    } else {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a root count bounded by the strut count is exact in f64"
+        )]
+        let count = placed.len() as f64;
+        (placed.iter().map(|disc| disc.radius_mm).sum::<f64>() / flare / count).max(minimum)
+    };
+    // (b) the area law on one hex cell. A hexagon whose nearest-neighbour
+    // spacing is `s` has area `(√3/2)·s²` — the Voronoi cell of the covering
+    // the up-sweep actually placed at, so this is the patch one seat owns.
+    let separation = context.hex_separation_mm;
+    let cell_area = 0.5 * 3.0_f64.sqrt() * separation * separation;
+    let area_law = if context.x_allowed.is_finite() && context.x_allowed > 0.0 && cell_area > 0.0 {
+        (cell_area / context.x_allowed / core::f64::consts::PI)
+            .sqrt()
+            .max(minimum)
+    } else {
+        minimum
+    };
+    outcome.flank_radius_mean_placed_mm = mean;
+    outcome.flank_radius_area_law_mm = area_law;
+    let used = match FLANK_RADIUS_ESTIMATE {
+        FlankRadiusEstimate::MeanPlacedRoot => mean,
+        FlankRadiusEstimate::HexCellAreaLaw => area_law,
+    };
+    outcome.flank_radius_used_mm = used;
+    used
 }
 
 /// Put one arm under each accepted flank seat, leaning outward to clear plate.
@@ -578,6 +697,7 @@ fn seat_flank_arms(
     outcome: &mut CongestionOutcome,
     shelf: usize,
     radius: f64,
+    bare: f64,
     seats: &[usize],
 ) -> usize {
     let grid = context.grid;
@@ -623,17 +743,7 @@ fn seat_flank_arms(
         });
         let arm = &struts[id as usize];
         index.stamp_shaft(id, 0, shelf, seat, &arm.path);
-        placed.push(RootDisc {
-            id,
-            cell,
-            x_mm: grid.center_x_mm(grid.col_of(cell)),
-            y_mm: grid.center_y_mm(grid.row_of(cell)),
-            radius_mm: radius,
-            section_mm2: core::f64::consts::PI
-                * context.tip_radius_min_mm
-                * context.tip_radius_min_mm,
-            under_silhouette: false,
-        });
+        push_disc(placed, grid, id, cell, radius, bare, false);
         outcome.arms_inserted += 1;
         outcome.inserted_ids.push(id);
         moved += 1;
@@ -873,7 +983,12 @@ fn nearest_clear_plate_cell(
 }
 
 /// Whether a disc of `radius_mm` at `cell` would touch no placed root.
-fn clear_of_placed(
+///
+/// `radius_mm` and every `placed` radius are FLARED radii — what actually
+/// touches the plate — so the test is `r_candidate + r_placed <= |Δcentre|`.
+/// The slenderness lane's mast search calls THIS function rather than its own
+/// copy: two copies of a clearance rule are two rules.
+pub(crate) fn clear_of_placed(
     grid: &Grid,
     cell: usize,
     radius_mm: f64,
@@ -974,8 +1089,55 @@ fn segment_path(
     Some(path)
 }
 
+/// Register a root disc a later pass has just placed but the down-sweep has
+/// not sized yet, at the FLARED radius the caller estimates for it.
+///
+/// The slenderness lane uses this to make each mast it drops visible to the
+/// clearance test the next mast runs, so two masts can never be placed on top
+/// of one another inside a single run of the lane.
+pub(crate) fn push_disc(
+    placed: &mut Vec<RootDisc>,
+    grid: &Grid,
+    id: u32,
+    cell: usize,
+    flared_radius_mm: f64,
+    bare_radius_mm: f64,
+    under_silhouette: bool,
+) {
+    placed.push(RootDisc {
+        id,
+        cell,
+        x_mm: grid.center_x_mm(grid.col_of(cell)),
+        y_mm: grid.center_y_mm(grid.row_of(cell)),
+        radius_mm: flared_radius_mm,
+        section_mm2: core::f64::consts::PI * bare_radius_mm * bare_radius_mm,
+        under_silhouette,
+    });
+}
+
+/// How many of `ids` have a root disc that overlaps ANY other plate root on the
+/// finished, SIZED field.
+///
+/// **Batch-first**: one pass to gather every disc, one sweep-line pass for the
+/// overlapping pairs, one membership test. Nothing here is a per-arm scan.
+#[must_use]
+pub fn roots_overlapping_after_sizing(
+    grid: &Grid,
+    history: &ColumnHistory,
+    struts: &[SweepStrut],
+    flare_factor: f64,
+    ids: &[u32],
+) -> usize {
+    if ids.is_empty() {
+        return 0;
+    }
+    let discs = root_discs(grid, history, struts, flare_factor);
+    let stacked = stacked_ids(&discs);
+    ids.iter().filter(|id| stacked.contains(id)).count()
+}
+
 /// Stamp every finished member's shaft into a fresh column index.
-fn stamp_all(index: &mut ColumnHistory, struts: &[SweepStrut]) {
+pub(crate) fn stamp_all(index: &mut ColumnHistory, struts: &[SweepStrut]) {
     for strut in struts {
         if strut.k_bottom == usize::MAX || strut.k_top < strut.k_bottom {
             continue;

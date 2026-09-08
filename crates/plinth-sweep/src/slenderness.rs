@@ -266,8 +266,24 @@ pub struct SlendernessOutcome {
     /// Partner searches that found a shaft but could not use it because the
     /// band did not fit inside both members. A WARNING quantity.
     pub brace_bands_refused: usize,
-    /// Mast searches that found no admissible plate cell.
+    /// Mast searches that found no admissible plate cell — no cell inside
+    /// `d_max` that was outside the model, free of a shaft, out of a drain's
+    /// way AND clear of every root flare already on the plate.
     pub mast_cells_refused: usize,
+    /// Masts whose FLARED root disc still laps another plate root once the
+    /// final down-sweep has sized the field.
+    ///
+    /// **This is not a placement failure and it is published rather than
+    /// asserted away.** The cell is chosen against `r_m = max(r_min, H_first/S)`
+    /// — the mast's own slenderness radius — because that is the only radius
+    /// that exists at the moment of choosing. The down-sweep afterwards sizes
+    /// the mast from what the cross actually ties into it, and the area law can
+    /// hand it more section than `r_m`; two roots that cleared at placement can
+    /// then grow into one another. Measured 2026-09-07: `make_lonely_peak`
+    /// leaves 2 such pairs with the rule on AND with it off — identical fields,
+    /// so the rule is not what fails there — while `make_laid_tube` goes from
+    /// 127 lapping mast pairs with the rule deleted to 0 with it in force.
+    pub mast_roots_overlapping_after_sizing: usize,
     /// Forced merges the un-merge pass put BACK because the trunk they landed
     /// on could not grow far enough to carry the sum. Their runs return as
     /// warnings; the arm is never dropped.
@@ -400,6 +416,13 @@ pub struct SlendernessContext<'a> {
     pub law: &'a SlendernessLaw,
     pub layer_height_mm: f64,
     pub layers: usize,
+    /// `FLARE_R_FACTOR` — the registered factor the emitter's root flare uses.
+    /// A mast is plate-rooted and gets a root flare like any arm, so the mast
+    /// search has to answer the congestion lane's question before it lands one.
+    pub flare_factor: f64,
+    /// Sabotage knob: whether a mast's cell must CLEAR the placed root discs,
+    /// or merely be an empty cell as it was before 2026-09-06.
+    pub mast_root_clearance: bool,
     /// Whether a member may land part-way down another member's shaft at all.
     /// Remedy 1 IS a shaft landing, so the descent knob that forbids one must
     /// forbid the other; otherwise the sabotage drill measures a rule it did
@@ -517,6 +540,23 @@ pub fn apply_remedies(
         });
     }
 
+    // THE ROOT DISCS ALREADY ON THE PLATE, as the congestion lane measures
+    // them. A mast is plate-rooted and lays a root flare, so dropping one on
+    // top of a root that is already there re-creates exactly the stacking the
+    // congestion lane just spent four rounds relieving. Measured at 3ff52c7:
+    // `make_laid_tube` left the congestion lane at 1.0004 with 2 overlapping
+    // pairs and its FINISHED file read 1.0926 with 155, and the Sphere — where
+    // the congestion lane ran zero rounds — still finished at 1.0068 with 8,
+    // entirely from masts.
+    //
+    // The list is built ONCE here, from the sized field, and each mast this
+    // lane drops is appended, so masts cannot be stacked on each other either.
+    // A merge that has just taken an arm OFF the plate leaves a stale disc
+    // behind; that is the conservative direction (it only ever refuses a cell)
+    // and it is left standing rather than guessed at.
+    let mut placed_roots =
+        crate::congestion::root_discs(context.grid, context.history, struts, context.flare_factor);
+
     // Remedies 2 and 3, run tie point by tie point up each surviving run.
     for run in &over {
         let wanted = extra_ties(run);
@@ -534,7 +574,15 @@ pub fn apply_remedies(
                 continue;
             }
             if context.mast
-                && try_mast(context, &index, struts, run.strut_id, k, &mut outcome)
+                && try_mast(
+                    context,
+                    &index,
+                    struts,
+                    &mut placed_roots,
+                    run.strut_id,
+                    k,
+                    &mut outcome,
+                )
             {
                 stamp_last_three(&mut index, struts);
                 continue;
@@ -1103,10 +1151,19 @@ fn push_brace(
 }
 
 /// Remedy 3: drop a plate-rooted mast and brace to it.
+///
+/// **The cell has to be CLEAR, not merely empty.** The occupancy test used to
+/// be a single per-cell question — is there a shaft head here — which is a
+/// question about one cell and says nothing about the disc that lands on it. A
+/// mast lays a root flare of `FLARE_R_FACTOR × r_m`, so a cell one pitch from a
+/// 0.6 mm root is empty and not clear. The search now carries the candidate's
+/// own flared radius and asks [`crate::congestion::clear_of_placed`] — the same
+/// function, not a copy of the rule — against every root already on the plate.
 fn try_mast(
     context: &SlendernessContext<'_>,
     index: &ColumnHistory,
     struts: &mut Vec<SweepStrut>,
+    placed_roots: &mut Vec<crate::congestion::RootDisc>,
     id: u32,
     k: usize,
     outcome: &mut SlendernessOutcome,
@@ -1129,7 +1186,16 @@ fn try_mast(
     let cols = grid.cols();
     let row0 = grid.row_of(here);
     let col0 = grid.col_of(here);
-    let mut best: Option<(f64, usize)> = None;
+    let flare = if context.flare_factor.is_finite() && context.flare_factor > 0.0 {
+        context.flare_factor
+    } else {
+        1.0
+    };
+    // Nearest admissible cell wins, so the scan is a ring-by-ring outward
+    // search expressed as one pass with a nearest-so-far: the box is the same
+    // box `d_max` bounds, and every test below is a refusal of THIS cell, never
+    // of the search.
+    let mut best: Option<(f64, usize, f64)> = None;
     for row in row0.saturating_sub(reach_cells)..=(row0 + reach_cells).min(grid.rows() - 1) {
         let base = row * cols;
         for col in col0.saturating_sub(reach_cells)..=(col0 + reach_cells).min(cols - 1) {
@@ -1149,14 +1215,45 @@ fn try_mast(
             if index.shaft_head[cell] != u32::MAX {
                 continue;
             }
-            if best.is_none_or(|(best_distance, best_cell)| {
+            // THE MAST'S OWN RADIUS, at this candidate. Its slenderness has to
+            // hold over the run from the plate up to its FIRST brace, which is
+            // the bottom of the band the cross about to be built spans, and
+            // that band depends on the gap to THIS cell. So the radius is a
+            // property of the candidate and is computed per candidate:
+            // `r_m = max(r_min, H_first / S)`.
+            let depth = context.lean.layers_to_reach(distance_mm);
+            if depth == 0 || depth > k {
+                continue;
+            }
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a layer count bounded by the plan's own layer count is exact in f64"
+            )]
+            let first_brace_mm = (k - depth) as f64 * context.layer_height_mm;
+            let radius_mm = context.law.brace_radius_mm(first_brace_mm);
+            // AND ITS FLARED DISC HAS TO CLEAR EVERY ROOT ALREADY ON THE PLATE.
+            if context.mast_root_clearance
+                && !crate::congestion::clear_of_placed(
+                    grid,
+                    cell,
+                    radius_mm * flare,
+                    placed_roots,
+                    None,
+                )
+            {
+                continue;
+            }
+            if best.is_none_or(|(best_distance, best_cell, _)| {
                 (distance_mm.total_cmp(&best_distance), cell) < (core::cmp::Ordering::Equal, best_cell)
             }) {
-                best = Some((distance_mm, cell));
+                best = Some((distance_mm, cell, radius_mm));
             }
         }
     }
-    let Some((_, cell)) = best else {
+    // NO CLEAR CELL INSIDE `d_max` MEANS THE MAST IS REFUSED AND COUNTED, never
+    // placed overlapping. The run it would have served comes back as a warning
+    // from the census at the end of the lane — emit and warn, never refuse.
+    let Some((_, cell, radius_mm)) = best else {
         outcome.mast_cells_refused += 1;
         return false;
     };
@@ -1164,21 +1261,6 @@ fn try_mast(
         outcome.mast_cells_refused += 1;
         return false;
     }
-    // The mast's own slenderness has to hold over the run from the plate up to
-    // its FIRST brace, which is the bottom of the band the cross about to be
-    // built spans. `depth` is that band, from the same law that will build it.
-    let gap_mm = crate::cell_distance_mm(grid, here, cell);
-    let depth = context.lean.layers_to_reach(gap_mm);
-    if depth == 0 || depth > k {
-        outcome.mast_cells_refused += 1;
-        return false;
-    }
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "a layer count bounded by the plan's own layer count is exact in f64"
-    )]
-    let first_brace_mm = (k - depth) as f64 * context.layer_height_mm;
-    let radius_mm = context.law.brace_radius_mm(first_brace_mm);
     let mast_id = u32::try_from(struts.len()).unwrap_or(u32::MAX);
     struts.push(SweepStrut {
         id: mast_id,
@@ -1208,6 +1290,17 @@ fn try_mast(
     let mut index_with_mast = ColumnHistory::new(grid);
     stamp_all(&mut index_with_mast, struts);
     if build_cross(context, &index_with_mast, struts, id, mast_id, k, outcome) {
+        // The mast is now a root on the plate, so the NEXT mast search has to
+        // clear it too.
+        crate::congestion::push_disc(
+            placed_roots,
+            grid,
+            mast_id,
+            cell,
+            radius_mm * flare,
+            radius_mm,
+            false,
+        );
         outcome.masts_dropped += 1;
         outcome.braces_added += 1;
         return true;

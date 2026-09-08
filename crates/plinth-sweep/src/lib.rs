@@ -495,6 +495,11 @@ pub struct SweepPolicy {
     /// **On in production.** The drill turns it off and watches the runs come
     /// out as warnings, with NEVER fewer arms than before.
     pub slenderness_mast: bool,
+    /// Whether a mast's plate cell must CLEAR the flared root discs already on
+    /// the plate. **On in production.** The drill turns it off, which restores
+    /// the pre-2026-09-06 per-cell occupancy test, and watches overlapping root
+    /// pairs reappear on the finished field.
+    pub slenderness_mast_root_clearance: bool,
     pub limits: SweepLimits,
 }
 
@@ -554,6 +559,7 @@ impl SweepPolicy {
             slenderness_merge: true,
             slenderness_brace: true,
             slenderness_mast: true,
+            slenderness_mast_root_clearance: true,
             limits: SweepLimits {
                 cell_layer_budget: placeholders.sweep_cell_layer_budget().diagnostic().get(),
                 ..SweepLimits::production()
@@ -667,6 +673,17 @@ impl SweepPolicy {
         self.slenderness_merge = false;
         self.slenderness_brace = false;
         self.slenderness_mast = false;
+        self
+    }
+
+    /// Let a mast stand on a cell that is merely EMPTY instead of one that is
+    /// CLEAR — the field this engine placed before 2026-09-06, where a mast's
+    /// root flare was free to lap over the root beside it. **Sabotage only**:
+    /// the drill sets it and overlapping root pairs must reappear on the
+    /// finished field.
+    #[must_use]
+    pub const fn without_mast_root_clearance(mut self) -> Self {
+        self.slenderness_mast_root_clearance = false;
         self
     }
 
@@ -985,6 +1002,7 @@ pub fn run_sweep_with_drains(
         flare_factor: policy.flare_r_factor,
         tip_radius_min_mm: policy.tip_radius_min_mm,
         hex_separation_mm: up_sweep::hex_separation_mm(lamina_reach_mm),
+        x_allowed: policy.x_allowed,
         outward_lean: policy.congestion_outward_lean,
         flank_arms: policy.congestion_flank_arms,
         max_struts: policy.limits.max_struts,
@@ -1008,6 +1026,24 @@ pub fn run_sweep_with_drains(
             congestion_outcome.rounds_used += 1;
             outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
             set_interior(&mut struts, &history);
+            // WHAT THE PRE-SIZING ESTIMATE GOT WRONG, measured rather than
+            // assumed. A flank arm's plate cell is chosen against an ESTIMATE
+            // of its root radius, because the arm does not exist yet when the
+            // cell is picked; the down-sweep that just ran is the first pass
+            // that knows the real one. Any inserted root whose flared disc
+            // still overlaps a neighbour is an ordinary stacked plate root
+            // (`StrutKind::Arm`, `Landing::Plate`, `k_bottom == 0`), so the
+            // NEXT round's `stacked_ids` names it and remedy 1 leans it out —
+            // no separate path, and this counter is what says whether any were
+            // left when the rounds ran out.
+            congestion_outcome.flank_roots_overlapping_after_sizing =
+                congestion::roots_overlapping_after_sizing(
+                    &grid,
+                    &history,
+                    &struts,
+                    policy.flare_r_factor,
+                    &congestion_outcome.inserted_ids,
+                );
         }
     }
     // What THIS lane left, before slenderness has its say. Published beside the
@@ -1047,6 +1083,8 @@ pub fn run_sweep_with_drains(
         merge: policy.slenderness_merge,
         brace: policy.slenderness_brace,
         mast: policy.slenderness_mast,
+        flare_factor: policy.flare_r_factor,
+        mast_root_clearance: policy.slenderness_mast_root_clearance,
         max_struts: policy.limits.max_struts,
     };
     let mut slenderness_merges_undone = 0_usize;
@@ -1085,6 +1123,25 @@ pub fn run_sweep_with_drains(
     slenderness_outcome.longest_run_mm = 0.0;
     slenderness_outcome.longest_run_limit_mm = 0.0;
     slenderness_outcome.merges_undone_by_radius = slenderness_merges_undone;
+    // WHAT THE MAST'S PLACEMENT-TIME RADIUS GOT WRONG, measured on the sized
+    // field by the same function that measures the flank arms' equivalent. A
+    // mast's cell is chosen against `r_m = max(r_min, H_first/S)`; the
+    // down-sweep then sizes it from what the cross ties into it, and two roots
+    // that cleared at placement can grow into one another. Published, never
+    // asserted away.
+    let mast_ids: Vec<u32> = struts
+        .iter()
+        .filter(|strut| strut.kind == StrutKind::Mast)
+        .map(|strut| strut.id)
+        .collect();
+    slenderness_outcome.mast_roots_overlapping_after_sizing =
+        congestion::roots_overlapping_after_sizing(
+            &grid,
+            &history,
+            &struts,
+            policy.flare_r_factor,
+            &mast_ids,
+        );
     slenderness_outcome.warnings.clear();
     for run in &slenderness_after {
         if run.length_mm > slenderness_outcome.longest_run_mm {
@@ -1111,13 +1168,24 @@ pub fn run_sweep_with_drains(
     // way: their own carried ledger where they meet the plate.
     congestion_outcome.after = congestion::measure(&grid, &history, &struts, policy.flare_r_factor);
     congestion_outcome.still_congested = congestion_outcome.after.all.congested();
-    congestion_outcome.flank_load_at_plate_mm2 = congestion_outcome
+    congestion_outcome.flank_load_still_at_plate_mm2 = congestion_outcome
         .inserted_ids
         .iter()
         .filter_map(|id| struts.get(*id as usize))
         .filter(|strut| matches!(strut.landing, Landing::Plate))
         .filter_map(|strut| strut.carried_mm2.first().copied())
         .sum();
+    // AND THE ONES THIS SUM CANNOT SEE. A later pass — a forced merge, or the
+    // down-sweep's own descent — can re-land an inserted arm on a trunk, and
+    // such an arm no longer meets the plate at all. It is not lost load; it is
+    // load that reaches the plate down somebody else's shaft. Publishing the
+    // count is what stops the sum above from reading as "less load moved".
+    congestion_outcome.flank_arms_moved_off_plate = congestion_outcome
+        .inserted_ids
+        .iter()
+        .filter_map(|id| struts.get(*id as usize))
+        .filter(|strut| !matches!(strut.landing, Landing::Plate))
+        .count();
 
     // The escape check runs on the FINISHED field, struts and all, because a
     // check that ran before sizing would be answering about a field nobody
@@ -1161,7 +1229,17 @@ pub fn run_sweep_with_drains(
     report.merges_refused_by_radius = merges_refused_by_radius;
     report.lean_max_step_mm = law.max_step_mm();
     report.descent_junctions_mid_shaft = junctions_mid_shaft_descent;
-    report.shaft_spans_recorded = history.shaft_spans.len();
+    // SHAFT SPANS AS THE FINISHED FIELD HAS THEM, not as the up-sweep left
+    // them. `history` is the UP-SWEEP's column index and nothing has written to
+    // it since: the descent, the congestion lane and the slenderness lane each
+    // build their own index over the field they are working on, so this counter
+    // has been reporting a pre-descent number ever since those lanes landed.
+    // Rebuilt here from the strut set that is actually emitted.
+    report.shaft_spans_recorded = {
+        let mut final_index = up_sweep::ColumnHistory::new(&grid);
+        congestion::stamp_all(&mut final_index, &struts);
+        final_index.shaft_spans.len()
+    };
     report.slenderness_lane = slenderness_outcome;
     report.congestion_lane = congestion_outcome;
     report.counters.lean_candidates_priced = lean_candidates_priced;
