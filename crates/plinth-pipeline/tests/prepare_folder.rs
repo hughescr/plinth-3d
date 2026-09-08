@@ -264,15 +264,25 @@ fn outcome<'a>(report: &'a PrepareReport, model: &str) -> &'a ModelPreparationOu
         .outcome
 }
 
-/// **How many contacts the healthy fixture refuses — MEASURED, 2026-08-20.**
+/// **How many contacts the healthy fixture refuses — MEASURED, re-derived
+/// 2026-09-08 for the tip-seating contact-law change (`26eaab7`, `dc3dae7`,
+/// `f8656cf`).**
 ///
-/// Zero until Craig's scar bound landed. It is not zero now, and the reason is
-/// recorded where it is asserted: the bound refuses a rescue whose cure would
-/// have left a scar wider than any support he has ever printed, and that
-/// contact carries **0.000 mm²**. The load assertion is the one with teeth;
-/// this count is what stops a second, unrelated refusal from slipping in behind
-/// a zero-area sum now that `is_empty()` can no longer be demanded.
-const HEALTHY_FIXTURE_ABANDONED_CONTACTS: usize = 1;
+/// Zero until Craig's scar bound landed (2026-08-20): the one contact the
+/// bound refused needed `0.650630996` mm radius to attest, 1.63x
+/// `TIP_RADIUS_MAX_GROWN_SCAR_MM` (0.4 mm), so the count went 0 -> 1. The
+/// legacy engine's seat depth minimum has since moved from a flat 0.3625 mm
+/// floor to a derived layer+pixel allowance (~0.1 mm), and `seat_depth_of`'s
+/// first term with it, so that SAME contact now needs less penetration to
+/// attest and its required scar radius drops back inside the 0.4 mm bound —
+/// the count returns to **0**, MEASURED by reading `abandoned_contacts.len()`
+/// back with this assertion loosened to a print. The load assertion below
+/// (`abandoned_mm2 == 0.0`) never moved: this contact carried 0.000 mm² in
+/// both states, so its refusal or attestation never changed what the fixture
+/// abandons in AREA, only in count. This count is what stops a second,
+/// unrelated refusal from slipping in behind a zero-area sum now that
+/// `is_empty()` can no longer be demanded.
+const HEALTHY_FIXTURE_ABANDONED_CONTACTS: usize = 0;
 
 /// **The load-bearing test: a folder in, a real `.chitubox` out.**
 ///
@@ -359,7 +369,23 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
     let warnings = load_warnings
         .as_ref()
         .expect("this fixture's real emitted-contact record has two area-law violations");
-    assert_eq!(warnings.judged, 18);
+    // **`judged` re-derived 2026-09-08 for the tip-seating contact-law change**
+    // (`26eaab7`, `dc3dae7`, `f8656cf`). `judged` is `emitted_contacts.len()`
+    // (`plinth-pipeline/src/gates.rs:1001`) — one count per contact this run
+    // actually shipped, NOT the fixture's fixed geometry. It moves in lockstep
+    // with `HEALTHY_FIXTURE_ABANDONED_CONTACTS` above by construction (every
+    // routed contact is either emitted-and-judged or abandoned): that count
+    // went 1 -> 0 under the same law change (a rescue that used to need a
+    // wider-than-bound scar now attests within it), so one more contact ships
+    // and `judged` goes 18 -> 19. Confirmed by instrumentation, not inferred:
+    // printed from a live run before this refresh was written. The CLAIM this
+    // test makes — "the load gate WARNS rather than refuses, and names exactly
+    // the violations a real emitted-contact record has" — is unchanged; only
+    // the emitted-contact count moved, and `violations.len() == 2` and both
+    // violations' `carried_area_mm2`/`emitted_tip_radius_mm` are unaffected
+    // because neither of the two violating contacts is the one that started
+    // attesting.
+    assert_eq!(warnings.judged, 19);
     assert_eq!(warnings.violations.len(), 2);
     for violation in &warnings.violations {
         assert_eq!(
@@ -1102,12 +1128,30 @@ fn a_model_that_cannot_close_its_coverage_emits_and_names_the_gap() {
     // guard) and its emitted file are unchanged, and the loop's wall time fell
     // from ~35 s to ~12 s. `RepairRunReport::prescreen` is where that is stated
     // on the run's own record.
+    // **Re-measured 2026-09-08, from `(54, 0)` to `(55, 0)`, for the
+    // TIP-SEATING CONTACT LAW** (`26eaab7`, `dc3dae7`, `f8656cf`: legacy seat
+    // depth minimum 0.3625 mm -> a derived layer+pixel allowance, and
+    // `seat_depth_of`'s first term). The batched seat attestation that runs
+    // the prescreen judges a seat's geometry using the SAME seating law the
+    // repair trial itself would use, so one seat that used to attest
+    // `undecidable_geometry` (needing more penetration than the old flat
+    // minimum could resolve unambiguously) now resolves under the shallower
+    // derived allowance and is no longer dropped at the screen. `offered`
+    // (202, the candidate set itself) is unaffected — nothing about which
+    // seats exist moved, only which of them the screen can decide. So `dropped`
+    // falls by exactly one (107 -> 106, all of it out of
+    // `undecidable_geometry`), the one seat the screen now passes through
+    // enters the trial loop, and `trials` rises by exactly one to match
+    // (54 -> 55). `commits` stays at 0: MEASURED, not assumed — the new trial
+    // is still vetoed (it joins the same zero-improvement/regression pool the
+    // other 54 already sat in), so this fixture still commits nothing and its
+    // stop reason (§B.3's zero-score guard, asserted below) is unchanged.
     let repair = repair_report
         .as_ref()
         .expect("a model that spent the repair controller states what it spent");
     assert_eq!(
         (repair.trials, repair.commits),
-        (54, 0),
+        (55, 0),
         "the raking blade tries every candidate that could help and commits none: {repair:?}"
     );
     assert_eq!(
@@ -1116,7 +1160,7 @@ fn a_model_that_cannot_close_its_coverage_emits_and_names_the_gap() {
             repair.prescreen.dropped,
             repair.prescreen.dropped_by_cause.get("undecidable_geometry"),
         ),
-        (202, 107, Some(&107)),
+        (202, 106, Some(&106)),
         "the trials this fixture no longer spends are accounted for by name on the report, not \
          merely absent from the count: {repair:?}"
     );

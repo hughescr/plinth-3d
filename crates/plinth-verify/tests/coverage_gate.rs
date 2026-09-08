@@ -313,6 +313,46 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // confirmation that the digest's input SHAPE did not widen — only one input's
 // value moved. No cap, gate, minimum, radius, tolerance or registered constant
 // was touched, and none was added.
+//
+// **Refreshed a fourteenth time on 2026-09-08, for the TIP-SEATING CONTACT LAW**
+// (`26eaab7`, `dc3dae7`, `f8656cf`): the legacy engine's seat depth minimum
+// moved from a flat 0.3625 mm floor to a derived layer+pixel allowance around
+// 0.1 mm, and `seat_depth_of`'s first term changed with it. **This swings the
+// SAME contact the GROW-TO-ATTEST/SCAR-BOUND pair above already swung, in the
+// SAME direction as GROW-TO-ATTEST, just reached by moving the physics
+// instead of moving the bound.** The contact that needed `0.650630996` mm
+// radius to attest — 1.63x `TIP_RADIUS_MAX_GROWN_SCAR_MM` (0.4 mm) — and was
+// refused under the SCAR BOUND now needs less penetration under the new law
+// and attests inside the bound again. Routed contacts and resource counts
+// move BACK to the exact GROW-TO-ATTEST values recorded above: route
+// memberships 71 -> 74, indexed points 69 -> 71, distance work 1,033,728 ->
+// 1,034,240, logical peak bytes 12,624,152 -> 12,624,272, `snapshot_digest`
+// 13198418135389558006 -> 8864297973426809209.
+//
+// **Confirmed by instrumentation, not inferred.** `request()`'s ceilings were
+// temporarily raised to `1_000_000`+ and the run's own `resources` counters
+// were read back before this refresh was written; they are the four numbers
+// above, exactly. The golden was then REGENERATED THROUGH THIS FILE'S OWN
+// PRODUCER PATH (the `THREAD_CHILD` arm below), never hand-edited, and the
+// two documents were diffed leaf by leaf: **13 of ~180 scalar leaves moved.**
+// Nine are the digest and the four counter/ceiling pairs above (each counted
+// once in `request`, once in `resources`). The other four are the measured
+// consequence on the two toe islands the restored contact stands between —
+// the SAME two islands, moving in the SAME safe direction, by the SAME
+// amounts as the GROW-TO-ATTEST refresh recorded:
+//
+// * island 5 uncovered area 0.48293112489274953 -> 0.4616253399710106 mm²,
+//   worst gap 4.380949640913765 -> 2.1953457995370087 mm
+// * island 8 uncovered area 0.48293112489274964 -> 0.4616253399710107 mm²,
+//   worst gap 4.380949640913764 -> 2.195345799537009 mm
+//
+// All 9 islands, the other 7 patches and all 7 defects are byte-identical,
+// and the report still refuses with the same 7 defects. `cap_minus_one_returns_a_typed_error_without_a_report`
+// carries the full derivation for why `max_distance_work` is the ceiling
+// re-pointed at the moved total, and why it is still the first (and only)
+// ceiling that can trip at cap-1. No cap, gate, minimum, radius, tolerance or
+// registered constant was touched by this refresh — the tip-seating law lives
+// in `plinth-support`, not in any bound this file owns.
 const FROZEN_REPORT_JSON: &str = include_str!("coverage_gate_toed_slab.json");
 
 fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationError> {
@@ -384,18 +424,27 @@ fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationE
     Ok(serde_json::to_string(&report).expect("serialize full coverage report"))
 }
 
+/// Route memberships (74), indexed points (71) and logical peak bytes
+/// (12,624,272) are this test's own hand-counted fixture ceilings, set to the
+/// EXACT realized totals `measurement_preflight` produces on `make_toed_slab`
+/// under the tip-seating contact-law change (`26eaab7`, `dc3dae7`,
+/// `f8656cf`) -- read back from this test's own `resources` counters with the
+/// ceilings raised well above them, never guessed. Query rows (50,688) and
+/// assessment work (5,879,808) are unchanged by that law; they bound the same
+/// realized totals as before. See `cap_minus_one_returns_a_typed_error_without_a_report`
+/// for the full derivation and the from->to values.
 fn request(max_distance_work: usize) -> CoverageMeasurementRequest {
     CoverageMeasurementRequest::from_f64(
         1.0,
         1.0,
-        CoverageMeasurementLimits::new(71, 69, 50_688, max_distance_work, 12_624_152, 5_879_808)
+        CoverageMeasurementLimits::new(74, 71, 50_688, max_distance_work, 12_624_272, 5_879_808)
             .expect("nonzero frozen limits"),
     )
     .expect("finite request")
 }
 
 fn report_json() -> String {
-    verify_json(1_033_728).expect("coverage report")
+    verify_json(1_034_240).expect("coverage report")
 }
 
 #[test]
@@ -476,10 +525,43 @@ fn redact_snapshot_digest(json: &str) -> String {
     )
 }
 
+/// **Re-derived 2026-09-07/08 for the tip-seating contact-law change**
+/// (`26eaab7`, `dc3dae7`, `f8656cf`: legacy seat depth minimum 0.3625 ->
+/// derived layer+pixel allowance, and `seat_depth_of`'s first term). That
+/// change touches only how deep a grown tip must seat, not this request's own
+/// caps or censor, and it moved one contact's outcome on this fixture: a
+/// contact that used to need `0.650630996` mm radius to attest -- 1.63x the
+/// registered `TIP_RADIUS_MAX_GROWN_SCAR_MM` (0.4 mm) -- and was refused (see
+/// the "SCAR BOUND" refresh above, `snapshot_digest ... 4190462360230124963`)
+/// now needs less penetration under the new law and attests inside the
+/// bound. This is the SAME contact and the SAME swing already measured and
+/// recorded above for GROW-TO-ATTEST, just reached by moving the physics
+/// instead of moving the bound: route memberships 71 -> 74, indexed points
+/// 69 -> 71, distance work 1,033,728 -> 1,034,240, logical peak bytes
+/// 12,624,152 -> 12,624,272 (confirmed against this test's own `resources`
+/// counters with the caps raised to `1_000_000`+ and read back; see the
+/// `request()` ceilings just below, which carry the same four numbers).
+///
+/// **Why "distance work" still trips first at cap-1.**
+/// `measurement_preflight` (`plinth-support/src/runner.rs`) totals
+/// `route memberships` once, up front, against `limits.max_route_memberships`
+/// before doing any per-membership work; then, per membership, it
+/// accumulates `indexed_point_count`, `distance_work` and `query_row_count`
+/// in that order, each checked against its own ceiling as it grows. On this
+/// fixture `request()`'s `max_route_memberships` (74), `max_indexed_points`
+/// (71) and `max_query_rows` (50,688) are set to EXACTLY the realized totals
+/// (`route_membership_sum` 74, `indexed_point_count` 71, `query_row_count`
+/// 50,688 -- unmoved by this change), so none of those three sequences can
+/// ever exceed its own ceiling before its final increment. Only
+/// `max_distance_work` is deliberately one less than the realized
+/// `distance_work` total (1,034,240), so it is the one ceiling that a
+/// monotonically-accumulating sum can cross, and it is the first cap the loop
+/// reaches that is actually violated -- exactly the same design as the prior
+/// pin, just re-pointed at the moved total.
 #[test]
 fn cap_minus_one_returns_a_typed_error_without_a_report() {
     assert_eq!(
-        verify_json(1_033_727),
+        verify_json(1_034_239),
         Err(CoverageVerificationError::ResourceLimit {
             resource: "distance work".to_owned()
         })
