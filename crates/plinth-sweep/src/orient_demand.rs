@@ -146,7 +146,7 @@ use plinth_orient::demand::{DemandFidelity, MeasuredSupportDemand, SupportDemand
 use plinth_orient::{ObjectiveWeights, OrientFaceTable, UpDirection};
 use rayon::prelude::*;
 
-use crate::{model_landing, run_sweep, tip_landing, SweepPolicy};
+use crate::{model_landing, run_sweep, tip_landing, StrutKind, SweepPolicy};
 
 /// See the module doc's "Two rasters" section.
 const DEMAND_PITCH_MULTIPLIER: f64 = 10.0;
@@ -353,9 +353,33 @@ impl SweepDemand {
             }
             _ => None,
         };
+        // THE BURDEN IS WHAT THE OWNER PAYS IN CLIPS, so it counts only the
+        // members that seat into the model and carry peel load. A brace or a
+        // mast (the slenderness lane, 2026-09-05/06) touches no model face
+        // and leaves no scar; counting either here would over-state the
+        // burden by exactly the stiffening the lane added to make the arms
+        // themselves legal (see the module doc's "What the burden IS" table
+        // and `tests/pose_demand_probe.rs`).
+        let arm_count = plan
+            .struts
+            .iter()
+            .filter(|strut| strut.kind == StrutKind::Arm)
+            .count();
+        let brace_count = plan
+            .struts
+            .iter()
+            .filter(|strut| strut.kind == StrutKind::Brace)
+            .count();
+        let mast_count = plan
+            .struts
+            .iter()
+            .filter(|strut| strut.kind == StrutKind::Mast)
+            .count();
         Ok(MeasuredSupportDemand {
-            support_area_cm2: burden_cm2(plan.struts.len(), settings.tip_radius_mm),
-            struts: plan.struts.len(),
+            support_area_cm2: burden_cm2(arm_count, settings.tip_radius_mm),
+            struts: arm_count,
+            braces: brace_count,
+            masts: mast_count,
             total_scar_mm2: plan.report.total_scar_mm2,
             achieved_pitch_mm: plan.report.achieved_pitch_mm,
             layers: plan.layers,
@@ -425,9 +449,13 @@ impl SupportDemandMeasurer for SweepDemand {
             .zip(&measured)
             .map(|(candidate, result)| {
                 let up = candidate.get();
-                let (arms, burden, landing, tip) = match result {
+                let (arms, stiffening, burden, landing, tip) = match result {
                     Ok(one) => (
                         one.struts.to_string(),
+                        // Published beside the arm count so the pose's
+                        // stiffening cost is visible without being allowed to
+                        // decide the pose (neither is folded into `burden`).
+                        format!("{} braces {} masts", one.braces, one.masts),
                         format!("{:.5}", one.support_area_cm2),
                         // A stated absence prints as one: "not measured" and
                         // "measured, nothing landed" must never look alike in
@@ -451,10 +479,12 @@ impl SupportDemandMeasurer for SweepDemand {
                         "err".to_owned(),
                         "err".to_owned(),
                         "err".to_owned(),
+                        "err".to_owned(),
                     ),
                 };
                 format!(
-                    "({:+.4},{:+.4},{:+.4}) arms {arms} burden {burden} cm2, {landing}, {tip}",
+                    "({:+.4},{:+.4},{:+.4}) arms {arms} ({stiffening}) burden {burden} cm2, \
+                     {landing}, {tip}",
                     up[0], up[1], up[2]
                 )
             })

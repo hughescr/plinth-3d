@@ -97,7 +97,22 @@ pub struct MeasuredSupportDemand {
     pub support_area_cm2: f64,
     /// The arm count this pose costs — the free variable the burden is built
     /// from, published raw beside it so the conversion can be checked.
+    ///
+    /// **`StrutKind::Arm` only.** A brace and a mast (the slenderness lane,
+    /// 2026-09-05/06) touch no model face and leave no scar, so they are not
+    /// part of what the owner pays in clips-to-remove; counting them here
+    /// would over-state the burden by exactly the stiffening the lane added
+    /// to make the arms themselves legal.
     pub struts: usize,
+    /// Cross-braces this pose's sweep placed (`StrutKind::Brace`), published
+    /// beside [`Self::struts`] so what the pose costs in STIFFENING is still
+    /// visible without being allowed to decide the pose. Never folded into
+    /// [`Self::struts`] or [`Self::support_area_cm2`].
+    pub braces: usize,
+    /// Plate-rooted masts this pose's sweep placed (`StrutKind::Mast`), the
+    /// mirror of [`Self::braces`] for the other slenderness remedy. Same
+    /// rule: published, never counted into the burden.
+    pub masts: usize,
     /// `Σ π r²` over the tips. Published because it is the quantity the
     /// burden was chosen OVER, and because the area law makes it very nearly
     /// a pose invariant (`SweepPlan::total_scar_mm2`'s own doc:

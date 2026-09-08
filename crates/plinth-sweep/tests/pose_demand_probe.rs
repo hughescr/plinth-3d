@@ -33,7 +33,7 @@ mod harness;
 use harness::sweep_with;
 use plinth_core::m0_constants;
 use plinth_mesh::{make_recessed_disc, Mesh};
-use plinth_sweep::{burden_cm2, SweepPlan, SweepPolicy};
+use plinth_sweep::{burden_cm2, StrutKind, SweepPlan, SweepPolicy};
 
 fn rotate_about_y(mesh: &Mesh, degrees: f64) -> Mesh {
     let (sin, cos) = degrees.to_radians().sin_cos();
@@ -62,18 +62,47 @@ fn tip_radius_default_mm() -> f64 {
         .get()
 }
 
+/// The burden the objective actually reads: `StrutKind::Arm` only. A brace or
+/// a mast (the slenderness lane, 2026-09-05/06) touches no model face and
+/// leaves no scar, so counting either here would over-state the burden by
+/// exactly the stiffening the lane added to make the arms themselves legal
+/// (`plinth_sweep::orient_demand`'s module doc, and its own fix 2026-09-07).
+fn arm_count(plan: &SweepPlan) -> usize {
+    plan.struts
+        .iter()
+        .filter(|strut| strut.kind == StrutKind::Arm)
+        .count()
+}
+
+fn brace_count(plan: &SweepPlan) -> usize {
+    plan.struts
+        .iter()
+        .filter(|strut| strut.kind == StrutKind::Brace)
+        .count()
+}
+
+fn mast_count(plan: &SweepPlan) -> usize {
+    plan.struts
+        .iter()
+        .filter(|strut| strut.kind == StrutKind::Mast)
+        .count()
+}
+
 fn probe(name: &str, mesh: &Mesh, pitch_mm: f64) -> SweepPlan {
     let policy = SweepPolicy::from_registry()
         .expect("registry")
         .with_working_pitch_mm(pitch_mm);
     let plan = sweep_with(mesh, pitch_mm, &policy);
     println!(
-        "{name:22} pitch {pitch_mm:.3} mm  demand {:9.2} mm2  arms {:5}  scar {:8.3} mm2  \
-         BURDEN {:8.5} cm2  peak {:9.2} mm2  layers {:4}  overloaded {:5}  inserted {:4}",
+        "{name:22} pitch {pitch_mm:.3} mm  demand {:9.2} mm2  arms {:5}  braces {:4}  masts {:4}  \
+         scar {:8.3} mm2  BURDEN {:8.5} cm2  peak {:9.2} mm2  layers {:4}  overloaded {:5}  \
+         inserted {:4}",
         plan.report.demand_area_mm2,
-        plan.report.struts_total,
+        arm_count(&plan),
+        brace_count(&plan),
+        mast_count(&plan),
         plan.report.total_scar_mm2,
-        burden_cm2(plan.report.struts_total, tip_radius_default_mm()),
+        burden_cm2(arm_count(&plan), tip_radius_default_mm()),
         plan.report.peak_layer_area_mm2,
         plan.report.layers,
         plan.report.overloaded_struts.len(),
@@ -107,11 +136,11 @@ fn a_tilt_costs_more_arms_than_the_flat_pose_while_measuring_less_demand() {
         ("Round 25 flipped 180 deg", &flat_25, &flipped_25),
     ] {
         assert!(
-            flat.report.struts_total < other.report.struts_total,
+            arm_count(flat) < arm_count(other),
             "{name} takes {} arms against the flat pose's {}; the flat pose must be the cheaper \
              field or the burden itself has moved",
-            other.report.struts_total,
-            flat.report.struts_total,
+            arm_count(other),
+            arm_count(flat),
         );
     }
 
@@ -129,8 +158,8 @@ fn a_tilt_costs_more_arms_than_the_flat_pose_while_measuring_less_demand() {
         ("Round 25 tilted 3.6 deg", &flat_25, &tilted_25),
         ("Round 25 flipped 180 deg", &flat_25, &flipped_25),
     ] {
-        let flat_burden = burden_cm2(flat.report.struts_total, radius_mm);
-        let other_burden = burden_cm2(other.report.struts_total, radius_mm);
+        let flat_burden = burden_cm2(arm_count(flat), radius_mm);
+        let other_burden = burden_cm2(arm_count(other), radius_mm);
         assert!(
             flat_burden < other_burden,
             "{name} must cost the objective MORE than the flat pose: {other_burden:.5} cm2 \
@@ -158,7 +187,7 @@ fn a_tilt_costs_more_arms_than_the_flat_pose_while_measuring_less_demand() {
             flat.report.total_scar_mm2,
         );
         assert!(
-            flipped.report.struts_total > flat.report.struts_total,
+            arm_count(flipped) > arm_count(flat),
             "{name}: while the arm count ranks it correctly",
         );
     }
@@ -170,8 +199,8 @@ fn a_tilt_costs_more_arms_than_the_flat_pose_while_measuring_less_demand() {
         flat_50.report.demand_area_mm2,
         tilted_50.report.demand_area_mm2,
         flat_50.report.demand_area_mm2 / tilted_50.report.demand_area_mm2.max(1.0e-9),
-        flat_50.report.struts_total,
-        tilted_50.report.struts_total,
-        tilted_50.report.struts_total as f64 / flat_50.report.struts_total as f64,
+        arm_count(&flat_50),
+        arm_count(&tilted_50),
+        arm_count(&tilted_50) as f64 / arm_count(&flat_50) as f64,
     );
 }

@@ -20,6 +20,10 @@ fn measured(support_area_cm2: f64, fidelity: DemandFidelity) -> MeasuredSupportD
     MeasuredSupportDemand {
         support_area_cm2,
         struts: 1,
+        // The double never places a brace or a mast: it is a test-local stand-in
+        // for the trait's contract, not a real sweep.
+        braces: 0,
+        masts: 0,
         total_scar_mm2: 0.25,
         achieved_pitch_mm: match fidelity {
             DemandFidelity::Prefilter => 0.5,

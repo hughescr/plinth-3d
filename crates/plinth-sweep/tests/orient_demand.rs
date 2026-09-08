@@ -6,11 +6,11 @@
 //! through a test-local mock; this is the one test of the real geometry this
 //! crate contributes.
 
-use plinth_core::m0_constants;
-use plinth_mesh::make_overhang_table;
+use plinth_core::{m0_constants, LayerPlan};
+use plinth_mesh::{make_overhang_table, make_tall_stilt_plate};
 use plinth_orient::demand::{DemandFidelity, SupportDemandMeasurer};
 use plinth_orient::{OrientFaceTable, UpDirection};
-use plinth_sweep::{burden_cm2, SweepDemand};
+use plinth_sweep::{burden_cm2, run_sweep, StrutKind, SweepDemand, SweepPlan, SweepPolicy};
 
 /// The scoring table the commit tier hands the measurer. Built here exactly as
 /// `plinth_orient::search` builds its Exact rung, so the fragility and display
@@ -130,5 +130,108 @@ fn different_poses_measure_different_burdens() {
     assert_ne!(
         identity.support_area_cm2, sideways.support_area_cm2,
         "a real measurement must depend on the candidate, unlike a fixed proxy"
+    );
+}
+
+/// The same pose, swept directly, so a test can compare `MeasuredSupportDemand`
+/// against the plan it was measured from. Reproduces `measure_one`'s own
+/// layer-count arithmetic (`orient_demand.rs`), the same pattern
+/// `tests/tip_contact_scar.rs`'s and `tests/model_landing_scar.rs`'s `swept`
+/// helpers use, so this sweeps the exact pose the measurer swept.
+fn swept_at(mesh: &plinth_mesh::Mesh, candidate: UpDirection) -> SweepPlan {
+    let transformed =
+        plinth_orient::oriented_recentered_mesh(mesh, candidate).expect("an orientable fixture");
+    let constants = m0_constants().expect("the registry");
+    let policy = SweepPolicy::from_registry().expect("the registered sweep policy");
+    let lift_mm = constants.placeholders().lift_mm().diagnostic().get();
+    let layer_height_mm = *constants.evidence().layer_height_default_mm().value();
+    let max_z = transformed
+        .verts()
+        .iter()
+        .fold(f64::NEG_INFINITY, |acc, vertex| acc.max(vertex[2]));
+    let plate_z = -lift_mm;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the same layer-count arithmetic orient_demand.rs's measure_one performs, so this \
+                  helper sweeps the pose the measurer swept"
+    )]
+    let count = (((max_z - plate_z) / layer_height_mm).ceil().max(1.0) as usize) + 1;
+    let layers = LayerPlan::new(plate_z, vec![layer_height_mm; count]).expect("a layer plan");
+    run_sweep(&transformed, &layers, &policy).expect("a sweepable fixture")
+}
+
+/// **Anti-vacuity, and the sabotage this fix must survive.** The slenderness
+/// lane (2026-09-05/06) added `StrutKind::Brace` and `StrutKind::Mast`
+/// members to the strut set; neither touches a model face or leaves a scar,
+/// so `MeasuredSupportDemand::struts` (the burden's own free variable) must
+/// count `StrutKind::Arm` only, with the brace and mast counts published
+/// beside it rather than folded in.
+///
+/// `make_tall_stilt_plate` at its own authored pose is the fixture
+/// `tests/slenderness_lane.rs` uses to prove the ladder fires on a real
+/// field, so it is used here at `UpDirection::MODEL_UP` to prove the SAME
+/// thing about the counts the demand measurer reports. The anti-vacuity
+/// assertion (braces or masts > 0) is checked FIRST: without it, a
+/// regression back to counting every strut (`plan.struts.len()`) could pass
+/// this test vacuously on a fixture that never grows a brace or a mast.
+#[test]
+fn the_burden_counts_arms_only_on_a_fixture_that_also_places_braces_and_masts() {
+    let mesh = make_tall_stilt_plate().expect("the tall stilt plate fixture");
+    let table = scoring_table(&mesh);
+    let candidate = UpDirection::MODEL_UP;
+
+    let plan = swept_at(&mesh, candidate);
+    let arms_in_plan = plan
+        .struts
+        .iter()
+        .filter(|strut| strut.kind == StrutKind::Arm)
+        .count();
+    let braces_in_plan = plan
+        .struts
+        .iter()
+        .filter(|strut| strut.kind == StrutKind::Brace)
+        .count();
+    let masts_in_plan = plan
+        .struts
+        .iter()
+        .filter(|strut| strut.kind == StrutKind::Mast)
+        .count();
+
+    // Anti-vacuity: the fixture must actually exercise the slenderness lane,
+    // or the equality checks below cannot tell "counts arms only" apart from
+    // "counts everything" (they agree whenever braces + masts == 0).
+    assert!(
+        braces_in_plan > 0 || masts_in_plan > 0,
+        "the stilt-plate fixture placed no braces ({braces_in_plan}) and no masts \
+         ({masts_in_plan}) at its authored pose; this test cannot distinguish an arm-only \
+         count from a total-strut count without at least one of either"
+    );
+
+    let results = SweepDemand::production().measure_support_demand(
+        &mesh,
+        &table,
+        &[candidate],
+        DemandFidelity::Production,
+    );
+    let measured = results[0].as_ref().expect("a well-formed fixture measures");
+
+    // The sabotage this guards against: reverting to `plan.struts.len()`
+    // (every kind) would make `measured.struts` equal
+    // `arms_in_plan + braces_in_plan + masts_in_plan`, which the anti-vacuity
+    // assertion above guarantees is strictly greater than `arms_in_plan`
+    // alone -- so this assertion goes red under that regression.
+    assert_eq!(
+        measured.struts, arms_in_plan,
+        "the measured burden's strut count must be the arm count alone, not the total strut \
+         count (braces {braces_in_plan}, masts {masts_in_plan})"
+    );
+    assert_eq!(
+        measured.braces, braces_in_plan,
+        "the brace count published beside the burden must match the plan's own braces"
+    );
+    assert_eq!(
+        measured.masts, masts_in_plan,
+        "the mast count published beside the burden must match the plan's own masts"
     );
 }
