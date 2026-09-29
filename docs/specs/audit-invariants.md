@@ -658,6 +658,29 @@ is legitimate — bracing makes them on purpose. What is not legitimate is a set
 primitives whose only route to ground is through each other, and (c) is exactly that
 statement as a number.
 
+**Clause (d), no support island (added 2026-09-28).** Connected is not held up. An arm
+whose tip is seated in the model and whose lower end stops in the air is connected
+through the model and grounded by (ii), yet its lowest layer prints on nothing (the
+"porcupine quills", `plinth-evidence/slice-sweep-2026-09-02/field-2026-09-28/quills.md`).
+So, directionally:
+
+```
+(d) the LOWEST point of every primitive (a frustum's lower axis end, a ball's bottom)
+    rests on one of
+      the plate      z <= z_plate + layer_height; a root FLARE may end at the raft top,
+                     z_plate + RAFT_PAD_HEIGHT_MM + layer_height (the format's flare
+                     contract; counted apart as below_rooted_at_raft_top)
+      the model      inside M, or within layer_height of its surface — NEVER for a tip
+                     ball: a seated tip holds only its own member's top
+      a primitive    whose solid is within layer_height of that point and whose own
+                     lowest z is strictly lower
+    and the chain it rests on ends at the plate or the model.
+```
+
+The member clause is a point test, not the overlap graph above, so a lowest point that
+sits inside a neighbour is not lost in the fusion-uncertain band. A model test that
+cannot be decided is counted as `below_indeterminate`, never as a pass or a failure.
+
 **Failure lines.**
 
 ```
@@ -669,6 +692,9 @@ PATH_FREE_END file=<path> model=<m> record=<r> type=<t> end=<start|end> point=<x
 
 PATH_ROOT_MISSING file=<path> model=<m> grounded_primitives=0 records=<n>
   no primitive reaches the plate or a valid model seat
+
+PATH_NO_SUPPORT_BELOW file=<path> model=<m> record=<r> type=<t> lowest_point=<x,y,z> rests_on=<nothing|unrooted_member> nearest_lower_solid_mm=<v>
+  clause (d): this primitive's lowest point rests on nothing that reaches the plate or the model
 
 PATH_INDETERMINATE file=<path> model=<m> record=<r> other=<r2> separation_mm=<v> band_mm=5.529014e-2 reason=<fusion_uncertain|seat_indeterminate>
   two solids are close enough that fusion cannot be decided; an undecided path is a failure

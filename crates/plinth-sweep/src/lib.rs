@@ -46,6 +46,7 @@ pub mod congestion;
 pub mod down_sweep;
 pub mod drain;
 pub mod grid;
+pub mod landing_check;
 pub mod lean;
 pub mod limits;
 pub mod model_landing;
@@ -907,6 +908,13 @@ pub fn run_sweep_with_drains(
         down_sweep::InsertionPolicy::disabled()
     };
     let mut outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
+    // SUPPORT COMES BEFORE WHAT RESTS ON IT. Every pass below that edits a
+    // landing is followed by one landing-validity check of the whole field
+    // (`landing_check`, `O(struts)`), so a pass that leaves a member standing
+    // on air is named on the emitted file rather than discovered in ChituBox.
+    // It only counts; it never moves or refuses anything.
+    let mut landings = landing_check::LandingLedger::default();
+    landings.record("up-sweep and down-sweep", &landing_check::check_landings(&struts));
     let mut removals = 0_u64;
     let mut removals_refused_by_span = 0_u64;
     let mut removal_passes_rolled_back = 0_u64;
@@ -943,6 +951,7 @@ pub fn run_sweep_with_drains(
         }
         removals += removed as u64;
     }
+    landings.record("removal", &landing_check::check_landings(&struts));
     // The interior test again, now that the down-sweep has added arms of its
     // own. Same test, same column history; running it twice is cheaper than
     // giving the down-sweep a reason to know about the up-sweep's history.
@@ -961,14 +970,21 @@ pub fn run_sweep_with_drains(
     // and it is bounded by the same registered pass count the removal loop
     // uses.
     let mut merges_refused_by_radius = 0_usize;
+    let mut merges_kept_carrying = 0_usize;
+    let mut unmerge_stale_landings = 0_usize;
     for _ in 0..policy.strut_removal_passes {
-        let undone = unmerge_overgrown(&mut struts, policy.tip_radius_max_mm);
-        if undone == 0 {
+        let unmerged = unmerge_overgrown(&mut struts, policy.tip_radius_max_mm);
+        // The LAST call describes the field as it is left: both counts are
+        // states, not events.
+        merges_kept_carrying = unmerged.kept_carrying;
+        unmerge_stale_landings = unmerged.stale_landings;
+        if unmerged.undone == 0 {
             break;
         }
-        merges_refused_by_radius += undone;
+        merges_refused_by_radius += unmerged.undone;
         outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
     }
+    landings.record("un-merge", &landing_check::check_landings(&struts));
 
     // AND ONCE MORE, ON THE FINISHED FIELD. `unmerge_overgrown` moves an arm
     // off its trunk and onto whatever the descent recorded as its straight
@@ -1052,6 +1068,7 @@ pub fn run_sweep_with_drains(
     // the slenderness lane put on the plate afterwards.
     congestion_outcome.at_lane_exit =
         congestion::measure(&grid, &history, &struts, policy.flare_r_factor);
+    landings.record("congestion", &landing_check::check_landings(&struts));
 
     // --- slenderness: merge, then |X|, then a mast, then a warning ---------
     //
@@ -1090,6 +1107,7 @@ pub fn run_sweep_with_drains(
     let mut slenderness_merges_undone = 0_usize;
     let struts_before_slenderness = struts.len();
     let slenderness_outcome = slenderness::apply_remedies(&slenderness_context, &mut struts);
+    landings.record("slenderness", &landing_check::check_landings(&struts));
     if slenderness_outcome.merges_forced > 0 || struts.len() > struts_before_slenderness {
         // Anything the lane moved or added has a stale ledger; the same
         // down-sweep that sized the field sizes the braces and the masts, and
@@ -1105,16 +1123,28 @@ pub fn run_sweep_with_drains(
         // back to the descent it recorded, and its run is then reported as a
         // warning — emit and warn, never refuse.
         for _ in 0..policy.strut_removal_passes {
-            let undone = unmerge_overgrown(&mut struts, policy.tip_radius_max_mm);
-            if undone == 0 {
+            let unmerged = unmerge_overgrown(&mut struts, policy.tip_radius_max_mm);
+            merges_kept_carrying = unmerged.kept_carrying;
+            unmerge_stale_landings = unmerged.stale_landings;
+            if unmerged.undone == 0 {
                 break;
             }
-            merges_refused_by_radius += undone;
-            slenderness_merges_undone += undone;
+            merges_refused_by_radius += unmerged.undone;
+            slenderness_merges_undone += unmerged.undone;
             outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
         }
         set_interior(&mut struts, &history);
+        landings.record("un-merge after slenderness", &landing_check::check_landings(&struts));
     }
+    // The finished field's own check, and the load it lost if any landing is
+    // broken: the down-sweep hands a child's load to its named parent at the
+    // landing layer, and a parent that does not stand there never picks it
+    // up. `injected = plate reaction + uncarried` closes exactly on a field
+    // whose every landing stands (measured: 0.00 mm² on the Cylinder and the
+    // Sphere before the slenderness lane); what is left is that loss.
+    landings.finished = landing_check::check_landings(&struts);
+    landings.load_gap_mm2 =
+        outcome.injected_load_mm2 - outcome.plate_reaction_mm2 - outcome.uncarried_load_mm2;
     // Measured on the FINISHED field, after the re-run, so the published run
     // lengths belong to the arms this file actually contains.
     let slenderness_after =
@@ -1227,6 +1257,9 @@ pub fn run_sweep_with_drains(
     report.arms_merged = arms_merged;
     report.lean_paths_blocked = lean_paths_blocked;
     report.merges_refused_by_radius = merges_refused_by_radius;
+    report.merges_kept_carrying = merges_kept_carrying;
+    report.unmerge_stale_landings = unmerge_stale_landings;
+    report.landing_check = landings;
     report.lean_max_step_mm = law.max_step_mm();
     report.descent_junctions_mid_shaft = junctions_mid_shaft_descent;
     // SHAFT SPANS AS THE FINISHED FIELD HAS THEM, not as the up-sweep left
@@ -1348,7 +1381,22 @@ fn seat_solid_layers(
 /// have a straight-down descent in the column history to be put back to; a
 /// load-inserted arm's descent is grown by the down-sweep and is not in this
 /// history at all.
-fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> usize {
+///
+/// **A TRUNK THAT CARRIES BRANCHES MAY NOT MOVE WITHOUT THEM** (2026-09-28).
+/// Un-merging an arm puts its whole lower path back on the column it recorded,
+/// so every member that had landed on the leaned path — or a brace seated on
+/// it — would be left in the air, 3 mm from the trunk its ledger still names
+/// (11 such children on `make_tall_stilt_plate`, carrying 169.8 mm², and the
+/// 15 quills on `make_overhang_table`). Such an arm is KEPT merged and counted
+/// in [`Unmerged::kept_carrying`]: the over-grown trunk is then a published
+/// warning rather than a broken tree. And an arm whose parent does not stand
+/// at its landing at all is no longer skipped in silence: it is counted in
+/// [`Unmerged::stale_landings`], and the landing check after this pass names
+/// it on the emitted file.
+fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> Unmerged {
+    let carries = landing_check::carries_someone(struts);
+    let mut kept_carrying = 0_usize;
+    let mut stale_landings = 0_usize;
     let overgrown: Vec<(usize, Landing, usize)> = struts
         .iter()
         .enumerate()
@@ -1359,8 +1407,12 @@ fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> usize
             let Landing::Strut { id, layer } = strut.landing else {
                 return None;
             };
-            let parent = struts.get(id as usize)?;
-            if parent.k_bottom == usize::MAX || layer < parent.k_bottom {
+            let Some(parent) = struts.get(id as usize) else {
+                stale_landings += 1;
+                return None;
+            };
+            if parent.k_bottom == usize::MAX || layer < parent.k_bottom || layer > parent.k_top {
+                stale_landings += 1;
                 return None;
             }
             let radius = *parent.radius_mm.get(layer - parent.k_bottom)?;
@@ -1368,8 +1420,14 @@ fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> usize
             // A fallback that is not strictly below the seat would be a
             // zero-height stub, which is the defect this field exists to
             // prevent; refuse the un-merge rather than emit one.
-            (radius >= tip_radius_max_mm && k_bottom < strut.k_top)
-                .then_some((index, landing, k_bottom))
+            if radius < tip_radius_max_mm || k_bottom >= strut.k_top {
+                return None;
+            }
+            if carries.get(index).copied().unwrap_or(true) {
+                kept_carrying += 1;
+                return None;
+            }
+            Some((index, landing, k_bottom))
         })
         .collect();
     for &(index, landing, k_bottom) in &overgrown {
@@ -1382,7 +1440,23 @@ fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> usize
         // refills both from `ledger_len`, so the invariant is "an un-merge is
         // never observed from outside that loop".
     }
-    overgrown.len()
+    Unmerged {
+        undone: overgrown.len(),
+        kept_carrying,
+        stale_landings,
+    }
+}
+
+/// What one un-merge pass did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Unmerged {
+    /// Arms put back on the descent they recorded.
+    undone: usize,
+    /// Over-grown merges KEPT because something rests on the arm that would
+    /// have moved. A warning quantity: the trunk it loads is at the maximum.
+    kept_carrying: usize,
+    /// Landings whose parent does not stand at the landing layer at all.
+    stale_landings: usize,
 }
 
 /// Flag the arms whose scar nobody will ever see.
@@ -1807,6 +1881,9 @@ fn build_report(
         arms_merged: 0,
         lean_paths_blocked: 0,
         merges_refused_by_radius: 0,
+        merges_kept_carrying: 0,
+        unmerge_stale_landings: 0,
+        landing_check: crate::landing_check::LandingLedger::default(),
         lean_max_step_mm: 0.0,
         descent_junctions_mid_shaft: 0,
         shaft_spans_recorded: 0,
@@ -2033,7 +2110,7 @@ mod removal_tests {
         child.straight_fallback = Some((Landing::Plate, 0));
         let mut struts = vec![parent, child];
 
-        let undone = unmerge_overgrown(&mut struts, tip_radius_max_mm);
+        let undone = unmerge_overgrown(&mut struts, tip_radius_max_mm).undone;
 
         assert_eq!(undone, 1, "the merge onto a clamped trunk must be undone");
         let child = &struts[1];
@@ -2063,17 +2140,53 @@ mod removal_tests {
         child.path = vec![7; 30];
         child.straight_fallback = Some((Landing::Plate, 0));
         let mut struts = vec![parent.clone(), child.clone()];
-        assert_eq!(unmerge_overgrown(&mut struts, 1.0), 0);
+        assert_eq!(unmerge_overgrown(&mut struts, 1.0).undone, 0);
         assert_eq!(struts[1].landing, Landing::Strut { id: 0, layer: 30 });
 
         parent.radius_mm = vec![1.0; 30];
         child.straight_fallback = None;
         let mut struts = vec![parent, child];
         assert_eq!(
-            unmerge_overgrown(&mut struts, 1.0),
+            unmerge_overgrown(&mut struts, 1.0).undone,
             0,
             "with no recorded straight descent there is nothing to put the arm back to"
         );
+    }
+
+    /// 2026-09-28, the un-merge route to the quills: a merged arm that a
+    /// grandchild has landed on is over-grown, and putting it back on its
+    /// straight column would leave the grandchild 3 mm from anything. A trunk
+    /// that carries branches may not move without them: it is KEPT, counted,
+    /// and its grandchild still stands on it. A landing whose parent is not
+    /// there at all is counted, not skipped in silence.
+    #[test]
+    fn a_merged_arm_that_carries_a_branch_is_never_put_back() {
+        let mut trunk = arm(0, 0, 40, 10);
+        trunk.radius_mm = vec![1.0; 30];
+        let mut child = arm(1, 7, 60, 30);
+        child.landing = Landing::Strut { id: 0, layer: 30 };
+        // Its base in the trunk's own column, then leaned out to its seat.
+        child.path = std::iter::once(0).chain(std::iter::repeat_n(7, 29)).collect();
+        child.straight_fallback = Some((Landing::Plate, 0));
+        let mut grandchild = arm(2, 9, 80, 45);
+        grandchild.landing = Landing::Strut { id: 1, layer: 45 };
+        grandchild.path = vec![7; 35];
+        let mut struts = vec![trunk.clone(), child.clone(), grandchild];
+
+        let unmerged = unmerge_overgrown(&mut struts, 1.0);
+        assert_eq!(unmerged.undone, 0, "the child carries the grandchild and must stay");
+        assert_eq!(unmerged.kept_carrying, 1);
+        assert_eq!(struts[1].landing, Landing::Strut { id: 0, layer: 30 });
+        assert!(crate::landing_check::check_landings(&struts).clean());
+
+        // The child's parent shortened above the landing layer: stale, counted.
+        let mut short = trunk;
+        short.k_bottom = 35;
+        short.radius_mm = vec![1.0; 5];
+        let mut struts = vec![short, child];
+        let unmerged = unmerge_overgrown(&mut struts, 1.0);
+        assert_eq!(unmerged.stale_landings, 1);
+        assert_eq!(unmerged.undone, 0);
     }
 
     /// Owner follow-up (2026-09-03, item 4 of the slice-sweep review): a

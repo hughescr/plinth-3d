@@ -288,6 +288,15 @@ pub struct SlendernessOutcome {
     /// on could not grow far enough to carry the sum. Their runs return as
     /// warnings; the arm is never dropped.
     pub merges_undone_by_radius: usize,
+    /// Remedy-1 candidates NOT re-landed because another member rests on them
+    /// or is tied to them. Moving such an arm moves the ground from under its
+    /// dependants — the daisy chains of 2026-09-28. The run falls to the brace,
+    /// the mast, or a warning. A path-hit witness for the rule.
+    pub merges_refused_carrying: usize,
+    /// Shaft landings the index offered and the LIVE field refused: the named
+    /// parent no longer stands at that cell and layer, because an earlier
+    /// merge in the same loop moved it. A path-hit witness for the rule.
+    pub merges_refused_stale_shaft: usize,
 }
 
 /// Every unbraced run in a finished field, measured from the strut set alone.
@@ -482,7 +491,27 @@ pub fn apply_remedies(
     // Remedy 1 first, for every run it can serve, because a merge costs no new
     // member at all. It moves an arm's base, so the shaft index is rebuilt
     // afterwards rather than patched.
+    //
+    // SUPPORT COMES BEFORE WHAT RESTS ON IT (2026-09-28). The index above is
+    // stamped once, and this loop moves arms, so two rules keep every landing
+    // it makes standing on something that is still there when the loop ends:
+    //
+    // * an arm that CARRIES SOMEONE — another member lands on it, or a brace
+    //   seats on it — is never re-landed, because re-landing it cuts away the
+    //   part its dependants rest on; and an arm that is merged ONTO becomes
+    //   such an arm at once, so it is frozen for the rest of the loop;
+    // * a shaft the index offers is taken only if its member STANDS THERE NOW
+    //   ([`crate::landing_check::stands_at`], `O(1)` against the live field),
+    //   because the index still shows the old column of every arm this loop
+    //   has already moved.
+    //
+    // Before this, the loop ran in id order and built daisy chains: a child
+    // was merged onto a parent's shaft at layer L, the parent — over its own
+    // limit — was then merged onto a third arm at L' > L, and the child's base
+    // was left in the air. 157 such members on the Cylinder, 28 on the Sphere.
+    // The refused links fall to the brace, the mast, or a warning.
     let mut merged_any = false;
+    let mut frozen = crate::landing_check::carries_someone(struts);
     if context.merge && context.shaft_landings {
         for run in &over {
             let Some(strut) = struts.get(run.strut_id as usize) else {
@@ -505,11 +534,25 @@ pub fn apply_remedies(
             if matches!(strut.landing, Landing::Strut { .. }) {
                 continue;
             }
-            let Some((landing, k_bottom, path)) =
-                merge_candidate(context, &index, struts, run.strut_id, run.limit_mm)
-            else {
+            if frozen.get(run.strut_id as usize).copied().unwrap_or(true) {
+                outcome.merges_refused_carrying += 1;
+                continue;
+            }
+            let Some((landing, k_bottom, path)) = merge_candidate(
+                context,
+                &index,
+                struts,
+                run.strut_id,
+                run.limit_mm,
+                &mut outcome.merges_refused_stale_shaft,
+            ) else {
                 continue;
             };
+            if let Landing::Strut { id: parent, .. } = landing {
+                if let Some(flag) = frozen.get_mut(parent as usize) {
+                    *flag = true;
+                }
+            }
             let strut = &mut struts[run.strut_id as usize];
             // WHERE THIS ARM WAS BEFORE THE CONSTRAINT MOVED IT. The un-merge
             // pass puts an arm back when the trunk it landed on cannot grow far
@@ -687,12 +730,18 @@ fn stamp_tail(index: &mut ColumnHistory, struts: &[SweepStrut], count: usize) {
 /// `limit_mm` is not admissible, however cheap it is. Straight down past the
 /// limit is therefore not admissible either — it is simply not in this
 /// candidate set.
+///
+/// **The index is a snapshot and the field is not.** The index was stamped
+/// before the merge loop began, and the loop has moved arms since, so every
+/// answer it gives is checked against the parent AS IT STANDS NOW before it is
+/// accepted; a stale answer is refused and counted in `stale`.
 fn merge_candidate(
     context: &SlendernessContext<'_>,
     index: &ColumnHistory,
     struts: &[SweepStrut],
     id: u32,
     limit_mm: f64,
+    stale: &mut usize,
 ) -> Option<(Landing, usize, Vec<u32>)> {
     let strut = struts.get(id as usize)?;
     let grid = context.grid;
@@ -746,6 +795,15 @@ fn merge_candidate(
                 continue;
             };
             if parent == id || descends_through(struts, parent, id) {
+                continue;
+            }
+            // THE PARENT MUST STAND HERE NOW, not merely have stood here when
+            // the index was stamped.
+            if !struts
+                .get(parent as usize)
+                .is_some_and(|live| crate::landing_check::stands_at(live, candidate, at))
+            {
+                *stale += 1;
                 continue;
             }
             let layers = strut.k_top.saturating_sub(at);

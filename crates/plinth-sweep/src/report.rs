@@ -224,6 +224,19 @@ pub struct SweepRunReport {
     /// Merges undone because the parent trunk they loaded would have had to
     /// exceed the registered maximum tip radius to carry the sum.
     pub merges_refused_by_radius: usize,
+    /// Merges the radius ceiling would have undone and did NOT, because
+    /// another member rests on the arm that would have moved: a trunk that
+    /// carries branches may not move without them. A WARNING quantity — the
+    /// trunk it loads sits at the registered maximum radius.
+    pub merges_kept_carrying: usize,
+    /// Landings the un-merge pass found whose parent does not stand at the
+    /// landing layer at all. Counted, never skipped in silence.
+    pub unmerge_stale_landings: usize,
+    /// **Every member rests on something**: the landing-validity check run
+    /// after every pass that edits landings, the finished field's own check,
+    /// and the load gap `injected - plate reaction - uncarried`. A WARNING on
+    /// an emitted file, never a refusal.
+    pub landing_check: crate::landing_check::LandingLedger,
     /// The largest sideways move one layer of descent may make, in mm --
     /// `h * cot(OVERHANG_ANGLE_DEG - OVERHANG_WEIGHT_TRANSITION_DEG/2)`. Zero
     /// when the lean is disabled, which is the sabotage state.
@@ -489,6 +502,7 @@ impl SweepRunReport {
             },
         )
         .expect("writing to a String cannot fail");
+        out.push_str(&self.render_landing_check());
         if self.sweeps_disagree {
             writeln!(
                 out,
@@ -512,6 +526,58 @@ impl SweepRunReport {
             out,
             "A shortfall above is a WARNING on an emitted file, never a gate. This output is \
              diagnostic evidence about the engine."
+        )
+        .expect("writing to a String cannot fail");
+        out
+    }
+
+    /// The landing-validity line: every member rests on something, or the
+    /// file says which do not. One line, with the per-pass trail beside it so
+    /// a pass that broke a chain is named even when a later pass mended it.
+    #[must_use]
+    pub fn render_landing_check(&self) -> String {
+        let ledger = &self.landing_check;
+        let finished = &ledger.finished;
+        let mut trail = String::new();
+        for (index, pass) in ledger.passes.iter().enumerate() {
+            if index > 0 {
+                trail.push_str("; ");
+            }
+            write!(
+                trail,
+                "{} {} unrooted / {} invalid",
+                pass.pass, pass.unrooted, pass.invalid_landings
+            )
+            .expect("writing to a String cannot fail");
+        }
+        let verdict = if finished.clean() {
+            "every member rests on the plate, the model, or a member that stands there"
+        } else {
+            "WARNING: members whose lower end rests on NOTHING are in this file (a warning on an \
+             emitted file, never a refusal)"
+        };
+        let mut out = String::new();
+        writeln!(
+            out,
+            "Landings: {verdict}. Finished field: {} member-on-member landings checked; {} \
+             unrooted members {:?}; {} landed on a parent that is not there at the landing \
+             layer, {} on a parent that stands in another cell there; {} brace tops tied to a \
+             member that has moved; load gap (injected - plate reaction - uncarried) {:.4} mm2; \
+             {} over-grown merges kept because the arm carries branches; {} stale landings met \
+             by the un-merge pass; slenderness merges refused because the arm carries someone \
+             {}, shafts refused because their member no longer stands there {}. After each \
+             pass: {trail}.",
+            finished.strut_landings,
+            finished.unrooted.len(),
+            finished.unrooted,
+            finished.parent_absent.len(),
+            finished.parent_elsewhere.len(),
+            finished.brace_tops_detached.len(),
+            ledger.load_gap_mm2,
+            self.merges_kept_carrying,
+            self.unmerge_stale_landings,
+            self.slenderness_lane.merges_refused_carrying,
+            self.slenderness_lane.merges_refused_stale_shaft,
         )
         .expect("writing to a String cannot fail");
         out

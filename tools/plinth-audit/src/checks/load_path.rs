@@ -12,6 +12,16 @@
 //! that touches a neighbour mid-span rather than at a declared endpoint, and
 //! only the overlap graph is literally what the specification asks for.
 //!
+//! ## Clause (d): no support island
+//!
+//! Connected is not held up. A support arm whose tip is seated in the model
+//! and whose lower end stops in the air is connected through the model and is
+//! grounded by clause (ii) below, yet its lowest layer prints on nothing.
+//! [`crate::checks::support_below`] asks the DIRECTIONAL question — does every
+//! primitive's lowest point rest on the plate, the model, or a primitive that
+//! reaches lower, in a chain ending at the plate or the model — and each
+//! primitive that fails it is a `PATH_NO_SUPPORT_BELOW` failure.
+//!
 //! ## Grounding
 //!
 //! A primitive is grounded if it touches the plate half-space (`z <=
@@ -43,6 +53,7 @@
 
 use crate::check::{Check, CheckOutcome, Failure};
 use crate::checks::interval::{self, Verdict};
+use crate::checks::support_below;
 use crate::consts as c;
 use crate::context::ModelContext;
 use crate::json::Json;
@@ -446,9 +457,76 @@ impl Check for LoadPath {
         }
 
         // -------------------------------------------------------------
+        // 6b. Clause (d), no support island: held up FROM BELOW. A tip
+        //     seated in the model grounds only its own member's top, never
+        //     what hangs beneath it.
+        // -------------------------------------------------------------
+        let kinds: Vec<RecordKind> = ctx.model.records.iter().map(|r| r.kind).collect();
+        let below = support_below::classify(&ok, &kinds, ctx.z_plate_mm, layer, |p| {
+            support_below::on_model_mesh(&ctx.model_mesh, p, layer)
+        });
+        for (k, &i) in below.unrooted.iter().enumerate() {
+            let rec = &ctx.model.records[i];
+            let low = below.unrooted_low[k];
+            let nearest = below.unrooted_nearest_below_mm[k];
+            let rests_on_nothing = below.rest[i] == Some(support_below::Rest::Nothing);
+            out.fail(Failure::line(
+                "PATH_NO_SUPPORT_BELOW",
+                &file,
+                ctx.model_index,
+                None,
+                Some(i),
+                &[
+                    ("type", rec.kind.label().to_string()),
+                    (
+                        "lowest_point",
+                        format!("{:.6},{:.6},{:.6}", low[0], low[1], low[2]),
+                    ),
+                    (
+                        "rests_on",
+                        if rests_on_nothing { "nothing" } else { "unrooted_member" }.to_string(),
+                    ),
+                    (
+                        "nearest_lower_solid_mm",
+                        if nearest.is_finite() {
+                            format!("{nearest:.6}")
+                        } else {
+                            "inf".to_string()
+                        },
+                    ),
+                ],
+                {
+                    let mut o = Json::obj();
+                    o.set("type", Json::str(rec.kind.label()));
+                    o.set("lowest_point", Json::v3(low));
+                    o.set(
+                        "rests_on",
+                        Json::str(if rests_on_nothing { "nothing" } else { "unrooted_member" }),
+                    );
+                    o.set(
+                        "nearest_lower_solid_mm",
+                        if nearest.is_finite() {
+                            Json::num(nearest)
+                        } else {
+                            Json::Null
+                        },
+                    );
+                    o
+                },
+            ));
+        }
+        let n_no_support_below = below.unrooted.len();
+
+        // -------------------------------------------------------------
         // 7. Report.
         // -------------------------------------------------------------
         let mut measured = Json::obj();
+        measured.set("no_support_below", Json::usize(n_no_support_below));
+        measured.set("below_rooted_at_plate", Json::usize(below.rooted_at_plate));
+        measured.set("below_rooted_at_raft_top", Json::usize(below.rooted_at_raft_top));
+        measured.set("below_rooted_on_model", Json::usize(below.rooted_on_model));
+        measured.set("below_resting_on_member", Json::usize(below.resting_on_member));
+        measured.set("below_indeterminate", Json::usize(below.indeterminate));
         measured.set("records_total", Json::usize(n));
         measured.set("records_ok", Json::usize(n_ok));
         measured.set("records_degenerate", Json::usize(n_degenerate));
@@ -465,7 +543,8 @@ impl Check for LoadPath {
         measured.set(
             "headline",
             Json::str(format!(
-                "{n_orphan} orphaned, {n_free_end} free ends, {} indeterminate (of {n} records)",
+                "{n_orphan} orphaned, {n_free_end} free ends, {n_no_support_below} with no \
+                 support below, {} indeterminate (of {n} records)",
                 out.indeterminate
             )),
         );
