@@ -911,6 +911,10 @@ fn nearest_clear_plate_cell(
     let rows = grid.rows();
     let seat_row = grid.row_of(seat_cell);
     let seat_col = grid.col_of(seat_cell);
+    // `placed` cannot change during this search, so the plate is indexed once
+    // here and every candidate asks the index rather than scanning every root
+    // on the plate (see `PlacedIndex`: the same test, disc by disc).
+    let plate = PlacedIndex::build(placed, skip);
     let mut best: Option<(f64, usize, Vec<u32>)> = None;
     let mut ring_cells: Vec<(f64, usize)> = Vec::new();
     for ring in 1..=cap_cells {
@@ -930,35 +934,52 @@ fn nearest_clear_plate_cell(
         let row_hi = (seat_row + ring).min(rows - 1);
         let col_lo = seat_col.saturating_sub(ring);
         let col_hi = (seat_col + ring).min(cols - 1);
+        // The ring's own cells, in row-major order: a whole row on the ring's
+        // top and bottom edges, and only its two edge columns in between.
+        // Everything strictly inside was visited by an earlier ring. (This is
+        // the set the loop used to find by walking the whole box and skipping
+        // the interior, which made the search cubic in the cap.)
+        let right_col = seat_col + ring;
+        let mut consider = |cell: usize| {
+            // OUTSIDE THE SILHOUETTE, and standing clear.
+            if context
+                .history
+                .column_max_model
+                .get(cell)
+                .copied()
+                .unwrap_or(1)
+                != 0
+            {
+                return;
+            }
+            if index.shaft_head.get(cell).copied().unwrap_or(u32::MAX) != u32::MAX {
+                return;
+            }
+            let lateral = crate::cell_distance_mm(grid, seat_cell, cell);
+            if lateral <= 0.0 || lateral > cap_mm {
+                return;
+            }
+            let drop = context.lean.layers_to_reach(lateral);
+            if drop == 0 || drop > k_top {
+                return;
+            }
+            if context.lean.descent_cost_mm(k_top, lateral).is_none() {
+                return;
+            }
+            ring_cells.push((lateral, cell));
+        };
         for row in row_lo..=row_hi {
             let edge_row = row == seat_row.saturating_sub(ring) || row == seat_row + ring;
             let base = row * cols;
-            for col in col_lo..=col_hi {
-                // The ring, not the box: everything strictly inside was visited
-                // by an earlier ring.
-                if !edge_row && col != seat_col.saturating_sub(ring) && col != seat_col + ring {
-                    continue;
+            if edge_row {
+                for col in col_lo..=col_hi {
+                    consider(base + col);
                 }
-                let cell = base + col;
-                // OUTSIDE THE SILHOUETTE, and standing clear.
-                if context.history.column_max_model.get(cell).copied().unwrap_or(1) != 0 {
-                    continue;
+            } else {
+                consider(base + col_lo);
+                if right_col <= col_hi {
+                    consider(base + right_col);
                 }
-                if index.shaft_head.get(cell).copied().unwrap_or(u32::MAX) != u32::MAX {
-                    continue;
-                }
-                let lateral = crate::cell_distance_mm(grid, seat_cell, cell);
-                if lateral <= 0.0 || lateral > cap_mm {
-                    continue;
-                }
-                let drop = context.lean.layers_to_reach(lateral);
-                if drop == 0 || drop > k_top {
-                    continue;
-                }
-                if context.lean.descent_cost_mm(k_top, lateral).is_none() {
-                    continue;
-                }
-                ring_cells.push((lateral, cell));
             }
         }
         ring_cells.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
@@ -969,7 +990,7 @@ fn nearest_clear_plate_cell(
             {
                 break;
             }
-            if !clear_of_placed(grid, cell, radius_mm, placed, skip) {
+            if !plate.clear(grid, cell, radius_mm) {
                 continue;
             }
             let Some(path) = segment_path(context, index, seat_cell, k_top, cell) else {
@@ -1001,14 +1022,192 @@ pub(crate) fn clear_of_placed(
         if Some(slot) == skip {
             continue;
         }
-        let reach = radius_mm + disc.radius_mm;
-        let dx = disc.x_mm - x;
-        let dy = disc.y_mm - y;
-        if dx * dx + dy * dy < reach * reach {
+        if disc_touches(x, y, radius_mm, disc) {
             return false;
         }
     }
     true
+}
+
+/// THE clearance rule, for one placed disc: whether a disc of `radius_mm`
+/// centred at `(x, y)` would touch it. [`clear_of_placed`] and
+/// [`PlacedIndex::clear`] both ask exactly this, so there is one rule.
+fn disc_touches(x: f64, y: f64, radius_mm: f64, disc: &RootDisc) -> bool {
+    let reach = radius_mm + disc.radius_mm;
+    let dx = disc.x_mm - x;
+    let dy = disc.y_mm - y;
+    dx * dx + dy * dy < reach * reach
+}
+
+/// A bucket index over the root discs on the plate, for a search that asks
+/// [`clear_of_placed`]'s question of many candidate cells while the plate
+/// stands still (`nearest_clear_plate_cell`).
+///
+/// It returns exactly what [`clear_of_placed`] returns, by asking
+/// [`disc_touches`] of every disc that COULD touch and skipping only discs that
+/// cannot: a disc whose centre is more than `|r| + max|R|` away along either
+/// axis has `|Δ| > |r + R|`, so `Δx² + Δy² < (r + R)²` is false for it in
+/// floating point as well (squaring and adding non-negative terms never round
+/// below a term), and the query widens its bucket range by one bucket on each
+/// side so a rounding in the bucket arithmetic can only ever ADD a disc to the
+/// tested set. Any non-finite centre or radius sends every query to the plain
+/// scan.
+///
+/// Why it exists: the congestion lane's outward search tests candidate cells in
+/// distance order until one is clear, and on a crowded plate most of the near
+/// cells are not; each of those tests scanned every root on the plate, which
+/// made that one search the largest cost of a Round 100 run after the mast fix.
+pub(crate) struct PlacedIndex<'a> {
+    placed: &'a [RootDisc],
+    skip: Option<usize>,
+    buckets: Option<DiscBuckets>,
+}
+
+struct DiscBuckets {
+    origin_x_mm: f64,
+    origin_y_mm: f64,
+    size_mm: f64,
+    nx: usize,
+    ny: usize,
+    /// Bucket `b` holds `slots[starts[b]..starts[b + 1]]`.
+    starts: Vec<u32>,
+    slots: Vec<u32>,
+    max_abs_radius_mm: f64,
+}
+
+impl<'a> PlacedIndex<'a> {
+    pub(crate) fn build(placed: &'a [RootDisc], skip: Option<usize>) -> Self {
+        let scan = Self {
+            placed,
+            skip,
+            buckets: None,
+        };
+        let live = || {
+            placed
+                .iter()
+                .enumerate()
+                .filter(move |(slot, _)| Some(*slot) != skip)
+        };
+        let (mut min_x, mut min_y) = (f64::INFINITY, f64::INFINITY);
+        let (mut max_x, mut max_y) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+        let mut max_abs_radius_mm = 0.0_f64;
+        let mut count = 0_usize;
+        for (_, disc) in live() {
+            if !(disc.x_mm.is_finite() && disc.y_mm.is_finite() && disc.radius_mm.is_finite()) {
+                return scan;
+            }
+            min_x = min_x.min(disc.x_mm);
+            min_y = min_y.min(disc.y_mm);
+            max_x = max_x.max(disc.x_mm);
+            max_y = max_y.max(disc.y_mm);
+            max_abs_radius_mm = max_abs_radius_mm.max(disc.radius_mm.abs());
+            count += 1;
+        }
+        if count == 0 || u32::try_from(placed.len()).is_err() {
+            return scan;
+        }
+        // About four discs per bucket side-by-side, and never finer than one
+        // disc diameter, so a query reads a handful of buckets.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a disc count, far below 2^53, as a bucket-sizing ratio"
+        )]
+        let spread = ((max_x - min_x) * (max_y - min_y) / count as f64).sqrt();
+        let size_mm = (2.0 * max_abs_radius_mm).max(2.0 * spread).max(1.0e-6);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a finite, non-negative extent over a positive bucket size, floored"
+        )]
+        let axis = |extent: f64| (extent / size_mm).floor() as usize + 1;
+        let (nx, ny) = (axis(max_x - min_x), axis(max_y - min_y));
+        let Some(buckets) = nx.checked_mul(ny).filter(|&n| n <= 4 * count + 64) else {
+            return scan;
+        };
+        let bucket_of = |disc: &RootDisc| {
+            let bx = Self::axis_index(disc.x_mm - min_x, size_mm, nx);
+            let by = Self::axis_index(disc.y_mm - min_y, size_mm, ny);
+            by * nx + bx
+        };
+        let mut starts = vec![0_u32; buckets + 1];
+        for (_, disc) in live() {
+            starts[bucket_of(disc) + 1] += 1;
+        }
+        for bucket in 0..buckets {
+            starts[bucket + 1] += starts[bucket];
+        }
+        let mut fill = starts.clone();
+        let mut slots = vec![0_u32; count];
+        for (slot, disc) in live() {
+            let bucket = bucket_of(disc);
+            slots[fill[bucket] as usize] = u32::try_from(slot).unwrap_or(u32::MAX);
+            fill[bucket] += 1;
+        }
+        Self {
+            placed,
+            skip,
+            buckets: Some(DiscBuckets {
+                origin_x_mm: min_x,
+                origin_y_mm: min_y,
+                size_mm,
+                nx,
+                ny,
+                starts,
+                slots,
+                max_abs_radius_mm,
+            }),
+        }
+    }
+
+    /// The bucket along one axis holding offset `offset_mm` from the origin,
+    /// clamped into `0..n` (clamping only ever merges edge buckets).
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a finite offset over a positive bucket size, floored and clamped to 0..n"
+    )]
+    fn axis_index(offset_mm: f64, size_mm: f64, n: usize) -> usize {
+        let at = (offset_mm / size_mm).floor();
+        if at <= 0.0 {
+            0
+        } else {
+            (at as usize).min(n - 1)
+        }
+    }
+
+    /// Exactly [`clear_of_placed`]`(grid, cell, radius_mm, placed, skip)`.
+    pub(crate) fn clear(&self, grid: &Grid, cell: usize, radius_mm: f64) -> bool {
+        let bound = radius_mm.abs()
+            + self
+                .buckets
+                .as_ref()
+                .map_or(f64::INFINITY, |buckets| buckets.max_abs_radius_mm);
+        let Some(buckets) = self.buckets.as_ref().filter(|_| bound.is_finite()) else {
+            return clear_of_placed(grid, cell, radius_mm, self.placed, self.skip);
+        };
+        let x = grid.center_x_mm(grid.col_of(cell));
+        let y = grid.center_y_mm(grid.row_of(cell));
+        let span = |centre: f64, origin: f64, n: usize| {
+            let lo = Self::axis_index(centre - bound - origin, buckets.size_mm, n);
+            let hi = Self::axis_index(centre + bound - origin, buckets.size_mm, n);
+            (lo.saturating_sub(1), (hi + 1).min(n - 1))
+        };
+        let (bx_lo, bx_hi) = span(x, buckets.origin_x_mm, buckets.nx);
+        let (by_lo, by_hi) = span(y, buckets.origin_y_mm, buckets.ny);
+        for by in by_lo..=by_hi {
+            for bx in bx_lo..=bx_hi {
+                let bucket = by * buckets.nx + bx;
+                let from = buckets.starts[bucket] as usize;
+                let to = buckets.starts[bucket + 1] as usize;
+                for &slot in &buckets.slots[from..to] {
+                    if disc_touches(x, y, radius_mm, &self.placed[slot as usize]) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
 }
 
 /// The cells a straight descent from `(seat_cell, k_top)` to `(base_cell, 0)`

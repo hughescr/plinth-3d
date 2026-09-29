@@ -49,7 +49,7 @@
 //!   ribs and rim annulus of the glue-face-UP pose — the owner's correct pose
 //!   — and was the deciding term against it (`plinth-evidence/slice-sweep-
 //!   2026-09-02/field-2026-09-28/round50.md` Q3).  Measured on the fixtures in
-//!   `tests/display_field.rs`: a regular 1 mm V-groove field scored D 0.0594
+//!   `tests/it/display_field.rs`: a regular 1 mm V-groove field scored D 0.0594
 //!   against an irregular bump texture's 0.0762 under the mean; under the
 //!   spread the grooves read as change.
 //! * **`tip_factor`** discounts the confound the owner named: protrusion tips
@@ -74,7 +74,7 @@
 //!   first form compared articulation at the scar radius against articulation
 //!   at `R_detail`, expecting a tip's to COLLAPSE as the neighbourhood ran
 //!   off the tip onto its shaft.  Measured on a 0.35 mm capped peg
-//!   (`tests/display_field.rs`) it never fired at all: the widened
+//!   (`tests/it/display_field.rs`) it never fired at all: the widened
 //!   neighbourhood ran onto a CYLINDRICAL shaft whose normals differ from the
 //!   cap's just as much, so the articulation did not collapse and the
 //!   discount was identically `1`.  The recorded value was `min tip_factor
