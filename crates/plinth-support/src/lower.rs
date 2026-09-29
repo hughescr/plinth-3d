@@ -609,7 +609,9 @@ impl DigestWriter {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SweepArmLanding {
     /// The build plate: the arm gets the legacy plate-root chain — a boss
-    /// column down to the boss top, then a `RootFlare` down to the raft top.
+    /// column down to the boss top, then a `RootFlare` down to the PLATE
+    /// itself — not the raft top: this path emits no raft (see
+    /// [`lower_sweep_arms`], step 3).
     Plate,
     /// Cured model material or another arm. The arm ends there. v1 emits no
     /// joint sphere at an arm-onto-arm junction; that is disclosed in the run
@@ -617,11 +619,11 @@ pub enum SweepArmLanding {
     Landed,
 }
 
-/// One straight vertical arm as the slice sweep placed and sized it.
+/// One straight arm as the slice sweep placed and sized it.
 ///
 /// *UNITS TRAP*: these are RADII. The registry speaks radius; ChituBox and the
 /// owner speak diameter.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SweepArm {
     /// The seat, on the model's down-facing surface — the BOTTOM plane of the
     /// first cured model lamina in this column. The tip is seated INTO the
@@ -633,9 +635,26 @@ pub struct SweepArm {
     /// Radius at the seat — the narrowest section, and the one the area law is
     /// evaluated at.
     pub tip_radius_mm: f64,
-    /// Radius at the landing. Never smaller than the tip: carried load is
-    /// non-decreasing downward, so an arm flares toward its root.
-    pub root_radius_mm: f64,
+    /// **The area law's section at every layer**, as the down-sweep sized it:
+    /// index 0 is the layer the arm lands in, the last entry is the layer under
+    /// the seat. Entry `s` covers the `s`-th of `len` equal parts of the rise
+    /// from `base_mm` to `seat_mm`.
+    ///
+    /// Until 2026-09-28 only two numbers crossed this boundary, the tip and the
+    /// root, and the arm was drawn as ONE straight taper between them. Since
+    /// mid-shaft landings arrived the profile is a STEP at every junction —
+    /// thin above, carrying the branch's load below — and a straight line from
+    /// a thin tip to a fat root 35 mm lower is still almost at the tip radius
+    /// just under the junction: the trunk was printed thinner than its own
+    /// ledger and thinner than the branch landing on it (field report
+    /// "trunk-thinner", realised X up to 75 against 12). The lowering now draws
+    /// the fewest straight spans that stay on or above this profile at every
+    /// height ([`drawn_spans`]).
+    ///
+    /// The ROOT radius is `radius_profile_mm[0]` (the plate flare is sized from
+    /// it). An empty profile draws the legacy straight column at the tip
+    /// radius, and is counted in [`SweepLowering::arms_without_profile`].
+    pub radius_profile_mm: Vec<f64>,
     /// OUTWARD unit normal of the model face this tip carries — the direction
     /// that points AWAY from the material, so seating moves against it.
     ///
@@ -687,7 +706,7 @@ pub struct SweepLowering {
     pub arms_dropped_zero_length: usize,
     /// Plate arms whose run from the plate is shorter than the registered
     /// no-bend height, so no root boss fits. They emit as a straight column to
-    /// the raft top with NO flare, and are counted here.
+    /// the plate with NO flare, and are counted here.
     pub arms_without_root_flare: usize,
     /// Arms whose radii or points would not cross the finite boundary, or
     /// which the emit boundary's own `is_semantically_valid` rejected.
@@ -719,6 +738,27 @@ pub struct SweepLowering {
     /// Every tip's radius, in the same order, so `a` and `r_tip` can be
     /// compared arm by arm without a second pass over the primitives.
     pub tip_radius_mm: Vec<f64>,
+    /// Members drawn as MORE than one straight span because one straight line
+    /// from the tip to the root would have dipped below the area law's profile
+    /// somewhere — every trunk under a mid-shaft junction. The path-hit
+    /// witness for [`drawn_spans`].
+    pub arms_drawn_in_spans: usize,
+    /// The `Member` frusta those splits added, chained below each taper.
+    pub profile_member_frusta: usize,
+    /// Arms handed to the lowering with no radius profile, drawn as a straight
+    /// column at the tip radius. Zero on every sweep field; a nonzero count is
+    /// a caller defect, published rather than hidden.
+    pub arms_without_profile: usize,
+    /// **The support resin as EMITTED**, in mm³: the solid volume of every
+    /// primitive written — tip balls (less any clipped cap), tapers, chained
+    /// members and root flares — each measured from its own record, summed
+    /// without removing overlaps. This is the number the file costs; the
+    /// sweep's ledger volume is the SIZING figure and is published beside it,
+    /// labelled as such.
+    pub drawn_volume_mm3: f64,
+    /// The part of [`Self::drawn_volume_mm3`] in tapers and chained members —
+    /// the span the ledger sizes, so the two can be compared like for like.
+    pub drawn_shaft_volume_mm3: f64,
 }
 
 impl SweepLowering {
@@ -800,8 +840,25 @@ impl From<LoweringError> for SweepLoweringError {
 ///    [`SphereGeometry::canonical_poles`], never recomputed here.
 /// 2. `ContactTaper` — the ball centre down to the boss top (plate landing) or
 ///    to the landing point (model/arm landing), carrying the registered
-///    `DEFAULT_CONTACT_DEPTH_MM`.
-/// 3. `RootFlare` — plate landings only, boss top down to the raft top.
+///    `DEFAULT_CONTACT_DEPTH_MM`. Where one straight taper would dip below the
+///    area law's own profile (every trunk under a mid-shaft junction) the taper
+///    stops at the first break and the rest of the shaft follows as chained
+///    `Member` frusta on the same axis ([`drawn_spans`]).
+/// 3. `RootFlare` — plate landings only, boss top down to the PLATE, `plate_z`,
+///    with its full `FLARE_R_FACTOR × r_root` foot.
+///
+/// **The plate, not the raft top** (fix/plate-gap, 2026-09-28). The legacy
+/// lowering ends its flare at `plate_z + CHITUBOX_RAFT_HEIGHT_MM` because it
+/// also emits the raft the flare stands on. This path emits NO raft
+/// (`docs/plans/slice-sweep-core-2026-09-02.md` §14 OR-3), and carrying the
+/// raft datum over without the raft left every root 0.2 mm — four layers —
+/// above the plate, curing its first layer against nothing: the owner saw the
+/// bases float in ChituBox. A plate-rooted member's lowest solid IS its plate
+/// contact, so it reaches `plate_z`. The same holds for the short-run branch
+/// (no boss fits): its straight column also ends on the plate. The boss TOP is
+/// untouched — it is the shared [`root_boss_top_at`], which still reads the
+/// raft height as its datum — so only the flare's (or short column's) lower
+/// end moves.
 ///
 /// # Errors
 ///
@@ -866,7 +923,6 @@ fn lower_sweep_arms_of(
     }
     let config = config;
     let plate = config.frame.plate_z_mm().get();
-    let raft_top = plate + config.raft_height_mm.get();
     let mut out = SweepLowering {
         primitives: Vec::with_capacity(arms.len().saturating_mul(3)),
         tip_seat_depth_mm: Vec::with_capacity(arms.len()),
@@ -875,13 +931,18 @@ fn lower_sweep_arms_of(
         ..SweepLowering::default()
     };
     for arm in arms {
-        let lowered = lower_one_sweep_arm(arm, config, raft_top, &mut out.primitives);
+        let lowered = lower_one_sweep_arm(arm, config, plate, &mut out.primitives);
         match lowered.outcome {
             ArmOutcome::Built => {}
             ArmOutcome::BuiltWithoutFlare => out.arms_without_root_flare += 1,
             ArmOutcome::ZeroLength => out.arms_dropped_zero_length += 1,
             ArmOutcome::InvalidGeometry => out.arms_dropped_invalid_geometry += 1,
         }
+        if lowered.spans > 1 {
+            out.arms_drawn_in_spans += 1;
+            out.profile_member_frusta += lowered.spans - 1;
+        }
+        out.arms_without_profile += usize::from(lowered.without_profile);
         if let Some(seat) = lowered.seat {
             out.tip_seat_depth_mm.push(seat.depth_mm);
             out.tip_cut_radius_mm.push(seat.cut_radius_mm);
@@ -895,7 +956,61 @@ fn lower_sweep_arms_of(
             });
         }
     }
+    // THE RESIN AS EMITTED, measured once over the finished primitive batch
+    // from each record's own endpoints and radii, never from the ledger.
+    for primitive in &out.primitives {
+        let volume = emitted_solid_volume_mm3(primitive);
+        out.drawn_volume_mm3 += volume;
+        if matches!(
+            primitive.segment_kind,
+            SupportSegmentKind::ContactTaper | SupportSegmentKind::Member
+        ) {
+            out.drawn_shaft_volume_mm3 += volume;
+        }
+    }
     Ok(out)
+}
+
+/// The solid one emitted record encloses, in mm³, from its own fields.
+///
+/// A frustum with rings normal to its own axis is `π·L/3·(r₀² + r₀r₁ + r₁²)`
+/// over its axial length `L`. A frustum with HORIZONTAL rings (a plate-root
+/// column, [`FrustumRingNormal::PlateZ`]) has a circle of the ring radius at
+/// every height, so by Cavalieri the same formula holds over its RISE, not its
+/// slant. A tip ball is `4/3·π·R³` less the cap above its clip plane. A raft
+/// record is not a solid of revolution this pass knows how to measure, and the
+/// sweep lowering emits none; it counts zero here.
+fn emitted_solid_volume_mm3(primitive: &SupportPrimitive) -> f64 {
+    use core::f64::consts::PI;
+    let r0 = primitive.start_radius_mm.get();
+    let r1 = primitive.end_radius_mm.get();
+    match primitive.segment_kind {
+        SupportSegmentKind::ContactTaper
+        | SupportSegmentKind::Member
+        | SupportSegmentKind::RootFlare => {
+            let length = match primitive.ring_normal {
+                FrustumRingNormal::SegmentAxis => distance(primitive.start_mm, primitive.end_mm),
+                FrustumRingNormal::PlateZ => {
+                    (primitive.start_mm[2].get() - primitive.end_mm[2].get()).abs()
+                }
+            };
+            PI * length / 3.0 * (r0.powi(2) + r0 * r1 + r1.powi(2))
+        }
+        SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere => {
+            let whole = 4.0 / 3.0 * PI * r0 * r0 * r0;
+            let centre_z = 0.5 * (primitive.start_mm[2].get() + primitive.end_mm[2].get());
+            let cap = primitive
+                .sphere_geometry
+                .as_ref()
+                .and_then(SphereGeometry::clip_above_z_mm)
+                .map_or(0.0, |clip| {
+                    let height = (centre_z + r0 - clip.get()).clamp(0.0, 2.0 * r0);
+                    PI * height * height * (3.0 * r0 - height) / 3.0
+                });
+            whole - cap
+        }
+        SupportSegmentKind::RaftPad | SupportSegmentKind::RaftBridge => 0.0,
+    }
 }
 
 enum ArmOutcome {
@@ -928,6 +1043,10 @@ struct TipSeat {
 struct ArmLowering {
     outcome: ArmOutcome,
     seat: Option<TipSeat>,
+    /// Straight spans the shaft was drawn in: 1 is the single taper.
+    spans: usize,
+    /// The arm arrived with no radius profile and was drawn at its tip radius.
+    without_profile: bool,
 }
 
 impl ArmLowering {
@@ -935,8 +1054,164 @@ impl ArmLowering {
         Self {
             outcome,
             seat: None,
+            spans: 0,
+            without_profile: false,
         }
     }
+}
+
+/// One straight span of a drawn member, between two heights on its axis.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DrawnSpan {
+    top_z_mm: f64,
+    bottom_z_mm: f64,
+    top_radius_mm: f64,
+    bottom_radius_mm: f64,
+}
+
+/// Float noise around an equality the construction designs for — a chord that
+/// ends exactly on a ledger value — and nothing more. It is not a physical
+/// allowance: a span is split whenever it dips below the ledger by more than
+/// one part in a billion.
+const PROFILE_RELATIVE_SLACK: f64 = 1.0e-9;
+
+/// **THE DRAWN PROFILE OF ONE MEMBER** (2026-09-28): the fewest straight spans,
+/// from `from_z` (the top of the drawn shaft: the tip ball's centre, or the
+/// seat of a member with no ball) down to `to_z` (where the shaft ends: the
+/// landing, the boss top, or the plate for a plate arm too short for a boss),
+/// whose section is at least the area
+/// law's own section at EVERY height.
+///
+/// **The rule** is the area law applied to the emitted geometry rather than
+/// only to the ledger: `π·r_drawn(z)² ≥ carried(z) / X_ALLOWED`, which is
+/// `r_drawn(z) ≥ profile(z)`. No new number enters — the profile is the
+/// down-sweep's, and the construction only decides where the straight spans
+/// break.
+///
+/// **The construction.** The profile is a step function over equal slots
+/// between `base_z` and `seat_z`. Cut the drawn range at every slot boundary
+/// inside it; each piece has one ledger radius. A candidate span runs between
+/// two cuts and is the straight chord from the ledger radius just below its
+/// top to the ledger radius just above its bottom (the member's own `start`
+/// and `end` radii at the two ends of the whole shaft, where those are wider).
+/// A linear chord over a piece with a constant requirement is lowest at one of
+/// the piece's ends, so checking every cut inside the span is exhaustive. If
+/// the chord dips below the ledger anywhere, the span is split at the cut where
+/// it dips furthest and both halves are tried again. One vector pass per span;
+/// it terminates because a one-piece span is its own ledger value and cannot
+/// dip.
+///
+/// Under a flat underside the ledger is constant between junctions, so the
+/// result is one span per junction-free run and a shoulder at each junction:
+/// the span above ends at the thin radius, the span below starts at the fat
+/// one. A shoulder faces UP and needs no support. Where the ledger does not
+/// step, nothing splits and the member is the single taper it always was.
+///
+/// This is the fewest spans for THIS chord rule, found greedily; it is not a
+/// claim of a global minimum over every possible choice of end radii.
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a slot index bounded by the profile length is exact in f64, and the f64 -> usize \
+              cast is reached only for a floored, positive index clamped to the profile length"
+)]
+fn drawn_spans(
+    profile: &[f64],
+    base_z: f64,
+    seat_z: f64,
+    from_z: f64,
+    to_z: f64,
+    start_radius: f64,
+    end_radius: f64,
+) -> Vec<DrawnSpan> {
+    let single = || {
+        vec![DrawnSpan {
+            top_z_mm: from_z,
+            bottom_z_mm: to_z,
+            top_radius_mm: start_radius,
+            bottom_radius_mm: end_radius,
+        }]
+    };
+    let slots = profile.len();
+    let rise = seat_z - base_z;
+    if slots == 0 || !rise.is_finite() || rise <= 0.0 || from_z <= to_z {
+        return single();
+    }
+    let slot_height = rise / slots as f64;
+    let slot_of = |z: f64| -> usize {
+        let index = ((z - base_z) / slot_height).floor();
+        if index <= 0.0 {
+            0
+        } else {
+            (index as usize).min(slots - 1)
+        }
+    };
+    // The cuts, top-down: the shaft's own ends and every slot boundary
+    // strictly inside it (one closer than the zero-length tolerance to an end
+    // would make a degenerate frustum, and adds nothing the end does not).
+    let mut cuts: Vec<f64> = Vec::with_capacity(slots + 2);
+    cuts.push(from_z);
+    let first = slot_of(from_z);
+    for boundary in (1..=first).rev() {
+        let z = base_z + boundary as f64 * slot_height;
+        if z < from_z - ZERO_LENGTH_MM && z > to_z + ZERO_LENGTH_MM {
+            cuts.push(z);
+        }
+    }
+    cuts.push(to_z);
+    let pieces = cuts.len() - 1;
+    // The ledger requirement on each piece, read at its mid-height.
+    let need: Vec<f64> = cuts
+        .windows(2)
+        .map(|pair| profile[slot_of(0.5 * (pair[0] + pair[1]))])
+        .collect();
+    let radius_at_top = |cut: usize| {
+        if cut == 0 {
+            start_radius.max(need[0])
+        } else {
+            need[cut]
+        }
+    };
+    let radius_at_bottom = |cut: usize| {
+        if cut == pieces {
+            end_radius.max(need[pieces - 1])
+        } else {
+            need[cut - 1]
+        }
+    };
+    let mut spans = Vec::new();
+    // Depth-first, top half first, so the spans come out top-down.
+    let mut pending = vec![(0_usize, pieces)];
+    while let Some((top, bottom)) = pending.pop() {
+        let top_radius = radius_at_top(top);
+        let bottom_radius = radius_at_bottom(bottom);
+        let drop = cuts[top] - cuts[bottom];
+        let mut worst: Option<(usize, f64)> = None;
+        for cut in top + 1..bottom {
+            let chord = top_radius + (bottom_radius - top_radius) * (cuts[top] - cuts[cut]) / drop;
+            let required = need[cut - 1].max(need[cut]);
+            let short = required - chord;
+            if short > required * PROFILE_RELATIVE_SLACK
+                && worst.is_none_or(|(_, deepest)| short > deepest)
+            {
+                worst = Some((cut, short));
+            }
+        }
+        match worst {
+            Some((cut, _)) => {
+                pending.push((cut, bottom));
+                pending.push((top, cut));
+            }
+            None => spans.push(DrawnSpan {
+                top_z_mm: cuts[top],
+                bottom_z_mm: cuts[bottom],
+                top_radius_mm: top_radius,
+                bottom_radius_mm: bottom_radius,
+            }),
+        }
+    }
+    spans
 }
 
 /// The tip seat for one arm, by the law in `docs/physics.md` §9, bounded by
@@ -1101,7 +1376,7 @@ fn seat_tip(
 fn lower_one_sweep_arm(
     arm: &SweepArm,
     config: LoweringConfig,
-    raft_top: f64,
+    plate_z: f64,
     out: &mut Vec<SupportPrimitive>,
 ) -> ArmLowering {
     let delta: [f64; 3] = std::array::from_fn(|index| arm.base_mm[index] - arm.seat_mm[index]);
@@ -1113,7 +1388,14 @@ fn lower_one_sweep_arm(
     let Ok(tip_radius) = positive(arm.tip_radius_mm) else {
         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
     };
-    let Ok(root_radius) = positive(arm.root_radius_mm.max(arm.tip_radius_mm)) else {
+    // The ledger's ROOT section — where the load arrives — never narrower than
+    // the tip. It is what the plate flare is sized from.
+    let ledger_root = arm
+        .radius_profile_mm
+        .first()
+        .copied()
+        .unwrap_or(arm.tip_radius_mm);
+    let Ok(root_radius) = positive(ledger_root.max(arm.tip_radius_mm)) else {
         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
     };
     let Ok(ball_radius) = positive(config.tip_ball_factor.get() * tip_radius.get()) else {
@@ -1198,27 +1480,48 @@ fn lower_one_sweep_arm(
     let Ok(base) = finite3(arm.base_mm) else {
         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
     };
+    // Every shaft below goes through `push_drawn_shaft`, which draws the taper
+    // and any chained members the ledger's profile needs; the plate-root chain
+    // around it is untouched.
+    let shaft = |top: [Finite; 3],
+                 bottom: [Finite; 3],
+                 ring_normal: FrustumRingNormal,
+                 staged: &mut Vec<SupportPrimitive>| {
+        push_drawn_shaft(
+            arm,
+            DrawnShaft {
+                top,
+                bottom,
+                tip_radius,
+                root_radius,
+                ring_normal,
+            },
+            config,
+            staged,
+        )
+    };
+    let spans: usize;
     let outcome = match arm.landing {
         SweepArmLanding::Landed => {
             if distance(center, base) <= ZERO_LENGTH_MM {
                 return ArmLowering::refused(ArmOutcome::ZeroLength);
             }
-            staged.push(frustum(
-                SupportSegmentKind::ContactTaper,
-                center,
-                base,
-                tip_radius,
-                root_radius,
-                Some(config.contact_depth_mm),
-                FrustumRingNormal::SegmentAxis,
-            ));
+            let Some(drawn) = shaft(center, base, FrustumRingNormal::SegmentAxis, &mut staged)
+            else {
+                return ArmLowering::refused(ArmOutcome::InvalidGeometry);
+            };
+            spans = drawn;
             ArmOutcome::Built
         }
         SweepArmLanding::Plate => {
-            let Ok(raft_z) = finite(raft_top) else {
+            // THE FOOT IS ON THE PLATE (fix/plate-gap, 2026-09-28). This path
+            // emits no raft, so there is no raft top to stop at: a plate root's
+            // lowest solid must be `plate_z` itself, or its first layer cures
+            // against the vat film instead of the plate.
+            let Ok(plate_z_finite) = finite(plate_z) else {
                 return ArmLowering::refused(ArmOutcome::InvalidGeometry);
             };
-            let raft_point = [base[0], base[1], raft_z];
+            let plate_point = [base[0], base[1], plate_z_finite];
             // The SEATED terminal z, exactly as the legacy path reads
             // `member.p0_mm()[2]` — which `initial.rs` already minted embedded.
             let boss_top =
@@ -1226,25 +1529,21 @@ fn lower_one_sweep_arm(
             match boss_top {
                 Some(top)
                     if distance(center, top) > ZERO_LENGTH_MM
-                        && distance(top, raft_point) > ZERO_LENGTH_MM =>
+                        && distance(top, plate_point) > ZERO_LENGTH_MM =>
                 {
                     let Ok(flare_radius) = positive(root_radius.get() * config.flare_factor.get())
                     else {
                         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
                     };
-                    staged.push(frustum(
-                        SupportSegmentKind::ContactTaper,
-                        center,
-                        top,
-                        tip_radius,
-                        root_radius,
-                        Some(config.contact_depth_mm),
-                        FrustumRingNormal::PlateZ,
-                    ));
+                    let Some(drawn) = shaft(center, top, FrustumRingNormal::PlateZ, &mut staged)
+                    else {
+                        return ArmLowering::refused(ArmOutcome::InvalidGeometry);
+                    };
+                    spans = drawn;
                     staged.push(frustum(
                         SupportSegmentKind::RootFlare,
                         top,
-                        raft_point,
+                        plate_point,
                         root_radius,
                         flare_radius,
                         None,
@@ -1255,20 +1554,18 @@ fn lower_one_sweep_arm(
                 _ => {
                     // The run from the plate is shorter than the registered
                     // no-bend height, or leaves no room between boss top and
-                    // raft, so no flare fits. Emit the straight column and
-                    // WARN: refusing here would destroy the evidence.
-                    if distance(center, raft_point) <= ZERO_LENGTH_MM {
+                    // plate, so no flare fits. Emit the straight column down
+                    // to the plate and WARN: refusing here would destroy the
+                    // evidence.
+                    if distance(center, plate_point) <= ZERO_LENGTH_MM {
                         return ArmLowering::refused(ArmOutcome::ZeroLength);
                     }
-                    staged.push(frustum(
-                        SupportSegmentKind::ContactTaper,
-                        center,
-                        raft_point,
-                        tip_radius,
-                        root_radius,
-                        Some(config.contact_depth_mm),
-                        FrustumRingNormal::PlateZ,
-                    ));
+                    let Some(drawn) =
+                        shaft(center, plate_point, FrustumRingNormal::PlateZ, &mut staged)
+                    else {
+                        return ArmLowering::refused(ArmOutcome::InvalidGeometry);
+                    };
+                    spans = drawn;
                     ArmOutcome::BuiltWithoutFlare
                 }
             }
@@ -1281,7 +1578,90 @@ fn lower_one_sweep_arm(
         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
     }
     out.append(&mut staged);
-    ArmLowering { outcome, seat }
+    ArmLowering {
+        outcome,
+        seat,
+        spans,
+        without_profile: arm.radius_profile_mm.is_empty(),
+    }
+}
+
+/// The ends and end radii of one shaft to draw.
+struct DrawnShaft {
+    top: [Finite; 3],
+    bottom: [Finite; 3],
+    tip_radius: PositiveFinite,
+    root_radius: PositiveFinite,
+    ring_normal: FrustumRingNormal,
+}
+
+/// Draw one member's shaft from `top` (the ball centre, or the seat of a member
+/// with no ball) straight down to `bottom`, as the spans [`drawn_spans`]
+/// chooses: the first span is the member's `ContactTaper`, carrying the
+/// registered contact depth exactly as before; every further span is a
+/// `Member` frustum chained end to end on the same straight axis, sharing its
+/// end point bit for bit with the span above. Returns the span count, or
+/// `None` when a span will not cross the finite boundary.
+fn push_drawn_shaft(
+    arm: &SweepArm,
+    shaft: DrawnShaft,
+    config: LoweringConfig,
+    staged: &mut Vec<SupportPrimitive>,
+) -> Option<usize> {
+    let top_z = shaft.top[2].get();
+    let bottom_z = shaft.bottom[2].get();
+    let spans = drawn_spans(
+        &arm.radius_profile_mm,
+        arm.base_mm[2],
+        arm.seat_mm[2],
+        top_z,
+        bottom_z,
+        shaft.tip_radius.get(),
+        shaft.root_radius.get(),
+    );
+    // A point on the straight axis at height `z`, by the same parameter the
+    // spans were cut at, so a shared end is the same number on both spans.
+    let on_axis = |z: f64| -> Option<[Finite; 3]> {
+        let t = (top_z - z) / (top_z - bottom_z);
+        finite3(std::array::from_fn(|index| {
+            let from = shaft.top[index].get();
+            from + (shaft.bottom[index].get() - from) * t
+        }))
+        .ok()
+    };
+    let last = spans.len().saturating_sub(1);
+    for (index, span) in spans.iter().enumerate() {
+        let start = if index == 0 {
+            shaft.top
+        } else {
+            on_axis(span.top_z_mm)?
+        };
+        let end = if index == last {
+            shaft.bottom
+        } else {
+            on_axis(span.bottom_z_mm)?
+        };
+        let start_radius = positive(span.top_radius_mm).ok()?;
+        let end_radius = positive(span.bottom_radius_mm).ok()?;
+        let (kind, depth) = if index == 0 {
+            (
+                SupportSegmentKind::ContactTaper,
+                Some(config.contact_depth_mm),
+            )
+        } else {
+            (SupportSegmentKind::Member, None)
+        };
+        staged.push(frustum(
+            kind,
+            start,
+            end,
+            start_radius,
+            end_radius,
+            depth,
+            shaft.ring_normal,
+        ));
+    }
+    Some(spans.len())
 }
 
 #[cfg(test)]

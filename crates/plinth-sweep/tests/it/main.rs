@@ -17,6 +17,7 @@ mod harness;
 
 mod congestion_lane;
 mod drain_connectivity;
+mod emitted_profile_covers_ledger;
 mod every_member_rests_on_something;
 mod load_insertion;
 mod mast_root_clearance;
@@ -28,6 +29,7 @@ mod oracle_tee;
 mod orient_demand;
 mod orient_demand_parallel;
 mod pitch_invariance;
+mod plate_root_contact;
 mod pose_demand_probe;
 mod round_bases_ratchet;
 mod sabotage;

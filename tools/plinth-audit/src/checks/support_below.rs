@@ -1,5 +1,6 @@
-//! I5 clause (d), "no support island": every support primitive is held up
-//! FROM BELOW.
+//! I5 clause (e), "no support island": every support primitive is held up
+//! FROM BELOW. (Clause (d) on fix/no-dangling; renumbered on landing, because
+//! fix/plate-gap's plate-root clause took (d) first.)
 //!
 //! I5's grounding (`load_path.rs`) asks whether a primitive is CONNECTED to the
 //! plate or to a valid model seat. That is the right question for a load path

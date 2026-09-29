@@ -1,0 +1,507 @@
+//! **The support that reaches the file is at least as thick as the support
+//! the area law sized** — the field report of 2026-09-28 ("the post above is
+//! thicker than the post below").
+//!
+//! The down-sweep sizes every member layer by layer: `radius_mm[slot]` is the
+//! section the carried load needs there, `π r² ≥ carried / X_ALLOWED`. Below a
+//! mid-shaft junction that ledger STEPS: the trunk carries its own load plus
+//! the branch's. Until this test was written the lowering drew every member as
+//! ONE straight frustum from the tip radius to the root radius, so a trunk 1-2
+//! mm below a junction was still drawn at almost its tip radius — thinner than
+//! its own ledger, and thinner than the branch landing on it (Craig's
+//! screenshot; 28 drawn inversions on the three pinned fixtures, realised
+//! X up to 75 against X_ALLOWED 12).
+//!
+//! What is graded, on the EMITTED primitives of the production sweep and the
+//! production lowering, never on the ledger restated:
+//!
+//! | test | what it asserts |
+//! |---|---|
+//! | `..._on_the_lonely_peak` / `..._on_the_brace_pair` / `..._on_the_tall_stilt_plate` | at the mid-height of every ledger slot of every member, the widest emitted section of that member there is at least the ledger radius; and at every `Landing::Strut` junction whose branch actually touches its trunk, the trunk's drawn section at the branch's base is at least the branch's drawn root |
+//!
+//! | `a_brace_thicker_than_its_trunks_raises_them_on_the_brace_pair` | the same, with every brace thickened past any trunk's ledger: the junction clause (a brace's root on its trunk, and its top on its host) must raise the trunks to meet it |
+//!
+//! A branch whose root does not touch the trunk its ledger names (the
+//! stilt plate's 11 un-merged branches, a separate defect) is counted EXACTLY
+//! per fixture and printed; it is not an inversion and no profile can fix it.
+//!
+//! How the tests are kept from passing vacuously: each counts the slots and
+//! junctions it graded and fails on zero; each requires the member it grades
+//! to be matched to its strut by where it lands; and a slot no emitted
+//! primitive covers inside the member's own drawn span is a FAILURE, not a
+//! skip. Slots below the member's lowest emitted point (the plate-gap span
+//! under a root flare, another lane's territory) are counted and printed.
+//!
+//! Sabotage: revert the lowering to one frustum per member (delete the
+//! breakpoint pass) and all three tests go red.
+
+// Layer counts from finite model-scale lengths, in test-local arithmetic.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
+use plinth_core::{m0_constants, Finite, LayerPlan, PositiveFinite};
+use plinth_mesh::{make_brace_pair, make_lonely_peak, make_tall_stilt_plate, Mesh};
+use plinth_support::{BuildFrame, SupportPrimitive, SupportSegmentKind};
+use plinth_sweep::{to_primitives, Landing, StrutKind, SweepEmission, SweepPlan, SweepPolicy};
+
+const LIFT_MM: f64 = 5.0;
+const MAX_PRIMITIVES: usize = 4_000_000;
+const MAX_PRIMITIVE_BYTES: usize = 1 << 30;
+/// Float noise around an equality the construction designs for (a chord that
+/// ends exactly on the ledger value), and nothing more.
+const RELATIVE_SLACK: f64 = 1.0e-9;
+
+fn layer_height_mm() -> f64 {
+    *m0_constants()
+        .expect("registry")
+        .evidence()
+        .layer_height_default_mm()
+        .value()
+}
+
+fn z_span(mesh: &Mesh) -> (f64, f64) {
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    for vertex in mesh.verts() {
+        min = min.min(vertex[2]);
+        max = max.max(vertex[2]);
+    }
+    (min, max)
+}
+
+/// The production frame, exactly as `tip_seating.rs::plan_of` builds it:
+/// `plate_z = min_z − lift`, one uniform plan stopping one layer above the top.
+///
+/// The finished plan is handed to `edit` before it is lowered — the lowering
+/// is graded against the plan it was actually given.
+fn plan_of_with(mesh: &Mesh, edit: impl FnOnce(&mut SweepPlan)) -> (SweepPlan, SweepEmission) {
+    let (min_z, max_z) = z_span(mesh);
+    let plate_z = min_z - LIFT_MM;
+    let height = layer_height_mm();
+    let count = (((max_z - plate_z) / height).ceil() as usize)
+        .saturating_add(1)
+        .max(1);
+    let layers = LayerPlan::new(plate_z, vec![height; count]).expect("a uniform layer plan");
+    let policy = SweepPolicy::from_registry().expect("the registry supplies every sweep number");
+    let mut plan = plinth_sweep::run_sweep(mesh, &layers, &policy)
+        .expect("the sweep emits and warns; it never refuses");
+    edit(&mut plan);
+    let frame = BuildFrame::new(
+        Finite::new(plate_z).expect("a finite plate"),
+        PositiveFinite::new(LIFT_MM).expect("a positive lift"),
+    );
+    let emission = to_primitives(&plan, frame, &layers, MAX_PRIMITIVES, MAX_PRIMITIVE_BYTES)
+        .expect("the lowering refuses only about the request");
+    (plan, emission)
+}
+
+fn point(primitive_point: [Finite; 3]) -> [f64; 3] {
+    primitive_point.map(Finite::get)
+}
+
+/// The emitted primitives, grouped per member in emission order. A member
+/// starts at its tip ball, or — for a brace or a mast, which carry no ball —
+/// at its taper. This reads the emitted SEQUENCE; it does not rebuild it.
+fn members(emission: &SweepEmission) -> Vec<Vec<&SupportPrimitive>> {
+    let mut groups: Vec<Vec<&SupportPrimitive>> = Vec::new();
+    for primitive in &emission.primitives {
+        let starts_new = match primitive.segment_kind {
+            SupportSegmentKind::ContactSphere => true,
+            SupportSegmentKind::ContactTaper => !groups
+                .last()
+                .and_then(|group| group.last())
+                .is_some_and(|last| last.segment_kind == SupportSegmentKind::ContactSphere),
+            _ => false,
+        };
+        if starts_new || groups.is_empty() {
+            groups.push(Vec::new());
+        }
+        groups.last_mut().expect("pushed above").push(primitive);
+    }
+    groups
+}
+
+/// The widest emitted section of one member at height `z`, or `None` when no
+/// primitive of the member spans `z`. Frusta are read as linear in their own
+/// axial parameter (the emitted record's own definition); a ball is read as a
+/// sphere cut perpendicular to its own pole axis.
+fn drawn_radius_at(group: &[&SupportPrimitive], z: f64) -> Option<f64> {
+    let mut widest: Option<f64> = None;
+    for primitive in group {
+        let start = point(primitive.start_mm);
+        let end = point(primitive.end_mm);
+        let r0 = primitive.start_radius_mm.get();
+        let r1 = primitive.end_radius_mm.get();
+        let here = match primitive.segment_kind {
+            SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere => {
+                let centre_z = 0.5 * (start[2] + end[2]);
+                let axis_len = ((end[0] - start[0]).powi(2)
+                    + (end[1] - start[1]).powi(2)
+                    + (end[2] - start[2]).powi(2))
+                .sqrt();
+                if axis_len <= 0.0 || (end[2] - start[2]).abs() <= 0.0 {
+                    None
+                } else {
+                    let along = (z - centre_z) * axis_len / (end[2] - start[2]);
+                    (along.abs() < r0).then(|| (r0 * r0 - along * along).sqrt())
+                }
+            }
+            _ => {
+                let (low, high) = (start[2].min(end[2]), start[2].max(end[2]));
+                if (start[2] - end[2]).abs() <= 0.0 || z < low || z > high {
+                    None
+                } else {
+                    let t = (start[2] - z) / (start[2] - end[2]);
+                    Some(r0 + t * (r1 - r0))
+                }
+            }
+        };
+        if let Some(radius) = here {
+            widest = Some(widest.map_or(radius, |best: f64| best.max(radius)));
+        }
+    }
+    widest
+}
+
+/// How far `point` sits sideways from the member's own drawn axis at its
+/// height, over the frusta that span that height; `None` when none does.
+fn axis_miss_at(group: &[&SupportPrimitive], point: [f64; 3]) -> Option<f64> {
+    group
+        .iter()
+        .filter(|primitive| {
+            !matches!(
+                primitive.segment_kind,
+                SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere
+            )
+        })
+        .filter_map(|primitive| {
+            let start = self::point(primitive.start_mm);
+            let end = self::point(primitive.end_mm);
+            let (low, high) = (start[2].min(end[2]), start[2].max(end[2]));
+            if (start[2] - end[2]).abs() <= 0.0 || point[2] < low || point[2] > high {
+                return None;
+            }
+            let t = (start[2] - point[2]) / (start[2] - end[2]);
+            let x = start[0] + t * (end[0] - start[0]);
+            let y = start[1] + t * (end[1] - start[1]);
+            Some((point[0] - x).hypot(point[1] - y))
+        })
+        .min_by(f64::total_cmp)
+}
+
+/// The member's highest emitted non-ball point and the radius drawn there —
+/// for a brace, where its top seats on its host.
+fn drawn_top(group: &[&SupportPrimitive]) -> Option<([f64; 3], f64)> {
+    group
+        .iter()
+        .filter(|primitive| {
+            !matches!(
+                primitive.segment_kind,
+                SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere
+            )
+        })
+        .flat_map(|primitive| {
+            [
+                (point(primitive.start_mm), primitive.start_radius_mm.get()),
+                (point(primitive.end_mm), primitive.end_radius_mm.get()),
+            ]
+        })
+        .max_by(|a, b| a.0[2].total_cmp(&b.0[2]))
+}
+
+/// The member's lowest emitted non-ball point and the radius drawn there.
+fn drawn_root(group: &[&SupportPrimitive]) -> Option<([f64; 3], f64)> {
+    group
+        .iter()
+        .filter(|primitive| {
+            !matches!(
+                primitive.segment_kind,
+                SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere
+            )
+        })
+        .flat_map(|primitive| {
+            [
+                (point(primitive.start_mm), primitive.start_radius_mm.get()),
+                (point(primitive.end_mm), primitive.end_radius_mm.get()),
+            ]
+        })
+        .min_by(|a, b| a.0[2].total_cmp(&b.0[2]))
+}
+
+#[derive(Default, Debug)]
+struct Census {
+    members: usize,
+    slots_graded: usize,
+    slots_below_lowest_point: usize,
+    under_drawn_members: Vec<(u32, f64, f64)>,
+    gaps_inside_member: usize,
+    junctions_graded: usize,
+    inversions: Vec<(u32, u32, f64, f64, f64)>,
+    /// Branches whose root does not touch the trunk their ledger names at all
+    /// (child, parent, sideways miss mm): the separate "detached junction"
+    /// defect of the same field report, which no drawing of the profile can
+    /// fix. Counted and printed, never graded as an inversion.
+    detached: Vec<(u32, u32, f64)>,
+    /// Brace tops graded against their host, and brace tops whose seat point
+    /// is not on the host's drawn section at all (printed, not graded).
+    brace_tops_graded: usize,
+    brace_tops_off_host: Vec<(u32, u32, f64)>,
+    member_frusta: usize,
+}
+
+fn census(plan: &SweepPlan, emission: &SweepEmission) -> Census {
+    let groups = members(emission);
+    assert_eq!(
+        emission.arms_emitted(),
+        emission.arms_offered,
+        "this grading pairs members with struts in plan order, so it needs every arm emitted"
+    );
+    assert_eq!(
+        groups.len(),
+        plan.struts.len(),
+        "one emitted member per strut in the plan"
+    );
+    let height = plan.layer_height_mm;
+    let plate = plan.plate_z_mm;
+    let mut out = Census {
+        members: groups.len(),
+        ..Census::default()
+    };
+    // Pair each member with its strut by WHERE IT LANDS, not only by order.
+    for (strut, group) in plan.struts.iter().zip(&groups) {
+        let base_cell = strut.base_cell();
+        let base = [
+            plan.grid.center_x_mm(plan.grid.col_of(base_cell)),
+            plan.grid.center_y_mm(plan.grid.row_of(base_cell)),
+        ];
+        let (root_point, _) = drawn_root(group).expect("every member has a shaft");
+        assert!(
+            (root_point[0] - base[0]).abs() <= 1e-6 && (root_point[1] - base[1]).abs() <= 1e-6,
+            "member {} does not land where its strut's base is: drawn {:?}, planned {:?}",
+            strut.id,
+            root_point,
+            base
+        );
+        out.member_frusta += group
+            .iter()
+            .filter(|primitive| primitive.segment_kind == SupportSegmentKind::Member)
+            .count();
+        let lowest = root_point[2];
+        let mut short_length = 0.0;
+        let mut worst_ratio = f64::INFINITY;
+        for (slot, required) in strut.radius_mm.iter().enumerate() {
+            let z = plate + (strut.k_bottom + slot) as f64 * height + 0.5 * height;
+            if z < lowest {
+                out.slots_below_lowest_point += 1;
+                continue;
+            }
+            out.slots_graded += 1;
+            let Some(drawn) = drawn_radius_at(group, z) else {
+                out.gaps_inside_member += 1;
+                continue;
+            };
+            if drawn < required * (1.0 - RELATIVE_SLACK) {
+                short_length += height;
+                worst_ratio = worst_ratio.min(drawn / required);
+            }
+        }
+        if short_length > 0.0 {
+            out.under_drawn_members
+                .push((strut.id, short_length, worst_ratio));
+        }
+    }
+    // THE JUNCTION CLAUSE: a trunk is at least as thick as each branch where
+    // the branch lands on it.
+    for (strut, group) in plan.struts.iter().zip(&groups) {
+        let Landing::Strut { id, .. } = strut.landing else {
+            continue;
+        };
+        let Some(parent_index) = plan.struts.iter().position(|parent| parent.id == id) else {
+            continue;
+        };
+        let (root_point, child_root) = drawn_root(group).expect("every member has a shaft");
+        let trunk = drawn_radius_at(&groups[parent_index], root_point[2]).unwrap_or(0.0);
+        let miss = axis_miss_at(&groups[parent_index], root_point).unwrap_or(f64::INFINITY);
+        if miss > trunk {
+            out.detached.push((strut.id, id, miss));
+            continue;
+        }
+        out.junctions_graded += 1;
+        if trunk < child_root * (1.0 - RELATIVE_SLACK) {
+            out.inversions
+                .push((strut.id, id, root_point[2] - plate, child_root, trunk));
+        }
+    }
+    // THE SAME CLAUSE AT A BRACE'S TOP, where it seats on its host shaft.
+    for (strut, group) in plan.struts.iter().zip(&groups) {
+        let Some(host_id) = strut.seat_on_strut else {
+            continue;
+        };
+        let Some(host_index) = plan.struts.iter().position(|host| host.id == host_id) else {
+            continue;
+        };
+        let (top_point, brace_top) = drawn_top(group).expect("every member has a shaft");
+        let trunk = drawn_radius_at(&groups[host_index], top_point[2]).unwrap_or(0.0);
+        let miss = axis_miss_at(&groups[host_index], top_point).unwrap_or(f64::INFINITY);
+        if miss > trunk {
+            out.brace_tops_off_host.push((strut.id, host_id, miss));
+            continue;
+        }
+        out.junctions_graded += 1;
+        out.brace_tops_graded += 1;
+        if trunk < brace_top * (1.0 - RELATIVE_SLACK) {
+            out.inversions
+                .push((strut.id, host_id, top_point[2] - plate, brace_top, trunk));
+        }
+    }
+    out
+}
+
+/// `detached_expected`: how many branches the fixture is KNOWN to leave off
+/// their named trunk (the separate defect). Asserted exactly, so a change in
+/// that population is loud here too rather than silently absorbed.
+fn grade(name: &str, mesh: &Mesh, detached_expected: usize) {
+    grade_with(name, mesh, detached_expected, |_| {});
+}
+
+fn grade_with(
+    name: &str,
+    mesh: &Mesh,
+    detached_expected: usize,
+    edit: impl FnOnce(&mut SweepPlan),
+) {
+    let (plan, emission) = plan_of_with(mesh, edit);
+    let found = census(&plan, &emission);
+    println!(
+        "{name}: brace tops graded {}, off their host (not graded) {:?}; members raised to a \
+         branch {}; arm junctions inverted in the ledger itself {}",
+        found.brace_tops_graded,
+        found.brace_tops_off_host,
+        emission.members_raised_to_a_branch,
+        emission.arm_junctions_inverted_in_ledger,
+    );
+    assert_eq!(
+        emission.arm_junctions_inverted_in_ledger, 0,
+        "{name}: the down-sweep's own ledger names an arm wider than its trunk"
+    );
+    println!(
+        "{name}: {} members, {} slots graded ({} below the lowest emitted point, not graded), \
+         {} junctions graded ({} detached, not graded: {:?}), {} Member frusta emitted (path \
+         hits of the breakpoint pass); under-drawn members {}, inversions {}, gaps {}",
+        found.members,
+        found.slots_graded,
+        found.slots_below_lowest_point,
+        found.junctions_graded,
+        found.detached.len(),
+        found.detached,
+        found.member_frusta,
+        found.under_drawn_members.len(),
+        found.inversions.len(),
+        found.gaps_inside_member,
+    );
+    assert!(
+        found.slots_graded > 0,
+        "{name}: anti-vacuity, no slot graded"
+    );
+    assert!(
+        found.junctions_graded > 0,
+        "{name}: anti-vacuity, no junction graded"
+    );
+    assert_eq!(
+        found.detached.len(),
+        detached_expected,
+        "{name}: detached branches (child, parent, sideways miss mm): {:?}",
+        found.detached
+    );
+    assert_eq!(
+        found.gaps_inside_member, 0,
+        "{name}: a ledger slot inside a member's drawn span has no emitted section at all"
+    );
+    let under_length: f64 = found.under_drawn_members.iter().map(|m| m.1).sum();
+    assert!(
+        found.under_drawn_members.is_empty() && found.inversions.is_empty(),
+        "{name}: {} members drawn thinner than their ledger over {under_length:.3} mm \
+         (id, length mm, worst drawn/ledger): {:?}; {} junctions where the trunk is drawn \
+         thinner than the branch landing on it (child, parent, z above plate, branch root, \
+         trunk there): {:?}",
+        found.under_drawn_members.len(),
+        found.under_drawn_members,
+        found.inversions.len(),
+        found.inversions
+    );
+}
+
+#[test]
+fn emitted_profile_covers_the_ledger_on_the_lonely_peak() {
+    grade(
+        "make_lonely_peak",
+        &make_lonely_peak().expect("the lonely peak fixture"),
+        0,
+    );
+}
+
+#[test]
+fn emitted_profile_covers_the_ledger_on_the_brace_pair() {
+    grade(
+        "make_brace_pair",
+        &make_brace_pair().expect("the brace pair fixture"),
+        0,
+    );
+}
+
+/// **A brace is sized by its own slenderness minimum, never by load**, so its
+/// section can exceed the shaft it joins, and the trunk's ledger never hears
+/// of it: on the dense-pose Sphere 38 brace ends sit on 0.05 mm arms at up to
+/// 0.08 mm. The pinned fixtures happen not to reach that case, so this test
+/// makes it: every brace on the brace pair is given 1.5 × the widest ledger
+/// radius in the whole field, which no trunk's ledger meets. The junction
+/// clause must then RAISE every trunk and host a brace joins, from the joint
+/// down to its root — and every member must still cover its own ledger.
+#[test]
+fn a_brace_thicker_than_its_trunks_raises_them_on_the_brace_pair() {
+    let mut thickened = 0_usize;
+    grade_with(
+        "make_brace_pair, braces thickened",
+        &make_brace_pair().expect("the brace pair fixture"),
+        0,
+        |plan| {
+            let widest = plan
+                .struts
+                .iter()
+                .flat_map(|strut| strut.radius_mm.iter().copied())
+                .fold(0.0_f64, f64::max);
+            for strut in plan
+                .struts
+                .iter_mut()
+                .filter(|strut| strut.kind == StrutKind::Brace)
+            {
+                for radius in &mut strut.radius_mm {
+                    *radius = 1.5 * widest;
+                }
+                thickened += 1;
+            }
+        },
+    );
+    assert!(
+        thickened > 0,
+        "anti-vacuity: the brace pair must place braces for this test to mean anything"
+    );
+}
+
+/// The fixture Craig's screenshot came from: 145 members, 21 attached drawn
+/// inversions before the fix. It also carries the SEPARATE detached-junction
+/// defect (11 branches un-merged off their trunk, field report "trunk-thinner",
+/// second defect), which no drawing of the profile can repair; those are
+/// counted exactly and excluded from the junction clause, and belong to their
+/// own lane.
+#[test]
+fn emitted_profile_covers_the_ledger_on_the_tall_stilt_plate() {
+    grade(
+        "make_tall_stilt_plate",
+        &make_tall_stilt_plate().expect("the tall stilt plate fixture"),
+        11,
+    );
+}

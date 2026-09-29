@@ -22,10 +22,14 @@
 //!   fraction of the upper hemisphere from which the face is unoccluded.  A
 //!   face whose authored normal points straight down scores exactly 0 by
 //!   construction, with no cutoff to choose.
-//! * **Detail density.**  The owner's first named signal is local low cosine
-//!   similarity among neighbouring triangle normals — faces that articulate a
-//!   lot carry denser detail.  Measured over a neighbourhood of radius
-//!   `R_detail` on the surface.
+//! * **Detail.**  The owner's first named signal was local low cosine
+//!   similarity among neighbouring triangle normals.  Refined by his ruling of
+//!   2026-09-05 (built 2026-09-28): detail is a WIDE DISTRIBUTION of
+//!   normal-change magnitudes in a neighbourhood — small, medium and large
+//!   together — and uniform change (a crease, a regular rib or groove) is
+//!   change, not detail.  So the field measures the SPREAD of the fold angles
+//!   within a surface neighbourhood of radius `R_detail`, not their mean; see
+//!   [`crate::display_eval`] for the statistic.
 //! * **The tip confound.**  The tips of pointy protrusions (rivet nubs, sword
 //!   tips, hilt bottoms, fingertips) also have sharply varying normals and are
 //!   the BEST places to land supports.  They are separated geometrically, not
@@ -61,17 +65,21 @@ use crate::delicacy::{DelicacyError, FaceTable};
 use crate::{Mesh, TopologyError};
 
 pub const DISPLAY_FIELD_SCHEMA: &str = "plinth-mesh/display-field";
-pub const DISPLAY_FIELD_SCHEMA_VERSION: u32 = 1;
+/// 2 (2026-09-28): `detail` is the SPREAD of the neighbourhood's
+/// normal-change distribution, not its mean, and the settings carry the change
+/// resolution that defines a change.
+pub const DISPLAY_FIELD_SCHEMA_VERSION: u32 = 2;
 
 /// The registered quantities one display evaluation is measured against.
 ///
-/// Three numbers, and every one of them is read from the constants registry:
-/// two registered `Placeholder`s and one length inherited from a `Measured`
-/// entry.  Nothing here is a literal.
+/// Every number is read from the constants registry: two registered
+/// `Placeholder`s, one length inherited from a `Measured` entry, and one
+/// `Derived` length (the change resolution).  Nothing here is a literal.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DisplaySettings {
     view_directions: usize,
     detail_radius_mm: f64,
+    change_resolution_mm: f64,
 }
 
 impl DisplaySettings {
@@ -86,6 +94,15 @@ impl DisplaySettings {
     ///   owner field datum — the radius of the largest scar one support tip
     ///   may leave — so `R_detail` is a stated multiple of the worst scar,
     ///   not a number chosen for this field.
+    /// * `change_resolution_mm` = `DECIMATION_MAX_P999_DEVIATION_MM` (Derived
+    ///   from `PIXEL_PITCH_Y_UM`: one addressable step of the coarser printer
+    ///   axis, 0.019 mm).  The smallest surface excursion the print can
+    ///   reproduce, and the deviation the decimated mesh this field is
+    ///   measured on is already authorized to carry.  A fold whose excursion
+    ///   across the whole `R_detail` neighbourhood stays inside it — `θ ×
+    ///   R_detail` below one step — cannot be told apart from tessellation or
+    ///   decimation noise, so it is not a normal CHANGE for the detail
+    ///   statistic (see `display_eval`).  Inherited, not chosen.
     ///
     /// # Errors
     ///
@@ -105,18 +122,31 @@ impl DisplaySettings {
             .diagnostic()
             .get();
         let scar_radius_mm = *constants.evidence().tip_radius_max_grown_scar_mm().value();
+        let change_resolution_mm = *constants.evidence().decimation_max_p999_deviation_mm().value();
         Self::new(
             usize::try_from(directions).unwrap_or(usize::MAX),
             multiple * scar_radius_mm,
+            change_resolution_mm,
         )
     }
 
     /// # Errors
     ///
     /// [`DisplayError::InvalidSetting`] when a value is not usable: a zero
-    /// direction count would leave visibility undefined, and a non-positive or
-    /// non-finite radius would leave the neighbourhood undefined.
-    pub fn new(view_directions: usize, detail_radius_mm: f64) -> Result<Self, DisplayError> {
+    /// direction count would leave visibility undefined, a non-positive or
+    /// non-finite radius would leave the neighbourhood undefined, and a
+    /// negative or non-finite change resolution would leave "a change" undefined.
+    pub fn new(
+        view_directions: usize,
+        detail_radius_mm: f64,
+        change_resolution_mm: f64,
+    ) -> Result<Self, DisplayError> {
+        if !change_resolution_mm.is_finite() || change_resolution_mm < 0.0 {
+            return Err(DisplayError::InvalidSetting {
+                name: "change_resolution_mm",
+                value: change_resolution_mm,
+            });
+        }
         if view_directions == 0 {
             return Err(DisplayError::InvalidSetting {
                 name: "view_directions",
@@ -132,6 +162,7 @@ impl DisplaySettings {
         Ok(Self {
             view_directions,
             detail_radius_mm,
+            change_resolution_mm,
         })
     }
 
@@ -142,6 +173,17 @@ impl DisplaySettings {
     #[must_use]
     pub const fn detail_radius_mm(self) -> f64 {
         self.detail_radius_mm
+    }
+    #[must_use]
+    pub const fn change_resolution_mm(self) -> f64 {
+        self.change_resolution_mm
+    }
+    /// The smallest fold angle that counts as a normal change: the angle whose
+    /// excursion across the `R_detail` neighbourhood is one change-resolution
+    /// step, `atan(change_resolution / R_detail)` (1.36° in production).
+    #[must_use]
+    pub fn change_resolution_rad(self) -> f64 {
+        (self.change_resolution_mm / self.detail_radius_mm).atan()
     }
 }
 
@@ -343,6 +385,7 @@ fn digest(table: &FaceTable, settings: DisplaySettings, values: &[DisplayFaceVal
     hash.update((table.face_count() as u64).to_le_bytes());
     hash.update((settings.view_directions as u64).to_le_bytes());
     hash.update(settings.detail_radius_mm.to_bits().to_le_bytes());
+    hash.update(settings.change_resolution_mm.to_bits().to_le_bytes());
     for value in values {
         for value in [
             value.visibility,
@@ -398,21 +441,35 @@ mod tests {
     #[test]
     fn settings_and_resource_boundaries_are_named() {
         assert!(matches!(
-            DisplaySettings::new(0, 0.8),
+            DisplaySettings::new(0, 0.8, 0.019),
             Err(DisplayError::InvalidSetting {
                 name: "view_directions",
                 ..
             })
         ));
         assert!(matches!(
-            DisplaySettings::new(8, f64::NAN),
+            DisplaySettings::new(8, f64::NAN, 0.019),
             Err(DisplayError::InvalidSetting { .. })
         ));
         assert!(matches!(
-            DisplaySettings::new(8, 0.0),
+            DisplaySettings::new(8, 0.0, 0.019),
             Err(DisplayError::InvalidSetting { .. })
         ));
-        assert!(DisplaySettings::new(8, 0.8).is_ok());
+        assert!(matches!(
+            DisplaySettings::new(8, 0.8, -0.019),
+            Err(DisplayError::InvalidSetting {
+                name: "change_resolution_mm",
+                ..
+            })
+        ));
+        assert!(matches!(
+            DisplaySettings::new(8, 0.8, f64::NAN),
+            Err(DisplayError::InvalidSetting {
+                name: "change_resolution_mm",
+                ..
+            })
+        ));
+        assert!(DisplaySettings::new(8, 0.8, 0.019).is_ok());
         assert!(matches!(
             DisplayBuildConfig {
                 max_index_bytes: 0,
@@ -456,6 +513,10 @@ mod tests {
         assert_eq!(scar, 0.400);
         assert_eq!(settings.detail_radius_mm(), 0.800);
         assert_eq!(settings.view_directions(), 64);
+        let step = *constants.evidence().decimation_max_p999_deviation_mm().value();
+        assert_eq!(settings.change_resolution_mm(), step);
+        assert_eq!(step, 0.019);
+        assert_eq!(settings.change_resolution_rad(), (0.019_f64 / 0.800).atan());
     }
 
     #[test]
@@ -463,7 +524,7 @@ mod tests {
         let mesh = make_box_default().unwrap();
         let build = || {
             let table = FaceTable::bind(&mesh, "source-lod").unwrap();
-            let settings = DisplaySettings::new(8, 0.8).unwrap();
+            let settings = DisplaySettings::new(8, 0.8, 0.019).unwrap();
             let values =
                 vec![DisplayFaceValue::new(0.5, 0.25, 1.0, 0.125).unwrap(); table.face_count()];
             DisplayField::from_face_values(table, settings, values).unwrap()

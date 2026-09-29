@@ -27,7 +27,7 @@
 //! the path, a member landed on the path can miss it. Measured 2026-09-28 on `make_laid_tube` at its production pose (plan
 //! digest `0335589d6ee25341`, reproduced exactly by this file's frame): this
 //! check finds 0 unrooted members, while the emitted-bytes audit
-//! (`plinth-audit` I5 clause (d)) finds 76 — 2 arm ends and 70 brace ends
+//! (`plinth-audit` I5 clause (e), `PATH_NO_SUPPORT_BELOW`) finds 76 — 2 arm ends and 70 brace ends
 //! 0-0.54 mm off the drawn shaft, and 4 brace ends inside the 0.2 mm raft gap.
 //! Which of the two departures accounts for each one was not traced member by
 //! member. The class belongs to the emit boundary and to brace placement, not
@@ -170,7 +170,14 @@ fn rooting(mesh: &Mesh, plan: &SweepPlan) -> Rooting {
             } else {
                 0.0
             };
-            let root = other.root_radius_mm.max(other.tip_radius_mm);
+            // The root radius is `radius_profile_mm[0]` (fix/drawn-profile
+            // replaced the old `root_radius_mm` field with the whole ledger).
+            let root = other
+                .radius_profile_mm
+                .first()
+                .copied()
+                .unwrap_or_default()
+                .max(other.tip_radius_mm);
             let radius = other.tip_radius_mm + (root - other.tip_radius_mm) * t;
             if distance - radius <= tol {
                 rests_on[i].push(j);

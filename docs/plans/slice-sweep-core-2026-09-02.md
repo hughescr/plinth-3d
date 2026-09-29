@@ -796,8 +796,33 @@ One sweep strut lowers to the same chain the existing lowering emits for a plate
                    merged so a segment is emitted only when the radius changes by more than
                    1 % or 0.005 mm, whichever is larger — a RECORD-COUNT economy, not a
                    physical rule; the unmerged profile stays in the ledger
-4. RootFlare       only for Landing::Plate, root boss top down to plate_z + raft_height
+4. RootFlare       only for Landing::Plate, root boss top down to plate_z
 ```
+
+**As built (2026-09-28, field report "trunk-thinner").** Step 3 was not built until
+2026-09-28: every strut was lowered as ONE taper from its tip radius to its root radius, which
+drew every trunk under a mid-shaft junction thinner than its own ledger and thinner than the
+branch landing on it. It is now built on a physical rule rather than the record-count economy
+above: the drawn section at every height is at least the ledger's, `r_drawn(z) ≥ radius_mm(z)`
+(the area law on the emitted geometry). `plinth_support::lower` (`drawn_spans`) cuts the shaft at
+slot boundaries and splits a straight chord only where it would dip below the ledger (at the
+cut where it dips furthest, recursively); a piecewise-constant ledger therefore breaks exactly at
+each step and nowhere else, with an upward-facing shoulder at each junction. The 1 % / 0.005 mm
+merge is NOT used — no tolerance beyond float noise (1e-9 relative) enters. The junction clause
+(a trunk is at least as thick as each branch where it joins) holds by the ledger for support
+arms; for a BRACE, sized by its own slenderness minimum and invisible to the trunk's ledger, the
+adapter (`junction_profiles`) raises the host's DRAWN profile to the brace's end radius from the
+joint down to the host's root (never a local collar: a member must not narrow downward, or it
+leaves a down-facing ledge), which also widens that host's plate flare. The run report's
+resin line now leads with the volume measured from the emitted records and keeps the ledger
+volume beside it, labelled as the sizing figure.
+
+**Corrected 2026-09-28 (fix/plate-gap).** This line first read "down to `plate_z + raft_height`",
+the legacy raft datum. v1 emits no raft (§14 OR-3), so that left every root flare 0.2 mm (four
+layers) above the plate with nothing under it; the owner saw the bases float in ChituBox. The
+flare now reaches `plate_z` itself with its full `FLARE_R_FACTOR × r_root` foot; a plate arm too
+short for a boss runs its straight column to `plate_z` too. The boss TOP is unchanged: it still
+comes from the shared `root_boss_top_at`, which reads the raft height as a datum.
 
 **The adapter must not re-derive this geometry by hand.** `lower_stub`
 (`crates/plinth-support/src/lower.rs:362`) and `root_boss_top` (`:416`) already compute the
@@ -1273,7 +1298,8 @@ the reason disclosed in the run report?** Out of scope for LANE 1–3 either way
 **OR-3 — raft.** v1 emits a `RootFlare` per plate landing and no raft. This is answerable only
 by opening LANE 2's disc files in ChituBox. **Do the discs need a raft, or is the flare enough?**
 If a raft is needed, `plinth_support::raft` operates on live forest members and needs a small
-adapter — the first v1.1 item.
+adapter — the first v1.1 item. (2026-09-28: while the question is open, the flare stands ON the
+plate, not on the top of the absent raft; see §9.2.)
 
 ### Standing question, unresolved by measurement
 

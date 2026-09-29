@@ -12,7 +12,7 @@
 //! that touches a neighbour mid-span rather than at a declared endpoint, and
 //! only the overlap graph is literally what the specification asks for.
 //!
-//! ## Clause (d): no support island
+//! ## Clause (e): no support island
 //!
 //! Connected is not held up. A support arm whose tip is seated in the model
 //! and whose lower end stops in the air is connected through the model and is
@@ -20,7 +20,9 @@
 //! [`crate::checks::support_below`] asks the DIRECTIONAL question — does every
 //! primitive's lowest point rest on the plate, the model, or a primitive that
 //! reaches lower, in a chain ending at the plate or the model — and each
-//! primitive that fails it is a `PATH_NO_SUPPORT_BELOW` failure.
+//! primitive that fails it is a `PATH_NO_SUPPORT_BELOW` failure. (Written as
+//! clause (d) on fix/no-dangling and renumbered when it landed after
+//! fix/plate-gap's clause (d), plate roots, below.)
 //!
 //! ## Grounding
 //!
@@ -38,6 +40,15 @@
 //! check to their internal state (rather than to the shared reconstructions
 //! every check is meant to read) is exactly the kind of cross-file dependency
 //! the project's module layout exists to avoid.
+//!
+//! ## Plate roots, clause (d)
+//!
+//! Grounding is about connectivity; it is not the test for a root. Every FLARE
+//! record (a plate root by format definition) must also have its lowest point
+//! ON the plate, or overlap a raft record that is on the plate. A root that
+//! fails this is `PATH_ROOT_FLOATING` (`audit-invariants.md` §3.5 clause (d),
+//! added by fix/plate-gap on 2026-09-28, after the owner saw slice-sweep roots
+//! float 0.2 mm above the plate in ChituBox).
 //!
 //! ## Never-pass discipline
 //!
@@ -289,6 +300,83 @@ impl Check for LoadPath {
         }
 
         // -------------------------------------------------------------
+        // 3b. Clause (d), plate roots: every FLARE stands ON the plate.
+        //
+        //    A FLARE record (wire 4) is by format definition a plate root
+        //    (`docs/specs/chitubox-format.md`). Its lowest solid is its
+        //    contact with the plate, so that lowest point must BE the plate
+        //    -- or the top of a raft record that is itself on the plate, the
+        //    legacy layout. Clause (i)'s one-layer band is the wrong test for
+        //    a root: it is "reaches the plate's layer", and a root whose foot
+        //    stops inside that band, or (with no raft under it) at the raft
+        //    height, cures its first layer against the vat film. The owner
+        //    saw exactly that in ChituBox on 2026-09-28: every slice-sweep
+        //    root stopped 0.2 mm (four layers) above the plate on a raft that
+        //    was never emitted (fix/plate-gap).
+        //
+        //    EXEMPT from the interval policy (`audit-interval-policy.md`
+        //    §1.5, §3.4) for the same reason clause (i) is: an equality-band
+        //    coincidence test at the f32 resolution of the evidence, with no
+        //    delivered-versus-required relation. A root BELOW the plate is not
+        //    graded here: that is the frame check's physically-impossible
+        //    signal (`FrameCheck::support_below_plate_mm`).
+        // -------------------------------------------------------------
+        let on_plate = |low: f64| {
+            let tol = c::tol_geom_mag(low.abs().max(ctx.z_plate_mm.abs()).max(1.0));
+            low - ctx.z_plate_mm <= tol
+        };
+        let raft_on_plate: Vec<bool> = (0..n)
+            .map(|i| {
+                ctx.model.records[i].kind == RecordKind::RaftPadOrBridge
+                    && ctx.primitives[i]
+                        .as_ref()
+                        .is_ok_and(|p| on_plate(p.aabb().min[2]))
+            })
+            .collect();
+        let mut n_root = 0usize;
+        let mut n_root_on_plate = 0usize;
+        let mut n_root_on_raft = 0usize;
+        let mut n_root_floating = 0usize;
+        let mut worst_root_gap_mm = 0.0f64;
+        for &(i, p) in &ok {
+            if ctx.model.records[i].kind != RecordKind::RootFlare {
+                continue;
+            }
+            n_root += 1;
+            let low = p.aabb().min[2];
+            if on_plate(low) {
+                n_root_on_plate += 1;
+                continue;
+            }
+            if adj[i].iter().any(|&j| raft_on_plate[j]) {
+                n_root_on_raft += 1;
+                continue;
+            }
+            n_root_floating += 1;
+            let gap = low - ctx.z_plate_mm;
+            worst_root_gap_mm = worst_root_gap_mm.max(gap);
+            out.fail(Failure::line(
+                "PATH_ROOT_FLOATING",
+                &file,
+                ctx.model_index,
+                None,
+                Some(i),
+                &[
+                    ("type", RecordKind::RootFlare.label().to_string()),
+                    ("lowest_z_mm", format!("{low:.6}")),
+                    ("gap_above_plate_mm", format!("{gap:.6}")),
+                ],
+                {
+                    let mut o = Json::obj();
+                    o.set("type", Json::str(RecordKind::RootFlare.label()));
+                    o.set("lowest_z_mm", Json::num(low));
+                    o.set("gap_above_plate_mm", Json::num(gap));
+                    o
+                },
+            ));
+        }
+
+        // -------------------------------------------------------------
         // 4. Reachability. Clause (c), the acyclic rootward relation, falls
         //    out for free: a BFS distance to ground cannot exist without a
         //    neighbour strictly closer, by construction of BFS.
@@ -457,7 +545,7 @@ impl Check for LoadPath {
         }
 
         // -------------------------------------------------------------
-        // 6b. Clause (d), no support island: held up FROM BELOW. A tip
+        // 6b. Clause (e), no support island: held up FROM BELOW. A tip
         //     seated in the model grounds only its own member's top, never
         //     what hangs beneath it.
         // -------------------------------------------------------------
@@ -539,12 +627,18 @@ impl Check for LoadPath {
         measured.set("indeterminate_connectivity", Json::usize(n_indet_conn));
         measured.set("overlap_edges", Json::usize(n_overlap_edges));
         measured.set("fusion_uncertain_pairs", Json::usize(n_indet_pairs));
+        measured.set("root_flares", Json::usize(n_root));
+        measured.set("root_flares_on_plate", Json::usize(n_root_on_plate));
+        measured.set("root_flares_on_raft", Json::usize(n_root_on_raft));
+        measured.set("root_flares_floating", Json::usize(n_root_floating));
+        measured.set("worst_root_gap_mm", Json::num(worst_root_gap_mm));
         measured.set("records", Json::Arr(records_json));
         measured.set(
             "headline",
             Json::str(format!(
-                "{n_orphan} orphaned, {n_free_end} free ends, {n_no_support_below} with no \
-                 support below, {} indeterminate (of {n} records)",
+                "{n_orphan} orphaned, {n_free_end} free ends, {n_root_floating} of {n_root} roots \
+                 off the plate, {n_no_support_below} with no support below, {} indeterminate \
+                 (of {n} records)",
                 out.indeterminate
             )),
         );
@@ -1212,6 +1306,119 @@ mod tests {
         let (out, _ctx) = run_on(m);
         assert_eq!(out.checked, 0);
         assert_eq!(out.status(), crate::check::Status::Pass);
+    }
+
+    // -----------------------------------------------------------------
+    // Clause (d), plate roots (fix/plate-gap, 2026-09-28).
+    // -----------------------------------------------------------------
+
+    fn root_counts(out: &CheckOutcome) -> [usize; 4] {
+        let get = |key: &str| {
+            out.measured
+                .get(key)
+                .and_then(Json::as_f64)
+                .unwrap_or_else(|| panic!("I5 must publish {key}"))
+        };
+        // Counts of a handful of records: exact in f64.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let as_count = |x: f64| x as usize;
+        [
+            as_count(get("root_flares")),
+            as_count(get("root_flares_on_plate")),
+            as_count(get("root_flares_on_raft")),
+            as_count(get("root_flares_floating")),
+        ]
+    }
+
+    fn floating_roots(out: &CheckOutcome) -> Vec<(usize, f64)> {
+        out.failures
+            .iter()
+            .filter(|f| f.code == "PATH_ROOT_FLOATING")
+            .map(|f| {
+                (
+                    f.record.expect("a floating root names its record"),
+                    f.values
+                        .get("gap_above_plate_mm")
+                        .and_then(Json::as_f64)
+                        .expect("a floating root states its gap"),
+                )
+            })
+            .collect()
+    }
+
+    /// The slice-sweep layout with NO raft: tip -> taper -> member -> flare,
+    /// the flare's foot `foot_gap_mm` above the plate.
+    fn raftless_chain(foot_gap_mm: f64) -> SynthModel {
+        let mut m = chain_touching_plate();
+        let z_plate = -m.translate_mm[2];
+        m.records.truncate(4); // drop the pad
+        m.records[3].end_mm = [0.0, 0.0, z_plate + foot_gap_mm];
+        m
+    }
+
+    #[test]
+    fn a_flare_standing_on_the_plate_is_a_grounded_root() {
+        let (out, _ctx) = run_on(raftless_chain(0.0));
+        assert!(floating_roots(&out).is_empty(), "{:?}", out.failures);
+        // PATH HIT: the clause graded the one root, and graded it ON the plate.
+        assert_eq!(root_counts(&out), [1, 1, 0, 0]);
+    }
+
+    /// The owner's defect, 2026-09-28: the flare ends at the 0.2 mm raft
+    /// height and no raft is emitted under it.
+    #[test]
+    fn a_flare_stopping_at_the_raft_height_with_no_raft_floats() {
+        let (out, _ctx) = run_on(raftless_chain(0.2));
+        let floating = floating_roots(&out);
+        assert_eq!(floating.len(), 1, "{:?}", out.failures);
+        assert_eq!(floating[0].0, 3);
+        assert!((floating[0].1 - 0.2).abs() < 1e-5, "{floating:?}");
+        assert_eq!(root_counts(&out), [1, 0, 0, 1]);
+        assert_eq!(out.status(), crate::check::Status::Fail);
+    }
+
+    /// Inside clause (i)'s one-layer band: clause (i) calls the flare
+    /// grounded, so neither `PATH_ORPHAN` nor `PATH_FREE_END` fires. Only the
+    /// root clause sees that the foot is not on the plate.
+    #[test]
+    fn a_flare_stopping_inside_the_first_layer_still_floats() {
+        let layer = AuditOptions::default().inputs.layer_height_mm;
+        let (out, _ctx) = run_on(raftless_chain(0.6 * layer));
+        assert!(
+            out.failures
+                .iter()
+                .all(|f| f.code != "PATH_ORPHAN" && f.code != "PATH_FREE_END"),
+            "clause (i) grounds a foot inside the first layer; the premise of this test: {:?}",
+            out.failures
+        );
+        assert_eq!(floating_roots(&out).len(), 1, "{:?}", out.failures);
+        assert_eq!(out.status(), crate::check::Status::Fail);
+    }
+
+    /// The legacy layout: the flare stands on the TOP of a raft pad that is
+    /// itself on the plate. That is a grounded root.
+    #[test]
+    fn a_flare_standing_on_a_raft_on_the_plate_is_a_grounded_root() {
+        let mut m = chain_touching_plate();
+        let z_plate = -m.translate_mm[2];
+        let raft_height = m.records[4].r_end;
+        m.records[3].end_mm = [0.0, 0.0, z_plate + raft_height];
+        let (out, _ctx) = run_on(m);
+        assert!(floating_roots(&out).is_empty(), "{:?}", out.failures);
+        assert_eq!(root_counts(&out), [1, 0, 1, 0]);
+    }
+
+    /// A raft that is itself off the plate grounds nothing.
+    #[test]
+    fn a_flare_on_a_raft_that_floats_still_floats() {
+        let mut m = chain_touching_plate();
+        let z_plate = -m.translate_mm[2];
+        let raft_height = m.records[4].r_end;
+        m.records[3].end_mm = [0.0, 0.0, z_plate + 2.0 * raft_height];
+        m.records[4].start_mm = [0.0, 0.0, z_plate + raft_height];
+        m.records[4].end_mm = [0.0, 0.0, z_plate + raft_height];
+        let (out, _ctx) = run_on(m);
+        assert_eq!(floating_roots(&out).len(), 1, "{:?}", out.failures);
     }
 
     // -----------------------------------------------------------------
