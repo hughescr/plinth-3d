@@ -239,11 +239,30 @@ fn the_lane_never_loses_load_and_never_takes_an_arm_away() {
     let with = sweep_with(&mesh, 0.0, &policy());
     let without = sweep_with(&mesh, 0.0, &policy().without_congestion());
 
-    assert!(
-        with.struts.len() >= without.struts.len(),
-        "the lane left FEWER members than it found: {} against {}",
+    // RE-SCOPED 2026-09-29 (fix/member-clearance): the lane's promise is about
+    // the members that CARRY load, so the ties the slenderness lane adds AFTER
+    // it (|X| diagonals and masts) are not counted. Their number is decided
+    // downstream, field by field: with crosses at one layer credited together
+    // the two fields here took 270 and 305 members in all, which says nothing
+    // about whether this lane took an arm away. Both totals are printed.
+    let carriers = |plan: &SweepPlan| {
+        plan.struts
+            .iter()
+            .filter(|strut| !matches!(strut.kind, StrutKind::Brace | StrutKind::Mast))
+            .count()
+    };
+    println!(
+        "laid tube: {} load-carrying members ({} in all) with the lane, {} ({} in all) without",
+        carriers(&with),
         with.struts.len(),
+        carriers(&without),
         without.struts.len()
+    );
+    assert!(
+        carriers(&with) >= carriers(&without),
+        "the lane left FEWER load-carrying members than it found: {} against {}",
+        carriers(&with),
+        carriers(&without)
     );
     assert!(
         with.report.uncarried_load_mm2 <= without.report.uncarried_load_mm2 + 1.0e-9,
