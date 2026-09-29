@@ -128,6 +128,21 @@ pub struct DownSweepOutcome {
     /// chain); reported rather than asserted so a defect here is visible in a
     /// run report instead of taking the process down.
     pub merge_order_cycles: u64,
+    /// Reads where a lander's load arrived at a support arm's CONTACT slot
+    /// (its top ledger slot, the one `tip_radius_mm` sizes the contact ball
+    /// from) and was booked one slot lower, into the shaft below the contact
+    /// (2026-09-29). The path-hit witness for that rule: zero on a field where
+    /// no arm lands on another arm's head.
+    pub contact_merges_moved_below: u64,
+    /// The load those reads moved, in mm². It still reaches the plate: the
+    /// shaft below the contact carries it.
+    pub contact_merge_load_moved_mm2: f64,
+    /// Reads where a lander's load arrived at the contact slot of an arm that
+    /// has NO slot below it (a one-layer arm that terminates at its own tip
+    /// layer). There is no shaft under the contact to take the load, so it
+    /// stays in the one slot, as before 2026-09-29, and is counted here
+    /// rather than dropped.
+    pub contact_merges_kept_at_single_slot: u64,
     /// Insertion rounds actually executed, summed over layers. A path-hit
     /// counter: without it, `arms_inserted_by_load == 0` cannot be told apart
     /// from an insertion step that never ran.
@@ -848,8 +863,41 @@ pub fn run(
                 // there, and carries only what lands on it.
                 let reads_peel = struts[index].kind == crate::StrutKind::Arm;
                 let own = if reads_peel { load_out[cell] } else { 0.0 };
-                let merged = pending[index];
-                pending[index] = 0.0;
+                // A LANDER'S LOAD NEVER SIZES THE CONTACT (2026-09-29). An
+                // arm's top slot is its CONTACT: `tip_radius_mm` reads it, the
+                // contact ball is drawn from it, and the scar identity sums it.
+                // A child that lands on this arm's head (at its `k_top`, or at
+                // its top alive layer) hands its load to `pending`, and reading
+                // that here put the child's load into the slot that sizes the
+                // PARENT's contact with the model. That load never crosses the
+                // parent's scar: it enters the head and goes down the shaft.
+                // Measured on the Round 25 ring stiffener: arm 39's ball drawn
+                // at 0.746 mm where its own peel asks for 0.400 mm, and the
+                // scar identity read 1.10 on a double count
+                // (`lanes/wall-creep-diagnosis.md`).
+                //
+                // So at the contact slot of a support arm the merged load is
+                // left in `pending` and read ONE SLOT LOWER, by the shaft under
+                // the contact, which then carries the sum. Only an arm has a
+                // contact: a brace's or a mast's top slot is member, and keeps
+                // the load. An arm that terminates at its own tip layer has no
+                // slot below, so there the load stays in its one slot, as
+                // before, and is counted. Sabotage: `defer_to_shaft = false`
+                // turns `contact_sizing::` red.
+                let at_contact = reads_peel && layer + 1 == struts[index].k_top;
+                let defer_to_shaft = at_contact && !arm.terminating;
+                let merged = if defer_to_shaft {
+                    if pending[index] > 0.0 {
+                        outcome.contact_merges_moved_below += 1;
+                        outcome.contact_merge_load_moved_mm2 += pending[index];
+                    }
+                    0.0
+                } else {
+                    if at_contact && pending[index] > 0.0 {
+                        outcome.contact_merges_kept_at_single_slot += 1;
+                    }
+                    core::mem::take(&mut pending[index])
+                };
                 if reads_peel {
                     load_out[cell] = 0.0;
                 }

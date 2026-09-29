@@ -17,6 +17,7 @@ mod harness;
 
 mod bracing;
 mod congestion_lane;
+mod contact_sizing;
 mod drain_connectivity;
 mod emitted_profile_covers_ledger;
 mod every_member_rests_on_something;

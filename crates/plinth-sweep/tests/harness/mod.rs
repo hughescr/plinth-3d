@@ -72,6 +72,21 @@ pub mod bands {
     /// design argues for it in terms, so the band is widened rather than the
     /// rule changed. The exact ratio is published in every run report as
     /// `plate_reaction_mm2` against `peak_layer_area_mm2`.
+    ///
+    /// **CORRECTED 2026-09-29: on the ring-stiffened round-base fixtures the
+    /// mechanism above does not occur.** A probe that traced every read found
+    /// the max-over-events lift adds exactly zero load at model cells on
+    /// Round 25 and Round 50, drafted or not
+    /// (`plinth-evidence/.../field-2026-09-28/lanes/wall-creep-diagnosis.md`).
+    /// What the band was absorbing there was a double count: a lander on a
+    /// support arm's head was booked into the parent's CONTACT slot, so its
+    /// load was summed into two scars (1.07-1.15). With the contact-sizing
+    /// rule (the lander's load joins the shaft below the contact) the
+    /// round-base ratchet reads Round 25 1.0024, Round 50 1.0010, Round 100
+    /// 0.9967; the residue is the minimum-radius clamp above and peel that
+    /// reaches the plate through model material below. The 6 % recorded above
+    /// for Round 50 predates that fixture and pose and was not re-traced. The
+    /// band is NOT moved on this correction.
     pub const AREA_IDENTITY: f64 = 0.08;
     /// The gate's phrasing is "~4-5 mm". The measured reach places at
     /// 3.69 mm — DENSER than the owner's own practice — so the band is widened

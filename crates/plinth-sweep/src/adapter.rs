@@ -284,6 +284,12 @@ pub(crate) fn drawn_profiles(struts: &[crate::SweepStrut]) -> (Vec<Vec<f64>>, Ju
     // support arm's ledger end wider than its host's LEDGER at the joint. The
     // load law says this cannot happen (the arm's load is booked into the host
     // below the landing), so it is counted, never assumed.
+    //
+    // A landing on a support arm's HEAD is booked one slot lower still: the
+    // top slot is the arm's contact, sized from its own peel alone, and the
+    // lander's load goes into the shaft under it (`down_sweep::run`,
+    // 2026-09-29). So at a head joint the slot the load was booked into is
+    // the one below the contact, where the host has one.
     let arm_ledger_inversions = joints
         .iter()
         .filter(|&&(parent, slot, branch, at_root)| {
@@ -294,7 +300,13 @@ pub(crate) fn drawn_profiles(struts: &[crate::SweepStrut]) -> (Vec<Vec<f64>>, Ju
                 branch_ledger.last()
             };
             let host_ledger = &struts[parent].radius_mm;
-            let there = host_ledger.get(slot.min(host_ledger.len().saturating_sub(1)));
+            let top = host_ledger.len().saturating_sub(1);
+            let booked = if struts[parent].kind == crate::StrutKind::Arm && slot >= top {
+                top.saturating_sub(1)
+            } else {
+                slot.min(top)
+            };
+            let there = host_ledger.get(booked);
             struts[branch].kind == crate::StrutKind::Arm
                 && matches!((end, there), (Some(end), Some(there)) if end > there)
         })

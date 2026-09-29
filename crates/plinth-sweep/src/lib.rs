@@ -2120,6 +2120,7 @@ fn build_report(
         tip_column_roots_offered: outcome.tip_column_roots_offered,
         tip_column_root_load_mm2: outcome.tip_column_root_load_mm2,
         misrouted_load_mm2: outcome.misrouted_load_mm2,
+        contact_merge_load_moved_mm2: outcome.contact_merge_load_moved_mm2,
         achieved_pitch_mm: grid.pitch_mm(),
         coarsening_steps,
         layers,
@@ -2202,6 +2203,8 @@ fn build_report(
             strut_removals_refused_by_span: removals_refused_by_span,
             removal_passes_rolled_back,
             lean_candidates_priced: 0,
+            contact_merges_moved_below: outcome.contact_merges_moved_below,
+            contact_merges_kept_at_single_slot: outcome.contact_merges_kept_at_single_slot,
         },
     }
 }

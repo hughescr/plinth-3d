@@ -300,6 +300,12 @@ pub struct SweepRunReport {
     /// `uncarried_load_mm2`, named so it can never hide inside it.
     pub misrouted_load_mm2: f64,
     pub tip_column_root_load_mm2: f64,
+    /// Load, in mm², that landers handed to a support arm's head and that the
+    /// down-sweep booked into the shaft BELOW the contact rather than into the
+    /// contact slot (2026-09-29). The contact is sized from the arm's own peel;
+    /// this load is carried by the shaft. Counted in
+    /// [`PathHits::contact_merges_moved_below`].
+    pub contact_merge_load_moved_mm2: f64,
     /// Path-hit counters. A green oracle must never be able to mean "the path
     /// never ran" (the witness-must-exercise-the-path lesson).
     pub counters: PathHits,
@@ -333,6 +339,14 @@ pub struct PathHits {
     /// search never ran, which a merge count of zero on its own cannot tell
     /// you.
     pub lean_candidates_priced: u64,
+    /// Down-sweep reads where a lander's load reached a support arm's contact
+    /// slot and was booked one slot lower, into the shaft (2026-09-29). Zero
+    /// means no arm landed on another arm's head, which a green
+    /// `contact_sizing` test must not be allowed to mean.
+    pub contact_merges_moved_below: u64,
+    /// The same, at an arm with no slot below its contact: the load stays in
+    /// the one slot (there is no shaft to take it) and is counted here.
+    pub contact_merges_kept_at_single_slot: u64,
 }
 
 impl SweepRunReport {
