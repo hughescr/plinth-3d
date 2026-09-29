@@ -59,6 +59,22 @@ pub struct DownSweepOutcome {
     /// derivation and for why it equals `peak_layer_area_mm2` on every
     /// flat-bottomed fixture.
     pub injected_load_mm2: f64,
+    /// Injected peel carried UNDER A LARGER EVENT in the same arm: at a read
+    /// where the load was put into the raster, `max` keeps the larger of the
+    /// arm's own events and the smaller never reaches the plate reaction. Not
+    /// lost — the arm is sized for the larger, and the two peel at different
+    /// instants — but a term of the whole-run identity,
+    /// `injected = plate + uncarried + absorbed + (load that went nowhere)`.
+    /// Per read it is `previous + fed - max(previous, own)`, where `fed` is
+    /// `own` when that load was put into the raster and zero when it is the
+    /// arm's own non-injected per-layer duplicate; a duplicate that out-weighs
+    /// everything the arm carried from above makes the term negative.
+    /// Measured 2026-09-29: the Cylinder 1.4625 mm² over 8 reads, the Sphere
+    /// 0.4950 over 6, `make_laid_tube` 3.85 over 14 (3 of them negative), and
+    /// in each case the whole of `injected - plate - uncarried`.
+    pub absorbed_event_load_mm2: f64,
+    /// Reads with a non-zero absorbed term. The path-hit witness.
+    pub absorbed_event_reads: u64,
     pub peak_layer_area_mm2: f64,
     /// The largest `X_model` any model section realized, overloaded or not.
     /// Without it, "no warnings fired" cannot be told apart from "the path
@@ -298,6 +314,10 @@ pub fn run(
     let mut distance = vec![f32::INFINITY; cells];
     let mut distance_prev = vec![f32::INFINITY; cells];
     let mut pending = vec![0.0_f64; struts.len()];
+    // Per cell, this layer: whether the load an arm would read there is peel
+    // that was put into the raster (arrived from above, or injected here), as
+    // opposed to the arm's own non-injected per-layer duplicate. Allocated once.
+    let mut peel_fed = vec![false; cells];
     let mut labels = vec![u32::MAX; cells];
     let mut parent = Vec::new();
     // Insertion scratch, allocated once. Arms this sweep adds are "growing"
@@ -452,6 +472,7 @@ pub fn run(
         let mut round = 0_usize;
         loop {
             load_out.iter_mut().for_each(|value| *value = 0.0);
+            peel_fed.fill(false);
             incoming = 0.0;
             placed = 0.0;
             lost = 0.0;
@@ -555,7 +576,9 @@ pub fn run(
             for cell in 0..cells {
                 if carriers[cell] {
                     let combined = load_out[cell].max(own);
-                    if !carriers_above[cell] && !continues_above[cell] {
+                    let injects = !carriers_above[cell] && !continues_above[cell];
+                    peel_fed[cell] = load_out[cell] > 0.0 || (injects && combined > load_out[cell]);
+                    if injects {
                         injected_here += combined - load_out[cell];
                     }
                     load_out[cell] = combined;
@@ -807,10 +830,29 @@ pub fn run(
                 // nothing red: the layer conservation assertion is computed
                 // before this point, and `overloaded` reads the same
                 // under-stated number.
-                let own = load_out[cell];
+                //
+                // AND ONLY AN ARM READS A PEEL EVENT (2026-09-29). A brace or a
+                // mast is lateral stiffening; the carrier pass above already
+                // refuses to offer either one as a carrier. But a brace ENDS
+                // in an arm's cell — its lower end on the arm's shaft, its top
+                // at its seat arm — and reading `load_out` there took the
+                // arm's own per-layer event, which the arm's `max` over its
+                // events already covers and the injection gate never counted,
+                // and handed it back to the arm through `pending`, SUMMED on
+                // top. Each brace landing grew its trunk by one cell's event
+                // that was never put into the raster, so the plate saw more
+                // than was injected (`make_brace_pair` -0.0275 mm², eleven
+                // events; on `make_laid_tube` enough to grow a root under a
+                // mast that had been placed clear of it). A non-arm member
+                // leaves the cell's load where it is, for the arm that stands
+                // there, and carries only what lands on it.
+                let reads_peel = struts[index].kind == crate::StrutKind::Arm;
+                let own = if reads_peel { load_out[cell] } else { 0.0 };
                 let merged = pending[index];
                 pending[index] = 0.0;
-                load_out[cell] = 0.0;
+                if reads_peel {
+                    load_out[cell] = 0.0;
+                }
                 outcome.strut_share_reads += 1;
                 let slot = arm.slot;
                 if struts[index].carried_mm2.len() <= slot {
@@ -852,6 +894,32 @@ pub fn run(
                 // must turn `a_merge_onto_a_trunk_already_carrying_more_still_grows_it`
                 // red.
                 let carried = combine_carried(previous, own, merged);
+                // TWO PEEL EVENTS IN ONE ARM, AND THE SMALLER IS CARRIED UNDER
+                // THE LARGER. When the load read here was put into the raster
+                // (it is not the arm's own per-layer duplicate), `max` keeps
+                // one of two events that were both injected, so the plate
+                // reaction books one of them and the injected total books both.
+                // That is the max-over-events rule working as designed — the
+                // events peel at different instants and the arm is sized for
+                // the larger — but it is a term of the whole-run identity, so
+                // it is named here: `injected = plate + uncarried + absorbed`,
+                // and whatever is left over is load that went nowhere
+                // (`landing_check`). `O(1)` per read; the flag is cleared so a
+                // second member in the cell cannot count it again.
+                if reads_peel {
+                    // Injected peel in: what the arm carried from above plus
+                    // what it reads here if that was put into the raster.
+                    // Out: the max. The difference is the absorbed event (or,
+                    // negative, a non-injected per-layer duplicate that
+                    // out-weighed everything the arm carried from above).
+                    let fed = if peel_fed[cell] { own } else { 0.0 };
+                    let absorbed = previous + fed - previous.max(own);
+                    if absorbed != 0.0 {
+                        outcome.absorbed_event_load_mm2 += absorbed;
+                        outcome.absorbed_event_reads += 1;
+                    }
+                }
+                peel_fed[cell] = false;
                 struts[index].carried_mm2[slot] = carried;
                 // THE AREA LAW SIZES AN ARM; A BRACE AND A MAST ARE SIZED BY THEIR
                 // OWN STRAIGHTNESS. `min_radius_mm` is zero for every support

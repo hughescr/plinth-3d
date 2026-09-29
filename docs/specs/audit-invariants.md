@@ -672,6 +672,37 @@ could not see a root that stops inside the first layer, and it let a floating ro
 whenever the tree was grounded through a model seat. A root below the plate is the
 frame check's failure (§1.2), not this clause's.
 
+**Clause (e), no support island (added 2026-09-28, fix/no-dangling; written as clause (d)
+on that branch and renumbered when it landed after fix/plate-gap's clause (d)).**
+Connected is not held up. An arm whose tip is seated in the model and whose lower end
+stops in the air is connected through the model and grounded by (ii), yet its lowest
+layer prints on nothing (the "porcupine quills",
+`plinth-evidence/slice-sweep-2026-09-02/field-2026-09-28/quills.md`). So, directionally:
+
+```
+(e) the LOWEST point of every primitive (a frustum's lower axis end, a ball's bottom)
+    rests on one of
+      the plate      z <= z_plate + layer_height; a root FLARE may end at the raft top,
+                     z_plate + RAFT_PAD_HEIGHT_MM + layer_height (the format's flare
+                     contract; counted apart as below_rooted_at_raft_top)
+      the model      inside M, or within layer_height of its surface — NEVER for a tip
+                     ball: a seated tip holds only its own member's top
+      a primitive    whose solid is within layer_height of that point and whose own
+                     lowest z is strictly lower
+    and the chain it rests on ends at the plate or the model.
+```
+
+The member clause is a point test, not the overlap graph above, so a lowest point that
+sits inside a neighbour is not lost in the fusion-uncertain band. A model test that
+cannot be decided is counted as `below_indeterminate`, never as a pass or a failure.
+
+Clauses (d) and (e) overlap on one case. Clause (e) accepts a FLARE that ends at the raft
+top as rooted, because it asks only whether the flare is held up from below; clause (d)
+still fails that flare as `PATH_ROOT_FLOATING` when no raft record lies under it, because
+it asks whether the root stands on the plate. A raft-top flare with no raft under it is
+therefore not a clause (e) failure but is a clause (d) failure, so the two lines never
+report the same defect.
+
 **Failure lines.**
 
 ```
@@ -686,6 +717,9 @@ PATH_ROOT_MISSING file=<path> model=<m> grounded_primitives=0 records=<n>
 
 PATH_ROOT_FLOATING file=<path> model=<m> record=<r> type=flare lowest_z_mm=<v> gap_above_plate_mm=<v>
   a plate root stops above the plate, with no raft on the plate under it (clause d)
+
+PATH_NO_SUPPORT_BELOW file=<path> model=<m> record=<r> type=<t> lowest_point=<x,y,z> rests_on=<nothing|unrooted_member> nearest_lower_solid_mm=<v>
+  clause (e): this primitive's lowest point rests on nothing that reaches the plate or the model
 
 PATH_INDETERMINATE file=<path> model=<m> record=<r> other=<r2> separation_mm=<v> band_mm=5.529014e-2 reason=<fusion_uncertain|seat_indeterminate>
   two solids are close enough that fusion cannot be decided; an undecided path is a failure

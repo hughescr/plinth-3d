@@ -288,6 +288,15 @@ pub struct SlendernessOutcome {
     /// on could not grow far enough to carry the sum. Their runs return as
     /// warnings; the arm is never dropped.
     pub merges_undone_by_radius: usize,
+    /// Remedy-1 candidates NOT re-landed because another member rests on them
+    /// or is tied to them. Moving such an arm moves the ground from under its
+    /// dependants — the daisy chains of 2026-09-28. The run falls to the brace,
+    /// the mast, or a warning. A path-hit witness for the rule.
+    pub merges_refused_carrying: usize,
+    /// Shaft landings the index offered and the LIVE field refused: the named
+    /// parent no longer stands at that cell and layer, because an earlier
+    /// merge in the same loop moved it. A path-hit witness for the rule.
+    pub merges_refused_stale_shaft: usize,
 }
 
 /// Every unbraced run in a finished field, measured from the strut set alone.
@@ -433,6 +442,10 @@ pub struct SlendernessContext<'a> {
     pub brace: bool,
     pub mast: bool,
     pub max_struts: usize,
+    /// `X_ALLOWED`, the registered area-law ratio. Read only to keep a trunk
+    /// under a forced merge sized for the load it was just handed, with the
+    /// down-sweep's own rule, until the down-sweep re-sizes the field.
+    pub x_allowed: f64,
 }
 
 /// Apply the remedy ladder to a sized field, in place.
@@ -482,7 +495,27 @@ pub fn apply_remedies(
     // Remedy 1 first, for every run it can serve, because a merge costs no new
     // member at all. It moves an arm's base, so the shaft index is rebuilt
     // afterwards rather than patched.
+    //
+    // SUPPORT COMES BEFORE WHAT RESTS ON IT (2026-09-28). The index above is
+    // stamped once, and this loop moves arms, so two rules keep every landing
+    // it makes standing on something that is still there when the loop ends:
+    //
+    // * an arm that CARRIES SOMEONE — another member lands on it, or a brace
+    //   seats on it — is never re-landed, because re-landing it cuts away the
+    //   part its dependants rest on; and an arm that is merged ONTO becomes
+    //   such an arm at once, so it is frozen for the rest of the loop;
+    // * a shaft the index offers is taken only if its member STANDS THERE NOW
+    //   ([`crate::landing_check::stands_at`], `O(1)` against the live field),
+    //   because the index still shows the old column of every arm this loop
+    //   has already moved.
+    //
+    // Before this, the loop ran in id order and built daisy chains: a child
+    // was merged onto a parent's shaft at layer L, the parent — over its own
+    // limit — was then merged onto a third arm at L' > L, and the child's base
+    // was left in the air. 157 such members on the Cylinder, 28 on the Sphere.
+    // The refused links fall to the brace, the mast, or a warning.
     let mut merged_any = false;
+    let mut frozen = crate::landing_check::carries_someone(struts);
     if context.merge && context.shaft_landings {
         for run in &over {
             let Some(strut) = struts.get(run.strut_id as usize) else {
@@ -505,11 +538,25 @@ pub fn apply_remedies(
             if matches!(strut.landing, Landing::Strut { .. }) {
                 continue;
             }
-            let Some((landing, k_bottom, path)) =
-                merge_candidate(context, &index, struts, run.strut_id, run.limit_mm)
-            else {
+            if frozen.get(run.strut_id as usize).copied().unwrap_or(true) {
+                outcome.merges_refused_carrying += 1;
+                continue;
+            }
+            let Some((landing, k_bottom, path)) = merge_candidate(
+                context,
+                &index,
+                struts,
+                run.strut_id,
+                run.limit_mm,
+                &mut outcome.merges_refused_stale_shaft,
+            ) else {
                 continue;
             };
+            if let Landing::Strut { id: parent, .. } = landing {
+                if let Some(flag) = frozen.get_mut(parent as usize) {
+                    *flag = true;
+                }
+            }
             let strut = &mut struts[run.strut_id as usize];
             // WHERE THIS ARM WAS BEFORE THE CONSTRAINT MOVED IT. The un-merge
             // pass puts an arm back when the trunk it landed on cannot grow far
@@ -524,6 +571,10 @@ pub fn apply_remedies(
             strut.landing = landing;
             strut.k_bottom = k_bottom;
             strut.path = path;
+            // The arm's own load at the root it just left: what it now hands
+            // to the trunk it landed on.
+            let handed_mm2 = strut.carried_mm2.first().copied().unwrap_or(0.0);
+            hand_load_down(context, struts, landing, handed_mm2);
             outcome.merges_forced += 1;
             merged_any = true;
         }
@@ -614,6 +665,67 @@ pub fn apply_remedies(
     outcome
 }
 
+/// Keep every trunk under a forced merge SIZED for the load the merge just
+/// handed it, until the down-sweep re-sizes the field.
+///
+/// A merge moves load, and the members below the junction grow: the down-sweep
+/// adds the child's load to its trunk from the junction downward
+/// ([`crate::down_sweep`]'s `combine_carried`) and sizes each layer by the area
+/// law. Until it runs, the trunk's ledger still describes the thinner member it
+/// was, and everything this lane decides after the merge loop reads that
+/// ledger: the unbraced-run census, and the ROOT DISCS a mast must clear. A mast
+/// placed against a root that then grows laps it — measured 2026-09-28 on
+/// `make_laid_tube`, where refusing daisy chains concentrated merges onto
+/// frozen trunks and left four masts 0.001-0.015 mm inside a root that grew
+/// after sizing.
+///
+/// So the load is handed down the chain now, with the down-sweep's own sizing
+/// rule: `r = clamp(sqrt(L / (X_ALLOWED·π)), r_min, r_max)`, never below the
+/// member's own `min_radius_mm`. Adding the child's whole root load to every
+/// layer below the junction is an UPPER bound on what `combine_carried` adds
+/// (it takes a max before it sums), so the estimate errs thick — the direction
+/// that keeps a mast clear. The down-sweep that runs after the lane overwrites
+/// all of it. `O(chain · span)`, one pass per merge.
+fn hand_load_down(
+    context: &SlendernessContext<'_>,
+    struts: &mut [SweepStrut],
+    landing: Landing,
+    handed_mm2: f64,
+) {
+    if !(handed_mm2.is_finite() && handed_mm2 > 0.0) {
+        return;
+    }
+    let law = context.law;
+    let x_allowed = context.x_allowed;
+    if !(x_allowed.is_finite() && x_allowed > 0.0) {
+        return;
+    }
+    let mut at = landing;
+    for _ in 0..struts.len() {
+        let Landing::Strut { id, layer } = at else {
+            return;
+        };
+        let Some(trunk) = struts.get_mut(id as usize) else {
+            return;
+        };
+        let Some(top_slot) = layer.checked_sub(trunk.k_bottom) else {
+            return;
+        };
+        let slots = (top_slot + 1)
+            .min(trunk.carried_mm2.len())
+            .min(trunk.radius_mm.len());
+        for slot in 0..slots {
+            trunk.carried_mm2[slot] += handed_mm2;
+            let radius = (trunk.carried_mm2[slot] / x_allowed / core::f64::consts::PI)
+                .sqrt()
+                .clamp(law.r_min_mm, law.r_max_mm)
+                .max(trunk.min_radius_mm);
+            trunk.radius_mm[slot] = trunk.radius_mm[slot].max(radius);
+        }
+        at = trunk.landing;
+    }
+}
+
 /// How many extra ties one over-limit run needs.
 ///
 /// `n` ties cut a run into `n + 1` pieces, and every piece must fit inside the
@@ -685,12 +797,18 @@ fn stamp_tail(index: &mut ColumnHistory, struts: &[SweepStrut], count: usize) {
 /// `limit_mm` is not admissible, however cheap it is. Straight down past the
 /// limit is therefore not admissible either — it is simply not in this
 /// candidate set.
+///
+/// **The index is a snapshot and the field is not.** The index was stamped
+/// before the merge loop began, and the loop has moved arms since, so every
+/// answer it gives is checked against the parent AS IT STANDS NOW before it is
+/// accepted; a stale answer is refused and counted in `stale`.
 fn merge_candidate(
     context: &SlendernessContext<'_>,
     index: &ColumnHistory,
     struts: &[SweepStrut],
     id: u32,
     limit_mm: f64,
+    stale: &mut usize,
 ) -> Option<(Landing, usize, Vec<u32>)> {
     let strut = struts.get(id as usize)?;
     let grid = context.grid;
@@ -744,6 +862,15 @@ fn merge_candidate(
                 continue;
             };
             if parent == id || descends_through(struts, parent, id) {
+                continue;
+            }
+            // THE PARENT MUST STAND HERE NOW, not merely have stood here when
+            // the index was stamped.
+            if !struts
+                .get(parent as usize)
+                .is_some_and(|live| crate::landing_check::stands_at(live, candidate, at))
+            {
+                *stale += 1;
                 continue;
             }
             let layers = strut.k_top.saturating_sub(at);

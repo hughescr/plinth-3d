@@ -573,6 +573,15 @@ is that the rewrite is a deletion, not a generalisation.**
 | **I9** | **Braces and raft members carry zero by construction**, and no cell can be charged to one. | True today, but by comment rather than by test. |
 | **I10** | **Determinism and independence.** The demand field's digest is a function of (mesh fingerprint, grid pitch, layer plan, `X_ALLOWED`) only — **not of the contact set**. Perturbing the seat set must not change the field, only the charges. | Not applicable; today's quantity does not exist without contacts. |
 
+**Addendum 2026-09-29 (I9, slice sweep).** I9 was false in the sweep engine, and only a comment
+said otherwise. A brace ends in an arm's cell, and the down-sweep let it read that cell's
+per-layer peel event and hand it to the arm, summed on top of the arm's own `max`: one
+never-injected event (0.0025 mm² on the registered grid) per brace landing, which is why the
+whole-run identity `injected - plate - uncarried` read slightly NEGATIVE on every model with
+braces (`make_brace_pair` -0.0275 mm², Round 25 -0.085 mm² at `d103c48`). Fixed in
+`plinth-sweep/src/down_sweep.rs` (only an arm reads a peel event); now graded by test,
+`plinth-sweep/tests/it/every_member_rests_on_something.rs::a_brace_hands_its_trunk_no_load`.
+
 Every one of these is a *sabotage* target: each ships with a test that perturbs the ledger and
 asserts the gate goes red. A gate that has never been seen red is not a gate.
 
