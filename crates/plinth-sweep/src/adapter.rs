@@ -90,6 +90,15 @@ pub struct SweepEmission {
     /// `support_volume_mm3` is the SIZING ledger and is published beside it.
     pub drawn_volume_mm3: f64,
     pub drawn_shaft_volume_mm3: f64,
+    /// THE RAFT (fix/sweep-raft, 2026-09-29): its resin, pads (one under every
+    /// plate foot), MST bridges, pads grown past the native diameter to cover
+    /// their foot, and feet sharing a pad
+    /// ([`plinth_support::SweepLowering::raft_pads`] and siblings).
+    pub raft_volume_mm3: f64,
+    pub raft_pads: usize,
+    pub raft_bridges: usize,
+    pub raft_pads_grown: usize,
+    pub raft_feet_sharing_a_pad: usize,
     /// Members whose drawn profile the JUNCTION CLAUSE raised above their
     /// ledger, from the junction down to their root, because a thicker branch
     /// (in practice a brace, sized by its own slenderness minimum) joins them.
@@ -170,6 +179,11 @@ pub fn to_primitives(
         arms_without_profile,
         drawn_volume_mm3,
         drawn_shaft_volume_mm3,
+        raft_volume_mm3,
+        raft_pads,
+        raft_bridges,
+        raft_pads_grown,
+        raft_feet_sharing_a_pad,
     } = lower_sweep_arms(
         &arms,
         frame,
@@ -197,6 +211,11 @@ pub fn to_primitives(
         arms_without_profile,
         drawn_volume_mm3,
         drawn_shaft_volume_mm3,
+        raft_volume_mm3,
+        raft_pads,
+        raft_bridges,
+        raft_pads_grown,
+        raft_feet_sharing_a_pad,
         members_raised_to_a_branch: raised.members,
         arm_junctions_inverted_in_ledger: raised.arm_ledger_inversions,
     })

@@ -428,7 +428,14 @@ impl<'a> ModelContext<'a> {
             layer_height_mm: audit.inputs().layer_height_mm,
             z_plate_mm,
         };
-        let primitives = primitives_early;
+        // Raft records in the native frame (z = 0.0) stand on the plate the
+        // frame just resolved (`Primitive::in_raft_frame`). Resolving the
+        // plate never reads the primitives, so there is no circularity.
+        let primitives = primitives_early
+            .into_iter()
+            .zip(&model.records)
+            .map(|(primitive, rec)| primitive.map(|p| p.in_raft_frame(rec, z_plate_mm)))
+            .collect::<Vec<_>>();
         let join_tol = audit
             .options
             .join_tol_override_mm
@@ -665,11 +672,16 @@ pub struct FrameCheck {
     pub contract_relation_mm: Option<f64>,
     /// Minimum `z` over type-6 raft geometry.
     pub min_raft_z_mm: Option<f64>,
-    /// Does the raft sit on the plate? True on emitted files; FALSE on native
-    /// ones, where the raft records carry `z = 0` while the rest of the
-    /// support tree is in the model-centred frame. Reported as a FINDING, not
-    /// gated, because the deviation is the file class's and not a defect in
-    /// this model.
+    /// Does the raft sit on the plate? Reported as a FINDING, not gated.
+    ///
+    /// Native raft records carry `z = 0` while their mesh and the rest of the
+    /// support tree are in the model-centred frame. Until fix/sweep-raft
+    /// (2026-09-29) the audit built the raft solid at the record's `z = 0`, so
+    /// this read FALSE on every native file. The audit now reads that frame as
+    /// what it is — the raft on the plate (`Primitive::in_raft_frame`) — so it
+    /// reads TRUE on native files and on plinth's own (which now write the
+    /// native frame too), and FALSE only for a raft record at some other `z`
+    /// that is not the plate.
     pub raft_agrees: Option<bool>,
     /// Minimum `z` over every NON-raft support solid.
     pub min_support_z_mm: Option<f64>,

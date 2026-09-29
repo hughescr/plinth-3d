@@ -824,6 +824,11 @@ flare now reaches `plate_z` itself with its full `FLARE_R_FACTOR × r_root` foot
 short for a boss runs its straight column to `plate_z` too. The boss TOP is unchanged: it still
 comes from the shared `root_boss_top_at`, which reads the raft height as a datum.
 
+**Corrected 2026-09-29 (fix/sweep-raft).** The path now emits a raft (§14 OR-3, answered), so the
+flare ends on its raft PAD top again, `plate_z + raft_height − 0.002 mm` (the native overlap),
+and the pad stands on `plate_z`. The same for the short column. A fourth step follows the arms:
+one pad per plate foot and MST bridges, planned once for the field.
+
 **As built (2026-09-28, fix/tip-trim; field report "tip-clip").** Steps 1 and 2 are TRIMMED to
 the seat. The ball goes to the full depth the seat law asks for (owner ruling 2026-09-05: never
 retract), and the tip ball and the first shaft segment then keep only
@@ -1339,6 +1344,17 @@ by opening LANE 2's disc files in ChituBox. **Do the discs need a raft, or is th
 If a raft is needed, `plinth_support::raft` operates on live forest members and needs a small
 adapter — the first v1.1 item. (2026-09-28: while the question is open, the flare stands ON the
 plate, not on the top of the absent raft; see §9.2.)
+
+**Answered 2026-09-29 (fix/sweep-raft).** The owner added ChituBox's own raft to the Round files
+and it caught only some feet; the diagnosis (`plinth-evidence/.../field-2026-09-28/
+raft-diagnosis.md`) found our files carried no raft while every native file writes a pad under
+every plate support. So the discs DO get a raft, and it is the legacy one, revived rather than
+redesigned: `plinth_support::raft`'s sweep planner takes the feet the sweep lowering emits
+(xy and foot radius) instead of forest members, and lays one pad under each foot plus MST
+bridges, the layout native bottom-connected files hold. Feet end on the pad top, 0.002 mm into
+it as native feet do; a pad grows past the native 2.2 mm when its foot needs it (owner ruling:
+grow the pad, never cap the foot); every type-6 record writes `z = 0.0` like native files. See
+`docs/specs/chitubox-format.md` and §9.2.
 
 ### Standing question, unresolved by measurement
 

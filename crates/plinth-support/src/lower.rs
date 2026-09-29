@@ -18,6 +18,24 @@ use crate::{
 
 const ZERO_LENGTH_MM: f64 = 1e-9;
 
+/// **Placeholder, format parity — how far a sweep foot reaches INTO its raft
+/// pad** (fix/sweep-raft, 2026-09-29).
+///
+/// MEASURED, not chosen: every ChituBox-authored file we hold ends its foot
+/// 0.002 mm below the top of the pad it stands on (`raft-diagnosis.md` §3.2:
+/// `two-supports` pad top −20.1205, flare end −20.1225;
+/// `cylinder-supported-bottom-connected` pad top −17.8, every flare and bare
+/// column end −17.802). The overlap makes the foot and the pad SHARE volume,
+/// so the slicer's union has no coincident face at the raft top; it is
+/// 1/25 of one 0.05 mm layer, far below anything the printer resolves, and
+/// far above the binary32 resolution of a coordinate (~1e-6 mm at 20 mm).
+///
+/// It decides no outcome and prunes nothing: it moves one end point by a
+/// sub-pixel amount to match the native bytes. The end-to-end test measures
+/// the native value from the committed fixture rather than trusting this one
+/// (`crates/plinth-pipeline/tests/it/plate_contact.rs`).
+pub const NATIVE_FOOT_PAD_OVERLAP_MM: f64 = 0.002;
+
 /// Bounds and frozen geometry policy for one lowering pass.
 ///
 /// Fields are private so callers cannot substitute emitter geometry constants. The only
@@ -612,9 +630,9 @@ impl DigestWriter {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SweepArmLanding {
     /// The build plate: the arm gets the legacy plate-root chain — a boss
-    /// column down to the boss top, then a `RootFlare` down to the PLATE
-    /// itself — not the raft top: this path emits no raft (see
-    /// [`lower_sweep_arms`], step 3).
+    /// column down to the boss top, then a `RootFlare` down to the top of the
+    /// raft pad the lowering puts under it (see [`lower_sweep_arms`], steps 3
+    /// and 4).
     Plate,
     /// Cured model material or another arm. The arm ends there. v1 emits no
     /// joint sphere at an arm-onto-arm junction; that is disclosed in the run
@@ -783,6 +801,22 @@ pub struct SweepLowering {
     /// The part of [`Self::drawn_volume_mm3`] in tapers and chained members —
     /// the span the ledger sizes, so the two can be compared like for like.
     pub drawn_shaft_volume_mm3: f64,
+    /// The part of [`Self::drawn_volume_mm3`] in the raft's pads and bridges.
+    pub raft_volume_mm3: f64,
+    /// THE RAFT (fix/sweep-raft, 2026-09-29): pads emitted, one under every
+    /// plate foot (feet within the registered plate mesh tolerance share one).
+    /// The path-hit witness for [`crate::raft`]'s sweep planner.
+    pub raft_pads: usize,
+    /// Minimum-spanning-tree bridges between the pads: `raft_pads − 1` when
+    /// there is any pad, so the raft is one piece.
+    pub raft_bridges: usize,
+    /// Pads grown WIDER than the native `CHITUBOX_PAD_DIAMETER_MM` so that
+    /// their emitted polygon covers the foot above (owner ruling 2026-09-29:
+    /// grow the pad, never cap the foot).
+    pub raft_pads_grown: usize,
+    /// Feet that share a pad with another foot within the registered plate
+    /// mesh tolerance.
+    pub raft_feet_sharing_a_pad: usize,
 }
 
 impl SweepLowering {
@@ -855,6 +889,11 @@ pub enum SweepLoweringError {
     PrimitiveLimit { limit: usize },
     #[error("registered current-parity constants are unavailable: {0}")]
     RegisteredConstants(String),
+    /// The raft planner could not read its registered pad constants, or built
+    /// a pad or bridge the emit boundary's own contract rejects. About the
+    /// registry or a defect in the planner, never about one model's arms.
+    #[error("the sweep raft could not be planned: {0}")]
+    Raft(String),
 }
 
 impl From<LoweringError> for SweepLoweringError {
@@ -881,21 +920,27 @@ impl From<LoweringError> for SweepLoweringError {
 ///    area law's own profile (every trunk under a mid-shaft junction) the taper
 ///    stops at the first break and the rest of the shaft follows as chained
 ///    `Member` frusta on the same axis ([`drawn_spans`]).
-/// 3. `RootFlare` — plate landings only, boss top down to the PLATE, `plate_z`,
-///    with its full `FLARE_R_FACTOR × r_root` foot.
+/// 3. `RootFlare` — plate landings only, boss top down to the RAFT TOP,
+///    `plate_z + CHITUBOX_RAFT_HEIGHT_MM − NATIVE_FOOT_PAD_OVERLAP_MM`, with
+///    its full `FLARE_R_FACTOR × r_root` foot.
+/// 4. THE RAFT — after every arm, once for the whole field: a `RaftPad` on the
+///    plate under every plate foot, wide enough that its emitted polygon
+///    covers the foot, and `RaftBridge`s along the pads' minimum spanning tree
+///    ([`crate::raft`]'s sweep planner). Bridges, then pads, after every
+///    support record: the native order.
 ///
-/// **The plate, not the raft top** (fix/plate-gap, 2026-09-28). The legacy
-/// lowering ends its flare at `plate_z + CHITUBOX_RAFT_HEIGHT_MM` because it
-/// also emits the raft the flare stands on. This path emits NO raft
-/// (`docs/plans/slice-sweep-core-2026-09-02.md` §14 OR-3), and carrying the
-/// raft datum over without the raft left every root 0.2 mm — four layers —
-/// above the plate, curing its first layer against nothing: the owner saw the
-/// bases float in ChituBox. A plate-rooted member's lowest solid IS its plate
-/// contact, so it reaches `plate_z`. The same holds for the short-run branch
-/// (no boss fits): its straight column also ends on the plate. The boss TOP is
-/// untouched — it is the shared [`root_boss_top_at`], which still reads the
-/// raft height as its datum — so only the flare's (or short column's) lower
-/// end moves.
+/// **The raft, revived** (fix/sweep-raft, 2026-09-29). The owner added
+/// ChituBox's own raft to our Round files and it caught only some feet
+/// (`raft-diagnosis.md`): our files carried no raft, while every
+/// ChituBox-authored file writes a pad under every plate support and ends the
+/// foot ON the pad. So the flare ends on the pad top again, as the legacy
+/// lowering always did, and the pad under it now exists. The history: until
+/// fix/plate-gap (2026-09-28) this path ended the flare at the raft top with
+/// NO raft under it, 0.2 mm (four layers) above the plate — the bases the
+/// owner saw float; fix/plate-gap moved the foot to the plate; this change
+/// puts the raft back under it. The short-run branch (no boss fits) stands its
+/// straight column on its pad the same way. The boss TOP is untouched — the
+/// shared [`root_boss_top_at`] reads the raft height as its datum.
 ///
 /// # Errors
 ///
@@ -969,8 +1014,10 @@ fn lower_sweep_arms_of(
         tip_raster_seat_offset_mm: Vec::with_capacity(arms.len()),
         ..SweepLowering::default()
     };
+    let mut feet: Vec<crate::raft::SweepFoot> = Vec::with_capacity(arms.len());
     for arm in arms {
         let lowered = lower_one_sweep_arm(arm, config, plate, &mut out.primitives);
+        feet.extend(lowered.foot);
         match lowered.outcome {
             ArmOutcome::Built => {}
             ArmOutcome::BuiltWithoutFlare => out.arms_without_root_flare += 1,
@@ -1001,16 +1048,35 @@ fn lower_sweep_arms_of(
             });
         }
     }
+    // THE RAFT (fix/sweep-raft, 2026-09-29): one pad under every plate foot,
+    // MST bridges between the pads, planned ONCE for the whole field from the
+    // feet the arms actually emitted, and appended after every support record
+    // in the native order (bridges, then pads).
+    let raft = crate::raft::plan_sweep_raft(&feet, config.frame.plate_z_mm())
+        .map_err(|error| SweepLoweringError::Raft(error.to_string()))?;
+    out.raft_pads = raft.pads;
+    out.raft_bridges = raft.bridges;
+    out.raft_pads_grown = raft.pads_grown;
+    out.raft_feet_sharing_a_pad = raft.feet_sharing_a_pad;
+    out.primitives.extend(raft.primitives);
+    if out.primitives.len() > max_primitives {
+        return Err(SweepLoweringError::PrimitiveLimit {
+            limit: max_primitives,
+        });
+    }
     // THE RESIN AS EMITTED, measured once over the finished primitive batch
     // from each record's own endpoints and radii, never from the ledger.
     for primitive in &out.primitives {
         let volume = emitted_solid_volume_mm3(primitive);
         out.drawn_volume_mm3 += volume;
-        if matches!(
-            primitive.segment_kind,
-            SupportSegmentKind::ContactTaper | SupportSegmentKind::Member
-        ) {
-            out.drawn_shaft_volume_mm3 += volume;
+        match primitive.segment_kind {
+            SupportSegmentKind::ContactTaper | SupportSegmentKind::Member => {
+                out.drawn_shaft_volume_mm3 += volume;
+            }
+            SupportSegmentKind::RaftPad | SupportSegmentKind::RaftBridge => {
+                out.raft_volume_mm3 += volume;
+            }
+            _ => {}
         }
     }
     Ok(out)
@@ -1023,8 +1089,8 @@ fn lower_sweep_arms_of(
 /// column, [`FrustumRingNormal::PlateZ`]) has a circle of the ring radius at
 /// every height, so by Cavalieri the same formula holds over its RISE, not its
 /// slant. A tip ball is `4/3·π·R³` less the cap beyond its seat plane. A raft
-/// record is not a solid of revolution this pass knows how to measure, and the
-/// sweep lowering emits none; it counts zero here.
+/// pad is a cylinder and a raft bridge a box (fix/sweep-raft, 2026-09-29: the
+/// sweep path now emits its raft, and the raft is resin the file costs).
 fn emitted_solid_volume_mm3(primitive: &SupportPrimitive) -> f64 {
     use core::f64::consts::PI;
     let r0 = primitive.start_radius_mm.get();
@@ -1054,7 +1120,16 @@ fn emitted_solid_volume_mm3(primitive: &SupportPrimitive) -> f64 {
             });
             whole - cap
         }
-        SupportSegmentKind::RaftPad | SupportSegmentKind::RaftBridge => 0.0,
+        // A pad is a cylinder: `start_radius` holds its DIAMETER and
+        // `end_radius` its height. A bridge is a box: `start_radius` holds its
+        // width, `end_radius` its height, and its length is the plan-view
+        // distance between its ends.
+        SupportSegmentKind::RaftPad => PI * (r0 * 0.5).powi(2) * r1,
+        SupportSegmentKind::RaftBridge => {
+            let dx = primitive.end_mm[0].get() - primitive.start_mm[0].get();
+            let dy = primitive.end_mm[1].get() - primitive.start_mm[1].get();
+            dx.hypot(dy) * r0 * r1
+        }
     }
 }
 
@@ -1093,6 +1168,9 @@ struct TipSeat {
 struct ArmLowering {
     outcome: ArmOutcome,
     seat: Option<TipSeat>,
+    /// The foot a PLATE arm stands on the raft with, for an arm that reached
+    /// the file; `None` for a landed arm or a dropped one.
+    foot: Option<crate::raft::SweepFoot>,
     /// Straight spans the shaft was drawn in: 1 is the single taper.
     spans: usize,
     /// `Member` spans below the taper that reach the model side of the seat
@@ -1107,6 +1185,7 @@ impl ArmLowering {
         Self {
             outcome,
             seat: None,
+            foot: None,
             spans: 0,
             members_trimmed: 0,
             without_profile: false,
@@ -1651,22 +1730,30 @@ fn lower_one_sweep_arm(
             ArmOutcome::Built
         }
         SweepArmLanding::Plate => {
-            // THE FOOT IS ON THE PLATE (fix/plate-gap, 2026-09-28). This path
-            // emits no raft, so there is no raft top to stop at: a plate root's
-            // lowest solid must be `plate_z` itself, or its first layer cures
-            // against the vat film instead of the plate.
-            let Ok(plate_z_finite) = finite(plate_z) else {
+            // THE FOOT STANDS ON ITS RAFT PAD (fix/sweep-raft, 2026-09-29).
+            // Every plate root now gets a pad under it (`plan_sweep_raft`,
+            // called once for the whole field by `lower_sweep_arms`), so the
+            // foot ends where every ChituBox-authored foot ends: on the pad
+            // TOP, `plate_z + CHITUBOX_RAFT_HEIGHT_MM`, reaching
+            // `NATIVE_FOOT_PAD_OVERLAP_MM` into the pad so the two solids
+            // share volume. The pad itself stands on `plate_z`. (From
+            // fix/plate-gap, 2026-09-28, until this change the path emitted
+            // no raft and the foot ended on the plate itself.)
+            let Ok(foot_z) =
+                finite(plate_z + config.raft_height_mm.get() - NATIVE_FOOT_PAD_OVERLAP_MM)
+            else {
                 return ArmLowering::refused(ArmOutcome::InvalidGeometry);
             };
-            let plate_point = [base[0], base[1], plate_z_finite];
+            let foot_point = [base[0], base[1], foot_z];
             // The SEATED terminal z, exactly as the legacy path reads
             // `member.p0_mm()[2]` — which `initial.rs` already minted embedded.
+            // Its boss top is measured from the raft top, as it always was.
             let boss_top =
                 root_boss_top_at(seated_seat[2], [base[0], base[1]], config).and_then(Result::ok);
             match boss_top {
                 Some(top)
                     if distance(center, top) > ZERO_LENGTH_MM
-                        && distance(top, plate_point) > ZERO_LENGTH_MM =>
+                        && distance(top, foot_point) > ZERO_LENGTH_MM =>
                 {
                     let Ok(flare_radius) = positive(root_radius.get() * config.flare_factor.get())
                     else {
@@ -1680,7 +1767,7 @@ fn lower_one_sweep_arm(
                     staged.push(frustum(
                         SupportSegmentKind::RootFlare,
                         top,
-                        plate_point,
+                        foot_point,
                         root_radius,
                         flare_radius,
                         None,
@@ -1691,14 +1778,16 @@ fn lower_one_sweep_arm(
                 _ => {
                     // The run from the plate is shorter than the registered
                     // no-bend height, or leaves no room between boss top and
-                    // plate, so no flare fits. Emit the straight column down
-                    // to the plate and WARN: refusing here would destroy the
+                    // the raft, so no flare fits. Emit the straight column down
+                    // to its pad and WARN: refusing here would destroy the
                     // evidence.
-                    if distance(center, plate_point) <= ZERO_LENGTH_MM {
+                    if distance(center, foot_point) <= ZERO_LENGTH_MM
+                        || center[2].get() <= foot_z.get()
+                    {
                         return ArmLowering::refused(ArmOutcome::ZeroLength);
                     }
                     let Some(drawn) =
-                        shaft(center, plate_point, FrustumRingNormal::PlateZ, &mut staged)
+                        shaft(center, foot_point, FrustumRingNormal::PlateZ, &mut staged)
                     else {
                         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
                     };
@@ -1742,10 +1831,23 @@ fn lower_one_sweep_arm(
     if staged.iter().any(|primitive| !primitive.is_semantically_valid()) {
         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
     }
+    // The foot the raft pad must cover: the LOWEST record of a plate arm — its
+    // flare, or the last span of a short column — at its lower end. Its ring
+    // is horizontal on both (a flare's axis is vertical; a column carries
+    // plate-Z rings), so its end radius is the circle the emitted ring is
+    // inscribed in.
+    let foot = match arm.landing {
+        SweepArmLanding::Plate => staged.last().map(|lowest| crate::raft::SweepFoot {
+            xy_mm: [base[0].get(), base[1].get()],
+            radius_mm: lowest.end_radius_mm.get(),
+        }),
+        SweepArmLanding::Landed => None,
+    };
     out.append(&mut staged);
     ArmLowering {
         outcome,
         seat,
+        foot,
         spans,
         members_trimmed,
         without_profile: arm.radius_profile_mm.is_empty(),

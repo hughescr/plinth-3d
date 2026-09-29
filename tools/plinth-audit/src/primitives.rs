@@ -139,6 +139,40 @@ impl Primitive {
         }
     }
 
+    /// **The native raft frame** (fix/sweep-raft, 2026-09-29).
+    ///
+    /// Every type-6 record in every ChituBox-authored file writes its start and
+    /// end at `z = 0.0`, while its MESH sits on the plate in the
+    /// model-centred frame (`raft-diagnosis.md` §4.2, five native files, every
+    /// pad and bridge); plinth's emitter writes the same since this change.
+    /// So a raft record with both ends at exactly `z = 0.0` stands on the
+    /// plate, and its solid is rebuilt there. A raft record at any other `z`
+    /// (the legacy emitter's model-frame pads) keeps the `z` it declares, so a
+    /// genuinely misplaced pad still shows. Every other record is unchanged.
+    #[must_use]
+    pub fn in_raft_frame(self, rec: &SupportRecord, z_plate_mm: f64) -> Self {
+        if rec.kind != RecordKind::RaftPadOrBridge
+            || rec.start_mm[2].to_bits() != 0.0_f64.to_bits()
+            || rec.end_mm[2].to_bits() != 0.0_f64.to_bits()
+        {
+            return self;
+        }
+        match self {
+            Self::RaftPad { base, r, h } => Self::RaftPad {
+                base: [base[0], base[1], z_plate_mm],
+                r,
+                h,
+            },
+            Self::RaftBridge { a, b, width, h } => Self::RaftBridge {
+                a: [a[0], a[1], z_plate_mm],
+                b: [b[0], b[1], z_plate_mm],
+                width,
+                h,
+            },
+            other => other,
+        }
+    }
+
     #[must_use]
     pub fn aabb(&self) -> Aabb {
         match *self {
