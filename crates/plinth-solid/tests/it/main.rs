@@ -11,3 +11,4 @@
 
 mod no_private_vector_algebra;
 mod solid_spike;
+mod trim_subtract_each;

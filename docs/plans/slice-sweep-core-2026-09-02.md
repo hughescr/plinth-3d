@@ -824,6 +824,27 @@ flare now reaches `plate_z` itself with its full `FLARE_R_FACTOR × r_root` foot
 short for a boss runs its straight column to `plate_z` too. The boss TOP is unchanged: it still
 comes from the shared `root_boss_top_at`, which reads the raft height as a datum.
 
+**As built (2026-09-28, fix/tip-trim; field report "tip-clip").** Steps 1 and 2 are TRIMMED to
+the seat. The ball goes to the full depth the seat law asks for (owner ruling 2026-09-05: never
+retract), and the tip ball and the first shaft segment then keep only
+`primitive ∩ {support side of the seat face's plane} ∖ model solid`. The plane is the carried
+face's own (the nearest DOWN-FACING mesh face to the tip, its closest point and outward normal,
+`tip_landing::tip_seat_faces`), not the raster seat, which the layer grid puts up to half a layer
+off the face. `plinth-emit` does the cut for the whole field in ONE batched Manifold call
+(`plinth_solid::ManifoldBackend::trim_and_subtract_each`: each piece `TrimByPlane`, then minus the
+model, imported once). This replaced the horizontal "far face" clip on the ball's top, which left
+every ball buried below it, said nothing about a face's edge, and never touched the taper. The
+record's `start`/`end`/radii are unchanged; only its soup is cut.
+
+The **footprint rule** goes with it (`plinth_sweep::footprint`): the contact disc the trim leaves
+(the ball's section in the seat plane, computed by the lowering's own derivation,
+`plinth_support::tip_contact_discs`) must lie on the seat face, graded in the eroded carrier
+rasters. A seat whose disc hangs off the face slides along the face to the nearest position whose
+whole disc is on it (search bounded by one ball diameter, a pruning Placeholder); a member joined
+to a moved axis (a branch landing, a brace top) moves with it (`footprint::followed_shifts`). A
+true knife edge keeps its seat, trimmed, and is warned about with the fraction of its disc on the
+face.
+
 **The adapter must not re-derive this geometry by hand.** `lower_stub`
 (`crates/plinth-support/src/lower.rs:362`) and `root_boss_top` (`:416`) already compute the
 canonical ball centre, poles and flare; LANE 2 promotes the geometry helpers to `pub` and the

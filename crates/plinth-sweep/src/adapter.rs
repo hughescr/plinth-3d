@@ -25,11 +25,11 @@
 //! area, which is what the owner saw in ChituBox on the Sphere and the Morel
 //! base. [`plinth_support::lower_sweep_arms`] now drives the pole INTO the
 //! model from this plane by the seat law of `docs/physics.md` §9 — to the FULL
-//! depth the contact-area term asks for. The cured thickness this module hands
-//! it in [`plinth_support::SweepArm::available_seat_depth_mm`] no longer
-//! shortens that seat; since the owner's ruling of 2026-09-05 it is a CLIP
-//! PLANE on the emitted ball, so a tip in a thin skin keeps its contact area
-//! and simply stops at the far face.
+//! depth the contact-area term asks for. The carried face this module hands it
+//! ([`plinth_support::SweepArm::seat_face_point_mm`] with the seat normal) is
+//! the SEAT PLANE the emitted ball and the first shaft segment are trimmed to
+//! (fix/tip-trim, 2026-09-28): a tip in a thin skin keeps its contact area,
+//! and nothing of it stands inside the model or past the face.
 //!
 //! A `Landing::Plate` arm has `k_bottom = 0`, so its base is exactly the plate.
 //! A `Landing::Model` or `Landing::Strut` arm has `k_bottom` at the HIGHEST
@@ -52,12 +52,19 @@ pub struct SweepEmission {
     pub arms_dropped_zero_length: usize,
     pub arms_without_root_flare: usize,
     pub arms_dropped_invalid_geometry: usize,
-    /// Tips whose emitted BALL was CLIPPED at the far face of the cured run it
-    /// strikes. The SEAT is at full law depth in every one of these cases
-    /// (owner ruling 2026-09-05: clip the geometry, never retract the tip);
-    /// what the thin wall removed is the part of the ball that would have
-    /// stood proud on the far side.
-    pub tips_truncated_by_thin_wall: usize,
+    /// Tips handed to the emitter with a SEAT TRIM: their ball and the first
+    /// segment of their shaft keep only the support side of the seat face,
+    /// outside the model (fix/tip-trim, 2026-09-28). The seat is at full law
+    /// depth in every case (owner ruling 2026-09-05: cut the geometry, never
+    /// retract the tip). The second count is the tips whose plane is the
+    /// raster seat's because no face was measured.
+    pub tips_trimmed_to_seat: usize,
+    pub tips_trimmed_without_a_measured_face: usize,
+    /// Per-tip contact disc the trim leaves in the seat plane, and the raster
+    /// seat's offset from that plane, in arm order
+    /// ([`plinth_support::SweepLowering::tip_contact_disc_radius_mm`]).
+    pub tip_contact_disc_radius_mm: Vec<f64>,
+    pub tip_raster_seat_offset_mm: Vec<f64>,
     /// Tips the law seated at its own smallest term.
     pub tips_at_law_minimum: usize,
     /// Per-tip delivered seat depth, cut-disc radius and tip radius, in arm
@@ -145,7 +152,10 @@ pub fn to_primitives(
         arms_dropped_zero_length,
         arms_without_root_flare,
         arms_dropped_invalid_geometry,
-        tips_truncated_by_thin_wall,
+        tips_trimmed_to_seat,
+        tips_trimmed_without_a_measured_face,
+        tip_contact_disc_radius_mm,
+        tip_raster_seat_offset_mm,
         tips_at_law_minimum,
         tip_seat_depth_mm,
         tip_cut_radius_mm,
@@ -168,7 +178,10 @@ pub fn to_primitives(
         arms_dropped_zero_length,
         arms_without_root_flare,
         arms_dropped_invalid_geometry,
-        tips_truncated_by_thin_wall,
+        tips_trimmed_to_seat,
+        tips_trimmed_without_a_measured_face,
+        tip_contact_disc_radius_mm,
+        tip_raster_seat_offset_mm,
         tips_at_law_minimum,
         tip_seat_depth_mm,
         tip_cut_radius_mm,
@@ -322,11 +335,13 @@ fn arms_and_junction_raises(plan: &SweepPlan) -> (Vec<SweepArm>, JunctionRaises)
     let plate = plan.plate_z_mm;
     let grid = &plan.grid;
     let (mut profiles, raised) = junction_profiles(plan);
+    let followed = crate::footprint::followed_shifts(&plan.struts);
     let arms = plan
         .struts
         .iter()
         .zip(profiles.iter_mut())
-        .map(|(strut, profile)| {
+        .enumerate()
+        .map(|(index, (strut, profile))| {
             let x = strut.center_mm[0];
             let y = strut.center_mm[1];
             let seat_z = plate + strut.k_top as f64 * height;
@@ -345,9 +360,26 @@ fn arms_and_junction_raises(plan: &SweepPlan) -> (Vec<SweepArm>, JunctionRaises)
                     grid.center_y_mm(grid.row_of(base_cell)),
                 )
             };
+            // THE FOOTPRINT RULE's move (fix/tip-trim, 2026-09-28): a seat
+            // whose contact disc hung off its face slides ALONG the face; a
+            // member joined to a moved axis follows it at the junction
+            // (`footprint::followed_shifts`). Applied only where non-zero, so
+            // every member nothing moved is bit-identical.
+            let crate::footprint::Followed {
+                seat_mm: seat_shift,
+                base_mm: base_shift,
+            } = followed[index];
+            let moved = |point: [f64; 3], by: Option<[f64; 3]>| -> [f64; 3] {
+                by.map_or(point, |by| {
+                    std::array::from_fn(|axis| point[axis] + by[axis])
+                })
+            };
+            // The face point moves with the arm's OWN seat move only.
+            let own_shift = (strut.seat_face.footprint == crate::Footprint::MovedOntoFace)
+                .then_some(strut.seat_face.shift_mm);
             SweepArm {
-                seat_mm: [x, y, seat_z],
-                base_mm: [base_x, base_y, base_z],
+                seat_mm: moved([x, y, seat_z], seat_shift),
+                base_mm: moved([base_x, base_y, base_z], base_shift),
                 tip_radius_mm: strut.tip_radius_mm(),
                 // THE WHOLE LEDGER, not its two ends (2026-09-28). Until then
                 // only `(tip, root)` crossed here and the arm was drawn as one
@@ -360,9 +392,14 @@ fn arms_and_junction_raises(plan: &SweepPlan) -> (Vec<SweepArm>, JunctionRaises)
                 // Both measured by the sweep at its own finished seat
                 // (`run_sweep_with_drains`); nothing is re-derived here. The
                 // lowering drives the tip ball into the model along the arm to
-                // the law's FULL depth and CLIPS the ball at this thickness.
+                // the law's FULL depth and TRIMS the ball and the first shaft
+                // segment to this face's plane. The point moves with the seat,
+                // so it stays on the same plane.
                 seat_normal_mm: strut.seat_normal,
-                available_seat_depth_mm: f64::from(strut.seat_solid_layers) * height,
+                seat_face_point_mm: strut
+                    .seat_face
+                    .point_mm
+                    .map(|point| moved(point, own_shift)),
                 landing: match strut.landing {
                     Landing::Plate => SweepArmLanding::Plate,
                     Landing::Model { .. } | Landing::Strut { .. } => SweepArmLanding::Landed,

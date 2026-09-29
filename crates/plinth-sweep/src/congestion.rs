@@ -736,7 +736,7 @@ fn seat_flank_arms(
             // load-inserted arms carry keeps it out of that pass entirely.
             inserted_by_load: true,
             path,
-            seat_solid_layers: 0,
+            seat_face: crate::SeatFace::default(),
             seat_normal: [0.0; 3],
             straight_fallback: None,
             fallback_path: Vec::new(),

@@ -40,6 +40,39 @@ pub struct EmitReport {
     pub artifact_path: PathBuf,
     pub support_record_count: usize,
     pub artifact_bytes: u64,
+    /// What the seat trim did to the records that carry one. Defaulted when
+    /// reading a report written before the trim existed. Boxed so the report
+    /// stays small inside the per-model outcome enum.
+    #[serde(default)]
+    pub seat_trim: Box<SeatTrimReport>,
+}
+
+/// **THE SEAT TRIM, as the emitter carried it out** (fix/tip-trim, 2026-09-28).
+///
+/// Every tip ball and the first shaft segment of every seated arm keep only
+/// `primitive ∩ {support side of the seat face's plane} ∖ model solid`, done
+/// for the whole field in ONE batched native call. These are its path hits.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SeatTrimReport {
+    /// Records that carried a seat trim and went through the batched call.
+    pub records_trimmed: usize,
+    /// Of those, records the seat-face half-space removed material from.
+    pub records_cut_by_seat_plane: usize,
+    /// Of those, records the model-solid difference removed material from
+    /// AFTER the half-space: the concave and straddling cases a plane cannot
+    /// see.
+    pub records_cut_by_model: usize,
+    /// Records the trim would have removed entirely. Emit and warn: such a
+    /// record keeps its UNTRIMMED geometry and is counted here.
+    pub records_left_whole_after_empty_trim: usize,
+    /// Solid removed by the trim, in thousandths of a mm³, over all records.
+    pub removed_volume_milli_mm3: u64,
+    /// The batched call itself failed (a model solid the boolean backend
+    /// rejects, say). Emit and warn: every record then keeps its untrimmed
+    /// geometry, and this names why.
+    #[serde(default)]
+    pub batch_error: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -165,7 +198,8 @@ fn write_staged(
     let geometry = model_triangle_soup(model.mesh(), center)?;
     let lift = model.lift_mm().get();
     let lift = f32_of(lift)?;
-    let records = build_records(model.primitives(), center)?;
+    let (records, seat_trim) =
+        build_records_trimmed(model.primitives(), center, Some(model.mesh()))?;
 
     let mut project = Project::new_empty();
     let index = project
@@ -206,7 +240,7 @@ fn write_staged(
             path: request.target_path.clone(),
         })?;
 
-    audit_disk(
+    let mut report = audit_disk(
         staging,
         &request.printer,
         AuditExpected {
@@ -217,7 +251,9 @@ fn write_staged(
             primitives: model.primitives(),
             model_center: center,
         },
-    )
+    )?;
+    report.seat_trim = Box::new(seat_trim);
+    Ok(report)
 }
 
 fn validate_target(path: &Path) -> Result<(), EmitError> {
@@ -329,6 +365,7 @@ fn audit_disk(
         artifact_path: path.to_path_buf(),
         support_record_count: records.len(),
         artifact_bytes,
+        seat_trim: Box::default(),
     })
 }
 
@@ -562,13 +599,38 @@ fn model_triangle_soup(mesh: &Mesh, center: [f64; 3]) -> Result<TriangleSoup, Em
     soup_from_triangles(&soups[0])
 }
 
-/// Build every support record for a model in one pass.
+/// Build every support record for a model with no seat trim applied — the
+/// single-primitive test path.
+#[cfg(test)]
+fn build_records(
+    primitives: &[SupportPrimitive],
+    center: [f64; 3],
+) -> Result<Vec<SupportRecord>, EmitError> {
+    build_records_trimmed(primitives, center, None).map(|(records, _)| records)
+}
+
+/// Build every support record for a model in one pass, with every record that
+/// carries a seat trim cut to it.
 ///
 /// Batch-first (D-37): gather every primitive's frame and raw soup, hand the
 /// whole forest to one kernel winding call, then scatter into wire records.
 /// There is deliberately no per-primitive winding call in this path. The
 /// registered frustum/raft side counts are likewise read exactly once, here,
 /// rather than once per primitive.
+///
+/// **THE SEAT TRIM** (fix/tip-trim, 2026-09-28). A seated tip ball and the
+/// first segment of its shaft keep only `primitive ∩ {support side of the seat
+/// face's plane} ∖ model solid`. ChituBox renders exactly this mesh, so this is
+/// where the rule has to hold. The whole field goes through ONE batched native
+/// call ([`plinth_solid::ManifoldBackend::trim_and_subtract_each`], the same
+/// Manifold backend `plinth-hollow` drills with): every piece welded once,
+/// the model imported once, no per-record crossing. The record's own
+/// `start`/`end`/radii are untouched; only its soup is cut.
+///
+/// Without a model (`model: None`, the unit tests' single-record path) no
+/// record is trimmed. Emit and warn throughout: a batch the backend rejects
+/// leaves every record untrimmed and says why in the report, and a piece the
+/// trim would remove entirely keeps its untrimmed soup and is counted.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
@@ -576,10 +638,11 @@ fn model_triangle_soup(mesh: &Mesh, center: [f64; 3]) -> Result<TriangleSoup, Em
           width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
           docs/evidence/remediation-2026-08-26/census/cast-audit.md"
 )]
-fn build_records(
+fn build_records_trimmed(
     primitives: &[SupportPrimitive],
     center: [f64; 3],
-) -> Result<Vec<SupportRecord>, EmitError> {
+    model: Option<&Mesh>,
+) -> Result<(Vec<SupportRecord>, SeatTrimReport), EmitError> {
     let policy = m0_constants()
         .map_err(|_| EmitError::Constants)?
         .placeholders();
@@ -593,12 +656,131 @@ fn build_records(
         frames.push(frame);
         soups.push(triangles);
     }
+    // Outward first: the boolean backend reads orientation as inside/outside.
     wind_outward(&mut soups)?;
-    frames
+    let report = match model {
+        Some(mesh) => trim_to_seats(primitives, &mut soups, mesh, center),
+        None => SeatTrimReport::default(),
+    };
+    let records = frames
         .iter()
         .zip(&soups)
         .map(|(frame, triangles)| encode_record(frame, triangles))
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((records, report))
+}
+
+/// The seat trim over a whole field, in place on the wound soups.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a vertex index of a mesh the backend itself validated fits usize on every supported \
+              target, and the removed volume is clamped non-negative and far below u64::MAX \
+              thousandths of a mm3"
+)]
+fn trim_to_seats(
+    primitives: &[SupportPrimitive],
+    soups: &mut [Vec<SoupTriangle>],
+    mesh: &Mesh,
+    center: [f64; 3],
+) -> SeatTrimReport {
+    let mut report = SeatTrimReport::default();
+    let trimmed: Vec<(usize, plinth_support::SeatTrim)> = primitives
+        .iter()
+        .enumerate()
+        .filter_map(|(index, primitive)| primitive.seat_trim.map(|trim| (index, trim)))
+        .collect();
+    if trimmed.is_empty() {
+        return report;
+    }
+    let mut pieces = Vec::with_capacity(trimmed.len());
+    let mut keep = Vec::with_capacity(trimmed.len());
+    for &(index, trim) in &trimmed {
+        let Some(piece) = weld(&soups[index]) else {
+            report.batch_error = Some(format!("record {index}: its soup does not weld closed"));
+            return report;
+        };
+        pieces.push(piece);
+        // In the record's model-centred frame, as the soup is.
+        let normal = trim.outward_normal();
+        let point = sub_center(trim.point_mm(), center);
+        keep.push(plinth_solid::KeepHalfSpace {
+            normal,
+            offset: geom_kernel::vec3::dot(normal, point),
+        });
+    }
+    // The model as ONE indexed solid, welded by point identity: a mesh can be
+    // closed by position while carrying the same corner under two indices (a
+    // fixture's separate caps, a decimation seam), and the boolean backend
+    // reads connectivity by index only.
+    let model_soup: Vec<SoupTriangle> = mesh
+        .tris()
+        .iter()
+        .map(|triangle| triangle.map(|corner| sub_center(mesh.verts()[corner as usize], center)))
+        .collect();
+    let Some(solid) = weld(&model_soup) else {
+        report.batch_error = Some("the model mesh does not weld into a valid solid".to_owned());
+        return report;
+    };
+    let results = match plinth_solid::ManifoldBackend.trim_and_subtract_each(
+        &solid,
+        &pieces,
+        &keep,
+        plinth_solid::BooleanLimits::UNLIMITED,
+    ) {
+        Ok(results) => results,
+        Err(error) => {
+            report.batch_error = Some(error.to_string());
+            return report;
+        }
+    };
+    let mut removed_mm3 = 0.0_f64;
+    for (&(index, _), result) in trimmed.iter().zip(&results) {
+        report.records_trimmed += 1;
+        // "Removed material" means more than the backend's own rounding: a
+        // relative part in a billion of the piece.
+        let noise = 1e-9 * result.whole_volume.abs();
+        report.records_cut_by_seat_plane +=
+            usize::from(result.whole_volume - result.after_half_space_volume > noise);
+        report.records_cut_by_model +=
+            usize::from(result.after_half_space_volume - result.after_subtraction_volume > noise);
+        let Some(kept) = &result.mesh else {
+            report.records_left_whole_after_empty_trim += 1;
+            continue;
+        };
+        removed_mm3 += (result.whole_volume - result.after_subtraction_volume).max(0.0);
+        let vertices = kept.vertices();
+        soups[index] = kept
+            .triangles()
+            .iter()
+            .map(|triangle| triangle.map(|corner| vertices[corner as usize]))
+            .collect();
+    }
+    report.removed_volume_milli_mm3 = (removed_mm3 * 1000.0).round() as u64;
+    report
+}
+
+/// One closed soup as an indexed mesh: corners that are the same point to the
+/// bit become one vertex (the generators emit shared corners bit-identically;
+/// `edge_key` folds the sign of zero), and a triangle a weld collapses is
+/// dropped.
+fn weld(soup: &[SoupTriangle]) -> Option<plinth_solid::Mesh> {
+    let mut index: std::collections::HashMap<[u64; 3], u64> =
+        std::collections::HashMap::with_capacity(soup.len());
+    let mut vertices: Vec<[f64; 3]> = Vec::with_capacity(soup.len());
+    let mut triangles: Vec<[u64; 3]> = Vec::with_capacity(soup.len());
+    for triangle in soup {
+        let corners = triangle.map(|point| {
+            *index.entry(edge_key(point)).or_insert_with(|| {
+                vertices.push(point);
+                (vertices.len() - 1) as u64
+            })
+        });
+        if corners[0] != corners[1] && corners[1] != corners[2] && corners[0] != corners[2] {
+            triangles.push(corners);
+        }
+    }
+    plinth_solid::Mesh::new(vertices, triangles).ok()
 }
 
 /// Everything a wire record needs besides its wound triangle soup.
@@ -633,28 +815,12 @@ fn record_frame_and_soup(
     let end = sub_center(finite_point(source_end), center);
     let triangles = match primitive.segment_kind {
         // Frozen semantics: type 7 owns the contact sphere; type 9 owns a
-        // standalone joint sphere; types 1 and 3 are frusta.
-        // THE CLIP (owner ruling, 2026-09-05). A seated tip goes to the full
-        // depth the contact-area law asks for; where that puts part of the ball
-        // above the far face of the cured model run it strikes, that part is
-        // not emitted and the opening is capped. The plane arrives in WORLD Z
-        // on the ball's own `SphereGeometry` and is rebased here into the
-        // record's model-centred frame, the same subtraction `start`/`end`
-        // already carry.
-        SupportSegmentKind::ContactSphere => {
-            let ball_center = midpoint(start, end);
-            match primitive
-                .sphere_geometry
-                .as_ref()
-                .and_then(plinth_support::SphereGeometry::clip_above_z_mm)
-            {
-                Some(clip_world_z) => {
-                    sphere_triangles_clipped(ball_center, r_start, clip_world_z.get() - center[2])?
-                }
-                None => sphere_triangles(ball_center, r_start)?,
-            }
+        // standalone joint sphere; types 1 and 3 are frusta. A seated tip is
+        // generated WHOLE here and cut to its seat by `trim_to_seats`, for the
+        // whole field at once.
+        SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere => {
+            sphere_triangles(midpoint(start, end), r_start)?
         }
-        SupportSegmentKind::JointSphere => sphere_triangles(midpoint(start, end), r_start)?,
         SupportSegmentKind::RaftPad => raft_pad_triangles(start, r_start, r_end, raft_sides)?,
         SupportSegmentKind::RaftBridge => raft_bridge_triangles(start, end, r_start, r_end)?,
         SupportSegmentKind::ContactTaper
@@ -905,193 +1071,11 @@ fn sphere_triangles(center: [f64; 3], radius: f64) -> Result<Vec<SoupTriangle>, 
     Ok(triangles)
 }
 
-/// The SAME ball, with everything above the horizontal plane `clip_z` removed
-/// and the opening closed by a flat cap — the smallest primitive that satisfies
-/// the owner's ruling of 2026-09-05 ("truncate the geometry beyond the model's
-/// surface so the tip cannot protrude on the other side of any thin model
-/// layer") without shrinking the ball and losing the contact disc the seat law
-/// sized.
-///
-/// **Reuses the tessellation.** The latitude/longitude triangles come from
-/// [`sphere_triangles`] unchanged, in its order. A triangle wholly at or below
-/// the plane is pushed through BIT-IDENTICAL; a triangle wholly above it is
-/// dropped; only a straddling triangle is cut, and the cut piece is closed by a
-/// fan over the on-plane boundary. So a ball that does not reach the plane at
-/// all emits exactly the soup it emitted before this function existed, which is
-/// what makes the no-clip case provably unmoved.
-///
-/// **Watertight by construction.** The two intersection points of a cut edge are
-/// interpolated from that edge's endpoints in a CANONICAL order (the lexically
-/// smaller endpoint first), so the two triangles that share an edge compute the
-/// same point to the bit and no crack can open between them; and the
-/// intersection's own Z is SET to `clip_z` rather than interpolated, so the cap
-/// is exactly planar and its vertices match the body's to the bit. Each cut
-/// triangle contributes exactly one directed boundary edge `p -> q`, and the cap
-/// fan emits `(q, p, apex)` for it, which is the one opposite traversal a closed
-/// mesh needs. `wind_soups_outward` then decides the whole soup's orientation
-/// from its signed volume, exactly as it does for a whole ball.
-///
-/// A plane at or above the ball's top returns the whole ball; a plane at or
-/// below its bottom returns nothing, which the caller must not ask for (a ball
-/// entirely above the far face of what it strikes is an arm with no seat at
-/// all).
-#[expect(
-    clippy::float_cmp,
-    reason = "exact equality is the POINT here: a vertex counts as on the clip plane only \
-              when its Z is bit-for-bit the plane, which is guaranteed because every \
-              crossing sets its own Z to `clip_z` rather than interpolating it. A \
-              tolerance would classify two triangles differently on the same shared edge \
-              and open the crack this function exists to prevent."
-)]
-fn sphere_triangles_clipped(
-    center: [f64; 3],
-    radius: f64,
-    clip_z: f64,
-) -> Result<Vec<SoupTriangle>, EmitError> {
-    let whole = sphere_triangles(center, radius)?;
-    if !clip_z.is_finite() {
-        return Err(EmitError::RecordEncodingRejected);
-    }
-    if clip_z >= center[2] + radius {
-        return Ok(whole);
-    }
-    // A plane at or below the bottom pole would keep nothing: every polygon
-    // collapses and the rim is empty, and a zero-triangle sphere record would
-    // otherwise pass the disk audit, which checks poles and radius but never
-    // the soup. The producer already refuses this seat (lower.rs); refusing it
-    // here too keeps the boundary honest (reviewer finding, 2026-09-05).
-    if clip_z <= center[2] - radius {
-        return Err(EmitError::RecordEncodingRejected);
-    }
-    let mut kept: Vec<SoupTriangle> = Vec::with_capacity(whole.len() + SPHERE_LONGITUDES);
-    for triangle in &whole {
-        let above = triangle.map(|vertex| vertex[2] > clip_z);
-        if !above[0] && !above[1] && !above[2] {
-            kept.push(*triangle);
-            continue;
-        }
-        if above[0] && above[1] && above[2] {
-            continue;
-        }
-        // Sutherland-Hodgman against the half-space `z <= clip_z`, over one
-        // triangle, keeping the original winding.
-        let mut polygon: Vec<[f64; 3]> = Vec::with_capacity(4);
-        for corner in 0..3 {
-            let current = triangle[corner];
-            let next = triangle[(corner + 1) % 3];
-            if !above[corner] {
-                polygon.push(current);
-            }
-            if above[corner] != above[(corner + 1) % 3] {
-                polygon.push(plane_crossing(current, next, clip_z));
-            }
-        }
-        // A corner sitting exactly on the plane makes its own crossing, so the
-        // walk above can emit the same point twice; drop the duplicate rather
-        // than emit a zero-area triangle.
-        polygon.dedup();
-        if polygon.len() > 1 && polygon[0] == polygon[polygon.len() - 1] {
-            polygon.pop();
-        }
-        if polygon.len() < 3 {
-            continue;
-        }
-        for corner in 1..polygon.len() - 1 {
-            kept.push([polygon[0], polygon[corner], polygon[corner + 1]]);
-        }
-    }
-    // THE CAP, derived from the kept geometry rather than from the cutting
-    // step. Every directed edge that lies IN the plane and has no opposite
-    // traversal among the kept triangles is a piece of the opening's rim, and
-    // gets one fan triangle back to the disc's centre; the fan's own spoke
-    // edges pair up with its neighbours', so the result is closed. Reading the
-    // rim off the kept soup this way also closes the case a per-triangle
-    // boundary walk misses: a clip plane that lands exactly on a latitude ring,
-    // where no triangle straddles at all and the ring itself is the opening.
-    let mut traversals: std::collections::HashMap<([u64; 3], [u64; 3]), usize> =
-        std::collections::HashMap::new();
-    for triangle in &kept {
-        for corner in 0..3 {
-            let from = triangle[corner];
-            let to = triangle[(corner + 1) % 3];
-            if from[2] == clip_z && to[2] == clip_z {
-                *traversals
-                    .entry((edge_key(from), edge_key(to)))
-                    .or_default() += 1;
-            }
-        }
-    }
-    let apex = [center[0], center[1], clip_z];
-    let rim: Vec<SoupTriangle> = kept
-        .iter()
-        .flat_map(|triangle| {
-            (0..3).filter_map(move |corner| {
-                let from = triangle[corner];
-                let to = triangle[(corner + 1) % 3];
-                (from[2] == clip_z && to[2] == clip_z).then_some((from, to))
-            })
-        })
-        .filter(|(from, to)| {
-            traversals
-                .get(&(edge_key(*to), edge_key(*from)))
-                .is_none_or(|count| *count == 0)
-        })
-        .map(|(from, to)| [to, from, apex])
-        .collect();
-    kept.extend(rim);
-    Ok(kept)
-}
-
 /// A point's identity for edge pairing: bit patterns, with the sign of zero
 /// normalized because `0.0` and `-0.0` are the same point and the sphere
 /// generator produces both.
 fn edge_key(point: [f64; 3]) -> [u64; 3] {
     point.map(|value| if value == 0.0 { 0.0 } else { value }.to_bits())
-}
-
-/// Where the segment `a -> b` crosses the horizontal plane `z = clip_z`.
-///
-/// Interpolated from the endpoints in a CANONICAL order so the two triangles
-/// sharing this edge get the same point to the bit, and with the crossing's own
-/// Z SET to the plane rather than interpolated so the cap is exactly planar.
-#[expect(
-    clippy::float_cmp,
-    reason = "an endpoint IS the crossing only when it lies exactly on the plane; a \
-              tolerance here would return a point a rounding step off the plane and \
-              unseal the cap."
-)]
-fn plane_crossing(a: [f64; 3], b: [f64; 3], clip_z: f64) -> [f64; 3] {
-    // An endpoint already ON the plane IS the crossing. Interpolating toward
-    // it instead would land a rounding step away and open a crack, and the
-    // answer here is order-independent by construction.
-    if a[2] == clip_z {
-        return [a[0], a[1], clip_z];
-    }
-    if b[2] == clip_z {
-        return [b[0], b[1], clip_z];
-    }
-    let (lo, hi) = if bit_key(a) <= bit_key(b) {
-        (a, b)
-    } else {
-        (b, a)
-    };
-    let span = hi[2] - lo[2];
-    let t = if span == 0.0 {
-        0.0
-    } else {
-        (clip_z - lo[2]) / span
-    };
-    [
-        lo[0] + (hi[0] - lo[0]) * t,
-        lo[1] + (hi[1] - lo[1]) * t,
-        clip_z,
-    ]
-}
-
-/// A total order over points by their bit patterns — used only to pick a
-/// canonical endpoint order, never to compare magnitudes.
-fn bit_key(point: [f64; 3]) -> [u64; 3] {
-    point.map(f64::to_bits)
 }
 
 /// Same multiply associativity as the original per-vertex trig
@@ -1505,6 +1489,7 @@ mod tests {
             }),
             ring_normal: FrustumRingNormal::SegmentAxis,
             sphere_geometry,
+            seat_trim: None,
         }
     }
 
@@ -2119,149 +2104,123 @@ mod tests {
         }
     }
 
-    /// THE CLIP ITSELF. A ball cut by a plane through it must keep nothing
-    /// above the plane, must stay closed, and must leave every triangle that
-    /// the plane does not touch exactly where it was.
-    #[test]
-    fn a_clipped_tip_ball_keeps_nothing_above_the_plane_and_stays_closed() {
-        for center in SPHERE_TEST_CENTERS {
-            for &radius in &SPHERE_TEST_RADII {
-                let whole = sphere_triangles(center, radius).expect("valid radius");
-                // Four planes across the ball: just under the top pole, above
-                // the equator, on the equator, and below it.
-                for fraction in [0.95, 0.5, 0.0, -0.5] {
-                    let clip_z = center[2] + radius * fraction;
-                    let clipped = sphere_triangles_clipped(center, radius, clip_z)
-                        .expect("a plane through the ball is clippable");
-                    assert!(
-                        !clipped.is_empty(),
-                        "a plane through the ball must leave geometry behind"
-                    );
-                    for (index, triangle) in clipped.iter().enumerate() {
-                        for (corner, vertex) in triangle.iter().enumerate() {
-                            assert!(
-                                vertex[2] <= clip_z + 1e-12,
-                                "triangle {index} corner {corner} stands at z {} above the \
-                                 clip plane {clip_z} — the tip has protruded through the far \
-                                 face this clip exists to respect",
-                                vertex[2]
-                            );
-                        }
-                    }
-                    assert_watertight(&clipped, "the clipped ball");
+    /// A seated tip ball and its taper at the edge of a slab: the ball
+    /// straddles the slab's bottom face AND hangs past its side, the taper's
+    /// tilted start cap rises through the bottom face. Returns the model and
+    /// the two primitives, both carrying the seat trim of the bottom face.
+    fn trimmed_edge_tip() -> (Mesh, Vec<SupportPrimitive>) {
+        // A slab 10 x 10 x 2 mm, bottom face at z = 0, side face at x = 5.
+        let model = plinth_mesh::make_box([10.0, 10.0, 2.0], [0.0, 0.0, 0.0]).unwrap();
+        let trim = plinth_support::SeatTrim::new([4.8, 0.0, 0.0], [0.0, 0.0, -1.0]).unwrap();
+        // A leaned arm: axis 45 degrees down and outward; ball centre 0.1 mm
+        // below the face and 0.05 mm outside the side face.
+        let centre = [5.05, 0.0, -0.1];
+        let axis = [0.5_f64.sqrt(), 0.0, -(0.5_f64.sqrt())];
+        let radius = 0.3;
+        let mut ball = primitive_with_radii(
+            SupportSegmentKind::ContactSphere,
+            std::array::from_fn(|i| centre[i] - radius * axis[i]),
+            std::array::from_fn(|i| centre[i] + radius * axis[i]),
+            radius,
+            radius,
+        );
+        ball.seat_trim = Some(trim);
+        let mut taper = primitive_with_radii(
+            SupportSegmentKind::ContactTaper,
+            centre,
+            std::array::from_fn(|i| centre[i] + 2.0 * axis[i]),
+            0.25,
+            0.3,
+        );
+        taper.seat_trim = Some(trim);
+        (model, vec![ball, taper])
+    }
 
-                    // REUSE, not re-tessellation: every triangle of the whole
-                    // ball that lies entirely at or below the plane survives
-                    // BIT-IDENTICAL, in order.
-                    let untouched: Vec<[[u64; 3]; 3]> = whole
-                        .iter()
-                        .filter(|triangle| triangle.iter().all(|vertex| vertex[2] <= clip_z))
-                        .map(|triangle| triangle.map(point_bits))
-                        .collect();
-                    let survivors: Vec<[[u64; 3]; 3]> = clipped
-                        .iter()
-                        .map(|triangle| triangle.map(point_bits))
-                        .collect();
-                    assert!(
-                        !untouched.is_empty(),
-                        "the fixture must leave some triangle untouched, or this assertion \
-                         proves nothing"
-                    );
-                    // Every untouched triangle appears in the clipped soup,
-                    // bit-identical AND in its original relative order — a
-                    // two-pointer subsequence walk, because the cut pieces are
-                    // interleaved where the plane crosses.
-                    let mut wanted = untouched.iter();
-                    let mut next = wanted.next();
-                    for survivor in &survivors {
-                        if Some(survivor) == next {
-                            next = wanted.next();
-                        }
-                    }
-                    assert!(
-                        next.is_none(),
-                        "an untouched triangle moved or vanished; the clip must reuse the \
-                         existing tessellation, not rebuild it"
-                    );
-                }
+    fn inside_slab(vertex: [f64; 3]) -> bool {
+        vertex[0] > -5.0 + 1e-9
+            && vertex[0] < 5.0 - 1e-9
+            && vertex[1].abs() < 5.0 - 1e-9
+            && vertex[2] > 1e-9
+            && vertex[2] < 2.0 - 1e-9
+    }
+
+    /// THE SEAT TRIM ITSELF (fix/tip-trim, 2026-09-28). Every trimmed record
+    /// keeps nothing on the model side of its seat plane, nothing inside the
+    /// model, and stays closed; the cut disc lies in the plane.
+    #[test]
+    fn a_trimmed_tip_and_taper_keep_only_the_support_side_outside_the_model() {
+        let (model, primitives) = trimmed_edge_tip();
+        let center = [0.0; 3];
+        let (records, report) =
+            build_records_trimmed(&primitives, center, Some(&model)).expect("records");
+        assert_eq!(report.records_trimmed, 2, "{report:?}");
+        assert_eq!(report.records_cut_by_seat_plane, 2, "{report:?}");
+        assert!(report.batch_error.is_none(), "{report:?}");
+        assert_eq!(report.records_left_whole_after_empty_trim, 0, "{report:?}");
+        for (index, record) in records.iter().enumerate() {
+            let triangles = wire_triangles(&record.mesh.xyz);
+            assert!(!triangles.is_empty(), "record {index} kept nothing");
+            let mut on_plane = 0;
+            for vertex in triangles.iter().flatten() {
+                assert!(
+                    vertex[2] <= 1e-6,
+                    "record {index}: a vertex at z {} stands on the model side of the seat plane",
+                    vertex[2]
+                );
+                assert!(
+                    !inside_slab(*vertex),
+                    "record {index}: vertex {vertex:?} is inside the model"
+                );
+                on_plane += usize::from(vertex[2].abs() <= 1e-6);
             }
+            assert!(
+                on_plane > 0,
+                "record {index}: the cut left no disc in the seat plane"
+            );
+            // Shared corners are one indexed vertex in the backend's output,
+            // so they round to the same f32 and pair up by point identity.
+            assert_watertight(&triangles, "a trimmed record");
         }
     }
 
-    /// SABOTAGE: the clip disabled. Feeding the same ball through the
-    /// UNCLIPPED generator — which is exactly what this crate did before the
-    /// ruling of 2026-09-05, and what a regression would restore — must put
-    /// vertices above the plane. Without this, the assertion above could be
-    /// passing because the ball never reached the plane at all.
+    /// SABOTAGE: the trim not run. The same two records built WITHOUT the
+    /// model (the path that trims nothing) must stand on the model side of
+    /// the plane and inside the model; otherwise the test above could pass
+    /// because the fixture never reached the face.
     #[test]
-    fn disabling_the_clip_puts_vertices_above_the_plane() {
-        let center = [1.5, -2.0, 11.0];
-        let radius = 2.2;
-        let clip_z = center[2] + radius * 0.5;
-        let unclipped = sphere_triangles(center, radius).expect("valid radius");
-        let above = unclipped
-            .iter()
-            .flatten()
-            .filter(|vertex| vertex[2] > clip_z + 1e-12)
-            .count();
+    fn without_the_trim_the_same_records_stand_inside_the_model() {
+        let (_, primitives) = trimmed_edge_tip();
+        let records = build_records(&primitives, [0.0; 3]).expect("records");
+        for (index, record) in records.iter().enumerate() {
+            let triangles = wire_triangles(&record.mesh.xyz);
+            assert!(
+                triangles.iter().flatten().any(|vertex| vertex[2] > 1e-3),
+                "record {index} never crossed the seat plane, so the trim test is vacuous"
+            );
+        }
         assert!(
-            above > 0,
-            "the unclipped ball must stand above the plane, or the clip test is vacuous"
-        );
-        let clipped =
-            sphere_triangles_clipped(center, radius, clip_z).expect("a plane through the ball");
-        assert_eq!(
-            clipped
+            records.iter().any(|record| wire_triangles(&record.mesh.xyz)
                 .iter()
                 .flatten()
-                .filter(|vertex| vertex[2] > clip_z + 1e-12)
-                .count(),
-            0,
-            "the clip must remove every one of those {above} vertices"
+                .any(|vertex| inside_slab(*vertex))),
+            "no record reached inside the model, so the model difference is graded on nothing"
         );
     }
 
-    /// A plane at or above the ball's top is not a clip. It must return the
-    /// whole ball, byte for byte, so an arm that never reaches its far face
-    /// emits exactly what it emitted before this function existed.
-    /// A plane at or below the bottom pole keeps nothing, and an empty sphere
-    /// record must be refused at the boundary rather than written.
+    /// A record with no seat trim is never touched by the batched call: the
+    /// same primitives with the trims removed come out bit-identical with and
+    /// without the model.
     #[test]
-    fn a_plane_at_or_below_the_bottom_pole_is_refused() {
-        for center in SPHERE_TEST_CENTERS {
-            for &radius in &SPHERE_TEST_RADII {
-                for clip_z in [center[2] - radius, center[2] - radius * 3.0] {
-                    assert!(
-                        sphere_triangles_clipped(center, radius, clip_z).is_err(),
-                        "a plane at {clip_z} under a ball of radius {radius} was not refused"
-                    );
-                }
-            }
+    fn an_untrimmed_record_is_bit_identical_with_or_without_the_model() {
+        let (model, mut primitives) = trimmed_edge_tip();
+        for primitive in &mut primitives {
+            primitive.seat_trim = None;
         }
-    }
-
-    #[test]
-    fn a_plane_above_the_ball_returns_the_whole_ball_unchanged() {
-        for center in SPHERE_TEST_CENTERS {
-            for &radius in &SPHERE_TEST_RADII {
-                let whole = sphere_triangles(center, radius).expect("valid radius");
-                for clip_z in [center[2] + radius, center[2] + radius * 4.0] {
-                    let clipped =
-                        sphere_triangles_clipped(center, radius, clip_z).expect("valid radius");
-                    assert_eq!(
-                        clipped
-                            .iter()
-                            .map(|triangle| triangle.map(point_bits))
-                            .collect::<Vec<_>>(),
-                        whole
-                            .iter()
-                            .map(|triangle| triangle.map(point_bits))
-                            .collect::<Vec<_>>(),
-                        "a plane at or above the top pole must leave the ball untouched"
-                    );
-                }
-            }
-        }
+        let (with_model, report) =
+            build_records_trimmed(&primitives, [0.0; 3], Some(&model)).expect("records");
+        let without = build_records(&primitives, [0.0; 3]).expect("records");
+        assert_eq!(report, SeatTrimReport::default());
+        assert_eq!(with_model, without);
     }
 
     /// FU-36: guards against a future "fix" that drops or adds a sliver and

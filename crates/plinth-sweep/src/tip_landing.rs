@@ -244,35 +244,65 @@ pub fn tip_seat_normals(
     plate_z_mm: f64,
     layer_height_mm: f64,
 ) -> Vec<[f64; 3]> {
-    let mut normals = vec![[0.0_f64; 3]; struts.len()];
+    tip_seat_faces(mesh, grid, struts, plate_z_mm, layer_height_mm)
+        .into_iter()
+        .map(|face| face.map_or([0.0; 3], |(normal, _)| normal))
+        .collect()
+}
+
+/// The face each arm's tip CARRIES, in strut order: its OUTWARD unit normal
+/// and the point of it closest to the tip's landing point, or `None` where the
+/// mesh has no down-facing face at all.
+///
+/// **The carried face is the nearest DOWN-FACING face** (fix/tip-trim,
+/// 2026-09-28). A tip carries a down-facing face by construction (this
+/// module's own doc). Until this date the nearest face of ANY kind was taken
+/// and, when it was not down-facing — a wall the tip stands beside, such as a
+/// disc's rim at its edge — the normal was left unmeasured and the lowering
+/// fell back to straight down. That was the right refusal and the wrong
+/// answer: the face the tip does carry was still there, one step further
+/// away. The seat trim needs that face's own PLANE, not a guess at its
+/// direction, so the search now runs over the down-facing faces only. Where
+/// the nearest face already was down-facing — every tip under a flat or
+/// gently curved face — the answer is the same face as before, bit for bit.
+///
+/// **Batching.** One read of the vertex triples, one filter to the
+/// down-facing faces, one parallel `landings × faces` closest-point pass
+/// ([`nearest_faces`], shared with the scar), one scatter.
+#[must_use]
+pub fn tip_seat_faces(
+    mesh: &Mesh,
+    grid: &Grid,
+    struts: &[SweepStrut],
+    plate_z_mm: f64,
+    layer_height_mm: f64,
+) -> Vec<Option<([f64; 3], [f64; 3])>> {
+    let mut faces = vec![None; struts.len()];
     let landings = tip_landings_of(grid, struts, plate_z_mm, layer_height_mm);
     if landings.is_empty() {
-        return normals;
+        return faces;
     }
-    let triangles = triangles_of(mesh);
+    // The mesh is outward-oriented, so a face normal already points AWAY from
+    // the material — which is the direction seating moves against.
+    let down_facing: Vec<([[f64; 3]; 3], [f64; 3])> = triangles_of(mesh)
+        .into_iter()
+        .filter_map(|triangle| {
+            let [a, b, c] = triangle;
+            let unit = vec3::normalize(vec3::cross(vec3::sub(b, a), vec3::sub(c, a)))?;
+            (unit[2] < 0.0).then_some((triangle, unit))
+        })
+        .collect();
+    let triangles: Vec<[[f64; 3]; 3]> = down_facing.iter().map(|(triangle, _)| *triangle).collect();
     let nearest = nearest_faces(&triangles, &landings);
     for (landing, found) in landings.iter().zip(&nearest) {
         let Some((face, _)) = *found else { continue };
-        let [a, b, c] = triangles[face];
-        // The mesh is outward-oriented, so the face normal already points AWAY
-        // from the material — which is the direction seating moves against.
-        let Some(unit) = vec3::normalize(vec3::cross(vec3::sub(b, a), vec3::sub(c, a))) else {
-            continue;
-        };
-        // A tip carries a DOWN-FACING face by construction (this module's own
-        // doc). A nearest face that is not down-facing is a wall the tip
-        // happens to stand beside, not the surface it carries, and using it
-        // would put a near-zero cosine into the seat law for a seat that is
-        // in fact square-on. Left unmeasured, so the lowering falls back to
-        // the arm's own axis.
-        if unit[2] >= 0.0 {
-            continue;
-        }
-        if let Some(slot) = normals.get_mut(landing.strut) {
-            *slot = unit;
+        let ([a, b, c], unit) = down_facing[face];
+        let point = closest_on_tri(landing.point_mm, a, b, c);
+        if let Some(slot) = faces.get_mut(landing.strut) {
+            *slot = Some((unit, point));
         }
     }
-    normals
+    faces
 }
 
 /// One read of the mesh's vertex triples, in face order.

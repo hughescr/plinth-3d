@@ -27,9 +27,13 @@
 //! | test | what it asserts | how it is kept from passing vacuously |
 //! |---|---|---|
 //! | `flat_disc_tips_seat_by_the_law` | every pole is inside by at least the law's own depth, and every delivered cut disc carries `a ≥ r_tip` | it counts the arms it graded and fails on an empty field; the sabotage below turns it red |
-//! | `zero_available_depth_clips_but_never_retracts` | zeroing the seating input changes the CLIP, never the seat | it requires every seat to stay at full depth AND every ball to be clipped |
-//! | `thin_skin_seats_in_full_and_clips_at_the_far_face` | a skin thinner than the ball is seated to the law's full depth, and the ball is clipped exactly at the skin's top face | it requires the skin to be thinner than the law's depth, and the clip counter to FIRE |
-//! | `a_thick_disc_never_clips_and_moves_only_by_the_allowance` | on thick material nothing clips, and re-running with the retired 0.100 mm pinned moves ONLY the arms that term binds | it requires both populations to be non-empty |
+//! | `the_seat_trim_is_the_carried_face_and_never_moves_the_seat` | every ball and first shaft segment carries the seat trim, its plane is the model's own underside, and dropping the face point moves no seat | it counts balls and trimmed tapers and requires them equal and non-zero |
+//! | `thin_skin_seats_in_full_and_is_trimmed_to_its_underside` | a skin thinner than the ball is seated to the law's full depth, and the ball is trimmed to the skin's underside | it requires the skin to be thinner than the law's depth, and every tip to carry the trim |
+//! | `a_thick_disc_moves_only_by_the_allowance` | re-running with the retired 0.100 mm pinned moves ONLY the arms that term binds, and moves no trim plane | it requires both populations to be non-empty |
+//!
+//! (Until 2026-09-28 the thin-wall bound was a horizontal "far face" clip on
+//! the ball's top; the seat trim — the ball and first shaft segment cut to the
+//! seat face's plane and out of the model — replaced it, fix/tip-trim.)
 //!
 //! Nothing here restates the seat law. The law's own numbers come from the
 //! registry, and the assertions are on consequences a reader can check against
@@ -42,9 +46,7 @@
 
 use plinth_core::{m0_constants, Finite, LayerPlan, PositiveFinite};
 use plinth_mesh::{make_disc_uniform, Mesh};
-use plinth_support::{
-    lower_sweep_arms, BuildFrame, SphereGeometry, SupportSegmentKind, SweepArm, SweepLowering,
-};
+use plinth_support::{lower_sweep_arms, BuildFrame, SupportSegmentKind, SweepArm, SweepLowering};
 use plinth_sweep::{arms_of, to_primitives, SweepEmission, SweepPlan, SweepPolicy};
 
 const LIFT_MM: f64 = 5.0;
@@ -202,8 +204,9 @@ fn flat_disc_tips_seat_by_the_law() {
         poles.len()
     );
     assert_eq!(
-        emission.tips_truncated_by_thin_wall, 0,
-        "a 3.5 mm disc is nowhere near thin enough to clip a ball"
+        emission.tips_trimmed_to_seat,
+        poles.len(),
+        "every seated tip must reach the emitter with its seat trim"
     );
 
     // # Re-cut 2026-09-06, after the production cause was found and fixed
@@ -303,97 +306,101 @@ fn flat_disc_tips_seat_by_the_law() {
 }
 
 // ---------------------------------------------------------------------------
-// (b) Sabotage: zero the seating input, and require the CLIP to move, not the
-//     seat.
+// (b) The seat trim is the carried FACE, and it never moves the seat.
 // ---------------------------------------------------------------------------
 
-/// The knob is the seating INPUT, not a production flag: `available_seat_depth_mm`
-/// is what the sweep measured of the material above each seat.
-///
-/// Before the owner's ruling of 2026-09-05 zeroing it retracted every tip back
-/// onto the lamina plane — the original point-contact defect, restored. Under
-/// the ruling it may do no such thing: the seat stays at the full depth the
-/// area law asked for, and what zeroing changes is where the emitted ball is
-/// CUT. This test is the guard on that: a seat that still moves when the
-/// thickness moves is a retraction, and retraction is what the ruling forbids.
+/// Every seated ball and the first segment of its shaft carry the seat trim,
+/// and the trim's plane is the model's own underside — not the raster seat,
+/// which the layer grid can put half a layer off it (fix/tip-trim,
+/// 2026-09-28). The trim is GEOMETRY only: dropping the measured face point
+/// (the plane then falls back to the raster seat) must not move one seat,
+/// which is the owner's 2026-09-05 ruling that the tip is never retracted.
 #[test]
-fn zero_available_depth_clips_but_never_retracts() {
+fn the_seat_trim_is_the_carried_face_and_never_moves_the_seat() {
     let mesh = flat_disc();
-    let (plan, layers, frame, _) = plan_of(&mesh);
+    let (plan, layers, frame, min_z) = plan_of(&mesh);
     let arms = arms_of(&plan);
     let honest = lower_sweep_arms(&arms, frame, &layers, MAX_PRIMITIVES, MAX_PRIMITIVE_BYTES)
         .expect("the lowering refuses only about the request");
-    let sabotaged: Vec<SweepArm> = arms
+    let faceless: Vec<SweepArm> = arms
         .iter()
         .map(|arm| SweepArm {
-            available_seat_depth_mm: 0.0,
+            seat_face_point_mm: None,
             ..arm.clone()
         })
         .collect();
     let lowered = lower_sweep_arms(
-        &sabotaged,
+        &faceless,
         frame,
         &layers,
         MAX_PRIMITIVES,
         MAX_PRIMITIVE_BYTES,
     )
     .expect("the lowering refuses only about the request");
-
     assert!(
-        !lowered.tip_seat_depth_mm.is_empty(),
-        "the sabotage must still build arms; a field of zero arms proves nothing"
+        !honest.tip_seat_depth_mm.is_empty(),
+        "a field of zero arms proves nothing"
     );
     assert_eq!(
         lowered.tip_seat_depth_mm, honest.tip_seat_depth_mm,
-        "zeroing the available thickness moved a SEAT. Under the owner's ruling of \
-         2026-09-05 the tip goes to the depth the contact area needs whatever the skin \
-         above it is; only the emitted geometry is cut"
+        "dropping the face point moved a SEAT; the trim may cut geometry, never the seat"
     );
-    // (a)'s own predicate must STILL hold with the thickness zeroed.
-    let short = lowered
-        .tip_seat_depth_mm
-        .iter()
-        .zip(&lowered.tip_radius_mm)
-        .filter(|(depth, tip)| **depth < required_depth_mm(**tip) - 1e-9)
-        .count();
+    assert_eq!(honest.tips_trimmed_without_a_measured_face, 0);
     assert_eq!(
-        short, 0,
-        "{short} tips fell short of the law's depth with the thickness zeroed — that is \
-         the retraction the ruling replaced with a clip"
+        lowered.tips_trimmed_without_a_measured_face,
+        lowered.tip_seat_depth_mm.len()
     );
-    assert_eq!(
-        lowered.tips_below_area_guarantee(),
-        0,
-        "a clipped tip still carries its full cut disc; the area guarantee cannot depend \
-         on how thick the skin above it is"
-    );
-    // And the clip DID fire, on every arm: with no material above the seat, no
-    // part of any ball may be emitted above the seat plane.
-    assert_eq!(
-        lowered.tips_truncated_by_thin_wall,
-        lowered.tip_seat_depth_mm.len(),
-        "with zero material above the seat every ball must be clipped at the seat plane"
-    );
-    for (index, primitive) in lowered
-        .primitives
-        .iter()
-        .filter(|primitive| primitive.segment_kind == SupportSegmentKind::ContactSphere)
-        .enumerate()
-    {
-        let clip = primitive
-            .sphere_geometry
-            .as_ref()
-            .and_then(SphereGeometry::clip_above_z_mm);
+
+    // Every ball and every FIRST shaft segment carries the trim; nothing else.
+    let mut balls = 0_usize;
+    let mut tapers = 0_usize;
+    for primitive in &honest.primitives {
+        match primitive.segment_kind {
+            SupportSegmentKind::ContactSphere => balls += 1,
+            // A brace's or a mast's taper seats on nothing and carries none.
+            SupportSegmentKind::ContactTaper if primitive.seat_trim.is_none() => continue,
+            SupportSegmentKind::ContactTaper => tapers += 1,
+            _ => {
+                assert!(
+                    primitive.seat_trim.is_none(),
+                    "{:?} carries a seat trim",
+                    primitive.segment_kind
+                );
+                continue;
+            }
+        }
+        let trim = primitive.seat_trim.unwrap_or_else(|| {
+            panic!(
+                "a {:?} reached the emitter untrimmed",
+                primitive.segment_kind
+            )
+        });
+        // THE CARRIED FACE: this disc's underside, z = min_z, facing down.
+        let normal = trim.outward_normal();
         assert!(
-            clip.is_some(),
-            "tip {index} reached the emit boundary with no clip plane, so its ball would \
-             be written whole and would stand proud of the surface"
+            normal[0].abs() < 1e-9 && normal[1].abs() < 1e-9 && (normal[2] + 1.0).abs() < 1e-9,
+            "a flat underside's seat plane faces straight down; got {normal:?}"
+        );
+        assert!(
+            (trim.point_mm()[2] - min_z).abs() < 1e-9,
+            "the seat plane stands at z {}, not on the model's underside {min_z}",
+            trim.point_mm()[2]
         );
     }
+    assert_eq!(balls, honest.tip_seat_depth_mm.len());
+    assert_eq!(
+        tapers, balls,
+        "every seated arm's first segment is trimmed with its ball"
+    );
+    assert_eq!(
+        honest.tips_below_area_guarantee_at_face(),
+        0,
+        "the contact disc the trim leaves ON the face must carry a >= r_tip"
+    );
 }
 
 // ---------------------------------------------------------------------------
-// (c) A skin thinner than the ball: seat in full, clip at the far face.
+// (c) A skin thinner than the ball: seat in full, trim to the underside.
 // ---------------------------------------------------------------------------
 
 /// A 20 mm disc 0.06 mm thick — ONE lamina at the registered layer height,
@@ -405,10 +412,12 @@ fn zero_available_depth_clips_but_never_retracts() {
 /// stops being so.
 ///
 /// What the fixture proves changed on 2026-09-05: the seat is NO LONGER cut
-/// back to the skin. It goes to the full law depth, the ball is clipped at the
-/// skin's own top face, and the area guarantee holds where it used to fail.
+/// back to the skin. It goes to the full law depth and the area guarantee
+/// holds where it used to fail. Since 2026-09-28 the emitted ball is trimmed
+/// to the skin's UNDERSIDE (the seat plane), which keeps it off the far face
+/// with room to spare; until then a horizontal clip at the far face did that.
 #[test]
-fn thin_skin_seats_in_full_and_clips_at_the_far_face() {
+fn thin_skin_seats_in_full_and_is_trimmed_to_its_underside() {
     let skin_mm = 0.06;
     let mesh = make_disc_uniform(20.0, skin_mm, 64, 4).expect("a thin-skin fixture");
     let (plan, layers, frame, min_z) = plan_of(&mesh);
@@ -425,9 +434,10 @@ fn thin_skin_seats_in_full_and_clips_at_the_far_face() {
          minimum depth ({} mm)",
         seat_minimum_mm()
     );
-    assert!(
-        emission.tips_truncated_by_thin_wall > 0,
-        "the clip must FIRE here; zero clips means the far face is not being read"
+    assert_eq!(
+        emission.tips_trimmed_to_seat,
+        emission.tip_seat_depth_mm.len(),
+        "the trim must reach every tip; a tip without it would be written whole"
     );
 
     // THE RULING ITSELF: full depth, not skin depth.
@@ -459,48 +469,45 @@ fn thin_skin_seats_in_full_and_clips_at_the_far_face() {
         SweepLowering::distribution(&emission.tip_radius_mm),
     );
 
-    // THE CLIP PLANE, on the emitted ball, at the skin's own far face. The
-    // mesh-level consequence — no triangle above it, and the cut ball still
-    // closed — is graded in `plinth-emit`'s own unit tests, on the primitive
-    // this one proves production hands over.
+    // THE SEAT PLANE, on every emitted ball, at the skin's own UNDERSIDE: the
+    // emitter keeps only what lies below it, so nothing of the ball can reach
+    // the skin's far face 0.06 mm above. The mesh-level consequence — no
+    // vertex past the plane or inside the model, the cut ball still closed —
+    // is graded in `plinth-emit`'s own unit tests and end to end in
+    // `plinth-pipeline`'s `tip_trim`, on the primitive this one proves
+    // production hands over.
     let top_face = min_z + skin_mm;
-    let mut clipped = 0_usize;
+    let mut trimmed = 0_usize;
     for (index, primitive) in emission
         .primitives
         .iter()
         .filter(|primitive| primitive.segment_kind == SupportSegmentKind::ContactSphere)
         .enumerate()
     {
-        let Some(clip) = primitive
-            .sphere_geometry
-            .as_ref()
-            .and_then(SphereGeometry::clip_above_z_mm)
-        else {
-            continue;
-        };
-        clipped += 1;
+        let trim = primitive
+            .seat_trim
+            .unwrap_or_else(|| panic!("tip {index} reached the emitter with no seat trim"));
+        trimmed += 1;
         assert!(
-            clip.get() <= top_face + layer_height_mm() + 1e-9,
-            "tip {index}: the clip plane at z {:.6} stands above the skin's top face \
-             {top_face:.6}, so geometry could still be emitted outside the model",
-            clip.get()
+            (trim.point_mm()[2] - min_z).abs() < 1e-9 && trim.outward_normal()[2] < -1.0 + 1e-9,
+            "tip {index}: the seat plane through {:?} facing {:?} is not the skin's \
+             underside z {min_z:.6}; the far face {top_face:.6} would not be protected",
+            trim.point_mm(),
+            trim.outward_normal()
         );
     }
-    assert_eq!(
-        clipped, emission.tips_truncated_by_thin_wall,
-        "every counted clip must carry a clip plane on its own emitted ball"
-    );
+    assert_eq!(trimmed, emission.tips_trimmed_to_seat);
 }
 
 // ---------------------------------------------------------------------------
-// (d) Thick material: nothing clips, and only the allowance term moved.
+// (d) Thick material: only the allowance term moved.
 // ---------------------------------------------------------------------------
 
 /// The 26eaab7 comparison, run rather than asserted.
 ///
-/// On a 3.5 mm disc no ball can reach a far face, so the clip must never fire
-/// and every emitted primitive must be exactly what the seat law alone
-/// produces. The one thing this commit changed for such a model is PR-1(a): the
+/// On a 3.5 mm disc every emitted primitive must be exactly what the seat law
+/// alone produces, and every trim plane is the underside whatever the law's
+/// terms are. The one thing that commit changed for such a model is PR-1(a): the
 /// law's smallest term went from the typed 0.100 mm to the derived allowance.
 /// So the test re-runs the identical lowering with that term PINNED back to
 /// 0.100 mm (the `seat-minimum-probe` feature, which no production build
@@ -514,7 +521,7 @@ fn thin_skin_seats_in_full_and_clips_at_the_far_face() {
 /// Both populations are required to be non-empty, so neither half can pass by
 /// examining nothing.
 #[test]
-fn a_thick_disc_never_clips_and_moves_only_by_the_allowance() {
+fn a_thick_disc_moves_only_by_the_allowance() {
     let mesh = flat_disc();
     let (plan, layers, frame, _) = plan_of(&mesh);
     let arms = arms_of(&plan);
@@ -530,21 +537,20 @@ fn a_thick_disc_never_clips_and_moves_only_by_the_allowance() {
     )
     .expect("the lowering refuses only about the request");
 
-    assert_eq!(
-        now.tips_truncated_by_thin_wall, 0,
-        "a 3.5 mm disc has no far face any ball can reach; the clip must not fire"
-    );
-    assert!(
-        now.primitives
+    // The seat trim is a property of the FACE, not of the seat law: moving
+    // the law's smallest term must leave every ball's trim plane unchanged.
+    let trims = |lowering: &SweepLowering| -> Vec<_> {
+        lowering
+            .primitives
             .iter()
             .filter(|primitive| primitive.segment_kind == SupportSegmentKind::ContactSphere)
-            .all(|primitive| primitive
-                .sphere_geometry
-                .as_ref()
-                .and_then(SphereGeometry::clip_above_z_mm)
-                .is_none()),
-        "an unclipped model must carry no clip plane on any ball, or the emitter will cut \
-         geometry nobody asked it to cut"
+            .map(|primitive| primitive.seat_trim)
+            .collect()
+    };
+    assert_eq!(
+        trims(&now),
+        trims(&pinned),
+        "the seat law's minimum moved a trim plane; the plane is the carried face's"
     );
     assert_eq!(
         now.primitives.len(),

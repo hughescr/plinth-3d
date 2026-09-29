@@ -1141,7 +1141,7 @@ fn push_brace(
         // load-inserted arm protects this one, for the same reason.
         inserted_by_load: true,
         path,
-        seat_solid_layers: 0,
+        seat_face: crate::SeatFace::default(),
         seat_normal: [0.0; 3],
         straight_fallback: None,
         fallback_path: Vec::new(),
@@ -1281,7 +1281,7 @@ fn try_mast(
         covered_demand: Vec::new(),
         inserted_by_load: true,
         path: Vec::new(),
-        seat_solid_layers: 0,
+        seat_face: crate::SeatFace::default(),
         seat_normal: [0.0; 3],
         straight_fallback: None,
         fallback_path: Vec::new(),
