@@ -276,6 +276,39 @@ fn tall_stilt_plate_has_no_member_resting_on_nothing() {
     assert_load_gap_closes("make_tall_stilt_plate", &rooting);
 }
 
+/// **The laid tube, the heaviest merge field** (138 quills at `d103c48`):
+/// every member rests on something, and the whole-run identity
+/// `injected = plate + uncarried + absorbed` closes, so no load went nowhere.
+/// `absorbed` is peel carried under a larger event in the same arm, which the
+/// max over events keeps out of the plate reaction by design; it is read from
+/// the report, never recomputed here.
+#[test]
+fn laid_tube_rests_on_something_and_loses_no_load() {
+    let mesh = plinth_mesh::make_laid_tube().expect("the laid tube fixture");
+    let (mesh, plan) = swept(&mesh);
+    let rooting = rooting(&mesh, &plan);
+    let ledger = &plan.report.landing_check;
+    eprintln!(
+        "make_laid_tube: digest {}; {} members; unrooted {:?}; gap {} mm2, absorbed {} mm2 over {} \
+         reads, unexplained {} mm2",
+        plan.report.sweep_digest,
+        plan.struts.len(),
+        rooting.unrooted,
+        ledger.load_gap_mm2,
+        ledger.absorbed_mm2,
+        ledger.absorbed_reads,
+        ledger.unexplained_gap_mm2()
+    );
+    assert!(rooting.on_member > 0, "no member rests on another");
+    assert_eq!(rooting.unrooted, Vec::<u32>::new());
+    let tolerance = 1.0e-9 * rooting.injected_mm2.max(1.0);
+    assert!(
+        ledger.unexplained_gap_mm2().abs() <= tolerance,
+        "{} mm2 of load went nowhere the down-sweep can name",
+        ledger.unexplained_gap_mm2()
+    );
+}
+
 /// **A brace carries no peel load, so it hands its trunk none.** A brace ends
 /// on an arm's shaft, in the arm's own cell. The down-sweep let the brace read
 /// that cell's per-layer event — an event the arm's own `max` over its events

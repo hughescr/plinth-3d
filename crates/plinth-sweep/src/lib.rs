@@ -1149,12 +1149,18 @@ pub fn run_sweep_with_drains(
     // The finished field's own check, and the load it lost if any landing is
     // broken: the down-sweep hands a child's load to its named parent at the
     // landing layer, and a parent that does not stand there never picks it
-    // up. `injected = plate reaction + uncarried` closes exactly on a field
-    // whose every landing stands (measured: 0.00 mm² on the Cylinder and the
-    // Sphere before the slenderness lane); what is left is that loss.
+    // up. `injected = plate reaction + uncarried + absorbed` closes exactly on
+    // a field whose every landing stands (measured: 0.00 mm² on the Cylinder
+    // and the Sphere before the slenderness lane); what is left is that loss.
+    // `absorbed` is peel carried under a larger event in the same arm, which
+    // the max over events keeps out of the plate reaction by design (measured
+    // 2026-09-29: the whole of the remaining gap on the Cylinder, 1.4625 mm²
+    // over 8 reads, and the Sphere, 0.4950 mm² over 6).
     landings.finished = landing_check::check_landings(&struts);
     landings.load_gap_mm2 =
         outcome.injected_load_mm2 - outcome.plate_reaction_mm2 - outcome.uncarried_load_mm2;
+    landings.absorbed_mm2 = outcome.absorbed_event_load_mm2;
+    landings.absorbed_reads = outcome.absorbed_event_reads;
     // Measured on the FINISHED field, after the re-run, so the published run
     // lengths belong to the arms this file actually contains.
     let slenderness_after =

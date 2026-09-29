@@ -99,9 +99,24 @@ pub struct LandingLedger {
     /// name; the load a vanished parent swallowed shows up here and nowhere
     /// else.
     pub load_gap_mm2: f64,
+    /// The part of `load_gap_mm2` the down-sweep can name: injected peel
+    /// carried under a larger event in the same arm
+    /// (`DownSweepOutcome::absorbed_event_load_mm2`). Not lost.
+    pub absorbed_mm2: f64,
+    /// Reads that absorbed an event. The path-hit witness for `absorbed_mm2`.
+    pub absorbed_reads: u64,
 }
 
 impl LandingLedger {
+    /// The load that went NOWHERE the down-sweep can name:
+    /// `injected - plate reaction - uncarried - absorbed`. Zero on a field
+    /// whose every landing stands; a parent that is not there to pick up a
+    /// child's load shows up here and nowhere else.
+    #[must_use]
+    pub fn unexplained_gap_mm2(&self) -> f64 {
+        self.load_gap_mm2 - self.absorbed_mm2
+    }
+
     /// Record the check of one pass.
     pub fn record(&mut self, pass: &'static str, check: &LandingCheck) {
         self.passes.push(LandingPass {
