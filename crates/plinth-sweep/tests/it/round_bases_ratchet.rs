@@ -151,8 +151,25 @@ pub(crate) struct Disc {
     /// to the full height. Innermost first.
     rings: &'static [(f64, f64)],
     segments: usize,
-    /// Arms placed at the glue-face-up pose, measured 2026-09-28 (see the
-    /// (4) assertion for why this is a pin and not a prediction).
+    /// Arms placed at the glue-face-up pose (see the (4) assertion for why
+    /// this is a pin and not a prediction). Measured 2026-09-28 as 169 / 338 /
+    /// 1142; Round 25 re-pinned to 105 by fix/no-dangling (see `round_25`).
+    ///
+    /// RE-PINNED 2026-09-29 by the wall-creep lane, ON PURPOSE, to 88 / 304 /
+    /// 1067, measured on develop `5db81a5` merged into the lane. This is the
+    /// move the (4) comment predicted: a drafted wall's creep is now priced by
+    /// its overhang weight (`reach.rs`, `creep_step`), so the drafted recess
+    /// wall no longer draws minimum-size hairline arms. Measured on the same
+    /// tree with only the creep weight switched off
+    /// (`SweepPolicy::without_creep_weight`): 105 / 338 / 1130, which is
+    /// develop's own count on all three discs; with it on, 88 / 304 / 1067, and
+    /// Round 25's 13 over-limit runs, 3 forced merges and 10 braces all go to 0.
+    /// The lane's other rule (congestion remedy 2 sized by the stack) does not
+    /// fire on any disc here: none is congested. The scar band is NOT widened:
+    /// the identity reads 1.00000 / 1.00000 / 0.99630 with the lane.
+    ///
+    /// Not a detector of the creep rule: 105 lies inside Round 25's band around
+    /// 88. `wall_creep::` grades the rule itself.
     pinned_arms: usize,
 }
 
@@ -180,13 +197,18 @@ pub(crate) struct Disc {
 /// 64 of them congestion-inserted. Round 50 is unchanged (338); Round 100
 /// moves 1142 -> 1130, inside its band. Evidence:
 /// `plinth-evidence/.../field-2026-09-28/lanes/no-dangling/retry/`.
+///
+/// RE-PINNED 105 -> 88 on 2026-09-29 by fix/wall-creep, on purpose: the creep
+/// rule removes the recess wall's hairline arms and the slenderness remedies
+/// that hung off them (see `Disc::pinned_arms`). Evidence:
+/// `plinth-evidence/.../field-2026-09-28/lanes/wall-creep/logs/ratchet-merged-*.log`.
 pub(crate) fn round_25() -> Disc {
     Disc {
         name: "Round 25",
         bottom_radius_mm: 11.5,
         rings: &[(2.62, 4.12)],
         segments: 96,
-        pinned_arms: 105,
+        pinned_arms: 88,
     }
 }
 
@@ -196,7 +218,7 @@ fn round_50() -> Disc {
         bottom_radius_mm: 24.0,
         rings: &[(2.62, 4.12), (12.25, 12.75)],
         segments: 128,
-        pinned_arms: 338,
+        pinned_arms: 304,
     }
 }
 
@@ -206,7 +228,7 @@ fn round_100() -> Disc {
         bottom_radius_mm: 49.0,
         rings: &[(2.62, 4.12), (12.25, 12.75), (25.0, 25.5)],
         segments: 128,
-        pinned_arms: 1142,
+        pinned_arms: 1067,
     }
 }
 
@@ -598,7 +620,8 @@ fn round_bases_stay_flat_supported_and_land_glue_face_up() {
         // band is the harness's licensed multiplicative width around today's
         // count, the same honest pin this file used for Round 25's flip before
         // 2026-09-28: a ratchet against a gross regression, and a number the
-        // rule-C lane is EXPECTED to move downward and re-pin.
+        // rule-C lane is EXPECTED to move downward and re-pin. It did, on
+        // 2026-09-29 (the wall-creep lane; see `Disc::pinned_arms`).
         let pinned = disc.pinned_arms as f64;
         let (low, high) = (pinned * bands::STRUT_COUNT.0, pinned * bands::STRUT_COUNT.1);
         assert!(

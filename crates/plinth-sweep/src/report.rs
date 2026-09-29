@@ -317,6 +317,12 @@ pub struct SweepRunReport {
 pub struct PathHits {
     pub reach_tests: u64,
     pub vertical_inheritance_hits: u64,
+    /// Cells a wall-creep step was priced for by the surface's overhang weight
+    /// (`reach::creep_step`). Zero means the rule never ran.
+    pub creep_cells_weighted: u64,
+    /// Of those, the cells the weighted step actually rooted from a carrier
+    /// one layer down.
+    pub creep_steps_taken: u64,
     pub multi_carrier_split_hits: u64,
     pub strut_share_reads: u64,
     pub landing_injections: u64,

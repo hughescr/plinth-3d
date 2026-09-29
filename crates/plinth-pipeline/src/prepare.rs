@@ -2723,7 +2723,9 @@ fn print_sweep_disclosure(
          -> {:.4} on the finished field (under the silhouette {:.4} -> {:.4} -> {:.4}); \
          overlapping root pairs {} -> {} -> {}; cells under \
          3+ roots {} -> {} (deepest stack {} -> {}); remedies over {} round(s): {} roots \
-         leaned outward, {} flank arms inserted at shelf layer {} ({} cover cells), \
+         leaned outward, {} flank arms inserted of {} wanted for {:.4} mm2 of stacked disc \
+         area after the lean, at shelf layer {} ({} cover cells), {} round(s) with no flank \
+         arm because the previous ones left the stack no smaller, \
          {:.4} mm2 of section moved outside the silhouette, {:.4} mm2 of load still carried to \
          the plate by flank arms ({} of them re-landed off the plate); flank root radius \
          estimate {:.4} mm used (mean placed root {:.4} mm, hex-cell area law {:.4} mm), \
@@ -2746,8 +2748,11 @@ fn print_sweep_disclosure(
         jam.rounds_used,
         jam.arms_leaned,
         jam.arms_inserted,
+        jam.flank_arms_wanted,
+        jam.flank_stacked_area_mm2.iter().sum::<f64>(),
         jam.shelf_layer,
         jam.shelf_cover_cells,
+        jam.flank_rounds_not_relieving,
         jam.section_moved_outside_silhouette_mm2,
         jam.flank_load_still_at_plate_mm2,
         jam.flank_arms_moved_off_plate,
@@ -2844,7 +2849,7 @@ fn print_sweep_disclosure(
         "[sweep {model}] slenderness p50 {:.1}:1 max {:.1}:1; overloaded arms {}; \
          model sections over X_ALLOWED {}; peel field {:?} (area {:?}, tilt {:?}); \
          path hits: reach {} vertical {} spread {} arm-share {} injections {} max-combines {} \
-         raster {} coarsening {} kappa {}/{} lift {}",
+         raster {} coarsening {} kappa {}/{} lift {} creep-cells {} creep-steps {}",
         report.slenderness_p50,
         report.slenderness_max,
         report.overloaded_struts.len(),
@@ -2863,6 +2868,8 @@ fn print_sweep_disclosure(
         report.counters.kappa_placement_reads,
         report.counters.kappa_audit_gate_reads,
         report.counters.lift_assertions,
+        report.counters.creep_cells_weighted,
+        report.counters.creep_steps_taken,
     );
     println!(
         "[sweep {model}] lowering: {} arms offered, {} emitted, {} dropped zero-length, \
@@ -2890,6 +2897,7 @@ fn print_sweep_disclosure(
             overloaded.strut_id, overloaded.layer, overloaded.carried_mm2, overloaded.realized_x,
         );
     }
+    print_overloaded_arms(model, plan);
     for section in report.model_section_overload.iter().take(20) {
         println!(
             "[sweep {model}] WARNING model section at layer {}: {:.4} mm2 of material carries \
@@ -2902,6 +2910,69 @@ fn print_sweep_disclosure(
             "[sweep {model}] WARNING {} demand cells ({:.4} mm2) no legal arm could reach. \
              This region is BARE on an emitted file.",
             report.residual_demand_cells, report.residual_demand_mm2,
+        );
+    }
+}
+
+/// One line per OVERLOADED ARM (not per arm-layer): what the member is and what
+/// hangs on it, so an overload in a run log can be traced to its cause without
+/// re-running the engine. Stdout only; the emitted file does not depend on it.
+///
+/// Batch-first: one pass over the overload list and one over the struts.
+fn print_overloaded_arms(model: &ModelId, plan: &plinth_sweep::SweepPlan) {
+    use std::collections::BTreeMap;
+    // id -> (entries, lowest layer, highest layer, most carried mm2)
+    let mut arms: BTreeMap<u32, (usize, usize, usize, f64)> = BTreeMap::new();
+    for entry in &plan.report.overloaded_struts {
+        let slot = arms
+            .entry(entry.strut_id)
+            .or_insert((0, usize::MAX, 0, 0.0));
+        slot.0 += 1;
+        slot.1 = slot.1.min(entry.layer);
+        slot.2 = slot.2.max(entry.layer);
+        slot.3 = slot.3.max(entry.carried_mm2);
+    }
+    if arms.is_empty() {
+        return;
+    }
+    // id -> (children landed on it, their summed carried load at their own
+    // bottom, braces or masts seated on it)
+    let mut hangers: BTreeMap<u32, (usize, f64, usize)> = BTreeMap::new();
+    for strut in &plan.struts {
+        if let plinth_sweep::Landing::Strut { id, .. } = strut.landing {
+            if arms.contains_key(&id) {
+                let slot = hangers.entry(id).or_default();
+                slot.0 += 1;
+                slot.1 += strut.carried_mm2.first().copied().unwrap_or(0.0);
+            }
+        }
+        if let Some(parent) = strut.seat_on_strut {
+            if arms.contains_key(&parent) {
+                hangers.entry(parent).or_default().2 += 1;
+            }
+        }
+    }
+    for (id, (entries, low, high, most)) in &arms {
+        let Some(strut) = plan.struts.get(*id as usize) else {
+            continue;
+        };
+        let (children, child_load, seated) = hangers.get(id).copied().unwrap_or_default();
+        println!(
+            "[sweep {model}] OVERLOADED ARM {id}: {entries} arm-layers over the limit, layers \
+             {low}..{high}, at most {most:.4} mm2; {:?} k {}..{}, landing {:?}, cell {} at \
+             ({:.3}, {:.3}) mm, inserted for load {}, moved by a remedy {}; {children} members \
+             landed on it carrying {child_load:.4} mm2 at their own bottoms, {seated} braces or \
+             masts seated on it; root radius {:.4} mm",
+            strut.kind,
+            strut.k_bottom,
+            strut.k_top,
+            strut.landing,
+            strut.cell,
+            strut.center_mm[0],
+            strut.center_mm[1],
+            strut.inserted_by_load,
+            strut.straight_fallback.is_some(),
+            strut.radius_mm.first().copied().unwrap_or(0.0),
         );
     }
 }

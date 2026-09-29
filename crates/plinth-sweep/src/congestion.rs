@@ -113,6 +113,11 @@ pub struct CongestionCensus {
     pub disc_area_mm2: f64,
     /// Area at least one disc covers, mm².
     pub union_area_mm2: f64,
+    /// The STACKED area, `(Σ disc cells − union cells) · cell area`, mm². Taken
+    /// from the integer cell counts and not as `disc_area − union_area`: two
+    /// censuses with the same stacked cells must read the same area to the
+    /// bit, whatever else the field holds, because remedy 2 compares them.
+    pub stacked_area_mm2: f64,
     /// `Σ π r²` analytically, mm² — published as a cross-check on the raster.
     pub analytic_disc_area_mm2: f64,
     /// `disc_area / union_area`. `1.0` means no two discs overlap; `0.0` means
@@ -194,6 +199,17 @@ pub struct CongestionOutcome {
     pub flank_radius_area_law_mm: f64,
     /// The one actually registered, bare, mm.
     pub flank_radius_used_mm: f64,
+    /// The STACKED flared plate area remedy 2 was called to relieve, one entry
+    /// per round in which it ran: `Σ disc cells − union cells` on the census
+    /// taken after remedy 1 moved its roots, in mm². What remedy 2's arm count
+    /// is sized from (see [`insert_flank_arms`]).
+    pub flank_stacked_area_mm2: Vec<f64>,
+    /// Flank arms the stacked area asked for, summed over the rounds:
+    /// `⌈stacked / one flank arm's own flared disc⌉` per round.
+    pub flank_arms_wanted: usize,
+    /// Rounds in which remedy 2 was NOT run because the flank arms of the
+    /// round before left the stack no smaller (see [`apply_remedies`]).
+    pub flank_rounds_not_relieving: usize,
     /// Searches that found no admissible plate cell outside the silhouette.
     pub outward_cells_refused: usize,
     /// Flank seats the path check or the non-overlap rule refused.
@@ -359,9 +375,14 @@ fn census(grid: &Grid, discs: &[RootDisc]) -> CongestionCensus {
         clippy::cast_precision_loss,
         reason = "cell counts bounded by the grid's own cell count are exact in f64"
     )]
-    let (stamped, unioned) = (stamps as f64, union_cells as f64);
+    let (stamped, unioned, stacked) = (
+        stamps as f64,
+        union_cells as f64,
+        (stamps - union_cells) as f64,
+    );
     out.disc_area_mm2 = stamped * cell_area;
     out.union_area_mm2 = unioned * cell_area;
+    out.stacked_area_mm2 = stacked * cell_area;
     out.ratio = if union_cells == 0 { 0.0 } else { stamped / unioned };
     out.stack_max = three_or_more;
     out.stack_depth_max = deepest;
@@ -484,8 +505,31 @@ pub fn apply_remedies(
     // Remedy 2 only when remedy 1 could not clear the stack. The census is
     // re-taken from the moved field rather than predicted from the counter.
     let after_lean = census(grid, &placed);
-    if context.flank_arms && after_lean.congested() {
-        moved += insert_flank_arms(context, &mut index, struts, &mut placed, outcome);
+    //
+    // AND ONLY WHILE IT IS RELIEVING. The last entry of
+    // `flank_stacked_area_mm2` is the stack the previous round's flank arms
+    // were inserted for; this round's census is taken after the down-sweep
+    // sized them. If the stack is no smaller, those arms relieved nothing,
+    // and more of the same buys members and no relief. Measured on Round 25
+    // flipped, 2026-09-29: 0.0575 mm² stacked in each of four rounds, one
+    // flank arm per round, and the four brought 10 |X| braces and 7 masts.
+    let stacked_mm2 = after_lean.stacked_area_mm2;
+    let relieving = outcome
+        .flank_stacked_area_mm2
+        .last()
+        .is_none_or(|previous| stacked_mm2 < *previous);
+    if context.flank_arms && after_lean.congested() && !relieving {
+        outcome.flank_rounds_not_relieving += 1;
+    }
+    if context.flank_arms && after_lean.congested() && relieving {
+        moved += insert_flank_arms(
+            context,
+            &mut index,
+            struts,
+            &mut placed,
+            outcome,
+            stacked_mm2,
+        );
     }
     moved
 }
@@ -578,16 +622,65 @@ fn lean_congested_roots(
 /// whose cured material BEGINS at that layer are its down-facing flank. On a
 /// laid-over cylinder that is the two lines along the body at the height of its
 /// own axis — the highest seats that still face downward and outward.
+///
+/// # How many: the relief is sized by the stack it relieves
+///
+/// A flank arm relieves the stack by carrying load that would otherwise reach
+/// the stacked roots. At best it takes its own section's worth, `π r_f² ·
+/// X_ALLOWED`, off them, and the area law then lets their section shrink by
+/// the same `π r_f²` — by `π (flare · r_f)²` of FLARED plate area, which is
+/// exactly the disc the flank arm is registered at. So a stacked flared area
+/// `E` needs at least `⌈E / π (flare · r_f)²⌉` flank arms, and every arm
+/// beyond that buys relief the plate has no stack for. That is the count.
+/// No constant: `E` is this round's census after the lean, and the disc is the
+/// placeholder radius this function already registers every flank arm at.
+///
+/// Measured before this rule (2026-09-29): Round 25 flipped had ONE
+/// overlapping root pair (congestion 1.0006, about 0.06 mm² stacked) and got
+/// 49 flank arms at shelf layer 144, which brought 83 |X| braces and 58
+/// masts; the laid tube at its production pose, 0.0004 stacked after the
+/// lean, got 84.
+///
+/// # Which: nearest the stack
+///
+/// When the shelf offers more seats than are wanted, the wanted ones are the
+/// seats nearest (in plan) to a root that is still stacked, because a flank
+/// arm's load leaves the body where it is seated and relieves the roots under
+/// that part of the body. When every seat is wanted, the seats keep the
+/// shelf's own raster order, so this rule changes nothing on a footprint whose
+/// stack outweighs the whole shelf.
 fn insert_flank_arms(
     context: &CongestionContext<'_>,
     index: &mut ColumnHistory,
     struts: &mut Vec<SweepStrut>,
     placed: &mut Vec<RootDisc>,
     outcome: &mut CongestionOutcome,
+    stacked_mm2: f64,
 ) -> usize {
     let shelves = underside_layers(context.history, context.layers);
     let bare = flank_root_radius_mm(context, &placed[..], outcome);
     let radius = bare * context.flare_factor;
+    let disc_mm2 = core::f64::consts::PI * radius * radius;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a finite non-negative area ratio, ceiled to an arm count"
+    )]
+    let wanted = if disc_mm2 > 0.0 && stacked_mm2.is_finite() {
+        ((stacked_mm2 / disc_mm2).ceil().max(1.0)) as usize
+    } else {
+        usize::MAX
+    };
+    outcome.flank_stacked_area_mm2.push(stacked_mm2);
+    outcome.flank_arms_wanted = outcome.flank_arms_wanted.saturating_add(wanted);
+    let stack: Vec<[f64; 2]> = {
+        let ids = stacked_ids(placed);
+        placed
+            .iter()
+            .filter(|disc| ids.binary_search(&disc.id).is_ok())
+            .map(|disc| [disc.x_mm, disc.y_mm])
+            .collect()
+    };
     let mut moved = 0_usize;
     // THE SHELF IS THE HIGHEST LAYER WHOSE COVER ADMITS THE HEX PITCH, and it
     // is found by walking DOWN from the top of the model rather than by naming
@@ -602,20 +695,49 @@ fn insert_flank_arms(
         if shelf == 0 {
             break;
         }
-        let seats = flank_seats(context, struts, shelf);
+        let mut seats = flank_seats(context, struts, shelf);
         if seats.is_empty() {
             continue;
+        }
+        if wanted < seats.len() {
+            nearest_the_stack_first(context.grid, &mut seats, &stack);
         }
         outcome.shelf_layer = shelf;
         outcome.shelf_cover_cells = cover_cells;
         moved = seat_flank_arms(
-            context, index, struts, placed, outcome, shelf, radius, bare, &seats,
+            context, index, struts, placed, outcome, shelf, radius, bare, &seats, wanted,
         );
         if moved > 0 {
             break;
         }
     }
     moved
+}
+
+/// Reorder `seats` so the ones nearest (in plan) to a still-stacked root come
+/// first; ties keep the shelf's raster order. One distance per seat and stacked
+/// root, once per round — the seats and the stack are both small lists, and
+/// nothing here touches the grid.
+fn nearest_the_stack_first(grid: &Grid, seats: &mut [usize], stack: &[[f64; 2]]) {
+    if stack.is_empty() {
+        return;
+    }
+    let mut keyed: Vec<(f64, usize)> = seats
+        .iter()
+        .map(|&cell| {
+            let x = grid.center_x_mm(grid.col_of(cell));
+            let y = grid.center_y_mm(grid.row_of(cell));
+            let nearest = stack
+                .iter()
+                .map(|p| (p[0] - x) * (p[0] - x) + (p[1] - y) * (p[1] - y))
+                .fold(f64::INFINITY, f64::min);
+            (nearest, cell)
+        })
+        .collect();
+    keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (slot, (_, cell)) in seats.iter_mut().zip(keyed) {
+        *slot = cell;
+    }
 }
 
 /// Which pre-sizing estimate of a flank root's radius is in force.
@@ -703,12 +825,15 @@ fn flank_root_radius_mm(
     used
 }
 
-/// Put one arm under each accepted flank seat, leaning outward to clear plate.
+/// Put one arm under each accepted flank seat, in the order given, leaning
+/// outward to clear plate, until `wanted` are seated. A refused seat passes the
+/// want to the next seat in the list.
 #[expect(
     clippy::too_many_arguments,
     reason = "the seating step reads the context, the column index, the strut set, the placed \
-          discs, the outcome it reports into, its own shelf layer, the placeholder radius and \
-          the seats; a struct would move the argument list rather than shorten it"
+          discs, the outcome it reports into, its own shelf layer, the placeholder radius, \
+          the seats and how many of them are wanted; a struct would move the argument list \
+          rather than shorten it"
 )]
 fn seat_flank_arms(
     context: &CongestionContext<'_>,
@@ -720,11 +845,12 @@ fn seat_flank_arms(
     radius: f64,
     bare: f64,
     seats: &[usize],
+    wanted: usize,
 ) -> usize {
     let grid = context.grid;
     let mut moved = 0_usize;
     for seat in seats.iter().copied() {
-        if struts.len() + 1 > context.max_struts {
+        if moved >= wanted || struts.len() + 1 > context.max_struts {
             break;
         }
         let Some((cell, path)) =
@@ -1445,6 +1571,48 @@ mod tests {
             assert_eq!(out.stack_max, 0);
             assert_eq!(out.stack_depth_max, 1);
         }
+    }
+
+    /// The same stacked pair reads the SAME stacked area to the bit, however
+    /// many disjoint roots the rest of the plate holds. Remedy 2 stops when a
+    /// round's stack is not smaller than the last one's, so two equal stacks
+    /// must compare equal; `disc_area − union_area` did not (Round 25 flipped,
+    /// 2026-09-29: the same 23 stacked cells read a hair smaller in round 2 and
+    /// bought a second flank arm that relieved nothing).
+    #[test]
+    fn the_same_stack_reads_the_same_stacked_area_whatever_else_is_on_the_plate() {
+        let grid = grid();
+        let pair = [disc(0, 5.0, 5.0, 0.4), disc(1, 5.5, 5.0, 0.4)];
+        let alone = census(&grid, &pair);
+        assert!(alone.stacked_area_mm2 > 0.0, "the pair does not overlap");
+        let mut differs_by_subtraction = 0;
+        for extra in 1..=40_u32 {
+            let mut discs = pair.to_vec();
+            for k in 0..extra {
+                let x = 0.5 + f64::from(k % 8) * 1.2;
+                let y = 7.0 + f64::from(k / 8) * 0.6;
+                discs.push(disc(10 + k, x, y, 0.13 + 0.01 * f64::from(k % 5)));
+            }
+            let out = census(&grid, &discs);
+            assert_eq!(
+                out.stacked_area_mm2.to_bits(),
+                alone.stacked_area_mm2.to_bits(),
+                "{extra} disjoint extra roots changed the stacked area {} -> {}",
+                alone.stacked_area_mm2,
+                out.stacked_area_mm2
+            );
+            if (out.disc_area_mm2 - out.union_area_mm2).to_bits()
+                != (alone.disc_area_mm2 - alone.union_area_mm2).to_bits()
+            {
+                differs_by_subtraction += 1;
+            }
+        }
+        // Anti-vacuity: the subtraction really does drift on these fields, so
+        // this test would catch it coming back.
+        assert!(
+            differs_by_subtraction > 0,
+            "the subtraction never drifted here, so this test cannot tell the two forms apart"
+        );
     }
 
     /// Two coincident discs put twice the area on one patch, and the ratio says

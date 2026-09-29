@@ -478,6 +478,13 @@ pub struct SweepPolicy {
     /// every arm drops straight down from its seat, which is exactly how this
     /// engine behaved before 2026-09-04.
     pub lean: bool,
+    /// Whether the reach potential prices a wall's creep by the registered
+    /// overhang weight of the mesh surface it crosses
+    /// ([`reach::SurfaceCreep`], field report 2026-09-28). **On in
+    /// production.** The knob exists so the drill can put the full-cost rule
+    /// back and watch Round 50's drafted rim draw its minimum-tip arms again;
+    /// nothing in the pipeline turns it off.
+    pub creep_weight: bool,
     /// Whether a descent may land part-way down another arm's SHAFT, and not
     /// only on its top. **On in production.** The knob exists so a test can
     /// show that a mid-shaft junction is what a given arm chose, by putting the
@@ -596,6 +603,7 @@ impl SweepPolicy {
                 .diagnostic()
                 .get(),
             lean: true,
+            creep_weight: true,
             shaft_landings: true,
             drain_keep_out: true,
             removal_span_check: true,
@@ -696,6 +704,16 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_slenderness(mut self) -> Self {
         self.slenderness = false;
+        self
+    }
+
+    /// Price every creep step at a full lamina whatever the wall's angle -- the
+    /// rule this engine had before the 2026-09-28 field report. **Sabotage and
+    /// comparison only**: with it set, Round 50's drafted rim must draw
+    /// minimum-tip arms again (`tests/it/wall_creep.rs`).
+    #[must_use]
+    pub const fn without_creep_weight(mut self) -> Self {
+        self.creep_weight = false;
         self
     }
 
@@ -881,6 +899,19 @@ pub fn run_sweep_with_drains(
         lean::LeanLaw::disabled(height)
     };
     let mut rasteriser_entries = 0_u64;
+    // The mesh's own surface, banded layer by layer, for the overhang weight a
+    // wall's creep is priced at. Disabled by the sabotage knob, which prices
+    // every creep at a full lamina as before.
+    let mut creep = if policy.creep_weight {
+        reach::SurfaceCreep::new(
+            mesh,
+            &grid,
+            policy.overhang_centre_deg,
+            policy.overhang_transition_deg,
+        )
+    } else {
+        reach::SurfaceCreep::disabled(&grid)
+    };
 
     for (layer, solids) in slices.iter().enumerate().take(layers) {
         rasteriser_entries += 1;
@@ -893,7 +924,18 @@ pub fn run_sweep_with_drains(
             continue;
         }
         reach::advance_thickness(&grid, &masks.cover, &masks.carry, height, &mut reach);
-        reach::recompute_potential(&grid, &masks.cover, policy.kappa, height, &[], &mut reach);
+        // The band this layer's material is born in: from the slicing plane
+        // below to its own.
+        creep.load_layer(&grid, planes[layer] - height, planes[layer]);
+        reach::recompute_potential(
+            &grid,
+            &masks.cover,
+            policy.kappa,
+            height,
+            &[],
+            &creep,
+            &mut reach,
+        );
         let outcome = up_sweep::place_layer(
             &grid,
             layer,
@@ -2187,6 +2229,8 @@ fn build_report(
         counters: PathHits {
             reach_tests: reach.reach_tests,
             vertical_inheritance_hits: reach.vertical_inheritance_hits,
+            creep_cells_weighted: reach.creep_cells_weighted,
+            creep_steps_taken: reach.creep_steps_taken,
             multi_carrier_split_hits: outcome.spread_search_hits,
             strut_share_reads: outcome.strut_share_reads,
             landing_injections: outcome.landing_injections,
