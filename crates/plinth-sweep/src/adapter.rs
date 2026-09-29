@@ -9,7 +9,9 @@
 //!
 //! What this module DOES own is the frame arithmetic: turning an arm's
 //! `(cell, k_top, k_bottom, landing)` into two points in millimetres, in the
-//! same frame the emitter reads.
+//! same frame the emitter reads — and handing across the arm's WHOLE radius
+//! ledger, one entry per layer, so the lowering can draw the section the area
+//! law sized at every height rather than a straight line between its two ends.
 //!
 //! ```text
 //! layer k covers z in [plate_z + k*h, plate_z + (k+1)*h)
@@ -64,6 +66,19 @@ pub struct SweepEmission {
     pub tip_seat_depth_mm: Vec<f64>,
     pub tip_cut_radius_mm: Vec<f64>,
     pub tip_radius_mm: Vec<f64>,
+    /// Members drawn in more than one straight span because one taper would
+    /// have dipped below the area law's profile (every trunk under a mid-shaft
+    /// junction), and the `Member` frusta that added.
+    pub arms_drawn_in_spans: usize,
+    pub profile_member_frusta: usize,
+    /// Arms that reached the lowering with no radius profile (a caller
+    /// defect; zero on every sweep field).
+    pub arms_without_profile: usize,
+    /// The support resin as EMITTED, from the written records themselves, and
+    /// the part of it in tapers and chained members. The sweep report's
+    /// `support_volume_mm3` is the SIZING ledger and is published beside it.
+    pub drawn_volume_mm3: f64,
+    pub drawn_shaft_volume_mm3: f64,
 }
 
 impl SweepEmission {
@@ -126,6 +141,11 @@ pub fn to_primitives(
         tip_seat_depth_mm,
         tip_cut_radius_mm,
         tip_radius_mm,
+        arms_drawn_in_spans,
+        profile_member_frusta,
+        arms_without_profile,
+        drawn_volume_mm3,
+        drawn_shaft_volume_mm3,
     } = lower_sweep_arms(
         &arms,
         frame,
@@ -144,6 +164,11 @@ pub fn to_primitives(
         tip_seat_depth_mm,
         tip_cut_radius_mm,
         tip_radius_mm,
+        arms_drawn_in_spans,
+        profile_member_frusta,
+        arms_without_profile,
+        drawn_volume_mm3,
+        drawn_shaft_volume_mm3,
     })
 }
 
@@ -185,7 +210,13 @@ pub fn arms_of(plan: &SweepPlan) -> Vec<SweepArm> {
                 seat_mm: [x, y, seat_z],
                 base_mm: [base_x, base_y, base_z],
                 tip_radius_mm: strut.tip_radius_mm(),
-                root_radius_mm: strut.radius_mm.first().copied().unwrap_or_default(),
+                // THE WHOLE LEDGER, not its two ends (2026-09-28). Until then
+                // only `(tip, root)` crossed here and the arm was drawn as one
+                // straight taper between them, which leaves every trunk under
+                // a mid-shaft junction thinner than its own ledger and thinner
+                // than the branch landing on it. The lowering draws the fewest
+                // straight spans that stay on or above this profile.
+                radius_profile_mm: strut.radius_mm.clone(),
                 // Both measured by the sweep at its own finished seat
                 // (`run_sweep_with_drains`); nothing is re-derived here. The
                 // lowering drives the tip ball into the model along the arm to
