@@ -366,10 +366,12 @@ pub enum Placement {
     /// repair controller, the pre-write gates, and the frozen lowering.
     #[default]
     Legacy,
-    /// The slice-sweep core (`plinth-sweep`), **experimental**. It skips the
-    /// pre-write gate set, branching, bracing, joint spheres, raft and every
-    /// clearance check; each of those absences is printed on the run and is
-    /// not a claim that they are unnecessary.
+    /// The slice-sweep core (`plinth-sweep`), **experimental**. It leans and
+    /// merges arms, ties long members (`|X|` braces, thickened roots, masts)
+    /// and keeps every brace's and mast's solid clear of the model and of the
+    /// other members. It skips the pre-write gate set, joint spheres and any
+    /// clearance check of an arm's own shaft; each of those absences is printed
+    /// on the run and is not a claim that they are unnecessary.
     Sweep,
 }
 

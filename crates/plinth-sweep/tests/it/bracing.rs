@@ -346,9 +346,9 @@ fn the_stilt_plate_leaves_no_unbraced_run() {
 /// So wherever a post NEEDS its crosses — with every cross on it taken out of
 /// the measurement it has a run over the limit — the crosses over that run
 /// must hold every direction of sway. A cross holds the sway within 45° of its
-/// own plane, so their planes must cover the half-turn in 90° arcs: no gap of
-/// more than 90° between neighbouring planes, going round. One plane is half a
-/// tie. (On d103c48 every tie was one cross in one plane.)
+/// own plane; crosses meeting the post at one band-top layer are credited
+/// together (`Σ cos² ≥ ½`, ruling of 2026-09-29, fix/member-clearance). One
+/// plane is half a tie. (On d103c48 every tie was one cross in one plane.)
 ///
 /// The measurement here is taken with ALL of the post's crosses removed, so it
 /// reads no plane at all: the planes are read off the finished geometry by the
@@ -396,25 +396,40 @@ fn assert_ties_hold_in_every_direction(name: &str, plan: &SweepPlan) {
                 continue;
             }
             graded += 1;
-            // Plane directions on the half-turn, sorted; the widest gap between
-            // neighbours (going round) must be at most 90 degrees.
-            #[expect(clippy::cast_precision_loss, reason = "grid steps are small integers")]
-            let mut deg: Vec<f64> = over
+            // RE-DERIVED 2026-09-29 (fix/member-clearance, ruling 3): crosses
+            // that meet the post at ONE band-top layer are credited together,
+            // holding a direction φ when Σ cos²(φ − θ) ≥ ½ over their planes (a
+            // single plane: the ±45° arc, exactly the old rule). Every direction
+            // on the half-turn, sampled every 0.5°, must be held by the crosses
+            // of at least one band-top layer inside the run. Until then the
+            // test asked for the planes' 45° arcs to cover the half-turn, which
+            // refuses two planes 60° apart that jointly hold every direction.
+            let mut by_top: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
+            for cross in mine
                 .iter()
-                .map(|p| {
-                    (p.1 as f64)
-                        .atan2(p.0 as f64)
-                        .to_degrees()
-                        .rem_euclid(180.0)
+                .filter(|c| run.k_lo < c.k_top && c.k_lo < run.k_top)
+            {
+                let p = plane_of(cross);
+                #[expect(clippy::cast_precision_loss, reason = "grid steps are small integers")]
+                let deg = (p.1 as f64)
+                    .atan2(p.0 as f64)
+                    .to_degrees()
+                    .rem_euclid(180.0);
+                let list = by_top.entry(cross.k_top).or_default();
+                if !list.iter().any(|known| (known - deg).abs() < 1.0e-9) {
+                    list.push(deg);
+                }
+            }
+            let unheld = (0..360).map(|i| f64::from(i) * 0.5).find(|phi| {
+                !by_top.values().any(|planes| {
+                    planes
+                        .iter()
+                        .map(|theta| (phi - theta).to_radians().cos().powi(2))
+                        .sum::<f64>()
+                        >= 0.5 - 1.0e-9
                 })
-                .collect();
-            deg.sort_by(f64::total_cmp);
-            let widest = deg
-                .windows(2)
-                .map(|w| w[1] - w[0])
-                .chain(std::iter::once(deg[0] + 180.0 - deg[deg.len() - 1]))
-                .fold(0.0_f64, f64::max);
-            if widest > 90.0 + 1.0e-9 {
+            });
+            if unheld.is_some() {
                 one_plane.push((post, run.k_lo, run.k_top, over));
             }
         }

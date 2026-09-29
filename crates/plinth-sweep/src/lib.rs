@@ -51,6 +51,7 @@ pub mod head_join;
 pub mod landing_check;
 pub mod lean;
 pub mod limits;
+pub(crate) mod member_clearance;
 pub mod model_landing;
 pub mod orient_demand;
 pub mod peel;
@@ -558,10 +559,11 @@ pub struct SweepPolicy {
     /// the pre-2026-09-06 per-cell occupancy test, and watches overlapping root
     /// pairs reappear on the finished field.
     pub slenderness_mast_root_clearance: bool,
-    /// `FINAL_CLEARANCE_GAP_MM`, the owner's field-ruled gap (2026-08-22)
-    /// between a support solid and the model. The head-join rule holds the
-    /// section that carries a lander's load this far from a trunk's seat plane
-    /// ([`head_join`]).
+    /// `FINAL_CLEARANCE_GAP_MM`, the owner's field-ruled 0.3 mm final hard
+    /// limit (2026-08-22) between a support solid and the model. The head-join
+    /// rule holds the section that carries a lander's load this far from a
+    /// trunk's seat plane ([`head_join`]); a brace or a mast is refused where
+    /// its drawn solid would come closer (`member_clearance.rs`).
     pub final_clearance_gap_mm: f64,
     /// Whether a lander that would join a support arm inside its seat zone is
     /// moved down the arm until the sum-sized section clears it ([`head_join`],
@@ -576,6 +578,12 @@ pub struct SweepPolicy {
     /// not depend on the pitch.
     pub surface_index_pitch_mm: f64,
     pub surface_index_max_bytes: u64,
+    /// Whether a brace or a mast must clear the model by the final gap and
+    /// every member it is not joined to by its own radius (fix/member-clearance,
+    /// 2026-09-29). **On in production.** The drill turns it off, which puts
+    /// back the centreline-cell test alone, and watches braces enter the model
+    /// and each other again; nothing in the pipeline turns it off.
+    pub member_clearance: bool,
     pub limits: SweepLimits,
 }
 
@@ -648,6 +656,7 @@ impl SweepPolicy {
                 .decimation_probe_max_grid_bytes()
                 .diagnostic()
                 .get(),
+            member_clearance: true,
             limits: SweepLimits {
                 cell_layer_budget: placeholders.sweep_cell_layer_budget().diagnostic().get(),
                 ..SweepLimits::production()
@@ -804,6 +813,16 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_head_join(mut self) -> Self {
         self.head_join = false;
+        self
+    }
+
+    /// Test a brace's or a mast's path by its centreline cell alone, the rule
+    /// this engine had until fix/member-clearance (2026-09-29): no radius, no
+    /// final gap, no member-against-member test. **Sabotage only**; nothing in
+    /// the pipeline sets it.
+    #[must_use]
+    pub const fn without_member_clearance(mut self) -> Self {
+        self.member_clearance = false;
         self
     }
 
@@ -1251,6 +1270,8 @@ pub fn run_sweep_with_drains(
         mast: policy.slenderness_mast,
         flare_factor: policy.flare_r_factor,
         mast_root_clearance: policy.slenderness_mast_root_clearance,
+        final_clearance_mm: policy.final_clearance_gap_mm,
+        member_clearance: policy.member_clearance,
         max_struts: policy.limits.max_struts,
         x_allowed: policy.x_allowed,
     };

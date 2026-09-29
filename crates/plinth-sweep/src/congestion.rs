@@ -1177,6 +1177,35 @@ pub(crate) fn clear_of_placed(
     true
 }
 
+/// What growing the disc at `cell` from `old_radius_mm` to `new_radius_mm`
+/// does to the discs around it (flared radii, as [`clear_of_placed`]):
+/// `(laps_a_new_root, grows_an_existing_lap)`. A disc it laps only after the
+/// growth is a NEW lap; a disc it already lapped before is an existing one,
+/// which the growth deepens. The same [`disc_touches`] rule, asked twice.
+pub(crate) fn growth_laps(
+    grid: &Grid,
+    cell: usize,
+    old_radius_mm: f64,
+    new_radius_mm: f64,
+    placed: &[RootDisc],
+    skip: Option<usize>,
+) -> (bool, bool) {
+    let x = grid.center_x_mm(grid.col_of(cell));
+    let y = grid.center_y_mm(grid.row_of(cell));
+    let (mut new_lap, mut existing) = (false, false);
+    for (slot, disc) in placed.iter().enumerate() {
+        if Some(slot) == skip || !disc_touches(x, y, new_radius_mm, disc) {
+            continue;
+        }
+        if disc_touches(x, y, old_radius_mm, disc) {
+            existing = true;
+        } else {
+            new_lap = true;
+        }
+    }
+    (new_lap, existing)
+}
+
 /// THE clearance rule, for one placed disc: whether a disc of `radius_mm`
 /// centred at `(x, y)` would touch it. [`clear_of_placed`] and
 /// [`PlacedIndex::clear`] both ask exactly this, so there is one rule.

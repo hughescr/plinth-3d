@@ -196,8 +196,10 @@ fn print_report(selection: &PrepareSelection, report: &PrepareReport) {
                 "legacy sealed support run (pre-write gates enforced)",
             PlacementSelection::Sweep =>
                 "slice-sweep core, EXPERIMENTAL: NO pre-write gate ran on any model in \
-                 this run; no branching, bracing, joint spheres, raft or clearance \
-                 checking. Per-model disclosure is printed above each model's line.",
+                 this run; arms lean and merge, long members are tied by |X| braces, \
+                 thickened roots and masts, and braces and masts clear the model and \
+                 each other; no joint spheres and no clearance check of an \
+                 arm's own shaft. Per-model disclosure is printed above each model's line.",
         }
     );
 

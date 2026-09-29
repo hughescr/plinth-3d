@@ -63,9 +63,26 @@ pub struct SeatTrimReport {
     /// AFTER the half-space: the concave and straddling cases a plane cannot
     /// see.
     pub records_cut_by_model: usize,
-    /// Records the trim would have removed entirely. Emit and warn: such a
-    /// record keeps its UNTRIMMED geometry and is counted here.
+    /// Records the trim would have removed entirely AND whose re-cut against
+    /// the model alone could not run (the second batched call failed): such a
+    /// record keeps its UNTRIMMED geometry and is counted here. Until
+    /// fix/member-clearance (2026-09-29) every emptied record was kept whole.
     pub records_left_whole_after_empty_trim: usize,
+    /// Records the seat trim emptied that still have solid OUTSIDE the model:
+    /// they keep `primitive ∖ model solid` (the seat plane cannot be honoured,
+    /// the model always is). A WARNING of a seat whose plane missed.
+    #[serde(default)]
+    pub records_kept_outside_model_after_empty_trim: usize,
+    /// Records that lie WHOLLY INSIDE the model: nothing of them is outside
+    /// the model solid, so nothing of them can print as support. They are
+    /// left out of the file (fix/member-clearance, 2026-09-29: "the seat trim
+    /// must never keep a record wholly inside the model"), named here as a
+    /// WARNING of a seat that failed.
+    #[serde(default)]
+    pub records_dropped_wholly_inside_model: usize,
+    /// The primitive indices of those dropped records.
+    #[serde(default)]
+    pub dropped_record_indices: Vec<usize>,
     /// Solid removed by the trim, in thousandths of a mm³, over all records.
     pub removed_volume_milli_mm3: u64,
     /// The batched call itself failed (a model solid the boolean backend
@@ -200,6 +217,22 @@ fn write_staged(
     let lift = f32_of(lift)?;
     let (records, seat_trim) =
         build_records_trimmed(model.primitives(), center, Some(model.mesh()))?;
+    // The audit reopens the file and pairs every record with its primitive, so
+    // it is given exactly the primitives whose records were written.
+    let written: std::borrow::Cow<'_, [SupportPrimitive]> =
+        if seat_trim.dropped_record_indices.is_empty() {
+            std::borrow::Cow::Borrowed(model.primitives())
+        } else {
+            std::borrow::Cow::Owned(
+                model
+                    .primitives()
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| !seat_trim.dropped_record_indices.contains(index))
+                    .map(|(_, primitive)| primitive.clone())
+                    .collect(),
+            )
+        };
 
     let mut project = Project::new_empty();
     let index = project
@@ -248,7 +281,7 @@ fn write_staged(
             plate_z: f32_of(model.plate_z_mm().get() - center[2])?,
             model: &geometry,
             records: &records,
-            primitives: model.primitives(),
+            primitives: &written,
             model_center: center,
         },
     )?;
@@ -642,7 +675,8 @@ fn build_records(
 /// Without a model (`model: None`, the unit tests' single-record path) no
 /// record is trimmed. Emit and warn throughout: a batch the backend rejects
 /// leaves every record untrimmed and says why in the report, and a piece the
-/// trim would remove entirely keeps its untrimmed soup and is counted.
+/// trim would remove entirely keeps only its part outside the model, or, with
+/// nothing outside, is left out of the file; both are counted.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
@@ -674,10 +708,14 @@ fn build_records_trimmed(
         Some(mesh) => trim_to_seats(primitives, &mut soups, mesh, center),
         None => SeatTrimReport::default(),
     };
+    // A record wholly inside the model is left out (`trim_to_seats`); every
+    // other record is encoded in primitive order, as before.
     let records = frames
         .iter()
         .zip(&soups)
-        .map(|(frame, triangles)| encode_record(frame, triangles))
+        .enumerate()
+        .filter(|(index, _)| !report.dropped_record_indices.contains(index))
+        .map(|(_, (frame, triangles))| encode_record(frame, triangles))
         .collect::<Result<Vec<_>, _>>()?;
     Ok((records, report))
 }
@@ -747,7 +785,8 @@ fn trim_to_seats(
         }
     };
     let mut removed_mm3 = 0.0_f64;
-    for (&(index, _), result) in trimmed.iter().zip(&results) {
+    let mut emptied: Vec<usize> = Vec::new();
+    for (position, (&(index, _), result)) in trimmed.iter().zip(&results).enumerate() {
         report.records_trimmed += 1;
         // "Removed material" means more than the backend's own rounding: a
         // relative part in a billion of the piece.
@@ -757,7 +796,7 @@ fn trim_to_seats(
         report.records_cut_by_model +=
             usize::from(result.after_half_space_volume - result.after_subtraction_volume > noise);
         let Some(kept) = &result.mesh else {
-            report.records_left_whole_after_empty_trim += 1;
+            emptied.push(position);
             continue;
         };
         removed_mm3 += (result.whole_volume - result.after_subtraction_volume).max(0.0);
@@ -767,6 +806,70 @@ fn trim_to_seats(
             .iter()
             .map(|triangle| triangle.map(|corner| vertices[corner as usize]))
             .collect();
+    }
+    // A RECORD THE TRIM EMPTIED IS NEVER KEPT WHOLE INSIDE THE MODEL
+    // (fix/member-clearance, 2026-09-29). Its seat plane cannot be honoured,
+    // but the model can: ONE more batched call re-cuts every such piece
+    // against the model alone (a half-space that keeps the whole piece). What
+    // is left outside the model is kept; a piece with nothing outside is
+    // wholly inside the model, prints as model and nothing else, and is left
+    // out of the file with a named warning. Until then every emptied record
+    // kept its whole untrimmed soup, inside the model (165 on the Cylinder at
+    // c33dc8e).
+    if !emptied.is_empty() {
+        let second: Vec<plinth_solid::Mesh> = emptied
+            .iter()
+            .map(|&position| pieces[position].clone())
+            .collect();
+        let keep_all: Vec<plinth_solid::KeepHalfSpace> = emptied
+            .iter()
+            .zip(&second)
+            .map(|(&position, piece)| {
+                let normal = keep[position].normal;
+                let lowest = piece
+                    .vertices()
+                    .iter()
+                    .map(|vertex| geom_kernel::vec3::dot(normal, *vertex))
+                    .fold(f64::INFINITY, f64::min);
+                // Below every vertex of the piece: the plane keeps all of it.
+                plinth_solid::KeepHalfSpace {
+                    normal,
+                    offset: lowest - 1.0,
+                }
+            })
+            .collect();
+        match plinth_solid::ManifoldBackend.trim_and_subtract_each(
+            &solid,
+            &second,
+            &keep_all,
+            plinth_solid::BooleanLimits::UNLIMITED,
+        ) {
+            Ok(outside) => {
+                for (&position, result) in emptied.iter().zip(&outside) {
+                    let index = trimmed[position].0;
+                    match &result.mesh {
+                        Some(kept) => {
+                            report.records_kept_outside_model_after_empty_trim += 1;
+                            removed_mm3 +=
+                                (result.whole_volume - result.after_subtraction_volume).max(0.0);
+                            let vertices = kept.vertices();
+                            soups[index] = kept
+                                .triangles()
+                                .iter()
+                                .map(|triangle| triangle.map(|corner| vertices[corner as usize]))
+                                .collect();
+                        }
+                        None => {
+                            report.records_dropped_wholly_inside_model += 1;
+                            report.dropped_record_indices.push(index);
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                report.records_left_whole_after_empty_trim += emptied.len();
+            }
+        }
     }
     report.removed_volume_milli_mm3 = (removed_mm3 * 1000.0).round() as u64;
     report

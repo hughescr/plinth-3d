@@ -243,8 +243,19 @@ fn deleting_the_clearance_rule_brings_the_overlapping_masts_back() {
         "production placed {clean_masts} masts and {} of them lap: {clean_overlaps:?}",
         clean_overlaps.len()
     );
+    // RE-DERIVED 2026-09-29 (fix/member-clearance): `> 10` → `> 0` pairs. With
+    // crosses at one layer credited together, the laid tube (thickening off)
+    // needs 2 masts, not 6, so a drill that deletes the rule can lap at most a
+    // handful; it laps 1 where production laps 0, and that difference is what
+    // this drill exists to show.
+    println!(
+        "laid tube, thickening off: {clean_masts} masts in force with {} lapping pairs; \
+         {sabotaged_masts} masts and {} lapping pairs with the clearance rule deleted",
+        clean_overlaps.len(),
+        sabotaged_overlaps.len()
+    );
     assert!(
-        sabotaged_overlaps.len() > 10,
+        sabotaged_overlaps.len() > clean_overlaps.len(),
         "the sabotage drill deleted the clearance rule and only {} pairs overlapped \
          ({sabotaged_masts} masts placed). Either this fixture no longer exercises the rule, or \
          the rule is not what is keeping the production field clean — say which before believing \

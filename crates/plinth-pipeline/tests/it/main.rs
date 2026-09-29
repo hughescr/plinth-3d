@@ -21,6 +21,7 @@ mod dual_cavity_real_pipeline;
 mod first_artifact;
 mod load_gate_area_law;
 mod load_gate_warning_mode_corpus_survey;
+mod member_clearance_emitted;
 mod no_private_vector_algebra;
 mod plate_contact;
 mod prepare_folder;

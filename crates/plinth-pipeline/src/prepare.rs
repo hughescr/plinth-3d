@@ -2417,10 +2417,15 @@ fn sweep_and_emit(
     println!(
         "[sweep {model}] seat trim in the file: {} records cut in one batched call; {} cut by \
          their seat plane, {} further cut by the model solid; {removed_mm3:.3} mm3 of support \
-         removed; {} left untrimmed because the trim would have removed them entirely",
+         removed; of the records the trim would have removed entirely, {} keep only their part \
+         outside the model, {} lie WHOLLY INSIDE the model and are left out of the file (a \
+         WARNING of a seat that failed), and {} were left untrimmed because the re-cut could not \
+         run",
         trim.records_trimmed,
         trim.records_cut_by_seat_plane,
         trim.records_cut_by_model,
+        trim.records_kept_outside_model_after_empty_trim,
+        trim.records_dropped_wholly_inside_model,
         trim.records_left_whole_after_empty_trim,
     );
     if let Some(error) = &trim.batch_error {
@@ -2882,6 +2887,25 @@ fn print_sweep_disclosure(
         } else {
             ""
         },
+    );
+    // MEMBER CLEARANCE AND JOINT CREDITING (fix/member-clearance, 2026-09-29):
+    // what the solid tests refused, what the joint rule saved, and which masts
+    // the rules moved or refused. Each is a path-hit witness.
+    println!(
+        "[sweep {model}] member clearance: brace bands refused {} for coming within the final \
+         gap of the model, {} for entering a member they are not joined to; mast cells refused \
+         {} by the model, {} by a member, {} for needing a mast thicker than the member it \
+         braces; {} masts placed at a cell needing a thinner mast than the nearest; {} crosses \
+         built at a layer the member was already tied at (planes credited together there); \
+         {} thickenings applied over a root lap that stood before the growth",
+        lane.brace_bands_refused_by_model,
+        lane.brace_bands_refused_by_member,
+        lane.mast_cells_refused_by_model,
+        lane.mast_cells_refused_by_member,
+        lane.mast_cells_refused_thicker_than_member,
+        lane.masts_moved_to_a_thinner_cell,
+        lane.crosses_at_an_existing_tie_layer,
+        lane.thicken_over_existing_lap,
     );
     for warning in lane.warnings.iter().take(20) {
         println!(
