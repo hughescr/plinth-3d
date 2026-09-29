@@ -47,6 +47,7 @@ pub mod down_sweep;
 pub mod drain;
 pub mod footprint;
 pub mod grid;
+pub mod head_join;
 pub mod landing_check;
 pub mod lean;
 pub mod limits;
@@ -557,6 +558,24 @@ pub struct SweepPolicy {
     /// the pre-2026-09-06 per-cell occupancy test, and watches overlapping root
     /// pairs reappear on the finished field.
     pub slenderness_mast_root_clearance: bool,
+    /// `FINAL_CLEARANCE_GAP_MM`, the owner's field-ruled gap (2026-08-22)
+    /// between a support solid and the model. The head-join rule holds the
+    /// section that carries a lander's load this far from a trunk's seat plane
+    /// ([`head_join`]).
+    pub final_clearance_gap_mm: f64,
+    /// Whether a lander that would join a support arm inside its seat zone is
+    /// moved down the arm until the sum-sized section clears it ([`head_join`],
+    /// 2026-09-29). **On in production.** The drill turns it off, which is the
+    /// field this engine placed before the rule, and the leaned heads' shafts
+    /// reach the model again.
+    pub head_join: bool,
+    /// `DECIMATION_PROBE_GRID_PITCH_MM` and `DECIMATION_PROBE_MAX_GRID_BYTES`:
+    /// the registered parity-grid pitch and byte cap of a distance-probe
+    /// surface index. The head-join rule builds one over the model to measure
+    /// a moved member's clearance; the clearance itself is a BVH walk and does
+    /// not depend on the pitch.
+    pub surface_index_pitch_mm: f64,
+    pub surface_index_max_bytes: u64,
     pub limits: SweepLimits,
 }
 
@@ -619,6 +638,16 @@ impl SweepPolicy {
             slenderness_thicken: true,
             slenderness_mast: true,
             slenderness_mast_root_clearance: true,
+            final_clearance_gap_mm: *evidence.final_clearance_gap_mm().value(),
+            head_join: true,
+            surface_index_pitch_mm: placeholders
+                .decimation_probe_grid_pitch_mm()
+                .diagnostic()
+                .get(),
+            surface_index_max_bytes: placeholders
+                .decimation_probe_max_grid_bytes()
+                .diagnostic()
+                .get(),
             limits: SweepLimits {
                 cell_layer_budget: placeholders.sweep_cell_layer_budget().diagnostic().get(),
                 ..SweepLimits::production()
@@ -764,6 +793,17 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_mast_root_clearance(mut self) -> Self {
         self.slenderness_mast_root_clearance = false;
+        self
+    }
+
+    /// Leave every join where the placement put it, head joins included — the
+    /// field this engine placed before the head-join rule of 2026-09-29.
+    /// **Sabotage only**: the drill sets it and a leaned head's sum-sized shaft
+    /// must reach its seat plane again. The rule's surveys still run and
+    /// publish what is in the seat zone.
+    #[must_use]
+    pub const fn without_head_join(mut self) -> Self {
+        self.head_join = false;
         self
     }
 
@@ -1270,6 +1310,48 @@ pub fn run_sweep_with_drains(
             &landing_check::check_landings(&struts),
         );
     }
+    // --- head joins: a lander joins a trunk BELOW its seat zone -----------
+    //
+    // After every pass that sets a landing (descent, un-merge, congestion, the
+    // slenderness merges) and BEFORE the ties, so a lander the rule lengthens
+    // is measured and tied like any other member. Each pass that moves a join
+    // is followed by the same down-sweep that books the lander's load at its
+    // new layer, and the rule runs again on the re-sized field until nothing
+    // moves, bounded by the registered pass count the other loops use.
+    let head_join_context = head_join::HeadJoinContext {
+        slender: &slenderness_context,
+        mesh,
+        layer_plan: plan,
+        plate_z_mm: plate_z,
+        clearance_mm: policy.final_clearance_gap_mm,
+        standoff_mm: policy.standoff_mm,
+        surface_pitch_mm: policy.surface_index_pitch_mm,
+        surface_max_bytes: policy.surface_index_max_bytes,
+        surface: std::cell::OnceCell::new(),
+    };
+    let mut head_join_outcome = head_join::HeadJoinOutcome {
+        enabled: policy.head_join,
+        clearance_mm: policy.final_clearance_gap_mm,
+        standoff_mm: policy.standoff_mm,
+        min_lander_clearance_mm: f64::INFINITY,
+        ..head_join::HeadJoinOutcome::default()
+    };
+    if policy.head_join {
+        for pass in 0..policy.strut_removal_passes {
+            let moved = head_join::apply(
+                &head_join_context,
+                &mut struts,
+                &mut head_join_outcome,
+                pass == 0,
+            );
+            if moved == 0 {
+                break;
+            }
+            outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
+            set_interior(&mut struts, &history);
+        }
+        landings.record("head joins", &landing_check::check_landings(&struts));
+    }
     // THE TIES: `|X|`, thicken, mast, each measured on the live field, then the
     // down-sweep that sizes what they added, then again until a pass changes
     // nothing — bounded by the same registered pass count the removal and
@@ -1403,6 +1485,7 @@ pub fn run_sweep_with_drains(
     report.merges_moved_with_trunk = merges_moved_with_trunk;
     report.unmerge_stale_landings = unmerge_stale_landings;
     report.landing_check = landings;
+    report.head_join = head_join_outcome;
     report.lean_max_step_mm = law.max_step_mm();
     report.descent_junctions_mid_shaft = junctions_mid_shaft_descent;
     // SHAFT SPANS AS THE FINISHED FIELD HAS THEM, not as the up-sweep left
@@ -1495,6 +1578,23 @@ pub fn run_sweep_with_drains(
         );
     }
     sweep_plan.report.seat_footprint = footprint;
+    // WHAT THE EMITTED FIELD STILL HAS IN A SEAT ZONE (head-join, 2026-09-29),
+    // measured on the arms exactly as they go to the lowering: the ties may
+    // have raised a trunk's drawn section after the rule ran, and a footprint
+    // move re-tilts a shaft. Published and warned on, never refused. Surveyed
+    // with the rule off too, so the sabotage field names what the rule would
+    // have moved.
+    {
+        let emitted = adapter::arms_of(&sweep_plan);
+        let (examined, listed) =
+            head_join::census(&head_join_context, &sweep_plan.struts, &emitted);
+        let rule = &mut sweep_plan.report.head_join;
+        rule.in_seat_zone_after = listed;
+        if !policy.head_join {
+            rule.joins_examined = examined;
+            rule.joins_in_seat_zone_before = rule.in_seat_zone_after.len();
+        }
+    }
     sweep_plan.report.sweep_digest = digest(&sweep_plan.struts);
     Ok(sweep_plan)
 }
@@ -2155,6 +2255,7 @@ fn build_report(
         slenderness_lane: crate::slenderness::SlendernessOutcome::default(),
         congestion_lane: crate::congestion::CongestionOutcome::default(),
         seat_footprint: crate::footprint::FootprintOutcome::default(),
+        head_join: crate::head_join::HeadJoinOutcome::default(),
         junctions_at_parent_top,
         junctions_mid_shaft,
         support_volume_mm3,

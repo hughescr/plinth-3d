@@ -409,6 +409,49 @@ pub(crate) fn drawn_ends(
     ([x, y, seat_z], [base_x, base_y, base_z])
 }
 
+/// The lowering's view of one member, drawn between `seat_mm` and `base_mm`
+/// with the drawn radius `profile`. The one construction [`arms_of`] and the
+/// sweep's head-join rule ([`crate::head_join`]) both use, so the rule measures
+/// the member the file gets.
+pub(crate) fn sweep_arm(
+    strut: &crate::SweepStrut,
+    seat_mm: [f64; 3],
+    base_mm: [f64; 3],
+    seat_face_point_mm: Option<[f64; 3]>,
+    profile: Vec<f64>,
+) -> SweepArm {
+    SweepArm {
+        seat_mm,
+        base_mm,
+        tip_radius_mm: strut.tip_radius_mm(),
+        // THE WHOLE LEDGER, not its two ends (2026-09-28). Until then
+        // only `(tip, root)` crossed here and the arm was drawn as one
+        // straight taper between them, which leaves every trunk under
+        // a mid-shaft junction thinner than its own ledger and thinner
+        // than the branch landing on it. The lowering draws the fewest
+        // straight spans that stay on or above this profile.
+        // Raised where a thicker branch joins (`junction_profiles`).
+        radius_profile_mm: profile,
+        // Both measured by the sweep at its own finished seat
+        // (`run_sweep_with_drains`); nothing is re-derived here. The
+        // lowering drives the tip ball into the model along the arm to
+        // the law's FULL depth and TRIMS the ball and the first shaft
+        // segment to this face's plane. The point moves with the seat,
+        // so it stays on the same plane.
+        seat_normal_mm: strut.seat_normal,
+        seat_face_point_mm,
+        landing: match strut.landing {
+            Landing::Plate => SweepArmLanding::Plate,
+            Landing::Model { .. } | Landing::Strut { .. } => SweepArmLanding::Landed,
+        },
+        // A brace seats on another arm and a mast tops out in free
+        // space; neither may be given a tip ball. Every arm the reach
+        // and the area law place seats into the model and is
+        // unchanged.
+        seats_into_model: strut.kind == crate::StrutKind::Arm,
+    }
+}
+
 fn arms_and_junction_raises(plan: &SweepPlan) -> (Vec<SweepArm>, JunctionRaises) {
     let height = plan.layer_height_mm;
     let plate = plan.plate_z_mm;
@@ -439,39 +482,16 @@ fn arms_and_junction_raises(plan: &SweepPlan) -> (Vec<SweepArm>, JunctionRaises)
             // The face point moves with the arm's OWN seat move only.
             let own_shift = (strut.seat_face.footprint == crate::Footprint::MovedOntoFace)
                 .then_some(strut.seat_face.shift_mm);
-            SweepArm {
-                seat_mm: moved(seat, seat_shift),
-                base_mm: moved(base, base_shift),
-                tip_radius_mm: strut.tip_radius_mm(),
-                // THE WHOLE LEDGER, not its two ends (2026-09-28). Until then
-                // only `(tip, root)` crossed here and the arm was drawn as one
-                // straight taper between them, which leaves every trunk under
-                // a mid-shaft junction thinner than its own ledger and thinner
-                // than the branch landing on it. The lowering draws the fewest
-                // straight spans that stay on or above this profile.
-                // Raised where a thicker branch joins (`junction_profiles`).
-                radius_profile_mm: std::mem::take(profile),
-                // Both measured by the sweep at its own finished seat
-                // (`run_sweep_with_drains`); nothing is re-derived here. The
-                // lowering drives the tip ball into the model along the arm to
-                // the law's FULL depth and TRIMS the ball and the first shaft
-                // segment to this face's plane. The point moves with the seat,
-                // so it stays on the same plane.
-                seat_normal_mm: strut.seat_normal,
-                seat_face_point_mm: strut
+            sweep_arm(
+                strut,
+                moved(seat, seat_shift),
+                moved(base, base_shift),
+                strut
                     .seat_face
                     .point_mm
                     .map(|point| moved(point, own_shift)),
-                landing: match strut.landing {
-                    Landing::Plate => SweepArmLanding::Plate,
-                    Landing::Model { .. } | Landing::Strut { .. } => SweepArmLanding::Landed,
-                },
-                // A brace seats on another arm and a mast tops out in free
-                // space; neither may be given a tip ball. Every arm the reach
-                // and the area law place seats into the model and is
-                // unchanged.
-                seats_into_model: strut.kind == crate::StrutKind::Arm,
-            }
+                std::mem::take(profile),
+            )
         })
         .collect();
     (arms, raised)

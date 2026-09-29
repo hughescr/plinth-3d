@@ -2413,7 +2413,11 @@ fn descends_through(struts: &[SweepStrut], from: u32, target: u32) -> bool {
 /// [`ColumnHistory::model_blocks`], which asks whether model stands at THIS
 /// layer, because this pass runs after the sweep and `top_model` by then names
 /// each column's topmost model layer overall.
-fn segment_path(
+///
+/// The head-join rule ([`crate::head_join`]) re-lands a member with this same
+/// test, so a join moved down a trunk is held to the refusals a remedy-1 merge
+/// is.
+pub(crate) fn segment_path(
     context: &SlendernessContext<'_>,
     index: &ColumnHistory,
     seat_cell: usize,

@@ -829,6 +829,30 @@ is met by `junction_profiles`, which raises the host's drawn profile to the bran
 joint down. An arm with no slot below its contact (one layer long, terminating at its own tip
 layer) keeps the load in its one slot and is counted (`contact_merges_kept_at_single_slot`).
 
+**As built (2026-09-29, fix/head-join; `lanes/contact-sizing.md` §5).** The ledger rule above left
+the GEOMETRY of a leaned head: the sum-sized shaft starts one slot under the seat, its tilted ring
+rises through the seat plane (Round 25 stiffener arms 39, 41, 44, about 53° from vertical, by 0.41
+to 0.48 mm), and the trim leaves that section on the model face, so the file's contact is not own
+sized. `head_join` (run after the slenderness merges and before the ties, to a fixed point with the
+down-sweep) moves such a lander so that (1) the section carrying the sum keeps
+`FINAL_CLEARANCE_GAP_MM` (0.3 mm) from the seat plane of the member it joins, measured on the drawn
+shaft from the ball centre (`tip_contact_discs`) as `d − R·√(1 − (n·m)²)`, and (2) the lander's own
+solid, re-landed there, keeps the two-tier clearance from the model (0.6 mm placement margin, else
+the 0.3 mm hard limit) by the kernel's segment-clearance predicate, its own seat zone excepted.
+Candidates are the head arm's shaft below the booked slot, then its landing chain, highest first.
+Members resting on a moved lander follow it onto its new axis (no nearer the model than they were).
+A join that cannot move is kept and warned (`HeadJoinOutcome`, prepare log "head joins"), and the
+emitted field is surveyed again after the footprint rule. **Scope (second round, same day):** every
+member landed on a support arm, at any layer, is graded, because a lander one or three layers under a
+leaned head is booked into the same slot as one at the head (Round 50 at its committed flip, arms 66,
+68, 83, 98, their sums across the plane by 0.33 to 0.48 mm and unwarned while the rule looked at head
+landings only). The seat zone is where the plane is the model: a section is in it only when it is
+within 0.3 mm of the seat plane AND of the model itself, its disc measured as a circumscribed 16-gon
+(edges and spokes) by the kernel's segment-clearance predicate. Under a steep face the infinite plane
+passes below the model (Round 25 arm 6), and such a join is left alone; where the model IS there the
+join is the rule's whatever the lean (Round 50 arm 155, vertical: its lander's solid was 0.088 mm
+inside the model). The same zone decides which candidate joins may take a lander.
+
 **Corrected 2026-09-28 (fix/plate-gap).** This line first read "down to `plate_z + raft_height`",
 the legacy raft datum. v1 emits no raft (§14 OR-3), so that left every root flare 0.2 mm (four
 layers) above the plate with nothing under it; the owner saw the bases float in ChituBox. The

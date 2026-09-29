@@ -46,7 +46,7 @@ use plinth_sweep::{arms_of, Landing, StrutKind, SweepPlan};
 
 /// The committed Round 25 pose: 180° about `x`, glue face up. A proper
 /// rotation, so the triangle winding (and every outward normal) is kept.
-fn flipped(mesh: &Mesh) -> Mesh {
+pub(crate) fn flipped(mesh: &Mesh) -> Mesh {
     let verts = mesh
         .verts()
         .iter()
