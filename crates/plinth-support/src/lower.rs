@@ -1126,9 +1126,8 @@ fn emitted_solid_volume_mm3(primitive: &SupportPrimitive) -> f64 {
         // distance between its ends.
         SupportSegmentKind::RaftPad => PI * (r0 * 0.5).powi(2) * r1,
         SupportSegmentKind::RaftBridge => {
-            let dx = primitive.end_mm[0].get() - primitive.start_mm[0].get();
-            let dy = primitive.end_mm[1].get() - primitive.start_mm[1].get();
-            dx.hypot(dy) * r0 * r1
+            let plan = |point: [Finite; 3]| [point[0].get(), point[1].get(), 0.0];
+            geom_kernel::vec3::dist(plan(primitive.start_mm), plan(primitive.end_mm)) * r0 * r1
         }
     }
 }

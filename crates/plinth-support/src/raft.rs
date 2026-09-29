@@ -419,6 +419,12 @@ fn euclidean_mst_edges(roots: &[PlateRoot]) -> Vec<(usize, usize)> {
     edges
 }
 
+/// Plan-view distance between two points, through the canonical kernel
+/// (`docs/specs/geometry-canon.md` §1).
+fn plan_distance(a: [f64; 2], b: [f64; 2]) -> f64 {
+    geom_kernel::vec3::dist([a[0], a[1], 0.0], [b[0], b[1], 0.0])
+}
+
 /// One foot a sweep plate root stands on: where it meets the raft, and the
 /// radius of the circle its emitted lowest ring is inscribed in.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -506,10 +512,10 @@ pub(crate) fn plan_sweep_raft(
             .iter_mut()
             .rev()
             .take_while(|(xy, _)| foot.xy_mm[0] - xy[0] <= tolerance)
-            .find(|(xy, _)| (foot.xy_mm[0] - xy[0]).hypot(foot.xy_mm[1] - xy[1]) <= tolerance);
+            .find(|(xy, _)| plan_distance(foot.xy_mm, *xy) <= tolerance);
         match hit {
             Some((xy, cover)) => {
-                let reach = (foot.xy_mm[0] - xy[0]).hypot(foot.xy_mm[1] - xy[1]) + foot.radius_mm;
+                let reach = plan_distance(foot.xy_mm, *xy) + foot.radius_mm;
                 *cover = cover.max(reach);
                 sharing += 1;
             }
