@@ -914,7 +914,10 @@ pub fn run_sweep_with_drains(
     // on air is named on the emitted file rather than discovered in ChituBox.
     // It only counts; it never moves or refuses anything.
     let mut landings = landing_check::LandingLedger::default();
-    landings.record("up-sweep and down-sweep", &landing_check::check_landings(&struts));
+    landings.record(
+        "up-sweep and down-sweep",
+        &landing_check::check_landings(&struts),
+    );
     let mut removals = 0_u64;
     let mut removals_refused_by_span = 0_u64;
     let mut removal_passes_rolled_back = 0_u64;
@@ -1138,7 +1141,10 @@ pub fn run_sweep_with_drains(
             outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
         }
         set_interior(&mut struts, &history);
-        landings.record("un-merge after slenderness", &landing_check::check_landings(&struts));
+        landings.record(
+            "un-merge after slenderness",
+            &landing_check::check_landings(&struts),
+        );
     }
     // The finished field's own check, and the load it lost if any landing is
     // broken: the down-sweep hands a child's load to its named parent at the
@@ -1498,7 +1504,10 @@ fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> Unmer
                 break;
             }
             if let Landing::Strut { id, layer } = landing {
-                let base = strut.fallback_path.first().map_or(strut.cell, |cell| *cell as usize);
+                let base = strut
+                    .fallback_path
+                    .first()
+                    .map_or(strut.cell, |cell| *cell as usize);
                 let target = id as usize;
                 let stands = struts
                     .get(target)
@@ -2273,7 +2282,9 @@ mod removal_tests {
         let mut child = arm(1, 7, 60, 30);
         child.landing = Landing::Strut { id: 0, layer: 30 };
         // Its base in the trunk's own column, then leaned out to its seat.
-        child.path = std::iter::once(0).chain(std::iter::repeat_n(7, 29)).collect();
+        child.path = std::iter::once(0)
+            .chain(std::iter::repeat_n(7, 29))
+            .collect();
         child.straight_fallback = Some((Landing::Plate, 0));
         let mut grandchild = arm(2, 9, 80, 45);
         grandchild.landing = Landing::Strut { id: 1, layer: 45 };
@@ -2283,7 +2294,10 @@ mod removal_tests {
         // The grandchild can go back to the plate: both move, in one pass.
         let mut struts = vec![trunk.clone(), child.clone(), grandchild.clone()];
         let unmerged = unmerge_overgrown(&mut struts, 1.0);
-        assert_eq!(unmerged.undone, 2, "the child and its branch go back together");
+        assert_eq!(
+            unmerged.undone, 2,
+            "the child and its branch go back together"
+        );
         assert_eq!(unmerged.moved_with_trunk, 1);
         assert_eq!(unmerged.kept_carrying, 0);
         assert_eq!(struts[1].landing, Landing::Plate);
@@ -2297,7 +2311,10 @@ mod removal_tests {
         brace.straight_fallback = None;
         let mut struts = vec![trunk.clone(), child.clone(), brace];
         let unmerged = unmerge_overgrown(&mut struts, 1.0);
-        assert_eq!(unmerged.undone, 0, "a brace rests on the child, which must stay");
+        assert_eq!(
+            unmerged.undone, 0,
+            "a brace rests on the child, which must stay"
+        );
         assert_eq!(unmerged.kept_carrying, 1);
         assert_eq!(struts[1].landing, Landing::Strut { id: 0, layer: 30 });
         assert!(crate::landing_check::check_landings(&struts).clean());

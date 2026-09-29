@@ -116,7 +116,11 @@ impl LandingLedger {
     /// chain and a later pass that happened to mend it are both visible.
     #[must_use]
     pub fn worst_pass_unrooted(&self) -> usize {
-        self.passes.iter().map(|pass| pass.unrooted).max().unwrap_or(0)
+        self.passes
+            .iter()
+            .map(|pass| pass.unrooted)
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -292,10 +296,14 @@ mod tests {
     fn a_landing_on_a_parent_that_has_moved_is_named_with_everything_above_it() {
         let trunk = arm(0, 5, 100, 0, Landing::Plate);
         let mut child = arm(1, 6, 60, 40, Landing::Strut { id: 0, layer: 40 });
-        child.path = std::iter::once(5).chain(std::iter::repeat_n(6, 19)).collect();
+        child.path = std::iter::once(5)
+            .chain(std::iter::repeat_n(6, 19))
+            .collect();
         let grandchild = arm(2, 7, 80, 50, Landing::Strut { id: 1, layer: 50 });
         let mut grandchild = grandchild;
-        grandchild.path = std::iter::once(6).chain(std::iter::repeat_n(7, 29)).collect();
+        grandchild.path = std::iter::once(6)
+            .chain(std::iter::repeat_n(7, 29))
+            .collect();
 
         let clean = check_landings(&[trunk.clone(), child.clone(), grandchild.clone()]);
         assert_eq!(clean.strut_landings, 2);
@@ -317,10 +325,14 @@ mod tests {
         let mut trunk = arm(0, 5, 100, 0, Landing::Plate);
         let child = {
             let mut child = arm(1, 9, 60, 40, Landing::Strut { id: 0, layer: 40 });
-            child.path = std::iter::once(8).chain(std::iter::repeat_n(9, 19)).collect();
+            child.path = std::iter::once(8)
+                .chain(std::iter::repeat_n(9, 19))
+                .collect();
             child
         };
-        trunk.path = (0..100).map(|layer| if layer == 40 { 8 } else { 5 }).collect();
+        trunk.path = (0..100)
+            .map(|layer| if layer == 40 { 8 } else { 5 })
+            .collect();
         assert!(stands_at(&trunk, 8, 40));
         assert!(check_landings(&[trunk.clone(), child.clone()]).clean());
         trunk.path.clear();

@@ -807,10 +807,29 @@ pub fn run(
                 // nothing red: the layer conservation assertion is computed
                 // before this point, and `overloaded` reads the same
                 // under-stated number.
-                let own = load_out[cell];
+                //
+                // AND ONLY AN ARM READS A PEEL EVENT (2026-09-29). A brace or a
+                // mast is lateral stiffening; the carrier pass above already
+                // refuses to offer either one as a carrier. But a brace ENDS
+                // in an arm's cell — its lower end on the arm's shaft, its top
+                // at its seat arm — and reading `load_out` there took the
+                // arm's own per-layer event, which the arm's `max` over its
+                // events already covers and the injection gate never counted,
+                // and handed it back to the arm through `pending`, SUMMED on
+                // top. Each brace landing grew its trunk by one cell's event
+                // that was never put into the raster, so the plate saw more
+                // than was injected (`make_brace_pair` -0.0275 mm², eleven
+                // events; on `make_laid_tube` enough to grow a root under a
+                // mast that had been placed clear of it). A non-arm member
+                // leaves the cell's load where it is, for the arm that stands
+                // there, and carries only what lands on it.
+                let reads_peel = struts[index].kind == crate::StrutKind::Arm;
+                let own = if reads_peel { load_out[cell] } else { 0.0 };
                 let merged = pending[index];
                 pending[index] = 0.0;
-                load_out[cell] = 0.0;
+                if reads_peel {
+                    load_out[cell] = 0.0;
+                }
                 outcome.strut_share_reads += 1;
                 let slot = arm.slot;
                 if struts[index].carried_mm2.len() <= slot {
