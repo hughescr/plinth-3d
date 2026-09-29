@@ -136,6 +136,7 @@ fn the_plate_section_is_the_load_the_plate_holds_over_x_allowed_plus_the_clamp()
     let x_allowed = *constants.evidence().x_allowed().value();
     assert!(x_allowed > 0.0);
 
+    let r_max = policy().tip_radius_max_mm;
     let mut per_load = [0.0_f64; 2];
     for (slot, (name, plan)) in [("without it", &without), ("with the lane", &with)]
         .into_iter()
@@ -144,14 +145,53 @@ fn the_plate_section_is_the_load_the_plate_holds_over_x_allowed_plus_the_clamp()
         let section = plate_section_mm2(plan);
         let predicted = plan.report.plate_reaction_mm2 / x_allowed;
         assert!(section > 0.0, "{name}: nothing lands on the plate");
-        // THE LAW IS A LOWER BOUND, not an equality: an arm the load would size
-        // below the smallest printable tip is clamped there, so the plate holds
-        // AT LEAST what the load asks for and the excess is the clamp. A lane
-        // that cleared the plate by shrinking arms would break this.
+        // THE LAW IS A LOWER BOUND PER ROOT, clamped at BOTH ends. An arm the
+        // load would size below the smallest printable tip is clamped UP there,
+        // which is the excess; an arm the load would size above `r_max` is
+        // clamped DOWN there and emitted with an overload WARNING (emit and
+        // warn, never refuse), which is a shortfall the engine reports rather
+        // than hides. So every root holds at least its own load over
+        // `X_ALLOWED`, OR stands at `r_max` and is named in
+        // `overloaded_struts` at its root layer; and the roots that are not
+        // ceiling-clamped hold at least their own load's worth in sum. A lane
+        // that cleared the plate by shrinking arms would break the first.
+        //
+        // Re-derived 2026-09-28 (wall-creep lane), because that change moved
+        // it and was meant to: this used to be asserted in aggregate over EVERY
+        // root, `section >= reaction / X_ALLOWED`, which held only while the
+        // minimum-tip clamp on dozens of hairline flank arms happened to pay
+        // for the one foot arm clamped at `r_max` (56 mm2 carried, 1.22 mm
+        // asked, 1.00 mm allowed, overloaded in both fields before and after).
+        // Pricing the steep flanks' creep by their overhang weight removed
+        // those hairlines, and with them the compensation — not the law.
+        let mut unclamped_section = 0.0_f64;
+        let mut unclamped_load = 0.0_f64;
+        for root in plate_roots(plan) {
+            let area = root.root_contact_area_mm2();
+            let load = root.carried_mm2.first().copied().unwrap_or(0.0);
+            if area >= load / x_allowed * 0.999 {
+                unclamped_section += area;
+                unclamped_load += load;
+                continue;
+            }
+            let radius = root.radius_mm.first().copied().unwrap_or(0.0);
+            assert!(
+                (radius - r_max).abs() < 1.0e-9
+                    && plan.report.overloaded_struts.iter().any(|warning| {
+                        warning.strut_id == root.id && warning.layer == root.k_bottom
+                    }),
+                "{name}: root {} holds {area} mm2 of section against the {} mm2 its {load} mm2 \
+                 asks for, at radius {radius} mm (r_max {r_max}), without an overload warning",
+                root.id,
+                load / x_allowed
+            );
+        }
         assert!(
-            section >= predicted * 0.999,
-            "{name}: the plate holds {section} mm2 of section against the {predicted} mm2 the \
-             area law asks for at a {} mm2 reaction",
+            unclamped_section >= unclamped_load / x_allowed * 0.999,
+            "{name}: the roots below the ceiling hold {unclamped_section} mm2 of section against \
+             the {} mm2 the area law asks for (whole plate: {section} mm2 against {predicted} \
+             mm2 at a {} mm2 reaction)",
+            unclamped_load / x_allowed,
             plan.report.plate_reaction_mm2
         );
         per_load[slot] = section / plan.report.plate_reaction_mm2;
