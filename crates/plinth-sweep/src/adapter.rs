@@ -198,7 +198,7 @@ pub fn to_primitives(
 
 /// What the junction clause did to the drawn profiles.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct JunctionRaises {
+pub(crate) struct JunctionRaises {
     /// Members whose drawn profile was raised anywhere.
     members: usize,
     /// Junctions where a support ARM's own LEDGER end is wider than its host's
@@ -233,7 +233,16 @@ struct JunctionRaises {
 /// radius in the field, so it terminates, and the pass count is bounded by the
 /// strut count. One batch pass over the strut vector per round.
 fn junction_profiles(plan: &SweepPlan) -> (Vec<Vec<f64>>, JunctionRaises) {
-    let struts = &plan.struts;
+    drawn_profiles(&plan.struts)
+}
+
+/// [`junction_profiles`] over a bare strut set: the profile every member is
+/// DRAWN at, slot by slot from its own `k_bottom`.
+///
+/// The slenderness lane measures its runs on exactly this (owner ruling
+/// 2026-09-29: "measure runs on the DRAWN profile"), so the section the lane
+/// grades and the section the file prints are one function, not two.
+pub(crate) fn drawn_profiles(struts: &[crate::SweepStrut]) -> (Vec<Vec<f64>>, JunctionRaises) {
     let mut profiles: Vec<Vec<f64>> = struts.iter().map(|strut| strut.radius_mm.clone()).collect();
     let max_id = struts
         .iter()

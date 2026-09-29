@@ -927,7 +927,18 @@ pub fn run(
                 // slenderness lane did not touch. Where it is not zero it is a
                 // MINIMUM and never a cap: a brace that some load does reach
                 // still grows under the area law above it.
-                let radius = size_arm(carried, sizing).max(struts[index].min_radius_mm);
+                // AND THE SLENDERNESS LANE'S THICKEN RUNG (2026-09-29): a
+                // per-layer MINIMUM, empty on every member the lane did not
+                // thicken, non-decreasing downward by construction, so the
+                // profile keeps its shape.
+                let thickened = struts[index]
+                    .thickened_mm
+                    .get(layer)
+                    .copied()
+                    .unwrap_or(0.0);
+                let radius = size_arm(carried, sizing)
+                    .max(struts[index].min_radius_mm)
+                    .max(thickened);
                 struts[index].radius_mm[slot] = radius;
                 if carried > sizing.x_allowed * core::f64::consts::PI * sizing.tip_radius_max_mm
                     * sizing.tip_radius_max_mm
@@ -1233,6 +1244,7 @@ fn insert_for_load(
                 ],
                 kind: crate::StrutKind::Arm,
                 min_radius_mm: 0.0,
+                thickened_mm: Vec::new(),
                 seat_on_strut: None,
                 k_top: layer + 1,
                 // Still growing: the descent decides where this stops, the

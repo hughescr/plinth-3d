@@ -150,6 +150,20 @@ pub struct SweepStrut {
     /// place the radius is chosen (`down_sweep::run`), and it is a MINIMUM, so
     /// a brace that some load does reach still grows under the area law.
     pub min_radius_mm: f64,
+    /// The radius the slenderness lane's THICKEN rung requires at each
+    /// ABSOLUTE layer (index = layer, not slot), or empty when the member was
+    /// never thickened.
+    ///
+    /// The owner's ruling of 2026-09-29: a post that runs too far unbraced may
+    /// be made stiffer instead of tied — "raise the root radius, keep the tip",
+    /// never above the 1.0 mm maximum. The lane writes the root it needs here
+    /// (a taper from the tip it kept down to the raised root, then that root
+    /// all the way to the member's own foot, so the member is never narrower
+    /// below than above), and `down_sweep::run` applies it the same way it
+    /// applies [`Self::min_radius_mm`]: as a MINIMUM beside the area law, so a
+    /// member some load reaches still grows under the law. Keyed by absolute
+    /// layer so it survives a re-run that re-sizes the ledger.
+    pub thickened_mm: Vec<f64>,
     /// For a brace, the arm its TOP seats on. `None` for everything else.
     ///
     /// The bottom end of a brace is its `landing`, which the ledger already
@@ -515,8 +529,12 @@ pub struct SweepPolicy {
     /// arms be tied by `|X|` braces instead.
     pub slenderness_merge: bool,
     /// Whether remedy 2 -- the `|X|` cross-brace -- may fire. **On in
-    /// production.** The drill turns it off and watches masts appear.
+    /// production.** The drill turns it off and watches thickening take over.
     pub slenderness_brace: bool,
+    /// Whether remedy 3 -- THICKEN, raising a member's root and keeping its
+    /// tip (owner ruling 2026-09-29) -- may fire. **On in production.** The
+    /// drill turns it off and watches masts appear.
+    pub slenderness_thicken: bool,
     /// Whether remedy 3 -- dropping a new plate-rooted mast -- may fire.
     /// **On in production.** The drill turns it off and watches the runs come
     /// out as warnings, with NEVER fewer arms than before.
@@ -584,6 +602,7 @@ impl SweepPolicy {
             slenderness: true,
             slenderness_merge: true,
             slenderness_brace: true,
+            slenderness_thicken: true,
             slenderness_mast: true,
             slenderness_mast_root_clearance: true,
             limits: SweepLimits {
@@ -683,11 +702,21 @@ impl SweepPolicy {
     }
 
     /// Refuse remedies 1 and 2. **Sabotage only**: the drill sets it and the
-    /// same arms must come out with masts dropped beside them.
+    /// same arms must come out thickened instead.
     #[must_use]
     pub const fn without_slenderness_brace(mut self) -> Self {
         self.slenderness_merge = false;
         self.slenderness_brace = false;
+        self
+    }
+
+    /// Refuse remedies 1, 2 and 3. **Sabotage only**: the drill sets it and
+    /// the same arms must come out with masts dropped beside them.
+    #[must_use]
+    pub const fn without_slenderness_thicken(mut self) -> Self {
+        self.slenderness_merge = false;
+        self.slenderness_brace = false;
+        self.slenderness_thicken = false;
         self
     }
 
@@ -698,6 +727,7 @@ impl SweepPolicy {
     pub const fn without_slenderness_mast(mut self) -> Self {
         self.slenderness_merge = false;
         self.slenderness_brace = false;
+        self.slenderness_thicken = false;
         self.slenderness_mast = false;
         self
     }
@@ -1129,20 +1159,19 @@ pub fn run_sweep_with_drains(
         layers,
         merge: policy.slenderness_merge,
         brace: policy.slenderness_brace,
+        thicken: policy.slenderness_thicken,
         mast: policy.slenderness_mast,
         flare_factor: policy.flare_r_factor,
         mast_root_clearance: policy.slenderness_mast_root_clearance,
         max_struts: policy.limits.max_struts,
         x_allowed: policy.x_allowed,
     };
-    let mut slenderness_merges_undone = 0_usize;
-    let struts_before_slenderness = struts.len();
-    let slenderness_outcome = slenderness::apply_remedies(&slenderness_context, &mut struts);
-    landings.record("slenderness", &landing_check::check_landings(&struts));
-    if slenderness_outcome.merges_forced > 0 || struts.len() > struts_before_slenderness {
-        // Anything the lane moved or added has a stale ledger; the same
-        // down-sweep that sized the field sizes the braces and the masts, and
-        // splits both shafts at every junction the crosses made.
+    let (mut slenderness_outcome, forced_merges) =
+        slenderness::apply_merges(&slenderness_context, &mut struts);
+    landings.record("slenderness merges", &landing_check::check_landings(&struts));
+    if slenderness_outcome.merges_forced > 0 {
+        // A moved arm has a stale ledger; the same down-sweep that sized the
+        // field sizes it again.
         outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
         // AND THE SAME RADIUS CEILING THE OWNER RULED ON, APPLIED TO THE
         // MERGES THIS LANE FORCED. `unmerge_overgrown` ran before the lane, so
@@ -1150,9 +1179,13 @@ pub fn run_sweep_with_drains(
         // loads, and where the area law cannot grow the trunk far enough the
         // merge is not admissible however slender the member was. Measured on
         // `make_overhang_table`, 2026-09-06: nine forced merges drove 1828
-        // overloaded arm-layers, against zero before the lane. The arm goes
-        // back to the descent it recorded, and its run is then reported as a
-        // warning — emit and warn, never refuse.
+        // overloaded arm-layers, against zero before the lane.
+        //
+        // BEFORE THE TIES, NOT AFTER (owner ruling 2026-09-29). This pass puts
+        // arms back on the plate, and until then it ran after the ties were
+        // placed, so every post it put back came out untied and warned: the 7
+        // warnings on the stilt plate were exactly those posts.
+        let mut unmerged_after_merges = 0_usize;
         for _ in 0..policy.strut_removal_passes {
             let unmerged = unmerge_overgrown(&mut struts, policy.tip_radius_max_mm);
             merges_moved_with_trunk += unmerged.moved_with_trunk;
@@ -1162,15 +1195,54 @@ pub fn run_sweep_with_drains(
                 break;
             }
             merges_refused_by_radius += unmerged.undone;
-            slenderness_merges_undone += unmerged.undone;
+            unmerged_after_merges += unmerged.undone;
             outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
         }
+        // WHICH OF THOSE WERE THE LANE'S OWN. A forced merge put back no
+        // longer stands on the landing the lane gave it; every other un-merge
+        // in this pass was a descent merge whose trunk a forced merge had
+        // loaded past the maximum. Until 2026-09-29 both were published as
+        // "forced merges put back" (8 on the stilt plate, none of them forced).
+        slenderness_outcome.merges_put_back_ids = forced_merges
+            .iter()
+            .filter(|(id, landing)| {
+                struts
+                    .get(*id as usize)
+                    .is_some_and(|strut| strut.landing != *landing)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        slenderness_outcome.merges_undone_by_radius =
+            slenderness_outcome.merges_put_back_ids.len();
+        slenderness_outcome.descent_merges_put_back = unmerged_after_merges
+            .saturating_sub(slenderness_outcome.merges_undone_by_radius);
         set_interior(&mut struts, &history);
         landings.record(
-            "un-merge after slenderness",
+            "un-merge after slenderness merges",
             &landing_check::check_landings(&struts),
         );
     }
+    // THE TIES: `|X|`, thicken, mast, each measured on the live field, then the
+    // down-sweep that sizes what they added, then again until a pass changes
+    // nothing — bounded by the same registered pass count the removal and
+    // un-merge loops use. A pass that still changed something when the bound
+    // ran out is published (`fixed_point` false), never hidden.
+    for _ in 0..policy.strut_removal_passes {
+        let applied =
+            slenderness::apply_ties(&slenderness_context, &mut struts, &mut slenderness_outcome);
+        if applied == 0 {
+            slenderness_outcome.fixed_point = true;
+            break;
+        }
+        slenderness_outcome.tie_passes += 1;
+        // Anything the pass added or thickened has a stale ledger; the same
+        // down-sweep that sized the field sizes the braces and the masts,
+        // splits both shafts at every junction the crosses made, and keeps
+        // every thickened root as a minimum beside the area law.
+        outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
+        set_interior(&mut struts, &history);
+    }
+    landings.record("slenderness ties", &landing_check::check_landings(&struts));
     // The finished field's own check, and the load it lost if any landing is
     // broken: the down-sweep hands a child's load to its named parent at the
     // landing layer, and a parent that does not stand there never picks it
@@ -1190,10 +1262,8 @@ pub fn run_sweep_with_drains(
     // lengths belong to the arms this file actually contains.
     let slenderness_after =
         slenderness::unbraced_runs(&grid, &struts, height, &slenderness_law);
-    let mut slenderness_outcome = slenderness_outcome;
     slenderness_outcome.longest_run_mm = 0.0;
     slenderness_outcome.longest_run_limit_mm = 0.0;
-    slenderness_outcome.merges_undone_by_radius = slenderness_merges_undone;
     // WHAT THE MAST'S PLACEMENT-TIME RADIUS GOT WRONG, measured on the sized
     // field by the same function that measures the flank arms' equivalent. A
     // mast's cell is chosen against `r_m = max(r_min, H_first/S)`; the
@@ -2176,6 +2246,7 @@ mod removal_tests {
             center_mm: [0.0, 0.0],
             kind: crate::StrutKind::Arm,
             min_radius_mm: 0.0,
+            thickened_mm: Vec::new(),
             seat_on_strut: None,
             k_top,
             k_bottom,
@@ -2339,6 +2410,7 @@ mod removal_tests {
             center_mm: [0.0, 0.0],
             kind: crate::StrutKind::Arm,
             min_radius_mm: 0.0,
+            thickened_mm: Vec::new(),
             seat_on_strut: None,
             k_top: 5,
             k_bottom: 0,
@@ -2384,6 +2456,7 @@ mod removal_tests {
             center_mm: [0.0, 0.0],
             kind: crate::StrutKind::Arm,
             min_radius_mm: 0.0,
+            thickened_mm: Vec::new(),
             seat_on_strut: None,
             k_top: 5,
             k_bottom,

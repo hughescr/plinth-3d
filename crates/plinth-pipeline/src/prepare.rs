@@ -2751,10 +2751,18 @@ fn print_sweep_disclosure(
     println!(
         "[sweep {model}] slenderness lane: S = {:.1} in force; brace reach {:.3} mm at the \
          thinnest brace, {:.3} mm at the thickest; {} arms over the limit before remedies \
-         ({} runs); remedies: {} merges forced, {} |X| braces added, {} masts PLACED, \
-         {} warnings; {} brace bands refused, {} masts REFUSED for want of a clear plate cell, \
-         {} mast roots still lapping another root after sizing, {} forced merges put \
-         back by the radius ceiling; longest unbraced run remaining {:.3} mm against its own limit of {:.3} mm{}",
+         ({} runs); remedies: {} merges forced, {} |X| braces added, {} members thickened \
+         (root raised, tip kept), {} masts PLACED, {} warnings; {} forced merges put back by \
+         the radius ceiling and {} descent merges put back beside them, both before any tie; \
+         crosses (each holds the sway within 45 deg of its own plane): {} for a run no cross \
+         held, {} for a direction the crosses on the member did not hold, \
+         {} to a partner beyond the nearest, {} bands planned, {} refused as overlapping a \
+         cross on the same pair, {} taken out again as not needed; thicken refused: \
+         {} past the maximum radius, {} for a root disc that would touch another, {} trunks \
+         raised under a thickened member; {} brace bands refused, {} masts REFUSED for want of \
+         an admissible plate cell ({} cells refused by the braced-panel check), {} masts \
+         extended to a later tie, {} mast roots still lapping another root after sizing; {} \
+         tie passes, {}; longest unbraced run remaining {:.3} mm against its own limit of {:.3} mm{}",
         lane.ratio,
         lane.thin_brace_reach_mm,
         lane.thick_brace_reach_mm,
@@ -2762,12 +2770,31 @@ fn print_sweep_disclosure(
         lane.runs_over_limit_before,
         lane.merges_forced,
         lane.braces_added,
+        lane.members_thickened,
         lane.masts_dropped,
         lane.warnings.len(),
+        lane.merges_undone_by_radius,
+        lane.descent_merges_put_back,
+        lane.crosses_first_plane,
+        lane.crosses_further_plane,
+        lane.crosses_to_a_later_partner,
+        lane.cross_bands_planned,
+        lane.crosses_refused_overlapping,
+        lane.crosses_pruned,
+        lane.thicken_refused_radius,
+        lane.thicken_refused_disc,
+        lane.trunks_raised_under_thickening,
         lane.brace_bands_refused,
         lane.mast_cells_refused,
+        lane.mast_cells_refused_by_panel,
+        lane.masts_extended,
         lane.mast_roots_overlapping_after_sizing,
-        lane.merges_undone_by_radius,
+        lane.tie_passes,
+        if lane.fixed_point {
+            "fixed point reached"
+        } else {
+            "NOT at a fixed point when the pass bound ran out (a WARNING, never a refusal)"
+        },
         lane.longest_run_mm,
         lane.longest_run_limit_mm,
         if lane.longest_run_mm > lane.longest_run_limit_mm {

@@ -129,7 +129,24 @@ fn deleting_each_rung_hands_the_work_to_the_next_one_down() {
     let full = sweep_with(&mesh, 0.0, &policy());
     let no_merge = sweep_with(&mesh, 0.0, &policy().without_slenderness_merge());
     let no_brace = sweep_with(&mesh, 0.0, &policy().without_slenderness_brace());
+    let no_thicken = sweep_with(&mesh, 0.0, &policy().without_slenderness_thicken());
     let no_mast = sweep_with(&mesh, 0.0, &policy().without_slenderness_mast());
+
+    // THICKEN (owner ruling 2026-09-29) sits between the cross and the mast:
+    // with crosses deleted it takes the work, and with it deleted too the
+    // work falls to masts.
+    assert!(
+        no_brace.report.slenderness_lane.members_thickened > 0,
+        "with bracing deleted the work must fall to thickening first: {:?}",
+        no_brace.report.slenderness_lane
+    );
+    assert_eq!(no_thicken.report.slenderness_lane.members_thickened, 0);
+    assert!(
+        no_thicken.report.slenderness_lane.masts_dropped > 0,
+        "with bracing and thickening deleted the work must fall to masts: {:?}",
+        no_thicken.report.slenderness_lane
+    );
+    assert_eq!(no_mast.report.slenderness_lane.members_thickened, 0);
 
     assert_eq!(
         no_merge.report.slenderness_lane.merges_forced, 0,
@@ -143,16 +160,13 @@ fn deleting_each_rung_hands_the_work_to_the_next_one_down() {
         no_merge.report.slenderness_lane
     );
 
-    assert_eq!(
-        no_brace.report.slenderness_lane.braces_added,
-        no_brace.report.slenderness_lane.masts_dropped,
-        "with bracing deleted the only crosses left are the ones a mast brings with it"
-    );
-    assert!(
-        no_brace.report.slenderness_lane.masts_dropped > 0,
-        "with bracing deleted the work must fall to masts: {:?}",
-        no_brace.report.slenderness_lane
-    );
+    for (name, plan) in [("bracing", &no_brace), ("bracing and thickening", &no_thicken)] {
+        assert_eq!(
+            plan.report.slenderness_lane.braces_added,
+            plan.report.slenderness_lane.masts_dropped + plan.report.slenderness_lane.masts_extended,
+            "with {name} deleted the only crosses left are the ones a mast brings with it"
+        );
+    }
 
     assert_eq!(no_mast.report.slenderness_lane.merges_forced, 0);
     assert_eq!(no_mast.report.slenderness_lane.braces_added, 0);
@@ -262,10 +276,11 @@ fn every_diagonal_rises_and_none_is_shallower_than_the_overhang_law_admits() {
 #[test]
 fn every_mast_is_plate_rooted_braced_and_inside_its_own_slenderness_limit() {
     let mesh = make_lonely_peak().expect("the lonely-peak fixture");
-    // The peak's own arms have neighbours: remedy 2 can tie them to each other.
-    // Deleting bracing is what makes this fixture grade the MAST path rather
-    // than whichever rung happens to fire first.
-    let plan = sweep_with(&mesh, 0.0, &policy().without_slenderness_brace());
+    // The peak's own arms have neighbours: remedy 2 can tie them to each other,
+    // and since 2026-09-29 remedy 3 thickens them. Deleting both is what makes
+    // this fixture grade the MAST path rather than whichever rung happens to
+    // fire first.
+    let plan = sweep_with(&mesh, 0.0, &policy().without_slenderness_thicken());
     let masts = masts(&plan);
     assert!(
         !masts.is_empty(),

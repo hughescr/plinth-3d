@@ -15,6 +15,7 @@
 #[path = "../harness/mod.rs"]
 mod harness;
 
+mod bracing;
 mod congestion_lane;
 mod drain_connectivity;
 mod emitted_profile_covers_ledger;
