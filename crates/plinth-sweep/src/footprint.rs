@@ -35,17 +35,27 @@
 //! mid-plane, so the first slice showing a face can be one lamina above it,
 //! and one more for the carrier mask's inward rounding), plus the rise a
 //! sloped face needs for the carrier mask to clear its own two-cell inward
-//! bound, `2 · pitch · tan(slope)`, and never more than the ball's own
-//! diameter. Every term is a resolution of the raster itself, not a new
-//! physical number.
+//! bound, `2 · pitch · tan(slope)`. Every term is a resolution of the raster
+//! itself, not a new physical number. (A first cut also capped the window at
+//! the ball's own diameter; on a steep face under a minimum-radius tip that
+//! cap is smaller than the raster can resolve and graded real face as edge,
+//! so it was dropped. A column outside the silhouette is empty at every
+//! height, so the wider window cannot pass a disc that hangs off an edge.)
 //!
 //! # The one pruning bound (a disclosed Placeholder, it decides no outcome)
 //!
-//! `SEARCH_RADIUS_BALL_DIAMETERS = 1`: the seat may move at most one ball
-//! diameter (`2R`) along the face. It only bounds how far the search looks. A
-//! move further than the tip's own ball carries it off the feature the reach
-//! criterion placed it for; beyond it the tip is left where it is and warned
-//! about rather than moved somewhere nobody asked for support.
+//! The seat may move along the face by at most
+//! `SEARCH_RADIUS_BALL_DIAMETERS · 2R + e + 2 · pitch`: the tip's own ball
+//! diameter, plus `e`, how far the arm's lean put the disc centre from the
+//! seat (the offset that pushed it off the face), plus the carrier mask's own
+//! two-cell inward bound (a disc graded ON the face must sit that far inside
+//! the raster's edge, whatever the tip's size). It only bounds how far the
+//! search looks. A move further than that carries the tip off the feature the
+//! reach criterion placed it for; beyond it the tip is left where it is and
+//! warned about rather than moved somewhere nobody asked for support. (A first
+//! cut used `2R` alone; on a minimum-radius tip that is smaller than the
+//! raster's own two-cell margin, and every such rim tip was misreported as a
+//! knife edge.)
 //!
 //! # Batching
 //!
@@ -172,13 +182,18 @@ fn sample_at(
         (col >= 0.0 && row >= 0.0 && (col as usize) < grid.cols() && (row as usize) < grid.rows())
             .then(|| grid.index(row as usize, col as usize));
     let pitch = grid.pitch_mm();
-    let rise = (2.0 * height + 2.0 * pitch * frame.tan_slope).min(2.0 * frame.ball_radius);
+    // A vertical face (tan = inf) reads the whole column above; `lamina`
+    // clamps the window to the stack.
+    let rise = 2.0 * height + 2.0 * pitch * frame.tan_slope;
+    let top = layers.saturating_sub(1);
     let lamina = |z: f64| -> usize {
         let k = ((z - plate_z) / height).floor();
-        if k.is_finite() && k > 0.0 {
-            (k as usize).min(layers.saturating_sub(1))
-        } else {
+        if k.is_nan() || k <= 0.0 {
             0
+        } else if k >= top as f64 {
+            top
+        } else {
+            k as usize
         }
     };
     Sample {
@@ -335,7 +350,16 @@ pub(crate) fn apply(
         let Some((frame, offsets)) = &frames[arm] else {
             continue;
         };
-        let search_mm = SEARCH_RADIUS_BALL_DIAMETERS * 2.0 * frame.ball_radius;
+        // How far the lean put the disc centre from the seat, in the plane.
+        let offset = geom_kernel::vec3::sub(frame.centre, arms[arm].seat_mm);
+        let normal = geom_kernel::vec3::cross(frame.e1, frame.e2);
+        let in_plane = geom_kernel::vec3::sub(
+            offset,
+            geom_kernel::vec3::scale(normal, geom_kernel::vec3::dot(offset, normal)),
+        );
+        let search_mm = SEARCH_RADIUS_BALL_DIAMETERS * 2.0 * frame.ball_radius
+            + geom_kernel::vec3::norm(in_plane)
+            + 2.0 * pitch;
         let disc_reach = offsets
             .iter()
             .map(|&(u, v)| u.abs().max(v.abs()))
@@ -343,7 +367,7 @@ pub(crate) fn apply(
             .unwrap_or(0);
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "a search radius of one ball diameter over the grid pitch is small"
+            reason = "a search radius of about one ball diameter over the grid pitch is small"
         )]
         let search_steps = (search_mm / pitch).floor() as i32;
         let half_width = disc_reach + search_steps;

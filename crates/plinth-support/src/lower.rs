@@ -1448,6 +1448,21 @@ fn seated_ball(
     // (`SeatTrim`). What that leaves in the seat plane is the contact disc,
     // `sqrt(R² − d²)` for a centre `d` on the support side, measured here from
     // the SAME plane the emitter cuts to.
+    //
+    // THE FACE MUST BE ONE THE BALL MEETS. The carried face is the nearest
+    // down-facing mesh face to the tip's landing point; on a sculpted surface
+    // that facet's PLANE can pass clear of the ball (a small facet tilted away
+    // from the patch the ball actually seats on). A plane the ball does not
+    // cross is not the face this tip is seated against, and trimming to it
+    // would keep nothing or everything. Such a tip falls back to the raster
+    // seat's own plane with the same normal, and is counted as unmeasured.
+    if let Some(trim) = tip_seat.trim {
+        if trim.support_side_distance_mm(center).abs() >= ball_radius_mm && tip_seat.face_measured {
+            tip_seat.trim = crate::SeatTrim::new(arm.seat_mm, trim.outward_normal()).ok();
+            tip_seat.face_measured = false;
+            tip_seat.raster_seat_offset_mm = 0.0;
+        }
+    }
     if let Some(trim) = tip_seat.trim {
         let d = trim.support_side_distance_mm(center);
         tip_seat.contact_disc_radius_mm = (ball_radius_mm * ball_radius_mm - d * d).max(0.0).sqrt();

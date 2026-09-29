@@ -840,7 +840,8 @@ The **footprint rule** goes with it (`plinth_sweep::footprint`): the contact dis
 (the ball's section in the seat plane, computed by the lowering's own derivation,
 `plinth_support::tip_contact_discs`) must lie on the seat face, graded in the eroded carrier
 rasters. A seat whose disc hangs off the face slides along the face to the nearest position whose
-whole disc is on it (search bounded by one ball diameter, a pruning Placeholder); a member joined
+whole disc is on it (search bounded by the ball diameter plus the lean's offset of the disc plus
+the carrier mask's two-cell margin, a pruning Placeholder); a member joined
 to a moved axis (a branch landing, a brace top) moves with it (`footprint::followed_shifts`). A
 true knife edge keeps its seat, trimmed, and is warned about with the fraction of its disc on the
 face.

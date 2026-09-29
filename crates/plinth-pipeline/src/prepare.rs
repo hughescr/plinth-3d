@@ -2593,7 +2593,7 @@ fn print_sweep_disclosure(
         for (arm, fraction) in &footprint.knife_edges {
             println!(
                 "[sweep {model}] WARNING tip of arm {arm} sits on a KNIFE EDGE: no seat within \
-                 one ball diameter along its face holds its whole contact disc, so it keeps its \
+                 the search radius along its face holds its whole contact disc, so it keeps its \
                  seat, trimmed, with {:.1}% of its disc on the face",
                 fraction * 100.0
             );
