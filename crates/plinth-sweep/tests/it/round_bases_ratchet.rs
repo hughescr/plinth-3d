@@ -190,7 +190,7 @@ pub(crate) fn round_25() -> Disc {
     }
 }
 
-fn round_50() -> Disc {
+pub(crate) fn round_50() -> Disc {
     Disc {
         name: "Round 50",
         bottom_radius_mm: 24.0,

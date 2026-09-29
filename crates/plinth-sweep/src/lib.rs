@@ -1544,14 +1544,8 @@ pub fn run_sweep_with_drains(
     // have moved.
     {
         let emitted = adapter::arms_of(&sweep_plan);
-        let (examined, listed) = head_join::census(
-            &sweep_plan.struts,
-            &emitted,
-            plan,
-            plate_z,
-            height,
-            policy.final_clearance_gap_mm,
-        );
+        let (examined, listed) =
+            head_join::census(&head_join_context, &sweep_plan.struts, &emitted);
         let rule = &mut sweep_plan.report.head_join;
         rule.in_seat_zone_after = listed;
         if !policy.head_join {

@@ -24,7 +24,8 @@
 //! 1. the section that carries the SUM stands at least the registered final
 //!    clearance (`FINAL_CLEARANCE_GAP_MM`, 0.3 mm, the owner's field ruling of
 //!    2026-08-22) from the seat plane of the member it joins, on the support
-//!    side — so above the join the head arm carries its own peel only, and
+//!    side, or from the model itself where the plane is not the model (below)
+//!    — so above the join the head arm carries its own peel only, and
 //!    everything of it in its seat zone is sized from its own load; and
 //! 2. the lander's own solid, re-landed there, keeps the two-tier clearance
 //!    from the model (the same ruling): the placement margin (`STANDOFF_MM`,
@@ -67,14 +68,26 @@
 //! A vertical arm under a flat face is untouched when its ball already puts the
 //! sum-sized span deep enough (Round 25 arm 42: 0.468 mm, over 0.3 mm).
 //!
-//! **Only HEAD joins** — a lander at the arm's seat layer or its top alive
-//! layer, the two landings whose load reaches the contact slot, which is the
-//! contact-sizing rule's own definition. The seat plane is the model face near
-//! the contact; a join well down a shaft is measured against the same
-//! infinite plane only where that plane is still a fair stand-in for the
-//! model, and under a steep face it is not (Round 25 arm 6: its face is 75°
-//! from horizontal, and the plane passes 1.25 mm below the model's lowest
-//! point where its lander joins). Such joins are not this rule's.
+//! **Every join on a support arm, graded by geometry, not by landing layer.**
+//! A lander one or three layers under a leaned head is booked into the same
+//! slot as one at the head (contact-sizing books a head landing one slot under
+//! the contact, and any other landing at its own layer), so its sum-sized
+//! section stands where a head join's does. `cb28bdd` looked at head landings
+//! only, and on Round 50 at its committed flip four ~57° arms (66, 68, 83, 98)
+//! kept a sum across the seat plane by 0.33 to 0.48 mm, unwarned.
+//!
+//! **The seat zone is where the seat plane is the model.** Test 1's plane is
+//! the model face at the contact, and it is infinite: under a steep face it
+//! passes below the model's lowest point (Round 25 arm 6, face 75° from
+//! horizontal: its lander's sum-sized section, 1.25 mm under the seat,
+//! crosses the plane with no model within reach). So a section is in the seat
+//! zone only when it is within the clearance of the plane AND of the model
+//! itself, measured on its disc by the kernel's clearance predicate
+//! ([`sections_near_model`]); the same zone decides which joins move and which
+//! candidates may take a lander. Where the model IS there, the join is the
+//! rule's whatever the arm's lean: Round 50 arm 155 is vertical under a steep
+//! face, and its lander's sum-sized section, 1.05 mm under the seat, crossed
+//! the face (the lander's own solid 0.088 mm inside the model).
 //!
 //! # What moves, and what it is held to
 //!
@@ -93,16 +106,21 @@
 //!
 //! No new physical constant: the two clearances are the registered ruling,
 //! and every other number is the down-sweep's, the lowering's or the grid's.
+//! One new resolution: a section's disc is measured as a circumscribed
+//! 16-gon ([`SECTION_POLYGON_SIDES`]), which errs only toward "near" (by at
+//! most 0.02 mm at the largest registered radius).
 //! The surface index's parity-grid pitch and byte cap are the registered
 //! `DECIMATION_PROBE_GRID_PITCH_MM` / `_MAX_GRID_BYTES` (the only registered
 //! pair for a distance-probe surface index); the segment clearance is a BVH
 //! walk and does not depend on that pitch.
 //!
 //! Batch-first: one survey per pass (the drawn profiles, the seat faces of
-//! every trunk with a head lander in one closest-face query, and every
-//! contact disc the pass needs in one call), the surface index built once per
-//! run and only when a join is in a seat zone, and one clearance batch per
-//! lander over all of its candidate joins.
+//! every trunk with a lander in one closest-face query, every contact disc
+//! the pass needs in one call, and every section the plane holds against the
+//! model in one clearance batch), the surface index built once per run and
+//! only when a section is near a seat plane, one section batch per pass over
+//! every candidate the plane holds, and one clearance batch per lander over
+//! all of its candidate joins.
 
 use std::cell::OnceCell;
 
@@ -127,13 +145,25 @@ pub struct HeadJoinOutcome {
     /// The placement margin a moved member's solid is searched at first, in mm
     /// (`STANDOFF_MM`).
     pub standoff_mm: f64,
-    /// Head joins (a member landed at a support arm's seat layer or its top
-    /// alive layer) examined by the first survey. The path-hit witness: zero
-    /// means no member landed on a support arm's head at all.
+    /// Joins on support arms (a member landed on a support arm, at any layer)
+    /// examined by the first survey. The path-hit witness: zero means no
+    /// member landed on a support arm at all.
     pub joins_examined: usize,
-    /// Head joins whose sum-sized section reached the seat zone when the rule
-    /// first ran, before it moved anything.
+    /// Joins whose sum-sized section reached the host's seat zone (within the
+    /// clearance of its seat plane AND of the model) when the rule first ran,
+    /// before it moved anything.
     pub joins_in_seat_zone_before: usize,
+    /// Joins, at that first survey, whose sum-sized section was within the
+    /// clearance of the host's seat plane but clear of the model: the plane is
+    /// not the model there (a steep face), and the join is left alone. The
+    /// path-hit witness for the model half of the seat zone.
+    pub joins_off_the_model: usize,
+    /// Candidate joins the seat plane alone would have refused and the model
+    /// test admitted, over every pass.
+    pub candidates_off_the_model: usize,
+    /// Section-against-model rows measured by the kernel's clearance
+    /// predicate (the model half of test 1), over every pass.
+    pub model_rows: usize,
     /// Landers moved, over every pass.
     pub landers_moved: usize,
     /// Of those, the ones that went down the head arm's landing chain, onto a
@@ -162,11 +192,11 @@ pub struct HeadJoinOutcome {
     pub kept_carrying_a_tie: usize,
     pub kept_not_an_arm: usize,
     pub kept_surface_unavailable: usize,
-    /// Head joins whose seat geometry could not be measured (no seat plane or
-    /// a degenerate shaft), so the rule could not grade them.
+    /// Joins whose host's seat geometry could not be measured (no seat plane
+    /// or a degenerate shaft), so the rule could not grade them.
     pub joins_unmeasured: usize,
-    /// **The emitted field**: head joins whose sum-sized section still reaches
-    /// the seat zone, as `(lander id, trunk id)`. A warning; empty when the
+    /// **The emitted field**: joins whose sum-sized section still reaches the
+    /// host's seat zone, as `(lander id, trunk id)`. A warning; empty when the
     /// rule held everywhere.
     pub in_seat_zone_after: Vec<(u32, u32)>,
 }
@@ -219,13 +249,15 @@ impl HeadJoinContext<'_> {
 }
 
 /// One member's measured tip: the drawn shaft from the ball centre `centre`
-/// to the base `base`, the seat plane (`plane_point`, outward `normal`), the
-/// ring spread `√(1 − (n·m)²)` of a section normal to that shaft, and how far
-/// its own contact reaches down its axis from the drawn seat.
+/// to the base `base` (unit direction `axis`), the seat plane (`plane_point`,
+/// outward `normal`), the ring spread `√(1 − (n·m)²)` of a section normal to
+/// that shaft, and how far its own contact reaches down its axis from the
+/// drawn seat.
 #[derive(Clone, Copy)]
 struct Head {
     centre: [f64; 3],
     base: [f64; 3],
+    axis: [f64; 3],
     plane_point: [f64; 3],
     normal: [f64; 3],
     spread: f64,
@@ -233,7 +265,7 @@ struct Head {
     contact_reach_mm: f64,
 }
 
-/// A head join, as the survey found it.
+/// A join on a support arm, as the survey found it.
 #[derive(Clone, Copy)]
 struct Join {
     child: usize,
@@ -243,44 +275,186 @@ struct Join {
     booked: usize,
 }
 
+/// One drawn section of a shaft: the centre of its ring, the shaft's unit
+/// axis (the ring is normal to it) and its radius.
+#[derive(Clone, Copy)]
+struct Section {
+    centre: [f64; 3],
+    axis: [f64; 3],
+    radius: f64,
+}
+
 impl Head {
-    /// The clearance, in mm, between the seat plane and the nearest point of
-    /// the sum-sized section of radius `radius` whose top is the top of layer
-    /// `slot` (or the ball centre where that is lower). Negative is on the
-    /// model side of the plane.
+    /// The section of radius `radius` whose top is the top of layer `slot`, or
+    /// the ball centre where that is lower.
     #[expect(
         clippy::cast_precision_loss,
         reason = "a layer index bounded by the plan's own layer count is exact in f64"
     )]
-    fn clearance_at(&self, plate_z_mm: f64, layer_height_mm: f64, slot: usize, radius: f64) -> f64 {
+    fn section_at(
+        &self,
+        plate_z_mm: f64,
+        layer_height_mm: f64,
+        slot: usize,
+        radius: f64,
+    ) -> Section {
         let slot_top_z = plate_z_mm + (slot + 1) as f64 * layer_height_mm;
         let rise = self.centre[2] - self.base[2];
         let top_z = slot_top_z.min(self.centre[2]);
         let t = ((self.centre[2] - top_z) / rise).clamp(0.0, 1.0);
-        let at: [f64; 3] = std::array::from_fn(|axis| {
-            self.centre[axis] + t * (self.base[axis] - self.centre[axis])
-        });
-        let distance =
-            geom_kernel::vec3::dot(geom_kernel::vec3::sub(at, self.plane_point), self.normal);
-        distance - radius * self.spread
+        Section {
+            centre: std::array::from_fn(|axis| {
+                self.centre[axis] + t * (self.base[axis] - self.centre[axis])
+            }),
+            axis: self.axis,
+            radius,
+        }
+    }
+
+    /// The clearance, in mm, between the seat plane and the nearest point of
+    /// `section`'s ring. Negative is on the model side of the plane.
+    fn plane_clearance(&self, section: &Section) -> f64 {
+        let distance = geom_kernel::vec3::dot(
+            geom_kernel::vec3::sub(section.centre, self.plane_point),
+            self.normal,
+        );
+        distance - section.radius * self.spread
+    }
+
+    /// [`Self::plane_clearance`] of [`Self::section_at`].
+    #[cfg(test)]
+    fn clearance_at(&self, plate_z_mm: f64, layer_height_mm: f64, slot: usize, radius: f64) -> f64 {
+        self.plane_clearance(&self.section_at(plate_z_mm, layer_height_mm, slot, radius))
     }
 }
 
-/// The contact slot's booking: a lander at the arm's seat layer or top alive
-/// layer is booked one slot under the contact where there is one
-/// (`down_sweep::run`), else into the contact itself.
-fn booked_slot(parent: &SweepStrut) -> usize {
-    let contact = parent.k_top.saturating_sub(1);
-    if contact > parent.k_bottom {
+/// Sides of the polygon a section's ring is measured as, against the model.
+///
+/// **A resolution, not a threshold.** The polygon CIRCUMSCRIBES the ring (its
+/// vertices at `R / cos(π/N)`), so it covers the whole disc and a disc that
+/// comes within the clearance of the model always has a polygon that does
+/// too. The only error is toward "near": the polygon stands at most
+/// `R·(sec(π/16) − 1) = 0.0196·R` beyond the ring, under 0.02 mm at the
+/// largest radius the registry allows (1 mm). It can only put a join INTO the
+/// seat zone, never let one out.
+const SECTION_POLYGON_SIDES: usize = 16;
+
+/// Whether each section's DISC comes within `clearance_mm` of the model: the
+/// circumscribed polygon's edges and its spokes from the centre, as
+/// zero-radius segments, by the kernel's clearance predicate in ONE batch,
+/// and the centre by the kernel's inside test in one more. A disc that enters
+/// the model crosses its surface on a spoke or an edge. A row the predicate
+/// did not measure counts as near (the safe side), and so does a section whose
+/// ring has no direction; a near-parallel bound is read as the distance (see
+/// the loop). Returns the verdicts and the rows measured.
+fn sections_near_model(
+    surface: &NativeSurface,
+    sections: &[Section],
+    clearance_mm: f64,
+) -> (Vec<bool>, usize) {
+    if sections.is_empty() {
+        return (Vec::new(), 0);
+    }
+    let sides = SECTION_POLYGON_SIDES;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a polygon side count of 16 is exact in f64"
+    )]
+    let half_angle = std::f64::consts::PI / sides as f64;
+    let mut near = vec![false; sections.len()];
+    let mut starts = Vec::with_capacity(sections.len() * 2 * sides);
+    let mut ends = Vec::with_capacity(sections.len() * 2 * sides);
+    let mut owner = Vec::with_capacity(sections.len() * 2 * sides);
+    for (index, section) in sections.iter().enumerate() {
+        let reference = if section.axis[0].abs() < 0.9 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+        let Some(e1) =
+            geom_kernel::vec3::normalize(geom_kernel::vec3::cross(section.axis, reference))
+        else {
+            near[index] = true;
+            continue;
+        };
+        let e2 = geom_kernel::vec3::cross(section.axis, e1);
+        let reach = section.radius / half_angle.cos();
+        let vertices: Vec<[f64; 3]> = (0..sides)
+            .map(|step| {
+                #[expect(clippy::cast_precision_loss, reason = "a vertex index below 16")]
+                let angle = 2.0 * half_angle * step as f64;
+                geom_kernel::vec3::add(
+                    section.centre,
+                    geom_kernel::vec3::add(
+                        geom_kernel::vec3::scale(e1, reach * angle.cos()),
+                        geom_kernel::vec3::scale(e2, reach * angle.sin()),
+                    ),
+                )
+            })
+            .collect();
+        for step in 0..sides {
+            starts.push(vertices[step]);
+            ends.push(vertices[(step + 1) % sides]);
+            owner.push(index);
+            starts.push(section.centre);
+            ends.push(vertices[step]);
+            owner.push(index);
+        }
+    }
+    let rows = starts.len();
+    let zero = vec![0.0; rows];
+    match surface.segment_clearance_classified(&starts, &ends, &zero, &zero, 0.0, &zero, &zero) {
+        Ok(found) => {
+            for (row, &index) in found.into_iter().zip(&owner) {
+                // AN UPPER-BOUND ROW IS DECIDED HERE, AND WHY THAT IS SAFE. The
+                // kernel flags a row when some face's pierce test was
+                // near-parallel (|det| at most `DET_EPS`, 1e-14) and keeps the
+                // endpoint and edge distances as a one-sided bound. For a
+                // ZERO-radius segment the bound is tight: a segment that pierces
+                // a face while lying within that angle of its plane stays within
+                // `length × sin ε` (under 1e-9 mm here) of the plane, so either
+                // an endpoint lies over the face (the endpoint distance reads
+                // ~0) or the segment crosses one of its edges in projection (the
+                // edge distance reads ~0). Measured on a flat slab: horizontal
+                // spokes 0.5 mm under it came back as bounds of exactly 0.5 mm,
+                // flagged by the slab's far SIDE faces, which share the BVH leaf.
+                // An unmeasured row stays near (the safe side).
+                let gap = row.clearance_mm().or_else(|| row.upper_bound_mm());
+                if gap.is_none_or(|gap| gap < clearance_mm - 1.0e-9) {
+                    near[index] = true;
+                }
+            }
+        }
+        Err(_) => near.iter_mut().for_each(|flag| *flag = true),
+    }
+    let centres: Vec<[f64; 3]> = sections.iter().map(|section| section.centre).collect();
+    for (flag, inside) in near.iter_mut().zip(surface.inside(&centres)) {
+        *flag |= inside;
+    }
+    (near, rows)
+}
+
+/// The slot of `host` a member landed at `layer` is booked into
+/// (`down_sweep::run`): its landing layer, except that a load reaching the
+/// CONTACT slot (a landing at the seat layer or the top alive layer) is booked
+/// one slot under the contact where there is one.
+fn booked_slot(host: &SweepStrut, layer: usize) -> usize {
+    let contact = host.k_top.saturating_sub(1);
+    let under_contact = if contact > host.k_bottom {
         contact - 1
     } else {
         contact
-    }
+    };
+    layer.min(under_contact)
 }
 
-/// Every head join of `struts`: a member landed on a support arm at the arm's
-/// seat layer or its top alive layer.
-fn head_joins(struts: &[SweepStrut]) -> Vec<Join> {
+/// Every join on a support arm in `struts`: a member landed on a support arm,
+/// at ANY layer. Which of them reaches a seat zone is geometry ([`grade`]),
+/// not the landing layer: a lander one or three layers under a leaned head is
+/// booked into the same slot as one at the head (Round 50 at its committed
+/// flip: arms 66, 68, 83, 98, their sums across the seat plane by 0.33 to
+/// 0.48 mm on `cb28bdd`, which looked at head landings only).
+fn arm_joins(struts: &[SweepStrut]) -> Vec<Join> {
     let mut joins = Vec::new();
     for (child, strut) in struts.iter().enumerate() {
         let Landing::Strut { id, layer } = strut.landing else {
@@ -295,7 +469,7 @@ fn head_joins(struts: &[SweepStrut]) -> Vec<Join> {
             || host.kind != StrutKind::Arm
             || host.k_bottom == usize::MAX
             || host.k_top <= host.k_bottom
-            || layer + 1 < host.k_top
+            || layer < host.k_bottom
         {
             continue;
         }
@@ -303,7 +477,7 @@ fn head_joins(struts: &[SweepStrut]) -> Vec<Join> {
             child,
             parent,
             layer,
-            booked: booked_slot(host),
+            booked: booked_slot(host, layer),
         });
     }
     joins
@@ -344,6 +518,7 @@ fn heads_of(
         heads[index] = Some(Head {
             centre,
             base,
+            axis,
             plane_point: disc.centre_mm,
             normal: disc.outward_normal,
             spread: (1.0 - along * along).max(0.0).sqrt(),
@@ -392,28 +567,44 @@ fn measure(
 struct Survey {
     examined: usize,
     unmeasured: usize,
+    /// Joins whose sum-sized section is within the clearance of the seat
+    /// plane but clear of the model: the plane is not the model there.
+    off_the_model: usize,
+    /// Section-against-model rows the survey measured.
+    model_rows: usize,
     in_zone: Vec<Join>,
     heads: Vec<Option<Head>>,
     profiles: Vec<Vec<f64>>,
 }
 
 /// Grade `joins` on the given drawn profiles (indexed by strut) and heads.
+///
+/// **A join is in its host's seat zone when the section that carries its sum
+/// comes within the clearance of the host's seat plane AND of the model
+/// itself.** The plane is the model only near the seat face; it is infinite,
+/// and under a steep face it passes below the model's lowest point (Round 25
+/// arm 6, face 75° from horizontal: its lander's sum-sized section, 1.25 mm
+/// under the seat, crosses the plane with no model within reach). The model
+/// test runs only on the joins the plane test holds, in one batch
+/// ([`sections_near_model`]); with no model surface they stay in the zone.
 fn grade(
+    context: &HeadJoinContext<'_>,
     struts: &[SweepStrut],
     joins: Vec<Join>,
     heads: Vec<Option<Head>>,
     profiles: Vec<Vec<f64>>,
-    plate_z_mm: f64,
-    layer_height_mm: f64,
-    clearance_mm: f64,
 ) -> Survey {
     let mut out = Survey {
         examined: joins.len(),
         unmeasured: 0,
+        off_the_model: 0,
+        model_rows: 0,
         in_zone: Vec::new(),
         heads,
         profiles,
     };
+    let height = context.slender.layer_height_mm;
+    let mut held: Vec<(Join, Section)> = Vec::new();
     for join in joins {
         let host = &struts[join.parent];
         let Some(head) = out.heads.get(join.parent).copied().flatten() else {
@@ -433,9 +624,26 @@ fn grade(
         if radius <= own * (1.0 + 1.0e-9) {
             continue;
         }
-        let clearance = head.clearance_at(plate_z_mm, layer_height_mm, join.booked, radius);
-        if clearance < clearance_mm - 1.0e-9 {
+        let section = head.section_at(context.plate_z_mm, height, join.booked, radius);
+        if head.plane_clearance(&section) < context.clearance_mm - 1.0e-9 {
+            held.push((join, section));
+        }
+    }
+    if held.is_empty() {
+        return out;
+    }
+    let Some(surface) = context.surface() else {
+        out.in_zone = held.into_iter().map(|(join, _)| join).collect();
+        return out;
+    };
+    let sections: Vec<Section> = held.iter().map(|(_, section)| *section).collect();
+    let (near, rows) = sections_near_model(surface, &sections, context.clearance_mm);
+    out.model_rows = rows;
+    for ((join, _), near) in held.into_iter().zip(near) {
+        if near {
             out.in_zone.push(join);
+        } else {
+            out.off_the_model += 1;
         }
     }
     out
@@ -443,71 +651,43 @@ fn grade(
 
 /// Survey the LIVE field inside the sweep.
 fn survey(context: &HeadJoinContext<'_>, struts: &[SweepStrut]) -> Survey {
-    let height = context.slender.layer_height_mm;
-    let joins = head_joins(struts);
+    let joins = arm_joins(struts);
     if joins.is_empty() {
-        return grade(
-            struts,
-            joins,
-            Vec::new(),
-            Vec::new(),
-            context.plate_z_mm,
-            height,
-            0.0,
-        );
+        return grade(context, struts, joins, Vec::new(), Vec::new());
     }
     let (profiles, _) = crate::adapter::drawn_profiles(struts);
     let parents = sorted_unique(joins.iter().map(|join| join.parent).collect());
     let heads = measure(context, struts, &profiles, &parents);
-    grade(
-        struts,
-        joins,
-        heads,
-        profiles,
-        context.plate_z_mm,
-        height,
-        context.clearance_mm,
-    )
+    grade(context, struts, joins, heads, profiles)
 }
 
-/// **The emitted field's census**: how many head joins it has, and every one
-/// whose sum-sized section still reaches the seat zone, as `(lander id, trunk
-/// id)`, measured on the arms exactly as they go to the lowering
-/// (`adapter::arms_of`, footprint moves included).
+/// **The emitted field's census**: how many joins on support arms it has, and
+/// every one whose sum-sized section still reaches its host's seat zone, as
+/// `(lander id, trunk id)`, measured on the arms exactly as they go to the
+/// lowering (`adapter::arms_of`, footprint moves included).
 #[must_use]
-pub fn census(
+pub(crate) fn census(
+    context: &HeadJoinContext<'_>,
     struts: &[SweepStrut],
     arms: &[SweepArm],
-    layer_plan: &LayerPlan,
-    plate_z_mm: f64,
-    layer_height_mm: f64,
-    clearance_mm: f64,
 ) -> (usize, Vec<(u32, u32)>) {
-    let joins = head_joins(struts);
+    let joins = arm_joins(struts);
     let examined = joins.len();
     if joins.is_empty() || arms.len() != struts.len() {
         return (examined, Vec::new());
     }
     let parents = sorted_unique(joins.iter().map(|join| join.parent).collect());
     let trunk_arms: Vec<SweepArm> = parents.iter().map(|&index| arms[index].clone()).collect();
-    let heads = heads_of(struts.len(), &parents, &trunk_arms, layer_plan);
+    let heads = heads_of(struts.len(), &parents, &trunk_arms, context.layer_plan);
     let profiles = arms
         .iter()
         .map(|arm| arm.radius_profile_mm.clone())
         .collect();
-    let listed = grade(
-        struts,
-        joins,
-        heads,
-        profiles,
-        plate_z_mm,
-        layer_height_mm,
-        clearance_mm,
-    )
-    .in_zone
-    .iter()
-    .map(|join| (struts[join.child].id, struts[join.parent].id))
-    .collect();
+    let listed = grade(context, struts, joins, heads, profiles)
+        .in_zone
+        .iter()
+        .map(|join| (struts[join.child].id, struts[join.parent].id))
+        .collect();
     (examined, listed)
 }
 
@@ -809,7 +989,9 @@ pub(crate) fn apply(
     if first {
         outcome.joins_examined = found.examined;
         outcome.joins_in_seat_zone_before = found.in_zone.len();
+        outcome.joins_off_the_model = found.off_the_model;
     }
+    outcome.model_rows += found.model_rows;
     outcome.joins_unmeasured = found.unmeasured;
     outcome.kept_no_clear_join = 0;
     outcome.kept_carrying_a_tie = 0;
@@ -880,9 +1062,53 @@ pub(crate) fn apply(
         }
     }
 
+    // TEST 1 over every candidate of every join: the seat plane by arithmetic,
+    // and, for the candidates the plane holds, the model in ONE batch — the
+    // same seat zone the survey grades by (`grade`).
+    let mut verdicts: Vec<Vec<bool>> = Vec::with_capacity(candidates.len());
+    let mut held: Vec<(usize, usize)> = Vec::new();
+    let mut held_sections: Vec<Section> = Vec::new();
+    for (position, (join, chain)) in found.in_zone.iter().zip(&candidates).enumerate() {
+        let lander_top = struts[join.child].k_top;
+        let mut row = Vec::with_capacity(chain.len());
+        for (slot, &(host, layer)) in chain.iter().enumerate() {
+            if layer >= lander_top {
+                row.push(false);
+                continue;
+            }
+            let Some(head) = heads[host] else {
+                // A host below the head arm whose tip could not be measured:
+                // its seat plane is unknown, and the join is not at its head.
+                row.push(host != join.parent);
+                continue;
+            };
+            let Some(&radius) = found.profiles[host].get(layer - struts[host].k_bottom) else {
+                row.push(false);
+                continue;
+            };
+            let section = head.section_at(context.plate_z_mm, height, layer, radius);
+            if head.plane_clearance(&section) >= context.clearance_mm - 1.0e-9 {
+                row.push(true);
+            } else {
+                row.push(false);
+                held.push((position, slot));
+                held_sections.push(section);
+            }
+        }
+        verdicts.push(row);
+    }
+    let (near, rows) = sections_near_model(surface, &held_sections, context.clearance_mm);
+    outcome.model_rows += rows;
+    for (&(position, slot), near) in held.iter().zip(near) {
+        if !near {
+            verdicts[position][slot] = true;
+            outcome.candidates_off_the_model += 1;
+        }
+    }
+
     let mut moved_count = 0;
     let mut moved_already = vec![false; n];
-    for (join, chain) in found.in_zone.iter().zip(&candidates) {
+    for ((join, chain), verdict) in found.in_zone.iter().zip(&candidates).zip(&verdicts) {
         if moved_already[join.child] {
             continue;
         }
@@ -890,24 +1116,11 @@ pub(crate) fn apply(
             outcome.kept_not_an_arm += 1;
             continue;
         }
-        // TEST 1 and the lean law, per candidate, from arithmetic alone.
         let lander = &struts[join.child];
-        let sum_clears = |host: usize, layer: usize| -> bool {
-            let Some(head) = heads[host] else {
-                // A host below the head arm whose tip could not be measured:
-                // its seat plane is unknown, and the join is not at its head.
-                return host != join.parent;
-            };
-            let Some(&radius) = found.profiles[host].get(layer - struts[host].k_bottom) else {
-                return false;
-            };
-            head.clearance_at(context.plate_z_mm, height, layer, radius)
-                >= context.clearance_mm - 1.0e-9
-        };
         let admissible: Vec<(usize, usize)> = chain
             .iter()
-            .copied()
-            .filter(|&(host, layer)| layer < lander.k_top && sum_clears(host, layer))
+            .zip(verdict)
+            .filter_map(|(&candidate, &clears)| clears.then_some(candidate))
             .collect();
         // TEST 2, one batch over every candidate the arithmetic admitted.
         let Some(lander_head) = heads[join.child] else {
@@ -1003,7 +1216,86 @@ pub(crate) fn apply(
 
 #[cfg(test)]
 mod tests {
-    use super::Head;
+    use super::{sections_near_model, Head, Section};
+    use geom_kernel::{NativeSurface, NativeSurfaceConfig};
+
+    /// A closed axis-aligned box from `low` to `high`, as a surface.
+    fn boxed(low: [f64; 3], high: [f64; 3]) -> NativeSurface {
+        let verts: Vec<[f64; 3]> = (0..8)
+            .map(|corner| {
+                std::array::from_fn(|k| {
+                    if corner >> k & 1 == 0 {
+                        low[k]
+                    } else {
+                        high[k]
+                    }
+                })
+            })
+            .collect();
+        let tris: Vec<[u32; 3]> = vec![
+            [0, 2, 1],
+            [1, 2, 3],
+            [4, 5, 6],
+            [5, 7, 6],
+            [0, 1, 4],
+            [1, 5, 4],
+            [2, 6, 3],
+            [3, 6, 7],
+            [0, 4, 2],
+            [2, 4, 6],
+            [1, 3, 5],
+            [3, 7, 5],
+        ];
+        let pitch = 0.1;
+        let estimate = NativeSurface::estimate_index_memory_from_indexed(&verts, &tris, pitch)
+            .expect("an estimate");
+        NativeSurface::from_indexed(
+            &verts,
+            &tris,
+            NativeSurfaceConfig {
+                grid_pitch_mm: pitch,
+                max_grid_bytes: estimate.max_axis_grid_bytes(),
+            },
+        )
+        .expect("a surface")
+    }
+
+    fn flat(centre: [f64; 3], radius: f64) -> Section {
+        Section {
+            centre,
+            axis: [0.0, 0.0, 1.0],
+            radius,
+        }
+    }
+
+    /// Hand-derived, against a clearance of 0.3 mm. A slab whose underside is
+    /// `z = 0` and spans `x, y ∈ [−5, 5]`:
+    /// * a 1 mm disc 0.2 mm under it is near, and 0.5 mm under it is not;
+    /// * a 1 mm disc 0.2 mm under the slab's plane but 2 mm beyond its edge
+    ///   (its nearest point 1 mm off, laterally) is NOT near: the plane is
+    ///   not the model there.
+    ///
+    /// A post 0.1 mm wide, its foot 0.1 mm over a 1 mm disc's CENTRE, is
+    /// within the clearance of the disc's interior only (the ring is 0.95 mm
+    /// off): near, by the spokes. Sabotage: dropping the spokes reads it far.
+    #[test]
+    fn a_disc_is_near_the_model_where_the_model_is() {
+        let slab = boxed([-5.0, -5.0, 0.0], [5.0, 5.0, 1.0]);
+        let (near, rows) = sections_near_model(
+            &slab,
+            &[
+                flat([0.0, 0.0, -0.2], 1.0),
+                flat([0.0, 0.0, -0.5], 1.0),
+                flat([8.0, 0.0, -0.2], 1.0),
+            ],
+            0.3,
+        );
+        assert_eq!(near, vec![true, false, false]);
+        let post = boxed([-0.05, -0.05, 0.1], [0.05, 0.05, 3.0]);
+        let (near_post, _) = sections_near_model(&post, &[flat([0.0, 0.0, 0.0], 1.0)], 0.3);
+        assert_eq!(near_post, vec![true]);
+        assert_eq!(rows, 3 * 2 * super::SECTION_POLYGON_SIDES);
+    }
 
     /// A shaft leaning from a ball centre at the origin toward `(3, 0, −4)`
     /// (cos θ = 0.8 from vertical) under a flat face through `z = 0.2` with
@@ -1012,6 +1304,7 @@ mod tests {
         Head {
             centre: [0.0, 0.0, 0.0],
             base: [3.0, 0.0, -4.0],
+            axis: [0.6, 0.0, -0.8],
             plane_point: [0.0, 0.0, 0.2],
             normal: [0.0, 0.0, -1.0],
             spread: 0.6,

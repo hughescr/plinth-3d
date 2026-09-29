@@ -842,8 +842,16 @@ the 0.3 mm hard limit) by the kernel's segment-clearance predicate, its own seat
 Candidates are the head arm's shaft below the booked slot, then its landing chain, highest first.
 Members resting on a moved lander follow it onto its new axis (no nearer the model than they were).
 A join that cannot move is kept and warned (`HeadJoinOutcome`, prepare log "head joins"), and the
-emitted field is surveyed again after the footprint rule. Only HEAD joins are this rule's: under a
-steep face the infinite seat plane is not a fair stand-in for the model far down a shaft.
+emitted field is surveyed again after the footprint rule. **Scope (second round, same day):** every
+member landed on a support arm, at any layer, is graded, because a lander one or three layers under a
+leaned head is booked into the same slot as one at the head (Round 50 at its committed flip, arms 66,
+68, 83, 98, their sums across the plane by 0.33 to 0.48 mm and unwarned while the rule looked at head
+landings only). The seat zone is where the plane is the model: a section is in it only when it is
+within 0.3 mm of the seat plane AND of the model itself, its disc measured as a circumscribed 16-gon
+(edges and spokes) by the kernel's segment-clearance predicate. Under a steep face the infinite plane
+passes below the model (Round 25 arm 6), and such a join is left alone; where the model IS there the
+join is the rule's whatever the lean (Round 50 arm 155, vertical: its lander's solid was 0.088 mm
+inside the model). The same zone decides which candidate joins may take a lander.
 
 **Corrected 2026-09-28 (fix/plate-gap).** This line first read "down to `plate_z + raft_height`",
 the legacy raft datum. v1 emits no raft (§14 OR-3), so that left every root flare 0.2 mm (four

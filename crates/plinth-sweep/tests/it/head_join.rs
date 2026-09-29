@@ -15,12 +15,22 @@
 //!
 //! # The rule graded here
 //!
-//! Every HEAD ARM — a support arm that the placement, without the rule, gave a
-//! lander at its seat layer or its top alive layer — is drawn, near its seat,
-//! at its OWN load's size only: every section of every shaft record whose ring
-//! comes within the registered final clearance (`FINAL_CLEARANCE_GAP_MM`,
-//! 0.3 mm) of the arm's seat plane is no wider than the arm's own contact
-//! radius, and no section wider than that reaches the plane at all.
+//! Every support arm a member lands on, AT ANY LAYER, is drawn, in its seat
+//! zone, at its OWN load's size only: every section of every shaft record
+//! that carries a lander's load (at or under the highest layer a member lands
+//! on it at) and whose ring comes within the registered final clearance
+//! (`FINAL_CLEARANCE_GAP_MM`, 0.3 mm) of the arm's seat plane AND whose disc
+//! comes within it of the model itself is no wider than the arm's own contact
+//! radius, and no such section wider than that reaches the plane at all.
+//! Where one is left (the rule found no admissible join), the census names
+//! exactly that arm.
+//!
+//! The scope is geometry, not the landing layer: `cb28bdd` graded (and moved)
+//! head landings only, and on Round 50 a lander one or three layers under a
+//! ~57° head, booked into the same slot, kept its sum across the seat plane
+//! by 0.33 to 0.48 mm (arms 66, 68, 83, 98), unwarned. The model half of the
+//! zone keeps the infinite seat plane honest under a steep face (Round 25
+//! arm 6: the plane passes below the model where its lander joins).
 //!
 //! # How it is graded
 //!
@@ -29,13 +39,16 @@
 //! ball. Each `ContactTaper` and `Member` record is cut into stations along
 //! its axis; at each station the ring (the record's own centre line, its
 //! linearly interpolated radius, normal to its axis) is SAMPLED at 64 points
-//! and measured against the plane. That is the grader's own method, not the
-//! rule's closed form. The own contact radius is the ledger's contact slot,
-//! checked against the registered area law of that slot's load.
+//! and measured against the plane, and its disc (9 rings of 64 points)
+//! against every model triangle by brute force. That is the grader's own
+//! method, not the rule's closed form or the kernel's predicate. The own
+//! contact radius is the ledger's contact slot, checked against the
+//! registered area law of that slot's load.
 //!
-//! The fixture is the Round 25 ratchet disc at its committed flip (the pose
-//! is applied directly, not searched), where cavity-ceiling arms lean across
-//! and land on the ring stiffener arms' heads.
+//! The fixtures are the Round 25 and Round 50 ratchet discs at their
+//! committed flip (the pose is applied directly, not searched), where
+//! cavity-ceiling arms lean across and land on or near the ring stiffener
+//! arms' heads.
 //!
 //! Sabotage: `SweepPolicy::without_head_join` (the placement as it was before
 //! the rule) must put a sum-sized section across a seat plane again, and
@@ -44,7 +57,7 @@
 
 use crate::contact_sizing::flipped;
 use crate::harness::{x_allowed, LIFT_MM};
-use crate::round_bases_ratchet::{mesh_for, place_with, round_25};
+use crate::round_bases_ratchet::{mesh_for, place_with, round_25, round_50};
 
 use plinth_core::{m0_constants, Finite, LayerPlan, PositiveFinite};
 use plinth_mesh::Mesh;
@@ -138,27 +151,36 @@ fn ring_lowest(centre: [f64; 3], radius: f64, axis: [f64; 3], trim: SeatTrim) ->
 struct Trunk {
     id: u32,
     own_mm: f64,
+    /// Stations in the seat zone: the ring within the final clearance of the
+    /// seat plane AND the section within it of the model itself.
     stations_in_zone: usize,
     /// Widest section within the seat zone.
     widest_in_zone_mm: f64,
-    /// Lowest ring reach of any section WIDER than the own contact.
+    /// Lowest ring reach, from the seat plane, of any section WIDER than the
+    /// own contact whose disc is within the final clearance of the model.
     lowest_wider_mm: f64,
+    /// Diagnostic: the same reach over EVERY wider section, the model's
+    /// distance not asked (the infinite plane alone), and the model's distance
+    /// at that section.
+    lowest_wider_plane_only_mm: f64,
+    model_gap_there_mm: f64,
 }
 
-/// The HEAD ARMS of a field placed WITHOUT the rule: support arms a member
-/// landed on at their seat layer or their top alive layer (the two landings
-/// whose load reaches the contact slot). The rule moves those landers, so the
-/// set is taken from the field as the placement left it.
-fn head_arms(unruled: &SweepPlan) -> Vec<u32> {
-    let mut ids: Vec<u32> = unruled
-        .struts
+/// Every SUPPORT ARM a member lands on, at ANY layer, in any of `plans`.
+/// Which of them has a seat zone to grade is decided by geometry in
+/// [`grade`], not by the landing layer: a lander one or three layers under a
+/// leaned head is booked into the same slot as one at the head.
+fn landed_arms(plans: &[&SweepPlan]) -> Vec<u32> {
+    let mut ids: Vec<u32> = plans
         .iter()
-        .filter_map(|child| match child.landing {
-            Landing::Strut { id, layer } => {
-                let host = unruled.struts.iter().find(|host| host.id == id)?;
-                (host.kind == StrutKind::Arm && layer + 1 >= host.k_top).then_some(id)
-            }
-            _ => None,
+        .flat_map(|plan| {
+            plan.struts.iter().filter_map(|child| match child.landing {
+                Landing::Strut { id, .. } => {
+                    let host = plan.struts.iter().find(|host| host.id == id)?;
+                    (host.kind == StrutKind::Arm).then_some(id)
+                }
+                _ => None,
+            })
         })
         .collect();
     ids.sort_unstable();
@@ -166,9 +188,118 @@ fn head_arms(unruled: &SweepPlan) -> Vec<u32> {
     ids
 }
 
-/// Grade the arms `ids` of `plan`.
-fn grade(plan: &SweepPlan, ids: &[u32]) -> Vec<Trunk> {
+/// Rings per disc, centre included, for the grader's model distance.
+const DISC_RINGS: usize = 8;
+
+/// The model, as the grader measures a section against it: every triangle
+/// and its box.
+struct Model<'a> {
+    mesh: &'a Mesh,
+    boxes: Vec<([f64; 3], [f64; 3])>,
+}
+
+impl<'a> Model<'a> {
+    fn new(mesh: &'a Mesh) -> Self {
+        let verts = mesh.verts();
+        let boxes = mesh
+            .tris()
+            .iter()
+            .map(|tri| {
+                let corners = tri.map(|vertex| verts[vertex as usize]);
+                let low =
+                    std::array::from_fn(|k| corners.iter().map(|c| c[k]).fold(f64::MAX, f64::min));
+                let high =
+                    std::array::from_fn(|k| corners.iter().map(|c| c[k]).fold(f64::MIN, f64::max));
+                (low, high)
+            })
+            .collect();
+        Self { mesh, boxes }
+    }
+
+    /// The smallest distance, in mm, from the DISC of radius `radius` about
+    /// `centre`, normal to `axis`, to the model surface, or `INFINITY` when no
+    /// triangle is within `reach` of the disc. Brute force: the disc sampled on
+    /// `DISC_RINGS` rings (the centre and `k·R/8`) of `RING_SAMPLES` points,
+    /// each measured to every triangle whose box is within reach. A disc that
+    /// enters the model crosses its surface on a spoke, so a sample lands
+    /// within half the sampling pitch (at most `R/16`, 0.06 mm at the widest
+    /// section on these fixtures) of the surface: the grader cannot miss an
+    /// entry by more than that.
+    fn disc_gap_mm(&self, centre: [f64; 3], radius: f64, axis: [f64; 3], reach: f64) -> f64 {
+        let verts = self.mesh.verts();
+        let near: Vec<&[u32; 3]> = self
+            .mesh
+            .tris()
+            .iter()
+            .zip(&self.boxes)
+            .filter(|(_, (low, high))| {
+                let outside: f64 = (0..3)
+                    .map(|k| {
+                        (low[k] - centre[k])
+                            .max(centre[k] - high[k])
+                            .max(0.0)
+                            .powi(2)
+                    })
+                    .sum();
+                outside.sqrt() <= radius + reach
+            })
+            .map(|(tri, _)| tri)
+            .collect();
+        if near.is_empty() {
+            return f64::INFINITY;
+        }
+        let reference = if axis[0].abs() < 0.9 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+        let e1 = geom_kernel::vec3::normalize(geom_kernel::vec3::cross(axis, reference))
+            .expect("a ring direction");
+        let e2 = geom_kernel::vec3::cross(axis, e1);
+        let mut gap = f64::INFINITY;
+        for ring in 0..=DISC_RINGS {
+            #[expect(clippy::cast_precision_loss, reason = "a ring index below 9")]
+            let r = radius * ring as f64 / DISC_RINGS as f64;
+            let samples = if ring == 0 { 1 } else { RING_SAMPLES };
+            for step in 0..samples {
+                #[expect(clippy::cast_precision_loss, reason = "a sample index below 64")]
+                let angle = std::f64::consts::TAU * step as f64 / RING_SAMPLES as f64;
+                let point = geom_kernel::vec3::add(
+                    centre,
+                    geom_kernel::vec3::add(
+                        geom_kernel::vec3::scale(e1, r * angle.cos()),
+                        geom_kernel::vec3::scale(e2, r * angle.sin()),
+                    ),
+                );
+                for tri in &near {
+                    let closest = geom_kernel::closest_on_tri(
+                        point,
+                        verts[tri[0] as usize],
+                        verts[tri[1] as usize],
+                        verts[tri[2] as usize],
+                    );
+                    gap = gap.min(geom_kernel::vec3::norm(geom_kernel::vec3::sub(
+                        point, closest,
+                    )));
+                }
+            }
+        }
+        gap
+    }
+}
+
+/// Grade the arms `ids` of `plan`, placed over `mesh`.
+///
+/// **The seat zone is where the seat plane is the model.** A section is in
+/// its arm's seat zone when its ring comes within the final clearance of the
+/// seat plane AND its disc comes within the final clearance of the model
+/// itself. The plane alone is infinite: under a steep face it passes well
+/// below the model (Round 25 arm 6, face 75° from horizontal: a section
+/// 1.25 mm under the seat crosses it where there is no model), and a section
+/// there touches nothing.
+fn grade(plan: &SweepPlan, ids: &[u32], mesh: &Mesh) -> Vec<Trunk> {
     let clearance = final_clearance_mm();
+    let model = Model::new(mesh);
     let arms = arms_of(plan);
     let mut out = Vec::new();
     for (index, host) in plan.struts.iter().enumerate() {
@@ -201,10 +332,30 @@ fn grade(plan: &SweepPlan, ids: &[u32]) -> Vec<Trunk> {
         else {
             continue;
         };
+        // WHERE A LANDER'S LOAD CAN BE: at or under the highest layer any
+        // member lands on this arm at. A section above that carries the arm's
+        // own peel only, and a section there wider than the contact is the
+        // arm's own (a thicken rung's taper: Round 25 arm 63, Round 50 arms
+        // 135 and 139, each 0.05 mm at the contact and thickened under it),
+        // not a sum this rule places.
+        let highest_landing = plan
+            .struts
+            .iter()
+            .filter_map(|child| match child.landing {
+                Landing::Strut { id, layer } if id == host.id => Some(layer),
+                _ => None,
+            })
+            .max();
+        #[expect(clippy::cast_precision_loss, reason = "a layer index below 2^52")]
+        let sum_top_z = highest_landing.map_or(f64::NEG_INFINITY, |layer| {
+            plan.plate_z_mm + (layer + 1) as f64 * plan.layer_height_mm
+        });
         let mut trunk = Trunk {
             id: host.id,
             own_mm: own,
             lowest_wider_mm: f64::INFINITY,
+            lowest_wider_plane_only_mm: f64::INFINITY,
+            model_gap_there_mm: f64::INFINITY,
             ..Trunk::default()
         };
         for primitive in &primitives {
@@ -230,11 +381,20 @@ fn grade(plan: &SweepPlan, ids: &[u32]) -> Vec<Trunk> {
                 let radius = primitive.start_radius_mm.get()
                     + t * (primitive.end_radius_mm.get() - primitive.start_radius_mm.get());
                 let lowest = ring_lowest(centre, radius, axis, trim);
-                let wider = radius > own * (1.0 + RADIUS_SLACK);
-                if lowest < clearance {
-                    trunk.stations_in_zone += 1;
-                    trunk.widest_in_zone_mm = trunk.widest_in_zone_mm.max(radius);
+                if lowest >= clearance {
+                    continue;
                 }
+                let wider = radius > own * (1.0 + RADIUS_SLACK) && centre[2] <= sum_top_z;
+                let gap = model.disc_gap_mm(centre, radius, axis, clearance);
+                if wider && lowest < trunk.lowest_wider_plane_only_mm {
+                    trunk.lowest_wider_plane_only_mm = lowest;
+                    trunk.model_gap_there_mm = gap;
+                }
+                if gap >= clearance {
+                    continue;
+                }
+                trunk.stations_in_zone += 1;
+                trunk.widest_in_zone_mm = trunk.widest_in_zone_mm.max(radius);
                 if wider {
                     trunk.lowest_wider_mm = trunk.lowest_wider_mm.min(lowest);
                 }
@@ -248,7 +408,9 @@ fn grade(plan: &SweepPlan, ids: &[u32]) -> Vec<Trunk> {
 fn print(plan: &SweepPlan, trunks: &[Trunk], label: &str) {
     let rule = &plan.report.head_join;
     println!(
-        "{label}: {} head arms graded; rule: {} head joins examined, {} in a seat zone before, \
+        "{label}: {} landed arms graded; rule: {} joins on arms examined, {} in a seat zone \
+         before ({} near the plane only, off the model; {} candidates admitted off the model; {} \
+         section-to-model rows), \
          {} landers moved ({} down the landing chain, {} at the hard limit only; max drop {} \
          layers; smallest solid clearance {:.4} mm; {:.4} mm2), {} dependants re-landed, {} \
          clearance rows, {} pass(es); kept: no clear join {}, tie {}, not an arm {}, no surface \
@@ -256,6 +418,9 @@ fn print(plan: &SweepPlan, trunks: &[Trunk], label: &str) {
         trunks.len(),
         rule.joins_examined,
         rule.joins_in_seat_zone_before,
+        rule.joins_off_the_model,
+        rule.candidates_off_the_model,
+        rule.model_rows,
         rule.landers_moved,
         rule.landers_moved_down_the_chain,
         rule.landers_at_hard_limit,
@@ -273,19 +438,40 @@ fn print(plan: &SweepPlan, trunks: &[Trunk], label: &str) {
         rule.in_seat_zone_after,
     );
     for trunk in trunks {
-        if trunk.stations_in_zone == 0 && trunk.lowest_wider_mm.is_infinite() {
+        if trunk.stations_in_zone == 0 && trunk.lowest_wider_plane_only_mm.is_infinite() {
             continue;
         }
         println!(
             "  arm {:>4}: own contact {:.4} mm; {} stations in the seat zone, widest {:.4} mm; \
-             sections wider than own reach to {:+.4} mm of the seat plane",
+             sections wider than own reach to {:+.4} mm of the seat plane where the model is \
+             (plane alone {:+.4} mm, model {:.4} mm away there)",
             trunk.id,
             trunk.own_mm,
             trunk.stations_in_zone,
             trunk.widest_in_zone_mm,
             trunk.lowest_wider_mm,
+            trunk.lowest_wider_plane_only_mm,
+            trunk.model_gap_there_mm,
         );
     }
+}
+
+/// Every trunk the grader finds with a section wider than its own contact in
+/// its seat zone must be NAMED by the emitted field's census (the prepare
+/// log's warning): emit and warn. Returns the ones it does not name.
+fn unwarned(plan: &SweepPlan, trunks: &[Trunk]) -> Vec<u32> {
+    let (wider_in_zone, _) = offenders(trunks);
+    let listed: Vec<u32> = plan
+        .report
+        .head_join
+        .in_seat_zone_after
+        .iter()
+        .map(|(_, trunk)| *trunk)
+        .collect();
+    wider_in_zone
+        .into_iter()
+        .filter(|id| !listed.contains(id))
+        .collect()
 }
 
 /// The trunks whose seat zone holds a section wider than their own contact,
@@ -355,12 +541,22 @@ fn solid_gap_mm(mesh: &Mesh, arm: &SweepArm) -> f64 {
     gap
 }
 
+/// Whether member `id` of `before` has the same landing and path in `after`.
+fn unmoved(before: &SweepPlan, after: &SweepPlan, id: u32) -> bool {
+    let find = |plan: &SweepPlan| plan.struts.iter().find(|strut| strut.id == id).cloned();
+    match (find(before), find(after)) {
+        (Some(was), Some(now)) => was.landing == now.landing && was.path == now.path,
+        _ => false,
+    }
+}
+
 #[test]
 fn the_seat_zone_of_every_head_arm_is_own_load_sized() {
+    let mesh = flipped(&mesh_for(&round_25()));
     let unruled = round_25_flipped_with(&production().without_head_join());
-    let heads = head_arms(&unruled);
     let plan = round_25_flipped_with(&production());
-    let trunks = grade(&plan, &heads);
+    let heads = landed_arms(&[&unruled, &plan]);
+    let trunks = grade(&plan, &heads, &mesh);
     print(&plan, &trunks, "Round 25 flipped");
     assert!(
         trunks.iter().any(|trunk| trunk.stations_in_zone > 0),
@@ -390,15 +586,29 @@ fn the_seat_zone_of_every_head_arm_is_own_load_sized() {
         "the finished field's census still lists {:?}",
         rule.in_seat_zone_after
     );
-    // AND THE MOVE DID NOT JUST PUT A SOLID ON THE MODEL SOMEWHERE ELSE. A
-    // moved LANDER keeps the 0.3 mm hard limit from the model outside its own
-    // tip ball; a member that rests on one and was re-landed with it is no
-    // nearer the model than it was (up to that limit).
-    let mesh = flipped(&mesh_for(&round_25()));
-    let arms = arms_of(&plan);
-    let arms_before = arms_of(&unruled);
-    let gap_of = |arm: &SweepArm| solid_gap_mm(&mesh, arm);
+    let (landers, _) = moved_members_clear_the_model(&unruled, &plan, &mesh);
+    assert!(
+        landers > 0,
+        "the rule moved no lander, so this grades nothing"
+    );
+}
+
+/// AND THE MOVE DID NOT JUST PUT A SOLID ON THE MODEL SOMEWHERE ELSE. A moved
+/// LANDER (whose old host did not move) keeps the 0.3 mm hard limit from the
+/// model outside its own tip ball; a member that rests on a moved one and was
+/// re-landed with it is no nearer the model than it was (up to that limit).
+/// Returns the landers moved, and how many of them had landed BELOW their
+/// host's top alive layer (not at its head).
+fn moved_members_clear_the_model(
+    unruled: &SweepPlan,
+    plan: &SweepPlan,
+    mesh: &Mesh,
+) -> (usize, usize) {
+    let arms = arms_of(plan);
+    let arms_before = arms_of(unruled);
+    let gap_of = |arm: &SweepArm| solid_gap_mm(mesh, arm);
     let mut landers = 0;
+    let mut below_head = 0;
     for (index, strut) in plan.struts.iter().enumerate() {
         let (was, before) = unruled
             .struts
@@ -406,11 +616,19 @@ fn the_seat_zone_of_every_head_arm_is_own_load_sized() {
             .enumerate()
             .find(|(_, other)| other.id == strut.id)
             .expect("the same member in both fields");
-        if before.landing == strut.landing && before.path == strut.path {
+        // The rule moves support arms only. A cross or a mast is placed by the
+        // ties AFTER the rule, on whatever field it left, so the same id names
+        // a different member in the two fields.
+        if strut.kind != StrutKind::Arm
+            || before.kind != StrutKind::Arm
+            || (before.landing == strut.landing && before.path == strut.path)
+        {
             continue;
         }
-        let head_lander = matches!(before.landing, Landing::Strut { id, layer }
-            if unruled.struts.iter().any(|host| host.id == id && layer + 1 >= host.k_top));
+        let head_lander = matches!(before.landing, Landing::Strut { id, .. }
+            if unmoved(unruled, plan, id));
+        let under_the_head = matches!(before.landing, Landing::Strut { id, layer }
+            if unruled.struts.iter().any(|host| host.id == id && layer + 1 < host.k_top));
         let gap_before = gap_of(&arms_before[was]);
         let gap = gap_of(&arms[index]);
         let required = if head_lander {
@@ -438,19 +656,18 @@ fn the_seat_zone_of_every_head_arm_is_own_load_sized() {
             strut.landing
         );
         landers += usize::from(head_lander);
+        below_head += usize::from(head_lander && under_the_head);
     }
-    assert!(
-        landers > 0,
-        "the rule moved no lander, so this grades nothing"
-    );
+    (landers, below_head)
 }
 
 /// The grader sees the defect when the rule is off: the placement as it was
 /// before the rule puts a sum-sized section across a leaned head's seat plane.
 #[test]
 fn without_the_rule_a_leaned_head_reaches_its_seat_plane_with_the_sum() {
+    let mesh = flipped(&mesh_for(&round_25()));
     let plan = round_25_flipped_with(&production().without_head_join());
-    let trunks = grade(&plan, &head_arms(&plan));
+    let trunks = grade(&plan, &landed_arms(&[&plan]), &mesh);
     print(&plan, &trunks, "Round 25 flipped, rule off");
     let (wider_in_zone, crossing) = offenders(&trunks);
     assert!(
@@ -463,8 +680,140 @@ fn without_the_rule_a_leaned_head_reaches_its_seat_plane_with_the_sum() {
         plan.report.head_join.landers_moved, 0,
         "the sabotage knob must move nothing"
     );
-    // The census names the same joins the rule would have moved.
-    assert!(!plan.report.head_join.in_seat_zone_after.is_empty());
+    // The census names every arm the grader finds, with the rule off too.
+    let missing = unwarned(&plan, &trunks);
+    assert!(
+        missing.is_empty(),
+        "arms {missing:?}: a section wider than own contact in the seat zone, and the census \
+         does not warn"
+    );
+}
+
+/// **The seat plane is not the model under a steep face.** Round 25 arm 6
+/// (vertical, face 75° from horizontal): its lander's sum-sized section,
+/// 1.25 mm under the seat, crosses the infinite seat plane with no model
+/// within reach. That section touches nothing, so the rule leaves the join
+/// where it is: every lander of an arm whose sums cross the plane only off
+/// the model keeps its landing and its path.
+#[test]
+fn a_sum_that_crosses_the_seat_plane_off_the_model_is_left_alone() {
+    let mesh = flipped(&mesh_for(&round_25()));
+    let unruled = round_25_flipped_with(&production().without_head_join());
+    let plan = round_25_flipped_with(&production());
+    let clearance = final_clearance_mm();
+    let off_model: Vec<u32> = grade(&unruled, &landed_arms(&[&unruled]), &mesh)
+        .into_iter()
+        .filter(|trunk| {
+            trunk.lowest_wider_plane_only_mm < clearance && trunk.lowest_wider_mm.is_infinite()
+        })
+        .map(|trunk| trunk.id)
+        .collect();
+    println!(
+        "Round 25 flipped: arms whose sums cross the seat plane only off the model {off_model:?}; \
+         rule: {} joins near the plane only",
+        plan.report.head_join.joins_off_the_model
+    );
+    assert!(
+        !off_model.is_empty(),
+        "no sum crosses a seat plane off the model on this fixture, so this test grades nothing"
+    );
+    let mut compared = 0;
+    for child in &unruled.struts {
+        let Landing::Strut { id, .. } = child.landing else {
+            continue;
+        };
+        if !off_model.contains(&id) || child.kind != StrutKind::Arm {
+            continue;
+        }
+        assert!(
+            unmoved(&unruled, &plan, child.id),
+            "member {} on arm {id}: its sum crosses the seat plane only where there is no \
+             model, and the rule moved it",
+            child.id
+        );
+        compared += 1;
+    }
+    assert!(
+        compared > 0,
+        "no lander on such an arm, so this test compares nothing"
+    );
+    // Last, so a broken zone reddens on the geometry above first: the rule's
+    // own path-hit witness for the model half of the zone.
+    assert!(
+        plan.report.head_join.joins_off_the_model > 0,
+        "the rule counted no join near the seat plane only, off the model"
+    );
+}
+
+fn round_50_flipped_with(policy: &SweepPolicy) -> SweepPlan {
+    place_with(&flipped(&mesh_for(&round_50())), "Round 50 flipped", policy)
+}
+
+/// **Round 50 at its committed flip: a lander NEAR the head, not at it.** The
+/// outer ring's stiffener arms lean about 57°, and landers there land one or
+/// three layers under the seat layer (arms 66, 68, 83, 98 on `cb28bdd`),
+/// where the contact-sizing rule books them into the same slot as a head
+/// join. Scoping by landing layer skipped them: their sum-sized sections
+/// crossed the seat plane by 0.33 to 0.48 mm, and no warning named them.
+/// Every arm a member lands on is graded, by geometry.
+///
+/// A join no admissible place exists for is kept and warned (emit and warn):
+/// on this fixture lander 189 on arm 87, whose head join `cb28bdd` already
+/// kept for that reason. So the finished field is held to: the census names
+/// EXACTLY the arms the grader still finds, each one a join the rule kept
+/// with a reason; and the rule moved landers that were under the head, not at
+/// it, each clear of the model.
+#[test]
+fn on_round_50_no_lander_near_a_head_puts_the_sum_in_its_seat_zone() {
+    let mesh = flipped(&mesh_for(&round_50()));
+    let unruled = round_50_flipped_with(&production().without_head_join());
+    let plan = round_50_flipped_with(&production());
+    let trunks = grade(&plan, &landed_arms(&[&unruled, &plan]), &mesh);
+    print(&plan, &trunks, "Round 50 flipped");
+    let before = grade(&unruled, &landed_arms(&[&unruled]), &mesh);
+    print(&unruled, &before, "Round 50 flipped, rule off");
+    let (_, crossing_before) = offenders(&before);
+    assert!(
+        !crossing_before.is_empty(),
+        "with the rule off no sum-sized section reaches a seat plane on Round 50, so the \
+         fixture no longer shows the defect"
+    );
+    let missing = unwarned(&plan, &trunks);
+    assert!(
+        missing.is_empty(),
+        "arms {missing:?}: a section wider than own contact in the seat zone, and the census \
+         does not warn"
+    );
+    let (mut wider_in_zone, _) = offenders(&trunks);
+    wider_in_zone.sort_unstable();
+    let rule = &plan.report.head_join;
+    let mut listed: Vec<u32> = rule
+        .in_seat_zone_after
+        .iter()
+        .map(|(_, trunk)| *trunk)
+        .collect();
+    listed.sort_unstable();
+    listed.dedup();
+    assert_eq!(
+        listed, wider_in_zone,
+        "the census must name exactly the arms whose seat zone still holds a sum"
+    );
+    let kept = rule.kept_no_clear_join
+        + rule.kept_carrying_a_tie
+        + rule.kept_not_an_arm
+        + rule.kept_surface_unavailable;
+    assert!(
+        rule.in_seat_zone_after.len() <= kept,
+        "{} joins left in a seat zone, {kept} kept with a reason: the rule left a join it \
+         neither moved nor accounted for",
+        rule.in_seat_zone_after.len()
+    );
+    let (landers, below_head) = moved_members_clear_the_model(&unruled, &plan, &mesh);
+    assert!(
+        below_head > 0 && landers > below_head,
+        "the rule must have moved landers from under a head as well as at one ({below_head} of \
+         {landers})"
+    );
 }
 
 /// A head the rule has no reason to touch keeps its join: every head arm that
