@@ -796,7 +796,7 @@ One sweep strut lowers to the same chain the existing lowering emits for a plate
                    merged so a segment is emitted only when the radius changes by more than
                    1 % or 0.005 mm, whichever is larger — a RECORD-COUNT economy, not a
                    physical rule; the unmerged profile stays in the ledger
-4. RootFlare       only for Landing::Plate, root boss top down to plate_z + raft_height
+4. RootFlare       only for Landing::Plate, root boss top down to plate_z
 ```
 
 **As built (2026-09-28, field report "trunk-thinner").** Step 3 was not built until
@@ -816,6 +816,13 @@ joint down to the host's root (never a local collar: a member must not narrow do
 leaves a down-facing ledge), which also widens that host's plate flare. The run report's
 resin line now leads with the volume measured from the emitted records and keeps the ledger
 volume beside it, labelled as the sizing figure.
+
+**Corrected 2026-09-28 (fix/plate-gap).** This line first read "down to `plate_z + raft_height`",
+the legacy raft datum. v1 emits no raft (§14 OR-3), so that left every root flare 0.2 mm (four
+layers) above the plate with nothing under it; the owner saw the bases float in ChituBox. The
+flare now reaches `plate_z` itself with its full `FLARE_R_FACTOR × r_root` foot; a plate arm too
+short for a boss runs its straight column to `plate_z` too. The boss TOP is unchanged: it still
+comes from the shared `root_boss_top_at`, which reads the raft height as a datum.
 
 **The adapter must not re-derive this geometry by hand.** `lower_stub`
 (`crates/plinth-support/src/lower.rs:362`) and `root_boss_top` (`:416`) already compute the
@@ -1291,7 +1298,8 @@ the reason disclosed in the run report?** Out of scope for LANE 1–3 either way
 **OR-3 — raft.** v1 emits a `RootFlare` per plate landing and no raft. This is answerable only
 by opening LANE 2's disc files in ChituBox. **Do the discs need a raft, or is the flare enough?**
 If a raft is needed, `plinth_support::raft` operates on live forest members and needs a small
-adapter — the first v1.1 item.
+adapter — the first v1.1 item. (2026-09-28: while the question is open, the flare stands ON the
+plate, not on the top of the absent raft; see §9.2.)
 
 ### Standing question, unresolved by measurement
 

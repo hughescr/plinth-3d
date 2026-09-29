@@ -609,7 +609,9 @@ impl DigestWriter {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SweepArmLanding {
     /// The build plate: the arm gets the legacy plate-root chain — a boss
-    /// column down to the boss top, then a `RootFlare` down to the raft top.
+    /// column down to the boss top, then a `RootFlare` down to the PLATE
+    /// itself — not the raft top: this path emits no raft (see
+    /// [`lower_sweep_arms`], step 3).
     Plate,
     /// Cured model material or another arm. The arm ends there. v1 emits no
     /// joint sphere at an arm-onto-arm junction; that is disclosed in the run
@@ -704,7 +706,7 @@ pub struct SweepLowering {
     pub arms_dropped_zero_length: usize,
     /// Plate arms whose run from the plate is shorter than the registered
     /// no-bend height, so no root boss fits. They emit as a straight column to
-    /// the raft top with NO flare, and are counted here.
+    /// the plate with NO flare, and are counted here.
     pub arms_without_root_flare: usize,
     /// Arms whose radii or points would not cross the finite boundary, or
     /// which the emit boundary's own `is_semantically_valid` rejected.
@@ -842,7 +844,21 @@ impl From<LoweringError> for SweepLoweringError {
 ///    area law's own profile (every trunk under a mid-shaft junction) the taper
 ///    stops at the first break and the rest of the shaft follows as chained
 ///    `Member` frusta on the same axis ([`drawn_spans`]).
-/// 3. `RootFlare` — plate landings only, boss top down to the raft top.
+/// 3. `RootFlare` — plate landings only, boss top down to the PLATE, `plate_z`,
+///    with its full `FLARE_R_FACTOR × r_root` foot.
+///
+/// **The plate, not the raft top** (fix/plate-gap, 2026-09-28). The legacy
+/// lowering ends its flare at `plate_z + CHITUBOX_RAFT_HEIGHT_MM` because it
+/// also emits the raft the flare stands on. This path emits NO raft
+/// (`docs/plans/slice-sweep-core-2026-09-02.md` §14 OR-3), and carrying the
+/// raft datum over without the raft left every root 0.2 mm — four layers —
+/// above the plate, curing its first layer against nothing: the owner saw the
+/// bases float in ChituBox. A plate-rooted member's lowest solid IS its plate
+/// contact, so it reaches `plate_z`. The same holds for the short-run branch
+/// (no boss fits): its straight column also ends on the plate. The boss TOP is
+/// untouched — it is the shared [`root_boss_top_at`], which still reads the
+/// raft height as its datum — so only the flare's (or short column's) lower
+/// end moves.
 ///
 /// # Errors
 ///
@@ -907,7 +923,6 @@ fn lower_sweep_arms_of(
     }
     let config = config;
     let plate = config.frame.plate_z_mm().get();
-    let raft_top = plate + config.raft_height_mm.get();
     let mut out = SweepLowering {
         primitives: Vec::with_capacity(arms.len().saturating_mul(3)),
         tip_seat_depth_mm: Vec::with_capacity(arms.len()),
@@ -916,7 +931,7 @@ fn lower_sweep_arms_of(
         ..SweepLowering::default()
     };
     for arm in arms {
-        let lowered = lower_one_sweep_arm(arm, config, raft_top, &mut out.primitives);
+        let lowered = lower_one_sweep_arm(arm, config, plate, &mut out.primitives);
         match lowered.outcome {
             ArmOutcome::Built => {}
             ArmOutcome::BuiltWithoutFlare => out.arms_without_root_flare += 1,
@@ -1063,7 +1078,8 @@ const PROFILE_RELATIVE_SLACK: f64 = 1.0e-9;
 /// **THE DRAWN PROFILE OF ONE MEMBER** (2026-09-28): the fewest straight spans,
 /// from `from_z` (the top of the drawn shaft: the tip ball's centre, or the
 /// seat of a member with no ball) down to `to_z` (where the shaft ends: the
-/// landing, the boss top, or the raft top), whose section is at least the area
+/// landing, the boss top, or the plate for a plate arm too short for a boss),
+/// whose section is at least the area
 /// law's own section at EVERY height.
 ///
 /// **The rule** is the area law applied to the emitted geometry rather than
@@ -1360,7 +1376,7 @@ fn seat_tip(
 fn lower_one_sweep_arm(
     arm: &SweepArm,
     config: LoweringConfig,
-    raft_top: f64,
+    plate_z: f64,
     out: &mut Vec<SupportPrimitive>,
 ) -> ArmLowering {
     let delta: [f64; 3] = std::array::from_fn(|index| arm.base_mm[index] - arm.seat_mm[index]);
@@ -1498,10 +1514,14 @@ fn lower_one_sweep_arm(
             ArmOutcome::Built
         }
         SweepArmLanding::Plate => {
-            let Ok(raft_z) = finite(raft_top) else {
+            // THE FOOT IS ON THE PLATE (fix/plate-gap, 2026-09-28). This path
+            // emits no raft, so there is no raft top to stop at: a plate root's
+            // lowest solid must be `plate_z` itself, or its first layer cures
+            // against the vat film instead of the plate.
+            let Ok(plate_z_finite) = finite(plate_z) else {
                 return ArmLowering::refused(ArmOutcome::InvalidGeometry);
             };
-            let raft_point = [base[0], base[1], raft_z];
+            let plate_point = [base[0], base[1], plate_z_finite];
             // The SEATED terminal z, exactly as the legacy path reads
             // `member.p0_mm()[2]` — which `initial.rs` already minted embedded.
             let boss_top =
@@ -1509,7 +1529,7 @@ fn lower_one_sweep_arm(
             match boss_top {
                 Some(top)
                     if distance(center, top) > ZERO_LENGTH_MM
-                        && distance(top, raft_point) > ZERO_LENGTH_MM =>
+                        && distance(top, plate_point) > ZERO_LENGTH_MM =>
                 {
                     let Ok(flare_radius) = positive(root_radius.get() * config.flare_factor.get())
                     else {
@@ -1523,7 +1543,7 @@ fn lower_one_sweep_arm(
                     staged.push(frustum(
                         SupportSegmentKind::RootFlare,
                         top,
-                        raft_point,
+                        plate_point,
                         root_radius,
                         flare_radius,
                         None,
@@ -1534,13 +1554,14 @@ fn lower_one_sweep_arm(
                 _ => {
                     // The run from the plate is shorter than the registered
                     // no-bend height, or leaves no room between boss top and
-                    // raft, so no flare fits. Emit the straight column and
-                    // WARN: refusing here would destroy the evidence.
-                    if distance(center, raft_point) <= ZERO_LENGTH_MM {
+                    // plate, so no flare fits. Emit the straight column down
+                    // to the plate and WARN: refusing here would destroy the
+                    // evidence.
+                    if distance(center, plate_point) <= ZERO_LENGTH_MM {
                         return ArmLowering::refused(ArmOutcome::ZeroLength);
                     }
                     let Some(drawn) =
-                        shaft(center, raft_point, FrustumRingNormal::PlateZ, &mut staged)
+                        shaft(center, plate_point, FrustumRingNormal::PlateZ, &mut staged)
                     else {
                         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
                     };
