@@ -2606,7 +2606,8 @@ fn print_sweep_disclosure(
          -> {:.4} on the finished field (under the silhouette {:.4} -> {:.4} -> {:.4}); \
          overlapping root pairs {} -> {} -> {}; cells under \
          3+ roots {} -> {} (deepest stack {} -> {}); remedies over {} round(s): {} roots \
-         leaned outward, {} flank arms inserted at shelf layer {} ({} cover cells), \
+         leaned outward, {} flank arms inserted of {} wanted for {:.4} mm2 of stacked disc \
+         area after the lean, at shelf layer {} ({} cover cells), \
          {:.4} mm2 of section moved outside the silhouette, {:.4} mm2 of load still carried to \
          the plate by flank arms ({} of them re-landed off the plate); flank root radius \
          estimate {:.4} mm used (mean placed root {:.4} mm, hex-cell area law {:.4} mm), \
@@ -2629,6 +2630,8 @@ fn print_sweep_disclosure(
         jam.rounds_used,
         jam.arms_leaned,
         jam.arms_inserted,
+        jam.flank_arms_wanted,
+        jam.flank_stacked_area_mm2.iter().sum::<f64>(),
         jam.shelf_layer,
         jam.shelf_cover_cells,
         jam.section_moved_outside_silhouette_mm2,

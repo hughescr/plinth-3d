@@ -17,6 +17,7 @@ mod harness;
 
 mod congestion_lane;
 mod drain_connectivity;
+mod flank_relief;
 mod load_insertion;
 mod mast_root_clearance;
 mod model_landing_scar;
