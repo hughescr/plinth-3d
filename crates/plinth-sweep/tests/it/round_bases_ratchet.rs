@@ -156,13 +156,37 @@ struct Disc {
     pinned_arms: usize,
 }
 
+/// RE-PINNED 169 -> 105 on 2026-09-29 by fix/no-dangling, on purpose and
+/// said so; the ruling on it is the owner's (Round bases are the gate).
+///
+/// The 169 held 64 FLANK ARMS the congestion lane inserted (arms 105-168, 4
+/// rounds, still congested at exit) to answer a congestion the pre-congestion
+/// `unmerge_overgrown` pass had made itself: it put an over-grown trunk back
+/// on its straight plate column and left the branches that rested on it
+/// behind, and they came down to the plate beside it (1 overlapping root
+/// pair, stack depth 2). The slenderness lane then saw 77 over-limit runs and
+/// answered with 106 braces, 83 masts and 50 unbraced-run warnings.
+///
+/// Under "a trunk carrying branches moves with them or not at all" the two
+/// branches move with their trunk, the plate roots do not overlap (54 roots,
+/// ratio 1.0, 0 pairs), the congestion lane inserts nothing, and the
+/// slenderness lane sees 13 runs: 3 merges, 20 braces, 3 masts, 0 warnings.
+/// 105 is the up-sweep's own count. Every physical assertion in this file is
+/// unchanged and passes (flat, glue face up, residual 0, uncarried 0, p95
+/// spacing 2.102 mm under the lattice pitch, the scar invariant).
+///
+/// Measured, not argued: with the subtree walk in `unmerge_overgrown`
+/// sabotaged (trunk moves alone), this fixture returns to exactly 169 arms,
+/// 64 of them congestion-inserted. Round 50 is unchanged (338); Round 100
+/// moves 1142 -> 1130, inside its band. Evidence:
+/// `plinth-evidence/.../field-2026-09-28/lanes/no-dangling/retry/`.
 fn round_25() -> Disc {
     Disc {
         name: "Round 25",
         bottom_radius_mm: 11.5,
         rings: &[(2.62, 4.12)],
         segments: 96,
-        pinned_arms: 169,
+        pinned_arms: 105,
     }
 }
 
@@ -431,6 +455,24 @@ fn round_bases_stay_flat_supported_and_land_glue_face_up() {
         let plan = place(oriented.mesh(), disc.name);
         let report = &plan.report;
         let elapsed_s = started.elapsed().as_secs_f64();
+        // Where the arm count comes from, printed so a re-pin can say which
+        // pass moved it (see (4)): arms the congestion lane inserted, branches
+        // the un-merge moved with their trunk, and the slenderness remedies.
+        println!(
+            "{}: arms inserted by congestion {} (rounds {}), by load {}; branches moved with \
+             their trunk {}; slenderness: runs over the limit {}, merges forced {}, braces {}, \
+             masts {}, unbraced-run warnings {}",
+            disc.name,
+            report.congestion_lane.arms_inserted,
+            report.congestion_lane.rounds_used,
+            report.arms_inserted_by_load,
+            report.merges_moved_with_trunk,
+            report.slenderness_lane.runs_over_limit_before,
+            report.slenderness_lane.merges_forced,
+            report.slenderness_lane.braces_added,
+            report.slenderness_lane.masts_dropped,
+            report.slenderness_lane.warnings.len(),
+        );
         let placed_arms = plan
             .struts
             .iter()
