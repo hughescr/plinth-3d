@@ -442,6 +442,10 @@ pub struct SlendernessContext<'a> {
     pub brace: bool,
     pub mast: bool,
     pub max_struts: usize,
+    /// `X_ALLOWED`, the registered area-law ratio. Read only to keep a trunk
+    /// under a forced merge sized for the load it was just handed, with the
+    /// down-sweep's own rule, until the down-sweep re-sizes the field.
+    pub x_allowed: f64,
 }
 
 /// Apply the remedy ladder to a sized field, in place.
@@ -567,6 +571,10 @@ pub fn apply_remedies(
             strut.landing = landing;
             strut.k_bottom = k_bottom;
             strut.path = path;
+            // The arm's own load at the root it just left: what it now hands
+            // to the trunk it landed on.
+            let handed_mm2 = strut.carried_mm2.first().copied().unwrap_or(0.0);
+            hand_load_down(context, struts, landing, handed_mm2);
             outcome.merges_forced += 1;
             merged_any = true;
         }
@@ -653,6 +661,67 @@ pub fn apply_remedies(
         }
     }
     outcome
+}
+
+/// Keep every trunk under a forced merge SIZED for the load the merge just
+/// handed it, until the down-sweep re-sizes the field.
+///
+/// A merge moves load, and the members below the junction grow: the down-sweep
+/// adds the child's load to its trunk from the junction downward
+/// ([`crate::down_sweep`]'s `combine_carried`) and sizes each layer by the area
+/// law. Until it runs, the trunk's ledger still describes the thinner member it
+/// was, and everything this lane decides after the merge loop reads that
+/// ledger: the unbraced-run census, and the ROOT DISCS a mast must clear. A mast
+/// placed against a root that then grows laps it — measured 2026-09-28 on
+/// `make_laid_tube`, where refusing daisy chains concentrated merges onto
+/// frozen trunks and left four masts 0.001-0.015 mm inside a root that grew
+/// after sizing.
+///
+/// So the load is handed down the chain now, with the down-sweep's own sizing
+/// rule: `r = clamp(sqrt(L / (X_ALLOWED·π)), r_min, r_max)`, never below the
+/// member's own `min_radius_mm`. Adding the child's whole root load to every
+/// layer below the junction is an UPPER bound on what `combine_carried` adds
+/// (it takes a max before it sums), so the estimate errs thick — the direction
+/// that keeps a mast clear. The down-sweep that runs after the lane overwrites
+/// all of it. `O(chain · span)`, one pass per merge.
+fn hand_load_down(
+    context: &SlendernessContext<'_>,
+    struts: &mut [SweepStrut],
+    landing: Landing,
+    handed_mm2: f64,
+) {
+    if !(handed_mm2.is_finite() && handed_mm2 > 0.0) {
+        return;
+    }
+    let law = context.law;
+    let x_allowed = context.x_allowed;
+    if !(x_allowed.is_finite() && x_allowed > 0.0) {
+        return;
+    }
+    let mut at = landing;
+    for _ in 0..struts.len() {
+        let Landing::Strut { id, layer } = at else {
+            return;
+        };
+        let Some(trunk) = struts.get_mut(id as usize) else {
+            return;
+        };
+        let Some(top_slot) = layer.checked_sub(trunk.k_bottom) else {
+            return;
+        };
+        let slots = (top_slot + 1)
+            .min(trunk.carried_mm2.len())
+            .min(trunk.radius_mm.len());
+        for slot in 0..slots {
+            trunk.carried_mm2[slot] += handed_mm2;
+            let radius = (trunk.carried_mm2[slot] / x_allowed / core::f64::consts::PI)
+                .sqrt()
+                .clamp(law.r_min_mm, law.r_max_mm)
+                .max(trunk.min_radius_mm);
+            trunk.radius_mm[slot] = trunk.radius_mm[slot].max(radius);
+        }
+        at = trunk.landing;
+    }
 }
 
 /// How many extra ties one over-limit run needs.

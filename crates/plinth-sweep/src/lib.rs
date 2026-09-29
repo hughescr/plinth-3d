@@ -972,10 +972,12 @@ pub fn run_sweep_with_drains(
     let mut merges_refused_by_radius = 0_usize;
     let mut merges_kept_carrying = 0_usize;
     let mut unmerge_stale_landings = 0_usize;
+    let mut merges_moved_with_trunk = 0_usize;
     for _ in 0..policy.strut_removal_passes {
         let unmerged = unmerge_overgrown(&mut struts, policy.tip_radius_max_mm);
-        // The LAST call describes the field as it is left: both counts are
-        // states, not events.
+        merges_moved_with_trunk += unmerged.moved_with_trunk;
+        // The LAST call describes the field as it is left: these two counts
+        // are states, not events.
         merges_kept_carrying = unmerged.kept_carrying;
         unmerge_stale_landings = unmerged.stale_landings;
         if unmerged.undone == 0 {
@@ -1103,6 +1105,7 @@ pub fn run_sweep_with_drains(
         flare_factor: policy.flare_r_factor,
         mast_root_clearance: policy.slenderness_mast_root_clearance,
         max_struts: policy.limits.max_struts,
+        x_allowed: policy.x_allowed,
     };
     let mut slenderness_merges_undone = 0_usize;
     let struts_before_slenderness = struts.len();
@@ -1124,6 +1127,7 @@ pub fn run_sweep_with_drains(
         // warning — emit and warn, never refuse.
         for _ in 0..policy.strut_removal_passes {
             let unmerged = unmerge_overgrown(&mut struts, policy.tip_radius_max_mm);
+            merges_moved_with_trunk += unmerged.moved_with_trunk;
             merges_kept_carrying = unmerged.kept_carrying;
             unmerge_stale_landings = unmerged.stale_landings;
             if unmerged.undone == 0 {
@@ -1258,6 +1262,7 @@ pub fn run_sweep_with_drains(
     report.lean_paths_blocked = lean_paths_blocked;
     report.merges_refused_by_radius = merges_refused_by_radius;
     report.merges_kept_carrying = merges_kept_carrying;
+    report.merges_moved_with_trunk = merges_moved_with_trunk;
     report.unmerge_stale_landings = unmerge_stale_landings;
     report.landing_check = landings;
     report.lean_max_step_mm = law.max_step_mm();
@@ -1385,19 +1390,41 @@ fn seat_solid_layers(
 /// **A TRUNK THAT CARRIES BRANCHES MAY NOT MOVE WITHOUT THEM** (2026-09-28).
 /// Un-merging an arm puts its whole lower path back on the column it recorded,
 /// so every member that had landed on the leaned path — or a brace seated on
-/// it — would be left in the air, 3 mm from the trunk its ledger still names
+/// it — used to be left in the air, 3 mm from the trunk its ledger still names
 /// (11 such children on `make_tall_stilt_plate`, carrying 169.8 mm², and the
-/// 15 quills on `make_overhang_table`). Such an arm is KEPT merged and counted
-/// in [`Unmerged::kept_carrying`]: the over-grown trunk is then a published
-/// warning rather than a broken tree. And an arm whose parent does not stand
-/// at its landing at all is no longer skipped in silence: it is counted in
+/// 15 quills on `make_overhang_table`). Now the arm moves only WITH everything
+/// that rests on it, transitively: every member of that subtree goes back to
+/// its own recorded descent in the same pass, so afterwards nothing rests on a
+/// part that moved. The subtree moves only if every member of it CAN — an arm
+/// with a recorded descent strictly below its seat, whose recorded landing is
+/// the plate, the model, or a member that stands there now and is not itself
+/// moving. A brace, a load-inserted arm, or any other member with nowhere
+/// recorded to go pins the whole subtree: the over-grown merge is then KEPT
+/// and counted in [`Unmerged::kept_carrying`], a published warning rather
+/// than a broken tree. And an arm whose parent does not stand at its landing
+/// at all is no longer skipped in silence: it is counted in
 /// [`Unmerged::stale_landings`], and the landing check after this pass names
 /// it on the emitted file.
+///
+/// Batch-first: one pass builds the dependant lists, one pass finds the
+/// over-grown arms, and each subtree is walked once.
 fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> Unmerged {
-    let carries = landing_check::carries_someone(struts);
-    let mut kept_carrying = 0_usize;
+    let n = struts.len();
+    let mut dependants: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (index, strut) in struts.iter().enumerate() {
+        if let Landing::Strut { id, .. } = strut.landing {
+            if let Some(list) = dependants.get_mut(id as usize) {
+                list.push(index);
+            }
+        }
+        if let Some(parent) = strut.seat_on_strut {
+            if let Some(list) = dependants.get_mut(parent as usize) {
+                list.push(index);
+            }
+        }
+    }
     let mut stale_landings = 0_usize;
-    let overgrown: Vec<(usize, Landing, usize)> = struts
+    let overgrown: Vec<usize> = struts
         .iter()
         .enumerate()
         .filter_map(|(index, strut)| {
@@ -1416,21 +1443,92 @@ fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> Unmer
                 return None;
             }
             let radius = *parent.radius_mm.get(layer - parent.k_bottom)?;
-            let (landing, k_bottom) = strut.straight_fallback?;
+            let (_, k_bottom) = strut.straight_fallback?;
             // A fallback that is not strictly below the seat would be a
             // zero-height stub, which is the defect this field exists to
             // prevent; refuse the un-merge rather than emit one.
-            if radius < tip_radius_max_mm || k_bottom >= strut.k_top {
-                return None;
-            }
-            if carries.get(index).copied().unwrap_or(true) {
-                kept_carrying += 1;
-                return None;
-            }
-            Some((index, landing, k_bottom))
+            (radius >= tip_radius_max_mm && k_bottom < strut.k_top).then_some(index)
         })
         .collect();
-    for &(index, landing, k_bottom) in &overgrown {
+
+    // Where a member would go if it were put back, or `None` when it has
+    // nowhere recorded to go.
+    let fallback_of = |strut: &SweepStrut| -> Option<(Landing, usize)> {
+        if strut.kind != StrutKind::Arm || strut.inserted_by_load || strut.path.is_empty() {
+            return None;
+        }
+        let (landing, k_bottom) = strut.straight_fallback?;
+        (k_bottom < strut.k_top).then_some((landing, k_bottom))
+    };
+    let mut moving = vec![false; n];
+    // Members some moving member's recorded descent lands on: they must stay.
+    let mut anchored = vec![false; n];
+    let mut in_subtree = vec![false; n];
+    let mut moves: Vec<(usize, Landing, usize)> = Vec::new();
+    let mut kept_carrying = 0_usize;
+    let mut moved_with_trunk = 0_usize;
+    for &root in &overgrown {
+        if moving[root] {
+            continue;
+        }
+        // The subtree: the arm and everything that rests on it, transitively.
+        let mut subtree = vec![root];
+        in_subtree[root] = true;
+        let mut cursor = 0;
+        while cursor < subtree.len() {
+            let member = subtree[cursor];
+            cursor += 1;
+            for &dependant in &dependants[member] {
+                if !in_subtree[dependant] {
+                    in_subtree[dependant] = true;
+                    subtree.push(dependant);
+                }
+            }
+        }
+        let mut plan: Vec<(usize, Landing, usize)> = Vec::with_capacity(subtree.len());
+        let mut can_move = true;
+        for &member in &subtree {
+            let strut = &struts[member];
+            let Some((landing, k_bottom)) = fallback_of(strut) else {
+                can_move = false;
+                break;
+            };
+            if moving[member] || anchored[member] {
+                can_move = false;
+                break;
+            }
+            if let Landing::Strut { id, layer } = landing {
+                let base = strut.fallback_path.first().map_or(strut.cell, |cell| *cell as usize);
+                let target = id as usize;
+                let stands = struts
+                    .get(target)
+                    .is_some_and(|live| landing_check::stands_at(live, base, layer));
+                if !stands || in_subtree[target] || moving[target] {
+                    can_move = false;
+                    break;
+                }
+            }
+            plan.push((member, landing, k_bottom));
+        }
+        for &member in &subtree {
+            in_subtree[member] = false;
+        }
+        if !can_move {
+            if subtree.len() > 1 {
+                kept_carrying += 1;
+            }
+            continue;
+        }
+        moved_with_trunk += plan.len() - 1;
+        for &(member, landing, _) in &plan {
+            moving[member] = true;
+            if let Landing::Strut { id, .. } = landing {
+                anchored[id as usize] = true;
+            }
+        }
+        moves.extend(plan);
+    }
+    for &(index, landing, k_bottom) in &moves {
         struts[index].landing = landing;
         struts[index].k_bottom = k_bottom;
         struts[index].path = std::mem::take(&mut struts[index].fallback_path);
@@ -1441,7 +1539,8 @@ fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> Unmer
         // never observed from outside that loop".
     }
     Unmerged {
-        undone: overgrown.len(),
+        undone: moves.len(),
+        moved_with_trunk,
         kept_carrying,
         stale_landings,
     }
@@ -1450,10 +1549,15 @@ fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> Unmer
 /// What one un-merge pass did.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Unmerged {
-    /// Arms put back on the descent they recorded.
+    /// Arms put back on the descent they recorded, branches included.
     undone: usize,
-    /// Over-grown merges KEPT because something rests on the arm that would
-    /// have moved. A warning quantity: the trunk it loads is at the maximum.
+    /// Of those, the ones that moved only because the trunk they rest on had
+    /// to move: branches taken off with their trunk.
+    moved_with_trunk: usize,
+    /// Over-grown merges KEPT because something rests on the arm that has
+    /// nowhere recorded to go (a brace, a load-inserted arm, a descent that
+    /// lands on a member that is itself moving). A warning quantity: the trunk
+    /// it loads is at the maximum.
     kept_carrying: usize,
     /// Landings whose parent does not stand at the landing layer at all.
     stale_landings: usize,
@@ -1882,6 +1986,7 @@ fn build_report(
         lean_paths_blocked: 0,
         merges_refused_by_radius: 0,
         merges_kept_carrying: 0,
+        merges_moved_with_trunk: 0,
         unmerge_stale_landings: 0,
         landing_check: crate::landing_check::LandingLedger::default(),
         lean_max_step_mm: 0.0,
@@ -2155,12 +2260,14 @@ mod removal_tests {
 
     /// 2026-09-28, the un-merge route to the quills: a merged arm that a
     /// grandchild has landed on is over-grown, and putting it back on its
-    /// straight column would leave the grandchild 3 mm from anything. A trunk
-    /// that carries branches may not move without them: it is KEPT, counted,
-    /// and its grandchild still stands on it. A landing whose parent is not
-    /// there at all is counted, not skipped in silence.
+    /// straight column alone would leave the grandchild 3 mm from anything. A
+    /// trunk moves WITH its branches or not at all: when the grandchild has a
+    /// descent of its own recorded, both go back in the same pass and every
+    /// landing still stands; when it has none (a brace, here), the trunk is
+    /// KEPT and counted. A landing whose parent is not there at all is
+    /// counted, not skipped in silence.
     #[test]
-    fn a_merged_arm_that_carries_a_branch_is_never_put_back() {
+    fn a_merged_arm_moves_with_its_branches_or_not_at_all() {
         let mut trunk = arm(0, 0, 40, 10);
         trunk.radius_mm = vec![1.0; 30];
         let mut child = arm(1, 7, 60, 30);
@@ -2171,10 +2278,26 @@ mod removal_tests {
         let mut grandchild = arm(2, 9, 80, 45);
         grandchild.landing = Landing::Strut { id: 1, layer: 45 };
         grandchild.path = vec![7; 35];
-        let mut struts = vec![trunk.clone(), child.clone(), grandchild];
+        grandchild.straight_fallback = Some((Landing::Plate, 0));
 
+        // The grandchild can go back to the plate: both move, in one pass.
+        let mut struts = vec![trunk.clone(), child.clone(), grandchild.clone()];
         let unmerged = unmerge_overgrown(&mut struts, 1.0);
-        assert_eq!(unmerged.undone, 0, "the child carries the grandchild and must stay");
+        assert_eq!(unmerged.undone, 2, "the child and its branch go back together");
+        assert_eq!(unmerged.moved_with_trunk, 1);
+        assert_eq!(unmerged.kept_carrying, 0);
+        assert_eq!(struts[1].landing, Landing::Plate);
+        assert_eq!(struts[2].landing, Landing::Plate);
+        assert!(crate::landing_check::check_landings(&struts).clean());
+
+        // The branch is a brace: it has nowhere recorded to go, so it pins
+        // the child, and the over-grown merge is kept rather than broken.
+        let mut brace = grandchild;
+        brace.kind = crate::StrutKind::Brace;
+        brace.straight_fallback = None;
+        let mut struts = vec![trunk.clone(), child.clone(), brace];
+        let unmerged = unmerge_overgrown(&mut struts, 1.0);
+        assert_eq!(unmerged.undone, 0, "a brace rests on the child, which must stay");
         assert_eq!(unmerged.kept_carrying, 1);
         assert_eq!(struts[1].landing, Landing::Strut { id: 0, layer: 30 });
         assert!(crate::landing_check::check_landings(&struts).clean());

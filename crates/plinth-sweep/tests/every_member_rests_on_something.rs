@@ -17,6 +17,22 @@
 //! own bookkeeping, and it misses the un-merge route, where the ledger still
 //! names a parent that no longer stands under the child.
 //!
+//! **The smallest defect this check cannot see.** It reads each member as
+//! the straight line `seat -> base` that `arms_of` hands the lowering, and
+//! that line is neither what the plan lands on nor exactly what the file
+//! draws. Landings are made on a member's RASTERISED PATH (`cell_at`), which
+//! need not be straight; and the lowering draws a plate-rooted arm as a taper
+//! to a root-boss top above the base point plus a vertical flare
+//! (`plinth_support::lower_sweep_arms`). Wherever the drawn solid departs from
+//! the path, a member landed on the path can miss it. Measured 2026-09-28 on `make_laid_tube` at its production pose (plan
+//! digest `0335589d6ee25341`, reproduced exactly by this file's frame): this
+//! check finds 0 unrooted members, while the emitted-bytes audit
+//! (`plinth-audit` I5 clause (d)) finds 76 — 2 arm ends and 70 brace ends
+//! 0-0.54 mm off the drawn shaft, and 4 brace ends inside the 0.2 mm raft gap.
+//! Which of the two departures accounts for each one was not traced member by
+//! member. The class belongs to the emit boundary and to brace placement, not
+//! to the landing rule this file grades; the audit, not this test, sees it.
+//!
 //! Tolerance is one layer height (0.05 mm): a lower end is on something when
 //! it is within one lamina of it. The quills' lower ends measured at least
 //! 0.447 mm from the model and 0.13 mm from the nearest member, so the verdict

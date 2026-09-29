@@ -229,6 +229,10 @@ pub struct SweepRunReport {
     /// carries branches may not move without them. A WARNING quantity — the
     /// trunk it loads sits at the registered maximum radius.
     pub merges_kept_carrying: usize,
+    /// Merged arms put back ONLY because the trunk they rest on was put back:
+    /// a trunk moves with its branches or not at all. Counted inside
+    /// `merges_refused_by_radius` too.
+    pub merges_moved_with_trunk: usize,
     /// Landings the un-merge pass found whose parent does not stand at the
     /// landing layer at all. Counted, never skipped in silence.
     pub unmerge_stale_landings: usize,
@@ -563,7 +567,8 @@ impl SweepRunReport {
              unrooted members {:?}; {} landed on a parent that is not there at the landing \
              layer, {} on a parent that stands in another cell there; {} brace tops tied to a \
              member that has moved; load gap (injected - plate reaction - uncarried) {:.4} mm2; \
-             {} over-grown merges kept because the arm carries branches; {} stale landings met \
+             {} over-grown merges kept because a branch they carry has nowhere to go; {} \
+             branches put back with their trunk; {} stale landings met \
              by the un-merge pass; slenderness merges refused because the arm carries someone \
              {}, shafts refused because their member no longer stands there {}. After each \
              pass: {trail}.",
@@ -575,6 +580,7 @@ impl SweepRunReport {
             finished.brace_tops_detached.len(),
             ledger.load_gap_mm2,
             self.merges_kept_carrying,
+            self.merges_moved_with_trunk,
             self.unmerge_stale_landings,
             self.slenderness_lane.merges_refused_carrying,
             self.slenderness_lane.merges_refused_stale_shaft,
