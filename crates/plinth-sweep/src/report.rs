@@ -251,9 +251,16 @@ pub struct SweepRunReport {
     /// sees what the footprint measured and what the remedies did, rather than
     /// inferring it from an arm count.
     pub congestion_lane: crate::congestion::CongestionOutcome,
-    /// **The resin the supports cost**, in mm³: `π r²` integrated along every
+    /// **The resin the area law SIZED**, in mm³: `π r²` integrated along every
     /// arm's own axis, layer by layer, with a leaned layer measured along its
     /// slant rather than its rise.
+    ///
+    /// This is the LEDGER figure, not the file's. The resin the file actually
+    /// holds is measured from the emitted records
+    /// (`SweepEmission::drawn_volume_mm3`) and is published first, with this
+    /// one beside it labelled as the sizing figure (2026-09-28: before then
+    /// this number was printed as "support volume" while the file drew 34-51 %
+    /// less on the taper spans).
     pub support_volume_mm3: f64,
     /// `Σ π r_root²` over the arms that land on the PLATE — the area the field
     /// asks the plate to hold, and the thing a merge removes when it takes an

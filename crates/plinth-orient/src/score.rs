@@ -195,6 +195,16 @@ impl UpDirection {
         self.0
     }
 
+    /// The opposite build direction, `−u`: the same part upside down.
+    /// Negation is exact, so the result is unit length whenever `self` is and
+    /// needs no renormalization; `−0.0` is canonicalized like every other
+    /// direction this type holds.
+    #[must_use]
+    pub fn antipode(self) -> Self {
+        let [x, y, z] = self.0;
+        Self([canonical_zero(-x), canonical_zero(-y), canonical_zero(-z)])
+    }
+
     /// The rotation taking this direction to `+ẑ`: the shortest arc, with the
     /// single antipode `u = −ẑ` resolved by one pinned convention, 180° about
     /// `+X`.

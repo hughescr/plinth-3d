@@ -125,16 +125,25 @@ fn a_cube_measures_every_term_analytically_including_the_scar() {
         1e-12,
         "fragility about x",
     );
-    assert!(
-        sideways.display_raw_mm2 > 0.0,
-        "a cube's side wall IS visible from the authored upper hemisphere; a zero display half \
-         here would mean the field never reached this pose"
+    // AMENDED AGAIN 2026-09-28. The side wall IS visible from the authored
+    // upper hemisphere, but it is featureless: every fold on a cube is the
+    // same 90°, which is change and not detail under the owner's 2026-09-05
+    // ruling (built 2026-09-28, `plinth-mesh/src/display_eval.rs`), so its
+    // display half is exactly 0 and turning the cube on its side is the same
+    // cube in EVERY term again. That the display field does reach a rotated
+    // pose is asserted where there is detail for it to see, in
+    // `display_face_objective.rs`.
+    assert_eq!(
+        sideways.display_raw_mm2.to_bits(),
+        0.0_f64.to_bits(),
+        "a cube's side wall carries no detail — one fold angle everywhere — so its display half \
+         must be exactly 0; a positive value means a crease is being read as detail"
     );
     assert_close(
-        sideways.score - terms.score,
-        weights.scar() * sideways.display_raw_mm2 / 100.0,
+        sideways.score,
+        terms.score,
         1e-12,
-        "score about x differs by exactly the display half at the registered scar weight",
+        "a featureless cube on its side scores what it scores upright",
     );
 }
 

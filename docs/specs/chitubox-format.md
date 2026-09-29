@@ -214,7 +214,11 @@ planner coordinates. For a stub from deepest contact point `p0` toward `p1`, let
 Joint balls are emitted separately as type 9 with start/end
 `center+[0,0,R]` / `center-[0,0,R]`. A plate root's type-3 column ends at a
 type-4 boss top; the boss ends at `plate_z+0.2`, the top of the unchanged type-6
-raft, rather than extending to `plate_z`. These are serialization contracts only;
+raft, rather than extending to `plate_z`. That contract belongs to the LEGACY
+lowering, which emits the raft. The slice-sweep lowering (`lower_sweep_arms`)
+emits NO raft, so its type-4 flare ends AT `plate_z` with its full foot radius
+(fix/plate-gap, 2026-09-28: flares stopping at `plate_z+0.2` with nothing below
+them floated four layers above the plate in ChituBox). These are serialization contracts only;
 the 400-byte group header and registry fields remain preserved from the evidenced
 corpus rather than inferred from these records.
 

@@ -12,12 +12,13 @@
 //! |---|---|---|
 //! | coarse | the whole grid (≤ 653) | L2, ~2 % of Exact |
 //! | refine | top `ORIENT_REFINE_TOP_K` | L1, ~10 % of Exact |
-//! | commit | top `ORIENT_COMMIT_TOP_K`, **plus the legacy 13** | **Exact** |
+//! | commit | top `ORIENT_COMMIT_TOP_K`, **plus the legacy 13 and the flat-face poses** | **Exact** |
 //!
 //! The escort in the commit row is the one place this deviates from the
 //! recorded funnel, and it is there because the recorded funnel measurably did
 //! not deliver what D-12 claims for it — see [`escort`], which carries the
-//! measurement. Neither recorded width moved.
+//! measurements (the legacy 13 on `Sphere`, 2026-08; the flat-face poses on
+//! `Round 50/100`, 2026-09-28). Neither recorded width moved.
 //!
 //! "Exact" is the protected, decimated **production mesh** this stage is handed,
 //! not the original high-detail input (`docs/engineering-journal/04-migration-plan.md`
@@ -508,6 +509,13 @@ pub struct RankedCandidate {
     pub rank: usize,
     pub candidate: usize,
     pub block: CandidateBlock,
+    /// The build-up direction `u` this candidate IS, in model frame. Carried
+    /// so the ranking reads on its own: before 2026-09-28 a reader (the
+    /// Round 50 diagnosis probe among them) had to rebuild the grid off a
+    /// re-simplified proxy just to learn which pose a row was, which is a
+    /// second implementation of the funnel standing between the record and
+    /// its reader.
+    pub up_model_frame: [Finite; 3],
     pub terms: TermsRecord,
 }
 
@@ -532,8 +540,8 @@ pub struct TierRecord {
     /// How many of this tier's ranking were promoted to the next tier by score.
     pub promoted: usize,
     /// How many candidates reached this tier by right rather than by promotion
-    /// — the legacy block's escort (see `escort`). Zero at every tier but the
-    /// commit tier.
+    /// — the legacy block and the flat-face poses (see `escort`). Zero at
+    /// every tier but the commit tier.
     pub escorted: usize,
     /// The full ranking at this tier — the recorded eyeball artifact.
     pub ranking: Vec<RankedCandidate>,
@@ -546,6 +554,12 @@ pub struct GridRecord {
     pub legacy: usize,
     pub rest_poses: usize,
     pub fibonacci: usize,
+    /// Rest poses that qualified as flat faces (`grid` module doc).
+    pub flat_faces: usize,
+    /// Candidates that rest a flat face on the plate — the set escorted to
+    /// the commit tier by right beside the legacy 13 (a flat face resting at
+    /// identity is covered by legacy candidate 0 and counted here too).
+    pub flat_face_poses: usize,
     pub duplicates_dropped: usize,
     pub candidates: usize,
     pub fibonacci_count: usize,
@@ -882,7 +896,11 @@ pub struct DenseSweepRecord {
 }
 
 /// The current record schema.
-pub const DENSE_SWEEP_SCHEMA_VERSION: u32 = 1;
+///
+/// 2 (2026-09-28): every ranking row carries its `up_model_frame`, and the
+/// grid record names its flat faces and the flat-face poses escorted to the
+/// commit tier.
+pub const DENSE_SWEEP_SCHEMA_VERSION: u32 = 2;
 
 /// What one sweep produced: the winner and the evidence.
 #[derive(Clone, Debug, PartialEq)]
@@ -1031,12 +1049,13 @@ pub fn search(
         executed_section_breakpoints: 0,
     };
 
-    // The legacy block, always. See `escort` below.
-    let legacy: Vec<usize> = grid
+    // The legacy block and the flat-face poses, always. See `escort` below.
+    let by_right: Vec<usize> = grid
         .candidates()
         .iter()
         .filter(|candidate| candidate.block == CandidateBlock::Legacy)
         .map(|candidate| candidate.id)
+        .chain(grid.flat_face_poses().iter().copied())
         .collect();
 
     let mut admitted: Vec<usize> = (0..grid.candidates().len()).collect();
@@ -1078,7 +1097,7 @@ pub fn search(
             .map(|ranked| ranked.candidate)
             .collect();
         if tier == SearchTier::Refine {
-            let (set, added) = escort(&promoted, &legacy);
+            let (set, added) = escort(&promoted, &by_right);
             escorted = added;
             admitted = set;
         } else {
@@ -1091,8 +1110,9 @@ pub fn search(
     // sweep's real measured SUPPORT BURDEN, in two stages.
     //
     // Stage 1 measures every candidate the commit tier admitted
-    // (`ORIENT_COMMIT_TOP_K` promoted plus the escorted legacy 13 — up to ~16
-    // in production) on the cheap coarsened raster. Stage 2 re-measures the
+    // (`ORIENT_COMMIT_TOP_K` promoted plus the escorted legacy 13 and
+    // flat-face poses — up to ~16-18 on the corpus) on the cheap coarsened
+    // raster. Stage 2 re-measures the
     // top `ORIENT_COMMIT_TOP_K` of those at the PRODUCTION pitch, the raster
     // the emitted support field is actually planned on.
     //
@@ -1290,12 +1310,20 @@ fn score_tier(
     for (position, outcome) in scored.outcomes().iter().enumerate() {
         let candidate = admitted[position];
         match outcome {
-            CandidateOutcome::Scored(terms) => ranking.push(RankedCandidate {
-                rank: 0,
-                candidate,
-                block: grid.candidates()[candidate].block,
-                terms: TermsRecord::new(*terms)?,
-            }),
+            CandidateOutcome::Scored(terms) => {
+                let direction = grid.candidates()[candidate].direction.get();
+                ranking.push(RankedCandidate {
+                    rank: 0,
+                    candidate,
+                    block: grid.candidates()[candidate].block,
+                    up_model_frame: [
+                        finite(direction[0])?,
+                        finite(direction[1])?,
+                        finite(direction[2])?,
+                    ],
+                    terms: TermsRecord::new(*terms)?,
+                });
+            }
             CandidateOutcome::Refused(refusal) => refusals.push(RefusalRecord {
                 tier,
                 candidate,
@@ -1366,10 +1394,26 @@ fn score_tier(
 /// escort is counted separately in the tier record so a reader can see exactly
 /// how many candidates reached the exact tier by promotion and how many by
 /// right.
-fn escort(promoted: &[usize], legacy: &[usize]) -> (Vec<usize>, usize) {
+///
+/// # The flat-face poses ride the same escort (2026-09-28)
+///
+/// The second set carried by right is [`SweepGrid::flat_face_poses`]: for
+/// every flat face of the part, the pose that rests it on the plate (`grid`
+/// module doc). A disc has two flat faces, one per side, so both its
+/// horizontal poses ride — glue face down and glue face up. Measured, not
+/// hypothesized, on the same grounds as the legacy block: on `Round_50.stl`
+/// and `Round_100.stl` the glue-face-up flip — the owner-ruled correct pose —
+/// was ranked **76th of 646** and **482nd of 644** by the coarse proxy and
+/// never measured, because the proxy's 45° support step made ~45° tilts look
+/// an order of magnitude cheaper than they measure (7517–12381 arms against
+/// 1058 on Round 100; `plinth-evidence/slice-sweep-2026-09-02/
+/// field-2026-09-28/round50.md` Q2). A disc adds one candidate here (its
+/// other flat pose is identity, already legacy); a part with no flat face
+/// adds none.
+fn escort(promoted: &[usize], by_right: &[usize]) -> (Vec<usize>, usize) {
     let mut set: BTreeSet<usize> = promoted.iter().copied().collect();
     let mut added = 0_usize;
-    for candidate in legacy {
+    for candidate in by_right {
         if set.insert(*candidate) {
             added += 1;
         }
@@ -1505,6 +1549,8 @@ fn grid_record(grid: &SweepGrid) -> Result<GridRecord, SearchError> {
         legacy: grid.legacy_count(),
         rest_poses: grid.rest_pose_count(),
         fibonacci: grid.fibonacci_count(),
+        flat_faces: grid.flat_face_count(),
+        flat_face_poses: grid.flat_face_poses().len(),
         duplicates_dropped: grid.duplicates_dropped(),
         candidates: grid.candidates().len(),
         fibonacci_count: grid.settings().fibonacci_count(),

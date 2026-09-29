@@ -2579,14 +2579,32 @@ fn print_sweep_disclosure(
         report.merges_refused_by_radius,
         report.reach.target_spacing_mm_registered_but_unused,
     );
+    // THE RESIN IS MEASURED FROM THE EMITTED RECORDS (2026-09-28). Until then
+    // this line published the sweep's LEDGER volume as "support volume", and
+    // the file held 34-51 % less on the taper spans because the lowering drew
+    // one straight taper where the ledger stepped. The emitted figure leads;
+    // the ledger stays beside it, labelled as the sizing figure.
     println!(
-        "[sweep {model}] resin: support volume {:.3} mm3 over {} arms; plate contacts {} \
+        "[sweep {model}] resin: support volume as emitted {:.3} mm3 ({:.3} mm3 in tapers and \
+         chained members, the rest tip balls and root flares) over {} arms; sizing ledger \
+         {:.3} mm3 (the area law's shafts, not what is drawn); drawn profile: {} members in \
+         more than one span, {} Member frusta chained, {} arms WITHOUT a profile, {} members \
+         raised above their ledger to meet a thicker branch, {} arm junctions inverted in the \
+         ledger itself; \
+         plate contacts {} \
          holding {:.4} mm2 of root area; junctions {} at a parent's top / {} MID-SHAFT \
          ({} chosen mid-shaft by the descent, before un-merging and removal); \
          shaft index {} spans; {} tip-column roots offered, carrying {:.4} mm2 that no other \
          carrier could have taken",
-        report.support_volume_mm3,
+        emission.drawn_volume_mm3,
+        emission.drawn_shaft_volume_mm3,
         report.struts_total,
+        report.support_volume_mm3,
+        emission.arms_drawn_in_spans,
+        emission.profile_member_frusta,
+        emission.arms_without_profile,
+        emission.members_raised_to_a_branch,
+        emission.arm_junctions_inverted_in_ledger,
         report.landings.plate,
         report.plate_contact_area_mm2,
         report.junctions_at_parent_top,

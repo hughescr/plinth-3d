@@ -651,12 +651,26 @@ handled by connectivity, not by a third ground clause.
 (c) the rootward relation is acyclic: order primitives by graph distance to ground,
     and require every primitive except a grounded one to have at least one neighbour
     strictly closer to ground
+(d) every plate root stands on the plate: the lowest point of every FLARE record
+    (type 4, a plate root by format definition) is z_plate, or the FLARE overlaps a
+    raft record (type 6) whose own lowest point is z_plate. Both equalities are read
+    through tol_geom.
 ```
 
 Clause (c) is the honest form of "no cycles". A cycle in the undirected connection graph
 is legitimate — bracing makes them on purpose. What is not legitimate is a set of
 primitives whose only route to ground is through each other, and (c) is exactly that
 statement as a number.
+
+Clause (d) was added 2026-09-28 (fix/plate-gap). Ground clause (i) asks whether a solid
+reaches the plate's first layer; that is the right test for connectivity and the wrong
+test for a root. A root's lowest point is its contact with the plate. If that point is
+above the plate, the first layer of the root cures against the vat film and not against
+the plate. The owner saw this in ChituBox: every slice-sweep root flare stopped 0.2 mm
+(four layers) above the plate, at the top of a raft that was never emitted. Clause (i)
+could not see a root that stops inside the first layer, and it let a floating root pass
+whenever the tree was grounded through a model seat. A root below the plate is the
+frame check's failure (§1.2), not this clause's.
 
 **Failure lines.**
 
@@ -669,6 +683,9 @@ PATH_FREE_END file=<path> model=<m> record=<r> type=<t> end=<start|end> point=<x
 
 PATH_ROOT_MISSING file=<path> model=<m> grounded_primitives=0 records=<n>
   no primitive reaches the plate or a valid model seat
+
+PATH_ROOT_FLOATING file=<path> model=<m> record=<r> type=flare lowest_z_mm=<v> gap_above_plate_mm=<v>
+  a plate root stops above the plate, with no raft on the plate under it (clause d)
 
 PATH_INDETERMINATE file=<path> model=<m> record=<r> other=<r2> separation_mm=<v> band_mm=5.529014e-2 reason=<fusion_uncertain|seat_indeterminate>
   two solids are close enough that fusion cannot be decided; an undecided path is a failure

@@ -1,6 +1,6 @@
 //! **What the display-face field says about geometry whose answer is known.**
 //!
-//! Four shapes, built here rather than loaded, each chosen because the right
+//! Five shapes, built here rather than loaded, each chosen because the right
 //! answer is a fact about the shape and not a judgement about it:
 //!
 //! * a **recessed disc** in the `Round 25` proportions, whose wide flat glue
@@ -11,7 +11,9 @@
 //!   sides apart and only the authored up-signal can;
 //! * a **slender peg with a rounded tip**, the confound the owner named —
 //!   sharply varying normals that are the BEST place to land a support;
-//! * a **grooved slab**, carving that must NOT be discounted.
+//! * a **textured slab**, carving that must NOT be discounted;
+//! * a **regular groove field**, one fold angle repeated, which is CHANGE and
+//!   not detail (owner ruling 2026-09-05, built 2026-09-28).
 //!
 //! Every assertion below is a comparison between two measurements of these
 //! shapes. There is no absolute magnitude asserted anywhere except `0`, which
@@ -282,15 +284,25 @@ fn capped_peg(radius_mm: f64, shaft_mm: f64, segments: usize, rings: usize) -> M
 ///
 /// * the face pointing away from the authored upper hemisphere scores exactly
 ///   `0`, whichever face that is;
-/// * the face pointing INTO it scores above `0` — on this featureless disc
-///   only where the mesh genuinely articulates, at the drafted rim, which is
-///   why the assertion is on the maximum over that face and not on its mean.
+/// * the face pointing INTO it is SEEN (visibility above `0`) and still
+///   scores `D = 0`, because it is featureless: the only fold its
+///   neighbourhood holds is the rim crease, one angle, which is change and
+///   not detail (owner ruling 2026-09-05, built 2026-09-28).
+///
+/// **Amended 2026-09-28.** Until the spread statistic replaced the mean, this
+/// test asserted the opposite of the second bullet — that the up-facing glue
+/// face "should carry some display value" because the drafted rim
+/// articulates. That was the mean statistic reading a crease as detail, the
+/// very reading that charged the Round bases' correct glue-face-up pose. The
+/// featureless glue face IS the display face; no detail measure can see that
+/// positively, and D must at least not push against it.
 #[test]
 #[expect(
     clippy::float_cmp,
-    reason = "the claim IS exact zero: `max(0, n·v)` is zero for every upper-hemisphere `v` when \
-              `n` points straight down, so a tolerance would pass on a field that had stopped \
-              producing it by construction"
+    reason = "both claims ARE exact zero: `max(0, n·v)` is zero for every upper-hemisphere `v` \
+              when `n` points straight down, and a spread over one fold angle is `1 - GM/AM` of \
+              identical values, so a tolerance would pass on a field that had stopped producing \
+              either by construction"
 )]
 fn a_recessed_disc_scores_zero_on_the_face_the_authored_top_cannot_see() {
     let authored = plinth_mesh::make_recessed_disc(11.5, 12.5, 3.5, 2.5, 10.0, 96)
@@ -326,12 +338,26 @@ fn a_recessed_disc_scores_zero_on_the_face_the_authored_top_cannot_see() {
                  construction cannot produce"
             );
         } else {
-            assert!(
-                glue_max > 0.0,
-                "{name}: the authored-up glue face scored 0 everywhere; the drafted rim \
-                 articulates and should carry some display value"
+            let seen = values
+                .iter()
+                .enumerate()
+                .filter(|(face, _)| normal_z[*face] * glue_face_z > 0.99)
+                .map(|(_, value)| value.visibility())
+                .fold(0.0_f64, f64::max);
+            println!(
+                "{name}: glue face mean D {glue_mean:.6}, max D {glue_max:.6}, max visibility \
+                 {seen:.6}"
             );
-            println!("{name}: glue face mean D {glue_mean:.6}, max D {glue_max:.6}");
+            assert!(
+                seen > 0.0,
+                "{name}: the authored-up glue face is not visible from the authored upper \
+                 hemisphere, so this assertion cannot separate detail from visibility"
+            );
+            assert_eq!(
+                glue_max, 0.0,
+                "{name}: the featureless glue face scored D {glue_max}; its neighbourhoods hold \
+                 one fold angle (the rim crease), which is change, not detail"
+            );
         }
     }
 }
@@ -379,22 +405,87 @@ fn a_plate_textured_on_both_sides_is_separated_by_the_authored_up_signal() {
 }
 
 // ---------------------------------------------------------------------------
+// (c2) uniform change is not detail (owner ruling 2026-09-05, built 2026-09-28)
+// ---------------------------------------------------------------------------
+
+/// **A regular groove field is CHANGE, not detail; an irregular texture is
+/// detail.**
+///
+/// Owner ruling 2026-09-05: "detail" is a WIDE DISTRIBUTION of normal-change
+/// magnitudes in a neighbourhood — small, medium and large together. A
+/// crease, a regular rib, a regular groove is one repeated change, however
+/// sharp, and is not detail. The Round bases are where the old reading did
+/// harm: their stiffener ribs and rim edges read as detail and charged the
+/// correct glue-face-up pose 24.1 mm2 on Round 100 (`round50.md` Q3).
+///
+/// Two surfaces, both fully visible from the authored upper hemisphere and
+/// neither closed over into a tip, so visibility and the tip discount cannot
+/// be what separates them:
+///
+/// * regular V grooves, 1 mm pitch, every fold the same angle — CHANGE;
+/// * the `|sin x sin y|` bump field the other tests here call texture, whose
+///   folds run from shallow flanks to sharp creases — DETAIL.
+///
+/// Under the mean-articulation reading this ran the wrong way: the grooves
+/// articulate harder than the bumps, so they read as MORE detail.
+#[test]
+fn a_regular_groove_field_is_change_and_an_irregular_texture_is_detail() {
+    let grooves = bumped_plate(
+        12.0,
+        1.5,
+        120,
+        |x, _| 0.12 * (1.0 - ((x.rem_euclid(1.0)) - 0.5).abs() * 2.0),
+        |_, _| 0.0,
+    );
+    let texture = bumped_plate(
+        12.0,
+        1.5,
+        120,
+        |x, y| 0.18 * ((x * 2.4).sin() * (y * 2.4).sin()).abs(),
+        |_, _| 0.0,
+    );
+    let groove_field = field(&grooves);
+    let texture_field = field(&texture);
+    let (groove_d, groove_faces) = mean_display(&grooves, &groove_field, |_, nz| nz > 0.5);
+    let (texture_d, texture_faces) = mean_display(&texture, &texture_field, |_, nz| nz > 0.5);
+    println!(
+        "regular grooves: D {groove_d:.6} over {groove_faces} faces; irregular texture: D \
+         {texture_d:.6} over {texture_faces} faces"
+    );
+    assert!(groove_faces > 100 && texture_faces > 100, "a fixture is too coarse to grade");
+    assert!(texture_d > 0.0, "the irregular texture must carry detail, or the comparison is vacuous");
+    assert!(
+        groove_d < 0.1 * texture_d,
+        "regular grooves scored D {groove_d:.6} against the irregular texture's {texture_d:.6}; a \
+         field of one repeated fold angle is change, not detail, and must read well below a \
+         texture whose folds span shallow to sharp"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // (d) the tip confound against real carving
 // ---------------------------------------------------------------------------
 
-/// **A protrusion tip is discounted; a carved groove field is not.**
+/// **A protrusion tip is discounted; a carved texture is not.**
 ///
 /// The peg's rounded cap is the owner's named confound: normals that vary
-/// sharply and a place a support SHOULD land. The grooved slab is carving:
+/// sharply and a place a support SHOULD land. The textured slab is carving:
 /// normals that vary just as sharply and a place a support should not land.
 /// Both are fully visible from the authored upper hemisphere, so visibility
 /// cannot be what separates them — the tip discount is.
 ///
 /// Two assertions, because "low" alone would pass for the wrong reason: the
 /// discount must actually FIRE on the cap (`tip_factor < 1`, a path-hit
-/// witness), and the grooved slab must end up ranked above it.
+/// witness), and the textured slab must end up ranked above it.
+///
+/// **Amended 2026-09-28.** The carving here used to be a REGULAR 1 mm V-groove
+/// field. Under the owner's 2026-09-05 ruling a regular groove is change, not
+/// detail, and `a_regular_groove_field_is_change_and_an_irregular_texture_is_detail`
+/// now asserts exactly that about the same grooves, so they can no longer
+/// stand for carving here. The irregular bump texture the other tests in
+/// this file already call texture takes their place.
 #[test]
-fn a_rounded_tip_is_discounted_and_a_carved_groove_field_is_not() {
+fn a_rounded_tip_is_discounted_and_a_carved_texture_is_not() {
     let peg = capped_peg(0.35, 1.2, 48, 12);
     let peg_field = field(&peg);
     let cap_z = 1.2_f64;
@@ -415,24 +506,25 @@ fn a_rounded_tip_is_discounted_and_a_carved_groove_field_is_not() {
         .map(|(_, value)| value.tip_factor())
         .fold(1.0_f64, f64::min);
 
-    // Shallow V grooves, 1 mm pitch, cut into the authored top of a thick
-    // slab: developable walls, so the angle defect is ~0 and the tip discount
-    // has nothing to fire on, while the normals articulate strongly.
-    let grooves = bumped_plate(
+    // The irregular bump texture on the authored top of a thick slab: a
+    // near-planar patch whose crests and troughs cancel in total curvature,
+    // so the tip discount has little to fire on, while the fold angles run
+    // from shallow flanks to sharp creases.
+    let texture = bumped_plate(
         12.0,
         1.5,
         120,
-        |x, _| 0.12 * (1.0 - ((x.rem_euclid(1.0)) - 0.5).abs() * 2.0),
+        |x, y| 0.18 * ((x * 2.4).sin() * (y * 2.4).sin()).abs(),
         |_, _| 0.0,
     );
-    let groove_field = field(&grooves);
-    let (groove_mean, groove_faces) = mean_display(&grooves, &groove_field, |_, nz| nz > 0.5);
+    let texture_field = field(&texture);
+    let (texture_mean, texture_faces) = mean_display(&texture, &texture_field, |_, nz| nz > 0.5);
 
     println!(
         "peg cap: D {peg_tip_mean:.6} over {peg_tip_faces} faces, min tip_factor \
-         {tip_factor_min:.6}; groove field: D {groove_mean:.6} over {groove_faces} faces"
+         {tip_factor_min:.6}; carved texture: D {texture_mean:.6} over {texture_faces} faces"
     );
-    assert!(peg_tip_faces > 20 && groove_faces > 100, "a fixture is too coarse to grade");
+    assert!(peg_tip_faces > 20 && texture_faces > 100, "a fixture is too coarse to grade");
     assert!(
         tip_factor_min < 1.0,
         "the tip discount never fired on the peg's rounded cap (min tip_factor \
@@ -440,8 +532,8 @@ fn a_rounded_tip_is_discounted_and_a_carved_groove_field_is_not() {
          without it would prove nothing"
     );
     assert!(
-        groove_mean > peg_tip_mean,
-        "the carved groove field scored D {groove_mean:.6}, at or below the peg tip's \
+        texture_mean > peg_tip_mean,
+        "the carved texture scored D {texture_mean:.6}, at or below the peg tip's \
          {peg_tip_mean:.6}; both are fully visible from above, so this comparison is the tip \
          discount's whole job"
     );
