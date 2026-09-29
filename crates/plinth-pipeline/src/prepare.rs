@@ -2688,6 +2688,8 @@ fn print_sweep_disclosure(
          plate contacts {} \
          holding {:.4} mm2 of root area; junctions {} at a parent's top / {} MID-SHAFT \
          ({} chosen mid-shaft by the descent, before un-merging and removal); \
+         {} lander loads on an arm's head booked into the shaft below its contact \
+         ({:.4} mm2), {} kept at a one-slot arm's contact; \
          shaft index {} spans; {} tip-column roots offered, carrying {:.4} mm2 that no other \
          carrier could have taken",
         emission.drawn_volume_mm3,
@@ -2704,6 +2706,9 @@ fn print_sweep_disclosure(
         report.junctions_at_parent_top,
         report.junctions_mid_shaft,
         report.descent_junctions_mid_shaft,
+        report.counters.contact_merges_moved_below,
+        report.contact_merge_load_moved_mm2,
+        report.counters.contact_merges_kept_at_single_slot,
         report.shaft_spans_recorded,
         report.tip_column_roots_offered,
         report.tip_column_root_load_mm2,

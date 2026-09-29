@@ -817,6 +817,18 @@ leaves a down-facing ledge), which also widens that host's plate flare. The run 
 resin line now leads with the volume measured from the emitted records and keeps the ledger
 volume beside it, labelled as the sizing figure.
 
+**As built (2026-09-29, fix/contact-sizing; `lanes/wall-creep-diagnosis.md`).** A tip's contact
+is sized from the load that crosses its own contact with the model, and nothing else. The top
+ledger slot of a support arm is its contact (`tip_radius_mm`, the ball's radius, the scar
+identity's term). A child that lands on the arm's HEAD (at its `k_top`, or at its top alive layer)
+used to have its load booked into that slot, which over-sized the parent's ball (Round 25: arm
+39 drawn at 0.746 mm where its own peel asks for 0.400 mm) and summed the child's load into two
+scars. The down-sweep now books that load one slot lower, into the shaft under the contact, which
+carries the sum; `r_drawn(z) ≥ radius_mm(z)` still holds, and the junction clause at a head joint
+is met by `junction_profiles`, which raises the host's drawn profile to the branch's root from the
+joint down. An arm with no slot below its contact (one layer long, terminating at its own tip
+layer) keeps the load in its one slot and is counted (`contact_merges_kept_at_single_slot`).
+
 **Corrected 2026-09-28 (fix/plate-gap).** This line first read "down to `plate_z + raft_height`",
 the legacy raft datum. v1 emits no raft (§14 OR-3), so that left every root flare 0.2 mm (four
 layers) above the plate with nothing under it; the owner saw the bases float in ChituBox. The

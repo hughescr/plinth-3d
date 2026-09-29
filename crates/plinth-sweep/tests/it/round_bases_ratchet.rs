@@ -143,7 +143,7 @@ const ANNULUS_INSET_MM: f64 = 1.0;
 const RECESS_DRAFT_MM: f64 = 0.67;
 
 /// One member of the `Round_*` family.
-struct Disc {
+pub(crate) struct Disc {
     name: &'static str,
     /// Radius of the plain glue face (the authored bottom).
     bottom_radius_mm: f64,
@@ -180,7 +180,7 @@ struct Disc {
 /// 64 of them congestion-inserted. Round 50 is unchanged (338); Round 100
 /// moves 1142 -> 1130, inside its band. Evidence:
 /// `plinth-evidence/.../field-2026-09-28/lanes/no-dangling/retry/`.
-fn round_25() -> Disc {
+pub(crate) fn round_25() -> Disc {
     Disc {
         name: "Round 25",
         bottom_radius_mm: 11.5,
@@ -292,7 +292,7 @@ fn revolve(points: &[(f64, f64)], segments: usize) -> Mesh {
     Mesh::new(verts, tris).expect("the revolved disc is a valid mesh")
 }
 
-fn mesh_for(disc: &Disc) -> Mesh {
+pub(crate) fn mesh_for(disc: &Disc) -> Mesh {
     revolve(&profile(disc), disc.segments)
 }
 
@@ -341,7 +341,7 @@ fn orient_dense(mesh: &Mesh, name: &str) -> OrientedModel {
 /// same layer-plan construction `sweep_and_emit` uses: `plate_z = min_z −
 /// lift`, one layer plan stopping at the model top plus one layer of
 /// headroom.
-fn place(mesh: &Mesh, name: &str) -> SweepPlan {
+pub(crate) fn place(mesh: &Mesh, name: &str) -> SweepPlan {
     let (min_z, max_z) = z_span(mesh);
     let plate_z = min_z - LIFT_MM;
     let height = layer_height_mm();
@@ -623,6 +623,33 @@ fn round_bases_stay_flat_supported_and_land_glue_face_up() {
         // Graded against `injected_load_mm2`, not `peak_layer_area_mm2`: the
         // two coincide only on a flat-bottomed model, and the glue-face-up
         // pose puts a ring, rib tops and a cavity ceiling at the bottom.
+        //
+        // WHAT IT MEASURES (2026-09-29): `total_scar_mm2` sums `π r_tip²`
+        // over the arms, and `r_tip` is each arm's CONTACT slot, sized from
+        // the peel that crosses that contact. So the identity holds exactly
+        // when every injected mm² reaches one contact once, up to the
+        // minimum-radius clamp. Until the contact-sizing rule a lander on a
+        // ring arm's head was booked into the parent's contact too, and this
+        // read 1.07-1.15 on a double count; the published split below is what
+        // a reader grades it against.
+        let contact_load_mm2: f64 = plan
+            .struts
+            .iter()
+            .filter(|strut| strut.kind == plinth_sweep::StrutKind::Arm)
+            .map(plinth_sweep::SweepStrut::tip_load_mm2)
+            .sum();
+        println!(
+            "{}: scar identity {:.5} (total scar {:.4} mm2, injected/X {:.4} mm2); contact slots \
+             hold {:.4} of {:.4} mm2 injected; {} lander merges moved below a contact ({:.4} mm2)",
+            disc.name,
+            report.total_scar_mm2 / (report.injected_load_mm2 / x_allowed()),
+            report.total_scar_mm2,
+            report.injected_load_mm2 / x_allowed(),
+            contact_load_mm2,
+            report.injected_load_mm2,
+            report.counters.contact_merges_moved_below,
+            report.contact_merge_load_moved_mm2,
+        );
         assert!(
             (report.total_scar_mm2 - report.injected_load_mm2 / x_allowed()).abs()
                 <= bands::AREA_IDENTITY * report.injected_load_mm2 / x_allowed(),
