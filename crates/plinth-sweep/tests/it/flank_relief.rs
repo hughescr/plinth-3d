@@ -116,3 +116,47 @@ fn a_sub_disc_stack_buys_at_most_one_flank_arm_per_round() {
         lane.flank_stacked_area_mm2.len()
     );
 }
+
+/// **Flank arms that relieved nothing are not followed by more.**
+///
+/// On the same fixture the lean leaves one overlapping pair that no flank arm
+/// clears: the stacked area after each round's sizing is the same 0.06 mm²
+/// (measured, 2026-09-29, in all four rounds). Remedy 2 runs again only on a
+/// stack its previous arms made SMALLER, so every stack it ran on must be
+/// strictly smaller than the one before, and on this fixture the lane must
+/// have declined at least one round for that reason (the path-hit witness).
+#[test]
+fn flank_arms_that_relieved_nothing_are_not_repeated() {
+    let mesh = about_y(&make_laid_tube().expect("the laid tube fixture"), -22.5);
+    let policy = SweepPolicy::from_registry().expect("the registry supplies every sweep number");
+    let plan = sweep_with(&mesh, 0.0, &policy);
+    let lane = &plan.report.congestion_lane;
+    println!(
+        "laid tube, production pose: remedy 2 ran on stacks {:?} mm2, declined {} round(s) as \
+         not relieving; {} flank arms, {} rounds, exit congestion {:.5}, {} members",
+        lane.flank_stacked_area_mm2,
+        lane.flank_rounds_not_relieving,
+        lane.arms_inserted,
+        lane.rounds_used,
+        lane.at_lane_exit.all.ratio,
+        plan.struts.len(),
+    );
+    assert!(
+        lane.at_lane_exit.all.congested(),
+        "the fixture came out clean, so no flank arm was ever unable to relieve it"
+    );
+    for pair in lane.flank_stacked_area_mm2.windows(2) {
+        assert!(
+            pair[1] < pair[0],
+            "remedy 2 ran again on {} mm2 after its arms left {} mm2: arms that relieved nothing \
+             were followed by more ({:?})",
+            pair[1],
+            pair[0],
+            lane.flank_stacked_area_mm2
+        );
+    }
+    assert!(
+        lane.flank_rounds_not_relieving > 0,
+        "the stack never failed to shrink on this fixture, so the rule was never exercised"
+    );
+}

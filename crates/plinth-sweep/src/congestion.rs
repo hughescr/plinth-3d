@@ -202,6 +202,9 @@ pub struct CongestionOutcome {
     /// Flank arms the stacked area asked for, summed over the rounds:
     /// `⌈stacked / one flank arm's own flared disc⌉` per round.
     pub flank_arms_wanted: usize,
+    /// Rounds in which remedy 2 was NOT run because the flank arms of the
+    /// round before left the stack no smaller (see [`apply_remedies`]).
+    pub flank_rounds_not_relieving: usize,
     /// Searches that found no admissible plate cell outside the silhouette.
     pub outward_cells_refused: usize,
     /// Flank seats the path check or the non-overlap rule refused.
@@ -471,8 +474,23 @@ pub fn apply_remedies(
     // Remedy 2 only when remedy 1 could not clear the stack. The census is
     // re-taken from the moved field rather than predicted from the counter.
     let after_lean = census(grid, &placed);
-    if context.flank_arms && after_lean.congested() {
-        let stacked_mm2 = (after_lean.disc_area_mm2 - after_lean.union_area_mm2).max(0.0);
+    //
+    // AND ONLY WHILE IT IS RELIEVING. The last entry of
+    // `flank_stacked_area_mm2` is the stack the previous round's flank arms
+    // were inserted for; this round's census is taken after the down-sweep
+    // sized them. If the stack is no smaller, those arms relieved nothing,
+    // and more of the same buys members and no relief. Measured on Round 25
+    // flipped, 2026-09-29: 0.0575 mm² stacked in each of four rounds, one
+    // flank arm per round, and the four brought 10 |X| braces and 7 masts.
+    let stacked_mm2 = (after_lean.disc_area_mm2 - after_lean.union_area_mm2).max(0.0);
+    let relieving = outcome
+        .flank_stacked_area_mm2
+        .last()
+        .is_none_or(|previous| stacked_mm2 < *previous);
+    if context.flank_arms && after_lean.congested() && !relieving {
+        outcome.flank_rounds_not_relieving += 1;
+    }
+    if context.flank_arms && after_lean.congested() && relieving {
         moved += insert_flank_arms(
             context,
             &mut index,
