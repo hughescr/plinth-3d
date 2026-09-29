@@ -984,17 +984,37 @@ macro_rules! placeholder_declarations {
                 }
             )+
 
+            // Built through a `Vec`, never as `Ok([a?, b?, ...])`. Inside an
+            // array literal every `?` is an exit that must drop each element
+            // already built, so the literal form gave this one function
+            // about 40,000 drop paths, and LLVM's MemCpyOpt and SimplifyCFG
+            // spent ~100 s on it in every optimised build of `plinth-core`
+            // (the single longest step of a cold workspace build, measured
+            // 2026-09-28 with `-Z llvm-time-trace`). Evaluation order and the
+            // first error returned are unchanged; the length is still proved
+            // at compile time, by `PLACEHOLDER_COUNT` below.
             pub fn descriptors(&self) -> Result<[ConstantDescriptor; 282], RegistryError> {
-                Ok([
-                    $(ConstantDescriptor::from_placeholder(
-                        ConstantId::from($id),
-                        $unit,
-                        $shape,
-                        &self.$field,
-                    )?,)+
-                ])
+                let mut descriptors = Vec::with_capacity(PLACEHOLDER_COUNT);
+                $(descriptors.push(ConstantDescriptor::from_placeholder(
+                    ConstantId::from($id),
+                    $unit,
+                    $shape,
+                    &self.$field,
+                )?);)+
+                Ok(descriptors.try_into().unwrap_or_else(|_: Vec<ConstantDescriptor>| {
+                    unreachable!("PLACEHOLDER_COUNT is asserted to be 282 at compile time")
+                }))
             }
         }
+
+        /// How many placeholders the table declares; the array
+        /// [`M0PlaceholderConstants::descriptors`] returns has exactly this
+        /// many entries.
+        const PLACEHOLDER_COUNT: usize = [$($id),+].len();
+        const _: () = assert!(
+            PLACEHOLDER_COUNT == 282,
+            "the placeholder table and descriptors()'s array length disagree"
+        );
     };
 }
 

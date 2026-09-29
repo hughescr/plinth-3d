@@ -31,6 +31,36 @@ cargo test --workspace --profile gate --offline    # lane loop
 cargo test --workspace --release      --offline    # merge gate
 ```
 
+## Where integration tests go
+
+Each crate's integration tests are ONE test program, `tests/it/main.rs`, with one module per
+file in `tests/it/`. Cargo links every test program on its own against the whole dependency
+graph, and under `--release` each link is a thin-LTO pass, so one program per file was the
+largest single cost of a test build. Test names carry the file stem as a prefix:
+
+```sh
+cargo test -p plinth-sweep --profile gate --offline --test it orient_demand::   # one former file
+cargo test -p plinth-sweep --profile gate --offline --test it                   # all of them
+```
+
+**A new test goes in `tests/it/<name>.rs` plus a `mod <name>;` line in `tests/it/main.rs`.**
+Shared helpers (`tests/harness/`, `tests/common/`, `examples/shared/first_artifact_chain.rs`)
+are declared once in `main.rs` and reached as `crate::harness` and so on. Cargo's automatic
+test discovery stays on, so a new top-level `tests/<name>.rs` (from a branch cut before this
+layout, say) still builds and runs as its own program: nothing is dropped, it only pays its
+own link. Move it into `tests/it/` when convenient.
+
+A test stays its own top-level program only when it needs a process to itself. Today that is
+every test that re-runs its own executable with `--exact <test name>` under a changed
+`PLINTH_THREADS` (inside `it` the name would gain a module prefix and the child would run
+nothing): `plinth-decimate/tests/thread_sweep.rs`, `plinth-orient/tests/orient_thread_sweep.rs`,
+`plinth-verify/tests/coverage_gate.rs`, and `geom_kernel/tests/{allowed_face_projection,
+native_api, point_index}.rs`. The `trybuild` suites (`tests/compile_fail.rs`) and all of
+`plinth-support/tests/` (whose slow suites are run one at a time on purpose) are also left as
+they were. Before adding a test that sets environment variables, changes the working directory,
+installs a panic hook or a global allocator, or times itself, keep it separate the same way:
+every test in `it` shares one process with the rest of the crate's tests.
+
 ## The gate: five commands, all of them, every time
 
 ```sh
@@ -470,7 +500,7 @@ worktree can look perfectly clean and still be unable to run the gate. At least 
 targets hard-fail without the corpus, with errors that do not name the corpus as the cause:
 `plinth-decimate`'s `corpus_budgets` test and `plinth-orient`'s
 `every_pinned_orientation_record_rederives_its_committed_oriented_solid_artifact`
-(`crates/plinth-orient/tests/orientation_rederivation.rs`), which falsifies every pinned
+(`crates/plinth-orient/tests/it/orientation_rederivation.rs`), which falsifies every pinned
 baseline orientation by re-deriving it from the corpus source STL. If those are the only
 failures in a fresh checkout, provision before investigating anything else.
 

@@ -576,7 +576,7 @@ pub fn apply_remedies(
             if context.mast
                 && try_mast(
                     context,
-                    &index,
+                    &mut index,
                     struts,
                     &mut placed_roots,
                     run.strut_id,
@@ -584,7 +584,9 @@ pub fn apply_remedies(
                     &mut outcome,
                 )
             {
-                stamp_last_three(&mut index, struts);
+                // `try_mast` stamped the mast itself before tying the cross to
+                // it; the cross's two members follow it, in member order.
+                stamp_last_two(&mut index, struts);
                 continue;
             }
         }
@@ -658,10 +660,6 @@ fn stamp_all(index: &mut ColumnHistory, struts: &[SweepStrut]) {
 
 fn stamp_last_two(index: &mut ColumnHistory, struts: &[SweepStrut]) {
     stamp_tail(index, struts, 2);
-}
-
-fn stamp_last_three(index: &mut ColumnHistory, struts: &[SweepStrut]) {
-    stamp_tail(index, struts, 3);
 }
 
 fn stamp_tail(index: &mut ColumnHistory, struts: &[SweepStrut], count: usize) {
@@ -1161,7 +1159,7 @@ fn push_brace(
 /// function, not a copy of the rule — against every root already on the plate.
 fn try_mast(
     context: &SlendernessContext<'_>,
-    index: &ColumnHistory,
+    index: &mut ColumnHistory,
     struts: &mut Vec<SweepStrut>,
     placed_roots: &mut Vec<crate::congestion::RootDisc>,
     id: u32,
@@ -1191,11 +1189,18 @@ fn try_mast(
     } else {
         1.0
     };
-    // Nearest admissible cell wins, so the scan is a ring-by-ring outward
-    // search expressed as one pass with a nearest-so-far: the box is the same
-    // box `d_max` bounds, and every test below is a refusal of THIS cell, never
-    // of the search.
-    let mut best: Option<(f64, usize, f64)> = None;
+    // Nearest admissible cell wins: the least `(distance, cell)`, compared
+    // lexicographically, among the cells that pass every test below. The box
+    // is the same box `d_max` bounds, and every test is a refusal of THIS
+    // cell, never of the search.
+    //
+    // The cheap per-cell tests run over the whole box; the one expensive test
+    // -- the flared disc against every placed root, a scan of the whole plate
+    // -- runs only in `(distance, cell)` order, and only until one cell passes
+    // it. That first passing cell IS the least passing cell, so this picks
+    // exactly the cell the one-pass nearest-so-far scan picked, without paying
+    // the plate scan for every cell of a box up to 169 cells across.
+    let mut candidates: Vec<(f64, usize, f64)> = Vec::new();
     for row in row0.saturating_sub(reach_cells)..=(row0 + reach_cells).min(grid.rows() - 1) {
         let base = row * cols;
         for col in col0.saturating_sub(reach_cells)..=(col0 + reach_cells).min(cols - 1) {
@@ -1231,25 +1236,20 @@ fn try_mast(
             )]
             let first_brace_mm = (k - depth) as f64 * context.layer_height_mm;
             let radius_mm = context.law.brace_radius_mm(first_brace_mm);
-            // AND ITS FLARED DISC HAS TO CLEAR EVERY ROOT ALREADY ON THE PLATE.
-            if context.mast_root_clearance
-                && !crate::congestion::clear_of_placed(
-                    grid,
-                    cell,
-                    radius_mm * flare,
-                    placed_roots,
-                    None,
-                )
-            {
-                continue;
-            }
-            if best.is_none_or(|(best_distance, best_cell, _)| {
-                (distance_mm.total_cmp(&best_distance), cell) < (core::cmp::Ordering::Equal, best_cell)
-            }) {
-                best = Some((distance_mm, cell, radius_mm));
-            }
+            candidates.push((distance_mm, cell, radius_mm));
         }
     }
+    candidates.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    // AND ITS FLARED DISC HAS TO CLEAR EVERY ROOT ALREADY ON THE PLATE. The
+    // plate does not change during this search, so it is indexed once and each
+    // candidate asks the index (`congestion::PlacedIndex`: the same test as
+    // `clear_of_placed`, disc by disc, over every disc that could touch).
+    let best = {
+        let plate = crate::congestion::PlacedIndex::build(placed_roots, None);
+        candidates.into_iter().find(|&(_, cell, radius_mm)| {
+            !context.mast_root_clearance || plate.clear(grid, cell, radius_mm * flare)
+        })
+    };
     // NO CLEAR CELL INSIDE `d_max` MEANS THE MAST IS REFUSED AND COUNTED, never
     // placed overlapping. The run it would have served comes back as a warning
     // from the census at the end of the lane — emit and warn, never refuse.
@@ -1286,10 +1286,17 @@ fn try_mast(
         straight_fallback: None,
         fallback_path: Vec::new(),
     });
-    // The mast has to be visible to the cross that ties to it.
-    let mut index_with_mast = ColumnHistory::new(grid);
-    stamp_all(&mut index_with_mast, struts);
-    if build_cross(context, &index_with_mast, struts, id, mast_id, k, outcome) {
+    // The mast has to be visible to the cross that ties to it. `index` already
+    // holds every other member, stamped in member order (the caller builds it
+    // with `stamp_all` and stamps each member it adds as it adds it), so
+    // stamping the mast last gives exactly the index a fresh `stamp_all` over
+    // `struts` would build -- the same spans, in the same order, in the same
+    // slots -- without re-walking every shaft of the plan for each attempt.
+    // If the cross is refused the mast's one span is taken back out, so the
+    // caller's index again matches `struts` after the `pop` below.
+    let spans_before = index.shaft_spans.len();
+    index.stamp_shaft(mast_id, 0, k, cell, &[]);
+    if build_cross(context, index, struts, id, mast_id, k, outcome) {
         // The mast is now a root on the plate, so the NEXT mast search has to
         // clear it too.
         crate::congestion::push_disc(
@@ -1307,6 +1314,7 @@ fn try_mast(
     }
     // The cross would not build. EMIT AND WARN: the mast is withdrawn rather
     // than left standing with nothing tied to it, and the run is reported.
+    index.unstamp_straight_shaft(cell, spans_before);
     struts.pop();
     outcome.mast_cells_refused += 1;
     false
