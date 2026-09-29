@@ -27,6 +27,7 @@ mod oracle_tee;
 mod orient_demand;
 mod orient_demand_parallel;
 mod pitch_invariance;
+mod plate_root_contact;
 mod pose_demand_probe;
 mod round_bases_ratchet;
 mod sabotage;

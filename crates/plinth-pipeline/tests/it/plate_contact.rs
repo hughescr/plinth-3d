@@ -31,7 +31,7 @@
 //! none would grade nothing, and that is asserted against too.
 //!
 //! The fixture is the PROCEDURAL `Round 25` (`plinth_mesh::make_recessed_disc`
-//! at the dimensions `crates/plinth-sweep/tests/round_bases_ratchet.rs`
+//! at the dimensions `crates/plinth-sweep/tests/it/round_bases_ratchet.rs`
 //! derives and measures against the real STL), written out as a real binary
 //! `.stl`, so this runs in a fresh clone with no provisioned corpus.
 

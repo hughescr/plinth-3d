@@ -1,7 +1,7 @@
 //! **A plate-rooted sweep member reaches the plate** — every branch of the
 //! sweep lowering's plate-root chain, one arm at a time.
 //!
-//! The end-to-end guard is `crates/plinth-pipeline/tests/plate_contact.rs`,
+//! The end-to-end guard is `crates/plinth-pipeline/tests/it/plate_contact.rs`,
 //! which reads the production `Round 25` artifact back from disk. It can only
 //! see branches that disc exercises, and on it every plate arm is tall enough
 //! for a flare, so the SHORT-RUN branch — a plate arm too close to the plate
