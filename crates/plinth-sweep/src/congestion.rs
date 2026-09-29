@@ -113,6 +113,11 @@ pub struct CongestionCensus {
     pub disc_area_mm2: f64,
     /// Area at least one disc covers, mm².
     pub union_area_mm2: f64,
+    /// The STACKED area, `(Σ disc cells − union cells) · cell area`, mm². Taken
+    /// from the integer cell counts and not as `disc_area − union_area`: two
+    /// censuses with the same stacked cells must read the same area to the
+    /// bit, whatever else the field holds, because remedy 2 compares them.
+    pub stacked_area_mm2: f64,
     /// `Σ π r²` analytically, mm² — published as a cross-check on the raster.
     pub analytic_disc_area_mm2: f64,
     /// `disc_area / union_area`. `1.0` means no two discs overlap; `0.0` means
@@ -349,9 +354,14 @@ fn census(grid: &Grid, discs: &[RootDisc]) -> CongestionCensus {
         clippy::cast_precision_loss,
         reason = "cell counts bounded by the grid's own cell count are exact in f64"
     )]
-    let (stamped, unioned) = (stamps as f64, union_cells as f64);
+    let (stamped, unioned, stacked) = (
+        stamps as f64,
+        union_cells as f64,
+        (stamps - union_cells) as f64,
+    );
     out.disc_area_mm2 = stamped * cell_area;
     out.union_area_mm2 = unioned * cell_area;
+    out.stacked_area_mm2 = stacked * cell_area;
     out.ratio = if union_cells == 0 { 0.0 } else { stamped / unioned };
     out.stack_max = three_or_more;
     out.stack_depth_max = deepest;
@@ -482,7 +492,7 @@ pub fn apply_remedies(
     // and more of the same buys members and no relief. Measured on Round 25
     // flipped, 2026-09-29: 0.0575 mm² stacked in each of four rounds, one
     // flank arm per round, and the four brought 10 |X| braces and 7 masts.
-    let stacked_mm2 = (after_lean.disc_area_mm2 - after_lean.union_area_mm2).max(0.0);
+    let stacked_mm2 = after_lean.stacked_area_mm2;
     let relieving = outcome
         .flank_stacked_area_mm2
         .last()
@@ -1516,6 +1526,48 @@ mod tests {
             assert_eq!(out.stack_max, 0);
             assert_eq!(out.stack_depth_max, 1);
         }
+    }
+
+    /// The same stacked pair reads the SAME stacked area to the bit, however
+    /// many disjoint roots the rest of the plate holds. Remedy 2 stops when a
+    /// round's stack is not smaller than the last one's, so two equal stacks
+    /// must compare equal; `disc_area − union_area` did not (Round 25 flipped,
+    /// 2026-09-29: the same 23 stacked cells read a hair smaller in round 2 and
+    /// bought a second flank arm that relieved nothing).
+    #[test]
+    fn the_same_stack_reads_the_same_stacked_area_whatever_else_is_on_the_plate() {
+        let grid = grid();
+        let pair = [disc(0, 5.0, 5.0, 0.4), disc(1, 5.5, 5.0, 0.4)];
+        let alone = census(&grid, &pair);
+        assert!(alone.stacked_area_mm2 > 0.0, "the pair does not overlap");
+        let mut differs_by_subtraction = 0;
+        for extra in 1..=40_u32 {
+            let mut discs = pair.to_vec();
+            for k in 0..extra {
+                let x = 0.5 + f64::from(k % 8) * 1.2;
+                let y = 7.0 + f64::from(k / 8) * 0.6;
+                discs.push(disc(10 + k, x, y, 0.13 + 0.01 * f64::from(k % 5)));
+            }
+            let out = census(&grid, &discs);
+            assert_eq!(
+                out.stacked_area_mm2.to_bits(),
+                alone.stacked_area_mm2.to_bits(),
+                "{extra} disjoint extra roots changed the stacked area {} -> {}",
+                alone.stacked_area_mm2,
+                out.stacked_area_mm2
+            );
+            if (out.disc_area_mm2 - out.union_area_mm2).to_bits()
+                != (alone.disc_area_mm2 - alone.union_area_mm2).to_bits()
+            {
+                differs_by_subtraction += 1;
+            }
+        }
+        // Anti-vacuity: the subtraction really does drift on these fields, so
+        // this test would catch it coming back.
+        assert!(
+            differs_by_subtraction > 0,
+            "the subtraction never drifted here, so this test cannot tell the two forms apart"
+        );
     }
 
     /// Two coincident discs put twice the area on one patch, and the ratio says
