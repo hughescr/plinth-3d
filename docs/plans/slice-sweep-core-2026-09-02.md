@@ -799,6 +799,24 @@ One sweep strut lowers to the same chain the existing lowering emits for a plate
 4. RootFlare       only for Landing::Plate, root boss top down to plate_z + raft_height
 ```
 
+**As built (2026-09-28, field report "trunk-thinner").** Step 3 was not built until
+2026-09-28: every strut was lowered as ONE taper from its tip radius to its root radius, which
+drew every trunk under a mid-shaft junction thinner than its own ledger and thinner than the
+branch landing on it. It is now built on a physical rule rather than the record-count economy
+above: the drawn section at every height is at least the ledger's, `r_drawn(z) ≥ radius_mm(z)`
+(the area law on the emitted geometry). `plinth_support::lower` (`drawn_spans`) cuts the shaft at
+slot boundaries and splits a straight chord only where it would dip below the ledger (at the
+cut where it dips furthest, recursively); a piecewise-constant ledger therefore breaks exactly at
+each step and nowhere else, with an upward-facing shoulder at each junction. The 1 % / 0.005 mm
+merge is NOT used — no tolerance beyond float noise (1e-9 relative) enters. The junction clause
+(a trunk is at least as thick as each branch where it joins) holds by the ledger for support
+arms; for a BRACE, sized by its own slenderness minimum and invisible to the trunk's ledger, the
+adapter (`junction_profiles`) raises the host's DRAWN profile to the brace's end radius from the
+joint down to the host's root (never a local collar: a member must not narrow downward, or it
+leaves a down-facing ledge), which also widens that host's plate flare. The run report's
+resin line now leads with the volume measured from the emitted records and keeps the ledger
+volume beside it, labelled as the sizing figure.
+
 **The adapter must not re-derive this geometry by hand.** `lower_stub`
 (`crates/plinth-support/src/lower.rs:362`) and `root_boss_top` (`:416`) already compute the
 canonical ball centre, poles and flare; LANE 2 promotes the geometry helpers to `pub` and the

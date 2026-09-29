@@ -327,7 +327,7 @@ fn zero_available_depth_clips_but_never_retracts() {
         .iter()
         .map(|arm| SweepArm {
             available_seat_depth_mm: 0.0,
-            ..*arm
+            ..arm.clone()
         })
         .collect();
     let lowered = lower_sweep_arms(
