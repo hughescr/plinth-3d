@@ -151,8 +151,15 @@ struct Disc {
     /// to the full height. Innermost first.
     rings: &'static [(f64, f64)],
     segments: usize,
-    /// Arms placed at the glue-face-up pose, measured 2026-09-28 (see the
-    /// (4) assertion for why this is a pin and not a prediction).
+    /// Arms placed at the glue-face-up pose (see the (4) assertion for why
+    /// this is a pin and not a prediction). Measured 2026-09-28 as 169 / 338 /
+    /// 1142; RE-PINNED 2026-09-29 by the wall-creep lane to 89 / 304 / 1068, the
+    /// move the (4) comment predicted: a drafted wall's creep is now priced by
+    /// its overhang weight (`reach.rs`, `creep_step`), so the drafted recess
+    /// wall no longer draws minimum-size arms, and congestion remedy 2 seats
+    /// flank arms only in proportion to the stack (`congestion.rs`), which took
+    /// Round 25's 64 flank arms to 1. Measured with each rule alone on Round
+    /// 25: creep rule only 139, remedy-2 rule only 106, both 89.
     pinned_arms: usize,
 }
 
@@ -162,7 +169,7 @@ fn round_25() -> Disc {
         bottom_radius_mm: 11.5,
         rings: &[(2.62, 4.12)],
         segments: 96,
-        pinned_arms: 169,
+        pinned_arms: 89,
     }
 }
 
@@ -172,7 +179,7 @@ fn round_50() -> Disc {
         bottom_radius_mm: 24.0,
         rings: &[(2.62, 4.12), (12.25, 12.75)],
         segments: 128,
-        pinned_arms: 338,
+        pinned_arms: 304,
     }
 }
 
@@ -182,7 +189,7 @@ fn round_100() -> Disc {
         bottom_radius_mm: 49.0,
         rings: &[(2.62, 4.12), (12.25, 12.75), (25.0, 25.5)],
         segments: 128,
-        pinned_arms: 1142,
+        pinned_arms: 1068,
     }
 }
 
@@ -556,7 +563,8 @@ fn round_bases_stay_flat_supported_and_land_glue_face_up() {
         // band is the harness's licensed multiplicative width around today's
         // count, the same honest pin this file used for Round 25's flip before
         // 2026-09-28: a ratchet against a gross regression, and a number the
-        // rule-C lane is EXPECTED to move downward and re-pin.
+        // rule-C lane is EXPECTED to move downward and re-pin. It did, on
+        // 2026-09-29 (the wall-creep lane; see `Disc::pinned_arms`).
         let pinned = disc.pinned_arms as f64;
         let (low, high) = (pinned * bands::STRUT_COUNT.0, pinned * bands::STRUT_COUNT.1);
         assert!(
