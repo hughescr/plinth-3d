@@ -62,6 +62,16 @@ fn request() -> SweepRequest {
 ///   cube under a scar-free objective, which builds neither field and is the
 ///   exact configuration `03-physics-and-constants.md` §3.8 requires to
 ///   reproduce the pre-scar search structurally.
+///
+/// # AMENDED AGAIN 2026-09-28: the tie is back under the full objective
+///
+/// The 2026-09-04 separation came from the old mean-based `detail`, which
+/// read the cube's 90° edges as detail on its authored top. Under the owner's
+/// 2026-09-05 ruling (built 2026-09-28, `plinth-mesh/src/display_eval.rs`) a
+/// crease is change, not detail: every fold on a cube is the same 90°, so
+/// every face carries `D = 0` and the full objective ties the six face-down
+/// poses to the bit again. Identity wins that tie on the id tie-break, which
+/// is what this test is named for, and both halves now assert the tie.
 #[test]
 fn a_cube_ties_six_ways_and_identity_wins() {
     let mesh = make_box_default().expect("cube fixture");
@@ -72,12 +82,17 @@ fn a_cube_ties_six_ways_and_identity_wins() {
     assert_eq!(outcome.winner().block, CandidateBlock::Legacy);
     let full = outcome.record();
     let full_runner_up = full.runner_up.as_ref().expect("a cube has a runner-up");
-    assert!(
-        full_runner_up.terms.score.get() > full.winner.terms.score.get(),
-        "under the full objective the display field must separate the cube's authored top from \
-         its other five faces: runner-up {} against winner {}",
+    assert_eq!(
+        full_runner_up.terms.score.get().to_bits(),
+        full.winner.terms.score.get().to_bits(),
+        "under the full objective a featureless cube's six face-down poses must tie: runner-up {} \
+         against winner {} — a separation would mean a 90 deg crease was read as detail",
         full_runner_up.terms.score.get(),
         full.winner.terms.score.get(),
+    );
+    assert!(
+        full_runner_up.candidate > full.winner.candidate,
+        "the full-objective tie must have been broken toward the lower id"
     );
 
     let mut scar_free = request();
@@ -359,13 +374,14 @@ fn the_three_tiers_promote_the_recorded_widths() {
     assert!(record.tiers[0].promoted <= request.ladder.refine_top_k());
     assert_eq!(record.tiers[1].scored, record.tiers[0].promoted);
     assert!(record.tiers[1].promoted <= request.ladder.commit_top_k());
-    // The commit tier scores the promoted set plus the escorted legacy block,
-    // which is what makes "never worse" hold at the tier that decides.
+    // The commit tier scores the promoted set plus the escorted legacy block
+    // and flat-face poses, which is what makes "never worse" hold at the tier
+    // that decides.
     assert_eq!(
         record.tiers[2].scored,
         record.tiers[1].promoted + record.tiers[2].escorted
     );
-    assert!(record.tiers[2].escorted <= record.grid.legacy);
+    assert!(record.tiers[2].escorted <= record.grid.legacy + record.grid.flat_face_poses);
 
     // Commitment happens at the production mesh and only there.
     assert_eq!(record.tiers[2].lod, EXACT_LOD);

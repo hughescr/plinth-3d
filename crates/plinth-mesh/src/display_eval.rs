@@ -26,12 +26,32 @@
 //!   measured rather than asserted, and it is the factor that decides the
 //!   Morel base, whose textured ground and whose relief-text underside BOTH
 //!   carry detail.
-//! * **`detail`** is the area-weighted mean of `1 − cos` between the face's
-//!   normal and its neighbours' normals over a surface neighbourhood of radius
-//!   `R_detail`, clamped into `[0, 1]`.  `1 − cos` is `0` on a flat region and
-//!   `1` when the neighbourhood's normals are decorrelated, which is what
-//!   makes `1` a meaning rather than a chosen divisor.  This is the owner's
-//!   "local low cosine similarity among neighbouring triangle normals".
+//! * **`detail`** is the SPREAD of the fold angles inside a surface
+//!   neighbourhood of radius `R_detail`: `1 − GM/AM` of the angles between
+//!   adjacent faces' normals, each fold weighted by the normal change it
+//!   carries (`length × angle`), folds below the printer's change resolution
+//!   excluded ([`spread_of_folds`], [`neighbourhood_pass`]).  It is `0` on a
+//!   flat region AND on uniform change — a crease, a regular rib or groove, a
+//!   uniformly faceted wall, every fold the same angle — and rises toward `1`
+//!   as the fold angles spread over orders of magnitude.  `0` and the limit
+//!   `1` are meanings (no spread; unbounded spread), not chosen divisors.
+//!   This is the owner's ruling of 2026-09-05, built 2026-09-28: "detail" is
+//!   a WIDE DISTRIBUTION of normal-change magnitudes (small, medium and large
+//!   together), and a crease or a regular rib is "change", not detail — so
+//!   the SPREAD of the local normal-change distribution, not its mean.
+//!
+//!   **What it replaced, and why.**  Until 2026-09-28 `detail` was the
+//!   area-weighted MEAN of `1 − cos` between the face's normal and its
+//!   neighbours' — the owner's first reading, "local low cosine similarity
+//!   among neighbouring triangle normals".  A mean cannot tell a crease from
+//!   texture: every face within `R_detail` of a 90° rib edge scored high.  On
+//!   `Round_100.stl` that put 24.1 mm² of display charge on the stiffener
+//!   ribs and rim annulus of the glue-face-UP pose — the owner's correct pose
+//!   — and was the deciding term against it (`plinth-evidence/slice-sweep-
+//!   2026-09-02/field-2026-09-28/round50.md` Q3).  Measured on the fixtures in
+//!   `tests/display_field.rs`: a regular 1 mm V-groove field scored D 0.0594
+//!   against an irregular bump texture's 0.0762 under the mean; under the
+//!   spread the grooves read as change.
 //! * **`tip_factor`** discounts the confound the owner named: protrusion tips
 //!   articulate sharply and are the BEST places to land supports.
 //!
@@ -63,17 +83,26 @@
 //!
 //! **They multiply, and that choice is load-bearing.**  An additive or
 //! probabilistic-OR combination would give a smooth, featureless authored-top
-//! face a positive `D` on visibility alone.  Measured, that is not a
-//! theoretical worry: all three `Round_*.stl` bases are authored recess-UP,
-//! and the owner's ChituBox verdict of 2026-09-03 is that `Round 50`/`Round
-//! 100` are correct at identity while `Round 25` is correct at a 180° flip.
-//! Their authored frames agree and their correct poses do not, so an authored
-//! up-signal that fires on featureless geometry would move `Round 25` to the
-//! WRONG pose.  Under the product, a featureless face has `detail = 0` and
-//! therefore `D = 0`, the objective is unchanged there, and the authored-up
-//! signal speaks only where there is detail for it to speak about.  That is
-//! also what makes `D = 0` reproduce today's objective exactly on plain
-//! geometry rather than approximately.
+//! face a positive `D` on visibility alone, and would make the authored frame
+//! itself an orientation vote on every part.  Under the product, a
+//! featureless face has `detail = 0` and therefore `D = 0`, the objective is
+//! unchanged there, and the authored-up signal speaks only where there is
+//! detail for it to speak about.  That is also what makes `D = 0` reproduce
+//! the pre-display objective exactly on plain geometry rather than
+//! approximately.
+//!
+//! **THE RECORD, CORRECTED 2026-09-28.**  This paragraph used to justify the
+//! product with the claim that "`Round 50`/`Round 100` are correct at
+//! identity while `Round 25` is correct at a 180° flip".  That was wrong. All
+//! three `Round_*.stl` bases are authored glue face DOWN (the plain plane at
+//! the authored `z` minimum, the recess and stiffener ribs at the maximum),
+//! and the owner's ruling of 2026-09-28 is that all three print glue face UP —
+//! the 180° flip. `Round 50` and `Round 100` came out at identity only
+//! because the orientation funnel never measured the flip (`plinth-orient`'s
+//! `search::escort`, flat-face poses) and, on `Round 100`, because the old
+//! mean-based `detail` read the ribs as detail. The featureless glue face is
+//! the display face; no detail measure can see that positively, and none
+//! should push against it.
 //!
 //! # Batch-first
 //!
@@ -85,7 +114,7 @@
 //! spatial query and no per-face kernel call anywhere in this file.  Every
 //! fold is serial in source index order.
 
-use geom_kernel::vec3::{dot, norm, sub};
+use geom_kernel::vec3::{cross, dot, norm, sub};
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, V3};
 
 use crate::delicacy::FaceTable;
@@ -132,7 +161,15 @@ pub fn evaluate_display(
         unusable,
     } = welded_angle_defect(mesh, &geometry).map_err(DisplayError::Topology)?;
     let curvature_by_face = curvature_by_face(mesh, &geometry, &topology, &defect, &unusable);
-    let neighbourhood = neighbourhood_pass(mesh, &geometry, &topology, &curvature_by_face, settings);
+    let folds = fold_pass(mesh, &geometry, &topology);
+    let neighbourhood = neighbourhood_pass(
+        mesh,
+        &geometry,
+        &topology,
+        &folds,
+        &curvature_by_face,
+        settings,
+    );
 
     let mut values = Vec::with_capacity(face_count);
     for (face, &visible) in visibility.iter().enumerate() {
@@ -394,9 +431,117 @@ struct Neighbourhood {
     curvature: Vec<f64>,
 }
 
-/// One surface-neighbourhood pass: the detail density and the total Gaussian
-/// curvature of every face's `R_detail` neighbourhood, in a single traversal
-/// per face over a shared scratch frontier.
+/// Per welded face adjacency, slot-aligned with
+/// [`crate::FaceTopology::indices`]: the FOLD angle between the two faces'
+/// normals and the length of the edge they share. One pass, before any
+/// neighbourhood is walked, so each fold is measured once and every
+/// neighbourhood that contains it reads the same number.
+struct Folds {
+    angle: Vec<f64>,
+    length: Vec<f64>,
+}
+
+/// Measures every fold once. The angle is `atan2(|n × m|, n · m)`, which stays
+/// accurate at the small angles `acos` loses; the shared edge is found by
+/// welded vertex identity, so a fold between two faces that meet only at a
+/// point (no shared edge) has zero length and carries nothing.
+fn fold_pass(mesh: &Mesh, geometry: &FaceGeometryPass, topology: &crate::FaceTopology) -> Folds {
+    let welded = topology.source_vertex_to_welded();
+    let indptr = topology.indptr();
+    let indices = topology.indices();
+    let tris = mesh.tris();
+    let verts = mesh.verts();
+    let mut angle = vec![0.0_f64; indices.len()];
+    let mut length = vec![0.0_f64; indices.len()];
+    for (face, corners) in tris.iter().enumerate() {
+        let (Some(&start), Some(&end)) = (indptr.get(face), indptr.get(face + 1)) else {
+            continue;
+        };
+        if geometry.degenerate[face] {
+            continue;
+        }
+        let welded_corners = corners.map(|corner| welded[corner as usize]);
+        for slot in start as usize..end as usize {
+            let other = indices[slot] as usize;
+            if other >= tris.len() || geometry.degenerate[other] {
+                continue;
+            }
+            let other_welded = tris[other].map(|corner| welded[corner as usize]);
+            let mut shared = [0_usize; 2];
+            let mut count = 0_usize;
+            for (position, id) in welded_corners.iter().enumerate() {
+                if count < 2 && other_welded.contains(id) {
+                    shared[count] = position;
+                    count += 1;
+                }
+            }
+            if count < 2 {
+                continue;
+            }
+            let a = verts[corners[shared[0]] as usize];
+            let b = verts[corners[shared[1]] as usize];
+            length[slot] = norm(sub(b, a));
+            let n = geometry.normals[face];
+            let m = geometry.normals[other];
+            angle[slot] = norm(cross(n, m)).atan2(dot(n, m));
+        }
+    }
+    Folds { angle, length }
+}
+
+/// The SPREAD of a set of fold angles, each weighted by the normal change it
+/// carries: `1 − GM/AM`, where GM and AM are the weighted geometric and
+/// arithmetic means of the angles.
+///
+/// * By the AM–GM inequality it lies in `[0, 1)`, and it is `0` exactly when
+///   every fold has the same angle — a crease, a regular rib, a regular
+///   groove, a uniformly faceted cylinder: CHANGE, not detail (owner ruling
+///   2026-09-05). It rises toward `1` as the angles spread over orders of
+///   magnitude — small, medium and large together.
+/// * It is `1 − exp(−L)`, where `L = ln AM − mean(ln θ)` is the mean log
+///   deviation (Theil's L), the standard scale-free spread of a positive
+///   quantity: multiplying every angle by the same factor leaves it
+///   unchanged, so a sharp regular rib and a shallow regular rib are equally
+///   NOT detail. For log-normally spread angles it is `1 − exp(−σ²/2)`.
+/// * The weight is `length × angle`, the normal change the fold carries (the
+///   discrete integral of the surface's turning along it). A flat edge
+///   carries none and so is not in the distribution at all — which is what
+///   lets a crease on a flat face read as ONE magnitude rather than as a
+///   0-or-90° mixture.
+///
+/// `sums` is `(Σw, Σw·θ, Σw·ln θ, min θ, max θ)`. When every fold holds the
+/// same angle the answer is `0` by definition, and it is returned as exactly
+/// `0` rather than as whatever last-bit residue `exp(ln θ)/θ` leaves.
+fn spread_of_folds(sums: (f64, f64, f64, f64, f64)) -> f64 {
+    let (weight, weighted_angle, weighted_log, smallest, largest) = sums;
+    if weight <= 0.0 || smallest >= largest {
+        return 0.0;
+    }
+    let arithmetic = weighted_angle / weight;
+    let geometric = (weighted_log / weight).exp();
+    if arithmetic <= 0.0 || !arithmetic.is_finite() || !geometric.is_finite() {
+        return 0.0;
+    }
+    (1.0 - geometric / arithmetic).clamp(0.0, 1.0)
+}
+
+/// One surface-neighbourhood pass: the detail (the spread of the fold angles)
+/// and the total Gaussian curvature of every face's `R_detail` neighbourhood,
+/// in a single traversal per face over a shared scratch frontier.
+///
+/// # Which folds a neighbourhood holds
+///
+/// Every welded edge BOTH of whose faces are in the neighbourhood, counted
+/// once, whose fold angle `θ` exceeds the change resolution
+/// ([`DisplaySettings::change_resolution_rad`], `atan(0.019 mm / R_detail)` =
+/// 1.36°): a fold whose excursion across the whole neighbourhood stays inside
+/// one addressable printer step — the deviation the decimated mesh is already
+/// authorized to carry — is indistinguishable from tessellation or
+/// decimation noise and is not a change. Without that bound a flat but
+/// non-axis-aligned plane, whose coplanar triangles fold by float noise alone,
+/// would read its noise as a maximally wide distribution; the scale-free
+/// statistic cannot tell `1e-8` from `1e-1` rad, so the resolution has to be
+/// stated, and it is inherited rather than chosen.
 ///
 /// # The neighbourhood is SURFACE-restricted, and the radius is Euclidean
 ///
@@ -431,7 +576,7 @@ struct Neighbourhood {
 /// `R_detail`.  A point deeper than `R_detail` inside a flat triangle sees
 /// nothing but its own plane, so it carries no detail whatever its
 /// neighbours do; only the band within `R_detail` of the face's edges can
-/// see across them.  The neighbourhood ratio above is therefore scaled by the
+/// see across them.  The neighbourhood's spread is therefore scaled by the
 /// band fraction `min(1, perimeter x R_detail / area)`, which is exactly 1 on
 /// any triangle smaller than the scale (a production mesh) and falls as a
 /// triangle grows past it.  Without this a 20 mm slab top made of two
@@ -443,22 +588,30 @@ fn neighbourhood_pass(
     mesh: &Mesh,
     geometry: &FaceGeometryPass,
     topology: &crate::FaceTopology,
+    folds: &Folds,
     curvature_by_face: &[f64],
     settings: DisplaySettings,
 ) -> Neighbourhood {
     let face_count = geometry.normals.len();
     let radius_sq = settings.detail_radius_mm() * settings.detail_radius_mm();
+    let resolution = settings.change_resolution_rad();
+    let indptr = topology.indptr();
+    let indices = topology.indices();
 
     let mut detail = vec![0.0_f64; face_count];
     let mut curvature = vec![0.0_f64; face_count];
     let band_fraction = border_band_fraction(mesh, geometry, settings.detail_radius_mm());
 
     // Shared scratch, reused across faces: a visited stamp keyed by the source
-    // face index (so it is cleared in O(visited), never O(faces)) and one
-    // frontier buffer.
+    // face index (so it is cleared in O(visited), never O(faces)), an INSIDE
+    // stamp keyed the same way (never cleared: a stamp equal to this seed can
+    // only have been written during this seed's walk), one frontier buffer
+    // and one list of the faces found inside.
     let mut stamp = vec![u32::MAX; face_count];
+    let mut inside_stamp = vec![u32::MAX; face_count];
     let mut frontier: Vec<u32> = Vec::new();
     let mut visited: Vec<u32> = Vec::new();
+    let mut members: Vec<usize> = Vec::new();
 
     for face in 0..face_count {
         if geometry.degenerate[face] {
@@ -466,17 +619,15 @@ fn neighbourhood_pass(
         }
         let seed = u32::try_from(face).unwrap_or(u32::MAX);
         let origin = geometry.centroids[face];
-        let normal = geometry.normals[face];
         let ring = topology.neighbors(face).unwrap_or(&[]);
 
         frontier.clear();
         visited.clear();
+        members.clear();
         frontier.push(seed);
         stamp[face] = seed;
         visited.push(seed);
 
-        let mut area_total = 0.0_f64;
-        let mut articulation_total = 0.0_f64;
         let mut curvature_total = 0.0_f64;
 
         let mut head = 0_usize;
@@ -492,10 +643,9 @@ fn neighbourhood_pass(
             if !inside {
                 continue;
             }
+            inside_stamp[current] = seed;
+            members.push(current);
             if !geometry.degenerate[current] {
-                let area = geometry.areas_mm2[current];
-                area_total += area;
-                articulation_total += area * (1.0 - dot(normal, geometry.normals[current]));
                 curvature_total += curvature_by_face[current];
             }
             // Expand only from faces that are themselves inside; a face outside
@@ -512,9 +662,35 @@ fn neighbourhood_pass(
             }
         }
 
-        if area_total > 0.0 {
-            detail[face] = articulation_total / area_total * band_fraction[face];
+        // The folds wholly inside the neighbourhood, each counted once (from
+        // its lower-indexed face), above the change resolution.
+        let mut sums = (0.0_f64, 0.0_f64, 0.0_f64, f64::INFINITY, 0.0_f64);
+        for &member in &members {
+            let (Some(&start), Some(&end)) = (indptr.get(member), indptr.get(member + 1)) else {
+                continue;
+            };
+            let range = start as usize..end as usize;
+            for ((&other, &angle), &length) in indices[range.clone()]
+                .iter()
+                .zip(&folds.angle[range.clone()])
+                .zip(&folds.length[range])
+            {
+                let other = other as usize;
+                if other <= member || inside_stamp.get(other) != Some(&seed) {
+                    continue;
+                }
+                if angle <= resolution {
+                    continue;
+                }
+                let weight = length * angle;
+                sums.0 += weight;
+                sums.1 += weight * angle;
+                sums.2 += weight * angle.ln();
+                sums.3 = sums.3.min(angle);
+                sums.4 = sums.4.max(angle);
+            }
         }
+        detail[face] = spread_of_folds(sums) * band_fraction[face];
         curvature[face] = curvature_total;
         for &touched in &visited {
             stamp[touched as usize] = u32::MAX;
@@ -625,22 +801,54 @@ fn border_band_fraction(mesh: &Mesh, geometry: &FaceGeometryPass, radius_mm: f64
 #[cfg(test)]
 mod band_tests {
     use super::*;
-    use crate::make_box_default;
 
-    /// **The same flat face is less "detail" the larger it is.** A box and the
-    /// same box scaled ten times share every dihedral, so under a per-triangle
-    /// reading they would score alike; but a 10x face is mostly interior that
-    /// sees nothing beyond its own plane, and its top must read well below the
-    /// small box's. This is the make_raking_blade defect of 2026-09-04 in
-    /// miniature: a two-triangle slab top scoring as carving.
+    /// A 10 mm block whose top face borders one VERTICAL wall and one wall
+    /// sheared 3 mm in `y`, so a top triangle's neighbourhood holds two
+    /// different fold angles. (A plain box's top holds only 90° folds, which
+    /// is one magnitude — change, not detail, since 2026-09-28 — and would
+    /// score 0 at every size, proving nothing about size.)
+    fn sheared_block() -> Mesh {
+        let verts = vec![
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [10.0, 10.0, 0.0],
+            [0.0, 10.0, 0.0],
+            [0.0, 3.0, 10.0],
+            [10.0, 0.0, 10.0],
+            [10.0, 10.0, 10.0],
+            [0.0, 10.0, 10.0],
+        ];
+        let tris = vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        Mesh::new(verts, tris).expect("sheared block")
+    }
+
+    /// **The same flat face is less "detail" the larger it is.** A block and
+    /// the same block scaled ten times share every fold angle, so under a
+    /// per-triangle reading they would score alike; but a 10x face is mostly
+    /// interior that sees nothing beyond its own plane, and its top must read
+    /// well below the small block's. This is the make_raking_blade defect of
+    /// 2026-09-04 in miniature: a two-triangle slab top scoring as carving.
     #[test]
     fn a_large_flat_face_carries_less_detail_than_the_same_face_small() {
-        let small = make_box_default().expect("box");
+        let small = sheared_block();
         let big = Mesh::new(
             small.verts().iter().map(|v| [v[0] * 10.0, v[1] * 10.0, v[2] * 10.0]).collect(),
             small.tris().to_vec(),
         )
-        .expect("scaled box");
+        .expect("scaled block");
         let settings = DisplaySettings::production().expect("display settings");
         let config = DisplayBuildConfig::production(1_000_000).expect("display config");
         let top_detail = |mesh: &Mesh| {
@@ -655,12 +863,16 @@ mod band_tests {
                 .fold(0.0_f64, f64::max)
         };
         let (small_top, big_top) = (top_detail(&small), top_detail(&big));
-        println!("box top detail: small {small_top:.6}, 10x {big_top:.6}");
-        assert!(small_top > 0.0, "the small box's top must see its own side walls");
+        println!("block top detail: small {small_top:.6}, 10x {big_top:.6}");
+        assert!(
+            small_top > 0.0,
+            "the small block's top must see its two different wall folds"
+        );
         assert!(
             big_top < 0.5 * small_top,
-            "10x box top detail {big_top:.6} is not well below the small box's {small_top:.6}; \
-             a face far larger than the detail radius is being read as articulated surface"
+            "10x block top detail {big_top:.6} is not well below the small block's \
+             {small_top:.6}; a face far larger than the detail radius is being read as \
+             articulated surface"
         );
     }
 }
