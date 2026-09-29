@@ -2697,7 +2697,7 @@ fn print_sweep_disclosure(
         "[sweep {model}] slenderness p50 {:.1}:1 max {:.1}:1; overloaded arms {}; \
          model sections over X_ALLOWED {}; peel field {:?} (area {:?}, tilt {:?}); \
          path hits: reach {} vertical {} spread {} arm-share {} injections {} max-combines {} \
-         raster {} coarsening {} kappa {}/{} lift {}",
+         raster {} coarsening {} kappa {}/{} lift {} creep-cells {} creep-steps {}",
         report.slenderness_p50,
         report.slenderness_max,
         report.overloaded_struts.len(),
@@ -2716,6 +2716,8 @@ fn print_sweep_disclosure(
         report.counters.kappa_placement_reads,
         report.counters.kappa_audit_gate_reads,
         report.counters.lift_assertions,
+        report.counters.creep_cells_weighted,
+        report.counters.creep_steps_taken,
     );
     println!(
         "[sweep {model}] lowering: {} arms offered, {} emitted, {} dropped zero-length, \

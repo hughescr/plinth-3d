@@ -659,7 +659,7 @@ impl SweepPolicy {
     /// Price every creep step at a full lamina whatever the wall's angle -- the
     /// rule this engine had before the 2026-09-28 field report. **Sabotage and
     /// comparison only**: with it set, Round 50's drafted rim must draw
-    /// minimum-tip arms again (`tests/wall_creep.rs`).
+    /// minimum-tip arms again (`tests/it/wall_creep.rs`).
     #[must_use]
     pub const fn without_creep_weight(mut self) -> Self {
         self.creep_weight = false;
