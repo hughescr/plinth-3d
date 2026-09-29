@@ -19,6 +19,8 @@
 //! |---|---|
 //! | `..._on_the_lonely_peak` / `..._on_the_brace_pair` / `..._on_the_tall_stilt_plate` | at the mid-height of every ledger slot of every member, the widest emitted section of that member there is at least the ledger radius; and at every `Landing::Strut` junction whose branch actually touches its trunk, the trunk's drawn section at the branch's base is at least the branch's drawn root |
 //!
+//! | `a_brace_thicker_than_its_trunks_raises_them_on_the_brace_pair` | the same, with every brace thickened past any trunk's ledger: the junction clause (a brace's root on its trunk, and its top on its host) must raise the trunks to meet it |
+//!
 //! A branch whose root does not touch the trunk its ledger names (the
 //! stilt plate's 11 un-merged branches, a separate defect) is counted EXACTLY
 //! per fixture and printed; it is not an inversion and no profile can fix it.
@@ -43,7 +45,7 @@
 use plinth_core::{m0_constants, Finite, LayerPlan, PositiveFinite};
 use plinth_mesh::{make_brace_pair, make_lonely_peak, make_tall_stilt_plate, Mesh};
 use plinth_support::{BuildFrame, SupportPrimitive, SupportSegmentKind};
-use plinth_sweep::{to_primitives, Landing, SweepEmission, SweepPlan, SweepPolicy};
+use plinth_sweep::{to_primitives, Landing, StrutKind, SweepEmission, SweepPlan, SweepPolicy};
 
 const LIFT_MM: f64 = 5.0;
 const MAX_PRIMITIVES: usize = 4_000_000;
@@ -72,7 +74,10 @@ fn z_span(mesh: &Mesh) -> (f64, f64) {
 
 /// The production frame, exactly as `tip_seating.rs::plan_of` builds it:
 /// `plate_z = min_z − lift`, one uniform plan stopping one layer above the top.
-fn plan_of(mesh: &Mesh) -> (SweepPlan, SweepEmission) {
+///
+/// The finished plan is handed to `edit` before it is lowered — the lowering
+/// is graded against the plan it was actually given.
+fn plan_of_with(mesh: &Mesh, edit: impl FnOnce(&mut SweepPlan)) -> (SweepPlan, SweepEmission) {
     let (min_z, max_z) = z_span(mesh);
     let plate_z = min_z - LIFT_MM;
     let height = layer_height_mm();
@@ -81,8 +86,9 @@ fn plan_of(mesh: &Mesh) -> (SweepPlan, SweepEmission) {
         .max(1);
     let layers = LayerPlan::new(plate_z, vec![height; count]).expect("a uniform layer plan");
     let policy = SweepPolicy::from_registry().expect("the registry supplies every sweep number");
-    let plan = plinth_sweep::run_sweep(mesh, &layers, &policy)
+    let mut plan = plinth_sweep::run_sweep(mesh, &layers, &policy)
         .expect("the sweep emits and warns; it never refuses");
+    edit(&mut plan);
     let frame = BuildFrame::new(
         Finite::new(plate_z).expect("a finite plate"),
         PositiveFinite::new(LIFT_MM).expect("a positive lift"),
@@ -186,6 +192,26 @@ fn axis_miss_at(group: &[&SupportPrimitive], point: [f64; 3]) -> Option<f64> {
         .min_by(f64::total_cmp)
 }
 
+/// The member's highest emitted non-ball point and the radius drawn there —
+/// for a brace, where its top seats on its host.
+fn drawn_top(group: &[&SupportPrimitive]) -> Option<([f64; 3], f64)> {
+    group
+        .iter()
+        .filter(|primitive| {
+            !matches!(
+                primitive.segment_kind,
+                SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere
+            )
+        })
+        .flat_map(|primitive| {
+            [
+                (point(primitive.start_mm), primitive.start_radius_mm.get()),
+                (point(primitive.end_mm), primitive.end_radius_mm.get()),
+            ]
+        })
+        .max_by(|a, b| a.0[2].total_cmp(&b.0[2]))
+}
+
 /// The member's lowest emitted non-ball point and the radius drawn there.
 fn drawn_root(group: &[&SupportPrimitive]) -> Option<([f64; 3], f64)> {
     group
@@ -219,6 +245,10 @@ struct Census {
     /// defect of the same field report, which no drawing of the profile can
     /// fix. Counted and printed, never graded as an inversion.
     detached: Vec<(u32, u32, f64)>,
+    /// Brace tops graded against their host, and brace tops whose seat point
+    /// is not on the host's drawn section at all (printed, not graded).
+    brace_tops_graded: usize,
+    brace_tops_off_host: Vec<(u32, u32, f64)>,
     member_frusta: usize,
 }
 
@@ -305,6 +335,28 @@ fn census(plan: &SweepPlan, emission: &SweepEmission) -> Census {
                 .push((strut.id, id, root_point[2] - plate, child_root, trunk));
         }
     }
+    // THE SAME CLAUSE AT A BRACE'S TOP, where it seats on its host shaft.
+    for (strut, group) in plan.struts.iter().zip(&groups) {
+        let Some(host_id) = strut.seat_on_strut else {
+            continue;
+        };
+        let Some(host_index) = plan.struts.iter().position(|host| host.id == host_id) else {
+            continue;
+        };
+        let (top_point, brace_top) = drawn_top(group).expect("every member has a shaft");
+        let trunk = drawn_radius_at(&groups[host_index], top_point[2]).unwrap_or(0.0);
+        let miss = axis_miss_at(&groups[host_index], top_point).unwrap_or(f64::INFINITY);
+        if miss > trunk {
+            out.brace_tops_off_host.push((strut.id, host_id, miss));
+            continue;
+        }
+        out.junctions_graded += 1;
+        out.brace_tops_graded += 1;
+        if trunk < brace_top * (1.0 - RELATIVE_SLACK) {
+            out.inversions
+                .push((strut.id, host_id, top_point[2] - plate, brace_top, trunk));
+        }
+    }
     out
 }
 
@@ -312,8 +364,22 @@ fn census(plan: &SweepPlan, emission: &SweepEmission) -> Census {
 /// their named trunk (the separate defect). Asserted exactly, so a change in
 /// that population is loud here too rather than silently absorbed.
 fn grade(name: &str, mesh: &Mesh, detached_expected: usize) {
-    let (plan, emission) = plan_of(mesh);
+    grade_with(name, mesh, detached_expected, |_| {});
+}
+
+fn grade_with(
+    name: &str,
+    mesh: &Mesh,
+    detached_expected: usize,
+    edit: impl FnOnce(&mut SweepPlan),
+) {
+    let (plan, emission) = plan_of_with(mesh, edit);
     let found = census(&plan, &emission);
+    println!(
+        "{name}: brace tops graded {}, off their host (not graded) {:?}; members raised to a \
+         branch {}",
+        found.brace_tops_graded, found.brace_tops_off_host, emission.members_raised_to_a_branch,
+    );
     println!(
         "{name}: {} members, {} slots graded ({} below the lowest emitted point, not graded), \
          {} junctions graded ({} detached, not graded: {:?}), {} Member frusta emitted (path \
@@ -376,6 +442,45 @@ fn emitted_profile_covers_the_ledger_on_the_brace_pair() {
         "make_brace_pair",
         &make_brace_pair().expect("the brace pair fixture"),
         0,
+    );
+}
+
+/// **A brace is sized by its own slenderness minimum, never by load**, so its
+/// section can exceed the shaft it joins, and the trunk's ledger never hears
+/// of it: on the dense-pose Sphere 38 brace ends sit on 0.05 mm arms at up to
+/// 0.08 mm. The pinned fixtures happen not to reach that case, so this test
+/// makes it: every brace on the brace pair is given 1.5 × the widest ledger
+/// radius in the whole field, which no trunk's ledger meets. The junction
+/// clause must then RAISE every trunk and host a brace joins, from the joint
+/// down to its root — and every member must still cover its own ledger.
+#[test]
+fn a_brace_thicker_than_its_trunks_raises_them_on_the_brace_pair() {
+    let mut thickened = 0_usize;
+    grade_with(
+        "make_brace_pair, braces thickened",
+        &make_brace_pair().expect("the brace pair fixture"),
+        0,
+        |plan| {
+            let widest = plan
+                .struts
+                .iter()
+                .flat_map(|strut| strut.radius_mm.iter().copied())
+                .fold(0.0_f64, f64::max);
+            for strut in plan
+                .struts
+                .iter_mut()
+                .filter(|strut| strut.kind == StrutKind::Brace)
+            {
+                for radius in &mut strut.radius_mm {
+                    *radius = 1.5 * widest;
+                }
+                thickened += 1;
+            }
+        },
+    );
+    assert!(
+        thickened > 0,
+        "anti-vacuity: the brace pair must place braces for this test to mean anything"
     );
 }
 
