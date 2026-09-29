@@ -1,0 +1,14 @@
+//! The one integration-test program for `plinth-hollow`.
+//!
+//! Each file below used to be its own test program, and cargo links every
+//! test program separately against the whole dependency graph. As modules of
+//! one program they share that link. Test names gain the file stem as a prefix
+//! (`repair_gate::name`).
+//!
+//! A new top-level `tests/<name>.rs` still builds and runs on its own, but a
+//! new test belongs here as `tests/it/<name>.rs` plus a `mod` line. See
+//! `docs/development.md`, "Where integration tests go".
+
+mod hollow_chain_end_to_end;
+mod no_private_vector_algebra;
+mod repair_gate;
