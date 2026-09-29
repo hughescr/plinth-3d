@@ -722,8 +722,7 @@ impl<'a> SurfaceCreep<'a> {
                 }),
             );
         }
-        let mut order: Vec<u32> =
-            (0..u32::try_from(tris.len()).unwrap_or(u32::MAX)).collect();
+        let mut order: Vec<u32> = (0..u32::try_from(tris.len()).unwrap_or(u32::MAX)).collect();
         order.sort_by(|a, b| z_lo[*a as usize].total_cmp(&z_lo[*b as usize]));
         Self {
             mesh: Some(mesh),
@@ -783,8 +782,7 @@ impl<'a> SurfaceCreep<'a> {
         let Some(mesh) = self.mesh else {
             return;
         };
-        while self.next < self.order.len() && self.z_lo[self.order[self.next] as usize] <= band_hi
-        {
+        while self.next < self.order.len() && self.z_lo[self.order[self.next] as usize] <= band_hi {
             self.active.push(self.order[self.next]);
             self.next += 1;
         }
@@ -931,7 +929,9 @@ fn rasterise_conservative(
     let rows = grid.rows() as f64;
     let cols = grid.cols() as f64;
     let row_lo = grid.row_coord(y_min).floor().max(0.0);
-    let row_hi = (grid.row_coord(y_max).ceil() - 1.0).max(row_lo).min(rows - 1.0);
+    let row_hi = (grid.row_coord(y_max).ceil() - 1.0)
+        .max(row_lo)
+        .min(rows - 1.0);
     if row_hi < row_lo {
         return;
     }
@@ -949,7 +949,8 @@ fn rasterise_conservative(
             let next = polygon[(index + 1) % polygon.len()];
             for level in [strip_lo, strip_hi] {
                 if (point[1] - level) * (next[1] - level) < 0.0 {
-                    let x = point[0] + (level - point[1]) * (next[0] - point[0]) / (next[1] - point[1]);
+                    let x =
+                        point[0] + (level - point[1]) * (next[0] - point[0]) / (next[1] - point[1]);
                     x_min = x_min.min(x);
                     x_max = x_max.max(x);
                 }
@@ -959,7 +960,9 @@ fn rasterise_conservative(
             continue;
         }
         let col_lo = grid.col_coord(x_min).floor().max(0.0);
-        let col_hi = (grid.col_coord(x_max).ceil() - 1.0).max(col_lo).min(cols - 1.0);
+        let col_hi = (grid.col_coord(x_max).ceil() - 1.0)
+            .max(col_lo)
+            .min(cols - 1.0);
         if col_hi < col_lo {
             continue;
         }
@@ -1422,7 +1425,8 @@ mod creep_tests {
         let mesh = plinth_mesh::make_box([4.0, 4.0, 2.0], [0.0, 0.0, 0.0]).expect("box");
         let (grid, _) = plan_grid(-3.0, -3.0, 3.0, 3.0, 1, 0.05, 0.0, 2_000_000_000);
         let mut creep = SurfaceCreep::new(&mesh, &grid, CENTRE, WIDTH);
-        let wall = (overhang_weight(90.0, CENTRE, WIDTH) / overhang_weight(0.0, CENTRE, WIDTH)) as f32;
+        let wall =
+            (overhang_weight(90.0, CENTRE, WIDTH) / overhang_weight(0.0, CENTRE, WIDTH)) as f32;
         let centre = grid.index(grid.rows() / 2, grid.cols() / 2);
         let edge_row = grid.rows() / 2;
         // The cell just inside x = -2, where the wall stands.
@@ -1469,12 +1473,17 @@ mod creep_tests {
         };
         let full = run(&SurfaceCreep::disabled(&grid));
         let lamina = (grid.pitch_mm() / (kappa * height)) as f32;
-        assert!((full - lamina).abs() < 1.0e-6, "full cost {full} against one lamina step {lamina}");
+        assert!(
+            (full - lamina).abs() < 1.0e-6,
+            "full cost {full} against one lamina step {lamina}"
+        );
 
         let mut steep = SurfaceCreep::disabled(&grid);
         steep.weight = vec![UNTOUCHED; grid.cells()];
         steep.weight[creeping] = 0.006;
-        steep.weight_touched.push(u32::try_from(creeping).expect("small grid"));
+        steep
+            .weight_touched
+            .push(u32::try_from(creeping).expect("small grid"));
         let weighted = run(&steep);
         assert!(
             (weighted - 0.006 * lamina).abs() < 1.0e-7,

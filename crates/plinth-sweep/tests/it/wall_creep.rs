@@ -126,7 +126,13 @@ fn revolve(profile: &[[f64; 2]], segments: usize) -> Mesh {
 
 /// Round 50 at its authored pose: plain face down, stiffener side up.
 fn round_50() -> Mesh {
-    let mut profile = vec![[0.0, 0.0], [24.0, 0.0], [25.0, 3.5], [23.0, 3.5], [22.33, 1.0]];
+    let mut profile = vec![
+        [0.0, 0.0],
+        [24.0, 0.0],
+        [25.0, 3.5],
+        [23.0, 3.5],
+        [22.33, 1.0],
+    ];
     // Three vertical ring stiffeners, floor to full height, outermost first.
     for (outer, inner) in [(16.62, 16.12), (9.87, 9.37), (3.12, 2.62)] {
         profile.extend([[outer, 1.0], [outer, 3.5], [inner, 3.5], [inner, 1.0]]);
@@ -143,7 +149,10 @@ fn flipped(mesh: &Mesh) -> Mesh {
 
 /// One demand arm's tip, with the face this file measured under it.
 #[derive(Debug)]
-#[allow(dead_code, reason = "read only through Debug, in the failure message and the census print")]
+#[allow(
+    dead_code,
+    reason = "read only through Debug, in the failure message and the census print"
+)]
 struct SteepTip {
     strut: usize,
     k_top: usize,
@@ -257,7 +266,11 @@ fn measure(what: &str, mesh: &Mesh) -> (SweepPlan, Census) {
 fn measure_with(what: &str, mesh: &Mesh, policy: &SweepPolicy) -> (SweepPlan, Census) {
     let plan = sweep_with(mesh, 0.0, policy);
     let found = census(mesh, &plan);
-    let arms = plan.struts.iter().filter(|s| s.kind == StrutKind::Arm).count();
+    let arms = plan
+        .struts
+        .iter()
+        .filter(|s| s.kind == StrutKind::Arm)
+        .count();
     let hits = plan.report.counters;
     println!(
         "{what}: {} struts ({arms} arms), demand arms above the bottom layer {}, at the bottom \
@@ -307,7 +320,10 @@ fn assert_rule_fired(what: &str, plan: &SweepPlan) {
 fn round_50_at_identity_draws_no_arm_onto_its_drafted_rim() {
     let mesh = round_50();
     let (plan, found) = measure("Round 50 identity", &mesh);
-    assert!(found.at_bottom > 0, "the plain underside must still be supported");
+    assert!(
+        found.at_bottom > 0,
+        "the plain underside must still be supported"
+    );
     assert_rule_fired("Round 50 identity", &plan);
     assert_no_steep_demand_arm("Round 50 identity", &found);
 }
@@ -318,7 +334,10 @@ fn round_50_flipped_draws_no_arm_onto_its_drafted_recess_wall() {
     let (plan, found) = measure("Round 50 flipped", &mesh);
     // The recess floor is a ceiling at this pose, 2.5 mm up: its arms are the
     // path-hit witness that arms above the bottom layer were checked at all.
-    assert!(found.checked > 0, "the flipped recess ceiling must still be supported");
+    assert!(
+        found.checked > 0,
+        "the flipped recess ceiling must still be supported"
+    );
     assert_rule_fired("Round 50 flipped", &plan);
     assert_no_steep_demand_arm("Round 50 flipped", &found);
 }
@@ -327,7 +346,10 @@ fn round_50_flipped_draws_no_arm_onto_its_drafted_recess_wall() {
 fn a_laid_cylinder_draws_no_arm_onto_its_steep_flanks() {
     let mesh = make_laid_tube().expect("the laid tube fixture");
     let (plan, found) = measure("laid tube", &mesh);
-    assert!(found.checked > 0, "the tube's lower hull must still be supported above its feet");
+    assert!(
+        found.checked > 0,
+        "the tube's lower hull must still be supported above its feet"
+    );
     assert_rule_fired("laid tube", &plan);
     assert_no_steep_demand_arm("laid tube", &found);
 }
@@ -342,7 +364,10 @@ fn the_full_cost_creep_draws_the_rim_arms_again() {
     let mesh = round_50();
     let policy = production().without_creep_weight();
     let (plan, found) = measure_with("Round 50 identity, full-cost creep", &mesh, &policy);
-    assert_eq!(plan.report.counters.creep_cells_weighted, 0, "the knob must switch the rule off");
+    assert_eq!(
+        plan.report.counters.creep_cells_weighted, 0,
+        "the knob must switch the rule off"
+    );
     assert!(
         !found.steep.is_empty(),
         "with the full-cost creep the drafted rim drew no arm, so this file cannot tell the rule \
