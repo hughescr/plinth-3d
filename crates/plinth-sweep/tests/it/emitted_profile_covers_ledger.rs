@@ -22,8 +22,9 @@
 //! | `a_brace_thicker_than_its_trunks_raises_them_on_the_brace_pair` | the same, with every brace thickened past any trunk's ledger: the junction clause (a brace's root on its trunk, and its top on its host) must raise the trunks to meet it |
 //!
 //! A branch whose root does not touch the trunk its ledger names (the
-//! stilt plate's 11 un-merged branches, a separate defect) is counted EXACTLY
-//! per fixture and printed; it is not an inversion and no profile can fix it.
+//! stilt plate carried 11 such un-merged branches until fix/no-dangling; every
+//! fixture now pins 0) is counted EXACTLY per fixture and printed; it is not an
+//! inversion and no profile can fix it.
 //!
 //! How the tests are kept from passing vacuously: each counts the slots and
 //! junctions it graded and fails on zero; each requires the member it grades
@@ -492,16 +493,20 @@ fn a_brace_thicker_than_its_trunks_raises_them_on_the_brace_pair() {
 }
 
 /// The fixture Craig's screenshot came from: 145 members, 21 attached drawn
-/// inversions before the fix. It also carries the SEPARATE detached-junction
+/// inversions before the fix. It also carried the SEPARATE detached-junction
 /// defect (11 branches un-merged off their trunk, field report "trunk-thinner",
-/// second defect), which no drawing of the profile can repair; those are
-/// counted exactly and excluded from the junction clause, and belong to their
-/// own lane.
+/// second defect), which no drawing of the profile can repair. That defect's
+/// own lane (fix/no-dangling: a trunk moves with its branches or not at all,
+/// in `unmerge_overgrown` and the slenderness forced-merge loop) removed all
+/// 11, so the count is now pinned at 0 and every one of those junctions is
+/// graded by the junction clause like any other (measured on the merge of
+/// fix/no-dangling with develop 4b58aeb: 155 members, 120 junctions graded,
+/// 0 detached, 0 inversions).
 #[test]
 fn emitted_profile_covers_the_ledger_on_the_tall_stilt_plate() {
     grade(
         "make_tall_stilt_plate",
         &make_tall_stilt_plate().expect("the tall stilt plate fixture"),
-        11,
+        0,
     );
 }
