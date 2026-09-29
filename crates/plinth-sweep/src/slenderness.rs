@@ -67,11 +67,12 @@
 //!    ON one shaft and landing on the other. Each is inside the overhang law by
 //!    construction — its band is `LeanLaw::layers_to_reach(d)` layers deep — so
 //!    no segment is horizontal and none has zero rise. **An `|X|` is a flat
-//!    truss and holds only in its own plane**, and the owner's ruling is that
-//!    bracing must hold in EVERY direction: a run is measured across the plane
-//!    of every cross that ties its member ([`unbraced_runs`]), so a tie needs
-//!    crosses in two planes at least 45° apart. Every partner in reach is
-//!    tried, nearest first, not only the nearest.
+//!    truss and holds only along its own plane**, and the owner's ruling is
+//!    that bracing must hold in EVERY direction: a cross is credited with the
+//!    sway directions within 45° of its plane, a member is measured in every
+//!    direction its crosses tell apart ([`unbraced_runs`]), and a tie made of
+//!    crosses needs planes whose arcs cover all of them. Every partner in reach
+//!    is tried, nearest first, not only the nearest.
 //! 3. **Thicken.** Raise the member's ROOT, keep its tip: the drawn profile
 //!    becomes a taper from the tip it had down to a thicker root, carried on
 //!    down to the member's own foot and down every trunk it stands on. It holds
@@ -266,15 +267,15 @@ pub struct UnbracedRun {
     pub radius_mm: f64,
     /// `S · radius_mm`.
     pub limit_mm: f64,
-    /// The plane this run is measured ACROSS, or `None` when no cross ties
-    /// the member at all and every direction sees the same ties.
+    /// The direction of sway this run is measured in, in degrees in
+    /// `[0, 180)` in grid (row, column) steps, or `None` when no cross ties
+    /// the member and every direction sees the same ties.
     ///
-    /// An `|X|` holds only in its own plane. A member tied by crosses is
-    /// measured once across each of their planes (grid steps from one post to
-    /// the other, sign-normalised), counting every tie except the crosses
-    /// within 45° of that plane (`holds_across`); the run it names is the one
-    /// that sways in the direction that plane cannot hold.
-    pub across: Option<[i64; 2]>,
+    /// An `|X|` holds only along its own plane. A member tied by crosses is
+    /// measured in every sway direction its crosses tell apart (`sway_directions`),
+    /// counting every landing and end, and each cross whose plane lies within
+    /// 45° of that direction (`holds`).
+    pub sway_deg: Option<f64>,
 }
 
 impl UnbracedRun {
@@ -353,15 +354,14 @@ pub struct SlendernessOutcome {
     /// Merges the DESCENT made that the same un-merge pass put back, because
     /// a forced merge had loaded their trunk past the maximum radius.
     pub descent_merges_put_back: usize,
-    /// Remedy 2: crosses built as a PAIR in two planes 45° or more apart for a run
-    /// no cross tied yet, and single crosses that completed a second plane on
-    /// a run one plane already held.
-    pub cross_pairs_added: usize,
-    pub crosses_completing_a_plane: usize,
+    /// Remedy 2: crosses built for a run no cross held yet, and crosses built
+    /// for a run that sways in a direction the crosses already on its member
+    /// do not hold (a further plane).
+    pub crosses_first_plane: usize,
+    pub crosses_further_plane: usize,
     /// Crosses built to a partner that was NOT the nearest in reach — the
-    /// nearest's band was refused or its plane was too close to one the run
-    /// already has. A path-hit
-    /// witness for "try more than one partner".
+    /// nearest's band was refused or its plane does not hold the direction the
+    /// run sways in. A path-hit witness for "try more than one partner".
     pub crosses_to_a_later_partner: usize,
     /// Bands planned in all (every partner tried, built or not).
     pub cross_bands_planned: usize,
@@ -372,11 +372,6 @@ pub struct SlendernessOutcome {
     /// left both posts inside their limits without them (every cross must be
     /// needed). Not included in `braces_added`.
     pub crosses_pruned: usize,
-    /// The narrowest angle, in degrees, between the two planes of a tie the
-    /// lane closed with crosses; `None` when it closed none. Never below 45°
-    /// by construction (`holds_across`); published so the owner can see how
-    /// close to that bound the ties sit.
-    pub narrowest_tie_plane_deg: Option<f64>,
     /// Remedy 3: members whose root the lane raised (tip kept), and the
     /// refusals: a root past the maximum radius, or a grown plate root whose
     /// flared disc would touch another root.
@@ -388,11 +383,9 @@ pub struct SlendernessOutcome {
     pub trunks_raised_under_thickening: usize,
     /// Remedy 4: plate cells refused because the braced panel a mast there
     /// would make cannot hold the arm to one pixel even at the maximum mast
-    /// radius; masts EXTENDED up to a later tie instead of a new mast; and
-    /// half ties (one plane) placed because nothing better was admissible.
+    /// radius; and masts EXTENDED up to a later tie instead of a new mast.
     pub mast_cells_refused_by_panel: usize,
     pub masts_extended: usize,
-    pub half_ties: usize,
     /// Tie passes run (each followed by a down-sweep), and whether the last
     /// one changed nothing — the lane's fixed point.
     pub tie_passes: usize,
@@ -425,10 +418,10 @@ pub struct SlendernessOutcome {
 ///
 /// **A brace's tie is a tie in ONE PLANE** (owner ruling 2026-09-29: bracing
 /// must hold in every direction). A flat truss holds nothing across its own
-/// plane, so the member is measured once across each distinct plane of the
-/// crosses that tie it, counting only the ties that hold across that plane —
-/// every landing and end, and every cross at least 45° from it (see
-/// `holds_across` and [`UnbracedRun::across`]). A member no cross ties is measured once. Runs that
+/// plane, so a member tied by crosses is measured in every direction of sway
+/// its crosses tell apart, counting only the ties that hold in that direction
+/// — every landing and end, and every cross within 45° of it (see `holds` and
+/// [`UnbracedRun::sway_deg`]). A member no cross ties is measured once. Runs that
 /// come out identical in two directions are reported once.
 #[must_use]
 pub fn unbraced_runs(
@@ -473,37 +466,69 @@ fn plane_between(grid: &Grid, from: usize, to: usize) -> Option<Plane> {
     Some(plane)
 }
 
-/// Exact integer test: two planes are the same line. Used only to list the
-/// distinct directions a member is measured across.
+/// Exact integer test: two planes are the same line. Used only to list a
+/// member's distinct planes once.
 fn parallel(a: Plane, b: Plane) -> bool {
     a[0] * b[1] - a[1] * b[0] == 0
 }
 
-/// Whether a cross in plane `tie` holds a post ACROSS plane `across`: the
-/// cross's own direction projects at least as far across `across` as along
-/// it, `|across × tie| ≥ |across · tie|` — the two planes stand at least 45°
-/// apart.
-///
-/// No tuned number: this is the bisector of the two projections, the point at
-/// which a cross stops being mostly the SAME tie as `across` and starts being
-/// mostly a different one. A rigid-tie reading (any plane the grid can tell
-/// apart counts) closed ties on the Cylinder with planes 0.1° apart, which hold
-/// nothing across either; the measured narrowest angle is still published.
-/// Integer arithmetic on grid steps, so it has no float noise either.
-fn holds_across(tie: Plane, across: Plane) -> bool {
-    let cross = (across[0] * tie[1] - across[1] * tie[0]).abs();
-    let dot = (across[0] * tie[0] + across[1] * tie[1]).abs();
-    cross >= dot
-}
-
+/// The direction of a plane, in degrees in `[0, 180)`, in grid (row, column)
+/// steps. A plane and its reverse are one direction.
 #[expect(
     clippy::cast_precision_loss,
     reason = "grid steps are bounded by the grid's own dimensions and exact in f64"
 )]
-fn plane_angle_deg(a: Plane, b: Plane) -> f64 {
-    let (ax, ay, bx, by) = (a[0] as f64, a[1] as f64, b[0] as f64, b[1] as f64);
-    let cosine = ((ax * bx + ay * by).abs() / (ax.hypot(ay) * bx.hypot(by))).min(1.0);
-    cosine.acos().to_degrees()
+fn plane_deg(plane: Plane) -> f64 {
+    (plane[1] as f64).atan2(plane[0] as f64).to_degrees().rem_euclid(180.0)
+}
+
+/// The angle between two undirected directions, in `[0, 90]`.
+fn apart_deg(a: f64, b: f64) -> f64 {
+    let d = (a - b).rem_euclid(180.0);
+    d.min(180.0 - d)
+}
+
+/// Whether a cross in plane `tie` holds the post against sway in direction
+/// `sway_deg`: the sway lies within 45° of the cross's own plane, so the
+/// cross resists at least as much of it as it lets through (a flat truss is
+/// stiff along its plane and free across it, and 45° is where the two
+/// projections are equal — the bisector, not a tuned number).
+fn holds(tie: Plane, sway_deg: f64) -> bool {
+    apart_deg(plane_deg(tie), sway_deg) <= 45.0
+}
+
+/// The sway directions a member has to be measured in: none when no cross
+/// ties it (every tie then holds every way), otherwise one direction inside
+/// every arc between consecutive BREAKPOINTS, the directions 45° either side
+/// of each plane where some cross stops or starts holding. Between two
+/// breakpoints the set of crosses that hold is the same, so the arcs'
+/// midpoints are every case there is; and a new cross only ever ADDS holding
+/// to a direction, so the measurement is monotone in the ties.
+fn sway_directions(planes: &[Plane]) -> Vec<Option<f64>> {
+    if planes.is_empty() {
+        return vec![None];
+    }
+    let mut breaks: Vec<f64> = planes
+        .iter()
+        .flat_map(|plane| {
+            let deg = plane_deg(*plane);
+            [(deg - 45.0).rem_euclid(180.0), (deg + 45.0).rem_euclid(180.0)]
+        })
+        .collect();
+    breaks.sort_by(f64::total_cmp);
+    breaks.dedup_by(|a, b| (*a - *b).abs() < 1.0e-9);
+    let count = breaks.len();
+    (0..count)
+        .map(|at| {
+            let from = breaks[at];
+            let to = if at + 1 < count {
+                breaks[at + 1]
+            } else {
+                breaks[0] + 180.0
+            };
+            Some((0.5 * (from + to)).rem_euclid(180.0))
+        })
+        .collect()
 }
 
 /// One lateral tie on one member: the layer, and the plane it holds in
@@ -584,23 +609,18 @@ fn member_runs(
             }
         }
     }
-    let directions: Vec<Option<Plane>> = if planes.is_empty() {
-        vec![None]
-    } else {
-        planes.into_iter().map(Some).collect()
-    };
     let mut runs: Vec<UnbracedRun> = Vec::new();
     let mut layers: Vec<usize> = Vec::with_capacity(ties.len() + 2);
-    for across in directions {
+    for sway_deg in sway_directions(&planes) {
         layers.clear();
         layers.push(strut.k_bottom);
         layers.push(strut.k_top);
         for tie in ties {
-            let holds = match (tie.plane, across) {
-                (Some(plane), Some(across)) => holds_across(plane, across),
+            let held = match (tie.plane, sway_deg) {
+                (Some(plane), Some(sway)) => holds(plane, sway),
                 _ => true,
             };
-            if holds && tie.layer >= strut.k_bottom && tie.layer <= strut.k_top {
+            if held && tie.layer >= strut.k_bottom && tie.layer <= strut.k_top {
                 layers.push(tie.layer);
             }
         }
@@ -623,7 +643,7 @@ fn member_runs(
                 length_mm,
                 radius_mm,
                 limit_mm: law.max_unbraced_mm(radius_mm),
-                across,
+                sway_deg,
             });
         }
     }
@@ -966,7 +986,8 @@ pub fn apply_ties(
     first.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     let mut queue: VecDeque<u32> = first.into_iter().map(|(_, id)| id).collect();
     let mut exhausted: BTreeSet<RunKey> = BTreeSet::new();
-    let mut applied = 0_usize;    'members: while let Some(id) = queue.pop_front() {
+    let mut applied = 0_usize;
+    'members: while let Some(id) = queue.pop_front() {
         let index = id as usize;
         if let Some(flag) = queued.get_mut(index) {
             *flag = false;
@@ -995,18 +1016,15 @@ pub fn apply_ties(
             .max_by_key(|run| (run.k_lo, run.k_top));
             let Some(run) = run else {
                 continue 'members;
-            };            // The first of the ties the run needs, evenly spaced; the member is
+            };
+            // The first of the ties the run needs, evenly spaced; the member is
             // measured again before the next one.
             let k = tie_layer(&run, 1, extra_ties(&run).max(1));
-            let mut one_plane: Option<CrossPlan> = None;
             if context.brace {
                 if let Some(k) = k {
-                    match tie_by_crosses(context, &mut state, struts, &run, k, outcome) {
-                        Ok(()) => {
-                            applied += 1;
-                            continue;
-                        }
-                        Err(half) => one_plane = half,
+                    if tie_by_crosses(context, &mut state, struts, &run, k, outcome) {
+                        applied += 1;
+                        continue;
                     }
                 }
             }
@@ -1017,7 +1035,7 @@ pub fn apply_ties(
             if context.mast {
                 if let Some(k) = k {
                     if let Some(new_mast) =
-                        tie_by_mast(context, &mut state, struts, &run, k, one_plane, outcome)
+                        tie_by_mast(context, &mut state, struts, &run, k, outcome)
                     {
                         applied += 1;
                         if let Some(mast) = new_mast {
@@ -1220,10 +1238,18 @@ fn prune_unneeded_crosses(
     taken
 }
 
-type RunKey = (u32, usize, usize, Option<Plane>);
+type RunKey = (u32, usize, usize, Option<i64>);
 
+/// A run's identity for the "no admissible remedy" set. The sway direction is
+/// an arc midpoint computed from integer grid steps, so it is keyed to a
+/// micro-degree, which is far finer than any two distinct arcs.
 fn run_key(run: &UnbracedRun) -> RunKey {
-    (run.strut_id, run.k_lo, run.k_top, run.across)
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a direction in [0, 180) degrees times 1e6 fits an i64 exactly enough to key it"
+    )]
+    let sway = run.sway_deg.map(|deg| (deg * 1.0e6).round() as i64);
+    (run.strut_id, run.k_lo, run.k_top, sway)
 }
 
 /// What the tie rungs keep current as they edit the field, so that no member
@@ -1318,30 +1344,20 @@ struct CrossPlan {
     plane: Option<Plane>,
 }
 
-fn note_plane_angle(outcome: &mut SlendernessOutcome, one: Option<Plane>, two: Option<Plane>) {
-    if let (Some(one), Some(two)) = (one, two) {
-        let angle = plane_angle_deg(one, two);
-        outcome.narrowest_tie_plane_deg = Some(
-            outcome
-                .narrowest_tie_plane_deg
-                .map_or(angle, |known| known.min(angle)),
-        );
-    }
-}
-
-/// Remedy 2: tie the run's member at layer `k` with crosses that hold it in
-/// every direction.
+/// Remedy 2: tie the run's member at layer `k` with ONE cross whose plane
+/// holds the direction the run sways in.
 ///
-/// A run measured ACROSS a plane already needs one more cross, in a plane at
-/// least 45° from that one. A run no cross ties yet needs TWO, in planes at
-/// least 45° apart, built together or not at all — one cross alone holds its
-/// own plane only, and a tie the lane would then have to finish by thickening
-/// would leave the cross redundant. Every partner in reach is tried, nearest
-/// first (the stilt plate's arm 81: its nearest band crossed a leg, and arm 65,
+/// A run measured in a sway direction takes a cross whose plane lies within
+/// 45° of that direction; a run no cross ties yet takes a cross in any plane.
+/// One cross holds only the arc of directions around its own plane, so the
+/// member is measured again at once and comes back for a further plane (or
+/// for the thicken rung, if no further plane is admissible). A cross that a
+/// later remedy — a further plane, or the member's own thickening — leaves
+/// holding nothing is taken out at the end of the pass
+/// ([`prune_unneeded_crosses`]), so building one at a time never leaves a
+/// cross that is not needed. Every partner in reach is tried, nearest first
+/// (the stilt plate's arm 81: its nearest band crossed a leg, and arm 65,
 /// 0.008 mm further away, was never tried).
-///
-/// On failure, the first cross that WOULD build is handed back, so the mast
-/// rung can use it as one plane if nothing better is admissible.
 fn tie_by_crosses(
     context: &SlendernessContext<'_>,
     state: &mut TieState,
@@ -1349,74 +1365,36 @@ fn tie_by_crosses(
     run: &UnbracedRun,
     k: usize,
     outcome: &mut SlendernessOutcome,
-) -> Result<(), Option<CrossPlan>> {
+) -> bool {
     let id = run.strut_id;
     let Some(here) = struts.get(id as usize).map(|strut| strut.cell_at(k)) else {
-        return Err(None);
+        return false;
     };
     let candidates = partner_candidates(context, struts, id, k);
-    let mut planned: Vec<CrossPlan> = Vec::new();
     for (rank, &(partner, cell)) in candidates.iter().enumerate() {
         let Some(plane) = plane_between(context.grid, here, cell) else {
             continue;
         };
-        if run.across.is_some_and(|across| !holds_across(plane, across)) {
+        if run.sway_deg.is_some_and(|sway| !holds(plane, sway)) {
             continue;
         }
         outcome.cross_bands_planned += 1;
-        let Some(plan) = plan_cross(context, &state.index, struts, &state.bands, id, partner, k, outcome)
+        let Some(plan) =
+            plan_cross(context, &state.index, struts, &state.bands, id, partner, k, outcome)
         else {
             continue;
         };
-        let plan_plane = plan.plane.or(Some(plane));
-        if run.across.is_some() {
-            note_plane_angle(outcome, run.across, plan_plane);
-            if rank > 0 {
-                outcome.crosses_to_a_later_partner += 1;
-            }
-            commit_cross(context, state, struts, plan);
-            outcome.braces_added += 1;
-            outcome.crosses_completing_a_plane += 1;
-            return Ok(());
-        }
-        let second_plane = planned.iter().position(|earlier| {
-            matches!((earlier.plane, plan_plane), (Some(one), Some(two)) if holds_across(one, two))
-                && !paths_collide(earlier, &plan)
-        });
-        if let Some(position) = second_plane {
-            let first = planned.swap_remove(position);
-            note_plane_angle(outcome, first.plane, plan_plane);
+        if rank > 0 {
             outcome.crosses_to_a_later_partner += 1;
-            commit_cross(context, state, struts, first);
-            commit_cross(context, state, struts, plan);
-            outcome.braces_added += 2;
-            outcome.cross_pairs_added += 1;
-            return Ok(());
         }
-        planned.push(plan);
-    }
-    Err(planned.into_iter().next())
-}
-
-/// Whether any diagonal of `second` shares a cell AT THE SAME LAYER with a
-/// diagonal of `first` — the test the shaft index would have made had `first`
-/// been built before `second` was planned.
-fn paths_collide(first: &CrossPlan, second: &CrossPlan) -> bool {
-    let cell_at = |plan: &CrossPlan, path: &[u32], layer: usize| {
-        layer
-            .checked_sub(plan.k_lo)
-            .and_then(|slot| path.get(slot))
-            .copied()
-    };
-    for path in [&second.first, &second.second] {
-        for (slot, cell) in path.iter().enumerate().skip(1) {
-            let layer = second.k_lo + slot;
-            for other in [&first.first, &first.second] {
-                if cell_at(first, other, layer) == Some(*cell) {
-                    return true;
-                }
-            }
+        if run.sway_deg.is_some() {
+            outcome.crosses_further_plane += 1;
+        } else {
+            outcome.crosses_first_plane += 1;
         }
+        commit_cross(context, state, struts, plan);
+        outcome.braces_added += 1;
+        return true;
     }
     false
 }
@@ -1717,12 +1695,9 @@ fn panel_sway_over_pixel(
     top * 2.0 * PI / law.ratio.powi(4)
 }
 
-/// Remedy 4: a mast, tied to the arm by a cross.
+/// Remedy 4: a mast, tied to the arm by a cross whose plane holds the
+/// direction the run sways in.
 ///
-/// * A run no cross ties yet takes the one plane the crosses COULD give first
-///   (`one_plane`), because it costs no new member; the member is then
-///   measured across that plane and comes back here only if nothing else
-///   closes it.
 /// * **One mast per arm where it will do**: an arm's own mast is extended up to
 ///   the new tie before a second one is dropped (the Cylinder's ladders of up
 ///   to six masts on one arm).
@@ -1742,23 +1717,14 @@ fn tie_by_mast(
     struts: &mut Vec<SweepStrut>,
     run: &UnbracedRun,
     k: usize,
-    one_plane: Option<CrossPlan>,
     outcome: &mut SlendernessOutcome,
 ) -> Option<Option<u32>> {
     let grid = context.grid;
     let law = context.law;
     let id = run.strut_id;
-    if run.across.is_none() {
-        if let Some(plan) = one_plane {
-            commit_cross(context, state, struts, plan);
-            outcome.braces_added += 1;
-            outcome.half_ties += 1;
-            return Some(None);
-        }
-    }
     let here = struts.get(id as usize)?.cell_at(k);
-    let admissible = |plane: Option<Plane>| match (plane, run.across) {
-        (Some(plane), Some(across)) => holds_across(plane, across),
+    let admissible = |plane: Option<Plane>| match (plane, run.sway_deg) {
+        (Some(plane), Some(sway)) => holds(plane, sway),
         (Some(_), None) => true,
         (None, _) => false,
     };
@@ -2592,7 +2558,7 @@ mod tests {
             length_mm: length,
             radius_mm: 0.1,
             limit_mm: limit,
-            across: None,
+            sway_deg: None,
         };
         assert_eq!(extra_ties(&run(4.0, 5.0)), 0);
         assert_eq!(extra_ties(&run(6.0, 5.0)), 1);
@@ -2623,6 +2589,34 @@ mod tests {
         assert!(
             thick_root > 0.65 && thick_tip < 0.45,
             "root-thick {thick_root}, tip-thick {thick_tip}"
+        );
+    }
+
+    /// One cross holds the quarter-turn either side of its own plane and
+    /// nothing else: the breakpoints fall 45° either side of its plane, and two
+    /// perpendicular planes hold every direction between them.
+    #[test]
+    fn one_cross_holds_the_arc_around_its_own_plane_and_no_more() {
+        let along = [0_i64, 10];
+        let other = [10_i64, 0];
+        assert!(super::holds(along, 90.0));
+        assert!(super::holds(along, 135.0));
+        assert!(!super::holds(along, 136.0));
+        assert!(!super::holds(along, 0.0));
+        let one = super::sway_directions(&[along]);
+        assert_eq!(one.len(), 2, "{one:?}");
+        let held = one
+            .iter()
+            .filter(|sway| super::holds(along, sway.expect("a direction")))
+            .count();
+        assert_eq!(held, 1, "one arc held and one not: {one:?}");
+        let both = super::sway_directions(&[along, other]);
+        assert!(
+            both.iter().all(|sway| {
+                let sway = sway.expect("a direction");
+                super::holds(along, sway) || super::holds(other, sway)
+            }),
+            "two perpendicular planes hold every direction: {both:?}"
         );
     }
 

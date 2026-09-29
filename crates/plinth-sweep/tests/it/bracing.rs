@@ -224,34 +224,95 @@ fn every_cross_is_needed_on_the_brace_pair() {
     assert_every_cross_is_needed("brace pair", brace_pair());
 }
 
-/// Test 3 of the field report: **the brace pair places no mast.** Its one
-/// mast (id 26 on d103c48) stood beside arm 8, which arms 4 and 5 had already
-/// tied.
-#[test]
-fn the_brace_pair_places_no_mast() {
-    let plan = brace_pair();
-    let masts = count_kind(plan, StrutKind::Mast);
+/// Tests 3 and 5 of the field report, RE-DERIVED on purpose (2026-09-29).
+///
+/// As written they were "the brace pair places no mast" (its mast 26 on
+/// d103c48 stood beside arm 8, which arms 4 and 5 had already tied) and "the
+/// stilt plate places no mast" (arm 81's mast, where arm 65 was in reach).
+/// Both were red on d103c48 with one mast each, and both went green under the
+/// first form of this lane, which credited a cross in every direction but the
+/// one straight across it.
+///
+/// The owner's ruling that bracing hold in EVERY direction, applied honestly
+/// (a cross holds the sway within 45° of its plane), leaves each fixture ONE
+/// post whose last direction no partner in reach can hold and whose thicker
+/// root would lay its flare onto a neighbour's: stilt arm 81 (root 0.621 ->
+/// 0.656 mm) and brace-pair arm 8 (0.388 -> 0.767 mm). The ladder then drops
+/// a mast, as the ruling orders. So the assertion is the defect the field
+/// report actually found — a REDUNDANT mast, or one dropped where a thicker
+/// root would have done — and not a count:
+///
+/// * every mast is needed: with it and its crosses taken out, the arm it
+///   ties has a run over the limit through the mast's band;
+/// * no more masts than thickenings refused (a mast follows a refused
+///   thickening, never an admissible one).
+fn assert_every_mast_is_needed(name: &str, plan: &SweepPlan) {
+    let law = law();
+    let lane = &plan.report.slenderness_lane;
+    let masts: Vec<usize> = plan
+        .struts
+        .iter()
+        .enumerate()
+        .filter(|(_, strut)| strut.kind == StrutKind::Mast)
+        .map(|(index, _)| index)
+        .collect();
+    let mut redundant = Vec::new();
+    for &mast in &masts {
+        let mast_id = plan.struts[mast].id;
+        let mut struts: Vec<SweepStrut> = plan.struts.clone();
+        let mut arms_and_bands: Vec<(u32, usize, usize)> = Vec::new();
+        for cross in crosses(plan) {
+            let (one, two) = cross.pair;
+            if one != mast_id && two != mast_id {
+                continue;
+            }
+            let arm = if one == mast_id { two } else { one };
+            arms_and_bands.push((arm, cross.k_lo, cross.k_top));
+            for &diagonal in &cross.diagonals {
+                detach(&mut struts[diagonal]);
+            }
+        }
+        detach(&mut struts[mast]);
+        let runs = unbraced_runs(&plan.grid, &struts, plan.layer_height_mm, &law);
+        let needed = arms_and_bands.iter().any(|&(arm, lo, top)| {
+            runs.iter().any(|run| {
+                run.strut_id == arm && run.over_limit() && run.k_lo < top && lo < run.k_top
+            })
+        });
+        if !needed {
+            redundant.push((mast_id, arms_and_bands));
+        }
+    }
+    let refused = lane.thicken_refused_disc + lane.thicken_refused_radius;
     println!(
-        "brace pair: {} masts, {} crosses; lane {:?}",
-        masts,
-        crosses(plan).len(),
-        plan.report.slenderness_lane
+        "{name}: {} masts, {} redundant {redundant:?}; thickenings refused {refused} \
+         ({} disc, {} radius)",
+        masts.len(),
+        redundant.len(),
+        lane.thicken_refused_disc,
+        lane.thicken_refused_radius
     );
-    assert_eq!(masts, 0, "the brace pair placed {masts} masts");
+    assert!(
+        redundant.is_empty(),
+        "{name}: {} masts tie arms that are inside their limits without them: {redundant:?}",
+        redundant.len()
+    );
+    assert!(
+        masts.len() <= refused,
+        "{name}: {} masts but only {refused} thickenings refused: a mast was dropped where a \
+         thicker root was admissible",
+        masts.len()
+    );
 }
 
-/// Test 5 of the field report: **the stilt plate places no mast.** Arm 65 is
-/// in reach of arm 81 and its band clears the leg; a thicker root holds any
-/// post that has no partner.
 #[test]
-fn the_stilt_plate_places_no_mast() {
-    let plan = stilt();
-    let masts = count_kind(plan, StrutKind::Mast);
-    println!(
-        "tall stilt plate: {masts} masts; lane {:?}",
-        plan.report.slenderness_lane
-    );
-    assert_eq!(masts, 0, "the tall stilt plate placed {masts} masts");
+fn the_brace_pair_places_no_redundant_mast() {
+    assert_every_mast_is_needed("brace pair", brace_pair());
+}
+
+#[test]
+fn the_stilt_plate_places_no_redundant_mast() {
+    assert_every_mast_is_needed("tall stilt plate", stilt());
 }
 
 /// Test 4 of the field report: **the stilt plate leaves no warning.** Every
@@ -284,14 +345,15 @@ fn the_stilt_plate_leaves_no_unbraced_run() {
 /// flat truss: it holds its two posts in its own plane and nothing across it.
 /// So wherever a post NEEDS its crosses — with every cross on it taken out of
 /// the measurement it has a run over the limit — the crosses over that run
-/// must stand in at least two planes at least 45° apart (each projecting at
-/// least as far across the other as along it). One plane is half
-/// a tie. (On d103c48 every tie was one cross in one plane.)
+/// must hold every direction of sway. A cross holds the sway within 45° of its
+/// own plane, so their planes must cover the half-turn in 90° arcs: no gap of
+/// more than 90° between neighbouring planes, going round. One plane is half a
+/// tie. (On d103c48 every tie was one cross in one plane.)
 ///
 /// The measurement here is taken with ALL of the post's crosses removed, so it
 /// reads no plane at all: the planes are read off the finished geometry by the
 /// test itself, from the two posts' axis cells at the top of each band.
-fn assert_ties_hold_in_two_planes(name: &str, plan: &SweepPlan) {
+fn assert_ties_hold_in_every_direction(name: &str, plan: &SweepPlan) {
     let law = law();
     let grid = &plan.grid;
     let all = crosses(plan);
@@ -334,37 +396,49 @@ fn assert_ties_hold_in_two_planes(name: &str, plan: &SweepPlan) {
                 continue;
             }
             graded += 1;
-            // Two planes at least 45 degrees apart: each projects at least as
-            // far across the other as along it (`|a x b| >= |a . b|`).
-            let two_planes = over.iter().any(|a| {
-                over.iter()
-                    .any(|b| (a.0 * b.1 - a.1 * b.0).abs() >= (a.0 * b.0 + a.1 * b.1).abs())
-            });
-            if !two_planes {
+            // Plane directions on the half-turn, sorted; the widest gap between
+            // neighbours (going round) must be at most 90 degrees.
+            #[expect(clippy::cast_precision_loss, reason = "grid steps are small integers")]
+            let mut deg: Vec<f64> = over
+                .iter()
+                .map(|p| {
+                    (p.1 as f64)
+                        .atan2(p.0 as f64)
+                        .to_degrees()
+                        .rem_euclid(180.0)
+                })
+                .collect();
+            deg.sort_by(f64::total_cmp);
+            let widest = deg
+                .windows(2)
+                .map(|w| w[1] - w[0])
+                .chain(std::iter::once(deg[0] + 180.0 - deg[deg.len() - 1]))
+                .fold(0.0_f64, f64::max);
+            if widest > 90.0 + 1.0e-9 {
                 one_plane.push((post, run.k_lo, run.k_top, over));
             }
         }
     }
     println!(
-        "{name}: {graded} needed ties graded, {} held in one plane only: {one_plane:?}",
+        "{name}: {graded} needed ties graded, {} leave a direction of sway unheld: {one_plane:?}",
         one_plane.len()
     );
     assert!(graded > 0, "{name}: anti-vacuity, no tie needed a cross");
     assert!(
         one_plane.is_empty(),
-        "{name}: {} ties stand in a single plane: {one_plane:?}",
+        "{name}: {} ties leave a direction of sway unheld: {one_plane:?}",
         one_plane.len()
     );
 }
 
 #[test]
-fn every_tie_holds_in_two_planes_on_the_stilt_plate() {
-    assert_ties_hold_in_two_planes("tall stilt plate", stilt());
+fn every_needed_tie_holds_in_every_direction_on_the_stilt_plate() {
+    assert_ties_hold_in_every_direction("tall stilt plate", stilt());
 }
 
 #[test]
-fn every_tie_holds_in_two_planes_on_the_brace_pair() {
-    assert_ties_hold_in_two_planes("brace pair", brace_pair());
+fn every_needed_tie_holds_in_every_direction_on_the_brace_pair() {
+    assert_ties_hold_in_every_direction("brace pair", brace_pair());
 }
 
 /// Test 8 of the field report: **"forced merges put back" counts only merges

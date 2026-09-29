@@ -105,12 +105,13 @@ Recorded here because it changes the ladder above; the code of record is
 - **Order:** merge → un-merge pass → `|X|` → **thicken** → mast → warn. The
   un-merge pass that puts back merges a trunk cannot carry now runs BEFORE
   any tie, so no post it puts back is left unmeasured.
-- **Every direction:** an `|X|` holds only in its own plane. A run is measured
-  across each plane of the crosses on its member; a tie needs crosses in two
-  planes at least 45° apart (built as a pair, or one completing a plane
-  already there): a cross is credited across a plane only where it projects
-  at least as far across it as along it. The narrowest angle used is
-  published.
+- **Every direction:** an `|X|` holds only along its own plane. A cross is
+  credited with the sway directions within 45° of its plane (where it resists
+  at least as much of the sway as it lets through); a member is measured in
+  every direction its crosses tell apart, so a tie made of crosses needs
+  planes whose ±45° arcs cover all 180° (two perpendicular planes, or three).
+  Crosses are built one at a time; one that a later cross or the member's own
+  thickening leaves unneeded is taken out at the end of its pass.
 - **Thicken:** raise the root, keep the tip, up to the 1.0 mm maximum; the
   root is the smallest that brings the run inside the one-pixel law, carried
   down every trunk below, and a grown plate root must clear every other root

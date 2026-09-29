@@ -2678,9 +2678,10 @@ fn print_sweep_disclosure(
          ({} runs); remedies: {} merges forced, {} |X| braces added, {} members thickened \
          (root raised, tip kept), {} masts PLACED, {} warnings; {} forced merges put back by \
          the radius ceiling and {} descent merges put back beside them, both before any tie; \
-         crosses: {} pairs in two planes, {} completing a second plane, {} single-plane ties, \
+         crosses (each holds the sway within 45 deg of its own plane): {} for a run no cross \
+         held, {} for a direction the crosses on the member did not hold, \
          {} to a partner beyond the nearest, {} bands planned, {} refused as overlapping a \
-         cross on the same pair, {} taken out again as not needed, narrowest angle between a tie's two planes {}; thicken refused: \
+         cross on the same pair, {} taken out again as not needed; thicken refused: \
          {} past the maximum radius, {} for a root disc that would touch another, {} trunks \
          raised under a thickened member; {} brace bands refused, {} masts REFUSED for want of \
          an admissible plate cell ({} cells refused by the braced-panel check), {} masts \
@@ -2698,15 +2699,12 @@ fn print_sweep_disclosure(
         lane.warnings.len(),
         lane.merges_undone_by_radius,
         lane.descent_merges_put_back,
-        lane.cross_pairs_added,
-        lane.crosses_completing_a_plane,
-        lane.half_ties,
+        lane.crosses_first_plane,
+        lane.crosses_further_plane,
         lane.crosses_to_a_later_partner,
         lane.cross_bands_planned,
         lane.crosses_refused_overlapping,
         lane.crosses_pruned,
-        lane.narrowest_tie_plane_deg
-            .map_or_else(|| "n/a".to_owned(), |deg| format!("{deg:.1} deg")),
         lane.thicken_refused_radius,
         lane.thicken_refused_disc,
         lane.trunks_raised_under_thickening,
