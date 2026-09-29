@@ -342,6 +342,13 @@ fn orient_dense(mesh: &Mesh, name: &str) -> OrientedModel {
 /// lift`, one layer plan stopping at the model top plus one layer of
 /// headroom.
 pub(crate) fn place(mesh: &Mesh, name: &str) -> SweepPlan {
+    let policy = SweepPolicy::from_registry().expect("the registry supplies every sweep number");
+    place_with(mesh, name, &policy)
+}
+
+/// [`place`] under a given policy, so a sabotage knob can be measured on the
+/// same fixture and the same layer plan.
+pub(crate) fn place_with(mesh: &Mesh, name: &str, policy: &SweepPolicy) -> SweepPlan {
     let (min_z, max_z) = z_span(mesh);
     let plate_z = min_z - LIFT_MM;
     let height = layer_height_mm();
@@ -354,8 +361,7 @@ pub(crate) fn place(mesh: &Mesh, name: &str) -> SweepPlan {
     let layer_count = (((max_z - plate_z) / height).ceil() as usize).saturating_add(1).max(1);
     let layers = LayerPlan::new(plate_z, vec![height; layer_count])
         .unwrap_or_else(|error| panic!("{name}: a uniform layer plan: {error}"));
-    let policy = SweepPolicy::from_registry().expect("the registry supplies every sweep number");
-    run_sweep(mesh, &layers, &policy)
+    run_sweep(mesh, &layers, policy)
         .unwrap_or_else(|error| panic!("{name}: the sweep emits and warns; it must not refuse: {error}"))
 }
 

@@ -22,6 +22,7 @@ mod drain_connectivity;
 mod emitted_profile_covers_ledger;
 mod every_member_rests_on_something;
 mod footprint_moves_hold_the_rules;
+mod head_join;
 mod load_insertion;
 mod mast_root_clearance;
 mod model_landing_scar;

@@ -272,6 +272,10 @@ pub struct SweepRunReport {
     /// disc graded against its seat face, the seats it moved onto the face,
     /// and the knife edges it could only warn about.
     pub seat_footprint: crate::footprint::FootprintOutcome,
+    /// The head-join rule (2026-09-29): member-on-arm joins graded against the
+    /// trunk's seat zone, the landers moved down their trunk, the joins kept
+    /// by reason, and the finished field's census.
+    pub head_join: crate::head_join::HeadJoinOutcome,
     /// **The resin the area law SIZED**, in mm³: `π r²` integrated along every
     /// arm's own axis, layer by layer, with a leaned layer measured along its
     /// slant rather than its rise.

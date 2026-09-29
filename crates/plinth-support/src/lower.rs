@@ -1491,6 +1491,11 @@ pub struct TipContactDisc {
     pub radius_mm: f64,
     /// The emitted ball's own radius `R`.
     pub ball_radius_mm: f64,
+    /// The emitted ball's CENTRE, which is also where the drawn shaft starts
+    /// (the taper runs from here to the landing). The sweep's head-join rule
+    /// (2026-09-29) measures a trunk's shaft from this point, so it reads the
+    /// same derivation the lowering draws from.
+    pub ball_centre_mm: [f64; 3],
 }
 
 /// **The contact disc every seated arm's tip will deliver**, computed by the
@@ -1541,6 +1546,7 @@ pub fn tip_contact_discs(
                 outward_normal: normal,
                 radius_mm: tip_seat.contact_disc_radius_mm,
                 ball_radius_mm,
+                ball_centre_mm: center,
             })
         })
         .collect())

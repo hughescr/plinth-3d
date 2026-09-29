@@ -2616,6 +2616,45 @@ fn print_sweep_disclosure(
                 fraction * 100.0
             );
         }
+        // THE HEAD-JOIN RULE (2026-09-29).
+        let rule = &report.head_join;
+        println!(
+            "[sweep {model}] head joins: {} examined, {} with a sum-sized section within {:.3} mm \
+             of the head arm's seat plane; {} landers moved below the seat zone ({} down the \
+             landing chain, {} at the {:.3} mm hard limit because no join held the {:.3} mm \
+             placement margin; largest drop {} layers; smallest solid clearance {:.4} mm; \
+             {:.4} mm2 handed on), {} resting members re-landed with them, {} clearance rows, \
+             {} pass(es){}; kept in the seat zone: no clear join {}, a cross tied to a mover {}, \
+             not a support arm {}, no model surface {}; {} unmeasured",
+            rule.joins_examined,
+            rule.joins_in_seat_zone_before,
+            rule.clearance_mm,
+            rule.landers_moved,
+            rule.landers_moved_down_the_chain,
+            rule.landers_at_hard_limit,
+            rule.clearance_mm,
+            rule.standoff_mm,
+            rule.max_drop_layers,
+            rule.min_lander_clearance_mm,
+            rule.load_moved_mm2,
+            rule.dependants_relanded,
+            rule.clearance_rows,
+            rule.passes,
+            if rule.enabled { "" } else { " (RULE OFF)" },
+            rule.kept_no_clear_join,
+            rule.kept_carrying_a_tie,
+            rule.kept_not_an_arm,
+            rule.kept_surface_unavailable,
+            rule.joins_unmeasured,
+        );
+        for (lander, trunk) in &rule.in_seat_zone_after {
+            println!(
+                "[sweep {model}] WARNING member {lander} joins arm {trunk} at its head and the \
+                 section carrying both loads comes within {:.3} mm of arm {trunk}'s seat plane, \
+                 so arm {trunk}'s contact with the model is wider than its own load needs",
+                rule.clearance_mm
+            );
+        }
     }
     println!(
         "[sweep {model}] peak layer area {:.4} mm2; total scar {:.4} mm2 (invariant \
