@@ -2682,7 +2682,8 @@ fn print_sweep_disclosure(
     // the ledger stays beside it, labelled as the sizing figure.
     println!(
         "[sweep {model}] resin: support volume as emitted {:.3} mm3 ({:.3} mm3 in tapers and \
-         chained members, the rest tip balls and root flares) over {} arms; sizing ledger \
+         chained members, {:.3} mm3 in the raft, the rest tip balls and root flares) over {} \
+         arms; sizing ledger \
          {:.3} mm3 (the area law's shafts, not what is drawn); drawn profile: {} members in \
          more than one span, {} Member frusta chained, {} arms WITHOUT a profile, {} members \
          raised above their ledger to meet a thicker branch, {} arm junctions inverted in the \
@@ -2694,6 +2695,7 @@ fn print_sweep_disclosure(
          carrier could have taken",
         emission.drawn_volume_mm3,
         emission.drawn_shaft_volume_mm3,
+        emission.raft_volume_mm3,
         report.struts_total,
         report.support_volume_mm3,
         emission.arms_drawn_in_spans,
