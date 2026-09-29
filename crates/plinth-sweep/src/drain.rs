@@ -300,6 +300,18 @@ impl DrainKeepOut {
         self.refusals.load(Ordering::Relaxed)
     }
 
+    /// Whether the keep-out covers `cell` at `layer` — [`Self::admits`]'s
+    /// answer, negated, WITHOUT counting a refusal. For a check on a finished
+    /// field (the footprint rule's move check) rather than a placement
+    /// candidate, so the published refusal count keeps meaning "placement
+    /// candidates refused".
+    #[must_use]
+    pub fn blocks(&self, cell: usize, layer: usize) -> bool {
+        self.lowest_blocked.get(cell).is_some_and(|&lowest| {
+            lowest != u32::MAX && usize::try_from(lowest).unwrap_or(usize::MAX) <= layer
+        })
+    }
+
     /// May an arm be seated in `cell` at `layer`?
     ///
     /// Counts its own refusals, so a run can prove the keep-out was consulted.

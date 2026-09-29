@@ -162,7 +162,11 @@ Rather than a literal third sweep, use the iterate the engine already has —
 the load-driven insertion rounds (`InsertionPolicy::max_rounds`) — with a
 second trigger beside overload: **congestion**. At the plate layer, rasterise
 every plate-rooted arm's root disc; congestion = Σ disc area / area of the
-union (>1 means overlap). When a footprint is congested:
+union (>1 means overlap). (Corrected 2026-09-29, review-fixes: a root disc is
+the flare of the root the member is DRAWN with — its ledger raised by the
+junction clause where a brace joins — by the lowering's own rule,
+`plinth_support::drawn_root_radius_mm`; the slenderness lane grows its discs
+as crosses raise roots.) When a footprint is congested:
 
 1. Let the congested arms' descents lean OUTWARD to plate cells outside the
    silhouette (the deferred-path charge already makes plate landings win

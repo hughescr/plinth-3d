@@ -57,21 +57,41 @@
 //! raster's own two-cell margin, and every such rim tip was misreported as a
 //! knife edge.)
 //!
+//! # A move is held to the rules of the finished field (review-fixes 2026-09-29)
+//!
+//! This rule runs after the lean law, the slenderness lane and the drain
+//! keep-out have been satisfied, and a move changes the geometry the file
+//! gets: the moved arm's axis and every member joined to it. So every round's
+//! on-face moves, together with the moves already accepted, are judged on the
+//! DRAWN ends of every member they displace ([`MoveLimits`]): lateral travel
+//! per unit drop within the lean law, the drawn chord within its tightest
+//! unbraced run's limit, and no new lamina in the drain keep-out — each "or no
+//! worse than before the move" for a member already past it. A move a broken
+//! rule traces back to is refused and its tip tries its next candidate; a tip
+//! whose every on-face candidate is refused keeps its seat, trimmed, with a
+//! WARNING (`Footprint::MoveRefused`), never a refusal. Measured on the
+//! flipped `Round 25` fixture: 7 proposals refused by the lean law, every
+//! tip still moved onto its face by a later candidate, and without the check
+//! two members left leaning at 1.575 and 1.586 against the law's 1.5697.
+//!
 //! # Batching
 //!
 //! Every sample of every tip is graded in ONE ascending pass over the layer
 //! stack (each needed layer rasterised once); the search lattice for the tips
 //! that fail is graded in one more such pass; every candidate move is
 //! re-derived through ONE batched [`plinth_support::tip_contact_discs`] call
-//! per round. No per-tip raster query, no per-tip registry read.
+//! per round, and judged by ONE displacement pass over the field per round
+//! (repeated only when a broken rule removes a move). No per-tip raster query,
+//! no per-tip registry read.
 
 use plinth_core::LayerPlan;
 use plinth_support::perception::SliceSolid;
 use plinth_support::{SweepArm, TipContactDisc};
 
+use crate::drain::DrainKeepOut;
 use crate::grid::Grid;
 use crate::raster::{rasterize_into, LayerMasks, RasterScratch};
-use crate::{Footprint, SweepStrut};
+use crate::{Footprint, Landing, SweepStrut};
 
 /// How far the seat may move along its face, in ball diameters. A Placeholder
 /// that only prunes the search (see the module doc); it never decides whether
@@ -97,12 +117,184 @@ pub struct FootprintOutcome {
     /// Tips on a true knife edge: no seat within the search radius puts the
     /// whole disc on the face. `(arm, fraction of disc samples on the face)`.
     pub knife_edges: Vec<(usize, f64)>,
+    /// Tips whose disc hangs off its face where every on-face seat the search
+    /// found would have broken a rule of the finished field ([`MoveLimits`]):
+    /// `(arm, fraction of disc samples on the face)`. The tip keeps its seat,
+    /// trimmed, and is warned about. Not a knife edge: the face is there.
+    pub moves_refused: Vec<(usize, f64)>,
+    /// Proposed moves refused, by the rule the moved geometry (the arm, or a
+    /// member joined to it) would have broken, and the member checks run: the
+    /// path hits of the move check (review-fixes 2026-09-29).
+    pub moves_refused_lean: usize,
+    pub moves_refused_slenderness: usize,
+    pub moves_refused_drain: usize,
+    pub members_checked: usize,
     /// Disc samples graded, lattice points searched, layers rasterised, and
     /// candidate rounds re-derived: the path hits.
     pub disc_samples: usize,
     pub search_samples: usize,
     pub layers_rasterised: usize,
     pub rounds: usize,
+}
+
+/// **What a footprint move may not break** (review-fixes 2026-09-29).
+///
+/// The footprint rule runs on the FINISHED field, after the lean law, the
+/// slenderness lane and the drain keep-out have all been satisfied, and a
+/// seat move changes the geometry the file gets: the moved arm's own axis, and
+/// every member joined to it ([`followed_shifts`]). So every proposed set of
+/// moves is judged on the DRAWN ends ([`crate::adapter::drawn_ends`] plus the
+/// displacement each member would get) against the same three rules, and a
+/// move that breaks one is refused and the search goes on to its next
+/// candidate. A member already past a rule before any move is held to "no
+/// worse than it was", so a move can never be refused for a violation it did
+/// not cause. No new number: each bound is the rule's own.
+pub(crate) struct MoveLimits<'a> {
+    /// The lean law's steepest member, as lateral travel per unit of drop:
+    /// `max_step / layer_height` (`lean.rs`, the saturated overhang angle).
+    pub max_lean: f64,
+    /// Per strut (index = id): the factor its drawn chord may grow by before
+    /// its tightest unbraced run passes its own limit — `min(limit / length)`
+    /// over its runs on the finished field (a run's length is its share of the
+    /// chord, `slenderness::run_length`). Infinite where no run binds.
+    pub chord_slack: Vec<f64>,
+    /// The drain keep-out the placement honoured.
+    pub keep_out: &'a DrainKeepOut,
+}
+
+/// The rule a proposed move would break.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Broken {
+    Lean,
+    Slenderness,
+    Drain,
+}
+
+/// Float noise on a comparison the geometry designs for (an arm drawn
+/// exactly at the lean law's limit), and nothing more.
+const RULE_RELATIVE_SLACK: f64 = 1e-9;
+
+/// Lateral travel per unit of drop of a member drawn from `seat` to `base`.
+fn lean_of((seat, base): ([f64; 3], [f64; 3])) -> f64 {
+    let drop = seat[2] - base[2];
+    let lateral = (seat[0] - base[0]).hypot(seat[1] - base[1]);
+    if drop > 0.0 {
+        lateral / drop
+    } else if lateral > 0.0 {
+        f64::INFINITY
+    } else {
+        0.0
+    }
+}
+
+fn chord_of((seat, base): ([f64; 3], [f64; 3])) -> f64 {
+    geom_kernel::vec3::norm(geom_kernel::vec3::sub(seat, base))
+}
+
+/// A member's drawn ends after its [`Followed`] displacement.
+fn displaced(before: ([f64; 3], [f64; 3]), followed: Followed) -> ([f64; 3], [f64; 3]) {
+    let moved = |point: [f64; 3], by: Option<[f64; 3]>| {
+        by.map_or(point, |by| geom_kernel::vec3::add(point, by))
+    };
+    (
+        moved(before.0, followed.seat_mm),
+        moved(before.1, followed.base_mm),
+    )
+}
+
+/// The first rule member `index` breaks when drawn from `after` rather than
+/// `before`, if any.
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::too_many_arguments,
+    reason = "layer indices bounded by the plan's layer count are exact in f64; grid coordinates \
+              are range-checked as f64 before the cast; the frame, the rules, and one member's \
+              ends before and after"
+)]
+fn broken_rule(
+    grid: &Grid,
+    plate_z: f64,
+    height: f64,
+    limits: &MoveLimits<'_>,
+    strut: &SweepStrut,
+    index: usize,
+    before: ([f64; 3], [f64; 3]),
+    after: ([f64; 3], [f64; 3]),
+) -> Option<Broken> {
+    let allowed_lean = lean_of(before).max(limits.max_lean);
+    if lean_of(after) > allowed_lean * (1.0 + RULE_RELATIVE_SLACK) {
+        return Some(Broken::Lean);
+    }
+    let (was, now) = (chord_of(before), chord_of(after));
+    let slack = limits
+        .chord_slack
+        .get(index)
+        .copied()
+        .unwrap_or(f64::INFINITY)
+        .max(1.0);
+    if was > 0.0 && now > was * slack * (1.0 + RULE_RELATIVE_SLACK) {
+        return Some(Broken::Slenderness);
+    }
+    if !limits.keep_out.is_empty() && strut.k_bottom != usize::MAX {
+        // The column the drawn axis stands in at each lamina it passes
+        // through, sampled at the lamina's mid-plane.
+        let cell_at = |(seat, base): ([f64; 3], [f64; 3]), z: f64| -> Option<usize> {
+            let rise = seat[2] - base[2];
+            let t = if rise > 0.0 {
+                ((z - base[2]) / rise).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            let x = base[0] + (seat[0] - base[0]) * t;
+            let y = base[1] + (seat[1] - base[1]) * t;
+            let col = grid.col_coord(x).floor();
+            let row = grid.row_coord(y).floor();
+            (col >= 0.0
+                && row >= 0.0
+                && (col as usize) < grid.cols()
+                && (row as usize) < grid.rows())
+            .then(|| grid.index(row as usize, col as usize))
+        };
+        for layer in strut.k_bottom..strut.k_top {
+            let z = plate_z + (layer as f64 + 0.5) * height;
+            let blocked =
+                |ends| cell_at(ends, z).is_some_and(|cell| limits.keep_out.blocks(cell, layer));
+            if blocked(after) && !blocked(before) {
+                return Some(Broken::Drain);
+            }
+        }
+    }
+    None
+}
+
+/// Every member's drawn chord after the footprint moves, over its chord
+/// before them: `1` for a member nothing moved. The run lengths the
+/// slenderness lane published are shares of the chord, so this is what
+/// refreshes them on the field the file gets.
+pub(crate) fn chord_scales(
+    grid: &Grid,
+    plate_z: f64,
+    height: f64,
+    struts: &[SweepStrut],
+) -> Vec<f64> {
+    struts
+        .iter()
+        .zip(followed_shifts(struts))
+        .map(|(strut, followed)| {
+            if followed.seat_mm.is_none() && followed.base_mm.is_none() {
+                return 1.0;
+            }
+            let before = crate::adapter::drawn_ends(grid, plate_z, height, strut);
+            let was = chord_of(before);
+            if was > 0.0 {
+                chord_of(displaced(before, followed)) / was
+            } else {
+                1.0
+            }
+        })
+        .collect()
 }
 
 /// One point of a lattice whose column is tested for carried material.
@@ -272,6 +464,10 @@ fn disc_offsets(radius_in_pitches: f64) -> Vec<(i32, i32)> {
     reason = "one pass in four batched stages (grade, search lattice, search, verify); splitting \
               it would thread the same six buffers through four signatures"
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the field, its rasters, its arms, its frame and the rules a move is held to"
+)]
 pub(crate) fn apply(
     grid: &Grid,
     slices: &[Vec<SliceSolid>],
@@ -280,6 +476,7 @@ pub(crate) fn apply(
     layer_plan: &LayerPlan,
     plate_z: f64,
     height: f64,
+    limits: &MoveLimits<'_>,
 ) -> FootprintOutcome {
     let mut outcome = FootprintOutcome::default();
     let Ok(discs) = plinth_support::tip_contact_discs(arms, layer_plan) else {
@@ -415,6 +612,22 @@ pub(crate) fn apply(
     // disc call per round.
     let mut pending: Vec<usize> = (0..searches.len()).collect();
     let mut accepted: Vec<Option<[f64; 3]>> = vec![None; searches.len()];
+    // THE MOVE CHECK's state: every member's drawn ends before any move, the
+    // own seat moves accepted so far (by member), and which search slot, if
+    // any, each member's own move belongs to.
+    let before_ends: Vec<([f64; 3], [f64; 3])> = struts
+        .iter()
+        .map(|strut| crate::adapter::drawn_ends(grid, plate_z, height, strut))
+        .collect();
+    let mut own_accepted: Vec<Option<[f64; 3]>> = vec![None; struts.len()];
+    let mut slot_of_member = vec![usize::MAX; struts.len()];
+    for (slot, search) in searches.iter().enumerate() {
+        if let Some(entry) = slot_of_member.get_mut(search.arm) {
+            *entry = slot;
+        }
+    }
+    let mut refused_by_limits = vec![false; searches.len()];
+    let search_arms: Vec<usize> = searches.iter().map(|search| search.arm).collect();
     while !pending.is_empty() {
         outcome.rounds += 1;
         let mut proposals: Vec<(usize, (i32, i32))> = Vec::new();
@@ -465,6 +678,7 @@ pub(crate) fn apply(
         let rederived = plinth_support::tip_contact_discs(&moved_arms, layer_plan)
             .unwrap_or_else(|_| vec![None; moved_arms.len()]);
         let mut resolved = vec![false; searches.len()];
+        let mut on_face: Vec<(usize, [f64; 3])> = Vec::with_capacity(proposals.len());
         for ((slot, _), (moved, disc)) in proposals.iter().zip(moved_arms.iter().zip(&rederived)) {
             let search = &searches[*slot];
             let Some((frame, _)) = &frames[search.arm] else {
@@ -494,12 +708,38 @@ pub(crate) fn apply(
                 on_lattice(search, lu, lv)
             });
             if real_ok {
-                accepted[*slot] = Some(geom_kernel::vec3::sub(
-                    moved.seat_mm,
-                    arms[search.arm].seat_mm,
+                on_face.push((
+                    *slot,
+                    geom_kernel::vec3::sub(moved.seat_mm, arms[search.arm].seat_mm),
                 ));
-                resolved[*slot] = true;
             }
+        }
+        // THE MOVE CHECK, once per round over the whole batch: the moves
+        // accepted so far plus this round's, every member they displace
+        // judged on its drawn ends. A broken rule refuses every move of THIS
+        // round that the broken member inherits a displacement from (itself
+        // or a host, transitively), and the rest are judged again without
+        // them. Each pass removes at least one move, so it ends.
+        let admitted = check_moves(
+            MoveCheck {
+                grid,
+                plate_z,
+                height,
+                limits,
+                struts,
+                before_ends: &before_ends,
+                own_accepted: &own_accepted,
+                slot_of_member: &slot_of_member,
+                search_arms: &search_arms,
+            },
+            on_face,
+            &mut refused_by_limits,
+            &mut outcome,
+        );
+        for (slot, shift) in admitted {
+            accepted[slot] = Some(shift);
+            own_accepted[searches[slot].arm] = Some(shift);
+            resolved[slot] = true;
         }
         pending.retain(|slot| {
             !resolved[*slot] && searches[*slot].next < searches[*slot].candidates.len()
@@ -520,10 +760,17 @@ pub(crate) fn apply(
             None => {
                 #[expect(clippy::cast_precision_loss, reason = "sample counts are small")]
                 let fraction = on[arm] as f64 / total[arm].max(1) as f64;
-                outcome.knife_edges.push((arm, fraction));
-                struts[arm].seat_face.footprint = Footprint::KnifeEdge {
-                    disc_on_face: fraction,
-                };
+                if refused_by_limits[slot] {
+                    outcome.moves_refused.push((arm, fraction));
+                    struts[arm].seat_face.footprint = Footprint::MoveRefused {
+                        disc_on_face: fraction,
+                    };
+                } else {
+                    outcome.knife_edges.push((arm, fraction));
+                    struts[arm].seat_face.footprint = Footprint::KnifeEdge {
+                        disc_on_face: fraction,
+                    };
+                }
             }
         }
     }
@@ -545,6 +792,113 @@ pub(crate) fn apply(
         }
     }
     outcome
+}
+
+/// Everything the batched move check reads that does not change within a
+/// round.
+struct MoveCheck<'a> {
+    grid: &'a Grid,
+    plate_z: f64,
+    height: f64,
+    limits: &'a MoveLimits<'a>,
+    struts: &'a [SweepStrut],
+    before_ends: &'a [([f64; 3], [f64; 3])],
+    own_accepted: &'a [Option<[f64; 3]>],
+    /// Per member: the search slot its own move belongs to, `usize::MAX` for
+    /// a member the footprint rule never moves itself.
+    slot_of_member: &'a [usize],
+    /// Per search slot: the member it moves.
+    search_arms: &'a [usize],
+}
+
+/// Judge one round's on-face moves ([`MoveLimits`]) and return the ones
+/// admitted. A refused move's slot is flagged in `refused_by_limits`, and the
+/// search goes on to that tip's next candidate.
+fn check_moves(
+    check: MoveCheck<'_>,
+    mut round: Vec<(usize, [f64; 3])>,
+    refused_by_limits: &mut [bool],
+    outcome: &mut FootprintOutcome,
+) -> Vec<(usize, [f64; 3])> {
+    let struts = check.struts;
+    let hosts = |index: usize| -> [Option<usize>; 2] {
+        let strut = &struts[index];
+        let seat_host = strut
+            .seat_on_strut
+            .map(|id| id as usize)
+            .filter(|id| *id != index && *id < struts.len());
+        let base_host = match strut.landing {
+            Landing::Strut { id, .. } => {
+                Some(id as usize).filter(|id| *id != index && *id < struts.len())
+            }
+            _ => None,
+        };
+        [seat_host, base_host]
+    };
+    let mut in_round = vec![false; check.search_arms.len()];
+    let mut blamed: Vec<Option<Broken>> = vec![None; check.search_arms.len()];
+    let mut walk: Vec<usize> = Vec::new();
+    let mut seen: Vec<usize> = Vec::new();
+    while !round.is_empty() {
+        let mut own = check.own_accepted.to_vec();
+        in_round.fill(false);
+        blamed.fill(None);
+        for &(slot, shift) in &round {
+            own[check.search_arms[slot]] = Some(shift);
+            in_round[slot] = true;
+        }
+        let followed = followed_shifts_with(struts, &own);
+        for (index, moved) in followed.iter().enumerate() {
+            if moved.seat_mm.is_none() && moved.base_mm.is_none() {
+                continue;
+            }
+            outcome.members_checked += 1;
+            let before = check.before_ends[index];
+            let Some(rule) = broken_rule(
+                check.grid,
+                check.plate_z,
+                check.height,
+                check.limits,
+                &struts[index],
+                index,
+                before,
+                displaced(before, *moved),
+            ) else {
+                continue;
+            };
+            // Blame every move of this round the member inherits its
+            // displacement from: itself, and its hosts, transitively.
+            walk.clear();
+            seen.clear();
+            walk.push(index);
+            while let Some(member) = walk.pop() {
+                if seen.contains(&member) || seen.len() > struts.len() {
+                    continue;
+                }
+                seen.push(member);
+                let slot = check.slot_of_member[member];
+                if slot != usize::MAX && in_round[slot] && blamed[slot].is_none() {
+                    blamed[slot] = Some(rule);
+                }
+                walk.extend(hosts(member).into_iter().flatten());
+            }
+        }
+        let before = round.len();
+        round.retain(|(slot, _)| blamed[*slot].is_none());
+        if round.len() == before {
+            break;
+        }
+        for (slot, rule) in blamed.iter().enumerate() {
+            let Some(rule) = rule else { continue };
+            refused_by_limits[slot] = true;
+            match rule {
+                Broken::Lean => outcome.moves_refused_lean += 1,
+                Broken::Slenderness => outcome.moves_refused_slenderness += 1,
+                Broken::Drain => outcome.moves_refused_drain += 1,
+            }
+        }
+    }
+    round
 }
 
 /// How one member moves because a seat moved: its seat and its base
@@ -574,6 +928,20 @@ pub struct Followed {
 /// Every entry is `Followed::default()` — nothing moves — when no seat moved.
 #[must_use]
 pub fn followed_shifts(struts: &[SweepStrut]) -> Vec<Followed> {
+    let own: Vec<Option<[f64; 3]>> = struts
+        .iter()
+        .map(|strut| {
+            (strut.seat_face.footprint == Footprint::MovedOntoFace)
+                .then_some(strut.seat_face.shift_mm)
+        })
+        .collect();
+    followed_shifts_with(struts, &own)
+}
+
+/// [`followed_shifts`] for a proposed set of own seat moves (`own[i]` is
+/// member `i`'s own seat move, `None` where it has none), so the footprint
+/// rule can judge a set of moves before it writes any of them.
+fn followed_shifts_with(struts: &[SweepStrut], own_moves: &[Option<[f64; 3]>]) -> Vec<Followed> {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum State {
         New,
@@ -581,10 +949,7 @@ pub fn followed_shifts(struts: &[SweepStrut]) -> Vec<Followed> {
         Done,
     }
     let mut out = vec![Followed::default(); struts.len()];
-    if !struts
-        .iter()
-        .any(|strut| strut.seat_face.footprint == Footprint::MovedOntoFace)
-    {
+    if own_moves.iter().all(Option::is_none) {
         return out;
     }
     let hosts = |index: usize| -> [Option<usize>; 2] {
@@ -645,8 +1010,7 @@ pub fn followed_shifts(struts: &[SweepStrut]) -> Vec<Followed> {
             }
             let strut = &struts[index];
             let [seat_host, base_host] = hosts(index);
-            let own = (strut.seat_face.footprint == Footprint::MovedOntoFace)
-                .then_some(strut.seat_face.shift_mm);
+            let own = own_moves.get(index).copied().flatten();
             let seat_mm = match seat_host {
                 Some(host) if state[host] == State::Done => along(&out, host, strut.k_top),
                 _ => own,
@@ -663,4 +1027,140 @@ pub fn followed_shifts(struts: &[SweepStrut]) -> Vec<Followed> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod move_check_tests {
+    use super::{broken_rule, Broken, MoveLimits};
+    use crate::drain::{DrainKeepOut, DrainSpec};
+    use crate::grid::{lay_out_at, Grid};
+    use crate::{Landing, SeatFace, StrutKind, SweepStrut};
+
+    const HEIGHT: f64 = 0.05;
+    const PLATE: f64 = 0.0;
+    /// The lean law at the registered 45° centre and 25° transition: the
+    /// saturated 32.5°, `cot 32.5° = 1.5697` lateral per unit drop.
+    fn max_lean() -> f64 {
+        1.0 / 32.5_f64.to_radians().tan()
+    }
+
+    fn grid() -> Grid {
+        lay_out_at(0.0, 0.0, 0.05, 400, 400)
+    }
+
+    /// A plate arm from layer 0 to layer 100 (a 5 mm drop).
+    fn arm() -> SweepStrut {
+        SweepStrut {
+            id: 0,
+            cell: 0,
+            center_mm: [0.0, 0.0],
+            kind: StrutKind::Arm,
+            min_radius_mm: 0.0,
+            thickened_mm: Vec::new(),
+            seat_on_strut: None,
+            k_top: 100,
+            k_bottom: 0,
+            landing: Landing::Plate,
+            interior: false,
+            radius_mm: vec![0.1; 100],
+            carried_mm2: vec![0.0; 100],
+            covered_demand: Vec::new(),
+            inserted_by_load: false,
+            path: Vec::new(),
+            straight_fallback: None,
+            fallback_path: Vec::new(),
+            seat_face: SeatFace::default(),
+            seat_normal: [0.0; 3],
+        }
+    }
+
+    fn judge(
+        grid: &Grid,
+        limits: &MoveLimits<'_>,
+        before: ([f64; 3], [f64; 3]),
+        after: ([f64; 3], [f64; 3]),
+    ) -> Option<Broken> {
+        broken_rule(grid, PLATE, HEIGHT, limits, &arm(), 0, before, after)
+    }
+
+    /// The reviewer's case: 5 mm drop, 7.5 mm lateral (1.50, inside the law);
+    /// a 0.95 mm move that adds lateral travel makes it 8.45 mm (1.69).
+    #[test]
+    fn a_move_that_leans_an_arm_past_the_law_is_refused() {
+        let grid = grid();
+        let keep_out = DrainKeepOut::none();
+        let limits = MoveLimits {
+            max_lean: max_lean(),
+            chord_slack: vec![f64::INFINITY],
+            keep_out: &keep_out,
+        };
+        let base = [10.0, 10.0, 0.0];
+        let before = ([17.5, 10.0, 5.0], base);
+        let outward = ([18.45, 10.0, 5.0], base);
+        let inward = ([16.55, 10.0, 5.0], base);
+        assert_eq!(judge(&grid, &limits, before, outward), Some(Broken::Lean));
+        assert_eq!(judge(&grid, &limits, before, inward), None);
+        // Already past the law (by a placement this rule did not make): held
+        // to no worse, never refused for what it already was.
+        let steep = ([18.5, 10.0, 5.0], base);
+        let steeper = ([18.6, 10.0, 5.0], base);
+        let gentler = ([18.4, 10.0, 5.0], base);
+        assert_eq!(judge(&grid, &limits, steep, steeper), Some(Broken::Lean));
+        assert_eq!(judge(&grid, &limits, steep, gentler), None);
+    }
+
+    /// A member whose tightest run is exactly at its limit may not grow its
+    /// chord; one with 10 % of slack may grow it by up to 10 %.
+    #[test]
+    fn a_move_that_lengthens_a_run_past_its_limit_is_refused() {
+        let grid = grid();
+        let keep_out = DrainKeepOut::none();
+        let base = [10.0, 10.0, 0.0];
+        let before = ([10.0, 10.0, 5.0], base);
+        // Chord 5 mm -> 5.0990 mm (+1.98 %).
+        let moved = ([11.0, 10.0, 5.0], base);
+        let at_limit = MoveLimits {
+            max_lean: max_lean(),
+            chord_slack: vec![1.0],
+            keep_out: &keep_out,
+        };
+        assert_eq!(
+            judge(&grid, &at_limit, before, moved),
+            Some(Broken::Slenderness)
+        );
+        let with_slack = MoveLimits {
+            max_lean: max_lean(),
+            chord_slack: vec![1.1],
+            keep_out: &keep_out,
+        };
+        assert_eq!(judge(&grid, &with_slack, before, moved), None);
+    }
+
+    /// A downward drain at (15, 10): its keep-out column is refused to an arm
+    /// that moves into it, never to one that was already there.
+    #[test]
+    fn a_move_into_a_drain_keep_out_is_refused() {
+        let grid = grid();
+        let drain = DrainSpec {
+            outlet_mm: [15.0, 10.0, 5.0],
+            outward_axis: [0.0, 0.0, -1.0],
+            radius_mm: 0.5,
+        };
+        let keep_out = DrainKeepOut::build(&grid, &[drain], 0.2, 0.3, 120, PLATE, HEIGHT);
+        assert!(!keep_out.is_empty());
+        let limits = MoveLimits {
+            max_lean: max_lean(),
+            chord_slack: vec![f64::INFINITY],
+            keep_out: &keep_out,
+        };
+        let clear = ([12.0, 10.0, 5.0], [12.0, 10.0, 0.0]);
+        let into = ([15.0, 10.0, 5.0], [12.0, 10.0, 0.0]);
+        assert_eq!(judge(&grid, &limits, clear, into), Some(Broken::Drain));
+        assert_eq!(judge(&grid, &limits, into, into), None);
+        assert_eq!(
+            keep_out.refusals(),
+            0,
+            "the move check never counts a refusal"
+        );
+    }
 }

@@ -262,10 +262,33 @@ pub fn measure(
 /// A `Brace` is excluded because it gets no root flare and never lands on the
 /// plate; an `Arm` and a `Mast` both keep the plate-root chain, so both are
 /// counted.
+///
+/// **The disc is the DRAWN root's** (review-fixes 2026-09-29). Until then it
+/// was sized from the ledger's `radius_mm[0]`, while the lowering flares the
+/// root of the profile the member is DRAWN at — the ledger raised by the
+/// junction clause wherever a thicker branch (a brace) joins it
+/// ([`crate::adapter::drawn_profiles`]). A braced plate arm then printed a
+/// wider foot than every clearance decision and the census had seen. The root
+/// is now [`plinth_support::drawn_root_radius_mm`] of that drawn profile: the
+/// lowering's own rule on the lowering's own profile.
 pub(crate) fn root_discs(
     grid: &Grid,
     history: &ColumnHistory,
     struts: &[SweepStrut],
+    flare_factor: f64,
+) -> Vec<RootDisc> {
+    let (profiles, _) = crate::adapter::drawn_profiles(struts);
+    root_discs_drawn(grid, history, struts, &profiles, flare_factor)
+}
+
+/// [`root_discs`] over drawn profiles the caller already holds (one per
+/// strut, in strut order), so a pass that keeps them live does not re-derive
+/// them.
+pub(crate) fn root_discs_drawn(
+    grid: &Grid,
+    history: &ColumnHistory,
+    struts: &[SweepStrut],
+    profiles: &[Vec<f64>],
     flare_factor: f64,
 ) -> Vec<RootDisc> {
     let factor = if flare_factor.is_finite() && flare_factor > 0.0 {
@@ -274,13 +297,11 @@ pub(crate) fn root_discs(
         1.0
     };
     let mut discs = Vec::with_capacity(struts.len());
-    for strut in struts {
+    for (strut, profile) in struts.iter().zip(profiles) {
         if !matches!(strut.landing, Landing::Plate) || strut.kind == StrutKind::Brace {
             continue;
         }
-        let Some(&root) = strut.radius_mm.first() else {
-            continue;
-        };
+        let root = plinth_support::drawn_root_radius_mm(profile, strut.tip_radius_mm());
         if !(root.is_finite() && root > 0.0) {
             continue;
         }
