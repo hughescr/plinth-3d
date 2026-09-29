@@ -117,6 +117,15 @@ fn crosses(plan: &SweepPlan) -> Vec<Cross> {
         .collect()
 }
 
+/// Take one diagonal out of a strut set without shifting any index: no bottom
+/// layer (the run measurement skips it), and joined to nothing (so no post is
+/// drawn thicker for it).
+fn detach(diagonal: &mut SweepStrut) {
+    diagonal.k_bottom = usize::MAX;
+    diagonal.landing = Landing::Plate;
+    diagonal.seat_on_strut = None;
+}
+
 fn count_kind(plan: &SweepPlan, kind: StrutKind) -> usize {
     plan.struts
         .iter()
@@ -180,9 +189,7 @@ fn assert_every_cross_is_needed(name: &str, plan: &SweepPlan) {
     for cross in &all {
         let mut struts: Vec<SweepStrut> = plan.struts.clone();
         for &diagonal in &cross.diagonals {
-            // `unbraced_runs` skips a member with no bottom layer: the cross is
-            // gone from the measurement, and no index shifts.
-            struts[diagonal].k_bottom = usize::MAX;
+            detach(&mut struts[diagonal]);
         }
         let runs = unbraced_runs(&plan.grid, &struts, plan.layer_height_mm, &law);
         let needed = runs.iter().any(|run| {
@@ -277,7 +284,8 @@ fn the_stilt_plate_leaves_no_unbraced_run() {
 /// flat truss: it holds its two posts in its own plane and nothing across it.
 /// So wherever a post NEEDS its crosses — with every cross on it taken out of
 /// the measurement it has a run over the limit — the crosses over that run
-/// must stand in at least two planes that are not parallel. One plane is half
+/// must stand in at least two planes at least 45° apart (each projecting at
+/// least as far across the other as along it). One plane is half
 /// a tie. (On d103c48 every tie was one cross in one plane.)
 ///
 /// The measurement here is taken with ALL of the post's crosses removed, so it
@@ -309,7 +317,7 @@ fn assert_ties_hold_in_two_planes(name: &str, plan: &SweepPlan) {
         let mut struts: Vec<SweepStrut> = plan.struts.clone();
         for cross in &mine {
             for &diagonal in &cross.diagonals {
-                struts[diagonal].k_bottom = usize::MAX;
+                detach(&mut struts[diagonal]);
             }
         }
         let runs = unbraced_runs(grid, &struts, plan.layer_height_mm, &law);
@@ -326,9 +334,12 @@ fn assert_ties_hold_in_two_planes(name: &str, plan: &SweepPlan) {
                 continue;
             }
             graded += 1;
-            let two_planes = over
-                .iter()
-                .any(|a| over.iter().any(|b| a.0 * b.1 - a.1 * b.0 != 0));
+            // Two planes at least 45 degrees apart: each projects at least as
+            // far across the other as along it (`|a x b| >= |a . b|`).
+            let two_planes = over.iter().any(|a| {
+                over.iter()
+                    .any(|b| (a.0 * b.1 - a.1 * b.0).abs() >= (a.0 * b.0 + a.1 * b.1).abs())
+            });
             if !two_planes {
                 one_plane.push((post, run.k_lo, run.k_top, over));
             }

@@ -107,9 +107,10 @@ Recorded here because it changes the ladder above; the code of record is
   any tie, so no post it puts back is left unmeasured.
 - **Every direction:** an `|X|` holds only in its own plane. A run is measured
   across each plane of the crosses on its member; a tie needs crosses in two
-  non-parallel planes (built as a pair, or one completing a plane already
-  there). Any two planes the grid tells apart count (the lane's rigid-tie
-  model); the narrowest angle used is published.
+  planes at least 45° apart (built as a pair, or one completing a plane
+  already there): a cross is credited across a plane only where it projects
+  at least as far across it as along it. The narrowest angle used is
+  published.
 - **Thicken:** raise the root, keep the tip, up to the 1.0 mm maximum; the
   root is the smallest that brings the run inside the one-pixel law, carried
   down every trunk below, and a grown plate root must clear every other root
