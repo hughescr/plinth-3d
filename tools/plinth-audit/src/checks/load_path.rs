@@ -314,6 +314,15 @@ impl Check for LoadPath {
         //    root stopped 0.2 mm (four layers) above the plate on a raft that
         //    was never emitted (fix/plate-gap).
         //
+        //    THE RAFT, BOTH FRAMES (fix/sweep-raft, 2026-09-29). The slice
+        //    sweep now emits the legacy raft again, and its foot ends on the
+        //    pad top like every native foot; its type-6 records write z = 0.0
+        //    as every native file does. A raft record's solid is read in that
+        //    frame (`Primitive::in_raft_frame`, applied once when the context
+        //    is built), so `raft_on_plate` below is TRUE for a native-frame
+        //    pad and for a legacy model-frame pad alike, and a flare standing
+        //    on either is `root_flares_on_raft`, not floating.
+        //
         //    EXEMPT from the interval policy (`audit-interval-policy.md`
         //    §1.5, §3.4) for the same reason clause (i) is: an equality-band
         //    coincidence test at the f32 resolution of the evidence, with no
@@ -1406,6 +1415,29 @@ mod tests {
         let (out, _ctx) = run_on(m);
         assert!(floating_roots(&out).is_empty(), "{:?}", out.failures);
         assert_eq!(root_counts(&out), [1, 0, 1, 0]);
+    }
+
+    /// The NATIVE raft frame (fix/sweep-raft, 2026-09-29): the pad record
+    /// writes z = 0.0, as every ChituBox-authored file and now plinth's own
+    /// emitter do, while the pad is on the plate. The flare ends on its top,
+    /// 0.002 mm into it as native feet do. A grounded root, on the raft.
+    ///
+    /// Sabotage, run by hand at the change: without `Primitive::in_raft_frame`
+    /// the pad is read at z = 0.0, above the plate, and this root floats
+    /// (`root_counts` [1, 0, 0, 1]).
+    #[test]
+    fn a_flare_on_a_native_frame_raft_pad_is_a_grounded_root() {
+        let mut m = chain_touching_plate();
+        let z_plate = -m.translate_mm[2];
+        let raft_height = m.records[4].r_end;
+        m.records[3].end_mm = [0.0, 0.0, z_plate + raft_height - 0.002];
+        m.records[4].start_mm = [0.0, 0.0, 0.0];
+        m.records[4].end_mm = [0.0, 0.0, 0.0];
+        let (out, ctx) = run_on(m);
+        assert!(floating_roots(&out).is_empty(), "{:?}", out.failures);
+        assert_eq!(root_counts(&out), [1, 0, 1, 0]);
+        // The frame check agrees: the raft's solid is on the plate.
+        assert_eq!(ctx.frame_check().raft_agrees, Some(true));
     }
 
     /// A raft that is itself off the plate grounds nothing.

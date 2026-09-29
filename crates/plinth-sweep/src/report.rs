@@ -404,8 +404,8 @@ impl SweepRunReport {
             out,
             "v1 does NOT do any of the following, and their absence is not a claim that they are \
              unnecessary: no branching (every arm is a straight vertical column), no \
-             cross-bracing, no joint spheres at arm-onto-arm junctions, no raft (a root flare \
-             stands in at each plate landing), no clearance checking of any kind (an arm passing \
+             cross-bracing, no joint spheres at arm-onto-arm junctions, no clearance checking of \
+             any kind (an arm passing \
              close to a wall is NOT detected), and no repair loop. The peel field is uniform: the \
              literature's area exponent and the machine's front-to-back tilt factor are computed \
              and reported below but decide nothing."

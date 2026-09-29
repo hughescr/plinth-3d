@@ -2362,15 +2362,17 @@ fn sweep_and_emit(
         return Ok(None);
     }
 
+    // The raft the lowering appended after every support record
+    // (fix/sweep-raft, 2026-09-29): its pads and bridges are counted as raft,
+    // everything before them as support.
+    let raft_primitive_count = emission.raft_pads + emission.raft_bridges;
     let primitive_count = emission.primitives.len();
     let (mesh, hollow_history) = hollowed.into_parts();
     let history = plinth_support::SupportHistory::from_reports(
         hollow_history,
         plinth_support::SupportReport {
-            support_primitive_count: primitive_count,
-            // v1 emits no raft; a `RootFlare` per plate landing stands in, and
-            // that is disclosed above rather than counted as a raft here.
-            raft_primitive_count: 0,
+            support_primitive_count: primitive_count.saturating_sub(raft_primitive_count),
+            raft_primitive_count,
         },
         frame,
     );
@@ -2680,7 +2682,8 @@ fn print_sweep_disclosure(
     // the ledger stays beside it, labelled as the sizing figure.
     println!(
         "[sweep {model}] resin: support volume as emitted {:.3} mm3 ({:.3} mm3 in tapers and \
-         chained members, the rest tip balls and root flares) over {} arms; sizing ledger \
+         chained members, {:.3} mm3 in the raft, the rest tip balls and root flares) over {} \
+         arms; sizing ledger \
          {:.3} mm3 (the area law's shafts, not what is drawn); drawn profile: {} members in \
          more than one span, {} Member frusta chained, {} arms WITHOUT a profile, {} members \
          raised above their ledger to meet a thicker branch, {} arm junctions inverted in the \
@@ -2694,6 +2697,7 @@ fn print_sweep_disclosure(
          carrier could have taken",
         emission.drawn_volume_mm3,
         emission.drawn_shaft_volume_mm3,
+        emission.raft_volume_mm3,
         report.struts_total,
         report.support_volume_mm3,
         emission.arms_drawn_in_spans,
@@ -2870,6 +2874,15 @@ fn print_sweep_disclosure(
         report.counters.lift_assertions,
         report.counters.creep_cells_weighted,
         report.counters.creep_steps_taken,
+    );
+    println!(
+        "[sweep {model}] raft: {} pads ({} grown wider than the native pad to cover their foot, \
+         {} feet sharing a pad), {} bridges, {:.4} mm3",
+        emission.raft_pads,
+        emission.raft_pads_grown,
+        emission.raft_feet_sharing_a_pad,
+        emission.raft_bridges,
+        emission.raft_volume_mm3,
     );
     println!(
         "[sweep {model}] lowering: {} arms offered, {} emitted, {} dropped zero-length, \

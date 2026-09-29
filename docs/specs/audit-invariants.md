@@ -672,6 +672,16 @@ could not see a root that stops inside the first layer, and it let a floating ro
 whenever the tree was grounded through a model seat. A root below the plate is the
 frame check's failure (§1.2), not this clause's.
 
+**Addendum 2026-09-29 (fix/sweep-raft): the raft's own frame.** Every type-6 record in
+every ChituBox-authored file writes start/end `z = 0.0` while its mesh sits on the plate in
+the model-centred frame; plinth's emitter now writes the same, and the slice sweep emits a
+raft again with each flare ending on its pad top. The audit therefore reconstructs a type-6
+record whose ends are exactly `z = 0.0` ON the plate (`Primitive::in_raft_frame`, applied
+once when the model context is built), and keeps the declared `z` of any other type-6
+record (the legacy model-frame pads). So "a raft record whose own lowest point is z_plate"
+holds for native-frame and legacy pads alike, and the §1.2 cross-check (`raft_agrees`) now
+reads true on native files, where it used to read false.
+
 **Clause (e), no support island (added 2026-09-28, fix/no-dangling; written as clause (d)
 on that branch and renumbered when it landed after fix/plate-gap's clause (d)).**
 Connected is not held up. An arm whose tip is seated in the model and whose lower end

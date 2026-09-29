@@ -177,7 +177,7 @@ pub use initial::ContactConstructionLimits;
 /// forest data model behind it.
 pub use lower::{
     drawn_root_radius_mm, lower_sweep_arms, tip_contact_discs, SweepArm, SweepArmLanding,
-    SweepLowering, SweepLoweringError, TipContactDisc,
+    SweepLowering, SweepLoweringError, TipContactDisc, NATIVE_FOOT_PAD_OVERLAP_MM,
 };
 /// TEST-ONLY, behind the quarantined `seat-minimum-probe` feature.
 #[cfg(feature = "seat-minimum-probe")]

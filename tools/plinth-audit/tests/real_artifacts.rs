@@ -333,8 +333,23 @@ fn a_native_file_reconstructs_without_being_mistaken_for_an_emitted_one() {
     // support tree is in the model-centred frame. That is a FINDING about the
     // file class, reported and not gated; the frame itself is still
     // established because no support reaches below the plate.
+    //
+    // Re-recorded 2026-09-29 (fix/sweep-raft): `raft_agrees` Some(false) ->
+    // Some(true). The audit now reads a raft record at exactly z = 0 as the
+    // native raft frame -- the raft on the plate -- because every native file
+    // (and, from the same change, plinth's own emitter) writes that frame
+    // while the raft MESH sits on the plate (`raft-diagnosis.md` §4.2).
+    // Measured on this file: the pads' mesh bottoms are at the plate,
+    // -20.3205 mm, and their records at z = 0.
     let frame = ctx.frame_check();
-    assert_eq!(frame.raft_agrees, Some(false));
+    assert_eq!(frame.raft_agrees, Some(true));
+    assert_eq!(
+        frame
+            .min_raft_z_mm
+            .map(|z| (z - frame.z_plate_mm).abs() <= frame.tolerance_mm),
+        Some(true),
+        "{frame:?}"
+    );
     assert!(frame.is_established(), "{frame:?}");
 }
 

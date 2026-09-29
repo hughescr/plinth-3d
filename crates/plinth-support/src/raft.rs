@@ -361,46 +361,221 @@ fn raft_primitive(
     }
 }
 
+/// Prim's minimum spanning tree over the roots' plan-view positions, with the
+/// frozen tie order: among every (visited `i`, unvisited `j`) pair the next
+/// edge is the smallest `(d², lo, hi, i, j)` lexicographically.
+///
+/// O(n²), not the O(n³) rescan it replaces (fix/sweep-raft, 2026-09-29: the
+/// sweep path now plans a raft under Round 100's ~760 feet). Each unvisited
+/// `j` keeps its best `(d², lo, hi, i)` over the visited set, updated once per
+/// newly visited vertex; the global minimum over `j` of `(best_j, j)` is the
+/// same lexicographic minimum over all pairs, because `j` is the last key.
+/// So the edge sequence is identical to the rescan's, tie for tie.
 fn euclidean_mst_edges(roots: &[PlateRoot]) -> Vec<(usize, usize)> {
-    if roots.len() < 2 {
+    type Key = (f64, usize, usize, usize);
+    let less = |a: &Key, b: &Key| {
+        a.0.total_cmp(&b.0)
+            .then(a.1.cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+            .then(a.3.cmp(&b.3))
+            == std::cmp::Ordering::Less
+    };
+    let n = roots.len();
+    if n < 2 {
         return Vec::new();
     }
-    let mut visited = vec![0_u8; roots.len()];
-    visited[0] = 1;
-    let mut edges = Vec::with_capacity(roots.len() - 1);
-    while edges.len() + 1 < roots.len() {
-        let mut best: Option<(f64, usize, usize, usize, usize)> = None;
-        for i in 0..roots.len() {
-            if visited[i] == 0 {
+    let mut visited = vec![false; n];
+    let mut best: Vec<Option<Key>> = vec![None; n];
+    let mut edges = Vec::with_capacity(n - 1);
+    let mut newest = 0;
+    visited[0] = true;
+    while edges.len() + 1 < n {
+        let i = newest;
+        let mut next: Option<(Key, usize)> = None;
+        for j in 0..n {
+            if visited[j] {
                 continue;
             }
-            for j in 0..roots.len() {
-                if visited[j] != 0 {
-                    continue;
-                }
-                let dx = roots[j].xy_mm[0].get() - roots[i].xy_mm[0].get();
-                let dy = roots[j].xy_mm[1].get() - roots[i].xy_mm[1].get();
-                let (lo, hi) = if i < j { (i, j) } else { (j, i) };
-                let candidate = (dx * dx + dy * dy, lo, hi, i, j);
-                if best.is_none_or(|current| {
-                    candidate
-                        .0
-                        .total_cmp(&current.0)
-                        .then(candidate.1.cmp(&current.1))
-                        .then(candidate.2.cmp(&current.2))
-                        .then(candidate.3.cmp(&current.3))
-                        .then(candidate.4.cmp(&current.4))
-                        == std::cmp::Ordering::Less
-                }) {
-                    best = Some(candidate);
-                }
+            let dx = roots[j].xy_mm[0].get() - roots[i].xy_mm[0].get();
+            let dy = roots[j].xy_mm[1].get() - roots[i].xy_mm[1].get();
+            let (lo, hi) = if i < j { (i, j) } else { (j, i) };
+            let candidate = (dx * dx + dy * dy, lo, hi, i);
+            if best[j]
+                .as_ref()
+                .is_none_or(|current| less(&candidate, current))
+            {
+                best[j] = Some(candidate);
+            }
+            let key = best[j].expect("set above");
+            if next.as_ref().is_none_or(|(current, _)| less(&key, current)) {
+                next = Some((key, j));
             }
         }
-        let (_, lo, hi, _, new_vertex) = best.expect("an unvisited root has a connecting edge");
+        let ((_, lo, hi, _), j) = next.expect("an unvisited root has a connecting edge");
         edges.push((lo, hi));
-        visited[new_vertex] = 1;
+        visited[j] = true;
+        newest = j;
     }
     edges
+}
+
+/// Plan-view distance between two points, through the canonical kernel
+/// (`docs/specs/geometry-canon.md` §1).
+fn plan_distance(a: [f64; 2], b: [f64; 2]) -> f64 {
+    geom_kernel::vec3::dist([a[0], a[1], 0.0], [b[0], b[1], 0.0])
+}
+
+/// One foot a sweep plate root stands on: where it meets the raft, and the
+/// radius of the circle its emitted lowest ring is inscribed in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SweepFoot {
+    pub(crate) xy_mm: [f64; 2],
+    pub(crate) radius_mm: f64,
+}
+
+/// The slice-sweep raft, and what planning it counted.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SweepRaft {
+    /// Bridges first, then pads: the native record order.
+    pub(crate) primitives: Vec<SupportPrimitive>,
+    pub(crate) pads: usize,
+    pub(crate) bridges: usize,
+    /// Pads grown wider than the native `CHITUBOX_PAD_DIAMETER_MM` because the
+    /// foot above needed it (owner ruling 2026-09-29).
+    pub(crate) pads_grown: usize,
+    /// Feet that shared a pad with another foot within the registered plate
+    /// mesh tolerance (one pad covers them all).
+    pub(crate) feet_sharing_a_pad: usize,
+}
+
+/// **The raft under a slice-sweep field** (fix/sweep-raft, 2026-09-29): the
+/// legacy bottom-connected layout — one round pad under every plate foot and
+/// minimum-spanning-tree bridges between the pads, the layout every
+/// ChituBox-authored file we hold writes — planned from the sweep's own feet
+/// rather than from forest members, which the sweep path does not build.
+///
+/// Same frozen pieces as [`plan_bottom_connected`]: the exact-`(x, y)` sort,
+/// the `CHITUBOX_PLATE_MESH_TOL_MM` dedup, [`euclidean_mst_edges`], and
+/// [`raft_primitive`] at the native bridge width and raft height.
+///
+/// **THE PAD COVERS ITS FOOT** (owner ruling 2026-09-29: grow the pad, never
+/// cap the foot). A native pad is 2.2 mm across under native feet no wider
+/// than 1.1 mm; sweep feet reach 1.5 mm. The pad is emitted as a regular
+/// `CHITUBOX_PAD_N_SIDES`-gon INSCRIBED in its record circle, so what the pad
+/// actually covers is that polygon's INRADIUS, `R·cos(π/n)`. The foot's
+/// lowest ring is a polygon inscribed in the foot circle, so the whole foot
+/// lies inside the pad when `R·cos(π/n) ≥ r_foot`. The pad radius is
+/// therefore the native radius, or `r_foot / cos(π/n)` where the foot needs
+/// more — the margin is the pad polygon's own sagitta, derived from the two
+/// shapes, no constant. Where feet share a pad, `r_foot` is the largest
+/// distance from the pad centre to a covered foot's edge.
+///
+/// Emit and warn, never refuse: there is no limit here beyond the caller's
+/// primitive budget; an empty foot list plans an empty raft.
+pub(crate) fn plan_sweep_raft(
+    feet: &[SweepFoot],
+    plate_z_mm: Finite,
+) -> Result<SweepRaft, SupportError> {
+    let constants = m0_constants().map_err(|_| SupportError::NoLegalSupportPlan)?;
+    let policy = constants.placeholders();
+    let tolerance = policy.chitubox_plate_mesh_tol_mm().diagnostic().get();
+    let native_diameter = *policy.chitubox_pad_diameter_mm().diagnostic();
+    let raft_height = *policy.chitubox_raft_height_mm().diagnostic();
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a registered side count of 20; exact in f64"
+    )]
+    let pad_sides = policy.chitubox_pad_n_sides().diagnostic().get() as f64;
+    let inradius_ratio = (std::f64::consts::PI / pad_sides).cos();
+
+    let mut sorted: Vec<SweepFoot> = feet
+        .iter()
+        .copied()
+        .filter(|foot| foot.xy_mm.iter().all(|v| v.is_finite()) && foot.radius_mm.is_finite())
+        .collect();
+    sorted.sort_unstable_by(|a, b| {
+        a.xy_mm[0]
+            .total_cmp(&b.xy_mm[0])
+            .then_with(|| a.xy_mm[1].total_cmp(&b.xy_mm[1]))
+            .then_with(|| a.radius_mm.total_cmp(&b.radius_mm))
+    });
+    // Dedup exactly as the legacy planner does (the lexically first point of a
+    // tolerance cluster is its pad centre), keeping the widest reach from that
+    // centre over every foot the pad has to cover.
+    let mut centres: Vec<([f64; 2], f64)> = Vec::with_capacity(sorted.len());
+    let mut sharing = 0;
+    for foot in &sorted {
+        // Centres are pushed in ascending x, so only the tail within one
+        // tolerance of this foot's x can hold it: a bounded look-back, not a
+        // scan of every prior pad.
+        let hit = centres
+            .iter_mut()
+            .rev()
+            .take_while(|(xy, _)| foot.xy_mm[0] - xy[0] <= tolerance)
+            .find(|(xy, _)| plan_distance(foot.xy_mm, *xy) <= tolerance);
+        match hit {
+            Some((xy, cover)) => {
+                let reach = plan_distance(foot.xy_mm, *xy) + foot.radius_mm;
+                *cover = cover.max(reach);
+                sharing += 1;
+            }
+            None => centres.push((foot.xy_mm, foot.radius_mm.max(0.0))),
+        }
+    }
+    let finite = |value: f64| Finite::new(value).map_err(|_| SupportError::InvalidPrimitive);
+    let roots = centres
+        .iter()
+        .map(|(xy, _)| {
+            Ok(PlateRoot {
+                xy_mm: [finite(xy[0])?, finite(xy[1])?],
+                // Unused by the MST; carried for the shared type.
+                root_radius_mm: native_diameter,
+            })
+        })
+        .collect::<Result<Vec<_>, SupportError>>()?;
+
+    let mut raft = SweepRaft {
+        primitives: Vec::with_capacity((2 * roots.len()).saturating_sub(1)),
+        feet_sharing_a_pad: sharing,
+        ..SweepRaft::default()
+    };
+    for (i, j) in euclidean_mst_edges(&roots) {
+        raft.primitives.push(raft_primitive(
+            SupportSegmentKind::RaftBridge,
+            roots[i].xy_mm,
+            roots[j].xy_mm,
+            plate_z_mm,
+            native_diameter,
+            raft_height,
+        ));
+        raft.bridges += 1;
+    }
+    for (root, (_, cover)) in roots.iter().zip(&centres) {
+        let needed_diameter = 2.0 * cover / inradius_ratio;
+        let diameter = if needed_diameter > native_diameter.get() {
+            raft.pads_grown += 1;
+            PositiveFinite::new(needed_diameter).map_err(|_| SupportError::InvalidPrimitive)?
+        } else {
+            native_diameter
+        };
+        raft.primitives.push(raft_primitive(
+            SupportSegmentKind::RaftPad,
+            root.xy_mm,
+            root.xy_mm,
+            plate_z_mm,
+            diameter,
+            raft_height,
+        ));
+        raft.pads += 1;
+    }
+    if raft
+        .primitives
+        .iter()
+        .any(|primitive| !primitive.is_semantically_valid())
+    {
+        return Err(SupportError::InvalidPrimitive);
+    }
+    Ok(raft)
 }
 
 #[cfg(test)]
@@ -499,6 +674,46 @@ mod tests {
             .primitives()
             .iter()
             .all(SupportPrimitive::is_semantically_valid));
+    }
+
+    /// Two feet inside the registered plate mesh tolerance share ONE pad, and
+    /// that pad covers the WIDER foot measured from the shared centre (the
+    /// lexically first foot), not the first foot's own radius. A third foot
+    /// far away gets its own pad and one bridge.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "exact pins over hand-written fixture coordinates the planner copies unchanged"
+    )]
+    fn sweep_feet_within_the_tolerance_share_a_pad_that_covers_the_wider_one() {
+        let feet = [
+            SweepFoot {
+                xy_mm: [0.0, 0.0],
+                radius_mm: 0.5,
+            },
+            SweepFoot {
+                xy_mm: [0.000_004, 0.0],
+                radius_mm: 1.5,
+            },
+            SweepFoot {
+                xy_mm: [9.0, 0.0],
+                radius_mm: 0.4,
+            },
+        ];
+        let raft = plan_sweep_raft(&feet, number(-3.0)).expect("a raft");
+        assert_eq!(raft.pads, 2);
+        assert_eq!(raft.bridges, 1);
+        assert_eq!(raft.feet_sharing_a_pad, 1);
+        assert_eq!(raft.pads_grown, 1);
+        let shared = raft
+            .primitives
+            .iter()
+            .find(|p| p.segment_kind == SupportSegmentKind::RaftPad && p.start_mm[0].get() == 0.0)
+            .expect("the shared pad at the lexically first foot");
+        // Its emitted 20-gon's inradius reaches the far edge of the wide foot.
+        let inradius = shared.start_radius_mm.get() * 0.5 * (std::f64::consts::PI / 20.0).cos();
+        assert!(inradius >= 0.000_004 + 1.5 - 1e-12, "inradius {inradius}");
+        assert!(raft.primitives.iter().all(|p| p.start_mm[2].get() == -3.0));
     }
 
     #[test]

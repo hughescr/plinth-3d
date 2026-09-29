@@ -218,7 +218,22 @@ raft, rather than extending to `plate_z`. That contract belongs to the LEGACY
 lowering, which emits the raft. The slice-sweep lowering (`lower_sweep_arms`)
 emits NO raft, so its type-4 flare ends AT `plate_z` with its full foot radius
 (fix/plate-gap, 2026-09-28: flares stopping at `plate_z+0.2` with nothing below
-them floated four layers above the plate in ChituBox). These are serialization contracts only;
+them floated four layers above the plate in ChituBox).
+
+**Addendum 2026-09-29 (fix/sweep-raft).** The slice-sweep lowering now emits the
+legacy bottom-connected raft too (`plinth_support::raft`'s sweep planner): a type-6
+pad under every plate foot, MST type-6 bridges between the pads, appended after every
+support record, bridges first. Its type-4 flare (and a short plate column with no
+flare) ends on the pad top minus `NATIVE_FOOT_PAD_OVERLAP_MM` (0.002 mm, measured on
+every native file: the foot reaches 0.002 mm into its pad). A pad is the native
+2.2 mm across unless the foot above needs more: then its diameter is
+`2·r_foot / cos(π/CHITUBOX_PAD_N_SIDES)`, so the emitted pad polygon's inradius
+covers the foot (owner ruling 2026-09-29: grow the pad, never cap the foot). Bridges
+stay the native 2.2 mm wide. **Every type-6 record, legacy and sweep, now writes
+start/end `z = 0.0`**, as every native file does, while its mesh stays on the plate
+in the model-centred frame; the emitter's disk audit requires that `z` exactly and
+bounds the mesh only. `tools/plinth-audit` reads a type-6 record at `z = 0.0` as
+standing on the plate (`Primitive::in_raft_frame`). These are serialization contracts only;
 the 400-byte group header and registry fields remain preserved from the evidenced
 corpus rather than inferred from these records.
 

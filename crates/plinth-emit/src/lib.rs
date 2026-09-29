@@ -353,6 +353,18 @@ fn audit_disk(
             return Err(EmitError::DiskAuditRejected);
         }
         bounds.extend_f32(&record.mesh.xyz, info.placement, plate_datum)?;
+        if record.segment_type == SegmentType::PAD_OR_BRIDGE {
+            // A raft record's end points are in the NATIVE raft frame: z is
+            // exactly 0.0, not a model-frame height (`encode_record`), so they
+            // are not geometry to bound. Its mesh, bounded above, is. Any
+            // other z on a pad or bridge is a frame error.
+            if record.start[2].to_bits() != 0.0_f32.to_bits()
+                || record.end[2].to_bits() != 0.0_f32.to_bits()
+            {
+                return Err(EmitError::DiskAuditRejected);
+            }
+            continue;
+        }
         bounds.extend_point(record.start, info.placement, plate_datum)?;
         bounds.extend_point(record.end, info.placement, plate_datum)?;
     }
@@ -875,6 +887,16 @@ fn encode_record(
         frame.segment_kind,
         SupportSegmentKind::RaftPad | SupportSegmentKind::RaftBridge
     ) {
+        // THE NATIVE RAFT FRAME (fix/sweep-raft, 2026-09-29). Every type-6
+        // record in every ChituBox-authored file we hold (5 files, every pad
+        // and bridge) writes start/end z = 0.0, while its MESH sits at the
+        // plate in the model-centred frame (`raft-diagnosis.md` §4.2). Until
+        // this change the record carried the plate's model-frame z, which no
+        // native file does; if ChituBox ever rebuilds a pad from its record it
+        // would land that far under the plate. The mesh is unchanged: it was
+        // built from the true plate height above.
+        record.start[2] = 0.0;
+        record.end[2] = 0.0;
         let is_bridge = frame.segment_kind == SupportSegmentKind::RaftBridge;
         record.trailing[0..4]
             .copy_from_slice(&(if is_bridge { 1.0_f32 } else { 0.0_f32 }).to_le_bytes());
@@ -2350,6 +2372,57 @@ mod tests {
         let records = build_records(model.primitives(), [0.0; 3])
             .expect("validated coincident raft primitive emits a pad record");
         assert_eq!(records[0].segment_type, SegmentType::PAD_OR_BRIDGE);
+    }
+
+    /// THE NATIVE RAFT FRAME (fix/sweep-raft, 2026-09-29): every type-6 record
+    /// in every ChituBox-authored file writes start/end `z = 0.0` while its
+    /// mesh sits on the plate in the model-centred frame. A pad and a bridge
+    /// on a plate at model-frame z −6.75 (centre z 0.5) must write exactly
+    /// that: record z +0.0, mesh from −7.25 to −7.05, xy untouched, and the
+    /// written file must pass the disk audit.
+    ///
+    /// Sabotage, run by hand at the change: without the two `record.*[2] =
+    /// 0.0` lines in `encode_record`, the record-z assertion goes red, and so
+    /// does `raft_pad_exactly_on_the_plate_survives_a_one_ulp_plate_derivation_split`,
+    /// because the disk audit refuses a raft record whose z is not 0.0.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "exact binary32 pins of a format field and of an exactly representable mesh height"
+    )]
+    fn raft_records_write_the_native_frame_and_keep_their_mesh_on_the_plate() {
+        let plate = -6.75;
+        let center = [0.25, -0.5, 0.5];
+        let pad = primitive(
+            SupportSegmentKind::RaftPad,
+            [1.0, 2.0, plate],
+            [1.0, 2.0, plate],
+        );
+        let bridge = primitive(
+            SupportSegmentKind::RaftBridge,
+            [1.0, 2.0, plate],
+            [4.0, 2.0, plate],
+        );
+        let records = build_records(&[bridge, pad], center).expect("raft records");
+        for record in &records {
+            assert_eq!(record.segment_type, SegmentType::PAD_OR_BRIDGE);
+            assert_eq!(record.start[2].to_bits(), 0.0_f32.to_bits(), "{record:?}");
+            assert_eq!(record.end[2].to_bits(), 0.0_f32.to_bits(), "{record:?}");
+            let (lo, hi) = record
+                .mesh
+                .xyz
+                .chunks_exact(3)
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
+                    (lo.min(v[2]), hi.max(v[2]))
+                });
+            assert_eq!(lo, -7.25, "the mesh bottom is the plate, model-centred");
+            assert!(
+                (hi - (-7.05)).abs() < 1e-6,
+                "the mesh top is plate + 0.2: {hi}"
+            );
+        }
+        assert_eq!(records[1].start[0], 0.75);
+        assert_eq!(records[1].start[1], 2.5);
     }
 
     #[test]

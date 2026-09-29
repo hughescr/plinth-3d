@@ -22,9 +22,10 @@
 //!   root FLARE may instead end at the raft top, `z_plate +`
 //!   [`c::RAFT_PAD_HEIGHT_MM`], because that is where the format's own flare
 //!   contract puts its lower end (`reader.rs`, wire 4: "column end to raft
-//!   top") and the plinth emitter writes no raft record under it. Those are
-//!   counted apart (`rooted_at_raft_top`) so the unresolved raft question
-//!   stays visible;
+//!   top"). Those are counted apart (`rooted_at_raft_top`). Since
+//!   fix/sweep-raft (2026-09-29) the plinth emitter writes a raft pad under
+//!   every such flare again, so I5 clause (d) (`load_path.rs`) grades whether
+//!   the pad is actually there; this clause only asks where the flare ends;
 //! * **the model** — the lowest point is inside the model or within one layer
 //!   of its surface. **A tip ball is never rooted this way**: a tip seated in
 //!   the model holds only its own member's TOP, and a member hanging from its

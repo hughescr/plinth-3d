@@ -109,6 +109,14 @@ fn point(primitive_point: [Finite; 3]) -> [f64; 3] {
 fn members(emission: &SweepEmission) -> Vec<Vec<&SupportPrimitive>> {
     let mut groups: Vec<Vec<&SupportPrimitive>> = Vec::new();
     for primitive in &emission.primitives {
+        // The raft (fix/sweep-raft, 2026-09-29) follows every member in the
+        // stream; it belongs to no member and carries no ledger section.
+        if matches!(
+            primitive.segment_kind,
+            SupportSegmentKind::RaftPad | SupportSegmentKind::RaftBridge
+        ) {
+            continue;
+        }
         let starts_new = match primitive.segment_kind {
             SupportSegmentKind::ContactSphere => true,
             SupportSegmentKind::ContactTaper => !groups
