@@ -45,6 +45,7 @@ pub mod adapter;
 pub mod congestion;
 pub mod down_sweep;
 pub mod drain;
+pub mod footprint;
 pub mod grid;
 pub mod landing_check;
 pub mod lean;
@@ -214,25 +215,49 @@ pub struct SweepStrut {
     /// merge recorded it, so an un-merge restores the member the placement
     /// chose (possibly leaned) rather than a vertical column it never used.
     pub fallback_path: Vec<u32>,
-    /// Cured model laminae standing at and above this arm's own `k_top`, in
-    /// its own tip column — the thickness the tip has to seat INTO.
+    /// The face this tip carries and what the footprint rule did at it,
+    /// filled once the strut set is final ([`footprint`]). Its point is
+    /// derived and moves no arm, so it is not digested; its `shift_mm` DOES
+    /// move the seat, and [`digest`] absorbs it whenever it is non-zero.
     ///
-    /// Filled by [`seat_solid_layers`] once the strut set is final, because
-    /// the down-sweep both adds and removes arms and a value captured earlier
-    /// would belong to a field nobody prints. `0` means "unmeasured", and the
-    /// lowering then seats nothing rather than guessing: an arm that reads
-    /// zero is counted in `tips_truncated_by_thin_wall`, never dropped.
-    ///
-    /// It is DERIVED from the model and the arm's own seat, so it is
-    /// deliberately absent from [`digest`]: the plan digest names the
-    /// PLACEMENT, and this field moves no arm.
-    pub seat_solid_layers: u32,
+    /// (Replaces `seat_solid_layers`, the cured thickness above the seat that
+    /// set the old far-face clip; the seat trim made that plane redundant.)
+    pub seat_face: SeatFace,
     /// Outward unit normal of the model face this tip carries, filled by
-    /// [`tip_seat_normals`] once the strut set is final. `[0, 0, 0]` means
-    /// unmeasured, and the lowering falls back to the arm's own axis.
-    ///
-    /// Derived, like [`Self::seat_solid_layers`], and likewise not digested.
+    /// [`tip_landing::tip_seat_faces`] once the strut set is final.
+    /// `[0, 0, 0]` means unmeasured, and the lowering falls back to straight
+    /// down. Derived and not digested.
     pub seat_normal: [f64; 3],
+}
+
+/// The face a tip carries, and what the footprint rule did there
+/// (fix/tip-trim, 2026-09-28).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SeatFace {
+    /// The carried face's point closest to the tip's landing point; `None`
+    /// where no down-facing face was found. With [`SweepStrut::seat_normal`]
+    /// it is the seat plane the tip is trimmed to.
+    pub point_mm: Option<[f64; 3]>,
+    /// The move the footprint rule gave the seat, IN the face's plane, so its
+    /// whole contact disc lies on the face. Zero when it did not move.
+    pub shift_mm: [f64; 3],
+    pub footprint: Footprint,
+}
+
+/// The footprint rule's verdict on one tip ([`footprint`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Footprint {
+    /// Not a seated tip, or no contact disc to grade.
+    #[default]
+    NotGraded,
+    /// The whole contact disc lies on the seat face where it was placed.
+    OnFace,
+    /// The seat was moved along the face so the whole disc lies on it.
+    MovedOntoFace,
+    /// A true knife edge: no seat within the search radius holds the whole
+    /// disc. The tip stays, trimmed, and is warned about with the fraction of
+    /// its disc on the face.
+    KnifeEdge { disc_on_face: f64 },
 }
 
 impl SweepStrut {
@@ -1296,96 +1321,46 @@ pub fn run_sweep_with_drains(
 
     // ------------------------------------------------ what each tip seats INTO
     //
-    // Both of these are properties of the MODEL at an arm's finished seat, so
-    // they are measured once here, after insertion, removal and un-merging
-    // have settled the strut set, and never during a pass that is still moving
-    // arms around. Neither moves an arm; both are read by the lowering when it
-    // drives the tip ball into the model.
-    let solid_layers = seat_solid_layers(&grid, &slices, &struts, layers);
-    let seat_normals =
-        tip_landing::tip_seat_normals(mesh, &grid, &struts, plate_z, height);
-    for (index, strut) in struts.iter_mut().enumerate() {
-        strut.seat_solid_layers = solid_layers.get(index).copied().unwrap_or(0);
-        strut.seat_normal = seat_normals.get(index).copied().unwrap_or([0.0; 3]);
+    // The face each tip carries is a property of the MODEL at an arm's
+    // finished seat, so it is measured once here, after insertion, removal and
+    // un-merging have settled the strut set, and never during a pass that is
+    // still moving arms around. The lowering drives the tip ball into it and
+    // trims the ball and the first shaft segment to its plane.
+    let seat_faces = tip_landing::tip_seat_faces(mesh, &grid, &struts, plate_z, height);
+    for (strut, face) in struts.iter_mut().zip(&seat_faces) {
+        strut.seat_normal = face.map_or([0.0; 3], |(normal, _)| normal);
+        strut.seat_face = SeatFace {
+            point_mm: face.map(|(_, point)| point),
+            ..SeatFace::default()
+        };
     }
 
-    Ok(SweepPlan {
+    let mut sweep_plan = SweepPlan {
         grid,
         layers,
         layer_height_mm: height,
         plate_z_mm: plate_z,
         struts,
         report,
-    })
-}
-
-/// How many cured laminae stand at and above each arm's own `k_top`, in its
-/// own tip column — the thickness a tip has to seat into, in layers.
-///
-/// **Why it is measured and not assumed.** The seat plane is the BOTTOM of
-/// lamina `k_top`, so an arm under a 0.15 mm skin has three laminae of model
-/// above it at a 0.05 mm layer height and nothing more. Driving the tip ball
-/// deeper than that would push its pole out through the far face, which the
-/// land-at-strike ruling forbids at either end. The lowering truncates to this
-/// number and counts the truncation; it never retracts and never drops the arm.
-///
-/// **Batching.** ONE rasterisation pass over the layer stack, in ascending
-/// order, with every arm still counting advanced together — no per-arm slice
-/// query and no second stack. An arm is opened at its own `k_top`, counts
-/// while its tip column stays covered, and closes at the first gap, so the
-/// whole pass is `O(layers · raster + Σ run)`.
-///
-/// **Which mask, and which way the error runs.** It counts `cover`, the
-/// any-overlap mask, because `cover` is what decided this arm's `k_top` in the
-/// first place and a bound measured against a different mask than the seat
-/// would be answering about a different column. `cover` rounds OUTWARD, so at
-/// the very top of a run it can credit one lamina that is only partly there —
-/// an over-statement bounded by one layer height (0.05 mm at the registered
-/// default). `carry` would round the other way, but it is eroded by one cell in
-/// Y and would read ZERO for every rim column, which is the defect this whole
-/// change exists to end, returned at the rim.
-fn seat_solid_layers(
-    grid: &Grid,
-    slices: &[Vec<plinth_support::perception::SliceSolid>],
-    struts: &[SweepStrut],
-    layers: usize,
-) -> Vec<u32> {
-    let mut runs = vec![0_u32; struts.len()];
-    if struts.is_empty() {
-        return runs;
-    }
-    // Arms bucketed by the layer they open at, so the pass opens them in one
-    // indexed lookup rather than scanning the strut vector per layer.
-    let mut opening_at: Vec<Vec<usize>> = vec![Vec::new(); layers];
-    for (index, strut) in struts.iter().enumerate() {
-        if let Some(bucket) = opening_at.get_mut(strut.k_top) {
-            bucket.push(index);
-        }
-    }
-    let mut scratch = RasterScratch::new(grid);
-    let mut masks = LayerMasks::default();
-    let mut open: Vec<usize> = Vec::new();
-    let mut still_open: Vec<usize> = Vec::new();
-    for (layer, solids) in slices.iter().enumerate().take(layers) {
-        if let Some(bucket) = opening_at.get(layer) {
-            open.extend_from_slice(bucket);
-        }
-        if open.is_empty() {
-            continue;
-        }
-        rasterize_into(grid, solids, &mut scratch, &mut masks);
-        still_open.clear();
-        for &index in &open {
-            let strut = &struts[index];
-            let cell = strut.cell_at(strut.k_top);
-            if masks.cover.get(cell).copied().unwrap_or(false) {
-                runs[index] += 1;
-                still_open.push(index);
-            }
-        }
-        std::mem::swap(&mut open, &mut still_open);
-    }
-    runs
+    };
+    // THE FOOTPRINT RULE (fix/tip-trim, 2026-09-28): every tip's contact disc,
+    // as the lowering will deliver it, graded against the eroded carrier
+    // rasters; a seat whose disc hangs off its face moves along the face, and
+    // a true knife edge is warned about. It moves seats, so the digest is
+    // re-taken over the finished field.
+    let arms = adapter::arms_of(&sweep_plan);
+    let footprint = footprint::apply(
+        &sweep_plan.grid,
+        &slices,
+        &mut sweep_plan.struts,
+        &arms,
+        plan,
+        plate_z,
+        height,
+    );
+    sweep_plan.report.seat_footprint = footprint;
+    sweep_plan.report.sweep_digest = digest(&sweep_plan.struts);
+    Ok(sweep_plan)
 }
 
 /// Put back straight any arm that merged into a trunk the area law cannot grow
@@ -2009,6 +1984,7 @@ fn build_report(
         shaft_spans_recorded: 0,
         slenderness_lane: crate::slenderness::SlendernessOutcome::default(),
         congestion_lane: crate::congestion::CongestionOutcome::default(),
+        seat_footprint: crate::footprint::FootprintOutcome::default(),
         junctions_at_parent_top,
         junctions_mid_shaft,
         support_volume_mm3,
@@ -2177,6 +2153,14 @@ fn digest(struts: &[SweepStrut]) -> String {
         for carried in &strut.carried_mm2 {
             absorb((carried * 1.0e6).round() as i64 as u64);
         }
+        // A seat the footprint rule moved is a different placement. Absorbed
+        // only when non-zero, so every field it moved nothing on keeps the
+        // digest it had.
+        if strut.seat_face.footprint == Footprint::MovedOntoFace {
+            for component in strut.seat_face.shift_mm {
+                absorb((component * 1.0e6).round() as i64 as u64);
+            }
+        }
     }
     format!("{accumulator:016x}")
 }
@@ -2202,7 +2186,7 @@ mod removal_tests {
             covered_demand: Vec::new(),
             inserted_by_load: false,
             path: Vec::new(),
-            seat_solid_layers: 0,
+            seat_face: crate::SeatFace::default(),
             seat_normal: [0.0; 3],
             straight_fallback: None,
             fallback_path: Vec::new(),
@@ -2367,7 +2351,7 @@ mod removal_tests {
             covered_demand: Vec::new(),
             inserted_by_load: true,
             path: Vec::new(),
-            seat_solid_layers: 0,
+            seat_face: crate::SeatFace::default(),
             seat_normal: [0.0; 3],
             straight_fallback: None,
             fallback_path: Vec::new(),
@@ -2410,7 +2394,7 @@ mod removal_tests {
             covered_demand: Vec::new(),
             inserted_by_load: false,
             path: Vec::new(),
-            seat_solid_layers: 0,
+            seat_face: crate::SeatFace::default(),
             seat_normal: [0.0; 3],
             straight_fallback: None,
             fallback_path: Vec::new(),

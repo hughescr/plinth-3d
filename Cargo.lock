@@ -1081,6 +1081,7 @@ dependencies = [
  "plinth-hollow",
  "plinth-mesh",
  "plinth-orient",
+ "plinth-solid",
  "plinth-support",
  "serde",
  "thiserror 1.0.69",

@@ -84,7 +84,7 @@ fn arm(seat_z_mm: f64, base_z_mm: f64, landing: SweepArmLanding, seats: bool) ->
         // flare is sized from `radius_profile_mm[0]`), constant up the rise.
         radius_profile_mm: vec![0.3],
         seat_normal_mm: [0.0, 0.0, -1.0],
-        available_seat_depth_mm: 0.0,
+        seat_face_point_mm: None,
         landing,
         seats_into_model: seats,
     }

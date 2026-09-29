@@ -2405,6 +2405,28 @@ fn sweep_and_emit(
             }));
         }
     };
+    // THE SEAT TRIM as the file holds it (fix/tip-trim, 2026-09-28).
+    let trim = &emit.seat_trim;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a resin volume in thousandths of a mm3 is far inside f64's exact range"
+    )]
+    let removed_mm3 = trim.removed_volume_milli_mm3 as f64 / 1000.0;
+    println!(
+        "[sweep {model}] seat trim in the file: {} records cut in one batched call; {} cut by \
+         their seat plane, {} further cut by the model solid; {removed_mm3:.3} mm3 of support \
+         removed; {} left untrimmed because the trim would have removed them entirely",
+        trim.records_trimmed,
+        trim.records_cut_by_seat_plane,
+        trim.records_cut_by_model,
+        trim.records_left_whole_after_empty_trim,
+    );
+    if let Some(error) = &trim.batch_error {
+        println!(
+            "[sweep {model}] WARNING the seat trim did not run ({error}); every tip and first \
+             shaft segment in this file is UNTRIMMED"
+        );
+    }
 
     Ok(Some(ChainOutcome {
         model: model.clone(),
@@ -2516,12 +2538,66 @@ fn print_sweep_disclosure(
         println!(
             "[sweep {model}] tip seat depth min {depth_min:.4} p50 {depth_p50:.4} \
              max {depth_max:.4} mm over {} seated tips; {} at the law minimum; \
-             {} CLIPPED at a thin wall's far face; cut-disc radius min {cut_min:.4} mm against \
+             cut-disc radius min {cut_min:.4} mm against \
              tip radius min {tip_min:.4} mm; tips below the a>=r_tip guarantee: {below}",
             emission.tip_seat_depth_mm.len(),
             emission.tips_at_law_minimum,
-            emission.tips_truncated_by_thin_wall,
         );
+        // THE SEAT TRIM and the FOOTPRINT RULE (fix/tip-trim, 2026-09-28).
+        let disc =
+            plinth_support::SweepLowering::distribution(&emission.tip_contact_disc_radius_mm)
+                .unwrap_or((f64::NAN, f64::NAN, f64::NAN));
+        let offset =
+            plinth_support::SweepLowering::distribution(&emission.tip_raster_seat_offset_mm)
+                .unwrap_or((f64::NAN, f64::NAN, f64::NAN));
+        let tip_radius = &emission.tip_radius_mm;
+        let below_at_face = emission
+            .tip_contact_disc_radius_mm
+            .iter()
+            .zip(tip_radius)
+            .filter(|(disc, tip)| {
+                **disc < **tip * (1.0 - plinth_support::SweepLowering::AREA_GUARANTEE_TOLERANCE)
+            })
+            .count();
+        let footprint = &report.seat_footprint;
+        println!(
+            "[sweep {model}] seat trim: {} tips (and their first shaft segments) trimmed to the \
+             support side of their seat face and out of the model, {} of them on the raster \
+             seat's plane for want of a measured face; contact disc at the face min {:.4} p50 \
+             {:.4} max {:.4} mm, {below_at_face} below its own tip radius; raster seat from the \
+             face min {:+.4} p50 {:+.4} max {:+.4} mm (positive = below a down-facing face). \
+             Footprint: {} discs graded, {} on their face as placed, {} seats MOVED along the \
+             face onto it (longest {:.4} mm; {} members joined to a moved axis moved with it, \
+             by up to {:.4} mm), {} on a knife edge; {} disc samples + {} search samples over {} \
+             layers, {} round(s)",
+            emission.tips_trimmed_to_seat,
+            emission.tips_trimmed_without_a_measured_face,
+            disc.0,
+            disc.1,
+            disc.2,
+            offset.0,
+            offset.1,
+            offset.2,
+            footprint.tips_graded,
+            footprint.tips_on_face,
+            footprint.tips_moved_onto_face,
+            footprint.max_move_mm,
+            footprint.members_following_a_moved_host,
+            footprint.max_follow_mm,
+            footprint.knife_edges.len(),
+            footprint.disc_samples,
+            footprint.search_samples,
+            footprint.layers_rasterised,
+            footprint.rounds,
+        );
+        for (arm, fraction) in &footprint.knife_edges {
+            println!(
+                "[sweep {model}] WARNING tip of arm {arm} sits on a KNIFE EDGE: no seat within \
+                 the search radius along its face holds its whole contact disc, so it keeps its \
+                 seat, trimmed, with {:.1}% of its disc on the face",
+                fraction * 100.0
+            );
+        }
     }
     println!(
         "[sweep {model}] peak layer area {:.4} mm2; total scar {:.4} mm2 (invariant \
@@ -3511,6 +3587,7 @@ mod tests {
                 artifact_path: std::path::PathBuf::from("deinonychus.chitubox"),
                 support_record_count: 0,
                 artifact_bytes: 0,
+                seat_trim: Box::default(),
             },
         };
 

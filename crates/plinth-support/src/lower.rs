@@ -239,6 +239,7 @@ pub(crate) fn lower_current(
             contact_depth_mm: None,
             ring_normal: FrustumRingNormal::SegmentAxis,
             sphere_geometry: Some(geometry),
+            seat_trim: None,
         });
     }
     primitives.extend_from_slice(raft.primitives());
@@ -404,6 +405,7 @@ fn lower_stub(
         contact_depth_mm: None,
         ring_normal: FrustumRingNormal::SegmentAxis,
         sphere_geometry: Some(geometry),
+        seat_trim: None,
     });
     out.push(frustum(
         SupportSegmentKind::ContactTaper,
@@ -485,6 +487,7 @@ fn frustum(
         contact_depth_mm,
         ring_normal,
         sphere_geometry: None,
+        seat_trim: None,
     }
 }
 
@@ -663,23 +666,24 @@ pub struct SweepArm {
     /// which is `theta = 0` — exactly what `lower_stub` does when it uses the
     /// member direction in place of a face normal.
     pub seat_normal_mm: [f64; 3],
-    /// Cured model thickness standing ABOVE `seat_mm` in this arm's own seat
-    /// column, in mm, as the sweep's own layer rasters measured it.
+    /// **A point ON the model face this tip carries** — the closest point of
+    /// the face whose normal is [`Self::seat_normal_mm`] — or `None` where no
+    /// face was measured (fix/tip-trim, 2026-09-28).
     ///
-    /// This is the land-at-strike bound applied at the TIP end, and since the
-    /// owner's ruling of 2026-09-05 it bounds the GEOMETRY, not the seat. The
-    /// tip is driven to the full depth the area law asks for; the far face of
-    /// this cured run — `seat_mm[2] + available_seat_depth_mm` — becomes a CLIP
-    /// PLANE on the emitted ball, so the part that would have stood proud of a
-    /// thin skin is removed and the opening capped. Nothing exits the far face;
-    /// nothing is retracted; the clip is counted in
-    /// [`SweepLowering::tips_truncated_by_thin_wall`] and the arm is never
-    /// dropped.
+    /// With the outward normal it is the SEAT PLANE the tip ball and the first
+    /// shaft segment are trimmed to ([`crate::SeatTrim`]). It is the model's
+    /// own surface, not `seat_mm`: `seat_mm` is the bottom of the first cured
+    /// LAMINA, which the layer raster puts up to half a layer above or below
+    /// the true face, and a trim a quarter-layer below the face would leave the
+    /// contact disc floating under the model. `None` falls back to the plane
+    /// through `seat_mm`, which the model difference still makes safe on the
+    /// model side.
     ///
-    /// `0` means "unmeasured", and the clip plane is then the seat surface
-    /// itself: the ball keeps its full depth and contributes its full cut disc
-    /// of contact, with nothing at all emitted inside the model.
-    pub available_seat_depth_mm: f64,
+    /// It replaces `available_seat_depth_mm`, the cured thickness above the
+    /// seat that set the old horizontal far-face clip. That plane lies on the
+    /// model side of the seat plane, so the seat trim removes everything it
+    /// removed and more.
+    pub seat_face_point_mm: Option<[f64; 3]>,
     pub landing: SweepArmLanding,
     /// Whether this member's TOP is a seat INTO the model.
     ///
@@ -711,15 +715,26 @@ pub struct SweepLowering {
     /// Arms whose radii or points would not cross the finite boundary, or
     /// which the emit boundary's own `is_semantically_valid` rejected.
     pub arms_dropped_invalid_geometry: usize,
-    /// Tips whose emitted BALL was CLIPPED at the far face of the cured run it
-    /// strikes, because the model there is thinner than the ball's own reach.
-    ///
-    /// Since the owner's ruling of 2026-09-05 this counts a clip, not a
-    /// shortfall: the seat is at full law depth in every one of these cases and
-    /// the contact area is the one the law asked for. What the thin wall took
-    /// away is the part of the ball that would have stood proud of the far
-    /// face, which is geometry the print never wanted.
-    pub tips_truncated_by_thin_wall: usize,
+    /// Tips handed to the emitter with a SEAT TRIM — their ball and the first
+    /// segment of their shaft are cut to the support side of the seat face and
+    /// outside the model (fix/tip-trim, 2026-09-28). Every seated tip carries
+    /// one; the path hit is that this equals the tip count.
+    pub tips_trimmed_to_seat: usize,
+    /// Of those, tips whose seat plane is the plane through the raster seat
+    /// because no carried face was measured.
+    pub tips_trimmed_without_a_measured_face: usize,
+    /// Every tip's CONTACT DISC radius as the trim leaves it: the circle the
+    /// seat plane cuts through the emitted ball, `sqrt(R² − d²)` for a ball
+    /// centre `d` from the plane, in arm order. Zero where the ball does not
+    /// reach the plane. This is the contact the file actually delivers; the
+    /// seat law's `tip_cut_radius_mm` is measured from the raster seat.
+    pub tip_contact_disc_radius_mm: Vec<f64>,
+    /// Every tip's raster seat (`seat_mm`) measured from its seat plane along
+    /// the outward normal, in arm order: positive when the raster seat lies
+    /// BELOW a down-facing face (on the support side), which shortens the
+    /// delivered burial by that much. The layer raster's own quantisation, up
+    /// to half a layer either way; published, not corrected here.
+    pub tip_raster_seat_offset_mm: Vec<f64>,
     /// Tips the law seated at its own smallest term — the DERIVED
     /// rasterisation allowance, one layer in Z plus one pixel in plane —
     /// because neither the flank term nor the ball-cap term asked for more.
@@ -750,11 +765,15 @@ pub struct SweepLowering {
     /// a caller defect, published rather than hidden.
     pub arms_without_profile: usize,
     /// **The support resin as EMITTED**, in mm³: the solid volume of every
-    /// primitive written — tip balls (less any clipped cap), tapers, chained
-    /// members and root flares — each measured from its own record, summed
-    /// without removing overlaps. This is the number the file costs; the
-    /// sweep's ledger volume is the SIZING figure and is published beside it,
-    /// labelled as such.
+    /// primitive written — tip balls (less the cap beyond their seat plane),
+    /// tapers, chained members and root flares — each measured from its own
+    /// record, summed without removing overlaps. This is the number the file
+    /// costs; the sweep's ledger volume is the SIZING figure and is published
+    /// beside it, labelled as such. It does NOT subtract the part of a first
+    /// segment beyond its seat plane, nor what the emitter's model difference
+    /// removes: those are measured by the emitter itself
+    /// (`plinth_emit::SeatTrimReport::removed_volume_milli_mm3`), so this
+    /// figure is an upper bound by exactly that much.
     pub drawn_volume_mm3: f64,
     /// The part of [`Self::drawn_volume_mm3`] in tapers and chained members —
     /// the span the ledger sizes, so the two can be compared like for like.
@@ -803,6 +822,19 @@ impl SweepLowering {
     /// The relative slack in the `a ≥ r_tip` comparison — float noise around an
     /// equality the law designs for, and nothing more.
     pub const AREA_GUARANTEE_TOLERANCE: f64 = 1.0e-9;
+
+    /// The same `a ≥ r_tip` comparison on the contact disc the trim actually
+    /// leaves at the SEAT FACE ([`Self::tip_contact_disc_radius_mm`]) rather
+    /// than on the seat law's own disc at the raster seat. A count, published;
+    /// the two differ by the raster's quantisation of where the face is.
+    #[must_use]
+    pub fn tips_below_area_guarantee_at_face(&self) -> usize {
+        self.tip_contact_disc_radius_mm
+            .iter()
+            .zip(&self.tip_radius_mm)
+            .filter(|(disc, tip)| **disc < **tip * (1.0 - Self::AREA_GUARANTEE_TOLERANCE))
+            .count()
+    }
 }
 
 /// The failures that are about the REQUEST, never about a model.
@@ -928,6 +960,8 @@ fn lower_sweep_arms_of(
         tip_seat_depth_mm: Vec::with_capacity(arms.len()),
         tip_cut_radius_mm: Vec::with_capacity(arms.len()),
         tip_radius_mm: Vec::with_capacity(arms.len()),
+        tip_contact_disc_radius_mm: Vec::with_capacity(arms.len()),
+        tip_raster_seat_offset_mm: Vec::with_capacity(arms.len()),
         ..SweepLowering::default()
     };
     for arm in arms {
@@ -947,7 +981,12 @@ fn lower_sweep_arms_of(
             out.tip_seat_depth_mm.push(seat.depth_mm);
             out.tip_cut_radius_mm.push(seat.cut_radius_mm);
             out.tip_radius_mm.push(seat.tip_radius_mm);
-            out.tips_truncated_by_thin_wall += usize::from(seat.clipped);
+            out.tip_contact_disc_radius_mm
+                .push(seat.contact_disc_radius_mm);
+            out.tip_raster_seat_offset_mm
+                .push(seat.raster_seat_offset_mm);
+            out.tips_trimmed_to_seat += 1;
+            out.tips_trimmed_without_a_measured_face += usize::from(!seat.face_measured);
             out.tips_at_law_minimum += usize::from(seat.at_law_minimum);
         }
         if out.primitives.len() > max_primitives {
@@ -977,7 +1016,7 @@ fn lower_sweep_arms_of(
 /// over its axial length `L`. A frustum with HORIZONTAL rings (a plate-root
 /// column, [`FrustumRingNormal::PlateZ`]) has a circle of the ring radius at
 /// every height, so by Cavalieri the same formula holds over its RISE, not its
-/// slant. A tip ball is `4/3·π·R³` less the cap above its clip plane. A raft
+/// slant. A tip ball is `4/3·π·R³` less the cap beyond its seat plane. A raft
 /// record is not a solid of revolution this pass knows how to measure, and the
 /// sweep lowering emits none; it counts zero here.
 fn emitted_solid_volume_mm3(primitive: &SupportPrimitive) -> f64 {
@@ -998,15 +1037,15 @@ fn emitted_solid_volume_mm3(primitive: &SupportPrimitive) -> f64 {
         }
         SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere => {
             let whole = 4.0 / 3.0 * PI * r0 * r0 * r0;
-            let centre_z = 0.5 * (primitive.start_mm[2].get() + primitive.end_mm[2].get());
-            let cap = primitive
-                .sphere_geometry
-                .as_ref()
-                .and_then(SphereGeometry::clip_above_z_mm)
-                .map_or(0.0, |clip| {
-                    let height = (centre_z + r0 - clip.get()).clamp(0.0, 2.0 * r0);
-                    PI * height * height * (3.0 * r0 - height) / 3.0
-                });
+            let centre: [f64; 3] = std::array::from_fn(|index| {
+                0.5 * (primitive.start_mm[index].get() + primitive.end_mm[index].get())
+            });
+            // The cap on the MODEL side of the seat plane: a ball whose centre
+            // is `d` on the support side loses a cap of height `R − d`.
+            let cap = primitive.seat_trim.map_or(0.0, |trim| {
+                let height = (r0 - trim.support_side_distance_mm(centre)).clamp(0.0, 2.0 * r0);
+                PI * height * height * (3.0 * r0 - height) / 3.0
+            });
             whole - cap
         }
         SupportSegmentKind::RaftPad | SupportSegmentKind::RaftBridge => 0.0,
@@ -1029,12 +1068,17 @@ struct TipSeat {
     /// minimal separating cut, not `r_tip`.
     cut_radius_mm: f64,
     tip_radius_mm: f64,
-    /// World Z of the far face of the cured model run standing above the seat
-    /// — the plane no emitted support geometry may cross.
-    far_face_z_mm: f64,
-    /// The ball reached above that far face, so its geometry was CUT there and
-    /// the opening capped. The seat itself is at full law depth either way.
-    clipped: bool,
+    /// The seat trim's plane: the OUTWARD normal the seat law used (the
+    /// carried face's, or straight down where none was measured) through the
+    /// carried face's own point, or through `seat_mm` where no face was
+    /// measured.
+    trim: Option<crate::SeatTrim>,
+    face_measured: bool,
+    /// The contact disc the trim leaves: the ball's section in the seat plane.
+    /// Filled by the caller once the ball exists.
+    contact_disc_radius_mm: f64,
+    /// `seat_mm` measured from the seat plane along the outward normal.
+    raster_seat_offset_mm: f64,
     /// The law's smallest term — the registered contact depth — was the
     /// binding one.
     at_law_minimum: bool,
@@ -1241,15 +1285,15 @@ fn drawn_spans(
 /// reaches this (its axial travel is inside the diameter cap by construction),
 /// so no ordinary seat moves for this reason.
 ///
-/// **The thin-wall bound is a CLIP, not a retraction** (owner ruling,
-/// 2026-09-05). The tip goes to the FULL depth the area term asks for, whatever
-/// the skin above it is; what the thin wall bounds is the emitted GEOMETRY, not
-/// the seat. Where the ball would reach above the far face of the cured run
-/// standing over the seat, that far face is reported as a CLIP PLANE on the
-/// ball's own [`SphereGeometry`], and the emit boundary removes the geometry
-/// above it and caps the opening. Land-at-strike still holds — nothing exits
-/// the far face — but it now holds by cutting the ball rather than by starving
-/// the contact.
+/// **The geometry is TRIMMED, never the seat retracted** (owner ruling,
+/// 2026-09-05; rule of 2026-09-28). The tip goes to the FULL depth the area
+/// term asks for, whatever the skin above it is. What bounds the emitted
+/// GEOMETRY is the seat trim returned here: the seat face's own plane, which
+/// the emitter cuts the ball and the first shaft segment to, together with the
+/// model solid itself. Land-at-strike holds — nothing stands inside the model
+/// or past its far side — by cutting the geometry rather than by starving the
+/// contact. (Until 2026-09-28 a horizontal far-face plane did this job for the
+/// ball's top alone.)
 fn seat_tip(
     arm: &SweepArm,
     unit: [f64; 3],
@@ -1328,8 +1372,8 @@ fn seat_tip(
     // NOTHING BOUNDS THE TRAVEL BUT THE LAW ITSELF. Until 2026-09-05 the
     // available cured thickness was a third `min` here, which RETRACTED the
     // tip out of a thin skin and starved the contact the area law had asked
-    // for; the owner's ruling of that date replaced retraction with clipping,
-    // and the thickness is now read below as a clip plane on the emitted ball.
+    // for; the owner's ruling of that date replaced retraction with cutting
+    // the emitted geometry, which is now the seat trim built below.
     let axial_mm = axial_for_target_mm.min(2.0 * equator_mm).max(0.0);
     let axial_mm = if axial_mm.is_finite() { axial_mm } else { 0.0 };
     // WHATEVER THE AXIS COULD NOT DELIVER, the normal does. Moving against the
@@ -1349,28 +1393,147 @@ fn seat_tip(
     // here rather than assumed anywhere.
     let cut_radius_mm =
         crate::contact::ball_cut_radius_mm(tip_radius_mm, depth_mm, config.tip_ball_factor.get());
-    // THE FAR FACE of the cured run standing above this seat, in world Z. The
-    // sweep counted those laminae in this arm's own tip column, so this plane
-    // is where the model STOPS: no emitted support geometry may stand above it
-    // (land-at-strike). It is reported for every arm; whether it actually cuts
-    // this arm's ball is decided by `lower_one_sweep_arm`, which is where the
-    // ball's centre and radius are known.
-    let far_face_z_mm = arm.seat_mm[2] + arm.available_seat_depth_mm;
+    // THE SEAT PLANE (fix/tip-trim, 2026-09-28): the carried face's own point
+    // with the very normal the law just used, so the plane the ball is cut to
+    // and the face the seat was measured against are one face, never two. The
+    // raster seat stands in only where no face was measured.
+    let face_measured = arm.seat_face_point_mm.is_some()
+        && geom_kernel::vec3::normalize(arm.seat_normal_mm).is_some();
+    let plane_point = arm
+        .seat_face_point_mm
+        .filter(|_| face_measured)
+        .unwrap_or(arm.seat_mm);
+    let trim = crate::SeatTrim::new(plane_point, outward).ok();
+    let raster_seat_offset_mm = trim.map_or(0.0, |trim| trim.support_side_distance_mm(arm.seat_mm));
     (
         seated,
         TipSeat {
             depth_mm,
             cut_radius_mm,
             tip_radius_mm,
-            far_face_z_mm,
-            // Filled by the caller once the ball exists.
-            clipped: false,
+            trim,
+            face_measured,
+            contact_disc_radius_mm: 0.0,
+            raster_seat_offset_mm,
             // `law_depth_mm` is a `max` over three terms of which the
             // rasterisation allowance is one, so it can never be below the
             // allowance; `<=` is equality.
             at_law_minimum: law_depth_mm <= allowance_mm,
         },
     )
+}
+
+/// One arm's seated tip ball: the seated pole, the ball centre, and the seat
+/// record with its contact disc filled in. The ONE derivation both the
+/// lowering and [`tip_contact_discs`] read, so the disc the sweep's footprint
+/// rule grades is the disc the file gets.
+fn seated_ball(
+    arm: &SweepArm,
+    unit: [f64; 3],
+    tip_radius_mm: f64,
+    ball_radius_mm: f64,
+    config: LoweringConfig,
+) -> ([f64; 3], [f64; 3], TipSeat) {
+    // THE SEAT. Until 2026-09-05 the ball's pole sat exactly on `arm.seat_mm`
+    // — the BOTTOM plane of the first cured model lamina — so the tip touched
+    // the model at a single point and carried an area of zero. It is now driven
+    // INTO the model by the seat law every other seating family in this crate
+    // reads (`contact::seat_depth_of`).
+    let (seated, mut tip_seat) = seat_tip(arm, unit, tip_radius_mm, config);
+    let center: [f64; 3] =
+        std::array::from_fn(|index| seated[index] + ball_radius_mm * unit[index]);
+    // TRIM, NEVER RETRACT (owner ruling 2026-09-05, rule of 2026-09-28). The
+    // ball is at the full depth the area law asked for; the emitter keeps only
+    // its part on the support side of the seat face and outside the model
+    // (`SeatTrim`). What that leaves in the seat plane is the contact disc,
+    // `sqrt(R² − d²)` for a centre `d` on the support side, measured here from
+    // the SAME plane the emitter cuts to.
+    //
+    // THE FACE MUST BE ONE THE BALL MEETS. The carried face is the nearest
+    // down-facing mesh face to the tip's landing point; on a sculpted surface
+    // that facet's PLANE can pass clear of the ball (a small facet tilted away
+    // from the patch the ball actually seats on). A plane the ball does not
+    // cross is not the face this tip is seated against, and trimming to it
+    // would keep nothing or everything. Such a tip falls back to the raster
+    // seat's own plane with the same normal, and is counted as unmeasured.
+    if let Some(trim) = tip_seat.trim {
+        if trim.support_side_distance_mm(center).abs() >= ball_radius_mm && tip_seat.face_measured {
+            tip_seat.trim = crate::SeatTrim::new(arm.seat_mm, trim.outward_normal()).ok();
+            tip_seat.face_measured = false;
+            tip_seat.raster_seat_offset_mm = 0.0;
+        }
+    }
+    if let Some(trim) = tip_seat.trim {
+        let d = trim.support_side_distance_mm(center);
+        tip_seat.contact_disc_radius_mm = (ball_radius_mm * ball_radius_mm - d * d).max(0.0).sqrt();
+    }
+    (seated, center, tip_seat)
+}
+
+/// The contact disc a seated tip's trim leaves in its seat plane.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TipContactDisc {
+    /// The disc's centre: the ball centre projected onto the seat plane.
+    pub centre_mm: [f64; 3],
+    /// The seat face's OUTWARD unit normal (the plane's normal).
+    pub outward_normal: [f64; 3],
+    /// The disc's radius, `sqrt(R² − d²)`; zero when the ball misses the plane.
+    pub radius_mm: f64,
+    /// The emitted ball's own radius `R`.
+    pub ball_radius_mm: f64,
+}
+
+/// **The contact disc every seated arm's tip will deliver**, computed by the
+/// lowering's own seat derivation ([`seated_ball`]) without lowering anything
+/// (fix/tip-trim, 2026-09-28). `None` for an arm that seats into nothing (a
+/// brace or mast), is zero-length, or carries no seat plane.
+///
+/// This is what the sweep's footprint rule grades against the layer rasters:
+/// the disc it tests is, by construction, the disc the file gets.
+///
+/// # Errors
+///
+/// Only about the request, as [`lower_sweep_arms`]: an empty or variable
+/// layer plan, or an unreadable registry.
+pub fn tip_contact_discs(
+    arms: &[SweepArm],
+    layers: &LayerPlan,
+) -> Result<Vec<Option<TipContactDisc>>, SweepLoweringError> {
+    let frame = BuildFrame::new(
+        Finite::new(layers.z0_mm()).map_err(|_| SweepLoweringError::MissingLayerHeight)?,
+        PositiveFinite::new(1.0).map_err(|_| SweepLoweringError::InvalidLimits)?,
+    );
+    let config = LoweringConfig::current(frame, layers, 1, 1)?;
+    Ok(arms
+        .iter()
+        .map(|arm| {
+            if !arm.seats_into_model {
+                return None;
+            }
+            let delta = geom_kernel::vec3::sub(arm.base_mm, arm.seat_mm);
+            let length = geom_kernel::vec3::norm(delta);
+            if !length.is_finite()
+                || length <= ZERO_LENGTH_MM
+                || !arm.tip_radius_mm.is_finite()
+                || arm.tip_radius_mm <= 0.0
+            {
+                return None;
+            }
+            let unit = delta.map(|value| value / length);
+            let ball_radius_mm = config.tip_ball_factor.get() * arm.tip_radius_mm;
+            let (_, center, tip_seat) =
+                seated_ball(arm, unit, arm.tip_radius_mm, ball_radius_mm, config);
+            let trim = tip_seat.trim?;
+            let normal = trim.outward_normal();
+            let d = trim.support_side_distance_mm(center);
+            Some(TipContactDisc {
+                centre_mm: std::array::from_fn(|index| center[index] - d * normal[index]),
+                outward_normal: normal,
+                radius_mm: tip_seat.contact_disc_radius_mm,
+                ball_radius_mm,
+            })
+        })
+        .collect())
 }
 
 fn lower_one_sweep_arm(
@@ -1410,49 +1573,14 @@ fn lower_one_sweep_arm(
     // slenderness lane did not touch.
     let mut staged: Vec<SupportPrimitive> = Vec::with_capacity(3);
     let (seated_seat, center, seat) = if arm.seats_into_model {
-        // THE SEAT. Until 2026-09-05 the ball's pole sat exactly on `arm.seat_mm`
-        // — the BOTTOM plane of the first cured model lamina — so the tip touched
-        // the model at a single point and carried an area of zero. It is now
-        // driven INTO the model by the seat law every other seating family in this
-        // crate reads (`contact::seat_depth_of`), bounded by the material that is
-        // there.
-        let (seated_seat, mut tip_seat) = seat_tip(arm, unit, tip_radius.get(), config);
-        let center_raw: [f64; 3] =
-            std::array::from_fn(|index| seated_seat[index] + ball_radius.get() * unit[index]);
+        // THE SEAT and its trim: `seated_ball`, the one derivation.
+        let (seated_seat, center_raw, tip_seat) =
+            seated_ball(arm, unit, tip_radius.get(), ball_radius.get(), config);
         let (Ok(center), Ok(unit_finite)) = (finite3(center_raw), finite3(unit)) else {
             return ArmLowering::refused(ArmOutcome::InvalidGeometry);
         };
         let Ok(geometry) = SphereGeometry::tip(center, unit_finite) else {
             return ArmLowering::refused(ArmOutcome::InvalidGeometry);
-        };
-        // CLIP, NEVER RETRACT (owner ruling, 2026-09-05). The ball is at the full
-        // depth the area law asked for; if any of it now stands above the far face
-        // of the cured run it strikes, that part is not emitted. The test is on the
-        // ball's own topmost point — `centre_z + R`, which for a leaned arm is
-        // ABOVE its seat-side pole — so a tilted tip cannot slip past it.
-        let ball_top_z_mm = center[2].get() + ball_radius.get();
-        let ball_bottom_z_mm = center[2].get() - ball_radius.get();
-        let geometry = if ball_top_z_mm > tip_seat.far_face_z_mm {
-            // A clip plane at or below the ball's own bottom would erase the tip
-            // entirely. The seat law cannot produce one — the travel is capped at
-            // the ball's diameter and the plane never falls below the seat surface,
-            // which leaves at least the ball's own radius under it — so reaching
-            // here means a caller handed in a seat and a thickness that disagree.
-            // Emit and warn: this ARM is dropped and counted, the field still
-            // emits, and no ball is silently left protruding.
-            if tip_seat.far_face_z_mm <= ball_bottom_z_mm {
-                return ArmLowering::refused(ArmOutcome::InvalidGeometry);
-            }
-            let Ok(clip_z) = Finite::new(tip_seat.far_face_z_mm) else {
-                return ArmLowering::refused(ArmOutcome::InvalidGeometry);
-            };
-            let Ok(clipped) = geometry.clipped_above_z(clip_z) else {
-                return ArmLowering::refused(ArmOutcome::InvalidGeometry);
-            };
-            tip_seat.clipped = true;
-            clipped
-        } else {
-            geometry
         };
         // The producer's own poles. A second implementation of this arithmetic is
         // exactly the defect `is_semantically_valid` exists to catch.
@@ -1468,6 +1596,7 @@ fn lower_one_sweep_arm(
             contact_depth_mm: None,
             ring_normal: FrustumRingNormal::SegmentAxis,
             sphere_geometry: Some(geometry),
+            seat_trim: tip_seat.trim,
         });
 
         (seated_seat, center, Some(tip_seat))
@@ -1571,6 +1700,19 @@ fn lower_one_sweep_arm(
             }
         }
     };
+    // THE FIRST SHAFT SEGMENT IS TRIMMED TO THE SAME SEAT (fix/tip-trim,
+    // 2026-09-28). The taper starts at the ball centre, and on a leaned arm its
+    // start cap is tilted with the axis, so it stands through the seat plane
+    // and past the face's edge exactly where the ball does ("a chunk of post",
+    // tip-clip.md). The same plane and the same model difference apply.
+    if let Some(trim) = seat.as_ref().and_then(|seat| seat.trim) {
+        if let Some(taper) = staged
+            .iter_mut()
+            .find(|primitive| primitive.segment_kind == SupportSegmentKind::ContactTaper)
+        {
+            taper.seat_trim = Some(trim);
+        }
+    }
     // The emit boundary's own contract, asked HERE, so one bad arm is dropped
     // and counted rather than failing the whole field at
     // `SupportedModel::from_parts` with nothing said about which arm did it.

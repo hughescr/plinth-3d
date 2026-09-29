@@ -357,6 +357,7 @@ fn raft_primitive(
         contact_depth_mm: None,
         ring_normal: FrustumRingNormal::SegmentAxis,
         sphere_geometry: None,
+        seat_trim: None,
     }
 }
 

@@ -268,6 +268,10 @@ pub struct SweepRunReport {
     /// sees what the footprint measured and what the remedies did, rather than
     /// inferring it from an arm count.
     pub congestion_lane: crate::congestion::CongestionOutcome,
+    /// The footprint rule (fix/tip-trim, 2026-09-28): every tip's contact
+    /// disc graded against its seat face, the seats it moved onto the face,
+    /// and the knife edges it could only warn about.
+    pub seat_footprint: crate::footprint::FootprintOutcome,
     /// **The resin the area law SIZED**, in mm³: `π r²` integrated along every
     /// arm's own axis, layer by layer, with a leaned layer measured along its
     /// slant rather than its rise.

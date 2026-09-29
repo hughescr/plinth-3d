@@ -264,4 +264,104 @@ FfiResponse manifold_difference_batch(
   });
 }
 
+// Each piece, trimmed to the kept side of its own plane, minus ONE shared
+// solid -- the whole batch in one native call. Mesh 0 is the shared
+// subtrahend; meshes 1..n are the pieces, and `planes` holds four doubles per
+// piece, `(nx, ny, nz, offset)`, keeping `{p : n . p >= offset}`. A piece may
+// come out EMPTY; its span in the output offsets is then zero-length.
+FfiBatchResponse manifold_trim_subtract_each(
+    rust::Slice<const double> vertices,
+    rust::Slice<const std::uint64_t> triangles,
+    rust::Slice<const std::uint64_t> vertex_offsets,
+    rust::Slice<const std::uint64_t> triangle_offsets,
+    rust::Slice<const double> planes,
+    std::uint64_t max_output_vertices,
+    std::uint64_t max_output_triangles) noexcept {
+  const auto fail = [](const ExpectedError& error) {
+    FfiBatchResponse response{};
+    response.code = error.code;
+    response.manifold_status = error.manifold_status;
+    response.has_mesh_index = error.has_mesh_index;
+    response.mesh_index = error.mesh_index;
+    response.output_limit = error.output_limit;
+    response.output_count = error.output_count;
+    return response;
+  };
+  try {
+    auto solids =
+        import_batch(vertices, triangles, vertex_offsets, triangle_offsets);
+    if (solids.size() < 2 || planes.size() != 4 * (solids.size() - 1)) {
+      throw ExpectedError{FfiErrorCode::DifferenceArity};
+    }
+    const manifold::Manifold& subtrahend = solids.front();
+    FfiBatchResponse response{};
+    response.code = FfiErrorCode::Success;
+    response.output_limit = FfiOutputLimit::Vertices;
+    response.batch.vertex_offsets.push_back(0);
+    response.batch.triangle_offsets.push_back(0);
+    std::uint64_t total_vertices = 0;
+    std::uint64_t total_triangles = 0;
+    for (std::size_t piece = 1; piece < solids.size(); ++piece) {
+      const double* plane = planes.data() + 4 * (piece - 1);
+      const manifold::Manifold& whole = solids[piece];
+      const manifold::Manifold kept =
+          whole.TrimByPlane(manifold::vec3(plane[0], plane[1], plane[2]),
+                            plane[3]);
+      const manifold::Manifold result =
+          kept.Boolean(subtrahend, manifold::OpType::Subtract);
+      const auto status = result.Status();
+      if (status != manifold::Manifold::Error::NoError) {
+        throw ExpectedError{FfiErrorCode::ResultManifoldStatus,
+                            static_cast<std::int32_t>(status)};
+      }
+      response.batch.volumes.push_back(whole.Volume());
+      response.batch.volumes.push_back(kept.Volume());
+      response.batch.volumes.push_back(result.Volume());
+      if (!result.IsEmpty()) {
+        get_mesh_gl64_calls.fetch_add(1, std::memory_order_relaxed);
+        const manifold::MeshGL64 mesh = result.GetMeshGL64();
+        if (mesh.numProp < 3) {
+          throw ExpectedError{FfiErrorCode::OutputPropertyStride};
+        }
+        const std::size_t num_vertices = mesh.NumVert();
+        total_vertices += num_vertices;
+        total_triangles += mesh.NumTri();
+        if (total_vertices > max_output_vertices) {
+          throw ExpectedError{FfiErrorCode::OutputLimitExceeded, 0, false, 0,
+                              FfiOutputLimit::Vertices, total_vertices};
+        }
+        if (total_triangles > max_output_triangles) {
+          throw ExpectedError{FfiErrorCode::OutputLimitExceeded, 0, false, 0,
+                              FfiOutputLimit::Triangles, total_triangles};
+        }
+        for (std::size_t vertex = 0; vertex < num_vertices; ++vertex) {
+          const std::size_t base = vertex * mesh.numProp;
+          response.batch.vertices.push_back(mesh.vertProperties[base]);
+          response.batch.vertices.push_back(mesh.vertProperties[base + 1]);
+          response.batch.vertices.push_back(mesh.vertProperties[base + 2]);
+        }
+        for (const std::uint64_t index : mesh.triVerts) {
+          response.batch.triangles.push_back(index);
+        }
+      }
+      response.batch.vertex_offsets.push_back(response.batch.vertices.size());
+      response.batch.triangle_offsets.push_back(
+          response.batch.triangles.size());
+    }
+    return response;
+  } catch (const ExpectedError& error) {
+    return fail(error);
+  } catch (const std::invalid_argument&) {
+    return fail(ExpectedError{FfiErrorCode::UnexpectedInvalidArgument});
+  } catch (const std::overflow_error&) {
+    return fail(ExpectedError{FfiErrorCode::UnexpectedOverflow});
+  } catch (const std::bad_alloc&) {
+    return fail(ExpectedError{FfiErrorCode::UnexpectedAllocation});
+  } catch (const std::exception&) {
+    return fail(ExpectedError{FfiErrorCode::UnexpectedStandardException});
+  } catch (...) {
+    return fail(ExpectedError{FfiErrorCode::UnexpectedNonStandardException});
+  }
+}
+
 }  // namespace plinth::solid
