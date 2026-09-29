@@ -377,8 +377,15 @@ fn grade_with(
     let found = census(&plan, &emission);
     println!(
         "{name}: brace tops graded {}, off their host (not graded) {:?}; members raised to a \
-         branch {}",
-        found.brace_tops_graded, found.brace_tops_off_host, emission.members_raised_to_a_branch,
+         branch {}; arm junctions inverted in the ledger itself {}",
+        found.brace_tops_graded,
+        found.brace_tops_off_host,
+        emission.members_raised_to_a_branch,
+        emission.arm_junctions_inverted_in_ledger,
+    );
+    assert_eq!(
+        emission.arm_junctions_inverted_in_ledger, 0,
+        "{name}: the down-sweep's own ledger names an arm wider than its trunk"
     );
     println!(
         "{name}: {} members, {} slots graded ({} below the lowest emitted point, not graded), \

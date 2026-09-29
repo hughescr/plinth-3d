@@ -83,8 +83,11 @@ pub struct SweepEmission {
     /// ledger, from the junction down to their root, because a thicker branch
     /// (in practice a brace, sized by its own slenderness minimum) joins them.
     pub members_raised_to_a_branch: usize,
-    /// Of those, the ones a support ARM forced. Zero on a consistent ledger.
-    pub member_raises_by_an_arm: usize,
+    /// Junctions where a support ARM's own ledger end is wider than its host's
+    /// ledger at the joint — a ledger inconsistency, zero on a consistent
+    /// ledger. Raises that only propagate a brace's raise down a tree of arms
+    /// are not counted here.
+    pub arm_junctions_inverted_in_ledger: usize,
 }
 
 impl SweepEmission {
@@ -176,7 +179,7 @@ pub fn to_primitives(
         drawn_volume_mm3,
         drawn_shaft_volume_mm3,
         members_raised_to_a_branch: raised.members,
-        member_raises_by_an_arm: raised.by_arm,
+        arm_junctions_inverted_in_ledger: raised.arm_ledger_inversions,
     })
 }
 
@@ -185,11 +188,12 @@ pub fn to_primitives(
 struct JunctionRaises {
     /// Members whose drawn profile was raised anywhere.
     members: usize,
-    /// Of the raises, how many were forced by a support ARM landing, rather
-    /// than by a brace or a mast. An arm's load is booked into its trunk's
-    /// ledger, so this is zero on a consistent ledger; a nonzero count is a
-    /// ledger inconsistency, published rather than hidden.
-    by_arm: usize,
+    /// Junctions where a support ARM's own LEDGER end is wider than its host's
+    /// LEDGER at the joint. An arm's load is booked into its host below the
+    /// landing, so this is zero on a consistent ledger; a nonzero count is a
+    /// ledger inconsistency, published rather than hidden. (A raise that only
+    /// PROPAGATES a brace's raise down a tree of arms is not one.)
+    arm_ledger_inversions: usize,
 }
 
 /// **The drawn profile of every member**: the down-sweep's ledger, raised
@@ -248,8 +252,26 @@ fn junction_profiles(plan: &SweepPlan) -> (Vec<Vec<f64>>, JunctionRaises) {
             joints.push((seat_host, slot, index, false));
         }
     }
+    // THE LEDGER'S OWN CONSISTENCY, measured before anything is raised: a
+    // support arm's ledger end wider than its host's LEDGER at the joint. The
+    // load law says this cannot happen (the arm's load is booked into the host
+    // below the landing), so it is counted, never assumed.
+    let arm_ledger_inversions = joints
+        .iter()
+        .filter(|&&(parent, slot, branch, at_root)| {
+            let branch_ledger = &struts[branch].radius_mm;
+            let end = if at_root {
+                branch_ledger.first()
+            } else {
+                branch_ledger.last()
+            };
+            let host_ledger = &struts[parent].radius_mm;
+            let there = host_ledger.get(slot.min(host_ledger.len().saturating_sub(1)));
+            struts[branch].kind == crate::StrutKind::Arm
+                && matches!((end, there), (Some(end), Some(there)) if end > there)
+        })
+        .count();
     let mut raised = vec![false; struts.len()];
-    let mut by_arm = vec![false; struts.len()];
     for _round in 0..=struts.len() {
         let mut moved = false;
         for &(parent, slot, branch, at_root) in &joints {
@@ -268,7 +290,6 @@ fn junction_profiles(plan: &SweepPlan) -> (Vec<Vec<f64>>, JunctionRaises) {
                     *radius = branch_radius;
                     moved = true;
                     raised[parent] = true;
-                    by_arm[parent] |= struts[branch].kind == crate::StrutKind::Arm;
                 }
             }
         }
@@ -278,7 +299,7 @@ fn junction_profiles(plan: &SweepPlan) -> (Vec<Vec<f64>>, JunctionRaises) {
     }
     let summary = JunctionRaises {
         members: raised.iter().filter(|flag| **flag).count(),
-        by_arm: by_arm.iter().filter(|flag| **flag).count(),
+        arm_ledger_inversions,
     };
     (profiles, summary)
 }

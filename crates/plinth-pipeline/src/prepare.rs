@@ -2589,7 +2589,8 @@ fn print_sweep_disclosure(
          chained members, the rest tip balls and root flares) over {} arms; sizing ledger \
          {:.3} mm3 (the area law's shafts, not what is drawn); drawn profile: {} members in \
          more than one span, {} Member frusta chained, {} arms WITHOUT a profile, {} members \
-         raised above their ledger to meet a thicker branch ({} of them by a support arm); \
+         raised above their ledger to meet a thicker branch, {} arm junctions inverted in the \
+         ledger itself; \
          plate contacts {} \
          holding {:.4} mm2 of root area; junctions {} at a parent's top / {} MID-SHAFT \
          ({} chosen mid-shaft by the descent, before un-merging and removal); \
@@ -2603,7 +2604,7 @@ fn print_sweep_disclosure(
         emission.profile_member_frusta,
         emission.arms_without_profile,
         emission.members_raised_to_a_branch,
-        emission.member_raises_by_an_arm,
+        emission.arm_junctions_inverted_in_ledger,
         report.landings.plate,
         report.plate_contact_area_mm2,
         report.junctions_at_parent_top,
