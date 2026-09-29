@@ -25,3 +25,4 @@ mod no_private_vector_algebra;
 mod plate_contact;
 mod prepare_folder;
 mod repair_prepass;
+mod tip_trim;

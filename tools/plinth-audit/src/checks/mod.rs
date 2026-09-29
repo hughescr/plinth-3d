@@ -60,6 +60,9 @@ pub mod load_path;
 pub mod narrowest_section;
 pub mod report_metrics;
 pub mod seat_depth;
+/// I5 clause (e), "no support island" — a helper of `load_path`, not an
+/// invariant of its own; it adds no schema key.
+pub mod support_below;
 pub mod unsupported_span;
 
 /// The ten gating invariants, in schema order. The verdict

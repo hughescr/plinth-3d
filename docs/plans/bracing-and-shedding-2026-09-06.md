@@ -96,6 +96,37 @@ will bite there first).
 4. **Warn.** If neither is possible (keep-out, no plate in reach), emit with
    a per-arm `unbraced_over_limit` warning; never drop the arm.
 
+### As reworked, 2026-09-29 (owner rulings on the 2026-09-28 field report)
+
+Recorded here because it changes the ladder above; the code of record is
+`crates/plinth-sweep/src/slenderness.rs` and the field report is
+`plinth-evidence/.../field-2026-09-28/braces-masts.md`.
+
+- **Order:** merge → un-merge pass → `|X|` → **thicken** → mast → warn. The
+  un-merge pass that puts back merges a trunk cannot carry now runs BEFORE
+  any tie, so no post it puts back is left unmeasured.
+- **Every direction:** an `|X|` holds only along its own plane. A cross is
+  credited with the sway directions within 45° of its plane (where it resists
+  at least as much of the sway as it lets through); a member is measured in
+  every direction its crosses tell apart, so a tie made of crosses needs
+  planes whose ±45° arcs cover all 180° (two perpendicular planes, or three).
+  Crosses are built one at a time; one that a later cross or the member's own
+  thickening leaves unneeded is taken out at the end of its pass.
+- **Thicken:** raise the root, keep the tip, up to the 1.0 mm maximum; the
+  root is the smallest that brings the run inside the one-pixel law, carried
+  down every trunk below, and a grown plate root must clear every other root
+  disc.
+- **Runs are measured on the drawn profile** with the taper integral
+  (`δ/p = (4/S⁴) ∫ (L−x)³ / r(x)⁴ dx`), not the narrowest ledger radius.
+- **Live re-measure:** each member's runs are cut again from the live field
+  before every remedy; every partner in reach is tried, nearest first; a
+  cross that a later one leaves unneeded is taken out at the end of its pass;
+  the passes repeat (with a down-sweep between) to a fixed point.
+- **Masts:** a cell is admissible only where the braced panel holds the arm to
+  one pixel in its plane (the frame of the field report's Q4); an arm's mast
+  is extended to a later tie before a second one is dropped.
+- `S` stays 50.
+
 ### Fixtures (new, procedural, in plinth-mesh fixtures.rs)
 
 - `make_tall_stilt_plate`: a plate 30 mm up on a 4 mm slab — every arm is
@@ -131,7 +162,11 @@ Rather than a literal third sweep, use the iterate the engine already has —
 the load-driven insertion rounds (`InsertionPolicy::max_rounds`) — with a
 second trigger beside overload: **congestion**. At the plate layer, rasterise
 every plate-rooted arm's root disc; congestion = Σ disc area / area of the
-union (>1 means overlap). When a footprint is congested:
+union (>1 means overlap). (Corrected 2026-09-29, review-fixes: a root disc is
+the flare of the root the member is DRAWN with — its ledger raised by the
+junction clause where a brace joins — by the lowering's own rule,
+`plinth_support::drawn_root_radius_mm`; the slenderness lane grows its discs
+as crosses raise roots.) When a footprint is congested:
 
 1. Let the congested arms' descents lean OUTWARD to plate cells outside the
    silhouette (the deferred-path charge already makes plate landings win

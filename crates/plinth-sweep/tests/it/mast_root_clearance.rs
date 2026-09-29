@@ -16,19 +16,35 @@
 //!   and the one that does NOT stay clear publishes what it leaves;
 //! * with the clearance test deleted, 127 overlapping mast pairs come back on
 //!   the laid tube;
-//! * on the laid tube the FINISHED field is no more congested than the
-//!   congestion lane's own exit, which is the claim Lane 3 could not make;
+//! * on the laid tube the FINISHED field's congestion ratio stays within a
+//!   stated tolerance of the congestion lane's own exit, which is the claim
+//!   Lane 3 could not make; and its lapping root pairs, which crosses raise
+//!   well past the exit's, are PUBLISHED exactly as the file draws them and
+//!   held to a known-defect ratchet (see that test);
 //! * the flank arms' pre-sizing radius estimate leaves no overlapping root
 //!   behind once the down-sweep has sized the field.
 
 use crate::harness;
 
 use harness::sweep_with;
+use plinth_core::{Finite, LayerPlan, PositiveFinite};
 use plinth_mesh::{make_brace_pair, make_laid_tube, make_lonely_peak, Mesh};
-use plinth_sweep::{Landing, StrutKind, SweepPlan, SweepPolicy, SweepStrut};
+use plinth_support::{BuildFrame, SupportSegmentKind};
+use plinth_sweep::{to_primitives, Landing, StrutKind, SweepPlan, SweepPolicy, SweepStrut};
 
+/// The production policy with ONE rung switched off: thickening.
+///
+/// Since 2026-09-29 the ladder thickens a post's root before it drops a mast
+/// (owner ruling: merge, `|X|`, thicken, mast, warn), and on these fixtures
+/// thickening now does the work the masts did — production places no mast on
+/// any of them. Every claim in this file is about where a MAST's root lands,
+/// so the rung above the mast is taken out and everything else (merges,
+/// crosses, the clearance rule under test) stays as production has it.
 fn policy() -> SweepPolicy {
-    SweepPolicy::from_registry().expect("the registry supplies every number the sweep reads")
+    SweepPolicy {
+        slenderness_thicken: false,
+        ..SweepPolicy::from_registry().expect("the registry supplies every number the sweep reads")
+    }
 }
 
 /// The registered root flare, read from the registry here rather than from the
@@ -131,15 +147,22 @@ fn every_mast_clears_every_plate_root_on_the_brace_pair() {
     );
 }
 
-/// The same claim on the fixture that places FIFTY-THREE masts, which is where
-/// the rule is actually load-bearing.
+/// The same claim on the fixture that placed FIFTY-THREE masts before
+/// 2026-09-29 (six since the bracing lane), which is where the rule is
+/// actually load-bearing.
 #[test]
 fn every_mast_clears_every_plate_root_on_the_laid_tube() {
     let plan = sweep_with(&laid_tube(), 0.0, &policy());
     let placed = masts(&plan);
+    // RE-DERIVED 2026-09-29 (bracing lane), on purpose: this was `> 10` when
+    // the laid tube placed 53 masts. Trying every partner in reach before a
+    // mast, and admitting a mast cell only where the braced panel holds, now
+    // leave it 6 (with thickening switched off, see `policy`). The rule is
+    // still what keeps them clear: the sabotage drill below measures more than
+    // ten lapping pairs with it deleted.
     assert!(
-        placed > 10,
-        "anti-vacuity: make_laid_tube must place many masts for this to be the load-bearing case; \
+        placed > 0,
+        "anti-vacuity: make_laid_tube must place masts for this to be the load-bearing case; \
          it placed {placed}"
     );
     let overlaps = overlapping_pairs_touching_a_mast(&plan);
@@ -239,22 +262,51 @@ fn deleting_the_clearance_rule_brings_the_overlapping_masts_back() {
     );
 }
 
-/// **WHAT LANE 3 COULD NOT CLAIM.** The finished field is no more congested
-/// than the congestion lane's own exit.
+/// **WHAT LANE 3 COULD NOT CLAIM, AND THE DEFECT THE HONEST CENSUS FOUND.**
 ///
-/// At 3ff52c7 the laid tube left the congestion lane at `1.0004` with 2
-/// overlapping pairs and its FINISHED file read `1.0926` with 155, every bit of
-/// the difference put there by masts. The claim graded here is the one that
-/// change makes available: the finished ratio is within a stated tolerance of
-/// the exit ratio, rather than a tenth above it.
+/// The finished congestion RATIO stays within a stated tolerance of the
+/// congestion lane's own exit. At 3ff52c7 the laid tube left the congestion
+/// lane at `1.0004` with 2 overlapping pairs and its FINISHED file read
+/// `1.0926` with 155, every bit of the difference put there by masts. The
+/// ratio claim is the one that change made available, and it still holds.
 ///
 /// **The tolerance is a TEST TOLERANCE and not a registered constant.** `0.01`
 /// is one percent of the ratio, which is an order of magnitude below the
 /// `0.0922` the defect used to add and an order of magnitude above the rounding
 /// of a rasterised area.
+///
+/// **KNOWN DEFECT, OPEN (re-scoped 2026-09-29, orchestrator ruling): a cross
+/// raises its posts' drawn roots, and the raised root flares lap their
+/// neighbours on the plate.** A cross (brace) joining a post is sized by its
+/// own slenderness minimum; the junction clause raises the post's DRAWN
+/// profile down its trunk chain to the plate foot, so the foot the file flares
+/// is bigger than the ledger root whose cell was chosen to clear. Until the
+/// review fixes (`b24fedf`) the census sized its discs from the LEDGER root and
+/// did not see this. Pair counts were then "5 at the lane exit, at most 4 x 5
+/// finished", and this test was green on an undersized census. The honest
+/// census (discs from `plinth_support::drawn_root_radius_mm`, the lowering's
+/// own rule) reads **42** lapping pairs on the finished laid tube; crosses grow
+/// 187 plate discs and 50 of them lap another root (published as
+/// `slenderness_lane.cross_roots_lapping`). The laps were always in the file.
+/// Recorded as an open defect in the field evidence's `lanes/LANDED.md`;
+/// the remedy (extend the root clearance rule to every cross and accept more
+/// masts, keep the laps as a published warning, or choose cross partners whose
+/// raise clears) is the owner's call.
+///
+/// So this test grades two things about the pair count instead of a bound
+/// relative to the exit:
+/// * **HONESTY.** The published finished census equals the lapping pairs
+///   among the root flares the production lowering actually emits, read off
+///   the flares' own end points and radii. An undersized census goes red here.
+/// * **A RATCHET.** The count may not grow past `KNOWN_ROOT_LAP_PAIRS`. A
+///   fix that lowers it should lower the pin with it.
 #[test]
-fn the_finished_laid_tube_is_no_worse_than_the_lane_left_it() {
+fn the_finished_laid_tube_publishes_its_drawn_root_laps_and_they_do_not_grow() {
     const RATIO_TOLERANCE: f64 = 0.01;
+    /// The honest finished count at the review-fixes land (2026-09-29), with
+    /// this file's policy (thickening off). A ratchet on a known defect, not a
+    /// tolerance: see the test's doc comment.
+    const KNOWN_ROOT_LAP_PAIRS: usize = 42;
 
     let plan = sweep_with(&laid_tube(), 0.0, &policy());
     let lane = &plan.report.congestion_lane;
@@ -279,12 +331,58 @@ fn the_finished_laid_tube_is_no_worse_than_the_lane_left_it() {
          than the {RATIO_TOLERANCE} tolerance; the masts are back on top of the footprint"
     );
 
-    // And the pair count, which is the number that matches what the eye sees.
+    // The pair count, which is the number that matches what the eye sees.
+    // HONESTY first: the published census against the feet the file draws.
+    let layers = LayerPlan::new(plan.plate_z_mm, vec![plan.layer_height_mm; plan.layers])
+        .expect("the plan's own uniform layer plan");
+    let frame = BuildFrame::new(
+        Finite::new(plan.plate_z_mm).expect("a finite plate"),
+        PositiveFinite::new(harness::LIFT_MM).expect("a positive lift"),
+    );
+    let emission = to_primitives(&plan, frame, &layers, 4_000_000, 1 << 30)
+        .expect("the lowering refuses only about the request");
+    let feet: Vec<([f64; 3], f64)> = emission
+        .primitives
+        .iter()
+        .filter(|primitive| primitive.segment_kind == SupportSegmentKind::RootFlare)
+        .map(|flare| (flare.end_mm.map(Finite::get), flare.end_radius_mm.get()))
+        .collect();
+    // `O(n²)` on purpose, as in `overlapping_pairs_touching_a_mast`.
+    let mut drawn_pairs = 0_usize;
+    for (slot, (a, ra)) in feet.iter().enumerate() {
+        for (b, rb) in &feet[slot + 1..] {
+            drawn_pairs += usize::from((a[0] - b[0]).hypot(a[1] - b[1]) < ra + rb);
+        }
+    }
     let exit_pairs = lane.at_lane_exit.all.overlap_pairs;
     let finished_pairs = lane.after.all.overlap_pairs;
+    println!(
+        "laid tube: {exit_pairs} lapping root pairs at the lane exit, {finished_pairs} published \
+         finished, {drawn_pairs} among the {} emitted root flares; crosses grew {} plate discs, \
+         {} lapping (ratio {finished:.4} against an exit of {exit:.4})",
+        feet.len(),
+        plan.report.slenderness_lane.cross_roots_grown,
+        plan.report.slenderness_lane.cross_roots_lapping,
+    );
+    assert_eq!(
+        lane.after.all.roots,
+        feet.len(),
+        "the finished census counts {} roots; the file flares {}",
+        lane.after.all.roots,
+        feet.len()
+    );
+    assert_eq!(
+        finished_pairs, drawn_pairs,
+        "the finished census publishes {finished_pairs} lapping root pairs; the root flares the \
+         file draws form {drawn_pairs}"
+    );
+
+    // The RATCHET on the known defect named above.
     assert!(
-        finished_pairs <= exit_pairs * 4,
-        "overlapping root pairs went {exit_pairs} at the lane exit -> {finished_pairs} finished"
+        finished_pairs <= KNOWN_ROOT_LAP_PAIRS,
+        "lapping root pairs on the finished laid tube grew: {finished_pairs} against the \
+         known-defect pin of {KNOWN_ROOT_LAP_PAIRS} (lane exit {exit_pairs}; crosses lapping {})",
+        plan.report.slenderness_lane.cross_roots_lapping,
     );
 }
 

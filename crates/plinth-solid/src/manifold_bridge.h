@@ -8,6 +8,7 @@ namespace plinth::solid {
 
 struct FfiMesh;
 struct FfiResponse;
+struct FfiBatchResponse;
 
 FfiResponse manifold_union_batch(rust::Slice<const double> vertices,
                                  rust::Slice<const std::uint64_t> triangles,
@@ -21,6 +22,15 @@ FfiResponse manifold_difference_batch(
     rust::Slice<const std::uint64_t> triangles,
     rust::Slice<const std::uint64_t> vertex_offsets,
     rust::Slice<const std::uint64_t> triangle_offsets,
+    std::uint64_t max_output_vertices,
+    std::uint64_t max_output_triangles) noexcept;
+
+FfiBatchResponse manifold_trim_subtract_each(
+    rust::Slice<const double> vertices,
+    rust::Slice<const std::uint64_t> triangles,
+    rust::Slice<const std::uint64_t> vertex_offsets,
+    rust::Slice<const std::uint64_t> triangle_offsets,
+    rust::Slice<const double> planes,
     std::uint64_t max_output_vertices,
     std::uint64_t max_output_triangles) noexcept;
 

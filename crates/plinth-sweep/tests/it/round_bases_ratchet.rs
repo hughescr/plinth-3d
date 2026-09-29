@@ -143,7 +143,7 @@ const ANNULUS_INSET_MM: f64 = 1.0;
 const RECESS_DRAFT_MM: f64 = 0.67;
 
 /// One member of the `Round_*` family.
-struct Disc {
+pub(crate) struct Disc {
     name: &'static str,
     /// Radius of the plain glue face (the authored bottom).
     bottom_radius_mm: f64,
@@ -153,23 +153,62 @@ struct Disc {
     segments: usize,
     /// Arms placed at the glue-face-up pose (see the (4) assertion for why
     /// this is a pin and not a prediction). Measured 2026-09-28 as 169 / 338 /
-    /// 1142; RE-PINNED 2026-09-29 by the wall-creep lane to 89 / 304 / 1068, the
+    /// 1142; Round 25 re-pinned to 105 by fix/no-dangling (see `round_25`).
+    ///
+    /// RE-PINNED 2026-09-29 by the wall-creep lane, ON PURPOSE, to 88 / 304 /
+    /// 1067, measured on develop `5db81a5` merged into the lane. This is the
     /// move the (4) comment predicted: a drafted wall's creep is now priced by
     /// its overhang weight (`reach.rs`, `creep_step`), so the drafted recess
-    /// wall no longer draws minimum-size arms, and congestion remedy 2 seats
-    /// flank arms only in proportion to the stack (`congestion.rs`), which took
-    /// Round 25's 64 flank arms to 1. Measured with each rule alone on Round
-    /// 25: creep rule only 139, remedy-2 rule only 106, both 89.
+    /// wall no longer draws minimum-size hairline arms. Measured on the same
+    /// tree with only the creep weight switched off
+    /// (`SweepPolicy::without_creep_weight`): 105 / 338 / 1130, which is
+    /// develop's own count on all three discs; with it on, 88 / 304 / 1067, and
+    /// Round 25's 13 over-limit runs, 3 forced merges and 10 braces all go to 0.
+    /// The lane's other rule (congestion remedy 2 sized by the stack) does not
+    /// fire on any disc here: none is congested. The scar band is NOT widened:
+    /// the identity reads 1.00000 / 1.00000 / 0.99630 with the lane.
+    ///
+    /// Not a detector of the creep rule: 105 lies inside Round 25's band around
+    /// 88. `wall_creep::` grades the rule itself.
     pinned_arms: usize,
 }
 
-fn round_25() -> Disc {
+/// RE-PINNED 169 -> 105 on 2026-09-29 by fix/no-dangling, on purpose and
+/// said so; the ruling on it is the owner's (Round bases are the gate).
+///
+/// The 169 held 64 FLANK ARMS the congestion lane inserted (arms 105-168, 4
+/// rounds, still congested at exit) to answer a congestion the pre-congestion
+/// `unmerge_overgrown` pass had made itself: it put an over-grown trunk back
+/// on its straight plate column and left the branches that rested on it
+/// behind, and they came down to the plate beside it (1 overlapping root
+/// pair, stack depth 2). The slenderness lane then saw 77 over-limit runs and
+/// answered with 106 braces, 83 masts and 50 unbraced-run warnings.
+///
+/// Under "a trunk carrying branches moves with them or not at all" the two
+/// branches move with their trunk, the plate roots do not overlap (54 roots,
+/// ratio 1.0, 0 pairs), the congestion lane inserts nothing, and the
+/// slenderness lane sees 13 runs: 3 merges, 20 braces, 3 masts, 0 warnings.
+/// 105 is the up-sweep's own count. Every physical assertion in this file is
+/// unchanged and passes (flat, glue face up, residual 0, uncarried 0, p95
+/// spacing 2.102 mm under the lattice pitch, the scar invariant).
+///
+/// Measured, not argued: with the subtree walk in `unmerge_overgrown`
+/// sabotaged (trunk moves alone), this fixture returns to exactly 169 arms,
+/// 64 of them congestion-inserted. Round 50 is unchanged (338); Round 100
+/// moves 1142 -> 1130, inside its band. Evidence:
+/// `plinth-evidence/.../field-2026-09-28/lanes/no-dangling/retry/`.
+///
+/// RE-PINNED 105 -> 88 on 2026-09-29 by fix/wall-creep, on purpose: the creep
+/// rule removes the recess wall's hairline arms and the slenderness remedies
+/// that hung off them (see `Disc::pinned_arms`). Evidence:
+/// `plinth-evidence/.../field-2026-09-28/lanes/wall-creep/logs/ratchet-merged-*.log`.
+pub(crate) fn round_25() -> Disc {
     Disc {
         name: "Round 25",
         bottom_radius_mm: 11.5,
         rings: &[(2.62, 4.12)],
         segments: 96,
-        pinned_arms: 89,
+        pinned_arms: 88,
     }
 }
 
@@ -189,7 +228,7 @@ fn round_100() -> Disc {
         bottom_radius_mm: 49.0,
         rings: &[(2.62, 4.12), (12.25, 12.75), (25.0, 25.5)],
         segments: 128,
-        pinned_arms: 1068,
+        pinned_arms: 1067,
     }
 }
 
@@ -275,7 +314,7 @@ fn revolve(points: &[(f64, f64)], segments: usize) -> Mesh {
     Mesh::new(verts, tris).expect("the revolved disc is a valid mesh")
 }
 
-fn mesh_for(disc: &Disc) -> Mesh {
+pub(crate) fn mesh_for(disc: &Disc) -> Mesh {
     revolve(&profile(disc), disc.segments)
 }
 
@@ -324,7 +363,7 @@ fn orient_dense(mesh: &Mesh, name: &str) -> OrientedModel {
 /// same layer-plan construction `sweep_and_emit` uses: `plate_z = min_z −
 /// lift`, one layer plan stopping at the model top plus one layer of
 /// headroom.
-fn place(mesh: &Mesh, name: &str) -> SweepPlan {
+pub(crate) fn place(mesh: &Mesh, name: &str) -> SweepPlan {
     let (min_z, max_z) = z_span(mesh);
     let plate_z = min_z - LIFT_MM;
     let height = layer_height_mm();
@@ -438,6 +477,24 @@ fn round_bases_stay_flat_supported_and_land_glue_face_up() {
         let plan = place(oriented.mesh(), disc.name);
         let report = &plan.report;
         let elapsed_s = started.elapsed().as_secs_f64();
+        // Where the arm count comes from, printed so a re-pin can say which
+        // pass moved it (see (4)): arms the congestion lane inserted, branches
+        // the un-merge moved with their trunk, and the slenderness remedies.
+        println!(
+            "{}: arms inserted by congestion {} (rounds {}), by load {}; branches moved with \
+             their trunk {}; slenderness: runs over the limit {}, merges forced {}, braces {}, \
+             masts {}, unbraced-run warnings {}",
+            disc.name,
+            report.congestion_lane.arms_inserted,
+            report.congestion_lane.rounds_used,
+            report.arms_inserted_by_load,
+            report.merges_moved_with_trunk,
+            report.slenderness_lane.runs_over_limit_before,
+            report.slenderness_lane.merges_forced,
+            report.slenderness_lane.braces_added,
+            report.slenderness_lane.masts_dropped,
+            report.slenderness_lane.warnings.len(),
+        );
         let placed_arms = plan
             .struts
             .iter()
@@ -589,6 +646,33 @@ fn round_bases_stay_flat_supported_and_land_glue_face_up() {
         // Graded against `injected_load_mm2`, not `peak_layer_area_mm2`: the
         // two coincide only on a flat-bottomed model, and the glue-face-up
         // pose puts a ring, rib tops and a cavity ceiling at the bottom.
+        //
+        // WHAT IT MEASURES (2026-09-29): `total_scar_mm2` sums `π r_tip²`
+        // over the arms, and `r_tip` is each arm's CONTACT slot, sized from
+        // the peel that crosses that contact. So the identity holds exactly
+        // when every injected mm² reaches one contact once, up to the
+        // minimum-radius clamp. Until the contact-sizing rule a lander on a
+        // ring arm's head was booked into the parent's contact too, and this
+        // read 1.07-1.15 on a double count; the published split below is what
+        // a reader grades it against.
+        let contact_load_mm2: f64 = plan
+            .struts
+            .iter()
+            .filter(|strut| strut.kind == plinth_sweep::StrutKind::Arm)
+            .map(plinth_sweep::SweepStrut::tip_load_mm2)
+            .sum();
+        println!(
+            "{}: scar identity {:.5} (total scar {:.4} mm2, injected/X {:.4} mm2); contact slots \
+             hold {:.4} of {:.4} mm2 injected; {} lander merges moved below a contact ({:.4} mm2)",
+            disc.name,
+            report.total_scar_mm2 / (report.injected_load_mm2 / x_allowed()),
+            report.total_scar_mm2,
+            report.injected_load_mm2 / x_allowed(),
+            contact_load_mm2,
+            report.injected_load_mm2,
+            report.counters.contact_merges_moved_below,
+            report.contact_merge_load_moved_mm2,
+        );
         assert!(
             (report.total_scar_mm2 - report.injected_load_mm2 / x_allowed()).abs()
                 <= bands::AREA_IDENTITY * report.injected_load_mm2 / x_allowed(),

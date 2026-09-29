@@ -15,10 +15,14 @@
 #[path = "../harness/mod.rs"]
 mod harness;
 
+mod bracing;
 mod congestion_lane;
+mod contact_sizing;
 mod drain_connectivity;
 mod emitted_profile_covers_ledger;
+mod every_member_rests_on_something;
 mod flank_relief;
+mod footprint_moves_hold_the_rules;
 mod load_insertion;
 mod mast_root_clearance;
 mod model_landing_scar;
@@ -31,9 +35,11 @@ mod orient_demand_parallel;
 mod pitch_invariance;
 mod plate_root_contact;
 mod pose_demand_probe;
+mod root_disc_as_drawn;
 mod round_bases_ratchet;
 mod sabotage;
 mod shaft_landing;
+mod shaft_seat_trim;
 mod slenderness_lane;
 mod tip_contact_scar;
 mod tip_seating;

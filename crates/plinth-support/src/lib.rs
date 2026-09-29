@@ -176,7 +176,8 @@ pub use initial::ContactConstructionLimits;
 /// `lower` stays crate-private: this exposes the primitive chain, not the
 /// forest data model behind it.
 pub use lower::{
-    lower_sweep_arms, SweepArm, SweepArmLanding, SweepLowering, SweepLoweringError,
+    drawn_root_radius_mm, lower_sweep_arms, tip_contact_discs, SweepArm, SweepArmLanding,
+    SweepLowering, SweepLoweringError, TipContactDisc,
 };
 /// TEST-ONLY, behind the quarantined `seat-minimum-probe` feature.
 #[cfg(feature = "seat-minimum-probe")]
@@ -238,10 +239,6 @@ enum SphereGeometryKind {
         center_mm: [Finite; 3],
         outward_axis_unit: [Finite; 3],
         exact_record_poles: Option<(PositiveFinite, [Finite; 3], [Finite; 3])>,
-        /// World Z above which this ball's MESH is not emitted — the far face
-        /// of the cured model run the tip strikes. `None` is the ordinary
-        /// whole ball.
-        clip_above_z_mm: Option<Finite>,
     },
     Joint {
         center_mm: [Finite; 3],
@@ -268,54 +265,7 @@ impl SphereGeometry {
             center_mm,
             outward_axis_unit,
             exact_record_poles: None,
-            clip_above_z_mm: None,
         }))
-    }
-
-    /// The same ball, with everything above world Z `clip_z_mm` removed from
-    /// the emitted MESH and the opening closed by a flat cap.
-    ///
-    /// **Why the geometry is cut and not shrunk** (owner ruling, 2026-09-05):
-    /// *"Push the support tip into the model as deeply as it needs to go to
-    /// reach the contact area that is needed, then TRUNCATE the geometry beyond
-    /// the model's surface so the tip cannot protrude on the other side of any
-    /// thin model layer."* A smaller ball would deliver a smaller cut disc,
-    /// which is the contact area the law sized; a clipped ball delivers the
-    /// same disc and stops at the far face.
-    ///
-    /// **What does NOT change.** The semantic centre, axis and radius are
-    /// untouched, so [`Self::canonical_poles`] still reports the whole ball's
-    /// two metadata poles and the record's own `start`/`end`/`r` fields are
-    /// exactly what they were. Only the triangle soup is cut.
-    ///
-    /// Rejects a clip on a joint sphere: a joint ball is not seated in the
-    /// model and has no far face to strike.
-    pub fn clipped_above_z(self, clip_z_mm: Finite) -> Result<Self, SupportError> {
-        match self.0 {
-            SphereGeometryKind::Tip {
-                center_mm,
-                outward_axis_unit,
-                exact_record_poles,
-                ..
-            } => Ok(Self(SphereGeometryKind::Tip {
-                center_mm,
-                outward_axis_unit,
-                exact_record_poles,
-                clip_above_z_mm: Some(clip_z_mm),
-            })),
-            SphereGeometryKind::Joint { .. } => Err(SupportError::InvalidPrimitive),
-        }
-    }
-
-    /// World Z above which this ball's mesh is cut off, if it is cut at all.
-    #[must_use]
-    pub fn clip_above_z_mm(&self) -> Option<Finite> {
-        match &self.0 {
-            SphereGeometryKind::Tip {
-                clip_above_z_mm, ..
-            } => *clip_above_z_mm,
-            SphereGeometryKind::Joint { .. } => None,
-        }
     }
 
     /// Bind a contact sphere to the Python record arithmetic: its metadata poles are authored
@@ -340,7 +290,6 @@ impl SphereGeometry {
             center_mm,
             outward_axis_unit,
             exact_record_poles: Some((radius, start_mm, end_mm)),
-            clip_above_z_mm: None,
         }))
     }
 
@@ -520,6 +469,76 @@ pub struct SupportPrimitive {
     /// Required authority for type-7/type-9 sphere records; absent for
     /// frusta and raft records.
     pub sphere_geometry: Option<SphereGeometry>,
+    /// **The seat face this primitive may not cross** (fix/tip-trim,
+    /// 2026-09-28). Present on a seated arm's tip ball, on the first segment
+    /// of its shaft, and on every further `Member` span of that shaft whose
+    /// solid reaches the model side of the plane (review-fixes 2026-09-29: the
+    /// drawn profile can cut the shaft into records inside that band), and on
+    /// nothing else. The emitter keeps only the
+    /// part of the primitive on the support side of this plane that is also
+    /// outside the model solid; the record's own `start`/`end`/radii are
+    /// untouched.
+    pub seat_trim: Option<SeatTrim>,
+}
+
+/// **THE SEAT FACE'S PLANE** (fix/tip-trim, 2026-09-28): a point on the model
+/// face a tip carries and that face's OUTWARD unit normal.
+///
+/// *The rule.* A tip ball and its arm's shaft (the first segment, and every
+/// further span the plane crosses) keep only
+/// `primitive ∩ {p : (p − point)·n ≥ 0} ∖ model solid`. The half-space is the
+/// support side of the face; the model difference removes what a plane cannot
+/// see (a concave corner, a ball straddling two faces). What survives meets the
+/// face in a flat cut disc lying ON the face — the contact area the seat law
+/// sized — and nothing stands inside the model or past its far side.
+///
+/// It replaces the horizontal "far face" clip, which cut only the ball's top
+/// at the column's own cured thickness: a horizontal plane says nothing about
+/// a face's edge, it left every ball buried below it, and it never touched the
+/// taper (`plinth-evidence/.../field-2026-09-28/tip-clip.md`). The far face
+/// lies on the model side of the seat plane, so the half-space already removes
+/// everything the far-face plane did.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SeatTrim {
+    point_mm: [Finite; 3],
+    outward_normal: [Finite; 3],
+}
+
+impl SeatTrim {
+    /// A seat plane through `point_mm` with outward normal `outward`,
+    /// normalised here once.
+    ///
+    /// # Errors
+    ///
+    /// [`SupportError::InvalidPrimitive`] for a non-finite point or a zero or
+    /// non-finite normal.
+    pub fn new(point_mm: [f64; 3], outward: [f64; 3]) -> Result<Self, SupportError> {
+        let unit = geom_kernel::vec3::normalize(outward).ok_or(SupportError::InvalidPrimitive)?;
+        Ok(Self {
+            point_mm: finite_array(point_mm)?,
+            outward_normal: finite_array(unit)?,
+        })
+    }
+
+    #[must_use]
+    pub fn point_mm(&self) -> [f64; 3] {
+        self.point_mm.map(Finite::get)
+    }
+
+    #[must_use]
+    pub fn outward_normal(&self) -> [f64; 3] {
+        self.outward_normal.map(Finite::get)
+    }
+
+    /// Signed distance of `p` from the plane: positive on the SUPPORT side,
+    /// negative on the model side.
+    #[must_use]
+    pub fn support_side_distance_mm(&self, p: [f64; 3]) -> f64 {
+        geom_kernel::vec3::dot(
+            geom_kernel::vec3::sub(p, self.point_mm()),
+            self.outward_normal(),
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -697,11 +716,22 @@ impl SupportPrimitive {
             (_, None) => true,
             _ => false,
         };
+        // Only a seated tip and the spans of its shaft are trimmed to a seat
+        // face; on a joint, a root flare or a raft record the plane would be a
+        // lie about what the member touches.
+        let trim_on_a_seated_member = self.seat_trim.is_none()
+            || matches!(
+                self.segment_kind,
+                SupportSegmentKind::ContactSphere
+                    | SupportSegmentKind::ContactTaper
+                    | SupportSegmentKind::Member
+            );
         nonzero_frustum
             && raft_pad_is_a_point
             && taper_depth_matches
             && ring_provenance_matches
             && sphere_poles_match
+            && trim_on_a_seated_member
     }
 }
 
@@ -2608,6 +2638,7 @@ mod tests {
                 .then(|| PositiveFinite::new(0.2).expect("fixture contact depth")),
             ring_normal: FrustumRingNormal::SegmentAxis,
             sphere_geometry: None,
+            seat_trim: None,
         }
     }
 
@@ -2891,6 +2922,7 @@ mod tests {
                 Finite::new(0.0).unwrap(),
                 Finite::new(0.0).unwrap(),
             ])),
+            seat_trim: None,
         }];
         let lift_mm = PositiveFinite::new(5.0).expect("positive fixture lift");
         let mismatch = SupportedModel::from_parts(
@@ -3007,6 +3039,7 @@ mod tests {
                 contact_depth_mm: None,
                 ring_normal: FrustumRingNormal::SegmentAxis,
                 sphere_geometry: Some(sphere_geometry),
+                seat_trim: None,
             };
             let history = fixture_history(std::slice::from_ref(&primitive));
             assert!(matches!(

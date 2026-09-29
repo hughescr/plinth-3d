@@ -224,6 +224,23 @@ pub struct SweepRunReport {
     /// Merges undone because the parent trunk they loaded would have had to
     /// exceed the registered maximum tip radius to carry the sum.
     pub merges_refused_by_radius: usize,
+    /// Merges the radius ceiling would have undone and did NOT, because
+    /// another member rests on the arm that would have moved: a trunk that
+    /// carries branches may not move without them. A WARNING quantity — the
+    /// trunk it loads sits at the registered maximum radius.
+    pub merges_kept_carrying: usize,
+    /// Merged arms put back ONLY because the trunk they rest on was put back:
+    /// a trunk moves with its branches or not at all. Counted inside
+    /// `merges_refused_by_radius` too.
+    pub merges_moved_with_trunk: usize,
+    /// Landings the un-merge pass found whose parent does not stand at the
+    /// landing layer at all. Counted, never skipped in silence.
+    pub unmerge_stale_landings: usize,
+    /// **Every member rests on something**: the landing-validity check run
+    /// after every pass that edits landings, the finished field's own check,
+    /// and the load gap `injected - plate reaction - uncarried`. A WARNING on
+    /// an emitted file, never a refusal.
+    pub landing_check: crate::landing_check::LandingLedger,
     /// The largest sideways move one layer of descent may make, in mm --
     /// `h * cot(OVERHANG_ANGLE_DEG - OVERHANG_WEIGHT_TRANSITION_DEG/2)`. Zero
     /// when the lean is disabled, which is the sabotage state.
@@ -251,6 +268,10 @@ pub struct SweepRunReport {
     /// sees what the footprint measured and what the remedies did, rather than
     /// inferring it from an arm count.
     pub congestion_lane: crate::congestion::CongestionOutcome,
+    /// The footprint rule (fix/tip-trim, 2026-09-28): every tip's contact
+    /// disc graded against its seat face, the seats it moved onto the face,
+    /// and the knife edges it could only warn about.
+    pub seat_footprint: crate::footprint::FootprintOutcome,
     /// **The resin the area law SIZED**, in mm³: `π r²` integrated along every
     /// arm's own axis, layer by layer, with a leaned layer measured along its
     /// slant rather than its rise.
@@ -279,6 +300,12 @@ pub struct SweepRunReport {
     /// `uncarried_load_mm2`, named so it can never hide inside it.
     pub misrouted_load_mm2: f64,
     pub tip_column_root_load_mm2: f64,
+    /// Load, in mm², that landers handed to a support arm's head and that the
+    /// down-sweep booked into the shaft BELOW the contact rather than into the
+    /// contact slot (2026-09-29). The contact is sized from the arm's own peel;
+    /// this load is carried by the shaft. Counted in
+    /// [`PathHits::contact_merges_moved_below`].
+    pub contact_merge_load_moved_mm2: f64,
     /// Path-hit counters. A green oracle must never be able to mean "the path
     /// never ran" (the witness-must-exercise-the-path lesson).
     pub counters: PathHits,
@@ -318,6 +345,14 @@ pub struct PathHits {
     /// search never ran, which a merge count of zero on its own cannot tell
     /// you.
     pub lean_candidates_priced: u64,
+    /// Down-sweep reads where a lander's load reached a support arm's contact
+    /// slot and was booked one slot lower, into the shaft (2026-09-29). Zero
+    /// means no arm landed on another arm's head, which a green
+    /// `contact_sizing` test must not be allowed to mean.
+    pub contact_merges_moved_below: u64,
+    /// The same, at an arm with no slot below its contact: the load stays in
+    /// the one slot (there is no shaft to take it) and is counted here.
+    pub contact_merges_kept_at_single_slot: u64,
 }
 
 impl SweepRunReport {
@@ -502,6 +537,7 @@ impl SweepRunReport {
             },
         )
         .expect("writing to a String cannot fail");
+        out.push_str(&self.render_landing_check());
         if self.sweeps_disagree {
             writeln!(
                 out,
@@ -525,6 +561,65 @@ impl SweepRunReport {
             out,
             "A shortfall above is a WARNING on an emitted file, never a gate. This output is \
              diagnostic evidence about the engine."
+        )
+        .expect("writing to a String cannot fail");
+        out
+    }
+
+    /// The landing-validity line: every member rests on something, or the
+    /// file says which do not. One line, with the per-pass trail beside it so
+    /// a pass that broke a chain is named even when a later pass mended it.
+    #[must_use]
+    pub fn render_landing_check(&self) -> String {
+        let ledger = &self.landing_check;
+        let finished = &ledger.finished;
+        let mut trail = String::new();
+        for (index, pass) in ledger.passes.iter().enumerate() {
+            if index > 0 {
+                trail.push_str("; ");
+            }
+            write!(
+                trail,
+                "{} {} unrooted / {} invalid",
+                pass.pass, pass.unrooted, pass.invalid_landings
+            )
+            .expect("writing to a String cannot fail");
+        }
+        let verdict = if finished.clean() {
+            "every member rests on the plate, the model, or a member that stands there"
+        } else {
+            "WARNING: members whose lower end rests on NOTHING are in this file (a warning on an \
+             emitted file, never a refusal)"
+        };
+        let mut out = String::new();
+        writeln!(
+            out,
+            "Landings: {verdict}. Finished field: {} member-on-member landings checked; {} \
+             unrooted members {:?}; {} landed on a parent that is not there at the landing \
+             layer, {} on a parent that stands in another cell there; {} brace tops tied to a \
+             member that has moved; load gap (injected - plate reaction - uncarried) {:.4} mm2, \
+             of which {:.4} mm2 is peel carried under a larger event in the same arm ({} reads; \
+             not lost) and {:.4} mm2 went nowhere the down-sweep can name; \
+             {} over-grown merges kept because a branch they carry has nowhere to go; {} \
+             branches put back with their trunk; {} stale landings met \
+             by the un-merge pass; slenderness merges refused because the arm carries someone \
+             {}, shafts refused because their member no longer stands there {}. After each \
+             pass: {trail}.",
+            finished.strut_landings,
+            finished.unrooted.len(),
+            finished.unrooted,
+            finished.parent_absent.len(),
+            finished.parent_elsewhere.len(),
+            finished.brace_tops_detached.len(),
+            ledger.load_gap_mm2,
+            ledger.absorbed_mm2,
+            ledger.absorbed_reads,
+            ledger.unexplained_gap_mm2(),
+            self.merges_kept_carrying,
+            self.merges_moved_with_trunk,
+            self.unmerge_stale_landings,
+            self.slenderness_lane.merges_refused_carrying,
+            self.slenderness_lane.merges_refused_stale_shaft,
         )
         .expect("writing to a String cannot fail");
         out

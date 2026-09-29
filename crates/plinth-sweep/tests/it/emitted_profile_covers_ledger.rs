@@ -22,8 +22,9 @@
 //! | `a_brace_thicker_than_its_trunks_raises_them_on_the_brace_pair` | the same, with every brace thickened past any trunk's ledger: the junction clause (a brace's root on its trunk, and its top on its host) must raise the trunks to meet it |
 //!
 //! A branch whose root does not touch the trunk its ledger names (the
-//! stilt plate's 11 un-merged branches, a separate defect) is counted EXACTLY
-//! per fixture and printed; it is not an inversion and no profile can fix it.
+//! stilt plate carried 11 such un-merged branches until fix/no-dangling; every
+//! fixture now pins 0) is counted EXACTLY per fixture and printed; it is not an
+//! inversion and no profile can fix it.
 //!
 //! How the tests are kept from passing vacuously: each counts the slots and
 //! junctions it graded and fails on zero; each requires the member it grades
@@ -271,11 +272,17 @@ fn census(plan: &SweepPlan, emission: &SweepEmission) -> Census {
         ..Census::default()
     };
     // Pair each member with its strut by WHERE IT LANDS, not only by order.
-    for (strut, group) in plan.struts.iter().zip(&groups) {
+    // The landing is the base cell's centre, moved with its host's drawn axis
+    // when the footprint rule slid that host's seat along its face
+    // (fix/tip-trim, 2026-09-28: `footprint::followed_shifts`, zero where
+    // nothing moved).
+    let followed = plinth_sweep::footprint::followed_shifts(&plan.struts);
+    for ((strut, group), follow) in plan.struts.iter().zip(&groups).zip(&followed) {
         let base_cell = strut.base_cell();
+        let base_shift = follow.base_mm.unwrap_or([0.0; 3]);
         let base = [
-            plan.grid.center_x_mm(plan.grid.col_of(base_cell)),
-            plan.grid.center_y_mm(plan.grid.row_of(base_cell)),
+            plan.grid.center_x_mm(plan.grid.col_of(base_cell)) + base_shift[0],
+            plan.grid.center_y_mm(plan.grid.row_of(base_cell)) + base_shift[1],
         ];
         let (root_point, _) = drawn_root(group).expect("every member has a shaft");
         assert!(
@@ -492,16 +499,20 @@ fn a_brace_thicker_than_its_trunks_raises_them_on_the_brace_pair() {
 }
 
 /// The fixture Craig's screenshot came from: 145 members, 21 attached drawn
-/// inversions before the fix. It also carries the SEPARATE detached-junction
+/// inversions before the fix. It also carried the SEPARATE detached-junction
 /// defect (11 branches un-merged off their trunk, field report "trunk-thinner",
-/// second defect), which no drawing of the profile can repair; those are
-/// counted exactly and excluded from the junction clause, and belong to their
-/// own lane.
+/// second defect), which no drawing of the profile can repair. That defect's
+/// own lane (fix/no-dangling: a trunk moves with its branches or not at all,
+/// in `unmerge_overgrown` and the slenderness forced-merge loop) removed all
+/// 11, so the count is now pinned at 0 and every one of those junctions is
+/// graded by the junction clause like any other (measured on the merge of
+/// fix/no-dangling with develop 4b58aeb: 155 members, 120 junctions graded,
+/// 0 detached, 0 inversions).
 #[test]
 fn emitted_profile_covers_the_ledger_on_the_tall_stilt_plate() {
     grade(
         "make_tall_stilt_plate",
         &make_tall_stilt_plate().expect("the tall stilt plate fixture"),
-        11,
+        0,
     );
 }

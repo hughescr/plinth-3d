@@ -278,10 +278,33 @@ pub fn measure(
 /// A `Brace` is excluded because it gets no root flare and never lands on the
 /// plate; an `Arm` and a `Mast` both keep the plate-root chain, so both are
 /// counted.
+///
+/// **The disc is the DRAWN root's** (review-fixes 2026-09-29). Until then it
+/// was sized from the ledger's `radius_mm[0]`, while the lowering flares the
+/// root of the profile the member is DRAWN at — the ledger raised by the
+/// junction clause wherever a thicker branch (a brace) joins it
+/// ([`crate::adapter::drawn_profiles`]). A braced plate arm then printed a
+/// wider foot than every clearance decision and the census had seen. The root
+/// is now [`plinth_support::drawn_root_radius_mm`] of that drawn profile: the
+/// lowering's own rule on the lowering's own profile.
 pub(crate) fn root_discs(
     grid: &Grid,
     history: &ColumnHistory,
     struts: &[SweepStrut],
+    flare_factor: f64,
+) -> Vec<RootDisc> {
+    let (profiles, _) = crate::adapter::drawn_profiles(struts);
+    root_discs_drawn(grid, history, struts, &profiles, flare_factor)
+}
+
+/// [`root_discs`] over drawn profiles the caller already holds (one per
+/// strut, in strut order), so a pass that keeps them live does not re-derive
+/// them.
+pub(crate) fn root_discs_drawn(
+    grid: &Grid,
+    history: &ColumnHistory,
+    struts: &[SweepStrut],
+    profiles: &[Vec<f64>],
     flare_factor: f64,
 ) -> Vec<RootDisc> {
     let factor = if flare_factor.is_finite() && flare_factor > 0.0 {
@@ -290,13 +313,11 @@ pub(crate) fn root_discs(
         1.0
     };
     let mut discs = Vec::with_capacity(struts.len());
-    for strut in struts {
+    for (strut, profile) in struts.iter().zip(profiles) {
         if !matches!(strut.landing, Landing::Plate) || strut.kind == StrutKind::Brace {
             continue;
         }
-        let Some(&root) = strut.radius_mm.first() else {
-            continue;
-        };
+        let root = plinth_support::drawn_root_radius_mm(profile, strut.tip_radius_mm());
         if !(root.is_finite() && root > 0.0) {
             continue;
         }
@@ -848,6 +869,7 @@ fn seat_flank_arms(
             ],
             kind: StrutKind::Arm,
             min_radius_mm: 0.0,
+            thickened_mm: Vec::new(),
             seat_on_strut: None,
             k_top: shelf,
             k_bottom: 0,
@@ -862,7 +884,7 @@ fn seat_flank_arms(
             // load-inserted arms carry keeps it out of that pass entirely.
             inserted_by_load: true,
             path,
-            seat_solid_layers: 0,
+            seat_face: crate::SeatFace::default(),
             seat_normal: [0.0; 3],
             straight_fallback: None,
             fallback_path: Vec::new(),
@@ -1438,6 +1460,29 @@ pub(crate) fn push_disc(
         section_mm2: core::f64::consts::PI * bare_radius_mm * bare_radius_mm,
         under_silhouette,
     });
+}
+
+/// Where member `id`'s own root disc sits in `placed`, if it has one.
+pub(crate) fn disc_slot(placed: &[RootDisc], id: u32) -> Option<usize> {
+    placed.iter().position(|disc| disc.id == id)
+}
+
+/// The FLARED radius of the disc in `slot`.
+pub(crate) fn disc_radius_mm(placed: &[RootDisc], slot: usize) -> Option<f64> {
+    placed.get(slot).map(|disc| disc.radius_mm)
+}
+
+/// Grow the disc in `slot` to a new bare root radius, flared by the same
+/// factor the emitter uses. The slenderness lane's thicken rung calls this
+/// once it has shown the grown disc clears every other root, so the next
+/// clearance test sees the root as it will be printed.
+pub(crate) fn grow_disc(placed: &mut [RootDisc], slot: usize, flared_radius_mm: f64, bare_radius_mm: f64) {
+    if let Some(disc) = placed.get_mut(slot) {
+        disc.radius_mm = disc.radius_mm.max(flared_radius_mm);
+        disc.section_mm2 = disc
+            .section_mm2
+            .max(core::f64::consts::PI * bare_radius_mm * bare_radius_mm);
+    }
 }
 
 /// How many of `ids` have a root disc that overlaps ANY other plate root on the

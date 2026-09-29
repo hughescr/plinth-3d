@@ -292,6 +292,83 @@ impl ManifoldBackend {
         run_batch_limited(meshes, limits, ffi::manifold_union_batch)
     }
 
+    /// **Many pieces, each trimmed to its own half-space and then minus ONE
+    /// shared solid, in one native call** (fix/tip-trim, 2026-09-28).
+    ///
+    /// Piece `i` becomes `pieces[i] ∩ keep[i] ∖ subtrahend`. This is the shape
+    /// the support tips need: hundreds of small primitives, each cut against
+    /// the same model, each keeping its own result. [`Self::difference_limited`]
+    /// cannot do it — it subtracts a union FROM one minuend and returns one
+    /// mesh — and a per-piece call would be a per-item native crossing in a
+    /// hot path. The subtrahend is imported once for the whole batch.
+    ///
+    /// A piece may come out EMPTY (`mesh: None`); that is information for the
+    /// caller, not an error. The three volumes let the caller say which cut
+    /// actually removed material.
+    ///
+    /// # Errors
+    ///
+    /// The same input, limit and native errors [`Self::difference_limited`]
+    /// returns, and [`SolidError::NativeValidation`] when `keep` does not have
+    /// one entry per piece.
+    pub fn trim_and_subtract_each(
+        &self,
+        subtrahend: &Mesh,
+        pieces: &[Mesh],
+        keep: &[KeepHalfSpace],
+        limits: BooleanLimits,
+    ) -> Result<Vec<TrimmedPiece>, SolidError> {
+        if pieces.len() != keep.len() {
+            return Err(SolidError::NativeValidation(
+                NativeValidationError::DifferenceArity,
+            ));
+        }
+        if pieces.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut meshes = Vec::with_capacity(pieces.len() + 1);
+        meshes.push(subtrahend.clone());
+        meshes.extend_from_slice(pieces);
+        let estimate = BooleanInputEstimate::for_meshes(&meshes)?;
+        validate_input_limits(estimate, limits)?;
+        validate_manifold_input_representability(&meshes)?;
+        let batch = FlatBatch::gather(&meshes)?;
+        let planes: Vec<f64> = keep
+            .iter()
+            .flat_map(|half| [half.normal[0], half.normal[1], half.normal[2], half.offset])
+            .collect();
+        let response = ffi::manifold_trim_subtract_each(
+            &batch.vertices,
+            &batch.triangles,
+            &batch.vertex_offsets,
+            &batch.triangle_offsets,
+            &planes,
+            limits.max_output_vertices,
+            limits.max_output_triangles,
+        );
+        if response.code != ffi::FfiErrorCode::Success {
+            let header = ffi::FfiResponse {
+                code: response.code,
+                manifold_status: response.manifold_status,
+                has_mesh_index: response.has_mesh_index,
+                mesh_index: response.mesh_index,
+                output_limit: response.output_limit,
+                output_count: response.output_count,
+                mesh: ffi::FfiMesh {
+                    vertices: Vec::new(),
+                    triangles: Vec::new(),
+                },
+            };
+            // Every non-success code maps to an error; a "success" here
+            // would be a protocol violation.
+            return match map_native_response_with_limits(header, limits) {
+                Ok(_) => Err(SolidError::InvalidNativeResponse),
+                Err(error) => Err(error),
+            };
+        }
+        unflatten_batch(response.batch, pieces.len())
+    }
+
     /// Runs one batch-shaped difference while enforcing explicit ABI limits.
     /// Input limits are checked before gathering or crossing the native boundary.
     pub fn difference_limited(
@@ -673,6 +750,93 @@ fn checked_u64_scalar_count(mut lengths: impl Iterator<Item = usize>) -> Result<
             .and_then(|scalars| total.checked_add(scalars))
             .ok_or(SolidError::BatchTooLarge)
     })
+}
+
+/// The kept side of a plane: `{p : normal · p >= offset}`. `normal` need not
+/// be unit length; it only has to be finite and non-zero.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KeepHalfSpace {
+    pub normal: [f64; 3],
+    pub offset: f64,
+}
+
+/// One piece's result from [`ManifoldBackend::trim_and_subtract_each`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrimmedPiece {
+    /// `None` when nothing of the piece survives.
+    pub mesh: Option<Mesh>,
+    /// The piece's own solid volume, as the native backend measured it.
+    pub whole_volume: f64,
+    /// After the half-space trim alone.
+    pub after_half_space_volume: f64,
+    /// After the half-space trim AND the subtraction.
+    pub after_subtraction_volume: f64,
+}
+
+fn unflatten_batch(
+    batch: ffi::FfiMeshBatch,
+    pieces: usize,
+) -> Result<Vec<TrimmedPiece>, SolidError> {
+    let ffi::FfiMeshBatch {
+        vertices,
+        triangles,
+        vertex_offsets,
+        triangle_offsets,
+        volumes,
+    } = batch;
+    if vertex_offsets.len() != pieces + 1
+        || triangle_offsets.len() != pieces + 1
+        || volumes.len() != 3 * pieces
+    {
+        return Err(SolidError::NativeValidation(
+            NativeValidationError::OutputCountMismatch,
+        ));
+    }
+    let span =
+        |offsets: &[u64], index: usize, total: usize| -> Result<(usize, usize), SolidError> {
+            let lo =
+                usize::try_from(offsets[index]).map_err(|_| SolidError::InvalidNativeResponse)?;
+            let hi = usize::try_from(offsets[index + 1])
+                .map_err(|_| SolidError::InvalidNativeResponse)?;
+            if lo > hi || hi > total || lo % 3 != 0 || hi % 3 != 0 {
+                return Err(SolidError::NativeValidation(
+                    NativeValidationError::OffsetOrderOrAlignment,
+                ));
+            }
+            Ok((lo, hi))
+        };
+    if vertex_offsets.last().copied() != u64::try_from(vertices.len()).ok()
+        || triangle_offsets.last().copied() != u64::try_from(triangles.len()).ok()
+    {
+        return Err(SolidError::NativeValidation(
+            NativeValidationError::OffsetSpan,
+        ));
+    }
+    let mut out = Vec::with_capacity(pieces);
+    for index in 0..pieces {
+        let (v_lo, v_hi) = span(&vertex_offsets, index, vertices.len())?;
+        let (t_lo, t_hi) = span(&triangle_offsets, index, triangles.len())?;
+        let mesh = if v_lo == v_hi && t_lo == t_hi {
+            None
+        } else {
+            let piece_vertices = vertices[v_lo..v_hi]
+                .chunks_exact(3)
+                .map(|values| [values[0], values[1], values[2]])
+                .collect();
+            let piece_triangles = triangles[t_lo..t_hi]
+                .chunks_exact(3)
+                .map(|values| [values[0], values[1], values[2]])
+                .collect();
+            Some(Mesh::new(piece_vertices, piece_triangles).map_err(SolidError::InvalidOutput)?)
+        };
+        out.push(TrimmedPiece {
+            mesh,
+            whole_volume: volumes[3 * index],
+            after_half_space_volume: volumes[3 * index + 1],
+            after_subtraction_volume: volumes[3 * index + 2],
+        });
+    }
+    Ok(out)
 }
 
 fn unflatten(output: ffi::FfiMesh) -> Result<Mesh, MeshValidationError> {

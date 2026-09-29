@@ -13,6 +13,9 @@ chitubox_io = { path = "../../rust/chitubox_io" }
 geom_kernel = { path = "../../rust/geom_kernel" }
 plinth-core = { path = "../plinth-core" }
 plinth-mesh = { path = "../plinth-mesh" }
+# The seat trim (fix/tip-trim): every seated tip and first shaft segment minus
+# the model solid, in one batched Manifold call.
+plinth-solid = { path = "../plinth-solid" }
 plinth-support = { path = "../plinth-support" }
 serde = { workspace = true }
 thiserror = { workspace = true }

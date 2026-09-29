@@ -45,7 +45,9 @@ pub mod adapter;
 pub mod congestion;
 pub mod down_sweep;
 pub mod drain;
+pub mod footprint;
 pub mod grid;
+pub mod landing_check;
 pub mod lean;
 pub mod limits;
 pub mod model_landing;
@@ -148,6 +150,20 @@ pub struct SweepStrut {
     /// place the radius is chosen (`down_sweep::run`), and it is a MINIMUM, so
     /// a brace that some load does reach still grows under the area law.
     pub min_radius_mm: f64,
+    /// The radius the slenderness lane's THICKEN rung requires at each
+    /// ABSOLUTE layer (index = layer, not slot), or empty when the member was
+    /// never thickened.
+    ///
+    /// The owner's ruling of 2026-09-29: a post that runs too far unbraced may
+    /// be made stiffer instead of tied — "raise the root radius, keep the tip",
+    /// never above the 1.0 mm maximum. The lane writes the root it needs here
+    /// (a taper from the tip it kept down to the raised root, then that root
+    /// all the way to the member's own foot, so the member is never narrower
+    /// below than above), and `down_sweep::run` applies it the same way it
+    /// applies [`Self::min_radius_mm`]: as a MINIMUM beside the area law, so a
+    /// member some load reaches still grows under the law. Keyed by absolute
+    /// layer so it survives a re-run that re-sizes the ledger.
+    pub thickened_mm: Vec<f64>,
     /// For a brace, the arm its TOP seats on. `None` for everything else.
     ///
     /// The bottom end of a brace is its `landing`, which the ledger already
@@ -213,25 +229,55 @@ pub struct SweepStrut {
     /// merge recorded it, so an un-merge restores the member the placement
     /// chose (possibly leaned) rather than a vertical column it never used.
     pub fallback_path: Vec<u32>,
-    /// Cured model laminae standing at and above this arm's own `k_top`, in
-    /// its own tip column — the thickness the tip has to seat INTO.
+    /// The face this tip carries and what the footprint rule did at it,
+    /// filled once the strut set is final ([`footprint`]). Its point is
+    /// derived and moves no arm, so it is not digested; its `shift_mm` DOES
+    /// move the seat, and [`digest`] absorbs it whenever it is non-zero.
     ///
-    /// Filled by [`seat_solid_layers`] once the strut set is final, because
-    /// the down-sweep both adds and removes arms and a value captured earlier
-    /// would belong to a field nobody prints. `0` means "unmeasured", and the
-    /// lowering then seats nothing rather than guessing: an arm that reads
-    /// zero is counted in `tips_truncated_by_thin_wall`, never dropped.
-    ///
-    /// It is DERIVED from the model and the arm's own seat, so it is
-    /// deliberately absent from [`digest`]: the plan digest names the
-    /// PLACEMENT, and this field moves no arm.
-    pub seat_solid_layers: u32,
+    /// (Replaces `seat_solid_layers`, the cured thickness above the seat that
+    /// set the old far-face clip; the seat trim made that plane redundant.)
+    pub seat_face: SeatFace,
     /// Outward unit normal of the model face this tip carries, filled by
-    /// [`tip_seat_normals`] once the strut set is final. `[0, 0, 0]` means
-    /// unmeasured, and the lowering falls back to the arm's own axis.
-    ///
-    /// Derived, like [`Self::seat_solid_layers`], and likewise not digested.
+    /// [`tip_landing::tip_seat_faces`] once the strut set is final.
+    /// `[0, 0, 0]` means unmeasured, and the lowering falls back to straight
+    /// down. Derived and not digested.
     pub seat_normal: [f64; 3],
+}
+
+/// The face a tip carries, and what the footprint rule did there
+/// (fix/tip-trim, 2026-09-28).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SeatFace {
+    /// The carried face's point closest to the tip's landing point; `None`
+    /// where no down-facing face was found. With [`SweepStrut::seat_normal`]
+    /// it is the seat plane the tip is trimmed to.
+    pub point_mm: Option<[f64; 3]>,
+    /// The move the footprint rule gave the seat, IN the face's plane, so its
+    /// whole contact disc lies on the face. Zero when it did not move.
+    pub shift_mm: [f64; 3],
+    pub footprint: Footprint,
+}
+
+/// The footprint rule's verdict on one tip ([`footprint`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Footprint {
+    /// Not a seated tip, or no contact disc to grade.
+    #[default]
+    NotGraded,
+    /// The whole contact disc lies on the seat face where it was placed.
+    OnFace,
+    /// The seat was moved along the face so the whole disc lies on it.
+    MovedOntoFace,
+    /// A true knife edge: no seat within the search radius holds the whole
+    /// disc. The tip stays, trimmed, and is warned about with the fraction of
+    /// its disc on the face.
+    KnifeEdge { disc_on_face: f64 },
+    /// The disc hangs off its face and every on-face seat the search found
+    /// would have broken a rule of the finished field — the lean law, an
+    /// unbraced run's limit, or the drain keep-out — for the arm or a member
+    /// joined to it (review-fixes 2026-09-29). The tip stays, trimmed, and is
+    /// warned about with the fraction of its disc on the face.
+    MoveRefused { disc_on_face: f64 },
 }
 
 impl SweepStrut {
@@ -496,8 +542,12 @@ pub struct SweepPolicy {
     /// arms be tied by `|X|` braces instead.
     pub slenderness_merge: bool,
     /// Whether remedy 2 -- the `|X|` cross-brace -- may fire. **On in
-    /// production.** The drill turns it off and watches masts appear.
+    /// production.** The drill turns it off and watches thickening take over.
     pub slenderness_brace: bool,
+    /// Whether remedy 3 -- THICKEN, raising a member's root and keeping its
+    /// tip (owner ruling 2026-09-29) -- may fire. **On in production.** The
+    /// drill turns it off and watches masts appear.
+    pub slenderness_thicken: bool,
     /// Whether remedy 3 -- dropping a new plate-rooted mast -- may fire.
     /// **On in production.** The drill turns it off and watches the runs come
     /// out as warnings, with NEVER fewer arms than before.
@@ -566,6 +616,7 @@ impl SweepPolicy {
             slenderness: true,
             slenderness_merge: true,
             slenderness_brace: true,
+            slenderness_thicken: true,
             slenderness_mast: true,
             slenderness_mast_root_clearance: true,
             limits: SweepLimits {
@@ -675,11 +726,21 @@ impl SweepPolicy {
     }
 
     /// Refuse remedies 1 and 2. **Sabotage only**: the drill sets it and the
-    /// same arms must come out with masts dropped beside them.
+    /// same arms must come out thickened instead.
     #[must_use]
     pub const fn without_slenderness_brace(mut self) -> Self {
         self.slenderness_merge = false;
         self.slenderness_brace = false;
+        self
+    }
+
+    /// Refuse remedies 1, 2 and 3. **Sabotage only**: the drill sets it and
+    /// the same arms must come out with masts dropped beside them.
+    #[must_use]
+    pub const fn without_slenderness_thicken(mut self) -> Self {
+        self.slenderness_merge = false;
+        self.slenderness_brace = false;
+        self.slenderness_thicken = false;
         self
     }
 
@@ -690,6 +751,7 @@ impl SweepPolicy {
     pub const fn without_slenderness_mast(mut self) -> Self {
         self.slenderness_merge = false;
         self.slenderness_brace = false;
+        self.slenderness_thicken = false;
         self.slenderness_mast = false;
         self
     }
@@ -949,6 +1011,16 @@ pub fn run_sweep_with_drains(
         down_sweep::InsertionPolicy::disabled()
     };
     let mut outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
+    // SUPPORT COMES BEFORE WHAT RESTS ON IT. Every pass below that edits a
+    // landing is followed by one landing-validity check of the whole field
+    // (`landing_check`, `O(struts)`), so a pass that leaves a member standing
+    // on air is named on the emitted file rather than discovered in ChituBox.
+    // It only counts; it never moves or refuses anything.
+    let mut landings = landing_check::LandingLedger::default();
+    landings.record(
+        "up-sweep and down-sweep",
+        &landing_check::check_landings(&struts),
+    );
     let mut removals = 0_u64;
     let mut removals_refused_by_span = 0_u64;
     let mut removal_passes_rolled_back = 0_u64;
@@ -985,6 +1057,7 @@ pub fn run_sweep_with_drains(
         }
         removals += removed as u64;
     }
+    landings.record("removal", &landing_check::check_landings(&struts));
     // The interior test again, now that the down-sweep has added arms of its
     // own. Same test, same column history; running it twice is cheaper than
     // giving the down-sweep a reason to know about the up-sweep's history.
@@ -1003,14 +1076,23 @@ pub fn run_sweep_with_drains(
     // and it is bounded by the same registered pass count the removal loop
     // uses.
     let mut merges_refused_by_radius = 0_usize;
+    let mut merges_kept_carrying = 0_usize;
+    let mut unmerge_stale_landings = 0_usize;
+    let mut merges_moved_with_trunk = 0_usize;
     for _ in 0..policy.strut_removal_passes {
-        let undone = unmerge_overgrown(&mut struts, policy.tip_radius_max_mm);
-        if undone == 0 {
+        let unmerged = unmerge_overgrown(&mut struts, policy.tip_radius_max_mm);
+        merges_moved_with_trunk += unmerged.moved_with_trunk;
+        // The LAST call describes the field as it is left: these two counts
+        // are states, not events.
+        merges_kept_carrying = unmerged.kept_carrying;
+        unmerge_stale_landings = unmerged.stale_landings;
+        if unmerged.undone == 0 {
             break;
         }
-        merges_refused_by_radius += undone;
+        merges_refused_by_radius += unmerged.undone;
         outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
     }
+    landings.record("un-merge", &landing_check::check_landings(&struts));
 
     // AND ONCE MORE, ON THE FINISHED FIELD. `unmerge_overgrown` moves an arm
     // off its trunk and onto whatever the descent recorded as its straight
@@ -1094,6 +1176,7 @@ pub fn run_sweep_with_drains(
     // the slenderness lane put on the plate afterwards.
     congestion_outcome.at_lane_exit =
         congestion::measure(&grid, &history, &struts, policy.flare_r_factor);
+    landings.record("congestion", &landing_check::check_landings(&struts));
 
     // --- slenderness: merge, then |X|, then a mast, then a warning ---------
     //
@@ -1124,18 +1207,19 @@ pub fn run_sweep_with_drains(
         layers,
         merge: policy.slenderness_merge,
         brace: policy.slenderness_brace,
+        thicken: policy.slenderness_thicken,
         mast: policy.slenderness_mast,
         flare_factor: policy.flare_r_factor,
         mast_root_clearance: policy.slenderness_mast_root_clearance,
         max_struts: policy.limits.max_struts,
+        x_allowed: policy.x_allowed,
     };
-    let mut slenderness_merges_undone = 0_usize;
-    let struts_before_slenderness = struts.len();
-    let slenderness_outcome = slenderness::apply_remedies(&slenderness_context, &mut struts);
-    if slenderness_outcome.merges_forced > 0 || struts.len() > struts_before_slenderness {
-        // Anything the lane moved or added has a stale ledger; the same
-        // down-sweep that sized the field sizes the braces and the masts, and
-        // splits both shafts at every junction the crosses made.
+    let (mut slenderness_outcome, forced_merges) =
+        slenderness::apply_merges(&slenderness_context, &mut struts);
+    landings.record("slenderness merges", &landing_check::check_landings(&struts));
+    if slenderness_outcome.merges_forced > 0 {
+        // A moved arm has a stale ledger; the same down-sweep that sized the
+        // field sizes it again.
         outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
         // AND THE SAME RADIUS CEILING THE OWNER RULED ON, APPLIED TO THE
         // MERGES THIS LANE FORCED. `unmerge_overgrown` ran before the lane, so
@@ -1143,28 +1227,91 @@ pub fn run_sweep_with_drains(
         // loads, and where the area law cannot grow the trunk far enough the
         // merge is not admissible however slender the member was. Measured on
         // `make_overhang_table`, 2026-09-06: nine forced merges drove 1828
-        // overloaded arm-layers, against zero before the lane. The arm goes
-        // back to the descent it recorded, and its run is then reported as a
-        // warning — emit and warn, never refuse.
+        // overloaded arm-layers, against zero before the lane.
+        //
+        // BEFORE THE TIES, NOT AFTER (owner ruling 2026-09-29). This pass puts
+        // arms back on the plate, and until then it ran after the ties were
+        // placed, so every post it put back came out untied and warned: the 7
+        // warnings on the stilt plate were exactly those posts.
+        let mut unmerged_after_merges = 0_usize;
         for _ in 0..policy.strut_removal_passes {
-            let undone = unmerge_overgrown(&mut struts, policy.tip_radius_max_mm);
-            if undone == 0 {
+            let unmerged = unmerge_overgrown(&mut struts, policy.tip_radius_max_mm);
+            merges_moved_with_trunk += unmerged.moved_with_trunk;
+            merges_kept_carrying = unmerged.kept_carrying;
+            unmerge_stale_landings = unmerged.stale_landings;
+            if unmerged.undone == 0 {
                 break;
             }
-            merges_refused_by_radius += undone;
-            slenderness_merges_undone += undone;
+            merges_refused_by_radius += unmerged.undone;
+            unmerged_after_merges += unmerged.undone;
             outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
         }
+        // WHICH OF THOSE WERE THE LANE'S OWN. A forced merge put back no
+        // longer stands on the landing the lane gave it; every other un-merge
+        // in this pass was a descent merge whose trunk a forced merge had
+        // loaded past the maximum. Until 2026-09-29 both were published as
+        // "forced merges put back" (8 on the stilt plate, none of them forced).
+        slenderness_outcome.merges_put_back_ids = forced_merges
+            .iter()
+            .filter(|(id, landing)| {
+                struts
+                    .get(*id as usize)
+                    .is_some_and(|strut| strut.landing != *landing)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        slenderness_outcome.merges_undone_by_radius =
+            slenderness_outcome.merges_put_back_ids.len();
+        slenderness_outcome.descent_merges_put_back = unmerged_after_merges
+            .saturating_sub(slenderness_outcome.merges_undone_by_radius);
+        set_interior(&mut struts, &history);
+        landings.record(
+            "un-merge after slenderness merges",
+            &landing_check::check_landings(&struts),
+        );
+    }
+    // THE TIES: `|X|`, thicken, mast, each measured on the live field, then the
+    // down-sweep that sizes what they added, then again until a pass changes
+    // nothing — bounded by the same registered pass count the removal and
+    // un-merge loops use. A pass that still changed something when the bound
+    // ran out is published (`fixed_point` false), never hidden.
+    for _ in 0..policy.strut_removal_passes {
+        let applied =
+            slenderness::apply_ties(&slenderness_context, &mut struts, &mut slenderness_outcome);
+        if applied == 0 {
+            slenderness_outcome.fixed_point = true;
+            break;
+        }
+        slenderness_outcome.tie_passes += 1;
+        // Anything the pass added or thickened has a stale ledger; the same
+        // down-sweep that sized the field sizes the braces and the masts,
+        // splits both shafts at every junction the crosses made, and keeps
+        // every thickened root as a minimum beside the area law.
+        outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
         set_interior(&mut struts, &history);
     }
+    landings.record("slenderness ties", &landing_check::check_landings(&struts));
+    // The finished field's own check, and the load it lost if any landing is
+    // broken: the down-sweep hands a child's load to its named parent at the
+    // landing layer, and a parent that does not stand there never picks it
+    // up. `injected = plate reaction + uncarried + absorbed` closes exactly on
+    // a field whose every landing stands (measured: 0.00 mm² on the Cylinder
+    // and the Sphere before the slenderness lane); what is left is that loss.
+    // `absorbed` is peel carried under a larger event in the same arm, which
+    // the max over events keeps out of the plate reaction by design (measured
+    // 2026-09-29: the whole of the remaining gap on the Cylinder, 1.4625 mm²
+    // over 8 reads, and the Sphere, 0.4950 mm² over 6).
+    landings.finished = landing_check::check_landings(&struts);
+    landings.load_gap_mm2 =
+        outcome.injected_load_mm2 - outcome.plate_reaction_mm2 - outcome.uncarried_load_mm2;
+    landings.absorbed_mm2 = outcome.absorbed_event_load_mm2;
+    landings.absorbed_reads = outcome.absorbed_event_reads;
     // Measured on the FINISHED field, after the re-run, so the published run
     // lengths belong to the arms this file actually contains.
     let slenderness_after =
         slenderness::unbraced_runs(&grid, &struts, height, &slenderness_law);
-    let mut slenderness_outcome = slenderness_outcome;
     slenderness_outcome.longest_run_mm = 0.0;
     slenderness_outcome.longest_run_limit_mm = 0.0;
-    slenderness_outcome.merges_undone_by_radius = slenderness_merges_undone;
     // WHAT THE MAST'S PLACEMENT-TIME RADIUS GOT WRONG, measured on the sized
     // field by the same function that measures the flank arms' equivalent. A
     // mast's cell is chosen against `r_m = max(r_min, H_first/S)`; the
@@ -1184,24 +1331,7 @@ pub fn run_sweep_with_drains(
             policy.flare_r_factor,
             &mast_ids,
         );
-    slenderness_outcome.warnings.clear();
-    for run in &slenderness_after {
-        if run.length_mm > slenderness_outcome.longest_run_mm {
-            slenderness_outcome.longest_run_mm = run.length_mm;
-            slenderness_outcome.longest_run_limit_mm = run.limit_mm;
-        }
-        if run.over_limit() {
-            slenderness_outcome
-                .warnings
-                .push(slenderness::UnbracedWarning {
-                    strut_id: run.strut_id,
-                    k_lo: run.k_lo,
-                    k_top: run.k_top,
-                    length_mm: run.length_mm,
-                    limit_mm: run.limit_mm,
-                });
-        }
-    }
+    publish_runs(&mut slenderness_outcome, &slenderness_after, &[]);
 
     // The congestion census AFTER, from the same function that measured it
     // before, read off the FINISHED field — so what is published describes the
@@ -1269,6 +1399,10 @@ pub fn run_sweep_with_drains(
     report.arms_merged = arms_merged;
     report.lean_paths_blocked = lean_paths_blocked;
     report.merges_refused_by_radius = merges_refused_by_radius;
+    report.merges_kept_carrying = merges_kept_carrying;
+    report.merges_moved_with_trunk = merges_moved_with_trunk;
+    report.unmerge_stale_landings = unmerge_stale_landings;
+    report.landing_check = landings;
     report.lean_max_step_mm = law.max_step_mm();
     report.descent_junctions_mid_shaft = junctions_mid_shaft_descent;
     // SHAFT SPANS AS THE FINISHED FIELD HAS THEM, not as the up-sweep left
@@ -1288,96 +1422,115 @@ pub fn run_sweep_with_drains(
 
     // ------------------------------------------------ what each tip seats INTO
     //
-    // Both of these are properties of the MODEL at an arm's finished seat, so
-    // they are measured once here, after insertion, removal and un-merging
-    // have settled the strut set, and never during a pass that is still moving
-    // arms around. Neither moves an arm; both are read by the lowering when it
-    // drives the tip ball into the model.
-    let solid_layers = seat_solid_layers(&grid, &slices, &struts, layers);
-    let seat_normals =
-        tip_landing::tip_seat_normals(mesh, &grid, &struts, plate_z, height);
-    for (index, strut) in struts.iter_mut().enumerate() {
-        strut.seat_solid_layers = solid_layers.get(index).copied().unwrap_or(0);
-        strut.seat_normal = seat_normals.get(index).copied().unwrap_or([0.0; 3]);
+    // The face each tip carries is a property of the MODEL at an arm's
+    // finished seat, so it is measured once here, after insertion, removal and
+    // un-merging have settled the strut set, and never during a pass that is
+    // still moving arms around. The lowering drives the tip ball into it and
+    // trims the ball and the first shaft segment to its plane.
+    let seat_faces = tip_landing::tip_seat_faces(mesh, &grid, &struts, plate_z, height);
+    for (strut, face) in struts.iter_mut().zip(&seat_faces) {
+        strut.seat_normal = face.map_or([0.0; 3], |(normal, _)| normal);
+        strut.seat_face = SeatFace {
+            point_mm: face.map(|(_, point)| point),
+            ..SeatFace::default()
+        };
     }
 
-    Ok(SweepPlan {
+    let mut sweep_plan = SweepPlan {
         grid,
         layers,
         layer_height_mm: height,
         plate_z_mm: plate_z,
         struts,
         report,
-    })
-}
-
-/// How many cured laminae stand at and above each arm's own `k_top`, in its
-/// own tip column — the thickness a tip has to seat into, in layers.
-///
-/// **Why it is measured and not assumed.** The seat plane is the BOTTOM of
-/// lamina `k_top`, so an arm under a 0.15 mm skin has three laminae of model
-/// above it at a 0.05 mm layer height and nothing more. Driving the tip ball
-/// deeper than that would push its pole out through the far face, which the
-/// land-at-strike ruling forbids at either end. The lowering truncates to this
-/// number and counts the truncation; it never retracts and never drops the arm.
-///
-/// **Batching.** ONE rasterisation pass over the layer stack, in ascending
-/// order, with every arm still counting advanced together — no per-arm slice
-/// query and no second stack. An arm is opened at its own `k_top`, counts
-/// while its tip column stays covered, and closes at the first gap, so the
-/// whole pass is `O(layers · raster + Σ run)`.
-///
-/// **Which mask, and which way the error runs.** It counts `cover`, the
-/// any-overlap mask, because `cover` is what decided this arm's `k_top` in the
-/// first place and a bound measured against a different mask than the seat
-/// would be answering about a different column. `cover` rounds OUTWARD, so at
-/// the very top of a run it can credit one lamina that is only partly there —
-/// an over-statement bounded by one layer height (0.05 mm at the registered
-/// default). `carry` would round the other way, but it is eroded by one cell in
-/// Y and would read ZERO for every rim column, which is the defect this whole
-/// change exists to end, returned at the rim.
-fn seat_solid_layers(
-    grid: &Grid,
-    slices: &[Vec<plinth_support::perception::SliceSolid>],
-    struts: &[SweepStrut],
-    layers: usize,
-) -> Vec<u32> {
-    let mut runs = vec![0_u32; struts.len()];
-    if struts.is_empty() {
-        return runs;
-    }
-    // Arms bucketed by the layer they open at, so the pass opens them in one
-    // indexed lookup rather than scanning the strut vector per layer.
-    let mut opening_at: Vec<Vec<usize>> = vec![Vec::new(); layers];
-    for (index, strut) in struts.iter().enumerate() {
-        if let Some(bucket) = opening_at.get_mut(strut.k_top) {
-            bucket.push(index);
-        }
-    }
-    let mut scratch = RasterScratch::new(grid);
-    let mut masks = LayerMasks::default();
-    let mut open: Vec<usize> = Vec::new();
-    let mut still_open: Vec<usize> = Vec::new();
-    for (layer, solids) in slices.iter().enumerate().take(layers) {
-        if let Some(bucket) = opening_at.get(layer) {
-            open.extend_from_slice(bucket);
-        }
-        if open.is_empty() {
-            continue;
-        }
-        rasterize_into(grid, solids, &mut scratch, &mut masks);
-        still_open.clear();
-        for &index in &open {
-            let strut = &struts[index];
-            let cell = strut.cell_at(strut.k_top);
-            if masks.cover.get(cell).copied().unwrap_or(false) {
-                runs[index] += 1;
-                still_open.push(index);
+    };
+    // THE FOOTPRINT RULE (fix/tip-trim, 2026-09-28): every tip's contact disc,
+    // as the lowering will deliver it, graded against the eroded carrier
+    // rasters; a seat whose disc hangs off its face moves along the face, and
+    // a true knife edge is warned about. It moves seats, so the digest is
+    // re-taken over the finished field.
+    let arms = adapter::arms_of(&sweep_plan);
+    //
+    // A move changes the geometry the file gets after every rule of the
+    // finished field was checked, so each proposed move is held to those same
+    // rules on its DRAWN geometry (review-fixes 2026-09-29): the lean law, the
+    // tightest unbraced run of every member it displaces, and the drain
+    // keep-out.
+    let mut chord_slack = vec![f64::INFINITY; sweep_plan.struts.len()];
+    for run in &slenderness_after {
+        if let Some(slack) = chord_slack.get_mut(run.strut_id as usize) {
+            if run.length_mm > 0.0 {
+                *slack = slack.min(run.limit_mm / run.length_mm);
             }
         }
-        std::mem::swap(&mut open, &mut still_open);
     }
-    runs
+    let limits = footprint::MoveLimits {
+        max_lean: if height > 0.0 {
+            law.max_step_mm() / height
+        } else {
+            0.0
+        },
+        chord_slack,
+        keep_out: &keep_out,
+    };
+    let footprint = footprint::apply(
+        &sweep_plan.grid,
+        &slices,
+        &mut sweep_plan.struts,
+        &arms,
+        plan,
+        plate_z,
+        height,
+        &limits,
+    );
+    // THE RUNS AS THE FILE HAS THEM: a moved member's runs are shares of its
+    // moved chord, so the published longest run and the warnings are
+    // re-read on it. A field no seat moved republishes exactly what it had.
+    if footprint.tips_moved_onto_face > 0 {
+        let scale = footprint::chord_scales(&sweep_plan.grid, plate_z, height, &sweep_plan.struts);
+        publish_runs(
+            &mut sweep_plan.report.slenderness_lane,
+            &slenderness_after,
+            &scale,
+        );
+    }
+    sweep_plan.report.seat_footprint = footprint;
+    sweep_plan.report.sweep_digest = digest(&sweep_plan.struts);
+    Ok(sweep_plan)
+}
+
+/// Publish the unbraced runs of a finished field: the longest with its own
+/// limit, and a warning for each run over its limit. `scale[id]` multiplies a
+/// member's run lengths (its drawn chord after the footprint moves over its
+/// chord before them); an empty `scale` is the field as measured.
+fn publish_runs(
+    lane: &mut slenderness::SlendernessOutcome,
+    runs: &[slenderness::UnbracedRun],
+    scale: &[f64],
+) {
+    lane.longest_run_mm = 0.0;
+    lane.longest_run_limit_mm = 0.0;
+    lane.warnings.clear();
+    for run in runs {
+        let factor = scale.get(run.strut_id as usize).copied().unwrap_or(1.0);
+        let run = slenderness::UnbracedRun {
+            length_mm: run.length_mm * factor,
+            ..*run
+        };
+        if run.length_mm > lane.longest_run_mm {
+            lane.longest_run_mm = run.length_mm;
+            lane.longest_run_limit_mm = run.limit_mm;
+        }
+        if run.over_limit() {
+            lane.warnings.push(slenderness::UnbracedWarning {
+                strut_id: run.strut_id,
+                k_lo: run.k_lo,
+                k_top: run.k_top,
+                length_mm: run.length_mm,
+                limit_mm: run.limit_mm,
+            });
+        }
+    }
 }
 
 /// Put back straight any arm that merged into a trunk the area law cannot grow
@@ -1390,8 +1543,45 @@ fn seat_solid_layers(
 /// have a straight-down descent in the column history to be put back to; a
 /// load-inserted arm's descent is grown by the down-sweep and is not in this
 /// history at all.
-fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> usize {
-    let overgrown: Vec<(usize, Landing, usize)> = struts
+///
+/// **A TRUNK THAT CARRIES BRANCHES MAY NOT MOVE WITHOUT THEM** (2026-09-28).
+/// Un-merging an arm puts its whole lower path back on the column it recorded,
+/// so every member that had landed on the leaned path — or a brace seated on
+/// it — used to be left in the air, 3 mm from the trunk its ledger still names
+/// (11 such children on `make_tall_stilt_plate`, carrying 169.8 mm², and the
+/// 15 quills on `make_overhang_table`). Now the arm moves only WITH everything
+/// that rests on it, transitively: every member of that subtree goes back to
+/// its own recorded descent in the same pass, so afterwards nothing rests on a
+/// part that moved. The subtree moves only if every member of it CAN — an arm
+/// with a recorded descent strictly below its seat, whose recorded landing is
+/// the plate, the model, or a member that stands there now and is not itself
+/// moving. A brace, a load-inserted arm, or any other member with nowhere
+/// recorded to go pins the whole subtree: the over-grown merge is then KEPT
+/// and counted in [`Unmerged::kept_carrying`], a published warning rather
+/// than a broken tree. And an arm whose parent does not stand at its landing
+/// at all is no longer skipped in silence: it is counted in
+/// [`Unmerged::stale_landings`], and the landing check after this pass names
+/// it on the emitted file.
+///
+/// Batch-first: one pass builds the dependant lists, one pass finds the
+/// over-grown arms, and each subtree is walked once.
+fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> Unmerged {
+    let n = struts.len();
+    let mut dependants: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (index, strut) in struts.iter().enumerate() {
+        if let Landing::Strut { id, .. } = strut.landing {
+            if let Some(list) = dependants.get_mut(id as usize) {
+                list.push(index);
+            }
+        }
+        if let Some(parent) = strut.seat_on_strut {
+            if let Some(list) = dependants.get_mut(parent as usize) {
+                list.push(index);
+            }
+        }
+    }
+    let mut stale_landings = 0_usize;
+    let overgrown: Vec<usize> = struts
         .iter()
         .enumerate()
         .filter_map(|(index, strut)| {
@@ -1401,20 +1591,104 @@ fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> usize
             let Landing::Strut { id, layer } = strut.landing else {
                 return None;
             };
-            let parent = struts.get(id as usize)?;
-            if parent.k_bottom == usize::MAX || layer < parent.k_bottom {
+            let Some(parent) = struts.get(id as usize) else {
+                stale_landings += 1;
+                return None;
+            };
+            if parent.k_bottom == usize::MAX || layer < parent.k_bottom || layer > parent.k_top {
+                stale_landings += 1;
                 return None;
             }
             let radius = *parent.radius_mm.get(layer - parent.k_bottom)?;
-            let (landing, k_bottom) = strut.straight_fallback?;
+            let (_, k_bottom) = strut.straight_fallback?;
             // A fallback that is not strictly below the seat would be a
             // zero-height stub, which is the defect this field exists to
             // prevent; refuse the un-merge rather than emit one.
-            (radius >= tip_radius_max_mm && k_bottom < strut.k_top)
-                .then_some((index, landing, k_bottom))
+            (radius >= tip_radius_max_mm && k_bottom < strut.k_top).then_some(index)
         })
         .collect();
-    for &(index, landing, k_bottom) in &overgrown {
+
+    // Where a member would go if it were put back, or `None` when it has
+    // nowhere recorded to go.
+    let fallback_of = |strut: &SweepStrut| -> Option<(Landing, usize)> {
+        if strut.kind != StrutKind::Arm || strut.inserted_by_load || strut.path.is_empty() {
+            return None;
+        }
+        let (landing, k_bottom) = strut.straight_fallback?;
+        (k_bottom < strut.k_top).then_some((landing, k_bottom))
+    };
+    let mut moving = vec![false; n];
+    // Members some moving member's recorded descent lands on: they must stay.
+    let mut anchored = vec![false; n];
+    let mut in_subtree = vec![false; n];
+    let mut moves: Vec<(usize, Landing, usize)> = Vec::new();
+    let mut kept_carrying = 0_usize;
+    let mut moved_with_trunk = 0_usize;
+    for &root in &overgrown {
+        if moving[root] {
+            continue;
+        }
+        // The subtree: the arm and everything that rests on it, transitively.
+        let mut subtree = vec![root];
+        in_subtree[root] = true;
+        let mut cursor = 0;
+        while cursor < subtree.len() {
+            let member = subtree[cursor];
+            cursor += 1;
+            for &dependant in &dependants[member] {
+                if !in_subtree[dependant] {
+                    in_subtree[dependant] = true;
+                    subtree.push(dependant);
+                }
+            }
+        }
+        let mut plan: Vec<(usize, Landing, usize)> = Vec::with_capacity(subtree.len());
+        let mut can_move = true;
+        for &member in &subtree {
+            let strut = &struts[member];
+            let Some((landing, k_bottom)) = fallback_of(strut) else {
+                can_move = false;
+                break;
+            };
+            if moving[member] || anchored[member] {
+                can_move = false;
+                break;
+            }
+            if let Landing::Strut { id, layer } = landing {
+                let base = strut
+                    .fallback_path
+                    .first()
+                    .map_or(strut.cell, |cell| *cell as usize);
+                let target = id as usize;
+                let stands = struts
+                    .get(target)
+                    .is_some_and(|live| landing_check::stands_at(live, base, layer));
+                if !stands || in_subtree[target] || moving[target] {
+                    can_move = false;
+                    break;
+                }
+            }
+            plan.push((member, landing, k_bottom));
+        }
+        for &member in &subtree {
+            in_subtree[member] = false;
+        }
+        if !can_move {
+            if subtree.len() > 1 {
+                kept_carrying += 1;
+            }
+            continue;
+        }
+        moved_with_trunk += plan.len() - 1;
+        for &(member, landing, _) in &plan {
+            moving[member] = true;
+            if let Landing::Strut { id, .. } = landing {
+                anchored[id as usize] = true;
+            }
+        }
+        moves.extend(plan);
+    }
+    for &(index, landing, k_bottom) in &moves {
         struts[index].landing = landing;
         struts[index].k_bottom = k_bottom;
         struts[index].path = std::mem::take(&mut struts[index].fallback_path);
@@ -1424,7 +1698,29 @@ fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> usize
         // refills both from `ledger_len`, so the invariant is "an un-merge is
         // never observed from outside that loop".
     }
-    overgrown.len()
+    Unmerged {
+        undone: moves.len(),
+        moved_with_trunk,
+        kept_carrying,
+        stale_landings,
+    }
+}
+
+/// What one un-merge pass did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Unmerged {
+    /// Arms put back on the descent they recorded, branches included.
+    undone: usize,
+    /// Of those, the ones that moved only because the trunk they rest on had
+    /// to move: branches taken off with their trunk.
+    moved_with_trunk: usize,
+    /// Over-grown merges KEPT because something rests on the arm that has
+    /// nowhere recorded to go (a brace, a load-inserted arm, a descent that
+    /// lands on a member that is itself moving). A warning quantity: the trunk
+    /// it loads is at the maximum.
+    kept_carrying: usize,
+    /// Landings whose parent does not stand at the landing layer at all.
+    stale_landings: usize,
 }
 
 /// Flag the arms whose scar nobody will ever see.
@@ -1849,11 +2145,16 @@ fn build_report(
         arms_merged: 0,
         lean_paths_blocked: 0,
         merges_refused_by_radius: 0,
+        merges_kept_carrying: 0,
+        merges_moved_with_trunk: 0,
+        unmerge_stale_landings: 0,
+        landing_check: crate::landing_check::LandingLedger::default(),
         lean_max_step_mm: 0.0,
         descent_junctions_mid_shaft: 0,
         shaft_spans_recorded: 0,
         slenderness_lane: crate::slenderness::SlendernessOutcome::default(),
         congestion_lane: crate::congestion::CongestionOutcome::default(),
+        seat_footprint: crate::footprint::FootprintOutcome::default(),
         junctions_at_parent_top,
         junctions_mid_shaft,
         support_volume_mm3,
@@ -1861,6 +2162,7 @@ fn build_report(
         tip_column_roots_offered: outcome.tip_column_roots_offered,
         tip_column_root_load_mm2: outcome.tip_column_root_load_mm2,
         misrouted_load_mm2: outcome.misrouted_load_mm2,
+        contact_merge_load_moved_mm2: outcome.contact_merge_load_moved_mm2,
         achieved_pitch_mm: grid.pitch_mm(),
         coarsening_steps,
         layers,
@@ -1945,6 +2247,8 @@ fn build_report(
             strut_removals_refused_by_span: removals_refused_by_span,
             removal_passes_rolled_back,
             lean_candidates_priced: 0,
+            contact_merges_moved_below: outcome.contact_merges_moved_below,
+            contact_merges_kept_at_single_slot: outcome.contact_merges_kept_at_single_slot,
         },
     }
 }
@@ -2024,6 +2328,14 @@ fn digest(struts: &[SweepStrut]) -> String {
         for carried in &strut.carried_mm2 {
             absorb((carried * 1.0e6).round() as i64 as u64);
         }
+        // A seat the footprint rule moved is a different placement. Absorbed
+        // only when non-zero, so every field it moved nothing on keeps the
+        // digest it had.
+        if strut.seat_face.footprint == Footprint::MovedOntoFace {
+            for component in strut.seat_face.shift_mm {
+                absorb((component * 1.0e6).round() as i64 as u64);
+            }
+        }
     }
     format!("{accumulator:016x}")
 }
@@ -2039,6 +2351,7 @@ mod removal_tests {
             center_mm: [0.0, 0.0],
             kind: crate::StrutKind::Arm,
             min_radius_mm: 0.0,
+            thickened_mm: Vec::new(),
             seat_on_strut: None,
             k_top,
             k_bottom,
@@ -2049,7 +2362,7 @@ mod removal_tests {
             covered_demand: Vec::new(),
             inserted_by_load: false,
             path: Vec::new(),
-            seat_solid_layers: 0,
+            seat_face: crate::SeatFace::default(),
             seat_normal: [0.0; 3],
             straight_fallback: None,
             fallback_path: Vec::new(),
@@ -2077,7 +2390,7 @@ mod removal_tests {
         child.straight_fallback = Some((Landing::Plate, 0));
         let mut struts = vec![parent, child];
 
-        let undone = unmerge_overgrown(&mut struts, tip_radius_max_mm);
+        let undone = unmerge_overgrown(&mut struts, tip_radius_max_mm).undone;
 
         assert_eq!(undone, 1, "the merge onto a clamped trunk must be undone");
         let child = &struts[1];
@@ -2107,17 +2420,79 @@ mod removal_tests {
         child.path = vec![7; 30];
         child.straight_fallback = Some((Landing::Plate, 0));
         let mut struts = vec![parent.clone(), child.clone()];
-        assert_eq!(unmerge_overgrown(&mut struts, 1.0), 0);
+        assert_eq!(unmerge_overgrown(&mut struts, 1.0).undone, 0);
         assert_eq!(struts[1].landing, Landing::Strut { id: 0, layer: 30 });
 
         parent.radius_mm = vec![1.0; 30];
         child.straight_fallback = None;
         let mut struts = vec![parent, child];
         assert_eq!(
-            unmerge_overgrown(&mut struts, 1.0),
+            unmerge_overgrown(&mut struts, 1.0).undone,
             0,
             "with no recorded straight descent there is nothing to put the arm back to"
         );
+    }
+
+    /// 2026-09-28, the un-merge route to the quills: a merged arm that a
+    /// grandchild has landed on is over-grown, and putting it back on its
+    /// straight column alone would leave the grandchild 3 mm from anything. A
+    /// trunk moves WITH its branches or not at all: when the grandchild has a
+    /// descent of its own recorded, both go back in the same pass and every
+    /// landing still stands; when it has none (a brace, here), the trunk is
+    /// KEPT and counted. A landing whose parent is not there at all is
+    /// counted, not skipped in silence.
+    #[test]
+    fn a_merged_arm_moves_with_its_branches_or_not_at_all() {
+        let mut trunk = arm(0, 0, 40, 10);
+        trunk.radius_mm = vec![1.0; 30];
+        let mut child = arm(1, 7, 60, 30);
+        child.landing = Landing::Strut { id: 0, layer: 30 };
+        // Its base in the trunk's own column, then leaned out to its seat.
+        child.path = std::iter::once(0)
+            .chain(std::iter::repeat_n(7, 29))
+            .collect();
+        child.straight_fallback = Some((Landing::Plate, 0));
+        let mut grandchild = arm(2, 9, 80, 45);
+        grandchild.landing = Landing::Strut { id: 1, layer: 45 };
+        grandchild.path = vec![7; 35];
+        grandchild.straight_fallback = Some((Landing::Plate, 0));
+
+        // The grandchild can go back to the plate: both move, in one pass.
+        let mut struts = vec![trunk.clone(), child.clone(), grandchild.clone()];
+        let unmerged = unmerge_overgrown(&mut struts, 1.0);
+        assert_eq!(
+            unmerged.undone, 2,
+            "the child and its branch go back together"
+        );
+        assert_eq!(unmerged.moved_with_trunk, 1);
+        assert_eq!(unmerged.kept_carrying, 0);
+        assert_eq!(struts[1].landing, Landing::Plate);
+        assert_eq!(struts[2].landing, Landing::Plate);
+        assert!(crate::landing_check::check_landings(&struts).clean());
+
+        // The branch is a brace: it has nowhere recorded to go, so it pins
+        // the child, and the over-grown merge is kept rather than broken.
+        let mut brace = grandchild;
+        brace.kind = crate::StrutKind::Brace;
+        brace.straight_fallback = None;
+        let mut struts = vec![trunk.clone(), child.clone(), brace];
+        let unmerged = unmerge_overgrown(&mut struts, 1.0);
+        assert_eq!(
+            unmerged.undone, 0,
+            "a brace rests on the child, which must stay"
+        );
+        assert_eq!(unmerged.kept_carrying, 1);
+        assert_eq!(struts[1].landing, Landing::Strut { id: 0, layer: 30 });
+        assert!(crate::landing_check::check_landings(&struts).clean());
+
+        // The child's parent shortened above the landing layer: stale, counted.
+        let mut short = trunk;
+        short.k_bottom = 35;
+        short.radius_mm = vec![1.0; 5];
+        let mut struts = vec![short, child];
+        let unmerged = unmerge_overgrown(&mut struts, 1.0);
+        assert_eq!(unmerged.stale_landings, 1);
+        assert_eq!(unmerged.undone, 0);
     }
 
     /// Owner follow-up (2026-09-03, item 4 of the slice-sweep review): a
@@ -2140,6 +2515,7 @@ mod removal_tests {
             center_mm: [0.0, 0.0],
             kind: crate::StrutKind::Arm,
             min_radius_mm: 0.0,
+            thickened_mm: Vec::new(),
             seat_on_strut: None,
             k_top: 5,
             k_bottom: 0,
@@ -2152,7 +2528,7 @@ mod removal_tests {
             covered_demand: Vec::new(),
             inserted_by_load: true,
             path: Vec::new(),
-            seat_solid_layers: 0,
+            seat_face: crate::SeatFace::default(),
             seat_normal: [0.0; 3],
             straight_fallback: None,
             fallback_path: Vec::new(),
@@ -2185,6 +2561,7 @@ mod removal_tests {
             center_mm: [0.0, 0.0],
             kind: crate::StrutKind::Arm,
             min_radius_mm: 0.0,
+            thickened_mm: Vec::new(),
             seat_on_strut: None,
             k_top: 5,
             k_bottom,
@@ -2195,7 +2572,7 @@ mod removal_tests {
             covered_demand: Vec::new(),
             inserted_by_load: false,
             path: Vec::new(),
-            seat_solid_layers: 0,
+            seat_face: crate::SeatFace::default(),
             seat_normal: [0.0; 3],
             straight_fallback: None,
             fallback_path: Vec::new(),

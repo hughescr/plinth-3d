@@ -47,8 +47,42 @@ mod bridge {
         mesh: FfiMesh,
     }
 
+    /// Many result meshes in one flattened buffer. Piece `i` owns
+    /// `vertices[vertex_offsets[i]..vertex_offsets[i + 1]]` and the matching
+    /// triangle span, with triangle indices LOCAL to the piece. An empty span
+    /// is an empty result. `volumes` holds three numbers per piece: the whole
+    /// piece, after its plane trim, and after the subtraction.
+    struct FfiMeshBatch {
+        vertices: Vec<f64>,
+        triangles: Vec<u64>,
+        vertex_offsets: Vec<u64>,
+        triangle_offsets: Vec<u64>,
+        volumes: Vec<f64>,
+    }
+
+    struct FfiBatchResponse {
+        code: FfiErrorCode,
+        manifold_status: i32,
+        has_mesh_index: bool,
+        mesh_index: u64,
+        output_limit: FfiOutputLimit,
+        output_count: u64,
+        batch: FfiMeshBatch,
+    }
+
     unsafe extern "C++" {
         include!("plinth-solid/src/manifold_bridge.h");
+
+        #[allow(clippy::too_many_arguments)]
+        fn manifold_trim_subtract_each(
+            vertices: &[f64],
+            triangles: &[u64],
+            vertex_offsets: &[u64],
+            triangle_offsets: &[u64],
+            planes: &[f64],
+            max_output_vertices: u64,
+            max_output_triangles: u64,
+        ) -> FfiBatchResponse;
 
         fn manifold_union_batch(
             vertices: &[f64],
@@ -75,8 +109,8 @@ mod bridge {
 }
 
 pub(crate) use bridge::{
-    manifold_difference_batch, manifold_union_batch, FfiErrorCode, FfiMesh, FfiOutputLimit,
-    FfiResponse,
+    manifold_difference_batch, manifold_trim_subtract_each, manifold_union_batch, FfiErrorCode,
+    FfiMesh, FfiMeshBatch, FfiOutputLimit, FfiResponse,
 };
 
 #[cfg(test)]

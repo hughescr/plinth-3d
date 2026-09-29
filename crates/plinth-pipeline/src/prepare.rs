@@ -2405,6 +2405,28 @@ fn sweep_and_emit(
             }));
         }
     };
+    // THE SEAT TRIM as the file holds it (fix/tip-trim, 2026-09-28).
+    let trim = &emit.seat_trim;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a resin volume in thousandths of a mm3 is far inside f64's exact range"
+    )]
+    let removed_mm3 = trim.removed_volume_milli_mm3 as f64 / 1000.0;
+    println!(
+        "[sweep {model}] seat trim in the file: {} records cut in one batched call; {} cut by \
+         their seat plane, {} further cut by the model solid; {removed_mm3:.3} mm3 of support \
+         removed; {} left untrimmed because the trim would have removed them entirely",
+        trim.records_trimmed,
+        trim.records_cut_by_seat_plane,
+        trim.records_cut_by_model,
+        trim.records_left_whole_after_empty_trim,
+    );
+    if let Some(error) = &trim.batch_error {
+        println!(
+            "[sweep {model}] WARNING the seat trim did not run ({error}); every tip and first \
+             shaft segment in this file is UNTRIMMED"
+        );
+    }
 
     Ok(Some(ChainOutcome {
         model: model.clone(),
@@ -2516,12 +2538,84 @@ fn print_sweep_disclosure(
         println!(
             "[sweep {model}] tip seat depth min {depth_min:.4} p50 {depth_p50:.4} \
              max {depth_max:.4} mm over {} seated tips; {} at the law minimum; \
-             {} CLIPPED at a thin wall's far face; cut-disc radius min {cut_min:.4} mm against \
+             cut-disc radius min {cut_min:.4} mm against \
              tip radius min {tip_min:.4} mm; tips below the a>=r_tip guarantee: {below}",
             emission.tip_seat_depth_mm.len(),
             emission.tips_at_law_minimum,
-            emission.tips_truncated_by_thin_wall,
         );
+        // THE SEAT TRIM and the FOOTPRINT RULE (fix/tip-trim, 2026-09-28).
+        let disc =
+            plinth_support::SweepLowering::distribution(&emission.tip_contact_disc_radius_mm)
+                .unwrap_or((f64::NAN, f64::NAN, f64::NAN));
+        let offset =
+            plinth_support::SweepLowering::distribution(&emission.tip_raster_seat_offset_mm)
+                .unwrap_or((f64::NAN, f64::NAN, f64::NAN));
+        let tip_radius = &emission.tip_radius_mm;
+        let below_at_face = emission
+            .tip_contact_disc_radius_mm
+            .iter()
+            .zip(tip_radius)
+            .filter(|(disc, tip)| {
+                **disc < **tip * (1.0 - plinth_support::SweepLowering::AREA_GUARANTEE_TOLERANCE)
+            })
+            .count();
+        let footprint = &report.seat_footprint;
+        println!(
+            "[sweep {model}] seat trim: {} tips (and their first shaft segments) trimmed to the \
+             support side of their seat face and out of the model, and {} further Member spans \
+             of those shafts that reach the model side of the seat plane, {} of them on the raster \
+             seat's plane for want of a measured face; contact disc at the face min {:.4} p50 \
+             {:.4} max {:.4} mm, {below_at_face} below its own tip radius; raster seat from the \
+             face min {:+.4} p50 {:+.4} max {:+.4} mm (positive = below a down-facing face). \
+             Footprint: {} discs graded, {} on their face as placed, {} seats MOVED along the \
+             face onto it (longest {:.4} mm; {} members joined to a moved axis moved with it, \
+             by up to {:.4} mm), {} on a knife edge, {} left in place because every on-face \
+             seat broke a rule of the finished field; moves refused by the lean law {}, by an \
+             unbraced run's limit {}, by the drain keep-out {} ({} member checks); {} disc \
+             samples + {} search samples over {} layers, {} round(s)",
+            emission.tips_trimmed_to_seat,
+            emission.shaft_members_trimmed_to_seat,
+            emission.tips_trimmed_without_a_measured_face,
+            disc.0,
+            disc.1,
+            disc.2,
+            offset.0,
+            offset.1,
+            offset.2,
+            footprint.tips_graded,
+            footprint.tips_on_face,
+            footprint.tips_moved_onto_face,
+            footprint.max_move_mm,
+            footprint.members_following_a_moved_host,
+            footprint.max_follow_mm,
+            footprint.knife_edges.len(),
+            footprint.moves_refused.len(),
+            footprint.moves_refused_lean,
+            footprint.moves_refused_slenderness,
+            footprint.moves_refused_drain,
+            footprint.members_checked,
+            footprint.disc_samples,
+            footprint.search_samples,
+            footprint.layers_rasterised,
+            footprint.rounds,
+        );
+        for (arm, fraction) in &footprint.knife_edges {
+            println!(
+                "[sweep {model}] WARNING tip of arm {arm} sits on a KNIFE EDGE: no seat within \
+                 the search radius along its face holds its whole contact disc, so it keeps its \
+                 seat, trimmed, with {:.1}% of its disc on the face",
+                fraction * 100.0
+            );
+        }
+        for (arm, fraction) in &footprint.moves_refused {
+            println!(
+                "[sweep {model}] WARNING tip of arm {arm} hangs off its face and every seat \
+                 along the face that holds its whole contact disc would break the lean law, an \
+                 unbraced run's limit or the drain keep-out for it or a member joined to it, so \
+                 it keeps its seat, trimmed, with {:.1}% of its disc on the face",
+                fraction * 100.0
+            );
+        }
     }
     println!(
         "[sweep {model}] peak layer area {:.4} mm2; total scar {:.4} mm2 (invariant \
@@ -2594,6 +2688,8 @@ fn print_sweep_disclosure(
          plate contacts {} \
          holding {:.4} mm2 of root area; junctions {} at a parent's top / {} MID-SHAFT \
          ({} chosen mid-shaft by the descent, before un-merging and removal); \
+         {} lander loads on an arm's head booked into the shaft below its contact \
+         ({:.4} mm2), {} kept at a one-slot arm's contact; \
          shaft index {} spans; {} tip-column roots offered, carrying {:.4} mm2 that no other \
          carrier could have taken",
         emission.drawn_volume_mm3,
@@ -2610,6 +2706,9 @@ fn print_sweep_disclosure(
         report.junctions_at_parent_top,
         report.junctions_mid_shaft,
         report.descent_junctions_mid_shaft,
+        report.counters.contact_merges_moved_below,
+        report.contact_merge_load_moved_mm2,
+        report.counters.contact_merges_kept_at_single_slot,
         report.shaft_spans_recorded,
         report.tip_column_roots_offered,
         report.tip_column_root_load_mm2,
@@ -2680,10 +2779,19 @@ fn print_sweep_disclosure(
     println!(
         "[sweep {model}] slenderness lane: S = {:.1} in force; brace reach {:.3} mm at the \
          thinnest brace, {:.3} mm at the thickest; {} arms over the limit before remedies \
-         ({} runs); remedies: {} merges forced, {} |X| braces added, {} masts PLACED, \
-         {} warnings; {} brace bands refused, {} masts REFUSED for want of a clear plate cell, \
-         {} mast roots still lapping another root after sizing, {} forced merges put \
-         back by the radius ceiling; longest unbraced run remaining {:.3} mm against its own limit of {:.3} mm{}",
+         ({} runs); remedies: {} merges forced, {} |X| braces added, {} members thickened \
+         (root raised, tip kept), {} masts PLACED, {} warnings; {} forced merges put back by \
+         the radius ceiling and {} descent merges put back beside them, both before any tie; \
+         crosses (each holds the sway within 45 deg of its own plane): {} for a run no cross \
+         held, {} for a direction the crosses on the member did not hold, \
+         {} to a partner beyond the nearest, {} bands planned, {} refused as overlapping a \
+         cross on the same pair, {} taken out again as not needed; thicken refused: \
+         {} past the maximum radius, {} for a root disc that would touch another, {} trunks \
+         raised under a thickened member; {} plate root discs grown to the root a cross makes \
+         the file draw, {} of them then lapping another root; {} brace bands refused, {} masts REFUSED for want of \
+         an admissible plate cell ({} cells refused by the braced-panel check), {} masts \
+         extended to a later tie, {} mast roots still lapping another root after sizing; {} \
+         tie passes, {}; longest unbraced run remaining {:.3} mm against its own limit of {:.3} mm{}",
         lane.ratio,
         lane.thin_brace_reach_mm,
         lane.thick_brace_reach_mm,
@@ -2691,12 +2799,33 @@ fn print_sweep_disclosure(
         lane.runs_over_limit_before,
         lane.merges_forced,
         lane.braces_added,
+        lane.members_thickened,
         lane.masts_dropped,
         lane.warnings.len(),
+        lane.merges_undone_by_radius,
+        lane.descent_merges_put_back,
+        lane.crosses_first_plane,
+        lane.crosses_further_plane,
+        lane.crosses_to_a_later_partner,
+        lane.cross_bands_planned,
+        lane.crosses_refused_overlapping,
+        lane.crosses_pruned,
+        lane.thicken_refused_radius,
+        lane.thicken_refused_disc,
+        lane.trunks_raised_under_thickening,
+        lane.cross_roots_grown,
+        lane.cross_roots_lapping,
         lane.brace_bands_refused,
         lane.mast_cells_refused,
+        lane.mast_cells_refused_by_panel,
+        lane.masts_extended,
         lane.mast_roots_overlapping_after_sizing,
-        lane.merges_undone_by_radius,
+        lane.tie_passes,
+        if lane.fixed_point {
+            "fixed point reached"
+        } else {
+            "NOT at a fixed point when the pass bound ran out (a WARNING, never a refusal)"
+        },
         lane.longest_run_mm,
         lane.longest_run_limit_mm,
         if lane.longest_run_mm > lane.longest_run_limit_mm {
@@ -3582,6 +3711,7 @@ mod tests {
                 artifact_path: std::path::PathBuf::from("deinonychus.chitubox"),
                 support_record_count: 0,
                 artifact_bytes: 0,
+                seat_trim: Box::default(),
             },
         };
 
