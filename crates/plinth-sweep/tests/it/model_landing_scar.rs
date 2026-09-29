@@ -31,6 +31,15 @@
 //!    pose is arm TIPS on its down face, not the one arm seated on it. Tip
 //!    contact is a different measurement and is not in scope here.
 //!
+//! **Superseded 2026-09-29 on finding 2.** The owner's ruling that detail is
+//! the SPREAD of the fold angles (round-pose lane, rule B) scores the slab top
+//! `D = 0`: every fold on this fixture is 90°, one magnitude, so it is change,
+//! not detail. With the 0.92 mm² display charge gone, the two poses are
+//! separated by burden and by the landing and tip scars, all in blade UP's
+//! favour, and the committed pose is now blade UP by 0.00145 points. The
+//! table's arm and landing counts still hold (the 2026-09-28 baseline already
+//! read the blade-down landing scar as 0.20483 mm²); (d) pins the new pose.
+//!
 //! Every assertion below is a comparison between two measurements or a
 //! comparison against zero, per the brief.
 
@@ -307,14 +316,39 @@ fn the_scar_raw_is_exactly_its_three_named_halves() {
 /// `TermsRecord::repriced`, or returning `None` from the measurer, reddens
 /// every assertion here.
 ///
-/// The pose itself is pinned as UNCHANGED, deliberately: a future change that
-/// does flip `make_raking_blade` must come back through this test and say so.
+/// The pose itself is pinned, deliberately: a future change that flips
+/// `make_raking_blade` must come back through this test and say so.
+///
+/// # Re-cut 2026-09-29: the pose DID flip, and bit equality went with it
+///
+/// Rule B of the round-pose lane (detail is the SPREAD of the fold angles,
+/// owner ruling 2026-09-05) took away the display charge that had kept the
+/// blade DOWN since 2026-09-04: every fold on this two-box fixture is 90°,
+/// one magnitude, so `D` is 0 on every face. The committed pose is now the
+/// 180° flip, blade UP (`u = −Z`), by 0.00145 points — the pose the owner
+/// judged good on 2026-09-03 (`plinth-evidence/slice-sweep-2026-09-02/
+/// field-2026-09-28/lanes/round-pose.md`). Withholding the landing scar does
+/// not move it back. Two assertions here had followed the old winner rather
+/// than the claim:
+///
+/// * Bit equality of `with == without + landing` held only by coincidence of
+///   the old association: the engine adds `base + (landing + tip)`
+///   (`TermsRecord::repriced`), this compares `(base + tip) + landing`, and at
+///   the new winner they differ by one ULP (65.83742749999999 against
+///   65.8374275). It is now the 1e-9 relative band of
+///   `tip_contact_scar.rs`'s four-halves identity (re-cut 2026-09-06), with
+///   the guard that earns it: the landing scar itself must lie far outside
+///   the band, so a missing term can never pass as association noise.
+/// * "The winner is charged MORE than the runner-up" was a fact about blade
+///   down, which seats one arm on the model against blade up's eight but
+///   lands a larger scar. The claim is that the two poses are charged
+///   DIFFERENT amounts, so the term can reorder them — as the tip-scar drill
+///   already states it.
 #[test]
 #[expect(
     clippy::float_cmp,
-    reason = "the claim under test IS bit equality between the run that folded the landing scar and \
-              the run that withheld it, plus that scar. A tolerance would pass on a fold that \
-              rounded differently, which is exactly what must not happen"
+    reason = "the pinned pose is an exact axis direction, and the two poses' shifts are compared for \
+              inequality: a tolerance would let two different charges pass as equal"
 )]
 fn withholding_the_landing_scar_moves_the_committed_numbers_but_not_this_pose() {
     let mesh = plinth_mesh::make_raking_blade().expect("the raking blade fixture");
@@ -343,15 +377,23 @@ fn withholding_the_landing_scar_moves_the_committed_numbers_but_not_this_pose() 
         "the winner seats no arm on the model, so withholding the term would be a no-op and this \
          drill would pass vacuously"
     );
-    // Stated as the ADDITION the engine performs, not as the subtraction that
-    // would undo it: `65.42 + 0.2057` loses the low bits of the small operand,
-    // so subtracting the two totals returns the landing scar only to about 2
-    // ULP. Comparing the sum is exact and is the claim that matters — the run
-    // with the term measured exactly the run without it, plus the landing.
-    assert_eq!(
-        winner.terms.scar_raw_mm2.get(),
-        winner_without.terms.scar_raw_mm2.get() + landing,
-        "the whole difference between the two runs' scar measurement is the landing scar"
+    // Stated as an addition, within the association band (doc above): the
+    // run with the term measured the run without it, plus the landing scar,
+    // and nothing else. The guard first: the band must be far narrower than
+    // the term it could otherwise hide.
+    let whole = winner.terms.scar_raw_mm2.get();
+    let tolerance = 1.0e-9 * whole.abs().max(1.0);
+    assert!(
+        landing > tolerance,
+        "the landing scar {landing} lies inside the association band {tolerance}, so the band \
+         could hide it"
+    );
+    let rebuilt = winner_without.terms.scar_raw_mm2.get() + landing;
+    assert!(
+        (whole - rebuilt).abs() <= tolerance,
+        "the whole difference between the two runs' scar measurement is the landing scar: \
+         {whole} against {rebuilt}, a gap of {} against a band of {tolerance}",
+        (whole - rebuilt).abs()
     );
     assert!(
         winner.terms.score.get() > winner_without.terms.score.get(),
@@ -373,16 +415,23 @@ fn withholding_the_landing_scar_moves_the_committed_numbers_but_not_this_pose() 
     let winner_shift = winner.terms.score.get() - winner_without.terms.score.get();
     let runner_up_shift = runner_up.terms.score.get() - runner_up_without.terms.score.get();
     assert!(
-        winner_shift > runner_up_shift,
-        "the term charged the winning pose ({winner_shift}) no more than the runner-up \
-         ({runner_up_shift}); it would then be incapable of ever reordering them"
+        winner_shift != runner_up_shift,
+        "the term charged the winning pose and the runner-up by the identical amount \
+         ({winner_shift}); it would then be structurally incapable of ever reordering them"
     );
 
-    // The finding, pinned: this fixture's pose does NOT move.
+    // The finding, pinned: withholding the term does not move this fixture's
+    // pose, and that pose is blade UP since 2026-09-29 (doc above).
     assert_eq!(
         with.winner().selection,
         without.winner().selection,
-        "make_raking_blade's committed pose moved. That is a real change in the engine's answer \
-         and the evidence README's finding is now stale: re-measure and re-record it."
+        "make_raking_blade's committed pose moved when the landing scar was withheld. That is a \
+         real change in the engine's answer: re-measure and re-record it."
+    );
+    assert_eq!(
+        with.record().winner.up_model_frame.map(plinth_core::Finite::get),
+        [0.0, 0.0, -1.0],
+        "make_raking_blade no longer commits the 180 deg flip (blade UP). That is a real change in \
+         the engine's answer: re-measure it and re-record lanes/round-pose.md's finding."
     );
 }

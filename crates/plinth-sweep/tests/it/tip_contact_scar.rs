@@ -25,7 +25,10 @@
 //! against 0.221, and the pose that puts the blade down pays 0.550 mm² of
 //! tip scar against 0.385 for the pose that puts it up — the term separates
 //! the two poses in the direction the owner expects, even though it does not
-//! flip this fixture (see (d)).
+//! flip this fixture on its own (see (d)). Since 2026-09-29 the fixture IS
+//! blade up: the display charge on the slab top that out-voted this term is
+//! gone (detail is the spread of the fold angles, round-pose lane rule B, and
+//! the slab's folds are all 90°), and (d) pins the new pose.
 //!
 //! **Choice (ii) does not reach exactly zero on a disc.** The brief expected
 //! "tips on a disc's flat underside are counted by the fold, so choice (ii)
@@ -330,12 +333,28 @@ fn the_scar_raw_is_exactly_its_four_named_halves() {
 /// changes the winner's score and its `scar_raw` by exactly the tip scar
 /// that was measured, and it charges the two poses by DIFFERENT amounts, so
 /// it is capable of moving a ranking even though it does not move this one.
+///
+/// # Re-cut 2026-09-29: the pose DID flip, and bit equality went with it
+///
+/// Rule B of the round-pose lane (detail is the SPREAD of the fold angles,
+/// owner ruling 2026-09-05) took away the display charge that had kept the
+/// blade DOWN: every fold on this two-box fixture is 90°, one magnitude, so
+/// `D` is 0 on every face, and the committed pose is now the 180° flip, blade
+/// UP (`u = −Z`), by 0.00145 points (`plinth-evidence/slice-sweep-2026-09-02/
+/// field-2026-09-28/lanes/round-pose.md`). Withholding the tip scar does not
+/// move it back; the pin below now says blade up, explicitly. The old bit
+/// equality `with == without + tip` held only by coincidence of the old
+/// association: the engine adds `base + (landing + tip)`
+/// (`TermsRecord::repriced`), this compares `(base + landing) + tip`, and at
+/// the new winner they differ by one ULP (65.83742749999999 against
+/// 65.8374275). It is now the same 1e-9 relative band as the four-halves
+/// identity above, with the guard that earns it: the tip scar itself must
+/// lie far outside the band.
 #[test]
 #[expect(
     clippy::float_cmp,
-    reason = "the claim under test IS bit equality between the run that folded the tip scar and the \
-              run that withheld it, plus that scar. A tolerance would pass on a fold that rounded \
-              differently, which is exactly what must not happen"
+    reason = "the pinned pose is an exact axis direction, and the two poses' shifts are compared for \
+              inequality: a tolerance would let two different charges pass as equal"
 )]
 fn withholding_the_tip_scar_moves_the_committed_numbers_but_not_this_pose() {
     let mesh = plinth_mesh::make_raking_blade().expect("the raking blade fixture");
@@ -364,10 +383,18 @@ fn withholding_the_tip_scar_moves_the_committed_numbers_but_not_this_pose() {
         "the winner's tips carry no non-excluded face, so withholding the term would be a no-op \
          and this drill would pass vacuously"
     );
-    assert_eq!(
-        winner.terms.scar_raw_mm2.get(),
-        winner_without.terms.scar_raw_mm2.get() + tip,
-        "the whole difference between the two runs' scar measurement is the tip scar"
+    let whole = winner.terms.scar_raw_mm2.get();
+    let tolerance = 1.0e-9 * whole.abs().max(1.0);
+    assert!(
+        tip > tolerance,
+        "the tip scar {tip} lies inside the association band {tolerance}, so the band could hide it"
+    );
+    let rebuilt = winner_without.terms.scar_raw_mm2.get() + tip;
+    assert!(
+        (whole - rebuilt).abs() <= tolerance,
+        "the whole difference between the two runs' scar measurement is the tip scar: {whole} \
+         against {rebuilt}, a gap of {} against a band of {tolerance}",
+        (whole - rebuilt).abs()
     );
     assert!(
         winner.terms.score.get() > winner_without.terms.score.get(),
@@ -392,14 +419,19 @@ fn withholding_the_tip_scar_moves_the_committed_numbers_but_not_this_pose() {
          ({winner_shift}); it would then be structurally incapable of ever reordering them"
     );
 
-    // The finding, pinned: this fixture's pose does NOT move. If a future
-    // change to the tip-contact scar (or anything upstream of it) DOES flip
-    // this fixture to blade-up, this assertion must be updated to assert the
-    // flip explicitly and the evidence README's finding re-measured.
+    // The finding, pinned: withholding the term does not move this fixture's
+    // pose, and since 2026-09-29 that pose is blade UP, asserted explicitly
+    // (doc above). A future change that moves it again must come back here.
     assert_eq!(
         with.winner().selection,
         without.winner().selection,
-        "make_raking_blade's committed pose moved. That is a real change in the engine's answer \
-         and the evidence README's finding is now stale: re-measure and re-record it."
+        "make_raking_blade's committed pose moved when the tip scar was withheld. That is a real \
+         change in the engine's answer: re-measure and re-record it."
+    );
+    assert_eq!(
+        with.record().winner.up_model_frame.map(plinth_core::Finite::get),
+        [0.0, 0.0, -1.0],
+        "make_raking_blade no longer commits the 180 deg flip (blade UP). That is a real change in \
+         the engine's answer: re-measure it and re-record lanes/round-pose.md's finding."
     );
 }
