@@ -12,8 +12,10 @@
 use crate::harness;
 
 use harness::sweep_with;
+use plinth_core::{Finite, LayerPlan, PositiveFinite};
 use plinth_mesh::{make_laid_tube, make_recessed_disc, Mesh};
-use plinth_sweep::{Landing, StrutKind, SweepPlan, SweepPolicy, SweepStrut};
+use plinth_support::{BuildFrame, SupportSegmentKind};
+use plinth_sweep::{to_primitives, Landing, StrutKind, SweepPlan, SweepPolicy, SweepStrut};
 
 fn policy() -> SweepPolicy {
     SweepPolicy::from_registry().expect("the registry supplies every number the sweep reads")
@@ -335,9 +337,16 @@ fn a_flat_disc_is_not_congested_and_the_lane_is_a_no_op_on_it() {
 ///
 /// A census that read the arm radius instead of the flared root would
 /// under-report every footprint by the square of the registered factor. This is
-/// what would catch it: the published analytic disc area is recomputed here
-/// FROM THE REGISTRY and from the finished field, never from the census itself,
-/// and it must equal `flare² · Σ π r_root²`.
+/// what would catch it: the published analytic disc area is read here off the
+/// ROOT FLARES the production lowering emits for the finished field, never
+/// from the census itself, and every flare's foot must be the registered
+/// factor times its root.
+///
+/// (Corrected 2026-09-29, review-fixes: this compared against
+/// `flare² · Σ π r_ledger²`, the LEDGER root. The file flares the DRAWN root —
+/// the ledger raised where a brace joins — and on the laid tube the two differ
+/// by 5.49 mm², so the old expectation graded the census against a disc the
+/// file never draws.)
 #[test]
 fn the_census_measures_the_flared_root_and_not_the_bare_arm() {
     let mesh = laid_tube();
@@ -353,19 +362,51 @@ fn the_census_measures_the_flared_root_and_not_the_bare_arm() {
     // The FINISHED-field census against the FINISHED field's own roots. The
     // `before` census is taken before the slenderness lane drops its masts, so
     // comparing it with the finished strut set would be comparing two fields.
-    let bare_section = plate_section_mm2(&plan);
-    let published = plan
-        .report
-        .congestion_lane
-        .after
-        .all
-        .analytic_disc_area_mm2;
-    assert!(bare_section > 0.0, "nothing lands on the plate to measure");
-    assert!(
-        (published - flare * flare * bare_section).abs() < 1.0e-9 * published.max(1.0),
-        "the census published {published} mm2 against the {} mm2 the flared area law asks for",
-        flare * flare * bare_section
+    let layers = LayerPlan::new(plan.plate_z_mm, vec![plan.layer_height_mm; plan.layers])
+        .expect("the plan's own uniform layer plan");
+    let frame = BuildFrame::new(
+        Finite::new(plan.plate_z_mm).expect("a finite plate"),
+        PositiveFinite::new(harness::LIFT_MM).expect("a positive lift"),
     );
+    let emission = to_primitives(&plan, frame, &layers, 4_000_000, 1 << 30)
+        .expect("the lowering refuses only about the request");
+    assert_eq!(
+        emission.arms_without_root_flare, 0,
+        "a plate arm with no flare has no emitted foot to grade the census against"
+    );
+    let mut emitted_feet_mm2 = 0.0;
+    let mut feet = 0_usize;
+    for primitive in &emission.primitives {
+        if primitive.segment_kind != SupportSegmentKind::RootFlare {
+            continue;
+        }
+        let (root, foot) = (
+            primitive.start_radius_mm.get(),
+            primitive.end_radius_mm.get(),
+        );
+        assert!(
+            (foot - flare * root).abs() <= 1.0e-12 * foot,
+            "a root flare's foot is {foot} mm on a {root} mm root, not the registered {flare}x"
+        );
+        emitted_feet_mm2 += core::f64::consts::PI * foot * foot;
+        feet += 1;
+    }
+    let census = &plan.report.congestion_lane.after.all;
+    let published = census.analytic_disc_area_mm2;
+    assert!(feet > 0, "nothing lands on the plate to measure");
+    assert_eq!(
+        census.roots, feet,
+        "the census counts a root the file does not flare"
+    );
+    assert!(
+        (published - emitted_feet_mm2).abs() < 1.0e-9 * published.max(1.0),
+        "the census published {published} mm2 against the {emitted_feet_mm2} mm2 of root flare \
+         the file draws"
+    );
+    // And the bare arm is not what was counted: the ledger roots alone read
+    // strictly less, by at least the flare factor squared.
+    let bare_section = plate_section_mm2(&plan);
+    assert!(published > bare_section * flare * flare * (1.0 - 1.0e-9));
     // Anti-vacuity: on THIS field the flare is what makes the roots touch at
     // all, so a census on the bare radius would have reported a clean plate.
     assert!(
