@@ -1,10 +1,11 @@
 //! What a sweep run must say about itself.
 //!
 //! **Every skip in this engine is disclosed here.** Skipping is legitimate;
-//! hiding a skip is not. The rendered block names, in terms, the things v1
-//! does not do — branching, bracing, joint spheres, raft, clearance checking,
-//! the repair loop — and states that their absence is not a claim that they
-//! are unnecessary.
+//! hiding a skip is not. The rendered block names, in terms, what the engine
+//! does (branching, bracing, member clearance of braces and masts) and what it
+//! does not — joint spheres, raft, clearance of an arm's own shaft, the repair
+//! loop — and states that their absence is not a claim that they are
+//! unnecessary.
 //!
 //! **A shortfall is a WARNING on an emitted file, never a gate** (owner ruling
 //! 2026-09-01). The output is diagnostic evidence about the engine, and a
@@ -402,13 +403,17 @@ impl SweepRunReport {
         .expect("writing to a String cannot fail");
         writeln!(
             out,
-            "v1 does NOT do any of the following, and their absence is not a claim that they are \
-             unnecessary: no branching (every arm is a straight vertical column), no \
-             cross-bracing, no joint spheres at arm-onto-arm junctions, no raft (a root flare \
-             stands in at each plate landing), no clearance checking of any kind (an arm passing \
-             close to a wall is NOT detected), and no repair loop. The peel field is uniform: the \
-             literature's area exponent and the machine's front-to-back tilt factor are computed \
-             and reported below but decide nothing."
+            "What this engine DOES: arms lean and merge onto other shafts (tops and mid-shaft \
+             landings); long members are tied by |X| cross-braces, thickened roots and plate \
+             masts; every brace's and mast's drawn solid clears the model by the final gap and \
+             every member it is not joined to; plate roots are kept clear of one another; drains \
+             keep their escape path. What it does NOT do, and whose absence is not a claim that \
+             it is unnecessary: no joint spheres at arm-onto-arm junctions, no raft (a root flare \
+             stands in at each plate landing), no radius-aware clearance of an ARM's own shaft \
+             against the model or another arm (only its centreline cell is tested, so an arm \
+             passing close to a wall is NOT detected), and no repair loop. The peel field is \
+             uniform: the literature's area exponent and the machine's front-to-back tilt factor \
+             are computed and reported below but decide nothing."
         )
         .expect("writing to a String cannot fail");
         writeln!(

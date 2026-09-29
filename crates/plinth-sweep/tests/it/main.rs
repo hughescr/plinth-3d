@@ -25,6 +25,7 @@ mod flank_relief;
 mod footprint_moves_hold_the_rules;
 mod load_insertion;
 mod mast_root_clearance;
+mod member_clearance;
 mod model_landing_scar;
 mod oracle_cavity;
 mod oracle_disc;

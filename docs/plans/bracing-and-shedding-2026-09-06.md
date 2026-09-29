@@ -127,6 +127,27 @@ Recorded here because it changes the ladder above; the code of record is
   is extended to a later tie before a second one is dropped.
 - `S` stays 50.
 
+### Member clearance, 2026-09-29 (fix/member-clearance; `brace-collide-diagnosis.md`)
+
+- **Drawn solid, not centreline.** A brace diagonal and a mast are tested as
+  the solid they are drawn: radius `r` about the straight axis must clear the
+  cured model by the registered final gap (0.3 mm, 2026-08-22) plus the
+  raster's half cell diagonal, end layers included, and must not enter any
+  member it is not joined to (axes `≥ r₁ + r₂` apart). The centreline-cell
+  test stays as the cheap first refusal. Code: `crates/plinth-sweep/src/member_clearance.rs`.
+- **Crosses at one layer are credited together:** planes `θᵢ` at one layer
+  hold `φ` when `Σ cos²(φ − θᵢ) ≥ ½` (one cross gives the ±45° arc above; two
+  planes 60°–120° apart hold every direction). A further plane goes to a band
+  top the member already has when that layer alone cuts the run inside the
+  limit.
+- **Masts:** never thicker than the member they brace; the cell needing the
+  smallest mast wins (nearest among equals).
+- **Thicken:** refused for its root disc only when the growth laps a root it
+  did not lap before (orchestrator ruling 2026-09-29).
+- **Seat trim:** a record the trim would empty keeps only its part outside the
+  model; one wholly inside the model is left out of the file and counted.
+- Arm shafts are NOT yet clearance-checked against the model (open).
+
 ### Fixtures (new, procedural, in plinth-mesh fixtures.rs)
 
 - `make_tall_stilt_plate`: a plate 30 mm up on a 4 mm slab — every arm is
