@@ -176,8 +176,8 @@ pub use initial::ContactConstructionLimits;
 /// `lower` stays crate-private: this exposes the primitive chain, not the
 /// forest data model behind it.
 pub use lower::{
-    lower_sweep_arms, tip_contact_discs, SweepArm, SweepArmLanding, SweepLowering,
-    SweepLoweringError, TipContactDisc,
+    drawn_root_radius_mm, lower_sweep_arms, tip_contact_discs, SweepArm, SweepArmLanding,
+    SweepLowering, SweepLoweringError, TipContactDisc,
 };
 /// TEST-ONLY, behind the quarantined `seat-minimum-probe` feature.
 #[cfg(feature = "seat-minimum-probe")]
@@ -470,8 +470,11 @@ pub struct SupportPrimitive {
     /// frusta and raft records.
     pub sphere_geometry: Option<SphereGeometry>,
     /// **The seat face this primitive may not cross** (fix/tip-trim,
-    /// 2026-09-28). Present on a seated arm's tip ball and on the first
-    /// segment of its shaft, and on nothing else. The emitter keeps only the
+    /// 2026-09-28). Present on a seated arm's tip ball, on the first segment
+    /// of its shaft, and on every further `Member` span of that shaft whose
+    /// solid reaches the model side of the plane (review-fixes 2026-09-29: the
+    /// drawn profile can cut the shaft into records inside that band), and on
+    /// nothing else. The emitter keeps only the
     /// part of the primitive on the support side of this plane that is also
     /// outside the model solid; the record's own `start`/`end`/radii are
     /// untouched.
@@ -481,7 +484,8 @@ pub struct SupportPrimitive {
 /// **THE SEAT FACE'S PLANE** (fix/tip-trim, 2026-09-28): a point on the model
 /// face a tip carries and that face's OUTWARD unit normal.
 ///
-/// *The rule.* A tip ball and the first shaft segment of its arm keep only
+/// *The rule.* A tip ball and its arm's shaft (the first segment, and every
+/// further span the plane crosses) keep only
 /// `primitive ∩ {p : (p − point)·n ≥ 0} ∖ model solid`. The half-space is the
 /// support side of the face; the model difference removes what a plane cannot
 /// see (a concave corner, a ball straddling two faces). What survives meets the
@@ -712,13 +716,15 @@ impl SupportPrimitive {
             (_, None) => true,
             _ => false,
         };
-        // Only a seated tip and the first segment of its shaft are trimmed to
-        // a seat face; on anything else the plane would be a lie about what
-        // the member touches.
+        // Only a seated tip and the spans of its shaft are trimmed to a seat
+        // face; on a joint, a root flare or a raft record the plane would be a
+        // lie about what the member touches.
         let trim_on_a_seated_member = self.seat_trim.is_none()
             || matches!(
                 self.segment_kind,
-                SupportSegmentKind::ContactSphere | SupportSegmentKind::ContactTaper
+                SupportSegmentKind::ContactSphere
+                    | SupportSegmentKind::ContactTaper
+                    | SupportSegmentKind::Member
             );
         nonzero_frustum
             && raft_pad_is_a_point

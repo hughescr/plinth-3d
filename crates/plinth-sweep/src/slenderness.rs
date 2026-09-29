@@ -378,6 +378,14 @@ pub struct SlendernessOutcome {
     pub members_thickened: usize,
     pub thicken_refused_radius: usize,
     pub thicken_refused_disc: usize,
+    /// Plate root discs a cross GREW, because the junction clause raised the
+    /// root the file draws for its post (or the post's trunk, or a new mast)
+    /// past the disc its placement was cleared against (review-fixes
+    /// 2026-09-29); and of those, how many then lap another root. The second
+    /// is a WARNING on the emitted file, never a refusal. Both are path-hit
+    /// witnesses for keeping the lane's discs equal to the drawn roots.
+    pub cross_roots_grown: usize,
+    pub cross_roots_lapping: usize,
     /// Trunks raised under a thickened member, so no member stands on one
     /// thinner than itself.
     pub trunks_raised_under_thickening: usize,
@@ -1338,10 +1346,14 @@ impl TieState {
         // (measured at 3ff52c7: `make_laid_tube` finished at 1.0926 with 155
         // overlapping pairs from masts alone). Built once per pass from the
         // sized field; every mast and every grown root updates it.
-        let placed_roots = crate::congestion::root_discs(
+        // Sized from the DRAWN profiles held just above, the ones the lowering
+        // flares (review-fixes 2026-09-29), and kept in step with them as
+        // crosses and thickenings raise roots (`commit_cross`, `thicken`).
+        let placed_roots = crate::congestion::root_discs_drawn(
             context.grid,
             context.history,
             struts,
+            &profiles,
             context.flare_factor,
         );
         Self {
@@ -1426,11 +1438,91 @@ fn tie_by_crosses(
         } else {
             outcome.crosses_first_plane += 1;
         }
-        commit_cross(context, state, struts, plan);
+        commit_cross(context, state, struts, plan, outcome);
         outcome.braces_added += 1;
         return true;
     }
     false
+}
+
+/// The junction clause from one raised joint DOWN: `member`'s drawn profile is
+/// raised to at least `radius` from `layer` to its root, then each trunk it
+/// stands on is raised to the member's drawn root from the member's landing to
+/// ITS root, and so on to the member that meets the plate or the model — the
+/// same clause, on the same slots, that [`crate::adapter::drawn_profiles`]
+/// applies for the lowering. Returns the index of that last member (the foot).
+/// A landing cycle, which placement never builds, stops the walk.
+fn raise_to_the_foot(
+    struts: &[SweepStrut],
+    profiles: &mut [Vec<f64>],
+    member: usize,
+    layer: usize,
+    radius: f64,
+) -> usize {
+    let (mut at, mut layer, mut radius) = (member, layer, radius);
+    for _ in 0..=struts.len() {
+        let Some(strut) = struts.get(at) else {
+            return at;
+        };
+        if let Some(profile) = profiles.get_mut(at) {
+            let top = layer.saturating_sub(strut.k_bottom);
+            for radius_here in profile.iter_mut().take(top + 1) {
+                *radius_here = radius_here.max(radius);
+            }
+            radius = profile.first().copied().unwrap_or(radius);
+        }
+        let Landing::Strut { id, .. } = strut.landing else {
+            return at;
+        };
+        let host = id as usize;
+        if host == at || host >= struts.len() {
+            return at;
+        }
+        layer = strut.k_bottom;
+        at = host;
+    }
+    at
+}
+
+/// Grow a plate foot's disc in `state.placed_roots` to the root it is now
+/// DRAWN with ([`plinth_support::drawn_root_radius_mm`] of its live profile),
+/// counting the growth and whether the grown disc laps another root.
+fn grow_foot_disc(
+    context: &SlendernessContext<'_>,
+    state: &mut TieState,
+    struts: &[SweepStrut],
+    foot: usize,
+    outcome: &mut SlendernessOutcome,
+) {
+    let Some(strut) = struts.get(foot) else {
+        return;
+    };
+    if !matches!(strut.landing, Landing::Plate) || strut.kind == StrutKind::Brace {
+        return;
+    }
+    let Some(profile) = state.profiles.get(foot) else {
+        return;
+    };
+    let root = plinth_support::drawn_root_radius_mm(profile, strut.tip_radius_mm());
+    let flared = root * flare_of(context);
+    let Some(slot) = crate::congestion::disc_slot(&state.placed_roots, strut.id) else {
+        return;
+    };
+    if crate::congestion::disc_radius_mm(&state.placed_roots, slot)
+        .is_some_and(|known| flared > known)
+    {
+        crate::congestion::grow_disc(&mut state.placed_roots, slot, flared, root);
+        outcome.cross_roots_grown += 1;
+        if !crate::congestion::clear_of_placed(
+            context.grid,
+            strut.base_cell(),
+            flared,
+            &state.placed_roots,
+            Some(slot),
+        ) {
+            outcome.cross_roots_lapping += 1;
+        }
+    }
 }
 
 /// Build a planned cross and bring every list the tie rungs read up to date.
@@ -1439,6 +1531,7 @@ fn commit_cross(
     state: &mut TieState,
     struts: &mut Vec<SweepStrut>,
     plan: CrossPlan,
+    outcome: &mut SlendernessOutcome,
 ) {
     let grid = context.grid;
     let span = plan.k - plan.k_lo;
@@ -1479,16 +1572,15 @@ fn commit_cross(
             list.push(Tie { layer: k_lo, plane });
         }
         // The junction clause the lowering applies: the post is drawn at
-        // least as thick as the diagonal, from the joint down to its root.
-        if let (Some(strut), Some(profile)) = (
-            struts.get(post as usize),
-            state.profiles.get_mut(post as usize),
-        ) {
-            let top = k.saturating_sub(strut.k_bottom);
-            for radius_here in profile.iter_mut().take(top + 1) {
-                *radius_here = radius_here.max(radius);
-            }
-        }
+        // least as thick as the diagonal, from the joint down to its root —
+        // and every trunk it stands on in turn, down to the plate or the model
+        // (`adapter::drawn_profiles` repeats the clause to a fixed point).
+        let foot = raise_to_the_foot(struts, &mut state.profiles, post as usize, k, radius);
+        // THE FOOT ON THE PLATE GROWS WITH IT (review-fixes 2026-09-29): the
+        // lowering flares the drawn root, so the disc every later mast and
+        // thickening is cleared against is grown to it here. A foot that now
+        // laps another root is counted: a warning on the emitted file.
+        grow_foot_disc(context, state, struts, foot, outcome);
     }
     for _ in 0..2 {
         state.ties.push(Vec::new());
@@ -1840,7 +1932,7 @@ fn tie_by_mast(
                 }
                 outcome.masts_extended += 1;
             }
-            commit_cross(context, state, struts, plan);
+            commit_cross(context, state, struts, plan, outcome);
             outcome.braces_added += 1;
             return Some(None);
         }
@@ -2003,14 +2095,35 @@ fn tie_by_mast(
         k,
         outcome,
     ) {
-        commit_cross(context, state, struts, plan);
+        commit_cross(context, state, struts, plan, outcome);
+        // The mast's disc at the root it is DRAWN with once its cross is on
+        // it (the cross can raise it past `radius_mm`), not the radius its
+        // cell was chosen against.
+        let drawn_root = state
+            .profiles
+            .get(mast_id as usize)
+            .map_or(radius_mm, |profile| {
+                plinth_support::drawn_root_radius_mm(profile, radius_mm)
+            });
+        if drawn_root > radius_mm {
+            outcome.cross_roots_grown += 1;
+            if !crate::congestion::clear_of_placed(
+                grid,
+                cell,
+                drawn_root * flare,
+                &state.placed_roots,
+                None,
+            ) {
+                outcome.cross_roots_lapping += 1;
+            }
+        }
         crate::congestion::push_disc(
             &mut state.placed_roots,
             grid,
             mast_id,
             cell,
-            radius_mm * flare,
-            radius_mm,
+            drawn_root * flare,
+            drawn_root,
             false,
         );
         state.masts_of.entry(id).or_default().push(mast_id);
@@ -2737,5 +2850,123 @@ mod tests {
         let law = SlendernessLaw::disabled();
         assert!(!law.binds());
         assert!(law.max_unbraced_mm(0.05).is_infinite());
+    }
+
+    fn plate_post(grid: &crate::grid::Grid, id: u32, col: usize, radius: f64) -> crate::SweepStrut {
+        let row = 100;
+        let cell = grid.index(row, col);
+        crate::SweepStrut {
+            id,
+            cell,
+            center_mm: [grid.center_x_mm(col), grid.center_y_mm(row)],
+            kind: crate::StrutKind::Arm,
+            min_radius_mm: 0.0,
+            thickened_mm: Vec::new(),
+            seat_on_strut: None,
+            k_top: 80,
+            k_bottom: 0,
+            landing: crate::Landing::Plate,
+            interior: false,
+            radius_mm: vec![radius; 80],
+            carried_mm2: vec![0.0; 80],
+            covered_demand: Vec::new(),
+            inserted_by_load: false,
+            path: Vec::new(),
+            seat_face: crate::SeatFace::default(),
+            seat_normal: [0.0; 3],
+            straight_fallback: None,
+            fallback_path: Vec::new(),
+        }
+    }
+
+    /// REVIEW-FIXES 2026-09-29: a cross raises its post's DRAWN root, and the
+    /// lane's placed root disc grows with it, so a later mast or thickening
+    /// is cleared against the foot the file will draw. The reviewer's case: a
+    /// 0.05 mm plate arm 0.50 mm from a 0.20 mm root (flare 1.6: 0.40 mm, clear)
+    /// takes a 0.20 mm cross to a third post; its drawn root is then the
+    /// brace's 0.20 mm (the junction clause), so its disc is 0.32 mm and it
+    /// laps its neighbour (0.64 mm > 0.50 mm). The expected numbers are
+    /// hand-derived from the inputs; the invariant is checked against the
+    /// discs rebuilt from scratch by `congestion::root_discs`.
+    #[test]
+    fn a_cross_grows_its_posts_plate_disc_to_the_drawn_root() {
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let history = crate::up_sweep::ColumnHistory::new(&grid);
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(0.05, 45.0, 25.0);
+        let law = law();
+        let flare = 1.6;
+        let context = super::SlendernessContext {
+            grid: &grid,
+            history: &history,
+            keep_out: &keep_out,
+            lean: &lean,
+            law: &law,
+            layer_height_mm: 0.05,
+            layers: 100,
+            flare_factor: flare,
+            mast_root_clearance: true,
+            shaft_landings: true,
+            merge: true,
+            brace: true,
+            thicken: true,
+            mast: true,
+            max_struts: 1_000,
+            x_allowed: 12.0,
+        };
+        // P at col 100, Q 10 cells (0.50 mm) away, R 40 cells the other way.
+        let mut struts = vec![
+            plate_post(&grid, 0, 100, 0.05),
+            plate_post(&grid, 1, 110, 0.20),
+            plate_post(&grid, 2, 60, 0.20),
+        ];
+        let mut state = super::TieState::build(&context, &struts);
+        let disc = |state: &super::TieState, id: u32| {
+            let slot = crate::congestion::disc_slot(&state.placed_roots, id).expect("a disc");
+            crate::congestion::disc_radius_mm(&state.placed_roots, slot).expect("a radius")
+        };
+        assert!((disc(&state, 0) - 0.05 * flare).abs() < 1e-12);
+        let plan = super::CrossPlan {
+            a: 0,
+            b: 2,
+            k: 40,
+            k_lo: 20,
+            a_top: struts[0].cell,
+            b_top: struts[2].cell,
+            radius_mm: 0.20,
+            first: Vec::new(),
+            second: Vec::new(),
+            plane: None,
+        };
+        let mut outcome = super::SlendernessOutcome::default();
+        super::commit_cross(&context, &mut state, &mut struts, plan, &mut outcome);
+
+        assert!(
+            (disc(&state, 0) - 0.20 * flare).abs() < 1e-12,
+            "the braced post's disc is {} mm; the file draws its root at 0.20 mm, a {} mm foot",
+            disc(&state, 0),
+            0.20 * flare
+        );
+        assert_eq!(outcome.cross_roots_grown, 1, "only P's root grew");
+        assert_eq!(outcome.cross_roots_lapping, 1, "P's grown foot laps Q's");
+        // The maintained discs equal the discs rebuilt from the field once the
+        // down-sweep has sized the new diagonals (at their own minimum, as it
+        // does for a brace no load reaches).
+        for strut in &mut struts {
+            if strut.kind == crate::StrutKind::Brace {
+                strut.radius_mm = vec![strut.min_radius_mm; strut.k_top - strut.k_bottom];
+            }
+        }
+        let rebuilt = crate::congestion::root_discs(&grid, &history, &struts, flare);
+        for id in 0..3 {
+            let slot = crate::congestion::disc_slot(&rebuilt, id).expect("a rebuilt disc");
+            let rebuilt_radius =
+                crate::congestion::disc_radius_mm(&rebuilt, slot).expect("a radius");
+            assert!(
+                (disc(&state, id) - rebuilt_radius).abs() < 1e-12,
+                "post {id}: the lane holds {} mm, the field draws {rebuilt_radius} mm",
+                disc(&state, id)
+            );
+        }
     }
 }

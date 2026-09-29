@@ -351,7 +351,10 @@ fn the_seat_trim_is_the_carried_face_and_never_moves_the_seat() {
         lowered.tip_seat_depth_mm.len()
     );
 
-    // Every ball and every FIRST shaft segment carries the trim; nothing else.
+    // Every ball and every FIRST shaft segment carries the trim; nothing else
+    // does HERE. A `Member` span carries it only where its solid reaches the
+    // model side of the seat plane, which a flat underside above a vertical
+    // shaft never allows (a sloped face can: `shaft_seat_trim.rs`).
     let mut balls = 0_usize;
     let mut tapers = 0_usize;
     for primitive in &honest.primitives {

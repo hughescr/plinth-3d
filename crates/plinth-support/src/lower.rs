@@ -760,6 +760,11 @@ pub struct SweepLowering {
     pub arms_drawn_in_spans: usize,
     /// The `Member` frusta those splits added, chained below each taper.
     pub profile_member_frusta: usize,
+    /// Of those, the `Member` spans that reach the MODEL side of their arm's
+    /// seat plane and so carry its seat trim like the taper above them
+    /// (review-fixes 2026-09-29). The path-hit witness for trimming every
+    /// shaft span a sloped seat plane crosses, not only the first.
+    pub shaft_members_trimmed_to_seat: usize,
     /// Arms handed to the lowering with no radius profile, drawn as a straight
     /// column at the tip radius. Zero on every sweep field; a nonzero count is
     /// a caller defect, published rather than hidden.
@@ -977,6 +982,7 @@ fn lower_sweep_arms_of(
             out.profile_member_frusta += lowered.spans - 1;
         }
         out.arms_without_profile += usize::from(lowered.without_profile);
+        out.shaft_members_trimmed_to_seat += lowered.members_trimmed;
         if let Some(seat) = lowered.seat {
             out.tip_seat_depth_mm.push(seat.depth_mm);
             out.tip_cut_radius_mm.push(seat.cut_radius_mm);
@@ -1089,6 +1095,9 @@ struct ArmLowering {
     seat: Option<TipSeat>,
     /// Straight spans the shaft was drawn in: 1 is the single taper.
     spans: usize,
+    /// `Member` spans below the taper that reach the model side of the seat
+    /// plane and so carry the seat trim.
+    members_trimmed: usize,
     /// The arm arrived with no radius profile and was drawn at its tip radius.
     without_profile: bool,
 }
@@ -1099,6 +1108,7 @@ impl ArmLowering {
             outcome,
             seat: None,
             spans: 0,
+            members_trimmed: 0,
             without_profile: false,
         }
     }
@@ -1553,12 +1563,10 @@ fn lower_one_sweep_arm(
     };
     // The ledger's ROOT section — where the load arrives — never narrower than
     // the tip. It is what the plate flare is sized from.
-    let ledger_root = arm
-        .radius_profile_mm
-        .first()
-        .copied()
-        .unwrap_or(arm.tip_radius_mm);
-    let Ok(root_radius) = positive(ledger_root.max(arm.tip_radius_mm)) else {
+    let Ok(root_radius) = positive(drawn_root_radius_mm(
+        &arm.radius_profile_mm,
+        arm.tip_radius_mm,
+    )) else {
         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
     };
     let Ok(ball_radius) = positive(config.tip_ball_factor.get() * tip_radius.get()) else {
@@ -1700,17 +1708,32 @@ fn lower_one_sweep_arm(
             }
         }
     };
-    // THE FIRST SHAFT SEGMENT IS TRIMMED TO THE SAME SEAT (fix/tip-trim,
-    // 2026-09-28). The taper starts at the ball centre, and on a leaned arm its
-    // start cap is tilted with the axis, so it stands through the seat plane
-    // and past the face's edge exactly where the ball does ("a chunk of post",
-    // tip-clip.md). The same plane and the same model difference apply.
+    // THE SHAFT IS TRIMMED TO THE SAME SEAT (fix/tip-trim, 2026-09-28;
+    // every span, review-fixes 2026-09-29). The taper starts at the ball
+    // centre, and on a leaned arm or under a sloped face its start cap stands
+    // through the seat plane and past the face's edge exactly where the ball
+    // does ("a chunk of post", tip-clip.md). The same plane and the same
+    // model difference apply.
+    //
+    // The rule is about the SOLID, not about how it is cut into records: the
+    // drawn profile breaks one straight shaft into several spans wherever the
+    // ledger steps (`drawn_spans`), and a span boundary can fall a slot below
+    // the seat, inside the band where the shaft's ring still reaches the model
+    // side of a sloped seat plane. So the taper keeps the trim it always had,
+    // and every further `Member` span whose own solid reaches the model side
+    // of the plane carries the same trim. A span wholly on the support side is
+    // left untouched and emits bit-identically, as before.
+    let mut members_trimmed = 0;
     if let Some(trim) = seat.as_ref().and_then(|seat| seat.trim) {
-        if let Some(taper) = staged
-            .iter_mut()
-            .find(|primitive| primitive.segment_kind == SupportSegmentKind::ContactTaper)
-        {
-            taper.seat_trim = Some(trim);
+        for primitive in &mut staged {
+            match primitive.segment_kind {
+                SupportSegmentKind::ContactTaper => primitive.seat_trim = Some(trim),
+                SupportSegmentKind::Member if frustum_reaches_model_side(primitive, trim) => {
+                    primitive.seat_trim = Some(trim);
+                    members_trimmed += 1;
+                }
+                _ => {}
+            }
         }
     }
     // The emit boundary's own contract, asked HERE, so one bad arm is dropped
@@ -1724,8 +1747,60 @@ fn lower_one_sweep_arm(
         outcome,
         seat,
         spans,
+        members_trimmed,
         without_profile: arm.radius_profile_mm.is_empty(),
     }
+}
+
+/// **The root a member is DRAWN with** — the section its plate flare is sized
+/// from (`root × FLARE_R_FACTOR` at the plate): the first entry of the radius
+/// profile the member is drawn at, never narrower than its tip, and the tip
+/// itself for an arm with no profile.
+///
+/// The ONE rule for it (review-fixes 2026-09-29). The lowering flares this
+/// root, and the sweep's congestion census and root-clearance decisions size
+/// every plate disc from it too, so the disc a decision is taken against is
+/// the disc the file lays down.
+#[must_use]
+pub fn drawn_root_radius_mm(profile: &[f64], tip_radius_mm: f64) -> f64 {
+    profile
+        .first()
+        .copied()
+        .unwrap_or(tip_radius_mm)
+        .max(tip_radius_mm)
+}
+
+/// Whether any point of a frustum record lies strictly on the MODEL side of a
+/// seat plane.
+///
+/// A frustum is the convex hull of its two end rings, so a linear function
+/// (the signed distance from the plane) takes its minimum on one of them. On a
+/// ring of radius `r` about centre `c` with unit ring normal `m`, the minimum
+/// is `d(c) − r·√(1 − (n·m)²)`, `n` the plane's unit normal. The ring normal
+/// is the record's own ([`FrustumRingNormal`]): the axis for an ordinary rod,
+/// `+Z` for a plate-root column's horizontal rings. Exact for the drawn
+/// circle; the emitted polygon is inscribed in it, so a record this calls
+/// clear is clear in the file too.
+fn frustum_reaches_model_side(primitive: &SupportPrimitive, trim: crate::SeatTrim) -> bool {
+    let start = primitive.start_mm.map(Finite::get);
+    let end = primitive.end_mm.map(Finite::get);
+    let ring_normal = match primitive.ring_normal {
+        FrustumRingNormal::SegmentAxis => {
+            geom_kernel::vec3::normalize(geom_kernel::vec3::sub(end, start))
+        }
+        FrustumRingNormal::PlateZ => Some([0.0, 0.0, 1.0]),
+    };
+    let Some(ring_normal) = ring_normal else {
+        return false;
+    };
+    let along = geom_kernel::vec3::dot(trim.outward_normal(), ring_normal);
+    let spread = (1.0 - along * along).max(0.0).sqrt();
+    [
+        (start, primitive.start_radius_mm.get()),
+        (end, primitive.end_radius_mm.get()),
+    ]
+    .into_iter()
+    .any(|(centre, radius)| trim.support_side_distance_mm(centre) - radius * spread < 0.0)
 }
 
 /// The ends and end radii of one shaft to draw.

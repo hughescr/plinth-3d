@@ -2562,15 +2562,19 @@ fn print_sweep_disclosure(
         let footprint = &report.seat_footprint;
         println!(
             "[sweep {model}] seat trim: {} tips (and their first shaft segments) trimmed to the \
-             support side of their seat face and out of the model, {} of them on the raster \
+             support side of their seat face and out of the model, and {} further Member spans \
+             of those shafts that reach the model side of the seat plane, {} of them on the raster \
              seat's plane for want of a measured face; contact disc at the face min {:.4} p50 \
              {:.4} max {:.4} mm, {below_at_face} below its own tip radius; raster seat from the \
              face min {:+.4} p50 {:+.4} max {:+.4} mm (positive = below a down-facing face). \
              Footprint: {} discs graded, {} on their face as placed, {} seats MOVED along the \
              face onto it (longest {:.4} mm; {} members joined to a moved axis moved with it, \
-             by up to {:.4} mm), {} on a knife edge; {} disc samples + {} search samples over {} \
-             layers, {} round(s)",
+             by up to {:.4} mm), {} on a knife edge, {} left in place because every on-face \
+             seat broke a rule of the finished field; moves refused by the lean law {}, by an \
+             unbraced run's limit {}, by the drain keep-out {} ({} member checks); {} disc \
+             samples + {} search samples over {} layers, {} round(s)",
             emission.tips_trimmed_to_seat,
+            emission.shaft_members_trimmed_to_seat,
             emission.tips_trimmed_without_a_measured_face,
             disc.0,
             disc.1,
@@ -2585,6 +2589,11 @@ fn print_sweep_disclosure(
             footprint.members_following_a_moved_host,
             footprint.max_follow_mm,
             footprint.knife_edges.len(),
+            footprint.moves_refused.len(),
+            footprint.moves_refused_lean,
+            footprint.moves_refused_slenderness,
+            footprint.moves_refused_drain,
+            footprint.members_checked,
             footprint.disc_samples,
             footprint.search_samples,
             footprint.layers_rasterised,
@@ -2595,6 +2604,15 @@ fn print_sweep_disclosure(
                 "[sweep {model}] WARNING tip of arm {arm} sits on a KNIFE EDGE: no seat within \
                  the search radius along its face holds its whole contact disc, so it keeps its \
                  seat, trimmed, with {:.1}% of its disc on the face",
+                fraction * 100.0
+            );
+        }
+        for (arm, fraction) in &footprint.moves_refused {
+            println!(
+                "[sweep {model}] WARNING tip of arm {arm} hangs off its face and every seat \
+                 along the face that holds its whole contact disc would break the lean law, an \
+                 unbraced run's limit or the drain keep-out for it or a member joined to it, so \
+                 it keeps its seat, trimmed, with {:.1}% of its disc on the face",
                 fraction * 100.0
             );
         }
@@ -2759,7 +2777,8 @@ fn print_sweep_disclosure(
          {} to a partner beyond the nearest, {} bands planned, {} refused as overlapping a \
          cross on the same pair, {} taken out again as not needed; thicken refused: \
          {} past the maximum radius, {} for a root disc that would touch another, {} trunks \
-         raised under a thickened member; {} brace bands refused, {} masts REFUSED for want of \
+         raised under a thickened member; {} plate root discs grown to the root a cross makes \
+         the file draw, {} of them then lapping another root; {} brace bands refused, {} masts REFUSED for want of \
          an admissible plate cell ({} cells refused by the braced-panel check), {} masts \
          extended to a later tie, {} mast roots still lapping another root after sizing; {} \
          tie passes, {}; longest unbraced run remaining {:.3} mm against its own limit of {:.3} mm{}",
@@ -2784,6 +2803,8 @@ fn print_sweep_disclosure(
         lane.thicken_refused_radius,
         lane.thicken_refused_disc,
         lane.trunks_raised_under_thickening,
+        lane.cross_roots_grown,
+        lane.cross_roots_lapping,
         lane.brace_bands_refused,
         lane.mast_cells_refused,
         lane.mast_cells_refused_by_panel,

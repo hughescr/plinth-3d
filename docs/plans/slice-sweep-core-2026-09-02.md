@@ -836,6 +836,13 @@ model, imported once). This replaced the horizontal "far face" clip on the ball'
 every ball buried below it, said nothing about a face's edge, and never touched the taper. The
 record's `start`/`end`/radii are unchanged; only its soup is cut.
 
+**Corrected (2026-09-29, review-fixes).** The trim is about the shaft's SOLID, not about how the
+drawn profile cuts it into records: every further `Member` span of a seated shaft whose solid
+reaches the model side of the seat plane carries the same trim as the taper above it (the minimum
+of the plane distance over its two end rings, `lower.rs::frustum_reaches_model_side`). On a sloped
+face a profile break one slot under the seat left such a span emitted whole. Published as
+`shaft_members_trimmed_to_seat`; pinned by `plinth-sweep` `tests/it/shaft_seat_trim.rs`.
+
 The **footprint rule** goes with it (`plinth_sweep::footprint`): the contact disc the trim leaves
 (the ball's section in the seat plane, computed by the lowering's own derivation,
 `plinth_support::tip_contact_discs`) must lie on the seat face, graded in the eroded carrier
@@ -845,6 +852,16 @@ the carrier mask's two-cell margin, a pruning Placeholder); a member joined
 to a moved axis (a branch landing, a brace top) moves with it (`footprint::followed_shifts`). A
 true knife edge keeps its seat, trimmed, and is warned about with the fraction of its disc on the
 face.
+
+**Corrected (2026-09-29, review-fixes).** The rule runs after the lean law, the slenderness lane and
+the drain keep-out, so a move is now held to those rules on the DRAWN ends of every member it
+displaces (`footprint::MoveLimits`): lateral travel per unit drop within the lean law, the drawn
+chord within its tightest unbraced run's limit, no new lamina in the drain keep-out; each "or no
+worse than before" for a member already past it. A refused move sends its tip to its next
+candidate; a tip with none left keeps its seat with a WARNING (`Footprint::MoveRefused`). The
+published run lengths are re-read on the moved chords. Pinned by `plinth-sweep`
+`tests/it/footprint_moves_hold_the_rules.rs` (flipped Round 25: without the check two members
+lean at 1.575 and 1.586 against the law's 1.5697).
 
 **The adapter must not re-derive this geometry by hand.** `lower_stub`
 (`crates/plinth-support/src/lower.rs:362`) and `root_boss_top` (`:416`) already compute the

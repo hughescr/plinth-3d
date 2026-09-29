@@ -272,6 +272,12 @@ pub enum Footprint {
     /// disc. The tip stays, trimmed, and is warned about with the fraction of
     /// its disc on the face.
     KnifeEdge { disc_on_face: f64 },
+    /// The disc hangs off its face and every on-face seat the search found
+    /// would have broken a rule of the finished field — the lean law, an
+    /// unbraced run's limit, or the drain keep-out — for the arm or a member
+    /// joined to it (review-fixes 2026-09-29). The tip stays, trimmed, and is
+    /// warned about with the fraction of its disc on the face.
+    MoveRefused { disc_on_face: f64 },
 }
 
 impl SweepStrut {
@@ -1283,24 +1289,7 @@ pub fn run_sweep_with_drains(
             policy.flare_r_factor,
             &mast_ids,
         );
-    slenderness_outcome.warnings.clear();
-    for run in &slenderness_after {
-        if run.length_mm > slenderness_outcome.longest_run_mm {
-            slenderness_outcome.longest_run_mm = run.length_mm;
-            slenderness_outcome.longest_run_limit_mm = run.limit_mm;
-        }
-        if run.over_limit() {
-            slenderness_outcome
-                .warnings
-                .push(slenderness::UnbracedWarning {
-                    strut_id: run.strut_id,
-                    k_lo: run.k_lo,
-                    k_top: run.k_top,
-                    length_mm: run.length_mm,
-                    limit_mm: run.limit_mm,
-                });
-        }
-    }
+    publish_runs(&mut slenderness_outcome, &slenderness_after, &[]);
 
     // The congestion census AFTER, from the same function that measured it
     // before, read off the FINISHED field — so what is published describes the
@@ -1419,6 +1408,29 @@ pub fn run_sweep_with_drains(
     // a true knife edge is warned about. It moves seats, so the digest is
     // re-taken over the finished field.
     let arms = adapter::arms_of(&sweep_plan);
+    //
+    // A move changes the geometry the file gets after every rule of the
+    // finished field was checked, so each proposed move is held to those same
+    // rules on its DRAWN geometry (review-fixes 2026-09-29): the lean law, the
+    // tightest unbraced run of every member it displaces, and the drain
+    // keep-out.
+    let mut chord_slack = vec![f64::INFINITY; sweep_plan.struts.len()];
+    for run in &slenderness_after {
+        if let Some(slack) = chord_slack.get_mut(run.strut_id as usize) {
+            if run.length_mm > 0.0 {
+                *slack = slack.min(run.limit_mm / run.length_mm);
+            }
+        }
+    }
+    let limits = footprint::MoveLimits {
+        max_lean: if height > 0.0 {
+            law.max_step_mm() / height
+        } else {
+            0.0
+        },
+        chord_slack,
+        keep_out: &keep_out,
+    };
     let footprint = footprint::apply(
         &sweep_plan.grid,
         &slices,
@@ -1427,10 +1439,56 @@ pub fn run_sweep_with_drains(
         plan,
         plate_z,
         height,
+        &limits,
     );
+    // THE RUNS AS THE FILE HAS THEM: a moved member's runs are shares of its
+    // moved chord, so the published longest run and the warnings are
+    // re-read on it. A field no seat moved republishes exactly what it had.
+    if footprint.tips_moved_onto_face > 0 {
+        let scale = footprint::chord_scales(&sweep_plan.grid, plate_z, height, &sweep_plan.struts);
+        publish_runs(
+            &mut sweep_plan.report.slenderness_lane,
+            &slenderness_after,
+            &scale,
+        );
+    }
     sweep_plan.report.seat_footprint = footprint;
     sweep_plan.report.sweep_digest = digest(&sweep_plan.struts);
     Ok(sweep_plan)
+}
+
+/// Publish the unbraced runs of a finished field: the longest with its own
+/// limit, and a warning for each run over its limit. `scale[id]` multiplies a
+/// member's run lengths (its drawn chord after the footprint moves over its
+/// chord before them); an empty `scale` is the field as measured.
+fn publish_runs(
+    lane: &mut slenderness::SlendernessOutcome,
+    runs: &[slenderness::UnbracedRun],
+    scale: &[f64],
+) {
+    lane.longest_run_mm = 0.0;
+    lane.longest_run_limit_mm = 0.0;
+    lane.warnings.clear();
+    for run in runs {
+        let factor = scale.get(run.strut_id as usize).copied().unwrap_or(1.0);
+        let run = slenderness::UnbracedRun {
+            length_mm: run.length_mm * factor,
+            ..*run
+        };
+        if run.length_mm > lane.longest_run_mm {
+            lane.longest_run_mm = run.length_mm;
+            lane.longest_run_limit_mm = run.limit_mm;
+        }
+        if run.over_limit() {
+            lane.warnings.push(slenderness::UnbracedWarning {
+                strut_id: run.strut_id,
+                k_lo: run.k_lo,
+                k_top: run.k_top,
+                length_mm: run.length_mm,
+                limit_mm: run.limit_mm,
+            });
+        }
+    }
 }
 
 /// Put back straight any arm that merged into a trunk the area law cannot grow
