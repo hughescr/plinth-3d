@@ -27,8 +27,19 @@ use harness::sweep_with;
 use plinth_mesh::{make_brace_pair, make_laid_tube, make_lonely_peak, Mesh};
 use plinth_sweep::{Landing, StrutKind, SweepPlan, SweepPolicy, SweepStrut};
 
+/// The production policy with ONE rung switched off: thickening.
+///
+/// Since 2026-09-29 the ladder thickens a post's root before it drops a mast
+/// (owner ruling: merge, `|X|`, thicken, mast, warn), and on these fixtures
+/// thickening now does the work the masts did — production places no mast on
+/// any of them. Every claim in this file is about where a MAST's root lands,
+/// so the rung above the mast is taken out and everything else (merges,
+/// crosses, the clearance rule under test) stays as production has it.
 fn policy() -> SweepPolicy {
-    SweepPolicy::from_registry().expect("the registry supplies every number the sweep reads")
+    SweepPolicy {
+        slenderness_thicken: false,
+        ..SweepPolicy::from_registry().expect("the registry supplies every number the sweep reads")
+    }
 }
 
 /// The registered root flare, read from the registry here rather than from the
@@ -131,15 +142,22 @@ fn every_mast_clears_every_plate_root_on_the_brace_pair() {
     );
 }
 
-/// The same claim on the fixture that places FIFTY-THREE masts, which is where
-/// the rule is actually load-bearing.
+/// The same claim on the fixture that placed FIFTY-THREE masts before
+/// 2026-09-29 (six since the bracing lane), which is where the rule is
+/// actually load-bearing.
 #[test]
 fn every_mast_clears_every_plate_root_on_the_laid_tube() {
     let plan = sweep_with(&laid_tube(), 0.0, &policy());
     let placed = masts(&plan);
+    // RE-DERIVED 2026-09-29 (bracing lane), on purpose: this was `> 10` when
+    // the laid tube placed 53 masts. Trying every partner in reach before a
+    // mast, and admitting a mast cell only where the braced panel holds, now
+    // leave it 6 (with thickening switched off, see `policy`). The rule is
+    // still what keeps them clear: the sabotage drill below measures more than
+    // ten lapping pairs with it deleted.
     assert!(
-        placed > 10,
-        "anti-vacuity: make_laid_tube must place many masts for this to be the load-bearing case; \
+        placed > 0,
+        "anti-vacuity: make_laid_tube must place masts for this to be the load-bearing case; \
          it placed {placed}"
     );
     let overlaps = overlapping_pairs_touching_a_mast(&plan);

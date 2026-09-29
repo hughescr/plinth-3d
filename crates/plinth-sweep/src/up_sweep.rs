@@ -609,6 +609,7 @@ pub fn place_layer(
             ],
             kind: crate::StrutKind::Arm,
             min_radius_mm: 0.0,
+            thickened_mm: Vec::new(),
             seat_on_strut: None,
             k_top: layer,
             k_bottom,

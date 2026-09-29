@@ -96,6 +96,35 @@ will bite there first).
 4. **Warn.** If neither is possible (keep-out, no plate in reach), emit with
    a per-arm `unbraced_over_limit` warning; never drop the arm.
 
+### As reworked, 2026-09-29 (owner rulings on the 2026-09-28 field report)
+
+Recorded here because it changes the ladder above; the code of record is
+`crates/plinth-sweep/src/slenderness.rs` and the field report is
+`plinth-evidence/.../field-2026-09-28/braces-masts.md`.
+
+- **Order:** merge → un-merge pass → `|X|` → **thicken** → mast → warn. The
+  un-merge pass that puts back merges a trunk cannot carry now runs BEFORE
+  any tie, so no post it puts back is left unmeasured.
+- **Every direction:** an `|X|` holds only in its own plane. A run is measured
+  across each plane of the crosses on its member; a tie needs crosses in two
+  non-parallel planes (built as a pair, or one completing a plane already
+  there). Any two planes the grid tells apart count (the lane's rigid-tie
+  model); the narrowest angle used is published.
+- **Thicken:** raise the root, keep the tip, up to the 1.0 mm maximum; the
+  root is the smallest that brings the run inside the one-pixel law, carried
+  down every trunk below, and a grown plate root must clear every other root
+  disc.
+- **Runs are measured on the drawn profile** with the taper integral
+  (`δ/p = (4/S⁴) ∫ (L−x)³ / r(x)⁴ dx`), not the narrowest ledger radius.
+- **Live re-measure:** each member's runs are cut again from the live field
+  before every remedy; every partner in reach is tried, nearest first; a
+  cross that a later one leaves unneeded is taken out at the end of its pass;
+  the passes repeat (with a down-sweep between) to a fixed point.
+- **Masts:** a cell is admissible only where the braced panel holds the arm to
+  one pixel in its plane (the frame of the field report's Q4); an arm's mast
+  is extended to a later tie before a second one is dropped.
+- `S` stays 50.
+
 ### Fixtures (new, procedural, in plinth-mesh fixtures.rs)
 
 - `make_tall_stilt_plate`: a plate 30 mm up on a 4 mm slab — every arm is

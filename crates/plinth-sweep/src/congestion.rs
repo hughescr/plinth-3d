@@ -722,6 +722,7 @@ fn seat_flank_arms(
             ],
             kind: StrutKind::Arm,
             min_radius_mm: 0.0,
+            thickened_mm: Vec::new(),
             seat_on_strut: None,
             k_top: shelf,
             k_bottom: 0,
@@ -1312,6 +1313,29 @@ pub(crate) fn push_disc(
         section_mm2: core::f64::consts::PI * bare_radius_mm * bare_radius_mm,
         under_silhouette,
     });
+}
+
+/// Where member `id`'s own root disc sits in `placed`, if it has one.
+pub(crate) fn disc_slot(placed: &[RootDisc], id: u32) -> Option<usize> {
+    placed.iter().position(|disc| disc.id == id)
+}
+
+/// The FLARED radius of the disc in `slot`.
+pub(crate) fn disc_radius_mm(placed: &[RootDisc], slot: usize) -> Option<f64> {
+    placed.get(slot).map(|disc| disc.radius_mm)
+}
+
+/// Grow the disc in `slot` to a new bare root radius, flared by the same
+/// factor the emitter uses. The slenderness lane's thicken rung calls this
+/// once it has shown the grown disc clears every other root, so the next
+/// clearance test sees the root as it will be printed.
+pub(crate) fn grow_disc(placed: &mut [RootDisc], slot: usize, flared_radius_mm: f64, bare_radius_mm: f64) {
+    if let Some(disc) = placed.get_mut(slot) {
+        disc.radius_mm = disc.radius_mm.max(flared_radius_mm);
+        disc.section_mm2 = disc
+            .section_mm2
+            .max(core::f64::consts::PI * bare_radius_mm * bare_radius_mm);
+    }
 }
 
 /// How many of `ids` have a root disc that overlaps ANY other plate root on the
