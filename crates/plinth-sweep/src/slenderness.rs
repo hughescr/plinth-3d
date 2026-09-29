@@ -479,7 +479,10 @@ fn parallel(a: Plane, b: Plane) -> bool {
     reason = "grid steps are bounded by the grid's own dimensions and exact in f64"
 )]
 fn plane_deg(plane: Plane) -> f64 {
-    (plane[1] as f64).atan2(plane[0] as f64).to_degrees().rem_euclid(180.0)
+    (plane[1] as f64)
+        .atan2(plane[0] as f64)
+        .to_degrees()
+        .rem_euclid(180.0)
 }
 
 /// The angle between two undirected directions, in `[0, 90]`.
@@ -512,7 +515,10 @@ fn sway_directions(planes: &[Plane]) -> Vec<Option<f64>> {
         .iter()
         .flat_map(|plane| {
             let deg = plane_deg(*plane);
-            [(deg - 45.0).rem_euclid(180.0), (deg + 45.0).rem_euclid(180.0)]
+            [
+                (deg - 45.0).rem_euclid(180.0),
+                (deg + 45.0).rem_euclid(180.0),
+            ]
         })
         .collect();
     breaks.sort_by(f64::total_cmp);
@@ -946,60 +952,25 @@ pub fn apply_ties(
     let height = context.layer_height_mm;
     let first_new = struts.len();
     let mut state = TieState::build(context, struts);
-    let mut queued = vec![false; struts.len()];
-    // BRANCHES BEFORE THEIR TRUNKS. Thickening a member raises every trunk it
-    // stands on, from the junction down to that trunk's root; a trunk tied
-    // BEFORE one of its branches was thickened could be left carrying a cross
-    // that no longer holds anything. So the members that stand deepest in the
-    // landing tree go first, and a trunk is measured after every raise its
-    // branches will hand it. `depth` is one walk down the landings per
-    // member, bounded by the strut count.
-    let depth_of = |strut: &SweepStrut| {
-        let mut depth = 0_usize;
-        let mut at = strut.landing;
-        while let Landing::Strut { id, .. } = at {
-            depth += 1;
-            if depth > struts.len() {
-                break;
-            }
-            at = struts.get(id as usize).map_or(Landing::Plate, |host| host.landing);
-        }
-        depth
-    };
-    let mut first: Vec<(usize, u32)> = Vec::new();
-    for (index, strut) in struts.iter().enumerate() {
-        let over = member_runs(
-            grid,
-            strut,
-            &state.ties[index],
-            &state.profiles[index],
-            height,
-            law,
-        )
-        .iter()
-        .any(UnbracedRun::over_limit);
-        if over {
-            first.push((depth_of(strut), strut.id));
-            queued[index] = true;
-        }
-    }
-    first.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    let mut queue: VecDeque<u32> = first.into_iter().map(|(_, id)| id).collect();
-    let mut exhausted: BTreeSet<RunKey> = BTreeSet::new();
     let mut applied = 0_usize;
-    'members: while let Some(id) = queue.pop_front() {
-        let index = id as usize;
-        if let Some(flag) = queued.get_mut(index) {
-            *flag = false;
-        }
-        for _attempt in 0..=context.max_struts {
-            if struts.len() + 2 > context.max_struts {
-                break 'members;
-            }
-            let Some(strut) = struts.get(index) else {
-                continue 'members;
-            };
-            let run = member_runs(
+    // ROUNDS, TO A FIXED POINT INSIDE THE PASS. A run with no admissible
+    // remedy is set aside for the rest of a round; a remedy applied later in
+    // the same round (a new mast, a new cross, a thicker trunk) can give it a
+    // partner or room it did not have, so the round is run again until one
+    // applies nothing. Every round that continues applied at least one remedy,
+    // so the rounds are bounded by the same bound the remedies are.
+    'rounds: for _round in 0..=context.max_struts {
+        let before = applied;
+        let mut queued = vec![false; struts.len()];
+        // BRANCHES BEFORE THEIR TRUNKS. Thickening a member raises every trunk
+        // it stands on, from the junction down to that trunk's root; a trunk
+        // tied BEFORE one of its branches was thickened could be left carrying
+        // a cross that no longer holds anything. So the members that stand
+        // deepest in the landing tree go first, and a trunk is measured after
+        // every raise its branches will hand it.
+        let mut first: Vec<(usize, u32)> = Vec::new();
+        for (index, strut) in struts.iter().enumerate() {
+            let over = member_runs(
                 grid,
                 strut,
                 &state.ties[index],
@@ -1007,55 +978,108 @@ pub fn apply_ties(
                 height,
                 law,
             )
-            .into_iter()
-            .filter(|run| run.over_limit() && !exhausted.contains(&run_key(run)))
-            // THE HIGHEST RUN FIRST. Thickening a run raises the member all
-            // the way down to its foot, so a cross placed first on a run
-            // below it could be left holding nothing; nothing done to a
-            // lower run changes a higher one.
-            .max_by_key(|run| (run.k_lo, run.k_top));
-            let Some(run) = run else {
-                continue 'members;
-            };
-            // The first of the ties the run needs, evenly spaced; the member is
-            // measured again before the next one.
-            let k = tie_layer(&run, 1, extra_ties(&run).max(1));
-            if context.brace {
-                if let Some(k) = k {
-                    if tie_by_crosses(context, &mut state, struts, &run, k, outcome) {
-                        applied += 1;
-                        continue;
-                    }
+            .iter()
+            .any(UnbracedRun::over_limit);
+            if over {
+                first.push((landing_depth(struts, strut), strut.id));
+                queued[index] = true;
+            }
+        }
+        first.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let mut queue: VecDeque<u32> = first.into_iter().map(|(_, id)| id).collect();
+        let mut exhausted: BTreeSet<RunKey> = BTreeSet::new();
+        'members: while let Some(id) = queue.pop_front() {
+            let index = id as usize;
+            if let Some(flag) = queued.get_mut(index) {
+                *flag = false;
+            }
+            for _attempt in 0..=context.max_struts {
+                if struts.len() + 2 > context.max_struts {
+                    break 'rounds;
                 }
-            }
-            if context.thicken && thicken(context, &mut state, struts, &run, outcome) {
-                applied += 1;
-                continue;
-            }
-            if context.mast {
-                if let Some(k) = k {
-                    if let Some(new_mast) =
-                        tie_by_mast(context, &mut state, struts, &run, k, outcome)
-                    {
-                        applied += 1;
-                        if let Some(mast) = new_mast {
-                            queued.resize(struts.len(), false);
-                            if !queued[mast as usize] {
-                                queued[mast as usize] = true;
-                                queue.push_back(mast);
-                            }
+                let Some(strut) = struts.get(index) else {
+                    continue 'members;
+                };
+                let run = member_runs(
+                    grid,
+                    strut,
+                    &state.ties[index],
+                    &state.profiles[index],
+                    height,
+                    law,
+                )
+                .into_iter()
+                .filter(|run| run.over_limit() && !exhausted.contains(&run_key(run)))
+                // THE HIGHEST RUN FIRST. Thickening a run raises the member
+                // all the way down to its foot, so a cross placed first on a
+                // run below it could be left holding nothing; nothing done to
+                // a lower run changes a higher one.
+                .max_by_key(|run| (run.k_lo, run.k_top));
+                let Some(run) = run else {
+                    continue 'members;
+                };
+                // The first of the ties the run needs, evenly spaced; the
+                // member is measured again before the next one.
+                let k = tie_layer(&run, 1, extra_ties(&run).max(1));
+                if context.brace {
+                    if let Some(k) = k {
+                        if tie_by_crosses(context, &mut state, struts, &run, k, outcome) {
+                            applied += 1;
+                            continue;
                         }
-                        continue;
                     }
                 }
+                if context.thicken && thicken(context, &mut state, struts, &run, outcome) {
+                    applied += 1;
+                    continue;
+                }
+                if context.mast {
+                    if let Some(k) = k {
+                        if let Some(new_mast) =
+                            tie_by_mast(context, &mut state, struts, &run, k, outcome)
+                        {
+                            applied += 1;
+                            if let Some(mast) = new_mast {
+                                queued.resize(struts.len(), false);
+                                if !queued[mast as usize] {
+                                    queued[mast as usize] = true;
+                                    queue.push_back(mast);
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                }
+                // No admissible remedy this round: the run is set aside, and
+                // if no later round finds it one, the census at the end of the
+                // sweep names it as a warning.
+                exhausted.insert(run_key(&run));
             }
-            // No admissible remedy: the run stays, and the census at the end
-            // of the sweep names it as a warning.
-            exhausted.insert(run_key(&run));
+        }
+        if applied == before {
+            break;
         }
     }
     prune_unneeded_crosses(context, &state, struts, first_new, outcome);
     applied
+}
+
+/// How many landings down a member stands from the plate or the model: `0` for
+/// a member that lands on either, one more for each trunk below. One walk
+/// down the landings, bounded by the strut count.
+fn landing_depth(struts: &[SweepStrut], strut: &SweepStrut) -> usize {
+    let mut depth = 0_usize;
+    let mut at = strut.landing;
+    while let Landing::Strut { id, .. } = at {
+        depth += 1;
+        if depth > struts.len() {
+            break;
+        }
+        at = struts
+            .get(id as usize)
+            .map_or(Landing::Plate, |host| host.landing);
+    }
+    depth
 }
 
 /// **Every cross must be needed** — closed at the end of each pass.
@@ -1104,9 +1128,9 @@ fn prune_unneeded_crosses(
             && two.kind == StrutKind::Brace
             && one.k_top == two.k_top
             && one.k_bottom == two.k_bottom
-            && one.seat_on_strut.is_some_and(|seat| {
-                matches!(two.landing, Landing::Strut { id, .. } if id == seat)
-            });
+            && one
+                .seat_on_strut
+                .is_some_and(|seat| matches!(two.landing, Landing::Strut { id, .. } if id == seat));
         if twins {
             crosses.push((at, at + 1));
             at += 2;
@@ -1213,7 +1237,9 @@ fn prune_unneeded_crosses(
             taken += 1;
         }
     }
-    let mut new_id: Vec<u32> = (0..len).map(|id| u32::try_from(id).unwrap_or(u32::MAX)).collect();
+    let mut new_id: Vec<u32> = (0..len)
+        .map(|id| u32::try_from(id).unwrap_or(u32::MAX))
+        .collect();
     let tail: Vec<SweepStrut> = struts.drain(first_new..).collect();
     for (offset, member) in tail.into_iter().enumerate() {
         let old = first_new + offset;
@@ -1283,7 +1309,8 @@ impl TieState {
             if strut.kind != StrutKind::Brace || !live(strut) {
                 continue;
             }
-            let (Some(seat), Landing::Strut { id: base, .. }) = (strut.seat_on_strut, strut.landing)
+            let (Some(seat), Landing::Strut { id: base, .. }) =
+                (strut.seat_on_strut, strut.landing)
             else {
                 continue;
             };
@@ -1379,9 +1406,16 @@ fn tie_by_crosses(
             continue;
         }
         outcome.cross_bands_planned += 1;
-        let Some(plan) =
-            plan_cross(context, &state.index, struts, &state.bands, id, partner, k, outcome)
-        else {
+        let Some(plan) = plan_cross(
+            context,
+            &state.index,
+            struts,
+            &state.bands,
+            id,
+            partner,
+            k,
+            outcome,
+        ) else {
             continue;
         };
         if rank > 0 {
@@ -1408,7 +1442,14 @@ fn commit_cross(
 ) {
     let grid = context.grid;
     let span = plan.k - plan.k_lo;
-    let (a, b, k, k_lo, radius, plane) = (plan.a, plan.b, plan.k, plan.k_lo, plan.radius_mm, plan.plane);
+    let (a, b, k, k_lo, radius, plane) = (
+        plan.a,
+        plan.b,
+        plan.k,
+        plan.k_lo,
+        plan.radius_mm,
+        plan.plane,
+    );
     push_brace(
         grid,
         struts,
@@ -1439,9 +1480,10 @@ fn commit_cross(
         }
         // The junction clause the lowering applies: the post is drawn at
         // least as thick as the diagonal, from the joint down to its root.
-        if let (Some(strut), Some(profile)) =
-            (struts.get(post as usize), state.profiles.get_mut(post as usize))
-        {
+        if let (Some(strut), Some(profile)) = (
+            struts.get(post as usize),
+            state.profiles.get_mut(post as usize),
+        ) {
             let top = k.saturating_sub(strut.k_bottom);
             for radius_here in profile.iter_mut().take(top + 1) {
                 *radius_here = radius_here.max(radius);
@@ -1677,8 +1719,8 @@ fn panel_sway_over_pixel(
     );
     let h = tie_mm.min(run_mm);
     let both_i = arm_i + mast_i;
-    let couple = gap_mm * gap_mm
-        / (h * (1.0 / arm_a + 1.0 / mast_a) + diagonal / (2.0 * brace_a * sin_sq));
+    let couple =
+        gap_mm * gap_mm / (h * (1.0 / arm_a + 1.0 / mast_a) + diagonal / (2.0 * brace_a * sin_sq));
     let k11 = 12.0 * both_i / h.powi(3);
     let k12 = -6.0 * both_i / (h * h);
     let k22 = 4.0 * both_i / h + couple;
@@ -1738,27 +1780,64 @@ fn tie_by_mast(
         if !admissible(plane_between(grid, here, standing.cell)) {
             continue;
         }
-        let (old_top, cell) = (standing.k_top, standing.cell);
+        let (old_top, cell, old_radius) = (standing.k_top, standing.cell, standing.min_radius_mm);
         let spans_before = state.index.shaft_spans.len();
+        // A taller mast needs the radius its whole new height asks for, and its
+        // grown root has to clear every other root, as a new mast's would.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a layer index bounded by the plan's own layer count is exact in f64"
+        )]
+        let grown = law
+            .brace_radius_mm(k as f64 * context.layer_height_mm)
+            .max(old_radius);
+        let slot = crate::congestion::disc_slot(&state.placed_roots, mast);
         if old_top < k {
             let blocked = (old_top + 1..=k).any(|layer| {
                 !context.keep_out.admits(cell, layer)
                     || state.index.shaft_blocks(cell, layer, None)
                     || context.history.model_blocks(cell, layer)
             });
-            if blocked {
+            let crowded = grown > old_radius
+                && context.mast_root_clearance
+                && !crate::congestion::clear_of_placed(
+                    grid,
+                    cell,
+                    grown * flare_of(context),
+                    &state.placed_roots,
+                    slot,
+                );
+            if blocked || crowded {
                 continue;
             }
             state.index.stamp_shaft(mast, old_top + 1, k, cell, &[]);
             struts[mast as usize].k_top = k;
         }
-        if let Some(plan) =
-            plan_cross(context, &state.index, struts, &state.bands, id, mast, k, outcome)
-        {
+        if let Some(plan) = plan_cross(
+            context,
+            &state.index,
+            struts,
+            &state.bands,
+            id,
+            mast,
+            k,
+            outcome,
+        ) {
             if old_top < k {
                 let profile = &mut state.profiles[mast as usize];
-                let root = profile.first().copied().unwrap_or(0.0);
-                profile.resize(k + 1, root);
+                profile.resize(k + 1, grown);
+                for radius in profile.iter_mut() {
+                    *radius = radius.max(grown);
+                }
+                struts[mast as usize].min_radius_mm = grown;
+                if let Some(slot) = slot {
+                    crate::congestion::grow_disc(
+                        &mut state.placed_roots,
+                        slot,
+                        grown * flare_of(context),
+                        grown,
+                    );
+                }
                 outcome.masts_extended += 1;
             }
             commit_cross(context, state, struts, plan);
@@ -1787,6 +1866,11 @@ fn tie_by_mast(
         reason = "layer counts bounded by the plan's own layer count are exact in f64"
     )]
     let tie_mm = run.length_mm * ((k - run.k_lo) as f64) / ((run.k_top - run.k_lo) as f64);
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a layer index bounded by the plan's own layer count is exact in f64"
+    )]
+    let mast_height_mm = k as f64 * context.layer_height_mm;
     let cols = grid.cols();
     let row0 = grid.row_of(here);
     let col0 = grid.col_of(here);
@@ -1813,19 +1897,17 @@ fn tie_by_mast(
             if !admissible(plane_between(grid, here, cell)) {
                 continue;
             }
-            // THE MAST'S OWN RADIUS at this candidate: its slenderness has to
-            // hold from the plate up to the bottom of the band the cross to
-            // THIS cell spans, `r_m = max(r_min, H_first / S)`.
             let depth = context.lean.layers_to_reach(distance_mm);
             if depth == 0 || depth > k {
                 continue;
             }
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "a layer count bounded by the plan's own layer count is exact in f64"
-            )]
-            let first_brace_mm = (k - depth) as f64 * context.layer_height_mm;
-            candidates.push((distance_mm, cell, law.brace_radius_mm(first_brace_mm)));
+            // THE MAST'S OWN RADIUS: `r_m = max(r_min, H / S)` over its WHOLE
+            // height. Until 2026-09-29 it was sized up to the bottom of its
+            // first band, but the cross that ties it holds only along its own
+            // plane, so across that plane the mast stands unbraced from the
+            // plate to its top (measured on the Cylinder: 16.05 mm against a
+            // 15.6 mm limit, re-opened by the very next pass).
+            candidates.push((distance_mm, cell, law.brace_radius_mm(mast_height_mm)));
         }
     }
     candidates.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
@@ -1835,7 +1917,14 @@ fn tie_by_mast(
         let mut chosen = None;
         for (distance_mm, cell, own_radius) in candidates {
             let sway = |mast_mm: f64| {
-                panel_sway_over_pixel(law, run.length_mm, run.radius_mm, tie_mm, mast_mm, distance_mm)
+                panel_sway_over_pixel(
+                    law,
+                    run.length_mm,
+                    run.radius_mm,
+                    tie_mm,
+                    mast_mm,
+                    distance_mm,
+                )
             };
             if sway(law.r_max_mm) > 1.0 {
                 outcome.mast_cells_refused_by_panel += 1;
@@ -1904,8 +1993,16 @@ fn tie_by_mast(
     // build; taken back out if the cross will not build.
     let spans_before = state.index.shaft_spans.len();
     state.index.stamp_shaft(mast_id, 0, k, cell, &[]);
-    if let Some(plan) = plan_cross(context, &state.index, struts, &state.bands, id, mast_id, k, outcome)
-    {
+    if let Some(plan) = plan_cross(
+        context,
+        &state.index,
+        struts,
+        &state.bands,
+        id,
+        mast_id,
+        k,
+        outcome,
+    ) {
         commit_cross(context, state, struts, plan);
         crate::congestion::push_disc(
             &mut state.placed_roots,
@@ -2572,7 +2669,10 @@ mod tests {
     fn a_uniform_post_is_its_own_equivalent_radius() {
         for n in [1_usize, 2, 7, 700] {
             let r = super::equivalent_radius(n, |_| Some(0.4)).expect("a radius");
-            assert!((r - 0.4).abs() < 1.0e-12, "{n} layers of 0.4 mm read as {r}");
+            assert!(
+                (r - 0.4).abs() < 1.0e-12,
+                "{n} layers of 0.4 mm read as {r}"
+            );
         }
     }
 
