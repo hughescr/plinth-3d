@@ -12,6 +12,7 @@
 //! `docs/development.md`, "Where integration tests go".
 
 mod display_face_objective;
+mod flat_face_poses;
 mod no_private_vector_algebra;
 mod orientation_dense_sweep;
 mod orientation_rederivation;

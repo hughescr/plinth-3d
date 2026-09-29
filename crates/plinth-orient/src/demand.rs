@@ -15,8 +15,8 @@
 //! it is what ranks the coarse and refine tiers and decides which poses
 //! reach the commit tier at all. What this trait adds is a SECOND prefilter
 //! inside the commit tier, because the commit tier's admitted set is
-//! `ORIENT_COMMIT_TOP_K` promoted plus the escorted legacy block (up to ~16
-//! poses), and a production-pitch sweep of all of them is not affordable on
+//! `ORIENT_COMMIT_TOP_K` promoted plus the escorted legacy block and flat-face
+//! poses (up to ~16-18 poses), and a production-pitch sweep of all of them is not affordable on
 //! a tall model (LANE 2 measured one production sweep of the Weeping Treant
 //! at 76.85 s).
 //!

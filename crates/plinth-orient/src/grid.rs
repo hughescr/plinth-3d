@@ -28,6 +28,44 @@
 //! | 1 | face-aligned rest poses (§1.3's hull substitute) | ≤ `ORIENT_REST_POSE_MAX` |
 //! | 2 | the Fibonacci lattice on S² | `ORIENT_FIBONACCI_COUNT` |
 //!
+//! # Flat faces rest on the plate by right (2026-09-28)
+//!
+//! A pose that rests one of the part's large flat faces on the plate is a
+//! rest pose (block 1), and the grid names the ones that are FLAT FACES
+//! ([`SweepGrid::flat_face_poses`]); the search carries them to the commit
+//! tier by right, exactly as it carries the legacy 13. A disc has two: its
+//! plain glue face down (identity) and its stiffener side down (the 180°
+//! flip, glue face UP — the owner's ruling for all three `Round_*` bases).
+//! The recorded funnel lost exactly that second pose on Round 50 and
+//! Round 100: the coarse proxy ranked it 76th and 482nd and promoted 24
+//! (`plinth-evidence/slice-sweep-2026-09-02/field-2026-09-28/round50.md` Q2).
+//!
+//! **Only resting poses, not their face-up twins — measured.** A face-up
+//! twin (`u = +n` for a flat face `n`) is a flat-face pose in its own right
+//! only when the part's opposite side is itself flat, and then it is already
+//! that side's resting pose. Adding the twin for a part whose opposite side
+//! is NOT flat was built and measured on 2026-09-28 and rejected: on the
+//! Morel base it adds the exact 180° flip (textured top DOWN), which the
+//! commit tier then prefers by 0.049 points on fragility, against the
+//! owner's ruling that the Morel base prints textured top up
+//! (`plinth-evidence/.../lanes/round-pose.md`). That preference is a finding
+//! about the objective's display pricing, recorded there as an open question,
+//! not something a candidate-set rule should decide either way.
+//!
+//! **Which rest poses are flat faces — a comparison, not a constant.** A
+//! rest pose `u` names the side of the part that faces `n = −u`. Its FLAT
+//! area is the projected area of the faces whose normals lie within the
+//! grid's own dedupe tolerance of `n` (the angle at which the search itself
+//! calls two directions one); its SIDE area is the projected area of
+//! everything facing that way, `Σ area·max(0, n_f·n)`. The rest pose is a
+//! flat face when the flat area outweighs the rest of that side: `flat >
+//! side − flat`. A disc's glue face (1809 of 1962 mm² on Round 50) and its
+//! stiffener side (1868 of 1964) both qualify; a sphere's bins never do; a
+//! cube's six faces all do. No number is chosen: the tolerance is the grid's
+//! and the comparison is between two areas of the same part. The escort it
+//! drives only adds candidates to a measured tier, so it can prune nothing
+//! and decides no outcome — the measured commit tier does.
+//!
 //! Block 0 is enumerated **first**, where D-12's prose lists it last, for
 //! reason (1) above.  The legacy 13 are built through the very same
 //! `rotation(axis, degrees)` builder the pinned path uses, so a dense winner
@@ -213,6 +251,8 @@ pub struct SweepGrid {
     legacy_count: usize,
     rest_pose_count: usize,
     fibonacci_count: usize,
+    flat_face_count: usize,
+    flat_face_poses: Vec<usize>,
     duplicates_dropped: usize,
     digest: String,
 }
@@ -273,12 +313,13 @@ impl SweepGrid {
         let legacy_count = candidates.len();
 
         // Block 1.
-        for direction in rest_poses(table, settings)? {
+        let rest = rest_poses(table, settings)?;
+        for direction in &rest {
             push_unique(
                 &mut candidates,
                 &mut duplicates_dropped,
                 CandidateBlock::RestPose,
-                direction,
+                *direction,
                 None,
                 cosine,
             );
@@ -298,6 +339,19 @@ impl SweepGrid {
         }
         let fibonacci_count = candidates.len() - legacy_count - rest_pose_count;
 
+        // The flat faces, and the pose that rests each one on the plate,
+        // resolved to the candidate that covers it — the EARLIEST within the
+        // dedupe tolerance, which is the one dedupe kept (a flat face resting
+        // at +Z is identity, the legacy candidate 0) — ascending, once each.
+        // No candidate is added: every such pose is already a rest pose.
+        let flat = flat_faces(table, &rest, cosine);
+        let mut poses: Vec<usize> = flat
+            .iter()
+            .filter_map(|face_down| covering(&candidates, *face_down, cosine))
+            .collect();
+        poses.sort_unstable();
+        poses.dedup();
+
         let digest = direction_digest(&candidates);
         Ok(Self {
             candidates,
@@ -305,6 +359,8 @@ impl SweepGrid {
             legacy_count,
             rest_pose_count,
             fibonacci_count,
+            flat_face_count: flat.len(),
+            flat_face_poses: poses,
             duplicates_dropped,
             digest,
         })
@@ -339,6 +395,17 @@ impl SweepGrid {
     #[must_use]
     pub const fn fibonacci_count(&self) -> usize {
         self.fibonacci_count
+    }
+    /// How many rest poses qualified as flat faces (module doc).
+    #[must_use]
+    pub const fn flat_face_count(&self) -> usize {
+        self.flat_face_count
+    }
+    /// The candidate ids that rest a flat face on the plate, ascending, once
+    /// each. These reach the commit tier by right; see `search::escort`.
+    #[must_use]
+    pub fn flat_face_poses(&self) -> &[usize] {
+        &self.flat_face_poses
     }
     #[must_use]
     pub const fn duplicates_dropped(&self) -> usize {
@@ -376,6 +443,53 @@ fn push_unique(
         direction,
         selection: selection.unwrap_or_else(|| up_selection(direction)),
     });
+}
+
+/// The earliest candidate within the dedupe tolerance of `direction` — the one
+/// [`push_unique`] kept for it — or `None` when nothing covers it.
+fn covering(candidates: &[Candidate], direction: UpDirection, cosine: f64) -> Option<usize> {
+    let u = direction.get();
+    candidates
+        .iter()
+        .find(|candidate| vec3::dot(u, candidate.direction.get()) > cosine)
+        .map(|candidate| candidate.id)
+}
+
+/// The rest poses that are flat faces (module doc, "Flat faces"), in
+/// rest-pose order: those whose within-tolerance area outweighs the rest of
+/// the side they face.
+///
+/// One dense faces × rest-poses pass, faces outer so the pose list streams
+/// once, accumulating both areas for every pose at once; the fold is serial in
+/// face order, so the result is bit-identical at any thread count.
+fn flat_faces(table: &OrientFaceTable, rest: &[UpDirection], cosine: f64) -> Vec<UpDirection> {
+    // The side a rest pose `u` lays on the plate faces `n = −u`.
+    let sides: Vec<[f64; 3]> = rest.iter().map(|pose| pose.antipode().get()).collect();
+    let mut flat = vec![0.0_f64; sides.len()];
+    let mut side = vec![0.0_f64; sides.len()];
+    let areas = table.areas_mm2();
+    for (face, normal) in table.normals().iter().enumerate() {
+        let face_area = areas[face];
+        if face_area <= 0.0 || !face_area.is_finite() {
+            continue;
+        }
+        for (pose, n) in sides.iter().enumerate() {
+            let facing = vec3::dot(*normal, *n);
+            if facing <= 0.0 {
+                continue;
+            }
+            let projected = face_area * facing;
+            side[pose] += projected;
+            if facing > cosine {
+                flat[pose] += projected;
+            }
+        }
+    }
+    rest.iter()
+        .enumerate()
+        .filter(|(pose, _)| flat[*pose] > side[*pose] - flat[*pose])
+        .map(|(_, direction)| *direction)
+        .collect()
 }
 
 /// The selection a searched direction records: the direction itself, which is
@@ -616,6 +730,17 @@ mod tests {
             grid.candidates().len(),
             13 + grid.rest_pose_count() + grid.fibonacci_count()
         );
+    }
+
+    /// A cube's six faces are all flat faces, and all six resting poses are
+    /// named for the escort; the one that rests the authored bottom down is
+    /// identity, the legacy candidate that already covers it.
+    #[test]
+    fn a_cube_names_six_flat_faces() {
+        let grid = SweepGrid::build(&table(), GridSettings::registered().unwrap()).unwrap();
+        assert_eq!(grid.flat_face_count(), 6);
+        assert_eq!(grid.flat_face_poses().len(), 6);
+        assert!(grid.flat_face_poses().contains(&0), "identity rests the cube's bottom face down");
     }
 
     /// A cube's six face-down poses are the six axis directions, and the
