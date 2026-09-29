@@ -176,6 +176,32 @@ impl ColumnHistory {
         });
     }
 
+    /// Take back the spans a [`Self::stamp_shaft`] of a STRAIGHT shaft at
+    /// `cell` added, given the span count from just before that stamp.
+    ///
+    /// A straight shaft occupies one column, so its stamp pushed at most one
+    /// span, onto `cell`'s list, and that span is the list's head. Popping it
+    /// and restoring the head leaves the index exactly as it was before the
+    /// stamp: the same spans, the same slots, the same list order. Used by the
+    /// slenderness lane's mast search, which stamps a trial mast into the live
+    /// index instead of rebuilding a whole index per attempt.
+    pub(crate) fn unstamp_straight_shaft(&mut self, cell: usize, spans_before: usize) {
+        while self.shaft_spans.len() > spans_before {
+            let slot = self.shaft_spans.len() - 1;
+            let Some(span) = self.shaft_spans.pop() else {
+                return;
+            };
+            debug_assert_eq!(
+                self.shaft_head.get(cell).copied(),
+                u32::try_from(slot).ok(),
+                "the span being taken back must head the straight shaft's own column"
+            );
+            if let Some(head) = self.shaft_head.get_mut(cell) {
+                *head = span.next;
+            }
+        }
+    }
+
     /// The HIGHEST layer at or below `ceiling` at which some arm's shaft stands
     /// in this column, with the arm that owns it.
     ///
