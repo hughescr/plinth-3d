@@ -1,4 +1,5 @@
-//! **A footprint stacked by less than one flank arm does not buy dozens.**
+//! **Remedy 2 buys no more flank arms than the stack asks for, and stops when
+//! they relieve nothing.**
 //!
 //! Challenge of 2026-09-29 on the wall-creep lane
 //! (`plinth-evidence/slice-sweep-2026-09-02/field-2026-09-28/lanes/wall-creep.md`):
@@ -6,46 +7,44 @@
 //! pair (congestion 1.0006, about 0.06 mm² of stacked flared plate area), and
 //! remedy 2 answered it with **49** flank arms at shelf layer 144. Those 49
 //! were exactly the 49 over-limit runs that then drew 83 |X| braces and 58
-//! masts. The laid tube at its production pose shows the same defect: the lean
-//! takes the footprint to 1.0004, and remedy 2 still seats **84** flank arms.
+//! masts. The laid tube at its production pose showed the same defect: the
+//! lean took the footprint to 1.0004, and remedy 2 still seated **84** flank
+//! arms.
 //!
 //! The rule graded (`crates/plinth-sweep/src/congestion.rs`,
 //! `insert_flank_arms`): a flank arm can take at most its own flared disc of
 //! stacked plate area off the stacked roots, so the arms a round inserts are
 //! sized by the stack the lean left, not by how many seats the shelf has.
 //!
-//! # What is measured
+//! # The fixture: the laid tube at its AUTHORED pose (re-scoped 2026-09-29)
 //!
-//! The fixture is `make_laid_tube` turned to the pose the production CLI's
-//! dense orientation search commits for it, "searched up-direction (0.3827,
-//! 0.0000, 0.9239)": a turn of −22.5° about Y. Measured, this harness then
-//! reproduces the CLI's own congestion line for the tube (1.0458 before, 23
-//! roots leaned, 84 flank arms at shelf layer 308, flank radius 0.2264 mm).
+//! This file first graded the tube at its production pose (a turn of −22.5°
+//! about Y), where the lean left a stack smaller than one flank disc. Develop
+//! has since changed the field under that pose: between `d103c48` (79 flank
+//! arms at shelf 308 in the production run) and `75c52c8` (0 flank arms) the
+//! lean alone clears it: 27 overlapping pairs before the lane, and the census
+//! after the lean no longer reads congested (this harness: 1.0388 -> 1.0000,
+//! 0 pairs), so remedy 2 never runs there and the file tested nothing
+//! ("remedy 2 never ran"). No fixture in the suite now presents a SUB-disc
+//! stack to remedy 2.
 //!
-//! The premise is read off the published census, and the test fails loudly if
-//! it does not hold: in every round remedy 2 ran, the stacked area it was
-//! called for is SMALLER than one flank arm's flared disc. The claim is the
-//! physical consequence: such a round needs one arm, so the lane inserts at
-//! most one flank arm per round it ran. Nothing below recomputes the arm count
-//! the way `insert_flank_arms` does.
+//! The tube at its authored pose (the fixture `congestion_lane` grades) still
+//! reaches remedy 2, measured 2026-09-29 on the develop-merged tree: the lean
+//! leaves 2.58 mm² stacked, which is 3.25 flank discs of 0.792 mm². So the
+//! claim is stated in its general form, of which "a sub-disc stack buys at
+//! most one arm" is the special case: every flank arm beyond the one that
+//! covers the last partial disc buys relief the plate has no stack for.
+//!
+//! The premise is read off the published census and the test fails loudly if
+//! it does not hold. Nothing below recomputes the arm count the way
+//! `insert_flank_arms` does; the bound is an inequality over the published
+//! stacked areas and the published flank radius.
 
 use crate::harness;
 
 use harness::sweep_with;
-use plinth_mesh::{make_laid_tube, Mesh};
+use plinth_mesh::make_laid_tube;
 use plinth_sweep::{StrutKind, SweepPolicy};
-
-/// The production pose: a rigid turn about Y that takes the CLI's searched
-/// up-direction `(sin 22.5°, 0, cos 22.5°)` to `+Z`.
-fn about_y(mesh: &Mesh, deg: f64) -> Mesh {
-    let (s, c) = deg.to_radians().sin_cos();
-    let verts = mesh
-        .verts()
-        .iter()
-        .map(|v| [v[0] * c + v[2] * s, v[1], -v[0] * s + v[2] * c])
-        .collect();
-    Mesh::new(verts, mesh.tris().to_vec()).expect("a rigid rotation preserves a valid mesh")
-}
 
 fn flare() -> f64 {
     plinth_core::m0_constants()
@@ -56,9 +55,12 @@ fn flare() -> f64 {
         .get()
 }
 
+/// **A round inserts at most the flank arms whose flared discs the stack can
+/// fill, plus the one that covers the last partial disc.** Summed over the
+/// rounds remedy 2 ran: `inserted < Σ stacked / disc + rounds`.
 #[test]
-fn a_sub_disc_stack_buys_at_most_one_flank_arm_per_round() {
-    let mesh = about_y(&make_laid_tube().expect("the laid tube fixture"), -22.5);
+fn flank_arms_are_no_more_than_the_stack_asks_for() {
+    let mesh = make_laid_tube().expect("the laid tube fixture");
     let policy = SweepPolicy::from_registry().expect("the registry supplies every sweep number");
     let plan = sweep_with(&mesh, 0.0, &policy);
     let lane = &plan.report.congestion_lane;
@@ -70,7 +72,7 @@ fn a_sub_disc_stack_buys_at_most_one_flank_arm_per_round() {
         .filter(|s| lane.inserted_ids.contains(&s.id) && s.kind == StrutKind::Arm)
         .count();
     println!(
-        "laid tube, production pose: congestion {:.5} -> {:.5} at lane exit, pairs {} -> {}; \
+        "laid tube, authored pose: congestion {:.5} -> {:.5} at lane exit, pairs {} -> {}; \
          {} rounds, {} roots leaned; remedy 2 ran in {} round(s) on stacked areas {:?} mm2 \
          against one flank disc of {disc_mm2:.4} mm2; {} flank arms wanted, {} inserted \
          ({flank_members} on the finished field); {} members in all",
@@ -99,19 +101,32 @@ fn a_sub_disc_stack_buys_at_most_one_flank_arm_per_round() {
         !lane.flank_stacked_area_mm2.is_empty() && lane.arms_inserted > 0,
         "remedy 2 never ran, so this file tests nothing"
     );
-    // The premise, from the published census.
+    assert!(disc_mm2 > 0.0, "no flank disc was registered");
+    // The premise, from the published census: a real, finite stack each round.
     for (round, stacked) in lane.flank_stacked_area_mm2.iter().enumerate() {
         assert!(
-            *stacked > 0.0 && *stacked < disc_mm2,
-            "round {round}: remedy 2 ran on {stacked} mm2 of stacked area, not a sub-disc stack \
-             against {disc_mm2} mm2; the fixture no longer presents the case this file grades"
+            stacked.is_finite() && *stacked > 0.0,
+            "round {round}: remedy 2 ran on {stacked} mm2 of stacked area"
         );
     }
     // The claim.
+    let discs_of_stack: f64 = lane
+        .flank_stacked_area_mm2
+        .iter()
+        .map(|stacked| stacked / disc_mm2)
+        .sum();
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "arm and round counts are small integers, exact in f64"
+    )]
+    let (inserted, rounds) = (
+        lane.arms_inserted as f64,
+        lane.flank_stacked_area_mm2.len() as f64,
+    );
     assert!(
-        lane.arms_inserted <= lane.flank_stacked_area_mm2.len(),
-        "{} flank arms for {} round(s) in which the stack was smaller than one flank arm's own \
-         disc: remedy 2 is sized by the seats, not by the stack",
+        inserted < discs_of_stack + rounds,
+        "{} flank arms for {discs_of_stack:.3} flank discs of stacked area over {} round(s): \
+         remedy 2 is sized by the seats, not by the stack",
         lane.arms_inserted,
         lane.flank_stacked_area_mm2.len()
     );
@@ -119,20 +134,20 @@ fn a_sub_disc_stack_buys_at_most_one_flank_arm_per_round() {
 
 /// **Flank arms that relieved nothing are not followed by more.**
 ///
-/// On the same fixture the lean leaves one overlapping pair that no flank arm
-/// clears: the stacked area after each round's sizing is the same 0.06 mm²
-/// (measured, 2026-09-29, in all four rounds). Remedy 2 runs again only on a
-/// stack its previous arms made SMALLER, so every stack it ran on must be
+/// On the same fixture the flank arms of remedy 2's first round leave the
+/// stack no smaller once the down-sweep has sized them (measured 2026-09-29:
+/// one round on 2.58 mm², then two rounds declined). Remedy 2 runs again only
+/// on a stack its previous arms made SMALLER, so every stack it ran on must be
 /// strictly smaller than the one before, and on this fixture the lane must
 /// have declined at least one round for that reason (the path-hit witness).
 #[test]
 fn flank_arms_that_relieved_nothing_are_not_repeated() {
-    let mesh = about_y(&make_laid_tube().expect("the laid tube fixture"), -22.5);
+    let mesh = make_laid_tube().expect("the laid tube fixture");
     let policy = SweepPolicy::from_registry().expect("the registry supplies every sweep number");
     let plan = sweep_with(&mesh, 0.0, &policy);
     let lane = &plan.report.congestion_lane;
     println!(
-        "laid tube, production pose: remedy 2 ran on stacks {:?} mm2, declined {} round(s) as \
+        "laid tube, authored pose: remedy 2 ran on stacks {:?} mm2, declined {} round(s) as \
          not relieving; {} flank arms, {} rounds, exit congestion {:.5}, {} members",
         lane.flank_stacked_area_mm2,
         lane.flank_rounds_not_relieving,
@@ -140,6 +155,10 @@ fn flank_arms_that_relieved_nothing_are_not_repeated() {
         lane.rounds_used,
         lane.at_lane_exit.all.ratio,
         plan.struts.len(),
+    );
+    assert!(
+        !lane.flank_stacked_area_mm2.is_empty() && lane.arms_inserted > 0,
+        "remedy 2 never ran, so this file tests nothing"
     );
     assert!(
         lane.at_lane_exit.all.congested(),
