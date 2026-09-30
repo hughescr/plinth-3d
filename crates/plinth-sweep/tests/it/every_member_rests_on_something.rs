@@ -382,7 +382,14 @@ fn a_brace_hands_its_trunk_no_load() {
 #[test]
 fn every_landing_names_a_parent_standing_under_it_on_the_overhang_table() {
     let mesh = plinth_mesh::make_overhang_table().expect("the overhang table fixture");
-    let mut policy = SweepPolicy::from_registry().expect("the registered sweep policy");
+    // Graded at the X this fixture was built at (12,
+    // `crate::harness::PATH_FIXTURE_X_ALLOWED`): at the ruled 18 the thinner
+    // arms leave no merge over-grown, the un-merge moves no branch with its
+    // trunk (98 landings, 0 moved; measured 2026-09-30), and this grades
+    // nothing. The un-merge reads no X.
+    let mut policy = crate::harness::at_path_fixture_x(
+        SweepPolicy::from_registry().expect("the registered sweep policy"),
+    );
     policy.slenderness = false;
     let (_, plan) = swept_with(&mesh, &policy);
     let grid = &plan.grid;

@@ -2703,8 +2703,9 @@ const PEEL_FRONT_ROOT_MOMENT_COEFFICIENT: f64 = 6.0;
 /// values; [`registry_low_point_reach_allowance_mm`] is the one production
 /// reader and supplies both from the registry.
 ///
-/// At the registered values the allowance is `sqrt(12/6) × 0.050 mm`
-/// = 0.0707 mm of reach.
+/// At the registered values the allowance is `sqrt(18/6) × 0.050 mm`
+/// = 0.0866 mm of reach (X_ALLOWED 18 since Craig's ruling of 2026-09-30;
+/// it was `sqrt(12/6) × 0.050` = 0.0707 mm).
 fn low_point_reach_allowance_mm(x_allowed: f64, layer_height_mm: f64) -> f64 {
     (x_allowed / PEEL_FRONT_ROOT_MOMENT_COEFFICIENT).sqrt() * layer_height_mm
 }
@@ -2727,7 +2728,7 @@ fn low_point_reach_allowance_mm(x_allowed: f64, layer_height_mm: f64) -> f64 {
 /// exposes only `new()` -- there is no way to construct one with a
 /// different evidence set to substitute in a test. The mitigation
 /// is `the_reach_allowance_is_read_from_the_registry_not_hardcoded`, which
-/// pins `x_allowed == 12.0` and `layer_height_mm == 0.050`: a future
+/// pins `x_allowed == 18.0` and `layer_height_mm == 0.050`: a future
 /// registry change to either value flips that assertion red, even though it
 /// cannot prove today that this function reads the registry rather than a
 /// constant.
@@ -8939,11 +8940,13 @@ mod tests {
         );
 
         // Craig's conservative-end ruling, 2026-08-19: coefficient 6, the peel
-        // front concentrated at the free edge. sqrt(12/6) * 0.050 mm.
+        // front concentrated at the free edge. sqrt(18/6) * 0.050 mm since
+        // Craig ruled X_ALLOWED 12 -> 18 on 2026-09-30 (the allowance follows
+        // X by construction: it was sqrt(12/6) * 0.050 = 0.0707 mm).
         assert!((PEEL_FRONT_ROOT_MOMENT_COEFFICIENT - 6.0).abs() < 1.0e-12);
-        assert!((x_allowed - 12.0).abs() < 1.0e-12);
+        assert!((x_allowed - 18.0).abs() < 1.0e-12);
         assert!((layer_height_mm - 0.050).abs() < 1.0e-12);
-        assert!((registered - 0.070_710_678_118_654_75).abs() < 1.0e-15);
+        assert!((registered - 0.086_602_540_378_443_87).abs() < 1.0e-15);
 
         // Sabotage the area law: four times X_ALLOWED must double the reach.
         let sabotaged_law = low_point_reach_allowance_mm(4.0 * x_allowed, layer_height_mm);

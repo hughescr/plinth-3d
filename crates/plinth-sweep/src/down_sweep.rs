@@ -281,7 +281,9 @@ pub struct SizingPolicy {
 /// different questions and the up-sweep can only ask the first: at the top of
 /// the up-sweep no load has been routed yet, so nothing there knows that a
 /// covering which is correct for reach concentrates 123 mm² of peel on one
-/// tip whose registered maximum is `X_ALLOWED · π · r_max² = 37.699 mm²`.
+/// tip whose registered maximum is `X_ALLOWED · π · r_max²` (37.699 mm² at the
+/// X_ALLOWED of 12 this was written against; 56.549 mm² at 18 since Craig's
+/// ruling of 2026-09-30).
 /// Before this step the engine's only answer was to clamp the radius at
 /// `r_max` and warn — 1800 warned arm-layers on the laid-over Cylinder, 514 on
 /// `oracle_ramp` — which is an honest warning about a field the engine could

@@ -124,6 +124,33 @@ pub fn x_allowed() -> f64 {
     *m0_constants().expect("registry").evidence().x_allowed().value()
 }
 
+/// **The X_ALLOWED these PATH fixtures were built at: 12, the registered value
+/// from 2026-07-30 until Craig's ruling of 2026-09-30 made it 18.**
+///
+/// A TEST FIXTURE PARAMETER, not a registered constant, and never read by
+/// production. Several fixtures were sized so that a LOAD-TRIGGERED path fires
+/// on them: an un-merge that moves a branch with its trunk, a lip-seat
+/// put-back, a forced slenderness merge put back, a mast where a mast is no
+/// thicker than its member, the area-law insertion trigger, a cavity merge
+/// undone, a hex field dense enough to wall a drain mouth in. At X 18 every arm
+/// carries its load on 1/1.5 of the section, so the same geometry no longer
+/// reaches those paths, and the tests' own anti-vacuity checks went red
+/// (measured 2026-09-30, `plinth-evidence/.../lanes/x-allowed-18.md`). None of
+/// those rules reads X: X only decides whether the fixture is heavy enough to
+/// reach them. So those tests grade their path at this X, and say so; the
+/// production X is graded by `x_allowed_ruling.rs` and by every other test,
+/// which run at the registry's value. Rebuilding the fixtures so that they
+/// reach these paths at 18 is recorded as open work, not done here.
+pub const PATH_FIXTURE_X_ALLOWED: f64 = 12.0;
+
+/// `policy` with its `x_allowed` set to [`PATH_FIXTURE_X_ALLOWED`].
+#[must_use]
+pub fn at_path_fixture_x(policy: SweepPolicy) -> SweepPolicy {
+    let mut policy = policy;
+    policy.x_allowed = PATH_FIXTURE_X_ALLOWED;
+    policy
+}
+
 /// Run the sweep on one mesh at an explicit working pitch, with lift applied.
 pub fn sweep(mesh: &Mesh, pitch_mm: f64) -> SweepPlan {
     let policy = SweepPolicy::from_registry()

@@ -225,6 +225,10 @@ or bracing.
 > could certify a layout whose own tips were predicted to break. The re-anchor was
 > applied to `tensile_green_mpa` (10.0 → 0.288).
 
+**Superseded 2026-09-30 (Craig ruling, §3.1): `X_ALLOWED` is now 18.0, a
+Measured owner decision bounded by both plates, not a `Derived` value. The
+requirement below is kept as the record of what shipped from 2026-07-30.**
+
 **Rust requirement.** Store `X_ALLOWED = 12.0` as a `Derived<f64>`, with the
 binding relation `floor(lower(X_STAR_CONE) / 2) = floor(25.00 / 2) = 12`, and **cross-check it
 against `X_STAR_CYLINDER`** (`Measured`, plate 6): 12.0 clears the binding measured
@@ -417,8 +421,9 @@ name and value are the contract.
 There is no `F`/format wrapper. Acceptance disposition is stated separately. In
 the legacy load-split family specifically — `PEEL_PRESSURE_PA`,
 `TENSILE_GREEN_MPA`, `TIP_SAFETY_FACTOR`, `MODULUS_GREEN_GPA`, and `X_ALLOWED`
-— the first four are diagnostic Placeholders and **only `X_ALLOWED = 12.0` is
-Derived and accept-safe**. Evidence-backed/fixed contracts such as the X brackets,
+— the first four are diagnostic Placeholders and **only `X_ALLOWED` is
+accept-safe** (18.0 since Craig's ruling of 2026-09-30, a Measured owner decision
+bounded by the plates; Derived 12.0 before it, §3.1). Evidence-backed/fixed contracts such as the X brackets,
 load-sharing result, and printer hardware profile retain their own stated
 accept-safe dispositions.
 
@@ -433,11 +438,53 @@ accept-safe dispositions.
 | `X_STAR_CONE` *(new; named `X_STAR_CONE` in 02 §3.5)* | **[25.00, 25.34]**, inclusive/inclusive `FiniteInterval` | — | **M** calibration plate 5, `OnOrBefore(2026-07-30)`, `err: null` | `plinth-core::constants::load` | Store the interval, not a midpoint. One boundary inversion at 25.00. Plate-5 arms were **cones**; plate 6 reproduced the boundary on cylinders, so this is **not** a cone artifact — §4.1. |
 | `X_STAR_CYLINDER` *(new; named `X_STAR_CYLINDER` in 02 §3.5)* | **(19.91, 30.48)**, exclusive/exclusive `FiniteInterval` | — | **M** calibration plate 6, `Exact(2026-07-31)`, `err: null` | `plinth-core::constants::load` | Cylindrical-arm boundary; geometric centre 24.6, **n = 1 at each bracket edge**, conditional on 4.00 mm arms and a 30 mm² cap. Store the interval, never 24.6. Contains `X_STAR_CONE` — that is what retires the cone-artifact question (§4.1). Was `Pending<FiniteInterval>` until 2026-07-31. |
 | `LOAD_SHARING` *(new; explicitly serde-tagged `enum LoadSharing`, 02 §3.6)* | **`Additive { n_eff_cap: 6.0 }`** | — | **M** plate 6, 2026-07-31 | `plinth-core::load` (type now); `plinth-core::constants::load` (constant, later M0); `plinth-support::load` (later reexports/consumes) | The passive validated type lives in core now; the `LOAD_SHARING` declaration is later M0 constants work. `plinth-support::load` later reexports the type and owns `ArmGroup` / `effective_x` behaviour. 12/12 strips survived `X_arm = 60.15` at N = 2,3,4,6 while the matched mono died — sharing is **at least additive**, `Zipper` is refuted. `n_eff_cap = 6.0` is the largest group measured and must validate finite and `>= 1.0`. **All five §4.2 caveats must live in the `note` field.** Was `Pending<LoadSharing>` until 2026-07-31. A `Measured` value requires its date. Categorical payload → `err: None`, serialized exactly as `"err": null`; see §4.2. |
-| `X_ALLOWED` *(new — does not exist in Python)* | **12.0** | — | **D** from `[X_STAR_CONE]`: `floor(lower(X_STAR_CONE)/2) = floor(25.00/2) = 12`; margin-checked against `X_STAR_CYLINDER` | `plinth-core::constants::load` | `Derived<f64>`, not `Measured` and not `Pending` — 02 §3.5 declares it exactly this way. All arm sizing derives from it; do not hardcode 12.0 anywhere else. Plate 6 did **not** move it: 12.0 clears the binding measured bracket edge by `19.91/12 = 1.66×` (§4.1). That is a margin check, not a derivation input. |
+| `X_ALLOWED` *(new — does not exist in Python)* | **18.0** (was 12.0 until 2026-09-30) | — | **M** owner decision, Craig ruling 2026-09-30, `Exact(2026-09-30)`, `err: null`; **bounded** by `X_STAR_CONE` and `X_STAR_CYLINDER`, not derived from them | `plinth-core::constants::evidence` | See the ruling note below this table. All arm sizing reads it; do not hardcode 18.0 (or 12.0) anywhere else. From 2026-07-30 to 2026-09-30 it was `Derived<f64> = floor(lower(X_STAR_CONE)/2) = floor(25.00/2) = 12`, with plate 6 supplying the `19.91/12 = 1.66×` margin check. |
 | `PEEL_PRESSURE_PA` (config.py:63) | 3000.0 | Pa | **P**, diagnostic only — order-of-magnitude legacy split | `plinth-core::constants::diagnostics` | Literature puts real MSLA peel stress at **12–13 kPa** (`../reference/literature/lit-green-peel.md`), i.e. this may be ~4× low. Must **not** be recombined to re-derive X or reach acceptance. |
 | `TENSILE_GREEN_MPA` (config.py:91) | 0.288 | MPa | **P**, diagnostic only — algebraic legacy split, *not* a derived or datasheet property | `plinth-core::constants::diagnostics` | Chosen so `0.288e6/(3000·8) = 12.0`, but that historical arithmetic does not promote it to `Derived`. Pre-plate-5 it was 10.0 MPa. |
 | `TIP_SAFETY_FACTOR` (config.py:106) | 8.0 | — | **P**, diagnostic only — policy, not measured | `plinth-core::constants::diagnostics` | Multiplies the legacy load before sizing. Retained for diagnosis only; the accept-safe rule reads `X_ALLOWED` directly. |
 | `MODULUS_GREEN_GPA` (config.py:95) | **0.5** | GPa | **P**, diagnostic only | `plinth-core::constants::diagnostics` | This is the live legacy value. Plate 5 measured nothing about stiffness. Historical proposals including **0.35 GPa** do not change the source inventory; changing 0.5 needs a separate documented decision. |
+
+#### `X_ALLOWED` ruling, 2026-09-30 (Craig)
+
+**Ruling.** The design load ratio `X_ALLOWED` goes from 12 to **18**.
+
+**Why.** The over-support attribution of 2026-09-30
+(`plinth-evidence/slice-sweep-2026-09-02/field-2026-09-28/oversupport-attribution.md`)
+measured every law-sized arm tip in the v5 files at exactly `load / (π · 12)`.
+No other term in sizing added margin, so the ×2 in `floor(25.00 / 2)` was the whole
+safety margin: each arm carried 0.48 of its snap load.
+
+**What it rests on, and the margin it leaves.**
+
+| evidence | value | margin at 18 |
+|---|---|---|
+| plate 5, `X_STAR_CONE` (cones) | `[25.00, 25.34]` | `25.00 / 18 = 1.389×` |
+| plate 6, `X_STAR_CYLINDER` (cylinders; n = 1 per edge; 4.00 mm arms, 30 mm² cap) | `(19.91, 30.48)` | `19.91 / 18 = 1.106×` below the lower edge (exclusive) |
+| field snap ratio | ≈ 25 | an arm now carries 0.72 of its snap load (was 0.48) |
+
+**How it is encoded.** `Measured<f64>` with an `owner_decision` source dated
+`Exact(2026-09-30)`, the same form as the other rulings in this registry
+(`TIP_DIAMETER_MIN_ALLOWED_MM`, `TIP_RADIUS_MAX_GROWN_SCAR_MM`,
+`FINAL_CLEARANCE_GAP_MM`). It is no longer `Derived`, because nothing computes 18
+from the plates. The plates **bound** it: `M0EvidenceConstants::new` refuses to
+construct unless `X_ALLOWED` is strictly below the lower edge of both
+`X_STAR_CONE` and `X_STAR_CYLINDER`. A recalibration that lowers either edge to 18
+or below therefore forces a new ruling.
+
+**What follows by construction.** Everything that reads `X_ALLOWED`:
+- member sizing, `π r² ≥ carried / X_ALLOWED`;
+- the per-tip ceiling `X_ALLOWED · π · r_max²`, now 56.55 mm² (was 37.70);
+- the removal threshold `X_ALLOWED · π · r_min²`, now 0.1414 mm² (was 0.0942);
+- the slenderness lane, which reads the radius the law gives;
+- the pre-write load gate;
+- the legacy low-point reach allowance `sqrt(X_ALLOWED / 6) × h`, now 0.0866 mm (was 0.0707).
+
+**What does NOT follow.** The legacy three-Placeholder split
+`TENSILE_GREEN_MPA / (PEEL_PRESSURE_PA · TIP_SAFETY_FACTOR)` = 12, which only the
+legacy engine reads. It stays 12 (more conservative than the ruling), and the
+constants gate now prints its REVIEW TRIGGER. The emitted-bytes audit
+(`tools/plinth-audit`) declares its own `X_ALLOWED = 12` on purpose, because it
+shares no code with the engine. Moving it is a separate decision.
 
 ### 3.2 Arm / tip geometry
 
@@ -994,7 +1041,7 @@ Exactly six declarations remain `Derived`:
 | `SUPPORT_KNN_MAX_WORK_PER_FACE` | `[SUPPORT_KNN_WORK_PER_FACE_OBSERVED]` | `next_power_of_two(2 × 696) = next_power_of_two(1392) = 2048` |
 | `SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE` | `[SUPPORT_PARITY_GRID_REFS_PER_FACE_OBSERVED]` | `next_power_of_two(2 × (81 + 36 × 2.8303132)) = next_power_of_two(366) = 512`, through the exact parity projection `81·faces + 36·references + 4` |
 | `TIP_RADIUS_MIN_ALLOWED_MM` | `[TIP_DIAMETER_MIN_ALLOWED_MM]` | `TIP_DIAMETER_MIN_ALLOWED_MM / 2 = 0.050 mm` |
-| `X_ALLOWED` | `[X_STAR_CONE]` | binding commitment/precedence: `floor(lower(X_STAR_CONE)/2) = floor(25.00/2) = 12`; `X_STAR_CYLINDER` only supplies the `19.91/12 = 1.66×` margin check |
+| ~~`X_ALLOWED`~~ | ~~`[X_STAR_CONE]`~~ | **No longer Derived since 2026-09-30** (Craig ruling, 18, Measured owner decision; §3.1). Was: `floor(lower(X_STAR_CONE)/2) = floor(25.00/2) = 12`, with `X_STAR_CYLINDER` supplying only the `19.91/12 = 1.66×` margin check |
 
 The following source values remain unchanged but are `Placeholder`, hence
 non-AcceptSafe: `DECIMATION_P999_FACTOR`, `DECIMATION_P99_FACTOR`,
@@ -1022,8 +1069,9 @@ cantilevers that tongue about its root. The replacement measures the tongue's
 
 > a non-birth low point is adequately carried if its reach is at most
 > `sqrt(X_ALLOWED / 6) × LAYER_HEIGHT_DEFAULT_MM` = **0.0707 mm**
+> (0.0866 mm since `X_ALLOWED` became 18 on 2026-09-30, §3.1)
 
-reading `X_ALLOWED` (Derived, plate 5) and `LAYER_HEIGHT_DEFAULT_MM` (Measured,
+reading `X_ALLOWED` (Derived, plate 5, until 2026-09-30; Craig's ruling since) and `LAYER_HEIGHT_DEFAULT_MM` (Measured,
 plate 6) from this registry. This is `X_ALLOWED`'s **first production reader**
 and closes one line of the registry-bypass finding (§task #57). The 6 is the
 root bending-moment coefficient for a load concentrated at the peel front;
@@ -1791,7 +1839,7 @@ second geometry.
 |---|---|
 | `X_STAR_CYLINDER` | `Pending<FiniteInterval>` → **`Measured<FiniteInterval>`**, `CalibrationPlate` 6 with `Exact(2026-07-31)`, carrying `(19.91, 30.48)` as exclusive/exclusive and `err: null`. Store the interval, not 24.6. The `note` field carries all three conditionals: n = 1 per bracket edge, 4.00 mm arms, 30 mm² cap. |
 | `X_STAR_CONE` | Unchanged. **Keep it a separate named constant** — the two are measured on different geometries at very different precision, and merging them would launder that difference away. |
-| `X_ALLOWED` | **Stays `Derived<f64> = 12.0` from `[X_STAR_CONE]`: `floor(lower(X_STAR_CONE)/2) = floor(25.00/2) = 12`.** It is *not* re-derived from the new plate-6 bracket: plate 6 is single-specimen at each edge, so it supplies only the **margin check** `19.91 / 12 = 1.66×`. **No arm in the engine resizes.** Do not hardcode 12.0 anywhere except this one derivation. |
+| `X_ALLOWED` | **Stays `Derived<f64> = 12.0` from `[X_STAR_CONE]`: `floor(lower(X_STAR_CONE)/2) = floor(25.00/2) = 12`.** It is *not* re-derived from the new plate-6 bracket: plate 6 is single-specimen at each edge, so it supplies only the **margin check** `19.91 / 12 = 1.66×`. **No arm in the engine resizes.** Do not hardcode 12.0 anywhere except this one derivation. *(Superseded 2026-09-30: Craig ruled 18, bounded below 19.91 by this bracket, margin `19.91/18 = 1.106×`; §3.1.)* |
 | `TENSILE_GREEN_MPA` | Unchanged numerically at 0.288 MPa, but classified correctly as a diagnostic `Placeholder`, not a `Derived` carrier and never an input to acceptance. |
 | Arm-geometry model | The brackets agree, so **there is no measured taper penalty** and tip-disc sizing stands. The fast-flare requirement of §1.3(b) keeps its original justification — the *observed* failure location — and the minimum-section locator stays **required**, because the X rule applies at the minimum section wherever it is. Neither is carrying a measured cone-vs-cylinder discount, and neither may be sold as if it were. |
 

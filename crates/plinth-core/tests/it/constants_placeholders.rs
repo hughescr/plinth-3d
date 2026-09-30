@@ -726,15 +726,20 @@ fn evidence_and_placeholder_fixture_builds_one_328_entry_structural_batch() {
 /// `X_engine = tensile_green_pa / (peel_pressure_pa * tip_safety_factor)`.
 ///
 /// THE ALLOWANCE ANCHOR IS `X_ALLOWED`.  There is exactly one registered
-/// area-ratio allowance in this engine and it is the Derived evidence constant
-/// `X_ALLOWED = floor(lower(X_STAR_CONE)/2) = 12`, chained from the measured
-/// plate interval.  Contact physics PR-4 reads THAT entry — it does not
-/// re-declare the number as a hand-typed placeholder, because a duplicate would
-/// let a plate recalibration move `X_STAR_CONE` while the contact threshold
-/// silently stayed at the stale hand-typed 12.  Reading the chained constant is
-/// what makes a recalibration flow through.
+/// area-ratio allowance in this engine and it is the evidence constant
+/// `X_ALLOWED`: 18 since Craig's ruling of 2026-09-30 (a Measured owner
+/// decision, bounded below the plate-5 and plate-6 snap edges), 12 =
+/// `floor(lower(X_STAR_CONE)/2)` before it.  Contact physics PR-4 reads THAT
+/// entry — it does not re-declare the number as a hand-typed placeholder,
+/// because a duplicate would let the registered allowance move while the
+/// contact threshold silently stayed at a stale hand-typed value.
 ///
 /// This is deliberately a ONE-SIDED bound and not an exact-equality coupling.
+/// Since 2026-09-30 the legacy `X_engine` (12) is strictly BELOW the allowance
+/// (18), so the REVIEW TRIGGER below prints: the legacy engine sizes more
+/// conservatively than the ruling asks. That is the safe direction, and it is
+/// left for Craig (the legacy split is three Placeholders and is not the
+/// slice-sweep's sizing path).
 /// `X_engine` = 12 is an internal CONSISTENCY identity that is a function of
 /// the arbitrary Python-era `tip_safety_factor` = 8 — had that been 6 the
 /// identity would read 16 — so it is NOT an independent measurement of
@@ -754,8 +759,9 @@ fn engine_implied_tip_area_ratio_does_not_exceed_the_h2_allowance() {
     let evidence = M0EvidenceConstants::new().expect("evidence constants");
     let allowance = *evidence.x_allowed().value();
     assert!(
-        (allowance - 12.0).abs() < 1.0e-12,
-        "X_ALLOWED is the anchor and currently reads {allowance}"
+        (allowance - 18.0).abs() < 1.0e-12,
+        "X_ALLOWED is the anchor and currently reads {allowance} (18 by Craig's ruling of \
+         2026-09-30)"
     );
 
     let implied = tensile_pa / (peel_pressure_pa * safety_factor);

@@ -279,8 +279,15 @@ fn every_mast_is_plate_rooted_braced_and_inside_its_own_slenderness_limit() {
     // The peak's own arms have neighbours: remedy 2 can tie them to each other,
     // and since 2026-09-29 remedy 3 thickens them. Deleting both is what makes
     // this fixture grade the MAST path rather than whichever rung happens to
-    // fire first.
-    let plan = sweep_with(&mesh, 0.0, &policy().without_slenderness_thicken());
+    // fire first. Graded at the X this fixture was built at (12,
+    // `harness::PATH_FIXTURE_X_ALLOWED`): at the ruled 18 every mast cell is
+    // refused as thicker than the member it would tie (0 masts, measured
+    // 2026-09-30), and the peak's 4 over-limit runs stay as warnings.
+    let plan = sweep_with(
+        &mesh,
+        0.0,
+        &harness::at_path_fixture_x(policy()).without_slenderness_thicken(),
+    );
     let masts = masts(&plan);
     assert!(
         !masts.is_empty(),

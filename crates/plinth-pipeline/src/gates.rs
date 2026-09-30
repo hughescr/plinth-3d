@@ -904,10 +904,10 @@ fn load_record_identity_mismatches(
 ///
 /// evaluated per contact on the FINAL numbers — after SPEC-A3-A4 §6 removal and
 /// repartition, after PR-8 grow-to-attest, after rewire, bracing and lowering.
-/// `X_ALLOWED` is the registered `Derived<f64>` of 12, whose own registry note
-/// states this law verbatim ("pi\*r^2 >= carried\_area/X with X = X\_ALLOWED =
-/// 12"), derived as `floor(lower(X_STAR_CONE)/2)` from the measured
-/// arm-capacity plate.
+/// `X_ALLOWED` is the registered design load ratio: 18 since Craig's ruling of
+/// 2026-09-30 (a Measured owner decision, bounded below the plate-5 cone and
+/// plate-6 cylinder snap edges), and 12 = `floor(lower(X_STAR_CONE)/2)` before
+/// it. The gate reads it; it never types it.
 ///
 /// # What establishes it
 ///
@@ -1587,9 +1587,11 @@ mod tests {
     #[test]
     fn the_registered_allowance_is_the_measured_anchor_the_law_names() {
         // The gate's threshold is not a hand-typed twin: it is X_ALLOWED, whose
-        // own registry note states this law verbatim.
+        // own registry note states this law verbatim. Re-pinned 12 -> 18 on
+        // 2026-09-30: Craig ruled the design load ratio to 18 (the registry's
+        // X_ALLOWED note records the ruling and the margins it leaves).
         assert!(
-            (x_allowed() - 12.0).abs() < 1.0e-12,
+            (x_allowed() - 18.0).abs() < 1.0e-12,
             "X_ALLOWED moved; the area law's anchor changed and that is a finding, not a value \
              to refresh here"
         );
@@ -1639,7 +1641,13 @@ mod tests {
             text.contains(&format!("{:.4} mm", required_radius_mm(carried))),
             "the demanded radius must appear: {text}"
         );
-        assert!(text.contains("X_ALLOWED = 12"), "{text}");
+        // The message prints the registered value, whatever it is (18 since
+        // Craig's ruling of 2026-09-30); it must never be a typed 12.
+        assert!(
+            text.contains(&format!("X_ALLOWED = {}", x_allowed())),
+            "{text}"
+        );
+        assert!(text.contains("X_ALLOWED = 18"), "{text}");
         assert!(
             text.contains("1 of 2 emitted contact(s)"),
             "the refused rows must be readable against the set they came from: {text}"

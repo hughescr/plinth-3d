@@ -19,6 +19,44 @@ pub enum M0EvidenceConstantsError {
     BuildVolume(#[from] BuildVolumeError),
     #[error("the evidence declaration for LOAD_SHARING must be additive")]
     NonAdditiveLoadSharing,
+    /// The ruled design load ratio must sit strictly below the measured snap
+    /// ratio on BOTH plates. A recalibration that moves either lower edge to or
+    /// below the ruling makes the registry refuse to construct, so a ruling can
+    /// never be left standing above a measured failure.
+    #[error(
+        "X_ALLOWED = {x_allowed} is not below the measured snap edges (X_STAR_CONE lower \
+         {cone_lower}, X_STAR_CYLINDER lower {cylinder_lower}); the design ratio must be \
+         re-ruled against the new plate data"
+    )]
+    DesignRatioAtOrAboveMeasuredSnap {
+        x_allowed: f64,
+        cone_lower: f64,
+        cylinder_lower: f64,
+    },
+}
+
+/// Craig's ruled design load ratio: the supported model area one unit of arm
+/// section may carry. See the `X_ALLOWED` note in [`M0EvidenceConstants::new`].
+const X_ALLOWED_RULED: f64 = 18.0;
+
+/// The ruling must sit strictly below the lower edge of both measured snap
+/// brackets (the plate-6 cylinder bracket's lower edge is exclusive, and a
+/// design ratio AT a measured failure is no design ratio at all).
+fn design_ratio_below_measured_snap(
+    x_allowed: f64,
+    cone: &FiniteInterval,
+    cylinder: &FiniteInterval,
+) -> Result<(), M0EvidenceConstantsError> {
+    if x_allowed.is_finite() && x_allowed > 0.0 && x_allowed < cone.lower() && x_allowed < cylinder.lower()
+    {
+        Ok(())
+    } else {
+        Err(M0EvidenceConstantsError::DesignRatioAtOrAboveMeasuredSnap {
+            x_allowed,
+            cone_lower: cone.lower(),
+            cylinder_lower: cylinder.lower(),
+        })
+    }
 }
 
 /// The closed M0 set whose values have measured or derived authority.
@@ -71,7 +109,7 @@ pub struct M0EvidenceConstants {
     tip_diameter_min_allowed_mm: Measured<f64>,
     tip_radius_max_grown_scar_mm: Measured<f64>,
     tip_radius_min_allowed_mm: Derived<f64>,
-    x_allowed: Derived<f64>,
+    x_allowed: Measured<f64>,
     x_star_cone: Measured<FiniteInterval>,
     x_star_cylinder: Measured<FiniteInterval>,
 }
@@ -141,7 +179,36 @@ impl M0EvidenceConstants {
             None,
             "Plate 5 conical-arm bracket with one boundary inversion at 25.00; retain the interval rather than a midpoint.",
         )?;
-        let x_allowed_value = (x_star_cone.value().lower() / 2.0).floor();
+        let x_star_cylinder = Measured::new(
+            FiniteInterval::new(19.91, 30.48, BoundKind::Exclusive, BoundKind::Exclusive)?,
+            EvidenceSource::calibration_plate(
+                PlateId::from("COUPON-PLATE-6-support-arm-capacity"),
+                "docs/engineering-journal/reference/plate-06-results.md",
+                "§5 Finding 2",
+                exact_date("2026-07-31")?,
+            )?,
+            None,
+            "Cylindrical-arm bracket with n = 1 per bracket edge, conditional on 4.00 mm arms and a 30 mm² cap; retain the interval and never its midpoint.",
+        )?;
+        // X_ALLOWED is Craig's ruling of 2026-09-30, no longer derived from the
+        // plates; the plates BOUND it, and the registry refuses to construct if
+        // either measured snap edge falls to or below the ruling.
+        design_ratio_below_measured_snap(
+            X_ALLOWED_RULED,
+            x_star_cone.value(),
+            x_star_cylinder.value(),
+        )?;
+        let x_allowed = Measured::new(
+            X_ALLOWED_RULED,
+            EvidenceSource::owner_decision(
+                EvidenceId::new("x-allowed-design-load-ratio-owner-ruling")?,
+                "docs/engineering-journal/03-physics-and-constants.md",
+                "§3.1",
+                exact_date("2026-09-30")?,
+            )?,
+            None,
+            "THE DESIGN LOAD RATIO: the supported model area one unit of arm section may carry, so a tip of radius r carries at most X_ALLOWED * pi * r^2 and every member is sized by pi*r^2 >= carried_area / X_ALLOWED. VALUE 18, Craig ruling 2026-09-30. It was 12 = floor(25.00/2) = floor(lower(X_STAR_CONE)/2) from 2026-07-30 to 2026-09-30: the plate-5 cone snap ratio with a 2x design factor. The ruling is an owner decision about margin, not a derivation, so this entry is Measured(owner_decision) and no longer Derived; nothing computes 18 from the plates. WHAT IT RESTS ON: (1) plate 5, X_STAR_CONE [25.00, 25.34], the conical-arm snap ratio, one inversion at 25.00; (2) plate 6, X_STAR_CYLINDER (19.91, 30.48), the cylindrical-arm bracket, n = 1 at each edge, conditional on 4.00 mm arms and a 30 mm² cap; (3) the over-support attribution of 2026-09-30 (plinth-evidence/slice-sweep-2026-09-02/field-2026-09-28/oversupport-attribution.md), which measured every law-sized tip at exactly load / (pi * 12), so the 2x factor was the whole of the margin and no other term in sizing was adding any. THE MARGIN IT LEAVES: 25.00/18 = 1.389× below the plate-5 cone snap edge, and 19.91/18 = 1.106× below the plate-6 cylinder bracket's lower edge (the edge is exclusive: the cylinder that survived at 19.91 is the nearest measured survival, n = 1). Against the field snap ratio of about 25 an arm now carries 18/25 = 0.72 of its snap load, where it carried 0.48 at 12. WHAT GUARDS IT: M0EvidenceConstants::new refuses to construct if X_ALLOWED is not strictly below the lower edge of BOTH X_STAR_CONE and X_STAR_CYLINDER, so a recalibration that lowers either bracket forces a new ruling instead of leaving this one standing above a measured failure. PREDICTED CONSEQUENCE (measurement, not a promise): resin -25..-28% and tip scar -33% on the flat and curved corpus models with arm counts about the same; the Sphere about -12%; braces move where arms get slender. Everything derived from X follows by construction: the per-tip ceiling X * pi * r_max^2 (56.55 mm² at r_max 1.0 mm, was 37.70), the removal threshold X * pi * r_min^2 (0.1414 mm² at r_min 0.05 mm, was 0.0942), and slenderness sizing, which reads the radius the law gives. The legacy load split TENSILE_GREEN_MPA / (PEEL_PRESSURE_PA * TIP_SAFETY_FACTOR) = 12 is three legacy diagnostic constants read only by the legacy engine and is NOT re-derived by this ruling.",
+        )?;
 
         // The one instrumented Weeping Treant run that measured what the
         // support pipeline's execution-authority caps actually have to admit.
@@ -499,30 +566,16 @@ impl M0EvidenceConstants {
                     exact_date("2026-08-20")?,
                 )?,
                 None,
-                "EXTERNAL REQUIREMENT -- field data, NOT physics and NOT a wet-finger estimate. The owner's measured field ceiling for a support tip: 0.400 mm RADIUS = 0.800 mm DIAMETER, ruled by Craig on 2026-08-20 and evidenced by his own printing practice -- the heaviest support he has ever needed is a 0.8 mm DIAMETER sphere, and he has never needed a larger scar on a model. UNITS TRAP: this registry speaks RADIUS and both the owner and the ChituBox UI speak DIAMETER; state both or the number lands 2x wrong. No physics derives this number and none is claimed for it. It is the largest scar the owner will accept, registered as an honestly-labelled external requirement so that a future coupon measurement of thin-tip attachment supersedes it rather than colliding with it. WHAT IT BOUNDS, exactly: GROWTH-FOR-ATTACHMENT only. PR-8's grow-to-attest ladder enlarges a tip BEYOND what the load law asked for, purely so the attestation ring can reach solid, and that enlargement is a scar the operator did not choose. The ascending ladder and its descending refinement scan therefore truncate at min(this bound, TIP_RADIUS_MAX_LEGACY_MM) = 0.400 mm radius (0.800 mm diameter), and a contact whose cure would need a larger tip is REFUSED through the existing disclosed ABANDONED LOAD line, which states the seat, the load, the rungs tried, and this bound by name as the stopper. WHAT IT DOES NOT BOUND: tips the LOAD LAW sizes. The area law -- pi*r^2 >= carried_area/X with X = X_ALLOWED = 12 -- may legitimately demand up to the registered TIP_RADIUS_MAX_LEGACY_MM of 1.000 mm radius (2.000 mm diameter) for a genuinely heavy area, and this bound neither clamps nor refuses such a tip: a load-sized tip above 0.400 mm radius that attests is emitted unchanged. The two are different appetites -- carrying weight versus reaching solid -- and only the second is bounded here. This constant WEAKENS NO REFUSAL: it can only turn a cure into a refusal, never a refusal into a cure.",
+                "EXTERNAL REQUIREMENT -- field data, NOT physics and NOT a wet-finger estimate. The owner's measured field ceiling for a support tip: 0.400 mm RADIUS = 0.800 mm DIAMETER, ruled by Craig on 2026-08-20 and evidenced by his own printing practice -- the heaviest support he has ever needed is a 0.8 mm DIAMETER sphere, and he has never needed a larger scar on a model. UNITS TRAP: this registry speaks RADIUS and both the owner and the ChituBox UI speak DIAMETER; state both or the number lands 2x wrong. No physics derives this number and none is claimed for it. It is the largest scar the owner will accept, registered as an honestly-labelled external requirement so that a future coupon measurement of thin-tip attachment supersedes it rather than colliding with it. WHAT IT BOUNDS, exactly: GROWTH-FOR-ATTACHMENT only. PR-8's grow-to-attest ladder enlarges a tip BEYOND what the load law asked for, purely so the attestation ring can reach solid, and that enlargement is a scar the operator did not choose. The ascending ladder and its descending refinement scan therefore truncate at min(this bound, TIP_RADIUS_MAX_LEGACY_MM) = 0.400 mm radius (0.800 mm diameter), and a contact whose cure would need a larger tip is REFUSED through the existing disclosed ABANDONED LOAD line, which states the seat, the load, the rungs tried, and this bound by name as the stopper. WHAT IT DOES NOT BOUND: tips the LOAD LAW sizes. The area law -- pi*r^2 >= carried_area/X with X = X_ALLOWED (18 since Craig's ruling of 2026-09-30; 12 when this bound was ruled) -- may legitimately demand up to the registered TIP_RADIUS_MAX_LEGACY_MM of 1.000 mm radius (2.000 mm diameter) for a genuinely heavy area, and this bound neither clamps nor refuses such a tip: a load-sized tip above 0.400 mm radius that attests is emitted unchanged. The two are different appetites -- carrying weight versus reaching solid -- and only the second is bounded here. This constant WEAKENS NO REFUSAL: it can only turn a cure into a refusal, never a refusal into a cure.",
             )?,
             tip_radius_min_allowed_mm: Derived::new(
                 tip_radius_value,
                 ["TIP_DIAMETER_MIN_ALLOWED_MM"],
                 "Exact diameter-to-radius conversion: TIP_DIAMETER_MIN_ALLOWED_MM / 2 = 0.050 mm RADIUS, from 0.100 mm DIAMETER. Was 0.075 mm radius (0.150 mm diameter) until the owner ruling of 2026-08-19 superseded its parent. This is a RADIUS and its parent is a DIAMETER; halve or double, never substitute. The warning this note used to carry -- do not substitute the tip-sizing default -- is now moot in VALUE and live in KIND: TIP_RADIUS_DEFAULT_MM is also 0.050 mm radius (0.100 mm diameter) since the same ruling, but it is the GENERATION clamp minimum and this is the VALIDATOR minimum. They agree today by ruling, not by derivation, and neither may be written in terms of the other.",
             ),
-            x_allowed: Derived::new(
-                x_allowed_value,
-                ["X_STAR_CONE"],
-                "Binding commitment: floor(lower(X_STAR_CONE)/2) = floor(25.00/2) = 12. X_STAR_CYLINDER supplies only the margin check 19.91/12 = 1.66× and is not a derivation input.",
-            ),
+            x_allowed,
             x_star_cone,
-            x_star_cylinder: Measured::new(
-                FiniteInterval::new(19.91, 30.48, BoundKind::Exclusive, BoundKind::Exclusive)?,
-                EvidenceSource::calibration_plate(
-                    PlateId::from("COUPON-PLATE-6-support-arm-capacity"),
-                    "docs/engineering-journal/reference/plate-06-results.md",
-                    "§5 Finding 2",
-                    exact_date("2026-07-31")?,
-                )?,
-                None,
-                "Cylindrical-arm bracket with n = 1 per bracket edge, conditional on 4.00 mm arms and a 30 mm² cap; retain the interval and never its midpoint.",
-            )?,
+            x_star_cylinder,
         })
     }
 
@@ -770,7 +823,7 @@ impl M0EvidenceConstants {
     }
 
     #[must_use]
-    pub const fn x_allowed(&self) -> &Derived<f64> {
+    pub const fn x_allowed(&self) -> &Measured<f64> {
         &self.x_allowed
     }
 
@@ -1051,7 +1104,7 @@ impl M0EvidenceConstants {
                 SCALAR,
                 &self.tip_radius_min_allowed_mm,
             )?,
-            ConstantDescriptor::from_derived(
+            ConstantDescriptor::from_measured(
                 ConstantId::from("X_ALLOWED"),
                 "1",
                 SCALAR,
@@ -1079,4 +1132,38 @@ fn exact_date(value: &str) -> Result<EvidenceDate, ProvenanceError> {
 
 fn on_or_before_date(value: &str) -> Result<EvidenceDate, ProvenanceError> {
     Ok(EvidenceDate::on_or_before(CalendarDate::new(value)?))
+}
+
+#[cfg(test)]
+mod design_ratio_guard_tests {
+    use super::{design_ratio_below_measured_snap, M0EvidenceConstantsError, X_ALLOWED_RULED};
+    use crate::{BoundKind, FiniteInterval};
+
+    fn cone() -> FiniteInterval {
+        FiniteInterval::new(25.00, 25.34, BoundKind::Inclusive, BoundKind::Inclusive).unwrap()
+    }
+
+    fn cylinder(lower: f64) -> FiniteInterval {
+        FiniteInterval::new(lower, 30.48, BoundKind::Exclusive, BoundKind::Exclusive).unwrap()
+    }
+
+    /// The ruling stands against today's plates, and the guard refuses a
+    /// ruling at or above either measured snap edge. The sabotage rows are the
+    /// cases the guard exists for: a design ratio AT the cylinder's lower edge
+    /// (19.91), a plate-6 recalibration that drops that edge below 18, and a
+    /// ruling at the cone's own snap (25).
+    #[test]
+    fn the_ruling_must_sit_strictly_below_both_measured_snap_edges() {
+        assert!(design_ratio_below_measured_snap(X_ALLOWED_RULED, &cone(), &cylinder(19.91)).is_ok());
+        for (x, cylinder_lower) in [(19.91, 19.91), (18.0, 17.5), (25.0, 30.0), (0.0, 19.91)] {
+            let refused = design_ratio_below_measured_snap(x, &cone(), &cylinder(cylinder_lower));
+            assert!(
+                matches!(
+                    refused,
+                    Err(M0EvidenceConstantsError::DesignRatioAtOrAboveMeasuredSnap { .. })
+                ),
+                "X {x} against a cylinder lower edge {cylinder_lower} must refuse: {refused:?}"
+            );
+        }
+    }
 }
