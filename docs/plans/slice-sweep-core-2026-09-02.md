@@ -554,6 +554,28 @@ conservative, not merely cheap: allocation is monotone and positively homogeneou
 side; the sweep computes the left; it therefore never under-sizes, and `O(K²)` event
 bookkeeping becomes `O(K)`.
 
+**Amended 2026-09-29 (rule a′, owner-approved): the max field routes; it no longer sizes.**
+"Never under-sizes" held, and on a laid-over cylinder it over-sized by 2.8×: the load of every
+event walks down the body's flanks to its lowest line, and there the max field SUMS the
+per-column maxima of events that never peel together (the Cylinder's arm 273 was charged
+41.71 mm² where no single event puts more than 14.70 mm² on it;
+`plinth-evidence/slice-sweep-2026-09-02/field-2026-09-28/cylinder-load-sharing.md`). The
+raster is still what decides where each cell's load goes, which footprint a load-inserted arm
+is chosen from, and the whole-run identities (conservation per layer, `injected = plate +
+uncarried + absorbed`). The sizes come from `crates/plinth-sweep/src/per_event.rs`: the
+down-sweep records the cells whose load did not go straight down and who read each carrier
+cell, the per-event pass composes those paths upward (routing sends a cell's load to ONE
+place, so each cell has one path) and routes every event on its own, pushing it down each
+member's chain; each member's design load at a layer is the largest cumulative force any single
+event reaches there or above, which is a suffix maximum. Cost `O(K · cells + events · members
+touched)`. Two things follow without a rule of their own: an arm that catches two parts of the
+SAME event at two heights carries their sum below the lower catch, and a child's load joins its
+parent's for the same event rather than the child's worst event added to the parent's worst.
+Conservation is asserted per event (plate + lost = the event's area, 1e-9 relative). The
+area-law insertion trigger reads one event's routed load, measured by the previous pass of the
+same down-sweep call (§6.5). Sabotage: `SweepPolicy::with_max_field_sizing` restores the old
+order and turns the staircase oracle (`tests/it/per_event_sizing.rs`) red.
+
 ### 6.5 Struts are columns; landing injection; sizing
 
 A strut does not spread. `carried_s(k) = carried_s(k+1) + share_s(k) + Σ(struts landing on s at k)`;

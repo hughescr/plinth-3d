@@ -172,19 +172,30 @@ fn a_tilt_costs_more_arms_than_the_flat_pose_while_measuring_less_demand() {
     // `SweepPlan::total_scar_mm2`'s own invariant is
     // `sum(pi r^2) = peak_layer_area / X_ALLOWED`, independent of how many
     // arms share the load, so the total scar is very nearly a pose invariant.
-    // Both discs' 180 deg flips demonstrate it ranking BACKWARDS. This is
-    // asserted, not merely printed, so a future substitution back to the scar
-    // fails here instead of on the plate.
+    // Until per-event sizing (2026-09-29) both discs' 180 deg flips showed it
+    // ranking BACKWARDS; sized per event the Round 50 flip reads 1.5 % MORE
+    // scar than flat (161.17 against 158.72 mm²) while taking 29 % more arms,
+    // so which way a 1-2 % difference points is not the finding. The finding
+    // is the insensitivity, and that is what is asserted, so a future
+    // substitution back to the scar fails here instead of on the plate: the
+    // scar moves by a smaller fraction than the arm count does.
     for (name, flat, flipped) in [
         ("Round 50", &flat_50, &flipped_50),
         ("Round 25", &flat_25, &flipped_25),
     ] {
+        let scar_change = (flipped.report.total_scar_mm2 - flat.report.total_scar_mm2).abs()
+            / flat.report.total_scar_mm2;
+        let arm_change =
+            (arm_count(flipped) as f64 - arm_count(flat) as f64).abs() / arm_count(flat) as f64;
         assert!(
-            flipped.report.total_scar_mm2 < flat.report.total_scar_mm2,
-            "{name}: the scar is expected to rank the 180 deg flip BACKWARDS (that is why it is \
-             not the burden); it now reads {:.4} mm2 flipped against {:.4} mm2 flat",
+            scar_change < arm_change,
+            "{name}: the scar moved by {:.1} % between flat and flipped ({:.4} against {:.4} \
+             mm2), no less than the arm count's {:.1} %; the scar is expected to be nearly \
+             pose-invariant (that is why it is not the burden)",
+            100.0 * scar_change,
             flipped.report.total_scar_mm2,
             flat.report.total_scar_mm2,
+            100.0 * arm_change,
         );
         assert!(
             arm_count(flipped) > arm_count(flat),

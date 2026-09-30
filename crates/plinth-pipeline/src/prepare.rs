@@ -2995,6 +2995,86 @@ fn print_sweep_disclosure(
         );
     }
     print_overloaded_arms(model, plan);
+    // PER-EVENT SIZING (rule a′, 2026-09-29): what the order change did, and
+    // its path-hit witnesses.
+    let per_event = &report.per_event;
+    println!(
+        "[sweep {model}] per-event sizing: {}; {} events (largest {:.4} mm2), largest plate \
+         reaction of one event {:.4} mm2, largest uncarried of one event {:.4} mm2, per-event \
+         conservation residual {:.3e}; heaviest member {} carries {:.4} mm2 (the max-field \
+         ledger it replaced: {:.4} mm2); {} routed entries, {} child hand-offs, {} model \
+         hand-backs, {} same-event catches summed (largest gain {:.4} mm2), {:.4} mm2 on stale \
+         landings; {} insertion triggers over the limit after {} pass(es)",
+        if per_event.enabled {
+            "ON"
+        } else {
+            "OFF (max-field ledger; sabotage)"
+        },
+        per_event.events,
+        per_event.max_event_mm2,
+        per_event.max_event_plate_mm2,
+        per_event.max_event_uncarried_mm2,
+        per_event.conservation_residual,
+        per_event.worst_member_id,
+        per_event.worst_member_mm2,
+        per_event.worst_member_max_field_mm2,
+        per_event.routed_entries,
+        per_event.child_feeds,
+        per_event.model_continuations,
+        per_event.same_event_catches,
+        per_event.same_event_catch_gain_max_mm2,
+        per_event.stale_landing_mm2,
+        per_event.triggers_over_limit,
+        per_event.passes,
+    );
+    let lane = &report.congestion_lane;
+    if lane.flank_relief_evaluated {
+        println!(
+            "[sweep {model}] flank relief: with the flank arms stacked {:.4} mm2, overloaded \
+             arm-layers {}, uncarried {:.4} mm2; without them {:.4} mm2, {}, {:.4} mm2; {} flank \
+             arms withdrawn",
+            lane.flank_relief_with[0],
+            lane.flank_relief_with[1],
+            lane.flank_relief_with[2],
+            lane.flank_relief_without[0],
+            lane.flank_relief_without[1],
+            lane.flank_relief_without[2],
+            lane.flank_arms_withdrawn,
+        );
+    }
+    // THE RIGID-BODY READING: a warning, never sizing.
+    let rigid = &report.rigid_share;
+    println!(
+        "[sweep {model}] rigid-body share (diagnostic, sizes nothing): {}; {} events solved over \
+         {} members in {} trees; heaviest share {:.4} mm2 on arm {}; {} arms above the limit; \
+         largest compression {:.4} mm2; residual {:.3e}",
+        if rigid.ran { "ran" } else { "not run" },
+        rigid.events_solved,
+        rigid.members,
+        rigid.trees,
+        rigid.max_share_mm2,
+        rigid.max_share_id,
+        rigid.over_limit.len(),
+        rigid.compressive_max_mm2,
+        rigid.conservation_residual,
+    );
+    for warning in rigid.over_limit.iter().take(20) {
+        println!(
+            "[sweep {model}] WARNING rigid-body share on arm {}: {:.4} mm2 at the event of layer \
+             {} would realize X {:.3} at the largest legal radius (X_ALLOWED 12); it is sized for \
+             {:.4} mm2 by its worst single event (root radius {:.4} mm; {} members land on it; it \
+             lands on {:?}). A body that has cured stiff shares its peel by stiffness; check this \
+             arm.",
+            warning.strut_id,
+            warning.share_mm2,
+            warning.event_layer,
+            warning.realized_x,
+            warning.sized_mm2,
+            warning.root_radius_mm,
+            warning.members_landed_on_it,
+            warning.landing,
+        );
+    }
     for section in report.model_section_overload.iter().take(20) {
         println!(
             "[sweep {model}] WARNING model section at layer {}: {:.4} mm2 of material carries \

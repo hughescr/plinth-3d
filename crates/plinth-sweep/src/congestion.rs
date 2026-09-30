@@ -216,7 +216,19 @@ pub struct CongestionOutcome {
     pub flank_seats_refused: usize,
     /// Ids of the arms this lane inserted, so the driver can read their carried
     /// load off the FINISHED field rather than remember it from placement.
+    /// Arms the flank-relief rule withdrew are no longer listed.
     pub inserted_ids: Vec<u32>,
+    /// Whether the flank-relief rule compared the field with and without the
+    /// lane's flank arms (2026-09-29; `withdraw_idle_flank_arms` in the sweep
+    /// driver). The path-hit witness: false when no flank arm was left to test.
+    pub flank_relief_evaluated: bool,
+    /// The comparison it made: `[stacked flared root area mm², overloaded
+    /// arm-layers, uncarried load mm²]` with the flank arms, and without them.
+    /// The arms stay only if some entry is larger without them.
+    pub flank_relief_with: [f64; 3],
+    pub flank_relief_without: [f64; 3],
+    /// Flank arms withdrawn because the finished field did not need them.
+    pub flank_arms_withdrawn: usize,
     /// True when congestion is still above `1.0` after the rounds are spent.
     /// A WARNING on an emitted file, never a refusal.
     pub still_congested: bool,

@@ -192,11 +192,23 @@ fn a_sloped_underside_charges_each_arm_the_largest_event_and_not_their_sum() {
             x_allowed(),
         );
     } else {
+        // PER EVENT (rule a′, 2026-09-29). Until then each arm was charged the
+        // SUM over its catchment of every column's largest event, so the scar
+        // came out at the conservation total / X_ALLOWED: every layer of the
+        // slope charged at once. Sized for its worst SINGLE event, an arm under
+        // this thin tilted plate sees one layer's band crossing its catchment
+        // at a time, so the field needs less: at least the largest single event
+        // (all of it reaches some tip, and nothing is lost), and at most the
+        // conservation total, which is what summing the maxima gives. Measured
+        // on this fixture: 190.9 mm² of tip load against a peak layer of
+        // 112.7 mm² and a total of 472.9 mm². S11 (summing an arm's events) is
+        // still unbounded here and still breaks the upper side.
         within_band(
             report.total_scar_mm2,
-            invariant * (1.0 - bands::AREA_IDENTITY),
+            report.peak_layer_area_mm2 / x_allowed() * (1.0 - bands::AREA_IDENTITY),
             invariant * (1.0 + bands::AREA_IDENTITY),
-            "total scar against the conservation total / X_ALLOWED on a sloped underside",
+            "total scar between the largest single event and the conservation total, / X_ALLOWED, \
+             on a sloped underside",
         );
     }
 }
