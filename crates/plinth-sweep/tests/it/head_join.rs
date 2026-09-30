@@ -98,10 +98,19 @@ fn round_25_flipped_with(policy: &SweepPolicy) -> SweepPlan {
 /// seat zone, rule on or off). These tests grade the head-join rule on the
 /// field it was built against; `plinth-pipeline` `lip_seat::` grades the
 /// production field.
+///
+/// AND AT THE SEAT PLACEMENT THE FIXTURE WAS BUILT FOR (2026-09-30,
+/// `harness::at_path_fixture_seating`): under the straight-line reach and the
+/// island seating, Round 25's rim is seated as one row and no arm lands on a
+/// leaned head any more (measured: 0 heads with landers on Round 25, 0 joins
+/// in a seat zone on Round 50), so every test here would grade nothing. The
+/// head-join rule reads no placement.
 fn production() -> SweepPolicy {
-    SweepPolicy::from_registry()
-        .expect("the registry supplies every sweep number")
-        .without_lip_seat()
+    crate::harness::at_path_fixture_seating(
+        SweepPolicy::from_registry()
+            .expect("the registry supplies every sweep number")
+            .without_lip_seat(),
+    )
 }
 
 /// `r = sqrt(ℓ / (X · π))` inside the registered clamps: the area law, read

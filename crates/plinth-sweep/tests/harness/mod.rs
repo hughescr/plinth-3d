@@ -54,6 +54,13 @@ pub mod bands {
     /// The band is widened to 1.7 so the oracle grades the physics rather than
     /// the two effects above, and both are named in the report so a future
     /// improvement to either is visible as a fall in this number.
+    ///
+    /// **Both effects were engineered away on 2026-09-30 (lane
+    /// lattice-align)**: the reach is measured as a straight length, so the
+    /// lattice is pitched at `√3·(κ·h − p/√2)` and not at the chamfer's
+    /// inradius, and each island is seated by the cheapest measured covering
+    /// (a rim ring as one midline row). The band is NOT narrowed here; the
+    /// counts it is centred on moved instead (`round_bases_ratchet.rs`).
     pub const STRUT_COUNT: (f64, f64) = (0.9, 1.7);
     /// Tiling slop at a circular boundary, **widened from the design of
     /// record's 5 % to 8 % on a measured correction that is reported rather
@@ -149,6 +156,29 @@ pub fn at_path_fixture_x(policy: SweepPolicy) -> SweepPolicy {
     let mut policy = policy;
     policy.x_allowed = PATH_FIXTURE_X_ALLOWED;
     policy
+}
+
+/// `policy` with the seat placement this engine had before 2026-09-30: reach
+/// and routing on the 8-neighbour chamfer, the chamfer's lattice separation,
+/// and one global lattice plus one raster-order greedy pass per layer
+/// (`SweepPolicy::without_straight_reach` + `without_island_seating`).
+///
+/// A TEST FIXTURE SETTING, not production, in the same sense as
+/// [`PATH_FIXTURE_X_ALLOWED`]. Several fixtures were built so that a DOWNSTREAM
+/// path fires on the arm field the old placement gave them: a brace pair
+/// whose posts need `|X|` ties, Round 25/50 heads that other arms land on, a
+/// stilt plate whose section move is taken back, a laid tube whose masts
+/// lap, an island that only a leaned arm roots. With the straight-line reach
+/// and the island seating the same geometry takes fewer, better-placed arms,
+/// and those paths are no longer reached (measured 2026-09-30,
+/// `plinth-evidence/.../lanes/lattice-align.md`): the brace pair needs no
+/// brace at all. None of those rules reads the seat placement; the placement
+/// only decides whether the fixture reaches them. So those tests grade their
+/// path at this placement and say so, and the production placement is graded
+/// by `lattice_align.rs`, the round-base ratchet and every other test.
+#[must_use]
+pub fn at_path_fixture_seating(policy: SweepPolicy) -> SweepPolicy {
+    policy.without_straight_reach().without_island_seating()
 }
 
 /// Run the sweep on one mesh at an explicit working pitch, with lift applied.

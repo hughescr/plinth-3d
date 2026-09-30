@@ -28,7 +28,14 @@ fn turn_about_y(mesh: &Mesh, degrees: f64) -> Mesh {
 #[test]
 fn the_rigid_share_names_the_laid_tubes_stiff_low_end_arms_and_sizes_nothing() {
     let mesh = turn_about_y(&make_laid_tube().expect("the laid tube fixture"), -22.5);
-    let policy = SweepPolicy::from_registry().expect("the registry");
+    // Graded at the seat placement the fixture was built for
+    // (`harness::at_path_fixture_seating`): the witness below is "the tube's
+    // two stiff low-end arms" of the field the old placement gave it. At the
+    // production placement the tilted tube is seated differently and the
+    // diagnostic names 5 arms (measured 2026-09-30); it still sizes nothing.
+    // The diagnostic reads no placement.
+    let policy =
+        harness::at_path_fixture_seating(SweepPolicy::from_registry().expect("the registry"));
     let plan = sweep_with(&mesh, 0.0, &policy);
     let rigid = &plan.report.rigid_share;
     println!(

@@ -361,7 +361,15 @@ fn every_landing_stands_after_a_lip_seat_put_back_on_the_laid_tube() {
 /// move was taken back on this field.
 #[test]
 fn a_section_move_taken_back_leaves_every_displaced_member_within_the_rules() {
-    let plan = &stilt().on;
+    // Graded at the seat placement the fixture was built for
+    // (`harness::at_path_fixture_seating`): at the production placement the
+    // stilt plate takes no section move back (measured 2026-09-30: 0), so
+    // there would be nothing displaced to grade. The rule reads no placement.
+    let plan = &sweep_with(
+        &make_tall_stilt_plate().expect("the tall stilt plate"),
+        0.0,
+        &crate::harness::at_path_fixture_seating(policy()),
+    );
     let footprint = &plan.report.seat_footprint;
     let graded = crate::footprint_moves_hold_the_rules::grade(plan);
     println!(

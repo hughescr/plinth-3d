@@ -24,6 +24,7 @@ mod every_member_rests_on_something;
 mod flank_relief;
 mod footprint_moves_hold_the_rules;
 mod head_join;
+mod lattice_align;
 mod lip_seat_sized;
 mod load_insertion;
 mod mast_root_clearance;

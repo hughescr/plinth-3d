@@ -68,7 +68,13 @@ const STEP_MM: f64 = 0.02;
 const TOLERANCE_MM3: f64 = 2.0 * STEP_MM * STEP_MM * STEP_MM;
 /// Field floors, so an empty or shrunken field cannot pass. The v4 file has 87
 /// tips, 49 of them on leaned arms.
-const MIN_ARMS: usize = 60;
+///
+/// RE-PINNED 60 → 45 on 2026-09-30 (lane lattice-align), on purpose: with the
+/// straight-line reach and the island seating the real Round_25 field is 54
+/// arms (11 leaned over 20°), because the rim annulus and the rib tops are
+/// seated as one midline row each rather than by the global lattice plus
+/// fill arms. The floor still refuses an empty or halved field.
+const MIN_ARMS: usize = 45;
 const MIN_LEANED_ARMS: usize = 10;
 
 type Point = [f64; 3];

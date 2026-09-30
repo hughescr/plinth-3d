@@ -67,7 +67,12 @@ fn brace_pair() -> &'static SweepPlan {
     static PLAN: OnceLock<SweepPlan> = OnceLock::new();
     PLAN.get_or_init(|| {
         let mesh = make_brace_pair().expect("the brace pair fixture");
-        sweep_with(&mesh, 0.0, &policy())
+        // Graded at the seat placement this fixture was built for
+        // (`harness::at_path_fixture_seating`): under the straight-line reach
+        // and the island seating the pair's posts take one forced merge and
+        // need no `|X|` at all (0 braces, measured 2026-09-30), so the tie
+        // tests would grade nothing. No bracing rule reads the placement.
+        sweep_with(&mesh, 0.0, &harness::at_path_fixture_seating(policy()))
     })
 }
 

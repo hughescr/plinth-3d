@@ -225,8 +225,14 @@ fn the_lonely_peak_publishes_the_mast_laps_its_sizing_pass_leaves() {
 #[test]
 fn deleting_the_clearance_rule_brings_the_overlapping_masts_back() {
     let mesh = laid_tube();
-    let clean = sweep_with(&mesh, 0.0, &policy());
-    let sabotaged = sweep_with(&mesh, 0.0, &policy().without_mast_root_clearance());
+    // Graded at the seat placement the fixture was built for
+    // (`harness::at_path_fixture_seating`): at the production placement the
+    // laid tube places 1 mast that laps nothing with the rule on or off
+    // (measured 2026-09-30), so the drill cannot tell the two engines apart.
+    // The clearance rule reads no placement.
+    let fixture = crate::harness::at_path_fixture_seating(policy());
+    let clean = sweep_with(&mesh, 0.0, &fixture);
+    let sabotaged = sweep_with(&mesh, 0.0, &fixture.without_mast_root_clearance());
 
     let clean_masts = masts(&clean);
     let sabotaged_masts = masts(&sabotaged);
