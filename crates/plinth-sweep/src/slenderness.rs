@@ -425,6 +425,10 @@ pub struct SlendernessOutcome {
     /// layer) and were DROPPED. Path-hit witnesses.
     pub brace_bands_moved_above_flare: usize,
     pub brace_bands_dropped_in_flare: usize,
+    /// Masts built after their band was dropped for dipping into a flare, by
+    /// planning the mast again with the tie moved up by the shortfall (a new
+    /// mast is only as tall as its tie, so its band cannot move on its own).
+    pub masts_raised_above_flare: usize,
     pub mast_cells_refused_by_model: usize,
     pub mast_cells_refused_by_member: usize,
     /// The member test's verdicts where the drawn-span rule (round-3 review
@@ -1349,9 +1353,9 @@ pub fn apply_ties(
                 }
                 if context.mast {
                     if let Some(k) = k {
-                        if let Some(new_mast) =
-                            tie_by_mast(context, &mut state, struts, &run, k, outcome)
-                        {
+                        if let Some(new_mast) = tie_by_mast_above_the_flares(
+                            context, &mut state, struts, &run, k, outcome,
+                        ) {
                             applied += 1;
                             if let Some(mast) = new_mast {
                                 queued.resize(struts.len(), false);
@@ -1657,6 +1661,11 @@ struct TieState {
     /// posts' free shafts (`None`: the registry was unreadable, and only the
     /// posts' own feet bound a band, as before 2026-09-30).
     root_flare: Option<SweepRootFlare>,
+    /// Set by [`plan_cross`] when it drops a band whose bottom fell inside a
+    /// flare because the band could not move within its posts: how many layers
+    /// the band had to rise. The mast rung reads it to try again with a mast
+    /// that tall (a new mast is only as tall as the layer it is planned at).
+    flare_shortfall: std::cell::Cell<Option<usize>>,
 }
 
 impl TieState {
@@ -1723,6 +1732,7 @@ impl TieState {
             masts_of,
             placed_roots,
             root_flare,
+            flare_shortfall: std::cell::Cell::new(None),
         }
     }
 
@@ -2229,6 +2239,42 @@ fn panel_sway_over_pixel(
 ///   Cylinder) — a second post, not a brace.
 ///
 /// Returns `None` when no mast is admissible; `Some(Some(id))` for a new mast.
+/// Remedy 4 at layer `k`, and, where its band had to dip into a root flare,
+/// AGAIN WITH THE TIE MOVED UP (fix/brace-not-in-flare, 2026-09-30).
+///
+/// A new mast is only as tall as the layer it is planned at, so its band
+/// cannot move up inside [`plan_cross`] the way a band between two standing
+/// posts does: it is dropped, and the shortfall is recorded. The mast is then
+/// planned afresh at the raised layer, where every test of the mast search
+/// (cell, radius, panel, keep-out, clearance) is made at the new height. Each
+/// retry raises the layer strictly, and the tie must stay inside the run, so
+/// the loop ends.
+fn tie_by_mast_above_the_flares(
+    context: &SlendernessContext<'_>,
+    state: &mut TieState,
+    struts: &mut Vec<SweepStrut>,
+    run: &UnbracedRun,
+    k: usize,
+    outcome: &mut SlendernessOutcome,
+) -> Option<Option<u32>> {
+    let mut at = k;
+    loop {
+        state.flare_shortfall.set(None);
+        if let Some(done) = tie_by_mast(context, state, struts, run, at, outcome) {
+            if at > k {
+                outcome.masts_raised_above_flare += 1;
+            }
+            return Some(done);
+        }
+        let raise = state.flare_shortfall.take()?;
+        let next = at + raise.max(1);
+        if next >= run.k_top {
+            return None;
+        }
+        at = next;
+    }
+}
+
 fn tie_by_mast(
     context: &SlendernessContext<'_>,
     state: &mut TieState,
@@ -3083,6 +3129,7 @@ fn plan_cross(
         outcome.brace_bands_refused += 1;
         outcome.brace_bands_dropped_in_flare += 1;
     };
+    let planned = k;
     let mut k = k;
     let mut moved = false;
     // Each turn either breaks or raises `k` strictly, and `k` may not pass
@@ -3115,6 +3162,11 @@ fn plan_cross(
         }
         let raised = k + (floor - k_lo);
         if !may_move || raised > top_limit {
+            if may_move {
+                // How far above the layer it was planned at the band's top
+                // would have to stand.
+                state.flare_shortfall.set(Some(raised - planned));
+            }
             dropped(outcome);
             return None;
         }

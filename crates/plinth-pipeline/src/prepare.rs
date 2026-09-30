@@ -3009,8 +3009,10 @@ fn print_sweep_disclosure(
     // inside a root flare or the raft. Path-hit witnesses.
     println!(
         "[sweep {model}] free shaft: {} brace bands moved up out of a root flare or the raft, \
-         {} dropped",
-        lane.brace_bands_moved_above_flare, lane.brace_bands_dropped_in_flare,
+         {} dropped; {} masts planned again with the tie moved up",
+        lane.brace_bands_moved_above_flare,
+        lane.brace_bands_dropped_in_flare,
+        lane.masts_raised_above_flare,
     );
     for warning in lane.warnings.iter().take(20) {
         println!(

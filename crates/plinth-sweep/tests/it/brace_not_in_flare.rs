@@ -127,6 +127,76 @@ fn raft_height_mm() -> f64 {
         .get()
 }
 
+/// Every brace end inside a flare the file draws, or at or below the raft top,
+/// described. Empty when the rule holds.
+fn brace_ends_in_a_flare(plan: &SweepPlan, flares: &[Flare]) -> Vec<String> {
+    let raft_top = plan.plate_z_mm + raft_height_mm();
+    let mut inside: Vec<String> = Vec::new();
+    for (id, end, point) in brace_ends(plan) {
+        if let Some(flare) = flares.iter().find(|flare| flare.contains(point)) {
+            inside.push(format!(
+                "brace {id} {end} at {:.3} mm over the plate, inside the flare at ({:.3}, {:.3}) \
+                 whose boss top is {:.3} mm up",
+                point[2] - plan.plate_z_mm,
+                flare.foot[0],
+                flare.foot[1],
+                flare.top[2] - plan.plate_z_mm,
+            ));
+        }
+        if point[2] <= raft_top {
+            inside.push(format!(
+                "brace {id} {end} at {:.3} mm over the plate, at or below the raft top",
+                point[2] - plan.plate_z_mm
+            ));
+        }
+    }
+    inside
+}
+
+/// **THE MAST PATH, on the laid tube with the thicken rung switched off** (the
+/// configuration `mast_root_clearance.rs` grades masts in, because production
+/// thickens instead of dropping masts on this fixture). A new mast is only as
+/// tall as its tie, so a mast band that dips into a flare cannot move up
+/// inside its posts; the rung plans the mast again with the tie moved up. The
+/// claim is the same: no brace end, a mast's cross included, lies in a flare;
+/// and masts are still placed, some of them by that retry (path hit).
+#[test]
+fn no_mast_brace_end_on_the_laid_tube_lies_inside_a_root_flare() {
+    let mesh = make_laid_tube().expect("the laid tube fixture");
+    let policy = SweepPolicy {
+        slenderness_thicken: false,
+        ..policy()
+    };
+    let plan = sweep_with(&mesh, 0.0, &policy);
+    let flares = emitted_flares(&plan);
+    let lane = &plan.report.slenderness_lane;
+    let inside = brace_ends_in_a_flare(&plan, &flares);
+    println!(
+        "laid tube, thicken off: {} masts, {} placed by a raised retry; bands moved {}, dropped \
+         {}; {} brace ends in a flare or the raft; {} warnings",
+        lane.masts_dropped,
+        lane.masts_raised_above_flare,
+        lane.brace_bands_moved_above_flare,
+        lane.brace_bands_dropped_in_flare,
+        inside.len(),
+        lane.warnings.len(),
+    );
+    assert!(
+        lane.masts_dropped > 0,
+        "anti-vacuity: the laid tube with thickening off placed no mast"
+    );
+    assert!(
+        lane.masts_raised_above_flare > 0,
+        "path hit: no mast was planned again with its tie moved up out of a flare"
+    );
+    assert!(
+        inside.is_empty(),
+        "{} brace ends lie inside a root flare or the raft:\n{}",
+        inside.len(),
+        inside.join("\n")
+    );
+}
+
 /// **THE CLAIM, on the laid tube**: no brace end lies inside any root flare
 /// the file draws, and none lies at or below the raft top. Non-vacuous: the
 /// field has braces and flares, and the flares are tall enough to hold a tie
@@ -154,26 +224,7 @@ fn no_brace_end_on_the_laid_tube_lies_inside_a_root_flare() {
         "anti-vacuity: the tallest flare rises only {tallest:.3} mm"
     );
 
-    let raft_top = plan.plate_z_mm + raft_height_mm();
-    let mut inside: Vec<String> = Vec::new();
-    for &(id, end, point) in &ends {
-        if let Some(flare) = flares.iter().find(|flare| flare.contains(point)) {
-            inside.push(format!(
-                "brace {id} {end} at {:.3} mm over the plate, inside the flare at ({:.3}, {:.3}) \
-                 whose boss top is {:.3} mm up",
-                point[2] - plan.plate_z_mm,
-                flare.foot[0],
-                flare.foot[1],
-                flare.top[2] - plan.plate_z_mm,
-            ));
-        }
-        if point[2] <= raft_top {
-            inside.push(format!(
-                "brace {id} {end} at {:.3} mm over the plate, at or below the raft top",
-                point[2] - plan.plate_z_mm
-            ));
-        }
-    }
+    let inside = brace_ends_in_a_flare(&plan, &flares);
     let lane = &plan.report.slenderness_lane;
     println!(
         "laid tube: {} brace ends, {} root flares (tallest {tallest:.3} mm); {} in a flare or \
