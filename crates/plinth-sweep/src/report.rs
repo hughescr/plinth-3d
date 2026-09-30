@@ -109,8 +109,13 @@ pub struct RemovalCoverageReport {
     /// Arms the replay restored.
     pub refused_by_replay: u64,
     /// Of `refused_by_replay`, the arms whose restoring cells all lay inside
-    /// the reach coupon's first-loss bracket (past 2.130 mm, within 2.592 mm).
-    /// **Reporting only**: the arms a reach at the bracket's far end would free.
+    /// the reach coupon's first-loss bracket (past 2.130 mm, within 2.592 mm)
+    /// ON THE LAYER THAT RESTORED THEM. **Reporting only, and a partial
+    /// view**: once an arm is restored the layers above its seat are never
+    /// examined without it, so this does NOT count the arms a reach at the
+    /// bracket's far end would free. Measured 2026-09-30 (lane
+    /// neighbour-cover, `whatif/first-loss`): this read 48 of 48 on the
+    /// Cylinder, and a replay that accepted cells up to the bracket freed 0.
     pub refused_by_replay_within_first_loss: u64,
     /// Replays run, over every pass. Zero means the replay never ran.
     pub replays: u64,
@@ -120,6 +125,8 @@ pub struct RemovalCoverageReport {
     /// up-sweep's residual demand, re-measured by the replay. When no arm has
     /// been added since placement it must equal the placement's own residual,
     /// which is what shows the replay reproduces the placement's potential.
+    /// Complete only when the first replay ran to the top without a restart;
+    /// a restart stops it at the restoring layer.
     pub replay_baseline_unrooted_cells: u64,
     /// Cells a proposed removal would have unrooted, summed over every check.
     pub replay_newly_unrooted_cells: u64,

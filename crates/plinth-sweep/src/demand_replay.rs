@@ -115,8 +115,10 @@ pub struct ReplayOutcome {
     pub refused: u64,
     /// Of `refused`, the arms every cell that restored them lay inside the
     /// first-loss bracket (finite and at most `first_loss_ratio`), on the
-    /// layer where they were restored. **Reporting only**: the arms a reach at
-    /// the bracket's far end would have let go.
+    /// layer where they were restored. **Reporting only, and partial**: the
+    /// layers above a restored seat are never examined without the arm, so
+    /// this is not the count a reach at the bracket's far end would free
+    /// (see `report::RemovalCoverageReport::refused_by_replay_within_first_loss`).
     pub refused_within_first_loss: u64,
     /// Whether the restart bound ran out and every doomed arm was restored.
     pub exhausted: bool,

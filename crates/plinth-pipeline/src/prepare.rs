@@ -2532,11 +2532,14 @@ fn print_sweep_disclosure(
         let coverage = &report.removal_coverage;
         println!(
             "[sweep {model}] removal coverage (multi-layer reach replay): {} under-loaded \
-             candidates, {} passed to the checks, {} kept by the replay ({} of them only for cells \
-             inside the first-loss reach bracket); {} replay(s) over {} layers; the field as \
-             placed leaves {} cells unrooted; proposed removals would have unrooted {} more ({} \
-             inside the first-loss bracket, worst potential {:.4}); {} replay(s) out of restarts; \
-             {} pass(es) retried with the span proxy, {} rolled back for an overloaded arm",
+             candidates, {} passed to the checks, {} kept by the replay ({} of them restored on \
+             their seat layer by cells inside the first-loss reach bracket -- the layers above a \
+             restored seat are not examined, so this is NOT a count of arms a first-loss reach \
+             would free); {} replay(s) over {} layers; the field as placed leaves {} cells \
+             unrooted (complete only when the first replay needed no restart); proposed removals \
+             would have unrooted {} more ({} inside the first-loss bracket, worst finite \
+             potential {:.4}); {} replay(s) out of restarts; {} pass(es) retried with the span \
+             proxy, {} rolled back for an overloaded arm",
             coverage.candidates,
             coverage.screened,
             coverage.refused_by_replay,
