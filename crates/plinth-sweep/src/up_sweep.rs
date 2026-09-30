@@ -309,6 +309,13 @@ impl ColumnHistory {
     /// column.
     #[must_use]
     pub fn shaft_blocks(&self, cell: usize, layer: usize, except: Option<u32>) -> bool {
+        self.shaft_blocks_excluding(cell, layer, except.as_slice())
+    }
+
+    /// [`Self::shaft_blocks`] with several members excepted (a re-landed
+    /// member's own old shaft, and the members that move with it).
+    #[must_use]
+    pub fn shaft_blocks_excluding(&self, cell: usize, layer: usize, except: &[u32]) -> bool {
         let Some(&head) = self.shaft_head.get(cell) else {
             return false;
         };
@@ -316,7 +323,7 @@ impl ColumnHistory {
         while slot != u32::MAX {
             let span = self.shaft_spans[slot as usize];
             slot = span.next;
-            if Some(span.id) == except {
+            if except.contains(&span.id) {
                 continue;
             }
             if (span.k_bottom as usize) <= layer && layer <= span.k_top as usize {

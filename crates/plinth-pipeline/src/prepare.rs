@@ -2670,6 +2670,64 @@ fn print_sweep_disclosure(
             rule.kept_surface_unavailable,
             rule.joins_unmeasured,
         );
+        // THE LIP-SEAT RULE (2026-09-29).
+        let lip = &report.lip_seat;
+        println!(
+            "[sweep {model}] lip seats: {} seated arms graded, {} met their seat face beyond the \
+             angle at which the seat trim keeps their section (deepest cut into a shaft outside \
+             its ball {:.4} mm, widest approach {:.1} deg); {} re-landed at a smaller angle to \
+             the same seat{}; kept: {} carrying another member, {} with no admissible descent; \
+             candidates {} priced, {} refused by the path test, {} by the plate rule, {} by the \
+             lowering's own measurement, {} verified; {} pass(es); {} members resting on a \
+             re-landed arm moved with it; footprint: {} on-face tips searched for a seat further \
+             along the same face, {} moved there, {} slides refused because the moved shaft \
+             would be cut (deeper); on the emitted field {} graded, {} still cut",
+            lip.arms_graded,
+            lip.arms_over_limit_before,
+            lip.max_bite_before_mm,
+            lip.max_approach_before_deg,
+            lip.arms_relanded,
+            if lip.enabled { "" } else { " (RULE OFF)" },
+            lip.kept_carrying,
+            lip.kept_no_candidate,
+            lip.candidates_priced,
+            lip.candidates_refused_path,
+            lip.candidates_refused_plate,
+            lip.candidates_refused_measured,
+            lip.candidates_verified,
+            lip.passes,
+            lip.children_moved_with_host,
+            report.seat_footprint.tips_graded_for_section,
+            report.seat_footprint.tips_moved_for_section,
+            report.seat_footprint.moves_refused_section,
+            lip.arms_graded_after,
+            lip.over_limit_after.len(),
+        );
+        for warning in &lip.over_limit_after {
+            println!(
+                "[sweep {model}] WARNING arm {} meets its seat face at {:.1} deg (its limit {:.1} \
+                 deg), and the seat trim cuts {:.4} mm into its shaft outside the tip ball{}{}{}",
+                warning.arm,
+                warning.approach_deg,
+                warning.limit_deg,
+                warning.bite_mm,
+                if warning.carries_someone {
+                    "; another member rests on it, so it was not re-landed"
+                } else {
+                    ""
+                },
+                if warning.relanded {
+                    "; it was re-landed by this rule and a later pass cut it again"
+                } else {
+                    ""
+                },
+                if warning.on_plate {
+                    "; it stands on the plate (horizontal rings down to its boss)"
+                } else {
+                    ""
+                },
+            );
+        }
         for (lander, trunk) in &rule.in_seat_zone_after {
             println!(
                 "[sweep {model}] WARNING member {lander} joins arm {trunk} near its head and the \

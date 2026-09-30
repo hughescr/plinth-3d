@@ -129,6 +129,13 @@ pub struct FootprintOutcome {
     pub moves_refused_slenderness: usize,
     pub moves_refused_drain: usize,
     pub members_checked: usize,
+    /// THE LIP-SEAT RULE's remedy 2 (2026-09-29): tips whose disc was on its
+    /// face but whose shaft the seat trim cut outside its ball, searched for a
+    /// seat further along the same face; those moved there; and proposed
+    /// slides refused because the moved shaft would be cut (deeper).
+    pub tips_graded_for_section: usize,
+    pub tips_moved_for_section: usize,
+    pub moves_refused_section: usize,
     /// Disc samples graded, lattice points searched, layers rasterised, and
     /// candidate rounds re-derived: the path hits.
     pub disc_samples: usize,
@@ -514,6 +521,15 @@ pub(crate) fn apply(
         total[arm] += 1;
         on[arm] += usize::from(hit[index]);
     }
+    // THE LIP-SEAT RULE's remedy 2 (2026-09-29): a tip whose disc is on its
+    // face but whose shaft the seat trim cuts outside its ball joins the same
+    // search, for a seat further along the same face where the moved arm keeps
+    // its section; and no slide, for either reason, may cut a shaft deeper
+    // than it was cut before. Measured by the lowering's own derivation.
+    let bites_before = plinth_support::tip_shaft_seat_bites(arms, layer_plan)
+        .unwrap_or_else(|_| vec![None; arms.len()]);
+    let bite_of = |bite: Option<&plinth_support::ShaftSeatBite>| bite.map_or(0.0, |b| b.bite_mm);
+    let mut section_only = vec![false; arms.len()];
     let mut failing: Vec<usize> = Vec::new();
     for arm in 0..arms.len() {
         if total[arm] == 0 {
@@ -523,6 +539,11 @@ pub(crate) fn apply(
         if on[arm] == total[arm] {
             outcome.tips_on_face += 1;
             struts[arm].seat_face.footprint = Footprint::OnFace;
+            if crate::lip_seat::cuts(bites_before[arm].as_ref()) {
+                section_only[arm] = true;
+                outcome.tips_graded_for_section += 1;
+                failing.push(arm);
+            }
         } else {
             failing.push(arm);
         }
@@ -677,10 +698,39 @@ pub(crate) fn apply(
             .collect();
         let rederived = plinth_support::tip_contact_discs(&moved_arms, layer_plan)
             .unwrap_or_else(|_| vec![None; moved_arms.len()]);
+        // The same moves drawn with their own profiles, for the section test.
+        let profiled: Vec<SweepArm> = proposals
+            .iter()
+            .zip(&moved_arms)
+            .map(|(&(slot, _), moved)| SweepArm {
+                radius_profile_mm: arms[searches[slot].arm].radius_profile_mm.clone(),
+                ..moved.clone()
+            })
+            .collect();
+        let moved_bites = plinth_support::tip_shaft_seat_bites(&profiled, layer_plan)
+            .unwrap_or_else(|_| vec![None; profiled.len()]);
         let mut resolved = vec![false; searches.len()];
         let mut on_face: Vec<(usize, [f64; 3])> = Vec::with_capacity(proposals.len());
-        for ((slot, _), (moved, disc)) in proposals.iter().zip(moved_arms.iter().zip(&rederived)) {
+        for (((slot, _), (moved, disc)), moved_bite) in proposals
+            .iter()
+            .zip(moved_arms.iter().zip(&rederived))
+            .zip(&moved_bites)
+        {
             let search = &searches[*slot];
+            let before = bite_of(bites_before[search.arm].as_ref());
+            let after = bite_of(moved_bite.as_ref());
+            // A tip searched for its section alone moves only onto a seat
+            // where the shaft keeps it; any other slide may not cut deeper.
+            let section_holds = if section_only[search.arm] {
+                !crate::lip_seat::cuts(moved_bite.as_ref())
+            } else {
+                !crate::lip_seat::cuts_deeper(before, after)
+            };
+            if !section_holds {
+                outcome.moves_refused_section += 1;
+                refused_by_limits[*slot] = true;
+                continue;
+            }
             let Some((frame, _)) = &frames[search.arm] else {
                 continue;
             };
@@ -752,11 +802,18 @@ pub(crate) fn apply(
         match accepted[slot] {
             Some(shift) => {
                 let length = geom_kernel::vec3::norm(shift);
-                outcome.tips_moved_onto_face += 1;
+                if section_only[arm] {
+                    outcome.tips_moved_for_section += 1;
+                } else {
+                    outcome.tips_moved_onto_face += 1;
+                }
                 outcome.max_move_mm = outcome.max_move_mm.max(length);
                 struts[arm].seat_face.shift_mm = shift;
                 struts[arm].seat_face.footprint = Footprint::MovedOntoFace;
             }
+            // A disc already on its face keeps its seat and its status; the
+            // lip-seat census warns about its shaft.
+            None if section_only[arm] => {}
             None => {
                 #[expect(clippy::cast_precision_loss, reason = "sample counts are small")]
                 let fraction = on[arm] as f64 / total[arm].max(1) as f64;
