@@ -487,6 +487,65 @@ fn root_boss_top_at(
     )
 }
 
+/// **Where a plate-rooted sweep member's root flare ends, measured up from
+/// the plate**: the height of its BOSS TOP, which is the top of the
+/// `RootFlare` record [`lower_sweep_arms`] draws for it, and the height of the
+/// raft top that flare stands on.
+///
+/// The slice sweep asks this so that a brace never ties a member inside its
+/// own root flare, where the brace adds resin and no stiffness
+/// (fix/brace-not-in-flare, 2026-09-30). It answers with
+/// [`root_boss_top_at`] itself, over a plate at z = 0, so that the placement
+/// and the lowering cannot disagree about where a flare ends: nothing here
+/// computes a boss top a second time.
+#[derive(Clone, Copy, Debug)]
+pub struct SweepRootFlare {
+    config: LoweringConfig,
+}
+
+impl SweepRootFlare {
+    /// The registered flare geometry at one layer height.
+    ///
+    /// # Errors
+    ///
+    /// The same request-shaped errors as [`lower_sweep_arms`]: a layer height
+    /// that is not positive and finite, or an unreadable registry.
+    pub fn registered(layer_height_mm: f64) -> Result<Self, SweepLoweringError> {
+        let plate = Finite::new(0.0).map_err(|_| SweepLoweringError::MissingLayerHeight)?;
+        // The lift is read only into the legacy forest digest, never into the
+        // boss arithmetic; the layer height stands in as a positive value.
+        let lift = PositiveFinite::new(layer_height_mm)
+            .map_err(|_| SweepLoweringError::MissingLayerHeight)?;
+        let layers = LayerPlan::new(0.0, vec![layer_height_mm])
+            .map_err(|_| SweepLoweringError::MissingLayerHeight)?;
+        let config = LoweringConfig::current(BuildFrame::new(plate, lift), &layers, 1, 1)?;
+        Ok(Self { config })
+    }
+
+    /// The boss top of a plate-rooted member whose seat stands
+    /// `seat_above_plate_mm` over the plate, in mm over the plate; `None`
+    /// where the run is shorter than the registered no-bend height, so the
+    /// lowering draws a straight column and no flare.
+    ///
+    /// The lowering reads the SEATED terminal (the seat pushed into the model
+    /// by the seat depth); a caller that has only the seat surface gets the
+    /// boss top of a seat that much lower. Only runs shorter than
+    /// `2 × FLARE_LEN_MM` above the raft are affected, by at most half the
+    /// seat depth.
+    #[must_use]
+    pub fn top_above_plate_mm(&self, seat_above_plate_mm: f64) -> Option<f64> {
+        let zero = Finite::new(0.0).ok()?;
+        let top = root_boss_top_at(seat_above_plate_mm, [zero, zero], self.config)?.ok()?;
+        Some(top[2].get())
+    }
+
+    /// `CHITUBOX_RAFT_HEIGHT_MM`: the raft top, in mm over the plate.
+    #[must_use]
+    pub fn raft_top_above_plate_mm(&self) -> f64 {
+        self.config.raft_height_mm.get()
+    }
+}
+
 fn frustum(
     segment_kind: SupportSegmentKind,
     start_mm: [Finite; 3],

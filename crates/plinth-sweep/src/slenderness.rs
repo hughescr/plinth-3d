@@ -77,7 +77,12 @@
 //!    reach is tried, nearest first, not only the nearest; every diagonal and
 //!    every mast is tested as the SOLID it is drawn, against the model (final
 //!    gap) and against every member it is not joined to
-//!    (`member_clearance.rs`, 2026-09-29).
+//!    (`member_clearance.rs`, 2026-09-29). **Both ends of a band lie on the
+//!    posts' free shafts** (2026-09-30): above the top of each post's root
+//!    flare and above the raft top. A band whose bottom falls inside a flare
+//!    moves up or is dropped, and a brace end inside a flare is never
+//!    credited as a tie: the flare is already a rigid base, and a tie in it
+//!    adds resin and no stiffness ([`free_shaft_floor`]).
 //! 3. **Thicken.** Raise the member's ROOT, keep its tip: the drawn profile
 //!    becomes a taper from the tip it had down to a thicker root, carried on
 //!    down to the member's own foot and down every trunk it stands on. It holds
@@ -104,6 +109,7 @@ use crate::grid::Grid;
 use crate::lean::LeanLaw;
 use crate::up_sweep::ColumnHistory;
 use crate::{Landing, StrutKind, SweepStrut};
+use plinth_support::SweepRootFlare;
 
 /// The slenderness law, evaluated once for one run and then read by everything
 /// the lane does.
@@ -411,6 +417,14 @@ pub struct SlendernessOutcome {
     /// mast extensions) refused for the same two reasons. Path-hit witnesses.
     pub brace_bands_refused_by_model: usize,
     pub brace_bands_refused_by_member: usize,
+    /// FREE SHAFT (fix/brace-not-in-flare, 2026-09-30): bands whose bottom
+    /// fell inside a post's root flare or the raft and that were MOVED UP until
+    /// both ends lie on the posts' free shafts (counted when the moved band is
+    /// built); and bands that could not move (the posts end first, the moved
+    /// band no longer ties the run, or the band had to stay at a shared tie
+    /// layer) and were DROPPED. Path-hit witnesses.
+    pub brace_bands_moved_above_flare: usize,
+    pub brace_bands_dropped_in_flare: usize,
     pub mast_cells_refused_by_model: usize,
     pub mast_cells_refused_by_member: usize,
     /// The member test's verdicts where the drawn-span rule (round-3 review
@@ -478,7 +492,7 @@ pub fn unbraced_runs(
     law: &SlendernessLaw,
 ) -> Vec<UnbracedRun> {
     let (profiles, _) = crate::adapter::drawn_profiles(struts);
-    let ties = tie_lists(grid, struts);
+    let ties = tie_lists(grid, struts, &free_shaft_floors(struts, layer_height_mm));
     let mut runs = Vec::new();
     for (index, strut) in struts.iter().enumerate() {
         runs.extend(member_runs(
@@ -729,6 +743,80 @@ fn live(strut: &SweepStrut) -> bool {
     strut.k_bottom != usize::MAX && strut.k_top > strut.k_bottom
 }
 
+/// Float noise on a height compared against a layer plane, so that a boss top
+/// that falls exactly on a layer boundary (1.7 mm = 34 × 0.05 mm) does not
+/// read a hair below it. NUMERICAL, not physical: it decides no geometry.
+const HEIGHT_NOISE_MM: f64 = 1.0e-9;
+
+/// **The lowest layer at which a tie on `strut` lies on its FREE SHAFT**
+/// (fix/brace-not-in-flare, 2026-09-30): strictly above the top of its root
+/// flare, for a plate-rooted member, and strictly above the raft top, for
+/// every member.
+///
+/// A root flare is already a rigid base: it is a cone `FLARE_R_FACTOR` times
+/// the root wide at its foot, standing on its raft pad. A brace that ties a
+/// member inside it adds resin and a record below the raft top and holds
+/// nothing the flare does not already hold (measured on the laid tube's `|X|`
+/// pair 177/178: lower ends 0.25 mm over the plate, inside flares whose boss
+/// top is 1.7 mm up; `oversupport-attribution.md`).
+///
+/// The flare's top is the lowering's own boss top
+/// ([`plinth_support::SweepRootFlare`], which answers with the arithmetic
+/// that draws the `RootFlare` record), read at the member's seat height
+/// `k_top · h`. `None` for the flare geometry (an unreadable registry) leaves
+/// only the member's own foot, as before this rule: the band is still built
+/// and nothing is refused on a missing number.
+fn free_shaft_floor(flare: Option<&SweepRootFlare>, strut: &SweepStrut, h: f64) -> usize {
+    let Some(flare) = flare else {
+        return 0;
+    };
+    if !(h.is_finite() && h > 0.0) {
+        return 0;
+    }
+    let mut top_mm = flare.raft_top_above_plate_mm();
+    if strut.landing == Landing::Plate && strut.kind != StrutKind::Brace {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a layer index bounded by the plan's own layer count is exact in f64"
+        )]
+        let seat_mm = strut.k_top as f64 * h;
+        if let Some(boss_mm) = flare.top_above_plate_mm(seat_mm) {
+            top_mm = top_mm.max(boss_mm);
+        }
+    }
+    first_layer_above(top_mm, h)
+}
+
+/// The lowest layer whose plane stands strictly above `height_mm`.
+fn first_layer_above(height_mm: f64, h: f64) -> usize {
+    if !(height_mm.is_finite() && height_mm >= 0.0) {
+        return 0;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a finite non-negative height over a positive layer height, floored"
+    )]
+    let mut layer = (height_mm / h).floor() as usize;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a layer index bounded by the plan's own layer count is exact in f64"
+    )]
+    while layer as f64 * h <= height_mm + HEIGHT_NOISE_MM {
+        layer += 1;
+    }
+    layer
+}
+
+/// [`free_shaft_floor`] for every member, in one pass.
+fn free_shaft_floors(struts: &[SweepStrut], h: f64) -> Vec<usize> {
+    let flare = SweepRootFlare::registered(h).ok();
+    struts
+        .iter()
+        .map(|strut| free_shaft_floor(flare.as_ref(), strut, h))
+        .collect()
+}
+
 /// The plane of the `|X|` a brace belongs to: from its seat post to its
 /// landing post, both read AT THE TOP OF THE BAND, so both diagonals of one
 /// cross name exactly one plane even when the posts lean.
@@ -747,19 +835,32 @@ fn brace_plane(grid: &Grid, struts: &[SweepStrut], brace: &SweepStrut) -> Option
 }
 
 /// Every tie on every member other than its own two ends. One pass.
-fn tie_lists(grid: &Grid, struts: &[SweepStrut]) -> Vec<Vec<Tie>> {
+///
+/// **A brace is credited only where it ties the member's FREE SHAFT**
+/// (fix/brace-not-in-flare, 2026-09-30): a brace end below the member's
+/// `floors` entry ([`free_shaft_floor`]) lies inside its root flare or the
+/// raft, which already hold that height rigidly, so it cuts no run. Landings
+/// of other members are ties wherever they land, as before.
+fn tie_lists(grid: &Grid, struts: &[SweepStrut], floors: &[usize]) -> Vec<Vec<Tie>> {
     let mut ties: Vec<Vec<Tie>> = vec![Vec::new(); struts.len()];
+    let on_free_shaft = |host: u32, layer: usize| {
+        floors
+            .get(host as usize)
+            .is_none_or(|&floor| layer >= floor)
+    };
     for strut in struts {
         if !live(strut) {
             continue;
         }
-        let plane = if strut.kind == StrutKind::Brace {
+        let brace = strut.kind == StrutKind::Brace;
+        let plane = if brace {
             brace_plane(grid, struts, strut)
         } else {
             None
         };
         if let Landing::Strut { id, layer } = strut.landing {
-            if let Some(list) = ties.get_mut(id as usize) {
+            let credited = !brace || on_free_shaft(id, layer);
+            if let Some(list) = ties.get_mut(id as usize).filter(|_| credited) {
                 list.push(Tie {
                     layer,
                     plane,
@@ -768,7 +869,8 @@ fn tie_lists(grid: &Grid, struts: &[SweepStrut]) -> Vec<Vec<Tie>> {
             }
         }
         if let Some(parent) = strut.seat_on_strut {
-            if let Some(list) = ties.get_mut(parent as usize) {
+            let credited = !brace || on_free_shaft(parent, strut.k_top);
+            if let Some(list) = ties.get_mut(parent as usize).filter(|_| credited) {
                 list.push(Tie {
                     layer: strut.k_top,
                     plane,
@@ -1228,14 +1330,14 @@ pub fn apply_ties(
                 );
                 if context.brace {
                     if let Some(at) = shared {
-                        if tie_by_crosses(context, &mut state, struts, &run, at, outcome) {
+                        if tie_by_crosses(context, &mut state, struts, &run, at, false, outcome) {
                             outcome.crosses_at_an_existing_tie_layer += 1;
                             applied += 1;
                             continue;
                         }
                     }
                     if let Some(k) = k {
-                        if tie_by_crosses(context, &mut state, struts, &run, k, outcome) {
+                        if tie_by_crosses(context, &mut state, struts, &run, k, true, outcome) {
                             applied += 1;
                             continue;
                         }
@@ -1551,6 +1653,10 @@ struct TieState {
     /// The root discs on the plate, as the congestion lane measures them;
     /// grown as roots are thickened and extended as masts are dropped.
     placed_roots: Vec<crate::congestion::RootDisc>,
+    /// The lowering's root-flare geometry, so a band's ends are kept on the
+    /// posts' free shafts (`None`: the registry was unreadable, and only the
+    /// posts' own feet bound a band, as before 2026-09-30).
+    root_flare: Option<SweepRootFlare>,
 }
 
 impl TieState {
@@ -1558,7 +1664,12 @@ impl TieState {
         let mut index = ColumnHistory::new(context.grid);
         stamp_all(&mut index, struts);
         let (profiles, _) = crate::adapter::drawn_profiles(struts);
-        let ties = tie_lists(context.grid, struts);
+        let root_flare = SweepRootFlare::registered(context.layer_height_mm).ok();
+        let floors: Vec<usize> = struts
+            .iter()
+            .map(|strut| free_shaft_floor(root_flare.as_ref(), strut, context.layer_height_mm))
+            .collect();
+        let ties = tie_lists(context.grid, struts, &floors);
         let mut bands: BTreeMap<(u32, u32), Vec<(usize, usize)>> = BTreeMap::new();
         let mut masts_of: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
         for strut in struts {
@@ -1611,7 +1722,15 @@ impl TieState {
             bands,
             masts_of,
             placed_roots,
+            root_flare,
         }
+    }
+
+    /// [`free_shaft_floor`] of a member as it stands NOW. Read on demand
+    /// rather than held per member, because a mast is pushed, extended and
+    /// withdrawn inside the pass and its seat height moves with it.
+    fn free_shaft_floor(&self, strut: &SweepStrut, layer_height_mm: f64) -> usize {
+        free_shaft_floor(self.root_flare.as_ref(), strut, layer_height_mm)
     }
 }
 
@@ -1651,6 +1770,7 @@ fn tie_by_crosses(
     struts: &mut Vec<SweepStrut>,
     run: &UnbracedRun,
     k: usize,
+    may_move: bool,
     outcome: &mut SlendernessOutcome,
 ) -> bool {
     let id = run.strut_id;
@@ -1668,7 +1788,9 @@ fn tie_by_crosses(
             continue;
         }
         outcome.cross_bands_planned += 1;
-        let Some(plan) = plan_cross(context, state, struts, id, partner, k, outcome) else {
+        let Some(plan) = plan_cross(
+            context, state, struts, id, partner, k, run, may_move, outcome,
+        ) else {
             continue;
         };
         if rank > 0 {
@@ -2217,7 +2339,7 @@ fn tie_by_mast(
             state.index.stamp_shaft(mast, old_top + 1, k, cell, &[]);
             struts[mast as usize].k_top = k;
         }
-        if let Some(plan) = plan_cross(context, state, struts, id, mast, k, outcome) {
+        if let Some(plan) = plan_cross(context, state, struts, id, mast, k, run, true, outcome) {
             if old_top < k {
                 let profile = &mut state.profiles[mast as usize];
                 profile.resize(k + 1, grown);
@@ -2423,7 +2545,7 @@ fn tie_by_mast(
     // build; taken back out if the cross will not build.
     let spans_before = state.index.shaft_spans.len();
     state.index.stamp_shaft(mast_id, 0, k, cell, &[]);
-    if let Some(plan) = plan_cross(context, state, struts, id, mast_id, k, outcome) {
+    if let Some(plan) = plan_cross(context, state, struts, id, mast_id, k, run, true, outcome) {
         commit_cross(context, state, struts, plan, outcome);
         // The mast's disc at the root it is DRAWN with once its cross is on
         // it (the cross can raise it past `radius_mm`), not the radius its
@@ -2913,6 +3035,24 @@ fn partner_candidates(
 /// the final gap, and must not enter any standing member it is not joined to
 /// ([`member_solids_clear`]). The centreline-cell test stays in front of it as
 /// the cheap first refusal.
+///
+/// **Both ends of the band lie on the posts' FREE SHAFTS**
+/// (fix/brace-not-in-flare, 2026-09-30): the band bottom `k_lo` stands above
+/// the top of each post's root flare and above the raft top
+/// ([`free_shaft_floor`]; the band top is higher still). A band whose bottom
+/// falls short MOVES UP by the shortfall, re-planned at the new top because a
+/// leaning post changes the gap and so the depth, until it clears; it is
+/// DROPPED (refused and counted) where it may not move (`may_move` false: it
+/// was planned at a layer the member is already tied at, which is the whole
+/// reason for that layer), where the moved top passes either post's top,
+/// where the moved band no longer ties `run` (its bottom is not below the
+/// run's top), or where its plane no longer holds the direction `run` sways in
+/// at the new layer.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the band needs the field, the two posts and the planned layer, and the run it ties \
+              and whether it may move, to keep its ends on the free shafts"
+)]
 fn plan_cross(
     context: &SlendernessContext<'_>,
     state: &TieState,
@@ -2920,29 +3060,77 @@ fn plan_cross(
     a: u32,
     b: u32,
     k: usize,
+    run: &UnbracedRun,
+    may_move: bool,
     outcome: &mut SlendernessOutcome,
 ) -> Option<CrossPlan> {
     let index = &state.index;
     let bands = &state.bands;
     let grid = context.grid;
-    let (a_cell_top, b_cell_top) = {
+    let h = context.layer_height_mm;
+    let (floor, top_limit) = {
         let (Some(one), Some(two)) = (struts.get(a as usize), struts.get(b as usize)) else {
             return None;
         };
-        (one.cell_at(k), two.cell_at(k))
+        (
+            state
+                .free_shaft_floor(one, h)
+                .max(state.free_shaft_floor(two, h)),
+            one.k_top.min(two.k_top),
+        )
     };
-    let gap_mm = crate::cell_distance_mm(grid, a_cell_top, b_cell_top);
-    if gap_mm <= 0.0 {
-        return None;
-    }
-    let depth = context.lean.layers_to_reach(gap_mm);
-    if depth == 0 {
-        return None;
-    }
-    let Some(k_lo) = k.checked_sub(depth) else {
+    let dropped = |outcome: &mut SlendernessOutcome| {
         outcome.brace_bands_refused += 1;
-        return None;
+        outcome.brace_bands_dropped_in_flare += 1;
     };
+    let mut k = k;
+    let mut moved = false;
+    // Each turn either breaks or raises `k` strictly, and `k` may not pass
+    // `top_limit`, so the loop ends.
+    let (a_cell_top, b_cell_top, depth, k_lo) = loop {
+        let (a_top, b_top) = {
+            let (Some(one), Some(two)) = (struts.get(a as usize), struts.get(b as usize)) else {
+                return None;
+            };
+            (one.cell_at(k), two.cell_at(k))
+        };
+        let gap_mm = crate::cell_distance_mm(grid, a_top, b_top);
+        if gap_mm <= 0.0 {
+            return None;
+        }
+        let depth = context.lean.layers_to_reach(gap_mm);
+        if depth == 0 {
+            return None;
+        }
+        let Some(k_lo) = k.checked_sub(depth) else {
+            if moved {
+                dropped(outcome);
+            } else {
+                outcome.brace_bands_refused += 1;
+            }
+            return None;
+        };
+        if k_lo >= floor {
+            break (a_top, b_top, depth, k_lo);
+        }
+        let raised = k + (floor - k_lo);
+        if !may_move || raised > top_limit {
+            dropped(outcome);
+            return None;
+        }
+        k = raised;
+        moved = true;
+    };
+    if moved {
+        let plane_holds = plane_between(grid, a_cell_top, b_cell_top).is_some_and(|plane| {
+            let ties = state.ties.get(a as usize).map_or(&[][..], Vec::as_slice);
+            new_plane_holds(ties, k, plane, run.sway_deg)
+        });
+        if k_lo >= run.k_top || !plane_holds {
+            dropped(outcome);
+            return None;
+        }
+    }
     if bands
         .get(&(a.min(b), a.max(b)))
         .is_some_and(|standing| standing.iter().any(|&(lo, top)| lo <= k && k_lo <= top))
@@ -3051,6 +3239,9 @@ fn plan_cross(
                 return None;
             }
         }
+    }
+    if moved {
+        outcome.brace_bands_moved_above_flare += 1;
     }
     Some(CrossPlan {
         a,
@@ -3441,5 +3632,177 @@ mod tests {
                 disc(&state, id)
             );
         }
+    }
+
+    /// The lowest layer on the free shaft of an 80-layer (4.0 mm) plate post
+    /// at 0.05 mm layers, HAND-DERIVED from the registered numbers: the raft
+    /// is 0.2 mm, the run above it 3.8 mm, so the boss rises
+    /// `max(0.5 − 0.2, min(FLARE_LEN_MM 1.5, 3.8 / 2)) = 1.5` mm over the raft
+    /// to 1.7 mm, which is layer 34's plane; the first layer strictly above it
+    /// is 35.
+    const FREE_SHAFT_FLOOR_OF_A_4_MM_POST: usize = 35;
+
+    /// FREE SHAFT (fix/brace-not-in-flare, 2026-09-30): the floor the lane
+    /// reads is the lowering's own boss top, and it is the hand-derived one.
+    #[test]
+    fn the_free_shaft_of_a_plate_post_starts_above_its_boss_top() {
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let post = plate_post(&grid, 0, 100, 0.2);
+        let floors = super::free_shaft_floors(&[post], 0.05);
+        assert_eq!(floors, vec![FREE_SHAFT_FLOOR_OF_A_4_MM_POST]);
+    }
+
+    /// FREE SHAFT: a brace end inside a post's root flare is NOT a tie: the
+    /// post's runs are cut where the same brace lands on its free shaft, and
+    /// are not cut where it lands inside the flare.
+    #[test]
+    fn a_brace_end_inside_a_root_flare_is_not_credited_as_a_tie() {
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let law = law();
+        let cuts_at = |landing_layer: usize| {
+            let mut struts = vec![
+                plate_post(&grid, 0, 100, 0.2),
+                plate_post(&grid, 1, 120, 0.2),
+            ];
+            let (seat, base) = (struts[0].cell, struts[1].cell);
+            super::push_brace(
+                &grid,
+                &mut struts,
+                seat,
+                60,
+                landing_layer,
+                crate::Landing::Strut {
+                    id: 1,
+                    layer: landing_layer,
+                },
+                0,
+                0.1,
+                vec![u32::try_from(base).expect("a cell index")],
+            );
+            super::unbraced_runs(&grid, &struts, 0.05, &law)
+                .iter()
+                .filter(|run| run.strut_id == 1)
+                .any(|run| run.k_lo == landing_layer || run.k_top == landing_layer)
+        };
+        assert!(
+            cuts_at(FREE_SHAFT_FLOOR_OF_A_4_MM_POST + 5),
+            "anti-vacuity: a brace landing on the free shaft must cut the post's run"
+        );
+        assert!(
+            !cuts_at(20),
+            "a brace landing at layer 20 (1.0 mm), inside the 1.7 mm flare, cut the post's run"
+        );
+        assert!(
+            !cuts_at(FREE_SHAFT_FLOOR_OF_A_4_MM_POST - 1),
+            "a brace landing on the boss top's own layer cut the post's run"
+        );
+    }
+
+    /// FREE SHAFT: a band whose bottom would fall inside a flare moves up by
+    /// the shortfall and is built with its bottom on the first free-shaft
+    /// layer; where it may not move it is dropped; a band already clear is
+    /// untouched. Two vertical 4.0 mm posts 1.0 mm apart.
+    #[test]
+    fn a_band_whose_bottom_falls_in_a_flare_moves_up_or_is_dropped() {
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let history = crate::up_sweep::ColumnHistory::new(&grid);
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(0.05, 45.0, 25.0);
+        let law = law();
+        let context = super::SlendernessContext {
+            grid: &grid,
+            history: &history,
+            keep_out: &keep_out,
+            lean: &lean,
+            law: &law,
+            layer_height_mm: 0.05,
+            layers: 100,
+            flare_factor: 1.6,
+            mast_root_clearance: true,
+            final_clearance_mm: 0.3,
+            member_clearance: true,
+            shaft_landings: true,
+            merge: true,
+            brace: true,
+            thicken: true,
+            mast: true,
+            max_struts: 1_000,
+            x_allowed: 12.0,
+        };
+        let struts = vec![
+            plate_post(&grid, 0, 100, 0.2),
+            plate_post(&grid, 1, 120, 0.2),
+        ];
+        let state = super::TieState::build(&context, &struts);
+        let run = UnbracedRun {
+            strut_id: 0,
+            k_lo: 0,
+            k_top: 80,
+            length_mm: 4.0,
+            radius_mm: 0.2,
+            limit_mm: 10.0,
+            sway_deg: None,
+        };
+        let depth = lean.layers_to_reach(1.0);
+        let low = 40;
+        assert!(
+            low - depth < FREE_SHAFT_FLOOR_OF_A_4_MM_POST,
+            "anti-vacuity: a band topped at {low} is {depth} layers deep and must dip into the flare"
+        );
+
+        let mut outcome = super::SlendernessOutcome::default();
+        let plan = super::plan_cross(
+            &context,
+            &state,
+            &struts,
+            0,
+            1,
+            low,
+            &run,
+            true,
+            &mut outcome,
+        )
+        .expect("the band moves up and is built");
+        assert_eq!(plan.k_lo, FREE_SHAFT_FLOOR_OF_A_4_MM_POST, "{plan:?}");
+        assert_eq!(plan.k, FREE_SHAFT_FLOOR_OF_A_4_MM_POST + depth, "{plan:?}");
+        assert_eq!(outcome.brace_bands_moved_above_flare, 1);
+        assert_eq!(outcome.brace_bands_dropped_in_flare, 0);
+
+        let mut outcome = super::SlendernessOutcome::default();
+        assert!(
+            super::plan_cross(
+                &context,
+                &state,
+                &struts,
+                0,
+                1,
+                low,
+                &run,
+                false,
+                &mut outcome
+            )
+            .is_none(),
+            "a band held to its layer may not move, and is dropped"
+        );
+        assert_eq!(outcome.brace_bands_dropped_in_flare, 1);
+        assert_eq!(outcome.brace_bands_moved_above_flare, 0);
+
+        let high = FREE_SHAFT_FLOOR_OF_A_4_MM_POST + depth + 3;
+        let mut outcome = super::SlendernessOutcome::default();
+        let plan = super::plan_cross(
+            &context,
+            &state,
+            &struts,
+            0,
+            1,
+            high,
+            &run,
+            true,
+            &mut outcome,
+        )
+        .expect("a band already on the free shafts is built where it was planned");
+        assert_eq!((plan.k, plan.k_lo), (high, high - depth));
+        assert_eq!(outcome.brace_bands_moved_above_flare, 0);
+        assert_eq!(outcome.brace_bands_dropped_in_flare, 0);
     }
 }

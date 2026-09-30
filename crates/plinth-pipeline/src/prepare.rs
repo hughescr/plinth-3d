@@ -3005,6 +3005,13 @@ fn print_sweep_disclosure(
         lane.crosses_at_an_existing_tie_layer,
         lane.thicken_over_existing_lap,
     );
+    // FREE SHAFT (fix/brace-not-in-flare, 2026-09-30): bands whose bottom fell
+    // inside a root flare or the raft. Path-hit witnesses.
+    println!(
+        "[sweep {model}] free shaft: {} brace bands moved up out of a root flare or the raft, \
+         {} dropped",
+        lane.brace_bands_moved_above_flare, lane.brace_bands_dropped_in_flare,
+    );
     for warning in lane.warnings.iter().take(20) {
         println!(
             "[sweep {model}]   unbraced_run_over_limit: arm {} layers {}..{} runs {:.3} mm \
