@@ -231,8 +231,12 @@ every native file: the foot reaches 0.002 mm into its pad). A pad is the native
 covers the foot (owner ruling 2026-09-29: grow the pad, never cap the foot). Bridges
 stay the native 2.2 mm wide. **Every type-6 record, legacy and sweep, now writes
 start/end `z = 0.0`**, as every native file does, while its mesh stays on the plate
-in the model-centred frame; the emitter's disk audit requires that `z` exactly and
-bounds the mesh only. `tools/plinth-audit` reads a type-6 record at `z = 0.0` as
+in the model-centred frame; the emitter's disk audit checks that `z` exactly and
+bounds the mesh only. **The disk audit warns; it refuses only a file that cannot be
+read back** (fix/round100-emit, 2026-09-29): a failed check on a file that reopens is an
+`AuditFinding` (check, record, value) on the emitted file's report and a `WARNING disk
+audit` line in the log, and the file stays at its target; a file the reader cannot
+decode is kept as `<target>.failed-audit` and the model exits 4 naming the check. `tools/plinth-audit` reads a type-6 record at `z = 0.0` as
 standing on the plate (`Primitive::in_raft_frame`). These are serialization contracts only;
 the 400-byte group header and registry fields remain preserved from the evidenced
 corpus rather than inferred from these records.

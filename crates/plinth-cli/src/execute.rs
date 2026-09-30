@@ -396,6 +396,19 @@ fn print_model(model: &ModelPreparationReport) {
                 emit.support_record_count,
                 emit.artifact_bytes
             );
+            // EMIT AND WARN (fix/round100-emit, 2026-09-29): a file that reads
+            // back but fails a disk-audit check is kept, and every failed check
+            // is named here: which check, which record, what value.
+            if !emit.audit_findings.is_empty() {
+                println!(
+                    "  WARNING disk audit  the reopened file FAILED {} check(s); it is kept as \
+                     evidence",
+                    emit.audit_findings.len()
+                );
+                for finding in &emit.audit_findings {
+                    println!("  WARNING disk audit  {finding}");
+                }
+            }
             // Disclosure half of the pre-write gate's #1 review finding: this
             // file was written after only some of the twelve named safety
             // checks actually ran, because most have no Rust implementation

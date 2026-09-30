@@ -26,4 +26,5 @@ mod no_private_vector_algebra;
 mod plate_contact;
 mod prepare_folder;
 mod repair_prepass;
+mod round100_emit;
 mod tip_trim;

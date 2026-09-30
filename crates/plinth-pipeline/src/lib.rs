@@ -517,7 +517,9 @@ pub enum ModelPreparationOutcome {
     /// engine takes deliberately — and a loss taken deliberately has to be
     /// stated.
     Artifact {
-        emit: EmitReport,
+        // Boxed (clippy::large_enum_variant) since the report carries the
+        // disk audit's findings (fix/round100-emit, 2026-09-29).
+        emit: Box<EmitReport>,
         geometry: prepare::SupportedGeometry,
         hollow_disposition: HollowDisposition,
         // Boxed (clippy::large_enum_variant): this variant carries several
@@ -1795,12 +1797,13 @@ mod tests {
                     repair: None,
                     orientation: None,
                     outcome: ModelPreparationOutcome::Artifact {
-                        emit: EmitReport {
+                        emit: Box::new(EmitReport {
                             artifact_path: PathBuf::from("out/mini-a.chitubox"),
                             support_record_count: 4,
                             artifact_bytes: 2048,
                             seat_trim: Box::default(),
-                        },
+                            audit_findings: Vec::new(),
+                        }),
                         geometry: SupportedGeometry::DrilledShellSealed,
                         hollow_disposition: HollowDisposition::HollowedAndDrilled,
                         cavity_repair: None,
@@ -1893,12 +1896,13 @@ mod tests {
                 model(
                     "emitted",
                     ModelPreparationOutcome::Artifact {
-                        emit: EmitReport {
+                        emit: Box::new(EmitReport {
                             artifact_path: PathBuf::from("out/emitted.chitubox"),
                             support_record_count: 1,
                             artifact_bytes: 1,
                             seat_trim: Box::default(),
-                        },
+                            audit_findings: Vec::new(),
+                        }),
                         geometry: SupportedGeometry::DrilledShellSealed,
                         hollow_disposition: HollowDisposition::HollowedAndDrilled,
                         cavity_repair: None,

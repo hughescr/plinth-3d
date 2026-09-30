@@ -1375,8 +1375,10 @@ pub struct GatedEmission {
 ///   measured, before any write.
 /// - [`PipelineError::Lowering`] (exit code 5) when lowering the passed
 ///   authority fails.
-/// - [`PipelineError::Emit`] (exit code 4) when the write or its disk audit
-///   fails.
+/// - [`PipelineError::Emit`] (exit code 4) when the write fails or the written
+///   file cannot be read back (its bytes are kept beside the target; a file
+///   that reads back but fails another audit check is EMITTED, with the
+///   findings on its report).
 pub fn judge_then_emit(
     model: &ModelId,
     authority: FinalSupportAuthority<'_>,

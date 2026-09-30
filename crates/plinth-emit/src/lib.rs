@@ -45,6 +45,104 @@ pub struct EmitReport {
     /// stays small inside the per-model outcome enum.
     #[serde(default)]
     pub seat_trim: Box<SeatTrimReport>,
+    /// **What the post-write disk audit found wrong with a file that reads
+    /// back** (fix/round100-emit, 2026-09-29). EMIT AND WARN, NEVER REFUSE
+    /// (Craig, 2026-09-01): a failed check is a WARNING on the emitted file,
+    /// which stays at `artifact_path` as evidence. Empty when every check
+    /// passed. Only a file that cannot be read back at all fails the write
+    /// ([`EmitError::DiskAuditUnreadable`]).
+    #[serde(default)]
+    pub audit_findings: Vec<AuditFinding>,
+}
+
+/// One failed check of the post-write disk audit: WHICH check, WHICH record,
+/// and WHAT value failed against what expectation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditFinding {
+    pub check: AuditCheck,
+    /// The 0-based support record in the file the check failed on (the first
+    /// one, when `failing` is more than 1). `None` when the check is about the
+    /// file or the model, or when the model mesh itself holds the value.
+    pub record: Option<usize>,
+    /// How many records (or values) failed this check. `record` and `detail`
+    /// name the first of them; a build-volume finding names the extreme.
+    pub failing: usize,
+    /// The failing value and what it was checked against, in numbers.
+    pub detail: String,
+}
+
+impl std::fmt::Display for AuditFinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "check {:?}", self.check)?;
+        match self.record {
+            Some(record) => write!(formatter, ", record {record}")?,
+            None => write!(formatter, ", no single record")?,
+        }
+        if self.failing > 1 {
+            write!(formatter, " (first of {} failing)", self.failing)?;
+        }
+        write!(formatter, ": {}", self.detail)
+    }
+}
+
+/// The checks of the post-write disk audit, by name. The first six make a
+/// file UNREADABLE (it cannot be decoded back); the rest are findings on a
+/// file that reads back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AuditCheck {
+    /// `Project::open` refused the bytes.
+    Reopen,
+    /// The file does not hold exactly one model.
+    ModelCount,
+    /// The model's header could not be decoded.
+    ModelRead,
+    /// The model's triangles could not be decoded.
+    ModelTrianglesRead,
+    /// The support records could not be decoded.
+    SupportsRead,
+    /// The file's size could not be read after the audit.
+    ArtifactMetadata,
+    /// The model's name or placement differs from what was written.
+    ModelNameOrPlacement,
+    /// The model's triangles differ, bit for bit, from what was written.
+    ModelTriangleBits,
+    /// A support record differs, bit for bit, from what was written.
+    SupportRecordBits,
+    /// The file holds a different number of records than primitives written.
+    RecordPrimitiveCount,
+    /// A sphere record's native fields differ from those derived from its
+    /// primitive's authority.
+    SphereRecordFields,
+    /// The model has no finite lowest point.
+    ModelMinimumZ,
+    /// The reopened lift and plate do not describe the planned frame.
+    PlateFrame,
+    /// A record carries a non-finite end point or radius.
+    NonFiniteRecord,
+    /// A record's (or the model's) mesh is empty, ragged or non-finite.
+    MeshShape,
+    /// A raft pad or bridge carries an end point z other than the native 0.0.
+    RaftRecordFrame,
+    /// Geometry lies outside the printer's build volume (below the plate,
+    /// above the height, or beyond an X/Y half-width, or spans too far).
+    BuildVolume,
+}
+
+impl AuditCheck {
+    /// Whether a failure of this check means the file cannot be read back.
+    #[must_use]
+    pub fn makes_the_file_unreadable(self) -> bool {
+        matches!(
+            self,
+            Self::Reopen
+                | Self::ModelCount
+                | Self::ModelRead
+                | Self::ModelTrianglesRead
+                | Self::SupportsRead
+                | Self::ArtifactMetadata
+        )
+    }
 }
 
 /// **THE SEAT TRIM, as the emitter carried it out** (fix/tip-trim, 2026-09-28).
@@ -98,8 +196,21 @@ pub enum EmitError {
     TargetUnavailable { path: PathBuf },
     #[error("ChituBox record encoding rejected the supported scene")]
     RecordEncodingRejected,
-    #[error("the freshly reopened ChituBox artifact failed its disk audit")]
-    DiskAuditRejected,
+    /// The freshly written file could not be READ BACK: our own reader could
+    /// not open it, find its one model, or decode its triangles or records.
+    /// This is the only audit outcome that fails the write, and even then the
+    /// bytes are kept, at `kept_at`, beside the target (never AT the target,
+    /// which only ever holds a file that reads back). Every other audit
+    /// finding is a WARNING on an emitted file: [`EmitReport::audit_findings`].
+    #[error(
+        "the freshly reopened ChituBox artifact could not be read back ({finding}); its bytes \
+         are kept at {}",
+        kept_at.display()
+    )]
+    DiskAuditUnreadable {
+        finding: AuditFinding,
+        kept_at: PathBuf,
+    },
     /// The rename onto `target_path` itself succeeded and its bytes are
     /// correct, but the directory sync that makes that rename survive a
     /// power loss could not be confirmed. Unlike every other variant, this
@@ -117,13 +228,22 @@ pub enum EmitError {
 /// assigned to the ChituBox model placement exactly once; support vertices remain in their
 /// model-local frame, where that placement applies to the complete assembly.
 ///
-/// **A refused write leaves no path at `target_path`.**  The project is saved to a sibling
-/// staging path and reaches `target_path` only by a rename performed *after* the disk audit
-/// has accepted it, so an audit rejection cannot hand anyone the file it just refused.  On
-/// every failure path *up to and including that rename* the staging file is removed and so
-/// is `target_path` itself, which is what makes the invariant hold for a *stale* artifact
-/// left by an earlier run: a caller that asks for this file and is refused is left with no
-/// file, not with last week's.
+/// **The disk audit warns; it refuses only a file that cannot be read back**
+/// (fix/round100-emit, 2026-09-29; EMIT AND WARN, NEVER REFUSE, Craig 2026-09-01). The
+/// project is saved to a sibling staging path and audited there.
+/// - A file that reads back reaches `target_path` by a rename, whatever the other checks
+///   found. Each failed check is an [`AuditFinding`] in [`EmitReport::audit_findings`]: the
+///   check, the record and the value. The file is the diagnostic evidence; deleting it would
+///   destroy it.
+/// - A file that cannot be read back ([`AuditCheck::makes_the_file_unreadable`]) never
+///   reaches `target_path`, which only ever holds a file that reads back. Its bytes are KEPT
+///   at [`failed_audit_path`] beside the target, and [`EmitError::DiskAuditUnreadable`]
+///   names the check and that path.
+///
+/// **A failed write leaves no stale artifact at `target_path`.** On every failure path *up
+/// to and including the rename* `target_path` is removed, which is what keeps an artifact
+/// an earlier run left there from passing for this run's answer. A stale `.failed-audit`
+/// sibling from an earlier run is removed at the start, for the same reason.
 ///
 /// **Durability of the accepted name.**  `chitubox_io::Project::save` (used by
 /// `write_staged`) fsyncs its bytes before its own rename and then fsyncs the directory that
@@ -144,20 +264,36 @@ pub enum EmitError {
 ///   directory sync that makes it survive a crash could not be confirmed. `target_path`
 ///   holds the correct artifact regardless.
 /// - [`EmitError::RecordEncodingRejected`] if the scene does not convert to wire records.
-/// - [`EmitError::DiskAuditRejected`] if the freshly reopened staging file fails its audit.
+/// - [`EmitError::DiskAuditUnreadable`] if the freshly written file cannot be read back. Its
+///   bytes are kept at [`failed_audit_path`].
 pub fn write(model: &SupportedModel, request: &EmitRequest) -> Result<EmitReport, EmitError> {
     validate_target(&request.target_path)?;
     let staging = staging_path(&request.target_path);
-    // A leftover staging file from a killed run is not evidence about this one.
+    let failed_audit = failed_audit_path(&request.target_path);
+    // A leftover staging file from a killed run, or an earlier run's kept
+    // unreadable bytes, is not evidence about this one.
     let _ = std::fs::remove_file(&staging);
+    let _ = std::fs::remove_file(&failed_audit);
 
-    match write_staged(model, request, &staging) {
+    let staged = write_staged(model, request, &staging);
+    settle_staged(&staging, &request.target_path, staged)
+}
+
+/// What [`write`] does with the staging file once the audit has spoken: a
+/// file that reads back is renamed onto `target`; an unreadable one is kept
+/// at [`failed_audit_path`]; any other failure removes both.
+fn settle_staged(
+    staging: &Path,
+    target: &Path,
+    staged: Result<EmitReport, EmitError>,
+) -> Result<EmitReport, EmitError> {
+    match staged {
         Ok(mut report) => {
-            if std::fs::rename(&staging, &request.target_path).is_err() {
-                let _ = std::fs::remove_file(&staging);
-                let _ = std::fs::remove_file(&request.target_path);
+            if std::fs::rename(staging, target).is_err() {
+                let _ = std::fs::remove_file(staging);
+                let _ = std::fs::remove_file(target);
                 return Err(EmitError::TargetUnavailable {
-                    path: request.target_path.clone(),
+                    path: target.to_path_buf(),
                 });
             }
             // See "Durability of the accepted name" above: this rename can
@@ -166,17 +302,30 @@ pub fn write(model: &SupportedModel, request: &EmitRequest) -> Result<EmitReport
             // crash right after this point could leave `target_path`
             // absent or pointing at the previous artifact even though the
             // rename syscall itself succeeded.
-            if sync_dir(&request.target_path).is_err() {
+            if sync_dir(target).is_err() {
                 return Err(EmitError::DurabilitySyncFailed {
-                    path: request.target_path.clone(),
+                    path: target.to_path_buf(),
                 });
             }
-            report.artifact_path = request.target_path.clone();
+            report.artifact_path = target.to_path_buf();
             Ok(report)
         }
+        Err(EmitError::DiskAuditUnreadable { finding, .. }) => {
+            // Keep the bytes: they are the only evidence of what the writer
+            // produced. Never AT the target, which holds only a file that reads
+            // back; beside it. If even the rename fails they stay at staging.
+            let _ = std::fs::remove_file(target);
+            let failed_audit = failed_audit_path(target);
+            let kept_at = if std::fs::rename(staging, &failed_audit).is_ok() {
+                failed_audit
+            } else {
+                staging.to_path_buf()
+            };
+            Err(EmitError::DiskAuditUnreadable { finding, kept_at })
+        }
         Err(error) => {
-            let _ = std::fs::remove_file(&staging);
-            let _ = std::fs::remove_file(&request.target_path);
+            let _ = std::fs::remove_file(staging);
+            let _ = std::fs::remove_file(target);
             Err(error)
         }
     }
@@ -203,6 +352,19 @@ fn staging_path(target: &Path) -> PathBuf {
         .map(std::ffi::OsString::from)
         .unwrap_or_default();
     name.push(STAGING_SUFFIX);
+    target.with_file_name(name)
+}
+
+/// Where [`write`] keeps the bytes of a file that could not be read back:
+/// `<target>.failed-audit`, beside the target and never at it.
+#[must_use]
+pub fn failed_audit_path(target: &Path) -> PathBuf {
+    const FAILED_AUDIT_SUFFIX: &str = ".failed-audit";
+    let mut name = target
+        .file_name()
+        .map(std::ffi::OsString::from)
+        .unwrap_or_default();
+    name.push(FAILED_AUDIT_SUFFIX);
     target.with_file_name(name)
 }
 
@@ -284,7 +446,11 @@ fn write_staged(
             primitives: &written,
             model_center: center,
         },
-    )?;
+    )
+    .map_err(|finding| EmitError::DiskAuditUnreadable {
+        finding,
+        kept_at: staging.to_path_buf(),
+    })?;
     report.seat_trim = Box::new(seat_trim);
     Ok(report)
 }
@@ -311,52 +477,128 @@ fn audit_disk(
     path: &Path,
     printer: &PrinterProfile,
     expected: AuditExpected<'_>,
-) -> Result<EmitReport, EmitError> {
-    let project = Project::open(path).map_err(|_| EmitError::DiskAuditRejected)?;
+) -> Result<EmitReport, AuditFinding> {
+    // UNREADABLE: the file cannot be decoded back. Only these fail the write.
+    let unreadable = |check: AuditCheck, detail: String| AuditFinding {
+        check,
+        record: None,
+        failing: 1,
+        detail,
+    };
+    let project = Project::open(path)
+        .map_err(|error| unreadable(AuditCheck::Reopen, format!("open refused: {error:?}")))?;
     if project.model_count() != 1 {
-        return Err(EmitError::DiskAuditRejected);
+        return Err(unreadable(
+            AuditCheck::ModelCount,
+            format!("{} models, 1 written", project.model_count()),
+        ));
     }
-    let info = project.model(0).map_err(|_| EmitError::DiskAuditRejected)?;
-    if info.name != MODEL_NAME
-        || !same_placement_bits(
-            info.placement,
-            Placement {
-                x: 0.0,
-                y: 0.0,
-                z_lift: expected.lift,
-            },
-        )
-    {
-        return Err(EmitError::DiskAuditRejected);
-    }
+    let info = project
+        .model(0)
+        .map_err(|error| unreadable(AuditCheck::ModelRead, format!("{error:?}")))?;
     let model_triangles = project
         .model_triangles(0)
-        .map_err(|_| EmitError::DiskAuditRejected)?;
-    if !same_f32_slice_bits(&model_triangles, &expected.model.xyz) {
-        return Err(EmitError::DiskAuditRejected);
-    }
+        .map_err(|error| unreadable(AuditCheck::ModelTrianglesRead, format!("{error:?}")))?;
     let records = project
         .supports(0)
-        .map_err(|_| EmitError::DiskAuditRejected)?;
-    if !same_support_records_bits(&records, expected.records) {
-        return Err(EmitError::DiskAuditRejected);
+        .map_err(|error| unreadable(AuditCheck::SupportsRead, format!("{error:?}")))?;
+
+    // READABLE: every other check is a WARNING on the emitted file.
+    let mut findings = Findings::default();
+    let written_placement = Placement {
+        x: 0.0,
+        y: 0.0,
+        z_lift: expected.lift,
+    };
+    if info.name != MODEL_NAME || !same_placement_bits(info.placement, written_placement) {
+        findings.fail(
+            AuditCheck::ModelNameOrPlacement,
+            None,
+            format!(
+                "read name {:?} placement {:?}, wrote name {MODEL_NAME:?} placement {:?}",
+                info.name, info.placement, written_placement
+            ),
+        );
+    }
+    if let Some(index) = first_differing_f32(&model_triangles, &expected.model.xyz) {
+        findings.fail(
+            AuditCheck::ModelTriangleBits,
+            None,
+            format!(
+                "model coordinate {index} differs (read {} values, wrote {})",
+                model_triangles.len(),
+                expected.model.xyz.len()
+            ),
+        );
+    }
+    if records.len() != expected.records.len() {
+        findings.fail(
+            AuditCheck::SupportRecordBits,
+            None,
+            format!(
+                "read {} records, wrote {}",
+                records.len(),
+                expected.records.len()
+            ),
+        );
+    }
+    for (index, (actual, wrote)) in records.iter().zip(expected.records).enumerate() {
+        if let Some(field) = differing_record_field(actual, wrote) {
+            findings.fail(
+                AuditCheck::SupportRecordBits,
+                Some(index),
+                format!("field {field} differs from the record written"),
+            );
+        }
     }
     if records.len() != expected.primitives.len() {
-        return Err(EmitError::DiskAuditRejected);
+        findings.fail(
+            AuditCheck::RecordPrimitiveCount,
+            None,
+            format!(
+                "{} records, {} primitives written",
+                records.len(),
+                expected.primitives.len()
+            ),
+        );
     }
-    for (record, primitive) in records.iter().zip(expected.primitives) {
-        audit_sphere_record_fields(record, primitive, expected.model_center)?;
+    for (index, (record, primitive)) in records.iter().zip(expected.primitives).enumerate() {
+        if let Err(detail) = audit_sphere_record_fields(record, primitive, expected.model_center) {
+            findings.fail(AuditCheck::SphereRecordFields, Some(index), detail);
+        }
     }
 
-    let model_local_min_z = min_z(&model_triangles)?;
-    // This is the physical frame invariant frozen by the Python emitter:
-    // centring moves the model and the planned plate together, while the sole
-    // placement lift separates their local Z values by exactly `lift_mm`.
-    let reopened_plate_z = model_local_min_z - info.placement.z_lift;
-    if !same_f32_frame_value(reopened_plate_z, expected.plate_z)
-        || !same_f32_frame_value(model_local_min_z - reopened_plate_z, info.placement.z_lift)
-    {
-        return Err(EmitError::DiskAuditRejected);
+    match min_z(&model_triangles) {
+        None => findings.fail(
+            AuditCheck::ModelMinimumZ,
+            None,
+            format!(
+                "no finite lowest point in {} model values",
+                model_triangles.len()
+            ),
+        ),
+        Some(model_local_min_z) => {
+            // This is the physical frame invariant frozen by the Python emitter:
+            // centring moves the model and the planned plate together, while the sole
+            // placement lift separates their local Z values by exactly `lift_mm`.
+            let reopened_plate_z = model_local_min_z - info.placement.z_lift;
+            if !same_f32_frame_value(reopened_plate_z, expected.plate_z)
+                || !same_f32_frame_value(
+                    model_local_min_z - reopened_plate_z,
+                    info.placement.z_lift,
+                )
+            {
+                findings.fail(
+                    AuditCheck::PlateFrame,
+                    None,
+                    format!(
+                        "reopened plate z {reopened_plate_z} (model minimum {model_local_min_z} \
+                         minus lift {}) against the planned plate z {}",
+                        info.placement.z_lift, expected.plate_z
+                    ),
+                );
+            }
+        }
     }
 
     // The world datum is `expected.plate_z` -- the one binary32 the raft pads
@@ -373,8 +615,15 @@ fn audit_disk(
     // hide a genuinely wrong plate or a second lift.
     let plate_datum = expected.plate_z;
     let mut bounds = WorldBounds::empty();
-    bounds.extend_f32(&model_triangles, info.placement, plate_datum)?;
-    for record in &records {
+    if let Err(detail) = bounds.extend_f32(
+        &model_triangles,
+        info.placement,
+        plate_datum,
+        GeometrySource::Model,
+    ) {
+        findings.fail(AuditCheck::MeshShape, None, format!("model mesh: {detail}"));
+    }
+    for (index, record) in records.iter().enumerate() {
         if !record.r_start.is_finite()
             || !record.r_end.is_finite()
             || !record
@@ -383,9 +632,28 @@ fn audit_disk(
                 .chain(record.end.iter())
                 .all(|value| value.is_finite())
         {
-            return Err(EmitError::DiskAuditRejected);
+            findings.fail(
+                AuditCheck::NonFiniteRecord,
+                Some(index),
+                format!(
+                    "start {:?} end {:?} r_start {} r_end {}",
+                    record.start, record.end, record.r_start, record.r_end
+                ),
+            );
+            continue;
         }
-        bounds.extend_f32(&record.mesh.xyz, info.placement, plate_datum)?;
+        if let Err(detail) = bounds.extend_f32(
+            &record.mesh.xyz,
+            info.placement,
+            plate_datum,
+            GeometrySource::Record(index),
+        ) {
+            findings.fail(
+                AuditCheck::MeshShape,
+                Some(index),
+                format!("record mesh: {detail}"),
+            );
+        }
         if record.segment_type == SegmentType::PAD_OR_BRIDGE {
             // A raft record's end points are in the NATIVE raft frame: z is
             // exactly 0.0, not a model-frame height (`encode_record`), so they
@@ -394,24 +662,117 @@ fn audit_disk(
             if record.start[2].to_bits() != 0.0_f32.to_bits()
                 || record.end[2].to_bits() != 0.0_f32.to_bits()
             {
-                return Err(EmitError::DiskAuditRejected);
+                findings.fail(
+                    AuditCheck::RaftRecordFrame,
+                    Some(index),
+                    format!(
+                        "raft end point z {} and {}, native 0.0",
+                        record.start[2], record.end[2]
+                    ),
+                );
             }
             continue;
         }
-        bounds.extend_point(record.start, info.placement, plate_datum)?;
-        bounds.extend_point(record.end, info.placement, plate_datum)?;
+        bounds.extend_point(
+            record.start,
+            info.placement,
+            plate_datum,
+            GeometrySource::Record(index),
+        );
+        bounds.extend_point(
+            record.end,
+            info.placement,
+            plate_datum,
+            GeometrySource::Record(index),
+        );
     }
-    bounds.validate_against(printer)?;
+    for finding in bounds.violations(printer) {
+        findings.push(finding);
+    }
 
     let artifact_bytes = std::fs::metadata(path)
-        .map_err(|_| EmitError::DiskAuditRejected)?
+        .map_err(|error| unreadable(AuditCheck::ArtifactMetadata, format!("{error:?}")))?
         .len();
     Ok(EmitReport {
         artifact_path: path.to_path_buf(),
         support_record_count: records.len(),
         artifact_bytes,
         seat_trim: Box::default(),
+        audit_findings: findings.into_vec(),
     })
+}
+
+/// The audit's findings, ONE per check for per-record checks: the first
+/// failing record and value are kept, and every further failure of the same
+/// check only counts. Aggregate findings (the build volume's sides) are
+/// pushed whole.
+#[derive(Default)]
+struct Findings(Vec<AuditFinding>);
+
+impl Findings {
+    fn fail(&mut self, check: AuditCheck, record: Option<usize>, detail: String) {
+        if let Some(existing) = self.0.iter_mut().find(|finding| finding.check == check) {
+            existing.failing += 1;
+            return;
+        }
+        self.0.push(AuditFinding {
+            check,
+            record,
+            failing: 1,
+            detail,
+        });
+    }
+
+    fn push(&mut self, finding: AuditFinding) {
+        self.0.push(finding);
+    }
+
+    fn into_vec(self) -> Vec<AuditFinding> {
+        self.0
+    }
+}
+
+fn first_differing_f32(actual: &[f32], expected: &[f32]) -> Option<usize> {
+    if let Some(index) = actual
+        .iter()
+        .zip(expected)
+        .position(|(actual, expected)| !same_f32_bits(*actual, *expected))
+    {
+        return Some(index);
+    }
+    (actual.len() != expected.len()).then_some(actual.len().min(expected.len()))
+}
+
+/// The first field (by name) in which a reopened record differs, bit for bit,
+/// from the record written; `None` when they are identical.
+fn differing_record_field(
+    actual: &SupportRecord,
+    expected: &SupportRecord,
+) -> Option<&'static str> {
+    if actual.segment_type != expected.segment_type {
+        return Some("segment_type");
+    }
+    if !same_f32_slice_bits(&actual.start, &expected.start) {
+        return Some("start");
+    }
+    if !same_f32_slice_bits(&actual.end, &expected.end) {
+        return Some("end");
+    }
+    if !same_f32_bits(actual.r_start, expected.r_start) {
+        return Some("r_start");
+    }
+    if !same_f32_bits(actual.r_end, expected.r_end) {
+        return Some("r_end");
+    }
+    if !same_f32_slice_bits(&actual.mesh.xyz, &expected.mesh.xyz) {
+        return Some("mesh");
+    }
+    // This covers type-1's depth and every other f32-bearing trailing field
+    // without assuming unwritten bytes are zero.
+    if actual.trailing != expected.trailing {
+        return Some("trailing");
+    }
+    None
 }
 
 /// Independent verifier for the native sphere-record field projection.  Keep
@@ -422,14 +783,17 @@ fn audit_sphere_record_fields(
     record: &SupportRecord,
     primitive: &SupportPrimitive,
     model_center: [f64; 3],
-) -> Result<(), EmitError> {
+) -> Result<(), String> {
     let Some(sphere) = &primitive.sphere_geometry else {
         return Ok(());
     };
     let radius = primitive.start_radius_mm.get();
     let (start, end) = if let Some((center_mm, outward_axis_unit)) = sphere.tip_authority() {
         if primitive.segment_kind != SupportSegmentKind::ContactSphere {
-            return Err(EmitError::DiskAuditRejected);
+            return Err(format!(
+                "tip sphere authority on a {:?} primitive",
+                primitive.segment_kind
+            ));
         }
         let center = finite_point(center_mm);
         let axis = finite_point(outward_axis_unit);
@@ -439,7 +803,10 @@ fn audit_sphere_record_fields(
         )
     } else if let Some(center_mm) = sphere.joint_center() {
         if primitive.segment_kind != SupportSegmentKind::JointSphere {
-            return Err(EmitError::DiskAuditRejected);
+            return Err(format!(
+                "joint sphere authority on a {:?} primitive",
+                primitive.segment_kind
+            ));
         }
         let center = finite_point(center_mm);
         (
@@ -447,17 +814,22 @@ fn audit_sphere_record_fields(
             [center[0], center[1], center[2] - radius],
         )
     } else {
-        return Err(EmitError::DiskAuditRejected);
+        return Err("sphere geometry with neither tip nor joint authority".to_owned());
     };
-    let expected_start = point_f32(sub_center(start, model_center))?;
-    let expected_end = point_f32(sub_center(end, model_center))?;
-    let expected_radius = f32_of(radius)?;
+    let not_finite = |_| "sphere authority is not finite in binary32".to_owned();
+    let expected_start = point_f32(sub_center(start, model_center)).map_err(not_finite)?;
+    let expected_end = point_f32(sub_center(end, model_center)).map_err(not_finite)?;
+    let expected_radius = f32_of(radius).map_err(not_finite)?;
     if !same_f32_slice_bits(&record.start, &expected_start)
         || !same_f32_slice_bits(&record.end, &expected_end)
         || !same_f32_bits(record.r_start, expected_radius)
         || !same_f32_bits(record.r_end, expected_radius)
     {
-        return Err(EmitError::DiskAuditRejected);
+        return Err(format!(
+            "record start {:?} end {:?} r {} / {}, authority start {expected_start:?} end \
+             {expected_end:?} r {expected_radius}",
+            record.start, record.end, record.r_start, record.r_end
+        ));
     }
     Ok(())
 }
@@ -483,59 +855,78 @@ fn same_placement_bits(actual: Placement, expected: Placement) -> bool {
         && same_f32_bits(actual.z_lift, expected.z_lift)
 }
 
-fn same_support_records_bits(actual: &[SupportRecord], expected: &[SupportRecord]) -> bool {
-    actual.len() == expected.len()
-        && actual.iter().zip(expected).all(|(actual, expected)| {
-            actual.segment_type == expected.segment_type
-                && same_f32_slice_bits(&actual.start, &expected.start)
-                && same_f32_slice_bits(&actual.end, &expected.end)
-                && same_f32_bits(actual.r_start, expected.r_start)
-                && same_f32_bits(actual.r_end, expected.r_end)
-                && same_f32_slice_bits(&actual.mesh.xyz, &expected.mesh.xyz)
-                // This covers type-1's depth and every other f32-bearing
-                // trailing field without assuming unwritten bytes are zero.
-                && actual.trailing == expected.trailing
-        })
-}
-
 #[derive(Clone, Copy)]
 struct Bounds {
     min: [f64; 3],
     max: [f64; 3],
 }
 
-fn min_z(values: &[f32]) -> Result<f32, EmitError> {
+fn min_z(values: &[f32]) -> Option<f32> {
     if values.is_empty() || !values.len().is_multiple_of(3) {
-        return Err(EmitError::DiskAuditRejected);
+        return None;
     }
     values
         .chunks_exact(3)
         .map(|point| point[2])
         .filter(|value| value.is_finite())
         .min_by(f32::total_cmp)
-        .ok_or(EmitError::DiskAuditRejected)
 }
 
-/// Bounds in printer coordinates, never merely local mesh coordinates.
+/// Which piece of the file set a bound: the model mesh or one record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GeometrySource {
+    Model,
+    Record(usize),
+}
+
+impl GeometrySource {
+    fn record(self) -> Option<usize> {
+        match self {
+            Self::Model => None,
+            Self::Record(index) => Some(index),
+        }
+    }
+}
+
+/// Bounds in printer coordinates, never merely local mesh coordinates, with
+/// the piece of the file that set each extreme, so a build-volume finding can
+/// name the record that breaks it.
 #[derive(Clone, Copy)]
-struct WorldBounds(Bounds);
+struct WorldBounds {
+    bounds: Bounds,
+    min_at: [Option<GeometrySource>; 3],
+    max_at: [Option<GeometrySource>; 3],
+}
 
 impl WorldBounds {
     fn empty() -> Self {
-        Self(Bounds::empty())
+        Self {
+            bounds: Bounds::empty(),
+            min_at: [None; 3],
+            max_at: [None; 3],
+        }
     }
 
+    /// Extend by a mesh; `Err` (with nothing added) for an empty, ragged or
+    /// non-finite mesh.
     fn extend_f32(
         &mut self,
         values: &[f32],
         placement: Placement,
         plate_z: f32,
-    ) -> Result<(), EmitError> {
+        source: GeometrySource,
+    ) -> Result<(), String> {
         if values.is_empty() || !values.len().is_multiple_of(3) {
-            return Err(EmitError::DiskAuditRejected);
+            return Err(format!(
+                "{} values, not a positive multiple of 3",
+                values.len()
+            ));
+        }
+        if let Some(index) = values.iter().position(|value| !value.is_finite()) {
+            return Err(format!("value {index} is {}", values[index]));
         }
         for point in values.chunks_exact(3) {
-            self.extend_point([point[0], point[1], point[2]], placement, plate_z)?;
+            self.extend_point([point[0], point[1], point[2]], placement, plate_z, source);
         }
         Ok(())
     }
@@ -545,17 +936,85 @@ impl WorldBounds {
         point: [f32; 3],
         placement: Placement,
         plate_z: f32,
-    ) -> Result<(), EmitError> {
+        source: GeometrySource,
+    ) {
         let world = [
             point[0] + placement.x,
             point[1] + placement.y,
             point[2] - plate_z,
         ];
-        self.0.extend_f32(&world)
+        for (axis, value) in world.iter().enumerate() {
+            let value = f64::from(*value);
+            // A non-finite world value (an f32 overflow) must still be seen:
+            // NaN fails every comparison, so it is taken as a new extreme.
+            if value.is_nan() || value < self.bounds.min[axis] {
+                self.bounds.min[axis] = value;
+                self.min_at[axis] = Some(source);
+            }
+            if value.is_nan() || value > self.bounds.max[axis] {
+                self.bounds.max[axis] = value;
+                self.max_at[axis] = Some(source);
+            }
+        }
     }
 
-    fn validate_against(self, printer: &PrinterProfile) -> Result<(), EmitError> {
-        self.0.validate_against(printer)
+    /// One finding per violated side of the printer's build volume, naming
+    /// the extreme value, the limit and the piece that holds the extreme.
+    /// (Spans need no check of their own: inside every side means the span
+    /// fits.)
+    fn violations(&self, printer: &PrinterProfile) -> Vec<AuditFinding> {
+        let volume = printer.build_volume_mm().value();
+        let half = [volume.x() * 0.5, volume.y() * 0.5];
+        let limits: [(usize, &str, f64, bool); 6] = [
+            (0, "x", -half[0], false),
+            (0, "x", half[0], true),
+            (1, "y", -half[1], false),
+            (1, "y", half[1], true),
+            (2, "z above the plate", 0.0, false),
+            (2, "z above the plate", volume.z(), true),
+        ];
+        let mut out = Vec::new();
+        for (axis, name, limit, is_max) in limits {
+            let (value, source) = if is_max {
+                (self.bounds.max[axis], self.max_at[axis])
+            } else {
+                (self.bounds.min[axis], self.min_at[axis])
+            };
+            let Some(source) = source else {
+                out.push(AuditFinding {
+                    check: AuditCheck::BuildVolume,
+                    record: None,
+                    failing: 1,
+                    detail: format!("no geometry bounds {name}"),
+                });
+                continue;
+            };
+            // NaN is outside: it compares as neither inside bound.
+            let inside = if is_max {
+                value <= limit
+            } else {
+                value >= limit
+            };
+            let outside = value.is_nan() || !inside;
+            if outside {
+                let side = if is_max { "maximum" } else { "minimum" };
+                let bound = if is_max { "at most" } else { "at least" };
+                let holder = match source {
+                    GeometrySource::Model => "the model mesh".to_owned(),
+                    GeometrySource::Record(index) => format!("record {index}"),
+                };
+                out.push(AuditFinding {
+                    check: AuditCheck::BuildVolume,
+                    record: source.record(),
+                    failing: 1,
+                    detail: format!(
+                        "{side} {name} {value:.6} mm (held by {holder}), the printer allows \
+                         {bound} {limit:.6} mm"
+                    ),
+                });
+            }
+        }
+        out
     }
 }
 
@@ -567,42 +1026,20 @@ impl Bounds {
         }
     }
 
+    #[cfg(test)]
     fn extend_f32(&mut self, values: &[f32]) -> Result<(), EmitError> {
         if values.is_empty() || !values.len().is_multiple_of(3) {
-            return Err(EmitError::DiskAuditRejected);
+            return Err(EmitError::RecordEncodingRejected);
         }
         for point in values.chunks_exact(3) {
             for (axis, value) in point.iter().enumerate() {
                 if !value.is_finite() {
-                    return Err(EmitError::DiskAuditRejected);
+                    return Err(EmitError::RecordEncodingRejected);
                 }
                 let value = f64::from(*value);
                 self.min[axis] = self.min[axis].min(value);
                 self.max[axis] = self.max[axis].max(value);
             }
-        }
-        Ok(())
-    }
-
-    fn validate_against(self, printer: &PrinterProfile) -> Result<(), EmitError> {
-        let volume = printer.build_volume_mm().value();
-        let span = [
-            self.max[0] - self.min[0],
-            self.max[1] - self.min[1],
-            self.max[2] - self.min[2],
-        ];
-        if !span.iter().all(|value| value.is_finite())
-            || span[0] > volume.x()
-            || span[1] > volume.y()
-            || span[2] > volume.z()
-            || self.min[0] < -volume.x() * 0.5
-            || self.max[0] > volume.x() * 0.5
-            || self.min[1] < -volume.y() * 0.5
-            || self.max[1] > volume.y() * 0.5
-            || self.min[2] < 0.0
-            || self.max[2] > volume.z()
-        {
-            return Err(EmitError::DiskAuditRejected);
         }
         Ok(())
     }
@@ -2415,8 +2852,10 @@ mod tests {
         let batched = build_records(&primitives, [0.25, -0.5, 1.0]).unwrap();
         for (index, primitive) in primitives.iter().enumerate() {
             let alone = build_records(std::slice::from_ref(primitive), [0.25, -0.5, 1.0]).unwrap();
-            assert!(
-                same_support_records_bits(&alone, &batched[index..=index]),
+            assert_eq!(alone.len(), 1);
+            assert_eq!(
+                differing_record_field(&alone[0], &batched[index]),
+                None,
                 "record {index} differs between the batched and solitary builds"
             );
         }
@@ -2852,8 +3291,11 @@ mod tests {
                     primitives: &[],
                     model_center: [0.0; 3],
                 },
-            ),
-            Err(EmitError::DiskAuditRejected)
+            )
+            .map(|_| ())
+            .map_err(|finding| finding.check),
+            Err(AuditCheck::Reopen),
+            "bytes the reader cannot open are the one UNREADABLE outcome, named as the reopen"
         );
         assert_eq!(
             std::fs::read(&target).unwrap(),
@@ -2863,8 +3305,12 @@ mod tests {
         std::fs::remove_file(target).expect("remove unique fixture artifact");
     }
 
+    /// EMIT AND WARN (fix/round100-emit, 2026-09-29): support geometry below
+    /// the planned plate is a FINDING on an emitted file, not a refusal. The
+    /// file is at the target, and the finding names the check, the record
+    /// that holds the lowest point and its value against the limit.
     #[test]
-    fn disk_audit_rejects_support_geometry_below_the_planned_plate() {
+    fn support_geometry_below_the_planned_plate_is_emitted_and_named() {
         let model = fixture_model(
             vec![primitive(
                 SupportSegmentKind::Member,
@@ -2874,31 +3320,36 @@ mod tests {
             3.0,
         );
         let target = fixture_path("below-plate.chitubox");
+        let report = write(
+            &model,
+            &EmitRequest {
+                target_path: target.clone(),
+                printer: printer(),
+            },
+        )
+        .expect("a file that reads back is emitted, whatever the audit found");
+        assert!(target.exists(), "the evidence must be kept at the target");
+        assert!(!staging_path(&target).exists());
+        assert!(!failed_audit_path(&target).exists());
+        let below: Vec<_> = report
+            .audit_findings
+            .iter()
+            .filter(|finding| finding.check == AuditCheck::BuildVolume)
+            .collect();
         assert_eq!(
-            write(
-                &model,
-                &EmitRequest {
-                    target_path: target.clone(),
-                    printer: printer()
-                }
-            ),
-            Err(EmitError::DiskAuditRejected)
+            below.len(),
+            1,
+            "one violated side: {:?}",
+            report.audit_findings
         );
-        // The refused file does not exist. It used to: the project was saved
-        // to the target and only then audited, so a rejection left behind
-        // exactly the artifact it had just refused -- and this assertion used
-        // to be `remove_file(target).unwrap()`, which is how the bug was
-        // pinned in place. Staging plus rename removes that path entirely.
+        assert_eq!(below[0].record, Some(0), "record 0 holds the lowest point");
         assert!(
-            !target.exists(),
-            "the disk audit refused the scene and left {} behind",
-            target.display()
+            below[0].detail.starts_with("minimum z above the plate -")
+                && below[0].detail.contains("at least 0.000000 mm"),
+            "the finding names the value and the limit: {}",
+            below[0].detail
         );
-        assert!(
-            !staging_path(&target).exists(),
-            "the refused staging file survived at {}",
-            staging_path(&target).display()
-        );
+        std::fs::remove_file(target).unwrap();
     }
 
     /// A raft pad sitting *exactly* on the planned plate must emit, even when
@@ -2961,7 +3412,7 @@ mod tests {
     }
 
     #[test]
-    fn disk_audit_rejects_support_geometry_above_printer_height() {
+    fn support_geometry_above_printer_height_is_emitted_and_named() {
         let model = fixture_model(
             vec![primitive(
                 SupportSegmentKind::Member,
@@ -2971,35 +3422,121 @@ mod tests {
             3.0,
         );
         let target = fixture_path("above-height.chitubox");
+        let report = write(
+            &model,
+            &EmitRequest {
+                target_path: target.clone(),
+                printer: printer(),
+            },
+        )
+        .expect("a file that reads back is emitted, whatever the audit found");
+        assert!(target.exists(), "the evidence must be kept at the target");
+        let high: Vec<_> = report
+            .audit_findings
+            .iter()
+            .filter(|finding| finding.check == AuditCheck::BuildVolume)
+            .collect();
         assert_eq!(
-            write(
-                &model,
-                &EmitRequest {
-                    target_path: target.clone(),
-                    printer: printer()
-                }
-            ),
-            Err(EmitError::DiskAuditRejected)
+            high.len(),
+            1,
+            "one violated side: {:?}",
+            report.audit_findings
+        );
+        assert_eq!(high[0].record, Some(0));
+        assert!(
+            high[0].detail.starts_with("maximum z above the plate"),
+            "{}",
+            high[0].detail
+        );
+        std::fs::remove_file(target).unwrap();
+    }
+
+    /// A clean scene carries no audit finding: the findings are not noise.
+    #[test]
+    fn a_clean_scene_has_no_audit_findings() {
+        let model = fixture_model(Vec::new(), 3.0);
+        let target = fixture_path("clean-audit.chitubox");
+        let report = write(
+            &model,
+            &EmitRequest {
+                target_path: target.clone(),
+                printer: printer(),
+            },
+        )
+        .expect("the scene emits");
+        assert_eq!(report.audit_findings, Vec::new());
+        std::fs::remove_file(target).unwrap();
+    }
+
+    /// A file that cannot be read back is the only audit outcome that fails
+    /// the write, and even then its BYTES ARE KEPT, beside the target (never
+    /// at it), and the error names the check and where the bytes are. An
+    /// artifact an earlier run left at the target is removed, so it cannot
+    /// pass for this run's answer.
+    #[test]
+    fn an_unreadable_file_fails_the_write_but_keeps_its_bytes_beside_the_target() {
+        let target = fixture_path("unreadable.chitubox");
+        let good = fixture_model(Vec::new(), 3.0);
+        let request = EmitRequest {
+            target_path: target.clone(),
+            printer: printer(),
+        };
+        write(&good, &request).expect("the first run emits");
+        assert!(target.exists());
+
+        // The staged bytes this run "wrote" cannot be read back.
+        let staging = staging_path(&target);
+        let unreadable = vec![0_u8; 9];
+        std::fs::write(&staging, &unreadable).unwrap();
+        let mesh = fixture_mesh();
+        let expected_model = model_triangle_soup(&mesh, mesh_bbox_center(&mesh).unwrap()).unwrap();
+        let staged = audit_disk(
+            &staging,
+            &printer(),
+            AuditExpected {
+                lift: 3.0,
+                plate_z: -3.5,
+                model: &expected_model,
+                records: &[],
+                primitives: &[],
+                model_center: [0.0; 3],
+            },
+        )
+        .map_err(|finding| EmitError::DiskAuditUnreadable {
+            finding,
+            kept_at: staging.clone(),
+        });
+
+        let result = settle_staged(&staging, &target, staged);
+        let Err(EmitError::DiskAuditUnreadable { finding, kept_at }) = result else {
+            panic!("an unreadable file fails the write: {result:?}");
+        };
+        assert_eq!(finding.check, AuditCheck::Reopen);
+        assert_eq!(kept_at, failed_audit_path(&target));
+        assert_eq!(
+            std::fs::read(&kept_at).unwrap(),
+            unreadable,
+            "the unreadable bytes are the evidence and must be kept"
         );
         assert!(
             !target.exists(),
-            "the disk audit refused the scene and left {} behind",
-            target.display()
+            "the target only ever holds a file that reads back; the earlier run's \
+             artifact must not pass for this run's answer"
         );
+        assert!(!staging.exists());
+        std::fs::remove_file(kept_at).unwrap();
     }
 
-    /// A refused write leaves *no* file at the target, including one an
-    /// earlier run put there.
+    /// A failed write (here, a scene whose coordinates do not fit binary32)
+    /// leaves *no* file at the target, including one an earlier run put there.
     ///
-    /// This is the half of the invariant that staging alone does not buy. The
-    /// claim `plinth-pipeline`'s gate module makes is "a refused model leaves
-    /// no path on disk at all"; if a previous run's artifact simply stayed
-    /// where it was, the next reader takes it for this run's answer. It is the
-    /// same reason `judge_then_emit` clears the target on a gate refusal,
-    /// which never reaches this function at all.
+    /// If a previous run's artifact simply stayed where it was, the next
+    /// reader takes it for this run's answer. It is the same reason
+    /// `judge_then_emit` clears the target on a gate refusal, which never
+    /// reaches this function at all.
     #[test]
-    fn a_refused_write_removes_an_earlier_runs_artifact_at_the_target() {
-        let target = fixture_path("stale-then-refused.chitubox");
+    fn a_failed_write_removes_an_earlier_runs_artifact_at_the_target() {
+        let target = fixture_path("stale-then-failed.chitubox");
         let good = fixture_model(Vec::new(), 3.0);
         let request = EmitRequest {
             target_path: target.clone(),
@@ -3009,18 +3546,21 @@ mod tests {
         assert_eq!(report.artifact_path, target);
         assert!(target.exists());
 
-        let refused = fixture_model(
+        let unencodable = fixture_model(
             vec![primitive(
                 SupportSegmentKind::Member,
-                [0.0, 0.0, -4.0],
-                [0.0, 0.0, -3.1],
+                [0.0, 0.0, 1.0e39],
+                [0.0, 0.0, 2.0e39],
             )],
             3.0,
         );
-        assert_eq!(write(&refused, &request), Err(EmitError::DiskAuditRejected));
+        assert_eq!(
+            write(&unencodable, &request),
+            Err(EmitError::RecordEncodingRejected)
+        );
         assert!(
             !target.exists(),
-            "a refused write left the earlier run's artifact at {}",
+            "a failed write left the earlier run's artifact at {}",
             target.display()
         );
     }
@@ -3136,7 +3676,7 @@ mod tests {
     }
 
     #[test]
-    fn disk_audit_rejects_a_reopened_lift_or_plate_frame_mismatch() {
+    fn disk_audit_names_a_reopened_lift_or_plate_frame_mismatch() {
         let model = fixture_model(Vec::new(), 3.0);
         let target = fixture_path("lift-mismatch.chitubox");
         write(
@@ -3149,20 +3689,27 @@ mod tests {
         .unwrap();
         let mesh = fixture_mesh();
         let expected_model = model_triangle_soup(&mesh, mesh_bbox_center(&mesh).unwrap()).unwrap();
-        assert_eq!(
-            audit_disk(
-                &target,
-                &printer(),
-                AuditExpected {
-                    lift: 3.0,
-                    plate_z: -3.4,
-                    model: &expected_model,
-                    records: &[],
-                    primitives: &[],
-                    model_center: [0.0; 3],
-                },
-            ),
-            Err(EmitError::DiskAuditRejected)
+        let report = audit_disk(
+            &target,
+            &printer(),
+            AuditExpected {
+                lift: 3.0,
+                plate_z: -3.4,
+                model: &expected_model,
+                records: &[],
+                primitives: &[],
+                model_center: [0.0; 3],
+            },
+        )
+        .expect("the file reads back");
+        assert!(
+            report
+                .audit_findings
+                .iter()
+                .any(|finding| finding.check == AuditCheck::PlateFrame
+                    && finding.detail.contains("-3.4")),
+            "the frame mismatch is named with its planned plate: {:?}",
+            report.audit_findings
         );
         std::fs::remove_file(target).unwrap();
     }
