@@ -932,10 +932,17 @@ price whose axis is within the limit, on a straight segment clear of model, memb
 keep-out, whose moved solid comes no nearer the model than the final gap or than it stood, verified
 by the lowering's measurement; an arm with leaf children moves with them (each re-landed on the
 moved axis at its own layer); run before the head-join rule and again after it, before the ties;
-(2) the footprint rule's slide along the same face, taken only where the moved shaft keeps its
-section, and no slide may cut a shaft deeper; (3) otherwise a WARNING per arm. Pinned by
-`plinth-pipeline` `tests/it/lip_seat.rs` (the real Round_25 at its committed flip, graded from the
-file bytes: 27 arms shaved on develop `2fc80b6`, 2.30 mm³ in air; 0 with the rule).
+each pass is SIZED by the down-sweep and the sized field decides: a re-landing whose new host chain
+comes out overloaded (`X_ALLOWED` at the maximum radius exceeded where it was not), or whose foot on
+the plate comes to lap a root it did not lap, is put back and that descent is not offered again;
+(2) for a tip whose disc is already on its face, the footprint rule's slide along the same face,
+taken only where the moved shaft keeps its section (a tip whose disc is OFF its face is slid for
+contact area alone, as before: contact area is the only seat criterion); (3) otherwise a WARNING
+per arm. Pinned by `plinth-pipeline` `tests/it/lip_seat.rs` (the real Round_25 at its committed
+flip, graded from the file bytes: 27 arms shaved on develop `2fc80b6`, 2.30 mm³ in air; 0 with the
+rule) and `plinth-sweep` `tests/it/lip_seat_sized.rs` (the stilt plate and the laid tube, rule on
+against rule off: no new overloaded host, no new overlapping root pair at a re-landed chain's
+foot; a tip moved for its section keeps it).
 
 **The adapter must not re-derive this geometry by hand.** `lower_stub`
 (`crates/plinth-support/src/lower.rs:362`) and `root_boss_top` (`:416`) already compute the

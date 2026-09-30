@@ -2679,10 +2679,14 @@ fn print_sweep_disclosure(
              the same seat{}; kept: {} carrying another member, {} with no admissible descent; \
              candidates {} priced, {} refused by the path test, {} by the plate rule, {} by the \
              lowering's own measurement, {} by the solid's clearance from the model{}, {} by a new \
-             plate root touching another, {} verified; {} pass(es); {} members resting on a \
-             re-landed arm moved with it; footprint: {} on-face tips searched for a seat further \
-             along the same face, {} moved there, {} slides refused because the moved shaft \
-             would be cut (deeper); on the emitted field {} graded, {} still cut",
+             plate root touching another, {} verified; put back once the field was sized: {} \
+             whose host chain came out overloaded, {} whose root came to lap another ({} sized \
+             checks; unexplained by any re-landing: {} newly overloaded members, {} new root \
+             pairs); {} pass(es); {} members resting on a re-landed arm moved with it; \
+             footprint: {} on-face tips searched for a seat further along the same face, {} \
+             moved there ({} taken back as still cut once every move's follow was drawn), {} \
+             slides of those refused because the moved shaft would still be cut; on the emitted \
+             field {} graded, {} still cut",
             lip.arms_graded,
             lip.arms_over_limit_before,
             lip.max_bite_before_mm,
@@ -2704,10 +2708,16 @@ fn print_sweep_disclosure(
             },
             lip.candidates_refused_roots,
             lip.candidates_verified,
+            lip.moves_put_back_host_load,
+            lip.moves_put_back_roots,
+            lip.sizing_checks,
+            lip.new_overloads_unattributed,
+            lip.new_root_pairs_unattributed,
             lip.passes,
             lip.children_moved_with_host,
             report.seat_footprint.tips_graded_for_section,
             report.seat_footprint.tips_moved_for_section,
+            report.seat_footprint.section_moves_taken_back,
             report.seat_footprint.moves_refused_section,
             lip.arms_graded_after,
             lip.over_limit_after.len(),

@@ -336,7 +336,23 @@ fn seat_plane(centre: Point, radius: f64, soup: &[[Point; 3]]) -> Option<(Point,
 /// Which way a record's rings lie, read from the file's own end ring: the
 /// vertices at distance `r_end` from `end` lie in a plane normal to the axis,
 /// or in a horizontal plane.
-fn rings_are_axial(start: Point, end: Point, r_end: f64, soup: &[[Point; 3]]) -> bool {
+///
+/// A vertex of the START ring (at `r_start` from `start`) is not an end-ring
+/// vertex even where it happens to lie `r_end` from `end` too. On a short
+/// record (length about its radius) it can: round 2 of this lane met a plate
+/// column's last joiner on Round_25 (record 177, length 0.707 mm, radius
+/// 0.733 mm, horizontal rings) whose start ring put five vertices at
+/// 0.734 mm from its end, 0.6 mm below it, and the grader read the rings as
+/// axial and counted the difference between the two solids (0.40 mm³) as
+/// trimmed shaft. The file's own mesh volume (1.0025 mm³) is the horizontal
+/// ring solid's (1.0024 mm³), not the axial one's (1.1812 mm³).
+fn rings_are_axial(
+    start: Point,
+    end: Point,
+    r_start: f64,
+    r_end: f64,
+    soup: &[[Point; 3]],
+) -> bool {
     let axis = sub(end, start);
     let length = norm(axis);
     let unit = axis.map(|v| v / length);
@@ -344,6 +360,9 @@ fn rings_are_axial(start: Point, end: Point, r_end: f64, soup: &[[Point; 3]]) ->
     for vertex in soup.iter().flatten() {
         let offset = sub(*vertex, end);
         if (norm(offset) - r_end).abs() > 1e-4 * (1.0 + r_end) {
+            continue;
+        }
+        if (norm(sub(*vertex, start)) - r_start).abs() <= 1e-4 * (1.0 + r_start) {
             continue;
         }
         along = along.max(dot(offset, unit).abs());
@@ -514,7 +533,7 @@ fn graded() -> &'static Graded {
                     end,
                     r_start,
                     r_end,
-                    axial_rings: rings_are_axial(start, end, r_end, &soup),
+                    axial_rings: rings_are_axial(start, end, r_start, r_end, &soup),
                     mesh: Solid::new(soup, 0.05),
                 });
                 joint = end;

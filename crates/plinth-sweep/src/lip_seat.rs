@@ -46,12 +46,17 @@
 //!    merges and head joins use) — admitted only where the approach angle is
 //!    within the arm's own derived limit, cheapest by the lean law's own price
 //!    first, and each one VERIFIED by the lowering's own measurement before it
-//!    is taken. An arm something else rests on is not moved (moving it would
-//!    move the ground under its dependants).
+//!    is taken. An arm something else rests on moves only with its leaf
+//!    children. **The sized field then decides** ([`blame`], [`put_back`]):
+//!    the down-sweep sizes the pass, and a re-landing whose new host chain
+//!    comes out overloaded, or whose foot on the plate comes to lap a root it
+//!    did not, is put back and its descent refused from then on.
 //! 2. **A seat further in on the same face.** The footprint rule
-//!    (`footprint.rs`) already slides a seat along its face; a tip whose shaft
-//!    the trim still bites joins its search, and a slide is taken only where
-//!    the moved arm keeps its section too (and its disc stays on the face).
+//!    (`footprint.rs`) already slides a seat along its face; a tip whose disc
+//!    is on its face but whose shaft the trim still bites joins its search,
+//!    and a slide is taken only where the moved arm keeps its section too
+//!    (and its disc stays on the face). A tip whose disc is OFF its face is
+//!    slid for contact area alone, whatever the slide does to its shaft.
 //! 3. **Otherwise the seat is kept and a WARNING names the arm**, its approach
 //!    angle and its limit. Emit and warn, never refuse.
 //!
@@ -203,6 +208,21 @@ pub struct LipSeatOutcome {
     /// went unmeasured (a WARNING; the rule still ran on the centreline test).
     pub clearance_unmeasured: bool,
     pub candidates_verified: usize,
+    /// Re-landings put back once the field was SIZED ([`settle`]): the host
+    /// chain that took the arm's load came out overloaded where it was not
+    /// (a member past `X_ALLOWED` at the maximum radius), or the plate root
+    /// at the foot of that chain came to overlap a root it did not overlap.
+    /// Each descent put back is not offered again.
+    pub moves_put_back_host_load: usize,
+    pub moves_put_back_roots: usize,
+    /// Sized-field checks run (one per re-sizing): the path hits of
+    /// [`settle`].
+    pub sizing_checks: usize,
+    /// On the last check of the last pass: members newly overloaded, and
+    /// root pairs newly overlapping, that no re-landing of that pass fed (a
+    /// WARNING quantity; the rule cannot name a cause it did not make).
+    pub new_overloads_unattributed: usize,
+    pub new_root_pairs_unattributed: usize,
     /// Arms over the limit that remedy 1 left alone: something rests on them,
     /// or no candidate held.
     pub kept_carrying: usize,
@@ -349,10 +369,13 @@ fn trial_arm(
 /// price) whose axis meets the seat face within the arm's own limit angle,
 /// whose straight segment clears model, members and the drain keep-out, whose
 /// base disc stays above the plate, and whose drawn geometry the lowering
-/// measures as keeping the shaft's section. Returns how many arms moved; the
-/// caller re-sizes the field and calls again.
+/// measures as keeping the shaft's section. A descent in `refused` (an arm
+/// id and a base cell the sized field already refused, [`settle`]) is not
+/// offered again. Returns the moves taken, so the caller can re-size the
+/// field, [`settle`] it, and call again.
 #[expect(
     clippy::too_many_lines,
+    clippy::too_many_arguments,
     reason = "one pass in three batched stages (price, path, measure); splitting it would thread \
               the same field, index and pending list through three signatures"
 )]
@@ -363,8 +386,9 @@ pub(crate) fn apply(
     struts: &mut [SweepStrut],
     arms: &[SweepArm],
     bites: &[Option<ShaftSeatBite>],
+    refused: &[(u32, usize)],
     outcome: &mut LipSeatOutcome,
-) -> usize {
+) -> Vec<Relanding> {
     let context = joins.slender;
     let surface = joins.surface();
     let tier = joins.clearance_mm;
@@ -457,7 +481,7 @@ pub(crate) fn apply(
             outcome.kept_no_candidate += 1;
             continue;
         };
-        let candidates = price(
+        let mut candidates = price(
             context,
             &index,
             struts,
@@ -469,6 +493,10 @@ pub(crate) fn apply(
             &children,
             outcome,
         );
+        let id = strut.id;
+        if refused.iter().any(|(arm, _)| *arm == id) {
+            candidates.retain(|candidate| !refused.contains(&(id, candidate.cell)));
+        }
         pending.push(Pending {
             index: index_of,
             candidates,
@@ -479,7 +507,7 @@ pub(crate) fn apply(
 
     // ---- stages 2 and 3, in rounds: each pending arm's next candidate whose
     // path clears, then all of them measured by the lowering in one call.
-    let mut moved = 0;
+    let mut moved: Vec<Relanding> = Vec::new();
     let mut open: Vec<usize> = (0..pending.len()).collect();
     let mut done = vec![false; pending.len()];
     while !open.is_empty() {
@@ -673,10 +701,22 @@ pub(crate) fn apply(
             };
             outcome.candidates_verified += 1;
             let strut = &mut struts[index_of];
+            let was = (
+                strut.landing,
+                strut.k_bottom,
+                std::mem::take(&mut strut.path),
+            );
             strut.landing = proposal.candidate.landing;
             strut.k_bottom = proposal.candidate.k_bottom;
             strut.path = path;
             let id = strut.id;
+            let mut record = Relanding {
+                index: index_of,
+                id,
+                cell: proposal.candidate.cell,
+                was,
+                children_were: Vec::with_capacity(children.len()),
+            };
             index.stamp_shaft(id, strut.k_bottom, strut.k_top, strut.cell, &strut.path);
             roots.retain(|disc| disc.id() != id);
             if let Some((radius, bare)) = flared {
@@ -698,7 +738,9 @@ pub(crate) fn apply(
             }
             for (child, _, child_path) in children {
                 let strut = &mut struts[child];
-                strut.path = child_path;
+                record
+                    .children_were
+                    .push((child, std::mem::replace(&mut strut.path, child_path)));
                 index.stamp_shaft(
                     strut.id,
                     strut.k_bottom,
@@ -716,7 +758,7 @@ pub(crate) fn apply(
             }
             outcome.relanded_ids.push(id);
             outcome.arms_relanded += 1;
-            moved += 1;
+            moved.push(record);
             done[proposal.slot] = true;
         }
         open.retain(|slot| !done[*slot] && pending[*slot].next < pending[*slot].candidates.len());
@@ -732,6 +774,187 @@ pub(crate) fn apply(
         }
     }
     moved
+}
+
+/// One re-landing [`apply`] took, with what it replaced, so [`settle`] can
+/// put it back.
+pub(crate) struct Relanding {
+    index: usize,
+    id: u32,
+    /// The base cell of the descent taken (what a put-back refuses again).
+    cell: usize,
+    /// The arm's landing, base layer and path before the move.
+    was: (Landing, usize, Vec<u32>),
+    /// Each child moved with it, and the child's path before.
+    children_were: Vec<(usize, Vec<u32>)>,
+}
+
+/// What a SIZED field measures that a re-landing can break: each overloaded
+/// member's largest carried load (`X_ALLOWED` at the maximum radius exceeded,
+/// the down-sweep's own test, `down_sweep::DownSweepOutcome::overloaded`),
+/// and every overlapping pair of plate roots as drawn (the congestion
+/// census's own discs and sweep line).
+pub(crate) struct SizedField {
+    overloaded: Vec<(u32, f64)>,
+    root_pairs: Vec<(u32, u32)>,
+}
+
+/// [`SizedField`] of `struts`, just sized by the down-sweep that returned
+/// `sized`. Batch-first: one pass over the overload list, one root census.
+pub(crate) fn measure_sized(
+    context: &SlendernessContext<'_>,
+    struts: &[SweepStrut],
+    sized: &crate::down_sweep::DownSweepOutcome,
+) -> SizedField {
+    let mut overloaded: Vec<(u32, f64)> = Vec::new();
+    for row in &sized.overloaded {
+        match overloaded.iter_mut().find(|(id, _)| *id == row.strut_id) {
+            Some((_, carried)) => *carried = carried.max(row.carried_mm2),
+            None => overloaded.push((row.strut_id, row.carried_mm2)),
+        }
+    }
+    overloaded.sort_unstable_by_key(|(id, _)| *id);
+    let discs =
+        crate::congestion::root_discs(context.grid, context.history, struts, context.flare_factor);
+    SizedField {
+        overloaded,
+        root_pairs: crate::congestion::overlap_pair_ids(&discs),
+    }
+}
+
+/// Float noise on "carries no more than it did", mm²: the down-sweep's own
+/// sum over the same ledger read twice, and nothing more.
+const LOAD_SLACK_MM2: f64 = 1.0e-9;
+
+/// Why [`settle`] put a re-landing back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PutBack {
+    HostLoad,
+    Roots,
+}
+
+/// **The sized field decides** (challenger, 2026-09-29). A re-landing hands
+/// the arm's whole load to a new host chain, or makes the arm a new plate
+/// root, and only the down-sweep that follows knows how thick that makes
+/// the chain and its root. So after it: a member of a mover's new chain (the
+/// arm, its host, and down to the plate) that is overloaded now and was not,
+/// or carries more past its limit than it did, blames that mover; and a
+/// plate root at the foot of a mover's chain that overlaps a root it did not
+/// overlap before blames it too. Measured on `make_tall_stilt_plate` at
+/// `ee07600` (arm 69 at `X` 12.83 against 12, 20 layers) and `make_laid_tube`
+/// (overlapping root pairs 1 -> 7) before this check existed.
+///
+/// Returns, per blamed move (by its slot in `moves`), why; plus the new
+/// overloaded members and new root pairs no move's chain explains.
+pub(crate) fn blame(
+    struts: &[SweepStrut],
+    moves: &[Relanding],
+    before: &SizedField,
+    after: &SizedField,
+) -> (Vec<(usize, PutBack)>, usize, usize) {
+    let was = |id: u32| -> f64 {
+        before
+            .overloaded
+            .binary_search_by_key(&id, |(member, _)| *member)
+            .map_or(0.0, |slot| before.overloaded[slot].1)
+    };
+    let new_over: Vec<u32> = after
+        .overloaded
+        .iter()
+        .filter(|(id, carried)| *carried > was(*id) + LOAD_SLACK_MM2)
+        .map(|(id, _)| *id)
+        .collect();
+    let new_pairs: Vec<(u32, u32)> = after
+        .root_pairs
+        .iter()
+        .filter(|pair| before.root_pairs.binary_search(pair).is_err())
+        .copied()
+        .collect();
+    if new_over.is_empty() && new_pairs.is_empty() {
+        return (Vec::new(), 0, 0);
+    }
+    let mut over_explained = vec![false; new_over.len()];
+    let mut pairs_explained = vec![false; new_pairs.len()];
+    let mut out = Vec::new();
+    let mut chain: Vec<u32> = Vec::new();
+    for (slot, relanding) in moves.iter().enumerate() {
+        // The mover and every member under it, down to its foot.
+        chain.clear();
+        let mut at = relanding.index;
+        let mut foot_on_plate = false;
+        for _ in 0..=struts.len() {
+            let Some(member) = struts.get(at) else { break };
+            chain.push(member.id);
+            match member.landing {
+                Landing::Strut { id, .. } => at = id as usize,
+                Landing::Plate => {
+                    foot_on_plate = true;
+                    break;
+                }
+                Landing::Model { .. } => break,
+            }
+        }
+        let mut cause = None;
+        for (flag, id) in over_explained.iter_mut().zip(&new_over) {
+            if chain.contains(id) {
+                *flag = true;
+                cause = Some(PutBack::HostLoad);
+            }
+        }
+        if let (true, Some(&foot)) = (foot_on_plate, chain.last()) {
+            for (flag, (a, b)) in pairs_explained.iter_mut().zip(&new_pairs) {
+                if *a == foot || *b == foot {
+                    *flag = true;
+                    cause.get_or_insert(PutBack::Roots);
+                }
+            }
+        }
+        if let Some(cause) = cause {
+            out.push((slot, cause));
+        }
+    }
+    let unexplained_over = over_explained.iter().filter(|flag| !**flag).count();
+    let unexplained_pairs = pairs_explained.iter().filter(|flag| !**flag).count();
+    (out, unexplained_over, unexplained_pairs)
+}
+
+/// Put one re-landing back as [`blame`] found it, refuse its descent from
+/// now on, and correct the counts.
+pub(crate) fn put_back(
+    struts: &mut [SweepStrut],
+    relanding: Relanding,
+    cause: PutBack,
+    refused: &mut Vec<(u32, usize)>,
+    outcome: &mut LipSeatOutcome,
+) {
+    let Relanding {
+        index,
+        id,
+        cell,
+        was: (landing, k_bottom, path),
+        children_were,
+    } = relanding;
+    let strut = &mut struts[index];
+    strut.landing = landing;
+    strut.k_bottom = k_bottom;
+    strut.path = path;
+    for (child, path) in children_were {
+        struts[child].path = path;
+        outcome.children_moved_with_host = outcome.children_moved_with_host.saturating_sub(1);
+    }
+    refused.push((id, cell));
+    if let Some(at) = outcome
+        .relanded_ids
+        .iter()
+        .rposition(|member| *member == id)
+    {
+        outcome.relanded_ids.remove(at);
+    }
+    outcome.arms_relanded = outcome.arms_relanded.saturating_sub(1);
+    match cause {
+        PutBack::HostLoad => outcome.moves_put_back_host_load += 1,
+        PutBack::Roots => outcome.moves_put_back_roots += 1,
+    }
 }
 
 /// One candidate's new path for the mover and for each of its children, or
@@ -1023,11 +1246,6 @@ pub(crate) fn cuts(bite: Option<&ShaftSeatBite>) -> bool {
     bite.is_some_and(over_limit)
 }
 
-/// Whether a move takes a shaft cut `before` mm deep to one cut deeper.
-pub(crate) fn cuts_deeper(before_mm: f64, after_mm: f64) -> bool {
-    after_mm > before_mm.max(0.0) + BITE_SLACK_MM
-}
-
 /// The emitted field's census, on the arms exactly as they go to the lowering
 /// (`adapter::arms_of`, footprint moves included): `(graded, warnings)`.
 pub(crate) fn census(
@@ -1075,7 +1293,7 @@ pub(crate) fn record_before(outcome: &mut LipSeatOutcome, bites: &[Option<ShaftS
 
 #[cfg(test)]
 mod tests {
-    use super::{cuts_deeper, min_drop_mm, top_aligned};
+    use super::{min_drop_mm, top_aligned};
 
     /// Under a flat face (outward normal straight down) an axis offset `D`
     /// sideways meets the face within a limit `L` once it drops `D·cot L`:
@@ -1114,15 +1332,5 @@ mod tests {
         );
         assert_eq!(top_aligned(&[1.0, 2.0, 3.0, 4.0, 5.0], 2), vec![4.0, 5.0]);
         assert!(top_aligned(&[], 3).is_empty());
-    }
-
-    /// A shaft already cut may stay cut as deep, never deeper; one not cut
-    /// may not be cut at all.
-    #[test]
-    fn a_move_may_not_cut_a_shaft_deeper() {
-        assert!(!cuts_deeper(0.0, 0.0));
-        assert!(cuts_deeper(0.0, 1e-6));
-        assert!(!cuts_deeper(0.2, 0.2));
-        assert!(cuts_deeper(0.2, 0.21));
     }
 }

@@ -1387,9 +1387,17 @@ pub fn run_sweep_with_drains(
         passes: policy.strut_removal_passes,
         enabled: policy.lip_seat,
     };
-    if let Some(sized) =
-        lip_seat_run.run(&head_join_context, &mut struts, &mut lip_seat_outcome, true)
-    {
+    // Descents a sized field put back (arm id, base cell), refused for the
+    // rest of the rule, both runs.
+    let mut lip_seat_refused: Vec<(u32, usize)> = Vec::new();
+    if let Some(sized) = lip_seat_run.run(
+        &head_join_context,
+        &mut struts,
+        &mut lip_seat_outcome,
+        true,
+        &outcome,
+        &mut lip_seat_refused,
+    ) {
         outcome = sized;
     }
     if policy.lip_seat {
@@ -1438,6 +1446,8 @@ pub fn run_sweep_with_drains(
             &mut struts,
             &mut lip_seat_outcome,
             false,
+            &outcome,
+            &mut lip_seat_refused,
         ) {
             outcome = sized;
         }
@@ -1663,7 +1673,7 @@ pub fn run_sweep_with_drains(
     // THE RUNS AS THE FILE HAS THEM: a moved member's runs are shares of its
     // moved chord, so the published longest run and the warnings are
     // re-read on it. A field no seat moved republishes exactly what it had.
-    if footprint.tips_moved_onto_face > 0 {
+    if footprint.tips_moved_onto_face + footprint.tips_moved_for_section > 0 {
         let scale = footprint::chord_scales(&sweep_plan.grid, plate_z, height, &sweep_plan.struts);
         publish_runs(
             &mut sweep_plan.report.slenderness_lane,
@@ -1961,50 +1971,92 @@ struct LipSeatRun<'a> {
 }
 
 impl LipSeatRun<'_> {
-    /// Survey, re-land, re-size, to a fixed point bounded by the registered
-    /// pass count. `first` records the survey's numbers as the field's
-    /// "before". Returns the last down-sweep's outcome when anything moved.
+    /// Survey, re-land, re-size, settle, to a fixed point bounded by the
+    /// registered pass count. `first` records the survey's numbers as the
+    /// field's "before"; `current` is the down-sweep outcome the field was
+    /// last sized by; `refused` the descents a sized field already put back.
+    /// Returns the last down-sweep's outcome when anything was re-sized.
     fn run(
         &self,
         joins: &head_join::HeadJoinContext<'_>,
         struts: &mut Vec<SweepStrut>,
         outcome: &mut lip_seat::LipSeatOutcome,
         first: bool,
+        current: &down_sweep::DownSweepOutcome,
+        refused: &mut Vec<(u32, usize)>,
     ) -> Option<down_sweep::DownSweepOutcome> {
         let context = joins.slender;
-        let mut sized = None;
+        let mut sized: Option<down_sweep::DownSweepOutcome> = None;
+        let mut before = self
+            .enabled
+            .then(|| lip_seat::measure_sized(context, struts, current));
         for pass in 0..self.passes {
             let (arms, bites) =
                 lip_seat::survey(self.mesh, context, self.plan, self.plate_z, struts);
             if first && pass == 0 {
                 lip_seat::record_before(outcome, &bites);
             }
-            if !self.enabled {
+            let Some(field_before) = before.as_ref() else {
                 break;
-            }
+            };
             outcome.passes += 1;
-            let moved = lip_seat::apply(
+            let mut moves = lip_seat::apply(
                 joins,
                 self.plan,
                 self.plate_z,
                 struts,
                 &arms,
                 &bites,
+                refused,
                 outcome,
             );
-            if moved == 0 {
+            if moves.is_empty() {
                 break;
             }
-            sized = Some(down_sweep::run(
-                context.grid,
-                self.slices,
-                struts,
-                self.sizing,
-                self.insertion,
-                self.keep_out,
-            ));
-            set_interior(struts, context.history);
+            // Size the field the moves made, and let it decide
+            // (`lip_seat::blame`): a move whose chain came out overloaded, or
+            // whose foot came to lap another root, is put back and the field
+            // sized again, until the moves left stand on the sized field.
+            let mut now = self.size(context, struts);
+            let field_after = loop {
+                let field_after = lip_seat::measure_sized(context, struts, &now);
+                outcome.sizing_checks += 1;
+                let (blamed, over, pairs) =
+                    lip_seat::blame(struts, &moves, field_before, &field_after);
+                outcome.new_overloads_unattributed = over;
+                outcome.new_root_pairs_unattributed = pairs;
+                if blamed.is_empty() {
+                    break field_after;
+                }
+                // Highest slot first, so each removal leaves the lower slots
+                // where `blame` found them.
+                for &(slot, cause) in blamed.iter().rev() {
+                    let relanding = moves.remove(slot);
+                    lip_seat::put_back(struts, relanding, cause, refused, outcome);
+                }
+                now = self.size(context, struts);
+            };
+            before = Some(field_after);
+            sized = Some(now);
         }
+        sized
+    }
+
+    /// The down-sweep over the live field, and the interior flags after it.
+    fn size(
+        &self,
+        context: &slenderness::SlendernessContext<'_>,
+        struts: &mut Vec<SweepStrut>,
+    ) -> down_sweep::DownSweepOutcome {
+        let sized = down_sweep::run(
+            context.grid,
+            self.slices,
+            struts,
+            self.sizing,
+            self.insertion,
+            self.keep_out,
+        );
+        set_interior(struts, context.history);
         sized
     }
 }
