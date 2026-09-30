@@ -97,6 +97,13 @@
 //! well as test 2. Members that rest on the lander are re-landed on its new
 //! axis at their own landing layer, transitively, under the same tests.
 //!
+//! **Above the plate** (fix/round100-emit, 2026-09-29). Every join, a
+//! lander's or a dependant's, keeps the member's drawn base disc at or above
+//! the build plate ([`stays_above_plate`]). The candidate walk reaches each
+//! host's own bottom layer, and a plate arm's bottom layer is the plate: on
+//! Round_100 a lander re-landed there dipped 0.2335 mm under it, and the
+//! emitter's disk audit refused the file.
+//!
 //! **Emit and warn.** A join that cannot move — no join passes, a cross
 //! (brace) tied to a member that would have to move, a lander that is not a
 //! support arm, or no model surface to measure against — is kept as it is and
@@ -184,6 +191,11 @@ pub struct HeadJoinOutcome {
     /// Candidate joins measured by the clearance predicate (the path-hit
     /// witness for test 2).
     pub clearance_rows: usize,
+    /// Candidate joins (a lander's, or a dependant's re-landing) refused
+    /// because the member's drawn base disc would reach under the build plate
+    /// (`stays_above_plate`), over every pass. The path-hit witness for the
+    /// plate rule (fix/round100-emit, 2026-09-29).
+    pub candidates_below_plate: usize,
     /// Rule passes that moved something (each followed by a down-sweep).
     pub passes: usize,
     /// Joins kept in the seat zone at the last pass, by reason (warnings, and
@@ -715,6 +727,34 @@ fn base_point(context: &HeadJoinContext<'_>, cell: usize, layer: usize) -> [f64;
     ]
 }
 
+/// **A join stands on the host's solid, above the build plate**
+/// (fix/round100-emit, 2026-09-29).
+///
+/// A member is drawn straight from its tip ball's centre `centre` to its base
+/// point `base`, and its base is a disc of radius `radius` NORMAL to that
+/// axis. On a leaned member the disc tilts, and its lowest point stands
+/// `radius · √(1 − a_z²)` under `base` (`a_z` the axis's vertical component).
+/// The plate is the physical floor: nothing can be drawn under it, and the
+/// emitter's disk audit names any record that is (`BuildVolume`). So a join is
+/// admissible only where that lowest point is at or above the plate.
+///
+/// The defect it answers: on Round_100 at its committed flip the rule re-landed
+/// lander 536 on plate arm 40 AT LAYER 0, on the plate itself; its end disc
+/// dipped 0.2335 mm under the plate, and from `15e594d` the whole file was
+/// refused. `candidate_joins` walks every host down to its own bottom layer,
+/// and a plate arm's bottom layer is the plate.
+///
+/// `radius` is the member's widest drawn radius, as test 2 uses: it never
+/// under-states the disc. No new constant: the plate height, the drawn axis
+/// and the drawn radius only.
+fn stays_above_plate(centre: [f64; 3], base: [f64; 3], radius: f64, plate_z_mm: f64) -> bool {
+    let reach_below = geom_kernel::vec3::normalize(geom_kernel::vec3::sub(base, centre))
+        .map_or(radius, |axis| {
+            radius * (1.0 - axis[2] * axis[2]).max(0.0).sqrt()
+        });
+    base[2] - reach_below >= plate_z_mm
+}
+
 /// How far down a member's axis `axis` (unit, seat to base) its own seat zone
 /// reaches: its tip ball, or, where further, the point where the member's
 /// solid first stands `tier` mm clear of its OWN seat plane. The kernel's
@@ -815,6 +855,9 @@ struct Planner<'a, 'c> {
     heads: &'a [Option<Head>],
     profiles: &'a [Vec<f64>],
     surface: &'a NativeSurface,
+    /// Dependant re-landings refused by the plate rule, counted here and
+    /// added to [`HeadJoinOutcome::candidates_below_plate`].
+    below_plate: std::cell::Cell<usize>,
 }
 
 impl Planner<'_, '_> {
@@ -887,12 +930,25 @@ impl Planner<'_, '_> {
                 // new axis at its own landing layer, or, where that breaks the
                 // lean law or a refusal, lower down the same member, highest
                 // first — each no nearer the model than it was, up to the tier.
+                let head = self.heads[dependant].ok_or(Refused::NoClearJoin)?;
+                let dependant_widest = self.widest(dependant);
                 let mut options: Vec<(usize, Vec<u32>, [f64; 3])> = Vec::new();
                 for layer in (moved_bottom..=at).rev() {
                     let Some(cell) = cell_on(&struts[moved], &moved_path, moved_bottom, layer)
                     else {
                         continue;
                     };
+                    let base = base_point(self.context, cell, layer);
+                    // THE PLATE, for a dependant as for its lander.
+                    if !stays_above_plate(
+                        head.centre,
+                        base,
+                        dependant_widest,
+                        self.context.plate_z_mm,
+                    ) {
+                        self.below_plate.set(self.below_plate.get() + 1);
+                        continue;
+                    }
                     if let Some(path) = relanded_path(
                         self.context,
                         self.index,
@@ -901,14 +957,12 @@ impl Planner<'_, '_> {
                         layer,
                         struts[moved].id,
                     ) {
-                        options.push((layer, path, base_point(self.context, cell, layer)));
+                        options.push((layer, path, base));
                     }
                 }
-                let head = self.heads[dependant].ok_or(Refused::NoClearJoin)?;
                 let mut bases = vec![base_point(self.context, strut.base_cell(), strut.k_bottom)];
                 bases.extend(options.iter().map(|option| option.2));
-                let found =
-                    solid_clearances(self.surface, &head, self.widest(dependant), &bases, tier);
+                let found = solid_clearances(self.surface, &head, dependant_widest, &bases, tier);
                 let required = found[0].map_or(tier, |before| tier.min(before)) - 1.0e-9;
                 let chosen = options
                     .into_iter()
@@ -1117,24 +1171,30 @@ pub(crate) fn apply(
             continue;
         }
         let lander = &struts[join.child];
-        let admissible: Vec<(usize, usize)> = chain
-            .iter()
-            .zip(verdict)
-            .filter_map(|(&candidate, &clears)| clears.then_some(candidate))
-            .collect();
-        // TEST 2, one batch over every candidate the arithmetic admitted.
         let Some(lander_head) = heads[join.child] else {
             outcome.kept_no_clear_join += 1;
             continue;
         };
-        let bases: Vec<[f64; 3]> = admissible
-            .iter()
-            .map(|&(host, layer)| base_point(context, struts[host].cell_at(layer), layer))
-            .collect();
         let widest = found.profiles[join.child]
             .iter()
             .copied()
             .fold(lander.tip_radius_mm(), f64::max);
+        // THE PLATE (`stays_above_plate`), by arithmetic, before test 2.
+        let mut admissible: Vec<(usize, usize)> = Vec::new();
+        let mut bases: Vec<[f64; 3]> = Vec::new();
+        for (&(host, layer), &clears) in chain.iter().zip(verdict) {
+            if !clears {
+                continue;
+            }
+            let base = base_point(context, struts[host].cell_at(layer), layer);
+            if stays_above_plate(lander_head.centre, base, widest, context.plate_z_mm) {
+                admissible.push((host, layer));
+                bases.push(base);
+            } else {
+                outcome.candidates_below_plate += 1;
+            }
+        }
+        // TEST 2, one batch over every candidate the arithmetic admitted.
         let tiers = [(context.standoff_mm, false), (context.clearance_mm, true)];
         let clearances: Vec<Vec<Option<f64>>> = tiers
             .iter()
@@ -1150,6 +1210,7 @@ pub(crate) fn apply(
             heads: &heads,
             profiles: &found.profiles,
             surface,
+            below_plate: std::cell::Cell::new(0),
         };
         let mut refusal = Refused::NoClearJoin;
         let mut planned: Option<(usize, usize, f64, bool, Vec<Move>)> = None;
@@ -1170,6 +1231,7 @@ pub(crate) fn apply(
                 }
             }
         }
+        outcome.candidates_below_plate += planner.below_plate.get();
         let Some((host, layer, clearance, at_hard_limit, moves)) = planned else {
             match refusal {
                 Refused::NoClearJoin => outcome.kept_no_clear_join += 1,
@@ -1216,7 +1278,7 @@ pub(crate) fn apply(
 
 #[cfg(test)]
 mod tests {
-    use super::{sections_near_model, Head, Section};
+    use super::{sections_near_model, stays_above_plate, Head, Section};
     use geom_kernel::{NativeSurface, NativeSurfaceConfig};
 
     /// A closed axis-aligned box from `low` to `high`, as a surface.
@@ -1329,5 +1391,26 @@ mod tests {
     fn a_section_never_starts_above_the_ball_centre() {
         let clearance = leaned().clearance_at(-10.0, 0.05, 250, 0.5);
         assert!((clearance - (0.2 - 0.3)).abs() < 1.0e-9, "{clearance}");
+    }
+
+    /// Hand-derived, the plate at z = 0. An axis leaned 3-4-5 (horizontal 3,
+    /// down 4: `a_z = −0.8`) tilts a 0.5 mm base disc so it reaches
+    /// `0.5·√(1 − 0.64) = 0.3` mm under the base point. So a base 0.29 mm over
+    /// the plate is refused, 0.31 mm admitted; a VERTICAL member's disc is
+    /// flat and may stand on the plate itself; a base ON the plate with any
+    /// lean (the Round_100 case: lander 536 re-landed at plate arm 40's
+    /// layer 0) is refused. Sabotage: dropping the disc's reach (`base_z ≥
+    /// plate` only) admits the 0.29 mm and on-the-plate leaned cases.
+    #[test]
+    fn a_join_keeps_the_members_base_disc_above_the_plate() {
+        let leaned =
+            |base_z: f64| stays_above_plate([0.0, 0.0, base_z + 4.0], [3.0, 0.0, base_z], 0.5, 0.0);
+        assert!(!leaned(0.29));
+        assert!(leaned(0.31));
+        assert!(!leaned(0.0));
+        let vertical =
+            |base_z: f64| stays_above_plate([0.0, 0.0, 4.0], [0.0, 0.0, base_z], 0.5, 0.0);
+        assert!(vertical(0.0));
+        assert!(!vertical(-0.01));
     }
 }

@@ -852,6 +852,13 @@ within 0.3 mm of the seat plane AND of the model itself, its disc measured as a 
 passes below the model (Round 25 arm 6), and such a join is left alone; where the model IS there the
 join is the rule's whatever the lean (Round 50 arm 155, vertical: its lander's solid was 0.088 mm
 inside the model). The same zone decides which candidate joins may take a lander.
+**The plate (fix/round100-emit, 2026-09-29).** The candidate walk goes down to each host's own
+bottom layer, and a plate arm's bottom layer is the plate: on Round_100 at its committed flip the
+rule re-landed lander 536 on plate arm 40 AT LAYER 0, and its leaned end disc dipped 0.2335 mm under
+the plate, so the emitter's disk audit refused the whole file from `15e594d` on. A join (a lander's,
+or a dependant's re-landing) is now admissible only where the member's base disc, normal to its drawn
+axis from the ball centre, stays at or above the plate: `z_base − r·√(1 − a_z²) ≥ plate_z`, `r` the
+member's widest drawn radius (as test 2). Counted as `candidates_below_plate`.
 
 **Corrected 2026-09-28 (fix/plate-gap).** This line first read "down to `plate_z + raft_height`",
 the legacy raft datum. v1 emits no raft (§14 OR-3), so that left every root flare 0.2 mm (four

@@ -595,7 +595,7 @@ impl ChainStop {
     ///
     /// The reserve's claim is "this *geometry* could not be sealed", so only a
     /// refusal by the sealed run or the planner may reach it. A `Lowering`, an
-    /// `Emit` (the post-write disk audit refusing the bytes), a `LayerPlan` or
+    /// `Emit` (a write failure, or a written file that cannot be read back), a `LayerPlan` or
     /// a `DegenerateExtent` says nothing about whether the geometry is
     /// supportable, and re-planning a different geometry after one of those
     /// would write a *substitute* artifact and label it a support refusal.
@@ -2387,10 +2387,14 @@ fn sweep_and_emit(
         )?;
 
     clock.entering("EmitWithoutGates");
-    // A failed write leaves no file: `plinth_emit::write` cleans up after
-    // itself on every failure path. An artifact an EARLIER run left at the
-    // same target is cleared the way the gated path clears it, so a refused
-    // model never leaves yesterday's answer sitting beside today's failure.
+    // A failed write leaves no file AT THE TARGET: `plinth_emit::write` clears
+    // it on every failure path. An artifact an EARLIER run left at the same
+    // target is cleared the way the gated path clears it, so a failed model
+    // never leaves yesterday's answer sitting beside today's failure. The disk
+    // audit no longer fails a file that reads back (its findings ride on the
+    // report as WARNINGS), and a file that cannot be read back keeps its bytes
+    // BESIDE the target (`plinth_emit::failed_audit_path`), which this removal
+    // does not touch (fix/round100-emit, 2026-09-29).
     let emit = match plinth_emit::write(
         &supported,
         &EmitRequest {
@@ -2633,6 +2637,7 @@ fn print_sweep_disclosure(
              placement margin; largest drop {} layers; smallest solid clearance {:.4} mm; \
              {:.4} mm2 handed on), {} resting members re-landed with them, {} clearance rows, \
              {} section-to-model rows, {} candidates admitted off the model, \
+             {} candidates refused because the member's base disc would reach under the plate, \
              {} pass(es){}; kept in the seat zone: no clear join {}, a cross tied to a mover {}, \
              not a support arm {}, no model surface {}; {} unmeasured",
             rule.joins_examined,
@@ -2651,6 +2656,7 @@ fn print_sweep_disclosure(
             rule.clearance_rows,
             rule.model_rows,
             rule.candidates_off_the_model,
+            rule.candidates_below_plate,
             rule.passes,
             if rule.enabled { "" } else { " (RULE OFF)" },
             rule.kept_no_clear_join,
@@ -3069,7 +3075,7 @@ fn print_overloaded_arms(model: &ModelId, plan: &plinth_sweep::SweepPlan) {
 /// claims. `a_chain_outcomes_disclosure_reaches_the_run_report` is the guard.
 fn artifact_outcome(outcome: ChainOutcome) -> ModelPreparationOutcome {
     ModelPreparationOutcome::Artifact {
-        emit: outcome.emit,
+        emit: Box::new(outcome.emit),
         geometry: outcome.supported_geometry,
         hollow_disposition: outcome.hollow_disposition,
         cavity_repair: outcome.cavity_repair.map(Box::new),
@@ -3794,6 +3800,7 @@ mod tests {
                 support_record_count: 0,
                 artifact_bytes: 0,
                 seat_trim: Box::default(),
+                audit_findings: Vec::new(),
             },
         };
 
