@@ -966,6 +966,21 @@ rule) and `plinth-sweep` `tests/it/lip_seat_sized.rs` (the stilt plate and the l
 against rule off: no new overloaded host, no new overlapping root pair at a re-landed chain's
 foot; a tip moved for its section keeps it).
 
+**Corrected (2026-09-29, fix/round5-review-fixes; cross-family review of `2fc80b6..develop`).** Two
+rollbacks left geometry nothing had checked. (a) The sizing that judges a pass of re-landings runs
+with load insertion on, and a growing arm can land on a MOVED shaft; putting the mover back restored
+only what the re-landing itself replaced, so such an arm kept a fixed landing where the moved shaft
+used to be, on air. The down-sweep never changes a member it did not add (it rewrites every ledger
+and appends what it inserts), so a put-back now withdraws every arm the judging sizing appended
+(`lip_seat::put_back_all`) and the field is sized again. (b) The footprint rule admits its moves as
+a set, so a branch's slide can hold the lean law only because its base follows its host's slide;
+when the host's section slide is taken back for a shaft still cut, every move left is now judged
+again by the same move check (`footprint::settle`: lean law, unbraced run, drain keep-out, each "no
+worse than it was"), and a move that then breaks one is taken back too (its tip warned as refused
+by the limits). Pinned by the unit tests `lip_seat::put_back_tests` and
+`footprint::move_check_tests::a_section_take_back_judges_the_moves_left_again` (both red on the
+pre-fix logic) and by `tests/it/lip_seat_sized.rs` on the stilt plate and the laid tube.
+
 **The adapter must not re-derive this geometry by hand.** `lower_stub`
 (`crates/plinth-support/src/lower.rs:362`) and `root_boss_top` (`:416`) already compute the
 canonical ball centre, poles and flare; LANE 2 promotes the geometry helpers to `pub` and the

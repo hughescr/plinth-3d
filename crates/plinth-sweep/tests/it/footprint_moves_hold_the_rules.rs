@@ -118,15 +118,20 @@ fn chord(arm: &SweepArm) -> f64 {
     (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
 }
 
-#[test]
-fn every_member_a_footprint_move_displaces_still_holds_the_lean_law_and_its_runs() {
-    let plan = place(&round_25_flipped());
-    let footprint = &plan.report.seat_footprint;
-    assert!(
-        footprint.tips_moved_onto_face > 0,
-        "no seat moved, so the move check is graded on nothing"
-    );
-    let after = arms_of(&plan);
+/// What [`grade`] measured on one plan: members displaced by a footprint
+/// move, and those past the lean law `(member, before, after)` or past a
+/// run's limit `(member, growth, slack)`.
+pub(crate) struct Graded {
+    pub displaced: usize,
+    pub max_lean: f64,
+    pub over_lean: Vec<(usize, f64, f64)>,
+    pub over_run: Vec<(usize, f64, f64)>,
+}
+
+/// Every member the footprint moves displace, graded as geometry on the arms
+/// the file gets against the arms it would get with every move taken back.
+pub(crate) fn grade(plan: &SweepPlan) -> Graded {
+    let after = arms_of(plan);
     let mut unmoved = plan.clone();
     for strut in &mut unmoved.struts {
         if strut.seat_face.footprint == Footprint::MovedOntoFace {
@@ -162,6 +167,28 @@ fn every_member_a_footprint_move_displaces_still_holds_the_lean_law_and_its_runs
             over_run.push((index, growth, slack[index]));
         }
     }
+    Graded {
+        displaced,
+        max_lean,
+        over_lean,
+        over_run,
+    }
+}
+
+#[test]
+fn every_member_a_footprint_move_displaces_still_holds_the_lean_law_and_its_runs() {
+    let plan = place(&round_25_flipped());
+    let footprint = &plan.report.seat_footprint;
+    assert!(
+        footprint.tips_moved_onto_face > 0,
+        "no seat moved, so the move check is graded on nothing"
+    );
+    let Graded {
+        displaced,
+        max_lean,
+        over_lean,
+        over_run,
+    } = grade(&plan);
     println!(
         "Round 25 flipped: {} seats moved, {displaced} members displaced, {} moves refused \
          (lean {}, run {}, drain {}; {} member checks); lean limit {max_lean:.4}; over the lean \

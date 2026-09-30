@@ -141,8 +141,19 @@ pub struct FootprintOutcome {
     /// The ids of the members moved for their section, in search order.
     pub moved_for_section: Vec<u32>,
     /// Section moves taken back because, drawn with every accepted move's
-    /// follow applied, the shaft was still cut (`settle_section_moves`).
+    /// follow applied, the shaft was still cut (`settle`).
     pub section_moves_taken_back: usize,
+    /// Moves taken back AFTER a section move was taken back, because the
+    /// field left behind broke the lean law, an unbraced run's limit or the
+    /// drain keep-out for a member they displace (`settle`,
+    /// round5-review-fixes 2026-09-29). Also counted in `moves_refused_lean`,
+    /// `moves_refused_slenderness` or `moves_refused_drain` by rule. A tip
+    /// whose disc was off its face then keeps its seat and is warned about in
+    /// `moves_refused`; a tip moved for its section alone keeps its seat.
+    pub moves_taken_back_limits: usize,
+    /// Sets of moves judged again after a take-back: the path hits of that
+    /// re-check.
+    pub settle_rechecks: usize,
     /// Disc samples graded, lattice points searched, layers rasterised, and
     /// candidate rounds re-derived: the path hits.
     pub disc_samples: usize,
@@ -816,6 +827,35 @@ pub(crate) fn apply(
         });
     }
 
+    // ---- settle: every section move measured again on the drawn field, and
+    // what is left judged again against the rules after each take-back.
+    let no_moves: Vec<Option<[f64; 3]>> = vec![None; struts.len()];
+    settle(
+        MoveCheck {
+            grid,
+            plate_z,
+            height,
+            limits,
+            struts,
+            before_ends: &before_ends,
+            own_accepted: &no_moves,
+            slot_of_member: &slot_of_member,
+            search_arms: &search_arms,
+        },
+        arms,
+        &section_only,
+        &mut accepted,
+        &mut refused_by_limits,
+        &mut outcome,
+        |drawn| {
+            plinth_support::tip_shaft_seat_bites(drawn, layer_plan)
+                .unwrap_or_else(|_| vec![None; drawn.len()])
+                .iter()
+                .map(|bite| crate::lip_seat::cuts(bite.as_ref()))
+                .collect()
+        },
+    );
+
     // ---- publish: moves, their consequence for branches, and knife edges.
     for (slot, search) in searches.iter().enumerate() {
         let arm = search.arm;
@@ -852,7 +892,6 @@ pub(crate) fn apply(
             }
         }
     }
-    settle_section_moves(struts, arms, layer_plan, &mut outcome);
     // A moved seat moves its member's drawn axis (seat to base, straight), so
     // every member joined to that axis FOLLOWS it (`followed_shifts`): a
     // branch's landing and a brace's top move with the host's axis at their
@@ -885,26 +924,57 @@ pub(crate) fn apply(
 /// face before the move, so it keeps its seat, as a tip no slide held would.
 /// Taking one back can change what its dependants follow, so this repeats
 /// until nothing is taken back (each round removes at least one move).
-fn settle_section_moves(
-    struts: &mut [SweepStrut],
+///
+/// **And what is left still holds the rules** (round5-review-fixes,
+/// 2026-09-29). The search admitted each move on the field WITH every other
+/// accepted move ([`check_moves`]), so a branch's seat slide could pass the
+/// lean law only because its base followed its host's slide. Taking the
+/// host's slide back takes that base displacement away, and the branch then
+/// leans by its own slide alone: a branch with 1 mm of drop and 1.55 mm of
+/// lateral travel, both ends moved +0.10 mm, stays at 1.55; with the host's
+/// slide taken back it is at 1.65, past the lean law's ~1.57. So after every
+/// take-back, every move left is judged again by the same move check on the
+/// same drawn ends ([`MoveLimits`]: the lean law, the unbraced run's limit,
+/// the drain keep-out, each "no worse than it was" before any move), and a
+/// move whose displaced members break a rule is taken back too. A tip whose
+/// disc was off its face then keeps its seat and is warned about, as a tip
+/// whose every slide broke a rule is. Each round removes at least one move,
+/// so this ends.
+///
+/// `cut` is the section measurement, one call per round over every section
+/// move drawn with the round's follows: the lowering's own
+/// [`plinth_support::tip_shaft_seat_bites`] read by [`crate::lip_seat::cuts`]
+/// in production.
+fn settle(
+    check: MoveCheck<'_>,
     arms: &[SweepArm],
-    layer_plan: &LayerPlan,
+    section_only: &[bool],
+    accepted: &mut [Option<[f64; 3]>],
+    refused_by_limits: &mut [bool],
     outcome: &mut FootprintOutcome,
+    mut cut: impl FnMut(&[SweepArm]) -> Vec<bool>,
 ) {
-    let mut taken_back = false;
-    while !outcome.moved_for_section.is_empty() {
-        let followed = followed_shifts(struts);
-        let members: Vec<usize> = outcome
-            .moved_for_section
-            .iter()
-            .filter_map(|id| struts.iter().position(|strut| strut.id == *id))
+    let struts = check.struts;
+    let mut own: Vec<Option<[f64; 3]>> = vec![None; struts.len()];
+    loop {
+        own.fill(None);
+        for (&member, shift) in check.search_arms.iter().zip(accepted.iter()) {
+            own[member] = *shift;
+        }
+        let section: Vec<usize> = (0..accepted.len())
+            .filter(|&slot| accepted[slot].is_some() && section_only[check.search_arms[slot]])
             .collect();
-        let drawn: Vec<SweepArm> = members
+        if section.is_empty() {
+            break;
+        }
+        let followed = followed_shifts_with(struts, &own);
+        let drawn: Vec<SweepArm> = section
             .iter()
-            .map(|&index| {
+            .map(|&slot| {
+                let index = check.search_arms[slot];
                 let arm = &arms[index];
                 let Followed { seat_mm, base_mm } = followed[index];
-                let shift = struts[index].seat_face.shift_mm;
+                let shift = own[index].unwrap_or([0.0; 3]);
                 SweepArm {
                     seat_mm: seat_mm
                         .map_or(arm.seat_mm, |by| geom_kernel::vec3::add(arm.seat_mm, by)),
@@ -917,39 +987,46 @@ fn settle_section_moves(
                 }
             })
             .collect();
-        let bites = plinth_support::tip_shaft_seat_bites(&drawn, layer_plan)
-            .unwrap_or_else(|_| vec![None; drawn.len()]);
-        let back: Vec<usize> = members
-            .iter()
-            .zip(&bites)
-            .filter(|(_, bite)| crate::lip_seat::cuts(bite.as_ref()))
-            .map(|(&index, _)| index)
-            .collect();
-        if back.is_empty() {
+        let cuts = cut(&drawn);
+        let mut taken_back = false;
+        for (&slot, &still_cut) in section.iter().zip(&cuts) {
+            if still_cut {
+                accepted[slot] = None;
+                outcome.section_moves_taken_back += 1;
+                taken_back = true;
+            }
+        }
+        if !taken_back {
             break;
         }
-        taken_back = true;
-        for &index in &back {
-            let strut = &mut struts[index];
-            strut.seat_face.shift_mm = [0.0; 3];
-            strut.seat_face.footprint = Footprint::OnFace;
-            let id = strut.id;
-            outcome.moved_for_section.retain(|member| *member != id);
-            outcome.tips_moved_for_section = outcome.tips_moved_for_section.saturating_sub(1);
-            outcome.section_moves_taken_back += 1;
-        }
-    }
-    if taken_back {
-        outcome.max_move_mm = struts
+        // THE MOVE CHECK again, on every move left: the whole set is this
+        // round's (`check.own_accepted` holds no move), so every member any of
+        // them displaces is judged on the ends the file will draw.
+        let left: Vec<(usize, [f64; 3])> = accepted
             .iter()
-            .filter(|strut| strut.seat_face.footprint == Footprint::MovedOntoFace)
-            .map(|strut| geom_kernel::vec3::norm(strut.seat_face.shift_mm))
-            .fold(0.0, f64::max);
+            .enumerate()
+            .filter_map(|(slot, shift)| shift.map(|shift| (slot, shift)))
+            .collect();
+        if left.is_empty() {
+            break;
+        }
+        outcome.settle_rechecks += 1;
+        let mut kept = vec![false; accepted.len()];
+        for (slot, _) in check_moves(check, left.clone(), refused_by_limits, outcome) {
+            kept[slot] = true;
+        }
+        for (slot, _) in left {
+            if !kept[slot] {
+                accepted[slot] = None;
+                outcome.moves_taken_back_limits += 1;
+            }
+        }
     }
 }
 
 /// Everything the batched move check reads that does not change within a
 /// round.
+#[derive(Clone, Copy)]
 struct MoveCheck<'a> {
     grid: &'a Grid,
     plate_z: f64,
@@ -1288,6 +1365,142 @@ mod move_check_tests {
             keep_out: &keep_out,
         };
         assert_eq!(judge(&grid, &with_slack, before, moved), None);
+    }
+
+    /// **The reviewer's case for `settle`** (round5-review-fixes 2026-09-29):
+    /// host H, a plate arm moved for its section alone; branch B landing on
+    /// H's axis at H's top (so B's base follows H's slide in full), moved for
+    /// contact area. B drops 1 mm with 1.55 mm of lateral travel. Both slid
+    /// +0.10 mm in x: B stays at 1.55, inside the lean law, and the move check
+    /// admits the pair. H's shaft is still cut on the drawn field, so its
+    /// slide is taken back; B's own slide alone puts it at 1.65, past the
+    /// law, so B's slide must go too, and B is marked refused by the limits.
+    #[test]
+    fn a_section_take_back_judges_the_moves_left_again() {
+        use super::{check_moves, settle, FootprintOutcome, MoveCheck};
+        let grid = grid();
+        let keep_out = DrainKeepOut::none();
+        let limits = MoveLimits {
+            max_lean: max_lean(),
+            chord_slack: vec![f64::INFINITY; 2],
+            keep_out: &keep_out,
+        };
+        let (row, host_col, branch_col) = (200, 100, 131);
+        let host_cell = grid.index(row, host_col);
+        let branch_cell = grid.index(row, branch_col);
+        let host = SweepStrut {
+            id: 0,
+            cell: host_cell,
+            center_mm: [grid.center_x_mm(host_col), grid.center_y_mm(row)],
+            ..arm()
+        };
+        let branch = SweepStrut {
+            id: 1,
+            cell: branch_cell,
+            center_mm: [grid.center_x_mm(branch_col), grid.center_y_mm(row)],
+            k_top: 120,
+            k_bottom: 100,
+            landing: Landing::Strut { id: 0, layer: 100 },
+            radius_mm: vec![0.1; 20],
+            carried_mm2: vec![0.0; 20],
+            path: vec![
+                u32::try_from(host_cell).expect("small grid"),
+                u32::try_from(branch_cell).expect("small grid"),
+            ],
+            ..arm()
+        };
+        let struts = vec![host, branch];
+        let before_ends: Vec<([f64; 3], [f64; 3])> = struts
+            .iter()
+            .map(|strut| crate::adapter::drawn_ends(&grid, PLATE, HEIGHT, strut))
+            .collect();
+        let lean = |(seat, base): ([f64; 3], [f64; 3])| {
+            (seat[0] - base[0]).hypot(seat[1] - base[1]) / (seat[2] - base[2])
+        };
+        assert!((lean(before_ends[1]) - 1.55).abs() < 1e-9);
+        let arms: Vec<plinth_support::SweepArm> = struts
+            .iter()
+            .zip(&before_ends)
+            .map(|(strut, &(seat, base))| {
+                crate::adapter::sweep_arm(strut, seat, base, None, vec![0.1])
+            })
+            .collect();
+        let no_moves = vec![None; 2];
+        let slot_of_member = [0, 1];
+        let search_arms = [0, 1];
+        let check = MoveCheck {
+            grid: &grid,
+            plate_z: PLATE,
+            height: HEIGHT,
+            limits: &limits,
+            struts: &struts,
+            before_ends: &before_ends,
+            own_accepted: &no_moves,
+            slot_of_member: &slot_of_member,
+            search_arms: &search_arms,
+        };
+        let slide = [0.10, 0.0, 0.0];
+        // The premise: the pair together passes the move check.
+        let mut refused = vec![false; 2];
+        let mut outcome = FootprintOutcome::default();
+        let admitted = check_moves(
+            check,
+            vec![(0, slide), (1, slide)],
+            &mut refused,
+            &mut outcome,
+        );
+        assert_eq!(admitted.len(), 2, "the pair together holds the lean law");
+        assert_eq!(refused, [false, false]);
+
+        let section_only = [true, false];
+        // Control: nothing cut, nothing taken back.
+        let mut accepted = vec![Some(slide); 2];
+        let mut outcome = FootprintOutcome::default();
+        settle(
+            check,
+            &arms,
+            &section_only,
+            &mut accepted,
+            &mut refused,
+            &mut outcome,
+            |drawn| vec![false; drawn.len()],
+        );
+        assert_eq!(accepted, vec![Some(slide); 2]);
+        assert_eq!(outcome.section_moves_taken_back, 0);
+
+        // H's shaft still cut: H's slide goes, and B's with it.
+        let mut outcome = FootprintOutcome::default();
+        let mut measured = 0;
+        settle(
+            check,
+            &arms,
+            &section_only,
+            &mut accepted,
+            &mut refused,
+            &mut outcome,
+            |drawn| {
+                measured += drawn.len();
+                vec![true; drawn.len()]
+            },
+        );
+        println!(
+            "settle: {measured} section arms measured, {} section moves taken back, {} moves \
+             taken back by the limits (lean {}), {} re-checks, {} member checks",
+            outcome.section_moves_taken_back,
+            outcome.moves_taken_back_limits,
+            outcome.moves_refused_lean,
+            outcome.settle_rechecks,
+            outcome.members_checked,
+        );
+        assert_eq!(outcome.section_moves_taken_back, 1);
+        assert_eq!(
+            accepted,
+            vec![None, None],
+            "the branch keeps a slide that leans it past the law once its host's is taken back"
+        );
+        assert_eq!(outcome.moves_taken_back_limits, 1);
+        assert_eq!(outcome.moves_refused_lean, 1);
+        assert_eq!(refused, [false, true]);
     }
 
     /// A downward drain at (15, 10): its keep-out column is refused to an arm
