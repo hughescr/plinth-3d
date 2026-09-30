@@ -51,6 +51,7 @@ pub mod head_join;
 pub mod landing_check;
 pub mod lean;
 pub mod limits;
+pub mod lip_seat;
 pub(crate) mod member_clearance;
 pub mod model_landing;
 pub mod orient_demand;
@@ -573,6 +574,11 @@ pub struct SweepPolicy {
     /// field this engine placed before the rule, and the leaned heads' shafts
     /// reach the model again.
     pub head_join: bool,
+    /// Whether a seated arm whose shaft the seat trim would cut outside its
+    /// tip ball is re-landed to meet its face within its limit angle
+    /// ([`lip_seat`], 2026-09-29). **On in production.** The drill turns it
+    /// off; the survey and the emitted census still run and publish.
+    pub lip_seat: bool,
     /// `DECIMATION_PROBE_GRID_PITCH_MM` and `DECIMATION_PROBE_MAX_GRID_BYTES`:
     /// the registered parity-grid pitch and byte cap of a distance-probe
     /// surface index. The head-join rule builds one over the model to measure
@@ -668,6 +674,7 @@ impl SweepPolicy {
             slenderness_mast_root_clearance: true,
             final_clearance_gap_mm: *evidence.final_clearance_gap_mm().value(),
             head_join: true,
+            lip_seat: true,
             surface_index_pitch_mm: placeholders
                 .decimation_probe_grid_pitch_mm()
                 .diagnostic()
@@ -836,6 +843,17 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_head_join(mut self) -> Self {
         self.head_join = false;
+        self
+    }
+
+    /// Leave every seated arm on the descent the placement gave it, however
+    /// side-on it meets its face — the field before the lip-seat rule of
+    /// 2026-09-29. **Sabotage only**: the drill sets it and a leaned arm's
+    /// shaft is cut by its seat trim again. The survey and the census still
+    /// run and publish.
+    #[must_use]
+    pub const fn without_lip_seat(mut self) -> Self {
+        self.lip_seat = false;
         self
     }
 
@@ -1406,14 +1424,18 @@ pub fn run_sweep_with_drains(
             &landing_check::check_landings(&struts),
         );
     }
-    // --- head joins: a lander joins a trunk BELOW its seat zone -----------
+    // --- lip seats: every seated arm meets its face within its limit angle -
     //
-    // After every pass that sets a landing (descent, un-merge, congestion, the
-    // slenderness merges) and BEFORE the ties, so a lander the rule lengthens
-    // is measured and tied like any other member. Each pass that moves a join
-    // is followed by the same down-sweep that books the lander's load at its
-    // new layer, and the rule runs again on the re-sized field until nothing
-    // moves, bounded by the registered pass count the other loops use.
+    // After the descent, the un-merge, the congestion lane and the slenderness
+    // merges have set every landing, and BEFORE the head-join rule and the
+    // ties, so a re-landed arm is joined and tied like any other member. Each
+    // pass that re-lands an arm is followed by the down-sweep that books its
+    // load on its new host, and runs again to a fixed point, bounded by the
+    // registered pass count the other loops use (`lip_seat.rs`).
+    //
+    // It shares the head-join rule's context: the same slenderness context,
+    // and the same lazily built model surface for a moved member's solid
+    // clearance.
     let head_join_context = head_join::HeadJoinContext {
         slender: &slenderness_context,
         mesh,
@@ -1425,6 +1447,45 @@ pub fn run_sweep_with_drains(
         surface_max_bytes: policy.surface_index_max_bytes,
         surface: std::cell::OnceCell::new(),
     };
+    let mut lip_seat_outcome = lip_seat::LipSeatOutcome {
+        enabled: policy.lip_seat,
+        ..lip_seat::LipSeatOutcome::default()
+    };
+    let lip_seat_run = LipSeatRun {
+        mesh,
+        plan,
+        plate_z,
+        slices: &slices,
+        sizing,
+        insertion,
+        keep_out: &keep_out,
+        passes: policy.strut_removal_passes,
+        enabled: policy.lip_seat,
+    };
+    // Descents a sized field put back (arm id, base cell), refused for the
+    // rest of the rule, both runs.
+    let mut lip_seat_refused: Vec<(u32, usize)> = Vec::new();
+    if let Some(sized) = lip_seat_run.run(
+        &head_join_context,
+        &mut struts,
+        &mut lip_seat_outcome,
+        true,
+        &outcome,
+        &mut lip_seat_refused,
+    ) {
+        outcome = sized;
+    }
+    if policy.lip_seat {
+        landings.record("lip seats", &landing_check::check_landings(&struts));
+    }
+    // --- head joins: a lander joins a trunk BELOW its seat zone -----------
+    //
+    // After every pass that sets a landing (descent, un-merge, congestion, the
+    // slenderness merges) and BEFORE the ties, so a lander the rule lengthens
+    // is measured and tied like any other member. Each pass that moves a join
+    // is followed by the same down-sweep that books the lander's load at its
+    // new layer, and the rule runs again on the re-sized field until nothing
+    // moves, bounded by the registered pass count the other loops use.
     let mut head_join_outcome = head_join::HeadJoinOutcome {
         enabled: policy.head_join,
         clearance_mm: policy.final_clearance_gap_mm,
@@ -1447,6 +1508,28 @@ pub fn run_sweep_with_drains(
             set_interior(&mut struts, &history);
         }
         landings.record("head joins", &landing_check::check_landings(&struts));
+    }
+    // --- lip seats again, on the field the head-join rule left -----------
+    //
+    // A head join moves a lander down its trunk, and an arm that carried it
+    // near its head may carry nothing near it now, or nothing at all, so it is
+    // free to meet its face within its limit. Still before the ties: a tied
+    // member never moves.
+    if policy.lip_seat {
+        if let Some(sized) = lip_seat_run.run(
+            &head_join_context,
+            &mut struts,
+            &mut lip_seat_outcome,
+            false,
+            &outcome,
+            &mut lip_seat_refused,
+        ) {
+            outcome = sized;
+        }
+        landings.record(
+            "lip seats after head joins",
+            &landing_check::check_landings(&struts),
+        );
     }
     // THE TIES: `|X|`, thicken, mast, each measured on the live field, then the
     // down-sweep that sizes what they added, then again until a pass changes
@@ -1686,7 +1769,7 @@ pub fn run_sweep_with_drains(
     // THE RUNS AS THE FILE HAS THEM: a moved member's runs are shares of its
     // moved chord, so the published longest run and the warnings are
     // re-read on it. A field no seat moved republishes exactly what it had.
-    if footprint.tips_moved_onto_face > 0 {
+    if footprint.tips_moved_onto_face + footprint.tips_moved_for_section > 0 {
         let scale = footprint::chord_scales(&sweep_plan.grid, plate_z, height, &sweep_plan.struts);
         publish_runs(
             &mut sweep_plan.report.slenderness_lane,
@@ -1713,6 +1796,21 @@ pub fn run_sweep_with_drains(
             rule.joins_in_seat_zone_before = rule.in_seat_zone_after.len();
         }
     }
+    // WHAT THE EMITTED FIELD STILL CUTS (lip-seat, 2026-09-29): every seated
+    // arm, as it goes to the lowering, measured for a seat trim that reaches
+    // its shaft outside the ball. Published and warned on, never refused.
+    {
+        let emitted = adapter::arms_of(&sweep_plan);
+        let (graded, over) = lip_seat::census(
+            &sweep_plan.struts,
+            &emitted,
+            plan,
+            &lip_seat_outcome.relanded_ids,
+        );
+        lip_seat_outcome.arms_graded_after = graded;
+        lip_seat_outcome.over_limit_after = over;
+    }
+    sweep_plan.report.lip_seat = lip_seat_outcome;
     sweep_plan.report.sweep_digest = digest(&sweep_plan.struts);
     Ok(sweep_plan)
 }
@@ -1952,6 +2050,113 @@ struct Unmerged {
 /// under every overhang by construction (that is what makes a face
 /// down-facing), so it answered "interior" for exterior scars and, once the
 /// descent could lean, answered about a column the arm's base is not even in.
+/// What the lip-seat passes read besides the strut set and the slenderness
+/// context: the model, the layer plan and the down-sweep's inputs, so each
+/// pass that re-lands an arm is followed by the same down-sweep that books its
+/// load on its new host.
+struct LipSeatRun<'a> {
+    mesh: &'a Mesh,
+    plan: &'a LayerPlan,
+    plate_z: f64,
+    slices: &'a [Vec<plinth_support::perception::SliceSolid>],
+    sizing: down_sweep::SizingPolicy,
+    insertion: down_sweep::InsertionPolicy,
+    keep_out: &'a DrainKeepOut,
+    passes: u32,
+    enabled: bool,
+}
+
+impl LipSeatRun<'_> {
+    /// Survey, re-land, re-size, settle, to a fixed point bounded by the
+    /// registered pass count. `first` records the survey's numbers as the
+    /// field's "before"; `current` is the down-sweep outcome the field was
+    /// last sized by; `refused` the descents a sized field already put back.
+    /// Returns the last down-sweep's outcome when anything was re-sized.
+    fn run(
+        &self,
+        joins: &head_join::HeadJoinContext<'_>,
+        struts: &mut Vec<SweepStrut>,
+        outcome: &mut lip_seat::LipSeatOutcome,
+        first: bool,
+        current: &down_sweep::DownSweepOutcome,
+        refused: &mut Vec<(u32, usize)>,
+    ) -> Option<down_sweep::DownSweepOutcome> {
+        let context = joins.slender;
+        let mut sized: Option<down_sweep::DownSweepOutcome> = None;
+        let mut before = self
+            .enabled
+            .then(|| lip_seat::measure_sized(context, struts, current));
+        for pass in 0..self.passes {
+            let (arms, bites) =
+                lip_seat::survey(self.mesh, context, self.plan, self.plate_z, struts);
+            if first && pass == 0 {
+                lip_seat::record_before(outcome, &bites);
+            }
+            let Some(field_before) = before.as_ref() else {
+                break;
+            };
+            outcome.passes += 1;
+            let mut moves = lip_seat::apply(
+                joins,
+                self.plan,
+                self.plate_z,
+                struts,
+                &arms,
+                &bites,
+                refused,
+                outcome,
+            );
+            if moves.is_empty() {
+                break;
+            }
+            // Size the field the moves made, and let it decide
+            // (`lip_seat::blame`): a move whose chain came out overloaded, or
+            // whose foot came to lap another root, is put back and the field
+            // sized again, until the moves left stand on the sized field.
+            let mut now = self.size(context, struts);
+            let field_after = loop {
+                let field_after = lip_seat::measure_sized(context, struts, &now);
+                outcome.sizing_checks += 1;
+                let (blamed, over, pairs) =
+                    lip_seat::blame(struts, &moves, field_before, &field_after);
+                outcome.new_overloads_unattributed = over;
+                outcome.new_root_pairs_unattributed = pairs;
+                if blamed.is_empty() {
+                    break field_after;
+                }
+                // Highest slot first, so each removal leaves the lower slots
+                // where `blame` found them.
+                for &(slot, cause) in blamed.iter().rev() {
+                    let relanding = moves.remove(slot);
+                    lip_seat::put_back(struts, relanding, cause, refused, outcome);
+                }
+                now = self.size(context, struts);
+            };
+            before = Some(field_after);
+            sized = Some(now);
+        }
+        sized
+    }
+
+    /// The down-sweep over the live field, and the interior flags after it.
+    fn size(
+        &self,
+        context: &slenderness::SlendernessContext<'_>,
+        struts: &mut Vec<SweepStrut>,
+    ) -> down_sweep::DownSweepOutcome {
+        let sized = down_sweep::run(
+            context.grid,
+            self.slices,
+            struts,
+            self.sizing,
+            self.insertion,
+            self.keep_out,
+        );
+        set_interior(struts, context.history);
+        sized
+    }
+}
+
 fn set_interior(struts: &mut [SweepStrut], history: &up_sweep::ColumnHistory) {
     for strut in struts.iter_mut() {
         strut.interior = match strut.landing {
@@ -2509,6 +2714,7 @@ fn build_report(
         head_join: crate::head_join::HeadJoinOutcome::default(),
         per_event: outcome.per_event.clone(),
         rigid_share: crate::rigid_share::RigidShareReport::default(),
+        lip_seat: crate::lip_seat::LipSeatOutcome::default(),
         junctions_at_parent_top,
         junctions_mid_shaft,
         support_volume_mm3,

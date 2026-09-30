@@ -176,6 +176,15 @@ fn the_disc_is_supported_by_a_plate_rooted_field_at_the_measured_spacing() {
                 strut.id,
                 strut.landing
             );
+            // THE DESCENT'S claim, so an arm the lip-seat rule re-landed
+            // (2026-09-29) is exempt from it and named in the report: that rule
+            // re-lands a max-lean merge at a smaller angle to its seat, the
+            // cheapest descent by the lean law's own price that keeps its
+            // section, and where the straight column's new root would touch a
+            // neighbour's that can be a shallow lean to a clear plate cell.
+            if plan.report.lip_seat.relanded_ids.contains(&strut.id) {
+                continue;
+            }
             assert!(
                 strut.is_leaned() == matches!(strut.landing, Landing::Strut { .. }),
                 "strut {} leaned {} but landed on {:?}; on a flat face the only reason to leave \

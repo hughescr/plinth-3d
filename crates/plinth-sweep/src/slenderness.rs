@@ -2755,6 +2755,30 @@ pub(crate) fn segment_path(
     k_bottom: usize,
     except: Option<u32>,
 ) -> Option<Vec<u32>> {
+    segment_path_excluding(
+        context,
+        index,
+        seat_cell,
+        k_top,
+        base_cell,
+        k_bottom,
+        except.as_slice(),
+    )
+}
+
+/// [`segment_path`] with several members the path may pass through: the one
+/// it lands on, and (for a member being RE-landed) its own shaft as the index
+/// still has it and the shafts of the members that move with it
+/// (`lip_seat.rs`, 2026-09-29). `segment_path` is this with at most one.
+pub(crate) fn segment_path_excluding(
+    context: &SlendernessContext<'_>,
+    index: &ColumnHistory,
+    seat_cell: usize,
+    k_top: usize,
+    base_cell: usize,
+    k_bottom: usize,
+    except: &[u32],
+) -> Option<Vec<u32>> {
     let grid = context.grid;
     let cols = grid.cols();
     let span = k_top.checked_sub(k_bottom)?;
@@ -2808,7 +2832,7 @@ pub(crate) fn segment_path(
             if context.history.model_blocks(cell, here) {
                 return None;
             }
-            if index.shaft_blocks(cell, here, except) {
+            if index.shaft_blocks_excluding(cell, here, except) {
                 return None;
             }
         }

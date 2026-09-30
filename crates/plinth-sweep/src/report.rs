@@ -286,6 +286,10 @@ pub struct SweepRunReport {
     /// The rigid-body reading of the load share (2026-09-29): a WARNING-only
     /// diagnostic that never sizes; the arms whose rigid share passes `ℓ_max`.
     pub rigid_share: crate::rigid_share::RigidShareReport,
+    /// The lip-seat rule (2026-09-29): every seated arm's approach to its seat
+    /// face against the angle at which the seat trim keeps its section, the
+    /// arms re-landed to meet it, and the emitted field's census.
+    pub lip_seat: crate::lip_seat::LipSeatOutcome,
     /// **The resin the area law SIZED**, in mm³: `π r²` integrated along every
     /// arm's own axis, layer by layer, with a leaned layer measured along its
     /// slant rather than its rise.

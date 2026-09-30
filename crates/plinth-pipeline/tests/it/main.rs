@@ -19,6 +19,7 @@ mod a4_noncoverage_gate_drift;
 mod a4_production_door;
 mod dual_cavity_real_pipeline;
 mod first_artifact;
+mod lip_seat;
 mod load_gate_area_law;
 mod load_gate_warning_mode_corpus_survey;
 mod member_clearance_emitted;

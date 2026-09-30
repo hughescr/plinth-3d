@@ -1636,6 +1636,323 @@ pub fn tip_contact_discs(
         .collect())
 }
 
+/// **How far the seat trim reaches into a seated arm's SHAFT outside its own
+/// tip ball** (fix/lip-seat, 2026-09-29), measured on the arm exactly as the
+/// lowering draws it.
+///
+/// The seat trim keeps `primitive ∩ {support side of the seat plane}` of the
+/// ball and of every shaft span that reaches the model side
+/// ([`crate::SeatTrim`]). Inside the ball that removes only the ball's own
+/// cap region: the shaft there is covered by the ball's solid either way. A
+/// shaft section OUTSIDE the ball that crosses the plane is different: the
+/// trim removes part of the arm's own section, resin that was drawn and is
+/// then thrown away, and on an arm that meets a steep face nearly side-on it
+/// removes most of the shaft (owner, Round 25, 2026-09-29: "a very fat
+/// side-branch is then almost completely shaved off").
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShaftSeatBite {
+    /// The deepest the seat plane reaches into the drawn shaft section at any
+    /// station whose ring is not wholly inside the tip ball, in mm; `0` when
+    /// the shaft keeps its whole section outside the ball.
+    pub bite_mm: f64,
+    /// The angle between the arm's axis (seat to base) and the seat face's
+    /// OUTWARD normal, in degrees: `0` for an arm that meets its face square.
+    pub approach_deg: f64,
+    /// **The derived limit angle** for this arm: the largest approach angle at
+    /// which the trim keeps the shaft's section, for the taper as drawn at its
+    /// top (radius `r`), the emitted ball (radius `R = f·r_tip`) and the seat
+    /// law's own depth `δ(φ)` along the normal. It is the root of
+    ///
+    /// ```text
+    /// g(φ) = (R·cos φ − δ(φ)) + √(R² − r²)·cos φ − r·sin φ
+    /// ```
+    ///
+    /// — the ball centre's height over the plane, plus the rise along the axis
+    /// to where the shaft's lateral surface leaves the ball, minus the ring's
+    /// own drop towards the plane. `g` falls as `φ` grows, so the root is the
+    /// one limit. For a constant taper `r = r_tip`, `f = 1.5` and the flank
+    /// term `δ = h + r·sin φ` (one layer `h` plus the tilted end disc), this is
+    /// `r·(f + √(f² − 1))·cos φ = h + 2·r·sin φ`: about 50° at `r = 0.36 mm`.
+    /// Reported beside `approach_deg`; the decision is [`Self::bite_mm`],
+    /// which measures the same thing on the spans as they are drawn (a
+    /// junction raise below the head, the raster seat's offset from the face).
+    pub limit_deg: f64,
+}
+
+/// [`ShaftSeatBite`] for every arm, in arm order: `None` for an arm that
+/// seats into nothing, carries no seat plane, or cannot be lowered.
+///
+/// Each arm is lowered by the production [`lower_one_sweep_arm`] into one
+/// reused scratch buffer, so the ball, the trim and every span measured are
+/// the ones the file gets. One call for the whole field.
+///
+/// # Errors
+///
+/// Only about the request, as [`lower_sweep_arms`].
+pub fn tip_shaft_seat_bites(
+    arms: &[SweepArm],
+    layers: &LayerPlan,
+) -> Result<Vec<Option<ShaftSeatBite>>, SweepLoweringError> {
+    let plate_z = layers.z0_mm();
+    let frame = BuildFrame::new(
+        Finite::new(plate_z).map_err(|_| SweepLoweringError::MissingLayerHeight)?,
+        PositiveFinite::new(1.0).map_err(|_| SweepLoweringError::InvalidLimits)?,
+    );
+    let config = LoweringConfig::current(frame, layers, 1, 1)?;
+    let mut scratch: Vec<SupportPrimitive> = Vec::new();
+    Ok(arms
+        .iter()
+        .map(|arm| {
+            if !arm.seats_into_model {
+                return None;
+            }
+            scratch.clear();
+            let lowered = lower_one_sweep_arm(arm, config, plate_z, &mut scratch);
+            let trim = lowered.seat.as_ref().and_then(|seat| seat.trim)?;
+            shaft_seat_bite(arm, &scratch, trim, config)
+        })
+        .collect())
+}
+
+/// One arm's [`ShaftSeatBite`] from its own lowered primitives.
+fn shaft_seat_bite(
+    arm: &SweepArm,
+    primitives: &[SupportPrimitive],
+    trim: crate::SeatTrim,
+    config: LoweringConfig,
+) -> Option<ShaftSeatBite> {
+    let ball = primitives
+        .iter()
+        .find(|primitive| primitive.segment_kind == SupportSegmentKind::ContactSphere)?;
+    let centre: [f64; 3] =
+        std::array::from_fn(|axis| 0.5 * (ball.start_mm[axis].get() + ball.end_mm[axis].get()));
+    let ball_radius = ball.start_radius_mm.get();
+    let normal = trim.outward_normal();
+    let mut bite = 0.0_f64;
+    let mut taper_top_radius = arm.tip_radius_mm;
+    for primitive in primitives {
+        if !matches!(
+            primitive.segment_kind,
+            SupportSegmentKind::ContactTaper | SupportSegmentKind::Member
+        ) {
+            continue;
+        }
+        if primitive.segment_kind == SupportSegmentKind::ContactTaper {
+            taper_top_radius = primitive.start_radius_mm.get();
+        }
+        bite = bite.max(frustum_bite_outside_ball(
+            primitive,
+            trim,
+            centre,
+            ball_radius,
+        ));
+    }
+    let delta = geom_kernel::vec3::sub(arm.base_mm, arm.seat_mm);
+    let unit = geom_kernel::vec3::normalize(delta)?;
+    let approach_deg = geom_kernel::vec3::dot(unit, normal)
+        .clamp(-1.0, 1.0)
+        .acos()
+        .to_degrees();
+    let limit_deg = seat_angle_limit_deg(arm.tip_radius_mm, taper_top_radius, ball_radius, config);
+    Some(ShaftSeatBite {
+        bite_mm: bite,
+        approach_deg,
+        limit_deg,
+    })
+}
+
+/// The deepest the seat plane reaches into one frustum record's section at a
+/// station whose ring is not wholly inside the ball `(centre, radius)`.
+///
+/// Along the record, `P(t) = start + t·(end − start)` and `r(t)` are linear,
+/// and the ring's lowest point towards the plane is `d(P(t)) − r(t)·√(1 −
+/// (n·m)²)` for ring normal `m` ([`frustum_reaches_model_side`]'s own
+/// formula), so the bite over any interval of `t` is largest at one of its
+/// ends. The ring leaves the ball where its FARTHEST point from the centre,
+/// `√((Δ·m)² + (|Δ_⊥| + r)²)` for `Δ = P − centre`, reaches the ball's
+/// radius; that distance grows along a record running away from the ball, so
+/// the station is found by bisection and the bite is read at it and at the
+/// record's far end. Conservative for a ring that only partly leaves the
+/// ball: its whole section is graded there.
+fn frustum_bite_outside_ball(
+    primitive: &SupportPrimitive,
+    trim: crate::SeatTrim,
+    centre: [f64; 3],
+    ball_radius: f64,
+) -> f64 {
+    /// Halvings of `t ∈ [0, 1]`: the station to well under a nanometre on any
+    /// record this engine draws.
+    const BISECTIONS: usize = 48;
+    let start = primitive.start_mm.map(Finite::get);
+    let end = primitive.end_mm.map(Finite::get);
+    let (r0, r1) = (
+        primitive.start_radius_mm.get(),
+        primitive.end_radius_mm.get(),
+    );
+    let ring_normal = match primitive.ring_normal {
+        FrustumRingNormal::SegmentAxis => {
+            geom_kernel::vec3::normalize(geom_kernel::vec3::sub(end, start))
+        }
+        FrustumRingNormal::PlateZ => Some([0.0, 0.0, 1.0]),
+    };
+    let Some(ring_normal) = ring_normal else {
+        return 0.0;
+    };
+    let along = geom_kernel::vec3::dot(trim.outward_normal(), ring_normal);
+    let spread = (1.0 - along * along).max(0.0).sqrt();
+    let at = |t: f64| -> ([f64; 3], f64) {
+        (
+            std::array::from_fn(|axis| start[axis] + t * (end[axis] - start[axis])),
+            r0 + t * (r1 - r0),
+        )
+    };
+    let outside = |t: f64| -> bool {
+        let (point, radius) = at(t);
+        let offset = geom_kernel::vec3::sub(point, centre);
+        let axial = geom_kernel::vec3::dot(offset, ring_normal);
+        let in_plane = geom_kernel::vec3::sub(offset, geom_kernel::vec3::scale(ring_normal, axial));
+        let far = geom_kernel::vec3::norm(in_plane) + radius;
+        axial * axial + far * far > ball_radius * ball_radius
+    };
+    let lowest = |t: f64| -> f64 {
+        let (point, radius) = at(t);
+        trim.support_side_distance_mm(point) - radius * spread
+    };
+    if !outside(1.0) {
+        return 0.0;
+    }
+    let exit = if outside(0.0) {
+        0.0
+    } else {
+        let (mut inside_t, mut outside_t) = (0.0_f64, 1.0_f64);
+        for _ in 0..BISECTIONS {
+            let mid = 0.5 * (inside_t + outside_t);
+            if outside(mid) {
+                outside_t = mid;
+            } else {
+                inside_t = mid;
+            }
+        }
+        outside_t
+    };
+    let bound = (-lowest(exit)).max(-lowest(1.0)).max(0.0);
+    // A ring normal to the axis is centred on the ball's own axis, so every
+    // point of it is equally far from the centre and the bound above is exact.
+    // A HORIZONTAL ring on a leaned axis (a plate column) is not: it can leave
+    // the ball on one side while the part of its section past the plane is
+    // still inside the ball, and the bound would call that a cut. Where the
+    // bound finds one on such a record, the section itself is sampled.
+    if bound <= 0.0 || primitive.ring_normal == FrustumRingNormal::SegmentAxis {
+        return bound;
+    }
+    sampled_bite_outside_ball(&at, ring_normal, trim, centre, ball_radius, exit)
+}
+
+/// The deepest point past the plane and outside the ball of a record's
+/// sections, sampled: `STATIONS + 1` stations over `t ∈ [exit, 1]`, each
+/// section's disc at `RINGS` radii of `ANGLES` points. A resolution of the
+/// measurement, not a physical number: the depth is linear on the section, so
+/// the sampled maximum sits within one sample spacing of the true one.
+fn sampled_bite_outside_ball(
+    at: &impl Fn(f64) -> ([f64; 3], f64),
+    ring_normal: [f64; 3],
+    trim: crate::SeatTrim,
+    centre: [f64; 3],
+    ball_radius: f64,
+    exit: f64,
+) -> f64 {
+    const STATIONS: usize = 32;
+    const RINGS: usize = 4;
+    const ANGLES: usize = 64;
+    let reference = if ring_normal[0].abs() < 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let Some(e1) = geom_kernel::vec3::normalize(geom_kernel::vec3::cross(ring_normal, reference))
+    else {
+        return 0.0;
+    };
+    let e2 = geom_kernel::vec3::cross(ring_normal, e1);
+    let mut deepest = 0.0_f64;
+    for station in 0..=STATIONS {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "sample counts are small integers, exact in f64"
+        )]
+        let t = exit + (1.0 - exit) * station as f64 / STATIONS as f64;
+        let (point, radius) = at(t);
+        for ring in 1..=RINGS {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "sample counts are small integers, exact in f64"
+            )]
+            let rho = radius * ring as f64 / RINGS as f64;
+            for angle in 0..ANGLES {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "sample counts are small integers, exact in f64"
+                )]
+                let (sin, cos) = (std::f64::consts::TAU * angle as f64 / ANGLES as f64).sin_cos();
+                let q: [f64; 3] =
+                    std::array::from_fn(|i| point[i] + rho * (cos * e1[i] + sin * e2[i]));
+                let depth = -trim.support_side_distance_mm(q);
+                if depth > deepest
+                    && geom_kernel::vec3::norm(geom_kernel::vec3::sub(q, centre)) > ball_radius
+                {
+                    deepest = depth;
+                }
+            }
+        }
+    }
+    deepest
+}
+
+/// The derived limit angle of [`ShaftSeatBite::limit_deg`], in degrees, by
+/// bisection on `g(φ)` over `[0°, 90°]` with the seat law the lowering uses
+/// ([`seat_tip`]: `δ = min(law(cos φ), R)`, the law reached along the normal).
+fn seat_angle_limit_deg(
+    tip_radius_mm: f64,
+    shaft_radius_mm: f64,
+    ball_radius_mm: f64,
+    config: LoweringConfig,
+) -> f64 {
+    /// Halvings of the 90° interval: far finer than any angle this reports.
+    const BISECTIONS: usize = 48;
+    let exit_rise = (ball_radius_mm * ball_radius_mm - shaft_radius_mm * shaft_radius_mm)
+        .max(0.0)
+        .sqrt();
+    let clearance = |phi_deg: f64| -> f64 {
+        let (sin, cos) = phi_deg.to_radians().sin_cos();
+        let law = crate::contact::seat_depth_of(
+            config.pixel_pitch_mm,
+            config.layer_height_mm.get(),
+            config.tip_ball_factor.get(),
+            cos,
+            tip_radius_mm,
+            true,
+        );
+        let depth = law.min(ball_radius_mm);
+        (ball_radius_mm * cos - depth) + exit_rise * cos - shaft_radius_mm * sin
+    };
+    if clearance(0.0) < 0.0 {
+        return 0.0;
+    }
+    if clearance(90.0) >= 0.0 {
+        return 90.0;
+    }
+    let (mut holds, mut fails) = (0.0_f64, 90.0_f64);
+    for _ in 0..BISECTIONS {
+        let mid = 0.5 * (holds + fails);
+        if clearance(mid) >= 0.0 {
+            holds = mid;
+        } else {
+            fails = mid;
+        }
+    }
+    holds
+}
+
 fn lower_one_sweep_arm(
     arm: &SweepArm,
     config: LoweringConfig,
@@ -2497,5 +2814,127 @@ mod tests {
             );
         }
         assert!(outputs.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+}
+
+/// The seat trim's reach into a shaft outside its ball
+/// ([`tip_shaft_seat_bites`], fix/lip-seat 2026-09-29), measured on arms built
+/// by hand against a flat and a steep face.
+#[cfg(test)]
+mod shaft_seat_bite_tests {
+    use super::{tip_shaft_seat_bites, ShaftSeatBite, SweepArm, SweepArmLanding};
+    use plinth_core::LayerPlan;
+
+    const TIP_MM: f64 = 0.3;
+    const LENGTH_MM: f64 = 3.0;
+
+    fn layers() -> LayerPlan {
+        LayerPlan::new(0.0, vec![0.05; 200]).expect("a uniform layer plan")
+    }
+
+    /// A landed arm seated at `seat` on a face of outward normal `normal`
+    /// through `seat`, running `LENGTH_MM` along `axis` (unit, seat to base).
+    fn arm(seat: [f64; 3], normal: [f64; 3], axis: [f64; 3]) -> SweepArm {
+        SweepArm {
+            seat_mm: seat,
+            base_mm: std::array::from_fn(|i| seat[i] + LENGTH_MM * axis[i]),
+            tip_radius_mm: TIP_MM,
+            radius_profile_mm: vec![TIP_MM; 60],
+            seat_normal_mm: normal,
+            seat_face_point_mm: Some(seat),
+            landing: SweepArmLanding::Landed,
+            seats_into_model: true,
+        }
+    }
+
+    fn leaned(deg: f64) -> [f64; 3] {
+        let (sin, cos) = deg.to_radians().sin_cos();
+        [sin, 0.0, -cos]
+    }
+
+    fn measure(arms: &[SweepArm]) -> Vec<ShaftSeatBite> {
+        tip_shaft_seat_bites(arms, &layers())
+            .expect("a valid request")
+            .into_iter()
+            .map(|bite| bite.expect("every arm seats into a measured face"))
+            .collect()
+    }
+
+    /// Under a flat face a vertical arm keeps its whole section, and the
+    /// derived limit is the angle the measured cut starts at: one degree
+    /// inside it nothing outside the ball is cut, one degree past it the plane
+    /// reaches the shaft. The limit and the cut are two readings of one
+    /// geometry, so each checks the other.
+    #[test]
+    fn the_derived_limit_is_where_the_measured_cut_starts() {
+        let seat = [0.0, 0.0, 5.0];
+        let down = [0.0, 0.0, -1.0];
+        let square = measure(&[arm(seat, down, down)])[0];
+        assert!(
+            square.bite_mm.abs() < 1e-12,
+            "square arm cut {}",
+            square.bite_mm
+        );
+        assert!(square.approach_deg.abs() < 1e-9);
+        let limit = square.limit_deg;
+        assert!(
+            (40.0..60.0).contains(&limit),
+            "a 0.3 mm tip with its 1.5x ball under a flat face: limit {limit}"
+        );
+        let pair = measure(&[
+            arm(seat, down, leaned(limit - 1.0)),
+            arm(seat, down, leaned(limit + 1.0)),
+        ]);
+        assert!(
+            pair[0].bite_mm.abs() < 1e-12,
+            "{:.2} deg inside the limit cut {:.5} mm",
+            limit - 1.0,
+            pair[0].bite_mm
+        );
+        assert!(
+            pair[1].bite_mm > 1e-4,
+            "{:.2} deg past the limit cut only {:.6} mm",
+            limit + 1.0,
+            pair[1].bite_mm
+        );
+        assert!((pair[1].approach_deg - (limit + 1.0)).abs() < 1e-9);
+    }
+
+    /// The owner's case: a face 75° from horizontal (a drafted inner wall),
+    /// and an arm leaning 57.5° ALONG it, as a side-branch merging with a
+    /// neighbour does. Its axis runs nearly parallel to the plane, and the
+    /// trim reaches past the shaft's own axis: most of the section is cut.
+    /// The same arm leaning 57.5° straight out of the face keeps its section.
+    #[test]
+    fn an_arm_running_along_a_steep_face_loses_most_of_its_section() {
+        let seat = [0.0, 0.0, 5.0];
+        let (sin, cos) = 75.0_f64.to_radians().sin_cos();
+        let wall = [-sin, 0.0, -cos];
+        let (lean_sin, lean_cos) = 57.5_f64.to_radians().sin_cos();
+        let along = [0.0, lean_sin, -lean_cos];
+        let out_of = [-lean_sin, 0.0, -lean_cos];
+        let bites = measure(&[arm(seat, wall, along), arm(seat, wall, out_of)]);
+        assert!(bites[0].approach_deg > bites[0].limit_deg);
+        assert!(
+            bites[0].bite_mm > TIP_MM,
+            "along the wall the plane reaches past the axis: cut {:.4} mm",
+            bites[0].bite_mm
+        );
+        assert!(bites[1].approach_deg < bites[1].limit_deg);
+        assert!(
+            bites[1].bite_mm.abs() < 1e-12,
+            "out of the wall: cut {}",
+            bites[1].bite_mm
+        );
+    }
+
+    /// A member that seats into nothing (a brace, a mast) has no ball and no
+    /// seat trim, so nothing is measured.
+    #[test]
+    fn a_member_that_seats_into_nothing_is_not_measured() {
+        let mut brace = arm([0.0, 0.0, 5.0], [0.0, 0.0, -1.0], leaned(60.0));
+        brace.seats_into_model = false;
+        let bites = tip_shaft_seat_bites(&[brace], &layers()).expect("a valid request");
+        assert_eq!(bites, vec![None]);
     }
 }

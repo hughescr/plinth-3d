@@ -129,6 +129,20 @@ pub struct FootprintOutcome {
     pub moves_refused_slenderness: usize,
     pub moves_refused_drain: usize,
     pub members_checked: usize,
+    /// THE LIP-SEAT RULE's remedy 2 (2026-09-29): tips whose disc was on its
+    /// face but whose shaft the seat trim cut outside its ball, searched for a
+    /// seat further along the same face; those moved there; and slides of
+    /// such tips refused because the moved shaft would still be cut. A tip
+    /// whose disc is OFF its face is never refused for its shaft: contact area
+    /// is the only seat criterion.
+    pub tips_graded_for_section: usize,
+    pub tips_moved_for_section: usize,
+    pub moves_refused_section: usize,
+    /// The ids of the members moved for their section, in search order.
+    pub moved_for_section: Vec<u32>,
+    /// Section moves taken back because, drawn with every accepted move's
+    /// follow applied, the shaft was still cut (`settle_section_moves`).
+    pub section_moves_taken_back: usize,
     /// Disc samples graded, lattice points searched, layers rasterised, and
     /// candidate rounds re-derived: the path hits.
     pub disc_samples: usize,
@@ -514,6 +528,14 @@ pub(crate) fn apply(
         total[arm] += 1;
         on[arm] += usize::from(hit[index]);
     }
+    // THE LIP-SEAT RULE's remedy 2 (2026-09-29): a tip whose disc is on its
+    // face but whose shaft the seat trim cuts outside its ball joins the same
+    // search, for a seat further along the same face where the moved arm keeps
+    // its section. Measured by the lowering's own derivation. A tip whose disc
+    // is OFF its face is searched for contact area alone, as before this rule.
+    let bites_before = plinth_support::tip_shaft_seat_bites(arms, layer_plan)
+        .unwrap_or_else(|_| vec![None; arms.len()]);
+    let mut section_only = vec![false; arms.len()];
     let mut failing: Vec<usize> = Vec::new();
     for arm in 0..arms.len() {
         if total[arm] == 0 {
@@ -523,6 +545,11 @@ pub(crate) fn apply(
         if on[arm] == total[arm] {
             outcome.tips_on_face += 1;
             struts[arm].seat_face.footprint = Footprint::OnFace;
+            if crate::lip_seat::cuts(bites_before[arm].as_ref()) {
+                section_only[arm] = true;
+                outcome.tips_graded_for_section += 1;
+                failing.push(arm);
+            }
         } else {
             failing.push(arm);
         }
@@ -677,10 +704,53 @@ pub(crate) fn apply(
             .collect();
         let rederived = plinth_support::tip_contact_discs(&moved_arms, layer_plan)
             .unwrap_or_else(|_| vec![None; moved_arms.len()]);
+        // The section test, for the tips searched for their section ALONE
+        // (their disc is already on its face): each such move drawn with its
+        // own profile, all of them in one lowering call. A tip searched
+        // because its disc is OFF its face is not tested: contact area is the
+        // only seat criterion, and a slide that puts the disc back on its
+        // face is taken whatever it does to the shaft (the lip-seat census
+        // then warns about the shaft). Challenger, 2026-09-29: a guard here on
+        // every slide left Round_100's arm 195 with 22 % of its disc on the
+        // face.
+        let section_slots: Vec<usize> = proposals
+            .iter()
+            .enumerate()
+            .filter(|(_, (slot, _))| section_only[searches[*slot].arm])
+            .map(|(at, _)| at)
+            .collect();
+        let profiled: Vec<SweepArm> = section_slots
+            .iter()
+            .map(|&at| SweepArm {
+                radius_profile_mm: arms[searches[proposals[at].0].arm]
+                    .radius_profile_mm
+                    .clone(),
+                ..moved_arms[at].clone()
+            })
+            .collect();
+        let measured = plinth_support::tip_shaft_seat_bites(&profiled, layer_plan)
+            .unwrap_or_else(|_| vec![None; profiled.len()]);
+        let mut moved_bites: Vec<Option<plinth_support::ShaftSeatBite>> =
+            vec![None; proposals.len()];
+        for (&at, bite) in section_slots.iter().zip(measured) {
+            moved_bites[at] = bite;
+        }
         let mut resolved = vec![false; searches.len()];
         let mut on_face: Vec<(usize, [f64; 3])> = Vec::with_capacity(proposals.len());
-        for ((slot, _), (moved, disc)) in proposals.iter().zip(moved_arms.iter().zip(&rederived)) {
+        for (((slot, _), (moved, disc)), moved_bite) in proposals
+            .iter()
+            .zip(moved_arms.iter().zip(&rederived))
+            .zip(&moved_bites)
+        {
             let search = &searches[*slot];
+            // A tip searched for its section alone moves only onto a seat
+            // where the shaft keeps it. Its refusal is its own count, never a
+            // "refused by the limits" (that names the lean law, an unbraced
+            // run or the drain keep-out, and this tip keeps its seat anyway).
+            if section_only[search.arm] && crate::lip_seat::cuts(moved_bite.as_ref()) {
+                outcome.moves_refused_section += 1;
+                continue;
+            }
             let Some((frame, _)) = &frames[search.arm] else {
                 continue;
             };
@@ -752,11 +822,19 @@ pub(crate) fn apply(
         match accepted[slot] {
             Some(shift) => {
                 let length = geom_kernel::vec3::norm(shift);
-                outcome.tips_moved_onto_face += 1;
+                if section_only[arm] {
+                    outcome.tips_moved_for_section += 1;
+                    outcome.moved_for_section.push(struts[arm].id);
+                } else {
+                    outcome.tips_moved_onto_face += 1;
+                }
                 outcome.max_move_mm = outcome.max_move_mm.max(length);
                 struts[arm].seat_face.shift_mm = shift;
                 struts[arm].seat_face.footprint = Footprint::MovedOntoFace;
             }
+            // A disc already on its face keeps its seat and its status; the
+            // lip-seat census warns about its shaft.
+            None if section_only[arm] => {}
             None => {
                 #[expect(clippy::cast_precision_loss, reason = "sample counts are small")]
                 let fraction = on[arm] as f64 / total[arm].max(1) as f64;
@@ -774,6 +852,7 @@ pub(crate) fn apply(
             }
         }
     }
+    settle_section_moves(struts, arms, layer_plan, &mut outcome);
     // A moved seat moves its member's drawn axis (seat to base, straight), so
     // every member joined to that axis FOLLOWS it (`followed_shifts`): a
     // branch's landing and a brace's top move with the host's axis at their
@@ -792,6 +871,81 @@ pub(crate) fn apply(
         }
     }
     outcome
+}
+
+/// **A tip moved for its section keeps it on the geometry the file draws.**
+/// The search measured each such move with its own seat shifted and its base
+/// where it stood; but the moves are taken together, and a member whose host
+/// moved in the same set has its base FOLLOW the host's axis
+/// ([`followed_shifts`]), which re-tilts its shaft. Measured on the stilt
+/// plate: member 66 moved for its section and came out cut 0.0013 mm on the
+/// emitted field. So every section move is measured again on the drawn ends
+/// with every accepted shift applied (the lowering's own measurement, all of
+/// them in one call), and a move still cut is taken back: its disc was on its
+/// face before the move, so it keeps its seat, as a tip no slide held would.
+/// Taking one back can change what its dependants follow, so this repeats
+/// until nothing is taken back (each round removes at least one move).
+fn settle_section_moves(
+    struts: &mut [SweepStrut],
+    arms: &[SweepArm],
+    layer_plan: &LayerPlan,
+    outcome: &mut FootprintOutcome,
+) {
+    let mut taken_back = false;
+    while !outcome.moved_for_section.is_empty() {
+        let followed = followed_shifts(struts);
+        let members: Vec<usize> = outcome
+            .moved_for_section
+            .iter()
+            .filter_map(|id| struts.iter().position(|strut| strut.id == *id))
+            .collect();
+        let drawn: Vec<SweepArm> = members
+            .iter()
+            .map(|&index| {
+                let arm = &arms[index];
+                let Followed { seat_mm, base_mm } = followed[index];
+                let shift = struts[index].seat_face.shift_mm;
+                SweepArm {
+                    seat_mm: seat_mm
+                        .map_or(arm.seat_mm, |by| geom_kernel::vec3::add(arm.seat_mm, by)),
+                    base_mm: base_mm
+                        .map_or(arm.base_mm, |by| geom_kernel::vec3::add(arm.base_mm, by)),
+                    seat_face_point_mm: arm
+                        .seat_face_point_mm
+                        .map(|point| geom_kernel::vec3::add(point, shift)),
+                    ..arm.clone()
+                }
+            })
+            .collect();
+        let bites = plinth_support::tip_shaft_seat_bites(&drawn, layer_plan)
+            .unwrap_or_else(|_| vec![None; drawn.len()]);
+        let back: Vec<usize> = members
+            .iter()
+            .zip(&bites)
+            .filter(|(_, bite)| crate::lip_seat::cuts(bite.as_ref()))
+            .map(|(&index, _)| index)
+            .collect();
+        if back.is_empty() {
+            break;
+        }
+        taken_back = true;
+        for &index in &back {
+            let strut = &mut struts[index];
+            strut.seat_face.shift_mm = [0.0; 3];
+            strut.seat_face.footprint = Footprint::OnFace;
+            let id = strut.id;
+            outcome.moved_for_section.retain(|member| *member != id);
+            outcome.tips_moved_for_section = outcome.tips_moved_for_section.saturating_sub(1);
+            outcome.section_moves_taken_back += 1;
+        }
+    }
+    if taken_back {
+        outcome.max_move_mm = struts
+            .iter()
+            .filter(|strut| strut.seat_face.footprint == Footprint::MovedOntoFace)
+            .map(|strut| geom_kernel::vec3::norm(strut.seat_face.shift_mm))
+            .fold(0.0, f64::max);
+    }
 }
 
 /// Everything the batched move check reads that does not change within a

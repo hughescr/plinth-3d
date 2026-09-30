@@ -244,7 +244,9 @@ pub(crate) struct HeadJoinContext<'a> {
 }
 
 impl HeadJoinContext<'_> {
-    fn surface(&self) -> Option<&NativeSurface> {
+    /// The model surface, built on first need (the lip-seat rule reads it
+    /// too, for a re-landed member's solid clearance).
+    pub(crate) fn surface(&self) -> Option<&NativeSurface> {
         self.surface
             .get_or_init(|| {
                 let verts = self.mesh.verts();
@@ -1006,7 +1008,12 @@ fn base_point(context: &HeadJoinContext<'_>, cell: usize, layer: usize) -> [f64;
 /// `radius` is the member's widest drawn radius, as test 2 uses: it never
 /// under-states the disc. No new constant: the plate height, the drawn axis
 /// and the drawn radius only.
-fn stays_above_plate(centre: [f64; 3], base: [f64; 3], radius: f64, plate_z_mm: f64) -> bool {
+pub(crate) fn stays_above_plate(
+    centre: [f64; 3],
+    base: [f64; 3],
+    radius: f64,
+    plate_z_mm: f64,
+) -> bool {
     let reach_below = geom_kernel::vec3::normalize(geom_kernel::vec3::sub(base, centre))
         .map_or(radius, |axis| {
             radius * (1.0 - axis[2] * axis[2]).max(0.0).sqrt()

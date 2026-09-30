@@ -88,8 +88,20 @@ fn round_25_flipped_with(policy: &SweepPolicy) -> SweepPlan {
     place_with(&flipped(&mesh_for(&round_25())), "Round 25 flipped", policy)
 }
 
+/// The production policy WITH THE LIP-SEAT RULE OFF (re-scoped 2026-09-29,
+/// fix/lip-seat). The head-join fixtures exist for their leaned heads (Round 25
+/// arms 39, 41, 44 at ~53° from vertical) with a lander's sum-sized section
+/// in the seat zone. The lip-seat rule, which runs before the head-join rule,
+/// re-lands exactly those heads to meet their faces within the angle at which
+/// the seat trim keeps their section, so on the production field this fixture
+/// no longer shows the defect this rule exists for (measured: 0 joins in a
+/// seat zone, rule on or off). These tests grade the head-join rule on the
+/// field it was built against; `plinth-pipeline` `lip_seat::` grades the
+/// production field.
 fn production() -> SweepPolicy {
-    SweepPolicy::from_registry().expect("the registry supplies every sweep number")
+    SweepPolicy::from_registry()
+        .expect("the registry supplies every sweep number")
+        .without_lip_seat()
 }
 
 /// `r = sqrt(ℓ / (X · π))` inside the registered clamps: the area law, read

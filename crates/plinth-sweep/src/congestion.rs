@@ -104,6 +104,14 @@ pub(crate) struct RootDisc {
     under_silhouette: bool,
 }
 
+impl RootDisc {
+    /// The member whose root this is (the lip-seat rule drops a disc when it
+    /// re-lands its member off the plate or onto another cell).
+    pub(crate) const fn id(&self) -> u32 {
+        self.id
+    }
+}
+
 /// One census of a set of root discs.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CongestionCensus {
@@ -461,6 +469,27 @@ fn disc_cells(grid: &Grid, disc: &RootDisc) -> Vec<usize> {
 /// radius in the set. That is near-linear on a field of any size and needs no
 /// second data structure.
 fn overlap_pairs(discs: &[RootDisc]) -> usize {
+    let mut pairs = 0_usize;
+    for_each_overlap(discs, |_, _| pairs += 1);
+    pairs
+}
+
+/// Every overlapping pair of `discs` by member id, `(lower id, higher id)`,
+/// sorted: the same sweep line as [`overlap_pairs`], so the lip-seat rule
+/// can tell a pair its re-landings made from one the field already had.
+pub(crate) fn overlap_pair_ids(discs: &[RootDisc]) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    for_each_overlap(discs, |a, b| {
+        let (x, y) = (discs[a].id, discs[b].id);
+        out.push((x.min(y), x.max(y)));
+    });
+    out.sort_unstable();
+    out
+}
+
+/// The sweep line behind [`overlap_pairs`]: `visit(a, b)` once per
+/// intersecting unordered pair of slots.
+fn for_each_overlap(discs: &[RootDisc], mut visit: impl FnMut(usize, usize)) {
     let mut order: Vec<usize> = (0..discs.len()).collect();
     order.sort_unstable_by(|a, b| {
         discs[*a]
@@ -472,7 +501,6 @@ fn overlap_pairs(discs: &[RootDisc]) -> usize {
         .iter()
         .map(|disc| disc.radius_mm)
         .fold(0.0_f64, f64::max);
-    let mut pairs = 0_usize;
     for (slot, first) in order.iter().enumerate() {
         let a = discs[*first];
         for second in &order[slot + 1..] {
@@ -484,11 +512,10 @@ fn overlap_pairs(discs: &[RootDisc]) -> usize {
             let dx = b.x_mm - a.x_mm;
             let dy = b.y_mm - a.y_mm;
             if dx * dx + dy * dy < reach * reach {
-                pairs += 1;
+                visit(*first, *second);
             }
         }
     }
-    pairs
 }
 
 /// Run the congestion remedies over a SIZED field, in place, for ONE round.
