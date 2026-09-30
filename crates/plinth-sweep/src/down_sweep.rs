@@ -12,12 +12,22 @@
 //!
 //! Each layer's peel is a separate event. A print never peels two layers at
 //! once, so the design load on a piece of material is the **largest** event
-//! routed through it, not the sum of all of them. Collapsing the history into
-//! one max-field before spreading is conservative rather than merely cheap:
-//! allocation is monotone and positively homogeneous, so
-//! `spread(max(a,b)) ≥ max(spread(a), spread(b))` cellwise. Replacing the max
-//! with a sum is sabotage S7, and on the cavity box it turns a 1600 mm² plate
-//! reaction into 2756 mm² — a 72 % lie, which is why that oracle exists.
+//! routed through it, not the sum of all of them. Replacing the max with a sum
+//! is sabotage S7, and on the cavity box it turns a 1600 mm² plate reaction
+//! into 2756 mm² — a 72 % lie, which is why that oracle exists.
+//!
+//! # The raster routes; the per-event pass sizes (rule a′, 2026-09-29)
+//!
+//! This pass collapses the history into ONE max-field raster before spreading.
+//! That is conservative (`spread(max(a,b)) ≥ max(spread(a), spread(b))`), and
+//! on a body whose load walks down its own flanks to one line it is badly
+//! so: the per-column maxima of events that never peel together are SUMMED
+//! where they meet, and the Cylinder's lowest-line arm was charged 41.71 mm²
+//! where no single event puts more than 14.70 mm² on it. So the raster is kept
+//! for what it decides well — where each cell's load goes, which footprint an
+//! inserted arm comes from, and the whole-run accounting identities — and the
+//! SIZES come from [`crate::per_event`], which follows the routing this pass
+//! records one event at a time and takes the maximum only after.
 //!
 //! # Conservation is checked, not assumed
 //!
@@ -37,6 +47,8 @@
     clippy::needless_range_loop,
     reason = "batch-first: these loops walk several parallel per-cell rasters at one index"
 )]
+
+use std::collections::{HashMap, HashSet};
 
 use plinth_support::perception::SliceSolid;
 
@@ -143,9 +155,11 @@ pub struct DownSweepOutcome {
     /// stays in the one slot, as before 2026-09-29, and is counted here
     /// rather than dropped.
     pub contact_merges_kept_at_single_slot: u64,
-    /// Insertion rounds actually executed, summed over layers. A path-hit
-    /// counter: without it, `arms_inserted_by_load == 0` cannot be told apart
-    /// from an insertion step that never ran.
+    /// Times the area-law trigger was evaluated. With per-event sizing: once
+    /// per per-event pass (every pass reads every member's per-event routed
+    /// load against `ℓ_max`); under the max-field sabotage, once per layer. A
+    /// path-hit counter: without it, `arms_inserted_by_load == 0` cannot be
+    /// told apart from an insertion step that never ran.
     pub insertion_rounds: u64,
     /// `(layer, cell)` pairs where a LEANED arm's own axis one layer up was
     /// offered to the routing field as a root, i.e. where the arm stands in a
@@ -164,6 +178,18 @@ pub struct DownSweepOutcome {
     /// outcome; it is included in `uncarried_load_mm2` and named here so a
     /// wrong root can never read as conserved.
     pub misrouted_load_mm2: f64,
+    /// What the per-event sizing measured on the field this call left
+    /// ([`crate::per_event`]). Default (disabled) under the sabotage knob.
+    pub per_event: crate::per_event::PerEventReport,
+    /// The routing the last pass of this call recorded, which the per-event
+    /// sizing followed. Kept so a diagnostic on the finished field
+    /// ([`crate::rigid_share`]) follows the same paths. Empty under the
+    /// sabotage knob.
+    pub route_log: crate::per_event::RouteLog,
+    /// Per member (strut index): whether any peel event's load reaches it.
+    /// A member no event reaches is no load's nearest carrier. Empty under the
+    /// sabotage knob.
+    pub reached_by_event: Vec<bool>,
 }
 
 /// Whether the down-sweep may add arms of its own, and how many arms the whole
@@ -235,6 +261,13 @@ pub struct SizingPolicy {
     /// well as the column it occupies here. See
     /// [`crate::SweepPolicy::tip_column_roots`]; `false` is the sabotage form.
     pub tip_column_roots: bool,
+    /// Whether members are sized for their worst SINGLE peel event
+    /// ([`crate::per_event`], rule a′, owner-approved 2026-09-29) and the load
+    /// insertion is triggered by one event's routed load. **On in
+    /// production.** `false` is the sabotage form: the max-field ledger, which
+    /// sums the per-column maxima of different events where they meet
+    /// ([`crate::SweepPolicy::with_max_field_sizing`]).
+    pub per_event: bool,
 }
 
 /// Run the whole down-sweep over `struts`, filling their radius and carried
@@ -260,12 +293,33 @@ pub struct SizingPolicy {
 /// them, spaced by the hex spacing that puts that many carriers on the
 /// footprint the load actually came from.
 ///
+/// # Sized per event (rule a′, 2026-09-29)
+///
+/// The top-down pass below routes ONE max-over-events raster, and that raster
+/// stays the engine's routing and accounting device: it decides where every
+/// cell's load goes, which footprint an inserted arm is chosen from, and the
+/// whole-run identities (`injected = plate + uncarried + absorbed`). It no
+/// longer SIZES anything. Where its per-column maxima meet at a lowest line it
+/// sums the maxima of events that never peel together, so after each pass the
+/// per-event pass ([`crate::per_event`]) routes every event on its own along
+/// the paths this pass recorded and rewrites every member's ledger with the
+/// largest load any single event puts there.
+///
+/// The insertion trigger moves with it. The area law still decides — an arm
+/// gets siblings when the load routed to it exceeds `ℓ_max` — but the load it
+/// reads is ONE event's, taken from the previous pass of this call: the first
+/// pass inserts nothing, and while the per-event pass finds an arm over the
+/// limit, another pass inserts there (at most `max_rounds` of them). An
+/// insertion can move load that a lower trigger was computed without; the next
+/// pass re-measures, so an arm is never sized on a stale load, only possibly
+/// placed on one.
+///
 /// # Panics
 ///
-/// On a conservation residual above 1e-9 relative, and on a carried profile
-/// that decreases downward. Both are defects in this code rather than
-/// statements about a model, which is why they are assertions and not
-/// warnings.
+/// On a conservation residual above 1e-9 relative, per layer of the max-field
+/// raster or per peel event of the per-event pass. Both are defects in this
+/// code rather than statements about a model, which is why they are
+/// assertions and not warnings.
 pub fn run(
     grid: &Grid,
     slices: &[Vec<SliceSolid>],
@@ -273,6 +327,192 @@ pub fn run(
     sizing: SizingPolicy,
     insertion: InsertionPolicy,
     keep_out: &DrainKeepOut,
+) -> DownSweepOutcome {
+    let l_max = sizing.x_allowed
+        * core::f64::consts::PI
+        * sizing.tip_radius_max_mm
+        * sizing.tip_radius_max_mm;
+    if !sizing.per_event {
+        // SABOTAGE: today's order, max over events first and sum after.
+        return sweep_pass(
+            grid,
+            slices,
+            struts,
+            sizing,
+            insertion,
+            keep_out,
+            None,
+            None,
+            &mut Vec::new(),
+        );
+    }
+    let mut triggers: HashMap<u64, f64> = HashMap::new();
+    let mut refused: HashSet<u64> = HashSet::new();
+    let mut inserted = 0_u64;
+    let mut geometry_exhausted = 0_u64;
+    let mut evaluations = 0_u64;
+    let mut passes = 0_usize;
+    loop {
+        let mut log = crate::per_event::RouteLog::new(slices.len());
+        let mut refused_here = Vec::new();
+        let mut outcome = sweep_pass(
+            grid,
+            slices,
+            struts,
+            sizing,
+            insertion,
+            keep_out,
+            Some(&triggers),
+            Some(&mut log),
+            &mut refused_here,
+        );
+        passes += 1;
+        inserted += outcome.arms_inserted_by_load;
+        geometry_exhausted += outcome.insertion_geometry_exhausted;
+        refused.extend(refused_here);
+        let worst_max_field = struts
+            .iter()
+            .flat_map(|strut| strut.carried_mm2.iter().copied())
+            .fold(0.0_f64, f64::max);
+        let sized = crate::per_event::size(grid, slices, struts, &log, sizing, l_max);
+        outcome.overloaded.clear();
+        let (worst, worst_id) = apply_per_event_ledger(
+            grid,
+            slices.len(),
+            struts,
+            &sized.best,
+            sizing,
+            l_max,
+            &mut outcome.overloaded,
+        );
+        outcome.per_event = sized.report;
+        outcome.reached_by_event = sized.reached;
+        outcome.per_event.passes = passes;
+        outcome.per_event.worst_member_max_field_mm2 = worst_max_field;
+        outcome.per_event.worst_member_mm2 = worst;
+        outcome.per_event.worst_member_id = worst_id;
+        if insertion.enabled {
+            evaluations += 1;
+        }
+        // A trigger the geometry already refused is not re-tried: the search
+        // found nowhere to put a carrier, and it would find nowhere again.
+        let open: HashMap<u64, f64> = sized
+            .triggers
+            .into_iter()
+            .filter(|(key, _)| !refused.contains(key))
+            .collect();
+        let done = !insertion.enabled || open.is_empty();
+        let exhausted = !done && passes > insertion.max_rounds;
+        if done || exhausted {
+            outcome.arms_inserted_by_load = inserted;
+            outcome.insertion_geometry_exhausted = geometry_exhausted;
+            outcome.insertion_rounds = evaluations;
+            outcome.insertion_rounds_exhausted = if exhausted {
+                let layers: HashSet<usize> = open
+                    .keys()
+                    .map(|key| crate::per_event::unpack(*key).1)
+                    .collect();
+                layers.len() as u64
+            } else {
+                0
+            };
+            outcome.route_log = log;
+            return outcome;
+        }
+        triggers = open;
+    }
+}
+
+/// Rewrite every member's ledger with its per-event design load, and name the
+/// members over `ℓ_max`.
+///
+/// The design load at a layer is the running maximum, from the tip down, of
+/// the largest cumulative force any one event reached there
+/// ([`crate::per_event`]). An arm also never reads less than one cell of its
+/// own layer's peel, which is the floor the max-field ledger always gave it.
+/// Radius is the registered area law, then the member's own minimum and any
+/// thickened layer, exactly as the top-down pass applies them. Returns the
+/// heaviest member's load and id.
+fn apply_per_event_ledger(
+    grid: &Grid,
+    layers: usize,
+    struts: &mut [SweepStrut],
+    best: &[Vec<f64>],
+    sizing: SizingPolicy,
+    l_max: f64,
+    overloaded: &mut Vec<OverloadedStrut>,
+) -> (f64, u32) {
+    let floor = grid.cell_area_mm2() * sizing.alpha;
+    let mut worst = 0.0_f64;
+    let mut worst_id = u32::MAX;
+    for (member, strut) in struts.iter_mut().enumerate() {
+        if strut.k_bottom == usize::MAX {
+            continue;
+        }
+        let Some(best) = best.get(member) else {
+            continue;
+        };
+        let reads_peel = strut.kind == crate::StrutKind::Arm;
+        let alive = strut.k_top.min(layers) > strut.k_bottom;
+        let slots = strut.carried_mm2.len().min(best.len());
+        let mut running = 0.0_f64;
+        for slot in (0..slots).rev() {
+            let own = if reads_peel && alive { floor } else { 0.0 };
+            running = running.max(best[slot]).max(own);
+            let layer = strut.k_bottom + slot;
+            strut.carried_mm2[slot] = running;
+            let thickened = strut.thickened_mm.get(layer).copied().unwrap_or(0.0);
+            strut.radius_mm[slot] = size_arm(running, sizing)
+                .max(strut.min_radius_mm)
+                .max(thickened);
+            if running > l_max {
+                overloaded.push(OverloadedStrut {
+                    strut_id: strut.id,
+                    layer,
+                    carried_mm2: running,
+                    realized_x: running
+                        / (core::f64::consts::PI
+                            * sizing.tip_radius_max_mm
+                            * sizing.tip_radius_max_mm),
+                });
+            }
+        }
+        if running > worst {
+            worst = running;
+            worst_id = strut.id;
+        }
+    }
+    // Top of the stack first, then by id: the order the top-down pass named
+    // them in.
+    overloaded.sort_by(|a, b| b.layer.cmp(&a.layer).then(a.strut_id.cmp(&b.strut_id)));
+    (worst, worst_id)
+}
+
+/// One top-down pass over the max-over-events raster: route, insert, read,
+/// size.
+///
+/// `triggers` is `None` in the sabotage form, where the insertion is triggered
+/// by the max-field load itself and this pass's ledger is final. Otherwise it
+/// holds the per-event loads, above `ℓ_max`, that the previous pass measured,
+/// keyed by [`crate::per_event::entry`]; an empty table inserts nothing.
+/// `log` records the routing for the per-event pass. `refused` collects the
+/// triggers the geometry could not relieve.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the pass reads the grid, the slices, the policies and the keep-out it always read, \
+          plus the trigger table it is driven by and the two records it writes for the per-event \
+          pass; a struct would move the argument list rather than shorten it"
+)]
+fn sweep_pass(
+    grid: &Grid,
+    slices: &[Vec<SliceSolid>],
+    struts: &mut Vec<SweepStrut>,
+    sizing: SizingPolicy,
+    insertion: InsertionPolicy,
+    keep_out: &DrainKeepOut,
+    triggers: Option<&HashMap<u64, f64>>,
+    mut log: Option<&mut crate::per_event::RouteLog>,
+    refused: &mut Vec<u64>,
 ) -> DownSweepOutcome {
     let cells = grid.cells();
     let area = grid.cell_area_mm2();
@@ -485,6 +725,10 @@ pub fn run(
         let mut any_lost;
         let mut route_converged;
         let mut round = 0_usize;
+        // Per-event mode inserts at most once per layer per pass: the trigger
+        // table was measured before this pass, so after an insertion only the
+        // re-route below is needed, and the next pass re-measures.
+        let mut inserted_here = false;
         loop {
             load_out.iter_mut().for_each(|value| *value = 0.0);
             peel_fed.fill(false);
@@ -510,6 +754,13 @@ pub fn run(
             );
             route_converged = route.converged;
             let any_root = route.any_root;
+            // THE ROUTING THIS LAYER ENDS WITH, recorded for the per-event
+            // pass: every loaded cell of the layer above that does not go
+            // straight down, and where it goes. Each round re-routes, so each
+            // round's record replaces the last and the final round's stands.
+            if let Some(log) = log.as_deref_mut() {
+                log.hops[layer].clear();
+            }
             for cell in 0..cells {
                 let load = load_in[cell];
                 if load <= 0.0 {
@@ -525,6 +776,9 @@ pub fn run(
                 let target = if any_root { nearest[cell] } else { u32::MAX };
                 let reachable = target != u32::MAX
                     && f64::from(distance[cell]) <= sizing.lamina_reach_mm + grid.pitch_mm();
+                if let Some(log) = log.as_deref_mut() {
+                    log.record_hop(layer, cell, reachable.then_some(target as usize));
+                }
                 if reachable {
                     // Nearest first, share by area. One raster cell of carrier
                     // has exactly the source cell's own area, so the
@@ -614,19 +868,53 @@ pub fn run(
             if !insertion.enabled {
                 break;
             }
-            // Counted HERE, after the enable gate, so it is a witness that the
-            // area law was consulted on this layer and not merely that the
-            // down-sweep looped.
-            outcome.insertion_rounds += 1;
             insert.hosts.clear();
-            for &id in &alive_by_layer[layer] {
-                insert.hosts.push(struts[id as usize].cell_at(layer));
-            }
-            for &index in &growing {
-                insert.hosts.push(growing_cell(&struts[index]));
-            }
-            if !insert.hosts.iter().any(|&cell| load_out[cell] > l_max) {
-                break;
+            insert.host_load.clear();
+            insert.host_keys.clear();
+            match triggers {
+                // THE PER-EVENT TRIGGER. The load an arm is relieved for is
+                // what ONE peel event routes into it at this layer, measured
+                // by the previous pass; the max-field `load_out` here holds
+                // the sum of different events' column maxima and would insert
+                // arms for load that never arrives at once. Only arms the
+                // table names are hosts, and each is relieved once per pass.
+                Some(table) => {
+                    if inserted_here || table.is_empty() {
+                        break;
+                    }
+                    for &id in &alive_by_layer[layer] {
+                        let key = crate::per_event::entry(id as usize, layer);
+                        if let Some(&load) = table.get(&key) {
+                            if load > l_max {
+                                insert.hosts.push(struts[id as usize].cell_at(layer));
+                                insert.host_load.push(load);
+                                insert.host_keys.push(key);
+                            }
+                        }
+                    }
+                    if insert.hosts.is_empty() {
+                        break;
+                    }
+                }
+                // SABOTAGE: today's trigger, the max-field load.
+                None => {
+                    // Counted HERE, after the enable gate, so it is a witness
+                    // that the area law was consulted on this layer and not
+                    // merely that the down-sweep looped.
+                    outcome.insertion_rounds += 1;
+                    for &id in &alive_by_layer[layer] {
+                        insert.hosts.push(struts[id as usize].cell_at(layer));
+                    }
+                    for &index in &growing {
+                        insert.hosts.push(growing_cell(&struts[index]));
+                    }
+                    for &cell in &insert.hosts {
+                        insert.host_load.push(load_out[cell]);
+                    }
+                    if !insert.host_load.iter().any(|&load| load > l_max) {
+                        break;
+                    }
+                }
             }
             if round >= insertion.max_rounds {
                 // Rounds-exhausted: the max_rounds BOUND was hit, not the
@@ -644,7 +932,6 @@ pub fn run(
                 &cover_above,
                 &mut carriers,
                 &load_in,
-                &load_out,
                 &nearest,
                 &distance,
                 l_max,
@@ -661,9 +948,11 @@ pub fn run(
                 // the round bound above. Emit and warn: the arms that remain
                 // over the limit are named one by one in `overloaded`.
                 outcome.insertion_geometry_exhausted += 1;
+                refused.extend(insert.host_keys.iter().copied());
                 break;
             }
             outcome.arms_inserted_by_load += added;
+            inserted_here = triggers.is_some();
             round += 1;
         }
         if !route_converged {
@@ -901,6 +1190,13 @@ pub fn run(
                 if reads_peel {
                     load_out[cell] = 0.0;
                 }
+                // WHO READ THIS CELL, AND IN WHAT ORDER, for the per-event
+                // pass: the first arm took the cell's load, and a member that
+                // lands on the model here hands its own back to whoever reads
+                // after it.
+                if let Some(log) = log.as_deref_mut() {
+                    log.record_read(layer, cell, index, reads_peel);
+                }
                 outcome.strut_share_reads += 1;
                 let slot = arm.slot;
                 if struts[index].carried_mm2.len() <= slot {
@@ -1100,6 +1396,12 @@ struct LayerArm {
 struct InsertScratch {
     /// Cells of the arms alive at this layer, in the order they are read.
     hosts: Vec<usize>,
+    /// The load that triggers each host's relief, parallel to `hosts`: one
+    /// event's routed load in production, the max-field load under sabotage.
+    host_load: Vec<f64>,
+    /// Each host's per-event trigger key, parallel to `hosts` (empty under
+    /// sabotage), so a trigger the geometry refused is not re-tried.
+    host_keys: Vec<u64>,
     /// `host_slot[cell]` is the index into `hosts` of the arm sitting in that
     /// cell, or `u32::MAX`. Lets the footprints of EVERY overloaded arm be
     /// collected in ONE pass over the raster instead of one pass per arm.
@@ -1112,6 +1414,8 @@ impl InsertScratch {
     fn new(cells: usize) -> Self {
         Self {
             hosts: Vec::new(),
+            host_load: Vec::new(),
+            host_keys: Vec::new(),
             host_slot: vec![u32::MAX; cells],
             buckets: Vec::new(),
             accepted: Vec::new(),
@@ -1180,7 +1484,6 @@ fn insert_for_load(
     cover_above: &[bool],
     carriers: &mut [bool],
     load_in: &[f64],
-    load_out: &[f64],
     nearest: &[u32],
     distance: &[f32],
     l_max: f64,
@@ -1200,7 +1503,7 @@ fn insert_for_load(
     scratch.buckets.resize(scratch.hosts.len(), Vec::new());
     let mut any_overloaded = false;
     for (slot, &cell) in scratch.hosts.iter().enumerate() {
-        if load_out[cell] > l_max {
+        if scratch.host_load[slot] > l_max {
             scratch.host_slot[cell] = u32::try_from(slot).unwrap_or(u32::MAX);
             any_overloaded = true;
         }
@@ -1237,7 +1540,7 @@ fn insert_for_load(
             continue;
         }
         scratch.host_slot[host_cell] = u32::MAX;
-        let routed = load_out[host_cell];
+        let routed = scratch.host_load[slot];
         let footprint = core::mem::take(&mut scratch.buckets[slot]);
         if footprint.is_empty() {
             continue;
@@ -1653,6 +1956,7 @@ mod merge_load_tests {
             alpha: 1.0,
             lamina_reach_mm: 2.13,
             tip_column_roots: true,
+            per_event: true,
         }
     }
 

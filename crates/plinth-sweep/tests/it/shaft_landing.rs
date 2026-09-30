@@ -129,12 +129,27 @@ fn force_crosses_a_mid_shaft_junction_and_the_parent_grows_only_below_it() {
         };
         let below = parent.carried_mm2[slot];
         let handed = child.carried_mm2.first().copied().expect("a sized child");
+        // PER EVENT (rule a′, 2026-09-29): below the junction each event puts
+        // its own load on the parent PLUS the same event's load from the child.
+        // So the design load below is at least the larger of the two sides'
+        // own worst events, and at most their sum: the sum is reached only
+        // when both peak in the same event. Until rule a′ this read
+        // `below >= above + handed`, which is the max-field ledger adding the
+        // child's worst event to the parent's worst event whether or not they
+        // ever peel together.
         assert!(
-            below >= above + handed - 1.0e-9,
+            below >= above.max(handed) - 1.0e-9,
             "arm {} handed {handed} mm2 to arm {} at layer {layer}, which carried {above} mm2 \
              just above the junction and only {below} mm2 just below it",
             child.id,
             parent.id
+        );
+        assert!(
+            below <= above + handed + 1.0e-9,
+            "arm {} carries {below} mm2 below the junction with arm {} at layer {layer}, more \
+             than its own {above} mm2 above plus the child's worst {handed} mm2",
+            parent.id,
+            child.id
         );
         // The area law, at the junction and one layer above it.
         let expected_below = area_law_radius_mm(below);

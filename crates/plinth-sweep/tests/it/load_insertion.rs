@@ -14,12 +14,52 @@
 //! and on, and grades the difference, so a change that quietly stops the
 //! insertion firing turns it red rather than leaving a green test that means
 //! "the path never ran".
+//!
+//! # Re-scoped 2026-09-29 (per-event sizing, rule a′)
+//!
+//! The 20° tilted disc was this file's fixture, and its 514 warned arm-layers
+//! were the max-field ledger's: every column's largest event summed across an
+//! arm's catchment, as if all 300 layers of the slope peeled at once. Sized for
+//! its worst SINGLE event, no arm on it is over the limit and the area law asks
+//! for no arm at all (measured: 0 overloaded arm-layers with insertion off,
+//! scar 15.91 of 15.58 mm² required). So the disc now grades the TRIGGER: the
+//! per-event trigger must insert nothing there, and the max-field order
+//! (sabotage) must still insert. The insertion itself is graded on a fixture
+//! where one real event exceeds `ℓ_max`: a cone standing on its point, every
+//! layer of which walks down the cone to the arm under the point.
 
 use crate::harness;
 
 use harness::{sweep_with, x_allowed};
 use plinth_mesh::{make_recessed_disc, Mesh};
 use plinth_sweep::SweepPolicy;
+
+/// A solid cone standing on a small flat face: a disc of `bottom` radius at
+/// `z = 0` widening to `top` radius at `height`. Its flanks are well inside one
+/// lamina's reach, so reach seats arms under the flat face and nowhere else, and
+/// each layer's WHOLE peel event walks down the flanks to those arms, with room
+/// on the face beside them for more. (Standing on a point instead, the funnel
+/// ends where no second arm fits, and the engine rightly reports the geometry
+/// exhausted.)
+fn cone_on_a_small_face(bottom: f64, top: f64, height: f64, sections: u32) -> Mesh {
+    let mut verts: Vec<[f64; 3]> = vec![[0.0, 0.0, 0.0], [0.0, 0.0, height]];
+    for (radius, z) in [(bottom, 0.0), (top, height)] {
+        for section in 0..sections {
+            let theta = 2.0 * core::f64::consts::PI * f64::from(section) / f64::from(sections);
+            verts.push([radius * theta.cos(), radius * theta.sin(), z]);
+        }
+    }
+    let low = |section: u32| 2 + section % sections;
+    let high = |section: u32| 2 + sections + section % sections;
+    let mut tris = Vec::new();
+    for section in 0..sections {
+        tris.push([0, low(section + 1), low(section)]);
+        tris.push([low(section), low(section + 1), high(section + 1)]);
+        tris.push([low(section), high(section + 1), high(section)]);
+        tris.push([1, high(section), high(section + 1)]);
+    }
+    Mesh::new(verts, tris).expect("a closed truncated cone")
+}
 
 /// Tilt a mesh about the X axis — the same rigid rotation `oracle_ramp` uses,
 /// and for the same reason: the fixture under test is a SLOPE, and pinning the
@@ -55,11 +95,61 @@ fn required_scar_mm2(plan: &plinth_sweep::SweepPlan) -> f64 {
         .sum()
 }
 
+/// **The trigger is ONE event's routed load.** On the tilted disc no single
+/// event puts more than `ℓ_max` on any arm, so the area law asks for nothing;
+/// the max-field order sums the per-column maxima of hundreds of layers and
+/// inserts arms for load that never arrives at once.
+#[test]
+fn the_insertion_trigger_reads_one_event_and_the_max_field_would_insert_for_a_sum() {
+    let mesh = tilted_disc();
+    let policy = SweepPolicy::from_registry()
+        .expect("the registry")
+        .with_working_pitch_mm(0.1);
+    let per_event = sweep_with(&mesh, 0.1, &policy);
+    let max_field = sweep_with(&mesh, 0.1, &policy.with_max_field_sizing());
+    for (name, plan) in [
+        ("per event", &per_event),
+        ("max field (sabotage)", &max_field),
+    ] {
+        println!(
+            "{name}: arms {} (inserted by load {}), overloaded arm-layers {}, insertion rounds {}, \
+             per-event triggers over the limit {}",
+            plan.report.struts_total,
+            plan.report.arms_inserted_by_load,
+            plan.report.overloaded_struts.len(),
+            plan.report.insertion_rounds,
+            plan.report.per_event.triggers_over_limit,
+        );
+    }
+    assert!(
+        per_event.report.insertion_rounds > 0 && per_event.report.per_event.events > 0,
+        "the per-event trigger was never evaluated, so finding nothing proves nothing"
+    );
+    assert_eq!(
+        per_event.report.arms_inserted_by_load, 0,
+        "no single event puts more than l_max on an arm here, and arms were inserted anyway"
+    );
+    assert!(
+        per_event.report.overloaded_struts.is_empty(),
+        "{} arm-layers are over the limit under per-event sizing",
+        per_event.report.overloaded_struts.len()
+    );
+    assert!(
+        max_field.report.arms_inserted_by_load > 0,
+        "the max-field order no longer inserts on this fixture, so it no longer shows what the \
+         per-event trigger avoids"
+    );
+}
+
 #[test]
 fn the_area_law_places_arms_reach_never_asked_for_and_the_shortfall_falls() {
-    let mesh = tilted_disc();
+    let mesh = cone_on_a_small_face(2.0, 6.0, 4.0, 64);
     let policy = SweepPolicy::from_registry().expect("the registry");
-    let without = sweep_with(&mesh, 0.1, &policy.with_working_pitch_mm(0.1).without_load_insertion());
+    let without = sweep_with(
+        &mesh,
+        0.1,
+        &policy.with_working_pitch_mm(0.1).without_load_insertion(),
+    );
     let with = sweep_with(&mesh, 0.1, &policy.with_working_pitch_mm(0.1));
 
     let report = |name: &str, plan: &plinth_sweep::SweepPlan| {
@@ -102,8 +192,9 @@ fn the_area_law_places_arms_reach_never_asked_for_and_the_shortfall_falls() {
     );
     assert!(
         with.report.arms_inserted_by_load > 0,
-        "the area law asked for no arms on a 20 deg underside where {} arm-layers are over the \
-         limit; either the trigger never fired or the footprint search finds nothing",
+        "the area law asked for no arms on a cone whose every layer funnels to one arm, where \
+         {} arm-layers are over the limit; either the trigger never fired or the footprint \
+         search finds nothing",
         without.report.overloaded_struts.len(),
     );
 

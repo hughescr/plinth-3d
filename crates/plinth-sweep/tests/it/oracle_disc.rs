@@ -261,13 +261,19 @@ fn the_disc_is_supported_by_a_plate_rooted_field_at_the_measured_spacing() {
         merging.report.landings.plate,
         straight.report.landings.plate,
     );
-    let area_gap =
-        (merging.report.plate_contact_area_mm2 - straight.report.plate_contact_area_mm2).abs();
+    // A merge never ADDS plate area. Until rule a′ (2026-09-29) it could not
+    // remove any either: the max-field ledger added the child's worst event to
+    // the trunk's worst event, so the merged root had exactly the two roots'
+    // area. Sized per event, the trunk below the junction carries each event's
+    // own load plus the SAME event's load from the child, which is less
+    // wherever the two peak in different events: the plate contact area the
+    // owner accepted as a merge benefit (ruling 2026-09-05). Measured here:
+    // 156.44 mm² merged against 158.77 mm² straight.
     assert!(
-        area_gap <= 1.0e-4 * straight.report.plate_contact_area_mm2.max(1.0),
-        "plate contact AREA moved by {area_gap:.6} mm2 between the two landing rules ({:.6} on, \
-         {:.6} off); the plate holds the same load either way, so the area it holds it over is \
-         not the rule's to change",
+        merging.report.plate_contact_area_mm2
+            <= straight.report.plate_contact_area_mm2 * (1.0 + 1.0e-4),
+        "merging ADDED plate contact area ({:.6} mm2 with shaft landings on, {:.6} off); a \
+         junction carries at most the sum of the two members' loads",
         merging.report.plate_contact_area_mm2,
         straight.report.plate_contact_area_mm2,
     );

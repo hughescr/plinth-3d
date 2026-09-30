@@ -55,9 +55,11 @@ pub(crate) mod member_clearance;
 pub mod model_landing;
 pub mod orient_demand;
 pub mod peel;
+pub mod per_event;
 pub mod raster;
 pub mod reach;
 pub mod report;
+pub mod rigid_share;
 pub mod slenderness;
 pub mod tip_landing;
 pub mod up_sweep;
@@ -584,6 +586,24 @@ pub struct SweepPolicy {
     /// back the centreline-cell test alone, and watches braces enter the model
     /// and each other again; nothing in the pipeline turns it off.
     pub member_clearance: bool,
+    /// Whether every member is sized for its worst SINGLE peel event, routed on
+    /// its own ([`per_event`], rule a′, owner-approved 2026-09-29), and the
+    /// load insertion triggered by one event's routed load. **On in
+    /// production.** The knob exists so the staircase oracle can put the
+    /// max-field ledger back and watch N events funnelled to one arm size it
+    /// for all N at once; nothing in the pipeline turns it off.
+    pub per_event_sizing: bool,
+    /// Whether the flank arms of congestion remedy 2 must EARN their place on
+    /// the finished field: they are kept only if withdrawing them would leave
+    /// more stacked root area on the plate or more overloaded arm-layers
+    /// ([`congestion`], 2026-09-29). **On in production.** The knob exists so
+    /// the drill can keep arms that carry nothing and watch the test go red.
+    pub flank_relief_check: bool,
+    /// Whether the rigid-body share diagnostic ([`rigid_share`]) runs on the
+    /// finished field. It sizes nothing and moves nothing; it only names arms
+    /// in a WARNING. On for every emitted field; [`run_sweep`], the orientation
+    /// search's pricing entry, turns it off because no score reads it.
+    pub rigid_share_diagnostic: bool,
     pub limits: SweepLimits,
 }
 
@@ -657,6 +677,9 @@ impl SweepPolicy {
                 .diagnostic()
                 .get(),
             member_clearance: true,
+            per_event_sizing: true,
+            flank_relief_check: true,
+            rigid_share_diagnostic: true,
             limits: SweepLimits {
                 cell_layer_budget: placeholders.sweep_cell_layer_budget().diagnostic().get(),
                 ..SweepLimits::production()
@@ -853,6 +876,29 @@ impl SweepPolicy {
         self.congestion_flank_arms = false;
         self
     }
+
+    /// Size every member from the max-over-events raster, the way this engine
+    /// did before rule a′ (2026-09-29): each column's maximum over all events
+    /// is taken FIRST and the maxima are summed where the routing brings them
+    /// together, so an arm at a lowest line is sized for peaks from different
+    /// layers added as if they peeled at once. **Sabotage only**: the staircase
+    /// oracle (`per_event_sizing::`) must go red under it, and nothing in the
+    /// pipeline sets it.
+    #[must_use]
+    pub const fn with_max_field_sizing(mut self) -> Self {
+        self.per_event_sizing = false;
+        self
+    }
+
+    /// Keep every flank arm remedy 2 inserted, whether or not the finished
+    /// field needs it. **Sabotage only**: the flank-relief test must go red
+    /// under it on a fixture whose flank arms carry nothing, and nothing in the
+    /// pipeline sets it.
+    #[must_use]
+    pub const fn without_flank_relief_check(mut self) -> Self {
+        self.flank_relief_check = false;
+        self
+    }
 }
 
 /// Place and size a support field for one oriented, lifted mesh.
@@ -862,12 +908,21 @@ impl SweepPolicy {
 /// derives its own layer count and truncates at the model top, because the
 /// pipeline's plan carries a +1.0 mm headroom and a 1,000-layer minimum that
 /// belong to the sealed-run gates rather than to this engine.
+///
+/// This is the entry the orientation search prices every candidate pose
+/// through, so it skips the rigid-body diagnostic ([`rigid_share`]): that one
+/// is a WARNING about the field that is emitted, and it decides nothing a
+/// candidate pose is scored on.
 pub fn run_sweep(
     mesh: &Mesh,
     plan: &LayerPlan,
     policy: &SweepPolicy,
 ) -> Result<SweepPlan, SweepError> {
-    run_sweep_with_drains(mesh, plan, policy, &[])
+    let policy = SweepPolicy {
+        rigid_share_diagnostic: false,
+        ..*policy
+    };
+    run_sweep_with_drains(mesh, plan, &policy, &[])
 }
 
 /// Place and size a support field, knowing where this model's drains come out.
@@ -1040,6 +1095,7 @@ pub fn run_sweep_with_drains(
         alpha: peel::alpha(policy.peel_field_mode),
         lamina_reach_mm,
         tip_column_roots: policy.tip_column_roots,
+        per_event: policy.per_event_sizing,
     };
     let minimum_load =
         policy.x_allowed * core::f64::consts::PI * policy.tip_radius_min_mm.powi(2);
@@ -1227,6 +1283,25 @@ pub fn run_sweep_with_drains(
                     policy.flare_r_factor,
                     &congestion_outcome.inserted_ids,
                 );
+        }
+    }
+    // THE FLANK ARMS EARN THEIR PLACE ON THE SIZED FIELD, or are withdrawn,
+    // before the slenderness lane ties anything to them.
+    if policy.congestion && policy.flank_relief_check {
+        let withdrawn = withdraw_idle_flank_arms(
+            &grid,
+            &history,
+            &slices,
+            &mut struts,
+            sizing,
+            insertion,
+            &keep_out,
+            policy.flare_r_factor,
+            &mut congestion_outcome,
+            &mut outcome,
+        );
+        if withdrawn > 0 {
+            set_interior(&mut struts, &history);
         }
     }
     // What THIS lane left, before slenderness has its say. Published beside the
@@ -1462,6 +1537,26 @@ pub fn run_sweep_with_drains(
         .filter(|strut| !matches!(strut.landing, Landing::Plate))
         .count();
 
+    // THE RIGID-BODY READING, on the finished and sized field, along the same
+    // routing the last down-sweep recorded. A WARNING only: it moves and sizes
+    // nothing (`rigid_share`).
+    let rigid_share = if policy.rigid_share_diagnostic {
+        rigid_share::diagnose(
+            &grid,
+            &slices,
+            &struts,
+            &outcome.route_log,
+            height,
+            policy.x_allowed
+                * core::f64::consts::PI
+                * policy.tip_radius_max_mm
+                * policy.tip_radius_max_mm,
+            policy.tip_radius_max_mm,
+        )
+    } else {
+        rigid_share::RigidShareReport::default()
+    };
+
     // The escape check runs on the FINISHED field, struts and all, because a
     // check that ran before sizing would be answering about a field nobody
     // prints. Its verdict is published and warned on; it never withdraws an
@@ -1498,6 +1593,7 @@ pub fn run_sweep_with_drains(
     report.drain_keep_out_refusals = keep_out.refusals();
     report.drain_seat_refusals = keep_out_refusals;
     report.escape = escape;
+    report.rigid_share = rigid_share;
     report.arms_leaned = arms_leaned;
     report.arms_merged = arms_merged;
     report.lean_paths_blocked = lean_paths_blocked;
@@ -1947,9 +2043,20 @@ fn remove_under_loaded(
     if span_check {
         *refused_by_span += refuse_uncovered_spans(grid, struts, &mut doomed, reach_mm, layers);
     }
+    drop_members(struts, &doomed);
+    doomed.iter().filter(|flag| **flag).count()
+}
+
+/// Remove the doomed members and renumber the rest, re-pointing every landing
+/// and every recorded fallback at the new ids. A landing on a removed member
+/// falls through to the plate rather than pointing at nothing. Returns the
+/// old-to-new id map (`u32::MAX` for a removed member).
+fn drop_members(struts: &mut Vec<SweepStrut>, doomed: &[bool]) -> Vec<u32> {
     let removed = doomed.iter().filter(|flag| **flag).count();
     if removed == 0 {
-        return 0;
+        return (0..struts.len())
+            .map(|index| u32::try_from(index).unwrap_or(u32::MAX))
+            .collect();
     }
     let mut kept = Vec::with_capacity(struts.len() - removed);
     let mut remap = vec![u32::MAX; struts.len()];
@@ -1982,9 +2089,131 @@ fn remove_under_loaded(
                 Some((Landing::Strut { id: mapped, layer }, k_bottom))
             };
         }
+        if let Some(parent) = strut.seat_on_strut {
+            let mapped = remap.get(parent as usize).copied().unwrap_or(u32::MAX);
+            strut.seat_on_strut = (mapped != u32::MAX).then_some(mapped);
+        }
     }
     *struts = kept;
-    removed
+    remap
+}
+
+/// **A flank arm stays only if the finished field needs it** (2026-09-29).
+///
+/// Remedy 2 seats its flank arms against a pre-sizing estimate: the arms do not
+/// exist yet when the count is chosen, so nothing then can say whether any load
+/// will reach them. Measured on the Cylinder, the four seated at the equator
+/// tangent carry 0.00 mm² under the engine's routing and at most 0.65 mm²
+/// under any physical reading of the load share, because a cell above their
+/// tips always has a model column beside it at distance zero
+/// (`cylinder-load-sharing.md`, §3). They relieve nothing, and they cost two
+/// long leaning arms each, and the ties those draw.
+///
+/// # The rule, stated as a comparison and not a threshold
+///
+/// The lane's flank arms are measured by what the field would be WITHOUT them:
+/// they are withdrawn, the down-sweep sizes what is left, and they come back
+/// only if that field is measurably worse on a quantity a flank arm exists to
+/// improve —
+///
+/// * more stacked flared root area on the plate (the congestion census's
+///   integer cell count, so the comparison is exact), or
+/// * more overloaded arm-layers (a load that would otherwise overload an arm),
+///   or
+/// * more load reaching no carrier.
+///
+/// If the set is needed, any member of it that no peel event reaches is still
+/// withdrawn: its column is no load's nearest carrier, so removing it changes
+/// no event's path and no other arm's load, and the census can only lose its
+/// disc. A flank arm another member lands on carries that member and stays.
+///
+/// Returns the number withdrawn. The caller's field and outcome are replaced
+/// only when arms are withdrawn.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the comparison re-runs the down-sweep, so it reads everything that sweep reads, plus \
+          the column history the census is measured over and the lane outcome it reports into"
+)]
+fn withdraw_idle_flank_arms(
+    grid: &Grid,
+    history: &ColumnHistory,
+    slices: &[Vec<plinth_support::perception::SliceSolid>],
+    struts: &mut Vec<SweepStrut>,
+    sizing: down_sweep::SizingPolicy,
+    insertion: down_sweep::InsertionPolicy,
+    keep_out: &DrainKeepOut,
+    flare_r_factor: f64,
+    lane: &mut congestion::CongestionOutcome,
+    outcome: &mut down_sweep::DownSweepOutcome,
+) -> usize {
+    let mut is_a_parent = vec![false; struts.len()];
+    for strut in struts.iter() {
+        if let Landing::Strut { id, .. } = strut.landing {
+            if let Some(flag) = is_a_parent.get_mut(id as usize) {
+                *flag = true;
+            }
+        }
+    }
+    let candidates: Vec<usize> = lane
+        .inserted_ids
+        .iter()
+        .map(|id| *id as usize)
+        .filter(|&index| {
+            struts
+                .get(index)
+                .is_some_and(|strut| strut.kind == StrutKind::Arm && !is_a_parent[index])
+        })
+        .collect();
+    if candidates.is_empty() {
+        return 0;
+    }
+    let measure = |struts: &[SweepStrut], outcome: &down_sweep::DownSweepOutcome| {
+        let census = congestion::measure(grid, history, struts, flare_r_factor);
+        (
+            census.all.stacked_area_mm2,
+            outcome.overloaded.len(),
+            outcome.uncarried_load_mm2,
+        )
+    };
+    let with = measure(struts, outcome);
+    let try_without = |doomed: &[bool]| {
+        let mut trial = struts.clone();
+        let remap = drop_members(&mut trial, doomed);
+        let trial_outcome = down_sweep::run(grid, slices, &mut trial, sizing, insertion, keep_out);
+        (trial, trial_outcome, remap)
+    };
+    let mut doomed = vec![false; struts.len()];
+    for &index in &candidates {
+        doomed[index] = true;
+    }
+    let (mut trial, mut trial_outcome, mut remap) = try_without(&doomed);
+    let without = measure(&trial, &trial_outcome);
+    lane.flank_relief_evaluated = true;
+    lane.flank_relief_with = [with.0, with.1 as f64, with.2];
+    lane.flank_relief_without = [without.0, without.1 as f64, without.2];
+    let needed = without.0 > with.0 || without.1 > with.1 || without.2 > with.2;
+    if needed {
+        // The set earns its place; its members no event reaches still do not.
+        doomed.fill(false);
+        for &index in &candidates {
+            doomed[index] = !outcome.reached_by_event.get(index).copied().unwrap_or(true);
+        }
+        if !doomed.iter().any(|flag| *flag) {
+            return 0;
+        }
+        (trial, trial_outcome, remap) = try_without(&doomed);
+    }
+    let withdrawn = doomed.iter().filter(|flag| **flag).count();
+    *struts = trial;
+    *outcome = trial_outcome;
+    lane.inserted_ids = lane
+        .inserted_ids
+        .iter()
+        .filter_map(|id| remap.get(*id as usize).copied())
+        .filter(|id| *id != u32::MAX)
+        .collect();
+    lane.flank_arms_withdrawn += withdrawn;
+    withdrawn
 }
 
 /// Un-doom every candidate whose removal would leave a layer of its own
@@ -2278,6 +2507,8 @@ fn build_report(
         congestion_lane: crate::congestion::CongestionOutcome::default(),
         seat_footprint: crate::footprint::FootprintOutcome::default(),
         head_join: crate::head_join::HeadJoinOutcome::default(),
+        per_event: outcome.per_event.clone(),
+        rigid_share: crate::rigid_share::RigidShareReport::default(),
         junctions_at_parent_top,
         junctions_mid_shaft,
         support_volume_mm3,

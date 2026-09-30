@@ -185,7 +185,8 @@ pub struct SweepRunReport {
     /// over-the-limit; more rounds would not have changed this. A warning on
     /// an emitted file; the arms themselves are named in `overloaded_struts`.
     pub insertion_geometry_exhausted: u64,
-    /// Insertion rounds executed, summed over layers. A path-hit counter:
+    /// Times the area-law trigger was evaluated (per per-event pass; per layer
+    /// under the max-field sabotage). A path-hit counter:
     /// `arms_inserted_by_load == 0` must not be readable as "no arm needed one"
     /// when it in fact means "the step never ran".
     pub insertion_rounds: u64,
@@ -277,6 +278,14 @@ pub struct SweepRunReport {
     /// trunk's seat zone, the landers moved down their trunk, the joins kept
     /// by reason, and the finished field's census.
     pub head_join: crate::head_join::HeadJoinOutcome,
+    /// Per-event sizing (rule a′, 2026-09-29) on the finished field: events
+    /// routed, the per-event conservation residual, the path-hit counts, and
+    /// the heaviest member under this rule beside the max-field ledger it
+    /// replaced.
+    pub per_event: crate::per_event::PerEventReport,
+    /// The rigid-body reading of the load share (2026-09-29): a WARNING-only
+    /// diagnostic that never sizes; the arms whose rigid share passes `ℓ_max`.
+    pub rigid_share: crate::rigid_share::RigidShareReport,
     /// **The resin the area law SIZED**, in mm³: `π r²` integrated along every
     /// arm's own axis, layer by layer, with a leaned layer measured along its
     /// slant rather than its rise.

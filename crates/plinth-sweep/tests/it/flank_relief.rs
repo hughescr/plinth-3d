@@ -179,3 +179,75 @@ fn flank_arms_that_relieved_nothing_are_not_repeated() {
         "the stack never failed to shrink on this fixture, so the rule was never exercised"
     );
 }
+
+/// **A flank arm stays only if the finished field needs it** (2026-09-29).
+///
+/// Remedy 2 still runs on this fixture and seats its flank arms; sized per
+/// event they carry nothing the field would miss, so the field without them has
+/// no more stacked root area, no more overloaded arm-layers and no more
+/// uncarried load, and the rule withdraws them before any tie is placed. The
+/// sabotage knob keeps them and they come back on the finished field. The
+/// comparison is read off the published report; nothing here re-derives it.
+#[test]
+fn flank_arms_that_the_finished_field_does_not_need_are_withdrawn() {
+    let mesh = make_laid_tube().expect("the laid tube fixture");
+    let policy = SweepPolicy::from_registry().expect("the registry supplies every sweep number");
+    let plan = sweep_with(&mesh, 0.0, &policy);
+    let kept = sweep_with(&mesh, 0.0, &policy.without_flank_relief_check());
+    let lane = &plan.report.congestion_lane;
+    let flank_members = |plan: &plinth_sweep::SweepPlan| {
+        let lane = &plan.report.congestion_lane;
+        plan.struts
+            .iter()
+            .filter(|s| lane.inserted_ids.contains(&s.id) && s.kind == StrutKind::Arm)
+            .count()
+    };
+    println!(
+        "laid tube, authored pose: {} flank arms inserted, {} withdrawn; with them {:?}, without \
+         them {:?}; finished field {} flank arms (sabotage: {} of {} inserted)",
+        lane.arms_inserted,
+        lane.flank_arms_withdrawn,
+        lane.flank_relief_with,
+        lane.flank_relief_without,
+        flank_members(&plan),
+        flank_members(&kept),
+        kept.report.congestion_lane.arms_inserted,
+    );
+    assert!(
+        lane.arms_inserted > 0 && lane.flank_relief_evaluated,
+        "remedy 2 or the relief comparison never ran, so this test proves nothing"
+    );
+    // The rule's own premise, from the published comparison: not one of the
+    // three quantities is larger without the flank arms.
+    for (what, with, without) in [
+        "stacked root area",
+        "overloaded arm-layers",
+        "uncarried load",
+    ]
+    .iter()
+    .zip(lane.flank_relief_with)
+    .zip(lane.flank_relief_without)
+    .map(|((what, with), without)| (what, with, without))
+    {
+        assert!(
+            without <= with,
+            "{what} is larger without the flank arms ({without} against {with}), yet they were \
+             withdrawn"
+        );
+    }
+    assert_eq!(
+        lane.flank_arms_withdrawn, lane.arms_inserted,
+        "flank arms that relieve nothing were left on the field"
+    );
+    assert_eq!(
+        flank_members(&plan),
+        0,
+        "a withdrawn flank arm is still on the finished field"
+    );
+    // SABOTAGE: keep them, and they are there.
+    assert_eq!(kept.report.congestion_lane.flank_arms_withdrawn, 0);
+    assert!(
+        flank_members(&kept) > 0,
+        "with the check off the flank arms should stay on the finished field"
+    );
+}
