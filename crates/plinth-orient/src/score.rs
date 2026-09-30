@@ -55,7 +55,7 @@
 //! arms of measured burden. Two missing quantities follow, both measurable
 //! only from a real support field and both folded in at the same commit-tier
 //! stage: the MODEL-LANDING scar — `Σ` over the arms that land on the model
-//! of `π r_seat² × fragility × (1 + D)` of the landed face — and the
+//! of `π r_seat² × (fragility + D)` of the landed face — and the
 //! TIP-CONTACT scar — the same product over the faces the arms' TIPS carry,
 //! excluding a face the fold above already counts (`plinth_sweep::tip_landing`'s
 //! own doc has the double-counting choice and the measurement behind it). Both
@@ -66,6 +66,26 @@
 //! by [`crate::search`] at the commit tier's production stage. Here they are
 //! [`CandidateTerms::landing_scar_raw_mm2`] and
 //! [`CandidateTerms::tip_scar_raw_mm2`] `= None`: a stated absence.
+//!
+//! ## Fragility and display ADD; neither scales the other (2026-09-29)
+//!
+//! Every scar half prices an area by `(fragility + D)`: `Σ_down(area ×
+//! (fragility + D))` here, and `π r² × (fragility + D)` for the two contact
+//! scars. Both fields are dimensionless in `[0, 1]`, so each half is an area
+//! in mm², and `ORIENT_SCAR_WEIGHT` prices both. `plinth-mesh/src/display.rs`
+//! defines the two apart: delicacy asks *would a support break this*,
+//! display asks *would a support spoil the look of this*, "neither is
+//! expressed in terms of the other". Two independent harms of one contact
+//! add.
+//!
+//! Until 2026-09-29 the display field entered as a multiplier, `area ×
+//! fragility × (1 + D)`, so a display face was protected only in proportion
+//! to its fragility, and a large, sturdy, textured base top was nearly
+//! unpriced. On the Morel base that charge was 6.685 mm² against the 21.3 mm²
+//! of fragility its flip saves on the underside, so the pose was decided by
+//! support-placement details and turned over on develop `0f70cf2`
+//! (`plinth-evidence/.../field-2026-09-28/lanes/morel-pose.md`). Where
+//! `D = 0` the two forms are the same number, bit for bit.
 //!
 //! ## The search space is S², not SO(3)
 //!
@@ -144,7 +164,7 @@ pub const ORIENT_SCAR_WEIGHT_ID: &str = "ORIENT_SCAR_WEIGHT";
 /// stamp what the scar term's display factor was measured with. **No new
 /// WEIGHT is registered for the display factor and none is read**: the scar
 /// term keeps [`ORIENT_SCAR_WEIGHT_ID`] unchanged and the field enters as a
-/// dimensionless multiplier `1 + D`.
+/// dimensionless per-area harm `D` beside fragility: `area × (fragility + D)`.
 pub const DISPLAY_VIEW_DIRECTIONS_ID: &str = "DISPLAY_VIEW_DIRECTIONS";
 pub const DISPLAY_DETAIL_TIP_MULTIPLE_ID: &str = "DISPLAY_DETAIL_TIP_MULTIPLE";
 pub const OVERHANG_ANGLE_DEG_ID: &str = "OVERHANG_ANGLE_DEG";
@@ -614,7 +634,7 @@ pub struct CandidateTerms {
     pub peel_term: f64,
     pub height_mm: f64,
     pub scar_term: f64,
-    /// `Σ_down(area_mm² × fragility × (1 + display))` before the weight and the
+    /// `Σ_down(area_mm² × (fragility + display))` before the weight and the
     /// cm² conversion, carried so a report can show the measurement separately
     /// from its price. Equal to `fragility_raw_mm2 + display_raw_mm2` by
     /// construction.
@@ -624,12 +644,13 @@ pub struct CandidateTerms {
     /// **Fragility and display are two named quantities, not one blended
     /// number** (owner ruling, 2026-09-03), and this is the fragility half.
     pub fragility_raw_mm2: f64,
-    /// `Σ_down(area_mm² × fragility × display)`: the display half, the
-    /// INCREMENT the display-face field adds. Zero exactly when no face that
-    /// this pose turns downward carries display value, which is what makes
-    /// `D = 0` reproduce the pre-display objective rather than approximate it.
+    /// `Σ_down(area_mm² × display)`: the display half, the INCREMENT the
+    /// display-face field adds. Not scaled by fragility (2026-09-29; see the
+    /// module doc). Zero exactly when no face that this pose turns downward
+    /// carries display value, which is what makes `D = 0` reproduce the
+    /// pre-display objective rather than approximate it.
     pub display_raw_mm2: f64,
-    /// `Σ_model-landings(π r_seat² × fragility × (1 + display))` of the landed
+    /// `Σ_model-landings(π r_seat² × (fragility + display))` of the landed
     /// face: the scar the SUPPORT FIELD leaves on the model, as opposed to the
     /// two halves above, which price the model's own down-facing area.
     ///
@@ -644,7 +665,7 @@ pub struct CandidateTerms {
     /// where it reads as "not measured" rather than "measured, and nothing
     /// landed".
     pub landing_scar_raw_mm2: Option<f64>,
-    /// `Σ_tips(π r_tip² × fragility × (1 + display))` of the face each arm's
+    /// `Σ_tips(π r_tip² × (fragility + display))` of the face each arm's
     /// TIP carries — the mirror of [`Self::landing_scar_raw_mm2`], priced at
     /// the other end of the arm, and the reason a support field standing on
     /// the model's own delicate down-facing surface (not merely seated on
@@ -852,7 +873,7 @@ pub struct OrientFaceTable {
     delicacy_digest: Option<String>,
     /// The display-face field D, in source face order, or EMPTY when no field
     /// was built. An empty display vector is a stated absence and is read as
-    /// the multiplier `1 + 0`, which is the pre-display objective exactly.
+    /// `D = 0`, which is the pre-display objective exactly.
     display: Vec<f64>,
     /// `None` when no display field was built — the same stated-absence rule
     /// [`Self::delicacy_digest`] follows.
@@ -1391,7 +1412,7 @@ fn score_one(
         }
     } else if table.display.is_empty() {
         // No display field was built for this table. The absence is read as
-        // the multiplier `1 + 0` and is spelled as a SEPARATE loop rather than
+        // `D = 0` and is spelled as a SEPARATE loop rather than
         // as an index into an empty vector, for the same structural reason the
         // scar-free branch is hoisted: the pre-display objective must be
         // reproduced by not reading a field, not by multiplying one by zero.
@@ -1403,20 +1424,22 @@ fn score_one(
             }
         }
     } else {
-        // `Σ_down(area × fragility × (1 + D))`, accumulated as its two named
-        // halves. **The association is pinned to reproduce the pre-display
-        // fold bit for bit when D is zero**: the fragility half is the
-        // identical `area * delicacy` product in the identical order, and the
-        // display half is a separate sum that adds `0.0` per face when the
-        // field is zero. Distributing `(1 + D)` inside the multiply instead
-        // would round differently and could move an argmin at 650 candidates
-        // for a field that says nothing.
+        // `Σ_down(area × (fragility + D))`, accumulated as its two named
+        // halves. The two harms ADD (2026-09-29): a support that would break
+        // a face and a support that would spoil its look are two independent
+        // harms, and a sturdy display face is spoiled exactly as much as a
+        // fragile one. **The association is pinned to reproduce the
+        // pre-display fold bit for bit when D is zero**: the fragility half
+        // is the identical `area * delicacy` product in the identical order,
+        // and the display half is a separate sum that adds `0.0` per face
+        // when the field is zero. Distributing `(fragility + D)` inside the
+        // multiply instead would round differently and could move an argmin
+        // at 650 candidates for a field that says nothing.
         for face in 0..table.tris.len() {
             if nz[face * stride + column] < down_limit {
                 support_area_mm2 += table.areas_mm2[face];
-                let fragility = table.areas_mm2[face] * table.delicacy[face];
-                fragility_raw_mm2 += fragility;
-                display_raw_mm2 += fragility * table.display[face];
+                fragility_raw_mm2 += table.areas_mm2[face] * table.delicacy[face];
+                display_raw_mm2 += table.areas_mm2[face] * table.display[face];
                 down_facing_faces += 1;
             }
         }

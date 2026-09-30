@@ -339,7 +339,7 @@ fn print_model(model: &ModelPreparationReport) {
         );
         // **The display-face map, published before it is trusted** (owner
         // ruling, 2026-09-03). The orientation scar term is
-        // `Sum_down(area x fragility x (1 + D))`, and D is measured on the
+        // `Sum_down(area x (fragility + D))`, and D is measured on the
         // model in its AUTHORED frame. An operator must be able to see what
         // the map SAID about this model without re-running anything, so the
         // summary is printed for every searched model, high values or not:

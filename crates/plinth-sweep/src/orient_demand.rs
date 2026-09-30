@@ -120,7 +120,7 @@
 //! # The production pass also prices where the arms LAND, and what they CARRY
 //!
 //! A production measurement carries two quantities the prefilter does not:
-//! the MODEL-LANDING SCAR, `Σ π r_seat² × fragility × (1 + D)` over the arms
+//! the MODEL-LANDING SCAR, `Σ π r_seat² × (fragility + D)` over the arms
 //! that seat on the model, measured by [`crate::model_landing`] against the
 //! very `OrientFaceTable` the objective was scored with; and the TIP-CONTACT
 //! SCAR, the same product over the faces the arms' TIPS carry (excluding one

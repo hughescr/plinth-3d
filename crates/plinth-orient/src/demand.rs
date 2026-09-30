@@ -129,7 +129,7 @@ pub struct MeasuredSupportDemand {
     /// zero scar can be read as "nothing landed on the model" rather than
     /// guessed at.
     pub model_landings: usize,
-    /// `Σ` over those landings of `π r_seat² × fragility × (1 + D)` of the
+    /// `Σ` over those landings of `π r_seat² × (fragility + D)` of the
     /// face each one seats on, in mm² — the scar this pose's SUPPORT FIELD
     /// leaves on the model, in the same units and under the same
     /// `ORIENT_SCAR_WEIGHT` as the objective's down-facing scar.
@@ -142,7 +142,7 @@ pub struct MeasuredSupportDemand {
     /// `Some(0.0)` asserts that a production sweep ran and nothing it placed
     /// touched the model.
     pub landing_scar_raw_mm2: Option<f64>,
-    /// `Σ` over this pose's arms of `π r_tip² × fragility × (1 + D)` of the
+    /// `Σ` over this pose's arms of `π r_tip² × (fragility + D)` of the
     /// face each one's TIP carries — the mirror of
     /// [`Self::landing_scar_raw_mm2`], priced at the other end of the arm,
     /// and excluding a tip charged against a face the analytic down-facing

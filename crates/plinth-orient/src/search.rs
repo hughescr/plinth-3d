@@ -394,11 +394,11 @@ pub struct TermsRecord {
     /// record instead of re-derived from the mesh.
     pub fragility_raw_mm2: Finite,
     pub display_raw_mm2: Finite,
-    /// `Σ_model-landings(π r_seat² × fragility × (1 + D))`, or [`None`] when
+    /// `Σ_model-landings(π r_seat² × (fragility + D))`, or [`None`] when
     /// no production sweep measured this candidate — a stated absence, never
     /// a zero (`crate::demand::MeasuredSupportDemand`'s own rule).
     pub landing_scar_raw_mm2: Option<Finite>,
-    /// `Σ_tips(π r_tip² × fragility × (1 + D))` over tip charges the analytic
+    /// `Σ_tips(π r_tip² × (fragility + D))` over tip charges the analytic
     /// down-facing fold does not already count
     /// (`plinth_sweep::tip_landing`'s own doc), or [`None`] under the same
     /// stated-absence rule as [`Self::landing_scar_raw_mm2`].

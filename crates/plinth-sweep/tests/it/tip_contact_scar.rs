@@ -435,3 +435,38 @@ fn withholding_the_tip_scar_moves_the_committed_numbers_but_not_this_pose() {
          the engine's answer: re-measure it and re-record lanes/round-pose.md's finding."
     );
 }
+
+/// A tip on a display face costs the same however sturdy the face is:
+/// fragility and display ADD (2026-09-29, `plinth_orient::score`'s module
+/// doc). The mirror of `model_landing_scar`'s test (e), at the other end of
+/// the arm: one plan, priced against two synthetic per-face fields over the
+/// real mesh, so only the pricing rule is under test. Under the old
+/// `fragility × (1 + D)` rule the first pricing was exactly zero.
+#[test]
+fn a_tip_on_a_sturdy_display_face_costs_what_a_tip_on_a_fragile_plain_face_costs() {
+    let mesh = plinth_mesh::make_raking_blade().expect("the raking blade fixture");
+    let down_limit = ObjectiveWeights::registered()
+        .expect("weights")
+        .down_limit();
+    let (oriented, plan) = swept(&mesh, BLADE_DOWN);
+    let faces = oriented.tris().len();
+    let (zeros, ones) = (vec![0.0_f64; faces], vec![1.0_f64; faces]);
+
+    let sturdy_display = tip_contact_scar(&oriented, &plan, &zeros, &ones, down_limit)
+        .expect("a fragility field of the right length");
+    let fragile_plain = tip_contact_scar(&oriented, &plan, &ones, &zeros, down_limit)
+        .expect("a fragility field of the right length");
+    assert!(
+        fragile_plain.tips > 0 && fragile_plain.raw_mm2 > 0.0,
+        "the blade-down pose charges no tip outside the analytic fold, so the comparison would be \
+         vacuous"
+    );
+    assert!(
+        (sturdy_display.raw_mm2 - fragile_plain.raw_mm2).abs() <= 1e-12 * fragile_plain.raw_mm2,
+        "tips on faces with no fragility and full display value cost {} mm2; the same tips on \
+         fully fragile faces with no display value cost {}. The display harm is following \
+         fragility again, so a sturdy display face is left unprotected",
+        sturdy_display.raw_mm2,
+        fragile_plain.raw_mm2,
+    );
+}

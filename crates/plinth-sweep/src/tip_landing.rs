@@ -24,7 +24,7 @@
 //! ([`crate::SweepStrut::tip_radius_mm`]):
 //!
 //! ```text
-//! scar_mm2 = pi * r_tip^2 * fragility(carried face) * (1 + D(carried face))
+//! scar_mm2 = pi * r_tip^2 * (fragility(carried face) + D(carried face))
 //! ```
 //!
 //! summed over the arms that carry a face the analytic fold does not already
@@ -141,7 +141,7 @@ pub struct TipCharge {
     /// Distance from the tip point to that face. A tip sits ON the surface
     /// it carries, so this is a raster half-cell at most.
     pub distance_mm: f64,
-    /// `π r_tip² × fragility × (1 + D)` of the carried face, computed
+    /// `π r_tip² × (fragility + D)` of the carried face, computed
     /// regardless of [`Self::already_counted`] so the OTHER double-counting
     /// choice can be recovered by summing this field over every charge.
     pub scar_mm2: f64,
@@ -156,10 +156,11 @@ pub struct TipCharge {
 /// What one pose's tip contacts cost the model.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TipContactScar {
-    /// `Σ π r_tip² × fragility × (1 + D)` over charges NOT already counted by
+    /// `Σ π r_tip² × (fragility + D)` over charges NOT already counted by
     /// the analytic fold (the module doc's chosen half). Zero — exactly, and
     /// only — when the sweep placed no arms, or every carried face is
-    /// already counted, or every carried face carries no fragility.
+    /// already counted, or every carried face carries neither fragility nor
+    /// display value.
     pub raw_mm2: f64,
     /// Arms this pose placed.
     pub tips: usize,
@@ -409,12 +410,14 @@ pub fn tip_contact_scar(
         .map(|(found, landing)| {
             found.map(|(face, distance_mm)| {
                 let contact = core::f64::consts::PI * landing.radius_mm * landing.radius_mm;
+                // Fragility and display ADD, as in `model_landing`: the
+                // display increment is not scaled by fragility.
                 let fragile = contact * fragility[face];
                 TipCharge {
                     strut: landing.strut,
                     face,
                     distance_mm,
-                    scar_mm2: fragile + fragile * display.get(face).copied().unwrap_or(0.0),
+                    scar_mm2: fragile + contact * display.get(face).copied().unwrap_or(0.0),
                     already_counted: normal_z[face] < down_limit,
                 }
             })

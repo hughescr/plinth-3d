@@ -3,8 +3,8 @@
 //!
 //! # The gap this closes
 //!
-//! The orientation objective's scar term is `Σ_down(area × fragility ×
-//! (1 + D))` — a measurement of the model's own down-facing area, and only of
+//! The orientation objective's scar term is `Σ_down(area × (fragility +
+//! D))` — a measurement of the model's own down-facing area, and only of
 //! that. It cannot see a support field, so it cannot see a support field
 //! landing on the one delicate thing on the model.
 //!
@@ -22,12 +22,13 @@
 //! ([`crate::Landing::Model`]):
 //!
 //! ```text
-//! scar_mm2 = pi * r_seat^2 * fragility(landed face) * (1 + D(landed face))
+//! scar_mm2 = pi * r_seat^2 * (fragility(landed face) + D(landed face))
 //! ```
 //!
 //! summed over the arms, in mm². That is the identical product the down-facing
 //! fold uses — an area in mm², times the delicacy of the surface it is charged
-//! against, times the display-face multiplier — so it is folded into
+//! against PLUS its display value, two independent harms of one contact that
+//! add (2026-09-29, `plinth_orient::score`'s module doc) — so it is folded into
 //! `scar_raw_mm2` beside the other two halves and priced by the SAME registered
 //! `ORIENT_SCAR_WEIGHT`. **No constant, weight or exchange rate is introduced
 //! by this module.** Every number it reads is already measured elsewhere: the
@@ -107,7 +108,7 @@ pub struct LandingCharge {
     /// this is a raster half-cell at most; a large value means the seat was
     /// charged to a face it does not touch and is a reason to look.
     pub distance_mm: f64,
-    /// `π r_seat² × fragility × (1 + D)` of that face.
+    /// `π r_seat² × (fragility + D)` of that face.
     pub scar_mm2: f64,
     pub interior: bool,
 }
@@ -115,9 +116,9 @@ pub struct LandingCharge {
 /// What one pose's model landings cost the model.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ModelLandingScar {
-    /// `Σ π r_seat² × fragility × (1 + D)` in mm². Zero — exactly, and only —
-    /// when nothing landed on the model, or when every landed face carries no
-    /// fragility.
+    /// `Σ π r_seat² × (fragility + D)` in mm². Zero — exactly, and only —
+    /// when nothing landed on the model, or when every landed face carries
+    /// neither fragility nor display value.
     pub raw_mm2: f64,
     /// Arms that seated on the model.
     pub landings: usize,
@@ -193,7 +194,7 @@ pub fn model_landings(plan: &SweepPlan) -> Vec<ModelLanding> {
 /// a zero. `Some` with `raw_mm2 == 0.0` is the positive assertion that a real
 /// sweep ran and its arms cost the model nothing.
 ///
-/// An empty `display` is read as the multiplier `1 + 0`, so a table built
+/// An empty `display` is read as `D = 0`, so a table built
 /// without a display field reproduces `π r² × fragility` exactly.
 #[must_use]
 pub fn model_landing_scar(
@@ -257,15 +258,16 @@ pub fn model_landing_scar(
             best_face.map(|face| {
                 let contact = core::f64::consts::PI * landing.radius_mm * landing.radius_mm;
                 // The same association the down-facing fold uses: the
-                // fragility product first, the display increment on top of it,
-                // so a zero display field reproduces `contact × fragility`
-                // rather than approximating it.
+                // fragility product first, the display increment (NOT scaled
+                // by fragility) on top of it, so a zero display field
+                // reproduces `contact × fragility` rather than approximating
+                // it.
                 let fragile = contact * fragility[face];
                 LandingCharge {
                     strut: landing.strut,
                     face,
                     distance_mm: best_distance.sqrt(),
-                    scar_mm2: fragile + fragile * display.get(face).copied().unwrap_or(0.0),
+                    scar_mm2: fragile + contact * display.get(face).copied().unwrap_or(0.0),
                     interior: landing.interior,
                 }
             })
