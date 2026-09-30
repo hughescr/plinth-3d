@@ -106,9 +106,13 @@
 //!
 //! No new physical constant: the two clearances are the registered ruling,
 //! and every other number is the down-sweep's, the lowering's or the grid's.
-//! One new resolution: a section's disc is measured as a circumscribed
+//! One new resolution: a section's disc is measured as a FILLED circumscribed
 //! 16-gon ([`SECTION_POLYGON_SIDES`]), which errs only toward "near" (by at
-//! most 0.02 mm at the largest registered radius).
+//! most 0.02 mm at the largest registered radius). Filled, not its edges and
+//! spokes alone (round-3 review, 2026-09-29): a model feature between two
+//! spokes, over the disc's interior, is within the clearance of the disc
+//! while every spoke and rim edge clears it, so the model's own edges are
+//! measured against the filled polygon too ([`sections_near_model`]).
 //! The surface index's parity-grid pitch and byte cap are the registered
 //! `DECIMATION_PROBE_GRID_PITCH_MM` / `_MAX_GRID_BYTES` (the only registered
 //! pair for a distance-probe surface index); the segment clearance is a BVH
@@ -164,6 +168,15 @@ pub struct HeadJoinOutcome {
     /// Section-against-model rows measured by the kernel's clearance
     /// predicate (the model half of test 1), over every pass.
     pub model_rows: usize,
+    /// The interior term of that model test (round-3 review fix,
+    /// 2026-09-29): model-edge rows measured against the FILLED sections, and
+    /// the sections it alone found near (every rim edge and spoke clear, the
+    /// centre outside), over every pass. Path-hit witnesses.
+    pub interior_rows: usize,
+    pub sections_near_by_interior: usize,
+    /// Of the emitted field's census below, the joins the interior term alone
+    /// put in the seat zone.
+    pub census_near_by_interior: usize,
     /// Landers moved, over every pass.
     pub landers_moved: usize,
     /// Of those, the ones that went down the head arm's landing chain, onto a
@@ -331,29 +344,68 @@ impl Head {
 /// Sides of the polygon a section's ring is measured as, against the model.
 ///
 /// **A resolution, not a threshold.** The polygon CIRCUMSCRIBES the ring (its
-/// vertices at `R / cos(π/N)`), so it covers the whole disc and a disc that
-/// comes within the clearance of the model always has a polygon that does
-/// too. The only error is toward "near": the polygon stands at most
+/// vertices at `R / cos(π/N)`), so the FILLED polygon covers the whole disc
+/// and a disc that comes within the clearance of the model always has a
+/// filled polygon that does too (measured filled: [`sections_near_model`]).
+/// The only error is toward "near": the polygon stands at most
 /// `R·(sec(π/16) − 1) = 0.0196·R` beyond the ring, under 0.02 mm at the
 /// largest radius the registry allows (1 mm). It can only put a join INTO the
 /// seat zone, never let one out.
 const SECTION_POLYGON_SIDES: usize = 16;
 
-/// Whether each section's DISC comes within `clearance_mm` of the model: the
-/// circumscribed polygon's edges and its spokes from the centre, as
-/// zero-radius segments, by the kernel's clearance predicate in ONE batch,
-/// and the centre by the kernel's inside test in one more. A disc that enters
-/// the model crosses its surface on a spoke or an edge. A row the predicate
-/// did not measure counts as near (the safe side), and so does a section whose
-/// ring has no direction; a near-parallel bound is read as the distance (see
-/// the loop). Returns the verdicts and the rows measured.
+/// What [`sections_near_model`] found: a verdict per section, and its
+/// path-hit witnesses.
+struct SectionsNear {
+    near: Vec<bool>,
+    /// Rim-edge and spoke rows measured against the model.
+    rows: usize,
+    /// Model-edge rows measured against the filled polygons (the interior
+    /// term, round-3 review fix, 2026-09-29).
+    interior_rows: usize,
+    /// Sections found near ONLY by the interior term: every rim edge and
+    /// spoke cleared, the centre was outside, and a model edge still came
+    /// within the clearance of the filled polygon.
+    near_by_interior: usize,
+}
+
+/// Whether each section's FILLED DISC comes within `clearance_mm` of the
+/// model, measured on the filled circumscribed polygon, which covers the disc.
+///
+/// The distance between the filled polygon `P` and a model triangle `T` is
+/// attained on an edge of one of them against the other, or it is zero where
+/// they meet (and then an edge of one meets the other). So:
+///
+/// 1. `P`'s edges against the model: the rim edges and, harmlessly, the spokes
+///    (the fan triangles' edges), as zero-radius segments, by the kernel's
+///    clearance predicate in ONE batch;
+/// 2. the model's edges against `P`: every model face within the rim's reach
+///    plus the clearance of the centre, in ONE kernel band query, and each of
+///    their edges against the sections' fan triangles, built into one small
+///    surface, in ONE more. A model feature between two spokes (the round-3
+///    review's post, its foot 0.29 mm over the disc and ≥ 0.302 mm from every
+///    spoke and rim edge) is seen here and nowhere else;
+/// 3. a disc wholly inside the model touches no surface: the centre, by the
+///    kernel's inside test.
+///
+/// A row the predicate did not measure counts as near (the safe side), and so
+/// does a section whose ring has no direction, and every section a failed
+/// batch covered; a near-parallel bound in step 1 is read as the distance (see
+/// the loop), and one in step 2 marks every section within reach of that
+/// model edge near.
 fn sections_near_model(
     surface: &NativeSurface,
+    model_verts: &[[f64; 3]],
+    model_tris: &[[u32; 3]],
     sections: &[Section],
     clearance_mm: f64,
-) -> (Vec<bool>, usize) {
+) -> SectionsNear {
     if sections.is_empty() {
-        return (Vec::new(), 0);
+        return SectionsNear {
+            near: Vec::new(),
+            rows: 0,
+            interior_rows: 0,
+            near_by_interior: 0,
+        };
     }
     let sides = SECTION_POLYGON_SIDES;
     #[expect(
@@ -365,6 +417,9 @@ fn sections_near_model(
     let mut starts = Vec::with_capacity(sections.len() * 2 * sides);
     let mut ends = Vec::with_capacity(sections.len() * 2 * sides);
     let mut owner = Vec::with_capacity(sections.len() * 2 * sides);
+    // Each section's filled polygon as a fan of `sides` triangles about its
+    // centre: `(centre, v_i, v_{i+1})`, in section order (step 2).
+    let mut fans: Vec<Option<Vec<[f64; 3]>>> = vec![None; sections.len()];
     for (index, section) in sections.iter().enumerate() {
         let reference = if section.axis[0].abs() < 0.9 {
             [1.0, 0.0, 0.0]
@@ -400,6 +455,7 @@ fn sections_near_model(
             ends.push(vertices[step]);
             owner.push(index);
         }
+        fans[index] = Some(vertices);
     }
     let rows = starts.len();
     let zero = vec![0.0; rows];
@@ -431,7 +487,194 @@ fn sections_near_model(
     for (flag, inside) in near.iter_mut().zip(surface.inside(&centres)) {
         *flag |= inside;
     }
-    (near, rows)
+    let before_interior = near.clone();
+    let interior_rows = model_edges_near_fans(
+        surface,
+        model_verts,
+        model_tris,
+        sections,
+        &fans,
+        half_angle,
+        clearance_mm,
+        &mut near,
+    );
+    let near_by_interior = near
+        .iter()
+        .zip(&before_interior)
+        .filter(|&(&after, &before)| after && !before)
+        .count();
+    SectionsNear {
+        near,
+        rows,
+        interior_rows,
+        near_by_interior,
+    }
+}
+
+/// Step 2 of [`sections_near_model`]: the MODEL's edges against the filled
+/// polygons of the sections not yet near. Marks a section near when a model
+/// edge comes within `clearance_mm` of its fan; returns the model-edge rows
+/// measured. Every failure marks the sections it covers near (the safe side).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the model (surface and its indexed source), the sections with their fans and \
+              polygon angle, the clearance, and the verdicts it updates"
+)]
+fn model_edges_near_fans(
+    surface: &NativeSurface,
+    model_verts: &[[f64; 3]],
+    model_tris: &[[u32; 3]],
+    sections: &[Section],
+    fans: &[Option<Vec<[f64; 3]>>],
+    half_angle: f64,
+    clearance_mm: f64,
+    near: &mut [bool],
+) -> usize {
+    let pending: Vec<usize> = (0..sections.len())
+        .filter(|&index| !near[index] && fans[index].is_some())
+        .collect();
+    if pending.is_empty() {
+        return 0;
+    }
+    // Each pending section's reach: its polygon lies within `R / cos(π/N)` of
+    // its centre, so a model face within the clearance of the polygon lies
+    // within that reach plus the clearance of the centre.
+    let reach_of = |index: usize| sections[index].radius / half_angle.cos() + clearance_mm;
+    let mark_pending = |near: &mut [bool]| pending.iter().for_each(|&index| near[index] = true);
+
+    // (a) The model faces near each pending section, in ONE band query (a
+    // zero-length segment at the centre: a ball).
+    let centres: Vec<[f64; 3]> = pending
+        .iter()
+        .map(|&index| sections[index].centre)
+        .collect();
+    let within: Vec<f64> = pending.iter().map(|&index| reach_of(index)).collect();
+    let limits = geom_kernel::NearFaceBatchLimits {
+        max_rows: pending.len(),
+        max_faces_per_row: surface.nfaces(),
+        max_total_faces: usize::MAX,
+    };
+    let Ok(band) =
+        surface.faces_near_segments_batch_classified(&centres, &centres, &within, limits)
+    else {
+        mark_pending(near);
+        return 0;
+    };
+    // Their edges, once each (by vertex pair).
+    let mut edges: Vec<(u32, u32)> = band
+        .rows
+        .iter()
+        .flatten()
+        .filter_map(|&face| model_tris.get(face as usize))
+        .flat_map(|&[a, b, c]| [(a, b), (b, c), (c, a)])
+        .map(|(a, b)| (a.min(b), a.max(b)))
+        .collect();
+    edges.sort_unstable();
+    edges.dedup();
+    let mut edge_starts = Vec::with_capacity(edges.len());
+    let mut edge_ends = Vec::with_capacity(edges.len());
+    for &(a, b) in &edges {
+        let (Some(&start), Some(&end)) = (model_verts.get(a as usize), model_verts.get(b as usize))
+        else {
+            mark_pending(near);
+            return 0;
+        };
+        edge_starts.push(start);
+        edge_ends.push(end);
+    }
+    if edges.is_empty() {
+        return 0;
+    }
+
+    // (b) The pending sections' fans as ONE small surface, face `f` owned by
+    // section `fan_owner[f]`.
+    let sides = SECTION_POLYGON_SIDES;
+    let mut fan_verts: Vec<[f64; 3]> = Vec::with_capacity(pending.len() * (sides + 1));
+    let mut fan_tris: Vec<[u32; 3]> = Vec::with_capacity(pending.len() * sides);
+    let mut fan_owner: Vec<usize> = Vec::with_capacity(pending.len() * sides);
+    for &index in &pending {
+        let Some(vertices) = fans[index].as_ref() else {
+            continue;
+        };
+        let Ok(base) = u32::try_from(fan_verts.len()) else {
+            mark_pending(near);
+            return 0;
+        };
+        fan_verts.push(sections[index].centre);
+        fan_verts.extend_from_slice(vertices);
+        for step in 0..sides {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a polygon vertex index below 16"
+            )]
+            let (one, two) = (step as u32 + 1, ((step + 1) % sides) as u32 + 1);
+            fan_tris.push([base, base + one, base + two]);
+            fan_owner.push(index);
+        }
+    }
+    let pitch = surface.config().grid_pitch_mm;
+    let fan_surface =
+        NativeSurface::estimate_index_memory_from_indexed(&fan_verts, &fan_tris, pitch)
+            .ok()
+            .and_then(|estimate| {
+                NativeSurface::from_indexed(
+                    &fan_verts,
+                    &fan_tris,
+                    NativeSurfaceConfig {
+                        grid_pitch_mm: pitch,
+                        max_grid_bytes: estimate.max_axis_grid_bytes(),
+                    },
+                )
+                .ok()
+            });
+    let Some(fan_surface) = fan_surface else {
+        mark_pending(near);
+        return 0;
+    };
+
+    // (c) Every model edge against every fan, in ONE band query at the
+    // clearance: a fan face in an edge's band puts its section near.
+    let band_mm = vec![(clearance_mm - 1.0e-9).max(0.0); edges.len()];
+    let limits = geom_kernel::NearFaceBatchLimits {
+        max_rows: edges.len(),
+        max_faces_per_row: fan_tris.len(),
+        max_total_faces: usize::MAX,
+    };
+    let Ok(found) = fan_surface.faces_near_segments_batch_classified(
+        &edge_starts,
+        &edge_ends,
+        &band_mm,
+        limits,
+    ) else {
+        mark_pending(near);
+        return edges.len();
+    };
+    for (row, faces) in found.rows.iter().enumerate() {
+        for &face in faces {
+            if let Some(&index) = fan_owner.get(face as usize) {
+                near[index] = true;
+            }
+        }
+        // A face whose pierce the kernel could not decide is left out of the
+        // band (its membership is proof-only); here an unproven pierce must
+        // count as near, so every pending section within reach of this edge
+        // is marked.
+        if found.near_parallel.get(row).is_some_and(|&count| count > 0) {
+            for &index in &pending {
+                let centre = sections[index].centre;
+                let (distance, _, _) = geom_kernel::segment_segment_distance_min(
+                    edge_starts[row],
+                    edge_ends[row],
+                    centre,
+                    centre,
+                );
+                if distance <= reach_of(index) {
+                    near[index] = true;
+                }
+            }
+        }
+    }
+    edges.len()
 }
 
 /// The slot of `host` a member landed at `layer` is booked into
@@ -572,6 +815,10 @@ struct Survey {
     off_the_model: usize,
     /// Section-against-model rows the survey measured.
     model_rows: usize,
+    /// Model-edge rows measured against the filled sections, and the
+    /// sections only that interior term found near.
+    interior_rows: usize,
+    near_by_interior: usize,
     in_zone: Vec<Join>,
     heads: Vec<Option<Head>>,
     profiles: Vec<Vec<f64>>,
@@ -599,6 +846,8 @@ fn grade(
         unmeasured: 0,
         off_the_model: 0,
         model_rows: 0,
+        interior_rows: 0,
+        near_by_interior: 0,
         in_zone: Vec::new(),
         heads,
         profiles,
@@ -637,9 +886,17 @@ fn grade(
         return out;
     };
     let sections: Vec<Section> = held.iter().map(|(_, section)| *section).collect();
-    let (near, rows) = sections_near_model(surface, &sections, context.clearance_mm);
-    out.model_rows = rows;
-    for ((join, _), near) in held.into_iter().zip(near) {
+    let found = sections_near_model(
+        surface,
+        context.mesh.verts(),
+        context.mesh.tris(),
+        &sections,
+        context.clearance_mm,
+    );
+    out.model_rows = found.rows;
+    out.interior_rows = found.interior_rows;
+    out.near_by_interior = found.near_by_interior;
+    for ((join, _), near) in held.into_iter().zip(found.near) {
         if near {
             out.in_zone.push(join);
         } else {
@@ -664,17 +921,18 @@ fn survey(context: &HeadJoinContext<'_>, struts: &[SweepStrut]) -> Survey {
 /// **The emitted field's census**: how many joins on support arms it has, and
 /// every one whose sum-sized section still reaches its host's seat zone, as
 /// `(lander id, trunk id)`, measured on the arms exactly as they go to the
-/// lowering (`adapter::arms_of`, footprint moves included).
+/// lowering (`adapter::arms_of`, footprint moves included); and how many of
+/// those the filled-section interior term alone put in the zone.
 #[must_use]
 pub(crate) fn census(
     context: &HeadJoinContext<'_>,
     struts: &[SweepStrut],
     arms: &[SweepArm],
-) -> (usize, Vec<(u32, u32)>) {
+) -> (usize, Vec<(u32, u32)>, usize) {
     let joins = arm_joins(struts);
     let examined = joins.len();
     if joins.is_empty() || arms.len() != struts.len() {
-        return (examined, Vec::new());
+        return (examined, Vec::new(), 0);
     }
     let parents = sorted_unique(joins.iter().map(|join| join.parent).collect());
     let trunk_arms: Vec<SweepArm> = parents.iter().map(|&index| arms[index].clone()).collect();
@@ -683,12 +941,13 @@ pub(crate) fn census(
         .iter()
         .map(|arm| arm.radius_profile_mm.clone())
         .collect();
-    let listed = grade(context, struts, joins, heads, profiles)
+    let graded = grade(context, struts, joins, heads, profiles);
+    let listed = graded
         .in_zone
         .iter()
         .map(|join| (struts[join.child].id, struts[join.parent].id))
         .collect();
-    (examined, listed)
+    (examined, listed, graded.near_by_interior)
 }
 
 /// Why a join could not be moved.
@@ -992,6 +1251,8 @@ pub(crate) fn apply(
         outcome.joins_off_the_model = found.off_the_model;
     }
     outcome.model_rows += found.model_rows;
+    outcome.interior_rows += found.interior_rows;
+    outcome.sections_near_by_interior += found.near_by_interior;
     outcome.joins_unmeasured = found.unmeasured;
     outcome.kept_no_clear_join = 0;
     outcome.kept_carrying_a_tie = 0;
@@ -1097,9 +1358,17 @@ pub(crate) fn apply(
         }
         verdicts.push(row);
     }
-    let (near, rows) = sections_near_model(surface, &held_sections, context.clearance_mm);
-    outcome.model_rows += rows;
-    for (&(position, slot), near) in held.iter().zip(near) {
+    let found_near = sections_near_model(
+        surface,
+        context.mesh.verts(),
+        context.mesh.tris(),
+        &held_sections,
+        context.clearance_mm,
+    );
+    outcome.model_rows += found_near.rows;
+    outcome.interior_rows += found_near.interior_rows;
+    outcome.sections_near_by_interior += found_near.near_by_interior;
+    for (&(position, slot), near) in held.iter().zip(found_near.near) {
         if !near {
             verdicts[position][slot] = true;
             outcome.candidates_off_the_model += 1;
@@ -1216,11 +1485,28 @@ pub(crate) fn apply(
 
 #[cfg(test)]
 mod tests {
-    use super::{sections_near_model, Head, Section};
+    use super::{sections_near_model, Head, Section, SectionsNear};
     use geom_kernel::{NativeSurface, NativeSurfaceConfig};
 
-    /// A closed axis-aligned box from `low` to `high`, as a surface.
-    fn boxed(low: [f64; 3], high: [f64; 3]) -> NativeSurface {
+    /// A model: its surface and the indexed triangles it was built from.
+    struct Model {
+        surface: NativeSurface,
+        verts: Vec<[f64; 3]>,
+        tris: Vec<[u32; 3]>,
+    }
+
+    fn near_of(model: &Model, sections: &[Section], clearance_mm: f64) -> SectionsNear {
+        sections_near_model(
+            &model.surface,
+            &model.verts,
+            &model.tris,
+            sections,
+            clearance_mm,
+        )
+    }
+
+    /// A closed axis-aligned box from `low` to `high`, as a model.
+    fn boxed(low: [f64; 3], high: [f64; 3]) -> Model {
         let verts: Vec<[f64; 3]> = (0..8)
             .map(|corner| {
                 std::array::from_fn(|k| {
@@ -1249,7 +1535,7 @@ mod tests {
         let pitch = 0.1;
         let estimate = NativeSurface::estimate_index_memory_from_indexed(&verts, &tris, pitch)
             .expect("an estimate");
-        NativeSurface::from_indexed(
+        let surface = NativeSurface::from_indexed(
             &verts,
             &tris,
             NativeSurfaceConfig {
@@ -1257,7 +1543,12 @@ mod tests {
                 max_grid_bytes: estimate.max_axis_grid_bytes(),
             },
         )
-        .expect("a surface")
+        .expect("a surface");
+        Model {
+            surface,
+            verts,
+            tris,
+        }
     }
 
     fn flat(centre: [f64; 3], radius: f64) -> Section {
@@ -1281,7 +1572,7 @@ mod tests {
     #[test]
     fn a_disc_is_near_the_model_where_the_model_is() {
         let slab = boxed([-5.0, -5.0, 0.0], [5.0, 5.0, 1.0]);
-        let (near, rows) = sections_near_model(
+        let found = near_of(
             &slab,
             &[
                 flat([0.0, 0.0, -0.2], 1.0),
@@ -1290,11 +1581,48 @@ mod tests {
             ],
             0.3,
         );
-        assert_eq!(near, vec![true, false, false]);
+        assert_eq!(found.near, vec![true, false, false]);
         let post = boxed([-0.05, -0.05, 0.1], [0.05, 0.05, 3.0]);
-        let (near_post, _) = sections_near_model(&post, &[flat([0.0, 0.0, 0.0], 1.0)], 0.3);
-        assert_eq!(near_post, vec![true]);
-        assert_eq!(rows, 3 * 2 * super::SECTION_POLYGON_SIDES);
+        let found_post = near_of(&post, &[flat([0.0, 0.0, 0.0], 1.0)], 0.3);
+        assert_eq!(found_post.near, vec![true]);
+        assert_eq!(found.rows, 3 * 2 * super::SECTION_POLYGON_SIDES);
+    }
+
+    /// The cross-family review's case (round 3, 2026-09-29): a closed
+    /// 0.1 × 0.1 mm post centred at `XY = (−0.1560722576, 0.7846282243)`, its
+    /// foot at `z = 0.29`, over a 1 mm disc at the origin, axis `+z`. The
+    /// post's footprint lies inside the disc, so the disc is 0.29 mm from the
+    /// model: NEAR against 0.3 mm. The post stands halfway between two of the
+    /// 16 spokes (at 101.25°), where the spokes and the rim are 0.302 mm or
+    /// more from it, and the centre is outside it; only the FILLED disc sees
+    /// it. Control: the same post with its foot at `z = 0.31` is 0.31 mm from
+    /// the disc and must read clear (the fix is exact on the filled polygon,
+    /// not a wider margin).
+    #[test]
+    fn a_post_between_two_spokes_is_near_the_filled_disc() {
+        let (x, y, half) = (-0.156_072_257_6, 0.784_628_224_3, 0.05);
+        let post_at = |foot: f64| boxed([x - half, y - half, foot], [x + half, y + half, 3.0]);
+        let found = near_of(&post_at(0.29), &[flat([0.0, 0.0, 0.0], 1.0)], 0.3);
+        assert_eq!(
+            found.near,
+            vec![true],
+            "the post's foot is 0.29 mm over the disc's interior, inside the 0.3 mm clearance"
+        );
+        // The path-hit witness: the interior term, and only it, found the post.
+        // Its rows are the edges of the post's faces within the rim's reach
+        // plus the clearance (1.0196 + 0.3 mm) of the centre: the foot and the
+        // four sides (the top, at z = 3, is out of reach), so the 4 foot
+        // edges, 4 verticals, 4 top edges, 4 side diagonals and the foot's
+        // diagonal: 17.
+        assert_eq!(found.near_by_interior, 1);
+        assert_eq!(found.interior_rows, 17);
+        let clear = near_of(&post_at(0.31), &[flat([0.0, 0.0, 0.0], 1.0)], 0.3);
+        assert_eq!(
+            clear.near,
+            vec![false],
+            "0.31 mm over the disc is clear of 0.3 mm"
+        );
+        assert_eq!(clear.near_by_interior, 0);
     }
 
     /// A shaft leaning from a ball centre at the origin toward `(3, 0, −4)`

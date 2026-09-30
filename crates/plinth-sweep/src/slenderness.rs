@@ -413,6 +413,14 @@ pub struct SlendernessOutcome {
     pub brace_bands_refused_by_member: usize,
     pub mast_cells_refused_by_model: usize,
     pub mast_cells_refused_by_member: usize,
+    /// The member test's verdicts where the drawn-span rule (round-3 review
+    /// fix, 2026-09-29) and the retired closest-axes reading DISAGREE, both
+    /// ways: refused here and admitted by the retired reading (a wider span
+    /// away from the closest axis point), and admitted here and refused by it
+    /// (it read the slot above the closest point too). Path-hit witnesses; both
+    /// zero means the rule decided every test on this field as before.
+    pub member_refusals_beyond_the_closest_axes: usize,
+    pub member_admissions_the_closest_axes_refused: usize,
     /// Mast cells whose braced panel would hold only with a mast THICKER than
     /// the member it braces: a second, stiffer post is not a brace, so the
     /// cell is refused (and, when no cell is left, the run goes to the
@@ -2153,7 +2161,7 @@ fn tie_by_mast(
             return false;
         }
         let posts: Vec<u32> = mast.into_iter().collect();
-        if !member_solids_clear(context, state, struts, bottom, top, radius, &posts) {
+        if !member_solids_clear(context, state, struts, bottom, top, radius, &posts, outcome) {
             outcome.mast_cells_refused_by_member += 1;
             return false;
         }
@@ -3004,7 +3012,16 @@ fn plan_cross(
             }
         }
         for (top, bottom) in diagonals {
-            if !member_solids_clear(context, state, struts, top, bottom, radius_mm, &[a, b]) {
+            if !member_solids_clear(
+                context,
+                state,
+                struts,
+                top,
+                bottom,
+                radius_mm,
+                &[a, b],
+                outcome,
+            ) {
                 outcome.brace_bands_refused += 1;
                 outcome.brace_bands_refused_by_member += 1;
                 return None;
@@ -3030,7 +3047,17 @@ fn plan_cross(
 /// the `posts` it joins and the members joined to those posts (a branch that
 /// lands on one, a diagonal that seats or lands on one, the trunk one stands
 /// on): those meet it at a planned joint. One pass over the members, each an
-/// O(1) bounding-box test and, where that passes, one segment distance.
+/// O(1) bounding-box test and, where that passes, one segment distance; a
+/// member whose WIDEST drawn radius does not clear is walked interval by
+/// interval against its drawn profile (`member_clearance::member_intrusion`).
+/// A verdict that differs from the retired closest-axes reading's is counted,
+/// by direction, in `outcome.member_refusals_beyond_the_closest_axes` and
+/// `outcome.member_admissions_the_closest_axes_refused`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the member test needs the field, the candidate's axis and radius, the posts it \
+              joins, and the outcome its path-hit witness is counted in"
+)]
 fn member_solids_clear(
     context: &SlendernessContext<'_>,
     state: &TieState,
@@ -3039,6 +3066,7 @@ fn member_solids_clear(
     to: [f64; 3],
     radius_mm: f64,
     posts: &[u32],
+    outcome: &mut SlendernessOutcome,
 ) -> bool {
     let grid = context.grid;
     let h = context.layer_height_mm;
@@ -3072,8 +3100,16 @@ fn member_solids_clear(
             k_bottom: strut.k_bottom,
             k_top: strut.k_top,
             fallback_radius_mm: strut.min_radius_mm,
+            tip_radius_mm: strut.tip_radius_mm(),
         });
-    crate::member_clearance::member_intrusion(solids, from, to, radius_mm, joined).is_none()
+    let verdict = crate::member_clearance::member_intrusion(solids, from, to, radius_mm, joined);
+    if verdict.refused_beyond_the_closest_axes() {
+        outcome.member_refusals_beyond_the_closest_axes += 1;
+    }
+    if verdict.admitted_where_the_retired_reading_refused() {
+        outcome.member_admissions_the_closest_axes_refused += 1;
+    }
+    verdict.entered.is_none()
 }
 
 #[expect(

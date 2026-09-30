@@ -2632,7 +2632,9 @@ fn print_sweep_disclosure(
              landing chain, {} at the {:.3} mm hard limit because no join held the {:.3} mm \
              placement margin; largest drop {} layers; smallest solid clearance {:.4} mm; \
              {:.4} mm2 handed on), {} resting members re-landed with them, {} clearance rows, \
-             {} section-to-model rows, {} candidates admitted off the model, \
+             {} section-to-model rows ({} model-edge rows against the filled sections; {} \
+             sections, {} in the emitted census, near only by their interior), {} candidates \
+             admitted off the model, \
              {} pass(es){}; kept in the seat zone: no clear join {}, a cross tied to a mover {}, \
              not a support arm {}, no model surface {}; {} unmeasured",
             rule.joins_examined,
@@ -2650,6 +2652,9 @@ fn print_sweep_disclosure(
             rule.dependants_relanded,
             rule.clearance_rows,
             rule.model_rows,
+            rule.interior_rows,
+            rule.sections_near_by_interior,
+            rule.census_near_by_interior,
             rule.candidates_off_the_model,
             rule.passes,
             if rule.enabled { "" } else { " (RULE OFF)" },
@@ -2894,7 +2899,9 @@ fn print_sweep_disclosure(
     println!(
         "[sweep {model}] member clearance: brace bands refused {} for coming within the final \
          gap of the model, {} for entering a member they are not joined to; mast cells refused \
-         {} by the model, {} by a member, {} for needing a mast thicker than the member it \
+         {} by the model, {} by a member (member tests measured on the drawn spans: {} \
+         refused where the closest-axes reading admitted, {} admitted where it refused); \
+         {} for needing a mast thicker than the member it \
          braces; {} masts placed at a cell needing a thinner mast than the nearest; {} crosses \
          built at a layer the member was already tied at (planes credited together there); \
          {} thickenings applied over a root lap that stood before the growth",
@@ -2902,6 +2909,8 @@ fn print_sweep_disclosure(
         lane.brace_bands_refused_by_member,
         lane.mast_cells_refused_by_model,
         lane.mast_cells_refused_by_member,
+        lane.member_refusals_beyond_the_closest_axes,
+        lane.member_admissions_the_closest_axes_refused,
         lane.mast_cells_refused_thicker_than_member,
         lane.masts_moved_to_a_thinner_cell,
         lane.crosses_at_an_existing_tie_layer,

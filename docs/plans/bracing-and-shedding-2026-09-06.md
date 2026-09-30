@@ -135,6 +135,12 @@ Recorded here because it changes the ladder above; the code of record is
   raster's half cell diagonal, end layers included, and must not enter any
   member it is not joined to (axes `≥ r₁ + r₂` apart). The centreline-cell
   test stays as the cheap first refusal. Code: `crates/plinth-sweep/src/member_clearance.rs`.
+- **Measured on the drawn spans (round-3 review, 2026-09-29).** A standing
+  member's radius varies, so the closest pair of axes is not the closest pair
+  of solids. The standing member is measured span by span as the lowering
+  draws it (`plinth_support::drawn_spans`, the one rule), each span read
+  round-ended at its wider end radius; a span is a chord and can stand wider
+  than the ledger at a slot it bridges. Counted: `member_refusals_beyond_the_closest_axes`.
 - **Crosses at one layer are credited together:** planes `θᵢ` at one layer
   hold `φ` when `Σ cos²(φ − θᵢ) ≥ ½` (one cross gives the ±45° arc above; two
   planes 60°–120° apart hold every direction). A further plane goes to a band

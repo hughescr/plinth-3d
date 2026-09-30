@@ -176,8 +176,9 @@ pub use initial::ContactConstructionLimits;
 /// `lower` stays crate-private: this exposes the primitive chain, not the
 /// forest data model behind it.
 pub use lower::{
-    drawn_root_radius_mm, lower_sweep_arms, tip_contact_discs, SweepArm, SweepArmLanding,
-    SweepLowering, SweepLoweringError, TipContactDisc, NATIVE_FOOT_PAD_OVERLAP_MM,
+    drawn_root_radius_mm, drawn_spans, lower_sweep_arms, tip_contact_discs, DrawnSpan, SweepArm,
+    SweepArmLanding, SweepLowering, SweepLoweringError, TipContactDisc,
+    NATIVE_FOOT_PAD_OVERLAP_MM,
 };
 /// TEST-ONLY, behind the quarantined `seat-minimum-probe` feature.
 #[cfg(feature = "seat-minimum-probe")]
