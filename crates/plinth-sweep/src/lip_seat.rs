@@ -215,6 +215,12 @@ pub struct LipSeatOutcome {
     /// Each descent put back is not offered again.
     pub moves_put_back_host_load: usize,
     pub moves_put_back_roots: usize,
+    /// Arms the load insertion of a sizing that put a re-landing back had
+    /// added, withdrawn with it ([`put_back_all`]); and of those, the ones
+    /// that had landed on a mover put back or on a member that moved with it
+    /// (each would have stood on air). The path hits of the withdrawal.
+    pub inserted_arms_withdrawn: usize,
+    pub inserted_on_a_put_back_move: usize,
     /// Sized-field checks run (one per re-sizing): the path hits of
     /// [`settle`].
     pub sizing_checks: usize,
@@ -918,6 +924,66 @@ pub(crate) fn blame(
     (out, unexplained_over, unexplained_pairs)
 }
 
+/// **Put the blamed re-landings back, and withdraw the sizing that judged
+/// them** (round5-review-fixes, 2026-09-29).
+///
+/// The field [`blame`] reads was sized by a down-sweep with load insertion
+/// on, and that down-sweep can add an arm that grows down and lands on a
+/// moved shaft (`down_sweep`, a growing arm's `Landing::Strut` on the member
+/// standing in its column). A re-landing records only what IT replaced, so
+/// putting the mover back left such an arm with a fixed landing where the
+/// moved shaft used to be: standing on air, and the next down-sweep still
+/// handed its load to the mover at that layer. The down-sweep never changes
+/// the geometry of a member it did not add (it rewrites every ledger, and
+/// appends what it inserts), so the whole of its side effect is the members
+/// past `sized_from`, the strut count the moves left before it ran. They are
+/// withdrawn with the moves, and the caller sizes again: insertion then
+/// places what the field that actually stands needs.
+pub(crate) fn put_back_all(
+    struts: &mut Vec<SweepStrut>,
+    sized_from: usize,
+    moves: &mut Vec<Relanding>,
+    blamed: &[(usize, PutBack)],
+    refused: &mut Vec<(u32, usize)>,
+    outcome: &mut LipSeatOutcome,
+) {
+    if blamed.is_empty() {
+        return;
+    }
+    if struts.len() > sized_from {
+        // The members a put-back moves: each mover and the children that
+        // moved with it. One flag vector, one pass over the added arms.
+        let mut moved_back = vec![false; sized_from];
+        for &(slot, _) in blamed {
+            let Some(relanding) = moves.get(slot) else {
+                continue;
+            };
+            for index in std::iter::once(relanding.index)
+                .chain(relanding.children_were.iter().map(|(child, _)| *child))
+            {
+                if let Some(flag) = moved_back.get_mut(index) {
+                    *flag = true;
+                }
+            }
+        }
+        for added in &struts[sized_from..] {
+            outcome.inserted_arms_withdrawn += 1;
+            if let Landing::Strut { id, .. } = added.landing {
+                if moved_back.get(id as usize).copied().unwrap_or(false) {
+                    outcome.inserted_on_a_put_back_move += 1;
+                }
+            }
+        }
+        struts.truncate(sized_from);
+    }
+    // Highest slot first, so each removal leaves the lower slots where
+    // `blame` found them.
+    for &(slot, cause) in blamed.iter().rev() {
+        let relanding = moves.remove(slot);
+        put_back(struts, relanding, cause, refused, outcome);
+    }
+}
+
 /// Put one re-landing back as [`blame`] found it, refuse its descent from
 /// now on, and correct the counts.
 pub(crate) fn put_back(
@@ -1288,6 +1354,122 @@ pub(crate) fn record_before(outcome: &mut LipSeatOutcome, bites: &[Option<ShaftS
             outcome.max_approach_before_deg =
                 outcome.max_approach_before_deg.max(bite.approach_deg);
         }
+    }
+}
+
+#[cfg(test)]
+mod put_back_tests {
+    use super::{put_back_all, LipSeatOutcome, PutBack, Relanding};
+    use crate::{Landing, SeatFace, StrutKind, SweepStrut};
+
+    fn member(id: u32, cell: usize, k_top: usize) -> SweepStrut {
+        SweepStrut {
+            id,
+            cell,
+            center_mm: [0.0, 0.0],
+            kind: StrutKind::Arm,
+            min_radius_mm: 0.0,
+            thickened_mm: Vec::new(),
+            seat_on_strut: None,
+            k_top,
+            k_bottom: 0,
+            landing: Landing::Plate,
+            interior: false,
+            radius_mm: Vec::new(),
+            carried_mm2: Vec::new(),
+            covered_demand: Vec::new(),
+            inserted_by_load: false,
+            path: Vec::new(),
+            straight_fallback: None,
+            fallback_path: Vec::new(),
+            seat_face: SeatFace::default(),
+            seat_normal: [0.0; 3],
+        }
+    }
+
+    /// **The reviewer's case** (round5-review-fixes 2026-09-29): mover M was
+    /// re-landed from a straight drop in its seat column 10 to a lean whose
+    /// shaft stands in column 20 at layer 40. The sizing that judged the
+    /// move inserted arm I, which grew down and landed on M's MOVED shaft at
+    /// layer 40. The sized field then blamed M, and M is put back. I must not
+    /// be left standing where M's shaft used to be.
+    #[test]
+    fn putting_a_relanding_back_leaves_no_inserted_arm_on_air() {
+        let mover_seat = 10_u32;
+        let moved_base = 20_u32;
+        // Layers 0..=100: column 20 up to layer 50, then column 10.
+        let moved_path: Vec<u32> = (0..=100)
+            .map(|layer| if layer <= 50 { moved_base } else { mover_seat })
+            .collect();
+        let mover = SweepStrut {
+            path: moved_path,
+            ..member(0, mover_seat as usize, 100)
+        };
+        // I, appended by the sizing: seat in column 30 at layer 60, down to
+        // M's moved shaft in column 20 at layer 40.
+        let inserted = SweepStrut {
+            k_bottom: 40,
+            landing: Landing::Strut { id: 0, layer: 40 },
+            inserted_by_load: true,
+            path: (40..=60)
+                .map(|layer| if layer == 40 { moved_base } else { 30 })
+                .collect(),
+            ..member(1, 30, 60)
+        };
+        let mut struts = vec![mover, inserted];
+        let sized_from = 1;
+        assert!(
+            crate::landing_check::check_landings(&struts).clean(),
+            "the premise: I stands on M's moved shaft"
+        );
+        let mut moves = vec![Relanding {
+            index: 0,
+            id: 0,
+            cell: moved_base as usize,
+            was: (Landing::Plate, 0, Vec::new()),
+            children_were: Vec::new(),
+        }];
+        let mut refused = Vec::new();
+        let mut outcome = LipSeatOutcome {
+            arms_relanded: 1,
+            relanded_ids: vec![0],
+            ..LipSeatOutcome::default()
+        };
+        put_back_all(
+            &mut struts,
+            sized_from,
+            &mut moves,
+            &[(0, PutBack::Roots)],
+            &mut refused,
+            &mut outcome,
+        );
+        let check = crate::landing_check::check_landings(&struts);
+        println!(
+            "put back: {} members left, {} inserted arms withdrawn ({} on a put-back move); \
+             landing check: {} strut landings, absent {:?}, elsewhere {:?}, unrooted {:?}",
+            struts.len(),
+            outcome.inserted_arms_withdrawn,
+            outcome.inserted_on_a_put_back_move,
+            check.strut_landings,
+            check.parent_absent,
+            check.parent_elsewhere,
+            check.unrooted
+        );
+        assert!(
+            check.clean() && check.invalid_landings() == 0,
+            "an arm the judging sizing inserted on the moved shaft stands on air after the put \
+             back: elsewhere {:?}, absent {:?}",
+            check.parent_elsewhere,
+            check.parent_absent
+        );
+        assert!(struts[0].path.is_empty(), "M is back on its straight drop");
+        assert_eq!(struts.len(), sized_from);
+        assert_eq!(outcome.inserted_arms_withdrawn, 1);
+        assert_eq!(outcome.inserted_on_a_put_back_move, 1);
+        assert_eq!(refused, vec![(0, moved_base as usize)]);
+        assert_eq!(outcome.arms_relanded, 0);
+        assert_eq!(outcome.moves_put_back_roots, 1);
+        assert!(moves.is_empty());
     }
 }
 

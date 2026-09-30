@@ -291,3 +291,91 @@ fn a_tip_moved_for_its_section_keeps_its_section_and_its_disc_on_the_face() {
         "tips moved along their face for their section do not hold: {broken:?}"
     );
 }
+
+/// **A put-back leaves nothing standing where a moved shaft was**
+/// (round5-review-fixes 2026-09-29). Every re-landing the sized field put
+/// back takes the arms its judging sizing inserted with it
+/// (`lip_seat::put_back_all`), so every member-on-member landing stands after
+/// each lip-seat pass: the production landing check the run records after
+/// each pass. Fails on zero put-backs.
+fn assert_every_landing_stands_after_the_lip_seat_passes(name: &str, plan: &SweepPlan) {
+    let lip = &plan.report.lip_seat;
+    let put_back = lip.moves_put_back_host_load + lip.moves_put_back_roots;
+    let passes: Vec<_> = plan
+        .report
+        .landing_check
+        .passes
+        .iter()
+        .filter(|pass| pass.pass.starts_with("lip seats"))
+        .collect();
+    println!(
+        "{name}: {put_back} re-landings put back; {} inserted arms withdrawn with them ({} on a \
+         move put back); landing checks after the lip-seat passes {passes:?}",
+        lip.inserted_arms_withdrawn, lip.inserted_on_a_put_back_move
+    );
+    assert!(
+        put_back > 0,
+        "{name}: nothing was put back, so this grades nothing"
+    );
+    assert!(
+        !passes.is_empty(),
+        "{name}: no landing check after a lip-seat pass"
+    );
+    for pass in passes {
+        assert!(
+            pass.invalid_landings == 0 && pass.unrooted == 0,
+            "{name}: after '{}' {} landings do not stand and {} members are unrooted",
+            pass.pass,
+            pass.invalid_landings,
+            pass.unrooted
+        );
+    }
+}
+
+#[test]
+fn every_landing_stands_after_a_lip_seat_put_back_on_the_stilt_plate() {
+    assert_every_landing_stands_after_the_lip_seat_passes("make_tall_stilt_plate", &stilt().on);
+}
+
+#[test]
+fn every_landing_stands_after_a_lip_seat_put_back_on_the_laid_tube() {
+    assert_every_landing_stands_after_the_lip_seat_passes("make_laid_tube", &laid_tube().on);
+}
+
+/// **A section move taken back leaves every other move within the rules**
+/// (round5-review-fixes 2026-09-29). The footprint rule admits a set of moves
+/// together, so a branch's slide can hold the lean law only because its base
+/// follows its host's slide; when the host's slide is taken back for a shaft
+/// still cut, every move left is judged again (`footprint::settle`). Graded
+/// on the emitted arms against the arms with every footprint move taken back
+/// ([`crate::footprint_moves_hold_the_rules::grade`]). Fails unless a section
+/// move was taken back on this field.
+#[test]
+fn a_section_move_taken_back_leaves_every_displaced_member_within_the_rules() {
+    let plan = &stilt().on;
+    let footprint = &plan.report.seat_footprint;
+    let graded = crate::footprint_moves_hold_the_rules::grade(plan);
+    println!(
+        "stilt: {} section moves taken back, then {} moves taken back by the rules over {} \
+         re-checks ({} member checks); {} members displaced; lean limit {:.4}; over the lean law \
+         {:?}; over a run {:?}",
+        footprint.section_moves_taken_back,
+        footprint.moves_taken_back_limits,
+        footprint.settle_rechecks,
+        footprint.members_checked,
+        graded.displaced,
+        graded.max_lean,
+        graded.over_lean,
+        graded.over_run
+    );
+    assert!(
+        footprint.section_moves_taken_back > 0 && footprint.settle_rechecks > 0,
+        "no section move was taken back on the stilt plate, so this grades nothing"
+    );
+    assert!(
+        graded.over_lean.is_empty() && graded.over_run.is_empty(),
+        "members displaced by the moves left after a take-back break a rule: lean {:?}, run {:?}",
+        graded.over_lean,
+        graded.over_run
+    );
+}

@@ -2111,8 +2111,11 @@ impl LipSeatRun<'_> {
             }
             // Size the field the moves made, and let it decide
             // (`lip_seat::blame`): a move whose chain came out overloaded, or
-            // whose foot came to lap another root, is put back and the field
-            // sized again, until the moves left stand on the sized field.
+            // whose foot came to lap another root, is put back WITH every arm
+            // the sizing that judged it inserted (`lip_seat::put_back_all`),
+            // and the field sized again, until the moves left stand on the
+            // sized field.
+            let sized_from = struts.len();
             let mut now = self.size(context, struts);
             let field_after = loop {
                 let field_after = lip_seat::measure_sized(context, struts, &now);
@@ -2124,12 +2127,7 @@ impl LipSeatRun<'_> {
                 if blamed.is_empty() {
                     break field_after;
                 }
-                // Highest slot first, so each removal leaves the lower slots
-                // where `blame` found them.
-                for &(slot, cause) in blamed.iter().rev() {
-                    let relanding = moves.remove(slot);
-                    lip_seat::put_back(struts, relanding, cause, refused, outcome);
-                }
+                lip_seat::put_back_all(struts, sized_from, &mut moves, &blamed, refused, outcome);
                 now = self.size(context, struts);
             };
             before = Some(field_after);
