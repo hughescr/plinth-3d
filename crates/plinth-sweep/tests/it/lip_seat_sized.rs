@@ -339,7 +339,16 @@ fn every_landing_stands_after_a_lip_seat_put_back_on_the_stilt_plate() {
 
 #[test]
 fn every_landing_stands_after_a_lip_seat_put_back_on_the_laid_tube() {
-    assert_every_landing_stands_after_the_lip_seat_passes("make_laid_tube", &laid_tube().on);
+    // Graded at the X this fixture was built at (12,
+    // `crate::harness::PATH_FIXTURE_X_ALLOWED`): at the ruled 18 the laid tube
+    // puts no re-landing back (measured 2026-09-30), so the shared production
+    // plan grades nothing here. The put-back rule reads no X.
+    let plan = sweep_with(
+        &make_laid_tube().expect("the laid tube"),
+        0.0,
+        &crate::harness::at_path_fixture_x(policy()),
+    );
+    assert_every_landing_stands_after_the_lip_seat_passes("make_laid_tube", &plan);
 }
 
 /// **A section move taken back leaves every other move within the rules**

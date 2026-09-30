@@ -30,7 +30,7 @@
 
 use crate::harness;
 
-use harness::{sweep_with, x_allowed};
+use harness::sweep_with;
 use plinth_mesh::{make_recessed_disc, Mesh};
 use plinth_sweep::SweepPolicy;
 
@@ -85,13 +85,16 @@ fn tilted_disc() -> Mesh {
     tilt_about_x(&flat, 20.0)
 }
 
-/// `Σ over arms of tip_load / X_ALLOWED` — the scar area the registered area
-/// law asks this field for, arm by arm. Independent of how the engine chose to
-/// size anything: it reads the loads, not the radii.
+/// `Σ over arms of tip_load / X_ALLOWED` — the scar area the area law asks
+/// this field for, arm by arm, at the X the run was sized with (the report
+/// carries it; it is the registry's X except where a test pins the path
+/// fixture's X). Independent of how the engine chose to size anything: it
+/// reads the loads, not the radii.
 fn required_scar_mm2(plan: &plinth_sweep::SweepPlan) -> f64 {
+    let x = plan.report.x_allowed;
     plan.struts
         .iter()
-        .map(|strut| strut.tip_load_mm2() / x_allowed())
+        .map(|strut| strut.tip_load_mm2() / x)
         .sum()
 }
 
@@ -144,7 +147,15 @@ fn the_insertion_trigger_reads_one_event_and_the_max_field_would_insert_for_a_su
 #[test]
 fn the_area_law_places_arms_reach_never_asked_for_and_the_shortfall_falls() {
     let mesh = cone_on_a_small_face(2.0, 6.0, 4.0, 64);
-    let policy = SweepPolicy::from_registry().expect("the registry");
+    // Graded at the X this fixture was built at (12,
+    // `crate::harness::PATH_FIXTURE_X_ALLOWED`): at the ruled 18 the cone's
+    // funnelled load stays under `ℓ_max = 18·π·r_max² = 56.55 mm²`, so 0
+    // arm-layers are over the limit and the area law asks for nothing
+    // (measured 2026-09-30). The trigger reads `sizing.x_allowed`, so this
+    // pins the fixture's X, not the rule's.
+    let policy = crate::harness::at_path_fixture_x(
+        SweepPolicy::from_registry().expect("the registry"),
+    );
     let without = sweep_with(
         &mesh,
         0.1,
@@ -270,9 +281,9 @@ fn the_area_law_places_arms_reach_never_asked_for_and_the_shortfall_falls() {
 fn a_flat_disc_needs_no_load_driven_arms_at_all() {
     // The counterpart, so "it always inserts" cannot pass for "it inserts where
     // the law asks". A flat disc's arms sit on a hex lattice at 3.41 mm, so one
-    // arm drains at most a hex cell of 10.06 mm2 of peel against the 37.70 mm2
-    // one tip may carry — a factor of 3.7 of headroom. The insertion must find
-    // nothing to do.
+    // arm drains at most a hex cell of 10.06 mm2 of peel against the 56.55 mm2
+    // one tip may carry at X_ALLOWED 18 — a factor of 5.6 of headroom (3.7 at
+    // the earlier 12). The insertion must find nothing to do.
     let policy = SweepPolicy::from_registry().expect("the registry");
     let plan = sweep_with(
         &make_recessed_disc(24.0, 25.0, 3.5, 2.5, 22.5, 128).expect("the Round 50 profile"),

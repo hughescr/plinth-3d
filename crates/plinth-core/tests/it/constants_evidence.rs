@@ -138,7 +138,7 @@ struct ExpectedSource {
     date: &'static str,
 }
 
-const EXPECTED_SOURCES: [ExpectedSource; 30] = [
+const EXPECTED_SOURCES: [ExpectedSource; 31] = [
     ExpectedSource {
         constant: "FINAL_CLEARANCE_GAP_MM",
         kind: "owner_decision",
@@ -323,6 +323,18 @@ const EXPECTED_SOURCES: [ExpectedSource; 30] = [
         date: "2026-08-20",
     },
     ExpectedSource {
+        // Craig's ruling of 2026-09-30 replaced the derivation
+        // floor(lower(X_STAR_CONE)/2) = 12 with a ruled design ratio of 18.
+        // The plates bound it; they no longer compute it.
+        constant: "X_ALLOWED",
+        kind: "owner_decision",
+        identity: "x-allowed-design-load-ratio-owner-ruling",
+        record: "docs/engineering-journal/03-physics-and-constants.md",
+        locator: "§3.1",
+        precision: "exact",
+        date: "2026-09-30",
+    },
+    ExpectedSource {
         constant: "X_STAR_CONE",
         kind: "calibration_plate",
         identity: "COUPON-PLATE-5-compliant-vs-stiff",
@@ -456,7 +468,8 @@ fn declaration_batch_has_exact_membership_order_shapes_and_provenance_counts() {
         .iter()
         .filter(|descriptor| descriptor.provenance().class() == RegistryProvenanceClass::Derived)
         .count();
-    assert_eq!((measured, derived), (30, 16));
+    // X_ALLOWED moved from Derived to Measured (an owner ruling) on 2026-09-30.
+    assert_eq!((measured, derived), (31, 15));
     assert!(descriptors.iter().all(|descriptor| !matches!(
         descriptor.provenance().class(),
         RegistryProvenanceClass::Placeholder | RegistryProvenanceClass::Pending
@@ -489,7 +502,7 @@ fn descriptor_values_preserve_exact_scalar_record_direction_and_interval_types()
     );
     assert_eq!(scalar(&descriptors, "TIP_DIAMETER_MIN_ALLOWED_MM"), 0.100);
     assert_eq!(scalar(&descriptors, "TIP_RADIUS_MIN_ALLOWED_MM"), 0.050);
-    assert_eq!(scalar(&descriptors, "X_ALLOWED"), 12.0);
+    assert_eq!(scalar(&descriptors, "X_ALLOWED"), 18.0);
 
     for id in ["MINIMA_DROP_INTERIOR_FACES", "MINIMA_REQUIRE_ISLAND_BIRTH"] {
         assert_eq!(
@@ -827,7 +840,10 @@ fn derived_sources_and_relations_are_exact_and_do_not_launder_authority() {
             "TIP_RADIUS_MIN_ALLOWED_MM",
             &["TIP_DIAMETER_MIN_ALLOWED_MM"] as &[&str],
         ),
-        ("X_ALLOWED", &["X_STAR_CONE"] as &[&str]),
+        // X_ALLOWED left this list on 2026-09-30: it is Craig's ruled design
+        // ratio (Measured, owner_decision), bounded by the plates rather than
+        // computed from them. See
+        // `the_design_load_ratio_is_craigs_ruling_and_sits_inside_the_measured_brackets`.
     ];
     for (id, expected_from) in expected {
         let RegistryProvenanceView::Derived { from, note } =
@@ -855,15 +871,115 @@ fn derived_sources_and_relations_are_exact_and_do_not_launder_authority() {
         *constants.tip_radius_min_allowed_mm().value(),
         constants.tip_diameter_min_allowed_mm().value() / 2.0
     );
-    assert_eq!(
-        *constants.x_allowed().value(),
-        (constants.x_star_cone().value().lower() / 2.0).floor()
-    );
     assert!(constants
         .cco_x_pair_load_discount()
         .note
         .contains("docs/engineering-journal/reference/physics_transient_peel.md"));
-    assert!(constants.x_allowed().note.contains("19.91/12 = 1.66×"));
+}
+
+/// **`X_ALLOWED` is Craig's ruled design load ratio, 18, and the plates bound
+/// it.**
+///
+/// Until 2026-09-30 `X_ALLOWED` was `Derived` as
+/// `floor(lower(X_STAR_CONE) / 2) = floor(25.00 / 2) = 12`: the plate-5 snap
+/// ratio with a 2x design factor. Craig ruled it to 18 on 2026-09-30 after the
+/// over-support attribution showed that every arm tip sits at exactly
+/// `load / (π · 12)`, so the 2x was the whole of the margin. 18 is not
+/// computed from anything, so it is no longer `Derived`: it is a `Measured`
+/// owner decision, the house form for a ruling (`TIP_DIAMETER_MIN_ALLOWED_MM`,
+/// `TIP_RADIUS_MAX_GROWN_SCAR_MM`, `FINAL_CLEARANCE_GAP_MM`).
+///
+/// This test pins four things:
+///
+/// 1. **the number**, 18;
+/// 2. **the class**, `Measured` from an `owner_decision` dated exactly
+///    2026-09-30, never `Derived` again (there is no derivation to claim);
+/// 3. **the relation to the measured brackets**, which is what keeps the
+///    ruling honest: 18 must sit strictly below BOTH the plate-5 cone lower
+///    edge (25.00) and the plate-6 cylinder lower edge (19.91, exclusive). A
+///    later plate that moved either edge to or below 18 turns this red, and it
+///    also stops the registry from constructing (the guard in
+///    `M0EvidenceConstants::new`), so a recalibration cannot leave a ruling
+///    standing above the measured snap;
+/// 4. **the note**, which must name the ruling, both margins and what the
+///    plates still say.
+#[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
+fn the_design_load_ratio_is_craigs_ruling_and_sits_inside_the_measured_brackets() {
+    let constants = component();
+    let descriptors = constants.descriptors().unwrap();
+
+    // (1) The number.
+    let x_allowed = scalar(&descriptors, "X_ALLOWED");
+    assert_eq!(
+        x_allowed, 18.0,
+        "X_ALLOWED is 18 by Craig's ruling of 2026-09-30 (it was 12 = floor(25.00/2))"
+    );
+    assert_eq!(*constants.x_allowed().value(), x_allowed);
+
+    // (2) The class.
+    let RegistryProvenanceView::Measured { source, err, note } =
+        descriptor(&descriptors, "X_ALLOWED").provenance().view()
+    else {
+        panic!(
+            "X_ALLOWED is a Measured owner decision since 2026-09-30 -- a ruling, \
+             not a derivation"
+        );
+    };
+    assert!(err.is_none());
+    assert_source(
+        source,
+        &ExpectedSource {
+            constant: "X_ALLOWED",
+            kind: "owner_decision",
+            identity: "x-allowed-design-load-ratio-owner-ruling",
+            record: "docs/engineering-journal/03-physics-and-constants.md",
+            locator: "§3.1",
+            precision: "exact",
+            date: "2026-09-30",
+        },
+    );
+
+    // (3) The relation to the measured brackets.
+    let cone = constants.x_star_cone().value();
+    let cylinder = constants.x_star_cylinder().value();
+    assert!(
+        x_allowed < cone.lower(),
+        "the design ratio {x_allowed} must sit below the plate-5 cone snap edge {}",
+        cone.lower()
+    );
+    assert!(
+        x_allowed < cylinder.lower(),
+        "the design ratio {x_allowed} must sit below the plate-6 cylinder bracket's lower \
+         edge {} (exclusive)",
+        cylinder.lower()
+    );
+    let cone_margin = cone.lower() / x_allowed;
+    let cylinder_margin = cylinder.lower() / x_allowed;
+    assert!((cone_margin - 1.3889).abs() < 5.0e-5, "{cone_margin}");
+    assert!((cylinder_margin - 1.1061).abs() < 5.0e-5, "{cylinder_margin}");
+
+    // (4) The note.
+    for phrase in [
+        "Craig ruling 2026-09-30",
+        "was 12 = floor(25.00/2)",
+        "25.00/18 = 1.389×",
+        "19.91/18 = 1.106×",
+        "X_STAR_CONE",
+        "X_STAR_CYLINDER",
+        "not a derivation",
+        "oversupport-attribution.md",
+    ] {
+        assert!(
+            note.contains(phrase),
+            "the X_ALLOWED note must say {phrase:?}; it is the record of what the ruling \
+             rests on and how much margin it leaves"
+        );
+    }
 }
 
 #[test]

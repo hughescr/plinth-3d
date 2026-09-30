@@ -655,7 +655,8 @@ fn no_arm_of_round_25_loses_more_than_its_tip_ball_cap_to_the_seat_trim() {
         offenders.join("\n")
     );
     // A RATCHET on the known defect above: develop `2fc80b6` has exactly one
-    // such arm on this fixture (tip record 234, lean 46.2 deg, 0.2315 mm3), and
+    // such arm on this fixture (tip record 234, lean 46.2 deg, 0.2315 mm3; two
+    // since X_ALLOWED became 18, see the constant), and
     // the lip-seat rule re-lands arms, so it must never add another (its
     // re-landings are held to the kernel's solid clearance for this reason).
     assert!(
@@ -670,4 +671,14 @@ fn no_arm_of_round_25_loses_more_than_its_tip_ball_cap_to_the_seat_trim() {
 /// Arms of this fixture whose shaft passes through model material on the
 /// support side of their seat plane, on develop `2fc80b6` (measured by this
 /// grader: tip record 234). A path-clearance defect, not the seat angle.
-const KNOWN_SHAFTS_THROUGH_THE_MODEL: usize = 1;
+///
+/// RE-PINNED 1 -> 2 on 2026-09-30, lane x-allowed-18: Craig ruled X_ALLOWED
+/// 12 -> 18, which re-sizes every arm of the field (1/1.5 of the section per
+/// unit load) and so re-lays the leans and seats the lip-seat pass works on.
+/// Measured on the ruled field: tip records 213 (lean 50.0 deg, ball 0.490 mm,
+/// 0.1748 mm3) and 238 (lean 44.9 deg, ball 0.390 mm, 0.1359 mm3), 0.3107 mm3
+/// in all, against one arm and 0.2315 mm3 at X 12. Nothing in the seat trim
+/// or the lip-seat rule changed; the defect is the same (an ARM's own solid is
+/// not clearance-checked, `lanes/member-clearance.md` Q1), and it now shows on
+/// two arms. The pin still holds the lip-seat rule to adding none.
+const KNOWN_SHAFTS_THROUGH_THE_MODEL: usize = 2;

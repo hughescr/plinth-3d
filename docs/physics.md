@@ -62,11 +62,19 @@ directions.
 ### The allowance the engine actually uses
 
 ```
-X_ALLOWED = floor(25.00 / 2) = 12
+X_ALLOWED = 18        (Craig ruling, 2026-09-30; was floor(25.00 / 2) = 12)
 ```
 
-so every arm satisfies `A_arm ≥ A_supported / 12` — the measured boundary with a factor of
-two held back. A second, independent plate using constant-diameter cylindrical arms rather
+so every arm satisfies `A_arm ≥ A_supported / 18`: 1.389× below the plate-5 cone boundary
+(25.00) and 1.106× below the plate-6 cylinder bracket's lower edge (19.91). The ruling
+followed the 2026-09-30 over-support attribution, which found every law-sized tip at exactly
+`A_supported / (π · 12)`, so the old factor of two was the whole margin. It is registered as a
+Measured owner decision, bounded by both plates (the registry refuses to construct if either
+lower edge falls to 18 or below), and is no longer derived from them.
+`docs/engineering-journal/03-physics-and-constants.md` §3.1 carries the ruling note.
+
+Until 2026-09-30 the text below held: `X_ALLOWED = floor(25.00 / 2) = 12`, so every arm
+satisfied `A_arm ≥ A_supported / 12`, the measured boundary with a factor of two held back. A second, independent plate using constant-diameter cylindrical arms rather
 than tapered cones bracketed the boundary at `X* ∈ (19.91, 30.48)`, which leaves the
 allowance **1.66×** of margin against the pessimistic end of an experiment it was not
 derived from. That is a cross-check, deliberately not a second derivation input.

@@ -2770,9 +2770,9 @@ fn print_sweep_disclosure(
          uncarried load {:.4} mm2 (misrouted {:.4} mm2); unrooted landings {}",
         report.peak_layer_area_mm2,
         report.total_scar_mm2,
-        report.peak_layer_area_mm2 / 12.0,
+        report.peak_layer_area_mm2 / report.x_allowed,
         if report.peak_layer_area_mm2 > 0.0 {
-            report.total_scar_mm2 / (report.peak_layer_area_mm2 / 12.0)
+            report.total_scar_mm2 / (report.peak_layer_area_mm2 / report.x_allowed)
         } else {
             f64::NAN
         },
@@ -3073,8 +3073,12 @@ fn print_sweep_disclosure(
     for overloaded in report.overloaded_struts.iter().take(20) {
         println!(
             "[sweep {model}] WARNING overloaded arm {} at layer {}: carries {:.4} mm2, \
-             realized X {:.3} against X_ALLOWED 12",
-            overloaded.strut_id, overloaded.layer, overloaded.carried_mm2, overloaded.realized_x,
+             realized X {:.3} against X_ALLOWED {}",
+            overloaded.strut_id,
+            overloaded.layer,
+            overloaded.carried_mm2,
+            overloaded.realized_x,
+            report.x_allowed,
         );
     }
     print_overloaded_arms(model, plan);
@@ -3144,7 +3148,7 @@ fn print_sweep_disclosure(
     for warning in rigid.over_limit.iter().take(20) {
         println!(
             "[sweep {model}] WARNING rigid-body share on arm {}: {:.4} mm2 at the event of layer \
-             {} would realize X {:.3} at the largest legal radius (X_ALLOWED 12); it is sized for \
+             {} would realize X {:.3} at the largest legal radius (X_ALLOWED {}); it is sized for \
              {:.4} mm2 by its worst single event (root radius {:.4} mm; {} members land on it; it \
              lands on {:?}). A body that has cured stiff shares its peel by stiffness; check this \
              arm.",
@@ -3152,6 +3156,7 @@ fn print_sweep_disclosure(
             warning.share_mm2,
             warning.event_layer,
             warning.realized_x,
+            report.x_allowed,
             warning.sized_mm2,
             warning.root_radius_mm,
             warning.members_landed_on_it,

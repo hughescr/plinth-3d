@@ -468,10 +468,17 @@ fn every_needed_tie_holds_in_every_direction_on_the_brace_pair() {
 /// kinds are published apart.
 #[test]
 fn forced_merges_put_back_are_the_lanes_own_and_descent_merges_are_counted_apart() {
-    let plan = stilt();
-    let lane = &plan.report.slenderness_lane;
+    // Graded at the X this fixture was built at (12): at the ruled 18 the stilt
+    // plate forces 3 merges and puts none back (measured 2026-09-30), so both
+    // counts read 0 and the test grades nothing. The put-back rule reads no X.
     let mesh = make_tall_stilt_plate().expect("the tall stilt plate fixture");
-    let without = sweep_with(&mesh, 0.0, &policy().without_slenderness());
+    let plan = &sweep_with(&mesh, 0.0, &harness::at_path_fixture_x(policy()));
+    let lane = &plan.report.slenderness_lane;
+    let without = sweep_with(
+        &mesh,
+        0.0,
+        &harness::at_path_fixture_x(policy()).without_slenderness(),
+    );
     println!(
         "tall stilt plate: {} forced merges, {} put back {:?}, {} descent merges put back",
         lane.merges_forced,
@@ -516,7 +523,15 @@ fn forced_merges_put_back_are_the_lanes_own_and_descent_merges_are_counted_apart
 #[test]
 fn masts_stand_where_the_panel_holds_one_to_an_arm_in_each_plane() {
     let mesh = make_lonely_peak().expect("the lonely peak fixture");
-    let plan = sweep_with(&mesh, 0.0, &policy().without_slenderness_thicken());
+    // Graded at the X this fixture was built at (12). At the ruled 18 the
+    // peak's arms are thinner than any mast the law would stand beside them, so
+    // every mast cell is refused as thicker than its member (23,448 refusals,
+    // 0 masts; measured 2026-09-30) and this rung is never reached.
+    let plan = sweep_with(
+        &mesh,
+        0.0,
+        &harness::at_path_fixture_x(policy()).without_slenderness_thicken(),
+    );
     let lane = &plan.report.slenderness_lane;
     let masts: Vec<&SweepStrut> = plan
         .struts

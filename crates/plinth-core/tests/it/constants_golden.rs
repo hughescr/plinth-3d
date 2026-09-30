@@ -375,7 +375,9 @@ fn global_registry_is_one_complete_atomic_306_constant_publication() {
             }
             counts
         });
-    assert_eq!(classes, [30, 16, 282, 0]);
+    // X_ALLOWED moved Derived -> Measured (Craig's ruling of 2026-09-30, an
+    // owner decision): 30/16 became 31/15. No constant was added or removed.
+    assert_eq!(classes, [31, 15, 282, 0]);
 }
 
 #[test]

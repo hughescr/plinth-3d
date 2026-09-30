@@ -99,6 +99,14 @@ pub struct SweepRunReport {
     pub layers: usize,
     pub cells_per_layer: usize,
     pub reach: ReachProvenance,
+    /// `X_ALLOWED`, the design load ratio this run sized every member with
+    /// (18 since Craig's ruling of 2026-09-30). Carried so every sentence the
+    /// run prints about the area law states the X it actually used, never a
+    /// typed number.
+    pub x_allowed: f64,
+    /// `TIP_RADIUS_MAX_LEGACY_MM`, the largest radius the law may ask for; the
+    /// per-tip load ceiling is `x_allowed · π · tip_radius_max_mm²`.
+    pub tip_radius_max_mm: f64,
     /// Whether the field this run placed would pass an audit whose span gate
     /// is written at `kappa_audit_gate`. Placement and gating are different
     /// jobs; this field exists so the difference is never decided by accident
@@ -469,11 +477,15 @@ impl SweepRunReport {
             out,
             "Arms are placed by TWO criteria, both measured. Reach put in {} of them (cured \
              material must never span more than one lamina's reach to a carrier); the area law \
-             put in the other {} (a tip carries at most X_ALLOWED * pi * r_max^2 = 37.6991 mm2, \
-             and where the routed load exceeded that the down-sweep added the carriers the law \
-             asks for and routed again, {} rounds in total).",
+             put in the other {} (a tip carries at most X_ALLOWED * pi * r_max^2 = {:.4} mm2 \
+             at X_ALLOWED {} and r_max {:.3} mm, and where the routed load exceeded that the \
+             down-sweep added the carriers the law asks for and routed again, {} rounds in \
+             total).",
             self.struts_total.saturating_sub(self.arms_inserted_by_load),
             self.arms_inserted_by_load,
+            self.x_allowed * core::f64::consts::PI * self.tip_radius_max_mm * self.tip_radius_max_mm,
+            self.x_allowed,
+            self.tip_radius_max_mm,
             self.insertion_rounds,
         )
         .expect("writing to a String cannot fail");

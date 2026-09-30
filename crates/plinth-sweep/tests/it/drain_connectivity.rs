@@ -121,9 +121,14 @@ fn a_drain_opening_into_free_air_is_connected() {
 #[test]
 fn deleting_the_keep_out_walls_the_outlet_in() {
     let drain = downward_drain();
-    let sabotaged = SweepPolicy::from_registry()
-        .expect("registry")
-        .without_drain_keep_out();
+    // Graded at the X this fixture was built at (12,
+    // `harness::PATH_FIXTURE_X_ALLOWED`). At the ruled 18 the thinner arms no
+    // longer wall this mouth in even WITHOUT the keep-out (connected, best
+    // clearance 2.550 mm against 2.045 required; measured 2026-09-30), so the
+    // fixture stops being adversarial. The keep-out reads no X.
+    let sabotaged =
+        harness::at_path_fixture_x(SweepPolicy::from_registry().expect("registry"))
+            .without_drain_keep_out();
     let plan = harness::sweep_with_drains(&flat_underside_slab(), &sabotaged, &[drain]);
     let escape = &plan.report.escape;
     assert_eq!(
@@ -202,7 +207,9 @@ fn deleting_the_keep_out_walls_the_outlet_in() {
 #[test]
 fn the_keep_out_clears_the_mouth_and_the_rest_is_reported() {
     let drain = downward_drain();
-    let policy = SweepPolicy::from_registry().expect("registry");
+    // At the X this fixture was built at (12): see
+    // `deleting_the_keep_out_walls_the_outlet_in` for why 18 is not adversarial.
+    let policy = harness::at_path_fixture_x(SweepPolicy::from_registry().expect("registry"));
     let mesh = flat_underside_slab();
     let kept = harness::sweep_with_drains(&mesh, &policy, &[drain]);
     let sabotaged = harness::sweep_with_drains(

@@ -585,7 +585,8 @@ impl FrozenTipLoadPolicy {
     ///
     /// This is an internal CONSISTENCY identity — a function of the
     /// Python-era `tip_safety_factor` = 8 — and NOT an independent measurement
-    /// of the H2 plate's `X_ALLOWED` = 12.  Had the safety factor been 6 this
+    /// of the registered `X_ALLOWED` (18 since Craig's ruling of 2026-09-30;
+    /// it was 12, the H2 plate's cone ratio halved).  Had the safety factor been 6 this
     /// would read 16.  What is notable is only that it does not EXCEED the
     /// measured allowance; that one-sided relationship is what the constants
     /// gate asserts.
@@ -2697,21 +2698,24 @@ const PEEL_FRONT_ROOT_MOMENT_COEFFICIENT: f64 = 6.0;
 /// carried, in mm.
 ///
 /// `K = sqrt(X_ALLOWED / 6)` and the allowance is `K · h`. Both `X_ALLOWED`
-/// (the registered area law, `Derived` from calibration plate 5) and `h`
+/// (the registered area law: Craig's ruling of 2026-09-30, bounded below both
+/// plate-5 and plate-6 snap edges; it was `Derived` from plate 5 before) and `h`
 /// (`LAYER_HEIGHT_DEFAULT_MM`, `Measured` on calibration plate 6) come from
 /// the caller so this formula can be exercised away from the registered
 /// values; [`registry_low_point_reach_allowance_mm`] is the one production
 /// reader and supplies both from the registry.
 ///
-/// At the registered values the allowance is `sqrt(12/6) × 0.050 mm`
-/// = 0.0707 mm of reach.
+/// At the registered values the allowance is `sqrt(18/6) × 0.050 mm`
+/// = 0.0866 mm of reach (X_ALLOWED 18 since Craig's ruling of 2026-09-30;
+/// it was `sqrt(12/6) × 0.050` = 0.0707 mm).
 fn low_point_reach_allowance_mm(x_allowed: f64, layer_height_mm: f64) -> f64 {
     (x_allowed / PEEL_FRONT_ROOT_MOMENT_COEFFICIENT).sqrt() * layer_height_mm
 }
 
-/// The sole production reader of the low-point reach allowance, and the sole
-/// production reader of `X_ALLOWED` anywhere in the engine (task #57,
-/// registry-bypass finding, constants audit sec 2f).
+/// The sole production reader of the low-point reach allowance, and the
+/// legacy engine's one production reader of `X_ALLOWED` (task #57,
+/// registry-bypass finding, constants audit sec 2f). The sweep engine reads
+/// `X_ALLOWED` on its own, through `plinth_sweep::SweepPolicy::from_registry`.
 ///
 /// The layer height comes from the registry, per Craig's ruling, not from the
 /// `LayerPlan`. Recorded divergence, not a defect today: the probe slice one
@@ -2727,7 +2731,7 @@ fn low_point_reach_allowance_mm(x_allowed: f64, layer_height_mm: f64) -> f64 {
 /// exposes only `new()` -- there is no way to construct one with a
 /// different evidence set to substitute in a test. The mitigation
 /// is `the_reach_allowance_is_read_from_the_registry_not_hardcoded`, which
-/// pins `x_allowed == 12.0` and `layer_height_mm == 0.050`: a future
+/// pins `x_allowed == 18.0` and `layer_height_mm == 0.050`: a future
 /// registry change to either value flips that assertion red, even though it
 /// cannot prove today that this function reads the registry rather than a
 /// constant.
@@ -8780,8 +8784,8 @@ mod tests {
                 hole: true,
             }],
         };
-        // The cavity centre is 1.0 mm from every wall, 14x the 0.0707 mm
-        // allowance.
+        // The cavity centre is 1.0 mm from every wall, 11.5x the 0.0866 mm
+        // allowance (14x the 0.0707 mm allowance before X_ALLOWED 12 -> 18).
         assert!((point_reach_mm(std::slice::from_ref(&solid), [2.0, 2.0]) - 1.0).abs() < 1.0e-12);
         // A point on the solid annulus is carried outright.
         assert_eq!(point_reach_mm(&[solid], [0.5, 0.5]), 0.0);
@@ -8817,8 +8821,9 @@ mod tests {
     /// sec 3), not re-derived from a mesh here, so the test is tautological
     /// on those values by construction. What it actually pins: (a) the
     /// comparison direction at both ends -- `>` the allowance demands a
-    /// support, `<=` is adequate; (b) the two non-trivial margins, 1.4756x
-    /// and 0.2827x the allowance; and (c) that `region_reach_mm` takes the
+    /// support, `<=` is adequate; (b) the two non-trivial margins, 1.2048x
+    /// and 0.2308x the allowance (1.4756x and 0.2827x before Craig's
+    /// X_ALLOWED 12 -> 18 ruling of 2026-09-30); and (c) that `region_reach_mm` takes the
     /// max over every sampled region point rather than only the minimum's
     /// representative point -- `reach_fixture_minimum`'s representative
     /// point always sits inside the carrying solid, so a reach read off it
@@ -8829,10 +8834,11 @@ mod tests {
     ///
     /// MEASURED reach values, read off the instrumented `b8edcb8` dumps:
     ///
-    /// - Crawler Zombie minimum 13 -- reach 0.104343 mm. 148% of the
-    ///   0.0707 mm allowance, so it DEMANDS a support.
-    /// - Thorny Vegepygmy minimum 17 -- reach 0.019988 mm. 28% of the
-    ///   allowance, so it is adequate.
+    /// - Crawler Zombie minimum 13 -- reach 0.104343 mm. 120% of the
+    ///   0.0866 mm allowance (`sqrt(18/6) * 0.050`), so it DEMANDS a support.
+    ///   It was 148% of the 0.0707 mm allowance at X_ALLOWED 12.
+    /// - Thorny Vegepygmy minimum 17 -- reach 0.019988 mm. 23% of the
+    ///   allowance (28% at X_ALLOWED 12), so it is adequate.
     /// - the other 55 -- reach 0.000000 mm exactly, every sampled region point
     ///   inside the solid below. Adequate with full margin.
     ///
@@ -8862,11 +8868,17 @@ mod tests {
             false,
             crawler_zombie <= allowance_mm
         ));
-        // 148% of the allowance. The margin is asserted, not just the verdict:
+        // 120% of the allowance. The margin is asserted, not just the verdict:
         // the corpus alone cannot tell the conservative coefficient 6 from the
         // optimistic 3 (this case demands a support at either), so the margin
         // is what pins Craig's conservative-end ruling here.
-        assert!((crawler_zombie / allowance_mm - 1.4756).abs() < 1.0e-3);
+        //
+        // RE-PINNED 2026-09-30, 1.4756 -> 1.2048: Craig ruled X_ALLOWED
+        // 12 -> 18, and the allowance follows X as sqrt(X/6) * h, so it moved
+        // 0.0707 -> 0.0866 mm (by sqrt(18/12) = 1.2247). The reach is the
+        // same literal; only the denominator moved. The verdict (demands a
+        // support) is unchanged.
+        assert!((crawler_zombie / allowance_mm - 1.2048).abs() < 1.0e-3);
 
         // Thorny Vegepygmy minimum 17, z = 2.355105 mm.
         let thorny_vegepygmy = region_reach_mm(&probe, &reach_fixture_minimum(2.355105, 0.019988));
@@ -8880,8 +8892,10 @@ mod tests {
             false,
             thorny_vegepygmy <= allowance_mm
         ));
-        // 28% of the allowance.
-        assert!((thorny_vegepygmy / allowance_mm - 0.2827).abs() < 1.0e-3);
+        // 23% of the allowance. RE-PINNED 2026-09-30, 0.2827 -> 0.2308, for
+        // the same reason as above (X_ALLOWED 12 -> 18, allowance
+        // 0.0707 -> 0.0866 mm). The verdict (adequate) is unchanged.
+        assert!((thorny_vegepygmy / allowance_mm - 0.2308).abs() < 1.0e-3);
 
         // The other 55: a dimple wholly inside the material below.
         let dimple = region_reach_mm(&probe, &reach_fixture_minimum(6.421297, -0.5));
@@ -8916,7 +8930,7 @@ mod tests {
     ///
     /// Mutating a test-local copy of either registered input moves the
     /// allowance by the amount the derivation predicts -- `sqrt` in the area
-    /// law, linear in the layer height. A hardcoded 0.0707 mm survives
+    /// law, linear in the layer height. A hardcoded 0.0866 mm survives
     /// neither check.
     #[test]
     #[expect(
@@ -8939,11 +8953,13 @@ mod tests {
         );
 
         // Craig's conservative-end ruling, 2026-08-19: coefficient 6, the peel
-        // front concentrated at the free edge. sqrt(12/6) * 0.050 mm.
+        // front concentrated at the free edge. sqrt(18/6) * 0.050 mm since
+        // Craig ruled X_ALLOWED 12 -> 18 on 2026-09-30 (the allowance follows
+        // X by construction: it was sqrt(12/6) * 0.050 = 0.0707 mm).
         assert!((PEEL_FRONT_ROOT_MOMENT_COEFFICIENT - 6.0).abs() < 1.0e-12);
-        assert!((x_allowed - 12.0).abs() < 1.0e-12);
+        assert!((x_allowed - 18.0).abs() < 1.0e-12);
         assert!((layer_height_mm - 0.050).abs() < 1.0e-12);
-        assert!((registered - 0.070_710_678_118_654_75).abs() < 1.0e-15);
+        assert!((registered - 0.086_602_540_378_443_87).abs() < 1.0e-15);
 
         // Sabotage the area law: four times X_ALLOWED must double the reach.
         let sabotaged_law = low_point_reach_allowance_mm(4.0 * x_allowed, layer_height_mm);

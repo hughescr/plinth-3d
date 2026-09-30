@@ -1121,9 +1121,12 @@ pub fn run_sweep_with_drains(
     // law asks for and drops arms it cannot justify, so a strut is neither
     // starved nor duplicated. The two criteria cannot fight over one arm AT
     // THE SAME MEASUREMENT: the insertion trigger is a routed load above
-    // `ℓ_max = X_ALLOWED·π·r_max² = 37.6991 mm²` and the removal trigger is a
-    // tip load below `ℓ_min = X_ALLOWED·π·r_min² = 0.0942 mm²`, which is 400x
-    // smaller, so no arm can read both at once. That 400x gap does NOT by
+    // `ℓ_max = X_ALLOWED·π·r_max²` (56.5487 mm² at X_ALLOWED 18, Craig's ruling
+    // of 2026-09-30; 37.6991 mm² at the earlier 12) and the removal trigger is
+    // a tip load below `ℓ_min = X_ALLOWED·π·r_min²` (0.1414 mm² at 18; 0.0942
+    // at 12), which is (r_max/r_min)² = 400x smaller whatever X is, so no arm
+    // can read both at once. Both are computed from `policy.x_allowed` here;
+    // neither is typed. That 400x gap does NOT by
     // itself prove the LOOP cannot oscillate across passes: each removal pass
     // re-runs the down-sweep with insertion still enabled, on a different
     // strut set, so an arm dropped this pass because ITS OWN load read low
@@ -2725,6 +2728,8 @@ fn build_report(
         coarsening_steps,
         layers,
         cells_per_layer: grid.cells(),
+        x_allowed: policy.x_allowed,
+        tip_radius_max_mm: policy.tip_radius_max_mm,
         reach: report::ReachProvenance {
             kappa_used: policy.kappa,
             kappa_first_loss: policy.kappa_first_loss,

@@ -16,9 +16,9 @@
 
 use crate::harness;
 
-use harness::{bands, hex_cell_area_mm2, lamina_reach_mm, sweep, within_band, x_allowed};
+use harness::{bands, hex_cell_area_mm2, lamina_reach_mm, sweep_with, within_band};
 use plinth_mesh::make_cavity_box;
-use plinth_sweep::Landing;
+use plinth_sweep::{Landing, SweepPolicy};
 
 const OUTER_MM: f64 = 40.0;
 const WALL_MM: f64 = 3.0;
@@ -26,7 +26,18 @@ const CAVITY_MM: f64 = OUTER_MM - 2.0 * WALL_MM;
 
 #[test]
 fn the_cavity_ceiling_is_carried_from_inside_and_the_plate_sees_a_maximum() {
-    let plan = sweep(&make_cavity_box(OUTER_MM, WALL_MM).unwrap(), 0.10);
+    // Graded at the X this fixture was built at (12,
+    // `harness::PATH_FIXTURE_X_ALLOWED`): at the ruled 18 no merge on the
+    // cavity box is over-grown, the un-merge undoes none, and the anti-vacuity
+    // check for the 2026-09-06 fix below fails (measured 2026-09-30). Nothing
+    // else here reads X: placement is by reach, and the ceiling scar below is
+    // printed against the X the run used.
+    let policy = harness::at_path_fixture_x(
+        SweepPolicy::from_registry()
+            .expect("the registry supplies every number the sweep reads")
+            .with_working_pitch_mm(0.10),
+    );
+    let plan = sweep_with(&make_cavity_box(OUTER_MM, WALL_MM).unwrap(), 0.10, &policy);
     let report = &plan.report;
     println!("{}", report.render_disclosure());
 
@@ -280,7 +291,7 @@ fn the_cavity_ceiling_is_carried_from_inside_and_the_plate_sees_a_maximum() {
         .sum();
     println!(
         "ceiling scar {ceiling_scar:.2} mm2 against a hand-derived {:.2} mm2",
-        interior_demand / x_allowed()
+        interior_demand / plan.report.x_allowed
     );
     assert!(
         ceiling_scar > 0.0,
