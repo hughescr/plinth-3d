@@ -217,11 +217,27 @@ impl ColumnHistory {
     /// shaft without a second lookup.
     #[must_use]
     pub fn shaft_landing(&self, cell: usize, ceiling: usize) -> Option<(u32, usize, usize)> {
+        self.shaft_landing_excluding(cell, ceiling, &[])
+    }
+
+    /// [`Self::shaft_landing`] ignoring the shafts of `except` (a member being
+    /// RE-landed, whose own old shaft the index still holds, and the members
+    /// that move with it: `lip_seat.rs`, 2026-09-29).
+    #[must_use]
+    pub fn shaft_landing_excluding(
+        &self,
+        cell: usize,
+        ceiling: usize,
+        except: &[u32],
+    ) -> Option<(u32, usize, usize)> {
         let mut slot = *self.shaft_head.get(cell)?;
         let mut best: Option<(u32, usize, usize)> = None;
         while slot != u32::MAX {
             let span = self.shaft_spans[slot as usize];
             slot = span.next;
+            if except.contains(&span.id) {
+                continue;
+            }
             let bottom = span.k_bottom as usize;
             if bottom > ceiling {
                 continue;

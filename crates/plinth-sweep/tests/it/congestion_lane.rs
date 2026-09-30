@@ -131,8 +131,17 @@ fn the_laid_tube_is_congested_before_the_lane_and_is_not_after_it() {
 #[test]
 fn the_plate_section_is_the_load_the_plate_holds_over_x_allowed_plus_the_clamp() {
     let mesh = laid_tube();
-    let with = sweep_with(&mesh, 0.0, &policy());
-    let without = sweep_with(&mesh, 0.0, &policy().without_congestion());
+    // THE CONGESTION LANE ALONE (re-scoped 2026-09-29, fix/lip-seat): the
+    // lip-seat rule runs after this lane and re-lands arms, some onto the
+    // plate, in both fields alike, so the root count below would measure the
+    // two rules together. Both fields leave it off; this test compares one
+    // lane with and without itself.
+    let with = sweep_with(&mesh, 0.0, &policy().without_lip_seat());
+    let without = sweep_with(
+        &mesh,
+        0.0,
+        &policy().without_congestion().without_lip_seat(),
+    );
 
     let constants = plinth_core::m0_constants().expect("the registry constructs");
     let x_allowed = *constants.evidence().x_allowed().value();

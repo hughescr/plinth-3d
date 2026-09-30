@@ -104,6 +104,14 @@ pub(crate) struct RootDisc {
     under_silhouette: bool,
 }
 
+impl RootDisc {
+    /// The member whose root this is (the lip-seat rule drops a disc when it
+    /// re-lands its member off the plate or onto another cell).
+    pub(crate) const fn id(&self) -> u32 {
+        self.id
+    }
+}
+
 /// One census of a set of root discs.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CongestionCensus {

@@ -196,6 +196,9 @@ pub struct LipSeatOutcome {
     /// Refused because a moved member's drawn solid would come nearer the
     /// model than the final gap, or than it already stood.
     pub candidates_refused_clearance: usize,
+    /// Refused because a new plate root's flared disc would touch another
+    /// root's (the congestion lane's own clearance rule).
+    pub candidates_refused_roots: usize,
     /// Whether the model surface could not be built, so the solid clearance
     /// went unmeasured (a WARNING; the rule still ran on the centreline test).
     pub clearance_unmeasured: bool,
@@ -370,6 +373,24 @@ pub(crate) fn apply(
     }
     let mut index = ColumnHistory::new(context.grid);
     crate::congestion::stamp_all(&mut index, struts);
+    // The roots on the plate, as the congestion census sizes them, on the
+    // profiles the survey drew.
+    let flare_factor = if context.flare_factor.is_finite() && context.flare_factor > 0.0 {
+        context.flare_factor
+    } else {
+        1.0
+    };
+    let profiles: Vec<Vec<f64>> = arms
+        .iter()
+        .map(|arm| arm.radius_profile_mm.clone())
+        .collect();
+    let mut roots = crate::congestion::root_discs_drawn(
+        context.grid,
+        context.history,
+        struts,
+        &profiles,
+        flare_factor,
+    );
     outcome.kept_carrying = 0;
     outcome.kept_no_candidate = 0;
 
@@ -601,6 +622,29 @@ pub(crate) fn apply(
                 outcome.candidates_refused_plate += 1;
                 continue;
             }
+            // A NEW PLATE ROOT keeps clear of every root already on the
+            // plate: its flared disc, sized as the congestion census sizes
+            // one (`congestion::root_discs_drawn`), may not touch another's.
+            let flared = matches!(proposal.candidate.landing, Landing::Plate).then(|| {
+                let arm = &trial[first];
+                let bare =
+                    plinth_support::drawn_root_radius_mm(&arm.radius_profile_mm, arm.tip_radius_mm);
+                (bare * flare_factor, bare)
+            });
+            if let Some((radius, _)) = flared {
+                let own = struts[index_of].id;
+                let skip = roots.iter().position(|disc| disc.id() == own);
+                if !crate::congestion::clear_of_placed(
+                    context.grid,
+                    proposal.candidate.cell,
+                    radius,
+                    &roots,
+                    skip,
+                ) {
+                    outcome.candidates_refused_roots += 1;
+                    continue;
+                }
+            }
             if !mover_keeps || !children_hold {
                 outcome.candidates_refused_measured += 1;
                 continue;
@@ -634,6 +678,24 @@ pub(crate) fn apply(
             strut.path = path;
             let id = strut.id;
             index.stamp_shaft(id, strut.k_bottom, strut.k_top, strut.cell, &strut.path);
+            roots.retain(|disc| disc.id() != id);
+            if let Some((radius, bare)) = flared {
+                let cell = proposal.candidate.cell;
+                let under = context
+                    .history
+                    .column_max_model
+                    .get(cell)
+                    .is_some_and(|top| *top != 0);
+                crate::congestion::push_disc(
+                    &mut roots,
+                    context.grid,
+                    id,
+                    cell,
+                    radius,
+                    bare,
+                    under,
+                );
+            }
             for (child, _, child_path) in children {
                 let strut = &mut struts[child];
                 strut.path = child_path;
@@ -775,9 +837,13 @@ fn price(
     // lets it over the arm's whole height, nor further than the straight
     // descent below its own seat is long (the up-sweep's own bound: a
     // re-landing is a descent the up-sweep could have chosen).
+    // The arm's own shaft and its children's are in the index; none of them
+    // is anything this arm could land on.
+    let mut own: Vec<u32> = Vec::with_capacity(children.len() + 1);
+    own.push(strut.id);
+    own.extend(children.iter().map(|&child| struts[child].id));
     let straight_layers = index
-        .shaft_landing(strut.cell, k_top.saturating_sub(1))
-        .filter(|(id, _, _)| *id != strut.id)
+        .shaft_landing_excluding(strut.cell, k_top.saturating_sub(1), &own)
         .map_or(k_top, |(_, at, _)| k_top - at);
     #[expect(
         clippy::cast_precision_loss,
@@ -830,16 +896,13 @@ fn price(
             let Some(ceiling) = k_top.checked_sub(drop) else {
                 continue;
             };
-            let (landing, k_bottom) = match index.shaft_landing(cell, ceiling) {
+            // The column's highest landing at or below the ceiling, the arm's
+            // own shaft and its children's aside (those rest on it: a cycle
+            // in the load path). Its own column is the straight descent.
+            let (landing, k_bottom) = match index.shaft_landing_excluding(cell, ceiling, &own) {
                 // Not onto an arm this pass is about to re-land: landing on
                 // it would freeze its own cut in place.
-                // Nor onto one of its own children, which rest on it (a
-                // cycle in the load path).
-                Some((id, at, _))
-                    if id != strut.id
-                        && !to_move.get(id as usize).copied().unwrap_or(false)
-                        && !children.contains(&(id as usize)) =>
-                {
+                Some((id, at, _)) if !to_move.get(id as usize).copied().unwrap_or(false) => {
                     (Landing::Strut { id, layer: at }, at)
                 }
                 Some(_) => continue,
