@@ -557,9 +557,11 @@ pub(crate) fn mask_extent_mm(
 /// carrying the engine's 1e-6 tolerance on the realized safety factor.
 ///
 /// THE ALLOWANCE ANCHOR IS THE REGISTERED `X_ALLOWED`.  The H2 area-ratio
-/// allowance is already in the M0 registry as the Derived evidence constant
-/// `X_ALLOWED = floor(lower(X_STAR_CONE)/2) = 12`, chained from the measured
-/// plate interval (`constants/evidence.rs`).  This module deliberately does NOT
+/// allowance is already in the M0 registry as the evidence constant
+/// `X_ALLOWED` = 18, Craig's ruling of 2026-09-30, guarded strictly below the
+/// lower edges of both measured plate intervals (`constants/evidence.rs`); it
+/// was `floor(lower(X_STAR_CONE)/2) = 12` before.  The legacy implied ratio
+/// above stays 12 and so still does not exceed it.  This module deliberately does NOT
 /// re-declare that number as a second, hand-typed placeholder: a duplicate
 /// would let a plate recalibration move `X_STAR_CONE` while the contact
 /// threshold silently stayed at the stale hand-typed value.  The one-sided
