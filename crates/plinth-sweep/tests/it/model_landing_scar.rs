@@ -435,3 +435,37 @@ fn withholding_the_landing_scar_moves_the_committed_numbers_but_not_this_pose() 
          the engine's answer: re-measure it and re-record lanes/round-pose.md's finding."
     );
 }
+
+/// (e) A seat on a display face costs the same however sturdy the face is:
+/// fragility and display ADD (2026-09-29, `plinth_orient::score`'s module
+/// doc), so a face with no fragility and full display value is charged
+/// exactly what a fully fragile face with no display value is — the seat's
+/// contact area.
+///
+/// The same plan is priced twice against two synthetic per-face fields over
+/// the real mesh, so only the pricing rule is under test. Under the old
+/// `fragility × (1 + D)` rule the first pricing was exactly zero.
+#[test]
+fn a_seat_on_a_sturdy_display_face_costs_what_a_seat_on_a_fragile_plain_face_costs() {
+    let mesh = plinth_mesh::make_raking_blade().expect("the raking blade fixture");
+    let (oriented, plan) = swept(&mesh, BLADE_UP);
+    let faces = oriented.tris().len();
+    let (zeros, ones) = (vec![0.0_f64; faces], vec![1.0_f64; faces]);
+
+    let sturdy_display = model_landing_scar(&oriented, &plan, &zeros, &ones)
+        .expect("a fragility field of the right length");
+    let fragile_plain = model_landing_scar(&oriented, &plan, &ones, &zeros)
+        .expect("a fragility field of the right length");
+    assert!(
+        fragile_plain.landings > 0 && fragile_plain.raw_mm2 > 0.0,
+        "the blade-up pose seats no arm on the model, so the comparison would be vacuous"
+    );
+    assert!(
+        (sturdy_display.raw_mm2 - fragile_plain.raw_mm2).abs() <= 1e-12 * fragile_plain.raw_mm2,
+        "seats on faces with no fragility and full display value cost {} mm2; the same seats on \
+         fully fragile faces with no display value cost {}. The display harm is following \
+         fragility again, so a sturdy display face is left unprotected",
+        sturdy_display.raw_mm2,
+        fragile_plain.raw_mm2,
+    );
+}

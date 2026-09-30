@@ -13,14 +13,15 @@
 //! The scar term is
 //!
 //! ```text
-//! scar_raw_mm2 = Σ_down(area_mm² × fragility × (1 + D))
+//! scar_raw_mm2 = Σ_down(area_mm² × (fragility + D))
 //!              = fragility_raw_mm2 + display_raw_mm2
 //! ```
 //!
 //! with `fragility` the delicacy field, unchanged, and no new weight anywhere:
 //! `ORIENT_SCAR_WEIGHT` still prices the whole term and `D` enters as a
-//! dimensionless multiplier. Fragility and display are published separately
-//! and both are asserted here.
+//! dimensionless per-area harm BESIDE fragility, not as a multiplier on it
+//! (2026-09-29; test (f) below). Fragility and display are published
+//! separately and all of it is asserted here.
 
 use plinth_mesh::Mesh;
 use plinth_orient::{
@@ -199,6 +200,160 @@ fn the_display_field_is_measured_once_in_the_authored_frame_and_carried_into_eve
             terms.display_raw_mm2,
         );
     }
+}
+
+/// A closed slab with an irregularly bumped AUTHORED TOP and a plain flat
+/// bottom at `z = 0`, `thickness_mm` thick under the bumps. The top is the
+/// display face; the bottom carries no detail. Only the thickness varies
+/// between the two slabs the test below compares, and thickness moves the
+/// top's FRAGILITY (the delicacy field's thinness proxy saturates at
+/// `THIN_FEATURE_MM`, 1.5 mm) and nothing the display field measures.
+///
+/// The texture stops 2 mm inside the rim, more than twice `R_detail`
+/// (0.8 mm), so no detail neighbourhood of the texture reaches the side walls
+/// (whose shape does change with thickness), and the rim's own neighbourhoods
+/// see only its uniform 90° creases, which rule B scores `D = 0` on both slabs.
+fn textured_top_slab(thickness_mm: f64) -> Mesh {
+    let bump = |x: f64, y: f64| {
+        if x.abs() > 4.0 || y.abs() > 4.0 {
+            0.0
+        } else {
+            0.18 * ((x * 2.4).sin() * (y * 1.7).sin()).abs()
+        }
+    };
+    let (span, cells) = (12.0_f64, 48_usize);
+    let step = span / cells as f64;
+    let coordinate = |index: usize| -span / 2.0 + step * index as f64;
+    let stride = cells + 1;
+    let mut verts: Vec<[f64; 3]> = Vec::with_capacity(2 * stride * stride);
+    for row in 0..stride {
+        for column in 0..stride {
+            let (x, y) = (coordinate(column), coordinate(row));
+            verts.push([x, y, thickness_mm + bump(x, y)]);
+        }
+    }
+    for row in 0..stride {
+        for column in 0..stride {
+            verts.push([coordinate(column), coordinate(row), 0.0]);
+        }
+    }
+    let upper = |row: usize, column: usize| index(row * stride + column);
+    let base = stride * stride;
+    let lower = |row: usize, column: usize| index(base + row * stride + column);
+    let mut tris: Vec<[u32; 3]> = Vec::new();
+    for row in 0..cells {
+        for column in 0..cells {
+            tris.push([
+                upper(row, column),
+                upper(row, column + 1),
+                upper(row + 1, column + 1),
+            ]);
+            tris.push([
+                upper(row, column),
+                upper(row + 1, column + 1),
+                upper(row + 1, column),
+            ]);
+            tris.push([
+                lower(row, column),
+                lower(row + 1, column + 1),
+                lower(row, column + 1),
+            ]);
+            tris.push([
+                lower(row, column),
+                lower(row + 1, column),
+                lower(row + 1, column + 1),
+            ]);
+        }
+    }
+    for index in 0..cells {
+        tris.push([upper(0, index), lower(0, index), lower(0, index + 1)]);
+        tris.push([upper(0, index), lower(0, index + 1), upper(0, index + 1)]);
+        tris.push([
+            upper(cells, index),
+            upper(cells, index + 1),
+            lower(cells, index + 1),
+        ]);
+        tris.push([
+            upper(cells, index),
+            lower(cells, index + 1),
+            lower(cells, index),
+        ]);
+        tris.push([upper(index, 0), upper(index + 1, 0), lower(index + 1, 0)]);
+        tris.push([upper(index, 0), lower(index + 1, 0), lower(index, 0)]);
+        tris.push([
+            upper(index, cells),
+            lower(index, cells),
+            lower(index + 1, cells),
+        ]);
+        tris.push([
+            upper(index, cells),
+            lower(index + 1, cells),
+            upper(index + 1, cells),
+        ]);
+    }
+    Mesh::new(verts, tris).expect("the textured-top slab is a valid mesh")
+}
+
+/// **(f) A support spoils the look of a display face however sturdy that face
+/// is: the display harm does not scale with fragility.**
+///
+/// `plinth-mesh/src/display.rs` defines the two quantities apart: delicacy
+/// asks *would a support break this*, display asks *would a support spoil the
+/// look of this*, and "neither is expressed in terms of the other". A scar on
+/// a sturdy textured base top spoils it exactly as much as the same scar on a
+/// thin one. So the display half of the scar term must not move when only the
+/// face's fragility moves.
+///
+/// Before 2026-09-29 the display half was `Σ_down(area × fragility × D)`: the
+/// display field entered as a `(1 + D)` MULTIPLIER on fragility, so a sturdy
+/// display face was nearly unpriced. That is how the Morel base's textured top
+/// (large, flat-ish, low fragility) went face down on develop `0f70cf2`: its
+/// whole display charge was 6.685 mm² against a 21.3 mm² fragility saving
+/// (`field-2026-09-28/lanes/morel-pose.md`).
+///
+/// The comparison: two slabs identical but for thickness under the textured
+/// top, scored at `u = −Z` (textured top DOWN). The thin one's top is more
+/// fragile; its display charge must be the same.
+#[test]
+fn a_display_face_costs_the_same_to_turn_down_however_sturdy_it_is() {
+    let (thin, thick) = (textured_top_slab(0.9), textured_top_slab(4.0));
+    let thin_table = OrientFaceTable::build(&thin, "test-lod").expect("thin scoring table");
+    let thick_table = OrientFaceTable::build(&thick, "test-lod").expect("thick scoring table");
+    let face_down = [up([0.0, 0.0, -1.0])];
+    let thin_terms = score(&thin_table, &face_down)[0];
+    let thick_terms = score(&thick_table, &face_down)[0];
+    println!(
+        "textured top DOWN: thin (0.9 mm) fragility {:.4} display {:.4}; thick (4.0 mm) \
+         fragility {:.4} display {:.4}",
+        thin_terms.fragility_raw_mm2,
+        thin_terms.display_raw_mm2,
+        thick_terms.fragility_raw_mm2,
+        thick_terms.display_raw_mm2,
+    );
+
+    // Non-vacuity: the two slabs DO differ in fragility, by a lot, and the
+    // texture IS display. Without both, equal display charges prove nothing.
+    assert!(
+        thin_terms.fragility_raw_mm2 > 1.5 * thick_terms.fragility_raw_mm2,
+        "the thin slab's top is not clearly more fragile ({:.4} vs {:.4} mm2); the fixture no \
+         longer separates fragility from display",
+        thin_terms.fragility_raw_mm2,
+        thick_terms.fragility_raw_mm2,
+    );
+    assert!(
+        thick_terms.display_raw_mm2 > 0.0,
+        "the textured top carries no display charge at all; the comparison below is vacuous"
+    );
+
+    let ratio = thin_terms.display_raw_mm2 / thick_terms.display_raw_mm2;
+    assert!(
+        (0.9..=1.1).contains(&ratio),
+        "turning the same textured top down cost {:.4} mm2 of display on the thin slab and \
+         {:.4} on the thick one (ratio {ratio:.3}); the display harm is following fragility, so a \
+         sturdy display face is left unprotected",
+        thin_terms.display_raw_mm2,
+        thick_terms.display_raw_mm2,
+    );
 }
 
 /// **(e) Where D is zero, the objective is the pre-display objective bit for

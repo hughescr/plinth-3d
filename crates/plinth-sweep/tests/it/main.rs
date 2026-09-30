@@ -28,6 +28,7 @@ mod load_insertion;
 mod mast_root_clearance;
 mod member_clearance;
 mod model_landing_scar;
+mod morel_pose;
 mod oracle_cavity;
 mod oracle_disc;
 mod oracle_ramp;
