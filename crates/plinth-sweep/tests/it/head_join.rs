@@ -838,8 +838,14 @@ fn on_round_50_no_lander_near_a_head_puts_the_sum_in_its_seat_zone() {
 /// the rule touching this head.
 #[test]
 fn a_head_that_already_clears_keeps_its_join() {
-    let on = round_25_flipped_with(&production());
-    let off = round_25_flipped_with(&production().without_head_join());
+    // RE-SCOPED 2026-09-30 (fix/chitubox-geometry), measured: with the owner's
+    // ChituBox ball ratios the production Round 25 flipped has no head that
+    // already clears ("no head was already clear, so this test compares
+    // nothing"). Graded at the X its path was built at
+    // (`crate::harness::PATH_FIXTURE_X_ALLOWED` = 12); the rule reads no X.
+    let at = crate::harness::at_path_fixture_x;
+    let on = round_25_flipped_with(&at(production()));
+    let off = round_25_flipped_with(&at(production().without_head_join()));
     let listed: Vec<u32> = off
         .report
         .head_join
