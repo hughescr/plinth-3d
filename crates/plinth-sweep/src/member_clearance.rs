@@ -23,7 +23,10 @@
 //!    clearance gap (`FINAL_CLEARANCE_GAP_MM`, 0.3 mm, the owner's ruling of
 //!    2026-08-22) along its whole axis, both end layers included.
 //! 2. **Member against member.** Two members that are not joined to each other
-//!    do not share volume: their axes are at least `r₁ + r₂` apart. Members
+//!    do not share volume: the candidate's axis is at least `r₁ + r₂` from
+//!    the standing member's axis on every span the file draws it as, `r₂`
+//!    that span's wider end (round-3 review, 2026-09-29: the closest pair of
+//!    axes is not the closest pair of solids when the radius varies). Members
 //!    that ARE joined (a diagonal and the post it seats on or lands on, or two
 //!    members of which one lands on the other) meet at the planned joint and
 //!    are not tested against each other.
@@ -168,26 +171,74 @@ pub(crate) struct MemberSolid<'a> {
     pub id: u32,
     pub from: [f64; 3],
     pub to: [f64; 3],
-    /// Drawn radius per layer from `k_bottom` upward (the member's DRAWN
-    /// profile); never read below `fallback_radius_mm`, the member's own
-    /// minimum.
+    /// Drawn radius per slot from `k_bottom` upward (the member's DRAWN
+    /// profile, the one the lowering gets); never read below
+    /// `fallback_radius_mm`, the member's own minimum.
     pub profile: &'a [f64],
     pub k_bottom: usize,
     pub k_top: usize,
     pub fallback_radius_mm: f64,
+    /// The member's tip radius (`SweepStrut::tip_radius_mm`), which the
+    /// lowering starts the shaft's top span at where it is wider.
+    pub tip_radius_mm: f64,
 }
 
 impl MemberSolid<'_> {
-    /// The drawn radius at the point `t ∈ [0, 1]` along the axis from `from`
-    /// (the base, at `k_bottom`) to `to` (the seat, at `k_top`): the larger of
-    /// the two layers the point lies between, so a taper is never read thin.
+    /// The member's widest drawn radius anywhere along it: no drawn span is
+    /// wider than the widest of the profile, the tip and the root, and the
+    /// root is the wider of the profile's first slot and the tip.
+    fn widest_radius_mm(&self) -> f64 {
+        self.profile
+            .iter()
+            .copied()
+            .fold(self.fallback_radius_mm.max(self.tip_radius_mm), f64::max)
+    }
+
+    /// The straight spans the lowering draws this member as
+    /// ([`plinth_support::drawn_spans`], the one rule): each a chord between
+    /// two radii, standing on or above the profile at every height, from the
+    /// seat (`to`) down to the base (`from`), in the member's own frame. `None`
+    /// when the member has no height to span.
+    fn drawn_spans(&self) -> Option<Vec<plinth_support::DrawnSpan>> {
+        let (base_z, seat_z) = (self.from[2], self.to[2]);
+        // `NaN` ends have no height either.
+        if seat_z.partial_cmp(&base_z) != Some(core::cmp::Ordering::Greater) {
+            return None;
+        }
+        let root = plinth_support::drawn_root_radius_mm(self.profile, self.tip_radius_mm);
+        Some(plinth_support::drawn_spans(
+            self.profile,
+            base_z,
+            seat_z,
+            seat_z,
+            base_z,
+            self.tip_radius_mm,
+            root,
+        ))
+    }
+
+    /// The point of the axis at height `z` (the axis runs from `from` at the
+    /// base to `to` at the seat).
+    fn axis_at(&self, z: f64) -> [f64; 3] {
+        let rise = self.to[2] - self.from[2];
+        let t = if rise > 0.0 {
+            ((z - self.from[2]) / rise).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        std::array::from_fn(|axis| self.from[axis] + t * (self.to[axis] - self.from[axis]))
+    }
+
+    /// The RETIRED reading, kept for the path-hit witness only (it never
+    /// decides): the drawn radius at the point `t ∈ [0, 1]` along the axis,
+    /// the larger of the two layers the point lies between.
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         clippy::cast_precision_loss,
         reason = "a fraction of a layer span bounded by the plan's own layer count"
     )]
-    pub fn radius_at(&self, t: f64) -> f64 {
+    fn retired_closest_point_radius_mm(&self, t: f64) -> f64 {
         let span = self.k_top.saturating_sub(self.k_bottom);
         let at = (t.clamp(0.0, 1.0) * span as f64).floor() as usize;
         let below = self.profile.get(at).copied();
@@ -205,27 +256,81 @@ impl MemberSolid<'_> {
     }
 }
 
-/// The first standing member whose solid the solid of radius `radius_mm` about
-/// `from`–`to` would enter, other than the ones `joined` excuses; `None` when
-/// it enters none. Two solids touch when their axes are closer than the sum of
-/// their radii at the closest points.
+/// One member-against-member refusal: the standing member entered and the
+/// most negative radius gap found over its drawn spans.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MemberIntrusion {
+    pub id: u32,
+    pub gap_mm: f64,
+}
+
+/// The verdict of [`member_intrusion`]: the first standing member entered
+/// (`None` when the candidate clears them all), and what the RETIRED
+/// closest-axes reading (`c33dc8e`..`0f70cf2`: the radius at the closest axis
+/// point, the larger of the two layers it lies between) would have said about
+/// the same candidate. The second is a witness only and never decides: where
+/// the two verdicts differ, this rule changed the field (the path-hit
+/// witness of the 2026-09-29 round-3 review fix, both directions).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MemberVerdict {
+    pub entered: Option<MemberIntrusion>,
+    pub retired_reading_refused: bool,
+}
+
+impl MemberVerdict {
+    /// Refused here, where the retired reading admitted.
+    pub fn refused_beyond_the_closest_axes(&self) -> bool {
+        self.entered.is_some() && !self.retired_reading_refused
+    }
+
+    /// Admitted here, where the retired reading refused (it read the slot
+    /// above the closest point too, and a thin span clears where that slot
+    /// was wide).
+    pub fn admitted_where_the_retired_reading_refused(&self) -> bool {
+        self.entered.is_none() && self.retired_reading_refused
+    }
+}
+
+/// Whether the solid of radius `radius_mm` about `from`–`to` would enter a
+/// standing member, other than the ones `joined` excuses (see
+/// [`MemberVerdict`]).
+///
+/// **The rule (round-3 review, 2026-09-29).** A standing member's radius
+/// varies along it, so the closest pair of AXES need not be the closest pair
+/// of SOLIDS: a wide section a little way from the closest axis point can
+/// reach the candidate while the thin section at that point does not. So the
+/// standing member is measured as the SPANS the file draws it as
+/// ([`MemberSolid::drawn_spans`], the lowering's own rule): a span is a
+/// frustum whose radius nowhere exceeds the wider of its two end radii, and
+/// the two solids share volume when, on SOME span, the candidate's axis comes
+/// closer to that span's axis than `radius_mm` plus that wider radius. A
+/// candidate that clears every span clears the drawn shaft; the only error is
+/// toward refusal (a frustum read at its wider end). The ledger's step profile
+/// is NOT a bound: a span is a chord and can stand wider than the ledger at a
+/// slot it bridges.
+///
+/// Batch-first: a member whose axis is farther than `radius_mm` plus its
+/// WIDEST radius from the candidate is cleared by that one distance (the
+/// common case); only one that is not is walked, one O(1) segment distance
+/// per drawn span. The retired reading costs one more O(1) distance on a
+/// member that reaches the walk.
 pub(crate) fn member_intrusion<'a>(
     members: impl IntoIterator<Item = MemberSolid<'a>>,
     from: [f64; 3],
     to: [f64; 3],
     radius_mm: f64,
     joined: impl Fn(u32) -> bool,
-) -> Option<(u32, f64)> {
+) -> MemberVerdict {
+    let mut verdict = MemberVerdict {
+        entered: None,
+        retired_reading_refused: false,
+    };
     for member in members {
         if joined(member.id) {
             continue;
         }
         // Bounding-box rejection with the member's largest drawn radius.
-        let widest = member
-            .profile
-            .iter()
-            .copied()
-            .fold(member.fallback_radius_mm, f64::max);
+        let widest = member.widest_radius_mm();
         let reach = radius_mm + widest;
         let apart = (0..3).any(|axis| {
             from[axis].min(to[axis]) - reach > member.from[axis].max(member.to[axis])
@@ -236,18 +341,71 @@ pub(crate) fn member_intrusion<'a>(
         }
         let (distance, _, on_member) =
             segment_segment_distance_min(from, to, member.from, member.to);
-        let length = geom_kernel::vec3::dist(member.from, member.to);
-        let t = if length > 0.0 {
-            geom_kernel::vec3::dist(member.from, on_member) / length
-        } else {
-            0.0
-        };
-        let gap = distance - radius_mm - member.radius_at(t);
-        if gap < 0.0 {
-            return Some((member.id, gap));
+        // Every radius the retired reading could read is at most `widest`, so
+        // a member cleared above was cleared by it too.
+        if distance - reach >= 0.0 {
+            continue;
+        }
+        if !verdict.retired_reading_refused {
+            let length = geom_kernel::vec3::dist(member.from, member.to);
+            let t = if length > 0.0 {
+                geom_kernel::vec3::dist(member.from, on_member) / length
+            } else {
+                0.0
+            };
+            verdict.retired_reading_refused =
+                distance - radius_mm - member.retired_closest_point_radius_mm(t) < 0.0;
+        }
+        if verdict.entered.is_none() {
+            verdict.entered = walk_spans(&member, from, to, radius_mm, widest, distance);
+        }
+        if verdict.entered.is_some() && verdict.retired_reading_refused {
+            break;
         }
     }
-    None
+    verdict
+}
+
+/// The per-span walk of [`member_intrusion`] on one standing member whose
+/// widest radius does not clear the candidate: the most negative gap over its
+/// drawn spans, or `None` when every span clears. `closest_axes_mm` is the
+/// whole-axis distance (a member with no height is read at its widest there).
+fn walk_spans(
+    member: &MemberSolid<'_>,
+    from: [f64; 3],
+    to: [f64; 3],
+    radius_mm: f64,
+    widest: f64,
+    closest_axes_mm: f64,
+) -> Option<MemberIntrusion> {
+    let Some(spans) = member.drawn_spans() else {
+        // No height to span: the member is read at its widest.
+        return Some(MemberIntrusion {
+            id: member.id,
+            gap_mm: closest_axes_mm - radius_mm - widest,
+        });
+    };
+    let mut worst: Option<f64> = None;
+    for span in &spans {
+        let bound = span
+            .top_radius_mm
+            .max(span.bottom_radius_mm)
+            .max(member.fallback_radius_mm);
+        let (distance, _, _) = segment_segment_distance_min(
+            from,
+            to,
+            member.axis_at(span.top_z_mm),
+            member.axis_at(span.bottom_z_mm),
+        );
+        let gap = distance - radius_mm - bound;
+        if gap < 0.0 && worst.is_none_or(|worst_gap| gap < worst_gap) {
+            worst = Some(gap);
+        }
+    }
+    worst.map(|gap_mm| MemberIntrusion {
+        id: member.id,
+        gap_mm,
+    })
 }
 
 #[cfg(test)]
@@ -307,11 +465,126 @@ mod tests {
             k_bottom: 0,
             k_top: 10,
             fallback_radius_mm: 0.05,
+            tip_radius_mm: 0.15,
         };
         let a = [-1.0, 0.0, 0.0];
         let b = [1.0, 0.0, 0.0];
-        assert!(member_intrusion([other.clone()], a, b, 0.14, |_| false).is_none());
-        assert!(member_intrusion([other.clone()], a, b, 0.2, |_| false).is_some());
-        assert!(member_intrusion([other], a, b, 0.2, |id| id == 7).is_none());
+        assert!(member_intrusion([other.clone()], a, b, 0.14, |_| false)
+            .entered
+            .is_none());
+        assert!(member_intrusion([other.clone()], a, b, 0.2, |_| false)
+            .entered
+            .is_some());
+        assert!(member_intrusion([other], a, b, 0.2, |id| id == 7)
+            .entered
+            .is_none());
+    }
+
+    /// A standing arm on the axis `(0,0,0)–(0,0,10)` drawn from `profile`,
+    /// one slot per `10 / profile.len()` mm, tip `profile.last()`.
+    fn standing(profile: &[f64]) -> MemberSolid<'_> {
+        MemberSolid {
+            id: 3,
+            from: [0.0, 0.0, 0.0],
+            to: [0.0, 0.0, 10.0],
+            profile,
+            k_bottom: 0,
+            k_top: profile.len(),
+            fallback_radius_mm: 0.05,
+            tip_radius_mm: profile.last().copied().unwrap_or(0.05),
+        }
+    }
+
+    /// The cross-family review's case (round 3, 2026-09-29). A standing arm on
+    /// the axis `(0,0,0)–(0,0,10)`, one slot per mm: radius 0.8 mm up to
+    /// `z = 8`, 0.1 mm above it (to the tip at `z = 10`). A candidate of
+    /// radius 0.1 mm from `(0.6, 0, 7.9)` to `(0.4, 0, 9)`.
+    ///
+    /// The closest AXIS pair is at `z = 9` (0.4 mm apart, where the arm is
+    /// 0.1 mm): `0.4 − 0.1 − 0.1 = +0.2`, clear. But at `z = 8` the
+    /// candidate's axis is `0.6 − 0.2·(0.1/1.1) = 0.5818` mm from the arm's,
+    /// inside its 0.8 mm section: the flat-ended solids overlap by
+    /// `0.5818 − 0.8 − 0.1 = −0.3182` mm. Hand-derived.
+    ///
+    /// The lowering draws this profile as two spans, 0.8 mm below `z = 8` and
+    /// 0.1 mm above. The walk reads each span round-ended about its axis (a
+    /// capsule, which holds the frustum): the 0.8 mm span's top end `(0,0,8)`
+    /// is `(0.6 − 0.1·s)/√(1 + s²) = 0.5724` mm from the candidate's line,
+    /// `s = 0.2/1.1`, so the walk reports `−0.3276` mm, beyond the true
+    /// `−0.3182`: the capsule errs only toward refusal.
+    ///
+    /// Control: the same candidate beside an arm of 0.1 mm all along is clear
+    /// (0.4 mm axis gap against 0.2 mm of radii), so the rule does not refuse
+    /// by the widest radius alone.
+    #[test]
+    fn a_wider_section_away_from_the_closest_axes_is_still_entered() {
+        let mut profile = [0.8_f64; 10];
+        profile[8] = 0.1;
+        profile[9] = 0.1;
+        let a = [0.6, 0.0, 7.9];
+        let b = [0.4, 0.0, 9.0];
+        let verdict = member_intrusion([standing(&profile)], a, b, 0.1, |_| false);
+        // The path-hit witness: the retired closest-axes reading admitted it.
+        assert!(verdict.refused_beyond_the_closest_axes(), "{verdict:?}");
+        let found = verdict.entered.expect(
+            "the candidate's solid enters the arm's 0.8 mm section at z = 7.9..8, although \
+             the closest axes (z = 9) are 0.2 mm clear",
+        );
+        assert_eq!(found.id, 3);
+        let s: f64 = 0.2 / 1.1;
+        let expected = (0.6 - 0.1 * s) / (1.0 + s * s).sqrt() - 0.8 - 0.1;
+        assert!(
+            (found.gap_mm - expected).abs() < 1.0e-9,
+            "{found:?} against {expected}"
+        );
+        let flat_ended = (0.6 - 0.1 * s) - 0.8 - 0.1;
+        assert!(found.gap_mm <= flat_ended, "{found:?} against {flat_ended}");
+        let thin = [0.1_f64; 10];
+        assert!(member_intrusion([standing(&thin)], a, b, 0.1, |_| false)
+            .entered
+            .is_none());
+    }
+
+    /// A span is a CHORD, not the ledger's step. The profile (base to tip)
+    /// `0.8, 0.1, 0.1, 0.1, 0.8` over 2 mm slots is drawn as ONE 0.8 mm span
+    /// (the chord between the two 0.8 mm ends never dips below the ledger), so
+    /// at `z = 5`, where the ledger says 0.1 mm, the file's solid is 0.8 mm. A
+    /// candidate of 0.1 mm crossing at 0.6 mm from the axis there enters it by
+    /// `0.6 − 0.8 − 0.1 = −0.3` mm, although the ledger at that height (0.1 mm)
+    /// and the retired closest-axes reading say `+0.4`. Sabotage: a bound read
+    /// from the ledger's local slots goes red here.
+    #[test]
+    fn a_span_that_bridges_thin_slots_is_measured_at_its_drawn_radius() {
+        let profile = [0.8, 0.1, 0.1, 0.1, 0.8];
+        let a = [-1.0, 0.6, 5.0];
+        let b = [1.0, 0.6, 5.0];
+        let verdict = member_intrusion([standing(&profile)], a, b, 0.1, |_| false);
+        assert!(verdict.refused_beyond_the_closest_axes(), "{verdict:?}");
+        let found = verdict
+            .entered
+            .expect("the drawn 0.8 mm span reaches the candidate at z = 5");
+        assert!((found.gap_mm - (-0.3)).abs() < 1.0e-9, "{found:?}");
+    }
+
+    /// The other direction: the retired reading read the slot ABOVE the
+    /// closest point too, so it refused where the drawn solid clears. Profile
+    /// (base to tip, 1 mm slots) `0.1 × 6, 0.8, 0.1 × 3` is drawn as three
+    /// spans: 0.1 mm to `z = 6`, 0.8 mm from 6 to 7, 0.1 mm above. A 0.1 mm
+    /// candidate crossing at 0.6 mm from the axis at `z = 5.1` is 0.4 mm clear
+    /// of the thin span, and the wide span's end `(0,0,6)` is
+    /// `√(0.6² + 0.9²) = 1.0817` mm away (`+0.1817` against 0.9 mm of radii):
+    /// clear. The retired reading, at slot 5, took `max(0.1, 0.8)` and refused
+    /// (`0.6 − 0.8 − 0.1 = −0.3`). Hand-derived.
+    #[test]
+    fn a_thin_span_below_a_wide_one_is_admitted_where_the_retired_reading_refused() {
+        let profile = [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.8, 0.1, 0.1, 0.1];
+        let a = [-1.0, 0.6, 5.1];
+        let b = [1.0, 0.6, 5.1];
+        let verdict = member_intrusion([standing(&profile)], a, b, 0.1, |_| false);
+        assert!(verdict.entered.is_none(), "{verdict:?}");
+        assert!(
+            verdict.admitted_where_the_retired_reading_refused(),
+            "{verdict:?}"
+        );
     }
 }

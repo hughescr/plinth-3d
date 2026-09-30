@@ -848,7 +848,10 @@ leaned head is booked into the same slot as one at the head (Round 50 at its com
 68, 83, 98, their sums across the plane by 0.33 to 0.48 mm and unwarned while the rule looked at head
 landings only). The seat zone is where the plane is the model: a section is in it only when it is
 within 0.3 mm of the seat plane AND of the model itself, its disc measured as a circumscribed 16-gon
-(edges and spokes) by the kernel's segment-clearance predicate. Under a steep face the infinite plane
+(edges and spokes) by the kernel's segment-clearance predicate, and (round-3 review, 2026-09-29) as
+the FILLED polygon: the model's own edges near the disc against the polygon's fan triangles, by the
+kernel's face-band query, because a model feature between two spokes is within the clearance of the
+disc while every spoke and rim edge clears it. Under a steep face the infinite plane
 passes below the model (Round 25 arm 6), and such a join is left alone; where the model IS there the
 join is the rule's whatever the lean (Round 50 arm 155, vertical: its lander's solid was 0.088 mm
 inside the model). The same zone decides which candidate joins may take a lander.

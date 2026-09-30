@@ -1193,12 +1193,17 @@ impl ArmLowering {
 }
 
 /// One straight span of a drawn member, between two heights on its axis.
+///
+/// Public (round-3 review, 2026-09-29) so the sweep's member-against-member
+/// clearance test measures the spans the file draws, by this one rule, rather
+/// than the ledger's step profile: a span is a chord and may stand wider than
+/// the ledger at a slot it bridges.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct DrawnSpan {
-    top_z_mm: f64,
-    bottom_z_mm: f64,
-    top_radius_mm: f64,
-    bottom_radius_mm: f64,
+pub struct DrawnSpan {
+    pub top_z_mm: f64,
+    pub bottom_z_mm: f64,
+    pub top_radius_mm: f64,
+    pub bottom_radius_mm: f64,
 }
 
 /// Float noise around an equality the construction designs for — a chord that
@@ -1248,7 +1253,8 @@ const PROFILE_RELATIVE_SLACK: f64 = 1.0e-9;
     reason = "a slot index bounded by the profile length is exact in f64, and the f64 -> usize \
               cast is reached only for a floored, positive index clamped to the profile length"
 )]
-fn drawn_spans(
+#[must_use]
+pub fn drawn_spans(
     profile: &[f64],
     base_z: f64,
     seat_z: f64,

@@ -1607,10 +1607,11 @@ pub fn run_sweep_with_drains(
     // have moved.
     {
         let emitted = adapter::arms_of(&sweep_plan);
-        let (examined, listed) =
+        let (examined, listed, near_by_interior) =
             head_join::census(&head_join_context, &sweep_plan.struts, &emitted);
         let rule = &mut sweep_plan.report.head_join;
         rule.in_seat_zone_after = listed;
+        rule.census_near_by_interior = near_by_interior;
         if !policy.head_join {
             rule.joins_examined = examined;
             rule.joins_in_seat_zone_before = rule.in_seat_zone_after.len();
