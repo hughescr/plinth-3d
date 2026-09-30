@@ -2,7 +2,7 @@ use crate::{
     BoundKind, BuildVolumeMm, ConstantId, Derived, EffectiveArmCount, EvidenceDate, EvidenceSource,
     EvidenceSourceView, Finite, FiniteInterval, LoadSharing, Measured, MeasuredPayload,
     MetricValue, MicronGranularity, Pending, Placeholder, PlateId, PrinterProfile,
-    PrinterProfileError, YDirection,
+    PrinterProfileError, TipContactProfiles, YDirection,
 };
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
@@ -648,6 +648,26 @@ constant_value_conversion!(YDirection, |value: &YDirection| {
 });
 constant_value_conversion!(MicronGranularity, |value: &MicronGranularity| {
     Ok(ConstantValue::unsigned_integer(u64::from(value.get())))
+});
+constant_value_conversion!(TipContactProfiles, |value: &TipContactProfiles| {
+    let rows = value
+        .profiles()
+        .iter()
+        .map(|profile| {
+            ConstantValue::record([
+                ("name", ConstantValue::core_text(profile.name())?),
+                (
+                    "tip_up_diameter_mm",
+                    ConstantValue::finite_scalar(profile.tip_up_diameter_mm())?,
+                ),
+                (
+                    "touch_diameter_mm",
+                    ConstantValue::finite_scalar(profile.touch_diameter_mm())?,
+                ),
+            ])
+        })
+        .collect::<Result<Vec<_>, RegistryError>>()?;
+    ConstantValue::list(rows)
 });
 
 impl<T: ToConstantValue> sealed::ConstantValueSource for Vec<T> {}

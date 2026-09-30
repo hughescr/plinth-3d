@@ -941,9 +941,11 @@ pub struct SlendernessContext<'a> {
     pub law: &'a SlendernessLaw,
     pub layer_height_mm: f64,
     pub layers: usize,
-    /// `FLARE_R_FACTOR` — the registered factor the emitter's root flare uses.
-    /// A mast is plate-rooted and gets a root flare like any arm, so the mast
-    /// search has to answer the congestion lane's question before it lands one.
+    /// `FLARE_R_FACTOR` — the congestion census's root-crowding disc factor
+    /// (`congestion::root_discs_drawn`). A mast is plate-rooted, so the mast
+    /// search has to answer the congestion lane's question before it lands
+    /// one. Until 2026-09-30 this was also the emitter's flare foot; the
+    /// emitter now stands every root on the owner's ChituBox boss instead.
     pub flare_factor: f64,
     /// Sabotage knob: whether a mast's cell must CLEAR the placed root discs,
     /// or merely be an empty cell as it was before 2026-09-06.

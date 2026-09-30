@@ -3,7 +3,24 @@
 //! This module stops at semantic primitives.  `plinth-emit` remains the only
 //! owner of mesh and ChituBox record construction.
 
-use plinth_core::{m0_constants, ContentDigest, Finite, PositiveFinite};
+use plinth_core::{m0_constants, ContentDigest, Finite, M0Constants, PositiveFinite};
+
+/// The owner's ChituBox raft geometry as both raft planners read it: the
+/// native pad DIAMETER (`CHITUBOX_PAD_DIAMETER_MM`, the root boss's foot,
+/// field `diameterofbossbottom`) and the pad and bridge thickness
+/// (`CHITUBOX_RAFT_HEIGHT_MM`, field `raftthickness`). Craig ChituBox profile
+/// export 2026-09-30; both were Placeholders of the same values until then.
+pub(crate) fn registered_pad_and_raft_height(
+    constants: &M0Constants,
+) -> Result<(PositiveFinite, PositiveFinite), SupportError> {
+    let evidence = constants.evidence();
+    let positive =
+        |value: f64| PositiveFinite::new(value).map_err(|_| SupportError::NoLegalSupportPlan);
+    Ok((
+        positive(*evidence.chitubox_pad_diameter_mm().value())?,
+        positive(*evidence.chitubox_raft_height_mm().value())?,
+    ))
+}
 
 use crate::{
     forest::{Forest, MemberKind, Owner},
@@ -188,8 +205,7 @@ pub(crate) fn plan_bottom_connected(
     let policy = constants.placeholders();
     let plate_band = policy.plate_band_mm().diagnostic().get();
     let tolerance = policy.chitubox_plate_mesh_tol_mm().diagnostic().get();
-    let pad_diameter = *policy.chitubox_pad_diameter_mm().diagnostic();
-    let raft_height = *policy.chitubox_raft_height_mm().diagnostic();
+    let (pad_diameter, raft_height) = registered_pad_and_raft_height(constants)?;
 
     let candidate_count = view
         .keys()
@@ -479,8 +495,7 @@ pub(crate) fn plan_sweep_raft(
     let constants = m0_constants().map_err(|_| SupportError::NoLegalSupportPlan)?;
     let policy = constants.placeholders();
     let tolerance = policy.chitubox_plate_mesh_tol_mm().diagnostic().get();
-    let native_diameter = *policy.chitubox_pad_diameter_mm().diagnostic();
-    let raft_height = *policy.chitubox_raft_height_mm().diagnostic();
+    let (native_diameter, raft_height) = registered_pad_and_raft_height(constants)?;
     #[expect(
         clippy::cast_precision_loss,
         reason = "a registered side count of 20; exact in f64"

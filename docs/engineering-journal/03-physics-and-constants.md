@@ -495,10 +495,10 @@ shares no code with the engine. Moving it is a separate decision.
 | `TIP_RADIUS_MIN_ALLOWED_MM` | **0.050** mm RADIUS (**0.100** mm DIAMETER) | mm | **D** from `TIP_DIAMETER_MIN_ALLOWED_MM / 2`, diagnostic | `plinth-support::placement` / `plinth-verify` | Mechanical conversion used by radius-valued APIs. Was **0.075** mm radius (0.150 mm diameter); it moved only because its parent was superseded on 2026-08-19, the relation is unchanged. **This is a RADIUS and its parent is a DIAMETER — halve or double, never substitute.** The old warning here ("do not substitute the 0.200 mm default") is moot in VALUE and live in KIND: `TIP_RADIUS_DEFAULT_MM` is also 0.050 mm radius (0.100 mm diameter) now, but that is the GENERATION clamp minimum and this is the VALIDATOR minimum. They agree by ruling, not by derivation, and neither may be written in terms of the other. |
 | `TIP_RADIUS_MAX_GROWN_SCAR_MM` | **0.400** mm RADIUS (**0.800** mm DIAMETER) | mm | **M** owner decision, 2026-08-20 — **EXTERNAL REQUIREMENT: field data, NOT physics, NOT a wet-finger estimate** | `plinth-support::designed_embed` (`growth_ceiling`) | **The largest scar a grow-for-attachment rescue may leave.** Craig's ruling of **2026-08-20**, on his own field data: the heaviest support he has ever needed is a **0.8 mm DIAMETER** sphere, so 0.8 mm diameter (0.4 mm radius) is his measured field ceiling. No physics derives this, and none is claimed — it is registered as an honestly-labelled external requirement so a future thin-tip attachment coupon supersedes it rather than colliding with it. **What it bounds:** PR-8's grow-to-attest ladder and its refinement scan truncate at `min(this, TIP_RADIUS_MAX_LEGACY_MM)` = 0.400 mm radius (0.800 mm diameter); a contact whose cure would exceed it is refused through the existing disclosed **ABANDONED LOAD** line, which names the seat, the load, the rungs tried and this bound as the stopper. **What it does NOT bound:** tips the **load law** sizes. The area law `π·r² ≥ carried_area / X` (X = 12) may demand up to `TIP_RADIUS_MAX_LEGACY_MM` = 1.000 mm radius (2.000 mm diameter) for a genuinely heavy area, and such a tip is emitted unchanged. Carrying weight and reaching solid are different appetites; only the second is bounded here. It weakens no refusal — it can only turn a cure into a refusal. **UNITS TRAP:** this row is a RADIUS, Craig and the ChituBox UI speak DIAMETER. |
 | `tip_r_max_mm` (118) | 1.0 | mm | **P**, diagnostic legacy cap | `plinth-support::placement` | **Caps one tip at `π·1.0²·12 = 37.70 mm²` of supported area at X=12.** Root cause of the unsatisfiable load gate (§1.5). At X=12 this also caps hexagonal arm spacing at `sqrt(37.70·2/√3) = 6.60 mm`. |
-| `tip_ball_r_factor` (423) | 1.5 | — | **P** | `plinth-support::placement` | Spherical contact at the tip. Aliased in `verify.BALL_FACTOR_STUB`. |
+| `tip_ball_r_factor` (423) | 1.5 | — | **P** | `plinth-support::placement` | Spherical contact at the tip. Aliased in `verify.BALL_FACTOR_STUB`. **Legacy engine only since 2026-09-30:** `--placement sweep` reads the owner's ChituBox profiles instead (`CHITUBOX_TIP_CONTACT_PROFILES`, §3.10.1a). |
 | `joints.MODEL_FOOT_FACTOR` | 1.4 | — | **P** | `plinth-support::placement` | Strut/rung foot balls. Aliased in `verify.BALL_FACTOR_FOOT`. |
 | `joint_ball_factor` (420) | 1.0 | — | **P** — "1.25 read as lumpy" in review | `plinth-support::placement` | |
-| `flare_len_mm` / `flare_r_factor` (425/426) | 1.5 / 1.6 | mm / — | **P** | `plinth-support::placement` | Conical flare at the pad. **Not** the fast-flare-above-the-tip term §1.3(b) requires — that term does not exist yet. |
+| `flare_len_mm` / `flare_r_factor` (425/426) | 1.5 / 1.6 | mm / — | **P** | `plinth-support::placement` | Conical flare at the pad. **Not** the fast-flare-above-the-tip term §1.3(b) requires — that term does not exist yet. **Since 2026-09-30** `--placement sweep` EMITS every plate root on the owner's ChituBox boss instead (`CHITUBOX_BOSS_HEIGHT_MM`, `CHITUBOX_BOSS_BOTTOM_DIAMETER_MM`, §3.10.1a); the sweep still reads `flare_r_factor` as its congestion census's crowding disc (§3.10.1a). |
 | `DEFAULT_CONTACT_DEPTH_MM` (legacy `contact_depth_mm`, 250) | 0.3 | mm | **P** — generation/profile default | `plinth-support::placement` + `plinth-emit` | This is not a ChituBox format grade or fixed wire value; the format field is variable. Keep the 0.3 mm policy in geometry generation, not `chitubox_io` format constants. |
 | `stub_length_mm` (247) | 2.5 | mm | **P** | `plinth-support::placement` | |
 | `min_shaft_r_mm` (139) | 0.3 | mm | **P** | `plinth-support::placement` | |
@@ -833,7 +833,52 @@ machines. Its deterministic replacement is a work budget.
 | `bracing._MIN_CROSS_LINK_XY_MM` / `_REACH_TIER_BASE_FACTOR` / `_FALLBACK_FRACTIONS` | 1/sqrt(2) / 1.25 / (0.5, 0.25, 0.75, 0.1, 0.9) | mm / — | **P**, brace search controls |
 | `struts` model-anchor defaults | 5.0 mm / 0.5 / 40 candidates | mm / — / count | **P**, candidate-selection controls |
 | `hollow` policy family | pitch 0.5 mm; bulk 10.0 mm; save 15.0 mL / 0.25; lobe 0.5 mL / 15.0 mm; drain 1.5 mm; vent 1.25 mm | mixed | **P**, output-changing hollowing policy |
-| ChituBox-emission geometry | 24 sides; plate tolerance 1e-5 mm; root 10 layers / 0.5 mm; pad 2.2 mm; raft 0.2 mm; pad 20 sides | mixed | format/generation contract, separate from binary offsets |
+| ChituBox-emission geometry | 24 sides; plate tolerance 1e-5 mm; root 10 layers / 0.5 mm; pad 20 sides | mixed | format/generation contract, separate from binary offsets. The pad (2.2 mm) and raft (0.2 mm) left this row on 2026-09-30: see §3.10.1a. |
+
+### 3.10.1a The owner's ChituBox support geometry (ruling of 2026-09-30)
+
+Craig ruled on 2026-09-30 that the support GEOMETRY comes from his own ChituBox
+practice, and exported his four support profiles (0 Light, 1 Middle, 2 Heavy,
+3 Ultralight) as `docs/evidence/chitubox-support-profiles-2026-09-30.cfgx`
+(committed verbatim; JSON). **Rule: import geometry RATIOS and fixed SHAPES
+only.** Every arm and tip RADIUS stays sized by the area law
+(`π r² ≥ load / X_ALLOWED`); ChituBox's per-profile fixed diameters are never
+imported as sizes. Each constant below carries the provenance "Craig ChituBox
+profile export 2026-09-30, field ⟨name⟩" (`Measured`, `owner_decision`), and
+`constants_evidence::chitubox_geometry_is_read_off_the_committed_profile_export`
+parses the file and holds every value to it.
+
+| Stable ID | Value | ChituBox field(s) | What it decides (`--placement sweep`) |
+|---|---|---|---|
+| `CHITUBOX_TIP_CONTACT_PROFILES` | (tip-up, touch) mm DIAMETER: Ultralight (0.15, 0.20), Light (0.20, 0.30), Middle (0.40, 0.50), Heavy (0.60, 0.80) | `top_support.supporttipupdiameter`, `.supporttouchtipdiameter` | Tip ball radius = `f(2 r_tip) · r_tip`, `f` = touch / tip-up, linear in tip DIAMETER between bracketing profiles, held at the end profile's ratio outside 0.15-0.60 mm. The seat law's ball-cap term and equator bound read the same `f`. Replaces `BALL_FACTOR_STUB` = 1.5. |
+| `CHITUBOX_BOSS_BOTTOM_DIAMETER_MM` | 2.2 | `support_general_para.diameterofbossbottom` | The root boss's foot: radius `max(1.1, r_root)`, grown to a wider load-sized root, never capping it (owner ruling 2026-09-29). Replaces `FLARE_R_FACTOR` × root as the EMITTED foot (placement's crowding disc still reads `FLARE_R_FACTOR`, below). |
+| `CHITUBOX_BOSS_HEIGHT_MM` | 1.0 | `support_general_para.heightofboss` | The boss top above the raft top, `max(minimum boss run, min(1.0, half the run above the raft))`. Replaces `FLARE_LEN_MM` = 1.5. |
+| `CHITUBOX_PAD_DIAMETER_MM` | 2.2, **D** from the boss foot | (`diameterofbossbottom`) | The native raft pad, as wide as the native boss foot (five native files: pad 2.2 under a 1.1 foot). Was **P** of the same value. |
+| `CHITUBOX_RAFT_HEIGHT_MM` | 0.2 | `raft_support.raftthickness` | Pad and bridge thickness; the boss's datum. Was **P** of the same value. |
+
+The legacy engine (`--placement legacy`, the CLI default) still reads
+`BALL_FACTOR_STUB`, `FLARE_R_FACTOR` and `FLARE_LEN_MM`; it reads the pad and
+raft from the entries above, at unchanged values.
+
+**What the sweep's placement measures at the plate: unchanged, and an open
+question.** The congestion census, the mast search's root clearance, the
+thicken rung's disc and the lip-seat lane's new-root clearance still measure
+each plate root as `FLARE_R_FACTOR` × its drawn root, which until 2026-09-30
+was also the emitted flare's foot. They no longer describe an emitted solid;
+they are kept so that placement is unchanged by the geometry. Measured
+alternatives (`plinth_sweep::SweepPolicy::flare_r_factor`): counting the fixed
+boss foot makes 9 of the 10 lane models "congested" (Cylinder 167 pairs),
+an overlap no remedy can thin and ChituBox's own files show too; counting the
+bare root silences the congestion lane on its reference fixture (the laid
+tube), turning 9 of its tests red.
+
+Fields read and NOT imported, with the reason, are listed in the lane report
+`plinth-evidence/.../lanes/chitubox-geometry.md` (outside the repository):
+tip-down diameter and tip length (load-sized taper), touch depth (the seat law
+is physics), middle and small-pillar diameters (load-sized), cross diameter
+(brace sizing unchanged), tip spacing (reach is coupon physics), bottom
+diameter and thickness and the tail contact (meaning unconfirmed), and the slab
+raft's height, angle, area ratio and grid.
 
 ### 3.10.2 Closed source-ledger additions — support and verification
 

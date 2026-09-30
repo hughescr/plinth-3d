@@ -59,6 +59,26 @@ fn stilt() -> &'static Pair {
     FIXTURE.get_or_init(|| pair(&make_tall_stilt_plate().expect("the tall stilt plate")))
 }
 
+/// The stilt plate, rule ON, graded at the X its section-move path was built at
+/// (`crate::harness::PATH_FIXTURE_X_ALLOWED` = 12).
+///
+/// RE-SCOPED 2026-09-30 (fix/chitubox-geometry), measured: with the owner's
+/// ChituBox ball ratios (`CHITUBOX_TIP_CONTACT_PROFILES`, 1.25-1.5 by tip size
+/// where every sweep ball was 1.5 × r before) the production stilt plate at
+/// X 18 searches 2 tips for their section, moves 0 and refuses 2,844 slides,
+/// so the two section-move tests below graded nothing. The rules they grade
+/// read no ball factor and no X; only the fixture stopped reaching them.
+fn stilt_at_path_x() -> &'static SweepPlan {
+    static FIXTURE: OnceLock<SweepPlan> = OnceLock::new();
+    FIXTURE.get_or_init(|| {
+        sweep_with(
+            &make_tall_stilt_plate().expect("the tall stilt plate"),
+            0.0,
+            &crate::harness::at_path_fixture_x(policy()),
+        )
+    })
+}
+
 fn laid_tube() -> &'static Pair {
     static FIXTURE: OnceLock<Pair> = OnceLock::new();
     FIXTURE.get_or_init(|| pair(&make_laid_tube().expect("the laid tube")))
@@ -243,7 +263,7 @@ fn a_lip_seat_relanding_laps_no_new_plate_root_on_the_laid_tube() {
 /// own status on each moved tip.
 #[test]
 fn a_tip_moved_for_its_section_keeps_its_section_and_its_disc_on_the_face() {
-    let plan = &stilt().on;
+    let plan = stilt_at_path_x();
     let footprint = &plan.report.seat_footprint;
     println!(
         "stilt: footprint {} tips searched for their section, {} moved, {} slides refused",
@@ -361,7 +381,7 @@ fn every_landing_stands_after_a_lip_seat_put_back_on_the_laid_tube() {
 /// move was taken back on this field.
 #[test]
 fn a_section_move_taken_back_leaves_every_displaced_member_within_the_rules() {
-    let plan = &stilt().on;
+    let plan = stilt_at_path_x();
     let footprint = &plan.report.seat_footprint;
     let graded = crate::footprint_moves_hold_the_rules::grade(plan);
     println!(

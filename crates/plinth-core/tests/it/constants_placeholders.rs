@@ -8,7 +8,7 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_PLACEHOLDER_IDS: [&str; 282] = [
+const EXPECTED_PLACEHOLDER_IDS: [&str; 280] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -35,10 +35,8 @@ const EXPECTED_PLACEHOLDER_IDS: [&str; 282] = [
     "CCO_XIA_ALPHA",
     "CHITUBOX_DEFAULT_PLACEMENT_XY_MM",
     "CHITUBOX_EMIT_N_SIDES",
-    "CHITUBOX_PAD_DIAMETER_MM",
     "CHITUBOX_PAD_N_SIDES",
     "CHITUBOX_PLATE_MESH_TOL_MM",
-    "CHITUBOX_RAFT_HEIGHT_MM",
     "CHITUBOX_ROOT_HEIGHT_MM",
     "CHITUBOX_ROOT_LAYERS",
     "CHITUBOX_SPHERE_MESH_TESSELLATION_POLICY",
@@ -306,7 +304,7 @@ macro_rules! rows {
     };
 }
 
-static EXPECTED_ROWS: [ExpectedRow; 282] = rows! {
+static EXPECTED_ROWS: [ExpectedRow; 280] = rows! {
     "A_ABS_MM2", "2.0", "mm²", "scalar";
     "BALL_BREACH_EPS_MM", "0.05", "mm", "scalar";
     "BALL_FACTOR_FOOT", "1.4", "1", "scalar";
@@ -333,10 +331,8 @@ static EXPECTED_ROWS: [ExpectedRow; 282] = rows! {
     "CCO_XIA_ALPHA", "0.5", "1", "scalar";
     "CHITUBOX_DEFAULT_PLACEMENT_XY_MM", "{x:0.0,y:0.0}", "mm", "record{x,y}";
     "CHITUBOX_EMIT_N_SIDES", "24", "count", "scalar";
-    "CHITUBOX_PAD_DIAMETER_MM", "2.2", "mm", "scalar";
     "CHITUBOX_PAD_N_SIDES", "20", "count", "scalar";
     "CHITUBOX_PLATE_MESH_TOL_MM", "0.00001", "mm", "scalar";
-    "CHITUBOX_RAFT_HEIGHT_MM", "0.2", "mm", "scalar";
     "CHITUBOX_ROOT_HEIGHT_MM", "0.5", "mm", "scalar";
     "CHITUBOX_ROOT_LAYERS", "10", "count", "scalar";
     "CHITUBOX_SPHERE_MESH_TESSELLATION_POLICY", "{n_lat:8,n_lon:16,triangles:224}", "count", "record{n_lat,n_lon,triangles}";
@@ -597,7 +593,7 @@ static EXPECTED_ROWS: [ExpectedRow; 282] = rows! {
 };
 
 fn component() -> M0PlaceholderConstants {
-    M0PlaceholderConstants::new().expect("all 282 placeholder declarations must construct")
+    M0PlaceholderConstants::new().expect("all 280 placeholder declarations must construct")
 }
 
 #[test]
@@ -608,7 +604,10 @@ fn exact_handwritten_membership_is_stable_sorted_and_all_placeholder() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, EXPECTED_PLACEHOLDER_IDS);
-    assert_eq!(descriptors.len(), 282);
+    // 282 until 2026-09-30, when CHITUBOX_PAD_DIAMETER_MM and
+    // CHITUBOX_RAFT_HEIGHT_MM moved to the evidence set with the owner's
+    // ChituBox profile export as their provenance.
+    assert_eq!(descriptors.len(), 280);
     assert!(descriptors
         .windows(2)
         .all(|pair| pair[0].id() < pair[1].id()));
@@ -699,7 +698,9 @@ const fn bound_key(bound: BoundKind) -> &'static str {
 }
 
 #[test]
-fn evidence_and_placeholder_fixture_builds_one_328_entry_structural_batch() {
+fn evidence_and_placeholder_fixture_builds_one_331_entry_structural_batch() {
+    // 328 until 2026-09-30: the owner's ChituBox profile export added three
+    // evidence constants (and moved two out of the placeholders, net zero).
     let mut descriptors = component()
         .descriptors()
         .unwrap()
@@ -707,14 +708,14 @@ fn evidence_and_placeholder_fixture_builds_one_328_entry_structural_batch() {
         .collect::<Vec<_>>();
     descriptors.extend(M0EvidenceConstants::new().unwrap().descriptors().unwrap());
     let registry = ConstantsRegistry::build_batch(descriptors).unwrap();
-    assert_eq!(registry.len(), 328);
+    assert_eq!(registry.len(), 331);
     assert_eq!(
         registry
             .iter()
             .map(|descriptor| descriptor.id().as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        328
+        331
     );
 }
 

@@ -53,9 +53,12 @@ fn flare_factor() -> f64 {
     policy().flare_r_factor
 }
 
-/// Every plate root's centre and FLARED radius, in millimetres — the disc the
-/// emitter actually lays. A brace gets no root flare and never lands on the
-/// plate, so it is not one.
+/// Every plate root's centre and FLARED radius, in millimetres — the census's
+/// crowding disc (the drawn root times `FLARE_R_FACTOR`). Until 2026-09-30
+/// that was also the foot the emitter lays; since then the emitter stands
+/// every root on the owner's fixed ChituBox boss, and the census keeps this
+/// crowding measure unchanged (`SweepPolicy::flare_r_factor`). A brace gets no
+/// root boss and never lands on the plate, so it is not one.
 fn flared_roots(plan: &SweepPlan) -> Vec<(u32, StrutKind, f64, f64, f64)> {
     let flare = flare_factor();
     plan.struts
@@ -224,9 +227,16 @@ fn the_lonely_peak_publishes_the_mast_laps_its_sizing_pass_leaves() {
 /// laid tube can: 0 lapping mast pairs in force, 127 with the rule deleted.
 #[test]
 fn deleting_the_clearance_rule_brings_the_overlapping_masts_back() {
+    // RE-SCOPED 2026-09-30 (fix/chitubox-geometry), measured: with the owner's
+    // ChituBox ball ratios the production laid tube (X 18, thickening off)
+    // places 2 masts and 0 lapping pairs with the rule in force AND deleted,
+    // so the drill told nothing apart. The drill now runs at the X the
+    // fixture's mast path was built at (`crate::harness::PATH_FIXTURE_X_ALLOWED`
+    // = 12); the clearance rule reads no X and no ball factor.
     let mesh = laid_tube();
-    let clean = sweep_with(&mesh, 0.0, &policy());
-    let sabotaged = sweep_with(&mesh, 0.0, &policy().without_mast_root_clearance());
+    let at = |policy: SweepPolicy| crate::harness::at_path_fixture_x(policy);
+    let clean = sweep_with(&mesh, 0.0, &at(policy()));
+    let sabotaged = sweep_with(&mesh, 0.0, &at(policy().without_mast_root_clearance()));
 
     let clean_masts = masts(&clean);
     let sabotaged_masts = masts(&sabotaged);
@@ -352,11 +362,21 @@ fn the_finished_laid_tube_publishes_its_drawn_root_laps_and_they_do_not_grow() {
     );
     let emission = to_primitives(&plan, frame, &layers, 4_000_000, 1 << 30)
         .expect("the lowering refuses only about the request");
+    // The census's crowding disc of each root the file draws: the `RootFlare`
+    // record's TOP ring, the drawn root, times the crowding factor. (Until
+    // 2026-09-30 this read the flare's foot, which WAS that disc; since then
+    // the boss's foot is the owner's fixed 1.1 mm, see `flared_roots`.)
+    let flare = flare_factor();
     let feet: Vec<([f64; 3], f64)> = emission
         .primitives
         .iter()
         .filter(|primitive| primitive.segment_kind == SupportSegmentKind::RootFlare)
-        .map(|flare| (flare.end_mm.map(Finite::get), flare.end_radius_mm.get()))
+        .map(|boss| {
+            (
+                boss.start_mm.map(Finite::get),
+                boss.start_radius_mm.get() * flare,
+            )
+        })
         .collect();
     // `O(n²)` on purpose, as in `overlapping_pairs_touching_a_mast`.
     let mut drawn_pairs = 0_usize;

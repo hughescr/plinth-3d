@@ -4,7 +4,7 @@ use std::path::Path;
 
 // This is a hand-maintained cross-component inventory. It deliberately does
 // not read the source ledger or the generated Markdown golden.
-const EXPECTED_CONSTANT_IDS: [&str; 328] = [
+const EXPECTED_CONSTANT_IDS: [&str; 331] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -30,6 +30,8 @@ const EXPECTED_CONSTANT_IDS: [&str; 328] = [
     "CCO_SPLIT_SLIDE_POLICY",
     "CCO_XIA_ALPHA",
     "CCO_X_PAIR_LOAD_DISCOUNT",
+    "CHITUBOX_BOSS_BOTTOM_DIAMETER_MM",
+    "CHITUBOX_BOSS_HEIGHT_MM",
     "CHITUBOX_DEFAULT_PLACEMENT_XY_MM",
     "CHITUBOX_EMIT_N_SIDES",
     "CHITUBOX_PAD_DIAMETER_MM",
@@ -39,6 +41,7 @@ const EXPECTED_CONSTANT_IDS: [&str; 328] = [
     "CHITUBOX_ROOT_HEIGHT_MM",
     "CHITUBOX_ROOT_LAYERS",
     "CHITUBOX_SPHERE_MESH_TESSELLATION_POLICY",
+    "CHITUBOX_TIP_CONTACT_PROFILES",
     "CLEARANCE_SAMPLE_STEP_MM",
     "COINCIDE_TOL_MM",
     "COLINEAR_ANGLE_DEG",
@@ -377,7 +380,11 @@ fn global_registry_is_one_complete_atomic_306_constant_publication() {
         });
     // X_ALLOWED moved Derived -> Measured (Craig's ruling of 2026-09-30, an
     // owner decision): 30/16 became 31/15. No constant was added or removed.
-    assert_eq!(classes, [31, 15, 282, 0]);
+    // Then the owner's ChituBox profile export (2026-09-30): three constants
+    // added (boss foot, boss height, tip-contact profiles; Measured), and the
+    // pad and raft height moved out of the placeholders (pad Derived from the
+    // boss foot, raft height Measured): 31/15/282 became 35/16/280.
+    assert_eq!(classes, [35, 16, 280, 0]);
 }
 
 #[test]

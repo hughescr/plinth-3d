@@ -18,6 +18,7 @@ mod number;
 mod printer;
 mod provenance;
 mod stage;
+mod support_profile;
 mod violation;
 
 pub use chord::{
@@ -61,4 +62,5 @@ pub use provenance::{
     ProvenanceError, ProvenanceManifest, ProvenanceRef,
 };
 pub use stage::Stage;
+pub use support_profile::{TipContactProfile, TipContactProfiles, TipContactProfilesError};
 pub use violation::ViolationKind;

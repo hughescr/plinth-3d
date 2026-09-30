@@ -6,7 +6,9 @@
 
 use std::mem::size_of;
 
-use plinth_core::{m0_constants, ContentDigest, Finite, LayerPlan, PositiveFinite};
+use plinth_core::{
+    m0_constants, ContentDigest, Finite, LayerPlan, M0Constants, PositiveFinite, TipContactProfiles,
+};
 use thiserror::Error;
 
 use crate::{
@@ -36,6 +38,80 @@ const ZERO_LENGTH_MM: f64 = 1e-9;
 /// (`crates/plinth-pipeline/tests/it/plate_contact.rs`).
 pub const NATIVE_FOOT_PAD_OVERLAP_MM: f64 = 0.002;
 
+/// **The root boss every sweep plate root stands on**: the owner's ChituBox
+/// boss (Craig ChituBox profile export 2026-09-30, fields
+/// `support_general_para.heightofboss` = 1.0 mm and `.diameterofbossbottom`
+/// = 2.2 mm, all four profiles; `CHITUBOX_BOSS_HEIGHT_MM`,
+/// `CHITUBOX_BOSS_BOTTOM_DIAMETER_MM`).
+///
+/// A cone from the shaft's own drawn root section at the boss top down to the
+/// boss foot on the raft pad. The foot is the owner's fixed 1.1 mm radius,
+/// **grown to the root where the load-sized root is wider** — the boss is
+/// grown, the root is never capped (owner ruling 2026-09-29). It replaces the
+/// legacy flare (`FLARE_R_FACTOR` × root over `FLARE_LEN_MM`) on the sweep
+/// path, and it is the ONE rule for the foot: the lowering draws it, and the
+/// sweep's congestion census, mast and thicken clearance and lip-seat root
+/// clearance all read [`Self::foot_radius_mm`], so the disc a decision is
+/// taken against is the disc the file lays down.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RootBoss {
+    height_mm: f64,
+    native_foot_radius_mm: f64,
+}
+
+impl RootBoss {
+    /// The registered boss.
+    ///
+    /// # Errors
+    ///
+    /// The registry cannot be read, or holds a non-positive boss.
+    pub fn registered() -> Result<Self, String> {
+        let constants = m0_constants().map_err(ToString::to_string)?;
+        Self::from_constants(constants)
+    }
+
+    fn from_constants(constants: &M0Constants) -> Result<Self, String> {
+        let evidence = constants.evidence();
+        let height_mm = *evidence.chitubox_boss_height_mm().value();
+        let native_foot_radius_mm = *evidence.chitubox_boss_bottom_diameter_mm().value() / 2.0;
+        if height_mm.is_finite()
+            && height_mm > 0.0
+            && native_foot_radius_mm.is_finite()
+            && native_foot_radius_mm > 0.0
+        {
+            Ok(Self {
+                height_mm,
+                native_foot_radius_mm,
+            })
+        } else {
+            Err(format!(
+                "the registered root boss is not a solid: height {height_mm} mm, foot radius \
+                 {native_foot_radius_mm} mm"
+            ))
+        }
+    }
+
+    /// The boss's height above the raft top, where the run allows it.
+    #[must_use]
+    pub const fn height_mm(self) -> f64 {
+        self.height_mm
+    }
+
+    /// The owner's boss foot RADIUS, half of `diameterofbossbottom`.
+    #[must_use]
+    pub const fn native_foot_radius_mm(self) -> f64 {
+        self.native_foot_radius_mm
+    }
+
+    /// The RADIUS of the foot a plate root of drawn root radius
+    /// `root_radius_mm` stands on: the owner's boss foot, or the root itself
+    /// where the root is wider. Never narrower than either.
+    #[must_use]
+    pub fn foot_radius_mm(self, root_radius_mm: f64) -> f64 {
+        root_radius_mm.max(self.native_foot_radius_mm)
+    }
+}
+
 /// Bounds and frozen geometry policy for one lowering pass.
 ///
 /// Fields are private so callers cannot substitute emitter geometry constants. The only
@@ -53,12 +129,21 @@ pub(crate) struct LoweringConfig {
     /// profile — the in-plane half of the PR-1(a) rasterisation allowance
     /// (`contact::rasterisation_allowance_mm`).
     pixel_pitch_mm: f64,
+    /// `BALL_FACTOR_STUB`: the LEGACY engine's tip ball ([`lower_stub`]).
+    /// The sweep path reads [`Self::sweep_ball_factor`] instead.
     tip_ball_factor: PositiveFinite,
+    /// `CHITUBOX_TIP_CONTACT_PROFILES`: the owner's ChituBox contact spheres,
+    /// which size every sweep tip ball ([`Self::sweep_ball_factor`]).
+    tip_contact_profiles: &'static TipContactProfiles,
     root_layers: u64,
     root_no_bend_mm: PositiveFinite,
     raft_height_mm: PositiveFinite,
+    /// `FLARE_LEN_MM` and `FLARE_R_FACTOR`: the LEGACY engine's root flare
+    /// ([`lower_member`]). The sweep path builds [`Self::root_boss`] instead.
     flare_length_mm: PositiveFinite,
     flare_factor: PositiveFinite,
+    /// The owner's ChituBox root boss, for every sweep plate root.
+    root_boss: RootBoss,
     plate_band_mm: PositiveFinite,
     joint: JointConfig,
     max_primitives: usize,
@@ -68,6 +153,15 @@ pub(crate) struct LoweringConfig {
 impl LoweringConfig {
     pub(crate) const fn joint_config(self) -> JointConfig {
         self.joint
+    }
+
+    /// **The contact-sphere factor of a SWEEP tip of `tip_radius_mm` RADIUS**:
+    /// read off the owner's ChituBox profiles by tip size
+    /// ([`TipContactProfiles::ball_factor`]). The one reader every sweep ball,
+    /// seat and trim computation goes through, so the ball the seat law is
+    /// solved for and the ball the file gets are one ball.
+    fn sweep_ball_factor(self, tip_radius_mm: f64) -> f64 {
+        self.tip_contact_profiles.ball_factor(tip_radius_mm)
     }
 
     pub(crate) fn current(
@@ -94,17 +188,22 @@ impl LoweringConfig {
             .map_err(|error| LoweringError::RegisteredConstants(error.to_string()))?;
         let policy = constants.placeholders();
         let joint_factor = *policy.joint_ball_factor().diagnostic();
+        let (_, raft_height_mm) = crate::raft::registered_pad_and_raft_height(constants)
+            .map_err(|error| LoweringError::RegisteredConstants(error.to_string()))?;
         Ok(Self {
             frame,
             layer_height_mm,
             contact_depth_mm: *policy.default_contact_depth_mm().diagnostic(),
             pixel_pitch_mm: crate::contact::registered_pixel_pitch_mm(constants),
             tip_ball_factor: *policy.ball_factor_stub().diagnostic(),
+            tip_contact_profiles: constants.evidence().chitubox_tip_contact_profiles().value(),
             root_layers: policy.chitubox_root_layers().diagnostic().get(),
             root_no_bend_mm: *policy.chitubox_root_height_mm().diagnostic(),
-            raft_height_mm: *policy.chitubox_raft_height_mm().diagnostic(),
+            raft_height_mm,
             flare_length_mm: *policy.flare_len_mm().diagnostic(),
             flare_factor: *policy.flare_r_factor().diagnostic(),
+            root_boss: RootBoss::from_constants(constants)
+                .map_err(LoweringError::RegisteredConstants)?,
             plate_band_mm: *policy.plate_band_mm().diagnostic(),
             joint: JointConfig::current(frame.plate_z_mm(), joint_factor),
             max_primitives,
@@ -449,6 +548,7 @@ fn root_boss_top(
     match root_boss_top_at(
         member.p0_mm()[2].get(),
         [member.p1_mm()[0], member.p1_mm()[1]],
+        config.flare_length_mm.get(),
         config,
     ) {
         Some(result) => result,
@@ -464,9 +564,14 @@ fn root_boss_top(
 /// too-short-run case that [`root_boss_top`] reports as
 /// `RootRunTooShort` — the caller decides what to do about it, because the
 /// sweep warns and emits where the legacy path refuses.
+///
+/// `boss_height_mm` is the one thing the two engines do not share: the legacy
+/// lowering passes its `FLARE_LEN_MM`, the sweep the owner's ChituBox
+/// `heightofboss` ([`RootBoss::height_mm`], 2026-09-30).
 fn root_boss_top_at(
     terminal_z_mm: f64,
     rootward_xy: [Finite; 2],
+    boss_height_mm: f64,
     config: LoweringConfig,
 ) -> Option<Result<[Finite; 3], LoweringError>> {
     let plate = config.frame.plate_z_mm().get();
@@ -479,8 +584,7 @@ fn root_boss_top_at(
     let raft_top = plate + config.raft_height_mm.get();
     let available_above_raft = terminal_z_mm - raft_top;
     let minimum_boss_height = (min_no_bend - config.raft_height_mm.get()).max(0.0);
-    let effective =
-        minimum_boss_height.max(config.flare_length_mm.get().min(available_above_raft / 2.0));
+    let effective = minimum_boss_height.max(boss_height_mm.min(available_above_raft / 2.0));
     Some(
         finite(raft_top + effective)
             .map(|top| [rootward_xy[0], rootward_xy[1], top]),
@@ -618,8 +722,10 @@ impl DigestWriter {
 // order to reach four numbers. Nothing below computes a ball pole, a boss top
 // or a flare radius a second time: the poles come from
 // `SphereGeometry::canonical_poles`, the boss top from `root_boss_top_at`
-// (which `root_boss_top` now delegates to), and the flare from the same
-// registered `FLARE_R_FACTOR` the legacy path reads.
+// (which `root_boss_top` now delegates to). Since 2026-09-30 the sweep's ball
+// and boss are the owner's ChituBox geometry, not the legacy placeholders: the
+// ball factor from `CHITUBOX_TIP_CONTACT_PROFILES` by tip size
+// (`LoweringConfig::sweep_ball_factor`) and the boss from `RootBoss`.
 // ---------------------------------------------------------------------------
 
 /// Where one sweep arm's bottom end sits.
@@ -771,6 +877,17 @@ pub struct SweepLowering {
     /// Every tip's radius, in the same order, so `a` and `r_tip` can be
     /// compared arm by arm without a second pass over the primitives.
     pub tip_radius_mm: Vec<f64>,
+    /// Every tip's CONTACT-SPHERE FACTOR, in the same order: the owner's
+    /// ChituBox ratio at that tip's size (`CHITUBOX_TIP_CONTACT_PROFILES`,
+    /// 2026-09-30), which the emitted ball radius is times the tip radius.
+    /// The path-hit witness for the profile table: one entry per tip.
+    pub tip_ball_factor: Vec<f64>,
+    /// Plate roots whose boss stands on the owner's native 1.1 mm foot
+    /// ([`RootBoss`], 2026-09-30).
+    pub root_bosses_at_native_foot: usize,
+    /// Plate roots whose drawn root is wider than the native foot, so the boss
+    /// foot is GROWN to the root (never the root capped).
+    pub root_bosses_grown_to_root: usize,
     /// Members drawn as MORE than one straight span because one straight line
     /// from the tip to the root would have dipped below the area law's profile
     /// somewhere — every trunk under a mid-shaft junction. The path-hit
@@ -913,16 +1030,20 @@ impl From<LoweringError> for SweepLoweringError {
 /// plate-rooted column carrying a contact ball:
 ///
 /// 1. `ContactSphere` — the tip ball at the seat, poles from
-///    [`SphereGeometry::canonical_poles`], never recomputed here.
+///    [`SphereGeometry::canonical_poles`], never recomputed here; its radius
+///    is the owner's ChituBox contact-sphere ratio at this tip's size times the
+///    load-sized tip radius (`CHITUBOX_TIP_CONTACT_PROFILES`, 2026-09-30).
 /// 2. `ContactTaper` — the ball centre down to the boss top (plate landing) or
 ///    to the landing point (model/arm landing), carrying the registered
 ///    `DEFAULT_CONTACT_DEPTH_MM`. Where one straight taper would dip below the
 ///    area law's own profile (every trunk under a mid-shaft junction) the taper
 ///    stops at the first break and the rest of the shaft follows as chained
 ///    `Member` frusta on the same axis ([`drawn_spans`]).
-/// 3. `RootFlare` — plate landings only, boss top down to the RAFT TOP,
-///    `plate_z + CHITUBOX_RAFT_HEIGHT_MM − NATIVE_FOOT_PAD_OVERLAP_MM`, with
-///    its full `FLARE_R_FACTOR × r_root` foot.
+/// 3. `RootFlare` — plate landings only: the owner's ChituBox ROOT BOSS
+///    ([`RootBoss`], 2026-09-30), boss top (`CHITUBOX_BOSS_HEIGHT_MM` above
+///    the raft where the run allows) down to the RAFT TOP,
+///    `plate_z + CHITUBOX_RAFT_HEIGHT_MM − NATIVE_FOOT_PAD_OVERLAP_MM`, from
+///    the drawn root out to the boss foot `max(1.1 mm, r_root)`.
 /// 4. THE RAFT — after every arm, once for the whole field: a `RaftPad` on the
 ///    plate under every plate foot, wide enough that its emitted polygon
 ///    covers the foot, and `RaftBridge`s along the pads' minimum spanning tree
@@ -1010,6 +1131,7 @@ fn lower_sweep_arms_of(
         tip_seat_depth_mm: Vec::with_capacity(arms.len()),
         tip_cut_radius_mm: Vec::with_capacity(arms.len()),
         tip_radius_mm: Vec::with_capacity(arms.len()),
+        tip_ball_factor: Vec::with_capacity(arms.len()),
         tip_contact_disc_radius_mm: Vec::with_capacity(arms.len()),
         tip_raster_seat_offset_mm: Vec::with_capacity(arms.len()),
         ..SweepLowering::default()
@@ -1030,10 +1152,16 @@ fn lower_sweep_arms_of(
         }
         out.arms_without_profile += usize::from(lowered.without_profile);
         out.shaft_members_trimmed_to_seat += lowered.members_trimmed;
+        match lowered.boss_grown {
+            Some(true) => out.root_bosses_grown_to_root += 1,
+            Some(false) => out.root_bosses_at_native_foot += 1,
+            None => {}
+        }
         if let Some(seat) = lowered.seat {
             out.tip_seat_depth_mm.push(seat.depth_mm);
             out.tip_cut_radius_mm.push(seat.cut_radius_mm);
             out.tip_radius_mm.push(seat.tip_radius_mm);
+            out.tip_ball_factor.push(seat.ball_factor);
             out.tip_contact_disc_radius_mm
                 .push(seat.contact_disc_radius_mm);
             out.tip_raster_seat_offset_mm
@@ -1148,6 +1276,9 @@ struct TipSeat {
     /// minimal separating cut, not `r_tip`.
     cut_radius_mm: f64,
     tip_radius_mm: f64,
+    /// The contact-sphere factor the ball was drawn and seated with: the
+    /// owner's ChituBox ratio at this tip's size.
+    ball_factor: f64,
     /// The seat trim's plane: the OUTWARD normal the seat law used (the
     /// carried face's, or straight down where none was measured) through the
     /// carried face's own point, or through `seat_mm` where no face was
@@ -1177,6 +1308,10 @@ struct ArmLowering {
     members_trimmed: usize,
     /// The arm arrived with no radius profile and was drawn at its tip radius.
     without_profile: bool,
+    /// A plate arm's root boss: `Some(true)` when the boss foot was GROWN to
+    /// a root wider than the owner's 1.1 mm, `Some(false)` at his native foot,
+    /// `None` for an arm with no boss.
+    boss_grown: Option<bool>,
 }
 
 impl ArmLowering {
@@ -1188,6 +1323,7 @@ impl ArmLowering {
             spans: 0,
             members_trimmed: 0,
             without_profile: false,
+            boss_grown: None,
         }
     }
 }
@@ -1434,10 +1570,14 @@ fn seat_tip(
         config.layer_height_mm.get(),
         config.pixel_pitch_mm,
     );
+    // The owner's ChituBox ball for this tip size (2026-09-30): the seat law's
+    // ball-cap term, the equator bound and the delivered cut below all read
+    // this one factor, the same one the emitted ball is drawn with.
+    let ball_factor = config.sweep_ball_factor(tip_radius_mm);
     let law_depth_mm = crate::contact::seat_depth_of(
         config.pixel_pitch_mm,
         config.layer_height_mm.get(),
-        config.tip_ball_factor.get(),
+        ball_factor,
         abs_cos,
         tip_radius_mm,
         true,
@@ -1451,7 +1591,7 @@ fn seat_tip(
     // a property of the emitted ball, not a new number, and it is what makes
     // `a ≥ r_tip` hold at BOTH ends of the law's range rather than only the
     // shallow one.
-    let equator_mm = config.tip_ball_factor.get() * tip_radius_mm;
+    let equator_mm = ball_factor * tip_radius_mm;
     let target_depth_mm = law_depth_mm.min(equator_mm);
     // Axial travel that delivers NORMAL depth `target_depth_mm`, bounded by the
     // ball's own length along the arm. A nearly-parallel seat would otherwise
@@ -1485,8 +1625,7 @@ fn seat_tip(
     // model surface actually takes through the emitted ball, which is what the
     // area law has to be evaluated on. It is not `r_tip`, and it is measured
     // here rather than assumed anywhere.
-    let cut_radius_mm =
-        crate::contact::ball_cut_radius_mm(tip_radius_mm, depth_mm, config.tip_ball_factor.get());
+    let cut_radius_mm = crate::contact::ball_cut_radius_mm(tip_radius_mm, depth_mm, ball_factor);
     // THE SEAT PLANE (fix/tip-trim, 2026-09-28): the carried face's own point
     // with the very normal the law just used, so the plane the ball is cut to
     // and the face the seat was measured against are one face, never two. The
@@ -1505,6 +1644,7 @@ fn seat_tip(
             depth_mm,
             cut_radius_mm,
             tip_radius_mm,
+            ball_factor,
             trim,
             face_measured,
             contact_disc_radius_mm: 0.0,
@@ -1619,7 +1759,7 @@ pub fn tip_contact_discs(
                 return None;
             }
             let unit = delta.map(|value| value / length);
-            let ball_radius_mm = config.tip_ball_factor.get() * arm.tip_radius_mm;
+            let ball_radius_mm = config.sweep_ball_factor(arm.tip_radius_mm) * arm.tip_radius_mm;
             let (_, center, tip_seat) =
                 seated_ball(arm, unit, arm.tip_radius_mm, ball_radius_mm, config);
             let trim = tip_seat.trim?;
@@ -1927,7 +2067,7 @@ fn seat_angle_limit_deg(
         let law = crate::contact::seat_depth_of(
             config.pixel_pitch_mm,
             config.layer_height_mm.get(),
-            config.tip_ball_factor.get(),
+            config.sweep_ball_factor(tip_radius_mm),
             cos,
             tip_radius_mm,
             true,
@@ -1976,7 +2116,10 @@ fn lower_one_sweep_arm(
     )) else {
         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
     };
-    let Ok(ball_radius) = positive(config.tip_ball_factor.get() * tip_radius.get()) else {
+    // THE OWNER'S CHITUBOX BALL (2026-09-30): the contact-sphere-to-tip ratio
+    // of his profiles at this tip's size, on the load-sized tip radius.
+    let Ok(ball_radius) = positive(config.sweep_ball_factor(tip_radius.get()) * tip_radius.get())
+    else {
         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
     };
     // A MEMBER THAT NEVER TOUCHES THE MODEL GETS NO BALL (2026-09-06). A
@@ -2045,6 +2188,7 @@ fn lower_one_sweep_arm(
         )
     };
     let spans: usize;
+    let mut boss_grown = None;
     let outcome = match arm.landing {
         SweepArmLanding::Landed => {
             if distance(center, base) <= ZERO_LENGTH_MM {
@@ -2075,18 +2219,30 @@ fn lower_one_sweep_arm(
             let foot_point = [base[0], base[1], foot_z];
             // The SEATED terminal z, exactly as the legacy path reads
             // `member.p0_mm()[2]` — which `initial.rs` already minted embedded.
-            // Its boss top is measured from the raft top, as it always was.
-            let boss_top =
-                root_boss_top_at(seated_seat[2], [base[0], base[1]], config).and_then(Result::ok);
+            // Its boss top is measured from the raft top, as it always was,
+            // at the owner's ChituBox boss height (2026-09-30).
+            let boss_top = root_boss_top_at(
+                seated_seat[2],
+                [base[0], base[1]],
+                config.root_boss.height_mm(),
+                config,
+            )
+            .and_then(Result::ok);
             match boss_top {
                 Some(top)
                     if distance(center, top) > ZERO_LENGTH_MM
                         && distance(top, foot_point) > ZERO_LENGTH_MM =>
                 {
-                    let Ok(flare_radius) = positive(root_radius.get() * config.flare_factor.get())
+                    // THE OWNER'S CHITUBOX BOSS FOOT (2026-09-30): 1.1 mm, or
+                    // the drawn root where the root is wider -- grown, never
+                    // capped. The `RootFlare` record is the boss cone.
+                    let Ok(flare_radius) =
+                        positive(config.root_boss.foot_radius_mm(root_radius.get()))
                     else {
                         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
                     };
+                    boss_grown =
+                        Some(flare_radius.get() > config.root_boss.native_foot_radius_mm());
                     let Some(drawn) = shaft(center, top, FrustumRingNormal::PlateZ, &mut staged)
                     else {
                         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
@@ -2179,11 +2335,12 @@ fn lower_one_sweep_arm(
         spans,
         members_trimmed,
         without_profile: arm.radius_profile_mm.is_empty(),
+        boss_grown,
     }
 }
 
-/// **The root a member is DRAWN with** — the section its plate flare is sized
-/// from (`root × FLARE_R_FACTOR` at the plate): the first entry of the radius
+/// **The root a member is DRAWN with** — the section its plate boss is sized
+/// from ([`RootBoss::foot_radius_mm`] at the plate): the first entry of the radius
 /// profile the member is drawn at, never narrower than its tip, and the tip
 /// itself for an arm with no profile.
 ///

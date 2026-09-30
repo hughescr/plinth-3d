@@ -6,8 +6,13 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_EVIDENCE_IDS: [&str; 46] = [
+const EXPECTED_EVIDENCE_IDS: [&str; 51] = [
     "CCO_X_PAIR_LOAD_DISCOUNT",
+    "CHITUBOX_BOSS_BOTTOM_DIAMETER_MM",
+    "CHITUBOX_BOSS_HEIGHT_MM",
+    "CHITUBOX_PAD_DIAMETER_MM",
+    "CHITUBOX_RAFT_HEIGHT_MM",
+    "CHITUBOX_TIP_CONTACT_PROFILES",
     "CONDITION_SHIFT_MAX",
     "DECIMATION_MAX_ABSOLUTE_DEVIATION_MM",
     "DECIMATION_MAX_P999_DEVIATION_MM",
@@ -55,8 +60,17 @@ const EXPECTED_EVIDENCE_IDS: [&str; 46] = [
     "X_STAR_CYLINDER",
 ];
 
-const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 46] = [
+const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 51] = [
     ("CCO_X_PAIR_LOAD_DISCOUNT", "1", "scalar"),
+    ("CHITUBOX_BOSS_BOTTOM_DIAMETER_MM", "mm", "scalar"),
+    ("CHITUBOX_BOSS_HEIGHT_MM", "mm", "scalar"),
+    ("CHITUBOX_PAD_DIAMETER_MM", "mm", "scalar"),
+    ("CHITUBOX_RAFT_HEIGHT_MM", "mm", "scalar"),
+    (
+        "CHITUBOX_TIP_CONTACT_PROFILES",
+        "mm",
+        "list[4]{name,tip_up_diameter_mm,touch_diameter_mm}",
+    ),
     ("CONDITION_SHIFT_MAX", "1", "scalar"),
     ("DECIMATION_MAX_ABSOLUTE_DEVIATION_MM", "mm", "scalar"),
     ("DECIMATION_MAX_P999_DEVIATION_MM", "mm", "scalar"),
@@ -138,7 +152,43 @@ struct ExpectedSource {
     date: &'static str,
 }
 
-const EXPECTED_SOURCES: [ExpectedSource; 31] = [
+const EXPECTED_SOURCES: [ExpectedSource; 35] = [
+    ExpectedSource {
+        constant: "CHITUBOX_BOSS_BOTTOM_DIAMETER_MM",
+        kind: "owner_decision",
+        identity: "craig-chitubox-profile-export-2026-09-30-diameterofbossbottom",
+        record: "docs/evidence/chitubox-support-profiles-2026-09-30.cfgx",
+        locator: "support[0..3].support_general_para.diameterofbossbottom",
+        precision: "exact",
+        date: "2026-09-30",
+    },
+    ExpectedSource {
+        constant: "CHITUBOX_BOSS_HEIGHT_MM",
+        kind: "owner_decision",
+        identity: "craig-chitubox-profile-export-2026-09-30-heightofboss",
+        record: "docs/evidence/chitubox-support-profiles-2026-09-30.cfgx",
+        locator: "support[0..3].support_general_para.heightofboss",
+        precision: "exact",
+        date: "2026-09-30",
+    },
+    ExpectedSource {
+        constant: "CHITUBOX_RAFT_HEIGHT_MM",
+        kind: "owner_decision",
+        identity: "craig-chitubox-profile-export-2026-09-30-raftthickness",
+        record: "docs/evidence/chitubox-support-profiles-2026-09-30.cfgx",
+        locator: "support[0..3].raft_support.raftthickness",
+        precision: "exact",
+        date: "2026-09-30",
+    },
+    ExpectedSource {
+        constant: "CHITUBOX_TIP_CONTACT_PROFILES",
+        kind: "owner_decision",
+        identity: "craig-chitubox-profile-export-2026-09-30-supporttouchtipdiameter",
+        record: "docs/evidence/chitubox-support-profiles-2026-09-30.cfgx",
+        locator: "support[0..3].top_support.supporttouchtipdiameter and .supporttipupdiameter",
+        precision: "exact",
+        date: "2026-09-30",
+    },
     ExpectedSource {
         constant: "FINAL_CLEARANCE_GAP_MM",
         kind: "owner_decision",
@@ -452,7 +502,7 @@ fn declaration_batch_has_exact_membership_order_shapes_and_provenance_counts() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(actual_ids, EXPECTED_EVIDENCE_IDS);
-    assert_eq!(descriptors.len(), 46);
+    assert_eq!(descriptors.len(), 51);
 
     for (descriptor, (id, unit, shape)) in descriptors.iter().zip(EXPECTED_DESCRIPTOR_CONTRACT) {
         assert_eq!(descriptor.id().as_str(), id, "ID contract drift for {id}");
@@ -469,7 +519,10 @@ fn declaration_batch_has_exact_membership_order_shapes_and_provenance_counts() {
         .filter(|descriptor| descriptor.provenance().class() == RegistryProvenanceClass::Derived)
         .count();
     // X_ALLOWED moved from Derived to Measured (an owner ruling) on 2026-09-30.
-    assert_eq!((measured, derived), (31, 15));
+    // The owner's ChituBox profile export (2026-09-30) added four Measured
+    // (boss foot, boss height, raft height, tip-contact profiles) and one
+    // Derived (the pad, from the boss foot): 31/15 became 35/16.
+    assert_eq!((measured, derived), (35, 16));
     assert!(descriptors.iter().all(|descriptor| !matches!(
         descriptor.provenance().class(),
         RegistryProvenanceClass::Placeholder | RegistryProvenanceClass::Pending
@@ -835,6 +888,10 @@ fn derived_sources_and_relations_are_exact_and_do_not_launder_authority() {
     let descriptors = constants.descriptors().unwrap();
     let expected = [
         ("CCO_X_PAIR_LOAD_DISCOUNT", &[][..]),
+        (
+            "CHITUBOX_PAD_DIAMETER_MM",
+            &["CHITUBOX_BOSS_BOTTOM_DIAMETER_MM"] as &[&str],
+        ),
         ("N_EFF_CAP", &["LOAD_SHARING"] as &[&str]),
         (
             "TIP_RADIUS_MIN_ALLOWED_MM",
@@ -1487,4 +1544,103 @@ fn the_reach_ratios_are_recomputed_from_their_registered_parents_bit_for_bit() {
     let placement = scalar(&descriptors, "LAMINA_REACH_RATIO");
     assert!(placement > scalar(&descriptors, "LAMINA_REACH_RATIO_AUDIT_GATE"));
     assert!(placement < scalar(&descriptors, "LAMINA_REACH_RATIO_FIRST_LOSS"));
+}
+
+/// **The support geometry is the owner's own ChituBox practice, read off his
+/// exported profiles** (ruling of 2026-09-30).
+///
+/// The export is committed verbatim at
+/// `docs/evidence/chitubox-support-profiles-2026-09-30.cfgx` (JSON). This test
+/// PARSES that file and holds every registered number to it, profile by
+/// profile, so the registry cannot drift from the owner's own record and a
+/// re-export with different numbers turns this red until the registry is
+/// re-read. It reads the export's fields by name and compares; it does not
+/// compute anything the registry computes.
+///
+/// * `CHITUBOX_TIP_CONTACT_PROFILES` holds one row per profile, by name, with
+///   that profile's `top_support.supporttipupdiameter` and
+///   `.supporttouchtipdiameter`; all four profiles are read.
+/// * `CHITUBOX_BOSS_BOTTOM_DIAMETER_MM`, `CHITUBOX_BOSS_HEIGHT_MM` and
+///   `CHITUBOX_RAFT_HEIGHT_MM` equal the `diameterofbossbottom`,
+///   `heightofboss` and `raftthickness` of EVERY profile (they agree; a
+///   profile that disagreed would have to be ruled on, not averaged).
+/// * `CHITUBOX_PAD_DIAMETER_MM` is Derived from the boss foot and equals it.
+#[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "the registry transcribes the export's decimal literals exactly; equality is the claim"
+)]
+fn chitubox_geometry_is_read_off_the_committed_profile_export() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("docs/evidence/chitubox-support-profiles-2026-09-30.cfgx");
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "the committed export {} is unreadable: {error}",
+            path.display()
+        )
+    });
+    let export: serde_json::Value =
+        serde_json::from_str(&raw).expect("the committed ChituBox export is JSON");
+    let profiles = export["support"]
+        .as_array()
+        .expect("a support profile array");
+    assert_eq!(profiles.len(), 4, "the owner exported four profiles");
+    let field = |profile: &serde_json::Value, section: &str, name: &str| -> f64 {
+        profile[section][name]["currentvalue"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("{} has no {section}.{name}", profile["name"]))
+    };
+
+    let constants = component();
+    let table = constants.chitubox_tip_contact_profiles().value();
+    assert_eq!(table.profiles().len(), profiles.len());
+    for profile in profiles {
+        let name = profile["name"].as_str().expect("a profile name");
+        let row = table
+            .profiles()
+            .iter()
+            .find(|row| row.name() == name)
+            .unwrap_or_else(|| panic!("profile {name} is missing from the registered table"));
+        assert_eq!(
+            row.tip_up_diameter_mm(),
+            field(profile, "top_support", "supporttipupdiameter"),
+            "{name}: supporttipupdiameter"
+        );
+        assert_eq!(
+            row.touch_diameter_mm(),
+            field(profile, "top_support", "supporttouchtipdiameter"),
+            "{name}: supporttouchtipdiameter"
+        );
+        assert_eq!(
+            *constants.chitubox_boss_bottom_diameter_mm().value(),
+            field(profile, "support_general_para", "diameterofbossbottom"),
+            "{name}: diameterofbossbottom"
+        );
+        assert_eq!(
+            *constants.chitubox_boss_height_mm().value(),
+            field(profile, "support_general_para", "heightofboss"),
+            "{name}: heightofboss"
+        );
+        assert_eq!(
+            *constants.chitubox_raft_height_mm().value(),
+            field(profile, "raft_support", "raftthickness"),
+            "{name}: raftthickness"
+        );
+    }
+    assert_eq!(
+        *constants.chitubox_pad_diameter_mm().value(),
+        *constants.chitubox_boss_bottom_diameter_mm().value()
+    );
+    // The owner's own reading of his profiles, 2026-09-30: the ball-to-tip
+    // ratios he prints with are 1.25 to 1.5. A table whose rows were swapped
+    // between the two diameters would read below one here.
+    for row in table.profiles() {
+        let ratio = row.ball_factor();
+        assert!(
+            (1.25 - 1e-12..=1.5 + 1e-12).contains(&ratio),
+            "{}: ball-to-tip ratio {ratio} is outside the owner's 1.25-1.5",
+            row.name()
+        );
+    }
 }

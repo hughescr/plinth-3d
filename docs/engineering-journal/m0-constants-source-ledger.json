@@ -259,6 +259,28 @@
       "provenance_detail": "Derived from=[] relation=(F/2)^0.25/F^0.25=0.5^0.25; proof=docs/reference/physics_transient_peel.md X-pair load/radius relation plus both live implementations"
     },
     {
+      "id": "CHITUBOX_BOSS_BOTTOM_DIAMETER_MM",
+      "classification": "runtime_emit_geometry",
+      "normative": "03-physics-and-constants.md §3.10.1 = 2.2 mm DIAMETER, Craig ChituBox profile export 2026-09-30, field support_general_para.diameterofbossbottom (all four profiles). The sweep's root boss foot: max(1.1 mm, r_root) radius, grown never capped (owner ruling 2026-09-29). Replaces FLARE_R_FACTOR as the EMITTED foot on --placement sweep; the sweep's congestion census still reads FLARE_R_FACTOR as its crowding disc, and the legacy engine still draws its flare with it.",
+      "source_locators": [
+        "docs/evidence/chitubox-support-profiles-2026-09-30.cfgx:support[0..3].support_general_para.diameterofbossbottom",
+        "Chitubox Projects/cylinder-cube-sphere.chitubox (outside the repository): native type-4 flare foot radius 1.1"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured source=owner_decision(id=\"craig-chitubox-profile-export-2026-09-30-diameterofbossbottom\", record=\"docs/evidence/chitubox-support-profiles-2026-09-30.cfgx\", locator=\"support[0..3].support_general_para.diameterofbossbottom\", date=exact(\"2026-09-30\")); err=null"
+    },
+    {
+      "id": "CHITUBOX_BOSS_HEIGHT_MM",
+      "classification": "runtime_emit_geometry",
+      "normative": "03-physics-and-constants.md §3.10.1 = 1.0 mm, Craig ChituBox profile export 2026-09-30, field support_general_para.heightofboss (all four profiles). The sweep's root boss height above the raft top. Replaces FLARE_LEN_MM on --placement sweep; the legacy engine still reads FLARE_LEN_MM.",
+      "source_locators": [
+        "docs/evidence/chitubox-support-profiles-2026-09-30.cfgx:support[0..3].support_general_para.heightofboss",
+        "Chitubox Projects/cylinder-cube-sphere.chitubox (outside the repository): native type-4 flare length 1.000"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured source=owner_decision(id=\"craig-chitubox-profile-export-2026-09-30-heightofboss\", record=\"docs/evidence/chitubox-support-profiles-2026-09-30.cfgx\", locator=\"support[0..3].support_general_para.heightofboss\", date=exact(\"2026-09-30\")); err=null"
+    },
+    {
       "id": "CHITUBOX_DEFAULT_PLACEMENT_XY_MM",
       "classification": "runtime_emit_default",
       "provenance_wrapper": "Placeholder",
@@ -282,12 +304,13 @@
     {
       "id": "CHITUBOX_PAD_DIAMETER_MM",
       "classification": "runtime_emit_geometry",
-      "normative": "03-physics-and-constants.md §3.10.1 = 2.2 mm",
+      "normative": "03-physics-and-constants.md §3.10.1 = 2.2 mm DIAMETER = CHITUBOX_BOSS_BOTTOM_DIAMETER_MM (Craig ChituBox profile export 2026-09-30, field support_general_para.diameterofbossbottom). The native raft pad; a pad whose 20-gon would not cover its foot is grown past it. Was a Placeholder of the same value until 2026-09-30.",
       "source_locators": [
-        "scripts/support_placement/chitubox_emit.py:PAD_DIAMETER_MM"
+        "scripts/support_placement/chitubox_emit.py:PAD_DIAMETER_MM",
+        "docs/evidence/chitubox-support-profiles-2026-09-30.cfgx:support[0..3].support_general_para.diameterofbossbottom"
       ],
-      "provenance_wrapper": "Placeholder",
-      "provenance_detail": "format/generation contract"
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived from=[CHITUBOX_BOSS_BOTTOM_DIAMETER_MM] relation=identity (native pad r0 2.2 under a native foot of radius 1.1 in all five ChituBox-authored files, raft-diagnosis 2026-09-29 §3.2)"
     },
     {
       "id": "CHITUBOX_PAD_N_SIDES",
@@ -312,12 +335,13 @@
     {
       "id": "CHITUBOX_RAFT_HEIGHT_MM",
       "classification": "runtime_emit_geometry",
-      "normative": "03-physics-and-constants.md §3.10.1 = 0.2 mm",
+      "normative": "03-physics-and-constants.md §3.10.1 = 0.2 mm, Craig ChituBox profile export 2026-09-30, field raft_support.raftthickness (all four profiles). Was a Placeholder of the same value until 2026-09-30.",
       "source_locators": [
-        "scripts/support_placement/chitubox_emit.py:RAFT_HEIGHT_MM"
+        "scripts/support_placement/chitubox_emit.py:RAFT_HEIGHT_MM",
+        "docs/evidence/chitubox-support-profiles-2026-09-30.cfgx:support[0..3].raft_support.raftthickness"
       ],
-      "provenance_wrapper": "Placeholder",
-      "provenance_detail": "format/generation contract"
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured source=owner_decision(id=\"craig-chitubox-profile-export-2026-09-30-raftthickness\", record=\"docs/evidence/chitubox-support-profiles-2026-09-30.cfgx\", locator=\"support[0..3].raft_support.raftthickness\", date=exact(\"2026-09-30\")); err=null"
     },
     {
       "id": "CHITUBOX_ROOT_HEIGHT_MM",
@@ -350,6 +374,17 @@
       ],
       "normative": "03-physics-and-constants.md §3.10.5 = n_lat 8, n_lon 16, 224 triangles",
       "provenance_detail": "structured default UV-sphere policy affecting all default-emitted tip/contact and joint sphere geometry"
+    },
+    {
+      "id": "CHITUBOX_TIP_CONTACT_PROFILES",
+      "classification": "runtime_emit_geometry",
+      "normative": "03-physics-and-constants.md §3.10.1 = the owner's four profiles' (supporttipupdiameter, supporttouchtipdiameter) in mm DIAMETER: Ultralight (0.15, 0.20), Light (0.20, 0.30), Middle (0.40, 0.50), Heavy (0.60, 0.80); Craig ChituBox profile export 2026-09-30. The --placement sweep tip ball is ball_factor(r_tip) * r_tip, ball_factor linear in tip DIAMETER between the bracketing profiles and held at the end profile's ratio outside 0.15-0.60 mm. Replaces BALL_FACTOR_STUB on the sweep path; the legacy engine still reads BALL_FACTOR_STUB. Tip RADII stay load-sized by the area law.",
+      "source_locators": [
+        "docs/evidence/chitubox-support-profiles-2026-09-30.cfgx:support[0..3].top_support.supporttouchtipdiameter and .supporttipupdiameter",
+        "Chitubox Projects/cylinder-cube-sphere.chitubox (outside the repository): native type-7 contact sphere radius touch/2, type-1 taper top radius tip-up/2"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured source=owner_decision(id=\"craig-chitubox-profile-export-2026-09-30-supporttouchtipdiameter\", record=\"docs/evidence/chitubox-support-profiles-2026-09-30.cfgx\", locator=\"support[0..3].top_support.supporttouchtipdiameter and .supporttipupdiameter\", date=exact(\"2026-09-30\")); err=null"
     },
     {
       "id": "CLEARANCE_SAMPLE_STEP_MM",

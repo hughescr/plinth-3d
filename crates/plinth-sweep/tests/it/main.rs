@@ -16,6 +16,7 @@
 mod harness;
 
 mod bracing;
+mod chitubox_geometry;
 mod congestion_lane;
 mod contact_sizing;
 mod drain_connectivity;

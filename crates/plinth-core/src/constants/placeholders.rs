@@ -993,7 +993,7 @@ macro_rules! placeholder_declarations {
             // 2026-09-28 with `-Z llvm-time-trace`). Evaluation order and the
             // first error returned are unchanged; the length is still proved
             // at compile time, by `PLACEHOLDER_COUNT` below.
-            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 282], RegistryError> {
+            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 280], RegistryError> {
                 let mut descriptors = Vec::with_capacity(PLACEHOLDER_COUNT);
                 $(descriptors.push(ConstantDescriptor::from_placeholder(
                     ConstantId::from($id),
@@ -1002,7 +1002,7 @@ macro_rules! placeholder_declarations {
                     &self.$field,
                 )?);)+
                 Ok(descriptors.try_into().unwrap_or_else(|_: Vec<ConstantDescriptor>| {
-                    unreachable!("PLACEHOLDER_COUNT is asserted to be 282 at compile time")
+                    unreachable!("PLACEHOLDER_COUNT is asserted to be 280 at compile time")
                 }))
             }
         }
@@ -1012,7 +1012,7 @@ macro_rules! placeholder_declarations {
         /// many entries.
         const PLACEHOLDER_COUNT: usize = [$($id),+].len();
         const _: () = assert!(
-            PLACEHOLDER_COUNT == 282,
+            PLACEHOLDER_COUNT == 280,
             "the placeholder table and descriptors()'s array length disagree"
         );
     };
@@ -1026,7 +1026,7 @@ placeholder_declarations! {
     ball_factor_foot: PositiveFinite = PositiveFinite::new(1.4)?;
     "BALL_FACTOR_FOOT", "1", "scalar", "Model-foot joint-ball geometry factor.";
     ball_factor_stub: PositiveFinite = PositiveFinite::new(1.5)?;
-    "BALL_FACTOR_STUB", "1", "scalar", "Tip stub ball-radius factor.";
+    "BALL_FACTOR_STUB", "1", "scalar", "Tip stub ball-radius factor. LEGACY ENGINE ONLY since 2026-09-30: --placement sweep sizes its tip balls from the owner's ChituBox profiles (CHITUBOX_TIP_CONTACT_PROFILES) and no longer reads this.";
     brace_ladder_z_mm: PositiveFinite = PositiveFinite::new(8.0)?;
     "BRACE_LADDER_Z_MM", "mm", "scalar", "Brace ladder vertical spacing tuning.";
     brace_neighbor_max_xy_mm: PositiveFinite = PositiveFinite::new(15.0)?;
@@ -1071,14 +1071,10 @@ placeholder_declarations! {
     "CHITUBOX_DEFAULT_PLACEMENT_XY_MM", "mm", "record{x,y}", "Project placement default with signed-zero-preserving coordinates.";
     chitubox_emit_n_sides: NonZeroU64 = nonzero(24)?;
     "CHITUBOX_EMIT_N_SIDES", "count", "scalar", "ChituBox emission geometry contract.";
-    chitubox_pad_diameter_mm: PositiveFinite = PositiveFinite::new(2.2)?;
-    "CHITUBOX_PAD_DIAMETER_MM", "mm", "scalar", "Generated support-pad diameter.";
     chitubox_pad_n_sides: NonZeroU64 = nonzero(20)?;
     "CHITUBOX_PAD_N_SIDES", "count", "scalar", "Generated support-pad tessellation count.";
     chitubox_plate_mesh_tol_mm: PositiveFinite = PositiveFinite::new(1e-5)?;
     "CHITUBOX_PLATE_MESH_TOL_MM", "mm", "scalar", "Plate mesh geometry tolerance, separate from binary offsets.";
-    chitubox_raft_height_mm: PositiveFinite = PositiveFinite::new(0.2)?;
-    "CHITUBOX_RAFT_HEIGHT_MM", "mm", "scalar", "Generated raft height.";
     chitubox_root_height_mm: PositiveFinite = PositiveFinite::new(0.5)?;
     "CHITUBOX_ROOT_HEIGHT_MM", "mm", "scalar", "Root no-bend height.";
     chitubox_root_layers: NonZeroU64 = nonzero(10)?;
@@ -1160,9 +1156,9 @@ placeholder_declarations! {
     expected_chitubox_api_version: NonZeroU64 = nonzero(1)?;
     "EXPECTED_CHITUBOX_API_VERSION", "count", "scalar", "Native writer compatibility version checked before emission.";
     flare_len_mm: PositiveFinite = PositiveFinite::new(1.5)?;
-    "FLARE_LEN_MM", "mm", "scalar", "Conical flare length, not the missing fast-flare term.";
+    "FLARE_LEN_MM", "mm", "scalar", "Conical flare length, not the missing fast-flare term. LEGACY ENGINE ONLY since 2026-09-30: --placement sweep builds its root boss from the owner's ChituBox profiles (CHITUBOX_BOSS_HEIGHT_MM) and no longer reads this.";
     flare_r_factor: PositiveFinite = PositiveFinite::new(1.6)?;
-    "FLARE_R_FACTOR", "1", "scalar", "Conical flare radius factor.";
+    "FLARE_R_FACTOR", "1", "scalar", "Conical flare radius factor. Since 2026-09-30 --placement sweep EMITS its root boss foot from the owner's ChituBox profiles (CHITUBOX_BOSS_BOTTOM_DIAMETER_MM, grown to the root); the sweep still reads this factor, unchanged, as its congestion census's root-crowding disc (factor x drawn root), which no longer describes an emitted solid. The legacy engine still draws its flare with it.";
     gate_on_ball_breach_default: bool = true;
     "GATE_ON_BALL_BREACH_DEFAULT", "1", "scalar", "Independent ball-breach verification default.";
     gate_on_removal_default: bool = false;

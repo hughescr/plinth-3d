@@ -44,31 +44,20 @@ fn layer_height_mm() -> f64 {
         .value()
 }
 
-fn flare_factor() -> f64 {
-    m0_constants()
-        .expect("registry")
-        .placeholders()
-        .flare_r_factor()
-        .diagnostic()
-        .get()
-}
+/// The owner's ChituBox root boss (Craig ChituBox profile export 2026-09-30,
+/// `support_general_para.diameterofbossbottom` = 2.2 mm, halved, and
+/// `.heightofboss` = 1.0 mm, all four profiles), typed here from his export so
+/// these tests do not read the rule they grade. Until 2026-09-30 the sweep's
+/// foot was `FLARE_R_FACTOR` (1.6) × the root over `FLARE_LEN_MM` (1.5 mm).
+const OWNER_BOSS_FOOT_RADIUS_MM: f64 = 1.1;
+const OWNER_BOSS_HEIGHT_MM: f64 = 1.0;
 
 fn raft_height_mm() -> f64 {
-    m0_constants()
+    *m0_constants()
         .expect("registry")
-        .placeholders()
+        .evidence()
         .chitubox_raft_height_mm()
-        .diagnostic()
-        .get()
-}
-
-fn native_pad_diameter_mm() -> f64 {
-    m0_constants()
-        .expect("registry")
-        .placeholders()
-        .chitubox_pad_diameter_mm()
-        .diagnostic()
-        .get()
+        .value()
 }
 
 /// Where every plate foot must end: on the pad top, reaching the native
@@ -235,31 +224,56 @@ fn a_flared_plate_arm_stands_its_full_flare_on_a_raft_pad() {
     let (support_z, holder) = lowest_support(&lowered.primitives);
     assert_eq!(holder.segment_kind, SupportSegmentKind::RootFlare);
     assert!((support_z - foot_z_mm()).abs() <= 1e-12);
-    // The FULL footprint: the foot radius is the registered flare of the root
-    // radius, not something narrower that merely reaches down.
-    let foot_radius = 0.3 * flare_factor();
+    // THE OWNER'S BOSS (2026-09-30): from the 0.3 mm root at its top down to
+    // his 1.1 mm foot, over his 1.0 mm boss height above the raft top (the
+    // foot reaching the native overlap into the pad).
+    assert!(
+        (flare.start_radius_mm.get() - 0.3).abs() <= 1e-12,
+        "the boss top is {} mm, not the drawn root",
+        flare.start_radius_mm.get()
+    );
+    let foot_radius = OWNER_BOSS_FOOT_RADIUS_MM;
     assert!(
         (flare.end_radius_mm.get() - foot_radius).abs() <= 1e-12,
-        "the flare foot radius is {} mm",
+        "the boss foot radius is {} mm, not the owner's {foot_radius} mm",
         flare.end_radius_mm.get()
+    );
+    let boss_top_above_raft = flare.start_mm[2].get() - (PLATE_Z_MM + raft_height_mm());
+    assert!(
+        (boss_top_above_raft - OWNER_BOSS_HEIGHT_MM).abs() <= 1e-12,
+        "the boss top stands {boss_top_above_raft} mm above the raft, not the owner's \
+         {OWNER_BOSS_HEIGHT_MM} mm"
+    );
+    assert_eq!(
+        (
+            lowered.root_bosses_at_native_foot,
+            lowered.root_bosses_grown_to_root
+        ),
+        (1, 0),
+        "path hit: one boss, on the native foot"
     );
     let pad_radius = assert_one_pad_on_the_plate_under(&lowered, [1.0, 2.0]);
     assert!(
         pad_radius >= foot_radius,
         "pad {pad_radius} under foot {foot_radius}"
     );
-    // A 0.48 mm foot fits the native 2.2 mm pad: nothing grown, one pad, no
-    // bridge.
-    assert_eq!(lowered.raft_pads_grown, 0);
-    assert!((pad_radius * 2.0 - native_pad_diameter_mm()).abs() <= 1e-12);
+    // The owner's 1.1 mm foot on his native 2.2 mm pad: the pad is emitted as a
+    // 20-gon INSCRIBED in its record circle, so a pad exactly as wide as the
+    // foot leaves the foot ring's corners outside its flats, and the covering
+    // rule (grow the pad, never cap the foot) grows it just past the foot.
+    // One pad, no bridge.
+    assert_eq!(lowered.raft_pads_grown, 1);
+    assert!(pad_radius > foot_radius);
     assert_eq!(lowered.raft_bridges, 0);
 }
 
-/// Owner ruling 2026-09-29: GROW THE PAD, NEVER CAP THE FOOT. A foot wider
-/// than the native pad keeps its full radius, and its pad grows past it.
+/// Owner ruling 2026-09-29: GROW THE PAD, NEVER CAP THE FOOT; and the owner's
+/// boss (2026-09-30) is grown only where the load-sized root is wider than its
+/// 1.1 mm foot, never capping the root. Such a root stands on a foot of its
+/// own radius, and its pad grows past it.
 #[test]
-fn a_foot_wider_than_the_native_pad_grows_its_pad_and_keeps_its_radius() {
-    let root = 1.0;
+fn a_root_wider_than_the_owners_boss_foot_grows_the_boss_and_the_pad() {
+    let root = 1.3;
     let lowered = lower(arm_at(
         [1.0, 2.0],
         PLATE_Z_MM + 6.0,
@@ -268,20 +282,28 @@ fn a_foot_wider_than_the_native_pad_grows_its_pad_and_keeps_its_radius() {
         SweepArmLanding::Plate,
         true,
     ));
-    let foot_radius = root * flare_factor();
+    let foot_radius = root;
     assert!(
-        2.0 * foot_radius > native_pad_diameter_mm(),
-        "the premise: this foot is wider than the native pad"
+        foot_radius > OWNER_BOSS_FOOT_RADIUS_MM,
+        "the premise: this root is wider than the owner's boss foot"
     );
     let flare = lowered
         .primitives
         .iter()
         .find(|primitive| primitive.segment_kind == SupportSegmentKind::RootFlare)
-        .expect("a flare");
+        .expect("a boss");
     assert!(
         (flare.end_radius_mm.get() - foot_radius).abs() <= 1e-12,
-        "the foot was capped to {}",
+        "the root was capped to {}",
         flare.end_radius_mm.get()
+    );
+    assert_eq!(
+        (
+            lowered.root_bosses_at_native_foot,
+            lowered.root_bosses_grown_to_root
+        ),
+        (0, 1),
+        "path hit: the boss-growth branch fired"
     );
     let pad_radius = assert_one_pad_on_the_plate_under(&lowered, [1.0, 2.0]);
     // PATH HIT: the grow branch fired.
