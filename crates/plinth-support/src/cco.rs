@@ -5896,9 +5896,11 @@ mod tests {
 
     use geom_kernel::{KnnBatchLimits, NativeSurface, NativeSurfaceConfig};
     use plinth_core::LayerPlan;
+    // The three-shell toed slab: this crate's frozen pins were measured on it
+    // (see `plinth_mesh::make_toed_slab_three_shells`).
     use plinth_mesh::{
-        build_face_topology, make_box, make_overhang_table, make_toed_slab, FaceTopology, Mesh,
-        WeldPolicy,
+        build_face_topology, make_box, make_overhang_table, make_toed_slab_three_shells,
+        FaceTopology, Mesh, WeldPolicy,
     };
 
     use crate::{
@@ -7160,7 +7162,7 @@ mod tests {
         let (build, plan, loads, surface, topology, mesh, _) = real_initial_transcript_fixture();
         let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
         let (_, alien_plan, alien_loads, _, _, _, _) =
-            real_initial_transcript_fixture_for(make_toed_slab().unwrap());
+            real_initial_transcript_fixture_for(make_toed_slab_three_shells().unwrap());
 
         assert!(matches!(
             CcoController::default().finalize_transcript(&build, &alien_plan, &loads, &geometry),

@@ -6904,8 +6904,11 @@ mod tests {
     use super::*;
     use geom_kernel::KnnBatchLimits;
     use plinth_core::{Finite, PositiveFinite};
+    // The three-shell toed slab: this crate's frozen pins were measured on it
+    // (see `plinth_mesh::make_toed_slab_three_shells`).
     use plinth_mesh::{
-        make_box, make_overhang_table, make_raking_blade, make_thin_fin, make_toed_slab,
+        make_box, make_overhang_table, make_raking_blade, make_thin_fin,
+        make_toed_slab_three_shells,
     };
 
     /// Canon item C6 (`docs/specs/geometry-canon.md` §1 OP-3): perception and
@@ -7845,7 +7848,7 @@ mod tests {
 
         // 7. A proof of another mesh. Same guard, same place as the replay:
         //    a face range proved on one mesh must not index another.
-        let foreign_mesh = make_toed_slab().unwrap();
+        let foreign_mesh = make_toed_slab_three_shells().unwrap();
         assert_eq!(
             append_with(
                 &case,
@@ -11478,7 +11481,7 @@ mod tests {
         // deliberately one on each side of the real surface's face count,
         // because the two directions fail differently past a missing check.
         let smaller = plinth_mesh::make_box_default().unwrap();
-        let larger = plinth_mesh::make_toed_slab().unwrap();
+        let larger = plinth_mesh::make_toed_slab_three_shells().unwrap();
         assert!(
             smaller.tris().len() < faces && faces < larger.tris().len(),
             "the arms need one foreign mesh smaller and one larger than the \
@@ -11781,7 +11784,7 @@ mod tests {
     fn table_toe_raking_and_thin_fin_are_bound() {
         for mesh in [
             make_overhang_table().unwrap(),
-            make_toed_slab().unwrap(),
+            make_toed_slab_three_shells().unwrap(),
             make_raking_blade().unwrap(),
             make_thin_fin().unwrap(),
         ] {
@@ -11827,7 +11830,7 @@ mod tests {
         assert_eq!(table_plan.island_births().len(), 4);
         assert_eq!(table_plan.local_z_minima().len(), 4);
 
-        let toe = make_toed_slab().unwrap();
+        let toe = make_toed_slab_three_shells().unwrap();
         let toe_delicacy = vec![0.0; toe.tris().len()];
         let toe_plan = prepare_generic_contacts(
             &toe,
@@ -12471,7 +12474,7 @@ mod tests {
         );
 
         let smaller = plinth_mesh::make_box_default().unwrap();
-        let larger = make_toed_slab().unwrap();
+        let larger = make_toed_slab_three_shells().unwrap();
         let faces = fixture.mesh.tris().len();
         assert!(
             smaller.tris().len() < faces && faces < larger.tris().len(),

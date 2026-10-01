@@ -1,4 +1,4 @@
-use geom_kernel::vec3::{cross, dot, sub};
+use geom_kernel::vec3::{cross, dist, dot, norm, sub};
 
 use crate::{Mesh, MeshError};
 
@@ -293,14 +293,192 @@ pub fn make_uncovered_rim_table() -> Result<Mesh, MeshError> {
     make_overhang_table_with([2.0, 2.0, 20.0], [25.0, 25.0, 4.0], 0.0)
 }
 
-/// The Python `make_toed_slab()` default.
+/// The toed slab: a 30 x 30 x 4 mm slab with its underside at z = 15, standing
+/// on two downward cone toes (radius 3 mm, 4 mm long at x = -8; radius
+/// 1.5 mm, 6 mm long at x = +8), as ONE closed solid.
+///
+/// The Python `make_toed_slab()` this was ported from concatenated three
+/// closed shells (a box and two cones) without a union, so each toe kept its
+/// base cap inside the slab: 64 triangles, 35.12 mm2, facing up into
+/// material. Every face-area term read them as surface; turned over, the
+/// orientation fold charged them as down-facing area, and that decided the
+/// X 18 pose by 0.015 % (field-2026-09-28 `creep-arms-diagnosis.md` Q2). The
+/// union below has no buried face: the slab's underside is pierced by the two
+/// toe footprints and each toe's flank meets the slab on that footprint's
+/// ring.
 pub fn make_toed_slab() -> Result<Mesh, MeshError> {
     make_toed_slab_with([30.0, 30.0, 4.0], 15.0)
 }
 
+/// [`make_toed_slab`] at another slab size and height, the toes unchanged.
+///
+/// Every vertex is exactly representable in f32, so the mesh survives the
+/// binary-STL wire bit for bit and the CLI reads the very solid this builds.
+///
+/// # Errors
+///
+/// A non-positive or non-finite slab dimension or a non-finite `z_bottom`;
+/// [`MeshError::InvalidRangeFixtureParameter`] when the slab is too small for
+/// each toe's footprint to sit wholly inside its own half of the underside
+/// (the halves are cut along the diagonal from the (-x, -y) corner to the
+/// (+x, +y) corner).
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "two deliberate narrowings: f64 -> f32 -> f64 rounds each ring coordinate onto the STL \
+          wire's grid (the point of it), and a ring index below SECTIONS = 32 fits a u32"
+)]
 pub fn make_toed_slab_with(top: [f64; 3], z_bottom: f64) -> Result<Mesh, MeshError> {
+    // (centre x, radius, length) of each toe; y = 0, attached at z_bottom.
+    const TOES: [(f64, f64, f64); 2] = [(-8.0, 3.0, 4.0), (8.0, 1.5, 6.0)];
+    const SECTIONS: usize = 32;
     validate_dimensions("top", top)?;
     validate_finite("z_bottom", z_bottom)?;
+    let f32_exact = |value: f64| f64::from(value as f32);
+    let (hx, hy) = (top[0] / 2.0, top[1] / 2.0);
+    if [hx, hy, z_bottom, z_bottom + top[2]]
+        .iter()
+        .any(|value| f32_exact(*value).to_bits() != value.to_bits())
+    {
+        return Err(MeshError::InvalidFiniteFixtureParameter {
+            parameter: "top/z_bottom (must be exactly representable in f32)",
+            value: top[0],
+        });
+    }
+    // The two halves of the underside, as their corners: the toe at -x lies
+    // above the diagonal y = (hy / hx) x, the toe at +x below it.
+    let corners = [[-hx, -hy], [hx, hy], [-hx, hy], [hx, -hy]];
+    let halves: [[usize; 3]; 2] = [[0, 1, 2], [0, 3, 1]];
+    let diagonal_length = norm([hx, hy, 0.0]);
+    for &(centre_x, radius, _) in &TOES {
+        // Distance of the toe centre (centre_x, 0) from the diagonal, and
+        // from the slab's edges: the footprint must clear all of them.
+        let clearance = (hy * centre_x).abs() / diagonal_length;
+        if clearance <= radius || hx - centre_x.abs() <= radius || hy <= radius {
+            return Err(MeshError::InvalidRangeFixtureParameter {
+                parameter: "top.x/top.y (each toe footprint inside its own half)",
+                value: top[0].min(top[1]),
+                min: 2.0 * (centre_x.abs() + radius),
+                max: f64::INFINITY,
+            });
+        }
+    }
+
+    let mut verts: Vec<[f64; 3]> = Vec::with_capacity(8 + TOES.len() * (SECTIONS + 1));
+    let mut tris: Vec<[u32; 3]> = Vec::with_capacity(10 + TOES.len() * (3 * SECTIONS + 3));
+    let index = |count: usize| u32::try_from(count).map_err(|_| MeshError::FixtureIndexOverflow);
+
+    // The slab: the box's own ten faces that are not its underside, in the
+    // box's face order (so the first source face stays [1, 3, 0]).
+    append_box(
+        &mut verts,
+        &mut tris,
+        top,
+        [0.0, 0.0, z_bottom + top[2] / 2.0],
+    )?;
+    // Box vertex k sits at (x, y, z) = (bit 2, bit 1, bit 0) of k: the
+    // underside is {0, 2, 4, 6}; drop the two faces made only of those.
+    tris.retain(|face| face.iter().any(|vertex| vertex % 2 == 1));
+    let corner_vertex = [0_u32, 6, 2, 4]; // (-,-), (+,+), (-,+), (+,-)
+
+    for (toe, &(centre_x, radius, length)) in TOES.iter().enumerate() {
+        let ring_start = index(verts.len())?;
+        for section in 0..SECTIONS {
+            let theta = 2.0 * core::f64::consts::PI * section as f64 / SECTIONS as f64;
+            verts.push([
+                f32_exact(centre_x + radius * theta.cos()),
+                f32_exact(radius * theta.sin()),
+                z_bottom,
+            ]);
+        }
+        let apex = index(verts.len())?;
+        verts.push([centre_x, 0.0, f32_exact(z_bottom - length)]);
+        let ring = |section: usize| ring_start + (section % SECTIONS) as u32;
+
+        // The toe's flank, outward: the ring runs counter-clockwise seen from
+        // +z, so (k+1, k, apex) faces away from the axis and downward.
+        for section in 0..SECTIONS {
+            tris.push([ring(section + 1), ring(section), apex]);
+        }
+
+        // This toe's half of the underside: the band between the half's three
+        // corners (a convex triangle) and the toe's ring (a convex polygon
+        // inside it), triangulated without new vertices. Walk both
+        // counter-clockwise; each corner takes, in order, every ring edge it
+        // SEES (lies strictly outside of), then hands over to the next
+        // corner. Consecutive corners' visible arcs of the ring overlap on
+        // these dimensions, so the hand-over vertex is seen by both and no
+        // triangle crosses the hole. (A plain angular zip does not work: the
+        // far (+x, +y) corner owns a 148-degree arc of the -x toe's ring and
+        // folded a triangle over the hole.) The fixture test checks the
+        // result: every underside face down-facing, their areas summing to
+        // the slab minus the two footprints.
+        let centre = [centre_x, 0.0];
+        let angle = |point: [f64; 2]| (point[1] - centre[1]).atan2(point[0] - centre[0]);
+        let mut outer: Vec<(f64, u32, [f64; 2])> = halves[toe]
+            .iter()
+            .map(|&corner| {
+                (
+                    angle(corners[corner]),
+                    corner_vertex[corner],
+                    corners[corner],
+                )
+            })
+            .collect();
+        outer.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // Every point here lies in the plane z = z_bottom, so work in it.
+        let in_plane = |point: [f64; 2]| [point[0], point[1], z_bottom];
+        let ring_point = |section: usize| verts[ring(section) as usize];
+        // Strictly right of the directed ring edge (k -> k+1): outside it.
+        let sees = |point: [f64; 2], section: usize| {
+            let a = ring_point(section);
+            let turn = cross(sub(ring_point(section + 1), a), sub(in_plane(point), a));
+            turn[2] < 0.0
+        };
+        // Start on the ring vertex nearest the first corner, the middle of
+        // the arc it sees.
+        let first_corner = in_plane(outer[0].2);
+        let first = (0..SECTIONS)
+            .min_by(|a, b| {
+                dist(ring_point(*a), first_corner).total_cmp(&dist(ring_point(*b), first_corner))
+            })
+            .expect("a ring has sections");
+        let (mut p, mut q) = (0_usize, 0_usize);
+        while p < outer.len() || q < SECTIONS {
+            let corner = outer[p % outer.len()].1;
+            let corner_xy = outer[p % outer.len()].2;
+            if q < SECTIONS && (p == outer.len() || sees(corner_xy, first + q)) {
+                // Down-facing: clockwise seen from +z. The corner lies outside
+                // the counter-clockwise ring edge (k, k+1), on its right, so
+                // (corner, k, k+1) is clockwise.
+                tris.push([corner, ring(first + q), ring(first + q + 1)]);
+                q += 1;
+            } else {
+                // The ring vertex lies inside the counter-clockwise corner
+                // edge (corner, next), on its left, so (corner, k, next) is
+                // clockwise.
+                let next = outer[(p + 1) % outer.len()].1;
+                tris.push([corner, ring(first + q), next]);
+                p += 1;
+            }
+        }
+    }
+    Mesh::new(verts, tris)
+}
+
+/// The toed slab EXACTLY as the Python `make_toed_slab()` default built it,
+/// and as [`make_toed_slab`] built it until 2026-09-30: three closed shells (a
+/// 30 x 30 x 4 mm box and two downward cones) concatenated without a union, so
+/// each toe keeps its base cap buried inside the slab. 76 vertices, 140 faces.
+///
+/// **Not a model to judge orientation or a field on** — its buried caps are
+/// counted as surface, which is the defect [`make_toed_slab`] fixes. It is kept
+/// because the legacy engine's (`plinth-support`) tests are parity pins
+/// against the Python oracle and frozen digests MEASURED on this mesh, and
+/// `corpus/models/make_toed_slab.stl` (the field input) is still this mesh.
+/// Re-pointing those pins onto the solid would need a new oracle, not a
+/// re-freeze. The vertex and face order is the old generator's, byte for byte.
+pub fn make_toed_slab_three_shells() -> Result<Mesh, MeshError> {
+    let (top, z_bottom) = ([30.0, 30.0, 4.0], 15.0);
     let mut verts = Vec::with_capacity(76);
     let mut tris = Vec::with_capacity(140);
     append_box(
@@ -312,6 +490,62 @@ pub fn make_toed_slab_with(top: [f64; 3], z_bottom: f64) -> Result<Mesh, MeshErr
     append_down_cone(&mut verts, &mut tris, 3.0, 4.0, [-8.0, 0.0, z_bottom])?;
     append_down_cone(&mut verts, &mut tris, 1.5, 6.0, [8.0, 0.0, z_bottom])?;
     Mesh::new(verts, tris)
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
+fn append_down_cone(
+    verts: &mut Vec<[f64; 3]>,
+    tris: &mut Vec<[u32; 3]>,
+    radius: f64,
+    height: f64,
+    attachment: [f64; 3],
+) -> Result<(), MeshError> {
+    const SECTIONS: usize = 32;
+    let base = u32::try_from(verts.len()).map_err(|_| MeshError::FixtureIndexOverflow)?;
+    // `trimesh.creation.cone` is a 32-section revolution, followed by its
+    // process=True exact merge.  `unique_ordered` retains the first vertex
+    // seen in every angular slice: base centre, ring zero, apex, then the
+    // remaining ring.  Preserve that unusual order because fixture indices
+    // are source data, not an invitation to canonicalize.
+    let rotate_x_pi = |point: [f64; 3]| {
+        let radians = core::f64::consts::PI;
+        let (sin, cos) = radians.sin_cos();
+        [
+            point[0] + attachment[0],
+            cos * point[1] - sin * point[2] + attachment[1],
+            sin * point[1] + cos * point[2] + attachment[2],
+        ]
+    };
+    verts.push(rotate_x_pi([0.0, 0.0, 0.0]));
+    let ring = |section: usize| {
+        let theta = 2.0 * core::f64::consts::PI * section as f64 / SECTIONS as f64;
+        rotate_x_pi([radius * theta.cos(), radius * theta.sin(), 0.0])
+    };
+    verts.push(ring(0));
+    verts.push(rotate_x_pi([0.0, 0.0, height]));
+    for section in 1..SECTIONS {
+        verts.push(ring(section));
+    }
+    let apex = base + 2;
+    let ring_index = |section: u32| {
+        if section == 0 {
+            base + 1
+        } else {
+            base + 2 + section
+        }
+    };
+    for section in 0..SECTIONS as u32 {
+        let next = (section + 1) % SECTIONS as u32;
+        tris.push([ring_index(section), base, ring_index(next)]);
+        tris.push([ring_index(section), ring_index(next), apex]);
+    }
+    Ok(())
 }
 
 /// The Python `make_raking_blade()` default.
@@ -387,62 +621,6 @@ fn append_box(
         }
     }
     tris.extend(BOX_FACES.map(|face| [base + face[0], base + face[1], base + face[2]]));
-    Ok(())
-}
-
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
-          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
-          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
-          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
-)]
-fn append_down_cone(
-    verts: &mut Vec<[f64; 3]>,
-    tris: &mut Vec<[u32; 3]>,
-    radius: f64,
-    height: f64,
-    attachment: [f64; 3],
-) -> Result<(), MeshError> {
-    const SECTIONS: usize = 32;
-    let base = u32::try_from(verts.len()).map_err(|_| MeshError::FixtureIndexOverflow)?;
-    // `trimesh.creation.cone` is a 32-section revolution, followed by its
-    // process=True exact merge.  `unique_ordered` retains the first vertex
-    // seen in every angular slice: base centre, ring zero, apex, then the
-    // remaining ring.  Preserve that unusual order because fixture indices
-    // are source data, not an invitation to canonicalize.
-    let rotate_x_pi = |point: [f64; 3]| {
-        let radians = core::f64::consts::PI;
-        let (sin, cos) = radians.sin_cos();
-        [
-            point[0] + attachment[0],
-            cos * point[1] - sin * point[2] + attachment[1],
-            sin * point[1] + cos * point[2] + attachment[2],
-        ]
-    };
-    verts.push(rotate_x_pi([0.0, 0.0, 0.0]));
-    let ring = |section: usize| {
-        let theta = 2.0 * core::f64::consts::PI * section as f64 / SECTIONS as f64;
-        rotate_x_pi([radius * theta.cos(), radius * theta.sin(), 0.0])
-    };
-    verts.push(ring(0));
-    verts.push(rotate_x_pi([0.0, 0.0, height]));
-    for section in 1..SECTIONS {
-        verts.push(ring(section));
-    }
-    let apex = base + 2;
-    let ring_index = |section: u32| {
-        if section == 0 {
-            base + 1
-        } else {
-            base + 2 + section
-        }
-    };
-    for section in 0..SECTIONS as u32 {
-        let next = (section + 1) % SECTIONS as u32;
-        tris.push([ring_index(section), base, ring_index(next)]);
-        tris.push([ring_index(section), ring_index(next), apex]);
-    }
     Ok(())
 }
 
