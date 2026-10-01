@@ -37,7 +37,11 @@ fn native_fixture_shapes_have_frozen_counts_bounds_and_face_order() {
     let fixtures: [FixtureExpectation; 6] = [
         ("box", make_box_default(), 8, 12, (0.0, 10.0)),
         ("table", make_overhang_table(), 40, 60, (0.0, 24.0)),
-        ("toed slab", make_toed_slab(), 76, 140, (9.0, 19.0)),
+        // 74 / 144 since the toes were unioned with the slab (2026-09-30):
+        // 8 box + 2 x (32 ring + apex) vertices; 10 box faces, and per toe 32
+        // flank + 32 ring-edge + 3 corner-edge underside faces. Was 76 / 140,
+        // three separate closed shells.
+        ("toed slab", make_toed_slab(), 74, 144, (9.0, 19.0)),
         (
             "raking blade",
             make_raking_blade(),
@@ -122,6 +126,107 @@ fn uncovered_rim_table_is_five_closed_boxes_at_frozen_dimensions() {
             .all(|component| component.signed_volume_mm3() > 0.0),
         "every component must be outward wound"
     );
+}
+
+/// The area of the regular 32-gon the toed slab's toe rings are, of
+/// circumradius `radius` (the analytic value the f32 ring approximates).
+fn toe_ring_area_mm2(radius: f64) -> f64 {
+    0.5 * 32.0 * radius * radius * (2.0 * core::f64::consts::PI / 32.0).sin()
+}
+
+/// **The toed slab is ONE closed solid: the toes are unioned with the slab.**
+///
+/// It used to be three overlapping closed shells (a box and two cones), each
+/// complete in itself, so each toe kept its base cap: 64 triangles, 35.12 mm2
+/// at z = 15, facing UP into the slab's material. Every face-area term reads
+/// those buried caps as real surface. Turned over, they face down and the
+/// orientation fold charged them as down-facing area (1.919 raw mm2), which
+/// decided the X 18 pose between "flat" and "on its toes" by 0.015 %
+/// (`plinth-evidence/.../field-2026-09-28/creep-arms-diagnosis.md` Q2).
+///
+/// What a single solid means here, measured, not asserted:
+/// * one closed, outward-wound component (the certificate) with no open edge;
+/// * no face in the slab's underside plane faces up (no buried cap), and the
+///   down-facing faces in that plane tile exactly the slab's underside minus
+///   the two toe footprints (every one down-facing, their areas summing to
+///   the annulus: an overlap or a gap would change the sum);
+/// * the enclosed volume is the slab plus the two toes, once each;
+/// * the f64 mesh is exactly what the f32 STL carries, so the CLI reads the
+///   same solid this test certifies.
+#[test]
+fn toed_slab_is_one_closed_solid_with_no_buried_toe_caps() {
+    let mesh = make_toed_slab().expect("procedural toed slab");
+    let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).expect("topology");
+    assert_eq!(
+        topology.counts().boundary_edges,
+        0,
+        "the toed slab must be closed"
+    );
+    let certificate = certify_closed_components(&mesh, &topology).expect("certificate");
+    assert_eq!(
+        certificate.components().len(),
+        1,
+        "the toed slab must be ONE closed solid, not overlapping shells: {:?}",
+        certificate.components()
+    );
+
+    let (slab_z, slab_side) = (15.0_f64, 30.0_f64);
+    let slab = slab_side * slab_side * 4.0;
+    let toes = [(3.0_f64, 4.0_f64), (1.5, 6.0)];
+    let footprints: f64 = toes.iter().map(|(r, _)| toe_ring_area_mm2(*r)).sum();
+    let toe_volume: f64 = toes
+        .iter()
+        .map(|(r, h)| toe_ring_area_mm2(*r) * h / 3.0)
+        .sum();
+    let volume = certificate.components()[0].signed_volume_mm3();
+    assert!(
+        (volume - (slab + toe_volume)).abs() < 1e-3,
+        "the solid must enclose the slab and its toes once each: {volume} mm3 against {} mm3",
+        slab + toe_volume
+    );
+
+    let normals = mesh.face_normals_z().expect("normals");
+    let mut underside_area = 0.0_f64;
+    for (face, triangle) in mesh.tris().iter().enumerate() {
+        let corners = triangle.map(|vertex| mesh.verts()[vertex as usize]);
+        // Exact bits: the generator places the underside at exactly 15.0.
+        if corners
+            .iter()
+            .all(|corner| corner[2].to_bits() == slab_z.to_bits())
+        {
+            assert!(
+                normals[face] < 0.0,
+                "face {face} lies in the slab's underside plane facing UP: a buried toe cap"
+            );
+            let e1 = [corners[1][0] - corners[0][0], corners[1][1] - corners[0][1]];
+            let e2 = [corners[2][0] - corners[0][0], corners[2][1] - corners[0][1]];
+            underside_area += 0.5 * (e1[0] * e2[1] - e1[1] * e2[0]).abs();
+        }
+    }
+    assert!(
+        (underside_area - (slab_side * slab_side - footprints)).abs() < 1e-3,
+        "the underside must be the slab minus the two toe footprints, tiled once: {underside_area} \
+         mm2 against {} mm2",
+        slab_side * slab_side - footprints
+    );
+
+    let scratch = std::env::temp_dir().join(format!(
+        "plinth-toed-slab-wire-{}.stl",
+        std::process::id()
+    ));
+    write_binary_stl(&scratch, &mesh).expect("every toed-slab coordinate must be exactly f32");
+    let reread = load_binary_stl(&scratch, WeldPolicy::None).expect("re-read");
+    let _ = std::fs::remove_file(&scratch);
+    assert_eq!(reread.tris().len(), mesh.tris().len());
+    for (face, triangle) in mesh.tris().iter().enumerate() {
+        for corner in 0..3 {
+            assert_eq!(
+                reread.verts()[reread.tris()[face][corner] as usize].map(f64::to_bits),
+                mesh.verts()[triangle[corner] as usize].map(f64::to_bits),
+                "face {face} corner {corner} changed on the f32 wire"
+            );
+        }
+    }
 }
 
 #[test]
