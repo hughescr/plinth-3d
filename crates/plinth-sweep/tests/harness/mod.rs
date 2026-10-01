@@ -181,6 +181,29 @@ pub fn at_path_fixture_seating(policy: SweepPolicy) -> SweepPolicy {
     policy.without_straight_reach().without_island_seating()
 }
 
+/// The slenderness ratio `S` registered until 2026-10-01, when Craig ruled
+/// it down to 30 (interim, pending a slenderness coupon).
+///
+/// A TEST FIXTURE SETTING, in the same sense as [`PATH_FIXTURE_X_ALLOWED`].
+/// The mast tests' fixtures (lonely peak, brace pair, laid tube) were built
+/// so that a 33-35 mm post needs a MAST. At `S` = 30 the braced panel a mast
+/// makes cannot hold such a post to one pixel even at the 1.0 mm maximum
+/// radius, so every mast cell is refused by the panel check (lonely peak:
+/// 23,448 cells; measured 2026-10-01, `lanes/bracing-rework.md`) and the
+/// run is a warning: the mast rules those tests grade are never reached. None
+/// of those rules reads `S` other than through the law it sizes with; `S`
+/// only decides whether the fixture reaches them.
+pub const PATH_FIXTURE_SLENDERNESS_RATIO: f64 = 50.0;
+
+/// `policy` with its slenderness ratio set to
+/// [`PATH_FIXTURE_SLENDERNESS_RATIO`].
+#[must_use]
+pub fn at_path_fixture_slenderness(policy: SweepPolicy) -> SweepPolicy {
+    let mut policy = policy;
+    policy.slenderness_ratio = PATH_FIXTURE_SLENDERNESS_RATIO;
+    policy
+}
+
 /// Run the sweep on one mesh at an explicit working pitch, with lift applied.
 pub fn sweep(mesh: &Mesh, pitch_mm: f64) -> SweepPlan {
     let policy = SweepPolicy::from_registry()

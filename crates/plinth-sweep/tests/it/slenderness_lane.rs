@@ -29,9 +29,21 @@ fn policy() -> SweepPolicy {
 /// with itself.
 fn law() -> SlendernessLaw {
     let constants = m0_constants().expect("the registry constructs");
+    law_at(
+        constants
+            .placeholders()
+            .slenderness_limit_ratio()
+            .diagnostic()
+            .get(),
+    )
+}
+
+/// [`law`] at a given ratio, every other input read from the registry.
+fn law_at(ratio: f64) -> SlendernessLaw {
+    let constants = m0_constants().expect("the registry constructs");
     let placeholders = constants.placeholders();
     SlendernessLaw::new(
-        placeholders.slenderness_limit_ratio().diagnostic().get(),
+        ratio,
         placeholders.tip_radius_default_mm().diagnostic().get(),
         placeholders.tip_radius_max_legacy_mm().diagnostic().get(),
         placeholders.overhang_angle_deg().diagnostic().get()
@@ -286,11 +298,17 @@ fn every_mast_is_plate_rooted_braced_and_inside_its_own_slenderness_limit() {
     // fire first. Graded at the X this fixture was built at (12,
     // `harness::PATH_FIXTURE_X_ALLOWED`): at the ruled 18 every mast cell is
     // refused as thicker than the member it would tie (0 masts, measured
-    // 2026-09-30), and the peak's 4 over-limit runs stay as warnings.
+    // 2026-09-30), and the peak's 4 over-limit runs stay as warnings. And at
+    // the S this fixture was built at (`harness::PATH_FIXTURE_SLENDERNESS_RATIO`,
+    // 50): at the ruled 30 the braced panel cannot hold the peak's 35 mm arms
+    // at any mast radius, every cell is refused by the panel check (0 masts,
+    // measured 2026-10-01), and the runs are warnings. Measured below with
+    // the same ratio.
     let plan = sweep_with(
         &mesh,
         0.0,
-        &harness::at_path_fixture_x(policy()).without_slenderness_thicken(),
+        &harness::at_path_fixture_slenderness(harness::at_path_fixture_x(policy()))
+            .without_slenderness_thicken(),
     );
     let masts = masts(&plan);
     assert!(
@@ -298,7 +316,7 @@ fn every_mast_is_plate_rooted_braced_and_inside_its_own_slenderness_limit() {
         "the lonely peak dropped no mast: {:?}",
         plan.report.slenderness_lane
     );
-    let law = law();
+    let law = law_at(harness::PATH_FIXTURE_SLENDERNESS_RATIO);
     for mast in &masts {
         assert_eq!(mast.landing, Landing::Plate, "a mast is plate-rooted");
         assert_eq!(mast.k_bottom, 0, "a mast runs from the plate");
@@ -331,7 +349,7 @@ fn every_mast_is_plate_rooted_braced_and_inside_its_own_slenderness_limit() {
     }
     // Every mast's own runs, measured by the same function that measures every
     // other member's.
-    for run in runs_of(&plan) {
+    for run in unbraced_runs(&plan.grid, &plan.struts, plan.layer_height_mm, &law) {
         let strut = &plan.struts[run.strut_id as usize];
         if strut.kind != plinth_sweep::StrutKind::Mast {
             continue;

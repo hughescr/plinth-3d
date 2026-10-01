@@ -80,8 +80,8 @@ pub use orient_demand::{burden_cm2, SweepDemand};
 pub use peel::{PeelFieldMode, PeelFieldStats};
 pub use report::{PathHits, SweepRunReport};
 pub use slenderness::{
-    unbraced_runs, SlendernessContext, SlendernessLaw, SlendernessOutcome, UnbracedRun,
-    UnbracedWarning,
+    unbraced_runs, BandRefusals, SlendernessContext, SlendernessLaw, SlendernessOutcome,
+    UnbracedRun, UnbracedWarning,
 };
 pub use tip_landing::{tip_contact_scar, tip_landings, TipCharge, TipContactScar, TipLanding};
 

@@ -17,6 +17,7 @@ mod harness;
 
 mod brace_not_in_flare;
 mod bracing;
+mod bracing_rework;
 mod chitubox_geometry;
 mod congestion_lane;
 mod contact_sizing;

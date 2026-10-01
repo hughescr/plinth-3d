@@ -16,7 +16,9 @@
 //!
 //! The owner's rulings (2026-09-29): the order is merge, `|X|`, THICKEN (raise
 //! the root, keep the tip, 1.0 mm maximum), mast, warn; bracing has to hold in
-//! EVERY direction, thickening preferred; `S` stays 50.
+//! EVERY direction, thickening preferred; `S` stays 50. (Craig's rulings of
+//! 2026-10-01: `S` = 30, one-direction crosses are kept, a landing ties its
+//! host from its seat; see `bracing_rework.rs` and the re-derivations below.)
 //!
 //! Every assertion reads the finished strut set, or the production
 //! measurement ([`plinth_sweep::unbraced_runs`]) applied to a strut set the
@@ -41,17 +43,12 @@ fn policy() -> SweepPolicy {
 /// The law as the production policy builds it, read from the registry here.
 fn law() -> SlendernessLaw {
     let constants = m0_constants().expect("the registry constructs");
-    let placeholders = constants.placeholders();
-    SlendernessLaw::new(
-        placeholders.slenderness_limit_ratio().diagnostic().get(),
-        placeholders.tip_radius_default_mm().diagnostic().get(),
-        placeholders.tip_radius_max_legacy_mm().diagnostic().get(),
-        placeholders.overhang_angle_deg().diagnostic().get()
-            - 0.5
-                * placeholders
-                    .overhang_weight_transition_deg()
-                    .diagnostic()
-                    .get(),
+    law_at(
+        constants
+            .placeholders()
+            .slenderness_limit_ratio()
+            .diagnostic()
+            .get(),
     )
 }
 
@@ -61,6 +58,38 @@ fn stilt() -> &'static SweepPlan {
         let mesh = make_tall_stilt_plate().expect("the tall stilt plate fixture");
         sweep_with(&mesh, 0.0, &policy())
     })
+}
+
+/// The stilt plate at the ratio in force until 2026-10-01
+/// (`harness::PATH_FIXTURE_SLENDERNESS_RATIO`), where every one of its posts
+/// has an admissible remedy: the ladder's completeness is graded there.
+fn stilt_at_s_50() -> &'static SweepPlan {
+    static PLAN: OnceLock<SweepPlan> = OnceLock::new();
+    PLAN.get_or_init(|| {
+        let mesh = make_tall_stilt_plate().expect("the tall stilt plate fixture");
+        sweep_with(
+            &mesh,
+            0.0,
+            &harness::at_path_fixture_slenderness(policy()),
+        )
+    })
+}
+
+/// [`law`] at a given ratio, every other input read from the registry.
+fn law_at(ratio: f64) -> SlendernessLaw {
+    let constants = m0_constants().expect("the registry constructs");
+    let placeholders = constants.placeholders();
+    SlendernessLaw::new(
+        ratio,
+        placeholders.tip_radius_default_mm().diagnostic().get(),
+        placeholders.tip_radius_max_legacy_mm().diagnostic().get(),
+        placeholders.overhang_angle_deg().diagnostic().get()
+            - 0.5
+                * placeholders
+                    .overhang_weight_transition_deg()
+                    .diagnostic()
+                    .get(),
+    )
 }
 
 fn brace_pair() -> &'static SweepPlan {
@@ -76,11 +105,20 @@ fn brace_pair() -> &'static SweepPlan {
     })
 }
 
+/// At the S the peak was built at (`harness::PATH_FIXTURE_SLENDERNESS_RATIO`,
+/// 50). At the ruled 30 its 35 mm arms need a root past the 1.0 mm maximum
+/// and no mast cell holds them, so both runs are warnings (measured
+/// 2026-10-01): the claim graded here, that a thicker root beats a mast
+/// WHERE it is admissible, is then never reached.
 fn lonely_peak() -> &'static SweepPlan {
     static PLAN: OnceLock<SweepPlan> = OnceLock::new();
     PLAN.get_or_init(|| {
         let mesh = make_lonely_peak().expect("the lonely peak fixture");
-        sweep_with(&mesh, 0.0, &policy())
+        sweep_with(
+            &mesh,
+            0.0,
+            &harness::at_path_fixture_slenderness(policy()),
+        )
     })
 }
 
@@ -187,9 +225,25 @@ fn no_two_crosses_on_one_pair_overlap_in_height_on_the_brace_pair() {
 /// through the band the cross stood in. A cross whose removal leaves both
 /// posts inside their limits was never needed (red on d103c48: stilt X
 /// 141/142, pair X 31/32 and the mast's X 27/28).
+///
+/// **RE-DERIVED 2026-10-01 (Craig's ruling: keep one-direction crosses).** A
+/// cross holds its own plane; a THICKENING sized for the direction across it
+/// also holds the cross's plane, and the ruling is that this never makes the
+/// cross unneeded. On the finished field the ledger already carries the
+/// thickening, so such a cross reads as not needed here; it is admitted only
+/// where one of its two posts carries a thickening. Every other cross must
+/// still be needed (stilt plate: X 75/80 over 544..605 is the one admitted,
+/// measured 2026-10-01).
 fn assert_every_cross_is_needed(name: &str, plan: &SweepPlan) {
     let law = law();
     let all = crosses(plan);
+    let thickened = |post: u32| {
+        plan.struts[post as usize]
+            .thickened_mm
+            .iter()
+            .any(|&radius| radius > 0.0)
+    };
+    let mut on_a_thickened_post = Vec::new();
     let mut redundant = Vec::new();
     for cross in &all {
         let mut struts: Vec<SweepStrut> = plan.struts.clone();
@@ -204,13 +258,19 @@ fn assert_every_cross_is_needed(name: &str, plan: &SweepPlan) {
                 && cross.k_lo < run.k_top
         });
         if !needed {
-            redundant.push((cross.pair, cross.k_lo, cross.k_top));
+            if thickened(cross.pair.0) || thickened(cross.pair.1) {
+                on_a_thickened_post.push((cross.pair, cross.k_lo, cross.k_top));
+            } else {
+                redundant.push((cross.pair, cross.k_lo, cross.k_top));
+            }
         }
     }
     println!(
-        "{name}: {} crosses graded, {} not needed: {redundant:?}",
+        "{name}: {} crosses graded, {} not needed: {redundant:?}; {} kept on a thickened \
+         post: {on_a_thickened_post:?}",
         all.len(),
-        redundant.len()
+        redundant.len(),
+        on_a_thickened_post.len()
     );
     assert!(
         redundant.is_empty(),
@@ -325,14 +385,22 @@ fn the_stilt_plate_places_no_redundant_mast() {
 /// every over-limit run has an admissible remedy; a warning there is a remedy
 /// the ladder did not try (red on d103c48: the 7 plate posts the un-merge pass
 /// put back after the lane had finished).
+///
+/// **RE-PINNED 2026-10-01 to `S` = 50** (`harness::PATH_FIXTURE_SLENDERNESS_RATIO`),
+/// where the premise above holds. At the ruled `S` = 30 a 35 mm post needs
+/// `r_eq` 1.17 mm, past the 1.0 mm maximum, so three posts (11, 70, 76) have
+/// no admissible remedy in the direction their crosses do not hold and are
+/// WARNED (measured 2026-10-01); production is graded on that contract by
+/// `the_stilt_plate_warns_every_run_it_leaves_over_the_limit`.
 #[test]
 fn the_stilt_plate_leaves_no_unbraced_run() {
-    let plan = stilt();
+    let plan = stilt_at_s_50();
     let lane = &plan.report.slenderness_lane;
-    let runs = unbraced_runs(&plan.grid, &plan.struts, plan.layer_height_mm, &law());
+    let law = law_at(harness::PATH_FIXTURE_SLENDERNESS_RATIO);
+    let runs = unbraced_runs(&plan.grid, &plan.struts, plan.layer_height_mm, &law);
     let over: Vec<_> = runs.iter().filter(|run| run.over_limit()).collect();
     println!(
-        "tall stilt plate: {} runs measured, {} over the limit, {} warnings",
+        "tall stilt plate at S = 50: {} runs measured, {} over the limit, {} warnings",
         runs.len(),
         over.len(),
         lane.warnings.len()
@@ -343,6 +411,47 @@ fn the_stilt_plate_leaves_no_unbraced_run() {
         over.len(),
         lane.warnings.len(),
         over.iter().take(10).collect::<Vec<_>>()
+    );
+}
+
+/// The stilt plate as production places it (`S` = 30): every run over the
+/// limit is a published warning (emit and warn, nothing hidden), and each
+/// warned member is one the thicken rung refused past the maximum radius.
+#[test]
+fn the_stilt_plate_warns_every_run_it_leaves_over_the_limit() {
+    let plan = stilt();
+    let lane = &plan.report.slenderness_lane;
+    let runs = unbraced_runs(&plan.grid, &plan.struts, plan.layer_height_mm, &law());
+    let mut over: Vec<(u32, usize, usize)> = runs
+        .iter()
+        .filter(|run| run.over_limit())
+        .map(|run| (run.strut_id, run.k_lo, run.k_top))
+        .collect();
+    over.sort_unstable();
+    over.dedup();
+    let mut warned: Vec<(u32, usize, usize)> = lane
+        .warnings
+        .iter()
+        .map(|warning| (warning.strut_id, warning.k_lo, warning.k_top))
+        .collect();
+    warned.sort_unstable();
+    warned.dedup();
+    println!(
+        "tall stilt plate: {} runs over the limit {over:?}; warnings {warned:?}; thicken refused \
+         past the maximum {}",
+        over.len(),
+        lane.thicken_refused_radius
+    );
+    assert_eq!(over, warned, "a run over the limit that is not warned, or the reverse");
+    let members = {
+        let mut ids: Vec<u32> = warned.iter().map(|(id, ..)| *id).collect();
+        ids.dedup();
+        ids.len()
+    };
+    assert!(
+        lane.thicken_refused_radius >= members,
+        "{members} warned members but only {} thickenings refused past the maximum",
+        lane.thicken_refused_radius
     );
 }
 
@@ -358,8 +467,8 @@ fn the_stilt_plate_leaves_no_unbraced_run() {
 /// The measurement here is taken with ALL of the post's crosses removed, so it
 /// reads no plane at all: the planes are read off the finished geometry by the
 /// test itself, from the two posts' axis cells at the top of each band.
-fn assert_ties_hold_in_every_direction(name: &str, plan: &SweepPlan) {
-    let (graded, one_plane) = ties_left_unheld(plan);
+fn assert_ties_hold_in_every_direction(name: &str, plan: &SweepPlan, law: &SlendernessLaw) {
+    let (graded, one_plane) = ties_left_unheld(plan, law);
     println!(
         "{name}: {graded} needed ties graded, {} leave a direction of sway unheld: {one_plane:?}",
         one_plane.len()
@@ -378,8 +487,7 @@ type UnheldTie = (u32, usize, usize, Vec<(i64, i64)>);
 
 /// The needed ties graded, and those whose crosses leave a direction of sway
 /// unheld (see [`assert_ties_hold_in_every_direction`]).
-fn ties_left_unheld(plan: &SweepPlan) -> (usize, Vec<UnheldTie>) {
-    let law = law();
+fn ties_left_unheld(plan: &SweepPlan, law: &SlendernessLaw) -> (usize, Vec<UnheldTie>) {
     let grid = &plan.grid;
     let all = crosses(plan);
     let plane_of = |cross: &Cross| {
@@ -407,7 +515,7 @@ fn ties_left_unheld(plan: &SweepPlan) -> (usize, Vec<UnheldTie>) {
                 detach(&mut struts[diagonal]);
             }
         }
-        let runs = unbraced_runs(grid, &struts, plan.layer_height_mm, &law);
+        let runs = unbraced_runs(grid, &struts, plan.layer_height_mm, law);
         for run in runs
             .iter()
             .filter(|run| run.strut_id == post && run.over_limit())
@@ -462,9 +570,48 @@ fn ties_left_unheld(plan: &SweepPlan) -> (usize, Vec<UnheldTie>) {
     (graded, one_plane)
 }
 
+/// The lane's contract where a tie cannot be closed in every direction: every
+/// needed tie that leaves a direction unheld stands on a post the lane WARNS
+/// about over that run (emit and warn), never silently.
+fn assert_unheld_ties_are_warned(name: &str, plan: &SweepPlan) {
+    let (graded, unheld) = ties_left_unheld(plan, &law());
+    assert!(graded > 0, "{name}: anti-vacuity, no tie needed a cross");
+    let warned = &plan.report.slenderness_lane.warnings;
+    let silent: Vec<_> = unheld
+        .iter()
+        .filter(|(post, k_lo, k_top, _)| {
+            !warned.iter().any(|warning| {
+                warning.strut_id == *post && warning.k_lo <= *k_lo && *k_top <= warning.k_top
+            })
+        })
+        .collect();
+    println!(
+        "{name}: {graded} needed ties graded, {} left unheld, warnings {warned:?}",
+        unheld.len()
+    );
+    assert!(
+        silent.is_empty(),
+        "{name}: ties leave a direction of sway unheld and the lane does not warn: {silent:?}"
+    );
+}
+
+/// **RE-DERIVED 2026-10-01 (Craig's rulings: `S` = 30; keep one-direction
+/// crosses).** At `S` = 30 three of the stilt plate's 35 mm posts (11, 70,
+/// 76) have one plane no partner in reach can hold, a thicker root past the
+/// 1.0 mm maximum, and no mast cell whose panel holds them: the lane keeps
+/// their one-plane crosses (ruling 2) and WARNS for the direction across
+/// them (measured 2026-10-01). So the stilt plate is graded on the lane's
+/// contract, as the brace pair's production field already is: every
+/// one-plane tie is named by a warning. The strict every-direction claim is
+/// still graded at `S` = 50 below.
 #[test]
 fn every_needed_tie_holds_in_every_direction_on_the_stilt_plate() {
-    assert_ties_hold_in_every_direction("tall stilt plate", stilt());
+    assert_unheld_ties_are_warned("tall stilt plate", stilt());
+    assert_ties_hold_in_every_direction(
+        "tall stilt plate at S = 50",
+        stilt_at_s_50(),
+        &law_at(harness::PATH_FIXTURE_SLENDERNESS_RATIO),
+    );
 }
 
 #[test]
@@ -499,30 +646,8 @@ fn every_needed_tie_holds_in_every_direction_on_the_brace_pair() {
             &harness::at_path_fixture_seating(policy().without_lip_seat()),
         )
     });
-    assert_ties_hold_in_every_direction("brace pair, lip-seat rule off", without_lip_seat);
-    let plan = brace_pair();
-    let (graded, unheld) = ties_left_unheld(plan);
-    assert!(
-        graded > 0,
-        "brace pair: anti-vacuity, no tie needed a cross"
-    );
-    let warned = &plan.report.slenderness_lane.warnings;
-    let silent: Vec<_> = unheld
-        .iter()
-        .filter(|(post, k_lo, k_top, _)| {
-            !warned.iter().any(|warning| {
-                warning.strut_id == *post && warning.k_lo <= *k_lo && *k_top <= warning.k_top
-            })
-        })
-        .collect();
-    println!(
-        "brace pair: {} ties left unheld, all warned: {warned:?}",
-        unheld.len()
-    );
-    assert!(
-        silent.is_empty(),
-        "brace pair: ties leave a direction of sway unheld and the lane does not warn: {silent:?}"
-    );
+    assert_ties_hold_in_every_direction("brace pair, lip-seat rule off", without_lip_seat, &law());
+    assert_unheld_ties_are_warned("brace pair", brace_pair());
 }
 
 /// Test 8 of the field report: **"forced merges put back" counts only merges
@@ -596,10 +721,14 @@ fn masts_stand_where_the_panel_holds_one_to_an_arm_in_each_plane() {
     // peak's arms are thinner than any mast the law would stand beside them, so
     // every mast cell is refused as thicker than its member (23,448 refusals,
     // 0 masts; measured 2026-09-30) and this rung is never reached.
+    // And at the S it was built at (`harness::PATH_FIXTURE_SLENDERNESS_RATIO`):
+    // at the ruled 30 the panel check refuses every mast cell (23,448
+    // refusals, 0 masts; measured 2026-10-01).
     let plan = sweep_with(
         &mesh,
         0.0,
-        &harness::at_path_fixture_x(policy()).without_slenderness_thicken(),
+        &harness::at_path_fixture_slenderness(harness::at_path_fixture_x(policy()))
+            .without_slenderness_thicken(),
     );
     let lane = &plan.report.slenderness_lane;
     let masts: Vec<&SweepStrut> = plan
@@ -678,6 +807,7 @@ fn gcd(a: i64, b: i64) -> i64 {
 /// else is in reach. On d103c48 it got two masts at 1.2 mm, inside the 2.2-2.4
 /// mm the braced panel needs, lapping their arms' roots after sizing. The
 /// thicker root holds both arms in every direction; the panel does not.
+/// (Re-derived 2026-10-01, below: one arm is now warned.)
 #[test]
 fn the_lonely_peak_is_held_without_a_mast_and_without_a_warning() {
     let plan = lonely_peak();
@@ -689,9 +819,21 @@ fn the_lonely_peak_is_held_without_a_mast_and_without_a_warning() {
         "anti-vacuity: the lonely peak has no over-limit run to remedy"
     );
     assert_eq!(masts, 0, "the lonely peak placed {masts} masts");
+    // RE-DERIVED 2026-10-01 (Craig's ruling: a landing ties its host only
+    // from its seat). Measured to the seat, arm 4's run is the whole 35 mm
+    // post, and the root that would hold it lays its flare onto a
+    // neighbour's (3 thickenings refused by the disc); no mast cell holds it
+    // either, so it is WARNED. Arm 1 is still held by its thicker root. The
+    // claim kept is the ladder's: no warning without a refused thickening.
+    let refused = lane.thicken_refused_disc + lane.thicken_refused_radius;
     assert!(
-        lane.warnings.is_empty(),
-        "the lonely peak leaves warnings: {:?}",
+        lane.members_thickened > 0,
+        "anti-vacuity: the thicken rung never fired on the lonely peak"
+    );
+    assert!(
+        lane.warnings.len() <= refused,
+        "the lonely peak leaves {} warnings but only {refused} thickenings were refused: {:?}",
+        lane.warnings.len(),
         lane.warnings
     );
 }

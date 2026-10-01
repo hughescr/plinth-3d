@@ -125,7 +125,7 @@ Recorded here because it changes the ladder above; the code of record is
 - **Masts:** a cell is admissible only where the braced panel holds the arm to
   one pixel in its plane (the frame of the field report's Q4); an arm's mast
   is extended to a later tie before a second one is dropped.
-- `S` stays 50.
+- `S` stays 50 (until 2026-10-01; see below).
 
 ### Member clearance, 2026-09-29 (fix/member-clearance; `brace-collide-diagnosis.md`)
 
@@ -153,6 +153,30 @@ Recorded here because it changes the ladder above; the code of record is
 - **Seat trim:** a record the trim would empty keeps only its part outside the
   model; one wholly inside the model is left out of the file and counted.
 - Arm shafts are NOT yet clearance-checked against the model (open).
+
+### As reworked, 2026-10-01 (Craig's rulings; `stilt-and-brace-pair-diagnosis.md`, `brace-pair-resin.md`)
+
+- **`S` = 30**, interim, pending a slenderness coupon (ChituBox practice
+  braces at about 13 × r). The registry note keeps the drag-only derivation
+  and says why the value now sits below its bracket.
+- **Keep one-direction crosses.** A cross that ties two columns holds the
+  sway in its own plane; thickening or a mast covers the direction across
+  it. The prune never takes a cross out because a thickening also holds: a
+  cross the first test finds unneeded is judged again on the posts as they
+  stood before the pass's thickenings, in the directions the cross itself
+  holds. A cross another cross or a landing makes redundant still goes.
+  Counted: `crosses_kept_in_their_own_plane`.
+- **Tie timing.** A branch that lands on a host holds the host only from the
+  layer its own seat prints. A run is the cantilever from the highest tie
+  that holds while a layer prints up to that layer, so the host is measured
+  over (tie below, branch seat) and then (landing, next end). Brace landings
+  are still credited at once (open question: the same physics applies over
+  a band's depth). Counted: `landing_ties_held_late`.
+- **Brace-band refusals by reason** (`BandRefusals`): posts at one cell,
+  below the plate, in a root flare, leaving a post, too flat for the overhang
+  law, end ring under the plate, centreline through a drain / the model / a
+  member, solid within the final gap of the model / a member. The reasons sum
+  to `brace_bands_refused`; the log prints them.
 
 ### Fixtures (new, procedural, in plinth-mesh fixtures.rs)
 
