@@ -2528,6 +2528,33 @@ fn print_sweep_disclosure(
         report.counters.strut_removals_refused_by_span,
         report.counters.removal_passes_rolled_back,
     );
+    {
+        let coverage = &report.removal_coverage;
+        println!(
+            "[sweep {model}] removal coverage (multi-layer reach replay): {} under-loaded \
+             candidates, {} passed to the checks, {} kept by the replay ({} of them restored on \
+             their seat layer by cells inside the first-loss reach bracket -- the layers above a \
+             restored seat are not examined, so this is NOT a count of arms a first-loss reach \
+             would free); {} replay(s) over {} layers; the field as placed leaves {} cells \
+             unrooted (complete only when the first replay needed no restart); proposed removals \
+             would have unrooted {} more ({} inside the first-loss bracket, worst finite \
+             potential {:.4}); {} replay(s) out of restarts; {} pass(es) retried with the span \
+             proxy, {} rolled back for an overloaded arm",
+            coverage.candidates,
+            coverage.screened,
+            coverage.refused_by_replay,
+            coverage.refused_by_replay_within_first_loss,
+            coverage.replays,
+            coverage.replay_trial_layers,
+            coverage.replay_baseline_unrooted_cells,
+            coverage.replay_newly_unrooted_cells,
+            coverage.replay_newly_unrooted_within_first_loss_cells,
+            coverage.replay_newly_unrooted_max_u,
+            coverage.replay_exhausted,
+            coverage.retried_with_span_proxy,
+            coverage.rolled_back_for_overload,
+        );
+    }
     // The tip SEAT, published per run rather than assumed. The `a >= r_tip`
     // guarantee is the last line: the cut disc the seat plane actually takes
     // through each ball, against the tip it has to be no narrower than.
