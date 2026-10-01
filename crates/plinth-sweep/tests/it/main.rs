@@ -46,6 +46,7 @@ mod pose_demand_probe;
 mod root_disc_as_drawn;
 mod round_bases_ratchet;
 mod sabotage;
+mod seat_face;
 mod shaft_landing;
 mod shaft_seat_trim;
 mod slenderness_lane;

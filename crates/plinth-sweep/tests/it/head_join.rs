@@ -716,11 +716,22 @@ fn without_the_rule_a_leaned_head_reaches_its_seat_plane_with_the_sum() {
 /// within reach. That section touches nothing, so the rule leaves the join
 /// where it is: every lander of an arm whose sums cross the plane only off
 /// the model keeps its landing and its path.
+///
+/// **Graded at the seat faces before 2026-09-30, and why.** Arm 6's seat
+/// plane is a face 75° from horizontal, and the seat-face ruling of
+/// 2026-09-30 (`tip_landing::SeatFaceRule`) no longer lets a tip carry a face
+/// steeper than the overhang band's steep end (57.5°): measured on this
+/// fixture, arm 6 then carries the shallow underside beside it and no sum
+/// crosses any seat plane off the model, so the test graded nothing. The
+/// head-join rule's off-model branch reads the seat plane it is handed and not
+/// how the face was chosen, so the branch is graded with the pre-ruling seat
+/// faces (`without_seat_face_band`) on both plans; the ruled seat faces are
+/// graded by `seat_face.rs` and `plinth-pipeline tip_trim::`.
 #[test]
 fn a_sum_that_crosses_the_seat_plane_off_the_model_is_left_alone() {
     let mesh = flipped(&mesh_for(&round_25()));
-    let unruled = round_25_flipped_with(&production().without_head_join());
-    let plan = round_25_flipped_with(&production());
+    let unruled = round_25_flipped_with(&production().without_seat_face_band().without_head_join());
+    let plan = round_25_flipped_with(&production().without_seat_face_band());
     let clearance = final_clearance_mm();
     let off_model: Vec<u32> = grade(&unruled, &landed_arms(&[&unruled]), &mesh)
         .into_iter()

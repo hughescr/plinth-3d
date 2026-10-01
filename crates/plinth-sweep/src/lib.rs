@@ -501,6 +501,11 @@ pub struct SweepPolicy {
     /// than by the one global hex lattice plus the greedy. **On in
     /// production.** Sabotage and comparison only.
     pub island_seating: bool,
+    /// Whether a tip may carry only a face the registered overhang law weighs
+    /// as an overhang (`tip_landing::SeatFaceRule`, orchestrator ruling
+    /// 2026-09-30), rather than the nearest face with any downward component.
+    /// **On in production.** Sabotage and comparison only.
+    pub seat_face_band: bool,
     /// Whether a descent may land part-way down another arm's SHAFT, and not
     /// only on its top. **On in production.** The knob exists so a test can
     /// show that a mid-shaft junction is what a given arm chose, by putting the
@@ -670,6 +675,7 @@ impl SweepPolicy {
             creep_weight: true,
             straight_reach: true,
             island_seating: true,
+            seat_face_band: true,
             shaft_landings: true,
             drain_keep_out: true,
             removal_span_check: true,
@@ -815,6 +821,17 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_island_seating(mut self) -> Self {
         self.island_seating = false;
+        self
+    }
+
+    /// Let a tip carry the nearest face with any downward component, walls a
+    /// rotation tips a hair downward included, as before 2026-09-30.
+    /// **Sabotage and comparison only**: with it set, the leaned tip at Round
+    /// 25's inner ring corner takes the recess wall as its seat face again
+    /// (`tests/it/seat_face.rs`, `plinth-pipeline tip_trim::`).
+    #[must_use]
+    pub const fn without_seat_face_band(mut self) -> Self {
+        self.seat_face_band = false;
         self
     }
 
@@ -1382,6 +1399,20 @@ pub fn run_sweep_with_drains(
         congestion::measure(&grid, &history, &struts, policy.flare_r_factor);
     landings.record("congestion", &landing_check::check_landings(&struts));
 
+    // Which faces a tip may carry: the faces the registered overhang law
+    // weighs as an overhang (orchestrator ruling 2026-09-30,
+    // `tip_landing::SeatFaceRule`). Read by the lip-seat and head-join passes
+    // and by the finished plan's seat faces, so all three measure a tip
+    // against one face.
+    let seat_face_rule = if policy.seat_face_band {
+        tip_landing::SeatFaceRule::from_overhang_band(
+            policy.overhang_centre_deg,
+            policy.overhang_transition_deg,
+        )
+    } else {
+        tip_landing::SeatFaceRule::any_down_facing()
+    };
+
     // --- slenderness: merge, then |X|, then a mast, then a warning ---------
     //
     // Here, and not inside `down_sweep::run`, for the reason `slenderness.rs`
@@ -1419,6 +1450,7 @@ pub fn run_sweep_with_drains(
         member_clearance: policy.member_clearance,
         max_struts: policy.limits.max_struts,
         x_allowed: policy.x_allowed,
+        seat_faces: seat_face_rule,
     };
     let (mut slenderness_outcome, forced_merges) =
         slenderness::apply_merges(&slenderness_context, &mut struts);
@@ -1771,7 +1803,12 @@ pub fn run_sweep_with_drains(
     // un-merging have settled the strut set, and never during a pass that is
     // still moving arms around. The lowering drives the tip ball into it and
     // trims the ball and the first shaft segment to its plane.
-    let seat_faces = tip_landing::tip_seat_faces(mesh, &grid, &struts, plate_z, height);
+    let (seat_faces, seat_face_hits) =
+        tip_landing::tip_seat_faces_counted(mesh, &grid, &struts, plate_z, height, seat_face_rule);
+    report.counters.seat_faces_measured = seat_face_hits.tips as u64;
+    report.counters.seat_faces_steeper_passed_over = seat_face_hits.steeper_face_passed_over as u64;
+    report.counters.seat_faces_fallback_any_down_facing =
+        u64::from(seat_face_hits.fallback_any_down_facing);
     for (strut, face) in struts.iter_mut().zip(&seat_faces) {
         strut.seat_normal = face.map_or([0.0; 3], |(normal, _)| normal);
         strut.seat_face = SeatFace {

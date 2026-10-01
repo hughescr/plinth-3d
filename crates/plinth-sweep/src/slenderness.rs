@@ -1099,6 +1099,10 @@ pub struct SlendernessContext<'a> {
     /// under a forced merge sized for the load it was just handed, with the
     /// down-sweep's own rule, until the down-sweep re-sizes the field.
     pub x_allowed: f64,
+    /// Which faces a tip may carry, so the lip-seat and head-join passes
+    /// measure every arm against the same face the finished plan seats it on
+    /// ([`crate::tip_landing::SeatFaceRule`]).
+    pub seat_faces: crate::tip_landing::SeatFaceRule,
 }
 
 /// Remedy 1 of the ladder, on a sized field, in place: the forced merges.
@@ -3659,6 +3663,7 @@ mod tests {
             mast: true,
             max_struts: 1_000,
             x_allowed: 12.0,
+            seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
         };
         // P at col 100, Q 10 cells (0.50 mm) away, R 40 cells the other way.
         let mut struts = vec![
@@ -3810,6 +3815,7 @@ mod tests {
             mast: true,
             max_struts: 1_000,
             x_allowed: 12.0,
+            seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
         };
         let struts = vec![
             plate_post(&grid, 0, 100, 0.2),
@@ -4007,6 +4013,7 @@ mod tests {
             mast: true,
             max_struts: 1_000,
             x_allowed: 12.0,
+            seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
         };
         // 16 cells at 0.05 mm: 0.8 mm between the posts.
         let struts = vec![
@@ -4105,6 +4112,7 @@ mod tests {
             mast: false,
             max_struts: 1_000,
             x_allowed: 12.0,
+            seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
         };
         let mut struts = vec![
             short_plate_post(&grid, 0, 100),

@@ -223,6 +223,96 @@ pub fn tip_landings_of(
     landings
 }
 
+/// Which faces a tip may CARRY (orchestrator ruling 2026-09-30).
+///
+/// **THE RULE: a tip seats on the face whose overhang it holds up — a face the
+/// registered overhang law weighs as an overhang — and never on a wall or an
+/// upward face.** A face is a seat face when it is shallower than the steep
+/// end of the law's own 10-to-90 band, `centre + transition / 2` from
+/// horizontal (57.5° at the registered 45° centre and 25° width). A down face
+/// at `θ` from horizontal has outward normal `n_z = -cos θ`, so the test is
+/// `n_z < -cos(centre + transition / 2)`.
+///
+/// **Why the band's steep end, and no other number.** It is the angle beyond
+/// which the registered law says the model holds itself up: the weight there
+/// is 0.1 and falls to 0.006 at 74° (`reach::creep_step` prices a wall's creep
+/// by exactly this weight, so the up-sweep does not place a tip FOR such a
+/// face). It mirrors [`crate::lean::LeanLaw`], which reads the SHALLOW end of
+/// the same band; no constant is introduced, the two registered angles are the
+/// only numbers read.
+///
+/// **What it fixes.** Until this rule the carried face was the nearest face
+/// with ANY downward component (`n_z < 0`). A tip at a convex corner — beside a
+/// wall, just under the edge of the face it holds — took the WALL: on the
+/// recessed Round 25 fixture at the flip a leaned tip at the ring's inner
+/// corner took the vertical recess wall (`n_z = -5.2e-17`, negative by the
+/// orientation's rounding, not by design) and the seat trim cut its ball
+/// against a vertical plane, leaving a 0.416 mm cap above the ring underside
+/// (`plinth-pipeline tip_trim::round_25_at_the_flip…`). On the lane models'
+/// finished plans the same class carried 5 Cylinder tips on walls at
+/// `n_z ≈ -1e-16` and 8 Morel tips on faces 1-31° off vertical, each with an
+/// overhang face within 0.06 mm; the Round bases and the Sphere had none.
+///
+/// **Emit and warn, never refuse.** A mesh with no face the band admits keeps
+/// the previous rule (every down-facing face) and the fall-back is counted
+/// ([`SeatFaceHits::fallback_any_down_facing`]); a tip is never left without
+/// a face because of this rule.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SeatFaceRule {
+    /// A face is a seat face when its outward unit normal's `z` is below this.
+    max_normal_z: f64,
+}
+
+impl SeatFaceRule {
+    /// The rule, from the two registered angles of the overhang law.
+    ///
+    /// A non-finite input, or a band whose steep end is not strictly between
+    /// horizontal and vertical, yields [`Self::any_down_facing`]: emit and
+    /// warn, never refuse.
+    #[must_use]
+    pub fn from_overhang_band(centre_deg: f64, transition_deg: f64) -> Self {
+        let steepest_deg = centre_deg + 0.5 * transition_deg;
+        if !(steepest_deg.is_finite() && steepest_deg > 0.0 && steepest_deg < 90.0) {
+            return Self::any_down_facing();
+        }
+        Self {
+            max_normal_z: -steepest_deg.to_radians().cos(),
+        }
+    }
+
+    /// Every face with any downward component is a seat face: the rule before
+    /// 2026-09-30. **Sabotage and comparison only.**
+    #[must_use]
+    pub const fn any_down_facing() -> Self {
+        Self { max_normal_z: 0.0 }
+    }
+
+    /// The `n_z` a face's outward unit normal must be below to be carried.
+    #[must_use]
+    pub const fn max_normal_z(&self) -> f64 {
+        self.max_normal_z
+    }
+
+    fn admits(self, normal_z: f64) -> bool {
+        normal_z < self.max_normal_z
+    }
+}
+
+/// What the seat-face rule did on one call: the witness that it fires.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SeatFaceHits {
+    /// Tips given a face.
+    pub tips: usize,
+    /// Of those, tips whose NEAREST down-facing face was one the rule refuses
+    /// (a wall, or a face steeper than the band) and which therefore carry a
+    /// different, farther face. Zero on a field where no tip stands beside a
+    /// wall; non-zero is the rule biting.
+    pub steeper_face_passed_over: usize,
+    /// Whether the mesh had no face the rule admits, so every down-facing face
+    /// was used instead.
+    pub fallback_any_down_facing: bool,
+}
+
 /// The OUTWARD unit normal of the face each arm's tip carries, in STRUT order
 /// (not landing order), `[0, 0, 0]` where no face was found.
 ///
@@ -244,8 +334,9 @@ pub fn tip_seat_normals(
     struts: &[SweepStrut],
     plate_z_mm: f64,
     layer_height_mm: f64,
+    rule: SeatFaceRule,
 ) -> Vec<[f64; 3]> {
-    tip_seat_faces(mesh, grid, struts, plate_z_mm, layer_height_mm)
+    tip_seat_faces(mesh, grid, struts, plate_z_mm, layer_height_mm, rule)
         .into_iter()
         .map(|face| face.map_or([0.0; 3], |(normal, _)| normal))
         .collect()
@@ -255,20 +346,19 @@ pub fn tip_seat_normals(
 /// and the point of it closest to the tip's landing point, or `None` where the
 /// mesh has no down-facing face at all.
 ///
-/// **The carried face is the nearest DOWN-FACING face** (fix/tip-trim,
-/// 2026-09-28). A tip carries a down-facing face by construction (this
-/// module's own doc). Until this date the nearest face of ANY kind was taken
-/// and, when it was not down-facing — a wall the tip stands beside, such as a
-/// disc's rim at its edge — the normal was left unmeasured and the lowering
-/// fell back to straight down. That was the right refusal and the wrong
-/// answer: the face the tip does carry was still there, one step further
-/// away. The seat trim needs that face's own PLANE, not a guess at its
-/// direction, so the search now runs over the down-facing faces only. Where
-/// the nearest face already was down-facing — every tip under a flat or
-/// gently curved face — the answer is the same face as before, bit for bit.
+/// **The carried face is the nearest face [`SeatFaceRule`] admits** — the
+/// nearest face the overhang law weighs as an overhang (2026-09-30). Before
+/// that it was the nearest DOWN-FACING face (fix/tip-trim, 2026-09-28), and
+/// before that the nearest face of any kind, whose normal was left unmeasured
+/// when it was not down-facing. Each step removed a face the tip stands
+/// BESIDE rather than under: first the upward and plain vertical faces, now
+/// the walls a rotation tips a hair downward and the steep faces the law says
+/// stand by themselves. Where the nearest face already was an overhang — every
+/// tip under a flat or gently curved face — the answer is the same face as
+/// before, bit for bit.
 ///
-/// **Batching.** One read of the vertex triples, one filter to the
-/// down-facing faces, one parallel `landings × faces` closest-point pass
+/// **Batching.** One read of the vertex triples, one filter to the admitted
+/// faces, one parallel `landings × faces` closest-point pass
 /// ([`nearest_faces`], shared with the scar), one scatter.
 #[must_use]
 pub fn tip_seat_faces(
@@ -277,11 +367,43 @@ pub fn tip_seat_faces(
     struts: &[SweepStrut],
     plate_z_mm: f64,
     layer_height_mm: f64,
+    rule: SeatFaceRule,
 ) -> Vec<Option<([f64; 3], [f64; 3])>> {
+    seat_faces(mesh, grid, struts, plate_z_mm, layer_height_mm, rule, false).0
+}
+
+/// [`tip_seat_faces`], and what the rule did ([`SeatFaceHits`]).
+///
+/// Counting needs a second closest-point pass over the faces the rule refused,
+/// so it is asked for once per finished plan (`run_sweep`), not by the passes
+/// that call [`tip_seat_faces`] many times while they move arms.
+#[must_use]
+pub fn tip_seat_faces_counted(
+    mesh: &Mesh,
+    grid: &Grid,
+    struts: &[SweepStrut],
+    plate_z_mm: f64,
+    layer_height_mm: f64,
+    rule: SeatFaceRule,
+) -> (Vec<Option<([f64; 3], [f64; 3])>>, SeatFaceHits) {
+    seat_faces(mesh, grid, struts, plate_z_mm, layer_height_mm, rule, true)
+}
+
+/// The one derivation behind [`tip_seat_faces`] and [`tip_seat_faces_counted`].
+fn seat_faces(
+    mesh: &Mesh,
+    grid: &Grid,
+    struts: &[SweepStrut],
+    plate_z_mm: f64,
+    layer_height_mm: f64,
+    rule: SeatFaceRule,
+    count: bool,
+) -> (Vec<Option<([f64; 3], [f64; 3])>>, SeatFaceHits) {
     let mut faces = vec![None; struts.len()];
+    let mut hits = SeatFaceHits::default();
     let landings = tip_landings_of(grid, struts, plate_z_mm, layer_height_mm);
     if landings.is_empty() {
-        return faces;
+        return (faces, hits);
     }
     // The mesh is outward-oriented, so a face normal already points AWAY from
     // the material — which is the direction seating moves against.
@@ -293,17 +415,40 @@ pub fn tip_seat_faces(
             (unit[2] < 0.0).then_some((triangle, unit))
         })
         .collect();
-    let triangles: Vec<[[f64; 3]; 3]> = down_facing.iter().map(|(triangle, _)| *triangle).collect();
+    let (admitted, refused): (Vec<_>, Vec<_>) = down_facing
+        .into_iter()
+        .partition(|(_, unit)| rule.admits(unit[2]));
+    // Emit and warn: a mesh with no overhang face at all keeps every
+    // down-facing face, and says so.
+    let (carried, passed_over) = if admitted.is_empty() {
+        hits.fallback_any_down_facing = !refused.is_empty();
+        (refused, Vec::new())
+    } else {
+        (admitted, refused)
+    };
+    let triangles: Vec<[[f64; 3]; 3]> = carried.iter().map(|(triangle, _)| *triangle).collect();
     let nearest = nearest_faces(&triangles, &landings);
+    if count && !passed_over.is_empty() {
+        let steep: Vec<[[f64; 3]; 3]> = passed_over.iter().map(|(triangle, _)| *triangle).collect();
+        hits.steeper_face_passed_over = nearest_faces(&steep, &landings)
+            .iter()
+            .zip(&nearest)
+            .filter(|(steep, kept)| match (steep, kept) {
+                (Some((_, steep_mm)), Some((_, kept_mm))) => steep_mm < kept_mm,
+                _ => false,
+            })
+            .count();
+    }
     for (landing, found) in landings.iter().zip(&nearest) {
         let Some((face, _)) = *found else { continue };
-        let ([a, b, c], unit) = down_facing[face];
+        let ([a, b, c], unit) = carried[face];
         let point = closest_on_tri(landing.point_mm, a, b, c);
         if let Some(slot) = faces.get_mut(landing.strut) {
             *slot = Some((unit, point));
+            hits.tips += 1;
         }
     }
-    faces
+    (faces, hits)
 }
 
 /// One read of the mesh's vertex triples, in face order.

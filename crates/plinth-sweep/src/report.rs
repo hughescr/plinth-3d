@@ -401,6 +401,15 @@ pub struct PathHits {
     /// at the measured reach `R`. Their ratio is the covering efficiency.
     pub island_seats: u64,
     pub island_hex_bound: u64,
+    /// The finished plan's tips given a carried face, the tips whose NEAREST
+    /// down-facing face was a wall or a face steeper than the overhang band
+    /// and which carry a farther overhang face instead, and whether the mesh
+    /// had no overhang face so every down-facing face was used
+    /// (`tip_landing::SeatFaceRule`, 2026-09-30). Zero passed over on a field
+    /// with a tip beside a wall means the rule never ran.
+    pub seat_faces_measured: u64,
+    pub seat_faces_steeper_passed_over: u64,
+    pub seat_faces_fallback_any_down_facing: u64,
 }
 
 impl SweepRunReport {
