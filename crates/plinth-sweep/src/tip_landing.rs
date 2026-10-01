@@ -344,6 +344,10 @@ pub fn tip_seat_normals(
         .collect()
 }
 
+/// One carried face, as [`tip_seat_faces`] gives it: the face's OUTWARD unit
+/// normal, then its point closest to the tip's landing point.
+pub type CarriedFace = ([f64; 3], [f64; 3]);
+
 /// The face each arm's tip CARRIES, in strut order: its OUTWARD unit normal
 /// and the point of it closest to the tip's landing point, or `None` where the
 /// mesh has no down-facing face at all.
@@ -370,7 +374,7 @@ pub fn tip_seat_faces(
     plate_z_mm: f64,
     layer_height_mm: f64,
     rule: SeatFaceRule,
-) -> Vec<Option<([f64; 3], [f64; 3])>> {
+) -> Vec<Option<CarriedFace>> {
     seat_faces(mesh, grid, struts, plate_z_mm, layer_height_mm, rule, false).0
 }
 
@@ -387,7 +391,7 @@ pub fn tip_seat_faces_counted(
     plate_z_mm: f64,
     layer_height_mm: f64,
     rule: SeatFaceRule,
-) -> (Vec<Option<([f64; 3], [f64; 3])>>, SeatFaceHits) {
+) -> (Vec<Option<CarriedFace>>, SeatFaceHits) {
     seat_faces(mesh, grid, struts, plate_z_mm, layer_height_mm, rule, true)
 }
 
@@ -400,7 +404,7 @@ fn seat_faces(
     layer_height_mm: f64,
     rule: SeatFaceRule,
     count: bool,
-) -> (Vec<Option<([f64; 3], [f64; 3])>>, SeatFaceHits) {
+) -> (Vec<Option<CarriedFace>>, SeatFaceHits) {
     let mut faces = vec![None; struts.len()];
     let mut hits = SeatFaceHits::default();
     let landings = tip_landings_of(grid, struts, plate_z_mm, layer_height_mm);
