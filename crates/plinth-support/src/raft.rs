@@ -476,8 +476,8 @@ pub(crate) struct SweepRaft {
 ///
 /// **THE PAD COVERS ITS FOOT** (owner ruling 2026-09-29: grow the pad, never
 /// cap the foot). A native pad is 2.2 mm across under native feet no wider
-/// than 1.1 mm; a sweep boss foot is scaled to its root by the owner's
-/// boss-to-shaft ratio (2026-09-30) and can be wider. The pad is emitted as a regular
+/// than 1.1 mm; a sweep boss foot is scaled to its root by the owner's Heavy
+/// boss-to-shaft ratio (2026-09-30) and is wider for any root over 0.75 mm. The pad is emitted as a regular
 /// `CHITUBOX_PAD_N_SIDES`-gon INSCRIBED in its record circle, so what the pad
 /// actually covers is that polygon's INRADIUS, `R·cos(π/n)`. The foot's
 /// lowest ring is a polygon inscribed in the foot circle, so the whole foot

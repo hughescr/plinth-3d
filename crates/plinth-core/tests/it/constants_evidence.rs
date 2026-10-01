@@ -12,7 +12,7 @@ const EXPECTED_EVIDENCE_IDS: [&str; 52] = [
     "CHITUBOX_BOSS_HEIGHT_MM",
     "CHITUBOX_PAD_DIAMETER_MM",
     "CHITUBOX_RAFT_HEIGHT_MM",
-    "CHITUBOX_ROOT_BOSS_PROFILES",
+    "CHITUBOX_ROOT_BOSS_PROFILE",
     "CHITUBOX_TIP_CONTACT_PROFILES",
     "CONDITION_SHIFT_MAX",
     "DECIMATION_MAX_ABSOLUTE_DEVIATION_MM",
@@ -68,9 +68,9 @@ const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 52] = [
     ("CHITUBOX_PAD_DIAMETER_MM", "mm", "scalar"),
     ("CHITUBOX_RAFT_HEIGHT_MM", "mm", "scalar"),
     (
-        "CHITUBOX_ROOT_BOSS_PROFILES",
+        "CHITUBOX_ROOT_BOSS_PROFILE",
         "mm",
-        "list[4]{name,shaft_diameter_mm,boss_bottom_diameter_mm}",
+        "record{name,shaft_diameter_mm,boss_bottom_diameter_mm}",
     ),
     (
         "CHITUBOX_TIP_CONTACT_PROFILES",
@@ -187,11 +187,11 @@ const EXPECTED_SOURCES: [ExpectedSource; 36] = [
         date: "2026-09-30",
     },
     ExpectedSource {
-        constant: "CHITUBOX_ROOT_BOSS_PROFILES",
+        constant: "CHITUBOX_ROOT_BOSS_PROFILE",
         kind: "owner_decision",
-        identity: "craig-chitubox-profile-export-2026-09-30-supportmiddlediameter",
+        identity: "craig-chitubox-profile-export-2026-09-30-heavy-boss-ratio",
         record: "docs/evidence/chitubox-support-profiles-2026-09-30.cfgx",
-        locator: "support[0..3].middle_support.supportmiddlediameter and support[0..3].support_general_para.diameterofbossbottom",
+        locator: "support[2] (Heavy).middle_support.supportmiddlediameter and support[2].support_general_para.diameterofbossbottom",
         precision: "exact",
         date: "2026-09-30",
     },
@@ -538,7 +538,8 @@ fn declaration_batch_has_exact_membership_order_shapes_and_provenance_counts() {
     // (boss foot, boss height, raft height, tip-contact profiles) and one
     // Derived (the pad, from the boss foot): 31/15 became 35/16. The owner's
     // ruling of the same day that the boss is scaled to its root added one
-    // more Measured (the root-boss profiles): 36/16.
+    // more Measured (the root-boss profiles, since his final ruling that day
+    // the one Heavy root-boss profile): 36/16.
     assert_eq!((measured, derived), (36, 16));
     assert!(descriptors.iter().all(|descriptor| !matches!(
         descriptor.provenance().class(),
@@ -1577,9 +1578,10 @@ fn the_reach_ratios_are_recomputed_from_their_registered_parents_bit_for_bit() {
 /// * `CHITUBOX_TIP_CONTACT_PROFILES` holds one row per profile, by name, with
 ///   that profile's `top_support.supporttipupdiameter` and
 ///   `.supporttouchtipdiameter`; all four profiles are read.
-/// * `CHITUBOX_ROOT_BOSS_PROFILES` holds one row per profile, by name, with
-///   that profile's `middle_support.supportmiddlediameter` (the shaft) and
-///   `support_general_para.diameterofbossbottom` (the boss foot).
+/// * `CHITUBOX_ROOT_BOSS_PROFILE` is the export's `support[2]`, named
+///   "Heavy", with that profile's `middle_support.supportmiddlediameter` (the
+///   shaft) and `support_general_para.diameterofbossbottom` (the boss foot)
+///   (Craig ruling 2026-09-30: Heavy profile ratio, under every root).
 /// * `CHITUBOX_BOSS_BOTTOM_DIAMETER_MM`, `CHITUBOX_BOSS_HEIGHT_MM` and
 ///   `CHITUBOX_RAFT_HEIGHT_MM` equal the `diameterofbossbottom`,
 ///   `heightofboss` and `raftthickness` of EVERY profile (they agree; a
@@ -1615,25 +1617,23 @@ fn chitubox_geometry_is_read_off_the_committed_profile_export() {
     let constants = component();
     let table = constants.chitubox_tip_contact_profiles().value();
     assert_eq!(table.profiles().len(), profiles.len());
-    let bosses = constants.chitubox_root_boss_profiles().value();
-    assert_eq!(bosses.profiles().len(), profiles.len());
+    // The root boss is the export's profile 2, and that profile is Heavy.
+    let boss = constants.chitubox_root_boss_profile().value();
+    let heavy = &profiles[2];
+    assert_eq!(heavy["name"].as_str(), Some("Heavy"), "support[2] is Heavy");
+    assert_eq!(boss.name(), "Heavy");
+    assert_eq!(
+        boss.shaft_diameter_mm(),
+        field(heavy, "middle_support", "supportmiddlediameter"),
+        "Heavy: supportmiddlediameter"
+    );
+    assert_eq!(
+        boss.boss_bottom_diameter_mm(),
+        field(heavy, "support_general_para", "diameterofbossbottom"),
+        "Heavy: diameterofbossbottom (root boss)"
+    );
     for profile in profiles {
         let name = profile["name"].as_str().expect("a profile name");
-        let boss = bosses
-            .profiles()
-            .iter()
-            .find(|row| row.name() == name)
-            .unwrap_or_else(|| panic!("profile {name} is missing from the root-boss table"));
-        assert_eq!(
-            boss.shaft_diameter_mm(),
-            field(profile, "middle_support", "supportmiddlediameter"),
-            "{name}: supportmiddlediameter"
-        );
-        assert_eq!(
-            boss.boss_bottom_diameter_mm(),
-            field(profile, "support_general_para", "diameterofbossbottom"),
-            "{name}: diameterofbossbottom (root-boss row)"
-        );
         let row = table
             .profiles()
             .iter()
@@ -1680,16 +1680,12 @@ fn chitubox_geometry_is_read_off_the_committed_profile_export() {
             row.name()
         );
     }
-    // The boss half (owner ruling 2026-09-30: the boss width is scaled to the
-    // root by his profiles' boss-to-shaft ratio). His shafts run 0.5-1.5 mm
-    // under one 2.2 mm foot, so every ratio lies in 2.2/1.5 ..= 2.2/0.5. A
-    // table whose two diameters were swapped would read below one.
-    for row in bosses.profiles() {
-        let ratio = row.boss_factor();
-        assert!(
-            (2.2 / 1.5 - 1e-12..=2.2 / 0.5 + 1e-12).contains(&ratio),
-            "{}: boss-to-shaft ratio {ratio} is outside 2.2/1.5 ..= 2.2/0.5",
-            row.name()
-        );
-    }
+    // The boss half (Craig ruling 2026-09-30: Heavy profile ratio, about 1.47
+    // times the support's own root). Typed here from the export's Heavy row,
+    // 2.2 / 1.5; a row whose two diameters were swapped would read below one.
+    assert!(
+        (boss.boss_factor() - 2.2 / 1.5).abs() <= 1e-12,
+        "the registered boss-to-shaft ratio is {}, not Heavy's 2.2 / 1.5",
+        boss.boss_factor()
+    );
 }

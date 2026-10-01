@@ -63,7 +63,7 @@ pub use provenance::{
 };
 pub use stage::Stage;
 pub use support_profile::{
-    RootBossProfile, RootBossProfiles, RootBossProfilesError, TipContactProfile,
-    TipContactProfiles, TipContactProfilesError,
+    RootBossProfile, RootBossProfileError, TipContactProfile, TipContactProfiles,
+    TipContactProfilesError,
 };
 pub use violation::ViolationKind;

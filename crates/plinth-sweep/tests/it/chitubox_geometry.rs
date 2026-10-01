@@ -138,44 +138,46 @@ fn every_sweep_tip_ball_is_the_owners_profile_ratio_at_its_own_tip_size() {
 }
 
 /// `(root RADIUS, expected boss-foot RADIUS)`, each worked by hand from the
-/// owner's profiles (DIAMETERS there, radii here): `diameterofbossbottom`
-/// 2.2 mm over `middle_support.supportmiddlediameter`,
+/// owner's HEAVY profile (DIAMETERS there, radii here): `diameterofbossbottom`
+/// 2.2 mm over `middle_support.supportmiddlediameter` 1.5 mm, the ratio
+/// 22/15 = 1.4667, under EVERY root whatever its size.
 ///
-/// | profile | shaft | boss bottom | ratio |
-/// |---|---|---|---|
-/// | Ultralight | 0.5 | 2.2 | 4.4 |
-/// | Light | 0.6 | 2.2 | 11/3 |
-/// | Middle | 1.2 | 2.2 | 11/6 |
-/// | Heavy | 1.5 | 2.2 | 22/15 |
+/// For the record, the other profiles' ratios (Ultralight 2.2/0.5 = 4.4,
+/// Light 2.2/0.6 = 11/3, Middle 2.2/1.2 = 11/6) are NOT read: under the
+/// superseded by-root-size reading the first five rows below drew 0.44, 1.1,
+/// 1.1, 1.2375 and 1.1 mm.
 const BOSS_ROWS: [(f64, f64); 7] = [
-    // d 0.20: below Ultralight's 0.5 shaft, held at its 4.4.
-    (0.1, 0.44),
-    // d 0.50: Ultralight's own shaft, its native 2.2 mm foot.
-    (0.25, 1.1),
-    // d 0.60: Light's own shaft -- the native file's 0.30 -> 1.10 boss.
-    (0.3, 1.1),
-    // d 0.90: halfway from Light (11/3) to Middle (11/6), 2.75.
-    (0.45, 0.45 * 2.75),
-    // d 1.20: Middle's own shaft.
-    (0.6, 1.1),
+    // d 0.20: narrower than every profile's shaft; still Heavy's 22/15.
+    (0.1, 0.1 * 22.0 / 15.0),
+    // d 0.50: Ultralight's own shaft; Heavy's 22/15, not Ultralight's 4.4.
+    (0.25, 0.25 * 22.0 / 15.0),
+    // d 0.60: Light's own shaft; 0.44, not the native Light file's 1.10.
+    (0.3, 0.44),
+    // d 0.90: between Light and Middle; 0.66.
+    (0.45, 0.66),
+    // d 1.20: Middle's own shaft; 0.88.
+    (0.6, 0.88),
     // d 1.50: Heavy's own shaft -- the native file's 0.75 -> 1.10 boss.
     (0.75, 1.1),
-    // d 2.00: above Heavy's 1.5, held at its 22/15; never extrapolated.
+    // d 2.00: wider than every profile's shaft; 22/15.
     (1.0, 22.0 / 15.0),
 ];
 
-/// **The sweep's root boss is the owner's own boss, scaled to the root**
-/// (ruling of 2026-09-30): his 1.0 mm height, and a foot that is the root
-/// times his boss-to-shaft ratio at the root's size, chosen by root size like
-/// the ball ratio; NOT a fixed 2.2 mm boss under every root, which raised
-/// resin 4-15 % on our 2-4 mm dense fields.
+/// **The sweep's root boss is the owner's own boss, at his HEAVY profile's
+/// ratio under every root** (rulings of 2026-09-30): his 1.0 mm height, and a
+/// foot that is the root times `diameterofbossbottom` / `supportmiddlediameter`
+/// of his profile 2 "Heavy", 2.2 / 1.5, about 1.47 times the support's own
+/// root. NOT a fixed 2.2 mm boss under every root, and NOT a ratio chosen by
+/// root size (both raised resin on our 2-4 mm dense fields; the by-size
+/// reading reads 1.47 to 4.4, and our roots sit where it reads near 3).
 ///
 /// Nothing here reads the rule it grades: every foot is worked by hand from
-/// the table above and typed. Sabotage: put the fixed `max(1.1, r_root)` foot
-/// back and the 0.1 and 0.45 and 1.0 mm rows go red; put `FLARE_R_FACTOR`
-/// (1.6) back and every row goes red.
+/// the Heavy row and typed. Sabotage: put the by-root-size interpolation back
+/// and every row but the 0.75 and 1.0 mm ones goes red; put the fixed
+/// `max(1.1, r_root)` foot back and every row but the 0.75 mm one goes red;
+/// put `FLARE_R_FACTOR` (1.6) back and every row goes red.
 #[test]
-fn every_sweep_root_boss_is_the_owners_profile_ratio_at_its_own_root_size() {
+fn every_sweep_root_boss_is_the_owners_heavy_ratio_at_every_root_size() {
     // Tips well under each root, so the root is the profile's first entry
     // (`drawn_root_radius_mm`), and a run tall enough for the full boss.
     let arms: Vec<SweepArm> = BOSS_ROWS
@@ -189,11 +191,11 @@ fn every_sweep_root_boss_is_the_owners_profile_ratio_at_its_own_root_size() {
         .collect();
     let lowered = lower_all(&arms);
 
-    // PATH HIT: every boss read its factor off the profile table.
+    // PATH HIT: every boss published the factor it was drawn with.
     assert_eq!(
         lowered.root_boss_factor.len(),
         BOSS_ROWS.len(),
-        "one profile-table factor per root boss"
+        "one published boss factor per root boss"
     );
     let bosses: Vec<(f64, f64, f64)> = lowered
         .primitives
@@ -218,7 +220,7 @@ fn every_sweep_root_boss_is_the_owners_profile_ratio_at_its_own_root_size() {
         );
         assert!(
             (foot - expected).abs() <= 1e-12,
-            "a {root} mm root stands on a {foot} mm foot; the owner's profiles draw {expected} mm"
+            "a {root} mm root stands on a {foot} mm foot; the owner's Heavy ratio draws {expected} mm"
         );
         assert!(
             (factor * root - expected).abs() <= 1e-12,

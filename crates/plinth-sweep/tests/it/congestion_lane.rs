@@ -428,32 +428,29 @@ fn a_flat_disc_is_not_congested_and_the_lane_is_a_no_op_on_it() {
 /// ChituBox boss.
 ///
 /// Since 2026-09-30 every plate root is drawn down to the owner's ChituBox
-/// boss, SCALED TO THE ROOT (his ruling of that day): the foot is the root
-/// times his boss-to-shaft ratio at the root's size, `diameterofbossbottom`
-/// 2.2 mm over `supportmiddlediameter` 0.5 / 0.6 / 1.2 / 1.5 mm. The census
+/// boss at his HEAVY profile's ratio (his final ruling of that day): the foot
+/// is the root times `diameterofbossbottom` 2.2 mm over Heavy's
+/// `supportmiddlediameter` 1.5 mm, whatever the root's size. The census
 /// keeps its crowding disc, `FLARE_R_FACTOR` × the DRAWN root
 /// (`SweepPolicy::flare_r_factor` says why), and the drawn root is the boss's
 /// TOP ring. This reads both off the `RootFlare` records the production
 /// lowering emits for the finished field, never from the census itself: the
 /// census area is the factor times each boss top, and every boss foot is its
-/// root times a ratio inside the owner's range (2.2/1.5 to 2.2/0.5), the one
-/// the lowering publishes for it, and never wider-ratioed for a wider root.
-/// The exact ratio at each size is graded by hand-worked rows in
-/// `chitubox_geometry`.
+/// root times Heavy's ratio, the one the lowering publishes for it. Hand-worked
+/// rows at seven root sizes are in `chitubox_geometry`.
 ///
 /// (Until 2026-09-30 this test was `the_census_measures_the_flared_root_and_
 /// not_the_bare_arm`: the census disc was also the emitted flare's foot, and
 /// every foot had to be the factor times its root. Corrected 2026-09-29,
 /// review-fixes, from the LEDGER root to the DRAWN one. Then, for part of
-/// 2026-09-30, every foot was a FIXED 1.1 mm grown to a wider root.)
+/// 2026-09-30, every foot was a FIXED 1.1 mm grown to a wider root, and then
+/// the root times a ratio chosen by root size, 2.2/1.5 to 2.2/0.5.)
 #[test]
 fn the_census_measures_the_flared_drawn_root_and_every_boss_stands_on_the_owners_foot() {
-    // Craig ChituBox profile export 2026-09-30: `diameterofbossbottom` 2.2 mm
-    // over his widest (Heavy, 1.5 mm) and narrowest (Ultralight, 0.5 mm)
-    // `supportmiddlediameter`, typed here so the test does not read the rule
-    // it grades.
-    const OWNER_RATIO_RANGE: core::ops::RangeInclusive<f64> =
-        (2.2 / 1.5 - 1.0e-12)..=(2.2 / 0.5 + 1.0e-12);
+    // Craig ChituBox profile export 2026-09-30, profile 2 "Heavy":
+    // `diameterofbossbottom` 2.2 mm over `supportmiddlediameter` 1.5 mm, typed
+    // here so the test does not read the rule it grades.
+    const OWNER_HEAVY_RATIO: f64 = 2.2 / 1.5;
     let mesh = laid_tube();
     let plan = sweep_with(&mesh, 0.0, &policy().without_congestion());
     let constants = plinth_core::m0_constants().expect("the registry constructs");
@@ -482,7 +479,7 @@ fn the_census_measures_the_flared_drawn_root_and_every_boss_stands_on_the_owners
     let mut emitted_roots_mm2 = 0.0;
     let mut bosses = 0_usize;
     let mut flared = 0_usize;
-    let mut ratios: Vec<(f64, f64)> = Vec::new();
+    let mut root_sizes: Vec<f64> = Vec::new();
     for primitive in &emission.primitives {
         if primitive.segment_kind != SupportSegmentKind::RootFlare {
             continue;
@@ -493,9 +490,9 @@ fn the_census_measures_the_flared_drawn_root_and_every_boss_stands_on_the_owners
         );
         let ratio = foot / root;
         assert!(
-            OWNER_RATIO_RANGE.contains(&ratio),
-            "a root boss's foot is {foot} mm on a {root} mm root: ratio {ratio}, outside the \
-             owner's {OWNER_RATIO_RANGE:?}"
+            (ratio - OWNER_HEAVY_RATIO).abs() <= 1.0e-9 * OWNER_HEAVY_RATIO,
+            "a root boss's foot is {foot} mm on a {root} mm root: ratio {ratio}, not the \
+             owner's Heavy {OWNER_HEAVY_RATIO}"
         );
         // The ratio the lowering says it drew this boss with (path hit, in
         // arm order, one per `RootFlare`) is the ratio in the file.
@@ -506,25 +503,22 @@ fn the_census_measures_the_flared_drawn_root_and_every_boss_stands_on_the_owners
             "boss {bosses}: drawn {foot}/{root}, published factor {published} at root {}",
             emission.root_boss_root_radius_mm[bosses]
         );
-        ratios.push((root, ratio));
+        root_sizes.push(root);
         flared += usize::from(foot > root);
         emitted_roots_mm2 += core::f64::consts::PI * (flare * root).powi(2);
         bosses += 1;
     }
     assert_eq!(emission.root_boss_factor.len(), bosses);
-    // Chosen by root size: the owner's ratio falls as his shaft widens
-    // (4.4, 3.667, 1.833, 1.467), so a wider root never gets a larger ratio.
-    ratios.sort_by(|a, b| a.0.total_cmp(&b.0));
-    for pair in ratios.windows(2) {
-        assert!(
-            pair[1].1 <= pair[0].1 + 1.0e-12,
-            "a {} mm root got ratio {} but a narrower {} mm root got {}",
-            pair[1].0,
-            pair[1].1,
-            pair[0].0,
-            pair[0].1
-        );
-    }
+    // Anti-vacuity for "whatever the root's size": the field carries at least
+    // one root narrower than Heavy's own 0.75 mm, where the superseded
+    // by-size reading read a LARGER ratio than Heavy's (up to 4.4), so the
+    // ratio check above can tell the two rules apart.
+    root_sizes.sort_by(f64::total_cmp);
+    assert!(
+        root_sizes.first().is_some_and(|smallest| *smallest < 0.75),
+        "every root is at least Heavy's own 0.75 mm, so no root could tell Heavy's ratio \
+         from the by-size reading: {root_sizes:?}"
+    );
     let census = &plan.report.congestion_lane.after.all;
     let published = census.analytic_disc_area_mm2;
     assert!(bosses > 0, "nothing lands on the plate to measure");

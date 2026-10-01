@@ -344,15 +344,15 @@
       "provenance_detail": "Measured source=owner_decision(id=\"craig-chitubox-profile-export-2026-09-30-raftthickness\", record=\"docs/evidence/chitubox-support-profiles-2026-09-30.cfgx\", locator=\"support[0..3].raft_support.raftthickness\", date=exact(\"2026-09-30\")); err=null"
     },
     {
-      "id": "CHITUBOX_ROOT_BOSS_PROFILES",
+      "id": "CHITUBOX_ROOT_BOSS_PROFILE",
       "classification": "runtime_emit_geometry",
-      "normative": "03-physics-and-constants.md §3.10.1 = the owner's four profiles' (supportmiddlediameter, diameterofbossbottom) in mm DIAMETER: Ultralight (0.5, 2.2), Light (0.6, 2.2), Middle (1.2, 2.2), Heavy (1.5, 2.2); Craig ChituBox profile export 2026-09-30. Owner ruling 2026-09-30: the --placement sweep boss foot is boss_factor(r_root) * r_root, boss_factor = diameterofbossbottom / supportmiddlediameter, linear in root DIAMETER between the bracketing profiles and held at the end profile's ratio outside 0.5-1.5 mm; boss height CHITUBOX_BOSS_HEIGHT_MM. Replaces the fixed 2.2 mm boss of the same day and FLARE_R_FACTOR on the sweep path; the legacy engine still reads FLARE_R_FACTOR. Root RADII stay load-sized.",
+      "normative": "03-physics-and-constants.md §3.10.1 = the owner's Heavy profile (support[2]) (supportmiddlediameter, diameterofbossbottom) in mm DIAMETER: (1.5, 2.2); Craig ChituBox profile export 2026-09-30. Craig ruling 2026-09-30: Heavy profile ratio. The --placement sweep boss foot of EVERY plate root is boss_factor * r_root, boss_factor = diameterofbossbottom / supportmiddlediameter = 22/15 (about 1.467), whatever the root's size; boss height CHITUBOX_BOSS_HEIGHT_MM; a foot still stands on its raft pad. Replaces, the same day, the fixed 2.2 mm boss and the ratio read off all four profiles by root size (CHITUBOX_ROOT_BOSS_PROFILES, retired), and FLARE_R_FACTOR on the sweep path; the legacy engine still reads FLARE_R_FACTOR. Root RADII stay load-sized.",
       "source_locators": [
-        "docs/evidence/chitubox-support-profiles-2026-09-30.cfgx:support[0..3].middle_support.supportmiddlediameter and support[0..3].support_general_para.diameterofbossbottom",
-        "Chitubox Projects/cylinder-cube-sphere.chitubox (outside the repository): native type-4 flares 0.75 -> 1.10 and 0.30 -> 1.10 over 1.0 mm"
+        "docs/evidence/chitubox-support-profiles-2026-09-30.cfgx:support[2] (Heavy).middle_support.supportmiddlediameter and support[2].support_general_para.diameterofbossbottom",
+        "Chitubox Projects/cylinder-cube-sphere.chitubox (outside the repository): native type-4 flares 0.75 -> 1.10 (Heavy's 1.5 mm shaft) over 1.0 mm"
       ],
       "provenance_wrapper": "Measured",
-      "provenance_detail": "Measured source=owner_decision(id=\"craig-chitubox-profile-export-2026-09-30-supportmiddlediameter\", record=\"docs/evidence/chitubox-support-profiles-2026-09-30.cfgx\", locator=\"support[0..3].middle_support.supportmiddlediameter and support[0..3].support_general_para.diameterofbossbottom\", date=exact(\"2026-09-30\")); err=null"
+      "provenance_detail": "Measured source=owner_decision(id=\"craig-chitubox-profile-export-2026-09-30-heavy-boss-ratio\", record=\"docs/evidence/chitubox-support-profiles-2026-09-30.cfgx\", locator=\"support[2] (Heavy).middle_support.supportmiddlediameter and support[2].support_general_para.diameterofbossbottom\", date=exact(\"2026-09-30\")); err=null"
     },
     {
       "id": "CHITUBOX_ROOT_HEIGHT_MM",

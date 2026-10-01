@@ -3092,8 +3092,8 @@ fn print_sweep_disclosure(
     );
     // THE OWNER'S CHITUBOX GEOMETRY (2026-09-30), as path hits: how many tip
     // balls read their factor off his profiles (and the range they read), and
-    // how many root bosses read their foot-to-root factor off his profiles by
-    // root size (and the factors and roots they read).
+    // how many root bosses were drawn at his Heavy profile's foot-to-root
+    // factor (and the factors and roots they were drawn with).
     let spread = |values: &[f64]| {
         plinth_support::SweepLowering::distribution(values).map_or_else(
             || "n/a".to_owned(),
@@ -3102,7 +3102,7 @@ fn print_sweep_disclosure(
     };
     println!(
         "[sweep {model}] chitubox geometry: {} tip balls sized from the profile table \
-         (factor min/p50/max {}), {} root bosses scaled to their root by the profile table \
+         (factor min/p50/max {}), {} root bosses scaled to their root by the Heavy profile ratio \
          (factor min/p50/max {}, root radius min/p50/max {} mm)",
         emission.tip_ball_factor.len(),
         spread(&emission.tip_ball_factor),

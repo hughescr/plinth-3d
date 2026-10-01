@@ -2,7 +2,7 @@ use crate::{
     BoundKind, BuildVolumeMm, ConstantId, Derived, EffectiveArmCount, EvidenceDate, EvidenceSource,
     EvidenceSourceView, Finite, FiniteInterval, LoadSharing, Measured, MeasuredPayload,
     MetricValue, MicronGranularity, Pending, Placeholder, PlateId, PrinterProfile,
-    PrinterProfileError, RootBossProfiles, TipContactProfiles, YDirection,
+    PrinterProfileError, RootBossProfile, TipContactProfiles, YDirection,
 };
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
@@ -669,25 +669,18 @@ constant_value_conversion!(TipContactProfiles, |value: &TipContactProfiles| {
         .collect::<Result<Vec<_>, RegistryError>>()?;
     ConstantValue::list(rows)
 });
-constant_value_conversion!(RootBossProfiles, |value: &RootBossProfiles| {
-    let rows = value
-        .profiles()
-        .iter()
-        .map(|profile| {
-            ConstantValue::record([
-                ("name", ConstantValue::core_text(profile.name())?),
-                (
-                    "shaft_diameter_mm",
-                    ConstantValue::finite_scalar(profile.shaft_diameter_mm())?,
-                ),
-                (
-                    "boss_bottom_diameter_mm",
-                    ConstantValue::finite_scalar(profile.boss_bottom_diameter_mm())?,
-                ),
-            ])
-        })
-        .collect::<Result<Vec<_>, RegistryError>>()?;
-    ConstantValue::list(rows)
+constant_value_conversion!(RootBossProfile, |profile: &RootBossProfile| {
+    ConstantValue::record([
+        ("name", ConstantValue::core_text(profile.name())?),
+        (
+            "shaft_diameter_mm",
+            ConstantValue::finite_scalar(profile.shaft_diameter_mm())?,
+        ),
+        (
+            "boss_bottom_diameter_mm",
+            ConstantValue::finite_scalar(profile.boss_bottom_diameter_mm())?,
+        ),
+    ])
 });
 
 impl<T: ToConstantValue> sealed::ConstantValueSource for Vec<T> {}

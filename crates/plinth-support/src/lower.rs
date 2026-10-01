@@ -7,8 +7,7 @@
 use std::mem::size_of;
 
 use plinth_core::{
-    m0_constants, ContentDigest, Finite, LayerPlan, M0Constants, PositiveFinite, RootBossProfiles,
-    TipContactProfiles,
+    m0_constants, ContentDigest, Finite, LayerPlan, M0Constants, PositiveFinite, TipContactProfiles,
 };
 use thiserror::Error;
 
@@ -40,20 +39,23 @@ const ZERO_LENGTH_MM: f64 = 1e-9;
 pub const NATIVE_FOOT_PAD_OVERLAP_MM: f64 = 0.002;
 
 /// **The root boss every sweep plate root stands on**: the owner's ChituBox
-/// boss, at his height and SCALED TO THE ROOT (Craig ChituBox profile export
-/// 2026-09-30, fields `support_general_para.heightofboss` = 1.0 mm in all four
-/// profiles, `CHITUBOX_BOSS_HEIGHT_MM`; and each profile's
-/// `diameterofbossbottom` over its `middle_support.supportmiddlediameter`,
-/// `CHITUBOX_ROOT_BOSS_PROFILES`).
+/// boss, at his height and SCALED TO THE ROOT by his HEAVY profile's ratio
+/// (Craig ChituBox profile export 2026-09-30, field
+/// `support_general_para.heightofboss` = 1.0 mm in all four profiles,
+/// `CHITUBOX_BOSS_HEIGHT_MM`; and profile 2 "Heavy"'s `diameterofbossbottom`
+/// 2.2 over its `middle_support.supportmiddlediameter` 1.5,
+/// `CHITUBOX_ROOT_BOSS_PROFILE`).
 ///
 /// A cone from the shaft's own drawn root section at the boss top down to the
-/// boss foot on the raft pad. **The foot is the root times the owner's
-/// boss-to-shaft ratio at that root's size** (owner ruling 2026-09-30: the
-/// boss width is scaled to the support's own root, chosen by root size like
-/// the ball ratio; NOT a fixed 2.2 mm boss under every support, which raised
-/// resin 4-15 % on our 2-4 mm dense fields). Every ratio is above one, so the
-/// foot is always wider than its root and never caps it. A root at a
-/// profile's own shaft gets that profile's native 2.2 mm foot.
+/// boss foot on the raft pad. **The foot is the root times 22/15, about 1.47,
+/// for every support** (Craig ruling 2026-09-30: Heavy profile ratio). It is
+/// NOT a fixed 2.2 mm boss under every support (that raised resin 4-15 % on
+/// our 2-4 mm dense fields), and NOT a ratio read off his four profiles by
+/// root size (1.47 to 4.4; that raised resin 5-26 % on the lane models). The
+/// ratio is above one, so the foot is always wider than its root and never
+/// caps it; a foot still stands on its raft pad, which grows only where its
+/// polygon cannot cover the foot. A root at Heavy's own 1.5 mm shaft gets the
+/// native 2.2 mm foot.
 ///
 /// It replaces the legacy flare (`FLARE_R_FACTOR` × root over `FLARE_LEN_MM`)
 /// on the sweep path. The sweep's placement decisions at the plate (the
@@ -63,7 +65,8 @@ pub const NATIVE_FOOT_PAD_OVERLAP_MM: f64 = 0.002;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RootBoss {
     height_mm: f64,
-    profiles: &'static RootBossProfiles,
+    /// The owner's Heavy boss-to-shaft ratio, read once off the registry.
+    factor: f64,
 }
 
 impl RootBoss {
@@ -80,14 +83,16 @@ impl RootBoss {
     fn from_constants(constants: &'static M0Constants) -> Result<Self, String> {
         let evidence = constants.evidence();
         let height_mm = *evidence.chitubox_boss_height_mm().value();
-        if height_mm.is_finite() && height_mm > 0.0 {
-            Ok(Self {
-                height_mm,
-                profiles: evidence.chitubox_root_boss_profiles().value(),
-            })
+        // `RootBossProfile::new` refuses a foot no wider than its shaft, so
+        // the registered factor is above one; checked again here so a boss
+        // that would cap its root can never be built.
+        let factor = evidence.chitubox_root_boss_profile().value().boss_factor();
+        if height_mm.is_finite() && height_mm > 0.0 && factor.is_finite() && factor > 1.0 {
+            Ok(Self { height_mm, factor })
         } else {
             Err(format!(
-                "the registered root boss is not a solid: height {height_mm} mm"
+                "the registered root boss is not a solid wider than its root: height \
+                 {height_mm} mm, foot-to-root factor {factor}"
             ))
         }
     }
@@ -98,12 +103,12 @@ impl RootBoss {
         self.height_mm
     }
 
-    /// The boss-foot-to-root ratio of a plate root of drawn root RADIUS
-    /// `root_radius_mm`, read off the owner's profiles by root size
-    /// ([`RootBossProfiles::boss_factor`]).
+    /// The boss-foot-to-root ratio of EVERY plate root: the owner's Heavy
+    /// profile's `diameterofbossbottom` / `supportmiddlediameter`
+    /// ([`plinth_core::RootBossProfile::boss_factor`]), whatever the root's size.
     #[must_use]
-    pub fn factor(self, root_radius_mm: f64) -> f64 {
-        self.profiles.boss_factor(root_radius_mm)
+    pub const fn factor(self) -> f64 {
+        self.factor
     }
 
     /// The RADIUS of the foot a plate root of drawn root radius
@@ -111,7 +116,7 @@ impl RootBoss {
     /// wider than the root.
     #[must_use]
     pub fn foot_radius_mm(self, root_radius_mm: f64) -> f64 {
-        self.factor(root_radius_mm) * root_radius_mm
+        self.factor * root_radius_mm
     }
 }
 
@@ -981,10 +986,10 @@ pub struct SweepLowering {
     /// The path-hit witness for the profile table: one entry per tip.
     pub tip_ball_factor: Vec<f64>,
     /// Every plate root boss's FOOT-TO-ROOT FACTOR, in arm order: the owner's
-    /// ChituBox boss-to-shaft ratio at that root's size
-    /// (`CHITUBOX_ROOT_BOSS_PROFILES`, [`RootBoss`], 2026-09-30), which the
-    /// emitted foot radius is times the drawn root. The path-hit witness for
-    /// the boss table: one entry per boss drawn.
+    /// Heavy profile's boss-to-shaft ratio, the same for every root
+    /// (`CHITUBOX_ROOT_BOSS_PROFILE`, [`RootBoss`], Craig ruling 2026-09-30:
+    /// Heavy profile ratio), which the emitted foot radius is times the drawn
+    /// root. The path-hit witness for the boss: one entry per boss drawn.
     pub root_boss_factor: Vec<f64>,
     /// Every plate root boss's drawn ROOT radius, in the same order.
     pub root_boss_root_radius_mm: Vec<f64>,
@@ -1143,8 +1148,8 @@ impl From<LoweringError> for SweepLoweringError {
 ///    ([`RootBoss`], 2026-09-30), boss top (`CHITUBOX_BOSS_HEIGHT_MM` above
 ///    the raft where the run allows) down to the RAFT TOP,
 ///    `plate_z + CHITUBOX_RAFT_HEIGHT_MM − NATIVE_FOOT_PAD_OVERLAP_MM`, from
-///    the drawn root out to the boss foot, the root times the owner's
-///    boss-to-shaft ratio at that root's size (`CHITUBOX_ROOT_BOSS_PROFILES`).
+///    the drawn root out to the boss foot, the root times the owner's Heavy
+///    boss-to-shaft ratio, 2.2 / 1.5, for every root (`CHITUBOX_ROOT_BOSS_PROFILE`).
 /// 4. THE RAFT — after every arm, once for the whole field: a `RaftPad` on the
 ///    plate under every plate foot, wide enough that its emitted polygon
 ///    covers the foot, and `RaftBridge`s along the pads' minimum spanning tree
@@ -2333,10 +2338,10 @@ fn lower_one_sweep_arm(
                         && distance(top, foot_point) > ZERO_LENGTH_MM =>
                 {
                     // THE OWNER'S CHITUBOX BOSS FOOT, SCALED TO THE ROOT
-                    // (2026-09-30): the drawn root times his boss-to-shaft
-                    // ratio at that root's size. The `RootFlare` record is
-                    // the boss cone.
-                    let factor = config.root_boss.factor(root_radius.get());
+                    // (2026-09-30): the drawn root times his Heavy profile's
+                    // boss-to-shaft ratio. The `RootFlare` record is the boss
+                    // cone.
+                    let factor = config.root_boss.factor();
                     let Ok(flare_radius) =
                         positive(config.root_boss.foot_radius_mm(root_radius.get()))
                     else {

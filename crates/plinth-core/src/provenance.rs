@@ -1,6 +1,6 @@
 use crate::{
     BuildVolumeMm, ConstantId, DecisionId, EffectiveArmCount, Finite, LoadSharing, MetricValue,
-    MicronGranularity, PlateId, RootBossProfiles, TipContactProfiles, YDirection,
+    MicronGranularity, PlateId, RootBossProfile, TipContactProfiles, YDirection,
 };
 use serde::{
     de::{self, MapAccess, Visitor},
@@ -1019,10 +1019,10 @@ categorical_payload!(
     YDirection,
     LoadSharing,
     MicronGranularity,
-    // A table read verbatim off the owner's exported profiles: exact values,
-    // no dispersion, so no error bar.
+    // A table (and one profile) read verbatim off the owner's exported
+    // profiles: exact values, no dispersion, so no error bar.
     TipContactProfiles,
-    RootBossProfiles
+    RootBossProfile
 );
 
 /// Endpoint inclusion semantics for a finite interval.

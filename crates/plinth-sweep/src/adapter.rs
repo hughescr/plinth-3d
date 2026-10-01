@@ -75,8 +75,8 @@ pub struct SweepEmission {
     pub tip_radius_mm: Vec<f64>,
     /// THE OWNER'S CHITUBOX GEOMETRY (2026-09-30), published as path hits:
     /// every tip's contact-sphere factor read off his profiles by tip size,
-    /// in arm order, and every plate root boss's foot-to-root factor read off
-    /// his profiles by root size, with the root it was read at
+    /// in arm order, and every plate root boss's foot-to-root factor (his
+    /// Heavy profile's, for every root), with the root it was drawn at
     /// ([`plinth_support::SweepLowering::tip_ball_factor`] and siblings).
     pub tip_ball_factor: Vec<f64>,
     pub root_boss_factor: Vec<f64>,

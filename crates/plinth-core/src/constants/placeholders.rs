@@ -1158,7 +1158,7 @@ placeholder_declarations! {
     flare_len_mm: PositiveFinite = PositiveFinite::new(1.5)?;
     "FLARE_LEN_MM", "mm", "scalar", "Conical flare length, not the missing fast-flare term. LEGACY ENGINE ONLY since 2026-09-30: --placement sweep builds its root boss from the owner's ChituBox profiles (CHITUBOX_BOSS_HEIGHT_MM) and no longer reads this.";
     flare_r_factor: PositiveFinite = PositiveFinite::new(1.6)?;
-    "FLARE_R_FACTOR", "1", "scalar", "Conical flare radius factor. Since 2026-09-30 --placement sweep EMITS its root boss foot from the owner's ChituBox profiles (CHITUBOX_ROOT_BOSS_PROFILES: the root times his boss-to-shaft ratio at its size); the sweep still reads this factor, unchanged, as its congestion census's root-crowding disc (factor x drawn root), which no longer describes an emitted solid. The legacy engine still draws its flare with it.";
+    "FLARE_R_FACTOR", "1", "scalar", "Conical flare radius factor. Since 2026-09-30 --placement sweep EMITS its root boss foot from the owner's ChituBox profiles (CHITUBOX_ROOT_BOSS_PROFILE: the root times his Heavy profile's boss-to-shaft ratio, 2.2 / 1.5, at every root size); the sweep still reads this factor, unchanged, as its congestion census's root-crowding disc (factor x drawn root), which no longer describes an emitted solid. The legacy engine still draws its flare with it.";
     gate_on_ball_breach_default: bool = true;
     "GATE_ON_BALL_BREACH_DEFAULT", "1", "scalar", "Independent ball-breach verification default.";
     gate_on_removal_default: bool = false;

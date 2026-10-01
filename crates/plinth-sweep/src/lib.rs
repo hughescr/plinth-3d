@@ -557,8 +557,9 @@ pub struct SweepPolicy {
     /// **Until 2026-09-30 this was also the emitter's flare foot**, so the
     /// census measured the disc the file lays. The emitter now stands every
     /// plate root on the owner's ChituBox boss scaled to the root
-    /// ([`plinth_support::RootBoss`]: the root times his boss-to-shaft ratio
-    /// at its size, 1.47 to 4.4; owner ruling 2026-09-30), and this factor no
+    /// ([`plinth_support::RootBoss`]: the root times his Heavy profile's
+    /// boss-to-shaft ratio, 2.2 / 1.5 = 1.467; owner ruling 2026-09-30, which
+    /// sits just under this 1.6), and this factor no
     /// longer describes any emitted solid. It is
     /// kept, unchanged, as the crowding measure so that the congestion lane,
     /// the mast search and the lip-seat lane place exactly what they placed
