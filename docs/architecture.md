@@ -63,6 +63,17 @@ minis is never given one model's answer. Either way, orientation is never inferr
 measures every candidate and records what it measured, including when the winner is the
 identity rotation.
 
+The operator can also say a model is to be used **as drawn** (GitHub issue #1): identity
+rotation, nothing searched, still centred and lifted off the plate like any other model. That
+holds when ANY of these does: `--orient none` (every model in the run); the macOS Finder tag
+`plinth-no-rotate`, read straight from the file's `com.apple.metadata:_kMDItemUserTags`
+extended attribute, not through Spotlight; `plinth-no-rotate` in the Linux `user.xdg.tags`
+attribute; or a marker file `<stem>.asdrawn` beside the STL, the portable form that survives
+git. A mark beats `dense` and `pinned:DIR` alike. The orientation record says which mark it was
+(`OrientationProvenance::AsDrawn`), and the run report prints one line per model:
+`as drawn (<reason>)` or `orientation searched`. A tag attribute that is present but unreadable
+is a WARNING line and the model is treated as untagged, never refused.
+
 ### Hollow
 
 Creates the shell, computes the interior cavity field, places drains and vents, and drills
@@ -135,7 +146,7 @@ equal; it is not a claim about how any particular GUI will render it.
 | `plinth-core` | The stable, dependency-light vocabulary: data contracts, the constants registry and its provenance types, and the single acceptance authority every stage reports through. No geometry. |
 | `plinth-mesh` | The f64 mesh substrate — topology, delicacy, STL I/O, triage, and the automatic repair pre-pass (declines rather than refuses; a clean mesh passes through byte-identical). Loading keeps meshes exactly as their source supplied them: no implicit weld, reorder or f32 conversion. |
 | `plinth-decimate` | The mandatory production decimation substrate: a narrow adapter over a locked QEM simplifier, with probing, protection halos and error-budget measurement around it. |
-| `plinth-orient` | Orientation: the three-tier dense sweep and the rigid rotation it (or a pinned baseline) commits, rebuilding the build frame. |
+| `plinth-orient` | Orientation: the three-tier dense sweep and the rigid rotation it (or a pinned baseline, or an operator's as-drawn mark) commits, rebuilding the build frame; `as_drawn` reads the per-model marks (tags via the `xattr` and, on macOS, `plist` crates; the `<stem>.asdrawn` marker everywhere). |
 | `plinth-hollow` | Shell creation, cavity field, drain and vent placement, drilling. |
 | `plinth-solid` | Batch-shaped f64 boolean-solid operations. |
 | `plinth-layers` | Per-layer polygon union with fill-rule normalization, so every downstream consumer of a slice is correct whichever fill rule it evaluates. |
@@ -143,7 +154,7 @@ equal; it is not a claim about how any particular GUI will render it.
 | `plinth-verify` | The gate crate: `verify_coverage`, the coverage verdict the pre-write gate consults before any bytes are written, and `verify_artifact`, disk-first `.chitubox` container verification reading precisely the bytes on disk with no producer state, cache, or repair path. **`verify_artifact` is not currently called by the production `prepare` route** — the only format check that runs after a write today is `plinth-emit`'s own fresh-open disk audit; `verify_artifact` is exercised only by this crate's tests and one example, and is scheduled for wiring into the pre-write gate porting work. |
 | `plinth-emit` | The single final emission boundary: f64 support geometry to f32 wire records, one fresh project, then an audit of a freshly opened copy. |
 | `plinth-pipeline` | The folder-in, one-artifact-per-model runner: sequences repair → decimate → orient → hollow → support for every model in a directory, then owns the pre-write gate (§ Gate) that is the sole door between a sealed support authority and a written file, before handing a passed model to `plinth-emit`. |
-| `plinth-cli` | The `plinth` binary. One subcommand, `prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense\|pinned:DIR] [--wall-mm MM] [--no-cache]`: resolves the request against the registered printer profile and resource policy, runs the pipeline over every model in the directory, and reports each model's disposition. |
+| `plinth-cli` | The `plinth` binary. One subcommand, `prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense\|none\|pinned:DIR] [--wall-mm MM] [--no-cache]`: resolves the request against the registered printer profile and resource policy, runs the pipeline over every model in the directory, and reports each model's disposition. |
 | `rust/geom_kernel` | The batch-first triangle-soup geometry kernel: BVH, closest point, ray and segment batches, slicing, parity grids. Every public query takes a slice and returns a slice. |
 | `rust/chitubox_io` | Reads and writes `.chitubox` projects starting from an *empty* project. Every write is verified by structural re-parse. |
 
