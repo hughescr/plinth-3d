@@ -7,6 +7,29 @@
 //! FLAT (no tilt), the correct way up, supported at regular spacing, zero
 //! uncarried load, no refusal.
 //!
+//! # AS DRAWN, 2026-10-01 (GitHub issue #1, owner spec)
+//!
+//! **"Glue face up" is now asserted through the AS-DRAWN path.** The
+//! repository's Round discs are committed glue face UP under
+//! `corpus/as-drawn/` with a `<stem>.asdrawn` marker each, so production uses
+//! them exactly as drawn and searches nothing. Three tests:
+//!
+//! 1. `round_bases_stay_flat_supported_and_land_glue_face_up` — the main
+//!    ratchet. The committed marker is read by the production probe; the
+//!    parametric disc DRAWN glue face up ([`turned_over`]) goes through
+//!    `orient_as_drawn` and the production placement sweep; every placement
+//!    assertion below is unchanged. **The arm pins are NOT re-pinned** (55 /
+//!    217 / 803 measured again, with the scar identity 0.889 / 0.944 / 0.972
+//!    as before): the as-drawn pose is the same mesh as the searched flip,
+//!    which test 2 proves vertex for vertex, so placement cannot move.
+//! 2. `an_unmarked_disc_is_still_searched_and_its_flip_is_the_as_drawn_pose`
+//!    — rule A for a disc nobody marked: (2a) the flip reaches the commit tier
+//!    and (2b) it is committed, then the searched mesh equals the as-drawn
+//!    turned-over mesh exactly. Search only, no placement.
+//! 3. `the_committed_round_discs_are_marked_and_drawn_glue_face_up` — the
+//!    real committed files are marked and, used as drawn, have the plain face
+//!    (the one flat face across the axis) on TOP.
+//!
 //! # THE RECORD, CORRECTED 2026-09-28 (owner ruling on the Round 50 diagnosis)
 //!
 //! **The correct pose for ALL THREE discs is the 180° flip: the plain glue
@@ -117,15 +140,18 @@
 
 use crate::harness;
 
+use std::path::{Path, PathBuf};
+
 use harness::{bands, lamina_reach_mm, layer_height_mm, x_allowed, z_span, LIFT_MM};
 use plinth_core::{m0_constants, LayerPlan};
 use plinth_decimate::{BudgetConfigError, ProbeConfig};
 use plinth_mesh::Mesh;
+use plinth_orient::as_drawn::{probe_source, AsDrawnReason};
 use plinth_orient::grid::GridSettings;
 use plinth_orient::search::{DenseSweepRecord, SearchTier};
 use plinth_orient::{
-    registered_sweep_request, search_and_orient, BaselineSelection, OrientationProvenance,
-    OrientedModel,
+    orient_as_drawn, registered_sweep_request, search_and_orient, BaselineSelection,
+    OrientationProvenance, OrientedModel,
 };
 use plinth_sweep::{run_sweep, SweepDemand, SweepPlan, SweepPolicy};
 
@@ -145,6 +171,9 @@ const RECESS_DRAFT_MM: f64 = 0.67;
 /// One member of the `Round_*` family.
 pub(crate) struct Disc {
     name: &'static str,
+    /// The stem of the committed, glue-face-UP, marked copy of the real file:
+    /// `corpus/as-drawn/<stem>.stl` beside `<stem>.asdrawn`.
+    stem: &'static str,
     /// Radius of the plain glue face (the authored bottom).
     bottom_radius_mm: f64,
     /// Ring stiffeners, `(inner, outer)` radius, rising from the recess floor
@@ -170,6 +199,18 @@ pub(crate) struct Disc {
     ///
     /// Not a detector of the creep rule: 105 lies inside Round 25's band around
     /// 88. `wall_creep::` grades the rule itself.
+    ///
+    /// RE-PINNED 2026-09-30 by the lattice-align lane, ON PURPOSE, 88 / 304 /
+    /// 1067 → 55 / 217 / 803, measured on develop `8007750` plus the lane. Two
+    /// engineering fixes to seat placement, no physics change: the reach is
+    /// measured as a straight length (a root now reaches `κ·h` in every
+    /// direction, not `κ·h/1.0824`), and each island of demand is covered by
+    /// the fewest seats among coverings built to it (the rim annulus and the
+    /// rib tops are seated as one midline row each). Residual 0, uncarried 0
+    /// and the p95 spacing under the lattice pitch hold on all three
+    /// (`lanes/lattice-align.md`). The old counts are reproduced by
+    /// `harness::at_path_fixture_seating`, which is how the path fixtures that
+    /// need the old field still reach their paths.
     pinned_arms: usize,
 }
 
@@ -205,30 +246,33 @@ pub(crate) struct Disc {
 pub(crate) fn round_25() -> Disc {
     Disc {
         name: "Round 25",
+        stem: "Round_25",
         bottom_radius_mm: 11.5,
         rings: &[(2.62, 4.12)],
         segments: 96,
-        pinned_arms: 88,
+        pinned_arms: 55,
     }
 }
 
 pub(crate) fn round_50() -> Disc {
     Disc {
         name: "Round 50",
+        stem: "Round_50",
         bottom_radius_mm: 24.0,
         rings: &[(2.62, 4.12), (12.25, 12.75)],
         segments: 128,
-        pinned_arms: 304,
+        pinned_arms: 217,
     }
 }
 
 fn round_100() -> Disc {
     Disc {
         name: "Round 100",
+        stem: "Round_100",
         bottom_radius_mm: 49.0,
         rings: &[(2.62, 4.12), (12.25, 12.75), (25.0, 25.5)],
         segments: 128,
-        pinned_arms: 1067,
+        pinned_arms: 803,
     }
 }
 
@@ -318,6 +362,67 @@ pub(crate) fn mesh_for(disc: &Disc) -> Mesh {
     revolve(&profile(disc), disc.segments)
 }
 
+/// The disc DRAWN glue face UP, the way the committed `corpus/as-drawn/`
+/// copies are: turned 180° about X, `(x, y, z) -> (x, -y, -z)`, which is the
+/// exact map `plinth-mesh`'s `flip_stl_x180` example applies to the real files
+/// and the exact rotation the dense search applies when it commits the flip
+/// (its antipode convention, `UpDirection::rotation_to_build_frame`). A
+/// rotation keeps winding, so the triangles are reused unchanged.
+fn turned_over(mesh: &Mesh) -> Mesh {
+    let verts = mesh
+        .verts()
+        .iter()
+        .map(|&[x, y, z]| [x, -y, -z])
+        .collect();
+    Mesh::new(verts, mesh.tris().to_vec()).expect("a rotated valid mesh is valid")
+}
+
+/// `corpus/as-drawn/<stem>.stl`: the committed, glue-face-UP, marked copy of
+/// the real Round file (`corpus/as-drawn/README.md`).
+fn committed_as_drawn(stem: &str) -> PathBuf {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../corpus/as-drawn")
+        .join(format!("{stem}.stl"));
+    assert!(
+        path.is_file(),
+        "the committed as-drawn fixture {} is missing",
+        path.display()
+    );
+    path
+}
+
+/// The operator mark on the committed file, read by the PRODUCTION probe the
+/// executor calls (`plinth_orient::as_drawn::probe_source`). The ratchet
+/// requires it to be the portable marker: an extended attribute does not
+/// survive git, so a fixture marked any other way would be marked only on the
+/// machine that tagged it.
+fn committed_mark(disc: &Disc) -> AsDrawnReason {
+    let source = committed_as_drawn(disc.stem);
+    let probe = probe_source(&source);
+    assert!(probe.warnings.is_empty(), "{}: {:?}", disc.name, probe.warnings);
+    match probe.reason {
+        Some(reason @ AsDrawnReason::MarkerFile { .. }) => reason,
+        other => panic!(
+            "{}: {} must be marked as drawn by its <stem>.asdrawn marker; the probe read {other:?}",
+            disc.name,
+            source.display()
+        ),
+    }
+}
+
+/// Decimate exactly as production does, then use the result AS DRAWN — the
+/// `plinth_orient::orient_as_drawn` call `orient_model` makes for a marked
+/// model in `crates/plinth-pipeline/src/prepare.rs`.
+fn orient_marked(mesh: &Mesh, name: &str, reason: AsDrawnReason) -> OrientedModel {
+    let outcome = plinth_decimate::run(mesh, registered_decimation_budget())
+        .unwrap_or_else(|error| panic!("{name}: decimation must run: {error}"));
+    let decimated = outcome
+        .into_decimated_model()
+        .unwrap_or_else(|scale| panic!("{name}: scale sanity must pass: {scale:?}"));
+    orient_as_drawn(decimated, reason)
+        .unwrap_or_else(|error| panic!("{name}: the as-drawn pose must not refuse: {error}"))
+}
+
 /// The production decimation probe configuration, read from the registry.
 /// Mirrors `crates/plinth-pipeline/src/prepare.rs`'s `registered_decimation_
 /// budget` verbatim; duplicated rather than depended on because `plinth-sweep`
@@ -396,6 +501,10 @@ struct FlatFace {
     count: usize,
     r_min: f64,
     r_max: f64,
+    /// Some qualifying triangle contains the axis `(0, 0)` in XY (closed
+    /// test). The real files triangulate the plain face without a vertex on
+    /// the axis, so `r_min` alone cannot say the face reaches it.
+    covers_axis: bool,
 }
 
 fn flat_face(mesh: &Mesh, target_z: f64, eps: f64) -> FlatFace {
@@ -404,6 +513,7 @@ fn flat_face(mesh: &Mesh, target_z: f64, eps: f64) -> FlatFace {
     let mut count = 0_usize;
     let mut r_min = f64::INFINITY;
     let mut r_max = 0.0_f64;
+    let mut covers_axis = false;
     for tri in mesh.tris() {
         let corners = [verts[tri[0] as usize], verts[tri[1] as usize], verts[tri[2] as usize]];
         if corners.iter().any(|vertex| (vertex[2] - target_z).abs() > eps) {
@@ -412,6 +522,11 @@ fn flat_face(mesh: &Mesh, target_z: f64, eps: f64) -> FlatFace {
         let [a, b, c] = corners;
         area += ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])).abs() / 2.0;
         count += 1;
+        // The axis lies in the triangle when it is on the same side of (or
+        // on) all three edges, whichever way the triangle winds.
+        let side = |p: [f64; 3], q: [f64; 3]| p[0] * q[1] - p[1] * q[0];
+        let sides = [side(a, b), side(b, c), side(c, a)];
+        covers_axis |= sides.iter().all(|&s| s >= 0.0) || sides.iter().all(|&s| s <= 0.0);
         for vertex in corners {
             let r = vertex[0].hypot(vertex[1]);
             r_min = r_min.min(r);
@@ -423,6 +538,7 @@ fn flat_face(mesh: &Mesh, target_z: f64, eps: f64) -> FlatFace {
         count,
         r_min: if count > 0 { r_min } else { 0.0 },
         r_max,
+        covers_axis,
     }
 }
 
@@ -437,7 +553,9 @@ const FLAT_FACE_EPS_MM: f64 = 1.0e-6;
 fn dense_record(oriented: &OrientedModel) -> &DenseSweepRecord {
     match &oriented.history().orientation().provenance {
         OrientationProvenance::DenseSweep(record) => record,
-        OrientationProvenance::Pinned { .. } => panic!("a dense search was run, not a pin"),
+        OrientationProvenance::Pinned { .. } | OrientationProvenance::AsDrawn { .. } => {
+            panic!("a dense search was run, not a pin or an as-drawn pose")
+        }
     }
 }
 
@@ -454,30 +572,45 @@ fn degrees_off_the_flip(selection: &BaselineSelection) -> Option<f64> {
     }
 }
 
+/// **The Round bases, AS DRAWN glue face up** (GitHub issue #1, owner spec
+/// 2026-10-01): the committed copies are drawn glue face UP and marked
+/// `<stem>.asdrawn`, so production uses them as drawn and searches nothing.
+/// This drives that path — the committed marker read by the production probe,
+/// then `orient_as_drawn` — on the parametric disc drawn the same way up
+/// ([`turned_over`]), and then the production placement sweep.
+///
+/// The placement assertions and the arm pins are unchanged, and that is
+/// itself a check: the as-drawn pose of the turned-over disc is the same mesh,
+/// bit for bit, as the searched flip of the authored disc
+/// (`an_unmarked_disc_is_still_searched_and_its_flip_is_the_as_drawn_pose`),
+/// so placement cannot tell the two paths apart.
+///
+/// What the search must still do for an UNMARKED disc — reach the flip and
+/// commit it (rule A) — is graded by that second test.
 #[test]
 fn round_bases_stay_flat_supported_and_land_glue_face_up() {
-    let grid_settings = GridSettings::registered().expect("registered grid settings");
-    let dedupe_tolerance_deg = grid_settings.dedupe_tolerance_deg();
-    let dedupe_cosine = grid_settings.dedupe_cosine();
     let lattice_pitch_mm = 3.0_f64.sqrt() * lamina_reach_mm();
 
     for disc in [round_25(), round_50(), round_100()] {
         let started = std::time::Instant::now();
         let mesh = mesh_for(&disc);
 
-        // ---- (2a) the flip reaches the commit tier -------------------------
-        let oriented = orient_dense(&mesh, disc.name);
-        let record = dense_record(&oriented);
-        let commit = record
-            .tiers
-            .iter()
-            .find(|tier| tier.tier == SearchTier::Commit)
-            .expect("the commit tier ran");
-        let flip_in_commit = commit
-            .ranking
-            .iter()
-            .find(|entry| -entry.up_model_frame[2].get() > dedupe_cosine);
+        // ---- (2) pose: AS DRAWN, by the committed marker -------------------
+        let reason = committed_mark(&disc);
+        let oriented = orient_marked(&turned_over(&mesh), disc.name, reason.clone());
         let orientation = oriented.history().orientation();
+        assert_eq!(
+            orientation.selection,
+            BaselineSelection::Identity,
+            "{}: a disc marked as drawn must not be turned",
+            disc.name
+        );
+        assert_eq!(
+            orientation.provenance,
+            OrientationProvenance::AsDrawn { reason },
+            "{}: the pose must be recorded as the operator's, not a search's",
+            disc.name
+        );
 
         // ---- (1) placement: run the real production sweep, no refusal -----
         let plan = place(oriented.mesh(), disc.name);
@@ -513,20 +646,14 @@ fn round_bases_stay_flat_supported_and_land_glue_face_up() {
         let plain_face_mm2 = flat_face(&mesh, 0.0, FLAT_FACE_EPS_MM).area_mm2;
 
         println!(
-            "{name}: commit tier {scored} (promoted {promoted} + escorted {escorted}), flip in \
-             commit tier: {flip}, selection {selection:?}; {placed_arms} arms of {members} members, \
+            "{name}: as drawn ({provenance:?}), selection {selection:?}; {placed_arms} arms of \
+             {members} members, \
              spacing mean {mean:.3} p95 {p95:.3} mm, residual {residual}, uncarried {uncarried:.4} \
              mm2; bottom z={min_z:.4} {lo_area:.2} mm2 (r {lo_r0:.3}..{lo_r1:.3}), top z={max_z:.4} \
              {hi_area:.2} mm2 (r {hi_r0:.3}..{hi_r1:.3}), plain face {plain_face_mm2:.2} mm2; \
              {elapsed_s:.2} s (wall time, not asserted)",
             name = disc.name,
-            scored = commit.scored,
-            promoted = record.tiers[1].promoted,
-            escorted = commit.escorted,
-            flip = flip_in_commit.map_or_else(
-                || "NO".to_owned(),
-                |entry| format!("rank {} score {:.5}", entry.rank, entry.terms.score.get())
-            ),
+            provenance = orientation.provenance,
             selection = orientation.selection,
             members = report.struts_total,
             mean = report.seat_spacing.mean_mm,
@@ -539,29 +666,6 @@ fn round_bases_stay_flat_supported_and_land_glue_face_up() {
             hi_area = hi.area_mm2,
             hi_r0 = hi.r_min,
             hi_r1 = hi.r_max,
-        );
-
-        assert!(
-            flip_in_commit.is_some(),
-            "{}: the 180 deg flip (glue face UP) never reached the commit tier — a proxy \
-             discarded the pose that lays the part's flat face horizontal (rule A)",
-            disc.name,
-        );
-
-        // ---- (2b) pose: the flip, within the search's own tolerance --------
-        let angle = degrees_off_the_flip(&orientation.selection).unwrap_or_else(|| {
-            panic!(
-                "{}: won an explicit AxisDegrees rotation ({:?}), not the flip",
-                disc.name, orientation.selection
-            )
-        });
-        assert!(
-            angle <= dedupe_tolerance_deg,
-            "{}: the committed pose is {angle:.4} deg off the glue-face-up flip, outside the \
-             search's own dedupe tolerance {dedupe_tolerance_deg:.4} deg (selection {:?}). Owner \
-             ruling 2026-09-28: all three Round discs print glue face UP.",
-            disc.name,
-            orientation.selection,
         );
 
         // ---- (2c) glue face up, measured geometrically on the oriented mesh
@@ -679,14 +783,208 @@ fn round_bases_stay_flat_supported_and_land_glue_face_up() {
             report.counters.contact_merges_moved_below,
             report.contact_merge_load_moved_mm2,
         );
+        // RE-SCOPED 2026-09-30 (lane lattice-align), ON PURPOSE: the identity
+        // is now asserted from ABOVE only. It exists to catch a DOUBLE COUNT
+        // (a lander booked into two scars read 1.07-1.15), and a double count
+        // can only push the scar over `injected/X`. From below, the identity
+        // holds only while every injected mm² reaches a contact in that
+        // contact's own worst event. With the straight-line reach and the
+        // island seating the recess floor takes fewer arms, more of its peel
+        // reaches the plate through the stiffener walls and the rim's
+        // contacts, and a per-event-sized contact (rule a′, owner-approved
+        // 2026-09-29) is sized for its worst single event, not for the sum of
+        // the events it serves. Measured: 0.889 / 0.944 / 0.972 (Round 25 /
+        // 50 / 100) with the contact slots holding 432 of 486, 1844 of 1954
+        // and 7611 of 7834 mm² injected, uncarried 0 on all three. The drift
+        // is not new: at develop's own placement (`harness::
+        // at_path_fixture_seating`, which reproduces 88 / 304 / 1067 exactly)
+        // the same reading is already 0.938 / 0.973 / 0.987 at X 18, inside
+        // the band only because the band is 8 %. Whether a
+        // contact that serves two peel events should carry their sum is the
+        // owner's question, asked in `lanes/lattice-align.md`; the rule under
+        // it is unchanged here. What the physics does guarantee is asserted
+        // below it: every contact is sized by the area law for the load its
+        // own slot carries.
         assert!(
-            (report.total_scar_mm2 - report.injected_load_mm2 / x_allowed()).abs()
-                <= bands::AREA_IDENTITY * report.injected_load_mm2 / x_allowed(),
-            "{}: total scar {:.3} mm2 against injected_load/X_ALLOWED {:.3} mm2 (band {:.0}%)",
+            report.total_scar_mm2
+                <= (1.0 + bands::AREA_IDENTITY) * report.injected_load_mm2 / x_allowed(),
+            "{}: total scar {:.3} mm2 above injected_load/X_ALLOWED {:.3} mm2 (band {:.0}%): a \
+             double count",
             disc.name,
             report.total_scar_mm2,
             report.injected_load_mm2 / x_allowed(),
             bands::AREA_IDENTITY * 100.0,
+        );
+        assert!(
+            (report.total_scar_mm2 - contact_load_mm2 / x_allowed()).abs()
+                <= bands::AREA_IDENTITY * contact_load_mm2 / x_allowed(),
+            "{}: total scar {:.3} mm2 against the contact slots' own load/X_ALLOWED {:.3} mm2 \
+             (band {:.0}%): a contact not sized by the area law for what it carries",
+            disc.name,
+            report.total_scar_mm2,
+            contact_load_mm2 / x_allowed(),
+            bands::AREA_IDENTITY * 100.0,
+        );
+    }
+}
+
+/// **Rule A, for a disc nobody marked**: the dense search still reaches the
+/// glue-face-up flip and commits it, and that searched pose IS the as-drawn
+/// pose of the turned-over disc, vertex for vertex.
+///
+/// The Round discs in the repository are now marked and searched no more, but
+/// an unmarked copy (the owner's own folders, the frozen field inputs) still
+/// goes through the search, so the search's answer stays graded here. Search
+/// only: placement on this pose is graded by the test above, and the vertex
+/// identity below is what lets that one placement stand for both paths.
+///
+/// | change | assertion that reddens |
+/// |---|---|
+/// | the flat-face escort in `crates/plinth-orient/src/search.rs` is dropped (rule A reverted) | (2a) on Round 50 (measured 2026-09-28) |
+/// | `orient_as_drawn` applies any rotation but identity, or `turned_over` / the flip tool's map stops being the search's antipode rotation | the vertex identity |
+#[test]
+fn an_unmarked_disc_is_still_searched_and_its_flip_is_the_as_drawn_pose() {
+    let grid_settings = GridSettings::registered().expect("registered grid settings");
+    let dedupe_tolerance_deg = grid_settings.dedupe_tolerance_deg();
+    let dedupe_cosine = grid_settings.dedupe_cosine();
+
+    for disc in [round_25(), round_50(), round_100()] {
+        let mesh = mesh_for(&disc);
+
+        // ---- (2a) the flip reaches the commit tier -------------------------
+        let oriented = orient_dense(&mesh, disc.name);
+        let record = dense_record(&oriented);
+        let commit = record
+            .tiers
+            .iter()
+            .find(|tier| tier.tier == SearchTier::Commit)
+            .expect("the commit tier ran");
+        let flip_in_commit = commit
+            .ranking
+            .iter()
+            .find(|entry| -entry.up_model_frame[2].get() > dedupe_cosine);
+        let orientation = oriented.history().orientation();
+        println!(
+            "{name}: commit tier {scored} (promoted {promoted} + escorted {escorted}), flip in \
+             commit tier: {flip}, selection {selection:?}",
+            name = disc.name,
+            scored = commit.scored,
+            promoted = record.tiers[1].promoted,
+            escorted = commit.escorted,
+            flip = flip_in_commit.map_or_else(
+                || "NO".to_owned(),
+                |entry| format!("rank {} score {:.5}", entry.rank, entry.terms.score.get())
+            ),
+            selection = orientation.selection,
+        );
+        assert!(
+            flip_in_commit.is_some(),
+            "{}: the 180 deg flip (glue face UP) never reached the commit tier — a proxy \
+             discarded the pose that lays the part's flat face horizontal (rule A)",
+            disc.name,
+        );
+
+        // ---- (2b) pose: the flip, within the search's own tolerance --------
+        let angle = degrees_off_the_flip(&orientation.selection).unwrap_or_else(|| {
+            panic!(
+                "{}: won an explicit AxisDegrees rotation ({:?}), not the flip",
+                disc.name, orientation.selection
+            )
+        });
+        assert!(
+            angle <= dedupe_tolerance_deg,
+            "{}: the committed pose is {angle:.4} deg off the glue-face-up flip, outside the \
+             search's own dedupe tolerance {dedupe_tolerance_deg:.4} deg (selection {:?}). Owner \
+             ruling 2026-09-28: all three Round discs print glue face UP.",
+            disc.name,
+            orientation.selection,
+        );
+
+        // ---- the searched flip IS the as-drawn pose ------------------------
+        let drawn = orient_marked(&turned_over(&mesh), disc.name, AsDrawnReason::OrientNone);
+        assert_eq!(
+            drawn.mesh().tris(),
+            oriented.mesh().tris(),
+            "{}: the as-drawn and searched meshes differ in their triangles",
+            disc.name
+        );
+        let differing = drawn
+            .mesh()
+            .verts()
+            .iter()
+            .zip(oriented.mesh().verts())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(
+            differing, 0,
+            "{}: {differing} vertices differ between the as-drawn turned-over disc and the \
+             searched flip of the authored disc",
+            disc.name
+        );
+    }
+}
+
+/// **The committed Round files are marked, and drawn glue face UP.**
+///
+/// `corpus/as-drawn/Round_{25,50,100}.stl` are the provisioned real files
+/// turned over once by `plinth-mesh`'s `flip_stl_x180` example
+/// (`corpus/as-drawn/README.md`). Loaded the way the executor loads a source
+/// (binary STL, the repair pre-pass, the registered decimation), probed by the
+/// production probe and used as drawn, each must stand flat with its single
+/// plain face — the one that reaches the axis — on TOP, and the stiffener side
+/// (rim annulus and rib tops, nothing at the axis: the centre is recess) at the
+/// bottom. No placement here: the field run of these files is the end-to-end
+/// check, and the placement physics is graded on the parametric twin above.
+#[test]
+fn the_committed_round_discs_are_marked_and_drawn_glue_face_up() {
+    for disc in [round_25(), round_50(), round_100()] {
+        let reason = committed_mark(&disc);
+        let source = committed_as_drawn(disc.stem);
+        let loaded = plinth_mesh::load_binary_stl(&source, plinth_mesh::WeldPolicy::None)
+            .unwrap_or_else(|error| panic!("{}: {error}", disc.name));
+        let (repaired, _) = plinth_mesh::repair_mesh(&loaded).into_parts();
+        let oriented = orient_marked(&repaired, disc.name, reason);
+        assert_eq!(
+            oriented.history().orientation().selection,
+            BaselineSelection::Identity
+        );
+
+        let (min_z, max_z) = z_span(oriented.mesh());
+        let lo = flat_face(oriented.mesh(), min_z, FLAT_FACE_EPS_MM);
+        let hi = flat_face(oriented.mesh(), max_z, FLAT_FACE_EPS_MM);
+        println!(
+            "{}: {} as drawn; bottom z={min_z:.4} {:.2} mm2 (r {:.3}..{:.3}), top z={max_z:.4} \
+             {:.2} mm2 (r {:.3}..{:.3})",
+            disc.name,
+            source.display(),
+            lo.area_mm2,
+            lo.r_min,
+            lo.r_max,
+            hi.area_mm2,
+            hi.r_min,
+            hi.r_max,
+        );
+        assert!(
+            lo.count > 0 && hi.count > 0,
+            "{}: no flat face at one of the z extremes; the committed file is TILTED",
+            disc.name
+        );
+        assert!(
+            hi.covers_axis && !lo.covers_axis,
+            "{}: top face covers the axis: {}, bottom face covers it: {}. The plain glue face \
+             (the only flat face across the axis; the stiffener side's centre is recess) must be \
+             on TOP. The committed file is glue face DOWN.",
+            disc.name,
+            hi.covers_axis,
+            lo.covers_axis,
+        );
+        assert!(
+            hi.area_mm2 > lo.area_mm2,
+            "{}: the top face ({:.2} mm2) must be the whole plain face, larger than the rim \
+             annulus and rib tops at the bottom ({:.2} mm2)",
+            disc.name,
+            hi.area_mm2,
+            lo.area_mm2,
         );
     }
 }

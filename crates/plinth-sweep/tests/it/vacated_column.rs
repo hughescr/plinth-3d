@@ -101,7 +101,34 @@ fn arms_vacating_their_seat_column(plan: &SweepPlan) -> usize {
 #[test]
 fn a_leaned_arm_carries_the_island_it_roots_and_the_seat_blind_rule_drops_it() {
     let mesh = island_over_a_vacating_lean();
-    let policy = SweepPolicy::from_registry().expect("registry");
+    // Graded at the seat placement the fixture was built for
+    // (`harness::at_path_fixture_seating`): at the production placement no arm
+    // under the island leans out of its seat column (measured 2026-09-30: 0),
+    // so the tip-column rule would be graded on nothing. The rule reads no
+    // placement.
+    //
+    // RE-SCOPED 2026-09-30 (fix/chitubox-geometry), measured: graded WITH THE
+    // LIP-SEAT RULE OFF, as the head-join fixtures are. With the owner's
+    // ChituBox ball ratio (a smaller ball on every tip) the lip-seat rule,
+    // which measures the seat trim's bite into a shaft with the ball the
+    // lowering draws, re-lands the island's leaned arm and its neighbour
+    // (ids 2 and 1) at a smaller angle to their seats. The island arm then
+    // stands nearly straight over the plate, and the seat-blind sabotage loses
+    // 0 mm²: the fixture no longer has the defect's shape. With the lip-seat
+    // rule off the fixture is exactly the one measured below: seat-blind
+    // 0.2100 mm² uncarried at an infinite gap, the rule 0 (44 tip-column roots
+    // offered, 0.245 mm² through them). The rule graded here is the
+    // down-sweep's accounting, which reads no lip-seat decision.
+    //
+    // MERGED 2026-10-01 (land of fix/chitubox-geometry onto develop 3372093):
+    // the two re-scopings answer two different causes (the seat placement from
+    // fix/lattice-align, the ball ratio from fix/chitubox-geometry), and the
+    // merged tree has both, so the fixture is graded under both.
+    let policy = harness::at_path_fixture_seating(
+        SweepPolicy::from_registry()
+            .expect("registry")
+            .without_lip_seat(),
+    );
     let with = sweep_with(&mesh, 0.0, &policy);
     let without = sweep_with(&mesh, 0.0, &policy.without_tip_column_roots());
 

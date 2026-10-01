@@ -97,7 +97,11 @@ struct Fixture {
 }
 
 fn fixture(mesh: Mesh) -> Fixture {
-    let plan = sweep_with(&mesh, 0.0, &policy());
+    fixture_with(mesh, &policy())
+}
+
+fn fixture_with(mesh: Mesh, policy: &SweepPolicy) -> Fixture {
+    let plan = sweep_with(&mesh, 0.0, policy);
     let drawn = arms_of(&plan)
         .into_iter()
         .map(|arm| arm.radius_profile_mm)
@@ -112,7 +116,17 @@ fn stilt() -> &'static Fixture {
 
 fn brace_pair() -> &'static Fixture {
     static FIXTURE: OnceLock<Fixture> = OnceLock::new();
-    FIXTURE.get_or_init(|| fixture(make_brace_pair().expect("the brace pair")))
+    // Graded at the seat placement the fixture was built for
+    // (`harness::at_path_fixture_seating`): at the production placement the
+    // brace pair places no brace and no mast (measured 2026-09-30), so there
+    // is nothing to grade against the final gap. The clearance rules read no
+    // placement.
+    FIXTURE.get_or_init(|| {
+        fixture_with(
+            make_brace_pair().expect("the brace pair"),
+            &crate::harness::at_path_fixture_seating(policy()),
+        )
+    })
 }
 
 fn live(strut: &SweepStrut) -> bool {

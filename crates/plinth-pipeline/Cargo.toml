@@ -38,3 +38,7 @@ thiserror = { workspace = true }
 # consults plinth-verify's coverage verdict before the library ever calls
 # plinth-emit, and `prepare` loads every source model through plinth-mesh.
 chitubox_io = { path = "../../rust/chitubox_io" }
+
+# `tests/it/orient_as_drawn.rs` sets `user.xdg.tags` on a scratch file.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+xattr = "1.6"

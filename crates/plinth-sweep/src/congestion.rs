@@ -27,8 +27,13 @@
 //! # The measurement
 //!
 //! At the plate layer, rasterise every plate-rooted member's ROOT DISC — the
-//! radius the EMITTER actually puts there, which is the arm's root radius times
-//! the registered `FLARE_R_FACTOR`, not the bare arm radius. Then
+//! arm's drawn root radius times the registered `FLARE_R_FACTOR`, not the bare
+//! arm radius. Until 2026-09-30 that was the radius the EMITTER put there (its
+//! flare foot). Since then the emitter stands every root on the owner's
+//! ChituBox boss scaled to the root (`plinth_support::RootBoss`: the root
+//! times his Heavy profile's boss-to-shaft ratio, 2.2 / 1.5) and the factor is
+//! kept, unchanged, as the census's crowding measure;
+//! `SweepPolicy::flare_r_factor` says why and what the open question is. Then
 //!
 //! ```text
 //! congestion = Σ (cells one disc covers) / (cells at least one disc covers)
@@ -250,7 +255,8 @@ pub struct CongestionContext<'a> {
     pub lean: &'a LeanLaw,
     pub layer_height_mm: f64,
     pub layers: usize,
-    /// `FLARE_R_FACTOR` — the registered factor the emitter's root flare uses.
+    /// `FLARE_R_FACTOR` — the census's root-crowding disc factor
+    /// (`SweepPolicy::flare_r_factor`).
     pub flare_factor: f64,
     /// `TIP_RADIUS_DEFAULT_MM` — the smallest printable radius, used as the
     /// placeholder section of an arm the down-sweep has not sized yet.
@@ -293,11 +299,20 @@ pub fn measure(
     }
 }
 
-/// Every plate-rooted member's root disc, as the emitter will lay it down.
+/// Every plate-rooted member's root disc: its drawn root times the crowding
+/// factor (`FLARE_R_FACTOR`).
 ///
-/// A `Brace` is excluded because it gets no root flare and never lands on the
+/// A `Brace` is excluded because it gets no root boss and never lands on the
 /// plate; an `Arm` and a `Mast` both keep the plate-root chain, so both are
 /// counted.
+///
+/// **Not the emitted foot since 2026-09-30.** The emitter stands every plate
+/// root on the owner's ChituBox boss, scaled to the root by his Heavy
+/// profile's boss-to-shaft ratio ([`plinth_support::RootBoss`]). This disc
+/// keeps the pre-change
+/// crowding measure so placement is unchanged by the geometry lane; see
+/// `SweepPolicy::flare_r_factor` for the measured alternatives and the open
+/// question.
 ///
 /// **The disc is the DRAWN root's** (review-fixes 2026-09-29). Until then it
 /// was sized from the ledger's `radius_mm[0]`, while the lowering flares the

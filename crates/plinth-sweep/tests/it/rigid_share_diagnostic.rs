@@ -28,7 +28,27 @@ fn turn_about_y(mesh: &Mesh, degrees: f64) -> Mesh {
 #[test]
 fn the_rigid_share_names_the_laid_tubes_stiff_low_end_arms_and_sizes_nothing() {
     let mesh = turn_about_y(&make_laid_tube().expect("the laid tube fixture"), -22.5);
-    let policy = SweepPolicy::from_registry().expect("the registry");
+    // Graded at the seat placement the fixture was built for
+    // (`harness::at_path_fixture_seating`): the witness below is "the tube's
+    // two stiff low-end arms" of the field the old placement gave it. At the
+    // production placement the tilted tube is seated differently and the
+    // diagnostic names 5 arms (measured 2026-09-30); it still sizes nothing.
+    // The diagnostic reads no placement.
+    //
+    // Graded also on the seat faces from before the seat-face band
+    // (`without_seat_face_band`), as `head_join.rs` grades its pre-band
+    // witness. The band (lattice-align `b28f15c`) moves which face some tips
+    // carry; that shifts the tube's load just enough that arm 18, the second
+    // low-end arm, falls under `ℓ_max`. Bisected at the round-8 milestone
+    // (2026-10-01, `lanes/round8-milestone/`): at `2e09334` the report named
+    // arm 17 (59.34 mm2) and arm 18 (57.27 mm2, 1.3 % over `ℓ_max`); from
+    // `b28f15c` on, with the band, it names arm 17 alone (58.59 mm2 on develop
+    // `16952e5`). On `16952e5` without the band it names arm 17 (59.22 mm2) and
+    // arm 18 (58.08 mm2) again. The diagnostic reads no seat face either; the
+    // band only decides whether this fixture reaches its two-arm witness.
+    let policy =
+        harness::at_path_fixture_seating(SweepPolicy::from_registry().expect("the registry"))
+            .without_seat_face_band();
     let plan = sweep_with(&mesh, 0.0, &policy);
     let rigid = &plan.report.rigid_share;
     println!(

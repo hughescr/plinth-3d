@@ -392,9 +392,40 @@ pub struct SweepRunReport {
     /// this load is carried by the shaft. Counted in
     /// [`PathHits::contact_merges_moved_below`].
     pub contact_merge_load_moved_mm2: f64,
+    /// What the unrooted-column rule did on the finished field
+    /// ([`crate::down_sweep::UnrootedColumns`], drain-rim routing 2026-09-30).
+    pub unrooted_routing: UnrootedRoutingReport,
     /// Path-hit counters. A green oracle must never be able to mean "the path
     /// never ran" (the witness-must-exercise-the-path lesson).
     pub counters: PathHits,
+}
+
+/// The unrooted-column rule on one run: what the up-sweep left unrooted, and
+/// what the last down-sweep did with the load that reached it
+/// ([`crate::down_sweep::UnrootedColumns`]). All zero on a field the up-sweep
+/// rooted everywhere, where the rule cannot change anything.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct UnrootedRoutingReport {
+    /// `(layer, cell)` entries the up-sweep recorded as covered and unrooted.
+    pub recorded_cells: u64,
+    /// `(layer, column)` pairs refused as a routing root (the recorded cells
+    /// that are model columns holding no arm). The path-hit witness.
+    pub columns_refused: u64,
+    /// Load that went sideways from an unrooted column to a rooted carrier.
+    pub load_rerouted_mm2: f64,
+    /// Load in an unrooted column with no rooted carrier in reach, which went
+    /// down its own column as before.
+    pub load_kept_mm2: f64,
+    /// Reads where a column whose load went sideways kept its own peel out of
+    /// the max-field raster; the path-hit witness for the ledger rule.
+    pub handed_columns_held: u64,
+    /// The peel those reads kept out, mm²: what the ledger without the rule
+    /// would have re-added without counting it as injected.
+    pub handed_own_withheld_mm2: f64,
+    /// Held events whose next step was not sideways, so they re-entered the
+    /// raster one layer down as counted injected peel, and that peel, mm².
+    pub handed_events_reentered: u64,
+    pub handed_reentered_mm2: f64,
 }
 
 /// Counts of the paths a sabotage drill would break, so a green suite can be
@@ -439,6 +470,37 @@ pub struct PathHits {
     /// The same, at an arm with no slot below its contact: the load stays in
     /// the one slot (there is no shaft to take it) and is counted here.
     pub contact_merges_kept_at_single_slot: u64,
+    /// Straight sightlines the reach field priced and found clear, and those
+    /// that crossed empty space so the path bent instead
+    /// (`reach::any_angle_relax`, 2026-09-30). Zero clear means the reach is
+    /// still a sum of raster steps; zero blocked on a model with holes means
+    /// the geodesic was never tested.
+    pub sightlines_clear: u64,
+    pub sightlines_blocked: u64,
+    /// The same two counts for the down-sweep's routing field.
+    pub route_sightlines_clear: u64,
+    pub route_sightlines_blocked: u64,
+    /// Islands of demand measured with more than one covering, islands where a
+    /// covering other than the global lattice won, and the seats that saved
+    /// against the global lattice's own measured count on those islands
+    /// (`up_sweep::choose_plan`, 2026-09-30).
+    pub islands_compared: u64,
+    pub islands_realigned: u64,
+    pub island_seats_saved: u64,
+    /// Every seat the up-sweep placed, and the hex covering lower bound of the
+    /// demand it placed them on: per island, `max(1, ⌈area / ((3√3/2)·R²)⌉)`
+    /// at the measured reach `R`. Their ratio is the covering efficiency.
+    pub island_seats: u64,
+    pub island_hex_bound: u64,
+    /// The finished plan's member tops (arms and braces) given a carried face,
+    /// those whose NEAREST down-facing face was a wall or a face steeper than
+    /// the overhang band and which carry a farther overhang face instead, and
+    /// whether the mesh had no overhang face so every down-facing face was
+    /// used (`tip_landing::SeatFaceRule`, 2026-09-30). Zero passed over on a
+    /// field with a tip beside a wall means the rule never ran.
+    pub seat_faces_measured: u64,
+    pub seat_faces_steeper_passed_over: u64,
+    pub seat_faces_fallback_any_down_facing: u64,
 }
 
 impl SweepRunReport {

@@ -66,7 +66,7 @@ use plinth_support::{
     SupportSegmentKind, SweepArm,
 };
 // (`SweepArm` is also the unit the moved-member clearance is graded on.)
-use plinth_sweep::{arms_of, Landing, StrutKind, SweepPlan, SweepPolicy};
+use plinth_sweep::{arms_of, Footprint, Landing, StrutKind, SweepPlan, SweepPolicy};
 
 /// Stations per shaft record, ends included.
 const STATIONS: usize = 33;
@@ -98,10 +98,19 @@ fn round_25_flipped_with(policy: &SweepPolicy) -> SweepPlan {
 /// seat zone, rule on or off). These tests grade the head-join rule on the
 /// field it was built against; `plinth-pipeline` `lip_seat::` grades the
 /// production field.
+///
+/// AND AT THE SEAT PLACEMENT THE FIXTURE WAS BUILT FOR (2026-09-30,
+/// `harness::at_path_fixture_seating`): under the straight-line reach and the
+/// island seating, Round 25's rim is seated as one row and no arm lands on a
+/// leaned head any more (measured: 0 heads with landers on Round 25, 0 joins
+/// in a seat zone on Round 50), so every test here would grade nothing. The
+/// head-join rule reads no placement.
 fn production() -> SweepPolicy {
-    SweepPolicy::from_registry()
-        .expect("the registry supplies every sweep number")
-        .without_lip_seat()
+    crate::harness::at_path_fixture_seating(
+        SweepPolicy::from_registry()
+            .expect("the registry supplies every sweep number")
+            .without_lip_seat(),
+    )
 }
 
 /// `r = sqrt(ℓ / (X · π))` inside the registered clamps: the area law, read
@@ -553,6 +562,33 @@ fn solid_gap_mm(mesh: &Mesh, arm: &SweepArm) -> f64 {
     gap
 }
 
+/// Whether the footprint rule moved member `id`'s drawn axis: its own seat
+/// was slid onto its face, or it lands on (or tops out on) a member that was,
+/// down the chain. Read off the finished field's own records.
+fn footprint_slid(plan: &SweepPlan) -> impl Fn(u32) -> bool + '_ {
+    move |id: u32| {
+        let mut next = Some(id);
+        let mut steps = 0;
+        while let Some(at) = next {
+            let Some(strut) = plan.struts.iter().find(|strut| strut.id == at) else {
+                return false;
+            };
+            if strut.seat_face.footprint == Footprint::MovedOntoFace {
+                return true;
+            }
+            next = match strut.landing {
+                Landing::Strut { id, .. } => Some(id),
+                _ => strut.seat_on_strut,
+            };
+            steps += 1;
+            if steps > plan.struts.len() {
+                return false;
+            }
+        }
+        false
+    }
+}
+
 /// Whether member `id` of `before` has the same landing and path in `after`.
 fn unmoved(before: &SweepPlan, after: &SweepPlan, id: u32) -> bool {
     let find = |plan: &SweepPlan| plan.struts.iter().find(|strut| strut.id == id).cloned();
@@ -593,10 +629,36 @@ fn the_seat_zone_of_every_head_arm_is_own_load_sized() {
         rule.joins_in_seat_zone_before,
         rule.landers_moved
     );
+    // RE-DERIVED 2026-09-30 (fix/chitubox-geometry), measured. Until then this
+    // read "the finished field's census is empty". The census is taken on the
+    // EMITTED field, after the footprint rule, which slides a seat along its
+    // face so its whole contact disc lies on it and re-tilts that member's
+    // shaft (and every member joined to it). With the owner's ChituBox ball
+    // ratio, plate arm 42 slides 0.447 mm for its disc, and the re-tilted ring
+    // of the sum-sized section under lander 77's join on its head comes within
+    // the clearance: the census lists (77, 42). Contact area is the only seat
+    // criterion (challenger ruling 2026-09-29, `footprint.rs`: a slide that
+    // puts a disc back on its face is taken whatever it does to the shaft,
+    // and the census warns). Measured the other way: refusing every slide
+    // that lists a join (a head-join guard in the footprint move check)
+    // empties the census and leaves arm 42 with 45 % of its disc on the face,
+    // the outcome that ruling rejected (Round_100 arm 195, 22 %). So what the
+    // census may still list here is exactly the joins whose HOST's drawn axis
+    // a later footprint slide re-tilted (the sum-sized section is the
+    // host's): the head-join rule itself left none, and the geometric grade
+    // above (no section wider than its own contact in a seat zone) stays
+    // strict.
+    let slid = footprint_slid(&plan);
+    let unaccounted: Vec<(u32, u32)> = rule
+        .in_seat_zone_after
+        .iter()
+        .copied()
+        .filter(|(_, host)| !slid(*host))
+        .collect();
     assert!(
-        rule.in_seat_zone_after.is_empty(),
-        "the finished field's census still lists {:?}",
-        rule.in_seat_zone_after
+        unaccounted.is_empty(),
+        "the finished field's census lists {unaccounted:?}, which no footprint slide re-tilted: \
+         the head-join rule left them"
     );
     let (landers, _) = moved_members_clear_the_model(&unruled, &plan, &mesh);
     assert!(
@@ -707,11 +769,22 @@ fn without_the_rule_a_leaned_head_reaches_its_seat_plane_with_the_sum() {
 /// within reach. That section touches nothing, so the rule leaves the join
 /// where it is: every lander of an arm whose sums cross the plane only off
 /// the model keeps its landing and its path.
+///
+/// **Graded at the seat faces before 2026-09-30, and why.** Arm 6's seat
+/// plane is a face 75° from horizontal, and the seat-face ruling of
+/// 2026-09-30 (`tip_landing::SeatFaceRule`) no longer lets a tip carry a face
+/// steeper than the overhang band's steep end (57.5°): measured on this
+/// fixture, arm 6 then carries the shallow underside beside it and no sum
+/// crosses any seat plane off the model, so the test graded nothing. The
+/// head-join rule's off-model branch reads the seat plane it is handed and not
+/// how the face was chosen, so the branch is graded with the pre-ruling seat
+/// faces (`without_seat_face_band`) on both plans; the ruled seat faces are
+/// graded by `seat_face.rs` and `plinth-pipeline tip_trim::`.
 #[test]
 fn a_sum_that_crosses_the_seat_plane_off_the_model_is_left_alone() {
     let mesh = flipped(&mesh_for(&round_25()));
-    let unruled = round_25_flipped_with(&production().without_head_join());
-    let plan = round_25_flipped_with(&production());
+    let unruled = round_25_flipped_with(&production().without_seat_face_band().without_head_join());
+    let plan = round_25_flipped_with(&production().without_seat_face_band());
     let clearance = final_clearance_mm();
     let off_model: Vec<u32> = grade(&unruled, &landed_arms(&[&unruled]), &mesh)
         .into_iter()
@@ -838,8 +911,14 @@ fn on_round_50_no_lander_near_a_head_puts_the_sum_in_its_seat_zone() {
 /// the rule touching this head.
 #[test]
 fn a_head_that_already_clears_keeps_its_join() {
-    let on = round_25_flipped_with(&production());
-    let off = round_25_flipped_with(&production().without_head_join());
+    // RE-SCOPED 2026-09-30 (fix/chitubox-geometry), measured: with the owner's
+    // ChituBox ball ratios the production Round 25 flipped has no head that
+    // already clears ("no head was already clear, so this test compares
+    // nothing"). Graded at the X its path was built at
+    // (`crate::harness::PATH_FIXTURE_X_ALLOWED` = 12); the rule reads no X.
+    let at = crate::harness::at_path_fixture_x;
+    let on = round_25_flipped_with(&at(production()));
+    let off = round_25_flipped_with(&at(production().without_head_join()));
     let listed: Vec<u32> = off
         .report
         .head_join

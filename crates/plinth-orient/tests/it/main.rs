@@ -11,6 +11,7 @@
 //! new test belongs here as `tests/it/<name>.rs` plus a `mod` line. See
 //! `docs/development.md`, "Where integration tests go".
 
+mod as_drawn;
 mod display_face_objective;
 mod flat_face_poses;
 mod no_private_vector_algebra;
@@ -18,3 +19,4 @@ mod orientation_dense_sweep;
 mod orientation_rederivation;
 mod orientation_scoring;
 mod peel_demand_override;
+mod tessellation_invariance;

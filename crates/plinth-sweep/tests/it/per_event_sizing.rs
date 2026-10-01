@@ -100,8 +100,10 @@ fn setup(mesh: &Mesh, top_z: f64, extent: f64, per_event: bool) -> Setup {
         owner_growth_ceiling_mm: policy.owner_growth_ceiling_mm,
         alpha: plinth_sweep::peel::alpha(policy.peel_field_mode),
         lamina_reach_mm: policy.kappa * h,
+        straight_reach: policy.straight_reach,
         tip_column_roots: true,
         per_event,
+        handed_column_ledger: true,
     };
     Setup {
         grid,
@@ -178,6 +180,7 @@ fn size_one_arm(setup: &Setup, strut: SweepStrut) -> (SweepStrut, down_sweep::Do
         setup.sizing,
         InsertionPolicy::disabled(),
         &DrainKeepOut::none(),
+        &down_sweep::UnrootedColumns::none(),
     );
     (struts.remove(0), outcome)
 }

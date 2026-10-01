@@ -29,7 +29,19 @@
 //! In the same layer rasters the sweep placed the tip with, using the ERODED
 //! carrier mask (`carry`: full containment, eroded one cell in Y), so a
 //! boundary cell never counts as face. The disc is sampled on a lattice of the
-//! grid's own pitch laid in its own plane. A sample is ON the face when the
+//! grid's own pitch laid in its own plane, AND ON ITS RIM (chitubox-geometry,
+//! 2026-09-30): points on the disc's own circle no more than a quarter pitch
+//! apart ([`RIM_SAMPLES_PER_PITCH`]). The lattice alone never looks past its
+//! outermost point inside the circle, up to one pitch short of the rim, so a
+//! rim that hung off the face by less than a pitch was graded on it: the
+//! flipped `Round 25` under the owner's ChituBox ball ratio emitted one disc
+//! 0.0153 mm off its face, graded on-face by every lattice point. A rim point
+//! in a carried cell is on the face (the carrier mask is full containment);
+//! between two rim points a quarter pitch apart the circle can cut a corner of
+//! a cell no sample sits in, by at most its sagitta, `(pitch/4)² / 8r`, which
+//! is 0.0004 mm at the smallest registered tip. Moves are verified the same
+//! way: the disc the lowering re-derives for a moved seat is sampled, lattice
+//! and rim, in one more batched raster pass per round. A sample is ON the face when the
 //! model is carried in its column within the raster's own vertical
 //! uncertainty above it: up to two laminae (the slice is taken at the lamina
 //! mid-plane, so the first slice showing a face can be one lamina above it,
@@ -98,6 +110,12 @@ use crate::{Footprint, Landing, SweepStrut};
 /// a disc is on its face.
 pub const SEARCH_RADIUS_BALL_DIAMETERS: f64 = 1.0;
 
+/// Rim samples per grid pitch of the disc's circumference: a quarter-pitch
+/// spacing, a resolution of the raster itself and not a physical number. The
+/// circle cuts a cell corner no rim sample sits in by at most the sagitta of a
+/// quarter-pitch chord (see the module doc).
+pub const RIM_SAMPLES_PER_PITCH: f64 = 4.0;
+
 /// What the footprint rule did to one field.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FootprintOutcome {
@@ -158,6 +176,13 @@ pub struct FootprintOutcome {
     /// candidate rounds re-derived: the path hits.
     pub disc_samples: usize,
     pub search_samples: usize,
+    /// Samples of the re-derived discs of proposed moves (lattice and rim),
+    /// graded before a move is accepted (chitubox-geometry, 2026-09-30).
+    pub verify_samples: usize,
+    /// Tips whose every LATTICE sample is on the face but a RIM sample is
+    /// not: the overhangs the lattice alone graded on-face. The path-hit
+    /// witness for the rim samples.
+    pub tips_off_face_at_rim_only: usize,
     pub layers_rasterised: usize,
     pub rounds: usize,
 }
@@ -376,8 +401,36 @@ impl Frame {
     }
 }
 
-/// A tip's disc frame and the lattice offsets its disc covers.
-type DiscLattice = (Frame, Vec<(i32, i32)>);
+/// A tip's disc frame, the lattice offsets its disc covers, and its rim
+/// points (in pitches, about the disc centre).
+type DiscLattice = (Frame, Vec<(i32, i32)>, Vec<(f64, f64)>);
+
+/// Points ON a disc of `radius` pitches, at most `1 / RIM_SAMPLES_PER_PITCH`
+/// of a pitch apart along the circle, in pitches about its centre; never
+/// fewer than eight.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "a rim of a few pitches gives a small positive sample count"
+)]
+fn rim_points(radius_in_pitches: f64) -> Vec<(f64, f64)> {
+    if !(radius_in_pitches.is_finite() && radius_in_pitches > 0.0) {
+        return Vec::new();
+    }
+    let count = (std::f64::consts::TAU * radius_in_pitches * RIM_SAMPLES_PER_PITCH)
+        .ceil()
+        .max(8.0) as usize;
+    (0..count)
+        .map(|index| {
+            let angle = std::f64::consts::TAU * index as f64 / count as f64;
+            (
+                radius_in_pitches * angle.cos(),
+                radius_in_pitches * angle.sin(),
+            )
+        })
+        .collect()
+}
 
 /// The column cell and lamina window a point on the seat plane is graded in.
 #[expect(
@@ -516,29 +569,43 @@ pub(crate) fn apply(
         .map(|disc| {
             let disc = disc.as_ref().filter(|disc| disc.radius_mm > 0.0)?;
             let frame = Frame::of(disc)?;
-            Some((frame, disc_offsets(disc.radius_mm / pitch)))
+            Some((
+                frame,
+                disc_offsets(disc.radius_mm / pitch),
+                rim_points(disc.radius_mm / pitch),
+            ))
         })
         .collect();
     let mut samples = Vec::new();
-    let mut owner: Vec<usize> = Vec::new();
+    // (arm, whether the sample is on the rim)
+    let mut owner: Vec<(usize, bool)> = Vec::new();
     for (arm, entry) in frames.iter().enumerate() {
-        let Some((frame, offsets)) = entry else {
+        let Some((frame, offsets, rim)) = entry else {
             continue;
         };
-        for &(u, v) in offsets {
-            let p = frame.point(pitch, f64::from(u), f64::from(v));
+        let lattice = offsets
+            .iter()
+            .map(|&(u, v)| (f64::from(u), f64::from(v), false));
+        let rim = rim.iter().map(|&(u, v)| (u, v, true));
+        for (u, v, on_rim) in lattice.chain(rim) {
+            let p = frame.point(pitch, u, v);
             samples.push(sample_at(grid, plate_z, height, layers, frame, p));
-            owner.push(arm);
+            owner.push((arm, on_rim));
         }
     }
     outcome.disc_samples = samples.len();
     let hit = carried(grid, slices, &samples, &mut outcome.layers_rasterised);
     let mut on = vec![0_usize; arms.len()];
     let mut total = vec![0_usize; arms.len()];
-    for (index, &arm) in owner.iter().enumerate() {
+    let mut lattice_missed = vec![false; arms.len()];
+    for (index, &(arm, on_rim)) in owner.iter().enumerate() {
         total[arm] += 1;
         on[arm] += usize::from(hit[index]);
+        lattice_missed[arm] |= !on_rim && !hit[index];
     }
+    outcome.tips_off_face_at_rim_only = (0..arms.len())
+        .filter(|&arm| total[arm] > 0 && on[arm] < total[arm] && !lattice_missed[arm])
+        .count();
     // THE LIP-SEAT RULE's remedy 2 (2026-09-29): a tip whose disc is on its
     // face but whose shaft the seat trim cuts outside its ball joins the same
     // search, for a seat further along the same face where the moved arm keeps
@@ -582,7 +649,7 @@ pub(crate) fn apply(
     let mut searches: Vec<Search> = Vec::with_capacity(failing.len());
     let mut lattice: Vec<Sample> = Vec::new();
     for &arm in &failing {
-        let Some((frame, offsets)) = &frames[arm] else {
+        let Some((frame, offsets, _)) = &frames[arm] else {
             continue;
         };
         // How far the lean put the disc centre from the seat, in the plane.
@@ -605,7 +672,9 @@ pub(crate) fn apply(
             reason = "a search radius of about one ball diameter over the grid pitch is small"
         )]
         let search_steps = (search_mm / pitch).floor() as i32;
-        let half_width = disc_reach + search_steps;
+        // One more pitch than the lattice offsets reach: the rim, read back at
+        // its nearest lattice point, lies up to a pitch beyond them.
+        let half_width = disc_reach + 1 + search_steps;
         let first = lattice.len();
         for u in -half_width..=half_width {
             for v in -half_width..=half_width {
@@ -671,14 +740,26 @@ pub(crate) fn apply(
         let mut proposals: Vec<(usize, (i32, i32))> = Vec::new();
         for &slot in &pending {
             let search = &mut searches[slot];
-            let Some((_, offsets)) = &frames[search.arm] else {
+            let Some((_, offsets, rim)) = &frames[search.arm] else {
                 continue;
             };
+            // The rim read back at its nearest search-lattice point: a
+            // pruning prefilter only. The disc the move really gets is graded
+            // exactly, lattice and rim, after the lowering re-derives it.
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a rim coordinate of a few pitches is small"
+            )]
+            let rim_cells: Vec<(i32, i32)> = rim
+                .iter()
+                .map(|&(u, v)| (u.round() as i32, v.round() as i32))
+                .collect();
             while search.next < search.candidates.len() {
                 let (i, j) = search.candidates[search.next];
                 search.next += 1;
                 if offsets
                     .iter()
+                    .chain(&rim_cells)
                     .all(|&(u, v)| on_lattice(search, u + i, v + j))
                 {
                     proposals.push((slot, (i, j)));
@@ -695,14 +776,15 @@ pub(crate) fn apply(
                 let arm = &arms[searches[slot].arm];
                 // The move is a lattice step IN the disc's plane, so the seat
                 // slides along the face and keeps its height above it.
-                let shift = frames[searches[slot].arm]
-                    .as_ref()
-                    .map_or([0.0; 3], |(frame, _)| {
-                        geom_kernel::vec3::sub(
-                            frame.point(pitch, f64::from(i), f64::from(j)),
-                            frame.centre,
-                        )
-                    });
+                let shift =
+                    frames[searches[slot].arm]
+                        .as_ref()
+                        .map_or([0.0; 3], |(frame, _, _)| {
+                            geom_kernel::vec3::sub(
+                                frame.point(pitch, f64::from(i), f64::from(j)),
+                                frame.centre,
+                            )
+                        });
                 SweepArm {
                     seat_mm: geom_kernel::vec3::add(arm.seat_mm, shift),
                     seat_face_point_mm: arm
@@ -747,7 +829,13 @@ pub(crate) fn apply(
             moved_bites[at] = bite;
         }
         let mut resolved = vec![false; searches.len()];
-        let mut on_face: Vec<(usize, [f64; 3])> = Vec::with_capacity(proposals.len());
+        // The real disc of every proposal still standing, sampled on its own
+        // lattice AND its rim in its own plane, all of them graded in ONE
+        // ascending raster pass: exactly how a disc is graded in stage 1, so
+        // a move is accepted only onto a seat whose whole disc is on the face.
+        let mut verify: Vec<(usize, [f64; 3])> = Vec::with_capacity(proposals.len());
+        let mut verify_samples: Vec<Sample> = Vec::new();
+        let mut verify_span: Vec<(usize, usize)> = Vec::with_capacity(proposals.len());
         for (((slot, _), (moved, disc)), moved_bite) in proposals
             .iter()
             .zip(moved_arms.iter().zip(&rederived))
@@ -762,39 +850,39 @@ pub(crate) fn apply(
                 outcome.moves_refused_section += 1;
                 continue;
             }
-            let Some((frame, _)) = &frames[search.arm] else {
-                continue;
-            };
             let Some(disc) = disc.filter(|disc| disc.radius_mm > 0.0) else {
                 continue;
             };
-            // The real disc, sampled on its own lattice and read back on the
-            // search lattice at the nearest point.
-            let real_ok = disc_offsets(disc.radius_mm / pitch).iter().all(|&(u, v)| {
-                let p = geom_kernel::vec3::add(
-                    disc.centre_mm,
-                    geom_kernel::vec3::add(
-                        geom_kernel::vec3::scale(frame.e1, pitch * f64::from(u)),
-                        geom_kernel::vec3::scale(frame.e2, pitch * f64::from(v)),
-                    ),
-                );
-                let d = geom_kernel::vec3::sub(p, frame.centre);
-                let lu = geom_kernel::vec3::dot(d, frame.e1) / pitch;
-                let lv = geom_kernel::vec3::dot(d, frame.e2) / pitch;
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "a lattice coordinate within the search window is small"
-                )]
-                let (lu, lv) = (lu.round() as i32, lv.round() as i32);
-                on_lattice(search, lu, lv)
-            });
-            if real_ok {
-                on_face.push((
-                    *slot,
-                    geom_kernel::vec3::sub(moved.seat_mm, arms[search.arm].seat_mm),
-                ));
+            let Some(real) = Frame::of(&disc) else {
+                continue;
+            };
+            let first = verify_samples.len();
+            let lattice = disc_offsets(disc.radius_mm / pitch)
+                .into_iter()
+                .map(|(u, v)| (f64::from(u), f64::from(v)));
+            for (u, v) in lattice.chain(rim_points(disc.radius_mm / pitch)) {
+                let p = real.point(pitch, u, v);
+                verify_samples.push(sample_at(grid, plate_z, height, layers, &real, p));
             }
+            verify_span.push((first, verify_samples.len()));
+            verify.push((
+                *slot,
+                geom_kernel::vec3::sub(moved.seat_mm, arms[search.arm].seat_mm),
+            ));
         }
+        outcome.verify_samples += verify_samples.len();
+        let verify_hit = carried(
+            grid,
+            slices,
+            &verify_samples,
+            &mut outcome.layers_rasterised,
+        );
+        let on_face: Vec<(usize, [f64; 3])> = verify
+            .into_iter()
+            .zip(verify_span)
+            .filter(|(_, (first, end))| verify_hit[*first..*end].iter().all(|&hit| hit))
+            .map(|(entry, _)| entry)
+            .collect();
         // THE MOVE CHECK, once per round over the whole batch: the moves
         // accepted so far plus this round's, every member they displace
         // judged on its drawn ends. A broken rule refuses every move of THIS

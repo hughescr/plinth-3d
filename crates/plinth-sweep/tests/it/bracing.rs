@@ -67,7 +67,12 @@ fn brace_pair() -> &'static SweepPlan {
     static PLAN: OnceLock<SweepPlan> = OnceLock::new();
     PLAN.get_or_init(|| {
         let mesh = make_brace_pair().expect("the brace pair fixture");
-        sweep_with(&mesh, 0.0, &policy())
+        // Graded at the seat placement this fixture was built for
+        // (`harness::at_path_fixture_seating`): under the straight-line reach
+        // and the island seating the pair's posts take one forced merge and
+        // need no `|X|` at all (0 braces, measured 2026-09-30), so the tie
+        // tests would grade nothing. No bracing rule reads the placement.
+        sweep_with(&mesh, 0.0, &harness::at_path_fixture_seating(policy()))
     })
 }
 
@@ -354,6 +359,26 @@ fn the_stilt_plate_leaves_no_unbraced_run() {
 /// reads no plane at all: the planes are read off the finished geometry by the
 /// test itself, from the two posts' axis cells at the top of each band.
 fn assert_ties_hold_in_every_direction(name: &str, plan: &SweepPlan) {
+    let (graded, one_plane) = ties_left_unheld(plan);
+    println!(
+        "{name}: {graded} needed ties graded, {} leave a direction of sway unheld: {one_plane:?}",
+        one_plane.len()
+    );
+    assert!(graded > 0, "{name}: anti-vacuity, no tie needed a cross");
+    assert!(
+        one_plane.is_empty(),
+        "{name}: {} ties leave a direction of sway unheld: {one_plane:?}",
+        one_plane.len()
+    );
+}
+
+/// A post's run over the limit with its crosses out, and the planes of the
+/// crosses over it: `(post, k_lo, k_top, planes)`.
+type UnheldTie = (u32, usize, usize, Vec<(i64, i64)>);
+
+/// The needed ties graded, and those whose crosses leave a direction of sway
+/// unheld (see [`assert_ties_hold_in_every_direction`]).
+fn ties_left_unheld(plan: &SweepPlan) -> (usize, Vec<UnheldTie>) {
     let law = law();
     let grid = &plan.grid;
     let all = crosses(plan);
@@ -434,16 +459,7 @@ fn assert_ties_hold_in_every_direction(name: &str, plan: &SweepPlan) {
             }
         }
     }
-    println!(
-        "{name}: {graded} needed ties graded, {} leave a direction of sway unheld: {one_plane:?}",
-        one_plane.len()
-    );
-    assert!(graded > 0, "{name}: anti-vacuity, no tie needed a cross");
-    assert!(
-        one_plane.is_empty(),
-        "{name}: {} ties leave a direction of sway unheld: {one_plane:?}",
-        one_plane.len()
-    );
+    (graded, one_plane)
 }
 
 #[test]
@@ -453,7 +469,60 @@ fn every_needed_tie_holds_in_every_direction_on_the_stilt_plate() {
 
 #[test]
 fn every_needed_tie_holds_in_every_direction_on_the_brace_pair() {
-    assert_ties_hold_in_every_direction("brace pair", brace_pair());
+    // RE-SCOPED 2026-09-30 (fix/chitubox-geometry), measured. The strict
+    // claim is graded WITH THE LIP-SEAT RULE OFF, as the head-join fixtures
+    // are: with the owner's ChituBox ball ratio (a smaller ball on every tip)
+    // the lip-seat rule, which measures the seat trim's bite into a shaft with
+    // the ball the lowering draws, re-lands 14 of the pair's 22 arms, and arm
+    // 18 (a 27-layer branch on post 4 at layer 673) becomes a 700-layer
+    // (35 mm) plate post of root radius 0.179 mm against an unbraced limit of
+    // 8.9 mm. The lane ties it to post 4 in one plane only (thicken refused
+    // for a root disc that would touch another, no mast admitted) and WARNS
+    // (`UnbracedWarning { strut_id: 18, k_lo: 0, k_top: 700 }`). With the
+    // lip-seat rule off arm 18 stays the branch, and every needed tie holds in
+    // every direction (4 graded, 0 unheld). On the production field the lane's
+    // contract is graded instead: a tie it could not close in every direction
+    // is NAMED by its warnings (emit and warn), never left silent.
+    //
+    // MERGED 2026-10-01 (land of fix/chitubox-geometry onto develop 3372093):
+    // the lip-seat-off field also runs at the seat placement the fixture was
+    // built for (`harness::at_path_fixture_seating`), as `brace_pair()` does.
+    // At the production placement the pair needs no `|X|` at all
+    // (fix/lattice-align, measured 2026-09-30), and the merged tree graded 0
+    // ties here (measured 2026-10-01): the anti-vacuity check went red.
+    static NO_LIP_SEAT: OnceLock<SweepPlan> = OnceLock::new();
+    let without_lip_seat = NO_LIP_SEAT.get_or_init(|| {
+        let mesh = make_brace_pair().expect("the brace pair fixture");
+        sweep_with(
+            &mesh,
+            0.0,
+            &harness::at_path_fixture_seating(policy().without_lip_seat()),
+        )
+    });
+    assert_ties_hold_in_every_direction("brace pair, lip-seat rule off", without_lip_seat);
+    let plan = brace_pair();
+    let (graded, unheld) = ties_left_unheld(plan);
+    assert!(
+        graded > 0,
+        "brace pair: anti-vacuity, no tie needed a cross"
+    );
+    let warned = &plan.report.slenderness_lane.warnings;
+    let silent: Vec<_> = unheld
+        .iter()
+        .filter(|(post, k_lo, k_top, _)| {
+            !warned.iter().any(|warning| {
+                warning.strut_id == *post && warning.k_lo <= *k_lo && *k_top <= warning.k_top
+            })
+        })
+        .collect();
+    println!(
+        "brace pair: {} ties left unheld, all warned: {warned:?}",
+        unheld.len()
+    );
+    assert!(
+        silent.is_empty(),
+        "brace pair: ties leave a direction of sway unheld and the lane does not warn: {silent:?}"
+    );
 }
 
 /// Test 8 of the field report: **"forced merges put back" counts only merges

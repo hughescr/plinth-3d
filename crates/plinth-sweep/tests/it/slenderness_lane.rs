@@ -204,7 +204,11 @@ fn deleting_each_rung_hands_the_work_to_the_next_one_down() {
 #[test]
 fn every_diagonal_rises_and_none_is_shallower_than_the_overhang_law_admits() {
     let mesh = make_brace_pair().expect("the brace-pair fixture");
-    let plan = sweep_with(&mesh, 0.0, &policy());
+    // Graded at the seat placement the fixture was built for
+    // (`harness::at_path_fixture_seating`): at the production placement the
+    // pair's over-limit runs are answered by one forced merge and no brace
+    // (measured 2026-09-30). The diagonal rule reads no placement.
+    let plan = sweep_with(&mesh, 0.0, &harness::at_path_fixture_seating(policy()));
     let braces = braces(&plan);
     assert!(
         !braces.is_empty(),

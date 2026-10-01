@@ -112,6 +112,12 @@ pub struct DownSweepOutcome {
     /// load it could have routed and says so, rather than routing load along a
     /// path it never proved.
     pub route_not_converged: u64,
+    /// Straight sightlines the routing field priced and found clear, and those
+    /// that crossed empty space and bent instead (`reach::any_angle_relax`).
+    /// The path-hit witnesses that load travels on the same straight-line
+    /// metric the reach potential measures, and still goes round a hole.
+    pub route_sightlines_clear: u64,
+    pub route_sightlines_blocked: u64,
     /// Arms this down-sweep added because the AREA LAW asked for them — see
     /// [`insert_for_load`]. Zero on a field where reach already placed enough
     /// section, so it also tells "the path never ran" apart from "the path ran
@@ -190,6 +196,145 @@ pub struct DownSweepOutcome {
     /// A member no event reaches is no load's nearest carrier. Empty under the
     /// sabotage knob.
     pub reached_by_event: Vec<bool>,
+    /// `(layer, column)` pairs where a model column the up-sweep left
+    /// UNROOTED was refused as a routing root ([`UnrootedColumns`]). The
+    /// path-hit witness for the unrooted-column rule: zero on a field the
+    /// up-sweep rooted everywhere, where the rule cannot change anything.
+    pub unrooted_columns_refused: u64,
+    /// Load, in mm², that entered an unrooted column and went SIDEWAYS to a
+    /// rooted carrier in reach instead of down that column.
+    pub unrooted_load_rerouted_mm2: f64,
+    /// Load, in mm², that entered an unrooted column with no rooted carrier in
+    /// reach, and so went down its own column as it always did.
+    pub unrooted_load_kept_mm2: f64,
+    /// Reads where an unrooted column whose carried load had been sent
+    /// sideways did NOT take its own layer's peel back into the raster
+    /// ([`UnrootedColumns`], "the ledger"). The path-hit witness for that
+    /// ledger rule.
+    pub handed_columns_held: u64,
+    /// The load those reads kept out of the raster, in mm²: what the
+    /// max-field ledger would otherwise have re-added to a re-routed column at
+    /// every layer without ever counting it as injected.
+    pub handed_own_withheld_mm2: f64,
+    /// Held events whose next step was NOT sideways (the column is rooted
+    /// there, has no rooted carrier in reach, or ends), so they re-entered
+    /// the raster one layer down, counted as injected peel.
+    pub handed_events_reentered: u64,
+    /// The peel those re-entries put back into the raster, mm². Part of
+    /// `injected_load_mm2`.
+    pub handed_reentered_mm2: f64,
+}
+
+/// The model columns the up-sweep left UNROOTED, layer by layer, and the rule
+/// the down-sweep applies to them (drain-rim routing, 2026-09-30).
+///
+/// # The disagreement this closes
+///
+/// The up-sweep roots a cell when a rooted carrier lies within reach of it
+/// ([`crate::reach::ReachState::is_rooted`]). Where it cannot place one -- a
+/// drain's keep-out, measured on the Sphere's drain rim -- it leaves the cell
+/// UNROOTED and says so (`residual_demand`). The material ABOVE such a cell is
+/// often still rooted, LATERALLY, from a ring of arms beside it. The
+/// down-sweep used to ignore that: it sent a continuing model column's load
+/// straight down whatever the column stood on, so peel load walked down the
+/// shell and into the unrooted rim, where nothing carries it. On the Sphere
+/// every mm² lost was on the same 100 rim cells, and it rose 376.26 -> 405.00
+/// mm² when the arm rings moved one or two layers up (lattice-align, round 7,
+/// "Blocker 2").
+///
+/// # The rule
+///
+/// One predicate, the up-sweep's own: a model column that is not rooted at
+/// layer `k` is not a routing root at `k`. Load arriving in it from `k + 1`
+/// goes sideways, through the cover it is in, to the nearest ROOTED carrier
+/// within the same one-lamina bound every other routed cell obeys -- the
+/// carrier the up-sweep's reach claimed that material for -- and only where
+/// there is none does it go down its own column, exactly as before. An arm is
+/// always a root, wherever it stands.
+///
+/// # The ledger
+///
+/// The max-field raster keeps, per carrier cell, the larger of what arrived
+/// and the cell's own peel. In a continuing column that `max` is a no-op: the
+/// column already carries at least its own peel from above. A column whose
+/// carried load was just sent sideways arrives EMPTY, and the `max` then put
+/// its own peel back -- an event the injection gate never counted, because the
+/// column did not start there -- and the next layer sent it sideways again.
+/// Every layer of a re-routed column re-added one cell of peel: built that way
+/// the whole-run identity `injected = plate + uncarried + absorbed` missed by
+/// -558 mm² on the Sphere. So a continuing model column whose load was handed
+/// sideways holds its own peel OUT of the raster at that layer, and where the
+/// held event goes is decided one layer down by the same rule:
+///
+/// * sideways again: the raster moves nothing (the larger event the column
+///   carried already went to a rooted carrier, and this one is carried under
+///   it, as in any continuing column), and the hop is recorded although the
+///   raster holds nothing there, so the per-event pass ([`crate::per_event`]),
+///   which routes and sizes every event on its own, sends it sideways too;
+/// * anywhere else (the column is rooted there, has no rooted carrier in
+///   reach, or ends): the event RE-ENTERS the raster, counted as injected, and
+///   goes on as a cell's own load always did.
+///
+/// Holding it out for good also closes the identity, and lies the other way:
+/// measured on a slab with a drain, the raster then read 0 mm² uncarried where
+/// one single event lost 3.51 mm². With the re-entry the raster reads at least
+/// what any one event loses (`tests/it/drain_rim_routing.rs`).
+#[derive(Clone, Debug, Default)]
+pub struct UnrootedColumns {
+    by_layer: Vec<Vec<u32>>,
+    total: usize,
+}
+
+impl UnrootedColumns {
+    /// No unrooted column anywhere: the rule is off (and costs nothing).
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Room for `layers` layers, none recorded yet.
+    #[must_use]
+    pub fn with_layers(layers: usize) -> Self {
+        Self {
+            by_layer: vec![Vec::new(); layers],
+            total: 0,
+        }
+    }
+
+    /// Record, at `layer`, every covered cell the up-sweep's reach leaves
+    /// unrooted. The predicate is [`crate::reach::ReachState::is_rooted`]
+    /// itself, read once per cell on a layer that has any residual demand.
+    pub fn record_layer(&mut self, layer: usize, cover: &[bool], reach: &crate::reach::ReachState) {
+        let Some(cells) = self.by_layer.get_mut(layer) else {
+            return;
+        };
+        self.total -= cells.len();
+        cells.clear();
+        for (cell, covered) in cover.iter().enumerate() {
+            if *covered && !reach.is_rooted(cell) {
+                cells.push(u32::try_from(cell).unwrap_or(u32::MAX));
+            }
+        }
+        self.total += cells.len();
+    }
+
+    /// The cells recorded at `layer` (empty where none, or past the record).
+    #[must_use]
+    pub fn at(&self, layer: usize) -> &[u32] {
+        self.by_layer.get(layer).map_or(&[], Vec::as_slice)
+    }
+
+    /// `(layer, cell)` entries recorded, over every layer.
+    #[must_use]
+    pub const fn total(&self) -> usize {
+        self.total
+    }
+
+    /// Whether nothing is recorded, i.e. the rule cannot change anything.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.total == 0
+    }
 }
 
 /// Whether the down-sweep may add arms of its own, and how many arms the whole
@@ -257,6 +402,10 @@ pub struct SizingPolicy {
     /// the two sweeps still price the same journey the same way — see
     /// `reach::recompute_potential`.
     pub lamina_reach_mm: f64,
+    /// Whether a routed run is measured as its straight length, the same
+    /// metric the reach potential uses. See
+    /// [`crate::SweepPolicy::straight_reach`]; `false` is the sabotage form.
+    pub straight_reach: bool,
     /// Whether an arm roots the column its own axis occupies ONE LAYER UP as
     /// well as the column it occupies here. See
     /// [`crate::SweepPolicy::tip_column_roots`]; `false` is the sabotage form.
@@ -268,6 +417,13 @@ pub struct SizingPolicy {
     /// sums the per-column maxima of different events where they meet
     /// ([`crate::SweepPolicy::with_max_field_sizing`]).
     pub per_event: bool,
+    /// Whether a model column whose carried load was handed sideways holds its
+    /// own peel out of the max-field raster until its next step decides where
+    /// that event goes ([`UnrootedColumns`], "the ledger"). **On in production**, and it reads nothing unless an unrooted
+    /// column was recorded. `false` is the sabotage form: the ledger as the
+    /// round-7 experiment built it, which re-adds one cell of un-injected peel
+    /// per re-routed layer ([`crate::SweepPolicy::without_handed_column_ledger`]).
+    pub handed_column_ledger: bool,
 }
 
 /// Run the whole down-sweep over `struts`, filling their radius and carried
@@ -329,6 +485,7 @@ pub fn run(
     sizing: SizingPolicy,
     insertion: InsertionPolicy,
     keep_out: &DrainKeepOut,
+    unrooted: &UnrootedColumns,
 ) -> DownSweepOutcome {
     let l_max = sizing.x_allowed
         * core::f64::consts::PI
@@ -343,6 +500,7 @@ pub fn run(
             sizing,
             insertion,
             keep_out,
+            unrooted,
             None,
             None,
             &mut Vec::new(),
@@ -364,6 +522,7 @@ pub fn run(
             sizing,
             insertion,
             keep_out,
+            unrooted,
             Some(&triggers),
             Some(&mut log),
             &mut refused_here,
@@ -512,6 +671,7 @@ fn sweep_pass(
     sizing: SizingPolicy,
     insertion: InsertionPolicy,
     keep_out: &DrainKeepOut,
+    unrooted: &UnrootedColumns,
     triggers: Option<&HashMap<u64, f64>>,
     mut log: Option<&mut crate::per_event::RouteLog>,
     refused: &mut Vec<u64>,
@@ -570,6 +730,33 @@ fn sweep_pass(
     let mut nearest = vec![u32::MAX; cells];
     let mut distance = vec![f32::INFINITY; cells];
     let mut distance_prev = vec![f32::INFINITY; cells];
+    let mut route_anchor = vec![crate::reach::NO_ANCHOR; cells];
+    let mut route_clear: Vec<f32> = Vec::with_capacity(cells);
+    // THE UNROOTED-COLUMN RULE's scratch ([`UnrootedColumns`]). Allocated only
+    // when the up-sweep left something unrooted; on every other field the
+    // rule reads nothing and the pass is the pass it always was.
+    let rule_active = !unrooted.is_empty();
+    let rule_cells = if rule_active { cells } else { 0 };
+    // This layer: model columns the up-sweep left unrooted, which are not
+    // routing roots.
+    let mut refused_root = vec![false; rule_cells];
+    // The roots the routing field is offered: the carriers less `refused_root`.
+    let mut roots = vec![false; rule_cells];
+    // This layer: continuing model columns whose carried load went sideways
+    // ("handed"), so they hold their own peel out of the raster. Set only at
+    // recorded cells, and cleared there. `handed_prev` lists the layer above's.
+    let mut handed = vec![false; rule_cells];
+    let mut handed_prev: Vec<usize> = Vec::new();
+    // The one cell's own peel event: what a handed column holds back, and
+    // what re-enters the raster when its next step is not sideways.
+    let own_peel = area * sizing.alpha;
+    // This round: unrooted columns whose load (or, empty, whose next event) the
+    // routing sent to a rooted carrier.
+    let mut sent_sideways = vec![false; rule_cells];
+    // Cells a still-growing arm stands in at the start of this layer: arms,
+    // never model columns, so never refused as roots.
+    let mut growing_here = vec![false; rule_cells];
+    let mut growing_marked: Vec<usize> = Vec::new();
     let mut pending = vec![0.0_f64; struts.len()];
     // Per cell, this layer: whether the load an arm would read there is peel
     // that was put into the raster (arrived from above, or injected here), as
@@ -690,6 +877,26 @@ fn sweep_pass(
         for &index in &growing {
             carriers[growing_cell(&struts[index])] = true;
         }
+        // THE UNROOTED-COLUMN RULE: which model columns at this layer are not
+        // routing roots. A column the up-sweep left unrooted here, holding no
+        // arm; an arm is a root wherever it stands. Sparse: only the recorded
+        // cells are touched, and they are cleared again at the end of the
+        // layer.
+        let unrooted_here = unrooted.at(layer);
+        if rule_active {
+            for &index in &growing {
+                let cell = growing_cell(&struts[index]);
+                growing_here[cell] = true;
+                growing_marked.push(cell);
+            }
+            for &cell in unrooted_here {
+                let cell = cell as usize;
+                if masks.carry[cell] && landing_target[cell] == u32::MAX && !growing_here[cell] {
+                    refused_root[cell] = true;
+                    outcome.unrooted_columns_refused += 1;
+                }
+            }
+        }
 
         // --- spread the incoming raster into this layer's carriers, and add
         //     the carriers the AREA LAW asks for ---------------------------
@@ -726,7 +933,18 @@ fn sweep_pass(
         let mut worst_gap;
         let mut any_lost;
         let mut route_converged;
+        let mut unrooted_rerouted;
+        let mut unrooted_kept;
+        let mut held_reads;
+        let mut held_load;
+        // Peel of handed columns one layer up that re-entered the raster here
+        // (once per layer, in the first round).
+        let mut reentered_here = 0.0_f64;
+        let mut reentered_reads = 0_u64;
         let mut round = 0_usize;
+        // The routing field's clearance is built at most once per layer:
+        // `cover_above` does not change between the rounds below.
+        let mut route_clear_built = false;
         // Per-event mode inserts at most once per layer per pass: the trigger
         // table was measured before this pass, so after an insertion only the
         // re-route below is needed, and the next pass re-measures.
@@ -744,16 +962,50 @@ fn sweep_pass(
             injected_here = 0.0_f64;
             worst_gap = 0.0;
             any_lost = false;
+            unrooted_rerouted = 0.0_f64;
+            unrooted_kept = 0.0_f64;
+            held_reads = 0_u64;
+            held_load = 0.0_f64;
+            // The roots: every carrier, less the unrooted model columns. A
+            // round can add carriers (the insertion below), so this is
+            // rebuilt per round; it is the carrier raster itself wherever the
+            // rule has nothing to refuse.
+            let offered: &[bool] = if rule_active && !unrooted_here.is_empty() {
+                roots.copy_from_slice(&carriers);
+                for &cell in unrooted_here {
+                    let cell = cell as usize;
+                    sent_sideways[cell] = false;
+                    handed[cell] = false;
+                    if refused_root[cell] {
+                        roots[cell] = false;
+                    }
+                }
+                &roots
+            } else {
+                &carriers
+            };
             let route = route_within_cover(
                 grid,
                 &cover_above,
-                &carriers,
+                offered,
                 &tip_root,
-                &mut distance,
-                &mut nearest,
-                &mut via_tip,
-                &mut distance_prev,
+                if sizing.straight_reach {
+                    (sizing.lamina_reach_mm + grid.pitch_mm()) as f32
+                } else {
+                    f32::NEG_INFINITY
+                },
+                RouteFields {
+                    distance: &mut distance,
+                    nearest: &mut nearest,
+                    via_tip: &mut via_tip,
+                    previous: &mut distance_prev,
+                    anchor: &mut route_anchor,
+                    clear: &mut route_clear,
+                    clear_built: &mut route_clear_built,
+                },
             );
+            outcome.route_sightlines_clear += route.sightlines.clear;
+            outcome.route_sightlines_blocked += route.sightlines.blocked;
             route_converged = route.converged;
             let any_root = route.any_root;
             // THE ROUTING THIS LAYER ENDS WITH, recorded for the per-event
@@ -763,21 +1015,72 @@ fn sweep_pass(
             if let Some(log) = log.as_deref_mut() {
                 log.hops[layer].clear();
             }
+            // A HANDED column one layer up -- one whose carried load went
+            // sideways there -- holds nothing in this raster, but it holds its
+            // own layer's peel event, which has not gone anywhere yet. Where
+            // that event goes is decided here, by the same rule:
+            //
+            // * still unrooted, with a rooted carrier in reach: sideways, like
+            //   the load above it. The raster moves nothing (the larger event
+            //   already went that way), and the hop is recorded so the
+            //   per-event pass, which does route this event, sends it there
+            //   too rather than down into the unrooted material;
+            // * anywhere else (rooted here, no rooted carrier in reach, or the
+            //   column ends): the event goes on as the cell's own load always
+            //   did, so it RE-ENTERS the raster here and is counted as injected
+            //   -- it is peel the raster now carries that it did not carry
+            //   before, and from here the column is an ordinary one. Decided
+            //   once per layer, in the first round; a later round only adds
+            //   roots.
+            if rule_active {
+                for &cell in &handed_prev {
+                    let target = if any_root { nearest[cell] } else { u32::MAX };
+                    let reachable = target != u32::MAX
+                        && f64::from(distance[cell]) <= sizing.lamina_reach_mm + grid.pitch_mm();
+                    if refused_root[cell] && reachable {
+                        // With load (a lander put some here), the loop below
+                        // sends it and records the hop.
+                        if load_in[cell] <= 0.0 {
+                            sent_sideways[cell] = true;
+                            if let Some(log) = log.as_deref_mut() {
+                                log.record_hop(layer, cell, Some(target as usize));
+                            }
+                        }
+                    } else if round == 0 && load_in[cell] < own_peel {
+                        reentered_here += own_peel - load_in[cell];
+                        reentered_reads += 1;
+                        load_in[cell] = own_peel;
+                    }
+                }
+            }
             for cell in 0..cells {
                 let load = load_in[cell];
                 if load <= 0.0 {
                     continue;
                 }
                 incoming += load;
-                if carriers[cell] {
+                let refused = rule_active && refused_root[cell];
+                if carriers[cell] && !refused {
                     load_out[cell] += load;
                     placed += load;
                     continue;
                 }
-                spread_hits += 1;
                 let target = if any_root { nearest[cell] } else { u32::MAX };
                 let reachable = target != u32::MAX
                     && f64::from(distance[cell]) <= sizing.lamina_reach_mm + grid.pitch_mm();
+                if refused {
+                    if !reachable {
+                        // No rooted carrier in reach: the load goes down its
+                        // own column, as it always did, and is counted.
+                        unrooted_kept += load;
+                        load_out[cell] += load;
+                        placed += load;
+                        continue;
+                    }
+                    sent_sideways[cell] = true;
+                    unrooted_rerouted += load;
+                }
+                spread_hits += 1;
                 if let Some(log) = log.as_deref_mut() {
                     log.record_hop(layer, cell, reachable.then_some(target as usize));
                 }
@@ -843,11 +1146,39 @@ fn sweep_pass(
             // 708.99 mm2 against a 20-degree-tilted Round 25's XY silhouette of
             // about 491 mm2, and it grew with the arm count, which is exactly
             // the wrong direction for a conservation total.
-            let own = area * sizing.alpha;
+            //
+            // THE LEDGER OF A HANDED COLUMN ([`UnrootedColumns`]). A continuing
+            // model column whose carried load the routing just sent sideways
+            // arrives here empty, and `max` would put its own peel back: an
+            // event the gate below never counts (the column did not start
+            // here), which the next layer sends sideways again, once per
+            // layer. Such a column keeps its own peel OUT of the raster here
+            // and the read is counted. Where that event goes is decided one
+            // layer down, by the same rule: sideways again (the raster moves
+            // nothing; it is carried under the larger event the column already
+            // handed on), or anywhere else, where it re-enters the raster as
+            // counted injected peel. Only model columns: an arm reads its own
+            // per-layer event as it always has.
+            let own = own_peel;
             for cell in 0..cells {
                 if carriers[cell] {
-                    let combined = load_out[cell].max(own);
                     let injects = !carriers_above[cell] && !continues_above[cell];
+                    if rule_active && sizing.handed_column_ledger && !injects {
+                        let model_column = masks.carry[cell]
+                            && landing_target[cell] == u32::MAX
+                            && !growing_here[cell];
+                        if model_column && sent_sideways[cell] {
+                            handed[cell] = true;
+                            if own > load_out[cell] {
+                                held_reads += 1;
+                                held_load += own - load_out[cell];
+                            }
+                            peel_fed[cell] = load_out[cell] > 0.0;
+                            max_hits += 1;
+                            continue;
+                        }
+                    }
+                    let combined = load_out[cell].max(own);
                     peel_fed[cell] = load_out[cell] > 0.0 || (injects && combined > load_out[cell]);
                     if injects {
                         injected_here += combined - load_out[cell];
@@ -971,9 +1302,17 @@ fn sweep_pass(
         outcome.uncarried_load_mm2 += lost + misrouted;
         outcome.misrouted_load_mm2 += misrouted;
         outcome.tip_column_root_load_mm2 += tip_root_load;
+        outcome.unrooted_load_rerouted_mm2 += unrooted_rerouted;
+        outcome.unrooted_load_kept_mm2 += unrooted_kept;
+        outcome.handed_columns_held += held_reads;
+        outcome.handed_own_withheld_mm2 += held_load;
+        outcome.handed_events_reentered += reentered_reads;
+        outcome.handed_reentered_mm2 += reentered_here;
         outcome.spread_search_hits += spread_hits;
         outcome.max_combine_hits += max_hits;
-        outcome.injected_load_mm2 += injected_here;
+        // A handed column's held event that re-entered the raster is peel put
+        // INTO the raster here, and the conservation total books it so.
+        outcome.injected_load_mm2 += injected_here + reentered_here;
         if any_lost || misrouted > 0.0 {
             outcome.uncarried_lowest_layer = Some(layer);
             if worst_gap > outcome.uncarried_worst_gap_mm {
@@ -1356,6 +1695,22 @@ fn sweep_pass(
         // This layer's cover is the next iteration's "above".
         cover_above.copy_from_slice(&masks.cover);
         carriers_above.copy_from_slice(&carriers);
+        if rule_active {
+            handed_prev.clear();
+            for &cell in unrooted_here {
+                let cell = cell as usize;
+                if handed[cell] {
+                    handed_prev.push(cell);
+                }
+                handed[cell] = false;
+                refused_root[cell] = false;
+                sent_sideways[cell] = false;
+            }
+            for &cell in &growing_marked {
+                growing_here[cell] = false;
+            }
+            growing_marked.clear();
+        }
     }
 
     // Anything still in the raster at the bottom of the stack reached the
@@ -1574,13 +1929,17 @@ fn insert_for_load(
             if scratch.accepted.len() >= extra || struts.len() >= max_struts {
                 break;
             }
-            if crate::chamfer_distance_mm(grid, cell, host_cell) < separation_mm {
+            // The insertion's own spacing test, unchanged by the 2026-09-30
+            // metric change: it is a spacing rule for the area law's extra
+            // carriers, not a reach test, and it keeps the chamfer it was
+            // built and measured with (`insertion_spacing_mm`).
+            if insertion_spacing_mm(grid, cell, host_cell) < separation_mm {
                 continue;
             }
             if scratch
                 .accepted
                 .iter()
-                .any(|&taken| crate::chamfer_distance_mm(grid, cell, taken) < separation_mm)
+                .any(|&taken| insertion_spacing_mm(grid, cell, taken) < separation_mm)
             {
                 continue;
             }
@@ -1698,10 +2057,14 @@ fn size_arm(carried_mm2: f64, sizing: SizingPolicy) -> f64 {
 ///
 /// Roots (`distance = 0`) are the cells of `cover_above` whose column is a
 /// CARRIER at layer k — model material or a live arm. Travel is restricted to
-/// `cover_above` and priced on the same 8-neighbour chamfer the reach potential
-/// uses (`p`, `p√2`), so "the down-sweep can route this load" and "the up-sweep
-/// called this cell rooted" are one predicate on one metric over one domain.
-/// Returns whether any root exists at all.
+/// `cover_above` and priced on the same any-angle metric the reach potential
+/// uses ([`crate::reach::any_angle_relax`]: the straight length wherever the
+/// sightline lies in the cover, one raster step where it does not), so "the
+/// down-sweep can route this load" and "the up-sweep called this cell rooted"
+/// are one predicate on one metric over one domain. `limit_mm` is the routing
+/// bound the caller tests `distance` against; beyond it the field is still an
+/// upper bound but is no longer measured exactly. Returns whether any root
+/// exists at all.
 ///
 /// This is what keeps the spread batch-first. A per-source ring search would
 /// cost 5,700 probes per cell — 4e9 on one disc layer — and a per-item search
@@ -1717,34 +2080,35 @@ fn size_arm(carried_mm2: f64, sizing: SizingPolicy) -> f64 {
 /// sweeps until the field stops moving, under the same bound and the same
 /// "report, never refuse" rule as `reach::recompute_potential`, and the caller
 /// counts the layers that hit the bound.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one routing field reads the grid, the cover it walks in, the two root sets it may \
-          start from, and writes the three parallel per-cell rasters that ARE its answer \
-          (distance, nearest, and which of the two root sets that nearest came from); bundling \
-          the rasters into a struct would move the argument list rather than shorten it, and \
-          they are reused across every layer so they cannot be returned by value"
-)]
 fn route_within_cover(
     grid: &Grid,
     cover_above: &[bool],
     carriers: &[bool],
     tip_root: &[u32],
-    distance: &mut [f32],
-    nearest: &mut [u32],
-    via_tip: &mut [bool],
-    previous: &mut [f32],
+    limit_mm: f32,
+    fields: RouteFields<'_>,
 ) -> RouteOutcome {
+    let RouteFields {
+        distance,
+        nearest,
+        via_tip,
+        previous,
+        anchor,
+        clear,
+        clear_built,
+    } = fields;
     let cols = grid.cols();
     let rows = grid.rows();
     let pitch = grid.pitch_mm() as f32;
-    let diagonal = pitch * core::f32::consts::SQRT_2;
+    let mut sight = crate::reach::Sightlines::default();
     let mut any_root = false;
     for cell in 0..grid.cells() {
         via_tip[cell] = false;
+        anchor[cell] = crate::reach::NO_ANCHOR;
         if cover_above[cell] && carriers[cell] {
             distance[cell] = 0.0;
             nearest[cell] = u32::try_from(cell).unwrap_or(u32::MAX);
+            anchor[cell] = nearest[cell];
             any_root = true;
         } else if tip_root[cell] != u32::MAX {
             // A LEANED ARM'S OWN AXIS, ONE LAYER UP. The load in this column
@@ -1754,6 +2118,7 @@ fn route_within_cover(
             // only ADD roots -- it never redirects load that already had one.
             distance[cell] = 0.0;
             nearest[cell] = tip_root[cell];
+            anchor[cell] = u32::try_from(cell).unwrap_or(u32::MAX);
             via_tip[cell] = true;
             any_root = true;
         } else {
@@ -1765,22 +2130,50 @@ fn route_within_cover(
         return RouteOutcome {
             any_root: false,
             converged: true,
+            sightlines: sight,
         };
     }
-    let relax = |cell: usize,
-                 from: usize,
-                 step: f32,
-                 distance: &mut [f32],
-                 nearest: &mut [u32],
-                 via_tip: &mut [bool]| {
-        let candidate = distance[from] + step;
-        if candidate < distance[cell] {
-            distance[cell] = candidate;
-            nearest[cell] = nearest[from];
+    // Nothing to route where every covered cell is already a root, and a
+    // root can never be improved on: the passes would change nothing, so they
+    // are not run, and the clearance they would read is not built.
+    if !(0..grid.cells()).any(|cell| cover_above[cell] && distance[cell] > 0.0) {
+        return RouteOutcome {
+            any_root: true,
+            converged: true,
+            sightlines: sight,
+        };
+    }
+    if !*clear_built {
+        crate::reach::clearance_mm(grid, cover_above, clear);
+        *clear_built = true;
+    }
+    let clear: &[f32] = clear;
+    let mut relax = |cell: usize,
+                     from: usize,
+                     distance: &mut [f32],
+                     nearest: &mut [u32],
+                     via_tip: &mut [bool],
+                     anchor: &mut [u32]| {
+        if let Some((value, origin, source)) = crate::reach::any_angle_relax(
+            cols,
+            pitch,
+            cover_above,
+            clear,
+            distance,
+            anchor,
+            cell,
+            from,
+            1.0,
+            limit_mm,
+            &mut sight,
+        ) {
+            distance[cell] = value;
+            anchor[cell] = origin;
+            nearest[cell] = nearest[source];
             // The attribution travels with the root, so a cell served BY a
             // tip-column root through the cover is counted as such and not only
             // the cell that sits directly on the arm.
-            via_tip[cell] = via_tip[from];
+            via_tip[cell] = via_tip[source];
         }
     };
     const MAX_SWEEP_ROUNDS: usize = 8;
@@ -1790,21 +2183,22 @@ fn route_within_cover(
         for row in 0..rows {
             for col in 0..cols {
                 let cell = row * cols + col;
-                if !cover_above[cell] {
+                // A root (distance 0) cannot be improved on.
+                if !cover_above[cell] || distance[cell] == 0.0 {
                     continue;
                 }
                 if col > 0 && cover_above[cell - 1] {
-                    relax(cell, cell - 1, pitch, distance, nearest, via_tip);
+                    relax(cell, cell - 1, distance, nearest, via_tip, anchor);
                 }
                 if row > 0 {
                     if cover_above[cell - cols] {
-                        relax(cell, cell - cols, pitch, distance, nearest, via_tip);
+                        relax(cell, cell - cols, distance, nearest, via_tip, anchor);
                     }
                     if col > 0 && cover_above[cell - cols - 1] {
-                        relax(cell, cell - cols - 1, diagonal, distance, nearest, via_tip);
+                        relax(cell, cell - cols - 1, distance, nearest, via_tip, anchor);
                     }
                     if col + 1 < cols && cover_above[cell - cols + 1] {
-                        relax(cell, cell - cols + 1, diagonal, distance, nearest, via_tip);
+                        relax(cell, cell - cols + 1, distance, nearest, via_tip, anchor);
                     }
                 }
             }
@@ -1812,21 +2206,22 @@ fn route_within_cover(
         for row in (0..rows).rev() {
             for col in (0..cols).rev() {
                 let cell = row * cols + col;
-                if !cover_above[cell] {
+                // A root (distance 0) cannot be improved on.
+                if !cover_above[cell] || distance[cell] == 0.0 {
                     continue;
                 }
                 if col + 1 < cols && cover_above[cell + 1] {
-                    relax(cell, cell + 1, pitch, distance, nearest, via_tip);
+                    relax(cell, cell + 1, distance, nearest, via_tip, anchor);
                 }
                 if row + 1 < rows {
                     if cover_above[cell + cols] {
-                        relax(cell, cell + cols, pitch, distance, nearest, via_tip);
+                        relax(cell, cell + cols, distance, nearest, via_tip, anchor);
                     }
                     if col + 1 < cols && cover_above[cell + cols + 1] {
-                        relax(cell, cell + cols + 1, diagonal, distance, nearest, via_tip);
+                        relax(cell, cell + cols + 1, distance, nearest, via_tip, anchor);
                     }
                     if col > 0 && cover_above[cell + cols - 1] {
-                        relax(cell, cell + cols - 1, diagonal, distance, nearest, via_tip);
+                        relax(cell, cell + cols - 1, distance, nearest, via_tip, anchor);
                     }
                 }
             }
@@ -1840,13 +2235,47 @@ fn route_within_cover(
     RouteOutcome {
         any_root: true,
         converged,
+        sightlines: sight,
     }
+}
+
+/// The 8-neighbour chamfer distance between two cells, in mm: the spacing
+/// metric [`insert_for_load`] was built and measured with. Kept for that one
+/// spacing rule when the reach and routing metric became the straight length
+/// (2026-09-30); moving it is a separate change with its own measurement
+/// (the load-insertion fixture refuses every candidate under the Euclidean
+/// spacing, measured in lane lattice-align).
+fn insertion_spacing_mm(grid: &Grid, a: usize, b: usize) -> f64 {
+    let rows = grid.row_of(a).abs_diff(grid.row_of(b));
+    let cols = grid.col_of(a).abs_diff(grid.col_of(b));
+    let (long, short) = if rows > cols { (rows, cols) } else { (cols, rows) };
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "cell offsets are bounded by the grid side (~1e4) and exact in f64"
+    )]
+    let (long, short) = (long as f64, short as f64);
+    grid.pitch_mm() * ((long - short) + core::f64::consts::SQRT_2 * short)
+}
+
+/// The per-cell rasters one routing field writes, reused across every layer.
+struct RouteFields<'a> {
+    distance: &'a mut [f32],
+    nearest: &'a mut [u32],
+    via_tip: &'a mut [bool],
+    previous: &'a mut [f32],
+    anchor: &'a mut [u32],
+    /// `cover_above`'s clearance field (`reach::clearance_mm`), built at most
+    /// once per layer, on the first round that needs it: the cover does not
+    /// change between rounds. The caller resets `clear_built` per layer.
+    clear: &'a mut Vec<f32>,
+    clear_built: &'a mut bool,
 }
 
 /// What one layer's routing field cost to build.
 struct RouteOutcome {
     any_root: bool,
     converged: bool,
+    sightlines: crate::reach::Sightlines,
 }
 /// Per connected component of MODEL material, `X_model = Σ L / component area`.
 ///
@@ -1957,8 +2386,10 @@ mod merge_load_tests {
             owner_growth_ceiling_mm: 0.4,
             alpha: 1.0,
             lamina_reach_mm: 2.13,
+            straight_reach: true,
             tip_column_roots: true,
             per_event: true,
+            handed_column_ledger: true,
         }
     }
 

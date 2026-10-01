@@ -776,11 +776,13 @@ const HEIGHT_NOISE_MM: f64 = 1.0e-9;
 /// plate at z = 0, so the boss is measured from the SEATED terminal, the
 /// seat pushed into the model by the seat law, exactly as the lowering
 /// measures it (round-6 review, 2026-09-30). Until then it was read at the
-/// seat surface `k_top · h`: on a post shorter than `2 × FLARE_LEN_MM` above
-/// the raft the boss top is half-way up the run, so the unseated reading put
-/// it half a seat depth low, and a tie one layer inside the drawn flare was
-/// accepted (a 3.05 mm post with a 0.05 mm tip: 1.625 mm read, 1.6595 mm
-/// drawn, layer 33 at 1.65 mm accepted).
+/// seat surface `k_top · h`: on a post shorter than twice the boss height
+/// above the raft the boss top is half-way up the run, so the unseated
+/// reading put it half a seat depth low, and a tie one layer inside the drawn
+/// flare was accepted (under the legacy 1.5 mm flare length, a 3.05 mm post
+/// with a 0.05 mm tip: 1.625 mm read, 1.6595 mm drawn, layer 33 at 1.65 mm
+/// accepted). The sweep's boss height is the owner's ChituBox `heightofboss`,
+/// 1.0 mm, since 2026-09-30, so such a post is now under 2.2 mm.
 ///
 /// The seat normal is the member's own as it stands: the carried face is
 /// measured after the ties (`run_sweep_with_drains`), and until then the
@@ -1070,9 +1072,11 @@ pub struct SlendernessContext<'a> {
     pub law: &'a SlendernessLaw,
     pub layer_height_mm: f64,
     pub layers: usize,
-    /// `FLARE_R_FACTOR` — the registered factor the emitter's root flare uses.
-    /// A mast is plate-rooted and gets a root flare like any arm, so the mast
-    /// search has to answer the congestion lane's question before it lands one.
+    /// `FLARE_R_FACTOR` — the congestion census's root-crowding disc factor
+    /// (`congestion::root_discs_drawn`). A mast is plate-rooted, so the mast
+    /// search has to answer the congestion lane's question before it lands
+    /// one. Until 2026-09-30 this was also the emitter's flare foot; the
+    /// emitter now stands every root on the owner's ChituBox boss instead.
     pub flare_factor: f64,
     /// Sabotage knob: whether a mast's cell must CLEAR the placed root discs,
     /// or merely be an empty cell as it was before 2026-09-06.
@@ -1099,6 +1103,10 @@ pub struct SlendernessContext<'a> {
     /// under a forced merge sized for the load it was just handed, with the
     /// down-sweep's own rule, until the down-sweep re-sizes the field.
     pub x_allowed: f64,
+    /// Which faces a tip may carry, so the lip-seat and head-join passes
+    /// measure every arm against the same face the finished plan seats it on
+    /// ([`crate::tip_landing::SeatFaceRule`]).
+    pub seat_faces: crate::tip_landing::SeatFaceRule,
 }
 
 /// Remedy 1 of the ladder, on a sized field, in place: the forced merges.
@@ -3659,6 +3667,7 @@ mod tests {
             mast: true,
             max_struts: 1_000,
             x_allowed: 12.0,
+            seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
         };
         // P at col 100, Q 10 cells (0.50 mm) away, R 40 cells the other way.
         let mut struts = vec![
@@ -3719,10 +3728,12 @@ mod tests {
     /// The lowest layer on the free shaft of an 80-layer (4.0 mm) plate post
     /// at 0.05 mm layers, HAND-DERIVED from the registered numbers: the raft
     /// is 0.2 mm, the run above it 3.8 mm, so the boss rises
-    /// `max(0.5 − 0.2, min(FLARE_LEN_MM 1.5, 3.8 / 2)) = 1.5` mm over the raft
-    /// to 1.7 mm, which is layer 34's plane; the first layer strictly above it
-    /// is 35.
-    const FREE_SHAFT_FLOOR_OF_A_4_MM_POST: usize = 35;
+    /// `max(0.5 − 0.2, min(CHITUBOX_BOSS_HEIGHT_MM 1.0, 3.8 / 2)) = 1.0` mm
+    /// over the raft to 1.2 mm, which is layer 24's plane; the first layer
+    /// strictly above it is 25. (35 until the sweep's boss became the owner's
+    /// ChituBox `heightofboss`, 1.0 mm, in place of the legacy `FLARE_LEN_MM`
+    /// 1.5 mm: fix/chitubox-geometry, 2026-09-30.)
+    const FREE_SHAFT_FLOOR_OF_A_4_MM_POST: usize = 25;
 
     /// FREE SHAFT (fix/brace-not-in-flare, 2026-09-30): the floor the lane
     /// reads is the lowering's own boss top, and it is the hand-derived one.
@@ -3772,7 +3783,7 @@ mod tests {
         );
         assert!(
             !cuts_at(20),
-            "a brace landing at layer 20 (1.0 mm), inside the 1.7 mm flare, cut the post's run"
+            "a brace landing at layer 20 (1.0 mm), inside the 1.2 mm flare, cut the post's run"
         );
         assert!(
             !cuts_at(FREE_SHAFT_FLOOR_OF_A_4_MM_POST - 1),
@@ -3810,6 +3821,7 @@ mod tests {
             mast: true,
             max_struts: 1_000,
             x_allowed: 12.0,
+            seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
         };
         let struts = vec![
             plate_post(&grid, 0, 100, 0.2),
@@ -3826,7 +3838,10 @@ mod tests {
             sway_deg: None,
         };
         let depth = lean.layers_to_reach(1.0);
-        let low = 40;
+        // Topped 8 layers short of a band that would just clear the flare
+        // (40 when the boss was the legacy 1.5 mm and the floor 35; the
+        // floor is now 25, fix/chitubox-geometry 2026-09-30).
+        let low = FREE_SHAFT_FLOOR_OF_A_4_MM_POST + depth - 8;
         assert!(
             low - depth < FREE_SHAFT_FLOOR_OF_A_4_MM_POST,
             "anti-vacuity: a band topped at {low} is {depth} layers deep and must dip into the flare"
@@ -3890,28 +3905,58 @@ mod tests {
 
     /// The reviewer's SHORT post (round-6 review, 2026-09-30): a vertical
     /// plate arm seated at layer 61 (3.05 mm at 0.05 mm layers) with a 0.05 mm
-    /// tip. Its run above the raft is shorter than `2 × FLARE_LEN_MM`, so its
-    /// boss top is half-way up that run and moves with the seat.
+    /// tip, over its 2.5 mm unbraced limit. Under the legacy 1.5 mm flare
+    /// length its run above the raft was shorter than twice the flare, so its
+    /// boss top was half-way up that run and moved with the seat. Under the
+    /// owner's 1.0 mm boss (fix/chitubox-geometry, 2026-09-30) it stands on
+    /// the full boss, top 1.2 mm, free shaft from layer 25
+    /// ([`FREE_SHAFT_FLOOR_OF_THE_SHORT_POST`]); the seat-moved case is
+    /// [`SEAT_MOVED_POST_TOP`]. No post that short needs a tie at all: a run
+    /// under `2 × 1.0 + 0.2` mm is inside the 2.5 mm limit of the minimum
+    /// 0.05 mm radius.
     const SHORT_POST_TOP: usize = 61;
     const SHORT_POST_TIP_MM: f64 = 0.05;
+    /// The free-shaft floor of the 3.05 mm post on the owner's full 1.0 mm
+    /// boss: `max(0.3, min(1.0, (3.119 − 0.2) / 2)) = 1.0` mm over the
+    /// 0.2 mm raft, top 1.2 mm (layer 24's plane), first layer above it 25.
+    const FREE_SHAFT_FLOOR_OF_THE_SHORT_POST: usize = 25;
 
-    /// The lowest layer on the free shaft of that short post, HAND-DERIVED
-    /// from the registered numbers and the seat law the lowering applies:
-    /// the tip is driven into the model by
+    /// A post short enough for its SEAT to move its boss under the sweep's
+    /// boss height, the owner's ChituBox `heightofboss` 1.0 mm
+    /// (fix/chitubox-geometry, 2026-09-30): its run above the raft is under
+    /// `2 × 1.0` mm, so its boss top is half-way up that run. Seated at layer
+    /// 41 (2.05 mm), the reviewer's 3.05 mm post 1.0 mm lower, for the same
+    /// 0.5 mm the boss height fell by twice. (The reviewer's 3.05 mm post now
+    /// stands on the full 1.0 mm boss, whatever its seat depth.)
+    const SEAT_MOVED_POST_TOP: usize = 41;
+
+    /// The lowest layer on the free shaft of that seat-moved post,
+    /// HAND-DERIVED from the registered numbers and the seat law the lowering
+    /// applies: the tip is driven into the model by
     /// `max(layer + pixel = 0.05 + 0.019, layer = 0.05, ball term) = 0.069`
     /// mm (straight down, the unmeasured-normal fallback), so the terminal
-    /// is 3.119 mm up; the boss rises `max(0.3, min(1.5, (3.119 − 0.2) / 2))
-    /// = 1.4595` mm over the 0.2 mm raft, to 1.6595 mm. Layer 33's plane
-    /// (1.65 mm) is INSIDE that flare; layer 34's (1.70 mm) is the first
-    /// above it. Reading the boss at the unseated 3.05 mm gives 1.625 mm and
-    /// layer 33, which is the defect.
-    const FREE_SHAFT_FLOOR_OF_THE_SHORT_POST: usize = 34;
+    /// is 2.119 mm up; the boss rises `max(0.3, min(1.0, (2.119 − 0.2) / 2))
+    /// = 0.9595` mm over the 0.2 mm raft, to 1.1595 mm. Layer 23's plane
+    /// (1.15 mm) is INSIDE that flare; layer 24's (1.20 mm) is the first
+    /// above it. Reading the boss at the unseated 2.05 mm gives 1.125 mm and
+    /// layer 23, which is the defect. (Under the legacy 1.5 mm flare length
+    /// this was the 3.05 mm post, boss top 1.6595 mm, floor 34.)
+    const FREE_SHAFT_FLOOR_OF_THE_SEAT_MOVED_POST: usize = 24;
 
     fn short_plate_post(grid: &crate::grid::Grid, id: u32, col: usize) -> crate::SweepStrut {
+        post_seated_at(grid, id, col, SHORT_POST_TOP)
+    }
+
+    fn post_seated_at(
+        grid: &crate::grid::Grid,
+        id: u32,
+        col: usize,
+        top: usize,
+    ) -> crate::SweepStrut {
         let mut post = plate_post(grid, id, col, SHORT_POST_TIP_MM);
-        post.k_top = SHORT_POST_TOP;
-        post.radius_mm = vec![SHORT_POST_TIP_MM; SHORT_POST_TOP];
-        post.carried_mm2 = vec![0.0; SHORT_POST_TOP];
+        post.k_top = top;
+        post.radius_mm = vec![SHORT_POST_TIP_MM; top];
+        post.carried_mm2 = vec![0.0; top];
         post
     }
 
@@ -3950,7 +3995,7 @@ mod tests {
     fn a_short_plate_posts_free_shaft_starts_above_the_boss_top_the_file_draws() {
         let h = 0.05;
         let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
-        let post = short_plate_post(&grid, 0, 100);
+        let post = post_seated_at(&grid, 0, 100, SEAT_MOVED_POST_TOP);
         let boss_mm = emitted_boss_top_mm(&grid, &post, h);
         let floor = super::free_shaft_floors(&grid, std::slice::from_ref(&post), h)[0];
         #[expect(
@@ -3971,7 +4016,7 @@ mod tests {
             plane(floor - 1)
         );
         assert_eq!(
-            floor, FREE_SHAFT_FLOOR_OF_THE_SHORT_POST,
+            floor, FREE_SHAFT_FLOOR_OF_THE_SEAT_MOVED_POST,
             "boss top {boss_mm:.4} mm"
         );
     }
@@ -4007,6 +4052,7 @@ mod tests {
             mast: true,
             max_struts: 1_000,
             x_allowed: 12.0,
+            seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
         };
         // 16 cells at 0.05 mm: 0.8 mm between the posts.
         let struts = vec![
@@ -4105,6 +4151,7 @@ mod tests {
             mast: false,
             max_struts: 1_000,
             x_allowed: 12.0,
+            seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
         };
         let mut struts = vec![
             short_plate_post(&grid, 0, 100),

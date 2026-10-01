@@ -1,31 +1,40 @@
-//! **A plate root's disc is the flare the file draws** — the congestion
+//! **A plate root's disc is the root the file draws** — the congestion
 //! census, and every clearance decision that reads the same discs, see the
-//! root the lowering actually flares (review-fixes, 2026-09-29).
+//! root the lowering actually draws (review-fixes, 2026-09-29).
 //!
 //! # The defect
 //!
 //! `congestion::root_discs` sized every root disc from the LEDGER root,
-//! `radius_mm[0]`. The lowering flares the DRAWN root: the ledger raised by the
+//! `radius_mm[0]`. The lowering draws the DRAWN root: the ledger raised by the
 //! junction clause wherever a thicker branch joins (in practice a brace, sized
 //! by its own slenderness minimum, which the ledger never hears of). So a
 //! 0.05 mm plate arm 0.50 mm from a 0.20 mm root reads, at the registered flare
 //! factor 1.6, as a 0.40 mm flare sum that clears; once a 0.20 mm brace joins
 //! it, the file draws its root at 0.20 mm, a 0.64 mm flare sum, and the two
-//! feet lap by 0.14 mm while the census still says 0.40 mm and no overlap.
+//! discs lap by 0.14 mm while the census still says 0.40 mm and no overlap.
 //!
 //! # The rule
 //!
-//! A root disc is sized from the same drawn profile the lowering flares, by the
-//! lowering's own root rule (`plinth_support::drawn_root_radius_mm`).
+//! A root disc is sized from the same drawn profile the lowering draws, by the
+//! lowering's own root rule (`plinth_support::drawn_root_radius_mm`), times
+//! the crowding factor `FLARE_R_FACTOR`.
+//!
+//! **Which ring of the plate root (2026-09-30).** Until then the disc was also
+//! the emitted flare's FOOT, and this test read the feet. Since the owner's
+//! ChituBox geometry the lowering stands every plate root on his boss, scaled
+//! to the root by his Heavy profile's boss-to-shaft ratio, and the census keeps its
+//! crowding disc (`SweepPolicy::flare_r_factor` says why). The drawn root is
+//! the boss's TOP ring, the `RootFlare` record's start radius, so this test
+//! now reads that ring, times the factor.
 //!
 //! # How it is graded
 //!
 //! The reviewer's case, built as a strut set on a real sweep plan's grid and
 //! frame, is lowered by the production adapter (`to_primitives`). The census
-//! (`congestion::measure`) must count exactly the emitted root flares, their
-//! total analytic area, and the overlapping pairs the emitted flares form —
-//! read off the flares' own end points and radii. Anti-vacuity: the emitted
-//! feet must lap (one pair), or the fixture grades nothing.
+//! (`congestion::measure`) must count exactly the emitted root bosses, their
+//! total analytic crowding-disc area, and the overlapping pairs those discs
+//! form — read off the records' own start points and radii. Anti-vacuity: the
+//! emitted roots' discs must lap (one pair), or the fixture grades nothing.
 //!
 //! Sabotage: size the discs from `radius_mm[0]` again and the test goes red.
 
@@ -182,7 +191,12 @@ fn the_census_counts_the_root_flares_the_file_draws_under_a_braced_post() {
         .primitives
         .iter()
         .filter(|primitive| primitive.segment_kind == SupportSegmentKind::RootFlare)
-        .map(|flare| (flare.end_mm.map(Finite::get), flare.end_radius_mm.get()))
+        .map(|boss| {
+            (
+                boss.start_mm.map(Finite::get),
+                boss.start_radius_mm.get() * flare,
+            )
+        })
         .collect();
     let emitted_area: f64 = feet
         .iter()
@@ -203,10 +217,10 @@ fn the_census_counts_the_root_flares_the_file_draws_under_a_braced_post() {
         census.analytic_disc_area_mm2,
         census.overlap_pairs
     );
-    assert_eq!(feet.len(), 3, "the three plate arms each draw a root flare");
+    assert_eq!(feet.len(), 3, "the three plate arms each draw a root boss");
     assert!(
         emitted_laps > 0,
-        "the emitted feet do not lap, so the fixture grades nothing"
+        "the emitted roots do not lap, so the fixture grades nothing"
     );
     assert_eq!(census.roots, feet.len());
     assert!(

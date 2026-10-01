@@ -107,7 +107,18 @@ fn head_junctions(plan: &SweepPlan) -> Vec<(usize, f64, usize)> {
 
 #[test]
 fn the_shaft_below_a_head_junction_carries_the_sum() {
-    let plan = round_25_flipped();
+    // Graded at the seat placement the fixture was built for
+    // (`harness::at_path_fixture_seating`): at the production placement Round
+    // 25's rim is one row and no arm lands on another's head (measured
+    // 2026-09-30: 54 arms, 0 heads with landers). The contact-sizing rule
+    // reads no placement.
+    let plan = crate::round_bases_ratchet::place_with(
+        &flipped(&mesh_for(&round_25())),
+        "Round 25 flipped",
+        &crate::harness::at_path_fixture_seating(
+            plinth_sweep::SweepPolicy::from_registry().expect("the registry"),
+        ),
+    );
     let heads = head_junctions(&plan);
     let hits = plan.report.counters;
     println!(

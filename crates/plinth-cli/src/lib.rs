@@ -26,7 +26,7 @@ use plinth_pipeline::{OutputProfile, Placement};
 
 pub const ROOT_USAGE: &str = "Usage: plinth <subcommand>\n\nSubcommands:\n  prepare  Prepare every source model in a directory\n\nOptions:\n  -h, --help     Show help\n  -V, --version  Show version";
 
-pub const PREPARE_USAGE: &str = "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|pinned:DIR] [--placement legacy|sweep] [--wall-mm MM] [--no-cache]\n\nOptions:\n  --input-models-dir DIR  Directory containing source models\n  --output PROFILE       Output profile; exactly: saturn4-ultra\n  --out-dir DIR          Destination directory\n  --orient MODE          dense (default) searches every model's build orientation; pinned:DIR replays the rotation DIR/<stem>.pipeline.json records, per model by stem\n  --placement MODE       legacy (default) is the sealed support run and its pre-write gates; sweep is the EXPERIMENTAL slice-sweep core, which runs NO pre-write gate; it leans and merges arms onto other shafts, ties long members with |X| braces, thickened roots and masts, and keeps each brace's and mast's solid clear of the model and of other members, but draws no joint spheres and does not clearance-check an arm's own shaft against the model\n  --wall-mm MM           Hollow shell wall thickness in mm, no finer than the frozen hollow voxel pitch; omit for the registered default, raise it for a piece that gets handled\n  --no-cache             Disable cache use for this request\n  -h, --help             Show help";
+pub const PREPARE_USAGE: &str = "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|none|pinned:DIR] [--placement legacy|sweep] [--wall-mm MM] [--no-cache]\n\nOptions:\n  --input-models-dir DIR  Directory containing source models\n  --output PROFILE       Output profile; exactly: saturn4-ultra\n  --out-dir DIR          Destination directory\n  --orient MODE          dense (default) searches every model's build orientation; none uses every model exactly as drawn (no rotation; still centred and lifted off the plate); pinned:DIR replays the rotation DIR/<stem>.pipeline.json records, per model by stem.\n                         One model is used as drawn under any mode when it carries the Finder tag plinth-no-rotate (macOS), has plinth-no-rotate in its user.xdg.tags attribute (Linux), or has a marker file <stem>.asdrawn beside it (any platform). The report says, per model, \"as drawn (<reason>)\" or \"orientation searched\"\n  --placement MODE       legacy (default) is the sealed support run and its pre-write gates; sweep is the EXPERIMENTAL slice-sweep core, which runs NO pre-write gate; it leans and merges arms onto other shafts, ties long members with |X| braces, thickened roots and masts, and keeps each brace's and mast's solid clear of the model and of other members, but draws no joint spheres and does not clearance-check an arm's own shaft against the model\n  --wall-mm MM           Hollow shell wall thickness in mm, no finer than the frozen hollow voxel pitch; omit for the registered default, raise it for a piece that gets handled\n  --no-cache             Disable cache use for this request\n  -h, --help             Show help";
 
 /// Whether this request may use a `plinth-pipeline` cache.
 ///
@@ -81,6 +81,13 @@ pub enum OrientSelection {
     /// directory does not name is refused per model, never given a neighbour's
     /// rotation.
     Pinned(PathBuf),
+    /// `--orient none`: use every model exactly as drawn (identity rotation,
+    /// still centred and lifted off the plate). GitHub issue #1.
+    ///
+    /// Under `dense` or `pinned:DIR` one model can still be marked as drawn by
+    /// a `plinth-no-rotate` tag or a `<stem>.asdrawn` marker; that per-model
+    /// check reads the filesystem, so it lives in the pipeline, not here.
+    AsDrawn,
 }
 
 /// The support engine the operator selected.
@@ -202,7 +209,7 @@ impl std::fmt::Display for ParseError {
             ),
             Self::UnknownOrientMode(value) => write!(
                 formatter,
-                "unknown orientation mode {value:?}; expected dense or pinned:DIR"
+                "unknown orientation mode {value:?}; expected dense, none or pinned:DIR"
             ),
             Self::NonUnicodePlacementMode(value) => write!(
                 formatter,
@@ -340,6 +347,7 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
                     .ok_or_else(|| ParseError::NonUnicodeOrientMode(raw.clone()))?;
                 orientation = Some(match value {
                     "dense" => OrientSelection::Dense,
+                    "none" => OrientSelection::AsDrawn,
                     _ => match value.strip_prefix("pinned:") {
                         // An empty directory is refused here rather than
                         // resolving to the process working directory, which is
@@ -474,13 +482,13 @@ mod tests {
         later_prepare_request_resolver(parsed);
     }
 
-    /// The two sanctioned spellings, and nothing between them.
+    /// The three sanctioned spellings, and nothing between them.
     ///
     /// Parsing opens no file: `pinned:DIR` records the path and the directory
     /// scan happens in `execute`, so this test can name a directory that does
     /// not exist and still describe the parser completely.
     #[test]
-    fn orient_accepts_exactly_dense_and_pinned_and_defaults_to_dense() {
+    fn orient_accepts_exactly_dense_none_and_pinned_and_defaults_to_dense() {
         let with = |mode: &str| {
             let mut arguments = stable_arguments().to_vec();
             arguments.extend(["--orient", mode]);
@@ -495,6 +503,11 @@ mod tests {
             selection(with("pinned:corpus/baseline").unwrap()).orientation,
             OrientSelection::Pinned(PathBuf::from("corpus/baseline"))
         );
+        // GitHub issue #1: every model exactly as drawn.
+        assert_eq!(
+            selection(with("none").unwrap()).orientation,
+            OrientSelection::AsDrawn
+        );
         // An omitted flag is the dense sweep, which is the recorded M8 default.
         assert_eq!(
             selection(parse_args(stable_arguments()).unwrap()).orientation,
@@ -508,6 +521,9 @@ mod tests {
             "Dense",
             "legacy_coarse",
             "legacy-13",
+            "None",
+            "as-drawn",
+            "identity",
         ] {
             assert_eq!(
                 with(rejected),

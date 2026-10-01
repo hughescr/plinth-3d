@@ -62,8 +62,16 @@ const TOLERANCE_MM: f64 = 1e-3;
 /// pre-fix run of this very fixture (88 tips, 88 first segments; rim count in
 /// the lane report), well under it, so they bound "graded something real",
 /// never the answer.
+///
+/// RE-PINNED 2026-10-01 (land of fix/chitubox-geometry onto develop 3372093):
+/// rim tips 10 → 3. The rim band is one ball diameter, so it narrows with the
+/// owner's ChituBox ball ratio (1.27-1.33 × r here, where it was 1.5), and the
+/// straight-line reach places fewer tips near the edge. Measured rim tips on
+/// this fixture: 25 of 88 at fix/chitubox-geometry 4fd22f0, 11 of 65 at
+/// develop 3372093, 5 of 65 on the merged tree, with 0 rule-2 violations. The
+/// minimum is set well under 5 and still bounds "graded something real".
 const MIN_GRADED_TIPS: usize = 60;
-const MIN_GRADED_RIM_TIPS: usize = 10;
+const MIN_GRADED_RIM_TIPS: usize = 3;
 
 const ROUND_25_BOTTOM_RADIUS_MM: f64 = 11.5;
 const ROUND_25_TOP_RADIUS_MM: f64 = 12.5;
