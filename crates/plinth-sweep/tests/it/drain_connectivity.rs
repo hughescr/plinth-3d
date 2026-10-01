@@ -311,3 +311,78 @@ fn probe() {
     radii.sort_by(f64::total_cmp);
     println!("tip radii min {:?} med {:?} max {:?}", radii.first(), radii.get(radii.len()/2), radii.last());
 }
+
+/// **Demand over a drain is seated from the keep-out's rim (2026-10-01).**
+///
+/// The keep-out is `bore + widest arm + standoff` in radius: 2.85 mm at the
+/// registered 1.25 mm bore, against a lamina reach of 2.13 mm. A seat may only
+/// stand on demand, so once the ring just outside the keep-out is rooted by
+/// the layer's first seats, the cells inside it that a seat on that ring would
+/// reach have no seat left and were reported BARE. That is what lost the
+/// Cylinder's ceiling over its drain (`plinth-evidence/slice-sweep-2026-09-02/
+/// field-2026-09-28/lanes/creep-45.md`). The rule graded here
+/// (`up_sweep::stranded_seat_for`): such a pivot may seat on a rooted underside
+/// cell outside the cylinder that reaches it.
+///
+/// Hand-derived before the run: from the rim, a seat reaches `ρ − p` inward
+/// (the candidate disc is one pitch inside the reach), so the disc that NO
+/// legal seat can reach has radius `R_k − (ρ − p)`, about 0.77 mm. That disc
+/// stays bare on the underside layer, and its columns stay unrooted up through
+/// the 4 mm top, so the residual is at most that disc (one pitch of raster
+/// slack on its radius) times the top's layers.
+#[test]
+fn demand_over_a_drain_is_seated_from_the_keep_out_rim() {
+    let policy = SweepPolicy::from_registry().expect("registry");
+    let drain = DrainSpec::from_bore([0.0, 0.0, 14.0], [0.0, 0.0, 12.0], bore_radius_mm());
+    let mesh = flat_underside_slab();
+    let seated = harness::sweep_with_drains(&mesh, &policy, &[drain]);
+    let stranded = harness::sweep_with_drains(&mesh, &policy.without_stranded_seating(), &[drain]);
+
+    let pitch = seated.grid.pitch_mm();
+    let cell_area = pitch * pitch;
+    // The keep-out is one disc (a single vertical drain), so its radius is
+    // read off its own cell count rather than restated from the registry.
+    let keep_out_radius =
+        (seated.report.drain_keep_out_cells as f64 * cell_area / core::f64::consts::PI).sqrt();
+    let seat_reach = harness::lamina_reach_mm() - pitch;
+    let bare_radius = (keep_out_radius - seat_reach).max(0.0) + pitch;
+    let top_layers = (4.0 / harness::layer_height_mm()).ceil() + 1.0;
+    let bound_cells = core::f64::consts::PI * bare_radius * bare_radius / cell_area * top_layers;
+    println!(
+        "keep-out radius {keep_out_radius:.3} mm, seat reach {seat_reach:.3} mm, unreachable disc \
+         radius <= {bare_radius:.3} mm over {top_layers} layers: bound {bound_cells:.0} cells; \
+         residual with stranded seating {} cells ({} stranded seats, {} arms, uncarried {:.4} \
+         mm2), without {} cells ({} arms, uncarried {:.4} mm2)",
+        seated.report.residual_demand_cells,
+        seated.report.counters.stranded_seats,
+        seated.struts.len(),
+        seated.report.uncarried_load_mm2,
+        stranded.report.residual_demand_cells,
+        stranded.struts.len(),
+        stranded.report.uncarried_load_mm2,
+    );
+    assert!(
+        keep_out_radius > harness::lamina_reach_mm(),
+        "the premise: the keep-out must be wider than one reach, or nothing is stranded"
+    );
+    assert!(
+        seated.report.counters.stranded_seats > 0,
+        "the rule never seated anything, so this test cannot see it"
+    );
+    assert_eq!(
+        stranded.report.counters.stranded_seats, 0,
+        "the knob must switch the rule off"
+    );
+    assert!(
+        stranded.report.residual_demand_cells > seated.report.residual_demand_cells,
+        "sabotage: without the rule the drain's ceiling must lose cells a legal seat reaches"
+    );
+    assert!(
+        (seated.report.residual_demand_cells as f64) <= bound_cells,
+        "the residual over the drain must be only the disc no legal seat reaches"
+    );
+    assert!(
+        seated.report.uncarried_load_mm2 <= stranded.report.uncarried_load_mm2,
+        "seating stranded demand must not lose load"
+    );
+}

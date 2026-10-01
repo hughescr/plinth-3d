@@ -515,6 +515,20 @@ pub struct SweepPolicy {
     /// back and watch Round 50's drafted rim draw its minimum-tip arms again;
     /// nothing in the pipeline turns it off.
     pub creep_weight: bool,
+    /// Whether a face that is not down-facing — at or beyond
+    /// `OVERHANG_ANGLE_DEG`, by the same `n_z < -sin(angle)` test the
+    /// orientation objective and `plinth-support` use — charges NO creep
+    /// (owner ruling 2026-09-30, [`reach::SurfaceCreep::new`]). **On in
+    /// production.** With it false such a face pays the logistic's tail.
+    /// Sabotage and comparison only; nothing in the pipeline turns it off.
+    pub creep_overhang_cut: bool,
+    /// Whether demand that no DEMAND cell can seat — every seat in reach of it
+    /// stands in a drain's escape cylinder — may seat on a rooted underside
+    /// cell that reaches it (`up_sweep::stranded_seat_for`, 2026-10-01). **On
+    /// in production.** It cannot fire on a model without drains. With it
+    /// false that demand is left BARE although a legal arm reaches it.
+    /// Sabotage and comparison only; nothing in the pipeline turns it off.
+    pub stranded_seating: bool,
     /// Whether reach and load routing measure a lateral run as its straight
     /// length (`reach::any_angle_relax`, 2026-09-30). **On in production.**
     /// With it false both sweeps fall back to the 8-neighbour chamfer, which
@@ -704,6 +718,8 @@ impl SweepPolicy {
                 .get(),
             lean: true,
             creep_weight: true,
+            creep_overhang_cut: true,
+            stranded_seating: true,
             straight_reach: true,
             island_seating: true,
             seat_face_band: true,
@@ -851,6 +867,28 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_creep_weight(mut self) -> Self {
         self.creep_weight = false;
+        self
+    }
+
+    /// Let a face at or beyond `OVERHANG_ANGLE_DEG` charge the logistic's tail
+    /// for creep again (0.50 at 45°, 0.067 at 60°), as before the owner's
+    /// 2026-09-30 ruling. **Sabotage and comparison only**: with it set, a
+    /// cavity ceiling bounded by 45-60° walls draws its creep arms again
+    /// (`tests/it/wall_creep.rs`).
+    #[must_use]
+    pub const fn without_creep_overhang_cut(mut self) -> Self {
+        self.creep_overhang_cut = false;
+        self
+    }
+
+    /// Leave demand BARE when every demand seat in reach of it stands in a
+    /// drain's escape cylinder, even where a rooted underside cell outside the
+    /// cylinder reaches it, as before 2026-10-01. **Sabotage and comparison
+    /// only**: with it set, the ceiling over a drain loses the cells a seat at
+    /// the keep-out's rim would root (`tests/it/drain_connectivity.rs`).
+    #[must_use]
+    pub const fn without_stranded_seating(mut self) -> Self {
+        self.stranded_seating = false;
         self
     }
 
@@ -1117,6 +1155,7 @@ pub fn run_sweep_with_drains(
     } else {
         GreedyScratch::legacy(&grid, lamina_reach_mm)
     };
+    greedy.stranded_seating = policy.stranded_seating;
     greedy.separation_mm = if policy.straight_reach {
         up_sweep::hex_separation_mm(lamina_reach_mm, grid.pitch_mm())
     } else {
@@ -1152,6 +1191,7 @@ pub fn run_sweep_with_drains(
             &grid,
             policy.overhang_centre_deg,
             policy.overhang_transition_deg,
+            policy.creep_overhang_cut,
         )
     } else {
         reach::SurfaceCreep::disabled(&grid)
@@ -1286,6 +1326,7 @@ pub fn run_sweep_with_drains(
         layers,
         straight_reach: policy.straight_reach,
         creep_weight: policy.creep_weight,
+        creep_overhang_cut: policy.creep_overhang_cut,
         overhang_centre_deg: policy.overhang_centre_deg,
         overhang_transition_deg: policy.overhang_transition_deg,
         max_restarts: policy.strut_removal_passes,
@@ -1910,6 +1951,7 @@ pub fn run_sweep_with_drains(
     report.counters.islands_realigned = greedy.islands_realigned;
     report.counters.island_seats_saved = greedy.seats_saved;
     report.counters.island_seats = greedy.island_seats;
+    report.counters.stranded_seats = greedy.stranded_seats;
     report.counters.island_hex_bound = greedy.island_hex_bound;
 
     // ------------------------------------------------ what each tip seats INTO
@@ -3107,6 +3149,7 @@ fn build_report(
             vertical_inheritance_hits: reach.vertical_inheritance_hits,
             creep_cells_weighted: reach.creep_cells_weighted,
             creep_steps_taken: reach.creep_steps_taken,
+            creep_cells_free: reach.creep_cells_free,
             multi_carrier_split_hits: outcome.spread_search_hits,
             strut_share_reads: outcome.strut_share_reads,
             landing_injections: outcome.landing_injections,
