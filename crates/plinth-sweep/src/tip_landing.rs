@@ -249,9 +249,10 @@ pub fn tip_landings_of(
 /// orientation's rounding, not by design) and the seat trim cut its ball
 /// against a vertical plane, leaving a 0.416 mm cap above the ring underside
 /// (`plinth-pipeline tip_trim::round_25_at_the_flip…`). On the lane models'
-/// finished plans the same class carried 5 Cylinder tips on walls at
-/// `n_z ≈ -1e-16` and 8 Morel tips on faces 1-31° off vertical, each with an
-/// overhang face within 0.06 mm; the Round bases and the Sphere had none.
+/// finished plans (2026-09-30) the rule passes over a nearer wall or steep
+/// face for 8 of the Morel base's 127 members (faces 1-31° off vertical, each
+/// with an overhang face within 0.06 mm) and 59 of the Cylinder's 413
+/// members; for none on the Round bases or the Sphere.
 ///
 /// **Emit and warn, never refuse.** A mesh with no face the band admits keeps
 /// the previous rule (every down-facing face) and the fall-back is counted
@@ -301,12 +302,13 @@ impl SeatFaceRule {
 /// What the seat-face rule did on one call: the witness that it fires.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SeatFaceHits {
-    /// Tips given a face.
+    /// Members given a face: one per member's top, braces included, exactly
+    /// the landings [`tip_landings_of`] derives.
     pub tips: usize,
-    /// Of those, tips whose NEAREST down-facing face was one the rule refuses
-    /// (a wall, or a face steeper than the band) and which therefore carry a
-    /// different, farther face. Zero on a field where no tip stands beside a
-    /// wall; non-zero is the rule biting.
+    /// Of those, members whose NEAREST down-facing face was one the rule
+    /// refuses (a wall, or a face steeper than the band) and which therefore
+    /// carry a different, farther face. Zero on a field where no member's top
+    /// stands beside a wall; non-zero is the rule biting.
     pub steeper_face_passed_over: usize,
     /// Whether the mesh had no face the rule admits, so every down-facing face
     /// was used instead.

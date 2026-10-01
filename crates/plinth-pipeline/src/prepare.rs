@@ -3057,8 +3057,8 @@ fn print_sweep_disclosure(
          islands measured with several coverings {}, won by a covering other than the global \
          lattice {}, seats saved against the global lattice's own count {}; straight-line reach: \
          sightlines {} clear / {} bent in the reach field, {} / {} in the routing field; seat \
-         faces: {} tips carry the nearest overhang face, {} of them beside a nearer wall or face \
-         steeper than the overhang band, which they do not seat on{}",
+         faces: {} member tops (arms and braces) carry the nearest overhang face, {} of them \
+         beside a nearer wall or face steeper than the overhang band, which they do not seat on{}",
         report.counters.island_seats,
         report.counters.island_hex_bound,
         report.counters.island_seats as f64 / (report.counters.island_hex_bound.max(1) as f64),

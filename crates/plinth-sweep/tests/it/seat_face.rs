@@ -12,8 +12,8 @@
 //! corner took the recess wall (`n_z = -5.2e-17`) and the seat trim cut its
 //! ball against a vertical plane, leaving a 0.416 mm cap above the ring
 //! underside (`plinth-pipeline tip_trim::round_25_at_the_flip…`). The lane
-//! models' finished plans carried 5 Cylinder tips on walls at `n_z ≈ -1e-16`
-//! and 8 Morel tips on faces 1-31° off vertical.
+//! models' finished plans had 8 Morel members on faces 1-31° off vertical and
+//! 59 Cylinder members beside a nearer wall or steep face.
 //!
 //! # The rule
 //!
