@@ -91,6 +91,62 @@ pub struct ReachProvenance {
     pub target_spacing_mm_registered_but_unused: f64,
 }
 
+/// The removal pass's coverage test, summed over every removal pass of one run.
+///
+/// An arm below the minimum load is a CANDIDATE. Under the production rule
+/// every candidate goes to the multi-layer reach REPLAY (`demand_replay`),
+/// which re-runs the up-sweep's potential over the field the removal would
+/// leave and restores any arm whose removal leaves a demand cell unrooted; the
+/// down-sweep then decides the load. Under the rule this engine had until
+/// 2026-09-30 a candidate had first to pass the same-layer SCREEN.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RemovalCoverageReport {
+    /// Arms below the minimum load, not load-placed and not a parent.
+    pub candidates: u64,
+    /// Of those, the ones the screen passed on to the span test and the
+    /// replay. Every candidate under the production rule, which has no screen.
+    pub screened: u64,
+    /// Arms the replay restored.
+    pub refused_by_replay: u64,
+    /// Of `refused_by_replay`, the arms whose restoring cells all lay inside
+    /// the reach coupon's first-loss bracket (past 2.130 mm, within 2.592 mm)
+    /// ON THE LAYER THAT RESTORED THEM. **Reporting only, and a partial
+    /// view**: once an arm is restored the layers above its seat are never
+    /// examined without it, so this does NOT count the arms a reach at the
+    /// bracket's far end would free. Measured 2026-09-30 (lane
+    /// neighbour-cover, `whatif/first-loss`): this read 48 of 48 on the
+    /// Cylinder, and a replay that accepted cells up to the bracket freed 0.
+    pub refused_by_replay_within_first_loss: u64,
+    /// Replays run, over every pass. Zero means the replay never ran.
+    pub replays: u64,
+    /// Layers on which a proposed field's potential was computed.
+    pub replay_trial_layers: u64,
+    /// Cells the replay found unrooted by the field BEFORE the first pass: the
+    /// up-sweep's residual demand, re-measured by the replay. When no arm has
+    /// been added since placement it must equal the placement's own residual,
+    /// which is what shows the replay reproduces the placement's potential.
+    /// Complete only when the first replay ran to the top without a restart;
+    /// a restart stops it at the restoring layer.
+    pub replay_baseline_unrooted_cells: u64,
+    /// Cells a proposed removal would have unrooted, summed over every check.
+    pub replay_newly_unrooted_cells: u64,
+    /// Of those, the cells still inside the first-loss bracket. Reporting only.
+    pub replay_newly_unrooted_within_first_loss_cells: u64,
+    /// The largest finite potential among those cells (1 = the placement's
+    /// reach; the first-loss bracket ends at 2.592 / 2.130 = 1.217). Zero when
+    /// none was found.
+    pub replay_newly_unrooted_max_u: f64,
+    /// Passes whose replay ran out of restarts and kept every arm.
+    pub replay_exhausted: u64,
+    /// Passes whose exact attempt (reach replay + down-sweep, no span proxy)
+    /// read worse and were tried again with the span proxy applied.
+    pub retried_with_span_proxy: u64,
+    /// Removal passes undone because the down-sweep then read MORE overloaded
+    /// arm-layers than before (the uncarried-load rollback is counted in
+    /// `PathHits::removal_passes_rolled_back`, which also counts these).
+    pub rolled_back_for_overload: u64,
+}
+
 /// Everything one sweep says about itself.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SweepRunReport {
@@ -206,6 +262,10 @@ pub struct SweepRunReport {
     pub peel_field_mode: PeelFieldMode,
     pub peel_field_stats: PeelFieldStats,
     pub sweep_digest: String,
+    /// What the removal pass's coverage test did (lane neighbour-cover,
+    /// 2026-09-30): how many under-loaded arms it screened, how many the
+    /// multi-layer reach replay refused, and the replay's own path hits.
+    pub removal_coverage: RemovalCoverageReport,
     /// Working cells some drain escape cylinder covers. Zero on a model with
     /// no drains, and then the keep-out was not consulted at all.
     pub drain_keep_out_cells: usize,
