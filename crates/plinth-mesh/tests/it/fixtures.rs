@@ -1,11 +1,11 @@
 use plinth_mesh::{
     build_face_topology, certify_closed_components, load_binary_stl, make_box, make_box_default,
     make_dual_cavity_pawn, make_dual_cavity_pawn_with_throat_radius, make_overhang_table,
-    make_raking_blade, make_thin_fin, make_toed_slab, make_uncovered_rim_table, mesh_fingerprint,
-    write_binary_stl, Mesh, MeshError, WeldPolicy, DUAL_CAVITY_CAVITY_THROAT_AT_BORE_MM,
-    DUAL_CAVITY_THROAT_ABOVE_BORE_MM, DUAL_CAVITY_THROAT_SEPARATED_MM, TOPOLOGY_CUT_DEGENERATE,
-    TOPOLOGY_CUT_DUPLICATE, TOPOLOGY_CUT_NONMANIFOLD, TOPOLOGY_CUT_POINT_ONLY,
-    TOPOLOGY_CUT_SAME_DIRECTION,
+    make_raking_blade, make_thin_fin, make_toed_slab, make_toed_slab_three_shells,
+    make_uncovered_rim_table, mesh_fingerprint, write_binary_stl, Mesh, MeshError, WeldPolicy,
+    DUAL_CAVITY_CAVITY_THROAT_AT_BORE_MM, DUAL_CAVITY_THROAT_ABOVE_BORE_MM,
+    DUAL_CAVITY_THROAT_SEPARATED_MM, TOPOLOGY_CUT_DEGENERATE, TOPOLOGY_CUT_DUPLICATE,
+    TOPOLOGY_CUT_NONMANIFOLD, TOPOLOGY_CUT_POINT_ONLY, TOPOLOGY_CUT_SAME_DIRECTION,
 };
 
 type FixtureExpectation = (
@@ -34,8 +34,17 @@ fn box_matches_frozen_trimesh_order_and_bottom_translation() {
 
 #[test]
 fn native_fixture_shapes_have_frozen_counts_bounds_and_face_order() {
-    let fixtures: [FixtureExpectation; 6] = [
+    let fixtures: [FixtureExpectation; 7] = [
         ("box", make_box_default(), 8, 12, (0.0, 10.0)),
+        // The pre-2026-09-30 toed slab, kept for the legacy engine's parity
+        // pins: the old generator's own frozen counts, unchanged.
+        (
+            "three-shell toed slab",
+            make_toed_slab_three_shells(),
+            76,
+            140,
+            (9.0, 19.0),
+        ),
         ("table", make_overhang_table(), 40, 60, (0.0, 24.0)),
         // 74 / 144 since the toes were unioned with the slab (2026-09-30):
         // 8 box + 2 x (32 ring + apex) vertices; 10 box faces, and per toe 32
@@ -210,10 +219,8 @@ fn toed_slab_is_one_closed_solid_with_no_buried_toe_caps() {
         slab_side * slab_side - footprints
     );
 
-    let scratch = std::env::temp_dir().join(format!(
-        "plinth-toed-slab-wire-{}.stl",
-        std::process::id()
-    ));
+    let scratch =
+        std::env::temp_dir().join(format!("plinth-toed-slab-wire-{}.stl", std::process::id()));
     write_binary_stl(&scratch, &mesh).expect("every toed-slab coordinate must be exactly f32");
     let reread = load_binary_stl(&scratch, WeldPolicy::None).expect("re-read");
     let _ = std::fs::remove_file(&scratch);

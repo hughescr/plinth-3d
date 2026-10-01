@@ -465,6 +465,89 @@ pub fn make_toed_slab_with(top: [f64; 3], z_bottom: f64) -> Result<Mesh, MeshErr
     Mesh::new(verts, tris)
 }
 
+/// The toed slab EXACTLY as the Python `make_toed_slab()` default built it,
+/// and as [`make_toed_slab`] built it until 2026-09-30: three closed shells (a
+/// 30 x 30 x 4 mm box and two downward cones) concatenated without a union, so
+/// each toe keeps its base cap buried inside the slab. 76 vertices, 140 faces.
+///
+/// **Not a model to judge orientation or a field on** — its buried caps are
+/// counted as surface, which is the defect [`make_toed_slab`] fixes. It is kept
+/// because the legacy engine's (`plinth-support`) tests are parity pins
+/// against the Python oracle and frozen digests MEASURED on this mesh, and
+/// `corpus/models/make_toed_slab.stl` (the field input) is still this mesh.
+/// Re-pointing those pins onto the solid would need a new oracle, not a
+/// re-freeze. The vertex and face order is the old generator's, byte for byte.
+pub fn make_toed_slab_three_shells() -> Result<Mesh, MeshError> {
+    let (top, z_bottom) = ([30.0, 30.0, 4.0], 15.0);
+    let mut verts = Vec::with_capacity(76);
+    let mut tris = Vec::with_capacity(140);
+    append_box(
+        &mut verts,
+        &mut tris,
+        top,
+        [0.0, 0.0, z_bottom + top[2] / 2.0],
+    )?;
+    append_down_cone(&mut verts, &mut tris, 3.0, 4.0, [-8.0, 0.0, z_bottom])?;
+    append_down_cone(&mut verts, &mut tris, 1.5, 6.0, [8.0, 0.0, z_bottom])?;
+    Mesh::new(verts, tris)
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
+          class, and the one architecture item the class carried (geom_kernel's 32-bit BVH index \
+          width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
+fn append_down_cone(
+    verts: &mut Vec<[f64; 3]>,
+    tris: &mut Vec<[u32; 3]>,
+    radius: f64,
+    height: f64,
+    attachment: [f64; 3],
+) -> Result<(), MeshError> {
+    const SECTIONS: usize = 32;
+    let base = u32::try_from(verts.len()).map_err(|_| MeshError::FixtureIndexOverflow)?;
+    // `trimesh.creation.cone` is a 32-section revolution, followed by its
+    // process=True exact merge.  `unique_ordered` retains the first vertex
+    // seen in every angular slice: base centre, ring zero, apex, then the
+    // remaining ring.  Preserve that unusual order because fixture indices
+    // are source data, not an invitation to canonicalize.
+    let rotate_x_pi = |point: [f64; 3]| {
+        let radians = core::f64::consts::PI;
+        let (sin, cos) = radians.sin_cos();
+        [
+            point[0] + attachment[0],
+            cos * point[1] - sin * point[2] + attachment[1],
+            sin * point[1] + cos * point[2] + attachment[2],
+        ]
+    };
+    verts.push(rotate_x_pi([0.0, 0.0, 0.0]));
+    let ring = |section: usize| {
+        let theta = 2.0 * core::f64::consts::PI * section as f64 / SECTIONS as f64;
+        rotate_x_pi([radius * theta.cos(), radius * theta.sin(), 0.0])
+    };
+    verts.push(ring(0));
+    verts.push(rotate_x_pi([0.0, 0.0, height]));
+    for section in 1..SECTIONS {
+        verts.push(ring(section));
+    }
+    let apex = base + 2;
+    let ring_index = |section: u32| {
+        if section == 0 {
+            base + 1
+        } else {
+            base + 2 + section
+        }
+    };
+    for section in 0..SECTIONS as u32 {
+        let next = (section + 1) % SECTIONS as u32;
+        tris.push([ring_index(section), base, ring_index(next)]);
+        tris.push([ring_index(section), ring_index(next), apex]);
+    }
+    Ok(())
+}
+
 /// The Python `make_raking_blade()` default.
 pub fn make_raking_blade() -> Result<Mesh, MeshError> {
     make_raking_blade_with([20.0, 20.0, 4.0], 10.0, [0.03, 2.0, 5.0], 85.0)

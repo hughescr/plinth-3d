@@ -1,43 +1,56 @@
-//! **The toed slab should land flat (authored top down, toes up) at its
-//! production pose search. MEASURED RED, and kept as the red test for whoever
-//! takes the decision this measurement hands back.**
+//! **The toed slab lands flat (authored top down, toes up) at its production
+//! pose search, and by a margin, not a tie.**
 //!
-//! At X 18 the slab stands on its toes, which is worse on scar, removal, print
+//! At X 18 the slab stood on its toes, which is worse on scar, removal, print
 //! risk and resin (`plinth-evidence/slice-sweep-2026-09-02/field-2026-09-28/
 //! creep-arms-diagnosis.md` Q2). That diagnosis traced the 0.015 % tie to the
 //! fixture: three overlapping shells whose buried toe caps charged the flipped
 //! pose 1.919 raw mm2 of down-facing area. The toed-slab-fixture lane
 //! (2026-09-30) made the fixture one closed solid
-//! (`plinth-mesh` `fixtures::toed_slab_is_one_closed_solid_with_no_buried_toe_caps`)
-//! and ran this test, the production chain in `prepare.rs`'s order (repair,
-//! registered decimation, dense search with the production sweep demand):
+//! (`plinth-mesh` `fixtures::toed_slab_is_one_closed_solid_with_no_buried_toe_caps`).
+//! This test runs the production chain in `prepare.rs`'s order (repair,
+//! registered decimation, dense search with the production sweep demand).
+//! Scores of the two poses that matter, MEASURED:
 //!
-//! | fixture | on its toes (0,0,+1) | flat (0,0,-1) | flat - toes |
+//! | fixture, objective | on its toes (0,0,+1) | flat (0,0,-1) | toes - flat |
 //! |---|---|---|---|
-//! | three shells (old) | 7.191398, fragility fold 135.000 | 7.192495, fold 136.919 | +0.001096 |
-//! | one solid (now) | 6.975059, fold 81.059 | 7.184816, fold 135.000 | +0.209757 |
+//! | three shells, fold per triangle | 7.191398 | 7.192495 | -0.001096 (toes win, a tie) |
+//! | one solid, fold per triangle | 6.975059 | 7.184816 | -0.209757 (toes win) |
+//! | one solid, fold by length (`04443a5`) | 6.661658 | 6.646539 | **+0.015118 (flat wins)** |
+//! | three shells, fold by length (sabotage) | 6.651946 | 6.671738 | -0.019792 (toes win) |
 //!
-//! The union removed the flipped pose's 1.919 as the diagnosis said, but it
-//! ALSO cut the toes-down pose's fold by 53.94 raw mm2, so the slab now stands
-//! on its toes by a clear margin. That 53.94 is not a physical change: the
-//! fragility of a face is 0.6 x the mean angle defect of its three corners
-//! (`delicacy_eval.rs`), so each of the old underside's two 450 mm2 triangles,
-//! all three corners cube corners (defect 0.25), was charged 0.15 / mm2 over
-//! its whole flat area (900 x 0.15 = 135.000 exactly). The flat top still is
-//! two such triangles, so the flipped pose still pays 135.000. The unioned
-//! underside is 70 triangles, each with ONE or two cube corners and the rest
-//! toe-ring vertices of smaller defect, and pays 81.059 (0.094 / mm2). The
-//! fold reads the TRIANGULATION of a flat face, not its shape.
+//! The last row is this test run on `make_toed_slab_three_shells` (2026-10-01,
+//! RED as it should be): with the buried toe caps back, the flipped pose has 66
+//! down-facing faces and a fold of 7.3587 raw mm2 against 1.0603, and stands on
+//! its toes again. So BOTH changes are needed for the flat pose: the union and
+//! the length-spread fold. The field input `corpus/models/make_toed_slab.stl`
+//! is still the three-shell mesh.
 //!
-//! The lane brief forbids changing the orientation objective, so this test is
-//! ignored rather than made to pass. Un-ignore it when the objective (or the
-//! delicacy field) stops charging a vertex's curvature over a whole face's
-//! area, or when the owner rules otherwise.
+//! The middle row was the lane's first result: the fragility fold charged a
+//! corner's angle defect over each whole face, so it read the TRIANGULATION of
+//! the flat underside, and the union's 70-triangle underside paid 81.059 raw
+//! mm2 where the two-triangle top paid 135.000. The scar-fold-invariance lane
+//! (`04443a5`) spreads the fold by length instead; on the solid the flipped
+//! pose's fold is now 1.0603 raw mm2 against 3.9718 on its toes.
+//!
+//! **What carries the margin.** Peel (3.638541) and height (10 mm) are equal in
+//! the two poses and support burden nearly so (0.007383 vs 0.007461 cm2). The
+//! scar term is 0.004307 flat against 0.019386 on its toes, a difference of
+//! 0.015079 of the 0.015118 margin. Under it, the measured tip scar is
+//! 0.0158 raw mm2 flat against 0.8747 on its toes: the toes-down pose puts its
+//! tips on the toe cones. So the decision is a physical one, and the test pins
+//! the tip-scar ordering beside the score ordering.
+//!
+//! **The 0.01-point bound.** It is not a physics constant; it separates a
+//! decision from the 0.0011-point tie the three-shell fixture turned on (about
+//! 9 x that tie). The measured margin, 0.015118, clears it by about 1.5 x, which
+//! is narrow: a change that moves the scar term's weight or the tip sizing can
+//! cross it, and that is a finding to report, not a bound to lower.
 
 use plinth_core::m0_constants;
 use plinth_decimate::{BudgetConfigError, ProbeConfig};
 use plinth_orient::registered_sweep_request;
-use plinth_orient::search::{SearchTier, search};
+use plinth_orient::search::{search, SearchTier};
 use plinth_sweep::SweepDemand;
 
 fn registered_decimation_budget() -> plinth_decimate::DecimationBudget {
@@ -69,9 +82,6 @@ fn registered_decimation_budget() -> plinth_decimate::DecimationBudget {
 }
 
 #[test]
-#[ignore = "MEASURED RED 2026-09-30: the unioned toed slab commits on its toes by 0.2098 points, \
-            because the scar fold charges a corner's curvature over a whole face's area; the lane \
-            may not change the objective (see the module doc)"]
 fn the_toed_slab_lands_flat_at_its_production_pose() {
     let raw = plinth_mesh::make_toed_slab().expect("procedural toed slab");
     let repaired = plinth_mesh::repair_mesh(&raw).into_mesh();
@@ -130,13 +140,29 @@ fn the_toed_slab_lands_flat_at_its_production_pose() {
         .ranking
         .iter()
         .filter(|entry| entry.up_model_frame[2].get() > 0.0)
-        .map(|entry| entry.terms.score.get())
-        .min_by(f64::total_cmp)
+        .min_by(|a, b| a.terms.score.get().total_cmp(&b.terms.score.get()))
         .expect("the commit tier ranks a toes-down pose");
-    let margin = best_toes_down - record.winner.terms.score.get();
+    let margin = best_toes_down.terms.score.get() - record.winner.terms.score.get();
     println!("flat wins by {margin:.6} points");
     assert!(
         margin > 0.01,
         "the flat pose wins by only {margin:.6} points: a tie, not a decision"
+    );
+    // And it wins for the physical reason: the flat pose's tips scar the model
+    // less than the best toes-down pose's (MEASURED 0.0158 vs 0.8747 raw mm2).
+    let tip_scar = |terms: &plinth_orient::search::TermsRecord| {
+        terms
+            .tip_scar_raw_mm2
+            .map(|value| value.get())
+            .expect("a commit-tier pose measured by the production sweep has a tip scar")
+    };
+    let (flat_tip, toes_tip) = (
+        tip_scar(&record.winner.terms),
+        tip_scar(&best_toes_down.terms),
+    );
+    assert!(
+        flat_tip < toes_tip,
+        "the flat pose won, but its tips scar {flat_tip:.4} raw mm2 against {toes_tip:.4} on its \
+         toes: the margin is not the scar the module doc says carries it"
     );
 }

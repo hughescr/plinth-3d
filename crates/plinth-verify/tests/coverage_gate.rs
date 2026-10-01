@@ -3,7 +3,13 @@ use std::{path::PathBuf, process::Command};
 use plinth_core::{ArtifactId, LayerPlan, PositiveFinite};
 use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
 use plinth_hollow::{HollowedModel, SolidDecisionReason};
-use plinth_mesh::{evaluate_delicacy, make_toed_slab, DelicacyBuildConfig, DelicacySettings};
+// The three-shell toed slab: the frozen report and the hand-counted ceilings
+// below were measured on it, and its pinned orientation record
+// (`corpus/baseline/make_toed_slab.pipeline.json`) is that mesh's (see
+// `plinth_mesh::make_toed_slab_three_shells`).
+use plinth_mesh::{
+    evaluate_delicacy, make_toed_slab_three_shells, DelicacyBuildConfig, DelicacySettings,
+};
 use plinth_orient::{run as run_orientation, OrientRequest, PinnedBaseline};
 use plinth_support::{
     run_support, CoverageMeasurementLimits, CoverageMeasurementRequest, SupportPreparationLimits,
@@ -356,7 +362,7 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 const FROZEN_REPORT_JSON: &str = include_str!("coverage_gate_toed_slab.json");
 
 fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationError> {
-    let mesh = make_toed_slab().expect("procedural toed slab");
+    let mesh = make_toed_slab_three_shells().expect("procedural three-shell toed slab");
     let budget =
         DecimationBudget::ratified_default(ProbeConfig::new(1.0, 64 * 1024 * 1024, 10_000.0))
             .expect("ratified decimation budget");

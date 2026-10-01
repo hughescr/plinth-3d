@@ -3,8 +3,10 @@ use std::{collections::BTreeSet, path::PathBuf};
 use plinth_core::{LayerPlan, PositiveFinite};
 use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
 use plinth_hollow::{HollowedModel, SolidDecisionReason};
+// The three-shell toed slab: this crate's frozen pins were measured on it (see
+// `plinth_mesh::make_toed_slab_three_shells`).
 use plinth_mesh::{
-    evaluate_delicacy, make_overhang_table, make_toed_slab, make_uncovered_rim_table,
+    evaluate_delicacy, make_overhang_table, make_toed_slab_three_shells, make_uncovered_rim_table,
     DelicacyBuildConfig, DelicacySettings, Mesh,
 };
 use plinth_orient::{
@@ -311,7 +313,7 @@ fn real_delicacy(hollowed: &HollowedModel) -> Vec<f64> {
 #[test]
 fn public_runner_seals_toed_slab_and_discloses_its_abandoned_load() {
     let hollowed = hollowed_corpus_model(
-        make_toed_slab().expect("procedural toed slab"),
+        make_toed_slab_three_shells().expect("procedural toed slab"),
         "make_toed_slab",
     );
     // FU-38 (2026-08-12): real delicacy, not the zero field -- see
@@ -758,7 +760,7 @@ fn public_runner_closes_the_uncovered_rim_table_only_after_appending_repair_cont
 #[test]
 fn public_runner_measures_sealed_coverage_with_its_islands_patches_and_resource_plan() {
     let hollowed = hollowed_corpus_model(
-        make_toed_slab().expect("procedural toed slab"),
+        make_toed_slab_three_shells().expect("procedural toed slab"),
         "make_toed_slab",
     );
     // FU-38 (2026-08-12): real delicacy, not the zero field -- see
@@ -1739,7 +1741,7 @@ fn a_spec6_removal_discloses_its_ownerless_islands_and_lets_the_measurement_rule
 #[test]
 fn toed_slab_contacts_stay_pairwise_distinct_and_under_the_scar_ceiling_regardless_of_the_digest() {
     let hollowed = hollowed_corpus_model(
-        make_toed_slab().expect("procedural toed slab"),
+        make_toed_slab_three_shells().expect("procedural toed slab"),
         "make_toed_slab",
     );
     let delicacy = real_delicacy(&hollowed);
@@ -1900,7 +1902,7 @@ fn uncovered_rim_tables_attempt_zero_route_area_is_the_same_on_a_second_independ
 #[test]
 fn abandoned_refusals_disclose_a_consistent_ladder_and_reason_whichever_contacts_are_refused() {
     let hollowed = hollowed_corpus_model(
-        make_toed_slab().expect("procedural toed slab"),
+        make_toed_slab_three_shells().expect("procedural toed slab"),
         "make_toed_slab",
     );
     let delicacy = real_delicacy(&hollowed);
