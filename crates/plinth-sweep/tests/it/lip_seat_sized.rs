@@ -422,3 +422,89 @@ fn a_section_move_taken_back_leaves_every_displaced_member_within_the_rules() {
         graded.over_run
     );
 }
+
+/// **A re-landing is put back only for load its move ADDED; the longest
+/// offender goes first** (fix/lip-seat-blame, 2026-10-01).
+///
+/// for-craig-v8 (`247b8d5`), the stilt plate at the production policy: the
+/// arms seated in the cells at (-8.675, 14.325) and (-1.375, 14.325) (engine
+/// arms 78 and 80) first re-landed DOWN the near post they already stood on,
+/// 3.65 and 3.6 mm sideways. Each was put back because that post came out
+/// overloaded, although other arms' moves had added the load
+/// (`lip_seat::blame`), and the refusal held for the rest of the rule: they
+/// ended 9.60 and 9.55 mm sideways on a far post, 13.5 mm branches
+/// (`stilt-and-brace-pair-diagnosis.md` item 1). The posts stand in rows
+/// 7.25 mm apart; the near post is 3.65 mm from each seat, the next 6.25 and
+/// then 9.6 mm, so 3.7 mm (the near post and the grid's rounding of it)
+/// separates the near post from every other host.
+#[test]
+fn the_stilt_plate_arms_that_stood_on_the_near_post_end_on_it() {
+    const NEAR_POST_MM: f64 = 3.7;
+    let plan = &stilt().on;
+    let grid = &plan.grid;
+    let centre = |cell: usize| {
+        (
+            grid.center_x_mm(grid.col_of(cell)),
+            grid.center_y_mm(grid.row_of(cell)),
+        )
+    };
+    let lateral = |cell: usize, base: usize| {
+        let (a, b) = (centre(cell), centre(base));
+        (b.0 - a.0).hypot(b.1 - a.1)
+    };
+    let lip = &plan.report.lip_seat;
+    // The same blame sent arms 24 and 63 7.26 and 6.25 mm sideways at v8; no
+    // seat on this lattice is further than 3.65 mm from a post column, so no
+    // re-landing has cause to travel past the near one.
+    let mut far: Vec<(u32, f64)> = Vec::new();
+    for &id in &lip.relanded_ids {
+        let strut = &plan.struts[id as usize];
+        let travel = lateral(strut.cell, strut.base_cell());
+        if travel > NEAR_POST_MM {
+            far.push((id, travel));
+        }
+        println!(
+            "stilt: re-landed arm {id} seat {:?} base {:?} lateral {:.3} mm landing {:?}",
+            centre(strut.cell),
+            centre(strut.base_cell()),
+            lateral(strut.cell, strut.base_cell()),
+            strut.landing
+        );
+    }
+    println!(
+        "stilt: put back for host load {}, for roots {}; spared (load already on the member) \
+         {}; held behind a longer offender {}; {} sized checks",
+        lip.moves_put_back_host_load,
+        lip.moves_put_back_roots,
+        lip.blame_spared_already_carried,
+        lip.blame_held_behind_longer,
+        lip.sizing_checks
+    );
+    let mut graded = 0;
+    for seat in [(-8.675, 14.325), (-1.375, 14.325)] {
+        let Some(strut) = plan.struts.iter().find(|strut| {
+            strut.kind == StrutKind::Arm && {
+                let (x, y) = centre(strut.cell);
+                (x - seat.0).abs() < grid.pitch_mm() / 2.0
+                    && (y - seat.1).abs() < grid.pitch_mm() / 2.0
+            }
+        }) else {
+            panic!("no arm seated in the cell at {seat:?}: the fixture moved");
+        };
+        graded += 1;
+        let travel = lateral(strut.cell, strut.base_cell());
+        assert!(
+            travel <= NEAR_POST_MM,
+            "arm {} seated at {seat:?} travels {travel:.3} mm sideways to {:?} ({:?}), past the \
+             near post {NEAR_POST_MM} mm away",
+            strut.id,
+            centre(strut.base_cell()),
+            strut.landing
+        );
+    }
+    assert_eq!(graded, 2);
+    assert!(
+        !lip.relanded_ids.is_empty() && far.is_empty(),
+        "re-landed arms travel past the near post (id, mm): {far:?}"
+    );
+}
