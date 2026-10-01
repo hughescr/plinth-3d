@@ -43,6 +43,7 @@
 
 pub mod adapter;
 pub mod congestion;
+pub(crate) mod demand_replay;
 pub mod down_sweep;
 pub mod drain;
 pub mod footprint;
@@ -442,6 +443,30 @@ pub enum SweepError {
     StrutLimit { limit: usize },
 }
 
+/// How the removal pass decides that an under-loaded arm's demand is still
+/// covered once the arm is gone (lane neighbour-cover, 2026-09-30).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemovalCoverage {
+    /// **Production.** Every under-loaded arm goes to the two exact checks:
+    /// the up-sweep's multi-layer reach potential, re-run over the field the
+    /// removal would leave ([`demand_replay`]), which keeps any arm whose
+    /// removal leaves a demand cell unrooted that the current field roots —
+    /// arms on every layer count as roots, at the layers where they touch the
+    /// model — and then the down-sweep, which undoes the pass if uncarried
+    /// load or the overloaded-arm count rises. The span test is applied only
+    /// if that exact attempt reads worse.
+    AnyLayerReplayed,
+    /// The rule until 2026-09-30: coverage only from an arm seated on the SAME
+    /// layer, by straight chamfer distance, and no replay. **Comparison and
+    /// sabotage only**; nothing in the pipeline sets it.
+    SameLayerSeat,
+    /// The production pass with the replay OFF: only the down-sweep (and the
+    /// span proxy as its fallback) decides, so an arm the reach law needs for
+    /// a handful of cells goes whenever the load does not miss it. **Sabotage
+    /// only**: the replay tests must go red under it.
+    AnyLayerUnchecked,
+}
+
 /// Everything the sweep reads, gathered once from the registry.
 #[derive(Clone, Copy, Debug)]
 pub struct SweepPolicy {
@@ -523,6 +548,12 @@ pub struct SweepPolicy {
     /// can put the seat-only rule back and watch the same arm be deleted with
     /// a gap opening under it (`refuse_uncovered_spans`).
     pub removal_span_check: bool,
+    /// How the removal pass decides that an under-loaded arm's demand is still
+    /// covered without it. **[`RemovalCoverage::AnyLayerReplayed`] in
+    /// production**; the other two are the rule this engine had until
+    /// 2026-09-30 and the unchecked screen, kept so the drill can show what the
+    /// replay refuses.
+    pub removal_coverage: RemovalCoverage,
     /// Whether an arm offers the down-sweep's routing field the column its own
     /// axis occupies ONE LAYER UP, and not only the column it occupies here.
     /// **On in production.** For a straight arm the two columns are the same
@@ -679,6 +710,7 @@ impl SweepPolicy {
             shaft_landings: true,
             drain_keep_out: true,
             removal_span_check: true,
+            removal_coverage: RemovalCoverage::AnyLayerReplayed,
             tip_column_roots: true,
             slenderness_ratio: placeholders.slenderness_limit_ratio().diagnostic().get(),
             flare_r_factor: placeholders.flare_r_factor().diagnostic().get(),
@@ -770,6 +802,24 @@ impl SweepPolicy {
     #[must_use]
     pub const fn with_seat_only_removal(mut self) -> Self {
         self.removal_span_check = false;
+        self
+    }
+
+    /// Put back the removal coverage rule this engine had until 2026-09-30:
+    /// a survivor seated on the SAME layer within reach, and no replay.
+    /// **Comparison only**; nothing in the pipeline sets it.
+    #[must_use]
+    pub const fn with_same_layer_removal(mut self) -> Self {
+        self.removal_coverage = RemovalCoverage::SameLayerSeat;
+        self
+    }
+
+    /// Switch the multi-layer reach replay OFF and leave the rest of the
+    /// production pass as it is. **Sabotage only**; nothing in the pipeline
+    /// sets it.
+    #[must_use]
+    pub const fn without_removal_replay(mut self) -> Self {
+        self.removal_coverage = RemovalCoverage::AnyLayerUnchecked;
         self
     }
 
@@ -1223,41 +1273,106 @@ pub fn run_sweep_with_drains(
     let mut removals = 0_u64;
     let mut removals_refused_by_span = 0_u64;
     let mut removal_passes_rolled_back = 0_u64;
+    let mut removal_coverage = report::RemovalCoverageReport::default();
+    // The multi-layer reach check reads exactly what the up-sweep read, so a
+    // replay of the unchanged field reproduces the placement's own potential.
+    let replay_context = demand_replay::ReplayContext {
+        grid: &grid,
+        slices: &slices,
+        planes: &planes,
+        mesh,
+        kappa: policy.kappa,
+        layer_height_mm: height,
+        layers,
+        straight_reach: policy.straight_reach,
+        creep_weight: policy.creep_weight,
+        overhang_centre_deg: policy.overhang_centre_deg,
+        overhang_transition_deg: policy.overhang_transition_deg,
+        max_restarts: policy.strut_removal_passes,
+        first_loss_ratio: policy.kappa_first_loss / policy.kappa,
+    };
     for _ in 0..policy.strut_removal_passes {
         // THE PASS IS UNDONE AS A WHOLE IF IT MAKES THE FIELD WORSE. The
-        // span test below is a coverage argument over arms alone; the
-        // down-sweep is the only thing that actually knows what the load did.
-        // Keeping the previous field beside the new one costs one clone per
-        // pass and turns "never if its removal raises `uncarried_load`" from
-        // an intention into a property the run can be graded on.
+        // span test and the replay below are coverage arguments over arms
+        // alone; the down-sweep is the only thing that actually knows what
+        // the load did. Keeping the previous field beside the new one costs
+        // one clone per pass and turns "never if its removal raises
+        // `uncarried_load`, or overloads an arm the field did not overload"
+        // from an intention into a property the run can be graded on.
+        //
+        // TWO ATTEMPTS, EXACT FIRST (2026-09-30). Under the replayed rule the
+        // pass first asks only the two exact questions — the up-sweep's reach
+        // (the replay, inside `remove_under_loaded`) and the down-sweep's load
+        // (below). The span test is a per-layer PROXY for the second: it asks
+        // whether another arm stands beside every layer of the candidate's
+        // shaft, including layers where the shaft stands in free air and
+        // carries nothing, so it refuses arms the down-sweep does not need.
+        // Only when the exact attempt reads worse is the pass tried again with
+        // the proxy applied, which is the rule this pass had before, so the
+        // proxy can salvage a pass but never decide one on its own.
         let before_struts = struts.clone();
         let before_outcome = outcome.clone();
-        let removed = remove_under_loaded(
-            &grid,
-            &mut struts,
-            minimum_load,
-            ReachMetric {
-                reach_mm: lamina_reach_mm,
-                straight: policy.straight_reach,
-            },
-            layers,
-            policy.removal_span_check,
-            &mut removals_refused_by_span,
-        );
-        if removed == 0 {
+        let replayed = policy.removal_coverage == RemovalCoverage::AnyLayerReplayed;
+        // The replay-off drill keeps production's attempts, so it differs from
+        // production in the replay alone.
+        let exact_first = policy.removal_coverage != RemovalCoverage::SameLayerSeat;
+        let span_attempts: &[bool] = if exact_first && policy.removal_span_check {
+            &[false, true]
+        } else {
+            &[policy.removal_span_check]
+        };
+        let mut accepted = 0_usize;
+        let mut rolled_back = false;
+        for (attempt, &span_check) in span_attempts.iter().enumerate() {
+            if attempt > 0 {
+                struts = before_struts.clone();
+                outcome = before_outcome.clone();
+                removal_coverage.retried_with_span_proxy += 1;
+            }
+            let removed = remove_under_loaded(
+                &grid,
+                &mut struts,
+                minimum_load,
+                ReachMetric {
+                    reach_mm: lamina_reach_mm,
+                    straight: policy.straight_reach,
+                },
+                layers,
+                span_check,
+                &mut removals_refused_by_span,
+                policy.removal_coverage,
+                replayed.then_some(&replay_context),
+                &mut removal_coverage,
+            );
+            if removed == 0 {
+                rolled_back = attempt > 0;
+                break;
+            }
+            outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
+            let more_uncarried = outcome.uncarried_load_mm2
+                > before_outcome.uncarried_load_mm2
+                    + 1.0e-9 * before_outcome.uncarried_load_mm2.abs().max(1.0);
+            let more_overloaded = outcome.overloaded.len() > before_outcome.overloaded.len();
+            if more_uncarried || more_overloaded {
+                if more_overloaded && !more_uncarried {
+                    removal_coverage.rolled_back_for_overload += 1;
+                }
+                rolled_back = true;
+                continue;
+            }
+            accepted = removed;
+            rolled_back = false;
             break;
         }
-        outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
-        let worse = outcome.uncarried_load_mm2
-            > before_outcome.uncarried_load_mm2
-                + 1.0e-9 * before_outcome.uncarried_load_mm2.abs().max(1.0);
-        if worse {
+        if accepted == 0 {
             struts = before_struts;
             outcome = before_outcome;
-            removal_passes_rolled_back += 1;
+            if rolled_back {
+                removal_passes_rolled_back += 1;
+            }
             break;
         }
-        removals += removed as u64;
+        removals += accepted as u64;
     }
     landings.record("removal", &landing_check::check_landings(&struts));
     // The interior test again, now that the down-sweep has added arms of its
@@ -1756,6 +1871,7 @@ pub fn run_sweep_with_drains(
         removals_refused_by_span,
         removal_passes_rolled_back,
     );
+    report.removal_coverage = removal_coverage;
     report.drain_keep_out_cells = keep_out.blocked_cells();
     report.drain_keep_out_refusals = keep_out.refusals();
     report.drain_seat_refusals = keep_out_refusals;
@@ -2270,9 +2386,10 @@ fn set_interior(struts: &mut [SweepStrut], history: &up_sweep::ColumnHistory) {
 ///
 /// **This can never create a bare island**, which is what makes
 /// `SWEEP_STRUT_REMOVAL_PASSES` unable to decide an outcome: a REACH-placed arm
-/// is deleted only if EVERY demand cell it rooted is still within one lamina's
-/// reach of a survivor at the same layer. A hairline arm is better than a bare
-/// island, so otherwise it is kept and reported with its load.
+/// is deleted only if the reach potential, re-run without it, still roots
+/// every cell the field roots with it (see "Which survivor covers a demand
+/// cell" below). A hairline arm is better than a bare island, so otherwise it
+/// is kept and reported with its load.
 ///
 /// A LOAD-placed arm (`inserted_by_load`) is never a candidate here, full
 /// stop — it is excluded below rather than let the coverage test decide it.
@@ -2290,6 +2407,40 @@ fn set_interior(struts: &mut [SweepStrut], history: &up_sweep::ColumnHistory) {
 /// calls with a different strut set in between). Excluding load-placed arms
 /// here removes the cycle rather than merely bounding it: the area law placed
 /// them for a reason a load-magnitude threshold cannot re-litigate.
+///
+/// # Which survivor covers a demand cell (lane neighbour-cover, 2026-09-30)
+///
+/// Until 2026-09-30 only a survivor SEATED ON THE SAME LAYER, within a
+/// straight chamfer distance, could cover a demand cell. A creep arm on a
+/// sloped flank has no such neighbour — the flank's other arms are seated a
+/// few layers up or down — so none could ever be removed, and the braces tied
+/// to them stayed too. The straight distance was also wrong the other way: a
+/// lamina reaches only through cured cover, and only upward in build order.
+///
+/// Under [`RemovalCoverage::AnyLayerReplayed`] there is no straight-line
+/// screen, because none is a necessary condition: the potential creeps up a
+/// steep wall at the wall's overhang weight, so it can root a cell further
+/// than one lamina from every seat. Every candidate goes instead to
+///
+/// 1. the **span test** (2026-09-06), when `span_check` is set — the caller
+///    sets it only on its fallback attempt (see `run_sweep_with_drains`);
+/// 2. the **multi-layer reach check, re-run**
+///    ([`demand_replay::refuse_unrooted_demand`]): the up-sweep's potential is
+///    replayed over the field the removal would leave, with every arm a root
+///    at the layer where it touches the model, and an arm whose removal
+///    leaves any demand cell unrooted that the current field roots is kept.
+///    An arm seated above a cell cannot root it — it does not touch the model
+///    until after that layer has peeled — and the replay, walking the layers
+///    in build order, carries that by construction.
+///
+/// The caller then re-runs the down-sweep and undoes the attempt if uncarried
+/// load or the overloaded-arm count rose. Braces are placed by the
+/// slenderness lane AFTER this pass, so an arm removed here never draws them.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the screen reads the grid and the field, the span test the layer count, and the \
+          replay the whole up-sweep's inputs; the counters are the pass's report"
+)]
 fn remove_under_loaded(
     grid: &Grid,
     struts: &mut Vec<SweepStrut>,
@@ -2298,6 +2449,9 @@ fn remove_under_loaded(
     layers: usize,
     span_check: bool,
     refused_by_span: &mut u64,
+    coverage: RemovalCoverage,
+    replay: Option<&demand_replay::ReplayContext<'_>>,
+    telemetry: &mut report::RemovalCoverageReport,
 ) -> usize {
     let candidates: Vec<usize> = struts
         .iter()
@@ -2328,22 +2482,51 @@ fn remove_under_loaded(
         if is_a_parent[candidate] {
             continue;
         }
-        let covered = struts[candidate].covered_demand.clone();
-        let layer = struts[candidate].k_top;
-        let still_covered = covered.iter().all(|&cell| {
-            struts.iter().enumerate().any(|(index, other)| {
-                index != candidate
-                    && !doomed[index]
-                    && other.k_top == layer
-                    && reach.within(grid, cell, other.cell)
-            })
-        });
+        telemetry.candidates += 1;
+        let still_covered = match coverage {
+            // No straight-line screen: it is not a necessary condition. The
+            // potential creeps up a steep wall at the wall's overhang weight
+            // (`reach::creep_step`), so it can root a cell further than one
+            // lamina from every seat, and on a flank — where these arms stand
+            // — it does. A straight-line prune would decide those arms
+            // without asking the law; the replay below asks it.
+            RemovalCoverage::AnyLayerReplayed | RemovalCoverage::AnyLayerUnchecked => true,
+            RemovalCoverage::SameLayerSeat => {
+                let layer = struts[candidate].k_top;
+                struts[candidate].covered_demand.iter().all(|&cell| {
+                    struts.iter().enumerate().any(|(index, other)| {
+                        index != candidate
+                            && !doomed[index]
+                            && other.k_top == layer
+                            && reach.within(grid, cell, other.cell)
+                    })
+                })
+            }
+        };
         if still_covered {
             doomed[candidate] = true;
+            telemetry.screened += 1;
         }
     }
     if span_check {
         *refused_by_span += refuse_uncovered_spans(grid, struts, &mut doomed, reach, layers);
+    }
+    if let Some(context) = replay {
+        let replayed = demand_replay::refuse_unrooted_demand(context, struts, &mut doomed);
+        telemetry.refused_by_replay += replayed.refused;
+        telemetry.refused_by_replay_within_first_loss += replayed.refused_within_first_loss;
+        telemetry.replays += replayed.replays;
+        telemetry.replay_trial_layers += replayed.trial_layers;
+        if telemetry.replays == replayed.replays {
+            // The first replay of the run measured the field as placed.
+            telemetry.replay_baseline_unrooted_cells = replayed.baseline_unrooted_cells;
+        }
+        telemetry.replay_newly_unrooted_cells += replayed.newly_unrooted_cells;
+        telemetry.replay_newly_unrooted_within_first_loss_cells +=
+            replayed.newly_unrooted_within_first_loss;
+        telemetry.replay_newly_unrooted_max_u =
+            telemetry.replay_newly_unrooted_max_u.max(replayed.newly_unrooted_max_u);
+        telemetry.replay_exhausted += u64::from(replayed.exhausted);
     }
     drop_members(struts, &doomed);
     doomed.iter().filter(|flag| **flag).count()
@@ -2625,15 +2808,19 @@ pub(crate) struct ReachMetric {
 impl ReachMetric {
     /// Whether `b` is within one reach of `a`.
     fn within(self, grid: &Grid, a: usize, b: usize) -> bool {
-        let distance = if self.straight {
+        self.distance_mm(grid, a, b) <= self.reach_mm
+    }
+
+    /// The distance from `a` to `b` in this metric, in mm.
+    pub(crate) fn distance_mm(self, grid: &Grid, a: usize, b: usize) -> f64 {
+        if self.straight {
             cell_distance_mm(grid, a, b)
         } else {
             let rows = grid.row_of(a).abs_diff(grid.row_of(b));
             let cols = grid.col_of(a).abs_diff(grid.col_of(b));
             let (long, short) = if rows > cols { (rows, cols) } else { (cols, rows) };
             grid.pitch_mm() * ((long - short) as f64 + core::f64::consts::SQRT_2 * short as f64)
-        };
-        distance <= self.reach_mm
+        }
     }
 }
 
@@ -2819,6 +3006,7 @@ fn build_report(
     SweepRunReport {
         // Filled by the caller, which is the only place that knows the drains:
         // this function is handed the sweep's own measurements and nothing else.
+        removal_coverage: report::RemovalCoverageReport::default(),
         drain_keep_out_cells: 0,
         drain_keep_out_refusals: 0,
         drain_seat_refusals: 0,
@@ -3032,7 +3220,33 @@ fn digest(struts: &[SweepStrut]) -> String {
 
 #[cfg(test)]
 mod removal_tests {
-    use super::{plan_grid, remove_under_loaded, unmerge_overgrown, Landing, SweepStrut};
+    use super::{plan_grid, unmerge_overgrown, Landing, SweepStrut};
+
+    /// The screen and the span test alone, as these fixtures have always been
+    /// graded. The multi-layer replay needs a mesh and its slices, so it is
+    /// graded end to end in `tests/it/neighbour_cover.rs`, not here.
+    fn remove_under_loaded(
+        grid: &crate::Grid,
+        struts: &mut Vec<SweepStrut>,
+        minimum_load_mm2: f64,
+        reach_mm: f64,
+        layers: usize,
+        span_check: bool,
+        refused_by_span: &mut u64,
+    ) -> usize {
+        super::remove_under_loaded(
+            grid,
+            struts,
+            minimum_load_mm2,
+            reach_mm,
+            layers,
+            span_check,
+            refused_by_span,
+            crate::RemovalCoverage::AnyLayerUnchecked,
+            None,
+            &mut crate::report::RemovalCoverageReport::default(),
+        )
+    }
 
     fn arm(id: u32, cell: usize, k_top: usize, k_bottom: usize) -> SweepStrut {
         SweepStrut {
