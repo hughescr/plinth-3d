@@ -59,6 +59,31 @@ fn runs_of(plan: &SweepPlan) -> Vec<UnbracedRun> {
     unbraced_runs(&plan.grid, &plan.struts, plan.layer_height_mm, &law())
 }
 
+/// The registered maximum radius, read from the registry: the thickest root
+/// THICKEN may draw.
+fn r_max_mm() -> f64 {
+    m0_constants()
+        .expect("the registry constructs")
+        .placeholders()
+        .tip_radius_max_legacy_mm()
+        .diagnostic()
+        .get()
+}
+
+/// The over-limit runs of `plan` (measured by `law`) that THICKEN could hold
+/// at all: no longer than `S · r_max`, the limit of a member drawn at the
+/// maximum radius over its whole run. A run longer than that is over its limit
+/// at ANY admissible root (a taper below the maximum only sways more), so the
+/// rung must refuse it by radius and hand it on. A necessary condition, not a
+/// sufficient one: a run inside it can still be refused for its foot's disc.
+fn thickenable_runs(plan: &SweepPlan, law: &SlendernessLaw) -> Vec<UnbracedRun> {
+    let cap = law.max_unbraced_mm(r_max_mm());
+    unbraced_runs(&plan.grid, &plan.struts, plan.layer_height_mm, law)
+        .into_iter()
+        .filter(|run| run.over_limit() && run.length_mm <= cap)
+        .collect()
+}
+
 fn braces(plan: &SweepPlan) -> Vec<&SweepStrut> {
     plan.struts
         .iter()
@@ -143,15 +168,36 @@ fn deleting_each_rung_hands_the_work_to_the_next_one_down() {
     let no_brace = sweep_with(&mesh, 0.0, &policy().without_slenderness_brace());
     let no_thicken = sweep_with(&mesh, 0.0, &policy().without_slenderness_thicken());
     let no_mast = sweep_with(&mesh, 0.0, &policy().without_slenderness_mast());
+    let off = sweep_with(&mesh, 0.0, &policy().without_slenderness());
 
     // THICKEN (owner ruling 2026-09-29) sits between the cross and the mast:
     // with crosses deleted it takes the work, and with it deleted too the
     // work falls to masts.
+    //
+    // RE-DERIVED at the merge of develop `ca2c545` (2026-10-01). At S = 30
+    // the stilt plate no longer has a run the rung can hold: after develop's
+    // lip-seat blame (`5d7b2c6`) every one of the field's 25 over-limit runs
+    // is a full-height plate-rooted post, k 0..700, 35.000 mm, against
+    // S · r_max = 30 mm (`lanes/bracing-rework/logs/merge-probe-no-brace.log`),
+    // so all 85 thickenings are refused by radius. The branches that split
+    // those posts below 30 mm on the lane's base `247b8d5` are the moves the
+    // blame no longer puts back. So at the production ratio this asserts the
+    // physics both ways — the rung is REACHED, and it thickens exactly when
+    // some run is short enough to hold — and the hand-over itself is graded
+    // at the ratio the fixture was built at, where the stilt posts are
+    // holdable: `with_bracing_deleted_thickening_takes_the_holdable_runs_first`.
+    let lane = &no_brace.report.slenderness_lane;
     assert!(
-        no_brace.report.slenderness_lane.members_thickened > 0,
-        "with bracing deleted the work must fall to thickening first: {:?}",
-        no_brace.report.slenderness_lane
+        lane.members_thickened + lane.thicken_refused_radius + lane.thicken_refused_disc > 0,
+        "with bracing deleted the work must reach thickening first: {lane:?}"
     );
+    let holdable = thickenable_runs(&off, &law());
+    if holdable.is_empty() {
+        assert_eq!(
+            lane.members_thickened, 0,
+            "no run is within S · r_max, yet the rung thickened something: {lane:?}"
+        );
+    }
     assert_eq!(no_thicken.report.slenderness_lane.members_thickened, 0);
     assert!(
         no_thicken.report.slenderness_lane.masts_dropped > 0,
@@ -195,7 +241,7 @@ fn deleting_each_rung_hands_the_work_to_the_next_one_down() {
             .filter(|strut| strut.kind == plinth_sweep::StrutKind::Arm)
             .count()
     };
-    let baseline = arms(&sweep_with(&mesh, 0.0, &policy().without_slenderness()));
+    let baseline = arms(&off);
     assert_eq!(
         arms(&no_mast),
         baseline,
@@ -204,6 +250,41 @@ fn deleting_each_rung_hands_the_work_to_the_next_one_down() {
     assert!(
         arms(&full) >= baseline - full.report.slenderness_lane.merges_forced,
         "the lane dropped arms rather than tying them"
+    );
+}
+
+/// **THE THICKEN RUNG TAKES OVER WHEN BRACING IS DELETED** — graded where the
+/// rung can physically hold something.
+///
+/// At the ruled S = 30 every over-limit stilt post is a 35 mm full-height run
+/// and the rung must refuse it by radius (see the ladder above). This keeps
+/// the hand-over's proof at the S the fixture was built at
+/// (`harness::PATH_FIXTURE_SLENDERNESS_RATIO`, 50, where `S · r_max` is
+/// 50 mm), the same pin the mast-mechanics tests use. Not vacuous: it first
+/// asserts that the field has runs the rung could hold, and then that with
+/// crosses deleted the rung holds some of them.
+#[test]
+fn with_bracing_deleted_thickening_takes_the_holdable_runs_first() {
+    let mesh = stilt_plate();
+    let at_50 = || harness::at_path_fixture_slenderness(policy());
+    let law = law_at(harness::PATH_FIXTURE_SLENDERNESS_RATIO);
+    let off = sweep_with(&mesh, 0.0, &at_50().without_slenderness());
+    let holdable = thickenable_runs(&off, &law);
+    assert!(
+        !holdable.is_empty(),
+        "at S = 50 the stilt plate has no over-limit run within S · r_max, so this grades nothing"
+    );
+    let no_brace = sweep_with(&mesh, 0.0, &at_50().without_slenderness_brace());
+    let lane = &no_brace.report.slenderness_lane;
+    assert!(
+        lane.members_thickened > 0,
+        "with bracing deleted the work must fall to thickening first: {} holdable runs, {lane:?}",
+        holdable.len()
+    );
+    assert_eq!(
+        lane.braces_added,
+        lane.masts_dropped + lane.masts_extended,
+        "with bracing deleted the only crosses left are the ones a mast brings with it"
     );
 }
 
