@@ -11,9 +11,9 @@
 //!   its seat, and the material built on that demand inherits the potential
 //!   upward ([`crate::reach::recompute_potential`]), so removing the arm can
 //!   unroot cells several layers higher that no seat-layer test looks at;
-//! * it measures a straight chamfer distance, while the potential travels only
-//!   THROUGH cured cover. Across a gap in the cover the straight line is
-//!   shorter than any path the lamina can take.
+//! * it measures a distance in the plane (`ReachMetric`), while the
+//!   potential travels only THROUGH cured cover. Across a gap in the cover
+//!   the straight line is shorter than any path the lamina can take.
 //!
 //! Both are answered the same way: re-run the up-sweep's own reach potential,
 //! layer by layer, over the arm set that would remain, and compare it with the
@@ -403,12 +403,16 @@ mod tests {
     //! Hand-derived geometry. A slab `S1` 4 mm long (x 0..4), 1 mm wide
     //! (y −0.5..0.5), its underside at z 1.0, so its first layer is layer 20
     //! at 0.05 mm (plane 1.025). Reach is one lamina, κ·h = 42.6006450 × 0.05
-    //! = 2.1300 mm, in the 8-neighbour chamfer metric: a cell `dx` along and
-    //! `dy` across is `(dx − dy) + √2·dy` away when `dx ≥ dy`.
+    //! = 2.1300 mm, measured as the straight length (`ReplayContext::
+    //! straight_reach`, the production metric since lane lattice-align): a
+    //! cell `dx` along and `dy` across is `√(dx² + dy²)` away. Under the
+    //! 8-neighbour chamfer it is `(dx − dy) + √2·dy` when `dx ≥ dy`; every
+    //! verdict below is the same in both metrics.
     //!
     //! The farthest cell of `S1` from the nearest of two arms at x 0.9 and
-    //! 3.1 is at x 2.0, y ±0.5: `(1.1 − 0.5) + √2·0.5 = 1.307 mm`, inside
-    //! reach. The far end, x 4.0, from x 0.9 alone: `3.1 mm`, outside it.
+    //! 3.1 is at x 2.0, y ±0.5: `√(1.1² + 0.5²) = 1.208 mm` (chamfer
+    //! `1.307 mm`), inside reach. The far end, x 4.0, from x 0.9 alone:
+    //! `3.1 mm` in both, outside it.
     //!
     //! No production function decides anything in these tests: the expected
     //! verdicts are the two numbers above.

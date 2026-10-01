@@ -457,7 +457,7 @@ pub enum RemovalCoverage {
     /// if that exact attempt reads worse.
     AnyLayerReplayed,
     /// The rule until 2026-09-30: coverage only from an arm seated on the SAME
-    /// layer, by straight chamfer distance, and no replay. **Comparison and
+    /// layer, by distance in the reach metric (`ReachMetric`), and no replay. **Comparison and
     /// sabotage only**; nothing in the pipeline sets it.
     SameLayerSeat,
     /// The production pass with the replay OFF: only the down-sweep (and the
