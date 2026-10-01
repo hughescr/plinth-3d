@@ -100,6 +100,7 @@ fn setup(mesh: &Mesh, top_z: f64, extent: f64, per_event: bool) -> Setup {
         owner_growth_ceiling_mm: policy.owner_growth_ceiling_mm,
         alpha: plinth_sweep::peel::alpha(policy.peel_field_mode),
         lamina_reach_mm: policy.kappa * h,
+        straight_reach: policy.straight_reach,
         tip_column_roots: true,
         per_event,
     };

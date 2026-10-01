@@ -3079,6 +3079,33 @@ fn print_sweep_disclosure(
         report.counters.creep_steps_taken,
     );
     println!(
+        "[sweep {model}] seat placement: up-sweep seats {} against a hex covering lower bound of \
+         {} over the islands of demand they cover (ratio {:.3}, bound at the measured reach); \
+         islands measured with several coverings {}, won by a covering other than the global \
+         lattice {}, seats saved against the global lattice's own count {}; straight-line reach: \
+         sightlines {} clear / {} bent in the reach field, {} / {} in the routing field; seat \
+         faces: {} member tops (arms and braces) carry the nearest overhang face, {} of them \
+         beside a nearer wall or face steeper than the overhang band, which they do not seat on{}",
+        report.counters.island_seats,
+        report.counters.island_hex_bound,
+        report.counters.island_seats as f64 / (report.counters.island_hex_bound.max(1) as f64),
+        report.counters.islands_compared,
+        report.counters.islands_realigned,
+        report.counters.island_seats_saved,
+        report.counters.sightlines_clear,
+        report.counters.sightlines_blocked,
+        report.counters.route_sightlines_clear,
+        report.counters.route_sightlines_blocked,
+        report.counters.seat_faces_measured,
+        report.counters.seat_faces_steeper_passed_over,
+        if report.counters.seat_faces_fallback_any_down_facing > 0 {
+            " (WARNING: the model has no overhang face at all, so every down-facing face was \
+             offered)"
+        } else {
+            ""
+        },
+    );
+    println!(
         "[sweep {model}] raft: {} pads ({} grown wider than the native pad to cover their foot, \
          {} feet sharing a pad), {} bridges, {:.4} mm3",
         emission.raft_pads,

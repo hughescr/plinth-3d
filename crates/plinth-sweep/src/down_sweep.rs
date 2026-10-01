@@ -112,6 +112,12 @@ pub struct DownSweepOutcome {
     /// load it could have routed and says so, rather than routing load along a
     /// path it never proved.
     pub route_not_converged: u64,
+    /// Straight sightlines the routing field priced and found clear, and those
+    /// that crossed empty space and bent instead (`reach::any_angle_relax`).
+    /// The path-hit witnesses that load travels on the same straight-line
+    /// metric the reach potential measures, and still goes round a hole.
+    pub route_sightlines_clear: u64,
+    pub route_sightlines_blocked: u64,
     /// Arms this down-sweep added because the AREA LAW asked for them — see
     /// [`insert_for_load`]. Zero on a field where reach already placed enough
     /// section, so it also tells "the path never ran" apart from "the path ran
@@ -257,6 +263,10 @@ pub struct SizingPolicy {
     /// the two sweeps still price the same journey the same way — see
     /// `reach::recompute_potential`.
     pub lamina_reach_mm: f64,
+    /// Whether a routed run is measured as its straight length, the same
+    /// metric the reach potential uses. See
+    /// [`crate::SweepPolicy::straight_reach`]; `false` is the sabotage form.
+    pub straight_reach: bool,
     /// Whether an arm roots the column its own axis occupies ONE LAYER UP as
     /// well as the column it occupies here. See
     /// [`crate::SweepPolicy::tip_column_roots`]; `false` is the sabotage form.
@@ -570,6 +580,8 @@ fn sweep_pass(
     let mut nearest = vec![u32::MAX; cells];
     let mut distance = vec![f32::INFINITY; cells];
     let mut distance_prev = vec![f32::INFINITY; cells];
+    let mut route_anchor = vec![crate::reach::NO_ANCHOR; cells];
+    let mut route_clear: Vec<f32> = Vec::with_capacity(cells);
     let mut pending = vec![0.0_f64; struts.len()];
     // Per cell, this layer: whether the load an arm would read there is peel
     // that was put into the raster (arrived from above, or injected here), as
@@ -727,6 +739,9 @@ fn sweep_pass(
         let mut any_lost;
         let mut route_converged;
         let mut round = 0_usize;
+        // The routing field's clearance is built at most once per layer:
+        // `cover_above` does not change between the rounds below.
+        let mut route_clear_built = false;
         // Per-event mode inserts at most once per layer per pass: the trigger
         // table was measured before this pass, so after an insertion only the
         // re-route below is needed, and the next pass re-measures.
@@ -749,11 +764,23 @@ fn sweep_pass(
                 &cover_above,
                 &carriers,
                 &tip_root,
-                &mut distance,
-                &mut nearest,
-                &mut via_tip,
-                &mut distance_prev,
+                if sizing.straight_reach {
+                    (sizing.lamina_reach_mm + grid.pitch_mm()) as f32
+                } else {
+                    f32::NEG_INFINITY
+                },
+                RouteFields {
+                    distance: &mut distance,
+                    nearest: &mut nearest,
+                    via_tip: &mut via_tip,
+                    previous: &mut distance_prev,
+                    anchor: &mut route_anchor,
+                    clear: &mut route_clear,
+                    clear_built: &mut route_clear_built,
+                },
             );
+            outcome.route_sightlines_clear += route.sightlines.clear;
+            outcome.route_sightlines_blocked += route.sightlines.blocked;
             route_converged = route.converged;
             let any_root = route.any_root;
             // THE ROUTING THIS LAYER ENDS WITH, recorded for the per-event
@@ -1574,13 +1601,17 @@ fn insert_for_load(
             if scratch.accepted.len() >= extra || struts.len() >= max_struts {
                 break;
             }
-            if crate::chamfer_distance_mm(grid, cell, host_cell) < separation_mm {
+            // The insertion's own spacing test, unchanged by the 2026-09-30
+            // metric change: it is a spacing rule for the area law's extra
+            // carriers, not a reach test, and it keeps the chamfer it was
+            // built and measured with (`insertion_spacing_mm`).
+            if insertion_spacing_mm(grid, cell, host_cell) < separation_mm {
                 continue;
             }
             if scratch
                 .accepted
                 .iter()
-                .any(|&taken| crate::chamfer_distance_mm(grid, cell, taken) < separation_mm)
+                .any(|&taken| insertion_spacing_mm(grid, cell, taken) < separation_mm)
             {
                 continue;
             }
@@ -1698,10 +1729,14 @@ fn size_arm(carried_mm2: f64, sizing: SizingPolicy) -> f64 {
 ///
 /// Roots (`distance = 0`) are the cells of `cover_above` whose column is a
 /// CARRIER at layer k — model material or a live arm. Travel is restricted to
-/// `cover_above` and priced on the same 8-neighbour chamfer the reach potential
-/// uses (`p`, `p√2`), so "the down-sweep can route this load" and "the up-sweep
-/// called this cell rooted" are one predicate on one metric over one domain.
-/// Returns whether any root exists at all.
+/// `cover_above` and priced on the same any-angle metric the reach potential
+/// uses ([`crate::reach::any_angle_relax`]: the straight length wherever the
+/// sightline lies in the cover, one raster step where it does not), so "the
+/// down-sweep can route this load" and "the up-sweep called this cell rooted"
+/// are one predicate on one metric over one domain. `limit_mm` is the routing
+/// bound the caller tests `distance` against; beyond it the field is still an
+/// upper bound but is no longer measured exactly. Returns whether any root
+/// exists at all.
 ///
 /// This is what keeps the spread batch-first. A per-source ring search would
 /// cost 5,700 probes per cell — 4e9 on one disc layer — and a per-item search
@@ -1717,34 +1752,35 @@ fn size_arm(carried_mm2: f64, sizing: SizingPolicy) -> f64 {
 /// sweeps until the field stops moving, under the same bound and the same
 /// "report, never refuse" rule as `reach::recompute_potential`, and the caller
 /// counts the layers that hit the bound.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one routing field reads the grid, the cover it walks in, the two root sets it may \
-          start from, and writes the three parallel per-cell rasters that ARE its answer \
-          (distance, nearest, and which of the two root sets that nearest came from); bundling \
-          the rasters into a struct would move the argument list rather than shorten it, and \
-          they are reused across every layer so they cannot be returned by value"
-)]
 fn route_within_cover(
     grid: &Grid,
     cover_above: &[bool],
     carriers: &[bool],
     tip_root: &[u32],
-    distance: &mut [f32],
-    nearest: &mut [u32],
-    via_tip: &mut [bool],
-    previous: &mut [f32],
+    limit_mm: f32,
+    fields: RouteFields<'_>,
 ) -> RouteOutcome {
+    let RouteFields {
+        distance,
+        nearest,
+        via_tip,
+        previous,
+        anchor,
+        clear,
+        clear_built,
+    } = fields;
     let cols = grid.cols();
     let rows = grid.rows();
     let pitch = grid.pitch_mm() as f32;
-    let diagonal = pitch * core::f32::consts::SQRT_2;
+    let mut sight = crate::reach::Sightlines::default();
     let mut any_root = false;
     for cell in 0..grid.cells() {
         via_tip[cell] = false;
+        anchor[cell] = crate::reach::NO_ANCHOR;
         if cover_above[cell] && carriers[cell] {
             distance[cell] = 0.0;
             nearest[cell] = u32::try_from(cell).unwrap_or(u32::MAX);
+            anchor[cell] = nearest[cell];
             any_root = true;
         } else if tip_root[cell] != u32::MAX {
             // A LEANED ARM'S OWN AXIS, ONE LAYER UP. The load in this column
@@ -1754,6 +1790,7 @@ fn route_within_cover(
             // only ADD roots -- it never redirects load that already had one.
             distance[cell] = 0.0;
             nearest[cell] = tip_root[cell];
+            anchor[cell] = u32::try_from(cell).unwrap_or(u32::MAX);
             via_tip[cell] = true;
             any_root = true;
         } else {
@@ -1765,22 +1802,50 @@ fn route_within_cover(
         return RouteOutcome {
             any_root: false,
             converged: true,
+            sightlines: sight,
         };
     }
-    let relax = |cell: usize,
-                 from: usize,
-                 step: f32,
-                 distance: &mut [f32],
-                 nearest: &mut [u32],
-                 via_tip: &mut [bool]| {
-        let candidate = distance[from] + step;
-        if candidate < distance[cell] {
-            distance[cell] = candidate;
-            nearest[cell] = nearest[from];
+    // Nothing to route where every covered cell is already a root, and a
+    // root can never be improved on: the passes would change nothing, so they
+    // are not run, and the clearance they would read is not built.
+    if !(0..grid.cells()).any(|cell| cover_above[cell] && distance[cell] > 0.0) {
+        return RouteOutcome {
+            any_root: true,
+            converged: true,
+            sightlines: sight,
+        };
+    }
+    if !*clear_built {
+        crate::reach::clearance_mm(grid, cover_above, clear);
+        *clear_built = true;
+    }
+    let clear: &[f32] = clear;
+    let mut relax = |cell: usize,
+                     from: usize,
+                     distance: &mut [f32],
+                     nearest: &mut [u32],
+                     via_tip: &mut [bool],
+                     anchor: &mut [u32]| {
+        if let Some((value, origin, source)) = crate::reach::any_angle_relax(
+            cols,
+            pitch,
+            cover_above,
+            clear,
+            distance,
+            anchor,
+            cell,
+            from,
+            1.0,
+            limit_mm,
+            &mut sight,
+        ) {
+            distance[cell] = value;
+            anchor[cell] = origin;
+            nearest[cell] = nearest[source];
             // The attribution travels with the root, so a cell served BY a
             // tip-column root through the cover is counted as such and not only
             // the cell that sits directly on the arm.
-            via_tip[cell] = via_tip[from];
+            via_tip[cell] = via_tip[source];
         }
     };
     const MAX_SWEEP_ROUNDS: usize = 8;
@@ -1790,21 +1855,22 @@ fn route_within_cover(
         for row in 0..rows {
             for col in 0..cols {
                 let cell = row * cols + col;
-                if !cover_above[cell] {
+                // A root (distance 0) cannot be improved on.
+                if !cover_above[cell] || distance[cell] == 0.0 {
                     continue;
                 }
                 if col > 0 && cover_above[cell - 1] {
-                    relax(cell, cell - 1, pitch, distance, nearest, via_tip);
+                    relax(cell, cell - 1, distance, nearest, via_tip, anchor);
                 }
                 if row > 0 {
                     if cover_above[cell - cols] {
-                        relax(cell, cell - cols, pitch, distance, nearest, via_tip);
+                        relax(cell, cell - cols, distance, nearest, via_tip, anchor);
                     }
                     if col > 0 && cover_above[cell - cols - 1] {
-                        relax(cell, cell - cols - 1, diagonal, distance, nearest, via_tip);
+                        relax(cell, cell - cols - 1, distance, nearest, via_tip, anchor);
                     }
                     if col + 1 < cols && cover_above[cell - cols + 1] {
-                        relax(cell, cell - cols + 1, diagonal, distance, nearest, via_tip);
+                        relax(cell, cell - cols + 1, distance, nearest, via_tip, anchor);
                     }
                 }
             }
@@ -1812,21 +1878,22 @@ fn route_within_cover(
         for row in (0..rows).rev() {
             for col in (0..cols).rev() {
                 let cell = row * cols + col;
-                if !cover_above[cell] {
+                // A root (distance 0) cannot be improved on.
+                if !cover_above[cell] || distance[cell] == 0.0 {
                     continue;
                 }
                 if col + 1 < cols && cover_above[cell + 1] {
-                    relax(cell, cell + 1, pitch, distance, nearest, via_tip);
+                    relax(cell, cell + 1, distance, nearest, via_tip, anchor);
                 }
                 if row + 1 < rows {
                     if cover_above[cell + cols] {
-                        relax(cell, cell + cols, pitch, distance, nearest, via_tip);
+                        relax(cell, cell + cols, distance, nearest, via_tip, anchor);
                     }
                     if col + 1 < cols && cover_above[cell + cols + 1] {
-                        relax(cell, cell + cols + 1, diagonal, distance, nearest, via_tip);
+                        relax(cell, cell + cols + 1, distance, nearest, via_tip, anchor);
                     }
                     if col > 0 && cover_above[cell + cols - 1] {
-                        relax(cell, cell + cols - 1, diagonal, distance, nearest, via_tip);
+                        relax(cell, cell + cols - 1, distance, nearest, via_tip, anchor);
                     }
                 }
             }
@@ -1840,13 +1907,47 @@ fn route_within_cover(
     RouteOutcome {
         any_root: true,
         converged,
+        sightlines: sight,
     }
+}
+
+/// The 8-neighbour chamfer distance between two cells, in mm: the spacing
+/// metric [`insert_for_load`] was built and measured with. Kept for that one
+/// spacing rule when the reach and routing metric became the straight length
+/// (2026-09-30); moving it is a separate change with its own measurement
+/// (the load-insertion fixture refuses every candidate under the Euclidean
+/// spacing, measured in lane lattice-align).
+fn insertion_spacing_mm(grid: &Grid, a: usize, b: usize) -> f64 {
+    let rows = grid.row_of(a).abs_diff(grid.row_of(b));
+    let cols = grid.col_of(a).abs_diff(grid.col_of(b));
+    let (long, short) = if rows > cols { (rows, cols) } else { (cols, rows) };
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "cell offsets are bounded by the grid side (~1e4) and exact in f64"
+    )]
+    let (long, short) = (long as f64, short as f64);
+    grid.pitch_mm() * ((long - short) + core::f64::consts::SQRT_2 * short)
+}
+
+/// The per-cell rasters one routing field writes, reused across every layer.
+struct RouteFields<'a> {
+    distance: &'a mut [f32],
+    nearest: &'a mut [u32],
+    via_tip: &'a mut [bool],
+    previous: &'a mut [f32],
+    anchor: &'a mut [u32],
+    /// `cover_above`'s clearance field (`reach::clearance_mm`), built at most
+    /// once per layer, on the first round that needs it: the cover does not
+    /// change between rounds. The caller resets `clear_built` per layer.
+    clear: &'a mut Vec<f32>,
+    clear_built: &'a mut bool,
 }
 
 /// What one layer's routing field cost to build.
 struct RouteOutcome {
     any_root: bool,
     converged: bool,
+    sightlines: crate::reach::Sightlines,
 }
 /// Per connected component of MODEL material, `X_model = Σ L / component area`.
 ///
@@ -1957,6 +2058,7 @@ mod merge_load_tests {
             owner_growth_ceiling_mm: 0.4,
             alpha: 1.0,
             lamina_reach_mm: 2.13,
+            straight_reach: true,
             tip_column_roots: true,
             per_event: true,
         }

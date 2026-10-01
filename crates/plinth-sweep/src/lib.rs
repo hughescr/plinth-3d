@@ -457,7 +457,7 @@ pub enum RemovalCoverage {
     /// if that exact attempt reads worse.
     AnyLayerReplayed,
     /// The rule until 2026-09-30: coverage only from an arm seated on the SAME
-    /// layer, by straight chamfer distance, and no replay. **Comparison and
+    /// layer, by distance in the reach metric (`ReachMetric`), and no replay. **Comparison and
     /// sabotage only**; nothing in the pipeline sets it.
     SameLayerSeat,
     /// The production pass with the replay OFF: only the down-sweep (and the
@@ -515,6 +515,22 @@ pub struct SweepPolicy {
     /// back and watch Round 50's drafted rim draw its minimum-tip arms again;
     /// nothing in the pipeline turns it off.
     pub creep_weight: bool,
+    /// Whether reach and load routing measure a lateral run as its straight
+    /// length (`reach::any_angle_relax`, 2026-09-30). **On in production.**
+    /// With it false both sweeps fall back to the 8-neighbour chamfer, which
+    /// prices a run at 22.5° off an axis 8.24 % long. Sabotage and comparison
+    /// only; nothing in the pipeline turns it off.
+    pub straight_reach: bool,
+    /// Whether each island of demand is seated by the cheapest of several
+    /// coverings measured on it (`up_sweep::choose_plan`, 2026-09-30), rather
+    /// than by the one global hex lattice plus the greedy. **On in
+    /// production.** Sabotage and comparison only.
+    pub island_seating: bool,
+    /// Whether a tip may carry only a face the registered overhang law weighs
+    /// as an overhang (`tip_landing::SeatFaceRule`, orchestrator ruling
+    /// 2026-09-30), rather than the nearest face with any downward component.
+    /// **On in production.** Sabotage and comparison only.
+    pub seat_face_band: bool,
     /// Whether a descent may land part-way down another arm's SHAFT, and not
     /// only on its top. **On in production.** The knob exists so a test can
     /// show that a mid-shaft junction is what a given arm chose, by putting the
@@ -688,6 +704,9 @@ impl SweepPolicy {
                 .get(),
             lean: true,
             creep_weight: true,
+            straight_reach: true,
+            island_seating: true,
+            seat_face_band: true,
             shaft_landings: true,
             drain_keep_out: true,
             removal_span_check: true,
@@ -832,6 +851,37 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_creep_weight(mut self) -> Self {
         self.creep_weight = false;
+        self
+    }
+
+    /// Measure reach and routing on the 8-neighbour chamfer again -- the
+    /// metric this engine had before 2026-09-30. **Sabotage and comparison
+    /// only**: with it set, a root no longer reaches `κ·h` at 22.5° off an axis
+    /// (`tests/it/lattice_align.rs`).
+    #[must_use]
+    pub const fn without_straight_reach(mut self) -> Self {
+        self.straight_reach = false;
+        self
+    }
+
+    /// Seat every island from the one global hex lattice plus the greedy, as
+    /// before 2026-09-30. **Sabotage and comparison only**: with it set, a ring
+    /// or a strip draws its boundary-blind fill arms again
+    /// (`tests/it/lattice_align.rs`).
+    #[must_use]
+    pub const fn without_island_seating(mut self) -> Self {
+        self.island_seating = false;
+        self
+    }
+
+    /// Let a tip carry the nearest face with any downward component, walls a
+    /// rotation tips a hair downward included, as before 2026-09-30.
+    /// **Sabotage and comparison only**: with it set, the leaned tip at Round
+    /// 25's inner ring corner takes the recess wall as its seat face again
+    /// (`tests/it/seat_face.rs`, `plinth-pipeline tip_trim::`).
+    #[must_use]
+    pub const fn without_seat_face_band(mut self) -> Self {
+        self.seat_face_band = false;
         self
     }
 
@@ -1058,8 +1108,20 @@ pub fn run_sweep_with_drains(
     // ---------------------------------------------------------------- upward
     let lamina_reach_mm = policy.kappa * height;
     let mut reach = ReachState::new(&grid);
+    if !policy.straight_reach {
+        reach.straight_limit = f32::NEG_INFINITY;
+    }
     let mut history = ColumnHistory::new(&grid);
-    let mut greedy = GreedyScratch::new(&grid, lamina_reach_mm);
+    let mut greedy = if policy.island_seating {
+        GreedyScratch::new(&grid, lamina_reach_mm)
+    } else {
+        GreedyScratch::legacy(&grid, lamina_reach_mm)
+    };
+    greedy.separation_mm = if policy.straight_reach {
+        up_sweep::hex_separation_mm(lamina_reach_mm, grid.pitch_mm())
+    } else {
+        up_sweep::chamfer_hex_separation_mm(lamina_reach_mm)
+    };
     let mut scratch = RasterScratch::new(&grid);
     let mut masks = LayerMasks::default();
     let mut struts: Vec<SweepStrut> = Vec::new();
@@ -1162,6 +1224,7 @@ pub fn run_sweep_with_drains(
         owner_growth_ceiling_mm: policy.owner_growth_ceiling_mm,
         alpha: peel::alpha(policy.peel_field_mode),
         lamina_reach_mm,
+        straight_reach: policy.straight_reach,
         tip_column_roots: policy.tip_column_roots,
         per_event: policy.per_event_sizing,
     };
@@ -1221,6 +1284,7 @@ pub fn run_sweep_with_drains(
         kappa: policy.kappa,
         layer_height_mm: height,
         layers,
+        straight_reach: policy.straight_reach,
         creep_weight: policy.creep_weight,
         overhang_centre_deg: policy.overhang_centre_deg,
         overhang_transition_deg: policy.overhang_transition_deg,
@@ -1269,7 +1333,10 @@ pub fn run_sweep_with_drains(
                 &grid,
                 &mut struts,
                 minimum_load,
-                lamina_reach_mm,
+                ReachMetric {
+                    reach_mm: lamina_reach_mm,
+                    straight: policy.straight_reach,
+                },
                 layers,
                 span_check,
                 &mut removals_refused_by_span,
@@ -1375,7 +1442,7 @@ pub fn run_sweep_with_drains(
         layers,
         flare_factor: policy.flare_r_factor,
         tip_radius_min_mm: policy.tip_radius_min_mm,
-        hex_separation_mm: up_sweep::hex_separation_mm(lamina_reach_mm),
+        hex_separation_mm: greedy.separation_mm,
         x_allowed: policy.x_allowed,
         outward_lean: policy.congestion_outward_lean,
         flank_arms: policy.congestion_flank_arms,
@@ -1447,6 +1514,20 @@ pub fn run_sweep_with_drains(
         congestion::measure(&grid, &history, &struts, policy.flare_r_factor);
     landings.record("congestion", &landing_check::check_landings(&struts));
 
+    // Which faces a tip may carry: the faces the registered overhang law
+    // weighs as an overhang (orchestrator ruling 2026-09-30,
+    // `tip_landing::SeatFaceRule`). Read by the lip-seat and head-join passes
+    // and by the finished plan's seat faces, so all three measure a tip
+    // against one face.
+    let seat_face_rule = if policy.seat_face_band {
+        tip_landing::SeatFaceRule::from_overhang_band(
+            policy.overhang_centre_deg,
+            policy.overhang_transition_deg,
+        )
+    } else {
+        tip_landing::SeatFaceRule::any_down_facing()
+    };
+
     // --- slenderness: merge, then |X|, then a mast, then a warning ---------
     //
     // Here, and not inside `down_sweep::run`, for the reason `slenderness.rs`
@@ -1484,6 +1565,7 @@ pub fn run_sweep_with_drains(
         member_clearance: policy.member_clearance,
         max_struts: policy.limits.max_struts,
         x_allowed: policy.x_allowed,
+        seat_faces: seat_face_rule,
     };
     let (mut slenderness_outcome, forced_merges) =
         slenderness::apply_merges(&slenderness_context, &mut struts);
@@ -1820,6 +1902,15 @@ pub fn run_sweep_with_drains(
     report.slenderness_lane = slenderness_outcome;
     report.congestion_lane = congestion_outcome;
     report.counters.lean_candidates_priced = lean_candidates_priced;
+    report.counters.sightlines_clear = reach.sightlines_clear;
+    report.counters.sightlines_blocked = reach.sightlines_blocked;
+    report.counters.route_sightlines_clear = outcome.route_sightlines_clear;
+    report.counters.route_sightlines_blocked = outcome.route_sightlines_blocked;
+    report.counters.islands_compared = greedy.islands_compared;
+    report.counters.islands_realigned = greedy.islands_realigned;
+    report.counters.island_seats_saved = greedy.seats_saved;
+    report.counters.island_seats = greedy.island_seats;
+    report.counters.island_hex_bound = greedy.island_hex_bound;
 
     // ------------------------------------------------ what each tip seats INTO
     //
@@ -1828,7 +1919,12 @@ pub fn run_sweep_with_drains(
     // un-merging have settled the strut set, and never during a pass that is
     // still moving arms around. The lowering drives the tip ball into it and
     // trims the ball and the first shaft segment to its plane.
-    let seat_faces = tip_landing::tip_seat_faces(mesh, &grid, &struts, plate_z, height);
+    let (seat_faces, seat_face_hits) =
+        tip_landing::tip_seat_faces_counted(mesh, &grid, &struts, plate_z, height, seat_face_rule);
+    report.counters.seat_faces_measured = seat_face_hits.tips as u64;
+    report.counters.seat_faces_steeper_passed_over = seat_face_hits.steeper_face_passed_over as u64;
+    report.counters.seat_faces_fallback_any_down_facing =
+        u64::from(seat_face_hits.fallback_any_down_facing);
     for (strut, face) in struts.iter_mut().zip(&seat_faces) {
         strut.seat_normal = face.map_or([0.0; 3], |(normal, _)| normal);
         strut.seat_face = SeatFace {
@@ -2349,7 +2445,7 @@ fn remove_under_loaded(
     grid: &Grid,
     struts: &mut Vec<SweepStrut>,
     minimum_load_mm2: f64,
-    reach_mm: f64,
+    reach: impl Into<ReachMetric>,
     layers: usize,
     span_check: bool,
     refused_by_span: &mut u64,
@@ -2366,6 +2462,7 @@ fn remove_under_loaded(
     if candidates.is_empty() {
         return 0;
     }
+    let reach = reach.into();
     let mut doomed = vec![false; struts.len()];
     // An arm ANOTHER arm lands on is never a removal candidate. Before the
     // descent could lean, a `Landing::Strut` was rare and the orphan fallback
@@ -2401,7 +2498,7 @@ fn remove_under_loaded(
                         index != candidate
                             && !doomed[index]
                             && other.k_top == layer
-                            && chamfer_distance_mm(grid, cell, other.cell) <= reach_mm
+                            && reach.within(grid, cell, other.cell)
                     })
                 })
             }
@@ -2412,7 +2509,7 @@ fn remove_under_loaded(
         }
     }
     if span_check {
-        *refused_by_span += refuse_uncovered_spans(grid, struts, &mut doomed, reach_mm, layers);
+        *refused_by_span += refuse_uncovered_spans(grid, struts, &mut doomed, reach, layers);
     }
     if let Some(context) = replay {
         let replayed = demand_replay::refuse_unrooted_demand(context, struts, &mut doomed);
@@ -2622,7 +2719,7 @@ fn withdraw_idle_flank_arms(
 ///
 /// For every layer of a candidate's span, some SURVIVING arm must stand within
 /// one lamina's reach of the candidate's own axis at that layer, in the same
-/// 8-neighbour chamfer metric the down-sweep routes in
+/// straight-line metric the down-sweep routes in
 /// (`down_sweep::route_within_cover`). If any layer has none, the candidate is
 /// kept.
 ///
@@ -2652,7 +2749,7 @@ fn refuse_uncovered_spans(
     grid: &Grid,
     struts: &[SweepStrut],
     doomed: &mut [bool],
-    reach_mm: f64,
+    reach: ReachMetric,
     layers: usize,
 ) -> u64 {
     if layers == 0 || !doomed.iter().any(|flag| *flag) {
@@ -2689,7 +2786,7 @@ fn refuse_uncovered_spans(
             let here = strut.cell_at(layer);
             survivors_by_layer[layer]
                 .iter()
-                .any(|cell| chamfer_distance_mm(grid, here, *cell as usize) <= reach_mm)
+                .any(|cell| reach.within(grid, here, *cell as usize))
         });
         if !covered_everywhere {
             doomed[index] = false;
@@ -2699,21 +2796,54 @@ fn refuse_uncovered_spans(
     refused
 }
 
-/// Distance in the SAME 8-neighbour chamfer metric the reach potential and the
-/// spread's feature transform use.
-///
-/// The removal test must ask its question in the metric the engine actually
-/// covers in. Asking it in the Euclidean metric — which is up to 8 % SHORTER
-/// than the chamfer distance — would delete an arm whose demand cells are only
-/// Euclidean-covered, and that is precisely how a pruning constant creates a
-/// bare island.
-pub(crate) fn chamfer_distance_mm(grid: &Grid, a: usize, b: usize) -> f64 {
-    let rows = grid.row_of(a).abs_diff(grid.row_of(b));
-    let cols = grid.col_of(a).abs_diff(grid.col_of(b));
-    let (long, short) = if rows > cols { (rows, cols) } else { (cols, rows) };
-    grid.pitch_mm() * ((long - short) as f64 + core::f64::consts::SQRT_2 * short as f64)
+/// One lamina's reach, and the metric it is measured in: the straight length
+/// in production, the 8-neighbour chamfer under
+/// [`SweepPolicy::without_straight_reach`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ReachMetric {
+    pub reach_mm: f64,
+    pub straight: bool,
 }
 
+impl ReachMetric {
+    /// Whether `b` is within one reach of `a`.
+    fn within(self, grid: &Grid, a: usize, b: usize) -> bool {
+        self.distance_mm(grid, a, b) <= self.reach_mm
+    }
+
+    /// The distance from `a` to `b` in this metric, in mm.
+    pub(crate) fn distance_mm(self, grid: &Grid, a: usize, b: usize) -> f64 {
+        if self.straight {
+            cell_distance_mm(grid, a, b)
+        } else {
+            let rows = grid.row_of(a).abs_diff(grid.row_of(b));
+            let cols = grid.col_of(a).abs_diff(grid.col_of(b));
+            let (long, short) = if rows > cols { (rows, cols) } else { (cols, rows) };
+            grid.pitch_mm() * ((long - short) as f64 + core::f64::consts::SQRT_2 * short as f64)
+        }
+    }
+}
+
+/// A bare reach in mm is measured in the production metric.
+impl From<f64> for ReachMetric {
+    fn from(reach_mm: f64) -> Self {
+        Self {
+            reach_mm,
+            straight: true,
+        }
+    }
+}
+
+/// Straight-line distance between two cell centres, in mm: the metric the
+/// reach potential and the down-sweep's routing field both measure in
+/// (`reach::any_angle_relax`, 2026-09-30).
+///
+/// The removal test must ask its question in the metric the engine actually
+/// covers in. Until 2026-09-30 that was the 8-neighbour chamfer, and asking in
+/// Euclidean then would have deleted an arm whose demand cells were only
+/// Euclidean-covered. The engine now covers in Euclidean, so the chamfer here
+/// would be the mismatch in the other direction: keeping an arm the field has
+/// already covered.
 pub(crate) fn cell_distance_mm(grid: &Grid, a: usize, b: usize) -> f64 {
     let dx = grid.center_x_mm(grid.col_of(a)) - grid.center_x_mm(grid.col_of(b));
     let dy = grid.center_y_mm(grid.row_of(a)) - grid.center_y_mm(grid.row_of(b));
@@ -2995,6 +3125,8 @@ fn build_report(
             lean_candidates_priced: 0,
             contact_merges_moved_below: outcome.contact_merges_moved_below,
             contact_merges_kept_at_single_slot: outcome.contact_merges_kept_at_single_slot,
+            // Set by the caller, which holds the up-sweep's scratch.
+            ..PathHits::default()
         },
     }
 }

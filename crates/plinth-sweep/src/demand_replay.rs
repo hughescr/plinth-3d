@@ -11,9 +11,9 @@
 //!   its seat, and the material built on that demand inherits the potential
 //!   upward ([`crate::reach::recompute_potential`]), so removing the arm can
 //!   unroot cells several layers higher that no seat-layer test looks at;
-//! * it measures a straight chamfer distance, while the potential travels only
-//!   THROUGH cured cover. Across a gap in the cover the straight line is
-//!   shorter than any path the lamina can take.
+//! * it measures a distance in the plane (`ReachMetric`), while the
+//!   potential travels only THROUGH cured cover. Across a gap in the cover
+//!   the straight line is shorter than any path the lamina can take.
 //!
 //! Both are answered the same way: re-run the up-sweep's own reach potential,
 //! layer by layer, over the arm set that would remain, and compare it with the
@@ -76,6 +76,11 @@ pub(crate) struct ReplayContext<'a> {
     pub kappa: f64,
     pub layer_height_mm: f64,
     pub layers: usize,
+    /// The up-sweep's metric ([`crate::SweepPolicy::straight_reach`]): the
+    /// straight length, or the 8-neighbour chamfer when it is off. The replay
+    /// must price a run as the placement did, or it reproduces a different
+    /// potential from the one the seats were placed on.
+    pub straight_reach: bool,
     pub creep_weight: bool,
     pub overhang_centre_deg: f64,
     pub overhang_transition_deg: f64,
@@ -227,7 +232,20 @@ fn replay_once(
     };
     let mut scratch = RasterScratch::new(grid);
     let mut masks = LayerMasks::default();
-    let mut current = ReachState::new(grid);
+    // The up-sweep's own metric switch (`run_sweep`), applied to both sets.
+    let new_state = || {
+        let mut state = ReachState::new(grid);
+        if !context.straight_reach {
+            state.straight_limit = f32::NEG_INFINITY;
+        }
+        state
+    };
+    // "Nearest" doomed arm, for the restore below, in the same metric.
+    let metric = crate::ReachMetric {
+        reach_mm: context.kappa * context.layer_height_mm,
+        straight: context.straight_reach,
+    };
+    let mut current = new_state();
     let mut proposed: Option<ReachState> = None;
     let mut trial_done = false;
     let mut queue = Vec::new();
@@ -258,7 +276,7 @@ fn replay_once(
         // Below the lowest doomed seat the two sets are the same set, so the
         // proposed one is only started there, from the current one's carry.
         if proposed.is_none() && !trial_done && layer >= lowest {
-            let mut state = ReachState::new(grid);
+            let mut state = new_state();
             state.u_prev.copy_from_slice(&current.u_prev);
             proposed = Some(state);
         }
@@ -335,9 +353,7 @@ fn replay_once(
                     .iter()
                     .enumerate()
                     .filter(|(index, flag)| **flag && struts[*index].k_top <= layer)
-                    .map(|(index, _)| {
-                        (crate::chamfer_distance_mm(grid, cell, struts[index].cell), index)
-                    })
+                    .map(|(index, _)| (metric.distance_mm(grid, cell, struts[index].cell), index))
                     .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
                 let Some((_, index)) = blamed else {
                     continue;
@@ -387,12 +403,16 @@ mod tests {
     //! Hand-derived geometry. A slab `S1` 4 mm long (x 0..4), 1 mm wide
     //! (y −0.5..0.5), its underside at z 1.0, so its first layer is layer 20
     //! at 0.05 mm (plane 1.025). Reach is one lamina, κ·h = 42.6006450 × 0.05
-    //! = 2.1300 mm, in the 8-neighbour chamfer metric: a cell `dx` along and
-    //! `dy` across is `(dx − dy) + √2·dy` away when `dx ≥ dy`.
+    //! = 2.1300 mm, measured as the straight length (`ReplayContext::
+    //! straight_reach`, the production metric since lane lattice-align): a
+    //! cell `dx` along and `dy` across is `√(dx² + dy²)` away. Under the
+    //! 8-neighbour chamfer it is `(dx − dy) + √2·dy` when `dx ≥ dy`; every
+    //! verdict below is the same in both metrics.
     //!
     //! The farthest cell of `S1` from the nearest of two arms at x 0.9 and
-    //! 3.1 is at x 2.0, y ±0.5: `(1.1 − 0.5) + √2·0.5 = 1.307 mm`, inside
-    //! reach. The far end, x 4.0, from x 0.9 alone: `3.1 mm`, outside it.
+    //! 3.1 is at x 2.0, y ±0.5: `√(1.1² + 0.5²) = 1.208 mm` (chamfer
+    //! `1.307 mm`), inside reach. The far end, x 4.0, from x 0.9 alone:
+    //! `3.1 mm` in both, outside it.
     //!
     //! No production function decides anything in these tests: the expected
     //! verdicts are the two numbers above.
@@ -478,6 +498,7 @@ mod tests {
             kappa: KAPPA,
             layer_height_mm: H,
             layers: LAYERS,
+            straight_reach: true,
             creep_weight: false,
             overhang_centre_deg: 45.0,
             overhang_transition_deg: 25.0,

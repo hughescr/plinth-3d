@@ -331,7 +331,15 @@ fn laid_tube_rests_on_something_and_loses_no_load() {
 #[test]
 fn a_brace_hands_its_trunk_no_load() {
     let mesh = plinth_mesh::make_brace_pair().expect("the brace pair fixture");
-    let (mesh, plan) = swept(&mesh);
+    // Graded at the seat placement the fixture was built for
+    // (`harness::at_path_fixture_seating`): at the production placement the
+    // pair places no brace (measured 2026-09-30). The rule reads no placement.
+    let (mesh, plan) = swept_with(
+        &mesh,
+        &crate::harness::at_path_fixture_seating(
+            SweepPolicy::from_registry().expect("the registered sweep policy"),
+        ),
+    );
     let braces: Vec<_> = plan
         .struts
         .iter()

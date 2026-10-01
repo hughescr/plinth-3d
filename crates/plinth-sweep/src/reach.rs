@@ -57,15 +57,29 @@
 //! The run WITHIN one layer, back to a cell whose column carried one layer
 //! down, is a sub-portion of that, so it is at most `κ·h` too — and that is
 //! exactly the question the down-sweep asks of every load cell, on the same
-//! 8-neighbour chamfer metric over the same cured cover
-//! ([`crate::down_sweep`]). The weighted creep step loosens this by at most
-//! ONE orthogonal pitch, because it runs after the chamfer, adds at most one
-//! orthogonal step to a chamfer value (or two to a carrier's own), and is
-//! never itself a source, so the in-layer run is at most `κ·h + p` — the bound
-//! the down-sweep actually routes within (`lamina_reach_mm + pitch`). So `residual_demand == 0` implies
+//! metric over the same cured cover ([`crate::down_sweep`]). The weighted
+//! creep step loosens this by at most ONE orthogonal pitch, because it runs
+//! after the lateral passes, adds at most one orthogonal step to their value
+//! (or two to a carrier's own), and is never itself a source, so the in-layer
+//! run is at most `κ·h + p` — the bound the down-sweep actually routes within
+//! (`lamina_reach_mm + pitch`). So `residual_demand == 0` implies
 //! `uncarried_load == 0` and
 //! [`crate::report::SweepRunReport::sweeps_disagree`] reports any survival of
 //! the contradiction rather than leaving a reader to compare two counters.
+//!
+//! # The metric: a straight length (2026-09-30)
+//!
+//! Both sweeps measure a lateral run as its straight length wherever the
+//! straight line lies in the cover, and bend it at a cell where it does not
+//! ([`any_angle_relax`]). Until 2026-09-30 they both used the 8-neighbour
+//! chamfer, which prices a run at 22.5° off an axis 8.24 % long, so a root
+//! reached only `κ·h / 1.0824` in its worst direction. `κ` was measured as a
+//! straight span, so the straight length is the metric it is a limit on. The
+//! two sweeps are still one predicate on one metric; the one caveat is that
+//! the any-angle field is an UPPER bound on the geodesic (exact in open cover,
+//! at most a step long where a path must bend), so two fields built from
+//! different sources can disagree by a fraction of a pitch — inside the
+//! routing bound's one-pitch slack.
 //!
 //! [`LAMINA_REACH_RATIO`]: plinth_core::M0EvidenceConstants::lamina_reach_ratio
 
@@ -140,7 +154,37 @@ pub struct ReachState {
     pub creep_steps_taken: u64,
     /// Reused per layer by [`creep_step`], so the rule allocates once per run.
     creep_scratch: Vec<(u32, f32)>,
+    /// The cell each potential was measured FROM in a straight line: the
+    /// last vertex of the any-angle path that priced it ([`any_angle_relax`]).
+    /// [`NO_ANCHOR`] where the potential is infinite.
+    pub anchor: Vec<u32>,
+    /// Straight sightlines the any-angle metric priced and found clear. The
+    /// path-hit witness that the reach is measured as a Euclidean length and
+    /// not as a sum of raster steps.
+    pub sightlines_clear: u64,
+    /// Sightlines that crossed a cell outside the cover, so the path bent at
+    /// the neighbour instead. The witness that the geodesic still goes round
+    /// what is not there.
+    pub sightlines_blocked: u64,
+    /// When set, [`relax_from_root`] records every cell it overwrites, so a
+    /// trial placement can be undone exactly ([`ReachState::undo_journal`]).
+    journaling: bool,
+    journal: Vec<(u32, f32, u32)>,
+    /// The largest potential at which a straight sightline is priced
+    /// ([`any_angle_relax`]'s `limit`). One unit in production, because no
+    /// rootedness decision reads above it. Negative infinity is the sabotage
+    /// form ([`crate::SweepPolicy::without_straight_reach`]): no sightline is
+    /// ever taken and the field is the 8-neighbour chamfer again.
+    pub straight_limit: f32,
+    /// The current layer's clearance field ([`clearance_mm`]), set by
+    /// [`recompute_potential`]. [`relax_from_root`] reads it, so it must run
+    /// on the cover the potential was last recomputed on (it always does: the
+    /// greedy seats on the layer it was handed).
+    pub clear_mm: Vec<f32>,
 }
+
+/// "No path reaches this cell", for [`ReachState::anchor`].
+pub const NO_ANCHOR: u32 = u32::MAX;
 
 impl ReachState {
     #[must_use]
@@ -164,12 +208,48 @@ impl ReachState {
             creep_cells_weighted: 0,
             creep_steps_taken: 0,
             creep_scratch: Vec::new(),
+            anchor: vec![NO_ANCHOR; cells],
+            sightlines_clear: 0,
+            sightlines_blocked: 0,
+            journaling: false,
+            journal: Vec::new(),
+            straight_limit: U_LIMIT,
+            clear_mm: Vec::new(),
         }
     }
 
     #[must_use]
     pub fn is_rooted(&self, cell: usize) -> bool {
         self.u[cell] <= 1.0
+    }
+
+    /// Start recording every write [`relax_from_root`] makes. A trial
+    /// placement that is then undone leaves the field bit-for-bit as it was.
+    pub fn begin_journal(&mut self) {
+        self.journal.clear();
+        self.journaling = true;
+    }
+
+    /// Put back every cell written since [`ReachState::begin_journal`], newest
+    /// first, and stop recording.
+    pub fn undo_journal(&mut self) {
+        while let Some((cell, value, anchor)) = self.journal.pop() {
+            self.u[cell as usize] = value;
+            self.anchor[cell as usize] = anchor;
+        }
+        self.journaling = false;
+    }
+
+    fn write(&mut self, cell: usize, value: f32, anchor: u32) {
+        if self.journaling {
+            self.journal.push((
+                u32::try_from(cell).unwrap_or(u32::MAX),
+                self.u[cell],
+                self.anchor[cell],
+            ));
+        }
+        self.u[cell] = value;
+        self.anchor[cell] = anchor;
     }
 }
 
@@ -269,6 +349,11 @@ pub fn recompute_potential(
     // `advance_thickness` so a caller that only recomputes the potential (the
     // unit tests, and `relax_from_root` through them) cannot read a zero.
     state.lamina_mm = layer_height_mm as f32;
+    // This layer's clearance field, for the sightline shortcut here and in
+    // every `relax_from_root` on this layer (which runs on the same cover).
+    let mut clear = std::mem::take(&mut state.clear_mm);
+    clearance_mm(grid, cover, &mut clear);
+    state.clear_mm = clear;
     // Step 1 — vertical inheritance, carried FORWARD and not charged:
     // `U[c] = U_prev[c]`.
     //
@@ -328,6 +413,7 @@ pub fn recompute_potential(
     // that exercises it — the flat oracles cannot, because on them a demand
     // cell's lateral run is zero.
     for cell in 0..cells {
+        state.anchor[cell] = NO_ANCHOR;
         if !cover[cell] {
             state.u[cell] = f32::INFINITY;
             continue;
@@ -338,6 +424,9 @@ pub fn recompute_potential(
         if state.u_prev[cell] <= 1.0 {
             let below = state.u_prev[cell];
             state.u[cell] = below;
+            // Inherited material is a source in its own right: every lateral
+            // path on this layer starts at a cell like this one or at a root.
+            state.anchor[cell] = u32::try_from(cell).unwrap_or(NO_ANCHOR);
             state.vertical_inheritance_hits += 1;
             // The largest potential any cell carried up from the layer below —
             // how close inherited material came to unrooting. The climb adds
@@ -352,9 +441,10 @@ pub fn recompute_potential(
     }
     for &root in roots {
         state.u[root] = 0.0;
+        state.anchor[root] = u32::try_from(root).unwrap_or(NO_ANCHOR);
     }
 
-    // Step 2 — chamfer sweeps until the field stops moving.
+    // Step 2 — any-angle sweeps until the field stops moving.
     //
     // # Deviation from the design of record's §5.2, stated rather than hidden
     //
@@ -374,12 +464,26 @@ pub fn recompute_potential(
     // pathological field cannot spin; exceeding it is REPORTED and leaves the
     // field conservative (an unconverged `U` is too HIGH, so the sweep
     // over-supports rather than under-supports).
+    //
+    // # The metric is the straight line, not the 8-neighbour chamfer (2026-09-30)
+    //
+    // `κ·h` is a LENGTH, measured on the coupons as a straight span. The
+    // 8-neighbour chamfer (steps `p` and `p√2`) prices a straight run at
+    // 22.5° off an axis 8.24 % long, so the set it called "within reach" was
+    // an octagon inscribed in the reach disc and every arm was granted only
+    // `κ·h / 1.0824` in its worst direction (`oversupport-attribution.md`
+    // item 7). The passes now price each step by [`any_angle_relax`]: the
+    // straight length back to the cell the neighbour's own path was measured
+    // from, whenever that sightline lies in the cover, and one raster step
+    // otherwise. Every value is still the length of a real path through the
+    // cover, so the field can only be too HIGH, never too low; in open cover
+    // it is the Euclidean distance exactly.
     const MAX_SWEEP_ROUNDS: usize = 8;
     let mut before = state.u.clone();
     let mut converged = false;
     for _ in 0..MAX_SWEEP_ROUNDS {
-        chamfer_forward(grid, cover, kappa, state);
-        chamfer_reverse(grid, cover, kappa, state);
+        any_angle_forward(grid, cover, kappa, state);
+        any_angle_reverse(grid, cover, kappa, state);
         if state.u == before {
             converged = true;
             break;
@@ -627,6 +731,9 @@ fn creep_step(
     }
     for &(cell, value) in &lowered {
         state.u[cell as usize] = value;
+        // The creep path ends here, so a straight sightline measured through
+        // this cell later starts from THIS value and no earlier one.
+        state.anchor[cell as usize] = cell;
     }
     state.creep_steps_taken += lowered.len() as u64;
     state.creep_scratch = lowered;
@@ -980,63 +1087,274 @@ fn rasterise_conservative(
     }
 }
 
-fn chamfer_forward(grid: &Grid, cover: &[bool], kappa: f64, state: &mut ReachState) {
+/// Straight-line distance between two cell centres, in mm.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "row and column offsets are bounded by the grid side (~1e4 cells) and exact in f32"
+)]
+#[inline]
+pub(crate) fn gap_mm(cols: usize, pitch: f32, a: usize, b: usize) -> f32 {
+    let dr = (a / cols).abs_diff(b / cols) as f32;
+    let dc = (a % cols).abs_diff(b % cols) as f32;
+    // `sqrt` of the sum, not `hypot`: the offsets are small whole numbers, so
+    // there is nothing to overflow, and the correctly rounded `sqrt` is one
+    // instruction where `hypot` is a library call (measured: 15 % of a
+    // routing-bound profile).
+    pitch * (dr * dr + dc * dc).sqrt()
+}
+
+/// Whether the straight line between two cell centres stays in `cover`.
+///
+/// The cells tested are the ones an 8-connected (Bresenham) walk visits, the
+/// same connectivity the raster steps use: a diagonal move between two cover
+/// cells is allowed there, so it is allowed here. Both ends are assumed to be
+/// cover already.
+#[expect(
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    reason = "row and column indices are bounded by the grid side (~1e4), far inside isize"
+)]
+pub(crate) fn line_of_sight(cols: usize, cover: &[bool], a: usize, b: usize) -> bool {
+    let (r0, c0) = ((a / cols) as isize, (a % cols) as isize);
+    let (r1, c1) = ((b / cols) as isize, (b % cols) as isize);
+    let dr = (r1 - r0).abs();
+    let dc = (c1 - c0).abs();
+    let sr = if r1 > r0 { 1 } else { -1 };
+    let sc = if c1 > c0 { 1 } else { -1 };
+    let mut err = dc - dr;
+    let (mut r, mut c) = (r0, c0);
+    loop {
+        if r == r1 && c == c1 {
+            return true;
+        }
+        let twice = 2 * err;
+        if twice > -dr {
+            err -= dr;
+            c += sc;
+        }
+        if twice < dc {
+            err += dc;
+            r += sr;
+        }
+        if !(r == r1 && c == c1) && !cover[r as usize * cols + c as usize] {
+            return false;
+        }
+    }
+}
+
+/// Sightline counters for [`any_angle_relax`].
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Sightlines {
+    pub clear: u64,
+    pub blocked: u64,
+}
+
+/// Price `cell` through its neighbour `from`, on the any-angle metric.
+///
+/// # The rule
+///
+/// A path that reached `from` was measured in a straight line from
+/// `anchors[from]`. If the straight line from that anchor on to `cell` lies in
+/// the cover, the path to `cell` is that straight line, priced at its true
+/// length; otherwise the path bends at `from` and pays the one raster step
+/// from there. This is the Theta* relaxation. Every value it returns is the
+/// length of a path that actually lies in the cover, so it can over-state a
+/// geodesic (at a bend it did not find) and never under-state one; where the
+/// cover is open it is the Euclidean distance exactly, which is the length
+/// the coupons measured `κ·h` as.
+///
+/// `limit` is the largest value any caller's predicate reads (one unit of
+/// potential, or the down-sweep's routing bound). Above it the answer cannot
+/// change a decision, so the sightline is not walked and the raster step is
+/// used instead — still a real path, still an upper bound.
+///
+/// `clear` is the cover's clearance field ([`clearance_mm`]) or empty. When
+/// the two ends' clearance discs together span the sightline, every cell the
+/// walk would visit lies inside one of them and so in the cover, and the walk
+/// is skipped: the same answer, without the per-cell loop.
+///
+/// Returns `(value, anchor, attribution_source)` when the price improves on
+/// `values[cell]`, where `attribution_source` is the cell whose root the new
+/// path inherits.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one relaxation reads the grid shape, the domain and its clearance, the two parallel \
+          per-cell fields it relaxes, the two cells, the price, the bound and the counters; a \
+          struct would move the list rather than shorten it"
+)]
+#[inline]
+pub(crate) fn any_angle_relax(
+    cols: usize,
+    pitch: f32,
+    cover: &[bool],
+    clear: &[f32],
+    values: &[f32],
+    anchors: &[u32],
+    cell: usize,
+    from: usize,
+    cost_per_mm: f32,
+    limit: f32,
+    sight: &mut Sightlines,
+) -> Option<(f32, u32, usize)> {
+    let current = values[cell];
+    let anchor = anchors[from];
+    if anchor != NO_ANCHOR && anchor as usize != from {
+        let origin = anchor as usize;
+        let straight = values[origin] + gap_mm(cols, pitch, origin, cell) * cost_per_mm;
+        // A bent path is never shorter than the straight one it bends from
+        // (the triangle inequality), so if the straight one does not improve
+        // the cell, nothing through `from` can.
+        if straight >= current {
+            return None;
+        }
+        if straight <= limit {
+            let open = !clear.is_empty() && {
+                let length = gap_mm(cols, pitch, origin, cell);
+                clear[origin] + clear[cell] - pitch > length
+            };
+            if open || line_of_sight(cols, cover, origin, cell) {
+                sight.clear += 1;
+                return Some((straight, anchor, origin));
+            }
+            sight.blocked += 1;
+        }
+    }
+    let bent = values[from] + gap_mm(cols, pitch, from, cell) * cost_per_mm;
+    (bent < current).then(|| (bent, u32::try_from(from).unwrap_or(NO_ANCHOR), from))
+}
+
+/// The worst-direction ratio of the 8-neighbour chamfer to the straight
+/// length, `cos 22.5° + (√2 − 1)·sin 22.5°` = 1.0824: a chamfer distance
+/// divided by it is never longer than the Euclidean distance it measures.
+fn chamfer_overstatement() -> f32 {
+    let eighth = core::f32::consts::FRAC_PI_8;
+    eighth.cos() + (core::f32::consts::SQRT_2 - 1.0) * eighth.sin()
+}
+
+/// Per cell, a radius in mm within which every cell centre is in `cover`:
+/// the chamfer distance to the nearest cell outside it, divided by the
+/// chamfer's worst overstatement ([`chamfer_overstatement`]). Zero outside the
+/// cover. Read by [`any_angle_relax`]'s shortcut.
+///
+/// Why the shortcut is exact: a cell the 8-connected walk visits has its
+/// centre within half a pitch of the segment, so it lies within `t + p/2` of
+/// one end where `t` is that end's share of the segment. If `r_a + r_c − p`
+/// exceeds the length, each point of the segment is within `r − p/2` of an
+/// end whose clear radius is `r`, so every visited centre is inside a clear
+/// disc.
+pub(crate) fn clearance_mm(grid: &Grid, cover: &[bool], out: &mut Vec<f32>) {
+    out.resize(grid.cells(), 0.0);
+    chamfer_distance(grid, cover, out);
+    let scale = 1.0 / chamfer_overstatement();
+    for value in out.iter_mut() {
+        *value *= scale;
+    }
+}
+
+/// The largest potential a rootedness decision reads.
+const U_LIMIT: f32 = 1.0;
+
+fn any_angle_forward(grid: &Grid, cover: &[bool], kappa: f64, state: &mut ReachState) {
     let cols = grid.cols();
     let pitch = grid.pitch_mm() as f32;
-    let diagonal = pitch * core::f32::consts::SQRT_2;
+    let w = weight(state, kappa, 0);
+    let mut sight = Sightlines::default();
     for row in 0..grid.rows() {
         for col in 0..cols {
             let cell = row * cols + col;
             if !cover[cell] {
                 continue;
             }
-            let w = weight(state, kappa, cell);
-            let mut best = state.u[cell];
+            let mut from = [usize::MAX; 4];
             if col > 0 {
-                best = best.min(state.u[cell - 1] + pitch * w);
+                from[0] = cell - 1;
             }
             if row > 0 {
-                best = best.min(state.u[cell - cols] + pitch * w);
+                from[1] = cell - cols;
                 if col > 0 {
-                    best = best.min(state.u[cell - cols - 1] + diagonal * w);
+                    from[2] = cell - cols - 1;
                 }
                 if col + 1 < cols {
-                    best = best.min(state.u[cell - cols + 1] + diagonal * w);
+                    from[3] = cell - cols + 1;
                 }
             }
-            state.u[cell] = best;
+            for near in from {
+                if near == usize::MAX || !cover[near] {
+                    continue;
+                }
+                if let Some((value, anchor, _)) = any_angle_relax(
+                    cols,
+                    pitch,
+                    cover,
+                    &state.clear_mm,
+                    &state.u,
+                    &state.anchor,
+                    cell,
+                    near,
+                    w,
+                    state.straight_limit,
+                    &mut sight,
+                ) {
+                    state.u[cell] = value;
+                    state.anchor[cell] = anchor;
+                }
+            }
         }
     }
+    state.sightlines_clear += sight.clear;
+    state.sightlines_blocked += sight.blocked;
 }
 
-fn chamfer_reverse(grid: &Grid, cover: &[bool], kappa: f64, state: &mut ReachState) {
+fn any_angle_reverse(grid: &Grid, cover: &[bool], kappa: f64, state: &mut ReachState) {
     let cols = grid.cols();
     let rows = grid.rows();
     let pitch = grid.pitch_mm() as f32;
-    let diagonal = pitch * core::f32::consts::SQRT_2;
+    let w = weight(state, kappa, 0);
+    let mut sight = Sightlines::default();
     for row in (0..rows).rev() {
         for col in (0..cols).rev() {
             let cell = row * cols + col;
             if !cover[cell] {
                 continue;
             }
-            let w = weight(state, kappa, cell);
-            let mut best = state.u[cell];
+            let mut from = [usize::MAX; 4];
             if col + 1 < cols {
-                best = best.min(state.u[cell + 1] + pitch * w);
+                from[0] = cell + 1;
             }
             if row + 1 < rows {
-                best = best.min(state.u[cell + cols] + pitch * w);
+                from[1] = cell + cols;
                 if col + 1 < cols {
-                    best = best.min(state.u[cell + cols + 1] + diagonal * w);
+                    from[2] = cell + cols + 1;
                 }
                 if col > 0 {
-                    best = best.min(state.u[cell + cols - 1] + diagonal * w);
+                    from[3] = cell + cols - 1;
                 }
             }
-            state.u[cell] = best;
+            for near in from {
+                if near == usize::MAX || !cover[near] {
+                    continue;
+                }
+                if let Some((value, anchor, _)) = any_angle_relax(
+                    cols,
+                    pitch,
+                    cover,
+                    &state.clear_mm,
+                    &state.u,
+                    &state.anchor,
+                    cell,
+                    near,
+                    w,
+                    state.straight_limit,
+                    &mut sight,
+                ) {
+                    state.u[cell] = value;
+                    state.anchor[cell] = anchor;
+                }
+            }
         }
     }
+    state.sightlines_clear += sight.clear;
+    state.sightlines_blocked += sight.blocked;
 }
 
 /// Relax `U` outward from one newly inserted root, stopping where the
@@ -1056,14 +1374,15 @@ pub fn relax_from_root(
     let cols = grid.cols();
     let rows = grid.rows();
     let pitch = grid.pitch_mm() as f32;
-    let diagonal = pitch * core::f32::consts::SQRT_2;
+    let w = weight(state, kappa, root);
+    let mut sight = Sightlines::default();
     queue.clear();
-    state.u[root] = 0.0;
+    state.write(root, 0.0, u32::try_from(root).unwrap_or(NO_ANCHOR));
     touched.push(root);
     queue.push(root);
     while let Some(cell) = queue.pop() {
         let base = state.u[cell];
-        if base > 1.0 {
+        if base > U_LIMIT {
             continue;
         }
         let row = cell / cols;
@@ -1091,17 +1410,29 @@ pub fn relax_from_root(
             if !cover[neighbour] {
                 continue;
             }
-            let step = if dr == 0 || dc == 0 { pitch } else { diagonal };
-            let candidate = base + step * weight(state, kappa, neighbour);
-            if candidate < state.u[neighbour] {
-                state.u[neighbour] = candidate;
+            if let Some((candidate, anchor, _)) = any_angle_relax(
+                cols,
+                pitch,
+                cover,
+                &state.clear_mm,
+                &state.u,
+                &state.anchor,
+                neighbour,
+                cell,
+                w,
+                state.straight_limit,
+                &mut sight,
+            ) {
+                state.write(neighbour, candidate, anchor);
                 touched.push(neighbour);
-                if candidate <= 1.0 {
+                if candidate <= U_LIMIT {
                     queue.push(neighbour);
                 }
             }
         }
     }
+    state.sightlines_clear += sight.clear;
+    state.sightlines_blocked += sight.blocked;
 }
 
 /// Carry the current layer's potential into the next, through `carry` only.

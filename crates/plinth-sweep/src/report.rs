@@ -439,6 +439,37 @@ pub struct PathHits {
     /// The same, at an arm with no slot below its contact: the load stays in
     /// the one slot (there is no shaft to take it) and is counted here.
     pub contact_merges_kept_at_single_slot: u64,
+    /// Straight sightlines the reach field priced and found clear, and those
+    /// that crossed empty space so the path bent instead
+    /// (`reach::any_angle_relax`, 2026-09-30). Zero clear means the reach is
+    /// still a sum of raster steps; zero blocked on a model with holes means
+    /// the geodesic was never tested.
+    pub sightlines_clear: u64,
+    pub sightlines_blocked: u64,
+    /// The same two counts for the down-sweep's routing field.
+    pub route_sightlines_clear: u64,
+    pub route_sightlines_blocked: u64,
+    /// Islands of demand measured with more than one covering, islands where a
+    /// covering other than the global lattice won, and the seats that saved
+    /// against the global lattice's own measured count on those islands
+    /// (`up_sweep::choose_plan`, 2026-09-30).
+    pub islands_compared: u64,
+    pub islands_realigned: u64,
+    pub island_seats_saved: u64,
+    /// Every seat the up-sweep placed, and the hex covering lower bound of the
+    /// demand it placed them on: per island, `max(1, ⌈area / ((3√3/2)·R²)⌉)`
+    /// at the measured reach `R`. Their ratio is the covering efficiency.
+    pub island_seats: u64,
+    pub island_hex_bound: u64,
+    /// The finished plan's member tops (arms and braces) given a carried face,
+    /// those whose NEAREST down-facing face was a wall or a face steeper than
+    /// the overhang band and which carry a farther overhang face instead, and
+    /// whether the mesh had no overhang face so every down-facing face was
+    /// used (`tip_landing::SeatFaceRule`, 2026-09-30). Zero passed over on a
+    /// field with a tip beside a wall means the rule never ran.
+    pub seat_faces_measured: u64,
+    pub seat_faces_steeper_passed_over: u64,
+    pub seat_faces_fallback_any_down_facing: u64,
 }
 
 impl SweepRunReport {

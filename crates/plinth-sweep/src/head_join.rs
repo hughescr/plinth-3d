@@ -799,8 +799,14 @@ fn measure(
     let grid = context.slender.grid;
     let height = context.slender.layer_height_mm;
     let mut tips: Vec<SweepStrut> = members.iter().map(|&index| struts[index].clone()).collect();
-    let faces =
-        crate::tip_landing::tip_seat_faces(context.mesh, grid, &tips, context.plate_z_mm, height);
+    let faces = crate::tip_landing::tip_seat_faces(
+        context.mesh,
+        grid,
+        &tips,
+        context.plate_z_mm,
+        height,
+        context.slender.seat_faces,
+    );
     let arms: Vec<SweepArm> = tips
         .iter_mut()
         .zip(&faces)

@@ -356,27 +356,92 @@ pub struct GreedyScratch {
     prefix: Vec<u32>,
     half_widths: Vec<usize>,
     reach_cells: usize,
+    /// The candidate disc's radius in cells, unrounded.
+    radius_cells: f64,
     reach_mm: f64,
     queue: Vec<usize>,
     touched: Vec<usize>,
     /// Reused across every descent so the lean search allocates once per run
     /// rather than once per arm.
     lean_candidates: Vec<super::up_sweep::LeanCandidate>,
+    /// Whether each island is seated by the cheapest measured covering
+    /// ([`choose_plan`]). `false` is the sabotage form: the global lattice and
+    /// the greedy only, over the whole layer at once, as before 2026-09-30
+    /// ([`crate::SweepPolicy::without_island_seating`]).
+    pub island_seating: bool,
+    /// The hex lattice's nearest-neighbour separation, mm
+    /// ([`hex_separation_mm`]; the chamfer's in [`GreedyScratch::legacy`]).
+    pub separation_mm: f64,
+    /// Per cell, the island of demand it belongs to on the current layer;
+    /// `u32::MAX` elsewhere. Reset over the island cells after every layer.
+    island_of: Vec<u32>,
+    /// Demand cells a TRIAL covering cleared, so the trial can be undone.
+    cleared: Vec<usize>,
+    /// Per cell of the island being seated, its depth inside the island's
+    /// edge in mm ([`island_depth`]); zero elsewhere. Read by the ridge band.
+    depth: Vec<f32>,
+    /// Path-hit witnesses of the island seating: islands that were measured
+    /// with more than one covering, and islands where a covering other than
+    /// the global lattice won and was seated.
+    pub islands_compared: u64,
+    pub islands_realigned: u64,
+    /// Seats the chosen coverings saved against the global lattice's own
+    /// count on the same islands, measured in the same trial.
+    pub seats_saved: u64,
+    /// Seats placed on islands, and the islands' hex covering lower bound
+    /// (see [`crate::report::PathHits::island_hex_bound`]).
+    pub island_seats: u64,
+    pub island_hex_bound: u64,
 }
 
 impl GreedyScratch {
     #[must_use]
+    pub fn new(grid: &Grid, reach_mm: f64) -> Self {
+        // The candidate disc is the reach disc less one raster pitch, in the
+        // same straight-line metric the potential uses. In open cover a root
+        // reaches the full `κ·h`; but where the island's edge is a raster
+        // staircase the sightline to an edge cell can cross the stair, and the
+        // path then bends at the last cell and pays up to one step more
+        // (`reach::any_angle_relax`). A seat chosen at the very edge of the
+        // disc then fails to root the pivot it was chosen for, and the pivot
+        // takes a second seat: measured on a 2 mm ring, 61 seats against the
+        // 42 that keeping one pitch inside the reach takes. Geometry of the
+        // raster, not a tuned constant.
+        let radius = reach_mm / grid.pitch_mm() - 1.0;
+        Self::with_radius(grid, reach_mm, radius, true)
+    }
+
+    /// The scratch this engine's greedy used before 2026-09-30: the global
+    /// lattice and one raster-order pivot pass over the whole layer, the
+    /// candidate disc rounded to whole cells, and the chamfer's lattice
+    /// separation ([`chamfer_hex_separation_mm`]). **Sabotage and comparison
+    /// only** ([`crate::SweepPolicy::without_island_seating`] together with
+    /// [`crate::SweepPolicy::without_straight_reach`] is the pre-lane seat
+    /// placement).
+    #[must_use]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a rounded, positive reach in cells (~40) is exact as a usize"
+    )]
+    pub fn legacy(grid: &Grid, reach_mm: f64) -> Self {
+        let rounded = (reach_mm / grid.pitch_mm()).round().max(1.0);
+        let mut scratch = Self::with_radius(grid, reach_mm, rounded, false);
+        scratch.reach_cells = rounded as usize;
+        scratch.separation_mm = chamfer_hex_separation_mm(reach_mm);
+        scratch
+    }
+
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         clippy::cast_precision_loss,
         reason = "the reach radius in cells is a small positive finite quotient of two registered \
-              lengths; it is rounded and then used only as a loop bound"
+              lengths; it is truncated and then used only as a loop bound"
     )]
-    pub fn new(grid: &Grid, reach_mm: f64) -> Self {
-        let reach_cells = (reach_mm / grid.pitch_mm()).round().max(1.0) as usize;
+    fn with_radius(grid: &Grid, reach_mm: f64, radius: f64, island_seating: bool) -> Self {
+        let reach_cells = radius.floor().max(1.0) as usize;
         let mut half_widths = Vec::with_capacity(reach_cells + 1);
-        let radius = reach_cells as f64;
         for offset in 0..=reach_cells {
             let dy = offset as f64;
             let half = (radius * radius - dy * dy).max(0.0).sqrt();
@@ -387,10 +452,21 @@ impl GreedyScratch {
             prefix: vec![0; grid.rows() * (grid.cols() + 1)],
             half_widths,
             reach_cells,
+            radius_cells: radius,
             reach_mm,
             queue: Vec::new(),
             touched: Vec::new(),
             lean_candidates: Vec::new(),
+            island_seating,
+            separation_mm: hex_separation_mm(reach_mm, grid.pitch_mm()),
+            island_of: vec![u32::MAX; grid.cells()],
+            cleared: Vec::new(),
+            depth: vec![0.0; grid.cells()],
+            islands_compared: 0,
+            islands_realigned: 0,
+            seats_saved: 0,
+            island_seats: 0,
+            island_hex_bound: 0,
         }
     }
 
@@ -466,7 +542,6 @@ pub fn place_layer(
     struts: &mut Vec<SweepStrut>,
     max_struts: usize,
 ) -> LayerOutcome {
-    let cols = grid.cols();
     let mut outcome = LayerOutcome {
         demand_cells: 0,
         residual_demand: 0,
@@ -519,211 +594,806 @@ pub fn place_layer(
     // for everything the lattice does not reach — boundary strips, islands, and
     // any region whose geodesic differs from its straight line. Nothing is
     // invented: the lattice pitch is `√3 · ρ` with `ρ` the registered reach
-    // divided by the 8-neighbour chamfer metric's own isotropy factor (see
-    // [`chamfer_isotropy`]), and a lattice point is used only where it is still
-    // uncovered demand, so an irregular region costs exactly what the greedy
-    // would have cost there and no more.
-    let separation_mm = hex_separation_mm(scratch.reach_mm);
-    let seeds = hex_lattice_cells(grid, cover, separation_mm);
-    let mut seed_index = 0_usize;
-    let mut pivot_cursor = 0_usize;
-    let mut last_pivot = usize::MAX;
-    loop {
-        if struts.len() >= max_struts {
+    // less the half-diagonal a lattice point moves when it is snapped to a
+    // cell ([`hex_separation_mm`]), and a lattice point is used only where it
+    // is still uncovered demand.
+    //
+    // # Each island is seated by the cheapest covering MEASURED on it (2026-09-30)
+    //
+    // One global lattice knows nothing of where an island's boundary is. On a
+    // ring or a strip it leaves lattice points wherever the global grid
+    // happens to fall — some a cell inside the edge, covering a sliver — and
+    // the greedy then spends one arm per gap between them: 2.8-3.5x the hex
+    // covering lower bound on the round-base rings, the laid tube's strips and
+    // the Cylinder's islands, and 44 small Morel islands took 85 fill arms
+    // rooting 0.3-1.8 mm2 each against 6-10 for a lattice arm
+    // (`oversupport-attribution.md` items 3 and 7).
+    //
+    // THE RULE: each island's demand is covered, completely, by the covering
+    // with the FEWEST seats among several that are each built to the island
+    // and each MEASURED on it with the real reach field — never estimated.
+    // The candidates are the global lattice (so no island can be seated worse
+    // than before on its own layer), and then by the island's shape: on an
+    // island deeper than one reach radius, lattices ALIGNED to it (rows
+    // parallel to its extent, the first row half a reach inside its edge,
+    // [`aligned_lattice_cells`]); on a thinner one (a strip, a ring, a small
+    // island) the greedy alone and the RIDGE covering, which seats one row
+    // down the island's midline, each seat as far along as still covers the
+    // whole cross-section at the first uncovered cell ([`best_seat_for`]).
+    // Every candidate ends
+    // with the same pivot pass, so every candidate covers every coverable
+    // cell; the choice changes how many arms, never whether the demand is
+    // met. The trials run on the live field under a journal and are undone
+    // bit for bit ([`ReachState::begin_journal`]); the winner is then seated
+    // for real, seat for seat as measured.
+    let separation_mm = scratch.separation_mm;
+    let lattice = hex_lattice_cells(grid, cover, separation_mm);
+    let seating = Seating {
+        grid,
+        layer,
+        cover,
+        keep_out,
+        law,
+        shaft_landings,
+        kappa,
+        separation_mm,
+        max_struts,
+    };
+    let islands = label_islands(grid, scratch);
+    // One seat's share of the optimal covering at the MEASURED reach, for the
+    // efficiency the run reports (not for any decision).
+    let hex_cell_mm2 = 1.5 * 3.0_f64.sqrt() * scratch.reach_mm * scratch.reach_mm;
+    let mut lattice_by_island: Vec<Vec<usize>> = vec![Vec::new(); islands.len()];
+    for &cell in &lattice {
+        let id = scratch.island_of[cell];
+        if id != u32::MAX {
+            lattice_by_island[id as usize].push(cell);
+        }
+    }
+    if !scratch.island_seating {
+        // THE SABOTAGE FORM, and the placement before 2026-09-30: every
+        // lattice point of the layer first, then one raster-order pivot pass
+        // over all of its demand, as if the layer were one island.
+        for island in &islands {
+            scratch.island_hex_bound += hex_bound(island.len(), grid.cell_area_mm2(), hex_cell_mm2);
+        }
+        let mut everything: Vec<usize> = islands.iter().flatten().copied().collect();
+        everything.sort_unstable();
+        let mut placer = Placer::Commit {
+            struts: &mut *struts,
+            outcome: &mut outcome,
+        };
+        let (seats, _) = cover_island(
+            &seating,
+            &lattice,
+            None,
+            &everything,
+            reach,
+            history,
+            scratch,
+            &mut placer,
+        );
+        scratch.island_seats += seats.len() as u64;
+    }
+    for (id, island) in islands.iter().enumerate() {
+        if !scratch.island_seating || struts.len() >= max_struts {
             break;
         }
-        let cell = if seed_index < seeds.len() {
-            let seed = seeds[seed_index];
-            seed_index += 1;
-            if !scratch.demand_bits[seed] {
-                continue;
-            }
-            // A lattice point inside a drain's escape cylinder is simply not
-            // used. The demand it would have covered stays in the set and the
-            // pivot pass below looks for a legal seat for it; only if none
-            // exists does it survive as reported residual demand.
-            if !keep_out.admits(seed, layer) {
-                continue;
-            }
-            seed
-        } else {
-            while pivot_cursor < grid.cells() && !scratch.demand_bits[pivot_cursor] {
-                pivot_cursor += 1;
-            }
-            if pivot_cursor >= grid.cells() {
-                break;
-            }
-            let pivot = pivot_cursor;
-            // A pivot that survived its own round is one no candidate could
-            // reach. Seating on it directly roots it by construction, which is
-            // what makes this loop terminate.
-            let chosen = if pivot == last_pivot {
-                keep_out.admits(pivot, layer).then_some(pivot)
-            } else {
-                best_seat_for(grid, cover, history, scratch, keep_out, layer, pivot)
-            };
-            last_pivot = pivot;
-            let Some(chosen) = chosen else {
-                // Every seat that could root this cell stands where the resin
-                // has to leave. EMIT AND WARN: step past it, leave its demand
-                // bit set so the residual-demand count at the end of this
-                // function reports it, and never refuse the model over it.
-                outcome.keep_out_refusals += 1;
-                pivot_cursor += 1;
-                continue;
-            };
-            chosen
-        };
-        let (landing, k_bottom, rooted_landing, path) = descend_leaning(
-            grid,
-            history,
-            keep_out,
-            law,
-            shaft_landings,
-            separation_mm,
-            cell,
-            layer,
-            &mut scratch.lean_candidates,
-            &mut outcome,
-        );
-        if !rooted_landing {
-            outcome.unrooted_landings += 1;
-        }
-        let id = u32::try_from(struts.len()).unwrap_or(u32::MAX);
-        scratch.touched.clear();
-        crate::reach::relax_from_root(
-            grid,
-            cover,
-            kappa,
-            cell,
-            reach,
-            &mut scratch.queue,
-            &mut scratch.touched,
-        );
-
-        // Everything this insertion newly rooted leaves the demand set and is
-        // recorded, so the removal pass can ask later whether a survivor still
-        // covers it.
-        let mut covered = Vec::new();
-        let mut dirty_lo = usize::MAX;
-        let mut dirty_hi = 0_usize;
-        for &touched in &scratch.touched {
-            if scratch.demand_bits[touched] && reach.is_rooted(touched) {
-                scratch.demand_bits[touched] = false;
-                covered.push(touched);
-                let row = touched / cols;
-                dirty_lo = dirty_lo.min(row);
-                dirty_hi = dirty_hi.max(row);
-            }
-        }
-        if let Some(tau) = reach.tau_used_mm.get(cell) {
-            let tau = f64::from(*tau);
-            if tau > reach.tau_at_binding_reach_max_mm {
-                reach.tau_at_binding_reach_max_mm = tau;
-            }
-        }
-
-        struts.push(SweepStrut {
-            id,
-            cell,
-            center_mm: [
-                grid.center_x_mm(cell % cols),
-                grid.center_y_mm(cell / cols),
-            ],
-            kind: crate::StrutKind::Arm,
-            min_radius_mm: 0.0,
-            thickened_mm: Vec::new(),
-            seat_on_strut: None,
-            k_top: layer,
-            k_bottom,
-            landing,
-            interior: false,
-            radius_mm: Vec::new(),
-            carried_mm2: Vec::new(),
-            covered_demand: covered,
-            inserted_by_load: false,
-            // Recorded ONLY for a leaned arm, and recorded NOW, because the
-            // column history this reads is a running state that will not say
-            // the same thing again once the sweep has passed this layer.
-            seat_face: crate::SeatFace::default(),
-            seat_normal: [0.0; 3],
-            fallback_path: Vec::new(),
-            straight_fallback: (!path.is_empty()).then(|| {
-                let (landing, bottom, _) = descend(history, cell, layer);
-                (landing, bottom)
-            }),
-            path,
-        });
-        // Every column the arm passes through now holds an arm, not just its
-        // seat column: a leaned arm that only stamped its seat would let the
-        // next descent route straight through its shaft.
-        let stamp = u32::try_from(layer + 1).unwrap_or(u32::MAX);
-        let placed = struts.last().expect("the arm just pushed");
-        if placed.path.is_empty() {
-            history.top_strut[cell] = stamp;
-            history.top_strut_id[cell] = id;
-        } else {
-            for (slot, &occupied) in placed.path.iter().enumerate() {
-                let occupied = occupied as usize;
-                let here = u32::try_from(k_bottom + slot + 1).unwrap_or(u32::MAX);
-                if history.top_strut[occupied] < here {
-                    history.top_strut[occupied] = here;
-                    history.top_strut_id[occupied] = id;
-                }
-            }
-            if history.top_strut[cell] < stamp {
-                history.top_strut[cell] = stamp;
-                history.top_strut_id[cell] = id;
-            }
-        }
-        // And the SHAFT, layer interval by layer interval, so a later descent
-        // can land anywhere on it and not only at its top. Nothing is copied:
-        // the arm's own path is read in place.
-        let placed = struts.last().expect("the arm just pushed");
-        history.stamp_shaft(id, k_bottom, layer, cell, &placed.path);
-
-        if dirty_lo > dirty_hi {
+        let open = island.iter().filter(|cell| scratch.demand_bits[**cell]).count();
+        if open == 0 {
             continue;
         }
-        // Local invalidation only. A global rebuild here is what makes a greedy
-        // quadratic in the layer; a row the insertion did not touch cannot have
-        // moved.
-        rebuild_prefix_rows(
-            grid,
-            &scratch.demand_bits,
-            &mut scratch.prefix,
-            dirty_lo,
-            dirty_hi,
+        scratch.island_hex_bound += hex_bound(open, grid.cell_area_mm2(), hex_cell_mm2);
+        let plan = choose_plan(
+            &seating,
+            u32::try_from(id).unwrap_or(u32::MAX),
+            island,
+            &lattice_by_island[id],
+            reach,
+            history,
+            scratch,
         );
+        let mut placer = Placer::Commit {
+            struts: &mut *struts,
+            outcome: &mut outcome,
+        };
+        let (seats, _) =
+            cover_island(&seating, &plan, None, island, reach, history, scratch, &mut placer);
+        scratch.island_seats += seats.len() as u64;
+    }
+    for island in &islands {
+        for &cell in island {
+            scratch.island_of[cell] = u32::MAX;
+        }
     }
 
     outcome.residual_demand += scratch.demand_bits.iter().filter(|bit| **bit).count();
     outcome
 }
 
-/// How much longer than a straight line the 8-neighbour chamfer metric measures,
-/// in its worst direction.
+/// `max(1, ⌈area / hex cell⌉)` for an island of `cells` cells.
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a cell count below ~1e7 is exact in f64, and the quotient is a small positive count"
+)]
+fn hex_bound(cells: usize, cell_area_mm2: f64, hex_cell_mm2: f64) -> u64 {
+    (cells as f64 * cell_area_mm2 / hex_cell_mm2).ceil().max(1.0) as u64
+}
+
+/// What every seat on one layer reads and nothing on it changes.
+#[derive(Clone, Copy)]
+struct Seating<'a> {
+    grid: &'a Grid,
+    layer: usize,
+    cover: &'a [bool],
+    keep_out: &'a DrainKeepOut,
+    law: &'a LeanLaw,
+    shaft_landings: bool,
+    kappa: f64,
+    separation_mm: f64,
+    max_struts: usize,
+}
+
+/// Whether a covering is being measured or seated.
+enum Placer<'s> {
+    /// Relax the reach field and clear demand only, under the journal.
+    Trial,
+    /// Seat the arm for real: descend, record it, stamp the column history.
+    Commit {
+        struts: &'s mut Vec<SweepStrut>,
+        outcome: &'s mut LayerOutcome,
+    },
+}
+
+/// The connected islands of this layer's demand (8-connected), each in scan
+/// order, in the order of their first cell. Labels `scratch.island_of`.
+fn label_islands(grid: &Grid, scratch: &mut GreedyScratch) -> Vec<Vec<usize>> {
+    let cols = grid.cols();
+    let rows = grid.rows();
+    let mut islands: Vec<Vec<usize>> = Vec::new();
+    let mut stack: Vec<usize> = Vec::new();
+    for start in 0..grid.cells() {
+        if !scratch.demand_bits[start] || scratch.island_of[start] != u32::MAX {
+            continue;
+        }
+        let id = u32::try_from(islands.len()).unwrap_or(u32::MAX);
+        let mut cells = Vec::new();
+        scratch.island_of[start] = id;
+        stack.push(start);
+        while let Some(cell) = stack.pop() {
+            cells.push(cell);
+            let row = cell / cols;
+            let col = cell % cols;
+            for near_row in row.saturating_sub(1)..=(row + 1).min(rows - 1) {
+                for near_col in col.saturating_sub(1)..=(col + 1).min(cols - 1) {
+                    let near = near_row * cols + near_col;
+                    if scratch.demand_bits[near] && scratch.island_of[near] == u32::MAX {
+                        scratch.island_of[near] = id;
+                        stack.push(near);
+                    }
+                }
+            }
+        }
+        cells.sort_unstable();
+        islands.push(cells);
+    }
+    islands
+}
+
+/// The seats of the cheapest measured covering of one island, in the order
+/// they were placed. See the placement comment in [`place_layer`].
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a reach radius of ~2 mm is held in f32 beside the f32 depth field it is compared \
+          with; f32 resolves it to 1e-7 mm"
+)]
+fn choose_plan(
+    seating: &Seating<'_>,
+    id: u32,
+    island: &[usize],
+    lattice_seeds: &[usize],
+    reach: &mut ReachState,
+    history: &mut ColumnHistory,
+    scratch: &mut GreedyScratch,
+) -> Vec<usize> {
+    let global = trial(seating, lattice_seeds, None, island, reach, history, scratch);
+    if global.len() <= 1 {
+        return global;
+    }
+    scratch.islands_compared += 1;
+    let baseline = global.len();
+    let mut best = global;
+    let mut other_won = false;
+    island_depth(seating.grid, island, id, &scratch.island_of, &mut scratch.depth);
+    let rho = (seating.separation_mm / 3.0_f64.sqrt()) as f32;
+    let deepest = island
+        .iter()
+        .map(|cell| scratch.depth[*cell])
+        .fold(0.0_f32, f32::max);
+    // Which coverings are worth measuring is decided by the island's shape,
+    // and only to bound the cost: every one of them is a complete covering,
+    // so leaving one out can cost seats and never coverage. An island no
+    // deeper than one reach radius anywhere is a strip or a ring: no lattice
+    // row fits across it, and the row the greedy walks down its midline is the
+    // covering. A deeper island is where a lattice pays, and where the
+    // greedy's cost (a full candidate search per seat) is largest.
+    let mut candidates: Vec<(Vec<usize>, Option<f32>)> = Vec::new();
+    if deepest <= rho {
+        candidates.push((Vec::new(), None));
+        candidates.push((Vec::new(), Some(0.5 * rho)));
+    } else {
+        for theta_deg in island_orientations(seating.grid, island) {
+            for phase in [0.0, 0.25, 0.5] {
+                candidates.push((
+                    aligned_lattice_cells(
+                        seating.grid,
+                        island,
+                        id,
+                        &scratch.island_of,
+                        seating.separation_mm,
+                        theta_deg,
+                        phase,
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    for (seeds, ridge) in &candidates {
+        let plan = trial(seating, seeds, *ridge, island, reach, history, scratch);
+        if plan.len() < best.len() {
+            best = plan;
+            other_won = true;
+        }
+    }
+    for &cell in island {
+        scratch.depth[cell] = 0.0;
+    }
+    if other_won {
+        scratch.islands_realigned += 1;
+        scratch.seats_saved += (baseline - best.len()) as u64;
+    }
+    best
+}
+
+/// Each cell's depth inside one island's edge, in mm: the 8-neighbour chamfer
+/// distance to the nearest cell outside the island, less the half cell by
+/// which the edge lies beyond the outermost cell centres. A placement
+/// heuristic only: it chooses which candidate cells a ridge covering may seat
+/// on, and the reach field then measures what those seats actually cover.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the pitch (0.05 mm) is held in f32 like the depth field; a signed row or column is \
+          cast back to usize only after it is checked non-negative"
+)]
+fn island_depth(grid: &Grid, island: &[usize], id: u32, island_of: &[u32], depth: &mut [f32]) {
+    let cols = grid.cols();
+    let pitch = grid.pitch_mm() as f32;
+    let diagonal = pitch * core::f32::consts::SQRT_2;
+    let (mut row_lo, mut row_hi, mut col_lo, mut col_hi) = (usize::MAX, 0, usize::MAX, 0);
+    for &cell in island {
+        depth[cell] = f32::INFINITY;
+        row_lo = row_lo.min(cell / cols);
+        row_hi = row_hi.max(cell / cols);
+        col_lo = col_lo.min(cell % cols);
+        col_hi = col_hi.max(cell % cols);
+    }
+    // Outside the island (or off the grid) reads as depth zero at the centre
+    // of the neighbouring cell.
+    let at = |depth: &[f32], row: isize, col: isize| -> f32 {
+        if row < 0 || col < 0 || row as usize >= grid.rows() || col as usize >= cols {
+            return 0.0;
+        }
+        let cell = row as usize * cols + col as usize;
+        if island_of[cell] == id {
+            depth[cell]
+        } else {
+            0.0
+        }
+    };
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "row and column indices are bounded by the grid side (~1e4), far inside isize"
+    )]
+    let signed = |value: usize| value as isize;
+    for row in row_lo..=row_hi {
+        for col in col_lo..=col_hi {
+            let cell = row * cols + col;
+            if island_of[cell] != id {
+                continue;
+            }
+            let (r, c) = (signed(row), signed(col));
+            let best = depth[cell]
+                .min(at(depth, r, c - 1) + pitch)
+                .min(at(depth, r - 1, c) + pitch)
+                .min(at(depth, r - 1, c - 1) + diagonal)
+                .min(at(depth, r - 1, c + 1) + diagonal);
+            depth[cell] = best;
+        }
+    }
+    for row in (row_lo..=row_hi).rev() {
+        for col in (col_lo..=col_hi).rev() {
+            let cell = row * cols + col;
+            if island_of[cell] != id {
+                continue;
+            }
+            let (r, c) = (signed(row), signed(col));
+            let best = depth[cell]
+                .min(at(depth, r, c + 1) + pitch)
+                .min(at(depth, r + 1, c) + pitch)
+                .min(at(depth, r + 1, c + 1) + diagonal)
+                .min(at(depth, r + 1, c - 1) + diagonal);
+            depth[cell] = best;
+        }
+    }
+    for &cell in island {
+        depth[cell] -= 0.5 * pitch;
+    }
+}
+
+/// Measure one covering of `island` from `seeds` on the live field, then put
+/// the field back exactly as it was. Returns the seats it placed, in order.
+fn trial(
+    seating: &Seating<'_>,
+    seeds: &[usize],
+    ridge: Option<f32>,
+    island: &[usize],
+    reach: &mut ReachState,
+    history: &mut ColumnHistory,
+    scratch: &mut GreedyScratch,
+) -> Vec<usize> {
+    reach.begin_journal();
+    scratch.cleared.clear();
+    let (seats, dirty) = cover_island(
+        seating,
+        seeds,
+        ridge,
+        island,
+        reach,
+        history,
+        scratch,
+        &mut Placer::Trial,
+    );
+    reach.undo_journal();
+    for index in 0..scratch.cleared.len() {
+        let cell = scratch.cleared[index];
+        scratch.demand_bits[cell] = true;
+    }
+    scratch.cleared.clear();
+    if dirty.0 <= dirty.1 {
+        rebuild_prefix_rows(
+            seating.grid,
+            &scratch.demand_bits,
+            &mut scratch.prefix,
+            dirty.0,
+            dirty.1,
+        );
+    }
+    seats
+}
+
+/// Cover what is left of one island's demand: the given seeds first, in
+/// order, wherever each is still uncovered demand and admitted by the drain
+/// keep-out, then the pivot pass until nothing coverable is left.
 ///
-/// The reach potential and the load spread both travel on 8 neighbours with
-/// steps `p` and `p√2`, so the set they call "within reach `R`" is an octagon,
-/// not a disc: at 22.5° off an axis it stops at `R / (cos 22.5° + (√2−1)·sin
-/// 22.5°)`. A lattice pitched at the full `R` would leave that shortfall
-/// uncovered at every interstice and the greedy would then spend one arm per
-/// interstice — which is a doubling, so this is derived rather than absorbed.
-/// **This is geometry, not a constant**: it is a fact about the metric the
-/// design of record chose, computed from it.
-fn chamfer_isotropy() -> f64 {
-    let eighth = core::f64::consts::FRAC_PI_8;
-    eighth.cos() + (core::f64::consts::SQRT_2 - 1.0) * eighth.sin()
+/// `ridge` is `Some(ρ/2)` for the ridge covering (see [`best_seat_for`]),
+/// `None` for the plain greedy.
+///
+/// Returns the seats placed and the demand rows they changed.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one covering reads the layer's fixed inputs, its seeds, its fill rule and its \
+          island, and writes the reach field, the history, the scratch and the placer"
+)]
+fn cover_island(
+    seating: &Seating<'_>,
+    seeds: &[usize],
+    ridge: Option<f32>,
+    island: &[usize],
+    reach: &mut ReachState,
+    history: &mut ColumnHistory,
+    scratch: &mut GreedyScratch,
+    placer: &mut Placer<'_>,
+) -> (Vec<usize>, (usize, usize)) {
+    let Seating {
+        grid,
+        layer,
+        cover,
+        keep_out,
+        max_struts,
+        ..
+    } = *seating;
+    let mut seats = Vec::new();
+    let mut dirty = (usize::MAX, 0_usize);
+    let at_limit = |placer: &Placer<'_>| match placer {
+        Placer::Trial => false,
+        Placer::Commit { struts, .. } => struts.len() >= max_struts,
+    };
+    let place = |cell: usize,
+                 reach: &mut ReachState,
+                 history: &mut ColumnHistory,
+                 scratch: &mut GreedyScratch,
+                 placer: &mut Placer<'_>| match placer {
+        Placer::Trial => trial_seat(seating, cell, reach, scratch),
+        Placer::Commit { struts, outcome } => {
+            commit_seat(seating, cell, reach, history, scratch, struts, outcome)
+        }
+    };
+    // A lattice point inside a drain's escape cylinder is simply not used. The
+    // demand it would have covered stays in the set and the pivot pass below
+    // looks for a legal seat for it; only if none exists does it survive as
+    // reported residual demand.
+    for &seed in seeds {
+        if at_limit(placer) {
+            return (seats, dirty);
+        }
+        if !scratch.demand_bits[seed] || !keep_out.admits(seed, layer) {
+            continue;
+        }
+        let (lo, hi) = place(seed, reach, history, scratch, placer);
+        seats.push(seed);
+        dirty = (dirty.0.min(lo), dirty.1.max(hi));
+    }
+    // The seeds do not read the prefix sums; the pivot pass does.
+    if dirty.0 <= dirty.1 {
+        rebuild_prefix_rows(grid, &scratch.demand_bits, &mut scratch.prefix, dirty.0, dirty.1);
+    }
+    let mut cursor = 0_usize;
+    let mut last_pivot = usize::MAX;
+    loop {
+        if at_limit(placer) {
+            break;
+        }
+        while cursor < island.len() && !scratch.demand_bits[island[cursor]] {
+            cursor += 1;
+        }
+        if cursor >= island.len() {
+            break;
+        }
+        let pivot = island[cursor];
+        // A pivot that survived its own round is one no candidate could
+        // reach. Seating on it directly roots it by construction, which is
+        // what makes this loop terminate.
+        let chosen = if pivot == last_pivot {
+            keep_out.admits(pivot, layer).then_some(pivot)
+        } else {
+            best_seat_for(grid, cover, history, scratch, keep_out, layer, pivot, ridge)
+        };
+        last_pivot = pivot;
+        let Some(chosen) = chosen else {
+            // Every seat that could root this cell stands where the resin has
+            // to leave. EMIT AND WARN: step past it, leave its demand bit set
+            // so the residual-demand count at the end of the layer reports it,
+            // and never refuse the model over it.
+            if let Placer::Commit { outcome, .. } = placer {
+                outcome.keep_out_refusals += 1;
+            }
+            cursor += 1;
+            continue;
+        };
+        let (lo, hi) = place(chosen, reach, history, scratch, placer);
+        seats.push(chosen);
+        if lo > hi {
+            continue;
+        }
+        dirty = (dirty.0.min(lo), dirty.1.max(hi));
+        // Local invalidation only. A global rebuild here is what makes a
+        // greedy quadratic in the layer; a row the insertion did not touch
+        // cannot have moved.
+        rebuild_prefix_rows(grid, &scratch.demand_bits, &mut scratch.prefix, lo, hi);
+    }
+    (seats, dirty)
+}
+
+/// A trial seat: root it in the reach field and clear the demand it covers,
+/// recording every cleared cell so [`trial`] can put it back.
+fn trial_seat(
+    seating: &Seating<'_>,
+    cell: usize,
+    reach: &mut ReachState,
+    scratch: &mut GreedyScratch,
+) -> (usize, usize) {
+    let cols = seating.grid.cols();
+    scratch.touched.clear();
+    crate::reach::relax_from_root(
+        seating.grid,
+        seating.cover,
+        seating.kappa,
+        cell,
+        reach,
+        &mut scratch.queue,
+        &mut scratch.touched,
+    );
+    let mut dirty = (usize::MAX, 0_usize);
+    for index in 0..scratch.touched.len() {
+        let touched = scratch.touched[index];
+        if scratch.demand_bits[touched] && reach.is_rooted(touched) {
+            scratch.demand_bits[touched] = false;
+            scratch.cleared.push(touched);
+            let row = touched / cols;
+            dirty = (dirty.0.min(row), dirty.1.max(row));
+        }
+    }
+    dirty
+}
+
+/// The orientations an island's aligned lattices are tried at, in degrees:
+/// rows along the grid's X and along its Y (the hex lattice repeats every
+/// 60°, so 30° is rows along Y), and, for an elongated island, rows along
+/// and across its principal axis.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "cell indices and counts are bounded by the grid size (~1e7) and are exact enough in \
+          f64 for a second moment"
+)]
+fn island_orientations(grid: &Grid, island: &[usize]) -> Vec<f64> {
+    let mut angles = vec![0.0, 30.0];
+    let cols = grid.cols();
+    let count = island.len() as f64;
+    if island.len() < 3 {
+        return angles;
+    }
+    let (mut sx, mut sy) = (0.0, 0.0);
+    for &cell in island {
+        sx += (cell % cols) as f64;
+        sy += (cell / cols) as f64;
+    }
+    let (mx, my) = (sx / count, sy / count);
+    let (mut xx, mut yy, mut xy) = (0.0, 0.0, 0.0);
+    for &cell in island {
+        let dx = (cell % cols) as f64 - mx;
+        let dy = (cell / cols) as f64 - my;
+        xx += dx * dx;
+        yy += dy * dy;
+        xy += dx * dy;
+    }
+    // The eigenvalues of the second moment; an island is elongated when the
+    // major one is at least twice the minor one. A disc, a ring or a square
+    // is not, and has no principal axis worth aligning to.
+    let mean = 0.5 * (xx + yy);
+    let spread = (0.25 * (xx - yy).powi(2) + xy * xy).sqrt();
+    if mean - spread > 0.0 && (mean + spread) / (mean - spread) < 2.0 {
+        return angles;
+    }
+    let axis = 0.5 * (2.0 * xy).atan2(xx - yy).to_degrees();
+    for theta in [axis, axis + 30.0] {
+        let folded = theta.rem_euclid(60.0);
+        if angles.iter().all(|seen| (seen - folded).abs() > 1.0) {
+            angles.push(folded);
+        }
+    }
+    angles
+}
+
+/// Hex lattice points laid out on one island, with its rows at `theta_deg`
+/// to the grid's X axis and aligned to the island's own extent: the first row
+/// half a reach radius inside the island's edge across the rows (so that
+/// row's discs cover the edge exactly), and each row starting `phase` of a
+/// lattice pitch from the island's edge along the rows. Only points that fall
+/// on the island's own cells are returned, in row order.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "lattice indices are non-negative finite quotients of model-scale lengths, and every \
+          point is range-checked against the grid before it becomes a cell index"
+)]
+fn aligned_lattice_cells(
+    grid: &Grid,
+    island: &[usize],
+    id: u32,
+    island_of: &[u32],
+    separation_mm: f64,
+    theta_deg: f64,
+    phase: f64,
+) -> Vec<usize> {
+    let cols = grid.cols();
+    let (sin, cos) = theta_deg.to_radians().sin_cos();
+    let (mut u_lo, mut u_hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut v_lo, mut v_hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for &cell in island {
+        let x = grid.center_x_mm(cell % cols);
+        let y = grid.center_y_mm(cell / cols);
+        let u = x * cos + y * sin;
+        let v = -x * sin + y * cos;
+        u_lo = u_lo.min(u);
+        u_hi = u_hi.max(u);
+        v_lo = v_lo.min(v);
+        v_hi = v_hi.max(v);
+    }
+    // The island's edge is half a cell beyond its outermost cell centres.
+    let half = 0.5 * grid.pitch_mm();
+    let (u_lo, u_hi, v_lo, v_hi) = (u_lo - half, u_hi + half, v_lo - half, v_hi + half);
+    let rho = separation_mm / 3.0_f64.sqrt();
+    let row_pitch = 1.5 * rho;
+    let rows = ((v_hi - v_lo) / row_pitch).ceil() as usize + 1;
+    let per_row = ((u_hi - u_lo) / separation_mm).ceil() as usize + 2;
+    let mut cells = Vec::new();
+    for row in 0..rows {
+        let v = v_lo + 0.5 * rho + row as f64 * row_pitch;
+        let stagger = if row % 2 == 1 { 0.5 * separation_mm } else { 0.0 };
+        for column in 0..per_row {
+            let u = u_lo + (phase * separation_mm + stagger).rem_euclid(separation_mm)
+                + column as f64 * separation_mm;
+            let x = u * cos - v * sin;
+            let y = u * sin + v * cos;
+            let (row_f, col_f) = (grid.row_coord(y).floor(), grid.col_coord(x).floor());
+            if row_f < 0.0
+                || col_f < 0.0
+                || row_f >= grid.rows() as f64
+                || col_f >= cols as f64
+            {
+                continue;
+            }
+            let cell = grid.index(row_f as usize, col_f as usize);
+            if island_of[cell] == id {
+                cells.push(cell);
+            }
+        }
+    }
+    cells
+}
+
+/// Seat one arm for real at `cell`: descend, root it, record it and stamp the
+/// column history. Returns the demand rows it changed (`lo > hi` when none).
+fn commit_seat(
+    seating: &Seating<'_>,
+    cell: usize,
+    reach: &mut ReachState,
+    history: &mut ColumnHistory,
+    scratch: &mut GreedyScratch,
+    struts: &mut Vec<SweepStrut>,
+    outcome: &mut LayerOutcome,
+) -> (usize, usize) {
+    let Seating {
+        grid,
+        layer,
+        cover,
+        keep_out,
+        law,
+        shaft_landings,
+        kappa,
+        separation_mm,
+        ..
+    } = *seating;
+    let cols = grid.cols();
+    let (landing, k_bottom, rooted_landing, path) = descend_leaning(
+        grid,
+        history,
+        keep_out,
+        law,
+        shaft_landings,
+        separation_mm,
+        cell,
+        layer,
+        &mut scratch.lean_candidates,
+        outcome,
+    );
+    if !rooted_landing {
+        outcome.unrooted_landings += 1;
+    }
+    let id = u32::try_from(struts.len()).unwrap_or(u32::MAX);
+    scratch.touched.clear();
+    crate::reach::relax_from_root(
+        grid,
+        cover,
+        kappa,
+        cell,
+        reach,
+        &mut scratch.queue,
+        &mut scratch.touched,
+    );
+
+    // Everything this insertion newly rooted leaves the demand set and is
+    // recorded, so the removal pass can ask later whether a survivor still
+    // covers it.
+    let mut covered = Vec::new();
+    let mut dirty_lo = usize::MAX;
+    let mut dirty_hi = 0_usize;
+    for &touched in &scratch.touched {
+        if scratch.demand_bits[touched] && reach.is_rooted(touched) {
+            scratch.demand_bits[touched] = false;
+            covered.push(touched);
+            let row = touched / cols;
+            dirty_lo = dirty_lo.min(row);
+            dirty_hi = dirty_hi.max(row);
+        }
+    }
+    if let Some(tau) = reach.tau_used_mm.get(cell) {
+        let tau = f64::from(*tau);
+        if tau > reach.tau_at_binding_reach_max_mm {
+            reach.tau_at_binding_reach_max_mm = tau;
+        }
+    }
+
+    struts.push(SweepStrut {
+        id,
+        cell,
+        center_mm: [
+            grid.center_x_mm(cell % cols),
+            grid.center_y_mm(cell / cols),
+        ],
+        kind: crate::StrutKind::Arm,
+        min_radius_mm: 0.0,
+        thickened_mm: Vec::new(),
+        seat_on_strut: None,
+        k_top: layer,
+        k_bottom,
+        landing,
+        interior: false,
+        radius_mm: Vec::new(),
+        carried_mm2: Vec::new(),
+        covered_demand: covered,
+        inserted_by_load: false,
+        // Recorded ONLY for a leaned arm, and recorded NOW, because the column
+        // history this reads is a running state that will not say the same
+        // thing again once the sweep has passed this layer.
+        seat_face: crate::SeatFace::default(),
+        seat_normal: [0.0; 3],
+        fallback_path: Vec::new(),
+        straight_fallback: (!path.is_empty()).then(|| {
+            let (landing, bottom, _) = descend(history, cell, layer);
+            (landing, bottom)
+        }),
+        path,
+    });
+    // Every column the arm passes through now holds an arm, not just its seat
+    // column: a leaned arm that only stamped its seat would let the next
+    // descent route straight through its shaft.
+    let stamp = u32::try_from(layer + 1).unwrap_or(u32::MAX);
+    let placed = struts.last().expect("the arm just pushed");
+    if placed.path.is_empty() {
+        history.top_strut[cell] = stamp;
+        history.top_strut_id[cell] = id;
+    } else {
+        for (slot, &occupied) in placed.path.iter().enumerate() {
+            let occupied = occupied as usize;
+            let here = u32::try_from(k_bottom + slot + 1).unwrap_or(u32::MAX);
+            if history.top_strut[occupied] < here {
+                history.top_strut[occupied] = here;
+                history.top_strut_id[occupied] = id;
+            }
+        }
+        if history.top_strut[cell] < stamp {
+            history.top_strut[cell] = stamp;
+            history.top_strut_id[cell] = id;
+        }
+    }
+    // And the SHAFT, layer interval by layer interval, so a later descent can
+    // land anywhere on it and not only at its top. Nothing is copied: the
+    // arm's own path is read in place.
+    let placed = struts.last().expect("the arm just pushed");
+    history.stamp_shaft(id, k_bottom, layer, cell, &placed.path);
+    (dirty_lo, dirty_hi)
 }
 
 /// Nearest-neighbour spacing of the hex covering at the registered reach.
 ///
 /// `√3 · ρ` is the spacing at which discs of radius `ρ` exactly cover the plane
-/// (`docs/physics.md`:128-135); `ρ` here is the registered reach reduced to the
-/// radius the chamfer metric actually guarantees.
-pub(crate) fn hex_separation_mm(reach_mm: f64) -> f64 {
-    3.0_f64.sqrt() * reach_mm / chamfer_isotropy()
+/// (`docs/physics.md`:128-135). The reach field is now measured on the
+/// straight-line metric ([`crate::reach::any_angle_relax`]), so a root reaches
+/// the full registered `κ·h` in every direction and `ρ` is that reach less
+/// ONE thing: a lattice point is seated at the centre of the raster cell it
+/// falls in, which moves it by up to half a cell diagonal, `p/√2`. A covering
+/// of radius `κ·h − p/√2` about the ideal points is therefore a covering of
+/// radius `κ·h` about the seated ones. **Geometry, not a constant.**
+///
+/// Until 2026-09-30 `ρ` was `κ·h / 1.0824`, the inradius of the octagon the
+/// 8-neighbour chamfer called "within reach" (`oversupport-attribution.md`
+/// item 7): 3.408 mm separation at `κ·h = 2.130 mm`, now 3.628 mm.
+pub(crate) fn hex_separation_mm(reach_mm: f64, pitch_mm: f64) -> f64 {
+    3.0_f64.sqrt() * (reach_mm - pitch_mm * core::f64::consts::FRAC_1_SQRT_2)
+}
+
+/// The separation this engine used before 2026-09-30, when reach travelled
+/// on the 8-neighbour chamfer: `√3·κh / 1.0824`, the chamfer's inradius.
+/// **Sabotage and comparison only** ([`crate::SweepPolicy::without_straight_reach`]).
+pub(crate) fn chamfer_hex_separation_mm(reach_mm: f64) -> f64 {
+    let eighth = core::f64::consts::FRAC_PI_8;
+    3.0_f64.sqrt() * reach_mm / (eighth.cos() + (core::f64::consts::SQRT_2 - 1.0) * eighth.sin())
 }
 
 /// Hex lattice points, in scan order, clipped to cells that can host a seat.
@@ -770,6 +1440,16 @@ fn hex_lattice_cells(grid: &Grid, cover: &[bool], separation_mm: f64) -> Vec<usi
 /// Ties break the way the design of record's §6.2 asks: prefer extending an
 /// existing arm, then the shortest descent, then the lowest cell index so the
 /// result is deterministic without depending on floating point.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the pitch (0.05 mm) is held in f32 beside the f32 depth field it bounds"
+)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the search reads the grid, the cover, the history's tie-break, the greedy's scratch, \
+          the keep-out, its layer and pivot, and the optional ridge band; a struct would move the \
+          list rather than shorten it"
+)]
 fn best_seat_for(
     grid: &Grid,
     cover: &[bool],
@@ -778,12 +1458,62 @@ fn best_seat_for(
     keep_out: &DrainKeepOut,
     layer: usize,
     pivot: usize,
+    ridge_depth_mm: Option<f32>,
 ) -> Option<usize> {
     let cols = grid.cols();
     let rows = grid.rows();
     let reach = scratch.reach_cells;
     let pivot_row = pivot / cols;
     let pivot_col = pivot % cols;
+    let admissible = |candidate: usize| -> bool {
+        // A seat must be a legal host AND somewhere support is actually
+        // wanted. Allowing an already-rooted host was measured on
+        // `make_overhang_table` to put four arms inside a leg's own
+        // self-rooted fringe — legal, and pure waste.
+        cover[candidate] && scratch.demand_bits[candidate] && keep_out.admits(candidate, layer)
+    };
+    // THE RIDGE BAND (the ridge covering of [`choose_plan`]). A seat at
+    // depth `d` inside an island's edge covers the edge beside it over a run
+    // of `2·√(R² − d²)`, and a hex row at `d = ρ/2` covers its edge exactly.
+    // So the band is `ρ/2` inside the edge where the island is that deep
+    // within reach of the pivot, and the deepest reachable cells (the
+    // island's midline) where it is thinner: one row down a strip or round a
+    // ring, an edge row round a wide island. `None` is the plain greedy.
+    let band = ridge_depth_mm.map(|half_rho| {
+        let mut deepest = 0.0_f32;
+        for row in pivot_row.saturating_sub(reach)..=(pivot_row + reach).min(rows - 1) {
+            let half = scratch.half_widths[row.abs_diff(pivot_row)];
+            for col in pivot_col.saturating_sub(half)..=(pivot_col + half).min(cols - 1) {
+                let candidate = row * cols + col;
+                if admissible(candidate) {
+                    deepest = deepest.max(scratch.depth[candidate]);
+                }
+            }
+        }
+        let target = half_rho.min(deepest);
+        let slack = grid.pitch_mm() as f32;
+        (target - slack, target + slack)
+    });
+    // THE PIVOT'S CROSS-SECTION. A ridge seat chosen only to reach the pivot
+    // goes as far forward as it can, and where the pivot sits on one edge of a
+    // strip it then overshoots the OTHER edge and leaves a sliver of it behind,
+    // which costs a whole seat later (measured on a 2 mm ring: 60 seats against
+    // 42). So the seat must also cover every uncovered cell of the pivot's own
+    // island within one band width (`2·target + p`) of it, no deeper than the
+    // band covers. A disc covers a set exactly when it covers the set's convex
+    // hull, so only the hull's vertices are tested. When no candidate can
+    // cover them all, the band choice alone stands.
+    let hull = band.map_or_else(Vec::new, |(lo, _)| {
+        let target = lo + grid.pitch_mm() as f32;
+        cross_section_hull(grid, scratch, pivot, 2.0 * target + grid.pitch_mm() as f32)
+    });
+    let radius_sq = scratch.radius_cells * scratch.radius_cells;
+    let covers_hull = |candidate: usize| -> bool {
+        let (row, col) = ((candidate / cols) as f64, (candidate % cols) as f64);
+        hull.iter()
+            .all(|&(r, c)| (r - row).powi(2) + (c - col).powi(2) <= radius_sq)
+    };
+    let mut best_hull: Option<(usize, (u32, bool, u32))> = None;
     // The pivot remains the default, and still wins every tie at the lowest
     // key, which is what keeps a field with no drains byte-identical. It is
     // only dropped when the keep-out refuses it, and then `None` propagates so
@@ -794,15 +1524,14 @@ fn best_seat_for(
         let half = scratch.half_widths[row.abs_diff(pivot_row)];
         for col in pivot_col.saturating_sub(half)..=(pivot_col + half).min(cols - 1) {
             let candidate = row * cols + col;
-            // A seat must be a legal host AND somewhere support is actually
-            // wanted. Allowing an already-rooted host was measured on
-            // `make_overhang_table` to put four arms inside a leg's own
-            // self-rooted fringe — legal, and pure waste.
-            if !cover[candidate] || !scratch.demand_bits[candidate] {
+            if !admissible(candidate) {
                 continue;
             }
-            if !keep_out.admits(candidate, layer) {
-                continue;
+            if let Some((lo, hi)) = band {
+                let depth = scratch.depth[candidate];
+                if depth < lo || depth > hi {
+                    continue;
+                }
             }
             let score = score_at(grid, &scratch.prefix, &scratch.half_widths, candidate);
             let key = (
@@ -814,9 +1543,85 @@ fn best_seat_for(
                 best_key = key;
                 best = Some(candidate);
             }
+            if !hull.is_empty()
+                && best_hull.is_none_or(|(_, held)| key > held)
+                && covers_hull(candidate)
+            {
+                best_hull = Some((candidate, key));
+            }
         }
     }
-    best
+    best_hull.map_or(best, |(candidate, _)| Some(candidate))
+}
+
+/// The convex hull, in (row, col) cell units, of the uncovered cells of the
+/// pivot's island within `within_mm` of the pivot and no deeper than
+/// `within_mm` inside the island's edge. See [`best_seat_for`].
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "cell indices and radii are bounded by the grid side (~1e4) and exact in f64"
+)]
+fn cross_section_hull(
+    grid: &Grid,
+    scratch: &GreedyScratch,
+    pivot: usize,
+    within_mm: f32,
+) -> Vec<(f64, f64)> {
+    let cols = grid.cols();
+    let rows = grid.rows();
+    let island = scratch.island_of[pivot];
+    let radius = f64::from(within_mm) / grid.pitch_mm();
+    let span = radius.floor() as usize;
+    let (pivot_row, pivot_col) = (pivot / cols, pivot % cols);
+    let mut points: Vec<(f64, f64)> = Vec::new();
+    for row in pivot_row.saturating_sub(span)..=(pivot_row + span).min(rows - 1) {
+        for col in pivot_col.saturating_sub(span)..=(pivot_col + span).min(cols - 1) {
+            let cell = row * cols + col;
+            let (dr, dc) = (row as f64 - pivot_row as f64, col as f64 - pivot_col as f64);
+            if dr * dr + dc * dc > radius * radius
+                || !scratch.demand_bits[cell]
+                || scratch.island_of[cell] != island
+                || scratch.depth[cell] > within_mm
+            {
+                continue;
+            }
+            points.push((row as f64, col as f64));
+        }
+    }
+    convex_hull(points)
+}
+
+/// Andrew's monotone chain; collinear points are dropped.
+fn convex_hull(mut points: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
+    points.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    points.dedup();
+    if points.len() < 3 {
+        return points;
+    }
+    let cross = |o: (f64, f64), a: (f64, f64), b: (f64, f64)| {
+        (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
+    };
+    let mut hull: Vec<(f64, f64)> = Vec::with_capacity(2 * points.len());
+    for pass in 0..2 {
+        let start = hull.len();
+        let ordered: Box<dyn Iterator<Item = &(f64, f64)>> = if pass == 0 {
+            Box::new(points.iter())
+        } else {
+            Box::new(points.iter().rev())
+        };
+        for &point in ordered {
+            while hull.len() >= start + 2
+                && cross(hull[hull.len() - 2], hull[hull.len() - 1], point) <= 0.0
+            {
+                hull.pop();
+            }
+            hull.push(point);
+        }
+        hull.pop();
+    }
+    hull
 }
 
 /// Straight down to the first thing the column meets.

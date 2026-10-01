@@ -78,7 +78,11 @@ fn z_span(mesh: &Mesh) -> (f64, f64) {
 ///
 /// The finished plan is handed to `edit` before it is lowered — the lowering
 /// is graded against the plan it was actually given.
-fn plan_of_with(mesh: &Mesh, edit: impl FnOnce(&mut SweepPlan)) -> (SweepPlan, SweepEmission) {
+fn plan_of_with(
+    mesh: &Mesh,
+    policy: &SweepPolicy,
+    edit: impl FnOnce(&mut SweepPlan),
+) -> (SweepPlan, SweepEmission) {
     let (min_z, max_z) = z_span(mesh);
     let plate_z = min_z - LIFT_MM;
     let height = layer_height_mm();
@@ -86,8 +90,7 @@ fn plan_of_with(mesh: &Mesh, edit: impl FnOnce(&mut SweepPlan)) -> (SweepPlan, S
         .saturating_add(1)
         .max(1);
     let layers = LayerPlan::new(plate_z, vec![height; count]).expect("a uniform layer plan");
-    let policy = SweepPolicy::from_registry().expect("the registry supplies every sweep number");
-    let mut plan = plinth_sweep::run_sweep(mesh, &layers, &policy)
+    let mut plan = plinth_sweep::run_sweep(mesh, &layers, policy)
         .expect("the sweep emits and warns; it never refuses");
     edit(&mut plan);
     let frame = BuildFrame::new(
@@ -379,16 +382,18 @@ fn census(plan: &SweepPlan, emission: &SweepEmission) -> Census {
 /// their named trunk (the separate defect). Asserted exactly, so a change in
 /// that population is loud here too rather than silently absorbed.
 fn grade(name: &str, mesh: &Mesh, detached_expected: usize) {
-    grade_with(name, mesh, detached_expected, |_| {});
+    let policy = SweepPolicy::from_registry().expect("the registry supplies every sweep number");
+    grade_with(name, mesh, &policy, detached_expected, |_| {});
 }
 
 fn grade_with(
     name: &str,
     mesh: &Mesh,
+    policy: &SweepPolicy,
     detached_expected: usize,
     edit: impl FnOnce(&mut SweepPlan),
 ) {
-    let (plan, emission) = plan_of_with(mesh, edit);
+    let (plan, emission) = plan_of_with(mesh, policy, edit);
     let found = census(&plan, &emission);
     println!(
         "{name}: brace tops graded {}, off their host (not graded) {:?}; members raised to a \
@@ -478,9 +483,16 @@ fn emitted_profile_covers_the_ledger_on_the_brace_pair() {
 #[test]
 fn a_brace_thicker_than_its_trunks_raises_them_on_the_brace_pair() {
     let mut thickened = 0_usize;
+    // Graded at the seat placement the fixture was built for
+    // (`harness::at_path_fixture_seating`): at the production placement the
+    // brace pair places no brace (measured 2026-09-30), so there is nothing to
+    // thicken. The profile rule reads no placement.
     grade_with(
         "make_brace_pair, braces thickened",
         &make_brace_pair().expect("the brace pair fixture"),
+        &crate::harness::at_path_fixture_seating(
+            SweepPolicy::from_registry().expect("the registry supplies every sweep number"),
+        ),
         0,
         |plan| {
             let widest = plan

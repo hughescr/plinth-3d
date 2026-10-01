@@ -101,7 +101,13 @@ fn arms_vacating_their_seat_column(plan: &SweepPlan) -> usize {
 #[test]
 fn a_leaned_arm_carries_the_island_it_roots_and_the_seat_blind_rule_drops_it() {
     let mesh = island_over_a_vacating_lean();
-    let policy = SweepPolicy::from_registry().expect("registry");
+    // Graded at the seat placement the fixture was built for
+    // (`harness::at_path_fixture_seating`): at the production placement no arm
+    // under the island leans out of its seat column (measured 2026-09-30: 0),
+    // so the tip-column rule would be graded on nothing. The rule reads no
+    // placement.
+    let policy =
+        harness::at_path_fixture_seating(SweepPolicy::from_registry().expect("registry"));
     let with = sweep_with(&mesh, 0.0, &policy);
     let without = sweep_with(&mesh, 0.0, &policy.without_tip_column_roots());
 

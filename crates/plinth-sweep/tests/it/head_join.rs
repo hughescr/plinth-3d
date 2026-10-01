@@ -98,10 +98,19 @@ fn round_25_flipped_with(policy: &SweepPolicy) -> SweepPlan {
 /// seat zone, rule on or off). These tests grade the head-join rule on the
 /// field it was built against; `plinth-pipeline` `lip_seat::` grades the
 /// production field.
+///
+/// AND AT THE SEAT PLACEMENT THE FIXTURE WAS BUILT FOR (2026-09-30,
+/// `harness::at_path_fixture_seating`): under the straight-line reach and the
+/// island seating, Round 25's rim is seated as one row and no arm lands on a
+/// leaned head any more (measured: 0 heads with landers on Round 25, 0 joins
+/// in a seat zone on Round 50), so every test here would grade nothing. The
+/// head-join rule reads no placement.
 fn production() -> SweepPolicy {
-    SweepPolicy::from_registry()
-        .expect("the registry supplies every sweep number")
-        .without_lip_seat()
+    crate::harness::at_path_fixture_seating(
+        SweepPolicy::from_registry()
+            .expect("the registry supplies every sweep number")
+            .without_lip_seat(),
+    )
 }
 
 /// `r = sqrt(ℓ / (X · π))` inside the registered clamps: the area law, read
@@ -707,11 +716,22 @@ fn without_the_rule_a_leaned_head_reaches_its_seat_plane_with_the_sum() {
 /// within reach. That section touches nothing, so the rule leaves the join
 /// where it is: every lander of an arm whose sums cross the plane only off
 /// the model keeps its landing and its path.
+///
+/// **Graded at the seat faces before 2026-09-30, and why.** Arm 6's seat
+/// plane is a face 75° from horizontal, and the seat-face ruling of
+/// 2026-09-30 (`tip_landing::SeatFaceRule`) no longer lets a tip carry a face
+/// steeper than the overhang band's steep end (57.5°): measured on this
+/// fixture, arm 6 then carries the shallow underside beside it and no sum
+/// crosses any seat plane off the model, so the test graded nothing. The
+/// head-join rule's off-model branch reads the seat plane it is handed and not
+/// how the face was chosen, so the branch is graded with the pre-ruling seat
+/// faces (`without_seat_face_band`) on both plans; the ruled seat faces are
+/// graded by `seat_face.rs` and `plinth-pipeline tip_trim::`.
 #[test]
 fn a_sum_that_crosses_the_seat_plane_off_the_model_is_left_alone() {
     let mesh = flipped(&mesh_for(&round_25()));
-    let unruled = round_25_flipped_with(&production().without_head_join());
-    let plan = round_25_flipped_with(&production());
+    let unruled = round_25_flipped_with(&production().without_seat_face_band().without_head_join());
+    let plan = round_25_flipped_with(&production().without_seat_face_band());
     let clearance = final_clearance_mm();
     let off_model: Vec<u32> = grade(&unruled, &landed_arms(&[&unruled]), &mesh)
         .into_iter()
