@@ -62,5 +62,8 @@ pub use provenance::{
     ProvenanceError, ProvenanceManifest, ProvenanceRef,
 };
 pub use stage::Stage;
-pub use support_profile::{TipContactProfile, TipContactProfiles, TipContactProfilesError};
+pub use support_profile::{
+    RootBossProfile, RootBossProfiles, RootBossProfilesError, TipContactProfile,
+    TipContactProfiles, TipContactProfilesError,
+};
 pub use violation::ViolationKind;

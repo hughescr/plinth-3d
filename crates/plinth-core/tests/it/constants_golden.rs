@@ -4,7 +4,7 @@ use std::path::Path;
 
 // This is a hand-maintained cross-component inventory. It deliberately does
 // not read the source ledger or the generated Markdown golden.
-const EXPECTED_CONSTANT_IDS: [&str; 331] = [
+const EXPECTED_CONSTANT_IDS: [&str; 332] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -38,6 +38,7 @@ const EXPECTED_CONSTANT_IDS: [&str; 331] = [
     "CHITUBOX_PAD_N_SIDES",
     "CHITUBOX_PLATE_MESH_TOL_MM",
     "CHITUBOX_RAFT_HEIGHT_MM",
+    "CHITUBOX_ROOT_BOSS_PROFILES",
     "CHITUBOX_ROOT_HEIGHT_MM",
     "CHITUBOX_ROOT_LAYERS",
     "CHITUBOX_SPHERE_MESH_TESSELLATION_POLICY",
@@ -383,8 +384,10 @@ fn global_registry_is_one_complete_atomic_306_constant_publication() {
     // Then the owner's ChituBox profile export (2026-09-30): three constants
     // added (boss foot, boss height, tip-contact profiles; Measured), and the
     // pad and raft height moved out of the placeholders (pad Derived from the
-    // boss foot, raft height Measured): 31/15/282 became 35/16/280.
-    assert_eq!(classes, [35, 16, 280, 0]);
+    // boss foot, raft height Measured): 31/15/282 became 35/16/280. The
+    // owner's ruling of the same day scaling the boss to its root added the
+    // root-boss profiles (Measured): 36/16/280.
+    assert_eq!(classes, [36, 16, 280, 0]);
 }
 
 #[test]

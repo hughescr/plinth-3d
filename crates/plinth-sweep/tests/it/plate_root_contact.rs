@@ -51,6 +51,12 @@ fn layer_height_mm() -> f64 {
 /// foot was `FLARE_R_FACTOR` (1.6) × the root over `FLARE_LEN_MM` (1.5 mm).
 const OWNER_BOSS_FOOT_RADIUS_MM: f64 = 1.1;
 const OWNER_BOSS_HEIGHT_MM: f64 = 1.0;
+/// The owner's boss-to-shaft ratios (ruling 2026-09-30: the boss is scaled to
+/// its root by these, chosen by root size), from the same export:
+/// `diameterofbossbottom` 2.2 over `middle_support.supportmiddlediameter`,
+/// Light 0.6 and Heavy 1.5.
+const OWNER_LIGHT_BOSS_TO_SHAFT: f64 = 2.2 / 0.6;
+const OWNER_HEAVY_BOSS_TO_SHAFT: f64 = 2.2 / 1.5;
 
 fn raft_height_mm() -> f64 {
     *m0_constants()
@@ -226,7 +232,9 @@ fn a_flared_plate_arm_stands_its_full_flare_on_a_raft_pad() {
     assert!((support_z - foot_z_mm()).abs() <= 1e-12);
     // THE OWNER'S BOSS (2026-09-30): from the 0.3 mm root at its top down to
     // his 1.1 mm foot, over his 1.0 mm boss height above the raft top (the
-    // foot reaching the native overlap into the pad).
+    // foot reaching the native overlap into the pad). A 0.3 mm root is a
+    // 0.6 mm shaft, his Light profile's own, so the boss scaled to it is
+    // Light's native 2.2 / 0.6 ratio: the native 1.1 mm foot.
     assert!(
         (flare.start_radius_mm.get() - 0.3).abs() <= 1e-12,
         "the boss top is {} mm, not the drawn root",
@@ -245,12 +253,14 @@ fn a_flared_plate_arm_stands_its_full_flare_on_a_raft_pad() {
          {OWNER_BOSS_HEIGHT_MM} mm"
     );
     assert_eq!(
-        (
-            lowered.root_bosses_at_native_foot,
-            lowered.root_bosses_grown_to_root
-        ),
-        (1, 0),
-        "path hit: one boss, on the native foot"
+        lowered.root_boss_factor.len(),
+        1,
+        "path hit: one boss, sized from the profile table"
+    );
+    assert!(
+        (lowered.root_boss_factor[0] - OWNER_LIGHT_BOSS_TO_SHAFT).abs() <= 1e-12,
+        "the boss read factor {}, not Light's {OWNER_LIGHT_BOSS_TO_SHAFT}",
+        lowered.root_boss_factor[0]
     );
     let pad_radius = assert_one_pad_on_the_plate_under(&lowered, [1.0, 2.0]);
     assert!(
@@ -268,11 +278,16 @@ fn a_flared_plate_arm_stands_its_full_flare_on_a_raft_pad() {
 }
 
 /// Owner ruling 2026-09-29: GROW THE PAD, NEVER CAP THE FOOT; and the owner's
-/// boss (2026-09-30) is grown only where the load-sized root is wider than its
-/// 1.1 mm foot, never capping the root. Such a root stands on a foot of its
-/// own radius, and its pad grows past it.
+/// boss is scaled to its root (ruling 2026-09-30). A root wider than every
+/// profile's shaft (here 2.6 mm across, against Heavy's 1.5) holds Heavy's own
+/// boss-to-shaft ratio, 2.2 / 1.5, and is never extrapolated: its foot is
+/// wider than the native 2.2 mm pad, and the pad grows past it.
+///
+/// (Until the scaling ruling this was `a_root_wider_than_the_owners_boss_
+/// foot_grows_the_boss_and_the_pad`, under a fixed 1.1 mm foot grown to the
+/// root: a 1.3 mm root then stood on a 1.3 mm foot.)
 #[test]
-fn a_root_wider_than_the_owners_boss_foot_grows_the_boss_and_the_pad() {
+fn a_root_wider_than_every_profile_shaft_holds_the_heavy_ratio_and_grows_the_pad() {
     let root = 1.3;
     let lowered = lower(arm_at(
         [1.0, 2.0],
@@ -282,10 +297,10 @@ fn a_root_wider_than_the_owners_boss_foot_grows_the_boss_and_the_pad() {
         SweepArmLanding::Plate,
         true,
     ));
-    let foot_radius = root;
+    let foot_radius = root * OWNER_HEAVY_BOSS_TO_SHAFT;
     assert!(
         foot_radius > OWNER_BOSS_FOOT_RADIUS_MM,
-        "the premise: this root is wider than the owner's boss foot"
+        "the premise: this foot is wider than the owner's native boss foot"
     );
     let flare = lowered
         .primitives
@@ -294,16 +309,13 @@ fn a_root_wider_than_the_owners_boss_foot_grows_the_boss_and_the_pad() {
         .expect("a boss");
     assert!(
         (flare.end_radius_mm.get() - foot_radius).abs() <= 1e-12,
-        "the root was capped to {}",
+        "the boss foot is {} mm on a {root} mm root, not Heavy's ratio ({foot_radius} mm)",
         flare.end_radius_mm.get()
     );
     assert_eq!(
-        (
-            lowered.root_bosses_at_native_foot,
-            lowered.root_bosses_grown_to_root
-        ),
-        (0, 1),
-        "path hit: the boss-growth branch fired"
+        lowered.root_boss_factor.len(),
+        1,
+        "path hit: one boss, sized from the profile table"
     );
     let pad_radius = assert_one_pad_on_the_plate_under(&lowered, [1.0, 2.0]);
     // PATH HIT: the grow branch fired.

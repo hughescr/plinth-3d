@@ -3062,19 +3062,23 @@ fn print_sweep_disclosure(
     );
     // THE OWNER'S CHITUBOX GEOMETRY (2026-09-30), as path hits: how many tip
     // balls read their factor off his profiles (and the range they read), and
-    // how many root bosses stand on his native foot or were grown to the root.
-    let ball = plinth_support::SweepLowering::distribution(&emission.tip_ball_factor);
+    // how many root bosses read their foot-to-root factor off his profiles by
+    // root size (and the factors and roots they read).
+    let spread = |values: &[f64]| {
+        plinth_support::SweepLowering::distribution(values).map_or_else(
+            || "n/a".to_owned(),
+            |(min, p50, max)| format!("{min:.4}/{p50:.4}/{max:.4}"),
+        )
+    };
     println!(
         "[sweep {model}] chitubox geometry: {} tip balls sized from the profile table \
-         (factor min/p50/max {}), {} root bosses at the native 1.1 mm foot, {} grown to a \
-         wider root",
+         (factor min/p50/max {}), {} root bosses scaled to their root by the profile table \
+         (factor min/p50/max {}, root radius min/p50/max {} mm)",
         emission.tip_ball_factor.len(),
-        ball.map_or_else(
-            || "n/a".to_owned(),
-            |(min, p50, max)| format!("{min:.4}/{p50:.4}/{max:.4}")
-        ),
-        emission.root_bosses_at_native_foot,
-        emission.root_bosses_grown_to_root,
+        spread(&emission.tip_ball_factor),
+        emission.root_boss_factor.len(),
+        spread(&emission.root_boss_factor),
+        spread(&emission.root_boss_root_radius_mm),
     );
     println!(
         "[sweep {model}] lowering: {} arms offered, {} emitted, {} dropped zero-length, \

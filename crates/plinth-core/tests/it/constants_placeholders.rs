@@ -698,9 +698,11 @@ const fn bound_key(bound: BoundKind) -> &'static str {
 }
 
 #[test]
-fn evidence_and_placeholder_fixture_builds_one_331_entry_structural_batch() {
+fn evidence_and_placeholder_fixture_builds_one_332_entry_structural_batch() {
     // 328 until 2026-09-30: the owner's ChituBox profile export added three
-    // evidence constants (and moved two out of the placeholders, net zero).
+    // evidence constants (and moved two out of the placeholders, net zero),
+    // and his ruling of the same day scaling the boss to its root added the
+    // root-boss profiles: 332.
     let mut descriptors = component()
         .descriptors()
         .unwrap()
@@ -708,14 +710,14 @@ fn evidence_and_placeholder_fixture_builds_one_331_entry_structural_batch() {
         .collect::<Vec<_>>();
     descriptors.extend(M0EvidenceConstants::new().unwrap().descriptors().unwrap());
     let registry = ConstantsRegistry::build_batch(descriptors).unwrap();
-    assert_eq!(registry.len(), 331);
+    assert_eq!(registry.len(), 332);
     assert_eq!(
         registry
             .iter()
             .map(|descriptor| descriptor.id().as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        331
+        332
     );
 }
 

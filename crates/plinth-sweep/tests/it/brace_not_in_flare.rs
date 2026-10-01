@@ -119,12 +119,13 @@ fn brace_ends(plan: &SweepPlan) -> Vec<(u32, &'static str, [f64; 3])> {
 }
 
 fn raft_height_mm() -> f64 {
-    m0_constants()
+    // Moved from the placeholders to the evidence on 2026-09-30 (the owner's
+    // ChituBox profile export, `raft_support.raftthickness`), same value.
+    *m0_constants()
         .expect("registry")
-        .placeholders()
+        .evidence()
         .chitubox_raft_height_mm()
-        .diagnostic()
-        .get()
+        .value()
 }
 
 /// Every brace end inside a flare the file draws, or at or below the raft top,

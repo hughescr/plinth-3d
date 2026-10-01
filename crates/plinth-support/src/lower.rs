@@ -7,7 +7,8 @@
 use std::mem::size_of;
 
 use plinth_core::{
-    m0_constants, ContentDigest, Finite, LayerPlan, M0Constants, PositiveFinite, TipContactProfiles,
+    m0_constants, ContentDigest, Finite, LayerPlan, M0Constants, PositiveFinite, RootBossProfiles,
+    TipContactProfiles,
 };
 use thiserror::Error;
 
@@ -39,24 +40,30 @@ const ZERO_LENGTH_MM: f64 = 1e-9;
 pub const NATIVE_FOOT_PAD_OVERLAP_MM: f64 = 0.002;
 
 /// **The root boss every sweep plate root stands on**: the owner's ChituBox
-/// boss (Craig ChituBox profile export 2026-09-30, fields
-/// `support_general_para.heightofboss` = 1.0 mm and `.diameterofbossbottom`
-/// = 2.2 mm, all four profiles; `CHITUBOX_BOSS_HEIGHT_MM`,
-/// `CHITUBOX_BOSS_BOTTOM_DIAMETER_MM`).
+/// boss, at his height and SCALED TO THE ROOT (Craig ChituBox profile export
+/// 2026-09-30, fields `support_general_para.heightofboss` = 1.0 mm in all four
+/// profiles, `CHITUBOX_BOSS_HEIGHT_MM`; and each profile's
+/// `diameterofbossbottom` over its `middle_support.supportmiddlediameter`,
+/// `CHITUBOX_ROOT_BOSS_PROFILES`).
 ///
 /// A cone from the shaft's own drawn root section at the boss top down to the
-/// boss foot on the raft pad. The foot is the owner's fixed 1.1 mm radius,
-/// **grown to the root where the load-sized root is wider** — the boss is
-/// grown, the root is never capped (owner ruling 2026-09-29). It replaces the
-/// legacy flare (`FLARE_R_FACTOR` × root over `FLARE_LEN_MM`) on the sweep
-/// path, and it is the ONE rule for the foot: the lowering draws it, and the
-/// sweep's congestion census, mast and thicken clearance and lip-seat root
-/// clearance all read [`Self::foot_radius_mm`], so the disc a decision is
-/// taken against is the disc the file lays down.
+/// boss foot on the raft pad. **The foot is the root times the owner's
+/// boss-to-shaft ratio at that root's size** (owner ruling 2026-09-30: the
+/// boss width is scaled to the support's own root, chosen by root size like
+/// the ball ratio; NOT a fixed 2.2 mm boss under every support, which raised
+/// resin 4-15 % on our 2-4 mm dense fields). Every ratio is above one, so the
+/// foot is always wider than its root and never caps it. A root at a
+/// profile's own shaft gets that profile's native 2.2 mm foot.
+///
+/// It replaces the legacy flare (`FLARE_R_FACTOR` × root over `FLARE_LEN_MM`)
+/// on the sweep path. The sweep's placement decisions at the plate (the
+/// congestion census, the mast and thicken root clearance, the lip-seat
+/// new-root clearance) keep their crowding disc, `FLARE_R_FACTOR` × the drawn
+/// root (`plinth_sweep::SweepPolicy::flare_r_factor`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RootBoss {
     height_mm: f64,
-    native_foot_radius_mm: f64,
+    profiles: &'static RootBossProfiles,
 }
 
 impl RootBoss {
@@ -70,23 +77,17 @@ impl RootBoss {
         Self::from_constants(constants)
     }
 
-    fn from_constants(constants: &M0Constants) -> Result<Self, String> {
+    fn from_constants(constants: &'static M0Constants) -> Result<Self, String> {
         let evidence = constants.evidence();
         let height_mm = *evidence.chitubox_boss_height_mm().value();
-        let native_foot_radius_mm = *evidence.chitubox_boss_bottom_diameter_mm().value() / 2.0;
-        if height_mm.is_finite()
-            && height_mm > 0.0
-            && native_foot_radius_mm.is_finite()
-            && native_foot_radius_mm > 0.0
-        {
+        if height_mm.is_finite() && height_mm > 0.0 {
             Ok(Self {
                 height_mm,
-                native_foot_radius_mm,
+                profiles: evidence.chitubox_root_boss_profiles().value(),
             })
         } else {
             Err(format!(
-                "the registered root boss is not a solid: height {height_mm} mm, foot radius \
-                 {native_foot_radius_mm} mm"
+                "the registered root boss is not a solid: height {height_mm} mm"
             ))
         }
     }
@@ -97,18 +98,20 @@ impl RootBoss {
         self.height_mm
     }
 
-    /// The owner's boss foot RADIUS, half of `diameterofbossbottom`.
+    /// The boss-foot-to-root ratio of a plate root of drawn root RADIUS
+    /// `root_radius_mm`, read off the owner's profiles by root size
+    /// ([`RootBossProfiles::boss_factor`]).
     #[must_use]
-    pub const fn native_foot_radius_mm(self) -> f64 {
-        self.native_foot_radius_mm
+    pub fn factor(self, root_radius_mm: f64) -> f64 {
+        self.profiles.boss_factor(root_radius_mm)
     }
 
     /// The RADIUS of the foot a plate root of drawn root radius
-    /// `root_radius_mm` stands on: the owner's boss foot, or the root itself
-    /// where the root is wider. Never narrower than either.
+    /// `root_radius_mm` stands on: [`Self::factor`] times the root. Always
+    /// wider than the root.
     #[must_use]
     pub fn foot_radius_mm(self, root_radius_mm: f64) -> f64 {
-        root_radius_mm.max(self.native_foot_radius_mm)
+        self.factor(root_radius_mm) * root_radius_mm
     }
 }
 
@@ -977,12 +980,14 @@ pub struct SweepLowering {
     /// 2026-09-30), which the emitted ball radius is times the tip radius.
     /// The path-hit witness for the profile table: one entry per tip.
     pub tip_ball_factor: Vec<f64>,
-    /// Plate roots whose boss stands on the owner's native 1.1 mm foot
-    /// ([`RootBoss`], 2026-09-30).
-    pub root_bosses_at_native_foot: usize,
-    /// Plate roots whose drawn root is wider than the native foot, so the boss
-    /// foot is GROWN to the root (never the root capped).
-    pub root_bosses_grown_to_root: usize,
+    /// Every plate root boss's FOOT-TO-ROOT FACTOR, in arm order: the owner's
+    /// ChituBox boss-to-shaft ratio at that root's size
+    /// (`CHITUBOX_ROOT_BOSS_PROFILES`, [`RootBoss`], 2026-09-30), which the
+    /// emitted foot radius is times the drawn root. The path-hit witness for
+    /// the boss table: one entry per boss drawn.
+    pub root_boss_factor: Vec<f64>,
+    /// Every plate root boss's drawn ROOT radius, in the same order.
+    pub root_boss_root_radius_mm: Vec<f64>,
     /// Members drawn as MORE than one straight span because one straight line
     /// from the tip to the root would have dipped below the area law's profile
     /// somewhere — every trunk under a mid-shaft junction. The path-hit
@@ -1138,7 +1143,8 @@ impl From<LoweringError> for SweepLoweringError {
 ///    ([`RootBoss`], 2026-09-30), boss top (`CHITUBOX_BOSS_HEIGHT_MM` above
 ///    the raft where the run allows) down to the RAFT TOP,
 ///    `plate_z + CHITUBOX_RAFT_HEIGHT_MM − NATIVE_FOOT_PAD_OVERLAP_MM`, from
-///    the drawn root out to the boss foot `max(1.1 mm, r_root)`.
+///    the drawn root out to the boss foot, the root times the owner's
+///    boss-to-shaft ratio at that root's size (`CHITUBOX_ROOT_BOSS_PROFILES`).
 /// 4. THE RAFT — after every arm, once for the whole field: a `RaftPad` on the
 ///    plate under every plate foot, wide enough that its emitted polygon
 ///    covers the foot, and `RaftBridge`s along the pads' minimum spanning tree
@@ -1247,10 +1253,9 @@ fn lower_sweep_arms_of(
         }
         out.arms_without_profile += usize::from(lowered.without_profile);
         out.shaft_members_trimmed_to_seat += lowered.members_trimmed;
-        match lowered.boss_grown {
-            Some(true) => out.root_bosses_grown_to_root += 1,
-            Some(false) => out.root_bosses_at_native_foot += 1,
-            None => {}
+        if let Some((root_radius_mm, factor)) = lowered.boss {
+            out.root_boss_root_radius_mm.push(root_radius_mm);
+            out.root_boss_factor.push(factor);
         }
         if let Some(seat) = lowered.seat {
             out.tip_seat_depth_mm.push(seat.depth_mm);
@@ -1403,10 +1408,9 @@ struct ArmLowering {
     members_trimmed: usize,
     /// The arm arrived with no radius profile and was drawn at its tip radius.
     without_profile: bool,
-    /// A plate arm's root boss: `Some(true)` when the boss foot was GROWN to
-    /// a root wider than the owner's 1.1 mm, `Some(false)` at his native foot,
-    /// `None` for an arm with no boss.
-    boss_grown: Option<bool>,
+    /// A plate arm's root boss: its drawn root radius and the foot-to-root
+    /// factor it was drawn with; `None` for an arm with no boss.
+    boss: Option<(f64, f64)>,
 }
 
 impl ArmLowering {
@@ -1418,7 +1422,7 @@ impl ArmLowering {
             spans: 0,
             members_trimmed: 0,
             without_profile: false,
-            boss_grown: None,
+            boss: None,
         }
     }
 }
@@ -2283,7 +2287,7 @@ fn lower_one_sweep_arm(
         )
     };
     let spans: usize;
-    let mut boss_grown = None;
+    let mut boss = None;
     let outcome = match arm.landing {
         SweepArmLanding::Landed => {
             if distance(center, base) <= ZERO_LENGTH_MM {
@@ -2328,16 +2332,17 @@ fn lower_one_sweep_arm(
                     if distance(center, top) > ZERO_LENGTH_MM
                         && distance(top, foot_point) > ZERO_LENGTH_MM =>
                 {
-                    // THE OWNER'S CHITUBOX BOSS FOOT (2026-09-30): 1.1 mm, or
-                    // the drawn root where the root is wider -- grown, never
-                    // capped. The `RootFlare` record is the boss cone.
+                    // THE OWNER'S CHITUBOX BOSS FOOT, SCALED TO THE ROOT
+                    // (2026-09-30): the drawn root times his boss-to-shaft
+                    // ratio at that root's size. The `RootFlare` record is
+                    // the boss cone.
+                    let factor = config.root_boss.factor(root_radius.get());
                     let Ok(flare_radius) =
                         positive(config.root_boss.foot_radius_mm(root_radius.get()))
                     else {
                         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
                     };
-                    boss_grown =
-                        Some(flare_radius.get() > config.root_boss.native_foot_radius_mm());
+                    boss = Some((root_radius.get(), factor));
                     let Some(drawn) = shaft(center, top, FrustumRingNormal::PlateZ, &mut staged)
                     else {
                         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
@@ -2430,7 +2435,7 @@ fn lower_one_sweep_arm(
         spans,
         members_trimmed,
         without_profile: arm.radius_profile_mm.is_empty(),
-        boss_grown,
+        boss,
     }
 }
 
@@ -3253,31 +3258,38 @@ mod sweep_root_flare_tests {
             let (sin, cos) = 35.0_f64.to_radians().sin_cos();
             [sin, 0.0, -cos]
         };
+        // "Short" means a run above the raft under twice the boss height, so
+        // the boss top sits half-way up it and the seat depth moves it. The
+        // sweep's boss height is the owner's 1.0 mm (`CHITUBOX_BOSS_HEIGHT_MM`,
+        // 2026-09-30), so every short post below stands 1.0 mm lower than it
+        // did under the legacy 1.5 mm flare length (the reviewer's 3.05 mm
+        // post is 2.05 mm here); at the old heights the boss top is the full
+        // 1.0 mm and no seat moves it.
         let cases: Vec<(&str, SweepArm, f64)> = vec![
-            // The reviewer's post: 3.05 mm, 0.05 mm tip, normal unmeasured.
+            // The reviewer's post, 1.0 mm shorter: 0.05 mm tip, normal unmeasured.
             (
                 "short vertical, unmeasured",
-                plate_arm([0.0, 0.0, 3.05], [0.0, 0.0], 0.0, 0.05, [0.0; 3]),
+                plate_arm([0.0, 0.0, 2.05], [0.0, 0.0], 0.0, 0.05, [0.0; 3]),
                 0.0,
             ),
             (
                 "short vertical, flat face",
-                plate_arm([0.0, 0.0, 3.05], [0.0, 0.0], 0.0, 0.05, down),
+                plate_arm([0.0, 0.0, 2.05], [0.0, 0.0], 0.0, 0.05, down),
                 0.0,
             ),
             (
                 "short vertical, 35 deg face",
-                plate_arm([0.0, 0.0, 2.6], [0.0, 0.0], 0.0, 0.3, tilted),
+                plate_arm([0.0, 0.0, 2.0], [0.0, 0.0], 0.0, 0.3, tilted),
                 0.0,
             ),
             (
                 "short leaned, 35 deg face",
-                plate_arm([0.0, 0.0, 2.6], [0.8, 0.0], 0.0, 0.1, tilted),
+                plate_arm([0.0, 0.0, 2.0], [0.8, 0.0], 0.0, 0.1, tilted),
                 0.0,
             ),
             (
                 "short, plate at z = 7.3",
-                plate_arm([1.0, 2.0, 10.15], [1.0, 2.0], 7.3, 0.05, down),
+                plate_arm([1.0, 2.0, 9.35], [1.0, 2.0], 7.3, 0.05, down),
                 7.3,
             ),
             (
@@ -3289,7 +3301,7 @@ mod sweep_root_flare_tests {
                 "short mast (no ball)",
                 SweepArm {
                     seats_into_model: false,
-                    ..plate_arm([0.0, 0.0, 2.4], [0.0, 0.0], 0.0, 0.1, [0.0; 3])
+                    ..plate_arm([0.0, 0.0, 1.9], [0.0, 0.0], 0.0, 0.1, [0.0; 3])
                 },
                 0.0,
             ),

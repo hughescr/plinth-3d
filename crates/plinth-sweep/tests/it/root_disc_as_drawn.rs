@@ -21,8 +21,8 @@
 //!
 //! **Which ring of the plate root (2026-09-30).** Until then the disc was also
 //! the emitted flare's FOOT, and this test read the feet. Since the owner's
-//! ChituBox geometry the lowering stands every plate root on a FIXED boss
-//! (1.1 mm foot, grown only for a wider root) and the census keeps its
+//! ChituBox geometry the lowering stands every plate root on his boss, scaled
+//! to the root by his boss-to-shaft ratio at its size, and the census keeps its
 //! crowding disc (`SweepPolicy::flare_r_factor` says why). The drawn root is
 //! the boss's TOP ring, the `RootFlare` record's start radius, so this test
 //! now reads that ring, times the factor.

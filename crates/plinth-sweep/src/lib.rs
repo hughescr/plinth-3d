@@ -525,12 +525,14 @@ pub struct SweepPolicy {
     ///
     /// **Until 2026-09-30 this was also the emitter's flare foot**, so the
     /// census measured the disc the file lays. The emitter now stands every
-    /// plate root on the owner's FIXED ChituBox boss
-    /// ([`plinth_support::RootBoss`]: a 1.1 mm foot, grown only for a wider
-    /// root), and this factor no longer describes any emitted solid. It is
+    /// plate root on the owner's ChituBox boss scaled to the root
+    /// ([`plinth_support::RootBoss`]: the root times his boss-to-shaft ratio
+    /// at its size, 1.47 to 4.4; owner ruling 2026-09-30), and this factor no
+    /// longer describes any emitted solid. It is
     /// kept, unchanged, as the crowding measure so that the congestion lane,
     /// the mast search and the lip-seat lane place exactly what they placed
-    /// before the geometry change: measured on the develop-head files,
+    /// before the geometry change: measured on the develop-head files (under
+    /// the earlier FIXED 2.2 mm boss, superseded the same day),
     /// counting the fixed boss feet instead would make 9 of the 10 lane models
     /// "congested" (feet within 2 × 1.1 mm: Cylinder 167 pairs, laid tube 85,
     /// Sphere 31, against 0-1 at 1.6 × root), an overlap no remedy can thin

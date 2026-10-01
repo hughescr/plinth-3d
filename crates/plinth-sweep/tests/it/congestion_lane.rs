@@ -427,26 +427,33 @@ fn a_flat_disc_is_not_congested_and_the_lane_is_a_no_op_on_it() {
 /// factor, not the bare arm; and the emitter stands that root on the owner's
 /// ChituBox boss.
 ///
-/// Since 2026-09-30 every plate root is drawn down to a FIXED boss: the
-/// owner's `diameterofbossbottom` = 2.2 mm foot (1.1 mm radius), grown to the
-/// root only where the load-sized root is wider, never capping it (Craig
-/// ChituBox profile export 2026-09-30). The census keeps its crowding disc,
-/// `FLARE_R_FACTOR` × the DRAWN root (`SweepPolicy::flare_r_factor` says why),
-/// and the drawn root is the boss's TOP ring. This reads both off the
-/// `RootFlare` records the production lowering emits for the finished field,
-/// never from the census itself: the census area is the factor times each
-/// boss top, and every boss foot is the owner's 1.1 mm or the root itself.
+/// Since 2026-09-30 every plate root is drawn down to the owner's ChituBox
+/// boss, SCALED TO THE ROOT (his ruling of that day): the foot is the root
+/// times his boss-to-shaft ratio at the root's size, `diameterofbossbottom`
+/// 2.2 mm over `supportmiddlediameter` 0.5 / 0.6 / 1.2 / 1.5 mm. The census
+/// keeps its crowding disc, `FLARE_R_FACTOR` × the DRAWN root
+/// (`SweepPolicy::flare_r_factor` says why), and the drawn root is the boss's
+/// TOP ring. This reads both off the `RootFlare` records the production
+/// lowering emits for the finished field, never from the census itself: the
+/// census area is the factor times each boss top, and every boss foot is its
+/// root times a ratio inside the owner's range (2.2/1.5 to 2.2/0.5), the one
+/// the lowering publishes for it, and never wider-ratioed for a wider root.
+/// The exact ratio at each size is graded by hand-worked rows in
+/// `chitubox_geometry`.
 ///
 /// (Until 2026-09-30 this test was `the_census_measures_the_flared_root_and_
 /// not_the_bare_arm`: the census disc was also the emitted flare's foot, and
 /// every foot had to be the factor times its root. Corrected 2026-09-29,
-/// review-fixes, from the LEDGER root to the DRAWN one.)
+/// review-fixes, from the LEDGER root to the DRAWN one. Then, for part of
+/// 2026-09-30, every foot was a FIXED 1.1 mm grown to a wider root.)
 #[test]
 fn the_census_measures_the_flared_drawn_root_and_every_boss_stands_on_the_owners_foot() {
-    // Craig ChituBox profile export 2026-09-30, `diameterofbossbottom` 2.2 mm,
-    // halved: the owner's number, typed here so the test does not read the
-    // rule it grades.
-    const OWNER_BOSS_FOOT_RADIUS_MM: f64 = 1.1;
+    // Craig ChituBox profile export 2026-09-30: `diameterofbossbottom` 2.2 mm
+    // over his widest (Heavy, 1.5 mm) and narrowest (Ultralight, 0.5 mm)
+    // `supportmiddlediameter`, typed here so the test does not read the rule
+    // it grades.
+    const OWNER_RATIO_RANGE: core::ops::RangeInclusive<f64> =
+        (2.2 / 1.5 - 1.0e-12)..=(2.2 / 0.5 + 1.0e-12);
     let mesh = laid_tube();
     let plan = sweep_with(&mesh, 0.0, &policy().without_congestion());
     let constants = plinth_core::m0_constants().expect("the registry constructs");
@@ -475,6 +482,7 @@ fn the_census_measures_the_flared_drawn_root_and_every_boss_stands_on_the_owners
     let mut emitted_roots_mm2 = 0.0;
     let mut bosses = 0_usize;
     let mut flared = 0_usize;
+    let mut ratios: Vec<(f64, f64)> = Vec::new();
     for primitive in &emission.primitives {
         if primitive.segment_kind != SupportSegmentKind::RootFlare {
             continue;
@@ -483,15 +491,39 @@ fn the_census_measures_the_flared_drawn_root_and_every_boss_stands_on_the_owners
             primitive.start_radius_mm.get(),
             primitive.end_radius_mm.get(),
         );
-        let owners = root.max(OWNER_BOSS_FOOT_RADIUS_MM);
+        let ratio = foot / root;
         assert!(
-            (foot - owners).abs() <= 1.0e-12 * foot,
-            "a root boss's foot is {foot} mm on a {root} mm root, not the owner's \
-             {OWNER_BOSS_FOOT_RADIUS_MM} mm grown to the root ({owners} mm)"
+            OWNER_RATIO_RANGE.contains(&ratio),
+            "a root boss's foot is {foot} mm on a {root} mm root: ratio {ratio}, outside the \
+             owner's {OWNER_RATIO_RANGE:?}"
         );
+        // The ratio the lowering says it drew this boss with (path hit, in
+        // arm order, one per `RootFlare`) is the ratio in the file.
+        let published = emission.root_boss_factor[bosses];
+        assert!(
+            (published - ratio).abs() <= 1.0e-9 * ratio
+                && (emission.root_boss_root_radius_mm[bosses] - root).abs() <= 1.0e-12,
+            "boss {bosses}: drawn {foot}/{root}, published factor {published} at root {}",
+            emission.root_boss_root_radius_mm[bosses]
+        );
+        ratios.push((root, ratio));
         flared += usize::from(foot > root);
         emitted_roots_mm2 += core::f64::consts::PI * (flare * root).powi(2);
         bosses += 1;
+    }
+    assert_eq!(emission.root_boss_factor.len(), bosses);
+    // Chosen by root size: the owner's ratio falls as his shaft widens
+    // (4.4, 3.667, 1.833, 1.467), so a wider root never gets a larger ratio.
+    ratios.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for pair in ratios.windows(2) {
+        assert!(
+            pair[1].1 <= pair[0].1 + 1.0e-12,
+            "a {} mm root got ratio {} but a narrower {} mm root got {}",
+            pair[1].0,
+            pair[1].1,
+            pair[0].0,
+            pair[0].1
+        );
     }
     let census = &plan.report.congestion_lane.after.all;
     let published = census.analytic_disc_area_mm2;

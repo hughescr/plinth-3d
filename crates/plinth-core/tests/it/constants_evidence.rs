@@ -6,12 +6,13 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_EVIDENCE_IDS: [&str; 51] = [
+const EXPECTED_EVIDENCE_IDS: [&str; 52] = [
     "CCO_X_PAIR_LOAD_DISCOUNT",
     "CHITUBOX_BOSS_BOTTOM_DIAMETER_MM",
     "CHITUBOX_BOSS_HEIGHT_MM",
     "CHITUBOX_PAD_DIAMETER_MM",
     "CHITUBOX_RAFT_HEIGHT_MM",
+    "CHITUBOX_ROOT_BOSS_PROFILES",
     "CHITUBOX_TIP_CONTACT_PROFILES",
     "CONDITION_SHIFT_MAX",
     "DECIMATION_MAX_ABSOLUTE_DEVIATION_MM",
@@ -60,12 +61,17 @@ const EXPECTED_EVIDENCE_IDS: [&str; 51] = [
     "X_STAR_CYLINDER",
 ];
 
-const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 51] = [
+const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 52] = [
     ("CCO_X_PAIR_LOAD_DISCOUNT", "1", "scalar"),
     ("CHITUBOX_BOSS_BOTTOM_DIAMETER_MM", "mm", "scalar"),
     ("CHITUBOX_BOSS_HEIGHT_MM", "mm", "scalar"),
     ("CHITUBOX_PAD_DIAMETER_MM", "mm", "scalar"),
     ("CHITUBOX_RAFT_HEIGHT_MM", "mm", "scalar"),
+    (
+        "CHITUBOX_ROOT_BOSS_PROFILES",
+        "mm",
+        "list[4]{name,shaft_diameter_mm,boss_bottom_diameter_mm}",
+    ),
     (
         "CHITUBOX_TIP_CONTACT_PROFILES",
         "mm",
@@ -152,7 +158,7 @@ struct ExpectedSource {
     date: &'static str,
 }
 
-const EXPECTED_SOURCES: [ExpectedSource; 35] = [
+const EXPECTED_SOURCES: [ExpectedSource; 36] = [
     ExpectedSource {
         constant: "CHITUBOX_BOSS_BOTTOM_DIAMETER_MM",
         kind: "owner_decision",
@@ -177,6 +183,15 @@ const EXPECTED_SOURCES: [ExpectedSource; 35] = [
         identity: "craig-chitubox-profile-export-2026-09-30-raftthickness",
         record: "docs/evidence/chitubox-support-profiles-2026-09-30.cfgx",
         locator: "support[0..3].raft_support.raftthickness",
+        precision: "exact",
+        date: "2026-09-30",
+    },
+    ExpectedSource {
+        constant: "CHITUBOX_ROOT_BOSS_PROFILES",
+        kind: "owner_decision",
+        identity: "craig-chitubox-profile-export-2026-09-30-supportmiddlediameter",
+        record: "docs/evidence/chitubox-support-profiles-2026-09-30.cfgx",
+        locator: "support[0..3].middle_support.supportmiddlediameter and support[0..3].support_general_para.diameterofbossbottom",
         precision: "exact",
         date: "2026-09-30",
     },
@@ -502,7 +517,7 @@ fn declaration_batch_has_exact_membership_order_shapes_and_provenance_counts() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(actual_ids, EXPECTED_EVIDENCE_IDS);
-    assert_eq!(descriptors.len(), 51);
+    assert_eq!(descriptors.len(), 52);
 
     for (descriptor, (id, unit, shape)) in descriptors.iter().zip(EXPECTED_DESCRIPTOR_CONTRACT) {
         assert_eq!(descriptor.id().as_str(), id, "ID contract drift for {id}");
@@ -521,8 +536,10 @@ fn declaration_batch_has_exact_membership_order_shapes_and_provenance_counts() {
     // X_ALLOWED moved from Derived to Measured (an owner ruling) on 2026-09-30.
     // The owner's ChituBox profile export (2026-09-30) added four Measured
     // (boss foot, boss height, raft height, tip-contact profiles) and one
-    // Derived (the pad, from the boss foot): 31/15 became 35/16.
-    assert_eq!((measured, derived), (35, 16));
+    // Derived (the pad, from the boss foot): 31/15 became 35/16. The owner's
+    // ruling of the same day that the boss is scaled to its root added one
+    // more Measured (the root-boss profiles): 36/16.
+    assert_eq!((measured, derived), (36, 16));
     assert!(descriptors.iter().all(|descriptor| !matches!(
         descriptor.provenance().class(),
         RegistryProvenanceClass::Placeholder | RegistryProvenanceClass::Pending
@@ -1560,6 +1577,9 @@ fn the_reach_ratios_are_recomputed_from_their_registered_parents_bit_for_bit() {
 /// * `CHITUBOX_TIP_CONTACT_PROFILES` holds one row per profile, by name, with
 ///   that profile's `top_support.supporttipupdiameter` and
 ///   `.supporttouchtipdiameter`; all four profiles are read.
+/// * `CHITUBOX_ROOT_BOSS_PROFILES` holds one row per profile, by name, with
+///   that profile's `middle_support.supportmiddlediameter` (the shaft) and
+///   `support_general_para.diameterofbossbottom` (the boss foot).
 /// * `CHITUBOX_BOSS_BOTTOM_DIAMETER_MM`, `CHITUBOX_BOSS_HEIGHT_MM` and
 ///   `CHITUBOX_RAFT_HEIGHT_MM` equal the `diameterofbossbottom`,
 ///   `heightofboss` and `raftthickness` of EVERY profile (they agree; a
@@ -1595,8 +1615,25 @@ fn chitubox_geometry_is_read_off_the_committed_profile_export() {
     let constants = component();
     let table = constants.chitubox_tip_contact_profiles().value();
     assert_eq!(table.profiles().len(), profiles.len());
+    let bosses = constants.chitubox_root_boss_profiles().value();
+    assert_eq!(bosses.profiles().len(), profiles.len());
     for profile in profiles {
         let name = profile["name"].as_str().expect("a profile name");
+        let boss = bosses
+            .profiles()
+            .iter()
+            .find(|row| row.name() == name)
+            .unwrap_or_else(|| panic!("profile {name} is missing from the root-boss table"));
+        assert_eq!(
+            boss.shaft_diameter_mm(),
+            field(profile, "middle_support", "supportmiddlediameter"),
+            "{name}: supportmiddlediameter"
+        );
+        assert_eq!(
+            boss.boss_bottom_diameter_mm(),
+            field(profile, "support_general_para", "diameterofbossbottom"),
+            "{name}: diameterofbossbottom (root-boss row)"
+        );
         let row = table
             .profiles()
             .iter()
@@ -1640,6 +1677,18 @@ fn chitubox_geometry_is_read_off_the_committed_profile_export() {
         assert!(
             (1.25 - 1e-12..=1.5 + 1e-12).contains(&ratio),
             "{}: ball-to-tip ratio {ratio} is outside the owner's 1.25-1.5",
+            row.name()
+        );
+    }
+    // The boss half (owner ruling 2026-09-30: the boss width is scaled to the
+    // root by his profiles' boss-to-shaft ratio). His shafts run 0.5-1.5 mm
+    // under one 2.2 mm foot, so every ratio lies in 2.2/1.5 ..= 2.2/0.5. A
+    // table whose two diameters were swapped would read below one.
+    for row in bosses.profiles() {
+        let ratio = row.boss_factor();
+        assert!(
+            (2.2 / 1.5 - 1e-12..=2.2 / 0.5 + 1e-12).contains(&ratio),
+            "{}: boss-to-shaft ratio {ratio} is outside 2.2/1.5 ..= 2.2/0.5",
             row.name()
         );
     }

@@ -2,8 +2,8 @@ use super::{ConstantDescriptor, RegistryError};
 use crate::{
     BoundKind, BuildVolumeError, BuildVolumeMm, CalendarDate, ConstantId, Derived, EvidenceDate,
     EvidenceId, EvidenceSource, FiniteInterval, LoadSharing, LoadSharingError, Measured,
-    MicronGranularity, PlateId, ProvenanceError, TipContactProfiles, TipContactProfilesError,
-    YDirection,
+    MicronGranularity, PlateId, ProvenanceError, RootBossProfiles, RootBossProfilesError,
+    TipContactProfiles, TipContactProfilesError, YDirection,
 };
 use thiserror::Error;
 
@@ -28,6 +28,19 @@ const CHITUBOX_TIP_CONTACT_ROWS: [(&str, f64, f64); 4] = [
     ("Ultralight", 0.15, 0.2),
 ];
 
+/// The owner's four profiles' root bosses, `(name, supportmiddlediameter,
+/// diameterofbossbottom)` in mm DIAMETER, transcribed from
+/// [`CHITUBOX_PROFILE_EXPORT`]. The shaft is `middle_support.supportmiddlediameter`;
+/// Ultralight alone also carries a different `supportmiddlediameter2` (0.7,
+/// against 0.5), which ChituBox applies below `triggerheightofLowmidsupdiam`
+/// (5 mm) on taller supports; it is NOT read (an open question for the owner).
+const CHITUBOX_ROOT_BOSS_ROWS: [(&str, f64, f64); 4] = [
+    ("Light", 0.6, 2.2),
+    ("Middle", 1.2, 2.2),
+    ("Heavy", 1.5, 2.2),
+    ("Ultralight", 0.5, 2.2),
+];
+
 /// Construction failures for the all-at-once M0 evidence declaration set.
 #[derive(Clone, Debug, PartialEq, Error)]
 pub enum M0EvidenceConstantsError {
@@ -41,6 +54,8 @@ pub enum M0EvidenceConstantsError {
     NonAdditiveLoadSharing,
     #[error(transparent)]
     TipContactProfiles(#[from] TipContactProfilesError),
+    #[error(transparent)]
+    RootBossProfiles(#[from] RootBossProfilesError),
     /// The ruled design load ratio must sit strictly below the measured snap
     /// ratio on BOTH plates. A recalibration that moves either lower edge to or
     /// below the ruling makes the registry refuse to construct, so a ruling can
@@ -93,6 +108,7 @@ pub struct M0EvidenceConstants {
     chitubox_boss_height_mm: Measured<f64>,
     chitubox_pad_diameter_mm: Derived<f64>,
     chitubox_raft_height_mm: Measured<f64>,
+    chitubox_root_boss_profiles: Measured<RootBossProfiles>,
     chitubox_tip_contact_profiles: Measured<TipContactProfiles>,
     condition_shift_max: Measured<f64>,
     decimation_max_absolute_deviation_mm: Derived<f64>,
@@ -381,7 +397,7 @@ impl M0EvidenceConstants {
                 "support[0..3].support_general_para.diameterofbossbottom",
             )?,
             None,
-            "Craig ChituBox profile export 2026-09-30, field support_general_para.diameterofbossbottom = 2.2 mm DIAMETER in all four profiles. THE ROOT BOSS's foot: the cone every plate-rooted support stands on, from the shaft's own section at the boss top down to this diameter on the raft pad. Native bytes agree: every type-4 flare in the five ChituBox-authored files we hold ends at radius 1.100 on a 2.2 mm pad (raft-diagnosis 2026-09-29 §3.2; cylinder-cube-sphere.chitubox: 0.75 -> 1.10 and 0.30 -> 1.10 over 1.0 mm). WHAT IT DECIDES on --placement sweep: the foot radius of every plate root is max(1.1 mm, r_root) -- the fixed boss, GROWN to the load-sized root where the root is wider and never capping a root (owner ruling 2026-09-29, grow the pad, never cap the foot). It REPLACES the unmeasured FLARE_R_FACTOR = 1.6 (foot = 1.6 * r_root) on the sweep path; the legacy engine still reads FLARE_R_FACTOR. The sweep's placement decisions at the plate (the congestion census, the mast and thicken root clearance, the lip-seat new-root clearance) do NOT read this foot: they keep their pre-2026-09-30 crowding disc, FLARE_R_FACTOR x the drawn root, so placement is unchanged by the geometry. Neighbouring bosses closer than 2.2 mm share a footprint on the raft, as ChituBox's own do (25 overlapping boss-foot pairs in the owner's cylinder-cube-sphere.chitubox); whether the census should count that is an open question for the owner (plinth_sweep::SweepPolicy::flare_r_factor).",
+            "Craig ChituBox profile export 2026-09-30, field support_general_para.diameterofbossbottom = 2.2 mm DIAMETER in all four profiles. THE ROOT BOSS's foot: the cone every plate-rooted support stands on, from the shaft's own section at the boss top down to this diameter on the raft pad. Native bytes agree: every type-4 flare in the five ChituBox-authored files we hold ends at radius 1.100 on a 2.2 mm pad (raft-diagnosis 2026-09-29 §3.2; cylinder-cube-sphere.chitubox: 0.75 -> 1.10 and 0.30 -> 1.10 over 1.0 mm). WHAT IT DECIDES on --placement sweep: the NATIVE raft pad under every plate foot (CHITUBOX_PAD_DIAMETER_MM is derived from it), on which a foot stands; a pad too narrow to cover its foot is grown past it (owner ruling 2026-09-29, grow the pad, never cap the foot). It does NOT size the boss foot itself: by the owner's ruling of 2026-09-30 the foot is SCALED to each support's own root by his profiles' boss-to-shaft ratio (CHITUBOX_ROOT_BOSS_PROFILES), because a fixed 2.2 mm boss under every root of our 2-4 mm dense fields raised resin 4-15 % (Sphere +47 %) against ChituBox's 6-8 mm spacing. The sweep's placement decisions at the plate (the congestion census, the mast and thicken root clearance, the lip-seat new-root clearance) do NOT read the boss foot: they keep their pre-2026-09-30 crowding disc, FLARE_R_FACTOR x the drawn root, so placement is unchanged by the geometry (an open question for the owner, plinth_sweep::SweepPolicy::flare_r_factor).",
         )?;
         let chitubox_boss_height_mm = Measured::new(
             1.0,
@@ -394,6 +410,15 @@ impl M0EvidenceConstants {
             profile_export("raftthickness", "support[0..3].raft_support.raftthickness")?,
             None,
             "Craig ChituBox profile export 2026-09-30, field raft_support.raftthickness = 0.2 mm in all four profiles: the thickness of the raft pads and bridges under the plate roots, and so the datum the root boss stands on. Native bytes agree: every type-6 pad and bridge in the five ChituBox-authored files we hold is 0.2 mm (record slot r1 = 0.2, mesh z plate to plate + 0.2). Until 2026-09-30 this same id held the same value as format parity with no field provenance; the value is unchanged, so both engines emit identical rafts. The export's other raft fields (raftheight 1.8, raftangle 30, raftarearatio 110 %, raftshape 2, raftgridwidth / raftgridpolylen 2.0) describe ChituBox's own slab raft and are NOT read: the engine emits the pad-and-bridge layout.",
+        )?;
+        let chitubox_root_boss_profiles = Measured::new(
+            RootBossProfiles::new(CHITUBOX_ROOT_BOSS_ROWS)?,
+            profile_export(
+                "supportmiddlediameter",
+                "support[0..3].middle_support.supportmiddlediameter and support[0..3].support_general_para.diameterofbossbottom",
+            )?,
+            None,
+            "Craig ChituBox profile export 2026-09-30, fields middle_support.supportmiddlediameter (the shaft's DIAMETER) and support_general_para.diameterofbossbottom (the boss foot's DIAMETER), all four profiles: Ultralight 0.5 -> 2.2 (ratio 4.400), Light 0.6 -> 2.2 (3.667), Middle 1.2 -> 2.2 (1.833), Heavy 1.5 -> 2.2 (1.467). OWNER RULING 2026-09-30: the support BASE (boss) keeps his 1.0 mm height (CHITUBOX_BOSS_HEIGHT_MM) and its WIDTH is SCALED to the support's own root by this ratio, chosen by root size like the ball ratio; NOT a fixed 2.2 mm boss under every support (that raised resin 4-15 %, Sphere +47 %, because our fields are 2-4 mm dense against ChituBox's 6-8 mm). WHAT IT DECIDES on --placement sweep: the boss foot of every plate root, whose radius is boss_factor(r_root) * r_root, with boss_factor linear in root DIAMETER between the two profiles whose shaft diameters bracket it and held at the end profile's own ratio outside 0.5-1.5 mm (never extrapolated): the same reading rule as CHITUBOX_TIP_CONTACT_PROFILES. A root at any profile's own shaft gets that profile's native 2.2 mm foot. It REPLACES the unmeasured FLARE_R_FACTOR = 1.6 as the EMITTED foot on the sweep path; the legacy engine still reads FLARE_R_FACTOR. WHAT IT DOES NOT DECIDE: the root RADIUS, which stays load-sized; only the ratio of foot to shaft is imported. MAPPING CHECKED ON NATIVE BYTES: Chitubox Projects/cylinder-cube-sphere.chitubox draws type-4 flares 0.75 -> 1.10 (Heavy's 1.5 mm shaft) and 0.30 -> 1.10 (a 0.6 mm shaft, Light's) over 1.0 mm. OPEN: Ultralight also sets middle_support.supportmiddlediameter2 = 0.7 (the other three profiles set it equal to their shaft), which ChituBox applies to the lower shaft of supports taller than triggerheightofLowmidsupdiam = 5 mm; this table reads supportmiddlediameter (0.5), the profile's shaft at every height. UNITS TRAP: ChituBox and this table speak DIAMETER; boss_factor takes the engine's RADIUS.",
         )?;
         let chitubox_pad_diameter_value = *chitubox_boss_bottom_diameter_mm.value();
 
@@ -408,9 +433,10 @@ impl M0EvidenceConstants {
             chitubox_pad_diameter_mm: Derived::new(
                 chitubox_pad_diameter_value,
                 ["CHITUBOX_BOSS_BOTTOM_DIAMETER_MM"],
-                "Exact identity: the raft pad under a plate root is as wide as the root boss's foot, CHITUBOX_BOSS_BOTTOM_DIAMETER_MM = 2.2 mm DIAMETER (Craig ChituBox profile export 2026-09-30, field support_general_para.diameterofbossbottom). Native bytes are the reason for the identity: in all five ChituBox-authored files we hold, every pad's record r0 is 2.2 (a DIAMETER; mesh radius 1.1000) under a flare foot of radius 1.1 (raft-diagnosis 2026-09-29 §3.2). This is the NATIVE pad; a pad whose polygon would not cover its foot is grown past it (owner ruling 2026-09-29, grow the pad, never cap the foot), which with a 1.1 mm boss foot and the 20-gon pad is every pad. Until 2026-09-30 this same id held the same value with no field provenance; both engines read this one now, and the legacy raft is unchanged. OPEN for the owner: whether ChituBox ties the pad to diameterofbossbottom or draws it at 2.2 regardless; a native file written with a different boss diameter would settle it.",
+                "Exact identity: the raft pad under a plate root is as wide as the root boss's foot, CHITUBOX_BOSS_BOTTOM_DIAMETER_MM = 2.2 mm DIAMETER (Craig ChituBox profile export 2026-09-30, field support_general_para.diameterofbossbottom). Native bytes are the reason for the identity: in all five ChituBox-authored files we hold, every pad's record r0 is 2.2 (a DIAMETER; mesh radius 1.1000) under a flare foot of radius 1.1 (raft-diagnosis 2026-09-29 §3.2). This is the NATIVE pad; a pad whose polygon would not cover its foot is grown past it (owner ruling 2026-09-29, grow the pad, never cap the foot), which with the 20-gon pad is every foot of radius about 1.086 mm or more (a foot at the native 1.1 mm included). Since 2026-09-30 the boss foot is scaled to its root (CHITUBOX_ROOT_BOSS_PROFILES) and the pad stays this native 2.2 mm under every foot it covers. Until 2026-09-30 this same id held the same value with no field provenance; both engines read this one now, and the legacy raft is unchanged. OPEN for the owner: whether ChituBox ties the pad to diameterofbossbottom or draws it at 2.2 regardless; a native file written with a different boss diameter would settle it.",
             ),
             chitubox_raft_height_mm,
+            chitubox_root_boss_profiles,
             chitubox_tip_contact_profiles,
             condition_shift_max,
             decimation_max_absolute_deviation_mm: Derived::new(
@@ -691,6 +717,13 @@ impl M0EvidenceConstants {
         &self.chitubox_raft_height_mm
     }
 
+    /// The owner's profiles' root-boss geometry (shaft and boss foot), and
+    /// the rule that reads a boss factor off it for any root size.
+    #[must_use]
+    pub const fn chitubox_root_boss_profiles(&self) -> &Measured<RootBossProfiles> {
+        &self.chitubox_root_boss_profiles
+    }
+
     /// The owner's profiles' contact-sphere geometry, and the one rule that
     /// reads a ball factor off it for any tip size.
     #[must_use]
@@ -952,7 +985,7 @@ impl M0EvidenceConstants {
     }
 
     /// Returns the complete declaration batch in stable ID order.
-    pub fn descriptors(&self) -> Result<[ConstantDescriptor; 51], RegistryError> {
+    pub fn descriptors(&self) -> Result<[ConstantDescriptor; 52], RegistryError> {
         Ok([
             ConstantDescriptor::from_derived(
                 ConstantId::from("CCO_X_PAIR_LOAD_DISCOUNT"),
@@ -983,6 +1016,12 @@ impl M0EvidenceConstants {
                 "mm",
                 SCALAR,
                 &self.chitubox_raft_height_mm,
+            )?,
+            ConstantDescriptor::from_measured(
+                ConstantId::from("CHITUBOX_ROOT_BOSS_PROFILES"),
+                "mm",
+                "list[4]{name,shaft_diameter_mm,boss_bottom_diameter_mm}",
+                &self.chitubox_root_boss_profiles,
             )?,
             ConstantDescriptor::from_measured(
                 ConstantId::from("CHITUBOX_TIP_CONTACT_PROFILES"),

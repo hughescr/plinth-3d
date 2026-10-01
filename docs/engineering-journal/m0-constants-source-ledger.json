@@ -261,7 +261,7 @@
     {
       "id": "CHITUBOX_BOSS_BOTTOM_DIAMETER_MM",
       "classification": "runtime_emit_geometry",
-      "normative": "03-physics-and-constants.md §3.10.1 = 2.2 mm DIAMETER, Craig ChituBox profile export 2026-09-30, field support_general_para.diameterofbossbottom (all four profiles). The sweep's root boss foot: max(1.1 mm, r_root) radius, grown never capped (owner ruling 2026-09-29). Replaces FLARE_R_FACTOR as the EMITTED foot on --placement sweep; the sweep's congestion census still reads FLARE_R_FACTOR as its crowding disc, and the legacy engine still draws its flare with it.",
+      "normative": "03-physics-and-constants.md §3.10.1 = 2.2 mm DIAMETER, Craig ChituBox profile export 2026-09-30, field support_general_para.diameterofbossbottom (all four profiles). The native raft pad (CHITUBOX_PAD_DIAMETER_MM is derived from it), and each profile's boss foot in CHITUBOX_ROOT_BOSS_PROFILES. Since the owner's ruling of 2026-09-30 it no longer sizes the sweep's boss foot directly: the foot is scaled to the root by CHITUBOX_ROOT_BOSS_PROFILES (a fixed max(1.1 mm, r_root) foot was superseded the same day). The sweep's congestion census still reads FLARE_R_FACTOR as its crowding disc, and the legacy engine still draws its flare with it.",
       "source_locators": [
         "docs/evidence/chitubox-support-profiles-2026-09-30.cfgx:support[0..3].support_general_para.diameterofbossbottom",
         "Chitubox Projects/cylinder-cube-sphere.chitubox (outside the repository): native type-4 flare foot radius 1.1"
@@ -342,6 +342,17 @@
       ],
       "provenance_wrapper": "Measured",
       "provenance_detail": "Measured source=owner_decision(id=\"craig-chitubox-profile-export-2026-09-30-raftthickness\", record=\"docs/evidence/chitubox-support-profiles-2026-09-30.cfgx\", locator=\"support[0..3].raft_support.raftthickness\", date=exact(\"2026-09-30\")); err=null"
+    },
+    {
+      "id": "CHITUBOX_ROOT_BOSS_PROFILES",
+      "classification": "runtime_emit_geometry",
+      "normative": "03-physics-and-constants.md §3.10.1 = the owner's four profiles' (supportmiddlediameter, diameterofbossbottom) in mm DIAMETER: Ultralight (0.5, 2.2), Light (0.6, 2.2), Middle (1.2, 2.2), Heavy (1.5, 2.2); Craig ChituBox profile export 2026-09-30. Owner ruling 2026-09-30: the --placement sweep boss foot is boss_factor(r_root) * r_root, boss_factor = diameterofbossbottom / supportmiddlediameter, linear in root DIAMETER between the bracketing profiles and held at the end profile's ratio outside 0.5-1.5 mm; boss height CHITUBOX_BOSS_HEIGHT_MM. Replaces the fixed 2.2 mm boss of the same day and FLARE_R_FACTOR on the sweep path; the legacy engine still reads FLARE_R_FACTOR. Root RADII stay load-sized.",
+      "source_locators": [
+        "docs/evidence/chitubox-support-profiles-2026-09-30.cfgx:support[0..3].middle_support.supportmiddlediameter and support[0..3].support_general_para.diameterofbossbottom",
+        "Chitubox Projects/cylinder-cube-sphere.chitubox (outside the repository): native type-4 flares 0.75 -> 1.10 and 0.30 -> 1.10 over 1.0 mm"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured source=owner_decision(id=\"craig-chitubox-profile-export-2026-09-30-supportmiddlediameter\", record=\"docs/evidence/chitubox-support-profiles-2026-09-30.cfgx\", locator=\"support[0..3].middle_support.supportmiddlediameter and support[0..3].support_general_para.diameterofbossbottom\", date=exact(\"2026-09-30\")); err=null"
     },
     {
       "id": "CHITUBOX_ROOT_HEIGHT_MM",

@@ -29,11 +29,11 @@
 //! At the plate layer, rasterise every plate-rooted member's ROOT DISC — the
 //! arm's drawn root radius times the registered `FLARE_R_FACTOR`, not the bare
 //! arm radius. Until 2026-09-30 that was the radius the EMITTER put there (its
-//! flare foot). Since then the emitter stands every root on the owner's FIXED
-//! ChituBox boss (`plinth_support::RootBoss`: a 1.1 mm foot, grown only for a
-//! wider root) and the factor is kept, unchanged, as the census's crowding
-//! measure; `SweepPolicy::flare_r_factor` says why and what the open question
-//! is. Then
+//! flare foot). Since then the emitter stands every root on the owner's
+//! ChituBox boss scaled to the root (`plinth_support::RootBoss`: the root
+//! times his boss-to-shaft ratio at its size, 1.47 to 4.4) and the factor is
+//! kept, unchanged, as the census's crowding measure;
+//! `SweepPolicy::flare_r_factor` says why and what the open question is. Then
 //!
 //! ```text
 //! congestion = Σ (cells one disc covers) / (cells at least one disc covers)
@@ -307,8 +307,9 @@ pub fn measure(
 /// counted.
 ///
 /// **Not the emitted foot since 2026-09-30.** The emitter stands every plate
-/// root on the owner's FIXED ChituBox boss (1.1 mm foot whatever the root
-/// carries, [`plinth_support::RootBoss`]). This disc keeps the pre-change
+/// root on the owner's ChituBox boss, scaled to the root by his
+/// boss-to-shaft ratio at its size ([`plinth_support::RootBoss`]). This disc
+/// keeps the pre-change
 /// crowding measure so placement is unchanged by the geometry lane; see
 /// `SweepPolicy::flare_r_factor` for the measured alternatives and the open
 /// question.

@@ -56,7 +56,7 @@ fn flare_factor() -> f64 {
 /// Every plate root's centre and FLARED radius, in millimetres — the census's
 /// crowding disc (the drawn root times `FLARE_R_FACTOR`). Until 2026-09-30
 /// that was also the foot the emitter lays; since then the emitter stands
-/// every root on the owner's fixed ChituBox boss, and the census keeps this
+/// every root on the owner's ChituBox boss scaled to the root, and the census keeps this
 /// crowding measure unchanged (`SweepPolicy::flare_r_factor`). A brace gets no
 /// root boss and never lands on the plate, so it is not one.
 fn flared_roots(plan: &SweepPlan) -> Vec<(u32, StrutKind, f64, f64, f64)> {
@@ -365,7 +365,8 @@ fn the_finished_laid_tube_publishes_its_drawn_root_laps_and_they_do_not_grow() {
     // The census's crowding disc of each root the file draws: the `RootFlare`
     // record's TOP ring, the drawn root, times the crowding factor. (Until
     // 2026-09-30 this read the flare's foot, which WAS that disc; since then
-    // the boss's foot is the owner's fixed 1.1 mm, see `flared_roots`.)
+    // the boss's foot is the owner's ChituBox boss scaled to the root, see
+    // `flared_roots`.)
     let flare = flare_factor();
     let feet: Vec<([f64; 3], f64)> = emission
         .primitives

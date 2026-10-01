@@ -498,7 +498,7 @@ shares no code with the engine. Moving it is a separate decision.
 | `tip_ball_r_factor` (423) | 1.5 | — | **P** | `plinth-support::placement` | Spherical contact at the tip. Aliased in `verify.BALL_FACTOR_STUB`. **Legacy engine only since 2026-09-30:** `--placement sweep` reads the owner's ChituBox profiles instead (`CHITUBOX_TIP_CONTACT_PROFILES`, §3.10.1a). |
 | `joints.MODEL_FOOT_FACTOR` | 1.4 | — | **P** | `plinth-support::placement` | Strut/rung foot balls. Aliased in `verify.BALL_FACTOR_FOOT`. |
 | `joint_ball_factor` (420) | 1.0 | — | **P** — "1.25 read as lumpy" in review | `plinth-support::placement` | |
-| `flare_len_mm` / `flare_r_factor` (425/426) | 1.5 / 1.6 | mm / — | **P** | `plinth-support::placement` | Conical flare at the pad. **Not** the fast-flare-above-the-tip term §1.3(b) requires — that term does not exist yet. **Since 2026-09-30** `--placement sweep` EMITS every plate root on the owner's ChituBox boss instead (`CHITUBOX_BOSS_HEIGHT_MM`, `CHITUBOX_BOSS_BOTTOM_DIAMETER_MM`, §3.10.1a); the sweep still reads `flare_r_factor` as its congestion census's crowding disc (§3.10.1a). |
+| `flare_len_mm` / `flare_r_factor` (425/426) | 1.5 / 1.6 | mm / — | **P** | `plinth-support::placement` | Conical flare at the pad. **Not** the fast-flare-above-the-tip term §1.3(b) requires — that term does not exist yet. **Since 2026-09-30** `--placement sweep` EMITS every plate root on the owner's ChituBox boss instead, scaled to the root (`CHITUBOX_BOSS_HEIGHT_MM`, `CHITUBOX_ROOT_BOSS_PROFILES`, §3.10.1a); the sweep still reads `flare_r_factor` as its congestion census's crowding disc (§3.10.1a). |
 | `DEFAULT_CONTACT_DEPTH_MM` (legacy `contact_depth_mm`, 250) | 0.3 | mm | **P** — generation/profile default | `plinth-support::placement` + `plinth-emit` | This is not a ChituBox format grade or fixed wire value; the format field is variable. Keep the 0.3 mm policy in geometry generation, not `chitubox_io` format constants. |
 | `stub_length_mm` (247) | 2.5 | mm | **P** | `plinth-support::placement` | |
 | `min_shaft_r_mm` (139) | 0.3 | mm | **P** | `plinth-support::placement` | |
@@ -851,7 +851,8 @@ parses the file and holds every value to it.
 | Stable ID | Value | ChituBox field(s) | What it decides (`--placement sweep`) |
 |---|---|---|---|
 | `CHITUBOX_TIP_CONTACT_PROFILES` | (tip-up, touch) mm DIAMETER: Ultralight (0.15, 0.20), Light (0.20, 0.30), Middle (0.40, 0.50), Heavy (0.60, 0.80) | `top_support.supporttipupdiameter`, `.supporttouchtipdiameter` | Tip ball radius = `f(2 r_tip) · r_tip`, `f` = touch / tip-up, linear in tip DIAMETER between bracketing profiles, held at the end profile's ratio outside 0.15-0.60 mm. The seat law's ball-cap term and equator bound read the same `f`. Replaces `BALL_FACTOR_STUB` = 1.5. |
-| `CHITUBOX_BOSS_BOTTOM_DIAMETER_MM` | 2.2 | `support_general_para.diameterofbossbottom` | The root boss's foot: radius `max(1.1, r_root)`, grown to a wider load-sized root, never capping it (owner ruling 2026-09-29). Replaces `FLARE_R_FACTOR` × root as the EMITTED foot (placement's crowding disc still reads `FLARE_R_FACTOR`, below). |
+| `CHITUBOX_ROOT_BOSS_PROFILES` | (shaft, boss bottom) mm DIAMETER: Ultralight (0.5, 2.2), Light (0.6, 2.2), Middle (1.2, 2.2), Heavy (1.5, 2.2) | `middle_support.supportmiddlediameter`, `support_general_para.diameterofbossbottom` | **The root boss's foot, scaled to its root** (owner ruling 2026-09-30): radius `k(2 r_root) · r_root`, `k` = boss bottom / shaft (4.4, 3.667, 1.833, 1.467), linear in root DIAMETER between bracketing profiles, held at the end profile's ratio outside 0.5-1.5 mm. A root at a profile's own shaft gets that profile's native 2.2 mm foot (native bytes: 0.75 → 1.10 and 0.30 → 1.10). Replaces `FLARE_R_FACTOR` × root as the EMITTED foot (placement's crowding disc still reads `FLARE_R_FACTOR`, below), and the fixed `max(1.1, r_root)` foot of earlier the same day, which raised resin 4-15 % (Sphere +47 %) on our 2-4 mm dense fields. Open: Ultralight's `supportmiddlediameter2` = 0.7 (lower shaft of supports over 5 mm) is not read. |
+| `CHITUBOX_BOSS_BOTTOM_DIAMETER_MM` | 2.2 | `support_general_para.diameterofbossbottom` | The native raft pad (below), and each profile's boss foot in `CHITUBOX_ROOT_BOSS_PROFILES`. A foot stays on its 2.2 mm pad; a pad too narrow to cover its foot is grown (owner ruling 2026-09-29). |
 | `CHITUBOX_BOSS_HEIGHT_MM` | 1.0 | `support_general_para.heightofboss` | The boss top above the raft top, `max(minimum boss run, min(1.0, half the run above the raft))`. Replaces `FLARE_LEN_MM` = 1.5. |
 | `CHITUBOX_PAD_DIAMETER_MM` | 2.2, **D** from the boss foot | (`diameterofbossbottom`) | The native raft pad, as wide as the native boss foot (five native files: pad 2.2 under a 1.1 foot). Was **P** of the same value. |
 | `CHITUBOX_RAFT_HEIGHT_MM` | 0.2 | `raft_support.raftthickness` | Pad and bridge thickness; the boss's datum. Was **P** of the same value. |
@@ -866,7 +867,8 @@ thicken rung's disc and the lip-seat lane's new-root clearance still measure
 each plate root as `FLARE_R_FACTOR` × its drawn root, which until 2026-09-30
 was also the emitted flare's foot. They no longer describe an emitted solid;
 they are kept so that placement is unchanged by the geometry. Measured
-alternatives (`plinth_sweep::SweepPolicy::flare_r_factor`): counting the fixed
+alternatives (`plinth_sweep::SweepPolicy::flare_r_factor`, measured under the
+fixed boss that preceded the scaled one): counting the fixed
 boss foot makes 9 of the 10 lane models "congested" (Cylinder 167 pairs),
 an overlap no remedy can thin and ChituBox's own files show too; counting the
 bare root silences the congestion lane on its reference fixture (the laid

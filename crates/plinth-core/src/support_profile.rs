@@ -1,9 +1,9 @@
 //! The support-profile geometry the owner prints with in ChituBox, as data.
 //!
 //! **UNITS TRAP**: ChituBox and the owner speak DIAMETER; the support engine
-//! speaks RADIUS. Every field here is a DIAMETER, named as one, and the one
-//! query that takes an engine size ([`TipContactProfiles::ball_factor`])
-//! takes a RADIUS and says so.
+//! speaks RADIUS. Every field here is a DIAMETER, named as one, and the two
+//! queries that take an engine size ([`TipContactProfiles::ball_factor`],
+//! [`RootBossProfiles::boss_factor`]) take a RADIUS and say so.
 
 use thiserror::Error;
 
@@ -144,24 +144,182 @@ impl TipContactProfiles {
     /// radius reads the smallest profile's factor rather than a NaN.
     #[must_use]
     pub fn ball_factor(&self, tip_radius_mm: f64) -> f64 {
-        let diameter = 2.0 * tip_radius_mm;
-        let first = &self.profiles[0];
-        let last = &self.profiles[self.profiles.len() - 1];
-        if !diameter.is_finite() || diameter <= first.tip_up_diameter_mm {
-            return first.ball_factor();
+        ratio_by_diameter(
+            &self.profiles,
+            2.0 * tip_radius_mm,
+            TipContactProfile::tip_up_diameter_mm,
+            TipContactProfile::ball_factor,
+        )
+    }
+}
+
+/// **The ONE profile-reading rule** both tables share: the ratio at a size of
+/// `diameter` mm DIAMETER is linear in diameter between the two profiles whose
+/// own sizes bracket it, and the nearest end profile's own ratio outside the
+/// owner's range (never extrapolated). A non-finite diameter reads the
+/// smallest profile's ratio rather than a NaN.
+///
+/// `profiles` is non-empty and sorted by `size`, strictly increasing; both
+/// table constructors guarantee it.
+fn ratio_by_diameter<P>(
+    profiles: &[P],
+    diameter: f64,
+    size: impl Fn(&P) -> f64,
+    ratio: impl Fn(&P) -> f64,
+) -> f64 {
+    let first = &profiles[0];
+    let last = &profiles[profiles.len() - 1];
+    if !diameter.is_finite() || diameter <= size(first) {
+        return ratio(first);
+    }
+    if diameter >= size(last) {
+        return ratio(last);
+    }
+    let upper = profiles
+        .iter()
+        .position(|profile| size(profile) >= diameter)
+        .unwrap_or(profiles.len() - 1);
+    let (below, above) = (&profiles[upper - 1], &profiles[upper]);
+    let t = (diameter - size(below)) / (size(above) - size(below));
+    ratio(below) + t * (ratio(above) - ratio(below))
+}
+
+/// One ChituBox support profile's root boss: the DIAMETER of the shaft the
+/// boss stands under (`middle_support.supportmiddlediameter`) and the DIAMETER
+/// of the boss's foot on the raft (`support_general_para.diameterofbossbottom`).
+///
+/// The native bytes show the boss as a cone from the shaft's own section down
+/// to the foot: `Chitubox Projects/cylinder-cube-sphere.chitubox` draws
+/// type-4 flares 0.75 -> 1.10 (Heavy, shaft 1.5) and 0.30 -> 1.10 (shaft 0.6,
+/// Light's) over 1.0 mm.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RootBossProfile {
+    name: String,
+    shaft_diameter_mm: f64,
+    boss_bottom_diameter_mm: f64,
+}
+
+impl RootBossProfile {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// `middle_support.supportmiddlediameter`, a DIAMETER in mm.
+    #[must_use]
+    pub const fn shaft_diameter_mm(&self) -> f64 {
+        self.shaft_diameter_mm
+    }
+
+    /// `support_general_para.diameterofbossbottom`, a DIAMETER in mm.
+    #[must_use]
+    pub const fn boss_bottom_diameter_mm(&self) -> f64 {
+        self.boss_bottom_diameter_mm
+    }
+
+    /// The boss-foot-to-shaft ratio this profile draws: boss bottom diameter
+    /// over shaft diameter.
+    #[must_use]
+    pub fn boss_factor(&self) -> f64 {
+        self.boss_bottom_diameter_mm / self.shaft_diameter_mm
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum RootBossProfilesError {
+    #[error("a root-boss profile table needs at least one profile")]
+    Empty,
+    #[error("profile {name}: diameters must be finite and greater than zero")]
+    NonPositive { name: String },
+    #[error(
+        "profile {name}: the boss foot must be wider than the shaft it stands under \
+         (a boss factor of 1 or less is no boss)"
+    )]
+    FootNotWiderThanShaft { name: String },
+    #[error("profiles {first} and {second} share a shaft diameter; the table cannot be read by root size")]
+    DuplicateShaftSize { first: String, second: String },
+    #[error("a profile name must not be empty")]
+    EmptyName,
+}
+
+/// The owner's ChituBox profiles' root-boss geometry, ordered by shaft size,
+/// and the rule that reads a boss factor off them for a root of any size
+/// (owner ruling 2026-09-30: the boss WIDTH is scaled to the support's own
+/// root by his profiles' boss-to-shaft ratio, chosen by root size like the
+/// ball ratio; NOT a fixed 2.2 mm boss under every root).
+///
+/// **The rule** is [`TipContactProfiles`]'s: the factor at a root is linear in
+/// the root's DIAMETER between the two profiles whose shaft diameters bracket
+/// it, and held at the nearest profile's own factor outside the owner's range.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RootBossProfiles {
+    profiles: Vec<RootBossProfile>,
+}
+
+impl RootBossProfiles {
+    /// Build the table from `(name, shaft DIAMETER, boss bottom DIAMETER)`
+    /// rows in any order; it is stored sorted by shaft diameter.
+    ///
+    /// # Errors
+    ///
+    /// An empty table, a non-finite or non-positive diameter, a boss foot no
+    /// wider than its shaft, or two profiles at one shaft size.
+    pub fn new<I, S>(rows: I) -> Result<Self, RootBossProfilesError>
+    where
+        I: IntoIterator<Item = (S, f64, f64)>,
+        S: Into<String>,
+    {
+        let mut profiles = Vec::new();
+        for (name, shaft, boss) in rows {
+            let name = name.into();
+            if name.trim().is_empty() {
+                return Err(RootBossProfilesError::EmptyName);
+            }
+            if !(shaft.is_finite() && shaft > 0.0 && boss.is_finite() && boss > 0.0) {
+                return Err(RootBossProfilesError::NonPositive { name });
+            }
+            if boss <= shaft {
+                return Err(RootBossProfilesError::FootNotWiderThanShaft { name });
+            }
+            profiles.push(RootBossProfile {
+                name,
+                shaft_diameter_mm: shaft,
+                boss_bottom_diameter_mm: boss,
+            });
         }
-        if diameter >= last.tip_up_diameter_mm {
-            return last.ball_factor();
+        if profiles.is_empty() {
+            return Err(RootBossProfilesError::Empty);
         }
-        let upper = self
-            .profiles
-            .iter()
-            .position(|profile| profile.tip_up_diameter_mm >= diameter)
-            .unwrap_or(self.profiles.len() - 1);
-        let (below, above) = (&self.profiles[upper - 1], &self.profiles[upper]);
-        let t = (diameter - below.tip_up_diameter_mm)
-            / (above.tip_up_diameter_mm - below.tip_up_diameter_mm);
-        below.ball_factor() + t * (above.ball_factor() - below.ball_factor())
+        profiles.sort_by(|a, b| a.shaft_diameter_mm.total_cmp(&b.shaft_diameter_mm));
+        if let Some(pair) = profiles
+            .windows(2)
+            .find(|pair| pair[1].shaft_diameter_mm <= pair[0].shaft_diameter_mm)
+        {
+            return Err(RootBossProfilesError::DuplicateShaftSize {
+                first: pair[0].name.clone(),
+                second: pair[1].name.clone(),
+            });
+        }
+        Ok(Self { profiles })
+    }
+
+    /// The profiles, narrowest shaft first.
+    #[must_use]
+    pub fn profiles(&self) -> &[RootBossProfile] {
+        &self.profiles
+    }
+
+    /// **The boss factor for a root of `root_radius_mm` RADIUS**: the boss
+    /// foot's radius is this factor times the root radius. Always greater
+    /// than one, because every profile's is.
+    #[must_use]
+    pub fn boss_factor(&self, root_radius_mm: f64) -> f64 {
+        ratio_by_diameter(
+            &self.profiles,
+            2.0 * root_radius_mm,
+            RootBossProfile::shaft_diameter_mm,
+            RootBossProfile::boss_factor,
+        )
     }
 }
 
@@ -227,6 +385,54 @@ mod tests {
         assert!(matches!(
             TipContactProfiles::new(Vec::<(&str, f64, f64)>::new()),
             Err(TipContactProfilesError::Empty)
+        ));
+    }
+
+    fn bosses() -> RootBossProfiles {
+        RootBossProfiles::new([
+            ("Light", 0.6, 2.2),
+            ("Middle", 1.2, 2.2),
+            ("Heavy", 1.5, 2.2),
+            ("Ultralight", 0.5, 2.2),
+        ])
+        .expect("valid fixture")
+    }
+
+    #[test]
+    fn boss_rows_are_sorted_by_shaft_size_and_a_root_at_a_profile_reads_its_own_ratio() {
+        let t = bosses();
+        let names: Vec<&str> = t.profiles().iter().map(RootBossProfile::name).collect();
+        assert_eq!(names, ["Ultralight", "Light", "Middle", "Heavy"]);
+        // RADIUS in: half of each profile's shaft DIAMETER. Each reads 2.2 / d.
+        assert!((t.boss_factor(0.25) - 4.4).abs() < 1e-12);
+        assert!((t.boss_factor(0.3) - 11.0 / 3.0).abs() < 1e-12);
+        assert!((t.boss_factor(0.6) - 11.0 / 6.0).abs() < 1e-12);
+        assert!((t.boss_factor(0.75) - 22.0 / 15.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn between_shafts_the_boss_ratio_is_linear_in_root_diameter_and_held_outside() {
+        let t = bosses();
+        // Diameter 0.9: halfway from Light (11/3) to Middle (11/6), 2.75.
+        assert!((t.boss_factor(0.45) - 2.75).abs() < 1e-12);
+        assert!((t.boss_factor(0.05) - 4.4).abs() < 1e-12);
+        assert!((t.boss_factor(2.0) - 22.0 / 15.0).abs() < 1e-12);
+        assert!((t.boss_factor(f64::NAN) - 4.4).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_boss_no_wider_than_its_shaft_or_a_repeated_shaft_size_is_refused() {
+        assert!(matches!(
+            RootBossProfiles::new([("flat", 2.2, 2.2)]),
+            Err(RootBossProfilesError::FootNotWiderThanShaft { .. })
+        ));
+        assert!(matches!(
+            RootBossProfiles::new([("a", 0.6, 2.2), ("b", 0.6, 2.0)]),
+            Err(RootBossProfilesError::DuplicateShaftSize { .. })
+        ));
+        assert!(matches!(
+            RootBossProfiles::new(Vec::<(&str, f64, f64)>::new()),
+            Err(RootBossProfilesError::Empty)
         ));
     }
 }
