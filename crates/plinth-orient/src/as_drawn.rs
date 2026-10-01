@@ -10,7 +10,9 @@
 //! 2. macOS: the STL file carries the Finder tag [`AS_DRAWN_TAG`], read from the
 //!    file's own `com.apple.metadata:_kMDItemUserTags` extended attribute (a
 //!    binary plist array of strings, each optionally suffixed `"\n<colour>"`),
-//!    never through Spotlight, whose index can lag the file or be switched off;
+//!    never through Spotlight, whose index can lag the file or be switched off.
+//!    A symlinked STL is read through the link (the target's tag counts; so
+//!    does a tag on the link itself);
 //! 3. Linux: the extended attribute `user.xdg.tags` (comma-separated) contains
 //!    [`AS_DRAWN_TAG`];
 //! 4. any platform: a marker file `<stem>.asdrawn` sits next to `<stem>.stl`.
@@ -96,8 +98,12 @@ pub struct AsDrawnProbe {
 /// Look for the per-model "as drawn" marks on one source STL: the platform's
 /// tag attribute first, then the portable marker file.
 ///
-/// Reads at most one extended attribute and checks one sibling path; it never
-/// opens the STL itself.
+/// A symlinked source is probed through the link: the tag on the file it
+/// points at counts, and so does a tag on the link itself; the marker is
+/// looked for beside the link (the name the operator put in the folder).
+///
+/// Reads one extended attribute (two for a symlink whose target carries none)
+/// and checks one sibling path; it never opens the STL itself.
 #[must_use]
 pub fn probe_source(source: &Path) -> AsDrawnProbe {
     let mut warnings = Vec::new();
@@ -156,12 +162,52 @@ fn platform_tag(_source: &Path, _warnings: &mut Vec<String>) -> Option<AsDrawnRe
     None
 }
 
-/// One extended attribute's bytes. An absent attribute, and a file system or
-/// platform that has no extended attributes at all, are both "no tag" and
-/// silent; any other read failure is "no tag" with a warning.
+/// One extended attribute's bytes, read THROUGH a symlink: the executor takes
+/// symlinked STLs on purpose (the corpus is provisioned as links, and a plate
+/// folder may be built from links into the model library), so the tag that
+/// counts is the one on the file the link points at. If that file has no such
+/// attribute and the source is itself a symlink, the link's own attribute is
+/// read too: Finder can tag a link, and that is the operator marking it.
+/// (Linux keeps no `user.*` attribute on a symlink; that second read finds
+/// nothing there.)
+///
+/// An absent attribute, and a file system or platform that has no extended
+/// attributes at all, are both "no tag" and silent; any other read failure is
+/// "no tag" with a warning.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn read_attribute(source: &Path, name: &str, warnings: &mut Vec<String>) -> Option<Vec<u8>> {
-    match xattr::get(source, name) {
+    read_one_attribute(source, name, Follow::Target, warnings).or_else(|| {
+        let is_link = source
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink());
+        is_link
+            .then(|| read_one_attribute(source, name, Follow::LinkItself, warnings))
+            .flatten()
+    })
+}
+
+/// Which file a [`read_one_attribute`] call reads at a symlink.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[derive(Clone, Copy)]
+enum Follow {
+    /// The file the link points at (`getxattr`).
+    Target,
+    /// The link itself (`lgetxattr` / `XATTR_NOFOLLOW`).
+    LinkItself,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn read_one_attribute(
+    source: &Path,
+    name: &str,
+    follow: Follow,
+    warnings: &mut Vec<String>,
+) -> Option<Vec<u8>> {
+    let read = match follow {
+        Follow::Target => xattr::get_deref(source, name),
+        Follow::LinkItself => xattr::get(source, name),
+    };
+    match read {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::Unsupported => None,
         Err(error) => {

@@ -7,7 +7,9 @@
 //!
 //! - `<stem>.asdrawn` marker (every platform);
 //! - macOS Finder tag, on a `/bin/cp -p` copy of the owner's tagged
-//!   `dnd-campaigns/cube.stl` (macOS only; the original is only read);
+//!   `dnd-campaigns/cube.stl` (macOS only; the original is only read), both
+//!   as a file in the input folder and as a SYMLINK into a library folder
+//!   that holds the tagged file (the tag is read through the link);
 //! - Linux `user.xdg.tags` (Linux only);
 //! - `OrientationPolicy::AsDrawn` (`--orient none`): every model;
 //! - a mark under a PINNED run: the marked model is used as drawn and is not
@@ -139,22 +141,40 @@ fn each_mark_makes_only_its_own_model_as_drawn_and_the_unmarked_one_is_searched(
     scratch.place("marked");
     scratch.mark("marked");
     scratch.place("plain");
+    // The tagged model sits in a "library" folder outside the input folder and
+    // is also put in the input folder TWICE: once as a copy (`tagged`) and once
+    // as a symlink to the library file (`linked`), the way a plate folder may be
+    // built from links into the model library. The tag lives on the library
+    // file only, so `linked` is marked only if the probe reads through the link.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    let library = {
+        let library = scratch.0.join("library");
+        std::fs::create_dir_all(&library).expect("library folder");
+        library.join("tagged-in-library.stl")
+    };
     #[cfg(target_os = "macos")]
     {
         let original = workspace_root().join("../cube.stl");
-        let status = std::process::Command::new("/bin/cp")
-            .arg("-p")
-            .arg(&original)
-            .arg(scratch.input().join("tagged.stl"))
-            .status()
-            .expect("run /bin/cp -p");
-        assert!(status.success(), "copy the owner's tagged cube");
+        for destination in [scratch.input().join("tagged.stl"), library.clone()] {
+            let status = std::process::Command::new("/bin/cp")
+                .arg("-p")
+                .arg(&original)
+                .arg(&destination)
+                .status()
+                .expect("run /bin/cp -p");
+            assert!(status.success(), "copy the owner's tagged cube");
+        }
     }
     #[cfg(target_os = "linux")]
     {
         let tagged = scratch.place("tagged");
         xattr::set(&tagged, "user.xdg.tags", b"plinth-no-rotate").expect("set user.xdg.tags");
+        std::fs::copy(&tagged, &library).expect("library copy");
+        xattr::set(&library, "user.xdg.tags", b"plinth-no-rotate").expect("set user.xdg.tags");
     }
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    std::os::unix::fs::symlink(&library, scratch.input().join("linked.stl"))
+        .expect("symlink into the library");
 
     let report = prepare(scratch.request(OrientationPolicy::DenseSweep)).expect("the run runs");
     assert_all_stopped_at_orient(&report);
@@ -184,8 +204,15 @@ fn each_mark_makes_only_its_own_model_as_drawn_and_the_unmarked_one_is_searched(
         let expected = AsDrawnReason::FinderTag;
         #[cfg(target_os = "linux")]
         let expected = AsDrawnReason::XdgTag;
-        assert_eq!(tagged.1, as_drawn(expected));
+        assert_eq!(tagged.1, as_drawn(expected.clone()));
         assert_eq!((tagged.2.to_bits(), tagged.3.as_str()), (0.0_f64.to_bits(), "identity"));
+        let linked = by_stem("linked");
+        assert_eq!(
+            linked.1,
+            as_drawn(expected),
+            "a symlink to a tagged file must be used as drawn"
+        );
+        assert_eq!((linked.2.to_bits(), linked.3.as_str()), (0.0_f64.to_bits(), "identity"));
     }
 
     // Path-hit count: the marked models, and only they, took the as-drawn path;
@@ -194,7 +221,7 @@ fn each_mark_makes_only_its_own_model_as_drawn_and_the_unmarked_one_is_searched(
         .iter()
         .filter(|(_, source, ..)| matches!(source, Some(OrientationSource::AsDrawn { .. })))
         .count();
-    let expected_hits = if cfg!(any(target_os = "macos", target_os = "linux")) { 2 } else { 1 };
+    let expected_hits = if cfg!(any(target_os = "macos", target_os = "linux")) { 3 } else { 1 };
     assert_eq!(hits, expected_hits, "{seen:?}");
     assert_eq!(seen.len(), expected_hits + 1, "{seen:?}");
 }

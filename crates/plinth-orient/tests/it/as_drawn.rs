@@ -151,6 +151,59 @@ fn the_finder_tag_on_the_owners_real_tagged_file_marks_it_as_drawn() {
     assert!(probe.warnings.is_empty(), "{:?}", probe.warnings);
 }
 
+/// A symlinked source is probed through the link. The executor takes symlinked
+/// STLs on purpose (the corpus is provisioned as links, and a plate folder may
+/// be built from links into the model library), so the Finder tag on the file
+/// a link points at must mark the link. Finder can also tag the link itself;
+/// that counts too.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_symlink_is_marked_by_the_tag_on_its_target_or_on_itself() {
+    use plinth_orient::as_drawn::FINDER_TAGS_XATTR;
+
+    let scratch = Scratch::new("finder-symlink");
+    let target = copy_of_the_owners_tagged_cube(&scratch);
+    let link = scratch.0.join("linked.stl");
+    std::os::unix::fs::symlink(&target, &link).expect("symlink to the tagged copy");
+    // Precondition: the link itself carries no attribute; only its target does.
+    assert_eq!(
+        xattr::get(&link, FINDER_TAGS_XATTR).expect("read the link's own attribute"),
+        None,
+        "the link must not carry the tag itself, or this test proves nothing"
+    );
+    let probe = probe_source(&link);
+    assert_eq!(
+        probe.reason,
+        Some(AsDrawnReason::FinderTag),
+        "the tag on the file a symlink points at must mark the symlinked source"
+    );
+    assert!(probe.warnings.is_empty(), "{:?}", probe.warnings);
+
+    // The tag on the link itself, with an untagged target.
+    let plain = scratch.untagged("plain");
+    let tagged_link = scratch.0.join("tagged-link.stl");
+    std::os::unix::fs::symlink(&plain, &tagged_link).expect("symlink to an untagged file");
+    let tags = xattr::get_deref(&target, FINDER_TAGS_XATTR)
+        .expect("read the cube copy's tags")
+        .expect("the cube copy carries tags");
+    xattr::set(&tagged_link, FINDER_TAGS_XATTR, &tags).expect("tag the link itself");
+    assert_eq!(
+        xattr::get_deref(&tagged_link, FINDER_TAGS_XATTR).expect("read through the link"),
+        None,
+        "precondition: the link's target is untagged"
+    );
+    let probe = probe_source(&tagged_link);
+    assert_eq!(probe.reason, Some(AsDrawnReason::FinderTag));
+    assert!(probe.warnings.is_empty(), "{:?}", probe.warnings);
+
+    // A link to an untagged file, with no tag of its own, is not marked.
+    let plain_link = scratch.0.join("plain-link.stl");
+    std::os::unix::fs::symlink(&plain, &plain_link).expect("symlink");
+    let probe = probe_source(&plain_link);
+    assert_eq!(probe.reason, None);
+    assert!(probe.warnings.is_empty(), "{:?}", probe.warnings);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn other_finder_tags_do_not_mark_and_a_broken_tag_attribute_warns() {
@@ -197,6 +250,14 @@ fn the_xdg_tag_marks_it_as_drawn_and_other_tags_do_not() {
     let other = scratch.untagged("other");
     xattr::set(&other, XDG_TAGS_XATTR, b"plinth-no-rotate-later").expect("set user.xdg.tags");
     assert_eq!(probe_source(&other).reason, None);
+
+    // A symlinked source is marked by its target's tag (Linux keeps no
+    // `user.*` attribute on a symlink itself, so the target is the only place).
+    let link = scratch.0.join("linked.stl");
+    std::os::unix::fs::symlink(&tagged, &link).expect("symlink to the tagged file");
+    let probe = probe_source(&link);
+    assert_eq!(probe.reason, Some(AsDrawnReason::XdgTag));
+    assert!(probe.warnings.is_empty(), "{:?}", probe.warnings);
 }
 
 /// The as-drawn orientation is identity, re-centred like every pose, with the

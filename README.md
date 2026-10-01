@@ -54,7 +54,7 @@ lifted off the plate). One model can be used as drawn under any mode by marking 
 tag `plinth-no-rotate` on macOS, `plinth-no-rotate` in the file's `user.xdg.tags` attribute on
 Linux (`setfattr -n user.xdg.tags -v plinth-no-rotate model.stl`), or, on any platform, an
 empty marker file `<stem>.asdrawn` beside `<stem>.stl` (the only form that survives git or a
-zip). The report says per model `as drawn (<reason>)` or `orientation searched`.
+zip). A tag on the file a symlinked STL points at counts. The report says per model `as drawn (<reason>)` or `orientation searched`.
 `corpus/as-drawn/` holds the Round bases drawn glue face up and marked this way.
 `--wall-mm` overrides the hollow shell's wall thickness. Each run prints a per-model report —
 stage results, emitted record counts, the size the pipeline assumed the model was — and exits

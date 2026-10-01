@@ -69,7 +69,9 @@ holds when ANY of these does: `--orient none` (every model in the run); the macO
 `plinth-no-rotate`, read straight from the file's `com.apple.metadata:_kMDItemUserTags`
 extended attribute, not through Spotlight; `plinth-no-rotate` in the Linux `user.xdg.tags`
 attribute; or a marker file `<stem>.asdrawn` beside the STL, the portable form that survives
-git. A mark beats `dense` and `pinned:DIR` alike. The orientation record says which mark it was
+git. A symlinked STL is read through the link: the tag on the file it points at counts, and
+so does a tag on the link itself; the marker is looked for beside the link. A mark beats
+`dense` and `pinned:DIR` alike. The orientation record says which mark it was
 (`OrientationProvenance::AsDrawn`), and the run report prints one line per model:
 `as drawn (<reason>)` or `orientation searched`. A tag attribute that is present but unreadable
 is a WARNING line and the model is treated as untagged, never refused.
