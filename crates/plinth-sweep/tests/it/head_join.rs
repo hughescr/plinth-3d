@@ -66,7 +66,7 @@ use plinth_support::{
     SupportSegmentKind, SweepArm,
 };
 // (`SweepArm` is also the unit the moved-member clearance is graded on.)
-use plinth_sweep::{arms_of, Landing, StrutKind, SweepPlan, SweepPolicy};
+use plinth_sweep::{arms_of, Footprint, Landing, StrutKind, SweepPlan, SweepPolicy};
 
 /// Stations per shaft record, ends included.
 const STATIONS: usize = 33;
@@ -553,6 +553,33 @@ fn solid_gap_mm(mesh: &Mesh, arm: &SweepArm) -> f64 {
     gap
 }
 
+/// Whether the footprint rule moved member `id`'s drawn axis: its own seat
+/// was slid onto its face, or it lands on (or tops out on) a member that was,
+/// down the chain. Read off the finished field's own records.
+fn footprint_slid(plan: &SweepPlan) -> impl Fn(u32) -> bool + '_ {
+    move |id: u32| {
+        let mut next = Some(id);
+        let mut steps = 0;
+        while let Some(at) = next {
+            let Some(strut) = plan.struts.iter().find(|strut| strut.id == at) else {
+                return false;
+            };
+            if strut.seat_face.footprint == Footprint::MovedOntoFace {
+                return true;
+            }
+            next = match strut.landing {
+                Landing::Strut { id, .. } => Some(id),
+                _ => strut.seat_on_strut,
+            };
+            steps += 1;
+            if steps > plan.struts.len() {
+                return false;
+            }
+        }
+        false
+    }
+}
+
 /// Whether member `id` of `before` has the same landing and path in `after`.
 fn unmoved(before: &SweepPlan, after: &SweepPlan, id: u32) -> bool {
     let find = |plan: &SweepPlan| plan.struts.iter().find(|strut| strut.id == id).cloned();
@@ -593,10 +620,36 @@ fn the_seat_zone_of_every_head_arm_is_own_load_sized() {
         rule.joins_in_seat_zone_before,
         rule.landers_moved
     );
+    // RE-DERIVED 2026-09-30 (fix/chitubox-geometry), measured. Until then this
+    // read "the finished field's census is empty". The census is taken on the
+    // EMITTED field, after the footprint rule, which slides a seat along its
+    // face so its whole contact disc lies on it and re-tilts that member's
+    // shaft (and every member joined to it). With the owner's ChituBox ball
+    // ratio, plate arm 42 slides 0.447 mm for its disc, and the re-tilted ring
+    // of the sum-sized section under lander 77's join on its head comes within
+    // the clearance: the census lists (77, 42). Contact area is the only seat
+    // criterion (challenger ruling 2026-09-29, `footprint.rs`: a slide that
+    // puts a disc back on its face is taken whatever it does to the shaft,
+    // and the census warns). Measured the other way: refusing every slide
+    // that lists a join (a head-join guard in the footprint move check)
+    // empties the census and leaves arm 42 with 45 % of its disc on the face,
+    // the outcome that ruling rejected (Round_100 arm 195, 22 %). So what the
+    // census may still list here is exactly the joins whose HOST's drawn axis
+    // a later footprint slide re-tilted (the sum-sized section is the
+    // host's): the head-join rule itself left none, and the geometric grade
+    // above (no section wider than its own contact in a seat zone) stays
+    // strict.
+    let slid = footprint_slid(&plan);
+    let unaccounted: Vec<(u32, u32)> = rule
+        .in_seat_zone_after
+        .iter()
+        .copied()
+        .filter(|(_, host)| !slid(*host))
+        .collect();
     assert!(
-        rule.in_seat_zone_after.is_empty(),
-        "the finished field's census still lists {:?}",
-        rule.in_seat_zone_after
+        unaccounted.is_empty(),
+        "the finished field's census lists {unaccounted:?}, which no footprint slide re-tilted: \
+         the head-join rule left them"
     );
     let (landers, _) = moved_members_clear_the_model(&unruled, &plan, &mesh);
     assert!(

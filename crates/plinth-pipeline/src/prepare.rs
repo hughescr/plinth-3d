@@ -2583,7 +2583,8 @@ fn print_sweep_disclosure(
              by up to {:.4} mm), {} on a knife edge, {} left in place because every on-face \
              seat broke a rule of the finished field; moves refused by the lean law {}, by an \
              unbraced run's limit {}, by the drain keep-out {} ({} member checks); {} disc \
-             samples + {} search samples over {} layers, {} round(s)",
+             samples + {} search samples + {} move-verify samples over {} layers, {} round(s); \
+             {} tips off their face at the disc's rim alone (lattice on the face)",
             emission.tips_trimmed_to_seat,
             emission.shaft_members_trimmed_to_seat,
             emission.tips_trimmed_without_a_measured_face,
@@ -2607,8 +2608,10 @@ fn print_sweep_disclosure(
             footprint.members_checked,
             footprint.disc_samples,
             footprint.search_samples,
+            footprint.verify_samples,
             footprint.layers_rasterised,
             footprint.rounds,
+            footprint.tips_off_face_at_rim_only,
         );
         for (arm, fraction) in &footprint.knife_edges {
             println!(
