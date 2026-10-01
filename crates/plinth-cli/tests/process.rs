@@ -67,8 +67,18 @@ fn root_and_prepare_help_pin_the_stable_usage_essentials() {
     assert!(prepare.status.success());
     let stdout = text(&prepare.stdout);
     assert!(stdout.contains(
-        "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|pinned:DIR] [--placement legacy|sweep] [--wall-mm MM] [--no-cache]"
+        "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|none|pinned:DIR] [--placement legacy|sweep] [--wall-mm MM] [--no-cache]"
     ));
+    // GitHub issue #1: the four as-drawn switches are documented where an
+    // operator looks for them.
+    for switch in [
+        "none uses every model exactly as drawn",
+        "Finder tag plinth-no-rotate",
+        "user.xdg.tags",
+        "<stem>.asdrawn",
+    ] {
+        assert!(stdout.contains(switch), "help does not document {switch:?}");
+    }
     for essential in [
         "--input-models-dir DIR",
         "--output PROFILE",
@@ -231,6 +241,92 @@ fn the_pinned_orientation_mode_replays_a_baseline_by_stem() {
     );
 }
 
+/// GitHub issue #1, across the process boundary: `--orient none` uses every
+/// model exactly as drawn, and the report says so on one line per model.
+#[test]
+fn the_none_orientation_mode_uses_every_model_as_drawn() {
+    let scratch = Scratch::new("orient-none");
+    scratch.place("make_toed_slab.prepped.stl", "mini");
+
+    let output = plinth(&[
+        "prepare",
+        "--input-models-dir",
+        scratch.input().to_str().expect("scratch path is Unicode"),
+        "--output",
+        "saturn4-ultra",
+        "--out-dir",
+        scratch.output().to_str().expect("scratch path is Unicode"),
+        "--orient",
+        "none",
+    ]);
+    let stdout = text(&output.stdout);
+    assert!(
+        stdout.contains("orientation  none: every model used exactly as drawn (--orient none)"),
+        "the run report must state the as-drawn authority: {stdout}"
+    );
+    assert!(
+        stdout.contains("\n  as drawn (--orient none)\n"),
+        "the model must carry its one as-drawn line: {stdout}"
+    );
+    assert!(
+        stdout.contains("rotation committed: identity"),
+        "an as-drawn model is not rotated: {stdout}"
+    );
+    assert!(
+        !stdout.contains("orientation searched"),
+        "nothing may be searched under --orient none: {stdout}"
+    );
+}
+
+/// GitHub issue #1, across the process boundary: under the default dense mode
+/// a `<stem>.asdrawn` marker makes ITS model as drawn, and an unmarked model
+/// beside it is still searched; one line each.
+#[test]
+fn a_marker_file_makes_its_model_as_drawn_and_its_neighbour_is_still_searched() {
+    let scratch = Scratch::new("orient-marker");
+    scratch.place("make_toed_slab.prepped.stl", "marked");
+    scratch.place("make_toed_slab.prepped.stl", "unmarked");
+    std::fs::write(scratch.input().join("marked.asdrawn"), b"").expect("write the marker");
+
+    let output = plinth(&[
+        "prepare",
+        "--input-models-dir",
+        scratch.input().to_str().expect("scratch path is Unicode"),
+        "--output",
+        "saturn4-ultra",
+        "--out-dir",
+        scratch.output().to_str().expect("scratch path is Unicode"),
+    ]);
+    let stdout = text(&output.stdout);
+    let block = |stem: &str| -> String {
+        let start = stdout
+            .find(&format!("MODEL  {stem}\n"))
+            .unwrap_or_else(|| panic!("no block for {stem}: {stdout}"));
+        let rest = &stdout[start + 1..];
+        let end = rest.find("MODEL  ").map_or(rest.len(), |offset| offset);
+        rest[..end].to_owned()
+    };
+    let marked = block("marked");
+    let unmarked = block("unmarked");
+    assert!(
+        marked.contains("\n  as drawn (marker file marked.asdrawn)\n"),
+        "the marked model must be used as drawn: {marked}"
+    );
+    assert!(
+        marked.contains("rotation committed: identity"),
+        "the marked model must not be rotated: {marked}"
+    );
+    assert!(
+        unmarked.contains("\n  orientation searched\n"),
+        "the unmarked model must still be searched: {unmarked}"
+    );
+    // A marker is not a model: two STLs, two models.
+    assert!(
+        stdout.contains("plinth prepare: 2 model(s)"),
+        "the marker file must not be enumerated as a model: {stdout}"
+    );
+}
+
 /// One spelling per concept: a near-miss orientation mode is refused, not
 /// guessed at.
 #[test]
@@ -250,7 +346,7 @@ fn an_unknown_orientation_mode_is_refused_by_name() {
     assert!(!output.status.success());
     let stderr = text(&output.stderr);
     assert!(
-        stderr.contains("unknown orientation mode") && stderr.contains("dense or pinned:DIR"),
+        stderr.contains("unknown orientation mode") && stderr.contains("dense, none or pinned:DIR"),
         "the refusal must name the sanctioned spellings: {stderr}"
     );
     assert!(
