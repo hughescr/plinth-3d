@@ -487,6 +487,25 @@ fn root_boss_top_at(
     )
 }
 
+/// The z of the terminal a plate-rooted sweep member's boss top is measured
+/// from: for a member that seats into the model, the SEATED pole
+/// [`seat_tip`] drives the tip to, over the same axis (seat to base) and tip
+/// radius [`lower_one_sweep_arm`] hands it; for one that does not, its seat.
+/// `None` for an arm the lowering refuses (no length, no positive tip).
+fn seated_terminal_z(arm: &SweepArm, config: LoweringConfig) -> Option<f64> {
+    if !arm.seats_into_model {
+        return Some(arm.seat_mm[2]);
+    }
+    let delta: [f64; 3] = std::array::from_fn(|index| arm.base_mm[index] - arm.seat_mm[index]);
+    let length = delta.iter().map(|value| value * value).sum::<f64>().sqrt();
+    if !length.is_finite() || length <= ZERO_LENGTH_MM {
+        return None;
+    }
+    let unit = delta.map(|value| value / length);
+    let tip_radius = positive(arm.tip_radius_mm).ok()?;
+    Some(seat_tip(arm, unit, tip_radius.get(), config).0[2])
+}
+
 /// **Where a plate-rooted sweep member's root flare ends, measured up from
 /// the plate**: the height of its BOSS TOP, which is the top of the
 /// `RootFlare` record [`lower_sweep_arms`] draws for it, and the height of the
@@ -522,20 +541,27 @@ impl SweepRootFlare {
         Ok(Self { config })
     }
 
-    /// The boss top of a plate-rooted member whose seat stands
-    /// `seat_above_plate_mm` over the plate, in mm over the plate; `None`
-    /// where the run is shorter than the registered no-bend height, so the
-    /// lowering draws a straight column and no flare.
+    /// The boss top of the plate-rooted member `arm`, in mm over the plate at
+    /// `plate_z_mm`; `None` where the run is shorter than the registered
+    /// no-bend height (the lowering draws a straight column and no flare), or
+    /// where the arm has no direction or no positive tip, which the lowering
+    /// refuses to draw.
     ///
-    /// The lowering reads the SEATED terminal (the seat pushed into the model
-    /// by the seat depth); a caller that has only the seat surface gets the
-    /// boss top of a seat that much lower. Only runs shorter than
-    /// `2 × FLARE_LEN_MM` above the raft are affected, by at most half the
-    /// seat depth.
+    /// **Read at the SEATED terminal, as [`lower_sweep_arms`] reads it**
+    /// (round-6 review, 2026-09-30). A member that seats into the model has
+    /// its tip driven in by the seat law ([`seat_tip`], the derivation the
+    /// lowering itself calls), and a run shorter than `2 × FLARE_LEN_MM` above
+    /// the raft puts its boss top half-way up that run, so the seat depth
+    /// moves the boss. Until this date the door took the seat SURFACE and
+    /// answered for a terminal one seat depth lower: on a 3.05 mm post with a
+    /// 0.05 mm tip, a boss top of 1.625 mm where the file draws 1.6595 mm, and
+    /// a brace tie at 1.65 mm inside the flare. A member that does not seat
+    /// (a mast's top) is its own terminal.
     #[must_use]
-    pub fn top_above_plate_mm(&self, seat_above_plate_mm: f64) -> Option<f64> {
+    pub fn top_above_plate_of(&self, arm: &SweepArm, plate_z_mm: f64) -> Option<f64> {
+        let terminal_z = seated_terminal_z(arm, self.config)?;
         let zero = Finite::new(0.0).ok()?;
-        let top = root_boss_top_at(seat_above_plate_mm, [zero, zero], self.config)?.ok()?;
+        let top = root_boss_top_at(terminal_z - plate_z_mm, [zero, zero], self.config)?.ok()?;
         Some(top[2].get())
     }
 
@@ -2995,5 +3021,143 @@ mod shaft_seat_bite_tests {
         brace.seats_into_model = false;
         let bites = tip_shaft_seat_bites(&[brace], &layers()).expect("a valid request");
         assert_eq!(bites, vec![None]);
+    }
+}
+
+/// [`SweepRootFlare`] answers with the boss top [`lower_sweep_arms`] DRAWS
+/// (round-6 review, 2026-09-30): graded against the emitted `RootFlare`
+/// record of each arm, lowered on its own, never against the door's own
+/// arithmetic.
+#[cfg(test)]
+mod sweep_root_flare_tests {
+    use super::{lower_sweep_arms, SweepArm, SweepArmLanding, SweepRootFlare};
+    use crate::{BuildFrame, SupportSegmentKind};
+    use plinth_core::{Finite, LayerPlan, PositiveFinite};
+
+    const H: f64 = 0.05;
+
+    /// A plate-rooted arm seated at `seat` (z over a plate at `plate_z`),
+    /// standing on the plate at `base_xy`, against a face of outward normal
+    /// `normal` (zero: unmeasured).
+    fn plate_arm(
+        seat: [f64; 3],
+        base_xy: [f64; 2],
+        plate_z: f64,
+        tip: f64,
+        normal: [f64; 3],
+    ) -> SweepArm {
+        SweepArm {
+            seat_mm: seat,
+            base_mm: [base_xy[0], base_xy[1], plate_z],
+            tip_radius_mm: tip,
+            radius_profile_mm: Vec::new(),
+            seat_normal_mm: normal,
+            seat_face_point_mm: None,
+            landing: SweepArmLanding::Plate,
+            seats_into_model: true,
+        }
+    }
+
+    /// The `RootFlare` record's top z, over the plate, as the file has it.
+    fn drawn_boss_top_mm(arm: &SweepArm, plate_z: f64) -> f64 {
+        let layers = LayerPlan::new(plate_z, vec![H; 400]).expect("a uniform plan");
+        let frame = BuildFrame::new(
+            Finite::new(plate_z).expect("a finite plate"),
+            PositiveFinite::new(5.0).expect("a positive lift"),
+        );
+        let lowering =
+            lower_sweep_arms(std::slice::from_ref(arm), frame, &layers, 100_000, 1 << 30)
+                .expect("the lowering refuses only about the request");
+        let tops: Vec<f64> = lowering
+            .primitives
+            .iter()
+            .filter(|primitive| primitive.segment_kind == SupportSegmentKind::RootFlare)
+            .map(|flare| flare.start_mm[2].get() - plate_z)
+            .collect();
+        assert_eq!(tops.len(), 1, "one plate arm draws one flare: {arm:?}");
+        tops[0]
+    }
+
+    #[test]
+    fn the_door_reads_the_boss_top_the_lowering_draws_at_the_seated_terminal() {
+        let door = SweepRootFlare::registered(H).expect("the registry");
+        let down = [0.0, 0.0, -1.0];
+        let tilted = {
+            let (sin, cos) = 35.0_f64.to_radians().sin_cos();
+            [sin, 0.0, -cos]
+        };
+        let cases: Vec<(&str, SweepArm, f64)> = vec![
+            // The reviewer's post: 3.05 mm, 0.05 mm tip, normal unmeasured.
+            (
+                "short vertical, unmeasured",
+                plate_arm([0.0, 0.0, 3.05], [0.0, 0.0], 0.0, 0.05, [0.0; 3]),
+                0.0,
+            ),
+            (
+                "short vertical, flat face",
+                plate_arm([0.0, 0.0, 3.05], [0.0, 0.0], 0.0, 0.05, down),
+                0.0,
+            ),
+            (
+                "short vertical, 35 deg face",
+                plate_arm([0.0, 0.0, 2.6], [0.0, 0.0], 0.0, 0.3, tilted),
+                0.0,
+            ),
+            (
+                "short leaned, 35 deg face",
+                plate_arm([0.0, 0.0, 2.6], [0.8, 0.0], 0.0, 0.1, tilted),
+                0.0,
+            ),
+            (
+                "short, plate at z = 7.3",
+                plate_arm([1.0, 2.0, 10.15], [1.0, 2.0], 7.3, 0.05, down),
+                7.3,
+            ),
+            (
+                "tall vertical",
+                plate_arm([0.0, 0.0, 8.0], [0.0, 0.0], 0.0, 0.2, down),
+                0.0,
+            ),
+            (
+                "short mast (no ball)",
+                SweepArm {
+                    seats_into_model: false,
+                    ..plate_arm([0.0, 0.0, 2.4], [0.0, 0.0], 0.0, 0.1, [0.0; 3])
+                },
+                0.0,
+            ),
+        ];
+        let mut moved_by_the_seat = 0;
+        for (what, arm, plate_z) in &cases {
+            let drawn = drawn_boss_top_mm(arm, *plate_z);
+            let answered = door.top_above_plate_of(arm, *plate_z).unwrap_or_else(|| {
+                panic!("{what}: the door found no flare where the file draws one")
+            });
+            assert!(
+                (answered - drawn).abs() < 1e-9,
+                "{what}: the door answers {answered:.6} mm, the file draws {drawn:.6} mm"
+            );
+            // How far the seat moved the boss off the unseated reading
+            // (`seat − plate` itself standing as the terminal).
+            let unseated = door
+                .top_above_plate_of(
+                    &SweepArm {
+                        seats_into_model: false,
+                        ..arm.clone()
+                    },
+                    *plate_z,
+                )
+                .expect("the same run, unseated");
+            if (drawn - unseated).abs() > 1e-6 {
+                moved_by_the_seat += 1;
+            }
+        }
+        // Anti-vacuity: the short seated arms are the ones the seat depth
+        // moves (5 of them); the tall post's boss is the full flare, and the
+        // mast does not seat.
+        assert_eq!(
+            moved_by_the_seat, 5,
+            "the seat depth moved {moved_by_the_seat} boss tops"
+        );
     }
 }

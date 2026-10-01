@@ -496,7 +496,11 @@ pub fn unbraced_runs(
     law: &SlendernessLaw,
 ) -> Vec<UnbracedRun> {
     let (profiles, _) = crate::adapter::drawn_profiles(struts);
-    let ties = tie_lists(grid, struts, &free_shaft_floors(struts, layer_height_mm));
+    let ties = tie_lists(
+        grid,
+        struts,
+        &free_shaft_floors(grid, struts, layer_height_mm),
+    );
     let mut runs = Vec::new();
     for (index, strut) in struts.iter().enumerate() {
         runs.extend(member_runs(
@@ -766,11 +770,31 @@ const HEIGHT_NOISE_MM: f64 = 1.0e-9;
 ///
 /// The flare's top is the lowering's own boss top
 /// ([`plinth_support::SweepRootFlare`], which answers with the arithmetic
-/// that draws the `RootFlare` record), read at the member's seat height
-/// `k_top · h`. `None` for the flare geometry (an unreadable registry) leaves
-/// only the member's own foot, as before this rule: the band is still built
-/// and nothing is refused on a missing number.
-fn free_shaft_floor(flare: Option<&SweepRootFlare>, strut: &SweepStrut, h: f64) -> usize {
+/// that draws the `RootFlare` record), read for the member AS THE LOWERING
+/// WILL DRAW IT: the arm the adapter builds from its drawn ends
+/// ([`crate::adapter::drawn_ends`], [`crate::adapter::sweep_arm`]) over a
+/// plate at z = 0, so the boss is measured from the SEATED terminal, the
+/// seat pushed into the model by the seat law, exactly as the lowering
+/// measures it (round-6 review, 2026-09-30). Until then it was read at the
+/// seat surface `k_top · h`: on a post shorter than `2 × FLARE_LEN_MM` above
+/// the raft the boss top is half-way up the run, so the unseated reading put
+/// it half a seat depth low, and a tie one layer inside the drawn flare was
+/// accepted (a 3.05 mm post with a 0.05 mm tip: 1.625 mm read, 1.6595 mm
+/// drawn, layer 33 at 1.65 mm accepted).
+///
+/// The seat normal is the member's own as it stands: the carried face is
+/// measured after the ties (`run_sweep_with_drains`), and until then the
+/// lowering's own fallback, straight down, is what it would draw.
+///
+/// `None` for the flare geometry (an unreadable registry) leaves only the
+/// member's own foot, as before this rule: the band is still built and
+/// nothing is refused on a missing number.
+fn free_shaft_floor(
+    flare: Option<&SweepRootFlare>,
+    grid: &Grid,
+    strut: &SweepStrut,
+    h: f64,
+) -> usize {
     let Some(flare) = flare else {
         return 0;
     };
@@ -779,12 +803,11 @@ fn free_shaft_floor(flare: Option<&SweepRootFlare>, strut: &SweepStrut, h: f64) 
     }
     let mut top_mm = flare.raft_top_above_plate_mm();
     if strut.landing == Landing::Plate && strut.kind != StrutKind::Brace {
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "a layer index bounded by the plan's own layer count is exact in f64"
-        )]
-        let seat_mm = strut.k_top as f64 * h;
-        if let Some(boss_mm) = flare.top_above_plate_mm(seat_mm) {
+        // The radius profile is not read by the boss arithmetic; only the
+        // two ends, the tip, the seat normal and whether the member seats.
+        let (seat, base) = crate::adapter::drawn_ends(grid, 0.0, h, strut);
+        let arm = crate::adapter::sweep_arm(strut, seat, base, None, Vec::new());
+        if let Some(boss_mm) = flare.top_above_plate_of(&arm, 0.0) {
             top_mm = top_mm.max(boss_mm);
         }
     }
@@ -813,11 +836,11 @@ fn first_layer_above(height_mm: f64, h: f64) -> usize {
 }
 
 /// [`free_shaft_floor`] for every member, in one pass.
-fn free_shaft_floors(struts: &[SweepStrut], h: f64) -> Vec<usize> {
+fn free_shaft_floors(grid: &Grid, struts: &[SweepStrut], h: f64) -> Vec<usize> {
     let flare = SweepRootFlare::registered(h).ok();
     struts
         .iter()
-        .map(|strut| free_shaft_floor(flare.as_ref(), strut, h))
+        .map(|strut| free_shaft_floor(flare.as_ref(), grid, strut, h))
         .collect()
 }
 
@@ -1676,7 +1699,14 @@ impl TieState {
         let root_flare = SweepRootFlare::registered(context.layer_height_mm).ok();
         let floors: Vec<usize> = struts
             .iter()
-            .map(|strut| free_shaft_floor(root_flare.as_ref(), strut, context.layer_height_mm))
+            .map(|strut| {
+                free_shaft_floor(
+                    root_flare.as_ref(),
+                    context.grid,
+                    strut,
+                    context.layer_height_mm,
+                )
+            })
             .collect();
         let ties = tie_lists(context.grid, struts, &floors);
         let mut bands: BTreeMap<(u32, u32), Vec<(usize, usize)>> = BTreeMap::new();
@@ -1739,8 +1769,8 @@ impl TieState {
     /// [`free_shaft_floor`] of a member as it stands NOW. Read on demand
     /// rather than held per member, because a mast is pushed, extended and
     /// withdrawn inside the pass and its seat height moves with it.
-    fn free_shaft_floor(&self, strut: &SweepStrut, layer_height_mm: f64) -> usize {
-        free_shaft_floor(self.root_flare.as_ref(), strut, layer_height_mm)
+    fn free_shaft_floor(&self, grid: &Grid, strut: &SweepStrut, layer_height_mm: f64) -> usize {
+        free_shaft_floor(self.root_flare.as_ref(), grid, strut, layer_height_mm)
     }
 }
 
@@ -3120,8 +3150,8 @@ fn plan_cross(
         };
         (
             state
-                .free_shaft_floor(one, h)
-                .max(state.free_shaft_floor(two, h)),
+                .free_shaft_floor(grid, one, h)
+                .max(state.free_shaft_floor(grid, two, h)),
             one.k_top.min(two.k_top),
         )
     };
@@ -3700,7 +3730,7 @@ mod tests {
     fn the_free_shaft_of_a_plate_post_starts_above_its_boss_top() {
         let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
         let post = plate_post(&grid, 0, 100, 0.2);
-        let floors = super::free_shaft_floors(&[post], 0.05);
+        let floors = super::free_shaft_floors(&grid, &[post], 0.05);
         assert_eq!(floors, vec![FREE_SHAFT_FLOOR_OF_A_4_MM_POST]);
     }
 
@@ -3856,5 +3886,310 @@ mod tests {
         assert_eq!((plan.k, plan.k_lo), (high, high - depth));
         assert_eq!(outcome.brace_bands_moved_above_flare, 0);
         assert_eq!(outcome.brace_bands_dropped_in_flare, 0);
+    }
+
+    /// The reviewer's SHORT post (round-6 review, 2026-09-30): a vertical
+    /// plate arm seated at layer 61 (3.05 mm at 0.05 mm layers) with a 0.05 mm
+    /// tip. Its run above the raft is shorter than `2 × FLARE_LEN_MM`, so its
+    /// boss top is half-way up that run and moves with the seat.
+    const SHORT_POST_TOP: usize = 61;
+    const SHORT_POST_TIP_MM: f64 = 0.05;
+
+    /// The lowest layer on the free shaft of that short post, HAND-DERIVED
+    /// from the registered numbers and the seat law the lowering applies:
+    /// the tip is driven into the model by
+    /// `max(layer + pixel = 0.05 + 0.019, layer = 0.05, ball term) = 0.069`
+    /// mm (straight down, the unmeasured-normal fallback), so the terminal
+    /// is 3.119 mm up; the boss rises `max(0.3, min(1.5, (3.119 − 0.2) / 2))
+    /// = 1.4595` mm over the 0.2 mm raft, to 1.6595 mm. Layer 33's plane
+    /// (1.65 mm) is INSIDE that flare; layer 34's (1.70 mm) is the first
+    /// above it. Reading the boss at the unseated 3.05 mm gives 1.625 mm and
+    /// layer 33, which is the defect.
+    const FREE_SHAFT_FLOOR_OF_THE_SHORT_POST: usize = 34;
+
+    fn short_plate_post(grid: &crate::grid::Grid, id: u32, col: usize) -> crate::SweepStrut {
+        let mut post = plate_post(grid, id, col, SHORT_POST_TIP_MM);
+        post.k_top = SHORT_POST_TOP;
+        post.radius_mm = vec![SHORT_POST_TIP_MM; SHORT_POST_TOP];
+        post.carried_mm2 = vec![0.0; SHORT_POST_TOP];
+        post
+    }
+
+    /// The boss top THE LOWERING DRAWS for one plate-rooted member, in mm over
+    /// the plate: the `RootFlare` record's top, read from
+    /// `plinth_support::lower_sweep_arms` over the arm the adapter builds for
+    /// the file. Nothing here computes a seat or a boss.
+    fn emitted_boss_top_mm(grid: &crate::grid::Grid, post: &crate::SweepStrut, h: f64) -> f64 {
+        let (seat, base) = crate::adapter::drawn_ends(grid, 0.0, h, post);
+        let (profiles, _) = crate::adapter::drawn_profiles(std::slice::from_ref(post));
+        let arm = crate::adapter::sweep_arm(post, seat, base, None, profiles[0].clone());
+        let layers = plinth_core::LayerPlan::new(0.0, vec![h; 200]).expect("a uniform plan");
+        let frame = plinth_support::BuildFrame::new(
+            plinth_core::Finite::new(0.0).expect("a finite plate"),
+            plinth_core::PositiveFinite::new(5.0).expect("a positive lift"),
+        );
+        let lowering = plinth_support::lower_sweep_arms(&[arm], frame, &layers, 100_000, 1 << 30)
+            .expect("the lowering refuses only about the request");
+        let flares: Vec<f64> = lowering
+            .primitives
+            .iter()
+            .filter(|primitive| {
+                primitive.segment_kind == plinth_support::SupportSegmentKind::RootFlare
+            })
+            .map(|flare| flare.start_mm[2].get())
+            .collect();
+        assert_eq!(flares.len(), 1, "one plate post draws one root flare");
+        flares[0]
+    }
+
+    /// ROUND-6 REVIEW (2026-09-30): the free shaft of a SHORT plate post
+    /// starts above the boss top the LOWERING DRAWS, which it reads at the
+    /// SEATED terminal. Graded against the emitted `RootFlare` record, and
+    /// against the hand-derived layer.
+    #[test]
+    fn a_short_plate_posts_free_shaft_starts_above_the_boss_top_the_file_draws() {
+        let h = 0.05;
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let post = short_plate_post(&grid, 0, 100);
+        let boss_mm = emitted_boss_top_mm(&grid, &post, h);
+        let floor = super::free_shaft_floors(&grid, std::slice::from_ref(&post), h)[0];
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a layer index far below 2^52 is exact in f64"
+        )]
+        let plane = |layer: usize| layer as f64 * h;
+        assert!(
+            plane(floor) > boss_mm,
+            "the free shaft starts at layer {floor} ({:.4} mm), inside the drawn flare whose boss \
+             top is {boss_mm:.4} mm",
+            plane(floor)
+        );
+        assert!(
+            plane(floor - 1) <= boss_mm,
+            "layer {} ({:.4} mm) is already above the drawn boss top {boss_mm:.4} mm",
+            floor - 1,
+            plane(floor - 1)
+        );
+        assert_eq!(
+            floor, FREE_SHAFT_FLOOR_OF_THE_SHORT_POST,
+            "boss top {boss_mm:.4} mm"
+        );
+    }
+
+    /// ROUND-6 REVIEW (2026-09-30), the reviewer's cross: two such short posts
+    /// 0.8 mm apart. A band planned low dips into the flares and moves up;
+    /// its lower ties must then stand above the boss top the file draws for
+    /// BOTH posts, and the band must still fit inside them.
+    #[test]
+    fn a_cross_between_short_posts_ties_them_above_the_flares_the_file_draws() {
+        let h = 0.05;
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let history = crate::up_sweep::ColumnHistory::new(&grid);
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(0.05, 45.0, 25.0);
+        let law = law();
+        let context = super::SlendernessContext {
+            grid: &grid,
+            history: &history,
+            keep_out: &keep_out,
+            lean: &lean,
+            law: &law,
+            layer_height_mm: h,
+            layers: 100,
+            flare_factor: 1.6,
+            mast_root_clearance: true,
+            final_clearance_mm: 0.3,
+            member_clearance: true,
+            shaft_landings: true,
+            merge: true,
+            brace: true,
+            thicken: true,
+            mast: true,
+            max_struts: 1_000,
+            x_allowed: 12.0,
+        };
+        // 16 cells at 0.05 mm: 0.8 mm between the posts.
+        let struts = vec![
+            short_plate_post(&grid, 0, 100),
+            short_plate_post(&grid, 1, 116),
+        ];
+        let state = super::TieState::build(&context, &struts);
+        let run = UnbracedRun {
+            strut_id: 0,
+            k_lo: 0,
+            k_top: SHORT_POST_TOP,
+            length_mm: 3.05,
+            radius_mm: SHORT_POST_TIP_MM,
+            limit_mm: 2.5,
+            sway_deg: None,
+        };
+        let depth = lean.layers_to_reach(0.8);
+        let low = 30;
+        assert!(
+            low - depth < FREE_SHAFT_FLOOR_OF_THE_SHORT_POST
+                && FREE_SHAFT_FLOOR_OF_THE_SHORT_POST + depth <= SHORT_POST_TOP,
+            "anti-vacuity: a band {depth} layers deep topped at {low} must dip into the flares and \
+             fit inside the posts once raised"
+        );
+        let mut outcome = super::SlendernessOutcome::default();
+        let plan = super::plan_cross(
+            &context,
+            &state,
+            &struts,
+            0,
+            1,
+            low,
+            &run,
+            true,
+            &mut outcome,
+        )
+        .expect("the band moves up and is built");
+        assert_eq!(
+            outcome.brace_bands_moved_above_flare, 1,
+            "path hit: {plan:?}"
+        );
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a layer index far below 2^52 is exact in f64"
+        )]
+        let tie_mm = plan.k_lo as f64 * h;
+        for post in &struts {
+            let boss_mm = emitted_boss_top_mm(&grid, post, h);
+            assert!(
+                tie_mm > boss_mm,
+                "the band's lower ties at layer {} ({tie_mm:.4} mm) lie inside post {}'s drawn \
+                 flare, whose boss top is {boss_mm:.4} mm",
+                plan.k_lo,
+                post.id
+            );
+        }
+        assert!(
+            plan.k <= SHORT_POST_TOP,
+            "the raised band passes the posts' tops: {plan:?}"
+        );
+    }
+
+    /// ROUND-6 REVIEW (2026-09-30), THE FIELD AS THE FILE HAS IT: two short
+    /// 0.05 mm posts 0.8 mm apart (each 3.05 mm, over its 2.5 mm limit) are
+    /// tied by the production pass, [`super::apply_ties`], and the whole
+    /// field is then lowered by `plinth_support::lower_sweep_arms` over the
+    /// arms the adapter builds. Every brace end, at the point the adapter
+    /// draws it, must lie outside every `RootFlare` record the lowering
+    /// emits. The flares come from the file, never from the rule.
+    #[test]
+    fn tying_two_short_posts_leaves_no_brace_end_inside_a_drawn_flare() {
+        let h = 0.05;
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let history = crate::up_sweep::ColumnHistory::new(&grid);
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(0.05, 45.0, 25.0);
+        let law = law();
+        let context = super::SlendernessContext {
+            grid: &grid,
+            history: &history,
+            keep_out: &keep_out,
+            lean: &lean,
+            law: &law,
+            layer_height_mm: h,
+            layers: 100,
+            flare_factor: 1.6,
+            mast_root_clearance: true,
+            final_clearance_mm: 0.3,
+            member_clearance: true,
+            shaft_landings: true,
+            merge: true,
+            brace: true,
+            // The brace rung alone: a thickened post needs no tie, and a mast
+            // is a third post; neither is the path graded here.
+            thicken: false,
+            mast: false,
+            max_struts: 1_000,
+            x_allowed: 12.0,
+        };
+        let mut struts = vec![
+            short_plate_post(&grid, 0, 100),
+            short_plate_post(&grid, 1, 116),
+        ];
+        let mut outcome = super::SlendernessOutcome::default();
+        let applied = super::apply_ties(&context, &mut struts, &mut outcome);
+        let braces: Vec<&crate::SweepStrut> = struts
+            .iter()
+            .filter(|strut| strut.kind == crate::StrutKind::Brace && super::live(strut))
+            .collect();
+        assert!(
+            applied > 0 && !braces.is_empty(),
+            "anti-vacuity: the pass tied nothing ({applied} applied, {outcome:?})"
+        );
+
+        // The whole field, lowered exactly as `to_primitives` lowers a plan.
+        let (profiles, _) = crate::adapter::drawn_profiles(&struts);
+        let arms: Vec<plinth_support::SweepArm> = struts
+            .iter()
+            .zip(profiles)
+            .map(|(strut, profile)| {
+                let (seat, base) = crate::adapter::drawn_ends(&grid, 0.0, h, strut);
+                crate::adapter::sweep_arm(strut, seat, base, None, profile)
+            })
+            .collect();
+        let layers = plinth_core::LayerPlan::new(0.0, vec![h; 200]).expect("a uniform plan");
+        let frame = plinth_support::BuildFrame::new(
+            plinth_core::Finite::new(0.0).expect("a finite plate"),
+            plinth_core::PositiveFinite::new(5.0).expect("a positive lift"),
+        );
+        let lowering = plinth_support::lower_sweep_arms(&arms, frame, &layers, 100_000, 1 << 30)
+            .expect("the lowering refuses only about the request");
+        // (boss top, foot, top radius, foot radius) of every drawn flare.
+        let flares: Vec<([f64; 3], [f64; 3], f64, f64)> = lowering
+            .primitives
+            .iter()
+            .filter(|primitive| {
+                primitive.segment_kind == plinth_support::SupportSegmentKind::RootFlare
+            })
+            .map(|flare| {
+                (
+                    flare.start_mm.map(plinth_core::Finite::get),
+                    flare.end_mm.map(plinth_core::Finite::get),
+                    flare.start_radius_mm.get(),
+                    flare.end_radius_mm.get(),
+                )
+            })
+            .collect();
+        assert_eq!(flares.len(), 2, "anti-vacuity: both posts draw a flare");
+        // Inside a frustum: between its foot and its top, and inside its
+        // radius at that height (linear from the foot to the top).
+        let inside = |point: [f64; 3]| {
+            flares.iter().find(|(top, foot, top_r, foot_r)| {
+                if point[2] < foot[2] || point[2] > top[2] {
+                    return false;
+                }
+                let t = (point[2] - foot[2]) / (top[2] - foot[2]);
+                let axis = [
+                    foot[0] + t * (top[0] - foot[0]),
+                    foot[1] + t * (top[1] - foot[1]),
+                ];
+                (point[0] - axis[0]).hypot(point[1] - axis[1]) < foot_r + t * (top_r - foot_r)
+            })
+        };
+        let mut found: Vec<String> = Vec::new();
+        for brace in &braces {
+            let (seat, base) = crate::adapter::drawn_ends(&grid, 0.0, h, brace);
+            for (end, point) in [("seat", seat), ("landing", base)] {
+                if let Some((top, ..)) = inside(point) {
+                    found.push(format!(
+                        "brace {} {end} at {:.4} mm, inside a flare whose boss top is {:.4} mm",
+                        brace.id, point[2], top[2]
+                    ));
+                }
+            }
+        }
+        println!(
+            "two short posts: {} braces, bands moved up {}, dropped {}; {} brace ends inside a \
+             drawn flare",
+            braces.len(),
+            outcome.brace_bands_moved_above_flare,
+            outcome.brace_bands_dropped_in_flare,
+            found.len()
+        );
+        assert!(found.is_empty(), "{}", found.join("\n"));
     }
 }
