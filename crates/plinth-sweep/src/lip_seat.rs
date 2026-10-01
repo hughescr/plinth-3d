@@ -683,7 +683,14 @@ pub(crate) fn apply(
                 outcome.candidates_refused_measured += 1;
                 continue;
             }
-            if locked[index_of] {
+            // A child that something landed on this pass is no longer a leaf,
+            // so its host may not take it along: the member resting on it would
+            // be left standing where the child used to be (measured on the
+            // Cylinder at fix/creep-45 `03428ce`: arm 182 re-landed on arm 198's
+            // shaft at layer 629, then arm 196 moved and took its child 198 with
+            // it, and 182 stood on air). `locked` is set on every new host and
+            // every child already moved, so one test covers both.
+            if locked[index_of] || proposal.children.iter().any(|(child, _, _)| locked[*child]) {
                 continue;
             }
             // The index and the field know the moves already taken this
