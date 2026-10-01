@@ -392,9 +392,40 @@ pub struct SweepRunReport {
     /// this load is carried by the shaft. Counted in
     /// [`PathHits::contact_merges_moved_below`].
     pub contact_merge_load_moved_mm2: f64,
+    /// What the unrooted-column rule did on the finished field
+    /// ([`crate::down_sweep::UnrootedColumns`], drain-rim routing 2026-09-30).
+    pub unrooted_routing: UnrootedRoutingReport,
     /// Path-hit counters. A green oracle must never be able to mean "the path
     /// never ran" (the witness-must-exercise-the-path lesson).
     pub counters: PathHits,
+}
+
+/// The unrooted-column rule on one run: what the up-sweep left unrooted, and
+/// what the last down-sweep did with the load that reached it
+/// ([`crate::down_sweep::UnrootedColumns`]). All zero on a field the up-sweep
+/// rooted everywhere, where the rule cannot change anything.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct UnrootedRoutingReport {
+    /// `(layer, cell)` entries the up-sweep recorded as covered and unrooted.
+    pub recorded_cells: u64,
+    /// `(layer, column)` pairs refused as a routing root (the recorded cells
+    /// that are model columns holding no arm). The path-hit witness.
+    pub columns_refused: u64,
+    /// Load that went sideways from an unrooted column to a rooted carrier.
+    pub load_rerouted_mm2: f64,
+    /// Load in an unrooted column with no rooted carrier in reach, which went
+    /// down its own column as before.
+    pub load_kept_mm2: f64,
+    /// Reads where a column whose load went sideways kept its own peel out of
+    /// the max-field raster; the path-hit witness for the ledger rule.
+    pub handed_columns_held: u64,
+    /// The peel those reads kept out, mm²: what the ledger without the rule
+    /// would have re-added without counting it as injected.
+    pub handed_own_withheld_mm2: f64,
+    /// Held events whose next step was not sideways, so they re-entered the
+    /// raster one layer down as counted injected peel, and that peel, mm².
+    pub handed_events_reentered: u64,
+    pub handed_reentered_mm2: f64,
 }
 
 /// Counts of the paths a sabotage drill would break, so a green suite can be
