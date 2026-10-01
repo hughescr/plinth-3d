@@ -2814,6 +2814,26 @@ fn print_sweep_disclosure(
         report.misrouted_load_mm2,
         report.unrooted_landings,
     );
+    // THE UNROOTED-COLUMN RULE (drain-rim routing, 2026-09-30): load that
+    // reached a model column the up-sweep left unrooted goes sideways to a
+    // rooted carrier in reach, not down into the unrooted material. All zero on
+    // a field the up-sweep rooted everywhere.
+    let unrooted_routing = &report.unrooted_routing;
+    println!(
+        "[sweep {model}] unrooted columns: {} (layer, cell) entries the up-sweep left unrooted, \
+         {} refused as routing roots; {:.4} mm2 sent sideways to a rooted carrier, {:.4} mm2 \
+         with no rooted carrier in reach kept down its own column; ledger: {} reads of a \
+         handed column kept {:.4} mm2 of its own peel out of the raster, {} of those events \
+         ({:.4} mm2) re-entered it one layer down as counted injected peel",
+        unrooted_routing.recorded_cells,
+        unrooted_routing.columns_refused,
+        unrooted_routing.load_rerouted_mm2,
+        unrooted_routing.load_kept_mm2,
+        unrooted_routing.handed_columns_held,
+        unrooted_routing.handed_own_withheld_mm2,
+        unrooted_routing.handed_events_reentered,
+        unrooted_routing.handed_reentered_mm2,
+    );
     println!(
         "[sweep {model}] raster {} cells/layer at {:.4} mm pitch over {} layers \
          ({} coarsening steps); kappa used {:.7}, first loss {:.7}, audit gate {:.7}, \

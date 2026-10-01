@@ -21,6 +21,7 @@ mod chitubox_geometry;
 mod congestion_lane;
 mod contact_sizing;
 mod drain_connectivity;
+mod drain_rim_routing;
 mod emitted_profile_covers_ledger;
 mod every_member_rests_on_something;
 mod flank_relief;

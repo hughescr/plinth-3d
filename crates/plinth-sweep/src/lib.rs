@@ -665,6 +665,18 @@ pub struct SweepPolicy {
     /// max-field ledger back and watch N events funnelled to one arm size it
     /// for all N at once; nothing in the pipeline turns it off.
     pub per_event_sizing: bool,
+    /// Whether the down-sweep refuses, as a routing root, a model column the
+    /// up-sweep left unrooted, and sends the load arriving in it sideways to
+    /// the rooted carrier in reach ([`down_sweep::UnrootedColumns`], drain-rim
+    /// routing, 2026-09-30). **On in production.** Off is the routing before
+    /// it: load walks down a continuing column into whatever it stands on.
+    pub unrooted_routing: bool,
+    /// Whether a model column whose carried load was handed sideways holds its
+    /// own peel out of the max-field raster until its next step, where it
+    /// re-enters as counted injected peel unless that step is sideways too
+    /// ([`down_sweep::SizingPolicy::handed_column_ledger`]). **On in
+    /// production**; off is the sabotage form.
+    pub handed_column_ledger: bool,
     /// Whether the flank arms of congestion remedy 2 must EARN their place on
     /// the finished field: they are kept only if withdrawing them would leave
     /// more stacked root area on the plate or more overloaded arm-layers
@@ -755,6 +767,8 @@ impl SweepPolicy {
                 .get(),
             member_clearance: true,
             per_event_sizing: true,
+            unrooted_routing: true,
+            handed_column_ledger: true,
             flank_relief_check: true,
             rigid_share_diagnostic: true,
             limits: SweepLimits {
@@ -788,6 +802,27 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_drain_keep_out(mut self) -> Self {
         self.drain_keep_out = false;
+        self
+    }
+
+    /// Route load down a model column the up-sweep left unrooted, as the
+    /// down-sweep did before 2026-09-30: the column is a root like any other
+    /// carrier, and peel load walks down the shell into the unrooted drain
+    /// rim. **Sabotage and comparison only**; nothing in the pipeline sets it.
+    #[must_use]
+    pub const fn without_unrooted_routing(mut self) -> Self {
+        self.unrooted_routing = false;
+        self
+    }
+
+    /// Let a model column whose load was handed sideways take its own peel
+    /// back into the max-field raster at every layer, without counting it as
+    /// injected -- the ledger the round-7 experiment built, whose whole-run
+    /// identity missed by -558 mm² on the Sphere. **Sabotage only**: the
+    /// drain-rim test's identity must go red under it.
+    #[must_use]
+    pub const fn without_handed_column_ledger(mut self) -> Self {
+        self.handed_column_ledger = false;
         self
     }
 
@@ -1144,6 +1179,11 @@ pub fn run_sweep_with_drains(
     let mut scratch = RasterScratch::new(&grid);
     let mut masks = LayerMasks::default();
     let mut struts: Vec<SweepStrut> = Vec::new();
+    let mut unrooted = if policy.unrooted_routing {
+        down_sweep::UnrootedColumns::with_layers(layers)
+    } else {
+        down_sweep::UnrootedColumns::none()
+    };
     let mut demand_cells_total = 0_usize;
     let mut residual_demand_cells = 0_usize;
     let mut unrooted_landings = 0_usize;
@@ -1213,6 +1253,12 @@ pub fn run_sweep_with_drains(
             &mut struts,
             policy.limits.max_struts,
         );
+        // What the up-sweep left UNROOTED here, by its own predicate, for the
+        // down-sweep's routing ([`down_sweep::UnrootedColumns`]). Read only on
+        // a layer with residual demand, before the potential is committed.
+        if policy.unrooted_routing && outcome.residual_demand > 0 {
+            unrooted.record_layer(layer, &masks.cover, &reach);
+        }
         demand_cells_total += outcome.demand_cells;
         residual_demand_cells += outcome.residual_demand;
         unrooted_landings += outcome.unrooted_landings;
@@ -1246,6 +1292,7 @@ pub fn run_sweep_with_drains(
         straight_reach: policy.straight_reach,
         tip_column_roots: policy.tip_column_roots,
         per_event: policy.per_event_sizing,
+        handed_column_ledger: policy.handed_column_ledger,
     };
     let minimum_load =
         policy.x_allowed * core::f64::consts::PI * policy.tip_radius_min_mm.powi(2);
@@ -1278,7 +1325,15 @@ pub fn run_sweep_with_drains(
     } else {
         down_sweep::InsertionPolicy::disabled()
     };
-    let mut outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
+    let mut outcome = down_sweep::run(
+        &grid,
+        &slices,
+        &mut struts,
+        sizing,
+        insertion,
+        &keep_out,
+        &unrooted,
+    );
     // SUPPORT COMES BEFORE WHAT RESTS ON IT. Every pass below that edits a
     // landing is followed by one landing-validity check of the whole field
     // (`landing_check`, `O(struts)`), so a pass that leaves a member standing
@@ -1367,7 +1422,15 @@ pub fn run_sweep_with_drains(
                 rolled_back = attempt > 0;
                 break;
             }
-            outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
+            outcome = down_sweep::run(
+                &grid,
+                &slices,
+                &mut struts,
+                sizing,
+                insertion,
+                &keep_out,
+                &unrooted,
+            );
             let more_uncarried = outcome.uncarried_load_mm2
                 > before_outcome.uncarried_load_mm2
                     + 1.0e-9 * before_outcome.uncarried_load_mm2.abs().max(1.0);
@@ -1426,7 +1489,15 @@ pub fn run_sweep_with_drains(
             break;
         }
         merges_refused_by_radius += unmerged.undone;
-        outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
+        outcome = down_sweep::run(
+            &grid,
+            &slices,
+            &mut struts,
+            sizing,
+            insertion,
+            &keep_out,
+            &unrooted,
+        );
     }
     landings.record("un-merge", &landing_check::check_landings(&struts));
 
@@ -1484,7 +1555,15 @@ pub fn run_sweep_with_drains(
                 break;
             }
             congestion_outcome.rounds_used += 1;
-            outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
+            outcome = down_sweep::run(
+                &grid,
+                &slices,
+                &mut struts,
+                sizing,
+                insertion,
+                &keep_out,
+                &unrooted,
+            );
             set_interior(&mut struts, &history);
             // WHAT THE PRE-SIZING ESTIMATE GOT WRONG, measured rather than
             // assumed. A flank arm's plate cell is chosen against an ESTIMATE
@@ -1517,6 +1596,7 @@ pub fn run_sweep_with_drains(
             sizing,
             insertion,
             &keep_out,
+            &unrooted,
             policy.flare_r_factor,
             &mut congestion_outcome,
             &mut outcome,
@@ -1592,7 +1672,15 @@ pub fn run_sweep_with_drains(
     if slenderness_outcome.merges_forced > 0 {
         // A moved arm has a stale ledger; the same down-sweep that sized the
         // field sizes it again.
-        outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
+        outcome = down_sweep::run(
+            &grid,
+            &slices,
+            &mut struts,
+            sizing,
+            insertion,
+            &keep_out,
+            &unrooted,
+        );
         // AND THE SAME RADIUS CEILING THE OWNER RULED ON, APPLIED TO THE
         // MERGES THIS LANE FORCED. `unmerge_overgrown` ran before the lane, so
         // it never saw them; a forced merge hands its trunk the SUM of both
@@ -1616,7 +1704,15 @@ pub fn run_sweep_with_drains(
             }
             merges_refused_by_radius += unmerged.undone;
             unmerged_after_merges += unmerged.undone;
-            outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
+            outcome = down_sweep::run(
+                &grid,
+                &slices,
+                &mut struts,
+                sizing,
+                insertion,
+                &keep_out,
+                &unrooted,
+            );
         }
         // WHICH OF THOSE WERE THE LANE'S OWN. A forced merge put back no
         // longer stands on the landing the lane gave it; every other un-merge
@@ -1677,6 +1773,7 @@ pub fn run_sweep_with_drains(
         sizing,
         insertion,
         keep_out: &keep_out,
+        unrooted: &unrooted,
         passes: policy.strut_removal_passes,
         enabled: policy.lip_seat,
     };
@@ -1722,7 +1819,15 @@ pub fn run_sweep_with_drains(
             if moved == 0 {
                 break;
             }
-            outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
+            outcome = down_sweep::run(
+                &grid,
+                &slices,
+                &mut struts,
+                sizing,
+                insertion,
+                &keep_out,
+                &unrooted,
+            );
             set_interior(&mut struts, &history);
         }
         landings.record("head joins", &landing_check::check_landings(&struts));
@@ -1766,7 +1871,15 @@ pub fn run_sweep_with_drains(
         // down-sweep that sized the field sizes the braces and the masts,
         // splits both shafts at every junction the crosses made, and keeps
         // every thickened root as a minimum beside the area law.
-        outcome = down_sweep::run(&grid, &slices, &mut struts, sizing, insertion, &keep_out);
+        outcome = down_sweep::run(
+            &grid,
+            &slices,
+            &mut struts,
+            sizing,
+            insertion,
+            &keep_out,
+            &unrooted,
+        );
         set_interior(&mut struts, &history);
     }
     landings.record("slenderness ties", &landing_check::check_landings(&struts));
@@ -1891,6 +2004,7 @@ pub fn run_sweep_with_drains(
         removal_passes_rolled_back,
     );
     report.removal_coverage = removal_coverage;
+    report.unrooted_routing.recorded_cells = u64::try_from(unrooted.total()).unwrap_or(u64::MAX);
     report.drain_keep_out_cells = keep_out.blocked_cells();
     report.drain_keep_out_refusals = keep_out.refusals();
     report.drain_seat_refusals = keep_out_refusals;
@@ -2295,6 +2409,7 @@ struct LipSeatRun<'a> {
     sizing: down_sweep::SizingPolicy,
     insertion: down_sweep::InsertionPolicy,
     keep_out: &'a DrainKeepOut,
+    unrooted: &'a down_sweep::UnrootedColumns,
     passes: u32,
     enabled: bool,
 }
@@ -2382,6 +2497,7 @@ impl LipSeatRun<'_> {
             self.sizing,
             self.insertion,
             self.keep_out,
+            self.unrooted,
         );
         set_interior(struts, context.history);
         sized
@@ -2646,6 +2762,7 @@ fn withdraw_idle_flank_arms(
     sizing: down_sweep::SizingPolicy,
     insertion: down_sweep::InsertionPolicy,
     keep_out: &DrainKeepOut,
+    unrooted: &down_sweep::UnrootedColumns,
     flare_r_factor: f64,
     lane: &mut congestion::CongestionOutcome,
     outcome: &mut down_sweep::DownSweepOutcome,
@@ -2683,7 +2800,9 @@ fn withdraw_idle_flank_arms(
     let try_without = |doomed: &[bool]| {
         let mut trial = struts.clone();
         let remap = drop_members(&mut trial, doomed);
-        let trial_outcome = down_sweep::run(grid, slices, &mut trial, sizing, insertion, keep_out);
+        let trial_outcome = down_sweep::run(
+            grid, slices, &mut trial, sizing, insertion, keep_out, unrooted,
+        );
         (trial, trial_outcome, remap)
     };
     let mut doomed = vec![false; struts.len()];
@@ -3056,6 +3175,17 @@ fn build_report(
         tip_column_root_load_mm2: outcome.tip_column_root_load_mm2,
         misrouted_load_mm2: outcome.misrouted_load_mm2,
         contact_merge_load_moved_mm2: outcome.contact_merge_load_moved_mm2,
+        // `recorded_cells` is the up-sweep's, set by the caller.
+        unrooted_routing: report::UnrootedRoutingReport {
+            recorded_cells: 0,
+            columns_refused: outcome.unrooted_columns_refused,
+            load_rerouted_mm2: outcome.unrooted_load_rerouted_mm2,
+            load_kept_mm2: outcome.unrooted_load_kept_mm2,
+            handed_columns_held: outcome.handed_columns_held,
+            handed_own_withheld_mm2: outcome.handed_own_withheld_mm2,
+            handed_events_reentered: outcome.handed_events_reentered,
+            handed_reentered_mm2: outcome.handed_reentered_mm2,
+        },
         achieved_pitch_mm: grid.pitch_mm(),
         coarsening_steps,
         layers,
