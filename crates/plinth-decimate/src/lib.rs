@@ -6389,19 +6389,34 @@ mod tests {
         // A candidate-free adaptive target consumes a `simplify_locked` call
         // exactly like a successful probe, so it must consume the same bounded
         // budget. This asserts the cap is held, not raised.
-        let mesh = plinth_mesh::make_toed_slab().unwrap();
+        //
+        // The witness is the dual-cavity pawn (13,952 faces), not the toed
+        // slab. The toed slab was the witness while it was three overlapping
+        // shells; as one closed solid (2026-09-30) it no longer reaches the
+        // adaptive stage, and neither does any other small procedural fixture
+        // (MEASURED at this budget, 2026-10-01: toed slab, both tables, raking
+        // blade, thin fin, laid tube, stilt plate, lonely peak, brace pair, a
+        // 64-segment disc and two tori all record 0 adaptive probes). The pawn
+        // records 5 of 5, so the cap is not only respected but REACHED here,
+        // and the equality below makes a cap raised by one show as 6.
+        let mesh = plinth_mesh::make_dual_cavity_pawn().unwrap();
         let locks = vec![false; mesh.verts().len()];
         let outcome = run_budget_search(&mesh, &locks, d2_budget(19.0)).unwrap();
         let (BudgetSearchOutcome::AlreadyPrintScale(success)
         | BudgetSearchOutcome::Verified(success)) = outcome
         else {
-            panic!("the toed slab is print-scale and must not be skipped");
+            panic!("the dual-cavity pawn is print-scale and must not be skipped");
         };
         let adaptive = &success.trace().adaptive_exploration;
         assert!(adaptive.probes.len() + adaptive.candidate_free_probes <= adaptive.probe_limit);
         assert!(
             !adaptive.probes.is_empty(),
             "this fixture must actually reach the adaptive stage"
+        );
+        assert_eq!(
+            adaptive.probes.len() + adaptive.candidate_free_probes,
+            adaptive.probe_limit,
+            "the witness must spend the whole adaptive budget, or a cap raised past it is invisible"
         );
     }
 

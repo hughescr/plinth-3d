@@ -1,7 +1,8 @@
-//! Orientation: the dense sweep, and the pinned baseline it can be replayed as.
+//! Orientation: the dense sweep, the pinned baseline it can be replayed as, and
+//! the operator's "use it as drawn".
 //!
-//! Two entry points, and the difference between them is where the rotation came
-//! from, never what is done with it:
+//! Three entry points, and the difference between them is where the rotation
+//! came from, never what is done with it:
 //!
 //! - [`search_and_orient`] runs the recorded three-tier dense sweep ([`search`])
 //!   over the candidate grid ([`grid`]), scoring `03-physics-and-constants.md`
@@ -10,19 +11,26 @@
 //!   production mesh.
 //! - [`run`] takes the selected legacy orientation out of a required pipeline
 //!   JSON and applies that rigid rotation, unchanged.
+//! - [`orient_as_drawn`] applies identity because the OPERATOR said so
+//!   (`--orient none`, a `plinth-no-rotate` tag, or a `<stem>.asdrawn` marker;
+//!   see [`as_drawn`]), and records which of those it was.
 //!
-//! Both then recreate the legacy frame — the transformed bounding box is
+//! All three then recreate the legacy frame — the transformed bounding box is
 //! centered in XY and rests at Z=0 — through the one `transform_mesh`, so a
-//! searched orientation and a pinned one differ in nothing downstream. The
-//! output replaces the production mesh and retains only reports, never an
-//! untransformed second mesh.
+//! searched orientation, a pinned one and an as-drawn one differ in nothing
+//! downstream; the lift off the plate is applied later, by placement, to all
+//! three alike. The output replaces the production mesh and retains only
+//! reports, never an untransformed second mesh.
 //!
 //! **Orientation is still never inferred.** The sweep does not guess: it
 //! measures every candidate and records what it measured, including when the
 //! answer it commits to is identity. Identity is a rotation like any other and
-//! is chosen here only by winning, never by default.
+//! is chosen by the search only by winning, never by default, and never as a
+//! fallback when the search fails. The as-drawn path is not a default either:
+//! it runs only on an explicit operator mark, and its provenance names the mark.
 #![forbid(unsafe_code)]
 
+pub mod as_drawn;
 pub mod demand;
 pub mod grid;
 mod score;
@@ -179,6 +187,40 @@ pub fn search_and_orient(
     let (mesh, transform) = transform_mesh(mesh, transform)?;
     let orientation = OrientationReport {
         provenance: OrientationProvenance::DenseSweep(Box::new(outcome.into_record())),
+        selection,
+        transform,
+    };
+    Ok(OrientedModel {
+        mesh,
+        history: OrientationHistory::from_reports(decimation, orientation),
+    })
+}
+
+/// Uses the model exactly as drawn: identity rotation, then the same frame
+/// restoration every orientation gets (XY-centred, resting at Z=0; placement
+/// lifts it off the plate later, as it does every model).
+///
+/// Nothing is searched and nothing is read from disk: the caller has already
+/// decided, from an operator mark, that this model stands as drawn, and
+/// `reason` records which mark ([`as_drawn::AsDrawnReason`]). The orientation
+/// report says [`BaselineSelection::Identity`] with
+/// [`OrientationProvenance::AsDrawn`], so the run report can tell "used as
+/// drawn" apart from "searched, and identity won".
+///
+/// # Errors
+///
+/// [`OrientError::InvalidTransformedMesh`] when the mesh is not finite after
+/// re-centring.
+pub fn orient_as_drawn(
+    model: DecimatedModel,
+    reason: as_drawn::AsDrawnReason,
+) -> Result<OrientedModel, OrientError> {
+    let selection = BaselineSelection::Identity;
+    let transform = transform_for(selection)?;
+    let (mesh, decimation) = model.into_parts();
+    let (mesh, transform) = transform_mesh(mesh, transform)?;
+    let orientation = OrientationReport {
+        provenance: OrientationProvenance::AsDrawn { reason },
         selection,
         transform,
     };
@@ -741,6 +783,9 @@ pub enum OrientationProvenance {
     /// Boxed because it is two orders of magnitude larger than the pinned arm,
     /// and an enum is as large as its largest variant.
     DenseSweep(Box<DenseSweepRecord>),
+    /// Nothing was searched or replayed: the operator marked the model to be
+    /// used as drawn, and `reason` says how ([`orient_as_drawn`]).
+    AsDrawn { reason: as_drawn::AsDrawnReason },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

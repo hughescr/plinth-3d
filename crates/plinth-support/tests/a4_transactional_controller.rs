@@ -22,8 +22,10 @@ use std::path::PathBuf;
 use plinth_core::{LayerPlan, PositiveFinite};
 use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
 use plinth_hollow::{HollowedModel, SolidDecisionReason};
+// The three-shell toed slab: this crate's frozen pins were measured on it (see
+// `plinth_mesh::make_toed_slab_three_shells`).
 use plinth_mesh::{
-    evaluate_delicacy, make_raking_blade, make_toed_slab, make_uncovered_rim_table,
+    evaluate_delicacy, make_raking_blade, make_toed_slab_three_shells, make_uncovered_rim_table,
     DelicacyBuildConfig, DelicacySettings, Mesh,
 };
 use plinth_orient::{run as run_orientation, OrientRequest, PinnedBaseline};
@@ -152,7 +154,7 @@ fn run(mesh: Mesh, baseline: &str) -> Result<FinalSupportAuthority<'static>, Sup
 #[test]
 fn toed_slab_seals_with_zero_trials_so_the_controller_never_touches_its_plan() {
     let authority = run(
-        make_toed_slab().expect("procedural toed slab"),
+        make_toed_slab_three_shells().expect("procedural toed slab"),
         "make_toed_slab",
     )
     .expect("make_toed_slab closes on its baseline layout");

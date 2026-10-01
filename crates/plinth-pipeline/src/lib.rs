@@ -178,6 +178,15 @@ pub enum OrientationPolicy {
     /// One baseline per source stem — the `<stem>` of `<stem>.stl`, which is
     /// also the `<stem>` of the `<stem>.chitubox` the run writes.
     Pinned(BTreeMap<String, PinnedBaseline>),
+    /// `--orient none`: every model in the run is used exactly as drawn
+    /// (identity rotation, still re-centred and lifted like any other).
+    ///
+    /// Under the other two policies a single model can still be marked as
+    /// drawn by a `plinth-no-rotate` tag or a `<stem>.asdrawn` marker
+    /// ([`plinth_orient::as_drawn`]); the mark wins over the policy, because
+    /// the owner's rule (GitHub issue #1, 2026-10-01) is that ANY of the four
+    /// switches holding makes the model as drawn.
+    AsDrawn,
 }
 
 impl OrientationPolicy {
@@ -195,7 +204,7 @@ impl OrientationPolicy {
     #[must_use]
     pub fn baseline_for(&self, stem: &str) -> Option<&PinnedBaseline> {
         match self {
-            Self::DenseSweep => None,
+            Self::DenseSweep | Self::AsDrawn => None,
             Self::Pinned(baselines) => baselines.get(stem),
         }
     }
@@ -932,6 +941,51 @@ pub struct OrientationDisclosure {
     /// deserializes.
     #[serde(default)]
     pub display: Option<plinth_orient::DisplayFieldSummary>,
+    /// **Who decided the pose**: searched, replayed from a pinned report, or
+    /// used as drawn because the operator marked it (and how). Read off the
+    /// record's provenance. `#[serde(default)]` reads an older report as
+    /// [`OrientationSource::Unrecorded`], never as a claim it does not make.
+    #[serde(default)]
+    pub source: OrientationSource,
+    /// A `plinth-no-rotate` tag attribute that was present but could not be
+    /// read or decoded, one line each. The model was then treated as untagged
+    /// (emit and warn); these lines are the warning.
+    #[serde(default)]
+    pub tag_warnings: Vec<String>,
+}
+
+/// Who decided a model's pose. A disclosure, rendered from
+/// [`plinth_orient::OrientationProvenance`]; the CLI prints it as one line per
+/// model.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OrientationSource {
+    /// A report written before this field existed.
+    #[default]
+    Unrecorded,
+    /// The dense search ran and its winner was committed.
+    Searched,
+    /// The rotation was replayed from this pinned report.
+    Pinned { report: PathBuf },
+    /// The operator marked the model to be used as drawn.
+    AsDrawn {
+        reason: plinth_orient::as_drawn::AsDrawnReason,
+    },
+}
+
+impl std::fmt::Display for OrientationSource {
+    /// The per-model line the owner specified (2026-10-01): `as drawn
+    /// (<reason>)` or `orientation searched`.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unrecorded => formatter.write_str("orientation source not recorded"),
+            Self::Searched => formatter.write_str("orientation searched"),
+            Self::Pinned { report } => {
+                write!(formatter, "orientation pinned ({})", report.display())
+            }
+            Self::AsDrawn { reason } => write!(formatter, "as drawn ({reason})"),
+        }
+    }
 }
 
 impl OrientationDisclosure {
@@ -947,18 +1001,34 @@ impl OrientationDisclosure {
     pub fn from_report(report: &plinth_orient::OrientationReport) -> Self {
         let cosine = report.transform.rotation[2][2].get().clamp(-1.0, 1.0);
         let original_up_tilt_deg = cosine.acos().to_degrees();
-        let display = match &report.provenance {
-            plinth_orient::OrientationProvenance::DenseSweep(record) => record
-                .lods
-                .iter()
-                .find(|lod| lod.lod == plinth_orient::EXACT_LOD)
-                .and_then(|lod| lod.display.clone()),
-            plinth_orient::OrientationProvenance::Pinned { .. } => None,
+        let (display, source) = match &report.provenance {
+            plinth_orient::OrientationProvenance::DenseSweep(record) => (
+                record
+                    .lods
+                    .iter()
+                    .find(|lod| lod.lod == plinth_orient::EXACT_LOD)
+                    .and_then(|lod| lod.display.clone()),
+                OrientationSource::Searched,
+            ),
+            plinth_orient::OrientationProvenance::Pinned { pinned_report } => (
+                None,
+                OrientationSource::Pinned {
+                    report: pinned_report.clone(),
+                },
+            ),
+            plinth_orient::OrientationProvenance::AsDrawn { reason } => (
+                None,
+                OrientationSource::AsDrawn {
+                    reason: reason.clone(),
+                },
+            ),
         };
         Self {
             original_up_tilt_deg,
             inverted: original_up_tilt_deg > 90.0,
             display,
+            source,
+            tag_warnings: Vec::new(),
             selection: match &report.selection {
                 plinth_orient::BaselineSelection::Identity => "identity".to_owned(),
                 plinth_orient::BaselineSelection::AxisDegrees { axis, degrees } => {
@@ -1412,6 +1482,60 @@ mod tests {
             "an unnamed model must get no baseline at all, never a neighbour's"
         );
         assert_eq!(OrientationPolicy::DenseSweep.baseline_for("mini-a"), None);
+        assert_eq!(OrientationPolicy::AsDrawn.baseline_for("mini-a"), None);
+    }
+
+    /// `--orient none` on the wire, and the one-line disclosure the owner
+    /// specified for each source of a pose (GitHub issue #1).
+    #[test]
+    fn the_as_drawn_policy_round_trips_and_each_source_prints_its_line() {
+        let wire = serde_json::to_string(&OrientationPolicy::AsDrawn).expect("serializes");
+        assert_eq!(wire, r#"{"kind":"as_drawn"}"#);
+        assert_eq!(
+            serde_json::from_str::<OrientationPolicy>(&wire).expect("deserializes"),
+            OrientationPolicy::AsDrawn
+        );
+        use plinth_orient::as_drawn::AsDrawnReason;
+        for (source, line) in [
+            (OrientationSource::Searched, "orientation searched"),
+            (
+                OrientationSource::AsDrawn {
+                    reason: AsDrawnReason::OrientNone,
+                },
+                "as drawn (--orient none)",
+            ),
+            (
+                OrientationSource::AsDrawn {
+                    reason: AsDrawnReason::FinderTag,
+                },
+                "as drawn (Finder tag plinth-no-rotate)",
+            ),
+            (
+                OrientationSource::AsDrawn {
+                    reason: AsDrawnReason::XdgTag,
+                },
+                "as drawn (user.xdg.tags plinth-no-rotate)",
+            ),
+            (
+                OrientationSource::AsDrawn {
+                    reason: AsDrawnReason::MarkerFile {
+                        marker: PathBuf::from("models/Round_25.asdrawn"),
+                    },
+                },
+                "as drawn (marker file Round_25.asdrawn)",
+            ),
+            (
+                OrientationSource::Pinned {
+                    report: PathBuf::from("pins/x.pipeline.json"),
+                },
+                "orientation pinned (pins/x.pipeline.json)",
+            ),
+        ] {
+            assert_eq!(source.to_string(), line);
+        }
+        // A report written before the field reads as "not recorded", never
+        // as a claim it does not make.
+        assert_eq!(OrientationSource::default(), OrientationSource::Unrecorded);
     }
 
     #[test]
