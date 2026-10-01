@@ -15,6 +15,7 @@
 #[path = "../harness/mod.rs"]
 mod harness;
 
+mod brace_not_in_flare;
 mod bracing;
 mod congestion_lane;
 mod contact_sizing;
