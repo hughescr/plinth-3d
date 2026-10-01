@@ -566,10 +566,29 @@ pub struct SweepPolicy {
     /// `SLENDERNESS_LIMIT_RATIO`, the largest unbraced-run length over radius a
     /// member may run before a lateral tie is required.
     pub slenderness_ratio: f64,
-    /// `FLARE_R_FACTOR`, the registered factor the emitter applies to a plate
-    /// arm's root radius when it lays the root flare down. The congestion
-    /// census measures the disc the emitter ACTUALLY puts on the plate, so it
-    /// reads the same number the lowering does rather than the bare radius.
+    /// `FLARE_R_FACTOR`: the congestion census's ROOT-CROWDING disc factor,
+    /// the census and every root-clearance decision measuring each plate root
+    /// at this factor times its drawn root.
+    ///
+    /// **Until 2026-09-30 this was also the emitter's flare foot**, so the
+    /// census measured the disc the file lays. The emitter now stands every
+    /// plate root on the owner's ChituBox boss scaled to the root
+    /// ([`plinth_support::RootBoss`]: the root times his Heavy profile's
+    /// boss-to-shaft ratio, 2.2 / 1.5 = 1.467; owner ruling 2026-09-30, which
+    /// sits just under this 1.6), and this factor no
+    /// longer describes any emitted solid. It is
+    /// kept, unchanged, as the crowding measure so that the congestion lane,
+    /// the mast search and the lip-seat lane place exactly what they placed
+    /// before the geometry change: measured on the develop-head files (under
+    /// the earlier FIXED 2.2 mm boss, superseded the same day),
+    /// counting the fixed boss feet instead would make 9 of the 10 lane models
+    /// "congested" (feet within 2 × 1.1 mm: Cylinder 167 pairs, laid tube 85,
+    /// Sphere 31, against 0-1 at 1.6 × root), an overlap no remedy can thin
+    /// and ChituBox's own files show too (25 pairs in the owner's
+    /// `cylinder-cube-sphere.chitubox`); counting the bare root instead
+    /// silences the lane on its reference fixture (the laid tube is then not
+    /// congested at all). What the census should measure now is the owner's
+    /// question (lane report `chitubox-geometry.md`).
     pub flare_r_factor: f64,
     /// Whether the congestion lane runs at all. **Sabotage knob**: with it
     /// false no footprint is measured for crowding, no root is re-landed and

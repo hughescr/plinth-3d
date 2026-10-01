@@ -423,27 +423,39 @@ fn a_flat_disc_is_not_congested_and_the_lane_is_a_no_op_on_it() {
     assert_eq!(with.struts.len(), without.struts.len());
 }
 
-/// The measurement is about the disc the EMITTER lays down, not the bare arm.
+/// The measurement is about the root the EMITTER draws, times the crowding
+/// factor, not the bare arm; and the emitter stands that root on the owner's
+/// ChituBox boss.
 ///
-/// A census that read the arm radius instead of the flared root would
-/// under-report every footprint by the square of the registered factor. This is
-/// what would catch it: the published analytic disc area is read here off the
-/// ROOT FLARES the production lowering emits for the finished field, never
-/// from the census itself, and every flare's foot must be the registered
-/// factor times its root.
+/// Since 2026-09-30 every plate root is drawn down to the owner's ChituBox
+/// boss at his HEAVY profile's ratio (his final ruling of that day): the foot
+/// is the root times `diameterofbossbottom` 2.2 mm over Heavy's
+/// `supportmiddlediameter` 1.5 mm, whatever the root's size. The census
+/// keeps its crowding disc, `FLARE_R_FACTOR` × the DRAWN root
+/// (`SweepPolicy::flare_r_factor` says why), and the drawn root is the boss's
+/// TOP ring. This reads both off the `RootFlare` records the production
+/// lowering emits for the finished field, never from the census itself: the
+/// census area is the factor times each boss top, and every boss foot is its
+/// root times Heavy's ratio, the one the lowering publishes for it. Hand-worked
+/// rows at seven root sizes are in `chitubox_geometry`.
 ///
-/// (Corrected 2026-09-29, review-fixes: this compared against
-/// `flare² · Σ π r_ledger²`, the LEDGER root. The file flares the DRAWN root —
-/// the ledger raised where a brace joins — and on the laid tube the two differ
-/// by 5.49 mm², so the old expectation graded the census against a disc the
-/// file never draws.)
+/// (Until 2026-09-30 this test was `the_census_measures_the_flared_root_and_
+/// not_the_bare_arm`: the census disc was also the emitted flare's foot, and
+/// every foot had to be the factor times its root. Corrected 2026-09-29,
+/// review-fixes, from the LEDGER root to the DRAWN one. Then, for part of
+/// 2026-09-30, every foot was a FIXED 1.1 mm grown to a wider root, and then
+/// the root times a ratio chosen by root size, 2.2/1.5 to 2.2/0.5.)
 #[test]
-fn the_census_measures_the_flared_root_and_not_the_bare_arm() {
+fn the_census_measures_the_flared_drawn_root_and_every_boss_stands_on_the_owners_foot() {
+    // Craig ChituBox profile export 2026-09-30, profile 2 "Heavy":
+    // `diameterofbossbottom` 2.2 mm over `supportmiddlediameter` 1.5 mm, typed
+    // here so the test does not read the rule it grades.
+    const OWNER_HEAVY_RATIO: f64 = 2.2 / 1.5;
     let mesh = laid_tube();
     let plan = sweep_with(&mesh, 0.0, &policy().without_congestion());
     let constants = plinth_core::m0_constants().expect("the registry constructs");
     let flare = constants.placeholders().flare_r_factor().diagnostic().get();
-    assert!(flare > 1.0, "the registered flare factor is not a flare");
+    assert!(flare > 1.0, "the registered crowding factor is not a flare");
     assert!(
         (flare - policy().flare_r_factor).abs() < 1.0e-12,
         "the sweep policy is not reading FLARE_R_FACTOR from the registry"
@@ -462,10 +474,12 @@ fn the_census_measures_the_flared_root_and_not_the_bare_arm() {
         .expect("the lowering refuses only about the request");
     assert_eq!(
         emission.arms_without_root_flare, 0,
-        "a plate arm with no flare has no emitted foot to grade the census against"
+        "a plate arm with no boss has no emitted root to grade the census against"
     );
-    let mut emitted_feet_mm2 = 0.0;
-    let mut feet = 0_usize;
+    let mut emitted_roots_mm2 = 0.0;
+    let mut bosses = 0_usize;
+    let mut flared = 0_usize;
+    let mut root_sizes: Vec<f64> = Vec::new();
     for primitive in &emission.primitives {
         if primitive.segment_kind != SupportSegmentKind::RootFlare {
             continue;
@@ -474,33 +488,63 @@ fn the_census_measures_the_flared_root_and_not_the_bare_arm() {
             primitive.start_radius_mm.get(),
             primitive.end_radius_mm.get(),
         );
+        let ratio = foot / root;
         assert!(
-            (foot - flare * root).abs() <= 1.0e-12 * foot,
-            "a root flare's foot is {foot} mm on a {root} mm root, not the registered {flare}x"
+            (ratio - OWNER_HEAVY_RATIO).abs() <= 1.0e-9 * OWNER_HEAVY_RATIO,
+            "a root boss's foot is {foot} mm on a {root} mm root: ratio {ratio}, not the \
+             owner's Heavy {OWNER_HEAVY_RATIO}"
         );
-        emitted_feet_mm2 += core::f64::consts::PI * foot * foot;
-        feet += 1;
+        // The ratio the lowering says it drew this boss with (path hit, in
+        // arm order, one per `RootFlare`) is the ratio in the file.
+        let published = emission.root_boss_factor[bosses];
+        assert!(
+            (published - ratio).abs() <= 1.0e-9 * ratio
+                && (emission.root_boss_root_radius_mm[bosses] - root).abs() <= 1.0e-12,
+            "boss {bosses}: drawn {foot}/{root}, published factor {published} at root {}",
+            emission.root_boss_root_radius_mm[bosses]
+        );
+        root_sizes.push(root);
+        flared += usize::from(foot > root);
+        emitted_roots_mm2 += core::f64::consts::PI * (flare * root).powi(2);
+        bosses += 1;
     }
+    assert_eq!(emission.root_boss_factor.len(), bosses);
+    // Anti-vacuity for "whatever the root's size": the field carries at least
+    // one root narrower than Heavy's own 0.75 mm, where the superseded
+    // by-size reading read a LARGER ratio than Heavy's (up to 4.4), so the
+    // ratio check above can tell the two rules apart.
+    root_sizes.sort_by(f64::total_cmp);
+    assert!(
+        root_sizes.first().is_some_and(|smallest| *smallest < 0.75),
+        "every root is at least Heavy's own 0.75 mm, so no root could tell Heavy's ratio \
+         from the by-size reading: {root_sizes:?}"
+    );
     let census = &plan.report.congestion_lane.after.all;
     let published = census.analytic_disc_area_mm2;
-    assert!(feet > 0, "nothing lands on the plate to measure");
+    assert!(bosses > 0, "nothing lands on the plate to measure");
     assert_eq!(
-        census.roots, feet,
-        "the census counts a root the file does not flare"
+        census.roots, bosses,
+        "the census counts a root the file does not stand on a boss"
     );
     assert!(
-        (published - emitted_feet_mm2).abs() < 1.0e-9 * published.max(1.0),
-        "the census published {published} mm2 against the {emitted_feet_mm2} mm2 of root flare \
-         the file draws"
+        (published - emitted_roots_mm2).abs() < 1.0e-9 * published.max(1.0),
+        "the census published {published} mm2 against {emitted_roots_mm2} mm2, the crowding \
+         factor times the drawn roots the file stands on its bosses"
     );
     // And the bare arm is not what was counted: the ledger roots alone read
-    // strictly less, by at least the flare factor squared.
+    // strictly less, by at least the factor squared.
     let bare_section = plate_section_mm2(&plan);
     assert!(published > bare_section * flare * flare * (1.0 - 1.0e-9));
-    // Anti-vacuity: on THIS field the flare is what makes the roots touch at
+    // Anti-vacuity: on THIS field the factor is what makes the roots touch at
     // all, so a census on the bare radius would have reported a clean plate.
     assert!(
         plan.report.congestion_lane.after.all.overlap_pairs > 0,
         "no root pair overlaps even at the flared radius; the fixture proves nothing"
+    );
+    // Anti-vacuity for the boss half: the bosses on THIS field are real cones,
+    // wider at the foot than the root they stand under.
+    assert!(
+        flared > 0,
+        "no boss on the laid tube is wider at its foot than its root; the fixture proves nothing"
     );
 }

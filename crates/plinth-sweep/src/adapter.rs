@@ -73,6 +73,14 @@ pub struct SweepEmission {
     pub tip_seat_depth_mm: Vec<f64>,
     pub tip_cut_radius_mm: Vec<f64>,
     pub tip_radius_mm: Vec<f64>,
+    /// THE OWNER'S CHITUBOX GEOMETRY (2026-09-30), published as path hits:
+    /// every tip's contact-sphere factor read off his profiles by tip size,
+    /// in arm order, and every plate root boss's foot-to-root factor (his
+    /// Heavy profile's, for every root), with the root it was drawn at
+    /// ([`plinth_support::SweepLowering::tip_ball_factor`] and siblings).
+    pub tip_ball_factor: Vec<f64>,
+    pub root_boss_factor: Vec<f64>,
+    pub root_boss_root_radius_mm: Vec<f64>,
     /// Members drawn in more than one straight span because one taper would
     /// have dipped below the area law's profile (every trunk under a mid-shaft
     /// junction), and the `Member` frusta that added.
@@ -173,6 +181,9 @@ pub fn to_primitives(
         tip_seat_depth_mm,
         tip_cut_radius_mm,
         tip_radius_mm,
+        tip_ball_factor,
+        root_boss_factor,
+        root_boss_root_radius_mm,
         arms_drawn_in_spans,
         profile_member_frusta,
         shaft_members_trimmed_to_seat,
@@ -205,6 +216,9 @@ pub fn to_primitives(
         tip_seat_depth_mm,
         tip_cut_radius_mm,
         tip_radius_mm,
+        tip_ball_factor,
+        root_boss_factor,
+        root_boss_root_radius_mm,
         arms_drawn_in_spans,
         profile_member_frusta,
         shaft_members_trimmed_to_seat,

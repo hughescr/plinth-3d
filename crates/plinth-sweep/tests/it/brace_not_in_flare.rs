@@ -119,12 +119,13 @@ fn brace_ends(plan: &SweepPlan) -> Vec<(u32, &'static str, [f64; 3])> {
 }
 
 fn raft_height_mm() -> f64 {
-    m0_constants()
+    // Moved from the placeholders to the evidence on 2026-09-30 (the owner's
+    // ChituBox profile export, `raft_support.raftthickness`), same value.
+    *m0_constants()
         .expect("registry")
-        .placeholders()
+        .evidence()
         .chitubox_raft_height_mm()
-        .diagnostic()
-        .get()
+        .value()
 }
 
 /// Every brace end inside a flare the file draws, or at or below the raft top,
@@ -163,10 +164,17 @@ fn brace_ends_in_a_flare(plan: &SweepPlan, flares: &[Flare]) -> Vec<String> {
 #[test]
 fn no_mast_brace_end_on_the_laid_tube_lies_inside_a_root_flare() {
     let mesh = make_laid_tube().expect("the laid tube fixture");
-    let policy = SweepPolicy {
+    // MERGED 2026-10-01 (land of fix/chitubox-geometry onto develop 3372093):
+    // graded at the seat placement the fixture was built for
+    // (`harness::at_path_fixture_seating`), as `mast_root_clearance.rs` grades
+    // masts on this same fixture. On the merged tree the production placement
+    // places 2 masts and plans none again with its tie raised (measured
+    // 2026-10-01), so the path-hit check went red. The flare rule reads no
+    // placement.
+    let policy = harness::at_path_fixture_seating(SweepPolicy {
         slenderness_thicken: false,
         ..policy()
-    };
+    });
     let plan = sweep_with(&mesh, 0.0, &policy);
     let flares = emitted_flares(&plan);
     let lane = &plan.report.slenderness_lane;

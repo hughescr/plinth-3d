@@ -2610,7 +2610,8 @@ fn print_sweep_disclosure(
              by up to {:.4} mm), {} on a knife edge, {} left in place because every on-face \
              seat broke a rule of the finished field; moves refused by the lean law {}, by an \
              unbraced run's limit {}, by the drain keep-out {} ({} member checks); {} disc \
-             samples + {} search samples over {} layers, {} round(s)",
+             samples + {} search samples + {} move-verify samples over {} layers, {} round(s); \
+             {} tips off their face at the disc's rim alone (lattice on the face)",
             emission.tips_trimmed_to_seat,
             emission.shaft_members_trimmed_to_seat,
             emission.tips_trimmed_without_a_measured_face,
@@ -2634,8 +2635,10 @@ fn print_sweep_disclosure(
             footprint.members_checked,
             footprint.disc_samples,
             footprint.search_samples,
+            footprint.verify_samples,
             footprint.layers_rasterised,
             footprint.rounds,
+            footprint.tips_off_face_at_rim_only,
         );
         for (arm, fraction) in &footprint.knife_edges {
             println!(
@@ -3113,6 +3116,26 @@ fn print_sweep_disclosure(
         emission.raft_feet_sharing_a_pad,
         emission.raft_bridges,
         emission.raft_volume_mm3,
+    );
+    // THE OWNER'S CHITUBOX GEOMETRY (2026-09-30), as path hits: how many tip
+    // balls read their factor off his profiles (and the range they read), and
+    // how many root bosses were drawn at his Heavy profile's foot-to-root
+    // factor (and the factors and roots they were drawn with).
+    let spread = |values: &[f64]| {
+        plinth_support::SweepLowering::distribution(values).map_or_else(
+            || "n/a".to_owned(),
+            |(min, p50, max)| format!("{min:.4}/{p50:.4}/{max:.4}"),
+        )
+    };
+    println!(
+        "[sweep {model}] chitubox geometry: {} tip balls sized from the profile table \
+         (factor min/p50/max {}), {} root bosses scaled to their root by the Heavy profile ratio \
+         (factor min/p50/max {}, root radius min/p50/max {} mm)",
+        emission.tip_ball_factor.len(),
+        spread(&emission.tip_ball_factor),
+        emission.root_boss_factor.len(),
+        spread(&emission.root_boss_factor),
+        spread(&emission.root_boss_root_radius_mm),
     );
     println!(
         "[sweep {model}] lowering: {} arms offered, {} emitted, {} dropped zero-length, \
