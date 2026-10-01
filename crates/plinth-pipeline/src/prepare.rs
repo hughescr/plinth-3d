@@ -3110,6 +3110,40 @@ fn print_sweep_disclosure(
         lane.brace_bands_dropped_in_flare,
         lane.masts_raised_above_flare,
     );
+    // BRACING REWORK (Craig's rulings of 2026-10-01): every brace band refused,
+    // by its one reason; crosses kept in their own plane where a thickening
+    // also holds; landing ties that hold only from their branch's seat.
+    let why = &lane.brace_band_refusals;
+    println!(
+        "[sweep {model}] brace bands refused {} = {} posts at one cell + {} below the plate + {} \
+         in a root flare + {} leaving a post + {} too flat for the overhang law + {} end ring under \
+         the plate + centreline through {} a drain, {} the model, {} a member + solid within the \
+         final gap of {} the model, {} a member{}; built after the 2026-10-01 fix: {} bands \
+         deepened for their diagonals, {} moved up off the plate; {} crosses kept in their \
+         own plane where a thickening also holds; {} landing ties hold only from their \
+         branch's seat",
+        lane.brace_bands_refused,
+        why.no_gap,
+        why.below_plate,
+        why.in_flare,
+        why.off_a_post,
+        why.too_flat,
+        why.ring_under_plate,
+        why.path_drain,
+        why.path_model,
+        why.path_member,
+        why.solid_model,
+        why.solid_member,
+        if why.total() == lane.brace_bands_refused {
+            ""
+        } else {
+            " [REASONS DO NOT SUM TO THE REFUSALS]"
+        },
+        lane.brace_bands_deepened_for_their_diagonals,
+        lane.brace_bands_moved_up_off_the_plate,
+        lane.crosses_kept_in_their_own_plane,
+        lane.landing_ties_held_late,
+    );
     for warning in lane.warnings.iter().take(20) {
         println!(
             "[sweep {model}]   unbraced_run_over_limit: arm {} layers {}..{} runs {:.3} mm \

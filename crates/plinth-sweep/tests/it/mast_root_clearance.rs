@@ -40,10 +40,19 @@ use plinth_sweep::{to_primitives, Landing, StrutKind, SweepPlan, SweepPolicy, Sw
 /// any of them. Every claim in this file is about where a MAST's root lands,
 /// so the rung above the mast is taken out and everything else (merges,
 /// crosses, the clearance rule under test) stays as production has it.
+///
+/// And at the S these fixtures were built at
+/// (`harness::PATH_FIXTURE_SLENDERNESS_RATIO`, 50): at the ruled 30 the braced
+/// panel cannot hold their 33-35 mm posts at any mast radius, every mast cell
+/// is refused by the panel check, and no mast is placed (measured 2026-10-01
+/// on the brace pair, the laid tube and the lonely peak).
 fn policy() -> SweepPolicy {
     SweepPolicy {
         slenderness_thicken: false,
-        ..SweepPolicy::from_registry().expect("the registry supplies every number the sweep reads")
+        ..harness::at_path_fixture_slenderness(
+            SweepPolicy::from_registry()
+                .expect("the registry supplies every number the sweep reads"),
+        )
     }
 }
 

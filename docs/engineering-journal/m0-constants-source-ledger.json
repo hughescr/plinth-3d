@@ -2297,13 +2297,13 @@
     {
       "id": "SLENDERNESS_LIMIT_RATIO",
       "classification": "support_placement",
-      "normative": "docs/plans/bracing-and-shedding-2026-09-06.md lane 2 (owner rulings 2026-09-05/06) = 50, dimensionless",
+      "normative": "docs/plans/bracing-and-shedding-2026-09-06.md lane 2 (owner rulings 2026-09-05/06) = 50, dimensionless; Craig ruling 2026-10-01 = 30 (interim, pending a slenderness coupon; ChituBox practice braces at ~13x r)",
       "source_locators": [
         "crates/plinth-sweep/src/slenderness.rs:SlendernessLaw",
         "crates/plinth-core/src/constants/placeholders.rs:slenderness_limit_ratio"
       ],
       "provenance_wrapper": "Placeholder",
-      "provenance_detail": "Largest unbraced-run length over arm radius, L_max(r) = S x r. The FORM is derived: an unbraced arm is a cantilever fixed at its last tie under a distributed lateral resin-drag load q, so delta = q L^4 / (2 pi E r^4), and holding delta under one pixel p gives L_max = (2 pi E r^4 p / q)^(1/4), proportional to r. The MAGNITUDE is a placeholder: q ~ 4 pi mu v ~ 5e-3 N/m, p = 0.019 mm and E from 1e8 Pa green to 1e9 Pa cured bracket S at 40 to 70; 50 sits inside that bracket at its conservative green end. No coupon exists (owner ruling: a defensible guess, registered honestly, with a sample to eyeball). It DECIDES OUTCOMES -- which arms are re-merged, where |X| braces go, where masts are dropped -- and it also sizes those remedies (r_b = max(r_min, l/S), r_m = max(r_min, H_first/S), d_max(r) = S r / sqrt(1 + tan^2 theta_sat)), so it is disclosed rather than pruning-only."
+      "provenance_detail": "Largest unbraced-run length over arm radius, L_max(r) = S x r. The FORM is derived: an unbraced arm is a cantilever fixed at its last tie under a distributed lateral resin-drag load q, so delta = q L^4 / (2 pi E r^4), and holding delta under one pixel p gives L_max = (2 pi E r^4 p / q)^(1/4), proportional to r. The MAGNITUDE is a placeholder: q ~ 4 pi mu v ~ 5e-3 N/m, p = 0.019 mm and E from 1e8 Pa green to 1e9 Pa cured bracket S at 40 to 70 for resin drag alone. 30 is registered (Craig ruling 2026-10-01: interim, pending a slenderness coupon; ChituBox practice braces at ~13x r), below the drag-only bracket because the tilt-release shear is a tip load the distributed-load ratio does not capture; 50 was registered until then. No coupon exists (owner ruling: a defensible guess, registered honestly, with a sample to eyeball). It DECIDES OUTCOMES -- which arms are re-merged, where |X| braces go, where masts are dropped -- and it also sizes those remedies (r_b = max(r_min, l/S), r_m = max(r_min, H_first/S), d_max(r) = S r / sqrt(1 + tan^2 theta_sat)), so it is disclosed rather than pruning-only."
     },
     {
       "id": "SLICE_UNION_MAX_ABS_MM",

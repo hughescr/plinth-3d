@@ -596,12 +596,15 @@ fn no_mast_is_thicker_than_the_member_it_braces_on_the_brace_pair() {
 #[test]
 fn no_mast_is_thicker_than_the_member_it_braces_on_the_lonely_peak_without_thickening() {
     let mesh = plinth_mesh::make_lonely_peak().expect("the lonely peak");
+    // At the S this fixture was built at (`harness::PATH_FIXTURE_SLENDERNESS_RATIO`):
+    // at the ruled 30 the panel check refuses every mast cell (0 masts,
+    // measured 2026-10-01) and the cap graded here is never reached.
     let plan = sweep_with(
         &mesh,
         0.0,
         &SweepPolicy {
             slenderness_thicken: false,
-            ..policy()
+            ..crate::harness::at_path_fixture_slenderness(policy())
         },
     );
     let drawn = arms_of(&plan)
@@ -663,6 +666,15 @@ fn the_stilt_plate_places_no_mast() {
 /// long stilt posts, and it holds while PRINTING — with every cross credited
 /// only from its band TOP, the first layer at which it ties anything, no run
 /// is over its limit. A guard, green on `c33dc8e`.
+///
+/// **RE-DERIVED 2026-10-01 (Craig's rulings: tie timing; `S` = 30).** The
+/// lane now measures exactly this print-time view itself: a diagonal holds
+/// its post only from its band top (it is a landing that holds from its
+/// seat). At `S` = 30 three stilt posts (11, 70, 76) have no admissible
+/// remedy in one direction and are WARNED; every run this guard finds over
+/// the limit must be one of those published warnings, never a silent one
+/// (until the timing rule, runs on 21 and 43 were over here and silent:
+/// measured 2026-10-01).
 #[test]
 fn every_run_holds_with_crosses_credited_from_their_band_top_on_the_stilt_plate() {
     let plan = &stilt().plan;
@@ -683,9 +695,23 @@ fn every_run_holds_with_crosses_credited_from_their_band_top_on_the_stilt_plate(
         .filter(|run| run.over_limit())
         .map(|run| (run.strut_id, run.k_lo, run.k_top))
         .collect();
+    let warned = &plan.report.slenderness_lane.warnings;
+    let silent: Vec<_> = over
+        .iter()
+        .filter(|(id, k_lo, k_top)| {
+            !warned.iter().any(|warning| {
+                warning.strut_id == *id && warning.k_lo <= *k_lo && *k_top <= warning.k_top
+            })
+        })
+        .collect();
+    println!(
+        "tall stilt plate: {} runs over the limit at print time {over:?}, {} not warned",
+        over.len(),
+        silent.len()
+    );
     assert!(
-        over.is_empty(),
-        "{} runs over the limit at print time: {over:?}",
-        over.len()
+        silent.is_empty(),
+        "{} runs over the limit at print time and not warned: {silent:?}",
+        silent.len()
     );
 }

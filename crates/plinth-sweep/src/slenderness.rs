@@ -96,6 +96,20 @@
 //!    existing mast is extended before a second one is dropped.
 //! 5. **Warn.** Named, counted, emitted. Never a dropped or shortened arm.
 //!
+//! # Craig's rulings of 2026-10-01
+//!
+//! * `S` is 30 (interim, pending a slenderness coupon).
+//! * **Tie timing.** A member that lands on a host — an arm branch or a
+//!   brace diagonal — holds the host sideways only from the layer its own top
+//!   is held (its seat prints). A run is the cantilever from the highest tie
+//!   that HOLDS while a layer prints up to that layer ([`RunMeasure`]), so an
+//!   `|X|` ties its posts from its band top, and a host carrying a branch is
+//!   measured up to the branch's seat.
+//! * **Keep one-direction crosses.** A cross holds its own plane; thickening
+//!   or a mast covers the direction across it, and a thickening that also
+//!   holds never makes the cross unneeded ([`prune_unneeded_crosses`]).
+//! * Every brace-band refusal is counted under one reason ([`BandRefusals`]).
+//!
 //! **Every remedy is attempted only for a run that is over the limit NOW.**
 //! The member's runs are re-measured from the live strut set after every
 //! remedy that touches it, so no partner builds a second cross on a pair an
@@ -464,6 +478,78 @@ pub struct SlendernessOutcome {
     /// parent no longer stands at that cell and layer, because an earlier
     /// merge in the same loop moved it. A path-hit witness for the rule.
     pub merges_refused_stale_shaft: usize,
+    /// Crosses the prune KEPT only because they hold their own plane on the
+    /// posts as they stood before this pass's thickenings (Craig ruling
+    /// 2026-10-01: keep one-direction crosses). Without the ruling each of
+    /// these would have been taken out. A path-hit witness.
+    pub crosses_kept_in_their_own_plane: usize,
+    /// Landing ties, on the field the LAST tie pass measured, that hold their
+    /// host only from a layer ABOVE the landing (the branch's seat, or a
+    /// diagonal's band top; Craig ruling 2026-10-01, tie timing). A path-hit
+    /// witness: zero means the timing rule changed no run.
+    pub landing_ties_held_late: usize,
+    /// Every brace band refused, by its reason (`brace_bands_refused` is
+    /// their sum). See [`BandRefusals`].
+    pub brace_band_refusals: BandRefusals,
+    /// Bands BUILT after the fix of 2026-10-01 to refusals that were not
+    /// geometric: deepened until both diagonals fit the overhang law (posts
+    /// leaning apart), and moved up because the band at its planned top
+    /// reached below the plate. Path-hit witnesses.
+    pub brace_bands_deepened_for_their_diagonals: usize,
+    pub brace_bands_moved_up_off_the_plate: usize,
+}
+
+/// Why a planned `|X|` band was refused, one count per reason; every refusal
+/// [`plan_cross`] makes is counted under exactly one of them (until 2026-10-01
+/// only the model gap and the member test were itemised, so on the brace pair
+/// 7 refusals of 9 planned bands showed 1 reason).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BandRefusals {
+    /// The two posts stand in one cell at the band top, or the gap needs no
+    /// layer: there is no diagonal to draw.
+    pub no_gap: usize,
+    /// The band would start below layer 0 (the plate).
+    pub below_plate: usize,
+    /// The band bottom fell in a root flare or the raft and could not move up
+    /// (`brace_bands_dropped_in_flare`).
+    pub in_flare: usize,
+    /// The band leaves one of the posts: its bottom is below a post's own
+    /// foot, or its top above a post's own top.
+    pub off_a_post: usize,
+    /// A diagonal's own lateral move (between the cells it joins, for leaning
+    /// posts) is longer than the overhang law admits over the band's depth.
+    pub too_flat: usize,
+    /// The band bottom is within one brace radius of the plate, so the
+    /// diagonal's end ring would be drawn below it.
+    pub ring_under_plate: usize,
+    /// A diagonal's centreline crosses a drain's escape cylinder, model
+    /// material, or another member's axis (`segment_path`).
+    pub path_drain: usize,
+    pub path_model: usize,
+    pub path_member: usize,
+    /// A diagonal's drawn SOLID comes within the final gap of the model, or
+    /// enters a member it is not joined to (`brace_bands_refused_by_model`,
+    /// `brace_bands_refused_by_member`).
+    pub solid_model: usize,
+    pub solid_member: usize,
+}
+
+impl BandRefusals {
+    /// Every refusal counted.
+    #[must_use]
+    pub const fn total(&self) -> usize {
+        self.no_gap
+            + self.below_plate
+            + self.in_flare
+            + self.off_a_post
+            + self.too_flat
+            + self.ring_under_plate
+            + self.path_drain
+            + self.path_model
+            + self.path_member
+            + self.solid_model
+            + self.solid_member
+    }
 }
 
 /// Every unbraced run in a finished field, measured from the strut set alone,
@@ -679,30 +765,119 @@ fn sway_directions(planes: &[Plane]) -> Vec<Option<f64>> {
     sway_directions_by_layer(&groups)
 }
 
-/// The ties of one member grouped by layer: per layer, whether something
+/// The ties of one member at one layer.
+#[derive(Clone, Debug)]
+struct LayerTies {
+    layer: usize,
+    /// The earliest layer from which something here holds EVERY direction (a
+    /// landing, an end), or `None` when nothing here does. A landing branch
+    /// holds from its seat ([`Tie::from`]), so this can lie above `layer`.
+    all_from: Option<usize>,
+    /// The DISTINCT planes of the crosses here, each with the layer it holds
+    /// from (a band top at once; a band bottom from its band top), sorted by
+    /// that layer.
+    planes: Vec<(Plane, usize)>,
+}
+
+impl LayerTies {
+    /// Whether something here holds every direction from its own layer on.
+    fn all_at_once(&self) -> bool {
+        self.all_from.is_some_and(|from| from <= self.layer)
+    }
+
+    /// The plane sets this layer has over time: the planes holding by each
+    /// plane's own start, earliest first (crosses here act together,
+    /// `joint_holds`, but only once each has started to hold).
+    /// One set per distinct start layer, so planes that start together are
+    /// one set, exactly as before tie timing.
+    fn plane_sets(&self) -> impl Iterator<Item = (usize, Vec<Plane>)> + '_ {
+        (1..=self.planes.len())
+            .filter(|&count| {
+                self.planes
+                    .get(count)
+                    .is_none_or(|next| next.1 != self.planes[count - 1].1)
+            })
+            .map(|count| {
+                (
+                    self.planes[count - 1].1,
+                    self.planes[..count].iter().map(|(plane, _)| *plane).collect(),
+                )
+            })
+    }
+
+    /// The layer from which this layer's ties hold the sway `sway_deg`
+    /// (`None`: no direction is told apart, so a plane set holds only where
+    /// it holds every direction), or `None` if they never do.
+    fn holds_from(&self, sway_deg: Option<f64>) -> Option<usize> {
+        let planes = self.plane_sets().find_map(|(from, planes)| {
+            let held = match sway_deg {
+                Some(sway) => joint_holds(&planes, sway),
+                None => joint_breaks(&planes).is_empty(),
+            };
+            held.then_some(from)
+        });
+        match (self.all_from, planes) {
+            (Some(all), Some(planes)) => Some(all.min(planes)),
+            (one, two) => one.or(two),
+        }
+    }
+}
+
+/// The ties of one member grouped by layer: per layer, from when something
 /// there holds every direction (a landing, an end), and the DISTINCT planes
 /// of the crosses there. One sort, no map.
-fn ties_by_layer(ties: &[Tie]) -> Vec<(usize, bool, Vec<Plane>)> {
+fn ties_by_layer(ties: &[Tie]) -> Vec<LayerTies> {
     let mut sorted: Vec<Tie> = ties.to_vec();
     sorted.sort_unstable_by_key(|tie| tie.layer);
-    let mut groups: Vec<(usize, bool, Vec<Plane>)> = Vec::new();
+    let mut groups: Vec<LayerTies> = Vec::new();
     for tie in sorted {
-        if groups.last().is_none_or(|group| group.0 != tie.layer) {
-            groups.push((tie.layer, false, Vec::new()));
+        if groups.last().is_none_or(|group| group.layer != tie.layer) {
+            groups.push(LayerTies {
+                layer: tie.layer,
+                all_from: None,
+                planes: Vec::new(),
+            });
         }
         let Some(group) = groups.last_mut() else {
             continue;
         };
         match tie.plane {
-            None => group.1 = true,
+            None => {
+                group.all_from = Some(group.all_from.map_or(tie.from, |known| known.min(tie.from)));
+            }
             Some(plane) => {
-                if !group.2.iter().any(|known| parallel(*known, plane)) {
-                    group.2.push(plane);
+                match group
+                    .planes
+                    .iter_mut()
+                    .find(|(known, _)| parallel(*known, plane))
+                {
+                    Some((_, from)) => *from = (*from).min(tie.from),
+                    None => group.planes.push((plane, tie.from)),
                 }
             }
         }
     }
+    for group in &mut groups {
+        group.planes.sort_by_key(|&(_, from)| from);
+    }
     groups
+}
+
+/// The sway directions a member's grouped ties tell apart. A layer whose
+/// every-direction tie holds AT ONCE needs no direction; one whose
+/// every-direction tie holds only later (a landing branch not yet seated)
+/// still has its crosses tell directions apart until then. Every plane set a
+/// layer passes through ([`LayerTies::plane_sets`]) contributes its
+/// breakpoints, so between two breakpoints every layer's held set is the same
+/// at every moment of the print.
+fn sway_directions_of(groups: &[LayerTies]) -> Vec<Option<f64>> {
+    let sets: Vec<Vec<Plane>> = groups
+        .iter()
+        .filter(|group| !group.all_at_once())
+        .flat_map(|group| group.plane_sets().map(|(_, planes)| planes))
+        .collect();
+    let open: Vec<&[Plane]> = sets.iter().map(Vec::as_slice).collect();
+    sway_directions_by_layer(&open)
 }
 
 /// The distinct planes of the crosses tying a member at exactly `layer`.
@@ -740,6 +915,13 @@ fn new_plane_holds(ties: &[Tie], layer: usize, plane: Plane, sway_deg: Option<f6
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Tie {
     layer: usize,
+    /// **The layer from which the tie HOLDS** (Craig ruling 2026-10-01, tie
+    /// timing). A member that lands on a host at `layer` — an arm branch or a
+    /// brace diagonal — is a free cantilever off the host until its own top
+    /// is held, the layer its seat prints; only from then does it hold the
+    /// host sideways. `from == layer` for a seat on the host (a diagonal's
+    /// band top), whose other end has already printed.
+    from: usize,
     plane: Option<Plane>,
     /// Whether this is a cross's band TOP on the member (a diagonal SEATS on
     /// it here). A cross ties nothing while printing until its top is cured,
@@ -870,6 +1052,19 @@ fn brace_plane(grid: &Grid, struts: &[SweepStrut], brace: &SweepStrut) -> Option
 /// `floors` entry ([`free_shaft_floor`]) lies inside its root flare or the
 /// raft, which already hold that height rigidly, so it cuts no run. Landings
 /// of other members are ties wherever they land, as before.
+///
+/// **A landing BRANCH holds its host only from the layer its own seat prints**
+/// (Craig ruling 2026-10-01, tie timing; `stilt-and-brace-pair-diagnosis.md`
+/// item 2). While the layers between the junction and the branch's seat
+/// print, the branch is free at its upper end and holds nothing; the host
+/// runs as a cantilever from its last tie below up to the layer printing. So
+/// the tie sits at the landing layer and HOLDS FROM the branch's top
+/// ([`Tie::from`]). **A diagonal is such a branch too**: it lands on one post
+/// at the band bottom and seats on the other at the band top, and holds
+/// nothing until that seat prints; so an `|X|` ties each post from its band
+/// TOP, which is what the member-clearance lane's print-time guard
+/// (`every_run_holds_with_crosses_credited_from_their_band_top_on_the_stilt_plate`)
+/// already measured.
 fn tie_lists(grid: &Grid, struts: &[SweepStrut], floors: &[usize]) -> Vec<Vec<Tie>> {
     let mut ties: Vec<Vec<Tie>> = vec![Vec::new(); struts.len()];
     let on_free_shaft = |host: u32, layer: usize| {
@@ -889,9 +1084,13 @@ fn tie_lists(grid: &Grid, struts: &[SweepStrut], floors: &[usize]) -> Vec<Vec<Ti
         };
         if let Landing::Strut { id, layer } = strut.landing {
             let credited = !brace || on_free_shaft(id, layer);
+            // The branch's top is its seat (a diagonal's is its band top on
+            // the other post): it holds the host from there.
+            let from = strut.k_top.max(layer);
             if let Some(list) = ties.get_mut(id as usize).filter(|_| credited) {
                 list.push(Tie {
                     layer,
+                    from,
                     plane,
                     band_top: false,
                 });
@@ -902,6 +1101,7 @@ fn tie_lists(grid: &Grid, struts: &[SweepStrut], floors: &[usize]) -> Vec<Vec<Ti
             if let Some(list) = ties.get_mut(parent as usize).filter(|_| credited) {
                 list.push(Tie {
                     layer: strut.k_top,
+                    from: strut.k_top,
                     plane,
                     band_top: plane.is_some(),
                 });
@@ -920,64 +1120,121 @@ fn member_runs(
     layer_height_mm: f64,
     law: &SlendernessLaw,
 ) -> Vec<UnbracedRun> {
+    let measure = RunMeasure {
+        grid,
+        strut,
+        thickened: &strut.thickened_mm,
+        profile,
+        layer_height_mm,
+        law,
+    };
+    let mut runs: Vec<UnbracedRun> = Vec::new();
     if !live(strut) {
-        return Vec::new();
+        return runs;
     }
     // CROSSES AT ONE LAYER ARE CREDITED TOGETHER (`joint_holds`); a layer
-    // with a landing or an end holds every direction whatever crosses it has.
+    // with a landing or an end holds every direction whatever crosses it has,
+    // from the layer that tie holds from.
     let groups = ties_by_layer(ties);
-    let open: Vec<&[Plane]> = groups
-        .iter()
-        .filter(|(_, all, _)| !*all)
-        .map(|(_, _, planes)| planes.as_slice())
-        .collect();
-    let mut runs: Vec<UnbracedRun> = Vec::new();
-    let mut layers: Vec<usize> = Vec::with_capacity(groups.len() + 2);
-    for sway_deg in sway_directions_by_layer(&open) {
-        layers.clear();
-        layers.push(strut.k_bottom);
-        layers.push(strut.k_top);
-        for (layer, all, planes) in &groups {
-            let held = *all || sway_deg.is_none_or(|sway| joint_holds(planes, sway));
-            if held && *layer >= strut.k_bottom && *layer <= strut.k_top {
-                layers.push(*layer);
+    for sway_deg in sway_directions_of(&groups) {
+        measure.push_runs(&groups, sway_deg, &mut runs);
+    }
+    runs
+}
+
+/// What one member's runs are measured on: the member, the per-layer minimum
+/// its thickening set (normally its own [`SweepStrut::thickened_mm`]; the
+/// prune passes the one the pass started from), and its drawn profile.
+struct RunMeasure<'a> {
+    grid: &'a Grid,
+    strut: &'a SweepStrut,
+    thickened: &'a [f64],
+    profile: &'a [f64],
+    layer_height_mm: f64,
+    law: &'a SlendernessLaw,
+}
+
+impl RunMeasure<'_> {
+    /// The member's runs in ONE sway direction, appended to `runs` (a run
+    /// already listed, by its two layers, is not listed twice).
+    ///
+    /// **TIE TIMING** (Craig ruling 2026-10-01). A run is a cantilever from
+    /// the highest tie that HOLDS while a layer prints up to that layer. A
+    /// tie that holds from its own layer (a cross, an end) ends a run there,
+    /// as before; a landing branch, which holds only from its seat
+    /// ([`Tie::from`]), ends the run that was printing until then, the one
+    /// from the tie below it up to the seat's layer (or the member's own top,
+    /// whichever comes first), and starts the run above it only after that.
+    /// With every tie holding at once this is exactly the old cut between
+    /// consecutive ties. One sort, one sweep.
+    fn push_runs(&self, groups: &[LayerTies], sway_deg: Option<f64>, runs: &mut Vec<UnbracedRun>) {
+        let strut = self.strut;
+        // (layer, holds from), inside the member, in this direction.
+        let mut held: Vec<(usize, usize)> = groups
+            .iter()
+            .filter(|group| group.layer >= strut.k_bottom && group.layer <= strut.k_top)
+            .filter_map(|group| group.holds_from(sway_deg).map(|from| (group.layer, from)))
+            .collect();
+        held.sort_unstable_by_key(|&(_, from)| from);
+        let mut ends: Vec<usize> = held
+            .iter()
+            .map(|&(_, from)| from.min(strut.k_top))
+            .filter(|&end| end > strut.k_bottom)
+            .collect();
+        ends.push(strut.k_top);
+        ends.sort_unstable();
+        ends.dedup();
+        let (mut base, mut next) = (strut.k_bottom, 0_usize);
+        for k_top in ends {
+            // Every tie that holds BEFORE this layer prints is a base the
+            // cantilever can stand on; the highest of them is.
+            while next < held.len() && held[next].1 < k_top {
+                base = base.max(held[next].0);
+                next += 1;
             }
-        }
-        layers.sort_unstable();
-        layers.dedup();
-        for pair in layers.windows(2) {
-            let (k_lo, k_top) = (pair[0], pair[1]);
-            if runs
-                .iter()
-                .any(|run| run.k_lo == k_lo && run.k_top == k_top)
+            let k_lo = base;
+            if k_lo >= k_top
+                || runs
+                    .iter()
+                    .any(|run| run.k_lo == k_lo && run.k_top == k_top)
             {
                 continue;
             }
-            let length_mm = run_length(grid, strut, k_lo, k_top, layer_height_mm);
-            let radius_mm = run_radius(strut, profile, k_lo, k_top);
+            let length_mm = run_length(self.grid, strut, k_lo, k_top, self.layer_height_mm);
+            let radius_mm = run_radius(strut, self.thickened, self.profile, k_lo, k_top);
             runs.push(UnbracedRun {
                 strut_id: strut.id,
                 k_lo,
                 k_top,
                 length_mm,
                 radius_mm,
-                limit_mm: law.max_unbraced_mm(radius_mm),
+                limit_mm: self.law.max_unbraced_mm(radius_mm),
                 sway_deg,
             });
         }
     }
-    runs
 }
 
 /// The drawn radius at an absolute layer, or the member's own minimum where
 /// the profile has no entry yet (a member this pass added and the down-sweep
 /// has not sized).
 fn drawn_at(strut: &SweepStrut, profile: &[f64], layer: usize) -> Option<f64> {
+    drawn_at_with(strut, &strut.thickened_mm, profile, layer)
+}
+
+/// [`drawn_at`] with the thickening minimum given rather than the member's
+/// own.
+fn drawn_at_with(
+    strut: &SweepStrut,
+    thickened: &[f64],
+    profile: &[f64],
+    layer: usize,
+) -> Option<f64> {
     let slot = layer.checked_sub(strut.k_bottom)?;
     let here = profile.get(slot).copied().unwrap_or(0.0);
     let minimum = strut
         .min_radius_mm
-        .max(strut.thickened_mm.get(layer).copied().unwrap_or(0.0));
+        .max(thickened.get(layer).copied().unwrap_or(0.0));
     let radius = here.max(minimum);
     (radius.is_finite() && radius > 0.0).then_some(radius)
 }
@@ -1019,9 +1276,15 @@ fn equivalent_radius(n: usize, radius_at: impl Fn(usize) -> Option<f64>) -> Opti
         .then(|| (weight / compliance).powf(0.25).clamp(narrowest, widest))
 }
 
-fn run_radius(strut: &SweepStrut, profile: &[f64], k_lo: usize, k_top: usize) -> f64 {
+fn run_radius(
+    strut: &SweepStrut,
+    thickened: &[f64],
+    profile: &[f64],
+    k_lo: usize,
+    k_top: usize,
+) -> f64 {
     equivalent_radius(k_top.saturating_sub(k_lo), |j| {
-        drawn_at(strut, profile, k_lo + j)
+        drawn_at_with(strut, thickened, profile, k_lo + j)
     })
     .unwrap_or_else(|| strut.tip_radius_mm())
 }
@@ -1278,6 +1541,12 @@ pub fn apply_ties(
     let height = context.layer_height_mm;
     let first_new = struts.len();
     let mut state = TieState::build(context, struts);
+    outcome.landing_ties_held_late = state
+        .ties
+        .iter()
+        .flatten()
+        .filter(|tie| tie.from > tie.layer)
+        .count();
     let mut applied = 0_usize;
     // ROUNDS, TO A FIXED POINT INSIDE THE PASS. A run with no admissible
     // remedy is set aside for the rest of a round; a remedy applied later in
@@ -1436,7 +1705,7 @@ fn shared_tie_layer(
     let planned = planned?;
     let fits = |k_lo: usize, k_top: usize| {
         let length = run_length(grid, strut, k_lo, k_top, layer_height_mm);
-        length <= law.max_unbraced_mm(run_radius(strut, profile, k_lo, k_top))
+        length <= law.max_unbraced_mm(run_radius(strut, &strut.thickened_mm, profile, k_lo, k_top))
     };
     let mut best: Option<usize> = None;
     for tie in ties {
@@ -1483,6 +1752,11 @@ fn landing_depth(struts: &[SweepStrut], strut: &SweepStrut) -> usize {
 /// a run over the limit through its band without it. Latest first, and each
 /// against the set as it stands, so every cross that is kept is needed given
 /// every other one kept. A mast left with no cross goes with it.
+///
+/// **Needed in its own plane is needed** (Craig ruling 2026-10-01): a cross
+/// the first test finds unneeded is judged again on the posts as they stood
+/// before this pass's thickenings, in the directions it holds; a thickening
+/// sized for the direction across the cross never takes the cross out.
 ///
 /// The drawn profiles are read as they stand. Where a removed diagonal was
 /// THICKER than its post, the post's profile still carries the junction raise
@@ -1556,10 +1830,12 @@ fn prune_unneeded_crosses(
         // diagonal thicker than its post — common where the area law leaves a
         // post at the minimum tip — raised the post it joined, and judging the
         // post on that raise would take out a cross the post still needs.
-        let drawn_without = |post: u32| {
+        // `profiles` is `state.profiles` (as drawn now) or `state.unthickened`
+        // (as drawn without this pass's thickenings).
+        let drawn_without = |post: u32, profiles: &[Vec<f64>]| {
             let host = &struts[post as usize];
             let mut profile = if host.radius_mm.is_empty() {
-                state.profiles[post as usize].clone()
+                profiles[post as usize].clone()
             } else {
                 host.radius_mm.clone()
             };
@@ -1569,10 +1845,10 @@ fn prune_unneeded_crosses(
                 }
                 let mut joints: Vec<(usize, Option<f64>)> = Vec::new();
                 if matches!(branch.landing, Landing::Strut { id, .. } if id == post) {
-                    joints.push((branch.k_bottom, state.profiles[index].first().copied()));
+                    joints.push((branch.k_bottom, profiles[index].first().copied()));
                 }
                 if branch.seat_on_strut == Some(post) {
-                    joints.push((branch.k_top, state.profiles[index].last().copied()));
+                    joints.push((branch.k_top, profiles[index].last().copied()));
                 }
                 for (layer, end) in joints {
                     let (Some(end), Some(top)) = (end, layer.checked_sub(host.k_bottom)) else {
@@ -1585,19 +1861,66 @@ fn prune_unneeded_crosses(
             }
             profile
         };
+        let through_band = |run: &UnbracedRun| run.over_limit() && run.k_lo < k && k_lo < run.k_top;
         let needed = [a, b].iter().any(|&post| {
             member_runs(
                 grid,
                 &struts[post as usize],
                 &without(post),
-                &drawn_without(post),
+                &drawn_without(post, &state.profiles),
                 height,
                 law,
             )
             .iter()
-            .any(|run| run.over_limit() && run.k_lo < k && k_lo < run.k_top)
+            .any(through_band)
         });
         if needed {
+            continue;
+        }
+        // **KEEP ONE-DIRECTION CROSSES** (Craig ruling 2026-10-01). A cross
+        // that ties two columns holds the sway in its own plane; thickening
+        // (or a mast) covers the direction across it, and a thickening that
+        // ALSO holds the cross's plane does not make the cross unneeded. So
+        // the cross is judged a second time on the posts as they were before
+        // this pass thickened anything (`state.unthickened`, and each post's
+        // thickening minimum as the pass found it), and only in the
+        // directions the cross itself holds: in each sway direction its
+        // member's ties tell apart WITH the cross, where the crosses at its
+        // band top (credited together, `joint_holds`) hold that direction, is
+        // a run through the band over the limit WITHOUT it? A cross another
+        // cross or a landing makes redundant still goes: there, nothing is
+        // over without it in its own directions.
+        let own_plane_needed = [a, b].iter().any(|&post| {
+            let index = post as usize;
+            let strut = &struts[index];
+            let profile = drawn_without(post, &state.unthickened);
+            let measure = RunMeasure {
+                grid,
+                strut,
+                thickened: state
+                    .thickened_at_start
+                    .get(index)
+                    .map_or(&[][..], Vec::as_slice),
+                profile: &profile,
+                layer_height_mm: height,
+                law,
+            };
+            let with = ties_by_layer(&ties[index]);
+            let without_groups = ties_by_layer(&without(post));
+            let planes_here = planes_at(&ties[index], k);
+            sway_directions_of(&with).into_iter().any(|sway| {
+                let held_by_the_cross = plane.is_none()
+                    || sway.is_none_or(|sway| joint_holds(&planes_here, sway));
+                if !held_by_the_cross {
+                    return false;
+                }
+                let mut runs = Vec::new();
+                measure.push_runs(&without_groups, sway, &mut runs);
+                runs.iter().any(through_band)
+            })
+        });
+        if own_plane_needed {
+            outcome.crosses_kept_in_their_own_plane += 1;
             continue;
         }
         let (list_a, list_b) = (without(a), without(b));
@@ -1679,6 +2002,12 @@ struct TieState {
     /// The DRAWN profile of every member (ledger plus junction raises), raised
     /// where a thickening or a diagonal's junction raises it.
     profiles: Vec<Vec<f64>>,
+    /// The same profiles raised by everything EXCEPT this pass's thickenings,
+    /// and every member's thickening minimum as the pass found it. The prune
+    /// judges a cross on these (Craig ruling 2026-10-01): a thickening never
+    /// makes a cross that holds its own plane unneeded.
+    unthickened: Vec<Vec<f64>>,
+    thickened_at_start: Vec<Vec<f64>>,
     /// Every member's ties other than its own two ends.
     ties: Vec<Vec<Tie>>,
     /// The height bands of the crosses on each unordered pair of posts.
@@ -1762,9 +2091,16 @@ impl TieState {
             &profiles,
             context.flare_factor,
         );
+        let unthickened = profiles.clone();
+        let thickened_at_start = struts
+            .iter()
+            .map(|strut| strut.thickened_mm.clone())
+            .collect();
         Self {
             index,
             profiles,
+            unthickened,
+            thickened_at_start,
             ties,
             bands,
             masts_of,
@@ -1981,11 +2317,15 @@ fn commit_cross(
         if let Some(list) = state.ties.get_mut(post as usize) {
             list.push(Tie {
                 layer: k,
+                from: k,
                 plane,
                 band_top: true,
             });
+            // The diagonal landing here holds only once its seat, at the
+            // band top on the other post, has printed (tie timing).
             list.push(Tie {
                 layer: k_lo,
+                from: k,
                 plane,
                 band_top: false,
             });
@@ -1995,6 +2335,7 @@ fn commit_cross(
         // and every trunk it stands on in turn, down to the plate or the model
         // (`adapter::drawn_profiles` repeats the clause to a fixed point).
         let foot = raise_to_the_foot(struts, &mut state.profiles, post as usize, k, radius);
+        raise_to_the_foot(struts, &mut state.unthickened, post as usize, k, radius);
         // THE FOOT ON THE PLATE GROWS WITH IT (review-fixes 2026-09-29): the
         // lowering flares the drawn root, so the disc every later mast and
         // thickening is cleared against is grown to it here. A foot that now
@@ -2004,6 +2345,7 @@ fn commit_cross(
     for _ in 0..2 {
         state.ties.push(Vec::new());
         state.profiles.push(vec![radius; span + 1]);
+        state.unthickened.push(vec![radius; span + 1]);
     }
     state
         .bands
@@ -2425,10 +2767,12 @@ fn tie_by_mast(
         }
         if let Some(plan) = plan_cross(context, state, struts, id, mast, k, run, true, outcome) {
             if old_top < k {
-                let profile = &mut state.profiles[mast as usize];
-                profile.resize(k + 1, grown);
-                for radius in profile.iter_mut() {
-                    *radius = radius.max(grown);
+                for profiles in [&mut state.profiles, &mut state.unthickened] {
+                    let profile = &mut profiles[mast as usize];
+                    profile.resize(k + 1, grown);
+                    for radius in profile.iter_mut() {
+                        *radius = radius.max(grown);
+                    }
                 }
                 struts[mast as usize].min_radius_mm = grown;
                 if let Some(slot) = slot {
@@ -2625,6 +2969,7 @@ fn tie_by_mast(
     });
     state.ties.push(Vec::new());
     state.profiles.push(vec![radius_mm; k + 1]);
+    state.unthickened.push(vec![radius_mm; k + 1]);
     // Stamped last, so the index is exactly what a fresh `stamp_all` would
     // build; taken back out if the cross will not build.
     let spans_before = state.index.shaft_spans.len();
@@ -2672,6 +3017,7 @@ fn tie_by_mast(
     struts.pop();
     state.ties.pop();
     state.profiles.pop();
+    state.unthickened.pop();
     outcome.mast_cells_refused += 1;
     None
 }
@@ -2985,11 +3331,34 @@ pub(crate) fn segment_path_excluding(
     k_bottom: usize,
     except: &[u32],
 ) -> Option<Vec<u32>> {
+    segment_path_or_block(context, index, seat_cell, k_top, base_cell, k_bottom, except).ok()
+}
+
+/// Why [`segment_path_or_block`] found no path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PathBlock {
+    /// No layer to draw on (the segment does not rise).
+    NoRise,
+    Drain,
+    Model,
+    Member,
+}
+
+/// [`segment_path_excluding`], naming the refusal.
+fn segment_path_or_block(
+    context: &SlendernessContext<'_>,
+    index: &ColumnHistory,
+    seat_cell: usize,
+    k_top: usize,
+    base_cell: usize,
+    k_bottom: usize,
+    except: &[u32],
+) -> Result<Vec<u32>, PathBlock> {
     let grid = context.grid;
     let cols = grid.cols();
-    let span = k_top.checked_sub(k_bottom)?;
+    let span = k_top.checked_sub(k_bottom).ok_or(PathBlock::NoRise)?;
     if span == 0 {
-        return None;
+        return Err(PathBlock::NoRise);
     }
     let seat_row = grid.row_of(seat_cell);
     let seat_col = grid.col_of(seat_cell);
@@ -3032,19 +3401,19 @@ pub(crate) fn segment_path_excluding(
         let col = col.min(cols - 1);
         let cell = row * cols + col;
         if !context.keep_out.admits(cell, here) {
-            return None;
+            return Err(PathBlock::Drain);
         }
         if slot > 0 {
             if context.history.model_blocks(cell, here) {
-                return None;
+                return Err(PathBlock::Model);
             }
             if index.shaft_blocks_excluding(cell, here, except) {
-                return None;
+                return Err(PathBlock::Member);
             }
         }
         path.push(u32::try_from(cell).unwrap_or(u32::MAX));
     }
-    Some(path)
+    Ok(path)
 }
 
 /// Every shaft, other than this arm's own, that stands at layer `k` within the
@@ -3129,9 +3498,19 @@ fn partner_candidates(
 /// DROPPED (refused and counted) where it may not move (`may_move` false: it
 /// was planned at a layer the member is already tied at, which is the whole
 /// reason for that layer), where the moved top passes either post's top,
-/// where the moved band no longer ties `run` (its bottom is not below the
-/// run's top), or where its plane no longer holds the direction `run` sways in
-/// at the new layer.
+/// where the moved band no longer ties `run` (its top, from which it holds,
+/// is not below the run's top), or where its plane no longer holds the
+/// direction `run` sways in at the new layer.
+///
+/// **Refusals that were not geometry are gone** (Craig ruling 2026-10-01,
+/// item 4): a band whose bottom would fall below the plate moves up exactly
+/// as one in a flare does, and a band between posts that lean apart is
+/// deepened until its diagonals fit the overhang law. What is still refused
+/// is geometry and clearance: a band that cannot move (a post ends first), a
+/// band below a branch partner's foot (moved onto the foot, its diagonal
+/// ends inside the partner's host trunk), the model or a member or a drain
+/// on a diagonal's path, a solid within the final gap. Each refusal is
+/// counted under one reason ([`BandRefusals`]).
 #[expect(
     clippy::too_many_arguments,
     reason = "the band needs the field, the two posts and the planned layer, and the run it ties \
@@ -3152,6 +3531,12 @@ fn plan_cross(
     let bands = &state.bands;
     let grid = context.grid;
     let h = context.layer_height_mm;
+    // THE LOWEST LAYER THE BAND BOTTOM MAY TAKE: on both posts' free shafts
+    // (above the flares and the raft). A band below a BRANCH partner's foot
+    // is NOT moved up onto it: there its diagonal ends in the branch's
+    // junction with its host trunk, which the member test admits as joined
+    // (measured 2026-10-01, stilt plate: diagonal 96 inside post 73 by
+    // 0.724 mm), so that refusal stays (`off_a_post`).
     let (floor, top_limit) = {
         let (Some(one), Some(two)) = (struts.get(a as usize), struts.get(b as usize)) else {
             return None;
@@ -3163,52 +3548,79 @@ fn plan_cross(
             one.k_top.min(two.k_top),
         )
     };
-    let dropped = |outcome: &mut SlendernessOutcome| {
+    // EVERY REFUSAL IS COUNTED UNDER ONE REASON (2026-10-01).
+    let refuse = |outcome: &mut SlendernessOutcome, reason: fn(&mut BandRefusals) -> &mut usize| {
         outcome.brace_bands_refused += 1;
+        *reason(&mut outcome.brace_band_refusals) += 1;
+    };
+    let dropped = |outcome: &mut SlendernessOutcome| {
+        refuse(outcome, |why| &mut why.in_flare);
         outcome.brace_bands_dropped_in_flare += 1;
     };
     let planned = k;
     let mut k = k;
     let mut moved = false;
+    let mut moved_off_the_plate = false;
+    let mut widened = false;
     // Each turn either breaks or raises `k` strictly, and `k` may not pass
     // `top_limit`, so the loop ends.
     let (a_cell_top, b_cell_top, depth, k_lo) = loop {
-        let (a_top, b_top) = {
-            let (Some(one), Some(two)) = (struts.get(a as usize), struts.get(b as usize)) else {
-                return None;
-            };
-            (one.cell_at(k), two.cell_at(k))
+        let (one, two) = match (struts.get(a as usize), struts.get(b as usize)) {
+            (Some(one), Some(two)) => (one, two),
+            _ => return None,
         };
+        let (a_top, b_top) = (one.cell_at(k), two.cell_at(k));
         let gap_mm = crate::cell_distance_mm(grid, a_top, b_top);
-        if gap_mm <= 0.0 {
+        let mut depth = context.lean.layers_to_reach(gap_mm);
+        if gap_mm <= 0.0 || depth == 0 {
+            refuse(outcome, |why| &mut why.no_gap);
             return None;
         }
-        let depth = context.lean.layers_to_reach(gap_mm);
-        if depth == 0 {
-            return None;
-        }
-        let Some(k_lo) = k.checked_sub(depth) else {
-            if moved {
-                dropped(outcome);
-            } else {
-                outcome.brace_bands_refused += 1;
+        // THE BAND IS AS DEEP AS ITS DIAGONALS NEED (2026-10-01). Sized from
+        // the gap at its top, a band between posts that lean apart has
+        // diagonals whose own lateral moves are longer than that gap and
+        // that the overhang law then refuses as too flat; the band is
+        // deepened to the move its longer diagonal makes, until both fit.
+        // The depth only grows, and never past `k`, so this ends.
+        while let Some(k_lo) = k.checked_sub(depth) {
+            let lateral = crate::cell_distance_mm(grid, a_top, two.cell_at(k_lo))
+                .max(crate::cell_distance_mm(grid, b_top, one.cell_at(k_lo)));
+            let needed = context.lean.layers_to_reach(lateral);
+            if needed <= depth {
+                break;
             }
-            return None;
-        };
-        if k_lo >= floor {
+            depth = needed;
+            widened = true;
+        }
+        // A BAND THAT DOES NOT FIT BELOW `k` FITS HIGHER (2026-10-01). Its
+        // bottom must stand at or above `floor` — the posts' free shafts, and
+        // so above the plate — and where it falls short the whole band moves
+        // up by the shortfall: reaching below the plate is no more a reason
+        // to refuse it than reaching into a flare is. Until then it was
+        // refused outright (Cylinder: 3,915 refusals below the plate).
+        let bottom = k.checked_sub(depth).filter(|&k_lo| k_lo >= floor);
+        if let Some(k_lo) = bottom {
             break (a_top, b_top, depth, k_lo);
         }
-        let raised = k + (floor - k_lo);
+        let raised = floor + depth;
         if !may_move || raised > top_limit {
             if may_move {
                 // How far above the layer it was planned at the band's top
                 // would have to stand.
                 state.flare_shortfall.set(Some(raised - planned));
             }
-            dropped(outcome);
+            // The binding reason, for the count: the plate, or a flare.
+            if k < depth {
+                refuse(outcome, |why| &mut why.below_plate);
+            } else {
+                dropped(outcome);
+            }
             return None;
         }
-        k = raised;
+        if k < depth {
+            moved_off_the_plate = true;
+        }
+        k = raised.max(k + 1);
         moved = true;
     };
     if moved {
@@ -3216,7 +3628,9 @@ fn plan_cross(
             let ties = state.ties.get(a as usize).map_or(&[][..], Vec::as_slice);
             new_plane_holds(ties, k, plane, run.sway_deg)
         });
-        if k_lo >= run.k_top || !plane_holds {
+        // TIE TIMING: a cross holds its posts from its band TOP, so a moved
+        // band ties `run` only if its top still stands inside it.
+        if k >= run.k_top || !plane_holds {
             dropped(outcome);
             return None;
         }
@@ -3239,7 +3653,7 @@ fn plan_cross(
         )
     };
     if !floor_ok {
-        outcome.brace_bands_refused += 1;
+        refuse(outcome, |why| &mut why.off_a_post);
         return None;
     }
     // Each diagonal's own lateral move, measured between the cells it actually
@@ -3249,7 +3663,7 @@ fn plan_cross(
     if context.lean.descent_cost_mm(depth, first_lateral).is_none()
         || context.lean.descent_cost_mm(depth, second_lateral).is_none()
     {
-        outcome.brace_bands_refused += 1;
+        refuse(outcome, |why| &mut why.too_flat);
         return None;
     }
     #[expect(
@@ -3277,17 +3691,26 @@ fn plan_cross(
     )]
     let band_base_mm = k_lo as f64 * context.layer_height_mm;
     if band_base_mm <= radius_mm {
-        outcome.brace_bands_refused += 1;
+        refuse(outcome, |why| &mut why.ring_under_plate);
         return None;
     }
-    let Some(first) = segment_path(context, index, a_cell_top, k, b_cell_lo, k_lo, Some(b)) else {
-        outcome.brace_bands_refused += 1;
-        return None;
+    let path = |seat: usize, base: usize, lands_on: u32, outcome: &mut SlendernessOutcome| {
+        match segment_path_or_block(context, index, seat, k, base, k_lo, &[lands_on]) {
+            Ok(path) => Some(path),
+            Err(block) => {
+                let reason: fn(&mut BandRefusals) -> &mut usize = match block {
+                    PathBlock::NoRise => |why| &mut why.no_gap,
+                    PathBlock::Drain => |why| &mut why.path_drain,
+                    PathBlock::Model => |why| &mut why.path_model,
+                    PathBlock::Member => |why| &mut why.path_member,
+                };
+                refuse(outcome, reason);
+                None
+            }
+        }
     };
-    let Some(second) = segment_path(context, index, b_cell_top, k, a_cell_lo, k_lo, Some(a)) else {
-        outcome.brace_bands_refused += 1;
-        return None;
-    };
+    let first = path(a_cell_top, b_cell_lo, b, outcome)?;
+    let second = path(b_cell_top, a_cell_lo, a, outcome)?;
     if context.member_clearance {
         let h = context.layer_height_mm;
         let point =
@@ -3308,7 +3731,7 @@ fn plan_cross(
             )
             .is_some()
             {
-                outcome.brace_bands_refused += 1;
+                refuse(outcome, |why| &mut why.solid_model);
                 outcome.brace_bands_refused_by_model += 1;
                 return None;
             }
@@ -3324,13 +3747,18 @@ fn plan_cross(
                 &[a, b],
                 outcome,
             ) {
-                outcome.brace_bands_refused += 1;
+                refuse(outcome, |why| &mut why.solid_member);
                 outcome.brace_bands_refused_by_member += 1;
                 return None;
             }
         }
     }
-    if moved {
+    if widened {
+        outcome.brace_bands_deepened_for_their_diagonals += 1;
+    }
+    if moved_off_the_plate {
+        outcome.brace_bands_moved_up_off_the_plate += 1;
+    } else if moved {
         outcome.brace_bands_moved_above_flare += 1;
     }
     Some(CrossPlan {
@@ -3350,8 +3778,8 @@ fn plan_cross(
 /// **Member against member**: whether the solid of radius `radius_mm` about
 /// `from`–`to` stays out of every standing member's DRAWN solid, other than
 /// the `posts` it joins and the members joined to those posts (a branch that
-/// lands on one, a diagonal that seats or lands on one, the trunk one stands
-/// on): those meet it at a planned joint. One pass over the members, each an
+/// lands on one, a diagonal that seats or lands on one): those meet it at a
+/// planned joint. The trunk a post stands on is NOT exempt (2026-10-01). One pass over the members, each an
 /// O(1) bounding-box test and, where that passes, one segment distance; a
 /// member whose WIDEST drawn radius does not clear is walked interval by
 /// interval against its drawn profile (`member_clearance::member_intrusion`).
@@ -3379,6 +3807,11 @@ fn member_solids_clear(
         member.seat_on_strut == Some(post)
             || matches!(member.landing, Landing::Strut { id, .. } if id == post)
     };
+    // NOT the trunk a post stands on (2026-10-01): a diagonal meets its post
+    // at the band, not at the post's foot, so a trunk is a member like any
+    // other. Until then it was admitted as joined, and a band deepened to
+    // reach a branch post's foot entered the trunk under it (stilt plate:
+    // diagonal 96 inside post 73 by 0.724 mm, measured 2026-10-01).
     let joined = |other: u32| {
         if posts.contains(&other) {
             return true;
@@ -3386,12 +3819,7 @@ fn member_solids_clear(
         let Some(member) = struts.get(other as usize) else {
             return true;
         };
-        posts.iter().any(|&post| {
-            rests_on(member, post)
-                || struts
-                    .get(post as usize)
-                    .is_some_and(|host| rests_on(host, other))
-        })
+        posts.iter().any(|&post| rests_on(member, post))
     };
     let solids = struts
         .iter()
@@ -4238,5 +4666,307 @@ mod tests {
             found.len()
         );
         assert!(found.is_empty(), "{}", found.join("\n"));
+    }
+
+    /// The runs of post 0 (a 4.0 mm plate post) when a branch lands on it at
+    /// layer 30 and SEATS at `branch_top`, as `(k_lo, k_top)` pairs, sorted.
+    fn host_runs_under_a_branch(branch_top: usize) -> Vec<(usize, usize)> {
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let host = plate_post(&grid, 0, 100, 0.2);
+        let mut branch = plate_post(&grid, 1, 120, 0.2);
+        branch.landing = crate::Landing::Strut { id: 0, layer: 30 };
+        branch.k_bottom = 30;
+        branch.k_top = branch_top;
+        branch.radius_mm = vec![0.2; branch_top - 30];
+        branch.carried_mm2 = vec![0.0; branch_top - 30];
+        let mut runs: Vec<(usize, usize)> = super::unbraced_runs(&grid, &[host, branch], 0.05, &law())
+            .iter()
+            .filter(|run| run.strut_id == 0)
+            .map(|run| (run.k_lo, run.k_top))
+            .collect();
+        runs.sort_unstable();
+        runs.dedup();
+        runs
+    }
+
+    /// TIE TIMING (Craig ruling 2026-10-01): a branch that lands on a host
+    /// holds the host sideways only once the branch is held at ITS top, the
+    /// layer its seat prints. Until then the branch is a free cantilever off
+    /// the host and the host runs from its last tie below up to the layer
+    /// being printed. A host carrying a branch that lands at layer 30 and
+    /// seats at layer 70 is therefore measured over 0..70 (printed before the
+    /// seat holds) and 30..80 (after it); the landing layer alone ends no run.
+    /// A branch that seats ABOVE the host's own top never holds it while the
+    /// host prints: one run, 0..80.
+    #[test]
+    fn a_landing_branch_ties_its_host_only_once_its_seat_has_printed() {
+        assert_eq!(
+            host_runs_under_a_branch(70),
+            vec![(0, 70), (30, 80)],
+            "a branch landing at 30 and seating at 70"
+        );
+        assert_eq!(
+            host_runs_under_a_branch(95),
+            vec![(0, 80)],
+            "a branch landing at 30 and seating at 95, above the host's own top at 80"
+        );
+    }
+
+    /// TIE TIMING for a cross: each diagonal lands on one post at the band
+    /// bottom and seats on the other at the band top, so the `|X|` holds
+    /// either post only once its top has printed. Two 4.0 mm posts with a
+    /// cross over 30..60 (its bottom on the free shaft, above the 1.2 mm
+    /// boss top): in the cross's plane each post runs 0..60 and 60..80; the
+    /// band bottom ends no run (until 2026-10-01: 0..30, 30..60, 60..80).
+    #[test]
+    fn a_cross_ties_its_posts_from_its_band_top() {
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let mut struts = vec![
+            plate_post(&grid, 0, 100, 0.2),
+            plate_post(&grid, 1, 140, 0.2),
+        ];
+        let (a, b) = (struts[0].cell, struts[1].cell);
+        for (seat_cell, seat_on, lands_on, base) in [(a, 0, 1, b), (b, 1, 0, a)] {
+            super::push_brace(
+                &grid,
+                &mut struts,
+                seat_cell,
+                60,
+                30,
+                crate::Landing::Strut {
+                    id: lands_on,
+                    layer: 30,
+                },
+                seat_on,
+                0.1,
+                vec![u32::try_from(base).expect("a cell index"); 30],
+            );
+        }
+        for post in 0..2_u32 {
+            let mut runs: Vec<(usize, usize)> = super::unbraced_runs(&grid, &struts, 0.05, &law())
+                .iter()
+                .filter(|run| run.strut_id == post)
+                .map(|run| (run.k_lo, run.k_top))
+                .collect();
+            runs.sort_unstable();
+            runs.dedup();
+            assert!(
+                runs.iter().all(|&(lo, top)| lo != 30 && top != 30),
+                "post {post}: the band bottom cut a run: {runs:?}"
+            );
+            assert!(
+                runs.contains(&(0, 60)) && runs.contains(&(60, 80)),
+                "post {post}: {runs:?}"
+            );
+        }
+    }
+
+    /// REFUSALS THAT WERE NOT GEOMETRY (Craig ruling 2026-10-01, item 4). On
+    /// two 4.0 mm posts 1.0 mm apart, two bands the lane used to refuse are
+    /// built:
+    /// * planned with its top lower than its own depth (the band "below the
+    ///   plate"): moved up until its bottom is on the free shafts;
+    /// * between posts that lean apart, where the depth sized from the gap at
+    ///   the top leaves a diagonal "too flat": deepened until both fit.
+    /// Red until 2026-10-01: refused as below the plate, and too flat.
+    ///
+    /// A band below a BRANCH partner's foot stays refused (`off_a_post`):
+    /// moved onto the foot, its diagonal ends inside the trunk the branch
+    /// lands on (measured on the stilt plate, 0.724 mm deep).
+    #[test]
+    fn a_band_that_fits_higher_or_deeper_is_built_not_refused() {
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let history = crate::up_sweep::ColumnHistory::new(&grid);
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(0.05, 45.0, 25.0);
+        let law = law();
+        let context = prune_context(&grid, &history, &keep_out, &lean, &law);
+        let run = UnbracedRun {
+            strut_id: 0,
+            k_lo: 0,
+            k_top: 80,
+            length_mm: 4.0,
+            radius_mm: 0.2,
+            limit_mm: 10.0,
+            sway_deg: None,
+        };
+        let depth = lean.layers_to_reach(1.0);
+        let plan = |struts: &[crate::SweepStrut], k: usize| {
+            let state = super::TieState::build(&context, struts);
+            let mut outcome = super::SlendernessOutcome::default();
+            let plan = super::plan_cross(&context, &state, struts, 0, 1, k, &run, true, &mut outcome);
+            (plan, outcome)
+        };
+
+        // Below the plate.
+        let posts = vec![
+            plate_post(&grid, 0, 100, 0.2),
+            plate_post(&grid, 1, 120, 0.2),
+        ];
+        assert!(depth > 2, "anti-vacuity: a 1.0 mm band is {depth} layers deep");
+        let (built, outcome) = plan(&posts, depth - 2);
+        let built = built.unwrap_or_else(|| panic!("refused: {:?}", outcome.brace_band_refusals));
+        assert_eq!(built.k_lo, FREE_SHAFT_FLOOR_OF_A_4_MM_POST, "{built:?}");
+        assert_eq!(outcome.brace_bands_moved_up_off_the_plate, 1);
+
+        // Below a branch partner's foot: post 1 lands on post 2 at layer 50.
+        let mut posts = vec![
+            plate_post(&grid, 0, 100, 0.2),
+            plate_post(&grid, 1, 120, 0.2),
+            plate_post(&grid, 2, 140, 0.2),
+        ];
+        posts[1].landing = crate::Landing::Strut { id: 2, layer: 50 };
+        posts[1].k_bottom = 50;
+        posts[1].radius_mm = vec![0.2; 30];
+        posts[1].carried_mm2 = vec![0.0; 30];
+        let k = 50 + depth - 5;
+        assert!(k + 1 < run.k_top && k - depth >= FREE_SHAFT_FLOOR_OF_A_4_MM_POST);
+        let (built, outcome) = plan(&posts, k);
+        assert!(built.is_none(), "a band below a branch's foot was built: {built:?}");
+        assert_eq!(outcome.brace_band_refusals.off_a_post, 1, "{:?}", outcome.brace_band_refusals);
+
+        // Leaning apart: post 1's axis steps one cell outward every 4 layers
+        // down, so a diagonal from post 0's top to post 1's bottom moves
+        // further than the gap at the top.
+        let mut posts = vec![
+            plate_post(&grid, 0, 100, 0.2),
+            plate_post(&grid, 1, 120, 0.2),
+        ];
+        posts[1].path = (0..80_usize)
+            .map(|layer| {
+                u32::try_from(grid.index(100, 120 + (80 - layer) / 4)).expect("a cell index")
+            })
+            .collect();
+        let k = 70;
+        let (built, outcome) = plan(&posts, k);
+        let built = built.unwrap_or_else(|| panic!("refused: {:?}", outcome.brace_band_refusals));
+        let lateral = crate::cell_distance_mm(&grid, posts[0].cell_at(k), posts[1].cell_at(built.k_lo));
+        assert!(
+            built.k - built.k_lo >= lean.layers_to_reach(lateral),
+            "the band is {} layers deep for a {lateral} mm diagonal: {built:?}",
+            built.k - built.k_lo
+        );
+        assert_eq!(outcome.brace_bands_deepened_for_their_diagonals, 1);
+    }
+
+    fn prune_context<'a>(
+        grid: &'a crate::grid::Grid,
+        history: &'a crate::up_sweep::ColumnHistory,
+        keep_out: &'a crate::drain::DrainKeepOut,
+        lean: &'a crate::lean::LeanLaw,
+        law: &'a SlendernessLaw,
+    ) -> super::SlendernessContext<'a> {
+        super::SlendernessContext {
+            grid,
+            history,
+            keep_out,
+            lean,
+            law,
+            layer_height_mm: 0.05,
+            layers: 100,
+            flare_factor: 1.6,
+            mast_root_clearance: true,
+            final_clearance_mm: 0.3,
+            member_clearance: true,
+            shaft_landings: true,
+            merge: true,
+            brace: true,
+            thicken: true,
+            mast: true,
+            max_struts: 1_000,
+            x_allowed: 12.0,
+            seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
+        }
+    }
+
+    /// Two 4.0 mm plate posts 2.0 mm apart at `radius`, one `|X|` between
+    /// them over layers 20..40 built in this pass; when `thicken` is set, each
+    /// post's remaining over-limit run (the direction straight across the
+    /// cross's plane) is then THICKENED by the production rung. Returns the
+    /// prune's count, and the members left.
+    fn prune_after(radius: f64, thicken: bool) -> (usize, usize, usize) {
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let history = crate::up_sweep::ColumnHistory::new(&grid);
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(0.05, 45.0, 25.0);
+        let law = law();
+        let context = prune_context(&grid, &history, &keep_out, &lean, &law);
+        let mut struts = vec![
+            plate_post(&grid, 0, 100, radius),
+            plate_post(&grid, 1, 140, radius),
+        ];
+        let mut state = super::TieState::build(&context, &struts);
+        let first_new = struts.len();
+        // Band 20..40: printed from its top, the cross cuts each post at 40,
+        // into 0..40 and 40..80, 2.0 mm each against a 2.5 mm limit.
+        let plan = super::CrossPlan {
+            a: 0,
+            b: 1,
+            k: 40,
+            k_lo: 20,
+            a_top: struts[0].cell,
+            b_top: struts[1].cell,
+            radius_mm: radius,
+            first: Vec::new(),
+            second: Vec::new(),
+            plane: super::plane_between(&grid, struts[0].cell, struts[1].cell),
+        };
+        let mut outcome = super::SlendernessOutcome::default();
+        super::commit_cross(&context, &mut state, &mut struts, plan, &mut outcome);
+        outcome.braces_added += 1;
+        let mut thickened = 0;
+        if thicken {
+            for post in 0..2_usize {
+                let runs = super::member_runs(
+                    &grid,
+                    &struts[post],
+                    &state.ties[post],
+                    &state.profiles[post],
+                    0.05,
+                    &law,
+                );
+                let over: Vec<UnbracedRun> =
+                    runs.into_iter().filter(UnbracedRun::over_limit).collect();
+                assert_eq!(
+                    over.len(),
+                    1,
+                    "anti-vacuity: post {post} is over only straight across the cross: {over:?}"
+                );
+                assert!(
+                    super::thicken(&context, &mut state, &mut struts, &over[0], &mut outcome),
+                    "anti-vacuity: post {post} takes the thicken rung"
+                );
+                thickened += 1;
+            }
+        }
+        let taken =
+            super::prune_unneeded_crosses(&context, &state, &mut struts, first_new, &mut outcome);
+        (taken, struts.len(), thickened)
+    }
+
+    /// KEEP ONE-DIRECTION CROSSES (Craig ruling 2026-10-01): a cross that
+    /// ties two columns holds the sway in its own plane; thickening (or a
+    /// mast) covers the direction across it. Thickening the posts for that
+    /// other direction does NOT make the cross unneeded, so the prune keeps
+    /// it. Red until 2026-10-01: the prune judged the cross on the THICKENED
+    /// posts, found both inside the limit in every direction without it, and
+    /// took it out (the brace pair's 2 built, 2 pruned, 0 kept).
+    #[test]
+    fn a_one_plane_cross_is_kept_when_thickening_holds_the_other_direction() {
+        let (taken, left, thickened) = prune_after(0.05, true);
+        assert_eq!(thickened, 2, "anti-vacuity: both posts thickened");
+        assert_eq!(taken, 0, "the prune took out a cross that holds its own plane");
+        assert_eq!(left, 4, "both posts and both diagonals stand");
+    }
+
+    /// The prune still takes out a cross that NOTHING needs: posts already
+    /// inside their limit in every direction (0.2 mm, 4.0 mm against 10 mm)
+    /// with no thickening at all. The guard that the rule above did not switch
+    /// the prune off.
+    #[test]
+    fn a_cross_no_post_needs_is_still_taken_out() {
+        let (taken, left, _) = prune_after(0.2, false);
+        assert_eq!(taken, 1, "a cross on two posts inside their limits was kept");
+        assert_eq!(left, 2, "only the two posts stand");
     }
 }
