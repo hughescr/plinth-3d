@@ -1125,10 +1125,25 @@ fn prepare_one(
     }
 
     clock.entering("Orientation");
+    // **As drawn?** (GitHub issue #1, owner spec 2026-10-01.) `--orient none`
+    // marks every model; otherwise this model's own tag attribute or
+    // `<stem>.asdrawn` marker can. The probe reads one extended attribute and
+    // checks one sibling path; a tag it cannot decode is a warning carried on
+    // the disclosure, never a refusal.
+    let probe = match policy.orientation {
+        OrientationPolicy::AsDrawn => plinth_orient::as_drawn::AsDrawnProbe {
+            reason: Some(plinth_orient::as_drawn::AsDrawnReason::OrientNone),
+            warnings: Vec::new(),
+        },
+        OrientationPolicy::DenseSweep | OrientationPolicy::Pinned(_) => {
+            plinth_orient::as_drawn::probe_source(source_path)
+        }
+    };
     let oriented = match orient_model(
         model,
         decimated,
         &policy.orientation,
+        probe.reason,
         policy.resources.orient(),
     ) {
         Ok(oriented) => oriented,
@@ -1139,9 +1154,10 @@ fn prepare_one(
     // parameter so that the eleven call sites above and below stay as they
     // are, and so that "no orientation was chosen yet" is enforced by which
     // closure is in scope instead of by remembering to pass `None`.
-    let orientation = Some(crate::OrientationDisclosure::from_report(
-        oriented.history().orientation(),
-    ));
+    let orientation = Some(crate::OrientationDisclosure {
+        tag_warnings: probe.warnings,
+        ..crate::OrientationDisclosure::from_report(oriented.history().orientation())
+    });
     let report = |repair: &Option<plinth_mesh::RepairEvidence>, assumed_print_size, outcome| {
         ModelPreparationReport {
             model: model.clone(),
@@ -1308,13 +1324,43 @@ fn failure(stop: &ChainStop) -> ModelPreparationOutcome {
 /// model the map does not name is refused
 /// ([`PipelineError::OrientationBaselineMissing`]) rather than given a
 /// neighbour's answer.
+///
+/// **An operator mark beats the policy.** `as_drawn` is `Some` when the run
+/// said `--orient none` or this model carries a `plinth-no-rotate` tag or a
+/// `<stem>.asdrawn` marker; the model is then used exactly as drawn, whatever
+/// the policy, and nothing is searched or replayed (owner spec 2026-10-01:
+/// ANY of the switches makes the model as drawn). That includes a pinned run:
+/// a marked model is not refused for lacking a baseline, because it does not
+/// need one.
 fn orient_model(
     model: &ModelId,
     decimated: DecimatedModel,
     policy: &OrientationPolicy,
+    as_drawn: Option<plinth_orient::as_drawn::AsDrawnReason>,
     limits: plinth_orient::OrientSearchLimits,
 ) -> Result<OrientedModel, ChainStop> {
+    if let Some(reason) = as_drawn {
+        return plinth_orient::orient_as_drawn(decimated, reason).map_err(|source| {
+            ChainStop::new(PipelineError::Orient {
+                model: model.clone(),
+                source,
+            })
+        });
+    }
     match policy {
+        // Reached only when the caller did not pass the run-wide reason,
+        // which `prepare_one` always does; answered the same way rather than
+        // with a panic.
+        OrientationPolicy::AsDrawn => plinth_orient::orient_as_drawn(
+            decimated,
+            plinth_orient::as_drawn::AsDrawnReason::OrientNone,
+        )
+        .map_err(|source| {
+            ChainStop::new(PipelineError::Orient {
+                model: model.clone(),
+                source,
+            })
+        }),
         OrientationPolicy::DenseSweep => {
             let mut request = plinth_orient::registered_sweep_request().map_err(|source| {
                 ChainStop::new(PipelineError::Orient {
@@ -2610,7 +2656,8 @@ fn print_sweep_disclosure(
              by up to {:.4} mm), {} on a knife edge, {} left in place because every on-face \
              seat broke a rule of the finished field; moves refused by the lean law {}, by an \
              unbraced run's limit {}, by the drain keep-out {} ({} member checks); {} disc \
-             samples + {} search samples over {} layers, {} round(s)",
+             samples + {} search samples + {} move-verify samples over {} layers, {} round(s); \
+             {} tips off their face at the disc's rim alone (lattice on the face)",
             emission.tips_trimmed_to_seat,
             emission.shaft_members_trimmed_to_seat,
             emission.tips_trimmed_without_a_measured_face,
@@ -2634,8 +2681,10 @@ fn print_sweep_disclosure(
             footprint.members_checked,
             footprint.disc_samples,
             footprint.search_samples,
+            footprint.verify_samples,
             footprint.layers_rasterised,
             footprint.rounds,
+            footprint.tips_off_face_at_rim_only,
         );
         for (arm, fraction) in &footprint.knife_edges {
             println!(
@@ -2810,6 +2859,26 @@ fn print_sweep_disclosure(
         report.uncarried_load_mm2,
         report.misrouted_load_mm2,
         report.unrooted_landings,
+    );
+    // THE UNROOTED-COLUMN RULE (drain-rim routing, 2026-09-30): load that
+    // reached a model column the up-sweep left unrooted goes sideways to a
+    // rooted carrier in reach, not down into the unrooted material. All zero on
+    // a field the up-sweep rooted everywhere.
+    let unrooted_routing = &report.unrooted_routing;
+    println!(
+        "[sweep {model}] unrooted columns: {} (layer, cell) entries the up-sweep left unrooted, \
+         {} refused as routing roots; {:.4} mm2 sent sideways to a rooted carrier, {:.4} mm2 \
+         with no rooted carrier in reach kept down its own column; ledger: {} reads of a \
+         handed column kept {:.4} mm2 of its own peel out of the raster, {} of those events \
+         ({:.4} mm2) re-entered it one layer down as counted injected peel",
+        unrooted_routing.recorded_cells,
+        unrooted_routing.columns_refused,
+        unrooted_routing.load_rerouted_mm2,
+        unrooted_routing.load_kept_mm2,
+        unrooted_routing.handed_columns_held,
+        unrooted_routing.handed_own_withheld_mm2,
+        unrooted_routing.handed_events_reentered,
+        unrooted_routing.handed_reentered_mm2,
     );
     println!(
         "[sweep {model}] raster {} cells/layer at {:.4} mm pitch over {} layers \
@@ -3116,6 +3185,26 @@ fn print_sweep_disclosure(
         emission.raft_feet_sharing_a_pad,
         emission.raft_bridges,
         emission.raft_volume_mm3,
+    );
+    // THE OWNER'S CHITUBOX GEOMETRY (2026-09-30), as path hits: how many tip
+    // balls read their factor off his profiles (and the range they read), and
+    // how many root bosses were drawn at his Heavy profile's foot-to-root
+    // factor (and the factors and roots they were drawn with).
+    let spread = |values: &[f64]| {
+        plinth_support::SweepLowering::distribution(values).map_or_else(
+            || "n/a".to_owned(),
+            |(min, p50, max)| format!("{min:.4}/{p50:.4}/{max:.4}"),
+        )
+    };
+    println!(
+        "[sweep {model}] chitubox geometry: {} tip balls sized from the profile table \
+         (factor min/p50/max {}), {} root bosses scaled to their root by the Heavy profile ratio \
+         (factor min/p50/max {}, root radius min/p50/max {} mm)",
+        emission.tip_ball_factor.len(),
+        spread(&emission.tip_ball_factor),
+        emission.root_boss_factor.len(),
+        spread(&emission.root_boss_factor),
+        spread(&emission.root_boss_root_radius_mm),
     );
     println!(
         "[sweep {model}] lowering: {} arms offered, {} emitted, {} dropped zero-length, \

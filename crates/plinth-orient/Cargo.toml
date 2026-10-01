@@ -28,3 +28,15 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
 thiserror = { workspace = true }
+# The "use this model as drawn" tags (GitHub issue #1, owner spec 2026-10-01):
+# read a file's extended attributes directly, never through Spotlight.
+# MIT OR Apache-2.0. Its default `unsupported` feature makes it compile, and
+# report "not supported", on a platform without xattrs, so a build there reads
+# no tag rather than failing.
+xattr = "1.6"
+
+# macOS Finder tags live in `com.apple.metadata:_kMDItemUserTags` as a binary
+# plist array of strings. MIT. Only macOS writes that attribute, so only macOS
+# links the decoder; serde support is not needed.
+[target.'cfg(target_os = "macos")'.dependencies]
+plist = { version = "1.10", default-features = false }

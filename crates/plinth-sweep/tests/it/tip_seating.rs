@@ -29,7 +29,7 @@
 //! | `flat_disc_tips_seat_by_the_law` | every pole is inside by at least the law's own depth, and every delivered cut disc carries `a ≥ r_tip` | it counts the arms it graded and fails on an empty field; the sabotage below turns it red |
 //! | `the_seat_trim_is_the_carried_face_and_never_moves_the_seat` | every ball and first shaft segment carries the seat trim, its plane is the model's own underside, and dropping the face point moves no seat | it counts balls and trimmed tapers and requires them equal and non-zero |
 //! | `thin_skin_seats_in_full_and_is_trimmed_to_its_underside` | a skin thinner than the ball is seated to the law's full depth, and the ball is trimmed to the skin's underside | it requires the skin to be thinner than the law's depth, and every tip to carry the trim |
-//! | `a_thick_disc_moves_only_by_the_allowance` | re-running with the retired 0.100 mm pinned moves ONLY the arms that term binds, and moves no trim plane | it requires both populations to be non-empty |
+//! | `a_thick_disc_moves_only_by_the_allowance` | re-running with the law's smallest term pinned (0.150 mm since 2026-09-30, the retired 0.100 mm before) moves ONLY the arms that term binds, and moves no trim plane | it requires both populations to be non-empty |
 //!
 //! (Until 2026-09-28 the thin-wall bound was a horizontal "far face" clip on
 //! the ball's top; the seat trim — the ball and first shaft segment cut to the
@@ -82,7 +82,7 @@ fn registered_pixel_pitch_mm() -> f64 {
         / 1000.0
 }
 
-/// The retired typed depth, read from the registry so the probe below pins the
+/// The retired typed depth, read from the registry so the probe below pins a
 /// number the engine actually carried rather than a literal.
 fn retired_contact_depth_mm() -> f64 {
     m0_constants()
@@ -93,30 +93,50 @@ fn retired_contact_depth_mm() -> f64 {
         .get()
 }
 
-/// The registered ball factor: an emitted tip ball has radius
-/// `BALL_FACTOR × r_tip`, and its equator is the deepest seat that still widens
-/// the cut disc.
-fn registered_ball_factor() -> f64 {
+/// **The seat minimum the thick-disc probe pins: 1.5 × the retired depth,
+/// 0.150 mm. RE-PINNED 2026-09-30 (fix/chitubox-geometry), and why.**
+///
+/// It was the retired 0.100 mm itself. The owner's ChituBox ball ratios
+/// (`CHITUBOX_TIP_CONTACT_PROFILES`: 1.25-1.5 by tip size, where every sweep
+/// ball was 1.5 × r before) make the ball clause `(f − √(f² − 1))·r` deeper on
+/// every tip above 0.1 mm, and on this disc every seat is then 0.104 mm or
+/// deeper, by its ball clause or its incidence clause: the retired depth binds
+/// no arm and the comparison split nothing (measured: 0 moved, 236 unmoved;
+/// seat-depth deciles 0.104, 0.158, 0.171, 0.184, 0.190 ... 0.274 mm). The
+/// claim graded is that the law is a MAXIMUM, so moving its smallest term
+/// moves only the arms that term binds; that holds for any pin above the
+/// allowance, and 0.150 mm splits this disc (about a tenth of its arms seat
+/// below it). A test fixture choice, not a registered number.
+fn probe_pin_mm() -> f64 {
+    1.5 * retired_contact_depth_mm()
+}
+
+/// The registered ball factor at this tip's size: an emitted sweep tip ball has
+/// radius `f(r_tip) × r_tip`, `f` read off the owner's ChituBox profiles
+/// (`CHITUBOX_TIP_CONTACT_PROFILES`, 2026-09-30; until then the single
+/// Placeholder `BALL_FACTOR_STUB` = 1.5), and its equator is the deepest seat
+/// that still widens the cut disc.
+fn registered_ball_factor(tip_radius_mm: f64) -> f64 {
     m0_constants()
         .expect("registry")
-        .placeholders()
-        .ball_factor_stub()
-        .diagnostic()
-        .get()
+        .evidence()
+        .chitubox_tip_contact_profiles()
+        .value()
+        .ball_factor(tip_radius_mm)
 }
 
 /// The depth this arm's seat must reach: the law's own minimum, or its ball's
 /// equator where that is shallower — the point past which more burial cuts a
 /// NARROWER disc, not a wider one.
 fn required_depth_mm(tip_radius_mm: f64) -> f64 {
-    seat_minimum_mm().min(registered_ball_factor() * tip_radius_mm)
+    seat_minimum_mm().min(registered_ball_factor(tip_radius_mm) * tip_radius_mm)
 }
 
 /// The ball-cap clause's own depth for a tip of this radius:
 /// `(f − sqrt(f² − 1)) · r_tip`, the depth at which the cut disc equals the
 /// shaft. Derived from the registered ball factor, never typed.
 fn ball_clause_depth_mm(tip_radius_mm: f64) -> f64 {
-    let factor = registered_ball_factor();
+    let factor = registered_ball_factor(tip_radius_mm);
     (factor - (factor * factor - 1.0).max(0.0).sqrt()) * tip_radius_mm
 }
 
@@ -512,9 +532,10 @@ fn thin_skin_seats_in_full_and_is_trimmed_to_its_underside() {
 /// alone produces, and every trim plane is the underside whatever the law's
 /// terms are. The one thing that commit changed for such a model is PR-1(a): the
 /// law's smallest term went from the typed 0.100 mm to the derived allowance.
-/// So the test re-runs the identical lowering with that term PINNED back to
-/// 0.100 mm (the `seat-minimum-probe` feature, which no production build
-/// enables) and requires:
+/// So the test re-runs the identical lowering with that term PINNED above the
+/// allowance (the `seat-minimum-probe` feature, which no production build
+/// enables; the pin was the retired 0.100 mm until 2026-09-30 and is 0.150 mm
+/// since, see [`probe_pin_mm`] for the measured reason) and requires:
 ///
 /// * every arm whose BALL clause binds — the term this commit did not touch —
 ///   to emit bit-identical geometry under both; and
@@ -536,10 +557,9 @@ fn a_thick_disc_moves_only_by_the_allowance() {
         &layers,
         MAX_PRIMITIVES,
         MAX_PRIMITIVE_BYTES,
-        retired_contact_depth_mm(),
+        probe_pin_mm(),
     )
     .expect("the lowering refuses only about the request");
-
     // The seat trim is a property of the FACE, not of the seat law: moving
     // the law's smallest term must leave every ball's trim plane unchanged.
     let trims = |lowering: &SweepLowering| -> Vec<_> {
@@ -566,13 +586,13 @@ fn a_thick_disc_moves_only_by_the_allowance() {
     // lower a seat, and by no more than that term moved. Stated as a
     // consequence rather than by recomputing the maximum here, which is the
     // trap a test that re-implements production logic falls into.
-    let step_mm = retired_contact_depth_mm() - seat_minimum_mm();
+    let step_mm = probe_pin_mm() - seat_minimum_mm();
     assert!(
         step_mm > 0.0,
-        "the derived allowance {} mm must be SHALLOWER than the typed depth {} mm it \
-         replaced, or this comparison is grading the wrong direction",
+        "the derived allowance {} mm must be SHALLOWER than the pinned depth {} mm, or this \
+         comparison is grading the wrong direction",
         seat_minimum_mm(),
-        retired_contact_depth_mm()
+        probe_pin_mm()
     );
     let mut moved = 0_usize;
     let mut unmoved = 0_usize;
@@ -620,17 +640,18 @@ fn a_thick_disc_moves_only_by_the_allowance() {
             let length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
             let sin_tilt = (axis[0] * axis[0] + axis[1] * axis[1]).sqrt() / length;
             let flank_mm = layer_height_mm() + now.tip_radius_mm[index] * sin_tilt;
-            let equator_mm = registered_ball_factor() * now.tip_radius_mm[index];
+            let equator_mm =
+                registered_ball_factor(now.tip_radius_mm[index]) * now.tip_radius_mm[index];
             assert!(
-                *here >= retired_contact_depth_mm() - 1e-12
+                *here >= probe_pin_mm() - 1e-12
                     || (*here - ball_clause_depth_mm(now.tip_radius_mm[index])).abs() < 1e-12
                     || (*here - flank_mm).abs() < 1e-12
                     || (*here - equator_mm).abs() < 1e-12,
-                "arm {index} did not move, yet its depth {here} is below the retired \
+                "arm {index} did not move, yet its depth {here} is below the pinned \
                  {} mm and is none of its own ball clause's depth, its own incidence \
                  clause's {flank_mm} mm, or its own ball equator at {equator_mm} mm — so \
                  nothing explains why the term that moved did not move it",
-                retired_contact_depth_mm()
+                probe_pin_mm()
             );
         }
     }

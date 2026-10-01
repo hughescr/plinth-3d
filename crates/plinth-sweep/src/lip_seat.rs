@@ -48,9 +48,12 @@
 //!    first, and each one VERIFIED by the lowering's own measurement before it
 //!    is taken. An arm something else rests on moves only with its leaf
 //!    children. **The sized field then decides** ([`blame`], [`put_back`]):
-//!    the down-sweep sizes the pass, and a re-landing whose new host chain
-//!    comes out overloaded, or whose foot on the plate comes to lap a root it
-//!    did not, is put back and its descent refused from then on.
+//!    the down-sweep sizes the pass, and a re-landing that ADDED load to a
+//!    member of its new host chain that comes out overloaded, or whose NEW
+//!    foot on the plate comes to lap a root it did not, is put back and its
+//!    descent refused from then on; where several moves broke the same
+//!    member, the longest goes back first, alone, and the field is sized
+//!    again before the next (fix/lip-seat-blame, 2026-10-01).
 //! 2. **A seat further in on the same face.** The footprint rule
 //!    (`footprint.rs`) already slides a seat along its face; a tip whose disc
 //!    is on its face but whose shaft the trim still bites joins its search,
@@ -221,6 +224,15 @@ pub struct LipSeatOutcome {
     /// (each would have stood on air). The path hits of the withdrawal.
     pub inserted_arms_withdrawn: usize,
     pub inserted_on_a_put_back_move: usize,
+    /// The path hits of [`blame`]'s attribution (fix/lip-seat-blame,
+    /// 2026-10-01), summed over the sized checks that put a move back: a
+    /// member newly overloaded (or a root newly lapping) that a move's new
+    /// chain reaches but its old chain already reached, so the move added
+    /// no load to it and is not blamed for it (R1); and moves that did add
+    /// to a broken member but were left standing because a longer move that
+    /// broke it was put back first (R2).
+    pub blame_spared_already_carried: usize,
+    pub blame_held_behind_longer: usize,
     /// Sized-field checks run (one per re-sizing): the path hits of
     /// [`settle`].
     pub sizing_checks: usize,
@@ -727,6 +739,7 @@ pub(crate) fn apply(
                 index: index_of,
                 id,
                 cell: proposal.candidate.cell,
+                cost_mm: proposal.candidate.cost_mm,
                 was,
                 children_were: Vec::with_capacity(children.len()),
             };
@@ -796,6 +809,10 @@ pub(crate) struct Relanding {
     id: u32,
     /// The base cell of the descent taken (what a put-back refuses again).
     cell: usize,
+    /// The lean law's price of the descent taken (`LeanLaw::descent_cost_mm`,
+    /// its weighted length): the measure that chose it as the cheapest, and
+    /// the order in which [`blame`] puts offenders back, longest first.
+    cost_mm: f64,
     /// The arm's landing, base layer and path before the move.
     was: (Landing, usize, Vec<u32>),
     /// Each child moved with it, and the child's path before.
@@ -846,25 +863,91 @@ pub(crate) enum PutBack {
     Roots,
 }
 
-/// **The sized field decides** (challenger, 2026-09-29). A re-landing hands
-/// the arm's whole load to a new host chain, or makes the arm a new plate
-/// root, and only the down-sweep that follows knows how thick that makes
-/// the chain and its root. So after it: a member of a mover's new chain (the
-/// arm, its host, and down to the plate) that is overloaded now and was not,
-/// or carries more past its limit than it did, blames that mover; and a
-/// plate root at the foot of a mover's chain that overlaps a root it did not
-/// overlap before blames it too. Measured on `make_tall_stilt_plate` at
-/// `ee07600` (arm 69 at `X` 12.83 against 12, 20 layers) and `make_laid_tube`
-/// (overlapping root pairs 1 -> 7) before this check existed.
+/// What [`blame`] decided on one sized check: the moves to put back now (by
+/// slot in `moves`, ascending, each with why), and the path hits of the
+/// attribution, which [`put_back_all`] books on the outcome.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct Blamed {
+    moves: Vec<(usize, PutBack)>,
+    /// (move, broken member or root pair) pairs the move's new chain reaches
+    /// but its old chain already reached: not blamed (R1).
+    spared_already_carried: usize,
+    /// Moves that added to a broken member or root pair, left standing
+    /// because a longer move that broke the same ones goes back first (R2).
+    held_behind_longer: usize,
+}
+
+impl Blamed {
+    /// Whether nothing is to be put back.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.moves.is_empty()
+    }
+}
+
+/// The members `start` hands its load to, `start` first, down its landings
+/// to its foot; and whether that foot stands on the plate. Bounded by the
+/// strut count, so a malformed cycle cannot spin.
+fn chain_of(struts: &[SweepStrut], start: usize, chain: &mut Vec<u32>) -> bool {
+    chain.clear();
+    let mut at = start;
+    for _ in 0..=struts.len() {
+        let Some(member) = struts.get(at) else { break };
+        chain.push(member.id);
+        match member.landing {
+            Landing::Strut { id, .. } => at = id as usize,
+            Landing::Plate => return true,
+            Landing::Model { .. } => break,
+        }
+    }
+    false
+}
+
+/// **The sized field decides** (challenger, 2026-09-29), **and a move answers
+/// only for the load it ADDED** (fix/lip-seat-blame, 2026-10-01).
 ///
-/// Returns, per blamed move (by its slot in `moves`), why; plus the new
-/// overloaded members and new root pairs no move's chain explains.
+/// A re-landing hands the arm's whole load to a new host chain, or makes the
+/// arm a new plate root, and only the down-sweep that follows knows how thick
+/// that makes the chain and its root. So after it, the members overloaded
+/// now and not before (or carrying more past their limit than before), and
+/// the plate-root pairs overlapping now and not before, are the field's
+/// breaks, and a move is an offender of a break only where its move put load
+/// there:
+///
+/// * **R1, attribution.** A move offends a broken member only when the member
+///   is in its NEW chain (the arm, its host, down to the foot) and was not in
+///   the chain under its `was` landing, read on the field as it stands (the
+///   chain this move alone, put back, would hand the load to). A move DOWN
+///   the host it already stood on added nothing to that host or anything
+///   under it. The mover itself is in both chains, and still answers for its
+///   own overload: whatever lands on it now lands on its moved shaft. A move
+///   offends a new root pair only when the root at its new foot is one of the
+///   pair and is a NEW foot for it: a different member from the old chain's
+///   foot, or the mover itself standing on the plate (its root is where it
+///   moved it).
+/// * **R2, smallest put-back.** Where several moves offend a break, the
+///   LONGEST offender (the lean law's price, `Relanding::cost_mm`, the
+///   measure that chose each move) goes back first, alone; the others stand
+///   until the field is sized again, and go back one by one, longest first,
+///   only while the break remains. One put-back per break per check: a move
+///   is put back when it offends a break no longer move of this check is
+///   already being put back for.
+///
+/// No constant: the attribution is the chain, the order is the lean law's.
+/// Before R1 and R2 (for-craig-v8, `247b8d5`) every move whose new chain held
+/// an overloaded member went back, including two moves on the stilt plate
+/// that only slid down their own near post; refused that descent for good,
+/// they ended 9.6 mm away on a far post as 13.5 mm branches
+/// (`stilt-and-brace-pair-diagnosis.md` item 1).
+///
+/// Returns what to put back now, plus the breaks no move added to (overloaded
+/// members, root pairs): a WARNING quantity, the rule cannot put back a
+/// cause it did not make.
 pub(crate) fn blame(
     struts: &[SweepStrut],
     moves: &[Relanding],
     before: &SizedField,
     after: &SizedField,
-) -> (Vec<(usize, PutBack)>, usize, usize) {
+) -> (Blamed, usize, usize) {
     let was = |id: u32| -> f64 {
         before
             .overloaded
@@ -883,52 +966,100 @@ pub(crate) fn blame(
         .filter(|pair| before.root_pairs.binary_search(pair).is_err())
         .copied()
         .collect();
+    let mut verdict = Blamed::default();
     if new_over.is_empty() && new_pairs.is_empty() {
-        return (Vec::new(), 0, 0);
+        return (verdict, 0, 0);
     }
-    let mut over_explained = vec![false; new_over.len()];
-    let mut pairs_explained = vec![false; new_pairs.len()];
-    let mut out = Vec::new();
+    // Breaks are numbered: the new overloads first, then the new root pairs.
+    let breaks = new_over.len() + new_pairs.len();
+    let mut added = vec![false; breaks];
+    // Per move: the breaks its move added to (R1).
+    let mut offends: Vec<Vec<usize>> = vec![Vec::new(); moves.len()];
     let mut chain: Vec<u32> = Vec::new();
+    let mut old: Vec<u32> = Vec::new();
     for (slot, relanding) in moves.iter().enumerate() {
-        // The mover and every member under it, down to its foot.
-        chain.clear();
-        let mut at = relanding.index;
-        let mut foot_on_plate = false;
-        for _ in 0..=struts.len() {
-            let Some(member) = struts.get(at) else { break };
-            chain.push(member.id);
-            match member.landing {
-                Landing::Strut { id, .. } => at = id as usize,
-                Landing::Plate => {
-                    foot_on_plate = true;
-                    break;
-                }
-                Landing::Model { .. } => break,
+        let foot_on_plate = chain_of(struts, relanding.index, &mut chain);
+        // The chain under the `was` landing, on the field as it stands.
+        let (old_on_plate, old_foot) = match relanding.was.0 {
+            Landing::Strut { id, .. } => {
+                let on_plate = chain_of(struts, id as usize, &mut old);
+                (on_plate, old.last().copied())
             }
-        }
-        let mut cause = None;
-        for (flag, id) in over_explained.iter_mut().zip(&new_over) {
-            if chain.contains(id) {
-                *flag = true;
-                cause = Some(PutBack::HostLoad);
+            Landing::Plate => {
+                old.clear();
+                (true, Some(relanding.id))
+            }
+            Landing::Model { .. } => {
+                old.clear();
+                (false, None)
+            }
+        };
+        for (number, id) in new_over.iter().enumerate() {
+            if !chain.contains(id) {
+                continue;
+            }
+            if *id == relanding.id || !old.contains(id) {
+                offends[slot].push(number);
+            } else {
+                verdict.spared_already_carried += 1;
             }
         }
         if let (true, Some(&foot)) = (foot_on_plate, chain.last()) {
-            for (flag, (a, b)) in pairs_explained.iter_mut().zip(&new_pairs) {
-                if *a == foot || *b == foot {
-                    *flag = true;
-                    cause.get_or_insert(PutBack::Roots);
+            let new_foot = foot == relanding.id || !(old_on_plate && old_foot == Some(foot));
+            for (offset, (a, b)) in new_pairs.iter().enumerate() {
+                if *a != foot && *b != foot {
+                    continue;
+                }
+                if new_foot {
+                    offends[slot].push(new_over.len() + offset);
+                } else {
+                    verdict.spared_already_carried += 1;
                 }
             }
         }
-        if let Some(cause) = cause {
-            out.push((slot, cause));
+        for &number in &offends[slot] {
+            added[number] = true;
         }
     }
-    let unexplained_over = over_explained.iter().filter(|flag| !**flag).count();
-    let unexplained_pairs = pairs_explained.iter().filter(|flag| !**flag).count();
-    (out, unexplained_over, unexplained_pairs)
+    // R2: longest offender first; a move goes back only for a break no
+    // longer move of this check already goes back for.
+    let mut order: Vec<usize> = (0..moves.len())
+        .filter(|slot| !offends[*slot].is_empty())
+        .collect();
+    order.sort_unstable_by(|a, b| {
+        moves[*b]
+            .cost_mm
+            .total_cmp(&moves[*a].cost_mm)
+            .then_with(|| b.cmp(a))
+    });
+    let mut relieved = vec![false; breaks];
+    for slot in order {
+        let list = &offends[slot];
+        if list.iter().all(|number| relieved[*number]) {
+            verdict.held_behind_longer += 1;
+            continue;
+        }
+        let cause = if list.iter().any(|number| *number < new_over.len()) {
+            PutBack::HostLoad
+        } else {
+            PutBack::Roots
+        };
+        for &number in list {
+            relieved[number] = true;
+        }
+        verdict.moves.push((slot, cause));
+    }
+    // `put_back_all` removes from the highest slot down.
+    verdict.moves.sort_unstable_by_key(|(slot, _)| *slot);
+    let unexplained_over = added[..new_over.len()]
+        .iter()
+        .filter(|flag| !**flag)
+        .count();
+    let unexplained_pairs = added[new_over.len()..]
+        .iter()
+        .filter(|flag| !**flag)
+        .count();
+    (verdict, unexplained_over, unexplained_pairs)
 }
 
 /// **Put the blamed re-landings back, and withdraw the sizing that judged
@@ -950,13 +1081,16 @@ pub(crate) fn put_back_all(
     struts: &mut Vec<SweepStrut>,
     sized_from: usize,
     moves: &mut Vec<Relanding>,
-    blamed: &[(usize, PutBack)],
+    blamed: &Blamed,
     refused: &mut Vec<(u32, usize)>,
     outcome: &mut LipSeatOutcome,
 ) {
     if blamed.is_empty() {
         return;
     }
+    outcome.blame_spared_already_carried += blamed.spared_already_carried;
+    outcome.blame_held_behind_longer += blamed.held_behind_longer;
+    let blamed = blamed.moves.as_slice();
     if struts.len() > sized_from {
         // The members a put-back moves: each mover and the children that
         // moved with it. One flag vector, one pass over the added arms.
@@ -1004,6 +1138,7 @@ pub(crate) fn put_back(
         index,
         id,
         cell,
+        cost_mm: _,
         was: (landing, k_bottom, path),
         children_were,
     } = relanding;
@@ -1373,7 +1508,7 @@ pub(crate) fn record_before(outcome: &mut LipSeatOutcome, bites: &[Option<ShaftS
 
 #[cfg(test)]
 mod put_back_tests {
-    use super::{put_back_all, LipSeatOutcome, PutBack, Relanding};
+    use super::{put_back_all, Blamed, LipSeatOutcome, PutBack, Relanding};
     use crate::{Landing, SeatFace, StrutKind, SweepStrut};
 
     fn member(id: u32, cell: usize, k_top: usize) -> SweepStrut {
@@ -1440,6 +1575,7 @@ mod put_back_tests {
             index: 0,
             id: 0,
             cell: moved_base as usize,
+            cost_mm: 1.0,
             was: (Landing::Plate, 0, Vec::new()),
             children_were: Vec::new(),
         }];
@@ -1453,7 +1589,10 @@ mod put_back_tests {
             &mut struts,
             sized_from,
             &mut moves,
-            &[(0, PutBack::Roots)],
+            &Blamed {
+                moves: vec![(0, PutBack::Roots)],
+                ..Blamed::default()
+            },
             &mut refused,
             &mut outcome,
         );
@@ -1484,6 +1623,215 @@ mod put_back_tests {
         assert_eq!(outcome.arms_relanded, 0);
         assert_eq!(outcome.moves_put_back_roots, 1);
         assert!(moves.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod blame_attribution_tests {
+    use super::{blame, PutBack, Relanding, SizedField};
+    use crate::{Landing, SeatFace, StrutKind, SweepStrut};
+
+    fn member(id: u32, cell: usize, k_top: usize, k_bottom: usize, landing: Landing) -> SweepStrut {
+        SweepStrut {
+            id,
+            cell,
+            center_mm: [0.0, 0.0],
+            kind: StrutKind::Arm,
+            min_radius_mm: 0.0,
+            thickened_mm: Vec::new(),
+            seat_on_strut: None,
+            k_top,
+            k_bottom,
+            landing,
+            interior: false,
+            radius_mm: Vec::new(),
+            carried_mm2: Vec::new(),
+            covered_demand: Vec::new(),
+            inserted_by_load: false,
+            path: Vec::new(),
+            straight_fallback: None,
+            fallback_path: Vec::new(),
+            seat_face: SeatFace::default(),
+            seat_normal: [0.0; 3],
+        }
+    }
+
+    /// The stilt plate's arm 78 (for-craig-v8, `247b8d5`): it already stood
+    /// on post 71 when the lip-seat pass moved it DOWN the same post to a
+    /// smaller approach angle. In the same pass other arms were moved ONTO
+    /// post 71 from elsewhere, and the sized field read 71 overloaded
+    /// (61.405 mm² > 56.549). Only the moves that ADDED load to 71 can have
+    /// overloaded it; arm 78's load was on 71 before its move. Blaming it
+    /// struck the near post off its list for the rest of the rule, and it
+    /// re-landed 9.6 mm away (a 13.55 mm branch).
+    ///
+    /// A's move is the LONGER of the two here, so R2 alone (longest first)
+    /// would put A back: this grades R1, the attribution.
+    #[test]
+    fn a_move_down_the_host_it_already_stood_on_is_not_blamed_for_that_hosts_overload() {
+        let post = member(0, 100, 700, 0, Landing::Plate);
+        // A: was on the post at 653, moved down the same post to 627.
+        let a = member(1, 200, 700, 627, Landing::Strut { id: 0, layer: 627 });
+        // B: was on the plate (its own column), moved onto the post at 628.
+        let b = member(2, 300, 700, 628, Landing::Strut { id: 0, layer: 628 });
+        let struts = vec![post, a, b];
+        let moves = vec![
+            relanding(1, 9.0, Landing::Strut { id: 0, layer: 653 }),
+            relanding(2, 5.0, Landing::Plate),
+        ];
+        let (blamed, unexplained, _) = blame(&struts, &moves, &calm(), &over(&[0]));
+        assert_eq!(unexplained, 0);
+        assert_eq!(
+            blamed.moves,
+            vec![(1, PutBack::HostLoad)],
+            "only the move that added load to the overloaded post may be put back"
+        );
+        assert_eq!(blamed.spared_already_carried, 1, "the R1 path hit");
+    }
+
+    fn relanding(index: usize, cost_mm: f64, was: Landing) -> Relanding {
+        Relanding {
+            index,
+            id: u32::try_from(index).expect("a small test index"),
+            cell: 100,
+            cost_mm,
+            was: (was, 0, Vec::new()),
+            children_were: Vec::new(),
+        }
+    }
+
+    fn calm() -> SizedField {
+        SizedField {
+            overloaded: Vec::new(),
+            root_pairs: Vec::new(),
+        }
+    }
+
+    fn over(members: &[u32]) -> SizedField {
+        SizedField {
+            overloaded: members.iter().map(|id| (*id, 61.405)).collect(),
+            root_pairs: Vec::new(),
+        }
+    }
+
+    /// **R2.** Three moves each added load to the same post (all three came
+    /// from the plate). Only the longest goes back on this check; the field is
+    /// sized again, and only if the post is still over its limit does the
+    /// next longest go back.
+    #[test]
+    fn where_several_moves_overload_a_post_the_longest_goes_back_alone_first() {
+        let post = member(0, 100, 700, 0, Landing::Plate);
+        let on_post = |id: u32| {
+            member(
+                id,
+                200 + id as usize,
+                700,
+                620,
+                Landing::Strut { id: 0, layer: 620 },
+            )
+        };
+        let struts = vec![post, on_post(1), on_post(2), on_post(3)];
+        let mut moves = vec![
+            relanding(1, 6.0, Landing::Plate),
+            relanding(2, 20.45, Landing::Plate),
+            relanding(3, 13.26, Landing::Plate),
+        ];
+        let (blamed, unexplained, _) = blame(&struts, &moves, &calm(), &over(&[0]));
+        assert_eq!(unexplained, 0);
+        assert_eq!(
+            blamed.moves,
+            vec![(1, PutBack::HostLoad)],
+            "the 20.45 mm move alone"
+        );
+        assert_eq!(blamed.held_behind_longer, 2, "the R2 path hit");
+        // Sized again with that move put back: the post still over its limit.
+        moves.remove(1);
+        let (blamed, _, _) = blame(&struts, &moves, &calm(), &over(&[0]));
+        assert_eq!(
+            blamed.moves,
+            vec![(1, PutBack::HostLoad)],
+            "then the 13.26 mm move"
+        );
+        // And once it is within its limit, nothing more goes back.
+        moves.remove(1);
+        let (blamed, _, _) = blame(&struts, &moves, &calm(), &calm());
+        assert!(blamed.is_empty());
+    }
+
+    /// **R2 across breaks.** The longest move overloaded two posts' chain
+    /// (it stands on post 1, which stands on post 0); a shorter move added
+    /// only to post 0. Putting the longest back relieves both, so the
+    /// shorter one stands until the field is sized again. A third move that
+    /// is the only offender of another post goes back on the same check.
+    #[test]
+    fn a_move_goes_back_only_for_a_break_no_longer_move_already_goes_back_for() {
+        let post = member(0, 100, 700, 0, Landing::Plate);
+        let middle = member(1, 110, 650, 600, Landing::Strut { id: 0, layer: 600 });
+        let far_post = member(2, 120, 700, 0, Landing::Plate);
+        let long = member(3, 130, 700, 640, Landing::Strut { id: 1, layer: 640 });
+        let short = member(4, 140, 700, 610, Landing::Strut { id: 0, layer: 610 });
+        let lone = member(5, 150, 700, 600, Landing::Strut { id: 2, layer: 600 });
+        let struts = vec![post, middle, far_post, long, short, lone];
+        let moves = vec![
+            relanding(3, 15.0, Landing::Plate),
+            relanding(4, 7.0, Landing::Plate),
+            relanding(5, 3.0, Landing::Plate),
+        ];
+        let (blamed, unexplained, _) = blame(&struts, &moves, &calm(), &over(&[0, 1, 2]));
+        assert_eq!(unexplained, 0);
+        assert_eq!(
+            blamed.moves,
+            vec![(0, PutBack::HostLoad), (2, PutBack::HostLoad)],
+            "the longest (posts 1 and 0) and the lone offender of post 2, not the short one"
+        );
+        assert_eq!(blamed.held_behind_longer, 1);
+    }
+
+    /// **R1 on plate roots.** A root pair that laps now and did not: the move
+    /// down the post it already stood on keeps that post's root as its foot
+    /// and is not blamed for it; an arm moved off its host onto the plate is
+    /// a new root there and is.
+    #[test]
+    fn a_move_whose_foot_was_already_its_foot_is_not_blamed_for_that_roots_new_pair() {
+        let post = member(0, 100, 700, 0, Landing::Plate);
+        let host = member(3, 400, 700, 0, Landing::Plate);
+        // A: moved down post 0 (it stood on it before).
+        let a = member(1, 200, 700, 627, Landing::Strut { id: 0, layer: 627 });
+        // B: was on post 3; now its own root on the plate beside post 0.
+        let b = member(2, 300, 700, 0, Landing::Plate);
+        let struts = vec![post, a, b, host];
+        let moves = vec![
+            relanding(1, 9.0, Landing::Strut { id: 0, layer: 653 }),
+            relanding(2, 5.0, Landing::Strut { id: 3, layer: 500 }),
+        ];
+        let after = SizedField {
+            overloaded: Vec::new(),
+            root_pairs: vec![(0, 2)],
+        };
+        let (blamed, _, unexplained) = blame(&struts, &moves, &calm(), &after);
+        assert_eq!(unexplained, 0);
+        assert_eq!(blamed.moves, vec![(1, PutBack::Roots)]);
+        assert_eq!(blamed.spared_already_carried, 1);
+    }
+
+    /// The mover still answers for its OWN overload: whatever loads it now
+    /// stands on its moved shaft. And an overload no move added to is
+    /// reported, not pinned on a move that did not make it.
+    #[test]
+    fn the_mover_answers_for_its_own_overload_and_an_overload_no_move_added_is_reported() {
+        let post = member(0, 100, 700, 0, Landing::Plate);
+        let a = member(1, 200, 700, 627, Landing::Strut { id: 0, layer: 627 });
+        let struts = vec![post, a];
+        let moves = vec![relanding(1, 9.0, Landing::Strut { id: 0, layer: 653 })];
+        let (blamed, unexplained, _) = blame(&struts, &moves, &calm(), &over(&[1]));
+        assert_eq!(blamed.moves, vec![(0, PutBack::HostLoad)]);
+        assert_eq!(unexplained, 0);
+        let (blamed, unexplained, _) = blame(&struts, &moves, &calm(), &over(&[0]));
+        assert!(
+            blamed.is_empty(),
+            "the post's load from A was there before A moved"
+        );
+        assert_eq!(unexplained, 1);
     }
 }
 

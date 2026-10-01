@@ -1991,9 +1991,11 @@ mod tests {
 
     use geom_kernel::{KnnBatchLimits, NativeSurface, NativeSurfaceConfig};
     use plinth_core::LayerPlan;
+    // The three-shell toed slab: this crate's frozen pins were measured on it
+    // (see `plinth_mesh::make_toed_slab_three_shells`).
     use plinth_mesh::{
-        build_face_topology, make_overhang_table, make_raking_blade, make_thin_fin, make_toed_slab,
-        FaceTopology, WeldPolicy,
+        build_face_topology, make_overhang_table, make_raking_blade, make_thin_fin,
+        make_toed_slab_three_shells, FaceTopology, WeldPolicy,
     };
 
     use super::*;
@@ -2648,7 +2650,7 @@ mod tests {
     #[test]
     fn geometry_mismatch_and_cap_minus_one_refuse_without_a_result_forest() {
         let table = Fixture::new(make_overhang_table().unwrap());
-        let toe = Fixture::new(make_toed_slab().unwrap());
+        let toe = Fixture::new(make_toed_slab_three_shells().unwrap());
         let config = perception_config(&table.delicacy);
         let selection =
             ContactSelectionConfig::current_defaults(Some(&table.delicacy), config.max_grid_bytes)
@@ -2916,7 +2918,7 @@ mod tests {
         let table = Fixture::new(make_overhang_table().unwrap())
             .build(ContactConstructionLimits::production())
             .unwrap();
-        let toe = Fixture::new(make_toed_slab().unwrap())
+        let toe = Fixture::new(make_toed_slab_three_shells().unwrap())
             .build(ContactConstructionLimits::production())
             .unwrap();
         for build in [&table, &toe] {
@@ -3155,7 +3157,7 @@ mod tests {
             Fixture::new(make_thin_fin().unwrap())
                 .plan
                 .generic_slice_thread_evidence(),
-            Fixture::new_with_layer_count(make_toed_slab().unwrap(), 20_000)
+            Fixture::new_with_layer_count(make_toed_slab_three_shells().unwrap(), 20_000)
                 .plan
                 .generic_slice_thread_evidence(),
         ]

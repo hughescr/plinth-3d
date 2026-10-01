@@ -73,7 +73,8 @@ fn a_clean_mesh_passes_through_byte_identical() {
     for (name, mesh, on_the_wire) in [
         ("box", make_box_default().expect("box"), true),
         ("overhang", make_overhang_table().expect("overhang"), true),
-        ("toed_slab", make_toed_slab().expect("slab"), false),
+        // Exactly f32 since the toes were unioned with the slab (2026-09-30).
+        ("toed_slab", make_toed_slab().expect("slab"), true),
         ("thin_fin", make_thin_fin().expect("fin"), false),
         (
             "dual_cavity_pawn",

@@ -29,11 +29,16 @@ type Builder = fn() -> Result<Mesh, MeshError>;
 
 /// Every procedural fixture this example can export, by the name the CLI and
 /// the evidence tables use for it.
-/// `make_toed_slab`, `make_raking_blade` and `make_thin_fin` are deliberately
-/// NOT here: their cone and offset geometry carries f64 coordinates that are not
-/// exactly representable in f32, so `write_binary_stl` refuses them by design,
-/// and their provisioned `corpus/models/*.stl` are what the measurements use.
-const FIXTURES: [(&str, Builder); 7] = [
+/// `make_raking_blade` and `make_thin_fin` are deliberately NOT here: their
+/// offset geometry carries f64 coordinates that are not exactly representable
+/// in f32, so `write_binary_stl` refuses them by design, and their provisioned
+/// `corpus/models/*.stl` are what the measurements use.
+///
+/// `make_toed_slab` IS here since 2026-09-30: it is now one closed solid (toes
+/// unioned with the slab) built on f32-exact coordinates. Its export is NOT the
+/// provisioned `corpus/models/make_toed_slab.stl`, which is the old
+/// three-shell Python mesh and still carries the corpus digest.
+const FIXTURES: [(&str, Builder); 8] = [
     ("make_box", plinth_mesh::make_box_default),
     ("make_overhang_table", plinth_mesh::make_overhang_table),
     ("make_uncovered_rim_table", plinth_mesh::make_uncovered_rim_table),
@@ -43,6 +48,8 @@ const FIXTURES: [(&str, Builder); 7] = [
     ("make_brace_pair", plinth_mesh::make_brace_pair),
     // The congestion lane's own (2026-09-06).
     ("make_laid_tube", plinth_mesh::make_laid_tube),
+    // The toed-slab-fixture lane (2026-09-30): the unioned solid.
+    ("make_toed_slab", plinth_mesh::make_toed_slab),
 ];
 
 fn main() -> ExitCode {

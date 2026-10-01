@@ -108,6 +108,7 @@ fn resolve(selection: &PrepareSelection) -> Result<PrepareRequest, PipelineError
 fn resolve_orientation(selection: &OrientSelection) -> Result<OrientationPolicy, PipelineError> {
     let directory = match selection {
         OrientSelection::Dense => return Ok(OrientationPolicy::DenseSweep),
+        OrientSelection::AsDrawn => return Ok(OrientationPolicy::AsDrawn),
         OrientSelection::Pinned(directory) => directory,
     };
     let entries = std::fs::read_dir(directory).map_err(|source| PipelineError::InputFolder {
@@ -178,6 +179,8 @@ fn print_report(selection: &PrepareSelection, report: &PrepareReport) {
         "  orientation  {}",
         match &selection.orientation {
             OrientSelection::Dense => "dense sweep (searched per model)".to_owned(),
+            OrientSelection::AsDrawn =>
+                "none: every model used exactly as drawn (--orient none)".to_owned(),
             OrientSelection::Pinned(directory) => format!(
                 "pinned baselines from {} (per model, by stem)",
                 directory.display()
@@ -308,6 +311,22 @@ fn near_parallel_lines(counts: NearParallelCounts) -> Vec<String> {
     lines
 }
 
+/// Who decided this model's pose, as the ONE line the owner specified
+/// (GitHub issue #1, 2026-10-01): `as drawn (<reason>)` or `orientation
+/// searched` (or `orientation pinned (<report>)` under `pinned:DIR`), then one
+/// WARNING line per tag attribute that was present but unreadable — the model
+/// was then treated as untagged, and this is where that is said.
+fn orientation_source_lines(orientation: &plinth_pipeline::OrientationDisclosure) -> Vec<String> {
+    let mut lines = vec![format!("  {}", orientation.source)];
+    lines.extend(
+        orientation
+            .tag_warnings
+            .iter()
+            .map(|warning| format!("  WARNING orientation tag  {warning}")),
+    );
+    lines
+}
+
 fn print_model(model: &ModelPreparationReport) {
     println!("MODEL  {}", model.model.as_str());
     println!("  source  {}", model.source_path.display());
@@ -327,6 +346,9 @@ fn print_model(model: &ModelPreparationReport) {
     // that appears only on surprising models teaches a reader to expect its
     // absence.
     if let Some(orientation) = &model.orientation {
+        for line in orientation_source_lines(orientation) {
+            println!("{line}");
+        }
         println!(
             "  orientation  original +Z is {:.1} deg off the build axis{}; rotation committed: {}",
             orientation.original_up_tilt_deg,
@@ -1110,7 +1132,7 @@ mod tests {
 
     use super::{
         coverage_gap_warning_lines, coverage_lines, coverage_repair_lines, near_parallel_lines,
-        remedies_tried_line, repair_lines,
+        orientation_source_lines, remedies_tried_line, repair_lines,
     };
 
     /// Counts with exactly one site charged.
@@ -1142,6 +1164,41 @@ mod tests {
     /// run over `corpus/baseline/make_toed_slab.prepped.stl` reads
     /// `kernel.walk.collecting 8` and still emits, while other real models
     /// read zero. Both readings have to be legible.
+    /// GitHub issue #1: who decided the pose is ONE line per model, and an
+    /// unreadable tag attribute is a WARNING line under it, never silence.
+    #[test]
+    fn the_orientation_source_is_one_line_and_an_unreadable_tag_warns() {
+        let disclosure = |source, tag_warnings| plinth_pipeline::OrientationDisclosure {
+            original_up_tilt_deg: 0.0,
+            inverted: false,
+            selection: "identity".to_owned(),
+            display: None,
+            source,
+            tag_warnings,
+        };
+        assert_eq!(
+            orientation_source_lines(&disclosure(
+                plinth_pipeline::OrientationSource::AsDrawn {
+                    reason: plinth_orient::as_drawn::AsDrawnReason::FinderTag,
+                },
+                Vec::new()
+            )),
+            vec!["  as drawn (Finder tag plinth-no-rotate)".to_owned()]
+        );
+        assert_eq!(
+            orientation_source_lines(&disclosure(
+                plinth_pipeline::OrientationSource::Searched,
+                vec!["m.stl: com.apple.metadata:_kMDItemUserTags could not be decoded".to_owned()]
+            )),
+            vec![
+                "  orientation searched".to_owned(),
+                "  WARNING orientation tag  m.stl: com.apple.metadata:_kMDItemUserTags could not \
+                 be decoded"
+                    .to_owned(),
+            ]
+        );
+    }
+
     #[test]
     fn a_run_that_measured_zero_says_so_instead_of_printing_nothing() {
         let lines = near_parallel_lines(NearParallelCounts::default());

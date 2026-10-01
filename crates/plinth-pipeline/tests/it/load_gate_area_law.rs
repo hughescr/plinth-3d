@@ -9,26 +9,41 @@
 //! # READ THIS BEFORE CHANGING ANYTHING HERE
 //!
 //! **`make_toed_slab` does not satisfy the registered support area law, and the
-//! ported gate finds exactly that.** Three of its sixty-four emitted contacts
-//! ship tips smaller than `pi * r^2 >= carried_area / X_ALLOWED` demands:
+//! ported gate finds exactly that.** Six of its sixty-nine emitted contacts
+//! ship tips smaller than `pi * r^2 >= carried_area / X_ALLOWED` demands
+//! (MEASURED 2026-10-01, the one-solid toed slab):
 //!
 //! | contact | carried area | shipped tip radius | realized X |
 //! |---------|--------------|--------------------|------------|
-//! | 24      | 450.000 mm²  | 0.050 mm           | 57 296     |
-//! | 48      | 450.000 mm²  | 0.050 mm           | 57 296     |
+//! | 38      | 206.292 mm²  | 0.050 mm           | 26 266     |
+//! | 28      | 183.425 mm²  | 0.050 mm           | 23 354     |
+//! | 72      |  84.213 mm²  | 1.000 mm           |     26.8   |
+//! | 15      |  66.736 mm²  | 1.000 mm           |     21.2   |
 //! | 4       |  60.000 mm²  | 1.000 mm           |     19.1   |
+//! | 33      |  57.583 mm²  | 1.000 mm           |     18.3   |
 //!
-//! against a registered allowance of 12. This is not a disagreement between the
-//! gate and the engine: `FrozenTipLoadPolicy::violates_safety_factor`, which
-//! `plinth_support::contact::area_sufficient` already delegates to, refuses all
-//! three as well. Nothing runs that predicate on the FINAL numbers, which is the
+//! against a registered allowance of 18 (Craig's ruling of 2026-09-30; it was
+//! 12). This is not a disagreement between the gate and the engine:
+//! `FrozenTipLoadPolicy::violates_safety_factor`, which
+//! `plinth_support::contact::area_sufficient` already delegates to, refuses
+//! them as well. Nothing runs that predicate on the FINAL numbers, which is the
 //! hole this gate was ported to close.
 //!
-//! No tip could have carried those two 450 mm² seats. The largest area any
+//! No tip could have carried any of those six seats. The largest area any
 //! admissible tip may carry is `X_ALLOWED * pi * TIP_RADIUS_MAX_LEGACY_MM^2` =
-//! 37.70 mm², so a seat charged 450 mm² is a LOAD PARTITION defect, not a tip
-//! sizing one — 900 of this model's 967.7 mm² of carried area landed on two
-//! contacts while fifty-eight others were charged exactly zero.
+//! 56.55 mm², so every row above is a LOAD PARTITION defect, not a tip sizing
+//! one — 658.2 of this model's 784.8 mm² of carried area landed on six
+//! contacts while fifty-one others were charged exactly zero.
+//!
+//! **The earlier record, on the three-shell fixture** (to 2026-09-30, when the
+//! toes were unioned with the slab into one closed solid): three of sixty-four
+//! contacts, two of them charged 450.000 mm² each at a 0.050 mm tip and one
+//! 60.000 mm² at 1.000 mm; 900 of 967.7 mm² on two contacts, fifty-eight at
+//! zero. Each 450 mm² seat was one whole triangle of the old two-triangle
+//! underside. The union re-triangulated the underside into 70 triangles, so
+//! the same single-carrier partition (below) charges smaller faces to more
+//! contacts. The defect is the same; its size on this fixture moved with the
+//! triangulation, which is itself the defect's signature.
 //!
 //! # Where it comes from, and it is already written down
 //!
@@ -51,7 +66,8 @@
 //! full evidence and lets emission proceed, so the corpus can be measured while
 //! task #68 (the load-partition defect above) is fixed, and flips back to hard
 //! refusal once it is. Until task #68 lands, any model with a downfacing face
-//! above 37.70 mm² still SHIPS with a documented, non-blocking WARNING attached
+//! above 56.55 mm² (37.70 mm² while X_ALLOWED was 12) still SHIPS with a
+//! documented, non-blocking WARNING attached
 //! rather than being silently accepted.
 //!
 //! **This file therefore pins a defect, not an approval.** When the load
@@ -69,8 +85,8 @@
 //!   downgrades, not what it weakens) — see `crates/plinth-pipeline/src/gates.rs`'s
 //!   `judge` function. This file calls it directly on the run's own recorded
 //!   evidence to demonstrate that.
-//! * The gate CLEARS the same record once exactly those three rows are given
-//!   the tip the law demands, so the finding is those three rows and nothing
+//! * The gate CLEARS the same record once exactly those six rows are given
+//!   the tip the law demands, so the finding is those six rows and nothing
 //!   else. Without this the finding would be consistent with a gate that
 //!   flags everything, which is decoration of a different kind.
 //! * The gate REFUSES again when one repaired row is put back under the law.
@@ -99,7 +115,7 @@ use std::path::PathBuf;
 
 use plinth_pipeline::{
     judge_emitted_load_law, judge_load_gate, GateRefusal, LoadGateDisposition, LoadLawFault,
-    LoadLawFaultClass, PreWriteGate,
+    LoadLawFaultClass, LoadLawViolation, PreWriteGate,
 };
 use plinth_support::EmittedContactDisclosure;
 
@@ -148,6 +164,52 @@ fn required_radius_mm(carried_area_mm2: f64) -> f64 {
     (carried_area_mm2 / (std::f64::consts::PI * x_allowed())).sqrt()
 }
 
+/// How far apart, in units of `f64::EPSILON` relative to the larger value, the
+/// sealed ledger's JSON round trip may put two copies of the same number.
+///
+/// The ledger is written with `serde_json` (shortest round-trip digits) but
+/// read back with `serde_json`'s default float parser, which this workspace
+/// builds WITHOUT the `float_roundtrip` feature and which is therefore not
+/// correctly rounded. MEASURED 2026-10-01 on this test's own record (one-solid
+/// toed slab): `-3.9114601862759564` reads back as `-3.911460186275957`,
+/// `183.42542052268982` as `183.42542052268985`, `1.6484178304672241` as
+/// `1.648417830467224`, each one unit in the last place. `f64::EPSILON * |x|`
+/// is between one and two units in the last place of `x`, so 2 admits two
+/// units and nothing a resummarized row could hide.
+const LEDGER_PARSE_EPSILONS: f64 = 2.0;
+
+/// `a` and `b` are the same number up to the ledger's parse error.
+fn same_through_the_ledger(a: f64, b: f64) -> bool {
+    a == b || (a - b).abs() <= LEDGER_PARSE_EPSILONS * f64::EPSILON * a.abs().max(b.abs())
+}
+
+fn same_optional_through_the_ledger(a: Option<f64>, b: Option<f64>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => same_through_the_ledger(a, b),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// The same violation row: same contact, same fault, every number equal up to
+/// the ledger's parse error, and every `None` where the other has `None`.
+fn same_violation_through_the_ledger(a: &LoadLawViolation, b: &LoadLawViolation) -> bool {
+    let positions = match (a.position_mm, b.position_mm) {
+        (Some(p), Some(q)) => p
+            .iter()
+            .zip(&q)
+            .all(|(&x, &y)| same_through_the_ledger(x, y)),
+        (None, None) => true,
+        _ => false,
+    };
+    a.contact_id == b.contact_id
+        && a.fault == b.fault
+        && positions
+        && same_optional_through_the_ledger(a.carried_area_mm2, b.carried_area_mm2)
+        && same_optional_through_the_ledger(a.emitted_tip_radius_mm, b.emitted_tip_radius_mm)
+        && same_optional_through_the_ledger(a.required_tip_radius_mm, b.required_tip_radius_mm)
+}
+
 /// The routed-contact identity list the gate cross-checks a record against,
 /// taken from the record itself.
 ///
@@ -180,7 +242,7 @@ fn the_load_gate_warns_on_the_toed_slabs_own_record_and_clears_it_once_repaired(
     let scratch = Scratch::new("toed-slab");
     let mesh = plinth_mesh::make_toed_slab().expect("procedural toed slab");
     let outcome = chain::run_procedural_model("make_toed_slab", mesh, scratch.path()).expect(
-        "WARNING MODE (owner ruling, 2026-08-29): make_toed_slab ships three contacts that \
+        "WARNING MODE (owner ruling, 2026-08-29): make_toed_slab ships six contacts that \
              violate the registered area law, but the Load gate no longer refuses emission for \
              it -- it records the violation and lets the model reach disk. If this expectation \
              now fails, either the load partition was fixed (rewrite this file to assert no \
@@ -193,9 +255,10 @@ fn the_load_gate_warns_on_the_toed_slabs_own_record_and_clears_it_once_repaired(
         scratch.path().exists(),
         "WARNING MODE must still write the artifact -- a warning is not a refusal"
     );
-    let warnings = outcome.load_warnings.as_ref().expect(
-        "the run's real record has three area-law violations; WARNING MODE must report them",
-    );
+    let warnings = outcome
+        .load_warnings
+        .as_ref()
+        .expect("the run's real record has six area-law violations; WARNING MODE must report them");
 
     // ---- The record the run left on disk ---------------------------------
     //
@@ -231,20 +294,60 @@ fn the_load_gate_warns_on_the_toed_slabs_own_record_and_clears_it_once_repaired(
     for violation in &violations {
         println!("LOAD-VIOLATION\t{violation}");
     }
+    let carried_total: f64 = recorded.iter().filter_map(|row| row.carried_area_mm2).sum();
+    let zero_charged = recorded
+        .iter()
+        .filter(|row| row.carried_area_mm2 == Some(0.0))
+        .count();
+    println!(
+        "LOAD-RECORD\t{} emitted contacts, {carried_total:.3} mm^2 carried in all, {zero_charged} \
+         charged exactly zero",
+        recorded.len()
+    );
     // And the pipeline's own WARNING MODE evidence must name exactly the same
     // rows the direct call does -- the dispatch is a relabelling, not a
-    // resummarizing.
+    // resummarizing. Row for row: same contact, same fault, same numbers, up
+    // to what the ledger's JSON round trip can carry (`same_violation_through_
+    // the_ledger` below; the run's evidence is in memory, the direct call's is
+    // re-read from disk).
     assert_eq!(
-        warnings.violations, violations,
-        "the run report's warning evidence must be exactly what a hard refusal would have \
-         carried, unweakened"
+        warnings.violations.len(),
+        violations.len(),
+        "the run report's warning evidence must carry every row a hard refusal would have"
+    );
+    let mut parse_separated = 0usize;
+    for (warned, refused) in warnings.violations.iter().zip(&violations) {
+        assert!(
+            same_violation_through_the_ledger(warned, refused),
+            "the run report's warning evidence must be exactly what a hard refusal would have \
+             carried, unweakened: warned {warned:?}, refused {refused:?}"
+        );
+        if warned != refused {
+            parse_separated += 1;
+        }
+    }
+    println!(
+        "LOAD-LEDGER-ROUNDTRIP\t{parse_separated} of {} rows differ only by the ledger's float parse",
+        violations.len()
+    );
+    // The comparison is not blind: a load a trillionth larger is a different row.
+    let mut nudged = violations[0];
+    nudged.carried_area_mm2 = nudged.carried_area_mm2.map(|area| area * (1.0 + 1.0e-12));
+    assert!(
+        !same_violation_through_the_ledger(&nudged, &violations[0]),
+        "the row comparison must see a load change far above the parse error"
     );
     assert_eq!(warnings.judged, recorded.len());
 
     // ---- The finding, pinned -------------------------------------------
+    //
+    // Re-pinned 3 -> 6 on 2026-10-01 by the toed-slab-fixture lane: the fixture
+    // became one closed solid, and its underside is 70 triangles instead of two
+    // 450 mm^2 ones, so the single-carrier partition (task #68) charges smaller,
+    // more numerous faces. The module doc has both records.
     assert_eq!(
         violations.len(),
-        3,
+        6,
         "the measured size of this model's area-law violation moved; that is a finding, not a \
          number to refresh: {violations:?}"
     );
@@ -272,17 +375,19 @@ fn the_load_gate_warns_on_the_toed_slabs_own_record_and_clears_it_once_repaired(
         .iter()
         .map(|violation| violation.carried_area_mm2.unwrap_or(0.0))
         .fold(0.0_f64, f64::max);
+    // Re-pinned 450.000 -> 206.292 mm^2 on 2026-10-01 with the count above:
+    // the 450 mm^2 seat was one whole triangle of the three-shell underside.
     assert!(
-        (heaviest - 450.0).abs() < 1.0e-9,
-        "the heaviest violating seat carries {heaviest} mm^2; it carried 450.000 mm^2 when this \
-         finding was recorded"
+        (heaviest - 206.291_933_655_738_8).abs() < 1.0e-9,
+        "the heaviest violating seat carries {heaviest} mm^2; it carried 206.2919 mm^2 when this \
+         finding was recorded on the one-solid toed slab"
     );
 
     // ---- DIRECTION 2: repair exactly those rows, and the gate CLEARS -----
     //
-    // A RECORD edit, not a claim that such a tip is printable: 3.4549 mm is far
+    // A RECORD edit, not a claim that such a tip is printable: 1.910 mm is
     // above the registered maximum, which is the finding restated. What it
-    // proves is that those three rows are the whole of the refusal.
+    // proves is that those rows are the whole of the refusal.
     let mut repaired = recorded.clone();
     for row in &mut repaired {
         let Some(carried) = row.carried_area_mm2 else {
@@ -307,7 +412,7 @@ fn the_load_gate_warns_on_the_toed_slabs_own_record_and_clears_it_once_repaired(
                 .unwrap_or(0.0)
                 .total_cmp(&b.carried_area_mm2.unwrap_or(0.0))
         })
-        .expect("three violations have a worst");
+        .expect("six violations have a worst");
     let index = repaired
         .iter()
         .position(|row| row.contact_id == worst.contact_id)

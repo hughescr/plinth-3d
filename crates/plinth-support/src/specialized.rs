@@ -8957,7 +8957,11 @@ mod tests {
     use super::*;
     use geom_kernel::KnnBatchLimits;
     use plinth_core::{Finite, PositiveFinite};
-    use plinth_mesh::{make_overhang_table, make_raking_blade, make_thin_fin, make_toed_slab};
+    // The three-shell toed slab: this crate's frozen pins were measured on it
+    // (see `plinth_mesh::make_toed_slab_three_shells`).
+    use plinth_mesh::{
+        make_overhang_table, make_raking_blade, make_thin_fin, make_toed_slab_three_shells,
+    };
 
     /// The gate's own kNN limits for tests.  `max_neighbors` matches what
     /// `SpecializedLimits::production` states for `coverage_route_knn`: the
@@ -15258,7 +15262,7 @@ mod tests {
             (
                 "toed slab",
                 "make_toed_slab",
-                make_toed_slab().unwrap(),
+                make_toed_slab_three_shells().unwrap(),
                 // Re-pinned 2026-08-31, geometry-consolidation plan item C7
                 // (`docs/specs/geometry-canon.md` §1 OP-4). PRIOR RECORD, kept
                 // verbatim: `5_397_140_793_948_005_744` (2026-08-08 FU-10
@@ -15363,7 +15367,7 @@ mod tests {
                 // no coincident pair, so its evidence is a fresh freeze rather
                 // than a regeneration of an older one.
                 "toed slab",
-                make_toed_slab().unwrap(),
+                make_toed_slab_three_shells().unwrap(),
                 // Re-pinned 2026-08-31, geometry-consolidation plan item C7
                 // (`docs/specs/geometry-canon.md` §1 OP-4), same cause and same
                 // bisect as the two digests in

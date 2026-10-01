@@ -59,6 +59,26 @@ fn stilt() -> &'static Pair {
     FIXTURE.get_or_init(|| pair(&make_tall_stilt_plate().expect("the tall stilt plate")))
 }
 
+/// The stilt plate, rule ON, graded at the X its section-move path was built at
+/// (`crate::harness::PATH_FIXTURE_X_ALLOWED` = 12).
+///
+/// RE-SCOPED 2026-09-30 (fix/chitubox-geometry), measured: with the owner's
+/// ChituBox ball ratios (`CHITUBOX_TIP_CONTACT_PROFILES`, 1.25-1.5 by tip size
+/// where every sweep ball was 1.5 × r before) the production stilt plate at
+/// X 18 searches 2 tips for their section, moves 0 and refuses 2,844 slides,
+/// so the two section-move tests below graded nothing. The rules they grade
+/// read no ball factor and no X; only the fixture stopped reaching them.
+fn stilt_at_path_x() -> &'static SweepPlan {
+    static FIXTURE: OnceLock<SweepPlan> = OnceLock::new();
+    FIXTURE.get_or_init(|| {
+        sweep_with(
+            &make_tall_stilt_plate().expect("the tall stilt plate"),
+            0.0,
+            &crate::harness::at_path_fixture_x(policy()),
+        )
+    })
+}
+
 fn laid_tube() -> &'static Pair {
     static FIXTURE: OnceLock<Pair> = OnceLock::new();
     FIXTURE.get_or_init(|| pair(&make_laid_tube().expect("the laid tube")))
@@ -243,7 +263,7 @@ fn a_lip_seat_relanding_laps_no_new_plate_root_on_the_laid_tube() {
 /// own status on each moved tip.
 #[test]
 fn a_tip_moved_for_its_section_keeps_its_section_and_its_disc_on_the_face() {
-    let plan = &stilt().on;
+    let plan = stilt_at_path_x();
     let footprint = &plan.report.seat_footprint;
     println!(
         "stilt: footprint {} tips searched for their section, {} moved, {} slides refused",
@@ -365,10 +385,16 @@ fn a_section_move_taken_back_leaves_every_displaced_member_within_the_rules() {
     // (`harness::at_path_fixture_seating`): at the production placement the
     // stilt plate takes no section move back (measured 2026-09-30: 0), so
     // there would be nothing displaced to grade. The rule reads no placement.
+    //
+    // MERGED 2026-10-01 (land of fix/chitubox-geometry onto develop 3372093):
+    // fix/chitubox-geometry graded this at the path X (`stilt_at_path_x`), and
+    // fix/lattice-align at the path seating. The two answer two different
+    // causes and the merged tree has both, so the stilt plate is graded under
+    // both.
     let plan = &sweep_with(
         &make_tall_stilt_plate().expect("the tall stilt plate"),
         0.0,
-        &crate::harness::at_path_fixture_seating(policy()),
+        &crate::harness::at_path_fixture_seating(crate::harness::at_path_fixture_x(policy())),
     );
     let footprint = &plan.report.seat_footprint;
     let graded = crate::footprint_moves_hold_the_rules::grade(plan);
@@ -394,5 +420,91 @@ fn a_section_move_taken_back_leaves_every_displaced_member_within_the_rules() {
         "members displaced by the moves left after a take-back break a rule: lean {:?}, run {:?}",
         graded.over_lean,
         graded.over_run
+    );
+}
+
+/// **A re-landing is put back only for load its move ADDED; the longest
+/// offender goes first** (fix/lip-seat-blame, 2026-10-01).
+///
+/// for-craig-v8 (`247b8d5`), the stilt plate at the production policy: the
+/// arms seated in the cells at (-8.675, 14.325) and (-1.375, 14.325) (engine
+/// arms 78 and 80) first re-landed DOWN the near post they already stood on,
+/// 3.65 and 3.6 mm sideways. Each was put back because that post came out
+/// overloaded, although other arms' moves had added the load
+/// (`lip_seat::blame`), and the refusal held for the rest of the rule: they
+/// ended 9.60 and 9.55 mm sideways on a far post, 13.5 mm branches
+/// (`stilt-and-brace-pair-diagnosis.md` item 1). The posts stand in rows
+/// 7.25 mm apart; the near post is 3.65 mm from each seat, the next 6.25 and
+/// then 9.6 mm, so 3.7 mm (the near post and the grid's rounding of it)
+/// separates the near post from every other host.
+#[test]
+fn the_stilt_plate_arms_that_stood_on_the_near_post_end_on_it() {
+    const NEAR_POST_MM: f64 = 3.7;
+    let plan = &stilt().on;
+    let grid = &plan.grid;
+    let centre = |cell: usize| {
+        (
+            grid.center_x_mm(grid.col_of(cell)),
+            grid.center_y_mm(grid.row_of(cell)),
+        )
+    };
+    let lateral = |cell: usize, base: usize| {
+        let (a, b) = (centre(cell), centre(base));
+        (b.0 - a.0).hypot(b.1 - a.1)
+    };
+    let lip = &plan.report.lip_seat;
+    // The same blame sent arms 24 and 63 7.26 and 6.25 mm sideways at v8; no
+    // seat on this lattice is further than 3.65 mm from a post column, so no
+    // re-landing has cause to travel past the near one.
+    let mut far: Vec<(u32, f64)> = Vec::new();
+    for &id in &lip.relanded_ids {
+        let strut = &plan.struts[id as usize];
+        let travel = lateral(strut.cell, strut.base_cell());
+        if travel > NEAR_POST_MM {
+            far.push((id, travel));
+        }
+        println!(
+            "stilt: re-landed arm {id} seat {:?} base {:?} lateral {:.3} mm landing {:?}",
+            centre(strut.cell),
+            centre(strut.base_cell()),
+            lateral(strut.cell, strut.base_cell()),
+            strut.landing
+        );
+    }
+    println!(
+        "stilt: put back for host load {}, for roots {}; spared (load already on the member) \
+         {}; held behind a longer offender {}; {} sized checks",
+        lip.moves_put_back_host_load,
+        lip.moves_put_back_roots,
+        lip.blame_spared_already_carried,
+        lip.blame_held_behind_longer,
+        lip.sizing_checks
+    );
+    let mut graded = 0;
+    for seat in [(-8.675, 14.325), (-1.375, 14.325)] {
+        let Some(strut) = plan.struts.iter().find(|strut| {
+            strut.kind == StrutKind::Arm && {
+                let (x, y) = centre(strut.cell);
+                (x - seat.0).abs() < grid.pitch_mm() / 2.0
+                    && (y - seat.1).abs() < grid.pitch_mm() / 2.0
+            }
+        }) else {
+            panic!("no arm seated in the cell at {seat:?}: the fixture moved");
+        };
+        graded += 1;
+        let travel = lateral(strut.cell, strut.base_cell());
+        assert!(
+            travel <= NEAR_POST_MM,
+            "arm {} seated at {seat:?} travels {travel:.3} mm sideways to {:?} ({:?}), past the \
+             near post {NEAR_POST_MM} mm away",
+            strut.id,
+            centre(strut.base_cell()),
+            strut.landing
+        );
+    }
+    assert_eq!(graded, 2);
+    assert!(
+        !lip.relanded_ids.is_empty() && far.is_empty(),
+        "re-landed arms travel past the near post (id, mm): {far:?}"
     );
 }

@@ -10,8 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use plinth_mesh::{
     load_binary_stl, load_binary_stls, make_box_default, make_overhang_table, make_raking_blade,
-    make_thin_fin, make_toed_slab, write_binary_stl, write_binary_stls, Mesh, MeshError,
-    WeldPolicy,
+    make_thin_fin, make_toed_slab_three_shells, write_binary_stl, write_binary_stls, Mesh,
+    MeshError, WeldPolicy,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -155,10 +155,12 @@ fn run() -> Result<(), String> {
 
 fn verify_native_synthetic_builders(out_dir: &Path, frozen: &[Mesh]) -> Result<(), String> {
     type Builder = fn() -> Result<Mesh, MeshError>;
+    // The frozen Python STL is the three-shell toed slab; `make_toed_slab` is
+    // the unioned solid since 2026-09-30 and is not what this file froze.
     let builders: [Builder; 5] = [
         make_box_default,
         make_overhang_table,
-        make_toed_slab,
+        make_toed_slab_three_shells,
         make_raking_blade,
         make_thin_fin,
     ];
