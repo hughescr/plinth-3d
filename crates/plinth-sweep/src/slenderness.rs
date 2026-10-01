@@ -491,6 +491,12 @@ pub struct SlendernessOutcome {
     /// Every brace band refused, by its reason (`brace_bands_refused` is
     /// their sum). See [`BandRefusals`].
     pub brace_band_refusals: BandRefusals,
+    /// Bands BUILT after the fix of 2026-10-01 to refusals that were not
+    /// geometric: deepened until both diagonals fit the overhang law (posts
+    /// leaning apart), and moved up because the band at its planned top
+    /// reached below the plate. Path-hit witnesses.
+    pub brace_bands_deepened_for_their_diagonals: usize,
+    pub brace_bands_moved_up_off_the_plate: usize,
 }
 
 /// Why a planned `|X|` band was refused, one count per reason; every refusal
@@ -3492,9 +3498,19 @@ fn partner_candidates(
 /// DROPPED (refused and counted) where it may not move (`may_move` false: it
 /// was planned at a layer the member is already tied at, which is the whole
 /// reason for that layer), where the moved top passes either post's top,
-/// where the moved band no longer ties `run` (its bottom is not below the
-/// run's top), or where its plane no longer holds the direction `run` sways in
-/// at the new layer.
+/// where the moved band no longer ties `run` (its top, from which it holds,
+/// is not below the run's top), or where its plane no longer holds the
+/// direction `run` sways in at the new layer.
+///
+/// **Refusals that were not geometry are gone** (Craig ruling 2026-10-01,
+/// item 4): a band whose bottom would fall below the plate moves up exactly
+/// as one in a flare does, and a band between posts that lean apart is
+/// deepened until its diagonals fit the overhang law. What is still refused
+/// is geometry and clearance: a band that cannot move (a post ends first), a
+/// band below a branch partner's foot (moved onto the foot, its diagonal
+/// ends inside the partner's host trunk), the model or a member or a drain
+/// on a diagonal's path, a solid within the final gap. Each refusal is
+/// counted under one reason ([`BandRefusals`]).
 #[expect(
     clippy::too_many_arguments,
     reason = "the band needs the field, the two posts and the planned layer, and the run it ties \
@@ -3515,6 +3531,12 @@ fn plan_cross(
     let bands = &state.bands;
     let grid = context.grid;
     let h = context.layer_height_mm;
+    // THE LOWEST LAYER THE BAND BOTTOM MAY TAKE: on both posts' free shafts
+    // (above the flares and the raft). A band below a BRANCH partner's foot
+    // is NOT moved up onto it: there its diagonal ends in the branch's
+    // junction with its host trunk, which the member test admits as joined
+    // (measured 2026-10-01, stilt plate: diagonal 96 inside post 73 by
+    // 0.724 mm), so that refusal stays (`off_a_post`).
     let (floor, top_limit) = {
         let (Some(one), Some(two)) = (struts.get(a as usize), struts.get(b as usize)) else {
             return None;
@@ -3538,43 +3560,67 @@ fn plan_cross(
     let planned = k;
     let mut k = k;
     let mut moved = false;
+    let mut moved_off_the_plate = false;
+    let mut widened = false;
     // Each turn either breaks or raises `k` strictly, and `k` may not pass
     // `top_limit`, so the loop ends.
     let (a_cell_top, b_cell_top, depth, k_lo) = loop {
-        let (a_top, b_top) = {
-            let (Some(one), Some(two)) = (struts.get(a as usize), struts.get(b as usize)) else {
-                return None;
-            };
-            (one.cell_at(k), two.cell_at(k))
+        let (one, two) = match (struts.get(a as usize), struts.get(b as usize)) {
+            (Some(one), Some(two)) => (one, two),
+            _ => return None,
         };
+        let (a_top, b_top) = (one.cell_at(k), two.cell_at(k));
         let gap_mm = crate::cell_distance_mm(grid, a_top, b_top);
-        let depth = context.lean.layers_to_reach(gap_mm);
+        let mut depth = context.lean.layers_to_reach(gap_mm);
         if gap_mm <= 0.0 || depth == 0 {
             refuse(outcome, |why| &mut why.no_gap);
             return None;
         }
-        let Some(k_lo) = k.checked_sub(depth) else {
-            if moved {
-                dropped(outcome);
-            } else {
-                refuse(outcome, |why| &mut why.below_plate);
+        // THE BAND IS AS DEEP AS ITS DIAGONALS NEED (2026-10-01). Sized from
+        // the gap at its top, a band between posts that lean apart has
+        // diagonals whose own lateral moves are longer than that gap and
+        // that the overhang law then refuses as too flat; the band is
+        // deepened to the move its longer diagonal makes, until both fit.
+        // The depth only grows, and never past `k`, so this ends.
+        while let Some(k_lo) = k.checked_sub(depth) {
+            let lateral = crate::cell_distance_mm(grid, a_top, two.cell_at(k_lo))
+                .max(crate::cell_distance_mm(grid, b_top, one.cell_at(k_lo)));
+            let needed = context.lean.layers_to_reach(lateral);
+            if needed <= depth {
+                break;
             }
-            return None;
-        };
-        if k_lo >= floor {
+            depth = needed;
+            widened = true;
+        }
+        // A BAND THAT DOES NOT FIT BELOW `k` FITS HIGHER (2026-10-01). Its
+        // bottom must stand at or above `floor` — the posts' free shafts, and
+        // so above the plate — and where it falls short the whole band moves
+        // up by the shortfall: reaching below the plate is no more a reason
+        // to refuse it than reaching into a flare is. Until then it was
+        // refused outright (Cylinder: 3,915 refusals below the plate).
+        let bottom = k.checked_sub(depth).filter(|&k_lo| k_lo >= floor);
+        if let Some(k_lo) = bottom {
             break (a_top, b_top, depth, k_lo);
         }
-        let raised = k + (floor - k_lo);
+        let raised = floor + depth;
         if !may_move || raised > top_limit {
             if may_move {
                 // How far above the layer it was planned at the band's top
                 // would have to stand.
                 state.flare_shortfall.set(Some(raised - planned));
             }
-            dropped(outcome);
+            // The binding reason, for the count: the plate, or a flare.
+            if k < depth {
+                refuse(outcome, |why| &mut why.below_plate);
+            } else {
+                dropped(outcome);
+            }
             return None;
         }
-        k = raised;
+        if k < depth {
+            moved_off_the_plate = true;
+        }
+        k = raised.max(k + 1);
         moved = true;
     };
     if moved {
@@ -3582,7 +3628,9 @@ fn plan_cross(
             let ties = state.ties.get(a as usize).map_or(&[][..], Vec::as_slice);
             new_plane_holds(ties, k, plane, run.sway_deg)
         });
-        if k_lo >= run.k_top || !plane_holds {
+        // TIE TIMING: a cross holds its posts from its band TOP, so a moved
+        // band ties `run` only if its top still stands inside it.
+        if k >= run.k_top || !plane_holds {
             dropped(outcome);
             return None;
         }
@@ -3705,7 +3753,12 @@ fn plan_cross(
             }
         }
     }
-    if moved {
+    if widened {
+        outcome.brace_bands_deepened_for_their_diagonals += 1;
+    }
+    if moved_off_the_plate {
+        outcome.brace_bands_moved_up_off_the_plate += 1;
+    } else if moved {
         outcome.brace_bands_moved_above_flare += 1;
     }
     Some(CrossPlan {
@@ -3725,8 +3778,8 @@ fn plan_cross(
 /// **Member against member**: whether the solid of radius `radius_mm` about
 /// `from`–`to` stays out of every standing member's DRAWN solid, other than
 /// the `posts` it joins and the members joined to those posts (a branch that
-/// lands on one, a diagonal that seats or lands on one, the trunk one stands
-/// on): those meet it at a planned joint. One pass over the members, each an
+/// lands on one, a diagonal that seats or lands on one): those meet it at a
+/// planned joint. The trunk a post stands on is NOT exempt (2026-10-01). One pass over the members, each an
 /// O(1) bounding-box test and, where that passes, one segment distance; a
 /// member whose WIDEST drawn radius does not clear is walked interval by
 /// interval against its drawn profile (`member_clearance::member_intrusion`).
@@ -3754,6 +3807,11 @@ fn member_solids_clear(
         member.seat_on_strut == Some(post)
             || matches!(member.landing, Landing::Strut { id, .. } if id == post)
     };
+    // NOT the trunk a post stands on (2026-10-01): a diagonal meets its post
+    // at the band, not at the post's foot, so a trunk is a member like any
+    // other. Until then it was admitted as joined, and a band deepened to
+    // reach a branch post's foot entered the trunk under it (stilt plate:
+    // diagonal 96 inside post 73 by 0.724 mm, measured 2026-10-01).
     let joined = |other: u32| {
         if posts.contains(&other) {
             return true;
@@ -3761,12 +3819,7 @@ fn member_solids_clear(
         let Some(member) = struts.get(other as usize) else {
             return true;
         };
-        posts.iter().any(|&post| {
-            rests_on(member, post)
-                || struts
-                    .get(post as usize)
-                    .is_some_and(|host| rests_on(host, other))
-        })
+        posts.iter().any(|&post| rests_on(member, post))
     };
     let solids = struts
         .iter()
@@ -4706,6 +4759,94 @@ mod tests {
                 "post {post}: {runs:?}"
             );
         }
+    }
+
+    /// REFUSALS THAT WERE NOT GEOMETRY (Craig ruling 2026-10-01, item 4). On
+    /// two 4.0 mm posts 1.0 mm apart, two bands the lane used to refuse are
+    /// built:
+    /// * planned with its top lower than its own depth (the band "below the
+    ///   plate"): moved up until its bottom is on the free shafts;
+    /// * between posts that lean apart, where the depth sized from the gap at
+    ///   the top leaves a diagonal "too flat": deepened until both fit.
+    /// Red until 2026-10-01: refused as below the plate, and too flat.
+    ///
+    /// A band below a BRANCH partner's foot stays refused (`off_a_post`):
+    /// moved onto the foot, its diagonal ends inside the trunk the branch
+    /// lands on (measured on the stilt plate, 0.724 mm deep).
+    #[test]
+    fn a_band_that_fits_higher_or_deeper_is_built_not_refused() {
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let history = crate::up_sweep::ColumnHistory::new(&grid);
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(0.05, 45.0, 25.0);
+        let law = law();
+        let context = prune_context(&grid, &history, &keep_out, &lean, &law);
+        let run = UnbracedRun {
+            strut_id: 0,
+            k_lo: 0,
+            k_top: 80,
+            length_mm: 4.0,
+            radius_mm: 0.2,
+            limit_mm: 10.0,
+            sway_deg: None,
+        };
+        let depth = lean.layers_to_reach(1.0);
+        let plan = |struts: &[crate::SweepStrut], k: usize| {
+            let state = super::TieState::build(&context, struts);
+            let mut outcome = super::SlendernessOutcome::default();
+            let plan = super::plan_cross(&context, &state, struts, 0, 1, k, &run, true, &mut outcome);
+            (plan, outcome)
+        };
+
+        // Below the plate.
+        let posts = vec![
+            plate_post(&grid, 0, 100, 0.2),
+            plate_post(&grid, 1, 120, 0.2),
+        ];
+        assert!(depth > 2, "anti-vacuity: a 1.0 mm band is {depth} layers deep");
+        let (built, outcome) = plan(&posts, depth - 2);
+        let built = built.unwrap_or_else(|| panic!("refused: {:?}", outcome.brace_band_refusals));
+        assert_eq!(built.k_lo, FREE_SHAFT_FLOOR_OF_A_4_MM_POST, "{built:?}");
+        assert_eq!(outcome.brace_bands_moved_up_off_the_plate, 1);
+
+        // Below a branch partner's foot: post 1 lands on post 2 at layer 50.
+        let mut posts = vec![
+            plate_post(&grid, 0, 100, 0.2),
+            plate_post(&grid, 1, 120, 0.2),
+            plate_post(&grid, 2, 140, 0.2),
+        ];
+        posts[1].landing = crate::Landing::Strut { id: 2, layer: 50 };
+        posts[1].k_bottom = 50;
+        posts[1].radius_mm = vec![0.2; 30];
+        posts[1].carried_mm2 = vec![0.0; 30];
+        let k = 50 + depth - 5;
+        assert!(k + 1 < run.k_top && k - depth >= FREE_SHAFT_FLOOR_OF_A_4_MM_POST);
+        let (built, outcome) = plan(&posts, k);
+        assert!(built.is_none(), "a band below a branch's foot was built: {built:?}");
+        assert_eq!(outcome.brace_band_refusals.off_a_post, 1, "{:?}", outcome.brace_band_refusals);
+
+        // Leaning apart: post 1's axis steps one cell outward every 4 layers
+        // down, so a diagonal from post 0's top to post 1's bottom moves
+        // further than the gap at the top.
+        let mut posts = vec![
+            plate_post(&grid, 0, 100, 0.2),
+            plate_post(&grid, 1, 120, 0.2),
+        ];
+        posts[1].path = (0..80_usize)
+            .map(|layer| {
+                u32::try_from(grid.index(100, 120 + (80 - layer) / 4)).expect("a cell index")
+            })
+            .collect();
+        let k = 70;
+        let (built, outcome) = plan(&posts, k);
+        let built = built.unwrap_or_else(|| panic!("refused: {:?}", outcome.brace_band_refusals));
+        let lateral = crate::cell_distance_mm(&grid, posts[0].cell_at(k), posts[1].cell_at(built.k_lo));
+        assert!(
+            built.k - built.k_lo >= lean.layers_to_reach(lateral),
+            "the band is {} layers deep for a {lateral} mm diagonal: {built:?}",
+            built.k - built.k_lo
+        );
+        assert_eq!(outcome.brace_bands_deepened_for_their_diagonals, 1);
     }
 
     fn prune_context<'a>(

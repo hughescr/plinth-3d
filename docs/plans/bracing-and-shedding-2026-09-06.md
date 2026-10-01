@@ -166,17 +166,25 @@ Recorded here because it changes the ladder above; the code of record is
   stood before the pass's thickenings, in the directions the cross itself
   holds. A cross another cross or a landing makes redundant still goes.
   Counted: `crosses_kept_in_their_own_plane`.
-- **Tie timing.** A branch that lands on a host holds the host only from the
-  layer its own seat prints. A run is the cantilever from the highest tie
-  that holds while a layer prints up to that layer, so the host is measured
-  over (tie below, branch seat) and then (landing, next end). Brace landings
-  are still credited at once (open question: the same physics applies over
-  a band's depth). Counted: `landing_ties_held_late`.
+- **Tie timing.** A member that lands on a host (an arm branch or a brace
+  diagonal) holds the host only from the layer its own seat prints. A run is
+  the cantilever from the highest tie that holds while a layer prints up to
+  that layer, so the host is measured over (tie below, branch seat) and then
+  (landing, next end), and an `|X|` ties its posts from its band top (what
+  the member-clearance print-time guard already measured). Counted:
+  `landing_ties_held_late`.
 - **Brace-band refusals by reason** (`BandRefusals`): posts at one cell,
   below the plate, in a root flare, leaving a post, too flat for the overhang
   law, end ring under the plate, centreline through a drain / the model / a
   member, solid within the final gap of the model / a member. The reasons sum
   to `brace_bands_refused`; the log prints them.
+- **Refusals that were not geometry are fixed.** A band whose bottom falls
+  below the plate moves up, as one in a flare already did; a band between
+  posts that lean apart is deepened until both diagonals fit the overhang
+  law. Counted: `brace_bands_moved_up_off_the_plate`,
+  `brace_bands_deepened_for_their_diagonals`. A band below a branch
+  partner's foot stays refused: moved onto the foot, its diagonal ends
+  inside the trunk the branch lands on (stilt plate, 0.724 mm deep).
 
 ### Fixtures (new, procedural, in plinth-mesh fixtures.rs)
 

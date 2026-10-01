@@ -3072,8 +3072,10 @@ fn print_sweep_disclosure(
         "[sweep {model}] brace bands refused {} = {} posts at one cell + {} below the plate + {} \
          in a root flare + {} leaving a post + {} too flat for the overhang law + {} end ring under \
          the plate + centreline through {} a drain, {} the model, {} a member + solid within the \
-         final gap of {} the model, {} a member{}; {} crosses kept in their own plane where a \
-         thickening also holds; {} landing ties hold only from their branch's seat",
+         final gap of {} the model, {} a member{}; built after the 2026-10-01 fix: {} bands \
+         deepened for their diagonals, {} moved up off the plate; {} crosses kept in their \
+         own plane where a thickening also holds; {} landing ties hold only from their \
+         branch's seat",
         lane.brace_bands_refused,
         why.no_gap,
         why.below_plate,
@@ -3091,6 +3093,8 @@ fn print_sweep_disclosure(
         } else {
             " [REASONS DO NOT SUM TO THE REFUSALS]"
         },
+        lane.brace_bands_deepened_for_their_diagonals,
+        lane.brace_bands_moved_up_off_the_plate,
         lane.crosses_kept_in_their_own_plane,
         lane.landing_ties_held_late,
     );
