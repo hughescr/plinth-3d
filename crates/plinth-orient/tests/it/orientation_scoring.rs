@@ -50,7 +50,10 @@ fn assert_close(actual: f64, expected: f64, tolerance: f64, what: &str) {
 /// asserted exactly: one down-facing face of 1 cm², a 1 cm² section at every
 /// height, 10 mm tall, and — since a cube corner's welded angle defect is
 /// exactly 0.25 and a 10 mm wall is far thicker than `THIN_FEATURE_MM` — a
-/// delicacy of exactly `0.6·0.25 + 0.4·0 = 0.15` on every face.
+/// fragility fold of exactly `0.6 · 0.25 · π r²` on the floor, `r` =
+/// `THIN_FEATURE_MM`: four quarter discs of radius `r` at the floor's four
+/// corners, each reading the corner's curvature 0.25 (since 2026-10-01; it was
+/// `0.15` over the floor's whole 100 mm², which read the triangulation).
 #[test]
 fn a_cube_measures_every_term_analytically_including_the_scar() {
     let mesh = make_box_default().expect("cube fixture");
@@ -66,9 +69,19 @@ fn a_cube_measures_every_term_analytically_including_the_scar() {
         terms.down_facing_faces, 2,
         "the cube's floor is two triangles"
     );
-    // 100 mm² of floor at delicacy 0.15.
-    assert_close(terms.scar_raw_mm2, 15.0, 1e-12, "raw scar");
-    assert_close(terms.scar_term, 0.4 * 15.0 / 100.0, 1e-12, "scar term");
+    // RE-PINNED 2026-10-01 (scar-fold-invariance lane). The old pin, 15.0,
+    // was 100 mm² of floor at delicacy 0.15: each floor triangle charged the
+    // mean of its corners' curvature (all cube corners, 0.25) over its whole
+    // area, so the number was a property of the floor being TWO triangles.
+    // Each corner's curvature now reaches only the surface within
+    // `THIN_FEATURE_MM` (1.5 mm) of it, which on the floor is one quarter
+    // disc per corner: `0.6 × 0.25 × 4 × π r² / 4 = 0.15 π r²` =
+    // 1.0602875205865552 mm², the same at any triangulation
+    // (`tessellation_invariance.rs`).
+    let thin_feature_mm = 1.5;
+    let fold = 0.6 * 0.25 * std::f64::consts::PI * thin_feature_mm * thin_feature_mm;
+    assert_close(terms.scar_raw_mm2, fold, 1e-12, "raw scar");
+    assert_close(terms.scar_term, 0.4 * fold / 100.0, 1e-12, "scar term");
     // Re-derived 2026-09-02 (LANE 3, docs/plans/slice-sweep-core-2026-09-02.md
     // §12): the old pin (6.56 = 0.5*1 + 3*1 + 0.3*10 + 0.06) priced the
     // retired `peak_xsec_cm2` term at `w_peak = 3.0`. It is replaced by a
@@ -80,13 +93,21 @@ fn a_cube_measures_every_term_analytically_including_the_scar() {
     // + 0.06 = 5.707380682642539. This is a measurement, not a hand-typed
     // number: it is what `score_all` actually returns, asserted to the same
     // 1e-12 tolerance as the pin it replaces.
-    assert_close(terms.score, 5.707_380_682_642_539, 1e-12, "score");
+    // RE-PINNED 2026-10-01 with the fold above: the scar term moves from
+    // 0.06 to `0.4 × fold / 100`, every other term is unchanged, so the
+    // score is the 2026-09-02 value with that one term exchanged.
+    assert_close(
+        terms.score,
+        5.707_380_682_642_539 - 0.06 + 0.4 * fold / 100.0,
+        1e-12,
+        "score",
+    );
 
     // The scar term's two published halves, and which one carries the cube.
     // The identity pose turns down the cube's authored FLOOR, which the
     // authored upper hemisphere cannot see, so its display value is exactly
     // zero and the whole scar term is fragility.
-    assert_close(terms.fragility_raw_mm2, 15.0, 1e-12, "fragility half");
+    assert_close(terms.fragility_raw_mm2, fold, 1e-12, "fragility half");
     assert_eq!(
         terms.display_raw_mm2.to_bits(),
         0.0_f64.to_bits(),
