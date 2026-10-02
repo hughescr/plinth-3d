@@ -152,6 +152,11 @@ pub struct ReachState {
     /// below the full-cost chamfer's value. The witness that the rule changed
     /// a decision input, not merely ran.
     pub creep_steps_taken: u64,
+    /// Of the cells priced, those priced at ZERO because every face within one
+    /// cell of them is at or beyond the registered overhang angle, so none of
+    /// them is down-facing ([`SurfaceCreep::new`], owner ruling 2026-09-30).
+    /// The witness that the overhang cut changed a price on this run.
+    pub creep_cells_free: u64,
     /// Reused per layer by [`creep_step`], so the rule allocates once per run.
     creep_scratch: Vec<(u32, f32)>,
     /// The cell each potential was measured FROM in a straight line: the
@@ -207,6 +212,7 @@ impl ReachState {
             vertical_inheritance_hits: 0,
             creep_cells_weighted: 0,
             creep_steps_taken: 0,
+            creep_cells_free: 0,
             creep_scratch: Vec::new(),
             anchor: vec![NO_ANCHOR; cells],
             sightlines_clear: 0,
@@ -626,8 +632,24 @@ fn weight(state: &ReachState, kappa: f64, _cell: usize) -> f32 {
 /// like 45°. `ω` is normalised to a horizontal lamina because that is the
 /// regime `κ` was measured in (single 50 µm laminae spanning over nothing): a
 /// horizontal ceiling pays exactly what it paid before, a 20° ramp 0.988 of it,
-/// a 60° wall 0.067, a 74° wall 0.006. **No constant is introduced**; the two
+/// a 44° face about 0.54 of it. **No constant is introduced**; the two
 /// registered angles are the only numbers read.
+///
+/// # A face that is not down-facing charges nothing (owner ruling 2026-09-30)
+///
+/// A face at or beyond `OVERHANG_ANGLE_DEG` pays `ω = 0`, not the logistic's
+/// tail (which read 0.50 at 45°, 0.067 at 60°, 0.006 at 74°). That is the
+/// boundary the rest of the engine already calls "down-facing": the
+/// orientation objective's fold and `plinth-support`'s contact perception both
+/// test `n_z < -sin(OVERHANG_ANGLE_DEG)`, and [`SurfaceCreep::new`] applies
+/// that same expression. The creep-arms diagnosis
+/// (`plinth-evidence/slice-sweep-2026-09-02/field-2026-09-28/
+/// creep-arms-diagnosis.md`, items 5-6) measured the tail deciding 95 % of the
+/// Cylinder's and 99 % of the Sphere's cavity-ceiling demand cells: it added
+/// only 0.22-0.31 of `U`, but that was the part that pushed a cell over 1. The
+/// cut zeroes the price of creep, nothing else: the cell is still covered, and
+/// a down-facing face anywhere within one cell of it still sets its price,
+/// because the larger weight wins.
 ///
 /// # Which moves it prices, and why no others
 ///
@@ -708,6 +730,9 @@ fn creep_step(
         state.creep_cells_weighted += 1;
         let step = pitch * weight(state, kappa, cell);
         let here = creep.weight_at(cell);
+        // Exactly zero only by the overhang cut: the logistic itself is
+        // positive at every angle.
+        state.creep_cells_free += u64::from(here <= 0.0);
         let mut best = f32::INFINITY;
         for near in orthogonal(cell).into_iter().flatten() {
             if !cover[near] {
@@ -799,17 +824,35 @@ const UNTOUCHED: f32 = f32::NEG_INFINITY;
 impl<'a> SurfaceCreep<'a> {
     /// Read every face's angle once, from its own normal.
     ///
+    /// With `overhang_cut` (production), a face that is not down-facing by the
+    /// engine's own test — `n_z < -sin(centre_deg)`, strict, byte for byte the
+    /// expression `plinth_orient::ObjectiveWeights::down_limit` and
+    /// `plinth_support::perceive_contacts_on_surface` evaluate from the same
+    /// registered angle — charges no creep: its weight is exactly 0. A
+    /// down-facing face keeps the logistic weight. Without it (sabotage and
+    /// comparison only, [`crate::SweepPolicy::without_creep_overhang_cut`]),
+    /// every face pays the logistic at its angle, as before 2026-09-30.
+    ///
     /// A non-finite or non-positive transition width yields the disabled
     /// field, which prices every creep at a full lamina exactly as before:
     /// emit and warn, never refuse.
     #[must_use]
-    pub fn new(mesh: &'a Mesh, grid: &Grid, centre_deg: f64, transition_deg: f64) -> Self {
+    pub fn new(
+        mesh: &'a Mesh,
+        grid: &Grid,
+        centre_deg: f64,
+        transition_deg: f64,
+        overhang_cut: bool,
+    ) -> Self {
         if !(transition_deg.is_finite() && transition_deg > 0.0 && centre_deg.is_finite()) {
             return Self::disabled(grid);
         }
         let verts = mesh.verts();
         let tris = mesh.tris();
         let horizontal = overhang_weight(0.0, centre_deg, transition_deg);
+        // The engine's down-facing cutoff (see above). At the registered 45°
+        // it is the logistic's own centre: `acos(sin 45°) = 45°`.
+        let down_limit = -centre_deg.to_radians().sin();
         let mut z_lo = Vec::with_capacity(tris.len());
         let mut z_hi = Vec::with_capacity(tris.len());
         let mut face_weight = Vec::with_capacity(tris.len());
@@ -823,6 +866,9 @@ impl<'a> SurfaceCreep<'a> {
             // `-sin(θ)` on `n_z`.
             face_weight.push(
                 vec3::normalize(vec3::cross(vec3::sub(b, a), vec3::sub(c, a))).map(|normal| {
+                    if overhang_cut && normal[2] >= down_limit {
+                        return 0.0;
+                    }
                     let theta = (-normal[2]).clamp(-1.0, 1.0).acos().to_degrees();
                     (overhang_weight(theta, centre_deg, transition_deg) / horizontal).min(1.0)
                         as f32
@@ -1749,13 +1795,15 @@ mod creep_tests {
 
     /// A box's band clip marks its vertical walls at the wall's weight and
     /// its horizontal underside at exactly one lamina; the interior of a band
-    /// no face crosses reads one lamina too.
+    /// no face crosses reads one lamina too. Read WITHOUT the overhang cut, so
+    /// the wall carries the logistic's tail and the band clip is what is
+    /// graded; the cut has its own tests below.
     #[test]
     fn a_box_band_marks_its_walls_steep_and_its_underside_flat() {
         // A 4 x 4 x 2 mm box standing on z = 0.
         let mesh = plinth_mesh::make_box([4.0, 4.0, 2.0], [0.0, 0.0, 0.0]).expect("box");
         let (grid, _) = plan_grid(-3.0, -3.0, 3.0, 3.0, 1, 0.05, 0.0, 2_000_000_000);
-        let mut creep = SurfaceCreep::new(&mesh, &grid, CENTRE, WIDTH);
+        let mut creep = SurfaceCreep::new(&mesh, &grid, CENTRE, WIDTH, false);
         let wall =
             (overhang_weight(90.0, CENTRE, WIDTH) / overhang_weight(0.0, CENTRE, WIDTH)) as f32;
         let centre = grid.index(grid.rows() / 2, grid.cols() / 2);
@@ -1778,6 +1826,68 @@ mod creep_tests {
             creep.weight_at(edge)
         );
         assert!(creep.faces_banded > 0);
+    }
+
+    /// One face, a down-facing right triangle tipped `theta` degrees about X:
+    /// its outward normal is `(0, sin θ, -cos θ)`, so `θ` is its angle from
+    /// horizontal. Test-local geometry.
+    fn tipped_face(theta: f64) -> plinth_mesh::Mesh {
+        let (sin, cos) = theta.to_radians().sin_cos();
+        // The flat triangle (0,0,0), (0,1,0), (1,0,0) faces straight down;
+        // rotate its y into (y cos, y sin) in the (y, z) plane.
+        let tip = |[x, y]: [f64; 2]| [x, y * cos, y * sin];
+        plinth_mesh::Mesh::new(
+            vec![tip([0.0, 0.0]), tip([0.0, 1.0]), tip([1.0, 0.0])],
+            vec![[0, 1, 2]],
+        )
+        .expect("one triangle")
+    }
+
+    /// THE CUT IS THE ENGINE'S DOWN-FACING TEST, read from the registry: a face
+    /// pays creep exactly when `plinth_orient`'s own `down_limit` (the
+    /// expression `plinth-support` evaluates) calls it down-facing. A
+    /// down-facing face keeps the logistic weight unchanged, and without the
+    /// cut every face pays the logistic as before.
+    #[test]
+    fn the_overhang_cut_is_the_engines_down_facing_test() {
+        let policy = crate::SweepPolicy::from_registry().expect("registry");
+        let down_limit = plinth_orient::ObjectiveWeights::registered()
+            .expect("registry")
+            .down_limit();
+        let (centre, width) = (policy.overhang_centre_deg, policy.overhang_transition_deg);
+        let (grid, _) = plan_grid(-1.0, -1.0, 2.0, 2.0, 1, 0.05, 0.0, 2_000_000_000);
+        let mut zeroed = 0;
+        for theta in [
+            0.0, 20.0, 40.0, 44.0, 44.9, 45.1, 46.0, 50.0, 60.0, 74.0, 90.0,
+        ] {
+            let mesh = tipped_face(theta);
+            let normal_z = -f64::cos(f64::to_radians(theta));
+            let logistic = (overhang_weight(theta, centre, width)
+                / overhang_weight(0.0, centre, width))
+            .min(1.0) as f32;
+            let cut = SurfaceCreep::new(&mesh, &grid, centre, width, true).face_weight[0]
+                .expect("a real face");
+            let tail = SurfaceCreep::new(&mesh, &grid, centre, width, false).face_weight[0]
+                .expect("a real face");
+            assert!(
+                (tail - logistic).abs() < 1.0e-6,
+                "without the cut {theta} deg pays {tail}, the logistic says {logistic}"
+            );
+            if normal_z < down_limit {
+                assert!(
+                    (cut - logistic).abs() < 1.0e-6 && cut > 0.0,
+                    "{theta} deg is down-facing and must keep the logistic {logistic}; got {cut}"
+                );
+            } else {
+                assert_eq!(
+                    cut, 0.0,
+                    "{theta} deg is not down-facing and must charge no creep"
+                );
+                zeroed += 1;
+            }
+        }
+        // 45.1 and up: six angles, so the boundary sits where the ruling put it.
+        assert_eq!(zeroed, 6, "the cut must fall between 44.9 and 45.1 deg");
     }
 
     /// The rule, on the potential itself: a column that did not carry one

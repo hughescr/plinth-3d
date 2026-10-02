@@ -98,7 +98,10 @@
 //!
 //! # Craig's rulings of 2026-10-01
 //!
-//! * `S` is 30 (interim, pending a slenderness coupon).
+//! * `S` is 30 (interim, pending a slenderness coupon). **Superseded
+//!   2026-10-02:** Craig ruled `S` = 40 (interim, pending the slenderness
+//!   coupon) after the S = 30 sample showed the Cylinder and the Sphere
+//!   heavily over-braced.
 //! * **Tie timing.** A member that lands on a host — an arm branch or a
 //!   brace diagonal — holds the host sideways only from the layer its own top
 //!   is held (its seat prints). A run is the cantilever from the highest tie

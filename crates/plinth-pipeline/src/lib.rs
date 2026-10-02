@@ -182,10 +182,11 @@ pub enum OrientationPolicy {
     /// (identity rotation, still re-centred and lifted like any other).
     ///
     /// Under the other two policies a single model can still be marked as
-    /// drawn by a `plinth-no-rotate` tag or a `<stem>.asdrawn` marker
-    /// ([`plinth_orient::as_drawn`]); the mark wins over the policy, because
-    /// the owner's rule (GitHub issue #1, 2026-10-01) is that ANY of the four
-    /// switches holding makes the model as drawn.
+    /// drawn by being named in `--no-orient=<list>`
+    /// ([`PrepareRequest::no_orient`]), a `plinth-no-rotate` tag, or a
+    /// `<stem>.asdrawn` marker ([`plinth_orient::as_drawn`]); the mark wins
+    /// over the policy, because the owner's rule (GitHub issue #1, 2026-10-01)
+    /// is that ANY of the switches holding makes the model as drawn.
     AsDrawn,
 }
 
@@ -419,6 +420,12 @@ pub struct PrepareRequest {
     pub input_models_dir: PathBuf,
     pub output_dir: PathBuf,
     pub orientation: OrientationPolicy,
+    /// `--no-orient=<list>`: the models of this folder to use exactly as drawn,
+    /// by file name or glob ([`plinth_orient::as_drawn::NoOrientList`]), under
+    /// any `orientation` policy. Empty: no model is listed. An entry that
+    /// names no model is reported on [`PrepareReport::no_orient_unmatched`],
+    /// never refused.
+    pub no_orient: plinth_orient::as_drawn::NoOrientList,
     /// Which support engine this run uses. See [`Placement`].
     pub placement: Placement,
     pub output_profile: OutputProfile,
@@ -1052,6 +1059,11 @@ impl OrientationDisclosure {
 pub struct PrepareReport {
     pub no_cache: bool,
     pub models: Vec<ModelPreparationReport>,
+    /// The `--no-orient` entries that named no model in the folder, in list
+    /// order. The run went on without them (emit and warn, never refuse); the
+    /// run report prints one WARNING line each.
+    #[serde(default)]
+    pub no_orient_unmatched: Vec<String>,
 }
 
 impl PrepareReport {
@@ -1508,6 +1520,14 @@ mod tests {
             ),
             (
                 OrientationSource::AsDrawn {
+                    reason: AsDrawnReason::Listed {
+                        entry: "Round_25".to_owned(),
+                    },
+                },
+                "as drawn (listed in --no-orient as Round_25)",
+            ),
+            (
+                OrientationSource::AsDrawn {
                     reason: AsDrawnReason::FinderTag,
                 },
                 "as drawn (Finder tag plinth-no-rotate)",
@@ -1915,6 +1935,7 @@ mod tests {
     fn report_distinguishes_one_artifact_from_an_explicit_stage_stop() {
         let report = PrepareReport {
             no_cache: true,
+            no_orient_unmatched: Vec::new(),
             models: vec![
                 ModelPreparationReport {
                     model: ModelId::new("mini-a"),
@@ -2018,6 +2039,7 @@ mod tests {
         };
         let report = PrepareReport {
             no_cache: false,
+            no_orient_unmatched: Vec::new(),
             models: vec![
                 model(
                     "emitted",
@@ -2123,6 +2145,7 @@ mod tests {
 
         let report = PrepareReport {
             no_cache: false,
+            no_orient_unmatched: Vec::new(),
             models: vec![sidecar.clone(), refused.clone()],
         };
         assert_eq!(
@@ -2136,6 +2159,7 @@ mod tests {
         // other way round must report the same verdict.
         let reversed = PrepareReport {
             no_cache: false,
+            no_orient_unmatched: Vec::new(),
             models: vec![refused, sidecar.clone()],
         };
         assert_eq!(reversed.exit_code(), PipelineExitCode::Gates);
@@ -2144,6 +2168,7 @@ mod tests {
         // `Gates` is the only sticky code, not a new severity ranking.
         let no_refusal = PrepareReport {
             no_cache: false,
+            no_orient_unmatched: Vec::new(),
             models: vec![
                 sidecar,
                 model(

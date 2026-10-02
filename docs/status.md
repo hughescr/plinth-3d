@@ -10,8 +10,9 @@ of STLs and writes one `.chitubox` project per model that clears the pipeline's 
 physics gates. Orientation defaults to a dense per-model search (`--orient dense`); a
 previously-searched rotation can be replayed instead with `--orient pinned:DIR`, and
 `--orient none` uses every model exactly as drawn. A single model is used as drawn under any
-mode when it carries the `plinth-no-rotate` tag (macOS Finder tag, or Linux `user.xdg.tags`) or
-has a `<stem>.asdrawn` marker beside it (GitHub issue #1). See
+mode when it is named in `--no-orient=<list>` (file names or `*`/`?` globs; an unmatched name
+is a warning), carries the `plinth-no-rotate` tag (macOS Finder tag, or Linux `user.xdg.tags`),
+or has a `<stem>.asdrawn` marker beside it (GitHub issue #1). See
 [`README.md`](../README.md) for the full command and [`docs/architecture.md`](architecture.md)
 for the stage-by-stage pipeline this drives.
 

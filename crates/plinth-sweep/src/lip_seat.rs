@@ -276,10 +276,25 @@ pub struct LipSeatOutcome {
     /// [`settle`].
     pub sizing_checks: usize,
     /// On the last check of the last pass: members newly overloaded, and
-    /// root pairs newly overlapping, that no re-landing of that pass fed (a
-    /// WARNING quantity; the rule cannot name a cause it did not make).
+    /// root pairs newly overlapping, against the field before the run's first
+    /// move, that no re-landing still standing fed (a WARNING quantity; the
+    /// rule cannot name a cause it did not make). Until 2026-10-02 this read
+    /// "no re-landing of that pass", against the field the previous pass left.
     pub new_overloads_unattributed: usize,
     pub new_root_pairs_unattributed: usize,
+    /// **Across passes** (fix/creep-45 round 11, 2026-10-02): every sized
+    /// check judges every move still standing, from every pass of the run,
+    /// against the field before the run's first move. A move an EARLIER pass
+    /// took cannot be put back in place (later moves, and the arms later
+    /// sizings inserted, may rest on its moved shaft), so its descent is
+    /// refused and the run starts again from that field. The moves so
+    /// refused, the re-runs, and the runs withdrawn whole because the re-runs
+    /// reached the registered pass count (a WARNING: the field is left as it
+    /// stood before that run). Kept across re-runs; every other count
+    /// describes the run that stands.
+    pub moves_refused_across_passes: usize,
+    pub reruns: usize,
+    pub runs_withdrawn: usize,
     /// Arms over the limit that remedy 1 left alone: something rests on them,
     /// or no candidate held.
     pub kept_carrying: usize,
@@ -793,7 +808,14 @@ pub(crate) fn apply(
                 outcome.candidates_refused_measured += 1;
                 continue;
             }
-            if locked[index_of] {
+            // A child that something landed on this pass is no longer a leaf,
+            // so its host may not take it along: the member resting on it would
+            // be left standing where the child used to be (measured on the
+            // Cylinder at fix/creep-45 `03428ce`: arm 182 re-landed on arm 198's
+            // shaft at layer 629, then arm 196 moved and took its child 198 with
+            // it, and 182 stood on air). `locked` is set on every new host and
+            // every child already moved, so one test covers both.
+            if locked[index_of] || proposal.children.iter().any(|(child, _, _)| locked[*child]) {
                 continue;
             }
             // The index and the field know the moves already taken this
@@ -976,6 +998,39 @@ impl Blamed {
     pub(crate) fn is_empty(&self) -> bool {
         self.moves.is_empty()
     }
+
+    /// Whether a move to put back stands at a slot below `pass_from`: the
+    /// standing list holds every pass's moves in order, so such a move was
+    /// taken by an earlier pass than the check's own.
+    pub(crate) fn reaches_before(&self, pass_from: usize) -> bool {
+        self.moves.iter().any(|(slot, _)| *slot < pass_from)
+    }
+}
+
+/// **Refuse every blamed descent for a re-run of the whole run** (fix/creep-45
+/// round 11, 2026-10-02). Called when [`Blamed::reaches_before`] holds: a move
+/// of an earlier pass offends a break, and only starting again from the field
+/// before the run's first move can take it back without leaving a later
+/// member on air. Every blamed move's descent (arm id, base cell) is refused
+/// from now on, as a put-back refuses it. Returns how many of them an earlier
+/// pass took.
+pub(crate) fn refuse_for_rerun(
+    moves: &[Relanding],
+    blamed: &Blamed,
+    pass_from: usize,
+    refused: &mut Vec<(u32, usize)>,
+) -> usize {
+    let mut earlier = 0;
+    for &(slot, _) in &blamed.moves {
+        let Some(relanding) = moves.get(slot) else {
+            continue;
+        };
+        refused.push((relanding.id, relanding.cell));
+        if slot < pass_from {
+            earlier += 1;
+        }
+    }
+    earlier
 }
 
 /// The members `start` hands its load to, `start` first, down its landings
@@ -1762,7 +1817,7 @@ mod put_back_tests {
 
 #[cfg(test)]
 mod blame_attribution_tests {
-    use super::{blame, PutBack, Relanding, SizedField};
+    use super::{blame, refuse_for_rerun, PutBack, Relanding, SizedField};
     use crate::{Landing, SeatFace, StrutKind, SweepStrut};
 
     fn member(id: u32, cell: usize, k_top: usize, k_bottom: usize, landing: Landing) -> SweepStrut {
@@ -1966,6 +2021,41 @@ mod blame_attribution_tests {
             "the post's load from A was there before A moved"
         );
         assert_eq!(unexplained, 1);
+    }
+
+    /// **Across passes** (fix/creep-45 round 11, 2026-10-02), the laid tube's
+    /// case in miniature. Pass 0 moved A off the plate onto post 0, and its
+    /// check found the post under its limit. Pass 1 moved B onto another post,
+    /// and its check finds post 0 over. Judged pass by pass (B alone, against
+    /// the field pass 0 left) no move feeds the post: "unattributed", left
+    /// standing. Judged over every standing move against the field before the
+    /// first move, A is named, and A is an earlier pass's move, so its descent
+    /// is refused for a re-run.
+    #[test]
+    fn a_host_that_the_moves_of_two_passes_overload_names_the_earlier_pass_move() {
+        let post = member(0, 100, 700, 0, Landing::Plate);
+        let a = member(1, 200, 700, 95, Landing::Strut { id: 0, layer: 95 });
+        let b = member(2, 300, 700, 400, Landing::Strut { id: 3, layer: 400 });
+        let other_post = member(3, 400, 700, 0, Landing::Plate);
+        let struts = vec![post, a, b, other_post];
+        let standing = vec![
+            relanding(1, 4.0, Landing::Plate),
+            relanding(2, 6.0, Landing::Plate),
+        ];
+        let pass_from = 1;
+        // The rule as it was: this pass's moves, against the previous pass's field.
+        let (blamed, unexplained, _) = blame(&struts, &standing[pass_from..], &calm(), &over(&[0]));
+        assert!(blamed.is_empty());
+        assert_eq!(unexplained, 1, "the old blind spot");
+        // The rule now: every standing move, against the field before the first.
+        let (blamed, unexplained, _) = blame(&struts, &standing, &calm(), &over(&[0]));
+        assert_eq!(unexplained, 0);
+        assert_eq!(blamed.moves, vec![(0, PutBack::HostLoad)]);
+        assert!(blamed.reaches_before(pass_from));
+        let mut refused = Vec::new();
+        let earlier = refuse_for_rerun(&standing, &blamed, pass_from, &mut refused);
+        assert_eq!(earlier, 1);
+        assert_eq!(refused, vec![(1, 100)]);
     }
 }
 

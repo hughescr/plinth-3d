@@ -106,6 +106,74 @@ pub fn write_binary_stls(entries: &[(PathBuf, Mesh)]) -> Result<(), MeshIoError>
     Ok(())
 }
 
+/// Byte offsets, within one 50-byte facet, of the f32 `y` and `z` of the
+/// normal (bytes 0..12) and of the three vertices (12..24, 24..36, 36..48).
+const FACET_Y_Z_OFFSETS: [usize; 8] = [4, 8, 16, 20, 28, 32, 40, 44];
+/// The sign bit of a little-endian f32 is the top bit of its LAST byte.
+const F32_SIGN_BYTE: usize = 3;
+const F32_SIGN_BIT: u8 = 0x80;
+
+/// **Turn a binary STL over, in place: 180 degrees about the X axis, exactly.**
+///
+/// The map is `(x, y, z) -> (x, -y, -z)`. On the wire that is the SIGN BIT of
+/// the `y` and `z` f32 of each facet's normal and of its three vertices.
+/// Nothing is decoded, multiplied or re-rounded, so the result is bit for bit
+/// the rotation the dense orientation search applies when it commits the flip
+/// (its antipode convention: 180 degrees about +X,
+/// `UpDirection::rotation_to_build_frame`). The header, the triangle count and
+/// order, the vertex order within each triangle (a rotation keeps winding) and
+/// each facet's attribute bytes are unchanged. Exactly 8 bytes per facet
+/// change, and turning twice gives back the input.
+///
+/// Used to make the committed "use as drawn" fixtures under `corpus/as-drawn/`
+/// (`corpus/as-drawn/README.md`, `sources.tsv`): the `as_drawn_corpus` and
+/// `flip_stl_x180` examples write them, and `plinth-orient`'s
+/// `as_drawn_corpus` tests regenerate them from their provisioned sources and
+/// compare byte for byte.
+///
+/// Returns the facet count. `path` names the bytes in errors only.
+///
+/// # Errors
+///
+/// The same framing checks [`load_binary_stl`] makes: too short, a declared
+/// triangle count that disagrees with the length (which is also how an ASCII
+/// STL fails here), or zero triangles. The bytes are not changed on error.
+pub fn turn_binary_stl_x180(path: &Path, bytes: &mut [u8]) -> Result<usize, MeshIoError> {
+    if bytes.len() < HEADER_BYTES + COUNT_BYTES {
+        return Err(MeshIoError::TooShort {
+            path: path.to_path_buf(),
+            actual: bytes.len(),
+        });
+    }
+    let triangles = u32::from_le_bytes(
+        bytes[HEADER_BYTES..HEADER_BYTES + COUNT_BYTES]
+            .try_into()
+            .expect("checked width"),
+    );
+    let expected = expected_len(path, triangles)?;
+    if bytes.len() != expected {
+        return Err(MeshIoError::LengthMismatch {
+            path: path.to_path_buf(),
+            triangles,
+            expected,
+            actual: bytes.len(),
+        });
+    }
+    if triangles == 0 {
+        return Err(MeshIoError::ZeroTriangles {
+            path: path.to_path_buf(),
+        });
+    }
+    let mut facets = 0;
+    for facet in bytes[HEADER_BYTES + COUNT_BYTES..].chunks_exact_mut(FACET_BYTES) {
+        for offset in FACET_Y_Z_OFFSETS {
+            facet[offset + F32_SIGN_BYTE] ^= F32_SIGN_BIT;
+        }
+        facets += 1;
+    }
+    Ok(facets)
+}
+
 fn decode_binary_stl(
     path: &Path,
     bytes: &[u8],

@@ -648,8 +648,32 @@ fn no_mast_is_thicker_than_the_member_it_braces_on_the_lonely_peak_without_thick
 /// disc only when the GROWTH laps a root the disc did not already lap. Post
 /// 81's root laps its neighbour by 0.051 mm before any growth, so the rung
 /// may thicken it and no mast is needed (red on `c33dc8e`: mast 198).
+///
+/// **RE-DERIVED 2026-10-02 (Craig ruling: `S` = 40).** The old claim, "the
+/// stilt plate places no mast", no longer grades rule 5 at any ratio, measured
+/// 2026-10-02 on this branch (develop `301fa6f` + `S` = 40):
+///
+/// * at `S` = 40 the production field thickens nothing (7 thickenings
+///   refused past the maximum radius, 0 for a disc) and the mast rung, whose
+///   braced panel holds at 40 where it could not at 30, places masts 137,
+///   144, 147 and 150. No disc refusal exists, so no mast here can be rule 5
+///   failing: the masts follow radius refusals, which is the ladder's order.
+/// * at `S` = 30 it passed only because the panel check refused every mast
+///   cell: it graded nothing.
+/// * at `S` = 50 (the ratio it was written at) the stilt plate now places
+///   masts 103 and 106 with 2 thickenings refused for a disc and 0 grown over
+///   an existing lap. Whether those two disc refusals are new laps (rule 5
+///   kept) or old ones (rule 5 broken) is NOT measured here; it is an open
+///   question in `lanes/slenderness-40.md`, and rule 5 has no path-hit
+///   witness on any fixture today (`thicken_over_existing_lap` is 0 at 40 and
+///   at 50).
+///
+/// So this now grades what the production field can show about rule 5: no
+/// thickening on the stilt plate is refused for its root disc, so no mast
+/// stands where a disc refusal put it; and the thicken rung is reached
+/// (anti-vacuity).
 #[test]
-fn the_stilt_plate_places_no_mast() {
+fn the_stilt_plate_places_no_mast_for_a_refused_root_disc() {
     let plan = &stilt().plan;
     let lane = &plan.report.slenderness_lane;
     let masts: Vec<usize> = plan
@@ -663,7 +687,15 @@ fn the_stilt_plate_places_no_mast() {
         "tall stilt plate: masts {masts:?}; thickened {}, refused by disc {}, grown over an existing lap {}",
         lane.members_thickened, lane.thicken_refused_disc, lane.thicken_over_existing_lap
     );
-    assert!(masts.is_empty(), "the stilt plate places masts {masts:?}");
+    assert!(
+        lane.members_thickened + lane.thicken_refused_radius + lane.thicken_refused_disc > 0,
+        "anti-vacuity: the thicken rung was never reached on the stilt plate"
+    );
+    assert_eq!(
+        lane.thicken_refused_disc, 0,
+        "the stilt plate refuses {} thickenings for their root disc (masts {masts:?})",
+        lane.thicken_refused_disc
+    );
 }
 
 // ------------------------------------------------------------------ rule 6
@@ -680,7 +712,8 @@ fn the_stilt_plate_places_no_mast() {
 /// remedy in one direction and are WARNED; every run this guard finds over
 /// the limit must be one of those published warnings, never a silent one
 /// (until the timing rule, runs on 21 and 43 were over here and silent:
-/// measured 2026-10-01).
+/// measured 2026-10-01). At `S` = 40 (Craig ruling 2026-10-02) one post (11)
+/// is over at print time, and it is warned (measured 2026-10-02).
 #[test]
 fn every_run_holds_with_crosses_credited_from_their_band_top_on_the_stilt_plate() {
     let plan = &stilt().plan;

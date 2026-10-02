@@ -7,17 +7,24 @@
 //!
 //! 1. the run was started with `--orient none` (every model in the run;
 //!    [`AsDrawnReason::OrientNone`], decided by the caller, not here);
-//! 2. macOS: the STL file carries the Finder tag [`AS_DRAWN_TAG`], read from the
+//! 2. the model is named in the run's `--no-orient=<list>` ([`NoOrientList`],
+//!    owner spec 2026-10-01; [`AsDrawnReason::Listed`]). Also decided by the
+//!    caller, over the whole folder at once: only the whole folder can say
+//!    that a listed name matched NO model, which is a warning, never a refusal;
+//! 3. macOS: the STL file carries the Finder tag [`AS_DRAWN_TAG`], read from the
 //!    file's own `com.apple.metadata:_kMDItemUserTags` extended attribute (a
 //!    binary plist array of strings, each optionally suffixed `"\n<colour>"`),
 //!    never through Spotlight, whose index can lag the file or be switched off.
 //!    A symlinked STL is read through the link (the target's tag counts; so
 //!    does a tag on the link itself);
-//! 3. Linux: the extended attribute `user.xdg.tags` (comma-separated) contains
+//! 4. Linux: the extended attribute `user.xdg.tags` (comma-separated) contains
 //!    [`AS_DRAWN_TAG`];
-//! 4. any platform: a marker file `<stem>.asdrawn` sits next to `<stem>.stl`.
+//! 5. any platform: a marker file `<stem>.asdrawn` sits next to `<stem>.stl`.
 //!    This is the PORTABLE form: git, zip and most copy tools drop extended
 //!    attributes, so a repository fixture is marked this way.
+//!
+//! The two run-wide switches (1, 2) are checked first and, when one holds, the
+//! file's own marks are not read: one reason is recorded, the first that holds.
 //!
 //! **This is an operator decision, not an inference.** The crate's rule that
 //! "identity is chosen only by winning" is about the SEARCH: the search never
@@ -60,6 +67,10 @@ pub const XDG_TAGS_XATTR: &str = "user.xdg.tags";
 pub enum AsDrawnReason {
     /// The run was started with `--orient none`.
     OrientNone,
+    /// The model's file name matched `entry` of the run's `--no-orient` list
+    /// ([`NoOrientList`]). The entry is kept as the operator typed it, so a
+    /// glob that caught a model nobody meant to list can be traced to it.
+    Listed { entry: String },
     /// macOS Finder tag [`AS_DRAWN_TAG`] on the STL.
     FinderTag,
     /// Linux `user.xdg.tags` entry [`AS_DRAWN_TAG`] on the STL.
@@ -72,6 +83,7 @@ impl fmt::Display for AsDrawnReason {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::OrientNone => formatter.write_str("--orient none"),
+            Self::Listed { entry } => write!(formatter, "listed in --no-orient as {entry}"),
             Self::FinderTag => write!(formatter, "Finder tag {AS_DRAWN_TAG}"),
             Self::XdgTag => write!(formatter, "{XDG_TAGS_XATTR} {AS_DRAWN_TAG}"),
             Self::MarkerFile { marker } => write!(
@@ -217,6 +229,182 @@ fn read_one_attribute(
             ));
             None
         }
+    }
+}
+
+/// The run's `--no-orient=<list>` (owner spec 2026-10-01): models to use
+/// EXACTLY AS DRAWN, named on the command line instead of by a tag or a
+/// marker beside the file.
+///
+/// An entry names a source by its FILE NAME in the input folder (the executor
+/// reads one folder, not a tree, so "relative to the input dir" is the file
+/// name). It matches when either holds:
+///
+/// - the entry, as a glob, matches the whole file name (`Round_25.stl`,
+///   `Round_*.stl`, `*.stl`);
+/// - the entry less a trailing `.stl` matches the file name less its `.stl`
+///   (`Round_25`, `Round_*`, `Round_2?`). The `.stl` is compared without
+///   regard to case on both sides, as the executor's own enumeration does;
+///   the rest of the name is compared exactly, case and all.
+///
+/// The glob has two wildcards: `*` (any run of characters, none included) and
+/// `?` (exactly one character). Every other character, `[` and `\` included,
+/// stands for itself. Entries are separated by commas and trimmed of the
+/// space around them; an empty entry is dropped. A name with a comma in it
+/// cannot be listed (use `?` for the comma).
+///
+/// **Emit and warn, never refuse.** An entry that matches no model in the
+/// folder is reported by [`NoOrientList::resolve`] for the run report to print
+/// as a WARNING; the run goes on, and every other model is prepared as it
+/// would have been.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NoOrientList {
+    entries: Vec<String>,
+}
+
+/// What [`NoOrientList::resolve`] found over one folder's sources.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NoOrientMatches {
+    /// One slot per source, in the order given: the FIRST entry (in list
+    /// order) that names it, or `None` when no entry does.
+    pub listed: Vec<Option<String>>,
+    /// The entries that named no source at all, in list order.
+    pub unmatched: Vec<String>,
+}
+
+impl NoOrientList {
+    /// The entries of one `--no-orient` value: comma-separated, each trimmed,
+    /// empty entries dropped.
+    #[must_use]
+    pub fn parse(value: &str) -> Self {
+        let mut list = Self::default();
+        list.extend(
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_owned),
+        );
+        list
+    }
+
+    /// Adds entries (a second `--no-orient` on the same command line), keeping
+    /// the first spelling of a repeated entry and the order they came in.
+    pub fn extend(&mut self, entries: impl IntoIterator<Item = String>) {
+        for entry in entries {
+            if !self.entries.contains(&entry) {
+                self.entries.push(entry);
+            }
+        }
+    }
+
+    /// No entry at all: the run has no list.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The entries, as the operator typed them (trimmed), in order.
+    #[must_use]
+    pub fn entries(&self) -> &[String] {
+        &self.entries
+    }
+
+    /// Matches every source of one folder against every entry, ONCE: which
+    /// entry (if any) names each source, and which entries named nothing.
+    /// `file_names` are the sources' file names (`<stem>.stl`), in the
+    /// executor's order.
+    #[must_use]
+    pub fn resolve<S: AsRef<str>>(&self, file_names: &[S]) -> NoOrientMatches {
+        let mut used = vec![false; self.entries.len()];
+        let listed = file_names
+            .iter()
+            .map(|file_name| {
+                let file_name = file_name.as_ref();
+                let hit = self
+                    .entries
+                    .iter()
+                    .position(|entry| entry_names(entry, file_name));
+                hit.map(|index| {
+                    used[index] = true;
+                    self.entries[index].clone()
+                })
+            })
+            .collect();
+        // An entry shadowed by an earlier one on every source it names still
+        // named a model; it is not "unmatched".
+        for (index, entry) in self.entries.iter().enumerate() {
+            if !used[index]
+                && file_names
+                    .iter()
+                    .any(|file_name| entry_names(entry, file_name.as_ref()))
+            {
+                used[index] = true;
+            }
+        }
+        let unmatched = self
+            .entries
+            .iter()
+            .zip(&used)
+            .filter(|(_, used)| !**used)
+            .map(|(entry, _)| entry.clone())
+            .collect();
+        NoOrientMatches { listed, unmatched }
+    }
+}
+
+/// Whether one `--no-orient` entry names the source file `file_name`: the
+/// glob matches the whole name, or matches it with `.stl` taken off both
+/// (see [`NoOrientList`]).
+#[must_use]
+pub fn entry_names(entry: &str, file_name: &str) -> bool {
+    glob_matches(entry, file_name)
+        || glob_matches(
+            without_stl_extension(entry),
+            without_stl_extension(file_name),
+        )
+}
+
+/// `*` and `?` glob over whole strings, by character. No other character is
+/// special.
+#[must_use]
+pub fn glob_matches(pattern: &str, text: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    let (mut at_pattern, mut at_text) = (0, 0);
+    // The last `*` seen: the pattern index just past it, and the text index it
+    // is currently taken to stop at. On a mismatch the star takes one more
+    // character and matching resumes after it.
+    let mut last_star: Option<(usize, usize)> = None;
+    while at_text < text.len() {
+        match pattern.get(at_pattern) {
+            Some('*') => {
+                last_star = Some((at_pattern + 1, at_text));
+                at_pattern += 1;
+            }
+            Some(&wanted) if wanted == '?' || wanted == text[at_text] => {
+                at_pattern += 1;
+                at_text += 1;
+            }
+            _ => match last_star {
+                Some((after_star, star_end)) => {
+                    last_star = Some((after_star, star_end + 1));
+                    at_pattern = after_star;
+                    at_text = star_end + 1;
+                }
+                None => return false,
+            },
+        }
+    }
+    pattern[at_pattern..].iter().all(|&character| character == '*')
+}
+
+/// `name` less a trailing `.stl` in any case, if it has one.
+fn without_stl_extension(name: &str) -> &str {
+    let cut = name.len().saturating_sub(4);
+    match (name.get(..cut), name.get(cut..)) {
+        (Some(stem), Some(extension)) if extension.eq_ignore_ascii_case(".stl") => stem,
+        _ => name,
     }
 }
 

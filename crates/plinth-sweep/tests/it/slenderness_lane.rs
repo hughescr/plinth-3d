@@ -186,6 +186,10 @@ fn deleting_each_rung_hands_the_work_to_the_next_one_down() {
     // some run is short enough to hold — and the hand-over itself is graded
     // at the ratio the fixture was built at, where the stilt posts are
     // holdable: `with_bracing_deleted_thickening_takes_the_holdable_runs_first`.
+    // At S = 40 (Craig ruling 2026-10-02) S · r_max = 40 mm, but a taper to a
+    // 1.0 mm root still has a smaller equivalent radius, and the production
+    // stilt plate thickens nothing (7 refused past the maximum, measured
+    // 2026-10-02); this test is green there as written.
     let lane = &no_brace.report.slenderness_lane;
     assert!(
         lane.members_thickened + lane.thicken_refused_radius + lane.thicken_refused_disc > 0,

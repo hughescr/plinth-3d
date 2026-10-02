@@ -20,7 +20,8 @@ use std::path::{Path, PathBuf};
 
 use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
 use plinth_orient::as_drawn::{
-    marker_path, probe_source, strip_finder_colour, xdg_tags, AsDrawnReason, AS_DRAWN_TAG,
+    entry_names, glob_matches, marker_path, probe_source, strip_finder_colour, xdg_tags,
+    AsDrawnReason, NoOrientList, AS_DRAWN_TAG,
 };
 use plinth_orient::{orient_as_drawn, BaselineSelection, OrientationProvenance};
 
@@ -307,4 +308,142 @@ fn orient_as_drawn_applies_identity_recentres_and_records_the_reason() {
     );
     assert!(min[2].abs() < 1e-9, "rests at z = 0, got {}", min[2]);
     assert!((min[0] + max[0]).abs() < 1e-9 && (min[1] + max[1]).abs() < 1e-9);
+}
+
+// --- `--no-orient=<list>` (owner spec 2026-10-01) --------------------------
+//
+// The list itself is a pure function of the entries and the folder's file
+// names; the executor wiring (one disposition per model, the unmatched
+// warning carried on the report) is graded in `plinth-pipeline`'s
+// `orient_as_drawn` tests, and the printed lines in `plinth-cli`.
+
+/// An exact name, with or without `.stl`; the `.stl` in any case, the rest of
+/// the name exactly.
+#[test]
+fn a_no_orient_entry_names_a_model_exactly_with_or_without_stl() {
+    for (entry, file_name) in [
+        ("Round_25.stl", "Round_25.stl"),
+        ("Round_25", "Round_25.stl"),
+        ("Round_25", "Round_25.STL"),
+        ("Round_25.STL", "Round_25.stl"),
+        ("Morel base", "Morel base.stl"),
+        ("Morel base.stl", "Morel base.stl"),
+    ] {
+        assert!(entry_names(entry, file_name), "{entry:?} must name {file_name:?}");
+    }
+    for (entry, file_name) in [
+        ("Round_2", "Round_25.stl"),
+        ("Round", "Round_25.stl"),
+        ("round_25", "Round_25.stl"),
+        ("Round_25.st", "Round_25.stl"),
+        ("Round_25.stl", "Round_250.stl"),
+        ("Round_25.obj", "Round_25.stl"),
+        ("", "Round_25.stl"),
+    ] {
+        assert!(!entry_names(entry, file_name), "{entry:?} must NOT name {file_name:?}");
+    }
+}
+
+/// `*` and `?` and nothing else; with or without `.stl` there too.
+#[test]
+fn a_no_orient_glob_takes_star_and_question_mark_and_nothing_else() {
+    for (entry, file_name) in [
+        ("Round_*", "Round_100.stl"),
+        ("Round_*.stl", "Round_100.stl"),
+        ("Round_2?", "Round_25.stl"),
+        ("Round_2?.stl", "Round_25.stl"),
+        ("*", "make_overhang_table.stl"),
+        ("*.stl", "make_overhang_table.stl"),
+        ("*_overhang_*", "make_overhang_table.stl"),
+        ("make_*_table", "make_overhang_table.stl"),
+        ("M?rel base", "Mörel base.stl"),
+        ("[R]ound_25", "[R]ound_25.stl"),
+    ] {
+        assert!(entry_names(entry, file_name), "{entry:?} must name {file_name:?}");
+    }
+    for (entry, file_name) in [
+        ("Round_2?", "Round_250.stl"),
+        ("Round_2?", "Round_2.stl"),
+        ("Round_*", "Cylinder.stl"),
+        ("*_table", "make_overhang_table_2.stl"),
+        // Brackets are literal, not a character class.
+        ("[R]ound_25", "Round_25.stl"),
+    ] {
+        assert!(!entry_names(entry, file_name), "{entry:?} must NOT name {file_name:?}");
+    }
+    // The glob on its own, over whole strings.
+    assert!(glob_matches("a*b*c", "aXXbYYc"));
+    assert!(!glob_matches("a*b*c", "aXXbYY"));
+    assert!(glob_matches("*a", "aaa"));
+    assert!(glob_matches("*", ""));
+    assert!(glob_matches("", ""));
+    assert!(!glob_matches("?", ""));
+    assert!(!glob_matches("", "a"));
+    assert!(glob_matches("a**?", "abc"));
+}
+
+#[test]
+fn a_no_orient_value_is_split_on_commas_trimmed_and_deduplicated() {
+    let mut list = NoOrientList::parse(" Round_25 , make_overhang_table.stl,, Round_*,Round_25,");
+    assert_eq!(
+        list.entries(),
+        ["Round_25", "make_overhang_table.stl", "Round_*"]
+    );
+    list.extend(NoOrientList::parse("Sphere,Round_*").entries().to_vec());
+    assert_eq!(
+        list.entries(),
+        ["Round_25", "make_overhang_table.stl", "Round_*", "Sphere"]
+    );
+    assert!(NoOrientList::parse(" , ,").is_empty());
+    assert!(NoOrientList::default().is_empty());
+}
+
+/// Over a whole folder: each source gets the FIRST entry that names it; an
+/// entry that names no source is reported (the run warns and goes on); an
+/// entry shadowed by an earlier one still named a model and is not reported.
+#[test]
+fn resolve_lists_each_source_once_and_reports_the_entries_that_named_nothing() {
+    let files = [
+        "Cylinder.stl",
+        "Round_25.stl",
+        "Round_50.stl",
+        "make_overhang_table.stl",
+    ];
+    let matches = NoOrientList::parse(
+        "Round_25.stl, Round_*, make_overhang_table, Sphere, Treant?, round_50",
+    )
+    .resolve(&files);
+    assert_eq!(
+        matches.listed,
+        [
+            None,
+            Some("Round_25.stl".to_owned()),
+            Some("Round_*".to_owned()),
+            Some("make_overhang_table".to_owned()),
+        ]
+    );
+    assert_eq!(matches.unmatched, ["Sphere", "Treant?", "round_50"]);
+
+    let shadowed = NoOrientList::parse("Round_25, Round_2?").resolve(&["Round_25.stl"]);
+    assert_eq!(shadowed.listed, [Some("Round_25".to_owned())]);
+    assert!(shadowed.unmatched.is_empty(), "{:?}", shadowed.unmatched);
+
+    let empty_folder = NoOrientList::parse("Round_25").resolve::<&str>(&[]);
+    assert!(empty_folder.listed.is_empty());
+    assert_eq!(empty_folder.unmatched, ["Round_25"]);
+
+    let no_list = NoOrientList::default().resolve(&files);
+    assert_eq!(no_list.listed, [None, None, None, None]);
+    assert!(no_list.unmatched.is_empty());
+}
+
+#[test]
+fn a_listed_model_says_which_entry_listed_it() {
+    assert_eq!(
+        AsDrawnReason::Listed {
+            entry: "Round_*".to_owned()
+        }
+        .to_string(),
+        "listed in --no-orient as Round_*"
+    );
 }

@@ -82,6 +82,9 @@ pub(crate) struct ReplayContext<'a> {
     /// potential from the one the seats were placed on.
     pub straight_reach: bool,
     pub creep_weight: bool,
+    /// The up-sweep's overhang cut ([`crate::SweepPolicy::creep_overhang_cut`]),
+    /// for the same reason as `straight_reach`.
+    pub creep_overhang_cut: bool,
     pub overhang_centre_deg: f64,
     pub overhang_transition_deg: f64,
     /// Upper bound on restarts; the registered removal pass count.
@@ -226,6 +229,7 @@ fn replay_once(
             grid,
             context.overhang_centre_deg,
             context.overhang_transition_deg,
+            context.creep_overhang_cut,
         )
     } else {
         SurfaceCreep::disabled(grid)
@@ -500,6 +504,7 @@ mod tests {
             layers: LAYERS,
             straight_reach: true,
             creep_weight: false,
+            creep_overhang_cut: true,
             overhang_centre_deg: 45.0,
             overhang_transition_deg: 25.0,
             max_restarts: 3,

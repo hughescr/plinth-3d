@@ -418,6 +418,14 @@ pub struct GreedyScratch {
     /// (see [`crate::report::PathHits::island_hex_bound`]).
     pub island_seats: u64,
     pub island_hex_bound: u64,
+    /// Whether a pivot no demand seat can reach (all of them in a drain's
+    /// escape cylinder) may seat on a rooted underside cell that reaches it
+    /// ([`stranded_seat_for`]). `false` is the sabotage form
+    /// ([`crate::SweepPolicy::without_stranded_seating`]): such demand is left
+    /// BARE, as before 2026-10-01.
+    pub stranded_seating: bool,
+    /// Seats placed that way. Path-hit witness.
+    pub stranded_seats: u64,
 }
 
 impl GreedyScratch {
@@ -493,6 +501,8 @@ impl GreedyScratch {
             seats_saved: 0,
             island_seats: 0,
             island_hex_bound: 0,
+            stranded_seating: true,
+            stranded_seats: 0,
         }
     }
 
@@ -1069,6 +1079,7 @@ fn cover_island(
     }
     let mut cursor = 0_usize;
     let mut last_pivot = usize::MAX;
+    let mut stranded_seats = 0_u64;
     loop {
         if at_limit(placer) {
             break;
@@ -1086,7 +1097,29 @@ fn cover_island(
         let chosen = if pivot == last_pivot {
             keep_out.admits(pivot, layer).then_some(pivot)
         } else {
-            best_seat_for(grid, cover, history, scratch, keep_out, layer, pivot, ridge)
+            best_seat_for(grid, cover, history, scratch, keep_out, layer, pivot, ridge).or_else(
+                || {
+                    let host = scratch
+                        .stranded_seating
+                        .then(|| {
+                            stranded_seat_for(
+                                grid,
+                                cover,
+                                history,
+                                scratch,
+                                keep_out,
+                                layer,
+                                pivot,
+                                &reach.u_prev,
+                            )
+                        })
+                        .flatten();
+                    if host.is_some() && matches!(placer, Placer::Commit { .. }) {
+                        stranded_seats += 1;
+                    }
+                    host
+                },
+            )
         };
         last_pivot = pivot;
         let Some(chosen) = chosen else {
@@ -1111,6 +1144,7 @@ fn cover_island(
         // cannot have moved.
         rebuild_prefix_rows(grid, &scratch.demand_bits, &mut scratch.prefix, lo, hi);
     }
+    scratch.stranded_seats += stranded_seats;
     (seats, dirty)
 }
 
@@ -1578,6 +1612,82 @@ fn best_seat_for(
         }
     }
     best_hull.map_or(best, |(candidate, _)| Some(candidate))
+}
+
+/// A seat for a pivot [`best_seat_for`] found NO seat for: every demand cell
+/// in reach of it, the pivot included, stands in a drain's escape cylinder,
+/// or outside the ridge band. `None` when there is still none.
+///
+/// # Why a rooted host is allowed here, and only here (2026-10-01)
+///
+/// [`best_seat_for`] seats only on DEMAND, because a host that is already
+/// rooted is legal but wasted ("four arms inside a leg's own self-rooted
+/// fringe", `make_overhang_table`). That rule assumes the demand it leaves
+/// behind can still be reached from demand. Beside a drain it cannot: the
+/// keep-out is `bore + widest arm + standoff` in radius (2.85 mm on the
+/// Cylinder) against a reach of 2.13 mm, the ring of cells just outside it is
+/// rooted by the first seats on the layer, and the cells inside it that a seat
+/// on that ring WOULD reach are then left BARE although a legal arm reaches
+/// them. Measured on the Cylinder at develop `3372093`: 1,555 ceiling cells
+/// (3.89 mm2) bare on the layer the cavity closes over its drain, carried up 55
+/// layers, with the potential the only thing that covered more of the disc —
+/// through arms the creep weight's tail happened to seat lower down, which the
+/// overhang cut removes (`lanes/creep-45.md`). Here the pivot itself is the
+/// demand the arm is for, so the host need not be.
+///
+/// The host must still be a legal seat (`cover`, admitted by the keep-out),
+/// and either demand or material that did NOT carry one layer down: a real
+/// underside, never a cell inside solid material whose arm would land on the
+/// model one layer below it. Choice and tie-breaks are [`best_seat_for`]'s.
+/// No keep-out, no change: without drains the pivot is always admitted, so
+/// [`best_seat_for`] never returns `None` and this never runs.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the same inputs as `best_seat_for`, plus the carried-column field; a struct would \
+          move the list rather than shorten it"
+)]
+fn stranded_seat_for(
+    grid: &Grid,
+    cover: &[bool],
+    history: &ColumnHistory,
+    scratch: &GreedyScratch,
+    keep_out: &DrainKeepOut,
+    layer: usize,
+    pivot: usize,
+    carried: &[f32],
+) -> Option<usize> {
+    let cols = grid.cols();
+    let rows = grid.rows();
+    let reach = scratch.reach_cells;
+    let pivot_row = pivot / cols;
+    let pivot_col = pivot % cols;
+    let mut best: Option<usize> = None;
+    let mut best_key = (0_u32, false, 0_u32);
+    for row in pivot_row.saturating_sub(reach)..=(pivot_row + reach).min(rows - 1) {
+        let half = scratch.half_widths[row.abs_diff(pivot_row)];
+        for col in pivot_col.saturating_sub(half)..=(pivot_col + half).min(cols - 1) {
+            let candidate = row * cols + col;
+            // `carried` is finite exactly where the column carried one layer
+            // down ([`crate::reach::commit_layer`]).
+            if !(cover[candidate]
+                && keep_out.admits(candidate, layer)
+                && (scratch.demand_bits[candidate] || !carried[candidate].is_finite()))
+            {
+                continue;
+            }
+            let score = score_at(grid, &scratch.prefix, &scratch.half_widths, candidate);
+            let key = (
+                score,
+                history.top_strut[candidate] > 0,
+                history.top_model[candidate],
+            );
+            if best.is_none() || key > best_key {
+                best_key = key;
+                best = Some(candidate);
+            }
+        }
+    }
+    best
 }
 
 /// The convex hull, in (row, col) cell units, of the uncovered cells of the

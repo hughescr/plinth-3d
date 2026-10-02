@@ -871,9 +871,23 @@ pub fn prepare(request: PrepareRequest) -> Result<PrepareReport, PipelineError> 
     let policy = StagePolicy::for_request(&request)
         .map_err(|source| PipelineError::ResourcePolicy { source })?;
 
+    // **`--no-orient=<list>`, matched once over the whole folder** (owner spec
+    // 2026-10-01): which entry names each source, and which entries named no
+    // source at all. The latter is a warning on the report, never a refusal.
+    let file_names: Vec<String> = sources
+        .iter()
+        .map(|source_path| {
+            source_path.file_name().map_or_else(
+                || source_path.to_string_lossy().into_owned(),
+                |name| name.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    let no_orient = request.no_orient.resolve(&file_names);
+
     let mut claimed_targets: BTreeSet<PathBuf> = BTreeSet::new();
     let mut models = Vec::with_capacity(sources.len());
-    for source_path in sources {
+    for (source_path, listed) in sources.into_iter().zip(no_orient.listed) {
         let model = ModelId::new(model_stem(&source_path));
         let target = request
             .output_dir
@@ -912,6 +926,7 @@ pub fn prepare(request: PrepareRequest) -> Result<PrepareReport, PipelineError> 
             &source_path,
             &target,
             &policy,
+            listed,
             request.stop_after,
         ));
     }
@@ -919,6 +934,7 @@ pub fn prepare(request: PrepareRequest) -> Result<PrepareReport, PipelineError> 
     Ok(PrepareReport {
         no_cache: request.no_cache,
         models,
+        no_orient_unmatched: no_orient.unmatched,
     })
 }
 
@@ -957,11 +973,15 @@ fn model_stem(path: &Path) -> String {
 }
 
 /// One model, load to artifact, with its disposition captured either way.
+///
+/// `listed` is the `--no-orient` entry that names this model, if one does
+/// (matched by [`prepare`] over the whole folder).
 fn prepare_one(
     model: &ModelId,
     source_path: &Path,
     target: &Path,
     policy: &StagePolicy,
+    listed: Option<String>,
     stop_after: Option<StageStop>,
 ) -> ModelPreparationReport {
     // `repair` is threaded through every disposition rather than attached only
@@ -1126,16 +1146,23 @@ fn prepare_one(
 
     clock.entering("Orientation");
     // **As drawn?** (GitHub issue #1, owner spec 2026-10-01.) `--orient none`
-    // marks every model; otherwise this model's own tag attribute or
-    // `<stem>.asdrawn` marker can. The probe reads one extended attribute and
-    // checks one sibling path; a tag it cannot decode is a warning carried on
-    // the disclosure, never a refusal.
-    let probe = match policy.orientation {
-        OrientationPolicy::AsDrawn => plinth_orient::as_drawn::AsDrawnProbe {
+    // marks every model; then the run's `--no-orient` list; otherwise this
+    // model's own tag attribute or `<stem>.asdrawn` marker can. One reason is
+    // recorded, the first that holds. The probe reads one extended attribute
+    // and checks one sibling path; a tag it cannot decode is a warning carried
+    // on the disclosure, never a refusal.
+    let probe = match (&policy.orientation, listed) {
+        (OrientationPolicy::AsDrawn, _) => plinth_orient::as_drawn::AsDrawnProbe {
             reason: Some(plinth_orient::as_drawn::AsDrawnReason::OrientNone),
             warnings: Vec::new(),
         },
-        OrientationPolicy::DenseSweep | OrientationPolicy::Pinned(_) => {
+        (OrientationPolicy::DenseSweep | OrientationPolicy::Pinned(_), Some(entry)) => {
+            plinth_orient::as_drawn::AsDrawnProbe {
+                reason: Some(plinth_orient::as_drawn::AsDrawnReason::Listed { entry }),
+                warnings: Vec::new(),
+            }
+        }
+        (OrientationPolicy::DenseSweep | OrientationPolicy::Pinned(_), None) => {
             plinth_orient::as_drawn::probe_source(source_path)
         }
     };
@@ -2760,7 +2787,9 @@ fn print_sweep_disclosure(
              whose host chain came out overloaded, {} whose root came to lap another ({} sized \
              checks; unexplained by any re-landing: {} newly overloaded members, {} new root \
              pairs; {} arms the judging sizing had inserted withdrawn with them, {} of those \
-             landed on a move put back); {} pass(es); {} members resting on a re-landed arm \
+             landed on a move put back); across passes: {} moves of an earlier pass refused and \
+             the rule re-run from the field before its first move, {} re-runs, {} runs withdrawn \
+             whole{}; {} pass(es); {} members resting on a re-landed arm \
              moved with it; footprint: {} on-face tips searched for a seat further along the \
              same face, {} moved there ({} taken back as still cut once every move's follow was \
              drawn, then {} other moves taken back because the field left broke a rule for a \
@@ -2795,6 +2824,15 @@ fn print_sweep_disclosure(
             lip.new_root_pairs_unattributed,
             lip.inserted_arms_withdrawn,
             lip.inserted_on_a_put_back_move,
+            lip.moves_refused_across_passes,
+            lip.reruns,
+            lip.runs_withdrawn,
+            if lip.runs_withdrawn > 0 {
+                " (WARNING: a run reached the registered pass count in re-runs, so its moves \
+                 were all taken back)"
+            } else {
+                ""
+            },
             lip.passes,
             lip.children_moved_with_host,
             report.seat_footprint.tips_graded_for_section,
@@ -3203,7 +3241,8 @@ fn print_sweep_disclosure(
         "[sweep {model}] slenderness p50 {:.1}:1 max {:.1}:1; overloaded arms {}; \
          model sections over X_ALLOWED {}; peel field {:?} (area {:?}, tilt {:?}); \
          path hits: reach {} vertical {} spread {} arm-share {} injections {} max-combines {} \
-         raster {} coarsening {} kappa {}/{} lift {} creep-cells {} creep-steps {}",
+         raster {} coarsening {} kappa {}/{} lift {} creep-cells {} creep-steps {} \
+         creep-free {} stranded-seats {}",
         report.slenderness_p50,
         report.slenderness_max,
         report.overloaded_struts.len(),
@@ -3224,6 +3263,8 @@ fn print_sweep_disclosure(
         report.counters.lift_assertions,
         report.counters.creep_cells_weighted,
         report.counters.creep_steps_taken,
+        report.counters.creep_cells_free,
+        report.counters.stranded_seats,
     );
     println!(
         "[sweep {model}] seat placement: up-sweep seats {} against a hex covering lower bound of \

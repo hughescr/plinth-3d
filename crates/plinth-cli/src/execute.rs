@@ -72,6 +72,7 @@ fn resolve(selection: &PrepareSelection) -> Result<PrepareRequest, PipelineError
         input_models_dir: selection.input_models_dir.clone(),
         output_dir: selection.output_dir.clone(),
         orientation: resolve_orientation(&selection.orientation)?,
+        no_orient: selection.no_orient.clone(),
         placement: selection.placement.into(),
         output_profile: selection.output_profile,
         decimation_budget,
@@ -187,6 +188,14 @@ fn print_report(selection: &PrepareSelection, report: &PrepareReport) {
             ),
         }
     );
+
+    for line in no_orient_lines(
+        &selection.no_orient,
+        &selection.input_models_dir,
+        &report.no_orient_unmatched,
+    ) {
+        println!("{line}");
+    }
 
     // Which support engine placed the field. Two runs of the same model under
     // the two engines produce the same KIND of artifact, so without this line
@@ -310,6 +319,33 @@ fn near_parallel_lines(counts: NearParallelCounts) -> Vec<String> {
             lines.push(format!("    {}  {count}", site.label()));
         }
     }
+    lines
+}
+
+/// `--no-orient=LIST` in the run header (owner spec 2026-10-01): the list as
+/// the run read it, then one WARNING line per entry that named no model in the
+/// folder. Such an entry is ignored and the run goes on (emit and warn, never
+/// refuse); each listed model still says `as drawn (listed in --no-orient as
+/// <entry>)` on its own line. No list, no lines: a run without the flag prints
+/// exactly what it printed before the flag existed.
+fn no_orient_lines(
+    list: &plinth_orient::as_drawn::NoOrientList,
+    input_models_dir: &std::path::Path,
+    unmatched: &[String],
+) -> Vec<String> {
+    if list.is_empty() && unmatched.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![format!(
+        "  no-orient    {}: these models used exactly as drawn",
+        list.entries().join(",")
+    )];
+    lines.extend(unmatched.iter().map(|entry| {
+        format!(
+            "  WARNING --no-orient  {entry:?} matches no model in {}; ignored, the run continues",
+            input_models_dir.display()
+        )
+    }));
     lines
 }
 
@@ -1134,7 +1170,7 @@ mod tests {
 
     use super::{
         coverage_gap_warning_lines, coverage_lines, coverage_repair_lines, near_parallel_lines,
-        orientation_source_lines, remedies_tried_line, repair_lines,
+        no_orient_lines, orientation_source_lines, remedies_tried_line, repair_lines,
     };
 
     /// Counts with exactly one site charged.
@@ -1196,6 +1232,33 @@ mod tests {
                 "  orientation searched".to_owned(),
                 "  WARNING orientation tag  m.stl: com.apple.metadata:_kMDItemUserTags could not \
                  be decoded"
+                    .to_owned(),
+            ]
+        );
+    }
+
+    /// `--no-orient`: no list prints nothing (the header is unchanged for every
+    /// run without the flag); a list prints one line, and each entry that named
+    /// no model one WARNING line.
+    #[test]
+    fn the_no_orient_list_is_one_header_line_and_each_unmatched_name_warns() {
+        let folder = std::path::Path::new("in dir");
+        let none = plinth_orient::as_drawn::NoOrientList::default();
+        assert!(no_orient_lines(&none, folder, &[]).is_empty());
+
+        let list = plinth_orient::as_drawn::NoOrientList::parse("Round_*, make_overhang_table");
+        assert_eq!(
+            no_orient_lines(&list, folder, &[]),
+            vec!["  no-orient    Round_*,make_overhang_table: these models used exactly as drawn"
+                .to_owned()]
+        );
+        assert_eq!(
+            no_orient_lines(&list, folder, &["make_overhang_table".to_owned()]),
+            vec![
+                "  no-orient    Round_*,make_overhang_table: these models used exactly as drawn"
+                    .to_owned(),
+                "  WARNING --no-orient  \"make_overhang_table\" matches no model in in dir; \
+                 ignored, the run continues"
                     .to_owned(),
             ]
         );

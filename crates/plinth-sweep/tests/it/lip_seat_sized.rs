@@ -286,6 +286,83 @@ fn a_lip_seat_relanding_overloads_no_host_on_the_laid_tube() {
     assert_no_new_overload("make_laid_tube", laid_tube());
 }
 
+/// The laid tube at the slenderness ratio registered until 2026-10-01
+/// (`harness::PATH_FIXTURE_SLENDERNESS_RATIO`, S = 50): the field on which the
+/// lip-seat rule left a host over its limit across passes.
+fn laid_tube_at_s_50() -> &'static Pair {
+    static FIXTURE: OnceLock<Pair> = OnceLock::new();
+    FIXTURE.get_or_init(|| {
+        let mesh = make_laid_tube().expect("the laid tube");
+        let at_50 = crate::harness::at_path_fixture_slenderness(policy());
+        Pair {
+            on: sweep_with(&mesh, 0.0, &at_50),
+            off: sweep_with(&mesh, 0.0, &at_50.without_lip_seat()),
+        }
+    })
+}
+
+/// **Across passes** (fix/creep-45 round 11, 2026-10-02). Measured on
+/// `cd4efe7` at the then-registered S = 50, creep cut on, and red again
+/// (same 56.5825 mm²) at S = 50 on the round-11 merge `ab597a4`; the
+/// production laid tube at S = 30 no longer reaches it, so the fixture pins
+/// S = 50 (`harness::at_path_fixture_slenderness`). Arm 21 is re-landed in the rule's FIRST
+/// pass onto member 7's shaft (+2.62 mm²); that pass's sized check finds 7
+/// under its limit. A later pass's moves shift load onto 7, and its check
+/// finds 7 at 56.5825 mm² against 18 × π × 1.0² = 56.549 mm², but no move OF
+/// THAT PASS feeds 7's chain, so it was judged "unattributed" and left
+/// standing. Every check now judges every move still standing, from every
+/// pass, against the field before the rule's first move.
+#[test]
+fn a_lip_seat_relanding_overloads_no_host_on_the_laid_tube_across_passes() {
+    let fixture = laid_tube_at_s_50();
+    let lip = &fixture.on.report.lip_seat;
+    println!(
+        "make_laid_tube at S = 50: across passes {} moves refused, {} re-runs, {} runs withdrawn; \
+         unattributed at the last check {} overloads, {} root pairs",
+        lip.moves_refused_across_passes,
+        lip.reruns,
+        lip.runs_withdrawn,
+        lip.new_overloads_unattributed,
+        lip.new_root_pairs_unattributed
+    );
+    // PATH HIT: the cross-pass judgement is what fixed it (measured 2026-10-02:
+    // 1 earlier-pass move refused, 1 re-run), not a withdrawal of the run.
+    assert!(
+        lip.moves_refused_across_passes > 0,
+        "the cross-pass path never fired"
+    );
+    assert_eq!(lip.runs_withdrawn, 0, "the run was withdrawn whole");
+    assert_no_new_overload("make_laid_tube at S = 50", fixture);
+}
+
+/// **Sabotage** of the test above: each check judging only its own pass's
+/// moves, against the field the previous pass left
+/// ([`SweepPolicy::without_lip_seat_across_passes`]), leaves member 7 over
+/// its limit again, and the cross-pass path never fires.
+#[test]
+fn judged_pass_by_pass_the_laid_tube_at_s_50_keeps_a_host_over_its_limit() {
+    let mesh = make_laid_tube().expect("the laid tube");
+    let sabotaged = sweep_with(
+        &mesh,
+        0.0,
+        &crate::harness::at_path_fixture_slenderness(policy()).without_lip_seat_across_passes(),
+    );
+    let lip = &sabotaged.report.lip_seat;
+    let over = overloaded(&sabotaged);
+    println!(
+        "make_laid_tube at S = 50, pass by pass: overloaded {over:?}; across passes {} moves \
+         refused, {} re-runs; unattributed at the last check {}",
+        lip.moves_refused_across_passes, lip.reruns, lip.new_overloads_unattributed
+    );
+    assert_eq!(lip.moves_refused_across_passes, 0);
+    assert_eq!(lip.reruns, 0);
+    assert!(
+        !over.is_empty(),
+        "judged pass by pass, the laid tube at S = 50 no longer keeps a host over its limit, so \
+         the test above witnesses nothing"
+    );
+}
+
 #[test]
 fn a_lip_seat_relanding_laps_no_new_plate_root_on_the_stilt_plate() {
     assert_no_new_root_pair("make_tall_stilt_plate", stilt());

@@ -68,6 +68,7 @@ fn request(scratch: &Scratch, stop_after: Option<StageStop>) -> PrepareRequest {
         // LANE 2: this suite pins the LEGACY engine. The sweep selector is a
         // runtime enum whose default is Legacy, named here so a future default
         // flip cannot silently re-point these fixtures at another engine.
+        no_orient: Default::default(),
         placement: plinth_pipeline::Placement::Legacy,
         output_profile: OutputProfile::Saturn4Ultra,
         decimation_budget: registered_decimation_budget().expect("registered budget"),

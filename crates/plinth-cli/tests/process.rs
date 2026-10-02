@@ -67,12 +67,16 @@ fn root_and_prepare_help_pin_the_stable_usage_essentials() {
     assert!(prepare.status.success());
     let stdout = text(&prepare.stdout);
     assert!(stdout.contains(
-        "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|none|pinned:DIR] [--placement legacy|sweep] [--wall-mm MM] [--no-cache]"
+        "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|none|pinned:DIR] [--no-orient=LIST] [--placement legacy|sweep] [--wall-mm MM] [--no-cache]"
     ));
-    // GitHub issue #1: the four as-drawn switches are documented where an
-    // operator looks for them.
+    // GitHub issue #1: the as-drawn switches are documented where an operator
+    // looks for them (`--no-orient=LIST`: owner spec 2026-10-01).
     for switch in [
         "none uses every model exactly as drawn",
+        "named in --no-orient",
+        "--no-orient=LIST",
+        "with or without .stl",
+        "matches no model prints a WARNING and the run continues",
         "Finder tag plinth-no-rotate",
         "user.xdg.tags",
         "<stem>.asdrawn",
@@ -325,6 +329,67 @@ fn a_marker_file_makes_its_model_as_drawn_and_its_neighbour_is_still_searched() 
         stdout.contains("plinth prepare: 2 model(s)"),
         "the marker file must not be enumerated as a model: {stdout}"
     );
+}
+
+/// `--no-orient=LIST` across the process boundary (owner spec 2026-10-01):
+/// the listed model is used as drawn and says why on its own line; the
+/// unlisted neighbour is still searched; a listed name that matches no model
+/// is a WARNING line and the run still emits every model and exits 0.
+#[test]
+fn the_no_orient_list_makes_its_model_as_drawn_and_warns_on_a_name_that_matches_nothing() {
+    let scratch = Scratch::new("no-orient");
+    scratch.place("make_toed_slab.prepped.stl", "listed");
+    scratch.place("make_toed_slab.prepped.stl", "unlisted");
+
+    let output = plinth(&[
+        "prepare",
+        "--input-models-dir",
+        scratch.input().to_str().expect("scratch path is Unicode"),
+        "--output",
+        "saturn4-ultra",
+        "--out-dir",
+        scratch.output().to_str().expect("scratch path is Unicode"),
+        "--no-orient=listed,no_such_model",
+    ]);
+    let stdout = text(&output.stdout);
+    assert!(
+        output.status.success(),
+        "an unmatched name must not fail the run: {stdout}\n{}",
+        text(&output.stderr)
+    );
+    assert!(
+        stdout.contains("\n  no-orient    listed,no_such_model: these models used exactly as drawn\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "\n  WARNING --no-orient  \"no_such_model\" matches no model in {}; ignored, the run continues\n",
+            scratch.input().display()
+        )),
+        "{stdout}"
+    );
+    let block = |stem: &str| -> String {
+        let start = stdout
+            .find(&format!("MODEL  {stem}\n"))
+            .unwrap_or_else(|| panic!("no block for {stem}: {stdout}"));
+        let rest = &stdout[start + 1..];
+        let end = rest.find("MODEL  ").map_or(rest.len(), |offset| offset);
+        rest[..end].to_owned()
+    };
+    let listed = block("listed");
+    assert!(
+        listed.contains("\n  as drawn (listed in --no-orient as listed)\n"),
+        "the listed model must be used as drawn: {listed}"
+    );
+    assert!(
+        listed.contains("rotation committed: identity"),
+        "the listed model must not be rotated: {listed}"
+    );
+    assert!(
+        block("unlisted").contains("\n  orientation searched\n"),
+        "the unlisted model must still be searched"
+    );
+    assert!(stdout.contains("SUMMARY  emitted=2  "), "{stdout}");
 }
 
 /// One spelling per concept: a near-miss orientation mode is refused, not
