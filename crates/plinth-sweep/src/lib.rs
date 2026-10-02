@@ -659,6 +659,16 @@ pub struct SweepPolicy {
     /// ([`lip_seat`], 2026-09-29). **On in production.** The drill turns it
     /// off; the survey and the emitted census still run and publish.
     pub lip_seat: bool,
+    /// Whether every sized check of the lip-seat rule judges every move still
+    /// standing, from EVERY pass, against the field before the run's first
+    /// move, and re-runs the rule without a blamed earlier-pass descent
+    /// (fix/creep-45 round 11, 2026-10-02; `LipSeatRun::run`). **On in
+    /// production.** With it false each check judges only its own pass's
+    /// moves against the field the previous pass left, so a member that the
+    /// moves of several passes push over its limit between them is never put
+    /// back. Sabotage and comparison only; nothing in the pipeline turns it
+    /// off.
+    pub lip_seat_across_passes: bool,
     /// `DECIMATION_PROBE_GRID_PITCH_MM` and `DECIMATION_PROBE_MAX_GRID_BYTES`:
     /// the registered parity-grid pitch and byte cap of a distance-probe
     /// surface index. The head-join rule builds one over the model to measure
@@ -773,6 +783,7 @@ impl SweepPolicy {
             final_clearance_gap_mm: *evidence.final_clearance_gap_mm().value(),
             head_join: true,
             lip_seat: true,
+            lip_seat_across_passes: true,
             surface_index_pitch_mm: placeholders
                 .decimation_probe_grid_pitch_mm()
                 .diagnostic()
@@ -1046,6 +1057,16 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_lip_seat(mut self) -> Self {
         self.lip_seat = false;
+        self
+    }
+
+    /// Judge each lip-seat check only by its own pass's moves, against the
+    /// field the previous pass left, as before 2026-10-02. **Sabotage only**:
+    /// with it set, the laid tube at `S` = 50 keeps member 7 over its limit
+    /// (`tests/it/lip_seat_sized.rs`).
+    #[must_use]
+    pub const fn without_lip_seat_across_passes(mut self) -> Self {
+        self.lip_seat_across_passes = false;
         self
     }
 
@@ -1817,6 +1838,7 @@ pub fn run_sweep_with_drains(
         unrooted: &unrooted,
         passes: policy.strut_removal_passes,
         enabled: policy.lip_seat,
+        across_passes: policy.lip_seat_across_passes,
     };
     // Descents a sized field put back (arm id, base cell), refused for the
     // rest of the rule, both runs.
@@ -2454,6 +2476,7 @@ struct LipSeatRun<'a> {
     unrooted: &'a down_sweep::UnrootedColumns,
     passes: u32,
     enabled: bool,
+    across_passes: bool,
 }
 
 impl LipSeatRun<'_> {
@@ -2462,6 +2485,32 @@ impl LipSeatRun<'_> {
     /// field's "before"; `current` is the down-sweep outcome the field was
     /// last sized by; `refused` the descents a sized field already put back.
     /// Returns the last down-sweep's outcome when anything was re-sized.
+    ///
+    /// # Every check judges every pass (fix/creep-45 round 11, 2026-10-02)
+    ///
+    /// Until 2026-10-02 each pass's check judged only that pass's moves,
+    /// against the field the PREVIOUS pass left. A member that the moves of
+    /// several passes push over its limit between them was then never put
+    /// back: the move that feeds it belongs to an earlier pass, whose check
+    /// found it under. Measured on the laid tube at `S` = 50 (`cd4efe7`): arm
+    /// 21, re-landed by the first pass onto member 7's shaft (+2.62 mm²);
+    /// the last check found 7 at 56.5825 mm² against 56.549, and no move of
+    /// its pass in 7's chain (`new_overloads_unattributed` 1).
+    ///
+    /// Now every check judges the moves STILL STANDING from every pass of
+    /// this run against the field before its first move (`origin`, the field
+    /// `current` sized), by the same attribution and order (`lip_seat::blame`).
+    /// A blamed move of the check's own pass goes back in place, as before:
+    /// nothing has been placed on the field since but the arms the judging
+    /// sizing inserted, which go back with it. A blamed move of an EARLIER
+    /// pass cannot: later moves and later sizings' inserted arms may rest on
+    /// its moved shaft. So every blamed descent of that check is refused, and
+    /// the run starts again from `origin` (`lip_seat::refuse_for_rerun`).
+    /// Each re-run refuses at least one more descent the previous run took,
+    /// so it ends; it is bounded by the same registered pass count, and if
+    /// that is reached the run is withdrawn whole and the field left as
+    /// `origin` (a WARNING, `LipSeatOutcome::runs_withdrawn`): the rule never
+    /// leaves a host over its limit that its own moves fed. No constant.
     fn run(
         &self,
         joins: &head_join::HeadJoinContext<'_>,
@@ -2472,58 +2521,113 @@ impl LipSeatRun<'_> {
         refused: &mut Vec<(u32, usize)>,
     ) -> Option<down_sweep::DownSweepOutcome> {
         let context = joins.slender;
-        let mut sized: Option<down_sweep::DownSweepOutcome> = None;
-        let mut before = self
+        let origin = self
             .enabled
             .then(|| lip_seat::measure_sized(context, struts, current));
-        for pass in 0..self.passes {
-            let (arms, bites) =
-                lip_seat::survey(self.mesh, context, self.plan, self.plate_z, struts);
-            if first && pass == 0 {
-                lip_seat::record_before(outcome, &bites);
-            }
-            let Some(field_before) = before.as_ref() else {
-                break;
-            };
-            outcome.passes += 1;
-            let mut moves = lip_seat::apply(
-                joins,
-                self.plan,
-                self.plate_z,
-                struts,
-                &arms,
-                &bites,
-                refused,
-                outcome,
-            );
-            if moves.is_empty() {
-                break;
-            }
-            // Size the field the moves made, and let it decide
-            // (`lip_seat::blame`): a move whose chain came out overloaded, or
-            // whose foot came to lap another root, is put back WITH every arm
-            // the sizing that judged it inserted (`lip_seat::put_back_all`),
-            // and the field sized again, until the moves left stand on the
-            // sized field.
-            let sized_from = struts.len();
-            let mut now = self.size(context, struts);
-            let field_after = loop {
-                let field_after = lip_seat::measure_sized(context, struts, &now);
-                outcome.sizing_checks += 1;
-                let (blamed, over, pairs) =
-                    lip_seat::blame(struts, &moves, field_before, &field_after);
-                outcome.new_overloads_unattributed = over;
-                outcome.new_root_pairs_unattributed = pairs;
-                if blamed.is_empty() {
-                    break field_after;
+        // The field and the counts as the run found them (after the first
+        // survey's record), for a re-run; taken only when a re-run can happen.
+        let mut start: Option<(Vec<SweepStrut>, lip_seat::LipSeatOutcome)> = None;
+        let mut reruns: u32 = 0;
+        'run: loop {
+            let mut sized: Option<down_sweep::DownSweepOutcome> = None;
+            // Every move still standing, every pass's in order.
+            let mut standing: Vec<lip_seat::Relanding> = Vec::new();
+            // Sabotage only (`without_lip_seat_across_passes`): the field the
+            // previous pass left, which each check judged against before.
+            let mut previous: Option<lip_seat::SizedField> = None;
+            for pass in 0..self.passes {
+                let (arms, bites) =
+                    lip_seat::survey(self.mesh, context, self.plan, self.plate_z, struts);
+                if first && pass == 0 && reruns == 0 {
+                    lip_seat::record_before(outcome, &bites);
                 }
-                lip_seat::put_back_all(struts, sized_from, &mut moves, &blamed, refused, outcome);
-                now = self.size(context, struts);
-            };
-            before = Some(field_after);
-            sized = Some(now);
+                let Some(origin) = origin.as_ref() else {
+                    break;
+                };
+                if self.across_passes && start.is_none() {
+                    start = Some((struts.clone(), outcome.clone()));
+                }
+                outcome.passes += 1;
+                if !self.across_passes {
+                    standing.clear();
+                }
+                let pass_from = standing.len();
+                let moves = lip_seat::apply(
+                    joins,
+                    self.plan,
+                    self.plate_z,
+                    struts,
+                    &arms,
+                    &bites,
+                    refused,
+                    outcome,
+                );
+                if moves.is_empty() {
+                    break;
+                }
+                standing.extend(moves);
+                // Size the field the moves made, and let it decide
+                // (`lip_seat::blame`): a move whose chain came out overloaded,
+                // or whose foot came to lap another root, is put back WITH
+                // every arm the sizing that judged it inserted
+                // (`lip_seat::put_back_all`), and the field sized again, until
+                // the moves left stand on the sized field.
+                let sized_from = struts.len();
+                let mut now = self.size(context, struts);
+                let field_after = loop {
+                    let field_after = lip_seat::measure_sized(context, struts, &now);
+                    outcome.sizing_checks += 1;
+                    let base = previous.as_ref().unwrap_or(origin);
+                    let (blamed, over, pairs) =
+                        lip_seat::blame(struts, &standing, base, &field_after);
+                    outcome.new_overloads_unattributed = over;
+                    outcome.new_root_pairs_unattributed = pairs;
+                    if blamed.is_empty() {
+                        break field_after;
+                    }
+                    if blamed.reaches_before(pass_from) {
+                        let Some((field_at_start, outcome_at_start)) = start.as_ref() else {
+                            // Unreachable: without `across_passes` the
+                            // standing list holds this pass's moves only.
+                            break field_after;
+                        };
+                        let earlier =
+                            lip_seat::refuse_for_rerun(&standing, &blamed, pass_from, refused);
+                        let kept = (
+                            outcome.moves_refused_across_passes + earlier,
+                            outcome.reruns,
+                            outcome.runs_withdrawn,
+                        );
+                        struts.clone_from(field_at_start);
+                        *outcome = outcome_at_start.clone();
+                        outcome.moves_refused_across_passes = kept.0;
+                        outcome.reruns = kept.1;
+                        outcome.runs_withdrawn = kept.2;
+                        if reruns < self.passes {
+                            reruns += 1;
+                            outcome.reruns += 1;
+                            continue 'run;
+                        }
+                        outcome.runs_withdrawn += 1;
+                        return None;
+                    }
+                    lip_seat::put_back_all(
+                        struts,
+                        sized_from,
+                        &mut standing,
+                        &blamed,
+                        refused,
+                        outcome,
+                    );
+                    now = self.size(context, struts);
+                };
+                if !self.across_passes {
+                    previous = Some(field_after);
+                }
+                sized = Some(now);
+            }
+            return sized;
         }
-        sized
     }
 
     /// The down-sweep over the live field, and the interior flags after it.
