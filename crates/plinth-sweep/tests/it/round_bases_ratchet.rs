@@ -913,7 +913,13 @@ fn an_unmarked_disc_is_still_searched_and_its_flip_is_the_as_drawn_pose() {
             .verts()
             .iter()
             .zip(oriented.mesh().verts())
-            .filter(|(a, b)| a != b)
+            // Exact, element by element: `partial_cmp` is `Some(Equal)` exactly
+            // where `==` holds (NaN differs from everything), as `a != b` read.
+            .filter(|(a, b)| {
+                a.iter()
+                    .zip(b.iter())
+                    .any(|(x, y)| x.partial_cmp(y) != Some(std::cmp::Ordering::Equal))
+            })
             .count();
         assert_eq!(
             differing, 0,
