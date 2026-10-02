@@ -414,7 +414,8 @@ fn the_stilt_plate_leaves_no_unbraced_run() {
     );
 }
 
-/// The stilt plate as production places it (`S` = 30): every run over the
+/// The stilt plate as production places it (`S` = 40 since Craig's ruling of
+/// 2026-10-02; one warned post, 11, measured then): every run over the
 /// limit is a published warning (emit and warn, nothing hidden), and each
 /// warned member is one the thicken rung refused past the maximum radius.
 #[test]
@@ -603,7 +604,9 @@ fn assert_unheld_ties_are_warned(name: &str, plan: &SweepPlan) {
 /// them (measured 2026-10-01). So the stilt plate is graded on the lane's
 /// contract, as the brace pair's production field already is: every
 /// one-plane tie is named by a warning. The strict every-direction claim is
-/// still graded at `S` = 50 below.
+/// still graded at `S` = 50 below. At `S` = 40 (Craig ruling 2026-10-02) the
+/// field places 4 masts and one post (11) is warned: 17 needed ties graded,
+/// 1 left unheld and warned (measured 2026-10-02).
 #[test]
 fn every_needed_tie_holds_in_every_direction_on_the_stilt_plate() {
     assert_unheld_ties_are_warned("tall stilt plate", stilt());

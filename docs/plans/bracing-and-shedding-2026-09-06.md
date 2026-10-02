@@ -158,7 +158,11 @@ Recorded here because it changes the ladder above; the code of record is
 
 - **`S` = 30**, interim, pending a slenderness coupon (ChituBox practice
   braces at about 13 × r). The registry note keeps the drag-only derivation
-  and says why the value now sits below its bracket.
+  and says why the value now sits below its bracket. **Superseded
+  2026-10-02: `S` = 40** (Craig ruling, interim, pending the slenderness
+  coupon), the green end of the bracket: at 30 the Cylinder and the Sphere
+  were heavily over-braced (`for-craig-v10`: Cylinder braces 136 → 502,
+  Sphere 50 → 100) and the stilt plate still carried more than it needed.
 - **Keep one-direction crosses.** A cross that ties two columns holds the
   sway in its own plane; thickening or a mast covers the direction across
   it. The prune never takes a cross out because a thickening also holds: a
