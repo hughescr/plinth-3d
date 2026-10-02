@@ -499,7 +499,7 @@ static EXPECTED_ROWS: [ExpectedRow; 280] = rows! {
     "REWIRE_TWIG_MERGE_LEN_MM", "0.5", "mm", "scalar";
     "REWIRE_WORK_BUDGET", "{state:\"disabled\"}", "count", "trial_setting<nonzero_u64>";
     "SCAR_COST_WEIGHT", "1.0", "1", "scalar";
-    "SLENDERNESS_LIMIT_RATIO", "30.0", "1", "scalar";
+    "SLENDERNESS_LIMIT_RATIO", "40.0", "1", "scalar";
     "SLICE_UNION_MAX_ABS_MM", "10000.0", "mm", "scalar";
     "SLICE_UNION_QUANTUM_MM", "0.00000001", "mm", "scalar";
     "SPACING_FLOOR_MM", "2.5", "mm", "scalar";
