@@ -440,6 +440,10 @@ pub struct PathHits {
     /// Of those, the cells the weighted step actually rooted from a carrier
     /// one layer down.
     pub creep_steps_taken: u64,
+    /// Of the cells priced, those priced at zero by the overhang cut (no face
+    /// within one cell is down-facing; owner ruling 2026-09-30). Zero means
+    /// the cut never changed a price.
+    pub creep_cells_free: u64,
     pub multi_carrier_split_hits: u64,
     pub strut_share_reads: u64,
     pub landing_injections: u64,
@@ -491,6 +495,10 @@ pub struct PathHits {
     /// demand it placed them on: per island, `max(1, ⌈area / ((3√3/2)·R²)⌉)`
     /// at the measured reach `R`. Their ratio is the covering efficiency.
     pub island_seats: u64,
+    /// Seats placed for demand that no demand cell could seat because every
+    /// one in reach stood in a drain's escape cylinder
+    /// (`up_sweep::stranded_seat_for`). Zero on a model without drains.
+    pub stranded_seats: u64,
     pub island_hex_bound: u64,
     /// The finished plan's member tops (arms and braces) given a carried face,
     /// those whose NEAREST down-facing face was a wall or a face steeper than

@@ -2786,7 +2786,9 @@ fn print_sweep_disclosure(
              whose host chain came out overloaded, {} whose root came to lap another ({} sized \
              checks; unexplained by any re-landing: {} newly overloaded members, {} new root \
              pairs; {} arms the judging sizing had inserted withdrawn with them, {} of those \
-             landed on a move put back); {} pass(es); {} members resting on a re-landed arm \
+             landed on a move put back); across passes: {} moves of an earlier pass refused and \
+             the rule re-run from the field before its first move, {} re-runs, {} runs withdrawn \
+             whole{}; {} pass(es); {} members resting on a re-landed arm \
              moved with it; footprint: {} on-face tips searched for a seat further along the \
              same face, {} moved there ({} taken back as still cut once every move's follow was \
              drawn, then {} other moves taken back because the field left broke a rule for a \
@@ -2820,6 +2822,15 @@ fn print_sweep_disclosure(
             lip.new_root_pairs_unattributed,
             lip.inserted_arms_withdrawn,
             lip.inserted_on_a_put_back_move,
+            lip.moves_refused_across_passes,
+            lip.reruns,
+            lip.runs_withdrawn,
+            if lip.runs_withdrawn > 0 {
+                " (WARNING: a run reached the registered pass count in re-runs, so its moves \
+                 were all taken back)"
+            } else {
+                ""
+            },
             lip.passes,
             lip.children_moved_with_host,
             report.seat_footprint.tips_graded_for_section,
@@ -3186,7 +3197,8 @@ fn print_sweep_disclosure(
         "[sweep {model}] slenderness p50 {:.1}:1 max {:.1}:1; overloaded arms {}; \
          model sections over X_ALLOWED {}; peel field {:?} (area {:?}, tilt {:?}); \
          path hits: reach {} vertical {} spread {} arm-share {} injections {} max-combines {} \
-         raster {} coarsening {} kappa {}/{} lift {} creep-cells {} creep-steps {}",
+         raster {} coarsening {} kappa {}/{} lift {} creep-cells {} creep-steps {} \
+         creep-free {} stranded-seats {}",
         report.slenderness_p50,
         report.slenderness_max,
         report.overloaded_struts.len(),
@@ -3207,6 +3219,8 @@ fn print_sweep_disclosure(
         report.counters.lift_assertions,
         report.counters.creep_cells_weighted,
         report.counters.creep_steps_taken,
+        report.counters.creep_cells_free,
+        report.counters.stranded_seats,
     );
     println!(
         "[sweep {model}] seat placement: up-sweep seats {} against a hex covering lower bound of \

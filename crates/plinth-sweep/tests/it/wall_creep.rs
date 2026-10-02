@@ -46,6 +46,10 @@
 //! * **the Cylinder**, as `make_laid_tube`: a 32-sided prism lying on its side,
 //!   whose facets step 11.25° at a time from the flat bottom facet to the
 //!   vertical flank, so it carries steep facets at 67.5°, 78.75° and 90°.
+//! * **a gable-roofed cavity** in a box (the overhang cut, owner ruling
+//!   2026-09-30, at the end of this file): a face at or beyond 45° is not
+//!   down-facing and charges no creep at all, so a cavity roofed at 50° needs
+//!   no arm, while one roofed at 40° still does.
 
 use crate::harness;
 
@@ -373,4 +377,182 @@ fn the_full_cost_creep_draws_the_rim_arms_again() {
         "with the full-cost creep the drafted rim drew no arm, so this file cannot tell the rule \
          from its absence"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The overhang cut (owner ruling 2026-09-30)
+// ---------------------------------------------------------------------------
+//
+// A face at or beyond `OVERHANG_ANGLE_DEG` (45°) is not down-facing by the
+// engine's own test (`n_z < -sin 45°`, the orientation fold and plinth-support's
+// contact perception), and it charges NO creep. Before the ruling it paid the
+// logistic's tail: ω(50°) = 0.293 of a lamina per pitch of creep. The
+// creep-arms diagnosis (`plinth-evidence/slice-sweep-2026-09-02/
+// field-2026-09-28/creep-arms-diagnosis.md`, items 5-6) found that tail
+// deciding 95-99 % of the Cylinder's and Sphere's cavity-ceiling demand.
+//
+// The fixture is a box with a gable-roofed cavity. Every face of the cavity
+// above its floor is a vertical wall or a roof plane at `roof_deg`. Arithmetic
+// before any code ran, at 50°: the roof closes 10 mm in from each eave, so the
+// tail charges `10 × 0.293 / 2.130 = 1.37` of a lamina at the ridge, and the
+// cells within about 2.7 mm of the ridge are demand; the gable ends root only
+// the 2.13 mm next to them, so the middle of the ridge needs arms. Under the cut
+// the same roof charges 0, so the cavity needs no arm at all. At 40° the roof is
+// down-facing, the cut does not touch it, and ω(40°) = 0.707 makes the whole
+// middle of the roof demand.
+
+/// Cavity half-width across X, from the centre to each eave.
+const CAVITY_HALF_WIDTH_MM: f64 = 10.0;
+/// Cavity half-length along Y; the gable ends stand here.
+const CAVITY_HALF_LENGTH_MM: f64 = 7.0;
+const CAVITY_FLOOR_Z_MM: f64 = 3.0;
+const CAVITY_EAVE_Z_MM: f64 = 5.0;
+const SHELL_MM: f64 = 3.0;
+
+/// A closed prism: the convex `(x, z)` polygon `section` extruded along Y over
+/// `[-half_length, half_length]`, wound OUTWARD (`inward == false`) or into the
+/// void (`inward == true`, a cavity). Test-local fixture geometry; the winding
+/// is fixed by the signed volume, as in [`revolve`].
+fn extrude_xz(
+    section: &[[f64; 2]],
+    half_length: f64,
+    inward: bool,
+) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+    let n = u32::try_from(section.len()).expect("fixture size");
+    let mut verts: Vec<[f64; 3]> = Vec::with_capacity(2 * section.len());
+    for y in [-half_length, half_length] {
+        for point in section {
+            verts.push([point[0], y, point[1]]);
+        }
+    }
+    let mut tris: Vec<[u32; 3]> = Vec::new();
+    for i in 0..n {
+        let j = (i + 1) % n;
+        tris.push([i, j, n + j]);
+        tris.push([i, n + j, n + i]);
+    }
+    for i in 1..n - 1 {
+        tris.push([0, i + 1, i]);
+        tris.push([n, n + i, n + i + 1]);
+    }
+    let signed_volume: f64 = tris
+        .iter()
+        .map(|tri| {
+            let [a, b, c] = tri.map(|index| verts[index as usize]);
+            vec3::dot(a, vec3::cross(b, c)) / 6.0
+        })
+        .sum();
+    if (signed_volume < 0.0) != inward {
+        for tri in &mut tris {
+            tri.swap(1, 2);
+        }
+    }
+    (verts, tris)
+}
+
+/// A solid box holding a gable-roofed cavity whose roof planes rise at
+/// `roof_deg` from horizontal, with a 3 mm shell all round.
+fn gable_cavity_box(roof_deg: f64) -> Mesh {
+    let ridge_z = CAVITY_EAVE_Z_MM + CAVITY_HALF_WIDTH_MM * roof_deg.to_radians().tan();
+    let outer = [
+        [-CAVITY_HALF_WIDTH_MM - SHELL_MM, 0.0],
+        [CAVITY_HALF_WIDTH_MM + SHELL_MM, 0.0],
+        [CAVITY_HALF_WIDTH_MM + SHELL_MM, ridge_z + SHELL_MM],
+        [-CAVITY_HALF_WIDTH_MM - SHELL_MM, ridge_z + SHELL_MM],
+    ];
+    let cavity = [
+        [-CAVITY_HALF_WIDTH_MM, CAVITY_FLOOR_Z_MM],
+        [CAVITY_HALF_WIDTH_MM, CAVITY_FLOOR_Z_MM],
+        [CAVITY_HALF_WIDTH_MM, CAVITY_EAVE_Z_MM],
+        [0.0, ridge_z],
+        [-CAVITY_HALF_WIDTH_MM, CAVITY_EAVE_Z_MM],
+    ];
+    let (mut verts, mut tris) = extrude_xz(&outer, CAVITY_HALF_LENGTH_MM + SHELL_MM, false);
+    let (inner_verts, inner_tris) = extrude_xz(&cavity, CAVITY_HALF_LENGTH_MM, true);
+    let offset = u32::try_from(verts.len()).expect("fixture size");
+    verts.extend(inner_verts);
+    tris.extend(inner_tris.iter().map(|tri| tri.map(|index| index + offset)));
+    Mesh::new(verts, tris).expect("a box with a closed cavity is a valid mesh")
+}
+
+/// Demand arms (placed for reach, not inserted for load) whose tip is inside
+/// the cavity: above its floor and within its footprint.
+fn cavity_arms(plan: &SweepPlan) -> usize {
+    let plane = |layer: usize| plan.plate_z_mm + (layer as f64 + 0.5) * plan.layer_height_mm;
+    plan.struts
+        .iter()
+        .filter(|strut| {
+            strut.kind == StrutKind::Arm
+                && !strut.inserted_by_load
+                && plane(strut.k_top) > CAVITY_FLOOR_Z_MM
+                && strut.center_mm[0].abs() < CAVITY_HALF_WIDTH_MM
+                && strut.center_mm[1].abs() < CAVITY_HALF_LENGTH_MM
+        })
+        .count()
+}
+
+fn measure_cavity(what: &str, roof_deg: f64, policy: &SweepPolicy) -> (SweepPlan, usize) {
+    let mesh = gable_cavity_box(roof_deg);
+    let (plan, found) = measure_with(what, &mesh, policy);
+    assert!(
+        found.at_bottom > 0,
+        "{what}: the box's underside must still be supported (census witness)"
+    );
+    let inside = cavity_arms(&plan);
+    println!(
+        "{what}: cavity arms {inside}; creep cells priced at zero by the overhang cut {}",
+        plan.report.counters.creep_cells_free
+    );
+    (plan, inside)
+}
+
+#[test]
+fn a_cavity_roofed_at_50_deg_draws_no_creep_arm() {
+    let (plan, inside) = measure_cavity("gable 50 deg", 50.0, &production());
+    assert_rule_fired("gable 50 deg", &plan);
+    assert!(
+        plan.report.counters.creep_cells_free > 0,
+        "the overhang cut priced no creep cell at zero, so this test cannot see it"
+    );
+    assert_eq!(
+        inside, 0,
+        "a roof at 50 deg is not down-facing; its creep must not unroot the cavity"
+    );
+    assert_eq!(plan.report.residual_demand_cells, 0, "nothing is left bare");
+    assert!(
+        plan.report.uncarried_load_mm2 <= 0.0,
+        "uncarried load {:.4} mm2",
+        plan.report.uncarried_load_mm2
+    );
+}
+
+/// Sabotage, kept in the tree: let the 50° roof pay the logistic's tail
+/// (`SweepPolicy::without_creep_overhang_cut`) and the cavity draws its creep
+/// arms again. This is the rule before the 2026-09-30 ruling, so it is also
+/// the red the test above was written against.
+#[test]
+fn the_logistic_tail_draws_the_cavity_arms_again() {
+    let policy = production().without_creep_overhang_cut();
+    let (plan, inside) = measure_cavity("gable 50 deg, logistic tail", 50.0, &policy);
+    assert_eq!(
+        plan.report.counters.creep_cells_free, 0,
+        "the knob must switch the cut off"
+    );
+    assert!(
+        inside > 0,
+        "with the tail the 50 deg roof drew no arm, so this file cannot tell the cut from its \
+         absence"
+    );
+}
+
+/// The cut drops no down-facing demand: a 40° roof is down-facing, pays
+/// ω(40°) = 0.707, and its cavity is still supported from inside.
+#[test]
+fn a_cavity_roofed_at_40_deg_still_draws_its_arms() {
+    let (plan, inside) = measure_cavity("gable 40 deg", 40.0, &production());
+    assert!(
+        inside > 0,
+        "a down-facing 40 deg roof lost its cavity arms under the overhang cut"
+    );
+    assert_eq!(plan.report.residual_demand_cells, 0, "nothing is left bare");
 }
