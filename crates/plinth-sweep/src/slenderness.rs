@@ -2405,7 +2405,7 @@ fn thicken(
         clippy::cast_precision_loss,
         reason = "layer counts bounded by the plan's own layer count are exact in f64"
     )]
-    let n_f = n as f64;
+    let steps = n.saturating_sub(1).max(1) as f64;
     // The drawn radius over the run, bottom first, and the top it keeps.
     let (drawn, top) = {
         let Some(strut) = struts.get(member) else {
@@ -2424,7 +2424,18 @@ fn thicken(
         clippy::cast_precision_loss,
         reason = "a slot index bounded by the layer count is exact in f64"
     )]
-    let taper = |root: f64, j: usize| root + (top - root) * (j as f64) / n_f;
+    // KEEP THE TIP: the run's top layer (`j = n − 1`, where `top` was read)
+    // is written exactly `top`, and the bottom (`j = 0`) exactly `root`. The
+    // weights are `1 − t` and `t`, so both ends are exact in floating point.
+    // Until 2026-10-01 the taper reached `top` at `j = n`, one layer ABOVE
+    // the run, and wrote the tip layer `root + (top − root)·(n−1)/n`: the tip
+    // came out thicker than drawn (overhang table, X 12, S 30: arm 19's tip
+    // 0.38969 → 0.39087 mm). A one-layer run has no tip to keep apart from
+    // its root, and takes the root, as before.
+    let taper = |root: f64, j: usize| {
+        let t = (j as f64) / steps;
+        root * (1.0 - t) + top * t
+    };
     let holds = |root: f64| {
         equivalent_radius(n, |j| {
             let wanted = taper(root, j);
@@ -4768,6 +4779,7 @@ mod tests {
     ///   plate"): moved up until its bottom is on the free shafts;
     /// * between posts that lean apart, where the depth sized from the gap at
     ///   the top leaves a diagonal "too flat": deepened until both fit.
+    ///
     /// Red until 2026-10-01: refused as below the plate, and too flat.
     ///
     /// A band below a BRANCH partner's foot stays refused (`off_a_post`):
@@ -4968,5 +4980,74 @@ mod tests {
         let (taken, left, _) = prune_after(0.2, false);
         assert_eq!(taken, 1, "a cross on two posts inside their limits was kept");
         assert_eq!(left, 2, "only the two posts stand");
+    }
+
+    /// RAISE THE ROOT, KEEP THE TIP (owner ruling 2026-09-29, quoted on
+    /// [`crate::SweepStrut::thickened_mm`]). One 4.0 mm plate post at 0.05 mm
+    /// (limit 2.5 mm at S = 50), untied, takes the thicken rung over its whole
+    /// run `0..80`. The minimum the rung writes at the run's top layer (79,
+    /// the tip) must be the tip as drawn, and the root must be raised.
+    ///
+    /// Red until 2026-10-01 (round-10 milestone): the taper reached the kept
+    /// top one layer ABOVE the run, so the tip layer was written
+    /// `root + (top − root)·(n−1)/n` — above the tip. On the overhang table at
+    /// X 12 and S 30 that raised arm 19's tip 0.38969 → 0.39087 mm, and
+    /// `x_allowed_ruling::the_same_field_at_x_twelve_has_one_and_a_half_times_the_tip_section`
+    /// read 1.509 where the law gives exactly 1.5.
+    #[test]
+    fn the_thicken_rung_raises_the_root_and_keeps_the_tip() {
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let history = crate::up_sweep::ColumnHistory::new(&grid);
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(0.05, 45.0, 25.0);
+        let law = law();
+        let context = prune_context(&grid, &history, &keep_out, &lean, &law);
+        let tip = 0.05;
+        let mut struts = vec![plate_post(&grid, 0, 100, tip)];
+        let mut state = super::TieState::build(&context, &struts);
+        let runs = super::member_runs(
+            &grid,
+            &struts[0],
+            &state.ties[0],
+            &state.profiles[0],
+            0.05,
+            &law,
+        );
+        let over: Vec<UnbracedRun> = runs.into_iter().filter(UnbracedRun::over_limit).collect();
+        assert_eq!(
+            over.len(),
+            1,
+            "anti-vacuity: the untied post is one over-limit run: {over:?}"
+        );
+        assert_eq!(
+            (over[0].k_lo, over[0].k_top),
+            (0, 80),
+            "the run is the whole post"
+        );
+        let mut outcome = super::SlendernessOutcome::default();
+        assert!(
+            super::thicken(&context, &mut state, &mut struts, &over[0], &mut outcome),
+            "anti-vacuity: the post takes the thicken rung"
+        );
+        let thickened = &struts[0].thickened_mm;
+        assert_eq!(
+            thickened.len(),
+            80,
+            "the rung writes every layer of the run"
+        );
+        assert!(
+            thickened[0] > tip,
+            "the root is raised: {} mm at layer 0 against a {tip} mm tip",
+            thickened[0]
+        );
+        assert!(
+            thickened[79] <= tip,
+            "the tip is kept: the rung wrote {} mm at the tip layer of a {tip} mm tip",
+            thickened[79]
+        );
+        assert!(
+            thickened.windows(2).all(|pair| pair[1] <= pair[0]),
+            "the taper never widens upward"
+        );
     }
 }
