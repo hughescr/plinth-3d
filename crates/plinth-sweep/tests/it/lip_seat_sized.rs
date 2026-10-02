@@ -84,6 +84,48 @@ fn laid_tube() -> &'static Pair {
     FIXTURE.get_or_init(|| pair(&make_laid_tube().expect("the laid tube")))
 }
 
+/// The laid tube, rule ON and OFF, at the registry's S, with the slenderness
+/// TIES (`|X|`, thicken, mast) off in both, so the field the root-pair test
+/// reads is the field the rule decided on.
+///
+/// RE-SCOPED 2026-10-01 (round-10 milestone), measured
+/// (`plinth-evidence/.../field-2026-09-28/lanes/round10-milestone/`). Bisect:
+/// green at `247b8d5` and `ca2c545`, red from the bracing rework's first
+/// commit `6732343` (S 50 → 30). At S 30 the finished rule-ON field has the
+/// pair (4, 103): centres 1.373 mm apart, flared roots 1.001 + 0.421 mm.
+/// Root 4 is the foot of the re-landings of arms 16 and 45 (load 15.30 →
+/// 22.12 mm², drawn root 0.520 → 0.625 mm), and the rule's own last sized
+/// check passed it (`new_root_pairs_unattributed` 0). Arm 103 carries the
+/// same load with the rule on and off (1.585 mm², ledger root 0.167 mm), but
+/// its DRAWN root is 0.263 mm with the rule on against 0.167 mm off: the ties
+/// pass, which runs after the rule, seats three braces on it with the rule on
+/// (141, 224, 226) and one with it off (186), and a brace junction raises the
+/// trunk below it to the brace. A cross's root growth is published in
+/// `cross_roots_lapping`, not refused (`slenderness::grow_foot_disc`), and the
+/// rule-OFF field at S 30 has a different set of crosses, so on the finished
+/// field the comparison no longer isolates the rule. With the ties off, at
+/// S 30: rule on 2 pairs, rule off 5, 2 moves put back for roots (path hits).
+/// The claim and its comparison are unchanged; the overload test above keeps
+/// the full field. NOT A PUT-BACK WITNESS: with the sized check's put-back
+/// skipped (sabotage, round-10 milestone) this fixture still has no new pair,
+/// with the ties off or at S 50, so this test grades the outcome only.
+fn laid_tube_untied() -> &'static Pair {
+    static FIXTURE: OnceLock<Pair> = OnceLock::new();
+    FIXTURE.get_or_init(|| {
+        let mesh = make_laid_tube().expect("the laid tube");
+        let untied = SweepPolicy {
+            slenderness_brace: false,
+            slenderness_thicken: false,
+            slenderness_mast: false,
+            ..policy()
+        };
+        Pair {
+            on: sweep_with(&mesh, 0.0, &untied),
+            off: sweep_with(&mesh, 0.0, &untied.without_lip_seat()),
+        }
+    })
+}
+
 /// Every member of `plan` that carries more at some layer than `X_ALLOWED`
 /// allows at the registered maximum radius, with its largest such load.
 fn overloaded(plan: &SweepPlan) -> Vec<(u32, f64)> {
@@ -249,10 +291,12 @@ fn a_lip_seat_relanding_laps_no_new_plate_root_on_the_stilt_plate() {
     assert_no_new_root_pair("make_tall_stilt_plate", stilt());
 }
 
-/// The laid tube's finished root pairs went 1 -> 7 at `ee07600`.
+/// The laid tube's finished root pairs went 1 -> 7 at `ee07600`. Graded with
+/// the ties off since 2026-10-01; [`laid_tube_untied`] gives the measured
+/// reason.
 #[test]
 fn a_lip_seat_relanding_laps_no_new_plate_root_on_the_laid_tube() {
-    assert_no_new_root_pair("make_laid_tube", laid_tube());
+    assert_no_new_root_pair("make_laid_tube", laid_tube_untied());
 }
 
 /// **Remedy 2, the section-only search.** A tip whose disc is on its face
