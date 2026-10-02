@@ -22,11 +22,12 @@ use std::path::PathBuf;
 
 use plinth_core::{M0ConstantsError, PositiveFinite};
 use plinth_hollow::{checked_wall_mm, registered_wall, HollowError, WallSelection};
+use plinth_orient::as_drawn::NoOrientList;
 use plinth_pipeline::{OutputProfile, Placement};
 
 pub const ROOT_USAGE: &str = "Usage: plinth <subcommand>\n\nSubcommands:\n  prepare  Prepare every source model in a directory\n\nOptions:\n  -h, --help     Show help\n  -V, --version  Show version";
 
-pub const PREPARE_USAGE: &str = "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|none|pinned:DIR] [--placement legacy|sweep] [--wall-mm MM] [--no-cache]\n\nOptions:\n  --input-models-dir DIR  Directory containing source models\n  --output PROFILE       Output profile; exactly: saturn4-ultra\n  --out-dir DIR          Destination directory\n  --orient MODE          dense (default) searches every model's build orientation; none uses every model exactly as drawn (no rotation; still centred and lifted off the plate); pinned:DIR replays the rotation DIR/<stem>.pipeline.json records, per model by stem.\n                         One model is used as drawn under any mode when it carries the Finder tag plinth-no-rotate (macOS), has plinth-no-rotate in its user.xdg.tags attribute (Linux), or has a marker file <stem>.asdrawn beside it (any platform). The report says, per model, \"as drawn (<reason>)\" or \"orientation searched\"\n  --placement MODE       legacy (default) is the sealed support run and its pre-write gates; sweep is the EXPERIMENTAL slice-sweep core, which runs NO pre-write gate; it leans and merges arms onto other shafts, ties long members with |X| braces, thickened roots and masts, and keeps each brace's and mast's solid clear of the model and of other members, but draws no joint spheres and does not clearance-check an arm's own shaft against the model\n  --wall-mm MM           Hollow shell wall thickness in mm, no finer than the frozen hollow voxel pitch; omit for the registered default, raise it for a piece that gets handled\n  --no-cache             Disable cache use for this request\n  -h, --help             Show help";
+pub const PREPARE_USAGE: &str = "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|none|pinned:DIR] [--no-orient=LIST] [--placement legacy|sweep] [--wall-mm MM] [--no-cache]\n\nOptions:\n  --input-models-dir DIR  Directory containing source models\n  --output PROFILE       Output profile; exactly: saturn4-ultra\n  --out-dir DIR          Destination directory\n  --orient MODE          dense (default) searches every model's build orientation; none uses every model exactly as drawn (no rotation; still centred and lifted off the plate); pinned:DIR replays the rotation DIR/<stem>.pipeline.json records, per model by stem.\n                         One model is used as drawn under any mode when it is named in --no-orient, carries the Finder tag plinth-no-rotate (macOS), has plinth-no-rotate in its user.xdg.tags attribute (Linux), or has a marker file <stem>.asdrawn beside it (any platform). The report says, per model, \"as drawn (<reason>)\" or \"orientation searched\"\n  --no-orient=LIST       Use these models exactly as drawn, under any --orient mode: a comma-separated list of file names in the input directory, with or without .stl, and simple globs (* any run of characters, ? one character), e.g. --no-orient=Round_*,make_overhang_table. Also --no-orient LIST; may be given more than once. A name that matches no model prints a WARNING and the run continues\n  --placement MODE       legacy (default) is the sealed support run and its pre-write gates; sweep is the EXPERIMENTAL slice-sweep core, which runs NO pre-write gate; it leans and merges arms onto other shafts, ties long members with |X| braces, thickened roots and masts, and keeps each brace's and mast's solid clear of the model and of other members, but draws no joint spheres and does not clearance-check an arm's own shaft against the model\n  --wall-mm MM           Hollow shell wall thickness in mm, no finer than the frozen hollow voxel pitch; omit for the registered default, raise it for a piece that gets handled\n  --no-cache             Disable cache use for this request\n  -h, --help             Show help";
 
 /// Whether this request may use a `plinth-pipeline` cache.
 ///
@@ -130,6 +131,11 @@ pub struct PrepareSelection {
     pub input_models_dir: PathBuf,
     pub output_dir: PathBuf,
     pub orientation: OrientSelection,
+    /// `--no-orient=LIST`: models to use exactly as drawn under any
+    /// `orientation`, by file name or glob (owner spec 2026-10-01). Parsing
+    /// only splits the list; matching it against the folder, and the WARNING
+    /// for a name that matches no model, happen when the folder is read.
+    pub no_orient: NoOrientList,
     /// Which support engine this run uses. See [`PlacementSelection`].
     pub placement: PlacementSelection,
     pub output_profile: OutputProfile,
@@ -162,6 +168,8 @@ pub enum ParseError {
     UnknownOutputProfile(String),
     NonUnicodeWallMm(OsString),
     NonUnicodeOrientMode(OsString),
+    /// `--no-orient` was given a list that is not valid Unicode.
+    NonUnicodeNoOrient(OsString),
     NonUnicodePlacementMode(OsString),
     /// `--placement` was given a mode that is not one of the two sanctioned
     /// spellings. One spelling per concept, so a near-miss is refused rather
@@ -205,6 +213,11 @@ impl std::fmt::Display for ParseError {
             Self::NonUnicodeOrientMode(value) => write!(
                 formatter,
                 "orientation mode is not valid Unicode: {:?}",
+                value.to_string_lossy()
+            ),
+            Self::NonUnicodeNoOrient(value) => write!(
+                formatter,
+                "--no-orient list is not valid Unicode: {:?}",
                 value.to_string_lossy()
             ),
             Self::UnknownOrientMode(value) => write!(
@@ -277,6 +290,7 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
     let mut wall_mm = None;
     let mut orientation = None;
     let mut placement = None;
+    let mut no_orient = NoOrientList::default();
     let mut cache = CacheMode::Enabled;
     let mut no_cache_seen = false;
     let mut index = 0;
@@ -373,6 +387,26 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
                     _ => return Err(ParseError::UnknownPlacementMode(value.to_owned())),
                 });
             }
+            // `--no-orient=LIST` (the spelling the owner used) or
+            // `--no-orient LIST`, like every other flag here. A list flag
+            // accumulates: given twice, both lists apply. An empty list names
+            // nothing and is refused as a missing value; a name that matches
+            // no model is NOT a parse error (the parser opens no folder) — the
+            // run warns about it and goes on.
+            Some(flag) if flag == "--no-orient" || flag.starts_with("--no-orient=") => {
+                let raw = match flag.strip_prefix("--no-orient=") {
+                    Some(inline) => OsString::from(inline),
+                    None => take_value("--no-orient", arguments, &mut index)?,
+                };
+                let value = raw
+                    .to_str()
+                    .ok_or_else(|| ParseError::NonUnicodeNoOrient(raw.clone()))?;
+                let listed = NoOrientList::parse(value);
+                if listed.is_empty() {
+                    return Err(ParseError::MissingFlagValue("--no-orient"));
+                }
+                no_orient.extend(listed.entries().iter().cloned());
+            }
             Some("--no-cache") => {
                 if no_cache_seen {
                     return Err(ParseError::DuplicateFlag("--no-cache"));
@@ -393,6 +427,7 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
             .ok_or(ParseError::MissingRequiredFlag("--input-models-dir"))?,
         output_dir: output_dir.ok_or(ParseError::MissingRequiredFlag("--out-dir"))?,
         orientation: orientation.unwrap_or_default(),
+        no_orient,
         placement: placement.unwrap_or_default(),
         output_profile: output_profile.ok_or(ParseError::MissingRequiredFlag("--output"))?,
         wall_mm: match wall_mm {
@@ -537,6 +572,58 @@ mod tests {
         assert_eq!(
             parse_args(twice),
             Err(ParseError::DuplicateFlag("--orient"))
+        );
+    }
+
+    /// `--no-orient=LIST` (owner spec 2026-10-01): the inline form the owner
+    /// wrote and the separate-value form every other flag takes; the list is
+    /// split, trimmed and kept in order; a second flag adds to the first; an
+    /// empty list is a missing value. Parsing opens no folder, so a name that
+    /// matches nothing is NOT refused here (the run warns about it).
+    #[test]
+    fn no_orient_takes_an_inline_or_separate_list_and_accumulates() {
+        let with = |extra: &[&str]| {
+            let mut arguments = stable_arguments().to_vec();
+            arguments.extend(extra);
+            parse_args(arguments)
+        };
+        assert!(selection(parse_args(stable_arguments()).unwrap())
+            .no_orient
+            .is_empty());
+        assert_eq!(
+            selection(with(&["--no-orient=Round_*, make_overhang_table.stl"]).unwrap())
+                .no_orient
+                .entries(),
+            ["Round_*", "make_overhang_table.stl"]
+        );
+        assert_eq!(
+            selection(with(&["--no-orient", "Morel base,Sphere"]).unwrap())
+                .no_orient
+                .entries(),
+            ["Morel base", "Sphere"]
+        );
+        let both = selection(
+            with(&[
+                "--no-orient=Round_25",
+                "--orient",
+                "dense",
+                "--no-orient",
+                "Round_50,Round_25",
+            ])
+            .unwrap(),
+        );
+        assert_eq!(both.no_orient.entries(), ["Round_25", "Round_50"]);
+        assert_eq!(both.orientation, OrientSelection::Dense);
+        for empty in [&["--no-orient="][..], &["--no-orient=, ,"], &["--no-orient"]] {
+            assert_eq!(
+                with(empty),
+                Err(ParseError::MissingFlagValue("--no-orient")),
+                "{empty:?}"
+            );
+        }
+        assert_eq!(
+            with(&["--no-orientation=x"]),
+            Err(ParseError::UnknownFlag("--no-orientation=x".into()))
         );
     }
 

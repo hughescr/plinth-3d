@@ -13,7 +13,11 @@
 //! - Linux `user.xdg.tags` (Linux only);
 //! - `OrientationPolicy::AsDrawn` (`--orient none`): every model;
 //! - a mark under a PINNED run: the marked model is used as drawn and is not
-//!   refused for lacking a baseline; the unmarked, unpinned model still is.
+//!   refused for lacking a baseline; the unmarked, unpinned model still is;
+//! - `--no-orient=<list>` (owner spec 2026-10-01): an exact name, a name
+//!   without `.stl`, a glob, a name that matches nothing (reported, the run
+//!   goes on), a listed model that ALSO has a marker, under the dense, pinned
+//!   and `--orient none` policies.
 //!
 //! An unmarked model under the default policy is still SEARCHED, and says so.
 //!
@@ -23,7 +27,7 @@
 
 use std::path::{Path, PathBuf};
 
-use plinth_orient::as_drawn::AsDrawnReason;
+use plinth_orient::as_drawn::{AsDrawnReason, NoOrientList};
 use plinth_pipeline::{
     prepare, registered_decimation_budget, registered_support_request, ModelPreparationOutcome,
     OrientationPolicy, OrientationSource, OutputProfile, PipelineExitCode, PrepareReport,
@@ -78,6 +82,7 @@ impl Scratch {
             input_models_dir: self.input(),
             output_dir: self.0.join("out"),
             orientation,
+            no_orient: NoOrientList::default(),
             placement: plinth_pipeline::Placement::Sweep,
             output_profile: OutputProfile::Saturn4Ultra,
             decimation_budget: registered_decimation_budget().expect("registered budget"),
@@ -291,4 +296,144 @@ fn a_mark_beats_a_pinned_run_and_needs_no_baseline() {
         "{:?}",
         unpinned.outcome
     );
+}
+
+fn listed(entry: &str) -> Option<OrientationSource> {
+    as_drawn(AsDrawnReason::Listed {
+        entry: entry.to_owned(),
+    })
+}
+
+/// `--no-orient=<list>` (owner spec 2026-10-01) through the real executor:
+/// each kind of entry makes exactly the models it names as drawn, at
+/// identity; a listed model that also has a marker is as drawn once, for the
+/// list (the first reason that holds); a marker-only model still answers to
+/// its marker; an unlisted, unmarked model is still searched; and the entries
+/// that name nothing come back on the report while every model still runs.
+#[test]
+fn the_no_orient_list_makes_exactly_its_models_as_drawn_and_reports_names_that_match_nothing() {
+    let scratch = Scratch::new("no-orient");
+    for stem in [
+        "exact",
+        "bare",
+        "glob_1",
+        "glob_2",
+        "both",
+        "marked_only",
+        "plain",
+    ] {
+        scratch.place(stem);
+    }
+    scratch.mark("both");
+    scratch.mark("marked_only");
+    let mut request = scratch.request(OrientationPolicy::DenseSweep);
+    request.no_orient = NoOrientList::parse("exact.stl, bare, glob_?, both, nothing_here, *.obj");
+
+    let report = prepare(request).expect("an unmatched entry never refuses the run");
+    assert_all_stopped_at_orient(&report);
+    let seen = sources(&report);
+    println!("{seen:?}");
+    let expected: [(&str, Option<OrientationSource>); 7] = [
+        ("bare", listed("bare")),
+        ("both", listed("both")),
+        ("exact", listed("exact.stl")),
+        ("glob_1", listed("glob_?")),
+        ("glob_2", listed("glob_?")),
+        (
+            "marked_only",
+            as_drawn(AsDrawnReason::MarkerFile {
+                marker: scratch.input().join("marked_only.asdrawn"),
+            }),
+        ),
+        ("plain", Some(OrientationSource::Searched)),
+    ];
+    assert_eq!(
+        seen.iter()
+            .map(|(stem, source, ..)| (stem.as_str(), source.clone()))
+            .collect::<Vec<_>>(),
+        expected.to_vec(),
+    );
+    for (stem, source, tilt, selection) in &seen {
+        if matches!(source, Some(OrientationSource::AsDrawn { .. })) {
+            assert_eq!(
+                (tilt.to_bits(), selection.as_str()),
+                (0.0_f64.to_bits(), "identity"),
+                "{stem} is as drawn and must not be turned"
+            );
+        }
+    }
+    // The searched neighbour is the same slab bytes and IS turned, so identity
+    // above is the as-drawn path, not the search agreeing by chance.
+    let plain = seen.iter().find(|(stem, ..)| stem == "plain").expect("plain");
+    assert_ne!(plain.3, "identity", "{plain:?}");
+
+    // Path hits: 5 models through the list, 1 through its marker, 1 searched.
+    let through_list = seen
+        .iter()
+        .filter(|(_, source, ..)| {
+            matches!(
+                source,
+                Some(OrientationSource::AsDrawn {
+                    reason: AsDrawnReason::Listed { .. }
+                })
+            )
+        })
+        .count();
+    assert_eq!(through_list, 5, "{seen:?}");
+    assert_eq!(report.no_orient_unmatched, ["nothing_here", "*.obj"]);
+}
+
+/// The list beats a pinned run (a listed model needs no baseline), and under
+/// `--orient none` the run-wide switch is the reason recorded; in both, a name
+/// that matches nothing is still reported.
+#[test]
+fn the_no_orient_list_under_a_pinned_run_and_under_orient_none() {
+    let scratch = Scratch::new("no-orient-pinned");
+    scratch.place("listed");
+    scratch.place("unpinned");
+
+    let mut pinned = scratch.request(OrientationPolicy::Pinned(Default::default()));
+    pinned.no_orient = NoOrientList::parse("listed,typo");
+    let report = prepare(pinned).expect("the run runs");
+    let by_stem = |report: &PrepareReport, stem: &str| {
+        report
+            .models
+            .iter()
+            .find(|model| model.model.as_str() == stem)
+            .unwrap_or_else(|| panic!("no model {stem}"))
+            .clone()
+    };
+    let listed_model = by_stem(&report, "listed");
+    assert!(
+        matches!(
+            listed_model.outcome,
+            ModelPreparationOutcome::Stopped {
+                after: StageStop::Orient
+            }
+        ),
+        "{:?}",
+        listed_model.outcome
+    );
+    assert_eq!(
+        listed_model.orientation.map(|orientation| orientation.source),
+        listed("listed")
+    );
+    assert!(
+        matches!(
+            &by_stem(&report, "unpinned").outcome,
+            ModelPreparationOutcome::Failed { exit_code: PipelineExitCode::Input, detail, .. }
+                if detail.contains("no pinned orientation baseline")
+        ),
+        "the unlisted, unpinned model is still refused by name"
+    );
+    assert_eq!(report.no_orient_unmatched, ["typo"]);
+
+    let mut none = scratch.request(OrientationPolicy::AsDrawn);
+    none.no_orient = NoOrientList::parse("listed,typo");
+    let report = prepare(none).expect("the run runs");
+    assert_all_stopped_at_orient(&report);
+    for (stem, source, ..) in sources(&report) {
+        assert_eq!(source, as_drawn(AsDrawnReason::OrientNone), "{stem}");
+    }
+    assert_eq!(report.no_orient_unmatched, ["typo"]);
 }

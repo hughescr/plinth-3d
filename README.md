@@ -54,7 +54,12 @@ lifted off the plate). One model can be used as drawn under any mode by marking 
 tag `plinth-no-rotate` on macOS, `plinth-no-rotate` in the file's `user.xdg.tags` attribute on
 Linux (`setfattr -n user.xdg.tags -v plinth-no-rotate model.stl`), or, on any platform, an
 empty marker file `<stem>.asdrawn` beside `<stem>.stl` (the only form that survives git or a
-zip). A tag on the file a symlinked STL points at counts. The report says per model `as drawn (<reason>)` or `orientation searched`.
+zip). A tag on the file a symlinked STL points at counts. Or name the models on the command
+line: `--no-orient=Round_*,make_overhang_table` is a comma-separated list of file names in the
+input folder, with or without `.stl`, where `*` stands for any run of characters and `?` for
+one; it may be given more than once. A listed name that matches no model prints a WARNING and
+the run goes on. Any one of these is enough. The report says per model `as drawn (<reason>)`
+(for example `as drawn (listed in --no-orient as Round_*)`) or `orientation searched`.
 `corpus/as-drawn/` holds the test models the owner wants used as drawn (the Round bases glue
 face up, the overhang table legs down, the raking blade blade up), marked this way and made
 from the recipe `corpus/as-drawn/sources.tsv` by `cargo run -p plinth-mesh --example as_drawn_corpus`.

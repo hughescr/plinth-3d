@@ -65,13 +65,17 @@ identity rotation.
 
 The operator can also say a model is to be used **as drawn** (GitHub issue #1): identity
 rotation, nothing searched, still centred and lifted off the plate like any other model. That
-holds when ANY of these does: `--orient none` (every model in the run); the macOS Finder tag
+holds when ANY of these does: `--orient none` (every model in the run); the model named in
+`--no-orient=<list>` (comma-separated file names in the input folder, with or without `.stl`,
+`*` and `?` globs; matched once over the whole folder, and a name that matches no model is a
+WARNING line on the run report, never a refusal); the macOS Finder tag
 `plinth-no-rotate`, read straight from the file's `com.apple.metadata:_kMDItemUserTags`
 extended attribute, not through Spotlight; `plinth-no-rotate` in the Linux `user.xdg.tags`
 attribute; or a marker file `<stem>.asdrawn` beside the STL, the portable form that survives
 git. A symlinked STL is read through the link: the tag on the file it points at counts, and
 so does a tag on the link itself; the marker is looked for beside the link. A mark beats
-`dense` and `pinned:DIR` alike. The orientation record says which mark it was
+`dense` and `pinned:DIR` alike. The run-wide switches are checked first (`--orient none`,
+then the list); one reason is recorded, the first that holds. The orientation record says which mark it was
 (`OrientationProvenance::AsDrawn`), and the run report prints one line per model:
 `as drawn (<reason>)` or `orientation searched`. A tag attribute that is present but unreadable
 is a WARNING line and the model is treated as untagged, never refused.

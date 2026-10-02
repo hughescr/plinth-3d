@@ -176,6 +176,7 @@ fn request(scratch: &Scratch) -> PrepareRequest {
                 pipeline_report: scratch.0.join("pins").join("Round_25.pipeline.json"),
             },
         ),
+        no_orient: Default::default(),
         placement: plinth_pipeline::Placement::Sweep,
         output_profile: OutputProfile::Saturn4Ultra,
         decimation_budget: registered_decimation_budget().expect("registered budget"),
