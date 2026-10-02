@@ -160,7 +160,7 @@ fn brace_ends_in_a_flare(plan: &SweepPlan, flares: &[Flare]) -> Vec<String> {
 /// tall as its tie, so a mast band that dips into a flare cannot move up
 /// inside its posts; the rung plans the mast again with the tie moved up. The
 /// claim is the same: no brace end, a mast's cross included, lies in a flare;
-/// and masts are still placed, some of them by that retry (path hit).
+/// and masts are still placed (the retry's path hit is re-scoped below).
 #[test]
 fn no_mast_brace_end_on_the_laid_tube_lies_inside_a_root_flare() {
     let mesh = make_laid_tube().expect("the laid tube fixture");
@@ -193,10 +193,14 @@ fn no_mast_brace_end_on_the_laid_tube_lies_inside_a_root_flare() {
         lane.masts_dropped > 0,
         "anti-vacuity: the laid tube with thickening off placed no mast"
     );
-    assert!(
-        lane.masts_raised_above_flare > 0,
-        "path hit: no mast was planned again with its tie moved up out of a flare"
-    );
+    // RE-SCOPED 2026-10-01 (bracing-rework): the path hit `masts_raised_above_flare
+    // > 0` is no longer reachable on this fixture. With `S` = 30 and bands
+    // deepened until their diagonals fit the overhang law, crosses close the
+    // runs the retried masts closed: 3 masts, none by a raised retry, 12
+    // warnings against 37 (measured 2026-10-01); at `S` = 50 the fixture
+    // places no mast at all. The retry rule is unchanged; its fixture witness
+    // is an open item in `lanes/bracing-rework.md`. The claim stands: no
+    // mast's brace end lies in a flare.
     assert!(
         inside.is_empty(),
         "{} brace ends lie inside a root flare or the raft:\n{}",

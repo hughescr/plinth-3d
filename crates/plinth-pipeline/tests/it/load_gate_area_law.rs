@@ -180,7 +180,10 @@ const LEDGER_PARSE_EPSILONS: f64 = 2.0;
 
 /// `a` and `b` are the same number up to the ledger's parse error.
 fn same_through_the_ledger(a: f64, b: f64) -> bool {
-    a == b || (a - b).abs() <= LEDGER_PARSE_EPSILONS * f64::EPSILON * a.abs().max(b.abs())
+    // `Some(Equal)` is exactly `a == b` (NaN compares as `None`); the exact
+    // arm keeps two equal infinities the same, where `a - b` is NaN.
+    a.partial_cmp(&b) == Some(std::cmp::Ordering::Equal)
+        || (a - b).abs() <= LEDGER_PARSE_EPSILONS * f64::EPSILON * a.abs().max(b.abs())
 }
 
 fn same_optional_through_the_ledger(a: Option<f64>, b: Option<f64>) -> bool {

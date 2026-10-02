@@ -55,7 +55,9 @@ tag `plinth-no-rotate` on macOS, `plinth-no-rotate` in the file's `user.xdg.tags
 Linux (`setfattr -n user.xdg.tags -v plinth-no-rotate model.stl`), or, on any platform, an
 empty marker file `<stem>.asdrawn` beside `<stem>.stl` (the only form that survives git or a
 zip). A tag on the file a symlinked STL points at counts. The report says per model `as drawn (<reason>)` or `orientation searched`.
-`corpus/as-drawn/` holds the Round bases drawn glue face up and marked this way.
+`corpus/as-drawn/` holds the test models the owner wants used as drawn (the Round bases glue
+face up, the overhang table legs down, the raking blade blade up), marked this way and made
+from the recipe `corpus/as-drawn/sources.tsv` by `cargo run -p plinth-mesh --example as_drawn_corpus`.
 `--wall-mm` overrides the hollow shell's wall thickness. Each run prints a per-model report —
 stage results, emitted record counts, the size the pipeline assumed the model was — and exits
 `3` if any model was refused by a physics gate, so a calling script can tell a refusal from a

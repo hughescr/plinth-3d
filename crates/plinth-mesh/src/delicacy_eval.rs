@@ -510,13 +510,14 @@ fn curvature_by_face(
     }
 
     let mut by_face = Vec::with_capacity(tris.len());
-    for face in 0..tris.len() {
+    for (face, &charged) in charge.iter().enumerate() {
         let area = geometry.areas_mm2[face];
-        if geometry.degenerate[face] || !(area > 0.0) {
+        // `is_nan() || <= 0` is `!(area > 0.0)`, NaN included.
+        if geometry.degenerate[face] || area.is_nan() || area <= 0.0 {
             by_face.push(0.0);
             continue;
         }
-        by_face.push((charge[face] / area).clamp(0.0, 1.0));
+        by_face.push((charged / area).clamp(0.0, 1.0));
     }
     Ok((by_face, counts))
 }
@@ -548,7 +549,7 @@ fn ball_face_area_mm2(
     ];
     let height = dot(sub(centre, corners[0]), normal);
     let disc_sq = radius_sq - height * height;
-    if !(disc_sq > 0.0) {
+    if disc_sq.is_nan() || disc_sq <= 0.0 {
         return 0.0;
     }
     let foot = sub(centre, scale(normal, height));
@@ -569,13 +570,16 @@ fn ball_face_area_mm2(
 fn disc_wedge_area(p: V3, q: V3, disc_sq: f64, normal: V3) -> f64 {
     let along = sub(q, p);
     let a = dot(along, along);
-    if !(a > 0.0) {
+    if a.is_nan() || a <= 0.0 {
         return 0.0;
     }
-    // |p + t·along|² = disc_sq  ⇔  a t² + 2 b t + c = 0.
+    // |p + t·along|² = disc_sq  ⇔  a t² + 2 b t + c = 0, whose reduced
+    // discriminant is b² − a·c (the half-b form; `b * b` is not a typo for
+    // `a * b`, which `clippy::suspicious_operation_groupings` suspects).
     let b = dot(p, along);
     let c = dot(p, p) - disc_sq;
-    let discriminant = b * b - a * c;
+    let b_squared = b * b;
+    let discriminant = b_squared - a * c;
     let mut cuts = [0.0_f64; 4];
     let mut count = 1_usize;
     if discriminant > 0.0 {
@@ -1024,10 +1028,10 @@ mod tests {
         // The whole triangle inside the ball.
         let all = ball_face_area_mm2(&mesh, &geometry, 0, [3.0, 3.0, 0.0], 400.0);
         assert!((all - 50.0).abs() < 1e-9, "{all}");
-        // A ball that misses the plane.
+        // A ball that misses the plane: exactly +0.0, compared bit for bit.
         assert_eq!(
-            ball_face_area_mm2(&mesh, &geometry, 0, [3.0, 3.0, 2.0], 1.0),
-            0.0
+            ball_face_area_mm2(&mesh, &geometry, 0, [3.0, 3.0, 2.0], 1.0).to_bits(),
+            0.0_f64.to_bits()
         );
     }
 

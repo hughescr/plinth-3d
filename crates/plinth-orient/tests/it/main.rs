@@ -12,6 +12,7 @@
 //! `docs/development.md`, "Where integration tests go".
 
 mod as_drawn;
+mod as_drawn_corpus;
 mod display_face_objective;
 mod flat_face_poses;
 mod no_private_vector_algebra;

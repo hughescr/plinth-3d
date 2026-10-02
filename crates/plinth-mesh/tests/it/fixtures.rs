@@ -225,11 +225,12 @@ fn toed_slab_is_one_closed_solid_with_no_buried_toe_caps() {
     let reread = load_binary_stl(&scratch, WeldPolicy::None).expect("re-read");
     let _ = std::fs::remove_file(&scratch);
     assert_eq!(reread.tris().len(), mesh.tris().len());
-    for (face, triangle) in mesh.tris().iter().enumerate() {
-        for corner in 0..3 {
+    for (face, (triangle, reread_triangle)) in mesh.tris().iter().zip(reread.tris()).enumerate() {
+        for (corner, (&vertex, &reread_vertex)) in triangle.iter().zip(reread_triangle).enumerate()
+        {
             assert_eq!(
-                reread.verts()[reread.tris()[face][corner] as usize].map(f64::to_bits),
-                mesh.verts()[triangle[corner] as usize].map(f64::to_bits),
+                reread.verts()[reread_vertex as usize].map(f64::to_bits),
+                mesh.verts()[vertex as usize].map(f64::to_bits),
                 "face {face} corner {corner} changed on the f32 wire"
             );
         }
