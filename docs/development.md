@@ -503,6 +503,14 @@ targets hard-fail without the corpus, with errors that do not name the corpus as
 (`crates/plinth-orient/tests/it/orientation_rederivation.rs`), which falsifies every pinned
 baseline orientation by re-deriving it from the corpus source STL. If those are the only
 failures in a fresh checkout, provision before investigating anything else.
+`plinth-orient`'s `as_drawn_corpus` tests also read the provisioned sources: they regenerate
+every committed `corpus/as-drawn/` file from its source and compare byte for byte.
+
+`corpus/as-drawn/` IS committed: the test models the owner wants used exactly as drawn, each
+with its `<stem>.asdrawn` marker (git keeps no Finder tag). They are made only from the recipe
+`corpus/as-drawn/sources.tsv`, never by hand:
+`cargo run --profile gate --offline -p plinth-mesh --example as_drawn_corpus` writes them, and
+`-- --check` verifies them (`corpus/as-drawn/README.md`).
 
 `corpus/baseline/` and `corpus/manifest.json` are evidence. They are not regenerated
 casually and never as a side effect of another change.

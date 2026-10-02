@@ -44,7 +44,10 @@ pub use fixtures::{
     DUAL_CAVITY_THROAT_ABOVE_BORE_MM, DUAL_CAVITY_THROAT_SEPARATED_MM, DUAL_CAVITY_UPPER_ARC_STEPS,
     DUAL_CAVITY_UPPER_SPHERE_R_MM,
 };
-pub use io::{load_binary_stl, load_binary_stls, write_binary_stl, write_binary_stls, MeshIoError};
+pub use io::{
+    load_binary_stl, load_binary_stls, turn_binary_stl_x180, write_binary_stl, write_binary_stls,
+    MeshIoError,
+};
 pub use repair::{
     repair_mesh, DuplicateDisposition, DuplicateFaceEvidence, DuplicateFaceGroup,
     EmptyResultRefusal, RepairEvidence, RepairedMesh, ResidualTopology, ShardStripEvidence,
