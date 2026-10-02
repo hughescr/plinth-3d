@@ -2,7 +2,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use plinth_mesh::{load_binary_stl, write_binary_stl, Mesh, MeshIoError, WeldPolicy};
+use plinth_mesh::{
+    load_binary_stl, turn_binary_stl_x180, write_binary_stl, Mesh, MeshIoError, WeldPolicy,
+};
 
 #[test]
 fn self_contained_two_facet_triangle_soup_round_trip_preserves_order_repetition_and_signed_zero() {
@@ -105,6 +107,59 @@ fn binary_stl_declared_count_is_checked_before_allocation() {
     ));
     fs::remove_dir_all(path.parent().expect("test parent"))
         .expect("remove test-only output directory");
+}
+
+/// `turn_binary_stl_x180` (the turn that makes `corpus/as-drawn/`) is the
+/// rotation `(x, y, z) -> (x, -y, -z)` exactly: read back by the production
+/// decoder, every vertex is the source vertex with y and z negated, bit for bit
+/// (signed zeros included); the triangles keep their order; the header is
+/// untouched; turning twice gives back the source bytes. A malformed file is
+/// refused and left unchanged.
+#[test]
+fn turning_over_about_x_is_exact_keeps_order_and_undoes_itself() {
+    let dir = temporary_directory("turn-x180");
+    fs::create_dir_all(&dir).expect("create test directory");
+    let source_path = dir.join("table.stl");
+    let table = plinth_mesh::make_overhang_table().expect("table fixture");
+    write_binary_stl(&source_path, &table).expect("the table is f32-exact");
+    let source = fs::read(&source_path).expect("read source");
+    let source_mesh = load_binary_stl(&source_path, WeldPolicy::None).expect("load source");
+
+    let mut turned = source.clone();
+    let facets = turn_binary_stl_x180(&source_path, &mut turned).expect("turn");
+    assert_eq!(facets, source_mesh.tris().len());
+    assert_eq!(turned[..84], source[..84], "header and count unchanged");
+    let turned_path = dir.join("turned.stl");
+    fs::write(&turned_path, &turned).expect("write turned");
+    let turned_mesh = load_binary_stl(&turned_path, WeldPolicy::None).expect("load turned");
+    assert_eq!(turned_mesh.tris(), source_mesh.tris(), "triangle order kept");
+    assert_eq!(turned_mesh.verts().len(), source_mesh.verts().len());
+    for (got, was) in turned_mesh.verts().iter().zip(source_mesh.verts()) {
+        assert_eq!(
+            got.map(f64::to_bits),
+            [was[0], -was[1], -was[2]].map(f64::to_bits),
+            "a vertex is not (x, -y, -z) of its source"
+        );
+    }
+
+    let mut twice = turned.clone();
+    turn_binary_stl_x180(&turned_path, &mut twice).expect("turn back");
+    assert!(twice == source, "turning twice must give back the source bytes");
+
+    let mut short = vec![0_u8; 83];
+    assert!(matches!(
+        turn_binary_stl_x180(&dir.join("short.stl"), &mut short),
+        Err(MeshIoError::TooShort { .. })
+    ));
+    let mut trailing = one_facet_bytes();
+    trailing.push(0);
+    let before = trailing.clone();
+    assert!(matches!(
+        turn_binary_stl_x180(&dir.join("trailing.stl"), &mut trailing),
+        Err(MeshIoError::LengthMismatch { .. })
+    ));
+    assert!(trailing == before, "a refused file is left unchanged");
+    fs::remove_dir_all(&dir).expect("remove test-only output directory");
 }
 
 fn one_facet_bytes() -> Vec<u8> {
