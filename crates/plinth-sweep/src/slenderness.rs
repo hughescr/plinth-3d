@@ -2021,6 +2021,11 @@ struct TieState {
     /// posts' free shafts (`None`: the registry was unreadable, and only the
     /// posts' own feet bound a band, as before 2026-09-30).
     root_flare: Option<SweepRootFlare>,
+    /// Every member's drawn shaft line off its planned one
+    /// (`adapter::planned_line_offset`): `None` for all but a leaning plate
+    /// post, whose file shaft runs to its boss top over its foot. Members
+    /// added during the pass (diagonals, masts) have none.
+    drawn_offsets: Vec<Option<crate::adapter::LineOffset>>,
     /// Set by [`plan_cross`] when it drops a band whose bottom fell inside a
     /// flare because the band could not move within its posts: how many layers
     /// the band had to rise. The mast rung reads it to try again with a mast
@@ -2096,6 +2101,19 @@ impl TieState {
             .iter()
             .map(|strut| strut.thickened_mm.clone())
             .collect();
+        let drawn_offsets = struts
+            .iter()
+            .map(|strut| {
+                root_flare.as_ref().and_then(|flare| {
+                    crate::adapter::planned_line_offset(
+                        flare,
+                        context.grid,
+                        context.layer_height_mm,
+                        strut,
+                    )
+                })
+            })
+            .collect();
         Self {
             index,
             profiles,
@@ -2106,7 +2124,20 @@ impl TieState {
             masts_of,
             placed_roots,
             root_flare,
+            drawn_offsets,
             flare_shortfall: std::cell::Cell::new(None),
+        }
+    }
+
+    /// Where member `id`'s DRAWN shaft stands at `layer`, off the axis cell
+    /// the plan keeps for it (`[0; 3]` for every member whose drawn line is
+    /// its planned one): a diagonal tied to it is measured, and drawn, there
+    /// (fix/morel-long-posts, 2026-10-02; `adapter::drawn_line_offset`).
+    fn drawn_off(&self, struts: &[SweepStrut], id: u32, layer: usize) -> [f64; 3] {
+        let index = id as usize;
+        match (self.drawn_offsets.get(index).copied().flatten(), struts.get(index)) {
+            (Some(offset), Some(strut)) => crate::adapter::offset_at(&offset, strut, layer),
+            _ => [0.0; 3],
         }
     }
 
@@ -3724,11 +3755,19 @@ fn plan_cross(
     let second = path(b_cell_top, a_cell_lo, a, outcome)?;
     if context.member_clearance {
         let h = context.layer_height_mm;
-        let point =
-            |cell: usize, layer: usize| crate::member_clearance::axis_point(grid, h, cell, layer);
+        // Each end ON ITS POST'S DRAWN SHAFT (fix/morel-long-posts,
+        // 2026-10-02): the axis cell the plan keeps, moved by the post's
+        // drawn-line offset there, exactly where the adapter draws it
+        // (`footprint::followed_shifts_drawn`). On a leaning plate post that
+        // is up to 0.585 mm from the cell (Morel base, for-craig-v10).
+        let point = |post: u32, cell: usize, layer: usize| {
+            let at = crate::member_clearance::axis_point(grid, h, cell, layer);
+            let off = state.drawn_off(struts, post, layer);
+            [at[0] + off[0], at[1] + off[1], at[2] + off[2]]
+        };
         let diagonals = [
-            (point(a_cell_top, k), point(b_cell_lo, k_lo)),
-            (point(b_cell_top, k), point(a_cell_lo, k_lo)),
+            (point(a, a_cell_top, k), point(b, b_cell_lo, k_lo)),
+            (point(b, b_cell_top, k), point(a, a_cell_lo, k_lo)),
         ];
         for (top, bottom) in diagonals {
             if crate::member_clearance::model_intrusion(
@@ -3838,8 +3877,19 @@ fn member_solids_clear(
         .filter(|(_, s)| live(s))
         .map(|(index, strut)| crate::member_clearance::MemberSolid {
             id: strut.id,
-            from: crate::member_clearance::axis_point(grid, h, strut.base_cell(), strut.k_bottom),
-            to: crate::member_clearance::axis_point(grid, h, strut.cell, strut.k_top),
+            // Each member as the file draws it: a leaning plate post's drawn
+            // line, not its planned one (fix/morel-long-posts, 2026-10-02).
+            from: {
+                let at =
+                    crate::member_clearance::axis_point(grid, h, strut.base_cell(), strut.k_bottom);
+                let off = state.drawn_off(struts, strut.id, strut.k_bottom);
+                [at[0] + off[0], at[1] + off[1], at[2] + off[2]]
+            },
+            to: {
+                let at = crate::member_clearance::axis_point(grid, h, strut.cell, strut.k_top);
+                let off = state.drawn_off(struts, strut.id, strut.k_top);
+                [at[0] + off[0], at[1] + off[1], at[2] + off[2]]
+            },
             profile: state.profiles.get(index).map_or(&[][..], Vec::as_slice),
             k_bottom: strut.k_bottom,
             k_top: strut.k_top,

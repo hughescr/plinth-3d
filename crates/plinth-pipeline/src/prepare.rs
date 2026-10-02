@@ -2752,7 +2752,8 @@ fn print_sweep_disclosure(
             "[sweep {model}] lip seats: {} seated arms graded, {} met their seat face beyond the \
              angle at which the seat trim keeps their section (deepest cut into a shaft outside \
              its ball {:.4} mm, widest approach {:.1} deg); {} re-landed at a smaller angle to \
-             the same seat{}; kept: {} carrying another member, {} with no admissible descent; \
+             the same seat{} ({} of them on the model below); kept: {} carrying another member, \
+             {} with no admissible descent; \
              candidates {} priced, {} refused by the path test, {} by the plate rule, {} by the \
              lowering's own measurement, {} by the solid's clearance from the model{}, {} by a new \
              plate root touching another, {} verified; put back once the field was sized: {} \
@@ -2771,6 +2772,7 @@ fn print_sweep_disclosure(
             lip.max_approach_before_deg,
             lip.arms_relanded,
             if lip.enabled { "" } else { " (RULE OFF)" },
+            lip.relanded_on_model,
             lip.kept_carrying,
             lip.kept_no_candidate,
             lip.candidates_priced,
@@ -2804,6 +2806,48 @@ fn print_sweep_disclosure(
             lip.arms_graded_after,
             lip.over_limit_after.len(),
         );
+        // EVERY MEMBER'S DRAWN SOLID AGAINST THE MODEL (fix/morel-long-posts,
+        // 2026-10-02): arm shafts included.
+        let clearance = &report.member_model_clearance;
+        if clearance.ran {
+            println!(
+                "[sweep {model}] model clearance of every member's drawn solid (arm shafts, \
+                 braces and masts, outside each member's own seat zone and model landing zone; \
+                 final gap {:.3} mm): {} members measured over {} spans ({} spans wholly in \
+                 their own zones), {} members with a span left undecided; smallest gap {}; {} \
+                 members within the final gap",
+                clearance.gap_mm,
+                clearance.members_measured,
+                clearance.rows,
+                clearance.rows_in_own_zones,
+                clearance.members_unmeasured,
+                clearance
+                    .smallest_clearance_mm
+                    .map_or_else(|| "none measured".to_owned(), |gap| format!("{gap:.4} mm")),
+                clearance.within_gap.len(),
+            );
+        } else {
+            println!(
+                "[sweep {model}] WARNING model clearance of every member's drawn solid did NOT \
+                 run: the model surface could not be built"
+            );
+        }
+        for near in &clearance.within_gap {
+            println!(
+                "[sweep {model}] WARNING member {} ({:?}, landing {:?}) stands {:.4} mm from the \
+                 model{} at ({:.3}, {:.3}, {:.3}), inside the {:.3} mm final gap, outside its own \
+                 seat and landing zones",
+                near.member,
+                near.kind,
+                near.landing,
+                near.clearance_mm,
+                if near.upper_bound { " at most" } else { "" },
+                near.witness_mm[0],
+                near.witness_mm[1],
+                near.witness_mm[2],
+                clearance.gap_mm,
+            );
+        }
         for warning in &lip.over_limit_after {
             println!(
                 "[sweep {model}] WARNING arm {} meets its seat face at {:.1} deg (its limit {:.1} \

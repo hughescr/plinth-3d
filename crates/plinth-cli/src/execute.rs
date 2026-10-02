@@ -201,8 +201,10 @@ fn print_report(selection: &PrepareSelection, report: &PrepareReport) {
                 "slice-sweep core, EXPERIMENTAL: NO pre-write gate ran on any model in \
                  this run; arms lean and merge, long members are tied by |X| braces, \
                  thickened roots and masts, and braces and masts clear the model and \
-                 each other; no joint spheres and no clearance check of an \
-                 arm's own shaft. Per-model disclosure is printed above each model's line.",
+                 each other; no joint spheres, and an arm's own shaft is not kept clear \
+                 of the model while it is placed (every member's drawn solid is measured \
+                 against the model on the finished field and warned on). Per-model \
+                 disclosure is printed above each model's line.",
         }
     );
 

@@ -201,7 +201,20 @@ fn every_mast_clears_every_plate_root_on_the_laid_tube() {
 /// the residual makes both zero and this test stays green.
 #[test]
 fn the_lonely_peak_publishes_the_mast_laps_its_sizing_pass_leaves() {
-    let plan = sweep_with(&lonely_peak(), 0.0, &policy());
+    // RE-PINNED 2026-10-02 (fix/morel-long-posts): graded with the lip-seat
+    // rule off. That lane's clearance gate refuses one of the fixture's five
+    // lip-seat re-landings (its drawn solid would stand inside the 0.3 mm
+    // final gap of the peak); with that arm left where the up-sweep put it,
+    // this configuration places no mast at all, and the honesty graded here
+    // is about masts. With the lip-seat rule off the masts are back.
+    let plan = sweep_with(
+        &lonely_peak(),
+        0.0,
+        &SweepPolicy {
+            lip_seat: false,
+            ..policy()
+        },
+    );
     assert!(
         masts(&plan) > 0,
         "anti-vacuity: make_lonely_peak must place a mast"

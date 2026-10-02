@@ -358,6 +358,9 @@ pub struct SweepRunReport {
     /// face against the angle at which the seat trim keeps its section, the
     /// arms re-landed to meet it, and the emitted field's census.
     pub lip_seat: crate::lip_seat::LipSeatOutcome,
+    /// Every member's drawn solid against the model on the finished field,
+    /// arm shafts included (fix/morel-long-posts, 2026-10-02).
+    pub member_model_clearance: MemberModelClearance,
     /// **The resin the area law SIZED**, in mm³: `π r²` integrated along every
     /// arm's own axis, layer by layer, with a leaned layer measured along its
     /// slant rather than its rise.
@@ -398,6 +401,48 @@ pub struct SweepRunReport {
     /// Path-hit counters. A green oracle must never be able to mean "the path
     /// never ran" (the witness-must-exercise-the-path lesson).
     pub counters: PathHits,
+}
+
+/// One member whose drawn solid stands within the final clearance gap of the
+/// model outside its own seat and landing zones
+/// ([`MemberModelClearance`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MemberNearModel {
+    pub member: u32,
+    pub kind: crate::StrutKind,
+    pub landing: crate::Landing,
+    /// The smallest gap between its drawn solid and the model, mm; negative
+    /// where the solid enters the model.
+    pub clearance_mm: f64,
+    /// Whether that number is the kernel's one-sided bound (the true gap is
+    /// at most this), not a measurement.
+    pub upper_bound: bool,
+    /// The model surface point nearest the solid there.
+    pub witness_mm: [f64; 3],
+}
+
+/// **Every member's drawn solid against the model, on the finished field**
+/// (fix/morel-long-posts, 2026-10-02; `member_clearance::model_clearance_census`):
+/// arm shafts, braces and masts alike, as the file draws them, outside each
+/// member's own seat zone and, for a member on the model, its own landing
+/// zone. A WARNING census, never a gate.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MemberModelClearance {
+    /// Whether it ran (the model surface could be built).
+    pub ran: bool,
+    /// The gap measured against: the registered final clearance gap, mm.
+    pub gap_mm: f64,
+    /// Members with at least one measured span, and members with a span the
+    /// kernel could not decide (or no drawable shaft).
+    pub members_measured: usize,
+    pub members_unmeasured: usize,
+    /// Spans measured, and spans wholly inside their member's own zones.
+    pub rows: usize,
+    pub rows_in_own_zones: usize,
+    /// The smallest gap measured on any member, mm.
+    pub smallest_clearance_mm: Option<f64>,
+    /// The members under the gap, in member order.
+    pub within_gap: Vec<MemberNearModel>,
 }
 
 /// The unrooted-column rule on one run: what the up-sweep left unrooted, and
@@ -555,10 +600,16 @@ impl SweepRunReport {
              are tied by |X| cross-braces, thickened roots and plate masts; every brace's and \
              mast's drawn solid clears the model by the final gap and every member it is not \
              joined to; plate roots are kept clear of one another; drains keep their escape \
-             path. What it does NOT do, and whose absence is not a claim that it is unnecessary: \
-             no joint spheres at arm-onto-arm junctions, no radius-aware clearance of an ARM's \
-             own shaft against the model or another arm (only its centreline cell is tested, so \
-             an arm passing close to a wall is NOT detected), and no repair loop. The peel field \
+             path; a lip-seat re-landing onto the plate or the model clears the model by the \
+             final gap, and one onto a member never enters the model or comes nearer it than \
+             the arm already stood; every \
+             member's drawn solid, arm shafts included, is measured against the model on the \
+             finished field and every one within the final gap is WARNED. What it does NOT do, \
+             and whose absence is not a claim that it is unnecessary: no joint spheres at \
+             arm-onto-arm junctions; no radius-aware clearance of an ARM's own shaft while it is \
+             PLACED (only its centreline cell is tested, so an arm passing close to a wall is \
+             warned about on the finished field, not kept clear), none against another arm; and \
+             no repair loop. The peel field \
              is uniform: the literature's area exponent and the machine's front-to-back tilt \
              factor are computed and reported below but decide nothing."
         )

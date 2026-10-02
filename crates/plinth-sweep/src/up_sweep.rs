@@ -274,6 +274,32 @@ impl ColumnHistory {
         false
     }
 
+    /// The HIGHEST layer at or below `ceiling` that is the TOP of a cured run
+    /// in this column: the strike face a descent landing on the model meets
+    /// there, as [`descend`] lands on `top_model - 1`. `None` when no cured
+    /// run in this column tops out at or below `ceiling`.
+    ///
+    /// The model counterpart of [`Self::shaft_landing_excluding`], read from
+    /// the per-column model spans because `top_model` is a running state
+    /// that, after the up-sweep, names the column's topmost cured layer
+    /// overall (fix/morel-long-posts, 2026-10-02: the lip-seat rule's
+    /// re-landing search asked only the shaft index, so a column whose
+    /// landing was model material was offered as a PLATE landing).
+    #[must_use]
+    pub fn model_landing_at_or_below(&self, cell: usize, ceiling: usize) -> Option<usize> {
+        let mut slot = *self.model_head.get(cell)?;
+        let mut best: Option<usize> = None;
+        while slot != u32::MAX {
+            let span = self.model_spans[slot as usize];
+            slot = span.next;
+            let top = span.k_top as usize;
+            if top <= ceiling && best.is_none_or(|layer| top > layer) {
+                best = Some(top);
+            }
+        }
+        best
+    }
+
     /// Record one layer's cured cells as model spans, extending the run each
     /// column is already in rather than opening a new one.
     ///
@@ -1663,7 +1689,7 @@ fn convex_hull(mut points: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
 /// another arm. Landing higher up the model surface is the down-sweep's job,
 /// where the arm exists to relieve a specific overload and its landing is
 /// chosen by the load, not by its length.
-fn deferred_path_mm(landing: Landing, k_bottom: usize, layer_height_mm: f64) -> f64 {
+pub(crate) fn deferred_path_mm(landing: Landing, k_bottom: usize, layer_height_mm: f64) -> f64 {
     match landing {
         Landing::Plate | Landing::Strut { .. } => 0.0,
         #[expect(
