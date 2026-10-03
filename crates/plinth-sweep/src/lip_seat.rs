@@ -1622,7 +1622,7 @@ fn live_arms(
         height,
         context.seat_faces,
     );
-    let (mut profiles, _) = crate::adapter::drawn_profiles(struts);
+    let (mut profiles, _) = crate::adapter::drawn_profiles(struts, context.load_step_taper);
     struts
         .iter()
         .zip(&faces)
@@ -2159,6 +2159,7 @@ mod model_landing_tests {
             max_struts: 1_000,
             x_allowed: 18.0,
             seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
+            load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
         };
         let struts = vec![strut.clone()];
         let mut index = ColumnHistory::new(&grid);

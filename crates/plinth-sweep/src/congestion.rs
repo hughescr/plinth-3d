@@ -328,7 +328,12 @@ pub(crate) fn root_discs(
     struts: &[SweepStrut],
     flare_factor: f64,
 ) -> Vec<RootDisc> {
-    let (profiles, _) = crate::adapter::drawn_profiles(struts);
+    // Only the ROOT of each profile is read here, and the load-step taper
+    // never reaches a root: a cone starts one layer above a junction, and the
+    // junction raises it could feed come from a branch's root or a brace's
+    // top, which it never touches (`adapter::drawn_profiles`). So the root is
+    // the same with or without it, and no policy is needed to read it.
+    let (profiles, _) = crate::adapter::drawn_profiles(struts, crate::adapter::LoadStepTaper::OFF);
     root_discs_drawn(grid, history, struts, &profiles, flare_factor)
 }
 

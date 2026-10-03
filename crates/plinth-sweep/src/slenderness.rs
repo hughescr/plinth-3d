@@ -577,6 +577,10 @@ impl BandRefusals {
 /// — every landing and end, and every cross within 45° of it (see `holds` and
 /// [`UnbracedRun::sway_deg`]). A member no cross ties is measured once. Runs that
 /// come out identical in two directions are reported once.
+///
+/// The drawn profile here carries the REGISTERED load-step taper
+/// ([`crate::adapter::LoadStepTaper::registered`]), the production default; the
+/// sweep itself measures with its policy's taper ([`unbraced_runs_drawn`]).
 #[must_use]
 pub fn unbraced_runs(
     grid: &Grid,
@@ -584,7 +588,24 @@ pub fn unbraced_runs(
     layer_height_mm: f64,
     law: &SlendernessLaw,
 ) -> Vec<UnbracedRun> {
-    let (profiles, _) = crate::adapter::drawn_profiles(struts);
+    unbraced_runs_drawn(
+        grid,
+        struts,
+        layer_height_mm,
+        law,
+        crate::adapter::LoadStepTaper::registered(layer_height_mm),
+    )
+}
+
+/// [`unbraced_runs`] on the profile drawn with `taper`.
+pub(crate) fn unbraced_runs_drawn(
+    grid: &Grid,
+    struts: &[SweepStrut],
+    layer_height_mm: f64,
+    law: &SlendernessLaw,
+    taper: crate::adapter::LoadStepTaper,
+) -> Vec<UnbracedRun> {
+    let (profiles, _) = crate::adapter::drawn_profiles(struts, taper);
     let ties = tie_lists(
         grid,
         struts,
@@ -1373,6 +1394,10 @@ pub struct SlendernessContext<'a> {
     /// measure every arm against the same face the finished plan seats it on
     /// ([`crate::tip_landing::SeatFaceRule`]).
     pub seat_faces: crate::tip_landing::SeatFaceRule,
+    /// How a load step on a support arm is drawn
+    /// ([`crate::adapter::LoadStepTaper`]): the lane, the lip-seat rule and the
+    /// head-join rule read the same drawn profile the file gets.
+    pub load_step_taper: crate::adapter::LoadStepTaper,
 }
 
 /// Remedy 1 of the ladder, on a sized field, in place: the forced merges.
@@ -1397,7 +1422,13 @@ pub fn apply_merges(
         return (outcome, forced);
     }
 
-    let runs = unbraced_runs(context.grid, struts, context.layer_height_mm, law);
+    let runs = unbraced_runs_drawn(
+        context.grid,
+        struts,
+        context.layer_height_mm,
+        law,
+        context.load_step_taper,
+    );
     let mut over: Vec<UnbracedRun> = runs.into_iter().filter(UnbracedRun::over_limit).collect();
     outcome.runs_over_limit_before = over.len();
     let mut named: Vec<u32> = over.iter().map(|run| run.strut_id).collect();
@@ -2043,7 +2074,7 @@ impl TieState {
     fn build(context: &SlendernessContext<'_>, struts: &[SweepStrut]) -> Self {
         let mut index = ColumnHistory::new(context.grid);
         stamp_all(&mut index, struts);
-        let (profiles, _) = crate::adapter::drawn_profiles(struts);
+        let (profiles, _) = crate::adapter::drawn_profiles(struts, context.load_step_taper);
         let root_flare = SweepRootFlare::registered(context.layer_height_mm).ok();
         let floors: Vec<usize> = struts
             .iter()
@@ -4215,6 +4246,7 @@ mod tests {
             max_struts: 1_000,
             x_allowed: 12.0,
             seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
+            load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
         };
         // P at col 100, Q 10 cells (0.50 mm) away, R 40 cells the other way.
         let mut struts = vec![
@@ -4369,6 +4401,7 @@ mod tests {
             max_struts: 1_000,
             x_allowed: 12.0,
             seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
+            load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
         };
         let struts = vec![
             plate_post(&grid, 0, 100, 0.2),
@@ -4513,7 +4546,10 @@ mod tests {
     /// the file. Nothing here computes a seat or a boss.
     fn emitted_boss_top_mm(grid: &crate::grid::Grid, post: &crate::SweepStrut, h: f64) -> f64 {
         let (seat, base) = crate::adapter::drawn_ends(grid, 0.0, h, post);
-        let (profiles, _) = crate::adapter::drawn_profiles(std::slice::from_ref(post));
+        let (profiles, _) = crate::adapter::drawn_profiles(
+            std::slice::from_ref(post),
+            crate::adapter::LoadStepTaper::registered(h),
+        );
         let arm = crate::adapter::sweep_arm(post, seat, base, None, profiles[0].clone());
         let layers = plinth_core::LayerPlan::new(0.0, vec![h; 200]).expect("a uniform plan");
         let frame = plinth_support::BuildFrame::new(
@@ -4600,6 +4636,7 @@ mod tests {
             max_struts: 1_000,
             x_allowed: 12.0,
             seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
+            load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
         };
         // 16 cells at 0.05 mm: 0.8 mm between the posts.
         let struts = vec![
@@ -4699,6 +4736,7 @@ mod tests {
             max_struts: 1_000,
             x_allowed: 12.0,
             seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
+            load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
         };
         let mut struts = vec![
             short_plate_post(&grid, 0, 100),
@@ -4716,7 +4754,7 @@ mod tests {
         );
 
         // The whole field, lowered exactly as `to_primitives` lowers a plan.
-        let (profiles, _) = crate::adapter::drawn_profiles(&struts);
+        let (profiles, _) = crate::adapter::drawn_profiles(&struts, context.load_step_taper);
         let arms: Vec<plinth_support::SweepArm> = struts
             .iter()
             .zip(profiles)
@@ -4996,6 +5034,7 @@ mod tests {
             max_struts: 1_000,
             x_allowed: 12.0,
             seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
+            load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
         }
     }
 
