@@ -462,7 +462,8 @@ pub fn drawn_line_offset(
     }
     // A vertical member's drawn line is its planned line (the boss stands
     // under its own seat); nothing moves, bit for bit.
-    if arm.seat_mm[0] == arm.base_mm[0] && arm.seat_mm[1] == arm.base_mm[1] {
+    let same = |a: f64, b: f64| a.partial_cmp(&b) == Some(std::cmp::Ordering::Equal);
+    if same(arm.seat_mm[0], arm.base_mm[0]) && same(arm.seat_mm[1], arm.base_mm[1]) {
         return None;
     }
     let (top, bottom) = flare.plate_shaft_of(arm, plate_z_mm)?;
