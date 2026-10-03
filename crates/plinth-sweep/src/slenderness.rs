@@ -126,7 +126,7 @@ use crate::grid::Grid;
 use crate::lean::LeanLaw;
 use crate::up_sweep::ColumnHistory;
 use crate::{Landing, StrutKind, SweepStrut};
-use plinth_support::SweepRootFlare;
+use plinth_support::{RootBoss, SweepRootFlare};
 
 /// The slenderness law, evaluated once for one run and then read by everything
 /// the lane does.
@@ -412,6 +412,13 @@ pub struct SlendernessOutcome {
     /// plate's post 81). The standing lap is the congestion lane's warning; this
     /// counts where the rung grew one. A path-hit witness for the rule.
     pub thicken_over_existing_lap: usize,
+    /// Thickenings the root-lap test ADMITTED on the feet the file draws
+    /// (the lowering's root boss, 2.2 / 1.5 × root) where the census's
+    /// crowding discs (`FLARE_R_FACTOR` × root) would have made a new lap and
+    /// refused them, the rule until 2026-10-02 (fix/mast-tie-and-overlap-factor).
+    /// A path-hit witness: zero means the drawn-foot test decided every
+    /// thickening as the crowding test did.
+    pub thicken_admitted_where_the_crowding_disc_laps: usize,
     /// Plate root discs a cross GREW, because the junction clause raised the
     /// root the file draws for its post (or the post's trunk, or a new mast)
     /// past the disc its placement was cleared against (review-fixes
@@ -428,6 +435,15 @@ pub struct SlendernessOutcome {
     /// radius; and masts EXTENDED up to a later tie instead of a new mast.
     pub mast_cells_refused_by_panel: usize,
     pub masts_extended: usize,
+    /// MAST TIE HEIGHT (fix/mast-tie-and-overlap-factor, 2026-10-02): mast
+    /// attempts planned at a layer ABOVE the crosses' first evenly spaced tie
+    /// (the layer every mast was planned at until this date), and of all mast
+    /// attempts, those whose tie had to rise above the highest evenly spaced
+    /// tie for the piece above to fit its own limit ([`mast_tie_layer`]).
+    /// Path-hit witnesses: both zero means the rule planned every mast where
+    /// the old one did.
+    pub mast_ties_planned_above_the_first_tie: usize,
+    pub mast_ties_raised_for_the_piece_above: usize,
     /// MEMBER CLEARANCE (fix/member-clearance, 2026-09-29): bands refused
     /// because a diagonal's drawn solid would come within the final gap of the
     /// model, or would enter a member it is not joined to; and mast cells (and
@@ -1616,8 +1632,9 @@ pub fn apply_ties(
                 let Some(run) = run else {
                     continue 'members;
                 };
-                // The first of the ties the run needs, evenly spaced; the
-                // member is measured again before the next one.
+                // A CROSS takes the first of the ties the run needs, evenly
+                // spaced; the member is measured again before the next one.
+                // A mast plans its own layer ([`mast_tie_layer`]).
                 let k = tie_layer(&run, 1, extra_ties(&run).max(1));
                 // A FURTHER PLANE GOES TO A LAYER THE MEMBER IS ALREADY TIED
                 // AT, where that layer alone cuts the run into pieces inside
@@ -1655,7 +1672,26 @@ pub fn apply_ties(
                     continue;
                 }
                 if context.mast {
-                    if let Some(k) = k {
+                    // A MAST HAS ITS OWN TIE LAYER (fix/mast-tie-and-overlap-factor,
+                    // 2026-10-02): where the piece above it is within its own
+                    // limit, not the crosses' first evenly spaced layer.
+                    let mast_k = mast_tie_layer(
+                        grid,
+                        &struts[index],
+                        &state.profiles[index],
+                        &run,
+                        height,
+                        law,
+                    );
+                    if let Some(tie) = mast_k {
+                        if k.is_some_and(|k| tie.layer > k) {
+                            outcome.mast_ties_planned_above_the_first_tie += 1;
+                        }
+                        if tie.raised {
+                            outcome.mast_ties_raised_for_the_piece_above += 1;
+                        }
+                    }
+                    if let Some(k) = mast_k.map(|tie| tie.layer) {
                         if let Some(new_mast) = tie_by_mast_above_the_flares(
                             context, &mut state, struts, &run, k, outcome,
                         ) {
@@ -2024,6 +2060,13 @@ struct TieState {
     /// posts' free shafts (`None`: the registry was unreadable, and only the
     /// posts' own feet bound a band, as before 2026-09-30).
     root_flare: Option<SweepRootFlare>,
+    /// The lowering's root boss ([`plinth_support::RootBoss`]: the owner's
+    /// Heavy boss, its foot the root times 2.2 / 1.5), so the thicken rung's
+    /// root-lap test measures the feet the file draws
+    /// (fix/mast-tie-and-overlap-factor, 2026-10-02). `None`: the registry
+    /// was unreadable, and the test falls back to the crowding discs, as
+    /// before this date.
+    root_boss: Option<RootBoss>,
     /// Every member's drawn shaft line off its planned one, as `(at its
     /// seat, at its base)`: a leaning plate post's own
     /// (`adapter::planned_line_offset`, its file shaft runs to its boss top
@@ -2157,6 +2200,7 @@ impl TieState {
             masts_of,
             placed_roots,
             root_flare,
+            root_boss: RootBoss::registered().ok(),
             drawn_offsets,
             flare_shortfall: std::cell::Cell::new(None),
         }
@@ -2463,8 +2507,11 @@ fn flare_of(context: &SlendernessContext<'_>) -> f64 {
 /// * every trunk the member stands on is raised to `R` from the junction down
 ///   to its own root (the junction rule: a trunk is at least as thick as the
 ///   branch where it joins it), and
-/// * where that chain meets the PLATE, the grown root's flared disc clears
-///   every other root disc — the same rule, the same function, as a mast's.
+/// * where that chain meets the PLATE, the grown root's drawn boss foot makes
+///   no new lap of another root's drawn boss foot — the feet the file prints,
+///   from the lowering's own [`RootBoss`] (since 2026-10-02; until then the
+///   census's crowding discs, `FLARE_R_FACTOR` × root), with the same
+///   touch rule the mast search uses.
 ///
 /// It holds in every direction, which is why the owner prefers it wherever
 /// crosses cannot close a tie. The minimum is written to
@@ -2580,14 +2627,53 @@ fn thicken(
                 // instead. A lap that stood before the growth is the
                 // congestion lane's published warning, not a veto here.
                 if grows_past_own {
-                    let (new_lap, existing) = crate::congestion::growth_laps(
-                        grid,
-                        strut.base_cell(),
-                        known.unwrap_or(0.0),
-                        flared,
-                        &state.placed_roots,
-                        slot,
-                    );
+                    // THE LAP IS MEASURED ON THE FEET THE FILE DRAWS
+                    // (fix/mast-tie-and-overlap-factor, 2026-10-02): every
+                    // root, the grown one and its neighbours, at the
+                    // lowering's own boss foot (`RootBoss::foot_radius_mm`,
+                    // the root times the owner's Heavy ratio 2.2 / 1.5; Craig
+                    // ruling 2026-09-30), not at the census's crowding factor
+                    // `FLARE_R_FACTOR` = 1.6 the placed discs are stored at.
+                    // Until this date a thickening was refused for a lap no
+                    // file prints (the lonely peak's arm 1 against post 0:
+                    // 0.001 mm at 1.6, clear by 0.15 mm at the drawn foot).
+                    // A root too short for a boss draws no foot wider than
+                    // itself, so the boss foot is the WIDEST the lowering can
+                    // draw under a root: the test can only err toward a
+                    // refusal. The disc stored after the growth stays at the
+                    // crowding factor, which the census and the mast search
+                    // still read (`SweepPolicy::flare_r_factor`).
+                    let census = || {
+                        crate::congestion::growth_laps(
+                            grid,
+                            strut.base_cell(),
+                            known.unwrap_or(0.0),
+                            flared,
+                            &state.placed_roots,
+                            slot,
+                        )
+                    };
+                    let (new_lap, existing) = match state.root_boss {
+                        Some(boss) => {
+                            let own_bare = slot
+                                .and_then(|slot| state.placed_roots.get(slot))
+                                .map_or(0.0, crate::congestion::RootDisc::bare_radius_mm);
+                            let drawn = crate::congestion::growth_laps_drawn(
+                                grid,
+                                strut.base_cell(),
+                                own_bare,
+                                root,
+                                &state.placed_roots,
+                                slot,
+                                |bare| boss.foot_radius_mm(bare),
+                            );
+                            if !drawn.0 && census().0 {
+                                outcome.thicken_admitted_where_the_crowding_disc_laps += 1;
+                            }
+                            drawn
+                        }
+                        None => census(),
+                    };
                     if new_lap {
                         outcome.thicken_refused_disc += 1;
                         return false;
@@ -3195,6 +3281,62 @@ fn extra_ties(run: &UnbracedRun) -> usize {
     )]
     let pieces = pieces.max(1.0) as usize;
     pieces.saturating_sub(1)
+}
+
+/// **The layer a MAST ties `run` at** (fix/mast-tie-and-overlap-factor,
+/// 2026-10-02; `v11-feedback-diagnosis.md` item 4).
+///
+/// The run needs `n = ceil(L / limit) − 1` ties, which cut it into pieces
+/// inside the limit. A mast's braced panel is judged on the arm's TOP sway,
+/// and the arm above the tie stands there as a free cantilever, so the mast
+/// takes the HIGHEST of those ties, the one whose piece above is the run's
+/// top piece: `n / (n + 1)` of the way up. If that top piece is still over its
+/// OWN limit (its own equivalent radius, thinner than the run's where the arm
+/// tapers to its tip), the tie rises layer by layer until it is not. The
+/// pieces below are tied by the next attempts on the same member (the mast's
+/// own extension path, or any rung), each again measured on its own.
+///
+/// Until this date the mast took the crosses' FIRST evenly spaced layer,
+/// `1 / (n + 1)` of the way up, and left `n / (n + 1)` of the run standing
+/// above it: on a run over twice its limit the free cantilever alone was
+/// `(2/3 · L / limit)⁴ > 3` pixels, so the panel refused every cell at every
+/// mast radius (the lonely peak: 35,172 cells, 3 masts refused). A run under
+/// twice its limit needs one tie, where the first and the highest are the
+/// same layer, so nothing changes there unless its top piece is over its
+/// own limit.
+///
+/// Measured with the production run measure ([`run_length`], [`run_radius`]);
+/// one equivalent-radius integral per layer tried, and the first layer tried
+/// is usually the answer. `None` where the run is too short to hold a tie or
+/// no layer inside it leaves a piece above within its limit.
+fn mast_tie_layer(
+    grid: &Grid,
+    strut: &SweepStrut,
+    profile: &[f64],
+    run: &UnbracedRun,
+    layer_height_mm: f64,
+    law: &SlendernessLaw,
+) -> Option<MastTie> {
+    let wanted = extra_ties(run).max(1);
+    let highest = tie_layer(run, wanted, wanted)?;
+    let layer = (highest..run.k_top).find(|&k| {
+        let piece_mm = run_length(grid, strut, k, run.k_top, layer_height_mm);
+        let radius_mm = run_radius(strut, &strut.thickened_mm, profile, k, run.k_top);
+        piece_mm <= law.max_unbraced_mm(radius_mm)
+    })?;
+    Some(MastTie {
+        layer,
+        raised: layer > highest,
+    })
+}
+
+/// Where [`mast_tie_layer`] planned a mast's tie, and whether it had to rise
+/// above the highest evenly spaced tie for the piece above to fit its own
+/// limit (a path-hit witness).
+#[derive(Clone, Copy, Debug)]
+struct MastTie {
+    layer: usize,
+    raised: bool,
 }
 
 /// The layer of the `step`-th of `wanted` evenly spaced ties inside a run.
@@ -5156,6 +5298,183 @@ mod tests {
         assert!(
             thickened.windows(2).all(|pair| pair[1] <= pair[0]),
             "the taper never widens upward"
+        );
+    }
+
+    /// A 10 mm plate post drawn 0.5 mm over its lowest 3 mm and 0.06 mm above
+    /// (a load-sized arm: thick where it carries, thin at the tip), alone on
+    /// a clear plate. Its run is 2.33 times its limit at S = 50, so it needs
+    /// two ties.
+    fn tapered_post(grid: &crate::grid::Grid) -> crate::SweepStrut {
+        let mut post = plate_post(grid, 0, 150, 0.06);
+        post.k_top = 200;
+        post.radius_mm = (0..200).map(|layer| if layer < 60 { 0.5 } else { 0.06 }).collect();
+        post.carried_mm2 = vec![0.0; 200];
+        post
+    }
+
+    /// **A MAST IS TIED WHERE THE PIECE ABOVE ITS TIE IS WITHIN ITS OWN
+    /// LIMIT** (fix/mast-tie-and-overlap-factor, 2026-10-02;
+    /// `v11-feedback-diagnosis.md` item 4).
+    ///
+    /// The post below runs 2.33 limits, so two ties cut it into pieces inside
+    /// the limit. Until this date the mast rung planned its tie at the FIRST
+    /// of those evenly spaced layers (a third of the way up), leaving two
+    /// thirds of the run standing above it; the braced panel judges the arm's
+    /// top and that free upper cantilever alone is
+    /// `(6.67 / 4.29)^4 ≈ 5.9` pixels, so every cell was refused by the panel
+    /// at every mast radius and no mast could be placed on any run longer
+    /// than twice its limit. Red until this date: 0 masts.
+    ///
+    /// Crosses have no partner here (one post) and the thicken rung is
+    /// switched off, so the mast rung is the only one that can fire.
+    #[test]
+    fn a_mast_is_tied_where_the_piece_above_its_tie_is_within_its_limit() {
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 300, 300);
+        let history = crate::up_sweep::ColumnHistory::new(&grid);
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(0.05, 45.0, 25.0);
+        let law = law();
+        let context = super::SlendernessContext {
+            layers: 260,
+            thicken: false,
+            ..prune_context(&grid, &history, &keep_out, &lean, &law)
+        };
+        let mut struts = vec![tapered_post(&grid)];
+        let before = super::unbraced_runs(&grid, &struts, 0.05, &law);
+        assert_eq!(before.len(), 1, "anti-vacuity: one run, the whole post: {before:?}");
+        assert!(
+            before[0].over_limit() && extra_ties(&before[0]) == 2,
+            "anti-vacuity: the run needs two ties: {:?}",
+            before[0]
+        );
+        let mut outcome = super::SlendernessOutcome::default();
+        super::apply_ties(&context, &mut struts, &mut outcome);
+        let masts: Vec<&crate::SweepStrut> = struts
+            .iter()
+            .filter(|strut| strut.kind == crate::StrutKind::Mast)
+            .collect();
+        assert!(
+            !masts.is_empty(),
+            "no mast was placed: {} masts, {} cells refused by the panel, {} as thicker than \
+             the member",
+            outcome.masts_dropped,
+            outcome.mast_cells_refused_by_panel,
+            outcome.mast_cells_refused_thicker_than_member
+        );
+        // Every mast is tied at or above the layer the piece above needs: the
+        // run measured from its top tie up to the post's top is inside its
+        // own limit (the production measure, read through the public census).
+        let after = super::unbraced_runs(&grid, &struts, 0.05, &law);
+        for run in after.iter().filter(|run| run.strut_id == 0 && run.k_top == 200) {
+            assert!(
+                run.k_lo > 0,
+                "the post's top run still starts at the plate in some direction: {run:?}"
+            );
+        }
+        for mast in &masts {
+            assert!(
+                mast.min_radius_mm <= 0.5 + 1.0e-12,
+                "a mast is never thicker than the member it braces: {} mm",
+                mast.min_radius_mm
+            );
+        }
+        assert!(
+            outcome.mast_ties_planned_above_the_first_tie > 0,
+            "path hit: the rule planned the mast above the crosses' first layer"
+        );
+        let over: Vec<&UnbracedRun> = after
+            .iter()
+            .filter(|run| run.strut_id == 0 && run.over_limit())
+            .collect();
+        assert!(
+            over.is_empty(),
+            "the post is left over its limit after {} masts and {} crosses: {over:?}",
+            masts.len(),
+            outcome.braces_added
+        );
+    }
+
+    /// **A THICKENING IS REFUSED ONLY FOR A LAP OF THE FEET THE FILE DRAWS**
+    /// (fix/mast-tie-and-overlap-factor, 2026-10-02).
+    ///
+    /// Since 2026-09-30 the lowering stands every plate root on the owner's
+    /// Heavy boss, its foot the root times 2.2 / 1.5 ≈ 1.467
+    /// ([`plinth_support::RootBoss`]). The thicken rung's root-lap test still
+    /// measured both roots at the congestion census's crowding factor, 1.6,
+    /// so it refused a thickening for a lap the file never prints (the
+    /// lonely peak's arm 1 would lap post 0 by 0.001 mm at 1.6, and clear it
+    /// by 0.15 mm at the drawn foot; `v11-feedback-diagnosis.md` item 4).
+    ///
+    /// Two plate posts: A, a 0.05 mm post that the rung thickens to a root
+    /// `R` (measured first on A alone), and B, a 0.5 mm post set the first
+    /// whole cell beyond the DRAWN feet's reach `1.467 (R + 0.5)` and inside
+    /// the crowding reach `1.6 (R + 0.5)`. Red until this date:
+    /// `thicken_refused_disc` = 1.
+    #[test]
+    fn a_thickening_is_refused_only_for_a_lap_of_the_feet_the_file_draws() {
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let history = crate::up_sweep::ColumnHistory::new(&grid);
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(0.05, 45.0, 25.0);
+        let law = law();
+        let context = prune_context(&grid, &history, &keep_out, &lean, &law);
+        let thicken_post_zero = |struts: &mut Vec<crate::SweepStrut>| {
+            let mut state = super::TieState::build(&context, struts);
+            let over: Vec<UnbracedRun> = super::member_runs(
+                &grid,
+                &struts[0],
+                &state.ties[0],
+                &state.profiles[0],
+                0.05,
+                &law,
+            )
+            .into_iter()
+            .filter(UnbracedRun::over_limit)
+            .collect();
+            assert_eq!(over.len(), 1, "anti-vacuity: post A is one over-limit run");
+            let mut outcome = super::SlendernessOutcome::default();
+            let done = super::thicken(&context, &mut state, struts, &over[0], &mut outcome);
+            (done, outcome)
+        };
+        let mut alone = vec![plate_post(&grid, 0, 40, 0.05)];
+        let (done, _) = thicken_post_zero(&mut alone);
+        assert!(done, "anti-vacuity: post A alone takes the thicken rung");
+        let root = alone[0].thickened_mm[0];
+        let boss = plinth_support::RootBoss::registered()
+            .expect("the registry holds the owner's root boss")
+            .factor();
+        let neighbour = 0.5;
+        let (drawn_reach, census_reach) = (
+            boss * (root + neighbour),
+            context.flare_factor * (root + neighbour),
+        );
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a short positive length over the grid pitch, rounded up to a cell count"
+        )]
+        let cells = (drawn_reach / grid.pitch_mm()).floor() as usize + 1;
+        let apart = crate::cell_distance_mm(&grid, grid.index(100, 40), grid.index(100, 40 + cells));
+        assert!(
+            apart > drawn_reach && apart < census_reach,
+            "anti-vacuity: B at {apart} mm lies between the drawn reach {drawn_reach} and the \
+             crowding reach {census_reach} (root {root}, boss factor {boss})"
+        );
+        let mut pair = vec![
+            plate_post(&grid, 0, 40, 0.05),
+            plate_post(&grid, 1, 40 + cells, neighbour),
+        ];
+        let (done, outcome) = thicken_post_zero(&mut pair);
+        assert!(
+            done && outcome.thicken_refused_disc == 0,
+            "the thickening was refused for a lap of the crowding discs only: refused by disc \
+             {}, B {apart} mm away, drawn feet reach {drawn_reach} mm",
+            outcome.thicken_refused_disc
+        );
+        assert!(
+            (pair[0].thickened_mm[0] - root).abs() < 1.0e-12,
+            "the neighbour changes whether the rung fires, never the root it draws"
         );
     }
 }
