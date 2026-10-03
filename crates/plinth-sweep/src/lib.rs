@@ -71,7 +71,7 @@ use plinth_mesh::Mesh;
 use plinth_support::perception::{slice_stack, SliceStackLimits};
 use thiserror::Error;
 
-pub use adapter::{arms_of, to_primitives, SweepEmission};
+pub use adapter::{arms_of, to_primitives, LoadStepTaper, SweepEmission};
 pub use congestion::{CongestionCensus, CongestionOutcome, CongestionReport};
 pub use drain::{DrainKeepOut, DrainSpec, DrainVerdict, EscapeReport};
 pub use limits::SweepLimits;
@@ -387,6 +387,9 @@ pub struct SweepPlan {
     pub plate_z_mm: f64,
     pub struts: Vec<SweepStrut>,
     pub report: SweepRunReport,
+    /// How the plan's load steps are drawn ([`adapter::LoadStepTaper`]): the
+    /// sweep's rules measured this profile, and the lowering draws it.
+    pub load_step_taper: adapter::LoadStepTaper,
 }
 
 impl SweepPlan {
@@ -669,6 +672,11 @@ pub struct SweepPolicy {
     /// back. Sabotage and comparison only; nothing in the pipeline turns it
     /// off.
     pub lip_seat_across_passes: bool,
+    /// Whether a load step on a support arm is drawn as a cone above its
+    /// junction ([`adapter::LoadStepTaper`], 2026-10-02), at the registered
+    /// lean law's largest step per layer. **On in production.** The drill
+    /// turns it off, and the shoulders come back.
+    pub load_step_taper: bool,
     /// `DECIMATION_PROBE_GRID_PITCH_MM` and `DECIMATION_PROBE_MAX_GRID_BYTES`:
     /// the registered parity-grid pitch and byte cap of a distance-probe
     /// surface index. The head-join rule builds one over the model to measure
@@ -784,6 +792,7 @@ impl SweepPolicy {
             head_join: true,
             lip_seat: true,
             lip_seat_across_passes: true,
+            load_step_taper: true,
             surface_index_pitch_mm: placeholders
                 .decimation_probe_grid_pitch_mm()
                 .diagnostic()
@@ -1067,6 +1076,15 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_lip_seat_across_passes(mut self) -> Self {
         self.lip_seat_across_passes = false;
+        self
+    }
+
+    /// Draw every load step as the sharp shoulder this engine drew before
+    /// 2026-10-02. **Sabotage only**: the drill sets it and the Cylinder's
+    /// shoulders come back (`tests/it/tapered_load_steps.rs`).
+    #[must_use]
+    pub const fn without_load_step_taper(mut self) -> Self {
+        self.load_step_taper = false;
         self
     }
 
@@ -1697,6 +1715,18 @@ pub fn run_sweep_with_drains(
     // history. This is the iterate that already re-runs the down-sweep after
     // it moves arms, so a brace is sized and its junction splits its shaft's
     // ledger by the same pass that sizes everything else.
+    // THE LOAD-STEP TAPER (fix/tapered-load-steps, 2026-10-02): the REGISTERED
+    // lean law's step, whatever the lean sabotage knob says, so that switching
+    // off the lean does not also bring the shoulders back.
+    let load_step_taper = if policy.load_step_taper {
+        adapter::LoadStepTaper::of(&lean::LeanLaw::new(
+            height,
+            policy.overhang_centre_deg,
+            policy.overhang_transition_deg,
+        ))
+    } else {
+        adapter::LoadStepTaper::OFF
+    };
     let slenderness_law = if policy.slenderness {
         slenderness::SlendernessLaw::new(
             policy.slenderness_ratio,
@@ -1727,6 +1757,7 @@ pub fn run_sweep_with_drains(
         max_struts: policy.limits.max_struts,
         x_allowed: policy.x_allowed,
         seat_faces: seat_face_rule,
+        load_step_taper,
     };
     let (mut slenderness_outcome, forced_merges) =
         slenderness::apply_merges(&slenderness_context, &mut struts);
@@ -1964,7 +1995,7 @@ pub fn run_sweep_with_drains(
     // Measured on the FINISHED field, after the re-run, so the published run
     // lengths belong to the arms this file actually contains.
     let slenderness_after =
-        slenderness::unbraced_runs(&grid, &struts, height, &slenderness_law);
+        slenderness::unbraced_runs_drawn(&grid, &struts, height, &slenderness_law, load_step_taper);
     slenderness_outcome.longest_run_mm = 0.0;
     slenderness_outcome.longest_run_limit_mm = 0.0;
     // WHAT THE MAST'S PLACEMENT-TIME RADIUS GOT WRONG, measured on the sized
@@ -2137,6 +2168,7 @@ pub fn run_sweep_with_drains(
         plate_z_mm: plate_z,
         struts,
         report,
+        load_step_taper,
     };
     // THE FOOTPRINT RULE (fix/tip-trim, 2026-09-28): every tip's contact disc,
     // as the lowering will deliver it, graded against the eroded carrier
@@ -2197,13 +2229,14 @@ pub fn run_sweep_with_drains(
     // have moved.
     {
         let emitted = adapter::arms_of(&sweep_plan);
-        let (examined, listed, near_by_interior) =
-            head_join::census(&head_join_context, &sweep_plan.struts, &emitted);
+        let found = head_join::census(&head_join_context, &sweep_plan.struts, &emitted);
         let rule = &mut sweep_plan.report.head_join;
-        rule.in_seat_zone_after = listed;
-        rule.census_near_by_interior = near_by_interior;
+        rule.in_seat_zone_after = found.listed;
+        rule.census_near_by_interior = found.near_by_interior;
+        rule.census_load_cone_layers = found.cone_sections_graded;
+        rule.census_held_by_load_cone = found.held_by_cone;
         if !policy.head_join {
-            rule.joins_examined = examined;
+            rule.joins_examined = found.examined;
             rule.joins_in_seat_zone_before = rule.in_seat_zone_after.len();
         }
     }

@@ -78,7 +78,7 @@ fn z_span(mesh: &Mesh) -> (f64, f64) {
 ///
 /// The finished plan is handed to `edit` before it is lowered — the lowering
 /// is graded against the plan it was actually given.
-fn plan_of_with(
+pub(crate) fn plan_of_with(
     mesh: &Mesh,
     policy: &SweepPolicy,
     edit: impl FnOnce(&mut SweepPlan),
@@ -109,7 +109,7 @@ fn point(primitive_point: [Finite; 3]) -> [f64; 3] {
 /// The emitted primitives, grouped per member in emission order. A member
 /// starts at its tip ball, or — for a brace or a mast, which carry no ball —
 /// at its taper. This reads the emitted SEQUENCE; it does not rebuild it.
-fn members(emission: &SweepEmission) -> Vec<Vec<&SupportPrimitive>> {
+pub(crate) fn members(emission: &SweepEmission) -> Vec<Vec<&SupportPrimitive>> {
     let mut groups: Vec<Vec<&SupportPrimitive>> = Vec::new();
     for primitive in &emission.primitives {
         // The raft (fix/sweep-raft, 2026-09-29) follows every member in the
@@ -140,7 +140,7 @@ fn members(emission: &SweepEmission) -> Vec<Vec<&SupportPrimitive>> {
 /// primitive of the member spans `z`. Frusta are read as linear in their own
 /// axial parameter (the emitted record's own definition); a ball is read as a
 /// sphere cut perpendicular to its own pole axis.
-fn drawn_radius_at(group: &[&SupportPrimitive], z: f64) -> Option<f64> {
+pub(crate) fn drawn_radius_at(group: &[&SupportPrimitive], z: f64) -> Option<f64> {
     let mut widest: Option<f64> = None;
     for primitive in group {
         let start = point(primitive.start_mm);
