@@ -20,8 +20,9 @@
 //!
 //! * the host's CONTACT layer (its top layer, sized from its own peel), and
 //!   the step into it;
-//! * a step at a layer where a BRACE joins the host: the brace-junction raise
-//!   is pending a force analysis and the owner, and is not tapered.
+//! * a step at a layer where a BRACE joins the host. Since 2026-10-03 a brace
+//!   raises nothing (rule R2), so no such step is made; brace joints are
+//!   graded by `brace_window_cap.rs`.
 //!
 //! Fixture: the committed `corpus/baseline/Cylinder.prepped.oriented-solid.stl`
 //! (the corpus Cylinder, unrotated), turned so that the up-direction the
@@ -50,7 +51,7 @@ const COMMITTED_UP: [f64; 3] = [-0.9947, 0.1028, 0.0];
 
 /// The corpus Cylinder, repaired as the executor repairs a source, turned so
 /// that [`COMMITTED_UP`] is +Z (Rodrigues' rotation about `up × z`).
-fn cylinder() -> Mesh {
+pub(crate) fn cylinder() -> Mesh {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../corpus/baseline/Cylinder.prepped.oriented-solid.stl");
     let raw = load_binary_stl(&path, WeldPolicy::None)

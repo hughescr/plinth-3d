@@ -19,7 +19,7 @@
 //! |---|---|
 //! | `..._on_the_lonely_peak` / `..._on_the_brace_pair` / `..._on_the_tall_stilt_plate` | at the mid-height of every ledger slot of every member, the widest emitted section of that member there is at least the ledger radius; and at every `Landing::Strut` junction whose branch actually touches its trunk, the trunk's drawn section at the branch's base is at least the branch's drawn root |
 //!
-//! | `a_brace_thicker_than_its_trunks_raises_them_on_the_brace_pair` | the same, with every brace thickened past any trunk's ledger: the junction clause (a brace's root on its trunk, and its top on its host) must raise the trunks to meet it |
+//! | `a_brace_raises_no_trunk_on_the_brace_pair` | with every brace thickened past any trunk's ledger, the lowering raises no member to a brace (rule R2, 2026-10-03: the lane never builds a brace thicker than its posts, and the brace-junction raise is deleted); every member still covers its own ledger |
 //!
 //! A branch whose root does not touch the trunk its ledger names (the
 //! stilt plate carried 11 such un-merged branches until fix/no-dangling; every
@@ -472,49 +472,77 @@ fn emitted_profile_covers_the_ledger_on_the_brace_pair() {
     );
 }
 
-/// **A brace is sized by its own slenderness minimum, never by load**, so its
-/// section can exceed the shaft it joins, and the trunk's ledger never hears
-/// of it: on the dense-pose Sphere 38 brace ends sit on 0.05 mm arms at up to
-/// 0.08 mm. The pinned fixtures happen not to reach that case, so this test
-/// makes it: every brace on the brace pair is given 1.5 × the widest ledger
-/// radius in the whole field, which no trunk's ledger meets. The junction
-/// clause must then RAISE every trunk and host a brace joins, from the joint
-/// down to its root — and every member must still cover its own ledger.
+/// **A brace raises no trunk** (rule R2, Craig ruling 2026-10-03, interim
+/// pending the slenderness coupon). Re-pinned from
+/// `a_brace_thicker_than_its_trunks_raises_them_on_the_brace_pair`, which
+/// pinned the deleted rule: a brace thicker than the shaft it joined raised
+/// every trunk and host from the joint down to its root, the "fat post with a
+/// thin top" Craig saw in ChituBox. The slenderness lane now never builds a
+/// diagonal thicker than the thinner post it joins (the band's
+/// `thicker_than_post` refusal), so the lowering has nothing to raise.
+///
+/// This test forces the case the lane no longer makes — every brace on the
+/// brace pair given 1.5 × the widest ledger radius in the field — and grades
+/// what the lowering does with it: no member is raised to a brace (the same
+/// count as the unedited field), every member still covers its own ledger,
+/// and the over-thick braces now stand thicker than their hosts (graded
+/// inversions), because nothing but the lane's R2 keeps them thin.
 #[test]
-fn a_brace_thicker_than_its_trunks_raises_them_on_the_brace_pair() {
+fn a_brace_raises_no_trunk_on_the_brace_pair() {
     let mut thickened = 0_usize;
     // Graded at the seat placement the fixture was built for
     // (`harness::at_path_fixture_seating`): at the production placement the
     // brace pair places no brace (measured 2026-09-30), so there is nothing to
     // thicken. The profile rule reads no placement.
-    grade_with(
-        "make_brace_pair, braces thickened",
-        &make_brace_pair().expect("the brace pair fixture"),
-        &crate::harness::at_path_fixture_seating(
-            SweepPolicy::from_registry().expect("the registry supplies every sweep number"),
-        ),
-        0,
-        |plan| {
-            let widest = plan
-                .struts
-                .iter()
-                .flat_map(|strut| strut.radius_mm.iter().copied())
-                .fold(0.0_f64, f64::max);
-            for strut in plan
-                .struts
-                .iter_mut()
-                .filter(|strut| strut.kind == StrutKind::Brace)
-            {
-                for radius in &mut strut.radius_mm {
-                    *radius = 1.5 * widest;
-                }
-                thickened += 1;
-            }
-        },
+    let policy = crate::harness::at_path_fixture_seating(
+        SweepPolicy::from_registry().expect("the registry supplies every sweep number"),
     );
+    let mesh = make_brace_pair().expect("the brace pair fixture");
+    let (_, plain) = plan_of_with(&mesh, &policy, |_| {});
+    let (plan, emission) = plan_of_with(&mesh, &policy, |plan| {
+        let widest = plan
+            .struts
+            .iter()
+            .flat_map(|strut| strut.radius_mm.iter().copied())
+            .fold(0.0_f64, f64::max);
+        for strut in plan
+            .struts
+            .iter_mut()
+            .filter(|strut| strut.kind == StrutKind::Brace)
+        {
+            for radius in &mut strut.radius_mm {
+                *radius = 1.5 * widest;
+            }
+            thickened += 1;
+        }
+    });
     assert!(
         thickened > 0,
         "anti-vacuity: the brace pair must place braces for this test to mean anything"
+    );
+    let found = census(&plan, &emission);
+    println!(
+        "make_brace_pair, braces thickened: {thickened} braces; members raised to a branch {} \
+         (unedited {}); {} junctions graded ({} brace tops), {} inversions; under-drawn {}",
+        emission.members_raised_to_a_branch,
+        plain.members_raised_to_a_branch,
+        found.junctions_graded,
+        found.brace_tops_graded,
+        found.inversions.len(),
+        found.under_drawn_members.len(),
+    );
+    assert_eq!(
+        emission.members_raised_to_a_branch, plain.members_raised_to_a_branch,
+        "a brace, however thick, raises no member"
+    );
+    assert!(
+        found.under_drawn_members.is_empty() && found.gaps_inside_member == 0,
+        "every member still covers its own ledger: {:?}",
+        found.under_drawn_members
+    );
+    assert!(
+        found.brace_tops_graded > 0 && !found.inversions.is_empty(),
+        "the over-thick braces stand thicker than their hosts: nothing raises a host to them"
     );
 }
 

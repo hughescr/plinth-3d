@@ -109,11 +109,12 @@ pub struct SweepEmission {
     pub raft_feet_sharing_a_pad: usize,
     /// Members whose drawn profile the JUNCTION CLAUSE raised above their
     /// ledger, from the junction down to their root, because a thicker branch
-    /// (in practice a brace, sized by its own slenderness minimum) joins them.
+    /// joins them. A brace raises nothing since 2026-10-03 (rule R2), so this
+    /// counts only branches of support arms.
     pub members_raised_to_a_branch: usize,
     /// Junctions where a support ARM's own ledger end is wider than its host's
     /// ledger at the joint — a ledger inconsistency, zero on a consistent
-    /// ledger. Raises that only propagate a brace's raise down a tree of arms
+    /// ledger. Raises that only propagate another raise down a tree of arms
     /// are not counted here.
     pub arm_junctions_inverted_in_ledger: usize,
     /// Load steps on support arms drawn as a cone above their junction
@@ -272,10 +273,9 @@ pub fn to_primitives(
 /// limit on how flat a member's printed surface may lie.)
 ///
 /// **What it does not touch.** Only a step made by CARRIED LOAD — an arm
-/// landing on an arm — is tapered. The brace-junction raise (a host raised to
-/// a brace's radius from the joint down to its root, [`drawn_profiles`]) is
-/// left as it is: a brace carries no load, and that rule waits on a force
-/// analysis and the owner. The cone never enters the host's CONTACT slot (its
+/// landing on an arm — is tapered. A brace makes no step at all: it raises
+/// nothing (rule R2, 2026-10-03, [`drawn_profiles`]). The cone never enters
+/// the host's CONTACT slot (its
 /// top slot, sized from its own peel alone); the head-join rule grades the
 /// cone's sections against the host's seat plane
 /// ([`crate::head_join`]).
@@ -342,7 +342,7 @@ pub(crate) struct LoadCone {
 }
 
 /// **Every cone the taper draws**, from the LEDGER (never from a raised
-/// profile, so a brace's raise is never tapered): for each support arm that
+/// profile, so a junction raise is never tapered): for each support arm that
 /// lands on a support arm, the host's ledger radius `R` in the slot its load
 /// is booked into (`head_join::booked_slot`, the down-sweep's booking), then
 /// `R − j · step` at `j` layers above it, for as long as that is wider than
@@ -426,7 +426,7 @@ pub(crate) struct JunctionRaises {
     /// LEDGER at the joint. An arm's load is booked into its host below the
     /// landing, so this is zero on a consistent ledger; a nonzero count is a
     /// ledger inconsistency, published rather than hidden. (A raise that only
-    /// PROPAGATES a brace's raise down a tree of arms is not one.)
+    /// PROPAGATES another raise down a tree of arms is not one.)
     arm_ledger_inversions: usize,
 }
 
@@ -436,18 +436,26 @@ pub(crate) struct JunctionRaises {
 /// The rule: a trunk is at least as thick as each branch where the branch
 /// joins it. For a support ARM landing on a trunk the ledger already says so
 /// — the branch's load is booked into the trunk below the landing, so the
-/// trunk's section there is at least the branch's. A BRACE (and a mast, if one
-/// is ever braced onto) is different: its section is set by its own
-/// slenderness minimum, not by load, and the trunk's ledger never hears of it,
-/// so a 0.08 mm brace can land on a 0.05 mm arm. For every junction — a
-/// member's landing on another strut, and a brace's top seat on its host —
-/// the host's drawn profile is raised to the branch's own drawn end radius
-/// from the junction layer DOWN TO THE HOST'S ROOT. Down to the root, and not
-/// only at the junction, because a printed member must never be narrower
-/// below than above: a local collar would leave a down-facing ledge, which is
-/// an unsupported overhang, and the ledger's own non-decreasing-downward shape
-/// exists for the same reason. A raised root also widens that member's plate
-/// flare, which is sized from the drawn root.
+/// trunk's section there is at least the branch's. Where a member's landing
+/// on another strut still finds the host thinner (a branch of a branch whose
+/// own profile was raised), the host's drawn profile is raised to the
+/// branch's own drawn end radius from the junction layer DOWN TO THE HOST'S
+/// ROOT. Down to the root, and not only at the junction, because a printed
+/// member must never be narrower below than above: a local collar would leave
+/// a down-facing ledge, which is an unsupported overhang, and the ledger's own
+/// non-decreasing-downward shape exists for the same reason. A raised root
+/// also widens that member's plate flare, which is sized from the drawn root.
+///
+/// **A BRACE RAISES NOTHING** (Craig ruling 2026-10-03, rule R2 of
+/// `bracing-mechanics.md`, interim pending the slenderness coupon). Until that
+/// date a brace's two joints — its landing and its top seat — raised the host
+/// to the brace's radius from the joint down to its root, because a brace is
+/// sized by its own slenderness minimum and could be thicker than the post it
+/// joined (a 0.231 mm diagonal on a 0.05 mm post): 26 of the 45 "fat post,
+/// thin top" steps in the round-11 files. The rule now runs the other way: a
+/// brace is never thicker than the thinner post it joins
+/// ([`crate::slenderness`], the band's `thicker_than_post` refusal), so the
+/// post already meets it and there is nothing to raise.
 ///
 /// A raised member may itself be a branch of another, so the pass repeats
 /// until nothing moves; every raise is monotone and bounded by the largest
@@ -458,7 +466,7 @@ pub(crate) struct JunctionRaises {
 /// cone above its junction ([`LoadStepTaper`], 2026-10-02). Both are maxima
 /// over the ledger from independent sources (the cone from the host's ledger,
 /// a raise from a branch's drawn end, which no cone touches: a cone never
-/// reaches a member's root slot or a brace), so the order does not matter.
+/// reaches a member's root slot), so the order does not matter.
 fn junction_profiles(plan: &SweepPlan) -> (Vec<Vec<f64>>, JunctionRaises) {
     drawn_profiles(&plan.struts, plan.load_step_taper)
 }
@@ -517,6 +525,11 @@ pub(crate) fn drawn_profiles(
     // branch's ROOT, false = at its TOP)
     let mut joints: Vec<(usize, usize, usize, bool)> = Vec::new();
     for (index, strut) in struts.iter().enumerate() {
+        // A brace raises nothing (R2, 2026-10-03; see the doc above): its
+        // joints are not junctions of this clause.
+        if strut.kind == crate::StrutKind::Brace {
+            continue;
+        }
         if let Landing::Strut { id, .. } = strut.landing {
             if let Some(parent) = host(id).filter(|parent| *parent != index) {
                 let slot = strut.k_bottom.saturating_sub(struts[parent].k_bottom);
@@ -966,25 +979,32 @@ mod tests {
         assert!(load_step_cones(&struts, LoadStepTaper::OFF).is_empty());
     }
 
-    /// A brace carries no load: the raise it makes (the host at the brace's
-    /// radius from the joint down to its root) keeps its shoulder, pending a
-    /// force analysis and the owner. Only the load step below it tapers.
+    /// **A brace raises nothing** (rule R2, Craig ruling 2026-10-03). Re-pinned
+    /// from `a_brace_raise_is_not_tapered`, which pinned the deleted rule: the
+    /// host was raised to the brace's 0.40 mm from the joint (slot 30) down to
+    /// its root, a shoulder back to the 0.25 mm ledger at slot 31. A brace is
+    /// now never thicker than the post it joins (the lane refuses the band
+    /// otherwise), so its joints are not junctions of the clause: the host is
+    /// its ledger plus the load cone of the arm below, and a brace's landing
+    /// makes no cone.
     #[test]
-    fn a_brace_raise_is_not_tapered() {
+    fn a_brace_raises_nothing() {
         let mut brace = member(2, StrutKind::Brace, 30, Landing::Strut { id: 0, layer: 30 }, vec![0.40; 5]);
         brace.min_radius_mm = 0.40;
-        let struts = vec![
+        brace.seat_on_strut = Some(1);
+        let with = vec![
             host(),
             member(1, StrutKind::Arm, 19, Landing::Strut { id: 0, layer: 19 }, vec![0.85; 30]),
             brace,
         ];
-        let (profiles, raised) = drawn_profiles(&struts, taper());
-        let drawn = &profiles[0];
+        let without: Vec<_> = with.iter().take(2).cloned().collect();
+        let (profiles, raised) = drawn_profiles(&with, taper());
+        let (bare, _) = drawn_profiles(&without, taper());
         assert_eq!(raised.load_steps_tapered, 1, "the brace's landing makes no cone");
-        // Raised to 0.40 at and below the joint (slot 30), then straight back
-        // to the 0.25 mm ledger: the brace's shoulder, untouched.
-        assert!((drawn[30] - 0.40).abs() < 1e-12);
-        assert!((drawn[31] - 0.25).abs() < 1e-12);
+        assert_eq!(raised.members, 0, "no member is raised to a brace");
+        assert_eq!(profiles[0], bare[0], "the host is drawn as if the brace were not there");
+        assert_eq!(profiles[1], bare[1], "so is the arm the brace seats on");
+        assert!((profiles[0][30] - 0.25).abs() < 1e-12, "no shoulder at the joint");
     }
 
     /// A lander on the host's head is booked one slot under its contact; the

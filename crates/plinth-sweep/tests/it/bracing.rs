@@ -649,7 +649,17 @@ fn every_needed_tie_holds_in_every_direction_on_the_brace_pair() {
             &harness::at_path_fixture_seating(policy().without_lip_seat()),
         )
     });
-    assert_ties_hold_in_every_direction("brace pair, lip-seat rule off", without_lip_seat, &law());
+    //
+    // RE-SCOPED 2026-10-03 (fix/brace-window-cap, Craig's interim rules R2,
+    // R7 + D5, D9): the lip-seat-off field is graded on the lane's contract
+    // too. Under R2 its post 10 (a 700-layer, 35 mm post) keeps two crosses
+    // in one plane and nothing across it: 5 needed ties graded, 1 unheld
+    // (measured 2026-10-03). The posts stand in a line, and the study names
+    // exactly this: "posts in a line can never be held across the line by
+    // crosses between themselves" (`bracing-mechanics.md` §3); across the
+    // line it takes thickening, a mast or a warning. The claim kept here is
+    // that every such tie is NAMED by a warning (emit and warn).
+    assert_unheld_ties_are_warned("brace pair, lip-seat rule off", without_lip_seat);
     assert_unheld_ties_are_warned("brace pair", brace_pair());
 }
 

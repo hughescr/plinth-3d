@@ -653,6 +653,20 @@ pub struct SweepPolicy {
     /// the pre-2026-09-06 per-cell occupancy test, and watches overlapping root
     /// pairs reappear on the finished field.
     pub slenderness_mast_root_clearance: bool,
+    /// Rule R2 (Craig ruling 2026-10-03, interim pending the slenderness
+    /// coupon): a brace is never thicker than the thinner post it joins, so
+    /// its reach is at most `S` times that post's radius; the brace-junction
+    /// raise is deleted with it. **On in production.** The drill turns it off
+    /// and braces thicker than their posts come back, drawn thicker than the
+    /// posts they join.
+    pub slenderness_brace_cap: bool,
+    /// Rules R7 + D5 and D9 (Craig ruling 2026-10-03, interim pending the
+    /// slenderness coupon): a cross is built only where it costs less resin
+    /// than thickening the run, and never past its pair's two-post ceiling;
+    /// past the ceiling the run is thickened into the window.
+    /// **On in production.** The drill turns it off and every admissible
+    /// cross is built again, as before.
+    pub slenderness_brace_window: bool,
     /// `FINAL_CLEARANCE_GAP_MM`, the owner's field-ruled 0.3 mm final hard
     /// limit (2026-08-22) between a support solid and the model. The head-join
     /// rule holds the section that carries a lander's load this far from a
@@ -797,6 +811,8 @@ impl SweepPolicy {
             slenderness_thicken: true,
             slenderness_mast: true,
             slenderness_mast_root_clearance: true,
+            slenderness_brace_cap: true,
+            slenderness_brace_window: true,
             final_clearance_gap_mm: *evidence.final_clearance_gap_mm().value(),
             head_join: true,
             lip_seat: true,
@@ -1104,6 +1120,24 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_load_step_taper(mut self) -> Self {
         self.load_step_taper = false;
+        self
+    }
+
+    /// Let a brace be thicker than the posts it joins (rule R2 off). With the
+    /// junction raise deleted (2026-10-03) such a brace is drawn thicker than
+    /// its post. **Sabotage only**; nothing in the pipeline sets it.
+    #[must_use]
+    pub const fn without_brace_cap(mut self) -> Self {
+        self.slenderness_brace_cap = false;
+        self
+    }
+
+    /// Build every admissible cross, as before 2026-10-03: no resin window,
+    /// no two-post ceiling (rules R7 + D5 and D9 off). **Sabotage only**;
+    /// nothing in the pipeline sets it.
+    #[must_use]
+    pub const fn without_brace_window(mut self) -> Self {
+        self.slenderness_brace_window = false;
         self
     }
 
@@ -1777,6 +1811,8 @@ pub fn run_sweep_with_drains(
         x_allowed: policy.x_allowed,
         seat_faces: seat_face_rule,
         load_step_taper,
+        brace_cap: policy.slenderness_brace_cap,
+        brace_window: policy.slenderness_brace_window,
     };
 
     // --- stranded seats: a stranded contact is a tip, not a new root -------
@@ -2132,6 +2168,12 @@ pub fn run_sweep_with_drains(
     // lengths belong to the arms this file actually contains.
     let slenderness_after =
         slenderness::unbraced_runs_drawn(&grid, &struts, height, &slenderness_law, load_step_taper);
+    // R2 ON THE FINISHED FIELD (2026-10-03): braces drawn thicker than a post
+    // at a joint, on the profiles the lowering draws. Counted, never assumed.
+    slenderness_outcome.braces_thicker_than_a_post = slenderness::braces_thicker_than_a_post(
+        &struts,
+        &adapter::drawn_profiles(&struts, load_step_taper).0,
+    );
     slenderness_outcome.longest_run_mm = 0.0;
     slenderness_outcome.longest_run_limit_mm = 0.0;
     // WHAT THE MAST'S PLACEMENT-TIME RADIUS GOT WRONG, measured on the sized

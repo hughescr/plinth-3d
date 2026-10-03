@@ -16,6 +16,7 @@
 mod harness;
 
 mod brace_not_in_flare;
+mod brace_window_cap;
 mod bracing;
 mod bracing_rework;
 mod chitubox_geometry;

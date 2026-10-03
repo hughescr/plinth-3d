@@ -180,11 +180,18 @@ fn no_mast_brace_end_on_the_laid_tube_lies_inside_a_root_flare() {
     // with the lip-seat rule off instead it places 2 (measured,
     // `lanes/morel-long-posts/r12/diag-masts*.log`). The cut takes away creep
     // arms the masts stood among; the flare rule reads no creep.
+    //
+    // RE-PINNED 2026-10-03 (fix/brace-window-cap, rule R2): graded with the
+    // brace cap off (`without_brace_cap`). Under R2 a mast's diagonal may be
+    // no thicker than the arm it ties, and the laid tube's thin arms refuse
+    // every mast cell this configuration offered (0 masts, 267 bands dropped,
+    // measured 2026-10-03). The flare rule reads no brace radius.
     let policy = harness::at_path_fixture_seating(SweepPolicy {
         slenderness_thicken: false,
         ..policy()
     })
-    .without_creep_overhang_cut();
+    .without_creep_overhang_cut()
+    .without_brace_cap();
     let plan = sweep_with(&mesh, 0.0, &policy);
     let flares = emitted_flares(&plan);
     let lane = &plan.report.slenderness_lane;

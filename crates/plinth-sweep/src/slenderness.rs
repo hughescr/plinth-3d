@@ -113,6 +113,28 @@
 //!   holds never makes the cross unneeded ([`prune_unneeded_crosses`]).
 //! * Every brace-band refusal is counted under one reason ([`BandRefusals`]).
 //!
+//! # Craig's rulings of 2026-10-03 (interim, pending the slenderness coupon)
+//!
+//! From the bracing force study (`field-2026-09-28/bracing-mechanics.md`,
+//! revision 2, and its cross-family challenge):
+//!
+//! * **R2.** A brace is never thicker than the thinner post it joins, so its
+//!   reach is at most `S` times that post's radius ([`plan_cross`]). The
+//!   brace-junction raise — the post drawn at the brace's radius from the
+//!   joint down to its root — is deleted (`adapter::drawn_profiles`): it held
+//!   up nothing, since a brace carries no peel load, and it drew a fat post
+//!   with a thin top.
+//! * **R7 + D5.** Brace inside a window, thicken outside it: a cross is built
+//!   only where it costs less resin than thickening the run
+//!   ([`cross_charge_mm3`]), so a run a little over its limit is thickened
+//!   and a long skinny one is braced. The window's edges are that comparison
+//!   for the actual pair, not a constant.
+//! * **D9.** Past a pair's two-post ceiling ([`pair_ceiling_ratio`]) no band
+//!   is added between that pair: a wider partner is tried, or the run is
+//!   thickened into the window ([`thicken_into_the_window`]).
+//! * Unchanged: the brace angle (the saturated overhang angle, 57.5° from
+//!   vertical) and "every direction before seating".
+//!
 //! **Every remedy is attempted only for a run that is over the limit NOW.**
 //! The member's runs are re-measured from the live strut set after every
 //! remedy that touches it, so no partner builds a second cross on a pair an
@@ -475,7 +497,9 @@ pub struct SlendernessOutcome {
     /// Mast cells whose braced panel would hold only with a mast THICKER than
     /// the member it braces: a second, stiffer post is not a brace, so the
     /// cell is refused (and, when no cell is left, the run goes to the
-    /// warning).
+    /// warning). Since 2026-10-03 (R2) also cells whose diagonal would be
+    /// thicker than the member at the tie: the mast is sized up to its
+    /// diagonal, the member is not.
     pub mast_cells_refused_thicker_than_member: usize,
     /// Masts placed at a cell that needed a thinner mast than the nearest
     /// admissible cell would have: the smallest mast wins, not the nearest.
@@ -516,6 +540,32 @@ pub struct SlendernessOutcome {
     /// reached below the plate. Path-hit witnesses.
     pub brace_bands_deepened_for_their_diagonals: usize,
     pub brace_bands_moved_up_off_the_plate: usize,
+    /// **BRACE WINDOW** (R7 + D5, Craig ruling 2026-10-03): crosses that
+    /// passed every geometric test and were NOT built because thickening the
+    /// run costs less resin than the crosses it would need
+    /// ([`cross_charge_mm3`]); runs then thickened with a cross refused that
+    /// way; and crosses built with BOTH posts needing the tie (the cross is
+    /// charged half to each). Path-hit witnesses.
+    pub crosses_refused_thicken_cheaper: usize,
+    pub thickened_where_cheaper_than_bracing: usize,
+    pub crosses_shared_by_both_posts: usize,
+    /// The lowest `L / limit` at which a cross was built while thickening
+    /// was admissible (the window's lower edge as the field met it), and the
+    /// highest at which a run was thickened because that was cheaper. `0`
+    /// where none.
+    pub window_lowest_braced_ratio: f64,
+    pub window_highest_thickened_ratio: f64,
+    /// **TWO-POST CEILING** (D9, 2026-10-03): crosses refused because the run
+    /// is longer than its pair can hold with any number of bands
+    /// ([`pair_ceiling_ratio`]); and runs thickened only INTO the window of
+    /// such a pair (to its ceiling), to be braced after. Path-hit witnesses.
+    pub crosses_refused_past_pair_ceiling: usize,
+    pub members_thickened_into_the_window: usize,
+    /// **R2 on the finished field** (2026-10-03): braces drawn thicker than a
+    /// post at one of their joints. The band rule makes this zero when the
+    /// posts' drawn sections do not shrink after the band is planned; it is
+    /// counted on the emitted profiles, never assumed. A WARNING quantity.
+    pub braces_thicker_than_a_post: usize,
 }
 
 /// Why a planned `|X|` band was refused, one count per reason; every refusal
@@ -551,13 +601,18 @@ pub struct BandRefusals {
     /// `brace_bands_refused_by_member`).
     pub solid_model: usize,
     pub solid_member: usize,
+    /// **R2** (2026-10-03): a diagonal of the band would be thicker than the
+    /// thinner of the two posts at one of its joints, i.e. it would reach
+    /// farther than `S` times that post's radius.
+    pub thicker_than_post: usize,
 }
 
 impl BandRefusals {
     /// Every refusal counted.
     #[must_use]
     pub const fn total(&self) -> usize {
-        self.no_gap
+        self.thicker_than_post
+            + self.no_gap
             + self.below_plate
             + self.in_flare
             + self.off_a_post
@@ -1414,6 +1469,20 @@ pub struct SlendernessContext<'a> {
     /// ([`crate::adapter::LoadStepTaper`]): the lane, the lip-seat rule and the
     /// head-join rule read the same drawn profile the file gets.
     pub load_step_taper: crate::adapter::LoadStepTaper,
+    /// **R2** (Craig ruling 2026-10-03, interim pending the slenderness
+    /// coupon): a brace is never thicker than the thinner post it joins, so
+    /// its reach is at most `S` times that post's radius. **On in
+    /// production.** Sabotage knob: off, a band is not refused for a diagonal
+    /// thicker than a post (and, the junction raise being deleted, such a
+    /// diagonal is then drawn thicker than its post).
+    pub brace_cap: bool,
+    /// **R7 + D5 and D9** (Craig ruling 2026-10-03, interim pending the
+    /// slenderness coupon): a cross is built only inside the window where it
+    /// costs less resin than thickening, and never past the two-post ceiling
+    /// of its pair; past the ceiling the run is thickened into the window.
+    /// **On in production.** Sabotage knob: off, every admissible cross is
+    /// built, as before 2026-10-03.
+    pub brace_window: bool,
 }
 
 /// Remedy 1 of the ladder, on a sized field, in place: the forced merges.
@@ -1683,24 +1752,51 @@ pub fn apply_ties(
                     law,
                     k,
                 );
+                let mut miss = CrossMiss::default();
                 if context.brace {
                     if let Some(at) = shared {
-                        if tie_by_crosses(context, &mut state, struts, &run, at, false, outcome) {
-                            outcome.crosses_at_an_existing_tie_layer += 1;
-                            applied += 1;
-                            continue;
+                        match tie_by_crosses(context, &mut state, struts, &run, at, false, outcome)
+                        {
+                            Ok(()) => {
+                                outcome.crosses_at_an_existing_tie_layer += 1;
+                                applied += 1;
+                                continue;
+                            }
+                            Err(missed) => miss.merge(missed),
                         }
                     }
                     if let Some(k) = k {
-                        if tie_by_crosses(context, &mut state, struts, &run, k, true, outcome) {
+                        match tie_by_crosses(context, &mut state, struts, &run, k, true, outcome) {
+                            Ok(()) => {
+                                applied += 1;
+                                continue;
+                            }
+                            Err(missed) => miss.merge(missed),
+                        }
+                    }
+                }
+                if context.thicken {
+                    // PAST THE TWO-POST CEILING (D9): no more bands between
+                    // that pair; thicken the run INTO the pair's window, then
+                    // brace, where that costs less resin than thickening it
+                    // all the way (or where full thickening is refused).
+                    if let Some(past) = miss.past_ceiling {
+                        if thicken_into_the_window(context, &mut state, struts, &run, past, outcome)
+                        {
                             applied += 1;
                             continue;
                         }
                     }
-                }
-                if context.thicken && thicken(context, &mut state, struts, &run, outcome) {
-                    applied += 1;
-                    continue;
+                    if thicken(context, &mut state, struts, &run, outcome) {
+                        if miss.thicken_cheaper {
+                            outcome.thickened_where_cheaper_than_bracing += 1;
+                            let ratio = run.length_mm / run.limit_mm;
+                            outcome.window_highest_thickened_ratio =
+                                outcome.window_highest_thickened_ratio.max(ratio);
+                        }
+                        applied += 1;
+                        continue;
+                    }
                 }
                 if context.mast {
                     // A MAST HAS ITS OWN TIE LAYER (fix/mast-tie-and-overlap-factor,
@@ -1828,12 +1924,8 @@ fn landing_depth(struts: &[SweepStrut], strut: &SweepStrut) -> usize {
 /// before this pass's thickenings, in the directions it holds; a thickening
 /// sized for the direction across the cross never takes the cross out.
 ///
-/// The drawn profiles are read as they stand. Where a removed diagonal was
-/// THICKER than its post, the post's profile still carries the junction raise
-/// that diagonal made, so the post is judged a little stiffer than it will
-/// print; the brace rule makes such a diagonal rare, and the down-sweep and
-/// the next pass measure the field again from scratch, so a run this leaves
-/// over the limit is tied then or named as a warning.
+/// The drawn profiles are read as they stand; a diagonal raises no post
+/// (R2, 2026-10-03), so taking one out leaves every post's section as it is.
 ///
 /// Members this pass added sit at the tail of `struts` and nothing older
 /// refers to them, so the tail is compacted in place and its ids remapped.
@@ -1896,12 +1988,12 @@ fn prune_unneeded_crosses(
         };
         // THE POST AS IT WOULD BE DRAWN WITHOUT THIS CROSS: its ledger, raised
         // by every branch that still joins it (the lowering's junction clause,
-        // one post at a time), and not by the two diagonals being judged. A
-        // diagonal thicker than its post — common where the area law leaves a
-        // post at the minimum tip — raised the post it joined, and judging the
-        // post on that raise would take out a cross the post still needs.
-        // `profiles` is `state.profiles` (as drawn now) or `state.unthickened`
-        // (as drawn without this pass's thickenings).
+        // one post at a time). A brace raises nothing since 2026-10-03 (R2:
+        // it is never thicker than its posts), so no diagonal, the two being
+        // judged or any other, enters the clause, as in
+        // `adapter::drawn_profiles`. `profiles` is `state.profiles` (as drawn
+        // now) or `state.unthickened` (as drawn without this pass's
+        // thickenings).
         let drawn_without = |post: u32, profiles: &[Vec<f64>]| {
             let host = &struts[post as usize];
             let mut profile = if host.radius_mm.is_empty() {
@@ -1910,7 +2002,12 @@ fn prune_unneeded_crosses(
                 host.radius_mm.clone()
             };
             for (index, branch) in struts.iter().enumerate() {
-                if removed[index] || index == one || index == two || !live(branch) {
+                if removed[index]
+                    || index == one
+                    || index == two
+                    || !live(branch)
+                    || branch.kind == StrutKind::Brace
+                {
                     continue;
                 }
                 let mut joints: Vec<(usize, Option<f64>)> = Vec::new();
@@ -2291,6 +2388,14 @@ struct CrossPlan {
     first: Vec<u32>,
     second: Vec<u32>,
     plane: Option<Plane>,
+    /// The two diagonals' resin, `π r_b² (ℓ₁ + ℓ₂)`: what the brace window
+    /// weighs against thickening.
+    volume_mm3: f64,
+    /// How the band got where it is (counted when it is built, not when it
+    /// is planned: a planned band the window refuses is not a built one).
+    widened: bool,
+    moved: bool,
+    moved_off_the_plate: bool,
 }
 
 /// Remedy 2: tie the run's member at layer `k` with ONE cross whose plane
@@ -2307,6 +2412,30 @@ struct CrossPlan {
 /// cross that is not needed. Every partner in reach is tried, nearest first
 /// (the stilt plate's arm 81: its nearest band crossed a leg, and arm 65,
 /// 0.008 mm further away, was never tried).
+///
+/// **THE BRACE WINDOW** (R7 + D5 and D9 of `bracing-mechanics.md`, Craig
+/// ruling 2026-10-03, interim pending the slenderness coupon). A cross that
+/// passes every geometric test is still not built when
+///
+/// * the run is longer than the pair's TWO-POST CEILING
+///   ([`pair_ceiling_ratio`]): however many bands two posts share, they bend
+///   together as one beam, and past that length no band count holds them.
+///   The partner is skipped (a farther or wider partner has a higher
+///   ceiling: "brace to a wider frame"), and the pair is returned so the run
+///   can be thickened into its window ([`thicken_into_the_window`]);
+/// * thickening the run costs less resin than the crosses it would need,
+///   charged to this run ([`cross_charge_mm3`]) against the resin the thicken
+///   rung would add for it (the same plan the rung would commit,
+///   [`plan_thicken`]). Where thickening is refused (past the maximum radius,
+///   or a root lap) or switched off, there is nothing to compare and the
+///   cross is built.
+///
+/// Neither is a tuned number: the ceiling is the two posts' composite
+/// section, and the lower edge is where the two resins are equal for THIS
+/// pair (the study's 1.5× for a shared cross and 2.5× for a cross one post
+/// needs are what that comparison gives for its ideal geometry).
+///
+/// Returns `Ok(())` when a cross was built, or what the window refused.
 fn tie_by_crosses(
     context: &SlendernessContext<'_>,
     state: &mut TieState,
@@ -2315,11 +2444,17 @@ fn tie_by_crosses(
     k: usize,
     may_move: bool,
     outcome: &mut SlendernessOutcome,
-) -> bool {
+) -> Result<(), CrossMiss> {
     let id = run.strut_id;
+    let mut miss = CrossMiss::default();
     let Some(here) = struts.get(id as usize).map(|strut| strut.cell_at(k)) else {
-        return false;
+        return Err(miss);
     };
+    let ratio = run.length_mm / run.limit_mm;
+    // The resin thickening this run would add, planned once and only when a
+    // cross gets far enough to be compared with it; `None` where the rung is
+    // off or refused.
+    let mut thicken_mm3: Option<Option<f64>> = None;
     let candidates = partner_candidates(context, struts, id, k);
     for (rank, &(partner, cell)) in candidates.iter().enumerate() {
         let Some(plane) = plane_between(context.grid, here, cell) else {
@@ -2336,6 +2471,58 @@ fn tie_by_crosses(
         ) else {
             continue;
         };
+        let mut shared = false;
+        if context.brace_window {
+            let partner_mm = struts
+                .get(partner as usize)
+                .and_then(|other| drawn_at(other, &state.profiles[partner as usize], plan.k))
+                .unwrap_or(0.0);
+            let gap_mm = crate::cell_distance_mm(context.grid, plan.a_top, plan.b_top);
+            let ceiling = pair_ceiling_ratio(run.radius_mm, partner_mm, gap_mm);
+            shared = partner_needs_the_tie(context, state, struts, partner, plan.k, plan.plane);
+            let planes = if run.sway_deg.is_none() { 2 } else { 1 };
+            if ratio > ceiling * (1.0 + RATIO_NOISE) {
+                outcome.crosses_refused_past_pair_ceiling += 1;
+                let past = PastCeiling {
+                    gap_mm,
+                    partner_mm,
+                    ceiling,
+                    cross_mm3: plan.volume_mm3,
+                    shared,
+                    planes,
+                };
+                if miss.past_ceiling.is_none_or(|known| past.ceiling > known.ceiling) {
+                    miss.past_ceiling = Some(past);
+                }
+                continue;
+            }
+            let thicken_cost = *thicken_mm3.get_or_insert_with(|| {
+                if !context.thicken {
+                    return None;
+                }
+                let fits = |radius: f64| run.length_mm <= context.law.max_unbraced_mm(radius);
+                match plan_thicken(context, state, struts, run, &fits) {
+                    Some(Ok(plan)) => Some(plan.added_mm3),
+                    _ => None,
+                }
+            });
+            if let Some(thicken_cost) = thicken_cost {
+                let charge = cross_charge_mm3(plan.volume_mm3, shared, planes, extra_ties(run).max(1));
+                if charge > thicken_cost {
+                    outcome.crosses_refused_thicken_cheaper += 1;
+                    miss.thicken_cheaper = true;
+                    continue;
+                }
+                if outcome.window_lowest_braced_ratio <= 0.0
+                    || ratio < outcome.window_lowest_braced_ratio
+                {
+                    outcome.window_lowest_braced_ratio = ratio;
+                }
+            }
+        }
+        if shared {
+            outcome.crosses_shared_by_both_posts += 1;
+        }
         if rank > 0 {
             outcome.crosses_to_a_later_partner += 1;
         }
@@ -2346,89 +2533,194 @@ fn tie_by_crosses(
         }
         commit_cross(context, state, struts, plan, outcome);
         outcome.braces_added += 1;
-        return true;
+        return Ok(());
     }
-    false
+    Err(miss)
 }
 
-/// The junction clause from one raised joint DOWN: `member`'s drawn profile is
-/// raised to at least `radius` from `layer` to its root, then each trunk it
-/// stands on is raised to the member's drawn root from the member's landing to
-/// ITS root, and so on to the member that meets the plate or the model — the
-/// same clause, on the same slots, that [`crate::adapter::drawn_profiles`]
-/// applies for the lowering. Returns the index of that last member (the foot).
-/// A landing cycle, which placement never builds, stops the walk.
-fn raise_to_the_foot(
-    struts: &[SweepStrut],
-    profiles: &mut [Vec<f64>],
-    member: usize,
-    layer: usize,
-    radius: f64,
-) -> usize {
-    let (mut at, mut layer, mut radius) = (member, layer, radius);
-    for _ in 0..=struts.len() {
-        let Some(strut) = struts.get(at) else {
-            return at;
-        };
-        if let Some(profile) = profiles.get_mut(at) {
-            let top = layer.saturating_sub(strut.k_bottom);
-            for radius_here in profile.iter_mut().take(top + 1) {
-                *radius_here = radius_here.max(radius);
+/// Relative float noise on a comparison of two quantities a construction
+/// makes equal: a run thickened INTO a pair's window by bisection lands
+/// exactly on its ceiling, and a diagonal sized to its post exactly meets
+/// it; neither must read as a hair past when measured again. Not a physical
+/// tolerance.
+const RATIO_NOISE: f64 = 1.0e-9;
+
+/// What the brace window refused for one run, so the ladder can pick the
+/// remedy the rules name for it.
+#[derive(Clone, Copy, Debug, Default)]
+struct CrossMiss {
+    /// A cross was refused ONLY because thickening costs less resin.
+    thicken_cheaper: bool,
+    /// The pair with the HIGHEST ceiling among those the run is past: the one
+    /// it can be thickened into the window of with the least resin.
+    past_ceiling: Option<PastCeiling>,
+}
+
+impl CrossMiss {
+    fn merge(&mut self, other: Self) {
+        self.thicken_cheaper |= other.thicken_cheaper;
+        if let Some(past) = other.past_ceiling {
+            if self.past_ceiling.is_none_or(|known| past.ceiling > known.ceiling) {
+                self.past_ceiling = Some(past);
             }
-            radius = profile.first().copied().unwrap_or(radius);
         }
-        let Landing::Strut { id, .. } = strut.landing else {
-            return at;
-        };
-        let host = id as usize;
-        if host == at || host >= struts.len() {
-            return at;
-        }
-        layer = strut.k_bottom;
-        at = host;
     }
-    at
 }
 
-/// Grow a plate foot's disc in `state.placed_roots` to the root it is now
-/// DRAWN with ([`plinth_support::drawn_root_radius_mm`] of its live profile),
-/// counting the growth and whether the grown disc laps another root.
-fn grow_foot_disc(
+/// A pair a run is past the two-post ceiling of (D9), as measured when its
+/// cross was refused.
+#[derive(Clone, Copy, Debug)]
+struct PastCeiling {
+    /// The gap between the posts' axes at the band top, and the partner's
+    /// drawn radius there.
+    gap_mm: f64,
+    partner_mm: f64,
+    /// The ceiling, as `L / limit`, at the run's radius then.
+    ceiling: f64,
+    /// The refused cross's own resin, whether both posts needed it, and the
+    /// planes the run needs: what bracing the pair would charge the run once
+    /// it is inside the window.
+    cross_mm3: f64,
+    shared: bool,
+    planes: usize,
+}
+
+/// **D9, the two-post ceiling**: the longest run, as a multiple of its own
+/// limit `S · r_a`, that two posts can hold together with ANY number of
+/// bands between them.
+///
+/// However many bands they share, two posts at most bend as ONE composite
+/// beam: sections `I = π r⁴ / 4`, areas `A = π r²`, axes `s` apart, so
+/// `I_c = I_a + I_b + (A_a A_b / (A_a + A_b)) s²`. Both carry the S-law's
+/// drag, `2q` together, so the pair sways `2q L⁴ / (8 E I_c)` against the
+/// post's own `q L⁴ / (8 E I_a)`, and the one-pixel length grows by
+///
+/// ```text
+/// λ_ceiling = (I_c / (2 I_a))^(1/4)  =  (1 + s² / r²)^(1/4)  ≈  √(s / r)   (equal posts)
+/// ```
+///
+/// (`bracing-mechanics.md` §3, "a two-post ceiling": 3.8 for its thin pair,
+/// r 0.15 mm at 2.2 mm, and 3.5 for its mid pair, r 0.4 mm at 5 mm). This
+/// is the INFINITE-band bound; with the bands the engine actually places the
+/// study's frame holds 3.3-3.6, so this ceiling errs toward bracing. No
+/// constant: `S`, `E` and `q` cancel.
+#[must_use]
+pub fn pair_ceiling_ratio(run_radius_mm: f64, partner_radius_mm: f64, gap_mm: f64) -> f64 {
+    let (a, b) = (run_radius_mm, partner_radius_mm);
+    if !(a.is_finite() && a > 0.0 && b.is_finite() && b > 0.0 && gap_mm.is_finite()) {
+        return 1.0;
+    }
+    let (a2, b2) = (a * a, b * b);
+    // `I / (π/4)` and `A / π`: the common factors cancel in the ratio.
+    let composite = a2 * a2 + b2 * b2 + 4.0 * gap_mm * gap_mm * a2 * b2 / (a2 + b2);
+    (composite / (2.0 * a2 * a2)).powf(0.25)
+}
+
+/// **R7 + D5**: the resin one cross charges the run it ties
+/// (`bracing-mechanics.md` §5): `c · P · n` diagonals' worth, where one
+/// diagonal is half the cross.
+///
+/// * `c` is 1 when the partner ALSO needs the tie (each post pays for one
+///   diagonal) and 2 when only this run does;
+/// * `P` is the planes the run needs: 2 for a run no cross holds yet (every
+///   direction), 1 for a further plane;
+/// * `n` is the bands the run needs, `⌈L / limit⌉ − 1` ([`extra_ties`]).
+///
+/// Compared with the resin the thicken rung would add for the same run; the
+/// cross is built only where it is not dearer.
+#[must_use]
+pub fn cross_charge_mm3(cross_mm3: f64, shared: bool, planes: usize, bands: usize) -> f64 {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "plane and band counts are small integers, exact in f64"
+    )]
+    let count = (planes * bands) as f64;
+    let per_post = if shared { 0.5 } else { 1.0 };
+    cross_mm3 * per_post * count
+}
+
+/// The radius of the diagonal an `|X|` across `gap_mm` between two straight
+/// posts needs: its band is the overhang law's fewest layers for that move
+/// (`LeanLaw::layers_to_reach`), its length the hypotenuse, and its radius
+/// the brace rule's ([`SlendernessLaw::brace_radius_mm`]) — what
+/// [`plan_cross`] computes for posts that do not lean.
+fn diagonal_radius_mm(context: &SlendernessContext<'_>, gap_mm: f64) -> f64 {
+    let depth = context.lean.layers_to_reach(gap_mm);
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a layer count bounded by the plan's own layer count is exact in f64"
+    )]
+    let rise_mm = depth as f64 * context.layer_height_mm;
+    context.law.brace_radius_mm(rise_mm.hypot(gap_mm))
+}
+
+/// **R2 on a finished field**: how many braces are drawn thicker than a post
+/// at one of their joints — the host they seat on, at their top layer, or
+/// the member they land on, at their bottom layer — on the drawn `profiles`
+/// (`adapter::drawn_profiles`, slot by slot from each member's own foot).
+/// One pass over the struts.
+pub(crate) fn braces_thicker_than_a_post(struts: &[SweepStrut], profiles: &[Vec<f64>]) -> usize {
+    let at = |id: u32, layer: usize| {
+        let index = id as usize;
+        let strut = struts.get(index)?;
+        drawn_at(strut, profiles.get(index)?, layer)
+    };
+    struts
+        .iter()
+        .enumerate()
+        .filter(|(_, strut)| strut.kind == StrutKind::Brace && live(strut))
+        .filter(|&(index, strut)| {
+            let own = profiles
+                .get(index)
+                .and_then(|profile| profile.iter().copied().reduce(f64::max))
+                .unwrap_or(0.0)
+                .max(strut.min_radius_mm);
+            let seat = strut.seat_on_strut.and_then(|host| at(host, strut.k_top));
+            let base = match strut.landing {
+                Landing::Strut { id, .. } => at(id, strut.k_bottom),
+                Landing::Plate | Landing::Model { .. } => None,
+            };
+            [seat, base]
+                .into_iter()
+                .flatten()
+                .any(|post| own > post * (1.0 + RATIO_NOISE))
+        })
+        .count()
+}
+
+/// Whether `partner` itself needs a tie at `k` in `plane`: one of its runs is
+/// over its limit, has `k` strictly inside it, and sways in a direction the
+/// plane holds (or is measured in every direction). Then the cross serves
+/// both posts and is charged half to each (`c = 1`).
+fn partner_needs_the_tie(
     context: &SlendernessContext<'_>,
-    state: &mut TieState,
+    state: &TieState,
     struts: &[SweepStrut],
-    foot: usize,
-    outcome: &mut SlendernessOutcome,
-) {
-    let Some(strut) = struts.get(foot) else {
-        return;
+    partner: u32,
+    k: usize,
+    plane: Option<Plane>,
+) -> bool {
+    let index = partner as usize;
+    let Some(strut) = struts.get(index) else {
+        return false;
     };
-    if !matches!(strut.landing, Landing::Plate) || strut.kind == StrutKind::Brace {
-        return;
-    }
-    let Some(profile) = state.profiles.get(foot) else {
-        return;
-    };
-    let root = plinth_support::drawn_root_radius_mm(profile, strut.tip_radius_mm());
-    let flared = root * flare_of(context);
-    let Some(slot) = crate::congestion::disc_slot(&state.placed_roots, strut.id) else {
-        return;
-    };
-    if crate::congestion::disc_radius_mm(&state.placed_roots, slot)
-        .is_some_and(|known| flared > known)
-    {
-        crate::congestion::grow_disc(&mut state.placed_roots, slot, flared, root);
-        outcome.cross_roots_grown += 1;
-        if !crate::congestion::clear_of_placed(
-            context.grid,
-            strut.base_cell(),
-            flared,
-            &state.placed_roots,
-            Some(slot),
-        ) {
-            outcome.cross_roots_lapping += 1;
-        }
-    }
+    member_runs(
+        context.grid,
+        strut,
+        &state.ties[index],
+        &state.profiles[index],
+        context.layer_height_mm,
+        context.law,
+    )
+    .iter()
+    .any(|run| {
+        run.over_limit()
+            && run.k_lo < k
+            && k < run.k_top
+            && run
+                .sway_deg
+                .is_none_or(|sway| plane.is_none_or(|plane| holds(plane, sway)))
+    })
 }
 
 /// Build a planned cross and bring every list the tie rungs read up to date.
@@ -2441,6 +2733,14 @@ fn commit_cross(
 ) {
     let grid = context.grid;
     let span = plan.k - plan.k_lo;
+    if plan.widened {
+        outcome.brace_bands_deepened_for_their_diagonals += 1;
+    }
+    if plan.moved_off_the_plate {
+        outcome.brace_bands_moved_up_off_the_plate += 1;
+    } else if plan.moved {
+        outcome.brace_bands_moved_above_flare += 1;
+    }
     let (a, b, k, k_lo, radius, plane) = (
         plan.a,
         plan.b,
@@ -2489,17 +2789,12 @@ fn commit_cross(
                 band_top: false,
             });
         }
-        // The junction clause the lowering applies: the post is drawn at
-        // least as thick as the diagonal, from the joint down to its root —
-        // and every trunk it stands on in turn, down to the plate or the model
-        // (`adapter::drawn_profiles` repeats the clause to a fixed point).
-        let foot = raise_to_the_foot(struts, &mut state.profiles, post as usize, k, radius);
-        raise_to_the_foot(struts, &mut state.unthickened, post as usize, k, radius);
-        // THE FOOT ON THE PLATE GROWS WITH IT (review-fixes 2026-09-29): the
-        // lowering flares the drawn root, so the disc every later mast and
-        // thickening is cleared against is grown to it here. A foot that now
-        // laps another root is counted: a warning on the emitted file.
-        grow_foot_disc(context, state, struts, foot, outcome);
+        // NO JUNCTION RAISE (R2, 2026-10-03): the diagonal is no thicker than
+        // either post at its band (`plan_cross` refuses it otherwise), so the
+        // post's drawn profile, and its root disc on the plate, stay as they
+        // are. Until that date the post was raised to the diagonal's radius
+        // from the joint down to its root, and every trunk under it, and its
+        // plate disc grown to match (`adapter::drawn_profiles`).
     }
     for _ in 0..2 {
         state.ties.push(Vec::new());
@@ -2556,11 +2851,170 @@ fn thicken(
     outcome: &mut SlendernessOutcome,
 ) -> bool {
     let law = context.law;
+    let fits = |radius: f64| run.length_mm <= law.max_unbraced_mm(radius);
+    thicken_to(context, state, struts, run, &fits, outcome)
+}
+
+/// **D9: thicken INTO THE WINDOW of a pair the run is past the ceiling of**
+/// (Craig ruling 2026-10-03, interim pending the slenderness coupon).
+///
+/// "Past the ceiling, two thin posts cannot hold each other. Thicken until
+/// `λ` drops into the window and then brace" (`bracing-mechanics.md` §5).
+/// The root is the smallest that brings the run's `L / (S · r_eq)` down to
+/// the pair's ceiling at that `r_eq` ([`pair_ceiling_ratio`] falls as the run
+/// thickens, more slowly than `λ` does, so the test is monotone and the same
+/// bisection finds it); the next attempt on the member then braces the pair.
+///
+/// Applied only where it costs less resin than thickening the run all the
+/// way, counting the crosses the pair will then need ([`cross_charge_mm3`] at
+/// the band count the ceiling leaves), or where full thickening is refused.
+/// A partial root that adds nothing is not applied (the loop must end).
+fn thicken_into_the_window(
+    context: &SlendernessContext<'_>,
+    state: &mut TieState,
+    struts: &mut [SweepStrut],
+    run: &UnbracedRun,
+    past: PastCeiling,
+    outcome: &mut SlendernessOutcome,
+) -> bool {
+    if !context.brace_window {
+        return false;
+    }
+    let law = context.law;
+    let into = |radius: f64| {
+        run.length_mm
+            <= law.max_unbraced_mm(radius) * pair_ceiling_ratio(radius, past.partner_mm, past.gap_mm)
+    };
+    let Some(Ok(partial)) = plan_thicken(context, state, struts, run, &into) else {
+        return false;
+    };
+    if partial.added_mm3 <= 0.0 {
+        return false;
+    }
+    let full = |radius: f64| run.length_mm <= law.max_unbraced_mm(radius);
+    if let Some(Ok(whole)) = plan_thicken(context, state, struts, run, &full) {
+        // The bands the run needs once it stands at the pair's ceiling.
+        let at_ceiling = UnbracedRun {
+            length_mm: run.limit_mm * past.ceiling,
+            ..*run
+        };
+        let braces = cross_charge_mm3(
+            past.cross_mm3,
+            past.shared,
+            past.planes,
+            extra_ties(&at_ceiling).max(1),
+        );
+        if whole.added_mm3 <= partial.added_mm3 + braces {
+            return false;
+        }
+    }
+    commit_thicken(state, struts, &partial, outcome);
+    outcome.members_thickened_into_the_window += 1;
+    true
+}
+
+/// [`thicken`] to the smallest root at which `fits(r_eq)` holds, counting a
+/// refusal by its reason.
+fn thicken_to(
+    context: &SlendernessContext<'_>,
+    state: &mut TieState,
+    struts: &mut [SweepStrut],
+    run: &UnbracedRun,
+    fits: &dyn Fn(f64) -> bool,
+    outcome: &mut SlendernessOutcome,
+) -> bool {
+    match plan_thicken(context, state, struts, run, fits) {
+        None => false,
+        Some(Err(ThickenRefusal::Radius)) => {
+            outcome.thicken_refused_radius += 1;
+            false
+        }
+        Some(Err(ThickenRefusal::Disc)) => {
+            outcome.thicken_refused_disc += 1;
+            false
+        }
+        Some(Ok(plan)) => {
+            commit_thicken(state, struts, &plan, outcome);
+            true
+        }
+    }
+}
+
+/// Why the thicken rung refused a run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThickenRefusal {
+    /// The root it needs is past the registered maximum radius.
+    Radius,
+    /// The grown plate root's drawn foot would make a new lap of another root.
+    Disc,
+}
+
+/// One thickening, planned against the live field and not yet applied
+/// ([`commit_thicken`] applies it). Planning changes nothing, so the brace
+/// window can weigh it against a cross.
+#[derive(Clone, Debug)]
+struct ThickenPlan {
+    k_lo: usize,
+    k_top: usize,
+    /// The root found, and the tip radius the taper keeps, over `steps`.
+    root: f64,
+    top: f64,
+    steps: f64,
+    /// The member, then every trunk it stands on: (member index, the highest
+    /// layer at which it must be at least `root` thick).
+    chain: Vec<(usize, usize)>,
+    /// The plate disc to grow, and to what.
+    disc_growth: Option<(usize, f64)>,
+    over_existing_lap: bool,
+    admitted_on_drawn_feet: bool,
+    /// The resin the thickening adds over the profiles as drawn now, mm³.
+    added_mm3: f64,
+}
+
+impl ThickenPlan {
+    /// The minimum radius the plan writes at `layer` of the chain member at
+    /// `position` (the member itself is `0`).
+    fn wanted(&self, position: usize, layer: usize) -> f64 {
+        if position == 0 && layer >= self.k_lo {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a slot index bounded by the layer count is exact in f64"
+            )]
+            let t = ((layer - self.k_lo) as f64) / self.steps;
+            self.root * (1.0 - t) + self.top * t
+        } else {
+            self.root
+        }
+    }
+
+    /// The layer (exclusive) up to which the plan writes the chain member at
+    /// `position`, from that member's own foot.
+    fn upto(&self, position: usize, highest: usize) -> usize {
+        if position == 0 {
+            self.k_top
+        } else {
+            highest + 1
+        }
+    }
+}
+
+/// Plan [`thicken`]'s root for `run` against the live field: the smallest
+/// root at which `fits(r_eq)` holds, the trunks it raises, and whether its
+/// plate root may grow. `None` where the run has no layer or no member;
+/// `Some(Err(..))` for a refusal. Changes nothing and counts nothing.
+fn plan_thicken(
+    context: &SlendernessContext<'_>,
+    state: &TieState,
+    struts: &[SweepStrut],
+    run: &UnbracedRun,
+    fits: &dyn Fn(f64) -> bool,
+) -> Option<Result<ThickenPlan, ThickenRefusal>> {
+    let law = context.law;
     let grid = context.grid;
     let member = run.strut_id as usize;
     let n = run.k_top.saturating_sub(run.k_lo);
     if n == 0 {
-        return false;
+        return None;
     }
     let (k_lo, k_top) = (run.k_lo, run.k_top);
     #[expect(
@@ -2570,9 +3024,7 @@ fn thicken(
     let steps = n.saturating_sub(1).max(1) as f64;
     // The drawn radius over the run, bottom first, and the top it keeps.
     let (drawn, top) = {
-        let Some(strut) = struts.get(member) else {
-            return false;
-        };
+        let strut = struts.get(member)?;
         let profile = &state.profiles[member];
         let drawn: Vec<Option<f64>> = (0..n).map(|j| drawn_at(strut, profile, k_lo + j)).collect();
         let top = drawn
@@ -2603,11 +3055,10 @@ fn thicken(
             let wanted = taper(root, j);
             Some(drawn[j].map_or(wanted, |here| here.max(wanted)))
         })
-        .is_some_and(|radius| run.length_mm <= law.max_unbraced_mm(radius))
+        .is_some_and(fits)
     };
     if !holds(law.r_max_mm) {
-        outcome.thicken_refused_radius += 1;
-        return false;
+        return Some(Err(ThickenRefusal::Radius));
     }
     let (mut low, mut high) = (top.min(law.r_max_mm), law.r_max_mm);
     for _ in 0..64 {
@@ -2641,6 +3092,7 @@ fn thicken(
     }
     let foot = chain.last().map_or(member, |(index, _)| *index);
     let mut over_existing_lap = false;
+    let mut admitted_on_drawn_feet = false;
     let disc_growth = {
         let strut = &struts[foot];
         if matches!(strut.landing, Landing::Plate) && strut.kind != StrutKind::Brace {
@@ -2698,16 +3150,13 @@ fn thicken(
                                 slot,
                                 |bare| boss.foot_radius_mm(bare),
                             );
-                            if !drawn.0 && census().0 {
-                                outcome.thicken_admitted_where_the_crowding_disc_laps += 1;
-                            }
+                            admitted_on_drawn_feet = !drawn.0 && census().0;
                             drawn
                         }
                         None => census(),
                     };
                     if new_lap {
-                        outcome.thicken_refused_disc += 1;
-                        return false;
+                        return Some(Err(ThickenRefusal::Disc));
                     }
                     over_existing_lap = existing;
                 }
@@ -2720,20 +3169,61 @@ fn thicken(
         }
     };
 
-    for (position, &(index, highest)) in chain.iter().enumerate() {
+    let mut plan = ThickenPlan {
+        k_lo,
+        k_top,
+        root,
+        top,
+        steps,
+        chain,
+        disc_growth,
+        over_existing_lap,
+        admitted_on_drawn_feet,
+        added_mm3: 0.0,
+    };
+    // THE RESIN IT ADDS: on every layer it raises, `π (wanted² − drawn²)`
+    // times that member's own length per layer (its chord, as `run_length`
+    // measures it). One pass over the layers the commit would write.
+    let height = context.layer_height_mm;
+    let mut added = 0.0;
+    for (position, &(index, highest)) in plan.chain.iter().enumerate() {
+        let strut = &struts[index];
+        let per_layer_mm = if strut.k_top > strut.k_bottom {
+            run_length(grid, strut, strut.k_bottom, strut.k_bottom + 1, height)
+        } else {
+            height
+        };
+        for layer in strut.k_bottom..plan.upto(position, highest) {
+            let wanted = plan.wanted(position, layer);
+            let now = drawn_at(strut, &state.profiles[index], layer).unwrap_or(0.0);
+            if wanted > now {
+                added += core::f64::consts::PI * (wanted * wanted - now * now) * per_layer_mm;
+            }
+        }
+    }
+    plan.added_mm3 = added;
+    Some(Ok(plan))
+}
+
+/// Apply a [`ThickenPlan`]: the minimum radius is written to each chain
+/// member's [`SweepStrut::thickened_mm`] (the down-sweep keeps it) and to its
+/// live drawn profile, and the plate disc grows.
+fn commit_thicken(
+    state: &mut TieState,
+    struts: &mut [SweepStrut],
+    plan: &ThickenPlan,
+    outcome: &mut SlendernessOutcome,
+) {
+    for (position, &(index, highest)) in plan.chain.iter().enumerate() {
         let strut = &mut struts[index];
         let k_bottom = strut.k_bottom;
-        let upto = if position == 0 { k_top } else { highest + 1 };
+        let upto = plan.upto(position, highest);
         if strut.thickened_mm.len() < upto {
             strut.thickened_mm.resize(upto, 0.0);
         }
         let mut raised = false;
         for layer in k_bottom..upto {
-            let wanted = if position == 0 && layer >= k_lo {
-                taper(root, layer - k_lo)
-            } else {
-                root
-            };
+            let wanted = plan.wanted(position, layer);
             let entry = &mut strut.thickened_mm[layer];
             *entry = entry.max(wanted);
             if let Some(drawn_here) = state.profiles[index].get_mut(layer - k_bottom) {
@@ -2747,14 +3237,16 @@ fn thicken(
             outcome.trunks_raised_under_thickening += 1;
         }
     }
-    if let Some((slot, flared)) = disc_growth {
-        crate::congestion::grow_disc(&mut state.placed_roots, slot, flared, root);
+    if let Some((slot, flared)) = plan.disc_growth {
+        crate::congestion::grow_disc(&mut state.placed_roots, slot, flared, plan.root);
     }
-    if over_existing_lap {
+    if plan.admitted_on_drawn_feet {
+        outcome.thicken_admitted_where_the_crowding_disc_laps += 1;
+    }
+    if plan.over_existing_lap {
         outcome.thicken_over_existing_lap += 1;
     }
     outcome.members_thickened += 1;
-    true
 }
 
 /// How far an arm's top sways, in PIXELS, when a mast `gap_mm` away is joined
@@ -2928,7 +3420,24 @@ fn tie_by_mast(
         true
     };
 
-    // The arm's own mast, extended.
+    // R2 FOR A MAST'S CROSS (2026-10-03): the diagonals may be no thicker
+    // than the mast, so a mast is sized at least as thick as the diagonal its
+    // cell needs. The mast is the one post this rung sizes itself; the arm
+    // is not grown, and a cell whose diagonal is thicker than the arm at the
+    // tie is refused (`mast_cells_refused_thicker_than_member`).
+    let arm_at_tie = struts
+        .get(id as usize)
+        .and_then(|arm| drawn_at(arm, &state.profiles[id as usize], k))
+        .unwrap_or(0.0);
+    let diagonal_for = |gap_mm: f64| {
+        if context.brace_cap {
+            diagonal_radius_mm(context, gap_mm)
+        } else {
+            0.0
+        }
+    };
+
+    // The arm's own mast, extended (and, under R2, widened to its diagonal).
     let own: Vec<u32> = state.masts_of.get(&id).cloned().unwrap_or_default();
     for mast in own {
         let Some(standing) = struts.get(mast as usize) else {
@@ -2938,6 +3447,11 @@ fn tie_by_mast(
             continue;
         }
         let (old_top, cell, old_radius) = (standing.k_top, standing.cell, standing.min_radius_mm);
+        let needed = diagonal_for(crate::cell_distance_mm(grid, here, cell));
+        if needed > arm_at_tie {
+            outcome.mast_cells_refused_thicker_than_member += 1;
+            continue;
+        }
         let spans_before = state.index.shaft_spans.len();
         // A taller mast needs the radius its whole new height asks for, and its
         // grown root has to clear every other root, as a new mast's would.
@@ -2947,15 +3461,18 @@ fn tie_by_mast(
         )]
         let grown = law
             .brace_radius_mm(k as f64 * context.layer_height_mm)
-            .max(old_radius);
+            .max(old_radius)
+            .max(needed);
+        let (extend, widen) = (old_top < k, grown > old_radius);
         let slot = crate::congestion::disc_slot(&state.placed_roots, mast);
-        if old_top < k {
-            let blocked = (old_top + 1..=k).any(|layer| {
-                !context.keep_out.admits(cell, layer)
-                    || state.index.shaft_blocks(cell, layer, None)
-                    || context.history.model_blocks(cell, layer)
-            });
-            let crowded = grown > old_radius
+        if extend || widen {
+            let blocked = extend
+                && (old_top + 1..=k).any(|layer| {
+                    !context.keep_out.admits(cell, layer)
+                        || state.index.shaft_blocks(cell, layer, None)
+                        || context.history.model_blocks(cell, layer)
+                });
+            let crowded = widen
                 && context.mast_root_clearance
                 && !crate::congestion::clear_of_placed(
                     grid,
@@ -2974,19 +3491,24 @@ fn tie_by_mast(
             if !column_clear(state, struts, cell, grown, Some(mast), outcome) {
                 continue;
             }
-            state.index.stamp_shaft(mast, old_top + 1, k, cell, &[]);
-            struts[mast as usize].k_top = k;
+            if extend {
+                state.index.stamp_shaft(mast, old_top + 1, k, cell, &[]);
+                struts[mast as usize].k_top = k;
+            }
+            // The band reads the mast at the radius it will stand at.
+            struts[mast as usize].min_radius_mm = grown;
         }
         if let Some(plan) = plan_cross(context, state, struts, id, mast, k, run, true, outcome) {
-            if old_top < k {
+            if extend || widen {
                 for profiles in [&mut state.profiles, &mut state.unthickened] {
                     let profile = &mut profiles[mast as usize];
-                    profile.resize(k + 1, grown);
+                    if profile.len() < k + 1 {
+                        profile.resize(k + 1, grown);
+                    }
                     for radius in profile.iter_mut() {
                         *radius = radius.max(grown);
                     }
                 }
-                struts[mast as usize].min_radius_mm = grown;
                 if let Some(slot) = slot {
                     crate::congestion::grow_disc(
                         &mut state.placed_roots,
@@ -2995,13 +3517,16 @@ fn tie_by_mast(
                         grown,
                     );
                 }
-                outcome.masts_extended += 1;
+                if extend {
+                    outcome.masts_extended += 1;
+                }
             }
             commit_cross(context, state, struts, plan, outcome);
             outcome.braces_added += 1;
             return Some(None);
         }
-        if old_top < k {
+        struts[mast as usize].min_radius_mm = old_radius;
+        if extend {
             state.index.unstamp_straight_shaft(cell, spans_before);
             struts[mast as usize].k_top = old_top;
         }
@@ -3063,8 +3588,22 @@ fn tie_by_mast(
             // first band, but the cross that ties it holds only along its own
             // plane, so across that plane the mast stands unbraced from the
             // plate to its top (measured on the Cylinder: 16.05 mm against a
-            // 15.6 mm limit, re-opened by the very next pass).
-            candidates.push((distance_mm, cell, law.brace_radius_mm(mast_height_mm)));
+            // 15.6 mm limit, re-opened by the very next pass). Under R2
+            // (2026-10-03) it is also at least as thick as the diagonal that
+            // ties it, and a cell whose diagonal would be thicker than the arm
+            // is refused. The diagonal grows with the distance, so a farther
+            // cell never needs a thinner mast and the scan below may still
+            // stop at the first cell that holds at its own radius.
+            let needed = diagonal_for(distance_mm);
+            if needed > arm_at_tie {
+                outcome.mast_cells_refused_thicker_than_member += 1;
+                continue;
+            }
+            candidates.push((
+                distance_mm,
+                cell,
+                law.brace_radius_mm(mast_height_mm).max(needed),
+            ));
         }
     }
     candidates.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
@@ -3971,6 +4510,28 @@ fn plan_cross(
     let radius_mm = context
         .law
         .brace_radius_mm(first_len.max(second_len));
+    // **R2: A BRACE IS NEVER THICKER THAN THE THINNER POST IT JOINS** (Craig
+    // ruling 2026-10-03, interim pending the slenderness coupon;
+    // `bracing-mechanics.md` §2, decision D1). With `r_b = max(r_min, ℓ / S)`
+    // this caps the diagonal's reach at `S` times the thinner post's radius.
+    // The posts are read as DRAWN at the four joints (each diagonal's seat at
+    // the band top and its landing at the bottom), so the junction raise that
+    // used to make a post meet a thicker diagonal (a fat post with a thin
+    // top) is never needed and is deleted. A design guard, not a strength
+    // proof: the construction-stage check (R9) is what bounds the rest.
+    if context.brace_cap {
+        let thinner = [(a, k), (a, k_lo), (b, k), (b, k_lo)]
+            .into_iter()
+            .filter_map(|(post, layer)| {
+                let strut = struts.get(post as usize)?;
+                drawn_at(strut, state.profiles.get(post as usize)?, layer)
+            })
+            .fold(f64::INFINITY, f64::min);
+        if radius_mm > thinner {
+            refuse(outcome, |why| &mut why.thicker_than_post);
+            return None;
+        }
+    }
     // **A DIAGONAL MAY NOT REACH THE PLATE.** A brace's frustum rings stand
     // perpendicular to its own tilted axis, so the ring at its base extends up
     // to one brace radius BELOW the axis point; a band whose bottom sits closer
@@ -4056,14 +4617,6 @@ fn plan_cross(
             }
         }
     }
-    if widened {
-        outcome.brace_bands_deepened_for_their_diagonals += 1;
-    }
-    if moved_off_the_plate {
-        outcome.brace_bands_moved_up_off_the_plate += 1;
-    } else if moved {
-        outcome.brace_bands_moved_above_flare += 1;
-    }
     Some(CrossPlan {
         a,
         b,
@@ -4075,6 +4628,10 @@ fn plan_cross(
         first,
         second,
         plane: plane_between(grid, a_cell_top, b_cell_top),
+        volume_mm3: core::f64::consts::PI * radius_mm * radius_mm * (first_len + second_len),
+        widened,
+        moved,
+        moved_off_the_plate,
     })
 }
 
@@ -4214,6 +4771,115 @@ fn push_brace(
 #[cfg(test)]
 mod tests {
     use super::{extra_ties, SlendernessLaw, UnbracedRun};
+
+    /// D9: the two-post ceiling reproduces the study's two pairs
+    /// (`bracing-mechanics.md` §3: "3.8 for the thin pair and 3.5 for the mid
+    /// pair") and its equal-post closed form `(1 + s²/r²)^(1/4)`, grows with
+    /// a wider partner ("brace to a wider frame"), and falls as the run's own
+    /// post thickens, more slowly than `λ` does (so thickening INTO the
+    /// window terminates).
+    #[test]
+    fn the_two_post_ceiling_is_the_composite_beam() {
+        let thin = super::pair_ceiling_ratio(0.15, 0.15, 2.2);
+        let mid = super::pair_ceiling_ratio(0.4, 0.4, 5.0);
+        assert!((thin - 3.834).abs() < 1e-3, "thin pair {thin}");
+        assert!((mid - 3.541).abs() < 1e-3, "mid pair {mid}");
+        for (r, s) in [(0.05, 0.3), (0.2, 1.0), (0.7, 9.0)] {
+            let closed = (1.0_f64 + s * s / (r * r)).powf(0.25);
+            assert!((super::pair_ceiling_ratio(r, r, s) - closed).abs() < 1e-12);
+        }
+        assert!(super::pair_ceiling_ratio(0.15, 0.6, 2.2) > thin, "a wider partner holds more");
+        // λ ∝ 1/r, the ceiling falls more slowly: λ / ceiling falls as r grows.
+        let over = |r: f64| (0.15 / r) * 4.0 / super::pair_ceiling_ratio(r, 0.15, 2.2);
+        assert!(over(0.2) < over(0.15) && over(0.3) < over(0.2));
+        assert!((super::pair_ceiling_ratio(0.15, 0.15, 0.0) - 1.0).abs() < 1e-12);
+    }
+
+    /// D9 on a field: two 20 mm, 0.05 mm plate posts 2.0 mm apart, each 8
+    /// limits long (S = 50). Their pair's ceiling is `(1 + 40²)^(1/4)` = 6.33,
+    /// so no band is built between them as they stand. A post is thickened
+    /// INTO the window (to the pair's ceiling at its new radius: root 0.484
+    /// mm, 5.31 mm³, measured 2026-10-03) because full thickening (`r_eq`
+    /// 0.4 mm over 20 mm) costs more resin than that plus the crosses, and
+    /// then the pair is braced. (At 1.0 mm apart every growth laps the other
+    /// post's drawn foot, so the fixture stands them 2.0 mm apart.) With the
+    /// window off (the sabotage) the same pass builds bands between the pair
+    /// at once and nothing is thickened into a window.
+    #[test]
+    fn a_pair_past_its_ceiling_is_thickened_into_the_window_then_braced() {
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let history = crate::up_sweep::ColumnHistory::new(&grid);
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(0.05, 45.0, 25.0);
+        let law = law();
+        let tall = |id: u32, col: usize| {
+            let mut post = plate_post(&grid, id, col, 0.05);
+            post.k_top = 400;
+            post.radius_mm = vec![0.05; 400];
+            post.carried_mm2 = vec![0.0; 400];
+            post
+        };
+        let run = |window: bool| {
+            let context = super::SlendernessContext {
+                grid: &grid,
+                history: &history,
+                keep_out: &keep_out,
+                lean: &lean,
+                law: &law,
+                layer_height_mm: 0.05,
+                layers: 500,
+                flare_factor: 1.6,
+                mast_root_clearance: true,
+                final_clearance_mm: 0.3,
+                member_clearance: true,
+                shaft_landings: true,
+                merge: true,
+                brace: true,
+                thicken: true,
+                mast: false,
+                max_struts: 1_000,
+                x_allowed: 12.0,
+                seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
+                load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
+                brace_cap: true,
+                brace_window: window,
+            };
+            let mut struts = vec![tall(0, 100), tall(1, 140)];
+            let mut outcome = super::SlendernessOutcome::default();
+            super::apply_ties(&context, &mut struts, &mut outcome);
+            outcome
+        };
+        assert!(
+            (super::pair_ceiling_ratio(0.05, 0.05, 2.0) - 1601.0_f64.powf(0.25)).abs() < 1e-12
+        );
+        let on = run(true);
+        println!(
+            "window on: {} past the ceiling, {} thickened into the window, {} thickened, {} \
+             crosses, {} refused for resin",
+            on.crosses_refused_past_pair_ceiling,
+            on.members_thickened_into_the_window,
+            on.members_thickened,
+            on.braces_added,
+            on.crosses_refused_thicken_cheaper
+        );
+        assert!(on.crosses_refused_past_pair_ceiling > 0, "path hit: {on:?}");
+        assert!(on.members_thickened_into_the_window > 0, "path hit: {on:?}");
+        assert!(on.braces_added > 0, "the pair is braced once inside its window: {on:?}");
+        let off = run(false);
+        assert_eq!(off.crosses_refused_past_pair_ceiling, 0);
+        assert_eq!(off.members_thickened_into_the_window, 0);
+        assert!(off.braces_added > 0, "{off:?}");
+    }
+
+    /// R7 + D5: a cross is charged one diagonal per post when both need it
+    /// (`c` = 1) and the whole cross when only the run does (`c` = 2), per
+    /// plane and per band (`bracing-mechanics.md` §5).
+    #[test]
+    fn a_cross_is_charged_per_plane_per_band_and_shared_halves_it() {
+        assert!((super::cross_charge_mm3(2.0, true, 2, 3) - 6.0).abs() < 1e-12);
+        assert!((super::cross_charge_mm3(2.0, false, 2, 3) - 12.0).abs() < 1e-12);
+        assert!((super::cross_charge_mm3(2.0, false, 1, 1) - 2.0).abs() < 1e-12);
+    }
 
     fn law() -> SlendernessLaw {
         SlendernessLaw::new(50.0, 0.05, 1.0, 32.5)
@@ -4378,17 +5044,20 @@ mod tests {
         }
     }
 
-    /// REVIEW-FIXES 2026-09-29: a cross raises its post's DRAWN root, and the
-    /// lane's placed root disc grows with it, so a later mast or thickening
-    /// is cleared against the foot the file will draw. The reviewer's case: a
-    /// 0.05 mm plate arm 0.50 mm from a 0.20 mm root (flare 1.6: 0.40 mm, clear)
-    /// takes a 0.20 mm cross to a third post; its drawn root is then the
-    /// brace's 0.20 mm (the junction clause), so its disc is 0.32 mm and it
-    /// laps its neighbour (0.64 mm > 0.50 mm). The expected numbers are
-    /// hand-derived from the inputs; the invariant is checked against the
-    /// discs rebuilt from scratch by `congestion::root_discs`.
+    /// The lane's placed root discs stay equal to the feet the file draws
+    /// when a cross is committed (review-fixes 2026-09-29), checked against
+    /// the discs rebuilt from scratch by `congestion::root_discs`.
+    ///
+    /// **Re-pinned 2026-10-03 (rule R2)** from
+    /// `a_cross_grows_its_posts_plate_disc_to_the_drawn_root`, which pinned
+    /// the deleted junction raise: a 0.05 mm plate arm 0.50 mm from a 0.20 mm
+    /// root took a 0.20 mm cross, was drawn at the brace's 0.20 mm root, and
+    /// its disc grew to 0.32 mm and lapped its neighbour. A brace now raises
+    /// nothing (the lane refuses a diagonal thicker than its post, and this
+    /// plan, built by hand, bypasses that refusal on purpose), so the arm's
+    /// drawn root, and its disc, stay at 0.05 mm: no growth, no lap.
     #[test]
-    fn a_cross_grows_its_posts_plate_disc_to_the_drawn_root() {
+    fn a_cross_leaves_its_posts_plate_disc_as_drawn() {
         let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
         let history = crate::up_sweep::ColumnHistory::new(&grid);
         let keep_out = crate::drain::DrainKeepOut::none();
@@ -4416,6 +5085,8 @@ mod tests {
             x_allowed: 12.0,
             seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
             load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
+            brace_cap: true,
+            brace_window: true,
         };
         // P at col 100, Q 10 cells (0.50 mm) away, R 40 cells the other way.
         let mut struts = vec![
@@ -4440,18 +5111,22 @@ mod tests {
             first: Vec::new(),
             second: Vec::new(),
             plane: None,
+            volume_mm3: 0.0,
+            widened: false,
+            moved: false,
+            moved_off_the_plate: false,
         };
         let mut outcome = super::SlendernessOutcome::default();
         super::commit_cross(&context, &mut state, &mut struts, plan, &mut outcome);
 
         assert!(
-            (disc(&state, 0) - 0.20 * flare).abs() < 1e-12,
-            "the braced post's disc is {} mm; the file draws its root at 0.20 mm, a {} mm foot",
+            (disc(&state, 0) - 0.05 * flare).abs() < 1e-12,
+            "the braced post's disc is {} mm; the file draws its root at 0.05 mm, a {} mm foot",
             disc(&state, 0),
-            0.20 * flare
+            0.05 * flare
         );
-        assert_eq!(outcome.cross_roots_grown, 1, "only P's root grew");
-        assert_eq!(outcome.cross_roots_lapping, 1, "P's grown foot laps Q's");
+        assert_eq!(outcome.cross_roots_grown, 0, "no root grew");
+        assert_eq!(outcome.cross_roots_lapping, 0, "no foot laps another");
         // The maintained discs equal the discs rebuilt from the field once the
         // down-sweep has sized the new diagonals (at their own minimum, as it
         // does for a brace no load reaches).
@@ -4571,6 +5246,8 @@ mod tests {
             x_allowed: 12.0,
             seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
             load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
+            brace_cap: true,
+            brace_window: true,
         };
         let struts = vec![
             plate_post(&grid, 0, 100, 0.2),
@@ -4611,7 +5288,10 @@ mod tests {
         .expect("the band moves up and is built");
         assert_eq!(plan.k_lo, FREE_SHAFT_FLOOR_OF_A_4_MM_POST, "{plan:?}");
         assert_eq!(plan.k, FREE_SHAFT_FLOOR_OF_A_4_MM_POST + depth, "{plan:?}");
-        assert_eq!(outcome.brace_bands_moved_above_flare, 1);
+        // Path hit, carried by the plan: the counter is bumped when a band is
+        // BUILT (`commit_cross`, 2026-10-03), so a band the brace window
+        // refuses is not counted as moved.
+        assert!(plan.moved && !plan.moved_off_the_plate, "{plan:?}");
         assert_eq!(outcome.brace_bands_dropped_in_flare, 0);
 
         let mut outcome = super::SlendernessOutcome::default();
@@ -4806,6 +5486,8 @@ mod tests {
             x_allowed: 12.0,
             seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
             load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
+            brace_cap: true,
+            brace_window: true,
         };
         // 16 cells at 0.05 mm: 0.8 mm between the posts.
         let struts = vec![
@@ -4843,8 +5525,9 @@ mod tests {
             &mut outcome,
         )
         .expect("the band moves up and is built");
-        assert_eq!(
-            outcome.brace_bands_moved_above_flare, 1,
+        // Counted when built (`commit_cross`); the plan carries the hit.
+        assert!(
+            plan.moved && !plan.moved_off_the_plate,
             "path hit: {plan:?}"
         );
         #[expect(
@@ -4906,6 +5589,8 @@ mod tests {
             x_allowed: 12.0,
             seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
             load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
+            brace_cap: true,
+            brace_window: true,
         };
         let mut struts = vec![
             short_plate_post(&grid, 0, 100),
@@ -5134,7 +5819,8 @@ mod tests {
         let (built, outcome) = plan(&posts, depth - 2);
         let built = built.unwrap_or_else(|| panic!("refused: {:?}", outcome.brace_band_refusals));
         assert_eq!(built.k_lo, FREE_SHAFT_FLOOR_OF_A_4_MM_POST, "{built:?}");
-        assert_eq!(outcome.brace_bands_moved_up_off_the_plate, 1);
+        // Counted when built (`commit_cross`); the plan carries the hit.
+        assert!(built.moved_off_the_plate, "{built:?}");
 
         // Below a branch partner's foot: post 1 lands on post 2 at layer 50.
         let mut posts = vec![
@@ -5173,7 +5859,8 @@ mod tests {
             "the band is {} layers deep for a {lateral} mm diagonal: {built:?}",
             built.k - built.k_lo
         );
-        assert_eq!(outcome.brace_bands_deepened_for_their_diagonals, 1);
+        // Counted when built (`commit_cross`); the plan carries the hit.
+        assert!(built.widened, "{built:?}");
     }
 
     fn prune_context<'a>(
@@ -5204,6 +5891,8 @@ mod tests {
             x_allowed: 12.0,
             seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
             load_step_taper: crate::adapter::LoadStepTaper::of(lean),
+            brace_cap: true,
+            brace_window: true,
         }
     }
 
@@ -5238,6 +5927,10 @@ mod tests {
             first: Vec::new(),
             second: Vec::new(),
             plane: super::plane_between(&grid, struts[0].cell, struts[1].cell),
+            volume_mm3: 0.0,
+            widened: false,
+            moved: false,
+            moved_off_the_plate: false,
         };
         let mut outcome = super::SlendernessOutcome::default();
         super::commit_cross(&context, &mut state, &mut struts, plan, &mut outcome);
