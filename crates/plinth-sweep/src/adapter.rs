@@ -388,13 +388,18 @@ pub(crate) fn load_step_cones(
             // The contact slot is the last one; the cone stops under it.
             let contact = ledger.len().saturating_sub(1);
             let mut top = None;
-            for slot in booked_slot + 1..contact {
+            for (slot, &ledger_radius) in ledger
+                .iter()
+                .enumerate()
+                .take(contact)
+                .skip(booked_slot + 1)
+            {
                 #[expect(
                     clippy::cast_precision_loss,
                     reason = "a slot count bounded by the plan's own layer count is exact in f64"
                 )]
                 let cone = wide - (slot - booked_slot) as f64 * step;
-                if cone <= ledger[slot] {
+                if cone <= ledger_radius {
                     break;
                 }
                 top = Some(host.k_bottom + slot);
@@ -476,14 +481,19 @@ pub(crate) fn drawn_profiles(
         let from = cone.booked - host.k_bottom;
         let wide = host.radius_mm[from];
         let profile = &mut profiles[cone.host];
-        for slot in from + 1..=cone.top - host.k_bottom {
+        for (slot, drawn) in profile
+            .iter_mut()
+            .enumerate()
+            .take(cone.top - host.k_bottom + 1)
+            .skip(from + 1)
+        {
             #[expect(
                 clippy::cast_precision_loss,
                 reason = "a slot count bounded by the plan's own layer count is exact in f64"
             )]
             let radius = wide - (slot - from) as f64 * taper.per_layer_mm();
-            if profile[slot] < radius {
-                profile[slot] = radius;
+            if *drawn < radius {
+                *drawn = radius;
                 load_step_layers_raised += 1;
             }
         }
@@ -927,9 +937,10 @@ mod tests {
         for slot in 0..drawn.len() {
             assert!(drawn[slot] >= ledger[slot], "slot {slot} drawn under its ledger");
         }
-        for slot in 20..=27 {
+        for (j, &radius) in drawn[20..=27].iter().enumerate() {
+            let slot = 20 + j;
             let expected = 0.90 - (slot - 19) as f64 * d;
-            assert!((drawn[slot] - expected).abs() < 1e-12, "slot {slot}: {}", drawn[slot]);
+            assert!((radius - expected).abs() < 1e-12, "slot {slot}: {radius}");
         }
         assert!((drawn[28] - 0.25).abs() < 1e-12, "the cone ends on the ledger");
         // The rule itself: going up, the drawn radius never narrows by more

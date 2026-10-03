@@ -5203,7 +5203,7 @@ mod tests {
             max_struts: 1_000,
             x_allowed: 12.0,
             seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
-            load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
+            load_step_taper: crate::adapter::LoadStepTaper::of(lean),
         }
     }
 
