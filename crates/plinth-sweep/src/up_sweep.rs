@@ -426,6 +426,12 @@ pub struct GreedyScratch {
     pub stranded_seating: bool,
     /// Seats placed that way. Path-hit witness.
     pub stranded_seats: u64,
+    /// Each committed stranded seat as `(seat cell, seat layer)`, in the
+    /// order it was placed. A member's id is renumbered by the removal pass,
+    /// its seat cell and seat layer are not, so this is how the stranded-seat
+    /// branch rule ([`crate::stranded_branch`]) finds the members this rule
+    /// seated once the field is sized.
+    pub stranded_seat_cells: Vec<(usize, usize)>,
 }
 
 impl GreedyScratch {
@@ -503,6 +509,7 @@ impl GreedyScratch {
             island_hex_bound: 0,
             stranded_seating: true,
             stranded_seats: 0,
+            stranded_seat_cells: Vec::new(),
         }
     }
 
@@ -1080,6 +1087,7 @@ fn cover_island(
     let mut cursor = 0_usize;
     let mut last_pivot = usize::MAX;
     let mut stranded_seats = 0_u64;
+    let mut stranded_cells: Vec<(usize, usize)> = Vec::new();
     loop {
         if at_limit(placer) {
             break;
@@ -1091,6 +1099,7 @@ fn cover_island(
             break;
         }
         let pivot = island[cursor];
+        let stranded_at_pivot = stranded_seats;
         // A pivot that survived its own round is one no candidate could
         // reach. Seating on it directly roots it by construction, which is
         // what makes this loop terminate.
@@ -1122,6 +1131,13 @@ fn cover_island(
             )
         };
         last_pivot = pivot;
+        // Which seats the stranded rule chose, read off the counter it just
+        // bumped rather than threaded out of the closure.
+        if stranded_seats > stranded_at_pivot {
+            if let Some(host) = chosen {
+                stranded_cells.push((host, layer));
+            }
+        }
         let Some(chosen) = chosen else {
             // Every seat that could root this cell stands where the resin has
             // to leave. EMIT AND WARN: step past it, leave its demand bit set
@@ -1145,6 +1161,7 @@ fn cover_island(
         rebuild_prefix_rows(grid, &scratch.demand_bits, &mut scratch.prefix, lo, hi);
     }
     scratch.stranded_seats += stranded_seats;
+    scratch.stranded_seat_cells.extend(stranded_cells);
     (seats, dirty)
 }
 

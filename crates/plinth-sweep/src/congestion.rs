@@ -1231,6 +1231,31 @@ pub(crate) fn clear_of_placed(
     true
 }
 
+/// Every placed root the disc of `radius_mm` at `cell` touches, as
+/// `(member id, centre distance mm)`, nearest first (ties by the lower id).
+/// Empty exactly when [`clear_of_placed`] says clear: the same
+/// [`disc_touches`] rule, asked of every disc instead of stopping at the
+/// first. The stranded-seat branch rule ([`crate::stranded_branch`]) needs to
+/// know WHICH roots a disc laps, because it lands the member on one of them.
+pub(crate) fn lapped_roots(
+    grid: &Grid,
+    cell: usize,
+    radius_mm: f64,
+    placed: &[RootDisc],
+    skip: Option<usize>,
+) -> Vec<(u32, f64)> {
+    let x = grid.center_x_mm(grid.col_of(cell));
+    let y = grid.center_y_mm(grid.row_of(cell));
+    let mut out: Vec<(u32, f64)> = placed
+        .iter()
+        .enumerate()
+        .filter(|(slot, disc)| Some(*slot) != skip && disc_touches(x, y, radius_mm, disc))
+        .map(|(_, disc)| (disc.id, (disc.x_mm - x).hypot(disc.y_mm - y)))
+        .collect();
+    out.sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    out
+}
+
 /// What growing the disc at `cell` from `old_radius_mm` to `new_radius_mm`
 /// does to the discs around it (flared radii, as [`clear_of_placed`]):
 /// `(laps_a_new_root, grows_an_existing_lap)`. A disc it laps only after the

@@ -96,6 +96,11 @@ impl DrainSpec {
 pub struct DrainKeepOut {
     lowest_blocked: Vec<u32>,
     blocked_cells: usize,
+    /// The capsules `lowest_blocked` was stamped from, kept so a SIZED member
+    /// can be asked the same question at its own radius
+    /// ([`Self::blocks_member`]). Empty for [`Self::none`].
+    capsules: Vec<Capsule>,
+    frame: StampFrame,
     /// How many times a placement candidate was refused by this keep-out. A
     /// path-hit witness: without it, "the drains are all connected" cannot be
     /// told apart from "the keep-out never ran". Atomic rather than a `Cell`
@@ -110,8 +115,77 @@ impl Clone for DrainKeepOut {
         Self {
             lowest_blocked: self.lowest_blocked.clone(),
             blocked_cells: self.blocked_cells,
+            capsules: self.capsules.clone(),
+            frame: self.frame,
             refusals: AtomicU64::new(self.refusals()),
         }
+    }
+}
+
+/// One drain's escape capsule as [`DrainKeepOut::build`] marched it: the
+/// outlet, the unit outward axis (zero: the outlet ball alone), how many
+/// half-pitch samples the march takes, and the radius LESS the arm's own,
+/// `bore + standoff`.
+#[derive(Clone, Copy, Debug, Default)]
+struct Capsule {
+    outlet_mm: [f64; 3],
+    axis: [f64; 3],
+    samples: usize,
+    clear_radius_mm: f64,
+}
+
+/// The frame the keep-out was stamped in.
+#[derive(Clone, Copy, Debug, Default)]
+struct StampFrame {
+    plate_z_mm: f64,
+    layer_height_mm: f64,
+    layers: usize,
+    top_z_mm: f64,
+    step_mm: f64,
+    max_arm_radius_mm: f64,
+}
+
+impl StampFrame {
+    /// The sample `index` of a capsule's march, or `None` once a ball of
+    /// `radius` there is wholly above the stack (the march stops).
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a sample index bounded by the working volume's diagonal over half a pitch is \
+              exact in f64"
+    )]
+    fn sample(&self, capsule: &Capsule, index: usize, radius: f64) -> Option<[f64; 3]> {
+        let t = index as f64 * self.step_mm;
+        let point = [
+            capsule.outlet_mm[0] + capsule.axis[0] * t,
+            capsule.outlet_mm[1] + capsule.axis[1] * t,
+            capsule.outlet_mm[2] + capsule.axis[2] * t,
+        ];
+        (point[2] - radius <= self.top_z_mm).then_some(point)
+    }
+
+    /// THE BALL RULE, one cell: the lowest layer the ball of `radius` about
+    /// `point` reaches over the column at `(row, col)`, `z − √(R² − d²)` for a
+    /// column at horizontal distance `d`, or `None` when the ball misses the
+    /// column or reaches it only above the stack. [`DrainKeepOut::build`]
+    /// stamps with this and [`DrainKeepOut::blocks_member`] asks it, so the
+    /// two cannot disagree about one ball.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a non-negative finite height over the layer height, floored to a layer index \
+              and range-checked against the stack"
+    )]
+    fn ball_layer(&self, grid: &Grid, point: [f64; 3], radius: f64, row: usize, col: usize) -> Option<usize> {
+        let dy = grid.center_y_mm(row) - point[1];
+        let dx = grid.center_x_mm(col) - point[0];
+        let horizontal = dx.mul_add(dx, dy * dy);
+        if horizontal > radius * radius {
+            return None;
+        }
+        let drop = (radius * radius - horizontal).sqrt();
+        let z = point[2] - drop;
+        let layer = ((z - self.plate_z_mm) / self.layer_height_mm).floor().max(0.0) as usize;
+        (layer < self.layers).then_some(layer)
     }
 }
 
@@ -155,9 +229,18 @@ impl DrainKeepOut {
         let mut lowest_blocked = vec![u32::MAX; grid.cells()];
         let top_z = plate_z_mm + (layers as f64) * layer_height_mm;
         let step = 0.5 * grid.pitch_mm();
+        let frame = StampFrame {
+            plate_z_mm,
+            layer_height_mm,
+            layers,
+            top_z_mm: top_z,
+            step_mm: step,
+            max_arm_radius_mm,
+        };
         // One stamp of the ball of `radius` centred on `point`: for every cell
-        // the ball covers, the LOWEST z it reaches over that cell, as a layer.
-        let stamp = |point: [f64; 3], radius: f64, lowest: &mut [u32]| {
+        // the ball covers, the LOWEST z it reaches over that cell, as a layer
+        // ([`StampFrame::ball_layer`]).
+        let stamp = |frame: &StampFrame, point: [f64; 3], radius: f64, lowest: &mut [u32]| {
             let lo_col = grid.col_coord(point[0] - radius).floor().max(0.0) as usize;
             let hi_col = (grid.col_coord(point[0] + radius).ceil().max(0.0) as usize)
                 .min(grid.cols().saturating_sub(1));
@@ -168,19 +251,10 @@ impl DrainKeepOut {
                 return;
             }
             for row in lo_row..=hi_row {
-                let dy = grid.center_y_mm(row) - point[1];
                 for col in lo_col..=hi_col {
-                    let dx = grid.center_x_mm(col) - point[0];
-                    let horizontal = dx.mul_add(dx, dy * dy);
-                    if horizontal > radius * radius {
+                    let Some(layer) = frame.ball_layer(grid, point, radius, row, col) else {
                         continue;
-                    }
-                    let drop = (radius * radius - horizontal).sqrt();
-                    let z = point[2] - drop;
-                    let layer = ((z - plate_z_mm) / layer_height_mm).floor().max(0.0) as usize;
-                    if layer >= layers {
-                        continue;
-                    }
+                    };
                     let cell = grid.index(row, col);
                     let value = layer as u32;
                     if value < lowest[cell] {
@@ -189,6 +263,7 @@ impl DrainKeepOut {
                 }
             }
         };
+        let mut capsules = Vec::with_capacity(drains.len());
 
         // How far a ray can run before it is certainly outside the stack in
         // every direction. The working volume's diagonal bounds it, and
@@ -230,18 +305,19 @@ impl DrainKeepOut {
                 [0.0, 0.0, 0.0]
             };
             let ray_samples = if axis_len > 0.0 { samples } else { 0 };
+            let capsule = Capsule {
+                outlet_mm: drain.outlet_mm,
+                axis,
+                samples: ray_samples,
+                clear_radius_mm: drain.radius_mm + standoff_mm,
+            };
             for sample in 0..=ray_samples {
-                let t = sample as f64 * step;
-                let point = [
-                    drain.outlet_mm[0] + axis[0] * t,
-                    drain.outlet_mm[1] + axis[1] * t,
-                    drain.outlet_mm[2] + axis[2] * t,
-                ];
-                if point[2] - radius > top_z {
+                let Some(point) = frame.sample(&capsule, sample, radius) else {
                     break;
-                }
-                stamp(point, radius, &mut lowest_blocked);
+                };
+                stamp(&frame, point, radius, &mut lowest_blocked);
             }
+            capsules.push(capsule);
 
             // --- what is deliberately NOT here: a gallery --------------------
             //
@@ -280,8 +356,49 @@ impl DrainKeepOut {
         Self {
             lowest_blocked,
             blocked_cells,
+            capsules,
+            frame,
             refusals: AtomicU64::new(0),
         }
+    }
+
+    /// [`Self::blocks`], asked for a SIZED member of drawn radius
+    /// `member_radius_mm` instead of the registered maximum arm radius.
+    ///
+    /// The keep-out's radius is `bore + arm radius + standoff`, and [`Self::
+    /// build`] uses the MAXIMUM arm radius only because "the down-sweep has
+    /// not sized anything when this is built". A rule that runs on the sized
+    /// field (the stranded-seat branch rule) knows the member's own radius,
+    /// so it asks the same capsules, marched the same way, with the same ball
+    /// rule ([`StampFrame::ball_layer`]) and the member's radius in the
+    /// maximum's place. A member at or above the maximum gets exactly
+    /// [`Self::blocks`]. No new number: the bore, the standoff and the
+    /// member's own drawn radius.
+    #[must_use]
+    pub fn blocks_member(&self, grid: &Grid, cell: usize, layer: usize, member_radius_mm: f64) -> bool {
+        if !self.blocks(cell, layer) {
+            return false;
+        }
+        if !(member_radius_mm.is_finite() && member_radius_mm < self.frame.max_arm_radius_mm) {
+            return true;
+        }
+        let (row, col) = (grid.row_of(cell), grid.col_of(cell));
+        for capsule in &self.capsules {
+            let radius = capsule.clear_radius_mm + member_radius_mm.max(0.0);
+            for sample in 0..=capsule.samples {
+                let Some(point) = self.frame.sample(capsule, sample, radius) else {
+                    break;
+                };
+                if self
+                    .frame
+                    .ball_layer(grid, point, radius, row, col)
+                    .is_some_and(|lowest| lowest <= layer)
+                {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     #[must_use]
@@ -606,6 +723,51 @@ mod tests {
         );
         assert!(keep_out.admits(away, 99));
         assert!(keep_out.refusals() >= 2, "refusals must be counted");
+    }
+
+    /// A SIZED member is asked the keep-out's own question at its own radius:
+    /// the column it may not stand in is `bore + its radius + standoff` wide,
+    /// not `bore + maximum arm radius + standoff`. At the maximum radius the
+    /// answer is exactly `blocks`; a thinner member is admitted closer, by
+    /// exactly its margin under the maximum, and never inside `bore + standoff`.
+    #[test]
+    fn a_sized_member_is_kept_out_by_its_own_radius() {
+        let (grid, _) = plan_grid(-10.0, -10.0, 10.0, 10.0, 100, 0.5, 1.0, 2_000_000_000);
+        let drain = DrainSpec {
+            outlet_mm: [0.0, 0.0, 5.0],
+            outward_axis: [0.0, 0.0, -1.0],
+            radius_mm: 1.25,
+        };
+        let (bore, standoff, max_arm) = (1.25, 0.6, 1.0);
+        let keep_out = DrainKeepOut::build(&grid, &[drain], standoff, max_arm, 100, 0.0, 0.05);
+        let pitch = grid.pitch_mm();
+        let row = grid.row_coord(0.0).floor() as usize;
+        let layer = 50;
+        let mut checked = (0, 0);
+        for col in grid.col_coord(0.0).floor() as usize..grid.cols() {
+            let cell = grid.index(row, col);
+            let distance = grid.center_x_mm(col).hypot(grid.center_y_mm(row));
+            if distance > bore + standoff + max_arm + 2.0 * pitch {
+                break;
+            }
+            assert_eq!(
+                keep_out.blocks_member(&grid, cell, layer, max_arm),
+                keep_out.blocks(cell, layer),
+                "at the maximum radius the answer is the keep-out's own, at {distance:.3} mm"
+            );
+            for member in [0.05, 0.25, 0.7] {
+                let reach = bore + standoff + member;
+                let blocked = keep_out.blocks_member(&grid, cell, layer, member);
+                if distance <= reach - pitch {
+                    assert!(blocked, "{member} mm member at {distance:.3} mm is inside {reach:.3}");
+                    checked.0 += 1;
+                } else if distance >= reach + pitch {
+                    assert!(!blocked, "{member} mm member at {distance:.3} mm is outside {reach:.3}");
+                    checked.1 += 1;
+                }
+            }
+        }
+        assert!(checked.0 > 0 && checked.1 > 0, "both sides were graded: {checked:?}");
     }
 
     #[test]

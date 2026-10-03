@@ -338,6 +338,10 @@ pub struct SweepRunReport {
     /// sees what the footprint measured and what the remedies did, rather than
     /// inferring it from an arm count.
     pub congestion_lane: crate::congestion::CongestionOutcome,
+    /// The stranded-seat branch rule (2026-10-02): stranded-seat members
+    /// standing on a lapped root before and after it, the branches it made and
+    /// kept, and what it put back or refused.
+    pub stranded_branch: crate::stranded_branch::StrandedBranchOutcome,
     /// The footprint rule (fix/tip-trim, 2026-09-28): every tip's contact
     /// disc graded against its seat face, the seats it moved onto the face,
     /// and the knife edges it could only warn about.
