@@ -3501,7 +3501,10 @@ mod sweep_root_flare_tests {
             let t = (arm.seat_mm[2] - door_bottom[2]) / (arm.seat_mm[2] - arm.base_mm[2]);
             let planned: [f64; 3] =
                 std::array::from_fn(|i| arm.seat_mm[i] + t * (arm.base_mm[i] - arm.seat_mm[i]));
-            let off = (planned[0] - door_bottom[0]).hypot(planned[1] - door_bottom[1]);
+            let off = geom_kernel::vec3::dist(
+                [planned[0], planned[1], 0.0],
+                [door_bottom[0], door_bottom[1], 0.0],
+            );
             if off > 0.05 {
                 off_the_planned_axis += 1;
             }
