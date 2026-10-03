@@ -2744,7 +2744,9 @@ fn print_sweep_disclosure(
              admitted off the model, \
              {} candidates refused because the member's base disc would reach under the raft top, \
              {} pass(es){}; kept in the seat zone: no clear join {}, a cross tied to a mover {}, \
-             not a support arm {}, no model surface {}; {} unmeasured",
+             not a support arm {}, no model surface {}; {} unmeasured; load-step cones: {} joins \
+             held by their cone alone at the first survey, {} cone layers graded and {} joins \
+             held by their cone alone in the emitted census",
             rule.joins_examined,
             rule.joins_in_seat_zone_before,
             rule.clearance_mm,
@@ -2772,6 +2774,9 @@ fn print_sweep_disclosure(
             rule.kept_not_an_arm,
             rule.kept_surface_unavailable,
             rule.joins_unmeasured,
+            rule.joins_held_by_load_cone,
+            rule.census_load_cone_layers,
+            rule.census_held_by_load_cone,
         );
         // THE LIP-SEAT RULE (2026-09-29).
         let lip = &report.lip_seat;
@@ -3009,7 +3014,7 @@ fn print_sweep_disclosure(
          {:.3} mm3 (the area law's shafts, not what is drawn); drawn profile: {} members in \
          more than one span, {} Member frusta chained, {} arms WITHOUT a profile, {} members \
          raised above their ledger to meet a thicker branch, {} arm junctions inverted in the \
-         ledger itself; \
+         ledger itself, {} load steps drawn as a cone ({} layers raised above the ledger); \
          plate contacts {} \
          holding {:.4} mm2 of root area; junctions {} at a parent's top / {} MID-SHAFT \
          ({} chosen mid-shaft by the descent, before un-merging and removal); \
@@ -3027,6 +3032,8 @@ fn print_sweep_disclosure(
         emission.arms_without_profile,
         emission.members_raised_to_a_branch,
         emission.arm_junctions_inverted_in_ledger,
+        emission.load_steps_tapered,
+        emission.load_step_layers_raised,
         report.landings.plate,
         report.plate_contact_area_mm2,
         report.junctions_at_parent_top,
@@ -3233,6 +3240,18 @@ fn print_sweep_disclosure(
         lane.brace_bands_moved_above_flare,
         lane.brace_bands_dropped_in_flare,
         lane.masts_raised_above_flare,
+    );
+    // MAST TIE HEIGHT AND THE THICKEN LAP ON THE DRAWN FEET
+    // (fix/mast-tie-and-overlap-factor, 2026-10-02). Path-hit witnesses.
+    println!(
+        "[sweep {model}] mast ties and drawn feet: {} mast attempts tied above the crosses' \
+         first evenly spaced layer (the piece above within its limit), {} of all mast attempts \
+         raised past the highest evenly spaced layer for the piece above to fit its own limit; \
+         {} thickenings admitted on the drawn boss feet that the crowding discs would have \
+         refused",
+        lane.mast_ties_planned_above_the_first_tie,
+        lane.mast_ties_raised_for_the_piece_above,
+        lane.thicken_admitted_where_the_crowding_disc_laps,
     );
     // BRACING REWORK (Craig's rulings of 2026-10-01): every brace band refused,
     // by its one reason; crosses kept in their own plane where a thickening

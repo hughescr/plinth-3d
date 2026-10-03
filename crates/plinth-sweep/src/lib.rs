@@ -72,7 +72,7 @@ use plinth_mesh::Mesh;
 use plinth_support::perception::{slice_stack, SliceStackLimits};
 use thiserror::Error;
 
-pub use adapter::{arms_of, to_primitives, SweepEmission};
+pub use adapter::{arms_of, to_primitives, LoadStepTaper, SweepEmission};
 pub use congestion::{CongestionCensus, CongestionOutcome, CongestionReport};
 pub use drain::{DrainKeepOut, DrainSpec, DrainVerdict, EscapeReport};
 pub use limits::SweepLimits;
@@ -388,6 +388,9 @@ pub struct SweepPlan {
     pub plate_z_mm: f64,
     pub struts: Vec<SweepStrut>,
     pub report: SweepRunReport,
+    /// How the plan's load steps are drawn ([`adapter::LoadStepTaper`]): the
+    /// sweep's rules measured this profile, and the lowering draws it.
+    pub load_step_taper: adapter::LoadStepTaper,
 }
 
 impl SweepPlan {
@@ -677,6 +680,11 @@ pub struct SweepPolicy {
     /// back. Sabotage and comparison only; nothing in the pipeline turns it
     /// off.
     pub lip_seat_across_passes: bool,
+    /// Whether a load step on a support arm is drawn as a cone above its
+    /// junction ([`adapter::LoadStepTaper`], 2026-10-02), at the registered
+    /// lean law's largest step per layer. **On in production.** The drill
+    /// turns it off, and the shoulders come back.
+    pub load_step_taper: bool,
     /// `DECIMATION_PROBE_GRID_PITCH_MM` and `DECIMATION_PROBE_MAX_GRID_BYTES`:
     /// the registered parity-grid pitch and byte cap of a distance-probe
     /// surface index. The head-join rule builds one over the model to measure
@@ -793,6 +801,7 @@ impl SweepPolicy {
             head_join: true,
             lip_seat: true,
             lip_seat_across_passes: true,
+            load_step_taper: true,
             surface_index_pitch_mm: placeholders
                 .decimation_probe_grid_pitch_mm()
                 .diagnostic()
@@ -1086,6 +1095,15 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_lip_seat_across_passes(mut self) -> Self {
         self.lip_seat_across_passes = false;
+        self
+    }
+
+    /// Draw every load step as the sharp shoulder this engine drew before
+    /// 2026-10-02. **Sabotage only**: the drill sets it and the Cylinder's
+    /// shoulders come back (`tests/it/tapered_load_steps.rs`).
+    #[must_use]
+    pub const fn without_load_step_taper(mut self) -> Self {
+        self.load_step_taper = false;
         self
     }
 
@@ -1592,129 +1610,6 @@ pub fn run_sweep_with_drains(
     // was there and never bit.
     set_interior(&mut struts, &history);
 
-    // Which faces a tip may carry: the faces the registered overhang law
-    // weighs as an overhang (orchestrator ruling 2026-09-30,
-    // `tip_landing::SeatFaceRule`). Read by the lip-seat and head-join passes
-    // and by the finished plan's seat faces, so all three measure a tip
-    // against one face.
-    let seat_face_rule = if policy.seat_face_band {
-        tip_landing::SeatFaceRule::from_overhang_band(
-            policy.overhang_centre_deg,
-            policy.overhang_transition_deg,
-        )
-    } else {
-        tip_landing::SeatFaceRule::any_down_facing()
-    };
-    let slenderness_law = if policy.slenderness {
-        slenderness::SlendernessLaw::new(
-            policy.slenderness_ratio,
-            policy.tip_radius_min_mm,
-            policy.tip_radius_max_mm,
-            policy.overhang_centre_deg - 0.5 * policy.overhang_transition_deg,
-        )
-    } else {
-        slenderness::SlendernessLaw::disabled()
-    };
-    let slenderness_context = slenderness::SlendernessContext {
-        grid: &grid,
-        history: &history,
-        keep_out: &keep_out,
-        lean: &law,
-        law: &slenderness_law,
-        shaft_landings: policy.shaft_landings,
-        layer_height_mm: height,
-        layers,
-        merge: policy.slenderness_merge,
-        brace: policy.slenderness_brace,
-        thicken: policy.slenderness_thicken,
-        mast: policy.slenderness_mast,
-        flare_factor: policy.flare_r_factor,
-        mast_root_clearance: policy.slenderness_mast_root_clearance,
-        final_clearance_mm: policy.final_clearance_gap_mm,
-        member_clearance: policy.member_clearance,
-        max_struts: policy.limits.max_struts,
-        x_allowed: policy.x_allowed,
-        seat_faces: seat_face_rule,
-    };
-
-    // --- stranded seats: a stranded contact is a tip, not a new root -------
-    //
-    // On the SIZED field, because "laps a standing root" is a question about
-    // sized roots (`stranded_branch.rs`). Before the congestion lane, so the
-    // lane measures and relieves the field this rule leaves rather than the
-    // pile-up it removes. Each round is sized again by the same down-sweep,
-    // and a branch whose trunk came out at the maximum radius is put back and
-    // its pair refused, so the next round tries the next lapped root. It runs
-    // until a round makes no branch: a re-sized trunk can grow into a NEW lap
-    // the round before never saw (measured on the laid tube: a third round was
-    // needed, and the registered pass count of 2 stopped it with a lapping
-    // trunk unjudged). It terminates without a tuned bound: only members on
-    // the plate are judged, a kept branch is off the plate, and a put-back
-    // refuses that pair for good; the bound below (one round per stranded
-    // member, plus one) is that count, not a knob.
-    let stranded = stranded_branch::stranded_ids(&struts, &greedy.stranded_seat_cells);
-    let mut stranded_branch_outcome = stranded_branch::StrandedBranchOutcome {
-        enabled: policy.stranded_branch,
-        stranded_members: stranded.len(),
-        ..stranded_branch::StrandedBranchOutcome::default()
-    };
-    stranded_branch_outcome.lapping_ids_before =
-        stranded_branch::census(&slenderness_context, &struts, &stranded);
-    stranded_branch_outcome.lapping_before = stranded_branch_outcome.lapping_ids_before.len();
-    if policy.stranded_branch && stranded_branch_outcome.lapping_before > 0 {
-        let mut refused = std::collections::HashSet::new();
-        for _ in 0..=stranded.len() {
-            let made = stranded_branch::branch_round(
-                &slenderness_context,
-                plate_z,
-                &mut struts,
-                &stranded,
-                &refused,
-                &mut stranded_branch_outcome,
-            );
-            if made.is_empty() {
-                break;
-            }
-            stranded_branch_outcome.rounds += 1;
-            outcome = down_sweep::run(
-                &grid,
-                &slices,
-                &mut struts,
-                sizing,
-                insertion,
-                &keep_out,
-                &unrooted,
-            );
-            let undone = stranded_branch::put_back_overloaded(
-                &mut struts,
-                &made,
-                policy.tip_radius_max_mm,
-                &mut refused,
-                &mut stranded_branch_outcome,
-            );
-            if undone > 0 {
-                outcome = down_sweep::run(
-                    &grid,
-                    &slices,
-                    &mut struts,
-                    sizing,
-                    insertion,
-                    &keep_out,
-                    &unrooted,
-                );
-            }
-        }
-        set_interior(&mut struts, &history);
-        landings.record(
-            "stranded-seat branches",
-            &landing_check::check_landings(&struts),
-        );
-    }
-    stranded_branch_outcome.branches_kept = stranded_branch_outcome.branches.len();
-    stranded_branch_outcome.lapping_ids_after =
-        stranded_branch::census(&slenderness_context, &struts, &stranded);
-    stranded_branch_outcome.lapping_after = stranded_branch_outcome.lapping_ids_after.len();
-
     // --- congestion: spread the footprint, then shed load to the flanks ----
     //
     // BEFORE the slenderness lane, deliberately. This lane MOVES a root
@@ -1816,10 +1711,20 @@ pub fn run_sweep_with_drains(
     congestion_outcome.at_lane_exit =
         congestion::measure(&grid, &history, &struts, policy.flare_r_factor);
     landings.record("congestion", &landing_check::check_landings(&struts));
-    stranded_branch_outcome.lapping_by_lane.push((
-        "congestion",
-        stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
-    ));
+
+    // Which faces a tip may carry: the faces the registered overhang law
+    // weighs as an overhang (orchestrator ruling 2026-09-30,
+    // `tip_landing::SeatFaceRule`). Read by the lip-seat and head-join passes
+    // and by the finished plan's seat faces, so all three measure a tip
+    // against one face.
+    let seat_face_rule = if policy.seat_face_band {
+        tip_landing::SeatFaceRule::from_overhang_band(
+            policy.overhang_centre_deg,
+            policy.overhang_transition_deg,
+        )
+    } else {
+        tip_landing::SeatFaceRule::any_down_facing()
+    };
 
     // --- slenderness: merge, then |X|, then a mast, then a warning ---------
     //
@@ -1828,9 +1733,144 @@ pub fn run_sweep_with_drains(
     // and remedy 1 re-chooses a descent against the up-sweep's own column
     // history. This is the iterate that already re-runs the down-sweep after
     // it moves arms, so a brace is sized and its junction splits its shaft's
-    // ledger by the same pass that sizes everything else. (Its context is
-    // built above, before the stranded-seat branch rule, which path-tests its
-    // landings with the same `segment_path`.)
+    // ledger by the same pass that sizes everything else.
+    // THE LOAD-STEP TAPER (fix/tapered-load-steps, 2026-10-02): the REGISTERED
+    // lean law's step, whatever the lean sabotage knob says, so that switching
+    // off the lean does not also bring the shoulders back.
+    let load_step_taper = if policy.load_step_taper {
+        adapter::LoadStepTaper::of(&lean::LeanLaw::new(
+            height,
+            policy.overhang_centre_deg,
+            policy.overhang_transition_deg,
+        ))
+    } else {
+        adapter::LoadStepTaper::OFF
+    };
+    let slenderness_law = if policy.slenderness {
+        slenderness::SlendernessLaw::new(
+            policy.slenderness_ratio,
+            policy.tip_radius_min_mm,
+            policy.tip_radius_max_mm,
+            policy.overhang_centre_deg - 0.5 * policy.overhang_transition_deg,
+        )
+    } else {
+        slenderness::SlendernessLaw::disabled()
+    };
+    let slenderness_context = slenderness::SlendernessContext {
+        grid: &grid,
+        history: &history,
+        keep_out: &keep_out,
+        lean: &law,
+        law: &slenderness_law,
+        shaft_landings: policy.shaft_landings,
+        layer_height_mm: height,
+        layers,
+        merge: policy.slenderness_merge,
+        brace: policy.slenderness_brace,
+        thicken: policy.slenderness_thicken,
+        mast: policy.slenderness_mast,
+        flare_factor: policy.flare_r_factor,
+        mast_root_clearance: policy.slenderness_mast_root_clearance,
+        final_clearance_mm: policy.final_clearance_gap_mm,
+        member_clearance: policy.member_clearance,
+        max_struts: policy.limits.max_struts,
+        x_allowed: policy.x_allowed,
+        seat_faces: seat_face_rule,
+        load_step_taper,
+    };
+
+    // --- stranded seats: a stranded contact is a tip, not a new root -------
+    //
+    // Before the slenderness merges, with their context: the rule path-tests
+    // its landings with the same `segment_path`.
+    //
+    // On the SIZED field, because "laps a standing root" is a question about
+    // sized roots (`stranded_branch.rs`). Each round is sized again by the
+    // same down-sweep, and a branch whose trunk came out at the maximum radius
+    // is put back and its pair refused, so the next round tries the next
+    // lapped root. It runs until a round makes no branch: a re-sized trunk can
+    // grow into a NEW lap the round before never saw (measured on the laid
+    // tube: a third round was needed, and the registered pass count of 2
+    // stopped it with a lapping trunk unjudged). It terminates without a tuned
+    // bound: only members on the plate are judged, a kept branch is off the
+    // plate, and a put-back refuses that pair for good; the bound below (one
+    // round per stranded member, plus one) is that count, not a knob.
+    //
+    // AFTER THE CONGESTION LANE, not before it (2026-10-02, measured). The
+    // congestion lane's remedy 1 leans a stacked root out to clear plate, and
+    // only a LEAF: a member something lands on is never a candidate
+    // (`congestion::lean_congested_roots`, "moving a parent breaks its
+    // children"). Run first, this rule turned stranded posts and their
+    // neighbours into trunks, and the lane could no longer lean them: on the
+    // laid tube at develop `469d482` it took the overlapping pairs from 38 to
+    // 20 at the lane's entry, but the lane then leaned 11 roots instead of 22
+    // and the finished field held 9 pairs against 8 without the rule. Run
+    // after, the lane first clears every leaf it can, and this rule branches
+    // only the stranded members the lane left lapping. The ids are found here,
+    // after the lane, because withdrawing idle flank arms renumbers members.
+    let stranded = stranded_branch::stranded_ids(&struts, &greedy.stranded_seat_cells);
+    let mut stranded_branch_outcome = stranded_branch::StrandedBranchOutcome {
+        enabled: policy.stranded_branch,
+        stranded_members: stranded.len(),
+        ..stranded_branch::StrandedBranchOutcome::default()
+    };
+    stranded_branch_outcome.lapping_ids_before =
+        stranded_branch::census(&slenderness_context, &struts, &stranded);
+    stranded_branch_outcome.lapping_before = stranded_branch_outcome.lapping_ids_before.len();
+    if policy.stranded_branch && stranded_branch_outcome.lapping_before > 0 {
+        let mut refused = std::collections::HashSet::new();
+        for _ in 0..=stranded.len() {
+            let made = stranded_branch::branch_round(
+                &slenderness_context,
+                plate_z,
+                &mut struts,
+                &stranded,
+                &refused,
+                &mut stranded_branch_outcome,
+            );
+            if made.is_empty() {
+                break;
+            }
+            stranded_branch_outcome.rounds += 1;
+            outcome = down_sweep::run(
+                &grid,
+                &slices,
+                &mut struts,
+                sizing,
+                insertion,
+                &keep_out,
+                &unrooted,
+            );
+            let undone = stranded_branch::put_back_overloaded(
+                &mut struts,
+                &made,
+                policy.tip_radius_max_mm,
+                &mut refused,
+                &mut stranded_branch_outcome,
+            );
+            if undone > 0 {
+                outcome = down_sweep::run(
+                    &grid,
+                    &slices,
+                    &mut struts,
+                    sizing,
+                    insertion,
+                    &keep_out,
+                    &unrooted,
+                );
+            }
+        }
+        set_interior(&mut struts, &history);
+        landings.record(
+            "stranded-seat branches",
+            &landing_check::check_landings(&struts),
+        );
+    }
+    stranded_branch_outcome.branches_kept = stranded_branch_outcome.branches.len();
+    stranded_branch_outcome.lapping_ids_after =
+        stranded_branch::census(&slenderness_context, &struts, &stranded);
+    stranded_branch_outcome.lapping_after = stranded_branch_outcome.lapping_ids_after.len();
+
     let (mut slenderness_outcome, forced_merges) =
         slenderness::apply_merges(&slenderness_context, &mut struts);
     landings.record("slenderness merges", &landing_check::check_landings(&struts));
@@ -2091,7 +2131,7 @@ pub fn run_sweep_with_drains(
     // Measured on the FINISHED field, after the re-run, so the published run
     // lengths belong to the arms this file actually contains.
     let slenderness_after =
-        slenderness::unbraced_runs(&grid, &struts, height, &slenderness_law);
+        slenderness::unbraced_runs_drawn(&grid, &struts, height, &slenderness_law, load_step_taper);
     slenderness_outcome.longest_run_mm = 0.0;
     slenderness_outcome.longest_run_limit_mm = 0.0;
     // WHAT THE MAST'S PLACEMENT-TIME RADIUS GOT WRONG, measured on the sized
@@ -2275,6 +2315,7 @@ pub fn run_sweep_with_drains(
         plate_z_mm: plate_z,
         struts,
         report,
+        load_step_taper,
     };
     // THE FOOTPRINT RULE (fix/tip-trim, 2026-09-28): every tip's contact disc,
     // as the lowering will deliver it, graded against the eroded carrier
@@ -2335,13 +2376,14 @@ pub fn run_sweep_with_drains(
     // have moved.
     {
         let emitted = adapter::arms_of(&sweep_plan);
-        let (examined, listed, near_by_interior) =
-            head_join::census(&head_join_context, &sweep_plan.struts, &emitted);
+        let found = head_join::census(&head_join_context, &sweep_plan.struts, &emitted);
         let rule = &mut sweep_plan.report.head_join;
-        rule.in_seat_zone_after = listed;
-        rule.census_near_by_interior = near_by_interior;
+        rule.in_seat_zone_after = found.listed;
+        rule.census_near_by_interior = found.near_by_interior;
+        rule.census_load_cone_layers = found.cone_sections_graded;
+        rule.census_held_by_load_cone = found.held_by_cone;
         if !policy.head_join {
-            rule.joins_examined = examined;
+            rule.joins_examined = found.examined;
             rule.joins_in_seat_zone_before = rule.in_seat_zone_after.len();
         }
     }

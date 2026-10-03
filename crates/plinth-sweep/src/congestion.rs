@@ -115,6 +115,15 @@ impl RootDisc {
     pub(crate) const fn id(&self) -> u32 {
         self.id
     }
+
+    /// The BARE root radius this disc was flared from, read back from the
+    /// section it holds (`section_mm2 = π r_root²` wherever a disc is made or
+    /// grown: [`root_discs_drawn`], [`push_disc`], [`grow_disc`]). A test that
+    /// measures roots at the DRAWN boss foot rather than at the crowding
+    /// factor reads it ([`growth_laps_drawn`]).
+    pub(crate) fn bare_radius_mm(&self) -> f64 {
+        (self.section_mm2 / core::f64::consts::PI).max(0.0).sqrt()
+    }
 }
 
 /// One census of a set of root discs.
@@ -328,7 +337,12 @@ pub(crate) fn root_discs(
     struts: &[SweepStrut],
     flare_factor: f64,
 ) -> Vec<RootDisc> {
-    let (profiles, _) = crate::adapter::drawn_profiles(struts);
+    // Only the ROOT of each profile is read here, and the load-step taper
+    // never reaches a root: a cone starts one layer above a junction, and the
+    // junction raises it could feed come from a branch's root or a brace's
+    // top, which it never touches (`adapter::drawn_profiles`). So the root is
+    // the same with or without it, and no policy is needed to read it.
+    let (profiles, _) = crate::adapter::drawn_profiles(struts, crate::adapter::LoadStepTaper::OFF);
     root_discs_drawn(grid, history, struts, &profiles, flare_factor)
 }
 
@@ -1285,13 +1299,59 @@ pub(crate) fn growth_laps(
     (new_lap, existing)
 }
 
+/// [`growth_laps`] with every root measured at the foot the file DRAWS under
+/// it, `foot(bare root)`, instead of at the crowding factor the discs in
+/// `placed` were stored at: the grown root (`old_bare_mm` to `new_bare_mm`)
+/// and every placed root alike. The same [`centres_touch`] rule, asked twice,
+/// so the two tests can differ only in the radii they are handed.
+///
+/// The thicken rung asks this with the lowering's own boss
+/// ([`plinth_support::RootBoss::foot_radius_mm`], fix/mast-tie-and-overlap-factor
+/// 2026-10-02), so the lap that refuses a thickening is the lap the file
+/// would print.
+pub(crate) fn growth_laps_drawn(
+    grid: &Grid,
+    cell: usize,
+    old_bare_mm: f64,
+    new_bare_mm: f64,
+    placed: &[RootDisc],
+    skip: Option<usize>,
+    foot: impl Fn(f64) -> f64,
+) -> (bool, bool) {
+    let x = grid.center_x_mm(grid.col_of(cell));
+    let y = grid.center_y_mm(grid.row_of(cell));
+    let (old_mm, new_mm) = (foot(old_bare_mm), foot(new_bare_mm));
+    let (mut new_lap, mut existing) = (false, false);
+    for (slot, disc) in placed.iter().enumerate() {
+        if Some(slot) == skip {
+            continue;
+        }
+        let other_mm = foot(disc.bare_radius_mm());
+        if !centres_touch(x, y, new_mm, disc.x_mm, disc.y_mm, other_mm) {
+            continue;
+        }
+        if centres_touch(x, y, old_mm, disc.x_mm, disc.y_mm, other_mm) {
+            existing = true;
+        } else {
+            new_lap = true;
+        }
+    }
+    (new_lap, existing)
+}
+
 /// THE clearance rule, for one placed disc: whether a disc of `radius_mm`
 /// centred at `(x, y)` would touch it. [`clear_of_placed`] and
 /// [`PlacedIndex::clear`] both ask exactly this, so there is one rule.
 fn disc_touches(x: f64, y: f64, radius_mm: f64, disc: &RootDisc) -> bool {
-    let reach = radius_mm + disc.radius_mm;
-    let dx = disc.x_mm - x;
-    let dy = disc.y_mm - y;
+    centres_touch(x, y, radius_mm, disc.x_mm, disc.y_mm, disc.radius_mm)
+}
+
+/// Two discs touch when their centres are nearer than the sum of their radii.
+/// The one arithmetic behind [`disc_touches`] and [`growth_laps_drawn`].
+fn centres_touch(x: f64, y: f64, radius_mm: f64, other_x: f64, other_y: f64, other_mm: f64) -> bool {
+    let reach = radius_mm + other_mm;
+    let dx = other_x - x;
+    let dy = other_y - y;
     dx * dx + dy * dy < reach * reach
 }
 

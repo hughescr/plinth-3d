@@ -45,6 +45,19 @@
 //! assume. So this runs where the slenderness merges run: after a completed
 //! down-sweep has sized every member, followed by the same down-sweep again.
 //!
+//! # Why after the congestion lane
+//!
+//! The congestion lane leans a stacked root out to clear plate, but only a
+//! leaf: a member something lands on is never moved
+//! (`congestion::lean_congested_roots`). A branch makes its trunk a carrier,
+//! so this rule run FIRST took the leaf moves away from that lane. Measured on
+//! the laid tube at develop `469d482`: run first, the rule took the
+//! overlapping pairs from 38 to 20 at the lane's entry, the lane then leaned 11
+//! roots instead of 22, and the finished field held 9 pairs against 8 without
+//! the rule. Run after the lane, it branches only the stranded members the
+//! lane could not clear: 6 pairs against 8 on the finished field, and the
+//! Cylinder's 16 still come down to 4 (the lane leans none of its ring posts).
+//!
 //! # Overload: the next legal seat, never an overloaded trunk
 //!
 //! A branch hands its trunk its whole load, and the ring posts already carry
@@ -279,7 +292,7 @@ pub(crate) fn branch_round(
     outcome: &mut StrandedBranchOutcome,
 ) -> Vec<Branch> {
     let grid = context.grid;
-    let (profiles, _) = crate::adapter::drawn_profiles(struts);
+    let (profiles, _) = crate::adapter::drawn_profiles(struts, context.load_step_taper);
     let mut placed = crate::congestion::root_discs_drawn(
         grid,
         context.history,

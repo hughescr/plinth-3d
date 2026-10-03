@@ -186,6 +186,13 @@ pub struct HeadJoinOutcome {
     /// Of the emitted field's census below, the joins the interior term alone
     /// put in the seat zone.
     pub census_near_by_interior: usize,
+    /// THE LOAD-STEP CONE (fix/tapered-load-steps, 2026-10-02): joins the
+    /// first survey held by the cone above their booked section alone, and on
+    /// the emitted field's census the cone layers graded and the joins held by
+    /// their cone alone. Path-hit witnesses of the cone half of test 1.
+    pub joins_held_by_load_cone: usize,
+    pub census_load_cone_layers: usize,
+    pub census_held_by_load_cone: usize,
     /// Landers moved, over every pass.
     pub landers_moved: usize,
     /// Of those, the ones that went down the head arm's landing chain, onto a
@@ -697,8 +704,10 @@ fn model_edges_near_fans(
 /// The slot of `host` a member landed at `layer` is booked into
 /// (`down_sweep::run`): its landing layer, except that a load reaching the
 /// CONTACT slot (a landing at the seat layer or the top alive layer) is booked
-/// one slot under the contact where there is one.
-fn booked_slot(host: &SweepStrut, layer: usize) -> usize {
+/// one slot under the contact where there is one. It is an absolute LAYER.
+/// The load-step taper starts its cones here too
+/// ([`crate::adapter::load_step_cones`]), so both read one booking.
+pub(crate) fn booked_slot(host: &SweepStrut, layer: usize) -> usize {
     let contact = host.k_top.saturating_sub(1);
     let under_contact = if contact > host.k_bottom {
         contact - 1
@@ -842,6 +851,11 @@ struct Survey {
     /// sections only that interior term found near.
     interior_rows: usize,
     near_by_interior: usize,
+    /// Load-step cone layers graded above joins whose booked section cleared
+    /// the plane, and the joins the plane held by their cone alone
+    /// ([`crate::adapter::LoadStepTaper`]): path-hit witnesses.
+    cone_sections_graded: usize,
+    held_by_cone: usize,
     in_zone: Vec<Join>,
     heads: Vec<Option<Head>>,
     profiles: Vec<Vec<f64>>,
@@ -871,11 +885,18 @@ fn grade(
         model_rows: 0,
         interior_rows: 0,
         near_by_interior: 0,
+        cone_sections_graded: 0,
+        held_by_cone: 0,
         in_zone: Vec::new(),
         heads,
         profiles,
     };
     let height = context.slender.layer_height_mm;
+    // THE LOAD-STEP CONE (fix/tapered-load-steps, 2026-10-02): above a join the
+    // drawn shaft narrows to the host's own section over a few layers instead
+    // of in one, so it stands nearer the seat than the booked section does.
+    // Its sections are graded by the same test, keyed by (host, booked layer).
+    let cones = crate::adapter::load_step_cones(struts, context.slender.load_step_taper);
     let mut held: Vec<(Join, Section)> = Vec::new();
     for join in joins {
         let host = &struts[join.parent];
@@ -899,6 +920,31 @@ fn grade(
         let section = head.section_at(context.plate_z_mm, height, join.booked, radius);
         if head.plane_clearance(&section) < context.clearance_mm - 1.0e-9 {
             held.push((join, section));
+            continue;
+        }
+        // The booked section clears the plane; the cone above it may not. The
+        // cone section nearest the plane is the one carried on.
+        let cone_top = cones
+            .binary_search_by(|cone| (cone.host, cone.booked).cmp(&(join.parent, join.booked)))
+            .ok()
+            .map(|at| cones[at].top);
+        let Some(cone_top) = cone_top else {
+            continue;
+        };
+        let nearest = (join.booked + 1..=cone_top)
+            .filter_map(|layer| {
+                let radius = *out.profiles[join.parent].get(layer - host.k_bottom)?;
+                (radius > own * (1.0 + 1.0e-9))
+                    .then(|| head.section_at(context.plate_z_mm, height, layer, radius))
+            })
+            .map(|section| (head.plane_clearance(&section), section))
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        out.cone_sections_graded += cone_top - join.booked;
+        if let Some((clearance, section)) = nearest {
+            if clearance < context.clearance_mm - 1.0e-9 {
+                out.held_by_cone += 1;
+                held.push((join, section));
+            }
         }
     }
     if held.is_empty() {
@@ -935,10 +981,25 @@ fn survey(context: &HeadJoinContext<'_>, struts: &[SweepStrut]) -> Survey {
     if joins.is_empty() {
         return grade(context, struts, joins, Vec::new(), Vec::new());
     }
-    let (profiles, _) = crate::adapter::drawn_profiles(struts);
+    let (profiles, _) = crate::adapter::drawn_profiles(struts, context.slender.load_step_taper);
     let parents = sorted_unique(joins.iter().map(|join| join.parent).collect());
     let heads = measure(context, struts, &profiles, &parents);
     grade(context, struts, joins, heads, profiles)
+}
+
+/// What the emitted field's [`census`] found.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Census {
+    /// Joins on support arms.
+    pub examined: usize,
+    /// Every one whose sum-sized section (or the load-step cone above it)
+    /// still reaches its host's seat zone, as `(lander id, trunk id)`.
+    pub listed: Vec<(u32, u32)>,
+    /// Of those, the ones the filled-section interior term alone put there.
+    pub near_by_interior: usize,
+    /// Load-step cone layers graded, and joins held by their cone alone.
+    pub cone_sections_graded: usize,
+    pub held_by_cone: usize,
 }
 
 /// **The emitted field's census**: how many joins on support arms it has, and
@@ -951,11 +1012,14 @@ pub(crate) fn census(
     context: &HeadJoinContext<'_>,
     struts: &[SweepStrut],
     arms: &[SweepArm],
-) -> (usize, Vec<(u32, u32)>, usize) {
+) -> Census {
     let joins = arm_joins(struts);
     let examined = joins.len();
     if joins.is_empty() || arms.len() != struts.len() {
-        return (examined, Vec::new(), 0);
+        return Census {
+            examined,
+            ..Census::default()
+        };
     }
     let parents = sorted_unique(joins.iter().map(|join| join.parent).collect());
     let trunk_arms: Vec<SweepArm> = parents.iter().map(|&index| arms[index].clone()).collect();
@@ -970,7 +1034,13 @@ pub(crate) fn census(
         .iter()
         .map(|join| (struts[join.child].id, struts[join.parent].id))
         .collect();
-    (examined, listed, graded.near_by_interior)
+    Census {
+        examined,
+        listed,
+        near_by_interior: graded.near_by_interior,
+        cone_sections_graded: graded.cone_sections_graded,
+        held_by_cone: graded.held_by_cone,
+    }
 }
 
 /// Why a join could not be moved.
@@ -1339,6 +1409,7 @@ pub(crate) fn apply(
         outcome.joins_examined = found.examined;
         outcome.joins_in_seat_zone_before = found.in_zone.len();
         outcome.joins_off_the_model = found.off_the_model;
+        outcome.joins_held_by_load_cone = found.held_by_cone;
     }
     outcome.model_rows += found.model_rows;
     outcome.interior_rows += found.interior_rows;

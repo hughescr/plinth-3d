@@ -418,11 +418,17 @@ fn tube_drain() -> DrainSpec {
 /// * no silent survivor: every stranded member still on a lapped root when the
 ///   rule finished was judged in its last round and refused for a logged
 ///   reason (something resting on it that cannot move with it, or no landing
-///   the lean law and the path test admit). Measured on this fixture: 18
-///   before the rule, 7 on the finished field, every one a trunk lapping
-///   another trunk; it is a WARNING on the file, never a refusal;
+///   the lean law and the path test admit). Measured on this fixture at
+///   develop `469d482`, the rule running after the congestion lane: 7 when
+///   the rule began (the lane had leaned the leaves out), 2 when it finished,
+///   6 on the finished field against 9 without the rule (the slenderness
+///   merges and lip seats grow discs back into a lap); it is a WARNING on the
+///   file, never a refusal;
 /// * the census the owner sees: no more overlapping root pairs and no more
-///   cells under three or more roots than without the rule;
+///   cells under three or more roots than without the rule, on the FINISHED
+///   field (measured: 6 pairs against 8; with the rule run before the
+///   congestion lane it was 9 against 8, the integration failure that moved
+///   it);
 /// * nothing paid for it: no more uncarried load, no more overloaded members,
 ///   every member still rooted.
 #[test]
@@ -469,6 +475,25 @@ fn a_stranded_seat_lands_on_the_root_it_laps_instead_of_standing_beside_it() {
     println!(
         "after each later lane: {:?}; branches {:?}",
         b.stranded_branch.lapping_by_lane, b.stranded_branch.branches
+    );
+    // The overlapping root pairs at each stage, with / without the rule:
+    // entering the congestion lane (what this rule left), leaving it, and on
+    // the finished field.
+    println!(
+        "overlap pairs: congestion entry {} / {}, lane exit {} / {}, finished {} / {}; congestion \
+         rounds {} / {}, arms leaned {} / {}, flank arms {} / {}",
+        b.congestion_lane.before.all.overlap_pairs,
+        s.congestion_lane.before.all.overlap_pairs,
+        b.congestion_lane.at_lane_exit.all.overlap_pairs,
+        s.congestion_lane.at_lane_exit.all.overlap_pairs,
+        b.congestion_lane.after.all.overlap_pairs,
+        s.congestion_lane.after.all.overlap_pairs,
+        b.congestion_lane.rounds_used,
+        s.congestion_lane.rounds_used,
+        b.congestion_lane.arms_leaned,
+        s.congestion_lane.arms_leaned,
+        b.congestion_lane.arms_inserted,
+        s.congestion_lane.arms_inserted,
     );
     for decision in &b.stranded_branch.decisions {
         println!("decision {decision:?}");
@@ -550,6 +575,20 @@ fn a_stranded_seat_lands_on_the_root_it_laps_instead_of_standing_beside_it() {
 /// against 0 (two stranded seats standing on a lapped root), so the slab DOES
 /// show the defect on one layer.
 ///
+/// RE-PINNED PREMISE (2026-10-02, after merging develop `469d482`): the
+/// stranded-seat rule now runs AFTER the congestion lane (see
+/// `stranded_branch.rs`, "Why after the congestion lane"). On this slab the
+/// lane leans both lapping stranded posts out to clear plate, because they are
+/// leaves, so the rule finds nothing left to branch (`lapping_before` 0, which
+/// is the census when the rule begins). The defect's premise is therefore read
+/// where stranded seating leaves the field, at the congestion lane's ENTRY:
+/// more overlapping pairs with stranded seating than without. What is graded
+/// is unchanged: the congestion lane's exit, the rule's own exit
+/// (`lapping_after`), and every later lane up to the ties. With nothing to
+/// branch the rule does not touch the field, so the finished slab is
+/// develop's own (measured at `469d482`: 4 overlapping pairs with stranded
+/// seating against 0 without, all grown by the tie lane, as below).
+///
 /// Graded where the placement lanes end: at the congestion lane's exit, and
 /// through every later lane up to the ties. The ties are not graded here, on
 /// purpose and as a measurement: on this slab the tie lane's cross raises grow
@@ -567,12 +606,17 @@ fn stranded_seating_adds_no_overlapping_root_on_the_flat_slab() {
     let off = harness::sweep_with_drains(&mesh, &policy.without_stranded_seating(), &[drain]);
     println!(
         "flat slab: stranded seats {}, lapping before {} after {} finished {}, branches kept {}; \
-         overlap pairs {} with stranded seating, {} without",
+         overlap pairs with / without stranded seating: congestion entry {} / {}, lane exit {} / \
+         {}, finished {} / {}",
         seated.report.counters.stranded_seats,
         seated.report.stranded_branch.lapping_before,
         seated.report.stranded_branch.lapping_after,
         seated.report.stranded_branch.lapping_on_finished_field,
         seated.report.stranded_branch.branches_kept,
+        seated.report.congestion_lane.before.all.overlap_pairs,
+        off.report.congestion_lane.before.all.overlap_pairs,
+        seated.report.congestion_lane.at_lane_exit.all.overlap_pairs,
+        off.report.congestion_lane.at_lane_exit.all.overlap_pairs,
         seated.report.congestion_lane.after.all.overlap_pairs,
         off.report.congestion_lane.after.all.overlap_pairs,
     );
@@ -582,8 +626,9 @@ fn stranded_seating_adds_no_overlapping_root_on_the_flat_slab() {
     );
     assert!(seated.report.counters.stranded_seats > 0, "premise: the rule seats here");
     assert!(
-        seated.report.stranded_branch.lapping_before > 0,
-        "premise: a stranded seat stands on a lapped root before the rule"
+        seated.report.congestion_lane.before.all.overlap_pairs
+            > off.report.congestion_lane.before.all.overlap_pairs,
+        "premise: stranded seating stands a root on another before the congestion lane"
     );
     assert!(
         seated.report.congestion_lane.at_lane_exit.all.overlap_pairs
