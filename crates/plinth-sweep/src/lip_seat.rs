@@ -464,6 +464,9 @@ pub(crate) fn apply(
     let context = joins.slender;
     let surface = joins.surface();
     let tier = joins.clearance_mm;
+    // The raft top a re-landing on a member keeps its base disc above, as the
+    // head-join rule's joins do (`head_join::stays_above_raft`).
+    let floor_z_mm = crate::head_join::join_floor_z_mm(plate_z_mm, context.layer_height_mm);
     if surface.is_none() {
         outcome.clearance_unmeasured = true;
     }
@@ -774,7 +777,7 @@ pub(crate) fn apply(
                         .first()
                         .copied()
                         .unwrap_or(arm.tip_radius_mm);
-                    crate::head_join::stays_above_plate(arm.seat_mm, arm.base_mm, root, plate_z_mm)
+                    crate::head_join::stays_above_raft(arm.seat_mm, arm.base_mm, root, floor_z_mm)
                 }
             });
             if !above_plate {

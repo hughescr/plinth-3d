@@ -2742,7 +2742,7 @@ fn print_sweep_disclosure(
              {} section-to-model rows ({} model-edge rows against the filled sections; {} \
              sections, {} in the emitted census, near only by their interior), {} candidates \
              admitted off the model, \
-             {} candidates refused because the member's base disc would reach under the plate, \
+             {} candidates refused because the member's base disc would reach under the raft top, \
              {} pass(es){}; kept in the seat zone: no clear join {}, a cross tied to a mover {}, \
              not a support arm {}, no model surface {}; {} unmeasured",
             rule.joins_examined,
