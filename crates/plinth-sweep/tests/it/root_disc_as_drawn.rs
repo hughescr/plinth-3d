@@ -6,12 +6,17 @@
 //!
 //! `congestion::root_discs` sized every root disc from the LEDGER root,
 //! `radius_mm[0]`. The lowering draws the DRAWN root: the ledger raised by the
-//! junction clause wherever a thicker branch joins (in practice a brace, sized
-//! by its own slenderness minimum, which the ledger never hears of). So a
-//! 0.05 mm plate arm 0.50 mm from a 0.20 mm root reads, at the registered flare
-//! factor 1.6, as a 0.40 mm flare sum that clears; once a 0.20 mm brace joins
-//! it, the file draws its root at 0.20 mm, a 0.64 mm flare sum, and the two
-//! discs lap by 0.14 mm while the census still says 0.40 mm and no overlap.
+//! junction clause wherever a thicker branch joins. So a 0.05 mm plate arm
+//! 0.50 mm from a 0.20 mm root reads, at the registered flare factor 1.6, as
+//! a 0.40 mm flare sum that clears; once a 0.20 mm branch joins it, the file
+//! draws its root at 0.20 mm, a 0.64 mm flare sum, and the two discs lap by
+//! 0.14 mm while the census still says 0.40 mm and no overlap.
+//!
+//! RE-PINNED 2026-10-03 (rule R2, Craig ruling): the reviewer's case joined a
+//! 0.20 mm BRACE to the 0.05 mm arm. A brace raises nothing now (the lane
+//! never builds one thicker than its post, and the brace-junction raise is
+//! deleted), so the case is built with a 0.20 mm support-arm BRANCH landing
+//! on the arm instead, the joint the clause still raises.
 //!
 //! # The rule
 //!
@@ -115,7 +120,7 @@ fn member(
     clippy::cast_precision_loss,
     reason = "cell offsets of a few pitches and layer counts of a small fixture"
 )]
-fn the_census_counts_the_root_flares_the_file_draws_under_a_braced_post() {
+fn the_census_counts_the_root_flares_the_file_draws_under_a_raised_post() {
     // A real plan for its grid, frame and report; its strut set is replaced.
     let mesh = make_lonely_peak().expect("the lonely peak fixture");
     let (min_z, max_z) = z_span(&mesh);
@@ -130,7 +135,7 @@ fn the_census_counts_the_root_flares_the_file_draws_under_a_braced_post() {
     let flare = policy.flare_r_factor;
 
     // P (0.05 mm) and Q (0.20 mm) roots about 0.50 mm apart: their LEDGER
-    // flares clear, P's drawn root after a 0.20 mm brace does not.
+    // flares clear, P's drawn root after a 0.20 mm branch does not.
     let pitch = grid.pitch_mm();
     let gap_cells = (0.5 / pitch).round() as usize;
     let gap_mm = gap_cells as f64 * pitch;
@@ -163,20 +168,20 @@ fn the_census_counts_the_root_flares_the_file_draws_under_a_braced_post() {
     let p = plate_arm(0, p_cell, p_centre, 0.05);
     let q = plate_arm(1, q_cell, q_centre, 0.20);
     let r = plate_arm(2, r_cell, r_centre, 0.20);
-    // The brace: tops out on P, lands on R lower down.
+    // The branch: a 0.20 mm support arm standing on P part-way up (a brace
+    // raises nothing since 2026-10-03, rule R2).
     let (k_hi, k_lo) = (k_top / 2, k_top / 4);
-    let mut brace = member(
+    let branch = member(
         3,
         p_cell,
         p_centre,
-        StrutKind::Brace,
+        StrutKind::Arm,
         k_lo,
         k_hi,
-        Landing::Strut { id: 2, layer: k_lo },
+        Landing::Strut { id: 0, layer: k_lo },
         0.20,
     );
-    brace.seat_on_strut = Some(0);
-    plan.struts = vec![p, q, r, brace];
+    plan.struts = vec![p, q, r, branch];
 
     let history = ColumnHistory::new(&grid);
     let census = congestion::measure(&grid, &history, &plan.struts, flare).all;

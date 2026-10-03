@@ -275,9 +275,16 @@ fn deleting_the_clearance_rule_brings_the_overlapping_masts_back() {
     // with it deleted, and still 0 and 1 with the lip-seat rule off, so the
     // lip-seat lane is not what took them; with the cut off it places 4 and 3.
     // The clearance rule reads no creep.
+    //
+    // RE-PINNED 2026-10-03 (fix/brace-window-cap, rule R2): and with the
+    // brace cap off (`without_brace_cap`). Under R2 a mast's diagonal may be
+    // no thicker than the arm it ties; on this configuration that refused
+    // every mast with the clearance rule in force and deleted (0 and 0,
+    // measured 2026-10-03). The clearance rule reads no brace radius.
     let fixture =
         crate::harness::at_path_fixture_seating(crate::harness::at_path_fixture_x(policy()))
-            .without_creep_overhang_cut();
+            .without_creep_overhang_cut()
+            .without_brace_cap();
     let clean = sweep_with(&mesh, 0.0, &fixture);
     let sabotaged = sweep_with(&mesh, 0.0, &fixture.without_mast_root_clearance());
 

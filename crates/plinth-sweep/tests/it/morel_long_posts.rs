@@ -276,7 +276,21 @@ fn every_brace_end_on_the_laid_tube_meets_its_posts_drawn_solid() {
     let mesh = make_laid_tube().expect("the laid tube fixture");
     for (name, policy, witness) in [
         ("production", policy(), false),
-        ("creep cut off", policy().without_creep_overhang_cut(), true),
+        // RE-PINNED 2026-10-03 (fix/brace-window-cap, rules R2 and R7 + D5):
+        // the witness field also runs with the brace cap and the brace window
+        // off. With both in force its 228 brace ends include 4 on leaning
+        // plate posts and none that would miss on the planned line; with the
+        // cap alone off, 236 and 4 and none; with both off, 448 ends, 60 on
+        // leaning plate posts, 23 of those missing on the planned line
+        // (measured 2026-10-03). The drawn-line rule reads neither rule.
+        (
+            "creep cut off",
+            policy()
+                .without_creep_overhang_cut()
+                .without_brace_cap()
+                .without_brace_window(),
+            true,
+        ),
     ] {
         let plan = harness::sweep_with(&mesh, 0.0, &policy);
         let census = brace_end_census(&plan);

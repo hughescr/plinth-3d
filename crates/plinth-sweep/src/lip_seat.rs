@@ -2160,6 +2160,8 @@ mod model_landing_tests {
             x_allowed: 18.0,
             seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
             load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
+            brace_cap: true,
+            brace_window: true,
         };
         let struts = vec![strut.clone()];
         let mut index = ColumnHistory::new(&grid);

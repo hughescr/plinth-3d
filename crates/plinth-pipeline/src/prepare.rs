@@ -3287,6 +3287,31 @@ fn print_sweep_disclosure(
         lane.crosses_kept_in_their_own_plane,
         lane.landing_ties_held_late,
     );
+    // BRACE WINDOW AND CAP (Craig ruling 2026-10-03, rules R2, R7 + D5 and
+    // D9, interim pending the slenderness coupon). Path-hit witnesses, and
+    // the R2 census on the finished field (a WARNING quantity).
+    println!(
+        "[sweep {model}] brace window: {} bands refused for a diagonal thicker than a post \
+         (R2); {} crosses refused because thickening costs less resin, {} runs then \
+         thickened (highest L/limit {:.3}; lowest L/limit braced where thickening was \
+         admissible {:.3}); {} crosses refused past the pair's two-post ceiling, {} runs \
+         thickened into the window; {} crosses shared by both posts; {} braces drawn \
+         thicker than a post at a joint{}",
+        lane.brace_band_refusals.thicker_than_post,
+        lane.crosses_refused_thicken_cheaper,
+        lane.thickened_where_cheaper_than_bracing,
+        lane.window_highest_thickened_ratio,
+        lane.window_lowest_braced_ratio,
+        lane.crosses_refused_past_pair_ceiling,
+        lane.members_thickened_into_the_window,
+        lane.crosses_shared_by_both_posts,
+        lane.braces_thicker_than_a_post,
+        if lane.braces_thicker_than_a_post > 0 {
+            " [WARNING on an emitted file, never a refusal]"
+        } else {
+            ""
+        },
+    );
     for warning in lane.warnings.iter().take(20) {
         println!(
             "[sweep {model}]   unbraced_run_over_limit: arm {} layers {}..{} runs {:.3} mm \
