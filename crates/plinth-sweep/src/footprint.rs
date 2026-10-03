@@ -1055,7 +1055,7 @@ fn settle(
         if section.is_empty() {
             break;
         }
-        let followed = followed_shifts_with(struts, &own);
+        let followed = followed_shifts_with(struts, &own, &[]);
         let drawn: Vec<SweepArm> = section
             .iter()
             .map(|&slot| {
@@ -1166,7 +1166,7 @@ fn check_moves(
             own[check.search_arms[slot]] = Some(shift);
             in_round[slot] = true;
         }
-        let followed = followed_shifts_with(struts, &own);
+        let followed = followed_shifts_with(struts, &own, &[]);
         for (index, moved) in followed.iter().enumerate() {
             if moved.seat_mm.is_none() && moved.base_mm.is_none() {
                 continue;
@@ -1254,13 +1254,44 @@ pub fn followed_shifts(struts: &[SweepStrut]) -> Vec<Followed> {
                 .then_some(strut.seat_face.shift_mm)
         })
         .collect();
-    followed_shifts_with(struts, &own)
+    followed_shifts_with(struts, &own, &[])
+}
+
+/// [`followed_shifts`], with each member's DRAWN line offset from its planned
+/// one (`line_offsets[i]`, [`crate::adapter::drawn_line_offset`]; an empty
+/// slice or `None` means the two coincide) added to the displacement a
+/// member joined to it follows (fix/morel-long-posts, 2026-10-02).
+///
+/// The offset moves only the members JOINED to a member — the branch that
+/// lands on it, the diagonal that seats or lands on it — never the member's
+/// own ends: the lowering already draws a leaning plate post along its drawn
+/// line, and what was off that line was everything placed on the planned
+/// one. A member nothing is joined to, or joined only to members whose two
+/// lines coincide, follows exactly what [`followed_shifts`] gives it.
+#[must_use]
+pub fn followed_shifts_drawn(
+    struts: &[SweepStrut],
+    line_offsets: &[Option<crate::adapter::LineOffset>],
+) -> Vec<Followed> {
+    let own: Vec<Option<[f64; 3]>> = struts
+        .iter()
+        .map(|strut| {
+            (strut.seat_face.footprint == Footprint::MovedOntoFace)
+                .then_some(strut.seat_face.shift_mm)
+        })
+        .collect();
+    followed_shifts_with(struts, &own, line_offsets)
 }
 
 /// [`followed_shifts`] for a proposed set of own seat moves (`own[i]` is
 /// member `i`'s own seat move, `None` where it has none), so the footprint
-/// rule can judge a set of moves before it writes any of them.
-fn followed_shifts_with(struts: &[SweepStrut], own_moves: &[Option<[f64; 3]>]) -> Vec<Followed> {
+/// rule can judge a set of moves before it writes any of them; and with the
+/// hosts' drawn-line offsets of [`followed_shifts_drawn`] (empty: none).
+fn followed_shifts_with(
+    struts: &[SweepStrut],
+    own_moves: &[Option<[f64; 3]>],
+    line_offsets: &[Option<crate::adapter::LineOffset>],
+) -> Vec<Followed> {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum State {
         New,
@@ -1268,9 +1299,18 @@ fn followed_shifts_with(struts: &[SweepStrut], own_moves: &[Option<[f64; 3]>]) -
         Done,
     }
     let mut out = vec![Followed::default(); struts.len()];
-    if own_moves.iter().all(Option::is_none) {
+    if own_moves.iter().all(Option::is_none) && line_offsets.iter().all(Option::is_none) {
         return out;
     }
+    // A host's drawn line off its planned one, at `layer` (`None` where the
+    // two coincide).
+    let drawn_off = |host: usize, layer: usize| -> Option<[f64; 3]> {
+        line_offsets
+            .get(host)
+            .copied()
+            .flatten()
+            .map(|offset| crate::adapter::offset_at(&offset, &struts[host], layer))
+    };
     let hosts = |index: usize| -> [Option<usize>; 2] {
         let strut = &struts[index];
         let seat_host = strut
@@ -1286,7 +1326,7 @@ fn followed_shifts_with(struts: &[SweepStrut], own_moves: &[Option<[f64; 3]>]) -
         [seat_host, base_host]
     };
     // The host's axis displacement at `layer`; `None` for an unmoved host.
-    let along = |out: &[Followed], host: usize, layer: usize| -> Option<[f64; 3]> {
+    let moved_along = |out: &[Followed], host: usize, layer: usize| -> Option<[f64; 3]> {
         let h = &struts[host];
         let Followed { seat_mm, base_mm } = out[host];
         if seat_mm.is_none() && base_mm.is_none() {
@@ -1305,6 +1345,16 @@ fn followed_shifts_with(struts: &[SweepStrut], own_moves: &[Option<[f64; 3]>]) -
         Some(std::array::from_fn(|axis| {
             t * seat[axis] + (1.0 - t) * base[axis]
         }))
+    };
+    // The host's axis displacement at `layer`, its drawn-line offset there
+    // added; `None` for a host that neither moved nor draws off its plan.
+    let along = |out: &[Followed], host: usize, layer: usize| -> Option<[f64; 3]> {
+        let moved = moved_along(out, host, layer);
+        match (moved, drawn_off(host, layer)) {
+            (moved, None) => moved,
+            (None, Some(off)) => Some(off),
+            (Some(moved), Some(off)) => Some(std::array::from_fn(|axis| moved[axis] + off[axis])),
+        }
     };
     let mut state = vec![State::New; struts.len()];
     let mut stack: Vec<usize> = Vec::new();

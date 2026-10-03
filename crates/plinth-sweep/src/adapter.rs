@@ -423,6 +423,108 @@ pub(crate) fn drawn_ends(
     ([x, y, seat_z], [base_x, base_y, base_z])
 }
 
+/// How far a member's DRAWN shaft line stands from the line it was planned
+/// on: `(at its seat, at its base)`, each a horizontal displacement in mm.
+/// Linear in between, because both lines are straight.
+pub type LineOffset = ([f64; 3], [f64; 3]);
+
+/// **A member's drawn shaft is where its junctions go** (fix/morel-long-posts,
+/// 2026-10-02): the displacement of `arm`'s drawn shaft line
+/// ([`plinth_support::SweepRootFlare::plate_shaft_of`], the lowering's own
+/// line) from the planned line between `arm.seat_mm` and `arm.base_mm`, at the
+/// seat's height and at the base's; `None` where the two lines are the same
+/// line, which is every member except one that stands on the plate and LEANS.
+///
+/// A leaning plate post is planned from its seat to its base ON THE PLATE,
+/// but its boss stands vertically over its foot, so the file draws its shaft
+/// from the seat to the boss top over the foot: a steeper line, which leaves
+/// the planned one by up to `lateral × boss_top / (seat_height − boss_top)`.
+/// A diagonal or a branch placed on the PLANNED line therefore ended up to
+/// 0.585 mm off the drawn post (Morel base, for-craig-v10: brace records
+/// 1334-1337 on post 578, 0.08-0.26 mm of air between brace end and post
+/// surface; 24 such ends on the Cylinder, 8 on the laid tube, 3 on the
+/// Sphere). The offset is what moves such a junction onto the drawn line,
+/// exactly as a footprint move of the post's seat moves it
+/// ([`crate::footprint::followed_shifts_drawn`]).
+///
+/// At a planned point a fraction `t` of the way from base to seat the drawn
+/// line is displaced by `t · seat + (1 − t) · base` of the returned pair,
+/// because the drawn point AT THE SAME HEIGHT is linear in that height, and
+/// the height is linear in `t`.
+#[must_use]
+pub fn drawn_line_offset(
+    flare: &plinth_support::SweepRootFlare,
+    arm: &SweepArm,
+    plate_z_mm: f64,
+) -> Option<LineOffset> {
+    if arm.landing != SweepArmLanding::Plate {
+        return None;
+    }
+    // A vertical member's drawn line is its planned line (the boss stands
+    // under its own seat); nothing moves, bit for bit.
+    if arm.seat_mm[0] == arm.base_mm[0] && arm.seat_mm[1] == arm.base_mm[1] {
+        return None;
+    }
+    let (top, bottom) = flare.plate_shaft_of(arm, plate_z_mm)?;
+    let rise = top[2] - bottom[2];
+    if !(rise.is_finite() && rise > 0.0) {
+        return None;
+    }
+    let drawn_at = |z: f64| -> [f64; 3] {
+        let t = (top[2] - z) / rise;
+        [
+            top[0] + t * (bottom[0] - top[0]),
+            top[1] + t * (bottom[1] - top[1]),
+            z,
+        ]
+    };
+    let off = |planned: [f64; 3]| -> [f64; 3] {
+        let drawn = drawn_at(planned[2]);
+        [drawn[0] - planned[0], drawn[1] - planned[1], 0.0]
+    };
+    Some((off(arm.seat_mm), off(arm.base_mm)))
+}
+
+/// [`drawn_line_offset`] for a member as it stands in the plan, before any
+/// seat face is measured (the lowering's fallback normal, straight down, as
+/// [`crate::slenderness`]'s free-shaft floor reads it too), for the rules
+/// that place junctions on it while the field is still being built.
+#[must_use]
+pub(crate) fn planned_line_offset(
+    flare: &plinth_support::SweepRootFlare,
+    grid: &crate::grid::Grid,
+    layer_height_mm: f64,
+    strut: &crate::SweepStrut,
+) -> Option<LineOffset> {
+    if strut.landing != Landing::Plate
+        || strut.kind == crate::StrutKind::Brace
+        || strut.k_bottom == usize::MAX
+        || !strut.is_leaned()
+    {
+        return None;
+    }
+    let (seat, base) = drawn_ends(grid, 0.0, layer_height_mm, strut);
+    let arm = sweep_arm(strut, seat, base, None, Vec::new());
+    drawn_line_offset(flare, &arm, 0.0)
+}
+
+/// The displacement [`LineOffset`] gives at `layer` of `strut` (linear in the
+/// layer between its base and its seat).
+#[must_use]
+pub(crate) fn offset_at(offset: &LineOffset, strut: &crate::SweepStrut, layer: usize) -> [f64; 3] {
+    let span = strut.k_top.saturating_sub(strut.k_bottom);
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "layer indices bounded by the plan's own layer count are exact in f64"
+    )]
+    let t = if span == 0 {
+        1.0
+    } else {
+        (layer.saturating_sub(strut.k_bottom) as f64 / span as f64).clamp(0.0, 1.0)
+    };
+    std::array::from_fn(|axis| t * offset.0[axis] + (1.0 - t) * offset.1[axis])
+}
+
 /// The lowering's view of one member, drawn between `seat_mm` and `base_mm`
 /// with the drawn radius `profile`. The one construction [`arms_of`] and the
 /// sweep's head-join rule ([`crate::head_join`]) both use, so the rule measures
@@ -471,42 +573,71 @@ fn arms_and_junction_raises(plan: &SweepPlan) -> (Vec<SweepArm>, JunctionRaises)
     let plate = plan.plate_z_mm;
     let grid = &plan.grid;
     let (mut profiles, raised) = junction_profiles(plan);
+    // THE FOOTPRINT RULE's move (fix/tip-trim, 2026-09-28): a seat whose
+    // contact disc hung off its face slides ALONG the face; a member joined to
+    // a moved axis follows it at the junction (`footprint::followed_shifts`).
+    // Applied only where non-zero, so every member nothing moved is
+    // bit-identical.
+    let build = |strut: &crate::SweepStrut,
+                 followed: crate::footprint::Followed,
+                 profile: Vec<f64>| {
+        let (seat, base) = drawn_ends(grid, plate, height, strut);
+        let crate::footprint::Followed {
+            seat_mm: seat_shift,
+            base_mm: base_shift,
+        } = followed;
+        let moved = |point: [f64; 3], by: Option<[f64; 3]>| -> [f64; 3] {
+            by.map_or(point, |by| std::array::from_fn(|axis| point[axis] + by[axis]))
+        };
+        // The face point moves with the arm's OWN seat move only.
+        let own_shift = (strut.seat_face.footprint == crate::Footprint::MovedOntoFace)
+            .then_some(strut.seat_face.shift_mm);
+        sweep_arm(
+            strut,
+            moved(seat, seat_shift),
+            moved(base, base_shift),
+            strut
+                .seat_face
+                .point_mm
+                .map(|point| moved(point, own_shift)),
+            profile,
+        )
+    };
     let followed = crate::footprint::followed_shifts(&plan.struts);
+    // A JUNCTION IS ON THE DRAWN SHAFT (fix/morel-long-posts, 2026-10-02): a
+    // leaning plate post's file shaft runs to its boss top over its foot, off
+    // the line it was planned on (`drawn_line_offset`), and every branch and
+    // diagonal joined to it follows the drawn line as it follows a footprint
+    // move. Each post's offset is read on the post as the file draws it (its
+    // own seat move applied); no post has a host at its base, so that is its
+    // final seat. A field with no leaning plate post is bit-identical.
+    let offsets: Vec<Option<LineOffset>> = match plinth_support::SweepRootFlare::registered(height)
+    {
+        Ok(flare) => plan
+            .struts
+            .iter()
+            .zip(&followed)
+            .map(|(strut, followed)| {
+                (strut.landing == Landing::Plate
+                    && strut.kind != crate::StrutKind::Brace
+                    && strut.is_leaned())
+                .then(|| drawn_line_offset(&flare, &build(strut, *followed, Vec::new()), plate))
+                .flatten()
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    let followed = if offsets.iter().any(Option::is_some) {
+        crate::footprint::followed_shifts_drawn(&plan.struts, &offsets)
+    } else {
+        followed
+    };
     let arms = plan
         .struts
         .iter()
         .zip(profiles.iter_mut())
-        .enumerate()
-        .map(|(index, (strut, profile))| {
-            let (seat, base) = drawn_ends(grid, plate, height, strut);
-            // THE FOOTPRINT RULE's move (fix/tip-trim, 2026-09-28): a seat
-            // whose contact disc hung off its face slides ALONG the face; a
-            // member joined to a moved axis follows it at the junction
-            // (`footprint::followed_shifts`). Applied only where non-zero, so
-            // every member nothing moved is bit-identical.
-            let crate::footprint::Followed {
-                seat_mm: seat_shift,
-                base_mm: base_shift,
-            } = followed[index];
-            let moved = |point: [f64; 3], by: Option<[f64; 3]>| -> [f64; 3] {
-                by.map_or(point, |by| {
-                    std::array::from_fn(|axis| point[axis] + by[axis])
-                })
-            };
-            // The face point moves with the arm's OWN seat move only.
-            let own_shift = (strut.seat_face.footprint == crate::Footprint::MovedOntoFace)
-                .then_some(strut.seat_face.shift_mm);
-            sweep_arm(
-                strut,
-                moved(seat, seat_shift),
-                moved(base, base_shift),
-                strut
-                    .seat_face
-                    .point_mm
-                    .map(|point| moved(point, own_shift)),
-                std::mem::take(profile),
-            )
-        })
+        .zip(followed)
+        .map(|((strut, profile), followed)| build(strut, followed, std::mem::take(profile)))
         .collect();
     (arms, raised)
 }

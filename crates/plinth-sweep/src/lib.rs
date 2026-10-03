@@ -2222,6 +2222,20 @@ pub fn run_sweep_with_drains(
         lip_seat_outcome.over_limit_after = over;
     }
     sweep_plan.report.lip_seat = lip_seat_outcome;
+    // EVERY MEMBER'S DRAWN SOLID AGAINST THE MODEL (fix/morel-long-posts,
+    // 2026-10-02), arm shafts included, on the arms exactly as they go to the
+    // lowering. Published and warned on, never refused.
+    {
+        let emitted = adapter::arms_of(&sweep_plan);
+        sweep_plan.report.member_model_clearance = member_clearance::model_clearance_census(
+            head_join_context.surface(),
+            &sweep_plan.struts,
+            &emitted,
+            plan,
+            plate_z,
+            policy.final_clearance_gap_mm,
+        );
+    }
     sweep_plan.report.sweep_digest = digest(&sweep_plan.struts);
     Ok(sweep_plan)
 }
@@ -3313,6 +3327,7 @@ fn build_report(
         per_event: outcome.per_event.clone(),
         rigid_share: crate::rigid_share::RigidShareReport::default(),
         lip_seat: crate::lip_seat::LipSeatOutcome::default(),
+        member_model_clearance: report::MemberModelClearance::default(),
         junctions_at_parent_top,
         junctions_mid_shaft,
         support_volume_mm3,

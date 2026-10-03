@@ -599,11 +599,17 @@ fn no_mast_is_thicker_than_the_member_it_braces_on_the_lonely_peak_without_thick
     // At the S this fixture was built at (`harness::PATH_FIXTURE_SLENDERNESS_RATIO`):
     // at the ruled 30 the panel check refuses every mast cell (0 masts,
     // measured 2026-10-01) and the cap graded here is never reached.
+    // RE-PINNED 2026-10-02 (fix/morel-long-posts): the lip-seat rule off, as
+    // in `mast_root_clearance`'s lonely-peak test and for the same reason:
+    // its clearance gate now refuses one of the fixture's lip-seat
+    // re-landings, and with that arm unmoved this configuration places no
+    // mast, so the cap graded here was never reached.
     let plan = sweep_with(
         &mesh,
         0.0,
         &SweepPolicy {
             slenderness_thicken: false,
+            lip_seat: false,
             ..crate::harness::at_path_fixture_slenderness(policy())
         },
     );

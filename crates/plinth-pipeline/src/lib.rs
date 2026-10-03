@@ -379,9 +379,11 @@ pub enum Placement {
     /// The slice-sweep core (`plinth-sweep`), **experimental**. It leans and
     /// merges arms, ties long members (`|X|` braces, thickened roots, masts)
     /// and keeps every brace's and mast's solid clear of the model and of the
-    /// other members. It skips the pre-write gate set, joint spheres and any
-    /// clearance check of an arm's own shaft; each of those absences is printed
-    /// on the run and is not a claim that they are unnecessary.
+    /// other members. It skips the pre-write gate set and joint spheres, and
+    /// does not keep an arm's own shaft clear of the model while placing it
+    /// (it measures every member's drawn solid against the model on the
+    /// finished field and warns); each of those absences is printed on the
+    /// run and is not a claim that they are unnecessary.
     Sweep,
 }
 

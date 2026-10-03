@@ -164,6 +164,289 @@ pub(crate) fn model_intrusion(
     None
 }
 
+/// **A member's own LANDING zone on the model** (fix/morel-long-posts,
+/// 2026-10-02): for each member that lands on the model, how far up its axis
+/// from its base the solid still stands within `tier` of the face it lands
+/// on, in mm; `0` for a member that does not land on the model.
+///
+/// A landing strikes the face: its base stands one lamina into the cured
+/// layer it lands on (`docs/physics.md`:284-324), so a clearance measured
+/// from base to seat reads that strike as an intrusion of about a lamina on
+/// EVERY model landing. That is the member's contact, exactly as the seat
+/// zone is at the other end ([`crate::head_join`]'s `own_seat_zone_mm`), and
+/// it is exempted the same way: the face the base lands on is the plane
+/// through its nearest surface point with that face's outward normal `n`;
+/// with `m` the unit axis from base to seat and `s` the base's signed height
+/// over that plane, the capsule of radius `r` first stands `tier` clear of
+/// the plane at `(tier + r − s) / (n·m)` along the axis. Measured on the
+/// Morel base (for-craig-v10): a model re-landing under the mushroom caps
+/// read −0.05 to −0.09 mm before the exemption, i.e. its own strike.
+///
+/// `f64::INFINITY` where the axis does not rise off the face (`n·m ≤ 0`) or
+/// the face is not measured: nothing of such a member can be judged, and the
+/// caller reads an unmeasured row as the strict answer.
+///
+/// Batch-first: one nearest-point query for all members.
+pub(crate) fn model_landing_zones_mm(
+    surface: &geom_kernel::NativeSurface,
+    seats: &[[f64; 3]],
+    bases: &[[f64; 3]],
+    radii: &[f64],
+    on_model: &[bool],
+    tier: f64,
+) -> Vec<f64> {
+    let faces = landing_faces(surface, bases, on_model);
+    (0..bases.len())
+        .map(|i| match faces.get(i).copied().flatten() {
+            None if on_model.get(i).copied().unwrap_or(false) => f64::INFINITY,
+            None => 0.0,
+            Some(face) => landing_zone_mm(face, bases[i], seats[i], radii[i], tier),
+        })
+        .collect()
+}
+
+/// The face each model-landed base strikes: its nearest surface point and
+/// that face's outward unit normal; `None` for a member not on the model, or
+/// a face the query could not name. One nearest-point batch.
+fn landing_faces(
+    surface: &geom_kernel::NativeSurface,
+    bases: &[[f64; 3]],
+    on_model: &[bool],
+) -> Vec<Option<([f64; 3], [f64; 3])>> {
+    let n = bases.len();
+    let wanted: Vec<usize> = (0..n)
+        .filter(|&i| on_model.get(i).copied().unwrap_or(false))
+        .collect();
+    let mut out = vec![None; n];
+    if wanted.is_empty() {
+        return out;
+    }
+    let points: Vec<[f64; 3]> = wanted.iter().map(|&i| bases[i]).collect();
+    let (_, closest, faces, normals) = surface.project(&points);
+    for (slot, &i) in wanted.iter().enumerate() {
+        if faces[slot] >= 0 {
+            out[i] = geom_kernel::vec3::normalize(normals[slot]).map(|normal| (closest[slot], normal));
+        }
+    }
+    out
+}
+
+/// [`model_landing_zones_mm`] for one member of radius `radius` on a landing
+/// face `(point, outward normal)`: `(tier + r − s) / (n·m)`, `m` the unit
+/// axis from `base` to `top`, `s` the base's signed height over the face
+/// plane; `f64::INFINITY` where the axis does not rise off the face.
+fn landing_zone_mm(
+    face: ([f64; 3], [f64; 3]),
+    base: [f64; 3],
+    top: [f64; 3],
+    radius: f64,
+    tier: f64,
+) -> f64 {
+    let (point, normal) = face;
+    let Some(axis) = geom_kernel::vec3::normalize(geom_kernel::vec3::sub(top, base)) else {
+        return f64::INFINITY;
+    };
+    let along = geom_kernel::vec3::dot(normal, axis);
+    if along <= 0.0 {
+        return f64::INFINITY;
+    }
+    let height = geom_kernel::vec3::dot(normal, geom_kernel::vec3::sub(base, point));
+    ((tier + radius - height) / along).max(0.0)
+}
+
+/// **Every member's drawn solid against the model, on the finished field**
+/// (fix/morel-long-posts, 2026-10-02): the production census of the rule
+/// "a support member's drawn solid clears the model by the final gap outside
+/// its own seat zone and, on the model, its own landing zone" — arm shafts
+/// included, which no rule measured before (the run disclosure said so: "no
+/// radius-aware clearance of an ARM's own shaft against the model").
+///
+/// Each member is measured as the file draws it: the straight shaft from its
+/// ball centre (its seat, for a member without a ball) to its landing, or to
+/// its boss top for a plate member ([`plinth_support::SweepRootFlare::plate_shaft_of`]),
+/// cut into the spans the lowering draws it as
+/// ([`plinth_support::drawn_spans`]), each read at its wider end. Its own
+/// seat zone is the part of the axis inside the tip ball or within `tier` of
+/// the seat plane, `max(R, (tier + r − d) / (n·m))` from the ball centre
+/// (`d` the centre's height over the plane on the support side); its landing
+/// zone is [`model_landing_zones_mm`]'s. The root flare, the boss and the raft
+/// are not shafts and are not measured here.
+///
+/// A WARNING quantity, never a gate: emit and warn. Batch-first: one contact
+/// disc batch, one nearest-point batch and one clearance batch for the field.
+pub(crate) fn model_clearance_census(
+    surface: Option<&geom_kernel::NativeSurface>,
+    struts: &[crate::SweepStrut],
+    arms: &[plinth_support::SweepArm],
+    layer_plan: &plinth_core::LayerPlan,
+    plate_z_mm: f64,
+    tier: f64,
+) -> crate::report::MemberModelClearance {
+    let mut census = crate::report::MemberModelClearance {
+        gap_mm: tier,
+        ..crate::report::MemberModelClearance::default()
+    };
+    let Some(surface) = surface else {
+        return census;
+    };
+    census.ran = true;
+    let height = layer_plan.heights_mm().first().copied().unwrap_or(0.0);
+    let flare = plinth_support::SweepRootFlare::registered(height).ok();
+    let discs = plinth_support::tip_contact_discs(arms, layer_plan)
+        .unwrap_or_else(|_| vec![None; arms.len()]);
+    let on_model: Vec<bool> = struts
+        .iter()
+        .map(|strut| matches!(strut.landing, crate::Landing::Model { .. }))
+        .collect();
+    let bases: Vec<[f64; 3]> = arms.iter().map(|arm| arm.base_mm).collect();
+    let faces = landing_faces(surface, &bases, &on_model);
+
+    // One row per drawn span: (member, p0, p1, radius, inset at p0, inset at p1).
+    let mut owner: Vec<usize> = Vec::new();
+    let (mut p0s, mut p1s, mut radii, mut inset0s, mut inset1s) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut measured_member = vec![false; arms.len()];
+    let mut unmeasured_member = vec![false; arms.len()];
+    for (index, (strut, arm)) in struts.iter().zip(arms).enumerate() {
+        if strut.k_bottom == usize::MAX || strut.k_top <= strut.k_bottom {
+            continue;
+        }
+        let disc = discs.get(index).copied().flatten();
+        let top = match disc {
+            Some(disc) if arm.seats_into_model => disc.ball_centre_mm,
+            _ => arm.seat_mm,
+        };
+        let bottom = if strut.landing == crate::Landing::Plate {
+            match flare.as_ref().and_then(|flare| flare.plate_shaft_of(arm, plate_z_mm)) {
+                Some((_, bottom)) => bottom,
+                None => {
+                    unmeasured_member[index] = true;
+                    continue;
+                }
+            }
+        } else {
+            arm.base_mm
+        };
+        let length = geom_kernel::vec3::dist(top, bottom);
+        let rise = top[2] - bottom[2];
+        if !(length.is_finite() && length > 0.0 && rise > 0.0) {
+            unmeasured_member[index] = true;
+            continue;
+        }
+        let axis = geom_kernel::vec3::scale(geom_kernel::vec3::sub(bottom, top), 1.0 / length);
+        let root = plinth_support::drawn_root_radius_mm(&arm.radius_profile_mm, arm.tip_radius_mm);
+        let spans = plinth_support::drawn_spans(
+            &arm.radius_profile_mm,
+            arm.base_mm[2],
+            arm.seat_mm[2],
+            top[2],
+            bottom[2],
+            arm.tip_radius_mm,
+            root,
+        );
+        let at = |z: f64| -> ([f64; 3], f64) {
+            let t = ((top[2] - z) / rise).clamp(0.0, 1.0);
+            (
+                std::array::from_fn(|axis_index| top[axis_index] + t * (bottom[axis_index] - top[axis_index])),
+                t * length,
+            )
+        };
+        for span in spans {
+            let radius = span.top_radius_mm.max(span.bottom_radius_mm).max(0.0);
+            let (from, a0) = at(span.top_z_mm);
+            let (to, a1) = at(span.bottom_z_mm);
+            if a1 <= a0 {
+                continue;
+            }
+            let seat_zone = match disc {
+                Some(disc) if arm.seats_into_model => {
+                    let along = geom_kernel::vec3::dot(disc.outward_normal, axis);
+                    let over = geom_kernel::vec3::dot(
+                        disc.outward_normal,
+                        geom_kernel::vec3::sub(disc.ball_centre_mm, disc.centre_mm),
+                    );
+                    if along > 0.0 {
+                        disc.ball_radius_mm.max((tier + radius - over) / along)
+                    } else {
+                        f64::INFINITY
+                    }
+                }
+                _ => 0.0,
+            };
+            let landing_zone = match faces.get(index).copied().flatten() {
+                Some(face) => landing_zone_mm(face, bottom, top, radius, tier),
+                None if on_model[index] => f64::INFINITY,
+                None => 0.0,
+            };
+            let inset0 = (seat_zone - a0).max(0.0);
+            let inset1 = (landing_zone - (length - a1)).max(0.0);
+            if inset0 + inset1 >= a1 - a0 {
+                census.rows_in_own_zones += 1;
+                continue;
+            }
+            owner.push(index);
+            p0s.push(from);
+            p1s.push(to);
+            radii.push(radius);
+            inset0s.push(inset0);
+            inset1s.push(inset1);
+        }
+    }
+    census.rows = owner.len();
+    let rows = surface
+        .segment_clearance_classified(&p0s, &p1s, &radii, &radii, 0.0, &inset0s, &inset1s)
+        .unwrap_or_default();
+    let mut worst: Vec<Option<(f64, bool, [f64; 3])>> = vec![None; arms.len()];
+    for (row, &index) in rows.iter().zip(&owner) {
+        let reading = match *row {
+            geom_kernel::SegmentClearanceClassified::Measured { clearance_mm, witness } => {
+                Some((clearance_mm, false, witness))
+            }
+            // A one-sided bound already under the gap is a finding; one over
+            // it decides nothing.
+            geom_kernel::SegmentClearanceClassified::UpperBound {
+                clearance_mm,
+                witness,
+                ..
+            } if clearance_mm < tier => Some((clearance_mm, true, witness)),
+            _ => None,
+        };
+        match reading {
+            Some(reading) => {
+                measured_member[index] = true;
+                if worst[index].is_none_or(|(now, _, _)| reading.0 < now) {
+                    worst[index] = Some(reading);
+                }
+            }
+            None => unmeasured_member[index] = true,
+        }
+    }
+    census.members_measured = measured_member.iter().filter(|m| **m).count();
+    census.members_unmeasured = unmeasured_member.iter().filter(|m| **m).count();
+    for (index, reading) in worst.iter().enumerate() {
+        let Some((clearance_mm, upper_bound, witness)) = *reading else {
+            continue;
+        };
+        if census
+            .smallest_clearance_mm
+            .is_none_or(|smallest| clearance_mm < smallest)
+        {
+            census.smallest_clearance_mm = Some(clearance_mm);
+        }
+        if clearance_mm < tier - 1.0e-9 {
+            census.within_gap.push(crate::report::MemberNearModel {
+                member: struts[index].id,
+                kind: struts[index].kind,
+                landing: struts[index].landing,
+                clearance_mm,
+                upper_bound,
+                witness_mm: witness,
+            });
+        }
+    }
+    census
+}
+
 /// One standing member's solid as the tie rungs test against: its straight
 /// axis and the radius it is drawn at along it.
 #[derive(Clone, Debug)]
@@ -406,6 +689,177 @@ fn walk_spans(
         id: member.id,
         gap_mm,
     })
+}
+
+/// **The census of every member's drawn solid, and the landing zone it
+/// grants a member on the model** (fix/morel-long-posts, 2026-10-02), on a
+/// box whose top face is `z = 2` and whose `+X` wall is `x = 5`.
+#[cfg(test)]
+mod census_tests {
+    use super::{model_clearance_census, model_landing_zones_mm};
+    use crate::{Landing, SeatFace, StrutKind, SweepStrut};
+    use geom_kernel::{NativeSurface, NativeSurfaceConfig};
+    use plinth_support::{SweepArm, SweepArmLanding};
+
+    const GAP: f64 = 0.3;
+    const H: f64 = 0.05;
+    const PLATE: f64 = -5.0;
+
+    fn boxed(low: [f64; 3], high: [f64; 3]) -> NativeSurface {
+        let verts: Vec<[f64; 3]> = (0..8)
+            .map(|corner| std::array::from_fn(|k| if corner >> k & 1 == 0 { low[k] } else { high[k] }))
+            .collect();
+        let tris: Vec<[u32; 3]> = vec![
+            [0, 2, 1],
+            [1, 2, 3],
+            [4, 5, 6],
+            [5, 7, 6],
+            [0, 1, 4],
+            [1, 5, 4],
+            [2, 6, 3],
+            [3, 6, 7],
+            [0, 4, 2],
+            [2, 4, 6],
+            [1, 3, 5],
+            [3, 7, 5],
+        ];
+        let pitch = 0.1;
+        let estimate = NativeSurface::estimate_index_memory_from_indexed(&verts, &tris, pitch)
+            .expect("an estimate");
+        NativeSurface::from_indexed(
+            &verts,
+            &tris,
+            NativeSurfaceConfig {
+                grid_pitch_mm: pitch,
+                max_grid_bytes: estimate.max_axis_grid_bytes(),
+            },
+        )
+        .expect("a surface")
+    }
+
+    fn block() -> NativeSurface {
+        boxed([-5.0, -5.0, 0.0], [5.0, 5.0, 2.0])
+    }
+
+    /// A vertical member over `(x, y)` from `top_z` down to `base_z`, of
+    /// constant radius `r`, as both the plan and the lowering hold it.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "heights over the plate, in whole layers, in a small test frame"
+    )]
+    fn member(
+        id: u32,
+        kind: StrutKind,
+        landing: Landing,
+        xy: [f64; 2],
+        base_z: f64,
+        top_z: f64,
+        r: f64,
+    ) -> (SweepStrut, SweepArm) {
+        let k_top = ((top_z - PLATE) / H).round() as usize;
+        let k_bottom = ((base_z - PLATE) / H).round() as usize;
+        let strut = SweepStrut {
+            id,
+            cell: 0,
+            center_mm: xy,
+            kind,
+            min_radius_mm: r,
+            thickened_mm: Vec::new(),
+            seat_on_strut: None,
+            k_top,
+            k_bottom,
+            landing,
+            interior: false,
+            radius_mm: vec![r; k_top - k_bottom + 1],
+            carried_mm2: Vec::new(),
+            covered_demand: Vec::new(),
+            inserted_by_load: false,
+            path: Vec::new(),
+            straight_fallback: None,
+            fallback_path: Vec::new(),
+            seat_face: SeatFace::default(),
+            seat_normal: [0.0; 3],
+        };
+        let arm = SweepArm {
+            seat_mm: [xy[0], xy[1], top_z],
+            base_mm: [xy[0], xy[1], base_z],
+            tip_radius_mm: r,
+            radius_profile_mm: vec![r; k_top - k_bottom + 1],
+            seat_normal_mm: [0.0; 3],
+            seat_face_point_mm: None,
+            landing: match landing {
+                Landing::Plate => SweepArmLanding::Plate,
+                Landing::Model { .. } | Landing::Strut { .. } => SweepArmLanding::Landed,
+            },
+            seats_into_model: false,
+        };
+        (strut, arm)
+    }
+
+    /// A landing STRIKES its face one lamina deep, so the plain clearance
+    /// reads every model landing as an intrusion; the landing zone is exactly
+    /// the stretch over which the solid is within the gap of that face, so
+    /// the rest of the member reads the gap and no less, and a zone a
+    /// hundredth of a millimetre short reads under it.
+    #[test]
+    fn a_landing_reads_its_own_strike_only_inside_its_landing_zone() {
+        let surface = block();
+        let r = 0.1;
+        let base = [0.0, 0.0, 2.0 - H];
+        let seat = [0.0, 0.0, 6.0];
+        let zone = model_landing_zones_mm(&surface, &[seat], &[base], &[r], &[true], GAP)[0];
+        assert!(
+            (zone - (GAP + r + H)).abs() < 1e-9,
+            "a vertical landing one lamina into a flat face: zone {zone}"
+        );
+        let read = |inset: f64| {
+            surface
+                .segment_clearance_classified(&[seat], &[base], &[r], &[r], 0.0, &[0.0], &[inset])
+                .expect("one row")[0]
+                .clearance_mm()
+                .expect("measured")
+        };
+        assert!(read(0.0) < 0.0, "the strike itself: {}", read(0.0));
+        assert!(read(zone) >= GAP - 1e-9, "outside the zone: {}", read(zone));
+        assert!(read(zone - 0.01) < GAP, "a zone too short: {}", read(zone - 0.01));
+        // A member that does not land on the model has no landing zone.
+        assert_eq!(
+            model_landing_zones_mm(&surface, &[seat], &[base], &[r], &[false], GAP)[0],
+            0.0
+        );
+    }
+
+    /// The census names the ARM whose drawn shaft passes the wall inside the
+    /// gap, and only it: the same arm a millimetre out, an arm that lands on
+    /// the top face, and a mast clear of everything, are clear. (Until this
+    /// census no rule measured an arm's own shaft against the model.)
+    #[test]
+    fn the_census_names_the_shaft_that_passes_the_wall_inside_the_gap() {
+        let surface = block();
+        let r = 0.15;
+        let near = 5.0 + r + 0.15;
+        let far = 5.0 + r + 1.0;
+        let members = [
+            member(0, StrutKind::Arm, Landing::Plate, [near, 0.0], PLATE, 4.0, r),
+            member(1, StrutKind::Arm, Landing::Plate, [far, 0.0], PLATE, 4.0, r),
+            member(2, StrutKind::Arm, Landing::Model { layer: 139 }, [0.0, 0.0], 2.0 - H, 6.0, r),
+            member(3, StrutKind::Mast, Landing::Plate, [far, 3.0], PLATE, 4.0, r),
+        ];
+        let (struts, arms): (Vec<SweepStrut>, Vec<SweepArm>) = members.into_iter().unzip();
+        let layers = plinth_core::LayerPlan::new(PLATE, vec![H; 400]).expect("a uniform plan");
+        let census = model_clearance_census(Some(&surface), &struts, &arms, &layers, PLATE, GAP);
+        assert!(census.ran);
+        assert_eq!(census.members_unmeasured, 0, "{census:?}");
+        assert_eq!(census.members_measured, 4, "{census:?}");
+        let named: Vec<u32> = census.within_gap.iter().map(|near| near.member).collect();
+        assert_eq!(named, vec![0], "{census:?}");
+        let gap = census.within_gap[0].clearance_mm;
+        assert!((gap - 0.15).abs() < 1e-6, "the near shaft stands {gap} mm off the wall");
+        // No surface, no census: the census says it did not run.
+        let none = model_clearance_census(None, &struts, &arms, &layers, PLATE, GAP);
+        assert!(!none.ran && none.within_gap.is_empty());
+    }
 }
 
 #[cfg(test)]

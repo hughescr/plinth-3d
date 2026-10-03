@@ -33,6 +33,18 @@
 //! member. The class belongs to the emit boundary and to brace placement, not
 //! to the landing rule this file grades; the audit, not this test, sees it.
 //!
+//! RE-PINNED 2026-10-02 (fix/morel-long-posts): the brace ends are the class
+//! that lane closed. A leaning plate post's file shaft runs to its boss top
+//! OVER ITS FOOT, off the `seat -> base` line, and every brace and branch
+//! joined to it is now drawn on the DRAWN shaft
+//! (`plinth_sweep::footprint::followed_shifts_drawn`). Read against the
+//! `seat -> base` line, those ends now read up to half a millimetre off it
+//! (raking blade 6, laid tube several): the check, not the field, was wrong.
+//! So a plate-rooted member is read as the lowering draws it: its shaft from
+//! the line `plinth_support::SweepRootFlare::plate_shaft_of` gives (graded
+//! against the lowered records in plinth-support's own test), and the
+//! vertical boss from that shaft's bottom down to its foot.
+//!
 //! Tolerance is one layer height (0.05 mm): a lower end is on something when
 //! it is within one lamina of it. The quills' lower ends measured at least
 //! 0.447 mm from the model and 0.13 mm from the nearest member, so the verdict
@@ -142,6 +154,22 @@ fn rooting(mesh: &Mesh, plan: &SweepPlan) -> Rooting {
             }
         })
         .collect();
+    // Each member's drawn axis as straight pieces `(top, bottom)`: the
+    // `seat -> base` line, or for a plate-rooted member its drawn shaft and
+    // its vertical boss under it.
+    let flare = plinth_support::SweepRootFlare::registered(plan.layer_height_mm).ok();
+    let pieces: Vec<Vec<([f64; 3], [f64; 3])>> = arms
+        .iter()
+        .map(|arm| {
+            match flare
+                .as_ref()
+                .and_then(|flare| flare.plate_shaft_of(arm, plan.plate_z_mm))
+            {
+                Some((top, bottom)) => vec![(top, bottom), (bottom, arm.base_mm)],
+                None => vec![(arm.seat_mm, arm.base_mm)],
+            }
+        })
+        .collect();
     let mut rooted = vec![false; n];
     let mut rests_on: Vec<Vec<usize>> = vec![Vec::new(); n];
     let (mut on_plate, mut on_model, mut on_member) = (0, 0, 0);
@@ -162,14 +190,6 @@ fn rooting(mesh: &Mesh, plan: &SweepPlan) -> Rooting {
             if j == i || low[j][2] >= point[2] - 1.0e-9 {
                 continue;
             }
-            let (distance, _, on_axis) =
-                segment_segment_distance(point, point, other.seat_mm, other.base_mm);
-            let length = vec3::dist(other.seat_mm, other.base_mm);
-            let t = if length > 0.0 {
-                vec3::dist(other.seat_mm, on_axis) / length
-            } else {
-                0.0
-            };
             // The root radius is `radius_profile_mm[0]` (fix/drawn-profile
             // replaced the old `root_radius_mm` field with the whole ledger).
             let root = other
@@ -178,8 +198,23 @@ fn rooting(mesh: &Mesh, plan: &SweepPlan) -> Rooting {
                 .copied()
                 .unwrap_or_default()
                 .max(other.tip_radius_mm);
-            let radius = other.tip_radius_mm + (root - other.tip_radius_mm) * t;
-            if distance - radius <= tol {
+            // The taper's parameter runs over the whole member, seat to the
+            // last piece's bottom, by height.
+            let (top_z, bottom_z) = (
+                pieces[j][0].0[2],
+                pieces[j][pieces[j].len() - 1].1[2],
+            );
+            let on = pieces[j].iter().any(|&(top, bottom)| {
+                let (distance, _, on_axis) = segment_segment_distance(point, point, top, bottom);
+                let t = if top_z > bottom_z {
+                    ((top_z - on_axis[2]) / (top_z - bottom_z)).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let radius = other.tip_radius_mm + (root - other.tip_radius_mm) * t;
+                distance - radius <= tol
+            });
+            if on {
                 rests_on[i].push(j);
             }
         }

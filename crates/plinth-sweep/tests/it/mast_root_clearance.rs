@@ -201,7 +201,20 @@ fn every_mast_clears_every_plate_root_on_the_laid_tube() {
 /// the residual makes both zero and this test stays green.
 #[test]
 fn the_lonely_peak_publishes_the_mast_laps_its_sizing_pass_leaves() {
-    let plan = sweep_with(&lonely_peak(), 0.0, &policy());
+    // RE-PINNED 2026-10-02 (fix/morel-long-posts): graded with the lip-seat
+    // rule off. That lane's clearance gate refuses one of the fixture's five
+    // lip-seat re-landings (its drawn solid would stand inside the 0.3 mm
+    // final gap of the peak); with that arm left where the up-sweep put it,
+    // this configuration places no mast at all, and the honesty graded here
+    // is about masts. With the lip-seat rule off the masts are back.
+    let plan = sweep_with(
+        &lonely_peak(),
+        0.0,
+        &SweepPolicy {
+            lip_seat: false,
+            ..policy()
+        },
+    );
     assert!(
         masts(&plan) > 0,
         "anti-vacuity: make_lonely_peak must place a mast"
@@ -253,8 +266,18 @@ fn deleting_the_clearance_rule_brings_the_overlapping_masts_back() {
     // the two re-scopings answer two different causes (the seat placement from
     // fix/lattice-align, the ball ratio from fix/chitubox-geometry), and the
     // merged tree has both, so the drill runs under both.
+    //
+    // RE-PINNED 2026-10-02 (fix/morel-long-posts merged with develop 7826593):
+    // the drill also runs with the creep-45 overhang cut off
+    // (`without_creep_overhang_cut`, the owner's 2026-09-30 ruling). Measured
+    // on the merged tree (`lanes/morel-long-posts/r12/diag-masts*.log`): with
+    // the cut in force the field places 0 masts with the rule in force and 1
+    // with it deleted, and still 0 and 1 with the lip-seat rule off, so the
+    // lip-seat lane is not what took them; with the cut off it places 4 and 3.
+    // The clearance rule reads no creep.
     let fixture =
-        crate::harness::at_path_fixture_seating(crate::harness::at_path_fixture_x(policy()));
+        crate::harness::at_path_fixture_seating(crate::harness::at_path_fixture_x(policy()))
+            .without_creep_overhang_cut();
     let clean = sweep_with(&mesh, 0.0, &fixture);
     let sabotaged = sweep_with(&mesh, 0.0, &fixture.without_mast_root_clearance());
 

@@ -692,6 +692,79 @@ impl SweepRootFlare {
     pub fn raft_top_above_plate_mm(&self) -> f64 {
         self.config.raft_height_mm.get()
     }
+
+    /// **The straight line [`lower_sweep_arms`] draws a plate-rooted member's
+    /// SHAFT along** (fix/morel-long-posts, 2026-10-02): from the shaft's top
+    /// (the seated ball centre of a member that seats into the model, its
+    /// seat otherwise) down to its BOSS TOP, which stands vertically over its
+    /// foot; or down to its foot on the pad where no boss fits. In the same
+    /// frame as `arm`, over a plate at `plate_z_mm`.
+    ///
+    /// The placement plans a member as the straight segment from its seat to
+    /// its base ON THE PLATE. For a member that leans, the boss is not on that
+    /// segment: it stands over the foot, so the file draws the shaft from the
+    /// seat to a point `boss top` above the foot, and the drawn axis leaves
+    /// the planned one by `lateral × boss_top / (seat_height − boss_top)` at
+    /// the plate's end. On the Morel base (for-craig-v10) a post leaning 6.15
+    /// mm over 10.46 mm drew its shaft 0.58 mm away from the planned axis at
+    /// 1.1 mm up, and the two `|X|` diagonals tied to it there ended in air.
+    /// A rule that puts anything ON a member's drawn shaft reads it here: the
+    /// same seat law ([`seated_ball`]) and boss arithmetic
+    /// ([`root_boss_top_at`]) the lowering calls, so the two cannot disagree.
+    ///
+    /// `None` for a member that does not stand on the plate, or that the
+    /// lowering refuses to draw (no length, no positive tip).
+    #[must_use]
+    pub fn plate_shaft_of(&self, arm: &SweepArm, plate_z_mm: f64) -> Option<([f64; 3], [f64; 3])> {
+        if arm.landing != SweepArmLanding::Plate {
+            return None;
+        }
+        // This door's config stands on a plate at z = 0; the arm is read in
+        // that frame and the answer moved back.
+        let lift = |point: [f64; 3], by: f64| [point[0], point[1], point[2] + by];
+        let local = SweepArm {
+            seat_mm: lift(arm.seat_mm, -plate_z_mm),
+            base_mm: lift(arm.base_mm, -plate_z_mm),
+            seat_face_point_mm: arm.seat_face_point_mm.map(|point| lift(point, -plate_z_mm)),
+            ..arm.clone()
+        };
+        let delta: [f64; 3] =
+            std::array::from_fn(|index| local.base_mm[index] - local.seat_mm[index]);
+        let length = delta.iter().map(|value| value * value).sum::<f64>().sqrt();
+        if !length.is_finite() || length <= ZERO_LENGTH_MM {
+            return None;
+        }
+        let unit = delta.map(|value| value / length);
+        let tip_radius = positive(local.tip_radius_mm).ok()?.get();
+        let (seated_seat, top) = if local.seats_into_model {
+            let ball_radius = self.config.sweep_ball_factor(tip_radius) * tip_radius;
+            let (seated_seat, center, _) =
+                seated_ball(&local, unit, tip_radius, ball_radius, self.config);
+            (seated_seat, center)
+        } else {
+            (local.seat_mm, local.seat_mm)
+        };
+        let foot = [
+            local.base_mm[0],
+            local.base_mm[1],
+            self.config.raft_height_mm.get() - NATIVE_FOOT_PAD_OVERLAP_MM,
+        ];
+        let zero_length = |a: [f64; 3], b: [f64; 3]| {
+            let d: f64 = (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f64>().sqrt();
+            d <= ZERO_LENGTH_MM
+        };
+        let boss = root_boss_top_at(
+            seated_seat[2],
+            [finite(local.base_mm[0]).ok()?, finite(local.base_mm[1]).ok()?],
+            self.config.root_boss.height_mm(),
+            self.config,
+        )
+        .and_then(Result::ok)
+        .map(|top| [top[0].get(), top[1].get(), top[2].get()])
+        .filter(|boss| !zero_length(top, *boss) && !zero_length(*boss, foot));
+        let bottom = boss.unwrap_or(foot);
+        Some((lift(top, plate_z_mm), lift(bottom, plate_z_mm)))
+    }
 }
 
 fn frustum(
@@ -3343,5 +3416,107 @@ mod sweep_root_flare_tests {
             moved_by_the_seat, 5,
             "the seat depth moved {moved_by_the_seat} boss tops"
         );
+    }
+
+    /// The shaft's two ends as the file has them: the start of its first
+    /// shaft record (the taper, or the first chained member) and the end of
+    /// its last one, read from the lowered primitives of the arm alone.
+    fn drawn_shaft_ends(arm: &SweepArm, plate_z: f64) -> ([f64; 3], [f64; 3]) {
+        let layers = LayerPlan::new(plate_z, vec![H; 400]).expect("a uniform plan");
+        let frame = BuildFrame::new(
+            Finite::new(plate_z).expect("a finite plate"),
+            PositiveFinite::new(5.0).expect("a positive lift"),
+        );
+        let lowering =
+            lower_sweep_arms(std::slice::from_ref(arm), frame, &layers, 100_000, 1 << 30)
+                .expect("the lowering refuses only about the request");
+        let shaft: Vec<_> = lowering
+            .primitives
+            .iter()
+            .filter(|primitive| {
+                matches!(
+                    primitive.segment_kind,
+                    SupportSegmentKind::ContactTaper | SupportSegmentKind::Member
+                )
+            })
+            .collect();
+        let point = |p: &[Finite; 3]| [p[0].get(), p[1].get(), p[2].get()];
+        let first = shaft.first().expect("a drawn shaft");
+        let last = shaft.last().expect("a drawn shaft");
+        (point(&first.start_mm), point(&last.end_mm))
+    }
+
+    /// The door's shaft line IS the drawn shaft, for a leaning post above all
+    /// (fix/morel-long-posts, 2026-10-02): its bottom is the boss top over the
+    /// FOOT, not the planned axis at that height, and so a member tied to the
+    /// post meets the solid the file draws only if it reads this line.
+    #[test]
+    fn the_door_reads_the_shaft_line_the_lowering_draws() {
+        let door = SweepRootFlare::registered(H).expect("the registry");
+        let down = [0.0, 0.0, -1.0];
+        let tilted = {
+            let (sin, cos) = 30.0_f64.to_radians().sin_cos();
+            [-sin, 0.0, -cos]
+        };
+        let cases: Vec<(&str, SweepArm, f64)> = vec![
+            // The Morel base's post 116 in for-craig-v10: 6.15 mm out over
+            // 10.46 mm, a 0.086 mm tip.
+            (
+                "tall leaned (Morel post 116)",
+                plate_arm([-2.69, -10.54, 10.7], [-7.94, -13.79], 0.0, 0.086, tilted),
+                0.0,
+            ),
+            (
+                "tall leaned, plate at z = 7.3",
+                plate_arm([0.0, 0.0, 15.3], [3.0, 1.0], 7.3, 0.12, down),
+                7.3,
+            ),
+            ("tall vertical", plate_arm([0.0, 0.0, 8.0], [0.0, 0.0], 0.0, 0.2, down), 0.0),
+            ("short leaned", plate_arm([0.0, 0.0, 2.0], [0.8, 0.0], 0.0, 0.1, tilted), 0.0),
+            (
+                "tall leaned mast-like (no ball)",
+                SweepArm {
+                    seats_into_model: false,
+                    ..plate_arm([0.0, 0.0, 6.0], [1.5, 0.0], 0.0, 0.1, [0.0; 3])
+                },
+                0.0,
+            ),
+        ];
+        let mut off_the_planned_axis = 0;
+        for (what, arm, plate_z) in &cases {
+            let (top, bottom) = drawn_shaft_ends(arm, *plate_z);
+            let (door_top, door_bottom) = door
+                .plate_shaft_of(arm, *plate_z)
+                .unwrap_or_else(|| panic!("{what}: the door found no shaft"));
+            for (name, drawn, answered) in [("top", top, door_top), ("bottom", bottom, door_bottom)] {
+                let gap = (0..3).map(|i| (drawn[i] - answered[i]).powi(2)).sum::<f64>().sqrt();
+                assert!(
+                    gap < 1e-6,
+                    "{what}: the door's shaft {name} {answered:?} is {gap:.3e} mm from the \
+                     file's {drawn:?}"
+                );
+            }
+            // Where the drawn bottom leaves the PLANNED axis (seat to base on
+            // the plate) at the same height: the defect this door exists for.
+            let t = (arm.seat_mm[2] - door_bottom[2]) / (arm.seat_mm[2] - arm.base_mm[2]);
+            let planned: [f64; 3] =
+                std::array::from_fn(|i| arm.seat_mm[i] + t * (arm.base_mm[i] - arm.seat_mm[i]));
+            let off = (planned[0] - door_bottom[0]).hypot(planned[1] - door_bottom[1]);
+            if off > 0.05 {
+                off_the_planned_axis += 1;
+            }
+        }
+        // Anti-vacuity: the four leaning posts draw their shaft off the
+        // planned axis; the vertical post does not.
+        assert_eq!(off_the_planned_axis, 4, "{off_the_planned_axis} shafts left the planned axis");
+        assert!(door
+            .plate_shaft_of(
+                &SweepArm {
+                    landing: SweepArmLanding::Landed,
+                    ..plate_arm([0.0, 0.0, 8.0], [0.0, 0.0], 0.0, 0.2, down)
+                },
+                0.0
+            )
+            .is_none());
     }
 }

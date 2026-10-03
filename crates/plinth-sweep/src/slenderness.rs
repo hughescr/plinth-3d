@@ -2024,6 +2024,14 @@ struct TieState {
     /// posts' free shafts (`None`: the registry was unreadable, and only the
     /// posts' own feet bound a band, as before 2026-09-30).
     root_flare: Option<SweepRootFlare>,
+    /// Every member's drawn shaft line off its planned one, as `(at its
+    /// seat, at its base)`: a leaning plate post's own
+    /// (`adapter::planned_line_offset`, its file shaft runs to its boss top
+    /// over its foot), plus what a member joined to one follows
+    /// (`footprint::followed_shifts_drawn`); `None` where the two lines
+    /// coincide. Members added during the pass have no entry
+    /// ([`Self::member_end_off`] reads their hosts).
+    drawn_offsets: Vec<Option<crate::adapter::LineOffset>>,
     /// Set by [`plan_cross`] when it drops a band whose bottom fell inside a
     /// flare because the band could not move within its posts: how many layers
     /// the band had to rise. The mast rung reads it to try again with a mast
@@ -2099,6 +2107,46 @@ impl TieState {
             .iter()
             .map(|strut| strut.thickened_mm.clone())
             .collect();
+        // Each member's DRAWN line against its planned one: a leaning plate
+        // post's own (its shaft to its boss top over its foot), plus, for a
+        // member joined to such a post, the displacement it follows at the
+        // ends it is joined by, transitively (a branch on the post, a
+        // diagonal on the branch), exactly as the adapter draws them.
+        let kinks: Vec<Option<crate::adapter::LineOffset>> = struts
+            .iter()
+            .map(|strut| {
+                root_flare.as_ref().and_then(|flare| {
+                    crate::adapter::planned_line_offset(
+                        flare,
+                        context.grid,
+                        context.layer_height_mm,
+                        strut,
+                    )
+                })
+            })
+            .collect();
+        let drawn_offsets: Vec<Option<crate::adapter::LineOffset>> =
+            if kinks.iter().any(Option::is_some) {
+                crate::footprint::followed_shifts_drawn(struts, &kinks)
+                    .into_iter()
+                    .zip(&kinks)
+                    .map(|(followed, kink)| {
+                        let add = |a: Option<[f64; 3]>, b: Option<[f64; 3]>| match (a, b) {
+                            (None, None) => None,
+                            (a, b) => {
+                                let (a, b) = (a.unwrap_or([0.0; 3]), b.unwrap_or([0.0; 3]));
+                                Some(std::array::from_fn(|k| a[k] + b[k]))
+                            }
+                        };
+                        let seat = add(followed.seat_mm, kink.map(|kink| kink.0));
+                        let base = add(followed.base_mm, kink.map(|kink| kink.1));
+                        (seat.is_some() || base.is_some())
+                            .then(|| (seat.unwrap_or([0.0; 3]), base.unwrap_or([0.0; 3])))
+                    })
+                    .collect()
+            } else {
+                vec![None; struts.len()]
+            };
         Self {
             index,
             profiles,
@@ -2109,8 +2157,41 @@ impl TieState {
             masts_of,
             placed_roots,
             root_flare,
+            drawn_offsets,
             flare_shortfall: std::cell::Cell::new(None),
         }
+    }
+
+    /// Where member `id`'s DRAWN shaft stands at `layer`, off the axis cell
+    /// the plan keeps for it (`[0; 3]` for every member whose drawn line is
+    /// its planned one): a diagonal tied to it is measured, and drawn, there
+    /// (fix/morel-long-posts, 2026-10-02; `adapter::drawn_line_offset`).
+    fn drawn_off(&self, struts: &[SweepStrut], id: u32, layer: usize) -> [f64; 3] {
+        let index = id as usize;
+        match (self.drawn_offsets.get(index).copied().flatten(), struts.get(index)) {
+            (Some(offset), Some(strut)) => crate::adapter::offset_at(&offset, strut, layer),
+            _ => [0.0; 3],
+        }
+    }
+
+    /// Where `strut`'s own seat (`at_seat`) or base end is drawn, off its
+    /// axis cell: its own drawn-line displacement where the pass started with
+    /// it, and for a member added during the pass (a diagonal), the drawn
+    /// line of the member that end is joined to.
+    fn member_end_off(&self, struts: &[SweepStrut], strut: &SweepStrut, at_seat: bool) -> [f64; 3] {
+        let layer = if at_seat { strut.k_top } else { strut.k_bottom };
+        if (strut.id as usize) < self.drawn_offsets.len() {
+            return self.drawn_off(struts, strut.id, layer);
+        }
+        let host = if at_seat {
+            strut.seat_on_strut
+        } else {
+            match strut.landing {
+                Landing::Strut { id, .. } => Some(id),
+                Landing::Plate | Landing::Model { .. } => None,
+            }
+        };
+        host.map_or([0.0; 3], |host| self.drawn_off(struts, host, layer))
     }
 
     /// [`free_shaft_floor`] of a member as it stands NOW. Read on demand
@@ -3727,11 +3808,19 @@ fn plan_cross(
     let second = path(b_cell_top, a_cell_lo, a, outcome)?;
     if context.member_clearance {
         let h = context.layer_height_mm;
-        let point =
-            |cell: usize, layer: usize| crate::member_clearance::axis_point(grid, h, cell, layer);
+        // Each end ON ITS POST'S DRAWN SHAFT (fix/morel-long-posts,
+        // 2026-10-02): the axis cell the plan keeps, moved by the post's
+        // drawn-line offset there, exactly where the adapter draws it
+        // (`footprint::followed_shifts_drawn`). On a leaning plate post that
+        // is up to 0.585 mm from the cell (Morel base, for-craig-v10).
+        let point = |post: u32, cell: usize, layer: usize| {
+            let at = crate::member_clearance::axis_point(grid, h, cell, layer);
+            let off = state.drawn_off(struts, post, layer);
+            [at[0] + off[0], at[1] + off[1], at[2] + off[2]]
+        };
         let diagonals = [
-            (point(a_cell_top, k), point(b_cell_lo, k_lo)),
-            (point(b_cell_top, k), point(a_cell_lo, k_lo)),
+            (point(a, a_cell_top, k), point(b, b_cell_lo, k_lo)),
+            (point(b, b_cell_top, k), point(a, a_cell_lo, k_lo)),
         ];
         for (top, bottom) in diagonals {
             if crate::member_clearance::model_intrusion(
@@ -3841,8 +3930,24 @@ fn member_solids_clear(
         .filter(|(_, s)| live(s))
         .map(|(index, strut)| crate::member_clearance::MemberSolid {
             id: strut.id,
-            from: crate::member_clearance::axis_point(grid, h, strut.base_cell(), strut.k_bottom),
-            to: crate::member_clearance::axis_point(grid, h, strut.cell, strut.k_top),
+            // Each member as the file draws it (fix/morel-long-posts,
+            // 2026-10-02): a leaning plate post on its drawn line, and a
+            // member joined to one at the end it joins it by, on that post's
+            // drawn line too (the adapter draws it there,
+            // `footprint::followed_shifts_drawn`). Measured on the Cylinder
+            // before the joined ends followed: two diagonals tied to such
+            // posts overlapped a third by up to 0.412 mm in the file.
+            from: {
+                let at =
+                    crate::member_clearance::axis_point(grid, h, strut.base_cell(), strut.k_bottom);
+                let off = state.member_end_off(struts, strut, false);
+                [at[0] + off[0], at[1] + off[1], at[2] + off[2]]
+            },
+            to: {
+                let at = crate::member_clearance::axis_point(grid, h, strut.cell, strut.k_top);
+                let off = state.member_end_off(struts, strut, true);
+                [at[0] + off[0], at[1] + off[1], at[2] + off[2]]
+            },
             profile: state.profiles.get(index).map_or(&[][..], Vec::as_slice),
             k_bottom: strut.k_bottom,
             k_top: strut.k_top,

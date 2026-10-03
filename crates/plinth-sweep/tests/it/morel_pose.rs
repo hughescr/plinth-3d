@@ -56,7 +56,7 @@ use plinth_orient::{
 };
 use plinth_sweep::SweepDemand;
 
-fn morel_path() -> PathBuf {
+pub(crate) fn morel_path() -> PathBuf {
     let directory = std::env::var_os("PLINTH_MINIS_DIR").map_or_else(
         || {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -68,7 +68,7 @@ fn morel_path() -> PathBuf {
     directory.join("Morel base.stl")
 }
 
-fn registered_decimation_budget() -> plinth_decimate::DecimationBudget {
+pub(crate) fn registered_decimation_budget() -> plinth_decimate::DecimationBudget {
     let placeholders = m0_constants().expect("registry").placeholders();
     let probe = ProbeConfig::new(
         placeholders

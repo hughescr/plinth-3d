@@ -40,13 +40,19 @@
 //! 1. **A smaller lean to the same seat.** The seat stays; the arm is re-landed
 //!    (its base moves) so its axis meets the face within the limit. The
 //!    candidates are the descents the up-sweep itself would consider — a
-//!    landing on another arm's shaft or on the plate, within the lean law, on
-//!    a straight segment that clears model material, every other member and
-//!    the drain keep-out (`slenderness::segment_path`, the test remedy-1
-//!    merges and head joins use) — admitted only where the approach angle is
-//!    within the arm's own derived limit, cheapest by the lean law's own price
-//!    first, and each one VERIFIED by the lowering's own measurement before it
-//!    is taken. An arm something else rests on moves only with its leaf
+//!    landing on another arm's shaft, on the MODEL below (fix/morel-long-posts,
+//!    2026-10-02), or on the plate, within the lean law, on a straight segment
+//!    that clears model material, every other member and the drain keep-out
+//!    (`slenderness::segment_path`, the test remedy-1 merges and head joins
+//!    use) — admitted only where the approach angle is within the arm's own
+//!    derived limit, cheapest by the up-sweep's own price first (the lean
+//!    law's weighted length, plus a model landing's height still owed to the
+//!    plate), whose drawn solid (read outside its own seat and landing zones)
+//!    clears the model by the final gap where the descent stands on a new
+//!    root, the plate or the model, and otherwise never enters the model or
+//!    comes nearer it than the final gap unless it already stood nearer, and
+//!    each one VERIFIED by the lowering's own
+//!    measurement before it is taken. An arm something else rests on moves only with its leaf
 //!    children. **The sized field then decides** ([`blame`], [`put_back`]):
 //!    the down-sweep sizes the pass, and a re-landing that ADDED load to a
 //!    member of its new host chain that comes out overloaded, or whose NEW
@@ -88,8 +94,8 @@ use crate::{Landing, StrutKind, SweepStrut};
 /// arithmetic on an arm drawn exactly at the limit, and nothing more.
 const BITE_SLACK_MM: f64 = 1.0e-9;
 
-/// Float noise on "no nearer the model than it was": the kernel's distance
-/// on the same segment read twice, and nothing more.
+/// Float noise on "no nearer the model than the gap, or than it was": the
+/// kernel's distance on the same segment read twice, and nothing more.
 const CLEARANCE_SLACK_MM: f64 = 1.0e-9;
 
 /// The kernel's solid clearance from the model of each member's drawn
@@ -98,17 +104,43 @@ const CLEARANCE_SLACK_MM: f64 = 1.0e-9;
 /// where its solid first stands `tier` clear of its own seat plane (the
 /// head-join rule's test 2, `head_join::own_seat_zone_mm`). `None` where the
 /// kernel did not decide or nothing is left to test.
+///
+/// A member that LANDS ON THE MODEL has its landing zone untested too
+/// ([`crate::member_clearance::model_landing_zones_mm`], fix/morel-long-posts
+/// 2026-10-02): until then its own strike read as an intrusion, so every
+/// model re-landing was refused at about −0.05 mm, and a member that already
+/// stood on the model read the same −0.05 mm and so licensed a move to any
+/// path no deeper than that (the Morel base's arm 127, for-craig-v10: 0.185 mm
+/// into the base rim, admitted as "no nearer than it was").
 fn solid_clearances(
     surface: &NativeSurface,
     arms: &[SweepArm],
+    on_model: &[bool],
     layer_plan: &LayerPlan,
+    plate_z_mm: f64,
     tier: f64,
 ) -> Vec<Option<f64>> {
     let discs = plinth_support::tip_contact_discs(arms, layer_plan)
         .unwrap_or_else(|_| vec![None; arms.len()]);
     let n = arms.len();
     let seats: Vec<[f64; 3]> = arms.iter().map(|arm| arm.seat_mm).collect();
-    let bases: Vec<[f64; 3]> = arms.iter().map(|arm| arm.base_mm).collect();
+    // A plate member's DRAWN shaft ends at its boss top over its foot, not on
+    // the plate under the planned line (fix/morel-long-posts, 2026-10-02:
+    // read on the planned line, the Morel's rim arm 120 cleared the base rim
+    // here and entered it by 0.092 mm in the file).
+    let flare = layer_plan
+        .heights_mm()
+        .first()
+        .and_then(|&height| plinth_support::SweepRootFlare::registered(height).ok());
+    let bases: Vec<[f64; 3]> = arms
+        .iter()
+        .map(|arm| {
+            flare
+                .as_ref()
+                .and_then(|flare| flare.plate_shaft_of(arm, plate_z_mm))
+                .map_or(arm.base_mm, |(_, bottom)| bottom)
+        })
+        .collect();
     let radii: Vec<f64> = arms
         .iter()
         .map(|arm| {
@@ -122,12 +154,13 @@ fn solid_clearances(
         .iter()
         .zip(&discs)
         .zip(&radii)
-        .map(|((arm, disc), &radius)| {
+        .zip(&bases)
+        .map(|(((arm, disc), &radius), &base)| {
             let Some(disc) = disc else {
                 return f64::INFINITY;
             };
             let Some(axis) =
-                geom_kernel::vec3::normalize(geom_kernel::vec3::sub(arm.base_mm, arm.seat_mm))
+                geom_kernel::vec3::normalize(geom_kernel::vec3::sub(base, arm.seat_mm))
             else {
                 return f64::INFINITY;
             };
@@ -141,9 +174,11 @@ fn solid_clearances(
             reach.max((tier + radius) / along)
         })
         .collect();
-    let zero = vec![0.0; n];
+    let landing_zones = crate::member_clearance::model_landing_zones_mm(
+        surface, &seats, &bases, &radii, on_model, tier,
+    );
     surface
-        .segment_clearance_classified(&seats, &bases, &radii, &radii, 0.0, &insets, &zero)
+        .segment_clearance_classified(&seats, &bases, &radii, &radii, 0.0, &insets, &landing_zones)
         .map_or_else(
             |_| vec![None; n],
             |rows| {
@@ -189,6 +224,10 @@ pub struct LipSeatOutcome {
     pub max_approach_before_deg: f64,
     /// Remedy 1: arms re-landed so they meet their face within the limit.
     pub arms_relanded: usize,
+    /// Of those, the ones re-landed on the MODEL below them rather than on a
+    /// member or the plate (fix/morel-long-posts, 2026-10-02): the path hits
+    /// of the model-landing candidate.
+    pub relanded_on_model: usize,
     /// Their ids, in the order they were moved.
     pub relanded_ids: Vec<u32>,
     /// Members that rest on a re-landed arm and were re-landed with it, on
@@ -607,10 +646,34 @@ pub(crate) fn apply(
             .unwrap_or_else(|_| vec![None; trial.len()]);
         // THE SOLID, not only the centreline: each moved member's drawn
         // segment against the model, as the head-join rule measures a moved
-        // lander (the kernel's clearance, its own seat zone untested). A move
-        // may not bring it nearer the model than the final gap, or than it
-        // already was. One batch for the round, and one for the same members
-        // as they stand.
+        // lander (the kernel's clearance, its own seat zone untested, and its
+        // own landing zone when it lands on the model), fix/morel-long-posts
+        // 2026-10-02:
+        //
+        // * A mover that comes to stand on a NEW ROOT, the plate or the
+        //   model, clears the final gap outright: its whole drawn shaft is
+        //   its own, read on the line the file draws (a plate member's to its
+        //   boss top over its foot), and the slenderness lane may yet thicken
+        //   it. Read only as "no nearer than it stood", the Morel's rim arm
+        //   120 went to the plate and ended 0.21 mm INTO the base rim: it had
+        //   stood with its shaft cut along the cap's underside (a cut the
+        //   seat trim removes in the file), so its "stood" was already
+        //   negative.
+        // * A mover joined to a member, and every child that follows it,
+        //   never enters the model and comes no nearer it than the final gap
+        //   unless it already stood nearer: `now ≥ min(gap, max(was, 0))`. A
+        //   junction under a host's head stands near the host's own seat by
+        //   construction (the head-join rule warns it); demanding the full
+        //   gap there sent the stilt plate's arm 18 9.6 mm sideways past its
+        //   near post (a 13.5 mm branch, the owner's 2026-10-01 finding).
+        // * Both readings exempt the member's own landing zone. Until then a
+        //   member standing on the model read its own strike, about
+        //   −0.05 mm, which licensed a path 0.185 mm INTO the Morel base's
+        //   rim (arm 127, for-craig-v10), while every model landing a move
+        //   proposed read the same strike and was refused.
+        //
+        // One batch for the round, and one for the same members as they
+        // stand.
         let (after, before) = match surface {
             Some(surface) => {
                 let movers: Vec<usize> = proposals
@@ -622,23 +685,58 @@ pub(crate) fn apply(
                     .collect();
                 let standing: Vec<SweepArm> =
                     movers.iter().map(|&member| arms[member].clone()).collect();
+                // Which of them land on the model: the mover as proposed (its
+                // children land on it), and each as it stands now.
+                let trial_on_model: Vec<bool> = proposals
+                    .iter()
+                    .flat_map(|proposal| {
+                        std::iter::once(matches!(
+                            proposal.candidate.landing,
+                            Landing::Model { .. }
+                        ))
+                        .chain(proposal.children.iter().map(|_| false))
+                    })
+                    .collect();
+                let standing_on_model: Vec<bool> = movers
+                    .iter()
+                    .map(|&member| matches!(struts[member].landing, Landing::Model { .. }))
+                    .collect();
                 (
-                    solid_clearances(surface, &trial, layer_plan, tier),
-                    solid_clearances(surface, &standing, layer_plan, tier),
+                    solid_clearances(
+                        surface,
+                        &trial,
+                        &trial_on_model,
+                        layer_plan,
+                        plate_z_mm,
+                        tier,
+                    ),
+                    solid_clearances(
+                        surface,
+                        &standing,
+                        &standing_on_model,
+                        layer_plan,
+                        plate_z_mm,
+                        tier,
+                    ),
                 )
             }
             None => (vec![None; trial.len()], vec![None; trial.len()]),
         };
         for (proposal, &first) in proposals.into_iter().zip(&first_of) {
             let index_of = pending[proposal.slot].index;
+            // A mover that stands on a NEW root (the plate or the model)
+            // must clear the gap outright; a mover joined to a member, and
+            // every child (each joined to the mover), no nearer than it
+            // stood, and never inside.
+            let new_root = !matches!(proposal.candidate.landing, Landing::Strut { .. });
             let clear = surface.is_none()
                 || (first..=first + proposal.children.len()).all(|slot| {
-                    match (after[slot], before[slot]) {
-                        (Some(now), was) => {
-                            now >= tier.min(was.unwrap_or(tier)) - CLEARANCE_SLACK_MM
-                        }
-                        (None, _) => false,
-                    }
+                    let minimum = if slot == first && new_root {
+                        tier
+                    } else {
+                        tier.min(before[slot].unwrap_or(tier).max(0.0))
+                    };
+                    after[slot].is_some_and(|now| now >= minimum - CLEARANCE_SLACK_MM)
                 });
             if !clear {
                 outcome.candidates_refused_clearance += 1;
@@ -799,6 +897,9 @@ pub(crate) fn apply(
             }
             outcome.relanded_ids.push(id);
             outcome.arms_relanded += 1;
+            if matches!(proposal.candidate.landing, Landing::Model { .. }) {
+                outcome.relanded_on_model += 1;
+            }
             moved.push(record);
             done[proposal.slot] = true;
         }
@@ -1191,6 +1292,9 @@ pub(crate) fn put_back(
         children_were,
     } = relanding;
     let strut = &mut struts[index];
+    if matches!(strut.landing, Landing::Model { .. }) {
+        outcome.relanded_on_model = outcome.relanded_on_model.saturating_sub(1);
+    }
     strut.landing = landing;
     strut.k_bottom = k_bottom;
     strut.path = path;
@@ -1378,14 +1482,42 @@ fn price(
             // The column's highest landing at or below the ceiling, the arm's
             // own shaft and its children's aside (those rest on it: a cycle
             // in the load path). Its own column is the straight descent.
-            let (landing, k_bottom) = match index.shaft_landing_excluding(cell, ceiling, &own) {
+            //
+            // THE MODEL IS A LANDING TOO (fix/morel-long-posts, 2026-10-02),
+            // exactly as the up-sweep's own descent offers it
+            // (`up_sweep::descend_leaning`): the highest of the column's
+            // shaft and its cured run's top wins, an arm on a tie. Until
+            // then only the shaft index was asked, so a column whose landing
+            // was model material read as EMPTY and was offered as the plate:
+            // on the Morel base (for-craig-v10) four arms under the mushroom
+            // caps that had landed straight down on the base's top face were
+            // re-landed 9.5-10.5 mm to the plate, leaning out past the rim.
+            //
+            // A column whose cured run stands THROUGH the ceiling offers
+            // nothing: everything at or below the ceiling is inside it, and
+            // the path to it would pass through the model above (the
+            // up-sweep's own "occupied, but not at any layer this descent
+            // can reach"). Until then such a column offered the plate, which
+            // the path test then refused.
+            if context.history.model_blocks(cell, ceiling)
+                && context.history.model_blocks(cell, ceiling + 1)
+            {
+                continue;
+            }
+            let shaft = index.shaft_landing_excluding(cell, ceiling, &own);
+            let model = context.history.model_landing_at_or_below(cell, ceiling);
+            let (landing, k_bottom) = match (shaft, model) {
+                (Some((_, at, _)), Some(model_at)) if model_at > at => {
+                    (Landing::Model { layer: model_at }, model_at)
+                }
                 // Not onto an arm this pass is about to re-land: landing on
                 // it would freeze its own cut in place.
-                Some((id, at, _)) if !to_move.get(id as usize).copied().unwrap_or(false) => {
+                (Some((id, at, _)), _) if !to_move.get(id as usize).copied().unwrap_or(false) => {
                     (Landing::Strut { id, layer: at }, at)
                 }
-                Some(_) => continue,
-                None => (Landing::Plate, 0),
+                (Some(_), _) => continue,
+                (None, Some(model_at)) => (Landing::Model { layer: model_at }, model_at),
+                (None, None) => (Landing::Plate, 0),
             };
             #[expect(
                 clippy::cast_precision_loss,
@@ -1395,9 +1527,18 @@ fn price(
             if !approach_holds(cell, drop_mm) {
                 continue;
             }
-            let Some(cost_mm) = law.descent_cost_mm(k_top - k_bottom, lateral_mm) else {
+            let Some(length_mm) = law.descent_cost_mm(k_top - k_bottom, lateral_mm) else {
                 continue;
             };
+            // Priced as the up-sweep prices it: a model landing still owes
+            // the path from its strike face to the plate, at least its own
+            // height (`up_sweep::deferred_path_mm`, no tunable part). So a
+            // model landing beats the plate exactly when its weighted
+            // length plus its height is the shorter, which any reachable
+            // landing under a leaning arm is: the same lean over fewer
+            // layers costs less than over all of them.
+            let cost_mm =
+                length_mm + crate::up_sweep::deferred_path_mm(landing, k_bottom, height);
             outcome.candidates_priced += 1;
             out.push(Candidate {
                 cost_mm,
@@ -1915,6 +2056,203 @@ mod blame_attribution_tests {
         let earlier = refuse_for_rerun(&standing, &blamed, pass_from, &mut refused);
         assert_eq!(earlier, 1);
         assert_eq!(refused, vec![(1, 100)]);
+    }
+}
+
+/// **The model below is a landing** (fix/morel-long-posts, 2026-10-02): the
+/// re-landing search offers the model's strike face where the column has one,
+/// priced as the up-sweep prices it, and the plate only where it does not.
+#[cfg(test)]
+mod model_landing_tests {
+    use super::{price, LipSeatOutcome};
+    use crate::up_sweep::{ColumnHistory, ShaftSpan};
+    use crate::{Landing, SeatFace, StrutKind, SweepStrut};
+
+    const H: f64 = 0.05;
+    const SIDE: usize = 120;
+    const SEAT_LAYER: usize = 100;
+    const SLAB_TOP: usize = 40;
+
+    fn grid() -> crate::grid::Grid {
+        crate::grid::lay_out_at(0.0, 0.0, H, SIDE, SIDE)
+    }
+
+    /// Cured model over layers `0..=SLAB_TOP` in every column where `cured`
+    /// says so: the base's top face under a mushroom cap, as the up-sweep's
+    /// model spans record it.
+    fn history(cured: impl Fn(usize, usize) -> bool) -> ColumnHistory {
+        let grid = grid();
+        let mut history = ColumnHistory::new(&grid);
+        for row in 0..SIDE {
+            for col in 0..SIDE {
+                if !cured(row, col) {
+                    continue;
+                }
+                let cell = row * SIDE + col;
+                let slot = u32::try_from(history.model_spans.len()).expect("small");
+                history.model_spans.push(ShaftSpan {
+                    k_bottom: 0,
+                    k_top: u32::try_from(SLAB_TOP).expect("small"),
+                    id: 0,
+                    next: history.model_head[cell],
+                });
+                history.model_head[cell] = slot;
+            }
+        }
+        history
+    }
+
+    fn arm(landing: Landing, k_bottom: usize) -> SweepStrut {
+        let grid = grid();
+        let cell = 60 * SIDE + 60;
+        SweepStrut {
+            id: 0,
+            cell,
+            center_mm: [grid.center_x_mm(60), grid.center_y_mm(60)],
+            kind: StrutKind::Arm,
+            min_radius_mm: 0.0,
+            thickened_mm: Vec::new(),
+            seat_on_strut: None,
+            k_top: SEAT_LAYER,
+            k_bottom,
+            landing,
+            interior: false,
+            radius_mm: vec![0.1; SEAT_LAYER - k_bottom + 1],
+            carried_mm2: Vec::new(),
+            covered_demand: Vec::new(),
+            inserted_by_load: false,
+            path: Vec::new(),
+            straight_fallback: None,
+            fallback_path: Vec::new(),
+            seat_face: SeatFace::default(),
+            seat_normal: [0.0; 3],
+        }
+    }
+
+    /// Every candidate `price` offers the arm under a cap face tilted 30° out
+    /// toward −X with a 20° limit (so it must lean out), over `history`.
+    fn candidates(history: &ColumnHistory, strut: &SweepStrut) -> Vec<(Landing, f64)> {
+        let grid = grid();
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
+        let law = crate::slenderness::SlendernessLaw::new(30.0, 0.05, 1.0, 32.5);
+        let context = crate::slenderness::SlendernessContext {
+            grid: &grid,
+            history,
+            keep_out: &keep_out,
+            lean: &lean,
+            law: &law,
+            layer_height_mm: H,
+            layers: 200,
+            flare_factor: 1.6,
+            mast_root_clearance: true,
+            final_clearance_mm: 0.3,
+            member_clearance: true,
+            shaft_landings: true,
+            merge: true,
+            brace: true,
+            thicken: true,
+            mast: true,
+            max_struts: 1_000,
+            x_allowed: 18.0,
+            seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
+        };
+        let struts = vec![strut.clone()];
+        let mut index = ColumnHistory::new(&grid);
+        crate::congestion::stamp_all(&mut index, &struts);
+        let (sin, cos) = 30.0_f64.to_radians().sin_cos();
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a small layer index is exact in f64"
+        )]
+        let seat = [strut.center_mm[0], strut.center_mm[1], SEAT_LAYER as f64 * H];
+        let mut outcome = LipSeatOutcome::default();
+        price(
+            &context,
+            &index,
+            &struts,
+            0,
+            seat,
+            [-sin, 0.0, -cos],
+            20.0,
+            &[true],
+            &[],
+            &mut outcome,
+        )
+        .into_iter()
+        .map(|candidate| (candidate.landing, candidate.cost_mm))
+        .collect()
+    }
+
+    /// The Morel base's cap arms (for-craig-v10): a slab under the seat, and
+    /// the search offered only the plate. Now every column over the slab
+    /// offers the slab's top, and the cheapest descent lands on it.
+    #[test]
+    fn over_the_base_the_search_offers_the_model_and_lands_on_it() {
+        let slab = history(|_, _| true);
+        let found = candidates(&slab, &arm(Landing::Model { layer: SLAB_TOP }, SLAB_TOP));
+        assert!(!found.is_empty(), "anti-vacuity: no candidate at all");
+        let on_plate = found
+            .iter()
+            .filter(|(landing, _)| *landing == Landing::Plate)
+            .count();
+        assert_eq!(
+            on_plate, 0,
+            "{on_plate} of {} candidates offered the plate through a slab every column holds",
+            found.len()
+        );
+        assert_eq!(
+            found[0].0,
+            Landing::Model { layer: SLAB_TOP },
+            "the cheapest descent is {:?}",
+            found[0]
+        );
+        // Priced as the up-sweep prices a model landing: at least its height
+        // over the slab, plus the height it still owes to the plate, which
+        // is the seat's own height; a plate descent of the same lean costs
+        // more than that.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a small layer index is exact in f64"
+        )]
+        let seat_height = SEAT_LAYER as f64 * H;
+        assert!(
+            found[0].1 >= seat_height,
+            "a model landing priced under the seat's own height: {:?}",
+            found[0]
+        );
+    }
+
+    /// The model landing is offered where the model stands, not invented:
+    /// with the slab only on the side the lean cannot take (+X; the face
+    /// looks −X, so the arm must lean −X) every candidate is the plate; with
+    /// the slab only far out on the −X side, the columns over it offer the
+    /// slab and the columns short of it the plate.
+    #[test]
+    fn beside_the_base_the_plate_is_still_offered() {
+        let count = |found: &[(Landing, f64)]| {
+            let on_plate = found
+                .iter()
+                .filter(|(landing, _)| *landing == Landing::Plate)
+                .count();
+            (on_plate, found.len() - on_plate)
+        };
+        let behind = history(|_, col| col > 60);
+        let (on_plate, on_model) =
+            count(&candidates(&behind, &arm(Landing::Model { layer: SLAB_TOP }, SLAB_TOP)));
+        assert!(on_plate > 0 && on_model == 0, "behind: {on_plate} plate, {on_model} model");
+        let ahead = history(|_, col| col < 40);
+        let (on_plate, on_model) =
+            count(&candidates(&ahead, &arm(Landing::Plate, 0)));
+        assert!(on_plate > 0 && on_model > 0, "ahead: {on_plate} plate, {on_model} model");
+        // With no model at all, the plate is all there is (the search as it
+        // was everywhere before this rule).
+        let bare = history(|_, _| false);
+        let found = candidates(&bare, &arm(Landing::Plate, 0));
+        assert!(
+            found.iter().all(|(landing, _)| *landing == Landing::Plate),
+            "a model landing offered with no model"
+        );
     }
 }
 
