@@ -3103,6 +3103,48 @@ fn print_sweep_disclosure(
             ""
         },
     );
+    // **THE STRANDED-SEAT BRANCH RULE, PUBLISHED PER RUN** (2026-10-02): a
+    // stranded contact is a tip, not a new root. How many stranded-seat
+    // members stood on the plate lapping another root before the rule, after
+    // it, and on the finished field, and what it did about them.
+    let strand = &report.stranded_branch;
+    println!(
+        "[sweep {model}] stranded-seat branches: {} stranded-seat members; standing on a \
+         lapped root {} -> {} after the rule -> {} on the finished field {:?} (after each later \
+         lane: {:?}); {} branches made over {} round(s), {} kept (member, landed on, layer) {:?}, {} put back because \
+         the trunk reached the maximum radius, {} resting members re-landed on a branch's new \
+         axis; refused: {} carrying a member that cannot move with it, {} with no \
+         legal landing on a lapped \
+         root; {} landings priced, {} refused by the path test ({} drain keep-out, {} model, \
+         {} member), {} by the raft floor{}",
+        strand.stranded_members,
+        strand.lapping_before,
+        strand.lapping_after,
+        strand.lapping_on_finished_field,
+        strand.lapping_ids_on_finished_field,
+        strand.lapping_by_lane,
+        strand.branches_made,
+        strand.rounds,
+        strand.branches_kept,
+        strand.branches,
+        strand.put_back_overloaded,
+        strand.resting_moved_with_branch,
+        strand.refused_carrying,
+        strand.refused_no_landing,
+        strand.landings_priced,
+        strand.paths_blocked,
+        strand.paths_blocked_drain,
+        strand.paths_blocked_model,
+        strand.paths_blocked_member,
+        strand.refused_raft,
+        if !strand.enabled {
+            " [RULE DISABLED]"
+        } else if strand.lapping_on_finished_field > 0 {
+            " [STRANDED SEATS STILL ON A LAPPED ROOT: a WARNING on an emitted file, never a refusal]"
+        } else {
+            ""
+        },
+    );
     // **THE SLENDERNESS LANE, PUBLISHED PER RUN** (owner ruling, 2026-09-05).
     // The ratio in force, what was over the limit before any remedy, what each
     // remedy did, and the worst run left standing against its own limit — so

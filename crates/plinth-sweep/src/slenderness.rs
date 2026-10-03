@@ -3380,7 +3380,7 @@ fn tie_layer(run: &UnbracedRun, step: usize, wanted: usize) -> Option<usize> {
     (at > run.k_lo && at < run.k_top).then_some(at)
 }
 
-fn stamp_all(index: &mut ColumnHistory, struts: &[SweepStrut]) {
+pub(crate) fn stamp_all(index: &mut ColumnHistory, struts: &[SweepStrut]) {
     for strut in struts {
         if strut.k_bottom == usize::MAX || strut.k_top < strut.k_bottom {
             continue;
@@ -3604,7 +3604,7 @@ pub(crate) fn segment_path_excluding(
 
 /// Why [`segment_path_or_block`] found no path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PathBlock {
+pub(crate) enum PathBlock {
     /// No layer to draw on (the segment does not rise).
     NoRise,
     Drain,
@@ -3613,7 +3613,7 @@ enum PathBlock {
 }
 
 /// [`segment_path_excluding`], naming the refusal.
-fn segment_path_or_block(
+pub(crate) fn segment_path_or_block(
     context: &SlendernessContext<'_>,
     index: &ColumnHistory,
     seat_cell: usize,
@@ -3621,6 +3621,29 @@ fn segment_path_or_block(
     base_cell: usize,
     k_bottom: usize,
     except: &[u32],
+) -> Result<Vec<u32>, PathBlock> {
+    segment_path_sized(context, index, seat_cell, k_top, base_cell, k_bottom, except, None)
+}
+
+/// [`segment_path_or_block`] for a member whose drawn radius is KNOWN: with
+/// `Some(radius)` the drain test is the keep-out's own capsule at that radius
+/// ([`DrainKeepOut::blocks_member`]) rather than at the registered maximum arm
+/// radius the keep-out had to assume before anything was sized. `None` is
+/// exactly [`segment_path_or_block`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the segment's two ends, the index, the members it may pass and the member's own \
+          radius; a struct would move the list rather than shorten it"
+)]
+pub(crate) fn segment_path_sized(
+    context: &SlendernessContext<'_>,
+    index: &ColumnHistory,
+    seat_cell: usize,
+    k_top: usize,
+    base_cell: usize,
+    k_bottom: usize,
+    except: &[u32],
+    member_radius_mm: Option<f64>,
 ) -> Result<Vec<u32>, PathBlock> {
     let grid = context.grid;
     let cols = grid.cols();
@@ -3668,7 +3691,11 @@ fn segment_path_or_block(
         let row = row.min(grid.rows() - 1);
         let col = col.min(cols - 1);
         let cell = row * cols + col;
-        if !context.keep_out.admits(cell, here) {
+        let drained = match member_radius_mm {
+            None => !context.keep_out.admits(cell, here),
+            Some(radius) => context.keep_out.blocks_member(grid, cell, here, radius),
+        };
+        if drained {
             return Err(PathBlock::Drain);
         }
         if slot > 0 {
