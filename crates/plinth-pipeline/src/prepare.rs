@@ -3192,6 +3192,18 @@ fn print_sweep_disclosure(
         lane.brace_bands_dropped_in_flare,
         lane.masts_raised_above_flare,
     );
+    // MAST TIE HEIGHT AND THE THICKEN LAP ON THE DRAWN FEET
+    // (fix/mast-tie-and-overlap-factor, 2026-10-02). Path-hit witnesses.
+    println!(
+        "[sweep {model}] mast ties and drawn feet: {} mast attempts tied above the crosses' \
+         first evenly spaced layer (the piece above within its limit), {} of all mast attempts \
+         raised past the highest evenly spaced layer for the piece above to fit its own limit; \
+         {} thickenings admitted on the drawn boss feet that the crowding discs would have \
+         refused",
+        lane.mast_ties_planned_above_the_first_tie,
+        lane.mast_ties_raised_for_the_piece_above,
+        lane.thicken_admitted_where_the_crowding_disc_laps,
+    );
     // BRACING REWORK (Craig's rulings of 2026-10-01): every brace band refused,
     // by its one reason; crosses kept in their own plane where a thickening
     // also holds; landing ties that hold only from their branch's seat.
