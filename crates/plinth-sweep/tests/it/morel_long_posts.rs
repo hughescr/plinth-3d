@@ -34,6 +34,36 @@ fn policy() -> SweepPolicy {
     SweepPolicy::from_registry().expect("the registry supplies every number the sweep reads")
 }
 
+/// Whether `point` lies inside the drawn `primitive`, to within a micrometre:
+/// a ball (contact or joint sphere, whose two records are its poles) or a
+/// frustum (its axis from start to end, its radius linear between the two end
+/// radii), and in either case on the support side of its seat trim, where the
+/// file keeps it.
+fn inside_drawn(primitive: &SupportPrimitive, point: [f64; 3]) -> bool {
+    let kept = primitive
+        .seat_trim
+        .is_none_or(|trim| trim.support_side_distance_mm(point) >= -1e-6);
+    let inside = match primitive.segment_kind {
+        SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere => {
+            inside_ball(primitive, point)
+        }
+        _ => inside_frustum(primitive, point),
+    };
+    kept && inside
+}
+
+/// Whether `point` lies inside the ball whose poles are `primitive`'s two
+/// records.
+fn inside_ball(primitive: &SupportPrimitive, point: [f64; 3]) -> bool {
+    let a = primitive.start_mm.map(Finite::get);
+    let b = primitive.end_mm.map(Finite::get);
+    let distance: f64 = (0..3)
+        .map(|k| (point[k] - 0.5 * (a[k] + b[k])).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    distance <= primitive.start_radius_mm.get() + 1e-6
+}
+
 /// Whether `point` lies inside the drawn frustum `primitive` (its axis from
 /// start to end, its radius linear between the two end radii), to within a
 /// micrometre.
@@ -60,7 +90,18 @@ fn inside_frustum(primitive: &SupportPrimitive, point: [f64; 3]) -> bool {
 }
 
 /// The drawn solid of ONE member, lowered on its own exactly as the field's
-/// lowering draws it (its shaft records and its root flare).
+/// lowering draws it: its head ball, its shaft records, its joint balls and
+/// its root flare.
+///
+/// RE-DERIVED 2026-10-02 (merge of develop 7826593: slenderness S 40 and the
+/// creep-45 pass re-runs): the head ball is part of the post. On the merged
+/// laid tube brace 157 seats on vertical plate post 1 (radius 0.927 mm, seat
+/// at z 0.0) at z −0.750, 0.067 mm above the top of the post's shaft record
+/// (z −0.817) and 0.067 mm from the centre of its 1.236 mm contact ball, on
+/// the support side of the seat trim. Graded against the shaft and flare
+/// alone it read "−0.927 mm outside": inside the post's radius but above its
+/// shaft record. The brace end meets the drawn post; the grading left out
+/// part of the post (`lanes/morel-long-posts/r12/diag-brace157b.log`).
 fn drawn_solid(plan: &SweepPlan, arm: &SweepArm) -> Vec<SupportPrimitive> {
     let layers = LayerPlan::new(plan.plate_z_mm, vec![plan.layer_height_mm; plan.layers])
         .expect("the plan's own uniform layer plan");
@@ -75,7 +116,9 @@ fn drawn_solid(plan: &SweepPlan, arm: &SweepArm) -> Vec<SupportPrimitive> {
         .filter(|primitive| {
             matches!(
                 primitive.segment_kind,
-                SupportSegmentKind::ContactTaper
+                SupportSegmentKind::ContactSphere
+                    | SupportSegmentKind::ContactTaper
+                    | SupportSegmentKind::JointSphere
                     | SupportSegmentKind::Member
                     | SupportSegmentKind::RootFlare
             )
@@ -106,40 +149,85 @@ fn brace_ends(plan: &SweepPlan, arms: &[SweepArm]) -> Vec<(u32, &'static str, u3
         .collect()
 }
 
-/// **Every brace end meets its post's DRAWN solid** (rule (a)). Graded
-/// against the post as the lowering draws it, alone, never against the
-/// crate's own idea of where the post stands. Non-vacuous: braces are tied to
-/// leaning plate posts, where the drawn shaft leaves the planned line.
-#[test]
-fn every_brace_end_on_the_laid_tube_meets_its_posts_drawn_solid() {
-    let mesh = make_laid_tube().expect("the laid tube fixture");
-    let plan = harness::sweep_with(&mesh, 0.0, &policy());
-    let arms = arms_of(&plan);
-    let ends = brace_ends(&plan, &arms);
-    assert!(!ends.is_empty(), "anti-vacuity: the laid tube placed no brace");
+/// What [`brace_end_census`] measured on one field.
+struct EndCensus {
+    ends: usize,
+    on_leaning_plate_posts: usize,
+    /// Ends on a leaning plate post whose point ON THE PLANNED LINE, at the
+    /// end's own height, would lie outside the post's drawn solid: the ends
+    /// rule (a) is what puts on their post. The path hit.
+    planned_line_misses: usize,
+    only_in_a_ball: usize,
+    off: Vec<String>,
+}
+
+/// Every brace end of `plan` graded against its post's drawn solid.
+fn brace_end_census(plan: &SweepPlan) -> EndCensus {
+    let arms = arms_of(plan);
+    let ends = brace_ends(plan, &arms);
 
     let mut solids: std::collections::BTreeMap<u32, Vec<SupportPrimitive>> =
         std::collections::BTreeMap::new();
     let mut off: Vec<String> = Vec::new();
     let mut on_leaning_plate_posts = 0;
+    let mut planned_line_misses = 0;
+    let mut only_in_a_ball = 0;
     for &(brace, end, post, point) in &ends {
         let Some(index) = plan.struts.iter().position(|strut| strut.id == post) else {
             off.push(format!("brace {brace} {end}: post {post} is not in the field"));
             continue;
         };
         let host = &plan.struts[index];
-        if host.landing == Landing::Plate && host.kind != StrutKind::Brace && host.is_leaned() {
-            on_leaning_plate_posts += 1;
-        }
+        let leaning_plate_post =
+            host.landing == Landing::Plate && host.kind != StrutKind::Brace && host.is_leaned();
         let solid = solids
             .entry(post)
-            .or_insert_with(|| drawn_solid(&plan, &arms[index]));
-        if !solid.iter().any(|primitive| inside_frustum(primitive, point)) {
+            .or_insert_with(|| drawn_solid(plan, &arms[index]));
+        if leaning_plate_post {
+            on_leaning_plate_posts += 1;
+            // The post's planned line (seat to base on the plate), at this
+            // end's height.
+            let (seat, base) = (arms[index].seat_mm, arms[index].base_mm);
+            let rise = seat[2] - base[2];
+            if rise > 0.0 {
+                let t = (point[2] - base[2]) / rise;
+                let planned: [f64; 3] =
+                    std::array::from_fn(|k| base[k] + t * (seat[k] - base[k]));
+                if !solid.iter().any(|primitive| inside_drawn(primitive, planned)) {
+                    planned_line_misses += 1;
+                }
+            }
+        }
+        let in_a_ball = |primitive: &SupportPrimitive| {
+            matches!(
+                primitive.segment_kind,
+                SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere
+            )
+        };
+        if solid
+            .iter()
+            .any(|primitive| in_a_ball(primitive) && inside_drawn(primitive, point))
+            && !solid
+                .iter()
+                .any(|primitive| !in_a_ball(primitive) && inside_drawn(primitive, point))
+        {
+            only_in_a_ball += 1;
+        }
+        if !solid.iter().any(|primitive| inside_drawn(primitive, point)) {
+            // How far outside: the radial reading at the end's own height on
+            // each shaft record, the surface distance on each ball.
             let nearest = solid
                 .iter()
                 .map(|primitive| {
                     let a = primitive.start_mm.map(Finite::get);
                     let b = primitive.end_mm.map(Finite::get);
+                    if in_a_ball(primitive) {
+                        let distance: f64 = (0..3)
+                            .map(|k| (point[k] - 0.5 * (a[k] + b[k])).powi(2))
+                            .sum::<f64>()
+                            .sqrt();
+                        return distance - primitive.start_radius_mm.get();
+                    }
                     let t = ((point[2] - a[2]) / (b[2] - a[2])).clamp(0.0, 1.0);
                     let x = a[0] + t * (b[0] - a[0]);
                     let y = a[1] + t * (b[1] - a[1]);
@@ -159,23 +247,67 @@ fn every_brace_end_on_the_laid_tube_meets_its_posts_drawn_solid() {
             ));
         }
     }
-    println!(
-        "laid tube: {} brace ends, {on_leaning_plate_posts} of them on a leaning plate post, {} \
-         off their post's drawn solid",
-        ends.len(),
-        off.len()
-    );
-    // PATH HIT: the ends this rule moves are there to move.
-    assert!(
-        on_leaning_plate_posts > 0,
-        "anti-vacuity: no brace is tied to a leaning plate post"
-    );
-    assert!(
-        off.is_empty(),
-        "{} brace ends miss their post's drawn solid:\n{}",
-        off.len(),
-        off.join("\n")
-    );
+    EndCensus {
+        ends: ends.len(),
+        on_leaning_plate_posts,
+        planned_line_misses,
+        only_in_a_ball,
+        off,
+    }
+}
+
+/// **Every brace end meets its post's DRAWN solid** (rule (a)). Graded
+/// against the post as the lowering draws it, alone, never against the
+/// crate's own idea of where the post stands.
+///
+/// Two fields: production, and the witness field, where the rule is what
+/// keeps ends on their posts. RE-DERIVED 2026-10-02 (merge of develop
+/// 7826593): on the merged production laid tube only 8 of 320 brace ends are
+/// on a leaning plate post, and every one of them would also meet the post on
+/// the planned line, so deleting the rule (sabotage S4: the adapter keeps the
+/// planned line) left the production field green
+/// (`lanes/morel-long-posts/r12/sabotage-S4-merged.log`). The witness field
+/// is the same fixture with the creep-45 overhang cut off
+/// (`without_creep_overhang_cut`, the owner's 2026-09-30 ruling), which keeps
+/// the creep arms whose leaning posts the braces tie to; the path hit
+/// (`planned_line_misses > 0`) is asserted there.
+#[test]
+fn every_brace_end_on_the_laid_tube_meets_its_posts_drawn_solid() {
+    let mesh = make_laid_tube().expect("the laid tube fixture");
+    for (name, policy, witness) in [
+        ("production", policy(), false),
+        ("creep cut off", policy().without_creep_overhang_cut(), true),
+    ] {
+        let plan = harness::sweep_with(&mesh, 0.0, &policy);
+        let census = brace_end_census(&plan);
+        println!(
+            "laid tube ({name}): {} brace ends, {} of them on a leaning plate post, {} of those \
+             off the post on its planned line, {} met only by a ball of their post, {} off their \
+             post's drawn solid",
+            census.ends,
+            census.on_leaning_plate_posts,
+            census.planned_line_misses,
+            census.only_in_a_ball,
+            census.off.len()
+        );
+        assert!(census.ends > 0, "anti-vacuity ({name}): the laid tube placed no brace");
+        if witness {
+            // PATH HIT: some end is on its post only because it follows the
+            // drawn line.
+            assert!(
+                census.planned_line_misses > 0,
+                "anti-vacuity ({name}): no brace end on a leaning plate post would miss it on \
+                 the planned line ({} on leaning plate posts)",
+                census.on_leaning_plate_posts
+            );
+        }
+        assert!(
+            census.off.is_empty(),
+            "{name}: {} brace ends miss their post's drawn solid:\n{}",
+            census.off.len(),
+            census.off.join("\n")
+        );
+    }
 }
 
 /// **On the Morel base itself, as authored** (the pose its production search

@@ -731,12 +731,12 @@ pub(crate) fn apply(
             let new_root = !matches!(proposal.candidate.landing, Landing::Strut { .. });
             let clear = surface.is_none()
                 || (first..=first + proposal.children.len()).all(|slot| {
-                    let floor = if slot == first && new_root {
+                    let minimum = if slot == first && new_root {
                         tier
                     } else {
                         tier.min(before[slot].unwrap_or(tier).max(0.0))
                     };
-                    after[slot].is_some_and(|now| now >= floor - CLEARANCE_SLACK_MM)
+                    after[slot].is_some_and(|now| now >= minimum - CLEARANCE_SLACK_MM)
                 });
             if !clear {
                 outcome.candidates_refused_clearance += 1;

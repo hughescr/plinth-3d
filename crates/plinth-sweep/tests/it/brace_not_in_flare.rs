@@ -171,10 +171,20 @@ fn no_mast_brace_end_on_the_laid_tube_lies_inside_a_root_flare() {
     // places 2 masts and plans none again with its tie raised (measured
     // 2026-10-01), so the path-hit check went red. The flare rule reads no
     // placement.
+    //
+    // RE-PINNED 2026-10-02 (fix/morel-long-posts merged with develop 7826593):
+    // graded with the creep-45 overhang cut off (`without_creep_overhang_cut`,
+    // the owner's 2026-09-30 ruling that a face at or past 45° charges no
+    // creep). On the merged tree this configuration places 0 masts; with the
+    // cut off it places 1 (lip-seat rule and every other rule in force), and
+    // with the lip-seat rule off instead it places 2 (measured,
+    // `lanes/morel-long-posts/r12/diag-masts*.log`). The cut takes away creep
+    // arms the masts stood among; the flare rule reads no creep.
     let policy = harness::at_path_fixture_seating(SweepPolicy {
         slenderness_thicken: false,
         ..policy()
-    });
+    })
+    .without_creep_overhang_cut();
     let plan = sweep_with(&mesh, 0.0, &policy);
     let flares = emitted_flares(&plan);
     let lane = &plan.report.slenderness_lane;
