@@ -4795,6 +4795,82 @@ mod tests {
         assert!((super::pair_ceiling_ratio(0.15, 0.15, 0.0) - 1.0).abs() < 1e-12);
     }
 
+    /// D9 on a field: two 20 mm, 0.05 mm plate posts 2.0 mm apart, each 8
+    /// limits long (S = 50). Their pair's ceiling is `(1 + 40²)^(1/4)` = 6.33,
+    /// so no band is built between them as they stand. A post is thickened
+    /// INTO the window (to the pair's ceiling at its new radius: root 0.484
+    /// mm, 5.31 mm³, measured 2026-10-03) because full thickening (`r_eq`
+    /// 0.4 mm over 20 mm) costs more resin than that plus the crosses, and
+    /// then the pair is braced. (At 1.0 mm apart every growth laps the other
+    /// post's drawn foot, so the fixture stands them 2.0 mm apart.) With the
+    /// window off (the sabotage) the same pass builds bands between the pair
+    /// at once and nothing is thickened into a window.
+    #[test]
+    fn a_pair_past_its_ceiling_is_thickened_into_the_window_then_braced() {
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let history = crate::up_sweep::ColumnHistory::new(&grid);
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(0.05, 45.0, 25.0);
+        let law = law();
+        let tall = |id: u32, col: usize| {
+            let mut post = plate_post(&grid, id, col, 0.05);
+            post.k_top = 400;
+            post.radius_mm = vec![0.05; 400];
+            post.carried_mm2 = vec![0.0; 400];
+            post
+        };
+        let run = |window: bool| {
+            let context = super::SlendernessContext {
+                grid: &grid,
+                history: &history,
+                keep_out: &keep_out,
+                lean: &lean,
+                law: &law,
+                layer_height_mm: 0.05,
+                layers: 500,
+                flare_factor: 1.6,
+                mast_root_clearance: true,
+                final_clearance_mm: 0.3,
+                member_clearance: true,
+                shaft_landings: true,
+                merge: true,
+                brace: true,
+                thicken: true,
+                mast: false,
+                max_struts: 1_000,
+                x_allowed: 12.0,
+                seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
+                load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
+                brace_cap: true,
+                brace_window: window,
+            };
+            let mut struts = vec![tall(0, 100), tall(1, 140)];
+            let mut outcome = super::SlendernessOutcome::default();
+            super::apply_ties(&context, &mut struts, &mut outcome);
+            outcome
+        };
+        assert!(
+            (super::pair_ceiling_ratio(0.05, 0.05, 2.0) - 1601.0_f64.powf(0.25)).abs() < 1e-12
+        );
+        let on = run(true);
+        println!(
+            "window on: {} past the ceiling, {} thickened into the window, {} thickened, {} \
+             crosses, {} refused for resin",
+            on.crosses_refused_past_pair_ceiling,
+            on.members_thickened_into_the_window,
+            on.members_thickened,
+            on.braces_added,
+            on.crosses_refused_thicken_cheaper
+        );
+        assert!(on.crosses_refused_past_pair_ceiling > 0, "path hit: {on:?}");
+        assert!(on.members_thickened_into_the_window > 0, "path hit: {on:?}");
+        assert!(on.braces_added > 0, "the pair is braced once inside its window: {on:?}");
+        let off = run(false);
+        assert_eq!(off.crosses_refused_past_pair_ceiling, 0);
+        assert_eq!(off.members_thickened_into_the_window, 0);
+        assert!(off.braces_added > 0, "{off:?}");
+    }
+
     /// R7 + D5: a cross is charged one diagonal per post when both need it
     /// (`c` = 1) and the whole cross when only the run does (`c` = 2), per
     /// plane and per band (`bracing-mechanics.md` §5).
