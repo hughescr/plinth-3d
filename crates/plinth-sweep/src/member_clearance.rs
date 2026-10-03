@@ -824,9 +824,12 @@ mod census_tests {
         assert!(read(zone) >= GAP - 1e-9, "outside the zone: {}", read(zone));
         assert!(read(zone - 0.01) < GAP, "a zone too short: {}", read(zone - 0.01));
         // A member that does not land on the model has no landing zone.
+        let zone_off_the_model =
+            model_landing_zones_mm(&surface, &[seat], &[base], &[r], &[false], GAP)[0];
         assert_eq!(
-            model_landing_zones_mm(&surface, &[seat], &[base], &[r], &[false], GAP)[0],
-            0.0
+            zone_off_the_model.partial_cmp(&0.0),
+            Some(std::cmp::Ordering::Equal),
+            "{zone_off_the_model}"
         );
     }
 

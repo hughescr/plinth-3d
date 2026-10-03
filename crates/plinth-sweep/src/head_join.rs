@@ -97,12 +97,14 @@
 //! well as test 2. Members that rest on the lander are re-landed on its new
 //! axis at their own landing layer, transitively, under the same tests.
 //!
-//! **Above the plate** (fix/round100-emit, 2026-09-29). Every join, a
-//! lander's or a dependant's, keeps the member's drawn base disc at or above
-//! the build plate ([`stays_above_plate`]). The candidate walk reaches each
-//! host's own bottom layer, and a plate arm's bottom layer is the plate: on
-//! Round_100 a lander re-landed there dipped 0.2335 mm under it, and the
-//! emitter's disk audit refused the file.
+//! **Above the raft** (fix/round100-emit, 2026-09-29; the raft top since
+//! fix/round11-milestone, 2026-10-02). Every join, a lander's or a
+//! dependant's, keeps the member's drawn base disc at or above the raft top
+//! ([`stays_above_raft`], [`join_floor_z_mm`]). The candidate walk reaches
+//! each host's own bottom layer, and a plate arm's bottom layer is the plate:
+//! on Round_100 a lander re-landed there dipped 0.2335 mm under it, and the
+//! emitter's disk audit refused the file; on the procedural Round 25 a lander
+//! moved into a plate post's flare reached through the post's raft pad.
 //!
 //! **Emit and warn.** A join that cannot move — no join passes, a cross
 //! (brace) tied to a member that would have to move, a lander that is not a
@@ -205,9 +207,10 @@ pub struct HeadJoinOutcome {
     /// witness for test 2).
     pub clearance_rows: usize,
     /// Candidate joins (a lander's, or a dependant's re-landing) refused
-    /// because the member's drawn base disc would reach under the build plate
-    /// (`stays_above_plate`), over every pass. The path-hit witness for the
-    /// plate rule (fix/round100-emit, 2026-09-29).
+    /// because the member's drawn base disc would reach under the raft top
+    /// (`stays_above_raft`; the build plate until fix/round11-milestone,
+    /// 2026-10-02), over every pass. The path-hit witness for the plate rule
+    /// (fix/round100-emit, 2026-09-29).
     pub candidates_below_plate: usize,
     /// Rule passes that moved something (each followed by a down-sweep).
     pub passes: usize,
@@ -994,37 +997,57 @@ fn base_point(context: &HeadJoinContext<'_>, cell: usize, layer: usize) -> [f64;
     ]
 }
 
-/// **A join stands on the host's solid, above the build plate**
-/// (fix/round100-emit, 2026-09-29).
+/// **A join stands on the host's solid, above the raft top**
+/// (fix/round100-emit, 2026-09-29; the raft top since fix/round11-milestone,
+/// 2026-10-02).
 ///
 /// A member is drawn straight from its tip ball's centre `centre` to its base
 /// point `base`, and its base is a disc of radius `radius` NORMAL to that
 /// axis. On a leaned member the disc tilts, and its lowest point stands
 /// `radius · √(1 − a_z²)` under `base` (`a_z` the axis's vertical component).
-/// The plate is the physical floor: nothing can be drawn under it, and the
-/// emitter's disk audit names any record that is (`BuildVolume`). So a join is
-/// admissible only where that lowest point is at or above the plate.
+/// A join is admissible only where that lowest point is at or above
+/// `floor_z_mm`, which callers take from [`join_floor_z_mm`]: the RAFT TOP.
 ///
-/// The defect it answers: on Round_100 at its committed flip the rule re-landed
-/// lander 536 on plate arm 40 AT LAYER 0, on the plate itself; its end disc
-/// dipped 0.2335 mm under the plate, and from `15e594d` the whole file was
-/// refused. `candidate_joins` walks every host down to its own bottom layer,
-/// and a plate arm's bottom layer is the plate.
+/// The defects it answers: on Round_100 at its committed flip the rule
+/// re-landed lander 536 on plate arm 40 AT LAYER 0, on the plate itself; its
+/// end disc dipped 0.2335 mm under the plate, and from `15e594d` the whole file
+/// was refused. `candidate_joins` walks every host down to its own bottom
+/// layer, and a plate arm's bottom layer is the plate. Since the sweep emits a
+/// raft (fix/sweep-raft, 2026-09-29) the plate is no longer the floor: under
+/// every plate root stands a pad up to the raft top, and only a FOOT ends in
+/// it. Judged against the plate, the round-11 milestone (`f19ba85`) found the
+/// head-join rule moving a lander on the procedural Round 25 down plate post
+/// 9 to layer 7 (0.35 mm up, inside the post's root flare), and its emitted
+/// end disc reached 0.087 mm below the raft top, through the pad
+/// (`plate_contact::every_plate_root_of_round_25_stands_on_a_raft_pad_that_covers_its_foot`).
 ///
-/// `radius` is the member's widest drawn radius, as test 2 uses: it never
-/// under-states the disc. No new constant: the plate height, the drawn axis
-/// and the drawn radius only.
-pub(crate) fn stays_above_plate(
+/// `radius` is the member's widest drawn radius, as test 2 uses. No new
+/// constant: the raft height, the drawn axis and the drawn radius only.
+pub(crate) fn stays_above_raft(
     centre: [f64; 3],
     base: [f64; 3],
     radius: f64,
-    plate_z_mm: f64,
+    floor_z_mm: f64,
 ) -> bool {
     let reach_below = geom_kernel::vec3::normalize(geom_kernel::vec3::sub(base, centre))
         .map_or(radius, |axis| {
             radius * (1.0 - axis[2] * axis[2]).max(0.0).sqrt()
         });
-    base[2] - reach_below >= plate_z_mm
+    base[2] - reach_below >= floor_z_mm
+}
+
+/// **The floor every join's base disc stands on: the raft top** over a plate
+/// at `plate_z_mm`, read through the lowering's own door
+/// ([`plinth_support::SweepRootFlare::raft_top_above_plate_mm`], the height
+/// the pads are drawn to), so the rule and the file cannot disagree. Nothing
+/// but a raft record and a foot ending in its pad reaches below it, the same
+/// floor the tie planner keeps every brace above
+/// (`slenderness::free_shaft_floor`). An unreadable registry leaves the plate,
+/// as before the raft: nothing is refused on a missing number.
+pub(crate) fn join_floor_z_mm(plate_z_mm: f64, layer_height_mm: f64) -> f64 {
+    plate_z_mm
+        + plinth_support::SweepRootFlare::registered(layer_height_mm)
+            .map_or(0.0, |flare| flare.raft_top_above_plate_mm())
 }
 
 /// How far down a member's axis `axis` (unit, seat to base) its own seat zone
@@ -1127,6 +1150,8 @@ struct Planner<'a, 'c> {
     heads: &'a [Option<Head>],
     profiles: &'a [Vec<f64>],
     surface: &'a NativeSurface,
+    /// The raft top ([`join_floor_z_mm`]) a dependant's base disc keeps above.
+    floor_z_mm: f64,
     /// Dependant re-landings refused by the plate rule, counted here and
     /// added to [`HeadJoinOutcome::candidates_below_plate`].
     below_plate: std::cell::Cell<usize>,
@@ -1211,13 +1236,8 @@ impl Planner<'_, '_> {
                         continue;
                     };
                     let base = base_point(self.context, cell, layer);
-                    // THE PLATE, for a dependant as for its lander.
-                    if !stays_above_plate(
-                        head.centre,
-                        base,
-                        dependant_widest,
-                        self.context.plate_z_mm,
-                    ) {
+                    // THE RAFT TOP, for a dependant as for its lander.
+                    if !stays_above_raft(head.centre, base, dependant_widest, self.floor_z_mm) {
                         self.below_plate.set(self.below_plate.get() + 1);
                         continue;
                     }
@@ -1312,6 +1332,9 @@ pub(crate) fn apply(
     first: bool,
 ) -> usize {
     let found = survey(context, struts);
+    // THE RAFT TOP every join keeps its base disc above (`stays_above_raft`),
+    // read once for the pass.
+    let floor_z_mm = join_floor_z_mm(context.plate_z_mm, context.slender.layer_height_mm);
     if first {
         outcome.joins_examined = found.examined;
         outcome.joins_in_seat_zone_before = found.in_zone.len();
@@ -1461,7 +1484,7 @@ pub(crate) fn apply(
             .iter()
             .copied()
             .fold(lander.tip_radius_mm(), f64::max);
-        // THE PLATE (`stays_above_plate`), by arithmetic, before test 2.
+        // THE RAFT TOP (`stays_above_raft`), by arithmetic, before test 2.
         let mut admissible: Vec<(usize, usize)> = Vec::new();
         let mut bases: Vec<[f64; 3]> = Vec::new();
         for (&(host, layer), &clears) in chain.iter().zip(verdict) {
@@ -1469,7 +1492,7 @@ pub(crate) fn apply(
                 continue;
             }
             let base = base_point(context, struts[host].cell_at(layer), layer);
-            if stays_above_plate(lander_head.centre, base, widest, context.plate_z_mm) {
+            if stays_above_raft(lander_head.centre, base, widest, floor_z_mm) {
                 admissible.push((host, layer));
                 bases.push(base);
             } else {
@@ -1492,6 +1515,7 @@ pub(crate) fn apply(
             heads: &heads,
             profiles: &found.profiles,
             surface,
+            floor_z_mm,
             below_plate: std::cell::Cell::new(0),
         };
         let mut refusal = Refused::NoClearJoin;
@@ -1560,7 +1584,9 @@ pub(crate) fn apply(
 
 #[cfg(test)]
 mod tests {
-    use super::{sections_near_model, stays_above_plate, Head, Section, SectionsNear};
+    use super::{
+        join_floor_z_mm, sections_near_model, stays_above_raft, Head, Section, SectionsNear,
+    };
     use geom_kernel::{NativeSurface, NativeSurfaceConfig};
 
     /// A model: its surface and the indexed triangles it was built from.
@@ -1745,13 +1771,64 @@ mod tests {
     #[test]
     fn a_join_keeps_the_members_base_disc_above_the_plate() {
         let leaned =
-            |base_z: f64| stays_above_plate([0.0, 0.0, base_z + 4.0], [3.0, 0.0, base_z], 0.5, 0.0);
+            |base_z: f64| stays_above_raft([0.0, 0.0, base_z + 4.0], [3.0, 0.0, base_z], 0.5, 0.0);
         assert!(!leaned(0.29));
         assert!(leaned(0.31));
         assert!(!leaned(0.0));
         let vertical =
-            |base_z: f64| stays_above_plate([0.0, 0.0, 4.0], [0.0, 0.0, base_z], 0.5, 0.0);
+            |base_z: f64| stays_above_raft([0.0, 0.0, 4.0], [0.0, 0.0, base_z], 0.5, 0.0);
         assert!(vertical(0.0));
         assert!(!vertical(-0.01));
+    }
+
+    /// **The floor is the raft top the lowering draws the pads to**
+    /// (fix/round11-milestone, 2026-10-02), read through the lowering's own
+    /// door, over any plate height. The milestone's case, hand-derived from
+    /// its numbers: a 0.3896 mm lander leaned with `√(1 − a_z²) = 0.4686`
+    /// joined 0.35 mm over the plate reaches 0.1826 mm under its base point,
+    /// so its disc's lowest point is 0.1674 mm over the plate. The plate
+    /// admitted it (`f19ba85`); the raft top, 0.2 mm up, refuses it, and
+    /// admits the same lander one layer higher (0.2174 mm). Sabotage: a floor
+    /// of the plate itself admits the 0.35 mm join, and this test goes red.
+    #[test]
+    fn a_join_keeps_the_members_base_disc_above_the_raft_top() {
+        let raft_mm = plinth_support::SweepRootFlare::registered(0.05)
+            .expect("the registry")
+            .raft_top_above_plate_mm();
+        assert!(raft_mm > 0.0, "the sweep draws a raft: {raft_mm}");
+        for plate in [0.0, -6.75, 7.3] {
+            let floor = join_floor_z_mm(plate, 0.05);
+            assert!(
+                (floor - (plate + raft_mm)).abs() < 1.0e-12,
+                "plate {plate}: floor {floor}, raft top {}",
+                plate + raft_mm
+            );
+        }
+        assert!(
+            (raft_mm - 0.2).abs() < 1.0e-12,
+            "the hand derivation reads a 0.2 mm raft"
+        );
+        // The lander's axis, as the milestone's probe read it (plate at 0).
+        let centre = [
+            -3.017_780_895_934_699_4,
+            -7.324_502_427_876_349,
+            7.448_434_970_962_137,
+        ];
+        let foot = [-4.525, -10.775];
+        let radius = 0.389_635_896_481_705_6;
+        let lander = |base_z: f64| {
+            stays_above_raft(
+                centre,
+                [foot[0], foot[1], base_z],
+                radius,
+                join_floor_z_mm(0.0, 0.05),
+            )
+        };
+        assert!(
+            stays_above_raft(centre, [foot[0], foot[1], 0.35], radius, 0.0),
+            "anti-vacuity: the plate floor admits the 0.35 mm join"
+        );
+        assert!(!lander(0.35), "0.35 mm up, the disc reaches into the pad");
+        assert!(lander(0.40), "one layer higher it clears the raft top");
     }
 }
