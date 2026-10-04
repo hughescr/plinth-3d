@@ -36,8 +36,14 @@
 //! arithmetic on the in-plane freedoms in the same order, so its drag is the
 //! same number to the last bit
 //! (`tests::the_drag_alone_is_the_drags_in_the_full_sway_to_the_last_bit`),
-//! about six times cheaper (315 µs against 48 µs on 2,000 random panels,
-//! 4.5 bands a panel).
+//! and the same refusals: the out-of-plane freedoms are factored too, for
+//! their pivots only (a panel whose out-of-plane pivot falls under the noise
+//! floor is refused as the full solve refuses it,
+//! `tests::a_panel_the_full_solve_refuses_is_refused_by_the_fast_drag`).
+//! The in-plane solve alone was about six times cheaper than the two full
+//! solves (315 µs against 48 µs on 2,000 random panels, 4.5 bands a panel);
+//! the out-of-plane factorisation gives some of that back (the slab's whole
+//! dense search: 49.9 s with the in-plane solve alone, 58.8 s with it).
 
 use crate::frame::Frame;
 
@@ -629,6 +635,105 @@ mod tests {
         }
         assert!(some > 1_000, "the comparison read real numbers: {some} solved");
         assert!(none > 0, "and some panels the two both refuse: {none}");
+    }
+
+    /// **A panel the full solve refuses for a pivot out of plane is refused
+    /// by the fast drag too.** The challenger's witness (2026-10-04, against
+    /// `d91e24c`): a tall run (174 mm) with 13 hair braces (radius 0.117 mm) on
+    /// posts of radius 0.61 and 1.12 mm, a gap of 0.60 mm. The unchanged
+    /// `70e2639` solver refuses it (an out-of-plane pivot under the noise
+    /// floor); an in-plane-only solve returned a finite drag and a count of 13
+    /// bands where the old loop returned none. Each of the two: `panel_drag`
+    /// is `None`, and `count_bands` is the old count.
+    #[test]
+    fn a_panel_the_full_solve_refuses_is_refused_by_the_fast_drag() {
+        let band = |bottom_mm: f64, top_mm: f64| PanelBand {
+            bottom_mm,
+            top_mm,
+            brace_radius_mm: 0.117_231_547_731_911_16,
+        };
+        let panel = Panel {
+            post_radius_mm: 0.606_710_511_365_277_5,
+            partner_radius_mm: 1.121_927_296_436_027_6,
+            gap_mm: 0.595_982_447_632_242_8,
+            height_mm: 174.192_434_130_992_5,
+            bands: vec![
+                band(8.460_097_110_442_05, 14.671_783_133_447_67),
+                band(31.541_831_414_282_438, 37.853_840_340_710_57),
+                band(47.123_513_977_408_25, 59.408_383_279_710_01),
+                band(68.602_908_317_551_03, 69.437_668_208_578_05),
+                band(70.660_633_753_754_95, 76.154_515_877_364_84),
+                band(77.087_635_923_666_11, 79.237_866_482_779_18),
+                band(79.304_350_540_327_15, 80.258_900_292_634_64),
+                band(82.599_542_805_309_95, 84.555_862_767_374_26),
+                band(85.413_302_072_573_17, 137.898_525_454_638_08),
+                band(138.461_438_270_445_54, 142.566_860_617_479_48),
+                band(151.403_104_984_712_63, 152.266_174_628_901_92),
+                band(155.635_599_250_200_67, 160.399_857_649_314_87),
+                band(161.547_221_716_200_34, 167.830_382_080_042_26),
+            ],
+        };
+        let ratio = 59.436_351_224_285_91;
+        assert!(panel_sway(&panel, ratio).is_none(), "the full solve refuses");
+        assert_eq!(panel_drag(&panel, ratio), None, "so does the fast one");
+        let thirteen = panel.bands.clone();
+        let layout = |n: usize| (n == 13).then(|| thirteen.clone());
+        let bare = Panel {
+            bands: Vec::new(),
+            ..panel
+        };
+        assert_eq!(
+            count_bands(&bare, ratio, 13, &layout),
+            count_bands_by_full_sway(&bare, ratio, 13, &layout)
+        );
+        assert_eq!(
+            count_bands(&bare, 30.0, 13, &layout),
+            count_bands_by_full_sway(&bare, 30.0, 13, &layout)
+        );
+    }
+
+    /// **Refusals agree on tall, thin-braced panels too.** The random panels
+    /// of the bit test are short (2 to 25 mm) and rarely meet a pivot under
+    /// the noise floor; these run to 250 mm with up to 16 bands of braces a
+    /// tenth to a half of the post, and the fast drag must be the full
+    /// sway's, bit for bit, or refused exactly when it is.
+    #[test]
+    fn tall_thin_braced_panels_are_refused_and_solved_alike() {
+        let mut rng = Lcg(0x5eed_ba4d_0000_0003);
+        let (mut solved, mut refused) = (0_usize, 0_usize);
+        for _ in 0..1_500 {
+            let post = rng.between(0.3, 0.9);
+            let height = rng.between(20.0, 250.0);
+            let count = 1 + rng.below(16);
+            let mut cuts: Vec<f64> = (0..2 * count).map(|_| rng.between(0.0, height)).collect();
+            cuts.sort_by(f64::total_cmp);
+            let brace = rng.between(0.1, 0.5) * post;
+            let panel = Panel {
+                post_radius_mm: post,
+                partner_radius_mm: rng.between(0.3, 1.5),
+                gap_mm: rng.between(0.4, 2.0),
+                height_mm: height,
+                bands: cuts
+                    .chunks(2)
+                    .map(|pair| PanelBand {
+                        bottom_mm: pair[0],
+                        top_mm: pair[1],
+                        brace_radius_mm: brace,
+                    })
+                    .collect(),
+            };
+            let ratio = rng.between(20.0, 60.0);
+            let full = panel_sway(&panel, ratio).map(|sway| sway.drag_over_pixel.to_bits());
+            let fast = panel_drag(&panel, ratio).map(f64::to_bits);
+            assert_eq!(fast, full, "{panel:?} at S {ratio}");
+            if full.is_some() {
+                solved += 1;
+            } else {
+                refused += 1;
+            }
+        }
+        assert!(solved > 300, "real numbers were compared: {solved}");
+        assert!(refused > 0, "refusals were compared: {refused}");
     }
 
     /// **The fast count is the full sway's count.** `count_bands` against
