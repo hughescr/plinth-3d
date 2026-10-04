@@ -3312,6 +3312,63 @@ fn print_sweep_disclosure(
             ""
         },
     );
+    // FRAME BANDS (Craig ruling 2026-10-03, R6 + D4, interim pending the
+    // slenderness coupon): bands counted through a two-post frame in which
+    // every band sways. Path-hit witnesses.
+    println!(
+        "[sweep {model}] brace frame: {} band sets built ({} bands, {} beyond the fixed-point \
+         count; most bands in one set {}; highest L/limit braced {:.3}); {} pairs past the \
+         frame's two-post ceiling, {} pairs with no room for the bands at their depth; {} sets \
+         refused for a band that could not be built; {} bands \
+         built off their laid layer and {} sets respaced with one more band (the frame solved \
+         again on the bands as built); {} sets pruned as one",
+        lane.frame_band_sets,
+        lane.frame_bands_built,
+        lane.frame_bands_beyond_fixed_point,
+        lane.frame_most_bands_in_a_set,
+        lane.frame_highest_ratio_braced,
+        lane.frame_pairs_past_ceiling,
+        lane.frame_pairs_without_room,
+        lane.frame_sets_refused_incomplete,
+        lane.frame_bands_moved_from_their_layer,
+        lane.frame_sets_respaced,
+        lane.frame_sets_pruned,
+    );
+    // CONSTRUCTION-STAGE SHAKE (Craig ruling 2026-10-03, R9 + D6): a WARNING
+    // only, at a stated, unmeasured brace peel pressure.
+    let shake = &lane.stage_shake;
+    println!(
+        "[sweep {model}] construction-stage shake (brace peel p_b = {:.2} kPa ASSUMED: the \
+         0.05 mm wall value, unmeasured for a brace): {} diagonals ({} not joined to their \
+         twin), {} stages solved ({} unsolved), {} stages and {} printing tops over 1 px; \
+         worst {:.2} px (member {}, layer {}), which reaches 1 px at p_b = {:.2} kPa",
+        shake.pressure_kpa,
+        shake.diagonals,
+        shake.unjoined,
+        shake.stages,
+        shake.unsolved_stages,
+        shake.stages_over_pixel,
+        shake.tops.len(),
+        shake.worst_px,
+        shake
+            .worst_member
+            .map_or_else(|| "none".to_owned(), |member| member.to_string()),
+        shake.worst_layer,
+        shake.pressure_for_one_pixel_kpa,
+    );
+    for top in &shake.tops {
+        println!(
+            "[sweep {model}] WARNING construction-stage shake: member {} printing top moves \
+             {:.2} px at layer {} while braces grow, at an ASSUMED brace peel p_b = {:.2} kPa \
+             (unmeasured; 1 px at p_b = {:.2} kPa) [a WARNING on an emitted file, never a \
+             refusal]",
+            top.member,
+            top.px,
+            top.layer,
+            shake.pressure_kpa,
+            shake.pressure_kpa / top.px,
+        );
+    }
     for warning in lane.warnings.iter().take(20) {
         println!(
             "[sweep {model}]   unbraced_run_over_limit: arm {} layers {}..{} runs {:.3} mm \

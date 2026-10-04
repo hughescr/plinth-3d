@@ -47,6 +47,8 @@ pub(crate) mod demand_replay;
 pub mod down_sweep;
 pub mod drain;
 pub mod footprint;
+pub(crate) mod frame;
+pub mod frame_bands;
 pub mod grid;
 pub mod head_join;
 pub mod landing_check;
@@ -63,6 +65,7 @@ pub mod reach;
 pub mod report;
 pub mod rigid_share;
 pub mod slenderness;
+pub mod stage_shake;
 pub mod stranded_branch;
 pub mod tip_landing;
 pub mod up_sweep;
@@ -667,6 +670,17 @@ pub struct SweepPolicy {
     /// **On in production.** The drill turns it off and every admissible
     /// cross is built again, as before.
     pub slenderness_brace_window: bool,
+    /// Rule R6 + D4 (Craig ruling 2026-10-03, interim pending the
+    /// slenderness coupon): brace bands are counted through a two-post frame
+    /// in which every band can sway, and a run's whole set is built at once
+    /// (`frame_bands`). **On in production.** The drill turns it off and the
+    /// ladder credits every band as a fixed point again, one at a time.
+    pub slenderness_frame_bands: bool,
+    /// Rule R9 + D6 (Craig ruling 2026-10-03): the brace-layer peel pressure
+    /// the construction-stage shake check ASSUMES, kPa
+    /// (`stage_shake::BRACE_PEEL_KPA`, the 0.05 mm wall value, unmeasured
+    /// for a brace). The check only warns; `0` switches it off.
+    pub stage_shake_brace_peel_kpa: f64,
     /// `FINAL_CLEARANCE_GAP_MM`, the owner's field-ruled 0.3 mm final hard
     /// limit (2026-08-22) between a support solid and the model. The head-join
     /// rule holds the section that carries a lander's load this far from a
@@ -813,6 +827,8 @@ impl SweepPolicy {
             slenderness_mast_root_clearance: true,
             slenderness_brace_cap: true,
             slenderness_brace_window: true,
+            slenderness_frame_bands: true,
+            stage_shake_brace_peel_kpa: stage_shake::BRACE_PEEL_KPA,
             final_clearance_gap_mm: *evidence.final_clearance_gap_mm().value(),
             head_join: true,
             lip_seat: true,
@@ -1138,6 +1154,25 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_brace_window(mut self) -> Self {
         self.slenderness_brace_window = false;
+        self
+    }
+
+    /// Credit every brace band as a fixed point again and place them one at
+    /// a time, `⌈L / limit⌉ − 1` per run, as before 2026-10-03 (rule R6
+    /// off). **Sabotage only**; nothing in the pipeline sets it.
+    #[must_use]
+    pub const fn without_frame_bands(mut self) -> Self {
+        self.slenderness_frame_bands = false;
+        self
+    }
+
+    /// The construction-stage shake check at another assumed brace peel
+    /// pressure, kPa (`0` switches it off). It only warns, so this changes no
+    /// emitted geometry. **Tests only**; the pipeline keeps the registered
+    /// interim value.
+    #[must_use]
+    pub const fn with_stage_shake_brace_peel_kpa(mut self, kpa: f64) -> Self {
+        self.stage_shake_brace_peel_kpa = kpa;
         self
     }
 
@@ -1813,6 +1848,7 @@ pub fn run_sweep_with_drains(
         load_step_taper,
         brace_cap: policy.slenderness_brace_cap,
         brace_window: policy.slenderness_brace_window,
+        frame_bands: policy.slenderness_frame_bands,
     };
 
     // --- stranded seats: a stranded contact is a tip, not a new root -------
@@ -2170,9 +2206,19 @@ pub fn run_sweep_with_drains(
         slenderness::unbraced_runs_drawn(&grid, &struts, height, &slenderness_law, load_step_taper);
     // R2 ON THE FINISHED FIELD (2026-10-03): braces drawn thicker than a post
     // at a joint, on the profiles the lowering draws. Counted, never assumed.
-    slenderness_outcome.braces_thicker_than_a_post = slenderness::braces_thicker_than_a_post(
+    let finished_profiles = adapter::drawn_profiles(&struts, load_step_taper).0;
+    slenderness_outcome.braces_thicker_than_a_post =
+        slenderness::braces_thicker_than_a_post(&struts, &finished_profiles);
+    // R9 + D6 (Craig ruling 2026-10-03): the construction-stage shake check
+    // on the finished field, at the stated brace peel pressure. A WARNING
+    // only: it reads the field and changes nothing.
+    slenderness_outcome.stage_shake = stage_shake::check(
+        &grid,
         &struts,
-        &adapter::drawn_profiles(&struts, load_step_taper).0,
+        &finished_profiles,
+        height,
+        &slenderness_law,
+        policy.stage_shake_brace_peel_kpa,
     );
     slenderness_outcome.longest_run_mm = 0.0;
     slenderness_outcome.longest_run_limit_mm = 0.0;

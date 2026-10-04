@@ -15,6 +15,7 @@
 #[path = "../harness/mod.rs"]
 mod harness;
 
+mod brace_frame_bands;
 mod brace_not_in_flare;
 mod brace_window_cap;
 mod bracing;
