@@ -2162,6 +2162,7 @@ mod model_landing_tests {
             load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
             brace_cap: true,
             brace_window: true,
+            frame_bands: true,
         };
         let struts = vec![strut.clone()];
         let mut index = ColumnHistory::new(&grid);

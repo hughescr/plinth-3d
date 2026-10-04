@@ -234,9 +234,35 @@ fn no_two_crosses_on_one_pair_overlap_in_height_on_the_brace_pair() {
 /// where one of its two posts carries a thickening. Every other cross must
 /// still be needed (stilt plate: X 75/80 over 544..605 is the one admitted,
 /// measured 2026-10-01).
+///
+/// **RE-DERIVED 2026-10-03 (R6 + D4, fix/brace-frame-bands).** A run is now
+/// tied by a SET of bands to one partner, counted through a two-post frame in
+/// which every band sways, and the set is needed as a whole: its bands were
+/// counted together, so taking ONE out leaves the frame short even where the
+/// fixed-point measure here, which credits each band as a clamp, finds the
+/// pieces either side inside their limits (at three times the limit, 5 bands
+/// at 1/2 limit spacing: drop one and the two pieces make exactly one limit).
+/// So the unit graded is every cross on one pair of posts, taken out
+/// together; that group must be needed. Red under R6 with the per-cross
+/// grading (2026-10-03): on the brace pair all 8 crosses on post 5's two
+/// pairs, (5, 8) and (5, 15), 4 bands each (two runs of 2), read redundant one
+/// at a time; taken out per pair, every pair is needed (10 pairs graded on
+/// the brace pair, 23 on the stilt plate, 0 not needed).
 fn assert_every_cross_is_needed(name: &str, plan: &SweepPlan) {
     let law = law();
-    let all = crosses(plan);
+    let mut by_pair: BTreeMap<(u32, u32), Cross> = BTreeMap::new();
+    for cross in crosses(plan) {
+        let group = by_pair.entry(cross.pair).or_insert(Cross {
+            pair: cross.pair,
+            k_lo: cross.k_lo,
+            k_top: cross.k_top,
+            diagonals: Vec::new(),
+        });
+        group.k_lo = group.k_lo.min(cross.k_lo);
+        group.k_top = group.k_top.max(cross.k_top);
+        group.diagonals.extend(cross.diagonals);
+    }
+    let all: Vec<Cross> = by_pair.into_values().collect();
     let thickened = |post: u32| {
         plan.struts[post as usize]
             .thickened_mm
@@ -266,15 +292,16 @@ fn assert_every_cross_is_needed(name: &str, plan: &SweepPlan) {
         }
     }
     println!(
-        "{name}: {} crosses graded, {} not needed: {redundant:?}; {} kept on a thickened \
-         post: {on_a_thickened_post:?}",
+        "{name}: {} pairs of posts graded (all their crosses taken out together), {} not \
+         needed: {redundant:?}; {} kept on a thickened post: {on_a_thickened_post:?}",
         all.len(),
         redundant.len(),
         on_a_thickened_post.len()
     );
     assert!(
         redundant.is_empty(),
-        "{name}: {} crosses tie posts that are inside their limits without them: {redundant:?}",
+        "{name}: {} pairs' crosses tie posts that are inside their limits without them: \
+         {redundant:?}",
         redundant.len()
     );
 }

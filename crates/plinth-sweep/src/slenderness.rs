@@ -132,6 +132,15 @@
 //! * **D9.** Past a pair's two-post ceiling ([`pair_ceiling_ratio`]) no band
 //!   is added between that pair: a wider partner is tried, or the run is
 //!   thickened into the window ([`thicken_into_the_window`]).
+//! * **R6 + D4.** A band is not a fixed point. A run is braced by a SET of
+//!   bands to one partner, counted through a two-post frame in which every
+//!   band sways ([`crate::frame_bands`], the study's `bands2` panel, held to
+//!   its numbers), laid evenly over the run and built together or not at all
+//!   ([`tie_by_band_set`]); the prune judges a set as one. Past the count
+//!   that fits, the pair is past its ceiling (D9 as the frame meets it).
+//! * **R9 + D6.** A construction-stage shake check on the finished field, a
+//!   WARNING only, at a stated, unmeasured brace peel pressure
+//!   ([`crate::stage_shake`]).
 //! * Unchanged: the brace angle (the saturated overhang angle, 57.5° from
 //!   vertical) and "every direction before seating".
 //!
@@ -566,6 +575,39 @@ pub struct SlendernessOutcome {
     /// posts' drawn sections do not shrink after the band is planned; it is
     /// counted on the emitted profiles, never assumed. A WARNING quantity.
     pub braces_thicker_than_a_post: usize,
+    /// **FRAME BANDS** (R6 + D4, 2026-10-03): band sets built (one set ties
+    /// one run to one partner, all its bands at once), the crosses in them,
+    /// and how many of those the fixed-point count `⌈L / limit⌉ − 1` would
+    /// NOT have built (the bands the frame added). Path-hit witnesses.
+    pub frame_band_sets: usize,
+    pub frame_bands_built: usize,
+    pub frame_bands_beyond_fixed_point: usize,
+    /// The most bands in one set, and the highest `L / limit` a set braced.
+    pub frame_most_bands_in_a_set: usize,
+    pub frame_highest_ratio_braced: f64,
+    /// Pairs refused because no band count that fits the run holds it (the
+    /// two-post ceiling as the frame meets it, D9), and sets refused because
+    /// one of their bands was refused (geometry, clearance, a band that grew
+    /// into its neighbour, or a frame that no longer held once the bands were
+    /// planned on the posts' real cells).
+    pub frame_pairs_past_ceiling: usize,
+    pub frame_sets_refused_incomplete: usize,
+    /// Pairs where not even the fixed-point count of bands fits the run at
+    /// that pair's band depth (above both posts' flares, below the run's
+    /// top): geometry, counted apart from the ceiling.
+    pub frame_pairs_without_room: usize,
+    /// Bands the field refused at their laid layer and that were built a
+    /// little lower or higher between their neighbours (the frame solved
+    /// again on the bands as built), and sets built with more bands than
+    /// first counted because a band found no place at the closer count.
+    pub frame_bands_moved_from_their_layer: usize,
+    pub frame_sets_respaced: usize,
+    /// Crosses the prune took out as whole sets (each set judged as one).
+    pub frame_sets_pruned: usize,
+    /// **CONSTRUCTION-STAGE SHAKE** (R9 + D6, 2026-10-03): a WARNING-only
+    /// check of the finished field ([`crate::stage_shake`]). Never changes
+    /// the field.
+    pub stage_shake: crate::stage_shake::StageShake,
 }
 
 /// Why a planned `|X|` band was refused, one count per reason; every refusal
@@ -1024,7 +1066,7 @@ struct Tie {
     band_top: bool,
 }
 
-fn live(strut: &SweepStrut) -> bool {
+pub(crate) fn live(strut: &SweepStrut) -> bool {
     strut.k_bottom != usize::MAX && strut.k_top > strut.k_bottom
 }
 
@@ -1068,7 +1110,7 @@ const HEIGHT_NOISE_MM: f64 = 1.0e-9;
 /// `None` for the flare geometry (an unreadable registry) leaves only the
 /// member's own foot, as before this rule: the band is still built and
 /// nothing is refused on a missing number.
-fn free_shaft_floor(
+pub(crate) fn free_shaft_floor(
     flare: Option<&SweepRootFlare>,
     grid: &Grid,
     strut: &SweepStrut,
@@ -1313,7 +1355,7 @@ impl RunMeasure<'_> {
 /// The drawn radius at an absolute layer, or the member's own minimum where
 /// the profile has no entry yet (a member this pass added and the down-sweep
 /// has not sized).
-fn drawn_at(strut: &SweepStrut, profile: &[f64], layer: usize) -> Option<f64> {
+pub(crate) fn drawn_at(strut: &SweepStrut, profile: &[f64], layer: usize) -> Option<f64> {
     drawn_at_with(strut, &strut.thickened_mm, profile, layer)
 }
 
@@ -1483,6 +1525,14 @@ pub struct SlendernessContext<'a> {
     /// **On in production.** Sabotage knob: off, every admissible cross is
     /// built, as before 2026-10-03.
     pub brace_window: bool,
+    /// **R6 + D4** (Craig ruling 2026-10-03, interim pending the slenderness
+    /// coupon): a run is braced by a SET of bands to one partner, as many as
+    /// the two-post frame needs with every band free to sway
+    /// ([`crate::frame_bands`]), laid evenly over the run and built together;
+    /// never by one band at a time credited as a fixed point. **On in
+    /// production.** Sabotage knob: off, the ladder places one band at a time
+    /// and counts `⌈L / limit⌉ − 1`, as before this ruling.
+    pub frame_bands: bool,
 }
 
 /// Remedy 1 of the ladder, on a sized field, in place: the forced merges.
@@ -1741,19 +1791,38 @@ pub fn apply_ties(
                 // the limit: its planes are then credited together there
                 // (`joint_holds`). Until 2026-09-29 each direction took its own
                 // mid-run layer, and a post collected crosses at five levels
-                // where two would do (the stilt plate's post 125).
-                let shared = shared_tie_layer(
-                    grid,
-                    strut,
-                    &state.ties[index],
-                    &state.profiles[index],
-                    &run,
-                    height,
-                    law,
-                    k,
-                );
+                // where two would do (the stilt plate's post 125). Under R6 a
+                // further plane is a band set like the first, laid on the same
+                // evenly spaced layers wherever its count is the same.
+                let shared = if context.frame_bands {
+                    None
+                } else {
+                    shared_tie_layer(
+                        grid,
+                        strut,
+                        &state.ties[index],
+                        &state.profiles[index],
+                        &run,
+                        height,
+                        law,
+                        k,
+                    )
+                };
                 let mut miss = CrossMiss::default();
-                if context.brace {
+                // R6 (2026-10-03): the run is tied by a SET of bands to one
+                // partner, counted through the frame and built at once; the
+                // one-band-at-a-time ladder below is the sabotage path.
+                if context.brace && context.frame_bands {
+                    if let Some(k) = k {
+                        match tie_by_band_set(context, &mut state, struts, &run, k, outcome) {
+                            Ok(()) => {
+                                applied += 1;
+                                continue;
+                            }
+                            Err(missed) => miss.merge(missed),
+                        }
+                    }
+                } else if context.brace {
                     if let Some(at) = shared {
                         match tie_by_crosses(context, &mut state, struts, &run, at, false, outcome)
                         {
@@ -1964,24 +2033,61 @@ fn prune_unneeded_crosses(
             at += 1;
         }
     }
+    // A BAND SET IS JUDGED AS ONE (R6, 2026-10-03): its bands were counted
+    // together through the frame, and taking one out leaves the frame short
+    // even where the fixed-point measure below would call that band
+    // redundant. Every other cross is a group of one, as before.
+    let mut groups: Vec<Vec<(usize, usize)>> = Vec::new();
+    for &cross in &crosses {
+        let set = state
+            .band_sets
+            .iter()
+            .find(|&&(first, count)| cross.0 >= first && cross.0 < first + 2 * count);
+        let joins_last = set.is_some_and(|&(first, _)| {
+            groups
+                .last()
+                .and_then(|group| group.first())
+                .is_some_and(|&(head, _)| head >= first && cross.0 > head)
+        });
+        match groups.last_mut() {
+            Some(group) if joins_last => group.push(cross),
+            _ => groups.push(vec![cross]),
+        }
+    }
     let mut ties = state.ties.clone();
     let mut removed = vec![false; len];
     let mut taken = 0_usize;
-    for &(one, two) in crosses.iter().rev() {
-        let brace = &struts[one];
+    for group in groups.iter().rev() {
+        let Some(&(head, _)) = group.first() else {
+            continue;
+        };
+        let brace = &struts[head];
         let (Some(a), Landing::Strut { id: b, .. }) = (brace.seat_on_strut, brace.landing) else {
             continue;
         };
-        let (k, k_lo) = (brace.k_top, brace.k_bottom);
-        let plane = brace_plane(grid, struts, brace);
+        // Every band of the group: (band top, band bottom, plane).
+        let bands: Vec<(usize, usize, Option<Plane>)> = group
+            .iter()
+            .map(|&(one, _)| {
+                let diagonal = &struts[one];
+                (
+                    diagonal.k_top,
+                    diagonal.k_bottom,
+                    brace_plane(grid, struts, diagonal),
+                )
+            })
+            .collect();
+        let in_group = |index: usize| group.iter().any(|&(one, two)| index == one || index == two);
         let without = |post: u32| {
             let mut list = ties[post as usize].clone();
-            for layer in [k, k_lo] {
-                if let Some(position) = list
-                    .iter()
-                    .position(|tie| tie.layer == layer && tie.plane == plane)
-                {
-                    list.remove(position);
+            for &(k, k_lo, plane) in &bands {
+                for layer in [k, k_lo] {
+                    if let Some(position) = list
+                        .iter()
+                        .position(|tie| tie.layer == layer && tie.plane == plane)
+                    {
+                        list.remove(position);
+                    }
                 }
             }
             list
@@ -2003,8 +2109,7 @@ fn prune_unneeded_crosses(
             };
             for (index, branch) in struts.iter().enumerate() {
                 if removed[index]
-                    || index == one
-                    || index == two
+                    || in_group(index)
                     || !live(branch)
                     || branch.kind == StrutKind::Brace
                 {
@@ -2028,7 +2133,12 @@ fn prune_unneeded_crosses(
             }
             profile
         };
-        let through_band = |run: &UnbracedRun| run.over_limit() && run.k_lo < k && k_lo < run.k_top;
+        let through_band = |run: &UnbracedRun| {
+            run.over_limit()
+                && bands
+                    .iter()
+                    .any(|&(k, k_lo, _)| run.k_lo < k && k_lo < run.k_top)
+        };
         let needed = [a, b].iter().any(|&post| {
             member_runs(
                 grid,
@@ -2074,10 +2184,14 @@ fn prune_unneeded_crosses(
             };
             let with = ties_by_layer(&ties[index]);
             let without_groups = ties_by_layer(&without(post));
-            let planes_here = planes_at(&ties[index], k);
+            let planes_here: Vec<(Option<Plane>, Vec<Plane>)> = bands
+                .iter()
+                .map(|&(k, _, plane)| (plane, planes_at(&ties[index], k)))
+                .collect();
             sway_directions_of(&with).into_iter().any(|sway| {
-                let held_by_the_cross = plane.is_none()
-                    || sway.is_none_or(|sway| joint_holds(&planes_here, sway));
+                let held_by_the_cross = planes_here.iter().any(|(plane, here)| {
+                    plane.is_none() || sway.is_none_or(|sway| joint_holds(here, sway))
+                });
                 if !held_by_the_cross {
                     return false;
                 }
@@ -2093,11 +2207,18 @@ fn prune_unneeded_crosses(
         let (list_a, list_b) = (without(a), without(b));
         ties[a as usize] = list_a;
         ties[b as usize] = list_b;
-        removed[one] = true;
-        removed[two] = true;
-        taken += 1;
-        outcome.braces_added = outcome.braces_added.saturating_sub(1);
-        outcome.crosses_pruned += 1;
+        for &(one, two) in group {
+            removed[one] = true;
+            removed[two] = true;
+        }
+        taken += group.len();
+        outcome.braces_added = outcome.braces_added.saturating_sub(group.len());
+        outcome.crosses_pruned += group.len();
+        if group.len() > 1 || state.band_sets.iter().any(|&(first, _)| first == head) {
+            outcome.frame_sets_pruned += 1;
+            outcome.frame_bands_built = outcome.frame_bands_built.saturating_sub(group.len());
+            outcome.frame_band_sets = outcome.frame_band_sets.saturating_sub(1);
+        }
     }
     if taken == 0 {
         return 0;
@@ -2208,6 +2329,10 @@ struct TieState {
     /// the band had to rise. The mast rung reads it to try again with a mast
     /// that tall (a new mast is only as tall as the layer it is planned at).
     flare_shortfall: std::cell::Cell<Option<usize>>,
+    /// The band sets built in this pass (R6): `(index of its first diagonal,
+    /// crosses)`. A set's diagonals are pushed back to back, two per cross,
+    /// and the prune judges a set as one ([`prune_unneeded_crosses`]).
+    band_sets: Vec<(usize, usize)>,
 }
 
 impl TieState {
@@ -2331,6 +2456,7 @@ impl TieState {
             root_boss: RootBoss::registered().ok(),
             drawn_offsets,
             flare_shortfall: std::cell::Cell::new(None),
+            band_sets: Vec::new(),
         }
     }
 
@@ -2490,6 +2616,7 @@ fn tie_by_crosses(
                     cross_mm3: plan.volume_mm3,
                     shared,
                     planes,
+                    frame: None,
                 };
                 if miss.past_ceiling.is_none_or(|known| past.ceiling > known.ceiling) {
                     miss.past_ceiling = Some(past);
@@ -2538,6 +2665,460 @@ fn tie_by_crosses(
     Err(miss)
 }
 
+/// **R6 + D4: tie the run with a SET of bands to one partner** (Craig ruling
+/// 2026-10-03, interim pending the slenderness coupon;
+/// `bracing-mechanics.md` revision 2, §3 and rule R6).
+///
+/// A band is not a fixed point: two posts and the bands between them sway
+/// together as one frame. So, for each partner in reach (nearest first, the
+/// plane holding the direction the run sways in, as [`tie_by_crosses`]):
+///
+/// 1. **Count** the bands through the pair's frame ([`frame_bands::count_bands`]):
+///    the fewest that hold the run's top within one pixel, every band free to
+///    sway, starting from the fixed-point count `⌈L / limit⌉ − 1` (a frame
+///    never needs fewer). The bands are laid as they will be built: tops at
+///    the run's evenly spaced tie layers, each as deep as the overhang law
+///    needs for the gap, raised above both posts' root flares.
+/// 2. **Past the ceiling** (no count that fits holds; D9): the pair is
+///    skipped, and kept so the run can be thickened until the frame holds it
+///    ([`thicken_into_the_window`]).
+/// 3. **Plan every band** ([`plan_cross`], the same geometric and clearance
+///    tests as one cross). If ANY band is refused, the set is refused and
+///    the next partner is tried: a partial set leaves the frame short. Bands
+///    whose posts lean apart are planned deeper than laid; the frame is then
+///    solved again on the bands as planned and must still hold.
+/// 4. **The window** (R7 + D5): the set's resin, charged to this run, against
+///    thickening the run ([`cross_charge_mm3`], with `n` the set itself).
+/// 5. **Build** every band of the set together; the prune judges the set as
+///    one ([`prune_unneeded_crosses`]).
+///
+/// Returns `Ok(())` when a set was built, or what the window and the ceiling
+/// refused.
+fn tie_by_band_set(
+    context: &SlendernessContext<'_>,
+    state: &mut TieState,
+    struts: &mut Vec<SweepStrut>,
+    run: &UnbracedRun,
+    k: usize,
+    outcome: &mut SlendernessOutcome,
+) -> Result<(), CrossMiss> {
+    use crate::frame_bands::{count_bands, panel_sway, BandCount, Panel};
+    let id = run.strut_id;
+    let grid = context.grid;
+    let h = context.layer_height_mm;
+    let mut miss = CrossMiss::default();
+    let Some(here) = struts.get(id as usize).map(|strut| strut.cell_at(k)) else {
+        return Err(miss);
+    };
+    let ratio = run.length_mm / run.limit_mm;
+    let fixed_point = extra_ties(run).max(1);
+    let planes = if run.sway_deg.is_none() { 2 } else { 1 };
+    let mut thicken_mm3: Option<Option<f64>> = None;
+    let candidates = partner_candidates(context, struts, id, k);
+    for (rank, &(partner, cell)) in candidates.iter().enumerate() {
+        let Some(plane) = plane_between(grid, here, cell) else {
+            continue;
+        };
+        if !new_plane_holds(&state.ties[id as usize], k, plane, run.sway_deg) {
+            continue;
+        }
+        let gap_mm = crate::cell_distance_mm(grid, here, cell);
+        let depth = context.lean.layers_to_reach(gap_mm);
+        let Some(partner_mm) = partner_radius_over(state, struts, partner, run) else {
+            continue;
+        };
+        if depth == 0 || gap_mm <= 0.0 {
+            continue;
+        }
+        let floor = match (struts.get(id as usize), struts.get(partner as usize)) {
+            (Some(one), Some(two)) => state
+                .free_shaft_floor(grid, one, h)
+                .max(state.free_shaft_floor(grid, two, h)),
+            _ => continue,
+        };
+        let brace_mm = diagonal_radius_mm(context, gap_mm);
+        let frame_past = |most_bands: usize| FramePast {
+            partner,
+            gap_mm,
+            depth,
+            brace_mm,
+            floor,
+            most_bands,
+        };
+        let cross_mm3 = core::f64::consts::PI
+            * brace_mm
+            * brace_mm
+            * 2.0
+            * gap_mm.hypot(layers_mm(depth, h));
+        let past_here = |miss: &mut CrossMiss, most_bands: usize| {
+            let past = PastCeiling {
+                gap_mm,
+                partner_mm,
+                ceiling: pair_ceiling_ratio(run.radius_mm, partner_mm, gap_mm),
+                cross_mm3,
+                shared: false,
+                planes,
+                frame: Some(frame_past(most_bands)),
+            };
+            if miss.past_ceiling.is_none_or(|known| past.ceiling > known.ceiling) {
+                miss.past_ceiling = Some(past);
+            }
+        };
+        let panel = Panel {
+            post_radius_mm: run.radius_mm,
+            partner_radius_mm: partner_mm,
+            gap_mm,
+            height_mm: run.length_mm,
+            bands: Vec::new(),
+        };
+        let layout = |n: usize| {
+            band_set_layers(run, n, depth, floor).map(|layers| panel_bands(run, &layers, brace_mm))
+        };
+        // D9's infinite-band ceiling first: no band count beats it, and it
+        // costs no solve.
+        if context.brace_window
+            && ratio > pair_ceiling_ratio(run.radius_mm, partner_mm, gap_mm) * (1.0 + RATIO_NOISE)
+        {
+            outcome.crosses_refused_past_pair_ceiling += 1;
+            let most = most_bands_that_fit(run, depth, floor);
+            if most > 0 {
+                past_here(&mut miss, most);
+            }
+            continue;
+        }
+        let counted = match count_bands(&panel, context.law.ratio(), fixed_point, &layout) {
+            BandCount::Holds { bands, .. } => bands,
+            // Not even the fixed-point count of bands fits the run with this
+            // pair's band depth (above both flares, below the run's top):
+            // there is no room for a set, which is geometry, not a ceiling.
+            BandCount::PastCeiling { most_bands: 0, .. } => {
+                outcome.frame_pairs_without_room += 1;
+                continue;
+            }
+            BandCount::PastCeiling { most_bands, .. } => {
+                outcome.frame_pairs_past_ceiling += 1;
+                past_here(&mut miss, most_bands);
+                continue;
+            }
+        };
+        // EVERY BAND OF THE SET, OR NONE. A band the field refuses where it
+        // was laid is tried a little lower or higher, between its
+        // neighbours ([`plan_band_set`]); the frame is then solved again on
+        // the bands as planned and must still hold. Where it does not, or a
+        // band finds no place, one more band is laid (closer spacing), up to
+        // as many as fit.
+        let holds = |plans: &[CrossPlan]| {
+            let planned = Panel {
+                bands: plans
+                    .iter()
+                    .map(|plan| crate::frame_bands::PanelBand {
+                        bottom_mm: height_in_run(run, plan.k_lo),
+                        top_mm: height_in_run(run, plan.k),
+                        brace_radius_mm: plan.radius_mm,
+                    })
+                    .collect(),
+                ..panel.clone()
+            };
+            panel_sway(&planned, context.law.ratio())
+                .is_some_and(|sway| sway.drag_over_pixel <= 1.0 + RATIO_NOISE)
+        };
+        let most = most_bands_that_fit(run, depth, floor).max(counted);
+        let mut found: Option<Vec<CrossPlan>> = None;
+        for count in counted..=most {
+            let Some(layers) = band_set_layers(run, count, depth, floor) else {
+                break;
+            };
+            let Some((set, moved)) =
+                plan_band_set(context, state, struts, run, partner, plane, &layers, outcome)
+            else {
+                continue;
+            };
+            let as_laid = set.iter().zip(&layers).all(|(plan, &(bottom, top))| {
+                plan.k_lo == bottom && plan.k == top && plan.radius_mm <= brace_mm
+            });
+            if as_laid || holds(&set) {
+                if count > counted {
+                    outcome.frame_sets_respaced += 1;
+                }
+                outcome.frame_bands_moved_from_their_layer += moved;
+                found = Some(set);
+                break;
+            }
+        }
+        let Some(plans) = found else {
+            outcome.frame_sets_refused_incomplete += 1;
+            continue;
+        };
+        let bands = plans.len();
+        let set_mm3: f64 = plans.iter().map(|plan| plan.volume_mm3).sum();
+        let mut shared = false;
+        if context.brace_window {
+            shared = partner_needs_the_tie(context, state, struts, partner, plans[0].k, plans[0].plane);
+            let thicken_cost = *thicken_mm3.get_or_insert_with(|| {
+                if !context.thicken {
+                    return None;
+                }
+                let fits = |radius: f64| run.length_mm <= context.law.max_unbraced_mm(radius);
+                match plan_thicken(context, state, struts, run, &fits) {
+                    Some(Ok(plan)) => Some(plan.added_mm3),
+                    _ => None,
+                }
+            });
+            if let Some(thicken_cost) = thicken_cost {
+                if cross_charge_mm3(set_mm3, shared, planes, 1) > thicken_cost {
+                    outcome.crosses_refused_thicken_cheaper += 1;
+                    miss.thicken_cheaper = true;
+                    continue;
+                }
+                if outcome.window_lowest_braced_ratio <= 0.0
+                    || ratio < outcome.window_lowest_braced_ratio
+                {
+                    outcome.window_lowest_braced_ratio = ratio;
+                }
+            }
+        }
+        if shared {
+            outcome.crosses_shared_by_both_posts += bands;
+        }
+        if rank > 0 {
+            outcome.crosses_to_a_later_partner += bands;
+        }
+        if run.sway_deg.is_some() {
+            outcome.crosses_further_plane += bands;
+        } else {
+            outcome.crosses_first_plane += bands;
+        }
+        let first = struts.len();
+        for plan in plans {
+            commit_cross(context, state, struts, plan, outcome);
+        }
+        state.band_sets.push((first, bands));
+        outcome.braces_added += bands;
+        outcome.frame_band_sets += 1;
+        outcome.frame_bands_built += bands;
+        outcome.frame_bands_beyond_fixed_point += bands.saturating_sub(fixed_point);
+        outcome.frame_most_bands_in_a_set = outcome.frame_most_bands_in_a_set.max(bands);
+        outcome.frame_highest_ratio_braced = outcome.frame_highest_ratio_braced.max(ratio);
+        return Ok(());
+    }
+    Err(miss)
+}
+
+/// Plan every band of a set laid on `layers` (ascending `(bottom, top)`),
+/// between `run`'s member and `partner`, or `None` where a band finds no
+/// place. Each band is planned at its laid top first; where the field refuses
+/// it there (the model, a member, a drain on a diagonal's path, a post that
+/// ends), at tops stepped half a band's depth at a time down and up from it,
+/// nearest first, while it stays above the band planned below it and inside
+/// the run. Planned with `may_move` false: the laid tops
+/// already stand above both posts' flares. Each attempt is one
+/// [`plan_cross`] and is counted as a band planned (and, if refused, under
+/// its one reason).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the set needs the field, the run, its partner and plane, the laid layers and the \
+              outcome its attempts are counted in"
+)]
+fn plan_band_set(
+    context: &SlendernessContext<'_>,
+    state: &TieState,
+    struts: &[SweepStrut],
+    run: &UnbracedRun,
+    partner: u32,
+    plane: Plane,
+    layers: &[(usize, usize)],
+    outcome: &mut SlendernessOutcome,
+) -> Option<(Vec<CrossPlan>, usize)> {
+    let id = run.strut_id;
+    let first_floor = layers.first().map_or(0, |&(bottom, _)| bottom);
+    let mut plans: Vec<CrossPlan> = Vec::with_capacity(layers.len());
+    let mut moved = 0_usize;
+    for &(bottom, top) in layers {
+        let depth = top - bottom;
+        // The band's top stays where its bottom is above the band planned
+        // below (or the first laid bottom, which is above the flares), and
+        // inside the run. A band that must climb past its laid layer pushes
+        // the ones above it up too (each starts above the one below), so a
+        // set can close up above an obstacle; the frame then judges the
+        // layout as built.
+        let low = plans
+            .last()
+            .map_or(first_floor + depth, |below| below.k + depth + 1)
+            .max(first_floor + depth);
+        let high = run.k_top.saturating_sub(1);
+        let laid = top;
+        let top = top.max(low);
+        let step = (depth / 2).max(1);
+        let mut tops: Vec<usize> = Vec::new();
+        if (low..=high).contains(&top) {
+            tops.push(top);
+        }
+        for i in 1.. {
+            let down = top.checked_sub(i * step).filter(|t| (low..=high).contains(t));
+            let up = Some(top + i * step).filter(|t| (low..=high).contains(t));
+            if down.is_none() && up.is_none() {
+                break;
+            }
+            tops.extend(down);
+            tops.extend(up);
+        }
+        let mut placed = false;
+        for at in tops {
+            if !new_plane_holds(&state.ties[id as usize], at, plane, run.sway_deg) {
+                continue;
+            }
+            outcome.cross_bands_planned += 1;
+            let Some(plan) = plan_cross(context, state, struts, id, partner, at, run, false, outcome)
+            else {
+                continue;
+            };
+            if plans.last().is_some_and(|below| plan.k_lo <= below.k) {
+                continue;
+            }
+            if at != laid {
+                moved += 1;
+            }
+            plans.push(plan);
+            placed = true;
+            break;
+        }
+        if !placed {
+            return None;
+        }
+    }
+    Some((plans, moved))
+}
+
+/// `layers × h` in mm.
+fn layers_mm(layers: usize, layer_height_mm: f64) -> f64 {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a layer count bounded by the plan's own layer count is exact in f64"
+    )]
+    let count = layers as f64;
+    count * layer_height_mm
+}
+
+/// How high `layer` stands above the run's base, along the run (its chord
+/// length per layer); `0` at or below the base.
+fn height_in_run(run: &UnbracedRun, layer: usize) -> f64 {
+    let span = run.k_top.saturating_sub(run.k_lo);
+    if span == 0 {
+        return 0.0;
+    }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "layer counts bounded by the plan's own layer count are exact in f64"
+    )]
+    let fraction = layer.saturating_sub(run.k_lo) as f64 / span as f64;
+    run.length_mm * fraction
+}
+
+/// **The layers of a set of `n` bands on `run`**: tops at the run's evenly
+/// spaced tie layers ([`tie_layer`], the layers the fixed-point ladder used),
+/// each band `depth` layers deep, a band whose bottom would fall below
+/// `floor` (a root flare or the raft) raised until it does not. `None` where
+/// `n` bands do not fit: a top at or past the run's top, or a band reaching
+/// down into the one below (one tie is never built twice).
+fn band_set_layers(
+    run: &UnbracedRun,
+    n: usize,
+    depth: usize,
+    floor: usize,
+) -> Option<Vec<(usize, usize)>> {
+    let mut layers: Vec<(usize, usize)> = Vec::with_capacity(n);
+    for step in 1..=n {
+        let top = tie_layer(run, step, n)?.max(floor + depth);
+        if top >= run.k_top {
+            return None;
+        }
+        let bottom = top - depth;
+        if layers.last().is_some_and(|&(_, below)| bottom <= below) {
+            return None;
+        }
+        layers.push((bottom, top));
+    }
+    Some(layers)
+}
+
+/// The most bands [`band_set_layers`] can lay on `run` (no solve).
+fn most_bands_that_fit(run: &UnbracedRun, depth: usize, floor: usize) -> usize {
+    let mut n = 0;
+    while band_set_layers(run, n + 1, depth, floor).is_some() {
+        n += 1;
+    }
+    n
+}
+
+/// The panel bands for `layers`, every diagonal `brace_mm`.
+fn panel_bands(
+    run: &UnbracedRun,
+    layers: &[(usize, usize)],
+    brace_mm: f64,
+) -> Vec<crate::frame_bands::PanelBand> {
+    layers
+        .iter()
+        .map(|&(bottom, top)| crate::frame_bands::PanelBand {
+            bottom_mm: height_in_run(run, bottom),
+            top_mm: height_in_run(run, top),
+            brace_radius_mm: brace_mm,
+        })
+        .collect()
+}
+
+/// The partner's drawn equivalent radius over the part of `run` it stands
+/// beside, or `None` where it stands beside none of it.
+fn partner_radius_over(
+    state: &TieState,
+    struts: &[SweepStrut],
+    partner: u32,
+    run: &UnbracedRun,
+) -> Option<f64> {
+    let index = partner as usize;
+    let other = struts.get(index)?;
+    let profile = state.profiles.get(index)?;
+    let lo = run.k_lo.max(other.k_bottom);
+    let top = run.k_top.min(other.k_top);
+    (top > lo).then(|| run_radius(other, &other.thickened_mm, profile, lo, top))
+}
+
+/// Whether the FRAME holds `run` once its root is thickened to `radius_mm`,
+/// against the pair `past` with the bands that fit (R6 + D9, for
+/// [`thicken_into_the_window`]).
+fn frame_holds_at(
+    context: &SlendernessContext<'_>,
+    state: &TieState,
+    struts: &[SweepStrut],
+    run: &UnbracedRun,
+    past: FramePast,
+    radius_mm: f64,
+) -> bool {
+    use crate::frame_bands::{count_bands, BandCount, Panel};
+    let Some(partner_mm) = partner_radius_over(state, struts, past.partner, run) else {
+        return false;
+    };
+    let thicker = UnbracedRun {
+        radius_mm,
+        limit_mm: context.law.max_unbraced_mm(radius_mm),
+        ..*run
+    };
+    let panel = Panel {
+        post_radius_mm: radius_mm,
+        partner_radius_mm: partner_mm,
+        gap_mm: past.gap_mm,
+        height_mm: run.length_mm,
+        bands: Vec::new(),
+    };
+    let layout = |n: usize| {
+        band_set_layers(run, n, past.depth, past.floor)
+            .map(|layers| panel_bands(run, &layers, past.brace_mm))
+    };
+    matches!(
+        count_bands(&panel, context.law.ratio(), extra_ties(&thicker).max(1), &layout),
+        BandCount::Holds { .. }
+    )
+}
+
 /// Relative float noise on a comparison of two quantities a construction
 /// makes equal: a run thickened INTO a pair's window by bisection lands
 /// exactly on its ceiling, and a diagonal sized to its post exactly meets
@@ -2583,6 +3164,24 @@ struct PastCeiling {
     cross_mm3: f64,
     shared: bool,
     planes: usize,
+    /// Under R6, the pair as the frame saw it, so the run can be thickened
+    /// until the FRAME holds it with the bands it can carry, rather than to
+    /// the infinite-band ceiling; `None` on the fixed-point ladder.
+    frame: Option<FramePast>,
+}
+
+/// A pair the frame found past its ceiling (R6 + D9): what
+/// [`thicken_into_the_window`] needs to ask the frame again at a thicker
+/// root.
+#[derive(Clone, Copy, Debug)]
+struct FramePast {
+    partner: u32,
+    gap_mm: f64,
+    depth: usize,
+    brace_mm: f64,
+    floor: usize,
+    /// The most bands that fit the run: what bracing it at the ceiling takes.
+    most_bands: usize,
 }
 
 /// **D9, the two-post ceiling**: the longest run, as a multiple of its own
@@ -2881,9 +3480,15 @@ fn thicken_into_the_window(
         return false;
     }
     let law = context.law;
-    let into = |radius: f64| {
-        run.length_mm
-            <= law.max_unbraced_mm(radius) * pair_ceiling_ratio(radius, past.partner_mm, past.gap_mm)
+    // Under R6 the window is where the FRAME holds the run with the bands
+    // that fit it; otherwise the infinite-band composite ceiling.
+    let into = |radius: f64| match past.frame {
+        Some(frame) => frame_holds_at(context, state, struts, run, frame, radius),
+        None => {
+            run.length_mm
+                <= law.max_unbraced_mm(radius)
+                    * pair_ceiling_ratio(radius, past.partner_mm, past.gap_mm)
+        }
     };
     let Some(Ok(partial)) = plan_thicken(context, state, struts, run, &into) else {
         return false;
@@ -2898,12 +3503,10 @@ fn thicken_into_the_window(
             length_mm: run.limit_mm * past.ceiling,
             ..*run
         };
-        let braces = cross_charge_mm3(
-            past.cross_mm3,
-            past.shared,
-            past.planes,
-            extra_ties(&at_ceiling).max(1),
-        );
+        let bands = past
+            .frame
+            .map_or_else(|| extra_ties(&at_ceiling).max(1), |frame| frame.most_bands.max(1));
+        let braces = cross_charge_mm3(past.cross_mm3, past.shared, past.planes, bands);
         if whole.added_mm3 <= partial.added_mm3 + braces {
             return false;
         }
@@ -4803,8 +5406,17 @@ mod tests {
     /// 0.4 mm over 20 mm) costs more resin than that plus the crosses, and
     /// then the pair is braced. (At 1.0 mm apart every growth laps the other
     /// post's drawn foot, so the fixture stands them 2.0 mm apart.) With the
-    /// window off (the sabotage) the same pass builds bands between the pair
-    /// at once and nothing is thickened into a window.
+    /// window off AND the frame off (the fixed-point ladder before
+    /// 2026-10-03) the same pass builds bands between the pair at once and
+    /// nothing is thickened into a window.
+    ///
+    /// RE-PINNED 2026-10-03 (R6, fix/brace-frame-bands): until then the
+    /// window-off run alone was the sabotage, and it built bands between the
+    /// pair. Under R6 the FRAME counts the bands, and no count that fits holds
+    /// a run 8 limits long between these posts: the ceiling is now physics
+    /// the frame meets, not a rule of the window's. So the window-off run with
+    /// the frame on builds no band between the pair (the frame refuses it,
+    /// counted), and the old drill is the run with both rules off.
     #[test]
     fn a_pair_past_its_ceiling_is_thickened_into_the_window_then_braced() {
         let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
@@ -4819,7 +5431,7 @@ mod tests {
             post.carried_mm2 = vec![0.0; 400];
             post
         };
-        let run = |window: bool| {
+        let run = |window: bool, frame: bool| {
             let context = super::SlendernessContext {
                 grid: &grid,
                 history: &history,
@@ -4843,6 +5455,7 @@ mod tests {
                 load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
                 brace_cap: true,
                 brace_window: window,
+                frame_bands: frame,
             };
             let mut struts = vec![tall(0, 100), tall(1, 140)];
             let mut outcome = super::SlendernessOutcome::default();
@@ -4852,23 +5465,29 @@ mod tests {
         assert!(
             (super::pair_ceiling_ratio(0.05, 0.05, 2.0) - 1601.0_f64.powf(0.25)).abs() < 1e-12
         );
-        let on = run(true);
+        let on = run(true, true);
         println!(
             "window on: {} past the ceiling, {} thickened into the window, {} thickened, {} \
-             crosses, {} refused for resin",
+             crosses ({} sets), {} refused for resin",
             on.crosses_refused_past_pair_ceiling,
             on.members_thickened_into_the_window,
             on.members_thickened,
             on.braces_added,
+            on.frame_band_sets,
             on.crosses_refused_thicken_cheaper
         );
         assert!(on.crosses_refused_past_pair_ceiling > 0, "path hit: {on:?}");
         assert!(on.members_thickened_into_the_window > 0, "path hit: {on:?}");
         assert!(on.braces_added > 0, "the pair is braced once inside its window: {on:?}");
-        let off = run(false);
-        assert_eq!(off.crosses_refused_past_pair_ceiling, 0);
-        assert_eq!(off.members_thickened_into_the_window, 0);
-        assert!(off.braces_added > 0, "{off:?}");
+        assert!(on.frame_band_sets > 0, "and braced by a frame band set: {on:?}");
+        let fixed_point = run(false, false);
+        assert_eq!(fixed_point.crosses_refused_past_pair_ceiling, 0);
+        assert_eq!(fixed_point.members_thickened_into_the_window, 0);
+        assert!(fixed_point.braces_added > 0, "{fixed_point:?}");
+        let frame_only = run(false, true);
+        assert_eq!(frame_only.members_thickened_into_the_window, 0);
+        assert!(frame_only.frame_pairs_past_ceiling > 0, "{frame_only:?}");
+        assert_eq!(frame_only.braces_added, 0, "{frame_only:?}");
     }
 
     /// R7 + D5: a cross is charged one diagonal per post when both need it
@@ -5087,6 +5706,7 @@ mod tests {
             load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
             brace_cap: true,
             brace_window: true,
+            frame_bands: true,
         };
         // P at col 100, Q 10 cells (0.50 mm) away, R 40 cells the other way.
         let mut struts = vec![
@@ -5248,6 +5868,7 @@ mod tests {
             load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
             brace_cap: true,
             brace_window: true,
+            frame_bands: true,
         };
         let struts = vec![
             plate_post(&grid, 0, 100, 0.2),
@@ -5488,6 +6109,7 @@ mod tests {
             load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
             brace_cap: true,
             brace_window: true,
+            frame_bands: true,
         };
         // 16 cells at 0.05 mm: 0.8 mm between the posts.
         let struts = vec![
@@ -5591,6 +6213,7 @@ mod tests {
             load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
             brace_cap: true,
             brace_window: true,
+            frame_bands: true,
         };
         let mut struts = vec![
             short_plate_post(&grid, 0, 100),
@@ -5893,6 +6516,7 @@ mod tests {
             load_step_taper: crate::adapter::LoadStepTaper::of(lean),
             brace_cap: true,
             brace_window: true,
+            frame_bands: true,
         }
     }
 
