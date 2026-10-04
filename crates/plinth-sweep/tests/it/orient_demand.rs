@@ -165,8 +165,11 @@ fn swept_at(mesh: &plinth_mesh::Mesh, candidate: UpDirection) -> SweepPlan {
 /// lane (2026-09-05/06) added `StrutKind::Brace` and `StrutKind::Mast`
 /// members to the strut set; neither touches a model face or leaves a scar,
 /// so `MeasuredSupportDemand::struts` (the burden's own free variable) must
-/// count `StrutKind::Arm` only, with the brace and mast counts published
-/// beside it rather than folded in.
+/// count only the members that seat a tip into the model, with the brace and
+/// mast counts published beside it rather than folded in. Those members are
+/// `StrutKind::Arm` and, since the D8 ruling (2026-10-03),
+/// `StrutKind::Tie`: a model tie seats a tip into the model and leaves a
+/// scar, so it is a clip like an arm (`StrutKind::seats_on_model`).
 ///
 /// `make_tall_stilt_plate` at its own authored pose is the fixture
 /// `tests/slenderness_lane.rs` uses to prove the ladder fires on a real
@@ -176,7 +179,7 @@ fn swept_at(mesh: &plinth_mesh::Mesh, candidate: UpDirection) -> SweepPlan {
 /// regression back to counting every strut (`plan.struts.len()`) could pass
 /// this test vacuously on a fixture that never grows a brace or a mast.
 #[test]
-fn the_burden_counts_arms_only_on_a_fixture_that_also_places_braces_and_masts() {
+fn the_burden_counts_arms_and_model_ties_only_on_a_fixture_that_also_places_braces_and_masts() {
     let mesh = make_tall_stilt_plate().expect("the tall stilt plate fixture");
     let table = scoring_table(&mesh);
     let candidate = UpDirection::MODEL_UP;
@@ -186,6 +189,11 @@ fn the_burden_counts_arms_only_on_a_fixture_that_also_places_braces_and_masts() 
         .struts
         .iter()
         .filter(|strut| strut.kind == StrutKind::Arm)
+        .count();
+    let ties_in_plan = plan
+        .struts
+        .iter()
+        .filter(|strut| strut.kind == StrutKind::Tie)
         .count();
     let braces_in_plan = plan
         .struts
@@ -218,13 +226,17 @@ fn the_burden_counts_arms_only_on_a_fixture_that_also_places_braces_and_masts() 
 
     // The sabotage this guards against: reverting to `plan.struts.len()`
     // (every kind) would make `measured.struts` equal
-    // `arms_in_plan + braces_in_plan + masts_in_plan`, which the anti-vacuity
-    // assertion above guarantees is strictly greater than `arms_in_plan`
-    // alone -- so this assertion goes red under that regression.
+    // `arms_in_plan + ties_in_plan + braces_in_plan + masts_in_plan`, which
+    // the anti-vacuity assertion above guarantees is strictly greater than
+    // the model-seated count alone -- so this assertion goes red under that
+    // regression. Where the fixture grows a model tie, dropping ties from the
+    // count (`== StrutKind::Arm`) goes red here too.
     assert_eq!(
-        measured.struts, arms_in_plan,
-        "the measured burden's strut count must be the arm count alone, not the total strut \
-         count (braces {braces_in_plan}, masts {masts_in_plan})"
+        measured.struts,
+        arms_in_plan + ties_in_plan,
+        "the measured burden's strut count must be the model-seated count alone (arms \
+         {arms_in_plan} + model ties {ties_in_plan}), not the total strut count (braces \
+         {braces_in_plan}, masts {masts_in_plan})"
     );
     assert_eq!(
         measured.braces, braces_in_plan,
