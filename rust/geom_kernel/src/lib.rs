@@ -144,7 +144,7 @@ pub use queries::{
     FacesNearSegmentsClassified, Interval, NativeSurface, NearFaceBatchError, NearFaceBatchLimits,
     PenetrationBatchError, PenetrationBatchLimits, PenetrationBatchMeter,
     PenetrationIntervalsClassified, PenetrationRowCensus, SegmentClearanceClassified,
-    SphereBreachClassified, UnmeasuredSegment,
+    SphereBreachClassified, UnmeasuredSegment, TAPER_EPS_MM,
 };
 pub use segment_batch::{
     point_nearest_segment_batch, point_segment_distances_batch, point_segment_taper_batch,

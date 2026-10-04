@@ -443,6 +443,10 @@ pub struct MemberModelClearance {
     /// Spans measured, and spans wholly inside their member's own zones.
     pub rows: usize,
     pub rows_in_own_zones: usize,
+    /// Measured spans whose two drawn end radii differ (by more than
+    /// [`geom_kernel::TAPER_EPS_MM`]): the rows the frustum reading can change.
+    /// The path-hit witness of the frustum rule (2026-10-04).
+    pub rows_tapered: usize,
     /// The smallest gap measured on any member, mm.
     pub smallest_clearance_mm: Option<f64>,
     /// The members under the gap, in member order.

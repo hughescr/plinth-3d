@@ -402,6 +402,9 @@ pub(crate) fn model_clearance_census(
             p1s.push(to);
             top_radii.push(span.top_radius_mm.max(0.0));
             bottom_radii.push(span.bottom_radius_mm.max(0.0));
+            if (span.top_radius_mm - span.bottom_radius_mm).abs() > geom_kernel::TAPER_EPS_MM {
+                census.rows_tapered += 1;
+            }
             inset0s.push(inset0);
             inset1s.push(inset1);
         }
@@ -869,6 +872,7 @@ mod census_tests {
             "the post must be one tapered chord: {spans:?}"
         );
         assert_eq!(census.members_measured, 1, "{census:?}");
+        assert_eq!(census.rows_tapered, 1, "the path-hit witness: the one span is tapered: {census:?}");
         assert!(census.within_gap.is_empty(), "the drawn solid clears by >= 0.4 mm: {census:?}");
     }
 
@@ -943,6 +947,7 @@ mod census_tests {
         assert!(census.ran);
         assert_eq!(census.members_unmeasured, 0, "{census:?}");
         assert_eq!(census.members_measured, 4, "{census:?}");
+        assert_eq!(census.rows_tapered, 0, "four constant-radius members: no tapered row: {census:?}");
         let named: Vec<u32> = census.within_gap.iter().map(|near| near.member).collect();
         assert_eq!(named, vec![0], "{census:?}");
         let gap = census.within_gap[0].clearance_mm;

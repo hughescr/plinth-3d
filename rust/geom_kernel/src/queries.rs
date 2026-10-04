@@ -24,7 +24,7 @@ use crate::{SurfaceIndexKind, SurfaceSubsetError, SurfaceTriangleSoupDigest};
 /// values that differ by rounding) takes the constant-radius form, which is bit
 /// for bit the form every such caller had before the frustum reading. Far below
 /// the 1 um the emitted files can resolve.
-const TAPER_EPS_MM: f64 = 1e-12;
+pub const TAPER_EPS_MM: f64 = 1e-12;
 
 /// `(sqrt(5) - 1) / 2`, the golden-section ratio.
 const GOLDEN_INV: f64 = 0.618_033_988_749_894_9;

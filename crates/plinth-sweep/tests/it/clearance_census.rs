@@ -175,6 +175,12 @@ fn the_brace_pair_census_matches_the_drawn_file() {
         !tapered.is_empty(),
         "the brace pair draws no tapered span; the test would prove nothing"
     );
+    assert!(
+        census.rows_tapered >= tapered.len(),
+        "the census read {} tapered rows for {} tapered members: {census:?}",
+        census.rows_tapered,
+        tapered.len()
+    );
     println!(
         "tapered members: {:?}",
         tapered.iter().map(|m| m.id).collect::<Vec<_>>()
