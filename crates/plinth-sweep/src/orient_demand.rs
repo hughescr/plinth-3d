@@ -111,6 +111,16 @@
 //! the reverse of the production-pitch order. That is the whole reason the
 //! caller re-measures its finalists here; a prefilter that ranked correctly
 //! would have made the second stage unnecessary.
+//!
+//! **The quick pass also skips bracing** (Craig ruling 2026-10-04). A prefilter
+//! run places no `|X|` cross, thickening, mast or model tie
+//! ([`SweepPolicy::without_slenderness_ties`]): it only ranks poses by the arms
+//! they cost, its raster is too coarse to crown one, and the crosses' frame
+//! solves were nearly all of its time since round 13. A prefilter row therefore
+//! reports 0 braces and 0 masts, and its arm count holds no model tie. The
+//! production measurement of the finalists runs every rung, as the emitted
+//! field does. The slenderness merges (which move arms and so change the count)
+//! still run in both.
 //! [`DEMAND_PITCH_MULTIPLIER`] is registered nowhere: it is a hand-picked
 //! cost/fidelity trade on a stage that now only prunes, stated here as a
 //! deviation from a literal "run the production sweep on every candidate"
