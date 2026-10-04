@@ -24,6 +24,26 @@
 //!
 //! Its numbers are held to the study's own on the study's own fixtures, every
 //! cell (`tests::the_panel_reproduces_the_study_band_table`).
+//!
+//! **What a count costs** (band-speed lane, 2026-10-04). The ladder asks for a
+//! count for every partner in reach of every run it cannot hold, so counts
+//! are the hot path of the brace rung (about six million of them in the toed
+//! slab's search at round 13). [`count_bands`] therefore solves each panel
+//! ONCE, in its own plane, for the drag alone ([`panel_drag`]): the panel is
+//! planar and the tip column is reported, never decided on, so the full
+//! three-dimensional solve for both loads that [`panel_sway`] still does (the
+//! tests' reference) is not needed. The in-plane solve is the full solve's
+//! arithmetic on the in-plane freedoms in the same order, so its drag is the
+//! same number to the last bit
+//! (`tests::the_drag_alone_is_the_drags_in_the_full_sway_to_the_last_bit`),
+//! and the same refusals: the out-of-plane freedoms are factored too, for
+//! their pivots only (a panel whose out-of-plane pivot falls under the noise
+//! floor is refused as the full solve refuses it,
+//! `tests::a_panel_the_full_solve_refuses_is_refused_by_the_fast_drag`).
+//! The in-plane solve alone was about six times cheaper than the two full
+//! solves (315 µs against 48 µs on 2,000 random panels, 4.5 bands a panel);
+//! the out-of-plane factorisation gives some of that back (the slab's whole
+//! dense search: 49.9 s with the in-plane solve alone, 58.8 s with it).
 
 use crate::frame::Frame;
 
@@ -77,10 +97,87 @@ fn level(z: f64) -> f64 {
     (z * LEVELS_PER_MM).round() / LEVELS_PER_MM
 }
 
+/// A panel's frame, built, with what the two solves read off it.
+struct Built {
+    frame: Frame,
+    /// The node numbers up each post, base first.
+    columns: Vec<Vec<usize>>,
+    top_a: usize,
+    top_b: usize,
+    /// `π r⁴ / 4` of the run's post.
+    second: f64,
+    /// The run's length in its own one-pixel lengths.
+    lambda: f64,
+    height: f64,
+}
+
+/// The study's uniform drag, lumped: each node takes half of each
+/// neighbouring division, on both posts.
+fn drag_loads(built: &Built) -> Vec<(usize, [f64; 3])> {
+    let frame = &built.frame;
+    let mut drag: Vec<(usize, [f64; 3])> = Vec::new();
+    for column in &built.columns {
+        for (i, &node) in column.iter().enumerate() {
+            let z = |at: usize| frame.point(column[at])[2];
+            let below = if i == 0 { z(i) } else { z(i - 1) };
+            let above = if i + 1 < column.len() { z(i + 1) } else { z(i) };
+            drag.push((node, [0.5 * (above - below), 0.0, 0.0]));
+        }
+    }
+    drag
+}
+
 /// Solve one panel. `None` where a band does not fit inside the run, or the
 /// input is not a panel (a non-positive radius, gap or height).
 #[must_use]
 pub fn panel_sway(panel: &Panel, ratio: f64) -> Option<PanelSway> {
+    let built = build(panel, ratio)?;
+    let tip = built.frame.solve(&[
+        (built.top_a, [1.0, 0.0, 0.0]),
+        (built.top_b, [1.0, 0.0, 0.0]),
+    ]);
+    if !tip.solved[built.top_a] {
+        return None;
+    }
+    let swept = built.frame.solve(&drag_loads(&built));
+    if !swept.solved[built.top_a] {
+        return None;
+    }
+    let Built {
+        top_a,
+        second,
+        lambda,
+        height,
+        ..
+    } = built;
+    Some(PanelSway {
+        drag_over_pixel: swept.moved[top_a][0] / (height.powi(4) / (8.0 * second))
+            * lambda.powi(4),
+        tip_over_limit: tip.moved[top_a][0] / (height.powi(3) / (3.0 * second)) * lambda.powi(3),
+    })
+}
+
+/// [`panel_sway`]'s `drag_over_pixel` and nothing else: the one solve
+/// [`count_bands`] and the engine's checks read. The same number to the last
+/// bit (`tests::the_drag_alone_is_the_drags_in_the_full_sway_to_the_last_bit`),
+/// from one in-plane solve instead of two full ones: a panel is planar, and
+/// the tip column is reported, never decided on.
+#[must_use]
+pub fn panel_drag(panel: &Panel, ratio: f64) -> Option<f64> {
+    let built = build(panel, ratio)?;
+    let swept = built.frame.solve_in_plane(&drag_loads(&built));
+    if !swept.solved[built.top_a] {
+        return None;
+    }
+    Some(
+        swept.moved[built.top_a][0] / (built.height.powi(4) / (8.0 * built.second))
+            * built.lambda.powi(4),
+    )
+}
+
+/// The frame of one panel, or `None` where a band does not fit inside the
+/// run or the input is not a panel.
+fn build(panel: &Panel, ratio: f64) -> Option<Built> {
     let Panel {
         post_radius_mm: rp,
         partner_radius_mm: rq,
@@ -151,29 +248,14 @@ pub fn panel_sway(panel: &Panel, ratio: f64) -> Option<PanelSway> {
     let top_b = *columns[1].last()?;
     let second = core::f64::consts::PI * rp.powi(4) / 4.0;
     let lambda = height / (ratio * rp);
-    let tip = frame.solve(&[(top_a, [1.0, 0.0, 0.0]), (top_b, [1.0, 0.0, 0.0])]);
-    if !tip.solved[top_a] {
-        return None;
-    }
-    // The uniform drag, lumped: each node takes half of each neighbouring
-    // division.
-    let mut drag: Vec<(usize, [f64; 3])> = Vec::new();
-    for column in &columns {
-        for (i, &node) in column.iter().enumerate() {
-            let z = |at: usize| frame.point(column[at])[2];
-            let below = if i == 0 { z(i) } else { z(i - 1) };
-            let above = if i + 1 < column.len() { z(i + 1) } else { z(i) };
-            drag.push((node, [0.5 * (above - below), 0.0, 0.0]));
-        }
-    }
-    let swept = frame.solve(&drag);
-    if !swept.solved[top_a] {
-        return None;
-    }
-    Some(PanelSway {
-        drag_over_pixel: swept.moved[top_a][0] / (height.powi(4) / (8.0 * second))
-            * lambda.powi(4),
-        tip_over_limit: tip.moved[top_a][0] / (height.powi(3) / (3.0 * second)) * lambda.powi(3),
+    Some(Built {
+        frame,
+        columns,
+        top_a,
+        top_b,
+        second,
+        lambda,
+        height,
     })
 }
 
@@ -215,6 +297,34 @@ pub fn count_bands(
     from: usize,
     layout: &dyn Fn(usize) -> Option<Vec<PanelBand>>,
 ) -> BandCount {
+    count_bands_with(panel, ratio, from, layout, &panel_drag)
+}
+
+/// [`count_bands`] by the FULL two-load solve ([`panel_sway`]): the loop as
+/// it stood before the band-speed lane (2026-10-04), kept as the reference the
+/// fast count is held to (`tests::the_fast_count_is_the_full_sways_count`,
+/// and the `brace_frame_bands` integration test). Not for the engine: it
+/// solves every panel twice, in six freedoms a node.
+#[doc(hidden)]
+#[must_use]
+pub fn count_bands_by_full_sway(
+    panel: &Panel,
+    ratio: f64,
+    from: usize,
+    layout: &dyn Fn(usize) -> Option<Vec<PanelBand>>,
+) -> BandCount {
+    count_bands_with(panel, ratio, from, layout, &|trial, ratio| {
+        panel_sway(trial, ratio).map(|sway| sway.drag_over_pixel)
+    })
+}
+
+fn count_bands_with(
+    panel: &Panel,
+    ratio: f64,
+    from: usize,
+    layout: &dyn Fn(usize) -> Option<Vec<PanelBand>>,
+    drag_of: &dyn Fn(&Panel, f64) -> Option<f64>,
+) -> BandCount {
     let mut best = BandCount::PastCeiling {
         most_bands: 0,
         drag_over_pixel: f64::INFINITY,
@@ -229,10 +339,9 @@ pub fn count_bands(
             bands,
             ..panel.clone()
         };
-        let Some(sway) = panel_sway(&trial, ratio) else {
+        let Some(drag) = drag_of(&trial, ratio) else {
             return best;
         };
-        let drag = sway.drag_over_pixel;
         if drag <= 1.0 + PIXEL_NOISE {
             return BandCount::Holds {
                 bands: n,
@@ -272,7 +381,10 @@ fn study_bands(height: f64, n: u32, rise: f64, gap: f64, ratio: f64, r_min: f64)
 
 #[cfg(test)]
 mod tests {
-    use super::{panel_sway, study_bands, Panel};
+    use super::{
+        count_bands, count_bands_by_full_sway, panel_drag, panel_sway, study_bands, BandCount,
+        Panel, PanelBand,
+    };
 
     /// `bracing-mechanics/data/bands2.out` at full precision, every cell:
     /// `(post radius, gap, λ, bands, drag, tip)`, from `tools/bands2.ts`
@@ -412,6 +524,257 @@ mod tests {
         }
         assert_eq!(checked, 84, "every cell of both study tables is checked");
         assert!(worst > 0.0, "the comparison read real numbers");
+    }
+
+    /// A small deterministic generator, so the random panels are the same on
+    /// every machine.
+    struct Lcg(u64);
+
+    impl Lcg {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "the top 53 bits of a u64 are exact in f64"
+        )]
+        fn unit(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 11) as f64 / (1_u64 << 53) as f64
+        }
+
+        fn between(&mut self, low: f64, high: f64) -> f64 {
+            low + (high - low) * self.unit()
+        }
+
+        /// A whole number below `count`.
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a small positive count"
+        )]
+        fn below(&mut self, count: u32) -> usize {
+            (self.unit() * f64::from(count)) as usize
+        }
+    }
+
+    /// A random panel: unequal posts, 1 to 8 bands at random places (the
+    /// ends may land a few micrometres from a mesh level or from each other,
+    /// so the node merge is exercised), diagonals of random radius.
+    fn random_panel(rng: &mut Lcg) -> Panel {
+        let post = rng.between(0.08, 0.8);
+        let height = rng.between(2.0, 25.0);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a small positive count"
+        )]
+        let count = 1 + (rng.unit() * 8.0) as usize;
+        let mut cuts: Vec<f64> = (0..2 * count).map(|_| rng.between(0.0, height)).collect();
+        cuts.sort_by(f64::total_cmp);
+        let brace = rng.between(0.05, post);
+        Panel {
+            post_radius_mm: post,
+            partner_radius_mm: rng.between(0.08, 0.8),
+            gap_mm: rng.between(0.4, 6.0),
+            height_mm: height,
+            bands: cuts
+                .chunks(2)
+                .map(|pair| PanelBand {
+                    bottom_mm: pair[0],
+                    top_mm: pair[1],
+                    brace_radius_mm: brace,
+                })
+                .collect(),
+        }
+    }
+
+    /// **The fast drag is the full sway's drag, to the last bit.** The
+    /// planar solve does the in-plane arithmetic of the full solve in the
+    /// same order, so every cell of both study tables and 1,500 random panels
+    /// (the same two outcomes: a number with the same bits, or none) agree
+    /// exactly, not to a tolerance. Sabotage (2026-10-04): form the planar
+    /// stiffness's terms as `(from * to) * k` instead of `(from * k) * to`, a
+    /// reordering that is the same number to 1e-16, and this test, its
+    /// stiffness twin in `frame` and `the_fast_count_is_the_full_sways_count`
+    /// all fail while the study table (tolerance 1e-7) still passes.
+    #[test]
+    fn the_drag_alone_is_the_drags_in_the_full_sway_to_the_last_bit() {
+        let tilt = 57.3_f64.to_radians().tan();
+        let mut panels: Vec<(Panel, f64)> = STUDY
+            .iter()
+            .map(|&(radius, gap, lambda, n, _, _)| {
+                let height = lambda * 40.0 * radius;
+                (
+                    Panel {
+                        post_radius_mm: radius,
+                        partner_radius_mm: radius,
+                        gap_mm: gap,
+                        height_mm: height,
+                        bands: study_bands(height, n, gap / tilt, gap, 40.0, 0.05),
+                    },
+                    40.0,
+                )
+            })
+            .collect();
+        let mut rng = Lcg(0x5eed_ba4d_0000_0001);
+        for _ in 0..1_500 {
+            let ratio = rng.between(20.0, 60.0);
+            panels.push((random_panel(&mut rng), ratio));
+        }
+        let (mut some, mut none) = (0_usize, 0_usize);
+        for (panel, ratio) in &panels {
+            let full = panel_sway(panel, *ratio).map(|sway| sway.drag_over_pixel.to_bits());
+            let fast = panel_drag(panel, *ratio).map(f64::to_bits);
+            assert_eq!(fast, full, "{panel:?} at S {ratio}");
+            if full.is_some() {
+                some += 1;
+            } else {
+                none += 1;
+            }
+        }
+        assert!(some > 1_000, "the comparison read real numbers: {some} solved");
+        assert!(none > 0, "and some panels the two both refuse: {none}");
+    }
+
+    /// **A panel the full solve refuses for a pivot out of plane is refused
+    /// by the fast drag too.** The challenger's witness (2026-10-04, against
+    /// `d91e24c`): a tall run (174 mm) with 13 hair braces (radius 0.117 mm) on
+    /// posts of radius 0.61 and 1.12 mm, a gap of 0.60 mm. The unchanged
+    /// `70e2639` solver refuses it (an out-of-plane pivot under the noise
+    /// floor); an in-plane-only solve returned a finite drag and a count of 13
+    /// bands where the old loop returned none. Each of the two: `panel_drag`
+    /// is `None`, and `count_bands` is the old count.
+    #[test]
+    fn a_panel_the_full_solve_refuses_is_refused_by_the_fast_drag() {
+        let band = |bottom_mm: f64, top_mm: f64| PanelBand {
+            bottom_mm,
+            top_mm,
+            brace_radius_mm: 0.117_231_547_731_911_16,
+        };
+        let panel = Panel {
+            post_radius_mm: 0.606_710_511_365_277_5,
+            partner_radius_mm: 1.121_927_296_436_027_6,
+            gap_mm: 0.595_982_447_632_242_8,
+            height_mm: 174.192_434_130_992_5,
+            bands: vec![
+                band(8.460_097_110_442_05, 14.671_783_133_447_67),
+                band(31.541_831_414_282_438, 37.853_840_340_710_57),
+                band(47.123_513_977_408_25, 59.408_383_279_710_01),
+                band(68.602_908_317_551_03, 69.437_668_208_578_05),
+                band(70.660_633_753_754_95, 76.154_515_877_364_84),
+                band(77.087_635_923_666_11, 79.237_866_482_779_18),
+                band(79.304_350_540_327_15, 80.258_900_292_634_64),
+                band(82.599_542_805_309_95, 84.555_862_767_374_26),
+                band(85.413_302_072_573_17, 137.898_525_454_638_08),
+                band(138.461_438_270_445_54, 142.566_860_617_479_48),
+                band(151.403_104_984_712_63, 152.266_174_628_901_92),
+                band(155.635_599_250_200_67, 160.399_857_649_314_87),
+                band(161.547_221_716_200_34, 167.830_382_080_042_26),
+            ],
+        };
+        let ratio = 59.436_351_224_285_91;
+        assert!(panel_sway(&panel, ratio).is_none(), "the full solve refuses");
+        assert_eq!(panel_drag(&panel, ratio), None, "so does the fast one");
+        let thirteen = panel.bands.clone();
+        let layout = |n: usize| (n == 13).then(|| thirteen.clone());
+        let bare = Panel {
+            bands: Vec::new(),
+            ..panel
+        };
+        assert_eq!(
+            count_bands(&bare, ratio, 13, &layout),
+            count_bands_by_full_sway(&bare, ratio, 13, &layout)
+        );
+        assert_eq!(
+            count_bands(&bare, 30.0, 13, &layout),
+            count_bands_by_full_sway(&bare, 30.0, 13, &layout)
+        );
+    }
+
+    /// **Refusals agree on tall, thin-braced panels too.** The random panels
+    /// of the bit test are short (2 to 25 mm) and rarely meet a pivot under
+    /// the noise floor; these run to 250 mm with up to 16 bands of braces a
+    /// tenth to a half of the post, and the fast drag must be the full
+    /// sway's, bit for bit, or refused exactly when it is.
+    #[test]
+    fn tall_thin_braced_panels_are_refused_and_solved_alike() {
+        let mut rng = Lcg(0x5eed_ba4d_0000_0003);
+        let (mut solved, mut refused) = (0_usize, 0_usize);
+        for _ in 0..1_500 {
+            let post = rng.between(0.3, 0.9);
+            let height = rng.between(20.0, 250.0);
+            let count = 1 + rng.below(16);
+            let mut cuts: Vec<f64> = (0..2 * count).map(|_| rng.between(0.0, height)).collect();
+            cuts.sort_by(f64::total_cmp);
+            let brace = rng.between(0.1, 0.5) * post;
+            let panel = Panel {
+                post_radius_mm: post,
+                partner_radius_mm: rng.between(0.3, 1.5),
+                gap_mm: rng.between(0.4, 2.0),
+                height_mm: height,
+                bands: cuts
+                    .chunks(2)
+                    .map(|pair| PanelBand {
+                        bottom_mm: pair[0],
+                        top_mm: pair[1],
+                        brace_radius_mm: brace,
+                    })
+                    .collect(),
+            };
+            let ratio = rng.between(20.0, 60.0);
+            let full = panel_sway(&panel, ratio).map(|sway| sway.drag_over_pixel.to_bits());
+            let fast = panel_drag(&panel, ratio).map(f64::to_bits);
+            assert_eq!(fast, full, "{panel:?} at S {ratio}");
+            if full.is_some() {
+                solved += 1;
+            } else {
+                refused += 1;
+            }
+        }
+        assert!(solved > 300, "real numbers were compared: {solved}");
+        assert!(refused > 0, "refusals were compared: {refused}");
+    }
+
+    /// **The fast count is the full sway's count.** `count_bands` against
+    /// the loop as it stood before the lane ([`count_bands_by_full_sway`]),
+    /// on the study's own layout for 1 to `fit` bands over random pairs,
+    /// starting from 1 to 4: the same bands, or the same ceiling with the
+    /// same most bands, and the same sway to the last bit.
+    #[test]
+    fn the_fast_count_is_the_full_sways_count() {
+        let tilt = 57.3_f64.to_radians().tan();
+        let mut rng = Lcg(0x5eed_ba4d_0000_0002);
+        let (mut holds, mut past) = (0_usize, 0_usize);
+        for _ in 0..400 {
+            let post = rng.between(0.1, 0.6);
+            let gap = rng.between(0.5, 5.0);
+            let ratio = rng.between(25.0, 45.0);
+            let height = ratio * post * rng.between(1.3, 4.0);
+            let fit = 1 + u32::try_from(rng.below(10)).expect("below ten");
+            let from = 1 + rng.below(4);
+            let panel = Panel {
+                post_radius_mm: post,
+                partner_radius_mm: rng.between(0.1, 0.6),
+                gap_mm: gap,
+                height_mm: height,
+                bands: Vec::new(),
+            };
+            let layout = |n: usize| {
+                u32::try_from(n)
+                    .ok()
+                    .filter(|&n| n <= fit)
+                    .map(|n| study_bands(height, n, gap / tilt, gap, ratio, 0.05))
+            };
+            let fast = count_bands(&panel, ratio, from, &layout);
+            let full = count_bands_by_full_sway(&panel, ratio, from, &layout);
+            assert_eq!(fast, full, "{panel:?} from {from} fit {fit}");
+            match fast {
+                BandCount::Holds { .. } => holds += 1,
+                BandCount::PastCeiling { .. } => past += 1,
+            }
+        }
+        assert!(holds > 20 && past > 20, "both outcomes read: {holds} hold, {past} past");
     }
 
     /// The study's headline, read off the same table by the same rule the

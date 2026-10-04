@@ -47,11 +47,31 @@
 //! is narrow: a change that moves the scar term's weight or the tip sizing can
 //! cross it, and that is a finding to report, not a bound to lower.
 
+use std::time::Instant;
+
 use plinth_core::m0_constants;
 use plinth_decimate::{BudgetConfigError, ProbeConfig};
 use plinth_orient::registered_sweep_request;
 use plinth_orient::search::{search, SearchTier};
 use plinth_sweep::SweepDemand;
+
+/// How long the dense search took before the round-13 frame bands, seconds:
+/// this test at `a73e40a` and `bf5802f` took 38 to 40 s (round-13 milestone
+/// bisect), and `bin/plinth-a73e40a` on the same slab through the CLI
+/// measured 3.66 s for the prefilter's 21 poses plus 33.85 s for the three
+/// production poses, 37.5 s (`lanes/band-speed.md`, 4 threads).
+const A73E40A_SEARCH_S: f64 = 38.0;
+
+/// The speed guard's bound: 2.5 times [`A73E40A_SEARCH_S`]. Measured on an
+/// idle machine at 4 threads, 2026-10-04 (`lanes/band-speed.md`): `70e2639`
+/// (the frame bands, unfixed), through the CLI, 80.65 s for the prefilter and
+/// 33.87 s for the production poses, **114.5 s, 3.0 times**, over the bound;
+/// the band-speed lane's search, through the CLI 15.3 s and 34.3 s and in this
+/// test **49.9 s, 1.3 times**, a factor 1.9 under it, so a neighbour test
+/// that takes half the machine does not trip it. A bound, not a target: the
+/// search is allowed to get slower for a reason, and the reason is then
+/// written in this constant's derivation.
+const SEARCH_BOUND_S: f64 = 2.5 * A73E40A_SEARCH_S;
 
 fn registered_decimation_budget() -> plinth_decimate::DecimationBudget {
     let placeholders = m0_constants().expect("registry").placeholders();
@@ -93,8 +113,22 @@ fn the_toed_slab_lands_flat_at_its_production_pose() {
         .0;
     let request = registered_sweep_request().expect("the registered sweep request");
     let demand = SweepDemand::production();
+    let started = Instant::now();
     let outcome = search(&decimated, &request, Some(&demand))
         .expect("the dense orientation search must not refuse");
+    let elapsed = started.elapsed();
+    println!("the dense search took {:.1} s (bound {SEARCH_BOUND_S:.0} s)", elapsed.as_secs_f64());
+    // THE SPEED GUARD. The search is the toed slab's whole cost, and the
+    // round-13 frame bands once made it 3 times slower than before them (and
+    // the process tests' slab 60 times slower): see `SEARCH_BOUND_S`.
+    assert!(
+        elapsed.as_secs_f64() <= SEARCH_BOUND_S,
+        "the toed slab's dense orientation search took {:.1} s, over the {SEARCH_BOUND_S:.0} s \
+         bound (2.5 times the {A73E40A_SEARCH_S:.1} s it took before the frame bands): a rule \
+         has made the brace ladder cost far more than it did (the round-13 regression, \
+         `lanes/band-speed.md`)",
+        elapsed.as_secs_f64()
+    );
     let record = outcome.record();
     let commit = record
         .tiers

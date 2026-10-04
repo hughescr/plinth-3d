@@ -257,6 +257,12 @@ impl DemandSettings {
             // raster `sweep_and_emit` plans the emitted field on.
             DemandFidelity::Production => policy,
         };
+        // A demand run reads no count of the brace frame's refusals (it reads
+        // the arms, the scar and the landings), so it does not classify a
+        // pair no band set can be planned on: the same ladder decisions, the
+        // same field (`plinth-sweep` `tests/it/frame_ledger.rs`), classifying
+        // only the pairs a decision can read (`lanes/band-speed.md`).
+        let policy = policy.without_frame_ledger();
         Ok(Self {
             lift_mm: constants.placeholders().lift_mm().diagnostic().get(),
             layer_height_mm: *constants.evidence().layer_height_default_mm().value(),

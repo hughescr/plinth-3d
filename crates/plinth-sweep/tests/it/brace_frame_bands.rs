@@ -25,6 +25,7 @@
 //! |---|---|
 //! | `the_pair_gets_the_bands_its_frame_needs` | with R6 on, at λ 2, 2.5 and 3 the built bands hold the run within one pixel in the frame, with at least the study's counts (2, 3, 5) |
 //! | `sabotage_fixed_point_bands_leave_the_frame_swaying` | the drill (R6 off, develop's ladder): 1, 2, 2 bands, and the frame sways past one pixel at every λ (the red) |
+//! | `the_fast_count_builds_the_bands_the_full_sway_counts_on_the_pair_fixtures` | the band-speed lane's in-plane count gives the same bands (and the same ceiling, most bands and sway to the last bit) as the full two-solve count it replaced, at λ 2, 2.5, 3 and 4 |
 //!
 //! Red on develop: develop has no `frame_bands` knob; its ladder IS the
 //! sabotage arm here (`without_frame_bands`, which restores it exactly), and
@@ -122,6 +123,7 @@ fn tie_the_pair(lambda: f64, frame_bands: bool) -> Built {
         brace_cap: true,
         brace_window: false,
         frame_bands,
+        frame_ledger: true,
         model_tie: false,
     };
     let mut struts = vec![post(&grid, 0, 60, layers), post(&grid, 1, 60 + GAP_CELLS, layers)];
@@ -200,5 +202,58 @@ fn sabotage_fixed_point_bands_leave_the_frame_swaying() {
             "λ {lambda}: fixed-point bands leave the frame over one pixel: {built:?}"
         );
         assert_eq!(built.outcome.frame_band_sets, 0);
+    }
+}
+
+/// **The fast count builds the bands the full sway counts** (band-speed lane,
+/// 2026-10-04): on this file's own thin pair at 2, 2.5, 3 and 4 times its
+/// limit, `count_bands` (one in-plane solve a count) and the loop as it stood
+/// before the lane (`count_bands_by_full_sway`, two full solves a count) say
+/// the same thing, to the last bit of the sway: the fewest bands that hold,
+/// or the same ceiling with the same most bands. The bands are laid as the
+/// study lays them, `rise` deep, at the depth the overhang law gives this gap.
+/// The headline counts (2, 3 and 5 at 2, 2.5 and 3 times) are read off the
+/// fast one.
+#[test]
+fn the_fast_count_builds_the_bands_the_full_sway_counts_on_the_pair_fixtures() {
+    use plinth_sweep::frame_bands::{count_bands, count_bands_by_full_sway, BandCount};
+    let gap = GAP_CELLS as f64 * H;
+    let lean = LeanLaw::new(H, 45.0, 25.0);
+    let rise = lean.layers_to_reach(gap) as f64 * H;
+    let brace = 0.05_f64.max(gap.hypot(rise) / S);
+    for (lambda, study) in [(2.0, Some(2)), (2.5, Some(3)), (3.0, Some(5)), (4.0, None)] {
+        let height = (lambda * S * RADIUS / H).round() * H;
+        let panel = Panel {
+            post_radius_mm: RADIUS,
+            partner_radius_mm: RADIUS,
+            gap_mm: gap,
+            height_mm: height,
+            bands: Vec::new(),
+        };
+        let layout = |n: usize| {
+            (n <= 12).then(|| {
+                (1..=n)
+                    .map(|i| {
+                        let centre = height * i as f64 / (n + 1) as f64;
+                        PanelBand {
+                            bottom_mm: centre - 0.5 * rise,
+                            top_mm: centre + 0.5 * rise,
+                            brace_radius_mm: brace,
+                        }
+                    })
+                    .collect()
+            })
+        };
+        let fast = count_bands(&panel, S, 1, &layout);
+        let full = count_bands_by_full_sway(&panel, S, 1, &layout);
+        println!("λ {lambda}: {fast:?}");
+        assert_eq!(fast, full, "λ {lambda}");
+        match (fast, study) {
+            (BandCount::Holds { bands, .. }, Some(want)) => {
+                assert!(bands >= want, "λ {lambda}: {bands} bands, the study's {want}");
+            }
+            (BandCount::PastCeiling { .. }, None) => {}
+            _ => panic!("λ {lambda}: {fast:?} against the study's {study:?}"),
+        }
     }
 }

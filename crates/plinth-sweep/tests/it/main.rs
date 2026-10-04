@@ -30,6 +30,7 @@ mod emitted_profile_covers_ledger;
 mod every_member_rests_on_something;
 mod flank_relief;
 mod footprint_moves_hold_the_rules;
+mod frame_ledger;
 mod head_join;
 mod lattice_align;
 mod lip_seat_sized;

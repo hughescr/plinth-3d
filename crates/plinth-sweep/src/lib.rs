@@ -702,6 +702,13 @@ pub struct SweepPolicy {
     /// (`frame_bands`). **On in production.** The drill turns it off and the
     /// ladder credits every band as a fixed point again, one at a time.
     pub slenderness_frame_bands: bool,
+    /// Whether the brace frame ([`slenderness::SlendernessContext::frame_ledger`])
+    /// counts EVERY pair it refuses, for the `brace frame:` line of the CLI.
+    /// **On for the emitted field.** The orientation search turns it off
+    /// ([`Self::without_frame_ledger`]): it reads none of those counts, and a
+    /// pair no band set can be planned on need not be classified to be
+    /// refused. No decision of the ladder depends on it.
+    pub slenderness_frame_ledger: bool,
     /// Decision D8 (Craig ruling 2026-10-03): where no cross, thickening or
     /// mast holds a run, the post is TIED TO THE MODEL's own nearby surface
     /// by members seated like any support tip ([`model_tie`]), the last rung
@@ -860,6 +867,7 @@ impl SweepPolicy {
             slenderness_brace_cap: true,
             slenderness_brace_window: true,
             slenderness_frame_bands: true,
+            slenderness_frame_ledger: true,
             slenderness_model_tie: true,
             stage_shake_brace_peel_kpa: stage_shake::BRACE_PEEL_KPA,
             final_clearance_gap_mm: *evidence.final_clearance_gap_mm().value(),
@@ -1196,6 +1204,16 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_frame_bands(mut self) -> Self {
         self.slenderness_frame_bands = false;
+        self
+    }
+
+    /// Do not count the pairs the brace frame refuses (see
+    /// [`Self::slenderness_frame_ledger`]): for a measurement that never
+    /// reads those counts, the orientation search's demand runs. Every
+    /// decision of the ladder, and so the field it builds, is the same.
+    #[must_use]
+    pub const fn without_frame_ledger(mut self) -> Self {
+        self.slenderness_frame_ledger = false;
         self
     }
 
@@ -1891,6 +1909,7 @@ pub fn run_sweep_with_drains(
         brace_cap: policy.slenderness_brace_cap,
         brace_window: policy.slenderness_brace_window,
         frame_bands: policy.slenderness_frame_bands,
+        frame_ledger: policy.slenderness_frame_ledger,
         model_tie: policy.slenderness_model_tie,
     };
 
