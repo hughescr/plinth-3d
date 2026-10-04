@@ -3345,8 +3345,9 @@ fn print_sweep_disclosure(
          refused: {} joint off the free shaft or the run, {} thicker than the post (R2), \
          centreline through {} a drain, {} the model, {} a member, {} solid within the final gap \
          of the model \
-         outside its seat zone, {} contact disc not wholly on the model, {} solid entering a \
-         member",
+         outside its seat zone, {} seat trim cutting the shaft outside the ball (lip-seat \
+         rule), {} contact disc not wholly on the model, {} solid entering a member; {} tie \
+         layers planned again with a tip sized up until the seat trim keeps its shaft",
         lane.model_tie_runs_tried,
         lane.model_tie_sets,
         lane.model_ties_built,
@@ -3364,8 +3365,10 @@ fn print_sweep_disclosure(
         lane.model_tie_refused_path_model,
         lane.model_tie_refused_path_member,
         lane.model_tie_refused_solid_model,
+        lane.model_tie_refused_trim_bite,
         lane.model_tie_refused_disc_off_face,
         lane.model_tie_refused_solid_member,
+        lane.model_tie_tips_sized_for_the_trim,
     );
     // CONSTRUCTION-STAGE SHAKE (Craig ruling 2026-10-03, R9 + D6): a WARNING
     // only, at a stated, unmeasured brace peel pressure.

@@ -648,6 +648,17 @@ pub struct SlendernessOutcome {
     pub model_tie_refused_path_model: usize,
     pub model_tie_refused_path_member: usize,
     pub model_tie_refused_solid_model: usize,
+    /// Candidates whose seat trim would cut the shaft outside the tip ball
+    /// (the lip-seat rule: the tie meets its face too side-on).
+    pub model_tie_refused_trim_bite: usize,
+    /// Tie layers planned again with a thicker tip because the nearest
+    /// contact's seat trim cut its shaft at the thinner one (the lip-seat
+    /// rule read as contact sizing; never past the post, R2).
+    pub model_tie_tips_sized_for_the_trim: usize,
+    /// Ties seated a few layers off their evenly spaced layer because no
+    /// admissible tie seats there (tried a layer at a time, up to half the
+    /// spacing either way).
+    pub model_ties_moved_from_their_layer: usize,
     pub model_tie_refused_disc_off_face: usize,
     pub model_tie_refused_solid_member: usize,
 }
@@ -5546,10 +5557,42 @@ fn tie_to_model(
             outcome.model_tie_refused_frame += 1;
             return false;
         }
+        // Each tie at its evenly spaced seat; a seat with no admissible tie
+        // there is tried a layer at a time lower and higher, up to half the
+        // spacing either way (between its neighbours, as a refused band is
+        // in R6). The pieces are judged on the seats as found.
+        let spacing = (run.k_top - run.k_lo) / (n + 1);
         let mut plans: Vec<TiePlan> = Vec::with_capacity(n);
         for &seat in &seats {
-            match plan_model_tie(context, model, state, struts, post_index, seat, run, floor, None, outcome)
-            {
+            let mut found: Result<TiePlan, TieMiss> = Err(TieMiss::NoSurface);
+            for shift in 0..=spacing / 2 {
+                let tries = if shift == 0 {
+                    [Some(seat), None]
+                } else {
+                    [seat.checked_sub(shift), Some(seat + shift)]
+                };
+                for at in tries.into_iter().flatten().filter(|&at| at > run.k_lo && at < run.k_top) {
+                    let attempt =
+                        plan_model_tie(context, model, state, struts, post_index, at, run, floor, None, outcome);
+                    // A miss for want of any candidate outranks one for want
+                    // of surface, for the count below.
+                    match (&found, attempt) {
+                        (_, Ok(plan)) => found = Ok(plan),
+                        (Err(TieMiss::NoSurface), Err(miss)) => found = Err(miss),
+                        _ => {}
+                    }
+                    if found.is_ok() {
+                        break;
+                    }
+                }
+                if found.is_ok() {
+                    if shift > 0 {
+                        outcome.model_ties_moved_from_their_layer += 1;
+                    }
+                    break;
+                }
+            }
+            match found {
                 Ok(plan) => plans.push(plan),
                 Err(TieMiss::NoSurface) => {
                     outcome.model_tie_refused_no_surface += 1;
@@ -5561,6 +5604,7 @@ fn tie_to_model(
                 }
             }
         }
+        plans.sort_by_key(|plan| plan.k_top);
         if !tie_pieces_fit(context, &struts[post_index], &state.profiles[post_index], run, &plans) {
             n += 1;
             continue;
@@ -5883,9 +5927,36 @@ fn plan_model_tie(
     if candidates.is_empty() {
         return Err(TieMiss::NoCandidate);
     }
-    screen_model_ties(context, model, state, struts, post_index, &candidates, outcome)
-        .map(|index| candidates.swap_remove(index))
-        .ok_or(TieMiss::NoCandidate)
+    match screen_model_ties(context, model, state, struts, post_index, &candidates, outcome) {
+        Screened::Passed(index) => Ok(candidates.swap_remove(index)),
+        // The contacts the seat trim would cut are sized up until it does
+        // not (the nearest that then also keeps its disc on the model), and
+        // the layer is planned again at that radius. The radius only grows
+        // and the ladder is finite, so this ends.
+        Screened::Failed { bitten } if !bitten.is_empty() => {
+            let current = candidates[bitten[0]].radius_mm;
+            let sized: Vec<TiePlan> = bitten.iter().map(|&index| candidates[index].clone()).collect();
+            match radius_the_trim_keeps(context, model, state, struts, post.id, &sized) {
+                Some(radius) if radius > current => {
+                    outcome.model_tie_tips_sized_for_the_trim += 1;
+                    plan_model_tie(
+                        context,
+                        model,
+                        state,
+                        struts,
+                        post_index,
+                        seat,
+                        run,
+                        floor,
+                        Some(radius),
+                        outcome,
+                    )
+                }
+                _ => Err(TieMiss::NoCandidate),
+            }
+        }
+        Screened::Failed { .. } => Err(TieMiss::NoCandidate),
+    }
 }
 
 /// A planned tie as the member it would be, at `radius_mm` (its ledger filled
@@ -5925,23 +5996,21 @@ fn tie_member(grid: &Grid, id: u32, post: u32, plan: &TiePlan, radius_mm: f64) -
     }
 }
 
-/// The first of `candidates` (in their order) that passes the drawn tests,
-/// or `None`. One surface projection, one contact-disc derivation and one
-/// census for the whole batch; the member test and the lone confirming
-/// census only for candidates the batch passed, in order, until one holds.
-fn screen_model_ties(
+/// Planned ties as the members and the arms the lowering would draw them as:
+/// each at its own radius, its seat normal and face point from the nearest
+/// face of any slope to its tip point (`tip_landing::tip_seat_faces` for a
+/// tie), one surface projection for the batch. Member ids are batch indices.
+fn tie_arms(
     context: &SlendernessContext<'_>,
     model: &ModelTies<'_>,
     state: &TieState,
     struts: &[SweepStrut],
-    post_index: usize,
+    post_id: u32,
     candidates: &[TiePlan],
-    outcome: &mut SlendernessOutcome,
-) -> Option<usize> {
+) -> (Vec<SweepStrut>, Vec<Option<[f64; 3]>>, Vec<plinth_support::SweepArm>) {
     let grid = context.grid;
     let h = context.layer_height_mm;
     let plate_z = model.plate_z_mm;
-    let post_id = struts[post_index].id;
     let mut members: Vec<SweepStrut> = candidates
         .iter()
         .enumerate()
@@ -5985,6 +6054,38 @@ fn screen_model_ties(
             crate::adapter::sweep_arm(member, seat, base, *face, member.radius_mm.clone())
         })
         .collect();
+    (members, face_points, arms)
+}
+
+/// What screening found: the first candidate (in order) that passes every
+/// drawn test, or, where none does, the candidates (in order) that cleared
+/// the model and were refused because the seat trim would cut their shaft
+/// (contacts that a thicker tip may seat).
+enum Screened {
+    Passed(usize),
+    Failed { bitten: Vec<usize> },
+}
+
+/// The first of `candidates` (in their order) that passes the drawn tests.
+/// One surface projection, one contact-disc derivation, one seat-trim
+/// derivation and one census for the whole batch; the member test and the
+/// lone confirming census only for candidates the batch passed, in order,
+/// until one holds.
+fn screen_model_ties(
+    context: &SlendernessContext<'_>,
+    model: &ModelTies<'_>,
+    state: &TieState,
+    struts: &[SweepStrut],
+    post_index: usize,
+    candidates: &[TiePlan],
+    outcome: &mut SlendernessOutcome,
+) -> Screened {
+    let grid = context.grid;
+    let h = context.layer_height_mm;
+    let plate_z = model.plate_z_mm;
+    let post_id = struts[post_index].id;
+    let (members, face_points, arms) = tie_arms(context, model, state, struts, post_id, candidates);
+    let mut bitten: Vec<usize> = Vec::new();
     let census = crate::member_clearance::model_clearance_census(
         Some(model.surface),
         &members,
@@ -5996,9 +6097,20 @@ fn screen_model_ties(
     let near: BTreeSet<u32> = census.within_gap.iter().map(|row| row.member).collect();
     let discs = plinth_support::tip_contact_discs(&arms, model.layer_plan)
         .unwrap_or_else(|_| vec![None; arms.len()]);
+    // THE LIP-SEAT RULE (fix/lip-seat): the seat trim may cut the tip ball's
+    // cap and never the shaft outside it, measured by the lowering's own
+    // derivation. A tie that meets its face too side-on is refused here, as
+    // the field's census would warn about it.
+    let bites = plinth_support::tip_shaft_seat_bites(&arms, model.layer_plan)
+        .unwrap_or_else(|_| vec![None; arms.len()]);
     for (index, member) in members.iter().enumerate() {
         if near.contains(&member.id) || face_points[index].is_none() {
             outcome.model_tie_refused_solid_model += 1;
+            continue;
+        }
+        if crate::lip_seat::cuts(bites.get(index).and_then(Option::as_ref)) {
+            outcome.model_tie_refused_trim_bite += 1;
+            bitten.push(index);
             continue;
         }
         let Some(disc) = discs.get(index).copied().flatten() else {
@@ -6046,7 +6158,69 @@ fn screen_model_ties(
             outcome.model_tie_refused_solid_model += 1;
             continue;
         }
-        return Some(index);
+        return Screened::Passed(index);
+    }
+    Screened::Failed { bitten }
+}
+
+/// **The contact sized up until the seat trim keeps its shaft** (the
+/// lip-seat rule read as contact sizing): the smallest radius, between the
+/// candidate's own and the post's (R2), at which the lowering's own
+/// shaft-bite derivation finds no cut outside the tip ball. The limit angle
+/// grows with the tip (`ShaftSeatBite::limit_deg`): a tie at the brace angle
+/// meets a vertical wall about 33 deg off its normal, just past the 32.4 deg
+/// a minimum tip admits and well inside the 43.9 deg of a 0.106 mm tip
+/// (measured on the lonely peak). For the bitten contacts in their order
+/// (nearest first), a ladder of radii evenly spaced at the resolution the
+/// frame's bisection uses (64 steps) up to the post's: the first contact with
+/// a rung whose shaft the trim keeps AND whose wider disc still lies wholly
+/// on the model gives that rung's radius. Batched: one arm derivation, one
+/// bite derivation and one disc derivation per group of contacts (a batching
+/// size, not a rule: the first contact in order wins whatever the grouping).
+/// `None` where no contact has such a rung.
+fn radius_the_trim_keeps(
+    context: &SlendernessContext<'_>,
+    model: &ModelTies<'_>,
+    state: &TieState,
+    struts: &[SweepStrut],
+    post_id: u32,
+    bitten: &[TiePlan],
+) -> Option<f64> {
+    const STEPS: u32 = 64;
+    const GROUP: usize = 8;
+    for group in bitten.chunks(GROUP) {
+        let ladder: Vec<TiePlan> = group
+            .iter()
+            .filter(|plan| plan.cap_mm > plan.radius_mm)
+            .flat_map(|plan| {
+                (1..=STEPS).map(move |step| TiePlan {
+                    radius_mm: plan.radius_mm
+                        + (plan.cap_mm - plan.radius_mm) * f64::from(step) / f64::from(STEPS),
+                    ..plan.clone()
+                })
+            })
+            .collect();
+        if ladder.is_empty() {
+            continue;
+        }
+        let (_, _, arms) = tie_arms(context, model, state, struts, post_id, &ladder);
+        let bites = plinth_support::tip_shaft_seat_bites(&arms, model.layer_plan).ok()?;
+        let discs = plinth_support::tip_contact_discs(&arms, model.layer_plan).ok()?;
+        let found = ladder.iter().zip(bites.iter().zip(&discs)).find(|(_, (bite, disc))| {
+            bite.as_ref().is_some_and(|bite| !crate::lip_seat::over_limit(bite))
+                && disc.as_ref().is_some_and(|disc| {
+                    crate::model_tie::disc_on_model(
+                        context.grid,
+                        context.history,
+                        context.layer_height_mm,
+                        model.plate_z_mm,
+                        disc,
+                    )
+                })
+        });
+        if let Some((rung, _)) = found {
+            return Some(rung.radius_mm);
+        }
     }
     None
 }

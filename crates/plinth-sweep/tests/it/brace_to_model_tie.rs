@@ -16,7 +16,9 @@
 //! | test | what it asserts |
 //! |---|---|
 //! | `the_lonely_peak_posts_are_tied_and_none_warns` | no `unbraced_run_over_limit` warning, and every run of every member inside its limit on the finished field (re-measured by the public run measure); model ties built |
-//! | `the_brace_pair_posts_are_tied_and_none_warns` | the same on the brace pair |
+//! | `the_brace_pair_posts_are_tied_where_the_rules_admit_a_tie` | arms 2 and 5 tied; only arm 9 may stay warned (no tie the trim rule admits holds it), and then the rung's refusal is counted |
+//! | `no_tie_is_cut_by_its_seat_trim` | on both: the emitted lip-seat census lists no tie |
+//! | `a_tie_adds_no_load_and_the_field_still_closes` | on both: the load gap closes and no tie carries load |
 //! | `every_tie_ends_in_a_seated_tip_on_the_model` | on both: every tie lands on a post, is lowered with a seated tip (a contact disc from the lowering's own seat derivation, on a measured face), and that face is the model's surface within its ball of the seat; one contact sphere per seated member in the emitted file |
 //! | `no_tie_is_within_the_final_gap_outside_its_seat_zone` | on both: the finished-field census measures every tie and lists none within 0.3 mm |
 //! | `a_tie_is_a_scar_and_is_sized_like_a_member` | on both: the published tip scar includes every tie's contact; each tie is at least its own slenderness radius and no thicker than its post at the joint (R2) |
@@ -94,7 +96,8 @@ fn tally(plan: &SweepPlan) -> String {
     format!(
         "ties built {} (ids {:?}), sets {}; runs tried {}, refused: no surface {}, no candidate \
          {}, frame {}; candidates {} (off shaft {}, thicker than post {}, path drain {} model {} \
-         member {}, solid model {}, disc off face {}, solid member {})",
+         member {}, solid model {}, trim bite {}, disc off face {}, solid member {}); tips sized \
+         for the trim {}",
         lane.model_ties_built,
         lane.model_tie_ids,
         lane.model_tie_sets,
@@ -109,8 +112,10 @@ fn tally(plan: &SweepPlan) -> String {
         lane.model_tie_refused_path_model,
         lane.model_tie_refused_path_member,
         lane.model_tie_refused_solid_model,
+        lane.model_tie_refused_trim_bite,
         lane.model_tie_refused_disc_off_face,
         lane.model_tie_refused_solid_member,
+        lane.model_tie_tips_sized_for_the_trim,
     )
 }
 
@@ -157,9 +162,46 @@ fn the_lonely_peak_posts_are_tied_and_none_warns() {
     assert_tied_and_quiet(peak_plan(), "lonely peak");
 }
 
+/// The brace pair: arms 2 and 5 are tied and quiet. Arm 9 (v12's last
+/// warning) is NOT: it stands beyond the corner of its column, so every near
+/// tie meets the wall too side-on for the seat trim (the lip-seat rule:
+/// approach about 74 deg against a limit of about 41 deg, a 0.32 mm cut into
+/// the shaft at `ec720fd`, before the rule was applied to ties), even with
+/// the tip sized up to the post; and every tie the rules admit reaches a far
+/// wall with its joint so low on the post that the pieces between ties stay
+/// over the limit at every tie count and seat shift. So its run stays a
+/// published WARNING (emit and warn), and the rung says why. Craig's call:
+/// lane report, open question 1.
 #[test]
-fn the_brace_pair_posts_are_tied_and_none_warns() {
-    assert_tied_and_quiet(pair_plan(), "brace pair");
+fn the_brace_pair_posts_are_tied_where_the_rules_admit_a_tie() {
+    let plan = pair_plan();
+    let lane = &plan.report.slenderness_lane;
+    eprintln!("brace pair: {}", tally(plan));
+    let tied: Vec<u32> = ties(plan)
+        .iter()
+        .filter_map(|tie| match tie.landing {
+            Landing::Strut { id, .. } => Some(id),
+            _ => None,
+        })
+        .collect();
+    for post in [2, 5] {
+        assert!(tied.contains(&post), "brace pair: post {post} has no tie; {}", tally(plan));
+    }
+    let warned: Vec<u32> = lane.warnings.iter().map(|w| w.strut_id).collect();
+    assert!(
+        warned.iter().all(|&id| id == 9),
+        "brace pair: runs warned on posts other than 9: {:?}; {}",
+        lane.warnings,
+        tally(plan)
+    );
+    assert!(
+        warned.is_empty() || lane.model_tie_refused_no_candidate > 0,
+        "brace pair: a run is warned but the rung refused nothing: {}",
+        tally(plan)
+    );
+    let over: Vec<u32> = runs_over(plan).into_iter().map(|run| run.0).collect();
+    assert!(over.iter().all(|&id| id == 9), "brace pair: runs over their limit: {over:?}");
+    assert!(lane.model_tie_worst_sway_px > 0.0 && lane.model_tie_worst_sway_px <= 1.0 + 1.0e-9);
 }
 
 #[test]
@@ -331,6 +373,25 @@ fn a_tie_is_a_scar_and_is_sized_like_a_member() {
                 tie.min_radius_mm,
             );
         }
+    }
+}
+
+/// The same trim rule as every seated arm (the lip-seat rule): no tie's seat
+/// trim cuts its shaft outside its tip ball, on the emitted field's own
+/// census. Red at `ec720fd` (before the screen applied the rule): the brace
+/// pair's ties 30 and 31 met their face at 73.7 deg against a limit of
+/// 40.6 deg, cut 0.3231 mm (`out-r13-ec720fd/make_brace_pair.log`).
+#[test]
+fn no_tie_is_cut_by_its_seat_trim() {
+    for (name, plan) in [("lonely peak", peak_plan()), ("brace pair", pair_plan())] {
+        let ids: Vec<u32> = ties(plan).iter().map(|tie| tie.id).collect();
+        let lip = &plan.report.lip_seat;
+        let cut: Vec<_> = lip.over_limit_after.iter().filter(|w| ids.contains(&w.arm)).collect();
+        assert!(
+            lip.arms_graded_after >= ids.len() && cut.is_empty(),
+            "{name}: {} graded; ties cut by their seat trim: {cut:?}",
+            lip.arms_graded_after
+        );
     }
 }
 
