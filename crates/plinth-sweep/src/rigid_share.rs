@@ -274,7 +274,7 @@ fn build_net(grid: &Grid, struts: &[SweepStrut]) -> Net {
         }
         members.push(Member {
             strut: i,
-            is_arm: s.kind == StrutKind::Arm,
+            is_arm: s.kind.seats_on_model(),
             seg0,
             nseg: segs.len() - seg0,
             bottom: Bottom::Plate,

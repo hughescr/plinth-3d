@@ -17,6 +17,7 @@ mod harness;
 
 mod brace_frame_bands;
 mod brace_not_in_flare;
+mod brace_to_model_tie;
 mod brace_window_cap;
 mod bracing;
 mod bracing_rework;

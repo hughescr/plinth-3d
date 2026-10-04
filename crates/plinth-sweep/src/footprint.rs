@@ -564,9 +564,20 @@ pub(crate) fn apply(
     let pitch = grid.pitch_mm();
 
     // ---- stage 1: every graded tip's own disc, one pass.
+    //
+    // A MODEL TIE (D8, 2026-10-03) is not graded here: its seat may be a
+    // wall, and this rule's "on the face" is read in the carried-face
+    // rasters, which hold down-facing faces only, so a disc on a wall reads
+    // as hanging off its face and would be slid along the wall off the
+    // model. A tie's disc is held wholly on the model where it is placed
+    // (`model_tie::disc_on_model`), and its seat is not moved.
     let frames: Vec<Option<DiscLattice>> = discs
         .iter()
-        .map(|disc| {
+        .zip(struts.iter())
+        .map(|(disc, strut)| {
+            if strut.kind == crate::StrutKind::Tie {
+                return None;
+            }
             let disc = disc.as_ref().filter(|disc| disc.radius_mm > 0.0)?;
             let frame = Frame::of(disc)?;
             Some((

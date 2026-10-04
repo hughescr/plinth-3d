@@ -2163,6 +2163,7 @@ mod model_landing_tests {
             brace_cap: true,
             brace_window: true,
             frame_bands: true,
+            model_tie: true,
         };
         let struts = vec![strut.clone()];
         let mut index = ColumnHistory::new(&grid);

@@ -3334,6 +3334,39 @@ fn print_sweep_disclosure(
         lane.frame_sets_respaced,
         lane.frame_sets_pruned,
     );
+    // MODEL TIES (Craig ruling 2026-10-03, D8): the last rung before a
+    // warning; each tie seats a rounded tip on the model like any support
+    // tip. Path-hit witnesses and every refusal by reason.
+    println!(
+        "[sweep {model}] model ties (D8, the last rung before a warning): {} runs tried, {} tie \
+         sets built ({} ties {:?}; {} sets with more ties than the fixed-point count, {} ties \
+         thickened for the frame, worst tied-post sway {:.3} px); runs refused: {} no model \
+         surface in reach, {} no candidate passed, {} no tie count holds the frame; {} candidates \
+         refused: {} joint off the free shaft or the run, {} thicker than the post (R2), \
+         centreline through {} a drain, {} the model, {} a member, {} solid within the final gap \
+         of the model \
+         outside its seat zone, {} contact disc not wholly on the model, {} solid entering a \
+         member",
+        lane.model_tie_runs_tried,
+        lane.model_tie_sets,
+        lane.model_ties_built,
+        lane.model_tie_ids,
+        lane.model_tie_sets_beyond_fixed_point,
+        lane.model_ties_thickened_for_the_frame,
+        lane.model_tie_worst_sway_px,
+        lane.model_tie_refused_no_surface,
+        lane.model_tie_refused_no_candidate,
+        lane.model_tie_refused_frame,
+        lane.model_tie_candidates,
+        lane.model_tie_refused_off_shaft,
+        lane.model_tie_refused_thicker_than_post,
+        lane.model_tie_refused_path_drain,
+        lane.model_tie_refused_path_model,
+        lane.model_tie_refused_path_member,
+        lane.model_tie_refused_solid_model,
+        lane.model_tie_refused_disc_off_face,
+        lane.model_tie_refused_solid_member,
+    );
     // CONSTRUCTION-STAGE SHAKE (Craig ruling 2026-10-03, R9 + D6): a WARNING
     // only, at a stated, unmeasured brace peel pressure.
     let shake = &lane.stage_shake;

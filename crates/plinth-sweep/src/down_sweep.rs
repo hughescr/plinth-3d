@@ -613,6 +613,11 @@ fn apply_per_event_ledger(
         let Some(best) = best.get(member) else {
             continue;
         };
+        // Only an arm reads peel. A model tie (2026-10-03) seats a tip in the
+        // model too, but its seat is under no face the routing loads (a
+        // wall's load goes straight down the model's own column), so the one
+        // cell this floor grants would be load nobody injected (measured on
+        // the brace pair: a load gap of -0.0075 mm2 from three ties).
         let reads_peel = strut.kind == crate::StrutKind::Arm;
         let alive = strut.k_top.min(layers) > strut.k_bottom;
         let slots = strut.carried_mm2.len().min(best.len());
@@ -827,6 +832,8 @@ fn sweep_pass(
             // carrier or a routing root (reviewer finding 2026-09-06: without
             // this filter a brace under cover would be grown by the area law
             // and emitted load-bearing with no contact geometry at either end).
+            // A model tie (2026-10-03) is lateral stiffening too: its tip is
+            // on a wall, under no face the routing loads.
             if struts[id as usize].kind != crate::StrutKind::Arm {
                 continue;
             }
