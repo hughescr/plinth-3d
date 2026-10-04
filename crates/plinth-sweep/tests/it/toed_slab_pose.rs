@@ -51,6 +51,7 @@ use std::time::Instant;
 
 use plinth_core::m0_constants;
 use plinth_decimate::{BudgetConfigError, ProbeConfig};
+use plinth_orient::demand::{DemandFidelity, SupportDemandMeasurer};
 use plinth_orient::registered_sweep_request;
 use plinth_orient::search::{search, SearchTier};
 use plinth_sweep::SweepDemand;
@@ -71,7 +72,59 @@ const A73E40A_SEARCH_S: f64 = 38.0;
 /// that takes half the machine does not trip it. A bound, not a target: the
 /// search is allowed to get slower for a reason, and the reason is then
 /// written in this constant's derivation.
+///
+/// Re-measured 2026-10-04 by lane prefilter-no-brace (Craig ruling "Skip
+/// bracing in the quick pass": the prefilter runs no tie pass, only the
+/// finalists are braced): **36.9 s in this test** (the prefilter's 21 poses
+/// 3.4 s, down from 23.7 s; the 3 production poses 33.4 s), 0.97 times
+/// [`A73E40A_SEARCH_S`] and a factor 2.6 under this bound. The bound is
+/// generous on purpose and catches the round-13 class of regression (3 times
+/// a73e40a). **It is scaled by the machine's load**, measured in the same run:
+/// the production stage's code did not change in the lane that made this
+/// guard, so its time over [`A73E40A_PRODUCTION_S`] (never below 1) is how
+/// much slower this machine is than the idle one the numbers come from. The
+/// unscaled bound failed on a machine with load average 13 (search 225.9 s,
+/// production stage 201.6 s, a factor 6, prefilter 24.2 s: the search was
+/// innocent). The prefilter's SHARE of the production stage cannot be moved by
+/// load, and is guarded on its own ([`PREFILTER_SHARE_BOUND`]).
 const SEARCH_BOUND_S: f64 = 2.5 * A73E40A_SEARCH_S;
+
+/// The production stage's time at `a73e40a` (the three finalists, 4 threads,
+/// idle machine), seconds: the yardstick for the machine's load in this run.
+const A73E40A_PRODUCTION_S: f64 = 33.85;
+
+/// The prefilter's time as a share of the production stage's, in the same
+/// run, so load cancels. Measured on an idle machine at 4 threads: `a73e40a`
+/// 3.66 / 33.85 = 0.11; lane prefilter-no-brace 3.44 / 33.42 = 0.10 (and
+/// 24.18 / 201.63 = 0.12 on a machine at load average 13). The regressions it
+/// exists to catch: the brace ladder run for every prefilter pose, 23.7 / 33 =
+/// 0.72 (band-speed lane) and 80.65 / 33.87 = 2.4 (`70e2639`). The bound 0.5
+/// is 4.8 times the measured share and 0.7 times the smaller regression.
+const PREFILTER_SHARE_BOUND: f64 = 0.5;
+
+/// The real measurer, timed per fidelity, so the guard can read the two stages
+/// apart. It delegates every call and changes nothing.
+struct TimedDemand {
+    inner: SweepDemand,
+    /// Seconds spent in `[prefilter, production]` calls.
+    spent: std::sync::Mutex<[f64; 2]>,
+}
+
+impl SupportDemandMeasurer for TimedDemand {
+    fn measure_support_demand(
+        &self,
+        mesh: &plinth_mesh::Mesh,
+        table: &plinth_orient::OrientFaceTable,
+        candidates: &[plinth_orient::UpDirection],
+        fidelity: DemandFidelity,
+    ) -> Vec<Result<plinth_orient::demand::MeasuredSupportDemand, String>> {
+        let started = Instant::now();
+        let measured = self.inner.measure_support_demand(mesh, table, candidates, fidelity);
+        let slot = usize::from(fidelity == DemandFidelity::Production);
+        self.spent.lock().expect("the timing lock")[slot] += started.elapsed().as_secs_f64();
+        measured
+    }
+}
 
 fn registered_decimation_budget() -> plinth_decimate::DecimationBudget {
     let placeholders = m0_constants().expect("registry").placeholders();
@@ -112,22 +165,38 @@ fn the_toed_slab_lands_flat_at_its_production_pose() {
         .into_parts()
         .0;
     let request = registered_sweep_request().expect("the registered sweep request");
-    let demand = SweepDemand::production();
+    let demand = TimedDemand { inner: SweepDemand::production(), spent: std::sync::Mutex::new([0.0; 2]) };
     let started = Instant::now();
     let outcome = search(&decimated, &request, Some(&demand))
         .expect("the dense orientation search must not refuse");
-    let elapsed = started.elapsed();
-    println!("the dense search took {:.1} s (bound {SEARCH_BOUND_S:.0} s)", elapsed.as_secs_f64());
-    // THE SPEED GUARD. The search is the toed slab's whole cost, and the
+    let elapsed = started.elapsed().as_secs_f64();
+    let [prefilter_s, production_s] = *demand.spent.lock().expect("the timing lock");
+    // How much slower than the idle machine the numbers come from: the
+    // production stage's code is not what these guards watch.
+    let load = (production_s / A73E40A_PRODUCTION_S).max(1.0);
+    let bound = SEARCH_BOUND_S * load;
+    let share = prefilter_s / production_s;
+    println!(
+        "the dense search took {elapsed:.1} s (bound {SEARCH_BOUND_S:.0} s x load {load:.2} = {bound:.0} s): \
+         prefilter {prefilter_s:.1} s, production {production_s:.1} s, share {share:.3} (bound {PREFILTER_SHARE_BOUND})"
+    );
+    // THE SPEED GUARDS. The search is the toed slab's whole cost, and the
     // round-13 frame bands once made it 3 times slower than before them (and
     // the process tests' slab 60 times slower): see `SEARCH_BOUND_S`.
     assert!(
-        elapsed.as_secs_f64() <= SEARCH_BOUND_S,
-        "the toed slab's dense orientation search took {:.1} s, over the {SEARCH_BOUND_S:.0} s \
-         bound (2.5 times the {A73E40A_SEARCH_S:.1} s it took before the frame bands): a rule \
-         has made the brace ladder cost far more than it did (the round-13 regression, \
-         `lanes/band-speed.md`)",
-        elapsed.as_secs_f64()
+        elapsed <= bound,
+        "the toed slab's dense orientation search took {elapsed:.1} s, over the {bound:.0} s bound \
+         (2.5 times the {A73E40A_SEARCH_S:.1} s it took before the frame bands, times the load \
+         {load:.2}): a rule has made the search cost far more than it did (the round-13 \
+         regression, `lanes/band-speed.md`)"
+    );
+    // The prefilter only ranks poses; bracing it (the round-13 regression) made
+    // it a multiple of the production stage instead of a tenth.
+    assert!(
+        share <= PREFILTER_SHARE_BOUND,
+        "the quick pass took {prefilter_s:.1} s against the production stage's {production_s:.1} s \
+         (share {share:.2}, bound {PREFILTER_SHARE_BOUND}): the prefilter is running the brace \
+         ladder again (Craig ruling 2026-10-04, 'skip bracing in the quick pass')"
     );
     let record = outcome.record();
     let commit = record

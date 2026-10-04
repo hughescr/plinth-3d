@@ -111,6 +111,16 @@
 //! the reverse of the production-pitch order. That is the whole reason the
 //! caller re-measures its finalists here; a prefilter that ranked correctly
 //! would have made the second stage unnecessary.
+//!
+//! **The quick pass also skips bracing** (Craig ruling 2026-10-04). A prefilter
+//! run places no `|X|` cross, thickening, mast or model tie
+//! ([`SweepPolicy::without_slenderness_ties`]): it only ranks poses by the arms
+//! they cost, its raster is too coarse to crown one, and the crosses' frame
+//! solves were nearly all of its time since round 13. A prefilter row therefore
+//! reports 0 braces and 0 masts, and its arm count holds no model tie. The
+//! production measurement of the finalists runs every rung, as the emitted
+//! field does. The slenderness merges (which move arms and so change the count)
+//! still run in both.
 //! [`DEMAND_PITCH_MULTIPLIER`] is registered nowhere: it is a hand-picked
 //! cost/fidelity trade on a stage that now only prunes, stated here as a
 //! deviation from a literal "run the production sweep on every candidate"
@@ -263,6 +273,20 @@ impl DemandSettings {
         // same field (`plinth-sweep` `tests/it/frame_ledger.rs`), classifying
         // only the pairs a decision can read (`lanes/band-speed.md`).
         let policy = policy.without_frame_ledger();
+        // THE QUICK PASS SKIPS BRACING (Craig ruling 2026-10-04). The prefilter
+        // only ranks hundreds of poses to choose the few the production
+        // measurement re-measures, and its raster is too coarse to crown one
+        // anyway (module doc, "Two rasters"). Since round 13 the crosses'
+        // frame solves were nearly all of its time (the toed slab's process
+        // test: 765 s against 38 s at `a73e40a`), and the production stage
+        // below still runs every rung exactly as the emitted field does, so
+        // the pose that is built is judged with bracing in. Without the ties
+        // a prefilter row reports 0 braces and 0 masts, and its arm count has
+        // no model tie in it.
+        let policy = match fidelity {
+            DemandFidelity::Prefilter => policy.without_slenderness_ties(),
+            DemandFidelity::Production => policy,
+        };
         Ok(Self {
             lift_mm: constants.placeholders().lift_mm().diagnostic().get(),
             layer_height_mm: *constants.evidence().layer_height_default_mm().value(),
