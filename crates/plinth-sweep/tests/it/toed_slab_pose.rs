@@ -64,12 +64,13 @@ const A73E40A_SEARCH_S: f64 = 38.0;
 
 /// The speed guard's bound: 2.5 times [`A73E40A_SEARCH_S`]. Measured on an
 /// idle machine at 4 threads, 2026-10-04 (`lanes/band-speed.md`): `70e2639`
-/// (the frame bands, unfixed) 80.65 s for the prefilter and 33.87 s for the
-/// production poses, **114.5 s, 3.0 times**, over the bound; the band-speed
-/// lane's search 15.3 s and 34.3 s, **49.6 s, 1.3 times**, a factor 1.9 under
-/// it, so a neighbour test that takes half the machine does not trip it. A
-/// bound, not a target: the search is allowed to get slower for a reason, and
-/// the reason is then written in this constant's derivation.
+/// (the frame bands, unfixed), through the CLI, 80.65 s for the prefilter and
+/// 33.87 s for the production poses, **114.5 s, 3.0 times**, over the bound;
+/// the band-speed lane's search, through the CLI 15.3 s and 34.3 s and in this
+/// test **49.9 s, 1.3 times**, a factor 1.9 under it, so a neighbour test
+/// that takes half the machine does not trip it. A bound, not a target: the
+/// search is allowed to get slower for a reason, and the reason is then
+/// written in this constant's derivation.
 const SEARCH_BOUND_S: f64 = 2.5 * A73E40A_SEARCH_S;
 
 fn registered_decimation_budget() -> plinth_decimate::DecimationBudget {
