@@ -177,7 +177,7 @@ fn lerp(a: V, b: V, f: f64) -> V {
 }
 
 /// Point-to-triangle distance (Ericson's region test), test-local.
-fn point_triangle(p: V, a: V, b: V, c: V) -> f64 {
+pub(crate) fn point_triangle(p: V, a: V, b: V, c: V) -> f64 {
     let ab = sub(b, a);
     let ac = sub(c, a);
     let ap = sub(p, a);
@@ -252,7 +252,7 @@ fn inside(mesh: &Mesh, p: V) -> bool {
 }
 
 /// Signed distance to the model surface, negative inside.
-fn signed(mesh: &Mesh, p: V) -> f64 {
+pub(crate) fn signed(mesh: &Mesh, p: V) -> f64 {
     let verts = mesh.verts();
     let d = mesh
         .tris()
