@@ -157,6 +157,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use rayon::prelude::*;
+
 use crate::drain::DrainKeepOut;
 use crate::grid::Grid;
 use crate::lean::LeanLaw;
@@ -1586,6 +1588,17 @@ pub struct SlendernessContext<'a> {
     /// production.** Sabotage knob: off, the ladder places one band at a time
     /// and counts `⌈L / limit⌉ − 1`, as before this ruling.
     pub frame_bands: bool,
+    /// Whether the brace frame classifies EVERY pair it refuses (no room for
+    /// the bands; past its two-post ceiling; a count that holds but no band
+    /// set that can be planned on it) and counts it, exactly as the CLI's
+    /// `brace frame:` line reports. **On for the emitted field.** Off, a pair
+    /// whose bands cannot be planned at any count is classified only where
+    /// the ladder's next rung reads the class (the pair a run is thickened
+    /// into the window of) and its count is left out of the ledger; the
+    /// orientation search's demand runs read no such count. Every decision,
+    /// and so every strut built, is the same either way
+    /// (`tests/it/frame_ledger.rs`).
+    pub frame_ledger: bool,
     /// **D8** (Craig ruling 2026-10-03): where no other rung holds a run, the
     /// post is TIED TO THE MODEL's own nearby surface ([`crate::model_tie`]),
     /// the last rung before a warning. **On in production.** Sabotage knob:
@@ -2802,7 +2815,7 @@ fn tie_by_band_set(
     k: usize,
     outcome: &mut SlendernessOutcome,
 ) -> Result<(), CrossMiss> {
-    use crate::frame_bands::{count_bands, panel_sway, BandCount, Panel};
+    use crate::frame_bands::{count_bands, panel_drag, BandCount, Panel};
     let id = run.strut_id;
     let grid = context.grid;
     let h = context.layer_height_mm;
@@ -2815,6 +2828,16 @@ fn tie_by_band_set(
     let planes = if run.sway_deg.is_none() { 2 } else { 1 };
     let mut thicken_mm3: Option<Option<f64>> = None;
     let candidates = partner_candidates(context, struts, id, k);
+    // THE PAIRS THE LEDGER OFF LEAVES UNCLASSIFIED (`frame_ledger`): those
+    // with room for bands but no band set that can be planned at any count.
+    // Such a pair can never be built on, so the only thing its class can
+    // change is the pair a run is thickened into the window of (the past-
+    // ceiling pair with the highest ceiling, the earliest of equals). They
+    // are classified after the loop, highest ceiling first, until one is
+    // past its ceiling, and only while one could still be that pair.
+    let mut deferred: Vec<DeferredPair> = Vec::new();
+    // The rank of the candidate `miss.past_ceiling` came from.
+    let mut past_rank = usize::MAX;
     for (rank, &(partner, cell)) in candidates.iter().enumerate() {
         let Some(plane) = plane_between(grid, here, cell) else {
             continue;
@@ -2850,19 +2873,24 @@ fn tie_by_band_set(
             * brace_mm
             * 2.0
             * gap_mm.hypot(layers_mm(depth, h));
+        let ceiling = pair_ceiling_ratio(run.radius_mm, partner_mm, gap_mm);
+        // Whether this pair became the one the run is thickened into the
+        // window of (a strictly higher ceiling than the one known).
         let past_here = |miss: &mut CrossMiss, most_bands: usize| {
             let past = PastCeiling {
                 gap_mm,
                 partner_mm,
-                ceiling: pair_ceiling_ratio(run.radius_mm, partner_mm, gap_mm),
+                ceiling,
                 cross_mm3,
                 shared: false,
                 planes,
                 frame: Some(frame_past(most_bands)),
             };
-            if miss.past_ceiling.is_none_or(|known| past.ceiling > known.ceiling) {
+            let beats = miss.past_ceiling.is_none_or(|known| past.ceiling > known.ceiling);
+            if beats {
                 miss.past_ceiling = Some(past);
             }
+            beats
         };
         let panel = Panel {
             post_radius_mm: run.radius_mm,
@@ -2881,10 +2909,53 @@ fn tie_by_band_set(
         {
             outcome.crosses_refused_past_pair_ceiling += 1;
             let most = most_bands_that_fit(run, depth, floor);
-            if most > 0 {
-                past_here(&mut miss, most);
+            if most > 0 && past_here(&mut miss, most) {
+                past_rank = rank;
             }
             continue;
+        }
+        if !context.frame_ledger {
+            // No room for the bands at the fixed-point count: what the count
+            // below would find at once, without a solve.
+            if band_set_layers(run, fixed_point, depth, floor).is_none() {
+                continue;
+            }
+            // A pair no band set can be planned on, at any count the ladder
+            // below could try, is refused whatever the frame says of it: set
+            // it aside. The counts it could try are the fixed-point count up
+            // to the end of the run of counts that fit from there, or the
+            // most that fit from one band, whichever is more (a superset of
+            // `found`'s loop). The plans are tried on a throwaway outcome;
+            // the pair is planned again, for real, only if one of them
+            // stands.
+            let mut tried = SlendernessOutcome::default();
+            let from_here = (fixed_point..)
+                .take_while(|&count| band_set_layers(run, count, depth, floor).is_some())
+                .last()
+                .unwrap_or(fixed_point);
+            let most = most_bands_that_fit(run, depth, floor).max(from_here);
+            let plannable = (fixed_point..=most)
+                .filter_map(|count| band_set_layers(run, count, depth, floor))
+                .any(|layers| {
+                    plan_band_set(
+                        context, state, struts, run, partner, plane, &layers, &mut tried,
+                    )
+                    .is_some()
+                });
+            if !plannable {
+                deferred.push(DeferredPair {
+                    rank,
+                    partner,
+                    gap_mm,
+                    partner_mm,
+                    depth,
+                    floor,
+                    brace_mm,
+                    cross_mm3,
+                    ceiling,
+                });
+                continue;
+            }
         }
         let counted = match count_bands(&panel, context.law.ratio(), fixed_point, &layout) {
             BandCount::Holds { bands, .. } => bands,
@@ -2897,7 +2968,9 @@ fn tie_by_band_set(
             }
             BandCount::PastCeiling { most_bands, .. } => {
                 outcome.frame_pairs_past_ceiling += 1;
-                past_here(&mut miss, most_bands);
+                if past_here(&mut miss, most_bands) {
+                    past_rank = rank;
+                }
                 continue;
             }
         };
@@ -2919,8 +2992,8 @@ fn tie_by_band_set(
                     .collect(),
                 ..panel.clone()
             };
-            panel_sway(&planned, context.law.ratio())
-                .is_some_and(|sway| sway.drag_over_pixel <= 1.0 + RATIO_NOISE)
+            panel_drag(&planned, context.law.ratio())
+                .is_some_and(|drag| drag <= 1.0 + RATIO_NOISE)
         };
         let most = most_bands_that_fit(run, depth, floor).max(counted);
         let mut found: Option<Vec<CrossPlan>> = None;
@@ -3001,7 +3074,104 @@ fn tie_by_band_set(
         outcome.frame_highest_ratio_braced = outcome.frame_highest_ratio_braced.max(ratio);
         return Ok(());
     }
+    // The pairs set aside: the highest ceiling first, the earliest of equals,
+    // each only while it could still be the pair the run is thickened into
+    // the window of; the first of them past its ceiling is that pair.
+    //
+    // The counts are classified a batch at a time, one pair a thread, because
+    // each is a pure function of its pair: the batch that holds the first
+    // pair past its ceiling finds the same pair in any thread count (the
+    // scan below takes the first in the sorted order), and a batch's pairs
+    // after it are the only work the early stop would have spared.
+    deferred.sort_by(|a, b| b.ceiling.total_cmp(&a.ceiling).then(a.rank.cmp(&b.rank)));
+    let ratio_s = context.law.ratio();
+    let batch_len = rayon::current_num_threads().max(1);
+    let mut at = 0;
+    'scan: while at < deferred.len() {
+        let batch: Vec<DeferredPair> = deferred[at..]
+            .iter()
+            .take(batch_len)
+            .take_while(|pair| {
+                // Every pair after one that cannot be the pair has a lower
+                // ceiling, or an equal one and a later rank.
+                miss.past_ceiling.is_none_or(|known| {
+                    // (Ceilings are finite and positive: `total_cmp` orders
+                    // them as `>` does.)
+                    match pair.ceiling.total_cmp(&known.ceiling) {
+                        core::cmp::Ordering::Greater => true,
+                        core::cmp::Ordering::Equal => pair.rank < past_rank,
+                        core::cmp::Ordering::Less => false,
+                    }
+                })
+            })
+            .copied()
+            .collect();
+        if batch.is_empty() {
+            break;
+        }
+        let counted: Vec<BandCount> = batch
+            .par_iter()
+            .map(|pair| {
+                let panel = Panel {
+                    post_radius_mm: run.radius_mm,
+                    partner_radius_mm: pair.partner_mm,
+                    gap_mm: pair.gap_mm,
+                    height_mm: run.length_mm,
+                    bands: Vec::new(),
+                };
+                let layout = |n: usize| {
+                    band_set_layers(run, n, pair.depth, pair.floor)
+                        .map(|layers| panel_bands(run, &layers, pair.brace_mm))
+                };
+                count_bands(&panel, ratio_s, fixed_point, &layout)
+            })
+            .collect();
+        for (pair, count) in batch.iter().zip(counted) {
+            if let BandCount::PastCeiling { most_bands, .. } = count {
+                if most_bands > 0 {
+                    miss.past_ceiling = Some(PastCeiling {
+                        gap_mm: pair.gap_mm,
+                        partner_mm: pair.partner_mm,
+                        ceiling: pair.ceiling,
+                        cross_mm3: pair.cross_mm3,
+                        shared: false,
+                        planes,
+                        frame: Some(FramePast {
+                            partner: pair.partner,
+                            gap_mm: pair.gap_mm,
+                            depth: pair.depth,
+                            brace_mm: pair.brace_mm,
+                            floor: pair.floor,
+                            most_bands,
+                        }),
+                    });
+                    break 'scan;
+                }
+            }
+        }
+        if batch.len() < batch_len.min(deferred.len() - at) {
+            // The batch ended where a pair could no longer be the one.
+            break;
+        }
+        at += batch.len();
+    }
     Err(miss)
+}
+
+/// A pair the brace frame set aside unclassified ([`tie_by_band_set`], the
+/// ledger off): what it takes to count its bands and, if it is past its
+/// ceiling, to name it as the pair a run is thickened into the window of.
+#[derive(Clone, Copy)]
+struct DeferredPair {
+    rank: usize,
+    partner: u32,
+    gap_mm: f64,
+    partner_mm: f64,
+    depth: usize,
+    floor: usize,
+    brace_mm: f64,
+    cross_mm3: f64,
+    ceiling: f64,
 }
 
 /// Plan every band of a set laid on `layers` (ascending `(bottom, top)`),
@@ -6348,6 +6518,7 @@ mod tests {
                 brace_cap: true,
                 brace_window: window,
                 frame_bands: frame,
+                frame_ledger: true,
                 model_tie: true,
             };
             let mut struts = vec![tall(0, 100), tall(1, 140)];
@@ -6600,6 +6771,7 @@ mod tests {
             brace_cap: true,
             brace_window: true,
             frame_bands: true,
+            frame_ledger: true,
             model_tie: true,
         };
         // P at col 100, Q 10 cells (0.50 mm) away, R 40 cells the other way.
@@ -6763,6 +6935,7 @@ mod tests {
             brace_cap: true,
             brace_window: true,
             frame_bands: true,
+            frame_ledger: true,
             model_tie: true,
         };
         let struts = vec![
@@ -7005,6 +7178,7 @@ mod tests {
             brace_cap: true,
             brace_window: true,
             frame_bands: true,
+            frame_ledger: true,
             model_tie: true,
         };
         // 16 cells at 0.05 mm: 0.8 mm between the posts.
@@ -7110,6 +7284,7 @@ mod tests {
             brace_cap: true,
             brace_window: true,
             frame_bands: true,
+            frame_ledger: true,
             model_tie: true,
         };
         let mut struts = vec![
@@ -7414,6 +7589,7 @@ mod tests {
             brace_cap: true,
             brace_window: true,
             frame_bands: true,
+            frame_ledger: true,
             model_tie: true,
         }
     }
