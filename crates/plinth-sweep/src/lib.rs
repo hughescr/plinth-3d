@@ -709,6 +709,17 @@ pub struct SweepPolicy {
     /// pair no band set can be planned on need not be classified to be
     /// refused. No decision of the ladder depends on it.
     pub slenderness_frame_ledger: bool,
+    /// Whether the slenderness lane's TIE PASSES run at all: the `|X|`
+    /// cross-brace, thickening, the plate-rooted mast, and the model tie
+    /// (D8), everything that only ADDS a member or widens one to hold a
+    /// slender run. **On for the emitted field and for the production
+    /// measurement of the orientation search's finalists.** The search's
+    /// prefilter turns it off ([`Self::without_slenderness_ties`]) because it
+    /// only ranks poses by the arms they cost, and the frame solves behind
+    /// the crosses are most of its time (Craig ruling 2026-10-04, "skip
+    /// bracing in the quick pass"). The slenderness MERGES (remedy 1, which
+    /// moves arms and so changes the arm count) still run.
+    pub slenderness_ties: bool,
     /// Decision D8 (Craig ruling 2026-10-03): where no cross, thickening or
     /// mast holds a run, the post is TIED TO THE MODEL's own nearby surface
     /// by members seated like any support tip ([`model_tie`]), the last rung
@@ -868,6 +879,7 @@ impl SweepPolicy {
             slenderness_brace_window: true,
             slenderness_frame_bands: true,
             slenderness_frame_ledger: true,
+            slenderness_ties: true,
             slenderness_model_tie: true,
             stage_shake_brace_peel_kpa: stage_shake::BRACE_PEEL_KPA,
             final_clearance_gap_mm: *evidence.final_clearance_gap_mm().value(),
@@ -1214,6 +1226,17 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_frame_ledger(mut self) -> Self {
         self.slenderness_frame_ledger = false;
+        self
+    }
+
+    /// Run no tie pass: no `|X|` cross, no thickening, no mast and no model
+    /// tie (see [`Self::slenderness_ties`]). The orientation search's
+    /// prefilter sets it, because it ranks poses by the arms they cost and
+    /// reads no brace, mast or tie. The slenderness merges still run. The
+    /// emitted field, and the search's production measurements, never set it.
+    #[must_use]
+    pub const fn without_slenderness_ties(mut self) -> Self {
+        self.slenderness_ties = false;
         self
     }
 
@@ -2219,7 +2242,16 @@ pub fn run_sweep_with_drains(
     // nothing — bounded by the same registered pass count the removal and
     // un-merge loops use. A pass that still changed something when the bound
     // ran out is published (`fixed_point` false), never hidden.
-    for _ in 0..policy.strut_removal_passes {
+    //
+    // NO PASS AT ALL when `slenderness_ties` is off (the orientation search's
+    // prefilter, Craig ruling 2026-10-04): the crosses' frame solves were the
+    // prefilter's time, and it reads none of what the passes add.
+    let tie_passes_allowed = if policy.slenderness_ties {
+        policy.strut_removal_passes
+    } else {
+        0
+    };
+    for _ in 0..tie_passes_allowed {
         let applied =
             slenderness::apply_ties(&slenderness_context, &mut struts, &mut slenderness_outcome);
         if applied == 0 {
@@ -2252,7 +2284,8 @@ pub fn run_sweep_with_drains(
     // first need and shared with the head-join and lip-seat rules.
     // Only where a run is still over its limit (the surface is not built for
     // a field that has none).
-    let runs_left = policy.slenderness_model_tie
+    let runs_left = policy.slenderness_ties
+        && policy.slenderness_model_tie
         && slenderness::unbraced_runs_drawn(&grid, &struts, height, &slenderness_law, load_step_taper)
             .iter()
             .any(slenderness::UnbracedRun::over_limit);

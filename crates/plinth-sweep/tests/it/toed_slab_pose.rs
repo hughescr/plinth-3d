@@ -71,6 +71,18 @@ const A73E40A_SEARCH_S: f64 = 38.0;
 /// that takes half the machine does not trip it. A bound, not a target: the
 /// search is allowed to get slower for a reason, and the reason is then
 /// written in this constant's derivation.
+///
+/// Re-measured 2026-10-04 by lane prefilter-no-brace (Craig ruling "Skip
+/// bracing in the quick pass": the prefilter runs no tie pass, only the
+/// finalists are braced): **36.9 s in this test** (the prefilter's 21 poses
+/// 3.4 s, down from 23.7 s; the 3 production poses 33.4 s), 0.97 times
+/// [`A73E40A_SEARCH_S`] and a factor 2.6 under this bound. The bound is
+/// generous on purpose (a loaded machine must not trip it) and catches the
+/// round-13 class of regression (3 times a73e40a). The narrower rule, that
+/// the prefilter runs no tie pass, is pinned structurally by
+/// `prefilter_no_brace::the_prefilter_measures_no_brace_mast_or_tie`, since a
+/// prefilter that brought the ladder back would cost this test only about
+/// 20 s more (59 s), which is inside the bound.
 const SEARCH_BOUND_S: f64 = 2.5 * A73E40A_SEARCH_S;
 
 fn registered_decimation_budget() -> plinth_decimate::DecimationBudget {

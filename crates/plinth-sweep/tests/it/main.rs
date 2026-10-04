@@ -52,6 +52,7 @@ mod pitch_invariance;
 mod plate_root_contact;
 mod rigid_share_diagnostic;
 mod pose_demand_probe;
+mod prefilter_no_brace;
 mod root_disc_as_drawn;
 mod round_bases_ratchet;
 mod sabotage;
