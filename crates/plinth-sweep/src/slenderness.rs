@@ -94,7 +94,12 @@
 //!    pixel in its plane (`panel_sway_over_pixel`), so a mast never stands at
 //!    the minimum disc clearance merely because that cell is nearest. An arm's
 //!    existing mast is extended before a second one is dropped.
-//! 5. **Warn.** Named, counted, emitted. Never a dropped or shortened arm.
+//! 5. **Tie to the model** (D8, Craig ruling 2026-10-03). Only after the
+//!    rungs above reach their fixed point: a run none of them held gets a set
+//!    of ties from the post to the model's own nearby surface, each seated
+//!    with a rounded tip like any support tip and counted through a frame in
+//!    which only the model is fixed ([`crate::model_tie`], `tie_to_model`).
+//! 6. **Warn.** Named, counted, emitted. Never a dropped or shortened arm.
 //!
 //! # Craig's rulings of 2026-10-01
 //!
@@ -608,6 +613,54 @@ pub struct SlendernessOutcome {
     /// check of the finished field ([`crate::stage_shake`]). Never changes
     /// the field.
     pub stage_shake: crate::stage_shake::StageShake,
+    /// **MODEL TIES** (D8, Craig ruling 2026-10-03; [`crate::model_tie`]):
+    /// the last rung before a warning. Runs that reached it, tie sets built
+    /// (one set ties one run, all its ties at once), the ties in them, and
+    /// the ties' ids on the finished field.
+    pub model_tie_runs_tried: usize,
+    pub model_tie_sets: usize,
+    pub model_ties_built: usize,
+    pub model_tie_ids: Vec<u32>,
+    /// Ties built thicker than their own slenderness radius because the
+    /// frame needed it (never past the post, R2); sets built with more ties
+    /// than the fixed-point count `⌈L / limit⌉ − 1`; and the worst
+    /// tied-post sway a built set left, in pixels (at most 1).
+    pub model_ties_thickened_for_the_frame: usize,
+    pub model_tie_sets_beyond_fixed_point: usize,
+    pub model_tie_worst_sway_px: f64,
+    /// Why runs that reached the rung got no tie set: no model surface in
+    /// reach of the post at some tie layer, no candidate whose geometry,
+    /// path, solid clearance (the finished-field census itself) or member
+    /// clearance passed, or a frame that no tie count holds.
+    pub model_tie_refused_no_surface: usize,
+    pub model_tie_refused_no_candidate: usize,
+    pub model_tie_refused_frame: usize,
+    /// Candidate ties refused, by reason: the joint below the post's free
+    /// shaft or the run's base, a tie thicker than the post (R2), the
+    /// centreline path (through a drain's escape, model material, or another
+    /// member's axis), the drawn solid within the final gap of the model
+    /// outside its own seat zone, its contact disc not wholly on the model,
+    /// or the solid entering a member.
+    pub model_tie_candidates: usize,
+    pub model_tie_refused_off_shaft: usize,
+    pub model_tie_refused_thicker_than_post: usize,
+    pub model_tie_refused_path_drain: usize,
+    pub model_tie_refused_path_model: usize,
+    pub model_tie_refused_path_member: usize,
+    pub model_tie_refused_solid_model: usize,
+    /// Candidates whose seat trim would cut the shaft outside the tip ball
+    /// (the lip-seat rule: the tie meets its face too side-on).
+    pub model_tie_refused_trim_bite: usize,
+    /// Tie layers planned again with a thicker tip because the nearest
+    /// contact's seat trim cut its shaft at the thinner one (the lip-seat
+    /// rule read as contact sizing; never past the post, R2).
+    pub model_tie_tips_sized_for_the_trim: usize,
+    /// Ties seated a few layers off their evenly spaced layer because no
+    /// admissible tie seats there (tried a layer at a time, up to half the
+    /// spacing either way).
+    pub model_ties_moved_from_their_layer: usize,
+    pub model_tie_refused_disc_off_face: usize,
+    pub model_tie_refused_solid_member: usize,
 }
 
 /// Why a planned `|X|` band was refused, one count per reason; every refusal
@@ -1533,6 +1586,22 @@ pub struct SlendernessContext<'a> {
     /// production.** Sabotage knob: off, the ladder places one band at a time
     /// and counts `⌈L / limit⌉ − 1`, as before this ruling.
     pub frame_bands: bool,
+    /// **D8** (Craig ruling 2026-10-03): where no other rung holds a run, the
+    /// post is TIED TO THE MODEL's own nearby surface ([`crate::model_tie`]),
+    /// the last rung before a warning. **On in production.** Sabotage knob:
+    /// off, those runs are warnings again. It needs the model surface, so it
+    /// fires only through [`apply_ties_with_model`].
+    pub model_tie: bool,
+}
+
+/// What the model-tie rung needs beyond the slenderness context: the model
+/// surface its candidates' solids are measured against (the finished-field
+/// census's own), and the frame the lowering draws in.
+#[derive(Clone, Copy)]
+pub(crate) struct ModelTies<'a> {
+    pub surface: &'a geom_kernel::NativeSurface,
+    pub layer_plan: &'a plinth_core::LayerPlan,
+    pub plate_z_mm: f64,
 }
 
 /// Remedy 1 of the ladder, on a sized field, in place: the forced merges.
@@ -1697,10 +1766,27 @@ pub fn apply_merges(
 ///
 /// Returns how many remedies it applied. The caller re-sizes the field with the
 /// down-sweep whenever that is not zero and calls again, to a fixed point.
+///
+/// This entry has no model surface, so the model-tie rung (D8) does not fire
+/// here. The sweep runs this to its fixed point first, and only then
+/// [`apply_ties_with_model`] with the other rungs off, so a post is tied to
+/// the model only where nothing else held it after every pass.
 pub fn apply_ties(
     context: &SlendernessContext<'_>,
     struts: &mut Vec<SweepStrut>,
     outcome: &mut SlendernessOutcome,
+) -> usize {
+    apply_ties_with_model(context, struts, outcome, None)
+}
+
+/// [`apply_ties`] with the model surface, so that a run no other rung holds
+/// may be TIED TO THE MODEL (D8, Craig ruling 2026-10-03), the last rung
+/// before a warning ([`tie_to_model`]).
+pub(crate) fn apply_ties_with_model(
+    context: &SlendernessContext<'_>,
+    struts: &mut Vec<SweepStrut>,
+    outcome: &mut SlendernessOutcome,
+    model: Option<&ModelTies<'_>>,
 ) -> usize {
     let law = context.law;
     if !law.binds() {
@@ -1899,6 +1985,20 @@ pub fn apply_ties(
                                     queue.push_back(mast);
                                 }
                             }
+                            continue;
+                        }
+                    }
+                }
+                // D8 (Craig ruling 2026-10-03): THE LAST RUNG BEFORE A
+                // WARNING. No cross, thickening or mast holds the run, so the
+                // post is tied to the model's own nearby surface, by ties
+                // seated like any support tip and counted through a frame.
+                // The sweep reaches it only in its own passes after the
+                // ladder's fixed point, with the other rungs off.
+                if context.model_tie {
+                    if let Some(model) = model {
+                        if tie_to_model(context, model, &mut state, struts, &run, outcome) {
+                            applied += 1;
                             continue;
                         }
                     }
@@ -4883,8 +4983,10 @@ fn partner_candidates(
         .filter(|other| {
             other.id != id
                 // A brace to a member of an `|X|` would tie a brace to a
-                // brace, which holds nothing: only shafts are partners.
+                // brace, which holds nothing: only shafts are partners. A
+                // model tie (D8) is a short member to the model, not a shaft.
                 && other.kind != StrutKind::Brace
+                && other.kind != StrutKind::Tie
                 && other.k_bottom != usize::MAX
                 && other.k_bottom <= k
                 && k <= other.k_top
@@ -5371,6 +5473,796 @@ fn push_brace(
     });
 }
 
+/// One planned model tie (D8): it lands on the post at `k_bottom`, rises to
+/// the model cell `contact` and seats there at `k_top`. Not yet built.
+#[derive(Clone, Debug)]
+struct TiePlan {
+    contact: usize,
+    k_top: usize,
+    k_bottom: usize,
+    /// Its own slenderness radius `max(r_min, ℓ / S)`, and (R2) the post's
+    /// drawn radius at the joint, which it may never pass.
+    radius_mm: f64,
+    cap_mm: f64,
+    path: Vec<u32>,
+}
+
+/// Why no tie could be planned at one tie layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TieMiss {
+    /// No model surface within the post's reach at that layer.
+    NoSurface,
+    /// Surface in reach, but no candidate passed every test.
+    NoCandidate,
+}
+
+/// **D8: TIE THE POST TO THE MODEL** (Craig ruling 2026-10-03; the last rung
+/// before a warning; [`crate::model_tie`] has the mechanics).
+///
+/// The run gets a SET of ties, planned in full and built together or not at
+/// all, like a band set (R6): `n` ties, from the fixed-point count
+/// `⌈L / limit⌉ − 1` up, their SEATS at the run's evenly spaced tie layers
+/// (a tie holds from its seat, tie timing). Each tie is the shortest
+/// candidate that passes every test ([`plan_model_tie`]). The set is built
+/// only where
+///
+/// * every piece of the run, measured as the finished field will measure it
+///   (from each tie's junction up to the next tie's seat), is inside its own
+///   limit, and
+/// * the post with its ties, counted through a frame in which every tie
+///   bends and only the model is fixed ([`crate::model_tie::tied_post_sway`]),
+///   sways at most one pixel in its WORST direction.
+///
+/// Each tie starts at its own slenderness radius. If the frame does not hold,
+/// the ties are thickened together, by bisection, as far as the frame needs
+/// and never past the post (R2); a thickened tie is screened again at its new
+/// radius. If even the post's radius does not hold, one more tie is laid, as
+/// long as one more still lowers the sway. A run no set holds stays a WARNING.
+fn tie_to_model(
+    context: &SlendernessContext<'_>,
+    model: &ModelTies<'_>,
+    state: &mut TieState,
+    struts: &mut Vec<SweepStrut>,
+    run: &UnbracedRun,
+    outcome: &mut SlendernessOutcome,
+) -> bool {
+    let grid = context.grid;
+    let h = context.layer_height_mm;
+    let post_index = run.strut_id as usize;
+    let Some(post) = struts.get(post_index) else {
+        return false;
+    };
+    if !matches!(post.kind, StrutKind::Arm | StrutKind::Mast) || !live(post) {
+        return false;
+    }
+    outcome.model_tie_runs_tried += 1;
+    let floor = state.free_shaft_floor(grid, post, h).max(post.k_bottom);
+    let fixed_point = extra_ties(run).max(1);
+    // The post's DRAWN axis, in the sweep's frame (plate at z = 0).
+    let on_post = |struts: &[SweepStrut], layer: usize| -> [f64; 3] {
+        let at = crate::member_clearance::axis_point(grid, h, struts[post_index].cell_at(layer), layer);
+        let off = state.drawn_off(struts, run.strut_id, layer);
+        [at[0] + off[0], at[1] + off[1], at[2] + off[2]]
+    };
+    let (base_mm, top_mm) = (on_post(struts, run.k_lo), on_post(struts, run.k_top));
+    let mut failing_sway = f64::INFINITY;
+    let mut n = fixed_point;
+    loop {
+        if struts.len() + n > context.max_struts {
+            return false;
+        }
+        let seats: Vec<usize> = (1..=n).filter_map(|step| tie_layer(run, step, n)).collect();
+        if seats.len() != n || seats.windows(2).any(|pair| pair[0] >= pair[1]) {
+            // No room for one more tie in the run.
+            outcome.model_tie_refused_frame += 1;
+            return false;
+        }
+        // Each tie at its evenly spaced seat; a seat with no admissible tie
+        // there is tried a layer at a time lower and higher, up to half the
+        // spacing either way (between its neighbours, as a refused band is
+        // in R6). The pieces are judged on the seats as found.
+        let spacing = (run.k_top - run.k_lo) / (n + 1);
+        let mut plans: Vec<TiePlan> = Vec::with_capacity(n);
+        for &seat in &seats {
+            let mut found: Result<TiePlan, TieMiss> = Err(TieMiss::NoSurface);
+            for shift in 0..=spacing / 2 {
+                let tries = if shift == 0 {
+                    [Some(seat), None]
+                } else {
+                    [seat.checked_sub(shift), Some(seat + shift)]
+                };
+                for at in tries.into_iter().flatten().filter(|&at| at > run.k_lo && at < run.k_top) {
+                    let attempt =
+                        plan_model_tie(context, model, state, struts, post_index, at, run, floor, None, outcome);
+                    // A miss for want of any candidate outranks one for want
+                    // of surface, for the count below.
+                    match (&found, attempt) {
+                        (_, Ok(plan)) => found = Ok(plan),
+                        (Err(TieMiss::NoSurface), Err(miss)) => found = Err(miss),
+                        _ => {}
+                    }
+                    if found.is_ok() {
+                        break;
+                    }
+                }
+                if found.is_ok() {
+                    if shift > 0 {
+                        outcome.model_ties_moved_from_their_layer += 1;
+                    }
+                    break;
+                }
+            }
+            match found {
+                Ok(plan) => plans.push(plan),
+                Err(TieMiss::NoSurface) => {
+                    outcome.model_tie_refused_no_surface += 1;
+                    return false;
+                }
+                Err(TieMiss::NoCandidate) => {
+                    outcome.model_tie_refused_no_candidate += 1;
+                    return false;
+                }
+            }
+        }
+        plans.sort_by_key(|plan| plan.k_top);
+        if !tie_pieces_fit(context, &struts[post_index], &state.profiles[post_index], run, &plans) {
+            n += 1;
+            continue;
+        }
+        // THE FRAME: every tie bends, only the model is fixed. The ties start
+        // at their own slenderness radius and are thickened together, by
+        // bisection, only as far as the frame needs, never past the post.
+        let set_sway = |plans: &[TiePlan], radii: &[f64]| {
+            tie_set_sway(context, base_mm, top_mm, run.radius_mm, plans, radii)
+        };
+        let holds = |sway: Option<f64>| sway.is_some_and(|px| px <= 1.0 + RATIO_NOISE);
+        // TO A FIXED POINT: the frame asks for radii; a tie thickened past its
+        // own slenderness radius is PLANNED AGAIN at the radius it will be
+        // drawn at (its wider ball may hang off the face it had, or its wider
+        // solid come within the gap, so it may seat elsewhere at the same
+        // layer); the set as re-planned is judged again. Radii only grow, and
+        // stop at the post's radius (R2). A round that moves no tie settles
+        // the set. The round count is a numerical bound on a move that
+        // cycles, like the bisection's, and a set that does not settle is
+        // refused.
+        let mut radii: Vec<f64> = plans.iter().map(|plan| plan.radius_mm).collect();
+        let mut thickened = vec![false; plans.len()];
+        let mut settled: Option<f64> = None;
+        let mut short_by: Option<f64> = None;
+        let mut pieces_broke = false;
+        for _ in 0..64 {
+            let low: Vec<f64> = plans
+                .iter()
+                .zip(&radii)
+                .map(|(plan, &radius)| radius.max(plan.radius_mm))
+                .collect();
+            if holds(set_sway(&plans, &low)) {
+                radii = low;
+                settled = set_sway(&plans, &radii);
+                break;
+            }
+            let cap: Vec<f64> = plans
+                .iter()
+                .zip(&low)
+                .map(|(plan, &radius)| plan.cap_mm.max(radius))
+                .collect();
+            let at_cap = set_sway(&plans, &cap);
+            if !holds(at_cap) {
+                short_by = Some(at_cap.unwrap_or(f64::INFINITY));
+                break;
+            }
+            let between = |t: f64| -> Vec<f64> {
+                low.iter()
+                    .zip(&cap)
+                    .map(|(&from, &to)| from + t * (to - from))
+                    .collect()
+            };
+            let (mut below, mut above) = (0.0_f64, 1.0_f64);
+            for _ in 0..64 {
+                let middle = 0.5 * (below + above);
+                if holds(set_sway(&plans, &between(middle))) {
+                    above = middle;
+                } else {
+                    below = middle;
+                }
+            }
+            radii = between(above);
+            let mut moved = false;
+            for (index, plan) in plans.iter_mut().enumerate() {
+                if radii[index] <= plan.radius_mm * (1.0 + RATIO_NOISE) {
+                    continue;
+                }
+                thickened[index] = true;
+                let Ok(again) = plan_model_tie(
+                    context,
+                    model,
+                    state,
+                    struts,
+                    post_index,
+                    plan.k_top,
+                    run,
+                    floor,
+                    Some(radii[index]),
+                    outcome,
+                ) else {
+                    outcome.model_tie_refused_no_candidate += 1;
+                    return false;
+                };
+                moved |= again.contact != plan.contact || again.k_bottom != plan.k_bottom;
+                *plan = again;
+            }
+            if !moved {
+                settled = set_sway(&plans, &radii);
+                break;
+            }
+            if !tie_pieces_fit(context, &struts[post_index], &state.profiles[post_index], run, &plans) {
+                pieces_broke = true;
+                break;
+            }
+        }
+        if pieces_broke {
+            // A moved tie left a piece over its limit: lay one more, as when
+            // the pieces did not fit before the frame.
+            n += 1;
+            continue;
+        }
+        if let Some(at) = short_by {
+            // Even the post's own radius does not hold: one more tie, while
+            // one more still lowers the sway.
+            if at >= failing_sway {
+                outcome.model_tie_refused_frame += 1;
+                return false;
+            }
+            failing_sway = at;
+            n += 1;
+            continue;
+        }
+        let Some(sway) = settled.filter(|&px| holds(Some(px))) else {
+            outcome.model_tie_refused_frame += 1;
+            return false;
+        };
+        outcome.model_ties_thickened_for_the_frame += thickened.iter().filter(|&&t| t).count();
+        outcome.model_tie_worst_sway_px = outcome.model_tie_worst_sway_px.max(sway);
+        outcome.model_tie_sets += 1;
+        if n > extra_ties(run) {
+            outcome.model_tie_sets_beyond_fixed_point += 1;
+        }
+        commit_model_ties(grid, state, struts, run.strut_id, &plans, &radii, outcome);
+        return true;
+    }
+}
+
+/// Whether every piece of `run` a planned tie set leaves is inside its own
+/// limit, as the finished field's run measure will cut it (tie timing): from
+/// the run's base to the first tie's seat, from each tie's junction to the
+/// next tie's seat, and from the last junction to the run's top; each
+/// junction above the one before. Measured with the production run length
+/// and drawn equivalent radius.
+fn tie_pieces_fit(
+    context: &SlendernessContext<'_>,
+    post: &SweepStrut,
+    profile: &[f64],
+    run: &UnbracedRun,
+    plans: &[TiePlan],
+) -> bool {
+    let (grid, h, law) = (context.grid, context.layer_height_mm, context.law);
+    let fits = |lo: usize, hi: usize| {
+        hi > lo
+            && run_length(grid, post, lo, hi, h)
+                <= law.max_unbraced_mm(run_radius(post, &post.thickened_mm, profile, lo, hi))
+    };
+    let mut lo = run.k_lo;
+    for plan in plans {
+        if plan.k_bottom <= lo || !fits(lo, plan.k_top) {
+            return false;
+        }
+        lo = plan.k_bottom;
+    }
+    fits(lo, run.k_top)
+}
+
+/// The tied post's worst-direction top sway in pixels
+/// ([`crate::model_tie::tied_post_sway`]): the run's drawn chord from `base`
+/// to `top` at its equivalent radius, each planned tie at its radius from its
+/// junction on the post to its seat cell, fixed in the model.
+fn tie_set_sway(
+    context: &SlendernessContext<'_>,
+    base: [f64; 3],
+    top: [f64; 3],
+    post_radius_mm: f64,
+    plans: &[TiePlan],
+    radii: &[f64],
+) -> Option<f64> {
+    let (grid, h) = (context.grid, context.layer_height_mm);
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a layer index bounded by the plan's own layer count is exact in f64"
+    )]
+    let members: Vec<crate::model_tie::TieMember> = plans
+        .iter()
+        .zip(radii)
+        .map(|(plan, &radius_mm)| crate::model_tie::TieMember {
+            junction_z_mm: plan.k_bottom as f64 * h,
+            seat_mm: crate::member_clearance::axis_point(grid, h, plan.contact, plan.k_top),
+            radius_mm,
+        })
+        .collect();
+    crate::model_tie::tied_post_sway(base, top, post_radius_mm, &members, context.law.ratio())
+}
+
+/// **Plan one model tie** whose seat is at layer `seat`, from the post at
+/// `post_index`, against the live field: the shortest candidate that passes
+/// every test, or why none did. With `thicker = Some(radius)` every candidate
+/// is planned and tested at that radius (a tie the frame thickened), never
+/// below its own slenderness radius.
+///
+/// The candidates are the model's SURFACE cells at the seat layer within the
+/// post's reach ([`crate::model_tie::surface_contacts`]), nearest first. For
+/// each:
+///
+/// * **the joint**: the tie rises at the overhang law's saturated lean, the
+///   brace angle (decision D3), so its junction on the post is the fewest
+///   layers below the seat the law admits for the move it makes, from where
+///   the post stands at that layer; the junction lies on the post's free
+///   shaft and inside the run;
+/// * **R2**: its radius `max(r_min, ℓ / S)` is no more than the post's drawn
+///   radius at the joint;
+/// * **the centreline**: no drain, model or other member on its cells
+///   ([`segment_path_or_block`], the test every brace and merge uses);
+///
+/// and then, all candidates in one batch, as the file will draw them (the
+/// tip ball seated by the lowering's own seat law on the face it meets, the
+/// nearest face of any slope):
+///
+/// * **its solid clears the model by the final gap outside its own seat
+///   zone**: the finished-field census itself
+///   ([`crate::member_clearance::model_clearance_census`]), confirmed alone
+///   on the chosen tie so a span the kernel could not decide never passes;
+/// * **its contact disc lies wholly on the model** ([`disc_on_model`]);
+/// * **its solid enters no member** it is not joined to
+///   ([`member_solids_clear`]).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one tie needs the field, the model, the post, its seat layer, the run it ties, the \
+              post's free shaft and an optional thicker radius"
+)]
+fn plan_model_tie(
+    context: &SlendernessContext<'_>,
+    model: &ModelTies<'_>,
+    state: &TieState,
+    struts: &[SweepStrut],
+    post_index: usize,
+    seat: usize,
+    run: &UnbracedRun,
+    floor: usize,
+    thicker: Option<f64>,
+    outcome: &mut SlendernessOutcome,
+) -> Result<TiePlan, TieMiss> {
+    let grid = context.grid;
+    let h = context.layer_height_mm;
+    let law = context.law;
+    let post = &struts[post_index];
+    let profile = &state.profiles[post_index];
+    let Some(at_seat) = drawn_at(post, profile, seat) else {
+        return Err(TieMiss::NoSurface);
+    };
+    let centre = post.cell_at(seat);
+    // R2 bounds the reach: a tie no thicker than the post reaches at most `S`
+    // times the post's radius along itself.
+    let reach = law.brace_reach_mm(at_seat);
+    let contacts: Vec<usize> =
+        crate::model_tie::surface_contacts(grid, context.history, centre, seat, reach)
+            .into_iter()
+            .map(|(_, cell)| cell)
+            .collect();
+    if contacts.is_empty() {
+        return Err(TieMiss::NoSurface);
+    }
+    let mut candidates: Vec<TiePlan> = Vec::new();
+    for contact in contacts {
+        outcome.model_tie_candidates += 1;
+        // The fewest layers the overhang law admits for the move the tie
+        // makes from where the post stands at its joint; deepened until the
+        // move from that joint fits (a leaning post moves under it). The
+        // depth only grows and the joint stays above layer 0, so this ends.
+        let mut depth = context
+            .lean
+            .layers_to_reach(crate::cell_distance_mm(grid, centre, contact));
+        let joint = loop {
+            if depth == 0 {
+                break None;
+            }
+            let Some(k_lo) = seat.checked_sub(depth) else {
+                break None;
+            };
+            let lateral = crate::cell_distance_mm(grid, contact, post.cell_at(k_lo));
+            let need = context.lean.layers_to_reach(lateral);
+            if need == 0 {
+                break None;
+            }
+            if need <= depth {
+                break Some((k_lo, lateral));
+            }
+            depth = need;
+        };
+        let Some((k_lo, lateral)) = joint.filter(|&(k_lo, _)| k_lo >= floor && k_lo > run.k_lo)
+        else {
+            outcome.model_tie_refused_off_shaft += 1;
+            continue;
+        };
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a layer count bounded by the plan's own layer count is exact in f64"
+        )]
+        let length = (depth as f64 * h).hypot(lateral);
+        let own = law.brace_radius_mm(length);
+        let cap = drawn_at(post, profile, k_lo).unwrap_or(0.0);
+        let radius = thicker.map_or(own, |radius| radius.max(own));
+        if context.brace_cap && radius > cap * (1.0 + RATIO_NOISE) {
+            outcome.model_tie_refused_thicker_than_post += 1;
+            continue;
+        }
+        let base_cell = post.cell_at(k_lo);
+        let path =
+            match segment_path_or_block(context, &state.index, contact, seat, base_cell, k_lo, &[post.id]) {
+                Ok(path) => path,
+                Err(block) => {
+                    *match block {
+                        PathBlock::Drain => &mut outcome.model_tie_refused_path_drain,
+                        PathBlock::Model | PathBlock::NoRise => &mut outcome.model_tie_refused_path_model,
+                        PathBlock::Member => &mut outcome.model_tie_refused_path_member,
+                    } += 1;
+                    continue;
+                }
+            };
+        candidates.push(TiePlan {
+            contact,
+            k_top: seat,
+            k_bottom: k_lo,
+            radius_mm: radius,
+            cap_mm: cap,
+            path,
+        });
+    }
+    if candidates.is_empty() {
+        return Err(TieMiss::NoCandidate);
+    }
+    match screen_model_ties(context, model, state, struts, post_index, &candidates, outcome) {
+        Screened::Passed(index) => Ok(candidates.swap_remove(index)),
+        // The contacts the seat trim would cut are sized up until it does
+        // not (the nearest that then also keeps its disc on the model), and
+        // the layer is planned again at that radius. The radius only grows
+        // and the ladder is finite, so this ends.
+        Screened::Failed { bitten } if !bitten.is_empty() => {
+            let current = candidates[bitten[0]].radius_mm;
+            let sized: Vec<TiePlan> = bitten.iter().map(|&index| candidates[index].clone()).collect();
+            match radius_the_trim_keeps(context, model, state, struts, post.id, &sized) {
+                Some(radius) if radius > current => {
+                    outcome.model_tie_tips_sized_for_the_trim += 1;
+                    plan_model_tie(
+                        context,
+                        model,
+                        state,
+                        struts,
+                        post_index,
+                        seat,
+                        run,
+                        floor,
+                        Some(radius),
+                        outcome,
+                    )
+                }
+                _ => Err(TieMiss::NoCandidate),
+            }
+        }
+        Screened::Failed { .. } => Err(TieMiss::NoCandidate),
+    }
+}
+
+/// A planned tie as the member it would be, at `radius_mm` (its ledger filled
+/// so the census draws it), and its seat normal where measured.
+fn tie_member(grid: &Grid, id: u32, post: u32, plan: &TiePlan, radius_mm: f64) -> SweepStrut {
+    let span = plan.k_top - plan.k_bottom;
+    SweepStrut {
+        id,
+        cell: plan.contact,
+        center_mm: [
+            grid.center_x_mm(grid.col_of(plan.contact)),
+            grid.center_y_mm(grid.row_of(plan.contact)),
+        ],
+        kind: StrutKind::Tie,
+        min_radius_mm: radius_mm,
+        thickened_mm: Vec::new(),
+        seat_on_strut: None,
+        k_top: plan.k_top,
+        k_bottom: plan.k_bottom,
+        landing: Landing::Strut {
+            id: post,
+            layer: plan.k_bottom,
+        },
+        interior: false,
+        radius_mm: vec![radius_mm; span],
+        carried_mm2: vec![0.0; span],
+        covered_demand: Vec::new(),
+        // A tie roots no demand cell, so the removal pass's coverage test
+        // would be vacuously true for it; the flag that protects a
+        // load-inserted arm protects it, for the same reason.
+        inserted_by_load: true,
+        path: plan.path.clone(),
+        seat_face: crate::SeatFace::default(),
+        seat_normal: [0.0; 3],
+        straight_fallback: None,
+        fallback_path: Vec::new(),
+    }
+}
+
+/// Planned ties as the members and the arms the lowering would draw them as:
+/// each at its own radius, its seat normal and face point from the nearest
+/// face of any slope to its tip point (`tip_landing::tip_seat_faces` for a
+/// tie), one surface projection for the batch. Member ids are batch indices.
+fn tie_arms(
+    context: &SlendernessContext<'_>,
+    model: &ModelTies<'_>,
+    state: &TieState,
+    struts: &[SweepStrut],
+    post_id: u32,
+    candidates: &[TiePlan],
+) -> (Vec<SweepStrut>, Vec<Option<[f64; 3]>>, Vec<plinth_support::SweepArm>) {
+    let grid = context.grid;
+    let h = context.layer_height_mm;
+    let plate_z = model.plate_z_mm;
+    let mut members: Vec<SweepStrut> = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, plan)| {
+            tie_member(grid, u32::try_from(index).unwrap_or(u32::MAX), post_id, plan, plan.radius_mm)
+        })
+        .collect();
+    // THE FACE EACH TIP MEETS: the nearest face of any slope to its tip point
+    // (`tip_landing::tip_seat_faces` for a tie), one projection.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a layer index bounded by the plan's own layer count is exact in f64"
+    )]
+    let points: Vec<[f64; 3]> = members
+        .iter()
+        .map(|member| {
+            [
+                member.center_mm[0],
+                member.center_mm[1],
+                plate_z + (member.k_top as f64 + 0.5) * h,
+            ]
+        })
+        .collect();
+    let (_, closest, faces, normals) = model.surface.project(&points);
+    let mut face_points: Vec<Option<[f64; 3]>> = Vec::with_capacity(members.len());
+    for (index, member) in members.iter_mut().enumerate() {
+        let normal = (faces.get(index).copied().unwrap_or(-1) >= 0)
+            .then(|| geom_kernel::vec3::normalize(normals[index]))
+            .flatten();
+        member.seat_normal = normal.unwrap_or([0.0; 3]);
+        face_points.push(normal.map(|_| closest[index]));
+    }
+    let off = |member: &SweepStrut| state.drawn_off(struts, post_id, member.k_bottom);
+    let arms: Vec<plinth_support::SweepArm> = members
+        .iter()
+        .zip(&face_points)
+        .map(|(member, face)| {
+            let (seat, base) = crate::adapter::drawn_ends(grid, plate_z, h, member);
+            let shift = off(member);
+            let base = [base[0] + shift[0], base[1] + shift[1], base[2] + shift[2]];
+            crate::adapter::sweep_arm(member, seat, base, *face, member.radius_mm.clone())
+        })
+        .collect();
+    (members, face_points, arms)
+}
+
+/// What screening found: the first candidate (in order) that passes every
+/// drawn test, or, where none does, the candidates (in order) that cleared
+/// the model and were refused because the seat trim would cut their shaft
+/// (contacts that a thicker tip may seat).
+enum Screened {
+    Passed(usize),
+    Failed { bitten: Vec<usize> },
+}
+
+/// The first of `candidates` (in their order) that passes the drawn tests.
+/// One surface projection, one contact-disc derivation, one seat-trim
+/// derivation and one census for the whole batch; the member test and the
+/// lone confirming census only for candidates the batch passed, in order,
+/// until one holds.
+fn screen_model_ties(
+    context: &SlendernessContext<'_>,
+    model: &ModelTies<'_>,
+    state: &TieState,
+    struts: &[SweepStrut],
+    post_index: usize,
+    candidates: &[TiePlan],
+    outcome: &mut SlendernessOutcome,
+) -> Screened {
+    let grid = context.grid;
+    let h = context.layer_height_mm;
+    let plate_z = model.plate_z_mm;
+    let post_id = struts[post_index].id;
+    let (members, face_points, arms) = tie_arms(context, model, state, struts, post_id, candidates);
+    let mut bitten: Vec<usize> = Vec::new();
+    let census = crate::member_clearance::model_clearance_census(
+        Some(model.surface),
+        &members,
+        &arms,
+        model.layer_plan,
+        plate_z,
+        context.final_clearance_mm,
+    );
+    let near: BTreeSet<u32> = census.within_gap.iter().map(|row| row.member).collect();
+    let discs = plinth_support::tip_contact_discs(&arms, model.layer_plan)
+        .unwrap_or_else(|_| vec![None; arms.len()]);
+    // THE LIP-SEAT RULE (fix/lip-seat): the seat trim may cut the tip ball's
+    // cap and never the shaft outside it, measured by the lowering's own
+    // derivation. A tie that meets its face too side-on is refused here, as
+    // the field's census would warn about it.
+    let bites = plinth_support::tip_shaft_seat_bites(&arms, model.layer_plan)
+        .unwrap_or_else(|_| vec![None; arms.len()]);
+    for (index, member) in members.iter().enumerate() {
+        if near.contains(&member.id) || face_points[index].is_none() {
+            outcome.model_tie_refused_solid_model += 1;
+            continue;
+        }
+        if crate::lip_seat::cuts(bites.get(index).and_then(Option::as_ref)) {
+            outcome.model_tie_refused_trim_bite += 1;
+            bitten.push(index);
+            continue;
+        }
+        let Some(disc) = discs.get(index).copied().flatten() else {
+            outcome.model_tie_refused_disc_off_face += 1;
+            continue;
+        };
+        if !crate::model_tie::disc_on_model(grid, context.history, h, plate_z, &disc) {
+            outcome.model_tie_refused_disc_off_face += 1;
+            continue;
+        }
+        // The member test in the sweep's own frame (plate at z = 0), from the
+        // ball centre the shaft starts at down to its junction on the post.
+        let from = [
+            disc.ball_centre_mm[0],
+            disc.ball_centre_mm[1],
+            disc.ball_centre_mm[2] - plate_z,
+        ];
+        let base = arms[index].base_mm;
+        let to = [base[0], base[1], base[2] - plate_z];
+        if !member_solids_clear(
+            context,
+            state,
+            struts,
+            from,
+            to,
+            member.min_radius_mm,
+            &[post_id],
+            outcome,
+        ) {
+            outcome.model_tie_refused_solid_member += 1;
+            continue;
+        }
+        // CONFIRMED ALONE: a span the kernel could not decide is not in the
+        // batch's list of near members, and must not pass for one that clears.
+        let alone = crate::member_clearance::model_clearance_census(
+            Some(model.surface),
+            std::slice::from_ref(member),
+            std::slice::from_ref(&arms[index]),
+            model.layer_plan,
+            plate_z,
+            context.final_clearance_mm,
+        );
+        if alone.members_measured != 1 || alone.members_unmeasured != 0 || !alone.within_gap.is_empty()
+        {
+            outcome.model_tie_refused_solid_model += 1;
+            continue;
+        }
+        return Screened::Passed(index);
+    }
+    Screened::Failed { bitten }
+}
+
+/// **The contact sized up until the seat trim keeps its shaft** (the
+/// lip-seat rule read as contact sizing): the smallest radius, between the
+/// candidate's own and the post's (R2), at which the lowering's own
+/// shaft-bite derivation finds no cut outside the tip ball. The limit angle
+/// grows with the tip (`ShaftSeatBite::limit_deg`): a tie at the brace angle
+/// meets a vertical wall about 33 deg off its normal, just past the 32.4 deg
+/// a minimum tip admits and well inside the 43.9 deg of a 0.106 mm tip
+/// (measured on the lonely peak). For the bitten contacts in their order
+/// (nearest first), a ladder of radii evenly spaced at the resolution the
+/// frame's bisection uses (64 steps) up to the post's: the first contact with
+/// a rung whose shaft the trim keeps AND whose wider disc still lies wholly
+/// on the model gives that rung's radius. Batched: one arm derivation, one
+/// bite derivation and one disc derivation per group of contacts (a batching
+/// size, not a rule: the first contact in order wins whatever the grouping).
+/// `None` where no contact has such a rung.
+fn radius_the_trim_keeps(
+    context: &SlendernessContext<'_>,
+    model: &ModelTies<'_>,
+    state: &TieState,
+    struts: &[SweepStrut],
+    post_id: u32,
+    bitten: &[TiePlan],
+) -> Option<f64> {
+    const STEPS: u32 = 64;
+    const GROUP: usize = 8;
+    for group in bitten.chunks(GROUP) {
+        let ladder: Vec<TiePlan> = group
+            .iter()
+            .filter(|plan| plan.cap_mm > plan.radius_mm)
+            .flat_map(|plan| {
+                (1..=STEPS).map(move |step| TiePlan {
+                    radius_mm: plan.radius_mm
+                        + (plan.cap_mm - plan.radius_mm) * f64::from(step) / f64::from(STEPS),
+                    ..plan.clone()
+                })
+            })
+            .collect();
+        if ladder.is_empty() {
+            continue;
+        }
+        let (_, _, arms) = tie_arms(context, model, state, struts, post_id, &ladder);
+        let bites = plinth_support::tip_shaft_seat_bites(&arms, model.layer_plan).ok()?;
+        let discs = plinth_support::tip_contact_discs(&arms, model.layer_plan).ok()?;
+        let found = ladder.iter().zip(bites.iter().zip(&discs)).find(|(_, (bite, disc))| {
+            bite.as_ref().is_some_and(|bite| !crate::lip_seat::over_limit(bite))
+                && disc.as_ref().is_some_and(|disc| {
+                    crate::model_tie::disc_on_model(
+                        context.grid,
+                        context.history,
+                        context.layer_height_mm,
+                        model.plate_z_mm,
+                        disc,
+                    )
+                })
+        });
+        if let Some((rung, _)) = found {
+            return Some(rung.radius_mm);
+        }
+    }
+    None
+}
+
+/// Build a planned tie set on the post `post`, at `radii`, and keep the
+/// pass's state current: each tie is a landing on the post that holds it in
+/// every direction from the layer its seat prints (tie timing), exactly as
+/// the finished field's run measure credits it ([`tie_lists`]).
+fn commit_model_ties(
+    grid: &Grid,
+    state: &mut TieState,
+    struts: &mut Vec<SweepStrut>,
+    post: u32,
+    plans: &[TiePlan],
+    radii: &[f64],
+    outcome: &mut SlendernessOutcome,
+) {
+    for (plan, &radius) in plans.iter().zip(radii) {
+        let id = u32::try_from(struts.len()).unwrap_or(u32::MAX);
+        let mut member = tie_member(grid, id, post, plan, radius);
+        // Sized by the down-sweep that follows the pass, like every member
+        // the ladder adds.
+        member.radius_mm = Vec::new();
+        member.carried_mm2 = Vec::new();
+        struts.push(member);
+        if let Some(list) = state.ties.get_mut(post as usize) {
+            list.push(Tie {
+                layer: plan.k_bottom,
+                from: plan.k_top,
+                plane: None,
+                band_top: false,
+            });
+        }
+        let span = plan.k_top - plan.k_bottom;
+        state.ties.push(Vec::new());
+        state.profiles.push(vec![radius; span + 1]);
+        state.unthickened.push(vec![radius; span + 1]);
+        outcome.model_ties_built += 1;
+    }
+    stamp_tail(&mut state.index, struts, plans.len());
+}
+
 #[cfg(test)]
 mod tests {
     use super::{extra_ties, SlendernessLaw, UnbracedRun};
@@ -5456,6 +6348,7 @@ mod tests {
                 brace_cap: true,
                 brace_window: window,
                 frame_bands: frame,
+                model_tie: true,
             };
             let mut struts = vec![tall(0, 100), tall(1, 140)];
             let mut outcome = super::SlendernessOutcome::default();
@@ -5707,6 +6600,7 @@ mod tests {
             brace_cap: true,
             brace_window: true,
             frame_bands: true,
+            model_tie: true,
         };
         // P at col 100, Q 10 cells (0.50 mm) away, R 40 cells the other way.
         let mut struts = vec![
@@ -5869,6 +6763,7 @@ mod tests {
             brace_cap: true,
             brace_window: true,
             frame_bands: true,
+            model_tie: true,
         };
         let struts = vec![
             plate_post(&grid, 0, 100, 0.2),
@@ -6110,6 +7005,7 @@ mod tests {
             brace_cap: true,
             brace_window: true,
             frame_bands: true,
+            model_tie: true,
         };
         // 16 cells at 0.05 mm: 0.8 mm between the posts.
         let struts = vec![
@@ -6214,6 +7110,7 @@ mod tests {
             brace_cap: true,
             brace_window: true,
             frame_bands: true,
+            model_tie: true,
         };
         let mut struts = vec![
             short_plate_post(&grid, 0, 100),
@@ -6517,6 +7414,7 @@ mod tests {
             brace_cap: true,
             brace_window: true,
             frame_bands: true,
+            model_tie: true,
         }
     }
 

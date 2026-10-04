@@ -359,11 +359,12 @@ impl SweepDemand {
         // and leaves no scar; counting either here would over-state the
         // burden by exactly the stiffening the lane added to make the arms
         // themselves legal (see the module doc's "What the burden IS" table
-        // and `tests/pose_demand_probe.rs`).
+        // and `tests/pose_demand_probe.rs`). A model tie (2026-10-03) DOES
+        // seat a tip into the model, so it is a clip like an arm.
         let arm_count = plan
             .struts
             .iter()
-            .filter(|strut| strut.kind == StrutKind::Arm)
+            .filter(|strut| strut.kind.seats_on_model())
             .count();
         let brace_count = plan
             .struts

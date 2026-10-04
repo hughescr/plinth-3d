@@ -313,6 +313,10 @@ pub struct SeatFaceHits {
     /// Whether the mesh had no face the rule admits, so every down-facing face
     /// was used instead.
     pub fallback_any_down_facing: bool,
+    /// Of [`Self::tips`], the model ties (Craig ruling 2026-10-03, D8), each
+    /// given the nearest face of ANY slope: a tie holds a post sideways and
+    /// may seat on a wall. A path-hit witness.
+    pub model_ties: usize,
 }
 
 /// The OUTWARD unit normal of the face each arm's tip carries, in STRUT order
@@ -407,19 +411,49 @@ fn seat_faces(
 ) -> (Vec<Option<CarriedFace>>, SeatFaceHits) {
     let mut faces = vec![None; struts.len()];
     let mut hits = SeatFaceHits::default();
-    let landings = tip_landings_of(grid, struts, plate_z_mm, layer_height_mm);
-    if landings.is_empty() {
+    let all_landings = tip_landings_of(grid, struts, plate_z_mm, layer_height_mm);
+    if all_landings.is_empty() {
         return (faces, hits);
     }
     // The mesh is outward-oriented, so a face normal already points AWAY from
     // the material — which is the direction seating moves against.
-    let down_facing: Vec<([[f64; 3]; 3], [f64; 3])> = triangles_of(mesh)
+    let every_face: Vec<([[f64; 3]; 3], [f64; 3])> = triangles_of(mesh)
         .into_iter()
         .filter_map(|triangle| {
             let [a, b, c] = triangle;
             let unit = vec3::normalize(vec3::cross(vec3::sub(b, a), vec3::sub(c, a)))?;
-            (unit[2] < 0.0).then_some((triangle, unit))
+            Some((triangle, unit))
         })
+        .collect();
+    // A MODEL TIE (Craig ruling 2026-10-03, D8) holds a post sideways and
+    // seats on the face it meets, a wall as readily as an overhang: it
+    // carries the nearest face of ANY slope, one more batched pass over the
+    // tie tips alone. Every other member keeps the rule below.
+    let (tie_landings, landings): (Vec<TipLanding>, Vec<TipLanding>) = all_landings
+        .into_iter()
+        .partition(|landing| {
+            struts
+                .get(landing.strut)
+                .is_some_and(|strut| strut.kind == crate::StrutKind::Tie)
+        });
+    if !tie_landings.is_empty() {
+        let triangles: Vec<[[f64; 3]; 3]> = every_face.iter().map(|(triangle, _)| *triangle).collect();
+        for (landing, found) in tie_landings.iter().zip(nearest_faces(&triangles, &tie_landings)) {
+            let Some((face, _)) = found else { continue };
+            let ([a, b, c], unit) = every_face[face];
+            if let Some(slot) = faces.get_mut(landing.strut) {
+                *slot = Some((unit, closest_on_tri(landing.point_mm, a, b, c)));
+                hits.tips += 1;
+                hits.model_ties += 1;
+            }
+        }
+    }
+    if landings.is_empty() {
+        return (faces, hits);
+    }
+    let down_facing: Vec<([[f64; 3]; 3], [f64; 3])> = every_face
+        .into_iter()
+        .filter(|(_, unit)| unit[2] < 0.0)
         .collect();
     let (admitted, refused): (Vec<_>, Vec<_>) = down_facing
         .into_iter()

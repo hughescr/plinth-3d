@@ -795,7 +795,7 @@ pub(crate) fn sweep_arm(
         // space; neither may be given a tip ball. Every arm the reach
         // and the area law place seats into the model and is
         // unchanged.
-        seats_into_model: strut.kind == crate::StrutKind::Arm,
+        seats_into_model: strut.kind.seats_on_model(),
     }
 }
 

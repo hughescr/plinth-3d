@@ -122,6 +122,7 @@ fn tie_the_pair(lambda: f64, frame_bands: bool) -> Built {
         brace_cap: true,
         brace_window: false,
         frame_bands,
+        model_tie: false,
     };
     let mut struts = vec![post(&grid, 0, 60, layers), post(&grid, 1, 60 + GAP_CELLS, layers)];
     let mut outcome = SlendernessOutcome::default();

@@ -57,6 +57,7 @@ pub mod limits;
 pub mod lip_seat;
 pub(crate) mod member_clearance;
 pub mod model_landing;
+pub(crate) mod model_tie;
 pub mod orient_demand;
 pub mod peel;
 pub mod per_event;
@@ -131,6 +132,31 @@ pub enum StrutKind {
     /// space, so it gets no tip ball; its bottom is the plate, so it keeps the
     /// plate-root chain and its flare.
     Mast,
+    /// **A MODEL TIE** (Craig ruling 2026-10-03, D8): a member that ties a
+    /// post to the model's own nearby surface, where nothing else can brace
+    /// the post (`slenderness::tie_to_model`). It lands on the post and rises
+    /// to the model, and it TOUCHES THE MODEL exactly as a support arm does:
+    /// a rounded tip seated by the same seat law, sized, trimmed and measured
+    /// by the same rules, and its contact is a scar. Unlike an arm its seat
+    /// may be a wall (it holds the post sideways, not a face up), so the face
+    /// it carries is the nearest face of any slope
+    /// (`tip_landing::tip_seat_faces`). The routing hands it no peel: its
+    /// seat is under no face the routing loads (a wall's load goes straight
+    /// down the model's own column), so, like a brace, it is not a carrier
+    /// and reads none, and any load that lands on it would still be carried.
+    /// It is sized by its own slenderness and the frame its post is counted
+    /// through, never past that post (`slenderness::tie_to_model`).
+    Tie,
+}
+
+impl StrutKind {
+    /// Whether this member's top is a rounded tip seated INTO the model: a
+    /// support arm, or a model tie. Such a member gets a tip ball and a seat
+    /// trim, and leaves a scar.
+    #[must_use]
+    pub const fn seats_on_model(self) -> bool {
+        matches!(self, Self::Arm | Self::Tie)
+    }
 }
 
 /// One placed arm.
@@ -676,6 +702,12 @@ pub struct SweepPolicy {
     /// (`frame_bands`). **On in production.** The drill turns it off and the
     /// ladder credits every band as a fixed point again, one at a time.
     pub slenderness_frame_bands: bool,
+    /// Decision D8 (Craig ruling 2026-10-03): where no cross, thickening or
+    /// mast holds a run, the post is TIED TO THE MODEL's own nearby surface
+    /// by members seated like any support tip ([`model_tie`]), the last rung
+    /// before a warning. **On in production.** The drill turns it off and
+    /// those runs are warnings again.
+    pub slenderness_model_tie: bool,
     /// Rule R9 + D6 (Craig ruling 2026-10-03): the brace-layer peel pressure
     /// the construction-stage shake check ASSUMES, kPa
     /// (`stage_shake::BRACE_PEEL_KPA`, the 0.05 mm wall value, unmeasured
@@ -828,6 +860,7 @@ impl SweepPolicy {
             slenderness_brace_cap: true,
             slenderness_brace_window: true,
             slenderness_frame_bands: true,
+            slenderness_model_tie: true,
             stage_shake_brace_peel_kpa: stage_shake::BRACE_PEEL_KPA,
             final_clearance_gap_mm: *evidence.final_clearance_gap_mm().value(),
             head_join: true,
@@ -1163,6 +1196,15 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_frame_bands(mut self) -> Self {
         self.slenderness_frame_bands = false;
+        self
+    }
+
+    /// Never tie a post to the model (decision D8 off): a run no cross,
+    /// thickening or mast holds stays a warning, as before 2026-10-03.
+    /// **Sabotage only**; nothing in the pipeline sets it.
+    #[must_use]
+    pub const fn without_model_ties(mut self) -> Self {
+        self.slenderness_model_tie = false;
         self
     }
 
@@ -1849,6 +1891,7 @@ pub fn run_sweep_with_drains(
         brace_cap: policy.slenderness_brace_cap,
         brace_window: policy.slenderness_brace_window,
         frame_bands: policy.slenderness_frame_bands,
+        model_tie: policy.slenderness_model_tie,
     };
 
     // --- stranded seats: a stranded contact is a tip, not a new root -------
@@ -2180,6 +2223,63 @@ pub fn run_sweep_with_drains(
         );
         set_interior(&mut struts, &history);
     }
+    // D8 (Craig ruling 2026-10-03): THE LAST RUNG BEFORE A WARNING. Only once
+    // the ladder above has reached its fixed point, a run it still could not
+    // hold — no cross, no thickening, no mast, after every pass — is TIED TO
+    // THE MODEL's own nearby surface ([`model_tie`]). These passes run the
+    // tie rung alone (the other rungs already failed on exactly these runs)
+    // and are sized by the same down-sweep. Its candidates are measured
+    // against the model surface the finished-field census uses, built on
+    // first need and shared with the head-join and lip-seat rules.
+    // Only where a run is still over its limit (the surface is not built for
+    // a field that has none).
+    let runs_left = policy.slenderness_model_tie
+        && slenderness::unbraced_runs_drawn(&grid, &struts, height, &slenderness_law, load_step_taper)
+            .iter()
+            .any(slenderness::UnbracedRun::over_limit);
+    if runs_left {
+        if let Some(surface) = head_join_context.surface() {
+            let model = slenderness::ModelTies {
+                surface,
+                layer_plan: plan,
+                plate_z_mm: plate_z,
+            };
+            let ties_only = slenderness::SlendernessContext {
+                brace: false,
+                thicken: false,
+                mast: false,
+                ..slenderness_context
+            };
+            for _ in 0..policy.strut_removal_passes {
+                let applied = slenderness::apply_ties_with_model(
+                    &ties_only,
+                    &mut struts,
+                    &mut slenderness_outcome,
+                    Some(&model),
+                );
+                if applied == 0 {
+                    break;
+                }
+                slenderness_outcome.tie_passes += 1;
+                outcome = down_sweep::run(
+                    &grid,
+                    &slices,
+                    &mut struts,
+                    sizing,
+                    insertion,
+                    &keep_out,
+                    &unrooted,
+                );
+                set_interior(&mut struts, &history);
+            }
+        }
+    }
+    // The ties as the finished field holds them (ids are the struts' own).
+    slenderness_outcome.model_tie_ids = struts
+        .iter()
+        .filter(|strut| strut.kind == StrutKind::Tie && slenderness::live(strut))
+        .map(|strut| strut.id)
+        .collect();
     landings.record("slenderness ties", &landing_check::check_landings(&struts));
     stranded_branch_outcome.lapping_by_lane.push((
         "slenderness ties",
@@ -3529,9 +3629,11 @@ fn build_report(
     // model contributes none. A brace seats on an arm and a mast stands in
     // free space; neither is given a tip ball at emit, and counting either
     // here would report a scar on a surface nothing touched.
+    // A MODEL TIE (2026-10-03) touches the model with a tip like an arm, so
+    // its contact is a scar too (Craig's ruling: it counts as a contact scar).
     let total_scar: f64 = struts
         .iter()
-        .filter(|strut| strut.kind == crate::StrutKind::Arm)
+        .filter(|strut| strut.kind.seats_on_model())
         .map(|strut| {
             let radius = strut.tip_radius_mm();
             core::f64::consts::PI * radius * radius

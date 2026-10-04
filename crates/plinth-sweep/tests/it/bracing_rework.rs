@@ -238,11 +238,18 @@ fn the_brace_pair_as_production_places_it_keeps_every_cross_it_builds() {
 
 /// The brace pair at `S` = 30, the ratio `for-craig-v10` ran (Craig's ruling
 /// of 2026-10-01, superseded on 2026-10-02 by 40).
+///
+/// RE-PINNED 2026-10-03 (fix/brace-to-model-tie): with the model-tie rung OFF.
+/// The question below is about the warned runs the crosses leave; since D8 a
+/// run no cross, thickening or mast holds is tied to the model, so no run is
+/// warned and the question is not reached (measured: 0 warnings, 0 on a
+/// crossed column). The crosses are the same either way: the tie rung runs
+/// only after the ladder's fixed point.
 fn brace_pair_at_s_30() -> &'static SweepPlan {
     static PLAN: OnceLock<SweepPlan> = OnceLock::new();
     PLAN.get_or_init(|| {
         let mesh = make_brace_pair().expect("the brace pair fixture");
-        let mut policy = policy();
+        let mut policy = policy().without_model_ties();
         policy.slenderness_ratio = 30.0;
         sweep_with(&mesh, 0.0, &policy)
     })
