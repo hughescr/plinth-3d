@@ -83,6 +83,12 @@ pub struct ColumnHistory {
     /// Highest layer + 1 at which this column ever held model, filled in a
     /// post-pass because the interior test needs to look UP.
     pub column_max_model: Vec<u32>,
+    /// Which members stand inside a hidden cavity, where the 0.3 mm final
+    /// clearance gap does not apply (Craig, 2026-10-05; [`crate::cavity`]).
+    /// Empty (exempts nothing) until the run builds it from the slices; kept
+    /// here because every reader of the finished field's clearance already
+    /// holds the column history.
+    pub hidden: crate::cavity::HiddenCavity,
     /// Head of each column's MODEL-span chain; `u32::MAX` means this column
     /// never held cured material at any layer.
     ///
@@ -115,6 +121,7 @@ impl ColumnHistory {
             top_strut: vec![0; cells],
             top_strut_id: vec![0; cells],
             column_max_model: vec![0; cells],
+            hidden: crate::cavity::HiddenCavity::none(),
             shaft_head: vec![u32::MAX; cells],
             shaft_spans: Vec::new(),
             model_head: vec![u32::MAX; cells],

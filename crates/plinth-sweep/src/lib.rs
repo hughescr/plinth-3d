@@ -42,6 +42,7 @@
 #![forbid(unsafe_code)]
 
 pub mod adapter;
+pub mod cavity;
 pub mod congestion;
 pub(crate) mod demand_replay;
 pub mod down_sweep;
@@ -1454,6 +1455,18 @@ pub fn run_sweep_with_drains(
         reach.straight_limit = f32::NEG_INFINITY;
     }
     let mut history = ColumnHistory::new(&grid);
+    // The hidden cavities (Craig ruling 2026-10-05; `cavity.rs`), one batch
+    // over the slices at the registered hollowing pitch. A member inside one
+    // is not read against the 0.3 mm final gap; outside one nothing changes.
+    history.hidden = cavity::HiddenCavity::build(
+        &grid,
+        &slices,
+        drains,
+        plate_z,
+        height,
+        policy.passage_voxel_pitch_mm,
+        policy.tip_radius_max_mm,
+    );
     let mut greedy = if policy.island_seating {
         GreedyScratch::new(&grid, lamina_reach_mm)
     } else {
@@ -2871,7 +2884,9 @@ pub fn run_sweep_with_drains(
             plan,
             plate_z,
             policy.final_clearance_gap_mm,
+            &history.hidden,
         );
+        sweep_plan.report.hidden_cavity = history.hidden.census();
     }
     sweep_plan.report.sweep_digest = digest(&sweep_plan.struts);
     Ok(sweep_plan)
@@ -3345,26 +3360,13 @@ impl LipSeatRun<'_> {
 
 fn set_interior(struts: &mut [SweepStrut], history: &up_sweep::ColumnHistory) {
     for strut in struts.iter_mut() {
-        strut.interior = landing_is_hidden(history, strut.base_cell(), strut.landing);
-    }
-}
-
-/// The one test of [`SweepStrut::interior`]: a landing on the model whose
-/// column has model material above the landing layer, so that nobody will
-/// ever see the scar. Craig ruled 2026-10-05 that the final clearance gap
-/// does not apply to a member so classified (a hidden cavity; his 2026-08-31
-/// ruling is that supports there are never removed or cleaned). The same
-/// test answers for a landing a search proposes but has not yet made.
-pub(crate) fn landing_is_hidden(
-    history: &up_sweep::ColumnHistory,
-    base_cell: usize,
-    landing: Landing,
-) -> bool {
-    match landing {
-        Landing::Model { layer } => {
-            usize::try_from(history.column_max_model[base_cell]).unwrap_or(0) > layer + 1
-        }
-        Landing::Plate | Landing::Strut { .. } => false,
+        strut.interior = match strut.landing {
+            Landing::Model { layer } => {
+                usize::try_from(history.column_max_model[strut.base_cell()]).unwrap_or(0)
+                    > layer + 1
+            }
+            Landing::Plate | Landing::Strut { .. } => false,
+        };
     }
 }
 
@@ -4024,6 +4026,7 @@ fn build_report(
         lip_seat: crate::lip_seat::LipSeatOutcome::default(),
         clearance_reroute: crate::lip_seat::LipSeatOutcome::default(),
         member_model_clearance: report::MemberModelClearance::default(),
+        hidden_cavity: cavity::CavityCensus::default(),
         junctions_at_parent_top,
         junctions_mid_shaft,
         support_volume_mm3,

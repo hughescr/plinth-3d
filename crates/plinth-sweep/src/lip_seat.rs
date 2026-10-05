@@ -153,6 +153,7 @@ pub(crate) fn clearance_violators(
         joins.layer_plan,
         joins.plate_z_mm,
         joins.clearance_mm,
+        &joins.slender.history.hidden,
     );
     let mut named = 0;
     for row in &census.within_gap {
@@ -973,19 +974,37 @@ pub(crate) fn apply(
             // stood, and never inside.
             let new_root = !matches!(proposal.candidate.landing, Landing::Strut { .. });
             // The final gap does not apply inside a hidden cavity (Craig
-            // ruling 2026-10-05): a mover that comes to stand on the model
-            // under model material, in the same test the interior flag uses,
-            // and a child that stands so now, are not read against the gap.
+            // ruling 2026-10-05): a mover whose PROPOSED axis, from the
+            // landing it would make up to its own seat, stands wholly in
+            // enclosed air ([`crate::cavity`]; whatever it would land on),
+            // is not read against the gap, and nor is a child that stands in
+            // one now and follows a mover that does. A proposal outside a
+            // cavity is read as before, so a recess open to the outside is
+            // never exempt.
+            let mover_hidden = {
+                let (base_cell, k_bottom) = (proposal.candidate.cell, proposal.candidate.k_bottom);
+                let seat_cell = struts[index_of].cell;
+                context
+                    .history
+                    .hidden
+                    .span_hidden(k_bottom, struts[index_of].k_top, |layer| {
+                        if layer == k_bottom {
+                            base_cell
+                        } else {
+                            proposal
+                                .path
+                                .get(layer.wrapping_sub(k_bottom))
+                                .map_or(seat_cell, |cell| *cell as usize)
+                        }
+                    })
+            };
             let hidden = |slot: usize| {
-                if slot == first {
-                    crate::landing_is_hidden(
-                        context.history,
-                        proposal.candidate.cell,
-                        proposal.candidate.landing,
-                    )
-                } else {
-                    struts[proposal.children[slot - first - 1].0].interior
-                }
+                mover_hidden
+                    && (slot == first
+                        || context
+                            .history
+                            .hidden
+                            .member_hidden(&struts[proposal.children[slot - first - 1].0]))
             };
             let clear = surface.is_none()
                 || (first..=first + proposal.children.len()).all(|slot| {

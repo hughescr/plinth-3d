@@ -265,14 +265,24 @@ because the move can make a run (a branch on a new host) or lower a limit (the o
 makes its sections thinner).
 
 **The final gap does not apply inside a hidden cavity** (owner ruling 2026-10-05, on the
-2026-08-31 ruling that supports hidden in a cavity are never removed or cleaned). A member the
-engine classifies as interior (`SweepStrut::interior`: it lands on the model with model material
-above the landing in the same column) is not read against the gap by the thickening refusal, is
-not counted by the census (so it is never sent to the re-route), and a mover that lands so is not
-read against the gap by the re-route's landing search; a brace band between two such posts is not
-read against the model (its path test still refuses a diagonal through model material). Outside a
-cavity nothing changes. The up-sweep's descent test is not changed: the column above a landing is
-not yet known while the up-sweep runs, so a seat placed there is read against the gap as before.
+2026-08-31 ruling that supports hidden in a cavity are never removed or cleaned). The test is
+the cavity itself (`cavity.rs`), not the scar flag `SweepStrut::interior` (model above the landing
+in the same column), which is also true of a recess open to the outside and false for a member
+that lands on another support. One flood per model, at the hollowing pitch: the slices are
+rasterised (any overlap) into a voxel lattice, the voxels below the plate are solid, each drain
+mouth is plugged with a ball wider than the bore (the bore does not open the cavity), and the empty
+space is flooded from the lattice boundary. Empty voxels the flood never reaches are enclosed air;
+a voxel is hidden when enclosed air lies within one voxel and no exterior air does. A member is
+hidden when every sampled point of its axis (the foot, one point per voxel of height, the seat) is
+hidden, whatever it lands on; a proposed landing or tie is asked with its own geometry before it
+exists. A hidden member is not read against the gap by the thickening refusal, is not counted by
+the census (so it is never sent to the re-route), a mover that would land so is not read against
+the gap by the re-route's landing search, a model tie so placed is confirmed clear by its lone
+census, and a brace band between two such posts is not read against the model (its path test still
+refuses a diagonal through model material). Every error runs toward "not hidden", which is the
+old behaviour: a cavity too narrow for the lattice exempts nothing. Outside a cavity nothing
+changes. The up-sweep's descent test is not changed: the column above a landing is not yet known
+while the up-sweep runs, so a seat placed there is read against the gap as before.
 
 ## 6. The seat's own contact zone — the honest exemption
 

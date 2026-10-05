@@ -675,6 +675,10 @@ pub struct SlendernessOutcome {
     pub model_tie_refused_path_model: usize,
     pub model_tie_refused_path_member: usize,
     pub model_tie_refused_solid_model: usize,
+    /// Ties chosen that stand wholly in a hidden cavity, where the final gap
+    /// is not read (Craig ruling 2026-10-05): the path hit of that ruling in
+    /// the tie screen.
+    pub model_tie_candidates_hidden: usize,
     /// Candidates whose seat trim would cut the shaft outside the tip ball
     /// (the lip-seat rule: the tie meets its face too side-on).
     pub model_tie_refused_trim_bite: usize,
@@ -3955,16 +3959,19 @@ fn thickening_enters_the_gap(
     type Raised = (usize, usize, usize, [f64; 3], [f64; 3]);
     // **THE FINAL GAP DOES NOT APPLY INSIDE A HIDDEN CAVITY** (Craig ruling
     // 2026-10-05, on his 2026-08-31 ruling that supports hidden in a cavity
-    // are never removed or cleaned): a member the engine's own classification
-    // calls interior ([`crate::SweepStrut::interior`], model material above
-    // its landing in the same column) is not read, so a post on a cavity floor
-    // may grow within the gap of the cavity it stands in. Outside a cavity
+    // are never removed or cleaned): a member whose whole axis stands in
+    // enclosed air ([`crate::cavity::HiddenCavity`], whatever it lands on:
+    // the plate cannot be, a model floor or another support can) is not
+    // read, so a post on a cavity floor may grow within the gap of the
+    // cavity it stands in. Not the scar flag ([`crate::SweepStrut::interior`]),
+    // which also holds for a recess open to the outside. Outside a cavity
     // nothing changes. The path hit is `ThickenReads::hidden_members`.
+    let hidden = &history.hidden;
     let mut reads = state.thicken_reads.get();
     reads.hidden_members += plan
         .chain
         .iter()
-        .filter(|&&(index, _)| struts.get(index).is_some_and(|strut| strut.interior))
+        .filter(|&&(index, _)| struts.get(index).is_some_and(|strut| hidden.member_hidden(strut)))
         .count();
     state.thicken_reads.set(reads);
     let members: Vec<Raised> = plan
@@ -3973,7 +3980,7 @@ fn thickening_enters_the_gap(
         .enumerate()
         .filter_map(|(position, &(index, highest))| {
             let strut = struts.get(index)?;
-            if strut.interior {
+            if hidden.member_hidden(strut) {
                 return None;
             }
             let upto = plan.upto(position, highest).min(strut.k_top + 1);
@@ -5915,12 +5922,15 @@ fn plan_cross(
             (point(b, b_cell_top, k), point(a, a_cell_lo, k_lo)),
         ];
         // The final gap does not apply inside a hidden cavity (Craig ruling
-        // 2026-10-05): a band between two posts that both stand in one is
-        // not read against the model (the path test above still refuses a
-        // diagonal that crosses model material).
-        let hidden = [a, b]
-            .iter()
-            .all(|&post| struts.get(post as usize).is_some_and(|strut| strut.interior));
+        // 2026-10-05): a band between two posts that both stand wholly in
+        // enclosed air ([`crate::cavity`]) is not read against the model (the
+        // path test above still refuses a diagonal that crosses model
+        // material).
+        let hidden = [a, b].iter().all(|&post| {
+            struts
+                .get(post as usize)
+                .is_some_and(|strut| context.history.hidden.member_hidden(strut))
+        });
         for (top, bottom) in diagonals {
             if !hidden
                 && crate::member_clearance::model_intrusion(
@@ -6727,6 +6737,7 @@ fn screen_model_ties(
         model.layer_plan,
         plate_z,
         context.final_clearance_mm,
+        &context.history.hidden,
     );
     let near: BTreeSet<u32> = census.within_gap.iter().map(|row| row.member).collect();
     let discs = plinth_support::tip_contact_discs(&arms, model.layer_plan)
@@ -6786,15 +6797,27 @@ fn screen_model_ties(
             model.layer_plan,
             plate_z,
             context.final_clearance_mm,
+            &context.history.hidden,
         );
-        if alone.members_measured != 1 || alone.members_unmeasured != 0 || !alone.within_gap.is_empty()
-        {
+        if !tie_confirmed_clear(&alone) {
             outcome.model_tie_refused_solid_model += 1;
             continue;
         }
+        outcome.model_tie_candidates_hidden += alone.members_hidden;
         return Screened::Passed(index);
     }
     Screened::Failed { bitten }
+}
+
+/// Whether the lone census of ONE planned tie confirms it clear of the
+/// model: measured with no span undecided and none inside the gap, OR left
+/// out of the census because the tie stands wholly in a hidden cavity (Craig
+/// ruling 2026-10-05; [`crate::cavity`]: a tie from an interior post to its
+/// cavity wall is classified by its own proposed geometry, foot on the post
+/// and contact on the wall), where the final gap does not apply.
+fn tie_confirmed_clear(alone: &crate::report::MemberModelClearance) -> bool {
+    let clear = alone.within_gap.is_empty() && alone.members_unmeasured == 0;
+    clear && (alone.members_measured == 1 || alone.members_hidden == 1)
 }
 
 /// **The contact sized up until the seat trim keeps its shaft** (the
@@ -8890,22 +8913,39 @@ mod tests {
     /// A 4 mm post of radius 0.05 mm standing on a model floor (landing
     /// `Model { layer: 0 }`) with a cured wall 0.4 mm from its axis over its
     /// whole height, as in `thickening_refuses_a_root_that_would_enter_the_gap`.
-    /// In the first field model material stands over the post's column (the
-    /// ceiling of a cavity), so the engine's own test
-    /// ([`crate::landing_is_hidden`], the one `set_interior` applies) calls it
-    /// interior, and the rung thickens it. In the control the column is open
-    /// above the floor, the post is not interior, and the same rung refuses
-    /// the same raise. Path hit: `thicken_members_hidden`. SABOTAGE INSIDE:
-    /// with the interior flag cleared by hand on the cavity field, the rung
-    /// refuses again, so the green result comes from the flag and from
-    /// nothing else in the fixture.
+    ///
+    /// The authority is the CAVITY MAP ([`crate::cavity`], built here from the
+    /// slices of a real 8 mm box with 1 mm walls), not the scar flag
+    /// ([`crate::SweepStrut::interior`], "model above the landing in the same
+    /// column", which is also true of a recess open to the outside; challenger
+    /// 2026-10-05). In all three fields the post's column has model above it,
+    /// so the scar flag is TRUE for the post in all three (asserted: the
+    /// anti-vacuity, since it is what admitted the pocket before).
+    ///
+    /// - SEALED box: the post stands in enclosed air. The rung thickens it
+    ///   (path hit `thicken_members_hidden`).
+    /// - open-sided POCKET (the same box with one wall left out, so a ceiling
+    ///   stands over the same floor and the air reaches the outside): the rung
+    ///   REFUSES the same raise. This is the negative control.
+    /// - no cavity at all: refused, as before.
+    ///
+    /// SABOTAGE RUN (done by hand, not left in the code): the exemption read
+    /// from `strut.interior` instead of the map lets the pocket thicken, and
+    /// the pocket assertion fails.
     #[test]
     fn a_post_on_a_hidden_cavity_floor_may_thicken_within_the_gap_of_the_cavity() {
+        use crate::cavity::fixtures::{cavity_box_sized, map_on};
         let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
         let keep_out = crate::drain::DrainKeepOut::none();
         let lean = crate::lean::LeanLaw::new(0.05, 45.0, 25.0);
         let law = law();
-        let build = |cavity: bool| {
+        #[derive(Clone, Copy)]
+        enum Field {
+            Sealed,
+            Pocket,
+            None,
+        }
+        let build = |field: Field| {
             let mut history = crate::up_sweep::ColumnHistory::new(&grid);
             for row in 90..=110 {
                 let cell = grid.index(row, 108);
@@ -8917,19 +8957,22 @@ mod tests {
                     next: u32::MAX,
                 });
             }
-            if cavity {
-                // Model material over the post's column, above its seat layer.
-                let cell = grid.index(100, 100);
-                history.column_max_model[cell] = 200;
-            }
+            // Model material over the post's column, above its seat layer, in
+            // every field: what the scar flag reads.
+            history.column_max_model[grid.index(100, 100)] = 200;
+            history.hidden = match field {
+                Field::Sealed => map_on(&cavity_box_sized(false, false, 0.0, 8.0, 1.0), &[], 0.0, &grid),
+                Field::Pocket => map_on(&cavity_box_sized(true, false, 0.0, 8.0, 1.0), &[], 0.0, &grid),
+                Field::None => crate::cavity::HiddenCavity::none(),
+            };
             let mut struts = vec![plate_post(&grid, 0, 100, 0.05)];
             struts[0].landing = crate::Landing::Model { layer: 0 };
             crate::set_interior(&mut struts, &history);
             (history, struts)
         };
-        let attempt = |cavity: bool, keep_flag: bool| {
-            let (history, mut struts) = build(cavity);
-            struts[0].interior &= keep_flag;
+        let attempt = |field: Field| {
+            let (history, mut struts) = build(field);
+            assert!(struts[0].interior, "anti-vacuity: the scar flag calls the post interior in every field");
             let context = prune_context(&grid, &history, &keep_out, &lean, &law);
             let mut state = super::TieState::build(&context, &struts);
             let over: Vec<UnbracedRun> = super::member_runs(
@@ -8949,22 +8992,53 @@ mod tests {
             let hidden = state.thicken_reads.get().hidden_members;
             (done, outcome, struts, hidden)
         };
-        assert!(build(true).1[0].interior, "anti-vacuity: the post stands in a hidden cavity");
-        assert!(!build(false).1[0].interior, "anti-vacuity: the control post does not");
-        let (done, outcome, struts, hidden) = attempt(true, true);
+        assert!(build(Field::Sealed).0.hidden.census().enclosed_voxels > 0, "anti-vacuity: the box encloses air");
+        assert_eq!(build(Field::Pocket).0.hidden.census().enclosed_voxels, 0, "anti-vacuity: the pocket does not");
+        let (done, outcome, struts, hidden) = attempt(Field::Sealed);
         assert!(done, "inside a hidden cavity the final gap does not apply: the rung thickens ({outcome:?})");
         assert_eq!(outcome.thicken_refused_model, 0, "{outcome:?}");
         assert!(struts[0].thickened_mm[0] > 0.065, "into the cavity wall: {}", struts[0].thickened_mm[0]);
         assert!(hidden > 0, "path hit: the refusal skipped a hidden member");
-        let (done, outcome, struts, hidden) = attempt(false, true);
-        assert!(!done, "outside a cavity the same raise enters the gap and is refused");
-        assert_eq!(outcome.thicken_refused_model, 1, "{outcome:?}");
-        assert!(struts[0].thickened_mm.is_empty(), "the post is left as drawn");
-        assert_eq!(hidden, 0, "the control reads its member");
-        let (done, outcome, _, hidden) = attempt(true, false);
-        assert!(
-            !done && outcome.thicken_refused_model == 1 && hidden == 0,
-            "SABOTAGE: with the interior flag cleared the cavity post is refused again ({outcome:?})"
-        );
+        for (field, what) in [(Field::Pocket, "a pocket open to the outside"), (Field::None, "no cavity")] {
+            let (done, outcome, struts, hidden) = attempt(field);
+            assert!(!done, "{what}: the same raise enters the gap and is refused ({outcome:?})");
+            assert_eq!(outcome.thicken_refused_model, 1, "{what}: {outcome:?}");
+            assert!(struts[0].thickened_mm.is_empty(), "{what}: the post is left as drawn");
+            assert_eq!(hidden, 0, "{what}: the member is read");
+        }
+    }
+
+    /// **A MODEL TIE IN A HIDDEN CAVITY IS CONFIRMED CLEAR** (Craig ruling
+    /// 2026-10-05; challenger 2026-10-05: the tie screen's lone census
+    /// demanded `members_measured == 1`, so a tie the census left out as
+    /// hidden was refused at the gap anyway). The lone census of one tie
+    /// confirms it when it measured it clear, or when it left it out because
+    /// the tie stands wholly in a hidden cavity; never when a span is
+    /// undecided, when it is inside the gap, or when nothing was read and
+    /// nothing was hidden.
+    #[test]
+    fn a_tie_left_out_as_hidden_is_confirmed_clear_and_nothing_else_unread_is() {
+        use crate::report::{MemberModelClearance, MemberNearModel};
+        let census = |measured: usize, hidden: usize, unmeasured: usize, near: usize| MemberModelClearance {
+            members_measured: measured,
+            members_hidden: hidden,
+            members_unmeasured: unmeasured,
+            within_gap: (0..near)
+                .map(|member| MemberNearModel {
+                    member: u32::try_from(member).expect("a few"),
+                    kind: crate::StrutKind::Tie,
+                    landing: crate::Landing::Plate,
+                    clearance_mm: 0.1,
+                    upper_bound: false,
+                    witness_mm: [0.0; 3],
+                })
+                .collect(),
+            ..MemberModelClearance::default()
+        };
+        assert!(super::tie_confirmed_clear(&census(1, 0, 0, 0)), "measured clear");
+        assert!(super::tie_confirmed_clear(&census(0, 1, 0, 0)), "left out as hidden");
+        assert!(!super::tie_confirmed_clear(&census(0, 0, 0, 0)), "nothing read, nothing hidden");
+        assert!(!super::tie_confirmed_clear(&census(0, 0, 1, 0)), "a span undecided");
+        assert!(!super::tie_confirmed_clear(&census(1, 0, 0, 1)), "inside the gap");
     }
 }

@@ -2942,6 +2942,20 @@ fn print_sweep_disclosure(
                  never a refusal]"
             );
         }
+        // THE HIDDEN-CAVITY MAP (Craig ruling 2026-10-05): what the flood
+        // from outside found, which the final gap's exemption reads.
+        let cavity = &report.hidden_cavity;
+        println!(
+            "[sweep {model}] hidden cavities (the final gap does not apply inside one): flood at \
+             {:.3} mm over {} voxels, {} solid, {} of empty space enclosed (not reached from \
+             outside, {} drain mouth(s) plugged), {} voxels where a member counts as hidden",
+            cavity.voxel_pitch_mm,
+            cavity.voxels,
+            cavity.solid_voxels,
+            cavity.enclosed_voxels,
+            cavity.drains_plugged,
+            cavity.hidden_voxels,
+        );
         // EVERY MEMBER'S DRAWN SOLID AGAINST THE MODEL (fix/morel-long-posts,
         // 2026-10-02): arm shafts included.
         let clearance = &report.member_model_clearance;
@@ -3444,7 +3458,8 @@ fn print_sweep_disclosure(
          of the model \
          outside its seat zone, {} seat trim cutting the shaft outside the ball (lip-seat \
          rule), {} contact disc not wholly on the model, {} solid entering a member; {} tie \
-         layers planned again with a tip sized up until the seat trim keeps its shaft",
+         layers planned again with a tip sized up until the seat trim keeps its shaft; {} ties \
+         chosen in a hidden cavity, where the final gap is not read",
         lane.model_tie_runs_tried,
         lane.model_tie_sets,
         lane.model_ties_built,
@@ -3466,6 +3481,7 @@ fn print_sweep_disclosure(
         lane.model_tie_refused_disc_off_face,
         lane.model_tie_refused_solid_member,
         lane.model_tie_tips_sized_for_the_trim,
+        lane.model_tie_candidates_hidden,
     );
     // CONSTRUCTION-STAGE SHAKE (Craig ruling 2026-10-03, R9 + D6): a WARNING
     // only, at a stated, unmeasured brace peel pressure.

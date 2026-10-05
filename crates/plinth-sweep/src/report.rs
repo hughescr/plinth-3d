@@ -370,6 +370,10 @@ pub struct SweepRunReport {
     /// Every member's drawn solid against the model on the finished field,
     /// arm shafts included (fix/morel-long-posts, 2026-10-02).
     pub member_model_clearance: MemberModelClearance,
+    /// The hidden-cavity map the final gap's exemption reads (Craig ruling
+    /// 2026-10-05; [`crate::cavity`]): what the flood found. Empty on a model
+    /// with no enclosed air.
+    pub hidden_cavity: crate::cavity::CavityCensus,
     /// **The resin the area law SIZED**, in mm³: `π r²` integrated along every
     /// arm's own axis, layer by layer, with a leaned layer measured along its
     /// slant rather than its rise.
