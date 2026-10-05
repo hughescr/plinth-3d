@@ -283,12 +283,21 @@ fn every_brace_end_on_the_laid_tube_meets_its_posts_drawn_solid() {
         // cap alone off, 236 and 4 and none; with both off, 448 ends, 60 on
         // leaning plate posts, 23 of those missing on the planned line
         // (measured 2026-10-03). The drawn-line rule reads neither rule.
+        // RE-PINNED 2026-10-05 (fix/drawn-solid-clearance, challenger round 2):
+        // the witness field also keeps the retired centreline descent. With the
+        // drawn-solid descent (a preferred tier now also requires the final gap)
+        // the same field has 408 ends, 18 on leaning plate posts and none
+        // missing on the planned line; with the retired descent, 20 and 1
+        // (measured 2026-10-05; the model refused 0 thickenings in either).
+        // The rule under test lives in the adapter and does not read the
+        // descent.
         (
             "creep cut off",
             policy()
                 .without_creep_overhang_cut()
                 .without_brace_cap()
-                .without_brace_window(),
+                .without_brace_window()
+                .without_drawn_solid_descent(),
             true,
         ),
     ] {
@@ -303,6 +312,10 @@ fn every_brace_end_on_the_laid_tube_meets_its_posts_drawn_solid() {
             census.planned_line_misses,
             census.only_in_a_ball,
             census.off.len()
+        );
+        println!(
+            "  thickenings refused by the model: {}; descents uncleared: {}",
+            plan.report.slenderness_lane.thicken_refused_model, plan.report.counters.descent_solid_uncleared
         );
         assert!(census.ends > 0, "anti-vacuity ({name}): the laid tube placed no brace");
         if witness {

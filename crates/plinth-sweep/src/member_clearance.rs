@@ -108,10 +108,13 @@ pub(crate) fn model_intrusion(
 
 /// [`model_intrusion`] for the frustum the file draws: the radius runs
 /// linearly from `radii.0` at `from` to `radii.1` at `to`, and each cured cell
-/// is read at the radius of the axis point nearest to it (fix/drawn-solid-clearance,
-/// 2026-10-04: the thickening rung's drawn root is one chord from a step to
-/// the root, and the wider end read all along its length refused a raise that
-/// the census, which reads the frustum, finds clear).
+/// is read at the frustum's true clearance to it, the least over the axis of
+/// the distance minus the radius there ([`frustum_clearance_to_column`];
+/// fix/drawn-solid-clearance, 2026-10-04: the thickening rung's drawn root is
+/// one chord from a step to the root, and the wider end read all along its
+/// length refused a raise that the census, which reads the frustum, finds
+/// clear; the radius at the nearest axis point alone accepted a thick end that
+/// stands inside the gap, challenger round 2).
 pub(crate) fn model_intrusion_tapered(
     grid: &Grid,
     history: &ColumnHistory,
@@ -182,32 +185,77 @@ pub(crate) fn model_intrusion_tapered(
                 if top < z_lo || bottom > z_hi {
                     continue;
                 }
-                let (distance, on_axis, _) =
+                let (distance, _, _) =
                     segment_segment_distance_min(from, to, [x, y, bottom], [x, y, top]);
                 if distance >= reach {
                     continue;
                 }
-                // The radius the solid has at the axis point nearest this cell.
-                let reach_here = if (radii.0 - radii.1).abs() <= f64::EPSILON {
-                    reach
-                } else {
-                    let length = geom_kernel::vec3::dist(from, to);
-                    let along = if length > 0.0 {
-                        (geom_kernel::vec3::dist(from, on_axis) / length).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    };
-                    (radii.0 + along * (radii.1 - radii.0)).max(0.0)
-                        + gap_mm.max(0.0)
-                        + raster_half_diagonal_mm(grid)
-                };
-                if distance < reach_here {
+                if (radii.0 - radii.1).abs() <= f64::EPSILON {
                     return Some((cell, distance));
+                }
+                // The frustum's own clearance to this cell: the least over the
+                // axis of `distance − radius there` (the radius at the nearest
+                // axis point alone is not it; the thick end can be nearer the
+                // cell's solid than the thin end the axes meet at).
+                let (clearance, at_distance) = frustum_clearance_to_column(from, to, radii, x, y, bottom, top);
+                if clearance < gap_mm.max(0.0) + raster_half_diagonal_mm(grid) {
+                    return Some((cell, at_distance));
                 }
             }
         }
     }
     None
+}
+
+/// The clearance of the frustum about the axis `from`–`to` (radius linear from
+/// `radii.0` at `from` to `radii.1` at `to`) to the vertical segment over
+/// `(x, y)` from `z_low` to `z_high`: the minimum over the axis of the point's
+/// distance to that segment minus the radius there, and the centreline
+/// distance at the minimiser.
+///
+/// The distance from a point moving along a line to a convex set is convex in
+/// the parameter, and the radius is linear in it, so `distance − radius` is
+/// convex and a ternary search finds its minimum (the least value seen is
+/// returned, which is an achievable clearance, never one below the true
+/// minimum). 40 rounds narrow the bracket to `(2/3)^40`, about 1e-7 of the
+/// axis.
+fn frustum_clearance_to_column(
+    from: [f64; 3],
+    to: [f64; 3],
+    radii: (f64, f64),
+    x: f64,
+    y: f64,
+    z_low: f64,
+    z_high: f64,
+) -> (f64, f64) {
+    let at = |s: f64| -> (f64, f64) {
+        let point: [f64; 3] = std::array::from_fn(|axis| from[axis] + s * (to[axis] - from[axis]));
+        let flat = (point[0] - x).hypot(point[1] - y);
+        let vertical = point[2] - point[2].clamp(z_low, z_high);
+        let distance = flat.hypot(vertical);
+        (distance - (radii.0 + s * (radii.1 - radii.0)).max(0.0), distance)
+    };
+    let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+    let mut best = at(0.0);
+    let end = at(1.0);
+    if end.0 < best.0 {
+        best = end;
+    }
+    for _ in 0..40 {
+        let (a, b) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+        let (fa, fb) = (at(a), at(b));
+        for probe in [fa, fb] {
+            if probe.0 < best.0 {
+                best = probe;
+            }
+        }
+        if fa.0 < fb.0 {
+            hi = b;
+        } else {
+            lo = a;
+        }
+    }
+    best
 }
 
 /// **A straight shaft's drawn solid against the model, outside its own seat
@@ -1140,6 +1188,40 @@ mod tests {
             model_intrusion_tapered(&grid, &lower, h, foot, top, (0.5, 0.1), gap).is_some(),
             "beside the thick foot the frustum still enters it"
         );
+    }
+
+    /// **THE FRUSTUM'S TRUE CLEARANCE, NOT THE CLEARANCE AT THE NEAREST AXIS
+    /// POINT** (challenger round 2, 2026-10-04). A 1 mm axis drawn from 0.1 mm
+    /// at its thin end to 0.9 mm at its thick end, and a one-lamina cured
+    /// column 0.65 mm off the axis beside the THIN end. The nearest axis point
+    /// to the column is the thin end (0.65 mm), where the radius is 0.1: that
+    /// reading gives 0.55 mm and accepts. But at the thick end the solid is
+    /// `√(0.65² + 1²) − 0.9 = 0.292 mm` from the column, under the 0.3 mm gap
+    /// (and the raster's half-diagonal on top). The clearance of a frustum to
+    /// a point is the minimum over the axis of `distance − radius`, and that is
+    /// convex in the axis parameter. Hand-derived; red before the fix.
+    #[test]
+    fn a_taper_is_judged_by_distance_minus_radius_not_at_the_nearest_axis_point() {
+        let grid = lay_out_at(0.0, 0.0, 0.05, 100, 100);
+        let h = 0.05;
+        let (x, y) = (grid.center_x_mm(50), grid.center_y_mm(50));
+        let mut history = ColumnHistory::new(&grid);
+        // One lamina at layer 20, z 1.0..1.05.
+        history.model_spans.push(ShaftSpan { k_bottom: 20, k_top: 20, id: 0, next: u32::MAX });
+        history.model_head[grid.index(50, 50)] = 0;
+        // The axis runs z 1.0 (thin end) down to z 0.0 (thick end), 0.65 mm off.
+        let (thin, thick) = ([x + 0.65, y, 1.0], [x + 0.65, y, 0.0]);
+        let gap = 0.3;
+        assert!(
+            model_intrusion_tapered(&grid, &history, h, thick, thin, (0.9, 0.1), gap).is_some(),
+            "the thick end stands 0.292 mm from the column: inside the final gap"
+        );
+        // Control: the same column beside a taper that is thin all the way
+        // clears (0.65 − 0.12 − 0.3 − 0.035 > 0).
+        assert!(model_intrusion_tapered(&grid, &history, h, thick, thin, (0.12, 0.1), gap).is_none());
+        // Control: the cured column stays clear of a thick end that is really farther.
+        let far = ([x + 0.8, y, 1.0], [x + 0.8, y, 0.0]);
+        assert!(model_intrusion_tapered(&grid, &history, h, far.1, far.0, (0.9, 0.1), gap).is_none());
     }
 
     /// A single cured column, one cell wide, over layers 10..=20; a member

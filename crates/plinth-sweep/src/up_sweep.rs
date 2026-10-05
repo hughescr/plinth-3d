@@ -2266,23 +2266,33 @@ fn descend_cleared(
     };
     // How well a candidate's axis (seat at `layer`, base at `at` in
     // `base_cell`) clears the model, at one tier.
+    //
+    // **A TIER IMPLIES THE FINAL GAP** (challenger round 2, 2026-10-04): the
+    // seat and landing zones a shaft is excused grow with the gap asked of it
+    // (`zone_factor · (r + gap)`), so a short descent can lie wholly inside its
+    // zones at the 0.6 mm preferred tier and still have a testable stretch at
+    // the 0.3 mm final one. A stricter tier therefore passes only a descent
+    // that also clears the final gap at the final gap's own zones.
     let blocked = |clear: &DescentClearance,
                    gap_mm: f64,
                    base_cell: usize,
                    k_bottom: usize,
                    landing: Landing| {
-        crate::member_clearance::shaft_model_intrusion(
-            grid,
-            history,
-            clear.layer_height_mm,
-            (cell, layer),
-            (base_cell, k_bottom),
-            matches!(landing, Landing::Model { .. }),
-            radius_lb_mm,
-            gap_mm,
-            clear.zone_factor,
-        )
-        .is_some()
+        let enters = |tier_mm: f64| {
+            crate::member_clearance::shaft_model_intrusion(
+                grid,
+                history,
+                clear.layer_height_mm,
+                (cell, layer),
+                (base_cell, k_bottom),
+                matches!(landing, Landing::Model { .. }),
+                radius_lb_mm,
+                tier_mm,
+                clear.zone_factor,
+            )
+            .is_some()
+        };
+        (gap_mm > clear.final_gap_mm && enters(clear.final_gap_mm)) || enters(gap_mm)
     };
     let straight_layers = layer.saturating_sub(straight_bottom);
     let Some(straight_length) = law.descent_cost_mm(straight_layers, 0.0) else {
@@ -3332,6 +3342,55 @@ mod descent_tests {
                 "layer {layer}: the path is {nearest} mm from the wall (wall x {sx})"
             );
         }
+    }
+
+    /// **PREFERRED CANNOT BYPASS THE FINAL GAP** (challenger round 2,
+    /// 2026-10-04). The exempt stretch at a seat grows with the gap asked of it
+    /// (`zone_factor · (r + gap)`), so a 1 mm descent at radius 0.05 mm is wholly
+    /// inside its seat zone at the 0.6 mm preferred tier (1.21 mm) although its
+    /// lowest 0.35 mm is testable at the 0.3 mm final tier (0.65 mm). A wall
+    /// 0.2 mm beside that lower part then read `Preferred` and skipped the final
+    /// test. Red before the fix: the straight descent was `Preferred`, counted
+    /// refused by nothing. Green: the straight descent is refused at the final
+    /// gap (and so is any lean that ends beside the wall), and nothing the
+    /// descent returns as `Preferred` stands inside the final gap.
+    #[test]
+    fn a_short_descent_cannot_pass_the_preferred_tier_by_zone_alone() {
+        let grid = plan_grid(0.0, 0.0, 8.0, 8.0, 400, H, 0.0, 1_000_000_000).0;
+        let mut history = ColumnHistory::new(&grid);
+        let seat = grid.index(80, 80);
+        // 0.2 mm beside the column, over the lowest 0.4 mm only.
+        let wall: Vec<usize> = (60..101).map(|row| grid.index(row, 84)).collect();
+        cure_wall(&mut history, &grid, &wall, 0, 7);
+        let law = LeanLaw::new(H, 45.0, 25.0);
+        let clear = two_tier(&law);
+        let seat_layer = 20; // 1 mm over the plate
+        let mut scratch = Vec::new();
+        let mut counts = outcome();
+        let descent = super::descend_cleared(
+            &grid, &history, &DrainKeepOut::none(), &law, true, 4.0, seat, seat_layer, &mut scratch,
+            &mut counts, Some(&clear), 0.05,
+        );
+        assert_eq!(
+            counts.solid.refused_at_final_gap, 1,
+            "the straight descent stands 0.2 mm from the wall's lowest 0.4 mm: {counts:?}"
+        );
+        assert!(
+            !(descent.path.is_empty() && descent.clears != super::Clears::Neither),
+            "the straight descent must not be kept as clear: {:?}",
+            descent.clears
+        );
+        // The same fixture with a wall far enough away reads Preferred, so the
+        // refusal above is the wall's, not a blanket one.
+        let mut far_history = ColumnHistory::new(&grid);
+        let far: Vec<usize> = (60..101).map(|row| grid.index(row, 100)).collect();
+        cure_wall(&mut far_history, &grid, &far, 0, 7);
+        let mut far_counts = outcome();
+        let far_descent = super::descend_cleared(
+            &grid, &far_history, &DrainKeepOut::none(), &law, true, 4.0, seat, seat_layer,
+            &mut scratch, &mut far_counts, Some(&clear), 0.05,
+        );
+        assert_eq!(far_descent.clears, super::Clears::Preferred, "{far_counts:?}");
     }
 
     /// A seat in a slot between two walls, open only along the walls: every

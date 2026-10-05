@@ -3839,13 +3839,18 @@ enum ThickenRefusal {
 ///
 /// Each member's raised stretch, from its foot to the layer the plan raises
 /// it to, is cut where the plan changes shape (a constant root below the
-/// run, a linear taper over it), and each piece is read as the FRUSTUM the
-/// plan draws (the radius at the axis point nearest each cured cell, as the
-/// census reads it) against the widest radius it is drawn at now, on the
-/// raster ([`crate::member_clearance::inset_segment_intrusion`]), outside the
-/// member's own seat zone and, on the model, its landing zone. A piece that
-/// is inside the gap already is not the thickening's doing and does not
-/// refuse it.
+/// run, a linear taper over it). A piece the plan does not raise anywhere is
+/// skipped; one that no cured cell reaches at its widest committed radius is
+/// cleared by that one read; otherwise it is walked SLOT BY SLOT (challenger
+/// round 2, 2026-10-04): the frustum a slot has when the plan is committed
+/// (the larger of the profile drawn now and the plan's minimum, at each of
+/// its two layers) against the frustum drawn there now, each read on the
+/// raster ([`crate::member_clearance::inset_segment_intrusion`], the true
+/// frustum clearance), outside the member's own seat zone and, on the model,
+/// its landing zone, both measured from the member's own ends. A slot that
+/// clears now and enters the gap committed refuses the plan; one that is
+/// inside the gap already, or that the plan does not raise, does not. A wider
+/// section or an existing violation elsewhere in the piece excuses nothing.
 fn thickening_enters_the_gap(
     context: &SlendernessContext<'_>,
     state: &TieState,
@@ -3884,26 +3889,38 @@ fn thickening_enters_the_gap(
             let (low, high) = (pair[0], pair[1]);
             // The plan writes a constant root below the taper and a linear
             // taper above it: each piece is one frustum, read as the frustum.
-            let (wanted_top, wanted_bottom) = (plan.wanted(position, high), plan.wanted(position, low));
-            let widest = wanted_top.max(wanted_bottom);
-            let now = (low..=high)
-                .map(|layer| drawn_at(strut, &state.profiles[index], layer).unwrap_or(0.0))
-                .fold(strut.min_radius_mm, f64::max);
-            if widest <= now {
+            // The radius drawn now at a layer, and the radius it is drawn at
+            // if the plan is committed (the plan only raises).
+            let current = |layer: usize| {
+                drawn_at(strut, &state.profiles[index], layer)
+                    .unwrap_or(0.0)
+                    .max(strut.min_radius_mm)
+            };
+            let committed = |layer: usize| current(layer).max(plan.wanted(position, layer));
+            // Only a slot the plan really raises can be its doing.
+            let grows = |layer: usize| committed(layer) > current(layer) + 1.0e-12;
+            if !(low..high).any(|layer| grows(layer) || grows(layer + 1)) {
                 continue;
             }
-            let zone = factor.max(1.0) * (widest + gap);
-            let (inset_top, inset_bottom) = (
-                if high >= strut.k_top { zone } else { 0.0 },
-                if low <= strut.k_bottom && on_model { zone } else { 0.0 },
-            );
-            let blocked = |radii: (f64, f64)| {
+            let widest = (low..=high).map(committed).fold(0.0, f64::max);
+            // One read of the whole piece at its widest committed radius bounds
+            // every slot of it: a piece that clears it clears the plan.
+            let blocked = |layers: (usize, usize), radii: (f64, f64), zone_radius: f64| {
+                let zone = factor.max(1.0) * (zone_radius + gap);
+                let (top, bottom) = (at(layers.1), at(layers.0));
+                // The zones run from the member's own ends, not the slot's.
+                let inset_top = (zone - geom_kernel::vec3::dist(seat, top)).max(0.0);
+                let inset_bottom = if on_model {
+                    (zone - geom_kernel::vec3::dist(bottom, base)).max(0.0)
+                } else {
+                    0.0
+                };
                 crate::member_clearance::inset_segment_intrusion(
                     grid,
                     history,
                     h,
-                    at(high),
-                    at(low),
+                    top,
+                    bottom,
                     inset_top,
                     inset_bottom,
                     radii,
@@ -3911,8 +3928,29 @@ fn thickening_enters_the_gap(
                 )
                 .is_some()
             };
-            if blocked((wanted_top, wanted_bottom)) && !blocked((now, now)) {
-                return true;
+            // (Its zone is read at the NARROWEST committed radius, the smallest
+            // exemption any slot has, so it can only refuse more than a slot.)
+            let narrowest = (low..=high).map(committed).fold(f64::INFINITY, f64::min);
+            if !blocked((low, high), (widest, widest), narrowest) {
+                continue;
+            }
+            // Slot by slot: the committed frustum of a slot against the frustum
+            // drawn there now. A slot that is inside the gap already, or that
+            // the plan does not raise, is not the plan's doing; a stretch that
+            // clears now and enters the gap committed is, wherever the rest of
+            // the piece is wide or already in the gap.
+            for layer in low..high {
+                if !(grows(layer) || grows(layer + 1)) {
+                    continue;
+                }
+                let zone_radius = committed(layer).max(committed(layer + 1));
+                let wanted = (committed(layer + 1), committed(layer));
+                let drawn = (current(layer + 1), current(layer));
+                if blocked((layer, layer + 1), wanted, zone_radius)
+                    && !blocked((layer, layer + 1), drawn, zone_radius)
+                {
+                    return true;
+                }
             }
         }
     }
@@ -7924,6 +7962,70 @@ mod tests {
         assert!(done, "SABOTAGE: without the clearance the rung thickens the post");
         assert_eq!(outcome.thicken_refused_model, 0);
         assert!(struts[0].thickened_mm[0] > 0.065, "into the wall: {}", struts[0].thickened_mm[0]);
+    }
+
+    /// **THE REFUSAL COMPARES THE PROFILES AT THE PLACES THEY DIFFER**
+    /// (challenger round 2, 2026-10-04). A 4 mm plate post drawn 0.5 mm over
+    /// its lowest 10 layers (thick where it carries, far from any model) and
+    /// 0.06 mm above, and a cured wall 0.45 mm from its axis beside layers
+    /// 30..=40 only. The plan raises the root to 0.3 mm and tapers it to the tip
+    /// over the whole post, so at layers 30..=40 it writes about 0.2 mm: the
+    /// raised solid enters the 0.3 mm gap (0.2 + 0.3 + 0.035 > 0.45) where the
+    /// drawn 0.06 mm solid (0.395 mm) clears. The first reading drew the
+    /// piece's WIDEST radius (0.5 mm, from the thick foot) everywhere to
+    /// call "now", which already intersects the wall, and its `widest <= now`
+    /// shortcut skipped the piece outright. Red before the fix: admitted.
+    /// Green: refused. The control is the same plan with the wall 0.9 mm away
+    /// (admitted), and the second wall, an EXISTING violation beside the thick
+    /// foot, does not excuse the new intrusion above it.
+    #[test]
+    fn a_thin_stretch_raised_into_the_gap_is_refused_whatever_the_rest_of_the_piece_is() {
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let wall_at = |history: &mut crate::up_sweep::ColumnHistory, col: usize, k0: u32, k1: u32| {
+            for row in 90..=110 {
+                let cell = grid.index(row, col);
+                history.model_head[cell] = u32::try_from(history.model_spans.len()).expect("a few spans");
+                history.model_spans.push(crate::up_sweep::ShaftSpan {
+                    k_bottom: k0,
+                    k_top: k1,
+                    id: 0,
+                    next: u32::MAX,
+                });
+            }
+        };
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(0.05, 45.0, 25.0);
+        let law = law();
+        let enters = |history: &crate::up_sweep::ColumnHistory| {
+            let context = prune_context(&grid, history, &keep_out, &lean, &law);
+            let mut post = plate_post(&grid, 0, 100, 0.06);
+            post.radius_mm = (0..80).map(|layer| if layer < 10 { 0.5 } else { 0.06 }).collect();
+            let struts = vec![post];
+            let state = super::TieState::build(&context, &struts);
+            let plan = super::ThickenPlan {
+                k_lo: 0,
+                k_top: 80,
+                root: 0.3,
+                top: 0.06,
+                steps: 80.0,
+                chain: vec![(0, 79)],
+                disc_growth: None,
+                over_existing_lap: false,
+                admitted_on_drawn_feet: false,
+                added_mm3: 0.0,
+            };
+            super::thickening_enters_the_gap(&context, &state, &struts, &plan)
+        };
+        let mut near = crate::up_sweep::ColumnHistory::new(&grid);
+        wall_at(&mut near, 109, 30, 40);
+        assert!(enters(&near), "the raised 0.2 mm solid enters a wall 0.45 mm away");
+        let mut far = crate::up_sweep::ColumnHistory::new(&grid);
+        wall_at(&mut far, 118, 30, 40);
+        assert!(!enters(&far), "control: a wall 0.9 mm away is not entered");
+        let mut both = crate::up_sweep::ColumnHistory::new(&grid);
+        wall_at(&mut both, 107, 0, 8); // 0.35 mm beside the thick foot: already inside its gap
+        wall_at(&mut both, 109, 30, 40);
+        assert!(enters(&both), "an existing violation elsewhere excuses nothing here");
     }
 
     /// A 10 mm plate post drawn 0.5 mm over its lowest 3 mm and 0.06 mm above

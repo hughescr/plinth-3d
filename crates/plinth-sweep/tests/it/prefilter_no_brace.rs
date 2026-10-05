@@ -107,9 +107,29 @@ fn the_prefilter_measures_no_brace_mast_or_tie() {
     // PATH HIT: at the prefilter's own coarse raster the full ladder does
     // place braces and ties at this pose, so the zeros below are the knob's
     // doing and not the raster's.
-    let full = demand_sweep_up(&mesh, &coarse, up);
+    //
+    // RE-PINNED 2026-10-05 (challenger round 2 of fix/drawn-solid-clearance):
+    // the witness ladder also runs without the member-against-model clearance.
+    // The thickening refusal now compares the plan with the profile drawn at
+    // each slot (it no longer excuses a slot because a wider one stands
+    // elsewhere in the piece), and at this raster the half-diagonal term
+    // (0.35 mm) exceeds the 0.3 mm gap, so it refused 151 thickenings and the
+    // ladder placed 0 braces and 0 ties here (was 4 and 11). The production
+    // prefilter runs no tie pass and reads neither rule; the witness only has
+    // to show that a ladder places braces and ties at this pose.
+    let full = demand_sweep_up(&mesh, &coarse.without_member_clearance(), up);
     let (full_braces, full_ties) = (count(&full, StrutKind::Brace), count(&full, StrutKind::Tie));
     println!("coarse sweep, ties on: {full_braces} braces, {full_ties} ties, {} arms", count(&full, StrutKind::Arm));
+    let lane = &full.report.slenderness_lane;
+    println!(
+        "slenderness lane: tie passes {}, thickened {}, thickenings refused (radius {}, disc {}, model {}), braces added {}",
+        lane.tie_passes,
+        lane.members_thickened,
+        lane.thicken_refused_radius,
+        lane.thicken_refused_disc,
+        lane.thicken_refused_model,
+        lane.braces_added
+    );
     assert!(full_braces > 0 && full_ties > 0, "path hit: the full coarse ladder placed {full_braces} braces, {full_ties} ties");
 
     let table = OrientFaceTable::build(&mesh, "exact").expect("a closed fixture scores");
