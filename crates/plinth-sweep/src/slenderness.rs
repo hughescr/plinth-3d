@@ -3928,8 +3928,10 @@ fn thickening_enters_the_gap(
     let gap = context.final_clearance_mm;
     let factor = context.lean.face_zone_factor();
     let lift = |point: [f64; 3]| [point[0], point[1], point[2] + context.plate_z_mm];
-    // The members the plan raises, with their two ends on the raster's frame.
-    let members: Vec<(usize, usize, usize, [f64; 3], [f64; 3])> = plan
+    // The members the plan raises, with their two ends on the raster's frame:
+    // (position in the chain, strut index, raised up to layer, seat, base).
+    type Raised = (usize, usize, usize, [f64; 3], [f64; 3]);
+    let members: Vec<Raised> = plan
         .chain
         .iter()
         .enumerate()
@@ -3979,7 +3981,9 @@ fn thickening_enters_the_gap(
         })
         .collect();
     type Read = (f64, f64, f64, f64);
-    let mut flagged: Vec<([f64; 3], [f64; 3], Read, Read, bool)> = Vec::new();
+    // (top, bottom, committed read, drawn read, faces known).
+    type Flagged = ([f64; 3], [f64; 3], Read, Read, bool);
+    let mut flagged: Vec<Flagged> = Vec::new();
     for (slot_of, &(position, index, upto, seat, base)) in members.iter().enumerate() {
         let strut = &struts[index];
         let top_layer = upto - 1;
@@ -4179,7 +4183,7 @@ fn thickening_enters_the_gap(
         return true;
     };
     let mut enters = false;
-    for row in 0..rows {
+    for (row, slot) in flagged.iter().enumerate() {
         let committed_clears = matches!(
             verdicts.get(row),
             Some(geom_kernel::SegmentClearanceClassified::Measured { clearance_mm, .. })
@@ -4187,7 +4191,7 @@ fn thickening_enters_the_gap(
         );
         // An unknown face's zero zone reads the contact itself as inside the
         // gap: that proves nothing, so such a member is never excused.
-        let drawn_inside_already = flagged[row].4
+        let drawn_inside_already = slot.4
             && matches!(
                 verdicts.get(rows + row),
                 Some(
