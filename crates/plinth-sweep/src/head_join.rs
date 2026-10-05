@@ -814,13 +814,28 @@ fn measure(
     let grid = context.slender.grid;
     let height = context.slender.layer_height_mm;
     let mut tips: Vec<SweepStrut> = members.iter().map(|&index| struts[index].clone()).collect();
-    let faces = crate::tip_landing::tip_seat_faces(
+    let mut faces = crate::tip_landing::tip_seat_faces(
         context.mesh,
         grid,
         &tips,
         context.plate_z_mm,
         height,
         context.slender.seat_faces,
+    );
+    // The seat normal is the footprint's average, here as in the finished plan
+    // (`footprint_normal`, Craig ruling 2026-10-05).
+    crate::footprint_normal::refine(
+        &crate::footprint_normal::FootprintEnv {
+            mesh: context.mesh,
+            surface: context.surface(),
+            grid,
+            plate_z_mm: context.plate_z_mm,
+            layer_height_mm: height,
+            layer_plan: context.layer_plan,
+            rule: context.slender.seat_faces,
+        },
+        &tips,
+        &mut faces,
     );
     let arms: Vec<SweepArm> = tips
         .iter_mut()

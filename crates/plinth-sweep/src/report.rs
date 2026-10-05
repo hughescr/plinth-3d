@@ -346,6 +346,11 @@ pub struct SweepRunReport {
     /// disc graded against its seat face, the seats it moved onto the face,
     /// and the knife edges it could only warn about.
     pub seat_footprint: crate::footprint::FootprintOutcome,
+    /// The footprint normal (Craig ruling 2026-10-05): every support arm's
+    /// seat normal taken as the area-weighted average over its contact
+    /// footprint, how many moved off their seat triangle's normal and by how
+    /// much, and the tips that kept the triangle's normal.
+    pub seat_footprint_normal: crate::footprint_normal::FootprintNormalOutcome,
     /// The head-join rule (2026-09-29): member-on-arm joins graded against the
     /// trunk's seat zone, the landers moved down their trunk, the joins kept
     /// by reason, and the finished field's census.

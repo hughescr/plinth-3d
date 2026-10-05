@@ -966,6 +966,22 @@ rule) and `plinth-sweep` `tests/it/lip_seat_sized.rs` (the stilt plate and the l
 against rule off: no new overloaded host, no new overlapping root pair at a re-landed chain's
 foot; a tip moved for its section keeps it).
 
+**As built (2026-10-05, fix/footprint-normal; Craig ruling the same day).** A support arm's seat
+normal is the area-weighted average of the model's outward normal over the patch its tip ball
+touches, not the normal of the one nearest facet (`plinth_sweep::footprint_normal`, `docs/physics.md`
+§7). The pairs `(tip, face)` are one flat CSR array per pass from ONE
+`NativeSurface::faces_near_segments_batch_classified` call (degenerate segment at the ball centre,
+`within = R`) on the surface the head-join rule builds, or a `balls × faces` scan where that surface is
+absent; each face is weighted by its exact clipped area (`triangle_disc_area`, closed form, selects
+only); the segmented sum is rayon over tips with no atomics. The footprint keeps only faces the
+seat-face rule admits and that are edge-connected to the seat triangle, and falls back to the seat
+triangle's normal where the covered area is nil. It runs at the three places a seat normal is
+measured (the finished plan, `lib.rs`; the lip-seat survey, `lip_seat::live_arms`; the head-join
+measurement, `head_join::measure`), and the policy switch `SweepPolicy::footprint_normal` /
+`without_footprint_normal()` turns it off for the orientation prefilter and the sabotage drill. The
+published counters are `SweepRunReport::seat_footprint_normal` (tips moved, by how much, fallbacks,
+fixed-point residual) and the `footprint normal` line of the `prepare` log.
+
 **Corrected (2026-09-29, fix/round5-review-fixes; cross-family review of `2fc80b6..develop`).** Two
 rollbacks left geometry nothing had checked. (a) The sizing that judges a pass of re-landings runs
 with load insertion on, and a growing arm can land on a MOVED shaft; putting the mover back restored

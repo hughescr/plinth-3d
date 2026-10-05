@@ -48,6 +48,7 @@ pub(crate) mod demand_replay;
 pub mod down_sweep;
 pub mod drain;
 pub mod footprint;
+pub mod footprint_normal;
 pub(crate) mod frame;
 pub mod frame_bands;
 pub mod grid;
@@ -586,6 +587,11 @@ pub struct SweepPolicy {
     /// 2026-09-30), rather than the nearest face with any downward component.
     /// **On in production.** Sabotage and comparison only.
     pub seat_face_band: bool,
+    /// Whether a support arm's seat normal is the area-weighted average over
+    /// its contact footprint (`footprint_normal`, Craig ruling 2026-10-05)
+    /// rather than the normal of one seat triangle. **On in production.** The
+    /// orientation prefilter and the sabotage drill turn it off.
+    pub footprint_normal: bool,
     /// Whether a descent may land part-way down another arm's SHAFT, and not
     /// only on its top. **On in production.** The knob exists so a test can
     /// show that a mid-shaft junction is what a given arm chose, by putting the
@@ -878,6 +884,7 @@ impl SweepPolicy {
             straight_reach: true,
             island_seating: true,
             seat_face_band: true,
+            footprint_normal: true,
             shaft_landings: true,
             drain_keep_out: true,
             removal_span_check: true,
@@ -1119,6 +1126,16 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_seat_face_band(mut self) -> Self {
         self.seat_face_band = false;
+        self
+    }
+
+    /// Take every support arm's seat normal from its one seat triangle, as
+    /// before 2026-10-05. **The orientation prefilter and the sabotage drill
+    /// only**: the prefilter ranks poses by the arms they cost and reads no
+    /// seat normal, and the finalists' production measurement runs the pass.
+    #[must_use]
+    pub const fn without_footprint_normal(mut self) -> Self {
+        self.footprint_normal = false;
         self
     }
 
@@ -1990,6 +2007,15 @@ pub fn run_sweep_with_holes(
     } else {
         tip_landing::SeatFaceRule::any_down_facing()
     };
+    // The seat normal of a support arm is its footprint's average
+    // (`footprint_normal`, Craig ruling 2026-10-05); the same rule value is
+    // read by the lip-seat and head-join passes and the finished plan, so all
+    // three measure one normal.
+    let seat_face_rule = if policy.footprint_normal {
+        seat_face_rule
+    } else {
+        seat_face_rule.without_footprint_normal()
+    };
 
     // --- slenderness: merge, then |X|, then a mast, then a warning ---------
     //
@@ -2785,8 +2811,25 @@ pub fn run_sweep_with_holes(
     // un-merging have settled the strut set, and never during a pass that is
     // still moving arms around. The lowering drives the tip ball into it and
     // trims the ball and the first shaft segment to its plane.
-    let (seat_faces, seat_face_hits) =
+    let (mut seat_faces, seat_face_hits) =
         tip_landing::tip_seat_faces_counted(mesh, &grid, &struts, plate_z, height, seat_face_rule);
+    // THE FOOTPRINT NORMAL (Craig ruling 2026-10-05): every support arm's seat
+    // normal is the area-weighted average over the patch its tip ball touches,
+    // not the normal of the one nearest facet. The seat point stays the
+    // facet's closest point.
+    report.seat_footprint_normal = footprint_normal::refine(
+        &footprint_normal::FootprintEnv {
+            mesh,
+            surface: head_join_context.surface(),
+            grid: &grid,
+            plate_z_mm: plate_z,
+            layer_height_mm: height,
+            layer_plan: plan,
+            rule: seat_face_rule,
+        },
+        &struts,
+        &mut seat_faces,
+    );
     report.counters.seat_faces_measured = seat_face_hits.tips as u64;
     report.counters.seat_faces_steeper_passed_over = seat_face_hits.steeper_face_passed_over as u64;
     report.counters.seat_faces_fallback_any_down_facing =
@@ -4042,6 +4085,7 @@ fn build_report(
         congestion_lane: crate::congestion::CongestionOutcome::default(),
         stranded_branch: crate::stranded_branch::StrandedBranchOutcome::default(),
         seat_footprint: crate::footprint::FootprintOutcome::default(),
+        seat_footprint_normal: crate::footprint_normal::FootprintNormalOutcome::default(),
         head_join: crate::head_join::HeadJoinOutcome::default(),
         per_event: outcome.per_event.clone(),
         rigid_share: crate::rigid_share::RigidShareReport::default(),

@@ -262,6 +262,12 @@ pub fn tip_landings_of(
 pub struct SeatFaceRule {
     /// A face is a seat face when its outward unit normal's `z` is below this.
     max_normal_z: f64,
+    /// Whether a support arm's seat normal is the area-weighted average over
+    /// its contact footprint ([`crate::footprint_normal`], Craig ruling
+    /// 2026-10-05) rather than its one seat triangle's. On in every
+    /// constructor; the orientation prefilter and the sabotage drill turn it
+    /// off ([`Self::without_footprint_normal`]).
+    footprint_normal: bool,
 }
 
 impl SeatFaceRule {
@@ -278,6 +284,7 @@ impl SeatFaceRule {
         }
         Self {
             max_normal_z: -steepest_deg.to_radians().cos(),
+            footprint_normal: true,
         }
     }
 
@@ -285,7 +292,26 @@ impl SeatFaceRule {
     /// 2026-09-30. **Sabotage and comparison only.**
     #[must_use]
     pub const fn any_down_facing() -> Self {
-        Self { max_normal_z: 0.0 }
+        Self {
+            max_normal_z: 0.0,
+            footprint_normal: true,
+        }
+    }
+
+    /// The rule with the seat normal taken from one seat triangle again, as it
+    /// was before 2026-10-05. **The orientation prefilter and the sabotage
+    /// drill only.**
+    #[must_use]
+    pub const fn without_footprint_normal(mut self) -> Self {
+        self.footprint_normal = false;
+        self
+    }
+
+    /// Whether a support arm's seat normal is its footprint's average
+    /// ([`crate::footprint_normal::refine`]).
+    #[must_use]
+    pub const fn footprint_normal(&self) -> bool {
+        self.footprint_normal
     }
 
     /// The `n_z` a face's outward unit normal must be below to be carried.
@@ -294,7 +320,7 @@ impl SeatFaceRule {
         self.max_normal_z
     }
 
-    fn admits(self, normal_z: f64) -> bool {
+    pub(crate) fn admits(self, normal_z: f64) -> bool {
         normal_z < self.max_normal_z
     }
 }

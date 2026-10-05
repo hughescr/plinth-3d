@@ -430,6 +430,34 @@ half-space. That is a distinct, open question about whether the engine should pr
 *around* the plug, not merely at the entry plane; it is design work, not a physics ruling, and
 belongs to `docs/plans/support-clearance.md`.
 
+### The seat normal is the footprint's average (Craig, 2026-10-05)
+
+**Craig's ruling:** every support tip's seat normal is the AREA-WEIGHTED AVERAGE of the model's
+outward normal over its actual contact footprint, never the normal of one nearest facet. The seat
+law's `abs_cos`, the trim plane, the contact disc and the lip-seat approach angle all read it.
+
+```
+footprint = tip ball ∩ model surface,
+            restricted to faces the seat-face rule admits (never a wall or a face past the band's
+            steep end) and edge-connected to the seat triangle through such faces
+n̄         = normalize( Σ area(f) · n(f) ),   area(f) = exact area of triangle f inside the ball
+```
+
+A triangle's weight is its exact clipped area: the ball cuts the triangle's plane in a disc of
+radius `√(R² − d²)`, and the area is that disc's overlap with the triangle, in closed form (a sum
+over the three edges of the signed area of the disc inside the fan from its centre). So a patch cut
+into triangles another way has the same total weight on each plane, and the normal does not depend
+on the tessellation. Where the area is nil (no admitted connected face in the ball) the tip keeps its
+seat triangle's normal and the count says so (emit and warn). Where the average equals the seat
+triangle's normal to rounding, the triangle's bits are kept, so a flat underside (every Round disc)
+is not perturbed. Because the admitted band's steep end (57.5° from horizontal) and the lean law's
+steep end (57.5° from vertical) are the two ends of one registered band, any average of admitted
+normals is inside the printable cone and needs no clamp. Model ties are not averaged (a tie may seat
+on a wall, decision D8). The ball depends on the seat depth, which depends on the normal, so the
+measurement runs twice (seat on the facet normal, measure, re-seat on the result, measure again);
+the largest angle between the two answers is published. Built in `plinth_sweep::footprint_normal`
+(`tests/it/footprint_normal.rs`); never run in the orientation prefilter.
+
 Land-at-strike is a **ratified design principle** — the standing answer for how the engine
 should treat a stub that runs into the model — rather than a claim that every piece of it is
 built. Build status belongs to `docs/status.md`.

@@ -473,7 +473,7 @@ pub(crate) fn survey(
     plate_z_mm: f64,
     struts: &[SweepStrut],
 ) -> (Vec<SweepArm>, Vec<Option<ShaftSeatBite>>) {
-    let arms = live_arms(mesh, context, plate_z_mm, struts);
+    let arms = live_arms(mesh, context, layer_plan, plate_z_mm, struts);
     let bites = plinth_support::tip_shaft_seat_bites(&arms, layer_plan)
         .unwrap_or_else(|_| vec![None; arms.len()]);
     (arms, bites)
@@ -1954,18 +1954,35 @@ fn min_drop_mm(dx: f64, dy: f64, normal: [f64; 3], c: f64) -> Option<f64> {
 fn live_arms(
     mesh: &Mesh,
     context: &SlendernessContext<'_>,
+    layer_plan: &LayerPlan,
     plate_z_mm: f64,
     struts: &[SweepStrut],
 ) -> Vec<SweepArm> {
     let grid = context.grid;
     let height = context.layer_height_mm;
-    let faces = crate::tip_landing::tip_seat_faces(
+    let mut faces = crate::tip_landing::tip_seat_faces(
         mesh,
         grid,
         struts,
         plate_z_mm,
         height,
         context.seat_faces,
+    );
+    // The seat normal is the footprint's average, here as in the finished plan
+    // (`footprint_normal`, Craig ruling 2026-10-05), so the bite this pass
+    // measures is the bite the file gets.
+    crate::footprint_normal::refine(
+        &crate::footprint_normal::FootprintEnv {
+            mesh,
+            surface: context.model_surface,
+            grid,
+            plate_z_mm,
+            layer_height_mm: height,
+            layer_plan,
+            rule: context.seat_faces,
+        },
+        struts,
+        &mut faces,
     );
     let (mut profiles, _) = crate::adapter::drawn_profiles(struts, context.load_step_taper);
     struts

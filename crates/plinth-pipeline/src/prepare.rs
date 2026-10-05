@@ -3615,6 +3615,35 @@ fn print_sweep_disclosure(
             ""
         },
     );
+    {
+        let footprint = &report.seat_footprint_normal;
+        println!(
+            "[sweep {model}] footprint normal ({}): {} support arms seat on the area-weighted \
+             average normal over their contact footprint ({} pairs, {}); {} moved off their seat \
+             triangle's normal (mean {:.3} deg over all, max {:.2} deg; over 1 deg {}, over 5 deg \
+             {}, over 15 deg {}); {} kept the triangle's normal (no ball {}, no admitted \
+             connected area {}); largest footprint {} faces; fixed-point residual {:.4} deg",
+            if footprint.enabled { "on" } else { "off" },
+            footprint.tips,
+            footprint.pairs,
+            if footprint.pairs_from_surface {
+                "surface index"
+            } else {
+                "face scan"
+            },
+            footprint.moved,
+            footprint.mean_deg,
+            footprint.max_deg,
+            footprint.moved_over_1_deg,
+            footprint.moved_over_5_deg,
+            footprint.moved_over_15_deg,
+            footprint.fallback_no_ball + footprint.fallback_no_footprint,
+            footprint.fallback_no_ball,
+            footprint.fallback_no_footprint,
+            footprint.max_faces_in_footprint,
+            footprint.fixed_point_residual_max_deg,
+        );
+    }
     println!(
         "[sweep {model}] raft: {} pads ({} grown wider than the native pad to cover their foot, \
          {} feet sharing a pad), {} bridges, {:.4} mm3",
