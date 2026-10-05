@@ -233,7 +233,12 @@ so the zone is taken to a fixed point); a trunk raised under a flat seat is test
 on the drawn frustum, all of a plan's slots in one batch: the raise enters the gap unless the
 predicate measures the committed slot clear, and a slot counts as inside the gap already only
 where the predicate reads the drawn slot under the gap. The raster's flag is never that proof;
-without a model surface nothing is proved and a flagged raise is refused.
+without a model surface nothing is proved and a flagged raise is refused. A zone is an
+exemption, so where no face is known (no surface, or the query names none) the zone is zero,
+never the longest: the raster then reads the solid up to its contact, the flag reaches that
+refusal, and such a member is never counted inside the gap already. (The descent test without
+any surface keeps the longest zones, since placement cannot refuse every seated shaft; the
+census, which cannot run either, warns.)
 The lip-seat gate is unchanged: a member may land "no nearer than it stood".
 
 **The clearance re-route after the final sizing.** The up-sweep places an arm at a lower bound
