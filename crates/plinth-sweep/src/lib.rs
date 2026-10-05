@@ -1399,6 +1399,22 @@ pub fn run_sweep_with_drains(
     policy: &SweepPolicy,
     drains: &[DrainSpec],
 ) -> Result<SweepPlan, SweepError> {
+    run_sweep_with_holes(mesh, plan, policy, drains, &[])
+}
+
+/// [`run_sweep_with_drains`], and the vents the hollow stage drilled besides
+/// (`vents`: each hole's mouth on the outside, its axis and its radius, in
+/// the `DrainSpec` shape). A vent changes no placement and no keep-out; it is
+/// read ONLY by the hidden-cavity map ([`cavity`]), which plugs every drilled
+/// hole so that a cavity the drill opened to the air by a drain or a vent is
+/// still a cavity. With no vents the two are the same computation.
+pub fn run_sweep_with_holes(
+    mesh: &Mesh,
+    plan: &LayerPlan,
+    policy: &SweepPolicy,
+    drains: &[DrainSpec],
+    vents: &[DrainSpec],
+) -> Result<SweepPlan, SweepError> {
     let (min_z, max_z, min_x, max_x, min_y, max_y) = bounds(mesh)?;
     let plate_z = plan.z0_mm();
     let height = uniform_height(plan)?;
@@ -1458,10 +1474,15 @@ pub fn run_sweep_with_drains(
     // The hidden cavities (Craig ruling 2026-10-05; `cavity.rs`), one batch
     // over the slices at the registered hollowing pitch. A member inside one
     // is not read against the 0.3 mm final gap; outside one nothing changes.
+    // Every hole the hollow stage drilled (drains AND vents) is plugged for
+    // the flood: a drilled hole is how resin and air get out, not a way in
+    // for a hand (measured on the Cylinder: its vent, a 2 mm hole near the
+    // top of the cavity wall, let the flood into the whole cavity).
+    let drilled: Vec<DrainSpec> = drains.iter().chain(vents).copied().collect();
     history.hidden = cavity::HiddenCavity::build(
         &grid,
         &slices,
-        drains,
+        &drilled,
         plate_z,
         height,
         policy.passage_voxel_pitch_mm,

@@ -2385,12 +2385,40 @@ fn sweep_and_emit(
             )
         })
         .collect();
+    // Every hole the drill stage cut besides the drains (the vents), by its
+    // mouth on the outside, for the hidden-cavity map alone: a cavity the
+    // drill opened to the air stays a cavity (Craig ruling 2026-10-05). They
+    // move no arm and no keep-out.
+    let vents: Vec<plinth_sweep::DrainSpec> = hollowed
+        .history()
+        .hollow()
+        .drain_plan()
+        .map(|plan| {
+            plan.holes()
+                .iter()
+                .map(|hole| plinth_sweep::DrainSpec {
+                    outlet_mm: [
+                        hole.outer_exit_mm[0].get(),
+                        hole.outer_exit_mm[1].get(),
+                        hole.outer_exit_mm[2].get(),
+                    ],
+                    outward_axis: [
+                        hole.direction[0].get(),
+                        hole.direction[1].get(),
+                        hole.direction[2].get(),
+                    ],
+                    radius_mm: hole.radius_mm.get(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let started = std::time::Instant::now();
-    let plan = plinth_sweep::run_sweep_with_drains(
+    let plan = plinth_sweep::run_sweep_with_holes(
         hollowed.mesh(),
         &sweep_layers,
         &policy,
         &drains,
+        &vents,
     )
     .map_err(|source| {
         ChainStop::new(PipelineError::Sweep {
