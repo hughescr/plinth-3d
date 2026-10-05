@@ -8938,8 +8938,7 @@ mod tests {
     /// whole height, as in `thickening_refuses_a_root_that_would_enter_the_gap`.
     ///
     /// The authority is the CAVITY MAP ([`crate::cavity`], built here from the
-    /// slices of a real 8 mm box with 1.5 mm walls, the thinnest the map
-    /// seals), not the scar flag
+    /// slices of a real 8 mm box with 1.5 mm walls), not the scar flag
     /// ([`crate::SweepStrut::interior`], "model above the landing in the same
     /// column", which is also true of a recess open to the outside; challenger
     /// 2026-10-05). In all three fields the post's column has model above it,

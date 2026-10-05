@@ -25,12 +25,15 @@
 //!
 //! 1. a voxel of a lattice that extends past the model on every side is SOLID
 //!    only when every print layer it spans holds a whole cell of the model
-//!    there (the raster's carrier mask: the cell wholly inside the span in X,
-//!    and the row and both its neighbours in Y); the voxels below the plate
-//!    are solid. Whole cells, not any-overlap, because an opening must never
-//!    be sealed by rounding (challenger, 2026-10-05: the any-overlap mask
-//!    rounds a span outward in X, so a 0.8 mm opening across two cells was
-//!    closed by both neighbours);
+//!    there, PROVED from the slice's geometry in both horizontal axes
+//!    ([`crate::raster::rasterize_whole_cells`]: the cell's centre inside,
+//!    and no boundary edge through the cell's interior); the voxels below
+//!    the plate are solid. Whole cells, proved, not any-overlap and not a
+//!    row-centre sample, because an opening must never be sealed by rounding
+//!    or by sampling (challenger, 2026-10-05: the any-overlap mask rounds a
+//!    span outward in X, so a 0.8 mm opening across two cells was closed by
+//!    both neighbours; the row-centre carrier mask never saw a slit narrow in
+//!    Y that held no row centre);
 //! 2. each drain's mouth is PLUGGED with a solid ball a little wider than the
 //!    bore. A drain is a hole the model was drilled with so resin can leave;
 //!    the cavity behind it is still the cavity (a support in it still cannot
@@ -46,16 +49,16 @@
 //!    of the opening) withholds the exemption.
 //!
 //! **The direction of every error is toward NOT hidden**, which is today's
-//! behaviour (the gap applies): an opening of any width in X, or one layer
-//! high, leaves its cells open, so it lets the flood in; a wall that holds no
-//! whole cell (under about 1.5 mm) does not hold the flood, so a cavity behind
-//! a wall that thin exempts nothing (the hollow stage's minimum wall is
-//! 2.0 mm); a cavity too narrow to resolve is not enclosed air. Two limits
-//! remain, both stated: an opening in Y narrower than a row that holds no row
-//! centre is not seen by the scanline (no raster at this pitch can see it),
-//! and a lift under one voxel could not be told from a cup and the flood would
-//! call the cup enclosed (the lift is several mm in practice; the gap under
-//! the model is exterior air).
+//! behaviour (the gap applies): an opening of any width in either horizontal
+//! axis, at any phase to the lattice, or one layer high, leaves the cells it
+//! touches open, so it lets the flood in; a wall that holds no 6-connected
+//! run of whole cells (under 1.0 mm square to the lattice, more on a slant)
+//! does not hold the flood, so a cavity behind a wall that thin exempts
+//! nothing (the hollow stage's minimum wall is 2.0 mm); a cavity too narrow
+//! to resolve is not enclosed air. One limit remains, stated: a lift under
+//! one voxel could not be told from a cup and the flood would call the cup
+//! enclosed (the lift is several mm in practice; the gap under the model is
+//! exterior air).
 //!
 //! A member is hidden when EVERY sampled point along its axis is hidden: the
 //! foot (wherever it lands: plate, model or another support), a point every
@@ -74,7 +77,7 @@ use plinth_support::perception::SliceSolid;
 
 use crate::drain::DrainSpec;
 use crate::grid::Grid;
-use crate::raster::{rasterize_into, LayerMasks, RasterScratch};
+use crate::raster::{rasterize_whole_cells, RasterScratch};
 use crate::SweepStrut;
 
 /// What one build measured (the path-hit witnesses of the cavity map).
@@ -180,20 +183,24 @@ impl HiddenCavity {
 
         // The model, WHOLLY-CONTAINED cells only, and every layer a voxel
         // spans must contain the cell. This is the CONSERVATIVE side for an
-        // opening (challenger, 2026-10-05): the any-overlap mask rounds a
-        // span outward in X, so a 0.8 mm gap between two spans, standing
-        // across two coarse cells, was sealed by both neighbours and an open
-        // recess read as enclosed. A cell that an opening touches, however
-        // narrow, is NOT solid here (the carry mask requires the whole cell
-        // inside the span in X and the row and both its neighbours in Y), and
-        // a voxel that any one of its layers leaves open is not solid either
+        // opening: the any-overlap mask rounds a span outward in X, so a
+        // 0.8 mm gap between two spans, standing across two coarse cells,
+        // was sealed by both neighbours (challenger round 2, 2026-10-05); and
+        // the row-centre carrier mask samples one y per row, so a slit narrow
+        // in Y between two row centres sampled as solid wall (round 3). A
+        // cell is solid here only when the slice PROVES it solid all
+        // through ([`rasterize_whole_cells`]: its centre inside, and no
+        // boundary edge through its interior), so a cell that an opening
+        // touches, however narrow and in either axis, is NOT solid; and a
+        // voxel that any one of its layers leaves open is not solid either
         // (a slit of one layer height is an opening). The price is a thin
-        // wall: one that holds no whole cell (under about 1.5 mm) does not
-        // hold the flood, so a thinner cavity wall exempts nothing. The
-        // engine's hollow stage never makes one (its minimum wall is 2.0 mm).
+        // wall: one that holds no 6-connected run of whole cells (under
+        // 1.0 mm square to the lattice, more on a slant) does not hold the
+        // flood, so a thinner cavity wall exempts nothing. The engine's
+        // hollow stage never makes one (its minimum wall is 2.0 mm).
         let coarse = crate::grid::lay_out_at(origin_x, origin_y, pitch, nx, ny);
         let mut scratch = RasterScratch::new(&coarse);
-        let mut masks = LayerMasks::default();
+        let mut whole: Vec<bool> = Vec::new();
         let plane = ny * nx;
         // Layers that touch each voxel row, and how many of them held each
         // cell wholly.
@@ -216,10 +223,10 @@ impl HiddenCavity {
             if solids.is_empty() {
                 continue;
             }
-            rasterize_into(&coarse, solids, &mut scratch, &mut masks);
+            rasterize_whole_cells(&coarse, solids, &mut scratch, &mut whole);
             for z in lo..=hi {
                 let row = &mut held[z * plane..(z + 1) * plane];
-                for (count, &carried) in row.iter_mut().zip(&masks.carry) {
+                for (count, &carried) in row.iter_mut().zip(&whole) {
                     *count += u32::from(carried);
                 }
             }
@@ -663,6 +670,32 @@ pub(crate) mod fixtures {
         boxes(&parts)
     }
 
+    /// The sealed [`cavity_box`] with a slot cut through its +x wall over the
+    /// whole height, from `slot_lo` to `slot_hi` in y: a recess open to the
+    /// outside by an opening of that width, narrow in Y (the scanline's
+    /// sampled axis). `slot_lo == slot_hi` leaves the wall whole, as two
+    /// pieces that touch at that y.
+    pub(crate) fn cavity_box_slit_in_y(slot_lo: f64, slot_hi: f64) -> Mesh {
+        let inner = OUTER - 2.0 * WALL;
+        let lo = CENTRE - OUTER / 2.0;
+        let hi = CENTRE + OUTER / 2.0;
+        let x_wall = hi - WALL / 2.0;
+        let (y_lo, y_hi) = (lo + WALL, hi - WALL);
+        let parts: Vec<([f64; 3], f64, f64, f64)> = vec![
+            ([OUTER, OUTER, WALL], CENTRE, CENTRE, OUTER - WALL),
+            ([WALL, OUTER, OUTER - WALL], lo + WALL / 2.0, CENTRE, 0.0),
+            ([inner, WALL, OUTER - WALL], CENTRE, lo + WALL / 2.0, 0.0),
+            ([inner, WALL, OUTER - WALL], CENTRE, hi - WALL / 2.0, 0.0),
+            // The +x wall's corner blocks, and the wall in two pieces either
+            // side of the slot.
+            ([WALL, WALL, OUTER - WALL], x_wall, lo + WALL / 2.0, 0.0),
+            ([WALL, WALL, OUTER - WALL], x_wall, hi - WALL / 2.0, 0.0),
+            ([WALL, slot_lo - y_lo, OUTER - WALL], x_wall, (y_lo + slot_lo) / 2.0, 0.0),
+            ([WALL, y_hi - slot_hi, OUTER - WALL], x_wall, (slot_hi + y_hi) / 2.0, 0.0),
+        ];
+        boxes(&parts)
+    }
+
     /// The map of `mesh` on a grid over its footprint, the plate at z = 0,
     /// with `drains` plugged.
     pub(crate) fn map_of(mesh: &Mesh, drains: &[DrainSpec]) -> (HiddenCavity, Grid) {
@@ -824,8 +857,43 @@ mod tests {
         assert!(sealed.census().enclosed_voxels > 0, "control: with no slot the box encloses air");
     }
 
+    /// **AN OPENING BETWEEN TWO ROW CENTRES IS NOT SEALED EITHER**
+    /// (challenger round 3, 2026-10-05). The scanline samples one y per row,
+    /// so a slit narrow in Y that holds no row centre is invisible to it: a
+    /// 0.4 mm slot through the +x wall over the whole height at y = 2.30 to
+    /// 2.70, between the row centres 2.25 and 2.75 (row edges 2.0, 2.5, 3.0
+    /// at the production 0.5 mm pitch), samples exactly as the sealed wall.
+    /// The row-centre carrier mask (whole cell in X, the row and both its
+    /// neighbours in Y) therefore sealed it and the open recess read as
+    /// enclosed. The map now holds a cell only when the slice proves the
+    /// WHOLE cell solid in both axes (no boundary edge crosses the cell's
+    /// interior, and its centre is inside), so the slot's two edges open the
+    /// two rows they cross: nothing is enclosed, nothing hidden.
+    ///
+    /// CONTROLS, same phase, wall and construction: the wall left whole as
+    /// two pieces touching at y = 2.30 (the same off-grid joint, no opening)
+    /// encloses air and hides the middle, so the map does not open a sealed
+    /// wall at a joint; and a 0.4 mm slot at the same off-grid phase in X
+    /// (x = 2.30 to 2.70 through the +y wall; it holds no COLUMN centre
+    /// either) is open too. RED BEFORE THE FIX: the row-centre carrier mask
+    /// sealed the Y slot (58,824 enclosed voxels). SABOTAGE RUN (by hand):
+    /// `rasterize_whole_cells` with its boundary-edge clearing skipped (the
+    /// centre test alone) seals it too (55,728) and the first assertion goes
+    /// red.
+    #[test]
+    fn a_slot_between_two_row_centres_does_not_seal_a_recess() {
+        let (slot, grid) = map_of(&cavity_box_slit_in_y(2.30, 2.70), &[]);
+        assert_eq!(slot.census().enclosed_voxels, 0, "{:?}", slot.census());
+        assert!(!slot.cell_hidden(cell(&grid, CENTRE, CENTRE), layer(10.0)), "the recess is open to the outside");
+        let (whole, _) = map_of(&cavity_box_slit_in_y(2.30, 2.30), &[]);
+        assert!(whole.census().enclosed_voxels > 0, "control: the wall in two touching pieces seals {:?}", whole.census());
+        assert!(whole.cell_hidden(cell(&grid, CENTRE, CENTRE), layer(10.0)), "control: its middle is hidden");
+        let (x_slot, _) = map_of(&cavity_box_slit(2.30, 2.70), &[]);
+        assert_eq!(x_slot.census().enclosed_voxels, 0, "control: the same slot in X is open {:?}", x_slot.census());
+    }
+
     /// **THE SOLID, NOT THE CENTRELINE** (challenger, 2026-10-05). A sealed
-    /// box with 1.5 mm walls, the thinnest the map seals, its +x wall's inner
+    /// box with 1.5 mm walls (three whole cells on the lattice), its +x wall's inner
     /// face at 8.0 mm: a post 0.475 mm inside the face is hidden as a
     /// centreline and as a 0.1 mm solid; a 0.7 mm solid touches the cavity
     /// wall 0.23 mm deep and stays hidden (contact with the cavity wall is

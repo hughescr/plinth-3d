@@ -578,6 +578,51 @@ fn children_follow(
     Some(out)
 }
 
+/// One axis a landing-search proposal would draw: from `k_bottom` to `k_top`,
+/// standing in `path[layer - k_bottom]` (the seat's cell past the path's
+/// end, as [`SweepStrut::cell_at`] reads it), the foot in `base_cell` where
+/// given, with a solid of `radius_mm` about it.
+#[derive(Clone, Copy, Debug)]
+struct ProposedAxis<'a> {
+    k_bottom: usize,
+    k_top: usize,
+    base_cell: Option<usize>,
+    seat_cell: usize,
+    path: &'a [u32],
+    radius_mm: f64,
+}
+
+/// Which members of one proposal the final gap does not apply to, the mover
+/// first, then its children in order: a member whose PROPOSED axis, with the
+/// solid it would be drawn at, stands wholly in hidden voxels; a child only
+/// when the mover it follows does too. Each is asked with the geometry the
+/// trial draws, never the one it stands on now (challenger round 3,
+/// 2026-10-05). The children are asked only when the mover is hidden.
+fn proposal_hidden<'a>(
+    hidden: &crate::cavity::HiddenCavity,
+    mover: ProposedAxis<'a>,
+    children: impl Iterator<Item = ProposedAxis<'a>>,
+) -> Vec<bool> {
+    let on = |axis: &ProposedAxis<'_>| {
+        hidden.span_hidden(
+            axis.k_bottom,
+            axis.k_top,
+            |layer| match axis.base_cell {
+                Some(base) if layer == axis.k_bottom => base,
+                _ => axis
+                    .path
+                    .get(layer.wrapping_sub(axis.k_bottom))
+                    .map_or(axis.seat_cell, |cell| *cell as usize),
+            },
+            |_| axis.radius_mm,
+        )
+    };
+    let mover_hidden = on(&mover);
+    std::iter::once(mover_hidden)
+        .chain(children.map(|child| mover_hidden && on(&child)))
+        .collect()
+}
+
 /// A member drawn as the lowering will draw it, from a strut clone with its
 /// landing, base layer and path replaced and the survey's measured face.
 #[expect(
@@ -977,40 +1022,38 @@ pub(crate) fn apply(
             // ruling 2026-10-05): a mover whose PROPOSED axis, from the
             // landing it would make up to its own seat, stands wholly in
             // enclosed air ([`crate::cavity`]; whatever it would land on),
-            // is not read against the gap, and nor is a child that stands in
-            // one now and follows a mover that does. A proposal outside a
-            // cavity is read as before, so a recess open to the outside is
-            // never exempt.
-            let mover_hidden = {
-                let (base_cell, k_bottom) = (proposal.candidate.cell, proposal.candidate.k_bottom);
-                let seat_cell = struts[index_of].cell;
-                // With the SOLID the trial arm is drawn at about that axis,
-                // not the centreline alone (challenger, 2026-10-05).
-                let radius = crate::cavity::arm_radius_mm(&trial[first]);
-                context.history.hidden.span_hidden(
-                    k_bottom,
-                    struts[index_of].k_top,
-                    |layer| {
-                        if layer == k_bottom {
-                            base_cell
-                        } else {
-                            proposal
-                                .path
-                                .get(layer.wrapping_sub(k_bottom))
-                                .map_or(seat_cell, |cell| *cell as usize)
-                        }
-                    },
-                    |_| radius,
-                )
-            };
-            let hidden = |slot: usize| {
-                mover_hidden
-                    && (slot == first
-                        || context.history.hidden.member_hidden(
-                            &struts[proposal.children[slot - first - 1].0],
-                            crate::cavity::arm_radius_mm(&trial[slot]),
-                        ))
-            };
+            // is not read against the gap, and nor is a child whose proposed
+            // axis would stand in one and follows a mover that does. A proposal
+            // outside a cavity is read as before, so a recess open to the
+            // outside is never exempt.
+            //
+            // Every member is asked with the geometry the trial draws: the
+            // mover on its proposed landing and path, each child on its
+            // PROPOSED path onto the moved axis, not the path it stands on
+            // (challenger round 3, 2026-10-05: a child moved beside another
+            // wall can carry its solid out of the hidden voxels while its old
+            // axis stays inside), each with the SOLID its trial arm is drawn
+            // at (round 2).
+            let hidden_slots = proposal_hidden(
+                &context.history.hidden,
+                ProposedAxis {
+                    k_bottom: proposal.candidate.k_bottom,
+                    k_top: struts[index_of].k_top,
+                    base_cell: Some(proposal.candidate.cell),
+                    seat_cell: struts[index_of].cell,
+                    path: &proposal.path,
+                    radius_mm: crate::cavity::arm_radius_mm(&trial[first]),
+                },
+                proposal.children.iter().enumerate().map(|(offset, (child, _, path))| ProposedAxis {
+                    k_bottom: struts[*child].k_bottom,
+                    k_top: struts[*child].k_top,
+                    base_cell: None,
+                    seat_cell: struts[*child].cell,
+                    path,
+                    radius_mm: crate::cavity::arm_radius_mm(&trial[first + 1 + offset]),
+                }),
+            );
+            let hidden = |slot: usize| hidden_slots[slot - first];
             let clear = surface.is_none()
                 || (first..=first + proposal.children.len()).all(|slot| {
                     if hidden(slot) {
@@ -2725,6 +2768,77 @@ mod model_landing_tests {
 #[cfg(test)]
 mod tests {
     use super::{min_drop_mm, top_aligned};
+
+    /// **A MOVED CHILD IS ASKED ON ITS PROPOSED PATH** (challenger round 3,
+    /// 2026-10-05). The landing search exempted a follower from the final gap
+    /// when its OLD axis was hidden, although the trial draws it on its new
+    /// path onto the moved axis. A sealed 9 mm box, 1.5 mm walls, the +x
+    /// wall's inner face at 8.0 mm (hidden voxels reach x = 8.5): the mover
+    /// re-lands straight in the cell centred at x = 7.45 (a 0.3 mm solid,
+    /// hidden); its child stands straight at x = 6.0 (a 1.2 mm solid, hidden
+    /// as it stands) and follows the mover by a lean down to x = 7.45, where
+    /// its 1.2 mm solid (plus the quarter-voxel sampling margin, to 8.775)
+    /// reaches the wall's outer voxels. Its centreline stays in the cavity
+    /// all the way.
+    ///
+    /// The child as proposed is NOT exempt (it is read against the gap, as
+    /// any member outside a cavity is). CONTROLS: the same child asked on its
+    /// standing path is exempt (the old answer, and the anti-vacuity: the
+    /// child WAS hidden); the same lean at a 0.3 mm solid stays hidden (it is
+    /// the solid that leaves, not the centreline); in an open-sided pocket
+    /// nothing is exempt. SABOTAGE RUN (by hand): `proposal_hidden` reading
+    /// each child with an empty path (its seat's cell all the way down, the
+    /// straight axis it stands on) exempts the lean child, and the first
+    /// assertion goes red (`[true, true]`).
+    #[test]
+    fn a_moved_child_is_asked_on_its_proposed_path_not_the_one_it_stands_on() {
+        use super::{proposal_hidden, ProposedAxis};
+        use crate::cavity::fixtures::{cavity_box_sized, cell, layer, map_of, CENTRE};
+        let (sealed, grid) = map_of(&cavity_box_sized(false, false, 0.0, 9.0, 1.5), &[]);
+        let (pocket, _) = map_of(&cavity_box_sized(true, false, 0.0, 9.0, 1.5), &[]);
+        assert!(sealed.census().enclosed_voxels > 0, "{:?}", sealed.census());
+        let at = |x: f64| cell(&grid, x, CENTRE);
+        let mover = ProposedAxis {
+            k_bottom: layer(0.2),
+            k_top: layer(6.0),
+            base_cell: Some(at(7.45)),
+            seat_cell: at(7.45),
+            path: &[],
+            radius_mm: 0.3,
+        };
+        let (k_bottom, k_top) = (layer(2.0), layer(5.0));
+        #[expect(clippy::cast_precision_loss, reason = "a small layer count")]
+        let lean: Vec<u32> = (k_bottom..=k_top)
+            .map(|k| {
+                let t = (k - k_bottom) as f64 / (k_top - k_bottom) as f64;
+                u32::try_from(at(t.mul_add(6.0 - 7.45, 7.45))).expect("a small grid")
+            })
+            .collect();
+        let seat = at(6.0);
+        // A child standing at `seat`, on `path`, with a solid of `radius_mm`.
+        let child = |path, radius_mm| ProposedAxis { k_bottom, k_top, base_cell: None, seat_cell: seat, path, radius_mm };
+        let (lean, standing): (&[u32], &[u32]) = (&lean, &[]);
+        assert_eq!(
+            proposal_hidden(&sealed, mover, std::iter::once(child(lean, 1.2))),
+            vec![true, false],
+            "the moved child's solid leaves the hidden voxels"
+        );
+        assert_eq!(
+            proposal_hidden(&sealed, mover, std::iter::once(child(standing, 1.2))),
+            vec![true, true],
+            "control: as it stands, the child is hidden"
+        );
+        assert_eq!(
+            proposal_hidden(&sealed, mover, std::iter::once(child(lean, 0.3))),
+            vec![true, true],
+            "control: a thin solid on the same lean stays hidden"
+        );
+        assert_eq!(
+            proposal_hidden(&pocket, mover, std::iter::once(child(standing, 1.2))),
+            vec![false, false],
+            "control: an open pocket exempts nothing"
+        );
+    }
 
     /// Under a flat face (outward normal straight down) an axis offset `D`
     /// sideways meets the face within a limit `L` once it drops `D·cot L`:

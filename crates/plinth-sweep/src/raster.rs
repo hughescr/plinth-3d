@@ -214,6 +214,174 @@ fn fill_spans(
     }
 }
 
+/// Rasterise one layer's solids into the WHOLE-CELL mask: a cell is set only
+/// when the slice PROVES the whole cell solid, in both horizontal axes.
+///
+/// The carrier mask is whole-cell in X but samples one y per row, so an
+/// opening narrow in Y that holds no row centre (a slit through a wall from
+/// y = 2.30 to 2.70 between the row centres 2.25 and 2.75 at a 0.5 mm pitch)
+/// samples exactly as a solid wall, and the eroded mask still holds both
+/// rows (challenger round 3, 2026-10-05). The hidden-cavity flood cannot
+/// accept that: a cell that blocks the flood must be solid all through, or
+/// an open recess reads as enclosed. So this mask asks the geometry, not a
+/// sample:
+///
+/// 1. a cell is set when its CENTRE stands strictly inside a filled span of
+///    its row (the row-centre scanline, the same crossings as the masks
+///    above);
+/// 2. a cell is cleared when any boundary edge of the slice (an outer or a
+///    hole) passes through its OPEN interior.
+///
+/// A cell no boundary crosses lies wholly in one region, and its centre
+/// says which, so what remains is exactly the cells wholly inside the
+/// solid. An edge along a cell line crosses no cell's interior (a wall face
+/// on the lattice keeps its cells), and a coordinate within 1e-9 cells of a
+/// cell line is taken as on it, so the round-off of a face on the lattice
+/// does not decide the cell; an opening narrower than that is no opening.
+/// Cost: `O(edges · rows_touched + cells_crossed)`, as the scanline.
+pub fn rasterize_whole_cells(
+    grid: &Grid,
+    solids: &[SliceSolid],
+    scratch: &mut RasterScratch,
+    whole: &mut Vec<bool>,
+) {
+    whole.clear();
+    whole.resize(grid.cells(), false);
+    for row in &mut scratch.crossings {
+        row.clear();
+    }
+    scratch.crossings.resize_with(grid.rows(), Vec::new);
+    for solid in solids {
+        push_loop(grid, solid.outer().points_xy_mm(), &mut scratch.crossings);
+        for hole in solid.holes() {
+            push_loop(grid, hole.points_xy_mm(), &mut scratch.crossings);
+        }
+    }
+    for row in 0..grid.rows() {
+        let crossings = &mut scratch.crossings[row];
+        if crossings.is_empty() {
+            continue;
+        }
+        crossings.sort_by(f64::total_cmp);
+        for pair in crossings.chunks_exact(2) {
+            fill_centres(grid, row, pair[0], pair[1], whole);
+        }
+    }
+    for solid in solids {
+        clear_crossed(grid, solid.outer().points_xy_mm(), whole);
+        for hole in solid.holes() {
+            clear_crossed(grid, hole.points_xy_mm(), whole);
+        }
+    }
+}
+
+/// Set the cells of `row` whose centre stands strictly inside `(x_lo, x_hi)`.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "both bounds are clamped into [0, cols) as f64 before the cast; a column index \
+          bounded by the cell-layer budget is exact in f64"
+)]
+fn fill_centres(grid: &Grid, row: usize, x_lo: f64, x_hi: f64, whole: &mut [bool]) {
+    let (lo, hi) = (grid.col_coord(x_lo), grid.col_coord(x_hi));
+    if !(lo.is_finite() && hi.is_finite()) || hi <= lo {
+        return;
+    }
+    // Centre `i + 0.5` strictly inside: `i > lo - 0.5` and `i < hi - 0.5`.
+    let first = ((lo - 0.5).floor() + 1.0).max(0.0);
+    let last = ((hi - 0.5).ceil() - 1.0).min(grid.cols() as f64 - 1.0);
+    if last >= first {
+        let base = row * grid.cols();
+        whole[base + first as usize..=base + last as usize].fill(true);
+    }
+}
+
+/// A cell coordinate within 1e-9 cells of a cell line, taken as on it.
+fn snap_to_line(coord: f64) -> f64 {
+    let line = coord.round();
+    if (coord - line).abs() <= 1e-9 {
+        line
+    } else {
+        coord
+    }
+}
+
+/// Clear every cell whose open interior an edge of the loop `points` passes
+/// through.
+fn clear_crossed(grid: &Grid, points: &[[f64; 2]], whole: &mut [bool]) {
+    if points.len() < 2 {
+        return;
+    }
+    for index in 0..points.len() {
+        let a = points[index];
+        let b = points[(index + 1) % points.len()];
+        clear_edge(grid, a, b, whole);
+    }
+}
+
+/// Clear the cells whose OPEN interior the segment `a`-`b` meets. Cell
+/// `(row j, col i)` is the open square `(i, i + 1) × (j, j + 1)` in cell
+/// coordinates.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "row and column bounds are clamped into the grid as f64 before every cast; indices \
+          bounded by the cell-layer budget are exact in f64"
+)]
+fn clear_edge(grid: &Grid, a: [f64; 2], b: [f64; 2], whole: &mut [bool]) {
+    let (u0, v0) = (snap_to_line(grid.col_coord(a[0])), snap_to_line(grid.row_coord(a[1])));
+    let (u1, v1) = (snap_to_line(grid.col_coord(b[0])), snap_to_line(grid.row_coord(b[1])));
+    if !(u0.is_finite() && v0.is_finite() && u1.is_finite() && v1.is_finite()) {
+        return;
+    }
+    let (cols, rows) = (grid.cols() as f64, grid.rows() as f64);
+    // The cells of row `row` whose open column interval `(i, i + 1)` meets
+    // the closed interval `[u_lo, u_hi]` traced in that row's open band; a
+    // single point on a column line meets none.
+    let mut clear_run = |row: f64, u_lo: f64, u_hi: f64| {
+        if row < 0.0 || row >= rows {
+            return;
+        }
+        let (first, last) = if u_lo == u_hi {
+            if u_lo == u_lo.floor() {
+                return;
+            }
+            (u_lo.floor(), u_lo.floor())
+        } else {
+            (u_lo.floor(), u_hi.ceil() - 1.0)
+        };
+        let (first, last) = (first.max(0.0), last.min(cols - 1.0));
+        if last < first {
+            return;
+        }
+        let base = row as usize * grid.cols();
+        whole[base + first as usize..=base + last as usize].fill(false);
+    };
+    if v0 == v1 {
+        // Along a row line it crosses no cell's interior.
+        if v0 != v0.floor() {
+            clear_run(v0.floor(), u0.min(u1), u0.max(u1));
+        }
+        return;
+    }
+    let ((lo_u, lo_v), (hi_u, hi_v)) = if v0 < v1 { ((u0, v0), (u1, v1)) } else { ((u1, v1), (u0, v0)) };
+    let slope = (hi_u - lo_u) / (hi_v - lo_v);
+    // Rows `j` with `j < hi_v` and `j + 1 > lo_v`: the open bands the segment
+    // runs through for a positive length.
+    let first = lo_v.floor().max(0.0);
+    let last = (hi_v.ceil() - 1.0).min(rows - 1.0);
+    let mut row = first;
+    while row <= last {
+        let (v_a, v_b) = (lo_v.max(row), hi_v.min(row + 1.0));
+        let u_a = if v_a == lo_v { lo_u } else { slope.mul_add(v_a - lo_v, lo_u) };
+        let u_b = if v_b == hi_v { hi_u } else { slope.mul_add(v_b - lo_v, lo_u) };
+        clear_run(row, u_a.min(u_b), u_a.max(u_b));
+        row += 1.0;
+    }
+}
+
 /// Erode the raw carrier mask by one cell in Y.
 ///
 /// The span rule above gives full containment in X only, because the scanline
