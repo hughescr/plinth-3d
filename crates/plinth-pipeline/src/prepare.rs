@@ -3622,7 +3622,10 @@ fn print_sweep_disclosure(
              average normal over their contact footprint ({} pairs, {}); {} moved off their seat \
              triangle's normal (mean {:.3} deg over all, max {:.2} deg; over 1 deg {}, over 5 deg \
              {}, over 15 deg {}); {} kept the triangle's normal (no ball {}, no admitted \
-             connected area {}); largest footprint {} faces; fixed-point residual {:.4} deg",
+             connected area {}); largest footprint {} faces; fixed-point residual {:.4} deg; \
+             slides measured at the moved ball {} (largest change {:.3} deg); emitted field \
+             re-measured: {} normals changed (largest {:.4} deg), {} discs graded again, {} \
+             now off their face",
             if footprint.enabled { "on" } else { "off" },
             footprint.tips,
             footprint.pairs,
@@ -3642,7 +3645,20 @@ fn print_sweep_disclosure(
             footprint.fallback_no_footprint,
             footprint.max_faces_in_footprint,
             footprint.fixed_point_residual_max_deg,
+            footprint.slid_remeasured,
+            footprint.slid_max_change_deg,
+            footprint.final_changed,
+            footprint.final_max_change_deg,
+            footprint.final_regraded,
+            footprint.final_off_face.len(),
         );
+        for (strut, fraction) in &footprint.final_off_face {
+            println!(
+                "[sweep {model}] WARNING footprint normal: member {strut}'s contact disc, graded \
+                 on the ball it is drawn with, has {:.1} % of its samples on its face",
+                fraction * 100.0
+            );
+        }
     }
     println!(
         "[sweep {model}] raft: {} pads ({} grown wider than the native pad to cover their foot, \

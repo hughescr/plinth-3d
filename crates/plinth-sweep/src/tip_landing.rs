@@ -408,6 +408,22 @@ pub fn tip_seat_faces(
     seat_faces(mesh, grid, struts, plate_z_mm, layer_height_mm, rule, false).0
 }
 
+/// [`tip_seat_faces`], and the MESH FACE ID of each tip's carried face (its
+/// seat triangle), in strut order: the identity the footprint normal seeds its
+/// connected patch from ([`crate::footprint_normal`]).
+#[must_use]
+pub fn tip_seat_faces_with_ids(
+    mesh: &Mesh,
+    grid: &Grid,
+    struts: &[SweepStrut],
+    plate_z_mm: f64,
+    layer_height_mm: f64,
+    rule: SeatFaceRule,
+) -> (Vec<Option<CarriedFace>>, Vec<Option<u32>>) {
+    let (faces, _, ids) = seat_faces(mesh, grid, struts, plate_z_mm, layer_height_mm, rule, false);
+    (faces, ids)
+}
+
 /// [`tip_seat_faces`], and what the rule did ([`SeatFaceHits`]).
 ///
 /// Counting needs a second closest-point pass over the faces the rule refused,
@@ -422,10 +438,26 @@ pub fn tip_seat_faces_counted(
     layer_height_mm: f64,
     rule: SeatFaceRule,
 ) -> (Vec<Option<CarriedFace>>, SeatFaceHits) {
+    let (faces, hits, _) = seat_faces(mesh, grid, struts, plate_z_mm, layer_height_mm, rule, true);
+    (faces, hits)
+}
+
+/// [`tip_seat_faces_counted`], and each tip's seat triangle id
+/// ([`tip_seat_faces_with_ids`]).
+#[must_use]
+pub fn tip_seat_faces_counted_with_ids(
+    mesh: &Mesh,
+    grid: &Grid,
+    struts: &[SweepStrut],
+    plate_z_mm: f64,
+    layer_height_mm: f64,
+    rule: SeatFaceRule,
+) -> (Vec<Option<CarriedFace>>, SeatFaceHits, Vec<Option<u32>>) {
     seat_faces(mesh, grid, struts, plate_z_mm, layer_height_mm, rule, true)
 }
 
-/// The one derivation behind [`tip_seat_faces`] and [`tip_seat_faces_counted`].
+/// The one derivation behind the `tip_seat_faces*` family: the carried faces,
+/// what the rule did, and each tip's seat triangle id (a mesh face index).
 fn seat_faces(
     mesh: &Mesh,
     grid: &Grid,
@@ -434,21 +466,23 @@ fn seat_faces(
     layer_height_mm: f64,
     rule: SeatFaceRule,
     count: bool,
-) -> (Vec<Option<CarriedFace>>, SeatFaceHits) {
+) -> (Vec<Option<CarriedFace>>, SeatFaceHits, Vec<Option<u32>>) {
     let mut faces = vec![None; struts.len()];
+    let mut ids: Vec<Option<u32>> = vec![None; struts.len()];
     let mut hits = SeatFaceHits::default();
     let all_landings = tip_landings_of(grid, struts, plate_z_mm, layer_height_mm);
     if all_landings.is_empty() {
-        return (faces, hits);
+        return (faces, hits, ids);
     }
     // The mesh is outward-oriented, so a face normal already points AWAY from
     // the material — which is the direction seating moves against.
-    let every_face: Vec<([[f64; 3]; 3], [f64; 3])> = triangles_of(mesh)
+    let every_face: Vec<([[f64; 3]; 3], [f64; 3], u32)> = triangles_of(mesh)
         .into_iter()
-        .filter_map(|triangle| {
+        .enumerate()
+        .filter_map(|(id, triangle)| {
             let [a, b, c] = triangle;
             let unit = vec3::normalize(vec3::cross(vec3::sub(b, a), vec3::sub(c, a)))?;
-            Some((triangle, unit))
+            Some((triangle, unit, u32::try_from(id).ok()?))
         })
         .collect();
     // A MODEL TIE (Craig ruling 2026-10-03, D8) holds a post sideways and
@@ -463,27 +497,29 @@ fn seat_faces(
                 .is_some_and(|strut| strut.kind == crate::StrutKind::Tie)
         });
     if !tie_landings.is_empty() {
-        let triangles: Vec<[[f64; 3]; 3]> = every_face.iter().map(|(triangle, _)| *triangle).collect();
+        let triangles: Vec<[[f64; 3]; 3]> =
+            every_face.iter().map(|(triangle, _, _)| *triangle).collect();
         for (landing, found) in tie_landings.iter().zip(nearest_faces(&triangles, &tie_landings)) {
             let Some((face, _)) = found else { continue };
-            let ([a, b, c], unit) = every_face[face];
+            let ([a, b, c], unit, id) = every_face[face];
             if let Some(slot) = faces.get_mut(landing.strut) {
                 *slot = Some((unit, closest_on_tri(landing.point_mm, a, b, c)));
+                ids[landing.strut] = Some(id);
                 hits.tips += 1;
                 hits.model_ties += 1;
             }
         }
     }
     if landings.is_empty() {
-        return (faces, hits);
+        return (faces, hits, ids);
     }
-    let down_facing: Vec<([[f64; 3]; 3], [f64; 3])> = every_face
+    let down_facing: Vec<([[f64; 3]; 3], [f64; 3], u32)> = every_face
         .into_iter()
-        .filter(|(_, unit)| unit[2] < 0.0)
+        .filter(|(_, unit, _)| unit[2] < 0.0)
         .collect();
     let (admitted, refused): (Vec<_>, Vec<_>) = down_facing
         .into_iter()
-        .partition(|(_, unit)| rule.admits(unit[2]));
+        .partition(|(_, unit, _)| rule.admits(unit[2]));
     // Emit and warn: a mesh with no overhang face at all keeps every
     // down-facing face, and says so.
     let (carried, passed_over) = if admitted.is_empty() {
@@ -492,10 +528,11 @@ fn seat_faces(
     } else {
         (admitted, refused)
     };
-    let triangles: Vec<[[f64; 3]; 3]> = carried.iter().map(|(triangle, _)| *triangle).collect();
+    let triangles: Vec<[[f64; 3]; 3]> = carried.iter().map(|(triangle, _, _)| *triangle).collect();
     let nearest = nearest_faces(&triangles, &landings);
     if count && !passed_over.is_empty() {
-        let steep: Vec<[[f64; 3]; 3]> = passed_over.iter().map(|(triangle, _)| *triangle).collect();
+        let steep: Vec<[[f64; 3]; 3]> =
+            passed_over.iter().map(|(triangle, _, _)| *triangle).collect();
         hits.steeper_face_passed_over = nearest_faces(&steep, &landings)
             .iter()
             .zip(&nearest)
@@ -507,14 +544,15 @@ fn seat_faces(
     }
     for (landing, found) in landings.iter().zip(&nearest) {
         let Some((face, _)) = *found else { continue };
-        let ([a, b, c], unit) = carried[face];
+        let ([a, b, c], unit, id) = carried[face];
         let point = closest_on_tri(landing.point_mm, a, b, c);
         if let Some(slot) = faces.get_mut(landing.strut) {
             *slot = Some((unit, point));
+            ids[landing.strut] = Some(id);
             hits.tips += 1;
         }
     }
-    (faces, hits)
+    (faces, hits, ids)
 }
 
 /// One read of the mesh's vertex triples, in face order.

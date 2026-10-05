@@ -974,8 +974,11 @@ touches, not the normal of the one nearest facet (`plinth_sweep::footprint_norma
 `within = R`) on the surface the head-join rule builds, or a `balls × faces` scan where that surface is
 absent; each face is weighted by its exact clipped area (`triangle_disc_area`, closed form, selects
 only); the segmented sum is rayon over tips with no atomics. The footprint keeps only faces the
-seat-face rule admits and that are edge-connected to the seat triangle, and falls back to the seat
-triangle's normal where the covered area is nil. It runs at the three places a seat normal is
+seat-face rule admits and that connect to the seat triangle (by identity) across shared edges that
+enter the ball, and falls back to the seat triangle's normal where the covered area is nil or the
+seat triangle's patch is absent from the ball. The footprint rule's slides are validated with the
+normal re-measured at the moved ball, and the emitted field is measured once more (changed tips
+graded again). It runs at the three places a seat normal is
 measured (the finished plan, `lib.rs`; the lip-seat survey, `lip_seat::live_arms`; the head-join
 measurement, `head_join::measure`), and the policy switch `SweepPolicy::footprint_normal` /
 `without_footprint_normal()` turns it off for the orientation prefilter and the sabotage drill. The

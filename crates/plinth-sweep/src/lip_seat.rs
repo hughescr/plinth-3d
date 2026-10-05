@@ -1960,7 +1960,7 @@ fn live_arms(
 ) -> Vec<SweepArm> {
     let grid = context.grid;
     let height = context.layer_height_mm;
-    let mut faces = crate::tip_landing::tip_seat_faces(
+    let (mut faces, seat_triangles) = crate::tip_landing::tip_seat_faces_with_ids(
         mesh,
         grid,
         struts,
@@ -1983,6 +1983,7 @@ fn live_arms(
         },
         struts,
         &mut faces,
+        &seat_triangles,
     );
     let (mut profiles, _) = crate::adapter::drawn_profiles(struts, context.load_step_taper);
     struts

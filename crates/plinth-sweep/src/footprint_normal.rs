@@ -23,7 +23,8 @@
 //! ```text
 //! footprint   = ball ∩ model surface
 //!             restricted to the faces the seat-face rule admits,
-//!             and edge-connected to the seat triangle through such faces
+//!             and connected to the SEAT TRIANGLE through such faces,
+//!             across edges that themselves enter the ball
 //! area(f)     = exact area of triangle f inside the ball
 //!             = area of triangle f ∩ the disc the ball cuts in f's plane,
 //!               radius sqrt(R² - d²), centred on the projection of C
@@ -41,16 +42,47 @@
 //!   (ruling 2026-09-30). The band's steep end and the lean law's steep end
 //!   are the two ends of one registered band, so any average of admitted
 //!   normals is inside the printable cone and needs no clamp.
-//! * **Edge-connected.** The far side of a thin wall, or a second sheet the
-//!   ball overlaps, is not part of the patch the tip touches. The walk is
-//!   over the admitted faces of the tip's own row, seeded at the admitted
-//!   face nearest the seat point.
+//! * **Connected through the ball.** The far side of a thin wall, or a second
+//!   sheet the ball overlaps, is not part of the patch the tip touches. Two
+//!   admitted triangles are joined when they share a mesh edge AND that edge
+//!   enters the ball: the footprint is the connected component of
+//!   `ball ∩ surface`, and a shared edge wholly outside the ball joins nothing
+//!   there. That is what makes the patch independent of the tessellation:
+//!   cut a triangle along a line and the new edges lie in the old triangle,
+//!   so a join through them is a join through the same point set. (A first
+//!   cut joined triangles on a shared edge wherever it lay; a ridge edge
+//!   outside the ball then joined two sides that a finer cut of the same
+//!   surface left apart.)
+//! * **Seeded at the seat triangle.** The walk starts at the seat triangle the
+//!   seat-face measurement chose ([`crate::tip_landing::tip_seat_faces_with_ids`]),
+//!   by identity. Where that triangle's patch does not reach the ball (the ball
+//!   overlaps only some other, disconnected sheet) there is NO footprint and
+//!   the tip keeps the seat triangle's own normal; the walk never re-seeds on
+//!   another sheet.
 //! * **No area, no change.** Where the covered area is nil (no admitted face
 //!   in the ball, or the ball could not be built) the tip keeps its seat
 //!   triangle's normal, and the count says so (emit and warn, never refuse).
 //! * **Flat faces are untouched.** Where the average equals the seat
 //!   triangle's normal to rounding the seat triangle's own bits are kept, so
 //!   a flat underside (every Round disc) is byte-identical.
+//!
+//! # The normal describes the geometry the file gets
+//!
+//! The ball a tip is drawn with depends on the normal (the seat law reads it),
+//! and the footprint grade and the seat moves ([`crate::footprint`]) read the
+//! ball. So the measurement is made on the arm as it is drawn, three times:
+//!
+//! 1. **Before the moves** ([`refine`]): the arm as planned, for the lip-seat
+//!    survey, the head-join measurement and the move search.
+//! 2. **Inside the move validation** ([`crate::footprint::apply`]): each
+//!    proposed slide is re-measured at the MOVED ball (the seat triangle
+//!    re-derived at the moved seat, [`reseat_sites`]), and the disc that is
+//!    graded against the face, the section test and the lowering are all
+//!    built from that normal. A move is accepted on the geometry it will have.
+//! 3. **On the emitted field** ([`remeasure_emitted`]): the arms exactly as the
+//!    adapter hands them to the lowering (seat slides, followers' ends), the
+//!    normal measured once more, and every tip whose normal changed has its
+//!    disc graded again ([`crate::footprint::regrade`]).
 //!
 //! # Batch design
 //!
@@ -63,10 +95,11 @@
 //!   ([`footprint_pairs`]).
 //! * One parallel pass over tips ([`footprint_normals`]): rayon over rows,
 //!   each row a segmented sum, no atomics, no shared mutable state.
-//! * Two passes ([`refine`]): the ball depends on the seat depth, which
-//!   depends on the normal. Seat along the facet normal, measure the
-//!   footprint normal, re-seat along it, measure again. The largest angle
-//!   between the two answers is published ([`FootprintNormalOutcome`]).
+//! * Two passes per measurement ([`measure_arms`]): the ball depends on the
+//!   seat depth, which depends on the normal. Seat along the starting normal,
+//!   measure the footprint normal, re-seat along it, measure again. The
+//!   largest angle between the two answers is published
+//!   ([`FootprintNormalOutcome`]).
 //! * Ties are left alone: a model tie may seat on a wall (decision D8), so its
 //!   "admitted faces" are every face.
 //! * The orientation prefilter never runs it
@@ -75,11 +108,12 @@
 use geom_kernel::{closest_on_tri, vec3, NativeSurface, NearFaceBatchLimits};
 use plinth_core::LayerPlan;
 use plinth_mesh::Mesh;
+use plinth_support::SweepArm;
 use rayon::prelude::*;
 
 use crate::grid::Grid;
 use crate::tip_landing::{CarriedFace, SeatFaceRule};
-use crate::{StrutKind, SweepStrut};
+use crate::{Footprint, StrutKind, SweepStrut};
 
 /// How far two unit normals may differ, per component, and still be the same
 /// normal: a few ULPs of `f64`. A footprint average that lands inside this of
@@ -264,10 +298,10 @@ pub struct FootprintBall {
     /// The tip ball's centre and radius.
     pub centre_mm: [f64; 3],
     pub radius_mm: f64,
-    /// The seat point the tip carries today (the closest point of its seat
-    /// triangle): the connected patch is the one through the admitted face
-    /// nearest to it.
-    pub seed_mm: [f64; 3],
+    /// The SEAT TRIANGLE's mesh face id: the connected patch is the one that
+    /// contains it. Where that triangle is not in the ball (or not admitted)
+    /// the answer is "no footprint".
+    pub seat_face: u32,
     /// The seat triangle's own outward unit normal: the answer where the
     /// footprint has no area, and the bits kept where the average equals it.
     pub facet_normal: [f64; 3],
@@ -307,12 +341,22 @@ pub fn footprint_normals(
         .collect()
 }
 
-/// A face of a row: its vertex ids, outward unit normal and clipped area.
+/// A face of a row: its mesh id, vertex ids, outward unit normal and clipped
+/// area.
 struct RowFace {
+    face: u32,
     ids: [u32; 3],
     normal: [f64; 3],
     area_mm2: f64,
-    distance_to_seed_mm: f64,
+}
+
+/// The distance from `point` to the segment `a`–`b`.
+fn distance_to_segment(point: [f64; 3], a: [f64; 3], b: [f64; 3]) -> f64 {
+    let d = vec3::sub(b, a);
+    let length_squared = vec3::dot(d, d);
+    let safe = if length_squared > 0.0 { length_squared } else { 1.0 };
+    let t = (vec3::dot(vec3::sub(point, a), d) / safe).clamp(0.0, 1.0);
+    vec3::dist(point, vec3::add(a, vec3::scale(d, t)))
 }
 
 fn footprint_of_row(
@@ -322,8 +366,8 @@ fn footprint_of_row(
     ball: &FootprintBall,
 ) -> Option<FootprintNormal> {
     let mut admitted: Vec<RowFace> = Vec::with_capacity(row.len());
-    for &id in row {
-        let Some(&ids) = tris.get(id as usize) else { continue };
+    for &face in row {
+        let Some(&ids) = tris.get(face as usize) else { continue };
         let (Some(&a), Some(&b), Some(&c)) = (
             verts.get(ids[0] as usize),
             verts.get(ids[1] as usize),
@@ -341,24 +385,21 @@ fn footprint_of_row(
             continue;
         }
         admitted.push(RowFace {
+            face,
             ids,
             normal,
             area_mm2: triangle_disc_area([a, b, c], ball.centre_mm, ball.radius_mm),
-            distance_to_seed_mm: vec3::dist(ball.seed_mm, closest_on_tri(ball.seed_mm, a, b, c)),
         });
     }
-    // THE SEED: the admitted face nearest the seat point (lowest index on a tie).
-    let mut seed: Option<usize> = None;
-    let mut best = f64::INFINITY;
-    for (index, face) in admitted.iter().enumerate() {
-        if face.distance_to_seed_mm < best {
-            best = face.distance_to_seed_mm;
-            seed = Some(index);
-        }
-    }
-    let seed = seed?;
-    // EDGE CONNECTIVITY through admitted faces of this row: union faces that
-    // share a vertex pair.
+    // THE SEED IS THE SEAT TRIANGLE, by identity. A row is ascending by face id.
+    // If the seat triangle is not an admitted face of the ball there is no
+    // footprint: the ball may overlap another, disconnected sheet, and that
+    // sheet is not what this tip seats on.
+    let seed = admitted.iter().position(|face| face.face == ball.seat_face)?;
+    // EDGE CONNECTIVITY through admitted faces of this row: union two faces
+    // that share a mesh edge when that edge ENTERS the ball. An edge wholly
+    // outside the ball joins nothing: the ball touches the two faces on its
+    // two separate sides.
     let mut parent: Vec<usize> = (0..admitted.len()).collect();
     fn find(parent: &mut [usize], mut node: usize) -> usize {
         while parent[node] != node {
@@ -374,11 +415,19 @@ fn footprint_of_row(
     }
     edges.sort_unstable();
     for pair in edges.windows(2) {
-        if pair[0].0 == pair[1].0 && pair[0].1 == pair[1].1 {
-            let (x, y) = (find(&mut parent, pair[0].2), find(&mut parent, pair[1].2));
-            if x != y {
-                parent[x.max(y)] = x.min(y);
-            }
+        if pair[0].0 != pair[1].0 || pair[0].1 != pair[1].1 {
+            continue;
+        }
+        let (Some(&p), Some(&q)) = (verts.get(pair[0].0 as usize), verts.get(pair[0].1 as usize))
+        else {
+            continue;
+        };
+        if distance_to_segment(ball.centre_mm, p, q) > ball.radius_mm {
+            continue;
+        }
+        let (x, y) = (find(&mut parent, pair[0].2), find(&mut parent, pair[1].2));
+        if x != y {
+            parent[x.max(y)] = x.min(y);
         }
     }
     let seed_root = find(&mut parent, seed);
@@ -426,8 +475,9 @@ pub struct FootprintNormalOutcome {
     /// Tips whose ball could not be built (no seat plane): they keep the seat
     /// triangle's normal.
     pub fallback_no_ball: usize,
-    /// Tips whose footprint had no admitted, connected area: they keep the
-    /// seat triangle's normal.
+    /// Tips whose footprint had no admitted, connected area (the seat
+    /// triangle's patch did not reach the ball): they keep the seat
+    /// triangle's normal.
     pub fallback_no_footprint: usize,
     /// Tips whose normal is not the seat triangle's, bit for bit.
     pub moved: usize,
@@ -444,6 +494,28 @@ pub struct FootprintNormalOutcome {
     pub fixed_point_residual_max_deg: f64,
     /// Most faces in any tip's connected footprint.
     pub max_faces_in_footprint: usize,
+    /// Slid tips re-measured at their moved ball inside the move validation
+    /// (path hits of [`crate::footprint::apply`]'s re-measure), and of those
+    /// the largest angle the slide changed the normal by.
+    pub slid_remeasured: usize,
+    pub slid_max_change_deg: f64,
+    /// THE EMITTED FIELD, measured once more ([`remeasure_emitted`]): the tips
+    /// whose normal differed from the one the moves were validated with, the
+    /// largest such change, and the tips whose disc, graded again on the final
+    /// ball, is not wholly on its face.
+    pub final_changed: usize,
+    pub final_max_change_deg: f64,
+    pub final_regraded: usize,
+    /// `(strut index, fraction of the disc samples on the face)`.
+    pub final_off_face: Vec<(usize, f64)>,
+}
+
+/// What [`measure_arms`] reads.
+pub struct MeasureEnv<'a> {
+    pub mesh: &'a Mesh,
+    /// The model's surface index, where one was built.
+    pub surface: Option<&'a NativeSurface>,
+    pub layer_plan: &'a LayerPlan,
 }
 
 /// What [`refine`] reads.
@@ -458,84 +530,111 @@ pub struct FootprintEnv<'a> {
     pub rule: SeatFaceRule,
 }
 
+impl<'a> FootprintEnv<'a> {
+    fn measure_env(&self) -> MeasureEnv<'a> {
+        MeasureEnv {
+            mesh: self.mesh,
+            surface: self.surface,
+            layer_plan: self.layer_plan,
+        }
+    }
+}
+
+/// One support arm's seat, as the footprint measurement needs it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TipSite {
+    /// The seat triangle's mesh face id: the nearest face the seat-face rule
+    /// admits to [`Self::landing_mm`] (moved by the tip's slide, if any).
+    pub face: u32,
+    /// The tip's landing point as the sweep planned it (before any slide):
+    /// [`reseat_sites`] moves it by the slide to find the seat triangle there.
+    pub landing_mm: [f64; 3],
+    /// The seat triangle's outward unit normal.
+    pub facet_normal: [f64; 3],
+    /// The admission threshold ([`SeatFaceRule::max_normal_z`], or the
+    /// any-down-facing one where the mesh had no admitted face).
+    pub max_normal_z: f64,
+}
+
+/// One tip's measured normal.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Measured {
+    /// The normal to seat with: the footprint's, or the seat triangle's where
+    /// there is no footprint or no ball.
+    pub normal: [f64; 3],
+    /// The ball could not be built (no seat plane) in the last pass.
+    pub no_ball: bool,
+    /// The last pass found no admitted, connected area (and a ball existed).
+    pub no_footprint: bool,
+    /// The angle between the first pass's answer and the second's.
+    pub residual_deg: f64,
+    /// Faces in the last pass's footprint.
+    pub faces: usize,
+}
+
+/// A measurement of many tips, and what it cost.
+pub struct Measurement {
+    /// In arm order; `None` where the arm has no site.
+    pub tips: Vec<Option<Measured>>,
+    pub pairs: usize,
+    pub pairs_from_surface: bool,
+}
+
 fn angle_deg(a: [f64; 3], b: [f64; 3]) -> f64 {
     vec3::dot(a, b).clamp(-1.0, 1.0).acos().to_degrees()
 }
 
-/// Replace every support arm's seat normal in `faces` (one facet's unit normal
-/// and closest point, [`crate::tip_landing::tip_seat_faces`]'s answer, in
-/// strut order) by its FOOTPRINT normal. The seat point is not changed.
+/// Measure the footprint normal of every arm that has a site, ON THE ARM AS
+/// GIVEN (its seat, base and tip radius; the first pass seats it on its seat
+/// triangle's normal, [`TipSite::facet_normal`], and the `seat_normal_mm` the
+/// arm carries is not read): two
+/// batched passes (module doc). `None` only when the request itself was
+/// unusable (no layer plan): nothing is measured.
 ///
-/// Two batched passes (module doc): the ball is built from the arm with the
-/// current normal, the footprint measured about it, the arm re-seated on the
-/// result and the footprint measured again. A rule without the footprint
-/// switch, a tie, a brace, a mast, and any tip with no face are left alone.
-pub fn refine(
-    env: &FootprintEnv<'_>,
-    struts: &[SweepStrut],
-    faces: &mut [Option<CarriedFace>],
-) -> FootprintNormalOutcome {
-    let mut outcome = FootprintNormalOutcome {
-        enabled: env.rule.footprint_normal(),
-        ..FootprintNormalOutcome::default()
-    };
-    if !outcome.enabled {
-        return outcome;
-    }
-    let tips: Vec<usize> = (0..struts.len().min(faces.len()))
-        .filter(|&index| struts[index].kind == StrutKind::Arm && faces[index].is_some())
+/// `arms` and `sites` are index-aligned. An arm with no site, and a brace or
+/// mast, is not measured.
+#[must_use]
+pub fn measure_arms(
+    env: &MeasureEnv<'_>,
+    arms: &[SweepArm],
+    sites: &[Option<TipSite>],
+) -> Option<Measurement> {
+    let tips: Vec<usize> = (0..arms.len().min(sites.len()))
+        .filter(|&index| sites[index].is_some())
         .collect();
-    outcome.tips = tips.len();
+    let mut result = Measurement {
+        tips: vec![None; arms.len()],
+        pairs: 0,
+        pairs_from_surface: env.surface.is_some(),
+    };
     if tips.is_empty() {
-        return outcome;
+        return Some(result);
     }
-    // Per tip: the seat triangle's normal and point, the admission threshold
-    // (the rule, or every down-facing face where the mesh had no admitted face
-    // at all and the seat fell back), and the working normal.
-    let facet: Vec<[f64; 3]> = tips.iter().map(|&i| faces[i].map_or([0.0; 3], |f| f.0)).collect();
-    let seed: Vec<[f64; 3]> = tips.iter().map(|&i| faces[i].map_or([0.0; 3], |f| f.1)).collect();
-    let threshold: Vec<f64> = facet
+    // The profile never reaches the disc: the seat derivation reads the seat,
+    // the base, the tip radius and the normal. The FIRST pass seats on the
+    // seat triangle's normal whatever the arm carries, so the answer depends
+    // on the geometry alone and is the same bits wherever it is measured.
+    let mut working: Vec<SweepArm> = tips
         .iter()
-        .map(|normal| {
-            if env.rule.admits(normal[2]) {
-                env.rule.max_normal_z()
-            } else {
-                SeatFaceRule::any_down_facing().max_normal_z()
-            }
+        .map(|&index| SweepArm {
+            radius_profile_mm: Vec::new(),
+            seat_normal_mm: sites[index].map_or(arms[index].seat_normal_mm, |s| s.facet_normal),
+            ..arms[index].clone()
         })
         .collect();
-    let mut current = facet.clone();
     let mut first: Vec<Option<[f64; 3]>> = vec![None; tips.len()];
-    let mut second: Vec<Option<[f64; 3]>> = vec![None; tips.len()];
+    let mut last: Vec<Option<FootprintNormal>> = vec![None; tips.len()];
     let mut no_ball = vec![false; tips.len()];
-    let mut no_footprint = vec![false; tips.len()];
-    let mut max_faces = 0_usize;
+    let mut second: Vec<Option<[f64; 3]>> = vec![None; tips.len()];
     for pass in 0..2 {
-        let arms: Vec<plinth_support::SweepArm> = tips
-            .iter()
-            .zip(&current)
-            .zip(&seed)
-            .map(|((&index, &normal), &point)| {
-                let strut = &struts[index];
-                let (seat, base) =
-                    crate::adapter::drawn_ends(env.grid, env.plate_z_mm, env.layer_height_mm, strut);
-                let mut arm = crate::adapter::sweep_arm(strut, seat, base, Some(point), Vec::new());
-                arm.seat_normal_mm = normal;
-                arm
-            })
-            .collect();
-        let Ok(discs) = plinth_support::tip_contact_discs(&arms, env.layer_plan) else {
-            // The request itself was unusable (no layer plan): nothing is
-            // measured, every tip keeps its seat triangle's normal.
-            outcome.fallback_no_ball = tips.len();
-            return outcome;
-        };
+        let discs = plinth_support::tip_contact_discs(&working, env.layer_plan).ok()?;
         let mut rows_of: Vec<usize> = Vec::with_capacity(tips.len());
         let mut centres: Vec<[f64; 3]> = Vec::with_capacity(tips.len());
         let mut radii: Vec<f64> = Vec::with_capacity(tips.len());
         for (position, disc) in discs.iter().enumerate() {
             match disc {
                 Some(disc) => {
+                    no_ball[position] = false;
                     rows_of.push(position);
                     centres.push(disc.ball_centre_mm);
                     radii.push(disc.ball_radius_mm);
@@ -543,53 +642,233 @@ pub fn refine(
                 None => no_ball[position] = true,
             }
         }
-        let Some(pairs) = footprint_pairs(env.mesh, env.surface, &centres, &radii) else {
-            outcome.fallback_no_ball = tips.len();
-            return outcome;
-        };
-        outcome.pairs = pairs.faces.len();
-        outcome.pairs_from_surface = env.surface.is_some();
+        let pairs = footprint_pairs(env.mesh, env.surface, &centres, &radii)?;
+        result.pairs = pairs.faces.len();
         let balls: Vec<FootprintBall> = rows_of
             .iter()
             .zip(centres.iter().zip(&radii))
-            .map(|(&position, (&centre_mm, &radius_mm))| FootprintBall {
-                centre_mm,
-                radius_mm,
-                seed_mm: seed[position],
-                facet_normal: facet[position],
-                max_normal_z: threshold[position],
+            .filter_map(|(&position, (&centre_mm, &radius_mm))| {
+                let site = sites[tips[position]]?;
+                Some(FootprintBall {
+                    centre_mm,
+                    radius_mm,
+                    seat_face: site.face,
+                    facet_normal: site.facet_normal,
+                    max_normal_z: site.max_normal_z,
+                })
             })
             .collect();
         let found = footprint_normals(env.mesh, &pairs, &balls);
-        let slot = if pass == 0 { &mut first } else { &mut second };
+        last.fill(None);
         for (&position, answer) in rows_of.iter().zip(&found) {
-            match answer {
-                Some(answer) => {
-                    current[position] = answer.normal;
-                    slot[position] = Some(answer.normal);
-                    no_footprint[position] = false;
-                    max_faces = max_faces.max(answer.faces);
-                }
-                None => no_footprint[position] = true,
+            last[position] = *answer;
+            if let Some(answer) = answer {
+                working[position].seat_normal_mm = answer.normal;
+                let slot = if pass == 0 { &mut first } else { &mut second };
+                slot[position] = Some(answer.normal);
             }
         }
     }
-    outcome.max_faces_in_footprint = max_faces;
-    outcome.fallback_no_ball = no_ball.iter().filter(|&&flag| flag).count();
-    outcome.fallback_no_footprint = no_footprint
-        .iter()
-        .zip(&no_ball)
-        .filter(|(&none, &ball)| none && !ball)
-        .count();
-    let mut sum_deg = 0.0_f64;
     for (position, &index) in tips.iter().enumerate() {
-        if let (Some(a), Some(b)) = (first[position], second[position]) {
-            outcome.fixed_point_residual_max_deg =
-                outcome.fixed_point_residual_max_deg.max(angle_deg(a, b));
+        let Some(site) = sites[index] else { continue };
+        let answer = last[position];
+        result.tips[index] = Some(Measured {
+            normal: answer.map_or(site.facet_normal, |found| found.normal),
+            no_ball: no_ball[position],
+            no_footprint: answer.is_none() && !no_ball[position],
+            residual_deg: match (first[position], second[position]) {
+                (Some(a), Some(b)) => angle_deg(a, b),
+                _ => 0.0,
+            },
+            faces: answer.map_or(0, |found| found.faces),
+        });
+    }
+    Some(result)
+}
+
+/// The nearest admitted face to each query point, as the seat-face rule picks
+/// a tip's seat triangle: one parallel `points × faces` pass over the faces
+/// whose outward unit normal's `z` is below the query's own threshold, lowest
+/// face id on a tie. `(face id, its unit normal)`.
+fn nearest_admitted(mesh: &Mesh, queries: &[([f64; 3], f64)]) -> Vec<Option<(u32, [f64; 3])>> {
+    let verts = mesh.verts();
+    let tris = mesh.tris();
+    // One read of every face's unit normal, in the spelling `seat_faces` uses.
+    let faces: Vec<Option<([[f64; 3]; 3], [f64; 3])>> = tris
+        .iter()
+        .map(|tri| {
+            let a = *verts.get(tri[0] as usize)?;
+            let b = *verts.get(tri[1] as usize)?;
+            let c = *verts.get(tri[2] as usize)?;
+            let unit = vec3::normalize(vec3::cross(vec3::sub(b, a), vec3::sub(c, a)))?;
+            Some(([a, b, c], unit))
+        })
+        .collect();
+    queries
+        .par_iter()
+        .map(|&(point, max_normal_z)| {
+            let mut best = f64::INFINITY;
+            let mut found: Option<(u32, [f64; 3])> = None;
+            for (id, face) in faces.iter().enumerate() {
+                let Some(([a, b, c], unit)) = face else { continue };
+                if !(unit[2] < 0.0 && unit[2] < max_normal_z) {
+                    continue;
+                }
+                let offset = vec3::sub(point, closest_on_tri(point, *a, *b, *c));
+                let distance = vec3::dot(offset, offset);
+                if distance < best {
+                    if let Ok(id) = u32::try_from(id) {
+                        best = distance;
+                        found = Some((id, *unit));
+                    }
+                }
+            }
+            found
+        })
+        .collect()
+}
+
+/// The sites of tips that SLID, re-derived at the slid seat: the seat triangle
+/// is the nearest admitted face to the planned landing point moved by the
+/// slide ([`TipSite::landing_mm`] + `shifts_mm[i]`), exactly the rule that
+/// chose it before the slide. A tip with no slide (`None` or a zero shift) and
+/// a tip with no site keep theirs; a tip no admitted face is found for keeps
+/// its old site.
+///
+/// One batched pass over the slid tips ([`nearest_admitted`]).
+#[must_use]
+pub fn reseat_sites(
+    mesh: &Mesh,
+    sites: &[Option<TipSite>],
+    shifts_mm: &[Option<[f64; 3]>],
+) -> Vec<Option<TipSite>> {
+    let slid: Vec<usize> = (0..sites.len().min(shifts_mm.len()))
+        .filter(|&index| sites[index].is_some() && shifts_mm[index].is_some_and(|s| s != [0.0; 3]))
+        .collect();
+    let mut out = sites.to_vec();
+    if slid.is_empty() {
+        return out;
+    }
+    let queries: Vec<([f64; 3], f64)> = slid
+        .iter()
+        .filter_map(|&index| {
+            let site = sites[index]?;
+            let shift = shifts_mm[index]?;
+            Some((vec3::add(site.landing_mm, shift), site.max_normal_z))
+        })
+        .collect();
+    for (&index, found) in slid.iter().zip(nearest_admitted(mesh, &queries)) {
+        if let (Some(site), Some((face, facet_normal))) = (sites[index], found) {
+            out[index] = Some(TipSite {
+                face,
+                facet_normal,
+                ..site
+            });
         }
-        let normal = current[position];
-        if normal != facet[position] {
-            let moved_deg = angle_deg(normal, facet[position]);
+    }
+    out
+}
+
+/// Replace every support arm's seat normal in `faces` (one facet's unit normal
+/// and closest point, [`crate::tip_landing::tip_seat_faces_with_ids`]'s answer,
+/// in strut order, `ids` the seat triangles) by its FOOTPRINT normal. The seat
+/// point is not changed. Also returns every measured tip's [`TipSite`] (strut
+/// order), for the re-measurements after the seats slide.
+///
+/// Two batched passes (module doc): the ball is built from the arm with the
+/// seat triangle's normal, the footprint measured about it, the arm re-seated
+/// on the result and the footprint measured again. A rule without the
+/// footprint switch, a tie, a brace, a mast, and any tip with no face are left
+/// alone.
+pub fn refine(
+    env: &FootprintEnv<'_>,
+    struts: &[SweepStrut],
+    faces: &mut [Option<CarriedFace>],
+    ids: &[Option<u32>],
+) -> (FootprintNormalOutcome, Vec<Option<TipSite>>) {
+    let mut outcome = FootprintNormalOutcome {
+        enabled: env.rule.footprint_normal(),
+        ..FootprintNormalOutcome::default()
+    };
+    let mut sites: Vec<Option<TipSite>> = vec![None; struts.len()];
+    if !outcome.enabled {
+        return (outcome, sites);
+    }
+    let landings = crate::tip_landing::tip_landings_of(
+        env.grid,
+        struts,
+        env.plate_z_mm,
+        env.layer_height_mm,
+    );
+    let mut landing_of: Vec<Option<[f64; 3]>> = vec![None; struts.len()];
+    for landing in &landings {
+        if let Some(slot) = landing_of.get_mut(landing.strut) {
+            *slot = Some(landing.point_mm);
+        }
+    }
+    let tips: Vec<usize> = (0..struts.len().min(faces.len()).min(ids.len()))
+        .filter(|&index| {
+            struts[index].kind == StrutKind::Arm
+                && faces[index].is_some()
+                && ids[index].is_some()
+                && landing_of[index].is_some()
+        })
+        .collect();
+    outcome.tips = tips.len();
+    if tips.is_empty() {
+        return (outcome, sites);
+    }
+    // Per tip: the seat triangle's identity and normal, and the admission
+    // threshold (the rule, or every down-facing face where the mesh had no
+    // admitted face at all and the seat fell back).
+    for &index in &tips {
+        let (Some((normal, _)), Some(face), Some(landing_mm)) =
+            (faces[index], ids[index], landing_of[index])
+        else {
+            continue;
+        };
+        sites[index] = Some(TipSite {
+            face,
+            landing_mm,
+            facet_normal: normal,
+            max_normal_z: if env.rule.admits(normal[2]) {
+                env.rule.max_normal_z()
+            } else {
+                SeatFaceRule::any_down_facing().max_normal_z()
+            },
+        });
+    }
+    let arms: Vec<SweepArm> = struts
+        .iter()
+        .enumerate()
+        .map(|(index, strut)| {
+            let (seat, base) =
+                crate::adapter::drawn_ends(env.grid, env.plate_z_mm, env.layer_height_mm, strut);
+            let point = faces.get(index).copied().flatten().map(|(_, point)| point);
+            crate::adapter::sweep_arm(strut, seat, base, point, Vec::new())
+        })
+        .collect();
+    let Some(measurement) = measure_arms(&env.measure_env(), &arms, &sites) else {
+        // The request itself was unusable (no layer plan): nothing is
+        // measured, every tip keeps its seat triangle's normal.
+        outcome.fallback_no_ball = tips.len();
+        return (outcome, sites);
+    };
+    outcome.pairs = measurement.pairs;
+    outcome.pairs_from_surface = measurement.pairs_from_surface;
+    let mut sum_deg = 0.0_f64;
+    for &index in &tips {
+        let (Some(measured), Some(site)) = (measurement.tips[index], sites[index]) else {
+            continue;
+        };
+        outcome.fallback_no_ball += usize::from(measured.no_ball);
+        outcome.fallback_no_footprint += usize::from(measured.no_footprint);
+        outcome.max_faces_in_footprint = outcome.max_faces_in_footprint.max(measured.faces);
+        outcome.fixed_point_residual_max_deg = outcome
+            .fixed_point_residual_max_deg
+            .max(measured.residual_deg);
+        if measured.normal != site.facet_normal {
+            let moved_deg = angle_deg(measured.normal, site.facet_normal);
             outcome.moved += 1;
             outcome.moved_over_1_deg += usize::from(moved_deg > 1.0);
             outcome.moved_over_5_deg += usize::from(moved_deg > 5.0);
@@ -597,7 +876,7 @@ pub fn refine(
             outcome.max_deg = outcome.max_deg.max(moved_deg);
             sum_deg += moved_deg;
             if let Some(slot) = faces.get_mut(index) {
-                *slot = slot.map(|(_, point)| (normal, point));
+                *slot = slot.map(|(_, point)| (measured.normal, point));
             }
         }
     }
@@ -608,5 +887,86 @@ pub fn refine(
     {
         outcome.mean_deg = sum_deg / tips.len() as f64;
     }
-    outcome
+    (outcome, sites)
+}
+
+/// The normals of tips SLID by the footprint rule, measured on the moved arms
+/// (`moved`, each with its seat and seat-face point shifted by `shifts_mm[i]`),
+/// with the seat triangle re-derived at the slid seat ([`reseat_sites`]).
+/// `sites[i]` is arm `i`'s site before the slide. An arm with no site (the
+/// pass is off, a brace, a mast, a tie) keeps the normal it carries. One
+/// batched [`measure_arms`] call; this is the re-measurement a proposed slide
+/// is validated with ([`crate::footprint::apply`]).
+#[must_use]
+pub fn remeasure_slid(
+    env: &MeasureEnv<'_>,
+    sites: &[Option<TipSite>],
+    moved: &[SweepArm],
+    shifts_mm: &[[f64; 3]],
+) -> Vec<[f64; 3]> {
+    let shifts: Vec<Option<[f64; 3]>> = shifts_mm.iter().map(|&shift| Some(shift)).collect();
+    let sites = reseat_sites(env.mesh, sites, &shifts);
+    let measurement = measure_arms(env, moved, &sites);
+    moved
+        .iter()
+        .enumerate()
+        .map(|(index, arm)| {
+            measurement
+                .as_ref()
+                .and_then(|found| found.tips.get(index).copied().flatten())
+                .map_or(arm.seat_normal_mm, |measured| measured.normal)
+        })
+        .collect()
+}
+
+/// What [`remeasure_emitted`] changed.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EmittedRemeasure {
+    /// Strut indices whose seat normal was not the measured one on the
+    /// emitted geometry, and now is.
+    pub changed: Vec<usize>,
+    /// The largest angle among those changes, degrees.
+    pub max_change_deg: f64,
+}
+
+/// MEASURE THE EMITTED FIELD: every measured tip's footprint normal on the
+/// arms exactly as the adapter hands them to the lowering (`emitted`: seat
+/// slides, followers' base and seat ends, junction offsets all applied, each
+/// arm carrying `strut.seat_normal`), with the seat triangle re-derived for
+/// every tip that slid. A tip whose normal differs from the one it carries is
+/// given the measured one, so the normal on a strut describes the ball it is
+/// drawn with. One more batched [`measure_arms`] call.
+///
+/// `sites` is [`refine`]'s answer; `None` for a tip it did not measure.
+pub fn remeasure_emitted(
+    env: &MeasureEnv<'_>,
+    struts: &mut [SweepStrut],
+    emitted: &[SweepArm],
+    sites: &[Option<TipSite>],
+) -> EmittedRemeasure {
+    let shifts: Vec<Option<[f64; 3]>> = struts
+        .iter()
+        .map(|strut| {
+            (strut.seat_face.footprint == Footprint::MovedOntoFace)
+                .then_some(strut.seat_face.shift_mm)
+        })
+        .collect();
+    let sites = reseat_sites(env.mesh, sites, &shifts);
+    let mut report = EmittedRemeasure::default();
+    let Some(measurement) = measure_arms(env, emitted, &sites) else {
+        return report;
+    };
+    for (index, strut) in struts.iter_mut().enumerate() {
+        let Some(Some(measured)) = measurement.tips.get(index) else {
+            continue;
+        };
+        if measured.normal != strut.seat_normal {
+            report.max_change_deg = report
+                .max_change_deg
+                .max(angle_deg(measured.normal, strut.seat_normal));
+            strut.seat_normal = measured.normal;
+            report.changed.push(index);
+        }
+    }
+    report
 }

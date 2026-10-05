@@ -2811,13 +2811,13 @@ pub fn run_sweep_with_holes(
     // un-merging have settled the strut set, and never during a pass that is
     // still moving arms around. The lowering drives the tip ball into it and
     // trims the ball and the first shaft segment to its plane.
-    let (mut seat_faces, seat_face_hits) =
-        tip_landing::tip_seat_faces_counted(mesh, &grid, &struts, plate_z, height, seat_face_rule);
+    let (mut seat_faces, seat_face_hits, seat_triangles) =
+        tip_landing::tip_seat_faces_counted_with_ids(mesh, &grid, &struts, plate_z, height, seat_face_rule);
     // THE FOOTPRINT NORMAL (Craig ruling 2026-10-05): every support arm's seat
     // normal is the area-weighted average over the patch its tip ball touches,
     // not the normal of the one nearest facet. The seat point stays the
     // facet's closest point.
-    report.seat_footprint_normal = footprint_normal::refine(
+    let (footprint_normal_outcome, footprint_sites) = footprint_normal::refine(
         &footprint_normal::FootprintEnv {
             mesh,
             surface: head_join_context.surface(),
@@ -2829,7 +2829,9 @@ pub fn run_sweep_with_holes(
         },
         &struts,
         &mut seat_faces,
+        &seat_triangles,
     );
+    report.seat_footprint_normal = footprint_normal_outcome;
     report.counters.seat_faces_measured = seat_face_hits.tips as u64;
     report.counters.seat_faces_steeper_passed_over = seat_face_hits.steeper_face_passed_over as u64;
     report.counters.seat_faces_fallback_any_down_facing =
@@ -2880,6 +2882,16 @@ pub fn run_sweep_with_holes(
         chord_slack,
         keep_out: &keep_out,
     };
+    // THE NORMAL AT A SLID BALL (`footprint_normal`, Craig ruling 2026-10-05):
+    // a proposed slide is validated with the footprint normal measured on the
+    // MOVED arm, the seat triangle re-derived at the slid seat.
+    let measure_env = footprint_normal::MeasureEnv {
+        mesh,
+        surface: head_join_context.surface(),
+        layer_plan: plan,
+    };
+    let mut slid_remeasured = 0_usize;
+    let mut slid_max_change_deg = 0.0_f64;
     let footprint = footprint::apply(
         &sweep_plan.grid,
         &slices,
@@ -2889,7 +2901,24 @@ pub fn run_sweep_with_holes(
         plate_z,
         height,
         &limits,
+        |members: &[usize], moved: &[plinth_support::SweepArm], shifts: &[[f64; 3]]| {
+            let sites: Vec<Option<footprint_normal::TipSite>> = members
+                .iter()
+                .map(|&member| footprint_sites.get(member).copied().flatten())
+                .collect();
+            let normals = footprint_normal::remeasure_slid(&measure_env, &sites, moved, shifts);
+            for ((site, arm), normal) in sites.iter().zip(moved).zip(&normals) {
+                if site.is_some() {
+                    slid_remeasured += 1;
+                    let dot = geom_kernel::vec3::dot(*normal, arm.seat_normal_mm).clamp(-1.0, 1.0);
+                    slid_max_change_deg = slid_max_change_deg.max(dot.acos().to_degrees());
+                }
+            }
+            normals
+        },
     );
+    sweep_plan.report.seat_footprint_normal.slid_remeasured = slid_remeasured;
+    sweep_plan.report.seat_footprint_normal.slid_max_change_deg = slid_max_change_deg;
     // THE RUNS AS THE FILE HAS THEM: a moved member's runs are shares of its
     // moved chord, so the published longest run and the warnings are
     // re-read on it. A field no seat moved republishes exactly what it had.
@@ -2902,6 +2931,47 @@ pub fn run_sweep_with_holes(
         );
     }
     sweep_plan.report.seat_footprint = footprint;
+    // THE NORMAL ON THE EMITTED FIELD (`footprint_normal`, Craig ruling
+    // 2026-10-05): the slides and the ends that follow them moved balls after
+    // their normals were measured, so measure once more on the arms exactly as
+    // the lowering gets them. A tip whose normal changes is given the new one
+    // and its disc is graded again on the ball it will be drawn with.
+    if sweep_plan.report.seat_footprint_normal.enabled {
+        let emitted = adapter::arms_of(&sweep_plan);
+        let remeasured = footprint_normal::remeasure_emitted(
+            &measure_env,
+            &mut sweep_plan.struts,
+            &emitted,
+            &footprint_sites,
+        );
+        let mut off_face = Vec::new();
+        if !remeasured.changed.is_empty() {
+            let final_arms = adapter::arms_of(&sweep_plan);
+            off_face = footprint::regrade(
+                &sweep_plan.grid,
+                &slices,
+                &sweep_plan.struts,
+                &final_arms,
+                &remeasured.changed,
+                plan,
+                plate_z,
+                height,
+            );
+            // Only a disc that WAS graded on its face is news: a knife edge
+            // or a refused move was already warned about.
+            off_face.retain(|&(index, _)| {
+                matches!(
+                    sweep_plan.struts[index].seat_face.footprint,
+                    Footprint::OnFace | Footprint::MovedOntoFace
+                )
+            });
+        }
+        let outcome = &mut sweep_plan.report.seat_footprint_normal;
+        outcome.final_changed = remeasured.changed.len();
+        outcome.final_max_change_deg = remeasured.max_change_deg;
+        outcome.final_regraded = remeasured.changed.len();
+        outcome.final_off_face = off_face;
+    }
     // WHAT THE EMITTED FIELD STILL HAS IN A SEAT ZONE (head-join, 2026-09-29),
     // measured on the arms exactly as they go to the lowering: the ties may
     // have raised a trunk's drawn section after the rule ran, and a footprint
