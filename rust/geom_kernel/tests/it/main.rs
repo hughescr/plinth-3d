@@ -24,4 +24,5 @@ mod kn_segment_clearance_unmeasured;
 mod near_wall_thin_feature;
 mod ray_class;
 mod segseg_min;
+mod tapered_clearance;
 mod walk_classified;

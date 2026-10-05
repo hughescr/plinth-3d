@@ -20,6 +20,21 @@ use crate::telemetry::{charge_near_parallel, NearParallelSite};
 use crate::vec3::{add, cross, dot, norm, scale, sub, V3};
 use crate::{SurfaceIndexKind, SurfaceSubsetError, SurfaceTriangleSoupDigest};
 
+/// Two radii closer than this are one radius: a row handed `r` twice (or two
+/// values that differ by rounding) takes the constant-radius form, which is bit
+/// for bit the form every such caller had before the frustum reading. Far below
+/// the 1 um the emitted files can resolve.
+pub const TAPER_EPS_MM: f64 = 1e-12;
+
+/// `(sqrt(5) - 1) / 2`, the golden-section ratio.
+const GOLDEN_INV: f64 = 0.618_033_988_749_894_9;
+
+/// Golden-section steps of the frustum search. The bracket shrinks by
+/// `GOLDEN_INV` each step, so 60 steps leave `0.618^60 = 3e-13` of the axis
+/// length (under 1e-10 mm on a 40 mm member): numerically exact for a distance
+/// the files hold to a micrometre.
+const GOLDEN_STEPS: usize = 60;
+
 thread_local! {
     static STACK: RefCell<Vec<i32>> = RefCell::new(Vec::with_capacity(128));
     static ZSCRATCH: RefCell<Vec<f64>> = RefCell::new(Vec::with_capacity(64));
@@ -1123,9 +1138,13 @@ impl std::fmt::Display for UnmeasuredSegment {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SegmentClearanceClassified {
     /// The axis was swept against the surface and every candidate was decided.
-    /// `clearance_mm` is `nearest_surface_distance - (r_max + standoff)`:
-    /// negative means the demanded gap is violated, non-negative means it is
-    /// met. `witness` is the surface point that produced the nearest distance.
+    /// `clearance_mm` is `nearest_surface_distance - (r_max + standoff)`
+    /// (`r_max` the wider of the row's two radii) from the capsule entry points,
+    /// and `min over the axis of (distance to the surface - radius) - standoff`,
+    /// the radius linear between the row's end radii, from
+    /// [`NativeSurface::segment_frustum_clearance_classified`]; the two agree on
+    /// a constant radius. Negative means the demanded gap is violated,
+    /// non-negative means it is met. `witness` is the surface point that produced the nearest distance.
     Measured { clearance_mm: f64, witness: V3 },
     /// The axis WAS swept, but at least one face's pierce candidate was
     /// undecidable ([`RayTriangleClass::NearParallel`]), so the true clearance
@@ -2357,6 +2376,85 @@ impl NativeSurface {
         (best_d, best_pt, near_parallel)
     }
 
+    /// Segment `[a, b]` against one triangle, for a member whose radius runs
+    /// linearly from `r_a` at `a` to `r_b` at `b`: the least of
+    /// `distance(axis(t), triangle) - radius(t)` over the axis, with `radius(t) =
+    /// r_a + t (r_b - r_a)`. Returns `(cost_mm, witness_point, near_parallel)`.
+    ///
+    /// This is the exact clearance of a frustum (a union of balls whose radius
+    /// is linear along the axis) to a convex face. `distance(axis(t), triangle)`
+    /// is the distance from a point moving on a line to a convex set, so it is
+    /// convex in `t`; minus a linear radius it stays convex, and a golden-section
+    /// search over `[0, 1]` finds its minimum. The two end points are tried on
+    /// their own, so a minimum at an end is exact.
+    ///
+    /// A pierce needs no special case: at a crossing the distance is 0, so the
+    /// cost there is `-radius`, and the search finds it. `near_parallel` is the
+    /// plain segment distance's flag for an undecided pierce, carried over so
+    /// that the row is an upper bound, as for the constant-radius walk.
+    ///
+    /// COST. About 64 closest-point evaluations per face, and only for a
+    /// tapered row; the walk prunes subtrees at `box_distance - r_max`, so only
+    /// faces near the axis reach this.
+    pub(crate) fn seg_tri_frustum_cost(
+        &self,
+        a: V3,
+        b: V3,
+        r_a: f64,
+        r_b: f64,
+        t: usize,
+    ) -> (f64, V3, bool) {
+        let (_, _, near_parallel) = self.seg_tri_dist(a, b, t);
+        let v0 = self.mesh.v0(t);
+        let p = v0;
+        let q = add(v0, self.mesh.e1(t));
+        let r = add(v0, self.mesh.e2(t));
+        let ab = sub(b, a);
+        let cost_at = |u: f64| -> (f64, V3) {
+            let x = add(a, scale(ab, u));
+            let c = closest_on_tri(x, p, q, r);
+            (norm(sub(x, c)) - (r_a + (r_b - r_a) * u), c)
+        };
+        // Both ends are exact candidates. The minimum of the convex cost sits at
+        // one of them, or inside, where the search finds it.
+        let (cost_a, point_a) = cost_at(0.0);
+        let (cost_b, point_b) = cost_at(1.0);
+        let (mut best, mut best_point) = if cost_b < cost_a {
+            (cost_b, point_b)
+        } else {
+            (cost_a, point_a)
+        };
+        let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+        let mut x1 = hi - GOLDEN_INV * (hi - lo);
+        let mut x2 = lo + GOLDEN_INV * (hi - lo);
+        let (mut f1, mut c1) = cost_at(x1);
+        let (mut f2, mut c2) = cost_at(x2);
+        for _ in 0..GOLDEN_STEPS {
+            if f1 < f2 {
+                hi = x2;
+                x2 = x1;
+                f2 = f1;
+                c2 = c1;
+                x1 = hi - GOLDEN_INV * (hi - lo);
+                (f1, c1) = cost_at(x1);
+            } else {
+                lo = x1;
+                x1 = x2;
+                f1 = f2;
+                c1 = c2;
+                x2 = lo + GOLDEN_INV * (hi - lo);
+                (f2, c2) = cost_at(x2);
+            }
+        }
+        for (cost, point) in [(f1, c1), (f2, c2)] {
+            if cost < best {
+                best = cost;
+                best_point = point;
+            }
+        }
+        (best, best_point, near_parallel)
+    }
+
     /// Exact minimum distance from segment [a,b] to the surface (branch & bound).
     ///
     /// One statement, two callers: this is [`Self::seg_surface_min_excluding`]
@@ -2390,6 +2488,27 @@ impl NativeSurface {
     /// endpoint/edge minimum standing), and the prune is `bound > best_d`, so a
     /// larger `best_d` prunes LESS. Uncertainty therefore costs traversal work,
     /// never a missed face.
+    pub(crate) fn seg_surface_min_excluding(
+        &self,
+        a: V3,
+        b: V3,
+        excluded: &[u32],
+    ) -> (f64, V3, u32) {
+        self.seg_surface_walk_excluding(a, b, excluded, 0.0, |tid| self.seg_tri_dist(a, b, tid))
+    }
+
+    /// The branch-and-bound walk behind [`Self::seg_surface_min_excluding`],
+    /// generic in what one face costs.
+    ///
+    /// `face_cost(tid)` returns `(cost, witness, near_parallel)` for the global
+    /// face `tid`; the walk keeps the face with the least cost. `slack` is how
+    /// far BELOW the segment-to-box distance a face's cost may fall: a subtree is
+    /// skipped when `box_distance - slack > best`. With `slack = 0` and the
+    /// plain segment-to-face distance as the cost this is the distance walk
+    /// exactly, bit for bit. A tapered member's cost is
+    /// `distance - radius_at_the_nearest_point`, which is at least
+    /// `distance - r_max`, so `slack = r_max` keeps the prune a true lower
+    /// bound.
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_possible_wrap,
@@ -2399,11 +2518,13 @@ impl NativeSurface {
               index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
               site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
     )]
-    pub(crate) fn seg_surface_min_excluding(
+    fn seg_surface_walk_excluding(
         &self,
         a: V3,
         b: V3,
         excluded: &[u32],
+        slack: f64,
+        mut face_cost: impl FnMut(usize) -> (f64, V3, bool),
     ) -> (f64, V3, u32) {
         let smin = box_min(a, b);
         let smax = box_max(a, b);
@@ -2416,7 +2537,7 @@ impl NativeSurface {
             stack.push(0);
             while let Some(ni) = stack.pop() {
                 let node = &self.bvh.nodes[ni as usize];
-                if box_box_dist(smin, smax, node.bmin, node.bmax) > best_d {
+                if box_box_dist(smin, smax, node.bmin, node.bmax) - slack > best_d {
                     continue;
                 }
                 if node.leaf {
@@ -2433,7 +2554,7 @@ impl NativeSurface {
                         if !excluded.is_empty() && excluded.binary_search(&tid).is_ok() {
                             continue;
                         }
-                        let (d, pt, np) = self.seg_tri_dist(a, b, tid as usize);
+                        let (d, pt, np) = face_cost(tid as usize);
                         if np {
                             near_parallel += 1;
                         }
@@ -2476,10 +2597,17 @@ impl NativeSurface {
     // BATCHED caller already amortizes over (see `segment_clearance` below).
     ///
     /// ONE PREDICATE. `excluded` empty is the whole-surface test, so the
-    /// demanded-gap arithmetic (`best_d - (r_max + standoff)`) has exactly one
+    /// demanded-gap arithmetic (`best_d - (r + standoff)`, or the per-face
+    /// frustum cost for a tapered row) has exactly one
     /// statement in the kernel and cannot fork between a stage that exempts
     /// faces and one that does not. Only two things vary per caller: which
     /// faces are in the set, and what number `standoff` carries.
+    ///
+    /// TWO READINGS OF A TAPERED ROW, one per `frustum` value. `false` is the
+    /// capsule of the wider end (`r_max` for the whole segment): every caller
+    /// before the census rule, and still every caller that is not the census.
+    /// `true` is the frustum the file draws (see below). A row whose two radii
+    /// are equal reads the same either way, bit for bit.
     #[allow(clippy::too_many_arguments)]
     fn seg_clear_one_excluding(
         &self,
@@ -2491,6 +2619,7 @@ impl NativeSurface {
         inset0: f64,
         inset1: f64,
         excluded: &[u32],
+        frustum: bool,
     ) -> SegmentClearanceClassified {
         let d = sub(p1, p0);
         let l = norm(d);
@@ -2507,9 +2636,30 @@ impl NativeSurface {
         let b = add(p0, scale(u, s_hi));
         let r_lo = r0 + (r1 - r0) * (s_lo / l);
         let r_hi = r0 + (r1 - r0) * (s_hi / l);
-        let r_max = r_lo.max(r_hi);
-        let thresh = r_max + standoff;
-        let (best_d, best_pt, near_parallel_faces) = self.seg_surface_min_excluding(a, b, excluded);
+        // THE FRUSTUM THE FILE DRAWS (rule R3, clearance-census-diagnosis.md).
+        // The radius is linear along the axis, `r_lo` at `a` to `r_hi` at `b`.
+        // A face beside the thin end is not as near as a face beside the thick
+        // end, and subtracting `r_max` for the whole segment read every face at
+        // the thick end's radius. A constant radius (`r_lo == r_hi`, every caller
+        // that hands one radius twice) keeps the one-subtraction form below,
+        // bit for bit; a tapered one, when the caller asks for the frustum, is
+        // measured per face, exactly.
+        let tapered = frustum && (r_hi - r_lo).abs() > TAPER_EPS_MM;
+        let (best_d, best_pt, near_parallel_faces) = if tapered {
+            let (r_a, r_b) = (r_lo, r_hi);
+            self.seg_surface_walk_excluding(a, b, excluded, r_a.max(r_b), |tid| {
+                self.seg_tri_frustum_cost(a, b, r_a, r_b, tid)
+            })
+        } else {
+            self.seg_surface_min_excluding(a, b, excluded)
+        };
+        // For a tapered row `best_d` is already `distance - radius` at the
+        // nearest point, so only the standoff is left to subtract.
+        let thresh = if tapered {
+            standoff
+        } else {
+            r_lo.max(r_hi) + standoff
+        };
         // NO CANDIDATE IS NOT A MEASUREMENT. `seg_surface_min_excluding` seeds
         // `best_d` with `f64::INFINITY` and only ever lowers it, so a
         // non-finite `best_d` means the walk found no face to measure against.
@@ -2640,6 +2790,68 @@ impl NativeSurface {
         inset1s: &[f64],
         excluded_faces: &[&[u32]],
     ) -> Result<Vec<SegmentClearanceClassified>, BatchInputError> {
+        self.clearance_rows_excluding(
+            p0s,
+            p1s,
+            r0s,
+            r1s,
+            standoff,
+            inset0s,
+            inset1s,
+            excluded_faces,
+            false,
+        )
+    }
+
+    /// **THE CLEARANCE PREDICATE, read as the FRUSTUM the file draws** (rule
+    /// R3 of `clearance-census-diagnosis.md`, 2026-10-04).
+    ///
+    /// [`Self::segment_clearance_classified`] reads a row whose radius runs
+    /// from `r0` to `r1` as a capsule of the WIDER radius all along. That reading
+    /// errs only toward refusal, and it is the reading the support engine's
+    /// placement gates (`plinth-support`'s brace, rewire and CCO stages) were
+    /// built, pinned and measured against; it is left as it was. This entry
+    /// point reads the same row as the solid the emitted file draws: a frustum,
+    /// radius linear along the axis (between the row's two radii at its two
+    /// clipped ends), so the clearance is
+    /// `min over the axis of (distance to the surface - radius) - standoff`.
+    /// A face beside the thin end of a long taper is no longer read at the thick
+    /// end's radius. A row with equal radii is bit-identical to the capsule
+    /// entry point. The result is never lower than the capsule reading.
+    ///
+    /// For the member-against-model CENSUS, which reports what the file draws.
+    /// COST: about 64 closest-point evaluations per candidate face of a tapered
+    /// row, only for faces the walk cannot prune at `box distance - r_max`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn segment_frustum_clearance_classified(
+        &self,
+        p0s: &[V3],
+        p1s: &[V3],
+        r0s: &[f64],
+        r1s: &[f64],
+        standoff: f64,
+        inset0s: &[f64],
+        inset1s: &[f64],
+    ) -> Result<Vec<SegmentClearanceClassified>, BatchInputError> {
+        self.clearance_rows_excluding(p0s, p1s, r0s, r1s, standoff, inset0s, inset1s, &[], true)
+    }
+
+    /// The batch loop behind the clearance entry points: one row per input, in
+    /// order, `frustum` choosing the reading of a tapered row (see
+    /// [`Self::seg_clear_one_excluding`]).
+    #[allow(clippy::too_many_arguments)]
+    fn clearance_rows_excluding(
+        &self,
+        p0s: &[V3],
+        p1s: &[V3],
+        r0s: &[f64],
+        r1s: &[f64],
+        standoff: f64,
+        inset0s: &[f64],
+        inset1s: &[f64],
+        excluded_faces: &[&[u32]],
+        frustum: bool,
+    ) -> Result<Vec<SegmentClearanceClassified>, BatchInputError> {
         let n = p0s.len();
         BatchInputError::require_len("segment_clearance", "p1s", n, p1s.len())?;
         BatchInputError::require_len("segment_clearance", "r0s", n, r0s.len())?;
@@ -2661,6 +2873,7 @@ impl NativeSurface {
                     let excluded = excluded_faces.get(i).copied().unwrap_or(&[]);
                     self.seg_clear_one_excluding(
                         p0s[i], p1s[i], r0s[i], r1s[i], standoff, inset0s[i], inset1s[i], excluded,
+                        frustum,
                     )
                 })
                 .collect()

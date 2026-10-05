@@ -22,6 +22,7 @@ mod brace_window_cap;
 mod bracing;
 mod bracing_rework;
 mod chitubox_geometry;
+mod clearance_census;
 mod congestion_lane;
 mod contact_sizing;
 mod drain_connectivity;

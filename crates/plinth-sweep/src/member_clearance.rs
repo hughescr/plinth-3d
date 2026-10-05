@@ -25,7 +25,9 @@
 //! 2. **Member against member.** Two members that are not joined to each other
 //!    do not share volume: the candidate's axis is at least `r₁ + r₂` from
 //!    the standing member's axis on every span the file draws it as, `r₂`
-//!    that span's wider end (round-3 review, 2026-09-29: the closest pair of
+//!    that span's wider end (the member-against-member test still reads it so:
+//!    an error toward refusal; the member-against-model census reads the drawn
+//!    frustum since 2026-10-04) (round-3 review, 2026-09-29: the closest pair of
 //!    axes is not the closest pair of solids when the radius varies). Members
 //!    that ARE joined (a diagonal and the post it seats on or lands on, or two
 //!    members of which one lands on the other) meet at the planned joint and
@@ -265,7 +267,9 @@ fn landing_zone_mm(
 /// ball centre (its seat, for a member without a ball) to its landing, or to
 /// its boss top for a plate member ([`plinth_support::SweepRootFlare::plate_shaft_of`]),
 /// cut into the spans the lowering draws it as
-/// ([`plinth_support::drawn_spans`]), each read at its wider end. Its own
+/// ([`plinth_support::drawn_spans`]), each read as the frustum the file draws
+/// (radius linear from its top end radius to its bottom end radius, taken at
+/// each face's nearest axis point, not the wider end all along). Its own
 /// seat zone is the part of the axis inside the tip ball or within `tier` of
 /// the seat plane, `max(R, (tier + r − d) / (n·m))` from the ball centre
 /// (`d` the centre's height over the plane on the support side); its landing
@@ -301,10 +305,19 @@ pub(crate) fn model_clearance_census(
     let bases: Vec<[f64; 3]> = arms.iter().map(|arm| arm.base_mm).collect();
     let faces = landing_faces(surface, &bases, &on_model);
 
-    // One row per drawn span: (member, p0, p1, radius, inset at p0, inset at p1).
+    // One row per drawn span: (member, p0, p1, radius at p0, radius at p1, inset
+    // at p0, inset at p1). The two radii are the span's two DRAWN end radii
+    // (the file draws a span as one frustum): the kernel reads the radius at
+    // the nearest point of each face, not the wider end for the whole span.
     let mut owner: Vec<usize> = Vec::new();
-    let (mut p0s, mut p1s, mut radii, mut inset0s, mut inset1s) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut p0s, mut p1s, mut top_radii, mut bottom_radii, mut inset0s, mut inset1s) = (
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
     let mut measured_member = vec![false; arms.len()];
     let mut unmeasured_member = vec![false; arms.len()];
     for (index, (strut, arm)) in struts.iter().zip(arms).enumerate() {
@@ -387,14 +400,26 @@ pub(crate) fn model_clearance_census(
             owner.push(index);
             p0s.push(from);
             p1s.push(to);
-            radii.push(radius);
+            top_radii.push(span.top_radius_mm.max(0.0));
+            bottom_radii.push(span.bottom_radius_mm.max(0.0));
+            if (span.top_radius_mm - span.bottom_radius_mm).abs() > geom_kernel::TAPER_EPS_MM {
+                census.rows_tapered += 1;
+            }
             inset0s.push(inset0);
             inset1s.push(inset1);
         }
     }
     census.rows = owner.len();
     let rows = surface
-        .segment_clearance_classified(&p0s, &p1s, &radii, &radii, 0.0, &inset0s, &inset1s)
+        .segment_frustum_clearance_classified(
+            &p0s,
+            &p1s,
+            &top_radii,
+            &bottom_radii,
+            0.0,
+            &inset0s,
+            &inset1s,
+        )
         .unwrap_or_default();
     let mut worst: Vec<Option<(f64, bool, [f64; 3])>> = vec![None; arms.len()];
     for (row, &index) in rows.iter().zip(&owner) {
@@ -797,6 +822,73 @@ mod census_tests {
         (strut, arm)
     }
 
+    /// A vertical plate post over `(0, 0)` from `top_z` to the plate, drawn as
+    /// ONE tapered span: tip radius `tip`, root radius `root`. The ledger sits at
+    /// the tip radius everywhere but its first slot, which is the root
+    /// (`drawn_root_radius_mm` reads the first entry) and lies under the plate
+    /// boss, so no slot boundary inside the shaft asks for more than the chord
+    /// has and the drawing is the single chord the thickening produces.
+    fn tapered_post(top_z: f64, tip: f64, root: f64) -> (SweepStrut, SweepArm) {
+        let (strut, mut arm) = member(0, StrutKind::Arm, Landing::Plate, [0.0, 0.0], PLATE, top_z, tip);
+        let mut profile = vec![tip; arm.radius_profile_mm.len()];
+        profile[0] = root;
+        arm.radius_profile_mm = profile.clone();
+        let mut strut = strut;
+        strut.radius_mm = profile;
+        (strut, arm)
+    }
+
+    fn census_of(
+        surface: &NativeSurface,
+        post: (SweepStrut, SweepArm),
+    ) -> (crate::report::MemberModelClearance, Vec<plinth_support::DrawnSpan>) {
+        let (struts, arms) = (vec![post.0], vec![post.1]);
+        let layers = plinth_core::LayerPlan::new(PLATE, vec![H; 400]).expect("a uniform plan");
+        let census = model_clearance_census(Some(surface), &struts, &arms, &layers, PLATE, GAP);
+        let root = plinth_support::drawn_root_radius_mm(&arms[0].radius_profile_mm, arms[0].tip_radius_mm);
+        let spans = plinth_support::drawn_spans(
+            &arms[0].radius_profile_mm,
+            arms[0].base_mm[2],
+            arms[0].seat_mm[2],
+            arms[0].seat_mm[2],
+            PLATE + 1.0,
+            arms[0].tip_radius_mm,
+            root,
+        );
+        (census, spans)
+    }
+
+    /// RED before the fix (rule R3). A plate post drawn as one chord from 0.3 mm
+    /// at the tip to 0.9 mm at the root, beside a wall 1.0 mm from the axis that
+    /// stands only beside the upper part (drawn radius at most 0.6 mm there):
+    /// the drawn solid clears the wall by at least 0.4 mm, and the census read it
+    /// at the root radius (1.0 - 0.9 = 0.1 mm) and named it.
+    #[test]
+    fn a_tapered_span_is_read_at_its_drawn_radius() {
+        let wall = boxed([1.0, -1.0, 0.5], [3.0, 1.0, 6.0]);
+        let (census, spans) = census_of(&wall, tapered_post(5.0, 0.3, 0.9));
+        assert!(
+            spans.len() == 1 && spans[0].top_radius_mm < spans[0].bottom_radius_mm,
+            "the post must be one tapered chord: {spans:?}"
+        );
+        assert_eq!(census.members_measured, 1, "{census:?}");
+        assert_eq!(census.rows_tapered, 1, "the path-hit witness: the one span is tapered: {census:?}");
+        assert!(census.within_gap.is_empty(), "the drawn solid clears by >= 0.4 mm: {census:?}");
+    }
+
+    /// The same chord with the wall beside its thick part is named, and at the
+    /// radius drawn there, not the root's: the reading is between the root
+    /// reading (0.1 mm) and the gap. (Guards the rule from relaxing a wall that
+    /// the solid really reaches.)
+    #[test]
+    fn a_tapered_span_beside_a_wall_at_its_thick_part_is_still_named() {
+        let wall = boxed([1.0, -1.0, -3.0], [3.0, 1.0, -1.0]);
+        let (census, _) = census_of(&wall, tapered_post(5.0, 0.3, 0.9));
+        assert_eq!(census.within_gap.len(), 1, "{census:?}");
+        let reading = census.within_gap[0].clearance_mm;
+        assert!(reading > 0.12 && reading < GAP, "read at the drawn radius there: {reading}");
+    }
+
     /// A landing STRIKES its face one lamina deep, so the plain clearance
     /// reads every model landing as an intrusion; the landing zone is exactly
     /// the stretch over which the solid is within the gap of that face, so
@@ -855,6 +947,7 @@ mod census_tests {
         assert!(census.ran);
         assert_eq!(census.members_unmeasured, 0, "{census:?}");
         assert_eq!(census.members_measured, 4, "{census:?}");
+        assert_eq!(census.rows_tapered, 0, "four constant-radius members: no tapered row: {census:?}");
         let named: Vec<u32> = census.within_gap.iter().map(|near| near.member).collect();
         assert_eq!(named, vec![0], "{census:?}");
         let gap = census.within_gap[0].clearance_mm;

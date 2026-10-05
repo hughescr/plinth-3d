@@ -2856,12 +2856,14 @@ fn print_sweep_disclosure(
             println!(
                 "[sweep {model}] model clearance of every member's drawn solid (arm shafts, \
                  braces and masts, outside each member's own seat zone and model landing zone; \
-                 final gap {:.3} mm): {} members measured over {} spans ({} spans wholly in \
-                 their own zones), {} members with a span left undecided; smallest gap {}; {} \
-                 members within the final gap",
+                 final gap {:.3} mm): {} members measured over {} spans ({} of them tapered, \
+                 read as the frustum the file draws; {} spans wholly in their own zones), {} \
+                 members with a span left undecided; smallest gap {}; {} members within the \
+                 final gap",
                 clearance.gap_mm,
                 clearance.members_measured,
                 clearance.rows,
+                clearance.rows_tapered,
                 clearance.rows_in_own_zones,
                 clearance.members_unmeasured,
                 clearance
