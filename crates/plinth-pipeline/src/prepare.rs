@@ -2860,7 +2860,9 @@ fn print_sweep_disclosure(
              {} replaced by a leaned descent that clears the preferred margin; {} replaced by \
              one that clears the final gap only; {} cleared by no descent (kept, warned by the \
              census); {} lean candidates refused; {} seats moved to a cell covering the same \
-             demand; {} thickenings refused for the model",
+             demand; {} thickenings refused for the model ({} raised slots flagged by the \
+             raster, {} of them measured clear by the census's predicate, {} proved inside the \
+             gap already as drawn)",
             hits.descent_solid_tested,
             hits.descent_solid_inside_preferred_margin,
             hits.descent_solid_refused_at_final_gap,
@@ -2870,6 +2872,9 @@ fn print_sweep_disclosure(
             hits.descent_solid_lean_candidates_refused,
             hits.descent_solid_seats_moved,
             report.slenderness_lane.thicken_refused_model,
+            report.slenderness_lane.thicken_slots_flagged,
+            report.slenderness_lane.thicken_slots_measured_clear,
+            report.slenderness_lane.thicken_slots_inside_already,
         );
         // THE CLEARANCE RE-ROUTE (fix/drawn-solid-clearance R2.2): path-hit
         // witnesses that the census named arms after the final sizing and the

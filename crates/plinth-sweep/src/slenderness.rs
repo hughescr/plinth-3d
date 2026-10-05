@@ -448,6 +448,13 @@ pub struct SlendernessOutcome {
     /// trunk raised with it, would enter the model's final clearance gap where
     /// the solid as drawn now does not (R2, 2026-10-04). A path-hit witness.
     pub thicken_refused_model: usize,
+    /// The refusal's path hits (challenger round 3, 2026-10-05): raised slots
+    /// the raster flagged within the gap, and of those the ones the census's
+    /// predicate measured clear as committed, and the ones it proved inside
+    /// the gap already as drawn (excused, not the plan's doing).
+    pub thicken_slots_flagged: usize,
+    pub thicken_slots_measured_clear: usize,
+    pub thicken_slots_inside_already: usize,
     /// Thickenings APPLIED whose root disc already lapped another root before
     /// the growth (and laps it more after): the growth made no new lap, so
     /// the rung is not refused (orchestrator ruling 2026-09-29, the stilt
@@ -2042,6 +2049,10 @@ pub(crate) fn apply_ties_with_model(
         }
     }
     prune_unneeded_crosses(context, &state, struts, first_new, outcome);
+    let reads = state.thicken_reads.get();
+    outcome.thicken_slots_flagged += reads.flagged;
+    outcome.thicken_slots_measured_clear += reads.measured_clear;
+    outcome.thicken_slots_inside_already += reads.inside_already;
     applied
 }
 
@@ -2461,6 +2472,20 @@ struct TieState {
     /// crosses)`. A set's diagonals are pushed back to back, two per cross,
     /// and the prune judges a set as one ([`prune_unneeded_crosses`]).
     band_sets: Vec<(usize, usize)>,
+    /// The thickening refusal's reads over the pass (path hits), summed
+    /// into the outcome when the pass ends.
+    thicken_reads: std::cell::Cell<ThickenReads>,
+}
+
+/// What the thickening refusal read ([`thickening_enters_the_gap`]): raised
+/// slots the raster flagged, and of those the ones the census's predicate
+/// measured clear when committed, and the ones it proved inside the gap
+/// already as drawn.
+#[derive(Clone, Copy, Debug, Default)]
+struct ThickenReads {
+    flagged: usize,
+    measured_clear: usize,
+    inside_already: usize,
 }
 
 impl TieState {
@@ -2585,6 +2610,7 @@ impl TieState {
             drawn_offsets,
             flare_shortfall: std::cell::Cell::new(None),
             band_sets: Vec::new(),
+            thicken_reads: std::cell::Cell::new(ThickenReads::default()),
         }
     }
 
@@ -4097,6 +4123,9 @@ fn thickening_enters_the_gap(
     if flagged.is_empty() {
         return false;
     }
+    let mut reads = state.thicken_reads.get();
+    reads.flagged += flagged.len();
+    state.thicken_reads.set(reads);
     // Without a surface the flag cannot be confirmed, and no slot can be
     // proved inside the gap already: the raise is refused.
     let Some(surface) = context.model_surface else {
@@ -4127,7 +4156,8 @@ fn thickening_enters_the_gap(
     else {
         return true;
     };
-    (0..rows).any(|row| {
+    let mut enters = false;
+    for row in 0..rows {
         let committed_clears = matches!(
             verdicts.get(row),
             Some(geom_kernel::SegmentClearanceClassified::Measured { clearance_mm, .. })
@@ -4140,8 +4170,12 @@ fn thickening_enters_the_gap(
                     | geom_kernel::SegmentClearanceClassified::UpperBound { clearance_mm, .. }
             ) if *clearance_mm < gap - THICKEN_CLEARANCE_SLACK_MM
         );
-        !committed_clears && !drawn_inside_already
-    })
+        reads.measured_clear += usize::from(committed_clears);
+        reads.inside_already += usize::from(!committed_clears && drawn_inside_already);
+        enters |= !committed_clears && !drawn_inside_already;
+    }
+    state.thicken_reads.set(reads);
+    enters
 }
 
 /// Float noise on a clearance compared against the final gap: the kernel's
@@ -8389,19 +8423,22 @@ mod tests {
                 &grid, &history, 0.05, foot.0, foot.1, 0.0, 0.0, (0.05, 0.05), 0.3,
             )
             .is_some();
-            (super::thickening_enters_the_gap(&context, &state, &struts, &plan), drawn_flagged)
+            let refused = super::thickening_enters_the_gap(&context, &state, &struts, &plan);
+            (refused, drawn_flagged, state.thicken_reads.get())
         };
-        let (refused, drawn_flagged) = read(0.35, 0.15, true);
+        let (refused, drawn_flagged, reads) = read(0.35, 0.15, true);
         assert!(
             drawn_flagged,
             "SABOTAGE: the raster flags the drawn slot, which the retired read took as proof"
         );
         assert!(refused, "the drawn post clears the bar; the raise enters the gap: refused");
-        let (refused, _) = read(0.3, 0.1, true);
+        assert!(reads.flagged > 0 && reads.inside_already == 0, "path hits: {reads:?}");
+        let (refused, _, reads) = read(0.3, 0.1, true);
         assert!(!refused, "control: the drawn post is inside the gap there already, proved: excused");
-        let (refused, _) = read(0.6, 0.0, true);
+        assert!(reads.inside_already > 0, "path hit: proved inside already: {reads:?}");
+        let (refused, _, _) = read(0.6, 0.0, true);
         assert!(!refused, "control: a bar 0.6 mm away is not entered");
-        let (refused, _) = read(0.35, 0.15, false);
+        let (refused, _, _) = read(0.35, 0.15, false);
         assert!(refused, "control: with no surface nothing is proved, and the flagged raise is refused");
     }
 
