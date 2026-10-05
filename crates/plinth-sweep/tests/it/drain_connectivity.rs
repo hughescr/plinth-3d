@@ -171,7 +171,14 @@ fn deleting_the_keep_out_walls_the_outlet_in() {
     // would make this knob look broken. The claim here is about the DESCENT.
     let straight = harness::sweep_with_drains(
         &flat_underside_slab(),
-        &sabotaged.without_shaft_landings().without_slenderness(),
+        // The clearance re-route is off too (2026-10-04, fix/drawn-solid-clearance
+        // R2.2): it re-lands a post the sizing grew into a wall onto the shaft
+        // beside it (measured: 2 members on shafts), and its candidates do not
+        // read the shaft-landing knob; the claim here is about the DESCENT.
+        &sabotaged
+            .without_shaft_landings()
+            .without_slenderness()
+            .without_clearance_reroute(),
         &[drain],
     );
     let open = escape.verdicts[0].best_clearance_mm;
