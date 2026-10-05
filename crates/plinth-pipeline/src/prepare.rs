@@ -2881,7 +2881,9 @@ fn print_sweep_disclosure(
              the last; {} passes; {} candidates priced, {} refused by the path test, {} by the \
              plate rule, {} by the clearance of the moved solid, {} by the roots, {} by the \
              lowering's measurement; {} arms re-landed ({} on the model, {} children moved with \
-             them); {} kept carrying, {} with no candidate; {} sized checks; {} moves put back \
+             them); {} kept carrying on the last pass ({} with a cross tied to them, {} with a \
+             brace, mast or tie resting on them or below, {} behind a member resting on them \
+             that was sent itself), {} with no candidate; {} sized checks; {} moves put back \
              for a host's load, {} for roots",
             if reroute.enabled { "on" } else { "off" },
             reroute.clearance_violators_first,
@@ -2897,6 +2899,9 @@ fn print_sweep_disclosure(
             reroute.relanded_on_model,
             reroute.children_moved_with_host,
             reroute.kept_carrying,
+            reroute.kept_locked_by_tie,
+            reroute.kept_locked_by_non_arm_below,
+            reroute.kept_behind_a_follower_also_sent,
             reroute.kept_no_candidate,
             reroute.sizing_checks,
             reroute.moves_put_back_host_load,

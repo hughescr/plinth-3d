@@ -301,6 +301,13 @@ pub struct LipSeatOutcome {
     /// and on the last pass's field.
     pub clearance_violators_first: usize,
     pub clearance_violators_last: usize,
+    /// Of the arms `kept_carrying` kept (on the last pass): those with a
+    /// cross tied to them, those with a member that is not an arm (a brace, a
+    /// mast, a tie) resting on them or on one of their descendants, and those
+    /// held back by a member resting on them that was sent itself.
+    pub kept_locked_by_tie: usize,
+    pub kept_locked_by_non_arm_below: usize,
+    pub kept_behind_a_follower_also_sent: usize,
     /// Remedy 1: arms re-landed so they meet their face within the limit.
     pub arms_relanded: usize,
     /// Of those, the ones re-landed on the MODEL below them rather than on a
@@ -593,6 +600,9 @@ pub(crate) fn apply(
     );
     outcome.kept_carrying = 0;
     outcome.kept_no_candidate = 0;
+    outcome.kept_locked_by_tie = 0;
+    outcome.kept_locked_by_non_arm_below = 0;
+    outcome.kept_behind_a_follower_also_sent = 0;
 
     // ---- who may move. An arm another member rests on moves only WITH its
     // children, and only when each child is a support arm nothing rests on and
@@ -683,6 +693,17 @@ pub(crate) fn apply(
         let children = followers_of[index_of].clone();
         if locked[index_of] || children.iter().any(|&child| to_move[child]) {
             outcome.kept_carrying += 1;
+            // Why, for the report: a cross tied to it, a member that is not an
+            // arm (a brace, a mast) resting on it or below it, an arm that
+            // carries others (the lip-seat rule's own lock), or a member that
+            // rests on it being sent itself (it goes first, this arm next pass).
+            if tied[index_of] {
+                outcome.kept_locked_by_tie += 1;
+            } else if children.iter().any(|&child| tied[child] || struts[child].kind != StrutKind::Arm) {
+                outcome.kept_locked_by_non_arm_below += 1;
+            } else if !locked[index_of] {
+                outcome.kept_behind_a_follower_also_sent += 1;
+            }
             continue;
         }
         let Some(arm) = arms.get(index_of) else {
