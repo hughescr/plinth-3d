@@ -207,13 +207,19 @@ final gap STAYS: the 0.6 mm margin is a placement-family search margin and only 
 refuses geometry (and the Round discs, whose posts stand 0.3 to 0.6 mm from their ring's walls,
 are the byte-identity control). Where the straight descent does not clear the final gap, a
 costlier lean is admitted, and the preferred margin chooses: a candidate that clears 0.6 mm beats
-one that clears only the final gap, which beats none. Where no descent clears the final gap, the
+one that clears only the final gap, which beats none. The zone exemption grows with the gap
+asked, so a descent counts as clearing the preferred margin only if it also clears the final gap
+at the final gap's own zones (a short descent can lie wholly inside its zones at 0.6 mm and still
+have a testable stretch at 0.3 mm). Where no descent clears the final gap, the
 seat may move only to a cell whose reach disc covers the SAME demand
 (`up_sweep::reseat_cells`); where none does, the seat is kept and the census names it (emit and
 warn). The seat-zone exemption is `1 / cos(steepest lean)` times `(radius + gap)` along the axis
 (`LeanLaw::face_zone_factor`), never shorter than the real zone against any face the lean law
 admits. A thickening that would raise a member, or a trunk raised with it, into the final gap
-where it stands clear now is refused (`ThickenRefusal::Model`) and the run takes the next rung.
+where it stands clear now is refused (`ThickenRefusal::Model`) and the run takes the next rung;
+the comparison is made slot by slot, the profile the plan commits against the profile drawn
+there now, each read as the frustum it is (its clearance is the least over the axis of distance
+minus radius), so a wider section or an existing violation elsewhere excuses nothing.
 The lip-seat gate is unchanged: a member may land "no nearer than it stood".
 
 ## 6. The seat's own contact zone — the honest exemption
