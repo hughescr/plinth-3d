@@ -394,6 +394,10 @@ pub struct LipSeatOutcome {
     /// Refused because a moved member's drawn solid would come nearer the
     /// model than the final gap, or than it already stood.
     pub candidates_refused_clearance: usize,
+    /// Moved members (a mover, a follower) whose solid was NOT read against
+    /// the final gap because it stands in a hidden cavity (Craig ruling
+    /// 2026-10-05): the path hit of that ruling in the landing search.
+    pub candidates_hidden: usize,
     /// Refused because a new plate root's flared disc would touch another
     /// root's (the congestion lane's own clearance rule).
     pub candidates_refused_roots: usize,
@@ -793,6 +797,7 @@ pub(crate) fn apply(
             bite.as_ref().map_or(90.0, |bite| bite.limit_deg),
             &to_move,
             &children,
+            trigger.is_clearance(),
             outcome,
         );
         let id = strut.id;
@@ -967,8 +972,27 @@ pub(crate) fn apply(
             // every child (each joined to the mover), no nearer than it
             // stood, and never inside.
             let new_root = !matches!(proposal.candidate.landing, Landing::Strut { .. });
+            // The final gap does not apply inside a hidden cavity (Craig
+            // ruling 2026-10-05): a mover that comes to stand on the model
+            // under model material, in the same test the interior flag uses,
+            // and a child that stands so now, are not read against the gap.
+            let hidden = |slot: usize| {
+                if slot == first {
+                    crate::landing_is_hidden(
+                        context.history,
+                        proposal.candidate.cell,
+                        proposal.candidate.landing,
+                    )
+                } else {
+                    struts[proposal.children[slot - first - 1].0].interior
+                }
+            };
             let clear = surface.is_none()
                 || (first..=first + proposal.children.len()).all(|slot| {
+                    if hidden(slot) {
+                        outcome.candidates_hidden += 1;
+                        return true;
+                    }
                     let minimum = if slot == first && (new_root || trigger.is_clearance()) {
                         tier
                     } else {
@@ -1643,6 +1667,7 @@ fn price(
     limit_deg: f64,
     to_move: &[bool],
     children: &[usize],
+    arms_only: bool,
     outcome: &mut LipSeatOutcome,
 ) -> Vec<Candidate> {
     let grid = context.grid;
@@ -1748,6 +1773,23 @@ fn price(
             let (landing, k_bottom) = match (shaft, model) {
                 (Some((_, at, _)), Some(model_at)) if model_at > at => {
                     (Landing::Model { layer: model_at }, model_at)
+                }
+                // **A RE-ROUTE LANDS ONLY ON AN ARM** (lane cylinder-bracing,
+                // rule E, 2026-10-05). The column history holds the braces
+                // too, so the shaft search can return a cross diagonal; a
+                // diagonal is sized for drag (`r_b = l / S`), not for a load
+                // path, and a branch re-landed on one (the Cylinder's 169 on
+                // brace 362) made a new run over its limit. The head-join
+                // rule already joins only to a host that is an arm (the host
+                // test in `head_join`). The clearance re-route only:
+                // the lip-seat rule's own search is unchanged.
+                (Some((id, _, _)), _)
+                    if arms_only
+                        && struts
+                            .get(id as usize)
+                            .is_some_and(|host| host.kind != StrutKind::Arm) =>
+                {
+                    continue
                 }
                 // Not onto an arm this pass is about to re-land: landing on
                 // it would freeze its own cut in place.
@@ -2442,6 +2484,18 @@ mod model_landing_tests {
     /// Every candidate `price` offers the arm under a cap face tilted 30° out
     /// toward −X with a 20° limit (so it must lean out), over `history`.
     fn candidates(history: &ColumnHistory, strut: &SweepStrut) -> Vec<(Landing, f64)> {
+        candidates_among(history, vec![strut.clone()], false)
+    }
+
+    /// [`candidates`] for the arm `struts[0]` with the other members of
+    /// `struts` standing in the column index too, and `arms_only` as the
+    /// clearance re-route sets it.
+    fn candidates_among(
+        history: &ColumnHistory,
+        struts: Vec<SweepStrut>,
+        arms_only: bool,
+    ) -> Vec<(Landing, f64)> {
+        let strut = struts[0].clone();
         let grid = grid();
         let keep_out = crate::drain::DrainKeepOut::none();
         let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
@@ -2475,7 +2529,6 @@ mod model_landing_tests {
             frame_ledger: true,
             model_tie: true,
         };
-        let struts = vec![strut.clone()];
         let mut index = ColumnHistory::new(&grid);
         crate::congestion::stamp_all(&mut index, &struts);
         let (sin, cos) = 30.0_f64.to_radians().sin_cos();
@@ -2495,11 +2548,82 @@ mod model_landing_tests {
             20.0,
             &[true],
             &[],
+            arms_only,
             &mut outcome,
         )
         .into_iter()
         .map(|candidate| (candidate.landing, candidate.cost_mm))
         .collect()
+    }
+
+    /// A member standing in column `(60, col)` over layers `0..=top`, on the
+    /// plate, of the given kind and id.
+    fn member_in_column(id: u32, kind: StrutKind, col: usize, top: usize) -> SweepStrut {
+        let grid = grid();
+        SweepStrut {
+            id,
+            cell: 60 * SIDE + col,
+            center_mm: [grid.center_x_mm(col), grid.center_y_mm(60)],
+            kind,
+            k_top: top,
+            k_bottom: 0,
+            landing: Landing::Plate,
+            radius_mm: vec![0.1; top + 1],
+            ..arm(Landing::Plate, 0)
+        }
+    }
+
+    /// **A RE-ROUTE LANDS ONLY ON AN ARM** (lane cylinder-bracing, rule E,
+    /// 2026-10-05; `cylinder-v15-regression.md`). The column history holds the
+    /// braces too, so the shaft search returned a cross diagonal as a landing,
+    /// and the Cylinder's branch 169 was re-landed on brace 362: a diagonal
+    /// sized for drag (`r_b = l / S`), not for a load path, which made a new
+    /// run over its limit (8.53 mm against 4.85 mm).
+    ///
+    /// The arm of the fixtures above, under the cap face that makes it lean
+    /// −X, with a member standing in a column inside its reach, 60 layers
+    /// tall (below the arm's lean ceiling). As a BRACE it may not be landed on
+    /// by the re-route (`arms_only`): no candidate lands on member 1. SABOTAGE
+    /// INSIDE: the same field priced for the lip-seat rule (`arms_only` off)
+    /// offers it, so the refusal comes from the rule. CONTROL: the same member
+    /// as an ARM is still offered to the re-route.
+    #[test]
+    fn a_rerouted_arm_never_lands_on_a_brace() {
+        let bare = history(|_, _| false);
+        let on_member = |found: &[(Landing, f64)]| {
+            found
+                .iter()
+                .filter(|(landing, _)| matches!(landing, Landing::Strut { id: 1, .. }))
+                .count()
+        };
+        let field = |kind: StrutKind| {
+            vec![
+                arm(Landing::Plate, 0),
+                member_in_column(1, kind, 50, 60),
+            ]
+        };
+        let reroute = candidates_among(&bare, field(StrutKind::Brace), true);
+        let lip_seat = candidates_among(&bare, field(StrutKind::Brace), false);
+        assert!(
+            on_member(&lip_seat) > 0,
+            "anti-vacuity: the lip-seat search offers a brace as a landing ({} candidates)",
+            lip_seat.len()
+        );
+        assert_eq!(
+            on_member(&reroute),
+            0,
+            "the re-route offered a landing on a brace: {:?}",
+            reroute
+                .iter()
+                .filter(|(landing, _)| matches!(landing, Landing::Strut { id: 1, .. }))
+                .collect::<Vec<_>>()
+        );
+        assert!(!reroute.is_empty(), "the re-route still offers the plate and the model");
+        let as_an_arm = candidates_among(&bare, field(StrutKind::Arm), true);
+        assert!(
+            on_member(&as_an_arm) > 0,
+            "control: an arm is still a landing for the re-route"
+        );
     }
 
     /// The Morel base's cap arms (for-craig-v10): a slab under the seat, and

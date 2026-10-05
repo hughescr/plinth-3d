@@ -445,6 +445,10 @@ pub struct MemberModelClearance {
     /// kernel could not decide (or no drawable shaft).
     pub members_measured: usize,
     pub members_unmeasured: usize,
+    /// Members left out because they stand in a hidden cavity, where the
+    /// final gap does not apply (Craig ruling 2026-10-05): not measured, not
+    /// counted, never re-routed. The path-hit witness of that ruling.
+    pub members_hidden: usize,
     /// Spans measured, and spans wholly inside their member's own zones.
     pub rows: usize,
     pub rows_in_own_zones: usize,

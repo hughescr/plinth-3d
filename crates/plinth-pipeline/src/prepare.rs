@@ -2862,7 +2862,8 @@ fn print_sweep_disclosure(
              census); {} lean candidates refused; {} seats moved to a cell covering the same \
              demand; {} thickenings refused for the model ({} raised slots flagged by the \
              raster, {} of them measured clear by the census's predicate, {} proved inside the \
-             gap already as drawn)",
+             gap already as drawn, {} undecided and so not refused; {} raised members in a \
+             hidden cavity not read)",
             hits.descent_solid_tested,
             hits.descent_solid_inside_preferred_margin,
             hits.descent_solid_refused_at_final_gap,
@@ -2875,6 +2876,8 @@ fn print_sweep_disclosure(
             report.slenderness_lane.thicken_slots_flagged,
             report.slenderness_lane.thicken_slots_measured_clear,
             report.slenderness_lane.thicken_slots_inside_already,
+            report.slenderness_lane.thicken_slots_undecided,
+            report.slenderness_lane.thicken_members_hidden,
         );
         // THE CLEARANCE RE-ROUTE (fix/drawn-solid-clearance R2.2): path-hit
         // witnesses that the census named arms after the final sizing and the
@@ -2889,7 +2892,8 @@ fn print_sweep_disclosure(
              them); {} kept carrying on the last pass ({} with a cross tied to them, {} with a \
              brace, mast or tie resting on them or below, {} behind a member resting on them \
              that was sent itself), {} with no candidate; {} sized checks; {} moves put back \
-             for a host's load, {} for roots",
+             for a host's load, {} for roots; {} moved members in a hidden cavity not read \
+             against the final gap",
             if reroute.enabled { "on" } else { "off" },
             reroute.clearance_violators_first,
             reroute.clearance_violators_last,
@@ -2911,6 +2915,13 @@ fn print_sweep_disclosure(
             reroute.sizing_checks,
             reroute.moves_put_back_host_load,
             reroute.moves_put_back_roots,
+            reroute.candidates_hidden,
+        );
+        println!(
+            "[sweep {model}] ties planned again after the clearance re-route moved an arm: {} \
+             passes applied {} remedies",
+            report.slenderness_lane.retie_passes_after_reroute,
+            report.slenderness_lane.retie_remedies_after_reroute,
         );
         // Kept for a frame (challenger round 3, 2026-10-05): named, with why.
         for (arm, lock) in &reroute.kept_for_a_frame {
@@ -2940,7 +2951,8 @@ fn print_sweep_disclosure(
                  braces and masts, outside each member's own seat zone and model landing zone; \
                  final gap {:.3} mm): {} members measured over {} spans ({} of them tapered, \
                  read as the frustum the file draws; {} spans wholly in their own zones), {} \
-                 members with a span left undecided; smallest gap {}; {} members within the \
+                 members with a span left undecided; {} members in a hidden cavity left out \
+                 (the final gap does not apply there); smallest gap {}; {} members within the \
                  final gap",
                 clearance.gap_mm,
                 clearance.members_measured,
@@ -2948,6 +2960,7 @@ fn print_sweep_disclosure(
                 clearance.rows_tapered,
                 clearance.rows_in_own_zones,
                 clearance.members_unmeasured,
+                clearance.members_hidden,
                 clearance
                     .smallest_clearance_mm
                     .map_or_else(|| "none measured".to_owned(), |gap| format!("{gap:.4} mm")),

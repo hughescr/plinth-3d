@@ -724,6 +724,15 @@ pub(crate) fn model_clearance_census(
         if strut.k_bottom == usize::MAX || strut.k_top <= strut.k_bottom {
             continue;
         }
+        // The final gap does not apply inside a hidden cavity (Craig ruling
+        // 2026-10-05, on his 2026-08-31 ruling that supports hidden in a
+        // cavity are never removed or cleaned): a member the engine calls
+        // interior is not measured, so it is neither counted nor re-routed.
+        // Counted apart, so the census says what it left out.
+        if strut.interior {
+            census.members_hidden += 1;
+            continue;
+        }
         let disc = discs.get(index).copied().flatten();
         let top = match disc {
             Some(disc) if arm.seats_into_model => disc.ball_centre_mm,
@@ -1120,6 +1129,16 @@ fn walk_spans(
 /// the tests that read a placement against the census's own predicate.
 #[cfg(test)]
 pub(crate) fn boxes_surface(boxes: &[([f64; 3], [f64; 3])]) -> geom_kernel::NativeSurface {
+    let (verts, tris) = boxes_mesh(boxes);
+    indexed_surface(&verts, &tris)
+}
+
+/// The vertices and triangles of [`boxes_surface`], so a test can move a
+/// vertex (a face tilted by one unit in the last place, say) before the
+/// surface is built: corner `c` of box `b` is vertex `8 b + c`, bit `k` of
+/// `c` set meaning the high coordinate on axis `k`.
+#[cfg(test)]
+pub(crate) fn boxes_mesh(boxes: &[([f64; 3], [f64; 3])]) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
     let mut verts: Vec<[f64; 3]> = Vec::new();
     let mut tris: Vec<[u32; 3]> = Vec::new();
     for &(low, high) in boxes {
@@ -1134,12 +1153,18 @@ pub(crate) fn boxes_surface(boxes: &[([f64; 3], [f64; 3])]) -> geom_kernel::Nati
             tris.push([base + t[0], base + t[1], base + t[2]]);
         }
     }
+    (verts, tris)
+}
+
+/// One model surface from indexed triangles, at the tests' grid pitch.
+#[cfg(test)]
+pub(crate) fn indexed_surface(verts: &[[f64; 3]], tris: &[[u32; 3]]) -> geom_kernel::NativeSurface {
     let pitch = 0.1;
-    let estimate = geom_kernel::NativeSurface::estimate_index_memory_from_indexed(&verts, &tris, pitch)
+    let estimate = geom_kernel::NativeSurface::estimate_index_memory_from_indexed(verts, tris, pitch)
         .expect("an estimate");
     geom_kernel::NativeSurface::from_indexed(
-        &verts,
-        &tris,
+        verts,
+        tris,
         geom_kernel::NativeSurfaceConfig {
             grid_pitch_mm: pitch,
             max_grid_bytes: estimate.max_axis_grid_bytes(),
@@ -1288,6 +1313,42 @@ mod census_tests {
             root,
         );
         (census, spans)
+    }
+
+    /// **A MEMBER IN A HIDDEN CAVITY IS NOT COUNTED** (Craig ruling
+    /// 2026-10-05: the 0.3 mm final gap does not apply inside a hidden cavity,
+    /// on his 2026-08-31 ruling that supports there are never removed or
+    /// cleaned). A 0.2 mm plate post with a wall 0.35 mm from its axis stands
+    /// 0.15 mm from it, inside the gap: the census names it. The same post
+    /// flagged interior ([`crate::SweepStrut::interior`]) is left out, counted
+    /// in `members_hidden` (the path hit), and is not named, so the clearance
+    /// re-route (which sends the arms this census names) does not move it
+    /// either. A SECOND post, not interior, beside the same wall is still
+    /// named in the same census: the ruling changes nothing outside a cavity.
+    #[test]
+    fn a_member_in_a_hidden_cavity_is_not_counted() {
+        let wall = boxed([0.35, -1.0, -6.0], [2.0, 1.0, 6.0]);
+        let layers = plinth_core::LayerPlan::new(PLATE, vec![H; 400]).expect("a uniform plan");
+        let census_with = |interior: bool| {
+            let mut hidden_candidate = member(0, StrutKind::Arm, Landing::Plate, [0.0, 0.0], PLATE, 5.0, 0.2);
+            hidden_candidate.0.interior = interior;
+            // A second post 0.5 mm further along the wall, never interior.
+            let other = member(1, StrutKind::Arm, Landing::Plate, [0.0, 0.5], PLATE, 5.0, 0.2);
+            let (struts, arms) = (
+                vec![hidden_candidate.0, other.0],
+                vec![hidden_candidate.1, other.1],
+            );
+            model_clearance_census(Some(&wall), &struts, &arms, &layers, PLATE, GAP)
+        };
+        let open = census_with(false);
+        let named = |census: &crate::report::MemberModelClearance| {
+            census.within_gap.iter().map(|near| near.member).collect::<Vec<_>>()
+        };
+        assert_eq!(named(&open), vec![0, 1], "anti-vacuity: both posts are inside the gap: {open:?}");
+        assert_eq!(open.members_hidden, 0, "{open:?}");
+        let hidden = census_with(true);
+        assert_eq!(named(&hidden), vec![1], "the interior post is not counted: {hidden:?}");
+        assert_eq!(hidden.members_hidden, 1, "path hit: one member left out as hidden: {hidden:?}");
     }
 
     /// RED before the fix (rule R3). A plate post drawn as one chord from 0.3 mm

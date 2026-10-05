@@ -230,8 +230,11 @@ two solids is excused only its own contact zones, read from the faces its ends s
 above, at the radius that solid has at the zone's edge (a taper is wider there than at its end,
 so the zone is taken to a fixed point); a trunk raised under a flat seat is tested below
 `gap + r`, not `1.86 (gap + r)`. A slot the raster flags is decided by the census's own predicate
-on the drawn frustum, all of a plan's slots in one batch: the raise enters the gap unless the
-predicate measures the committed slot clear, and a slot counts as inside the gap already only
+on the drawn frustum, all of a plan's slots in one batch: the raise enters the gap only where
+the predicate PROVES it, a measured read under the gap or an upper bound under the gap (the
+kernel's one-sided read, where it could not decide a near-parallel face, says the clearance is
+AT MOST the number: an upper bound at or above the gap is undecided and refuses nothing, as the
+census does not count it either), and a slot counts as inside the gap already only
 where the predicate reads the drawn slot under the gap. The raster's flag is never that proof;
 without a model surface nothing is proved and a flagged raise is refused. A zone is an
 exemption, so where no face is known (no surface, or the query names none) the zone is zero,
@@ -254,7 +257,22 @@ slenderness ladder solved (a cross seated on it or on a member resting on it, or
 model tie resting on it) is kept where it stands and named in a WARNING with that reason: moving
 it moves a junction of the frame, and carrying the frame along unsolved, or taking it down and
 solving again, could leave a post over its slenderness limit (sway or snap mid-print) to buy
-clearance for a member that already stands clear of the model.
+clearance for a member that already stands clear of the model. The re-route lands an arm only
+on another ARM, never on a brace: the column history holds the cross diagonals too, and a
+diagonal is sized for drag, not for a load path. When the re-route moved anything, the tie passes
+and the model-tie passes run again on the field it left (they act only on runs over their limit),
+because the move can make a run (a branch on a new host) or lower a limit (the old host's re-size
+makes its sections thinner).
+
+**The final gap does not apply inside a hidden cavity** (owner ruling 2026-10-05, on the
+2026-08-31 ruling that supports hidden in a cavity are never removed or cleaned). A member the
+engine classifies as interior (`SweepStrut::interior`: it lands on the model with model material
+above the landing in the same column) is not read against the gap by the thickening refusal, is
+not counted by the census (so it is never sent to the re-route), and a mover that lands so is not
+read against the gap by the re-route's landing search; a brace band between two such posts is not
+read against the model (its path test still refuses a diagonal through model material). Outside a
+cavity nothing changes. The up-sweep's descent test is not changed: the column above a landing is
+not yet known while the up-sweep runs, so a seat placed there is read against the gap as before.
 
 ## 6. The seat's own contact zone — the honest exemption
 

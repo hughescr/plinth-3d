@@ -2464,6 +2464,86 @@ pub fn run_sweep_with_drains(
             "clearance re-route",
             &landing_check::check_landings(&struts),
         );
+        // **THE TIES ARE PLANNED AGAIN WHERE THE RE-ROUTE MOVED ANYTHING**
+        // (lane cylinder-bracing, rule D, 2026-10-05). The ladder above ran on
+        // the field BEFORE the re-route, so a run the move made (a branch
+        // re-landed on a new host, whose run is longer than its limit) or a
+        // limit the move lowered (the old host's re-size made its sections
+        // thinner) had no rung left to hold it, and the census warned
+        // (Cylinder: arms 169 and 196). The same passes run again on the
+        // field the re-route left, acting only on runs over their limit, and
+        // are sized by the same down-sweep; then the model-tie passes, the
+        // last rung before a warning, on whatever they still could not hold.
+        // The frame-lock rule is unchanged: a member a cross is tied to is
+        // not moved. This needs rule E (a re-route lands only on an arm):
+        // without it the passes braced a branch standing on a diagonal and
+        // its top shook 41 px.
+        if policy.slenderness_ties && !clearance_reroute_outcome.relanded_ids.is_empty() {
+            for _ in 0..policy.strut_removal_passes {
+                let applied = slenderness::apply_ties(
+                    &slenderness_context,
+                    &mut struts,
+                    &mut slenderness_outcome,
+                );
+                if applied == 0 {
+                    break;
+                }
+                slenderness_outcome.tie_passes += 1;
+                slenderness_outcome.retie_passes_after_reroute += 1;
+                slenderness_outcome.retie_remedies_after_reroute += applied;
+                outcome = reroute.size(&slenderness_context, &mut struts);
+            }
+            let runs_left = policy.slenderness_model_tie
+                && slenderness::unbraced_runs_drawn(
+                    &grid,
+                    &struts,
+                    height,
+                    &slenderness_law,
+                    load_step_taper,
+                )
+                .iter()
+                .any(slenderness::UnbracedRun::over_limit);
+            if runs_left {
+                if let Some(surface) = head_join_context.surface() {
+                    let model = slenderness::ModelTies {
+                        surface,
+                        layer_plan: plan,
+                        plate_z_mm: plate_z,
+                    };
+                    let ties_only = slenderness::SlendernessContext {
+                        brace: false,
+                        thicken: false,
+                        mast: false,
+                        ..slenderness_context
+                    };
+                    for _ in 0..policy.strut_removal_passes {
+                        let applied = slenderness::apply_ties_with_model(
+                            &ties_only,
+                            &mut struts,
+                            &mut slenderness_outcome,
+                            Some(&model),
+                        );
+                        if applied == 0 {
+                            break;
+                        }
+                        slenderness_outcome.tie_passes += 1;
+                        slenderness_outcome.retie_passes_after_reroute += 1;
+                        slenderness_outcome.retie_remedies_after_reroute += applied;
+                        outcome = reroute.size(&slenderness_context, &mut struts);
+                    }
+                }
+            }
+            // The ties as the finished field holds them (ids are the struts' own).
+            slenderness_outcome.model_tie_ids = struts
+                .iter()
+                .filter(|strut| strut.kind == StrutKind::Tie && slenderness::live(strut))
+                .map(|strut| strut.id)
+                .collect();
+            landings.record(
+                "ties after the clearance re-route",
+                &landing_check::check_landings(&struts),
+            );
+        }
     }
     // The finished field's own check, and the load it lost if any landing is
     // broken: the down-sweep hands a child's load to its named parent at the
@@ -3265,13 +3345,26 @@ impl LipSeatRun<'_> {
 
 fn set_interior(struts: &mut [SweepStrut], history: &up_sweep::ColumnHistory) {
     for strut in struts.iter_mut() {
-        strut.interior = match strut.landing {
-            Landing::Model { layer } => {
-                usize::try_from(history.column_max_model[strut.base_cell()]).unwrap_or(0)
-                    > layer + 1
-            }
-            Landing::Plate | Landing::Strut { .. } => false,
-        };
+        strut.interior = landing_is_hidden(history, strut.base_cell(), strut.landing);
+    }
+}
+
+/// The one test of [`SweepStrut::interior`]: a landing on the model whose
+/// column has model material above the landing layer, so that nobody will
+/// ever see the scar. Craig ruled 2026-10-05 that the final clearance gap
+/// does not apply to a member so classified (a hidden cavity; his 2026-08-31
+/// ruling is that supports there are never removed or cleaned). The same
+/// test answers for a landing a search proposes but has not yet made.
+pub(crate) fn landing_is_hidden(
+    history: &up_sweep::ColumnHistory,
+    base_cell: usize,
+    landing: Landing,
+) -> bool {
+    match landing {
+        Landing::Model { layer } => {
+            usize::try_from(history.column_max_model[base_cell]).unwrap_or(0) > layer + 1
+        }
+        Landing::Plate | Landing::Strut { .. } => false,
     }
 }
 
