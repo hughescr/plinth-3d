@@ -207,3 +207,126 @@ fn the_brace_pair_census_matches_the_drawn_file() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// fix/drawn-solid-clearance (2026-10-04): R1 of clearance-census-diagnosis.md.
+// ---------------------------------------------------------------------------
+
+/// The finished field's census, on the stock overhang table at production
+/// placement. The table's legs are 4 x 4 x 20 mm; the up-sweep's hex covering
+/// puts a lattice seat 0.325 mm from a leg's inner face, and the post under it
+/// (member 30) used to drop straight beside the leg's whole 20 mm and then be
+/// thickened into it (the census read it at -0.445 mm; the file drew it 0.374
+/// mm inside the leg).
+///
+/// RED before R1: member 30 named at -0.445 mm. After it the seat moved to a
+/// cell covering the same demand, or kept and warned; no member is named at a
+/// NEGATIVE gap (a solid inside the model). The two ruled exceptions
+/// (`clearance` ruling 2026-10-04: lip-seat's "no nearer than it stood" gate
+/// stays, so branch 79 stays a warning) may still stand within the final gap,
+/// and the test lists what stands rather than hiding it.
+#[test]
+fn no_member_enters_the_overhang_table() {
+    let mesh = plinth_mesh::make_overhang_table().expect("the overhang table");
+    let plan = sweep_with(&mesh, 0.0, &policy());
+    let census = &plan.report.member_model_clearance;
+    assert!(census.ran, "{census:?}");
+    let counters = &plan.report.counters;
+    // Path hits: the solid test ran, and it refused something on this model.
+    assert!(
+        counters.descent_solid_tested > 0,
+        "the drawn-solid test never ran: {counters:?}"
+    );
+    assert!(
+        counters.descent_solid_refused_at_final_gap > 0,
+        "the drawn-solid test never refused a descent on the table: {counters:?}"
+    );
+    println!(
+        "descent solid: tested {} refused-at-final-gap {} cleared-by-lean {} final-only {} uncleared {} lean-refused {} seats-moved {}",
+        counters.descent_solid_tested,
+        counters.descent_solid_refused_at_final_gap,
+        counters.descent_solid_cleared_by_lean,
+        counters.descent_solid_at_final_gap_only,
+        counters.descent_solid_uncleared,
+        counters.descent_solid_lean_candidates_refused,
+        counters.descent_solid_seats_moved
+    );
+    for near in &census.within_gap {
+        println!(
+            "within the gap: member {} {:?} at {:.4} mm",
+            near.member, near.landing, near.clearance_mm
+        );
+    }
+    let inside: Vec<_> = census
+        .within_gap
+        .iter()
+        .filter(|near| near.clearance_mm < 0.0)
+        .collect();
+    assert!(
+        inside.is_empty(),
+        "members whose drawn solid is inside the model: {inside:?}"
+    );
+}
+
+/// THE SABOTAGE of the test above: the same table with the centreline-only
+/// descent (`without_drawn_solid_descent`) puts a member inside the leg again.
+/// A test that only asserted the clean census would pass on a census that
+/// never reads the walls.
+#[test]
+fn sabotage_without_the_drawn_solid_descent_a_member_enters_the_overhang_table() {
+    let mesh = plinth_mesh::make_overhang_table().expect("the overhang table");
+    let plan = sweep_with(&mesh, 0.0, &policy().without_drawn_solid_descent());
+    let census = &plan.report.member_model_clearance;
+    assert!(census.ran, "{census:?}");
+    assert_eq!(
+        plan.report.counters.descent_solid_tested, 0,
+        "the knob is off: no solid is read"
+    );
+    assert!(
+        census.within_gap.iter().any(|near| near.clearance_mm < 0.0),
+        "the retired descent should put a member inside the model: {:?}",
+        census.within_gap
+    );
+}
+
+/// **On the Morel base: no lander's solid is inside the model where it joins
+/// its host** (R1; Morel 95 and 112 were branches on 76 and 77 whose solid
+/// reached the model at the junction, at -0.069 and -0.055 mm). Local input,
+/// like the other Morel tests, so `#[ignore]`d in the gate.
+#[test]
+#[ignore = "reads the local, uncommitted Morel base mini (PLINTH_MINIS_DIR)"]
+fn a_lander_never_joins_inside_its_hosts_contact() {
+    let path = super::morel_pose::morel_path();
+    let raw = plinth_mesh::load_binary_stl(&path, plinth_mesh::WeldPolicy::None)
+        .unwrap_or_else(|error| panic!("{}: {error:?}", path.display()));
+    let repaired = plinth_mesh::repair_mesh(&raw).into_mesh();
+    let mesh = plinth_decimate::run(&repaired, super::morel_pose::registered_decimation_budget())
+        .expect("decimation must run")
+        .into_decimated_model()
+        .expect("scale sanity must pass")
+        .into_parts()
+        .0;
+    let plan = sweep_with(&mesh, 0.0, &policy());
+    let census = &plan.report.member_model_clearance;
+    assert!(census.ran, "{census:?}");
+    let counters = &plan.report.counters;
+    println!(
+        "Morel: descent solid tested {} refused-at-final-gap {} cleared-by-lean {} final-only {} uncleared {} seats-moved {}; {} members within the gap",
+        counters.descent_solid_tested,
+        counters.descent_solid_refused_at_final_gap,
+        counters.descent_solid_cleared_by_lean,
+        counters.descent_solid_at_final_gap_only,
+        counters.descent_solid_uncleared,
+        counters.descent_solid_seats_moved,
+        census.within_gap.len()
+    );
+    for near in &census.within_gap {
+        println!("within the gap: member {} {:?} at {:.4} mm", near.member, near.landing, near.clearance_mm);
+    }
+    let inside: Vec<_> = census
+        .within_gap
+        .iter()
+        .filter(|near| matches!(near.landing, Landing::Strut { .. }) && near.clearance_mm < 0.0)
+        .collect();
+    assert!(inside.is_empty(), "landers whose solid is inside the model: {inside:?}");
+}

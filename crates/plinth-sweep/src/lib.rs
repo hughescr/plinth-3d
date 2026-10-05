@@ -776,6 +776,15 @@ pub struct SweepPolicy {
     /// back the centreline-cell test alone, and watches braces enter the model
     /// and each other again; nothing in the pipeline turns it off.
     pub member_clearance: bool,
+    /// Whether the up-sweep's every descent is read as the SOLID the file will
+    /// draw, against the model, at Craig's two tiers (the 0.6 mm placement
+    /// margin, then the 0.3 mm final gap): a seat with no clear descent moves
+    /// to a cell that covers the same demand
+    /// (fix/drawn-solid-clearance, 2026-10-04, R1 of
+    /// `clearance-census-diagnosis.md`). **On in production.** The drill turns
+    /// it off, which puts back the centreline-only descent, and watches posts
+    /// enter the model again; nothing in the pipeline turns it off.
+    pub drawn_solid_descent: bool,
     /// Whether every member is sized for its worst SINGLE peel event, routed on
     /// its own ([`per_event`], rule a′, owner-approved 2026-09-29), and the
     /// load insertion triggered by one event's routed load. **On in
@@ -896,6 +905,7 @@ impl SweepPolicy {
                 .diagnostic()
                 .get(),
             member_clearance: true,
+            drawn_solid_descent: true,
             per_event_sizing: true,
             unrooted_routing: true,
             handed_column_ledger: true,
@@ -1269,6 +1279,16 @@ impl SweepPolicy {
         self
     }
 
+    /// Descend by the centreline alone, the up-sweep this engine had until
+    /// fix/drawn-solid-clearance (2026-10-04): no drawn solid, no clearance, no
+    /// seat moved for one. **Sabotage and comparison only**; nothing in the
+    /// pipeline sets it.
+    #[must_use]
+    pub const fn without_drawn_solid_descent(mut self) -> Self {
+        self.drawn_solid_descent = false;
+        self
+    }
+
     /// Measure the plate's congestion but change nothing — the field this
     /// engine placed before 2026-09-06. **Sabotage and comparison only**: it is
     /// what the "the lane is a no-op on a disc" byte-identity check is taken
@@ -1451,6 +1471,17 @@ pub fn run_sweep_with_drains(
         lean::LeanLaw::disabled(height)
     };
     let mut rasteriser_entries = 0_u64;
+    // What every descent reads to test its own drawn solid against the model
+    // (fix/drawn-solid-clearance): Craig's two tiers and the radius bound.
+    let descent_clearance = policy.drawn_solid_descent.then(|| up_sweep::DescentClearance {
+        layer_height_mm: height,
+        preferred_gap_mm: policy.standoff_mm,
+        final_gap_mm: policy.final_clearance_gap_mm,
+        tip_radius_min_mm: policy.tip_radius_min_mm,
+        x_allowed: policy.x_allowed,
+        zone_factor: law.face_zone_factor(),
+    });
+    let mut descent_tally = up_sweep::DescentTally::default();
     // The mesh's own surface, banded layer by layer, for the overhang weight a
     // wall's creep is priced at. Disabled by the sabotage knob, which prices
     // every creep at a full lamina as before.
@@ -1489,7 +1520,7 @@ pub fn run_sweep_with_drains(
             &creep,
             &mut reach,
         );
-        let outcome = up_sweep::place_layer(
+        let outcome = up_sweep::place_layer_cleared(
             &grid,
             layer,
             &masks.cover,
@@ -1502,7 +1533,9 @@ pub fn run_sweep_with_drains(
             &mut greedy,
             &mut struts,
             policy.limits.max_struts,
+            descent_clearance.as_ref(),
         );
+        descent_tally.absorb(&outcome.solid);
         // What the up-sweep left UNROOTED here, by its own predicate, for the
         // down-sweep's routing ([`down_sweep::UnrootedColumns`]). Read only on
         // a layer with residual demand, before the potential is committed.
@@ -2516,6 +2549,14 @@ pub fn run_sweep_with_drains(
         stranded_branch_outcome.lapping_ids_on_finished_field.len();
     report.stranded_branch = stranded_branch_outcome;
     report.counters.lean_candidates_priced = lean_candidates_priced;
+    report.counters.descent_solid_tested = descent_tally.tested;
+    report.counters.descent_solid_inside_preferred_margin = descent_tally.inside_preferred_margin;
+    report.counters.descent_solid_refused_at_final_gap = descent_tally.refused_at_final_gap;
+    report.counters.descent_solid_cleared_by_lean = descent_tally.cleared_by_lean;
+    report.counters.descent_solid_at_final_gap_only = descent_tally.at_final_gap_only;
+    report.counters.descent_solid_uncleared = descent_tally.uncleared;
+    report.counters.descent_solid_lean_candidates_refused = descent_tally.lean_candidates_refused;
+    report.counters.descent_solid_seats_moved = descent_tally.seats_moved;
     report.counters.sightlines_clear = reach.sightlines_clear;
     report.counters.sightlines_blocked = reach.sightlines_blocked;
     report.counters.route_sightlines_clear = outcome.route_sightlines_clear;

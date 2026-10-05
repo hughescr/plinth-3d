@@ -520,6 +520,7 @@ impl GreedyScratch {
 }
 
 /// What one layer's greedy produced.
+#[derive(Debug)]
 pub struct LayerOutcome {
     /// Cells that entered the demand set on this layer — the model area that
     /// had no rooted carrier within reach and had to be given an arm. This is
@@ -558,6 +559,136 @@ pub struct LayerOutcome {
     /// Candidate landings the lean search priced. The path-hit witness that
     /// the search ran at all.
     pub lean_candidates_priced: u64,
+    /// What the drawn-solid test did on this layer ([`DescentTally`]).
+    pub solid: DescentTally,
+}
+
+impl LayerOutcome {
+    /// An outcome with every count at zero.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            demand_cells: 0,
+            residual_demand: 0,
+            unrooted_landings: 0,
+            keep_out_refusals: 0,
+            arms_leaned: 0,
+            arms_merged: 0,
+            lean_paths_blocked: 0,
+            junctions_mid_shaft: 0,
+            lean_candidates_priced: 0,
+            solid: DescentTally::default(),
+        }
+    }
+
+    /// Fold in what ONE accepted descent counted (a trial descent that was
+    /// not taken is dropped, never folded).
+    fn absorb_descent(&mut self, other: &LayerOutcome) {
+        self.arms_leaned += other.arms_leaned;
+        self.arms_merged += other.arms_merged;
+        self.lean_paths_blocked += other.lean_paths_blocked;
+        self.junctions_mid_shaft += other.junctions_mid_shaft;
+        self.lean_candidates_priced += other.lean_candidates_priced;
+        self.solid.absorb(&other.solid);
+    }
+}
+
+/// **What the drawn-solid test did** (fix/drawn-solid-clearance, 2026-10-04):
+/// the path-hit witnesses that the test ran and that it bit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DescentTally {
+    /// Straight descents whose drawn solid was tested against the model.
+    pub tested: u64,
+    /// Of those, straight descents standing inside the preferred 0.6 mm
+    /// placement margin (kept when they clear the 0.3 mm final gap).
+    pub inside_preferred_margin: u64,
+    /// Straight descents that do NOT clear the final gap: the ones the
+    /// search replaces (a lean) or whose seat is moved.
+    pub refused_at_final_gap: u64,
+    /// Refused straight descents replaced by a leaned one that clears the
+    /// preferred margin.
+    pub cleared_by_lean: u64,
+    /// Refused straight descents replaced by a descent that clears the
+    /// final gap only (no candidate cleared the preferred margin).
+    pub at_final_gap_only: u64,
+    /// Descents no candidate cleared even at the final gap: kept, and
+    /// WARNED by the census (emit and warn).
+    pub uncleared: u64,
+    /// Lean candidates refused because their drawn solid enters the gap.
+    pub lean_candidates_refused: u64,
+    /// Seats moved to another cell that covers the SAME demand because no
+    /// descent from the first cell cleared.
+    pub seats_moved: u64,
+}
+
+impl DescentTally {
+    pub(crate) fn absorb(&mut self, other: &DescentTally) {
+        self.tested += other.tested;
+        self.inside_preferred_margin += other.inside_preferred_margin;
+        self.refused_at_final_gap += other.refused_at_final_gap;
+        self.cleared_by_lean += other.cleared_by_lean;
+        self.at_final_gap_only += other.at_final_gap_only;
+        self.uncleared += other.uncleared;
+        self.lean_candidates_refused += other.lean_candidates_refused;
+        self.seats_moved += other.seats_moved;
+    }
+}
+
+/// **What a descent needs to test its drawn solid against the model**
+/// (fix/drawn-solid-clearance, 2026-10-04): Craig's two-tier clearance
+/// (2026-08-22) and the lower bound on the radius the arm will be drawn at.
+#[derive(Clone, Copy, Debug)]
+pub struct DescentClearance {
+    pub layer_height_mm: f64,
+    /// `STANDOFF_MM`, the preferred placement margin.
+    pub preferred_gap_mm: f64,
+    /// `FINAL_CLEARANCE_GAP_MM`, the hard limit a placement may still use.
+    pub final_gap_mm: f64,
+    /// The registered minimum tip radius: no arm is drawn thinner.
+    pub tip_radius_min_mm: f64,
+    /// `X_ALLOWED`: the area law's ratio of carried area to arm section.
+    pub x_allowed: f64,
+    /// [`crate::lean::LeanLaw::face_zone_factor`]: the zone exemption.
+    pub zone_factor: f64,
+}
+
+impl DescentClearance {
+    /// A LOWER bound on the radius an arm that covers `area_mm2` of demand
+    /// is drawn at: the larger of the minimum tip radius and the area-law
+    /// radius `√(area / (X · π))` of what it covers. Later landers only add
+    /// load, so the drawn radius is never smaller.
+    #[must_use]
+    pub fn radius_lower_bound_mm(&self, area_mm2: f64) -> f64 {
+        let law = if self.x_allowed > 0.0 && area_mm2.is_finite() && area_mm2 > 0.0 {
+            (area_mm2 / (self.x_allowed * core::f64::consts::PI)).sqrt()
+        } else {
+            0.0
+        };
+        self.tip_radius_min_mm.max(law)
+    }
+}
+
+/// How well a descent clears the model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Clears {
+    /// Clears the preferred placement margin.
+    Preferred,
+    /// Clears the final gap only.
+    FinalOnly,
+    /// Clears neither: kept and warned.
+    Neither,
+    /// Not tested (no clearance given, or no solid to read).
+    Untested,
+}
+
+/// One descent: where it lands, whether the landing is rooted, the leaned
+/// path (empty when straight) and how well its drawn solid clears the model.
+pub(crate) struct Descent {
+    pub landing: Landing,
+    pub k_bottom: usize,
+    pub rooted: bool,
+    pub path: Vec<u32>,
+    pub clears: Clears,
 }
 
 /// Place struts on one layer.
@@ -585,17 +716,48 @@ pub fn place_layer(
     struts: &mut Vec<SweepStrut>,
     max_struts: usize,
 ) -> LayerOutcome {
-    let mut outcome = LayerOutcome {
-        demand_cells: 0,
-        residual_demand: 0,
-        unrooted_landings: 0,
-        keep_out_refusals: 0,
-        arms_leaned: 0,
-        arms_merged: 0,
-        lean_paths_blocked: 0,
-        junctions_mid_shaft: 0,
-        lean_candidates_priced: 0,
-    };
+    place_layer_cleared(
+        grid,
+        layer,
+        cover,
+        keep_out,
+        law,
+        shaft_landings,
+        kappa,
+        reach,
+        history,
+        scratch,
+        struts,
+        max_struts,
+        None,
+    )
+}
+
+/// [`place_layer`] with the drawn-solid test: every descent's solid is read
+/// against the model at the two-tier clearance (`clearance`; `None` is the
+/// retired centreline-only placement, kept for the tests that pin it).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one layer's greedy genuinely reads the grid, the layer's masks, the reach state, the \
+          column history, the strut list, its scratch, its layer index and the clearance; \
+          bundling them into a struct would move the argument list rather than shorten it"
+)]
+pub fn place_layer_cleared(
+    grid: &Grid,
+    layer: usize,
+    cover: &[bool],
+    keep_out: &DrainKeepOut,
+    law: &LeanLaw,
+    shaft_landings: bool,
+    kappa: f64,
+    reach: &mut ReachState,
+    history: &mut ColumnHistory,
+    scratch: &mut GreedyScratch,
+    struts: &mut Vec<SweepStrut>,
+    max_struts: usize,
+    clearance: Option<&DescentClearance>,
+) -> LayerOutcome {
+    let mut outcome = LayerOutcome::empty();
 
     let mut demand_total = 0_usize;
     for cell in 0..grid.cells() {
@@ -681,6 +843,7 @@ pub fn place_layer(
         kappa,
         separation_mm,
         max_struts,
+        clearance,
     };
     let islands = label_islands(grid, scratch);
     // One seat's share of the optimal covering at the MEASURED reach, for the
@@ -777,6 +940,7 @@ struct Seating<'a> {
     kappa: f64,
     separation_mm: f64,
     max_struts: usize,
+    clearance: Option<&'a DescentClearance>,
 }
 
 /// Whether a covering is being measured or seated.
@@ -1328,16 +1492,29 @@ fn commit_seat(
     let Seating {
         grid,
         layer,
-        cover,
         keep_out,
         law,
         shaft_landings,
-        kappa,
         separation_mm,
+        clearance,
         ..
     } = *seating;
     let cols = grid.cols();
-    let (landing, k_bottom, rooted_landing, path) = descend_leaning(
+    let id = u32::try_from(struts.len()).unwrap_or(u32::MAX);
+
+    // Root the seat in the reach field and clear the demand it covers, then
+    // descend FROM what it covers: the drawn solid's radius is bounded below
+    // by the area law on that demand. Under the drawn-solid test the rooting
+    // runs under the journal so a seat whose every descent enters the model
+    // can be undone bit for bit and moved (below); without the test it is
+    // the placement this engine always made.
+    let mut cell = cell;
+    if clearance.is_some() {
+        reach.begin_journal();
+    }
+    let mut covered = root_and_clear(seating, cell, reach, scratch);
+    let mut trial = LayerOutcome::empty();
+    let mut descent = descend_cleared(
         grid,
         history,
         keep_out,
@@ -1347,37 +1524,105 @@ fn commit_seat(
         cell,
         layer,
         &mut scratch.lean_candidates,
-        outcome,
+        &mut trial,
+        clearance,
+        clearance.map_or(0.0, |c| {
+            c.radius_lower_bound_mm(covered.len() as f64 * grid.cell_area_mm2())
+        }),
     );
+    if let (Some(clear), Clears::Neither) = (clearance, descent.clears) {
+        // **THE SEAT MAY MOVE, BUT ONLY TO A CELL THAT COVERS THE SAME
+        // DEMAND** (Craig, R1 of `clearance-census-diagnosis.md`): nothing
+        // that this seat roots is left unrooted by the move.
+        let first_covered = covered.clone();
+        undo_rooting(reach, scratch, &covered);
+        let mut moved = false;
+        let lower_bound = clear.radius_lower_bound_mm(first_covered.len() as f64 * grid.cell_area_mm2());
+        for candidate in reseat_cells(seating, cell) {
+            // The cheap necessary test first, on the straight descent alone
+            // (a lean search per candidate cell is thousands of tests per
+            // seat): a descent that enters the model at the radius the FIRST
+            // seat's demand needs enters it at any larger one, and the
+            // covering is only measured for a cell whose straight descent
+            // clears the final gap.
+            let (landing_there, bottom_there, _) = descend(history, candidate, layer);
+            if crate::member_clearance::shaft_model_intrusion(
+                grid,
+                history,
+                clear.layer_height_mm,
+                (candidate, layer),
+                (candidate, bottom_there),
+                matches!(landing_there, Landing::Model { .. }),
+                lower_bound,
+                clear.final_gap_mm,
+                clear.zone_factor,
+            )
+            .is_some()
+            {
+                continue;
+            }
+            reach.begin_journal();
+            let covered_there = root_and_clear(seating, candidate, reach, scratch);
+            let same_demand = first_covered.iter().all(|&c| reach.is_rooted(c));
+            if same_demand {
+                let mut there = LayerOutcome::empty();
+                let moved_descent = descend_cleared(
+                    grid,
+                    history,
+                    keep_out,
+                    law,
+                    shaft_landings,
+                    separation_mm,
+                    candidate,
+                    layer,
+                    &mut scratch.lean_candidates,
+                    &mut there,
+                    Some(clear),
+                    clear.radius_lower_bound_mm(covered_there.len() as f64 * grid.cell_area_mm2()),
+                );
+                if moved_descent.clears != Clears::Neither {
+                    cell = candidate;
+                    covered = covered_there;
+                    descent = moved_descent;
+                    trial = there;
+                    trial.solid.seats_moved += 1;
+                    moved = true;
+                    break;
+                }
+            }
+            undo_rooting(reach, scratch, &covered_there);
+        }
+        if !moved {
+            // No such cell clears either: keep the seat, WARN (the census
+            // names it). Re-root where it stood.
+            reach.begin_journal();
+            covered = root_and_clear(seating, cell, reach, scratch);
+        }
+    }
+    if clearance.is_some() {
+        reach.end_journal();
+    }
+    outcome.absorb_descent(&trial);
+    let Descent {
+        landing,
+        k_bottom,
+        rooted: rooted_landing,
+        path,
+        ..
+    } = descent;
     if !rooted_landing {
         outcome.unrooted_landings += 1;
     }
-    let id = u32::try_from(struts.len()).unwrap_or(u32::MAX);
-    scratch.touched.clear();
-    crate::reach::relax_from_root(
-        grid,
-        cover,
-        kappa,
-        cell,
-        reach,
-        &mut scratch.queue,
-        &mut scratch.touched,
-    );
 
-    // Everything this insertion newly rooted leaves the demand set and is
-    // recorded, so the removal pass can ask later whether a survivor still
-    // covers it.
-    let mut covered = Vec::new();
+    // Everything this insertion newly rooted left the demand set and is
+    // recorded (`covered`), so the removal pass can ask later whether a
+    // survivor still covers it.
     let mut dirty_lo = usize::MAX;
     let mut dirty_hi = 0_usize;
-    for &touched in &scratch.touched {
-        if scratch.demand_bits[touched] && reach.is_rooted(touched) {
-            scratch.demand_bits[touched] = false;
-            covered.push(touched);
-            let row = touched / cols;
-            dirty_lo = dirty_lo.min(row);
-            dirty_hi = dirty_hi.max(row);
-        }
+    for &touched in &covered {
+        let row = touched / cols;
+        dirty_lo = dirty_lo.min(row);
+        dirty_hi = dirty_hi.max(row);
     }
     if let Some(tau) = reach.tau_used_mm.get(cell) {
         let tau = f64::from(*tau);
@@ -1445,6 +1690,83 @@ fn commit_seat(
     let placed = struts.last().expect("the arm just pushed");
     history.stamp_shaft(id, k_bottom, layer, cell, &placed.path);
     (dirty_lo, dirty_hi)
+}
+
+/// Root a seat at `cell` in the reach field and take everything it newly
+/// roots out of the demand set; returns those cells (what the seat covers).
+fn root_and_clear(
+    seating: &Seating<'_>,
+    cell: usize,
+    reach: &mut ReachState,
+    scratch: &mut GreedyScratch,
+) -> Vec<usize> {
+    scratch.touched.clear();
+    crate::reach::relax_from_root(
+        seating.grid,
+        seating.cover,
+        seating.kappa,
+        cell,
+        reach,
+        &mut scratch.queue,
+        &mut scratch.touched,
+    );
+    let mut covered = Vec::new();
+    for &touched in &scratch.touched {
+        if scratch.demand_bits[touched] && reach.is_rooted(touched) {
+            scratch.demand_bits[touched] = false;
+            covered.push(touched);
+        }
+    }
+    covered
+}
+
+/// Undo [`root_and_clear`] bit for bit: the journal puts the reach field
+/// back and the covered cells return to the demand set.
+fn undo_rooting(reach: &mut ReachState, scratch: &mut GreedyScratch, covered: &[usize]) {
+    reach.undo_journal();
+    for &cell in covered {
+        scratch.demand_bits[cell] = true;
+    }
+}
+
+/// The cells a seat that has no clear descent may move to, nearest first
+/// (ties by cell index): model cells of this layer, admitted by the drain
+/// keep-out, within HALF the covering's seat spacing of where it stood
+/// (`separation_mm / 2`, the covering's own geometry: one step further and
+/// the seat is nearer its neighbour's than its own). The caller keeps only
+/// a cell that covers the same demand.
+fn reseat_cells(seating: &Seating<'_>, cell: usize) -> Vec<usize> {
+    let Seating {
+        grid,
+        layer,
+        cover,
+        keep_out,
+        separation_mm,
+        ..
+    } = *seating;
+    let radius_mm = 0.5 * separation_mm;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a non-negative finite length divided by the grid pitch, floored to a loop bound"
+    )]
+    let radius_cells = (radius_mm / grid.pitch_mm()).floor().max(0.0) as usize;
+    let (row, col) = (grid.row_of(cell), grid.col_of(cell));
+    let mut found: Vec<(f64, usize)> = Vec::new();
+    for r in row.saturating_sub(radius_cells)..=(row + radius_cells).min(grid.rows() - 1) {
+        for c in col.saturating_sub(radius_cells)..=(col + radius_cells).min(grid.cols() - 1) {
+            let candidate = r * grid.cols() + c;
+            if candidate == cell || !cover[candidate] || !keep_out.admits(candidate, layer) {
+                continue;
+            }
+            let lateral = crate::cell_distance_mm(grid, cell, candidate);
+            if lateral <= radius_mm {
+                found.push((lateral, candidate));
+            }
+        }
+    }
+    found.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    found.into_iter().map(|(_, candidate)| candidate).collect()
 }
 
 /// Nearest-neighbour spacing of the hex covering at the registered reach.
@@ -1866,6 +2188,7 @@ struct LeanCandidate {
           layer, its search bound and the outcome it reports into; a struct would move the \
           argument list rather than shorten it"
 )]
+#[cfg(test)]
 fn descend_leaning(
     grid: &Grid,
     history: &ColumnHistory,
@@ -1878,21 +2201,131 @@ fn descend_leaning(
     scratch: &mut Vec<LeanCandidate>,
     outcome: &mut LayerOutcome,
 ) -> (Landing, usize, bool, Vec<u32>) {
+    let descent = descend_cleared(
+        grid,
+        history,
+        keep_out,
+        law,
+        shaft_landings,
+        search_radius_mm,
+        cell,
+        layer,
+        scratch,
+        outcome,
+        None,
+        0.0,
+    );
+    (descent.landing, descent.k_bottom, descent.rooted, descent.path)
+}
+
+/// [`descend_leaning`] with the drawn-solid test (fix/drawn-solid-clearance,
+/// 2026-10-04, `clearance-census-diagnosis.md` R1).
+///
+/// With `clearance` given, EVERY candidate descent, the straight one
+/// included, is read as the solid the file will draw: its straight axis,
+/// outside its own seat zone (and landing zone on the model), at a LOWER
+/// BOUND `radius_lb_mm` on its drawn radius, against the cured model, at
+/// Craig's two tiers (2026-08-22). Candidates are taken in the order they
+/// always were (cheapest first, a tie to the straight descent). A straight
+/// descent that clears the FINAL gap is exactly the descent this function
+/// always returned (a leaned one replaces it only as before, and only if it
+/// clears the final gap too): the 0.6 mm margin is a placement-family search
+/// margin, and only the final gap refuses geometry. Where the straight
+/// descent does not clear the final gap, a costlier lean is admitted (it
+/// would not be priced before) and the PREFERRED margin chooses: a candidate
+/// that clears 0.6 mm beats any that clears only the final gap, which beats
+/// none. `Clears::Neither` means no descent clears even the final gap: the
+/// straight one is returned and the caller may move the seat.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the descent reads the grid, the history, the keep-out, the law, its own seat and \
+          layer, its search bound, the outcome it reports into, and the clearance with its \
+          radius; a struct would move the argument list rather than shorten it"
+)]
+fn descend_cleared(
+    grid: &Grid,
+    history: &ColumnHistory,
+    keep_out: &DrainKeepOut,
+    law: &LeanLaw,
+    shaft_landings: bool,
+    search_radius_mm: f64,
+    cell: usize,
+    layer: usize,
+    scratch: &mut Vec<LeanCandidate>,
+    outcome: &mut LayerOutcome,
+    clearance: Option<&DescentClearance>,
+    radius_lb_mm: f64,
+) -> Descent {
     let (straight_landing, straight_bottom, straight_rooted) = descend(history, cell, layer);
+    let straight = |clears: Clears| Descent {
+        landing: straight_landing,
+        k_bottom: straight_bottom,
+        rooted: straight_rooted,
+        path: Vec::new(),
+        clears,
+    };
+    // How well a candidate's axis (seat at `layer`, base at `at` in
+    // `base_cell`) clears the model, at one tier.
+    let blocked = |clear: &DescentClearance,
+                   gap_mm: f64,
+                   base_cell: usize,
+                   k_bottom: usize,
+                   landing: Landing| {
+        crate::member_clearance::shaft_model_intrusion(
+            grid,
+            history,
+            clear.layer_height_mm,
+            (cell, layer),
+            (base_cell, k_bottom),
+            matches!(landing, Landing::Model { .. }),
+            radius_lb_mm,
+            gap_mm,
+            clear.zone_factor,
+        )
+        .is_some()
+    };
     let straight_layers = layer.saturating_sub(straight_bottom);
     let Some(straight_length) = law.descent_cost_mm(straight_layers, 0.0) else {
-        return (straight_landing, straight_bottom, straight_rooted, Vec::new());
+        return straight(Clears::Untested);
     };
     let straight_cost =
         straight_length + deferred_path_mm(straight_landing, straight_bottom, law.layer_height_mm());
+    // The straight descent's own verdict, at both tiers (one test when it
+    // clears the preferred margin).
+    let straight_clears = clearance.map(|clear| {
+        outcome.solid.tested += 1;
+        if !blocked(clear, clear.preferred_gap_mm, cell, straight_bottom, straight_landing) {
+            Clears::Preferred
+        } else {
+            outcome.solid.inside_preferred_margin += 1;
+            if !blocked(clear, clear.final_gap_mm, cell, straight_bottom, straight_landing) {
+                Clears::FinalOnly
+            } else {
+                outcome.solid.refused_at_final_gap += 1;
+                Clears::Neither
+            }
+        }
+    });
+    // **A STRAIGHT DESCENT THAT CLEARS THE FINAL GAP STAYS** (Craig's ruling,
+    // 2026-08-22: the 0.6 mm margin is a placement-family SEARCH margin, only
+    // the 0.3 mm final gap refuses geometry; and the Round discs, whose posts
+    // stand 0.3 to 0.6 mm from the ring's walls, are the byte-identity
+    // control of this rule). The preferred margin chooses among the
+    // alternatives only where the straight descent has to be replaced.
+    let straight_is_clear = straight_clears.is_none_or(|clears| clears != Clears::Neither);
     if !law.leans() {
-        return (straight_landing, straight_bottom, straight_rooted, Vec::new());
+        return straight(straight_clears.unwrap_or(Clears::Untested));
     }
 
     // The box the two bounds above allow. `straight_cost` is the straight
     // descent's length, and no cheaper descent can travel further sideways
-    // than that.
-    let radius_mm = search_radius_mm.min(straight_cost);
+    // than that. Where the straight descent itself does not clear, nothing
+    // bounds the cost of the alternative by it any more.
+    let radius_mm = if straight_is_clear {
+        search_radius_mm.min(straight_cost)
+    } else {
+        search_radius_mm
+    };
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -1900,7 +2333,7 @@ fn descend_leaning(
     )]
     let radius_cells = (radius_mm / grid.pitch_mm()).floor().max(0.0) as usize;
     if radius_cells == 0 {
-        return (straight_landing, straight_bottom, straight_rooted, Vec::new());
+        return straight(straight_clears.unwrap_or(Clears::Untested));
     }
     let cols = grid.cols();
     let seat_row = grid.row_of(cell);
@@ -2006,7 +2439,7 @@ fn descend_leaning(
                 reason = "a layer count bounded by the plan's own layer count is exact in f64"
             )]
             let bare_mm = descent_layers as f64 * law.layer_height_mm();
-            if bare_mm >= straight_cost {
+            if straight_is_clear && bare_mm >= straight_cost {
                 continue;
             }
             let Some(length_mm) = law.descent_cost_mm(descent_layers, lateral_mm) else {
@@ -2014,7 +2447,7 @@ fn descend_leaning(
             };
             let cost_mm = length_mm + deferred_path_mm(landing, k_bottom, law.layer_height_mm());
             outcome.lean_candidates_priced += 1;
-            if cost_mm >= straight_cost {
+            if straight_is_clear && cost_mm >= straight_cost {
                 continue;
             }
             scratch.push(LeanCandidate {
@@ -2029,7 +2462,7 @@ fn descend_leaning(
         }
     }
     if scratch.is_empty() {
-        return (straight_landing, straight_bottom, straight_rooted, Vec::new());
+        return straight(straight_clears.unwrap_or(Clears::Untested));
     }
     // Cheapest first; a tie goes to the merge, then to the model, then to the
     // plate, then to the lower cell index. Every step of that order is total,
@@ -2041,9 +2474,49 @@ fn descend_leaning(
             .then_with(|| a.cell.cmp(&b.cell))
     });
 
-    let mut blocked = false;
-    for candidate in scratch.iter() {
-        if let Some(path) = lean_path(grid, history, keep_out, layer, cell, candidate) {
+    let mut path_blocked = false;
+    // Tiers, best first. Without the clearance there is the one pass this
+    // search always made. With it, a pass takes only candidates that clear
+    // its gap; the straight descent stands in the order at its own cost, a
+    // tie going to it, and wins the pass it clears.
+    let tiers: &[(f64, Clears)] = match clearance {
+        None => &[(0.0, Clears::Untested)],
+        // The straight descent clears the final gap and stays; a cheaper lean
+        // replaces it only if it clears the final gap too.
+        Some(clear) if straight_is_clear => &[(clear.final_gap_mm, Clears::FinalOnly)],
+        Some(clear) => &[
+            (clear.preferred_gap_mm, Clears::Preferred),
+            (clear.final_gap_mm, Clears::FinalOnly),
+        ],
+    };
+    let mut paths: Vec<Option<Option<Vec<u32>>>> = vec![None; scratch.len()];
+    for (tier_index, &(gap_mm, tier)) in tiers.iter().enumerate() {
+        // The straight descent has been read already: it passes every tier
+        // of this list or none (see `tiers`).
+        let straight_passes = straight_is_clear;
+        for (index, candidate) in scratch.iter().enumerate() {
+            // The straight descent stands in the order at its own cost: a
+            // candidate no cheaper than it comes after it, and it wins the
+            // pass it clears. (Without the clearance every candidate is
+            // cheaper, so this never fires.)
+            if clearance.is_some() && straight_passes && candidate.cost_mm >= straight_cost {
+                break;
+            }
+            let path = paths[index]
+                .get_or_insert_with(|| lean_path(grid, history, keep_out, layer, cell, candidate))
+                .as_ref();
+            let Some(path) = path else {
+                path_blocked = true;
+                continue;
+            };
+            if let Some(clear) = clearance {
+                if blocked(clear, gap_mm, candidate.cell, candidate.k_bottom, candidate.landing) {
+                    if tier_index == 0 {
+                        outcome.solid.lean_candidates_refused += 1;
+                    }
+                    continue;
+                }
+            }
             outcome.arms_leaned += 1;
             if candidate.class == 0 {
                 outcome.arms_merged += 1;
@@ -2051,14 +2524,35 @@ fn descend_leaning(
                     outcome.junctions_mid_shaft += 1;
                 }
             }
-            return (candidate.landing, candidate.k_bottom, candidate.rooted, path);
+            if !straight_is_clear && clearance.is_some() {
+                match tier {
+                    Clears::FinalOnly => outcome.solid.at_final_gap_only += 1,
+                    _ => outcome.solid.cleared_by_lean += 1,
+                }
+            }
+            return Descent {
+                landing: candidate.landing,
+                k_bottom: candidate.k_bottom,
+                rooted: candidate.rooted,
+                path: path.clone(),
+                clears: tier,
+            };
         }
-        blocked = true;
+        if clearance.is_some() && straight_passes {
+            if path_blocked {
+                outcome.lean_paths_blocked += 1;
+            }
+            return straight(straight_clears.unwrap_or(Clears::Untested));
+        }
     }
-    if blocked {
+    if path_blocked {
         outcome.lean_paths_blocked += 1;
     }
-    (straight_landing, straight_bottom, straight_rooted, Vec::new())
+    if clearance.is_some() {
+        outcome.solid.uncleared += 1;
+        return straight(Clears::Neither);
+    }
+    straight(Clears::Untested)
 }
 
 /// The cells a leaning descent would occupy, or `None` if it cannot have them.
@@ -2245,7 +2739,9 @@ fn score_at(grid: &Grid, prefix: &[u32], half_widths: &[usize], cell: usize) -> 
 
 #[cfg(test)]
 mod descent_tests {
-    use super::{descend_leaning, lean_path, ColumnHistory, LayerOutcome, LeanCandidate};
+    use super::{
+        descend_leaning, lean_path, ColumnHistory, DescentClearance, LayerOutcome, LeanCandidate,
+    };
     use crate::drain::DrainKeepOut;
     use crate::grid::plan_grid;
     use crate::lean::LeanLaw;
@@ -2254,17 +2750,7 @@ mod descent_tests {
     const H: f64 = 0.05;
 
     fn outcome() -> LayerOutcome {
-        LayerOutcome {
-            demand_cells: 0,
-            residual_demand: 0,
-            unrooted_landings: 0,
-            keep_out_refusals: 0,
-            arms_leaned: 0,
-            arms_merged: 0,
-            lean_paths_blocked: 0,
-            junctions_mid_shaft: 0,
-            lean_candidates_priced: 0,
-        }
+        LayerOutcome::empty()
     }
 
     /// A straight arm standing in one column from `k_bottom` to `k_top`,
@@ -2751,5 +3237,193 @@ mod descent_tests {
             !history.shaft_blocks(grid.index(20, 31), 4, Some(1)),
             "the member being landed on is exempt"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // fix/drawn-solid-clearance (2026-10-04): the descent reads its drawn solid.
+    // -------------------------------------------------------------------
+
+    /// Cure a wall: every cell in `cells` is model over layers `k0..=k1`, as
+    /// `commit_layer_history` would have recorded it layer by layer.
+    fn cure_wall(history: &mut ColumnHistory, grid: &crate::grid::Grid, cells: &[usize], k0: usize, k1: usize) {
+        for layer in k0..=k1 {
+            let mut cover = vec![false; grid.cells()];
+            for &cell in cells {
+                cover[cell] = true;
+            }
+            history.stamp_model(layer, &cover);
+            for &cell in cells {
+                history.top_model[cell] = u32::try_from(layer + 1).expect("a small layer index");
+            }
+        }
+    }
+
+    fn two_tier(law: &LeanLaw) -> DescentClearance {
+        DescentClearance {
+            layer_height_mm: H,
+            preferred_gap_mm: 0.6,
+            final_gap_mm: 0.3,
+            tip_radius_min_mm: 0.05,
+            x_allowed: 18.0,
+            zone_factor: law.face_zone_factor(),
+        }
+    }
+
+    /// THE MECHANISM (R1, `clearance-census-diagnosis.md` section 4), AND ITS
+    /// SABOTAGE. A seat 200 layers up, a cured wall 0.35 mm beside its column
+    /// from layer 10 to 199. Without the clearance (the retired centreline
+    /// descent) the straight descent runs down the wall's whole 9.5 mm at a
+    /// distance no solid of radius 0.05 plus the 0.3 mm final gap can hold.
+    /// With it the straight descent is refused at the preferred margin AND the
+    /// final gap, and the cheapest lean that clears wins even though it costs
+    /// more than the straight one; its path then never comes nearer the wall
+    /// than the final gap below the seat zone.
+    #[test]
+    fn a_descent_beside_a_wall_is_tested_at_its_smallest_drawn_radius() {
+        // 8 mm square: room to lean 3 mm away from the wall.
+        let grid = plan_grid(0.0, 0.0, 8.0, 8.0, 400, H, 0.0, 1_000_000_000).0;
+        let mut history = ColumnHistory::new(&grid);
+        let seat = grid.index(80, 80);
+        // Seven cells = 0.35 mm from the seat's column to the wall's cell centres.
+        let wall: Vec<usize> = (60..101).map(|row| grid.index(row, 87)).collect();
+        cure_wall(&mut history, &grid, &wall, 10, 199);
+        let law = LeanLaw::new(H, 45.0, 25.0);
+        let clear = two_tier(&law);
+        let mut scratch = Vec::new();
+
+        let mut retired = outcome();
+        let (landing, _, _, path) = descend_leaning(
+            &grid, &history, &DrainKeepOut::none(), &law, true, 4.0, seat, 200, &mut scratch, &mut retired,
+        );
+        assert_eq!(landing, Landing::Plate);
+        assert!(path.is_empty(), "SABOTAGE: the centreline descent drops straight beside the wall");
+        assert_eq!(retired.solid.tested, 0, "and tests no solid");
+
+        let mut counts = outcome();
+        let descent = super::descend_cleared(
+            &grid, &history, &DrainKeepOut::none(), &law, true, 4.0, seat, 200, &mut scratch, &mut counts,
+            Some(&clear), 0.05,
+        );
+        assert_eq!(counts.solid.tested, 1, "the straight descent's solid was read");
+        assert_eq!(counts.solid.refused_at_final_gap, 1, "and refused at the 0.3 mm final gap");
+        assert!(!descent.path.is_empty(), "a leaned descent was taken: {counts:?}");
+        assert_eq!(descent.landing, Landing::Plate);
+        assert_eq!(descent.clears, super::Clears::Preferred, "and it clears the preferred margin");
+        assert_eq!(counts.solid.cleared_by_lean, 1);
+        // The test's own reading of the path: every slot more than 2 mm under
+        // the seat (past any zone the law allows) is at least the final gap
+        // plus the smallest radius from the nearest wall cell centre.
+        let sx = grid.center_x_mm(87);
+        for (slot, &cell) in descent.path.iter().enumerate() {
+            let layer = descent.k_bottom + slot;
+            if layer + 40 > 200 {
+                continue;
+            }
+            let (x, y) = (
+                grid.center_x_mm(grid.col_of(cell as usize)),
+                grid.center_y_mm(grid.row_of(cell as usize)),
+            );
+            let nearest = wall
+                .iter()
+                .map(|&w| (x - grid.center_x_mm(grid.col_of(w))).hypot(y - grid.center_y_mm(grid.row_of(w))))
+                .fold(f64::INFINITY, f64::min);
+            assert!(
+                nearest >= 0.05 + 0.3,
+                "layer {layer}: the path is {nearest} mm from the wall (wall x {sx})"
+            );
+        }
+    }
+
+    /// A seat in a slot between two walls, open only along the walls: every
+    /// lean stays 0.35 mm from one of them, so no descent clears, and the
+    /// answer is `Clears::Neither` with the straight descent kept (emit and
+    /// warn), counted as uncleared.
+    #[test]
+    fn a_descent_no_lean_can_clear_is_kept_and_counted_uncleared() {
+        let grid = grid();
+        let mut history = ColumnHistory::new(&grid);
+        let seat = grid.index(20, 20);
+        let walls: Vec<usize> = (0..grid.rows())
+            .flat_map(|row| [grid.index(row, 13), grid.index(row, 27)])
+            .collect();
+        cure_wall(&mut history, &grid, &walls, 10, 199);
+        let law = LeanLaw::new(H, 45.0, 25.0);
+        let clear = two_tier(&law);
+        let mut scratch = Vec::new();
+        let mut counts = outcome();
+        let descent = super::descend_cleared(
+            &grid, &history, &DrainKeepOut::none(), &law, true, 4.0, seat, 200, &mut scratch, &mut counts,
+            Some(&clear), 0.05,
+        );
+        assert_eq!(descent.clears, super::Clears::Neither, "{counts:?}");
+        assert!(descent.path.is_empty(), "the straight descent is kept");
+        assert_eq!(counts.solid.uncleared, 1);
+        assert!(counts.solid.lean_candidates_refused > 0, "leans were tried and refused: {counts:?}");
+    }
+
+    /// Where nothing stands beside the descent the drawn-solid test changes
+    /// nothing: the same landing and path as the retired descent, and the
+    /// straight descent clears the preferred margin (the byte-identity the
+    /// Round discs rest on).
+    #[test]
+    fn a_descent_with_no_wall_beside_it_is_unchanged() {
+        let grid = grid();
+        let mut history = ColumnHistory::new(&grid);
+        let neighbour = grid.index(20, 28);
+        straight_arm(&mut history, 7, neighbour, 0, 190);
+        let seat = grid.index(20, 20);
+        let law = LeanLaw::new(H, 45.0, 25.0);
+        let clear = two_tier(&law);
+        let mut scratch = Vec::new();
+        let mut retired = outcome();
+        let before = descend_leaning(
+            &grid, &history, &DrainKeepOut::none(), &law, true, 4.0, seat, 200, &mut scratch, &mut retired,
+        );
+        let mut counts = outcome();
+        let after = super::descend_cleared(
+            &grid, &history, &DrainKeepOut::none(), &law, true, 4.0, seat, 200, &mut scratch, &mut counts,
+            Some(&clear), 0.05,
+        );
+        assert_eq!((after.landing, after.k_bottom, after.rooted, after.path.clone()), before);
+        // The merge onto the neighbouring trunk is the same descent as the
+        // retired search took; with the straight descent clear, only the
+        // final gap is asked of it.
+        assert_ne!(after.clears, super::Clears::Neither);
+        assert_eq!(counts.solid.tested, 1, "the solid was read");
+        assert_eq!(counts.solid.inside_preferred_margin, 0);
+        assert_eq!(counts.solid.refused_at_final_gap, 0);
+    }
+
+    /// **THE PREFERRED MARGIN IS A SEARCH MARGIN, NOT A GATE** (Craig's
+    /// 2026-08-22 ruling, and the Round discs' byte identity, which stand
+    /// 0.3 to 0.6 mm from their ring's walls): a wall 0.55 mm from the seat's
+    /// column is inside the 0.6 mm margin and outside the 0.3 mm final gap, so
+    /// the straight descent STAYS, exactly the descent the retired search
+    /// returned, and is counted as inside the margin and refused by nothing.
+    #[test]
+    fn a_straight_descent_inside_the_preferred_margin_but_clear_of_the_final_gap_stays() {
+        let grid = plan_grid(0.0, 0.0, 8.0, 8.0, 400, H, 0.0, 1_000_000_000).0;
+        let mut history = ColumnHistory::new(&grid);
+        let seat = grid.index(80, 80);
+        // Eleven cells = 0.55 mm: past the final reach (0.05 + 0.3 + 0.035)
+        // and inside the preferred one (0.05 + 0.6 + 0.035).
+        let wall: Vec<usize> = (60..101).map(|row| grid.index(row, 91)).collect();
+        cure_wall(&mut history, &grid, &wall, 10, 199);
+        let law = LeanLaw::new(H, 45.0, 25.0);
+        let clear = two_tier(&law);
+        let mut scratch = Vec::new();
+        let mut retired = outcome();
+        let before = descend_leaning(
+            &grid, &history, &DrainKeepOut::none(), &law, true, 4.0, seat, 200, &mut scratch, &mut retired,
+        );
+        let mut counts = outcome();
+        let after = super::descend_cleared(
+            &grid, &history, &DrainKeepOut::none(), &law, true, 4.0, seat, 200, &mut scratch, &mut counts,
+            Some(&clear), 0.05,
+        );
+        assert_eq!((after.landing, after.k_bottom, after.rooted, after.path.clone()), before);
+        assert_eq!(counts.solid.inside_preferred_margin, 1, "path hit: the wall is inside the margin");
+        assert_eq!(counts.solid.refused_at_final_gap, 0);
+        assert_eq!(after.clears, super::Clears::FinalOnly);
     }
 }

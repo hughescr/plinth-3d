@@ -195,6 +195,27 @@ consequence directly on the Giant Bat: the old rule excused an arm standing 0.24
 the model while refusing a thinner arm on the same axis with 0.569 mm of real gap. The
 two-tier split, read as true-gap throughout, is what frees the Bat from that inversion.
 
+**The up-sweep reads both tiers on every descent (fix/drawn-solid-clearance, 2026-10-04).** An arm's
+descent was tested by its centreline cell alone, and the radius it is drawn at was never in the
+test, so a post could stand 0.325 mm from a leg face and be drawn 0.374 mm inside it (overhang
+table member 30). Every descent, the straight one included, is now read as the solid the file will
+draw: its straight axis, outside its own seat zone and (on the model) its landing zone, at a LOWER
+bound on its radius (the larger of the registered minimum tip radius and the area-law radius
+`√(A / (X·π))` of the demand its seat covers), against the cured model. The candidates keep their
+order (cheapest first, a tie to the straight descent). A straight descent that clears the 0.3 mm
+final gap STAYS: the 0.6 mm margin is a placement-family search margin and only the final gap
+refuses geometry (and the Round discs, whose posts stand 0.3 to 0.6 mm from their ring's walls,
+are the byte-identity control). Where the straight descent does not clear the final gap, a
+costlier lean is admitted, and the preferred margin chooses: a candidate that clears 0.6 mm beats
+one that clears only the final gap, which beats none. Where no descent clears the final gap, the
+seat may move only to a cell whose reach disc covers the SAME demand
+(`up_sweep::reseat_cells`); where none does, the seat is kept and the census names it (emit and
+warn). The seat-zone exemption is `1 / cos(steepest lean)` times `(radius + gap)` along the axis
+(`LeanLaw::face_zone_factor`), never shorter than the real zone against any face the lean law
+admits. A thickening that would raise a member, or a trunk raised with it, into the final gap
+where it stands clear now is refused (`ThickenRefusal::Model`) and the run takes the next rung.
+The lip-seat gate is unchanged: a member may land "no nearer than it stood".
+
 ## 6. The seat's own contact zone — the honest exemption
 
 A member seated into the model is legitimately inside the material it stands on. Something

@@ -2849,6 +2849,28 @@ fn print_sweep_disclosure(
             lip.arms_graded_after,
             lip.over_limit_after.len(),
         );
+        // THE DRAWN SOLID OF EVERY DESCENT (fix/drawn-solid-clearance,
+        // 2026-10-04): path-hit witnesses that the up-sweep read each
+        // descent's solid against the model, and that the test bit.
+        let hits = &report.counters;
+        println!(
+            "[sweep {model}] drawn-solid descent (two tiers, preferred 0.6 mm then the final \
+             gap): {} descents read; {} straight descents inside the preferred margin (kept \
+             where they clear the final gap); {} straight descents refused at the final gap; \
+             {} replaced by a leaned descent that clears the preferred margin; {} replaced by \
+             one that clears the final gap only; {} cleared by no descent (kept, warned by the \
+             census); {} lean candidates refused; {} seats moved to a cell covering the same \
+             demand; {} thickenings refused for the model",
+            hits.descent_solid_tested,
+            hits.descent_solid_inside_preferred_margin,
+            hits.descent_solid_refused_at_final_gap,
+            hits.descent_solid_cleared_by_lean,
+            hits.descent_solid_at_final_gap_only,
+            hits.descent_solid_uncleared,
+            hits.descent_solid_lean_candidates_refused,
+            hits.descent_solid_seats_moved,
+            report.slenderness_lane.thicken_refused_model,
+        );
         // EVERY MEMBER'S DRAWN SOLID AGAINST THE MODEL (fix/morel-long-posts,
         // 2026-10-02): arm shafts included.
         let clearance = &report.member_model_clearance;

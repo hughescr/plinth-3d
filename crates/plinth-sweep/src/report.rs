@@ -519,6 +519,24 @@ pub struct PathHits {
     /// search never ran, which a merge count of zero on its own cannot tell
     /// you.
     pub lean_candidates_priced: u64,
+    /// **The drawn-solid test of the up-sweep's descents**
+    /// (fix/drawn-solid-clearance, 2026-10-04), the path-hit witnesses: the
+    /// descents whose solid was read against the model at the lower bound on
+    /// its radius; the straight ones standing inside the preferred 0.6 mm
+    /// margin (kept when they clear the final gap); the straight ones that do
+    /// not clear the 0.3 mm final gap; those replaced by a leaned descent that
+    /// clears the preferred margin; those replaced by one that clears the
+    /// final gap only; those no descent cleared (kept, warned by the census);
+    /// the lean candidates refused for entering the gap; and the seats moved
+    /// to a cell covering the same demand. All zero means the test never ran.
+    pub descent_solid_tested: u64,
+    pub descent_solid_inside_preferred_margin: u64,
+    pub descent_solid_refused_at_final_gap: u64,
+    pub descent_solid_cleared_by_lean: u64,
+    pub descent_solid_at_final_gap_only: u64,
+    pub descent_solid_uncleared: u64,
+    pub descent_solid_lean_candidates_refused: u64,
+    pub descent_solid_seats_moved: u64,
     /// Down-sweep reads where a lander's load reached a support arm's contact
     /// slot and was booked one slot lower, into the shaft (2026-09-29). Zero
     /// means no arm landed on another arm's head, which a green

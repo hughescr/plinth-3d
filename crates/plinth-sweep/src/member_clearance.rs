@@ -166,6 +166,89 @@ pub(crate) fn model_intrusion(
     None
 }
 
+/// **A straight shaft's drawn solid against the model, outside its own seat
+/// zone and (on the model) its own landing zone**, on the raster
+/// (fix/drawn-solid-clearance, 2026-10-04; `clearance-census-diagnosis.md`
+/// R1): the shaft from its base cell at layer `base.1` to its seat cell at
+/// layer `seat.1`, a solid of radius `radius_mm`, against the cured material
+/// the column history knows.
+///
+/// The zones are the raster's own form of the census's
+/// ([`model_clearance_census`]): the seat end is exempt for
+/// `zone_factor · (radius + gap)` along the axis, and so is the base end
+/// where the shaft lands on the MODEL (a plate or a member landing has no
+/// model face to strike). A shaft rises off the face it stands against at
+/// `n·m ≥ 1 / zone_factor` at the steepest tilt the overhang law admits
+/// ([`crate::lean::LeanLaw::face_zone_factor`]), and it first stands `gap`
+/// clear of that face's plane at `(gap + radius) / (n·m)` along its axis
+/// ([`landing_zone_mm`]), so the exemption is never shorter than the real
+/// zone. A shaft that lies wholly inside its zones is not judged.
+///
+/// Returns the first offending cell and its distance, `None` when it clears.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the shaft's two ends, its kind, its radius and gap, and the raster it is read on"
+)]
+pub(crate) fn shaft_model_intrusion(
+    grid: &Grid,
+    history: &ColumnHistory,
+    layer_height_mm: f64,
+    seat: (usize, usize),
+    base: (usize, usize),
+    lands_on_model: bool,
+    radius_mm: f64,
+    gap_mm: f64,
+    zone_factor: f64,
+) -> Option<(usize, f64)> {
+    let top = axis_point(grid, layer_height_mm, seat.0, seat.1);
+    let bottom = axis_point(grid, layer_height_mm, base.0, base.1);
+    let zone = zone_factor.max(1.0) * (radius_mm.max(0.0) + gap_mm.max(0.0));
+    inset_segment_intrusion(
+        grid,
+        history,
+        layer_height_mm,
+        top,
+        bottom,
+        zone,
+        if lands_on_model { zone } else { 0.0 },
+        radius_mm,
+        gap_mm,
+    )
+}
+
+/// [`model_intrusion`] on the axis `top`–`bottom` with `inset_top` mm of its
+/// top end and `inset_bottom` mm of its bottom end left out (a seat zone, a
+/// landing zone). `None` where the two insets use the whole axis.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the segment's two ends and insets, its radius and gap, and the raster it is read on"
+)]
+pub(crate) fn inset_segment_intrusion(
+    grid: &Grid,
+    history: &ColumnHistory,
+    layer_height_mm: f64,
+    top: [f64; 3],
+    bottom: [f64; 3],
+    inset_top_mm: f64,
+    inset_bottom_mm: f64,
+    radius_mm: f64,
+    gap_mm: f64,
+) -> Option<(usize, f64)> {
+    let length = geom_kernel::vec3::dist(top, bottom);
+    if !(length.is_finite() && length > 0.0) {
+        return None;
+    }
+    if inset_top_mm + inset_bottom_mm >= length {
+        return None;
+    }
+    let along = |from: [f64; 3], towards: [f64; 3], mm: f64| -> [f64; 3] {
+        std::array::from_fn(|axis| from[axis] + (towards[axis] - from[axis]) * (mm / length))
+    };
+    let from = along(bottom, top, inset_bottom_mm);
+    let to = along(top, bottom, inset_top_mm);
+    model_intrusion(grid, history, layer_height_mm, from, to, radius_mm, gap_mm)
+}
+
 /// **A member's own LANDING zone on the model** (fix/morel-long-posts,
 /// 2026-10-02): for each member that lands on the model, how far up its axis
 /// from its base the solid still stands within `tier` of the face it lands

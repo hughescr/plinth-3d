@@ -444,6 +444,10 @@ pub struct SlendernessOutcome {
     pub members_thickened: usize,
     pub thicken_refused_radius: usize,
     pub thicken_refused_disc: usize,
+    /// Thickenings refused because the raised solid, of the member or of a
+    /// trunk raised with it, would enter the model's final clearance gap where
+    /// the solid as drawn now does not (R2, 2026-10-04). A path-hit witness.
+    pub thicken_refused_model: usize,
     /// Thickenings APPLIED whose root disc already lapped another root before
     /// the growth (and laps it more after): the growth made no new lap, so
     /// the rung is not refused (orchestrator ruling 2026-09-29, the stilt
@@ -3806,6 +3810,10 @@ fn thicken_to(
             outcome.thicken_refused_disc += 1;
             false
         }
+        Some(Err(ThickenRefusal::Model)) => {
+            outcome.thicken_refused_model += 1;
+            false
+        }
         Some(Ok(plan)) => {
             commit_thicken(state, struts, &plan, outcome);
             true
@@ -3820,6 +3828,96 @@ enum ThickenRefusal {
     Radius,
     /// The grown plate root's drawn foot would make a new lap of another root.
     Disc,
+    /// The raised solid, of the member or of a trunk raised with it, would
+    /// enter the model's final clearance gap where it does not now.
+    Model,
+}
+
+/// Whether raising the members of `plan` puts a raised stretch of any of them
+/// inside the model's final gap where that stretch as drawn now stands clear
+/// ([`ThickenRefusal::Model`]).
+///
+/// Each member's raised stretch, from its foot to the layer the plan raises
+/// it to, is cut into pieces (the member's own taper into four, the rest one
+/// piece), and each piece is read at the WIDEST radius the plan writes on it
+/// (an error toward refusal) against the radius it is drawn at now, on the
+/// raster ([`crate::member_clearance::inset_segment_intrusion`]), outside the
+/// member's own seat zone and, on the model, its landing zone. A piece that
+/// is inside the gap already is not the thickening's doing and does not
+/// refuse it.
+fn thickening_enters_the_gap(
+    context: &SlendernessContext<'_>,
+    state: &TieState,
+    struts: &[SweepStrut],
+    plan: &ThickenPlan,
+) -> bool {
+    let (grid, history, h) = (context.grid, context.history, context.layer_height_mm);
+    let gap = context.final_clearance_mm;
+    let factor = context.lean.face_zone_factor();
+    for (position, &(index, highest)) in plan.chain.iter().enumerate() {
+        let Some(strut) = struts.get(index) else {
+            continue;
+        };
+        let upto = plan.upto(position, highest).min(strut.k_top + 1);
+        if strut.k_bottom == usize::MAX || strut.k_top <= strut.k_bottom || upto <= strut.k_bottom + 1 {
+            continue;
+        }
+        let top_layer = upto - 1;
+        // Piece boundaries, foot first.
+        let mut cuts = vec![strut.k_bottom];
+        if position == 0 && plan.k_lo > strut.k_bottom && plan.k_lo < top_layer {
+            cuts.push(plan.k_lo);
+        }
+        let from = *cuts.last().unwrap_or(&strut.k_bottom);
+        let pieces = if position == 0 { 4 } else { 1 };
+        for piece in 1..=pieces {
+            let layer = from + (top_layer - from) * piece / pieces;
+            if layer > *cuts.last().unwrap_or(&from) {
+                cuts.push(layer);
+            }
+        }
+        let seat = crate::member_clearance::axis_point(grid, h, strut.cell, strut.k_top);
+        let base = crate::member_clearance::axis_point(grid, h, strut.base_cell(), strut.k_bottom);
+        let span = (strut.k_top - strut.k_bottom) as f64;
+        let at = |layer: usize| -> [f64; 3] {
+            let t = (layer - strut.k_bottom) as f64 / span;
+            std::array::from_fn(|axis| base[axis] + t * (seat[axis] - base[axis]))
+        };
+        let on_model = matches!(strut.landing, Landing::Model { .. });
+        for pair in cuts.windows(2) {
+            let (low, high) = (pair[0], pair[1]);
+            let wanted = plan.wanted(position, low).max(plan.wanted(position, high));
+            let now = (low..=high)
+                .map(|layer| drawn_at(strut, &state.profiles[index], layer).unwrap_or(0.0))
+                .fold(strut.min_radius_mm, f64::max);
+            if wanted <= now {
+                continue;
+            }
+            let zone = factor.max(1.0) * (wanted + gap);
+            let (inset_top, inset_bottom) = (
+                if high >= strut.k_top { zone } else { 0.0 },
+                if low <= strut.k_bottom && on_model { zone } else { 0.0 },
+            );
+            let blocked = |radius: f64| {
+                crate::member_clearance::inset_segment_intrusion(
+                    grid,
+                    history,
+                    h,
+                    at(high),
+                    at(low),
+                    inset_top,
+                    inset_bottom,
+                    radius,
+                    gap,
+                )
+                .is_some()
+            };
+            if blocked(wanted) && !blocked(now) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// One thickening, planned against the live field and not yet applied
@@ -4054,6 +4152,16 @@ fn plan_thicken(
         admitted_on_drawn_feet,
         added_mm3: 0.0,
     };
+    // **THICKENING MAY NOT PUSH A MEMBER INTO THE FINAL GAP** (R2 of
+    // `clearance-census-diagnosis.md`, 2026-10-04). The root it needs was
+    // found against the unbraced-length law alone; the overhang table's post
+    // 30 stood 0.325 mm from a leg and was raised to 0.770 mm, 0.374 mm inside
+    // it. A member, or a trunk raised with it, whose raised solid enters the
+    // gap where its solid as drawn now does not, refuses the rung; the run
+    // goes on to the cross, the mast, the model tie, then the warning.
+    if context.member_clearance && thickening_enters_the_gap(context, state, struts, &plan) {
+        return Some(Err(ThickenRefusal::Model));
+    }
     // THE RESIN IT ADDS: on every layer it raises, `π (wanted² − drawn²)`
     // times that member's own length per layer (its chord, as `run_length`
     // measures it). One pass over the layers the commit would write.
@@ -7756,6 +7864,67 @@ mod tests {
             thickened.windows(2).all(|pair| pair[1] <= pair[0]),
             "the taper never widens upward"
         );
+    }
+
+    /// **THICKENING MAY NOT PUSH A MEMBER INTO THE FINAL GAP** (R2,
+    /// `clearance-census-diagnosis.md`, 2026-10-04): the overhang table's post
+    /// 30 stood 0.325 mm from a leg face and the rung raised its root to 0.77
+    /// mm, 0.374 mm inside the leg.
+    ///
+    /// A 4 mm plate post over its limit with a cured wall 0.4 mm from its
+    /// axis over layers 0..=60 (its seat is at layer 80). At its drawn radius
+    /// 0.05 mm it clears the 0.3 mm gap (0.35 + the raster's 0.035 mm < 0.4);
+    /// the root the law asks for does not. Red before the rule: the rung
+    /// thickened. Green: refused, counted `thicken_refused_model`, the post
+    /// left as drawn. SABOTAGE: with `member_clearance` off it thickens again.
+    #[test]
+    fn thickening_refuses_a_root_that_would_enter_the_gap() {
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let mut history = crate::up_sweep::ColumnHistory::new(&grid);
+        for row in 90..=110 {
+            let cell = grid.index(row, 108);
+            history.model_head[cell] = u32::try_from(history.model_spans.len()).expect("a few spans");
+            history.model_spans.push(crate::up_sweep::ShaftSpan {
+                k_bottom: 0,
+                k_top: 60,
+                id: 0,
+                next: u32::MAX,
+            });
+        }
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(0.05, 45.0, 25.0);
+        let law = law();
+        let attempt = |member_clearance: bool| {
+            let context = super::SlendernessContext {
+                member_clearance,
+                ..prune_context(&grid, &history, &keep_out, &lean, &law)
+            };
+            let mut struts = vec![plate_post(&grid, 0, 100, 0.05)];
+            let mut state = super::TieState::build(&context, &struts);
+            let over: Vec<UnbracedRun> = super::member_runs(
+                &grid,
+                &struts[0],
+                &state.ties[0],
+                &state.profiles[0],
+                0.05,
+                &law,
+            )
+            .into_iter()
+            .filter(UnbracedRun::over_limit)
+            .collect();
+            assert_eq!(over.len(), 1, "anti-vacuity: the untied post is one over-limit run");
+            let mut outcome = super::SlendernessOutcome::default();
+            let done = super::thicken(&context, &mut state, &mut struts, &over[0], &mut outcome);
+            (done, outcome, struts)
+        };
+        let (done, outcome, struts) = attempt(true);
+        assert!(!done, "the rung would push the post into the wall and must refuse");
+        assert_eq!(outcome.thicken_refused_model, 1, "{outcome:?}");
+        assert!(struts[0].thickened_mm.is_empty(), "the post is left as drawn");
+        let (done, outcome, struts) = attempt(false);
+        assert!(done, "SABOTAGE: without the clearance the rung thickens the post");
+        assert_eq!(outcome.thicken_refused_model, 0);
+        assert!(struts[0].thickened_mm[0] > 0.065, "into the wall: {}", struts[0].thickened_mm[0]);
     }
 
     /// A 10 mm plate post drawn 0.5 mm over its lowest 3 mm and 0.06 mm above

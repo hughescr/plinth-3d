@@ -133,6 +133,23 @@ impl LeanLaw {
         self.max_step_mm > 0.0
     }
 
+    /// `1 / cos(steepest lean from vertical)`: how much longer than the
+    /// clearance it stands against a face an arm's own shaft rises off, at the
+    /// worst tilt the law admits. A shaft of radius `r` stands `tier` clear of
+    /// the plane of the face it seats against `(tier + r) / (n·m)` along its
+    /// axis (`member_clearance::model_landing_zones_mm`), and the face an arm
+    /// stands against is never tilted past the angle the overhang law lets an
+    /// arm lean to, so `n·m ≥ cos(lean)`. Derived from the law, not typed:
+    /// `hypot(max_step, h) / h`. `1` for the disabled law (no lean at all).
+    #[must_use]
+    pub fn face_zone_factor(&self) -> f64 {
+        if self.layer_height_mm > 0.0 {
+            self.max_step_mm.hypot(self.layer_height_mm) / self.layer_height_mm
+        } else {
+            1.0
+        }
+    }
+
     /// The registered overhang weight at the angle a layer with sideways move
     /// `step_mm` makes with horizontal. `0` for a vertical layer, rising to `1`
     /// as the arm lies over.
