@@ -46,12 +46,20 @@ use plinth_sweep::{to_primitives, Landing, StrutKind, SweepPlan, SweepPolicy, Sw
 /// panel cannot hold their 33-35 mm posts at any mast radius, every mast cell
 /// is refused by the panel check, and no mast is placed (measured 2026-10-01
 /// on the brace pair, the laid tube and the lonely peak).
+///
+/// **Re-pinned 2026-10-04 (fix/drawn-solid-clearance):** and under the
+/// centreline-only descent these fixtures were built on. With the drawn-solid
+/// descent the laid tube's one descent beside a foot is replaced, its crosses
+/// close the runs it needed masts for, and it places 0 masts (measured), so
+/// the laid-tube claims below would be vacuous. The rule under test is where
+/// a mast's ROOT lands; it reads no descent clearance.
 fn policy() -> SweepPolicy {
     SweepPolicy {
         slenderness_thicken: false,
         ..harness::at_path_fixture_slenderness(
             SweepPolicy::from_registry()
-                .expect("the registry supplies every number the sweep reads"),
+                .expect("the registry supplies every number the sweep reads")
+                .without_drawn_solid_descent(),
         )
     }
 }

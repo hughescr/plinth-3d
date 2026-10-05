@@ -97,7 +97,11 @@ const TILTED: [f64; 3] = [0.0, 1.0, 1.0];
 fn the_prefilter_measures_no_brace_mast_or_tie() {
     let mesh = make_tall_stilt_plate().expect("fixture");
     let up = UpDirection::new(TILTED).expect("a direction");
-    let base = SweepPolicy::from_registry().expect("registry");
+    // The prefilter reads no drawn solid of a descent (its raster's half
+    // diagonal, 0.35 mm, exceeds the 0.3 mm gap: `orient_demand.rs`); the
+    // by-hand sweeps here are taken under the same policy so they stay the
+    // prefilter's own field (fix/drawn-solid-clearance, 2026-10-04).
+    let base = SweepPolicy::from_registry().expect("registry").without_drawn_solid_descent();
     let coarse = base.with_working_pitch_mm(base.working_pitch_mm * 10.0).without_frame_ledger();
 
     // PATH HIT: at the prefilter's own coarse raster the full ladder does
