@@ -2385,12 +2385,40 @@ fn sweep_and_emit(
             )
         })
         .collect();
+    // Every hole the drill stage cut besides the drains (the vents), by its
+    // mouth on the outside, for the hidden-cavity map alone: a cavity the
+    // drill opened to the air stays a cavity (Craig ruling 2026-10-05). They
+    // move no arm and no keep-out.
+    let vents: Vec<plinth_sweep::DrainSpec> = hollowed
+        .history()
+        .hollow()
+        .drain_plan()
+        .map(|plan| {
+            plan.holes()
+                .iter()
+                .map(|hole| plinth_sweep::DrainSpec {
+                    outlet_mm: [
+                        hole.outer_exit_mm[0].get(),
+                        hole.outer_exit_mm[1].get(),
+                        hole.outer_exit_mm[2].get(),
+                    ],
+                    outward_axis: [
+                        hole.direction[0].get(),
+                        hole.direction[1].get(),
+                        hole.direction[2].get(),
+                    ],
+                    radius_mm: hole.radius_mm.get(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let started = std::time::Instant::now();
-    let plan = plinth_sweep::run_sweep_with_drains(
+    let plan = plinth_sweep::run_sweep_with_holes(
         hollowed.mesh(),
         &sweep_layers,
         &policy,
         &drains,
+        &vents,
     )
     .map_err(|source| {
         ChainStop::new(PipelineError::Sweep {
@@ -2856,15 +2884,18 @@ fn print_sweep_disclosure(
         println!(
             "[sweep {model}] drawn-solid descent (two tiers, preferred 0.6 mm then the final \
              gap): {} descents read; {} straight descents inside the preferred margin (kept \
-             where they clear the final gap); {} straight descents refused at the final gap; \
+             where they clear the final gap); {} straight descents wholly in a hidden cavity \
+             (the final gap is not asked there); {} straight descents refused at the final gap; \
              {} replaced by a leaned descent that clears the preferred margin; {} replaced by \
              one that clears the final gap only; {} cleared by no descent (kept, warned by the \
              census); {} lean candidates refused; {} seats moved to a cell covering the same \
              demand; {} thickenings refused for the model ({} raised slots flagged by the \
              raster, {} of them measured clear by the census's predicate, {} proved inside the \
-             gap already as drawn)",
+             gap already as drawn, {} undecided and so not refused; {} raised members in a \
+             hidden cavity not read)",
             hits.descent_solid_tested,
             hits.descent_solid_inside_preferred_margin,
+            hits.descent_solid_in_hidden_cavity,
             hits.descent_solid_refused_at_final_gap,
             hits.descent_solid_cleared_by_lean,
             hits.descent_solid_at_final_gap_only,
@@ -2875,6 +2906,8 @@ fn print_sweep_disclosure(
             report.slenderness_lane.thicken_slots_flagged,
             report.slenderness_lane.thicken_slots_measured_clear,
             report.slenderness_lane.thicken_slots_inside_already,
+            report.slenderness_lane.thicken_slots_undecided,
+            report.slenderness_lane.thicken_members_hidden,
         );
         // THE CLEARANCE RE-ROUTE (fix/drawn-solid-clearance R2.2): path-hit
         // witnesses that the census named arms after the final sizing and the
@@ -2889,7 +2922,8 @@ fn print_sweep_disclosure(
              them); {} kept carrying on the last pass ({} with a cross tied to them, {} with a \
              brace, mast or tie resting on them or below, {} behind a member resting on them \
              that was sent itself), {} with no candidate; {} sized checks; {} moves put back \
-             for a host's load, {} for roots",
+             for a host's load, {} for roots; {} moved members in a hidden cavity not read \
+             against the final gap",
             if reroute.enabled { "on" } else { "off" },
             reroute.clearance_violators_first,
             reroute.clearance_violators_last,
@@ -2911,6 +2945,13 @@ fn print_sweep_disclosure(
             reroute.sizing_checks,
             reroute.moves_put_back_host_load,
             reroute.moves_put_back_roots,
+            reroute.candidates_hidden,
+        );
+        println!(
+            "[sweep {model}] ties planned again after the clearance re-route moved an arm: {} \
+             passes applied {} remedies",
+            report.slenderness_lane.retie_passes_after_reroute,
+            report.slenderness_lane.retie_remedies_after_reroute,
         );
         // Kept for a frame (challenger round 3, 2026-10-05): named, with why.
         for (arm, lock) in &reroute.kept_for_a_frame {
@@ -2931,6 +2972,20 @@ fn print_sweep_disclosure(
                  never a refusal]"
             );
         }
+        // THE HIDDEN-CAVITY MAP (Craig ruling 2026-10-05): what the flood
+        // from outside found, which the final gap's exemption reads.
+        let cavity = &report.hidden_cavity;
+        println!(
+            "[sweep {model}] hidden cavities (the final gap does not apply inside one): flood at \
+             {:.3} mm over {} voxels, {} solid, {} of empty space enclosed (not reached from \
+             outside, {} drain mouth(s) plugged), {} voxels where a member counts as hidden",
+            cavity.voxel_pitch_mm,
+            cavity.voxels,
+            cavity.solid_voxels,
+            cavity.enclosed_voxels,
+            cavity.drains_plugged,
+            cavity.hidden_voxels,
+        );
         // EVERY MEMBER'S DRAWN SOLID AGAINST THE MODEL (fix/morel-long-posts,
         // 2026-10-02): arm shafts included.
         let clearance = &report.member_model_clearance;
@@ -2940,7 +2995,8 @@ fn print_sweep_disclosure(
                  braces and masts, outside each member's own seat zone and model landing zone; \
                  final gap {:.3} mm): {} members measured over {} spans ({} of them tapered, \
                  read as the frustum the file draws; {} spans wholly in their own zones), {} \
-                 members with a span left undecided; smallest gap {}; {} members within the \
+                 members with a span left undecided; {} members in a hidden cavity left out \
+                 (the final gap does not apply there); smallest gap {}; {} members within the \
                  final gap",
                 clearance.gap_mm,
                 clearance.members_measured,
@@ -2948,6 +3004,7 @@ fn print_sweep_disclosure(
                 clearance.rows_tapered,
                 clearance.rows_in_own_zones,
                 clearance.members_unmeasured,
+                clearance.members_hidden,
                 clearance
                     .smallest_clearance_mm
                     .map_or_else(|| "none measured".to_owned(), |gap| format!("{gap:.4} mm")),
@@ -3431,7 +3488,8 @@ fn print_sweep_disclosure(
          of the model \
          outside its seat zone, {} seat trim cutting the shaft outside the ball (lip-seat \
          rule), {} contact disc not wholly on the model, {} solid entering a member; {} tie \
-         layers planned again with a tip sized up until the seat trim keeps its shaft",
+         layers planned again with a tip sized up until the seat trim keeps its shaft; {} ties \
+         chosen in a hidden cavity, where the final gap is not read",
         lane.model_tie_runs_tried,
         lane.model_tie_sets,
         lane.model_ties_built,
@@ -3453,6 +3511,7 @@ fn print_sweep_disclosure(
         lane.model_tie_refused_disc_off_face,
         lane.model_tie_refused_solid_member,
         lane.model_tie_tips_sized_for_the_trim,
+        lane.model_tie_candidates_hidden,
     );
     // CONSTRUCTION-STAGE SHAKE (Craig ruling 2026-10-03, R9 + D6): a WARNING
     // only, at a stated, unmeasured brace peel pressure.

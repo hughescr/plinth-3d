@@ -42,6 +42,7 @@
 #![forbid(unsafe_code)]
 
 pub mod adapter;
+pub mod cavity;
 pub mod congestion;
 pub(crate) mod demand_replay;
 pub mod down_sweep;
@@ -1398,6 +1399,22 @@ pub fn run_sweep_with_drains(
     policy: &SweepPolicy,
     drains: &[DrainSpec],
 ) -> Result<SweepPlan, SweepError> {
+    run_sweep_with_holes(mesh, plan, policy, drains, &[])
+}
+
+/// [`run_sweep_with_drains`], and the vents the hollow stage drilled besides
+/// (`vents`: each hole's mouth on the outside, its axis and its radius, in
+/// the `DrainSpec` shape). A vent changes no placement and no keep-out; it is
+/// read ONLY by the hidden-cavity map ([`cavity`]), which plugs every drilled
+/// hole so that a cavity the drill opened to the air by a drain or a vent is
+/// still a cavity. With no vents the two are the same computation.
+pub fn run_sweep_with_holes(
+    mesh: &Mesh,
+    plan: &LayerPlan,
+    policy: &SweepPolicy,
+    drains: &[DrainSpec],
+    vents: &[DrainSpec],
+) -> Result<SweepPlan, SweepError> {
     let (min_z, max_z, min_x, max_x, min_y, max_y) = bounds(mesh)?;
     let plate_z = plan.z0_mm();
     let height = uniform_height(plan)?;
@@ -1454,6 +1471,23 @@ pub fn run_sweep_with_drains(
         reach.straight_limit = f32::NEG_INFINITY;
     }
     let mut history = ColumnHistory::new(&grid);
+    // The hidden cavities (Craig ruling 2026-10-05; `cavity.rs`), one batch
+    // over the slices at the registered hollowing pitch. A member inside one
+    // is not read against the 0.3 mm final gap; outside one nothing changes.
+    // Every hole the hollow stage drilled (drains AND vents) is plugged for
+    // the flood: a drilled hole is how resin and air get out, not a way in
+    // for a hand (measured on the Cylinder: its vent, a 2 mm hole near the
+    // top of the cavity wall, let the flood into the whole cavity).
+    let drilled: Vec<DrainSpec> = drains.iter().chain(vents).copied().collect();
+    history.hidden = cavity::HiddenCavity::build(
+        &grid,
+        &slices,
+        &drilled,
+        plate_z,
+        height,
+        policy.passage_voxel_pitch_mm,
+        policy.tip_radius_max_mm,
+    );
     let mut greedy = if policy.island_seating {
         GreedyScratch::new(&grid, lamina_reach_mm)
     } else {
@@ -2464,6 +2498,86 @@ pub fn run_sweep_with_drains(
             "clearance re-route",
             &landing_check::check_landings(&struts),
         );
+        // **THE TIES ARE PLANNED AGAIN WHERE THE RE-ROUTE MOVED ANYTHING**
+        // (lane cylinder-bracing, rule D, 2026-10-05). The ladder above ran on
+        // the field BEFORE the re-route, so a run the move made (a branch
+        // re-landed on a new host, whose run is longer than its limit) or a
+        // limit the move lowered (the old host's re-size made its sections
+        // thinner) had no rung left to hold it, and the census warned
+        // (Cylinder: arms 169 and 196). The same passes run again on the
+        // field the re-route left, acting only on runs over their limit, and
+        // are sized by the same down-sweep; then the model-tie passes, the
+        // last rung before a warning, on whatever they still could not hold.
+        // The frame-lock rule is unchanged: a member a cross is tied to is
+        // not moved. This needs rule E (a re-route lands only on an arm):
+        // without it the passes braced a branch standing on a diagonal and
+        // its top shook 41 px.
+        if policy.slenderness_ties && !clearance_reroute_outcome.relanded_ids.is_empty() {
+            for _ in 0..policy.strut_removal_passes {
+                let applied = slenderness::apply_ties(
+                    &slenderness_context,
+                    &mut struts,
+                    &mut slenderness_outcome,
+                );
+                if applied == 0 {
+                    break;
+                }
+                slenderness_outcome.tie_passes += 1;
+                slenderness_outcome.retie_passes_after_reroute += 1;
+                slenderness_outcome.retie_remedies_after_reroute += applied;
+                outcome = reroute.size(&slenderness_context, &mut struts);
+            }
+            let runs_left = policy.slenderness_model_tie
+                && slenderness::unbraced_runs_drawn(
+                    &grid,
+                    &struts,
+                    height,
+                    &slenderness_law,
+                    load_step_taper,
+                )
+                .iter()
+                .any(slenderness::UnbracedRun::over_limit);
+            if runs_left {
+                if let Some(surface) = head_join_context.surface() {
+                    let model = slenderness::ModelTies {
+                        surface,
+                        layer_plan: plan,
+                        plate_z_mm: plate_z,
+                    };
+                    let ties_only = slenderness::SlendernessContext {
+                        brace: false,
+                        thicken: false,
+                        mast: false,
+                        ..slenderness_context
+                    };
+                    for _ in 0..policy.strut_removal_passes {
+                        let applied = slenderness::apply_ties_with_model(
+                            &ties_only,
+                            &mut struts,
+                            &mut slenderness_outcome,
+                            Some(&model),
+                        );
+                        if applied == 0 {
+                            break;
+                        }
+                        slenderness_outcome.tie_passes += 1;
+                        slenderness_outcome.retie_passes_after_reroute += 1;
+                        slenderness_outcome.retie_remedies_after_reroute += applied;
+                        outcome = reroute.size(&slenderness_context, &mut struts);
+                    }
+                }
+            }
+            // The ties as the finished field holds them (ids are the struts' own).
+            slenderness_outcome.model_tie_ids = struts
+                .iter()
+                .filter(|strut| strut.kind == StrutKind::Tie && slenderness::live(strut))
+                .map(|strut| strut.id)
+                .collect();
+            landings.record(
+                "ties after the clearance re-route",
+                &landing_check::check_landings(&struts),
+            );
+        }
     }
     // The finished field's own check, and the load it lost if any landing is
     // broken: the down-sweep hands a child's load to its named parent at the
@@ -2646,6 +2760,7 @@ pub fn run_sweep_with_drains(
     report.counters.lean_candidates_priced = lean_candidates_priced;
     report.counters.descent_solid_tested = descent_tally.tested;
     report.counters.descent_solid_inside_preferred_margin = descent_tally.inside_preferred_margin;
+    report.counters.descent_solid_in_hidden_cavity = descent_tally.in_hidden_cavity;
     report.counters.descent_solid_refused_at_final_gap = descent_tally.refused_at_final_gap;
     report.counters.descent_solid_cleared_by_lean = descent_tally.cleared_by_lean;
     report.counters.descent_solid_at_final_gap_only = descent_tally.at_final_gap_only;
@@ -2791,7 +2906,9 @@ pub fn run_sweep_with_drains(
             plan,
             plate_z,
             policy.final_clearance_gap_mm,
+            &history.hidden,
         );
+        sweep_plan.report.hidden_cavity = history.hidden.census();
     }
     sweep_plan.report.sweep_digest = digest(&sweep_plan.struts);
     Ok(sweep_plan)
@@ -3931,6 +4048,7 @@ fn build_report(
         lip_seat: crate::lip_seat::LipSeatOutcome::default(),
         clearance_reroute: crate::lip_seat::LipSeatOutcome::default(),
         member_model_clearance: report::MemberModelClearance::default(),
+        hidden_cavity: cavity::CavityCensus::default(),
         junctions_at_parent_top,
         junctions_mid_shaft,
         support_volume_mm3,

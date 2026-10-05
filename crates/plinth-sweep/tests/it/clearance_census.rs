@@ -397,3 +397,52 @@ fn sabotage_without_the_clearance_reroute_the_post_stays_inside_the_gap() {
         census.within_gap
     );
 }
+
+/// **A RE-ROUTED FIELD LEAVES NO RUN OVER ITS LIMIT** (lane cylinder-bracing,
+/// rule D, 2026-10-05; `cylinder-v15-regression.md`). The tie passes ran on the
+/// field BEFORE the clearance re-route, so a run the move made (the Cylinder's
+/// branch 169, re-landed on a new host: 8.53 mm against 4.85 mm) or a limit
+/// the move lowered (196's re-size: 24.55 mm against a limit that fell to
+/// 23.78 mm) had no rung left to hold it, and the census warned. The passes
+/// now run again on the field the re-route left.
+///
+/// On the overhang table, where the re-route moves post 26 with its subtree:
+/// the pass moved arms, and the finished field, re-measured by the public run
+/// measure, has no run over its limit and no `unbraced_run_over_limit`
+/// warning. THIS IS A GUARD, NOT A RED TEST: the table's moved arms never
+/// leave a run over its limit (the re-tie finds none: `retie_remedies` stays
+/// zero, measured), so it passes without the rule. The red witness of rule D
+/// is the Cylinder in its production pose (the hollowed model with its drain),
+/// 169 and 196, which the unit-sized fixtures here cannot reproduce; the lane
+/// report records its run, before and after. The path hit that the rule ran on
+/// the Cylinder is `retie_passes_after_reroute` / `retie_remedies_after_reroute`.
+#[test]
+fn a_rerouted_field_leaves_no_run_over_its_limit() {
+    let mesh = plinth_mesh::make_overhang_table().expect("the overhang table");
+    let plan = sweep_with(&mesh, 0.0, &policy());
+    let reroute = &plan.report.clearance_reroute;
+    assert!(reroute.arms_relanded > 0, "anti-vacuity: the re-route moved no arm: {reroute:?}");
+    let lane = &plan.report.slenderness_lane;
+    assert!(
+        lane.warnings.is_empty(),
+        "unbraced_run_over_limit warnings after the re-route: {:?}",
+        lane.warnings
+    );
+    let policy = policy();
+    let law = plinth_sweep::SlendernessLaw::new(
+        policy.slenderness_ratio,
+        policy.tip_radius_min_mm,
+        policy.tip_radius_max_mm,
+        policy.overhang_centre_deg - 0.5 * policy.overhang_transition_deg,
+    );
+    let over: Vec<_> = plinth_sweep::unbraced_runs(&plan.grid, &plan.struts, plan.layer_height_mm, &law)
+        .into_iter()
+        .filter(|run| run.over_limit())
+        .map(|run| (run.strut_id, run.k_lo, run.k_top, run.length_mm, run.limit_mm))
+        .collect();
+    assert!(over.is_empty(), "runs over their limit on the re-routed field: {over:?}");
+    println!(
+        "re-tie after the re-route: {} passes, {} remedies",
+        lane.retie_passes_after_reroute, lane.retie_remedies_after_reroute
+    );
+}

@@ -83,6 +83,12 @@ pub struct ColumnHistory {
     /// Highest layer + 1 at which this column ever held model, filled in a
     /// post-pass because the interior test needs to look UP.
     pub column_max_model: Vec<u32>,
+    /// Which members stand inside a hidden cavity, where the 0.3 mm final
+    /// clearance gap does not apply (Craig, 2026-10-05; [`crate::cavity`]).
+    /// Empty (exempts nothing) until the run builds it from the slices; kept
+    /// here because every reader of the finished field's clearance already
+    /// holds the column history.
+    pub hidden: crate::cavity::HiddenCavity,
     /// Head of each column's MODEL-span chain; `u32::MAX` means this column
     /// never held cured material at any layer.
     ///
@@ -115,6 +121,7 @@ impl ColumnHistory {
             top_strut: vec![0; cells],
             top_strut_id: vec![0; cells],
             column_max_model: vec![0; cells],
+            hidden: crate::cavity::HiddenCavity::none(),
             shaft_head: vec![u32::MAX; cells],
             shaft_spans: Vec::new(),
             model_head: vec![u32::MAX; cells],
@@ -602,6 +609,10 @@ pub struct DescentTally {
     /// Of those, straight descents standing inside the preferred 0.6 mm
     /// placement margin (kept when they clear the 0.3 mm final gap).
     pub inside_preferred_margin: u64,
+    /// Of those, straight descents that stand wholly in a hidden cavity (the
+    /// solid at its lower-bound radius in hidden voxels), where the final gap
+    /// is not asked (Craig, 2026-10-05).
+    pub in_hidden_cavity: u64,
     /// Straight descents that do NOT clear the final gap: the ones the
     /// search replaces (a lean) or whose seat is moved.
     pub refused_at_final_gap: u64,
@@ -625,6 +636,7 @@ impl DescentTally {
     pub(crate) fn absorb(&mut self, other: &DescentTally) {
         self.tested += other.tested;
         self.inside_preferred_margin += other.inside_preferred_margin;
+        self.in_hidden_cavity += other.in_hidden_cavity;
         self.refused_at_final_gap += other.refused_at_final_gap;
         self.cleared_by_lean += other.cleared_by_lean;
         self.at_final_gap_only += other.at_final_gap_only;
@@ -2312,6 +2324,16 @@ fn descend_cleared(
     // query), and each candidate's landing face once per candidate that the
     // raster reads ([`crate::member_clearance::ShaftRead::intrusion`]).
     let seat_face = clearance.and_then(|clear| clear.read(grid, history).seat_face((cell, layer)));
+    // Whether the PROPOSED descent, the straight axis from this seat down to
+    // `base_cell` at `k_bottom`, with a solid of the lower-bound radius about
+    // it, stands wholly in hidden voxels of the cavity map.
+    let in_cavity = |clear: &DescentClearance<'_>, base_cell: usize, k_bottom: usize| {
+        history.hidden.segment_hidden(
+            crate::member_clearance::axis_point(grid, clear.layer_height_mm, cell, layer),
+            crate::member_clearance::axis_point(grid, clear.layer_height_mm, base_cell, k_bottom),
+            radius_lb_mm,
+        )
+    };
     let blocked = |clear: &DescentClearance<'_>,
                    gap_mm: f64,
                    base_cell: usize,
@@ -2329,7 +2351,27 @@ fn descend_cleared(
             )
             .is_some()
         };
-        (gap_mm > clear.final_gap_mm && enters(clear.final_gap_mm)) || enters(gap_mm)
+        // **THE FINAL GAP DOES NOT APPLY INSIDE A HIDDEN CAVITY** (Craig
+        // ruling 2026-10-05, on his 2026-08-31 ruling that supports hidden in
+        // a cavity are never removed or cleaned; challenger, same day). The
+        // cavity map is built from all the slices before the up-sweep starts,
+        // so it answers for the PROPOSED descent now: a straight axis from
+        // this seat to the landing, with the solid at the lower bound of its
+        // radius about it, wholly in hidden voxels is not refused for the
+        // gap. The model-crossing and drain checks are not this test's:
+        // `descend_cleared` keeps its path test (`shaft_blocks`) and the
+        // drain keep-out for every candidate, and a descent that enters the
+        // model is not in enclosed air by construction. Outside a cavity
+        // nothing changes. The PREFERRED margin is a placement search margin
+        // and is still read.
+        let at_final = || !in_cavity(clear, base_cell, k_bottom) && enters(clear.final_gap_mm);
+        if gap_mm > clear.final_gap_mm {
+            at_final() || enters(gap_mm)
+        } else if gap_mm < clear.final_gap_mm {
+            enters(gap_mm)
+        } else {
+            at_final()
+        }
     };
     let straight_layers = layer.saturating_sub(straight_bottom);
     let Some(straight_length) = law.descent_cost_mm(straight_layers, 0.0) else {
@@ -2341,6 +2383,9 @@ fn descend_cleared(
     // clears the preferred margin).
     let straight_clears = clearance.map(|clear| {
         outcome.solid.tested += 1;
+        if in_cavity(clear, cell, straight_bottom) {
+            outcome.solid.in_hidden_cavity += 1;
+        }
         if !blocked(clear, clear.preferred_gap_mm, cell, straight_bottom, straight_landing) {
             Clears::Preferred
         } else {
@@ -3525,6 +3570,59 @@ mod descent_tests {
         assert_eq!(counts.solid.inside_preferred_margin, 1, "path hit: the wall is inside the margin");
         assert_eq!(counts.solid.refused_at_final_gap, 0);
         assert_eq!(after.clears, super::Clears::FinalOnly);
+    }
+
+    /// **THE FINAL GAP DOES NOT APPLY TO A DESCENT INSIDE A HIDDEN CAVITY**
+    /// (Craig ruling 2026-10-05; challenger 2026-10-05: the up-sweep's
+    /// refusing landing search read the 0.3 mm gap unconditionally). The
+    /// fixture of `a_descent_beside_a_wall_is_tested_at_its_smallest_drawn_radius`
+    /// (a cured wall 0.35 mm beside the seat's column, the straight descent
+    /// inside the final gap) with the cavity map of a real sealed 6 mm box
+    /// with 1.5 mm walls around the seat:
+    ///
+    /// - SEALED cavity: the straight descent is NOT refused at the final gap
+    ///   (`refused_at_final_gap` 0), it stays (`Clears::FinalOnly`, no path),
+    ///   and the path hit `in_hidden_cavity` is 1;
+    /// - the NEGATIVE CONTROLS, same wall, same seat: the same box with a side
+    ///   wall left out (an open pocket) and no cavity at all both refuse it at
+    ///   the final gap and replace it by a lean, as before.
+    ///
+    /// SABOTAGE RUN (by hand): `in_cavity` answering `false` refuses the sealed
+    /// case too and the first assertion fails.
+    #[test]
+    fn a_straight_descent_inside_a_hidden_cavity_is_not_refused_at_the_final_gap() {
+        use crate::cavity::fixtures::{cavity_box_sized, map_on};
+        let grid = plan_grid(0.0, 0.0, 8.0, 8.0, 400, H, 0.0, 1_000_000_000).0;
+        let seat = grid.index(80, 80);
+        let wall: Vec<usize> = (60..101).map(|row| grid.index(row, 87)).collect();
+        let law = LeanLaw::new(H, 45.0, 25.0);
+        let clear = two_tier(&law);
+        let run = |map: Option<bool>| {
+            let mut history = ColumnHistory::new(&grid);
+            cure_wall(&mut history, &grid, &wall, 10, 79);
+            if let Some(open_side) = map {
+                history.hidden = map_on(&cavity_box_sized(open_side, false, 0.0, 6.0, 1.5), &[], 0.0, &grid);
+            }
+            let mut scratch = Vec::new();
+            let mut counts = outcome();
+            let descent = super::descend_cleared(
+                &grid, &history, &DrainKeepOut::none(), &law, true, 4.0, seat, 80, &mut scratch, &mut counts,
+                Some(&clear), 0.05,
+            );
+            (descent, counts, history.hidden.census().enclosed_voxels)
+        };
+        let (descent, counts, enclosed) = run(Some(false));
+        assert!(enclosed > 0, "anti-vacuity: the sealed box encloses air");
+        assert_eq!(counts.solid.refused_at_final_gap, 0, "{counts:?}");
+        assert_eq!(counts.solid.in_hidden_cavity, 1, "path hit: the descent stood in the cavity: {counts:?}");
+        assert_eq!(counts.solid.inside_preferred_margin, 1, "anti-vacuity: the wall is inside the margin");
+        assert!(descent.path.is_empty() && descent.clears == super::Clears::FinalOnly, "{:?}", descent.clears);
+        for (map, what) in [(Some(true), "an open pocket"), (None, "no cavity")] {
+            let (descent, counts, _) = run(map);
+            assert_eq!(counts.solid.refused_at_final_gap, 1, "{what}: {counts:?}");
+            assert_eq!(counts.solid.in_hidden_cavity, 0, "{what}: {counts:?}");
+            assert!(!descent.path.is_empty(), "{what}: a leaned descent replaces it: {counts:?}");
+        }
     }
 
     /// **A SHAFT IS EXEMPT FOR ITS OWN CONTACT ZONE, NOT FOR THE LONGEST ONE**

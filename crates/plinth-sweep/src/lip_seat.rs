@@ -153,6 +153,7 @@ pub(crate) fn clearance_violators(
         joins.layer_plan,
         joins.plate_z_mm,
         joins.clearance_mm,
+        &joins.slender.history.hidden,
     );
     let mut named = 0;
     for row in &census.within_gap {
@@ -394,6 +395,10 @@ pub struct LipSeatOutcome {
     /// Refused because a moved member's drawn solid would come nearer the
     /// model than the final gap, or than it already stood.
     pub candidates_refused_clearance: usize,
+    /// Moved members (a mover, a follower) whose solid was NOT read against
+    /// the final gap because it stands in a hidden cavity (Craig ruling
+    /// 2026-10-05): the path hit of that ruling in the landing search.
+    pub candidates_hidden: usize,
     /// Refused because a new plate root's flared disc would touch another
     /// root's (the congestion lane's own clearance rule).
     pub candidates_refused_roots: usize,
@@ -571,6 +576,51 @@ fn children_follow(
         out.push((child, cell, new_path));
     }
     Some(out)
+}
+
+/// One axis a landing-search proposal would draw: from `k_bottom` to `k_top`,
+/// standing in `path[layer - k_bottom]` (the seat's cell past the path's
+/// end, as [`SweepStrut::cell_at`] reads it), the foot in `base_cell` where
+/// given, with a solid of `radius_mm` about it.
+#[derive(Clone, Copy, Debug)]
+struct ProposedAxis<'a> {
+    k_bottom: usize,
+    k_top: usize,
+    base_cell: Option<usize>,
+    seat_cell: usize,
+    path: &'a [u32],
+    radius_mm: f64,
+}
+
+/// Which members of one proposal the final gap does not apply to, the mover
+/// first, then its children in order: a member whose PROPOSED axis, with the
+/// solid it would be drawn at, stands wholly in hidden voxels; a child only
+/// when the mover it follows does too. Each is asked with the geometry the
+/// trial draws, never the one it stands on now (challenger round 3,
+/// 2026-10-05). The children are asked only when the mover is hidden.
+fn proposal_hidden<'a>(
+    hidden: &crate::cavity::HiddenCavity,
+    mover: ProposedAxis<'a>,
+    children: impl Iterator<Item = ProposedAxis<'a>>,
+) -> Vec<bool> {
+    let on = |axis: &ProposedAxis<'_>| {
+        hidden.span_hidden(
+            axis.k_bottom,
+            axis.k_top,
+            |layer| match axis.base_cell {
+                Some(base) if layer == axis.k_bottom => base,
+                _ => axis
+                    .path
+                    .get(layer.wrapping_sub(axis.k_bottom))
+                    .map_or(axis.seat_cell, |cell| *cell as usize),
+            },
+            |_| axis.radius_mm,
+        )
+    };
+    let mover_hidden = on(&mover);
+    std::iter::once(mover_hidden)
+        .chain(children.map(|child| mover_hidden && on(&child)))
+        .collect()
 }
 
 /// A member drawn as the lowering will draw it, from a strut clone with its
@@ -793,6 +843,7 @@ pub(crate) fn apply(
             bite.as_ref().map_or(90.0, |bite| bite.limit_deg),
             &to_move,
             &children,
+            trigger.is_clearance(),
             outcome,
         );
         let id = strut.id;
@@ -967,8 +1018,48 @@ pub(crate) fn apply(
             // every child (each joined to the mover), no nearer than it
             // stood, and never inside.
             let new_root = !matches!(proposal.candidate.landing, Landing::Strut { .. });
+            // The final gap does not apply inside a hidden cavity (Craig
+            // ruling 2026-10-05): a mover whose PROPOSED axis, from the
+            // landing it would make up to its own seat, stands wholly in
+            // enclosed air ([`crate::cavity`]; whatever it would land on),
+            // is not read against the gap, and nor is a child whose proposed
+            // axis would stand in one and follows a mover that does. A proposal
+            // outside a cavity is read as before, so a recess open to the
+            // outside is never exempt.
+            //
+            // Every member is asked with the geometry the trial draws: the
+            // mover on its proposed landing and path, each child on its
+            // PROPOSED path onto the moved axis, not the path it stands on
+            // (challenger round 3, 2026-10-05: a child moved beside another
+            // wall can carry its solid out of the hidden voxels while its old
+            // axis stays inside), each with the SOLID its trial arm is drawn
+            // at (round 2).
+            let hidden_slots = proposal_hidden(
+                &context.history.hidden,
+                ProposedAxis {
+                    k_bottom: proposal.candidate.k_bottom,
+                    k_top: struts[index_of].k_top,
+                    base_cell: Some(proposal.candidate.cell),
+                    seat_cell: struts[index_of].cell,
+                    path: &proposal.path,
+                    radius_mm: crate::cavity::arm_radius_mm(&trial[first]),
+                },
+                proposal.children.iter().enumerate().map(|(offset, (child, _, path))| ProposedAxis {
+                    k_bottom: struts[*child].k_bottom,
+                    k_top: struts[*child].k_top,
+                    base_cell: None,
+                    seat_cell: struts[*child].cell,
+                    path,
+                    radius_mm: crate::cavity::arm_radius_mm(&trial[first + 1 + offset]),
+                }),
+            );
+            let hidden = |slot: usize| hidden_slots[slot - first];
             let clear = surface.is_none()
                 || (first..=first + proposal.children.len()).all(|slot| {
+                    if hidden(slot) {
+                        outcome.candidates_hidden += 1;
+                        return true;
+                    }
                     let minimum = if slot == first && (new_root || trigger.is_clearance()) {
                         tier
                     } else {
@@ -1643,6 +1734,7 @@ fn price(
     limit_deg: f64,
     to_move: &[bool],
     children: &[usize],
+    arms_only: bool,
     outcome: &mut LipSeatOutcome,
 ) -> Vec<Candidate> {
     let grid = context.grid;
@@ -1748,6 +1840,23 @@ fn price(
             let (landing, k_bottom) = match (shaft, model) {
                 (Some((_, at, _)), Some(model_at)) if model_at > at => {
                     (Landing::Model { layer: model_at }, model_at)
+                }
+                // **A RE-ROUTE LANDS ONLY ON AN ARM** (lane cylinder-bracing,
+                // rule E, 2026-10-05). The column history holds the braces
+                // too, so the shaft search can return a cross diagonal; a
+                // diagonal is sized for drag (`r_b = l / S`), not for a load
+                // path, and a branch re-landed on one (the Cylinder's 169 on
+                // brace 362) made a new run over its limit. The head-join
+                // rule already joins only to a host that is an arm (the host
+                // test in `head_join`). The clearance re-route only:
+                // the lip-seat rule's own search is unchanged.
+                (Some((id, _, _)), _)
+                    if arms_only
+                        && struts
+                            .get(id as usize)
+                            .is_some_and(|host| host.kind != StrutKind::Arm) =>
+                {
+                    continue
                 }
                 // Not onto an arm this pass is about to re-land: landing on
                 // it would freeze its own cut in place.
@@ -2442,6 +2551,18 @@ mod model_landing_tests {
     /// Every candidate `price` offers the arm under a cap face tilted 30° out
     /// toward −X with a 20° limit (so it must lean out), over `history`.
     fn candidates(history: &ColumnHistory, strut: &SweepStrut) -> Vec<(Landing, f64)> {
+        candidates_among(history, vec![strut.clone()], false)
+    }
+
+    /// [`candidates`] for the arm `struts[0]` with the other members of
+    /// `struts` standing in the column index too, and `arms_only` as the
+    /// clearance re-route sets it.
+    fn candidates_among(
+        history: &ColumnHistory,
+        struts: Vec<SweepStrut>,
+        arms_only: bool,
+    ) -> Vec<(Landing, f64)> {
+        let strut = struts[0].clone();
         let grid = grid();
         let keep_out = crate::drain::DrainKeepOut::none();
         let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
@@ -2475,7 +2596,6 @@ mod model_landing_tests {
             frame_ledger: true,
             model_tie: true,
         };
-        let struts = vec![strut.clone()];
         let mut index = ColumnHistory::new(&grid);
         crate::congestion::stamp_all(&mut index, &struts);
         let (sin, cos) = 30.0_f64.to_radians().sin_cos();
@@ -2495,11 +2615,82 @@ mod model_landing_tests {
             20.0,
             &[true],
             &[],
+            arms_only,
             &mut outcome,
         )
         .into_iter()
         .map(|candidate| (candidate.landing, candidate.cost_mm))
         .collect()
+    }
+
+    /// A member standing in column `(60, col)` over layers `0..=top`, on the
+    /// plate, of the given kind and id.
+    fn member_in_column(id: u32, kind: StrutKind, col: usize, top: usize) -> SweepStrut {
+        let grid = grid();
+        SweepStrut {
+            id,
+            cell: 60 * SIDE + col,
+            center_mm: [grid.center_x_mm(col), grid.center_y_mm(60)],
+            kind,
+            k_top: top,
+            k_bottom: 0,
+            landing: Landing::Plate,
+            radius_mm: vec![0.1; top + 1],
+            ..arm(Landing::Plate, 0)
+        }
+    }
+
+    /// **A RE-ROUTE LANDS ONLY ON AN ARM** (lane cylinder-bracing, rule E,
+    /// 2026-10-05; `cylinder-v15-regression.md`). The column history holds the
+    /// braces too, so the shaft search returned a cross diagonal as a landing,
+    /// and the Cylinder's branch 169 was re-landed on brace 362: a diagonal
+    /// sized for drag (`r_b = l / S`), not for a load path, which made a new
+    /// run over its limit (8.53 mm against 4.85 mm).
+    ///
+    /// The arm of the fixtures above, under the cap face that makes it lean
+    /// −X, with a member standing in a column inside its reach, 60 layers
+    /// tall (below the arm's lean ceiling). As a BRACE it may not be landed on
+    /// by the re-route (`arms_only`): no candidate lands on member 1. SABOTAGE
+    /// INSIDE: the same field priced for the lip-seat rule (`arms_only` off)
+    /// offers it, so the refusal comes from the rule. CONTROL: the same member
+    /// as an ARM is still offered to the re-route.
+    #[test]
+    fn a_rerouted_arm_never_lands_on_a_brace() {
+        let bare = history(|_, _| false);
+        let on_member = |found: &[(Landing, f64)]| {
+            found
+                .iter()
+                .filter(|(landing, _)| matches!(landing, Landing::Strut { id: 1, .. }))
+                .count()
+        };
+        let field = |kind: StrutKind| {
+            vec![
+                arm(Landing::Plate, 0),
+                member_in_column(1, kind, 50, 60),
+            ]
+        };
+        let reroute = candidates_among(&bare, field(StrutKind::Brace), true);
+        let lip_seat = candidates_among(&bare, field(StrutKind::Brace), false);
+        assert!(
+            on_member(&lip_seat) > 0,
+            "anti-vacuity: the lip-seat search offers a brace as a landing ({} candidates)",
+            lip_seat.len()
+        );
+        assert_eq!(
+            on_member(&reroute),
+            0,
+            "the re-route offered a landing on a brace: {:?}",
+            reroute
+                .iter()
+                .filter(|(landing, _)| matches!(landing, Landing::Strut { id: 1, .. }))
+                .collect::<Vec<_>>()
+        );
+        assert!(!reroute.is_empty(), "the re-route still offers the plate and the model");
+        let as_an_arm = candidates_among(&bare, field(StrutKind::Arm), true);
+        assert!(
+            on_member(&as_an_arm) > 0,
+            "control: an arm is still a landing for the re-route"
+        );
     }
 
     /// The Morel base's cap arms (for-craig-v10): a slab under the seat, and
@@ -2577,6 +2768,77 @@ mod model_landing_tests {
 #[cfg(test)]
 mod tests {
     use super::{min_drop_mm, top_aligned};
+
+    /// **A MOVED CHILD IS ASKED ON ITS PROPOSED PATH** (challenger round 3,
+    /// 2026-10-05). The landing search exempted a follower from the final gap
+    /// when its OLD axis was hidden, although the trial draws it on its new
+    /// path onto the moved axis. A sealed 9 mm box, 1.5 mm walls, the +x
+    /// wall's inner face at 8.0 mm (hidden voxels reach x = 8.5): the mover
+    /// re-lands straight in the cell centred at x = 7.45 (a 0.3 mm solid,
+    /// hidden); its child stands straight at x = 6.0 (a 1.2 mm solid, hidden
+    /// as it stands) and follows the mover by a lean down to x = 7.45, where
+    /// its 1.2 mm solid (plus the quarter-voxel sampling margin, to 8.775)
+    /// reaches the wall's outer voxels. Its centreline stays in the cavity
+    /// all the way.
+    ///
+    /// The child as proposed is NOT exempt (it is read against the gap, as
+    /// any member outside a cavity is). CONTROLS: the same child asked on its
+    /// standing path is exempt (the old answer, and the anti-vacuity: the
+    /// child WAS hidden); the same lean at a 0.3 mm solid stays hidden (it is
+    /// the solid that leaves, not the centreline); in an open-sided pocket
+    /// nothing is exempt. SABOTAGE RUN (by hand): `proposal_hidden` reading
+    /// each child with an empty path (its seat's cell all the way down, the
+    /// straight axis it stands on) exempts the lean child, and the first
+    /// assertion goes red (`[true, true]`).
+    #[test]
+    fn a_moved_child_is_asked_on_its_proposed_path_not_the_one_it_stands_on() {
+        use super::{proposal_hidden, ProposedAxis};
+        use crate::cavity::fixtures::{cavity_box_sized, cell, layer, map_of, CENTRE};
+        let (sealed, grid) = map_of(&cavity_box_sized(false, false, 0.0, 9.0, 1.5), &[]);
+        let (pocket, _) = map_of(&cavity_box_sized(true, false, 0.0, 9.0, 1.5), &[]);
+        assert!(sealed.census().enclosed_voxels > 0, "{:?}", sealed.census());
+        let at = |x: f64| cell(&grid, x, CENTRE);
+        let mover = ProposedAxis {
+            k_bottom: layer(0.2),
+            k_top: layer(6.0),
+            base_cell: Some(at(7.45)),
+            seat_cell: at(7.45),
+            path: &[],
+            radius_mm: 0.3,
+        };
+        let (k_bottom, k_top) = (layer(2.0), layer(5.0));
+        #[expect(clippy::cast_precision_loss, reason = "a small layer count")]
+        let lean: Vec<u32> = (k_bottom..=k_top)
+            .map(|k| {
+                let t = (k - k_bottom) as f64 / (k_top - k_bottom) as f64;
+                u32::try_from(at(t.mul_add(6.0 - 7.45, 7.45))).expect("a small grid")
+            })
+            .collect();
+        let seat = at(6.0);
+        // A child standing at `seat`, on `path`, with a solid of `radius_mm`.
+        let child = |path, radius_mm| ProposedAxis { k_bottom, k_top, base_cell: None, seat_cell: seat, path, radius_mm };
+        let (lean, standing): (&[u32], &[u32]) = (&lean, &[]);
+        assert_eq!(
+            proposal_hidden(&sealed, mover, std::iter::once(child(lean, 1.2))),
+            vec![true, false],
+            "the moved child's solid leaves the hidden voxels"
+        );
+        assert_eq!(
+            proposal_hidden(&sealed, mover, std::iter::once(child(standing, 1.2))),
+            vec![true, true],
+            "control: as it stands, the child is hidden"
+        );
+        assert_eq!(
+            proposal_hidden(&sealed, mover, std::iter::once(child(lean, 0.3))),
+            vec![true, true],
+            "control: a thin solid on the same lean stays hidden"
+        );
+        assert_eq!(
+            proposal_hidden(&pocket, mover, std::iter::once(child(standing, 1.2))),
+            vec![false, false],
+            "control: an open pocket exempts nothing"
+        );
+    }
 
     /// Under a flat face (outward normal straight down) an axis offset `D`
     /// sideways meets the face within a limit `L` once it drops `D·cot L`:

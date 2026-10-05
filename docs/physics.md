@@ -230,8 +230,11 @@ two solids is excused only its own contact zones, read from the faces its ends s
 above, at the radius that solid has at the zone's edge (a taper is wider there than at its end,
 so the zone is taken to a fixed point); a trunk raised under a flat seat is tested below
 `gap + r`, not `1.86 (gap + r)`. A slot the raster flags is decided by the census's own predicate
-on the drawn frustum, all of a plan's slots in one batch: the raise enters the gap unless the
-predicate measures the committed slot clear, and a slot counts as inside the gap already only
+on the drawn frustum, all of a plan's slots in one batch: the raise enters the gap only where
+the predicate PROVES it, a measured read under the gap or an upper bound under the gap (the
+kernel's one-sided read, where it could not decide a near-parallel face, says the clearance is
+AT MOST the number: an upper bound at or above the gap is undecided and refuses nothing, as the
+census does not count it either), and a slot counts as inside the gap already only
 where the predicate reads the drawn slot under the gap. The raster's flag is never that proof;
 without a model surface nothing is proved and a flagged raise is refused. A zone is an
 exemption, so where no face is known (no surface, or the query names none) the zone is zero,
@@ -254,7 +257,47 @@ slenderness ladder solved (a cross seated on it or on a member resting on it, or
 model tie resting on it) is kept where it stands and named in a WARNING with that reason: moving
 it moves a junction of the frame, and carrying the frame along unsolved, or taking it down and
 solving again, could leave a post over its slenderness limit (sway or snap mid-print) to buy
-clearance for a member that already stands clear of the model.
+clearance for a member that already stands clear of the model. The re-route lands an arm only
+on another ARM, never on a brace: the column history holds the cross diagonals too, and a
+diagonal is sized for drag, not for a load path. When the re-route moved anything, the tie passes
+and the model-tie passes run again on the field it left (they act only on runs over their limit),
+because the move can make a run (a branch on a new host) or lower a limit (the old host's re-size
+makes its sections thinner).
+
+**The final gap does not apply inside a hidden cavity** (owner ruling 2026-10-05, on the
+2026-08-31 ruling that supports hidden in a cavity are never removed or cleaned). The test is
+the cavity itself (`cavity.rs`), not the scar flag `SweepStrut::interior` (model above the landing
+in the same column), which is also true of a recess open to the outside and false for a member
+that lands on another support. One flood per model, at the hollowing pitch: a voxel of a lattice
+that reaches past the model is solid only when every layer it spans holds a WHOLE cell of the model
+there, proved from the slice's geometry in both horizontal axes (the cell's centre inside and no
+boundary edge through the cell's interior; not any overlap: an any-overlap mask rounds a span
+outward, and an opening of 0.8 mm across two cells was sealed by both neighbours; and not a
+row-centre sample: a slit narrow in Y between two row centres sampled as solid wall), the voxels
+below the plate are solid, each drilled hole
+(drain or vent) mouth is plugged with a ball wider than the bore (the bore does not open the
+cavity), and the empty space is flooded from the lattice boundary. Empty voxels the flood never
+reaches are enclosed air; a voxel is hidden when enclosed air lies within one voxel and no
+exterior air does. A member is hidden when every sampled point of its axis (the foot, one point per
+half voxel of height, the seat) is hidden, whatever it lands on, AND the member's solid, at the
+radius it is drawn at or the plan would draw it at, stays in hidden voxels (so a raise that would
+carry it to an exterior face is read as before, and one that touches the cavity wall a voxel deep
+is not); a proposed landing, raise or tie is asked with its own geometry before it exists (a
+re-route's mover on its proposed landing and path, and each child that follows it on its proposed
+path onto the moved axis, at the radius its trial arm is drawn at, never on the axis it stood on).
+A hidden
+member is not read against the gap by the thickening refusal, is not counted by the census (so it
+is never sent to the re-route), a mover that would land so is not read against the gap by the
+re-route's landing search, a straight descent of the up-sweep (the cavity map is built before the
+up-sweep, from all the slices) that stands so is not refused for the final gap (the model-crossing
+and drain tests of the lean search are unchanged), a model tie so placed is confirmed clear by its
+lone census, and a brace band whose diagonals stand so is not read against the model (its path
+test still refuses a diagonal through model material). Every error runs toward "not hidden", which
+is the old behaviour: an opening of any width in either horizontal axis and at any phase to the
+lattice, a wall that holds no 6-connected run of whole cells (under 1.0 mm square to the lattice,
+more on a slant; the hollow stage makes none under 2.0 mm) and a cavity too narrow for the lattice
+exempt nothing. One limit stands: a lift under one voxel could not be told from a cup. Outside a
+cavity nothing changes.
 
 ## 6. The seat's own contact zone — the honest exemption
 

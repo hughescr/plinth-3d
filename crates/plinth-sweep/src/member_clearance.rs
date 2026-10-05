@@ -685,6 +685,7 @@ pub(crate) fn model_clearance_census(
     layer_plan: &plinth_core::LayerPlan,
     plate_z_mm: f64,
     tier: f64,
+    cavity: &crate::cavity::HiddenCavity,
 ) -> crate::report::MemberModelClearance {
     let mut census = crate::report::MemberModelClearance {
         gap_mm: tier,
@@ -722,6 +723,19 @@ pub(crate) fn model_clearance_census(
     let mut unmeasured_member = vec![false; arms.len()];
     for (index, (strut, arm)) in struts.iter().zip(arms).enumerate() {
         if strut.k_bottom == usize::MAX || strut.k_top <= strut.k_bottom {
+            continue;
+        }
+        // The final gap does not apply inside a hidden cavity (Craig ruling
+        // 2026-10-05, on his 2026-08-31 ruling that supports hidden in a
+        // cavity are never removed or cleaned): a member whose whole axis
+        // stands in enclosed air ([`crate::cavity`], whatever it lands on)
+        // is not measured, so it is neither counted nor re-routed. Counted
+        // apart, so the census says what it left out. Asked of the member's
+        // DRAWN SOLID (the widest of its profile), not its centreline: a
+        // thick post whose solid reaches a voxel the cavity map does not
+        // call hidden is measured.
+        if cavity.member_hidden(strut, crate::cavity::arm_radius_mm(arm)) {
+            census.members_hidden += 1;
             continue;
         }
         let disc = discs.get(index).copied().flatten();
@@ -1120,6 +1134,16 @@ fn walk_spans(
 /// the tests that read a placement against the census's own predicate.
 #[cfg(test)]
 pub(crate) fn boxes_surface(boxes: &[([f64; 3], [f64; 3])]) -> geom_kernel::NativeSurface {
+    let (verts, tris) = boxes_mesh(boxes);
+    indexed_surface(&verts, &tris)
+}
+
+/// The vertices and triangles of [`boxes_surface`], so a test can move a
+/// vertex (a face tilted by one unit in the last place, say) before the
+/// surface is built: corner `c` of box `b` is vertex `8 b + c`, bit `k` of
+/// `c` set meaning the high coordinate on axis `k`.
+#[cfg(test)]
+pub(crate) fn boxes_mesh(boxes: &[([f64; 3], [f64; 3])]) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
     let mut verts: Vec<[f64; 3]> = Vec::new();
     let mut tris: Vec<[u32; 3]> = Vec::new();
     for &(low, high) in boxes {
@@ -1134,12 +1158,18 @@ pub(crate) fn boxes_surface(boxes: &[([f64; 3], [f64; 3])]) -> geom_kernel::Nati
             tris.push([base + t[0], base + t[1], base + t[2]]);
         }
     }
+    (verts, tris)
+}
+
+/// One model surface from indexed triangles, at the tests' grid pitch.
+#[cfg(test)]
+pub(crate) fn indexed_surface(verts: &[[f64; 3]], tris: &[[u32; 3]]) -> geom_kernel::NativeSurface {
     let pitch = 0.1;
-    let estimate = geom_kernel::NativeSurface::estimate_index_memory_from_indexed(&verts, &tris, pitch)
+    let estimate = geom_kernel::NativeSurface::estimate_index_memory_from_indexed(verts, tris, pitch)
         .expect("an estimate");
     geom_kernel::NativeSurface::from_indexed(
-        &verts,
-        &tris,
+        verts,
+        tris,
         geom_kernel::NativeSurfaceConfig {
             grid_pitch_mm: pitch,
             max_grid_bytes: estimate.max_axis_grid_bytes(),
@@ -1276,7 +1306,8 @@ mod census_tests {
     ) -> (crate::report::MemberModelClearance, Vec<plinth_support::DrawnSpan>) {
         let (struts, arms) = (vec![post.0], vec![post.1]);
         let layers = plinth_core::LayerPlan::new(PLATE, vec![H; 400]).expect("a uniform plan");
-        let census = model_clearance_census(Some(surface), &struts, &arms, &layers, PLATE, GAP);
+        let none = crate::cavity::HiddenCavity::none();
+        let census = model_clearance_census(Some(surface), &struts, &arms, &layers, PLATE, GAP, &none);
         let root = plinth_support::drawn_root_radius_mm(&arms[0].radius_profile_mm, arms[0].tip_radius_mm);
         let spans = plinth_support::drawn_spans(
             &arms[0].radius_profile_mm,
@@ -1288,6 +1319,56 @@ mod census_tests {
             root,
         );
         (census, spans)
+    }
+
+    /// **A MEMBER IN A HIDDEN CAVITY IS NOT COUNTED** (Craig ruling
+    /// 2026-10-05: the 0.3 mm final gap does not apply inside a hidden cavity,
+    /// on his 2026-08-31 ruling that supports there are never removed or
+    /// cleaned; challenger 2026-10-05: the authority is the CAVITY, not the
+    /// scar flag). Two 0.2 mm posts stand on a support 0.35 mm from a wall
+    /// face, 0.15 mm from it: inside the gap. Neither is flagged
+    /// [`crate::SweepStrut::interior`] (that flag is false for a member that
+    /// lands on a support, which is the point of the control: a branch
+    /// standing wholly in a cavity on an interior post).
+    ///
+    /// - no cavity map: both are named (anti-vacuity);
+    /// - the map of an open-sided POCKET (a ceiling over the same floor, so
+    ///   model stands over the column, open to the outside on one face): both
+    ///   are named. This is the negative control the scar flag failed;
+    /// - the map of a SEALED cavity: neither is named, and `members_hidden`
+    ///   counts both (the path hit), so the clearance re-route, which sends
+    ///   the arms this census names, does not move them.
+    #[test]
+    fn a_member_in_a_hidden_cavity_is_not_counted() {
+        use crate::cavity::fixtures::{cavity_box_at, cell, map_of_at};
+        let wall = boxed([5.35, 3.0, -6.0], [7.0, 7.0, 6.0]);
+        let layers = plinth_core::LayerPlan::new(PLATE, vec![H; 400]).expect("a uniform plan");
+        let sealed = map_of_at(&cavity_box_at(false, false, PLATE), &[], PLATE);
+        let pocket = map_of_at(&cavity_box_at(true, false, PLATE), &[], PLATE);
+        assert!(sealed.0.census().enclosed_voxels > 0, "{:?}", sealed.0.census());
+        assert_eq!(pocket.0.census().enclosed_voxels, 0, "{:?}", pocket.0.census());
+        let census_with = |cavity: &crate::cavity::HiddenCavity, grid: &crate::grid::Grid| {
+            let on_a_support = Landing::Strut { id: 9, layer: 0 };
+            let mut one = member(0, StrutKind::Arm, on_a_support, [5.0, 5.0], PLATE, 5.0, 0.2);
+            let mut two = member(1, StrutKind::Arm, on_a_support, [5.0, 5.5], PLATE, 5.0, 0.2);
+            one.0.cell = cell(grid, 5.0, 5.0);
+            two.0.cell = cell(grid, 5.0, 5.5);
+            assert!(!one.0.interior && !two.0.interior, "anti-vacuity: the scar flag is false for both");
+            let (struts, arms) = (vec![one.0, two.0], vec![one.1, two.1]);
+            model_clearance_census(Some(&wall), &struts, &arms, &layers, PLATE, GAP, cavity)
+        };
+        let named = |census: &crate::report::MemberModelClearance| {
+            census.within_gap.iter().map(|near| near.member).collect::<Vec<_>>()
+        };
+        let open = census_with(&crate::cavity::HiddenCavity::none(), &sealed.1);
+        assert_eq!(named(&open), vec![0, 1], "anti-vacuity: both posts are inside the gap: {open:?}");
+        assert_eq!(open.members_hidden, 0, "{open:?}");
+        let in_a_pocket = census_with(&pocket.0, &pocket.1);
+        assert_eq!(named(&in_a_pocket), vec![0, 1], "a pocket open to the outside is no cavity: {in_a_pocket:?}");
+        assert_eq!(in_a_pocket.members_hidden, 0, "{in_a_pocket:?}");
+        let hidden = census_with(&sealed.0, &sealed.1);
+        assert!(named(&hidden).is_empty(), "members in a sealed cavity are not counted: {hidden:?}");
+        assert_eq!(hidden.members_hidden, 2, "path hit: both left out as hidden: {hidden:?}");
     }
 
     /// RED before the fix (rule R3). A plate post drawn as one chord from 0.3 mm
@@ -1375,7 +1456,8 @@ mod census_tests {
         ];
         let (struts, arms): (Vec<SweepStrut>, Vec<SweepArm>) = members.into_iter().unzip();
         let layers = plinth_core::LayerPlan::new(PLATE, vec![H; 400]).expect("a uniform plan");
-        let census = model_clearance_census(Some(&surface), &struts, &arms, &layers, PLATE, GAP);
+        let nowhere = crate::cavity::HiddenCavity::none();
+        let census = model_clearance_census(Some(&surface), &struts, &arms, &layers, PLATE, GAP, &nowhere);
         assert!(census.ran);
         assert_eq!(census.members_unmeasured, 0, "{census:?}");
         assert_eq!(census.members_measured, 4, "{census:?}");
@@ -1385,7 +1467,7 @@ mod census_tests {
         let gap = census.within_gap[0].clearance_mm;
         assert!((gap - 0.15).abs() < 1e-6, "the near shaft stands {gap} mm off the wall");
         // No surface, no census: the census says it did not run.
-        let none = model_clearance_census(None, &struts, &arms, &layers, PLATE, GAP);
+        let none = model_clearance_census(None, &struts, &arms, &layers, PLATE, GAP, &nowhere);
         assert!(!none.ran && none.within_gap.is_empty());
     }
 }

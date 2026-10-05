@@ -370,6 +370,10 @@ pub struct SweepRunReport {
     /// Every member's drawn solid against the model on the finished field,
     /// arm shafts included (fix/morel-long-posts, 2026-10-02).
     pub member_model_clearance: MemberModelClearance,
+    /// The hidden-cavity map the final gap's exemption reads (Craig ruling
+    /// 2026-10-05; [`crate::cavity`]): what the flood found. Empty on a model
+    /// with no enclosed air.
+    pub hidden_cavity: crate::cavity::CavityCensus,
     /// **The resin the area law SIZED**, in mm³: `π r²` integrated along every
     /// arm's own axis, layer by layer, with a leaned layer measured along its
     /// slant rather than its rise.
@@ -445,6 +449,10 @@ pub struct MemberModelClearance {
     /// kernel could not decide (or no drawable shaft).
     pub members_measured: usize,
     pub members_unmeasured: usize,
+    /// Members left out because they stand in a hidden cavity, where the
+    /// final gap does not apply (Craig ruling 2026-10-05): not measured, not
+    /// counted, never re-routed. The path-hit witness of that ruling.
+    pub members_hidden: usize,
     /// Spans measured, and spans wholly inside their member's own zones.
     pub rows: usize,
     pub rows_in_own_zones: usize,
@@ -536,6 +544,9 @@ pub struct PathHits {
     /// to a cell covering the same demand. All zero means the test never ran.
     pub descent_solid_tested: u64,
     pub descent_solid_inside_preferred_margin: u64,
+    /// Of the straight descents tested, those wholly in a hidden cavity, where
+    /// the final gap is not asked (Craig, 2026-10-05).
+    pub descent_solid_in_hidden_cavity: u64,
     pub descent_solid_refused_at_final_gap: u64,
     pub descent_solid_cleared_by_lean: u64,
     pub descent_solid_at_final_gap_only: u64,
