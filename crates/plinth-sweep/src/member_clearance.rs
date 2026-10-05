@@ -365,8 +365,13 @@ impl ShaftRead<'_> {
     ///   by the kernel's clearance predicate ([`geom_kernel::SegmentClearanceClassified`]),
     ///   the one the finished-field census runs, on the same axis and zones; it
     ///   is refused only when that predicate reads it under the gap (or reads
-    ///   only a bound that does not clear it). Without a surface the raster's
-    ///   flag stands, with the longest zones.
+    ///   only a bound that does not clear it). Where the surface names no face
+    ///   for an end, that end's zone is zero ([`contact_zone_mm`]): its
+    ///   contact reads as inside the gap and the shaft is refused, never
+    ///   excused. Without a surface at all the raster's flag stands, with the
+    ///   longest zones: placement cannot refuse every seated shaft, and the
+    ///   finished-field census, which cannot run either, says so in a
+    ///   WARNING.
     pub(crate) fn intrusion(
         &self,
         seat: (usize, usize),
@@ -487,8 +492,16 @@ pub(crate) fn contact_faces(
 ///
 /// `n·m` is never taken below `1 / zone_factor`, the steepest the lean law
 /// admits, and the zone is never longer than `zone_factor · (r + gap)`, the
-/// longest; without a face (no surface, or the query named none) the zone is
-/// that longest one. A flat seat's zone is `gap + r`, not the longest.
+/// longest. A flat seat's zone is `gap + r`, not the longest.
+///
+/// **Without a face the zone is ZERO** (challenger round 5, 2026-10-05): no
+/// surface, or a query that named no face, says nothing about how long the
+/// zone is, and a zone is an exemption, so an unknown one exempts nothing.
+/// The retired read gave the longest zone there, which on a short member
+/// exempted the whole solid and so suppressed every read of it before the
+/// reader's own "nothing can be proved without a surface" refusal could run.
+/// A reader that gets zero here reads the contact itself as inside the gap;
+/// it must never take that as proof of an existing violation.
 pub(crate) fn contact_zone_mm(
     face: Option<ContactFace>,
     end: [f64; 3],
@@ -499,7 +512,7 @@ pub(crate) fn contact_zone_mm(
 ) -> f64 {
     let longest = zone_factor.max(1.0) * (radius + gap);
     let Some(face) = face else {
-        return longest;
+        return 0.0;
     };
     // The least `n·m` the lean law admits: a face steeper than that is read
     // as if it were exactly that steep (a longer zone is never given).

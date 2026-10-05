@@ -3907,6 +3907,16 @@ enum ThickenRefusal {
 ///   only where the predicate reads it under the gap (a measured value, or an
 ///   upper bound under the gap). Without a model surface nothing can be
 ///   proved, so a slot the raster flags committed refuses the plan.
+///
+/// Challenger round 5 (2026-10-05): **an unknown face exempts nothing.**
+/// Without a surface, or where the query names no face for an end, that
+/// end's zone is ZERO ([`crate::member_clearance::contact_zone_mm`]), so the
+/// raster reads the solid up to its contact and the flag reaches the refusal
+/// above. The retired read gave the longest zone there, which exempted a
+/// short trunk whole: nothing was flagged, and the plan was admitted before
+/// the no-surface refusal could run. A member with an unknown face is never
+/// proved inside the gap already either (its zero zone reads its own contact
+/// as inside the gap, which proves nothing about the plan).
 fn thickening_enters_the_gap(
     context: &SlendernessContext<'_>,
     state: &TieState,
@@ -3957,8 +3967,19 @@ fn thickening_enters_the_gap(
     // Every slot the raster flags committed: (top, bottom) on the raster's
     // frame, then the committed and the drawn frustum, each as
     // (radius at top, radius at bottom, inset at top, inset at bottom).
+    // A member whose seat face, or model landing face, is unknown: its zones
+    // there are zero, and nothing about it can be proved inside the gap.
+    let faces_known: Vec<bool> = members
+        .iter()
+        .enumerate()
+        .map(|(slot_of, member)| {
+            seat_faces[slot_of].is_some()
+                && (!matches!(struts[member.1].landing, Landing::Model { .. })
+                    || landing_faces[slot_of].is_some())
+        })
+        .collect();
     type Read = (f64, f64, f64, f64);
-    let mut flagged: Vec<([f64; 3], [f64; 3], Read, Read)> = Vec::new();
+    let mut flagged: Vec<([f64; 3], [f64; 3], Read, Read, bool)> = Vec::new();
     for (slot_of, &(position, index, upto, seat, base)) in members.iter().enumerate() {
         let strut = &struts[index];
         let top_layer = upto - 1;
@@ -4116,6 +4137,7 @@ fn thickening_enters_the_gap(
                     at(layer),
                     (wanted.0, wanted.1, wanted_top, wanted_bottom),
                     (current(layer + 1), current(layer), drawn_top, drawn_bottom),
+                    faces_known[slot_of],
                 ));
             }
         }
@@ -4163,13 +4185,16 @@ fn thickening_enters_the_gap(
             Some(geom_kernel::SegmentClearanceClassified::Measured { clearance_mm, .. })
                 if *clearance_mm >= gap - THICKEN_CLEARANCE_SLACK_MM
         );
-        let drawn_inside_already = matches!(
-            verdicts.get(rows + row),
-            Some(
-                geom_kernel::SegmentClearanceClassified::Measured { clearance_mm, .. }
-                    | geom_kernel::SegmentClearanceClassified::UpperBound { clearance_mm, .. }
-            ) if *clearance_mm < gap - THICKEN_CLEARANCE_SLACK_MM
-        );
+        // An unknown face's zero zone reads the contact itself as inside the
+        // gap: that proves nothing, so such a member is never excused.
+        let drawn_inside_already = flagged[row].4
+            && matches!(
+                verdicts.get(rows + row),
+                Some(
+                    geom_kernel::SegmentClearanceClassified::Measured { clearance_mm, .. }
+                        | geom_kernel::SegmentClearanceClassified::UpperBound { clearance_mm, .. }
+                ) if *clearance_mm < gap - THICKEN_CLEARANCE_SLACK_MM
+            );
         reads.measured_clear += usize::from(committed_clears);
         reads.inside_already += usize::from(!committed_clears && drawn_inside_already);
         enters |= !committed_clears && !drawn_inside_already;
@@ -8307,6 +8332,17 @@ mod tests {
     /// retired zone, `zone_factor · (r + gap)` = 0.84 mm, covers the whole
     /// 0.6 mm trunk, so that read exempted all of it (the raster finds
     /// nothing outside it). CONTROL: the wall 0.85 mm away is not entered.
+    ///
+    /// **WITHOUT A SURFACE** (challenger round 5, 2026-10-05): the same slab,
+    /// wall, raster and plan with `model_surface: None` (production reaches
+    /// this when `head_join::build_surface` passes its memory cap or fails).
+    /// Red before the fix: no face meant the longest zone, the trunk was
+    /// exempt whole, nothing was flagged, and the raise was ADMITTED before
+    /// the no-surface refusal could run. Green: an unknown face exempts
+    /// nothing, so the raster flags the raised trunk and the refusal runs
+    /// (path hit: flagged slots). Without a surface nothing is provable, so
+    /// the 0.85 mm wall's raise is refused too (the trunk's own seat contact
+    /// is flagged): conservative, and counted as a refusal.
     #[test]
     fn a_short_trunk_raised_with_a_branch_is_read_below_its_flat_seats_own_zone() {
         let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
@@ -8334,14 +8370,14 @@ mod tests {
             admitted_on_drawn_feet: false,
             added_mm3: 0.0,
         };
-        let enters = |wall_from: f64| {
+        let enters_with = |wall_from: f64, with_surface: bool| {
             let wall = ([cx + wall_from, cy - 0.5, 0.0], [cx + wall_from + 0.5, cy + 0.5, 0.2]);
             let mut history = crate::up_sweep::ColumnHistory::new(&grid);
             cure_box(&grid, &mut history, slab.0, slab.1);
             cure_box(&grid, &mut history, wall.0, wall.1);
             let surface = crate::member_clearance::boxes_surface(&[slab, wall]);
             let context = super::SlendernessContext {
-                model_surface: Some(&surface),
+                model_surface: with_surface.then_some(&surface),
                 plate_z_mm: 0.0,
                 ..prune_context(&grid, &history, &keep_out, &lean, &law)
             };
@@ -8355,7 +8391,12 @@ mod tests {
             let retired = crate::member_clearance::inset_segment_intrusion(
                 &grid, &history, 0.05, seat, base, retired_zone, 0.0, (0.15, 0.15), 0.3,
             );
-            (super::thickening_enters_the_gap(&context, &state, &struts, &plan), retired, retired_zone)
+            let refused = super::thickening_enters_the_gap(&context, &state, &struts, &plan);
+            (refused, retired, retired_zone, state.thicken_reads.get())
+        };
+        let enters = |wall_from: f64| {
+            let (refused, retired, retired_zone, _) = enters_with(wall_from, true);
+            (refused, retired, retired_zone)
         };
         let (refused, retired, retired_zone) = enters(0.4);
         assert!(retired_zone >= 0.6, "anti-vacuity: the retired zone covers the trunk: {retired_zone}");
@@ -8363,6 +8404,35 @@ mod tests {
         assert!(refused, "the raised trunk enters the gap beside its foot, below its seat's own zone");
         let (refused, _, _) = enters(0.85);
         assert!(!refused, "control: a wall 0.85 mm away is not entered");
+        // No surface: no face is known, and an unknown face exempts nothing.
+        let (refused, retired, _, reads) = enters_with(0.4, false);
+        assert!(
+            retired.is_none(),
+            "SABOTAGE: the retired no-face zone (the longest) left nothing for the raster to flag"
+        );
+        assert!(
+            refused,
+            "without a surface the raise beside the 0.4 mm wall is refused ({reads:?})"
+        );
+        assert!(reads.flagged > 0, "path hit: the raised trunk is flagged without a surface: {reads:?}");
+        assert!(
+            reads.measured_clear == 0 && reads.inside_already == 0,
+            "nothing is measured or proved without a surface: {reads:?}"
+        );
+        let (refused, _, _, reads) = enters_with(0.85, false);
+        assert!(
+            refused && reads.flagged > 0,
+            "without a surface nothing is provable: the flagged raise is refused ({reads:?})"
+        );
+        let unknown = crate::member_clearance::contact_zone_mm(
+            None,
+            [cx, cy, 0.6],
+            [0.0, 0.0, -1.0],
+            0.15,
+            0.3,
+            lean.face_zone_factor(),
+        );
+        assert!(unknown.abs() < 1.0e-12, "an unknown face's zone is zero: {unknown}");
     }
 
     /// **"INSIDE THE GAP ALREADY" IS PROVED ON THE SURFACE, NOT FLAGGED BY
