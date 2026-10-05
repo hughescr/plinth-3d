@@ -785,6 +785,15 @@ pub struct SweepPolicy {
     /// it off, which puts back the centreline-only descent, and watches posts
     /// enter the model again; nothing in the pipeline turns it off.
     pub drawn_solid_descent: bool,
+    /// Whether, after the field's final sizing and its ties, every arm the
+    /// census names within the final gap of the model is RE-ROUTED at its
+    /// sized radius, and the field re-sized (fix/drawn-solid-clearance,
+    /// 2026-10-04, R2.2 of `clearance-census-diagnosis.md`;
+    /// [`LipSeatRun::run`] with `RunMode::Clearance`). The arms the lip-seat
+    /// rule re-landed are left to its own gate (Craig's 2026-10-04 ruling).
+    /// **On in production.** The drill turns it off, which puts back the
+    /// field the sizing left, and watches grown posts keep their intrusions.
+    pub clearance_reroute: bool,
     /// Whether every member is sized for its worst SINGLE peel event, routed on
     /// its own ([`per_event`], rule a′, owner-approved 2026-09-29), and the
     /// load insertion triggered by one event's routed load. **On in
@@ -906,6 +915,7 @@ impl SweepPolicy {
                 .get(),
             member_clearance: true,
             drawn_solid_descent: true,
+            clearance_reroute: true,
             per_event_sizing: true,
             unrooted_routing: true,
             handed_column_ledger: true,
@@ -1289,6 +1299,16 @@ impl SweepPolicy {
         self
     }
 
+    /// Leave every arm where the final sizing found it, whatever the census
+    /// says of its clearance (the field this engine finished before
+    /// fix/drawn-solid-clearance R2.2). **Sabotage and comparison only**, and
+    /// the orientation prefilter, which runs no finishing passes.
+    #[must_use]
+    pub const fn without_clearance_reroute(mut self) -> Self {
+        self.clearance_reroute = false;
+        self
+    }
+
     /// Measure the plate's congestion but change nothing — the field this
     /// engine placed before 2026-09-06. **Sabotage and comparison only**: it is
     /// what the "the lane is a no-op on a disc" byte-identity check is taken
@@ -1473,13 +1493,35 @@ pub fn run_sweep_with_drains(
     let mut rasteriser_entries = 0_u64;
     // What every descent reads to test its own drawn solid against the model
     // (fix/drawn-solid-clearance): Craig's two tiers and the radius bound.
+    //
+    // The model's surface index, shared with the head-join, lip-seat and
+    // census rules that read it later from the same cell. It is built here,
+    // before any arm stands, only when the descent test runs: the test
+    // confirms what the raster flags against the surface and takes each
+    // contact zone from the face's own normal.
+    let model_surface: std::cell::OnceCell<Option<geom_kernel::NativeSurface>> =
+        std::cell::OnceCell::new();
+    if policy.drawn_solid_descent {
+        model_surface.get_or_init(|| {
+            head_join::build_surface(
+                mesh,
+                policy.surface_index_pitch_mm,
+                policy.surface_index_max_bytes,
+            )
+        });
+    }
     let descent_clearance = policy.drawn_solid_descent.then(|| up_sweep::DescentClearance {
         layer_height_mm: height,
+        plate_z_mm: plate_z,
         preferred_gap_mm: policy.standoff_mm,
         final_gap_mm: policy.final_clearance_gap_mm,
         tip_radius_min_mm: policy.tip_radius_min_mm,
         x_allowed: policy.x_allowed,
         zone_factor: law.face_zone_factor(),
+        surface: model_surface
+            .get()
+            .and_then(Option::as_ref)
+            .map(up_sweep::SurfaceRef),
     });
     let mut descent_tally = up_sweep::DescentTally::default();
     // The mesh's own surface, banded layer by layer, for the overhang weight a
@@ -2162,7 +2204,7 @@ pub fn run_sweep_with_drains(
         standoff_mm: policy.standoff_mm,
         surface_pitch_mm: policy.surface_index_pitch_mm,
         surface_max_bytes: policy.surface_index_max_bytes,
-        surface: std::cell::OnceCell::new(),
+        surface: &model_surface,
     };
     let mut lip_seat_outcome = lip_seat::LipSeatOutcome {
         enabled: policy.lip_seat,
@@ -2189,6 +2231,7 @@ pub fn run_sweep_with_drains(
         &mut struts,
         &mut lip_seat_outcome,
         true,
+        RunMode::SeatBite,
         &outcome,
         &mut lip_seat_refused,
     ) {
@@ -2256,6 +2299,7 @@ pub fn run_sweep_with_drains(
             &mut struts,
             &mut lip_seat_outcome,
             false,
+            RunMode::SeatBite,
             &outcome,
             &mut lip_seat_refused,
         ) {
@@ -2370,6 +2414,51 @@ pub fn run_sweep_with_drains(
         "slenderness ties",
         stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
     ));
+    // --- THE CLEARANCE RE-ROUTE (fix/drawn-solid-clearance, R2.2) ---------
+    //
+    // Every later growth in an arm's radius (the area-law sizing, the
+    // thickening rung) changes the solid the file draws, and the up-sweep
+    // placed the arm at a LOWER BOUND of that radius. So after the final
+    // sizing and the ties, on the field the lowering will draw, the census
+    // names each arm whose drawn solid stands within the final gap of the
+    // model, and each is re-landed at its sized radius by the lip-seat
+    // rule's own machinery (price the descents, path-test them, measure the
+    // moved member's solid against the model with the final gap asked
+    // OUTRIGHT, size the field, let the sized field put a move back that
+    // overloaded a host or lapped a root), to a fixed point bounded by the
+    // registered pass count. An arm no candidate clears stays where it
+    // stood, and the census warns on it (emit and warn). The arms the
+    // lip-seat rule itself re-landed are left alone: Craig's ruling of
+    // 2026-10-04 keeps that rule's gate ("no nearer than it stood"), so what
+    // it admitted stays a WARNING.
+    let mut clearance_reroute_outcome = lip_seat::LipSeatOutcome {
+        enabled: policy.clearance_reroute,
+        ..lip_seat::LipSeatOutcome::default()
+    };
+    if policy.clearance_reroute {
+        let reroute = LipSeatRun {
+            enabled: true,
+            ..lip_seat_run
+        };
+        let mut refused: Vec<(u32, usize)> = Vec::new();
+        if let Some(sized) = reroute.run(
+            &head_join_context,
+            &mut struts,
+            &mut clearance_reroute_outcome,
+            false,
+            RunMode::Clearance {
+                exclude: &lip_seat_outcome.relanded_ids,
+            },
+            &outcome,
+            &mut refused,
+        ) {
+            outcome = sized;
+        }
+        landings.record(
+            "clearance re-route",
+            &landing_check::check_landings(&struts),
+        );
+    }
     // The finished field's own check, and the load it lost if any landing is
     // broken: the down-sweep hands a child's load to its named parent at the
     // landing layer, and a parent that does not stand there never picks it
@@ -2683,6 +2772,7 @@ pub fn run_sweep_with_drains(
         lip_seat_outcome.over_limit_after = over;
     }
     sweep_plan.report.lip_seat = lip_seat_outcome;
+    sweep_plan.report.clearance_reroute = clearance_reroute_outcome;
     // EVERY MEMBER'S DRAWN SOLID AGAINST THE MODEL (fix/morel-long-posts,
     // 2026-10-02), arm shafts included, on the arms exactly as they go to the
     // lowering. Published and warned on, never refused.
@@ -2954,6 +3044,18 @@ struct LipSeatRun<'a> {
     across_passes: bool,
 }
 
+/// What a [`LipSeatRun`] is sent by.
+#[derive(Clone, Copy)]
+enum RunMode<'a> {
+    /// The seat trim cuts the arm's shaft (the lip-seat rule).
+    SeatBite,
+    /// **The clearance re-route** (fix/drawn-solid-clearance, R2.2): the
+    /// census names the arm's drawn solid, as the SIZED field draws it, within
+    /// the final gap of the model. `exclude` are the arms the lip-seat rule
+    /// re-landed, which Craig's 2026-10-04 ruling leaves to its own gate.
+    Clearance { exclude: &'a [u32] },
+}
+
 impl LipSeatRun<'_> {
     /// Survey, re-land, re-size, settle, to a fixed point bounded by the
     /// registered pass count. `first` records the survey's numbers as the
@@ -2986,12 +3088,17 @@ impl LipSeatRun<'_> {
     /// that is reached the run is withdrawn whole and the field left as
     /// `origin` (a WARNING, `LipSeatOutcome::runs_withdrawn`): the rule never
     /// leaves a host over its limit that its own moves fed. No constant.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the field, what sends an arm, the sized outcome it starts from and the refusals it keeps"
+    )]
     fn run(
         &self,
         joins: &head_join::HeadJoinContext<'_>,
         struts: &mut Vec<SweepStrut>,
         outcome: &mut lip_seat::LipSeatOutcome,
         first: bool,
+        mode: RunMode<'_>,
         current: &down_sweep::DownSweepOutcome,
         refused: &mut Vec<(u32, usize)>,
     ) -> Option<down_sweep::DownSweepOutcome> {
@@ -3013,9 +3120,33 @@ impl LipSeatRun<'_> {
             for pass in 0..self.passes {
                 let (arms, bites) =
                     lip_seat::survey(self.mesh, context, self.plan, self.plate_z, struts);
-                if first && pass == 0 && reruns == 0 {
-                    lip_seat::record_before(outcome, &bites);
-                }
+                // What sends an arm: the seat trim's bite (the lip-seat rule),
+                // or the finished-field census naming its drawn solid within
+                // the final gap (the clearance re-route).
+                let violators: Vec<bool>;
+                let trigger = match mode {
+                    RunMode::SeatBite => {
+                        if first && pass == 0 && reruns == 0 {
+                            lip_seat::record_before(outcome, &bites);
+                        }
+                        lip_seat::Trigger::SeatBite
+                    }
+                    RunMode::Clearance { exclude } => {
+                        let named;
+                        (violators, named) =
+                            lip_seat::clearance_violators(joins, struts, &arms, exclude);
+                        if pass == 0 && reruns == 0 {
+                            outcome.clearance_violators_first = named;
+                        }
+                        outcome.clearance_violators_last = named;
+                        if named == 0 {
+                            break;
+                        }
+                        lip_seat::Trigger::Clearance {
+                            violators: &violators,
+                        }
+                    }
+                };
                 let Some(origin) = origin.as_ref() else {
                     break;
                 };
@@ -3034,6 +3165,7 @@ impl LipSeatRun<'_> {
                     struts,
                     &arms,
                     &bites,
+                    trigger,
                     refused,
                     outcome,
                 );
@@ -3791,6 +3923,7 @@ fn build_report(
         per_event: outcome.per_event.clone(),
         rigid_share: crate::rigid_share::RigidShareReport::default(),
         lip_seat: crate::lip_seat::LipSeatOutcome::default(),
+        clearance_reroute: crate::lip_seat::LipSeatOutcome::default(),
         member_model_clearance: report::MemberModelClearance::default(),
         junctions_at_parent_top,
         junctions_mid_shaft,

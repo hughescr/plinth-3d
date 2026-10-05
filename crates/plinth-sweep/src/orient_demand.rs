@@ -292,7 +292,10 @@ impl DemandSettings {
         // arms they cost, which this rule must not change. The production
         // measurement of the finalists, at the registered pitch, reads it.
         let policy = match fidelity {
-            DemandFidelity::Prefilter => policy.without_slenderness_ties().without_drawn_solid_descent(),
+            DemandFidelity::Prefilter => policy
+                .without_slenderness_ties()
+                .without_drawn_solid_descent()
+                .without_clearance_reroute(),
             DemandFidelity::Production => policy,
         };
         Ok(Self {

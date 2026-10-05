@@ -120,7 +120,14 @@ fn production() -> SweepPolicy {
         SweepPolicy::from_registry()
             .expect("the registry supplies every sweep number")
             .without_lip_seat()
-            .without_drawn_solid_descent(),
+            .without_drawn_solid_descent()
+            // The clearance re-route (R2.2) moves arms after the final sizing
+            // where the census names them inside the gap; on these flipped
+            // fixtures it re-lands the leaned heads the tests below grade
+            // (measured: 16 of 16 moves at a head and none under one, no head
+            // already clear). The head-join rule reads no clearance, so the
+            // fixture keeps the field the sizing leaves.
+            .without_clearance_reroute(),
     )
 }
 

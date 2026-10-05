@@ -119,11 +119,14 @@ fn the_shaft_below_a_head_junction_carries_the_sum() {
         // centreline-only descent the fixture was measured on. With the
         // drawn-solid descent the flipped Round 25 has 0 heads with landers
         // (measured), so the test would grade nothing; the contact-sizing
-        // rule reads no descent clearance.
+        // rule reads no descent clearance. The clearance re-route (R2.2) is off
+        // too: it re-lands the leaned arms this fixture grades after the final
+        // sizing (measured: still 0 heads with landers with it on).
         &crate::harness::at_path_fixture_seating(
             plinth_sweep::SweepPolicy::from_registry()
                 .expect("the registry")
-                .without_drawn_solid_descent(),
+                .without_drawn_solid_descent()
+                .without_clearance_reroute(),
         ),
     );
     let heads = head_junctions(&plan);

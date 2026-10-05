@@ -251,6 +251,7 @@ fn no_member_enters_the_overhang_table() {
         counters.descent_solid_lean_candidates_refused,
         counters.descent_solid_seats_moved
     );
+    println!("clearance re-route: {:?}", plan.report.clearance_reroute);
     for near in &census.within_gap {
         println!(
             "within the gap: member {} {:?} at {:.4} mm",
@@ -275,7 +276,13 @@ fn no_member_enters_the_overhang_table() {
 #[test]
 fn sabotage_without_the_drawn_solid_descent_a_member_enters_the_overhang_table() {
     let mesh = plinth_mesh::make_overhang_table().expect("the overhang table");
-    let plan = sweep_with(&mesh, 0.0, &policy().without_drawn_solid_descent());
+    // The re-route is off too: after the final sizing it would move a member
+    // the retired descent put inside the leg, which is its job (the test above).
+    let plan = sweep_with(
+        &mesh,
+        0.0,
+        &policy().without_drawn_solid_descent().without_clearance_reroute(),
+    );
     let census = &plan.report.member_model_clearance;
     assert!(census.ran, "{census:?}");
     assert_eq!(
@@ -329,4 +336,64 @@ fn a_lander_never_joins_inside_its_hosts_contact() {
         .filter(|near| matches!(near.landing, Landing::Strut { .. }) && near.clearance_mm < 0.0)
         .collect();
     assert!(inside.is_empty(), "landers whose solid is inside the model: {inside:?}");
+}
+
+/// **A post the sizing grew into the gap is re-routed** (R2.2 of
+/// `clearance-census-diagnosis.md`, fix/drawn-solid-clearance, 2026-10-04).
+/// The overhang table's post 26 is placed clear at the radius the up-sweep can
+/// bound (0.05 mm), then the area law sizes it for the 55.6 mm² of four members
+/// that land on it (r = 0.99 mm), and its drawn solid stands 0.228 mm from the
+/// corner of a leg (the final gap is 0.3 mm). It carries three branches, one of
+/// which carries two more: the re-route moves the whole subtree.
+///
+/// After the re-route the census names only what the lip-seat rule itself
+/// re-landed (Craig's 2026-10-04 ruling keeps that rule's gate "no nearer than
+/// it stood", so branch 79 stays a warning), and the counters witness that the
+/// pass ran, named the post, moved it with the arms that rest on it, and asked
+/// the moved solid for the final gap outright.
+///
+/// RED before the pass existed: member 26 named at 0.2279 mm.
+#[test]
+fn a_post_grown_into_the_gap_by_the_sizing_is_re_routed_on_the_overhang_table() {
+    let mesh = plinth_mesh::make_overhang_table().expect("the overhang table");
+    let plan = sweep_with(&mesh, 0.0, &policy());
+    let census = &plan.report.member_model_clearance;
+    assert!(census.ran, "{census:?}");
+    let reroute = &plan.report.clearance_reroute;
+    // Path hits: the pass ran, named a post, moved it with its subtree, and
+    // refused candidates by the clearance of the moved solid.
+    assert!(reroute.enabled, "{reroute:?}");
+    assert!(reroute.clearance_violators_first > 0, "no arm was named: {reroute:?}");
+    assert!(reroute.arms_relanded > 0, "no arm was moved: {reroute:?}");
+    assert!(reroute.children_moved_with_host > 0, "no subtree followed: {reroute:?}");
+    assert!(reroute.candidates_refused_clearance > 0, "no candidate was refused for its solid: {reroute:?}");
+    assert_eq!(reroute.clearance_violators_last, 0, "{reroute:?}");
+    let ruled = &plan.report.lip_seat.relanded_ids;
+    let unruled: Vec<_> = census
+        .within_gap
+        .iter()
+        .filter(|near| !ruled.contains(&near.member))
+        .collect();
+    assert!(
+        unruled.is_empty(),
+        "members within the final gap that the lip-seat rule did not move: {unruled:?}"
+    );
+}
+
+/// THE SABOTAGE of the test above: without the re-route the same table keeps
+/// post 26 inside the gap, and the pass reports it never ran.
+#[test]
+fn sabotage_without_the_clearance_reroute_the_post_stays_inside_the_gap() {
+    let mesh = plinth_mesh::make_overhang_table().expect("the overhang table");
+    let plan = sweep_with(&mesh, 0.0, &policy().without_clearance_reroute());
+    let census = &plan.report.member_model_clearance;
+    assert!(census.ran, "{census:?}");
+    let reroute = &plan.report.clearance_reroute;
+    assert!(!reroute.enabled && reroute.arms_relanded == 0, "{reroute:?}");
+    let ruled = &plan.report.lip_seat.relanded_ids;
+    assert!(
+        census.within_gap.iter().any(|near| !ruled.contains(&near.member)),
+        "the sizing grows post 26 into the gap, and nothing moves it: {:?}",
+        census.within_gap
+    );
 }

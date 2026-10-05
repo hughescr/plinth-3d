@@ -2871,6 +2871,37 @@ fn print_sweep_disclosure(
             hits.descent_solid_seats_moved,
             report.slenderness_lane.thicken_refused_model,
         );
+        // THE CLEARANCE RE-ROUTE (fix/drawn-solid-clearance R2.2): path-hit
+        // witnesses that the census named arms after the final sizing and the
+        // lip-seat machinery moved them.
+        let reroute = &report.clearance_reroute;
+        println!(
+            "[sweep {model}] clearance re-route after the final sizing ({}): {} arms within the \
+             final gap on the first pass (the lip-seat rule's own re-landings left alone), {} on \
+             the last; {} passes; {} candidates priced, {} refused by the path test, {} by the \
+             plate rule, {} by the clearance of the moved solid, {} by the roots, {} by the \
+             lowering's measurement; {} arms re-landed ({} on the model, {} children moved with \
+             them); {} kept carrying, {} with no candidate; {} sized checks; {} moves put back \
+             for a host's load, {} for roots",
+            if reroute.enabled { "on" } else { "off" },
+            reroute.clearance_violators_first,
+            reroute.clearance_violators_last,
+            reroute.passes,
+            reroute.candidates_priced,
+            reroute.candidates_refused_path,
+            reroute.candidates_refused_plate,
+            reroute.candidates_refused_clearance,
+            reroute.candidates_refused_roots,
+            reroute.candidates_refused_measured,
+            reroute.arms_relanded,
+            reroute.relanded_on_model,
+            reroute.children_moved_with_host,
+            reroute.kept_carrying,
+            reroute.kept_no_candidate,
+            reroute.sizing_checks,
+            reroute.moves_put_back_host_load,
+            reroute.moves_put_back_roots,
+        );
         // EVERY MEMBER'S DRAWN SOLID AGAINST THE MODEL (fix/morel-long-posts,
         // 2026-10-02): arm shafts included.
         let clearance = &report.member_model_clearance;

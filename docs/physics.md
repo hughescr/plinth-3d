@@ -213,14 +213,30 @@ at the final gap's own zones (a short descent can lie wholly inside its zones at
 have a testable stretch at 0.3 mm). Where no descent clears the final gap, the
 seat may move only to a cell whose reach disc covers the SAME demand
 (`up_sweep::reseat_cells`); where none does, the seat is kept and the census names it (emit and
-warn). The seat-zone exemption is `1 / cos(steepest lean)` times `(radius + gap)` along the axis
-(`LeanLaw::face_zone_factor`), never shorter than the real zone against any face the lean law
-admits. A thickening that would raise a member, or a trunk raised with it, into the final gap
+warn). Each shaft is excused only its OWN contact zones: the seat zone is where the capsule first
+stands `gap` clear of the seat face's plane, `(gap + r − h) / (n·m)` along the axis (`n` that
+face's outward normal, `m` the axis from the seat to the base, `h` the seat's height over the
+plane), and a model landing's zone is the same at its landing face; neither is taken longer
+than the longest the lean law admits (`LeanLaw::face_zone_factor`, `n·m` never below
+`cos(steepest lean)`). A flat seat's zone is `gap + r`, not `1.86 (gap + r)`, so a short branch
+under a flat seat is tested below it. The raster only flags (its reach carries half a cell's
+diagonal); a flagged shaft is confirmed by the kernel's clearance predicate, the census's own,
+on the same axis and zones, and refused only when that reads it under the gap. A thickening that would raise a member, or a trunk raised with it, into the final gap
 where it stands clear now is refused (`ThickenRefusal::Model`) and the run takes the next rung;
 the comparison is made slot by slot, the profile the plan commits against the profile drawn
 there now, each read as the frustum it is (its clearance is the least over the axis of distance
 minus radius), so a wider section or an existing violation elsewhere excuses nothing.
 The lip-seat gate is unchanged: a member may land "no nearer than it stood".
+
+**The clearance re-route after the final sizing.** The up-sweep places an arm at a lower bound
+of the radius it is later drawn at (the area law and the thickening grow it), so after the final
+sizing and the ties the census names every arm whose drawn solid stands within the final gap
+of the model. Each is re-landed at its sized radius with the lip-seat rule's machinery (priced
+descents, path test, the lowering's measurement, the sized-field put-back for a host's load or a
+lapped root), to a fixed point bounded by the registered pass count, with one difference: the
+mover must clear the final gap outright, since it was sent for the gap. The arms the lip-seat
+rule itself re-landed are left to that rule's gate (they stay warnings); an arm no candidate
+clears stays and is named by the census (emit and warn).
 
 ## 6. The seat's own contact zone — the honest exemption
 

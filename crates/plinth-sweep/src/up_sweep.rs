@@ -638,8 +638,10 @@ impl DescentTally {
 /// (fix/drawn-solid-clearance, 2026-10-04): Craig's two-tier clearance
 /// (2026-08-22) and the lower bound on the radius the arm will be drawn at.
 #[derive(Clone, Copy, Debug)]
-pub struct DescentClearance {
+pub struct DescentClearance<'a> {
     pub layer_height_mm: f64,
+    /// The plate's z in the mesh's frame (the raster's frame has it at 0).
+    pub plate_z_mm: f64,
     /// `STANDOFF_MM`, the preferred placement margin.
     pub preferred_gap_mm: f64,
     /// `FINAL_CLEARANCE_GAP_MM`, the hard limit a placement may still use.
@@ -648,11 +650,43 @@ pub struct DescentClearance {
     pub tip_radius_min_mm: f64,
     /// `X_ALLOWED`: the area law's ratio of carried area to arm section.
     pub x_allowed: f64,
-    /// [`crate::lean::LeanLaw::face_zone_factor`]: the zone exemption.
+    /// [`crate::lean::LeanLaw::face_zone_factor`]: the longest zone a shaft
+    /// is exempt for (used whole only where `surface` is absent).
     pub zone_factor: f64,
+    /// The model's surface index: names each contact zone's face and gives
+    /// the census's own verdict on what the raster flags
+    /// ([`crate::member_clearance::ShaftRead::intrusion`]). `None` where it
+    /// could not be built.
+    pub surface: Option<SurfaceRef<'a>>,
 }
 
-impl DescentClearance {
+/// A borrowed model surface, `Debug` without printing the index.
+#[derive(Clone, Copy)]
+pub struct SurfaceRef<'a>(pub &'a geom_kernel::NativeSurface);
+
+impl core::fmt::Debug for SurfaceRef<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("SurfaceRef(..)")
+    }
+}
+
+impl DescentClearance<'_> {
+    /// The shaft reader of this clearance on `history`.
+    pub(crate) fn read<'h>(
+        &'h self,
+        grid: &'h Grid,
+        history: &'h ColumnHistory,
+    ) -> crate::member_clearance::ShaftRead<'h> {
+        crate::member_clearance::ShaftRead {
+            grid,
+            history,
+            layer_height_mm: self.layer_height_mm,
+            plate_z_mm: self.plate_z_mm,
+            surface: self.surface.map(|surface| surface.0),
+            zone_factor: self.zone_factor,
+        }
+    }
+
     /// A LOWER bound on the radius an arm that covers `area_mm2` of demand
     /// is drawn at: the larger of the minimum tip radius and the area-law
     /// radius `√(area / (X · π))` of what it covers. Later landers only add
@@ -755,7 +789,7 @@ pub fn place_layer_cleared(
     scratch: &mut GreedyScratch,
     struts: &mut Vec<SweepStrut>,
     max_struts: usize,
-    clearance: Option<&DescentClearance>,
+    clearance: Option<&DescentClearance<'_>>,
 ) -> LayerOutcome {
     let mut outcome = LayerOutcome::empty();
 
@@ -940,7 +974,7 @@ struct Seating<'a> {
     kappa: f64,
     separation_mm: f64,
     max_struts: usize,
-    clearance: Option<&'a DescentClearance>,
+    clearance: Option<&'a DescentClearance<'a>>,
 }
 
 /// Whether a covering is being measured or seated.
@@ -1546,18 +1580,17 @@ fn commit_seat(
             // covering is only measured for a cell whose straight descent
             // clears the final gap.
             let (landing_there, bottom_there, _) = descend(history, candidate, layer);
-            if crate::member_clearance::shaft_model_intrusion(
-                grid,
-                history,
-                clear.layer_height_mm,
-                (candidate, layer),
-                (candidate, bottom_there),
-                matches!(landing_there, Landing::Model { .. }),
-                lower_bound,
-                clear.final_gap_mm,
-                clear.zone_factor,
-            )
-            .is_some()
+            let read = clear.read(grid, history);
+            if read
+                .intrusion(
+                    (candidate, layer),
+                    read.seat_face((candidate, layer)),
+                    (candidate, bottom_there),
+                    matches!(landing_there, Landing::Model { .. }),
+                    lower_bound,
+                    clear.final_gap_mm,
+                )
+                .is_some()
             {
                 continue;
             }
@@ -2253,7 +2286,7 @@ fn descend_cleared(
     layer: usize,
     scratch: &mut Vec<LeanCandidate>,
     outcome: &mut LayerOutcome,
-    clearance: Option<&DescentClearance>,
+    clearance: Option<&DescentClearance<'_>>,
     radius_lb_mm: f64,
 ) -> Descent {
     let (straight_landing, straight_bottom, straight_rooted) = descend(history, cell, layer);
@@ -2273,22 +2306,26 @@ fn descend_cleared(
     // zones at the 0.6 mm preferred tier and still have a testable stretch at
     // the 0.3 mm final one. A stricter tier therefore passes only a descent
     // that also clears the final gap at the final gap's own zones.
-    let blocked = |clear: &DescentClearance,
+    //
+    // **THE ZONES ARE THE SEAT'S AND THE LANDING'S OWN** (challenger round 3):
+    // the face this seat stands against is named once (one nearest-point
+    // query), and each candidate's landing face once per candidate that the
+    // raster reads ([`crate::member_clearance::ShaftRead::intrusion`]).
+    let seat_face = clearance.and_then(|clear| clear.read(grid, history).seat_face((cell, layer)));
+    let blocked = |clear: &DescentClearance<'_>,
                    gap_mm: f64,
                    base_cell: usize,
                    k_bottom: usize,
                    landing: Landing| {
+        let read = clear.read(grid, history);
         let enters = |tier_mm: f64| {
-            crate::member_clearance::shaft_model_intrusion(
-                grid,
-                history,
-                clear.layer_height_mm,
+            read.intrusion(
                 (cell, layer),
+                seat_face,
                 (base_cell, k_bottom),
                 matches!(landing, Landing::Model { .. }),
                 radius_lb_mm,
                 tier_mm,
-                clear.zone_factor,
             )
             .is_some()
         };
@@ -3268,14 +3305,18 @@ mod descent_tests {
         }
     }
 
-    fn two_tier(law: &LeanLaw) -> DescentClearance {
+    /// The two tiers with no surface: the raster's own flag stands, with the
+    /// longest zones (the degraded form; the surface tests are below).
+    fn two_tier(law: &LeanLaw) -> DescentClearance<'static> {
         DescentClearance {
             layer_height_mm: H,
+            plate_z_mm: 0.0,
             preferred_gap_mm: 0.6,
             final_gap_mm: 0.3,
             tip_radius_min_mm: 0.05,
             x_allowed: 18.0,
             zone_factor: law.face_zone_factor(),
+            surface: None,
         }
     }
 
@@ -3484,5 +3525,147 @@ mod descent_tests {
         assert_eq!(counts.solid.inside_preferred_margin, 1, "path hit: the wall is inside the margin");
         assert_eq!(counts.solid.refused_at_final_gap, 0);
         assert_eq!(after.clears, super::Clears::FinalOnly);
+    }
+
+    /// **A SHAFT IS EXEMPT FOR ITS OWN CONTACT ZONE, NOT FOR THE LONGEST ONE**
+    /// (challenger round 3, 2026-10-04). A 0.6 mm branch of radius 0.05 mm
+    /// under a flat seat (the underside of a slab at z = 2): the flat seat's
+    /// zone is `(0.3 + 0.05) / 1 = 0.35 mm`, but the lean law's longest zone
+    /// is `1.86 * 0.35 = 0.651 mm`, which exempted the branch whole, so a
+    /// foreign wall 0.25 mm from its axis beside its lowest 0.2 mm (clearance
+    /// 0.2 mm) was never tested.
+    ///
+    /// SABOTAGE INSIDE: the retired read (`shaft_model_intrusion`, the longest
+    /// zone for every shaft) accepts it. CONTROLS: a wall 0.8 mm away clears;
+    /// a thin lip that stands only inside the seat's own zone (0.05 mm under
+    /// the slab) is still excused.
+    #[test]
+    fn a_short_branch_under_a_flat_seat_is_tested_below_the_flat_seats_own_zone() {
+        let grid = plan_grid(-2.0, -2.0, 2.0, 2.0, 400, H, 0.0, 1_000_000_000).0;
+        let law = LeanLaw::new(H, 45.0, 25.0);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the cell under the origin of a small test grid"
+        )]
+        let seat = grid.index(grid.row_coord(0.0) as usize, grid.col_coord(0.0) as usize);
+        // The raster of a wall `wall.0..wall.1` in x, 1 mm across in y, from
+        // z `z.0` to `z.1`.
+        let at = |wall: (f64, f64), z: (f64, f64)| -> ColumnHistory {
+            let mut history = ColumnHistory::new(&grid);
+            let cells: Vec<usize> = (0..grid.cells())
+                .filter(|&cell| {
+                    let (x, y) = (
+                        grid.center_x_mm(grid.col_of(cell)),
+                        grid.center_y_mm(grid.row_of(cell)),
+                    );
+                    x >= wall.0 && x <= wall.1 && y.abs() <= 0.5
+                })
+                .collect();
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a height over the layer height, in whole layers of a small test frame"
+            )]
+            let (k0, k1) = ((z.0 / H).round() as usize, (z.1 / H).round() as usize - 1);
+            cure_wall(&mut history, &grid, &cells, k0, k1);
+            history
+        };
+        let (k_seat, k_base) = (40_usize, 28_usize); // z = 2.0 and 1.4: a 0.6 mm branch
+        let radius = 0.05;
+        // The slab (whose underside is the seat) and the wall are two bodies
+        // in one surface; the raster knows the wall.
+        fn read_of<'a>(
+            grid: &'a crate::grid::Grid,
+            history: &'a ColumnHistory,
+            surface: &'a geom_kernel::NativeSurface,
+            zone_factor: f64,
+        ) -> crate::member_clearance::ShaftRead<'a> {
+            crate::member_clearance::ShaftRead {
+                grid,
+                history,
+                layer_height_mm: H,
+                plate_z_mm: 0.0,
+                surface: Some(surface),
+                zone_factor,
+            }
+        }
+        let both = |wall: (f64, f64), z: (f64, f64)| -> geom_kernel::NativeSurface {
+            two_boxes(
+                ([-1.0, -1.0, 2.0], [1.0, 1.0, 3.0]),
+                ([wall.0, -0.5, z.0], [wall.1, 0.5, z.1]),
+            )
+        };
+
+        // The challenger's shape: wall top 1.6 mm, 0.25 mm beside the axis.
+        let history = at((0.25, 0.75), (0.0, 1.6));
+        let surface = both((0.25, 0.75), (0.0, 1.6));
+        let read = read_of(&grid, &history, &surface, law.face_zone_factor());
+        let face = read.seat_face((seat, k_seat));
+        let face_normal = face.expect("the seat's face is the slab's underside").normal;
+        assert!(face_normal[2] < -0.99, "a flat seat: {face_normal:?}");
+        assert!(
+            crate::member_clearance::shaft_model_intrusion(
+                &grid, &history, H, (seat, k_seat), (seat, k_base), false, radius, 0.3, law.face_zone_factor(),
+            )
+            .is_none(),
+            "SABOTAGE: the retired read excuses the whole branch"
+        );
+        let hit = read.intrusion((seat, k_seat), face, (seat, k_base), false, radius, 0.3);
+        assert!(hit.is_some(), "the lowest 0.2 mm stands 0.2 mm from the wall: refused");
+
+        // Control: a wall 0.8 mm away clears.
+        let history = at((0.85, 1.35), (0.0, 1.6));
+        let surface = both((0.85, 1.35), (0.0, 1.6));
+        let read = read_of(&grid, &history, &surface, law.face_zone_factor());
+        let face = read.seat_face((seat, k_seat));
+        assert!(read.intrusion((seat, k_seat), face, (seat, k_base), false, radius, 0.3).is_none());
+
+        // Control: a thin wall that stands only inside the seat's own zone (a
+        // 0.04 mm lip 0.2 mm beside the axis, 0.05 mm under the slab) is still
+        // excused: the raster flags it (its reach carries half a cell's
+        // diagonal) and the census's own predicate, which leaves the zone out,
+        // reads the rest of the branch clear.
+        let history = at((0.2, 0.7), (1.95, 1.99));
+        let surface = both((0.2, 0.7), (1.95, 1.99));
+        let read = read_of(&grid, &history, &surface, law.face_zone_factor());
+        let face = read.seat_face((seat, k_seat));
+        assert!(
+            read.intrusion((seat, k_seat), face, (seat, k_base), false, radius, 0.3).is_none(),
+            "inside the seat's own zone: not the branch's to answer for"
+        );
+    }
+
+    /// Two boxes as one surface.
+    fn two_boxes(
+        a: ([f64; 3], [f64; 3]),
+        b: ([f64; 3], [f64; 3]),
+    ) -> geom_kernel::NativeSurface {
+        let mut verts: Vec<[f64; 3]> = Vec::new();
+        let mut tris: Vec<[u32; 3]> = Vec::new();
+        for (low, high) in [a, b] {
+            let base = u32::try_from(verts.len()).expect("a few vertices");
+            for corner in 0..8_usize {
+                verts.push(std::array::from_fn(|k| if corner >> k & 1 == 0 { low[k] } else { high[k] }));
+            }
+            for t in [
+                [0, 2, 1], [1, 2, 3], [4, 5, 6], [5, 7, 6], [0, 1, 4], [1, 5, 4],
+                [2, 6, 3], [3, 6, 7], [0, 4, 2], [2, 4, 6], [1, 3, 5], [3, 7, 5],
+            ] {
+                tris.push([base + t[0], base + t[1], base + t[2]]);
+            }
+        }
+        let pitch = 0.1;
+        let estimate = geom_kernel::NativeSurface::estimate_index_memory_from_indexed(&verts, &tris, pitch)
+            .expect("an estimate");
+        geom_kernel::NativeSurface::from_indexed(
+            &verts,
+            &tris,
+            geom_kernel::NativeSurfaceConfig {
+                grid_pitch_mm: pitch,
+                max_grid_bytes: estimate.max_axis_grid_bytes(),
+            },
+        )
+        .expect("a surface")
     }
 }

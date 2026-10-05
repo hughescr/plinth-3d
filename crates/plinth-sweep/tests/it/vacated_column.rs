@@ -136,7 +136,11 @@ fn a_leaned_arm_carries_the_island_it_roots_and_the_seat_blind_rule_drops_it() {
         SweepPolicy::from_registry()
             .expect("registry")
             .without_lip_seat()
-            .without_drawn_solid_descent(),
+            .without_drawn_solid_descent()
+            // The clearance re-route (R2.2) is off too: it moves arms after
+            // the final sizing, and the island this fixture needs a leaned
+            // arm to root is not left by the seat-blind rule on that field.
+            .without_clearance_reroute(),
     );
     let with = sweep_with(&mesh, 0.0, &policy);
     let without = sweep_with(&mesh, 0.0, &policy.without_tip_column_roots());

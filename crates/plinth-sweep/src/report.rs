@@ -362,6 +362,11 @@ pub struct SweepRunReport {
     /// face against the angle at which the seat trim keeps its section, the
     /// arms re-landed to meet it, and the emitted field's census.
     pub lip_seat: crate::lip_seat::LipSeatOutcome,
+    /// **The clearance re-route** (fix/drawn-solid-clearance, 2026-10-04, R2.2):
+    /// the arms the census named within the final gap of the model after the
+    /// final sizing, re-landed at their sized radius by the lip-seat rule's
+    /// machinery. Its counters are that machinery's, on this run alone.
+    pub clearance_reroute: crate::lip_seat::LipSeatOutcome,
     /// Every member's drawn solid against the model on the finished field,
     /// arm shafts included (fix/morel-long-posts, 2026-10-02).
     pub member_model_clearance: MemberModelClearance,

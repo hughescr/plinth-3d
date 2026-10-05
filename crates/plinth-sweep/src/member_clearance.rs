@@ -308,6 +308,171 @@ pub(crate) fn shaft_model_intrusion(
     )
 }
 
+/// What a placement-time shaft test reads, bundled: the raster the sweep has
+/// built so far, its frame, and the model's surface where it could be built.
+/// The surface turns the raster's flag into the census's own verdict and
+/// gives each contact zone the normal of the face it is on
+/// ([`ShaftRead::intrusion`]).
+#[derive(Clone, Copy)]
+pub(crate) struct ShaftRead<'a> {
+    pub grid: &'a Grid,
+    pub history: &'a ColumnHistory,
+    pub layer_height_mm: f64,
+    /// The plate's z in the mesh's frame (the raster's frame has the plate at 0).
+    pub plate_z_mm: f64,
+    pub surface: Option<&'a geom_kernel::NativeSurface>,
+    /// [`crate::lean::LeanLaw::face_zone_factor`]: the longest zone, used where
+    /// no surface is there to name the face.
+    pub zone_factor: f64,
+}
+
+impl ShaftRead<'_> {
+    fn kernel_point(&self, point: [f64; 3]) -> [f64; 3] {
+        [point[0], point[1], point[2] + self.plate_z_mm]
+    }
+
+    /// The face the shaft's seat at `seat` stands against: the model's nearest
+    /// face to the seat's axis point and its outward normal. One nearest-point
+    /// query; `None` without a surface or where the query names no face.
+    pub(crate) fn seat_face(&self, seat: (usize, usize)) -> Option<ContactFace> {
+        let surface = self.surface?;
+        let point = self.kernel_point(axis_point(self.grid, self.layer_height_mm, seat.0, seat.1));
+        landing_faces(surface, &[point], &[true])
+            .into_iter()
+            .next()
+            .flatten()
+            .map(|(point, normal)| ContactFace { point, normal })
+    }
+
+    /// **A straight shaft's drawn solid against the model, read as the census
+    /// reads it** (challenger round 3, 2026-10-04): the shaft from its base cell
+    /// at layer `base.1` to its seat cell at layer `seat.1`, radius
+    /// `radius_mm`, outside its OWN contact zones and no others. Returns the
+    /// first offending cell and its distance, `None` when it clears.
+    ///
+    /// * **The zones are the real ones.** The seat zone is where the capsule
+    ///   first stands `gap` clear of the seat face's plane,
+    ///   `(gap + r − h) / (n·m)` along the axis, `n` that face's outward normal
+    ///   (`seat_face`, one query per seat), `m` the axis from the seat to the
+    ///   base and `h` the seat's height over the plane; a model landing's zone
+    ///   is the same at its landing face
+    ///   ([`landing_zone_mm`]). Neither is longer than the longest the lean law
+    ///   admits (`n·m` is never taken below `1 / zone_factor`, which can only
+    ///   test MORE). The old read took the longest zone for every shaft, so a
+    ///   0.6 mm branch under a flat seat (zone 0.35 mm) was exempt whole.
+    /// * **The raster only flags.** Its reach carries half a cell's diagonal,
+    ///   so a cell it flags may still be clear. A flagged shaft is confirmed
+    ///   by the kernel's clearance predicate ([`geom_kernel::SegmentClearanceClassified`]),
+    ///   the one the finished-field census runs, on the same axis and zones; it
+    ///   is refused only when that predicate reads it under the gap (or reads
+    ///   only a bound that does not clear it). Without a surface the raster's
+    ///   flag stands, with the longest zones.
+    pub(crate) fn intrusion(
+        &self,
+        seat: (usize, usize),
+        seat_face: Option<ContactFace>,
+        base: (usize, usize),
+        lands_on_model: bool,
+        radius_mm: f64,
+        gap_mm: f64,
+    ) -> Option<(usize, f64)> {
+        let (grid, history, height) = (self.grid, self.history, self.layer_height_mm);
+        let Some(surface) = self.surface else {
+            return shaft_model_intrusion(
+                grid,
+                history,
+                height,
+                seat,
+                base,
+                lands_on_model,
+                radius_mm,
+                gap_mm,
+                self.zone_factor,
+            );
+        };
+        let top = axis_point(grid, height, seat.0, seat.1);
+        let bottom = axis_point(grid, height, base.0, base.1);
+        let length = geom_kernel::vec3::dist(top, bottom);
+        if !(length.is_finite() && length > 0.0) {
+            return None;
+        }
+        let radius = radius_mm.max(0.0);
+        let gap = gap_mm.max(0.0);
+        let longest = self.zone_factor.max(1.0) * (radius + gap);
+        // The least `n·m` the lean law admits: a face steeper than that is
+        // read as if it were exactly that steep (a longer zone is never given).
+        let steepest = 1.0 / self.zone_factor.max(1.0);
+        let down = geom_kernel::vec3::scale(geom_kernel::vec3::sub(bottom, top), 1.0 / length);
+        let seat_zone = match seat_face {
+            Some(face) => {
+                let along = geom_kernel::vec3::dot(face.normal, down).max(steepest);
+                let over = geom_kernel::vec3::dot(
+                    face.normal,
+                    geom_kernel::vec3::sub(self.kernel_point(top), face.point),
+                );
+                ((gap + radius - over) / along).clamp(0.0, longest)
+            }
+            None => longest,
+        };
+        let landing_zone = if lands_on_model {
+            let base_point = self.kernel_point(bottom);
+            match landing_faces(surface, &[base_point], &[true]).into_iter().next().flatten() {
+                Some((point, normal)) => {
+                    let up = geom_kernel::vec3::scale(down, -1.0);
+                    let along = geom_kernel::vec3::dot(normal, up).max(steepest);
+                    let height_over = geom_kernel::vec3::dot(
+                        normal,
+                        geom_kernel::vec3::sub(base_point, point),
+                    );
+                    ((gap + radius - height_over) / along).clamp(0.0, longest)
+                }
+                None => longest,
+            }
+        } else {
+            0.0
+        };
+        let flagged = inset_segment_intrusion(
+            grid,
+            history,
+            height,
+            top,
+            bottom,
+            seat_zone,
+            landing_zone,
+            (radius, radius),
+            gap,
+        )?;
+        let verdict = surface
+            .segment_clearance_classified(
+                &[self.kernel_point(top)],
+                &[self.kernel_point(bottom)],
+                &[radius],
+                &[radius],
+                0.0,
+                &[seat_zone],
+                &[landing_zone],
+            )
+            .ok()
+            .and_then(|rows| rows.into_iter().next());
+        match verdict {
+            Some(geom_kernel::SegmentClearanceClassified::Measured { clearance_mm, .. })
+                if clearance_mm >= gap - 1.0e-9 =>
+            {
+                None
+            }
+            _ => Some(flagged),
+        }
+    }
+}
+
+/// The face a shaft's contact is on: the model's nearest surface point and
+/// the face's outward unit normal, in the mesh's frame.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ContactFace {
+    pub point: [f64; 3],
+    pub normal: [f64; 3],
+}
+
 /// [`model_intrusion`] on the axis `top`–`bottom` with `inset_top` mm of its
 /// top end and `inset_bottom` mm of its bottom end left out (a seat zone, a
 /// landing zone). `None` where the two insets use the whole axis.

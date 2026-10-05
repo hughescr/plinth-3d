@@ -98,6 +98,79 @@ const BITE_SLACK_MM: f64 = 1.0e-9;
 /// kernel's distance on the same segment read twice, and nothing more.
 const CLEARANCE_SLACK_MM: f64 = 1.0e-9;
 
+/// What sends an arm to be re-landed by [`apply`].
+#[derive(Clone, Copy)]
+pub(crate) enum Trigger<'a> {
+    /// The seat trim cuts the arm's shaft outside its ball (this module's own
+    /// remedy 1).
+    SeatBite,
+    /// **The clearance re-route** (fix/drawn-solid-clearance, R2.2 of
+    /// `clearance-census-diagnosis.md`): the arm's drawn solid, as the sized
+    /// field draws it, stands within the final gap of the model. `violators`
+    /// has one flag per member. The same candidates, path tests, lowering
+    /// measurements and sized-field settle apply, with two differences that
+    /// follow from the trigger: the mover must clear the final gap OUTRIGHT
+    /// wherever it lands (it was sent for the gap, so "no nearer than it
+    /// stood" would license it to stay inside), and an arm that has no seat
+    /// bite to compare is not refused for having none.
+    Clearance { violators: &'a [bool] },
+}
+
+impl Trigger<'_> {
+    /// Whether member `index` is sent to be re-landed, given its measured bite.
+    fn sends(self, index: usize, bite: Option<&ShaftSeatBite>) -> bool {
+        match self {
+            Trigger::SeatBite => bite.is_some_and(over_limit),
+            Trigger::Clearance { violators } => violators.get(index).copied().unwrap_or(false),
+        }
+    }
+
+    const fn is_clearance(self) -> bool {
+        matches!(self, Trigger::Clearance { .. })
+    }
+}
+
+/// **The members the finished-field census names as within the final gap of the
+/// model**, as one flag per strut (batch-first: one census over the field),
+/// and how many it names. Only arms are re-landed; `exclude` holds the arms the
+/// lip-seat rule itself re-landed: Craig's ruling of 2026-10-04 keeps that
+/// rule's gate ("no nearer than it stood"), so what it admitted stays a
+/// WARNING and is never sent back here.
+pub(crate) fn clearance_violators(
+    joins: &HeadJoinContext<'_>,
+    struts: &[SweepStrut],
+    arms: &[SweepArm],
+    exclude: &[u32],
+) -> (Vec<bool>, usize) {
+    let mut flags = vec![false; struts.len()];
+    let Some(surface) = joins.surface() else {
+        return (flags, 0);
+    };
+    let census = crate::member_clearance::model_clearance_census(
+        Some(surface),
+        struts,
+        arms,
+        joins.layer_plan,
+        joins.plate_z_mm,
+        joins.clearance_mm,
+    );
+    let mut named = 0;
+    for row in &census.within_gap {
+        if row.kind != StrutKind::Arm || exclude.contains(&row.member) {
+            continue;
+        }
+        let slot = match struts.get(row.member as usize) {
+            Some(strut) if strut.id == row.member => Some(row.member as usize),
+            _ => struts.iter().position(|strut| strut.id == row.member),
+        };
+        if let Some(slot) = slot {
+            flags[slot] = true;
+            named += 1;
+        }
+    }
+    (flags, named)
+}
+
 /// The kernel's solid clearance from the model of each member's drawn
 /// segment, from its drawn seat to its base at its widest drawn radius, with
 /// its own seat zone untested — its tip ball, or where further, the point
@@ -222,6 +295,12 @@ pub struct LipSeatOutcome {
     /// The deepest such cut, mm, and the widest approach angle among them.
     pub max_bite_before_mm: f64,
     pub max_approach_before_deg: f64,
+    /// **The clearance re-route's survey** ([`Trigger::Clearance`], filled
+    /// only by that run): arms the census named within the final gap on the
+    /// first pass of the run (the lip-seat rule's own re-landings excluded),
+    /// and on the last pass's field.
+    pub clearance_violators_first: usize,
+    pub clearance_violators_last: usize,
     /// Remedy 1: arms re-landed so they meet their face within the limit.
     pub arms_relanded: usize,
     /// Of those, the ones re-landed on the MODEL below them rather than on a
@@ -359,6 +438,10 @@ struct Proposal {
 /// path there, or `None` when one of them cannot follow: its landing layer is
 /// no longer on the moved shaft, its straight segment is blocked, or the lean
 /// law cannot close the new gap.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the field and its index, the mover's new axis, and the members that follow it"
+)]
 fn children_follow(
     context: &SlendernessContext<'_>,
     index: &ColumnHistory,
@@ -367,26 +450,40 @@ fn children_follow(
     k_bottom: usize,
     path: &[u32],
     children: &[usize],
+    transitive: bool,
 ) -> Option<Vec<Follow>> {
-    let host = &struts[mover];
+    // Each host that moved, with the base layer and path its axis now has:
+    // the mover first. With `transitive` the list holds every descendant of
+    // the mover, parents before children, and a descendant lands on its OWN
+    // host's moved axis (the clearance re-route moves a whole subtree).
+    let mut moved: Vec<(usize, usize, Vec<u32>)> = vec![(mover, k_bottom, path.to_vec())];
     let mut out = Vec::with_capacity(children.len());
     for &child in children {
         let strut = &struts[child];
-        let Landing::Strut { layer, .. } = strut.landing else {
+        let Landing::Strut { id: host_id, layer } = strut.landing else {
             return None;
         };
-        if layer < k_bottom || layer > host.k_top {
+        let (host, host_k_bottom, host_path) = moved
+            .iter()
+            .find(|(member, _, _)| *member == host_id as usize)
+            .map(|(member, k_bottom, path)| (&struts[*member], *k_bottom, path.as_slice()))?;
+        if layer < host_k_bottom || layer > host.k_top {
             return None;
         }
-        let cell = path
-            .get(layer - k_bottom)
+        let cell = host_path
+            .get(layer - host_k_bottom)
             .map_or(host.cell, |cell| *cell as usize);
         let lateral_mm = crate::cell_distance_mm(context.grid, strut.cell, cell);
         context
             .lean
             .descent_cost_mm(strut.k_top.checked_sub(layer)?, lateral_mm)?;
         // The child may pass through the host it lands on and through its own
-        // old shaft, which the index still holds.
+        // old shaft, which the index still holds (and, moving a subtree,
+        // through the shafts of the members that move with it).
+        let mut except: Vec<u32> = vec![host.id, strut.id];
+        if transitive {
+            except.extend(children.iter().map(|&other| struts[other].id));
+        }
         let new_path = crate::slenderness::segment_path_excluding(
             context,
             index,
@@ -394,8 +491,11 @@ fn children_follow(
             strut.k_top,
             cell,
             layer,
-            &[host.id, strut.id],
+            &except,
         )?;
+        if transitive {
+            moved.push((child, strut.k_bottom, new_path.clone()));
+        }
         out.push((child, cell, new_path));
     }
     Some(out)
@@ -458,6 +558,7 @@ pub(crate) fn apply(
     struts: &mut [SweepStrut],
     arms: &[SweepArm],
     bites: &[Option<ShaftSeatBite>],
+    trigger: Trigger<'_>,
     refused: &[(u32, usize)],
     outcome: &mut LipSeatOutcome,
 ) -> Vec<Relanding> {
@@ -514,13 +615,46 @@ pub(crate) fn apply(
             }
         }
     }
+    // **The clearance re-route moves a whole SUBTREE.** An arm sent for its
+    // clearance that carries members which carry others (the overhang
+    // table's post 26: three branches, one with two branches of its own) is
+    // the ordinary case of a thick, heavily loaded trunk, and it is the one
+    // the area law grew into the model. It moves with every arm that rests on
+    // it, directly or not (each lands on its own host's moved axis, parents
+    // before children); it stays locked only where a member that is not an
+    // arm (a brace, a mast) rests on it somewhere below, or a cross is tied
+    // to it or to one of them, since this pass cannot re-land those.
+    let followers_of: Vec<Vec<usize>> = if trigger.is_clearance() {
+        (0..struts.len())
+            .map(|member| {
+                let mut out: Vec<usize> = Vec::new();
+                let mut stack: Vec<usize> = children_of[member].iter().rev().copied().collect();
+                while let Some(next) = stack.pop() {
+                    if out.len() > struts.len() {
+                        break;
+                    }
+                    out.push(next);
+                    stack.extend(children_of[next].iter().rev().copied());
+                }
+                out
+            })
+            .collect()
+    } else {
+        children_of.clone()
+    };
     let mut locked: Vec<bool> = (0..struts.len())
         .map(|member| {
             carries[member]
                 && (tied[member]
-                    || children_of[member]
-                        .iter()
-                        .any(|&child| carries[child] || struts[child].kind != StrutKind::Arm))
+                    || if trigger.is_clearance() {
+                        followers_of[member]
+                            .iter()
+                            .any(|&follower| tied[follower] || struts[follower].kind != StrutKind::Arm)
+                    } else {
+                        children_of[member]
+                            .iter()
+                            .any(|&child| carries[child] || struts[child].kind != StrutKind::Arm)
+                    })
         })
         .collect();
     let to_move: Vec<bool> = struts
@@ -528,23 +662,25 @@ pub(crate) fn apply(
         .zip(bites)
         .enumerate()
         .map(|(index_of, (strut, bite))| {
-            bite.as_ref().is_some_and(over_limit)
+            trigger.sends(index_of, bite.as_ref())
                 && strut.kind == StrutKind::Arm
                 && strut.k_bottom != usize::MAX
                 && !locked[index_of]
         })
         .collect();
 
-    // ---- stage 1: price every candidate descent of every arm over its limit.
+    // ---- stage 1: price every candidate descent of every arm sent.
     let mut pending: Vec<Pending> = Vec::new();
     for (index_of, (strut, bite)) in struts.iter().zip(bites).enumerate() {
-        let Some(bite) = bite else { continue };
-        if !over_limit(bite) || strut.kind != StrutKind::Arm || strut.k_bottom == usize::MAX {
+        if !trigger.sends(index_of, bite.as_ref())
+            || strut.kind != StrutKind::Arm
+            || strut.k_bottom == usize::MAX
+        {
             continue;
         }
         // A child that is itself over its limit is re-landed first; the
         // parent is taken on the next pass, with whatever still rests on it.
-        let children = children_of[index_of].clone();
+        let children = followers_of[index_of].clone();
         if locked[index_of] || children.iter().any(|&child| to_move[child]) {
             outcome.kept_carrying += 1;
             continue;
@@ -563,7 +699,10 @@ pub(crate) fn apply(
             index_of,
             arm.seat_mm,
             normal,
-            bite.limit_deg,
+            // An arm sent for clearance that has no measured bite (its seat
+            // trim is not an issue) keeps the whole half space: the angle the
+            // lowering measures below is what decides.
+            bite.as_ref().map_or(90.0, |bite| bite.limit_deg),
             &to_move,
             &children,
             outcome,
@@ -596,7 +735,15 @@ pub(crate) fn apply(
             while job.next < job.candidates.len() {
                 let candidate = job.candidates[job.next];
                 job.next += 1;
-                match propose(context, &index, struts, job.index, candidate, &job.children) {
+                match propose(
+                    context,
+                    &index,
+                    struts,
+                    job.index,
+                    candidate,
+                    &job.children,
+                    trigger.is_clearance(),
+                ) {
                     Some((path, children)) => {
                         proposals.push(Proposal {
                             slot,
@@ -734,7 +881,7 @@ pub(crate) fn apply(
             let new_root = !matches!(proposal.candidate.landing, Landing::Strut { .. });
             let clear = surface.is_none()
                 || (first..=first + proposal.children.len()).all(|slot| {
-                    let minimum = if slot == first && new_root {
+                    let minimum = if slot == first && (new_root || trigger.is_clearance()) {
                         tier
                     } else {
                         tier.min(before[slot].unwrap_or(tier).max(0.0))
@@ -746,9 +893,7 @@ pub(crate) fn apply(
                 continue;
             }
             // The mover keeps its section; each child is no worse than it was.
-            let mover_keeps = measured[first]
-                .as_ref()
-                .is_some_and(|bite| !over_limit(bite));
+            let mover_keeps = measured[first].as_ref().map_or(trigger.is_clearance(), |bite| !over_limit(bite));
             let children_hold =
                 proposal
                     .children
@@ -760,9 +905,9 @@ pub(crate) fn apply(
                             .copied()
                             .flatten()
                             .map_or(0.0, |bite| bite.bite_mm);
-                        measured[first + 1 + offset]
-                            .as_ref()
-                            .is_some_and(|bite| bite.bite_mm <= before.max(0.0) + BITE_SLACK_MM)
+                        measured[first + 1 + offset].as_ref().map_or(trigger.is_clearance(), |bite| {
+                            bite.bite_mm <= before.max(0.0) + BITE_SLACK_MM
+                        })
                     });
             let above_plate = (0..=proposal.children.len()).all(|offset| {
                 let arm = &trial[first + offset];
@@ -833,6 +978,7 @@ pub(crate) fn apply(
                 index_of,
                 proposal.candidate,
                 &job.children,
+                trigger.is_clearance(),
             );
             let Some((path, children)) = again.filter(|(path, children)| {
                 *path == proposal.path && *children == proposal.children
@@ -1330,6 +1476,7 @@ fn propose(
     mover: usize,
     candidate: Candidate,
     children: &[usize],
+    transitive: bool,
 ) -> Option<(Vec<u32>, Vec<Follow>)> {
     // THE PARENT MUST STAND HERE NOW: another arm of this pass may have been
     // re-landed from under the index's picture of it.
@@ -1363,6 +1510,7 @@ fn propose(
         candidate.k_bottom,
         &path,
         children,
+        transitive,
     )?;
     Some((path, followed))
 }
