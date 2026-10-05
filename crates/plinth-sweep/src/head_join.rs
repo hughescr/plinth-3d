@@ -250,7 +250,32 @@ pub(crate) struct HeadJoinContext<'a> {
     pub surface_max_bytes: u64,
     /// The model surface, built on first need and kept for the run; `None`
     /// inside when it could not be built.
-    pub surface: OnceCell<Option<NativeSurface>>,
+    pub surface: &'a OnceCell<Option<NativeSurface>>,
+}
+
+/// The model's surface index, or `None` when its memory estimate is over
+/// `max_bytes` or it cannot be built. One builder for every reader: the
+/// placement's descent test (`up_sweep`, which reads it before any arm
+/// stands) and the head-join, lip-seat and census rules (which read it later
+/// from the same cell).
+pub(crate) fn build_surface(mesh: &Mesh, pitch_mm: f64, max_bytes: u64) -> Option<NativeSurface> {
+    let verts = mesh.verts();
+    let tris = mesh.tris();
+    let estimate =
+        NativeSurface::estimate_index_memory_from_indexed(verts, tris, pitch_mm).ok()?;
+    let cap = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+    if estimate.peak_bytes() > cap {
+        return None;
+    }
+    NativeSurface::from_indexed(
+        verts,
+        tris,
+        NativeSurfaceConfig {
+            grid_pitch_mm: pitch_mm,
+            max_grid_bytes: estimate.max_axis_grid_bytes(),
+        },
+    )
+    .ok()
 }
 
 impl HeadJoinContext<'_> {
@@ -258,29 +283,7 @@ impl HeadJoinContext<'_> {
     /// too, for a re-landed member's solid clearance).
     pub(crate) fn surface(&self) -> Option<&NativeSurface> {
         self.surface
-            .get_or_init(|| {
-                let verts = self.mesh.verts();
-                let tris = self.mesh.tris();
-                let estimate = NativeSurface::estimate_index_memory_from_indexed(
-                    verts,
-                    tris,
-                    self.surface_pitch_mm,
-                )
-                .ok()?;
-                let cap = usize::try_from(self.surface_max_bytes).unwrap_or(usize::MAX);
-                if estimate.peak_bytes() > cap {
-                    return None;
-                }
-                NativeSurface::from_indexed(
-                    verts,
-                    tris,
-                    NativeSurfaceConfig {
-                        grid_pitch_mm: self.surface_pitch_mm,
-                        max_grid_bytes: estimate.max_axis_grid_bytes(),
-                    },
-                )
-                .ok()
-            })
+            .get_or_init(|| build_surface(self.mesh, self.surface_pitch_mm, self.surface_max_bytes))
             .as_ref()
     }
 }

@@ -246,6 +246,13 @@ impl ReachState {
         self.journaling = false;
     }
 
+    /// Stop recording and KEEP every write made since
+    /// [`ReachState::begin_journal`]: the trial became the real placement.
+    pub fn end_journal(&mut self) {
+        self.journal.clear();
+        self.journaling = false;
+    }
+
     fn write(&mut self, cell: usize, value: f32, anchor: u32) {
         if self.journaling {
             self.journal.push((

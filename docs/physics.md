@@ -195,6 +195,67 @@ consequence directly on the Giant Bat: the old rule excused an arm standing 0.24
 the model while refusing a thinner arm on the same axis with 0.569 mm of real gap. The
 two-tier split, read as true-gap throughout, is what frees the Bat from that inversion.
 
+**The up-sweep reads both tiers on every descent (fix/drawn-solid-clearance, 2026-10-04).** An arm's
+descent was tested by its centreline cell alone, and the radius it is drawn at was never in the
+test, so a post could stand 0.325 mm from a leg face and be drawn 0.374 mm inside it (overhang
+table member 30). Every descent, the straight one included, is now read as the solid the file will
+draw: its straight axis, outside its own seat zone and (on the model) its landing zone, at a LOWER
+bound on its radius (the larger of the registered minimum tip radius and the area-law radius
+`√(A / (X·π))` of the demand its seat covers), against the cured model. The candidates keep their
+order (cheapest first, a tie to the straight descent). A straight descent that clears the 0.3 mm
+final gap STAYS: the 0.6 mm margin is a placement-family search margin and only the final gap
+refuses geometry (and the Round discs, whose posts stand 0.3 to 0.6 mm from their ring's walls,
+are the byte-identity control). Where the straight descent does not clear the final gap, a
+costlier lean is admitted, and the preferred margin chooses: a candidate that clears 0.6 mm beats
+one that clears only the final gap, which beats none. The zone exemption grows with the gap
+asked, so a descent counts as clearing the preferred margin only if it also clears the final gap
+at the final gap's own zones (a short descent can lie wholly inside its zones at 0.6 mm and still
+have a testable stretch at 0.3 mm). Where no descent clears the final gap, the
+seat may move only to a cell whose reach disc covers the SAME demand
+(`up_sweep::reseat_cells`); where none does, the seat is kept and the census names it (emit and
+warn). Each shaft is excused only its OWN contact zones: the seat zone is where the capsule first
+stands `gap` clear of the seat face's plane, `(gap + r − h) / (n·m)` along the axis (`n` that
+face's outward normal, `m` the axis from the seat to the base, `h` the seat's height over the
+plane), and a model landing's zone is the same at its landing face; neither is taken longer
+than the longest the lean law admits (`LeanLaw::face_zone_factor`, `n·m` never below
+`cos(steepest lean)`). A flat seat's zone is `gap + r`, not `1.86 (gap + r)`, so a short branch
+under a flat seat is tested below it. The raster only flags (its reach carries half a cell's
+diagonal); a flagged shaft is confirmed by the kernel's clearance predicate, the census's own,
+on the same axis and zones, and refused only when that reads it under the gap. A thickening that would raise a member, or a trunk raised with it, into the final gap
+where it stands clear now is refused (`ThickenRefusal::Model`) and the run takes the next rung;
+the comparison is made slot by slot, the profile the plan commits against the profile drawn
+there now, each read as the frustum it is (its clearance is the least over the axis of distance
+minus radius), so a wider section or an existing violation elsewhere excuses nothing. Each of the
+two solids is excused only its own contact zones, read from the faces its ends stand against as
+above, at the radius that solid has at the zone's edge (a taper is wider there than at its end,
+so the zone is taken to a fixed point); a trunk raised under a flat seat is tested below
+`gap + r`, not `1.86 (gap + r)`. A slot the raster flags is decided by the census's own predicate
+on the drawn frustum, all of a plan's slots in one batch: the raise enters the gap unless the
+predicate measures the committed slot clear, and a slot counts as inside the gap already only
+where the predicate reads the drawn slot under the gap. The raster's flag is never that proof;
+without a model surface nothing is proved and a flagged raise is refused. A zone is an
+exemption, so where no face is known (no surface, or the query names none) the zone is zero,
+never the longest: the raster then reads the solid up to its contact, the flag reaches that
+refusal, and such a member is never counted inside the gap already. (The descent test without
+any surface keeps the longest zones, since placement cannot refuse every seated shaft; the
+census, which cannot run either, warns.)
+The lip-seat gate is unchanged: a member may land "no nearer than it stood".
+
+**The clearance re-route after the final sizing.** The up-sweep places an arm at a lower bound
+of the radius it is later drawn at (the area law and the thickening grow it), so after the final
+sizing and the ties the census names every arm whose drawn solid stands within the final gap
+of the model. Each is re-landed at its sized radius with the lip-seat rule's machinery (priced
+descents, path test, the lowering's measurement, the sized-field put-back for a host's load or a
+lapped root), to a fixed point bounded by the registered pass count, with one difference: the
+mover must clear the final gap outright, since it was sent for the gap. The arms the lip-seat
+rule itself re-landed are left to that rule's gate (they stay warnings); an arm no candidate
+clears stays and is named by the census (emit and warn). An arm that carries part of a frame the
+slenderness ladder solved (a cross seated on it or on a member resting on it, or a brace, mast or
+model tie resting on it) is kept where it stands and named in a WARNING with that reason: moving
+it moves a junction of the frame, and carrying the frame along unsolved, or taking it down and
+solving again, could leave a post over its slenderness limit (sway or snap mid-print) to buy
+clearance for a member that already stands clear of the model.
+
 ## 6. The seat's own contact zone — the honest exemption
 
 A member seated into the model is legitimately inside the material it stands on. Something

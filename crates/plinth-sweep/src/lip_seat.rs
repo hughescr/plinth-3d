@@ -98,6 +98,79 @@ const BITE_SLACK_MM: f64 = 1.0e-9;
 /// kernel's distance on the same segment read twice, and nothing more.
 const CLEARANCE_SLACK_MM: f64 = 1.0e-9;
 
+/// What sends an arm to be re-landed by [`apply`].
+#[derive(Clone, Copy)]
+pub(crate) enum Trigger<'a> {
+    /// The seat trim cuts the arm's shaft outside its ball (this module's own
+    /// remedy 1).
+    SeatBite,
+    /// **The clearance re-route** (fix/drawn-solid-clearance, R2.2 of
+    /// `clearance-census-diagnosis.md`): the arm's drawn solid, as the sized
+    /// field draws it, stands within the final gap of the model. `violators`
+    /// has one flag per member. The same candidates, path tests, lowering
+    /// measurements and sized-field settle apply, with two differences that
+    /// follow from the trigger: the mover must clear the final gap OUTRIGHT
+    /// wherever it lands (it was sent for the gap, so "no nearer than it
+    /// stood" would license it to stay inside), and an arm that has no seat
+    /// bite to compare is not refused for having none.
+    Clearance { violators: &'a [bool] },
+}
+
+impl Trigger<'_> {
+    /// Whether member `index` is sent to be re-landed, given its measured bite.
+    fn sends(self, index: usize, bite: Option<&ShaftSeatBite>) -> bool {
+        match self {
+            Trigger::SeatBite => bite.is_some_and(over_limit),
+            Trigger::Clearance { violators } => violators.get(index).copied().unwrap_or(false),
+        }
+    }
+
+    const fn is_clearance(self) -> bool {
+        matches!(self, Trigger::Clearance { .. })
+    }
+}
+
+/// **The members the finished-field census names as within the final gap of the
+/// model**, as one flag per strut (batch-first: one census over the field),
+/// and how many it names. Only arms are re-landed; `exclude` holds the arms the
+/// lip-seat rule itself re-landed: Craig's ruling of 2026-10-04 keeps that
+/// rule's gate ("no nearer than it stood"), so what it admitted stays a
+/// WARNING and is never sent back here.
+pub(crate) fn clearance_violators(
+    joins: &HeadJoinContext<'_>,
+    struts: &[SweepStrut],
+    arms: &[SweepArm],
+    exclude: &[u32],
+) -> (Vec<bool>, usize) {
+    let mut flags = vec![false; struts.len()];
+    let Some(surface) = joins.surface() else {
+        return (flags, 0);
+    };
+    let census = crate::member_clearance::model_clearance_census(
+        Some(surface),
+        struts,
+        arms,
+        joins.layer_plan,
+        joins.plate_z_mm,
+        joins.clearance_mm,
+    );
+    let mut named = 0;
+    for row in &census.within_gap {
+        if row.kind != StrutKind::Arm || exclude.contains(&row.member) {
+            continue;
+        }
+        let slot = match struts.get(row.member as usize) {
+            Some(strut) if strut.id == row.member => Some(row.member as usize),
+            _ => struts.iter().position(|strut| strut.id == row.member),
+        };
+        if let Some(slot) = slot {
+            flags[slot] = true;
+            named += 1;
+        }
+    }
+    (flags, named)
+}
+
 /// The kernel's solid clearance from the model of each member's drawn
 /// segment, from its drawn seat to its base at its widest drawn radius, with
 /// its own seat zone untested — its tip ball, or where further, the point
@@ -210,6 +283,64 @@ pub struct LipSeatWarning {
     pub on_plate: bool,
 }
 
+/// Why the clearance re-route kept an arm it was sent: the arm carries part
+/// of a frame the slenderness ladder solved.
+///
+/// Moving such an arm moves a junction of that frame. The frame's band
+/// layers and count, its window and its two-post ceiling were solved for the
+/// pair as it stands; carried along unsolved, the frame could leave a post
+/// over its slenderness limit while the report counts it braced, and taken
+/// down and solved again it could leave the post unbraced. Either trades a
+/// member that stands clear of the model but inside the final gap for a
+/// post that may sway or snap mid-print, so the re-route keeps the arm and
+/// warns (emit and warn).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameLock {
+    /// A cross is seated on the arm itself.
+    CrossTied,
+    /// A cross is seated on a member that rests on it, directly or not.
+    CrossTiedBelow,
+    /// A member that is not an arm (a brace, a mast, a model tie) rests on
+    /// it, directly or not.
+    NonArmResting,
+}
+
+/// One flag per member: whether a cross (a brace's top) is seated on it.
+pub(crate) fn crosses_seated(struts: &[SweepStrut]) -> Vec<bool> {
+    let mut tied = vec![false; struts.len()];
+    for strut in struts {
+        if let Some(host) = strut.seat_on_strut {
+            if let Some(flag) = tied.get_mut(host as usize) {
+                *flag = true;
+            }
+        }
+    }
+    tied
+}
+
+/// Why the clearance re-route keeps `member` for a frame, given which
+/// members have a cross seated on them (`tied`) and every member resting on
+/// it, directly or not (`followers`); `None` where it may move with them.
+pub(crate) fn frame_lock(
+    struts: &[SweepStrut],
+    tied: &[bool],
+    member: usize,
+    followers: &[usize],
+) -> Option<FrameLock> {
+    if tied.get(member).copied().unwrap_or(false) {
+        Some(FrameLock::CrossTied)
+    } else if followers.iter().any(|&follower| tied.get(follower).copied().unwrap_or(false)) {
+        Some(FrameLock::CrossTiedBelow)
+    } else if followers
+        .iter()
+        .any(|&follower| struts.get(follower).is_some_and(|strut| strut.kind != StrutKind::Arm))
+    {
+        Some(FrameLock::NonArmResting)
+    } else {
+        None
+    }
+}
+
 /// What the rule did to one field.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LipSeatOutcome {
@@ -222,6 +353,26 @@ pub struct LipSeatOutcome {
     /// The deepest such cut, mm, and the widest approach angle among them.
     pub max_bite_before_mm: f64,
     pub max_approach_before_deg: f64,
+    /// **The clearance re-route's survey** ([`Trigger::Clearance`], filled
+    /// only by that run): arms the census named within the final gap on the
+    /// first pass of the run (the lip-seat rule's own re-landings excluded),
+    /// and on the last pass's field.
+    pub clearance_violators_first: usize,
+    pub clearance_violators_last: usize,
+    /// Of the arms `kept_carrying` kept (on the last pass): those with a
+    /// cross tied to them, those with a member that is not an arm (a brace, a
+    /// mast, a tie) resting on them or on one of their descendants, and those
+    /// held back by a member resting on them that was sent itself.
+    pub kept_locked_by_tie: usize,
+    pub kept_locked_by_non_arm_below: usize,
+    pub kept_behind_a_follower_also_sent: usize,
+    /// **Named, with the reason** (challenger round 3, 2026-10-05): every arm
+    /// the clearance re-route was sent and kept where it stands (on the last
+    /// pass) because a cross, a brace, a mast or a tie belongs to the frame
+    /// it carries ([`FrameLock`]). Each is a WARNING on the emitted file: the
+    /// re-route does not move the junction of a frame the slenderness ladder
+    /// solved and does not re-plan that frame.
+    pub kept_for_a_frame: Vec<(u32, FrameLock)>,
     /// Remedy 1: arms re-landed so they meet their face within the limit.
     pub arms_relanded: usize,
     /// Of those, the ones re-landed on the MODEL below them rather than on a
@@ -359,6 +510,10 @@ struct Proposal {
 /// path there, or `None` when one of them cannot follow: its landing layer is
 /// no longer on the moved shaft, its straight segment is blocked, or the lean
 /// law cannot close the new gap.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the field and its index, the mover's new axis, and the members that follow it"
+)]
 fn children_follow(
     context: &SlendernessContext<'_>,
     index: &ColumnHistory,
@@ -367,26 +522,40 @@ fn children_follow(
     k_bottom: usize,
     path: &[u32],
     children: &[usize],
+    transitive: bool,
 ) -> Option<Vec<Follow>> {
-    let host = &struts[mover];
+    // Each host that moved, with the base layer and path its axis now has:
+    // the mover first. With `transitive` the list holds every descendant of
+    // the mover, parents before children, and a descendant lands on its OWN
+    // host's moved axis (the clearance re-route moves a whole subtree).
+    let mut moved: Vec<(usize, usize, Vec<u32>)> = vec![(mover, k_bottom, path.to_vec())];
     let mut out = Vec::with_capacity(children.len());
     for &child in children {
         let strut = &struts[child];
-        let Landing::Strut { layer, .. } = strut.landing else {
+        let Landing::Strut { id: host_id, layer } = strut.landing else {
             return None;
         };
-        if layer < k_bottom || layer > host.k_top {
+        let (host, host_k_bottom, host_path) = moved
+            .iter()
+            .find(|(member, _, _)| *member == host_id as usize)
+            .map(|(member, k_bottom, path)| (&struts[*member], *k_bottom, path.as_slice()))?;
+        if layer < host_k_bottom || layer > host.k_top {
             return None;
         }
-        let cell = path
-            .get(layer - k_bottom)
+        let cell = host_path
+            .get(layer - host_k_bottom)
             .map_or(host.cell, |cell| *cell as usize);
         let lateral_mm = crate::cell_distance_mm(context.grid, strut.cell, cell);
         context
             .lean
             .descent_cost_mm(strut.k_top.checked_sub(layer)?, lateral_mm)?;
         // The child may pass through the host it lands on and through its own
-        // old shaft, which the index still holds.
+        // old shaft, which the index still holds (and, moving a subtree,
+        // through the shafts of the members that move with it).
+        let mut except: Vec<u32> = vec![host.id, strut.id];
+        if transitive {
+            except.extend(children.iter().map(|&other| struts[other].id));
+        }
         let new_path = crate::slenderness::segment_path_excluding(
             context,
             index,
@@ -394,8 +563,11 @@ fn children_follow(
             strut.k_top,
             cell,
             layer,
-            &[host.id, strut.id],
+            &except,
         )?;
+        if transitive {
+            moved.push((child, strut.k_bottom, new_path.clone()));
+        }
         out.push((child, cell, new_path));
     }
     Some(out)
@@ -458,6 +630,7 @@ pub(crate) fn apply(
     struts: &mut [SweepStrut],
     arms: &[SweepArm],
     bites: &[Option<ShaftSeatBite>],
+    trigger: Trigger<'_>,
     refused: &[(u32, usize)],
     outcome: &mut LipSeatOutcome,
 ) -> Vec<Relanding> {
@@ -492,6 +665,10 @@ pub(crate) fn apply(
     );
     outcome.kept_carrying = 0;
     outcome.kept_no_candidate = 0;
+    outcome.kept_locked_by_tie = 0;
+    outcome.kept_locked_by_non_arm_below = 0;
+    outcome.kept_behind_a_follower_also_sent = 0;
+    outcome.kept_for_a_frame.clear();
 
     // ---- who may move. An arm another member rests on moves only WITH its
     // children, and only when each child is a support arm nothing rests on and
@@ -501,26 +678,54 @@ pub(crate) fn apply(
     // pass cannot re-land.
     let carries = crate::landing_check::carries_someone(struts);
     let mut children_of: Vec<Vec<usize>> = vec![Vec::new(); struts.len()];
-    let mut tied = vec![false; struts.len()];
     for (child, strut) in struts.iter().enumerate() {
         if let Landing::Strut { id, .. } = strut.landing {
             if let Some(list) = children_of.get_mut(id as usize) {
                 list.push(child);
             }
         }
-        if let Some(host) = strut.seat_on_strut {
-            if let Some(flag) = tied.get_mut(host as usize) {
-                *flag = true;
-            }
-        }
     }
+    let tied = crosses_seated(struts);
+    // **The clearance re-route moves a whole SUBTREE.** An arm sent for its
+    // clearance that carries members which carry others (the overhang
+    // table's post 26: three branches, one with two branches of its own) is
+    // the ordinary case of a thick, heavily loaded trunk, and it is the one
+    // the area law grew into the model. It moves with every arm that rests on
+    // it, directly or not (each lands on its own host's moved axis, parents
+    // before children); it stays locked only where a member that is not an
+    // arm (a brace, a mast) rests on it somewhere below, or a cross is tied
+    // to it or to one of them, since this pass cannot re-land those.
+    let followers_of: Vec<Vec<usize>> = if trigger.is_clearance() {
+        (0..struts.len())
+            .map(|member| {
+                let mut out: Vec<usize> = Vec::new();
+                let mut stack: Vec<usize> = children_of[member].iter().rev().copied().collect();
+                while let Some(next) = stack.pop() {
+                    if out.len() > struts.len() {
+                        break;
+                    }
+                    out.push(next);
+                    stack.extend(children_of[next].iter().rev().copied());
+                }
+                out
+            })
+            .collect()
+    } else {
+        children_of.clone()
+    };
     let mut locked: Vec<bool> = (0..struts.len())
         .map(|member| {
             carries[member]
                 && (tied[member]
-                    || children_of[member]
-                        .iter()
-                        .any(|&child| carries[child] || struts[child].kind != StrutKind::Arm))
+                    || if trigger.is_clearance() {
+                        followers_of[member]
+                            .iter()
+                            .any(|&follower| tied[follower] || struts[follower].kind != StrutKind::Arm)
+                    } else {
+                        children_of[member]
+                            .iter()
+                            .any(|&child| carries[child] || struts[child].kind != StrutKind::Arm)
+                    })
         })
         .collect();
     let to_move: Vec<bool> = struts
@@ -528,25 +733,44 @@ pub(crate) fn apply(
         .zip(bites)
         .enumerate()
         .map(|(index_of, (strut, bite))| {
-            bite.as_ref().is_some_and(over_limit)
+            trigger.sends(index_of, bite.as_ref())
                 && strut.kind == StrutKind::Arm
                 && strut.k_bottom != usize::MAX
                 && !locked[index_of]
         })
         .collect();
 
-    // ---- stage 1: price every candidate descent of every arm over its limit.
+    // ---- stage 1: price every candidate descent of every arm sent.
     let mut pending: Vec<Pending> = Vec::new();
     for (index_of, (strut, bite)) in struts.iter().zip(bites).enumerate() {
-        let Some(bite) = bite else { continue };
-        if !over_limit(bite) || strut.kind != StrutKind::Arm || strut.k_bottom == usize::MAX {
+        if !trigger.sends(index_of, bite.as_ref())
+            || strut.kind != StrutKind::Arm
+            || strut.k_bottom == usize::MAX
+        {
             continue;
         }
         // A child that is itself over its limit is re-landed first; the
         // parent is taken on the next pass, with whatever still rests on it.
-        let children = children_of[index_of].clone();
+        let children = followers_of[index_of].clone();
         if locked[index_of] || children.iter().any(|&child| to_move[child]) {
             outcome.kept_carrying += 1;
+            // Why, for the report: a cross tied to it, a member that is not an
+            // arm (a brace, a mast) resting on it or below it, an arm that
+            // carries others (the lip-seat rule's own lock), or a member that
+            // rests on it being sent itself (it goes first, this arm next pass).
+            if tied[index_of] {
+                outcome.kept_locked_by_tie += 1;
+            } else if children.iter().any(|&child| tied[child] || struts[child].kind != StrutKind::Arm) {
+                outcome.kept_locked_by_non_arm_below += 1;
+            } else if !locked[index_of] {
+                outcome.kept_behind_a_follower_also_sent += 1;
+            }
+            // Named, with its reason: kept for a frame is a WARNING.
+            if trigger.is_clearance() && locked[index_of] {
+                if let Some(lock) = frame_lock(struts, &tied, index_of, &children) {
+                    outcome.kept_for_a_frame.push((strut.id, lock));
+                }
+            }
             continue;
         }
         let Some(arm) = arms.get(index_of) else {
@@ -563,7 +787,10 @@ pub(crate) fn apply(
             index_of,
             arm.seat_mm,
             normal,
-            bite.limit_deg,
+            // An arm sent for clearance that has no measured bite (its seat
+            // trim is not an issue) keeps the whole half space: the angle the
+            // lowering measures below is what decides.
+            bite.as_ref().map_or(90.0, |bite| bite.limit_deg),
             &to_move,
             &children,
             outcome,
@@ -596,7 +823,15 @@ pub(crate) fn apply(
             while job.next < job.candidates.len() {
                 let candidate = job.candidates[job.next];
                 job.next += 1;
-                match propose(context, &index, struts, job.index, candidate, &job.children) {
+                match propose(
+                    context,
+                    &index,
+                    struts,
+                    job.index,
+                    candidate,
+                    &job.children,
+                    trigger.is_clearance(),
+                ) {
                     Some((path, children)) => {
                         proposals.push(Proposal {
                             slot,
@@ -734,7 +969,7 @@ pub(crate) fn apply(
             let new_root = !matches!(proposal.candidate.landing, Landing::Strut { .. });
             let clear = surface.is_none()
                 || (first..=first + proposal.children.len()).all(|slot| {
-                    let minimum = if slot == first && new_root {
+                    let minimum = if slot == first && (new_root || trigger.is_clearance()) {
                         tier
                     } else {
                         tier.min(before[slot].unwrap_or(tier).max(0.0))
@@ -746,9 +981,7 @@ pub(crate) fn apply(
                 continue;
             }
             // The mover keeps its section; each child is no worse than it was.
-            let mover_keeps = measured[first]
-                .as_ref()
-                .is_some_and(|bite| !over_limit(bite));
+            let mover_keeps = measured[first].as_ref().map_or(trigger.is_clearance(), |bite| !over_limit(bite));
             let children_hold =
                 proposal
                     .children
@@ -760,9 +993,9 @@ pub(crate) fn apply(
                             .copied()
                             .flatten()
                             .map_or(0.0, |bite| bite.bite_mm);
-                        measured[first + 1 + offset]
-                            .as_ref()
-                            .is_some_and(|bite| bite.bite_mm <= before.max(0.0) + BITE_SLACK_MM)
+                        measured[first + 1 + offset].as_ref().map_or(trigger.is_clearance(), |bite| {
+                            bite.bite_mm <= before.max(0.0) + BITE_SLACK_MM
+                        })
                     });
             let above_plate = (0..=proposal.children.len()).all(|offset| {
                 let arm = &trial[first + offset];
@@ -833,6 +1066,7 @@ pub(crate) fn apply(
                 index_of,
                 proposal.candidate,
                 &job.children,
+                trigger.is_clearance(),
             );
             let Some((path, children)) = again.filter(|(path, children)| {
                 *path == proposal.path && *children == proposal.children
@@ -1330,6 +1564,7 @@ fn propose(
     mover: usize,
     candidate: Candidate,
     children: &[usize],
+    transitive: bool,
 ) -> Option<(Vec<u32>, Vec<Follow>)> {
     // THE PARENT MUST STAND HERE NOW: another arm of this pass may have been
     // re-landed from under the index's picture of it.
@@ -1363,6 +1598,7 @@ fn propose(
         candidate.k_bottom,
         &path,
         children,
+        transitive,
     )?;
     Some((path, followed))
 }
@@ -1695,6 +1931,77 @@ pub(crate) fn record_before(outcome: &mut LipSeatOutcome, bites: &[Option<ShaftS
             outcome.max_approach_before_deg =
                 outcome.max_approach_before_deg.max(bite.approach_deg);
         }
+    }
+}
+
+/// **A carrier kept for a frame is NAMED, with why** (challenger round 3,
+/// 2026-10-05, finding 3): the Cylinder's arms 171, 195 and 203 stood 0.20 to
+/// 0.24 mm from the model, each with a cross seated on it, and the re-route
+/// only counted them (`kept_locked_by_tie 3`). Each is now a WARNING naming
+/// the arm and the part of a frame that holds it.
+#[cfg(test)]
+mod frame_lock_tests {
+    use super::{crosses_seated, frame_lock, FrameLock};
+    use crate::{Landing, SeatFace, StrutKind, SweepStrut};
+
+    fn member(id: u32, kind: StrutKind, landing: Landing, seat_on_strut: Option<u32>) -> SweepStrut {
+        SweepStrut {
+            id,
+            cell: 0,
+            center_mm: [0.0, 0.0],
+            kind,
+            min_radius_mm: 0.0,
+            thickened_mm: Vec::new(),
+            seat_on_strut,
+            k_top: 100,
+            k_bottom: 0,
+            landing,
+            interior: false,
+            radius_mm: Vec::new(),
+            carried_mm2: Vec::new(),
+            covered_demand: Vec::new(),
+            inserted_by_load: false,
+            path: Vec::new(),
+            straight_fallback: None,
+            fallback_path: Vec::new(),
+            seat_face: SeatFace::default(),
+            seat_normal: [0.0; 3],
+        }
+    }
+
+    /// Carrier 0 on the plate, arm 1 resting on it, partner post 2, and
+    /// member 3: a cross diagonal seated on `seated_on` and landing on the
+    /// partner (or, with `seated_on` `None`, an arm on the partner instead).
+    fn field(seated_on: Option<u32>, third: StrutKind) -> Vec<SweepStrut> {
+        vec![
+            member(0, StrutKind::Arm, Landing::Plate, None),
+            member(1, StrutKind::Arm, Landing::Strut { id: 0, layer: 40 }, None),
+            member(2, StrutKind::Arm, Landing::Plate, None),
+            member(3, third, Landing::Strut { id: 2, layer: 30 }, seated_on),
+        ]
+    }
+
+    #[test]
+    fn a_carrier_held_by_a_frame_is_named_with_the_part_that_holds_it() {
+        // A cross seated on the carrier itself.
+        let struts = field(Some(0), StrutKind::Brace);
+        let tied = crosses_seated(&struts);
+        assert_eq!(tied, vec![true, false, false, false]);
+        assert_eq!(frame_lock(&struts, &tied, 0, &[1]), Some(FrameLock::CrossTied));
+        // A cross seated on the arm resting on it.
+        let struts = field(Some(1), StrutKind::Brace);
+        let tied = crosses_seated(&struts);
+        assert_eq!(frame_lock(&struts, &tied, 0, &[1]), Some(FrameLock::CrossTiedBelow));
+        // A mast resting on it.
+        let mut struts = field(None, StrutKind::Arm);
+        struts[1].kind = StrutKind::Mast;
+        let tied = crosses_seated(&struts);
+        assert_eq!(frame_lock(&struts, &tied, 0, &[1]), Some(FrameLock::NonArmResting));
+        // CONTROL: no frame anywhere under it, it moves with its follower.
+        let struts = field(None, StrutKind::Arm);
+        let tied = crosses_seated(&struts);
+        assert_eq!(tied, vec![false; 4]);
+        assert_eq!(frame_lock(&struts, &tied, 0, &[1]), None);
     }
 }
 
@@ -2151,6 +2458,8 @@ mod model_landing_tests {
             mast_root_clearance: true,
             final_clearance_mm: 0.3,
             member_clearance: true,
+            model_surface: None,
+            plate_z_mm: 0.0,
             shaft_landings: true,
             merge: true,
             brace: true,

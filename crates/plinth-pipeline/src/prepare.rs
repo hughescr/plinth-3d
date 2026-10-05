@@ -2849,6 +2849,88 @@ fn print_sweep_disclosure(
             lip.arms_graded_after,
             lip.over_limit_after.len(),
         );
+        // THE DRAWN SOLID OF EVERY DESCENT (fix/drawn-solid-clearance,
+        // 2026-10-04): path-hit witnesses that the up-sweep read each
+        // descent's solid against the model, and that the test bit.
+        let hits = &report.counters;
+        println!(
+            "[sweep {model}] drawn-solid descent (two tiers, preferred 0.6 mm then the final \
+             gap): {} descents read; {} straight descents inside the preferred margin (kept \
+             where they clear the final gap); {} straight descents refused at the final gap; \
+             {} replaced by a leaned descent that clears the preferred margin; {} replaced by \
+             one that clears the final gap only; {} cleared by no descent (kept, warned by the \
+             census); {} lean candidates refused; {} seats moved to a cell covering the same \
+             demand; {} thickenings refused for the model ({} raised slots flagged by the \
+             raster, {} of them measured clear by the census's predicate, {} proved inside the \
+             gap already as drawn)",
+            hits.descent_solid_tested,
+            hits.descent_solid_inside_preferred_margin,
+            hits.descent_solid_refused_at_final_gap,
+            hits.descent_solid_cleared_by_lean,
+            hits.descent_solid_at_final_gap_only,
+            hits.descent_solid_uncleared,
+            hits.descent_solid_lean_candidates_refused,
+            hits.descent_solid_seats_moved,
+            report.slenderness_lane.thicken_refused_model,
+            report.slenderness_lane.thicken_slots_flagged,
+            report.slenderness_lane.thicken_slots_measured_clear,
+            report.slenderness_lane.thicken_slots_inside_already,
+        );
+        // THE CLEARANCE RE-ROUTE (fix/drawn-solid-clearance R2.2): path-hit
+        // witnesses that the census named arms after the final sizing and the
+        // lip-seat machinery moved them.
+        let reroute = &report.clearance_reroute;
+        println!(
+            "[sweep {model}] clearance re-route after the final sizing ({}): {} arms within the \
+             final gap on the first pass (the lip-seat rule's own re-landings left alone), {} on \
+             the last; {} passes; {} candidates priced, {} refused by the path test, {} by the \
+             plate rule, {} by the clearance of the moved solid, {} by the roots, {} by the \
+             lowering's measurement; {} arms re-landed ({} on the model, {} children moved with \
+             them); {} kept carrying on the last pass ({} with a cross tied to them, {} with a \
+             brace, mast or tie resting on them or below, {} behind a member resting on them \
+             that was sent itself), {} with no candidate; {} sized checks; {} moves put back \
+             for a host's load, {} for roots",
+            if reroute.enabled { "on" } else { "off" },
+            reroute.clearance_violators_first,
+            reroute.clearance_violators_last,
+            reroute.passes,
+            reroute.candidates_priced,
+            reroute.candidates_refused_path,
+            reroute.candidates_refused_plate,
+            reroute.candidates_refused_clearance,
+            reroute.candidates_refused_roots,
+            reroute.candidates_refused_measured,
+            reroute.arms_relanded,
+            reroute.relanded_on_model,
+            reroute.children_moved_with_host,
+            reroute.kept_carrying,
+            reroute.kept_locked_by_tie,
+            reroute.kept_locked_by_non_arm_below,
+            reroute.kept_behind_a_follower_also_sent,
+            reroute.kept_no_candidate,
+            reroute.sizing_checks,
+            reroute.moves_put_back_host_load,
+            reroute.moves_put_back_roots,
+        );
+        // Kept for a frame (challenger round 3, 2026-10-05): named, with why.
+        for (arm, lock) in &reroute.kept_for_a_frame {
+            let why = match lock {
+                plinth_sweep::lip_seat::FrameLock::CrossTied => "a cross is seated on it",
+                plinth_sweep::lip_seat::FrameLock::CrossTiedBelow => {
+                    "a cross is seated on a member resting on it"
+                }
+                plinth_sweep::lip_seat::FrameLock::NonArmResting => {
+                    "a brace, mast or model tie rests on it or below it"
+                }
+            };
+            println!(
+                "[sweep {model}] WARNING arm {arm} stands within the final gap of the model and \
+                 the clearance re-route kept it where it stands: {why}, so moving it would move \
+                 a junction of a frame the slenderness ladder solved, and this pass neither \
+                 carries a frame unsolved nor takes one down [a WARNING on an emitted file, \
+                 never a refusal]"
+            );
+        }
         // EVERY MEMBER'S DRAWN SOLID AGAINST THE MODEL (fix/morel-long-posts,
         // 2026-10-02): arm shafts included.
         let clearance = &report.member_model_clearance;

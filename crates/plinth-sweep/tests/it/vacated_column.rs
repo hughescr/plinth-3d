@@ -124,10 +124,23 @@ fn a_leaned_arm_carries_the_island_it_roots_and_the_seat_blind_rule_drops_it() {
     // the two re-scopings answer two different causes (the seat placement from
     // fix/lattice-align, the ball ratio from fix/chitubox-geometry), and the
     // merged tree has both, so the fixture is graded under both.
+    //
+    // RE-PINNED 2026-10-04 (fix/drawn-solid-clearance): and under the
+    // centreline-only descent the fixture was measured on. With the
+    // drawn-solid descent the flipped Round's arms that ran along the ring
+    // lip's wall are replaced, the island this fixture needs a leaned arm to
+    // root is no longer left by the seat-blind rule (it lost 0 mm2 against
+    // 0.2100), and the fixture would grade nothing. The rule graded is the
+    // down-sweep's accounting, which reads no descent clearance.
     let policy = harness::at_path_fixture_seating(
         SweepPolicy::from_registry()
             .expect("registry")
-            .without_lip_seat(),
+            .without_lip_seat()
+            .without_drawn_solid_descent()
+            // The clearance re-route (R2.2) is off too: it moves arms after
+            // the final sizing, and the island this fixture needs a leaned
+            // arm to root is not left by the seat-blind rule on that field.
+            .without_clearance_reroute(),
     );
     let with = sweep_with(&mesh, 0.0, &policy);
     let without = sweep_with(&mesh, 0.0, &policy.without_tip_column_roots());

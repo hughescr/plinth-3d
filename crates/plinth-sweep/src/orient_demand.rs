@@ -283,8 +283,19 @@ impl DemandSettings {
         // the pose that is built is judged with bracing in. Without the ties
         // a prefilter row reports 0 braces and 0 masts, and its arm count has
         // no model tie in it.
+        // NOR DOES IT READ THE DRAWN SOLID OF A DESCENT
+        // (fix/drawn-solid-clearance, 2026-10-04): the coarse raster's own
+        // resolution term, half a cell's diagonal, is 0.35 mm at 0.5 mm pitch,
+        // larger than the 0.3 mm final gap the test reads, so it would find
+        // walls that are not there (the tall stilt plate's tilted coarse sweep
+        // went from 349 arms to 302), and the prefilter ranks poses by the
+        // arms they cost, which this rule must not change. The production
+        // measurement of the finalists, at the registered pitch, reads it.
         let policy = match fidelity {
-            DemandFidelity::Prefilter => policy.without_slenderness_ties(),
+            DemandFidelity::Prefilter => policy
+                .without_slenderness_ties()
+                .without_drawn_solid_descent()
+                .without_clearance_reroute(),
             DemandFidelity::Production => policy,
         };
         Ok(Self {

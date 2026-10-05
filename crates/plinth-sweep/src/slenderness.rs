@@ -444,6 +444,17 @@ pub struct SlendernessOutcome {
     pub members_thickened: usize,
     pub thicken_refused_radius: usize,
     pub thicken_refused_disc: usize,
+    /// Thickenings refused because the raised solid, of the member or of a
+    /// trunk raised with it, would enter the model's final clearance gap where
+    /// the solid as drawn now does not (R2, 2026-10-04). A path-hit witness.
+    pub thicken_refused_model: usize,
+    /// The refusal's path hits (challenger round 3, 2026-10-05): raised slots
+    /// the raster flagged within the gap, and of those the ones the census's
+    /// predicate measured clear as committed, and the ones it proved inside
+    /// the gap already as drawn (excused, not the plan's doing).
+    pub thicken_slots_flagged: usize,
+    pub thicken_slots_measured_clear: usize,
+    pub thicken_slots_inside_already: usize,
     /// Thickenings APPLIED whose root disc already lapped another root before
     /// the growth (and laps it more after): the growth made no new lap, so
     /// the rung is not refused (orchestrator ruling 2026-09-29, the stilt
@@ -1543,6 +1554,17 @@ pub struct SlendernessContext<'a> {
     /// against the model and against every member it is not joined to, or
     /// only its centreline cell, as before 2026-09-29.
     pub member_clearance: bool,
+    /// The model's surface, in the mesh's frame (the plate at
+    /// `plate_z_mm`), where the run built it: the thickening refusal
+    /// ([`ThickenRefusal::Model`]) takes each member's contact zones from the
+    /// faces its ends stand against and decides every slot with the census's
+    /// own clearance predicate on the drawn frustum (challenger round 3,
+    /// 2026-10-05). `None`: the raster reads alone, with the longest zones,
+    /// and no slot is ever proved inside the gap already (so a raise the
+    /// raster flags is refused).
+    pub model_surface: Option<&'a geom_kernel::NativeSurface>,
+    /// The plate's z in the mesh's frame (the raster's frame has it at 0).
+    pub plate_z_mm: f64,
     /// Whether a member may land part-way down another member's shaft at all.
     /// Remedy 1 IS a shaft landing, so the descent knob that forbids one must
     /// forbid the other; otherwise the sabotage drill measures a rule it did
@@ -2027,6 +2049,10 @@ pub(crate) fn apply_ties_with_model(
         }
     }
     prune_unneeded_crosses(context, &state, struts, first_new, outcome);
+    let reads = state.thicken_reads.get();
+    outcome.thicken_slots_flagged += reads.flagged;
+    outcome.thicken_slots_measured_clear += reads.measured_clear;
+    outcome.thicken_slots_inside_already += reads.inside_already;
     applied
 }
 
@@ -2446,6 +2472,20 @@ struct TieState {
     /// crosses)`. A set's diagonals are pushed back to back, two per cross,
     /// and the prune judges a set as one ([`prune_unneeded_crosses`]).
     band_sets: Vec<(usize, usize)>,
+    /// The thickening refusal's reads over the pass (path hits), summed
+    /// into the outcome when the pass ends.
+    thicken_reads: std::cell::Cell<ThickenReads>,
+}
+
+/// What the thickening refusal read ([`thickening_enters_the_gap`]): raised
+/// slots the raster flagged, and of those the ones the census's predicate
+/// measured clear when committed, and the ones it proved inside the gap
+/// already as drawn.
+#[derive(Clone, Copy, Debug, Default)]
+struct ThickenReads {
+    flagged: usize,
+    measured_clear: usize,
+    inside_already: usize,
 }
 
 impl TieState {
@@ -2570,6 +2610,7 @@ impl TieState {
             drawn_offsets,
             flare_shortfall: std::cell::Cell::new(None),
             band_sets: Vec::new(),
+            thicken_reads: std::cell::Cell::new(ThickenReads::default()),
         }
     }
 
@@ -3806,6 +3847,10 @@ fn thicken_to(
             outcome.thicken_refused_disc += 1;
             false
         }
+        Some(Err(ThickenRefusal::Model)) => {
+            outcome.thicken_refused_model += 1;
+            false
+        }
         Some(Ok(plan)) => {
             commit_thicken(state, struts, &plan, outcome);
             true
@@ -3820,7 +3865,348 @@ enum ThickenRefusal {
     Radius,
     /// The grown plate root's drawn foot would make a new lap of another root.
     Disc,
+    /// The raised solid, of the member or of a trunk raised with it, would
+    /// enter the model's final clearance gap where it does not now.
+    Model,
 }
+
+/// Whether raising the members of `plan` puts a raised stretch of any of them
+/// inside the model's final gap where that stretch as drawn now stands clear
+/// ([`ThickenRefusal::Model`]).
+///
+/// Each member's raised stretch, from its foot to the layer the plan raises
+/// it to, is cut where the plan changes shape (a constant root below the
+/// run, a linear taper over it), and walked SLOT BY SLOT (challenger round 2,
+/// 2026-10-04): the frustum a slot has when the plan is committed (the larger
+/// of the profile drawn now and the plan's minimum, at each of its two
+/// layers) against the frustum drawn there now. A slot that clears now and
+/// enters the gap committed refuses the plan; one that is inside the gap
+/// already, or that the plan does not raise, does not. A wider section or an
+/// existing violation elsewhere in the piece excuses nothing.
+///
+/// Challenger round 3 (2026-10-05), the two reads it named:
+///
+/// * **Each solid is excused its OWN contact zones, no longer ones.** A
+///   member's seat zone is where that solid first stands `gap` clear of the
+///   face its seat stands against, and on the model its landing zone is the
+///   same at its landing face ([`crate::member_clearance::contact_zone_mm`],
+///   the form the up-sweep's descent test uses), each at the solid's own
+///   radius at that end (the committed solid's for the committed read, the
+///   drawn one's for the drawn read). The read it replaces excused every
+///   member `zone_factor · (r + gap)` at both ends: a 0.6 mm trunk under a
+///   flat seat raised to 0.15 mm was exempt whole (0.837 mm), so its growth
+///   toward a wall beside its foot was never read.
+/// * **"Inside the gap already" is PROVED, never flagged.** The raster only
+///   flags (its reach carries half a cell's diagonal, so a flagged slot can
+///   be clear); a slot the raster flags committed is decided by the census's
+///   own clearance predicate on the drawn frustum
+///   ([`geom_kernel::NativeSurface::segment_frustum_clearance_classified`]),
+///   once for the committed solid and once for the drawn one, all such slots
+///   of the plan in ONE batch. The committed slot enters the gap unless the
+///   predicate MEASURES it clear; the drawn slot is inside the gap already
+///   only where the predicate reads it under the gap (a measured value, or an
+///   upper bound under the gap). Without a model surface nothing can be
+///   proved, so a slot the raster flags committed refuses the plan.
+///
+/// Challenger round 5 (2026-10-05): **an unknown face exempts nothing.**
+/// Without a surface, or where the query names no face for an end, that
+/// end's zone is ZERO ([`crate::member_clearance::contact_zone_mm`]), so the
+/// raster reads the solid up to its contact and the flag reaches the refusal
+/// above. The retired read gave the longest zone there, which exempted a
+/// short trunk whole: nothing was flagged, and the plan was admitted before
+/// the no-surface refusal could run. A member with an unknown face is never
+/// proved inside the gap already either (its zero zone reads its own contact
+/// as inside the gap, which proves nothing about the plan).
+fn thickening_enters_the_gap(
+    context: &SlendernessContext<'_>,
+    state: &TieState,
+    struts: &[SweepStrut],
+    plan: &ThickenPlan,
+) -> bool {
+    use crate::member_clearance::{contact_faces, contact_zone_mm, inset_segment_intrusion, ContactFace};
+    let (grid, history, h) = (context.grid, context.history, context.layer_height_mm);
+    let gap = context.final_clearance_mm;
+    let factor = context.lean.face_zone_factor();
+    let lift = |point: [f64; 3]| [point[0], point[1], point[2] + context.plate_z_mm];
+    // The members the plan raises, with their two ends on the raster's frame.
+    let members: Vec<(usize, usize, usize, [f64; 3], [f64; 3])> = plan
+        .chain
+        .iter()
+        .enumerate()
+        .filter_map(|(position, &(index, highest))| {
+            let strut = struts.get(index)?;
+            let upto = plan.upto(position, highest).min(strut.k_top + 1);
+            if strut.k_bottom == usize::MAX || strut.k_top <= strut.k_bottom || upto <= strut.k_bottom + 1 {
+                return None;
+            }
+            let seat = crate::member_clearance::axis_point(grid, h, strut.cell, strut.k_top);
+            let base = crate::member_clearance::axis_point(grid, h, strut.base_cell(), strut.k_bottom);
+            Some((position, index, upto, seat, base))
+        })
+        .collect();
+    // The face each member's seat, and each model landing, stands against:
+    // one nearest-point batch for the plan.
+    let (seat_faces, landing_faces): (Vec<Option<ContactFace>>, Vec<Option<ContactFace>>) =
+        match context.model_surface {
+            Some(surface) => {
+                let mut points: Vec<[f64; 3]> = members.iter().map(|member| lift(member.3)).collect();
+                points.extend(members.iter().map(|member| lift(member.4)));
+                let mut faces = contact_faces(surface, &points);
+                let landings = faces.split_off(members.len());
+                let landings = landings
+                    .into_iter()
+                    .zip(&members)
+                    .map(|(face, member)| {
+                        face.filter(|_| matches!(struts[member.1].landing, Landing::Model { .. }))
+                    })
+                    .collect();
+                (faces, landings)
+            }
+            None => (vec![None; members.len()], vec![None; members.len()]),
+        };
+    // Every slot the raster flags committed: (top, bottom) on the raster's
+    // frame, then the committed and the drawn frustum, each as
+    // (radius at top, radius at bottom, inset at top, inset at bottom).
+    // A member whose seat face, or model landing face, is unknown: its zones
+    // there are zero, and nothing about it can be proved inside the gap.
+    let faces_known: Vec<bool> = members
+        .iter()
+        .enumerate()
+        .map(|(slot_of, member)| {
+            seat_faces[slot_of].is_some()
+                && (!matches!(struts[member.1].landing, Landing::Model { .. })
+                    || landing_faces[slot_of].is_some())
+        })
+        .collect();
+    type Read = (f64, f64, f64, f64);
+    let mut flagged: Vec<([f64; 3], [f64; 3], Read, Read, bool)> = Vec::new();
+    for (slot_of, &(position, index, upto, seat, base)) in members.iter().enumerate() {
+        let strut = &struts[index];
+        let top_layer = upto - 1;
+        // Piece boundaries, foot first.
+        let mut cuts = vec![strut.k_bottom];
+        if position == 0 && plan.k_lo > strut.k_bottom && plan.k_lo < top_layer {
+            cuts.push(plan.k_lo);
+        }
+        if top_layer > *cuts.last().unwrap_or(&strut.k_bottom) {
+            cuts.push(top_layer);
+        }
+        let span = (strut.k_top - strut.k_bottom) as f64;
+        let at =|layer: usize| -> [f64; 3] {
+            let t = (layer - strut.k_bottom) as f64 / span;
+            std::array::from_fn(|axis| base[axis] + t * (seat[axis] - base[axis]))
+        };
+        // The radius drawn now at a layer, and the radius it is drawn at if
+        // the plan is committed (the plan only raises, and only below `upto`).
+        let current = |layer: usize| {
+            drawn_at(strut, &state.profiles[index], layer)
+                .unwrap_or(0.0)
+                .max(strut.min_radius_mm)
+        };
+        let committed = |layer: usize| {
+            if layer < upto {
+                current(layer).max(plan.wanted(position, layer))
+            } else {
+                current(layer)
+            }
+        };
+        // Only a slot the plan really raises can be its doing.
+        let grows = |layer: usize| committed(layer) > current(layer) + 1.0e-12;
+        // A solid's radius at an end: the end layer's, or the slot below it
+        // where the profile stops one short of the seat.
+        let end_radius = |radius: &dyn Fn(usize) -> f64, layer: usize| {
+            let here = radius(layer);
+            if here > 0.0 || layer == 0 {
+                here
+            } else {
+                radius(layer - 1)
+            }
+        };
+        let length = geom_kernel::vec3::dist(seat, base);
+        if !(length.is_finite() && length > 0.0) {
+            continue;
+        }
+        let down = geom_kernel::vec3::scale(geom_kernel::vec3::sub(base, seat), 1.0 / length);
+        let up = geom_kernel::vec3::scale(down, -1.0);
+        let on_model = matches!(strut.landing, Landing::Model { .. });
+        // A solid's radius `s` mm along its axis from its seat end
+        // (`from_seat`) or its landing end: the wider of the two layers the
+        // point stands between.
+        let radius_along = |radius: &dyn Fn(usize) -> f64, s: f64, from_seat: bool| -> f64 {
+            let steps = (s / length).clamp(0.0, 1.0) * span;
+            let layer = if from_seat {
+                strut.k_top as f64 - steps
+            } else {
+                strut.k_bottom as f64 + steps
+            };
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a layer between the member's own two end layers, floored and ceiled"
+            )]
+            let (below, above) = (layer.floor() as usize, layer.ceil() as usize);
+            let at = |k: usize| {
+                if k >= strut.k_top {
+                    end_radius(radius, strut.k_top)
+                } else {
+                    radius(k)
+                }
+            };
+            at(below).max(at(above))
+        };
+        // A solid's own zone at one end: where ITS surface first stands `gap`
+        // clear of that end's face plane. A tapered solid is wider at the
+        // zone's edge than at its end, so the zone is read at the radius the
+        // solid has at its edge, to a fixed point (a few rounds: the zone only
+        // grows, and never past the longest the lean law admits).
+        let own_zone = |face: Option<ContactFace>,
+                        end: [f64; 3],
+                        into: [f64; 3],
+                        radius: &dyn Fn(usize) -> f64,
+                        from_seat: bool|
+         -> f64 {
+            let mut zone = contact_zone_mm(face, end, into, radius_along(radius, 0.0, from_seat), gap, factor);
+            for _ in 0..8 {
+                let wider = contact_zone_mm(face, end, into, radius_along(radius, zone, from_seat), gap, factor);
+                if wider <= zone + 1.0e-12 {
+                    break;
+                }
+                zone = wider;
+            }
+            zone
+        };
+        // Each solid's own zones: (seat zone, landing zone).
+        let zones = |radius: &dyn Fn(usize) -> f64| -> (f64, f64) {
+            let seat_zone = own_zone(seat_faces[slot_of], lift(seat), down, radius, true);
+            let landing_zone = if on_model {
+                own_zone(landing_faces[slot_of], lift(base), up, radius, false)
+            } else {
+                0.0
+            };
+            (seat_zone, landing_zone)
+        };
+        let committed_zones = zones(&committed);
+        let drawn_zones = zones(&current);
+        // The zones run from the member's own ends, not the slot's.
+        let insets = |layers: (usize, usize), zones: (f64, f64)| -> (f64, f64) {
+            let (top, bottom) = (at(layers.1), at(layers.0));
+            (
+                (zones.0 - geom_kernel::vec3::dist(seat, top)).max(0.0),
+                (zones.1 - geom_kernel::vec3::dist(bottom, base)).max(0.0),
+            )
+        };
+        let raster_flags = |layers: (usize, usize), radii: (f64, f64)| {
+            let (inset_top, inset_bottom) = insets(layers, committed_zones);
+            inset_segment_intrusion(
+                grid,
+                history,
+                h,
+                at(layers.1),
+                at(layers.0),
+                inset_top,
+                inset_bottom,
+                radii,
+                gap,
+            )
+            .is_some()
+        };
+        for pair in cuts.windows(2) {
+            let (low, high) = (pair[0], pair[1]);
+            if !(low..high).any(|layer| grows(layer) || grows(layer + 1)) {
+                continue;
+            }
+            // One raster read of the whole piece at its widest committed
+            // radius, outside the committed solid's own zones, bounds every
+            // slot of it: a piece that clears it clears the plan.
+            let widest = (low..=high).map(committed).fold(0.0, f64::max);
+            if !raster_flags((low, high), (widest, widest)) {
+                continue;
+            }
+            for layer in low..high {
+                if !(grows(layer) || grows(layer + 1)) {
+                    continue;
+                }
+                let wanted = (committed(layer + 1), committed(layer));
+                if !raster_flags((layer, layer + 1), wanted) {
+                    continue;
+                }
+                let (wanted_top, wanted_bottom) = insets((layer, layer + 1), committed_zones);
+                let (drawn_top, drawn_bottom) = insets((layer, layer + 1), drawn_zones);
+                flagged.push((
+                    at(layer + 1),
+                    at(layer),
+                    (wanted.0, wanted.1, wanted_top, wanted_bottom),
+                    (current(layer + 1), current(layer), drawn_top, drawn_bottom),
+                    faces_known[slot_of],
+                ));
+            }
+        }
+    }
+    if flagged.is_empty() {
+        return false;
+    }
+    let mut reads = state.thicken_reads.get();
+    reads.flagged += flagged.len();
+    state.thicken_reads.set(reads);
+    // Without a surface the flag cannot be confirmed, and no slot can be
+    // proved inside the gap already: the raise is refused.
+    let Some(surface) = context.model_surface else {
+        return true;
+    };
+    // ONE batch: every flagged slot's committed frustum, then its drawn one.
+    let rows = flagged.len();
+    let mut p0s: Vec<[f64; 3]> = Vec::with_capacity(2 * rows);
+    let mut p1s: Vec<[f64; 3]> = Vec::with_capacity(2 * rows);
+    let (mut r0s, mut r1s, mut i0s, mut i1s) = (
+        Vec::with_capacity(2 * rows),
+        Vec::with_capacity(2 * rows),
+        Vec::with_capacity(2 * rows),
+        Vec::with_capacity(2 * rows),
+    );
+    for drawn in [false, true] {
+        for row in &flagged {
+            let (r_top, r_bottom, inset_top, inset_bottom) = if drawn { row.3 } else { row.2 };
+            p0s.push(lift(row.0));
+            p1s.push(lift(row.1));
+            r0s.push(r_top);
+            r1s.push(r_bottom);
+            i0s.push(inset_top);
+            i1s.push(inset_bottom);
+        }
+    }
+    let Ok(verdicts) = surface.segment_frustum_clearance_classified(&p0s, &p1s, &r0s, &r1s, 0.0, &i0s, &i1s)
+    else {
+        return true;
+    };
+    let mut enters = false;
+    for row in 0..rows {
+        let committed_clears = matches!(
+            verdicts.get(row),
+            Some(geom_kernel::SegmentClearanceClassified::Measured { clearance_mm, .. })
+                if *clearance_mm >= gap - THICKEN_CLEARANCE_SLACK_MM
+        );
+        // An unknown face's zero zone reads the contact itself as inside the
+        // gap: that proves nothing, so such a member is never excused.
+        let drawn_inside_already = flagged[row].4
+            && matches!(
+                verdicts.get(rows + row),
+                Some(
+                    geom_kernel::SegmentClearanceClassified::Measured { clearance_mm, .. }
+                        | geom_kernel::SegmentClearanceClassified::UpperBound { clearance_mm, .. }
+                ) if *clearance_mm < gap - THICKEN_CLEARANCE_SLACK_MM
+            );
+        reads.measured_clear += usize::from(committed_clears);
+        reads.inside_already += usize::from(!committed_clears && drawn_inside_already);
+        enters |= !committed_clears && !drawn_inside_already;
+    }
+    state.thicken_reads.set(reads);
+    enters
+}
+
+/// Float noise on a clearance compared against the final gap: the kernel's
+/// distance at a zone's own edge, where the solid stands exactly `gap` from
+/// its face by construction. NUMERICAL, not physical.
+const THICKEN_CLEARANCE_SLACK_MM: f64 = 1.0e-9;
 
 /// One thickening, planned against the live field and not yet applied
 /// ([`commit_thicken`] applies it). Planning changes nothing, so the brace
@@ -4054,6 +4440,16 @@ fn plan_thicken(
         admitted_on_drawn_feet,
         added_mm3: 0.0,
     };
+    // **THICKENING MAY NOT PUSH A MEMBER INTO THE FINAL GAP** (R2 of
+    // `clearance-census-diagnosis.md`, 2026-10-04). The root it needs was
+    // found against the unbraced-length law alone; the overhang table's post
+    // 30 stood 0.325 mm from a leg and was raised to 0.770 mm, 0.374 mm inside
+    // it. A member, or a trunk raised with it, whose raised solid enters the
+    // gap where its solid as drawn now does not, refuses the rung; the run
+    // goes on to the cross, the mast, the model tie, then the warning.
+    if context.member_clearance && thickening_enters_the_gap(context, state, struts, &plan) {
+        return Some(Err(ThickenRefusal::Model));
+    }
     // THE RESIN IT ADDS: on every layer it raises, `π (wanted² − drawn²)`
     // times that member's own length per layer (its chord, as `run_length`
     // measures it). One pass over the layers the commit would write.
@@ -6506,6 +6902,8 @@ mod tests {
                 mast_root_clearance: true,
                 final_clearance_mm: 0.3,
                 member_clearance: true,
+                model_surface: None,
+                plate_z_mm: 0.0,
                 shaft_landings: true,
                 merge: true,
                 brace: true,
@@ -6759,6 +7157,8 @@ mod tests {
             mast_root_clearance: true,
             final_clearance_mm: 0.3,
             member_clearance: true,
+            model_surface: None,
+            plate_z_mm: 0.0,
             shaft_landings: true,
             merge: true,
             brace: true,
@@ -6923,6 +7323,8 @@ mod tests {
             mast_root_clearance: true,
             final_clearance_mm: 0.3,
             member_clearance: true,
+            model_surface: None,
+            plate_z_mm: 0.0,
             shaft_landings: true,
             merge: true,
             brace: true,
@@ -7166,6 +7568,8 @@ mod tests {
             mast_root_clearance: true,
             final_clearance_mm: 0.3,
             member_clearance: true,
+            model_surface: None,
+            plate_z_mm: 0.0,
             shaft_landings: true,
             merge: true,
             brace: true,
@@ -7270,6 +7674,8 @@ mod tests {
             mast_root_clearance: true,
             final_clearance_mm: 0.3,
             member_clearance: true,
+            model_surface: None,
+            plate_z_mm: 0.0,
             shaft_landings: true,
             merge: true,
             brace: true,
@@ -7577,6 +7983,8 @@ mod tests {
             mast_root_clearance: true,
             final_clearance_mm: 0.3,
             member_clearance: true,
+            model_surface: None,
+            plate_z_mm: 0.0,
             shaft_landings: true,
             merge: true,
             brace: true,
@@ -7756,6 +8164,352 @@ mod tests {
             thickened.windows(2).all(|pair| pair[1] <= pair[0]),
             "the taper never widens upward"
         );
+    }
+
+    /// **THICKENING MAY NOT PUSH A MEMBER INTO THE FINAL GAP** (R2,
+    /// `clearance-census-diagnosis.md`, 2026-10-04): the overhang table's post
+    /// 30 stood 0.325 mm from a leg face and the rung raised its root to 0.77
+    /// mm, 0.374 mm inside the leg.
+    ///
+    /// A 4 mm plate post over its limit with a cured wall 0.4 mm from its
+    /// axis over layers 0..=60 (its seat is at layer 80). At its drawn radius
+    /// 0.05 mm it clears the 0.3 mm gap (0.35 + the raster's 0.035 mm < 0.4);
+    /// the root the law asks for does not. Red before the rule: the rung
+    /// thickened. Green: refused, counted `thicken_refused_model`, the post
+    /// left as drawn. SABOTAGE: with `member_clearance` off it thickens again.
+    #[test]
+    fn thickening_refuses_a_root_that_would_enter_the_gap() {
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let mut history = crate::up_sweep::ColumnHistory::new(&grid);
+        for row in 90..=110 {
+            let cell = grid.index(row, 108);
+            history.model_head[cell] = u32::try_from(history.model_spans.len()).expect("a few spans");
+            history.model_spans.push(crate::up_sweep::ShaftSpan {
+                k_bottom: 0,
+                k_top: 60,
+                id: 0,
+                next: u32::MAX,
+            });
+        }
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(0.05, 45.0, 25.0);
+        let law = law();
+        let attempt = |member_clearance: bool| {
+            let context = super::SlendernessContext {
+                member_clearance,
+                ..prune_context(&grid, &history, &keep_out, &lean, &law)
+            };
+            let mut struts = vec![plate_post(&grid, 0, 100, 0.05)];
+            let mut state = super::TieState::build(&context, &struts);
+            let over: Vec<UnbracedRun> = super::member_runs(
+                &grid,
+                &struts[0],
+                &state.ties[0],
+                &state.profiles[0],
+                0.05,
+                &law,
+            )
+            .into_iter()
+            .filter(UnbracedRun::over_limit)
+            .collect();
+            assert_eq!(over.len(), 1, "anti-vacuity: the untied post is one over-limit run");
+            let mut outcome = super::SlendernessOutcome::default();
+            let done = super::thicken(&context, &mut state, &mut struts, &over[0], &mut outcome);
+            (done, outcome, struts)
+        };
+        let (done, outcome, struts) = attempt(true);
+        assert!(!done, "the rung would push the post into the wall and must refuse");
+        assert_eq!(outcome.thicken_refused_model, 1, "{outcome:?}");
+        assert!(struts[0].thickened_mm.is_empty(), "the post is left as drawn");
+        let (done, outcome, struts) = attempt(false);
+        assert!(done, "SABOTAGE: without the clearance the rung thickens the post");
+        assert_eq!(outcome.thicken_refused_model, 0);
+        assert!(struts[0].thickened_mm[0] > 0.065, "into the wall: {}", struts[0].thickened_mm[0]);
+    }
+
+    /// **THE REFUSAL COMPARES THE PROFILES AT THE PLACES THEY DIFFER**
+    /// (challenger round 2, 2026-10-04). A 4 mm plate post drawn 0.5 mm over
+    /// its lowest 10 layers (thick where it carries, far from any model) and
+    /// 0.06 mm above, and a cured wall 0.45 mm from its axis beside layers
+    /// 30..=40 only. The plan raises the root to 0.3 mm and tapers it to the tip
+    /// over the whole post, so at layers 30..=40 it writes about 0.2 mm: the
+    /// raised solid enters the 0.3 mm gap (0.2 + 0.3 + 0.035 > 0.45) where the
+    /// drawn 0.06 mm solid (0.395 mm) clears. The first reading drew the
+    /// piece's WIDEST radius (0.5 mm, from the thick foot) everywhere to
+    /// call "now", which already intersects the wall, and its `widest <= now`
+    /// shortcut skipped the piece outright. Red before the fix: admitted.
+    /// Green: refused. The control is the same plan with the wall 0.9 mm away
+    /// (admitted), and the second wall, an EXISTING violation beside the thick
+    /// foot, does not excuse the new intrusion above it.
+    #[test]
+    fn a_thin_stretch_raised_into_the_gap_is_refused_whatever_the_rest_of_the_piece_is() {
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let wall_at = |history: &mut crate::up_sweep::ColumnHistory, col: usize, k0: u32, k1: u32| {
+            for row in 90..=110 {
+                let cell = grid.index(row, col);
+                history.model_head[cell] = u32::try_from(history.model_spans.len()).expect("a few spans");
+                history.model_spans.push(crate::up_sweep::ShaftSpan {
+                    k_bottom: k0,
+                    k_top: k1,
+                    id: 0,
+                    next: u32::MAX,
+                });
+            }
+        };
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(0.05, 45.0, 25.0);
+        let law = law();
+        let enters = |history: &crate::up_sweep::ColumnHistory| {
+            let context = prune_context(&grid, history, &keep_out, &lean, &law);
+            let mut post = plate_post(&grid, 0, 100, 0.06);
+            post.radius_mm = (0..80).map(|layer| if layer < 10 { 0.5 } else { 0.06 }).collect();
+            let struts = vec![post];
+            let state = super::TieState::build(&context, &struts);
+            let plan = super::ThickenPlan {
+                k_lo: 0,
+                k_top: 80,
+                root: 0.3,
+                top: 0.06,
+                steps: 80.0,
+                chain: vec![(0, 79)],
+                disc_growth: None,
+                over_existing_lap: false,
+                admitted_on_drawn_feet: false,
+                added_mm3: 0.0,
+            };
+            super::thickening_enters_the_gap(&context, &state, &struts, &plan)
+        };
+        let mut near = crate::up_sweep::ColumnHistory::new(&grid);
+        wall_at(&mut near, 109, 30, 40);
+        assert!(enters(&near), "the raised 0.2 mm solid enters a wall 0.45 mm away");
+        let mut far = crate::up_sweep::ColumnHistory::new(&grid);
+        wall_at(&mut far, 118, 30, 40);
+        assert!(!enters(&far), "control: a wall 0.9 mm away is not entered");
+        let mut both = crate::up_sweep::ColumnHistory::new(&grid);
+        wall_at(&mut both, 107, 0, 8); // 0.35 mm beside the thick foot: already inside its gap
+        wall_at(&mut both, 109, 30, 40);
+        assert!(enters(&both), "an existing violation elsewhere excuses nothing here");
+    }
+
+    /// Cure, in `history`, every cell whose centre lies in the box
+    /// `low..=high` (x, y), over the layers that box spans in z.
+    fn cure_box(
+        grid: &crate::grid::Grid,
+        history: &mut crate::up_sweep::ColumnHistory,
+        low: [f64; 3],
+        high: [f64; 3],
+    ) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a small non-negative height over the layer height, in whole layers"
+        )]
+        let (k0, k1) = ((low[2] / 0.05).round() as u32, (high[2] / 0.05).round() as u32 - 1);
+        for cell in 0..grid.cells() {
+            let (x, y) = (grid.center_x_mm(grid.col_of(cell)), grid.center_y_mm(grid.row_of(cell)));
+            if x < low[0] - 1.0e-9 || x > high[0] + 1.0e-9 || y < low[1] - 1.0e-9 || y > high[1] + 1.0e-9 {
+                continue;
+            }
+            let slot = u32::try_from(history.model_spans.len()).expect("a few spans");
+            history.model_spans.push(crate::up_sweep::ShaftSpan {
+                k_bottom: k0,
+                k_top: k1,
+                id: 0,
+                next: history.model_head[cell],
+            });
+            history.model_head[cell] = slot;
+        }
+    }
+
+    /// **A TRUNK RAISED WITH A BRANCH IS EXCUSED ONLY ITS OWN SEAT ZONE**
+    /// (challenger round 3, 2026-10-05, finding 1). A 0.6 mm plate trunk of
+    /// radius 0.05 mm under a flat seat (a slab's underside at z = 0.6), raised
+    /// to 0.15 mm as a TRUNK of a branch's plan (chain position 1), with a
+    /// foreign wall 0.4 mm from its axis over its lowest 0.2 mm. Drawn now it
+    /// clears the wall by 0.35 mm; raised, by 0.25 mm: inside the 0.3 mm gap.
+    /// The flat seat's own zone at 0.15 mm is `gap + r` = 0.45 mm, so the
+    /// lowest 0.15 mm is read and the raise is refused. SABOTAGE INSIDE: the
+    /// retired zone, `zone_factor · (r + gap)` = 0.84 mm, covers the whole
+    /// 0.6 mm trunk, so that read exempted all of it (the raster finds
+    /// nothing outside it). CONTROL: the wall 0.85 mm away is not entered.
+    ///
+    /// **WITHOUT A SURFACE** (challenger round 5, 2026-10-05): the same slab,
+    /// wall, raster and plan with `model_surface: None` (production reaches
+    /// this when `head_join::build_surface` passes its memory cap or fails).
+    /// Red before the fix: no face meant the longest zone, the trunk was
+    /// exempt whole, nothing was flagged, and the raise was ADMITTED before
+    /// the no-surface refusal could run. Green: an unknown face exempts
+    /// nothing, so the raster flags the raised trunk and the refusal runs
+    /// (path hit: flagged slots). Without a surface nothing is provable, so
+    /// the 0.85 mm wall's raise is refused too (the trunk's own seat contact
+    /// is flagged): conservative, and counted as a refusal.
+    #[test]
+    fn a_short_trunk_raised_with_a_branch_is_read_below_its_flat_seats_own_zone() {
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(0.05, 45.0, 25.0);
+        let law = law();
+        let (cx, cy) = (grid.center_x_mm(100), grid.center_y_mm(100));
+        let slab = ([cx - 1.0, cy - 1.0, 0.6], [cx + 1.0, cy + 1.0, 1.6]);
+        // The branch whose plan raises the trunk stands 3 mm away, in the clear.
+        let branch = plate_post(&grid, 0, 40, 0.05);
+        let mut trunk = plate_post(&grid, 1, 100, 0.05);
+        trunk.k_top = 12;
+        trunk.radius_mm = vec![0.05; 12];
+        trunk.carried_mm2 = vec![0.0; 12];
+        let struts = vec![branch, trunk];
+        let plan = super::ThickenPlan {
+            k_lo: 0,
+            k_top: 80,
+            root: 0.15,
+            top: 0.05,
+            steps: 80.0,
+            chain: vec![(0, 79), (1, 11)],
+            disc_growth: None,
+            over_existing_lap: false,
+            admitted_on_drawn_feet: false,
+            added_mm3: 0.0,
+        };
+        let enters_with = |wall_from: f64, with_surface: bool| {
+            let wall = ([cx + wall_from, cy - 0.5, 0.0], [cx + wall_from + 0.5, cy + 0.5, 0.2]);
+            let mut history = crate::up_sweep::ColumnHistory::new(&grid);
+            cure_box(&grid, &mut history, slab.0, slab.1);
+            cure_box(&grid, &mut history, wall.0, wall.1);
+            let surface = crate::member_clearance::boxes_surface(&[slab, wall]);
+            let context = super::SlendernessContext {
+                model_surface: with_surface.then_some(&surface),
+                plate_z_mm: 0.0,
+                ..prune_context(&grid, &history, &keep_out, &lean, &law)
+            };
+            let state = super::TieState::build(&context, &struts);
+            // The retired read: the longest zone exempts the whole trunk.
+            let retired_zone = lean.face_zone_factor() * (0.15 + 0.3);
+            let (seat, base) = (
+                crate::member_clearance::axis_point(&grid, 0.05, struts[1].cell, 12),
+                crate::member_clearance::axis_point(&grid, 0.05, struts[1].cell, 0),
+            );
+            let retired = crate::member_clearance::inset_segment_intrusion(
+                &grid, &history, 0.05, seat, base, retired_zone, 0.0, (0.15, 0.15), 0.3,
+            );
+            let refused = super::thickening_enters_the_gap(&context, &state, &struts, &plan);
+            (refused, retired, retired_zone, state.thicken_reads.get())
+        };
+        let enters = |wall_from: f64| {
+            let (refused, retired, retired_zone, _) = enters_with(wall_from, true);
+            (refused, retired, retired_zone)
+        };
+        let (refused, retired, retired_zone) = enters(0.4);
+        assert!(retired_zone >= 0.6, "anti-vacuity: the retired zone covers the trunk: {retired_zone}");
+        assert!(retired.is_none(), "SABOTAGE: the retired zone excused the whole trunk");
+        assert!(refused, "the raised trunk enters the gap beside its foot, below its seat's own zone");
+        let (refused, _, _) = enters(0.85);
+        assert!(!refused, "control: a wall 0.85 mm away is not entered");
+        // No surface: no face is known, and an unknown face exempts nothing.
+        let (refused, retired, _, reads) = enters_with(0.4, false);
+        assert!(
+            retired.is_none(),
+            "SABOTAGE: the retired no-face zone (the longest) left nothing for the raster to flag"
+        );
+        assert!(
+            refused,
+            "without a surface the raise beside the 0.4 mm wall is refused ({reads:?})"
+        );
+        assert!(reads.flagged > 0, "path hit: the raised trunk is flagged without a surface: {reads:?}");
+        assert!(
+            reads.measured_clear == 0 && reads.inside_already == 0,
+            "nothing is measured or proved without a surface: {reads:?}"
+        );
+        let (refused, _, _, reads) = enters_with(0.85, false);
+        assert!(
+            refused && reads.flagged > 0,
+            "without a surface nothing is provable: the flagged raise is refused ({reads:?})"
+        );
+        let unknown = crate::member_clearance::contact_zone_mm(
+            None,
+            [cx, cy, 0.6],
+            [0.0, 0.0, -1.0],
+            0.15,
+            0.3,
+            lean.face_zone_factor(),
+        );
+        assert!(unknown.abs() < 1.0e-12, "an unknown face's zone is zero: {unknown}");
+    }
+
+    /// **"INSIDE THE GAP ALREADY" IS PROVED ON THE SURFACE, NOT FLAGGED BY
+    /// THE RASTER** (challenger round 3, 2026-10-05, finding 2). The
+    /// challenger's shape: a 4 mm plate post of radius 0.05 mm under a flat
+    /// seat, and a 0.01 mm square model bar over the post's whole height, its
+    /// centre 0.35 mm across and 0.15 mm along from the axis (one cell centre,
+    /// 0.3808 mm away). Its nearest surface is 0.3742 mm from the axis, so the
+    /// drawn post clears it by 0.3242 mm; raised to a 0.1 mm root it clears by
+    /// 0.2742 mm, inside the gap. SABOTAGE INSIDE: the raster flags the drawn
+    /// slot (0.3808 < 0.05 + 0.3 + half a cell's diagonal = 0.3854), which the
+    /// retired read took as an existing violation and excused the raise.
+    /// Green: the predicate measures the drawn slot clear, so the raise is
+    /// refused. CONTROLS: a bar whose surface stands 0.31 mm away (the drawn
+    /// post is inside the gap there already, PROVED) excuses the raise; a bar
+    /// 0.6 mm away is not entered; with no surface nothing can be proved and
+    /// the raise is refused.
+    #[test]
+    fn a_raster_flag_is_not_proof_that_the_drawn_solid_is_inside_the_gap_already() {
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(0.05, 45.0, 25.0);
+        let law = law();
+        let (cx, cy) = (grid.center_x_mm(100), grid.center_y_mm(100));
+        let slab = ([cx - 1.0, cy - 1.0, 4.0], [cx + 1.0, cy + 1.0, 5.0]);
+        let struts = vec![plate_post(&grid, 0, 100, 0.05)];
+        let plan = super::ThickenPlan {
+            k_lo: 0,
+            k_top: 80,
+            root: 0.1,
+            top: 0.05,
+            steps: 80.0,
+            chain: vec![(0, 79)],
+            disc_growth: None,
+            over_existing_lap: false,
+            admitted_on_drawn_feet: false,
+            added_mm3: 0.0,
+        };
+        // A 0.01 mm bar centred on the cell centre `(dx, dy)` from the axis.
+        let read = |dx: f64, dy: f64, with_surface: bool| {
+            let (bx, by) = (cx + dx, cy + dy);
+            let bar = ([bx - 0.005, by - 0.005, 0.0], [bx + 0.005, by + 0.005, 4.0]);
+            let mut history = crate::up_sweep::ColumnHistory::new(&grid);
+            cure_box(&grid, &mut history, slab.0, slab.1);
+            cure_box(&grid, &mut history, bar.0, bar.1);
+            let surface = crate::member_clearance::boxes_surface(&[slab, bar]);
+            let context = super::SlendernessContext {
+                model_surface: with_surface.then_some(&surface),
+                plate_z_mm: 0.0,
+                ..prune_context(&grid, &history, &keep_out, &lean, &law)
+            };
+            let state = super::TieState::build(&context, &struts);
+            let foot = (
+                crate::member_clearance::axis_point(&grid, 0.05, struts[0].cell, 1),
+                crate::member_clearance::axis_point(&grid, 0.05, struts[0].cell, 0),
+            );
+            let drawn_flagged = crate::member_clearance::inset_segment_intrusion(
+                &grid, &history, 0.05, foot.0, foot.1, 0.0, 0.0, (0.05, 0.05), 0.3,
+            )
+            .is_some();
+            let refused = super::thickening_enters_the_gap(&context, &state, &struts, &plan);
+            (refused, drawn_flagged, state.thicken_reads.get())
+        };
+        let (refused, drawn_flagged, reads) = read(0.35, 0.15, true);
+        assert!(
+            drawn_flagged,
+            "SABOTAGE: the raster flags the drawn slot, which the retired read took as proof"
+        );
+        assert!(refused, "the drawn post clears the bar; the raise enters the gap: refused");
+        assert!(reads.flagged > 0 && reads.inside_already == 0, "path hits: {reads:?}");
+        let (refused, _, reads) = read(0.3, 0.1, true);
+        assert!(!refused, "control: the drawn post is inside the gap there already, proved: excused");
+        assert!(reads.inside_already > 0, "path hit: proved inside already: {reads:?}");
+        let (refused, _, _) = read(0.6, 0.0, true);
+        assert!(!refused, "control: a bar 0.6 mm away is not entered");
+        let (refused, _, _) = read(0.35, 0.15, false);
+        assert!(refused, "control: with no surface nothing is proved, and the flagged raise is refused");
     }
 
     /// A 10 mm plate post drawn 0.5 mm over its lowest 3 mm and 0.06 mm above

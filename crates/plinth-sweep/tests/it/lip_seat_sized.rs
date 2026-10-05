@@ -293,7 +293,16 @@ fn laid_tube_at_s_50() -> &'static Pair {
     static FIXTURE: OnceLock<Pair> = OnceLock::new();
     FIXTURE.get_or_init(|| {
         let mesh = make_laid_tube().expect("the laid tube");
-        let at_50 = crate::harness::at_path_fixture_slenderness(policy());
+        // **Re-pinned 2026-10-04 (fix/drawn-solid-clearance):** this fixture
+        // is the field on which the rule left a host over its limit, measured
+        // under the centreline-only descent. With the drawn-solid descent the
+        // laid tube's one refused descent is replaced and the field no longer
+        // keeps that host over its limit (a measured 0 moves refused), so the
+        // tests below would witness nothing. The rule under test is the
+        // lip-seat put-back, which reads no placement clearance: the fixture
+        // keeps the placement it was measured on.
+        let at_50 = crate::harness::at_path_fixture_slenderness(policy())
+            .without_drawn_solid_descent();
         Pair {
             on: sweep_with(&mesh, 0.0, &at_50),
             off: sweep_with(&mesh, 0.0, &at_50.without_lip_seat()),
@@ -345,7 +354,9 @@ fn judged_pass_by_pass_the_laid_tube_at_s_50_keeps_a_host_over_its_limit() {
     let sabotaged = sweep_with(
         &mesh,
         0.0,
-        &crate::harness::at_path_fixture_slenderness(policy()).without_lip_seat_across_passes(),
+        &crate::harness::at_path_fixture_slenderness(policy())
+            .without_drawn_solid_descent()
+            .without_lip_seat_across_passes(),
     );
     let lip = &sabotaged.report.lip_seat;
     let over = overloaded(&sabotaged);

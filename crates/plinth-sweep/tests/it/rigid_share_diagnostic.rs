@@ -46,9 +46,18 @@ fn the_rigid_share_names_the_laid_tubes_stiff_low_end_arms_and_sizes_nothing() {
     // `16952e5`). On `16952e5` without the band it names arm 17 (59.22 mm2) and
     // arm 18 (58.08 mm2) again. The diagnostic reads no seat face either; the
     // band only decides whether this fixture reaches its two-arm witness.
+    //
+    // And without the drawn-solid descent (2026-10-04, fix/drawn-solid-clearance,
+    // round 3): its zones are now each face's own, so the tilted tube's descents
+    // next to the legs differ from the longest-zone read of round 2, and the
+    // load moves by the same margin again (measured: the report names arm 18
+    // alone, 59.91 mm2, with the descent on and the re-route off or on; arm 17
+    // falls under `ℓ_max`). The diagnostic reads no clearance.
     let policy =
         harness::at_path_fixture_seating(SweepPolicy::from_registry().expect("the registry"))
-            .without_seat_face_band();
+            .without_seat_face_band()
+            .without_drawn_solid_descent()
+            .without_clearance_reroute();
     let plan = sweep_with(&mesh, 0.0, &policy);
     let rigid = &plan.report.rigid_share;
     println!(

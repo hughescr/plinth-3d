@@ -95,6 +95,36 @@ pub(crate) fn model_intrusion(
     radius_mm: f64,
     gap_mm: f64,
 ) -> Option<(usize, f64)> {
+    model_intrusion_tapered(
+        grid,
+        history,
+        layer_height_mm,
+        from,
+        to,
+        (radius_mm, radius_mm),
+        gap_mm,
+    )
+}
+
+/// [`model_intrusion`] for the frustum the file draws: the radius runs
+/// linearly from `radii.0` at `from` to `radii.1` at `to`, and each cured cell
+/// is read at the frustum's true clearance to it, the least over the axis of
+/// the distance minus the radius there ([`frustum_clearance_to_column`];
+/// fix/drawn-solid-clearance, 2026-10-04: the thickening rung's drawn root is
+/// one chord from a step to the root, and the wider end read all along its
+/// length refused a raise that the census, which reads the frustum, finds
+/// clear; the radius at the nearest axis point alone accepted a thick end that
+/// stands inside the gap, challenger round 2).
+pub(crate) fn model_intrusion_tapered(
+    grid: &Grid,
+    history: &ColumnHistory,
+    layer_height_mm: f64,
+    from: [f64; 3],
+    to: [f64; 3],
+    radii: (f64, f64),
+    gap_mm: f64,
+) -> Option<(usize, f64)> {
+    let radius_mm = radii.0.max(radii.1);
     let reach = radius_mm.max(0.0) + gap_mm.max(0.0) + raster_half_diagonal_mm(grid);
     if !reach.is_finite() {
         return None;
@@ -157,13 +187,383 @@ pub(crate) fn model_intrusion(
                 }
                 let (distance, _, _) =
                     segment_segment_distance_min(from, to, [x, y, bottom], [x, y, top]);
-                if distance < reach {
+                if distance >= reach {
+                    continue;
+                }
+                if (radii.0 - radii.1).abs() <= f64::EPSILON {
                     return Some((cell, distance));
+                }
+                // The frustum's own clearance to this cell: the least over the
+                // axis of `distance − radius there` (the radius at the nearest
+                // axis point alone is not it; the thick end can be nearer the
+                // cell's solid than the thin end the axes meet at).
+                let (clearance, at_distance) = frustum_clearance_to_column(from, to, radii, x, y, bottom, top);
+                if clearance < gap_mm.max(0.0) + raster_half_diagonal_mm(grid) {
+                    return Some((cell, at_distance));
                 }
             }
         }
     }
     None
+}
+
+/// The clearance of the frustum about the axis `from`–`to` (radius linear from
+/// `radii.0` at `from` to `radii.1` at `to`) to the vertical segment over
+/// `(x, y)` from `z_low` to `z_high`: the minimum over the axis of the point's
+/// distance to that segment minus the radius there, and the centreline
+/// distance at the minimiser.
+///
+/// The distance from a point moving along a line to a convex set is convex in
+/// the parameter, and the radius is linear in it, so `distance − radius` is
+/// convex and a ternary search finds its minimum (the least value seen is
+/// returned, which is an achievable clearance, never one below the true
+/// minimum). 40 rounds narrow the bracket to `(2/3)^40`, about 1e-7 of the
+/// axis.
+fn frustum_clearance_to_column(
+    from: [f64; 3],
+    to: [f64; 3],
+    radii: (f64, f64),
+    x: f64,
+    y: f64,
+    z_low: f64,
+    z_high: f64,
+) -> (f64, f64) {
+    let at = |s: f64| -> (f64, f64) {
+        let point: [f64; 3] = std::array::from_fn(|axis| from[axis] + s * (to[axis] - from[axis]));
+        let flat = (point[0] - x).hypot(point[1] - y);
+        let vertical = point[2] - point[2].clamp(z_low, z_high);
+        let distance = flat.hypot(vertical);
+        (distance - (radii.0 + s * (radii.1 - radii.0)).max(0.0), distance)
+    };
+    let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+    let mut best = at(0.0);
+    let end = at(1.0);
+    if end.0 < best.0 {
+        best = end;
+    }
+    for _ in 0..40 {
+        let (a, b) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+        let (fa, fb) = (at(a), at(b));
+        for probe in [fa, fb] {
+            if probe.0 < best.0 {
+                best = probe;
+            }
+        }
+        if fa.0 < fb.0 {
+            hi = b;
+        } else {
+            lo = a;
+        }
+    }
+    best
+}
+
+/// **A straight shaft's drawn solid against the model, outside its own seat
+/// zone and (on the model) its own landing zone**, on the raster
+/// (fix/drawn-solid-clearance, 2026-10-04; `clearance-census-diagnosis.md`
+/// R1): the shaft from its base cell at layer `base.1` to its seat cell at
+/// layer `seat.1`, a solid of radius `radius_mm`, against the cured material
+/// the column history knows.
+///
+/// The zones are the raster's own form of the census's
+/// ([`model_clearance_census`]): the seat end is exempt for
+/// `zone_factor · (radius + gap)` along the axis, and so is the base end
+/// where the shaft lands on the MODEL (a plate or a member landing has no
+/// model face to strike). A shaft rises off the face it stands against at
+/// `n·m ≥ 1 / zone_factor` at the steepest tilt the overhang law admits
+/// ([`crate::lean::LeanLaw::face_zone_factor`]), and it first stands `gap`
+/// clear of that face's plane at `(gap + radius) / (n·m)` along its axis
+/// ([`landing_zone_mm`]), so the exemption is never shorter than the real
+/// zone. A shaft that lies wholly inside its zones is not judged.
+///
+/// Returns the first offending cell and its distance, `None` when it clears.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the shaft's two ends, its kind, its radius and gap, and the raster it is read on"
+)]
+pub(crate) fn shaft_model_intrusion(
+    grid: &Grid,
+    history: &ColumnHistory,
+    layer_height_mm: f64,
+    seat: (usize, usize),
+    base: (usize, usize),
+    lands_on_model: bool,
+    radius_mm: f64,
+    gap_mm: f64,
+    zone_factor: f64,
+) -> Option<(usize, f64)> {
+    let top = axis_point(grid, layer_height_mm, seat.0, seat.1);
+    let bottom = axis_point(grid, layer_height_mm, base.0, base.1);
+    let zone = zone_factor.max(1.0) * (radius_mm.max(0.0) + gap_mm.max(0.0));
+    inset_segment_intrusion(
+        grid,
+        history,
+        layer_height_mm,
+        top,
+        bottom,
+        zone,
+        if lands_on_model { zone } else { 0.0 },
+        (radius_mm, radius_mm),
+        gap_mm,
+    )
+}
+
+/// What a placement-time shaft test reads, bundled: the raster the sweep has
+/// built so far, its frame, and the model's surface where it could be built.
+/// The surface turns the raster's flag into the census's own verdict and
+/// gives each contact zone the normal of the face it is on
+/// ([`ShaftRead::intrusion`]).
+#[derive(Clone, Copy)]
+pub(crate) struct ShaftRead<'a> {
+    pub grid: &'a Grid,
+    pub history: &'a ColumnHistory,
+    pub layer_height_mm: f64,
+    /// The plate's z in the mesh's frame (the raster's frame has the plate at 0).
+    pub plate_z_mm: f64,
+    pub surface: Option<&'a geom_kernel::NativeSurface>,
+    /// [`crate::lean::LeanLaw::face_zone_factor`]: the longest zone, used where
+    /// no surface is there to name the face.
+    pub zone_factor: f64,
+}
+
+impl ShaftRead<'_> {
+    fn kernel_point(&self, point: [f64; 3]) -> [f64; 3] {
+        [point[0], point[1], point[2] + self.plate_z_mm]
+    }
+
+    /// The face the shaft's seat at `seat` stands against: the model's nearest
+    /// face to the seat's axis point and its outward normal. One nearest-point
+    /// query; `None` without a surface or where the query names no face.
+    pub(crate) fn seat_face(&self, seat: (usize, usize)) -> Option<ContactFace> {
+        let surface = self.surface?;
+        let point = self.kernel_point(axis_point(self.grid, self.layer_height_mm, seat.0, seat.1));
+        landing_faces(surface, &[point], &[true])
+            .into_iter()
+            .next()
+            .flatten()
+            .map(|(point, normal)| ContactFace { point, normal })
+    }
+
+    /// **A straight shaft's drawn solid against the model, read as the census
+    /// reads it** (challenger round 3, 2026-10-04): the shaft from its base cell
+    /// at layer `base.1` to its seat cell at layer `seat.1`, radius
+    /// `radius_mm`, outside its OWN contact zones and no others. Returns the
+    /// first offending cell and its distance, `None` when it clears.
+    ///
+    /// * **The zones are the real ones.** The seat zone is where the capsule
+    ///   first stands `gap` clear of the seat face's plane,
+    ///   `(gap + r − h) / (n·m)` along the axis, `n` that face's outward normal
+    ///   (`seat_face`, one query per seat), `m` the axis from the seat to the
+    ///   base and `h` the seat's height over the plane; a model landing's zone
+    ///   is the same at its landing face
+    ///   ([`landing_zone_mm`]). Neither is longer than the longest the lean law
+    ///   admits (`n·m` is never taken below `1 / zone_factor`, which can only
+    ///   test MORE). The old read took the longest zone for every shaft, so a
+    ///   0.6 mm branch under a flat seat (zone 0.35 mm) was exempt whole.
+    /// * **The raster only flags.** Its reach carries half a cell's diagonal,
+    ///   so a cell it flags may still be clear. A flagged shaft is confirmed
+    ///   by the kernel's clearance predicate ([`geom_kernel::SegmentClearanceClassified`]),
+    ///   the one the finished-field census runs, on the same axis and zones; it
+    ///   is refused only when that predicate reads it under the gap (or reads
+    ///   only a bound that does not clear it). Where the surface names no face
+    ///   for an end, that end's zone is zero ([`contact_zone_mm`]): its
+    ///   contact reads as inside the gap and the shaft is refused, never
+    ///   excused. Without a surface at all the raster's flag stands, with the
+    ///   longest zones: placement cannot refuse every seated shaft, and the
+    ///   finished-field census, which cannot run either, says so in a
+    ///   WARNING.
+    pub(crate) fn intrusion(
+        &self,
+        seat: (usize, usize),
+        seat_face: Option<ContactFace>,
+        base: (usize, usize),
+        lands_on_model: bool,
+        radius_mm: f64,
+        gap_mm: f64,
+    ) -> Option<(usize, f64)> {
+        let (grid, history, height) = (self.grid, self.history, self.layer_height_mm);
+        let Some(surface) = self.surface else {
+            return shaft_model_intrusion(
+                grid,
+                history,
+                height,
+                seat,
+                base,
+                lands_on_model,
+                radius_mm,
+                gap_mm,
+                self.zone_factor,
+            );
+        };
+        let top = axis_point(grid, height, seat.0, seat.1);
+        let bottom = axis_point(grid, height, base.0, base.1);
+        let length = geom_kernel::vec3::dist(top, bottom);
+        if !(length.is_finite() && length > 0.0) {
+            return None;
+        }
+        let radius = radius_mm.max(0.0);
+        let gap = gap_mm.max(0.0);
+        let down = geom_kernel::vec3::scale(geom_kernel::vec3::sub(bottom, top), 1.0 / length);
+        let seat_zone = contact_zone_mm(
+            seat_face,
+            self.kernel_point(top),
+            down,
+            radius,
+            gap,
+            self.zone_factor,
+        );
+        let landing_zone = if lands_on_model {
+            let base_point = self.kernel_point(bottom);
+            let face = contact_faces(surface, &[base_point]).into_iter().next().flatten();
+            contact_zone_mm(
+                face,
+                base_point,
+                geom_kernel::vec3::scale(down, -1.0),
+                radius,
+                gap,
+                self.zone_factor,
+            )
+        } else {
+            0.0
+        };
+        let flagged = inset_segment_intrusion(
+            grid,
+            history,
+            height,
+            top,
+            bottom,
+            seat_zone,
+            landing_zone,
+            (radius, radius),
+            gap,
+        )?;
+        let verdict = surface
+            .segment_clearance_classified(
+                &[self.kernel_point(top)],
+                &[self.kernel_point(bottom)],
+                &[radius],
+                &[radius],
+                0.0,
+                &[seat_zone],
+                &[landing_zone],
+            )
+            .ok()
+            .and_then(|rows| rows.into_iter().next());
+        match verdict {
+            Some(geom_kernel::SegmentClearanceClassified::Measured { clearance_mm, .. })
+                if clearance_mm >= gap - 1.0e-9 =>
+            {
+                None
+            }
+            _ => Some(flagged),
+        }
+    }
+}
+
+/// The face a shaft's contact is on: the model's nearest surface point and
+/// the face's outward unit normal, in the mesh's frame.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ContactFace {
+    pub point: [f64; 3],
+    pub normal: [f64; 3],
+}
+
+/// The face each point (in the mesh's frame) stands against: the model's
+/// nearest surface point and that face's outward unit normal, `None` where
+/// the query names no face. One nearest-point batch for all of them.
+pub(crate) fn contact_faces(
+    surface: &geom_kernel::NativeSurface,
+    points: &[[f64; 3]],
+) -> Vec<Option<ContactFace>> {
+    let all = vec![true; points.len()];
+    landing_faces(surface, points, &all)
+        .into_iter()
+        .map(|face| face.map(|(point, normal)| ContactFace { point, normal }))
+        .collect()
+}
+
+/// **A shaft's own CONTACT ZONE at one end, from the face it stands against**
+/// (challenger round 3, 2026-10-04; the one form every placement-time read
+/// uses: the up-sweep's descent test and the thickening rung's refusal): the
+/// length along the axis, from the contact end `end` (mesh frame) into the
+/// shaft along the unit `into`, over which a solid of radius `radius` still
+/// stands within `gap` of the face's plane, `(gap + r − h) / (n·m)`, `n` the
+/// face's outward normal, `m = into`, `h` the end's height over the plane.
+///
+/// `n·m` is never taken below `1 / zone_factor`, the steepest the lean law
+/// admits, and the zone is never longer than `zone_factor · (r + gap)`, the
+/// longest. A flat seat's zone is `gap + r`, not the longest.
+///
+/// **Without a face the zone is ZERO** (challenger round 5, 2026-10-05): no
+/// surface, or a query that named no face, says nothing about how long the
+/// zone is, and a zone is an exemption, so an unknown one exempts nothing.
+/// The retired read gave the longest zone there, which on a short member
+/// exempted the whole solid and so suppressed every read of it before the
+/// reader's own "nothing can be proved without a surface" refusal could run.
+/// A reader that gets zero here reads the contact itself as inside the gap;
+/// it must never take that as proof of an existing violation.
+pub(crate) fn contact_zone_mm(
+    face: Option<ContactFace>,
+    end: [f64; 3],
+    into: [f64; 3],
+    radius: f64,
+    gap: f64,
+    zone_factor: f64,
+) -> f64 {
+    let longest = zone_factor.max(1.0) * (radius + gap);
+    let Some(face) = face else {
+        return 0.0;
+    };
+    // The least `n·m` the lean law admits: a face steeper than that is read
+    // as if it were exactly that steep (a longer zone is never given).
+    let steepest = 1.0 / zone_factor.max(1.0);
+    let along = geom_kernel::vec3::dot(face.normal, into).max(steepest);
+    let over = geom_kernel::vec3::dot(face.normal, geom_kernel::vec3::sub(end, face.point));
+    ((gap + radius - over) / along).clamp(0.0, longest)
+}
+
+/// [`model_intrusion`] on the axis `top`–`bottom` with `inset_top` mm of its
+/// top end and `inset_bottom` mm of its bottom end left out (a seat zone, a
+/// landing zone). `None` where the two insets use the whole axis.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the segment's two ends and insets, its radius and gap, and the raster it is read on"
+)]
+pub(crate) fn inset_segment_intrusion(
+    grid: &Grid,
+    history: &ColumnHistory,
+    layer_height_mm: f64,
+    top: [f64; 3],
+    bottom: [f64; 3],
+    inset_top_mm: f64,
+    inset_bottom_mm: f64,
+    radii_top_bottom: (f64, f64),
+    gap_mm: f64,
+) -> Option<(usize, f64)> {
+    let length = geom_kernel::vec3::dist(top, bottom);
+    if !(length.is_finite() && length > 0.0) {
+        return None;
+    }
+    if inset_top_mm + inset_bottom_mm >= length {
+        return None;
+    }
+    let along = |from: [f64; 3], towards: [f64; 3], mm: f64| -> [f64; 3] {
+        std::array::from_fn(|axis| from[axis] + (towards[axis] - from[axis]) * (mm / length))
+    };
+    let from = along(bottom, top, inset_bottom_mm);
+    let to = along(top, bottom, inset_top_mm);
+    // The radius at each end of what is left, on the linear taper.
+    let (r_top, r_bottom) = radii_top_bottom;
+    let radius_at = |from_top_mm: f64| r_top + (r_bottom - r_top) * (from_top_mm / length);
+    model_intrusion_tapered(
+        grid,
+        history,
+        layer_height_mm,
+        from,
+        to,
+        (radius_at(length - inset_bottom_mm), radius_at(inset_top_mm)),
+        gap_mm,
+    )
 }
 
 /// **A member's own LANDING zone on the model** (fix/morel-long-posts,
@@ -716,6 +1116,38 @@ fn walk_spans(
     })
 }
 
+/// Axis-aligned boxes `(low corner, high corner)` as one model surface, for
+/// the tests that read a placement against the census's own predicate.
+#[cfg(test)]
+pub(crate) fn boxes_surface(boxes: &[([f64; 3], [f64; 3])]) -> geom_kernel::NativeSurface {
+    let mut verts: Vec<[f64; 3]> = Vec::new();
+    let mut tris: Vec<[u32; 3]> = Vec::new();
+    for &(low, high) in boxes {
+        let base = u32::try_from(verts.len()).expect("a few vertices");
+        for corner in 0..8_usize {
+            verts.push(std::array::from_fn(|k| if corner >> k & 1 == 0 { low[k] } else { high[k] }));
+        }
+        for t in [
+            [0, 2, 1], [1, 2, 3], [4, 5, 6], [5, 7, 6], [0, 1, 4], [1, 5, 4],
+            [2, 6, 3], [3, 6, 7], [0, 4, 2], [2, 4, 6], [1, 3, 5], [3, 7, 5],
+        ] {
+            tris.push([base + t[0], base + t[1], base + t[2]]);
+        }
+    }
+    let pitch = 0.1;
+    let estimate = geom_kernel::NativeSurface::estimate_index_memory_from_indexed(&verts, &tris, pitch)
+        .expect("an estimate");
+    geom_kernel::NativeSurface::from_indexed(
+        &verts,
+        &tris,
+        geom_kernel::NativeSurfaceConfig {
+            grid_pitch_mm: pitch,
+            max_grid_bytes: estimate.max_axis_grid_bytes(),
+        },
+    )
+    .expect("a surface")
+}
+
 /// **The census of every member's drawn solid, and the landing zone it
 /// grants a member on the model** (fix/morel-long-posts, 2026-10-02), on a
 /// box whose top face is `z = 2` and whose `+X` wall is `x = 5`.
@@ -960,9 +1392,83 @@ mod census_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{member_intrusion, model_intrusion, MemberSolid};
+    use super::{member_intrusion, model_intrusion, model_intrusion_tapered, MemberSolid};
     use crate::grid::lay_out_at;
     use crate::up_sweep::{ColumnHistory, ShaftSpan};
+
+    /// **The raster reads the FRUSTUM** (fix/drawn-solid-clearance,
+    /// 2026-10-04): a member drawn as one chord from 0.1 mm at its top to
+    /// 0.5 mm at its foot, passing a cured column 0.7 mm off its axis that
+    /// stands only beside its THIN upper half. Read at the wider end all
+    /// along (0.5 + 0.3 + half a cell) it enters the column; read as the
+    /// frustum (0.1 to 0.3 mm there) it clears. A column beside the thick
+    /// foot is still entered.
+    #[test]
+    fn the_raster_reads_a_tapered_member_as_the_frustum_it_is() {
+        let grid = lay_out_at(0.0, 0.0, 0.05, 100, 100);
+        let h = 0.05;
+        let (x, y) = (grid.center_x_mm(50), grid.center_y_mm(50));
+        let column_at = |k_bottom: u32, k_top: u32| {
+            let mut history = ColumnHistory::new(&grid);
+            let cell = grid.index(50, 50);
+            history.model_spans.push(ShaftSpan { k_bottom, k_top, id: 0, next: u32::MAX });
+            history.model_head[cell] = 0;
+            history
+        };
+        // The member: top at z = 4.0, foot at z = 0.0, 0.7 mm beside the column.
+        let (top, foot) = ([x + 0.7, y, 4.0], [x + 0.7, y, 0.0]);
+        // The column over z 3.0..3.5, in the thin upper half (radius about 0.2).
+        let upper = column_at(60, 70);
+        let gap = 0.3;
+        assert!(
+            model_intrusion(&grid, &upper, h, foot, top, 0.5, gap).is_some(),
+            "read at the wider end all along, the member enters the column"
+        );
+        assert!(
+            model_intrusion_tapered(&grid, &upper, h, foot, top, (0.5, 0.1), gap).is_none(),
+            "read as the frustum, the thin upper half clears it"
+        );
+        // The same column over z 0.2..0.7, beside the thick foot (radius about 0.45).
+        let lower = column_at(4, 14);
+        assert!(
+            model_intrusion_tapered(&grid, &lower, h, foot, top, (0.5, 0.1), gap).is_some(),
+            "beside the thick foot the frustum still enters it"
+        );
+    }
+
+    /// **THE FRUSTUM'S TRUE CLEARANCE, NOT THE CLEARANCE AT THE NEAREST AXIS
+    /// POINT** (challenger round 2, 2026-10-04). A 1 mm axis drawn from 0.1 mm
+    /// at its thin end to 0.9 mm at its thick end, and a one-lamina cured
+    /// column 0.65 mm off the axis beside the THIN end. The nearest axis point
+    /// to the column is the thin end (0.65 mm), where the radius is 0.1: that
+    /// reading gives 0.55 mm and accepts. But at the thick end the solid is
+    /// `√(0.65² + 1²) − 0.9 = 0.292 mm` from the column, under the 0.3 mm gap
+    /// (and the raster's half-diagonal on top). The clearance of a frustum to
+    /// a point is the minimum over the axis of `distance − radius`, and that is
+    /// convex in the axis parameter. Hand-derived; red before the fix.
+    #[test]
+    fn a_taper_is_judged_by_distance_minus_radius_not_at_the_nearest_axis_point() {
+        let grid = lay_out_at(0.0, 0.0, 0.05, 100, 100);
+        let h = 0.05;
+        let (x, y) = (grid.center_x_mm(50), grid.center_y_mm(50));
+        let mut history = ColumnHistory::new(&grid);
+        // One lamina at layer 20, z 1.0..1.05.
+        history.model_spans.push(ShaftSpan { k_bottom: 20, k_top: 20, id: 0, next: u32::MAX });
+        history.model_head[grid.index(50, 50)] = 0;
+        // The axis runs z 1.0 (thin end) down to z 0.0 (thick end), 0.65 mm off.
+        let (thin, thick) = ([x + 0.65, y, 1.0], [x + 0.65, y, 0.0]);
+        let gap = 0.3;
+        assert!(
+            model_intrusion_tapered(&grid, &history, h, thick, thin, (0.9, 0.1), gap).is_some(),
+            "the thick end stands 0.292 mm from the column: inside the final gap"
+        );
+        // Control: the same column beside a taper that is thin all the way
+        // clears (0.65 − 0.12 − 0.3 − 0.035 > 0).
+        assert!(model_intrusion_tapered(&grid, &history, h, thick, thin, (0.12, 0.1), gap).is_none());
+        // Control: the cured column stays clear of a thick end that is really farther.
+        let far = ([x + 0.8, y, 1.0], [x + 0.8, y, 0.0]);
+        assert!(model_intrusion_tapered(&grid, &history, h, far.1, far.0, (0.9, 0.1), gap).is_none());
+    }
 
     /// A single cured column, one cell wide, over layers 10..=20; a member
     /// passing beside it is refused inside `r + gap + half-diagonal` and

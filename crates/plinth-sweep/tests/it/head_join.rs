@@ -105,11 +105,29 @@ fn round_25_flipped_with(policy: &SweepPolicy) -> SweepPlan {
 /// leaned head any more (measured: 0 heads with landers on Round 25, 0 joins
 /// in a seat zone on Round 50), so every test here would grade nothing. The
 /// head-join rule reads no placement.
+///
+/// **Re-pinned 2026-10-04 (fix/drawn-solid-clearance):** and under the
+/// centreline-only descent these fixtures were built on. The flipped Round 25
+/// and 50 seat arms on the ring lip's drafted wall and run along it; the
+/// drawn-solid descent refuses those descents, replaces them, and the heads
+/// the tests below grade (a lander on a leaned head, a head already clear)
+/// no longer occur on the field: measured 0 joins in a seat zone before, 0
+/// heads already clear, so each would compare nothing. The head-join rule
+/// reads no placement clearance. (The production Round discs, as drawn, are
+/// byte-identical under the new descent.)
 fn production() -> SweepPolicy {
     crate::harness::at_path_fixture_seating(
         SweepPolicy::from_registry()
             .expect("the registry supplies every sweep number")
-            .without_lip_seat(),
+            .without_lip_seat()
+            .without_drawn_solid_descent()
+            // The clearance re-route (R2.2) moves arms after the final sizing
+            // where the census names them inside the gap; on these flipped
+            // fixtures it re-lands the leaned heads the tests below grade
+            // (measured: 16 of 16 moves at a head and none under one, no head
+            // already clear). The head-join rule reads no clearance, so the
+            // fixture keeps the field the sizing leaves.
+            .without_clearance_reroute(),
     )
 }
 

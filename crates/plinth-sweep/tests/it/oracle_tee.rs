@@ -36,7 +36,21 @@ fn leg_fringe_mm2() -> f64 {
 
 #[test]
 fn the_slab_load_walks_inward_to_the_legs_and_conserves_through_them() {
-    let plan = sweep(&make_overhang_table().unwrap(), 0.05);
+    // Re-pinned 2026-10-04 (fix/drawn-solid-clearance, R2.2): the claim below
+    // is about the up-sweep's DESCENTS ("a lean off a flat underside reaches
+    // another arm's shaft"). The clearance re-route after the final sizing
+    // re-lands a post the sizing grew into a leg's gap, and a post it moves is
+    // leaned onto a new plate cell (measured: arm 26 leaned true, landed on the
+    // plate), which is that rule's job and not a descent. The oracle reads the
+    // field the descents leave.
+    let plan = harness::sweep_with(
+        &make_overhang_table().unwrap(),
+        0.05,
+        &plinth_sweep::SweepPolicy::from_registry()
+            .expect("the registry supplies every number the sweep reads")
+            .with_working_pitch_mm(0.05)
+            .without_clearance_reroute(),
+    );
     let report = &plan.report;
     println!("{}", report.render_disclosure());
     println!(
@@ -260,7 +274,12 @@ fn the_slab_load_walks_inward_to_the_legs_and_conserves_through_them() {
         &plinth_sweep::SweepPolicy::from_registry()
             .expect("the registry supplies every number the sweep reads")
             .with_working_pitch_mm(0.05)
-            .without_slenderness(),
+            .without_slenderness()
+            // Both sides without the clearance re-route (2026-10-04,
+            // fix/drawn-solid-clearance R2.2): its candidates land on shafts
+            // whatever the shaft-landing knob says, and this claim is about
+            // the descent's landing rule.
+            .without_clearance_reroute(),
     );
     let straight = harness::sweep_with(
         &make_overhang_table().unwrap(),
@@ -269,6 +288,7 @@ fn the_slab_load_walks_inward_to_the_legs_and_conserves_through_them() {
             .expect("the registry supplies every number the sweep reads")
             .with_working_pitch_mm(0.05)
             .without_slenderness()
+            .without_clearance_reroute()
             .without_shaft_landings(),
     );
     println!(
