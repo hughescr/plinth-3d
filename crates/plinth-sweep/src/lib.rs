@@ -2760,6 +2760,7 @@ pub fn run_sweep_with_holes(
     report.counters.lean_candidates_priced = lean_candidates_priced;
     report.counters.descent_solid_tested = descent_tally.tested;
     report.counters.descent_solid_inside_preferred_margin = descent_tally.inside_preferred_margin;
+    report.counters.descent_solid_in_hidden_cavity = descent_tally.in_hidden_cavity;
     report.counters.descent_solid_refused_at_final_gap = descent_tally.refused_at_final_gap;
     report.counters.descent_solid_cleared_by_lean = descent_tally.cleared_by_lean;
     report.counters.descent_solid_at_final_gap_only = descent_tally.at_final_gap_only;

@@ -3966,13 +3966,38 @@ fn thickening_enters_the_gap(
     // cavity it stands in. Not the scar flag ([`crate::SweepStrut::interior`]),
     // which also holds for a recess open to the outside. Outside a cavity
     // nothing changes. The path hit is `ThickenReads::hidden_members`.
+    //
+    // **THE PROPOSED SOLID, not the centreline** (challenger, 2026-10-05):
+    // the member is asked with the radius the plan would draw it at (the
+    // widest of the drawn profile and the plan's own, along its whole length),
+    // so a raise that would carry the solid out of the hidden voxels (through
+    // a thin wall, say, to an exterior face) is read as before.
     let hidden = &history.hidden;
-    let mut reads = state.thicken_reads.get();
-    reads.hidden_members += plan
+    let proposed_hidden = |position: usize, index: usize, highest: usize| -> bool {
+        let Some(strut) = struts.get(index) else {
+            return false;
+        };
+        let upto = plan.upto(position, highest).min(strut.k_top + 1);
+        let radius_at = |layer: usize| {
+            let drawn = drawn_at(strut, &state.profiles[index], layer)
+                .unwrap_or(0.0)
+                .max(strut.min_radius_mm);
+            if layer < upto {
+                drawn.max(plan.wanted(position, layer))
+            } else {
+                drawn
+            }
+        };
+        hidden.span_hidden(strut.k_bottom, strut.k_top, |layer| strut.cell_at(layer), radius_at)
+    };
+    let chain_hidden: Vec<bool> = plan
         .chain
         .iter()
-        .filter(|&&(index, _)| struts.get(index).is_some_and(|strut| hidden.member_hidden(strut)))
-        .count();
+        .enumerate()
+        .map(|(position, &(index, highest))| proposed_hidden(position, index, highest))
+        .collect();
+    let mut reads = state.thicken_reads.get();
+    reads.hidden_members += chain_hidden.iter().filter(|hidden| **hidden).count();
     state.thicken_reads.set(reads);
     let members: Vec<Raised> = plan
         .chain
@@ -3980,7 +4005,7 @@ fn thickening_enters_the_gap(
         .enumerate()
         .filter_map(|(position, &(index, highest))| {
             let strut = struts.get(index)?;
-            if hidden.member_hidden(strut) {
+            if chain_hidden[position] {
                 return None;
             }
             let upto = plan.upto(position, highest).min(strut.k_top + 1);
@@ -5922,15 +5947,13 @@ fn plan_cross(
             (point(b, b_cell_top, k), point(a, a_cell_lo, k_lo)),
         ];
         // The final gap does not apply inside a hidden cavity (Craig ruling
-        // 2026-10-05): a band between two posts that both stand wholly in
-        // enclosed air ([`crate::cavity`]) is not read against the model (the
-        // path test above still refuses a diagonal that crosses model
-        // material).
-        let hidden = [a, b].iter().all(|&post| {
-            struts
-                .get(post as usize)
-                .is_some_and(|strut| context.history.hidden.member_hidden(strut))
-        });
+        // 2026-10-05): a band whose two diagonals, each with the brace's own
+        // solid about it, stand wholly in hidden voxels ([`crate::cavity`])
+        // is not read against the model (the path test above still refuses a
+        // diagonal that crosses model material).
+        let hidden = diagonals
+            .iter()
+            .all(|&(top, bottom)| context.history.hidden.segment_hidden(top, bottom, radius_mm));
         for (top, bottom) in diagonals {
             if !hidden
                 && crate::member_clearance::model_intrusion(
@@ -8915,7 +8938,8 @@ mod tests {
     /// whole height, as in `thickening_refuses_a_root_that_would_enter_the_gap`.
     ///
     /// The authority is the CAVITY MAP ([`crate::cavity`], built here from the
-    /// slices of a real 8 mm box with 1 mm walls), not the scar flag
+    /// slices of a real 8 mm box with 1.5 mm walls, the thinnest the map
+    /// seals), not the scar flag
     /// ([`crate::SweepStrut::interior`], "model above the landing in the same
     /// column", which is also true of a recess open to the outside; challenger
     /// 2026-10-05). In all three fields the post's column has model above it,
@@ -8961,8 +8985,8 @@ mod tests {
             // every field: what the scar flag reads.
             history.column_max_model[grid.index(100, 100)] = 200;
             history.hidden = match field {
-                Field::Sealed => map_on(&cavity_box_sized(false, false, 0.0, 8.0, 1.0), &[], 0.0, &grid),
-                Field::Pocket => map_on(&cavity_box_sized(true, false, 0.0, 8.0, 1.0), &[], 0.0, &grid),
+                Field::Sealed => map_on(&cavity_box_sized(false, false, 0.0, 8.0, 1.5), &[], 0.0, &grid),
+                Field::Pocket => map_on(&cavity_box_sized(true, false, 0.0, 8.0, 1.5), &[], 0.0, &grid),
                 Field::None => crate::cavity::HiddenCavity::none(),
             };
             let mut struts = vec![plate_post(&grid, 0, 100, 0.05)];
@@ -9006,6 +9030,86 @@ mod tests {
             assert!(struts[0].thickened_mm.is_empty(), "{what}: the post is left as drawn");
             assert_eq!(hidden, 0, "{what}: the member is read");
         }
+    }
+
+    /// **THE EXEMPTION IS FOR THE PROPOSED SOLID, NOT THE CENTRELINE**
+    /// (challenger, 2026-10-05). A post 0.475 mm from the inner face of a
+    /// sealed box's wall (1.5 mm, outer face at 9.5 mm) with a cured wall cell
+    /// 0.4 mm from its axis, asked with `thickening_enters_the_gap`:
+    ///
+    /// - a raise to 0.7 mm stays in hidden voxels (it touches the cavity wall
+    ///   0.23 mm deep, which the ruling permits): admitted, path hit
+    ///   `hidden_members`;
+    /// - a raise to 2.1 mm would carry the solid through the outer face at
+    ///   x = 9.5: read as before, refused, though the CENTRELINE is in the same
+    ///   hidden voxels as in the first case;
+    /// - the controls: no cavity at all, and a box whose walls are 0.1 mm (the
+    ///   thin wall of the challenger's example) refuse the 0.7 mm raise, and
+    ///   the thin box encloses NO air (a wall that holds no whole cell does
+    ///   not seal, so no member is ever hidden behind it).
+    ///
+    /// SABOTAGE RUN (by hand): the proposed radius read as 0 (the centreline)
+    /// admits the 2.1 mm raise and the second assertion fails.
+    #[test]
+    fn a_raise_that_carries_the_solid_out_of_the_hidden_voxels_is_read_as_before() {
+        use crate::cavity::fixtures::{cavity_box_sized, map_on};
+        use crate::cavity::HiddenCavity;
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.05, 200, 200);
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(0.05, 45.0, 25.0);
+        let law = law();
+        let plan = |root: f64| super::ThickenPlan {
+            k_lo: 0,
+            k_top: 80,
+            root,
+            top: root,
+            steps: 80.0,
+            chain: vec![(0, 79)],
+            disc_growth: None,
+            over_existing_lap: false,
+            admitted_on_drawn_feet: false,
+            added_mm3: 0.0,
+        };
+        // (refused, members read as hidden, enclosed voxels of the map).
+        let read = |map: Option<(f64, f64)>, root: f64| {
+            let mut history = crate::up_sweep::ColumnHistory::new(&grid);
+            for row in 90..=110 {
+                let cell = grid.index(row, 158);
+                history.model_head[cell] = u32::try_from(history.model_spans.len()).expect("a few spans");
+                history.model_spans.push(crate::up_sweep::ShaftSpan {
+                    k_bottom: 0,
+                    k_top: 60,
+                    id: 0,
+                    next: u32::MAX,
+                });
+            }
+            history.hidden = match map {
+                Some((outer, wall)) => map_on(&cavity_box_sized(false, false, 0.0, outer, wall), &[], 0.0, &grid),
+                None => HiddenCavity::none(),
+            };
+            let mut struts = vec![plate_post(&grid, 0, 150, 0.05)];
+            struts[0].landing = crate::Landing::Model { layer: 0 };
+            let context = prune_context(&grid, &history, &keep_out, &lean, &law);
+            let state = super::TieState::build(&context, &struts);
+            let refused = super::thickening_enters_the_gap(&context, &state, &struts, &plan(root));
+            (refused, state.thicken_reads.get().hidden_members, history.hidden.census().enclosed_voxels)
+        };
+        let (refused, hidden, enclosed) = read(Some((9.0, 1.5)), 0.7);
+        assert!(enclosed > 0, "anti-vacuity: the 9 mm box with 1.5 mm walls encloses air");
+        assert!(
+            !refused && hidden == 1,
+            "a raise that stays in hidden voxels, touching the cavity wall, is admitted (hidden {hidden})"
+        );
+        let (refused, hidden, _) = read(Some((9.0, 1.5)), 2.1);
+        assert!(
+            refused && hidden == 0,
+            "a raise whose solid reaches the outer face is read as before (hidden {hidden})"
+        );
+        let (refused, hidden, _) = read(None, 0.7);
+        assert!(refused && hidden == 0, "control: no cavity, the same raise is refused");
+        let (refused, hidden, enclosed) = read(Some((9.0, 0.1)), 0.7);
+        assert_eq!(enclosed, 0, "a 0.1 mm wall holds no whole cell: no enclosed air");
+        assert!(refused && hidden == 0, "control: the thin-walled box hides nothing");
     }
 
     /// **A MODEL TIE IN A HIDDEN CAVITY IS CONFIRMED CLEAR** (Craig ruling

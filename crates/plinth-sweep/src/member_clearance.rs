@@ -730,8 +730,11 @@ pub(crate) fn model_clearance_census(
         // cavity are never removed or cleaned): a member whose whole axis
         // stands in enclosed air ([`crate::cavity`], whatever it lands on)
         // is not measured, so it is neither counted nor re-routed. Counted
-        // apart, so the census says what it left out.
-        if cavity.member_hidden(strut) {
+        // apart, so the census says what it left out. Asked of the member's
+        // DRAWN SOLID (the widest of its profile), not its centreline: a
+        // thick post whose solid reaches a voxel the cavity map does not
+        // call hidden is measured.
+        if cavity.member_hidden(strut, crate::cavity::arm_radius_mm(arm)) {
             census.members_hidden += 1;
             continue;
         }

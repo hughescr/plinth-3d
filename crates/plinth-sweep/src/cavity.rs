@@ -23,9 +23,14 @@
 //! pitch the drain-escape check and the drill stage decide their own flood
 //! at):
 //!
-//! 1. every print layer is OR-ed (any-overlap, as the escape check does) into
-//!    a voxel lattice that extends past the model on every side; the voxels
-//!    below the plate are solid;
+//! 1. a voxel of a lattice that extends past the model on every side is SOLID
+//!    only when every print layer it spans holds a whole cell of the model
+//!    there (the raster's carrier mask: the cell wholly inside the span in X,
+//!    and the row and both its neighbours in Y); the voxels below the plate
+//!    are solid. Whole cells, not any-overlap, because an opening must never
+//!    be sealed by rounding (challenger, 2026-10-05: the any-overlap mask
+//!    rounds a span outward in X, so a 0.8 mm opening across two cells was
+//!    closed by both neighbours);
 //! 2. each drain's mouth is PLUGGED with a solid ball a little wider than the
 //!    bore. A drain is a hole the model was drilled with so resin can leave;
 //!    the cavity behind it is still the cavity (a support in it still cannot
@@ -41,17 +46,27 @@
 //!    of the opening) withholds the exemption.
 //!
 //! **The direction of every error is toward NOT hidden**, which is today's
-//! behaviour (the gap applies): a wall thinner than a voxel is any-overlap
-//! solid so it does not leak; a cavity too narrow to resolve is not enclosed
-//! air and exempts nothing; a lift under one voxel could not be told from a
-//! cup and the flood would call the cup enclosed (the lift is several mm in
-//! practice; the gap under the model is exterior air).
+//! behaviour (the gap applies): an opening of any width in X, or one layer
+//! high, leaves its cells open, so it lets the flood in; a wall that holds no
+//! whole cell (under about 1.5 mm) does not hold the flood, so a cavity behind
+//! a wall that thin exempts nothing (the hollow stage's minimum wall is
+//! 2.0 mm); a cavity too narrow to resolve is not enclosed air. Two limits
+//! remain, both stated: an opening in Y narrower than a row that holds no row
+//! centre is not seen by the scanline (no raster at this pitch can see it),
+//! and a lift under one voxel could not be told from a cup and the flood would
+//! call the cup enclosed (the lift is several mm in practice; the gap under
+//! the model is exterior air).
 //!
 //! A member is hidden when EVERY sampled point along its axis is hidden: the
 //! foot (wherever it lands: plate, model or another support), a point every
-//! lattice voxel up the shaft, and the seat. A proposed landing or a proposed
-//! tie is asked with its own geometry through [`HiddenCavity::span_hidden`],
-//! before it exists.
+//! half voxel up the shaft, and the seat; and the member's SOLID, not its
+//! centreline, is what is asked ([`HiddenCavity::solid_hidden`]): every voxel
+//! the disc of the drawn or proposed radius touches must be hidden, so a raise
+//! that would carry the solid to an exterior face is read as before, and a
+//! solid that merely touches the cavity wall (one voxel deep) is not. A
+//! proposed landing, a proposed raise or a proposed tie is asked with its own
+//! geometry through [`HiddenCavity::span_hidden`] or
+//! [`HiddenCavity::segment_hidden`], before it exists.
 
 use std::collections::VecDeque;
 
@@ -163,10 +178,27 @@ impl HiddenCavity {
             }
         }
 
-        // The model, any-overlap, every layer into every voxel row it touches.
+        // The model, WHOLLY-CONTAINED cells only, and every layer a voxel
+        // spans must contain the cell. This is the CONSERVATIVE side for an
+        // opening (challenger, 2026-10-05): the any-overlap mask rounds a
+        // span outward in X, so a 0.8 mm gap between two spans, standing
+        // across two coarse cells, was sealed by both neighbours and an open
+        // recess read as enclosed. A cell that an opening touches, however
+        // narrow, is NOT solid here (the carry mask requires the whole cell
+        // inside the span in X and the row and both its neighbours in Y), and
+        // a voxel that any one of its layers leaves open is not solid either
+        // (a slit of one layer height is an opening). The price is a thin
+        // wall: one that holds no whole cell (under about 1.5 mm) does not
+        // hold the flood, so a thinner cavity wall exempts nothing. The
+        // engine's hollow stage never makes one (its minimum wall is 2.0 mm).
         let coarse = crate::grid::lay_out_at(origin_x, origin_y, pitch, nx, ny);
         let mut scratch = RasterScratch::new(&coarse);
         let mut masks = LayerMasks::default();
+        let plane = ny * nx;
+        // Layers that touch each voxel row, and how many of them held each
+        // cell wholly.
+        let mut layers_in_row = vec![0_u32; nz];
+        let mut held = vec![0_u32; nz * plane];
         for (layer, solids) in slices.iter().enumerate() {
             let z_lo = plate_z_mm + layer as f64 * layer_height_mm;
             let lo = ((z_lo - origin_z) / pitch).floor();
@@ -175,29 +207,47 @@ impl HiddenCavity {
                 continue;
             }
             let (lo, hi) = (lo.max(0.0) as usize, (hi.max(0.0) as usize).min(nz - 1));
-            if lo > hi || solids.is_empty() {
+            if lo > hi {
+                continue;
+            }
+            for count in &mut layers_in_row[lo..=hi] {
+                *count += 1;
+            }
+            if solids.is_empty() {
                 continue;
             }
             rasterize_into(&coarse, solids, &mut scratch, &mut masks);
             for z in lo..=hi {
-                for cell in 0..ny * nx {
-                    if masks.cover[cell] {
-                        solid[z * ny * nx + cell] = true;
-                    }
+                let row = &mut held[z * plane..(z + 1) * plane];
+                for (count, &carried) in row.iter_mut().zip(&masks.carry) {
+                    *count += u32::from(carried);
+                }
+            }
+        }
+        for z in 0..nz {
+            if layers_in_row[z] == 0 {
+                continue;
+            }
+            let row = &held[z * plane..(z + 1) * plane];
+            for (cell, &count) in row.iter().enumerate() {
+                if count == layers_in_row[z] {
+                    solid[z * plane + cell] = true;
                 }
             }
         }
 
         // Each drain's mouth plugged, so the flood cannot run in by the bore.
         // A ball wider than the bore on its centre covers the bore's whole
-        // cross-section at the mouth, and the margin of two voxels covers the
-        // rounding of the lattice.
+        // cross-section at the mouth, and the margin of three voxels covers
+        // the rounding of the lattice and the cells the bore's edge leaves
+        // open (a bore's wall cells are partial, so the open duct is up to a
+        // voxel wider on each side).
         let mut plugged = 0_usize;
         for drain in drains {
             if !drain.radius_mm.is_finite() || !drain.outlet_mm.iter().all(|v| v.is_finite()) {
                 continue;
             }
-            let radius = drain.radius_mm.abs() + 2.0 * pitch;
+            let radius = drain.radius_mm.abs() + 3.0 * pitch;
             let reach = (radius / pitch).ceil() as i64 + 1;
             let centre = [
                 ((drain.outlet_mm[0] - origin_x) / pitch).floor() as i64,
@@ -333,74 +383,178 @@ impl HiddenCavity {
 
     /// Whether the point on `cell`'s axis at `layer` is hidden.
     #[must_use]
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_precision_loss,
-        clippy::cast_sign_loss,
-        reason = "a layer index is exact in f64; each quotient is checked against its dimension \
-                  before the index is formed"
-    )]
     pub fn cell_hidden(&self, cell: usize, layer: usize) -> bool {
+        self.solid_hidden(cell, layer, 0.0)
+    }
+
+    /// Whether a SOLID of radius `radius_mm` about the point on `cell`'s axis
+    /// at `layer` lies wholly in hidden voxels: every voxel the disc of that
+    /// radius (and the sampling margin) touches is hidden.
+    ///
+    /// **The member's SOLID, not its centreline** (challenger, 2026-10-05):
+    /// a centreline in a hidden voxel says nothing about a thickened post
+    /// whose raise reaches past a thin wall to the outside. A hidden voxel
+    /// has enclosed air within a voxel and no exterior air within a voxel, so
+    /// a solid that stays in hidden voxels contacts the cavity wall at most a
+    /// voxel deep and never reaches an exterior face.
+    #[must_use]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a layer index is exact in f64"
+    )]
+    pub fn solid_hidden(&self, cell: usize, layer: usize, radius_mm: f64) -> bool {
         let Some(lattice) = &self.lattice else {
             return false;
         };
-        let (row, col) = (lattice.grid.row_of(cell), lattice.grid.col_of(cell));
-        let x = lattice.grid.center_x_mm(col);
-        let y = lattice.grid.center_y_mm(row);
+        let x = lattice.grid.center_x_mm(lattice.grid.col_of(cell));
+        let y = lattice.grid.center_y_mm(lattice.grid.row_of(cell));
         let z = lattice.plate_z_mm + (layer as f64 + 0.5) * lattice.layer_height_mm;
-        let at = |value: f64, origin: f64| ((value - origin) / lattice.pitch_mm).floor();
-        let (fx, fy, fz) = (
-            at(x, lattice.origin_mm[0]),
-            at(y, lattice.origin_mm[1]),
-            at(z, lattice.origin_mm[2]),
-        );
-        let [nz, ny, nx] = lattice.dims;
-        if fx < 0.0 || fy < 0.0 || fz < 0.0 {
-            return false;
-        }
-        let (ix, iy, iz) = (fx as usize, fy as usize, fz as usize);
-        if ix >= nx || iy >= ny || iz >= nz {
-            return false;
-        }
-        lattice.hidden[(iz * ny + iy) * nx + ix]
+        lattice.point_hidden(x, y, z, radius_mm)
     }
 
-    /// Whether an axis from layer `k_bottom` to `k_top`, standing in
-    /// `cell_at(layer)` at each layer, lies wholly in hidden voxels: the foot,
-    /// one point per lattice voxel of height, and the seat. A member that
-    /// does not exist yet (a proposed landing, a proposed tie) is asked with
-    /// the geometry it would have.
+    /// Whether the axis from layer `k_bottom` to `k_top`, standing in
+    /// `cell_at(layer)` at each layer, with a solid of radius `radius_at`
+    /// about it, lies wholly in hidden voxels: the foot, a point every half
+    /// voxel of height, and the seat. A member that does not exist yet (a
+    /// proposed landing, a proposed raise) is asked with the geometry it
+    /// would have. The radius at a sample is the widest of the layers up to
+    /// the next sample, so a profile that swells between samples is read at
+    /// its widest.
     #[must_use]
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "a positive pitch-over-height ratio of a few tens"
     )]
-    pub fn span_hidden(&self, k_bottom: usize, k_top: usize, cell_at: impl Fn(usize) -> usize) -> bool {
+    pub fn span_hidden(
+        &self,
+        k_bottom: usize,
+        k_top: usize,
+        cell_at: impl Fn(usize) -> usize,
+        radius_at: impl Fn(usize) -> f64,
+    ) -> bool {
         let Some(lattice) = &self.lattice else {
             return false;
         };
         if self.census.hidden_voxels == 0 || k_bottom == usize::MAX || k_top < k_bottom {
             return false;
         }
-        let stride = ((lattice.pitch_mm / lattice.layer_height_mm).floor().max(1.0)) as usize;
+        let step = ((lattice.pitch_mm / lattice.layer_height_mm / 2.0).floor().max(1.0)) as usize;
         let mut layer = k_bottom;
         loop {
-            if !self.cell_hidden(cell_at(layer), layer) {
+            let next = (layer + step).min(k_top);
+            let radius = (layer..=next).map(&radius_at).fold(0.0_f64, f64::max);
+            if !self.solid_hidden(cell_at(layer), layer, radius) {
                 return false;
             }
             if layer >= k_top {
                 return true;
             }
-            layer = (layer + stride).min(k_top);
+            layer = next;
         }
     }
 
-    /// Whether `strut`, as it stands, lies wholly inside a hidden cavity.
+    /// Whether `strut`, as it stands, with a solid of radius `radius_mm`
+    /// about its axis, lies wholly inside a hidden cavity.
     #[must_use]
-    pub fn member_hidden(&self, strut: &SweepStrut) -> bool {
-        self.span_hidden(strut.k_bottom, strut.k_top, |layer| strut.cell_at(layer))
+    pub fn member_hidden(&self, strut: &SweepStrut, radius_mm: f64) -> bool {
+        self.span_hidden(strut.k_bottom, strut.k_top, |layer| strut.cell_at(layer), |_| radius_mm)
     }
+
+    /// Whether a solid of radius `radius_mm` about the straight axis `from`
+    /// to `to` (the sweep's frame: the plate at z = 0) lies wholly in hidden
+    /// voxels, sampled every quarter voxel along the axis and at both ends.
+    #[must_use]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "a positive length over a positive step, a few hundred at most"
+    )]
+    pub fn segment_hidden(&self, from: [f64; 3], to: [f64; 3], radius_mm: f64) -> bool {
+        let Some(lattice) = &self.lattice else {
+            return false;
+        };
+        if self.census.hidden_voxels == 0
+            || !from.iter().chain(&to).all(|v| v.is_finite())
+            || !radius_mm.is_finite()
+        {
+            return false;
+        }
+        let length = geom_kernel::vec3::dist(from, to);
+        let samples = (length / (0.25 * lattice.pitch_mm)).ceil().max(1.0) as usize;
+        (0..=samples).all(|at| {
+            let t = at as f64 / samples as f64;
+            lattice.point_hidden(
+                t.mul_add(to[0] - from[0], from[0]),
+                t.mul_add(to[1] - from[1], from[1]),
+                t.mul_add(to[2] - from[2], from[2]) + lattice.plate_z_mm,
+                radius_mm,
+            )
+        })
+    }
+}
+
+impl Lattice {
+    /// Whether every voxel within `radius_mm` (and the sampling margin, a
+    /// quarter voxel: the samples of an axis stand at most that far from any
+    /// point between them in the horizontal plane) of the point is hidden.
+    /// A voxel outside the lattice is not.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "each quotient is checked against its dimension before the index is formed"
+    )]
+    fn point_hidden(&self, x: f64, y: f64, z: f64, radius_mm: f64) -> bool {
+        if !(x.is_finite() && y.is_finite() && z.is_finite() && radius_mm.is_finite()) {
+            return false;
+        }
+        let reach = radius_mm.max(0.0) + 0.25 * self.pitch_mm;
+        let [nz, ny, nx] = self.dims;
+        let index_of = |value: f64, origin: f64, limit: usize| {
+            let at = ((value - origin) / self.pitch_mm).floor();
+            (at >= 0.0 && at < limit as f64).then_some(at as usize)
+        };
+        let Some(iz) = index_of(z, self.origin_mm[2], nz) else {
+            return false;
+        };
+        let (Some(x_lo), Some(x_hi), Some(y_lo), Some(y_hi)) = (
+            index_of(x - reach, self.origin_mm[0], nx),
+            index_of(x + reach, self.origin_mm[0], nx),
+            index_of(y - reach, self.origin_mm[1], ny),
+            index_of(y + reach, self.origin_mm[1], ny),
+        ) else {
+            return false;
+        };
+        for iy in y_lo..=y_hi {
+            let dy = distance_to_span(y, self.origin_mm[1] + iy as f64 * self.pitch_mm, self.pitch_mm);
+            for ix in x_lo..=x_hi {
+                let dx = distance_to_span(x, self.origin_mm[0] + ix as f64 * self.pitch_mm, self.pitch_mm);
+                if dx.hypot(dy) <= reach && !self.hidden[(iz * ny + iy) * nx + ix] {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
+/// Distance from `value` to the span `[lo, lo + width]`, zero inside it.
+fn distance_to_span(value: f64, lo: f64, width: f64) -> f64 {
+    (lo - value).max(value - (lo + width)).max(0.0)
+}
+
+/// The widest radius a finished arm is drawn at: the widest of its radius
+/// profile and its tip. The footprint the cavity map is asked about.
+#[must_use]
+pub fn arm_radius_mm(arm: &plinth_support::SweepArm) -> f64 {
+    arm.radius_profile_mm
+        .iter()
+        .copied()
+        .chain(std::iter::once(arm.tip_radius_mm))
+        .filter(|radius| radius.is_finite())
+        .fold(0.0_f64, f64::max)
 }
 
 /// Fixtures the tests of the rules that read the cavity map share.
@@ -465,6 +619,11 @@ pub(crate) mod fixtures {
         ];
         let x_wall = hi - wall / 2.0;
         if !open_side {
+            // The two corner blocks: a real shell has no missing corner, and
+            // the map holds whole cells only (a wall's end row is eroded
+            // where nothing stands beyond it).
+            parts.push(([wall, wall, outer - wall], x_wall, lo + wall / 2.0, 0.0));
+            parts.push(([wall, wall, outer - wall], x_wall, hi - wall / 2.0, 0.0));
             if bore {
                 let mid = (outer - wall) / 2.0;
                 let (below, above) = (mid - BORE / 2.0, outer - wall - (mid + BORE / 2.0));
@@ -480,6 +639,27 @@ pub(crate) mod fixtures {
         for part in &mut parts {
             part.3 += z0;
         }
+        boxes(&parts)
+    }
+
+    /// The sealed [`cavity_box`] with a slot cut through its +y wall over the
+    /// whole height, from `slot_lo` to `slot_hi` in x: a recess open to the
+    /// outside by an opening of that width.
+    pub(crate) fn cavity_box_slit(slot_lo: f64, slot_hi: f64) -> Mesh {
+        let inner = OUTER - 2.0 * WALL;
+        let lo = CENTRE - OUTER / 2.0;
+        let hi = CENTRE + OUTER / 2.0;
+        let y_wall = hi - WALL / 2.0;
+        let (x_lo, x_hi) = (lo + WALL, hi - WALL);
+        let parts: Vec<([f64; 3], f64, f64, f64)> = vec![
+            ([OUTER, OUTER, WALL], CENTRE, CENTRE, OUTER - WALL),
+            ([WALL, OUTER, OUTER - WALL], lo + WALL / 2.0, CENTRE, 0.0),
+            ([WALL, OUTER, OUTER - WALL], hi - WALL / 2.0, CENTRE, 0.0),
+            ([inner, WALL, OUTER - WALL], CENTRE, lo + WALL / 2.0, 0.0),
+            // The +y wall in two pieces either side of the slot.
+            ([slot_lo - x_lo, WALL, OUTER - WALL], (x_lo + slot_lo) / 2.0, y_wall, 0.0),
+            ([x_hi - slot_hi, WALL, OUTER - WALL], (slot_hi + x_hi) / 2.0, y_wall, 0.0),
+        ];
         boxes(&parts)
     }
 
@@ -605,9 +785,65 @@ mod tests {
         let inside = cell(&grid, CENTRE, CENTRE);
         let outside = cell(&grid, CENTRE + OUTER / 2.0 + 2.0, CENTRE);
         let (floor, ceiling) = (layer(0.2), layer(OUTER - WALL - 1.0));
-        assert!(cavity.span_hidden(floor, ceiling, |_| inside));
-        assert!(!cavity.span_hidden(floor, ceiling, |at| if at > layer(10.0) { outside } else { inside }));
-        assert!(!cavity.span_hidden(floor, ceiling, |_| outside));
-        assert!(!super::HiddenCavity::none().span_hidden(floor, ceiling, |_| inside));
+        assert!(cavity.span_hidden(floor, ceiling, |_| inside, |_| 0.05));
+        assert!(!cavity.span_hidden(
+            floor,
+            ceiling,
+            |at| if at > layer(10.0) { outside } else { inside },
+            |_| 0.05
+        ));
+        assert!(!cavity.span_hidden(floor, ceiling, |_| outside, |_| 0.05));
+        assert!(!super::HiddenCavity::none().span_hidden(floor, ceiling, |_| inside, |_| 0.05));
+    }
+
+    /// **AN OPENING NARROWER THAN TWO VOXELS IS NOT SEALED BY THE LATTICE**
+    /// (challenger, 2026-10-05). The sealed 24 mm box with a 0.8 mm slot cut
+    /// through its +y wall over the whole height, standing across two coarse
+    /// cells at the production 0.5 mm pitch: the slot spans x = 2.1 to 2.9,
+    /// the cells' edges stand at 2.0, 2.5 and 3.0. The any-overlap mask
+    /// rounded each neighbouring span outward into both cells and sealed the
+    /// slot, so the recess read as enclosed and hid its members. The map now
+    /// holds only whole cells, so the slot leaves the flood a way in: nothing
+    /// is enclosed, nothing is hidden.
+    ///
+    /// CONTROLS, same phase and wall, nothing else changed: the box without
+    /// the slot is enclosed and hides its middle (the first test above), and a
+    /// slot wide enough to hold whole cells (two voxels, 1.2 mm) also leaves
+    /// nothing hidden. SABOTAGE RUN (by hand): the raster's any-overlap mask
+    /// in place of the whole-cell one seals the 0.8 mm slot and the first
+    /// assertion fails.
+    #[test]
+    fn a_slot_narrower_than_two_voxels_does_not_seal_a_recess() {
+        let narrow = cavity_box_slit(2.1, 2.9);
+        let (map, grid) = map_of(&narrow, &[]);
+        assert_eq!(map.census().enclosed_voxels, 0, "{:?}", map.census());
+        assert!(!map.cell_hidden(cell(&grid, CENTRE, CENTRE), layer(10.0)), "the recess is open to the outside");
+        let (wide, _) = map_of(&cavity_box_slit(2.0, 3.2), &[]);
+        assert_eq!(wide.census().enclosed_voxels, 0, "control: a wide slot opens it too");
+        let (sealed, _) = map_of(&cavity_box(false, false), &[]);
+        assert!(sealed.census().enclosed_voxels > 0, "control: with no slot the box encloses air");
+    }
+
+    /// **THE SOLID, NOT THE CENTRELINE** (challenger, 2026-10-05). A sealed
+    /// box with 1.5 mm walls, the thinnest the map seals, its +x wall's inner
+    /// face at 8.0 mm: a post 0.475 mm inside the face is hidden as a
+    /// centreline and as a 0.1 mm solid; a 0.7 mm solid touches the cavity
+    /// wall 0.23 mm deep and stays hidden (contact with the cavity wall is
+    /// what the ruling allows); a 1.6 mm solid reaches the wall's outer
+    /// voxels and is NOT hidden, and neither is one that goes through the
+    /// outer face. SABOTAGE RUN (by hand): the radius ignored in
+    /// `point_hidden` makes the last two hidden.
+    #[test]
+    fn a_solid_is_hidden_only_while_it_stays_in_hidden_voxels() {
+        let mesh = cavity_box_sized(false, false, 0.0, 9.0, 1.5);
+        let (cavity, grid) = map_of(&mesh, &[]);
+        assert!(cavity.census().enclosed_voxels > 0, "{:?}", cavity.census());
+        let post = cell(&grid, 7.5, CENTRE);
+        let at = layer(2.0);
+        assert!(cavity.solid_hidden(post, at, 0.0), "the centreline");
+        assert!(cavity.solid_hidden(post, at, 0.1), "a thin solid");
+        assert!(cavity.solid_hidden(post, at, 0.7), "touching the cavity wall");
+        assert!(!cavity.solid_hidden(post, at, 1.6), "into the wall's outer voxels");
+        assert!(!cavity.solid_hidden(post, at, 2.5), "through the outer face");
     }
 }

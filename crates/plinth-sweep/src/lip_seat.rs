@@ -984,10 +984,13 @@ pub(crate) fn apply(
             let mover_hidden = {
                 let (base_cell, k_bottom) = (proposal.candidate.cell, proposal.candidate.k_bottom);
                 let seat_cell = struts[index_of].cell;
-                context
-                    .history
-                    .hidden
-                    .span_hidden(k_bottom, struts[index_of].k_top, |layer| {
+                // With the SOLID the trial arm is drawn at about that axis,
+                // not the centreline alone (challenger, 2026-10-05).
+                let radius = crate::cavity::arm_radius_mm(&trial[first]);
+                context.history.hidden.span_hidden(
+                    k_bottom,
+                    struts[index_of].k_top,
+                    |layer| {
                         if layer == k_bottom {
                             base_cell
                         } else {
@@ -996,15 +999,17 @@ pub(crate) fn apply(
                                 .get(layer.wrapping_sub(k_bottom))
                                 .map_or(seat_cell, |cell| *cell as usize)
                         }
-                    })
+                    },
+                    |_| radius,
+                )
             };
             let hidden = |slot: usize| {
                 mover_hidden
                     && (slot == first
-                        || context
-                            .history
-                            .hidden
-                            .member_hidden(&struts[proposal.children[slot - first - 1].0]))
+                        || context.history.hidden.member_hidden(
+                            &struts[proposal.children[slot - first - 1].0],
+                            crate::cavity::arm_radius_mm(&trial[slot]),
+                        ))
             };
             let clear = surface.is_none()
                 || (first..=first + proposal.children.len()).all(|slot| {

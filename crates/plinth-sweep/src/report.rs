@@ -544,6 +544,9 @@ pub struct PathHits {
     /// to a cell covering the same demand. All zero means the test never ran.
     pub descent_solid_tested: u64,
     pub descent_solid_inside_preferred_margin: u64,
+    /// Of the straight descents tested, those wholly in a hidden cavity, where
+    /// the final gap is not asked (Craig, 2026-10-05).
+    pub descent_solid_in_hidden_cavity: u64,
     pub descent_solid_refused_at_final_gap: u64,
     pub descent_solid_cleared_by_lean: u64,
     pub descent_solid_at_final_gap_only: u64,

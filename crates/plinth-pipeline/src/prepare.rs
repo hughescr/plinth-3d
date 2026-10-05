@@ -2884,7 +2884,8 @@ fn print_sweep_disclosure(
         println!(
             "[sweep {model}] drawn-solid descent (two tiers, preferred 0.6 mm then the final \
              gap): {} descents read; {} straight descents inside the preferred margin (kept \
-             where they clear the final gap); {} straight descents refused at the final gap; \
+             where they clear the final gap); {} straight descents wholly in a hidden cavity \
+             (the final gap is not asked there); {} straight descents refused at the final gap; \
              {} replaced by a leaned descent that clears the preferred margin; {} replaced by \
              one that clears the final gap only; {} cleared by no descent (kept, warned by the \
              census); {} lean candidates refused; {} seats moved to a cell covering the same \
@@ -2894,6 +2895,7 @@ fn print_sweep_disclosure(
              hidden cavity not read)",
             hits.descent_solid_tested,
             hits.descent_solid_inside_preferred_margin,
+            hits.descent_solid_in_hidden_cavity,
             hits.descent_solid_refused_at_final_gap,
             hits.descent_solid_cleared_by_lean,
             hits.descent_solid_at_final_gap_only,

@@ -268,21 +268,29 @@ makes its sections thinner).
 2026-08-31 ruling that supports hidden in a cavity are never removed or cleaned). The test is
 the cavity itself (`cavity.rs`), not the scar flag `SweepStrut::interior` (model above the landing
 in the same column), which is also true of a recess open to the outside and false for a member
-that lands on another support. One flood per model, at the hollowing pitch: the slices are
-rasterised (any overlap) into a voxel lattice, the voxels below the plate are solid, each drain
-mouth is plugged with a ball wider than the bore (the bore does not open the cavity), and the empty
-space is flooded from the lattice boundary. Empty voxels the flood never reaches are enclosed air;
-a voxel is hidden when enclosed air lies within one voxel and no exterior air does. A member is
-hidden when every sampled point of its axis (the foot, one point per voxel of height, the seat) is
-hidden, whatever it lands on; a proposed landing or tie is asked with its own geometry before it
-exists. A hidden member is not read against the gap by the thickening refusal, is not counted by
-the census (so it is never sent to the re-route), a mover that would land so is not read against
-the gap by the re-route's landing search, a model tie so placed is confirmed clear by its lone
-census, and a brace band between two such posts is not read against the model (its path test still
-refuses a diagonal through model material). Every error runs toward "not hidden", which is the
-old behaviour: a cavity too narrow for the lattice exempts nothing. Outside a cavity nothing
-changes. The up-sweep's descent test is not changed: the column above a landing is not yet known
-while the up-sweep runs, so a seat placed there is read against the gap as before.
+that lands on another support. One flood per model, at the hollowing pitch: a voxel of a lattice
+that reaches past the model is solid only when every layer it spans holds a WHOLE cell of the model
+there (not any overlap: an any-overlap mask rounds a span outward, and an opening of 0.8 mm across
+two cells was sealed by both neighbours), the voxels below the plate are solid, each drilled hole
+(drain or vent) mouth is plugged with a ball wider than the bore (the bore does not open the
+cavity), and the empty space is flooded from the lattice boundary. Empty voxels the flood never
+reaches are enclosed air; a voxel is hidden when enclosed air lies within one voxel and no
+exterior air does. A member is hidden when every sampled point of its axis (the foot, one point per
+half voxel of height, the seat) is hidden, whatever it lands on, AND the member's solid, at the
+radius it is drawn at or the plan would draw it at, stays in hidden voxels (so a raise that would
+carry it to an exterior face is read as before, and one that touches the cavity wall a voxel deep
+is not); a proposed landing, raise or tie is asked with its own geometry before it exists. A hidden
+member is not read against the gap by the thickening refusal, is not counted by the census (so it
+is never sent to the re-route), a mover that would land so is not read against the gap by the
+re-route's landing search, a straight descent of the up-sweep (the cavity map is built before the
+up-sweep, from all the slices) that stands so is not refused for the final gap (the model-crossing
+and drain tests of the lean search are unchanged), a model tie so placed is confirmed clear by its
+lone census, and a brace band whose diagonals stand so is not read against the model (its path
+test still refuses a diagonal through model material). Every error runs toward "not hidden", which
+is the old behaviour: an opening of any width, a wall under about 1.5 mm (the hollow stage makes
+none under 2.0 mm) and a cavity too narrow for the lattice exempt nothing. Two limits stand: an
+opening in Y narrower than a row that holds no row centre is not seen by the scanline, and a lift
+under one voxel could not be told from a cup. Outside a cavity nothing changes.
 
 ## 6. The seat's own contact zone — the honest exemption
 
