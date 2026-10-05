@@ -264,8 +264,16 @@ impl HiddenCavity {
             for dz in -reach..=reach {
                 for dy in -reach..=reach {
                     for dx in -reach..=reach {
-                        let (x, y, z) = (centre[0] + dx, centre[1] + dy, centre[2] + dz);
-                        if x < 0 || y < 0 || z < 0 || x >= nx as i64 || y >= ny as i64 || z >= nz as i64 {
+                        // Off the lattice below (negative) or beyond (past
+                        // its last voxel) on any axis: not a voxel to plug.
+                        let (Ok(x), Ok(y), Ok(z)) = (
+                            usize::try_from(centre[0] + dx),
+                            usize::try_from(centre[1] + dy),
+                            usize::try_from(centre[2] + dz),
+                        ) else {
+                            continue;
+                        };
+                        if x >= nx || y >= ny || z >= nz {
                             continue;
                         }
                         let at = [
@@ -279,7 +287,7 @@ impl HiddenCavity {
                             at[2] - drain.outlet_mm[2],
                         ];
                         if d[0].mul_add(d[0], d[1].mul_add(d[1], d[2] * d[2])) <= radius * radius {
-                            solid[index(z as usize, y as usize, x as usize)] = true;
+                            solid[index(z, y, x)] = true;
                         }
                     }
                 }
@@ -715,7 +723,6 @@ pub(crate) mod fixtures {
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            clippy::cast_precision_loss,
             reason = "a small positive layer count"
         )]
         let layers = ((top - plate_z) / H).ceil() as usize;

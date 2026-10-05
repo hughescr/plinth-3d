@@ -32,12 +32,33 @@
 //! cover its centre, on a 0.05 mm raster.
 //!
 //! * **No cell under three or more roots.** 129 on `for-craig-v11`.
-//! * **At most four overlapping root pairs.** 16 on `for-craig-v11`. The four
-//!   the rule leaves, measured on this branch: two pairs off the ring (5-6.7 mm
-//!   from the axis) that already stood in round 10, before stranded seating
-//!   existed, and two whose stranded member carries another member, which the
-//!   rule refuses to move (its dependants would be left in the air) and the
-//!   run WARNS about. A fifth pair is a new pile-up.
+//! * **No overlapping root pair outside the pinned five.** 16 on
+//!   `for-craig-v11`. Every pair the file shows must be one of
+//!   [`PINNED_PAIRS`], named by the two root centres (file coordinates, mm;
+//!   the drain axis is at x = y = 0). A pair anywhere else is a new pile-up and
+//!   fails, whatever the count; a pinned pair that goes away is an improvement
+//!   and passes.
+//!
+//!   Re-pinned at the round-16 milestone (2026-10-05, develop `be4c179`),
+//!   from "at most four pairs" to the five named below. The rule change that
+//!   moved it is the cylinder-bracing lane's round 2 (`6b0d238`: the
+//!   hidden-cavity map holds whole cells only, and a straight descent wholly
+//!   in a hidden cavity is not refused at the final gap). Measured on the
+//!   lane's own runs: 4 pairs at `9577dd0` (round 1, = `for-craig-v15`),
+//!   5 at `6b0d238` and at `2019f39`. The fifth pair is (-6.687, 0.763) and
+//!   (-4.737, 1.663), 6.73 and 5.02 mm from the drain axis, off the ring: the
+//!   pair this pin's first version already named as one of "two pairs off the
+//!   ring (5-6.7 mm from the axis) that already stood in round 10, before
+//!   stranded seating existed". It came back because the post at
+//!   (-4.737, 1.663), a short straight post from the plate to the model, now
+//!   carries more of the field's load: its tip ball 0.723 -> 0.915 mm and its
+//!   area-law shaft 0.542 -> 0.686 mm radius, so its crowding disc (1.6x the
+//!   root) laps its neighbour's by 0.19 mm. The drawn flares (1.006 and
+//!   1.136 mm) do not touch (2.142 mm against 2.148 mm apart), and no cell
+//!   stands under three roots. The run reports the pair on the congestion
+//!   lane's line (`overlapping root pairs 16 -> 16 -> 5`). The other four
+//!   pairs are the ones `for-craig-v15` shows, at the same centres: three on
+//!   the post at (-2.987, 0.263) by the drain ring and one 12-13 mm out.
 //!
 //! The fixture is the PROVISIONED `corpus/models/Cylinder.stl` (gitignored, as
 //! `round100_emit.rs` uses Round_100), run exactly as the CLI runs it
@@ -53,8 +74,20 @@ use plinth_pipeline::{
 const STEM: &str = "Cylinder";
 /// The raster the stack is counted on: the sweep's working pitch.
 const RASTER_MM: f64 = 0.05;
-/// See the module doc: the four pairs the rule leaves, by name.
-const MAX_OVERLAPPING_PAIRS: usize = 4;
+/// See the module doc: the only overlapping root pairs allowed, each named by
+/// its two root centres `(x, y)` in file coordinates (mm). Re-pinned at the
+/// round-16 milestone from "at most four" (the reason is in the module doc).
+const PINNED_PAIRS: [[(f64, f64); 2]; 5] = [
+    [(-2.987, 0.263), (-2.587, -1.237)],
+    [(-2.987, 0.263), (-2.187, 1.863)],
+    [(-2.987, 0.263), (-4.737, 1.663)],
+    [(-6.687, 0.763), (-4.737, 1.663)],
+    [(5.763, -11.587), (5.463, -10.987)],
+];
+/// How near a root centre must be to a pinned centre to be that root. The
+/// centres stand on the 0.05 mm working lattice, so a moved root misses by
+/// 0.05 mm or more.
+const CENTRE_MATCH_MM: f64 = 0.01;
 
 struct Scratch(PathBuf);
 
@@ -188,17 +221,29 @@ fn plate_roots(records: &[chitubox_io::SupportRecord], flare_factor: f64) -> Vec
     roots
 }
 
-fn overlapping_pairs(roots: &[Root]) -> Vec<(usize, usize, f64)> {
+fn overlapping_pairs(roots: &[Root]) -> Vec<(Root, Root, f64)> {
     let mut pairs = Vec::new();
     for (i, a) in roots.iter().enumerate() {
         for b in &roots[i + 1..] {
             let distance = (a.x - b.x).hypot(a.y - b.y);
             if distance < a.disc + b.disc {
-                pairs.push((a.record, b.record, distance));
+                pairs.push((*a, *b, distance));
             }
         }
     }
     pairs
+}
+
+/// Whether a root stands at a pinned centre.
+fn at(root: &Root, centre: (f64, f64)) -> bool {
+    (root.x - centre.0).hypot(root.y - centre.1) <= CENTRE_MATCH_MM
+}
+
+/// Whether an overlapping pair is one of [`PINNED_PAIRS`], in either order.
+fn pinned(a: &Root, b: &Root) -> bool {
+    PINNED_PAIRS
+        .iter()
+        .any(|[p, q]| (at(a, *p) && at(b, *q)) || (at(a, *q) && at(b, *p)))
 }
 
 /// Raster cells (centres on a `RASTER_MM` lattice) under three or more discs.
@@ -256,17 +301,22 @@ fn the_cylinders_drain_ring_stands_no_pile_of_overlapping_posts() {
     let roots = plate_roots(&records, flare_factor);
     let pairs = overlapping_pairs(&roots);
     let stacked = stacked_cells(&roots);
+    let named: Vec<_> = pairs
+        .iter()
+        .map(|(a, b, distance)| (a.record, (a.x, a.y), b.record, (b.x, b.y), *distance))
+        .collect();
     println!(
-        "{} plate roots; {} overlapping pairs {:?}; {} cells under 3+ roots",
+        "{} plate roots; {} overlapping pairs (record, centre, record, centre, distance) {named:?}; \
+         {stacked} cells under 3+ roots",
         roots.len(),
         pairs.len(),
-        pairs,
-        stacked
     );
     assert!(roots.len() > 50, "the grader must find the Cylinder's plate roots, found {}", roots.len());
     assert_eq!(stacked, 0, "no cell may stand under three or more plate roots");
+    let unpinned: Vec<_> = pairs.iter().filter(|(a, b, _)| !pinned(a, b)).collect();
     assert!(
-        pairs.len() <= MAX_OVERLAPPING_PAIRS,
-        "at most {MAX_OVERLAPPING_PAIRS} overlapping root pairs (16 on for-craig-v11): {pairs:?}"
+        unpinned.is_empty(),
+        "no overlapping root pair outside the pinned {} (16 pairs on for-craig-v11); new: {unpinned:?}",
+        PINNED_PAIRS.len()
     );
 }
