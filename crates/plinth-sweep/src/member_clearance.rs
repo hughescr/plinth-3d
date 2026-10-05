@@ -95,6 +95,33 @@ pub(crate) fn model_intrusion(
     radius_mm: f64,
     gap_mm: f64,
 ) -> Option<(usize, f64)> {
+    model_intrusion_tapered(
+        grid,
+        history,
+        layer_height_mm,
+        from,
+        to,
+        (radius_mm, radius_mm),
+        gap_mm,
+    )
+}
+
+/// [`model_intrusion`] for the frustum the file draws: the radius runs
+/// linearly from `radii.0` at `from` to `radii.1` at `to`, and each cured cell
+/// is read at the radius of the axis point nearest to it (fix/drawn-solid-clearance,
+/// 2026-10-04: the thickening rung's drawn root is one chord from a step to
+/// the root, and the wider end read all along its length refused a raise that
+/// the census, which reads the frustum, finds clear).
+pub(crate) fn model_intrusion_tapered(
+    grid: &Grid,
+    history: &ColumnHistory,
+    layer_height_mm: f64,
+    from: [f64; 3],
+    to: [f64; 3],
+    radii: (f64, f64),
+    gap_mm: f64,
+) -> Option<(usize, f64)> {
+    let radius_mm = radii.0.max(radii.1);
     let reach = radius_mm.max(0.0) + gap_mm.max(0.0) + raster_half_diagonal_mm(grid);
     if !reach.is_finite() {
         return None;
@@ -155,9 +182,26 @@ pub(crate) fn model_intrusion(
                 if top < z_lo || bottom > z_hi {
                     continue;
                 }
-                let (distance, _, _) =
+                let (distance, on_axis, _) =
                     segment_segment_distance_min(from, to, [x, y, bottom], [x, y, top]);
-                if distance < reach {
+                if distance >= reach {
+                    continue;
+                }
+                // The radius the solid has at the axis point nearest this cell.
+                let reach_here = if (radii.0 - radii.1).abs() <= f64::EPSILON {
+                    reach
+                } else {
+                    let length = geom_kernel::vec3::dist(from, to);
+                    let along = if length > 0.0 {
+                        (geom_kernel::vec3::dist(from, on_axis) / length).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    (radii.0 + along * (radii.1 - radii.0)).max(0.0)
+                        + gap_mm.max(0.0)
+                        + raster_half_diagonal_mm(grid)
+                };
+                if distance < reach_here {
                     return Some((cell, distance));
                 }
             }
@@ -211,7 +255,7 @@ pub(crate) fn shaft_model_intrusion(
         bottom,
         zone,
         if lands_on_model { zone } else { 0.0 },
-        radius_mm,
+        (radius_mm, radius_mm),
         gap_mm,
     )
 }
@@ -231,7 +275,7 @@ pub(crate) fn inset_segment_intrusion(
     bottom: [f64; 3],
     inset_top_mm: f64,
     inset_bottom_mm: f64,
-    radius_mm: f64,
+    radii_top_bottom: (f64, f64),
     gap_mm: f64,
 ) -> Option<(usize, f64)> {
     let length = geom_kernel::vec3::dist(top, bottom);
@@ -246,7 +290,18 @@ pub(crate) fn inset_segment_intrusion(
     };
     let from = along(bottom, top, inset_bottom_mm);
     let to = along(top, bottom, inset_top_mm);
-    model_intrusion(grid, history, layer_height_mm, from, to, radius_mm, gap_mm)
+    // The radius at each end of what is left, on the linear taper.
+    let (r_top, r_bottom) = radii_top_bottom;
+    let radius_at = |from_top_mm: f64| r_top + (r_bottom - r_top) * (from_top_mm / length);
+    model_intrusion_tapered(
+        grid,
+        history,
+        layer_height_mm,
+        from,
+        to,
+        (radius_at(length - inset_bottom_mm), radius_at(inset_top_mm)),
+        gap_mm,
+    )
 }
 
 /// **A member's own LANDING zone on the model** (fix/morel-long-posts,
@@ -1043,9 +1098,49 @@ mod census_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{member_intrusion, model_intrusion, MemberSolid};
+    use super::{member_intrusion, model_intrusion, model_intrusion_tapered, MemberSolid};
     use crate::grid::lay_out_at;
     use crate::up_sweep::{ColumnHistory, ShaftSpan};
+
+    /// **The raster reads the FRUSTUM** (fix/drawn-solid-clearance,
+    /// 2026-10-04): a member drawn as one chord from 0.1 mm at its top to
+    /// 0.5 mm at its foot, passing a cured column 0.7 mm off its axis that
+    /// stands only beside its THIN upper half. Read at the wider end all
+    /// along (0.5 + 0.3 + half a cell) it enters the column; read as the
+    /// frustum (0.1 to 0.3 mm there) it clears. A column beside the thick
+    /// foot is still entered.
+    #[test]
+    fn the_raster_reads_a_tapered_member_as_the_frustum_it_is() {
+        let grid = lay_out_at(0.0, 0.0, 0.05, 100, 100);
+        let h = 0.05;
+        let (x, y) = (grid.center_x_mm(50), grid.center_y_mm(50));
+        let column_at = |k_bottom: u32, k_top: u32| {
+            let mut history = ColumnHistory::new(&grid);
+            let cell = grid.index(50, 50);
+            history.model_spans.push(ShaftSpan { k_bottom, k_top, id: 0, next: u32::MAX });
+            history.model_head[cell] = 0;
+            history
+        };
+        // The member: top at z = 4.0, foot at z = 0.0, 0.7 mm beside the column.
+        let (top, foot) = ([x + 0.7, y, 4.0], [x + 0.7, y, 0.0]);
+        // The column over z 3.0..3.5, in the thin upper half (radius about 0.2).
+        let upper = column_at(60, 70);
+        let gap = 0.3;
+        assert!(
+            model_intrusion(&grid, &upper, h, foot, top, 0.5, gap).is_some(),
+            "read at the wider end all along, the member enters the column"
+        );
+        assert!(
+            model_intrusion_tapered(&grid, &upper, h, foot, top, (0.5, 0.1), gap).is_none(),
+            "read as the frustum, the thin upper half clears it"
+        );
+        // The same column over z 0.2..0.7, beside the thick foot (radius about 0.45).
+        let lower = column_at(4, 14);
+        assert!(
+            model_intrusion_tapered(&grid, &lower, h, foot, top, (0.5, 0.1), gap).is_some(),
+            "beside the thick foot the frustum still enters it"
+        );
+    }
 
     /// A single cured column, one cell wide, over layers 10..=20; a member
     /// passing beside it is refused inside `r + gap + half-diagonal` and

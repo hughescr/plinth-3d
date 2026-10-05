@@ -3838,9 +3838,10 @@ enum ThickenRefusal {
 /// ([`ThickenRefusal::Model`]).
 ///
 /// Each member's raised stretch, from its foot to the layer the plan raises
-/// it to, is cut into pieces (the member's own taper into four, the rest one
-/// piece), and each piece is read at the WIDEST radius the plan writes on it
-/// (an error toward refusal) against the radius it is drawn at now, on the
+/// it to, is cut where the plan changes shape (a constant root below the
+/// run, a linear taper over it), and each piece is read as the FRUSTUM the
+/// plan draws (the radius at the axis point nearest each cured cell, as the
+/// census reads it) against the widest radius it is drawn at now, on the
 /// raster ([`crate::member_clearance::inset_segment_intrusion`]), outside the
 /// member's own seat zone and, on the model, its landing zone. A piece that
 /// is inside the gap already is not the thickening's doing and does not
@@ -3868,13 +3869,8 @@ fn thickening_enters_the_gap(
         if position == 0 && plan.k_lo > strut.k_bottom && plan.k_lo < top_layer {
             cuts.push(plan.k_lo);
         }
-        let from = *cuts.last().unwrap_or(&strut.k_bottom);
-        let pieces = if position == 0 { 4 } else { 1 };
-        for piece in 1..=pieces {
-            let layer = from + (top_layer - from) * piece / pieces;
-            if layer > *cuts.last().unwrap_or(&from) {
-                cuts.push(layer);
-            }
+        if top_layer > *cuts.last().unwrap_or(&strut.k_bottom) {
+            cuts.push(top_layer);
         }
         let seat = crate::member_clearance::axis_point(grid, h, strut.cell, strut.k_top);
         let base = crate::member_clearance::axis_point(grid, h, strut.base_cell(), strut.k_bottom);
@@ -3886,19 +3882,22 @@ fn thickening_enters_the_gap(
         let on_model = matches!(strut.landing, Landing::Model { .. });
         for pair in cuts.windows(2) {
             let (low, high) = (pair[0], pair[1]);
-            let wanted = plan.wanted(position, low).max(plan.wanted(position, high));
+            // The plan writes a constant root below the taper and a linear
+            // taper above it: each piece is one frustum, read as the frustum.
+            let (wanted_top, wanted_bottom) = (plan.wanted(position, high), plan.wanted(position, low));
+            let widest = wanted_top.max(wanted_bottom);
             let now = (low..=high)
                 .map(|layer| drawn_at(strut, &state.profiles[index], layer).unwrap_or(0.0))
                 .fold(strut.min_radius_mm, f64::max);
-            if wanted <= now {
+            if widest <= now {
                 continue;
             }
-            let zone = factor.max(1.0) * (wanted + gap);
+            let zone = factor.max(1.0) * (widest + gap);
             let (inset_top, inset_bottom) = (
                 if high >= strut.k_top { zone } else { 0.0 },
                 if low <= strut.k_bottom && on_model { zone } else { 0.0 },
             );
-            let blocked = |radius: f64| {
+            let blocked = |radii: (f64, f64)| {
                 crate::member_clearance::inset_segment_intrusion(
                     grid,
                     history,
@@ -3907,12 +3906,12 @@ fn thickening_enters_the_gap(
                     at(low),
                     inset_top,
                     inset_bottom,
-                    radius,
+                    radii,
                     gap,
                 )
                 .is_some()
             };
-            if blocked(wanted) && !blocked(now) {
+            if blocked((wanted_top, wanted_bottom)) && !blocked((now, now)) {
                 return true;
             }
         }
