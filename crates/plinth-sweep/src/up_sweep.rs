@@ -3641,31 +3641,6 @@ mod descent_tests {
         a: ([f64; 3], [f64; 3]),
         b: ([f64; 3], [f64; 3]),
     ) -> geom_kernel::NativeSurface {
-        let mut verts: Vec<[f64; 3]> = Vec::new();
-        let mut tris: Vec<[u32; 3]> = Vec::new();
-        for (low, high) in [a, b] {
-            let base = u32::try_from(verts.len()).expect("a few vertices");
-            for corner in 0..8_usize {
-                verts.push(std::array::from_fn(|k| if corner >> k & 1 == 0 { low[k] } else { high[k] }));
-            }
-            for t in [
-                [0, 2, 1], [1, 2, 3], [4, 5, 6], [5, 7, 6], [0, 1, 4], [1, 5, 4],
-                [2, 6, 3], [3, 6, 7], [0, 4, 2], [2, 4, 6], [1, 3, 5], [3, 7, 5],
-            ] {
-                tris.push([base + t[0], base + t[1], base + t[2]]);
-            }
-        }
-        let pitch = 0.1;
-        let estimate = geom_kernel::NativeSurface::estimate_index_memory_from_indexed(&verts, &tris, pitch)
-            .expect("an estimate");
-        geom_kernel::NativeSurface::from_indexed(
-            &verts,
-            &tris,
-            geom_kernel::NativeSurfaceConfig {
-                grid_pitch_mm: pitch,
-                max_grid_bytes: estimate.max_axis_grid_bytes(),
-            },
-        )
-        .expect("a surface")
+        crate::member_clearance::boxes_surface(&[a, b])
     }
 }

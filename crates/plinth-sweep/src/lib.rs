@@ -1496,12 +1496,16 @@ pub fn run_sweep_with_drains(
     //
     // The model's surface index, shared with the head-join, lip-seat and
     // census rules that read it later from the same cell. It is built here,
-    // before any arm stands, only when the descent test runs: the test
-    // confirms what the raster flags against the surface and takes each
-    // contact zone from the face's own normal.
+    // before any arm stands, only when the descent test or the thickening
+    // refusal will read it: both confirm what the raster flags against the
+    // surface and take each contact zone from the face's own normal.
     let model_surface: std::cell::OnceCell<Option<geom_kernel::NativeSurface>> =
         std::cell::OnceCell::new();
-    if policy.drawn_solid_descent {
+    let thickening_reads_the_model = policy.slenderness
+        && policy.slenderness_ties
+        && policy.slenderness_thicken
+        && policy.member_clearance;
+    if policy.drawn_solid_descent || thickening_reads_the_model {
         model_surface.get_or_init(|| {
             head_join::build_surface(
                 mesh,
@@ -2000,6 +2004,8 @@ pub fn run_sweep_with_drains(
         mast_root_clearance: policy.slenderness_mast_root_clearance,
         final_clearance_mm: policy.final_clearance_gap_mm,
         member_clearance: policy.member_clearance,
+        model_surface: model_surface.get().and_then(Option::as_ref),
+        plate_z_mm: plate_z,
         max_struts: policy.limits.max_struts,
         x_allowed: policy.x_allowed,
         seat_faces: seat_face_rule,

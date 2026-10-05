@@ -2907,6 +2907,25 @@ fn print_sweep_disclosure(
             reroute.moves_put_back_host_load,
             reroute.moves_put_back_roots,
         );
+        // Kept for a frame (challenger round 3, 2026-10-05): named, with why.
+        for (arm, lock) in &reroute.kept_for_a_frame {
+            let why = match lock {
+                plinth_sweep::lip_seat::FrameLock::CrossTied => "a cross is seated on it",
+                plinth_sweep::lip_seat::FrameLock::CrossTiedBelow => {
+                    "a cross is seated on a member resting on it"
+                }
+                plinth_sweep::lip_seat::FrameLock::NonArmResting => {
+                    "a brace, mast or model tie rests on it or below it"
+                }
+            };
+            println!(
+                "[sweep {model}] WARNING arm {arm} stands within the final gap of the model and \
+                 the clearance re-route kept it where it stands: {why}, so moving it would move \
+                 a junction of a frame the slenderness ladder solved, and this pass neither \
+                 carries a frame unsolved nor takes one down [a WARNING on an emitted file, \
+                 never a refusal]"
+            );
+        }
         // EVERY MEMBER'S DRAWN SOLID AGAINST THE MODEL (fix/morel-long-posts,
         // 2026-10-02): arm shafts included.
         let clearance = &report.member_model_clearance;

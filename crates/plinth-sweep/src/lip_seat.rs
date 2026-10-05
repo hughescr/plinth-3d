@@ -283,6 +283,64 @@ pub struct LipSeatWarning {
     pub on_plate: bool,
 }
 
+/// Why the clearance re-route kept an arm it was sent: the arm carries part
+/// of a frame the slenderness ladder solved.
+///
+/// Moving such an arm moves a junction of that frame. The frame's band
+/// layers and count, its window and its two-post ceiling were solved for the
+/// pair as it stands; carried along unsolved, the frame could leave a post
+/// over its slenderness limit while the report counts it braced, and taken
+/// down and solved again it could leave the post unbraced. Either trades a
+/// member that stands clear of the model but inside the final gap for a
+/// post that may sway or snap mid-print, so the re-route keeps the arm and
+/// warns (emit and warn).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameLock {
+    /// A cross is seated on the arm itself.
+    CrossTied,
+    /// A cross is seated on a member that rests on it, directly or not.
+    CrossTiedBelow,
+    /// A member that is not an arm (a brace, a mast, a model tie) rests on
+    /// it, directly or not.
+    NonArmResting,
+}
+
+/// One flag per member: whether a cross (a brace's top) is seated on it.
+pub(crate) fn crosses_seated(struts: &[SweepStrut]) -> Vec<bool> {
+    let mut tied = vec![false; struts.len()];
+    for strut in struts {
+        if let Some(host) = strut.seat_on_strut {
+            if let Some(flag) = tied.get_mut(host as usize) {
+                *flag = true;
+            }
+        }
+    }
+    tied
+}
+
+/// Why the clearance re-route keeps `member` for a frame, given which
+/// members have a cross seated on them (`tied`) and every member resting on
+/// it, directly or not (`followers`); `None` where it may move with them.
+pub(crate) fn frame_lock(
+    struts: &[SweepStrut],
+    tied: &[bool],
+    member: usize,
+    followers: &[usize],
+) -> Option<FrameLock> {
+    if tied.get(member).copied().unwrap_or(false) {
+        Some(FrameLock::CrossTied)
+    } else if followers.iter().any(|&follower| tied.get(follower).copied().unwrap_or(false)) {
+        Some(FrameLock::CrossTiedBelow)
+    } else if followers
+        .iter()
+        .any(|&follower| struts.get(follower).is_some_and(|strut| strut.kind != StrutKind::Arm))
+    {
+        Some(FrameLock::NonArmResting)
+    } else {
+        None
+    }
+}
+
 /// What the rule did to one field.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LipSeatOutcome {
@@ -308,6 +366,13 @@ pub struct LipSeatOutcome {
     pub kept_locked_by_tie: usize,
     pub kept_locked_by_non_arm_below: usize,
     pub kept_behind_a_follower_also_sent: usize,
+    /// **Named, with the reason** (challenger round 3, 2026-10-05): every arm
+    /// the clearance re-route was sent and kept where it stands (on the last
+    /// pass) because a cross, a brace, a mast or a tie belongs to the frame
+    /// it carries ([`FrameLock`]). Each is a WARNING on the emitted file: the
+    /// re-route does not move the junction of a frame the slenderness ladder
+    /// solved and does not re-plan that frame.
+    pub kept_for_a_frame: Vec<(u32, FrameLock)>,
     /// Remedy 1: arms re-landed so they meet their face within the limit.
     pub arms_relanded: usize,
     /// Of those, the ones re-landed on the MODEL below them rather than on a
@@ -603,6 +668,7 @@ pub(crate) fn apply(
     outcome.kept_locked_by_tie = 0;
     outcome.kept_locked_by_non_arm_below = 0;
     outcome.kept_behind_a_follower_also_sent = 0;
+    outcome.kept_for_a_frame.clear();
 
     // ---- who may move. An arm another member rests on moves only WITH its
     // children, and only when each child is a support arm nothing rests on and
@@ -612,19 +678,14 @@ pub(crate) fn apply(
     // pass cannot re-land.
     let carries = crate::landing_check::carries_someone(struts);
     let mut children_of: Vec<Vec<usize>> = vec![Vec::new(); struts.len()];
-    let mut tied = vec![false; struts.len()];
     for (child, strut) in struts.iter().enumerate() {
         if let Landing::Strut { id, .. } = strut.landing {
             if let Some(list) = children_of.get_mut(id as usize) {
                 list.push(child);
             }
         }
-        if let Some(host) = strut.seat_on_strut {
-            if let Some(flag) = tied.get_mut(host as usize) {
-                *flag = true;
-            }
-        }
     }
+    let tied = crosses_seated(struts);
     // **The clearance re-route moves a whole SUBTREE.** An arm sent for its
     // clearance that carries members which carry others (the overhang
     // table's post 26: three branches, one with two branches of its own) is
@@ -703,6 +764,12 @@ pub(crate) fn apply(
                 outcome.kept_locked_by_non_arm_below += 1;
             } else if !locked[index_of] {
                 outcome.kept_behind_a_follower_also_sent += 1;
+            }
+            // Named, with its reason: kept for a frame is a WARNING.
+            if trigger.is_clearance() && locked[index_of] {
+                if let Some(lock) = frame_lock(struts, &tied, index_of, &children) {
+                    outcome.kept_for_a_frame.push((strut.id, lock));
+                }
             }
             continue;
         }
@@ -1867,6 +1934,77 @@ pub(crate) fn record_before(outcome: &mut LipSeatOutcome, bites: &[Option<ShaftS
     }
 }
 
+/// **A carrier kept for a frame is NAMED, with why** (challenger round 3,
+/// 2026-10-05, finding 3): the Cylinder's arms 171, 195 and 203 stood 0.20 to
+/// 0.24 mm from the model, each with a cross seated on it, and the re-route
+/// only counted them (`kept_locked_by_tie 3`). Each is now a WARNING naming
+/// the arm and the part of a frame that holds it.
+#[cfg(test)]
+mod frame_lock_tests {
+    use super::{crosses_seated, frame_lock, FrameLock};
+    use crate::{Landing, SeatFace, StrutKind, SweepStrut};
+
+    fn member(id: u32, kind: StrutKind, landing: Landing, seat_on_strut: Option<u32>) -> SweepStrut {
+        SweepStrut {
+            id,
+            cell: 0,
+            center_mm: [0.0, 0.0],
+            kind,
+            min_radius_mm: 0.0,
+            thickened_mm: Vec::new(),
+            seat_on_strut,
+            k_top: 100,
+            k_bottom: 0,
+            landing,
+            interior: false,
+            radius_mm: Vec::new(),
+            carried_mm2: Vec::new(),
+            covered_demand: Vec::new(),
+            inserted_by_load: false,
+            path: Vec::new(),
+            straight_fallback: None,
+            fallback_path: Vec::new(),
+            seat_face: SeatFace::default(),
+            seat_normal: [0.0; 3],
+        }
+    }
+
+    /// Carrier 0 on the plate, arm 1 resting on it, partner post 2, and
+    /// member 3: a cross diagonal seated on `seated_on` and landing on the
+    /// partner (or, with `seated_on` `None`, an arm on the partner instead).
+    fn field(seated_on: Option<u32>, third: StrutKind) -> Vec<SweepStrut> {
+        vec![
+            member(0, StrutKind::Arm, Landing::Plate, None),
+            member(1, StrutKind::Arm, Landing::Strut { id: 0, layer: 40 }, None),
+            member(2, StrutKind::Arm, Landing::Plate, None),
+            member(3, third, Landing::Strut { id: 2, layer: 30 }, seated_on),
+        ]
+    }
+
+    #[test]
+    fn a_carrier_held_by_a_frame_is_named_with_the_part_that_holds_it() {
+        // A cross seated on the carrier itself.
+        let struts = field(Some(0), StrutKind::Brace);
+        let tied = crosses_seated(&struts);
+        assert_eq!(tied, vec![true, false, false, false]);
+        assert_eq!(frame_lock(&struts, &tied, 0, &[1]), Some(FrameLock::CrossTied));
+        // A cross seated on the arm resting on it.
+        let struts = field(Some(1), StrutKind::Brace);
+        let tied = crosses_seated(&struts);
+        assert_eq!(frame_lock(&struts, &tied, 0, &[1]), Some(FrameLock::CrossTiedBelow));
+        // A mast resting on it.
+        let mut struts = field(None, StrutKind::Arm);
+        struts[1].kind = StrutKind::Mast;
+        let tied = crosses_seated(&struts);
+        assert_eq!(frame_lock(&struts, &tied, 0, &[1]), Some(FrameLock::NonArmResting));
+        // CONTROL: no frame anywhere under it, it moves with its follower.
+        let struts = field(None, StrutKind::Arm);
+        let tied = crosses_seated(&struts);
+        assert_eq!(tied, vec![false; 4]);
+        assert_eq!(frame_lock(&struts, &tied, 0, &[1]), None);
+    }
+}
+
 #[cfg(test)]
 mod put_back_tests {
     use super::{put_back_all, Blamed, LipSeatOutcome, PutBack, Relanding};
@@ -2320,6 +2458,8 @@ mod model_landing_tests {
             mast_root_clearance: true,
             final_clearance_mm: 0.3,
             member_clearance: true,
+            model_surface: None,
+            plate_z_mm: 0.0,
             shaft_landings: true,
             merge: true,
             brace: true,

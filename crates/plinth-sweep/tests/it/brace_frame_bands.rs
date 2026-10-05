@@ -111,6 +111,8 @@ fn tie_the_pair(lambda: f64, frame_bands: bool) -> Built {
         mast_root_clearance: true,
         final_clearance_mm: 0.3,
         member_clearance: true,
+        model_surface: None,
+        plate_z_mm: 0.0,
         shaft_landings: true,
         merge: false,
         brace: true,

@@ -398,36 +398,26 @@ impl ShaftRead<'_> {
         }
         let radius = radius_mm.max(0.0);
         let gap = gap_mm.max(0.0);
-        let longest = self.zone_factor.max(1.0) * (radius + gap);
-        // The least `n·m` the lean law admits: a face steeper than that is
-        // read as if it were exactly that steep (a longer zone is never given).
-        let steepest = 1.0 / self.zone_factor.max(1.0);
         let down = geom_kernel::vec3::scale(geom_kernel::vec3::sub(bottom, top), 1.0 / length);
-        let seat_zone = match seat_face {
-            Some(face) => {
-                let along = geom_kernel::vec3::dot(face.normal, down).max(steepest);
-                let over = geom_kernel::vec3::dot(
-                    face.normal,
-                    geom_kernel::vec3::sub(self.kernel_point(top), face.point),
-                );
-                ((gap + radius - over) / along).clamp(0.0, longest)
-            }
-            None => longest,
-        };
+        let seat_zone = contact_zone_mm(
+            seat_face,
+            self.kernel_point(top),
+            down,
+            radius,
+            gap,
+            self.zone_factor,
+        );
         let landing_zone = if lands_on_model {
             let base_point = self.kernel_point(bottom);
-            match landing_faces(surface, &[base_point], &[true]).into_iter().next().flatten() {
-                Some((point, normal)) => {
-                    let up = geom_kernel::vec3::scale(down, -1.0);
-                    let along = geom_kernel::vec3::dot(normal, up).max(steepest);
-                    let height_over = geom_kernel::vec3::dot(
-                        normal,
-                        geom_kernel::vec3::sub(base_point, point),
-                    );
-                    ((gap + radius - height_over) / along).clamp(0.0, longest)
-                }
-                None => longest,
-            }
+            let face = contact_faces(surface, &[base_point]).into_iter().next().flatten();
+            contact_zone_mm(
+                face,
+                base_point,
+                geom_kernel::vec3::scale(down, -1.0),
+                radius,
+                gap,
+                self.zone_factor,
+            )
         } else {
             0.0
         };
@@ -471,6 +461,52 @@ impl ShaftRead<'_> {
 pub(crate) struct ContactFace {
     pub point: [f64; 3],
     pub normal: [f64; 3],
+}
+
+/// The face each point (in the mesh's frame) stands against: the model's
+/// nearest surface point and that face's outward unit normal, `None` where
+/// the query names no face. One nearest-point batch for all of them.
+pub(crate) fn contact_faces(
+    surface: &geom_kernel::NativeSurface,
+    points: &[[f64; 3]],
+) -> Vec<Option<ContactFace>> {
+    let all = vec![true; points.len()];
+    landing_faces(surface, points, &all)
+        .into_iter()
+        .map(|face| face.map(|(point, normal)| ContactFace { point, normal }))
+        .collect()
+}
+
+/// **A shaft's own CONTACT ZONE at one end, from the face it stands against**
+/// (challenger round 3, 2026-10-04; the one form every placement-time read
+/// uses: the up-sweep's descent test and the thickening rung's refusal): the
+/// length along the axis, from the contact end `end` (mesh frame) into the
+/// shaft along the unit `into`, over which a solid of radius `radius` still
+/// stands within `gap` of the face's plane, `(gap + r − h) / (n·m)`, `n` the
+/// face's outward normal, `m = into`, `h` the end's height over the plane.
+///
+/// `n·m` is never taken below `1 / zone_factor`, the steepest the lean law
+/// admits, and the zone is never longer than `zone_factor · (r + gap)`, the
+/// longest; without a face (no surface, or the query named none) the zone is
+/// that longest one. A flat seat's zone is `gap + r`, not the longest.
+pub(crate) fn contact_zone_mm(
+    face: Option<ContactFace>,
+    end: [f64; 3],
+    into: [f64; 3],
+    radius: f64,
+    gap: f64,
+    zone_factor: f64,
+) -> f64 {
+    let longest = zone_factor.max(1.0) * (radius + gap);
+    let Some(face) = face else {
+        return longest;
+    };
+    // The least `n·m` the lean law admits: a face steeper than that is read
+    // as if it were exactly that steep (a longer zone is never given).
+    let steepest = 1.0 / zone_factor.max(1.0);
+    let along = geom_kernel::vec3::dot(face.normal, into).max(steepest);
+    let over = geom_kernel::vec3::dot(face.normal, geom_kernel::vec3::sub(end, face.point));
+    ((gap + radius - over) / along).clamp(0.0, longest)
 }
 
 /// [`model_intrusion`] on the axis `top`–`bottom` with `inset_top` mm of its
@@ -1065,6 +1101,38 @@ fn walk_spans(
         id: member.id,
         gap_mm,
     })
+}
+
+/// Axis-aligned boxes `(low corner, high corner)` as one model surface, for
+/// the tests that read a placement against the census's own predicate.
+#[cfg(test)]
+pub(crate) fn boxes_surface(boxes: &[([f64; 3], [f64; 3])]) -> geom_kernel::NativeSurface {
+    let mut verts: Vec<[f64; 3]> = Vec::new();
+    let mut tris: Vec<[u32; 3]> = Vec::new();
+    for &(low, high) in boxes {
+        let base = u32::try_from(verts.len()).expect("a few vertices");
+        for corner in 0..8_usize {
+            verts.push(std::array::from_fn(|k| if corner >> k & 1 == 0 { low[k] } else { high[k] }));
+        }
+        for t in [
+            [0, 2, 1], [1, 2, 3], [4, 5, 6], [5, 7, 6], [0, 1, 4], [1, 5, 4],
+            [2, 6, 3], [3, 6, 7], [0, 4, 2], [2, 4, 6], [1, 3, 5], [3, 7, 5],
+        ] {
+            tris.push([base + t[0], base + t[1], base + t[2]]);
+        }
+    }
+    let pitch = 0.1;
+    let estimate = geom_kernel::NativeSurface::estimate_index_memory_from_indexed(&verts, &tris, pitch)
+        .expect("an estimate");
+    geom_kernel::NativeSurface::from_indexed(
+        &verts,
+        &tris,
+        geom_kernel::NativeSurfaceConfig {
+            grid_pitch_mm: pitch,
+            max_grid_bytes: estimate.max_axis_grid_bytes(),
+        },
+    )
+    .expect("a surface")
 }
 
 /// **The census of every member's drawn solid, and the landing zone it

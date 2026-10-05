@@ -225,7 +225,15 @@ on the same axis and zones, and refused only when that reads it under the gap. A
 where it stands clear now is refused (`ThickenRefusal::Model`) and the run takes the next rung;
 the comparison is made slot by slot, the profile the plan commits against the profile drawn
 there now, each read as the frustum it is (its clearance is the least over the axis of distance
-minus radius), so a wider section or an existing violation elsewhere excuses nothing.
+minus radius), so a wider section or an existing violation elsewhere excuses nothing. Each of the
+two solids is excused only its own contact zones, read from the faces its ends stand against as
+above, at the radius that solid has at the zone's edge (a taper is wider there than at its end,
+so the zone is taken to a fixed point); a trunk raised under a flat seat is tested below
+`gap + r`, not `1.86 (gap + r)`. A slot the raster flags is decided by the census's own predicate
+on the drawn frustum, all of a plan's slots in one batch: the raise enters the gap unless the
+predicate measures the committed slot clear, and a slot counts as inside the gap already only
+where the predicate reads the drawn slot under the gap. The raster's flag is never that proof;
+without a model surface nothing is proved and a flagged raise is refused.
 The lip-seat gate is unchanged: a member may land "no nearer than it stood".
 
 **The clearance re-route after the final sizing.** The up-sweep places an arm at a lower bound
@@ -236,7 +244,12 @@ descents, path test, the lowering's measurement, the sized-field put-back for a 
 lapped root), to a fixed point bounded by the registered pass count, with one difference: the
 mover must clear the final gap outright, since it was sent for the gap. The arms the lip-seat
 rule itself re-landed are left to that rule's gate (they stay warnings); an arm no candidate
-clears stays and is named by the census (emit and warn).
+clears stays and is named by the census (emit and warn). An arm that carries part of a frame the
+slenderness ladder solved (a cross seated on it or on a member resting on it, or a brace, mast or
+model tie resting on it) is kept where it stands and named in a WARNING with that reason: moving
+it moves a junction of the frame, and carrying the frame along unsolved, or taking it down and
+solving again, could leave a post over its slenderness limit (sway or snap mid-print) to buy
+clearance for a member that already stands clear of the model.
 
 ## 6. The seat's own contact zone — the honest exemption
 
