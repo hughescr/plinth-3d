@@ -430,6 +430,44 @@ half-space. That is a distinct, open question about whether the engine should pr
 *around* the plug, not merely at the entry plane; it is design work, not a physics ruling, and
 belongs to `docs/plans/support-clearance.md`.
 
+### The seat normal is the footprint's average (Craig, 2026-10-05)
+
+**Craig's ruling:** every support tip's seat normal is the AREA-WEIGHTED AVERAGE of the model's
+outward normal over its actual contact footprint, never the normal of one nearest facet. The seat
+law's `abs_cos`, the trim plane, the contact disc and the lip-seat approach angle all read it.
+
+```
+footprint = tip ball ∩ model surface,
+            restricted to faces the seat-face rule admits (never a wall or a face past the band's
+            steep end) and connected to the seat triangle through such faces across shared edges
+            that themselves enter the ball
+n̄         = normalize( Σ area(f) · n(f) ),   area(f) = exact area of triangle f inside the ball
+```
+
+A triangle's weight is its exact clipped area: the ball cuts the triangle's plane in a disc of
+radius `√(R² − d²)`, and the area is that disc's overlap with the triangle, in closed form (a sum
+over the three edges of the signed area of the disc inside the fan from its centre). So a patch cut
+into triangles another way has the same total weight on each plane, and the normal does not depend
+on the tessellation. The connected patch is the connected component of `ball ∩ surface`: two
+admitted triangles join only across a shared edge that enters the ball (an edge wholly outside the
+ball joins the two sides a finer cut of the same surface would leave apart), and the walk starts at
+the seat triangle by identity. Where the seat triangle's patch does not reach the ball (the ball
+overlaps only another sheet), or the area is nil, the tip keeps its seat triangle's normal and the
+count says so (emit and warn); the walk never re-seeds on another sheet. Where the average equals the seat
+triangle's normal to rounding, the triangle's bits are kept, so a flat underside (every Round disc)
+is not perturbed. Because the admitted band's steep end (57.5° from horizontal) and the lean law's
+steep end (57.5° from vertical) are the two ends of one registered band, any average of admitted
+normals is inside the printable cone and needs no clamp. Model ties are not averaged (a tie may seat
+on a wall, decision D8). The ball depends on the seat depth, which depends on the normal, so the
+measurement runs twice (seat on the facet normal, measure, re-seat on the result, measure again);
+the largest angle between the two answers is published. The normal describes the geometry the file
+gets: each proposed slide of the footprint rule is re-measured at the MOVED ball (the seat triangle
+re-derived there) and the disc graded, the section test and the accepted move use that normal; and
+the emitted field (seat slides and followers' ends applied) is measured once more, a tip whose normal
+changes has its disc graded again and a disc now off its face is warned about. Built in
+`plinth_sweep::footprint_normal`
+(`tests/it/footprint_normal.rs`); never run in the orientation prefilter.
+
 Land-at-strike is a **ratified design principle** — the standing answer for how the engine
 should treat a stub that runs into the model — rather than a claim that every piece of it is
 built. Build status belongs to `docs/status.md`.

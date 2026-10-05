@@ -534,9 +534,106 @@ fn disc_offsets(radius_in_pitches: f64) -> Vec<(i32, i32)> {
     offsets
 }
 
+/// **Grade again the discs of tips whose seat normal changed after they were
+/// graded** (`which`, strut indices): the footprint normal is measured on the
+/// emitted ball ([`crate::footprint_normal::remeasure_emitted`]), and a ball
+/// seated along another normal cuts another disc, so the grade the move search
+/// gave the earlier disc no longer describes the file. `arms` are the emitted
+/// arms carrying the final normals. Graded exactly as stage 1 grades (the
+/// lattice AND the rim, in the disc's own plane, one ascending raster pass).
+///
+/// Returns `(strut index, fraction of the disc's samples on the face)` for
+/// every tip of `which` whose disc is not wholly on its face. The grade is
+/// published and warned on and moves nothing: a re-grade never un-moves a
+/// seat.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the field, its rasters, its arms and the tips to grade again"
+)]
+pub(crate) fn regrade(
+    grid: &Grid,
+    slices: &[Vec<SliceSolid>],
+    struts: &[SweepStrut],
+    arms: &[SweepArm],
+    which: &[usize],
+    layer_plan: &LayerPlan,
+    plate_z: f64,
+    height: f64,
+) -> Vec<(usize, f64)> {
+    if which.is_empty() {
+        return Vec::new();
+    }
+    let subset: Vec<SweepArm> = which
+        .iter()
+        .filter_map(|&index| arms.get(index).cloned())
+        .collect();
+    let Ok(discs) = plinth_support::tip_contact_discs(&subset, layer_plan) else {
+        return Vec::new();
+    };
+    let pitch = grid.pitch_mm();
+    let layers = slices.len();
+    let mut samples: Vec<Sample> = Vec::new();
+    let mut owner: Vec<usize> = Vec::new();
+    for (position, (&index, disc)) in which.iter().zip(&discs).enumerate() {
+        let Some(strut) = struts.get(index) else { continue };
+        let Some((frame, offsets, rim)) = disc_lattice(disc.as_ref(), strut, pitch) else {
+            continue;
+        };
+        let lattice = offsets.iter().map(|&(u, v)| (f64::from(u), f64::from(v)));
+        for (u, v) in lattice.chain(rim) {
+            let p = frame.point(pitch, u, v);
+            samples.push(sample_at(grid, plate_z, height, layers, &frame, p));
+            owner.push(position);
+        }
+    }
+    let mut layers_rasterised = 0;
+    let hit = carried(grid, slices, &samples, &mut layers_rasterised);
+    let mut on = vec![0_usize; which.len()];
+    let mut total = vec![0_usize; which.len()];
+    for (&position, &is_hit) in owner.iter().zip(&hit) {
+        total[position] += 1;
+        on[position] += usize::from(is_hit);
+    }
+    (0..which.len())
+        .filter(|&position| total[position] > 0 && on[position] < total[position])
+        .map(|position| {
+            #[expect(clippy::cast_precision_loss, reason = "sample counts are small")]
+            let fraction = on[position] as f64 / total[position] as f64;
+            (which[position], fraction)
+        })
+        .collect()
+}
+
+/// A graded tip's disc frame, lattice offsets and rim points
+/// ([`DiscLattice`]); `None` for a tie (not graded, see [`apply`]), a missing
+/// disc, or a disc with no radius.
+fn disc_lattice(
+    disc: Option<&TipContactDisc>,
+    strut: &SweepStrut,
+    pitch: f64,
+) -> Option<DiscLattice> {
+    if strut.kind == crate::StrutKind::Tie {
+        return None;
+    }
+    let disc = disc.filter(|disc| disc.radius_mm > 0.0)?;
+    let frame = Frame::of(disc)?;
+    Some((
+        frame,
+        disc_offsets(disc.radius_mm / pitch),
+        rim_points(disc.radius_mm / pitch),
+    ))
+}
+
 /// Grade every seated tip's disc, move the seats that hang off their face,
 /// and warn about the knife edges. `arms` is the field as the adapter will
 /// hand it to the lowering, in strut order.
+///
+/// **A slide is validated on the geometry it will have.** Each proposed slide
+/// is re-measured at the MOVED ball: `remeasure(arm indices, moved arms,
+/// shifts)` returns the seat normal each moved arm gets there (the footprint
+/// normal at the slid ball, [`crate::footprint_normal::remeasure_slid`]), and
+/// the disc that is graded against the face, the section test and the
+/// accepted move all use that normal.
 #[expect(
     clippy::too_many_lines,
     reason = "one pass in four batched stages (grade, search lattice, search, verify); splitting \
@@ -555,6 +652,7 @@ pub(crate) fn apply(
     plate_z: f64,
     height: f64,
     limits: &MoveLimits<'_>,
+    mut remeasure: impl FnMut(&[usize], &[SweepArm], &[[f64; 3]]) -> Vec<[f64; 3]>,
 ) -> FootprintOutcome {
     let mut outcome = FootprintOutcome::default();
     let Ok(discs) = plinth_support::tip_contact_discs(arms, layer_plan) else {
@@ -574,18 +672,7 @@ pub(crate) fn apply(
     let frames: Vec<Option<DiscLattice>> = discs
         .iter()
         .zip(struts.iter())
-        .map(|(disc, strut)| {
-            if strut.kind == crate::StrutKind::Tie {
-                return None;
-            }
-            let disc = disc.as_ref().filter(|disc| disc.radius_mm > 0.0)?;
-            let frame = Frame::of(disc)?;
-            Some((
-                frame,
-                disc_offsets(disc.radius_mm / pitch),
-                rim_points(disc.radius_mm / pitch),
-            ))
-        })
+        .map(|(disc, strut)| disc_lattice(disc.as_ref(), strut, pitch))
         .collect();
     let mut samples = Vec::new();
     // (arm, whether the sample is on the rim)
@@ -730,6 +817,10 @@ pub(crate) fn apply(
     // disc call per round.
     let mut pending: Vec<usize> = (0..searches.len()).collect();
     let mut accepted: Vec<Option<[f64; 3]>> = vec![None; searches.len()];
+    // The seat normal measured at each slot's latest proposed ball, and the
+    // one of the move it was accepted with.
+    let mut proposal_normal: Vec<Option<[f64; 3]>> = vec![None; searches.len()];
+    let mut accepted_normal: Vec<Option<[f64; 3]>> = vec![None; searches.len()];
     // THE MOVE CHECK's state: every member's drawn ends before any move, the
     // own seat moves accepted so far (by member), and which search slot, if
     // any, each member's own move belongs to.
@@ -781,21 +872,26 @@ pub(crate) fn apply(
         if proposals.is_empty() {
             break;
         }
-        let moved_arms: Vec<SweepArm> = proposals
+        // The move is a lattice step IN the disc's plane, so the seat slides
+        // along the face and keeps its height above it.
+        let slides: Vec<[f64; 3]> = proposals
             .iter()
             .map(|&(slot, (i, j))| {
+                frames[searches[slot].arm]
+                    .as_ref()
+                    .map_or([0.0; 3], |(frame, _, _)| {
+                        geom_kernel::vec3::sub(
+                            frame.point(pitch, f64::from(i), f64::from(j)),
+                            frame.centre,
+                        )
+                    })
+            })
+            .collect();
+        let mut moved_arms: Vec<SweepArm> = proposals
+            .iter()
+            .zip(&slides)
+            .map(|(&(slot, _), &shift)| {
                 let arm = &arms[searches[slot].arm];
-                // The move is a lattice step IN the disc's plane, so the seat
-                // slides along the face and keeps its height above it.
-                let shift =
-                    frames[searches[slot].arm]
-                        .as_ref()
-                        .map_or([0.0; 3], |(frame, _, _)| {
-                            geom_kernel::vec3::sub(
-                                frame.point(pitch, f64::from(i), f64::from(j)),
-                                frame.centre,
-                            )
-                        });
                 SweepArm {
                     seat_mm: geom_kernel::vec3::add(arm.seat_mm, shift),
                     seat_face_point_mm: arm
@@ -806,6 +902,19 @@ pub(crate) fn apply(
                 }
             })
             .collect();
+        // THE NORMAL AT THE MOVED BALL: the footprint under the slid tip is
+        // another patch of the surface, so its average normal is another
+        // normal, and the ball, the disc graded below and the trim all follow
+        // it. The move is accepted on the geometry the file will have.
+        let slid_members: Vec<usize> = proposals
+            .iter()
+            .map(|&(slot, _)| searches[slot].arm)
+            .collect();
+        let slid_normals = remeasure(&slid_members, &moved_arms, &slides);
+        for ((arm, &normal), &(slot, _)) in moved_arms.iter_mut().zip(&slid_normals).zip(&proposals) {
+            arm.seat_normal_mm = normal;
+            proposal_normal[slot] = Some(normal);
+        }
         let rederived = plinth_support::tip_contact_discs(&moved_arms, layer_plan)
             .unwrap_or_else(|_| vec![None; moved_arms.len()]);
         // The section test, for the tips searched for their section ALONE
@@ -918,6 +1027,7 @@ pub(crate) fn apply(
         );
         for (slot, shift) in admitted {
             accepted[slot] = Some(shift);
+            accepted_normal[slot] = proposal_normal[slot];
             own_accepted[searches[slot].arm] = Some(shift);
             resolved[slot] = true;
         }
@@ -929,6 +1039,14 @@ pub(crate) fn apply(
     // ---- settle: every section move measured again on the drawn field, and
     // what is left judged again against the rules after each take-back.
     let no_moves: Vec<Option<[f64; 3]>> = vec![None; struts.len()];
+    // Each moved tip is measured with the seat normal of the ball it was moved
+    // to (`accepted_normal`), not the one it had before the slide.
+    let mut settle_arms: Vec<SweepArm> = arms.to_vec();
+    for (slot, normal) in accepted_normal.iter().enumerate() {
+        if let (Some(normal), Some(arm)) = (normal, settle_arms.get_mut(search_arms[slot])) {
+            arm.seat_normal_mm = *normal;
+        }
+    }
     settle(
         MoveCheck {
             grid,
@@ -941,7 +1059,7 @@ pub(crate) fn apply(
             slot_of_member: &slot_of_member,
             search_arms: &search_arms,
         },
-        arms,
+        &settle_arms,
         &section_only,
         &mut accepted,
         &mut refused_by_limits,
@@ -968,6 +1086,10 @@ pub(crate) fn apply(
                     outcome.tips_moved_onto_face += 1;
                 }
                 outcome.max_move_mm = outcome.max_move_mm.max(length);
+                // The strut carries the normal of the ball it was moved to.
+                if let Some(normal) = accepted_normal[slot] {
+                    struts[arm].seat_normal = normal;
+                }
                 struts[arm].seat_face.shift_mm = shift;
                 struts[arm].seat_face.footprint = Footprint::MovedOntoFace;
             }

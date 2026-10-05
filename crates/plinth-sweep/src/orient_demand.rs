@@ -295,7 +295,12 @@ impl DemandSettings {
             DemandFidelity::Prefilter => policy
                 .without_slenderness_ties()
                 .without_drawn_solid_descent()
-                .without_clearance_reroute(),
+                .without_clearance_reroute()
+                // NOR DOES IT AVERAGE THE SEAT NORMAL OVER A FOOTPRINT (Craig
+                // ruling 2026-10-05, `footprint_normal`): it ranks poses by the
+                // arms they cost and reads no seat normal; the finalists'
+                // production measurement, below, runs the pass.
+                .without_footprint_normal(),
             DemandFidelity::Production => policy,
         };
         Ok(Self {
