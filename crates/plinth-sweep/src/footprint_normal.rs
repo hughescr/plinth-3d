@@ -139,6 +139,11 @@ fn disc_fan_area(a: [f64; 2], b: [f64; 2], rho: f64) -> f64 {
     let safe = if a_len2 > 0.0 { a_len2 } else { 1.0 };
     let half_b = dot(a, d);
     let c = dot(a, a) - rho * rho;
+    #[expect(
+        clippy::suspicious_operation_groupings,
+        reason = "the quarter discriminant (b/2)^2 - a*c of a*t^2 + b*t + c, with a = `safe`: \
+                  `half_b * half_b` is meant, not `safe * half_b`"
+    )]
     let discriminant = (half_b * half_b - safe * c).max(0.0);
     let root = discriminant.sqrt();
     let t1 = ((-half_b - root) / safe).clamp(0.0, 1.0);
@@ -434,11 +439,10 @@ fn footprint_of_row(
     let mut sum = [0.0_f64; 3];
     let mut area = 0.0_f64;
     let mut faces = 0_usize;
-    for index in 0..admitted.len() {
+    for (index, face) in admitted.iter().enumerate() {
         if find(&mut parent, index) != seed_root {
             continue;
         }
-        let face = &admitted[index];
         sum = vec3::add(sum, vec3::scale(face.normal, face.area_mm2));
         area += face.area_mm2;
         faces += 1;
@@ -686,6 +690,10 @@ pub fn measure_arms(
     Some(result)
 }
 
+/// One face's corners and outward unit normal; `None` for a face with a
+/// missing vertex or no normal (zero area).
+type FaceCornersNormal = Option<([[f64; 3]; 3], [f64; 3])>;
+
 /// The nearest admitted face to each query point, as the seat-face rule picks
 /// a tip's seat triangle: one parallel `points × faces` pass over the faces
 /// whose outward unit normal's `z` is below the query's own threshold, lowest
@@ -694,7 +702,7 @@ fn nearest_admitted(mesh: &Mesh, queries: &[([f64; 3], f64)]) -> Vec<Option<(u32
     let verts = mesh.verts();
     let tris = mesh.tris();
     // One read of every face's unit normal, in the spelling `seat_faces` uses.
-    let faces: Vec<Option<([[f64; 3]; 3], [f64; 3])>> = tris
+    let faces: Vec<FaceCornersNormal> = tris
         .iter()
         .map(|tri| {
             let a = *verts.get(tri[0] as usize)?;
@@ -737,6 +745,11 @@ fn nearest_admitted(mesh: &Mesh, queries: &[([f64; 3], f64)]) -> Vec<Option<(u32
 ///
 /// One batched pass over the slid tips ([`nearest_admitted`]).
 #[must_use]
+#[expect(
+    clippy::float_cmp,
+    reason = "an exactly zero shift is a tip that did not move; any other shift, however small, \
+              moved the seat, and its seat triangle is re-derived"
+)]
 pub fn reseat_sites(
     mesh: &Mesh,
     sites: &[Option<TipSite>],
@@ -780,6 +793,12 @@ pub fn reseat_sites(
 /// on the result and the footprint measured again. A rule without the
 /// footprint switch, a tie, a brace, a mast, and any tip with no face are left
 /// alone.
+#[expect(
+    clippy::float_cmp,
+    reason = "identity, not closeness: `footprint_normal` returns the seat triangle's own normal \
+              bit for bit when the average lands within SAME_NORMAL_ULPS of it, so unequal means \
+              the normal was replaced"
+)]
 pub fn refine(
     env: &FootprintEnv<'_>,
     struts: &[SweepStrut],
@@ -938,6 +957,11 @@ pub struct EmittedRemeasure {
 /// drawn with. One more batched [`measure_arms`] call.
 ///
 /// `sites` is [`refine`]'s answer; `None` for a tip it did not measure.
+#[expect(
+    clippy::float_cmp,
+    reason = "identity, not closeness: a strut must carry exactly the normal measured on its \
+              emitted ball, so any bit of difference is a change to write and to report"
+)]
 pub fn remeasure_emitted(
     env: &MeasureEnv<'_>,
     struts: &mut [SweepStrut],
