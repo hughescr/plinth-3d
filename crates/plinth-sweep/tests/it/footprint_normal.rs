@@ -93,6 +93,10 @@ fn triangle_disc_area_is_exact_for_half_and_quarter_discs() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "an area that is exactly zero by construction (no overlap, degenerate triangle) is pinned exactly"
+)]
 fn triangle_disc_area_is_exact_inside_and_outside() {
     // A disc wholly inside a big triangle: the disc.
     let inside_disc = triangle_disc_area(
@@ -370,6 +374,10 @@ fn a_sheet_behind_the_patch_is_cut_off_by_connectivity() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "the pin IS bit identity: a flat face must keep its seat triangle's normal unperturbed"
+)]
 fn a_flat_face_keeps_its_seat_triangles_bits() {
     // A flat underside cut into triangles of very different sizes, every normal
     // the same plane's: whatever the patch, the answer is the seat triangle's
@@ -435,7 +443,7 @@ fn ridge_outside_the_ball(cut: bool) -> Mesh {
         verts.push(p);
         u32::try_from(verts.len() - 1).expect("small mesh")
     };
-    let mut add = |verts: &mut Vec<[f64; 3]>, tris: &mut Vec<[u32; 3]>, tri: [u32; 3]| {
+    let add = |verts: &mut Vec<[f64; 3]>, tris: &mut Vec<[u32; 3]>, tri: [u32; 3]| {
         let [p, q, r] = tri.map(|v| verts[v as usize]);
         let u = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
         let v = [r[0] - p[0], r[1] - p[1], r[2] - p[2]];
@@ -557,6 +565,10 @@ fn a_ball_that_overlaps_only_another_sheet_has_no_footprint() {
 // ---- the normal follows the ball ------------------------------------------
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "a tip with no footprint keeps the normal it was given, bit for bit, and that is what is pinned"
+)]
 fn a_slid_tip_is_measured_at_its_moved_ball() {
     // A vertical arm under the right plane of a 30°/50° ridge, then SLID along
     // the surface far across the ridge onto the left plane. The normal the
@@ -605,10 +617,10 @@ fn a_slid_tip_is_measured_at_its_moved_ball() {
     let reseated = reseat_sites(&mesh, &[Some(site)], &[Some(shift)]);
     let reseated = reseated[0].expect("a site");
     assert_ne!(reseated.face, site.face);
-    for axis in 0..3 {
-        assert!(close(reseated.facet_normal[axis], n_left[axis], 1e-12), "{:?}", reseated.facet_normal);
+    for (&got, &want) in reseated.facet_normal.iter().zip(&n_left) {
+        assert!(close(got, want, 1e-12), "{:?}", reseated.facet_normal);
     }
-    let slid = remeasure_slid(&env, &[Some(site)], &[moved.clone()], &[shift]);
+    let slid = remeasure_slid(&env, &[Some(site)], core::slice::from_ref(&moved), &[shift]);
     for axis in 0..3 {
         assert!(
             close(slid[0][axis], n_left[axis], 1e-9),

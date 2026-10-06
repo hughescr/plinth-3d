@@ -53,11 +53,22 @@ fn the_rigid_share_names_the_laid_tubes_stiff_low_end_arms_and_sizes_nothing() {
     // load moves by the same margin again (measured: the report names arm 18
     // alone, 59.91 mm2, with the descent on and the re-route off or on; arm 17
     // falls under `ℓ_max`). The diagnostic reads no clearance.
+    //
+    // And on the seat triangle's own normal, without the footprint normal
+    // (Craig ruling 2026-10-05, `footprint_normal`, merged at `f94710e`). The
+    // area-weighted footprint normal turns some tips' seat normals, which moves
+    // the tube's load by the same margin once more. Measured at the round-17
+    // milestone (2026-10-06, `lanes/round17-milestone/`): on `f94710e` with the
+    // footprint normal the report names arm 17 alone (59.45 mm2); arm 18 falls
+    // under `ℓ_max`. With it off (and the switches above) it names arm 17
+    // (59.30 mm2) and arm 18 (57.62 mm2) again. The diagnostic reads no seat
+    // normal.
     let policy =
         harness::at_path_fixture_seating(SweepPolicy::from_registry().expect("the registry"))
             .without_seat_face_band()
             .without_drawn_solid_descent()
-            .without_clearance_reroute();
+            .without_clearance_reroute()
+            .without_footprint_normal();
     let plan = sweep_with(&mesh, 0.0, &policy);
     let rigid = &plan.report.rigid_share;
     println!(
