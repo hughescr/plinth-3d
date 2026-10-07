@@ -460,6 +460,21 @@ mod tests {
         assert_ne!(crate::digest(&[straight, with_head]), none);
     }
 
+    /// The adapter lives in this crate and must build the drawing payload
+    /// through the public `plinth_support` door, not through `lower`.
+    #[test]
+    fn the_drawing_payload_is_constructible_across_the_crate_boundary() {
+        let payload = plinth_support::SweepHead {
+            contact_mm: [0.0; 3],
+            unit: [0.0, 0.0, -1.0],
+            joint_mm: [0.0, 0.0, -0.52],
+            joint_radius_mm: 0.22,
+            gap_mm: 0.3,
+            profile_mm: vec![0.07, 0.06],
+        };
+        assert_eq!(payload.profile_mm.len(), 2);
+    }
+
     /// Computed by the code of `dffb6f3`, before heads existed, for the two
     /// struts above.
     const PINNED_DIGEST: &str = "f72fd0a62fafab0e";
