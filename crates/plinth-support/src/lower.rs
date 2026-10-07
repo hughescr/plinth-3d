@@ -1840,6 +1840,11 @@ const PROFILE_RELATIVE_SLACK: f64 = 1.0e-9;
 /// one. A shoulder faces UP and needs no support. Where the ledger does not
 /// step, nothing splits and the member is the single taper it always was.
 ///
+/// **Ramps** (2026-10-07): a run of two or more consecutive widenings, which
+/// is how the adapter writes a load-step collar (one radius per layer slot),
+/// is drawn as one frustum from the thin value above it to the wide value at
+/// its last rise, not as a disc per slot. See the comment at `ramp_cut`.
+///
 /// This is the fewest spans for THIS chord rule, found greedily; it is not a
 /// claim of a global minimum over every possible choice of end radii.
 #[expect(
@@ -1907,16 +1912,61 @@ pub fn drawn_spans(
             need[cut]
         }
     };
+    // RAMPS (2026-10-07). A rise is an interior cut where the member widens
+    // going down. A ramp is a maximal run of at least two consecutive rises:
+    // the adapter's load-step collar, written as one radius per layer slot.
+    // Left to the greedy alone, every slot of a ramp becomes its own disc,
+    // because each shorter chord ends at the thin value above its cut. A
+    // single rise is a flat-underside junction and keeps its shoulder.
+    //
+    // The shaft is split into regions at each ramp's top boundary (the top of
+    // the last piece before its first rise, which keeps its own thin value)
+    // and at its last rise; a region with no ramp is the plain shaft and runs
+    // exactly the code it always did. Inside a ramp region a span that ends at
+    // a ramp cut takes the wider of the two ledger values there, so the
+    // surface stays continuous with the span below, which starts at it.
+    let mut ramp_cut = vec![false; pieces + 1];
+    let mut region_starts: Vec<usize> = vec![0];
+    let mut cut = 1;
+    while cut < pieces {
+        let widens = |c: usize| need[c] > need[c - 1] * (1.0 + PROFILE_RELATIVE_SLACK);
+        if !widens(cut) {
+            cut += 1;
+            continue;
+        }
+        let first_rise = cut;
+        while cut < pieces && widens(cut) {
+            cut += 1;
+        }
+        let last_rise = cut - 1;
+        if last_rise > first_rise {
+            ramp_cut[first_rise..=last_rise].fill(true);
+            for boundary in [first_rise - 1, last_rise] {
+                if region_starts.last() != Some(&boundary) {
+                    region_starts.push(boundary);
+                }
+            }
+        }
+    }
+    if region_starts.last() != Some(&pieces) {
+        region_starts.push(pieces);
+    }
     let radius_at_bottom = |cut: usize| {
         if cut == pieces {
             end_radius.max(need[pieces - 1])
+        } else if ramp_cut[cut] {
+            need[cut - 1].max(need[cut])
         } else {
             need[cut - 1]
         }
     };
     let mut spans = Vec::new();
     // Depth-first, top half first, so the spans come out top-down.
-    let mut pending = vec![(0_usize, pieces)];
+    let mut pending: Vec<(usize, usize)> = region_starts
+        .windows(2)
+        .map(|pair| (pair[0], pair[1]))
+        .rev()
+        .collect();
     while let Some((top, bottom)) = pending.pop() {
         let top_radius = radius_at_top(top);
         let bottom_radius = radius_at_bottom(bottom);
@@ -4136,5 +4186,265 @@ mod headed_arm_tests {
             .expect("a valid request");
         assert_eq!(lowering.tips_headed, 0);
         assert_eq!(lowering.heads_drawn_straight, 1);
+    }
+}
+
+#[cfg(test)]
+mod drawn_span_ramp_tests {
+    use super::{drawn_spans, DrawnSpan};
+
+    /// The lean law's radius change per 0.05 mm layer (the adapter's collar).
+    const D: f64 = 0.078_485;
+
+    /// Spans of a shaft whose pieces are one unit tall, given TOP-DOWN per
+    /// piece requirements; the shaft runs from the top of the first piece to
+    /// the bottom of the last.
+    #[expect(clippy::cast_precision_loss, reason = "a small piece count is exact in f64")]
+    fn spans_of(top_down: &[f64], start: f64, end: f64) -> Vec<DrawnSpan> {
+        let n = top_down.len();
+        let bottom_first: Vec<f64> = top_down.iter().rev().copied().collect();
+        drawn_spans(&bottom_first, 0.0, n as f64, n as f64, 0.0, start, end)
+    }
+
+    fn repeat(value: f64, count: usize) -> Vec<f64> {
+        vec![value; count]
+    }
+
+    fn assert_continuous(spans: &[DrawnSpan], total: f64) {
+        assert!((spans[0].top_z_mm - total).abs() < 1e-12);
+        assert!(spans.last().unwrap().bottom_z_mm.abs() < 1e-12);
+        for pair in spans.windows(2) {
+            assert!((pair[0].bottom_z_mm - pair[1].top_z_mm).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn a_ramp_of_seven_steps_is_one_frustum() {
+        let thin = 0.3;
+        let mut profile = repeat(thin, 10);
+        profile.extend((1..=7).map(|k| thin + f64::from(k) * D));
+        let wide = thin + 8.0 * D;
+        profile.extend(repeat(wide, 5));
+        let spans = spans_of(&profile, thin, wide);
+        assert_continuous(&spans, 22.0);
+        assert_eq!(spans.len(), 3, "{spans:?}");
+        assert_eq!(
+            (spans[0].top_radius_mm, spans[0].bottom_radius_mm),
+            (thin, thin)
+        );
+        // The frustum starts at the top of the last thin layer (z = 13).
+        assert_eq!(spans[0].bottom_z_mm, 13.0);
+        assert!((spans[1].top_radius_mm - thin).abs() < 1e-12);
+        assert!((spans[1].bottom_radius_mm - wide).abs() < 1e-12);
+        assert_eq!(spans[1].bottom_z_mm, 5.0);
+        assert!((spans[2].top_radius_mm - wide).abs() < 1e-12);
+        assert!((spans[2].bottom_radius_mm - wide).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_adapters_collar_cone_is_at_most_two_frusta() {
+        // Top-down: the post's ledger 0.25, the cone from 0.272 widening by
+        // D per layer down to the branch radius 0.90, then the raised post.
+        let mut profile = repeat(0.25, 3);
+        profile.extend((1..=8).rev().map(|k| 0.90 - f64::from(k) * D));
+        profile.extend(repeat(0.90, 3));
+        let spans = spans_of(&profile, 0.25, 0.90);
+        assert_continuous(&spans, 14.0);
+        let in_ramp: Vec<&DrawnSpan> = spans
+            .iter()
+            .filter(|s| s.top_z_mm <= 12.0 && s.bottom_z_mm >= 3.0)
+            .collect();
+        assert!(
+            (1..=2).contains(&in_ramp.len()),
+            "{} spans across the ramp: {spans:?}",
+            in_ramp.len()
+        );
+        assert!(spans.len() <= 4, "{spans:?}");
+        for pair in spans.windows(2) {
+            assert!((pair[0].bottom_radius_mm - pair[1].top_radius_mm).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn a_single_step_keeps_its_shoulder() {
+        let mut profile = repeat(0.3, 4);
+        profile.extend(repeat(0.6, 4));
+        let spans = spans_of(&profile, 0.3, 0.6);
+        assert_eq!(
+            spans,
+            vec![
+                DrawnSpan {
+                    top_z_mm: 8.0,
+                    bottom_z_mm: 4.0,
+                    top_radius_mm: 0.3,
+                    bottom_radius_mm: 0.3
+                },
+                DrawnSpan {
+                    top_z_mm: 4.0,
+                    bottom_z_mm: 0.0,
+                    top_radius_mm: 0.6,
+                    bottom_radius_mm: 0.6
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_ramp_next_to_a_single_step_changes_only_the_ramp() {
+        // thin, a lone step up to mid, flat, then a two-rise ramp to wide.
+        let mut profile = repeat(0.3, 3);
+        profile.extend(repeat(0.5, 3));
+        profile.extend([0.6, 0.7]);
+        profile.extend(repeat(0.8, 3));
+        let spans = spans_of(&profile, 0.3, 0.8);
+        assert_continuous(&spans, 11.0);
+        // The lone step is a shoulder: a span ends at 0.3 on z = 8.
+        let at_step = spans
+            .iter()
+            .find(|s| s.bottom_z_mm == 8.0)
+            .expect("a span ends at the step");
+        assert_eq!(at_step.bottom_radius_mm, 0.3);
+        let below = spans
+            .iter()
+            .find(|s| s.top_z_mm == 8.0)
+            .expect("a span starts at the step");
+        assert_eq!(below.top_radius_mm, 0.5);
+        // The ramp (cuts at z = 5, 4, 3) is continuous.
+        for z in [5.0, 4.0, 3.0] {
+            for pair in spans.windows(2).filter(|p| p[0].bottom_z_mm == z) {
+                assert!((pair[0].bottom_radius_mm - pair[1].top_radius_mm).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn a_constant_profile_is_the_single_taper() {
+        let spans = spans_of(&repeat(0.4, 6), 0.3, 0.5);
+        assert_eq!(
+            spans,
+            vec![DrawnSpan {
+                top_z_mm: 6.0,
+                bottom_z_mm: 0.0,
+                top_radius_mm: 0.4,
+                bottom_radius_mm: 0.5
+            }]
+        );
+    }
+
+    struct Lcg(u64);
+    impl Lcg {
+        #[expect(clippy::cast_precision_loss, reason = "53 bits are exact in f64")]
+        fn next(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((self.0 >> 11) as f64) / ((1_u64 << 53) as f64)
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a small index range in a test generator"
+        )]
+        fn count(&mut self, lo: usize, hi: usize) -> usize {
+            lo + (self.next() * (hi - lo + 1) as f64) as usize % (hi - lo + 1)
+        }
+    }
+
+    #[test]
+    #[expect(clippy::cast_precision_loss, reason = "small cut indices are exact in f64")]
+    fn random_stepped_profiles_stay_above_the_ledger_and_ramps_are_continuous() {
+        for seed in 0..400_u64 {
+            let mut rng = Lcg(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32);
+            let mut need = Vec::new();
+            let mut value = 0.15 + 0.3 * rng.next();
+            while need.len() < 40 {
+                need.extend(repeat(value, rng.count(1, 4)));
+                match rng.count(0, 2) {
+                    0 => value += 0.02 + 0.2 * rng.next(),
+                    1 => {
+                        // A ramp: 2-6 consecutive widenings.
+                        for _ in 0..rng.count(2, 6) {
+                            value += 0.02 + 0.07 * rng.next();
+                            need.push(value);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let n = need.len();
+            let spans = spans_of(&need, need[0] * 0.9, need[n - 1] * 1.1);
+            assert_continuous(&spans, n as f64);
+            let radius_at = |z: f64| -> f64 {
+                let s = spans
+                    .iter()
+                    .find(|s| z <= s.top_z_mm + 1e-12 && z >= s.bottom_z_mm - 1e-12)
+                    .expect("a span covers z");
+                let t = (s.top_z_mm - z) / (s.top_z_mm - s.bottom_z_mm);
+                s.top_radius_mm + (s.bottom_radius_mm - s.top_radius_mm) * t
+            };
+            for (piece, required) in need.iter().enumerate() {
+                let z = n as f64 - piece as f64 - 0.5;
+                assert!(
+                    radius_at(z) >= required * (1.0 - 1e-9),
+                    "seed {seed} piece {piece}"
+                );
+            }
+            // Cuts strictly inside a span carry the larger neighbour.
+            for cut in 1..n {
+                let z = (n - cut) as f64;
+                let boundary = spans.iter().any(|s| (s.bottom_z_mm - z).abs() < 1e-12);
+                if !boundary {
+                    let required = need[cut - 1].max(need[cut]);
+                    assert!(
+                        radius_at(z) >= required * (1.0 - 1e-9),
+                        "seed {seed} cut {cut}"
+                    );
+                }
+            }
+            // Ramps: runs of >= 2 consecutive rises.
+            let rise: Vec<bool> = (0..n)
+                .map(|c| c >= 1 && need[c] > need[c - 1] * (1.0 + 1e-9))
+                .collect();
+            let mut c = 1;
+            while c < n {
+                if !rise[c] {
+                    c += 1;
+                    continue;
+                }
+                let a = c;
+                while c < n && rise[c] {
+                    c += 1;
+                }
+                let b = c - 1;
+                if b == a {
+                    continue;
+                }
+                // The region is split at its top (cut a - 1) and its bottom (cut b).
+                for cut in [a - 1, b] {
+                    if cut == 0 {
+                        continue;
+                    }
+                    let z = (n - cut) as f64;
+                    assert!(
+                        spans.iter().any(|s| (s.bottom_z_mm - z).abs() < 1e-12),
+                        "seed {seed}: no span boundary at ramp edge cut {cut}"
+                    );
+                }
+                for cut in a..=b {
+                    let z = (n - cut) as f64;
+                    for pair in spans
+                        .windows(2)
+                        .filter(|p| (p[0].bottom_z_mm - z).abs() < 1e-12)
+                    {
+                        assert!(
+                            (pair[0].bottom_radius_mm - pair[1].top_radius_mm).abs() < 1e-12,
+                            "seed {seed}: radii differ at ramp cut {cut}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
