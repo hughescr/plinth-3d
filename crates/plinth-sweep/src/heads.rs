@@ -38,10 +38,15 @@
 //!
 //! * head, at axial distance `s` from `D`: `r(s)³ = (r_t²/c)(r + 4s)`
 //!   ([`head_section_mm`]);
-//! * joint: `r_K³ = (r_t²/c)(r_K + 4(g' + r_K))` with `g' = g + hb`
-//!   ([`solve_joint`]);
+//! * joint, PLANNED: `r_K³ = (r_t²/c)(r_K + 4(g' + r_K))` with `g' = g + hb`
+//!   ([`solve_joint`]), at the planning tip. This is the size placement used;
+//! * joint, DRAWN: the head law at the measured `L = |DK|`,
+//!   `r_K³ = (r_t²/c)(r_K + 4L)` ([`final_joint_radius_mm`]), at the FINAL
+//!   tip. `K` and `L` are frozen, so the lever is fixed whatever the ball's
+//!   size and the joint follows the final tip down as well as up;
 //! * post below `K`, at distance `σ` down a post of length `ℓ`:
-//!   `r³ ≥ r_led²·r + (4r_t²/c)(g' + r_K)(1 − σ/ℓ)` ([`post_section_mm`]).
+//!   `r³ ≥ r_led²·r + (4r_t²/c)·L·(1 − σ/ℓ)` ([`post_section_mm`]), never
+//!   narrower than the drawn joint.
 
 use std::collections::BTreeMap;
 
@@ -77,7 +82,10 @@ pub struct Head {
     /// The cell of `K` at `k_joint`.
     pub joint_cell: u32,
     /// The planned `r_K` ([`solve_joint`]) at the tip radius the head was
-    /// planned with. The drawn joint is never smaller.
+    /// planned with: what placement used for the stand-off and the clearance
+    /// tests. The DRAWN joint is [`final_joint_radius_mm`] at the final tip
+    /// over the frozen `|DK|`, which is smaller than this for a final tip
+    /// below the planned one and larger for a fatter one.
     pub joint_radius_mm: f64,
     /// The tip radius `r_t` the head and joint were planned at.
     pub planned_tip_radius_mm: f64,
@@ -231,22 +239,22 @@ pub fn solve_joint(
     solve_bend(tip_radius_mm / cos_lean_max.sqrt(), 1.0, gap_mm, max_radius_mm)
 }
 
-/// **The joint a FROZEN head must carry at its final tip radius**, with no
-/// placement maximum: the root of the same cubic as [`solve_joint`], over
-/// `[r_t/√c, bound]` where `bound` is a radius that always satisfies it.
+/// **The joint a FROZEN head must carry at its final tip radius**: the head's
+/// own section law ([`head_section_mm`]) at the head's measured length
+/// `|DK| = head_length_mm`, the distance from the contact centre `D` to the
+/// joint centre `K`. With `a = r_t²/c` it is the root of `r³ = a(r + 4L)`.
 ///
-/// Placement may refuse a joint above the registered maximum radius, because
-/// no head exists yet and the arm keeps its straight tip. After placement the
-/// head is built and frozen; the final tip radius can only grow, and the
-/// joint grows with it (never capped, per the grow-never-cap rule). With
-/// `a = r_t²/c` the cubic is `r³ = a(5r + 4g)`, and `r = max(√(10a),
-/// ∛(8ga))` satisfies it (`r³/2 ≥ 5ar` and `r³/2 ≥ 4ga`). `None` only for a
-/// tip radius or a gap that is not finite and positive.
+/// `K` and `|DK|` are frozen at placement, so the lever of the tip's load at
+/// `K` is at most `|DK|` whatever the ball's size; the joint at the final tip
+/// needs no re-solve and no planned value. It can be smaller than the planned
+/// joint (a final tip below the planned one) or larger (a fatter tip), and it
+/// equals [`solve_joint`]'s radius when the final tip is the planned one and
+/// `|DK|` is that joint's own `g + r_K`. A smaller ball only lengthens the
+/// bare stalk, so the clearance cannot get worse; a larger one is caught by
+/// [`downgrade_grown_heads`].
 #[must_use]
-pub fn grown_joint_radius_mm(tip_radius_mm: f64, gap_mm: f64, cos_lean_max: f64) -> Option<f64> {
-    let a = tip_radius_mm * tip_radius_mm / cos_lean_max;
-    let bound = (10.0 * a).sqrt().max((8.0 * gap_mm * a).cbrt());
-    solve_joint(tip_radius_mm, gap_mm, cos_lean_max, bound).map(|joint| joint.joint_radius_mm)
+pub fn final_joint_radius_mm(tip_radius_mm: f64, head_length_mm: f64, cos_lean_max: f64) -> f64 {
+    head_section_mm(tip_radius_mm, head_length_mm, cos_lean_max)
 }
 
 /// The post's section at a `lever_mm` below the joint, over a ledger section
@@ -993,7 +1001,8 @@ pub fn check_head(
 #[cfg(test)]
 mod tests {
     use super::{
-        head_section_mm, post_section_mm, section_radius_mm, solve_bend, solve_joint, Head,
+        final_joint_radius_mm, head_section_mm, post_section_mm, section_radius_mm, solve_bend,
+        solve_joint, Head,
     };
     use crate::{Landing, SeatFace, SweepStrut};
 
@@ -1028,6 +1037,29 @@ mod tests {
         assert!((bend.joint_radius_mm - 0.149).abs() < 1e-3, "{bend:?}");
         assert!((bend.length_mm - 0.449).abs() < 1e-3, "{bend:?}");
         assert!((bend.lever_mm - 0.297).abs() < 1e-3, "{bend:?}");
+    }
+
+    /// The drawn joint at the FINAL tip over a frozen `|DK|` (plan section A,
+    /// v18 Cylinder `|DK|` = 1.344 mm): the sizes of the plan's table, and the
+    /// planned joint back when the final tip is the planned one.
+    #[test]
+    fn the_final_joint_follows_the_final_tip_over_the_frozen_length() {
+        let c = cos_lean();
+        for (tip, want) in [(0.05, 0.298), (0.06, 0.337), (0.115, 0.526), (0.15, 0.631)] {
+            let r = final_joint_radius_mm(tip, 1.344, c);
+            assert!((r - want).abs() < 1e-3, "tip {tip}: {r} against {want}");
+            let residual = r * r * r - tip * tip / c * (r + 4.0 * 1.344);
+            assert!(residual.abs() < 1e-12, "tip {tip}: residual {residual}");
+        }
+        // The planned joint's own |DK| gives the planned joint back.
+        for tip in [0.05, 0.15] {
+            let planned = solve_joint(tip, GAP_MM, c, 1.0).expect("solvable");
+            let again = final_joint_radius_mm(tip, planned.length_mm, c);
+            assert!((again - planned.joint_radius_mm).abs() < 1e-9, "tip {tip}");
+        }
+        // Monotone in the tip and in the length.
+        assert!(final_joint_radius_mm(0.05, 1.0, c) < final_joint_radius_mm(0.06, 1.0, c));
+        assert!(final_joint_radius_mm(0.05, 1.0, c) < final_joint_radius_mm(0.05, 1.5, c));
     }
 
     #[test]

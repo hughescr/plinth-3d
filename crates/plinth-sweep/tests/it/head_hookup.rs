@@ -15,8 +15,9 @@
 //!   (`the_tip_keeps_the_pure_area_law`);
 //! * the load-step ceiling at the joint removed: the cone climbs the head
 //!   (`a_load_step_cone_ends_at_the_joint`);
-//! * the joint never grown past its planned radius
-//!   (`a_fatter_tip_grows_the_joint_and_the_deficit_is_reported`);
+//! * the joint held at its planned radius instead of the law at the final tip
+//!   (`a_fatter_tip_grows_the_joint_and_the_deficit_is_reported`,
+//!   `a_final_tip_below_the_planned_one_shrinks_the_joint_and_the_post_keeps_up`);
 //! * the radius profile not cut to the post
 //!   (`a_headed_strut_is_sized_and_drawn_as_a_head`).
 
@@ -24,7 +25,7 @@ use plinth_core::{m0_constants, Finite, LayerPlan, PositiveFinite};
 use plinth_mesh::make_lonely_peak;
 use plinth_support::BuildFrame;
 use plinth_sweep::down_sweep::{self, InsertionPolicy, SizingPolicy, UnrootedColumns};
-use plinth_sweep::heads::{head_section_mm, solve_joint, Head};
+use plinth_sweep::heads::{final_joint_radius_mm, head_section_mm, solve_joint, Head};
 use plinth_sweep::{
     arms_of, to_primitives, DrainKeepOut, Landing, SeatFace, StrutKind, SweepEmission, SweepPlan,
     SweepPolicy, SweepStrut,
@@ -55,6 +56,8 @@ struct Fixture {
     struts: Vec<SweepStrut>,
     k_joint: usize,
     planned_joint_mm: f64,
+    /// `|DK|`, the frozen head length the drawn joint is sized over.
+    length_mm: f64,
 }
 
 fn cell_of(grid: &plinth_sweep::grid::Grid, x: f64, y: f64) -> u32 {
@@ -71,13 +74,20 @@ fn cell_of(grid: &plinth_sweep::grid::Grid, x: f64, y: f64) -> u32 {
 }
 
 /// The headed arm and its branch on a real plan's grid and frame.
+fn fixture(headed: bool) -> Fixture {
+    fixture_planned(headed, None)
+}
+
+/// [`fixture`] with the head PLANNED at `planned_tip_mm` (the policy's own
+/// minimum tip when `None`): the planned joint and the frozen `|DK|` follow it,
+/// whatever the final tip turns out to be.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss,
     reason = "layer counts and offsets of a small fixture"
 )]
-fn fixture(headed: bool) -> Fixture {
+fn fixture_planned(headed: bool, planned_tip_mm: Option<f64>) -> Fixture {
     let mesh = make_lonely_peak().expect("the lonely peak fixture");
     let (min_z, max_z) = harness::z_span(&mesh);
     let plate_z = min_z - LIFT_MM;
@@ -93,7 +103,7 @@ fn fixture(headed: bool) -> Fixture {
     let grid = plan.grid;
 
     let c = cos_lean();
-    let r_t = policy.tip_radius_min_mm;
+    let r_t = planned_tip_mm.unwrap_or(policy.tip_radius_min_mm);
     let joint = solve_joint(r_t, GAP_MM, c, policy.tip_radius_max_mm).expect("a thin tip");
     let phi = PHI_DEG.to_radians();
     let unit = [phi.sin(), 0.0, -phi.cos()];
@@ -216,6 +226,7 @@ fn fixture(headed: bool) -> Fixture {
         struts: vec![host, branch],
         k_joint,
         planned_joint_mm: joint.joint_radius_mm,
+        length_mm: joint.length_mm,
     }
 }
 
@@ -299,9 +310,17 @@ fn a_headed_strut_is_sized_and_drawn_as_a_head() {
         payload.profile_mm,
         payload.joint_radius_mm
     );
-    // (c) the joint is at least the planned one and, with r_t unchanged, it
+    // (c) the joint is the law at the FINAL tip over the frozen |DK|; with the
+    // final tip equal to the planned one that is the planned joint, and it
     // stands exactly g off the seat plane.
-    assert!(payload.joint_radius_mm >= fx.planned_joint_mm);
+    let final_joint = final_joint_radius_mm(r_t, fx.length_mm, c);
+    assert!(
+        (payload.joint_radius_mm - final_joint).abs() < 1e-9
+            && (final_joint - fx.planned_joint_mm).abs() < 1e-9,
+        "drawn joint {} against the final-tip law {final_joint}, planned {}",
+        payload.joint_radius_mm,
+        fx.planned_joint_mm
+    );
     assert_eq!(emission.joints_grown, 0);
     assert!((emission.max_standoff_deficit_mm).abs() < 1e-12);
     assert_eq!(emission.head_standoff_mm.len(), 1);
@@ -313,7 +332,7 @@ fn a_headed_strut_is_sized_and_drawn_as_a_head() {
     // The ledger beside the law: the head layers read the head law, and the
     // joint slot holds the joint.
     let slot = |layer: usize| layer - struts[0].k_bottom;
-    assert!(struts[0].radius_mm[slot(k_joint)] >= fx.planned_joint_mm);
+    assert!(struts[0].radius_mm[slot(k_joint)] >= final_joint - 1e-12);
     let h = fx.sizing.layer_height_mm;
     for layer in k_joint + 1..K_TOP - 1 {
         let z = fx.plan.plate_z_mm + layer as f64 * h;
@@ -360,23 +379,26 @@ fn a_load_step_cone_ends_at_the_joint() {
     // joint slot instead of climbing the head.
     let mut fx = fixture(true);
     let struts = fx.struts.clone();
-    let (_, arms, emission) = size_and_draw(&mut fx, struts);
+    let (struts, arms, emission) = size_and_draw(&mut fx, struts);
     assert_eq!(emission.load_steps_tapered, 1, "the fixture draws one cone");
     assert_eq!(
         emission.load_step_layers_raised,
         fx.k_joint - LANDING_LAYER,
         "the cone raised the layers above the landing up to the joint, no higher"
     );
-    // The joint slot is raised by the cone: it stands wider than the joint.
+    // The joint slot is raised by the cone: it stands wider than the drawn
+    // joint (the law at the final tip, which is the planned one here).
     let post = &arms[0].radius_profile_mm;
-    assert!(post[fx.k_joint] > fx.planned_joint_mm);
+    let final_joint = final_joint_radius_mm(struts[0].tip_radius_mm(), fx.length_mm, cos_lean());
+    assert!((final_joint - fx.planned_joint_mm).abs() < 1e-9, "anti-vacuity");
+    assert!(post[fx.k_joint] > final_joint + 1e-6);
 }
 
 #[test]
 fn a_fatter_tip_grows_the_joint_and_the_deficit_is_reported() {
-    // (f) The final tip radius is above the planned one: the joint grows with
-    // it (never capped), the stand-off falls under the gap by exactly the
-    // growth, and the report says so.
+    // (f) The final tip radius is above the planned one: the joint is the law
+    // at the final tip over the frozen |DK| (never capped), the stand-off
+    // falls under the gap by exactly the growth, and the report says so.
     let mut fx = fixture(true);
     let mut struts = fx.struts.clone();
     struts[0].min_radius_mm = 0.10;
@@ -384,8 +406,12 @@ fn a_fatter_tip_grows_the_joint_and_the_deficit_is_reported() {
     let c = cos_lean();
     let r_t = struts[0].tip_radius_mm();
     assert!((r_t - 0.10).abs() < 1e-12, "the tip is the minimum, {r_t}");
-    let grown = solve_joint(r_t, GAP_MM, c, 1.0).expect("a 0.10 tip").joint_radius_mm;
+    let grown = final_joint_radius_mm(r_t, fx.length_mm, c);
     assert!(grown > fx.planned_joint_mm + 0.05, "anti-vacuity: {grown}");
+    // The law at the frozen |DK|, not the self-consistent re-solve: a fatter
+    // tip's ball does not move K, so the lever stays |DK|.
+    let residual = grown.powi(3) - r_t * r_t / c * (grown + 4.0 * fx.length_mm);
+    assert!(residual.abs() < 1e-9, "the cubic at |DK| {}: {residual}", fx.length_mm);
     let payload = arms[0].head.as_ref().expect("a head");
     assert!(
         (payload.joint_radius_mm - grown).abs() < 1e-9,
@@ -449,15 +475,16 @@ fn lean(fx: &Fixture, host: &mut SweepStrut, cols: usize) {
 fn a_joint_the_placement_maximum_would_refuse_still_grows() {
     // Review finding 1: placement refuses a joint above the registered
     // maximum radius (no head exists yet), but a FROZEN head whose final tip
-    // is fat must still grow its joint, never cap it. A 0.35 mm tip needs a
-    // 1.17 mm joint; the registered maximum radius is 1.0 mm.
+    // is fat must still grow its joint, never cap it. A 0.45 mm tip over the
+    // frozen |DK| of this head needs a joint wider than 1.0 mm, the registered
+    // maximum radius.
     let mut fx = fixture(true);
     let mut struts = fx.struts.clone();
-    struts[0].min_radius_mm = 0.35;
+    struts[0].min_radius_mm = 0.45;
     let (struts, arms, emission) = size_and_draw(&mut fx, struts);
     let c = cos_lean();
     let r_t = struts[0].tip_radius_mm();
-    assert!((r_t - 0.35).abs() < 1e-12, "the tip is the minimum, {r_t}");
+    assert!((r_t - 0.45).abs() < 1e-12, "the tip is the minimum, {r_t}");
     assert!(
         solve_joint(r_t, GAP_MM, c, 1.0).is_none(),
         "anti-vacuity: the placement law refuses this joint"
@@ -465,8 +492,8 @@ fn a_joint_the_placement_maximum_would_refuse_still_grows() {
     let slot = |layer: usize| layer - struts[0].k_bottom;
     let r_k = struts[0].radius_mm[slot(fx.k_joint)];
     assert!(r_k > 1.0, "the joint grew past the placement maximum: {r_k}");
-    let residual = r_k * r_k * r_k - r_t * r_t / c * (r_k + 4.0 * (GAP_MM + r_k));
-    assert!(residual >= -1e-9, "the joint carries its own law: {residual}");
+    let residual = r_k * r_k * r_k - r_t * r_t / c * (r_k + 4.0 * fx.length_mm);
+    assert!(residual >= -1e-9, "the joint carries its own law at |DK|: {residual}");
     let payload = arms[0].head.as_ref().expect("a head");
     assert!((payload.joint_radius_mm - r_k).abs() < 1e-12);
     assert_eq!(emission.joints_grown, 1);
@@ -475,14 +502,53 @@ fn a_joint_the_placement_maximum_would_refuse_still_grows() {
         "the deficit is the whole growth: {}",
         emission.max_standoff_deficit_mm
     );
-    // The post under the joint is sized for the grown joint's lever, not the
-    // planned one: just under K the lever is within 10 percent of g + r_K.
+    // The post under the joint is never narrower than the ball, and at least
+    // the section of a lever within 10 percent of |DK|.
     let just_under = struts[0].radius_mm[slot(fx.k_joint) - 1];
-    let lower_bound = plinth_sweep::heads::post_section_mm(r_t, r_t, 0.9 * (GAP_MM + r_k), c);
+    let lower_bound = plinth_sweep::heads::post_section_mm(r_t, r_t, 0.9 * fx.length_mm, c);
     assert!(
-        just_under >= lower_bound,
-        "post {just_under} under the grown lever's section {lower_bound}"
+        just_under >= lower_bound && just_under >= r_k - 1e-12,
+        "post {just_under} under the lever's section {lower_bound} or the ball {r_k}"
     );
+}
+
+#[test]
+fn a_final_tip_below_the_planned_one_shrinks_the_joint_and_the_post_keeps_up() {
+    // The head was PLANNED at a fat tip (0.15 mm) but the final tip is the
+    // minimum (0.05 mm). The joint is the law at the FINAL tip over the frozen
+    // |DK|, not the planned joint; the post under K is never narrower than it.
+    let mut fx = fixture_planned(true, Some(0.15));
+    let mut struts = fx.struts.clone();
+    // One headed arm: no thickened layers and no branch, so the ledger is the
+    // pure area law and the head minimum alone sizes the joint and the post.
+    struts[0].thickened_mm = vec![0.0; struts[0].thickened_mm.len()];
+    struts.truncate(1);
+    let (struts, arms, _) = size_and_draw(&mut fx, struts);
+    let c = cos_lean();
+    let r_t = struts[0].tip_radius_mm();
+    assert!((r_t - 0.05).abs() < 1e-12, "the final tip is the minimum, {r_t}");
+    let expected = final_joint_radius_mm(r_t, fx.length_mm, c);
+    assert!(
+        fx.planned_joint_mm > expected + 0.1,
+        "anti-vacuity: planned {} against final {expected}",
+        fx.planned_joint_mm
+    );
+    let slot = |layer: usize| layer - struts[0].k_bottom;
+    let joint = struts[0].radius_mm[slot(fx.k_joint)];
+    assert!(
+        (joint - expected).abs() < 1e-9,
+        "the joint slot holds the final-tip law {expected}, not the planned {}: {joint}",
+        fx.planned_joint_mm
+    );
+    assert!(
+        struts[0].radius_mm[..slot(fx.k_joint)]
+            .iter()
+            .all(|&radius| radius >= expected - 1e-12),
+        "a post slot under K is narrower than the ball: {:?}",
+        &struts[0].radius_mm[..slot(fx.k_joint)]
+    );
+    let payload = arms[0].head.as_ref().expect("a head");
+    assert!((payload.joint_radius_mm - expected).abs() < 1e-9);
 }
 
 #[test]

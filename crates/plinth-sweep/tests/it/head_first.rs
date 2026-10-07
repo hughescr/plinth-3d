@@ -253,10 +253,11 @@ fn grade(name: &str, mesh: &Mesh) -> (usize, usize) {
     );
     assert_eq!(emission.tips_headed, headed.len(), "{name}: built is drawn");
     assert_eq!(emission.heads_drawn_straight, 0, "{name}");
-    // The drawn stand-off is the planned one less whatever the joint grew by
-    // when the final tip needed a wider joint than the placement's lower bound
-    // (the joint is frozen at K and only grows; the deficit is a warning). A
-    // head whose joint did not grow stands at least the final gap off.
+    // The drawn joint is the law at the final tip over the frozen |DK| (K is
+    // frozen; the joint follows the final tip down as well as up), so the drawn
+    // stand-off is the planned one plus whatever the joint shrank by, less
+    // whatever it grew by. A head whose joint did not grow past the planned one
+    // stands at least the final gap off.
     assert_eq!(emission.head_standoff_mm.len(), headed.len(), "{name}");
     // Every head that is drawn stands the final gap off its seat plane,
     // whatever its joint grew by: the grown ones were downgraded.
