@@ -2774,7 +2774,7 @@ pub fn run_sweep_with_holes(
     // before anything reads the finished field, every head whose joint now
     // stands less than the final gap off its seat plane is dropped (the post
     // keeps its route; the arm is drawn straight) and counted in the heads line.
-    let heads_downgraded = heads::downgrade_grown_heads(&mut struts, &grid);
+    let heads_downgraded = heads::downgrade_grown_heads(&mut struts);
     landings.finished = landing_check::check_landings(&struts, height);
     landings.load_gap_mm2 =
         outcome.injected_load_mm2 - outcome.plate_reaction_mm2 - outcome.uncarried_load_mm2;

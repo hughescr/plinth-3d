@@ -941,7 +941,8 @@ mod head_first_rulings {
         struts[1].radius_mm[190] = 0.2204;
         let before = struts[0].clone();
         let straight_before = struts[2].clone();
-        let downgraded = downgrade_grown_heads(&mut struts, &grid);
+        let path_before = struts[1].path.clone();
+        let downgraded = downgrade_grown_heads(&mut struts);
         assert_eq!(downgraded, vec![1], "only the grown joint is downgraded");
         assert_eq!(struts[0], before, "a joint that stands the gap off is untouched");
         assert_eq!(struts[2], straight_before, "a straight arm is untouched");
@@ -954,18 +955,16 @@ mod head_first_rulings {
             "above the post the head minimum falls back to the tip's own radius: {:?}",
             &arm.radius_mm[188..]
         );
-        assert!(arm.path.is_empty(), "a post in the seat's own column is straight");
+        assert_eq!(arm.path, path_before, "the post keeps its route: the path is not rewritten");
     }
 
-    /// (b) A leaned post keeps its base; its path becomes the straight chord
-    /// from the base cell to the seat cell, one cell per layer below the seat.
+    /// (b) A leaned post keeps its base, its landing and its path (the members
+    /// that landed on it still stand on the cells it occupied), so the landing
+    /// ledger reads the downgraded field as rooted as it read it headed.
     #[test]
-    fn a_downgraded_leaning_arm_is_drawn_on_the_chord_from_its_base_to_its_seat() {
+    fn a_downgraded_leaning_arm_keeps_its_base_and_its_route() {
         let grid = grid();
         let mut strut = straight(&grid, 0, 150, 150, 200, 0.05);
-        let seat = strut.cell;
-        // The post leans 20 columns over 191 layers, from col 130 up to the
-        // joint cell at col 148.
         let post: Vec<u32> = (0..=190)
             .map(|slot| cell_u32(grid.index(150, 130 + (slot * 18) / 190)))
             .collect();
@@ -975,16 +974,14 @@ mod head_first_rulings {
         *strut.radius_mm.last_mut().expect("a ledger") = 0.1;
         strut.radius_mm[190] = 0.2204;
         let mut struts = vec![strut];
-        assert_eq!(downgrade_grown_heads(&mut struts, &grid), vec![0]);
+        let path_before = struts[0].path.clone();
+        assert_eq!(downgrade_grown_heads(&mut struts), vec![0]);
         let arm = &struts[0];
         assert!(arm.head.is_none());
         assert_eq!(arm.base_cell(), base, "the base stays where the post landed");
-        assert_eq!(arm.cell, seat);
-        assert_eq!(arm.path.len(), arm.k_top - arm.k_bottom, "one cell per layer below the seat");
+        assert_eq!(arm.path, path_before);
         assert!(arm.is_leaned());
-        let cols: Vec<usize> = arm.path.iter().map(|&cell| grid.col_of(cell as usize)).collect();
-        assert_eq!(cols[0], 130);
-        assert!(cols.windows(2).all(|pair| pair[1] >= pair[0]), "monotone chord: {cols:?}");
-        assert!(cols[cols.len() - 1] >= 148, "the chord reaches the seat's side: {cols:?}");
+        let check = check_landings(&struts, H);
+        assert!(check.heads_not_intact.is_empty(), "no head left to be intact: {check:?}");
     }
 }

@@ -498,15 +498,16 @@ pub fn planned_tip_radius_mm(demand_lb_mm: f64, rule: &HeadRule) -> f64 {
 /// from the seat plane, `(K - D)·u - r_K`, is below the gap `g`, the sphere
 /// stands inside the clearance and the file would draw a head that cuts the
 /// model. Such a member goes back to today's straight tip: the head is dropped,
-/// the post keeps its landing and its base (it is NOT re-routed), and the arm is
-/// drawn straight from its seat to that base. Its section above the joint falls
-/// back to the area law at the tip (the head minimum is gone with the head), and
-/// its path becomes the straight chord between the two cells. A head the
-/// ledger cannot draw (no joint slot) is dropped the same way.
+/// the post keeps its landing, its base AND its path (it is NOT re-routed: the
+/// members that landed on it, and the landing ledger, still read the cells it
+/// stood in), and the arm is drawn straight from its seat to that base. Its
+/// section from the joint up falls back to the area law at the tip (the head
+/// minimum is gone with the head). A head the ledger cannot draw (no joint
+/// slot) is dropped the same way.
 ///
 /// One pass over `struts`, after the last sizing and before anything reads the
 /// finished field. Returns the downgraded members' ids, in id order.
-pub fn downgrade_grown_heads(struts: &mut [crate::SweepStrut], grid: &Grid) -> Vec<u32> {
+pub fn downgrade_grown_heads(struts: &mut [crate::SweepStrut]) -> Vec<u32> {
     let mut downgraded = Vec::new();
     for strut in struts.iter_mut() {
         let Some(head) = strut.head.as_ref() else {
@@ -531,37 +532,6 @@ pub fn downgrade_grown_heads(struts: &mut [crate::SweepStrut], grid: &Grid) -> V
         for radius in strut.radius_mm.iter_mut().take(slots).skip(joint_slot) {
             *radius = tip;
         }
-        // The straight chord from the base cell to the seat cell, one entry per
-        // layer `k_bottom .. k_top` (the straight arm's own path convention).
-        let (base, seat) = (strut.base_cell(), strut.cell);
-        let span = strut.k_top.saturating_sub(strut.k_bottom);
-        if base == seat || span == 0 {
-            strut.path.clear();
-            continue;
-        }
-        let (base_row, base_col) = (grid.row_of(base), grid.col_of(base));
-        let (seat_row, seat_col) = (grid.row_of(seat), grid.col_of(seat));
-        strut.path = (0..span)
-            .map(|slot| {
-                #[expect(
-                    clippy::cast_precision_loss,
-                    reason = "a slot index and a grid index are exact in f64"
-                )]
-                let t = slot as f64 / span as f64;
-                #[expect(
-                    clippy::cast_precision_loss,
-                    clippy::cast_possible_truncation,
-                    clippy::cast_sign_loss,
-                    reason = "an interpolation between two in-range grid indices, rounded back onto the grid"
-                )]
-                let at = |from: usize, to: usize| {
-                    (from as f64 + (to as f64 - from as f64) * t).round().max(0.0) as usize
-                };
-                let row = at(base_row, seat_row).min(grid.rows() - 1);
-                let col = at(base_col, seat_col).min(grid.cols() - 1);
-                u32::try_from(grid.index(row, col)).unwrap_or(u32::MAX)
-            })
-            .collect();
     }
     downgraded
 }

@@ -3037,7 +3037,7 @@ fn print_sweep_disclosure(
         for warning in &lip.over_limit_after {
             println!(
                 "[sweep {model}] WARNING arm {} meets its seat face at {:.1} deg (its limit {:.1} \
-                 deg), and the seat trim cuts {:.4} mm into its shaft outside the tip ball{}{}{}",
+                 deg), and the seat trim cuts {:.6} mm into its shaft outside the tip ball{}{}{}",
                 warning.arm,
                 warning.approach_deg,
                 warning.limit_deg,
