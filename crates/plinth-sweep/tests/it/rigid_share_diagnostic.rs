@@ -68,7 +68,8 @@ fn the_rigid_share_names_the_laid_tubes_stiff_low_end_arms_and_sizes_nothing() {
             .without_seat_face_band()
             .without_drawn_solid_descent()
             .without_clearance_reroute()
-            .without_footprint_normal();
+            .without_footprint_normal()
+            .without_heads();
     let plan = sweep_with(&mesh, 0.0, &policy);
     let rigid = &plan.report.rigid_share;
     println!(

@@ -3684,8 +3684,9 @@ fn print_sweep_disclosure(
         println!(
             "[sweep {model}] heads: {} built at placement on steep faces, {straight} kept a \
              straight tip ({reasons}); drawn {}; stalk mm {}; stand-off mm {} (gap {final_gap_mm}); \
-             joints grown {} (largest stand-off deficit {:.4} mm); necks wider than ball {}; u \
-             against final footprint normal {:.3} deg max, {:.3} median",
+             joints grown {} (largest stand-off deficit {:.4} mm); necks wider than ball {}; \
+             placement normal residual {:.3} deg max, {:.3} median; u against final footprint \
+             normal {:.3} deg max, {:.3} median; lip-seat bites on headed arms {} (must be 0)",
             heads.built,
             emission.tips_headed,
             spread(&emission.head_stalk_mm),
@@ -3693,8 +3694,11 @@ fn print_sweep_disclosure(
             emission.joints_grown,
             emission.max_standoff_deficit_mm,
             emission.head_necks_wider_than_ball,
+            heads.placement_residual_deg_max,
+            heads.placement_residual_deg_median,
             heads.final_normal_residual_deg_max,
             heads.final_normal_residual_deg_median,
+            report.lip_seat.headed_bites,
         );
         let warned = heads
             .refusals
