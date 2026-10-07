@@ -5078,6 +5078,7 @@ fn tie_by_mast(
         seat_normal: [0.0; 3],
         straight_fallback: None,
         fallback_path: Vec::new(),
+        head: None,
     });
     state.ties.push(Vec::new());
     state.profiles.push(vec![radius_mm; k + 1]);
@@ -6137,6 +6138,7 @@ fn push_brace(
         seat_normal: [0.0; 3],
         straight_fallback: None,
         fallback_path: Vec::new(),
+        head: None,
     });
 }
 
@@ -6660,6 +6662,7 @@ fn tie_member(grid: &Grid, id: u32, post: u32, plan: &TiePlan, radius_mm: f64) -
         seat_normal: [0.0; 3],
         straight_fallback: None,
         fallback_path: Vec::new(),
+        head: None,
     }
 }
 
@@ -7236,6 +7239,7 @@ mod tests {
             seat_normal: [0.0; 3],
             straight_fallback: None,
             fallback_path: Vec::new(),
+            head: None,
         }
     }
 

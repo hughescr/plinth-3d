@@ -89,6 +89,7 @@ fn arm(index: usize, tip_radius_mm: f64) -> SweepArm {
         seat_face_point_mm: Some([x, 0.0, PLATE_Z_MM + 8.0]),
         landing: SweepArmLanding::Plate,
         seats_into_model: true,
+        head: None,
     }
 }
 

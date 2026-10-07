@@ -107,6 +107,14 @@ pub struct SweepEmission {
     pub raft_bridges: usize,
     pub raft_pads_grown: usize,
     pub raft_feet_sharing_a_pad: usize,
+    /// The lowering's head counters ([`plinth_support::SweepLowering`]): heads
+    /// drawn, heads drawn straight, necks wider than their ball, and per
+    /// headed arm the bare stalk length and the joint's stand-off.
+    pub tips_headed: usize,
+    pub heads_drawn_straight: usize,
+    pub head_necks_wider_than_ball: usize,
+    pub head_stalk_mm: Vec<f64>,
+    pub head_standoff_mm: Vec<f64>,
     /// Members whose drawn profile the JUNCTION CLAUSE raised above their
     /// ledger, from the junction down to their root, because a thicker branch
     /// joins them. A brace raises nothing since 2026-10-03 (rule R2), so this
@@ -201,6 +209,11 @@ pub fn to_primitives(
         raft_bridges,
         raft_pads_grown,
         raft_feet_sharing_a_pad,
+        tips_headed,
+        heads_drawn_straight,
+        head_necks_wider_than_ball,
+        head_stalk_mm,
+        head_standoff_mm,
     } = lower_sweep_arms(
         &arms,
         frame,
@@ -236,6 +249,11 @@ pub fn to_primitives(
         raft_bridges,
         raft_pads_grown,
         raft_feet_sharing_a_pad,
+        tips_headed,
+        heads_drawn_straight,
+        head_necks_wider_than_ball,
+        head_stalk_mm,
+        head_standoff_mm,
         members_raised_to_a_branch: raised.members,
         arm_junctions_inverted_in_ledger: raised.arm_ledger_inversions,
         load_steps_tapered: raised.load_steps_tapered,
@@ -653,6 +671,23 @@ pub(crate) fn drawn_ends(
     ([x, y, seat_z], [base_x, base_y, base_z])
 }
 
+/// **The two ends of a member's POST**: where it starts and where it lands, in
+/// the drawn frame. For a headed strut the post starts at the head's joint `K`
+/// (carried, never re-derived); otherwise this is [`drawn_ends`]' answer.
+#[must_use]
+pub fn drawn_post_ends(
+    grid: &crate::grid::Grid,
+    plate_z_mm: f64,
+    layer_height_mm: f64,
+    strut: &crate::SweepStrut,
+) -> ([f64; 3], [f64; 3]) {
+    let (seat, base) = drawn_ends(grid, plate_z_mm, layer_height_mm, strut);
+    match &strut.head {
+        Some(head) => (head.joint_mm, base),
+        None => (seat, base),
+    }
+}
+
 /// How far a member's DRAWN shaft line stands from the line it was planned
 /// on: `(at its seat, at its base)`, each a horizontal displacement in mm.
 /// Linear in between, because both lines are straight.
@@ -796,6 +831,8 @@ pub(crate) fn sweep_arm(
         // and the area law place seats into the model and is
         // unchanged.
         seats_into_model: strut.kind.seats_on_model(),
+        // The hookup (a later lane) carries a strut's head across here.
+        head: None,
     }
 }
 
@@ -911,6 +948,7 @@ mod tests {
             seat_normal: [0.0; 3],
             straight_fallback: None,
             fallback_path: Vec::new(),
+            head: None,
         }
     }
 

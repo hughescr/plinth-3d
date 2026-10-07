@@ -147,6 +147,7 @@ fn arm(cell: usize, k_top: usize, path: Vec<u32>) -> SweepStrut {
         path,
         straight_fallback: None,
         fallback_path: Vec::new(),
+        head: None,
         seat_face: SeatFace {
             point_mm: None,
             shift_mm: [0.0; 3],

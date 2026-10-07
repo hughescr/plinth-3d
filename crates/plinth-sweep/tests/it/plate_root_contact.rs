@@ -128,6 +128,7 @@ fn arm_at(
         seat_face_point_mm: None,
         landing,
         seats_into_model: seats,
+        head: None,
     }
 }
 

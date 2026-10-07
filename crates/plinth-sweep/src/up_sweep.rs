@@ -1701,6 +1701,7 @@ fn commit_seat(
         seat_face: crate::SeatFace::default(),
         seat_normal: [0.0; 3],
         fallback_path: Vec::new(),
+        head: None,
         straight_fallback: (!path.is_empty()).then(|| {
             let (landing, bottom, _) = descend(history, cell, layer);
             (landing, bottom)

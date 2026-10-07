@@ -53,6 +53,7 @@ pub(crate) mod frame;
 pub mod frame_bands;
 pub mod grid;
 pub mod head_join;
+pub mod heads;
 pub mod landing_check;
 pub mod lean;
 pub mod limits;
@@ -280,6 +281,11 @@ pub struct SweepStrut {
     /// `[0, 0, 0]` means unmeasured, and the lowering falls back to straight
     /// down. Derived and not digested.
     pub seat_normal: [f64; 3],
+    /// The articulated head this arm's top carries ([`heads::Head`]), **frozen
+    /// at placement**: the up-sweep builds it once and no later pass moves it.
+    /// `None` is the straight tip, every arm before heads existed and every
+    /// arm where a head cannot be built.
+    pub head: Option<heads::Head>,
 }
 
 /// The face a tip carries, and what the footprint rule did there
@@ -353,6 +359,69 @@ impl SweepStrut {
     #[must_use]
     pub fn is_leaned(&self) -> bool {
         !self.path.is_empty() && self.base_cell() != self.cell
+    }
+
+    /// The highest layer of the POST: the head's joint layer for a headed arm,
+    /// `k_top` otherwise.
+    #[must_use]
+    pub fn post_top_layer(&self) -> usize {
+        self.head.as_ref().map_or(self.k_top, |head| head.k_joint)
+    }
+
+    /// Whether another member may join this one at `layer`. Always for a
+    /// straight arm; for a headed arm only where the joining member's own
+    /// section stays clear of the joint sphere: `layer + ceil(r_K / h) <= k_joint`.
+    #[must_use]
+    pub fn joinable_at(&self, layer: usize, layer_height_mm: f64) -> bool {
+        let Some(head) = &self.head else {
+            return true;
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a joint radius over the layer height is a small positive integer once ceiled"
+        )]
+        let clear = (head.joint_radius_mm / layer_height_mm).ceil().max(0.0) as usize;
+        layer.saturating_add(clear) <= head.k_joint
+    }
+
+    /// Set what lies BELOW the head: the landing, the lowest layer and the
+    /// post's cells. A straight arm takes exactly the three assignments it
+    /// always did. A headed arm keeps its head: its path becomes `post_path`
+    /// (layers `k_bottom ..= k_joint`; empty means straight down in the joint
+    /// cell) followed by the head's own cells, and `k_top` is untouched.
+    pub fn set_post(&mut self, landing: Landing, k_bottom: usize, post_path: Vec<u32>) {
+        self.landing = landing;
+        self.k_bottom = k_bottom;
+        let Some(head) = &self.head else {
+            self.path = post_path;
+            return;
+        };
+        let mut path = post_path;
+        if path.is_empty() {
+            path.resize((head.k_joint + 1).saturating_sub(k_bottom), head.joint_cell);
+        }
+        path.extend_from_slice(&head.cells);
+        self.path = path;
+    }
+
+    /// Whether a headed arm's path still carries its head: the path covers
+    /// `k_bottom ..= k_top`, holds the joint cell at `k_joint`, ends in the
+    /// head's cells, and the last of them is the seat cell. `true` for a
+    /// straight arm.
+    #[must_use]
+    pub fn head_intact(&self) -> bool {
+        let Some(head) = &self.head else {
+            return true;
+        };
+        let Some(joint_slot) = head.k_joint.checked_sub(self.k_bottom) else {
+            return false;
+        };
+        self.k_top >= self.k_bottom
+            && self.path.len() == self.k_top - self.k_bottom + 1
+            && self.path.get(joint_slot) == Some(&head.joint_cell)
+            && self.path.ends_with(&head.cells)
+            && head.cells.last().map(|cell| *cell as usize) == Some(self.cell)
     }
 
     /// Total load this arm carries at its tip.
@@ -4274,6 +4343,7 @@ fn build_report(
             // Set by the caller, which holds the up-sweep's scratch.
             ..PathHits::default()
         },
+        heads: heads::HeadsOutcome::default(),
     }
 }
 
@@ -4360,6 +4430,19 @@ fn digest(struts: &[SweepStrut]) -> String {
                 absorb((component * 1.0e6).round() as i64 as u64);
             }
         }
+        // A head is part of the placement. Absorbed only when present, so a
+        // field with no head digests exactly as it did before heads existed.
+        if let Some(head) = &strut.head {
+            for point in [head.contact_mm, head.unit, head.joint_mm] {
+                for component in point {
+                    absorb(component.to_bits());
+                }
+            }
+            absorb(head.k_joint as u64);
+            for cell in &head.cells {
+                absorb(u64::from(*cell));
+            }
+        }
     }
     format!("{accumulator:016x}")
 }
@@ -4416,6 +4499,7 @@ mod removal_tests {
             seat_normal: [0.0; 3],
             straight_fallback: None,
             fallback_path: Vec::new(),
+            head: None,
         }
     }
 
@@ -4582,6 +4666,7 @@ mod removal_tests {
             seat_normal: [0.0; 3],
             straight_fallback: None,
             fallback_path: Vec::new(),
+            head: None,
         }];
 
         let mut refused = 0_u64;
@@ -4626,6 +4711,7 @@ mod removal_tests {
             seat_normal: [0.0; 3],
             straight_fallback: None,
             fallback_path: Vec::new(),
+            head: None,
         };
         // The candidate reads below the minimum load; the neighbour reads well
         // above it, so only one of the two is ever a candidate.

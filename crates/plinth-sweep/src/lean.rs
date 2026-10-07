@@ -150,6 +150,19 @@ impl LeanLaw {
         }
     }
 
+    /// `cos λmax`: the cosine of the steepest lean from vertical the law
+    /// admits, `h / hypot(max_step, h)` (the reciprocal of
+    /// [`Self::face_zone_factor`]). `1` for the disabled law. A head's joint is
+    /// sized at this envelope ([`crate::heads`]).
+    #[must_use]
+    pub fn cos_max_lean(&self) -> f64 {
+        if self.layer_height_mm > 0.0 {
+            self.layer_height_mm / self.max_step_mm.hypot(self.layer_height_mm)
+        } else {
+            1.0
+        }
+    }
+
     /// The registered overhang weight at the angle a layer with sideways move
     /// `step_mm` makes with horizontal. `0` for a vertical layer, rising to `1`
     /// as the arm lies over.

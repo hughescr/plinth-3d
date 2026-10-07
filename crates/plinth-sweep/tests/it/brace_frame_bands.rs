@@ -75,6 +75,7 @@ fn post(grid: &Grid, id: u32, col: usize, layers: usize) -> SweepStrut {
         seat_normal: [0.0; 3],
         straight_fallback: None,
         fallback_path: Vec::new(),
+        head: None,
     }
 }
 

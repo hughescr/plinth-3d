@@ -608,6 +608,12 @@ fn seated_terminal_z(arm: &SweepArm, config: LoweringConfig) -> Option<f64> {
     if !arm.seats_into_model {
         return Some(arm.seat_mm[2]);
     }
+    // A headed arm's post starts at the carried joint.
+    if let Some(head) = &arm.head {
+        if headed_tip(arm, config).is_some() {
+            return Some(head.joint_mm[2]);
+        }
+    }
     let delta: [f64; 3] = std::array::from_fn(|index| arm.base_mm[index] - arm.seat_mm[index]);
     let length = delta.iter().map(|value| value * value).sum::<f64>().sqrt();
     if !length.is_finite() || length <= ZERO_LENGTH_MM {
@@ -726,6 +732,11 @@ impl SweepRootFlare {
             seat_mm: lift(arm.seat_mm, -plate_z_mm),
             base_mm: lift(arm.base_mm, -plate_z_mm),
             seat_face_point_mm: arm.seat_face_point_mm.map(|point| lift(point, -plate_z_mm)),
+            head: arm.head.as_ref().map(|head| SweepHead {
+                contact_mm: lift(head.contact_mm, -plate_z_mm),
+                joint_mm: lift(head.joint_mm, -plate_z_mm),
+                ..head.clone()
+            }),
             ..arm.clone()
         };
         let delta: [f64; 3] =
@@ -736,7 +747,10 @@ impl SweepRootFlare {
         }
         let unit = delta.map(|value| value / length);
         let tip_radius = positive(local.tip_radius_mm).ok()?.get();
-        let (seated_seat, top) = if local.seats_into_model {
+        let (seated_seat, top) = if let Some(head) = headed_tip(&local, self.config) {
+            // A headed arm's post starts at the carried joint.
+            (head.head.joint_mm, head.head.joint_mm)
+        } else if local.seats_into_model {
             let ball_radius = self.config.sweep_ball_factor(tip_radius) * tip_radius;
             let (seated_seat, center, _) =
                 seated_ball(&local, unit, tip_radius, ball_radius, self.config);
@@ -764,6 +778,17 @@ impl SweepRootFlare {
         .filter(|boss| !zero_length(top, *boss) && !zero_length(*boss, foot));
         let bottom = boss.unwrap_or(foot);
         Some((lift(top, plate_z_mm), lift(bottom, plate_z_mm)))
+    }
+
+    /// The printer's rasterisation allowance, one layer in Z plus one pixel in
+    /// plane (the seat law's own smallest separation,
+    /// `contact::rasterisation_allowance_mm`), in mm.
+    #[must_use]
+    pub fn rasterisation_allowance_mm(&self) -> f64 {
+        crate::contact::rasterisation_allowance_mm(
+            self.config.layer_height_mm.get(),
+            self.config.pixel_pitch_mm,
+        )
     }
 }
 
@@ -995,6 +1020,36 @@ pub struct SweepArm {
     /// the owner has to cut off a member that was never meant to be removed
     /// separately.
     pub seats_into_model: bool,
+    /// **The articulated head** (Craig 2026-10-06): the ball is seated along
+    /// [`SweepHead::unit`] (so the contact arrives square), a short straight
+    /// head runs to a joint sphere at the carried [`SweepHead::joint_mm`], and
+    /// the post continues from there to the base. `None` is the straight arm,
+    /// drawn exactly as before this field existed. For a headed arm
+    /// [`Self::radius_profile_mm`] spans `base_mm` -> `joint_mm` (not the seat).
+    /// An arm whose head cannot be drawn is drawn straight and counted
+    /// ([`SweepLowering::heads_drawn_straight`]).
+    pub head: Option<SweepHead>,
+}
+
+/// What the sweep decided about one arm's head ([`SweepArm::head`]). Every
+/// point is in the frame of [`SweepArm::seat_mm`]. `K` is CARRIED: the
+/// lowering never re-derives it from the seated ball.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SweepHead {
+    /// `D`: the contact centre, on the seat plane. The seat trim's plane is
+    /// `(contact_mm, unit)`.
+    pub contact_mm: [f64; 3],
+    /// `u`: the outward unit normal of the face, `z < 0`.
+    pub unit: [f64; 3],
+    /// `K`: the joint sphere's centre.
+    pub joint_mm: [f64; 3],
+    /// `r_K`: the joint sphere's radius.
+    pub joint_radius_mm: f64,
+    /// `g`: the registered final clearance gap.
+    pub gap_mm: f64,
+    /// The head's section: `n` sections at the mid-points of `n` equal parts
+    /// of `K -> D`; index 0 is next to the joint.
+    pub profile_mm: Vec<f64>,
 }
 
 /// What lowering one sweep field produced, and everything it had to warn about.
@@ -1112,6 +1167,23 @@ pub struct SweepLowering {
     /// Feet that share a pad with another foot within the registered plate
     /// mesh tolerance.
     pub raft_feet_sharing_a_pad: usize,
+    /// Tips drawn as a head ([`SweepArm::head`]): ball along the face normal,
+    /// head to a joint sphere, post. The path-hit witness for heads.
+    pub tips_headed: usize,
+    /// Arms that carried a head the lowering could not draw (non-finite, no
+    /// length, a ball already past the joint, no measured seat plane) and drew
+    /// straight instead.
+    pub heads_drawn_straight: usize,
+    /// Headed arms whose neck, where it leaves the ball, is wider than the
+    /// ball's own solid there (allowed: the law asks for it).
+    pub head_necks_wider_than_ball: usize,
+    /// Per headed arm, in arm order: the bare length along `u` between the
+    /// ball's surface and the joint sphere's surface, `|K - C| - R - r_K`
+    /// (`C` the ball centre, `R` the ball radius). May be zero or negative.
+    pub head_stalk_mm: Vec<f64>,
+    /// Per headed arm, in arm order: the joint's clearance from the seat
+    /// plane, `(K - D)·u - r_K`. It equals `g` when the joint has not grown.
+    pub head_standoff_mm: Vec<f64>,
 }
 
 impl SweepLowering {
@@ -1330,6 +1402,13 @@ fn lower_sweep_arms_of(
             out.profile_member_frusta += lowered.spans - 1;
         }
         out.arms_without_profile += usize::from(lowered.without_profile);
+        out.heads_drawn_straight += usize::from(lowered.head_drawn_straight);
+        if let Some(head) = lowered.head {
+            out.tips_headed += 1;
+            out.head_necks_wider_than_ball += usize::from(head.neck_wider_than_ball);
+            out.head_stalk_mm.push(head.stalk_mm);
+            out.head_standoff_mm.push(head.standoff_mm);
+        }
         out.shaft_members_trimmed_to_seat += lowered.members_trimmed;
         if let Some((root_radius_mm, factor)) = lowered.boss {
             out.root_boss_root_radius_mm.push(root_radius_mm);
@@ -1447,6 +1526,7 @@ enum ArmOutcome {
 
 /// What one arm's tip seat actually delivered, recorded only for an arm that
 /// reached the file.
+#[derive(Clone, Copy)]
 struct TipSeat {
     /// The delivered depth, measured along the carried face's own normal.
     depth_mm: f64,
@@ -1489,6 +1569,18 @@ struct ArmLowering {
     /// A plate arm's root boss: its drawn root radius and the foot-to-root
     /// factor it was drawn with; `None` for an arm with no boss.
     boss: Option<(f64, f64)>,
+    /// What a headed arm drew ([`SweepArm::head`]); `None` for a straight one.
+    head: Option<HeadDrawn>,
+    /// The arm carried a head that could not be drawn and was drawn straight.
+    head_drawn_straight: bool,
+}
+
+/// The measurements of one drawn head.
+#[derive(Clone, Copy)]
+struct HeadDrawn {
+    stalk_mm: f64,
+    standoff_mm: f64,
+    neck_wider_than_ball: bool,
 }
 
 impl ArmLowering {
@@ -1501,8 +1593,199 @@ impl ArmLowering {
             members_trimmed: 0,
             without_profile: false,
             boss: None,
+            head: None,
+            head_drawn_straight: false,
         }
     }
+}
+
+/// One arm's head, derived from its carried [`SweepHead`] and its seated ball
+/// ([`headed_tip`]). `K` is the carried joint, never derived from the ball.
+struct HeadedTip<'a> {
+    head: &'a SweepHead,
+    /// The ball's axis: the head's outward normal.
+    unit: [f64; 3],
+    /// The seated pole, the ball centre and the seat record, as
+    /// [`seated_ball`] gives them along [`Self::unit`].
+    seated: [f64; 3],
+    centre: [f64; 3],
+    tip_seat: TipSeat,
+    /// Where the head starts: the ball centre, or, where the centre stands
+    /// under the seat plane, the contact disc's centre on it.
+    start: [f64; 3],
+    /// The start's height over the seat plane, `max(d, 0)`.
+    start_height_mm: f64,
+    /// The ball's own radius `R` at its centre, the contact disc's radius
+    /// `sqrt(R² - d²)` where the start is on the plane.
+    start_cap_radius_mm: f64,
+}
+
+/// **The head of an articulated arm**, or `None` where the arm cannot be drawn
+/// as one (it has no [`SweepArm::head`], seats into nothing, the head is not
+/// finite, the seated ball does not meet the head's seat plane, or the ball
+/// already stands past the joint). Every reader of a headed arm's geometry goes
+/// through this one derivation, so the placement, the census and the file see
+/// one head.
+fn headed_tip<'a>(arm: &'a SweepArm, config: LoweringConfig) -> Option<HeadedTip<'a>> {
+    let head = arm.head.as_ref()?;
+    if !arm.seats_into_model {
+        return None;
+    }
+    let finite_point = |point: [f64; 3]| point.iter().all(|value| value.is_finite());
+    if !(finite_point(head.contact_mm)
+        && finite_point(head.joint_mm)
+        && head.joint_radius_mm.is_finite()
+        && head.joint_radius_mm > 0.0
+        && !head.profile_mm.is_empty()
+        && head
+            .profile_mm
+            .iter()
+            .all(|radius| radius.is_finite() && *radius > 0.0))
+    {
+        return None;
+    }
+    let unit = geom_kernel::vec3::normalize(head.unit)?;
+    if unit[2] >= 0.0 {
+        return None;
+    }
+    let tip_radius = positive(arm.tip_radius_mm).ok()?.get();
+    let ball_radius = config.sweep_ball_factor(tip_radius) * tip_radius;
+    // The ball is seated against the head's own seat plane `(D, u)`: the seat
+    // trim of a headed arm. The raster seat still says how deep the ball goes.
+    let seating = SweepArm {
+        radius_profile_mm: Vec::new(),
+        seat_normal_mm: unit,
+        seat_face_point_mm: Some(head.contact_mm),
+        head: None,
+        ..arm.clone()
+    };
+    let (seated, centre, tip_seat) = seated_ball(&seating, unit, tip_radius, ball_radius, config);
+    let trim = tip_seat.trim.filter(|_| tip_seat.face_measured)?;
+    let normal = trim.outward_normal();
+    let centre_height_mm = trim.support_side_distance_mm(centre);
+    // Where the ball centre stands under the plane (the raster seat inside the
+    // face by more than the ball's height), the head starts on the plane, at
+    // the contact disc's centre.
+    let (start, start_height_mm, start_cap_radius_mm) = if centre_height_mm < 0.0 {
+        (
+            std::array::from_fn(|axis| centre[axis] - centre_height_mm * normal[axis]),
+            0.0,
+            (ball_radius * ball_radius - centre_height_mm * centre_height_mm)
+                .max(0.0)
+                .sqrt(),
+        )
+    } else {
+        (centre, centre_height_mm, ball_radius)
+    };
+    let to_joint = geom_kernel::vec3::dot(unit, geom_kernel::vec3::sub(head.joint_mm, start));
+    let rise = start[2] - head.joint_mm[2];
+    if !(to_joint.is_finite() && to_joint > ZERO_LENGTH_MM && rise.is_finite() && rise > ZERO_LENGTH_MM)
+    {
+        return None;
+    }
+    Some(HeadedTip {
+        head,
+        unit,
+        seated,
+        centre,
+        tip_seat,
+        start,
+        start_height_mm,
+        start_cap_radius_mm,
+    })
+}
+
+/// What [`push_head_segment`] drew.
+struct HeadSegment {
+    spans: usize,
+    /// The neck's first ring is wider than the ball's solid at the start.
+    neck_wider_than_ball: bool,
+}
+
+/// Draw the head from its start to the carried joint `K`, and the joint sphere
+/// at `K`. The head's section is the carried profile (the bending law's, from
+/// the contact centre to the joint), and the fewest straight spans that stay
+/// on or above it are drawn ([`drawn_spans`]), the first the contact taper. A
+/// neck ring wider than the ball is allowed, and reported. `None` where a span
+/// will not cross the finite boundary.
+fn push_head_segment(
+    headed: &HeadedTip<'_>,
+    tip_radius: PositiveFinite,
+    config: LoweringConfig,
+    staged: &mut Vec<SupportPrimitive>,
+) -> Option<HeadSegment> {
+    let head = headed.head;
+    let (start, joint) = (headed.start, head.joint_mm);
+    let rise = start[2] - joint[2];
+    // The profile runs K -> D, index 0 at the joint, over the heights of that
+    // axis; the drawn range starts at `start`, on or below D.
+    let spans = drawn_spans(
+        &head.profile_mm,
+        joint[2],
+        head.contact_mm[2],
+        start[2],
+        joint[2],
+        tip_radius.get(),
+        head.joint_radius_mm,
+    );
+    let on_axis = |z: f64| -> Option<[Finite; 3]> {
+        let t = (start[2] - z) / rise;
+        finite3(std::array::from_fn(|axis| {
+            start[axis] + (joint[axis] - start[axis]) * t
+        }))
+        .ok()
+    };
+    let last = spans.len().saturating_sub(1);
+    for (index, span) in spans.iter().enumerate() {
+        let from = if index == 0 {
+            finite3(start).ok()?
+        } else {
+            on_axis(span.top_z_mm)?
+        };
+        let to = if index == last {
+            finite3(joint).ok()?
+        } else {
+            on_axis(span.bottom_z_mm)?
+        };
+        let (kind, depth) = if index == 0 {
+            (
+                SupportSegmentKind::ContactTaper,
+                Some(config.contact_depth_mm),
+            )
+        } else {
+            (SupportSegmentKind::Member, None)
+        };
+        staged.push(frustum(
+            kind,
+            from,
+            to,
+            positive(span.top_radius_mm).ok()?,
+            positive(span.bottom_radius_mm).ok()?,
+            depth,
+            FrustumRingNormal::SegmentAxis,
+        ));
+    }
+    let geometry = SphereGeometry::joint(finite3(joint).ok()?);
+    let radius = positive(head.joint_radius_mm).ok()?;
+    let (start_mm, end_mm) = geometry.canonical_poles(radius).ok()?;
+    staged.push(SupportPrimitive {
+        segment_kind: SupportSegmentKind::JointSphere,
+        start_mm,
+        end_mm,
+        start_radius_mm: radius,
+        end_radius_mm: radius,
+        contact_depth_mm: None,
+        ring_normal: FrustumRingNormal::SegmentAxis,
+        sphere_geometry: Some(geometry),
+        seat_trim: None,
+    });
+    let neck_wider_than_ball = spans
+        .first()
+        .is_some_and(|first| first.top_radius_mm > headed.start_cap_radius_mm);
+    Some(HeadSegment {
+        spans: spans.len(),
+        neck_wider_than_ball,
+    })
 }
 
 /// One straight span of a drawn member, between two heights on its axis.
@@ -1897,6 +2180,13 @@ pub struct TipContactDisc {
     /// (2026-09-29) measures a trunk's shaft from this point, so it reads the
     /// same derivation the lowering draws from.
     pub ball_centre_mm: [f64; 3],
+    /// Where the arm's POST starts: the ball centre for a straight arm, the
+    /// carried joint `K` for a headed one ([`SweepArm::head`]). A reader that
+    /// measures the post (the clearance census, the head-join zone) starts
+    /// here, not at the ball.
+    pub post_top_mm: [f64; 3],
+    /// The head's joint radius, `None` for a straight arm.
+    pub head_joint_radius_mm: Option<f64>,
 }
 
 /// **The contact disc every seated arm's tip will deliver**, computed by the
@@ -1937,8 +2227,16 @@ pub fn tip_contact_discs(
             }
             let unit = delta.map(|value| value / length);
             let ball_radius_mm = config.sweep_ball_factor(arm.tip_radius_mm) * arm.tip_radius_mm;
-            let (_, center, tip_seat) =
-                seated_ball(arm, unit, arm.tip_radius_mm, ball_radius_mm, config);
+            // A head's ball is seated along its own normal, not the axis.
+            let headed = headed_tip(arm, config);
+            let (center, tip_seat) = match &headed {
+                Some(head) => (head.centre, head.tip_seat),
+                None => {
+                    let (_, center, tip_seat) =
+                        seated_ball(arm, unit, arm.tip_radius_mm, ball_radius_mm, config);
+                    (center, tip_seat)
+                }
+            };
             let trim = tip_seat.trim?;
             let normal = trim.outward_normal();
             let d = trim.support_side_distance_mm(center);
@@ -1948,6 +2246,8 @@ pub fn tip_contact_discs(
                 radius_mm: tip_seat.contact_disc_radius_mm,
                 ball_radius_mm,
                 ball_centre_mm: center,
+                post_top_mm: headed.as_ref().map_or(center, |head| head.head.joint_mm),
+                head_joint_radius_mm: headed.as_ref().map(|head| head.head.joint_radius_mm),
             })
         })
         .collect())
@@ -2307,11 +2607,24 @@ fn lower_one_sweep_arm(
     // branch below unchanged, so this is the identity on every field the
     // slenderness lane did not touch.
     let mut staged: Vec<SupportPrimitive> = Vec::with_capacity(3);
+    // THE ARTICULATED HEAD: the ball is seated along the face normal, the head
+    // runs to the carried joint, and the post starts there. The head's pieces
+    // are staged apart first, so a head that cannot be drawn leaves the arm
+    // straight and counted. `None` is the straight arm.
+    let mut head_pieces: Vec<SupportPrimitive> = Vec::new();
+    let headed = headed_tip(arm, config).and_then(|headed| {
+        push_head_segment(&headed, tip_radius, config, &mut head_pieces)
+            .map(|segment| (headed, segment))
+    });
+    let head_drawn_straight = arm.head.is_some() && headed.is_none();
     let (seated_seat, center, seat) = if arm.seats_into_model {
         // THE SEAT and its trim: `seated_ball`, the one derivation.
-        let (seated_seat, center_raw, tip_seat) =
-            seated_ball(arm, unit, tip_radius.get(), ball_radius.get(), config);
-        let (Ok(center), Ok(unit_finite)) = (finite3(center_raw), finite3(unit)) else {
+        let (seated_seat, center_raw, tip_seat) = match &headed {
+            Some((head, _)) => (head.seated, head.centre, head.tip_seat),
+            None => seated_ball(arm, unit, tip_radius.get(), ball_radius.get(), config),
+        };
+        let ball_unit = headed.as_ref().map_or(unit, |(head, _)| head.unit);
+        let (Ok(center), Ok(unit_finite)) = (finite3(center_raw), finite3(ball_unit)) else {
             return ArmLowering::refused(ArmOutcome::InvalidGeometry);
         };
         let Ok(geometry) = SphereGeometry::tip(center, unit_finite) else {
@@ -2344,6 +2657,44 @@ fn lower_one_sweep_arm(
     let Ok(base) = finite3(arm.base_mm) else {
         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
     };
+    // The shaft's top: the ball centre, or for a head the carried joint `K`,
+    // with the head drawn first and then the joint sphere. The post then starts
+    // at `K` with the joint's radius, over a profile that spans base -> `K`.
+    let (shaft_top, post_start_radius, profile_top_z, head_drawn) = match &headed {
+        Some((head, segment)) => {
+            let (Ok(joint), Ok(joint_radius)) = (
+                finite3(head.head.joint_mm),
+                positive(head.head.joint_radius_mm),
+            ) else {
+                return ArmLowering::refused(ArmOutcome::InvalidGeometry);
+            };
+            staged.append(&mut head_pieces);
+            let to_joint = geom_kernel::vec3::sub(head.head.joint_mm, head.centre);
+            let stalk_mm = geom_kernel::vec3::norm(to_joint)
+                - ball_radius.get()
+                - head.head.joint_radius_mm;
+            let standoff_mm = geom_kernel::vec3::dot(
+                head.unit,
+                geom_kernel::vec3::sub(head.head.joint_mm, head.head.contact_mm),
+            ) - head.head.joint_radius_mm;
+            (
+                joint,
+                joint_radius,
+                head.head.joint_mm[2],
+                Some(HeadDrawn {
+                    stalk_mm,
+                    standoff_mm,
+                    neck_wider_than_ball: segment.neck_wider_than_ball,
+                }),
+            )
+        }
+        None => (center, tip_radius, arm.seat_mm[2], None),
+    };
+    let first_kind = if headed.is_some() {
+        SupportSegmentKind::Member
+    } else {
+        SupportSegmentKind::ContactTaper
+    };
     // Every shaft below goes through `push_drawn_shaft`, which draws the taper
     // and any chained members the ledger's profile needs; the plate-root chain
     // around it is untouched.
@@ -2356,9 +2707,11 @@ fn lower_one_sweep_arm(
             DrawnShaft {
                 top,
                 bottom,
-                tip_radius,
+                tip_radius: post_start_radius,
                 root_radius,
                 ring_normal,
+                first_kind,
+                profile_top_z_mm: profile_top_z,
             },
             config,
             staged,
@@ -2368,10 +2721,10 @@ fn lower_one_sweep_arm(
     let mut boss = None;
     let outcome = match arm.landing {
         SweepArmLanding::Landed => {
-            if distance(center, base) <= ZERO_LENGTH_MM {
+            if distance(shaft_top, base) <= ZERO_LENGTH_MM {
                 return ArmLowering::refused(ArmOutcome::ZeroLength);
             }
-            let Some(drawn) = shaft(center, base, FrustumRingNormal::SegmentAxis, &mut staged)
+            let Some(drawn) = shaft(shaft_top, base, FrustumRingNormal::SegmentAxis, &mut staged)
             else {
                 return ArmLowering::refused(ArmOutcome::InvalidGeometry);
             };
@@ -2398,8 +2751,15 @@ fn lower_one_sweep_arm(
             // `member.p0_mm()[2]` — which `initial.rs` already minted embedded.
             // Its boss top is measured from the raft top, as it always was,
             // at the owner's ChituBox boss height (2026-09-30).
+            // A headed arm's post starts at the joint, so its boss is measured
+            // from there.
+            let terminal_z = if headed.is_some() {
+                profile_top_z
+            } else {
+                seated_seat[2]
+            };
             let boss_top = root_boss_top_at(
-                seated_seat[2],
+                terminal_z,
                 [base[0], base[1]],
                 config.root_boss.height_mm(),
                 config,
@@ -2407,7 +2767,7 @@ fn lower_one_sweep_arm(
             .and_then(Result::ok);
             match boss_top {
                 Some(top)
-                    if distance(center, top) > ZERO_LENGTH_MM
+                    if distance(shaft_top, top) > ZERO_LENGTH_MM
                         && distance(top, foot_point) > ZERO_LENGTH_MM =>
                 {
                     // THE OWNER'S CHITUBOX BOSS FOOT, SCALED TO THE ROOT
@@ -2421,7 +2781,7 @@ fn lower_one_sweep_arm(
                         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
                     };
                     boss = Some((root_radius.get(), factor));
-                    let Some(drawn) = shaft(center, top, FrustumRingNormal::PlateZ, &mut staged)
+                    let Some(drawn) = shaft(shaft_top, top, FrustumRingNormal::PlateZ, &mut staged)
                     else {
                         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
                     };
@@ -2443,13 +2803,13 @@ fn lower_one_sweep_arm(
                     // the raft, so no flare fits. Emit the straight column down
                     // to its pad and WARN: refusing here would destroy the
                     // evidence.
-                    if distance(center, foot_point) <= ZERO_LENGTH_MM
-                        || center[2].get() <= foot_z.get()
+                    if distance(shaft_top, foot_point) <= ZERO_LENGTH_MM
+                        || shaft_top[2].get() <= foot_z.get()
                     {
                         return ArmLowering::refused(ArmOutcome::ZeroLength);
                     }
                     let Some(drawn) =
-                        shaft(center, foot_point, FrustumRingNormal::PlateZ, &mut staged)
+                        shaft(shaft_top, foot_point, FrustumRingNormal::PlateZ, &mut staged)
                     else {
                         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
                     };
@@ -2514,6 +2874,8 @@ fn lower_one_sweep_arm(
         members_trimmed,
         without_profile: arm.radius_profile_mm.is_empty(),
         boss,
+        head: head_drawn,
+        head_drawn_straight,
     }
 }
 
@@ -2572,9 +2934,16 @@ fn frustum_reaches_model_side(primitive: &SupportPrimitive, trim: crate::SeatTri
 struct DrawnShaft {
     top: [Finite; 3],
     bottom: [Finite; 3],
+    /// The radius the top span starts at: the tip's, or a head joint's.
     tip_radius: PositiveFinite,
     root_radius: PositiveFinite,
     ring_normal: FrustumRingNormal,
+    /// The first span's kind: the arm's `ContactTaper`, or a `Member` for the
+    /// post below a head (the taper is the head's segment above it).
+    first_kind: SupportSegmentKind,
+    /// The height the radius profile's top slot ends at: the seat for a
+    /// straight arm, the joint for a headed one.
+    profile_top_z_mm: f64,
 }
 
 /// Draw one member's shaft from `top` (the ball centre, or the seat of a member
@@ -2595,7 +2964,7 @@ fn push_drawn_shaft(
     let spans = drawn_spans(
         &arm.radius_profile_mm,
         arm.base_mm[2],
-        arm.seat_mm[2],
+        shaft.profile_top_z_mm,
         top_z,
         bottom_z,
         shaft.tip_radius.get(),
@@ -2625,7 +2994,7 @@ fn push_drawn_shaft(
         };
         let start_radius = positive(span.top_radius_mm).ok()?;
         let end_radius = positive(span.bottom_radius_mm).ok()?;
-        let (kind, depth) = if index == 0 {
+        let (kind, depth) = if index == 0 && shaft.first_kind == SupportSegmentKind::ContactTaper {
             (
                 SupportSegmentKind::ContactTaper,
                 Some(config.contact_depth_mm),
@@ -3179,6 +3548,7 @@ mod shaft_seat_bite_tests {
             seat_face_point_mm: Some(seat),
             landing: SweepArmLanding::Landed,
             seats_into_model: true,
+            head: None,
         }
     }
 
@@ -3305,6 +3675,7 @@ mod sweep_root_flare_tests {
             seat_face_point_mm: None,
             landing: SweepArmLanding::Plate,
             seats_into_model: true,
+            head: None,
         }
     }
 
@@ -3521,5 +3892,230 @@ mod sweep_root_flare_tests {
                 0.0
             )
             .is_none());
+    }
+}
+
+/// AN ARTICULATED HEAD (Craig 2026-10-06): the lowering draws a ball seated
+/// along the head's normal, a head to the CARRIED joint, the joint sphere and
+/// the post from it. Built by hand on a 41.3 degree face with the head's
+/// section from the law (`r(s)^3 = (r_t^2/c)(r + 4s)`, c = cos 57.5 deg).
+#[cfg(test)]
+mod headed_arm_tests {
+    use super::{
+        lower_one_sweep_arm, lower_sweep_arms, tip_shaft_seat_bites, BuildFrame, Finite,
+        LoweringConfig, PositiveFinite, SupportPrimitive, SupportSegmentKind, SweepArm,
+        SweepArmLanding, SweepHead,
+    };
+    use plinth_core::LayerPlan;
+
+    const FACE_DEG: f64 = 41.3;
+    const GAP_MM: f64 = 0.3;
+    const TIP_MM: f64 = 0.05;
+    const SECTIONS: usize = 8;
+
+    fn cos_lean() -> f64 {
+        57.5_f64.to_radians().cos()
+    }
+
+    /// The root `r >= ledger` of `r^3 = ledger^2 r + 4 tip^2 lever`, by
+    /// bisection (plinth-sweep's `heads` module owns the production law; this
+    /// crate sits below it).
+    fn section(ledger: f64, tip: f64, lever: f64) -> f64 {
+        let excess = |r: f64| r * (r * r - ledger * ledger) - 4.0 * tip * tip * lever;
+        let (mut low, mut high) = (ledger, ledger + (4.0 * tip * tip * lever).cbrt());
+        for _ in 0..100 {
+            let mid = 0.5 * (low + high);
+            if excess(mid) >= 0.0 {
+                high = mid;
+            } else {
+                low = mid;
+            }
+        }
+        high
+    }
+
+    fn unit() -> [f64; 3] {
+        let (sin, cos) = FACE_DEG.to_radians().sin_cos();
+        [sin, 0.0, -cos]
+    }
+
+    /// `(r_K, |DK|)`: the joint's cubic `r_K^3 = (r_t^2/c)(r_K + 4(g + r_K))`.
+    fn joint() -> (f64, f64) {
+        let ledger = TIP_MM / cos_lean().sqrt();
+        let (mut low, mut high) = (ledger, 1.0);
+        let excess = |r: f64| r * r * r - ledger * ledger * (r + 4.0 * (GAP_MM + r));
+        for _ in 0..100 {
+            let mid = 0.5 * (low + high);
+            if excess(mid) >= 0.0 {
+                high = mid;
+            } else {
+                low = mid;
+            }
+        }
+        (high, GAP_MM + high)
+    }
+
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a section index of a handful of sections is exact in f64"
+    )]
+    fn head(contact: [f64; 3]) -> SweepHead {
+        let (r_k, length) = joint();
+        let u = unit();
+        let ledger = TIP_MM / cos_lean().sqrt();
+        // n sections at the mid-points of n equal parts of K -> D, index 0 at K.
+        let profile_mm = (0..SECTIONS)
+            .map(|index| {
+                let from_joint = (index as f64 + 0.5) * length / SECTIONS as f64;
+                section(ledger, ledger, length - from_joint)
+            })
+            .collect();
+        SweepHead {
+            contact_mm: contact,
+            unit: u,
+            joint_mm: std::array::from_fn(|axis| contact[axis] + length * u[axis]),
+            joint_radius_mm: r_k,
+            gap_mm: GAP_MM,
+            profile_mm,
+        }
+    }
+
+    /// A landed arm: the seat at `seat`, the head's contact centre at
+    /// `contact`, a vertical post from the carried joint down to z = 2.
+    fn arm(seat: [f64; 3], contact: [f64; 3]) -> SweepArm {
+        let head = head(contact);
+        let base = [head.joint_mm[0], head.joint_mm[1], 2.0];
+        SweepArm {
+            seat_mm: seat,
+            base_mm: base,
+            tip_radius_mm: TIP_MM,
+            radius_profile_mm: vec![head.joint_radius_mm + 0.05; 150],
+            seat_normal_mm: unit(),
+            seat_face_point_mm: Some(contact),
+            landing: SweepArmLanding::Landed,
+            seats_into_model: true,
+            head: Some(head),
+        }
+    }
+
+    fn layers() -> LayerPlan {
+        LayerPlan::new(0.0, vec![0.05; 400]).expect("a uniform layer plan")
+    }
+
+    fn frame() -> BuildFrame {
+        BuildFrame::new(
+            Finite::new(0.0).expect("finite"),
+            PositiveFinite::new(1.0).expect("positive"),
+        )
+    }
+
+    fn lower(arm: &SweepArm) -> Vec<SupportPrimitive> {
+        let layers = layers();
+        let config = LoweringConfig::current(frame(), &layers, 1, 1).expect("config");
+        let mut out = Vec::new();
+        let lowered = lower_one_sweep_arm(arm, config, 0.0, &mut out);
+        assert!(lowered.head.is_some(), "the head was drawn as a head");
+        out
+    }
+
+    fn point(p: [Finite; 3]) -> [f64; 3] {
+        p.map(Finite::get)
+    }
+
+    #[test]
+    fn a_headed_arm_is_drawn_ball_head_joint_post_to_the_carried_joint() {
+        let seat = [0.0, 0.0, 10.0];
+        // The seat is moved 0.01 mm off the contact centre: the carried joint
+        // must not follow the seated ball.
+        let moved = [0.01, 0.0, 10.0];
+        for (arm, what) in [
+            (arm(seat, seat), "seat on the contact centre"),
+            (arm(moved, seat), "seat moved 0.01 mm"),
+        ] {
+            let drawn = lower(&arm);
+            let head = arm.head.as_ref().expect("a head");
+            let k = head.joint_mm;
+            let n = unit();
+            // The ball first, its axis parallel to u.
+            let ball = &drawn[0];
+            assert_eq!(ball.segment_kind, SupportSegmentKind::ContactSphere, "{what}");
+            let (centre, axis) = ball
+                .sphere_geometry
+                .as_ref()
+                .and_then(crate::SphereGeometry::tip_authority)
+                .expect("a tip ball");
+            for i in 0..3 {
+                assert!((axis[i].get() - n[i]).abs() < 1e-12, "{what}: ball axis {axis:?}");
+            }
+            let centre = point(centre);
+            // The joint sphere sits AT the carried K, radius r_K.
+            let joint_at = drawn
+                .iter()
+                .position(|p| p.segment_kind == SupportSegmentKind::JointSphere)
+                .expect("a joint sphere");
+            let joint = &drawn[joint_at];
+            assert!((joint.start_radius_mm.get() - head.joint_radius_mm).abs() < 1e-12);
+            let drawn_k = point(
+                joint
+                    .sphere_geometry
+                    .as_ref()
+                    .and_then(crate::SphereGeometry::joint_center)
+                    .expect("a joint centre"),
+            );
+            assert_eq!(drawn_k, k, "{what}: the joint is the carried K");
+            // The head's taper and member spans end exactly at K.
+            let neck = &drawn[1..joint_at];
+            assert!(!neck.is_empty());
+            assert_eq!(neck[0].segment_kind, SupportSegmentKind::ContactTaper);
+            // (On the ball centre, or on the plane through it where the raster
+            // seat puts the centre a rounding under the plane.)
+            for i in 0..3 {
+                assert!(
+                    (point(neck[0].start_mm)[i] - centre[i]).abs() < 1e-9,
+                    "{what}: the head starts off the ball"
+                );
+            }
+            assert!(neck[1..]
+                .iter()
+                .all(|p| p.segment_kind == SupportSegmentKind::Member));
+            assert_eq!(point(neck.last().expect("a neck").end_mm), k, "{what}");
+            // The post: Member records from K to the base.
+            let post = &drawn[joint_at + 1..];
+            assert!(post.iter().all(|p| p.segment_kind == SupportSegmentKind::Member));
+            assert_eq!(point(post[0].start_mm), k, "{what}");
+            assert_eq!(point(post.last().expect("a post").end_mm), arm.base_mm, "{what}");
+            // The seat trim cuts no head piece.
+            let bite = tip_shaft_seat_bites(std::slice::from_ref(&arm), &layers())
+                .expect("a valid request")[0]
+                .expect("measured")
+                .bite_mm;
+            assert!(bite.abs() < 1e-12, "{what}: the trim bites the head: {bite}");
+            // The counters: one head, stand-off g (the joint has not grown),
+            // none drawn straight.
+            let lowering =
+                lower_sweep_arms(std::slice::from_ref(&arm), frame(), &layers(), 100_000, 1 << 30)
+                    .expect("a valid request");
+            assert_eq!(lowering.tips_headed, 1, "{what}");
+            assert_eq!(lowering.heads_drawn_straight, 0, "{what}");
+            assert_eq!(lowering.head_standoff_mm.len(), 1);
+            assert!(
+                (lowering.head_standoff_mm[0] - GAP_MM).abs() < 1e-9,
+                "{what}: stand-off {}",
+                lowering.head_standoff_mm[0]
+            );
+            assert_eq!(lowering.head_stalk_mm.len(), 1);
+            assert!(lowering.head_stalk_mm[0].is_finite());
+        }
+    }
+
+    #[test]
+    fn a_head_that_cannot_be_drawn_is_drawn_straight_and_counted() {
+        let seat = [0.0, 0.0, 10.0];
+        let mut broken = arm(seat, seat);
+        broken.head.as_mut().expect("a head").joint_mm[0] = f64::NAN;
+        let lowering = lower_sweep_arms(&[broken], frame(), &layers(), 100_000, 1 << 30)
+            .expect("a valid request");
+        assert_eq!(lowering.tips_headed, 0);
+        assert_eq!(lowering.heads_drawn_straight, 1);
     }
 }
