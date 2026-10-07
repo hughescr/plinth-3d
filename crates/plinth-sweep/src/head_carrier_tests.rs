@@ -878,3 +878,113 @@ fn the_lip_seat_pass_never_re_lands_a_headed_arm_on_either_trigger() {
         assert_heads_honoured(&before, &tops, &struts, "lip seat");
     }
 }
+
+// ---------------------------------------------------------------------------
+// The head-first lane's two rulings of 2026-10-06: a head is planned at an
+// ESTIMATE of the final tip radius, and a head the final sizing grew across the
+// clearance is downgraded to the straight tip.
+// ---------------------------------------------------------------------------
+
+mod head_first_rulings {
+    use super::*;
+    use crate::heads::{
+        downgrade_grown_heads, planned_tip_radius_mm, HeadRule, TYPICAL_TIP_RADIUS_MM,
+    };
+
+    fn rule(max_radius_mm: f64) -> HeadRule {
+        HeadRule {
+            gap_mm: 0.3,
+            allowance_mm: 0.1,
+            cos_lean_max: 0.5373,
+            max_radius_mm,
+            typical_tip_radius_mm: TYPICAL_TIP_RADIUS_MM,
+            max_normal_z: -0.34,
+            layer_height_mm: H,
+            plate_z_mm: 0.0,
+        }
+    }
+
+    /// (a) The plan reads the estimate where the seat's own demand asks for
+    /// less, the demand where it asks for more, and falls back to the demand
+    /// where the estimate's joint would exceed the registered maximum radius.
+    #[test]
+    fn a_head_is_planned_at_the_larger_of_its_demand_and_the_corpus_estimate() {
+        let wide = rule(1.0);
+        assert!((planned_tip_radius_mm(0.05, &wide) - TYPICAL_TIP_RADIUS_MM).abs() < 1e-12);
+        assert!((planned_tip_radius_mm(0.21, &wide) - 0.21).abs() < 1e-12);
+        // A joint for r_t = 0.15 is 0.5486 mm: over a 0.5 mm maximum, so the
+        // demand's own radius is kept.
+        let narrow = rule(0.5);
+        assert!((planned_tip_radius_mm(0.05, &narrow) - 0.05).abs() < 1e-12);
+    }
+
+    /// (b) A joint whose final stand-off is under `g` goes back to the straight
+    /// tip; one that stands `g` off, and a straight arm, are untouched.
+    #[test]
+    fn a_head_the_final_sizing_grew_across_the_clearance_is_downgraded() {
+        let grid = grid();
+        // |DK| along u = 0.5 mm * 0.75 = 0.375 mm: a joint of 0.05 stands 0.325
+        // off (kept); a joint of 0.2204 stands 0.1546 off (grown).
+        let mut struts = vec![
+            headed(&grid, 0, 150, 150, 200, 190, 0.05),
+            headed(&grid, 1, 150, 160, 200, 190, 0.05),
+            straight(&grid, 2, 150, 170, 200, 0.05),
+        ];
+        // The tip's own radius stays 0.1 (the contact slot), the head slots
+        // are raised, and arm 1's joint slot grew.
+        for strut in &mut struts {
+            *strut.radius_mm.last_mut().expect("a ledger") = 0.1;
+        }
+        for slot in 191..200 {
+            struts[1].radius_mm[slot] = 0.18;
+        }
+        struts[1].radius_mm[190] = 0.2204;
+        let before = struts[0].clone();
+        let straight_before = struts[2].clone();
+        let downgraded = downgrade_grown_heads(&mut struts, &grid);
+        assert_eq!(downgraded, vec![1], "only the grown joint is downgraded");
+        assert_eq!(struts[0], before, "a joint that stands the gap off is untouched");
+        assert_eq!(struts[2], straight_before, "a straight arm is untouched");
+        let arm = &struts[1];
+        assert!(arm.head.is_none(), "the head is dropped");
+        assert_eq!(arm.landing, Landing::Plate, "the post keeps its landing");
+        assert_eq!(arm.k_bottom, 0);
+        assert!(
+            arm.radius_mm[190..].iter().all(|&radius| (radius - 0.1).abs() < 1e-12),
+            "above the post the head minimum falls back to the tip's own radius: {:?}",
+            &arm.radius_mm[188..]
+        );
+        assert!(arm.path.is_empty(), "a post in the seat's own column is straight");
+    }
+
+    /// (b) A leaned post keeps its base; its path becomes the straight chord
+    /// from the base cell to the seat cell, one cell per layer below the seat.
+    #[test]
+    fn a_downgraded_leaning_arm_is_drawn_on_the_chord_from_its_base_to_its_seat() {
+        let grid = grid();
+        let mut strut = straight(&grid, 0, 150, 150, 200, 0.05);
+        let seat = strut.cell;
+        // The post leans 20 columns over 191 layers, from col 130 up to the
+        // joint cell at col 148.
+        let post: Vec<u32> = (0..=190)
+            .map(|slot| cell_u32(grid.index(150, 130 + (slot * 18) / 190)))
+            .collect();
+        let base = post[0] as usize;
+        let joint_cell = post[190] as usize;
+        give_head(&mut strut, 190, joint_cell, Some(post));
+        *strut.radius_mm.last_mut().expect("a ledger") = 0.1;
+        strut.radius_mm[190] = 0.2204;
+        let mut struts = vec![strut];
+        assert_eq!(downgrade_grown_heads(&mut struts, &grid), vec![0]);
+        let arm = &struts[0];
+        assert!(arm.head.is_none());
+        assert_eq!(arm.base_cell(), base, "the base stays where the post landed");
+        assert_eq!(arm.cell, seat);
+        assert_eq!(arm.path.len(), arm.k_top - arm.k_bottom, "one cell per layer below the seat");
+        assert!(arm.is_leaned());
+        let cols: Vec<usize> = arm.path.iter().map(|&cell| grid.col_of(cell as usize)).collect();
+        assert_eq!(cols[0], 130);
+        assert!(cols.windows(2).all(|pair| pair[1] >= pair[0]), "monotone chord: {cols:?}");
+        assert!(cols[cols.len() - 1] >= 148, "the chord reaches the seat's side: {cols:?}");
+    }
+}

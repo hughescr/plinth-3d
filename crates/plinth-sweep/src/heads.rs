@@ -287,6 +287,11 @@ pub struct HeadsOutcome {
     /// The largest stand-off deficit below `g`, in mm, left after a joint
     /// grew: a WARNING quantity, zero when every joint stands `g` off.
     pub max_standoff_deficit_mm: f64,
+    /// Heads built at placement and DOWNGRADED to today's straight tip after
+    /// the final sizing, because the final tip radius grew the joint across
+    /// the clearance (stand-off below `g`): the member ids. See
+    /// [`downgrade_grown_heads`].
+    pub downgraded_after_sizing: Vec<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -311,6 +316,13 @@ pub fn skims(tip_radius_mm: f64, cos_x: f64, gap_mm: f64, allowance_mm: f64) -> 
     (gap_mm + tip_radius_mm) * (1.0 / cos_x - 1.0) > allowance_mm
 }
 
+/// The corpus p90 of a steep tip's final radius, mm: the planning prior behind
+/// [`HeadRule::typical_tip_radius_mm`] (measured on the v17 corpus,
+/// `articulation-build-plan.md`). DEBT: a measured prior, not a derived limit;
+/// it prunes the plan and decides no outcome, because the check after the final
+/// sizing ([`downgrade_grown_heads`]) does.
+pub const TYPICAL_TIP_RADIUS_MM: f64 = 0.15;
+
 /// The registered numbers the constructor reads.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HeadRule {
@@ -322,6 +334,12 @@ pub struct HeadRule {
     pub cos_lean_max: f64,
     /// The registered maximum tip radius: the joint may not exceed it.
     pub max_radius_mm: f64,
+    /// The tip radius a seat is planned at when its own demand asks for less:
+    /// the corpus p90 of a steep tip's final radius (about 0.15 mm,
+    /// `articulation-build-plan.md`). A PLANNING ESTIMATE that prunes and
+    /// never decides an outcome: the check after the final sizing
+    /// ([`downgrade_grown_heads`]) decides whether a head is kept.
+    pub typical_tip_radius_mm: f64,
     /// A face is admitted when its outward normal's `z` is below this
     /// ([`crate::tip_landing::SeatFaceRule::max_normal_z`]).
     pub max_normal_z: f64,
@@ -448,6 +466,104 @@ pub fn plan_head(req: &HeadRequest, rule: &HeadRule, grid: &Grid) -> Result<Head
         cos_lean_max: rule.cos_lean_max,
         cells,
     })
+}
+
+/// **The tip radius a head is planned at** (orchestrator ruling 2026-10-06,
+/// after the Cylinder watch: 9 of 28 joints planned at the 0.05 mm minimum grew
+/// across the seat plane when the final sizing gave the tip up to 0.28 mm).
+///
+/// `demand_lb_mm` is the lower bound the seat's own demand gives through the
+/// area law (the only per-seat figure placement has: later landers and peel
+/// events add load afterwards, so the final radius is never below it). The
+/// estimate is the larger of that and the corpus p90 of a steep tip's final
+/// radius ([`HeadRule::typical_tip_radius_mm`]), so a seat that covers little is
+/// still planned for the tip it usually ends with. Where the joint for the
+/// estimate would exceed the registered maximum radius, the lower bound is
+/// used (the head is still planned, and the check after the final sizing
+/// decides). A planning figure only: it never decides an outcome.
+#[must_use]
+pub fn planned_tip_radius_mm(demand_lb_mm: f64, rule: &HeadRule) -> f64 {
+    let estimate = demand_lb_mm.max(rule.typical_tip_radius_mm);
+    if estimate > demand_lb_mm
+        && solve_joint(estimate, rule.gap_mm, rule.cos_lean_max, rule.max_radius_mm).is_none()
+    {
+        return demand_lb_mm;
+    }
+    estimate
+}
+
+/// **Downgrade every head the final sizing grew across the clearance**
+/// (orchestrator ruling 2026-10-06). A head is frozen at placement and only
+/// its radii grow; when the final tip radius gives a joint whose stand-off
+/// from the seat plane, `(K - D)·u - r_K`, is below the gap `g`, the sphere
+/// stands inside the clearance and the file would draw a head that cuts the
+/// model. Such a member goes back to today's straight tip: the head is dropped,
+/// the post keeps its landing and its base (it is NOT re-routed), and the arm is
+/// drawn straight from its seat to that base. Its section above the joint falls
+/// back to the area law at the tip (the head minimum is gone with the head), and
+/// its path becomes the straight chord between the two cells. A head the
+/// ledger cannot draw (no joint slot) is dropped the same way.
+///
+/// One pass over `struts`, after the last sizing and before anything reads the
+/// finished field. Returns the downgraded members' ids, in id order.
+pub fn downgrade_grown_heads(struts: &mut [crate::SweepStrut], grid: &Grid) -> Vec<u32> {
+    let mut downgraded = Vec::new();
+    for strut in struts.iter_mut() {
+        let Some(head) = strut.head.as_ref() else {
+            continue;
+        };
+        if !crate::slenderness::live(strut) {
+            continue;
+        }
+        let along = vec3::dot(vec3::sub(head.joint_mm, head.contact_mm), head.unit);
+        let joint_slot = head.k_joint.checked_sub(strut.k_bottom);
+        let joint_radius = joint_slot.and_then(|slot| strut.radius_mm.get(slot).copied());
+        let grown = joint_radius.is_none_or(|radius| along - radius < head.gap_mm - 1e-9);
+        if !grown {
+            continue;
+        }
+        downgraded.push(strut.id);
+        strut.head = None;
+        let slots = strut.radius_mm.len();
+        let (Some(joint_slot), Some(&tip)) = (joint_slot, strut.radius_mm.last()) else {
+            continue;
+        };
+        for radius in strut.radius_mm.iter_mut().take(slots).skip(joint_slot) {
+            *radius = tip;
+        }
+        // The straight chord from the base cell to the seat cell, one entry per
+        // layer `k_bottom .. k_top` (the straight arm's own path convention).
+        let (base, seat) = (strut.base_cell(), strut.cell);
+        let span = strut.k_top.saturating_sub(strut.k_bottom);
+        if base == seat || span == 0 {
+            strut.path.clear();
+            continue;
+        }
+        let (base_row, base_col) = (grid.row_of(base), grid.col_of(base));
+        let (seat_row, seat_col) = (grid.row_of(seat), grid.col_of(seat));
+        strut.path = (0..span)
+            .map(|slot| {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "a slot index and a grid index are exact in f64"
+                )]
+                let t = slot as f64 / span as f64;
+                #[expect(
+                    clippy::cast_precision_loss,
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "an interpolation between two in-range grid indices, rounded back onto the grid"
+                )]
+                let at = |from: usize, to: usize| {
+                    (from as f64 + (to as f64 - from as f64) * t).round().max(0.0) as usize
+                };
+                let row = at(base_row, seat_row).min(grid.rows() - 1);
+                let col = at(base_col, seat_col).min(grid.cols() - 1);
+                u32::try_from(grid.index(row, col)).unwrap_or(u32::MAX)
+            })
+            .collect();
+    }
+    downgraded
 }
 
 /// One tip's question to [`placement_normals`].
@@ -1082,6 +1198,7 @@ mod constructor_tests {
             allowance_mm: allowance(),
             cos_lean_max: cos_lean(),
             max_radius_mm: 1.0,
+            typical_tip_radius_mm: 0.15,
             max_normal_z: -70.0_f64.to_radians().cos(),
             layer_height_mm: H,
             plate_z_mm,

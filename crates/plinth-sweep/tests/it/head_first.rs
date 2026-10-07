@@ -155,7 +155,20 @@ fn grade(name: &str, mesh: &Mesh) -> (usize, usize) {
         heads.placement_residual_deg_max,
     );
     assert!(heads.built > 0, "{name}: no head was built, so nothing is graded");
-    assert_eq!(headed.len(), heads.built, "{name}: every head built survives to the file");
+    // A head the final sizing grew across the clearance went back to the
+    // straight tip (orchestrator ruling 2026-10-06): built = kept + downgraded.
+    let downgraded = &heads.downgraded_after_sizing;
+    assert_eq!(
+        headed.len() + downgraded.len(),
+        heads.built,
+        "{name}: every head built is kept or downgraded after the sizing"
+    );
+    for &id in downgraded {
+        assert!(
+            plan.struts[id as usize].head.is_none(),
+            "{name}: downgraded member {id} still carries a head"
+        );
+    }
     let height = plan.layer_height_mm;
     let arms = arms_of(plan);
     for &index in &headed {
@@ -240,23 +253,21 @@ fn grade(name: &str, mesh: &Mesh) -> (usize, usize) {
     // (the joint is frozen at K and only grows; the deficit is a warning). A
     // head whose joint did not grow stands at least the final gap off.
     assert_eq!(emission.head_standoff_mm.len(), headed.len(), "{name}");
-    let mut grown = 0;
+    // Every head that is drawn stands the final gap off its seat plane,
+    // whatever its joint grew by: the grown ones were downgraded.
     for (&index, &stand_off) in headed.iter().zip(&emission.head_standoff_mm) {
-        let strut = &plan.struts[index];
-        let head = strut.head.as_ref().expect("headed");
-        let drawn_radius = strut.radius_mm[head.k_joint - strut.k_bottom];
-        let growth = (drawn_radius - head.joint_radius_mm).max(0.0);
-        grown += usize::from(growth > 1e-9);
         assert!(
-            stand_off >= GAP_MM - growth - 1e-9,
-            "{name}: arm {index}: drawn stand-off {stand_off} under the gap {GAP_MM} less the \
-             joint's growth {growth}"
+            stand_off >= GAP_MM - 1e-9,
+            "{name}: arm {index}: drawn stand-off {stand_off} under the gap {GAP_MM}"
         );
-        if growth <= 1e-9 {
-            assert!(stand_off >= GAP_MM - 1e-9, "{name}: arm {index}: stand-off {stand_off}");
-        }
     }
-    println!("{name}: {grown} of {} joints grown past their planned radius", headed.len());
+    assert_eq!(emission.joints_grown, 0, "{name}: no drawn joint is grown across the clearance");
+    println!(
+        "{name}: {} downgraded after sizing {:?}; {} kept",
+        downgraded.len(),
+        downgraded,
+        headed.len()
+    );
     (heads.built, headed.len())
 }
 

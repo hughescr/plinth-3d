@@ -3684,7 +3684,8 @@ fn print_sweep_disclosure(
         println!(
             "[sweep {model}] heads: {} built at placement on steep faces, {straight} kept a \
              straight tip ({reasons}); drawn {}; stalk mm {}; stand-off mm {} (gap {final_gap_mm}); \
-             joints grown {} (largest stand-off deficit {:.4} mm); necks wider than ball {}; \
+             joints grown {} (largest stand-off deficit {:.4} mm); downgraded after sizing: {}; \
+             necks wider than ball {}; \
              placement normal residual {:.3} deg max, {:.3} median; u against final footprint \
              normal {:.3} deg max, {:.3} median; lip-seat bites on headed arms {} (must be 0)",
             heads.built,
@@ -3693,6 +3694,7 @@ fn print_sweep_disclosure(
             spread(&emission.head_standoff_mm),
             emission.joints_grown,
             emission.max_standoff_deficit_mm,
+            heads.downgraded_after_sizing.len(),
             emission.head_necks_wider_than_ball,
             heads.placement_residual_deg_max,
             heads.placement_residual_deg_median,
@@ -3710,6 +3712,14 @@ fn print_sweep_disclosure(
             println!(
                 "[sweep {model}] WARNING heads: members that kept a straight tip, by reason: {}",
                 warned.join("; ")
+            );
+        }
+        if !heads.downgraded_after_sizing.is_empty() {
+            println!(
+                "[sweep {model}] WARNING heads: {} heads built at placement went back to a \
+                 straight tip after the final sizing grew the joint across the clearance: {:?}",
+                heads.downgraded_after_sizing.len(),
+                heads.downgraded_after_sizing
             );
         }
         if emission.heads_drawn_straight > 0 {

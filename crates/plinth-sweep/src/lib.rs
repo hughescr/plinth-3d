@@ -1719,6 +1719,7 @@ pub fn run_sweep_with_holes(
                     )
                     .cos_max_lean(),
                     max_radius_mm: policy.tip_radius_max_mm,
+                    typical_tip_radius_mm: heads::TYPICAL_TIP_RADIUS_MM,
                     max_normal_z: seat_face_rule.max_normal_z(),
                     layer_height_mm: height,
                     plate_z_mm: plate_z,
@@ -2768,6 +2769,12 @@ pub fn run_sweep_with_holes(
     // the max over events keeps out of the plate reaction by design (measured
     // 2026-09-29: the whole of the remaining gap on the Cylinder, 1.4625 mm²
     // over 8 reads, and the Sphere, 0.4950 mm² over 6).
+    // **A HEAD THE FINAL SIZING GREW ACROSS THE CLEARANCE GOES BACK TO THE
+    // STRAIGHT TIP** (orchestrator ruling 2026-10-06): after the last sizing and
+    // before anything reads the finished field, every head whose joint now
+    // stands less than the final gap off its seat plane is dropped (the post
+    // keeps its route; the arm is drawn straight) and counted in the heads line.
+    let heads_downgraded = heads::downgrade_grown_heads(&mut struts, &grid);
     landings.finished = landing_check::check_landings(&struts, height);
     landings.load_gap_mm2 =
         outcome.injected_load_mm2 - outcome.plate_reaction_mm2 - outcome.uncarried_load_mm2;
@@ -2957,6 +2964,7 @@ pub fn run_sweep_with_holes(
     report.counters.stranded_seats = greedy.stranded_seats;
     report.counters.island_hex_bound = greedy.island_hex_bound;
     greedy.heads.publish(&mut report.heads);
+    report.heads.downgraded_after_sizing = heads_downgraded;
 
     // ------------------------------------------------ what each tip seats INTO
     //

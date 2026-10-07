@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use crate::drain::DrainKeepOut;
 use crate::grid::Grid;
 use crate::heads::{
-    check_head, plan_head, placement_normals, Head, HeadCapsule, HeadCheckCtx, HeadRefusal,
+    check_head, plan_head, placement_normals, planned_tip_radius_mm, Head, HeadCapsule, HeadCheckCtx, HeadRefusal,
     HeadRequest, HeadRule, HeadsOutcome, PlacementBall, PlacementEnv,
 };
 use crate::lean::LeanLaw;
@@ -1677,6 +1677,12 @@ fn plan_seat_head(
     };
     let (clear, env) = env;
     let rule = env.rule;
+    // The head is planned at an ESTIMATE of the tip's final radius, not at the
+    // minimum its own demand allows: later landers and peel events grow the tip
+    // after placement, and a joint planned small stands across the clearance
+    // once it grows ([`planned_tip_radius_mm`]; the check after the final
+    // sizing decides what is kept).
+    let tip_radius_lb_mm = planned_tip_radius_mm(tip_radius_lb_mm, &rule);
     let Some(surface) = clear.surface.map(|surface| surface.0) else {
         return Err(Some(HeadRefusal::NoSurface));
     };
