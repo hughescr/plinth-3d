@@ -257,6 +257,58 @@ pub fn final_joint_radius_mm(tip_radius_mm: f64, head_length_mm: f64, cos_lean_m
     head_section_mm(tip_radius_mm, head_length_mm, cos_lean_max)
 }
 
+/// **The head drawn as a polyline of straight frusta that never goes under
+/// its section law** ([`head_section_mm`]): `(s, r)` knots from the contact
+/// centre (`s = 0`) to the joint (`s = length_mm`), where `s` is the distance
+/// along the head's axis from `D`.
+///
+/// The law `r³ = a(r + 4s)`, `a = r_t²/c`, is concave in `s` (its slope
+/// `dr/ds = 4a/(3r² − a)` falls as `r` grows; it is 2 at `s = 0`), so it lies
+/// on or under each of its tangents. The tangents at `s_i = L(i/3)³`,
+/// `i = 0..3`, are drawn, and the polyline runs through the two exact ends
+/// `(0, r_t/√c)` and `(L, r(L))` and the three points where consecutive
+/// tangents meet: at most four frusta, no steps, never narrower than the law,
+/// the ends exact (the last equals [`final_joint_radius_mm`], the ball's own
+/// radius). The cubic spacing puts the knots where the law bends most, next
+/// to the contact. A head of no length is the single point at the contact.
+#[must_use]
+pub fn head_polyline_mm(tip_radius_mm: f64, length_mm: f64, cos_lean_max: f64) -> Vec<[f64; 2]> {
+    const TANGENTS: usize = 4;
+    let start = head_section_mm(tip_radius_mm, 0.0, cos_lean_max);
+    if !(length_mm.is_finite() && length_mm > 0.0) {
+        return vec![[0.0, start]];
+    }
+    let a = tip_radius_mm * tip_radius_mm / cos_lean_max;
+    // The tangent points `(s, r, slope)`.
+    let tangents: Vec<[f64; 3]> = (0..TANGENTS)
+        .map(|index| {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a tangent index of at most 3 is exact in f64"
+            )]
+            let s = length_mm * (index as f64 / (TANGENTS - 1) as f64).powi(3);
+            let r = head_section_mm(tip_radius_mm, s, cos_lean_max);
+            [s, r, 4.0 * a / (3.0 * r * r - a)]
+        })
+        .collect();
+    let mut knots = vec![[0.0, start]];
+    for pair in tangents.windows(2) {
+        let (lower, upper) = (pair[0], pair[1]);
+        // The lines `r = r_i + m_i (s - s_i)` meet at `s`; it lies between
+        // the two tangent points for a concave law.
+        let slope_gap = lower[2] - upper[2];
+        let s = if slope_gap > 1.0e-12 {
+            ((upper[1] - lower[1]) + lower[2] * lower[0] - upper[2] * upper[0]) / slope_gap
+        } else {
+            0.5 * (lower[0] + upper[0])
+        }
+        .clamp(lower[0], upper[0]);
+        knots.push([s, lower[1] + lower[2] * (s - lower[0])]);
+    }
+    knots.push([length_mm, head_section_mm(tip_radius_mm, length_mm, cos_lean_max)]);
+    knots
+}
+
 /// The post's section at a `lever_mm` below the joint, over a ledger section
 /// `ledger_radius_mm`: `r³ = r_led²·r + (4r_t²/c)·lever`. The lever falls
 /// linearly from `g + r_K` at `K` to zero at the post's next hold.
@@ -1001,8 +1053,8 @@ pub fn check_head(
 #[cfg(test)]
 mod tests {
     use super::{
-        final_joint_radius_mm, head_section_mm, post_section_mm, section_radius_mm, solve_bend,
-        solve_joint, Head,
+        final_joint_radius_mm, head_polyline_mm, head_section_mm, post_section_mm,
+        section_radius_mm, solve_bend, solve_joint, Head,
     };
     use crate::{Landing, SeatFace, SweepStrut};
 
@@ -1060,6 +1112,47 @@ mod tests {
         // Monotone in the tip and in the length.
         assert!(final_joint_radius_mm(0.05, 1.0, c) < final_joint_radius_mm(0.06, 1.0, c));
         assert!(final_joint_radius_mm(0.05, 1.0, c) < final_joint_radius_mm(0.05, 1.5, c));
+    }
+
+    /// The drawn head (plan section B, L 1.344): the tangent polyline never
+    /// goes under the law, its ends are the law's own, and it is the plan's
+    /// five points (so four frusta) within 0.5 um.
+    #[test]
+    fn the_head_polyline_never_goes_under_the_law_and_its_ends_are_exact() {
+        let c = cos_lean();
+        let length = 1.344;
+        for tip in [0.05, 0.06, 0.115, 0.15] {
+            let knots = head_polyline_mm(tip, length, c);
+            assert_eq!(knots.len(), 5, "tip {tip}: {knots:?}");
+            assert_eq!(knots[0], [0.0, head_section_mm(tip, 0.0, c)]);
+            assert_eq!(knots[4], [length, head_section_mm(tip, length, c)]);
+            assert!(knots.windows(2).all(|w| w[0][0] < w[1][0] && w[0][1] < w[1][1]));
+            for step in 0..=1000 {
+                let s = length * f64::from(step) / 1000.0;
+                let at = knots
+                    .windows(2)
+                    .find(|w| s <= w[1][0])
+                    .map(|w| w[0][1] + (w[1][1] - w[0][1]) * (s - w[0][0]) / (w[1][0] - w[0][0]))
+                    .expect("s lies in the polyline");
+                let law = head_section_mm(tip, s, c);
+                assert!(at >= law - 1.0e-12, "tip {tip}, s {s}: {at} under the law {law}");
+            }
+        }
+        let thin = head_polyline_mm(0.05, length, c);
+        for (got, want) in thin.iter().zip([
+            [0.0, 0.068],
+            [0.012, 0.093],
+            [0.139, 0.162],
+            [0.720, 0.253],
+            [1.344, 0.298],
+        ]) {
+            assert!(
+                (got[0] - want[0]).abs() < 5.0e-4 && (got[1] - want[1]).abs() < 5.0e-4,
+                "{got:?} against the plan's {want:?}"
+            );
+        }
+        // No length: only the contact point.
+        assert_eq!(head_polyline_mm(0.05, 0.0, c).len(), 1);
     }
 
     #[test]
@@ -1232,9 +1325,9 @@ mod tests {
             joint_mm: [0.0, 0.0, -0.52],
             joint_radius_mm: 0.22,
             gap_mm: 0.3,
-            profile_mm: vec![0.07, 0.06],
+            profile_knots_mm: vec![[0.0, 0.07], [0.52, 0.22]],
         };
-        assert_eq!(payload.profile_mm.len(), 2);
+        assert_eq!(payload.profile_knots_mm.len(), 2);
     }
 
     /// Computed by the code of `dffb6f3`, before heads existed, for the two

@@ -113,6 +113,7 @@ pub struct SweepEmission {
     pub tips_headed: usize,
     pub heads_drawn_straight: usize,
     pub head_necks_wider_than_ball: usize,
+    pub head_neck_ratio: Vec<f64>,
     pub head_stalk_mm: Vec<f64>,
     pub head_standoff_mm: Vec<f64>,
     /// Joints the final tip radius grew past the radius the head was planned
@@ -227,6 +228,7 @@ pub fn to_primitives(
         tips_headed,
         heads_drawn_straight,
         head_necks_wider_than_ball,
+        head_neck_ratio,
         head_stalk_mm,
         head_standoff_mm,
     } = lower_sweep_arms(
@@ -267,6 +269,7 @@ pub fn to_primitives(
         tips_headed,
         heads_drawn_straight,
         head_necks_wider_than_ball,
+        head_neck_ratio,
         head_stalk_mm,
         head_standoff_mm,
         joints_grown: raised.joints_grown,
@@ -1043,14 +1046,16 @@ pub(crate) fn sweep_arm(
 /// [`drawn_ends`] and [`drawn_post_ends`] return (`plate_z + k·h`), so the
 /// conversion is the identity. `r_K` is the LEDGER radius at `k_joint`, which
 /// the down-sweep keeps at or above the planned one. The head's section is
-/// [`crate::heads::head_section_mm`] at the mid-points of `n = k_top −
-/// k_joint` equal parts from `K` to `D` (index 0 next to the joint), at the
-/// final tip radius: one law with two readers, so the file never reads the
-/// per-layer ledger here.
+/// [`crate::heads::head_polyline_mm`]: the tangent polyline of the section
+/// law ([`crate::heads::head_section_mm`]) at the final tip radius over the
+/// measured `|DK|`, as `(s, r)` knots from `D` to `K` (one law with two
+/// readers, so the file never reads the per-layer ledger here). It is never
+/// under the law and ends at the law's own value at `K`, the joint's radius.
 pub(crate) fn head_payload(strut: &crate::SweepStrut) -> Option<plinth_support::SweepHead> {
     // A head given up after the final sizing is drawn as the straight arm.
     let head = strut.head.as_ref().filter(|head| !head.drawn_straight)?;
-    let parts = strut.k_top.checked_sub(head.k_joint).filter(|n| *n > 0)?;
+    // A head that spans no layer is drawn straight.
+    strut.k_top.checked_sub(head.k_joint).filter(|n| *n > 0)?;
     let joint_slot = head.k_joint.checked_sub(strut.k_bottom)?;
     let joint_radius_mm = *strut.radius_mm.get(joint_slot)?;
     let r_t = strut.tip_radius_mm();
@@ -1058,23 +1063,14 @@ pub(crate) fn head_payload(strut: &crate::SweepStrut) -> Option<plinth_support::
         .map(|axis| (head.joint_mm[axis] - head.contact_mm[axis]).powi(2))
         .sum::<f64>()
         .sqrt();
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "a head's section count is a handful of layers, exact in f64"
-    )]
-    let profile_mm = (0..parts)
-        .map(|index| {
-            let from_joint = (index as f64 + 0.5) * length / parts as f64;
-            crate::heads::head_section_mm(r_t, length - from_joint, head.cos_lean_max)
-        })
-        .collect();
+    let profile_knots_mm = crate::heads::head_polyline_mm(r_t, length, head.cos_lean_max);
     Some(plinth_support::SweepHead {
         contact_mm: head.contact_mm,
         unit: head.unit,
         joint_mm: head.joint_mm,
         joint_radius_mm,
         gap_mm: head.gap_mm,
-        profile_mm,
+        profile_knots_mm,
     })
 }
 
