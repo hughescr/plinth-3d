@@ -115,6 +115,16 @@ pub struct SweepEmission {
     pub head_necks_wider_than_ball: usize,
     pub head_stalk_mm: Vec<f64>,
     pub head_standoff_mm: Vec<f64>,
+    /// Joints the final tip radius grew past the radius the head was planned
+    /// with (the joint sphere is drawn at the ledger radius, and the planned
+    /// `K` is frozen, so a grown joint stands closer to the seat plane than
+    /// the gap), and the largest stand-off deficit below the gap that left,
+    /// in mm. Both zero when no joint grew. These are the run's
+    /// `report.heads.joints_grown` and `max_standoff_deficit_mm`, measured
+    /// here because only the adapter sees the final ledger and the head
+    /// together.
+    pub joints_grown: usize,
+    pub max_standoff_deficit_mm: f64,
     /// Members whose drawn profile the JUNCTION CLAUSE raised above their
     /// ledger, from the junction down to their root, because a thicker branch
     /// joins them. A brace raises nothing since 2026-10-03 (rule R2), so this
@@ -254,6 +264,8 @@ pub fn to_primitives(
         head_necks_wider_than_ball,
         head_stalk_mm,
         head_standoff_mm,
+        joints_grown: raised.joints_grown,
+        max_standoff_deficit_mm: raised.max_standoff_deficit_mm,
         members_raised_to_a_branch: raised.members,
         arm_junctions_inverted_in_ledger: raised.arm_ledger_inversions,
         load_steps_tapered: raised.load_steps_tapered,
@@ -405,11 +417,17 @@ pub(crate) fn load_step_cones(
             let wide = *ledger.get(booked_slot)?;
             // The contact slot is the last one; the cone stops under it.
             let contact = ledger.len().saturating_sub(1);
+            // A headed host's cone never rises above its joint slot: the
+            // joint sphere is the transition, and the head above it is sized
+            // by its own law.
+            let ceiling = host.head.as_ref().map_or(contact, |head| {
+                contact.min(head.k_joint.saturating_sub(host.k_bottom) + 1)
+            });
             let mut top = None;
             for (slot, &ledger_radius) in ledger
                 .iter()
                 .enumerate()
-                .take(contact)
+                .take(ceiling)
                 .skip(booked_slot + 1)
             {
                 #[expect(
@@ -432,8 +450,13 @@ pub(crate) fn load_step_cones(
 }
 
 /// What the junction clause did to the drawn profiles.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct JunctionRaises {
+    /// Headed members whose joint the final tip radius grew, and the largest
+    /// stand-off deficit below the gap that left, mm
+    /// ([`SweepEmission::joints_grown`]).
+    joints_grown: usize,
+    max_standoff_deficit_mm: f64,
     /// Members whose drawn profile was raised anywhere.
     members: usize,
     /// Load steps drawn as a cone ([`LoadStepTaper`]), and the layers the
@@ -603,7 +626,11 @@ pub(crate) fn drawn_profiles(
                 continue;
             };
             let host_profile = &mut profiles[parent];
-            let top = slot.min(host_profile.len().saturating_sub(1));
+            let mut top = slot.min(host_profile.len().saturating_sub(1));
+            // A raise never reaches above a headed host's joint slot.
+            if let Some(head) = &struts[parent].head {
+                top = top.min(head.k_joint.saturating_sub(struts[parent].k_bottom));
+            }
             for radius in host_profile.iter_mut().take(top + 1) {
                 if *radius < branch_radius {
                     *radius = branch_radius;
@@ -621,6 +648,7 @@ pub(crate) fn drawn_profiles(
         load_steps_tapered: cones.len(),
         load_step_layers_raised,
         arm_ledger_inversions,
+        ..JunctionRaises::default()
     };
     (profiles, summary)
 }
@@ -769,7 +797,9 @@ pub(crate) fn planned_line_offset(
     {
         return None;
     }
-    let (seat, base) = drawn_ends(grid, 0.0, layer_height_mm, strut);
+    // The line measured is the POST's: from the head's joint for a headed
+    // member, from the seat otherwise.
+    let (seat, base) = drawn_post_ends(grid, 0.0, layer_height_mm, strut);
     let arm = sweep_arm(strut, seat, base, None, Vec::new());
     drawn_line_offset(flare, &arm, 0.0)
 }
@@ -778,7 +808,8 @@ pub(crate) fn planned_line_offset(
 /// layer between its base and its seat).
 #[must_use]
 pub(crate) fn offset_at(offset: &LineOffset, strut: &crate::SweepStrut, layer: usize) -> [f64; 3] {
-    let span = strut.k_top.saturating_sub(strut.k_bottom);
+    // The line spans the POST: base to the joint layer for a headed member.
+    let span = strut.post_top_layer().saturating_sub(strut.k_bottom);
     #[expect(
         clippy::cast_precision_loss,
         reason = "layer indices bounded by the plan's own layer count are exact in f64"
@@ -800,8 +831,24 @@ pub(crate) fn sweep_arm(
     seat_mm: [f64; 3],
     base_mm: [f64; 3],
     seat_face_point_mm: Option<[f64; 3]>,
-    profile: Vec<f64>,
+    mut profile: Vec<f64>,
 ) -> SweepArm {
+    // A HEADED member: the arm's ball is seated along the head's own unit
+    // against the plane `(D, u)`, the head is drawn from the carried payload,
+    // and the radius profile is the POST only (ledger slots `k_bottom ..=
+    // k_joint`).
+    let head = head_payload(strut);
+    let (seat_normal_mm, seat_face_point_mm) = match &head {
+        Some(head) => {
+            let post_slots = strut
+                .post_top_layer()
+                .saturating_sub(strut.k_bottom)
+                .saturating_add(1);
+            profile.truncate(post_slots);
+            (head.unit, Some(head.contact_mm))
+        }
+        None => (strut.seat_normal, seat_face_point_mm),
+    };
     SweepArm {
         seat_mm,
         base_mm,
@@ -820,7 +867,7 @@ pub(crate) fn sweep_arm(
         // the law's FULL depth and TRIMS the ball and the first shaft
         // segment to this face's plane. The point moves with the seat,
         // so it stays on the same plane.
-        seat_normal_mm: strut.seat_normal,
+        seat_normal_mm,
         seat_face_point_mm,
         landing: match strut.landing {
             Landing::Plate => SweepArmLanding::Plate,
@@ -831,9 +878,50 @@ pub(crate) fn sweep_arm(
         // and the area law place seats into the model and is
         // unchanged.
         seats_into_model: strut.kind.seats_on_model(),
-        // The hookup (a later lane) carries a strut's head across here.
-        head: None,
+        head,
     }
+}
+
+/// **The drawing payload of a headed member** ([`plinth_support::SweepHead`]),
+/// or `None` for a straight one (or one whose head does not fit its layers).
+///
+/// The contact `D`, the unit `u` and the joint `K` are the strut's own
+/// ([`crate::heads::Head`]), which are already in the drawn frame: the frame
+/// [`drawn_ends`] and [`drawn_post_ends`] return (`plate_z + k·h`), so the
+/// conversion is the identity. `r_K` is the LEDGER radius at `k_joint`, which
+/// the down-sweep keeps at or above the planned one. The head's section is
+/// [`crate::heads::head_section_mm`] at the mid-points of `n = k_top −
+/// k_joint` equal parts from `K` to `D` (index 0 next to the joint), at the
+/// final tip radius: one law with two readers, so the file never reads the
+/// per-layer ledger here.
+pub(crate) fn head_payload(strut: &crate::SweepStrut) -> Option<plinth_support::SweepHead> {
+    let head = strut.head.as_ref()?;
+    let parts = strut.k_top.checked_sub(head.k_joint).filter(|n| *n > 0)?;
+    let joint_slot = head.k_joint.checked_sub(strut.k_bottom)?;
+    let joint_radius_mm = *strut.radius_mm.get(joint_slot)?;
+    let r_t = strut.tip_radius_mm();
+    let length = (0..3)
+        .map(|axis| (head.joint_mm[axis] - head.contact_mm[axis]).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a head's section count is a handful of layers, exact in f64"
+    )]
+    let profile_mm = (0..parts)
+        .map(|index| {
+            let from_joint = (index as f64 + 0.5) * length / parts as f64;
+            crate::heads::head_section_mm(r_t, length - from_joint, head.cos_lean_max)
+        })
+        .collect();
+    Some(plinth_support::SweepHead {
+        contact_mm: head.contact_mm,
+        unit: head.unit,
+        joint_mm: head.joint_mm,
+        joint_radius_mm,
+        gap_mm: head.gap_mm,
+        profile_mm,
+    })
 }
 
 fn arms_and_junction_raises(plan: &SweepPlan) -> (Vec<SweepArm>, JunctionRaises) {
@@ -889,7 +977,14 @@ fn arms_and_junction_raises(plan: &SweepPlan) -> (Vec<SweepArm>, JunctionRaises)
                 (strut.landing == Landing::Plate
                     && strut.kind != crate::StrutKind::Brace
                     && strut.is_leaned())
-                .then(|| drawn_line_offset(&flare, &build(strut, *followed, Vec::new()), plate))
+                .then(|| {
+                    let mut arm = build(strut, *followed, Vec::new());
+                    // The line measured is the POST's, from the head's joint.
+                    if strut.head.is_some() {
+                        arm.seat_mm = drawn_post_ends(grid, plate, height, strut).0;
+                    }
+                    drawn_line_offset(&flare, &arm, plate)
+                })
                 .flatten()
             })
             .collect(),
@@ -907,8 +1002,36 @@ fn arms_and_junction_raises(plan: &SweepPlan) -> (Vec<SweepArm>, JunctionRaises)
         .zip(followed)
         .map(|((strut, profile), followed)| build(strut, followed, std::mem::take(profile)))
         .collect();
-    (arms, raised)
+    (arms, joints_grown_of(&plan.struts, raised))
 }
+
+/// **Where a head's joint grew** (the lowering draws the joint at the ledger
+/// radius at `k_joint`, and `K` is frozen at the planned radius): for each
+/// headed member the drawn stand-off `(K − D)·u − r_K,eff` against the gap.
+/// Below the gap, the growth `r_K,eff − r_K,planned` is the deficit; it counts
+/// one grown joint and raises the largest deficit. One pass over the struts.
+fn joints_grown_of(struts: &[crate::SweepStrut], mut raised: JunctionRaises) -> JunctionRaises {
+    for strut in struts {
+        let (Some(head), Some(payload)) = (&strut.head, head_payload(strut)) else {
+            continue;
+        };
+        let along: f64 = (0..3)
+            .map(|axis| (head.joint_mm[axis] - head.contact_mm[axis]) * head.unit[axis])
+            .sum();
+        let standoff = along - payload.joint_radius_mm;
+        if standoff < head.gap_mm - GAP_EPSILON_MM {
+            raised.joints_grown += 1;
+            raised.max_standoff_deficit_mm = raised
+                .max_standoff_deficit_mm
+                .max(payload.joint_radius_mm - head.joint_radius_mm);
+        }
+    }
+    raised
+}
+
+/// Below this a stand-off that falls short of the gap is rounding, not a grown
+/// joint: far under any radius this engine draws.
+const GAP_EPSILON_MM: f64 = 1e-9;
 
 #[cfg(test)]
 mod tests {

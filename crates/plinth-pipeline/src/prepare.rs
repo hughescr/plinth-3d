@@ -2457,6 +2457,7 @@ fn sweep_and_emit(
         sweep_seconds,
         inputs.printer,
         &sweep_layers,
+        policy.final_clearance_gap_mm,
     );
 
     if stop_after == Some(StageStop::Support) {
@@ -2598,6 +2599,7 @@ fn print_sweep_disclosure(
     sweep_seconds: f64,
     printer: &PrinterProfile,
     layers: &plinth_core::LayerPlan,
+    final_gap_mm: f64,
 ) {
     let report = &plan.report;
     println!("[sweep {model}] {}", report.render_disclosure());
@@ -3657,6 +3659,60 @@ fn print_sweep_disclosure(
                 "[sweep {model}] WARNING footprint normal: member {strut}'s contact disc, graded \
                  on the ball it is drawn with, has {:.1} % of its samples on its face",
                 fraction * 100.0
+            );
+        }
+    }
+    // ARTICULATED HEADS (Craig 2026-10-06): built at placement on steep faces,
+    // the seats that kept a straight tip and why, and what the file drew.
+    // Printed whether or not any head was built, so a zero is a measurement.
+    {
+        let heads = &report.heads;
+        let spread = |values: &[f64]| {
+            plinth_support::SweepLowering::distribution(values).map_or_else(
+                || "n/a".to_owned(),
+                |(min, p50, max)| format!("{min:.3}/{p50:.3}/{max:.3}"),
+            )
+        };
+        let straight: usize = heads.refusals.values().map(Vec::len).sum();
+        let reasons = heads
+            .refusals
+            .iter()
+            .filter(|(_, ids)| !ids.is_empty())
+            .map(|(reason, ids)| format!("{reason:?}: {} {ids:?}", ids.len()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "[sweep {model}] heads: {} built at placement on steep faces, {straight} kept a \
+             straight tip ({reasons}); drawn {}; stalk mm {}; stand-off mm {} (gap {final_gap_mm}); \
+             joints grown {} (largest stand-off deficit {:.4} mm); necks wider than ball {}; u \
+             against final footprint normal {:.3} deg max, {:.3} median",
+            heads.built,
+            emission.tips_headed,
+            spread(&emission.head_stalk_mm),
+            spread(&emission.head_standoff_mm),
+            emission.joints_grown,
+            emission.max_standoff_deficit_mm,
+            emission.head_necks_wider_than_ball,
+            heads.final_normal_residual_deg_max,
+            heads.final_normal_residual_deg_median,
+        );
+        let warned = heads
+            .refusals
+            .iter()
+            .filter(|(_, ids)| !ids.is_empty())
+            .map(|(reason, ids)| format!("{reason:?} {ids:?}"))
+            .collect::<Vec<_>>();
+        if !warned.is_empty() {
+            println!(
+                "[sweep {model}] WARNING heads: members that kept a straight tip, by reason: {}",
+                warned.join("; ")
+            );
+        }
+        if emission.heads_drawn_straight > 0 {
+            println!(
+                "[sweep {model}] WARNING heads: {} carried heads could not be drawn and were \
+                 drawn straight",
+                emission.heads_drawn_straight
             );
         }
     }

@@ -33,6 +33,7 @@ mod flank_relief;
 mod footprint_moves_hold_the_rules;
 mod footprint_normal;
 mod frame_ledger;
+mod head_hookup;
 mod head_join;
 mod lattice_align;
 mod lip_seat_sized;

@@ -1,0 +1,431 @@
+//! **A headed strut is sized and drawn correctly** (articulated heads, lane
+//! `head-hookup`, Craig 2026-10-06; `heads.rs` carries the law).
+//!
+//! A hand-built field: one headed arm (`u` 41.3 deg from straight down, tip
+//! radius 0.05 mm, a straight post from the joint to the plate) and one branch
+//! that lands on the post below the joint. It runs through
+//! `down_sweep::run` (the per-layer head minimum), then `adapter::arms_of`
+//! (the drawing payload) and `to_primitives` (the lowering). There is no
+//! producer of heads yet, so the head is built here by hand, from the same law
+//! the up-sweep will use.
+//!
+//! Sabotages, each turning its test red:
+//!
+//! * the head minimum applied at the contact slot too: the tip rises
+//!   (`the_tip_keeps_the_pure_area_law`);
+//! * the load-step ceiling at the joint removed: the cone climbs the head
+//!   (`a_load_step_cone_ends_at_the_joint`);
+//! * the joint never grown past its planned radius
+//!   (`a_fatter_tip_grows_the_joint_and_the_deficit_is_reported`);
+//! * the radius profile not cut to the post
+//!   (`a_headed_strut_is_sized_and_drawn_as_a_head`).
+
+use plinth_core::{m0_constants, Finite, LayerPlan, PositiveFinite};
+use plinth_mesh::make_lonely_peak;
+use plinth_support::BuildFrame;
+use plinth_sweep::down_sweep::{self, InsertionPolicy, SizingPolicy, UnrootedColumns};
+use plinth_sweep::heads::{head_section_mm, solve_joint, Head};
+use plinth_sweep::{
+    arms_of, to_primitives, DrainKeepOut, Landing, SeatFace, StrutKind, SweepEmission, SweepPlan,
+    SweepPolicy, SweepStrut,
+};
+
+use crate::harness;
+
+const LIFT_MM: f64 = 5.0;
+const MAX_PRIMITIVES: usize = 100_000;
+const MAX_PRIMITIVE_BYTES: usize = 1 << 26;
+/// `cos` of the lean law's largest angle, the envelope the plan values use.
+const GAP_MM: f64 = 0.3;
+const PHI_DEG: f64 = 41.3;
+/// The seat layer of the headed arm, and the layer the branch lands on.
+const K_TOP: usize = 60;
+const LANDING_LAYER: usize = 47;
+
+fn cos_lean() -> f64 {
+    57.5_f64.to_radians().cos()
+}
+
+struct Fixture {
+    plan: SweepPlan,
+    layers: LayerPlan,
+    sizing: SizingPolicy,
+    slices: Vec<Vec<plinth_support::perception::SliceSolid>>,
+    /// The two struts before the down-sweep: the headed arm, the branch.
+    struts: Vec<SweepStrut>,
+    k_joint: usize,
+    planned_joint_mm: f64,
+}
+
+fn cell_of(grid: &plinth_sweep::grid::Grid, x: f64, y: f64) -> u32 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a coordinate inside the grid"
+    )]
+    let (col, row) = (
+        grid.col_coord(x).floor() as usize,
+        grid.row_coord(y).floor() as usize,
+    );
+    u32::try_from(grid.index(row, col)).expect("a small grid")
+}
+
+/// The headed arm and its branch on a real plan's grid and frame.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "layer counts and offsets of a small fixture"
+)]
+fn fixture(headed: bool) -> Fixture {
+    let mesh = make_lonely_peak().expect("the lonely peak fixture");
+    let (min_z, max_z) = harness::z_span(&mesh);
+    let plate_z = min_z - LIFT_MM;
+    let h = *m0_constants()
+        .expect("registry")
+        .evidence()
+        .layer_height_default_mm()
+        .value();
+    let count = (((max_z - plate_z) / h).ceil() as usize).saturating_add(1);
+    let layers = LayerPlan::new(plate_z, vec![h; count]).expect("a uniform layer plan");
+    let policy = SweepPolicy::from_registry().expect("the registry");
+    let mut plan = plinth_sweep::run_sweep(&mesh, &layers, &policy).expect("the sweep emits");
+    let grid = plan.grid;
+
+    let c = cos_lean();
+    let r_t = policy.tip_radius_min_mm;
+    let joint = solve_joint(r_t, GAP_MM, c, policy.tip_radius_max_mm).expect("a thin tip");
+    let phi = PHI_DEG.to_radians();
+    let unit = [phi.sin(), 0.0, -phi.cos()];
+    // K stands over the centre of a cell, so the straight post is exactly
+    // under it.
+    let (row, col) = (grid.rows() / 2, grid.cols() / 2);
+    let k_xy = [grid.center_x_mm(col), grid.center_y_mm(row)];
+    let contact = [
+        k_xy[0] - joint.length_mm * unit[0],
+        k_xy[1],
+        plate_z + K_TOP as f64 * h,
+    ];
+    let joint_mm = [
+        contact[0] + joint.length_mm * unit[0],
+        contact[1],
+        contact[2] + joint.length_mm * unit[2],
+    ];
+    let k_joint = ((joint_mm[2] - plate_z) / h).floor() as usize;
+    let joint_cell = cell_of(&grid, joint_mm[0], joint_mm[1]);
+    let seat_cell = cell_of(&grid, contact[0], contact[1]);
+    let head_cells: Vec<u32> = (k_joint + 1..=K_TOP)
+        .map(|layer| {
+            let z = plate_z + layer as f64 * h;
+            let t = ((z - contact[2]) / unit[2]).clamp(0.0, joint.length_mm);
+            cell_of(&grid, contact[0] + t * unit[0], contact[1])
+        })
+        .collect();
+    assert_eq!(head_cells.last(), Some(&seat_cell));
+    let head = Head {
+        contact_mm: contact,
+        unit,
+        joint_mm,
+        k_joint,
+        joint_cell,
+        joint_radius_mm: joint.joint_radius_mm,
+        planned_tip_radius_mm: r_t,
+        gap_mm: GAP_MM,
+        cos_lean_max: c,
+        cells: head_cells.clone(),
+    };
+    let mut path = vec![joint_cell; k_joint + 1];
+    path.extend_from_slice(&head_cells);
+    let thickened: Vec<f64> = (0..count)
+        .map(|layer| if layer <= LANDING_LAYER { 1.0 } else { 0.0 })
+        .collect();
+    let host = SweepStrut {
+        id: 0,
+        cell: seat_cell as usize,
+        center_mm: [contact[0], contact[1]],
+        kind: StrutKind::Arm,
+        min_radius_mm: 0.0,
+        thickened_mm: thickened,
+        seat_on_strut: None,
+        k_top: K_TOP,
+        k_bottom: 0,
+        landing: Landing::Plate,
+        interior: false,
+        radius_mm: Vec::new(),
+        carried_mm2: Vec::new(),
+        covered_demand: Vec::new(),
+        inserted_by_load: false,
+        path: if headed { path } else { Vec::new() },
+        straight_fallback: None,
+        fallback_path: Vec::new(),
+        head: headed.then_some(head),
+        seat_face: SeatFace::default(),
+        seat_normal: [0.0; 3],
+    };
+    // The branch: an arm eight cells off the post, landing on it below the joint.
+    let branch_cell = grid.index(row, col + 8);
+    let branch = SweepStrut {
+        id: 1,
+        cell: branch_cell,
+        center_mm: [grid.center_x_mm(col + 8), grid.center_y_mm(row)],
+        kind: StrutKind::Arm,
+        min_radius_mm: 0.0,
+        thickened_mm: Vec::new(),
+        seat_on_strut: None,
+        k_top: LANDING_LAYER + 6,
+        k_bottom: LANDING_LAYER,
+        landing: Landing::Strut {
+            id: 0,
+            layer: LANDING_LAYER,
+        },
+        interior: false,
+        radius_mm: Vec::new(),
+        carried_mm2: Vec::new(),
+        covered_demand: Vec::new(),
+        inserted_by_load: false,
+        path: Vec::new(),
+        straight_fallback: None,
+        fallback_path: Vec::new(),
+        head: None,
+        seat_face: SeatFace::default(),
+        seat_normal: [0.0; 3],
+    };
+    plan.struts = Vec::new();
+    let sizing = SizingPolicy {
+        x_allowed: policy.x_allowed,
+        tip_radius_min_mm: policy.tip_radius_min_mm,
+        tip_radius_max_mm: policy.tip_radius_max_mm,
+        owner_growth_ceiling_mm: policy.owner_growth_ceiling_mm,
+        alpha: plinth_sweep::peel::alpha(policy.peel_field_mode),
+        lamina_reach_mm: policy.kappa * h,
+        straight_reach: policy.straight_reach,
+        tip_column_roots: true,
+        per_event: true,
+        handed_column_ledger: true,
+        layer_height_mm: h,
+        plate_z_mm: plate_z,
+    };
+    let slices = vec![Vec::new(); plan.layers];
+    Fixture {
+        plan,
+        layers,
+        sizing,
+        slices,
+        struts: vec![host, branch],
+        k_joint,
+        planned_joint_mm: joint.joint_radius_mm,
+    }
+}
+
+/// Run the down-sweep over `struts`, put them in the plan, and lower it.
+fn size_and_draw(
+    fx: &mut Fixture,
+    struts: Vec<SweepStrut>,
+) -> (Vec<SweepStrut>, Vec<plinth_support::SweepArm>, SweepEmission) {
+    let mut struts = struts;
+    down_sweep::run(
+        &fx.plan.grid,
+        &fx.slices,
+        &mut struts,
+        fx.sizing,
+        InsertionPolicy::disabled(),
+        &DrainKeepOut::none(),
+        &UnrootedColumns::none(),
+    );
+    fx.plan.struts = struts.clone();
+    let arms = arms_of(&fx.plan);
+    let frame = BuildFrame::new(
+        Finite::new(fx.plan.plate_z_mm).expect("a finite plate"),
+        PositiveFinite::new(LIFT_MM).expect("a positive lift"),
+    );
+    let emission = to_primitives(
+        &fx.plan,
+        frame,
+        &fx.layers,
+        MAX_PRIMITIVES,
+        MAX_PRIMITIVE_BYTES,
+    )
+    .expect("the lowering refuses only about the request");
+    (struts, arms, emission)
+}
+
+#[test]
+fn a_headed_strut_is_sized_and_drawn_as_a_head() {
+    let mut fx = fixture(true);
+    let struts = fx.struts.clone();
+    let (struts, arms, emission) = size_and_draw(&mut fx, struts);
+    let k_joint = fx.k_joint;
+    let c = cos_lean();
+    // (a) one head drawn; the radius profile is the post only.
+    assert_eq!(emission.tips_headed, 1, "the head was drawn as a head");
+    assert_eq!(emission.heads_drawn_straight, 0);
+    assert_eq!(
+        arms[0].radius_profile_mm.len(),
+        k_joint - struts[0].k_bottom + 1,
+        "the post's slots k_bottom..=k_joint, and not the head's"
+    );
+    let payload = arms[0].head.as_ref().expect("the arm carries its head");
+    let head = struts[0].head.as_ref().expect("the strut keeps its head");
+    assert_eq!(arms[0].seat_normal_mm, head.unit);
+    assert_eq!(arms[0].seat_face_point_mm, Some(head.contact_mm));
+    // (b) the head's profile is monotone, from the joint's side up to the
+    // contact, and starts about 1.364 r_t above the contact.
+    let r_t = struts[0].tip_radius_mm();
+    let n = k_joint.abs_diff(K_TOP);
+    assert_eq!(payload.profile_mm.len(), n);
+    assert!(
+        payload.profile_mm.windows(2).all(|w| w[0] >= w[1]),
+        "the section falls toward the contact: {:?}",
+        payload.profile_mm
+    );
+    let at_contact = *payload.profile_mm.last().expect("a profile");
+    let neck = r_t / c.sqrt();
+    assert!((neck / r_t - 1.364).abs() < 1e-3, "the neck starts at 1.364 r_t");
+    assert!(
+        at_contact >= neck && at_contact < 1.6 * neck,
+        "the section at the contact is {at_contact}, the neck {neck}"
+    );
+    assert!(
+        payload.profile_mm[0] <= payload.joint_radius_mm
+            && payload.profile_mm[0] > 0.8 * payload.joint_radius_mm,
+        "the profile reaches the joint: {:?} vs r_K {}",
+        payload.profile_mm,
+        payload.joint_radius_mm
+    );
+    // (c) the joint is at least the planned one and, with r_t unchanged, it
+    // stands exactly g off the seat plane.
+    assert!(payload.joint_radius_mm >= fx.planned_joint_mm);
+    assert_eq!(emission.joints_grown, 0);
+    assert!((emission.max_standoff_deficit_mm).abs() < 1e-12);
+    assert_eq!(emission.head_standoff_mm.len(), 1);
+    assert!(
+        (emission.head_standoff_mm[0] - GAP_MM).abs() < 1e-9,
+        "stand-off {} against the gap {GAP_MM}",
+        emission.head_standoff_mm[0]
+    );
+    // The ledger beside the law: the head layers read the head law, and the
+    // joint slot holds the joint.
+    let slot = |layer: usize| layer - struts[0].k_bottom;
+    assert!(struts[0].radius_mm[slot(k_joint)] >= fx.planned_joint_mm);
+    let h = fx.sizing.layer_height_mm;
+    for layer in k_joint + 1..K_TOP - 1 {
+        let z = fx.plan.plate_z_mm + layer as f64 * h;
+        let s = ((z - head.contact_mm[2]) / head.unit[2]).clamp(0.0, 0.52);
+        let law = head_section_mm(r_t, s, c);
+        assert!(
+            struts[0].radius_mm[slot(layer)] >= law - 1e-12,
+            "layer {layer} under the head law"
+        );
+    }
+    // The post is never narrower going down.
+    assert!(
+        struts[0].radius_mm[..slot(k_joint)]
+            .windows(2)
+            .all(|w| w[0] >= w[1] - 1e-12),
+        "the post narrows going down"
+    );
+}
+
+#[test]
+fn the_tip_keeps_the_pure_area_law() {
+    // (d) The tip slot is the ball and the contact: it reads the area law and
+    // nothing else, headed or not.
+    let mut fx = fixture(true);
+    let headed = fx.struts.clone();
+    let (headed, _, _) = size_and_draw(&mut fx, headed);
+    let mut fx = fixture(false);
+    let straight = fx.struts.clone();
+    let (straight, _, _) = size_and_draw(&mut fx, straight);
+    assert!(straight[0].tip_radius_mm() > 0.0);
+    assert!(
+        (headed[0].tip_radius_mm() - straight[0].tip_radius_mm()).abs() < 1e-15,
+        "the head minimum raised the tip: {} against the area law's {}",
+        headed[0].tip_radius_mm(),
+        straight[0].tip_radius_mm()
+    );
+    assert_eq!(headed[0].tip_radius_mm().to_bits(), 0.05_f64.to_bits());
+}
+
+#[test]
+fn a_load_step_cone_ends_at_the_joint() {
+    // (e) The branch lands on the post below the joint; its load step is
+    // drawn as a cone from the landing layer upward, and the cone stops at the
+    // joint slot instead of climbing the head.
+    let mut fx = fixture(true);
+    let struts = fx.struts.clone();
+    let (_, arms, emission) = size_and_draw(&mut fx, struts);
+    assert_eq!(emission.load_steps_tapered, 1, "the fixture draws one cone");
+    assert_eq!(
+        emission.load_step_layers_raised,
+        fx.k_joint - LANDING_LAYER,
+        "the cone raised the layers above the landing up to the joint, no higher"
+    );
+    // The joint slot is raised by the cone: it stands wider than the joint.
+    let post = &arms[0].radius_profile_mm;
+    assert!(post[fx.k_joint] > fx.planned_joint_mm);
+}
+
+#[test]
+fn a_fatter_tip_grows_the_joint_and_the_deficit_is_reported() {
+    // (f) The final tip radius is above the planned one: the joint grows with
+    // it (never capped), the stand-off falls under the gap by exactly the
+    // growth, and the report says so.
+    let mut fx = fixture(true);
+    let mut struts = fx.struts.clone();
+    struts[0].min_radius_mm = 0.10;
+    let (struts, arms, emission) = size_and_draw(&mut fx, struts);
+    let c = cos_lean();
+    let r_t = struts[0].tip_radius_mm();
+    assert!((r_t - 0.10).abs() < 1e-12, "the tip is the minimum, {r_t}");
+    let grown = solve_joint(r_t, GAP_MM, c, 1.0).expect("a 0.10 tip").joint_radius_mm;
+    assert!(grown > fx.planned_joint_mm + 0.05, "anti-vacuity: {grown}");
+    let payload = arms[0].head.as_ref().expect("a head");
+    assert!(
+        (payload.joint_radius_mm - grown).abs() < 1e-9,
+        "the joint is drawn at the grown radius {grown}, not {}",
+        payload.joint_radius_mm
+    );
+    assert_eq!(emission.joints_grown, 1);
+    let deficit = grown - fx.planned_joint_mm;
+    assert!(
+        (emission.max_standoff_deficit_mm - deficit).abs() < 1e-9,
+        "deficit {} against {deficit}",
+        emission.max_standoff_deficit_mm
+    );
+    assert_eq!(emission.tips_headed, 1);
+    assert!(
+        (emission.head_standoff_mm[0] - (GAP_MM - deficit)).abs() < 1e-9,
+        "the drawn stand-off {} is the gap less the growth",
+        emission.head_standoff_mm[0]
+    );
+    // The head's neck follows the final tip radius too.
+    assert!(
+        payload.profile_mm.last().copied().unwrap_or(0.0)
+            >= head_section_mm(r_t, 0.0, c) - 1e-12
+    );
+    let _ = struts;
+}
+
+#[test]
+fn a_field_with_no_heads_is_the_area_law_and_a_straight_arm() {
+    // (g) With no head the ledger is the area law, the member minimum and the
+    // thickened layers, nothing else; the arm is straight, with its whole
+    // ledger as its profile, and every head counter reads zero.
+    let mut fx = fixture(false);
+    let struts = fx.struts.clone();
+    let (struts, arms, emission) = size_and_draw(&mut fx, struts);
+    let host = &struts[0];
+    for (slot, radius) in host.radius_mm.iter().enumerate() {
+        let thickened = host.thickened_mm.get(slot).copied().unwrap_or(0.0);
+        assert!(
+            (radius - thickened.max(0.05)).abs() < 1e-15,
+            "slot {slot}: {radius} against thickened {thickened}"
+        );
+    }
+    assert!(arms.iter().all(|arm| arm.head.is_none()));
+    assert_eq!(arms[0].radius_profile_mm.len(), host.k_top - host.k_bottom);
+    assert_eq!(emission.tips_headed, 0);
+    assert_eq!(emission.joints_grown, 0);
+    assert!(emission.max_standoff_deficit_mm.abs() < 1e-15);
+    assert!(emission.head_stalk_mm.is_empty());
+}

@@ -104,6 +104,8 @@ fn setup(mesh: &Mesh, top_z: f64, extent: f64, per_event: bool) -> Setup {
         tip_column_roots: true,
         per_event,
         handed_column_ledger: true,
+        layer_height_mm: h,
+        plate_z_mm: 0.0,
     };
     Setup {
         grid,
