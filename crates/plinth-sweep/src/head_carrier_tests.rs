@@ -356,7 +356,7 @@ fn a_forced_merge_never_moves_a_headed_arm_and_lands_below_its_joint() {
 // -------------------------------------------------------- stranded branches
 
 fn stranded_run(
-    struts: &mut Vec<SweepStrut>,
+    struts: &mut [SweepStrut],
     stranded: &[u32],
 ) -> crate::stranded_branch::StrandedBranchOutcome {
     let grid = grid();
@@ -590,6 +590,10 @@ fn tilted_arms(grid: &Grid, struts: &mut [SweepStrut]) -> Vec<plinth_support::Sw
 /// seat as a refused move. SABOTAGE: with the guard removed the headed arm is
 /// searched like the control and reads a knife edge, not a refused move.
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "a head is never slid: its shift is pinned to the exact zero the rule leaves"
+)]
 fn the_footprint_rule_never_slides_a_headed_arm() {
     let grid = grid();
     let mut struts = vec![
