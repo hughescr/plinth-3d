@@ -1047,9 +1047,12 @@ pub struct SweepHead {
     pub joint_radius_mm: f64,
     /// `g`: the registered final clearance gap.
     pub gap_mm: f64,
-    /// The head's section: `n` sections at the mid-points of `n` equal parts
-    /// of `K -> D`; index 0 is next to the joint.
-    pub profile_mm: Vec<f64>,
+    /// The head's section as a polyline of `(s, r)` knots, `s` the distance
+    /// along `u` from `D` (the first knot has `s = 0`, the last `s = |K - D|`,
+    /// strictly rising), `r` the drawn radius there. One straight frustum is
+    /// drawn between consecutive knots, so a polyline on or above the
+    /// bending law stays on or above it. The last radius is the joint's.
+    pub profile_knots_mm: Vec<[f64; 2]>,
 }
 
 /// What lowering one sweep field produced, and everything it had to warn about.
@@ -1177,6 +1180,9 @@ pub struct SweepLowering {
     /// Headed arms whose neck, where it leaves the ball, is wider than the
     /// ball's own solid there (allowed: the law asks for it).
     pub head_necks_wider_than_ball: usize,
+    /// Per headed arm, in arm order: the neck's first ring radius over the
+    /// ball's solid radius where the neck leaves it (above 1 when wider).
+    pub head_neck_ratio: Vec<f64>,
     /// Per headed arm, in arm order: the bare length along `u` between the
     /// ball's surface and the joint sphere's surface, `|K - C| - R - r_K`
     /// (`C` the ball centre, `R` the ball radius). May be zero or negative.
@@ -1406,6 +1412,7 @@ fn lower_sweep_arms_of(
         if let Some(head) = lowered.head {
             out.tips_headed += 1;
             out.head_necks_wider_than_ball += usize::from(head.neck_wider_than_ball);
+            out.head_neck_ratio.push(head.neck_ratio);
             out.head_stalk_mm.push(head.stalk_mm);
             out.head_standoff_mm.push(head.standoff_mm);
         }
@@ -1581,6 +1588,7 @@ struct HeadDrawn {
     stalk_mm: f64,
     standoff_mm: f64,
     neck_wider_than_ball: bool,
+    neck_ratio: f64,
 }
 
 impl ArmLowering {
@@ -1636,11 +1644,12 @@ fn headed_tip<'a>(arm: &'a SweepArm, config: LoweringConfig) -> Option<HeadedTip
         && finite_point(head.joint_mm)
         && head.joint_radius_mm.is_finite()
         && head.joint_radius_mm > 0.0
-        && !head.profile_mm.is_empty()
+        && head.profile_knots_mm.len() >= 2
         && head
-            .profile_mm
+            .profile_knots_mm
             .iter()
-            .all(|radius| radius.is_finite() && *radius > 0.0))
+            .all(|[s, radius]| s.is_finite() && *s >= 0.0 && radius.is_finite() && *radius > 0.0)
+        && head.profile_knots_mm.windows(2).all(|pair| pair[0][0] < pair[1][0]))
     {
         return None;
     }
@@ -1700,52 +1709,70 @@ struct HeadSegment {
     spans: usize,
     /// The neck's first ring is wider than the ball's solid at the start.
     neck_wider_than_ball: bool,
+    /// The neck's first ring radius over the ball's solid radius at the start.
+    neck_ratio: f64,
 }
 
 /// Draw the head from its start to the carried joint `K`, and the joint sphere
-/// at `K`. The head's section is the carried profile (the bending law's, from
-/// the contact centre to the joint), and the fewest straight spans that stay
-/// on or above it are drawn ([`drawn_spans`]), the first the contact taper. A
-/// neck ring wider than the ball is allowed, and reported. `None` where a span
-/// will not cross the finite boundary.
+/// at `K`. The head's section is the carried polyline of `(s, r)` knots (the
+/// bending law's tangent polyline, from the contact centre to the joint): the
+/// polyline is clipped at the start's own distance `s_start` along `u`, and
+/// one straight frustum is drawn between consecutive knots, so consecutive
+/// frusta share their end radius, no step is drawn, and the last ring is the
+/// joint's. The first is the contact taper. A neck ring wider than the ball is
+/// allowed, and reported. `None` where a frustum will not cross the finite
+/// boundary, or the start is not before the joint.
 fn push_head_segment(
     headed: &HeadedTip<'_>,
-    tip_radius: PositiveFinite,
     config: LoweringConfig,
     staged: &mut Vec<SupportPrimitive>,
 ) -> Option<HeadSegment> {
     let head = headed.head;
     let (start, joint) = (headed.start, head.joint_mm);
-    let rise = start[2] - joint[2];
-    // The profile runs K -> D, index 0 at the joint, over the heights of that
-    // axis; the drawn range starts at `start`, on or below D.
-    let spans = drawn_spans(
-        &head.profile_mm,
-        joint[2],
-        head.contact_mm[2],
-        start[2],
-        joint[2],
-        tip_radius.get(),
-        head.joint_radius_mm,
-    );
-    let on_axis = |z: f64| -> Option<[Finite; 3]> {
-        let t = (start[2] - z) / rise;
+    let knots = &head.profile_knots_mm;
+    let length = knots.last()?[0];
+    // `start` stands `s_start` along `u` from the contact centre `D`: on the
+    // plane (0) or the ball centre above it.
+    let s_start =
+        geom_kernel::vec3::dot(headed.unit, geom_kernel::vec3::sub(start, head.contact_mm)).max(0.0);
+    if !(s_start < length) {
+        return None;
+    }
+    // The clipped polyline: the law's radius at `s_start`, then every knot
+    // past it. A knot within a micron of the start would be a degenerate
+    // frustum and is skipped.
+    let past = knots
+        .partition_point(|knot| knot[0] <= s_start + ZERO_LENGTH_MM)
+        .min(knots.len() - 1);
+    let first_radius = match past.checked_sub(1).map(|index| knots[index]) {
+        Some(below) => {
+            let above = knots.get(past).copied().unwrap_or(below);
+            let t = (s_start - below[0]) / (above[0] - below[0]).max(f64::MIN_POSITIVE);
+            below[1] + (above[1] - below[1]) * t.clamp(0.0, 1.0)
+        }
+        None => knots[0][1],
+    };
+    let clipped: Vec<[f64; 2]> = std::iter::once([s_start, first_radius])
+        .chain(knots[past..].iter().copied())
+        .collect();
+    let on_axis = |s: f64| -> Option<[Finite; 3]> {
+        let t = (s - s_start) / (length - s_start);
         finite3(std::array::from_fn(|axis| {
             start[axis] + (joint[axis] - start[axis]) * t
         }))
         .ok()
     };
-    let last = spans.len().saturating_sub(1);
-    for (index, span) in spans.iter().enumerate() {
+    let last = clipped.len().saturating_sub(2);
+    for (index, pair) in clipped.windows(2).enumerate() {
         let from = if index == 0 {
             finite3(start).ok()?
         } else {
-            on_axis(span.top_z_mm)?
+            on_axis(pair[0][0])?
         };
         let to = if index == last {
             finite3(joint).ok()?
         } else {
-            on_axis(span.bottom_z_mm)?
+            on_axis(pair[1][0])?
         };
         let (kind, depth) = if index == 0 {
             (
@@ -1759,14 +1786,16 @@ fn push_head_segment(
             kind,
             from,
             to,
-            positive(span.top_radius_mm).ok()?,
-            positive(span.bottom_radius_mm).ok()?,
+            positive(pair[0][1]).ok()?,
+            positive(pair[1][1]).ok()?,
             depth,
             FrustumRingNormal::SegmentAxis,
         ));
     }
+    let spans = clipped.len() - 1;
+    let end_radius = clipped.last()?[1];
     let geometry = SphereGeometry::joint(finite3(joint).ok()?);
-    let radius = positive(head.joint_radius_mm).ok()?;
+    let radius = positive(head.joint_radius_mm.max(end_radius)).ok()?;
     let (start_mm, end_mm) = geometry.canonical_poles(radius).ok()?;
     staged.push(SupportPrimitive {
         segment_kind: SupportSegmentKind::JointSphere,
@@ -1779,12 +1808,10 @@ fn push_head_segment(
         sphere_geometry: Some(geometry),
         seat_trim: None,
     });
-    let neck_wider_than_ball = spans
-        .first()
-        .is_some_and(|first| first.top_radius_mm > headed.start_cap_radius_mm);
     Some(HeadSegment {
-        spans: spans.len(),
-        neck_wider_than_ball,
+        spans,
+        neck_wider_than_ball: first_radius > headed.start_cap_radius_mm,
+        neck_ratio: first_radius / headed.start_cap_radius_mm,
     })
 }
 
@@ -2663,7 +2690,7 @@ fn lower_one_sweep_arm(
     // straight and counted. `None` is the straight arm.
     let mut head_pieces: Vec<SupportPrimitive> = Vec::new();
     let headed = headed_tip(arm, config).and_then(|headed| {
-        push_head_segment(&headed, tip_radius, config, &mut head_pieces)
+        push_head_segment(&headed, config, &mut head_pieces)
             .map(|segment| (headed, segment))
     });
     let head_drawn_straight = arm.head.is_some() && headed.is_none();
@@ -2748,6 +2775,7 @@ fn lower_one_sweep_arm(
                     stalk_mm,
                     standoff_mm,
                     neck_wider_than_ball: segment.neck_wider_than_ball,
+                    neck_ratio: segment.neck_ratio,
                 }),
             )
         }
@@ -3974,7 +4002,6 @@ mod headed_arm_tests {
     const FACE_DEG: f64 = 41.3;
     const GAP_MM: f64 = 0.3;
     const TIP_MM: f64 = 0.05;
-    const SECTIONS: usize = 8;
 
     fn cos_lean() -> f64 {
         57.5_f64.to_radians().cos()
@@ -4018,40 +4045,72 @@ mod headed_arm_tests {
         (high, GAP_MM + high)
     }
 
+    /// The head's law at the final tip `tip` and distance `s` from `D`.
+    fn law(tip: f64, s: f64) -> f64 {
+        let ledger = tip / cos_lean().sqrt();
+        section(ledger, ledger, s)
+    }
+
+    /// The knots of a head of length `length`: the law's tangents at
+    /// `s_i = L (i/3)^3` meeting each other, between the exact ends. A fixture
+    /// input only: the production polyline is `plinth_sweep::heads::
+    /// head_polyline_mm`, tested against the law and the plan's numbers there.
     #[expect(
         clippy::cast_precision_loss,
-        reason = "a section index of a handful of sections is exact in f64"
+        reason = "a tangent index of at most 3 is exact in f64"
     )]
-    fn head(contact: [f64; 3]) -> SweepHead {
-        let (r_k, length) = joint();
-        let u = unit();
-        let ledger = TIP_MM / cos_lean().sqrt();
-        // n sections at the mid-points of n equal parts of K -> D, index 0 at K.
-        let profile_mm = (0..SECTIONS)
+    fn knots(tip: f64, length: f64) -> Vec<[f64; 2]> {
+        let a = tip * tip / cos_lean();
+        let tangents: Vec<[f64; 3]> = (0..4)
             .map(|index| {
-                let from_joint = (index as f64 + 0.5) * length / SECTIONS as f64;
-                section(ledger, ledger, length - from_joint)
+                let s = length * (index as f64 / 3.0).powi(3);
+                let r = law(tip, s);
+                [s, r, 4.0 * a / (3.0 * r * r - a)]
             })
             .collect();
+        let mut out = vec![[0.0, law(tip, 0.0)]];
+        for pair in tangents.windows(2) {
+            let (lo, hi) = (pair[0], pair[1]);
+            let s = ((hi[1] - lo[1]) + lo[2] * lo[0] - hi[2] * hi[0]) / (lo[2] - hi[2]);
+            out.push([s, lo[1] + lo[2] * (s - lo[0])]);
+        }
+        out.push([length, law(tip, length)]);
+        out
+    }
+
+    fn head(contact: [f64; 3]) -> SweepHead {
+        let (_, length) = joint();
+        head_with(TIP_MM, length, contact)
+    }
+
+    /// A head of the final tip `tip` and length `|DK| = length`, its joint the
+    /// law's own radius there.
+    fn head_with(tip: f64, length: f64, contact: [f64; 3]) -> SweepHead {
+        let u = unit();
         SweepHead {
             contact_mm: contact,
             unit: u,
             joint_mm: std::array::from_fn(|axis| contact[axis] + length * u[axis]),
-            joint_radius_mm: r_k,
+            joint_radius_mm: law(tip, length),
             gap_mm: GAP_MM,
-            profile_mm,
+            profile_knots_mm: knots(tip, length),
         }
     }
 
     /// A landed arm: the seat at `seat`, the head's contact centre at
     /// `contact`, a vertical post from the carried joint down to z = 2.
     fn arm(seat: [f64; 3], contact: [f64; 3]) -> SweepArm {
-        let head = head(contact);
+        let (_, length) = joint();
+        arm_with(TIP_MM, length, seat, contact)
+    }
+
+    fn arm_with(tip: f64, length: f64, seat: [f64; 3], contact: [f64; 3]) -> SweepArm {
+        let head = head_with(tip, length, contact);
         let base = [head.joint_mm[0], head.joint_mm[1], 2.0];
         SweepArm {
             seat_mm: seat,
             base_mm: base,
-            tip_radius_mm: TIP_MM,
+            tip_radius_mm: tip,
             radius_profile_mm: vec![head.joint_radius_mm + 0.05; 150],
             seat_normal_mm: unit(),
             seat_face_point_mm: Some(contact),
@@ -4174,6 +4233,97 @@ mod headed_arm_tests {
             );
             assert_eq!(lowering.head_stalk_mm.len(), 1);
             assert!(lowering.head_stalk_mm[0].is_finite());
+        }
+    }
+
+    /// THE SMOOTH HEAD (v18 feedback B, 2026-10-07): the head is at most four
+    /// frusta that share their end radii, never go under the law, hold at most
+    /// 1.04 of the law's volume, and end at the joint's own radius. The v18 head
+    /// was about fourteen one-layer discs that jumped in radius at every layer.
+    #[test]
+    fn the_head_is_a_few_smooth_frusta_on_or_above_the_law_ending_at_the_joint() {
+        let length = 1.344;
+        let u = unit();
+        for tip in [0.05, 0.115] {
+            let contact = [0.0, 0.0, 10.0];
+            let arm = arm_with(tip, length, contact, contact);
+            let drawn = lower(&arm);
+            let joint_at = drawn
+                .iter()
+                .position(|p| p.segment_kind == SupportSegmentKind::JointSphere)
+                .expect("a joint sphere");
+            let neck = &drawn[1..joint_at];
+            assert!(
+                (1..=4).contains(&neck.len()),
+                "tip {tip}: {} head frusta, at most four",
+                neck.len()
+            );
+            for pair in neck.windows(2) {
+                assert!(
+                    (pair[0].end_radius_mm.get() - pair[1].start_radius_mm.get()).abs() < 1e-12,
+                    "tip {tip}: a step from {} to {}",
+                    pair[0].end_radius_mm.get(),
+                    pair[1].start_radius_mm.get()
+                );
+            }
+            let head = arm.head.as_ref().expect("a head");
+            assert!(
+                (neck.last().expect("a neck").end_radius_mm.get() - head.joint_radius_mm).abs()
+                    < 1e-9,
+                "tip {tip}: the last ring is the joint's radius"
+            );
+            // The drawn radius at s along u from D, by the frusta's own ends.
+            let along = |p: [Finite; 3]| -> f64 {
+                let p = point(p);
+                (0..3).map(|axis| (p[axis] - contact[axis]) * u[axis]).sum()
+            };
+            let ends: Vec<(f64, f64)> = std::iter::once((
+                along(neck[0].start_mm),
+                neck[0].start_radius_mm.get(),
+            ))
+            .chain(
+                neck.iter()
+                    .map(|p| (along(p.end_mm), p.end_radius_mm.get())),
+            )
+            .collect();
+            let (s_start, s_end) = (ends[0].0, ends[ends.len() - 1].0);
+            assert!((s_end - length).abs() < 1e-9, "tip {tip}: the head ends at K");
+            let drawn_at = |s: f64| -> f64 {
+                let pair = ends
+                    .windows(2)
+                    .find(|w| s <= w[1].0)
+                    .expect("s lies in the head");
+                pair[0].1 + (pair[1].1 - pair[0].1) * (s - pair[0].0) / (pair[1].0 - pair[0].0)
+            };
+            for step in 0..=200 {
+                let s = s_start + (s_end - s_start) * f64::from(step) / 200.0;
+                let (got, want) = (drawn_at(s), law(tip, s));
+                assert!(got >= want - 1e-9, "tip {tip}, s {s}: drawn {got} under the law {want}");
+            }
+            // Volumes over [s_start, L]: the frusta against the law (Simpson).
+            let drawn_volume: f64 = neck
+                .iter()
+                .map(|p| {
+                    let (r0, r1) = (p.start_radius_mm.get(), p.end_radius_mm.get());
+                    let h: f64 = (0..3)
+                        .map(|axis| (point(p.end_mm)[axis] - point(p.start_mm)[axis]).powi(2))
+                        .sum::<f64>()
+                        .sqrt();
+                    std::f64::consts::PI * h * (r0 * r0 + r0 * r1 + r1 * r1) / 3.0
+                })
+                .sum();
+            let steps = 2000;
+            let dz = (s_end - s_start) / f64::from(steps);
+            let law_volume: f64 = (0..steps)
+                .map(|i| {
+                    let s = s_start + dz * (f64::from(i) + 0.5);
+                    std::f64::consts::PI * law(tip, s).powi(2) * dz
+                })
+                .sum();
+            assert!(
+                drawn_volume <= 1.04 * law_volume && drawn_volume >= law_volume - 1e-9,
+                "tip {tip}: drawn {drawn_volume} mm3 against the law's {law_volume}"
+            );
         }
     }
 

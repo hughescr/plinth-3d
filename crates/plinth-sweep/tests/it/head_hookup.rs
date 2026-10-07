@@ -25,7 +25,9 @@ use plinth_core::{m0_constants, Finite, LayerPlan, PositiveFinite};
 use plinth_mesh::make_lonely_peak;
 use plinth_support::BuildFrame;
 use plinth_sweep::down_sweep::{self, InsertionPolicy, SizingPolicy, UnrootedColumns};
-use plinth_sweep::heads::{final_joint_radius_mm, head_section_mm, solve_joint, Head};
+use plinth_sweep::heads::{
+    final_joint_radius_mm, head_polyline_mm, head_section_mm, solve_joint, Head,
+};
 use plinth_sweep::{
     arms_of, to_primitives, DrainKeepOut, Landing, SeatFace, StrutKind, SweepEmission, SweepPlan,
     SweepPolicy, SweepStrut,
@@ -286,28 +288,29 @@ fn a_headed_strut_is_sized_and_drawn_as_a_head() {
     let head = struts[0].head.as_ref().expect("the strut keeps its head");
     assert_eq!(arms[0].seat_normal_mm, head.unit);
     assert_eq!(arms[0].seat_face_point_mm, Some(head.contact_mm));
-    // (b) the head's profile is monotone, from the joint's side up to the
-    // contact, and starts about 1.364 r_t above the contact.
+    // (b) the head's section is the tangent polyline of the law, from the
+    // contact (s = 0, 1.364 r_t) to the joint (s = |DK|, the joint's radius):
+    // at most four frusta, and the knots rise with s.
     let r_t = struts[0].tip_radius_mm();
-    let n = k_joint.abs_diff(K_TOP);
-    assert_eq!(payload.profile_mm.len(), n);
+    let knots = &payload.profile_knots_mm;
+    assert_eq!(*knots, head_polyline_mm(r_t, fx.length_mm, c));
+    assert!((2..=5).contains(&knots.len()), "at most four frusta: {knots:?}");
     assert!(
-        payload.profile_mm.windows(2).all(|w| w[0] >= w[1]),
-        "the section falls toward the contact: {:?}",
-        payload.profile_mm
+        knots.windows(2).all(|w| w[0][0] < w[1][0] && w[0][1] <= w[1][1]),
+        "the section grows from the contact to the joint: {knots:?}"
     );
-    let at_contact = *payload.profile_mm.last().expect("a profile");
+    let at_contact = knots[0][1];
     let neck = r_t / c.sqrt();
     assert!((neck / r_t - 1.364).abs() < 1e-3, "the neck starts at 1.364 r_t");
     assert!(
-        at_contact >= neck && at_contact < 1.6 * neck,
+        knots[0][0] == 0.0 && (at_contact - neck).abs() < 1e-12,
         "the section at the contact is {at_contact}, the neck {neck}"
     );
+    let last = knots.last().expect("a polyline");
     assert!(
-        payload.profile_mm[0] <= payload.joint_radius_mm
-            && payload.profile_mm[0] > 0.8 * payload.joint_radius_mm,
-        "the profile reaches the joint: {:?} vs r_K {}",
-        payload.profile_mm,
+        (last[0] - fx.length_mm).abs() < 1e-9
+            && (last[1] - payload.joint_radius_mm).abs() < 1e-9,
+        "the polyline reaches the joint: {knots:?} vs r_K {}",
         payload.joint_radius_mm
     );
     // (c) the joint is the law at the FINAL tip over the frozen |DK|; with the
@@ -433,7 +436,7 @@ fn a_fatter_tip_grows_the_joint_and_the_deficit_is_reported() {
     );
     // The head's neck follows the final tip radius too.
     assert!(
-        payload.profile_mm.last().copied().unwrap_or(0.0)
+        payload.profile_knots_mm.first().map_or(0.0, |knot| knot[1])
             >= head_section_mm(r_t, 0.0, c) - 1e-12
     );
     let _ = struts;
