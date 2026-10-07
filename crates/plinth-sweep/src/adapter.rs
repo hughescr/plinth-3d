@@ -755,8 +755,13 @@ pub fn drawn_line_offset(
     }
     // A vertical member's drawn line is its planned line (the boss stands
     // under its own seat); nothing moves, bit for bit.
+    // A HEADED arm's post is planned from the head's joint `K`, not from the
+    // seat (which stays the contact seat so the lowering recognises the head,
+    // [`plinth_support::SweepRootFlare::plate_shaft_of`]); `K` is an absolute
+    // drawn-frame point, like the arm's other points.
+    let planned_top = arm.head.as_ref().map_or(arm.seat_mm, |head| head.joint_mm);
     let same = |a: f64, b: f64| a.partial_cmp(&b) == Some(std::cmp::Ordering::Equal);
-    if same(arm.seat_mm[0], arm.base_mm[0]) && same(arm.seat_mm[1], arm.base_mm[1]) {
+    if same(planned_top[0], arm.base_mm[0]) && same(planned_top[1], arm.base_mm[1]) {
         return None;
     }
     let (top, bottom) = flare.plate_shaft_of(arm, plate_z_mm)?;
@@ -776,17 +781,23 @@ pub fn drawn_line_offset(
         let drawn = drawn_at(planned[2]);
         [drawn[0] - planned[0], drawn[1] - planned[1], 0.0]
     };
-    Some((off(arm.seat_mm), off(arm.base_mm)))
+    Some((off(planned_top), off(arm.base_mm)))
 }
 
 /// [`drawn_line_offset`] for a member as it stands in the plan, before any
 /// seat face is measured (the lowering's fallback normal, straight down, as
 /// [`crate::slenderness`]'s free-shaft floor reads it too), for the rules
 /// that place junctions on it while the field is still being built.
+///
+/// `plate_z_mm` is the plate's z in the drawn frame. A headed member's carried
+/// contact and joint are ABSOLUTE drawn-frame points, so its line must be
+/// measured over the real plate; a straight member's line is the same in any
+/// frame, so it is measured at z = 0 exactly as before (bit for bit).
 #[must_use]
-pub(crate) fn planned_line_offset(
+pub fn planned_line_offset(
     flare: &plinth_support::SweepRootFlare,
     grid: &crate::grid::Grid,
+    plate_z_mm: f64,
     layer_height_mm: f64,
     strut: &crate::SweepStrut,
 ) -> Option<LineOffset> {
@@ -797,11 +808,13 @@ pub(crate) fn planned_line_offset(
     {
         return None;
     }
-    // The line measured is the POST's: from the head's joint for a headed
-    // member, from the seat otherwise.
-    let (seat, base) = drawn_post_ends(grid, 0.0, layer_height_mm, strut);
+    let frame_z = strut.head.as_ref().map_or(0.0, |_| plate_z_mm);
+    // The arm keeps its contact seat (a headed arm needs it for the
+    // lowering's own head test); the line measured is the POST's, from the
+    // head's joint, which `drawn_line_offset` reads off the carried head.
+    let (seat, base) = drawn_ends(grid, frame_z, layer_height_mm, strut);
     let arm = sweep_arm(strut, seat, base, None, Vec::new());
-    drawn_line_offset(flare, &arm, 0.0)
+    drawn_line_offset(flare, &arm, frame_z)
 }
 
 /// The displacement [`LineOffset`] gives at `layer` of `strut` (linear in the
@@ -977,14 +990,11 @@ fn arms_and_junction_raises(plan: &SweepPlan) -> (Vec<SweepArm>, JunctionRaises)
                 (strut.landing == Landing::Plate
                     && strut.kind != crate::StrutKind::Brace
                     && strut.is_leaned())
-                .then(|| {
-                    let mut arm = build(strut, *followed, Vec::new());
-                    // The line measured is the POST's, from the head's joint.
-                    if strut.head.is_some() {
-                        arm.seat_mm = drawn_post_ends(grid, plate, height, strut).0;
-                    }
-                    drawn_line_offset(&flare, &arm, plate)
-                })
+                // A headed arm keeps its contact seat (the lowering's own
+                // `headed_tip` needs it to recognise the head);
+                // `drawn_line_offset` measures the POST's line from the
+                // head's joint.
+                .then(|| drawn_line_offset(&flare, &build(strut, *followed, Vec::new()), plate))
                 .flatten()
             })
             .collect(),

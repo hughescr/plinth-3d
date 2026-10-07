@@ -429,3 +429,107 @@ fn a_field_with_no_heads_is_the_area_law_and_a_straight_arm() {
     assert!(emission.max_standoff_deficit_mm.abs() < 1e-15);
     assert!(emission.head_stalk_mm.is_empty());
 }
+
+/// Lean the headed post: its base stands `cols` cells off the joint's column,
+/// so the arm is a LEANING plate post and the boss stands over a different foot.
+fn lean(fx: &Fixture, host: &mut SweepStrut, cols: usize) {
+    let grid = &fx.plan.grid;
+    let (row, col) = (grid.rows() / 2, grid.cols() / 2);
+    host.path[0] = u32::try_from(grid.index(row, col + cols)).expect("a small grid");
+}
+
+#[test]
+fn a_joint_the_placement_maximum_would_refuse_still_grows() {
+    // Review finding 1: placement refuses a joint above the registered
+    // maximum radius (no head exists yet), but a FROZEN head whose final tip
+    // is fat must still grow its joint, never cap it. A 0.35 mm tip needs a
+    // 1.17 mm joint; the registered maximum radius is 1.0 mm.
+    let mut fx = fixture(true);
+    let mut struts = fx.struts.clone();
+    struts[0].min_radius_mm = 0.35;
+    let (struts, arms, emission) = size_and_draw(&mut fx, struts);
+    let c = cos_lean();
+    let r_t = struts[0].tip_radius_mm();
+    assert!((r_t - 0.35).abs() < 1e-12, "the tip is the minimum, {r_t}");
+    assert!(
+        solve_joint(r_t, GAP_MM, c, 1.0).is_none(),
+        "anti-vacuity: the placement law refuses this joint"
+    );
+    let slot = |layer: usize| layer - struts[0].k_bottom;
+    let r_k = struts[0].radius_mm[slot(fx.k_joint)];
+    assert!(r_k > 1.0, "the joint grew past the placement maximum: {r_k}");
+    let residual = r_k * r_k * r_k - r_t * r_t / c * (r_k + 4.0 * (GAP_MM + r_k));
+    assert!(residual >= -1e-9, "the joint carries its own law: {residual}");
+    let payload = arms[0].head.as_ref().expect("a head");
+    assert!((payload.joint_radius_mm - r_k).abs() < 1e-12);
+    assert_eq!(emission.joints_grown, 1);
+    assert!(
+        (emission.max_standoff_deficit_mm - (r_k - fx.planned_joint_mm)).abs() < 1e-9,
+        "the deficit is the whole growth: {}",
+        emission.max_standoff_deficit_mm
+    );
+    // The post under the joint is sized for the grown joint's lever, not the
+    // planned one: just under K the lever is within 10 percent of g + r_K.
+    let just_under = struts[0].radius_mm[slot(fx.k_joint) - 1];
+    let lower_bound = plinth_sweep::heads::post_section_mm(r_t, r_t, 0.9 * (GAP_MM + r_k), c);
+    assert!(
+        just_under >= lower_bound,
+        "post {just_under} under the grown lever's section {lower_bound}"
+    );
+}
+
+#[test]
+fn a_headed_leaning_post_is_measured_from_its_joint_over_the_real_plate() {
+    // Review findings 2 and 3: the drawn line of a headed leaning post is the
+    // lowering's own (from K, the head recognised through the contact seat),
+    // and the offsets are read at K and at the base, over the REAL plate (the
+    // head's points are absolute, and this plate stands under z = 0).
+    let mut fx = fixture(true);
+    let mut struts = fx.struts.clone();
+    lean(&fx, &mut struts[0], 12);
+    let (struts, arms, _) = size_and_draw(&mut fx, struts);
+    let plate = fx.plan.plate_z_mm;
+    assert!(plate < -1.0, "a lifted model: the plate is under z = 0");
+    let flare = plinth_support::SweepRootFlare::registered(fx.sizing.layer_height_mm)
+        .expect("the registered flare");
+    let head = struts[0].head.as_ref().expect("a head");
+    let (top, bottom) = flare
+        .plate_shaft_of(&arms[0], plate)
+        .expect("a plate post's shaft");
+    for axis in 0..3 {
+        assert!(
+            (top[axis] - head.joint_mm[axis]).abs() < 1e-9,
+            "the post starts at K: {top:?} against {:?}",
+            head.joint_mm
+        );
+    }
+    let offset = plinth_sweep::adapter::drawn_line_offset(&flare, &arms[0], plate)
+        .expect("a leaning post has an offset");
+    // The drawn line starts AT the planned top, K.
+    assert!(
+        offset.0.iter().all(|v| v.abs() < 1e-9),
+        "no offset at K: {:?}",
+        offset.0
+    );
+    let base = arms[0].base_mm;
+    let expected = (base[0] - head.joint_mm[0]) * (bottom[2] - base[2]) / (head.joint_mm[2] - bottom[2]);
+    assert!(expected.abs() > 1e-3, "anti-vacuity: {expected}");
+    assert!(
+        (offset.1[0] - expected).abs() < 1e-9,
+        "offset at the base {:?} against {expected}",
+        offset.1
+    );
+    // The in-field reader, before any face is measured, reads the same line.
+    let planned = plinth_sweep::adapter::planned_line_offset(
+        &flare,
+        &fx.plan.grid,
+        plate,
+        fx.sizing.layer_height_mm,
+        &struts[0],
+    )
+    .expect("a leaning headed post has a planned offset");
+    for axis in 0..3 {
+        assert!((planned.0[axis] - offset.0[axis]).abs() < 1e-9, "{planned:?} {offset:?}");
+        assert!((planned.1[axis] - offset.1[axis]).abs() < 1e-9, "{planned:?} {offset:?}");
+    }
+}

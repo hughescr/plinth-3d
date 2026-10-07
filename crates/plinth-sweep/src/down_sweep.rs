@@ -478,10 +478,11 @@ fn apply_head_minimum(strut: &mut SweepStrut, sizing: SizingPolicy) -> Option<f6
     let r_t = strut.radius_mm[slots - 1];
     let joint_slot = head.k_joint - strut.k_bottom;
     let z_of = |layer: usize| sizing.plate_z_mm + layer as f64 * h;
-    let r_k_eff = crate::heads::solve_joint(r_t, g, c, sizing.tip_radius_max_mm)
-        .map_or(head.joint_radius_mm, |joint| {
-            joint.joint_radius_mm.max(head.joint_radius_mm)
-        });
+    // The head is frozen; its joint only grows. No placement maximum applies
+    // here: a final tip that needs a joint wider than the registered maximum
+    // radius still gets it (see `grown_joint_radius_mm`).
+    let r_k_eff = crate::heads::grown_joint_radius_mm(r_t, g, c)
+        .map_or(head.joint_radius_mm, |joint| joint.max(head.joint_radius_mm));
     // The head: axial distance from D along u to the layer's z.
     let to_k: [f64; 3] = std::array::from_fn(|axis| head.joint_mm[axis] - head.contact_mm[axis]);
     let length = to_k.iter().map(|v| v * v).sum::<f64>().sqrt();
