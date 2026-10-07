@@ -2677,10 +2677,23 @@ fn lower_one_sweep_arm(
                 head.unit,
                 geom_kernel::vec3::sub(head.head.joint_mm, head.head.contact_mm),
             ) - head.head.joint_radius_mm;
+            // The post's profile holds one slot per LAYER from the base up to
+            // and including the joint's layer, so its top is that layer's top
+            // boundary, not `K` (which stands inside it). Mapping the slots
+            // onto base -> `K` squeezed every slot under a layer high on the
+            // post: on the Cylinder at `149452e` a one-step cone read as two
+            // steps in one layer (round-18 milestone, 2026-10-07). The shaft
+            // still ends at `K`; `drawn_spans` reads the joint slot there.
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a post's slot count is bounded by the plan's layer count, exact in f64"
+            )]
+            let slots_top_z = base[2].get()
+                + arm.radius_profile_mm.len() as f64 * config.layer_height_mm.get();
             (
                 joint,
                 joint_radius,
-                head.head.joint_mm[2],
+                slots_top_z.max(head.head.joint_mm[2]),
                 Some(HeadDrawn {
                     stalk_mm,
                     standoff_mm,
@@ -4023,6 +4036,11 @@ mod headed_arm_tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the joint and the post ends are CARRIED points, never re-derived, so they are \
+                  pinned bit for bit"
+    )]
     fn a_headed_arm_is_drawn_ball_head_joint_post_to_the_carried_joint() {
         let seat = [0.0, 0.0, 10.0];
         // The seat is moved 0.01 mm off the contact centre: the carried joint
@@ -4069,9 +4087,10 @@ mod headed_arm_tests {
             assert_eq!(neck[0].segment_kind, SupportSegmentKind::ContactTaper);
             // (On the ball centre, or on the plane through it where the raster
             // seat puts the centre a rounding under the plane.)
-            for i in 0..3 {
+            let start = point(neck[0].start_mm);
+            for (axis, centre_at) in centre.iter().enumerate() {
                 assert!(
-                    (point(neck[0].start_mm)[i] - centre[i]).abs() < 1e-9,
+                    (start[axis] - centre_at).abs() < 1e-9,
                     "{what}: the head starts off the ball"
                 );
             }

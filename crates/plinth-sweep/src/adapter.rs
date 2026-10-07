@@ -378,8 +378,8 @@ pub(crate) struct LoadCone {
     pub top: usize,
 }
 
-/// **Every cone the taper draws**, from the LEDGER (never from a raised
-/// profile, so a junction raise is never tapered): for each support arm that
+/// **Every cone the taper draws from the LEDGER** (a junction raise is tapered
+/// separately, by [`drawn_profiles`], from the raised width): for each support arm that
 /// lands on a support arm, the host's ledger radius `R` in the slot its load
 /// is booked into (`head_join::booked_slot`, the down-sweep's booking), then
 /// `R − j · step` at `j` layers above it, for as long as that is wider than
@@ -519,7 +519,10 @@ pub(crate) struct JunctionRaises {
 /// cone above its junction ([`LoadStepTaper`], 2026-10-02). Both are maxima
 /// over the ledger from independent sources (the cone from the host's ledger,
 /// a raise from a branch's drawn end, which no cone touches: a cone never
-/// reaches a member's root slot), so the order does not matter.
+/// reaches a member's root slot), so the order does not matter. After the
+/// raise, a support arm's junction that the raise widened past its ledger
+/// draws the same cone from the raised width (2026-10-07), so a branch
+/// thicker than its host leaves no shoulder above the junction either.
 fn junction_profiles(plan: &SweepPlan) -> (Vec<Vec<f64>>, JunctionRaises) {
     drawn_profiles(&plan.struts, plan.load_step_taper)
 }
@@ -655,9 +658,82 @@ pub(crate) fn drawn_profiles(
             break;
         }
     }
+    // A RAISED JUNCTION IS A LOAD STEP TOO (round-18 milestone, 2026-10-07).
+    // A headed arm's post is sized from its joint down, not from its load, so
+    // it can land on a support arm thinner than itself (Cylinder at
+    // `149452e`: 23 such landings, the host 0.05-0.50 mm, the headed root
+    // 0.29-0.77 mm). The raise above widens the host to the branch from the
+    // junction down; without a cone the host then narrows back to its ledger
+    // in one layer, the shoulder the taper exists to remove (19 on the
+    // Cylinder). So, after the raise, every arm-on-arm junction draws the same
+    // cone from the host's DRAWN radius at the junction, under the same
+    // ceiling as the ledger's cone (below the contact slot, and never above a
+    // headed host's joint slot). Ascending by host then slot, so a cone that
+    // reaches a higher junction is that junction's starting width. A cone
+    // never reaches a root slot, so no raise depends on it. Where no raise
+    // exceeds the ledger, the ledger cone already drew it and nothing moves.
+    let mut tapered: Vec<(usize, usize)> = cones
+        .iter()
+        .map(|cone| (cone.host, cone.booked - struts[cone.host].k_bottom))
+        .collect();
+    if taper.tapers() {
+        let step = taper.per_layer_mm();
+        let mut steps: Vec<(usize, usize)> = joints
+            .iter()
+            .filter(|&&(parent, _, branch, at_root)| {
+                at_root
+                    && struts[branch].kind == crate::StrutKind::Arm
+                    && struts[parent].kind == crate::StrutKind::Arm
+            })
+            .map(|&(parent, slot, _, _)| {
+                let mut top = slot.min(profiles[parent].len().saturating_sub(1));
+                if let Some(head) = &struts[parent].head {
+                    top = top.min(head.k_joint.saturating_sub(struts[parent].k_bottom));
+                }
+                (parent, top)
+            })
+            .collect();
+        steps.sort_unstable();
+        steps.dedup();
+        for (parent, from) in steps {
+            let host = &struts[parent];
+            let profile = &mut profiles[parent];
+            let contact = profile.len().saturating_sub(1);
+            let ceiling = host.head.as_ref().map_or(contact, |head| {
+                contact.min(head.k_joint.saturating_sub(host.k_bottom) + 1)
+            });
+            let Some(&wide) = profile.get(from) else {
+                continue;
+            };
+            let mut drew = false;
+            for (above, drawn) in profile
+                .iter_mut()
+                .enumerate()
+                .take(ceiling)
+                .skip(from + 1)
+            {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "a slot count bounded by the plan's own layer count is exact in f64"
+                )]
+                let cone = wide - (above - from) as f64 * step;
+                if cone <= *drawn {
+                    break;
+                }
+                *drawn = cone;
+                load_step_layers_raised += 1;
+                drew = true;
+            }
+            if drew {
+                tapered.push((parent, from));
+            }
+        }
+    }
+    tapered.sort_unstable();
+    tapered.dedup();
     let summary = JunctionRaises {
         members: raised.iter().filter(|flag| **flag).count(),
-        load_steps_tapered: cones.len(),
+        load_steps_tapered: tapered.len(),
         load_step_layers_raised,
         arm_ledger_inversions,
         ..JunctionRaises::default()
@@ -1293,6 +1369,39 @@ mod tests {
         assert_eq!(profiles[0], bare[0], "the host is drawn as if the brace were not there");
         assert_eq!(profiles[1], bare[1], "so is the arm the brace seats on");
         assert!((profiles[0][30] - 0.25).abs() < 1e-12, "no shoulder at the joint");
+    }
+
+    /// **A branch thicker than its host** (a headed post on a thin arm) raises
+    /// the host to the branch from the junction down, and the host then draws
+    /// a cone above the junction from that raised width, not a one-layer
+    /// shoulder back to its ledger. Hand-derived: a 0.25 mm host, a 0.60 mm
+    /// branch at slot 19; 0.60 − j · step stays above 0.25 while
+    /// j < 0.35 / step = 4.46, so slots 20..=23 are raised, 4 of them.
+    #[test]
+    fn a_raised_junction_is_drawn_as_a_cone() {
+        let struts = vec![
+            member(0, StrutKind::Arm, 0, Landing::Plate, vec![0.25; 40]),
+            member(1, StrutKind::Arm, 19, Landing::Strut { id: 0, layer: 19 }, vec![0.60; 30]),
+        ];
+        let (profiles, raised) = drawn_profiles(&struts, taper());
+        let drawn = &profiles[0];
+        let d = step();
+        assert!(load_step_cones(&struts, taper()).is_empty(), "the ledger has no step");
+        assert_eq!(raised.load_steps_tapered, 1);
+        assert_eq!(raised.load_step_layers_raised, 4);
+        assert!(drawn[..=19].iter().all(|&radius| (radius - 0.60).abs() < 1e-12));
+        for (j, &radius) in drawn[20..=23].iter().enumerate() {
+            let expected = 0.60 - (j + 1) as f64 * d;
+            assert!((radius - expected).abs() < 1e-12, "slot {}: {radius}", 20 + j);
+        }
+        assert!((drawn[24] - 0.25).abs() < 1e-12, "the cone ends on the ledger");
+        for slot in 1..drawn.len() {
+            let narrowing = drawn[slot - 1] - drawn[slot];
+            assert!(narrowing <= d * (1.0 + 1e-9), "slot {slot} narrows by {narrowing}");
+        }
+        // Sabotage: with the taper off the shoulder is back.
+        let (off, _) = drawn_profiles(&struts, LoadStepTaper::OFF);
+        assert!((off[0][19] - off[0][20] - 0.35).abs() < 1e-12);
     }
 
     /// A lander on the host's head is booked one slot under its contact; the

@@ -461,7 +461,7 @@ pub fn plan_head(req: &HeadRequest, rule: &HeadRule, grid: &Grid) -> Result<Head
     let contact = vec3::sub(a, vec3::scale(unit, vec3::dot(vec3::sub(a, p), unit)));
     let k = vec3::add(contact, vec3::scale(unit, joint.length_mm));
     let layers_over_plate = ((k[2] - rule.plate_z_mm) / rule.layer_height_mm).floor();
-    if !(layers_over_plate >= 1.0) {
+    if layers_over_plate.is_nan() || layers_over_plate < 1.0 {
         return Err(HeadRefusal::NoPost);
     }
     #[expect(

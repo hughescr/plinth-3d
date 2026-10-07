@@ -186,12 +186,19 @@ fn no_mast_brace_end_on_the_laid_tube_lies_inside_a_root_flare() {
     // no thicker than the arm it ties, and the laid tube's thin arms refuse
     // every mast cell this configuration offered (0 masts, 267 bands dropped,
     // measured 2026-10-03). The flare rule reads no brace radius.
+    //
+    // RE-PINNED 2026-10-07 (round-18 milestone, after head-first `149452e`):
+    // graded with heads off (`without_heads`). Heads now stand on the laid
+    // tube's steep flanks, which moves the arms the masts stood among, and
+    // this configuration places 0 masts with them (measured 2026-10-07). The
+    // flare rule reads no head.
     let policy = harness::at_path_fixture_seating(SweepPolicy {
         slenderness_thicken: false,
         ..policy()
     })
     .without_creep_overhang_cut()
-    .without_brace_cap();
+    .without_brace_cap()
+    .without_heads();
     let plan = sweep_with(&mesh, 0.0, &policy);
     let flares = emitted_flares(&plan);
     let lane = &plan.report.slenderness_lane;

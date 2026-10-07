@@ -1540,16 +1540,16 @@ fn run_length(
     k_top: usize,
     layer_height_mm: f64,
 ) -> f64 {
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "layer counts bounded by the plan's own layer count are exact in f64"
-    )]
     // The chord of the member's POST: from the joint `K` for a headed arm,
     // from the seat otherwise.
     let (top_layer, top_cell) = match &strut.head {
         Some(head) => (head.k_joint, head.joint_cell as usize),
         None => (strut.k_top, strut.cell),
     };
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "layer counts bounded by the plan's own layer count are exact in f64"
+    )]
     let span = top_layer.saturating_sub(strut.k_bottom) as f64;
     let lateral_mm = crate::cell_distance_mm(grid, top_cell, strut.base_cell());
     let member_mm = (span * layer_height_mm).hypot(lateral_mm);
@@ -6952,6 +6952,11 @@ fn radius_the_trim_keeps(
 /// pass's state current: each tie is a landing on the post that holds it in
 /// every direction from the layer its seat prints (tie timing), exactly as
 /// the finished field's run measure credits it ([`tie_lists`]).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the pass's own state, the post, its plans and radii, and the grid and layer height \
+              its tie timing reads; bundling them would only rename the same arguments"
+)]
 fn commit_model_ties(
     grid: &Grid,
     layer_height_mm: f64,

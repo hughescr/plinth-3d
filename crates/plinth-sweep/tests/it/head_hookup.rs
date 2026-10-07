@@ -252,6 +252,11 @@ fn size_and_draw(
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "the arm's seat normal and face point are the head's CARRIED unit and contact, \
+              copied, never re-derived, so they are pinned bit for bit"
+)]
 fn a_headed_strut_is_sized_and_drawn_as_a_head() {
     let mut fx = fixture(true);
     let struts = fx.struts.clone();

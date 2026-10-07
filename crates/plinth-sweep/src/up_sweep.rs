@@ -2926,7 +2926,7 @@ fn descend_cleared_from(
                     strut_top_below(history, candidate, layer, running_layer);
                 if strut_top > 0 && strut_top >= model_top {
                     let top = strut_top as usize - 1;
-                    ((top <= ceiling).then(|| (strut_top_id, top, top)), None)
+                    ((top <= ceiling).then_some((strut_top_id, top, top)), None)
                 } else {
                     (None, reachable_model)
                 }
