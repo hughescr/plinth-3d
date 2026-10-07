@@ -293,17 +293,18 @@ pub fn head_polyline_mm(tip_radius_mm: f64, length_mm: f64, cos_lean_max: f64) -
         .collect();
     let mut knots = vec![[0.0, start]];
     for pair in tangents.windows(2) {
-        let (lower, upper) = (pair[0], pair[1]);
+        let [s_lo, r_lo, m_lo] = pair[0];
+        let [s_hi, r_hi, m_hi] = pair[1];
         // The lines `r = r_i + m_i (s - s_i)` meet at `s`; it lies between
         // the two tangent points for a concave law.
-        let slope_gap = lower[2] - upper[2];
+        let slope_gap = m_lo - m_hi;
         let s = if slope_gap > 1.0e-12 {
-            ((upper[1] - lower[1]) + lower[2] * lower[0] - upper[2] * upper[0]) / slope_gap
+            ((r_hi - r_lo) + m_lo * s_lo - m_hi * s_hi) / slope_gap
         } else {
-            0.5 * (lower[0] + upper[0])
+            0.5 * (s_lo + s_hi)
         }
-        .clamp(lower[0], upper[0]);
-        knots.push([s, lower[1] + lower[2] * (s - lower[0])]);
+        .clamp(s_lo, s_hi);
+        knots.push([s, r_lo + m_lo * (s - s_lo)]);
     }
     knots.push([length_mm, head_section_mm(tip_radius_mm, length_mm, cos_lean_max)]);
     knots
@@ -1124,8 +1125,10 @@ mod tests {
         for tip in [0.05, 0.06, 0.115, 0.15] {
             let knots = head_polyline_mm(tip, length, c);
             assert_eq!(knots.len(), 5, "tip {tip}: {knots:?}");
-            assert_eq!(knots[0], [0.0, head_section_mm(tip, 0.0, c)]);
-            assert_eq!(knots[4], [length, head_section_mm(tip, length, c)]);
+            // Exact to the bit: the ends are the law's own values.
+            let bits = |point: [f64; 2]| point.map(f64::to_bits);
+            assert_eq!(bits(knots[0]), bits([0.0, head_section_mm(tip, 0.0, c)]), "{knots:?}");
+            assert_eq!(bits(knots[4]), bits([length, head_section_mm(tip, length, c)]), "{knots:?}");
             assert!(knots.windows(2).all(|w| w[0][0] < w[1][0] && w[0][1] < w[1][1]));
             for step in 0..=1000 {
                 let s = length * f64::from(step) / 1000.0;

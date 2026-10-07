@@ -1735,7 +1735,8 @@ fn push_head_segment(
     // plane (0) or the ball centre above it.
     let s_start =
         geom_kernel::vec3::dot(headed.unit, geom_kernel::vec3::sub(start, head.contact_mm)).max(0.0);
-    if !(s_start < length) {
+    // A NaN start or length is not before the joint either.
+    if s_start.partial_cmp(&length) != Some(std::cmp::Ordering::Less) {
         return None;
     }
     // The clipped polyline: the law's radius at `s_start`, then every knot
@@ -4055,24 +4056,23 @@ mod headed_arm_tests {
     /// `s_i = L (i/3)^3` meeting each other, between the exact ends. A fixture
     /// input only: the production polyline is `plinth_sweep::heads::
     /// head_polyline_mm`, tested against the law and the plan's numbers there.
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "a tangent index of at most 3 is exact in f64"
-    )]
     fn knots(tip: f64, length: f64) -> Vec<[f64; 2]> {
         let a = tip * tip / cos_lean();
-        let tangents: Vec<[f64; 3]> = (0..4)
+        let tangents: Vec<[f64; 3]> = (0..4_i32)
             .map(|index| {
-                let s = length * (index as f64 / 3.0).powi(3);
+                let s = length * (f64::from(index) / 3.0).powi(3);
                 let r = law(tip, s);
                 [s, r, 4.0 * a / (3.0 * r * r - a)]
             })
             .collect();
         let mut out = vec![[0.0, law(tip, 0.0)]];
         for pair in tangents.windows(2) {
-            let (lo, hi) = (pair[0], pair[1]);
-            let s = ((hi[1] - lo[1]) + lo[2] * lo[0] - hi[2] * hi[0]) / (lo[2] - hi[2]);
-            out.push([s, lo[1] + lo[2] * (s - lo[0])]);
+            // Each tangent is (s, r, slope); the two lines meet where
+            // r_lo + m_lo (s - s_lo) = r_hi + m_hi (s - s_hi).
+            let [s_lo, r_lo, m_lo] = pair[0];
+            let [s_hi, r_hi, m_hi] = pair[1];
+            let s = (r_hi - r_lo + m_lo * s_lo - m_hi * s_hi) / (m_lo - m_hi);
+            out.push([s, r_lo + m_lo * (s - s_lo)]);
         }
         out.push([length, law(tip, length)]);
         out
@@ -4309,7 +4309,8 @@ mod headed_arm_tests {
                         .map(|axis| (point(p.end_mm)[axis] - point(p.start_mm)[axis]).powi(2))
                         .sum::<f64>()
                         .sqrt();
-                    std::f64::consts::PI * h * (r0 * r0 + r0 * r1 + r1 * r1) / 3.0
+                    // The frustum volume, pi h (r0^2 + r0 r1 + r1^2) / 3.
+                    std::f64::consts::PI * h * (r0 * (r0 + r1) + r1 * r1) / 3.0
                 })
                 .sum();
             let steps = 2000;
@@ -4383,10 +4384,10 @@ mod drawn_span_ramp_tests {
             (thin, thin)
         );
         // The frustum starts at the top of the last thin layer (z = 13).
-        assert_eq!(spans[0].bottom_z_mm, 13.0);
+        assert!((spans[0].bottom_z_mm - 13.0).abs() < 1e-12, "{spans:?}");
         assert!((spans[1].top_radius_mm - thin).abs() < 1e-12);
         assert!((spans[1].bottom_radius_mm - wide).abs() < 1e-12);
-        assert_eq!(spans[1].bottom_z_mm, 5.0);
+        assert!((spans[1].bottom_z_mm - 5.0).abs() < 1e-12, "{spans:?}");
         assert!((spans[2].top_radius_mm - wide).abs() < 1e-12);
         assert!((spans[2].bottom_radius_mm - wide).abs() < 1e-12);
     }
@@ -4451,17 +4452,17 @@ mod drawn_span_ramp_tests {
         // The lone step is a shoulder: a span ends at 0.3 on z = 8.
         let at_step = spans
             .iter()
-            .find(|s| s.bottom_z_mm == 8.0)
+            .find(|s| (s.bottom_z_mm - 8.0).abs() < 1e-12)
             .expect("a span ends at the step");
-        assert_eq!(at_step.bottom_radius_mm, 0.3);
+        assert!((at_step.bottom_radius_mm - 0.3).abs() < 1e-12, "{spans:?}");
         let below = spans
             .iter()
-            .find(|s| s.top_z_mm == 8.0)
+            .find(|s| (s.top_z_mm - 8.0).abs() < 1e-12)
             .expect("a span starts at the step");
-        assert_eq!(below.top_radius_mm, 0.5);
+        assert!((below.top_radius_mm - 0.5).abs() < 1e-12, "{spans:?}");
         // The ramp (cuts at z = 5, 4, 3) is continuous.
         for z in [5.0, 4.0, 3.0] {
-            for pair in spans.windows(2).filter(|p| p[0].bottom_z_mm == z) {
+            for pair in spans.windows(2).filter(|p| (p[0].bottom_z_mm - z).abs() < 1e-12) {
                 assert!((pair[0].bottom_radius_mm - pair[1].top_radius_mm).abs() < 1e-12);
             }
         }
