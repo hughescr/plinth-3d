@@ -104,6 +104,10 @@ pub struct StrandedBranchOutcome {
     /// move with them: a tie (a brace seated on it), or a resting member that
     /// carries another in turn.
     pub refused_carrying: usize,
+    /// Branches left alone because the child is HEADED, or because a member
+    /// resting on it is (the branch would re-land it). A head is frozen at
+    /// placement and nothing moves a headed arm.
+    pub headed_kept: usize,
     /// Members resting on a branched member that were re-landed on its new
     /// axis with it.
     pub resting_moved_with_branch: usize,
@@ -301,7 +305,7 @@ pub(crate) fn branch_round(
         context.flare_factor,
     );
     let mut index = ColumnHistory::new(grid);
-    crate::slenderness::stamp_all(&mut index, struts);
+    crate::slenderness::stamp_all(&mut index, struts, context.layer_height_mm);
     // Who rests on whom (lands on, or is tied to), kept up to date as this
     // round makes branches: what must move with a member, or pins it.
     let mut resting: Vec<Vec<u32>> = vec![Vec::new(); struts.len()];
@@ -344,6 +348,12 @@ pub(crate) fn branch_round(
         if laps.is_empty() {
             continue;
         }
+        // A HEADED child is never branched: its post would be re-routed and
+        // its head is frozen at placement.
+        if strut.head.is_some() {
+            outcome.headed_kept += 1;
+            continue;
+        }
         let mut decision = StrandedDecision {
             round: outcome.rounds + 1,
             member: child,
@@ -364,11 +374,18 @@ pub(crate) fn branch_round(
         // this rule's own branches.
         let mut dependants: Vec<(u32, usize)> = Vec::new();
         let mut pinned = false;
+        let mut headed_dependant = false;
         for &id in resting.get(child as usize).map_or(&[][..], Vec::as_slice) {
             let Some(rest) = struts.get(id as usize) else {
                 pinned = true;
                 break;
             };
+            // A dependant is RE-LANDED with the branch; a headed one is never
+            // moved, so the branch is refused.
+            if rest.head.is_some() {
+                headed_dependant = true;
+                break;
+            }
             match rest.landing {
                 Landing::Strut { id: host, layer }
                     if host == child
@@ -383,6 +400,12 @@ pub(crate) fn branch_round(
                     break;
                 }
             }
+        }
+        if headed_dependant {
+            outcome.headed_kept += 1;
+            decision.outcome = "headed dependant";
+            outcome.decisions.push(decision);
+            continue;
         }
         if pinned {
             outcome.refused_carrying += 1;
@@ -434,12 +457,12 @@ pub(crate) fn branch_round(
         strut.landing = Landing::Strut { id: parent, layer };
         strut.k_bottom = layer;
         strut.path = path;
-        index.stamp_shaft(child, layer, strut.k_top, strut.cell, &strut.path);
+        index.stamp_strut(strut, context.layer_height_mm);
         for (id, new_path) in moved {
             let rest = &mut struts[id as usize];
             saved.push(Saved::of(rest));
             rest.path = new_path;
-            index.stamp_shaft(id, rest.k_bottom, rest.k_top, rest.cell, &rest.path);
+            index.stamp_strut(rest, context.layer_height_mm);
             outcome.resting_moved_with_branch += 1;
         }
         made.push(Branch {
@@ -507,7 +530,10 @@ fn landing_on(
         .map(|(_, layer)| *layer)
         .min()
         .unwrap_or(k_top);
-    let hi = host.k_top.min(k_top.checked_sub(1)?).min(below.checked_sub(1)?);
+    // A headed trunk is joined only below its joint (`joinable_top_layer`;
+    // `k_top` for a straight one).
+    let host_top = host.joinable_top_layer(context.layer_height_mm)?;
+    let hi = host_top.min(k_top.checked_sub(1)?).min(below.checked_sub(1)?);
     if lo > hi {
         return None;
     }

@@ -140,6 +140,11 @@ pub struct FootprintOutcome {
     /// `(arm, fraction of disc samples on the face)`. The tip keeps its seat,
     /// trimmed, and is warned about. Not a knife edge: the face is there.
     pub moves_refused: Vec<(usize, f64)>,
+    /// HEADED tips whose disc hangs off its face: never slid (a head is frozen
+    /// at placement), so they keep their seat as a [`Footprint::MoveRefused`]
+    /// and are warned about with the fraction of the disc on the face. Also
+    /// listed in `moves_refused`.
+    pub headed_kept: usize,
     /// Proposed moves refused, by the rule the moved geometry (the arm, or a
     /// member joined to it) would have broken, and the member checks run: the
     /// path hits of the move check (review-fixes 2026-09-29).
@@ -336,7 +341,9 @@ pub(crate) fn chord_scales(
             if followed.seat_mm.is_none() && followed.base_mm.is_none() {
                 return 1.0;
             }
-            let before = crate::adapter::drawn_ends(grid, plate_z, height, strut);
+            // The chord of the member's POST (from the joint `K` for a headed
+            // arm): that is the line a follower shift tilts.
+            let before = crate::adapter::drawn_post_ends(grid, plate_z, height, strut);
             let was = chord_of(before);
             if was > 0.0 {
                 chord_of(displaced(before, followed)) / was
@@ -718,6 +725,23 @@ pub(crate) fn apply(
             continue;
         }
         outcome.tips_graded += 1;
+        // A HEADED arm is graded but never slid: its head is frozen at
+        // placement. A disc off its face keeps its seat, as a refused move.
+        if struts[arm].head.is_some() {
+            if on[arm] == total[arm] {
+                outcome.tips_on_face += 1;
+                struts[arm].seat_face.footprint = Footprint::OnFace;
+            } else {
+                #[expect(clippy::cast_precision_loss, reason = "sample counts are small")]
+                let fraction = on[arm] as f64 / total[arm].max(1) as f64;
+                outcome.headed_kept += 1;
+                outcome.moves_refused.push((arm, fraction));
+                struts[arm].seat_face.footprint = Footprint::MoveRefused {
+                    disc_on_face: fraction,
+                };
+            }
+            continue;
+        }
         if on[arm] == total[arm] {
             outcome.tips_on_face += 1;
             struts[arm].seat_face.footprint = Footprint::OnFace;
@@ -826,7 +850,7 @@ pub(crate) fn apply(
     // any, each member's own move belongs to.
     let before_ends: Vec<([f64; 3], [f64; 3])> = struts
         .iter()
-        .map(|strut| crate::adapter::drawn_ends(grid, plate_z, height, strut))
+        .map(|strut| crate::adapter::drawn_post_ends(grid, plate_z, height, strut))
         .collect();
     let mut own_accepted: Vec<Option<[f64; 3]>> = vec![None; struts.len()];
     let mut slot_of_member = vec![usize::MAX; struts.len()];
@@ -1466,14 +1490,18 @@ fn followed_shifts_with(
             return None;
         }
         let (seat, base) = (seat_mm.unwrap_or([0.0; 3]), base_mm.unwrap_or([0.0; 3]));
-        if h.k_top <= h.k_bottom || h.k_bottom == usize::MAX {
+        // The displaced axis runs from the base to the member's POST top: its
+        // frozen joint K for a headed arm (the head is never moved), its
+        // `k_top` for a straight one.
+        let post_top = h.post_top_layer();
+        if post_top <= h.k_bottom || h.k_bottom == usize::MAX {
             return Some(seat);
         }
         #[expect(
             clippy::cast_precision_loss,
             reason = "layer indices bounded by the plan's layer count are exact in f64"
         )]
-        let t = ((layer.saturating_sub(h.k_bottom)) as f64 / (h.k_top - h.k_bottom) as f64)
+        let t = ((layer.saturating_sub(h.k_bottom)) as f64 / (post_top - h.k_bottom) as f64)
             .clamp(0.0, 1.0);
         Some(std::array::from_fn(|axis| {
             t * seat[axis] + (1.0 - t) * base[axis]

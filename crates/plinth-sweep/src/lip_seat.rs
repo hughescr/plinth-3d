@@ -461,6 +461,13 @@ pub struct LipSeatOutcome {
     /// graded, and those whose shaft the trim still cuts, warned.
     pub arms_graded_after: usize,
     pub over_limit_after: Vec<LipSeatWarning>,
+    /// Arms the trigger sent (bite or clearance) that stay where they are
+    /// because they are HEADED, or because a member that would have to move
+    /// with them is. A head is frozen at placement; on the last pass.
+    pub headed_kept: usize,
+    /// HEADED arms whose shaft the emitted field's seat trim still cuts. A
+    /// head's post starts at the joint, clear of the seat plane: must read 0.
+    pub headed_bites: usize,
 }
 
 /// Every seated arm of `struts`, as the lowering will draw it on the live
@@ -694,7 +701,7 @@ pub(crate) fn apply(
         outcome.clearance_unmeasured = true;
     }
     let mut index = ColumnHistory::new(context.grid);
-    crate::congestion::stamp_all(&mut index, struts);
+    crate::congestion::stamp_all(&mut index, struts, context.layer_height_mm);
     // The roots on the plate, as the congestion census sizes them, on the
     // profiles the survey drew.
     let flare_factor = if context.flare_factor.is_finite() && context.flare_factor > 0.0 {
@@ -714,6 +721,7 @@ pub(crate) fn apply(
         flare_factor,
     );
     outcome.kept_carrying = 0;
+    outcome.headed_kept = 0;
     outcome.kept_no_candidate = 0;
     outcome.kept_locked_by_tie = 0;
     outcome.kept_locked_by_non_arm_below = 0;
@@ -768,13 +776,17 @@ pub(crate) fn apply(
             carries[member]
                 && (tied[member]
                     || if trigger.is_clearance() {
-                        followers_of[member]
-                            .iter()
-                            .any(|&follower| tied[follower] || struts[follower].kind != StrutKind::Arm)
+                        followers_of[member].iter().any(|&follower| {
+                            tied[follower]
+                                || struts[follower].kind != StrutKind::Arm
+                                || struts[follower].head.is_some()
+                        })
                     } else {
-                        children_of[member]
-                            .iter()
-                            .any(|&child| carries[child] || struts[child].kind != StrutKind::Arm)
+                        children_of[member].iter().any(|&child| {
+                            carries[child]
+                                || struts[child].kind != StrutKind::Arm
+                                || struts[child].head.is_some()
+                        })
                     })
         })
         .collect();
@@ -785,6 +797,8 @@ pub(crate) fn apply(
         .map(|(index_of, (strut, bite))| {
             trigger.sends(index_of, bite.as_ref())
                 && strut.kind == StrutKind::Arm
+                // A HEADED arm is never re-landed (its head is frozen).
+                && strut.head.is_none()
                 && strut.k_bottom != usize::MAX
                 && !locked[index_of]
         })
@@ -799,11 +813,21 @@ pub(crate) fn apply(
         {
             continue;
         }
+        // A HEADED arm is sent but never re-landed: its head is frozen at
+        // placement. Counted, and left where it is.
+        if strut.head.is_some() {
+            outcome.headed_kept += 1;
+            continue;
+        }
         // A child that is itself over its limit is re-landed first; the
         // parent is taken on the next pass, with whatever still rests on it.
         let children = followers_of[index_of].clone();
         if locked[index_of] || children.iter().any(|&child| to_move[child]) {
             outcome.kept_carrying += 1;
+            // A member that would have to move with it is HEADED: never moved.
+            if children.iter().any(|&child| struts[child].head.is_some()) {
+                outcome.headed_kept += 1;
+            }
             // Why, for the report: a cross tied to it, a member that is not an
             // arm (a brace, a mast) resting on it or below it, an arm that
             // carries others (the lip-seat rule's own lock), or a member that
@@ -1184,7 +1208,7 @@ pub(crate) fn apply(
                 was,
                 children_were: Vec::with_capacity(children.len()),
             };
-            index.stamp_shaft(id, strut.k_bottom, strut.k_top, strut.cell, &strut.path);
+            index.stamp_strut(strut, context.layer_height_mm);
             roots.retain(|disc| disc.id() != id);
             if let Some((radius, bare)) = flared {
                 let cell = proposal.candidate.cell;
@@ -1208,13 +1232,7 @@ pub(crate) fn apply(
                 record
                     .children_were
                     .push((child, std::mem::replace(&mut strut.path, child_path)));
-                index.stamp_shaft(
-                    strut.id,
-                    strut.k_bottom,
-                    strut.k_top,
-                    strut.cell,
-                    &strut.path,
-                );
+                index.stamp_strut(strut, context.layer_height_mm);
                 locked[child] = true;
                 outcome.children_moved_with_host += 1;
             }
@@ -2196,7 +2214,7 @@ mod put_back_tests {
         let mut struts = vec![mover, inserted];
         let sized_from = 1;
         assert!(
-            crate::landing_check::check_landings(&struts).clean(),
+            crate::landing_check::check_landings(&struts, 0.05).clean(),
             "the premise: I stands on M's moved shaft"
         );
         let mut moves = vec![Relanding {
@@ -2224,7 +2242,7 @@ mod put_back_tests {
             &mut refused,
             &mut outcome,
         );
-        let check = crate::landing_check::check_landings(&struts);
+        let check = crate::landing_check::check_landings(&struts, 0.05);
         println!(
             "put back: {} members left, {} inserted arms withdrawn ({} on a put-back move); \
              landing check: {} strut landings, absent {:?}, elsewhere {:?}, unrooted {:?}",
@@ -2535,6 +2553,7 @@ mod model_landing_tests {
                     k_top: u32::try_from(SLAB_TOP).expect("small"),
                     id: 0,
                     next: history.model_head[cell],
+                    landable_end: u32::MAX,
                 });
                 history.model_head[cell] = slot;
             }
@@ -2619,7 +2638,7 @@ mod model_landing_tests {
             model_tie: true,
         };
         let mut index = ColumnHistory::new(&grid);
-        crate::congestion::stamp_all(&mut index, &struts);
+        crate::congestion::stamp_all(&mut index, &struts, H);
         let (sin, cos) = 30.0_f64.to_radians().sin_cos();
         #[expect(
             clippy::cast_precision_loss,

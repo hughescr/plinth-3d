@@ -862,7 +862,9 @@ impl SweepRunReport {
             "Landings: {verdict}. Finished field: {} member-on-member landings checked; {} \
              unrooted members {:?}; {} landed on a parent that is not there at the landing \
              layer, {} on a parent that stands in another cell there; {} brace tops tied to a \
-             member that has moved; load gap (injected - plate reaction - uncarried) {:.4} mm2, \
+             member that has moved; {} heads whose path no longer carries them, {} members \
+             joined above a head's joint (both must be 0); \
+             load gap (injected - plate reaction - uncarried) {:.4} mm2, \
              of which {:.4} mm2 is peel carried under a larger event in the same arm ({} reads; \
              not lost) and {:.4} mm2 went nowhere the down-sweep can name; \
              {} over-grown merges kept because a branch they carry has nowhere to go; {} \
@@ -876,6 +878,8 @@ impl SweepRunReport {
             finished.parent_absent.len(),
             finished.parent_elsewhere.len(),
             finished.brace_tops_detached.len(),
+            finished.heads_not_intact.len(),
+            finished.joins_above_joint.len(),
             ledger.load_gap_mm2,
             ledger.absorbed_mm2,
             ledger.absorbed_reads,

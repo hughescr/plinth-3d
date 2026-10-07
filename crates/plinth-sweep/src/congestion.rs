@@ -234,6 +234,9 @@ pub struct CongestionOutcome {
     pub flank_rounds_not_relieving: usize,
     /// Searches that found no admissible plate cell outside the silhouette.
     pub outward_cells_refused: usize,
+    /// Stacked plate roots the lean left alone because the arm is HEADED: a
+    /// head is frozen at placement and nothing re-routes a headed arm.
+    pub headed_kept: usize,
     /// Flank seats the path check or the non-overlap rule refused.
     pub flank_seats_refused: usize,
     /// Ids of the arms this lane inserted, so the driver can read their carried
@@ -562,7 +565,7 @@ pub fn apply_remedies(
         return 0;
     }
     let mut index = ColumnHistory::new(grid);
-    stamp_all(&mut index, struts);
+    stamp_all(&mut index, struts, context.layer_height_mm);
     let mut placed = root_discs(grid, context.history, struts, context.flare_factor);
 
     let mut moved = 0_usize;
@@ -632,6 +635,11 @@ fn lean_congested_roots(
     }
     let mut moved = 0_usize;
     for id in congested {
+        // A HEADED arm is never re-routed: its head is frozen at placement.
+        if struts.get(id as usize).is_some_and(|strut| strut.head.is_some()) {
+            outcome.headed_kept += 1;
+            continue;
+        }
         if carries_someone.get(id as usize).copied().unwrap_or(true) {
             continue;
         }
@@ -667,7 +675,7 @@ fn lean_congested_roots(
         strut.straight_fallback = Some((strut.landing, strut.k_bottom));
         strut.fallback_path = core::mem::take(&mut strut.path);
         strut.path = path;
-        index.stamp_shaft(id, 0, strut.k_top, strut.cell, &strut.path);
+        index.stamp_strut(strut, context.layer_height_mm);
         placed[slot].cell = cell;
         placed[slot].x_mm = context.grid.center_x_mm(context.grid.col_of(cell));
         placed[slot].y_mm = context.grid.center_y_mm(context.grid.row_of(cell));
@@ -959,7 +967,7 @@ fn seat_flank_arms(
             head: None,
         });
         let arm = &struts[id as usize];
-        index.stamp_shaft(id, 0, shelf, seat, &arm.path);
+        index.stamp_strut(arm, context.layer_height_mm);
         push_disc(placed, grid, id, cell, radius, bare, false);
         outcome.arms_inserted += 1;
         outcome.inserted_ids.push(id);
@@ -1676,18 +1684,12 @@ pub fn roots_overlapping_after_sizing(
 }
 
 /// Stamp every finished member's shaft into a fresh column index.
-pub(crate) fn stamp_all(index: &mut ColumnHistory, struts: &[SweepStrut]) {
+pub(crate) fn stamp_all(index: &mut ColumnHistory, struts: &[SweepStrut], layer_height_mm: f64) {
     for strut in struts {
         if strut.k_bottom == usize::MAX || strut.k_top < strut.k_bottom {
             continue;
         }
-        index.stamp_shaft(
-            strut.id,
-            strut.k_bottom,
-            strut.k_top,
-            strut.cell,
-            &strut.path,
-        );
+        index.stamp_strut(strut, layer_height_mm);
     }
 }
 
