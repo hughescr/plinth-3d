@@ -43,6 +43,15 @@
 
 use std::collections::BTreeMap;
 
+use geom_kernel::{closest_on_tri, vec3, NativeSurface, NearFaceBatchLimits};
+use plinth_core::TipContactProfiles;
+use plinth_mesh::Mesh;
+
+use crate::drain::DrainKeepOut;
+use crate::footprint_normal::{footprint_normals, footprint_pairs, FootprintBall};
+use crate::grid::Grid;
+use crate::up_sweep::ColumnHistory;
+
 /// Halvings of a bracket: far finer than any radius this engine draws, a
 /// numerical resolution and not a physical number.
 const BISECTIONS: usize = 100;
@@ -262,6 +271,545 @@ pub struct HeadsOutcome {
     pub max_standoff_deficit_mm: f64,
 }
 
+// ---------------------------------------------------------------------------
+// The constructor: trigger, placement normal, plan, placement tests.
+//
+// Pure functions. Nothing calls them yet (a later lane wires them into
+// `commit_seat`). Every point is absolute mm in the lowering's frame (the
+// plate stands at `plate_z_mm`); the raster frame (plate at z = 0) is derived
+// from it where a layer index or the hidden-cavity map is asked.
+// ---------------------------------------------------------------------------
+
+/// `Skim(x)`: a shaft at angle `x` (cosine `cos_x`) to the normal stays inside
+/// the final gap for more than the rasterisation allowance longer than a normal
+/// approach does: `(g + r)(sec x − 1) > allowance`. A non-positive cosine is a
+/// grazing approach: it skims. `allowance_mm` is the seat law's layer + pixel
+/// (`plinth_support`'s `rasterisation_allowance_mm`).
+#[must_use]
+pub fn skims(tip_radius_mm: f64, cos_x: f64, gap_mm: f64, allowance_mm: f64) -> bool {
+    if cos_x.is_nan() || cos_x <= 0.0 {
+        return true;
+    }
+    (gap_mm + tip_radius_mm) * (1.0 / cos_x - 1.0) > allowance_mm
+}
+
+/// The registered numbers the constructor reads.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeadRule {
+    /// `g`: the registered final clearance gap.
+    pub gap_mm: f64,
+    /// `layer + pixel`: the seat law's rasterisation allowance.
+    pub allowance_mm: f64,
+    /// `c = cos λmax` ([`crate::lean::LeanLaw::cos_max_lean`]).
+    pub cos_lean_max: f64,
+    /// The registered maximum tip radius: the joint may not exceed it.
+    pub max_radius_mm: f64,
+    /// A face is admitted when its outward normal's `z` is below this
+    /// ([`crate::tip_landing::SeatFaceRule::max_normal_z`]).
+    pub max_normal_z: f64,
+    /// The layer height `h`.
+    pub layer_height_mm: f64,
+    /// Where the plate stands, in the frame of every point below.
+    pub plate_z_mm: f64,
+}
+
+/// Whether a face with outward unit normal `z` component `unit_z` is steep
+/// enough for a head at tip radius `tip_radius_lb_mm`: the face is admitted
+/// (faces down, below the rule's `max_normal_z`) and a vertical post would
+/// skim it ([`skims`] at `cos x = −unit_z`).
+#[must_use]
+pub fn head_triggers(unit_z: f64, tip_radius_lb_mm: f64, rule: &HeadRule) -> bool {
+    unit_z < 0.0
+        && unit_z < rule.max_normal_z
+        && skims(tip_radius_lb_mm, -unit_z, rule.gap_mm, rule.allowance_mm)
+}
+
+/// One seat's question to [`plan_head`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeadRequest {
+    /// `A`: the seat's axis point.
+    pub axis_point_mm: [f64; 3],
+    /// `P`: the seat face's point (the seat plane passes through it).
+    pub face_point_mm: [f64; 3],
+    /// `u`: the footprint normal at placement, outward.
+    pub unit: [f64; 3],
+    /// The tip radius lower bound the trigger and the joint are planned at.
+    pub tip_radius_lb_mm: f64,
+    /// The seat's cell at `k_top`.
+    pub seat_cell: u32,
+    /// The seat's layer.
+    pub k_top: usize,
+}
+
+/// The cell of the grid holding `(x, y)`, or `None` outside it.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a floored coordinate tested non-negative and below the grid's own dimensions first"
+)]
+fn cell_holding(grid: &Grid, x_mm: f64, y_mm: f64) -> Option<usize> {
+    let col = grid.col_coord(x_mm).floor();
+    let row = grid.row_coord(y_mm).floor();
+    if !(col >= 0.0 && row >= 0.0 && col < grid.cols() as f64 && row < grid.rows() as f64) {
+        return None;
+    }
+    Some(grid.index(row as usize, col as usize))
+}
+
+/// **Plan one head**, once, at placement. Steps, in order, each a refusal:
+///
+/// 1. [`HeadRefusal::NotSteep`] unless the trigger holds ([`head_triggers`]);
+/// 2. [`HeadRefusal::JointOverMax`] if [`solve_joint`] has no root;
+/// 3. `D = A − ((A − P)·u)·u`, `K = D + (g + r_K)·u` (exact: never snapped to
+///    a cell centre);
+/// 4. `k_joint = floor(K_z / h)` over the plate, toward the plate;
+/// 5. the joint's cell, and for `k_joint < k < k_top` the cell of the `D→K`
+///    axis at `z = k·h` (clamped to the segment), then the seat cell at
+///    `k_top`;
+/// 6. [`HeadRefusal::NoPost`] if `k_joint` is 0 (the joint is below layer 1)
+///    or not below `k_top`, or if the axis leaves the grid.
+///
+/// # Errors
+///
+/// The [`HeadRefusal`] above; the arm keeps today's straight tip.
+pub fn plan_head(req: &HeadRequest, rule: &HeadRule, grid: &Grid) -> Result<Head, HeadRefusal> {
+    let Some(unit) = vec3::normalize(req.unit) else {
+        return Err(HeadRefusal::NoFootprint);
+    };
+    if !head_triggers(unit[2], req.tip_radius_lb_mm, rule) {
+        return Err(HeadRefusal::NotSteep);
+    }
+    let Some(joint) = solve_joint(
+        req.tip_radius_lb_mm,
+        rule.gap_mm,
+        rule.cos_lean_max,
+        rule.max_radius_mm,
+    ) else {
+        return Err(HeadRefusal::JointOverMax);
+    };
+    let (a, p) = (req.axis_point_mm, req.face_point_mm);
+    let contact = vec3::sub(a, vec3::scale(unit, vec3::dot(vec3::sub(a, p), unit)));
+    let k = vec3::add(contact, vec3::scale(unit, joint.length_mm));
+    let layers_over_plate = ((k[2] - rule.plate_z_mm) / rule.layer_height_mm).floor();
+    if !(layers_over_plate >= 1.0) {
+        return Err(HeadRefusal::NoPost);
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a floored layer count tested at least one above"
+    )]
+    let k_joint = layers_over_plate as usize;
+    if k_joint >= req.k_top {
+        return Err(HeadRefusal::NoPost);
+    }
+    let cell_of = |at: [f64; 3]| {
+        cell_holding(grid, at[0], at[1])
+            .and_then(|cell| u32::try_from(cell).ok())
+            .ok_or(HeadRefusal::NoPost)
+    };
+    let joint_cell = cell_of(k)?;
+    let drop_mm = (contact[2] - k[2]).max(f64::MIN_POSITIVE);
+    let mut cells = Vec::with_capacity(req.k_top - k_joint);
+    for layer in k_joint + 1..req.k_top {
+        #[expect(clippy::cast_precision_loss, reason = "a layer index is exact in f64")]
+        let z = rule.plate_z_mm + layer as f64 * rule.layer_height_mm;
+        let t = ((contact[2] - z) / drop_mm).clamp(0.0, 1.0);
+        cells.push(cell_of(vec3::add(contact, vec3::scale(vec3::sub(k, contact), t)))?);
+    }
+    cells.push(req.seat_cell);
+    Ok(Head {
+        contact_mm: contact,
+        unit,
+        joint_mm: k,
+        k_joint,
+        joint_cell,
+        joint_radius_mm: joint.joint_radius_mm,
+        planned_tip_radius_mm: req.tip_radius_lb_mm,
+        gap_mm: rule.gap_mm,
+        cos_lean_max: rule.cos_lean_max,
+        cells,
+    })
+}
+
+/// One tip's question to [`placement_normals`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlacementBall {
+    /// `A`: the seat's axis point, the first pass's ball centre.
+    pub axis_point_mm: [f64; 3],
+    /// The seat triangle's mesh face id (the same nearest-face primitive
+    /// [`crate::tip_landing::tip_seat_faces_counted_with_ids`] uses).
+    pub seat_face: u32,
+    /// The seat triangle's own outward unit normal.
+    pub facet_normal: [f64; 3],
+    /// The tip radius lower bound.
+    pub tip_radius_lb_mm: f64,
+    /// The contact-sphere factor at that radius, read off the registry's
+    /// [`TipContactProfiles::ball_factor`]; never a literal.
+    pub ball_factor: f64,
+}
+
+impl PlacementBall {
+    /// A ball whose factor is read off the registered profile table.
+    #[must_use]
+    pub fn from_profiles(
+        axis_point_mm: [f64; 3],
+        seat_face: u32,
+        facet_normal: [f64; 3],
+        tip_radius_lb_mm: f64,
+        profiles: &TipContactProfiles,
+    ) -> Self {
+        Self {
+            axis_point_mm,
+            seat_face,
+            facet_normal,
+            tip_radius_lb_mm,
+            ball_factor: profiles.ball_factor(tip_radius_lb_mm),
+        }
+    }
+
+    fn radius_mm(&self) -> f64 {
+        self.ball_factor * self.tip_radius_lb_mm
+    }
+}
+
+/// What [`placement_normals`] reads.
+pub struct PlacementEnv<'a> {
+    pub mesh: &'a Mesh,
+    /// The model's surface index, where one was built.
+    pub surface: Option<&'a NativeSurface>,
+    /// [`crate::tip_landing::SeatFaceRule::max_normal_z`].
+    pub max_normal_z: f64,
+}
+
+/// One batched pass of the footprint kernel: the normal under each ball.
+fn footprint_pass(
+    env: &PlacementEnv<'_>,
+    balls: &[PlacementBall],
+    centres: &[[f64; 3]],
+) -> Vec<Option<[f64; 3]>> {
+    let radii: Vec<f64> = balls.iter().map(PlacementBall::radius_mm).collect();
+    let Some(pairs) = footprint_pairs(env.mesh, env.surface, centres, &radii) else {
+        return vec![None; balls.len()];
+    };
+    let questions: Vec<FootprintBall> = balls
+        .iter()
+        .zip(centres.iter().zip(&radii))
+        .map(|(ball, (&centre_mm, &radius_mm))| FootprintBall {
+            centre_mm,
+            radius_mm,
+            seat_face: ball.seat_face,
+            facet_normal: ball.facet_normal,
+            max_normal_z: env.max_normal_z,
+        })
+        .collect();
+    footprint_normals(env.mesh, &pairs, &questions)
+        .into_iter()
+        .map(|found| found.map(|f| f.normal))
+        .collect()
+}
+
+/// **The placement normal of every ball, in two batched passes** (the kernel
+/// of [`crate::footprint_normal`] over the whole slice at once).
+///
+/// Pass 1 centres each ball (radius `R = ball_factor · r_lb`) at `A`, giving
+/// `u1`. Pass 2 centres it at `D(u1)`: `A` projected onto the plane through
+/// the seat triangle's closest point to `A` with normal `u1`, giving `u2`.
+/// The answer is `u2` and the angle between `u1` and `u2`, in degrees.
+///
+/// Each answer depends on its own ball alone, so one call over three balls
+/// equals three calls over one, bit for bit.
+///
+/// # Errors (per ball)
+///
+/// [`HeadRefusal::NoFootprint`] where either pass finds no admitted, connected
+/// footprint under the ball.
+#[must_use]
+pub fn placement_normals(
+    env: &PlacementEnv<'_>,
+    balls: &[PlacementBall],
+) -> Vec<Result<([f64; 3], f64), HeadRefusal>> {
+    let first_centres: Vec<[f64; 3]> = balls.iter().map(|b| b.axis_point_mm).collect();
+    let first = footprint_pass(env, balls, &first_centres);
+    // Pass 2 runs only for the balls pass 1 measured.
+    let live: Vec<usize> = (0..balls.len()).filter(|&i| first[i].is_some()).collect();
+    let verts = env.mesh.verts();
+    let tris = env.mesh.tris();
+    let mut second_balls = Vec::with_capacity(live.len());
+    let mut second_centres = Vec::with_capacity(live.len());
+    let mut kept = Vec::with_capacity(live.len());
+    for &i in &live {
+        let (ball, Some(u1)) = (&balls[i], first[i]) else { continue };
+        let corners = tris.get(ball.seat_face as usize).and_then(|t| {
+            Some([
+                *verts.get(t[0] as usize)?,
+                *verts.get(t[1] as usize)?,
+                *verts.get(t[2] as usize)?,
+            ])
+        });
+        let Some([va, vb, vc]) = corners else { continue };
+        let a = ball.axis_point_mm;
+        let face_point = closest_on_tri(a, va, vb, vc);
+        let centre = vec3::sub(a, vec3::scale(u1, vec3::dot(vec3::sub(a, face_point), u1)));
+        second_balls.push(*ball);
+        second_centres.push(centre);
+        kept.push(i);
+    }
+    let second = footprint_pass(env, &second_balls, &second_centres);
+    let mut out = vec![Err(HeadRefusal::NoFootprint); balls.len()];
+    for (&i, u2) in kept.iter().zip(second) {
+        let (Some(u1), Some(u2)) = (first[i], u2) else { continue };
+        let residual = vec3::dot(u1, u2).clamp(-1.0, 1.0).acos().to_degrees();
+        out[i] = Ok((u2, residual));
+    }
+    out
+}
+
+/// A planned head as the placement tests see another head: its axis and its
+/// joint's radius.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeadCapsule {
+    /// `D`.
+    pub contact_mm: [f64; 3],
+    /// `K`.
+    pub joint_mm: [f64; 3],
+    /// `r_K`.
+    pub joint_radius_mm: f64,
+}
+
+impl HeadCapsule {
+    #[must_use]
+    pub fn of(head: &Head) -> Self {
+        Self {
+            contact_mm: head.contact_mm,
+            joint_mm: head.joint_mm,
+            joint_radius_mm: head.joint_radius_mm,
+        }
+    }
+}
+
+/// What [`check_head`] reads. `mesh` is the triangle store the `surface`
+/// index was built from (the index answers WHICH faces are near, not where
+/// their corners are).
+pub struct HeadCheckCtx<'a> {
+    pub grid: &'a Grid,
+    pub history: &'a ColumnHistory,
+    pub keep_out: &'a DrainKeepOut,
+    pub surface: Option<&'a NativeSurface>,
+    pub mesh: &'a Mesh,
+    pub plate_z_mm: f64,
+    pub layer_height_mm: f64,
+    pub separation_mm: f64,
+}
+
+/// Walk the head's layers `k_joint .. k_top` (the seat layer is the seat's
+/// own business): at each, every cell whose centre stands within
+/// `r(s) / cos(tilt) + extra_mm` of the axis (the horizontal reach of the
+/// inclined section), and the cell holding the axis itself, is offered to
+/// `refuses`. `true` as soon as one is refused. No allocation.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "cell ranges floored and clamped into the grid; a layer index is exact in f64"
+)]
+fn walk_axis(
+    head: &Head,
+    tip_radius_mm: f64,
+    ctx: &HeadCheckCtx<'_>,
+    extra_mm: f64,
+    mut refuses: impl FnMut(usize, usize) -> bool,
+) -> bool {
+    let (d, k) = (head.contact_mm, head.joint_mm);
+    let length = vec3::dist(d, k);
+    let drop_mm = (d[2] - k[2]).max(f64::MIN_POSITIVE);
+    let cos_tilt = (-head.unit[2]).max(f64::MIN_POSITIVE);
+    let grid = ctx.grid;
+    let top = head.k_joint + head.cells.len();
+    for layer in head.k_joint..top {
+        let z = ctx.plate_z_mm + layer as f64 * ctx.layer_height_mm;
+        let t = ((d[2] - z) / drop_mm).clamp(0.0, 1.0);
+        let at = vec3::add(d, vec3::scale(vec3::sub(k, d), t));
+        let mut radius = head_section_mm(tip_radius_mm, t * length, head.cos_lean_max);
+        if t >= 1.0 {
+            radius = radius.max(head.joint_radius_mm);
+        }
+        let reach = radius / cos_tilt + extra_mm;
+        let own = cell_holding(grid, at[0], at[1]);
+        if own.is_some_and(|cell| refuses(cell, layer)) {
+            return true;
+        }
+        let max_col = grid.cols().saturating_sub(1);
+        let max_row = grid.rows().saturating_sub(1);
+        let lo_col = grid.col_coord(at[0] - reach).floor().max(0.0) as usize;
+        let hi_col = (grid.col_coord(at[0] + reach).floor().max(0.0) as usize).min(max_col);
+        let lo_row = grid.row_coord(at[1] - reach).floor().max(0.0) as usize;
+        let hi_row = (grid.row_coord(at[1] + reach).floor().max(0.0) as usize).min(max_row);
+        for row in lo_row..=hi_row {
+            let dy = grid.center_y_mm(row) - at[1];
+            for col in lo_col..=hi_col {
+                let dx = grid.center_x_mm(col) - at[0];
+                let cell = grid.index(row, col);
+                if dx * dx + dy * dy <= reach * reach
+                    && own != Some(cell)
+                    && refuses(cell, layer)
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// A triangle clipped to the half-space `(Q − origin)·normal ≥ offset`: a
+/// convex polygon of up to four corners, in a fixed array.
+fn clip_above(
+    triangle: [[f64; 3]; 3],
+    origin: [f64; 3],
+    normal: [f64; 3],
+    offset_mm: f64,
+    out: &mut [[f64; 3]; 4],
+) -> usize {
+    let height = |q: [f64; 3]| vec3::dot(vec3::sub(q, origin), normal) - offset_mm;
+    let mut n = 0;
+    for i in 0..3 {
+        let (cur, nxt) = (triangle[i], triangle[(i + 1) % 3]);
+        let (hc, hn) = (height(cur), height(nxt));
+        if hc >= 0.0 {
+            out[n] = cur;
+            n += 1;
+        }
+        if (hc >= 0.0) != (hn >= 0.0) {
+            let t = hc / (hc - hn);
+            out[n] = vec3::add(cur, vec3::scale(vec3::sub(nxt, cur), t));
+            n += 1;
+        }
+    }
+    n
+}
+
+/// The distance from the segment `a`–`b` to the convex polygon `poly`
+/// (three or four corners, planar): the distance from a point to a convex set
+/// is convex along a segment, so a ternary search over the segment finds the
+/// minimum, and each probe is the nearest point of the polygon's fan
+/// triangles ([`closest_on_tri`]). A segment through the polygon gives zero.
+fn segment_polygon_distance(a: [f64; 3], b: [f64; 3], poly: &[[f64; 3]]) -> f64 {
+    let probe = |t: f64| {
+        let p = vec3::add(a, vec3::scale(vec3::sub(b, a), t));
+        (1..poly.len() - 1)
+            .map(|i| vec3::dist(p, closest_on_tri(p, poly[0], poly[i], poly[i + 1])))
+            .fold(f64::INFINITY, f64::min)
+    };
+    let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+    for _ in 0..48 {
+        let third = (hi - lo) / 3.0;
+        let (m1, m2) = (lo + third, hi - third);
+        if probe(m1) <= probe(m2) {
+            hi = m2;
+        } else {
+            lo = m1;
+        }
+    }
+    probe(0.5 * (lo + hi))
+}
+
+/// **The placement tests of one head**, against everything accepted before it.
+/// In order, each a refusal:
+///
+/// * (a) [`HeadRefusal::HiddenCavity`]: the whole `D→K` solid lies in the
+///   hidden-cavity map (`history.hidden`, not a strut's `interior` flag);
+/// * (b) [`HeadRefusal::InDrain`]: some cell within `r(s)` of the axis, at a
+///   layer `k_joint .. k_top − 1`, is refused by the drain keep-out;
+/// * (c) [`HeadRefusal::HitsMember`]: a stamped shaft stands within
+///   `r(s) + separation` of the axis at those layers;
+/// * (d) [`HeadRefusal::HitsHead`]: the segment distance to an accepted head
+///   is under `r_K + r_K,other + separation`;
+/// * (e) [`HeadRefusal::HitsModel`]: ONE batched surface query for the
+///   segment `D→K` at `r_K + g` finds the candidate faces; each is clipped to
+///   the half-space `(Q − D)·u ≥ g` (below it is the contact zone, so the seat
+///   surface is exempt) and the clipped part's distance to the axis from
+///   `D + g·u` to `K` must stay at least `r_K + g`. A concave wall near the
+///   axis above height `g` is refused; the seat face and convex surroundings
+///   are not;
+/// * (f) [`HeadRefusal::NoSurface`] where there is no surface index (or it
+///   refused the query): the model cannot be tested, so no head is built.
+///
+/// # Errors
+///
+/// The first failing check's [`HeadRefusal`].
+pub fn check_head(
+    head: &Head,
+    tip_radius_mm: f64,
+    ctx: &HeadCheckCtx<'_>,
+    accepted: &[HeadCapsule],
+) -> Result<(), HeadRefusal> {
+    let (d, k, r_k) = (head.contact_mm, head.joint_mm, head.joint_radius_mm);
+    // (a) The hidden-cavity map speaks the raster frame: the plate at z = 0.
+    let raster = |p: [f64; 3]| [p[0], p[1], p[2] - ctx.plate_z_mm];
+    if ctx.history.hidden.segment_hidden(raster(d), raster(k), r_k) {
+        return Err(HeadRefusal::HiddenCavity);
+    }
+    // (b)
+    if walk_axis(head, tip_radius_mm, ctx, 0.0, |cell, layer| {
+        !ctx.keep_out.admits(cell, layer)
+    }) {
+        return Err(HeadRefusal::InDrain);
+    }
+    // (c)
+    if walk_axis(head, tip_radius_mm, ctx, ctx.separation_mm, |cell, layer| {
+        ctx.history.shaft_blocks(cell, layer, None)
+    }) {
+        return Err(HeadRefusal::HitsMember);
+    }
+    // (d)
+    for other in accepted {
+        let (distance, _, _) =
+            geom_kernel::segment_segment_distance(d, k, other.contact_mm, other.joint_mm);
+        if distance < r_k + other.joint_radius_mm + ctx.separation_mm {
+            return Err(HeadRefusal::HitsHead);
+        }
+    }
+    // (e), (f)
+    let Some(surface) = ctx.surface else {
+        return Err(HeadRefusal::NoSurface);
+    };
+    let reach_mm = r_k + head.gap_mm;
+    let limits = NearFaceBatchLimits {
+        max_rows: 1,
+        max_faces_per_row: surface.nfaces(),
+        max_total_faces: usize::MAX,
+    };
+    let Ok(found) = surface.faces_near_segments_batch_classified(&[d], &[k], &[reach_mm], limits)
+    else {
+        return Err(HeadRefusal::NoSurface);
+    };
+    let from = vec3::add(d, vec3::scale(head.unit, head.gap_mm));
+    let (verts, tris) = (ctx.mesh.verts(), ctx.mesh.tris());
+    let mut polygon = [[0.0; 3]; 4];
+    for &face in found.rows.first().map_or(&[][..], Vec::as_slice) {
+        let Some(&[ia, ib, ic]) = tris.get(face as usize) else { continue };
+        let (Some(&va), Some(&vb), Some(&vc)) = (
+            verts.get(ia as usize),
+            verts.get(ib as usize),
+            verts.get(ic as usize),
+        ) else {
+            continue;
+        };
+        let corners = clip_above(
+            [va, vb, vc],
+            d,
+            head.unit,
+            head.gap_mm,
+            &mut polygon,
+        );
+        if corners >= 3 && segment_polygon_distance(from, k, &polygon[..corners]) < reach_mm {
+            return Err(HeadRefusal::HitsModel);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -478,4 +1026,542 @@ mod tests {
     /// Computed by the code of `dffb6f3`, before heads existed, for the two
     /// struts above.
     const PINNED_DIGEST: &str = "f72fd0a62fafab0e";
+}
+
+/// The constructor's own tests: the trigger table, the worked head, one
+/// fixture per refusal reason, and the batched placement normal.
+#[cfg(test)]
+mod constructor_tests {
+    use super::{
+        check_head, head_triggers, plan_head, placement_normals, skims, Head, HeadCapsule,
+        HeadCheckCtx, HeadRefusal, HeadRequest, HeadRule, PlacementBall, PlacementEnv,
+    };
+    use crate::cavity::fixtures as cavity;
+    use crate::drain::{DrainKeepOut, DrainSpec};
+    use crate::grid::{lay_out_at, Grid};
+    use crate::up_sweep::ColumnHistory;
+    use geom_kernel::{closest_on_tri, vec3, NativeSurface, NativeSurfaceConfig};
+    use plinth_core::m0_constants;
+    use plinth_mesh::Mesh;
+
+    const H: f64 = 0.05;
+    const GAP: f64 = 0.3;
+    const PIXEL: f64 = 0.0192;
+    const SEPARATION: f64 = 0.1;
+
+    fn allowance() -> f64 {
+        H + PIXEL
+    }
+
+    fn cos_lean() -> f64 {
+        57.5_f64.to_radians().cos()
+    }
+
+    /// Faces admitted up to 70 degrees from straight down.
+    fn rule(plate_z_mm: f64) -> HeadRule {
+        HeadRule {
+            gap_mm: GAP,
+            allowance_mm: allowance(),
+            cos_lean_max: cos_lean(),
+            max_radius_mm: 1.0,
+            max_normal_z: -70.0_f64.to_radians().cos(),
+            layer_height_mm: H,
+            plate_z_mm,
+        }
+    }
+
+    /// The outward normal of a face `deg` from straight down, leaning to +x.
+    fn unit_at(deg: f64) -> [f64; 3] {
+        [deg.to_radians().sin(), 0.0, -deg.to_radians().cos()]
+    }
+
+    fn grid() -> Grid {
+        lay_out_at(-2.0, -2.0, 0.1, 100, 100)
+    }
+
+    fn surface_of(mesh: &Mesh) -> NativeSurface {
+        NativeSurface::from_indexed(
+            mesh.verts(),
+            mesh.tris(),
+            NativeSurfaceConfig { grid_pitch_mm: 0.25, max_grid_bytes: 64 << 20 },
+        )
+        .expect("a surface")
+    }
+
+    /// `(e1, e2)`: a basis of the plane whose normal is `u`.
+    fn basis(u: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+        let e2 = [0.0, 1.0, 0.0];
+        (vec3::normalize(vec3::cross(e2, u)).expect("a basis"), e2)
+    }
+
+    /// `origin + a·e + b·f` for the four corners of `[-ha, ha] x [lo_b, hi_b]`.
+    fn rect(origin: [f64; 3], e: [f64; 3], f: [f64; 3], a: (f64, f64), b: (f64, f64)) -> [[f64; 3]; 4] {
+        let at = |s: f64, t: f64| vec3::add(origin, vec3::add(vec3::scale(e, s), vec3::scale(f, t)));
+        [at(a.0, b.0), at(a.1, b.0), at(a.1, b.1), at(a.0, b.1)]
+    }
+
+    fn quads_mesh(quads: &[[[f64; 3]; 4]]) -> Mesh {
+        let mut verts = Vec::new();
+        let mut tris = Vec::new();
+        for quad in quads {
+            let base = u32::try_from(verts.len()).expect("small");
+            verts.extend_from_slice(quad);
+            tris.push([base, base + 1, base + 2]);
+            tris.push([base, base + 2, base + 3]);
+        }
+        Mesh::new(verts, tris).expect("quads")
+    }
+
+    /// The head of the worked example, D on a face `41.3` degrees from down.
+    fn worked_head(contact: [f64; 3], plate_z: f64) -> Head {
+        let u = unit_at(41.3);
+        let top = ((contact[2] - plate_z) / H).ceil();
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a small positive layer")]
+        let k_top = top as usize;
+        let req = HeadRequest {
+            axis_point_mm: vec3::add(contact, vec3::scale(u, 0.2)),
+            face_point_mm: contact,
+            unit: u,
+            tip_radius_lb_mm: 0.05,
+            seat_cell: 5,
+            k_top,
+        };
+        plan_head(&req, &rule(plate_z), &grid()).expect("the worked head")
+    }
+
+    struct Scene {
+        mesh: Mesh,
+        surface: NativeSurface,
+        grid: Grid,
+        history: ColumnHistory,
+        keep_out: DrainKeepOut,
+    }
+
+    impl Scene {
+        fn of(mesh: Mesh) -> Self {
+            let grid = grid();
+            Self {
+                surface: surface_of(&mesh),
+                history: ColumnHistory::new(&grid),
+                keep_out: DrainKeepOut::none(),
+                grid,
+                mesh,
+            }
+        }
+
+        fn ctx(&self) -> HeadCheckCtx<'_> {
+            HeadCheckCtx {
+                grid: &self.grid,
+                history: &self.history,
+                keep_out: &self.keep_out,
+                surface: Some(&self.surface),
+                mesh: &self.mesh,
+                plate_z_mm: 0.0,
+                layer_height_mm: H,
+                separation_mm: SEPARATION,
+            }
+        }
+    }
+
+    const D: [f64; 3] = [1.5, 1.0, 2.03];
+
+    /// A planar seat face through `D` with the head's own normal, and a
+    /// `wall` quad (if any) standing on it `lateral` mm from the axis.
+    fn planar_scene(wall_lateral: Option<f64>) -> Scene {
+        let u = unit_at(41.3);
+        let (e1, e2) = basis(u);
+        let mut quads = vec![rect(D, e1, e2, (-1.5, 1.5), (-1.5, 1.5))];
+        if let Some(lateral) = wall_lateral {
+            quads.push(rect(
+                vec3::add(D, vec3::scale(e1, lateral)),
+                u,
+                e2,
+                (0.0, 3.0),
+                (-1.5, 1.5),
+            ));
+        }
+        Scene::of(quads_mesh(&quads))
+    }
+
+    // ---- (1) the trigger ---------------------------------------------------
+
+    #[test]
+    fn the_trigger_table() {
+        let r = rule(0.0);
+        let cases = [
+            (0.05, 32.0, false),
+            (0.05, 35.0, true),
+            (0.15, 31.0, true),
+            (0.05, 0.0, false),
+            // Beyond the admitted band: 75 degrees from down, past 70.
+            (0.05, 75.0, false),
+        ];
+        for (radius, deg, expected) in cases {
+            let got = head_triggers(unit_at(deg)[2], radius, &r);
+            println!("trigger r {radius} at {deg} deg -> {got}");
+            assert_eq!(got, expected, "r {radius} at {deg} deg");
+        }
+        assert!((allowance() - 0.0692).abs() < 1e-12);
+        // The bare law: a grazing (non-positive) cosine skims, a square one does not.
+        assert!(skims(0.05, 0.0, GAP, allowance()));
+        assert!(skims(0.05, -0.2, GAP, allowance()));
+        assert!(skims(0.05, f64::NAN, GAP, allowance()));
+        assert!(!skims(0.05, 1.0, GAP, allowance()));
+        // A face that points up is never steep.
+        assert!(!head_triggers(0.5, 0.05, &r));
+    }
+
+    // ---- (2) the worked head -----------------------------------------------
+
+    #[test]
+    fn the_worked_head_has_the_plan_numbers() {
+        // Shifted by a plate height the answer is the same one.
+        for plate_z in [0.0, 3.0] {
+            let contact = [D[0], D[1], D[2] + plate_z];
+            let head = worked_head(contact, plate_z);
+            let u = unit_at(41.3);
+            assert!((head.joint_radius_mm - 0.2204).abs() < 1e-4, "{}", head.joint_radius_mm);
+            let length = vec3::dist(head.contact_mm, head.joint_mm);
+            assert!((length - 0.5204).abs() < 1e-4, "|DK| = {length}");
+            for axis in 0..3 {
+                assert!((head.contact_mm[axis] - contact[axis]).abs() < 1e-12, "D");
+                let want = contact[axis] + (GAP + head.joint_radius_mm) * u[axis];
+                assert!((head.joint_mm[axis] - want).abs() < 1e-9, "K exact, axis {axis}");
+            }
+            // K_z over the plate is 1.639 mm: layer 32 at 0.05 mm, rounded toward the plate.
+            let expected = ((head.joint_mm[2] - plate_z) / H).floor();
+            assert!((expected - 32.0).abs() < f64::EPSILON);
+            assert_eq!(head.k_joint, 32, "floor(K_z / h)");
+            let k_top = 41;
+            assert_eq!(head.cells.len(), k_top - head.k_joint);
+            assert_eq!(*head.cells.last().expect("cells"), 5, "the last cell is the seat cell");
+            // Every cell lies within half a cell of the axis at its layer.
+            let grid = grid();
+            let drop_mm = head.contact_mm[2] - head.joint_mm[2];
+            for (offset, &cell) in head.cells[..head.cells.len() - 1].iter().enumerate() {
+                let layer = head.k_joint + 1 + offset;
+                #[expect(clippy::cast_precision_loss, reason = "small layer index")]
+                let z = plate_z + layer as f64 * H;
+                let t = ((head.contact_mm[2] - z) / drop_mm).clamp(0.0, 1.0);
+                let x = head.contact_mm[0] + t * (head.joint_mm[0] - head.contact_mm[0]);
+                let y = head.contact_mm[1] + t * (head.joint_mm[1] - head.contact_mm[1]);
+                let (col, row) = (grid.col_of(cell as usize), grid.row_of(cell as usize));
+                assert!((grid.center_x_mm(col) - x).abs() <= 0.5 * grid.pitch_mm() + 1e-9, "layer {layer} x");
+                assert!((grid.center_y_mm(row) - y).abs() <= 0.5 * grid.pitch_mm() + 1e-9, "layer {layer} y");
+            }
+            let joint_col = grid.col_of(head.joint_cell as usize);
+            assert!((grid.center_x_mm(joint_col) - head.joint_mm[0]).abs() <= 0.5 * grid.pitch_mm() + 1e-9);
+            println!(
+                "worked head (plate {plate_z}): r_K {:.4} |DK| {length:.4} k_joint {} cells {}",
+                head.joint_radius_mm,
+                head.k_joint,
+                head.cells.len()
+            );
+        }
+    }
+
+    // ---- (3) the refusals of the plan -----------------------------------------
+
+    fn request(contact: [f64; 3], radius: f64, k_top: usize) -> HeadRequest {
+        let u = unit_at(41.3);
+        HeadRequest {
+            axis_point_mm: contact,
+            face_point_mm: contact,
+            unit: u,
+            tip_radius_lb_mm: radius,
+            seat_cell: 5,
+            k_top,
+        }
+    }
+
+    #[test]
+    fn the_plan_refuses_by_reason() {
+        let grid = grid();
+        let r = rule(0.0);
+        let refusal = |req: HeadRequest| plan_head(&req, &r, &grid).expect_err("a refusal");
+        let over = refusal(request(D, 0.30, 41));
+        println!("r 0.30 -> {over:?}");
+        assert_eq!(over, HeadRefusal::JointOverMax);
+        // Just under the threshold of 0.2944 still builds.
+        assert!(plan_head(&request(D, 0.2943, 41), &r, &grid).is_ok());
+        // K below layer 1: D at 0.3 puts K under the plate.
+        let low = refusal(request([1.5, 1.0, 0.3], 0.05, 41));
+        println!("K under the plate -> {low:?}");
+        assert_eq!(low, HeadRefusal::NoPost);
+        // K in layer 0 (0.029 mm over the plate).
+        assert_eq!(refusal(request([1.5, 1.0, 0.42], 0.05, 41)), HeadRefusal::NoPost);
+        // K at or above the seat's own layer.
+        let flat_top = refusal(request(D, 0.05, 32));
+        println!("k_joint = k_top -> {flat_top:?}");
+        assert_eq!(flat_top, HeadRefusal::NoPost);
+        // The axis leaves the raster.
+        assert_eq!(refusal(request([7.9, 1.0, 2.03], 0.05, 41)), HeadRefusal::NoPost);
+        // Not steep: straight down, and a face beyond the admitted band.
+        let straight = HeadRequest { unit: unit_at(0.0), ..request(D, 0.05, 41) };
+        assert_eq!(refusal(straight), HeadRefusal::NotSteep);
+        let beyond = HeadRequest { unit: unit_at(75.0), ..request(D, 0.05, 41) };
+        assert_eq!(refusal(beyond), HeadRefusal::NotSteep);
+        let shallow = HeadRequest { unit: unit_at(32.0), ..request(D, 0.05, 41) };
+        assert_eq!(refusal(shallow), HeadRefusal::NotSteep);
+    }
+
+    // ---- (4) check_head ----------------------------------------------------------
+
+    #[test]
+    fn a_planar_seat_face_passes() {
+        let scene = planar_scene(None);
+        let head = worked_head(D, 0.0);
+        let verdict = check_head(&head, 0.05, &scene.ctx(), &[]);
+        println!("planar seat face -> {verdict:?}");
+        assert_eq!(verdict, Ok(()));
+    }
+
+    #[test]
+    fn a_concave_wall_beside_the_axis_is_refused() {
+        let head = worked_head(D, 0.0);
+        // 0.2 mm from the axis, rising from the seat plane to 3 mm over it.
+        let near = planar_scene(Some(0.2));
+        let verdict = check_head(&head, 0.05, &near.ctx(), &[]);
+        println!("concave wall at 0.2 mm -> {verdict:?}");
+        assert_eq!(verdict, Err(HeadRefusal::HitsModel));
+        // The same wall far away (1.2 mm) clears the 0.52 mm sphere + gap.
+        let far = planar_scene(Some(1.2));
+        assert_eq!(check_head(&head, 0.05, &far.ctx(), &[]), Ok(()));
+    }
+
+    /// A lower cap of a sphere of radius 3 about (2, 2, 10), outward normals,
+    /// rings every 1.5 degrees to 60 degrees from straight down.
+    fn sphere_cap() -> Mesh {
+        let (centre, radius) = ([2.0, 2.0, 10.0], 3.0);
+        let (rings, segments) = (40_usize, 240_usize);
+        let point = |ring: usize, seg: usize| {
+            #[expect(clippy::cast_precision_loss, reason = "small indices")]
+            let (theta, phi) = (
+                (60.0_f64 * ring as f64 / rings as f64).to_radians(),
+                (360.0_f64 * seg as f64 / segments as f64).to_radians(),
+            );
+            [
+                centre[0] + radius * theta.sin() * phi.cos(),
+                centre[1] + radius * theta.sin() * phi.sin(),
+                centre[2] - radius * theta.cos(),
+            ]
+        };
+        let mut verts = vec![point(0, 0)];
+        for ring in 1..=rings {
+            for seg in 0..segments {
+                verts.push(point(ring, seg));
+            }
+        }
+        let at = |ring: usize, seg: usize| -> u32 {
+            u32::try_from(if ring == 0 { 0 } else { 1 + (ring - 1) * segments + seg % segments })
+                .expect("small")
+        };
+        let mut tris = Vec::new();
+        for ring in 0..rings {
+            for seg in 0..segments {
+                let (a, b, c, d) = (at(ring, seg), at(ring, seg + 1), at(ring + 1, seg + 1), at(ring + 1, seg));
+                if ring == 0 {
+                    tris.push([a, c, d]);
+                } else {
+                    tris.push([a, b, c]);
+                    tris.push([a, c, d]);
+                }
+            }
+        }
+        // Wind every triangle outward (away from the sphere's centre).
+        for tri in &mut tris {
+            let [a, b, c] = tri.map(|i| verts[i as usize]);
+            let normal = vec3::cross(vec3::sub(b, a), vec3::sub(c, a));
+            let mid = vec3::scale(vec3::add(vec3::add(a, b), c), 1.0 / 3.0);
+            if vec3::dot(normal, vec3::sub(mid, centre)) < 0.0 {
+                tri.swap(1, 2);
+            }
+        }
+        Mesh::new(verts, tris).expect("a sphere cap")
+    }
+
+    /// A seat ball just outside the cap, `deg` from straight down, azimuth 0.
+    fn sphere_ball(mesh: &Mesh, deg: f64, radius: f64) -> (PlacementBall, [f64; 3]) {
+        let radial = unit_at(deg);
+        let on = [2.0 + 3.0 * radial[0], 2.0, 10.0 + 3.0 * radial[2]];
+        let a = vec3::add(on, vec3::scale(radial, 0.02));
+        let (verts, tris) = (mesh.verts(), mesh.tris());
+        let mut best = (f64::INFINITY, 0_u32);
+        for (id, t) in tris.iter().enumerate() {
+            let near = closest_on_tri(a, verts[t[0] as usize], verts[t[1] as usize], verts[t[2] as usize]);
+            let distance = vec3::dist(a, near);
+            if distance < best.0 {
+                best = (distance, u32::try_from(id).expect("small"));
+            }
+        }
+        let t = tris[best.1 as usize];
+        let [va, vb, vc] = [verts[t[0] as usize], verts[t[1] as usize], verts[t[2] as usize]];
+        let facet = vec3::normalize(vec3::cross(vec3::sub(vb, va), vec3::sub(vc, va))).expect("a facet");
+        let constants = m0_constants().expect("registry");
+        let profiles = constants.evidence().chitubox_tip_contact_profiles().value();
+        (PlacementBall::from_profiles(a, best.1, facet, radius, profiles), on)
+    }
+
+    #[test]
+    fn a_convex_sphere_underside_passes_and_the_normal_is_radial() {
+        let mesh = sphere_cap();
+        let (ball, on) = sphere_ball(&mesh, 41.3, 0.05);
+        let env = PlacementEnv { mesh: &mesh, surface: None, max_normal_z: rule(0.0).max_normal_z };
+        let found = placement_normals(&env, &[ball]);
+        let (u2, residual) = found[0].expect("a footprint");
+        let radial = unit_at(41.3);
+        let off = vec3::dot(u2, radial).clamp(-1.0, 1.0).acos().to_degrees();
+        println!("sphere underside: normal {off:.3} deg off radial, residual {residual:.3} deg");
+        assert!(off < 1.0, "within 1 degree of the radial normal: {off}");
+        assert!(residual.is_finite() && (0.0..1.0).contains(&residual), "residual {residual}");
+        // The batched surface route gives the same bits as the scan route.
+        let surface = surface_of(&mesh);
+        let env_surface = PlacementEnv { surface: Some(&surface), ..env };
+        assert_eq!(placement_normals(&env_surface, &[ball]), found);
+        // A head on that normal.
+        let (verts, tris) = (mesh.verts(), mesh.tris());
+        let t = tris[ball.seat_face as usize];
+        let face_point = closest_on_tri(
+            ball.axis_point_mm,
+            verts[t[0] as usize],
+            verts[t[1] as usize],
+            verts[t[2] as usize],
+        );
+        let top = (face_point[2] / H).ceil();
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a small positive layer")]
+        let k_top = top as usize;
+        let req = HeadRequest {
+            axis_point_mm: ball.axis_point_mm,
+            face_point_mm: face_point,
+            unit: u2,
+            tip_radius_lb_mm: 0.05,
+            seat_cell: 5,
+            k_top,
+        };
+        let head = plan_head(&req, &rule(0.0), &grid()).expect("a head on the sphere");
+        let scene = Scene::of(mesh);
+        let verdict = check_head(&head, 0.05, &scene.ctx(), &[]);
+        println!("convex sphere underside (contact at {on:?}) -> {verdict:?}");
+        assert_eq!(verdict, Ok(()));
+    }
+
+    #[test]
+    fn a_drain_keep_out_across_the_head_refuses_it() {
+        let mut scene = planar_scene(None);
+        let head = worked_head(D, 0.0);
+        let mid = vec3::scale(vec3::add(head.contact_mm, head.joint_mm), 0.5);
+        assert_eq!(check_head(&head, 0.05, &scene.ctx(), &[]), Ok(()), "control: no drain");
+        let drain = DrainSpec { outlet_mm: mid, outward_axis: [0.0, 1.0, 0.0], radius_mm: 0.3 };
+        scene.keep_out = DrainKeepOut::build(&scene.grid, &[drain], 0.1, 0.5, 400, 0.0, H);
+        let verdict = check_head(&head, 0.05, &scene.ctx(), &[]);
+        println!("drain keep-out across the head -> {verdict:?}");
+        assert_eq!(verdict, Err(HeadRefusal::InDrain));
+    }
+
+    #[test]
+    fn a_shaft_beside_the_head_refuses_it() {
+        let mut scene = planar_scene(None);
+        let head = worked_head(D, 0.0);
+        let mid = vec3::scale(vec3::add(head.contact_mm, head.joint_mm), 0.5);
+        // 0.2 mm beside the axis: inside r(s)/cos + separation (about 0.33).
+        let beside = super::cell_holding(&scene.grid, mid[0] + 0.2, mid[1]).expect("in the raster");
+        scene.history.stamp_shaft(9, 0, 100, beside, &[]);
+        let verdict = check_head(&head, 0.05, &scene.ctx(), &[]);
+        println!("shaft stamped 0.2 mm beside the head -> {verdict:?}");
+        assert_eq!(verdict, Err(HeadRefusal::HitsMember));
+        // A shaft 1 mm away does not.
+        let mut far = planar_scene(None);
+        let far_cell = super::cell_holding(&far.grid, mid[0] + 1.0, mid[1]).expect("in the raster");
+        far.history.stamp_shaft(9, 0, 100, far_cell, &[]);
+        assert_eq!(check_head(&head, 0.05, &far.ctx(), &[]), Ok(()));
+    }
+
+    #[test]
+    fn a_second_head_close_to_the_first_is_refused() {
+        let scene = planar_scene(None);
+        let head = worked_head(D, 0.0);
+        let mut other = HeadCapsule::of(&head);
+        other.contact_mm[1] += 0.3;
+        other.joint_mm[1] += 0.3;
+        let verdict = check_head(&head, 0.05, &scene.ctx(), &[other]);
+        println!("second head 0.3 mm away -> {verdict:?}");
+        assert_eq!(verdict, Err(HeadRefusal::HitsHead));
+        // 1.0 mm away clears r_K + r_K + separation = 0.54.
+        other.contact_mm[1] += 0.7;
+        other.joint_mm[1] += 0.7;
+        assert_eq!(check_head(&head, 0.05, &scene.ctx(), &[other]), Ok(()));
+    }
+
+    #[test]
+    fn a_head_inside_a_hidden_cavity_is_refused() {
+        let mesh = cavity::cavity_box(false, false);
+        let (map, cavity_grid) = cavity::map_of(&mesh, &[]);
+        // Under the cavity's ceiling (z = 21), well inside it.
+        let contact = [5.0, 5.0, 19.02];
+        let u = unit_at(41.3);
+        let req = HeadRequest {
+            axis_point_mm: contact,
+            face_point_mm: contact,
+            unit: u,
+            tip_radius_lb_mm: 0.05,
+            seat_cell: 5,
+            k_top: 381,
+        };
+        let head = plan_head(&req, &rule(0.0), &cavity_grid).expect("a head in the cavity");
+        let surface = surface_of(&mesh);
+        let mut history = ColumnHistory::new(&cavity_grid);
+        let keep_out = DrainKeepOut::none();
+        let check = |history: &ColumnHistory| {
+            let ctx = HeadCheckCtx {
+                grid: &cavity_grid,
+                history,
+                keep_out: &keep_out,
+                surface: Some(&surface),
+                mesh: &mesh,
+                plate_z_mm: 0.0,
+                layer_height_mm: H,
+                separation_mm: SEPARATION,
+            };
+            check_head(&head, 0.05, &ctx, &[])
+        };
+        assert_eq!(check(&history), Ok(()), "control: no map");
+        history.hidden = map;
+        let verdict = check(&history);
+        println!("head in a hidden cavity -> {verdict:?}");
+        assert_eq!(verdict, Err(HeadRefusal::HiddenCavity));
+    }
+
+    #[test]
+    fn no_surface_index_is_a_refusal() {
+        let scene = planar_scene(None);
+        let head = worked_head(D, 0.0);
+        let mut ctx = scene.ctx();
+        ctx.surface = None;
+        let verdict = check_head(&head, 0.05, &ctx, &[]);
+        println!("no surface -> {verdict:?}");
+        assert_eq!(verdict, Err(HeadRefusal::NoSurface));
+    }
+
+    // ---- (5) the batched placement normal -------------------------------------------
+
+    #[test]
+    fn three_balls_in_one_call_equal_three_calls_bit_for_bit() {
+        let mesh = sphere_cap();
+        let surface = surface_of(&mesh);
+        let env = PlacementEnv { mesh: &mesh, surface: Some(&surface), max_normal_z: rule(0.0).max_normal_z };
+        let (low, _) = sphere_ball(&mesh, 20.0, 0.05);
+        let (mid, _) = sphere_ball(&mesh, 41.3, 0.15);
+        // A ball in the air over nothing: no footprint.
+        let air = PlacementBall { axis_point_mm: [2.0, 2.0, 50.0], ..low };
+        let balls = [low, mid, air];
+        let together = placement_normals(&env, &balls);
+        let apart: Vec<_> = balls.iter().map(|b| placement_normals(&env, &[*b])[0]).collect();
+        assert_eq!(together, apart);
+        assert!(together[0].is_ok() && together[1].is_ok());
+        assert_eq!(together[2], Err(HeadRefusal::NoFootprint));
+        println!("3-ball call: {together:?}");
+        // The same without the surface index (the scan route).
+        let scan = PlacementEnv { surface: None, ..env };
+        assert_eq!(placement_normals(&scan, &balls), together);
+    }
 }
