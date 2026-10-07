@@ -5821,6 +5821,13 @@ fn plan_cross(
         // refused outright (Cylinder: 3,915 refusals below the plate).
         let bottom = k.checked_sub(depth).filter(|&k_lo| k_lo >= floor);
         if let Some(k_lo) = bottom {
+            // The band TOP as planned (or moved) must also stand inside
+            // both posts' joinable range: a band that already fits is not
+            // exempt from the headed post's joint (`top_limit`).
+            if k > top_limit {
+                refuse(outcome, |why| &mut why.off_a_post);
+                return None;
+            }
             break (a_top, b_top, depth, k_lo);
         }
         let raised = floor + depth;
@@ -8118,6 +8125,45 @@ mod tests {
         );
         // Counted when built (`commit_cross`); the plan carries the hit.
         assert!(built.widened, "{built:?}");
+    }
+
+    /// A band that ALREADY fits is as bound by a headed post's joinable top
+    /// as a raised one: a straight post 0 and a headed post 1 (k_top 200,
+    /// joint 190, joinable 185). A band topped at 190 is refused (`off_a_post`),
+    /// one topped at 180 is built. SABOTAGE: drop the `k > top_limit` refusal
+    /// in `plan_cross` and the band at 190 is built, seated on the joint.
+    #[test]
+    fn a_band_that_fits_is_refused_above_a_headed_posts_joinable_top() {
+        let grid = crate::head_carrier_tests::grid();
+        let history = crate::up_sweep::ColumnHistory::new(&grid);
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(0.05, 45.0, 25.0);
+        let law = law();
+        let context = prune_context(&grid, &history, &keep_out, &lean, &law);
+        let posts = vec![
+            crate::head_carrier_tests::straight(&grid, 0, 150, 100, 400, 0.2),
+            crate::head_carrier_tests::headed(&grid, 1, 150, 120, 200, 190, 0.2),
+        ];
+        let run = UnbracedRun {
+            strut_id: 0,
+            k_lo: 0,
+            k_top: 399,
+            length_mm: 20.0,
+            radius_mm: 0.2,
+            limit_mm: 10.0,
+            sway_deg: None,
+        };
+        let state = super::TieState::build(&context, &posts);
+        let try_at = |k: usize| {
+            let mut outcome = super::SlendernessOutcome::default();
+            let plan = super::plan_cross(&context, &state, &posts, 0, 1, k, &run, true, &mut outcome);
+            (plan, outcome)
+        };
+        let (low, outcome) = try_at(180);
+        assert!(low.is_some(), "control: a band below the joinable top is built: {outcome:?}");
+        let (high, outcome) = try_at(190);
+        assert!(high.is_none(), "a band on the joint is refused: {high:?}");
+        assert_eq!(outcome.brace_band_refusals.off_a_post, 1, "{outcome:?}");
     }
 
     fn prune_context<'a>(

@@ -1490,14 +1490,18 @@ fn followed_shifts_with(
             return None;
         }
         let (seat, base) = (seat_mm.unwrap_or([0.0; 3]), base_mm.unwrap_or([0.0; 3]));
-        if h.k_top <= h.k_bottom || h.k_bottom == usize::MAX {
+        // The displaced axis runs from the base to the member's POST top: its
+        // frozen joint K for a headed arm (the head is never moved), its
+        // `k_top` for a straight one.
+        let post_top = h.post_top_layer();
+        if post_top <= h.k_bottom || h.k_bottom == usize::MAX {
             return Some(seat);
         }
         #[expect(
             clippy::cast_precision_loss,
             reason = "layer indices bounded by the plan's layer count are exact in f64"
         )]
-        let t = ((layer.saturating_sub(h.k_bottom)) as f64 / (h.k_top - h.k_bottom) as f64)
+        let t = ((layer.saturating_sub(h.k_bottom)) as f64 / (post_top - h.k_bottom) as f64)
             .clamp(0.0, 1.0);
         Some(std::array::from_fn(|axis| {
             t * seat[axis] + (1.0 - t) * base[axis]

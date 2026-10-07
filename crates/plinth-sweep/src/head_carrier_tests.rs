@@ -525,6 +525,46 @@ fn bands_and_ties_never_attach_above_a_headed_posts_joint() {
     assert_heads_honoured(&before, &tops, &struts, "bands and ties");
 }
 
+/// REVIEW FINDING 2. A member joined to a headed child of a sliding straight
+/// host follows the child's POST line (base to the joint K), not a line to its
+/// `k_top`. The child's base moves 0.075 mm; at layer 180 of a post from 150 to
+/// 190 that line has moved 0.25 * 0.075. SABOTAGE: interpolating to `k_top`
+/// gives 0.4 * 0.075.
+#[test]
+fn a_member_on_a_headed_child_follows_the_post_line_to_the_joint() {
+    let grid = grid();
+    let (k_top, k_joint, landing) = (200, 190, 150);
+    let mut host = straight(&grid, 0, 150, 150, k_top, 0.3);
+    let slide = [0.1, 0.0, 0.0];
+    host.seat_face = SeatFace {
+        point_mm: None,
+        shift_mm: slide,
+        footprint: crate::Footprint::MovedOntoFace,
+    };
+    let child_cell = grid.index(150, 156);
+    let mut child = straight(&grid, 1, 150, 156, k_top, 0.1);
+    child.landing = Landing::Strut { id: 0, layer: landing };
+    child.k_bottom = landing;
+    child.radius_mm = vec![0.1; k_top - landing + 1];
+    child.carried_mm2 = vec![0.0; k_top - landing + 1];
+    let mut post = vec![cell_u32(host.cell); k_joint - landing];
+    post.push(cell_u32(child_cell));
+    give_head(&mut child, k_joint, child_cell, Some(post));
+    // A brace seated on the headed child at layer 180 (below its joinable top).
+    let mut brace = straight(&grid, 2, 150, 156, 180, 0.05);
+    brace.kind = StrutKind::Brace;
+    brace.seat_on_strut = Some(1);
+    let struts = vec![host, child, brace];
+    let followed = crate::footprint::followed_shifts(&struts);
+    let base = followed[1].base_mm.expect("the post base follows the host");
+    let seat = followed[2].seat_mm.expect("the brace follows the child's post line");
+    assert!(
+        (seat[0] - 0.25 * base[0]).abs() < 1e-12,
+        "follows by {seat:?}, expected {} (post line to K)",
+        0.25 * base[0]
+    );
+}
+
 // -------------------------------------------------------------- the finish
 
 /// The lowering's arms for a hand-made field: every member seated square under
