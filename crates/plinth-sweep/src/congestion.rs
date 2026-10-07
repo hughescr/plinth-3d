@@ -956,6 +956,7 @@ fn seat_flank_arms(
             seat_normal: [0.0; 3],
             straight_fallback: None,
             fallback_path: Vec::new(),
+            head: None,
         });
         let arm = &struts[id as usize];
         index.stamp_shaft(id, 0, shelf, seat, &arm.path);

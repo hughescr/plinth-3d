@@ -419,6 +419,9 @@ pub struct SweepRunReport {
     /// Path-hit counters. A green oracle must never be able to mean "the path
     /// never ran" (the witness-must-exercise-the-path lesson).
     pub counters: PathHits,
+    /// What the run did about articulated support heads: built, refused by
+    /// reason, residuals and grown joints.
+    pub heads: crate::heads::HeadsOutcome,
 }
 
 /// One member whose drawn solid stands within the final clearance gap of the

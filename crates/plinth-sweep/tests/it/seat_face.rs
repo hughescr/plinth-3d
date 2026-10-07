@@ -75,6 +75,7 @@ fn arm(cell: usize, k_top: usize) -> SweepStrut {
         path: Vec::new(),
         straight_fallback: None,
         fallback_path: Vec::new(),
+        head: None,
         seat_face: SeatFace::default(),
         seat_normal: [0.0; 3],
     }

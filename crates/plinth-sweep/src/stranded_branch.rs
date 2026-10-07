@@ -746,6 +746,7 @@ mod tests {
             seat_face: crate::SeatFace::default(),
             seat_normal: [0.0; 3],
             fallback_path: Vec::new(),
+            head: None,
             straight_fallback: None,
             path: Vec::new(),
         }

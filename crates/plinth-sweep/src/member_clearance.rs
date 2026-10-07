@@ -1265,6 +1265,7 @@ mod census_tests {
             path: Vec::new(),
             straight_fallback: None,
             fallback_path: Vec::new(),
+            head: None,
             seat_face: SeatFace::default(),
             seat_normal: [0.0; 3],
         };
@@ -1280,6 +1281,7 @@ mod census_tests {
                 Landing::Model { .. } | Landing::Strut { .. } => SweepArmLanding::Landed,
             },
             seats_into_model: false,
+            head: None,
         };
         (strut, arm)
     }

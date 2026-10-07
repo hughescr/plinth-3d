@@ -96,6 +96,7 @@ fn stepped_arm(seat_normal: [f64; 3], root: f64, tip_slots: usize) -> SweepArm {
         seat_face_point_mm: Some(seat),
         landing: SweepArmLanding::Landed,
         seats_into_model: true,
+        head: None,
     }
 }
 

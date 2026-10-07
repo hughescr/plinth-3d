@@ -2091,6 +2091,7 @@ mod frame_lock_tests {
             path: Vec::new(),
             straight_fallback: None,
             fallback_path: Vec::new(),
+            head: None,
             seat_face: SeatFace::default(),
             seat_normal: [0.0; 3],
         }
@@ -2157,6 +2158,7 @@ mod put_back_tests {
             path: Vec::new(),
             straight_fallback: None,
             fallback_path: Vec::new(),
+            head: None,
             seat_face: SeatFace::default(),
             seat_normal: [0.0; 3],
         }
@@ -2277,6 +2279,7 @@ mod blame_attribution_tests {
             path: Vec::new(),
             straight_fallback: None,
             fallback_path: Vec::new(),
+            head: None,
             seat_face: SeatFace::default(),
             seat_normal: [0.0; 3],
         }
@@ -2561,6 +2564,7 @@ mod model_landing_tests {
             path: Vec::new(),
             straight_fallback: None,
             fallback_path: Vec::new(),
+            head: None,
             seat_face: SeatFace::default(),
             seat_normal: [0.0; 3],
         }
