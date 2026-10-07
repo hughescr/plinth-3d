@@ -14,7 +14,7 @@ use chitubox_io::{
 use geom_kernel::vec3::dot;
 use geom_kernel::vec3::{add, cross, norm, scale, sub};
 use geom_kernel::SoupTriangle;
-use plinth_core::{m0_constants, PrinterProfile};
+use plinth_core::{m0_constants, PositiveFinite, PrinterProfile};
 use plinth_mesh::Mesh;
 use plinth_support::{FrustumRingNormal, SupportPrimitive, SupportSegmentKind, SupportedModel};
 use serde::{Deserialize, Serialize};
@@ -787,7 +787,9 @@ fn audit_sphere_record_fields(
     let Some(sphere) = &primitive.sphere_geometry else {
         return Ok(());
     };
-    let radius = primitive.start_radius_mm.get();
+    // The record carries the radius the sphere is DRAWN at (a joint sphere is
+    // circumscribed, see `drawn_sphere_radius`), poles included.
+    let radius = drawn_sphere_radius(primitive.segment_kind, primitive.start_radius_mm.get());
     let (start, end) = if let Some((center_mm, outward_axis_unit)) = sphere.tip_authority() {
         if primitive.segment_kind != SupportSegmentKind::ContactSphere {
             return Err(format!(
@@ -1352,15 +1354,29 @@ fn record_frame_and_soup(
     frustum_sides: usize,
     raft_sides: usize,
 ) -> Result<(RecordFrame, Vec<SoupTriangle>), EmitError> {
-    let r_start = primitive.start_radius_mm.get();
-    let r_end = primitive.end_radius_mm.get();
+    let mut r_start = primitive.start_radius_mm.get();
+    let mut r_end = primitive.end_radius_mm.get();
     let (source_start, source_end) = match primitive.segment_kind {
-        SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere => primitive
-            .sphere_geometry
-            .as_ref()
-            .ok_or(EmitError::RecordEncodingRejected)?
-            .canonical_poles(primitive.start_radius_mm)
-            .map_err(|_| EmitError::RecordEncodingRejected)?,
+        SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere => {
+            // A joint sphere is drawn, and its record is written, at the
+            // circumscribed vertex radius (`drawn_sphere_radius`), so the
+            // poles, both record radii and the mesh agree.
+            let drawn = PositiveFinite::new(drawn_sphere_radius(
+                primitive.segment_kind,
+                r_start,
+            ))
+            .map_err(|_| EmitError::RecordEncodingRejected)?;
+            if primitive.segment_kind == SupportSegmentKind::JointSphere {
+                r_start = drawn.get();
+                r_end = drawn.get();
+            }
+            primitive
+                .sphere_geometry
+                .as_ref()
+                .ok_or(EmitError::RecordEncodingRejected)?
+                .canonical_poles(drawn)
+                .map_err(|_| EmitError::RecordEncodingRejected)?
+        }
         _ => (primitive.start_mm, primitive.end_mm),
     };
     let start = sub_center(finite_point(source_start), center);
@@ -1609,6 +1625,51 @@ fn sphere_triangles(center: [f64; 3], radius: f64) -> Result<Vec<SoupTriangle>, 
     if !radius.is_finite() || radius <= 0.0 {
         return Err(EmitError::RecordEncodingRejected);
     }
+    Ok(sphere_mesh(center, radius))
+}
+
+/// The joint sphere's circumscribe factor `k`: the smallest distance from the
+/// sphere's centre to any triangle PLANE of the 8x16 sphere mesh, over that
+/// triangle's vertex radius. The mesh's flat faces sit inside its vertex
+/// sphere, up to `1 - k` of the radius, so a round rim of radius `r` centred
+/// on the joint (a head's base, a post's top) pokes through the faces of a
+/// mesh drawn at vertex radius `r`. Drawn at vertex radius `r / k`, every
+/// face plane stands at least `r` from the centre and the mesh contains the
+/// true sphere of radius `r`, and so every such rim. Derived from the mesh's
+/// own triangles, never typed.
+///
+/// The mesh is convex (a latitude/longitude cell's four corners are a planar
+/// isosceles trapezoid, so its two triangles share one plane; the poles are
+/// single triangles), so the planes' minimum distance is the inradius.
+static JOINT_CIRCUMSCRIBE: LazyLock<f64> = LazyLock::new(joint_circumscribe_factor);
+
+fn joint_circumscribe_factor() -> f64 {
+    let origin = [0.0; 3];
+    sphere_mesh(origin, 1.0)
+        .iter()
+        .filter_map(|[a, b, c]| {
+            let normal = cross(sub(*b, *a), sub(*c, *a));
+            let length = norm(normal);
+            let vertex_radius = norm(*a).max(norm(*b)).max(norm(*c));
+            (length > 0.0 && vertex_radius > 0.0)
+                .then(|| geom_kernel::vec3::dot(normal, *a).abs() / length / vertex_radius)
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// The vertex radius a sphere record is DRAWN at, and written with, for a
+/// primitive of kind `kind` and registered radius `radius`: a joint sphere is
+/// circumscribed ([`JOINT_CIRCUMSCRIBE`]) so its flat faces contain the true
+/// sphere; a contact sphere is drawn at its registered radius, as the seat
+/// trim and the contact area read it.
+fn drawn_sphere_radius(kind: SupportSegmentKind, radius: f64) -> f64 {
+    match kind {
+        SupportSegmentKind::JointSphere => radius / *JOINT_CIRCUMSCRIBE,
+        _ => radius,
+    }
+}
+
+fn sphere_mesh(center: [f64; 3], radius: f64) -> Vec<SoupTriangle> {
     let lat_table = &*LATITUDE_TABLE;
     let lon_table = &*LONGITUDE_TABLE;
     let mut triangles = Vec::with_capacity(2 * SPHERE_LONGITUDES * (SPHERE_LATITUDES - 1));
@@ -1630,7 +1691,7 @@ fn sphere_triangles(center: [f64; 3], radius: f64) -> Result<Vec<SoupTriangle>, 
             }
         }
     }
-    Ok(triangles)
+    triangles
 }
 
 /// A point's identity for edge pairing: bit patterns, with the sign of zero
@@ -2153,10 +2214,22 @@ mod tests {
         assert_eq!((joiner_bounds.min[2], joiner_bounds.max[2]), (8.0, 11.0));
 
         assert_eq!(records[3].segment_type, SegmentType::SHAFT);
-        assert_eq!(records[3].start, [1.0, 2.0, 12.75]);
-        assert_eq!(records[3].end, [1.0, 2.0, 11.25]);
+        // A joint ball is written at its circumscribed vertex radius, poles
+        // and both record radii alike (`drawn_sphere_radius`).
+        let drawn = 0.75 / *JOINT_CIRCUMSCRIBE;
+        assert_eq!(
+            records[3].start,
+            [1.0, 2.0, point_f32([1.0, 2.0, 12.0 + drawn]).unwrap()[2]]
+        );
+        assert_eq!(
+            records[3].end,
+            [1.0, 2.0, point_f32([1.0, 2.0, 12.0 - drawn]).unwrap()[2]]
+        );
+        assert_eq!(records[3].r_start, f32_of(drawn).unwrap());
+        assert_eq!(records[3].r_end, f32_of(drawn).unwrap());
         let shaft_bounds = record_bounds(&records[3]);
-        assert_eq!((shaft_bounds.min[2], shaft_bounds.max[2]), (11.25, 12.75));
+        assert!((shaft_bounds.min[2] - (12.0 - drawn)).abs() < 1e-5);
+        assert!((shaft_bounds.max[2] - (12.0 + drawn)).abs() < 1e-5);
     }
 
     #[test]
@@ -2810,6 +2883,67 @@ mod tests {
                 "radius {radius} should be rejected"
             );
         }
+    }
+
+    /// **The joint ball contains the round rims at its centre** (Craig,
+    /// 2026-10-07: two peripheral lines stood out of every head joint). The
+    /// 8x16 mesh's flat faces sit inside its vertex sphere, so a head's round
+    /// base or a post's round top of radius `r`, centred on the joint, poked
+    /// through a mesh drawn at vertex radius `r`. Every vertex of a 24-gon ring
+    /// of radius `r` on the sphere centre, in three orientations, must be on
+    /// the inner side of every triangle's plane, through the REAL record path.
+    #[test]
+    fn a_joint_sphere_contains_a_round_rim_of_its_own_radius_at_its_centre() {
+        let r = 0.298_f64;
+        let centre = [3.0, -2.0, 7.5];
+        let primitive = primitive_with_radii(
+            SupportSegmentKind::JointSphere,
+            [centre[0], centre[1], centre[2] + r],
+            [centre[0], centre[1], centre[2] - r],
+            r,
+            r,
+        );
+        let (frame, soup) = record_frame_and_soup(&primitive, [0.0; 3], 16, 16).unwrap();
+        let k = *JOINT_CIRCUMSCRIBE;
+        assert!((0.95..0.98).contains(&k), "k = {k}, expected about 0.962");
+        let orientations = [
+            [0.0, 0.0, 1.0],
+            [40.0_f64.to_radians().sin(), 0.0, 40.0_f64.to_radians().cos()],
+            [0.3, -0.5, 0.2],
+        ];
+        for axis in orientations {
+            let axis = scale(axis, 1.0 / norm(axis));
+            let seed = if axis[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+            let u = cross(axis, seed);
+            let u = scale(u, 1.0 / norm(u));
+            let v = cross(axis, u);
+            for index in 0..24 {
+                let angle = std::f64::consts::TAU * f64::from(index) / 24.0;
+                let vertex = add(
+                    centre,
+                    scale(add(scale(u, angle.cos()), scale(v, angle.sin())), r),
+                );
+                for [a, b, c] in &soup {
+                    let mut normal = cross(sub(*b, *a), sub(*c, *a));
+                    if dot(normal, sub(*a, centre)) < 0.0 {
+                        normal = scale(normal, -1.0);
+                    }
+                    let outside = dot(normal, sub(vertex, *a)) / norm(normal);
+                    assert!(
+                        outside <= 1e-12,
+                        "rim vertex {index} of axis {axis:?} stands {outside} mm outside a face plane"
+                    );
+                }
+            }
+        }
+        // The record carries what is drawn: radius and poles.
+        assert!((frame.r_start - r / k).abs() < 1e-12 && frame.r_end.to_bits() == frame.r_start.to_bits());
+        assert!((frame.start[2] - (centre[2] + r / k)).abs() < 1e-12);
+        // The contact sphere is NOT circumscribed: its radius is the contact's.
+        assert_eq!(
+            drawn_sphere_radius(SupportSegmentKind::ContactSphere, r).to_bits(),
+            r.to_bits()
+        );
     }
 
     /// The batched builder must reach the same wire bytes it reached when each

@@ -447,13 +447,16 @@ pub struct SizingPolicy {
 ///   ledger's last slot, layer `k_top - 1`): `head_section_mm(r_t, s(k), c)`,
 ///   where `s(k)` is the axial distance from `D` of the head axis at the
 ///   layer's z, clamped to `[0, |DK|]`;
-/// * the joint layer: `r_K,eff = max(planned r_K, solve_joint(r_t, g, c))`,
-///   so a joint grows with a fatter tip and is never capped;
+/// * the joint layer: `r_K,eff = final_joint_radius_mm(r_t, |DK|, c)`, the
+///   head law at the measured `|DK|` and the FINAL tip. `K` is frozen, so the
+///   lever is fixed whatever the ball's size: the joint follows the final tip
+///   down as well as up, and no planned value enters;
 /// * post layers below the joint: `post_section_mm(r_led, r_t, lever, c)`,
-///   with the lever `(g + r_K,eff)·(1 − σ/ℓ)` falling linearly down the post's
-///   chord from `K` to its base (`σ/ℓ` is the chord fraction at the layer's z).
-///   The post never narrows going down (the engine's own rule for a printed
-///   member), so the section is carried down as a running maximum.
+///   with the lever `|DK|·(1 − σ/ℓ)` falling linearly down the post's chord
+///   from `K` to its base (`σ/ℓ` is the chord fraction at the layer's z). The
+///   post never narrows going down (the engine's own rule for a printed
+///   member), so the section is carried down as a running maximum that starts
+///   at `r_K,eff`: the post under `K` is never narrower than the ball.
 ///
 /// Returns the effective joint radius, or `None` when nothing was applied.
 #[expect(
@@ -474,20 +477,20 @@ fn apply_head_minimum(strut: &mut SweepStrut, sizing: SizingPolicy) -> Option<f6
         return None;
     }
     let h = sizing.layer_height_mm;
-    // The lever is `|DK| = g + hb + r_K`: the joint stands the ball's height
-    // further out than the clearance alone (`Head::ball_allowance_mm`).
-    let (g, c) = (head.lever_gap_mm(), head.cos_lean_max);
+    let c = head.cos_lean_max;
     let r_t = strut.radius_mm[slots - 1];
     let joint_slot = head.k_joint - strut.k_bottom;
     let z_of = |layer: usize| sizing.plate_z_mm + layer as f64 * h;
-    // The head is frozen; its joint only grows. No placement maximum applies
-    // here: a final tip that needs a joint wider than the registered maximum
-    // radius still gets it (see `grown_joint_radius_mm`).
-    let r_k_eff = crate::heads::grown_joint_radius_mm(r_t, g, c)
-        .map_or(head.joint_radius_mm, |joint| joint.max(head.joint_radius_mm));
-    // The head: axial distance from D along u to the layer's z.
+    // The lever is the measured `|DK|` (the joint stands the ball's height
+    // further out than the clearance alone, `Head::ball_allowance_mm`). `K`
+    // and `|DK|` are frozen at placement, so the lever is fixed whatever the
+    // ball's size. The joint is the head law at `|DK|` and the FINAL tip: no
+    // placement maximum applies, and it is not held at the planned radius (a
+    // final tip below the planned one gets the smaller ball).
     let to_k: [f64; 3] = std::array::from_fn(|axis| head.joint_mm[axis] - head.contact_mm[axis]);
     let length = to_k.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let r_k_eff = crate::heads::final_joint_radius_mm(r_t, length, c);
+    // The head: axial distance from D along u to the layer's z.
     let u_z = head.unit[2];
     let mut section = Vec::with_capacity(slots);
     for slot in (joint_slot + 1)..(slots - 1) {
@@ -503,7 +506,7 @@ fn apply_head_minimum(strut: &mut SweepStrut, sizing: SizingPolicy) -> Option<f6
     let k_z = head.joint_mm[2];
     let base_z = z_of(strut.k_bottom);
     let span = k_z - base_z;
-    let mut running = 0.0_f64;
+    let mut running = r_k_eff;
     for slot in (0..joint_slot).rev() {
         let z = z_of(strut.k_bottom + slot);
         let fraction = if span > f64::EPSILON {
@@ -511,7 +514,7 @@ fn apply_head_minimum(strut: &mut SweepStrut, sizing: SizingPolicy) -> Option<f6
         } else {
             1.0
         };
-        let lever = (g + r_k_eff) * (1.0 - fraction);
+        let lever = length * (1.0 - fraction);
         let wanted = crate::heads::post_section_mm(strut.radius_mm[slot], r_t, lever, c);
         running = running.max(wanted).max(strut.radius_mm[slot]);
         section.push((slot, running));
