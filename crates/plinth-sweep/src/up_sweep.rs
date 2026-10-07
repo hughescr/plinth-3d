@@ -20,6 +20,8 @@
     reason = "batch-first: these loops walk several parallel per-cell rasters at one index"
 )]
 
+use std::collections::BTreeMap;
+
 use crate::drain::DrainKeepOut;
 use crate::grid::Grid;
 use crate::lean::LeanLaw;
@@ -41,6 +43,12 @@ pub struct ShaftSpan {
     pub k_top: u32,
     pub id: u32,
     pub next: u32,
+    /// EXCLUSIVE end of the layers a later member may LAND on in this span:
+    /// layers `>= landable_end` block but never take a landing. `u32::MAX`
+    /// means no cap (every span except the post-top of a headed arm, whose
+    /// head slots and joint clearance are blocking-only; see
+    /// [`ColumnHistory::stamp_strut`]).
+    pub landable_end: u32,
 }
 
 /// Column history the descent reads. Every `top_*` entry names the HIGHEST
@@ -109,6 +117,10 @@ pub struct ColumnHistory {
     pub shaft_head: Vec<u32>,
     /// Every `(arm, column run)` occupancy interval, in one flat arena.
     pub shaft_spans: Vec<ShaftSpan>,
+    /// Per headed arm id, the highest layer another member may join it at
+    /// (`k_joint - ceil(r_K / h)`; `None` where the joint stands too low for
+    /// any join). Filled by [`Self::stamp_strut`]; the producer lane reads it.
+    pub joinable_tops: BTreeMap<u32, Option<usize>>,
 }
 
 impl ColumnHistory {
@@ -126,7 +138,36 @@ impl ColumnHistory {
             shaft_spans: Vec::new(),
             model_head: vec![u32::MAX; cells],
             model_spans: Vec::new(),
+            joinable_tops: BTreeMap::new(),
         }
+    }
+
+    /// Record one finished member's shaft, honouring its head.
+    ///
+    /// A straight arm stamps exactly as [`Self::stamp_shaft`] does. A HEADED
+    /// arm stamps its whole path (post and head slots both BLOCK), but its
+    /// post is LANDABLE only up to the joinable top, `k_joint - ceil(r_K / h)`:
+    /// a later member may never land on the joint sphere or the head, and its
+    /// own section must stay clear of the sphere
+    /// ([`crate::SweepStrut::joinable_at`]). The joinable top is recorded per
+    /// id in [`Self::joinable_tops`].
+    pub fn stamp_strut(&mut self, strut: &SweepStrut, layer_height_mm: f64) {
+        if strut.head.is_none() {
+            self.stamp_shaft(strut.id, strut.k_bottom, strut.k_top, strut.cell, &strut.path);
+            return;
+        }
+        let joinable_top = strut.joinable_top_layer(layer_height_mm);
+        self.joinable_tops.insert(strut.id, joinable_top);
+        // Exclusive end: one past the joinable top, or nothing landable.
+        let landable_end = joinable_top.map_or(0, |top| u32::try_from(top + 1).unwrap_or(u32::MAX));
+        self.stamp_runs(
+            strut.id,
+            strut.k_bottom,
+            strut.k_top,
+            strut.cell,
+            &strut.path,
+            landable_end,
+        );
     }
 
     /// Record where one finished arm's shaft stands, column by column.
@@ -139,6 +180,19 @@ impl ColumnHistory {
     /// Runs of equal cells are folded into ONE span, so a leaned arm costs one
     /// entry per column it crosses rather than one per layer.
     pub fn stamp_shaft(&mut self, id: u32, k_bottom: usize, k_top: usize, seat_cell: usize, path: &[u32]) {
+        self.stamp_runs(id, k_bottom, k_top, seat_cell, path, u32::MAX);
+    }
+
+    /// [`Self::stamp_shaft`] with the exclusive end of the landable layers.
+    fn stamp_runs(
+        &mut self,
+        id: u32,
+        k_bottom: usize,
+        k_top: usize,
+        seat_cell: usize,
+        path: &[u32],
+        landable_end: u32,
+    ) {
         if k_top < k_bottom {
             return;
         }
@@ -152,17 +206,17 @@ impl ColumnHistory {
                 continue;
             }
             if run_cell != usize::MAX {
-                self.push_span(run_cell, id, run_from, layer - 1);
+                self.push_span(run_cell, id, run_from, layer - 1, landable_end);
             }
             run_cell = here;
             run_from = layer;
         }
         if run_cell != usize::MAX {
-            self.push_span(run_cell, id, run_from, k_top);
+            self.push_span(run_cell, id, run_from, k_top, landable_end);
         }
     }
 
-    fn push_span(&mut self, cell: usize, id: u32, k_bottom: usize, k_top: usize) {
+    fn push_span(&mut self, cell: usize, id: u32, k_bottom: usize, k_top: usize, landable_end: u32) {
         let Some(head) = self.shaft_head.get_mut(cell) else {
             return;
         };
@@ -180,6 +234,7 @@ impl ColumnHistory {
             k_top: u32::try_from(k_top).unwrap_or(u32::MAX),
             id,
             next,
+            landable_end,
         });
     }
 
@@ -246,11 +301,14 @@ impl ColumnHistory {
                 continue;
             }
             let bottom = span.k_bottom as usize;
-            if bottom > ceiling {
+            // A span's landable layers end below `landable_end`: a headed
+            // arm's joint and head block but are never landed on.
+            let end = span.landable_end as usize;
+            if bottom > ceiling || bottom >= end {
                 continue;
             }
             let top = span.k_top as usize;
-            let here = top.min(ceiling);
+            let here = top.min(ceiling).min(end - 1);
             if best.is_none_or(|(_, layer, _)| here > layer) {
                 best = Some((span.id, here, top));
             }
@@ -339,6 +397,7 @@ impl ColumnHistory {
                 k_top: k,
                 id: 0,
                 next: head,
+                landable_end: u32::MAX,
             });
             self.model_head[cell] = slot;
         }

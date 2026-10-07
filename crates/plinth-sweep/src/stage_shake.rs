@@ -147,7 +147,8 @@ pub fn check(
     let flare = SweepRootFlare::registered(h).ok();
     let ends: Vec<([f64; 3], [f64; 3])> = struts
         .iter()
-        .map(|strut| crate::adapter::drawn_ends(grid, 0.0, h, strut))
+        // A member's LINE: its post, from the joint `K` for a headed arm.
+        .map(|strut| crate::adapter::drawn_post_ends(grid, 0.0, h, strut))
         .collect();
     let height = |layer: usize| {
         #[expect(

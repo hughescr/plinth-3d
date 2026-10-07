@@ -226,6 +226,10 @@ pub struct HeadJoinOutcome {
     pub kept_no_clear_join: usize,
     pub kept_carrying_a_tie: usize,
     pub kept_not_an_arm: usize,
+    /// Joins kept because the lander is HEADED, or a member that would have
+    /// to move with it is: a head is frozen at placement and nothing moves a
+    /// headed arm.
+    pub headed_kept: usize,
     pub kept_surface_unavailable: usize,
     /// Joins whose host's seat geometry could not be measured (no seat plane
     /// or a degenerate shaft), so the rule could not grade them.
@@ -778,7 +782,9 @@ fn heads_of(
         let Some(disc) = disc else {
             continue;
         };
-        let centre = disc.ball_centre_mm;
+        // The shaft starts at the ball centre, or at the joint `K` of a headed
+        // arm, whose neck and joint sphere are the contact.
+        let centre = disc.post_top_mm;
         let base = arm.base_mm;
         if centre[2] - base[2] <= 0.0 {
             continue;
@@ -796,7 +802,7 @@ fn heads_of(
             spread: (1.0 - along * along).max(0.0).sqrt(),
             seat: arm.seat_mm,
             contact_reach_mm: geom_kernel::vec3::norm(geom_kernel::vec3::sub(centre, arm.seat_mm))
-                + disc.ball_radius_mm,
+                + disc.head_joint_radius_mm.unwrap_or(disc.ball_radius_mm),
         });
     }
     heads
@@ -1066,6 +1072,8 @@ pub(crate) fn census(
 enum Refused {
     NoClearJoin,
     CarryingTie,
+    /// The lander, or a member resting on it, is headed: never moved.
+    Headed,
 }
 
 /// One tentative move: `(strut index, landing, k_bottom, path)`.
@@ -1265,6 +1273,10 @@ impl Planner<'_, '_> {
         tier: f64,
     ) -> Result<Vec<Move>, Refused> {
         let struts = self.struts;
+        // A HEADED lander is never moved (its head is frozen at placement).
+        if struts[child].head.is_some() {
+            return Err(Refused::Headed);
+        }
         let base_cell = struts[host].cell_at(layer);
         let path = relanded_path(
             self.context,
@@ -1311,6 +1323,10 @@ impl Planner<'_, '_> {
                 if cell_on(&struts[moved], &moved_path, moved_bottom, at) == Some(strut.base_cell())
                 {
                     continue;
+                }
+                // A headed dependant would have to be re-landed: never.
+                if strut.head.is_some() {
+                    return Err(Refused::Headed);
                 }
                 // THE DEPENDANT FOLLOWS THE MEMBER IT RESTS ON: re-landed on its
                 // new axis at its own landing layer, or, where that breaks the
@@ -1371,7 +1387,7 @@ impl Planner<'_, '_> {
 /// The joins a lander may be moved to, highest first: the head arm's own
 /// shaft under the booked slot, then each member below it on its landing
 /// chain (support arms only) from the layer the one above lands at.
-fn candidate_joins(struts: &[SweepStrut], join: &Join) -> Vec<(usize, usize)> {
+fn candidate_joins(struts: &[SweepStrut], join: &Join, layer_height_mm: f64) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut host = join.parent;
     let mut top = join.booked;
@@ -1379,12 +1395,17 @@ fn candidate_joins(struts: &[SweepStrut], join: &Join) -> Vec<(usize, usize)> {
     loop {
         let strut = &struts[host];
         let lowest = strut.k_bottom;
+        // A HEADED host is joined only at or below its joinable top
+        // (`k_top` for a straight host, so nothing changes there).
+        let joinable = strut.joinable_top_layer(layer_height_mm);
         if top > lowest {
             let highest = if host == join.parent { top - 1 } else { top };
-            for layer in (lowest..=highest).rev() {
-                out.push((host, layer));
+            if let Some(cap) = joinable {
+                for layer in (lowest..=highest.min(cap)).rev() {
+                    out.push((host, layer));
+                }
             }
-        } else if host != join.parent && top == lowest {
+        } else if host != join.parent && top == lowest && joinable.is_some_and(|cap| lowest <= cap) {
             out.push((host, lowest));
         }
         let Landing::Strut { id, layer } = strut.landing else {
@@ -1437,6 +1458,7 @@ pub(crate) fn apply(
     outcome.kept_no_clear_join = 0;
     outcome.kept_carrying_a_tie = 0;
     outcome.kept_not_an_arm = 0;
+    outcome.headed_kept = 0;
     outcome.kept_surface_unavailable = 0;
     if found.in_zone.is_empty() {
         return 0;
@@ -1465,25 +1487,26 @@ pub(crate) fn apply(
     // rests on them — is left OUT of the obstacle index, so none blocks its
     // own new path; each accepted move is stamped back in as it lands.
     let mut may_move = vec![false; n];
-    let mut stack: Vec<usize> = found.in_zone.iter().map(|join| join.child).collect();
+    // A HEADED member never moves, so it stays in the obstacle index.
+    let headed = |index: usize| struts[index].head.is_some();
+    let mut stack: Vec<usize> = found
+        .in_zone
+        .iter()
+        .map(|join| join.child)
+        .filter(|&child| !headed(child))
+        .collect();
     while let Some(index) = stack.pop() {
         if std::mem::replace(&mut may_move[index], true) {
             continue;
         }
-        stack.extend(dependants[index].iter().copied());
+        stack.extend(dependants[index].iter().copied().filter(|&member| !headed(member)));
     }
     let mut obstacles = ColumnHistory::new(context.slender.grid);
     for (position, strut) in struts.iter().enumerate() {
         if may_move[position] || strut.k_bottom == usize::MAX || strut.k_top < strut.k_bottom {
             continue;
         }
-        obstacles.stamp_shaft(
-            strut.id,
-            strut.k_bottom,
-            strut.k_top,
-            strut.cell,
-            &strut.path,
-        );
+        obstacles.stamp_strut(strut, height);
     }
     // Every member whose tip this pass needs, in ONE measurement: the hosts on
     // every candidate chain (test 1), and the landers and what rests on them
@@ -1491,7 +1514,7 @@ pub(crate) fn apply(
     let candidates: Vec<Vec<(usize, usize)>> = found
         .in_zone
         .iter()
-        .map(|join| candidate_joins(struts, join))
+        .map(|join| candidate_joins(struts, join, height))
         .collect();
     let mut wanted: Vec<usize> = candidates.iter().flatten().map(|&(host, _)| host).collect();
     wanted.extend((0..n).filter(|&index| may_move[index]));
@@ -1565,6 +1588,11 @@ pub(crate) fn apply(
             outcome.kept_not_an_arm += 1;
             continue;
         }
+        // A HEADED lander is kept where it is.
+        if struts[join.child].head.is_some() {
+            outcome.headed_kept += 1;
+            continue;
+        }
         let lander = &struts[join.child];
         let Some(lander_head) = heads[join.child] else {
             outcome.kept_no_clear_join += 1;
@@ -1632,6 +1660,7 @@ pub(crate) fn apply(
             match refusal {
                 Refused::NoClearJoin => outcome.kept_no_clear_join += 1,
                 Refused::CarryingTie => outcome.kept_carrying_a_tie += 1,
+                Refused::Headed => outcome.headed_kept += 1,
             }
             continue;
         };
@@ -1654,13 +1683,7 @@ pub(crate) fn apply(
             strut.path = path;
             // `carried_mm2` and `radius_mm` are now stale; the caller re-runs
             // the down-sweep, which re-sizes both from `ledger_len`.
-            obstacles.stamp_shaft(
-                strut.id,
-                strut.k_bottom,
-                strut.k_top,
-                strut.cell,
-                &strut.path,
-            );
+            obstacles.stamp_strut(strut, height);
             moved_already[member] = true;
         }
         moved_count += 1;
@@ -1670,6 +1693,37 @@ pub(crate) fn apply(
         outcome.passes += 1;
     }
     moved_count
+}
+
+#[cfg(test)]
+mod head_carrier_join_tests {
+    use super::{candidate_joins, Join};
+    use crate::head_carrier_tests::{grid, headed, straight, H};
+    use crate::Landing;
+
+    /// A lander on a HEADED host is offered join layers at or below the host's
+    /// joinable top only (`k_joint - ceil(r_K / h)`), down its own shaft and
+    /// then down the chain; the same host with no head is offered every layer.
+    /// SABOTAGE: with the cap removed the headed host is offered its head.
+    #[test]
+    fn a_headed_host_is_offered_no_join_above_its_joint() {
+        let grid = grid();
+        let (k_top, k_joint) = (200, 190);
+        let joinable = k_joint - 5;
+        let lander = |host: crate::SweepStrut| {
+            let mut child = straight(&grid, 1, 150, 160, k_top, 0.1);
+            child.landing = Landing::Strut { id: 0, layer: k_top - 1 };
+            child.k_bottom = k_top - 1;
+            let struts = vec![host, child];
+            let join = Join { child: 1, parent: 0, layer: k_top - 1, booked: k_top - 1 };
+            candidate_joins(&struts, &join, H)
+        };
+        let on_head = lander(headed(&grid, 0, 150, 150, k_top, k_joint, 0.3));
+        assert!(!on_head.is_empty(), "anti-vacuity: layers below the joint are offered");
+        assert_eq!(on_head.iter().map(|&(_, layer)| layer).max(), Some(joinable));
+        let on_straight = lander(straight(&grid, 0, 150, 150, k_top, 0.3));
+        assert_eq!(on_straight.iter().map(|&(_, layer)| layer).max(), Some(k_top - 2));
+    }
 }
 
 #[cfg(test)]

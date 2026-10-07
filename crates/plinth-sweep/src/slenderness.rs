@@ -558,6 +558,9 @@ pub struct SlendernessOutcome {
     /// dependants — the daisy chains of 2026-09-28. The run falls to the brace,
     /// the mast, or a warning. A path-hit witness for the rule.
     pub merges_refused_carrying: usize,
+    /// Over-limit runs of a HEADED arm the forced-merge pass left alone: a
+    /// head is frozen at placement and a merge would re-route its post.
+    pub headed_kept: usize,
     /// Shaft landings the index offered and the LIVE field refused: the named
     /// parent no longer stands at that cell and layer, because an earlier
     /// merge in the same loop moved it. A path-hit witness for the rule.
@@ -1390,19 +1393,25 @@ impl RunMeasure<'_> {
     /// consecutive ties. One sort, one sweep.
     fn push_runs(&self, groups: &[LayerTies], sway_deg: Option<f64>, runs: &mut Vec<UnbracedRun>) {
         let strut = self.strut;
+        // A HEADED member's runs end at its JOINABLE top, not at `k_top`: a
+        // band, a tie or an `|X|` never attaches above it, so the run's top
+        // layer is the highest layer any of them may use.
+        let Some(top) = strut.joinable_top_layer(self.layer_height_mm) else {
+            return;
+        };
         // (layer, holds from), inside the member, in this direction.
         let mut held: Vec<(usize, usize)> = groups
             .iter()
-            .filter(|group| group.layer >= strut.k_bottom && group.layer <= strut.k_top)
+            .filter(|group| group.layer >= strut.k_bottom && group.layer <= top)
             .filter_map(|group| group.holds_from(sway_deg).map(|from| (group.layer, from)))
             .collect();
         held.sort_unstable_by_key(|&(_, from)| from);
         let mut ends: Vec<usize> = held
             .iter()
-            .map(|&(_, from)| from.min(strut.k_top))
+            .map(|&(_, from)| from.min(top))
             .filter(|&end| end > strut.k_bottom)
             .collect();
-        ends.push(strut.k_top);
+        ends.push(top);
         ends.sort_unstable();
         ends.dedup();
         let (mut base, mut next) = (strut.k_bottom, 0_usize);
@@ -1535,8 +1544,14 @@ fn run_length(
         clippy::cast_precision_loss,
         reason = "layer counts bounded by the plan's own layer count are exact in f64"
     )]
-    let span = (strut.k_top - strut.k_bottom) as f64;
-    let lateral_mm = crate::cell_distance_mm(grid, strut.cell, strut.base_cell());
+    // The chord of the member's POST: from the joint `K` for a headed arm,
+    // from the seat otherwise.
+    let (top_layer, top_cell) = match &strut.head {
+        Some(head) => (head.k_joint, head.joint_cell as usize),
+        None => (strut.k_top, strut.cell),
+    };
+    let span = top_layer.saturating_sub(strut.k_bottom) as f64;
+    let lateral_mm = crate::cell_distance_mm(grid, top_cell, strut.base_cell());
     let member_mm = (span * layer_height_mm).hypot(lateral_mm);
     #[expect(
         clippy::cast_precision_loss,
@@ -1708,7 +1723,7 @@ pub fn apply_merges(
     // down-sweep has added its own since, and a brace may tie to any of them.
     let index = {
         let mut index = ColumnHistory::new(context.grid);
-        stamp_all(&mut index, struts);
+        stamp_all(&mut index, struts, context.layer_height_mm);
         index
     };
 
@@ -1739,6 +1754,12 @@ pub fn apply_merges(
             let Some(strut) = struts.get(run.strut_id as usize) else {
                 continue;
             };
+            // A HEADED arm is never merged: its head is frozen at placement
+            // and a merge re-routes the whole post.
+            if strut.head.is_some() {
+                outcome.headed_kept += 1;
+                continue;
+            }
             // Only a run that reaches the arm's own base can be cured by
             // re-choosing where that base lands.
             // `k_lo` is the run's LOWER tie and `k_top` its upper one; the arm's
@@ -2517,7 +2538,7 @@ struct ThickenReads {
 impl TieState {
     fn build(context: &SlendernessContext<'_>, struts: &[SweepStrut]) -> Self {
         let mut index = ColumnHistory::new(context.grid);
-        stamp_all(&mut index, struts);
+        stamp_all(&mut index, struts, context.layer_height_mm);
         let (profiles, _) = crate::adapter::drawn_profiles(struts, context.load_step_taper);
         let root_flare = SweepRootFlare::registered(context.layer_height_mm).ok();
         let floors: Vec<usize> = struts
@@ -3707,7 +3728,7 @@ fn commit_cross(
         radius,
         plan.second,
     );
-    stamp_last_two(&mut state.index, struts);
+    stamp_last_two(&mut state.index, struts, context.layer_height_mm);
     for post in [a, b] {
         if let Some(list) = state.ties.get_mut(post as usize) {
             list.push(Tie {
@@ -5281,38 +5302,31 @@ fn tie_layer(run: &UnbracedRun, step: usize, wanted: usize) -> Option<usize> {
     (at > run.k_lo && at < run.k_top).then_some(at)
 }
 
-pub(crate) fn stamp_all(index: &mut ColumnHistory, struts: &[SweepStrut]) {
+pub(crate) fn stamp_all(index: &mut ColumnHistory, struts: &[SweepStrut], layer_height_mm: f64) {
     for strut in struts {
         if strut.k_bottom == usize::MAX || strut.k_top < strut.k_bottom {
             continue;
         }
-        index.stamp_shaft(
-            strut.id,
-            strut.k_bottom,
-            strut.k_top,
-            strut.cell,
-            &strut.path,
-        );
+        index.stamp_strut(strut, layer_height_mm);
     }
 }
 
-fn stamp_last_two(index: &mut ColumnHistory, struts: &[SweepStrut]) {
-    stamp_tail(index, struts, 2);
+fn stamp_last_two(index: &mut ColumnHistory, struts: &[SweepStrut], layer_height_mm: f64) {
+    stamp_tail(index, struts, 2, layer_height_mm);
 }
 
-fn stamp_tail(index: &mut ColumnHistory, struts: &[SweepStrut], count: usize) {
+fn stamp_tail(
+    index: &mut ColumnHistory,
+    struts: &[SweepStrut],
+    count: usize,
+    layer_height_mm: f64,
+) {
     let from = struts.len().saturating_sub(count);
     for strut in &struts[from..] {
         if strut.k_bottom == usize::MAX || strut.k_top < strut.k_bottom {
             continue;
         }
-        index.stamp_shaft(
-            strut.id,
-            strut.k_bottom,
-            strut.k_top,
-            strut.cell,
-            &strut.path,
-        );
+        index.stamp_strut(strut, layer_height_mm);
     }
 }
 
@@ -5739,11 +5753,20 @@ fn plan_cross(
         let (Some(one), Some(two)) = (struts.get(a as usize), struts.get(b as usize)) else {
             return None;
         };
+        // The band's top may not pass either post's JOINABLE top: a diagonal
+        // seated on a headed post must keep clear of its joint sphere
+        // (`joinable_at`); for a straight post this is `k_top`, as before.
+        let (Some(one_top), Some(two_top)) = (
+            one.joinable_top_layer(h),
+            two.joinable_top_layer(h),
+        ) else {
+            return None;
+        };
         (
             state
                 .free_shaft_floor(grid, one, h)
                 .max(state.free_shaft_floor(grid, two, h)),
-            one.k_top.min(two.k_top),
+            one_top.min(two_top),
         )
     };
     // EVERY REFUSAL IS COUNTED UNDER ONE REASON (2026-10-01).
@@ -6396,7 +6419,16 @@ fn tie_to_model(
         if n > extra_ties(run) {
             outcome.model_tie_sets_beyond_fixed_point += 1;
         }
-        commit_model_ties(grid, state, struts, run.strut_id, &plans, &radii, outcome);
+        commit_model_ties(
+            grid,
+            context.layer_height_mm,
+            state,
+            struts,
+            run.strut_id,
+            &plans,
+            &radii,
+            outcome,
+        );
         return true;
     }
 }
@@ -6914,6 +6946,7 @@ fn radius_the_trim_keeps(
 /// the finished field's run measure credits it ([`tie_lists`]).
 fn commit_model_ties(
     grid: &Grid,
+    layer_height_mm: f64,
     state: &mut TieState,
     struts: &mut Vec<SweepStrut>,
     post: u32,
@@ -6943,7 +6976,12 @@ fn commit_model_ties(
         state.unthickened.push(vec![radius; span + 1]);
         outcome.model_ties_built += 1;
     }
-    stamp_tail(&mut state.index, struts, plans.len());
+    stamp_tail(
+        &mut state.index,
+        struts,
+        plans.len(),
+        layer_height_mm,
+    );
 }
 
 #[cfg(test)]
@@ -8307,6 +8345,7 @@ mod tests {
                 k_top: 60,
                 id: 0,
                 next: u32::MAX,
+                landable_end: u32::MAX,
             });
         }
         let keep_out = crate::drain::DrainKeepOut::none();
@@ -8371,6 +8410,7 @@ mod tests {
                     k_top: k1,
                     id: 0,
                     next: u32::MAX,
+                    landable_end: u32::MAX,
                 });
             }
         };
@@ -8434,6 +8474,7 @@ mod tests {
                 k_top: k1,
                 id: 0,
                 next: history.model_head[cell],
+                landable_end: u32::MAX,
             });
             history.model_head[cell] = slot;
         }
@@ -8982,6 +9023,7 @@ mod tests {
                     k_top: 60,
                     id: 0,
                     next: u32::MAX,
+                    landable_end: u32::MAX,
                 });
             }
             // Model material over the post's column, above its seat layer, in
@@ -9084,6 +9126,7 @@ mod tests {
                     k_top: 60,
                     id: 0,
                     next: u32::MAX,
+                    landable_end: u32::MAX,
                 });
             }
             history.hidden = match map {

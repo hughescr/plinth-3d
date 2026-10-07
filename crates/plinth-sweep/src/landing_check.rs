@@ -62,6 +62,14 @@ pub struct LandingCheck {
     /// Every member whose chain of landings does not end at the plate or the
     /// model: the two lists above, and everything that rests on them.
     pub unrooted: Vec<u32>,
+    /// HEADED arms whose path no longer carries their head ([`SweepStrut::head_intact`]):
+    /// something rewrote the path, moved `k_top`, or moved the joint. Must be 0.
+    pub heads_not_intact: Vec<u32>,
+    /// Members joined to a HEADED host above its joinable top
+    /// ([`SweepStrut::joinable_at`]): a `Landing::Strut` onto the host, or a
+    /// brace top seated on it, at a layer the joint sphere or the head
+    /// occupies. Strut ids of the joining members. Must be 0.
+    pub joins_above_joint: Vec<u32>,
 }
 
 impl LandingCheck {
@@ -74,7 +82,10 @@ impl LandingCheck {
     /// Whether this check found nothing to warn about.
     #[must_use]
     pub fn clean(&self) -> bool {
-        self.unrooted.is_empty() && self.brace_tops_detached.is_empty()
+        self.unrooted.is_empty()
+            && self.brace_tops_detached.is_empty()
+            && self.heads_not_intact.is_empty()
+            && self.joins_above_joint.is_empty()
     }
 }
 
@@ -85,6 +96,8 @@ pub struct LandingPass {
     pub invalid_landings: usize,
     pub unrooted: usize,
     pub brace_tops_detached: usize,
+    pub heads_not_intact: usize,
+    pub joins_above_joint: usize,
 }
 
 /// Every landing check one run made, and the finished field's own.
@@ -124,6 +137,8 @@ impl LandingLedger {
             invalid_landings: check.invalid_landings(),
             unrooted: check.unrooted.len(),
             brace_tops_detached: check.brace_tops_detached.len(),
+            heads_not_intact: check.heads_not_intact.len(),
+            joins_above_joint: check.joins_above_joint.len(),
         });
     }
 
@@ -184,13 +199,16 @@ enum Root {
 
 /// Check every landing of one strut set.
 #[must_use]
-pub fn check_landings(struts: &[SweepStrut]) -> LandingCheck {
+pub fn check_landings(struts: &[SweepStrut], layer_height_mm: f64) -> LandingCheck {
     let mut check = LandingCheck::default();
     // Per strut: whether its OWN landing is valid (plate and model always are),
     // and whom it rests on when it rests on a member.
     let mut own_valid = vec![true; struts.len()];
     let mut parent_of: Vec<Option<usize>> = vec![None; struts.len()];
     for (index, strut) in struts.iter().enumerate() {
+        if !strut.head_intact() {
+            check.heads_not_intact.push(strut.id);
+        }
         if strut.kind == StrutKind::Brace {
             if let Some(seat_on) = strut.seat_on_strut {
                 let tied = struts
@@ -198,6 +216,12 @@ pub fn check_landings(struts: &[SweepStrut]) -> LandingCheck {
                     .is_some_and(|other| stands_at(other, strut.cell, strut.k_top));
                 if !tied {
                     check.brace_tops_detached.push(strut.id);
+                }
+                // A brace top seated on a HEADED host above its joinable top.
+                if struts.get(seat_on as usize).is_some_and(|other| {
+                    other.head.is_some() && !other.joinable_at(strut.k_top, layer_height_mm)
+                }) {
+                    check.joins_above_joint.push(strut.id);
                 }
             }
         }
@@ -216,6 +240,10 @@ pub fn check_landings(struts: &[SweepStrut]) -> LandingCheck {
             check.parent_absent.push(strut.id);
             continue;
         };
+        // A landing on a HEADED host above its joinable top.
+        if parent.head.is_some() && !parent.joinable_at(layer, layer_height_mm) {
+            check.joins_above_joint.push(strut.id);
+        }
         let spans = parent.k_bottom != usize::MAX
             && parent.k_bottom <= layer
             && layer <= parent.k_top
@@ -322,7 +350,7 @@ mod tests {
             .chain(std::iter::repeat_n(7, 29))
             .collect();
 
-        let clean = check_landings(&[trunk.clone(), child.clone(), grandchild.clone()]);
+        let clean = check_landings(&[trunk.clone(), child.clone(), grandchild.clone()], 0.05);
         assert_eq!(clean.strut_landings, 2);
         assert!(clean.clean(), "{clean:?}");
 
@@ -330,7 +358,7 @@ mod tests {
         let mut moved = trunk;
         moved.k_bottom = 45;
         moved.landing = Landing::Model { layer: 45 };
-        let broken = check_landings(&[moved, child, grandchild]);
+        let broken = check_landings(&[moved, child, grandchild], 0.05);
         assert_eq!(broken.parent_absent, vec![1]);
         assert_eq!(broken.unrooted, vec![1, 2]);
     }
@@ -351,9 +379,9 @@ mod tests {
             .map(|layer| if layer == 40 { 8 } else { 5 })
             .collect();
         assert!(stands_at(&trunk, 8, 40));
-        assert!(check_landings(&[trunk.clone(), child.clone()]).clean());
+        assert!(check_landings(&[trunk.clone(), child.clone()], 0.05).clean());
         trunk.path.clear();
-        let broken = check_landings(&[trunk, child]);
+        let broken = check_landings(&[trunk, child], 0.05);
         assert_eq!(broken.parent_elsewhere, vec![1]);
         assert_eq!(broken.unrooted, vec![1]);
     }
@@ -363,7 +391,7 @@ mod tests {
     fn a_cycle_of_landings_is_unrooted() {
         let one = arm(0, 5, 100, 50, Landing::Strut { id: 1, layer: 50 });
         let two = arm(1, 5, 100, 50, Landing::Strut { id: 0, layer: 50 });
-        let check = check_landings(&[one, two]);
+        let check = check_landings(&[one, two], 0.05);
         assert_eq!(check.unrooted, vec![0, 1]);
     }
 }

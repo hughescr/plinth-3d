@@ -739,10 +739,16 @@ pub(crate) fn model_clearance_census(
             continue;
         }
         let disc = discs.get(index).copied().flatten();
+        // The POST starts at the ball centre, or at the joint `K` of a headed
+        // arm: the neck and the joint sphere are the contact, and the post's
+        // own zone there is zero by construction.
         let top = match disc {
-            Some(disc) if arm.seats_into_model => disc.ball_centre_mm,
+            Some(disc) if arm.seats_into_model => disc.post_top_mm,
             _ => arm.seat_mm,
         };
+        let post_start_radius = disc
+            .and_then(|disc| disc.head_joint_radius_mm)
+            .unwrap_or(arm.tip_radius_mm);
         let bottom = if strut.landing == crate::Landing::Plate {
             match flare.as_ref().and_then(|flare| flare.plate_shaft_of(arm, plate_z_mm)) {
                 Some((_, bottom)) => bottom,
@@ -768,7 +774,7 @@ pub(crate) fn model_clearance_census(
             arm.seat_mm[2],
             top[2],
             bottom[2],
-            arm.tip_radius_mm,
+            post_start_radius,
             root,
         );
         let at = |z: f64| -> ([f64; 3], f64) {
@@ -786,6 +792,8 @@ pub(crate) fn model_clearance_census(
                 continue;
             }
             let seat_zone = match disc {
+                // A headed arm's post stands outside the contact zone.
+                Some(disc) if arm.seats_into_model && disc.head_joint_radius_mm.is_some() => 0.0,
                 Some(disc) if arm.seats_into_model => {
                     let along = geom_kernel::vec3::dot(disc.outward_normal, axis);
                     let over = geom_kernel::vec3::dot(
@@ -1495,7 +1503,7 @@ mod tests {
         let column_at = |k_bottom: u32, k_top: u32| {
             let mut history = ColumnHistory::new(&grid);
             let cell = grid.index(50, 50);
-            history.model_spans.push(ShaftSpan { k_bottom, k_top, id: 0, next: u32::MAX });
+            history.model_spans.push(ShaftSpan { k_bottom, k_top, id: 0, next: u32::MAX, landable_end: u32::MAX });
             history.model_head[cell] = 0;
             history
         };
@@ -1537,7 +1545,7 @@ mod tests {
         let (x, y) = (grid.center_x_mm(50), grid.center_y_mm(50));
         let mut history = ColumnHistory::new(&grid);
         // One lamina at layer 20, z 1.0..1.05.
-        history.model_spans.push(ShaftSpan { k_bottom: 20, k_top: 20, id: 0, next: u32::MAX });
+        history.model_spans.push(ShaftSpan { k_bottom: 20, k_top: 20, id: 0, next: u32::MAX, landable_end: u32::MAX });
         history.model_head[grid.index(50, 50)] = 0;
         // The axis runs z 1.0 (thin end) down to z 0.0 (thick end), 0.65 mm off.
         let (thin, thick) = ([x + 0.65, y, 1.0], [x + 0.65, y, 0.0]);
@@ -1567,6 +1575,7 @@ mod tests {
             k_top: 20,
             id: 0,
             next: u32::MAX,
+            landable_end: u32::MAX,
         });
         history.model_head[cell] = 0;
         let h = 0.05;

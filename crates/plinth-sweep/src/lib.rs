@@ -53,6 +53,8 @@ pub(crate) mod frame;
 pub mod frame_bands;
 pub mod grid;
 pub mod head_join;
+#[cfg(test)]
+mod head_carrier_tests;
 pub mod heads;
 pub mod landing_check;
 pub mod lean;
@@ -319,8 +321,9 @@ pub enum Footprint {
     /// The disc hangs off its face and every on-face seat the search found
     /// would have broken a rule of the finished field — the lean law, an
     /// unbraced run's limit, or the drain keep-out — for the arm or a member
-    /// joined to it (review-fixes 2026-09-29). The tip stays, trimmed, and is
-    /// warned about with the fraction of its disc on the face.
+    /// joined to it (review-fixes 2026-09-29), or the arm is headed (heads are
+    /// never slid). The tip stays, trimmed, and is warned about with the
+    /// fraction of its disc on the face.
     MoveRefused { disc_on_face: f64 },
 }
 
@@ -383,6 +386,24 @@ impl SweepStrut {
         )]
         let clear = (head.joint_radius_mm / layer_height_mm).ceil().max(0.0) as usize;
         layer.saturating_add(clear) <= head.k_joint
+    }
+
+    /// The highest layer another member may join this one at: `k_top` for a
+    /// straight arm, `k_joint - ceil(r_K / h)` for a headed one (`None` where
+    /// the joint stands too low for any join). The layer-for-layer form of
+    /// [`Self::joinable_at`] for a headed arm.
+    #[must_use]
+    pub fn joinable_top_layer(&self, layer_height_mm: f64) -> Option<usize> {
+        let Some(head) = &self.head else {
+            return Some(self.k_top);
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a joint radius over the layer height is a small positive integer once ceiled"
+        )]
+        let clear = (head.joint_radius_mm / layer_height_mm).ceil().max(0.0) as usize;
+        head.k_joint.checked_sub(clear)
     }
 
     /// Set what lies BELOW the head: the landing, the lowest layer and the
@@ -1791,7 +1812,7 @@ pub fn run_sweep_with_holes(
     let mut landings = landing_check::LandingLedger::default();
     landings.record(
         "up-sweep and down-sweep",
-        &landing_check::check_landings(&struts),
+        &landing_check::check_landings(&struts, height),
     );
     let mut removals = 0_u64;
     let mut removals_refused_by_span = 0_u64;
@@ -1906,7 +1927,7 @@ pub fn run_sweep_with_holes(
         }
         removals += accepted as u64;
     }
-    landings.record("removal", &landing_check::check_landings(&struts));
+    landings.record("removal", &landing_check::check_landings(&struts, height));
     // The interior test again, now that the down-sweep has added arms of its
     // own. Same test, same column history; running it twice is cheaper than
     // giving the down-sweep a reason to know about the up-sweep's history.
@@ -1949,7 +1970,7 @@ pub fn run_sweep_with_holes(
             &unrooted,
         );
     }
-    landings.record("un-merge", &landing_check::check_landings(&struts));
+    landings.record("un-merge", &landing_check::check_landings(&struts, height));
 
     // AND ONCE MORE, ON THE FINISHED FIELD. `unmerge_overgrown` moves an arm
     // off its trunk and onto whatever the descent recorded as its straight
@@ -2061,7 +2082,7 @@ pub fn run_sweep_with_holes(
     // the slenderness lane put on the plate afterwards.
     congestion_outcome.at_lane_exit =
         congestion::measure(&grid, &history, &struts, policy.flare_r_factor);
-    landings.record("congestion", &landing_check::check_landings(&struts));
+    landings.record("congestion", &landing_check::check_landings(&struts, height));
 
     // Which faces a tip may carry: the faces the registered overhang law
     // weighs as an overhang (orchestrator ruling 2026-09-30,
@@ -2230,7 +2251,7 @@ pub fn run_sweep_with_holes(
         set_interior(&mut struts, &history);
         landings.record(
             "stranded-seat branches",
-            &landing_check::check_landings(&struts),
+            &landing_check::check_landings(&struts, height),
         );
     }
     stranded_branch_outcome.branches_kept = stranded_branch_outcome.branches.len();
@@ -2240,7 +2261,7 @@ pub fn run_sweep_with_holes(
 
     let (mut slenderness_outcome, forced_merges) =
         slenderness::apply_merges(&slenderness_context, &mut struts);
-    landings.record("slenderness merges", &landing_check::check_landings(&struts));
+    landings.record("slenderness merges", &landing_check::check_landings(&struts, height));
     stranded_branch_outcome.lapping_by_lane.push((
         "slenderness merges",
         stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
@@ -2311,7 +2332,7 @@ pub fn run_sweep_with_holes(
         set_interior(&mut struts, &history);
         landings.record(
             "un-merge after slenderness merges",
-            &landing_check::check_landings(&struts),
+            &landing_check::check_landings(&struts, height),
         );
         stranded_branch_outcome.lapping_by_lane.push((
             "un-merge after slenderness merges",
@@ -2373,7 +2394,7 @@ pub fn run_sweep_with_holes(
         outcome = sized;
     }
     if policy.lip_seat {
-        landings.record("lip seats", &landing_check::check_landings(&struts));
+        landings.record("lip seats", &landing_check::check_landings(&struts, height));
         stranded_branch_outcome.lapping_by_lane.push((
             "lip seats",
             stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
@@ -2416,7 +2437,7 @@ pub fn run_sweep_with_holes(
             );
             set_interior(&mut struts, &history);
         }
-        landings.record("head joins", &landing_check::check_landings(&struts));
+        landings.record("head joins", &landing_check::check_landings(&struts, height));
         stranded_branch_outcome.lapping_by_lane.push((
             "head joins",
             stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
@@ -2442,7 +2463,7 @@ pub fn run_sweep_with_holes(
         }
         landings.record(
             "lip seats after head joins",
-            &landing_check::check_landings(&struts),
+            &landing_check::check_landings(&struts, height),
         );
         stranded_branch_outcome.lapping_by_lane.push((
             "lip seats after head joins",
@@ -2544,7 +2565,7 @@ pub fn run_sweep_with_holes(
         .filter(|strut| strut.kind == StrutKind::Tie && slenderness::live(strut))
         .map(|strut| strut.id)
         .collect();
-    landings.record("slenderness ties", &landing_check::check_landings(&struts));
+    landings.record("slenderness ties", &landing_check::check_landings(&struts, height));
     stranded_branch_outcome.lapping_by_lane.push((
         "slenderness ties",
         stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
@@ -2591,7 +2612,7 @@ pub fn run_sweep_with_holes(
         }
         landings.record(
             "clearance re-route",
-            &landing_check::check_landings(&struts),
+            &landing_check::check_landings(&struts, height),
         );
         // **THE TIES ARE PLANNED AGAIN WHERE THE RE-ROUTE MOVED ANYTHING**
         // (lane cylinder-bracing, rule D, 2026-10-05). The ladder above ran on
@@ -2670,7 +2691,7 @@ pub fn run_sweep_with_holes(
                 .collect();
             landings.record(
                 "ties after the clearance re-route",
-                &landing_check::check_landings(&struts),
+                &landing_check::check_landings(&struts, height),
             );
         }
     }
@@ -2684,7 +2705,7 @@ pub fn run_sweep_with_holes(
     // the max over events keeps out of the plate reaction by design (measured
     // 2026-09-29: the whole of the remaining gap on the Cylinder, 1.4625 mm²
     // over 8 reads, and the Sphere, 0.4950 mm² over 6).
-    landings.finished = landing_check::check_landings(&struts);
+    landings.finished = landing_check::check_landings(&struts, height);
     landings.load_gap_mm2 =
         outcome.injected_load_mm2 - outcome.plate_reaction_mm2 - outcome.uncarried_load_mm2;
     landings.absorbed_mm2 = outcome.absorbed_event_load_mm2;
@@ -2836,7 +2857,7 @@ pub fn run_sweep_with_holes(
     // Rebuilt here from the strut set that is actually emitted.
     report.shaft_spans_recorded = {
         let mut final_index = up_sweep::ColumnHistory::new(&grid);
-        congestion::stamp_all(&mut final_index, &struts);
+        congestion::stamp_all(&mut final_index, &struts, height);
         final_index.shaft_spans.len()
     };
     report.slenderness_lane = slenderness_outcome;
@@ -3041,6 +3062,7 @@ pub fn run_sweep_with_holes(
         outcome.final_regraded = remeasured.changed.len();
         outcome.final_off_face = off_face;
     }
+    finish_heads(&mut sweep_plan);
     // WHAT THE EMITTED FIELD STILL HAS IN A SEAT ZONE (head-join, 2026-09-29),
     // measured on the arms exactly as they go to the lowering: the ties may
     // have raised a trunk's drawn section after the rule ran, and a footprint
@@ -3072,6 +3094,17 @@ pub fn run_sweep_with_holes(
             &lip_seat_outcome.relanded_ids,
         );
         lip_seat_outcome.arms_graded_after = graded;
+        // The census still grades a HEADED arm; its post starts at the joint,
+        // clear of the seat plane, so its bite must read zero.
+        lip_seat_outcome.headed_bites = over
+            .iter()
+            .filter(|warning| {
+                sweep_plan
+                    .struts
+                    .get(warning.arm as usize)
+                    .is_some_and(|strut| strut.head.is_some())
+            })
+            .count();
         lip_seat_outcome.over_limit_after = over;
     }
     sweep_plan.report.lip_seat = lip_seat_outcome;
@@ -3201,7 +3234,9 @@ fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> Unmer
             // A fallback that is not strictly below the seat would be a
             // zero-height stub, which is the defect this field exists to
             // prevent; refuse the un-merge rather than emit one.
-            (radius >= tip_radius_max_mm && k_bottom < strut.k_top).then_some(index)
+            // (A headed arm's post ends at its joint, so the post must stand
+            // strictly below it: `post_top_layer` is `k_top` for a straight arm.)
+            (radius >= tip_radius_max_mm && k_bottom < strut.post_top_layer()).then_some(index)
         })
         .collect();
 
@@ -3212,7 +3247,7 @@ fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> Unmer
             return None;
         }
         let (landing, k_bottom) = strut.straight_fallback?;
-        (k_bottom < strut.k_top).then_some((landing, k_bottom))
+        (k_bottom < strut.post_top_layer()).then_some((landing, k_bottom))
     };
     let mut moving = vec![false; n];
     // Members some moving member's recorded descent lands on: they must stay.
@@ -3286,9 +3321,10 @@ fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> Unmer
         moves.extend(plan);
     }
     for &(index, landing, k_bottom) in &moves {
-        struts[index].landing = landing;
-        struts[index].k_bottom = k_bottom;
-        struts[index].path = std::mem::take(&mut struts[index].fallback_path);
+        // `set_post` keeps a headed arm's head: its fallback holds the POST
+        // only, and the head slots are appended after it.
+        let post = std::mem::take(&mut struts[index].fallback_path);
+        struts[index].set_post(landing, k_bottom, post);
         // `carried_mm2` and `radius_mm` are now STALE: they describe a member
         // that stopped at the trunk. The caller's loop (lib.rs:616) re-runs
         // `down_sweep::run` after every non-zero return, which clears and
@@ -3301,6 +3337,40 @@ fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> Unmer
         kept_carrying,
         stale_landings,
     }
+}
+
+/// **A headed arm carries its own seat plane** (the finish of the head
+/// contract): after the final seat faces are assigned and the emitted normals
+/// re-measured, each headed arm's `seat_normal` is the head's `u` and its seat
+/// face point the head's contact centre `D`, whatever was measured on the final
+/// field. The angle between `u` and the measured final normal is the residual
+/// published in [`report::SweepReport::heads`] (max, median); an arm with no
+/// measured normal adds none. Batch-first: one pass over the struts.
+fn finish_heads(plan: &mut SweepPlan) {
+    let mut residuals_deg: Vec<f64> = Vec::new();
+    for strut in &mut plan.struts {
+        let Some(head) = &strut.head else {
+            continue;
+        };
+        if let Some(measured) = geom_kernel::vec3::normalize(strut.seat_normal) {
+            let dot = geom_kernel::vec3::dot(head.unit, measured).clamp(-1.0, 1.0);
+            residuals_deg.push(dot.acos().to_degrees());
+        }
+        strut.seat_normal = head.unit;
+        strut.seat_face.point_mm = Some(head.contact_mm);
+    }
+    if residuals_deg.is_empty() {
+        return;
+    }
+    residuals_deg.sort_by(f64::total_cmp);
+    let middle = residuals_deg.len() / 2;
+    let median = if residuals_deg.len() % 2 == 1 {
+        residuals_deg[middle]
+    } else {
+        0.5 * (residuals_deg[middle - 1] + residuals_deg[middle])
+    };
+    plan.report.heads.final_normal_residual_deg_max = residuals_deg[residuals_deg.len() - 1];
+    plan.report.heads.final_normal_residual_deg_median = median;
 }
 
 /// What one un-merge pass did.
@@ -4602,7 +4672,7 @@ mod removal_tests {
         assert_eq!(unmerged.kept_carrying, 0);
         assert_eq!(struts[1].landing, Landing::Plate);
         assert_eq!(struts[2].landing, Landing::Plate);
-        assert!(crate::landing_check::check_landings(&struts).clean());
+        assert!(crate::landing_check::check_landings(&struts, 0.05).clean());
 
         // The branch is a brace: it has nowhere recorded to go, so it pins
         // the child, and the over-grown merge is kept rather than broken.
@@ -4617,7 +4687,7 @@ mod removal_tests {
         );
         assert_eq!(unmerged.kept_carrying, 1);
         assert_eq!(struts[1].landing, Landing::Strut { id: 0, layer: 30 });
-        assert!(crate::landing_check::check_landings(&struts).clean());
+        assert!(crate::landing_check::check_landings(&struts, 0.05).clean());
 
         // The child's parent shortened above the landing layer: stale, counted.
         let mut short = trunk;
