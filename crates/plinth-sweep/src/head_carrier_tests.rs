@@ -80,6 +80,8 @@ fn head_of(strut: &SweepStrut, k_joint: usize, joint_cell: usize) -> Head {
         gap_mm: 0.3,
         cos_lean_max: 0.5373,
         cells: vec![cell_u32(strut.cell); strut.k_top - k_joint],
+        ball_allowance_mm: 0.0,
+        drawn_straight: false,
     }
 }
 
@@ -876,5 +878,240 @@ fn the_lip_seat_pass_never_re_lands_a_headed_arm_on_either_trigger() {
         assert_eq!(moved, 0, "(clearance {clearance}) a headed arm is never re-landed");
         assert_eq!(struts[0].landing, Landing::Plate);
         assert_heads_honoured(&before, &tops, &struts, "lip seat");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The head-first lane's two rulings of 2026-10-06: a head is planned at an
+// ESTIMATE of the final tip radius, and a head the final sizing grew across the
+// clearance is downgraded to the straight tip.
+// ---------------------------------------------------------------------------
+
+mod head_first_rulings {
+    use super::*;
+    use crate::heads::{
+        downgrade_grown_heads, planned_tip_radius_mm, HeadRule, TYPICAL_TIP_RADIUS_MM,
+    };
+
+    fn rule(max_radius_mm: f64) -> HeadRule {
+        HeadRule {
+            gap_mm: 0.3,
+            allowance_mm: 0.1,
+            cos_lean_max: 0.5373,
+            max_radius_mm,
+            typical_tip_radius_mm: TYPICAL_TIP_RADIUS_MM,
+            max_normal_z: -0.34,
+            layer_height_mm: H,
+            plate_z_mm: 0.0,
+        }
+    }
+
+    /// (a) The plan reads the estimate where the seat's own demand asks for
+    /// less, the demand where it asks for more, and falls back to the demand
+    /// where the estimate's joint would exceed the registered maximum radius.
+    #[test]
+    fn a_head_is_planned_at_the_larger_of_its_demand_and_the_corpus_estimate() {
+        let wide = rule(1.0);
+        let no_ball = |_: f64| 0.0;
+        assert!((planned_tip_radius_mm(0.05, &wide, no_ball) - TYPICAL_TIP_RADIUS_MM).abs() < 1e-12);
+        assert!((planned_tip_radius_mm(0.21, &wide, no_ball) - 0.21).abs() < 1e-12);
+        // A joint for r_t = 0.15 is 0.5486 mm: over a 0.5 mm maximum, so the
+        // demand's own radius is kept.
+        let narrow = rule(0.5);
+        assert!((planned_tip_radius_mm(0.05, &narrow, no_ball) - 0.05).abs() < 1e-12);
+        // The ball's height moves the joint out and the lever with it: a joint
+        // that fits at 0.15 with no ball is refused with a 1.5-factor ball.
+        let roomy = rule(0.6);
+        assert!((planned_tip_radius_mm(0.05, &roomy, no_ball) - TYPICAL_TIP_RADIUS_MM).abs() < 1e-12);
+        assert!((planned_tip_radius_mm(0.05, &roomy, |_| 1.5) - 0.05).abs() < 1e-12);
+    }
+
+    /// (neck) The joint is planned `g` beyond the ball's far side, not beyond
+    /// the plane: the bare neck `(K - D)·u - r_K - 2R` is the gap. Every term is
+    /// read off the planned head, none off the helper under test.
+    #[test]
+    fn the_planned_joint_leaves_the_gap_as_a_bare_neck_beyond_the_ball() {
+        let grid = grid();
+        let rule = rule(1.0);
+        let (tip, ball_radius) = (0.15, 0.0975);
+        let request = |ball_radius_mm: f64| crate::heads::HeadRequest {
+            axis_point_mm: [7.0, 7.0, 10.0],
+            face_point_mm: [7.0, 7.0, 10.0],
+            unit: [0.66, 0.0, -0.75],
+            tip_radius_lb_mm: tip,
+            ball_radius_mm,
+            seat_cell: 0,
+            k_top: 200,
+        };
+        let neck = |head: &Head| {
+            let to_k = [
+                head.joint_mm[0] - head.contact_mm[0],
+                head.joint_mm[1] - head.contact_mm[1],
+                head.joint_mm[2] - head.contact_mm[2],
+            ];
+            let along: f64 = (0..3).map(|axis| to_k[axis] * head.unit[axis]).sum();
+            along - head.joint_radius_mm - 2.0 * ball_radius
+        };
+        let head = crate::heads::plan_head(&request(ball_radius), &rule, &grid).expect("a head");
+        assert!(
+            (neck(&head) - rule.gap_mm).abs() < 1e-9,
+            "the bare neck {} is the gap {}",
+            neck(&head),
+            rule.gap_mm
+        );
+        // Anti-vacuity: a head planned with no ball allowance has its neck
+        // taken back by the ball's whole height.
+        let bare = crate::heads::plan_head(&request(0.0), &rule, &grid).expect("a head");
+        assert!(neck(&bare) < rule.gap_mm - 0.15, "the old plan's neck {}", neck(&bare));
+    }
+
+    /// (neck) A head whose stand-off clears the gap but whose neck, at the
+    /// FINAL tip radius's ball, is under the rasterisation allowance is given
+    /// up; the same head with a smaller ball is kept.
+    #[test]
+    fn a_head_whose_final_ball_leaves_no_neck_is_downgraded() {
+        let grid = grid();
+        // Along u: 0.5 mm * 0.75 / |u| = 0.3754 mm; r_K 0.05: stand-off 0.3254.
+        let fresh = || {
+            let mut strut = headed(&grid, 0, 150, 150, 200, 190, 0.05);
+            *strut.radius_mm.last_mut().expect("a ledger") = 0.1;
+            vec![strut]
+        };
+        // Ball 0.1 mm high at tip 0.1 with factor 0.5: neck 0.2254 over 0.1.
+        let mut kept = fresh();
+        assert!(downgrade_grown_heads(&mut kept, 0.1, |_| 0.5).is_empty(), "a neck of 0.2254 stands");
+        assert!(!kept[0].head.as_ref().expect("a head").drawn_straight);
+        // Ball 0.3 mm high at factor 1.5: neck 0.0254, under the allowance
+        // though the stand-off (0.3254) is above the gap (0.3).
+        let mut given_up = fresh();
+        assert_eq!(downgrade_grown_heads(&mut given_up, 0.1, |_| 1.5), vec![0]);
+        assert!(given_up[0].head.as_ref().expect("a head").drawn_straight);
+    }
+
+    /// (follow) The members landed on a downgraded post stand on its OLD axis
+    /// (K to the base); the line now drawn is the straight arm from the seat. The
+    /// offset moves a junction from the old line onto the new one at every layer
+    /// the post is joinable at. Both lines are derived here from the grid.
+    #[test]
+    fn a_member_on_a_downgraded_post_follows_the_straight_line_now_drawn() {
+        let grid = grid();
+        let mut strut = straight(&grid, 0, 150, 150, 200, 0.05);
+        let post: Vec<u32> = (0..=190)
+            .map(|slot| cell_u32(grid.index(150, 130 + (slot * 10) / 190)))
+            .collect();
+        let joint_cell = post[190] as usize;
+        give_head(&mut strut, 190, joint_cell, Some(post));
+        let z =|layer: usize| f64::from(u32::try_from(layer).expect("small")) * H;
+        // K over its own cell, 0.5 mm off the contact (the lateral run).
+        let k = [
+            grid.center_x_mm(grid.col_of(joint_cell)),
+            grid.center_y_mm(grid.row_of(joint_cell)),
+            z(190),
+        ];
+        let d = [strut.center_mm[0], strut.center_mm[1], z(200)];
+        let base_cell = strut.base_cell();
+        let base = [
+            grid.center_x_mm(grid.col_of(base_cell)),
+            grid.center_y_mm(grid.row_of(base_cell)),
+            0.0,
+        ];
+        {
+            let head = strut.head.as_mut().expect("a head");
+            head.joint_mm = k;
+            head.contact_mm = d;
+            head.drawn_straight = true;
+        }
+        let offset = crate::adapter::downgraded_line_offset(None, &grid, 0.0, H, &strut)
+            .expect("a downgraded head has an offset");
+        // A member joined at layer 100: on the old line before, on the new line
+        // after.
+        let at = |from: [f64; 3], to: [f64; 3], layer: usize| {
+            let t = (z(layer) - from[2]) / (to[2] - from[2]);
+            [from[0] + t * (to[0] - from[0]), from[1] + t * (to[1] - from[1])]
+        };
+        let (old_xy, new_xy) = (at(base, k, 100), at(base, d, 100));
+        let shift = crate::adapter::offset_at(&offset, &strut, 100);
+        let moved = [old_xy[0] + shift[0], old_xy[1] + shift[1]];
+        assert!(
+            (moved[0] - new_xy[0]).hypot(moved[1] - new_xy[1]) < 1e-9,
+            "the member lands on the line drawn: {moved:?} against {new_xy:?}"
+        );
+        // Anti-vacuity: without the follow the member is further off the post
+        // than any branch and post radius here (0.05 + 0.1 mm).
+        let air = (old_xy[0] - new_xy[0]).hypot(old_xy[1] - new_xy[1]);
+        assert!(air > 0.15, "the displacement the follow removes is {air} mm");
+        // And a head still drawn is no business of this offset.
+        strut.head.as_mut().expect("a head").drawn_straight = false;
+        assert!(crate::adapter::downgraded_line_offset(None, &grid, 0.0, H, &strut).is_none());
+    }
+
+    /// (b) A joint whose final stand-off is under `g` goes back to the straight
+    /// tip; one that stands `g` off, and a straight arm, are untouched.
+    #[test]
+    fn a_head_the_final_sizing_grew_across_the_clearance_is_downgraded() {
+        let grid = grid();
+        // |DK| along u = 0.5 mm * 0.75 = 0.375 mm: a joint of 0.05 stands 0.325
+        // off (kept); a joint of 0.2204 stands 0.1546 off (grown).
+        let mut struts = vec![
+            headed(&grid, 0, 150, 150, 200, 190, 0.05),
+            headed(&grid, 1, 150, 160, 200, 190, 0.05),
+            straight(&grid, 2, 150, 170, 200, 0.05),
+        ];
+        // The tip's own radius stays 0.1 (the contact slot), the head slots
+        // are raised, and arm 1's joint slot grew.
+        for strut in &mut struts {
+            *strut.radius_mm.last_mut().expect("a ledger") = 0.1;
+        }
+        for slot in 191..200 {
+            struts[1].radius_mm[slot] = 0.18;
+        }
+        struts[1].radius_mm[190] = 0.2204;
+        let before = struts[0].clone();
+        let straight_before = struts[2].clone();
+        let path_before = struts[1].path.clone();
+        let downgraded = downgrade_grown_heads(&mut struts, 0.0, |_| 0.0);
+        assert_eq!(downgraded, vec![1], "only the grown joint is downgraded");
+        assert_eq!(struts[0], before, "a joint that stands the gap off is untouched");
+        assert_eq!(struts[2], straight_before, "a straight arm is untouched");
+        let arm = &struts[1];
+        assert!(
+            arm.head.as_ref().is_some_and(|head| head.drawn_straight),
+            "the head is drawn straight (and kept, with its route)"
+        );
+        assert_eq!(arm.landing, Landing::Plate, "the post keeps its landing");
+        assert_eq!(arm.k_bottom, 0);
+        assert!(
+            arm.radius_mm[190..].iter().all(|&radius| (radius - 0.1).abs() < 1e-12),
+            "above the post the head minimum falls back to the tip's own radius: {:?}",
+            &arm.radius_mm[188..]
+        );
+        assert_eq!(arm.path, path_before, "the post keeps its route: the path is not rewritten");
+    }
+
+    /// (b) A leaned post keeps its base, its landing and its path (the members
+    /// that landed on it still stand on the cells it occupied), so the landing
+    /// ledger reads the downgraded field as rooted as it read it headed.
+    #[test]
+    fn a_downgraded_leaning_arm_keeps_its_base_and_its_route() {
+        let grid = grid();
+        let mut strut = straight(&grid, 0, 150, 150, 200, 0.05);
+        let post: Vec<u32> = (0..=190)
+            .map(|slot| cell_u32(grid.index(150, 130 + (slot * 18) / 190)))
+            .collect();
+        let base = post[0] as usize;
+        let joint_cell = post[190] as usize;
+        give_head(&mut strut, 190, joint_cell, Some(post));
+        *strut.radius_mm.last_mut().expect("a ledger") = 0.1;
+        strut.radius_mm[190] = 0.2204;
+        let mut struts = vec![strut];
+        let path_before = struts[0].path.clone();
+        assert_eq!(downgrade_grown_heads(&mut struts, 0.0, |_| 0.0), vec![0]);
+        let arm = &struts[0];
+        assert!(arm.head.as_ref().is_some_and(|head| head.drawn_straight));
+        assert_eq!(arm.base_cell(), base, "the base stays where the post landed");
+        assert_eq!(arm.path, path_before);
+        assert!(arm.is_leaned());
+        let check = check_landings(&struts, H);
+        assert!(check.heads_not_intact.is_empty(), "the route is untouched: {check:?}");
     }
 }

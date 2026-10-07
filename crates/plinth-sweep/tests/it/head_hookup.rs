@@ -133,6 +133,8 @@ fn fixture(headed: bool) -> Fixture {
         gap_mm: GAP_MM,
         cos_lean_max: c,
         cells: head_cells.clone(),
+        ball_allowance_mm: 0.0,
+        drawn_straight: false,
     };
     let mut path = vec![joint_cell; k_joint + 1];
     path.extend_from_slice(&head_cells);

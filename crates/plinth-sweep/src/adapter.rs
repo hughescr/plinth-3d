@@ -125,6 +125,11 @@ pub struct SweepEmission {
     /// together.
     pub joints_grown: usize,
     pub max_standoff_deficit_mm: f64,
+    /// Members landed or seated on a post whose head was drawn straight after
+    /// the final sizing, and the largest displacement (mm) that moved one onto
+    /// the line now drawn. Without it each stood that far off its post.
+    pub downgraded_joins: usize,
+    pub downgraded_follow_max_mm: f64,
     /// Members whose drawn profile the JUNCTION CLAUSE raised above their
     /// ledger, from the junction down to their root, because a thicker branch
     /// joins them. A brace raises nothing since 2026-10-03 (rule R2), so this
@@ -266,6 +271,8 @@ pub fn to_primitives(
         head_standoff_mm,
         joints_grown: raised.joints_grown,
         max_standoff_deficit_mm: raised.max_standoff_deficit_mm,
+        downgraded_joins: raised.downgraded_joins,
+        downgraded_follow_max_mm: raised.downgraded_follow_max_mm,
         members_raised_to_a_branch: raised.members,
         arm_junctions_inverted_in_ledger: raised.arm_ledger_inversions,
         load_steps_tapered: raised.load_steps_tapered,
@@ -457,6 +464,11 @@ pub(crate) struct JunctionRaises {
     /// ([`SweepEmission::joints_grown`]).
     joints_grown: usize,
     max_standoff_deficit_mm: f64,
+    /// Joins on a post whose head was drawn straight, and the largest
+    /// displacement that moved them onto the line drawn
+    /// ([`downgraded_follow_of`]).
+    downgraded_joins: usize,
+    downgraded_follow_max_mm: f64,
     /// Members whose drawn profile was raised anywhere.
     members: usize,
     /// Load steps drawn as a cone ([`LoadStepTaper`]), and the layers the
@@ -701,7 +713,9 @@ pub(crate) fn drawn_ends(
 
 /// **The two ends of a member's POST**: where it starts and where it lands, in
 /// the drawn frame. For a headed strut the post starts at the head's joint `K`
-/// (carried, never re-derived); otherwise this is [`drawn_ends`]' answer.
+/// (carried, never re-derived); otherwise this is [`drawn_ends`]' answer. A
+/// head given up after the final sizing ([`crate::heads::Head::drawn_straight`])
+/// is drawn as the straight arm: its post is the whole line.
 #[must_use]
 pub fn drawn_post_ends(
     grid: &crate::grid::Grid,
@@ -711,9 +725,59 @@ pub fn drawn_post_ends(
 ) -> ([f64; 3], [f64; 3]) {
     let (seat, base) = drawn_ends(grid, plate_z_mm, layer_height_mm, strut);
     match &strut.head {
-        Some(head) => (head.joint_mm, base),
-        None => (seat, base),
+        Some(head) if !head.drawn_straight => (head.joint_mm, base),
+        _ => (seat, base),
     }
+}
+
+/// **Where a member's junctions go after its head was given up**
+/// ([`crate::heads::Head::drawn_straight`]): the displacement of the line the
+/// file now draws (the straight arm from its seat to its base, or to its boss
+/// top over its foot for a leaning plate post) from the line its joined
+/// members were placed on (the post's planned axis, from the joint `K` down to
+/// the base), at `K`'s height and at the base's. `None` for any other member.
+///
+/// The members that landed on the post, and the braces that seat on it, were
+/// placed against the cells of the K-to-base route. The straight line leaves
+/// that route by up to the head's lateral run, so without this they would
+/// stand in air. It feeds [`crate::footprint::followed_shifts_drawn`], exactly
+/// as the leaning-post offset ([`drawn_line_offset`]) does; both lines pass
+/// through the base, so the displacement falls away toward it.
+#[must_use]
+pub(crate) fn downgraded_line_offset(
+    flare: Option<&plinth_support::SweepRootFlare>,
+    grid: &crate::grid::Grid,
+    plate_z_mm: f64,
+    layer_height_mm: f64,
+    strut: &crate::SweepStrut,
+) -> Option<LineOffset> {
+    let head = strut.head.as_ref().filter(|head| head.drawn_straight)?;
+    let (seat, base) = drawn_ends(grid, plate_z_mm, layer_height_mm, strut);
+    // `head_payload` is `None` for this strut, so this is the straight arm.
+    let arm = sweep_arm(strut, seat, base, None, Vec::new());
+    let (top, bottom) = match flare {
+        Some(flare) if strut.landing == Landing::Plate && strut.is_leaned() => flare
+            .plate_shaft_of(&arm, plate_z_mm)
+            .unwrap_or((seat, base)),
+        _ => (seat, base),
+    };
+    let rise = top[2] - bottom[2];
+    if !(rise.is_finite() && rise > 0.0) {
+        return None;
+    }
+    let drawn_at = |z: f64| -> [f64; 3] {
+        let t = (top[2] - z) / rise;
+        [
+            top[0] + t * (bottom[0] - top[0]),
+            top[1] + t * (bottom[1] - top[1]),
+            z,
+        ]
+    };
+    let off = |planned: [f64; 3]| -> [f64; 3] {
+        let drawn = drawn_at(planned[2]);
+        [drawn[0] - planned[0], drawn[1] - planned[1], 0.0]
+    };
+    Some((off(head.joint_mm), off(base)))
 }
 
 /// How far a member's DRAWN shaft line stands from the line it was planned
@@ -908,7 +972,8 @@ pub(crate) fn sweep_arm(
 /// final tip radius: one law with two readers, so the file never reads the
 /// per-layer ledger here.
 pub(crate) fn head_payload(strut: &crate::SweepStrut) -> Option<plinth_support::SweepHead> {
-    let head = strut.head.as_ref()?;
+    // A head given up after the final sizing is drawn as the straight arm.
+    let head = strut.head.as_ref().filter(|head| !head.drawn_straight)?;
     let parts = strut.k_top.checked_sub(head.k_joint).filter(|n| *n > 0)?;
     let joint_slot = head.k_joint.checked_sub(strut.k_bottom)?;
     let joint_radius_mm = *strut.radius_mm.get(joint_slot)?;
@@ -980,13 +1045,27 @@ fn arms_and_junction_raises(plan: &SweepPlan) -> (Vec<SweepArm>, JunctionRaises)
     // move. Each post's offset is read on the post as the file draws it (its
     // own seat move applied); no post has a host at its base, so that is its
     // final seat. A field with no leaning plate post is bit-identical.
-    let offsets: Vec<Option<LineOffset>> = match plinth_support::SweepRootFlare::registered(height)
-    {
-        Ok(flare) => plan
-            .struts
+    //
+    // A HEAD GIVEN UP AFTER THE FINAL SIZING draws as the straight arm, from
+    // its seat to its base, while the members joined to its post stand on the
+    // K-to-base route they were placed on; their offset is the displacement
+    // between the two lines ([`downgraded_line_offset`]).
+    let flare = plinth_support::SweepRootFlare::registered(height).ok();
+    let any_straight_head = plan
+        .struts
+        .iter()
+        .any(|strut| strut.head.as_ref().is_some_and(|head| head.drawn_straight));
+    let offsets: Vec<Option<LineOffset>> = if flare.is_none() && !any_straight_head {
+        Vec::new()
+    } else {
+        plan.struts
             .iter()
             .zip(&followed)
             .map(|(strut, followed)| {
+                if strut.head.as_ref().is_some_and(|head| head.drawn_straight) {
+                    return downgraded_line_offset(flare.as_ref(), grid, plate, height, strut);
+                }
+                let flare = flare.as_ref()?;
                 (strut.landing == Landing::Plate
                     && strut.kind != crate::StrutKind::Brace
                     && strut.is_leaned())
@@ -994,12 +1073,12 @@ fn arms_and_junction_raises(plan: &SweepPlan) -> (Vec<SweepArm>, JunctionRaises)
                 // `headed_tip` needs it to recognise the head);
                 // `drawn_line_offset` measures the POST's line from the
                 // head's joint.
-                .then(|| drawn_line_offset(&flare, &build(strut, *followed, Vec::new()), plate))
+                .then(|| drawn_line_offset(flare, &build(strut, *followed, Vec::new()), plate))
                 .flatten()
             })
-            .collect(),
-        Err(_) => Vec::new(),
+            .collect()
     };
+    let raised = downgraded_follow_of(&plan.struts, &offsets, raised);
     let followed = if offsets.iter().any(Option::is_some) {
         crate::footprint::followed_shifts_drawn(&plan.struts, &offsets)
     } else {
@@ -1034,6 +1113,44 @@ fn joints_grown_of(struts: &[crate::SweepStrut], mut raised: JunctionRaises) -> 
             raised.max_standoff_deficit_mm = raised
                 .max_standoff_deficit_mm
                 .max(payload.joint_radius_mm - head.joint_radius_mm);
+        }
+    }
+    raised
+}
+
+/// **What the members joined to a downgraded head's post follow**: how many
+/// joins (a landing on the post, a brace seated on it) sit on a post whose head
+/// was drawn straight, and the largest horizontal displacement, in mm, that
+/// moves them onto the line now drawn ([`downgraded_line_offset`]). The
+/// displacement is the air the old code would have left between the member and
+/// the post. One pass over the struts.
+fn downgraded_follow_of(
+    struts: &[crate::SweepStrut],
+    offsets: &[Option<LineOffset>],
+    mut raised: JunctionRaises,
+) -> JunctionRaises {
+    let straight = |host: usize| {
+        struts
+            .get(host)
+            .and_then(|strut| strut.head.as_ref())
+            .is_some_and(|head| head.drawn_straight)
+    };
+    for strut in struts {
+        let seat_join = strut.seat_on_strut.map(|id| (id as usize, strut.k_top));
+        let base_join = match strut.landing {
+            Landing::Strut { id, layer } => Some((id as usize, layer)),
+            _ => None,
+        };
+        for (host, layer) in [seat_join, base_join].into_iter().flatten() {
+            if !straight(host) {
+                continue;
+            }
+            let Some(Some(offset)) = offsets.get(host) else {
+                continue;
+            };
+            let at = offset_at(offset, &struts[host], layer);
+            raised.downgraded_joins += 1;
+            raised.downgraded_follow_max_mm = raised.downgraded_follow_max_mm.max(at[0].hypot(at[1]));
         }
     }
     raised

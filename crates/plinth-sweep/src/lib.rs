@@ -682,6 +682,13 @@ pub struct SweepPolicy {
     /// rather than the normal of one seat triangle. **On in production.** The
     /// orientation prefilter and the sabotage drill turn it off.
     pub footprint_normal: bool,
+    /// Whether the up-sweep builds an articulated head on a steep face
+    /// ([`heads`], Craig ruling 2026-10-06): a short straight neck along the
+    /// footprint normal from the contact to a joint sphere, with the post
+    /// starting at the joint. **On in production.** Like `footprint_normal`
+    /// it reads the measured seat normal, so the orientation prefilter and the
+    /// sabotage drill turn it off, and the straight tip is what every seat gets.
+    pub heads: bool,
     /// Whether a descent may land part-way down another arm's SHAFT, and not
     /// only on its top. **On in production.** The knob exists so a test can
     /// show that a mid-shaft junction is what a given arm chose, by putting the
@@ -975,6 +982,7 @@ impl SweepPolicy {
             island_seating: true,
             seat_face_band: true,
             footprint_normal: true,
+            heads: true,
             shaft_landings: true,
             drain_keep_out: true,
             removal_span_check: true,
@@ -1226,6 +1234,15 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_footprint_normal(mut self) -> Self {
         self.footprint_normal = false;
+        self
+    }
+
+    /// Give every seat the straight tip, as before 2026-10-06. **The
+    /// orientation prefilter and the sabotage drill only** (the prefilter
+    /// ranks poses by the arms they cost and reads no seat normal).
+    #[must_use]
+    pub const fn without_heads(mut self) -> Self {
+        self.heads = false;
         self
     }
 
@@ -1655,6 +1672,63 @@ pub fn run_sweep_with_holes(
             )
         });
     }
+    // Which faces a tip may carry: the faces the registered overhang law
+    // weighs as an overhang (orchestrator ruling 2026-09-30,
+    // `tip_landing::SeatFaceRule`). Read by the head rule below, by the
+    // lip-seat and head-join passes and by the finished plan's seat faces, so
+    // all of them measure a tip against one face.
+    let seat_face_rule = if policy.seat_face_band {
+        tip_landing::SeatFaceRule::from_overhang_band(
+            policy.overhang_centre_deg,
+            policy.overhang_transition_deg,
+        )
+    } else {
+        tip_landing::SeatFaceRule::any_down_facing()
+    };
+    // The seat normal of a support arm is its footprint's average
+    // (`footprint_normal`, Craig ruling 2026-10-05); the same rule value is
+    // read by the lip-seat and head-join passes and the finished plan, so all
+    // three measure one normal.
+    let seat_face_rule = if policy.footprint_normal {
+        seat_face_rule
+    } else {
+        seat_face_rule.without_footprint_normal()
+    };
+    // The registered numbers of the head law (`heads`): the final gap, the
+    // rasterisation allowance (one layer plus one pixel, as the seat law's),
+    // the lean law's `cos λmax`, the registered maximum radius, the seat-face
+    // band and the layer grid. Absent (no head anywhere) where the registry
+    // cannot be read or the policy turns heads off; emit and warn, never refuse.
+    let head_registry = if policy.heads {
+        m0_constants().ok().map(|constants| {
+            let printer = constants.saturn4_ultra();
+            let pixel_mm = printer
+                .pixel_pitch_x_um()
+                .value()
+                .max(*printer.pixel_pitch_y_um().value())
+                / 1000.0;
+            (
+                constants.evidence().chitubox_tip_contact_profiles().value(),
+                heads::HeadRule {
+                    gap_mm: policy.final_clearance_gap_mm,
+                    allowance_mm: height + pixel_mm,
+                    cos_lean_max: lean::LeanLaw::new(
+                        height,
+                        policy.overhang_centre_deg,
+                        policy.overhang_transition_deg,
+                    )
+                    .cos_max_lean(),
+                    max_radius_mm: policy.tip_radius_max_mm,
+                    typical_tip_radius_mm: heads::TYPICAL_TIP_RADIUS_MM,
+                    max_normal_z: seat_face_rule.max_normal_z(),
+                    layer_height_mm: height,
+                    plate_z_mm: plate_z,
+                },
+            )
+        })
+    } else {
+        None
+    };
     let descent_clearance = policy.drawn_solid_descent.then(|| up_sweep::DescentClearance {
         layer_height_mm: height,
         plate_z_mm: plate_z,
@@ -1667,6 +1741,14 @@ pub fn run_sweep_with_holes(
             .get()
             .and_then(Option::as_ref)
             .map(up_sweep::SurfaceRef),
+        heads: head_registry.map(|(profiles, rule)| up_sweep::HeadEnv {
+            mesh,
+            profiles,
+            rule,
+            // A head keeps the final gap from every stamped shaft and every
+            // earlier head, the same clearance a member keeps from the model.
+            separation_mm: policy.final_clearance_gap_mm,
+        }),
     });
     let mut descent_tally = up_sweep::DescentTally::default();
     // The mesh's own surface, banded layer by layer, for the overhang weight a
@@ -2086,28 +2168,8 @@ pub fn run_sweep_with_holes(
         congestion::measure(&grid, &history, &struts, policy.flare_r_factor);
     landings.record("congestion", &landing_check::check_landings(&struts, height));
 
-    // Which faces a tip may carry: the faces the registered overhang law
-    // weighs as an overhang (orchestrator ruling 2026-09-30,
-    // `tip_landing::SeatFaceRule`). Read by the lip-seat and head-join passes
-    // and by the finished plan's seat faces, so all three measure a tip
-    // against one face.
-    let seat_face_rule = if policy.seat_face_band {
-        tip_landing::SeatFaceRule::from_overhang_band(
-            policy.overhang_centre_deg,
-            policy.overhang_transition_deg,
-        )
-    } else {
-        tip_landing::SeatFaceRule::any_down_facing()
-    };
-    // The seat normal of a support arm is its footprint's average
-    // (`footprint_normal`, Craig ruling 2026-10-05); the same rule value is
-    // read by the lip-seat and head-join passes and the finished plan, so all
-    // three measure one normal.
-    let seat_face_rule = if policy.footprint_normal {
-        seat_face_rule
-    } else {
-        seat_face_rule.without_footprint_normal()
-    };
+    // (`seat_face_rule`, the faces a tip may carry, is fixed above the
+    // up-sweep: the head rule reads it too.)
 
     // --- slenderness: merge, then |X|, then a mast, then a warning ---------
     //
@@ -2707,6 +2769,18 @@ pub fn run_sweep_with_holes(
     // the max over events keeps out of the plate reaction by design (measured
     // 2026-09-29: the whole of the remaining gap on the Cylinder, 1.4625 mm²
     // over 8 reads, and the Sphere, 0.4950 mm² over 6).
+    // **A HEAD THE FINAL SIZING GREW ACROSS THE CLEARANCE, OR ONTO ITS OWN
+    // BALL, GOES BACK TO THE STRAIGHT TIP** (orchestrator ruling 2026-10-06):
+    // after the last sizing and before anything reads the finished field, every
+    // head whose joint now stands less than the final gap off its seat plane,
+    // or leaves a bare neck under the rasterisation allowance, is drawn as the
+    // straight tip (the post keeps its route; the members joined to it follow
+    // the line now drawn) and counted in the heads line.
+    let heads_downgraded = head_registry.map_or_else(Vec::new, |(profiles, rule)| {
+        heads::downgrade_grown_heads(&mut struts, rule.allowance_mm, |radius| {
+            profiles.ball_factor(radius)
+        })
+    });
     landings.finished = landing_check::check_landings(&struts, height);
     landings.load_gap_mm2 =
         outcome.injected_load_mm2 - outcome.plate_reaction_mm2 - outcome.uncarried_load_mm2;
@@ -2895,6 +2969,8 @@ pub fn run_sweep_with_holes(
     report.counters.island_seats = greedy.island_seats;
     report.counters.stranded_seats = greedy.stranded_seats;
     report.counters.island_hex_bound = greedy.island_hex_bound;
+    greedy.heads.publish(&mut report.heads);
+    report.heads.downgraded_after_sizing = heads_downgraded;
 
     // ------------------------------------------------ what each tip seats INTO
     //
@@ -3104,7 +3180,7 @@ pub fn run_sweep_with_holes(
                 sweep_plan
                     .struts
                     .get(warning.arm as usize)
-                    .is_some_and(|strut| strut.head.is_some())
+                    .is_some_and(|strut| strut.head.as_ref().is_some_and(|head| !head.drawn_straight))
             })
             .count();
         lip_seat_outcome.over_limit_after = over;
@@ -4513,6 +4589,10 @@ fn digest(struts: &[SweepStrut]) -> String {
             absorb(head.k_joint as u64);
             for cell in &head.cells {
                 absorb(u64::from(*cell));
+            }
+            // Drawn straight after the final sizing: a different file.
+            if head.drawn_straight {
+                absorb(1);
             }
         }
     }

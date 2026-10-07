@@ -3037,7 +3037,7 @@ fn print_sweep_disclosure(
         for warning in &lip.over_limit_after {
             println!(
                 "[sweep {model}] WARNING arm {} meets its seat face at {:.1} deg (its limit {:.1} \
-                 deg), and the seat trim cuts {:.4} mm into its shaft outside the tip ball{}{}{}",
+                 deg), and the seat trim cuts {:.6} mm into its shaft outside the tip ball{}{}{}",
                 warning.arm,
                 warning.approach_deg,
                 warning.limit_deg,
@@ -3683,18 +3683,28 @@ fn print_sweep_disclosure(
             .join(", ");
         println!(
             "[sweep {model}] heads: {} built at placement on steep faces, {straight} kept a \
-             straight tip ({reasons}); drawn {}; stalk mm {}; stand-off mm {} (gap {final_gap_mm}); \
-             joints grown {} (largest stand-off deficit {:.4} mm); necks wider than ball {}; u \
-             against final footprint normal {:.3} deg max, {:.3} median",
+             straight tip ({reasons}); drawn {}; visible neck (bare stalk, ball to joint) mm {}; \
+             stand-off mm {} (gap {final_gap_mm}); \
+             joints grown {} (largest stand-off deficit {:.4} mm); downgraded after sizing: {} \
+             ({} joins on their posts followed onto the straight line drawn, largest shift {:.3} mm); \
+             necks wider than ball {}; \
+             placement normal residual {:.3} deg max, {:.3} median; u against final footprint \
+             normal {:.3} deg max, {:.3} median; lip-seat bites on headed arms {} (must be 0)",
             heads.built,
             emission.tips_headed,
             spread(&emission.head_stalk_mm),
             spread(&emission.head_standoff_mm),
             emission.joints_grown,
             emission.max_standoff_deficit_mm,
+            heads.downgraded_after_sizing.len(),
+            emission.downgraded_joins,
+            emission.downgraded_follow_max_mm,
             emission.head_necks_wider_than_ball,
+            heads.placement_residual_deg_max,
+            heads.placement_residual_deg_median,
             heads.final_normal_residual_deg_max,
             heads.final_normal_residual_deg_median,
+            report.lip_seat.headed_bites,
         );
         let warned = heads
             .refusals
@@ -3706,6 +3716,15 @@ fn print_sweep_disclosure(
             println!(
                 "[sweep {model}] WARNING heads: members that kept a straight tip, by reason: {}",
                 warned.join("; ")
+            );
+        }
+        if !heads.downgraded_after_sizing.is_empty() {
+            println!(
+                "[sweep {model}] WARNING heads: {} heads built at placement went back to a \
+                 straight tip after the final sizing grew the joint across the clearance or onto \
+                 its ball: {:?}",
+                heads.downgraded_after_sizing.len(),
+                heads.downgraded_after_sizing
             );
         }
         if emission.heads_drawn_straight > 0 {

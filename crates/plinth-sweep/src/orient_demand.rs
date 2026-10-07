@@ -300,7 +300,11 @@ impl DemandSettings {
                 // ruling 2026-10-05, `footprint_normal`): it ranks poses by the
                 // arms they cost and reads no seat normal; the finalists'
                 // production measurement, below, runs the pass.
-                .without_footprint_normal(),
+                .without_footprint_normal()
+                // NOR DOES IT BUILD ARTICULATED HEADS (2026-10-06): a head
+                // changes the post's start and the seat's cell, never the
+                // demand the prefilter counts.
+                .without_heads(),
             DemandFidelity::Production => policy,
         };
         Ok(Self {

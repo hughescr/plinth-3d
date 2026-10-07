@@ -24,6 +24,10 @@ use std::collections::BTreeMap;
 
 use crate::drain::DrainKeepOut;
 use crate::grid::Grid;
+use crate::heads::{
+    check_head, plan_head, placement_normals, planned_tip_radius_mm, Head, HeadCapsule, HeadCheckCtx, HeadRefusal,
+    HeadRequest, HeadRule, HeadsOutcome, PlacementBall, PlacementEnv,
+};
 use crate::lean::LeanLaw;
 use crate::reach::ReachState;
 use crate::{Landing, SweepStrut};
@@ -498,6 +502,9 @@ pub struct GreedyScratch {
     /// branch rule ([`crate::stranded_branch`]) finds the members this rule
     /// seated once the field is sized.
     pub stranded_seat_cells: Vec<(usize, usize)>,
+    /// The articulated heads built so far, and what was refused
+    /// ([`HeadsState`]); empty unless the sweep runs with heads.
+    pub heads: HeadsState,
 }
 
 impl GreedyScratch {
@@ -576,6 +583,7 @@ impl GreedyScratch {
             stranded_seating: true,
             stranded_seats: 0,
             stranded_seat_cells: Vec::new(),
+            heads: HeadsState::default(),
         }
     }
 
@@ -729,6 +737,67 @@ pub struct DescentClearance<'a> {
     /// ([`crate::member_clearance::ShaftRead::intrusion`]). `None` where it
     /// could not be built.
     pub surface: Option<SurfaceRef<'a>>,
+    /// What the up-sweep reads to build an articulated head at each steep seat
+    /// ([`HeadEnv`]); `None` is the straight tip everywhere
+    /// ([`crate::SweepPolicy::heads`] off).
+    pub heads: Option<HeadEnv<'a>>,
+}
+
+/// What [`commit_seat`] reads to build an articulated head: the model's
+/// triangles, the registered contact-ball table, the registered numbers of the
+/// head law, and the separation a head keeps from every accepted member.
+#[derive(Clone, Copy)]
+pub struct HeadEnv<'a> {
+    pub mesh: &'a plinth_mesh::Mesh,
+    pub profiles: &'a plinth_core::TipContactProfiles,
+    pub rule: HeadRule,
+    /// The clearance a head keeps from stamped shafts and earlier heads.
+    pub separation_mm: f64,
+}
+
+impl core::fmt::Debug for HeadEnv<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("HeadEnv").field("rule", &self.rule).finish_non_exhaustive()
+    }
+}
+
+/// The margin, in degrees, below the skim angle under which a seat's facet is
+/// too flat to ask the footprint for a head. A SEARCH PRUNE and not a rule:
+/// the footprint normal differs from the seat facet's by at most 9.88 degrees
+/// on the v16 corpus, and [`plan_head`] still decides on the footprint's own
+/// normal. It only saves the footprint query on faces no head could want.
+const HEAD_PRUNE_MARGIN_DEG: f64 = 15.0;
+
+/// The running state of heads across one sweep: the accepted heads' capsules
+/// (the placement tests' "earlier heads"), what was built or refused, and the
+/// placement residuals.
+#[derive(Debug, Default)]
+pub struct HeadsState {
+    pub accepted: Vec<HeadCapsule>,
+    pub outcome: HeadsOutcome,
+    /// Per built head, the angle between the normal the seat was placed with
+    /// (pass 1) and the refined one (pass 2), in degrees.
+    pub residuals_deg: Vec<f64>,
+}
+
+impl HeadsState {
+    /// Publish the counts into the run report: heads built, refusals by
+    /// reason, and the placement residual (max, median).
+    pub fn publish(&self, into: &mut HeadsOutcome) {
+        into.built = self.outcome.built;
+        into.refusals.clone_from(&self.outcome.refusals);
+        let mut sorted = self.residuals_deg.clone();
+        sorted.sort_by(f64::total_cmp);
+        if let Some(&max) = sorted.last() {
+            let middle = sorted.len() / 2;
+            into.placement_residual_deg_max = max;
+            into.placement_residual_deg_median = if sorted.len() % 2 == 1 {
+                sorted[middle]
+            } else {
+                0.5 * (sorted[middle - 1] + sorted[middle])
+            };
+        }
+    }
 }
 
 /// A borrowed model surface, `Debug` without printing the index.
@@ -1583,6 +1652,120 @@ fn aligned_lattice_cells(
     cells
 }
 
+/// **Plan and check one articulated head for the seat at `cell`** (layer
+/// `seating.layer`), before anything rests on the arm. `tip_radius_lb_mm` is
+/// the lower bound on the tip's drawn radius (what the seat's demand needs).
+///
+/// `Ok((head, residual_deg))` when a head is built. `Err(None)` when the seat
+/// keeps the straight tip and NOTHING is counted (heads off, a facet that is
+/// not steep, a face too flat to be worth the footprint query:
+/// [`HEAD_PRUNE_MARGIN_DEG`]). `Err(Some(reason))` for every other refusal,
+/// which the caller counts by reason and member id.
+///
+/// The nearest model face to the seat's axis point is named by ONE surface
+/// query, which gives the facet's normal for the prune, the seat triangle's
+/// identity for the footprint kernel and the face point for the head's plane.
+fn plan_seat_head(
+    seating: &Seating<'_>,
+    history: &ColumnHistory,
+    accepted: &[HeadCapsule],
+    cell: usize,
+    tip_radius_lb_mm: f64,
+) -> Result<(Head, f64), Option<HeadRefusal>> {
+    let Some(env) = seating.clearance.and_then(|clear| clear.heads.map(|env| (clear, env))) else {
+        return Err(None);
+    };
+    let (clear, env) = env;
+    let rule = env.rule;
+    // The head is planned at an ESTIMATE of the tip's final radius, not at the
+    // minimum its own demand allows: later landers and peel events grow the tip
+    // after placement, and a joint planned small stands across the clearance
+    // once it grows ([`planned_tip_radius_mm`]; the check after the final
+    // sizing decides what is kept).
+    let tip_radius_lb_mm =
+        planned_tip_radius_mm(tip_radius_lb_mm, &rule, |radius| env.profiles.ball_factor(radius));
+    let Some(surface) = clear.surface.map(|surface| surface.0) else {
+        return Err(Some(HeadRefusal::NoSurface));
+    };
+    let grid = seating.grid;
+    #[expect(clippy::cast_precision_loss, reason = "a layer index is exact in f64")]
+    let axis_point = [
+        grid.center_x_mm(grid.col_of(cell)),
+        grid.center_y_mm(grid.row_of(cell)),
+        rule.plate_z_mm + (seating.layer as f64 + 0.5) * rule.layer_height_mm,
+    ];
+    let points = [axis_point];
+    let (_, closest, faces, normals) = surface.project(&points);
+    let (Some(&face_point), Some(&face), Some(&facet_raw)) =
+        (closest.first(), faces.first(), normals.first())
+    else {
+        return Err(Some(HeadRefusal::NoSurface));
+    };
+    let (Ok(face), Some(facet)) = (u32::try_from(face), geom_kernel::vec3::normalize(facet_raw))
+    else {
+        return Err(Some(HeadRefusal::NoSurface));
+    };
+    // The search prune. A facet that faces up, or is steeper than the seat-face
+    // band admits, wants no head; a facet more than the margin below the skim
+    // angle is too flat for the footprint to bring it over.
+    let facet_cos = -facet[2];
+    if facet_cos <= 0.0 || facet[2] >= rule.max_normal_z {
+        return Err(None);
+    }
+    let secant = 1.0 + rule.allowance_mm / (rule.gap_mm + tip_radius_lb_mm);
+    let skim_deg = (1.0 / secant).clamp(-1.0, 1.0).acos().to_degrees();
+    if facet_cos > (skim_deg - HEAD_PRUNE_MARGIN_DEG).max(0.0).to_radians().cos() {
+        return Err(None);
+    }
+    let ball = PlacementBall::from_profiles(axis_point, face, facet, tip_radius_lb_mm, env.profiles);
+    let placement = PlacementEnv {
+        mesh: env.mesh,
+        surface: Some(surface),
+        max_normal_z: rule.max_normal_z,
+    };
+    let Some(found) = placement_normals(&placement, &[ball]).into_iter().next() else {
+        return Err(Some(HeadRefusal::NoFootprint));
+    };
+    let (unit, residual_deg) = found.map_err(Some)?;
+    // The head's axis runs through the DRAWN seat (the cell centre at the seat
+    // layer's own z, `adapter::drawn_ends`), because the lowering seats the
+    // ball along `u` from there: a head axis through the footprint's ball
+    // centre (half a layer higher) would leave the neck a degree off the ball's
+    // axis, and the seat trim would cut the neck's wide first ring.
+    #[expect(clippy::cast_precision_loss, reason = "a layer index is exact in f64")]
+    let drawn_seat = [
+        axis_point[0],
+        axis_point[1],
+        rule.plate_z_mm + seating.layer as f64 * rule.layer_height_mm,
+    ];
+    let request = HeadRequest {
+        axis_point_mm: drawn_seat,
+        face_point_mm: face_point,
+        unit,
+        tip_radius_lb_mm,
+        ball_radius_mm: ball.ball_factor * tip_radius_lb_mm,
+        seat_cell: u32::try_from(cell).unwrap_or(u32::MAX),
+        k_top: seating.layer,
+    };
+    let head = match plan_head(&request, &rule, grid) {
+        Ok(head) => head,
+        Err(HeadRefusal::NotSteep) => return Err(None),
+        Err(reason) => return Err(Some(reason)),
+    };
+    let ctx = HeadCheckCtx {
+        grid,
+        history,
+        keep_out: seating.keep_out,
+        surface: Some(surface),
+        mesh: env.mesh,
+        plate_z_mm: rule.plate_z_mm,
+        layer_height_mm: rule.layer_height_mm,
+        separation_mm: env.separation_mm,
+    };
+    check_head(&head, tip_radius_lb_mm, &ctx, accepted).map_err(Some)?;
+    Ok((head, residual_deg))
+}
+
 /// Seat one arm for real at `cell`: descend, root it, record it and stamp the
 /// column history. Returns the demand rows it changed (`lo > hi` when none).
 fn commit_seat(
@@ -1706,6 +1889,84 @@ fn commit_seat(
     if clearance.is_some() {
         reach.end_journal();
     }
+
+    // **THE ARTICULATED HEAD** (Craig 2026-10-06), now that the seat cell and
+    // what it covers are final and before anything rests on the arm: on a steep
+    // face the arm's top is a short straight head along the footprint normal to
+    // a joint sphere, and the post descends from the joint. Where the head
+    // cannot be built the arm keeps today's straight tip, counted by reason;
+    // `NotSteep` and a face too flat to ask are not counted at all.
+    let mut head_built: Option<Head> = None;
+    if clearance.is_some_and(|clear| clear.heads.is_some()) {
+        let lower_bound = clearance.map_or(0.0, |clear| {
+            clear.radius_lower_bound_mm(covered.len() as f64 * grid.cell_area_mm2())
+        });
+        match plan_seat_head(seating, history, &scratch.heads.accepted, cell, lower_bound) {
+            Err(None) => {}
+            Err(Some(reason)) => {
+                scratch.heads.outcome.refusals.entry(reason).or_default().push(id);
+            }
+            Ok((head, residual_deg)) => {
+                // The post, from the joint, against the history BELOW the joint
+                // (the running state holds the model and the other seats above
+                // it), read as a solid of the joint's own radius.
+                let mut post_trial = LayerOutcome::empty();
+                let head_margin_mm = law.layer_height_mm()
+                    + crate::member_clearance::raster_half_diagonal_mm(grid);
+                let post = descend_cleared_from(
+                    grid,
+                    history,
+                    keep_out,
+                    law,
+                    shaft_landings,
+                    separation_mm,
+                    head.joint_cell as usize,
+                    head.k_joint,
+                    layer,
+                    &mut scratch.lean_candidates,
+                    &mut post_trial,
+                    clearance,
+                    head.joint_radius_mm,
+                    Some(&PostPlane {
+                        joint_mm: head.joint_mm,
+                        contact_mm: head.contact_mm,
+                        unit: head.unit,
+                        // The post is never drawn thinner than the joint, and the
+                        // joint itself grows with the final tip (frozen at K,
+                        // wider only): the sizing may draw the post anywhere
+                        // up to the registered maximum radius, so a leaning
+                        // post is admitted only if even that stays off the
+                        // plane (measured: a post leaning back at 80 degrees to
+                        // the normal, its joint grown 0.22 to 0.53 mm, was cut
+                        // by the trim on the ball fixture).
+                        radius_mm: clearance
+                            .and_then(|clear| clear.heads)
+                            .map_or(head.joint_radius_mm, |env| {
+                                env.rule.max_radius_mm.max(head.joint_radius_mm)
+                            }),
+                        plate_z_mm: clearance.map_or(0.0, |clear| clear.plate_z_mm),
+                        margin_mm: head_margin_mm,
+                    }),
+                );
+                if post.clears == Clears::Neither && descent.clears != Clears::Neither {
+                    scratch
+                        .heads
+                        .outcome
+                        .refusals
+                        .entry(HeadRefusal::PostUncleared)
+                        .or_default()
+                        .push(id);
+                } else {
+                    scratch.heads.accepted.push(HeadCapsule::of(&head));
+                    scratch.heads.outcome.built += 1;
+                    scratch.heads.residuals_deg.push(residual_deg);
+                    descent = post;
+                    trial = post_trial;
+                    head_built = Some(head);
+                }
+            }
+        }
+    }
     outcome.absorb_descent(&trial);
     let Descent {
         landing,
@@ -1760,13 +2021,30 @@ fn commit_seat(
         seat_face: crate::SeatFace::default(),
         seat_normal: [0.0; 3],
         fallback_path: Vec::new(),
-        head: None,
+        head: head_built.clone(),
+        // A headed arm's fallback is the straight post from its JOINT, post
+        // only (`set_post` puts the head slots back on a restore).
         straight_fallback: (!path.is_empty()).then(|| {
-            let (landing, bottom, _) = descend(history, cell, layer);
+            let (landing, bottom, _, _) = match &head_built {
+                Some(head) => descend_below(history, head.joint_cell as usize, head.k_joint, layer),
+                None => descend_below(history, cell, layer, layer),
+            };
             (landing, bottom)
         }),
         path,
     });
+    if let Some(head) = &head_built {
+        // The post runs from the joint: the descent's cells stop one layer
+        // under it, so the joint's own cell closes them, and `set_post` follows
+        // them with the head's cells up to the seat (a straight post is the
+        // joint cell all the way down).
+        let placed = struts.last_mut().expect("the arm just pushed");
+        let mut post = core::mem::take(&mut placed.path);
+        if !post.is_empty() {
+            post.push(head.joint_cell);
+        }
+        placed.set_post(landing, k_bottom, post);
+    }
     // Every column the arm passes through now holds an arm, not just its seat
     // column: a leaned arm that only stamped its seat would let the next
     // descent route straight through its shaft.
@@ -1791,9 +2069,10 @@ fn commit_seat(
     }
     // And the SHAFT, layer interval by layer interval, so a later descent can
     // land anywhere on it and not only at its top. Nothing is copied: the
-    // arm's own path is read in place.
+    // arm's own path is read in place. A headed arm stamps its post landable
+    // only up to its joinable top, and its head as blocking only.
     let placed = struts.last().expect("the arm just pushed");
-    history.stamp_shaft(id, k_bottom, layer, cell, &placed.path);
+    history.stamp_strut(placed, clearance.map_or(0.0, |clear| clear.layer_height_mm));
     (dirty_lo, dirty_hi)
 }
 
@@ -2361,7 +2640,107 @@ fn descend_cleared(
     clearance: Option<&DescentClearance<'_>>,
     radius_lb_mm: f64,
 ) -> Descent {
-    let (straight_landing, straight_bottom, straight_rooted) = descend(history, cell, layer);
+    descend_cleared_from(
+        grid,
+        history,
+        keep_out,
+        law,
+        shaft_landings,
+        search_radius_mm,
+        cell,
+        layer,
+        layer,
+        scratch,
+        outcome,
+        clearance,
+        radius_lb_mm,
+        None,
+    )
+}
+
+/// The seat plane an articulated head's post must stay on the FREE side of.
+///
+/// The seat trim cuts away everything of the post that lies beyond the seat
+/// plane (through the contact `D`, normal `u`), so a post that leans back under
+/// the face must not be chosen: it would be cut off its own joint. A lean
+/// candidate is admitted only if its drawn base, with the post's radius about
+/// the axis, stands on the free side with a margin of one layer and half a cell
+/// (the drawn post is that far off its grid route). The straight post under the
+/// joint always stands on the free side (it moves along `-z`, and `u_z < 0`).
+#[derive(Clone, Copy, Debug)]
+struct PostPlane {
+    /// The joint `K`, exact, in the lowering's frame.
+    joint_mm: [f64; 3],
+    /// The contact centre `D`.
+    contact_mm: [f64; 3],
+    /// The outward normal `u` of the seat plane.
+    unit: [f64; 3],
+    /// An UPPER bound on the post's radius (the registered maximum): the
+    /// joint grows with the final tip and the sizing may thicken the post
+    /// toward its base, and a ring of that radius must still stand off the
+    /// plane.
+    radius_mm: f64,
+    /// The plate's z in the lowering's frame (the grid's axis points have it at 0).
+    plate_z_mm: f64,
+    /// The margin the base keeps from the plane.
+    margin_mm: f64,
+}
+
+impl PostPlane {
+    /// Whether a post from the joint to the axis point `base` (raster frame:
+    /// the plate at z = 0) stays on the free side of the plane.
+    fn admits(&self, base: [f64; 3]) -> bool {
+        use geom_kernel::vec3;
+        let base = [base[0], base[1], base[2] + self.plate_z_mm];
+        let to_base = vec3::sub(base, self.joint_mm);
+        let Some(axis) = vec3::normalize(to_base) else {
+            return true;
+        };
+        let along = vec3::dot(axis, self.unit);
+        let across = (1.0 - along * along).max(0.0).sqrt();
+        let height = vec3::dot(vec3::sub(base, self.contact_mm), self.unit);
+        height - self.radius_mm * across >= self.margin_mm
+    }
+}
+
+/// [`descend_cleared`] from a START that need not be the layer being placed.
+///
+/// `(cell, layer)` is where the descent starts: the seat for today's arms, and
+/// the joint `(joint_cell, k_joint)` for the post of an articulated head.
+/// `running_layer` is the layer the running column history stands at (the
+/// layer being placed). When the two are equal every read is the running state,
+/// bit for bit as before. When the start is LOWER, the running state holds
+/// material ABOVE the start (other seats of this layer, the model between the
+/// joint and the seat), which a post that begins at the joint must not land
+/// on, so every history read goes through [`model_top_below`],
+/// [`strut_top_below`] and [`ColumnHistory::model_blocks`], which answer for
+/// the layers below the start only. The seat face is not read for such a
+/// start: a post's contact zone at its joint is zero.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the descent reads the grid, the history, the keep-out, the law, its own start, \
+          the running layer, its search bound, the outcome it reports into, and the clearance \
+          with its radius; a struct would move the argument list rather than shorten it"
+)]
+fn descend_cleared_from(
+    grid: &Grid,
+    history: &ColumnHistory,
+    keep_out: &DrainKeepOut,
+    law: &LeanLaw,
+    shaft_landings: bool,
+    search_radius_mm: f64,
+    cell: usize,
+    layer: usize,
+    running_layer: usize,
+    scratch: &mut Vec<LeanCandidate>,
+    outcome: &mut LayerOutcome,
+    clearance: Option<&DescentClearance<'_>>,
+    radius_lb_mm: f64,
+    post_plane: Option<&PostPlane>,
+) -> Descent {
+    let from_joint = running_layer != layer;
+    let (straight_landing, straight_bottom, straight_rooted, head_blocked) =
+        descend_below(history, cell, layer, running_layer);
     let straight = |clears: Clears| Descent {
         landing: straight_landing,
         k_bottom: straight_bottom,
@@ -2383,7 +2762,11 @@ fn descend_cleared(
     // the face this seat stands against is named once (one nearest-point
     // query), and each candidate's landing face once per candidate that the
     // raster reads ([`crate::member_clearance::ShaftRead::intrusion`]).
-    let seat_face = clearance.and_then(|clear| clear.read(grid, history).seat_face((cell, layer)));
+    let seat_face = if from_joint {
+        None
+    } else {
+        clearance.and_then(|clear| clear.read(grid, history).seat_face((cell, layer)))
+    };
     // Whether the PROPOSED descent, the straight axis from this seat down to
     // `base_cell` at `k_bottom`, with a solid of the lower-bound radius about
     // it, stands wholly in hidden voxels of the cavity map.
@@ -2464,7 +2847,14 @@ fn descend_cleared(
     // stand 0.3 to 0.6 mm from the ring's walls, are the byte-identity
     // control of this rule). The preferred margin chooses among the
     // alternatives only where the straight descent has to be replaced.
-    let straight_is_clear = straight_clears.is_none_or(|clears| clears != Clears::Neither);
+    //
+    // **A HEAD BLOCKS THE STRAIGHT DESCENT** (articulated heads, 2026-10-06): a
+    // straight descent that would land on an earlier headed arm ABOVE its
+    // joinable top is refused, so it is not "clear" and a lean candidate is
+    // taken instead. With none, the straight landing stands (the ledger reports
+    // it as a join above the joint, never a refusal).
+    let straight_is_clear =
+        !head_blocked && straight_clears.is_none_or(|clears| clears != Clears::Neither);
     if !law.leans() {
         return straight(straight_clears.unwrap_or(Clears::Untested));
     }
@@ -2517,7 +2907,7 @@ fn descend_cleared(
                 Some(ceiling) if drop > 0 => ceiling,
                 _ => continue,
             };
-            let model_top = history.top_model[candidate];
+            let model_top = model_top_below(history, candidate, layer, running_layer);
             let reachable_model =
                 (model_top > 0 && model_top as usize - 1 <= ceiling).then(|| model_top as usize - 1);
             let (shaft, model_layer) = if shaft_landings {
@@ -2532,13 +2922,11 @@ fn descend_cleared(
                 // squarely within it. That blindness is part of what this lane
                 // removes; reproducing it here is what makes the before/after
                 // comparison a comparison.
-                let strut_top = history.top_strut[candidate];
+                let (strut_top, strut_top_id) =
+                    strut_top_below(history, candidate, layer, running_layer);
                 if strut_top > 0 && strut_top >= model_top {
                     let top = strut_top as usize - 1;
-                    (
-                        (top <= ceiling).then(|| (history.top_strut_id[candidate], top, top)),
-                        None,
-                    )
+                    ((top <= ceiling).then(|| (strut_top_id, top, top)), None)
                 } else {
                     (None, reachable_model)
                 }
@@ -2566,7 +2954,7 @@ fn descend_cleared(
                     (
                         Landing::Model { layer: at },
                         at,
-                        history.top_model_rooted[candidate],
+                        model_rooted_below(history, candidate, layer, running_layer, model_top),
                         1_u8,
                         false,
                     )
@@ -2579,6 +2967,19 @@ fn descend_cleared(
                     }
                     (Landing::Plate, 0, true, 2_u8, false)
                 };
+            // A head's post never leans back across its own seat plane: the
+            // seat trim would cut it off the joint.
+            if let Some(plane) = post_plane {
+                #[expect(clippy::cast_precision_loss, reason = "a layer index is exact in f64")]
+                let base = [
+                    grid.center_x_mm(grid.col_of(candidate)),
+                    grid.center_y_mm(grid.row_of(candidate)),
+                    k_bottom as f64 * law.layer_height_mm(),
+                ];
+                if !plane.admits(base) {
+                    continue;
+                }
+            }
             // A sound lower bound on any descent to this landing — every layer
             // costs at least a vertical one — so a candidate that cannot beat
             // the straight descent even at that bound is dropped before it is
@@ -2655,7 +3056,9 @@ fn descend_cleared(
                 break;
             }
             let path = paths[index]
-                .get_or_insert_with(|| lean_path(grid, history, keep_out, layer, cell, candidate))
+                .get_or_insert_with(|| {
+                    lean_path_from(grid, history, keep_out, layer, running_layer, cell, candidate)
+                })
                 .as_ref();
             let Some(path) = path else {
                 path_blocked = true;
@@ -2700,6 +3103,11 @@ fn descend_cleared(
     if path_blocked {
         outcome.lean_paths_blocked += 1;
     }
+    if head_blocked && straight_clears != Some(Clears::Neither) {
+        // No lean candidate either: the straight landing stands (its own
+        // clearance verdict), and the landing ledger names the join.
+        return straight(straight_clears.unwrap_or(Clears::Untested));
+    }
     if clearance.is_some() {
         outcome.solid.uncleared += 1;
         return straight(Clears::Neither);
@@ -2716,11 +3124,29 @@ fn descend_cleared(
 /// another arm, or inside a drain's escape cylinder. The landing layer itself
 /// is exempt from the occupancy test: striking one lamina into the surface is
 /// what a landing IS (`docs/physics.md`:284-324).
+#[cfg(test)]
 fn lean_path(
     grid: &Grid,
     history: &ColumnHistory,
     keep_out: &DrainKeepOut,
     layer: usize,
+    seat_cell: usize,
+    candidate: &LeanCandidate,
+) -> Option<Vec<u32>> {
+    lean_path_from(grid, history, keep_out, layer, layer, seat_cell, candidate)
+}
+
+/// [`lean_path`] from a start `(seat_cell, layer)` under a running history at
+/// `running_layer` (see [`descend_cleared_from`]). At the running layer the
+/// model test is the running `top_model` ("cured at or above here"); under a
+/// lower start, where `top_model` also holds material ABOVE the start, it is
+/// the sharp question [`ColumnHistory::model_blocks`] ("cured exactly here").
+fn lean_path_from(
+    grid: &Grid,
+    history: &ColumnHistory,
+    keep_out: &DrainKeepOut,
+    layer: usize,
+    running_layer: usize,
     seat_cell: usize,
     candidate: &LeanCandidate,
 ) -> Option<Vec<u32>> {
@@ -2782,7 +3208,12 @@ fn lean_path(
             // No model may already stand at this layer or above it in this
             // column: `top_model` holds layer + 1 of the topmost model cell, so
             // `> here` is exactly "cured at or above here".
-            if history.top_model[here_cell] as usize > here {
+            let in_model = if layer == running_layer {
+                history.top_model[here_cell] as usize > here
+            } else {
+                history.model_blocks(here_cell, here)
+            };
+            if in_model {
                 return None;
             }
             // Arms are asked the sharper question — "is an arm ACTUALLY here,
@@ -2800,17 +3231,99 @@ fn lean_path(
 }
 
 fn descend(history: &ColumnHistory, cell: usize, layer: usize) -> (Landing, usize, bool) {
-    let strut_top = history.top_strut[cell];
-    let model_top = history.top_model[cell];
+    let (landing, bottom, rooted, _) = descend_below(history, cell, layer, layer);
+    (landing, bottom, rooted)
+}
+
+/// The topmost model layer + 1 in `cell` that stands BELOW `start`, with the
+/// history running at `running_layer`; 0 means none.
+///
+/// At the running layer this is the running state `top_model[cell]`, exactly
+/// as before. Under a lower start (the joint of an articulated head) the
+/// running state also holds the model between the joint and the seat, which a
+/// post that begins at the joint must not land on, so the answer is read from
+/// the column's cured runs: the top of the highest run that tops out under
+/// `start`.
+fn model_top_below(history: &ColumnHistory, cell: usize, start: usize, running: usize) -> u32 {
+    if start == running {
+        return history.top_model[cell];
+    }
+    start
+        .checked_sub(1)
+        .and_then(|below| history.model_landing_at_or_below(cell, below))
+        .map_or(0, |top| u32::try_from(top + 1).unwrap_or(u32::MAX))
+}
+
+/// The topmost strut layer + 1 in `cell` below `start` and its owner (0 and 0
+/// for none), with the history running at `running_layer`.
+///
+/// At the running layer: the running `top_strut`, as before. Under a lower
+/// start: the highest LANDABLE layer of any shaft below `start`
+/// ([`ColumnHistory::shaft_landing`]), which keeps a headed host's joint and
+/// head out of reach.
+fn strut_top_below(history: &ColumnHistory, cell: usize, start: usize, running: usize) -> (u32, u32) {
+    if start == running {
+        return (history.top_strut[cell], history.top_strut_id[cell]);
+    }
+    start
+        .checked_sub(1)
+        .and_then(|below| history.shaft_landing(cell, below))
+        .map_or((0, 0), |(id, layer, _)| {
+            (u32::try_from(layer + 1).unwrap_or(u32::MAX), id)
+        })
+}
+
+/// Whether the topmost model cell below `start` was itself rooted. The running
+/// flag belongs to the running top; under a lower start it is read only where
+/// that top IS the model landing, and is `false` (warn, never hide) where the
+/// landing is a lower run whose own flag was not kept.
+fn model_rooted_below(
+    history: &ColumnHistory,
+    cell: usize,
+    start: usize,
+    running: usize,
+    landing_top: u32,
+) -> bool {
+    if start == running {
+        history.top_model_rooted[cell]
+    } else {
+        history.top_model[cell] == landing_top && history.top_model_rooted[cell]
+    }
+}
+
+/// Whether a running-state landing on `owner` at `layer` meets a HEAD: the
+/// owner is headed and `layer` is above its joinable top
+/// ([`ColumnHistory::joinable_tops`]; no joinable layer at all blocks all).
+fn lands_on_head(history: &ColumnHistory, owner: u32, layer: usize) -> bool {
+    !history.joinable_tops.is_empty()
+        && history
+            .joinable_tops
+            .get(&owner)
+            .is_some_and(|top| top.is_none_or(|joinable| layer > joinable))
+}
+
+/// [`descend`] from `start` under a history running at `running`, and whether
+/// the straight landing is BLOCKED by a headed arm (a running-state strut hit
+/// above its owner's joinable top; never for a start below the running layer,
+/// whose shaft reads are landable-only already).
+fn descend_below(
+    history: &ColumnHistory,
+    cell: usize,
+    start: usize,
+    running: usize,
+) -> (Landing, usize, bool, bool) {
+    let (strut_top, strut_id) = strut_top_below(history, cell, start, running);
+    let model_top = model_top_below(history, cell, start, running);
     if strut_top > 0 && strut_top >= model_top {
         let landing_layer = strut_top as usize - 1;
         return (
             Landing::Strut {
-                id: history.top_strut_id[cell],
+                id: strut_id,
                 layer: landing_layer,
             },
             landing_layer,
             true,
+            start == running && lands_on_head(history, strut_id, landing_layer),
         );
     }
     if model_top > 0 {
@@ -2820,11 +3333,12 @@ fn descend(history: &ColumnHistory, cell: usize, layer: usize) -> (Landing, usiz
                 layer: landing_layer,
             },
             landing_layer,
-            history.top_model_rooted[cell],
+            model_rooted_below(history, cell, start, running, model_top),
+            false,
         );
     }
-    debug_assert!(layer > 0, "a seat on layer 0 cannot descend to the plate");
-    (Landing::Plate, 0, true)
+    debug_assert!(start > 0, "a seat on layer 0 cannot descend to the plate");
+    (Landing::Plate, 0, true, false)
 }
 
 /// Record this layer's model cells in the column history, after the greedy has
@@ -3422,6 +3936,7 @@ mod descent_tests {
             x_allowed: 18.0,
             zone_factor: law.face_zone_factor(),
             surface: None,
+            heads: None,
         }
     }
 
@@ -3800,5 +4315,166 @@ mod descent_tests {
         b: ([f64; 3], [f64; 3]),
     ) -> geom_kernel::NativeSurface {
         crate::member_clearance::boxes_surface(&[a, b])
+    }
+}
+
+/// **The producer's descent mechanisms** (lane `head-first`, 2026-10-06): the
+/// post of a head descends from its JOINT against the history below it, and a
+/// straight descent that meets a head is blocked.
+///
+/// SABOTAGE (each run by hand): [`model_top_below`] reading `top_model` for a
+/// lower start turns the first test red; [`lands_on_head`] returning `false`
+/// turns the second red.
+#[cfg(test)]
+mod head_first_tests {
+    use super::{
+        descend_below, descend_cleared, descend_cleared_from, ColumnHistory, LayerOutcome,
+    };
+    use crate::drain::DrainKeepOut;
+    use crate::head_carrier_tests::{grid, headed, H};
+    use crate::lean::LeanLaw;
+    use crate::Landing;
+
+    /// Cure `cell` over layers `from..=to` the way `commit_layer_history` does.
+    fn cure(history: &mut ColumnHistory, cells: usize, cell: usize, from: usize, to: usize) {
+        let mut cover = vec![false; cells];
+        cover[cell] = true;
+        for layer in from..=to {
+            history.stamp_model(layer, &cover);
+            history.top_model[cell] = u32::try_from(layer + 1).expect("small");
+            history.top_model_rooted[cell] = true;
+            history.column_max_model[cell] = u32::try_from(layer + 1).expect("small");
+        }
+    }
+
+    /// The concave case. A head's joint stands at layer 100 and its seat at
+    /// 150, and cured model stands in the JOINT's column from 110 to 149 (a
+    /// concave wall above the joint). The post, descending from the joint, must
+    /// reach the plate; the running state, read from the seat, lands on that
+    /// model (the control, which also proves the fixture holds the model).
+    #[test]
+    fn the_post_descends_from_the_joint_and_never_lands_on_the_model_above_it() {
+        let grid = grid();
+        let mut history = ColumnHistory::new(&grid);
+        let joint_cell = grid.index(150, 150);
+        cure(&mut history, grid.cells(), joint_cell, 110, 149);
+        let law = LeanLaw::new(H, 45.0, 25.0);
+        let mut scratch = Vec::new();
+        let keep_out = DrainKeepOut::none();
+
+        // Control: from the seat layer the same column lands on that model.
+        let mut counts = LayerOutcome::empty();
+        let from_seat = descend_cleared(
+            &grid, &history, &keep_out, &law, true, 4.0, joint_cell, 150, &mut scratch,
+            &mut counts, None, 0.0,
+        );
+        assert_eq!(
+            from_seat.landing,
+            Landing::Model { layer: 149 },
+            "control: the running state holds the model above the joint"
+        );
+
+        // The post: start at the joint, history running at the seat's layer.
+        let mut counts = LayerOutcome::empty();
+        let post = descend_cleared_from(
+            &grid, &history, &keep_out, &law, true, 4.0, joint_cell, 100, 150, &mut scratch,
+            &mut counts, None, 0.0, None,
+        );
+        assert_eq!(
+            post.landing,
+            Landing::Plate,
+            "the post starts under the model and lands on the plate, not on the model above"
+        );
+        assert_eq!(post.k_bottom, 0);
+        assert!(post.path.is_empty(), "a straight post carries no path");
+        // The same from the straight descent alone.
+        let (landing, bottom, _, blocked) = descend_below(&history, joint_cell, 100, 150);
+        assert_eq!((landing, bottom, blocked), (Landing::Plate, 0, false));
+    }
+
+    /// A head's post never leans back across its own seat plane (the seat trim
+    /// would cut it off the joint): a base under the model side of the plane is
+    /// refused, a base straight under the joint and one leaning outward are
+    /// admitted. SABOTAGE: `admits` returning `true` turns this red.
+    #[test]
+    fn a_post_may_not_lean_back_across_its_seat_plane() {
+        use super::PostPlane;
+        let phi = 41.3_f64.to_radians();
+        let unit = [phi.sin(), 0.0, -phi.cos()];
+        let contact = [0.0, 0.0, 10.0];
+        let joint = [contact[0] + 0.5 * unit[0], 0.0, contact[2] + 0.5 * unit[2]];
+        let plane = PostPlane {
+            joint_mm: joint,
+            contact_mm: contact,
+            unit,
+            radius_mm: 0.2,
+            plate_z_mm: 0.0,
+            margin_mm: 0.07,
+        };
+        // Straight under the joint, and leaning out away from the model.
+        assert!(plane.admits([joint[0], joint[1], 2.0]));
+        assert!(plane.admits([joint[0] + 3.0, joint[1], 6.0]));
+        // Leaning back under the face: beyond the plane, on the model's side.
+        assert!(!plane.admits([joint[0] - 5.0, joint[1], 8.0]));
+    }
+
+    /// A later seat's straight descent meets an earlier head: blocked, so it
+    /// leans onto the trunk beside it (priced as dearer than the straight drop,
+    /// which an unblocked descent keeps); with the lean off it keeps the
+    /// straight landing, and the block is reported.
+    #[test]
+    fn a_straight_descent_onto_a_head_is_blocked_and_leans_or_keeps_the_landing() {
+        let grid = grid();
+        let mut history = ColumnHistory::new(&grid);
+        // A headed arm: joint at layer 100, seat (and head top) at layer 190,
+        // standing in (150, 150). Its post is landable only to layer 95.
+        let host = headed(&grid, 7, 150, 150, 190, 100, 0.2);
+        let host_cell = host.cell;
+        history.stamp_strut(&host, H);
+        for (slot, &occupied) in host.path.iter().enumerate() {
+            let here = u32::try_from(host.k_bottom + slot + 1).expect("small");
+            if history.top_strut[occupied as usize] < here {
+                history.top_strut[occupied as usize] = here;
+                history.top_strut_id[occupied as usize] = 7;
+            }
+        }
+        // A trunk eight cells (0.4 mm) off, its top at layer 150.
+        let trunk_cell = grid.index(150, 158);
+        history.top_strut[trunk_cell] = 151;
+        history.top_strut_id[trunk_cell] = 3;
+        history.stamp_shaft(3, 0, 150, trunk_cell, &[]);
+        let law = LeanLaw::new(H, 45.0, 25.0);
+        let mut scratch = Vec::new();
+        let keep_out = DrainKeepOut::none();
+
+        // The straight descent from layer 200 lands on the head: blocked.
+        let (landing, bottom, _, blocked) = descend_below(&history, host_cell, 200, 200);
+        assert_eq!(landing, Landing::Strut { id: 7, layer: 190 });
+        assert_eq!(bottom, 190);
+        assert!(blocked, "a landing above the joinable top (layer 95) is blocked");
+
+        // It leans onto the trunk instead (the straight drop is ten layers, the
+        // lean fifty: only the block sends it there).
+        let mut counts = LayerOutcome::empty();
+        let leaned = descend_cleared(
+            &grid, &history, &keep_out, &law, true, 4.0, host_cell, 200, &mut scratch,
+            &mut counts, None, 0.0,
+        );
+        assert_eq!(
+            leaned.landing,
+            Landing::Strut { id: 3, layer: 150 },
+            "blocked by the head, the seat leans onto the trunk"
+        );
+        assert!(!leaned.path.is_empty());
+
+        // With the lean off there is no alternative: the straight landing
+        // stands (the landing ledger reports it as a join above the joint).
+        let mut counts = LayerOutcome::empty();
+        let kept = descend_cleared(
+            &grid, &history, &keep_out, &LeanLaw::disabled(H), true, 4.0, host_cell, 200,
+            &mut scratch, &mut counts, None, 0.0,
+        );
+        assert_eq!(kept.landing, Landing::Strut { id: 7, layer: 190 });
+        assert!(kept.path.is_empty());
     }
 }
