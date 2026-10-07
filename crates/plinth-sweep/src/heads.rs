@@ -8,15 +8,16 @@
 //!   seat cell (k_top)
 //!        ● D        D  the contact centre, on the seat plane
 //!         \         u  the footprint normal at placement (outward, z < 0)
-//!          \  head  K  the joint sphere's centre, K = D + (g + r_K)·u
+//!          \  head  K  the joint sphere's centre, K = D + (g + hb + r_K)·u
 //!           ● K     g  the registered final clearance gap
-//!           |
+//!           |       hb the contact ball's height over the plane (2R)
 //!           |  post  K -> base, the rest of the arm
 //! ```
 //!
 //! On a steep face the arm's top is a short straight HEAD along `u`, so the
-//! contact arrives square. The joint sphere stands exactly `g` off the seat
-//! plane, so the post is never inside the gap. The up-sweep builds a head once,
+//! contact arrives square. The joint sphere stands `g + hb` off the seat
+//! plane: `g` clear of the ball's far side (the visible neck, the bare stalk
+//! the ball hinges on), so the post is never inside the gap. The up-sweep builds a head once,
 //! at placement, and nothing moves it afterwards; where a head cannot be built
 //! the arm keeps today's straight tip (emit and warn, never refuse).
 //!
@@ -37,9 +38,10 @@
 //!
 //! * head, at axial distance `s` from `D`: `r(s)³ = (r_t²/c)(r + 4s)`
 //!   ([`head_section_mm`]);
-//! * joint: `r_K³ = (r_t²/c)(r_K + 4(g + r_K))` ([`solve_joint`]);
+//! * joint: `r_K³ = (r_t²/c)(r_K + 4(g' + r_K))` with `g' = g + hb`
+//!   ([`solve_joint`]);
 //! * post below `K`, at distance `σ` down a post of length `ℓ`:
-//!   `r³ ≥ r_led²·r + (4r_t²/c)(g + r_K)(1 − σ/ℓ)` ([`post_section_mm`]).
+//!   `r³ ≥ r_led²·r + (4r_t²/c)(g' + r_K)(1 − σ/ℓ)` ([`post_section_mm`]).
 
 use std::collections::BTreeMap;
 
@@ -67,7 +69,7 @@ pub struct Head {
     pub contact_mm: [f64; 3],
     /// `u`: the footprint normal at placement, unit, outward (`z < 0`).
     pub unit: [f64; 3],
-    /// `K`: the joint sphere's centre, exact mm, `D + (g + r_K)·u`.
+    /// `K`: the joint sphere's centre, exact mm, `D + (g + hb + r_K)·u`.
     pub joint_mm: [f64; 3],
     /// `floor(K_z / layer height)` over the plate, rounded toward the plate:
     /// the layer the post's grid route starts at.
@@ -87,6 +89,31 @@ pub struct Head {
     /// The head's cells for layers `k_joint + 1 ..= k_top`, bottom-up. The
     /// last entry is the seat cell.
     pub cells: Vec<u32>,
+    /// `hb`: the height the contact ball stands over the seat plane at the
+    /// planned tip radius, `2R` for a ball tangent to the plane (a seated ball
+    /// stands lower, so this is an upper bound). The joint is planned `g + hb`
+    /// off the plane, so the bare neck between the ball's far side and the
+    /// joint sphere is at least `g` at the planned radius; without it the
+    /// joint stood `g` off the PLANE and the ball, which stands `hb` over the
+    /// plane, took the whole neck back (measured: 30 drawn heads, neck min
+    /// -0.060 mm, balls overlapping the joint).
+    pub ball_allowance_mm: f64,
+    /// Set after the final sizing when the head is given up
+    /// ([`downgrade_grown_heads`]): the arm is DRAWN as today's straight tip,
+    /// from its seat to its base, while the strut keeps the head, its path and
+    /// its cells, because the members that landed on it were placed against
+    /// them. The drawing follows ([`crate::adapter`]): members joined to the
+    /// post are moved by the displacement between the post's old axis (`K` to
+    /// the base) and the straight line now drawn.
+    pub drawn_straight: bool,
+}
+
+impl Head {
+    /// The gap the joint law reads: `g + hb`, so `|DK| = lever_gap_mm + r_K`.
+    #[must_use]
+    pub fn lever_gap_mm(&self) -> f64 {
+        self.gap_mm + self.ball_allowance_mm
+    }
 }
 
 /// The smallest section radius that carries the tip's bending moment at a
@@ -371,6 +398,10 @@ pub struct HeadRequest {
     pub unit: [f64; 3],
     /// The tip radius lower bound the trigger and the joint are planned at.
     pub tip_radius_lb_mm: f64,
+    /// The contact ball's radius `R` at that tip radius (the registered
+    /// profile's factor times the tip radius): the joint stands `2R` further
+    /// out than the clearance alone ([`Head::ball_allowance_mm`]).
+    pub ball_radius_mm: f64,
     /// The seat's cell at `k_top`.
     pub seat_cell: u32,
     /// The seat's layer.
@@ -396,8 +427,8 @@ fn cell_holding(grid: &Grid, x_mm: f64, y_mm: f64) -> Option<usize> {
 ///
 /// 1. [`HeadRefusal::NotSteep`] unless the trigger holds ([`head_triggers`]);
 /// 2. [`HeadRefusal::JointOverMax`] if [`solve_joint`] has no root;
-/// 3. `D = A − ((A − P)·u)·u`, `K = D + (g + r_K)·u` (exact: never snapped to
-///    a cell centre);
+/// 3. `D = A − ((A − P)·u)·u`, `K = D + (g + hb + r_K)·u` with `hb = 2R` the
+///    ball's height over the plane (exact: never snapped to a cell centre);
 /// 4. `k_joint = floor(K_z / h)` over the plate, toward the plate;
 /// 5. the joint's cell, and for `k_joint < k < k_top` the cell of the `D→K`
 ///    axis at `z = k·h` (clamped to the segment), then the seat cell at
@@ -415,9 +446,12 @@ pub fn plan_head(req: &HeadRequest, rule: &HeadRule, grid: &Grid) -> Result<Head
     if !head_triggers(unit[2], req.tip_radius_lb_mm, rule) {
         return Err(HeadRefusal::NotSteep);
     }
+    // The joint stands `g` beyond the ball's far side, not beyond the plane:
+    // the ball stands up to `2R` over the plane, and the lever is `|DK|`.
+    let ball_allowance_mm = ball_allowance_of(req.ball_radius_mm);
     let Some(joint) = solve_joint(
         req.tip_radius_lb_mm,
-        rule.gap_mm,
+        rule.gap_mm + ball_allowance_mm,
         rule.cos_lean_max,
         rule.max_radius_mm,
     ) else {
@@ -465,7 +499,21 @@ pub fn plan_head(req: &HeadRequest, rule: &HeadRule, grid: &Grid) -> Result<Head
         gap_mm: rule.gap_mm,
         cos_lean_max: rule.cos_lean_max,
         cells,
+        ball_allowance_mm,
+        drawn_straight: false,
     })
+}
+
+/// The height a contact ball of radius `ball_radius_mm` stands over its seat
+/// plane at most: its diameter (a ball seated into the model stands lower).
+/// Zero for a radius that is not finite and positive.
+#[must_use]
+pub fn ball_allowance_of(ball_radius_mm: f64) -> f64 {
+    if ball_radius_mm.is_finite() && ball_radius_mm > 0.0 {
+        2.0 * ball_radius_mm
+    } else {
+        0.0
+    }
 }
 
 /// **The tip radius a head is planned at** (orchestrator ruling 2026-10-06,
@@ -482,49 +530,77 @@ pub fn plan_head(req: &HeadRequest, rule: &HeadRule, grid: &Grid) -> Result<Head
 /// used (the head is still planned, and the check after the final sizing
 /// decides). A planning figure only: it never decides an outcome.
 #[must_use]
-pub fn planned_tip_radius_mm(demand_lb_mm: f64, rule: &HeadRule) -> f64 {
+pub fn planned_tip_radius_mm(
+    demand_lb_mm: f64,
+    rule: &HeadRule,
+    ball_factor_at: impl Fn(f64) -> f64,
+) -> f64 {
     let estimate = demand_lb_mm.max(rule.typical_tip_radius_mm);
-    if estimate > demand_lb_mm
-        && solve_joint(estimate, rule.gap_mm, rule.cos_lean_max, rule.max_radius_mm).is_none()
-    {
-        return demand_lb_mm;
+    if estimate > demand_lb_mm {
+        let ball_mm = ball_allowance_of(ball_factor_at(estimate) * estimate);
+        if solve_joint(estimate, rule.gap_mm + ball_mm, rule.cos_lean_max, rule.max_radius_mm)
+            .is_none()
+        {
+            return demand_lb_mm;
+        }
     }
     estimate
 }
 
-/// **Downgrade every head the final sizing grew across the clearance**
-/// (orchestrator ruling 2026-10-06). A head is frozen at placement and only
-/// its radii grow; when the final tip radius gives a joint whose stand-off
-/// from the seat plane, `(K - D)·u - r_K`, is below the gap `g`, the sphere
-/// stands inside the clearance and the file would draw a head that cuts the
-/// model. Such a member goes back to today's straight tip: the head is dropped,
-/// the post keeps its landing, its base AND its path (it is NOT re-routed: the
-/// members that landed on it, and the landing ledger, still read the cells it
-/// stood in), and the arm is drawn straight from its seat to that base. Its
-/// section from the joint up falls back to the area law at the tip (the head
-/// minimum is gone with the head). A head the ledger cannot draw (no joint
-/// slot) is dropped the same way.
+/// **Downgrade every head the final sizing grew across the clearance or onto
+/// its own ball** (orchestrator ruling 2026-10-06). A head is frozen at
+/// placement and only its radii grow. It is given up when, at the FINAL tip
+/// radius, either
 ///
+/// * the joint's stand-off from the seat plane, `(K - D)·u - r_K`, is below the
+///   gap `g` (the sphere stands inside the clearance and would cut the model), or
+/// * the bare neck is under `neck_min_mm`: the stand-off less the ball's
+///   height over the plane, `2R` at the final tip radius (an upper bound: a
+///   seated ball stands lower, so the drawn neck is never shorter than this).
+///   Below it the ball and the joint sphere run together and nothing is left
+///   to hinge on.
+///
+/// Such a member goes back to today's straight tip: the arm is DRAWN straight
+/// from its seat to its base ([`Head::drawn_straight`]). The strut keeps the
+/// head, its landing, its base AND its path (it is NOT re-routed): the members
+/// that landed on the post were placed against the cells it stood in, and the
+/// drawing moves them by the displacement between the old axis and the
+/// straight line ([`crate::adapter`]). Its section from the joint up falls
+/// back to the area law at the tip (the head minimum goes with the head). A
+/// head the ledger cannot draw (no joint slot) is given up the same way.
+///
+/// `ball_factor_at` is the registered contact-sphere factor at a tip radius.
 /// One pass over `struts`, after the last sizing and before anything reads the
 /// finished field. Returns the downgraded members' ids, in id order.
-pub fn downgrade_grown_heads(struts: &mut [crate::SweepStrut]) -> Vec<u32> {
+pub fn downgrade_grown_heads(
+    struts: &mut [crate::SweepStrut],
+    neck_min_mm: f64,
+    ball_factor_at: impl Fn(f64) -> f64,
+) -> Vec<u32> {
     let mut downgraded = Vec::new();
     for strut in struts.iter_mut() {
         let Some(head) = strut.head.as_ref() else {
             continue;
         };
-        if !crate::slenderness::live(strut) {
+        if head.drawn_straight || !crate::slenderness::live(strut) {
             continue;
         }
         let along = vec3::dot(vec3::sub(head.joint_mm, head.contact_mm), head.unit);
         let joint_slot = head.k_joint.checked_sub(strut.k_bottom);
         let joint_radius = joint_slot.and_then(|slot| strut.radius_mm.get(slot).copied());
-        let grown = joint_radius.is_none_or(|radius| along - radius < head.gap_mm - 1e-9);
+        let tip = strut.tip_radius_mm();
+        let ball_height = ball_allowance_of(ball_factor_at(tip) * tip);
+        let grown = joint_radius.is_none_or(|radius| {
+            let standoff = along - radius;
+            standoff < head.gap_mm - 1e-9 || standoff - ball_height < neck_min_mm - 1e-9
+        });
         if !grown {
             continue;
         }
         downgraded.push(strut.id);
-        strut.head = None;
+        if let Some(head) = strut.head.as_mut() {
+            head.drawn_straight = true;
+        }
         let slots = strut.radius_mm.len();
         let (Some(joint_slot), Some(&tip)) = (joint_slot, strut.radius_mm.last()) else {
             continue;
@@ -1036,6 +1112,8 @@ mod tests {
             gap_mm: GAP_MM,
             cos_lean_max: cos_lean(),
             cells: vec![9, 9, 8, 8, 8, 7, 7, 7],
+            ball_allowance_mm: 0.0,
+            drawn_straight: false,
         }
     }
 
@@ -1228,6 +1306,7 @@ mod constructor_tests {
             face_point_mm: contact,
             unit: u,
             tip_radius_lb_mm: 0.05,
+            ball_radius_mm: 0.0,
             seat_cell: 5,
             k_top,
         };
@@ -1374,6 +1453,7 @@ mod constructor_tests {
             face_point_mm: contact,
             unit: u,
             tip_radius_lb_mm: radius,
+            ball_radius_mm: 0.0,
             seat_cell: 5,
             k_top,
         }
@@ -1540,6 +1620,7 @@ mod constructor_tests {
             face_point_mm: face_point,
             unit: u2,
             tip_radius_lb_mm: 0.05,
+            ball_radius_mm: 0.0,
             seat_cell: 5,
             k_top,
         };
@@ -1609,6 +1690,7 @@ mod constructor_tests {
             face_point_mm: contact,
             unit: u,
             tip_radius_lb_mm: 0.05,
+            ball_radius_mm: 0.0,
             seat_cell: 5,
             k_top: 381,
         };

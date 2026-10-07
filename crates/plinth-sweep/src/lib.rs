@@ -2769,12 +2769,18 @@ pub fn run_sweep_with_holes(
     // the max over events keeps out of the plate reaction by design (measured
     // 2026-09-29: the whole of the remaining gap on the Cylinder, 1.4625 mm²
     // over 8 reads, and the Sphere, 0.4950 mm² over 6).
-    // **A HEAD THE FINAL SIZING GREW ACROSS THE CLEARANCE GOES BACK TO THE
-    // STRAIGHT TIP** (orchestrator ruling 2026-10-06): after the last sizing and
-    // before anything reads the finished field, every head whose joint now
-    // stands less than the final gap off its seat plane is dropped (the post
-    // keeps its route; the arm is drawn straight) and counted in the heads line.
-    let heads_downgraded = heads::downgrade_grown_heads(&mut struts);
+    // **A HEAD THE FINAL SIZING GREW ACROSS THE CLEARANCE, OR ONTO ITS OWN
+    // BALL, GOES BACK TO THE STRAIGHT TIP** (orchestrator ruling 2026-10-06):
+    // after the last sizing and before anything reads the finished field, every
+    // head whose joint now stands less than the final gap off its seat plane,
+    // or leaves a bare neck under the rasterisation allowance, is drawn as the
+    // straight tip (the post keeps its route; the members joined to it follow
+    // the line now drawn) and counted in the heads line.
+    let heads_downgraded = head_registry.map_or_else(Vec::new, |(profiles, rule)| {
+        heads::downgrade_grown_heads(&mut struts, rule.allowance_mm, |radius| {
+            profiles.ball_factor(radius)
+        })
+    });
     landings.finished = landing_check::check_landings(&struts, height);
     landings.load_gap_mm2 =
         outcome.injected_load_mm2 - outcome.plate_reaction_mm2 - outcome.uncarried_load_mm2;
@@ -3174,7 +3180,7 @@ pub fn run_sweep_with_holes(
                 sweep_plan
                     .struts
                     .get(warning.arm as usize)
-                    .is_some_and(|strut| strut.head.is_some())
+                    .is_some_and(|strut| strut.head.as_ref().is_some_and(|head| !head.drawn_straight))
             })
             .count();
         lip_seat_outcome.over_limit_after = over;
@@ -4583,6 +4589,10 @@ fn digest(struts: &[SweepStrut]) -> String {
             absorb(head.k_joint as u64);
             for cell in &head.cells {
                 absorb(u64::from(*cell));
+            }
+            // Drawn straight after the final sizing: a different file.
+            if head.drawn_straight {
+                absorb(1);
             }
         }
     }

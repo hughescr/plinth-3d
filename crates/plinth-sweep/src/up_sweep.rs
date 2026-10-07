@@ -1682,7 +1682,8 @@ fn plan_seat_head(
     // after placement, and a joint planned small stands across the clearance
     // once it grows ([`planned_tip_radius_mm`]; the check after the final
     // sizing decides what is kept).
-    let tip_radius_lb_mm = planned_tip_radius_mm(tip_radius_lb_mm, &rule);
+    let tip_radius_lb_mm =
+        planned_tip_radius_mm(tip_radius_lb_mm, &rule, |radius| env.profiles.ball_factor(radius));
     let Some(surface) = clear.surface.map(|surface| surface.0) else {
         return Err(Some(HeadRefusal::NoSurface));
     };
@@ -1742,6 +1743,7 @@ fn plan_seat_head(
         face_point_mm: face_point,
         unit,
         tip_radius_lb_mm,
+        ball_radius_mm: ball.ball_factor * tip_radius_lb_mm,
         seat_cell: u32::try_from(cell).unwrap_or(u32::MAX),
         k_top: seating.layer,
     };

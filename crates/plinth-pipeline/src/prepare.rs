@@ -3683,8 +3683,10 @@ fn print_sweep_disclosure(
             .join(", ");
         println!(
             "[sweep {model}] heads: {} built at placement on steep faces, {straight} kept a \
-             straight tip ({reasons}); drawn {}; stalk mm {}; stand-off mm {} (gap {final_gap_mm}); \
-             joints grown {} (largest stand-off deficit {:.4} mm); downgraded after sizing: {}; \
+             straight tip ({reasons}); drawn {}; visible neck (bare stalk, ball to joint) mm {}; \
+             stand-off mm {} (gap {final_gap_mm}); \
+             joints grown {} (largest stand-off deficit {:.4} mm); downgraded after sizing: {} \
+             ({} joins on their posts followed onto the straight line drawn, largest shift {:.3} mm); \
              necks wider than ball {}; \
              placement normal residual {:.3} deg max, {:.3} median; u against final footprint \
              normal {:.3} deg max, {:.3} median; lip-seat bites on headed arms {} (must be 0)",
@@ -3695,6 +3697,8 @@ fn print_sweep_disclosure(
             emission.joints_grown,
             emission.max_standoff_deficit_mm,
             heads.downgraded_after_sizing.len(),
+            emission.downgraded_joins,
+            emission.downgraded_follow_max_mm,
             emission.head_necks_wider_than_ball,
             heads.placement_residual_deg_max,
             heads.placement_residual_deg_median,
@@ -3717,7 +3721,8 @@ fn print_sweep_disclosure(
         if !heads.downgraded_after_sizing.is_empty() {
             println!(
                 "[sweep {model}] WARNING heads: {} heads built at placement went back to a \
-                 straight tip after the final sizing grew the joint across the clearance: {:?}",
+                 straight tip after the final sizing grew the joint across the clearance or onto \
+                 its ball: {:?}",
                 heads.downgraded_after_sizing.len(),
                 heads.downgraded_after_sizing
             );

@@ -4,7 +4,7 @@
 //!
 //! On a steep model face the arm's top is a short straight head along the
 //! footprint normal `u`, from the contact centre `D` to a joint sphere at
-//! `K = D + (g + r_K)·u`, and the post runs from `K`. These tests drive the
+//! `K = D + (g + hb + r_K)·u`, and the post runs from `K`. These tests drive the
 //! production sweep, the production adapter and the production lowering on two
 //! convex fixtures (a ball, and a laid cylinder) and grade the heads the file
 //! gets:
@@ -142,8 +142,10 @@ fn grade(name: &str, mesh: &Mesh) -> (usize, usize) {
     let run = run(mesh, &policy());
     let plan = &run.plan;
     let heads = &plan.report.heads;
+    // A head given up after the final sizing keeps its route and is drawn
+    // straight (`drawn_straight`); it is not a head on the finished field.
     let headed: Vec<usize> = (0..plan.struts.len())
-        .filter(|&i| plan.struts[i].head.is_some())
+        .filter(|&i| plan.struts[i].head.as_ref().is_some_and(|head| !head.drawn_straight))
         .collect();
     println!(
         "{name}: {} arms, {} built, {} headed on the finished field; refusals {:?}; placement \
@@ -165,8 +167,8 @@ fn grade(name: &str, mesh: &Mesh) -> (usize, usize) {
     );
     for &id in downgraded {
         assert!(
-            plan.struts[id as usize].head.is_none(),
-            "{name}: downgraded member {id} still carries a head"
+            plan.struts[id as usize].head.as_ref().is_some_and(|head| head.drawn_straight),
+            "{name}: downgraded member {id} is still drawn as a head"
         );
     }
     let height = plan.layer_height_mm;
@@ -233,7 +235,10 @@ fn grade(name: &str, mesh: &Mesh) -> (usize, usize) {
             .lip_seat
             .over_limit_after
             .iter()
-            .filter(|warning| plan.struts[warning.arm as usize].head.is_some())
+            .filter(|warning| plan.struts[warning.arm as usize]
+                .head
+                .as_ref()
+                .is_some_and(|head| !head.drawn_straight))
             .collect::<Vec<_>>()
     );
     assert_eq!(plan.report.clearance_reroute.headed_bites, 0, "{name}: a re-route bite on a headed arm");
@@ -262,6 +267,17 @@ fn grade(name: &str, mesh: &Mesh) -> (usize, usize) {
         );
     }
     assert_eq!(emission.joints_grown, 0, "{name}: no drawn joint is grown across the clearance");
+    // THE VISIBLE NECK: the bare stalk between the ball's far side and the
+    // joint sphere, as the lowering draws it, is positive on every drawn head
+    // (a head with no bare stalk is a ball fused to its joint, and was
+    // downgraded) and at least one layer.
+    assert_eq!(emission.head_stalk_mm.len(), headed.len(), "{name}");
+    for (&index, &stalk) in headed.iter().zip(&emission.head_stalk_mm) {
+        assert!(
+            stalk >= height,
+            "{name}: arm {index}: the drawn neck {stalk} mm is under one layer ({height} mm)"
+        );
+    }
     println!(
         "{name}: {} downgraded after sizing {:?}; {} kept",
         downgraded.len(),

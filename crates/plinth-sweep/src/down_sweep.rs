@@ -474,7 +474,9 @@ fn apply_head_minimum(strut: &mut SweepStrut, sizing: SizingPolicy) -> Option<f6
         return None;
     }
     let h = sizing.layer_height_mm;
-    let (g, c) = (head.gap_mm, head.cos_lean_max);
+    // The lever is `|DK| = g + hb + r_K`: the joint stands the ball's height
+    // further out than the clearance alone (`Head::ball_allowance_mm`).
+    let (g, c) = (head.lever_gap_mm(), head.cos_lean_max);
     let r_t = strut.radius_mm[slots - 1];
     let joint_slot = head.k_joint - strut.k_bottom;
     let z_of = |layer: usize| sizing.plate_z_mm + layer as f64 * h;
