@@ -204,6 +204,24 @@ pub fn solve_joint(
     solve_bend(tip_radius_mm / cos_lean_max.sqrt(), 1.0, gap_mm, max_radius_mm)
 }
 
+/// **The joint a FROZEN head must carry at its final tip radius**, with no
+/// placement maximum: the root of the same cubic as [`solve_joint`], over
+/// `[r_t/√c, bound]` where `bound` is a radius that always satisfies it.
+///
+/// Placement may refuse a joint above the registered maximum radius, because
+/// no head exists yet and the arm keeps its straight tip. After placement the
+/// head is built and frozen; the final tip radius can only grow, and the
+/// joint grows with it (never capped, per the grow-never-cap rule). With
+/// `a = r_t²/c` the cubic is `r³ = a(5r + 4g)`, and `r = max(√(10a),
+/// ∛(8ga))` satisfies it (`r³/2 ≥ 5ar` and `r³/2 ≥ 4ga`). `None` only for a
+/// tip radius or a gap that is not finite and positive.
+#[must_use]
+pub fn grown_joint_radius_mm(tip_radius_mm: f64, gap_mm: f64, cos_lean_max: f64) -> Option<f64> {
+    let a = tip_radius_mm * tip_radius_mm / cos_lean_max;
+    let bound = (10.0 * a).sqrt().max((8.0 * gap_mm * a).cbrt());
+    solve_joint(tip_radius_mm, gap_mm, cos_lean_max, bound).map(|joint| joint.joint_radius_mm)
+}
+
 /// The post's section at a `lever_mm` below the joint, over a ledger section
 /// `ledger_radius_mm`: `r³ = r_led²·r + (4r_t²/c)·lever`. The lever falls
 /// linearly from `g + r_K` at `K` to zero at the post's next hold.

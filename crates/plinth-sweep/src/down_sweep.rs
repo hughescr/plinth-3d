@@ -424,6 +424,101 @@ pub struct SizingPolicy {
     /// round-7 experiment built it, which re-adds one cell of un-injected peel
     /// per re-routed layer ([`crate::SweepPolicy::without_handed_column_ledger`]).
     pub handed_column_ledger: bool,
+    /// The uniform layer height `h`, mm: layer `k` stands at
+    /// `plate_z_mm + k·h`. Read only by the head minimum
+    /// ([`apply_head_minimum`]), which needs the height of a layer over the
+    /// plate to place a head's section along its axis.
+    pub layer_height_mm: f64,
+    /// The plate's z in the drawn frame, mm (see [`Self::layer_height_mm`]).
+    pub plate_z_mm: f64,
+}
+
+/// **The articulated head's per-layer MINIMUM radius**, applied beside the
+/// area law, `min_radius_mm` and `thickened_mm` on every down-sweep run
+/// (Craig 2026-10-06; `heads.rs` carries the law). Every layer is a minimum
+/// and never a cap: the ledger only grows. A strut with no head is untouched,
+/// bit for bit.
+///
+/// `r_t` is THIS run's tip radius, the area law at the contact slot, and the
+/// contact slot keeps the pure area law (the ball is the contact, so it is
+/// never raised). Then, with `c` the head's own `cos λmax`:
+///
+/// * head layers `k_joint+1` up to, not including, the contact slot (the
+///   ledger's last slot, layer `k_top - 1`): `head_section_mm(r_t, s(k), c)`,
+///   where `s(k)` is the axial distance from `D` of the head axis at the
+///   layer's z, clamped to `[0, |DK|]`;
+/// * the joint layer: `r_K,eff = max(planned r_K, solve_joint(r_t, g, c))`,
+///   so a joint grows with a fatter tip and is never capped;
+/// * post layers below the joint: `post_section_mm(r_led, r_t, lever, c)`,
+///   with the lever `(g + r_K,eff)·(1 − σ/ℓ)` falling linearly down the post's
+///   chord from `K` to its base (`σ/ℓ` is the chord fraction at the layer's z).
+///   The post never narrows going down (the engine's own rule for a printed
+///   member), so the section is carried down as a running maximum.
+///
+/// Returns the effective joint radius, or `None` when nothing was applied.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "layer indices bounded by the plan's own layer count are exact in f64"
+)]
+fn apply_head_minimum(strut: &mut SweepStrut, sizing: SizingPolicy) -> Option<f64> {
+    let head = strut.head.as_ref()?;
+    let slots = strut.radius_mm.len();
+    // The ledger spans layers `k_bottom ..= k_top - 1` (`ledger_len`), so the
+    // contact slot is the LAST slot, and the joint must stand under it.
+    let alive = strut.k_bottom != usize::MAX
+        && strut.k_top > strut.k_bottom
+        && slots == strut.k_top - strut.k_bottom
+        && head.k_joint >= strut.k_bottom
+        && head.k_joint - strut.k_bottom + 1 < slots;
+    if !alive {
+        return None;
+    }
+    let h = sizing.layer_height_mm;
+    let (g, c) = (head.gap_mm, head.cos_lean_max);
+    let r_t = strut.radius_mm[slots - 1];
+    let joint_slot = head.k_joint - strut.k_bottom;
+    let z_of = |layer: usize| sizing.plate_z_mm + layer as f64 * h;
+    // The head is frozen; its joint only grows. No placement maximum applies
+    // here: a final tip that needs a joint wider than the registered maximum
+    // radius still gets it (see `grown_joint_radius_mm`).
+    let r_k_eff = crate::heads::grown_joint_radius_mm(r_t, g, c)
+        .map_or(head.joint_radius_mm, |joint| joint.max(head.joint_radius_mm));
+    // The head: axial distance from D along u to the layer's z.
+    let to_k: [f64; 3] = std::array::from_fn(|axis| head.joint_mm[axis] - head.contact_mm[axis]);
+    let length = to_k.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let u_z = head.unit[2];
+    let mut section = Vec::with_capacity(slots);
+    for slot in (joint_slot + 1)..(slots - 1) {
+        let z = z_of(strut.k_bottom + slot);
+        let s = if u_z.abs() > f64::EPSILON {
+            ((z - head.contact_mm[2]) / u_z).clamp(0.0, length)
+        } else {
+            0.0
+        };
+        section.push((slot, crate::heads::head_section_mm(r_t, s, c)));
+    }
+    // The post: the chord from K down to the base at the post's own z span.
+    let k_z = head.joint_mm[2];
+    let base_z = z_of(strut.k_bottom);
+    let span = k_z - base_z;
+    let mut running = 0.0_f64;
+    for slot in (0..joint_slot).rev() {
+        let z = z_of(strut.k_bottom + slot);
+        let fraction = if span > f64::EPSILON {
+            ((k_z - z) / span).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let lever = (g + r_k_eff) * (1.0 - fraction);
+        let wanted = crate::heads::post_section_mm(strut.radius_mm[slot], r_t, lever, c);
+        running = running.max(wanted).max(strut.radius_mm[slot]);
+        section.push((slot, running));
+    }
+    section.push((joint_slot, r_k_eff));
+    for (slot, radius) in section {
+        strut.radius_mm[slot] = strut.radius_mm[slot].max(radius);
+    }
+    Some(r_k_eff)
 }
 
 /// Run the whole down-sweep over `struts`, filling their radius and carried
@@ -493,7 +588,7 @@ pub fn run(
         * sizing.tip_radius_max_mm;
     if !sizing.per_event {
         // SABOTAGE: today's order, max over events first and sum after.
-        return sweep_pass(
+        let outcome = sweep_pass(
             grid,
             slices,
             struts,
@@ -505,6 +600,10 @@ pub fn run(
             None,
             &mut Vec::new(),
         );
+        for strut in struts.iter_mut() {
+            apply_head_minimum(strut, sizing);
+        }
+        return outcome;
     }
     let mut triggers: HashMap<u64, f64> = HashMap::new();
     let mut refused: HashSet<u64> = HashSet::new();
@@ -643,6 +742,8 @@ fn apply_per_event_ledger(
                 });
             }
         }
+        // A headed member's per-layer minimum, beside the area law above.
+        apply_head_minimum(strut, sizing);
         if running > worst {
             worst = running;
             worst_id = strut.id;
@@ -2398,6 +2499,8 @@ mod merge_load_tests {
             tip_column_roots: true,
             per_event: true,
             handed_column_ledger: true,
+            layer_height_mm: 0.05,
+            plate_z_mm: 0.0,
         }
     }
 

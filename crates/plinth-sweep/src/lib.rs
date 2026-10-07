@@ -1763,6 +1763,8 @@ pub fn run_sweep_with_holes(
         tip_column_roots: policy.tip_column_roots,
         per_event: policy.per_event_sizing,
         handed_column_ledger: policy.handed_column_ledger,
+        layer_height_mm: height,
+        plate_z_mm: plate_z,
     };
     let minimum_load =
         policy.x_allowed * core::f64::consts::PI * policy.tip_radius_min_mm.powi(2);

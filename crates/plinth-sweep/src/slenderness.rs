@@ -2615,6 +2615,7 @@ impl TieState {
                     crate::adapter::planned_line_offset(
                         flare,
                         context.grid,
+                        context.plate_z_mm,
                         context.layer_height_mm,
                         strut,
                     )
