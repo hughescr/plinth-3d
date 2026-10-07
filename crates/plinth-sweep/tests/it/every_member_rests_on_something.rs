@@ -156,18 +156,28 @@ fn rooting(mesh: &Mesh, plan: &SweepPlan) -> Rooting {
         .collect();
     // Each member's drawn axis as straight pieces `(top, bottom)`: the
     // `seat -> base` line, or for a plate-rooted member its drawn shaft and
-    // its vertical boss under it.
+    // its vertical boss under it. A HEADED member (round-18 milestone,
+    // 2026-10-07) is drawn as its head, `seat -> joint`, and its post from
+    // the carried joint `K` down; members land on the K-to-base post, which
+    // leaves the `seat -> base` line by up to the head's lateral run (on the
+    // laid tube at `149452e`, members 106, 116 and 120 read as unrooted on
+    // the straight line). The post's taper runs from the joint.
     let flare = plinth_support::SweepRootFlare::registered(plan.layer_height_mm).ok();
     let pieces: Vec<Vec<([f64; 3], [f64; 3])>> = arms
         .iter()
         .map(|arm| {
-            match flare
+            let post_top = arm.head.as_ref().map_or(arm.seat_mm, |head| head.joint_mm);
+            let mut pieces = match flare
                 .as_ref()
                 .and_then(|flare| flare.plate_shaft_of(arm, plan.plate_z_mm))
             {
                 Some((top, bottom)) => vec![(top, bottom), (bottom, arm.base_mm)],
-                None => vec![(arm.seat_mm, arm.base_mm)],
+                None => vec![(post_top, arm.base_mm)],
+            };
+            if arm.head.is_some() {
+                pieces.push((arm.seat_mm, post_top));
             }
+            pieces
         })
         .collect();
     let mut rooted = vec![false; n];
@@ -198,12 +208,9 @@ fn rooting(mesh: &Mesh, plan: &SweepPlan) -> Rooting {
                 .copied()
                 .unwrap_or_default()
                 .max(other.tip_radius_mm);
-            // The taper's parameter runs over the whole member, seat to the
-            // last piece's bottom, by height.
-            let (top_z, bottom_z) = (
-                pieces[j][0].0[2],
-                pieces[j][pieces[j].len() - 1].1[2],
-            );
+            // The taper's parameter runs over the whole post, its top (the
+            // seat, or a headed member's joint) to its base, by height.
+            let (top_z, bottom_z) = (pieces[j][0].0[2], other.base_mm[2]);
             let on = pieces[j].iter().any(|&(top, bottom)| {
                 let (distance, _, on_axis) = segment_segment_distance(point, point, top, bottom);
                 let t = if top_z > bottom_z {
