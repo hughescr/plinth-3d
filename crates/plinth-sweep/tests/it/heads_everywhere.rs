@@ -145,6 +145,7 @@ fn field(setup: &Setup, landed_at: Option<usize>) -> Vec<SweepStrut> {
         cos_lean_max: 0.5373,
         cells: vec![cell_u32(host_cell); K_TOP - K_JOINT],
         ball_allowance_mm: 0.0,
+        link_mm: 0.0,
         drawn_straight: false,
         law_planned: HeadLaw::envelope(0.5373),
         law_drawn: None,

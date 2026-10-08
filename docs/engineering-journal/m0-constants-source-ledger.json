@@ -891,6 +891,17 @@
       "provenance_detail": "Placeholder"
     },
     {
+      "id": "HEAD_LINK_MM",
+      "classification": "external_requirement",
+      "normative": "03-physics-and-constants.md §3.5 = 0.300 mm. CLASS: EXTERNAL REQUIREMENT -- an owner ruling, NOT physics. Craig, 2026-10-08, on the articulated heads: the contact ball is joined to the cone by a bare LINK, a cylinder of the tip's own radius, 0.3 to 0.6 mm long (\"short is fine\"); 0.300 mm is the bottom of his range. It places the joint sphere at K = D + (g + 2R + HEAD_LINK_MM + r_K)u and is the link length the drawing emits; a link under one layer plus one pixel is refused when the sweep starts. The bending law does not size the link: every head whose link lies under the law is warned with its stress ratio, and a coupon is what will size the margin.",
+      "source_locators": [
+        "crates/plinth-sweep/src/heads.rs:head_profile_with_link",
+        "crates/plinth-support/src/lower.rs:push_head_segment"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured source=owner_decision(id=\"head-link-owner-ruling-2026-10-08\", record=\"docs/engineering-journal/03-physics-and-constants.md\", locator=\"§3.5\", date=exact(\"2026-10-08\")); err=null"
+    },
+    {
       "id": "HOLLOW_ALLOW_OUTPUT_DEFAULT",
       "classification": "runtime_hollowing",
       "provenance_wrapper": "Placeholder",

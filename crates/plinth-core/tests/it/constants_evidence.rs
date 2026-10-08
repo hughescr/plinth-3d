@@ -6,7 +6,7 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_EVIDENCE_IDS: [&str; 52] = [
+const EXPECTED_EVIDENCE_IDS: [&str; 53] = [
     "CCO_X_PAIR_LOAD_DISCOUNT",
     "CHITUBOX_BOSS_BOTTOM_DIAMETER_MM",
     "CHITUBOX_BOSS_HEIGHT_MM",
@@ -19,6 +19,7 @@ const EXPECTED_EVIDENCE_IDS: [&str; 52] = [
     "DECIMATION_MAX_P999_DEVIATION_MM",
     "DECIMATION_MAX_P99_DEVIATION_MM",
     "FINAL_CLEARANCE_GAP_MM",
+    "HEAD_LINK_MM",
     "LAMINA_REACH_RATIO",
     "LAMINA_REACH_RATIO_AUDIT_GATE",
     "LAMINA_REACH_RATIO_FIRST_LOSS",
@@ -61,7 +62,7 @@ const EXPECTED_EVIDENCE_IDS: [&str; 52] = [
     "X_STAR_CYLINDER",
 ];
 
-const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 52] = [
+const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 53] = [
     ("CCO_X_PAIR_LOAD_DISCOUNT", "1", "scalar"),
     ("CHITUBOX_BOSS_BOTTOM_DIAMETER_MM", "mm", "scalar"),
     ("CHITUBOX_BOSS_HEIGHT_MM", "mm", "scalar"),
@@ -82,6 +83,7 @@ const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 52] = [
     ("DECIMATION_MAX_P999_DEVIATION_MM", "mm", "scalar"),
     ("DECIMATION_MAX_P99_DEVIATION_MM", "mm", "scalar"),
     ("FINAL_CLEARANCE_GAP_MM", "mm", "scalar"),
+    ("HEAD_LINK_MM", "mm", "scalar"),
     ("LAMINA_REACH_RATIO", "1", "scalar"),
     ("LAMINA_REACH_RATIO_AUDIT_GATE", "1", "scalar"),
     ("LAMINA_REACH_RATIO_FIRST_LOSS", "1", "scalar"),
@@ -158,7 +160,7 @@ struct ExpectedSource {
     date: &'static str,
 }
 
-const EXPECTED_SOURCES: [ExpectedSource; 36] = [
+const EXPECTED_SOURCES: [ExpectedSource; 37] = [
     ExpectedSource {
         constant: "CHITUBOX_BOSS_BOTTOM_DIAMETER_MM",
         kind: "owner_decision",
@@ -212,6 +214,15 @@ const EXPECTED_SOURCES: [ExpectedSource; 36] = [
         locator: "§3.5",
         precision: "exact",
         date: "2026-08-22",
+    },
+    ExpectedSource {
+        constant: "HEAD_LINK_MM",
+        kind: "owner_decision",
+        identity: "head-link-owner-ruling-2026-10-08",
+        record: "docs/engineering-journal/03-physics-and-constants.md",
+        locator: "§3.5",
+        precision: "exact",
+        date: "2026-10-08",
     },
     ExpectedSource {
         constant: "LAYER_HEIGHT_DEFAULT_MM",
@@ -517,7 +528,7 @@ fn declaration_batch_has_exact_membership_order_shapes_and_provenance_counts() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(actual_ids, EXPECTED_EVIDENCE_IDS);
-    assert_eq!(descriptors.len(), 52);
+    assert_eq!(descriptors.len(), 53);
 
     for (descriptor, (id, unit, shape)) in descriptors.iter().zip(EXPECTED_DESCRIPTOR_CONTRACT) {
         assert_eq!(descriptor.id().as_str(), id, "ID contract drift for {id}");
@@ -539,8 +550,9 @@ fn declaration_batch_has_exact_membership_order_shapes_and_provenance_counts() {
     // Derived (the pad, from the boss foot): 31/15 became 35/16. The owner's
     // ruling of the same day that the boss is scaled to its root added one
     // more Measured (the root-boss profiles, since his final ruling that day
-    // the one Heavy root-boss profile): 36/16.
-    assert_eq!((measured, derived), (36, 16));
+    // the one Heavy root-boss profile): 36/16. The head-link ruling of
+    // 2026-10-08 added one more Measured: 37/16.
+    assert_eq!((measured, derived), (37, 16));
     assert!(descriptors.iter().all(|descriptor| !matches!(
         descriptor.provenance().class(),
         RegistryProvenanceClass::Placeholder | RegistryProvenanceClass::Pending

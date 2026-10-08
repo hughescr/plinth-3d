@@ -1065,7 +1065,20 @@ pub struct SweepHead {
     /// strictly rising), `r` the drawn radius there. One straight frustum is
     /// drawn between consecutive knots, so a polyline on or above the
     /// bending law stays on or above it. The last radius is the joint's.
+    ///
+    /// With a link ([`Self::link_mm`] above zero) these are the CONE's knots
+    /// only, the first at the link's planned far end with the link's radius;
+    /// the lowering draws the link itself from the seated ball.
     pub profile_knots_mm: Vec<[f64; 2]>,
+    /// `L_link`: the length of the bare LINK, mm (Craig 2026-10-08: "neck
+    /// 0.3-0.6, short is fine"): a cylinder of [`Self::link_radius_mm`] that
+    /// runs this far along `u` from where it leaves the contact ball, then the
+    /// cone ([`Self::profile_knots_mm`]). `0` draws the head from the ball
+    /// centre along the knots, as before the link existed.
+    pub link_mm: f64,
+    /// `r_L`: the link's radius, mm. Read only when [`Self::link_mm`] is
+    /// above zero.
+    pub link_radius_mm: f64,
 }
 
 /// What lowering one sweep field produced, and everything it had to warn about.
@@ -1197,13 +1210,13 @@ pub struct SweepLowering {
     /// ball's solid radius where the neck leaves it (above 1 when wider).
     pub head_neck_ratio: Vec<f64>,
     /// Per headed arm, in arm order: the DRAWN LINK, measured from the head's
-    /// drawn frusta (Craig 2026-10-07): the length along `u` from where the
-    /// head solid leaves the contact ball's surface to the first point where
-    /// the drawn radius reaches the ball's radius `R`. `0` when the drawn head
-    /// is already as wide as the ball where it leaves it. (Until 2026-10-08
-    /// this held the PLANNED gap `|K - C| - R - r_K`, which the drawn file did
-    /// not have: median 0.96 mm reported, 0 mm drawn.) The field keeps its name
-    /// because the sweep adapter copies it by name.
+    /// drawn frusta (Craig 2026-10-07, redefined 2026-10-08): the bare axial
+    /// length of the leading constant-radius run, from where its ring leaves
+    /// the contact ball's surface to where the radius first rises ([`drawn_link_mm`]).
+    /// `0` when the first frustum widens (a cone from the ball). (Until
+    /// 2026-10-08 this held the PLANNED gap `|K - C| - R - r_K`, which the
+    /// drawn file did not have: median 0.96 mm reported, 0 mm drawn.) The field
+    /// keeps its name because the sweep adapter copies it by name.
     pub head_stalk_mm: Vec<f64>,
     /// Per headed arm, in arm order: the joint's clearance from the seat
     /// plane, `(K - D)·u - r_K`. It equals `g` when the joint has not grown.
@@ -1617,72 +1630,45 @@ fn emitted_solid_volume_mm3(primitive: &SupportPrimitive) -> f64 {
     }
 }
 
-/// **The drawn link between the contact ball and the head's wide part**, in mm
-/// along the head axis, from the DRAWN frusta.
+/// A drawn frustum counts as a constant-radius run (a cylinder) when its two
+/// end radii differ by no more than this: the file stores coordinates as
+/// `f32`, so a radius is only known to about a tenth of a micron.
+const LINK_FLAT_TOLERANCE_MM: f64 = 1.0e-4;
+
+/// **The drawn link between the contact ball and the head's cone**, in mm
+/// along the head axis, from the DRAWN frusta (Craig 2026-10-08: the link is
+/// the bare cylinder the ball hinges on; one definition for the log and the
+/// audit).
 ///
 /// `frusta` are the head's drawn cones as `([a, r] at the start, [a, r] at the
 /// end)`, `a` the distance along the head axis from the ball's centre, `r` the
-/// drawn radius there, in order. The head solid leaves the ball's surface at
-/// the first `a` where the head's section clears the ball's: `r(a)² + a² ≥ R²`.
-/// The link runs from there to the first `a` where the drawn radius reaches the
-/// ball's radius `R`. It is `0` when the drawn radius at the ball's surface is
-/// already `R` or more (the head is wider than the ball from the moment it
-/// leaves it), and when the head never leaves the ball. If the radius never
-/// reaches `R` the link runs to the last frustum's end.
+/// drawn radius there, in order. The link is the LEADING constant-radius run:
+/// the first frustum and every frustum after it that keeps the same radius (to
+/// [`LINK_FLAT_TOLERANCE_MM`]). It is measured from where that radius leaves
+/// the ball's surface, `a = sqrt(R² − r²)` (the run's start where the radius
+/// is the ball's or more), to where the radius first rises. It is `0` when the
+/// first frustum widens (a cone from the ball), and when the run ends inside
+/// the ball.
 fn drawn_link_mm(frusta: &[([f64; 2], [f64; 2])], ball_radius: f64) -> f64 {
-    let ball_sq = ball_radius * ball_radius;
-    let radius_in = |&([a0, r0], [a1, r1]): &([f64; 2], [f64; 2]), a: f64| -> f64 {
-        let t = if a1 > a0 {
-            ((a - a0) / (a1 - a0)).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        r0 + (r1 - r0) * t
-    };
-    // Where the head leaves the ball.
-    let mut exit: Option<(f64, usize)> = None;
-    for (index, frustum) in frusta.iter().enumerate() {
-        let ([a0, r0], [a1, r1]) = *frustum;
-        let length = a1 - a0;
-        if length.is_nan() || length <= 0.0 {
-            continue;
-        }
-        let f0 = r0 * r0 + a0 * a0 - ball_sq;
-        if f0 >= 0.0 {
-            exit = Some((a0, index));
-            break;
-        }
-        // (r0 + k x)² + (a0 + x)² = R², the positive root (f0 < 0 gives one).
-        let k = (r1 - r0) / length;
-        let (qa, qb) = (k * k + 1.0, 2.0 * (r0 * k + a0));
-        let x = (-qb + (qb * qb - 4.0 * qa * f0).max(0.0).sqrt()) / (2.0 * qa);
-        if x <= length {
-            exit = Some((a0 + x, index));
-            break;
-        }
-    }
-    let Some((exit_at, exit_index)) = exit else {
+    let flat = |&([_, r0], [_, r1]): &([f64; 2], [f64; 2])| (r1 - r0).abs() <= LINK_FLAT_TOLERANCE_MM;
+    let Some(&([start_at, radius], _)) = frusta.first().filter(|first| flat(first)) else {
         return 0.0;
     };
-    if radius_in(&frusta[exit_index], exit_at) >= ball_radius {
-        return 0.0;
-    }
-    // Where the drawn radius first reaches the ball's.
-    let mut reach = frusta.last().map_or(exit_at, |last| last.1[0]);
-    for frustum in &frusta[exit_index..] {
-        let ([a0, r0], [a1, r1]) = *frustum;
-        if r1 >= ball_radius && a1 > a0 {
-            let from = exit_at.max(a0);
-            let r_from = radius_in(frustum, from);
-            if r_from >= ball_radius {
-                reach = from;
-            } else {
-                reach = a0 + (ball_radius - r0) / (r1 - r0) * (a1 - a0);
-            }
-            break;
-        }
-    }
-    (reach - exit_at).max(0.0)
+    let run_end = frusta
+        .iter()
+        .take_while(|frustum| {
+            flat(frustum) && (frustum.0[1] - radius).abs() <= LINK_FLAT_TOLERANCE_MM
+        })
+        .last()
+        .map_or(start_at, |last| last.1[0]);
+    let exit = if radius < ball_radius {
+        (ball_radius * ball_radius - radius * radius)
+            .sqrt()
+            .max(start_at)
+    } else {
+        start_at
+    };
+    (run_end - exit).max(0.0)
 }
 
 /// `chitubox_emit_n_sides`: the polygon every frustum ring and hull ring is
@@ -1830,6 +1816,11 @@ struct HeadedTip<'a> {
     /// The ball's own radius `R` at its centre, the contact disc's radius
     /// `sqrt(R² - d²)` where the start is on the plane.
     start_cap_radius_mm: f64,
+    /// The ball's radius `R`.
+    ball_radius_mm: f64,
+    /// The ball centre's distance along [`Self::unit`] from the contact centre
+    /// `D` (negative where the centre stands under the seat plane).
+    centre_s_mm: f64,
 }
 
 /// **The head of an articulated arm**, or `None` where the arm cannot be drawn
@@ -1911,6 +1902,8 @@ fn headed_tip<'a>(arm: &'a SweepArm, config: LoweringConfig) -> Option<HeadedTip
         start,
         start_height_mm,
         start_cap_radius_mm,
+        ball_radius_mm: ball_radius,
+        centre_s_mm: geom_kernel::vec3::dot(unit, geom_kernel::vec3::sub(centre, head.contact_mm)),
     })
 }
 
@@ -1938,7 +1931,7 @@ fn push_head_segment(
     staged: &mut Vec<SupportPrimitive>,
 ) -> Option<HeadSegment> {
     let head = headed.head;
-    let (start, joint) = (headed.start, head.joint_mm);
+    let start = headed.start;
     let knots = &head.profile_knots_mm;
     let length = knots.last()?[0];
     // `start` stands `s_start` along `u` from the contact centre `D`: on the
@@ -1949,6 +1942,38 @@ fn push_head_segment(
     // A NaN start or length is not before the joint either.
     if s_start.partial_cmp(&length) != Some(std::cmp::Ordering::Less) {
         return None;
+    }
+    // THE LINK (Craig 2026-10-08): the head is the ball, a bare cylinder of
+    // the link's radius that leaves the ball's surface and runs `link_mm`
+    // further along `u`, then the cone. The cylinder is the first frustum
+    // (the contact taper) and the carried knots are the cone's: the first is
+    // the planned far end of the link and is replaced by the drawn one, which
+    // follows the ball as it is seated. A cone knot within one XY pixel of the
+    // link's end would be a frustum shorter than a pixel and is merged into the
+    // next; the cone starts at the link's radius, never wider.
+    if head.link_mm > 0.0 && head.link_radius_mm > 0.0 {
+        let link_radius = head.link_radius_mm;
+        let ball = headed.ball_radius_mm;
+        let exit = (ball * ball - link_radius * link_radius).max(0.0).sqrt();
+        let link_end = (headed.centre_s_mm + exit + head.link_mm)
+            .max(s_start + LINK_MIN_LENGTH_MM)
+            .min(length - LINK_MIN_LENGTH_MM);
+        let cone = knots.get(1..).filter(|cone| !cone.is_empty())?;
+        let first = cone
+            .partition_point(|knot| knot[0] < link_end + config.pixel_pitch_mm)
+            .min(cone.len() - 1);
+        let chain: Vec<[f64; 2]> = [[s_start, link_radius], [link_end, link_radius]]
+            .into_iter()
+            .chain(cone[first..].iter().copied())
+            .collect();
+        return push_head_chain(
+            headed,
+            config,
+            &chain,
+            staged,
+            link_radius >= ball,
+            link_radius / ball,
+        );
     }
     // The clipped polyline: the law's radius at `s_start`, then every knot
     // past it. A knot within a micron of the start would be a degenerate
@@ -1979,6 +2004,36 @@ fn push_head_segment(
     let clipped: Vec<[f64; 2]> = std::iter::once([s_start, first_radius])
         .chain(knots[merged..].iter().copied())
         .collect();
+    push_head_chain(
+        headed,
+        config,
+        &clipped,
+        staged,
+        first_radius > headed.start_cap_radius_mm,
+        first_radius / headed.start_cap_radius_mm,
+    )
+}
+
+/// The shortest link or cone span the lowering will draw, mm: a micron, the
+/// same degenerate-frustum guard the head's other spans use.
+const LINK_MIN_LENGTH_MM: f64 = 1.0e-6;
+
+/// Draw the head's chain of `(s, r)` knots as straight frusta (the first the
+/// contact taper, the rest members, the last ending exactly on `K`) and the
+/// joint sphere at `K`. `chain[0]` stands at the head's start and the knots
+/// rise strictly in `s`.
+fn push_head_chain(
+    headed: &HeadedTip<'_>,
+    config: LoweringConfig,
+    clipped: &[[f64; 2]],
+    staged: &mut Vec<SupportPrimitive>,
+    neck_wider_than_ball: bool,
+    neck_ratio: f64,
+) -> Option<HeadSegment> {
+    let head = headed.head;
+    let (start, joint) = (headed.start, head.joint_mm);
+    let length = head.profile_knots_mm.last()?[0];
+    let s_start = clipped.first()?[0];
     let on_axis = |s: f64| -> Option<[Finite; 3]> {
         let t = (s - s_start) / (length - s_start);
         finite3(std::array::from_fn(|axis| {
@@ -2034,8 +2089,8 @@ fn push_head_segment(
     });
     Some(HeadSegment {
         spans,
-        neck_wider_than_ball: first_radius > headed.start_cap_radius_mm,
-        neck_ratio: first_radius / headed.start_cap_radius_mm,
+        neck_wider_than_ball,
+        neck_ratio,
     })
 }
 
@@ -4579,6 +4634,8 @@ mod headed_arm_tests {
             joint_radius_mm: law(tip, length),
             gap_mm: GAP_MM,
             profile_knots_mm: knots(tip, length),
+            link_mm: 0.0,
+            link_radius_mm: 0.0,
         }
     }
 
@@ -4742,6 +4799,45 @@ mod headed_arm_tests {
         }
     }
 
+    /// THE LINK (Craig 2026-10-08): the head is the ball, a bare cylinder of
+    /// the link's radius that is `link_mm` long from where it leaves the ball,
+    /// then a cone that starts at the link's radius (no step) and ends at the
+    /// joint's. The measured link is the carried one, the cylinder is the
+    /// contact taper, and the link is thinner than the ball.
+    #[test]
+    fn a_linked_head_is_the_ball_a_bare_cylinder_of_the_link_length_and_a_cone() {
+        let (tip, length, link) = (0.1, 1.2, 0.3);
+        let contact = [0.0, 0.0, 10.0];
+        let mut arm = arm_with(tip, length, contact, contact);
+        let head = arm.head.as_mut().expect("a head");
+        head.link_mm = link;
+        head.link_radius_mm = tip;
+        // The cone: from the link's planned far end at the link's radius to
+        // the joint's own radius.
+        head.profile_knots_mm = vec![[0.5, tip], [length, head.joint_radius_mm]];
+        let layers = layers();
+        let config = LoweringConfig::current(frame(), &layers, 1, 1).expect("config");
+        let mut out = Vec::new();
+        let lowered = lower_one_sweep_arm(&arm, config, 0.0, &mut out);
+        let drawn = lowered.head.expect("the head was drawn as a head");
+        let joint_at = out
+            .iter()
+            .position(|p| p.segment_kind == SupportSegmentKind::JointSphere)
+            .expect("a joint sphere");
+        let neck = &out[1..joint_at];
+        assert_eq!(neck.len(), 2, "the link, then one cone frustum");
+        assert_eq!(neck[0].segment_kind, SupportSegmentKind::ContactTaper);
+        let radius = |p: &SupportPrimitive| (p.start_radius_mm.get(), p.end_radius_mm.get());
+        assert_eq!(radius(&neck[0]), (tip, tip), "the link is a cylinder of the link radius");
+        assert!(
+            (neck[1].start_radius_mm.get() - tip).abs() < 1e-12,
+            "the cone starts at the link radius, no step"
+        );
+        assert!((neck[1].end_radius_mm.get() - arm.head.as_ref().expect("head").joint_radius_mm).abs() < 1e-12);
+        assert!((drawn.stalk_mm - link).abs() < 1e-6, "measured link {}", drawn.stalk_mm);
+        assert!(drawn.neck_ratio < 1.0 && !drawn.neck_wider_than_ball, "link thinner than the ball");
+    }
+
     /// THE SMOOTH HEAD (v18 feedback B, 2026-10-07): the head is at most four
     /// frusta that share their end radii, never go under the law, hold at most
     /// 1.04 of the law's volume, and end at the joint's own radius. The v18 head
@@ -4875,24 +4971,35 @@ mod drawn_link_tests {
     #[test]
     fn the_link_of_a_ball_a_cylinder_and_a_cone_is_the_bare_length_from_the_ball() {
         // A cylinder of radius 0.05 from the ball's centre to 1.0, then a cone
-        // widening to 0.40 at 1.5. The head leaves the ball where
-        // r² + a² = R², at sqrt(R² - r²); the drawn radius reaches R on the cone.
+        // widening to 0.40 at 1.5. The cylinder leaves the ball where
+        // r² + a² = R², at sqrt(R² - r²); the link runs to where the radius
+        // first rises, at 1.0.
         let r = 0.05;
         let frusta = [([0.0, r], [1.0, r]), ([1.0, r], [1.5, 0.40])];
         let exit = (BALL * BALL - r * r).sqrt();
-        let reach = 1.0 + (BALL - r) / (0.40 - r) * 0.5;
-        let expected = reach - exit;
         let link = drawn_link_mm(&frusta, BALL);
-        assert!((link - expected).abs() < 1e-12, "{link} vs {expected}");
-        // With the cone starting at the ball's own radius, the link is exactly
-        // the cylinder's length less the part inside the ball.
+        assert!((link - (1.0 - exit)).abs() < 1e-12, "{link} vs {}", 1.0 - exit);
+        // A step up to the ball's own radius where the cone starts changes
+        // nothing: the link is the leading constant-radius run.
         let abrupt = [([0.0, r], [1.0, r]), ([1.0, BALL], [1.5, 0.40])];
         let link = drawn_link_mm(&abrupt, BALL);
-        assert!(
-            (link - (1.0 - exit)).abs() < 1e-12,
-            "{link} vs {}",
-            1.0 - exit
-        );
+        assert!((link - (1.0 - exit)).abs() < 1e-12, "{link} vs {}", 1.0 - exit);
+    }
+
+    #[test]
+    fn a_link_as_wide_as_the_ball_or_wider_is_still_a_link_and_a_cone_from_the_ball_is_not() {
+        // A cylinder of the ball's radius from the centre: it never sits inside
+        // the ball's surface, so the whole run is link.
+        let wide = [([0.0, BALL], [0.4, BALL]), ([0.4, BALL], [1.0, 0.5])];
+        assert!((drawn_link_mm(&wide, BALL) - 0.4).abs() < 1e-12);
+        let wider = [([0.0, 2.0 * BALL], [0.4, 2.0 * BALL])];
+        assert!((drawn_link_mm(&wider, BALL) - 0.4).abs() < 1e-12);
+        // A cone from the ball is no link, f32 noise in a radius is not a cone.
+        let cone = [([0.0, 0.05], [1.0, 0.2])];
+        assert!(drawn_link_mm(&cone, BALL).abs() < 1e-12);
+        let noise = [([0.0, 0.05], [0.5, 0.050_05]), ([0.5, 0.050_05], [1.0, 0.3])];
+        let exit = (BALL * BALL - 0.05_f64 * 0.05).sqrt();
+        assert!((drawn_link_mm(&noise, BALL) - (0.5 - exit)).abs() < 1e-12);
     }
 
     #[test]

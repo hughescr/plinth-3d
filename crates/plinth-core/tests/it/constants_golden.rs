@@ -4,7 +4,7 @@ use std::path::Path;
 
 // This is a hand-maintained cross-component inventory. It deliberately does
 // not read the source ledger or the generated Markdown golden.
-const EXPECTED_CONSTANT_IDS: [&str; 332] = [
+const EXPECTED_CONSTANT_IDS: [&str; 333] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -92,6 +92,7 @@ const EXPECTED_CONSTANT_IDS: [&str; 332] = [
     "GRIP_CLEAR_MM",
     "GRIP_HANDLE_LEN_MM",
     "GRIP_HANDLE_R_MM",
+    "HEAD_LINK_MM",
     "HOLLOW_ALLOW_OUTPUT_DEFAULT",
     "HOLLOW_BREATHING_VOXEL_PITCH_MM",
     "HOLLOW_BULK_MIN_MM",
@@ -386,8 +387,9 @@ fn global_registry_is_one_complete_atomic_306_constant_publication() {
     // pad and raft height moved out of the placeholders (pad Derived from the
     // boss foot, raft height Measured): 31/15/282 became 35/16/280. The
     // owner's ruling of the same day scaling the boss to its root added the
-    // root-boss profiles (Measured): 36/16/280.
-    assert_eq!(classes, [36, 16, 280, 0]);
+    // root-boss profiles (Measured): 36/16/280. The owner's head-link ruling of
+    // 2026-10-08 added HEAD_LINK_MM (Measured): 37/16/280.
+    assert_eq!(classes, [37, 16, 280, 0]);
 }
 
 #[test]

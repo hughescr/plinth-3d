@@ -858,6 +858,11 @@ pub struct SweepPolicy {
     /// trunk's seat plane ([`head_join`]); a brace or a mast is refused where
     /// its drawn solid would come closer (`member_clearance.rs`).
     pub final_clearance_gap_mm: f64,
+    /// `HEAD_LINK_MM`: the length of the bare link between a head's contact
+    /// ball and its cone (Craig 2026-10-08). A policy with a link under one
+    /// layer plus one pixel is refused when the sweep starts
+    /// ([`SweepError::Registry`]); `0` draws heads with no link.
+    pub head_link_mm: f64,
     /// Whether a lander that would join a support arm inside its seat zone is
     /// moved down the arm until the sum-sized section clears it ([`head_join`],
     /// 2026-09-29). **On in production.** The drill turns it off, which is the
@@ -1024,6 +1029,7 @@ impl SweepPolicy {
             slenderness_model_tie: true,
             stage_shake_brace_peel_kpa: stage_shake::BRACE_PEEL_KPA,
             final_clearance_gap_mm: *evidence.final_clearance_gap_mm().value(),
+            head_link_mm: *evidence.head_link_mm().value(),
             head_join: true,
             lip_seat: true,
             lip_seat_across_passes: true,
@@ -1717,7 +1723,20 @@ pub fn run_sweep_with_holes(
     // band and the layer grid. Absent (no head anywhere) where the registry
     // cannot be read or the policy turns heads off; emit and warn, never refuse.
     let head_registry = if policy.heads {
-        m0_constants().ok().map(|constants| {
+        let registry = m0_constants().ok();
+        // THE LINK IS REFUSED AT LOAD where it is shorter than one layer plus
+        // one pixel (Craig 2026-10-08): it would not print as a link.
+        if let Some(constants) = registry {
+            let printer = constants.saturn4_ultra();
+            let pixel_mm = printer
+                .pixel_pitch_x_um()
+                .value()
+                .max(*printer.pixel_pitch_y_um().value())
+                / 1000.0;
+            heads::check_link_mm(policy.head_link_mm, height + pixel_mm)
+                .map_err(SweepError::Registry)?;
+        }
+        registry.map(|constants| {
             let printer = constants.saturn4_ultra();
             let pixel_mm = printer
                 .pixel_pitch_x_um()
@@ -1736,6 +1755,7 @@ pub fn run_sweep_with_holes(
                     )
                     .cos_max_lean(),
                     max_radius_mm: policy.tip_radius_max_mm,
+                    link_mm: policy.head_link_mm,
                     typical_tip_radius_mm: heads::TYPICAL_TIP_RADIUS_MM,
                     max_normal_z: seat_face_rule.max_normal_z(),
                     layer_height_mm: height,
@@ -3274,6 +3294,16 @@ pub fn run_sweep_with_holes(
             &history.hidden,
         );
         sweep_plan.report.hidden_cavity = history.hidden.census();
+    }
+    // THE LINK UNDER THE LAW (Craig 2026-10-08): the link is the contact's own
+    // size, so the bending law is not met there. One warning per drawn head,
+    // read on the finished field (the tip and the law the file is drawn with).
+    if let Some((profiles, rule)) = head_registry {
+        sweep_plan.report.heads.link_overstress = heads::link_overstress(
+            &sweep_plan.struts,
+            rule.link_mm,
+            |radius| profiles.ball_factor(radius),
+        );
     }
     sweep_plan.report.sweep_digest = digest(&sweep_plan.struts);
     Ok(sweep_plan)

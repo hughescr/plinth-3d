@@ -3716,19 +3716,21 @@ fn print_sweep_disclosure(
             .join(", ");
         println!(
             "[sweep {model}] heads: {} built at placement on steep faces, {straight} kept a \
-             straight tip ({reasons}); drawn {}; neck: drawn link thinner than the contact ball, \
-             measured from drawn frusta, mm min/median/max {} ({} heads with no link); \
+             straight tip ({reasons}); drawn {}; link: the bare leading cylinder of the head, \
+             measured from drawn frusta, mm min/median/max {} ({} heads with no link, link \
+             radius at or over the ball's {}); \
              stand-off mm {} (gap {final_gap_mm}); \
              joints grown {} (largest stand-off deficit {:.4} mm); downgraded after sizing: {} \
              ({} joins on their posts followed onto the straight line drawn, largest shift {:.3} mm); \
              sized again for the post after the seat moves: {}; \
-             necks wider than ball {} (largest first-ring/ball-cap ratio {:.3}); \
+             link radius over ball radius: largest {:.3}; \
              placement normal residual {:.3} deg max, {:.3} median; u against final footprint \
              normal {:.3} deg max, {:.3} median; lip-seat bites on headed arms {} (must be 0)",
             heads.built,
             emission.tips_headed,
             spread(&emission.head_stalk_mm),
             emission.head_stalk_mm.iter().filter(|link| **link <= 0.0).count(),
+            emission.head_necks_wider_than_ball,
             spread(&emission.head_standoff_mm),
             emission.joints_grown,
             emission.max_standoff_deficit_mm,
@@ -3736,7 +3738,6 @@ fn print_sweep_disclosure(
             emission.downgraded_joins,
             emission.downgraded_follow_max_mm,
             heads.resized_after_moves,
-            emission.head_necks_wider_than_ball,
             emission.head_neck_ratio.iter().copied().fold(0.0_f64, f64::max),
             heads.placement_residual_deg_max,
             heads.placement_residual_deg_median,
@@ -3780,6 +3781,25 @@ fn print_sweep_disclosure(
             println!(
                 "[sweep {model}] WARNING heads: straight tips off their face normal beyond the \
                  skim law: {named}"
+            );
+        }
+        // THE LINK UNDER THE LAW (Craig 2026-10-08): one warning per head, then
+        // the count, median and largest ratio.
+        if !heads.link_overstress.is_empty() {
+            for warning in &heads.link_overstress {
+                println!("[sweep {model}] WARNING heads: link under the bending law: {warning}");
+            }
+            let mut ratios: Vec<f64> = heads.link_overstress.iter().map(|w| w.stress_ratio).collect();
+            ratios.sort_by(f64::total_cmp);
+            println!(
+                "[sweep {model}] heads: {} of {} drawn links lie under the bending law (stress \
+                 over allowed, min/median/max {:.1}/{:.1}/{:.1}); only a coupon can size the \
+                 margin",
+                ratios.len(),
+                emission.tips_headed,
+                ratios[0],
+                ratios[ratios.len() / 2],
+                ratios[ratios.len() - 1],
             );
         }
         if !heads.downgraded_after_sizing.is_empty() {

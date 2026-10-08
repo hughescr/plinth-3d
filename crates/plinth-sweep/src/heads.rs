@@ -8,16 +8,18 @@
 //!   seat cell (k_top)
 //!        ● D        D  the contact centre, on the seat plane
 //!         \         u  the footprint normal at placement (outward, z < 0)
-//!          \  head  K  the joint sphere's centre, K = D + (g + hb + r_K)·u
+//!          \  head  K  the joint sphere's centre, K = D + (g + hb + L + r_K)·u
 //!           ● K     g  the registered final clearance gap
 //!           |       hb the contact ball's height over the plane (2R)
+//!           |       L  the bare link, a cylinder of the tip's radius
 //!           |  post  K -> base, the rest of the arm
 //! ```
 //!
 //! On a steep face the arm's top is a short straight HEAD along `u`, so the
-//! contact arrives square. The joint sphere stands `g + hb` off the seat
-//! plane: `g` clear of the ball's far side (the visible neck, the bare stalk
-//! the ball hinges on), so the post is never inside the gap. The up-sweep builds a head once,
+//! contact arrives square. The head is the contact ball, a bare LINK of length
+//! `L` (`link_mm`) and the tip's own radius, then a cone to the joint sphere.
+//! The joint sphere stands `g + hb + L` off the seat plane: `g` clear of the
+//! link's far end, so the post is never inside the gap. The up-sweep builds a head once,
 //! at placement, and nothing moves it afterwards; where a head cannot be built
 //! the arm keeps today's straight tip (emit and warn, never refuse).
 //!
@@ -106,6 +108,11 @@ pub struct Head {
     /// plane, took the whole neck back (measured: 30 drawn heads, neck min
     /// -0.060 mm, balls overlapping the joint).
     pub ball_allowance_mm: f64,
+    /// `L_link`: the registered length of the bare LINK, the cylinder of the
+    /// tip's own radius that runs from where it leaves the contact ball to
+    /// the cone (Craig 2026-10-08: "neck 0.3-0.6, short is fine"). The joint
+    /// stands `g` beyond the link's far end, so `|DK| = g + hb + L_link + r_K`.
+    pub link_mm: f64,
     /// Set after the final sizing when the head is given up
     /// ([`downgrade_grown_heads`]): the arm is DRAWN as today's straight tip,
     /// from its seat to its base, while the strut keeps the head, its path and
@@ -138,10 +145,11 @@ impl Head {
         self.law_drawn.unwrap_or(self.law_planned)
     }
 
-    /// The gap the joint law reads: `g + hb`, so `|DK| = lever_gap_mm + r_K`.
+    /// The gap the joint law reads: `g + hb + L_link`, so
+    /// `|DK| = lever_gap_mm + r_K`.
     #[must_use]
     pub fn lever_gap_mm(&self) -> f64 {
-        self.gap_mm + self.ball_allowance_mm
+        self.gap_mm + self.ball_allowance_mm + self.link_mm
     }
 }
 
@@ -548,9 +556,24 @@ pub fn head_polyline_mm(tip_radius_mm: f64, length_mm: f64, cos_lean_max: f64) -
 /// cylinder of radius `r_t`.
 #[must_use]
 pub fn head_polyline_law_mm(tip_radius_mm: f64, length_mm: f64, law: HeadLaw) -> Vec<[f64; 2]> {
-    let start = head_section_law_mm(tip_radius_mm, 0.0, law);
-    if !(length_mm.is_finite() && length_mm > 0.0) {
-        return vec![[0.0, start]];
+    head_polyline_from_law_mm(tip_radius_mm, 0.0, length_mm, law)
+}
+
+/// [`head_polyline_law_mm`] over `[from_mm, length_mm]` instead of
+/// `[0, length_mm]`: the first knot is the law at `from_mm`, the last the law
+/// at `length_mm`, and the tangents are spaced over the span between them.
+/// `from_mm = 0` is [`head_polyline_law_mm`], bit for bit. A span of no length
+/// is the single point at `from_mm`.
+#[must_use]
+pub fn head_polyline_from_law_mm(
+    tip_radius_mm: f64,
+    from_mm: f64,
+    length_mm: f64,
+    law: HeadLaw,
+) -> Vec<[f64; 2]> {
+    let start = head_section_law_mm(tip_radius_mm, from_mm, law);
+    if !(length_mm.is_finite() && length_mm > from_mm) {
+        return vec![[from_mm, start]];
     }
     let a = tip_radius_mm * tip_radius_mm / law.cos_lean;
     let p = a * law.cos_phi_abs;
@@ -566,10 +589,12 @@ pub fn head_polyline_law_mm(tip_radius_mm: f64, length_mm: f64, law: HeadLaw) ->
         0.0
     };
     if floor_end >= length_mm {
-        return vec![[0.0, start], [length_mm, start]];
+        return vec![[from_mm, start], [length_mm, start]];
     }
-    let tangent_count = if floor_end > 0.0 { 3_usize } else { 4_usize };
-    let span = length_mm - floor_end;
+    let floored = floor_end > from_mm;
+    let tangent_count = if floored { 3_usize } else { 4_usize };
+    let base = floor_end.max(from_mm);
+    let span = length_mm - base;
     // The tangent points `(s, r, slope)`.
     let tangents: Vec<[f64; 3]> = (0..tangent_count)
         .map(|index| {
@@ -577,13 +602,13 @@ pub fn head_polyline_law_mm(tip_radius_mm: f64, length_mm: f64, law: HeadLaw) ->
                 clippy::cast_precision_loss,
                 reason = "a tangent index of at most 3 is exact in f64"
             )]
-            let s = floor_end + span * (index as f64 / (tangent_count - 1) as f64).powi(3);
+            let s = base + span * (index as f64 / (tangent_count - 1) as f64).powi(3);
             let r = head_section_law_mm(tip_radius_mm, s, law);
             [s, r, q / (3.0 * r * r - p)]
         })
         .collect();
-    let mut knots = vec![[0.0, start]];
-    if floor_end > 0.0 {
+    let mut knots = vec![[from_mm, start]];
+    if floored {
         knots.push([floor_end, tip_radius_mm]);
     }
     for pair in tangents.windows(2) {
@@ -602,6 +627,170 @@ pub fn head_polyline_law_mm(tip_radius_mm: f64, length_mm: f64, law: HeadLaw) ->
     }
     knots.push([length_mm, head_section_law_mm(tip_radius_mm, length_mm, law)]);
     knots
+}
+
+/// **The head as it is drawn with its link** (Craig 2026-10-08): the contact
+/// ball, a bare cylinder of radius `r_L` and length `L_link` (the LINK), then a
+/// cone to the joint sphere.
+///
+/// All distances `s` run along the head's axis from the contact centre `D`.
+/// The ball stands `2R` over `D` at most, so the link's far end is planned at
+/// `s_far = 2R + L_link`; `r_L` is the tip's own radius (the contact's area-law
+/// need, ruling A: each part is sized for its own requirement), so the link is
+/// never wider than the ball.
+///
+/// A link that thin lies UNDER the bending law at `s_far` (the law there is
+/// 1.3 to 3.9 times the ball for a side-loaded head); Craig's ChituBox Light
+/// tip does the same. [`section_stress_ratio`] measures how far under, and the
+/// run warns per head ([`link_overstress`]). The cone leaves `(s_far, r_L)`
+/// along the line of the law's own slope there, and runs on until it meets the
+/// law at `s_c`; from `s_c` to the joint the tangent polyline of
+/// [`head_polyline_from_law_mm`] keeps the head on or above the law. Where the
+/// line does not meet the law before the joint (a short head), the cone is one
+/// straight frustum from `(s_far, r_L)` to the joint's own section. A point
+/// under a concave law has no tangent to it, which is why the cone starts
+/// along the law's slope and is not tangent. At most five frusta, no step.
+///
+/// Where the link would reach the joint (`s_far` not before `length_mm`) the
+/// cone starts a micron before it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeadProfile {
+    /// `r_L`: the link's radius.
+    pub link_radius_mm: f64,
+    /// `s_far`: where the link ends and the cone starts, from `D`.
+    pub link_end_mm: f64,
+    /// The cone's `(s, r)` knots, from `(s_far, r_L)` to `(length, r_K)`.
+    pub knots: Vec<[f64; 2]>,
+}
+
+/// See [`HeadProfile`].
+#[must_use]
+pub fn head_profile_with_link(
+    tip_radius_mm: f64,
+    ball_radius_mm: f64,
+    link_mm: f64,
+    length_mm: f64,
+    law: HeadLaw,
+) -> HeadProfile {
+    let link_radius_mm = tip_radius_mm;
+    let planned_end = ball_allowance_of(ball_radius_mm) + link_mm;
+    let link_end_mm = planned_end.min(length_mm - 1.0e-3).max(0.0);
+    let joint = head_section_law_mm(tip_radius_mm, length_mm, law);
+    let at_end = head_section_law_mm(tip_radius_mm, link_end_mm, law);
+    let finish = |knots: Vec<[f64; 2]>| HeadProfile {
+        link_radius_mm,
+        link_end_mm,
+        knots,
+    };
+    if !(length_mm.is_finite() && length_mm > link_end_mm) {
+        return finish(vec![[link_end_mm, link_radius_mm]]);
+    }
+    if at_end <= link_radius_mm + 1.0e-12 {
+        // The link is on the (floored) law: the tangent polyline from its end.
+        let mut knots = head_polyline_from_law_mm(tip_radius_mm, link_end_mm, length_mm, law);
+        knots[0] = [link_end_mm, link_radius_mm];
+        return finish(knots);
+    }
+    // The law's slope at `s_far`: `Q / (3 r² − P)`.
+    let a = tip_radius_mm * tip_radius_mm / law.cos_lean;
+    let (p, q) = (a * law.cos_phi_abs, 4.0 * a * law.sin_phi);
+    let slope = q / (3.0 * at_end * at_end - p);
+    let line = |s: f64| link_radius_mm + slope * (s - link_end_mm);
+    let under = |s: f64| line(s) - head_section_law_mm(tip_radius_mm, s, law);
+    if !(slope.is_finite() && under(length_mm) >= 0.0) {
+        return finish(vec![[link_end_mm, link_radius_mm], [length_mm, joint]]);
+    }
+    // `line - law` is convex, negative at `s_far` and not falling: one root.
+    let (mut low, mut high) = (link_end_mm, length_mm);
+    for _ in 0..BISECTIONS {
+        let mid = 0.5 * (low + high);
+        if under(mid) >= 0.0 {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+    let meet = high;
+    let mut knots = vec![[link_end_mm, link_radius_mm]];
+    let rest = head_polyline_from_law_mm(tip_radius_mm, meet, length_mm, law);
+    if meet - link_end_mm > 1.0e-9 {
+        knots.extend(rest);
+    } else {
+        knots.extend(rest.into_iter().skip(1));
+    }
+    finish(knots)
+}
+
+/// **How far a section of radius `radius_mm` at axial distance `s_mm` is over
+/// its stress limit** under `law`, as a ratio of stress to allowed stress. The
+/// law is `r³ = P·r + Q·s`, the section where the ratio is exactly 1, so the
+/// ratio of a section of radius `r` there is `P/r² + Q·s/r³` with the law's
+/// `P = (r_t²/c)|cos phi'|` and `Q = 4(r_t²/c) sin phi'`. Above 1 is a section
+/// under the law.
+#[must_use]
+pub fn section_stress_ratio(tip_radius_mm: f64, radius_mm: f64, s_mm: f64, law: HeadLaw) -> f64 {
+    let a = tip_radius_mm * tip_radius_mm / law.cos_lean;
+    let (p, q) = (a * law.cos_phi_abs, 4.0 * a * law.sin_phi);
+    p / (radius_mm * radius_mm) + q * s_mm / (radius_mm * radius_mm * radius_mm)
+}
+
+/// The warning for a head whose link lies under the bending law (emit and
+/// warn, never refuse).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LinkOverstress {
+    /// The member's id.
+    pub member: u32,
+    /// The link's radius, mm.
+    pub link_radius_mm: f64,
+    /// The contact ball's radius `R`, mm.
+    pub ball_radius_mm: f64,
+    /// Stress over allowed stress at the link's far end ([`section_stress_ratio`]).
+    pub stress_ratio: f64,
+}
+
+impl std::fmt::Display for LinkOverstress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "member {}: link radius {:.3} mm (ball {:.3} mm) carries {:.1} times the allowed stress",
+            self.member, self.link_radius_mm, self.ball_radius_mm, self.stress_ratio
+        )
+    }
+}
+
+/// **One warning per drawn head whose link is over its stress limit**, on the
+/// finished field (after the last sizing, so the law and the tip are the
+/// drawn ones). The link is a cylinder of the tip's radius whose far end
+/// stands `2R + link_mm` from the contact centre. In strut order. One pass.
+#[must_use]
+pub fn link_overstress(
+    struts: &[crate::SweepStrut],
+    link_mm: f64,
+    ball_factor_at: impl Fn(f64) -> f64,
+) -> Vec<LinkOverstress> {
+    struts
+        .iter()
+        .filter_map(|strut| {
+            let head = strut.head.as_ref().filter(|head| !head.drawn_straight)?;
+            if !crate::slenderness::live(strut) {
+                return None;
+            }
+            let tip = strut.tip_radius_mm();
+            let ball = ball_factor_at(tip) * tip;
+            let ratio = section_stress_ratio(
+                tip,
+                tip,
+                ball_allowance_of(ball) + link_mm,
+                head.law(),
+            );
+            (ratio > 1.0 + 1.0e-9).then_some(LinkOverstress {
+                member: strut.id,
+                link_radius_mm: tip,
+                ball_radius_mm: ball,
+                stress_ratio: ratio,
+            })
+        })
+        .collect()
 }
 
 /// The post's section at a `lever_mm` below the joint, over a ledger section
@@ -716,6 +905,11 @@ pub struct HeadsOutcome {
     /// on the finished field by [`crate::off_normal_straight_tips`]. A warning
     /// quantity: every one is a refusal the run counted by reason.
     pub off_normal_straight: Vec<(u32, f64, Option<HeadRefusal>)>,
+    /// Drawn heads whose link (a cylinder of the tip's radius) lies under the
+    /// bending law, one warning each, in strut order (Craig 2026-10-08: the
+    /// link is the contact's own size, so the law is not met there and only a
+    /// coupon can size the margin). See [`link_overstress`].
+    pub link_overstress: Vec<LinkOverstress>,
 }
 
 /// The warning for a head kept although its drawn clearance is short.
@@ -791,6 +985,9 @@ pub struct HeadRule {
     pub cos_lean_max: f64,
     /// The registered maximum tip radius: the joint may not exceed it.
     pub max_radius_mm: f64,
+    /// `L_link`: the registered length of the bare link between the contact
+    /// ball and the cone ([`Head::link_mm`]). `0` plans a head with no link.
+    pub link_mm: f64,
     /// The tip radius a seat is planned at when its own demand asks for less:
     /// the corpus p90 of a steep tip's final radius (about 0.15 mm,
     /// `articulation-build-plan.md`). A PLANNING ESTIMATE that prunes and
@@ -876,7 +1073,7 @@ pub fn plan_head(req: &HeadRequest, rule: &HeadRule, grid: &Grid) -> Result<Head
     // (the numerical maximum of the exact law, not the 90 degree envelope).
     let Some((joint, law_planned)) = solve_joint_for_axis(
         req.tip_radius_lb_mm,
-        rule.gap_mm + ball_allowance_mm,
+        rule.gap_mm + ball_allowance_mm + rule.link_mm,
         unit,
         rule.cos_lean_max,
         rule.max_radius_mm,
@@ -926,6 +1123,7 @@ pub fn plan_head(req: &HeadRequest, rule: &HeadRule, grid: &Grid) -> Result<Head
         cos_lean_max: rule.cos_lean_max,
         cells,
         ball_allowance_mm,
+        link_mm: rule.link_mm,
         drawn_straight: false,
         law_planned,
         law_drawn: None,
@@ -967,8 +1165,13 @@ pub fn planned_tip_radius_mm(
     let estimate = demand_lb_mm.max(rule.typical_tip_radius_mm);
     if estimate > demand_lb_mm {
         let ball_mm = ball_allowance_of(ball_factor_at(estimate) * estimate);
-        if solve_joint(estimate, rule.gap_mm + ball_mm, rule.cos_lean_max, rule.max_radius_mm)
-            .is_none()
+        if solve_joint(
+            estimate,
+            rule.gap_mm + ball_mm + rule.link_mm,
+            rule.cos_lean_max,
+            rule.max_radius_mm,
+        )
+        .is_none()
         {
             return demand_lb_mm;
         }
@@ -1046,6 +1249,25 @@ pub fn downgrade_grown_heads(
         }
     }
     outcome
+}
+
+/// **The link is refused at load** where it is shorter than the rasterisation
+/// allowance (one layer plus one pixel, `allowance_mm`): such a link would not
+/// print as a link. `0` is the switch that draws heads with no link, and is
+/// accepted; a negative or non-finite length is refused.
+///
+/// # Errors
+///
+/// The reason, as text, for a link under the allowance.
+pub fn check_link_mm(link_mm: f64, allowance_mm: f64) -> Result<(), String> {
+    if link_mm == 0.0 || (link_mm.is_finite() && link_mm >= allowance_mm) {
+        Ok(())
+    } else {
+        Err(format!(
+            "HEAD_LINK_MM {link_mm} mm is shorter than one layer plus one pixel \
+             ({allowance_mm} mm): a link that short does not print as a link"
+        ))
+    }
 }
 
 /// One tip's question to [`placement_normals`].
@@ -1429,9 +1651,10 @@ pub fn check_head(
 #[cfg(test)]
 mod tests {
     use super::{
-        final_joint_radius_law_mm, final_joint_radius_mm, head_polyline_law_mm, head_polyline_mm,
-        head_section_law_mm, head_section_mm, post_section_law_mm, post_section_mm,
-        section_radius_mm, solve_bend, solve_joint, solve_joint_for_axis, Head, HeadLaw,
+        check_link_mm, final_joint_radius_law_mm, final_joint_radius_mm, head_polyline_law_mm,
+        head_polyline_mm, head_profile_with_link, head_section_law_mm, head_section_mm,
+        post_section_law_mm, post_section_mm, section_radius_mm, section_stress_ratio, solve_bend,
+        solve_joint, solve_joint_for_axis, Head, HeadLaw,
     };
     use crate::{Landing, SeatFace, SweepStrut};
 
@@ -1439,6 +1662,82 @@ mod tests {
 
     fn cos_lean() -> f64 {
         57.5_f64.to_radians().cos()
+    }
+
+    /// THE LINK (Craig 2026-10-08): the cone leaves `(s_far, r_t)`, the link's
+    /// own radius, where `s_far = 2R + L`; it ends exactly on the law at the
+    /// joint; its knots rise strictly; it lies under the law only in a prefix
+    /// (from the link to where it meets the law) and on or above it from then
+    /// on; and the link is under the law (stress above 1) at its far end while
+    /// the law's own section carries exactly 1.
+    #[test]
+    fn the_cone_leaves_the_link_radius_meets_the_law_and_stays_on_it() {
+        let c = cos_lean();
+        let link = 0.3;
+        for tip in [0.05, 0.115, 0.15] {
+            let ball = 1.4 * tip;
+            let s_far = 2.0 * ball + link;
+            for law in [
+                HeadLaw::envelope(c),
+                HeadLaw { cos_lean: 0.8, cos_phi_abs: 0.4, sin_phi: 0.9165 },
+            ] {
+                // A short head (joint just past the link) and a long one.
+                for length in [s_far + 0.55, s_far + 3.0] {
+                    let profile = head_profile_with_link(tip, ball, link, length, law);
+                    assert!((profile.link_radius_mm - tip).abs() < 1e-15, "the link is the tip's own");
+                    assert!((profile.link_end_mm - s_far).abs() < 1e-12);
+                    let knots = &profile.knots;
+                    assert!(knots.len() >= 2 && knots.len() <= 6, "at most five frusta: {law:?}: {knots:?}");
+                    let bits = |point: [f64; 2]| point.map(f64::to_bits);
+                    assert_eq!(bits(knots[0]), bits([s_far, tip]), "the cone starts at the link radius");
+                    assert_eq!(
+                        bits(knots[knots.len() - 1]),
+                        bits([length, head_section_law_mm(tip, length, law)]),
+                        "the cone ends on the law at the joint"
+                    );
+                    assert!(knots.windows(2).all(|w| w[0][0] < w[1][0]), "{knots:?}");
+                    let drawn = |s: f64| {
+                        knots
+                            .windows(2)
+                            .find(|w| s <= w[1][0])
+                            .map(|w| w[0][1] + (w[1][1] - w[0][1]) * (s - w[0][0]) / (w[1][0] - w[0][0]))
+                            .expect("s lies in the cone")
+                    };
+                    let mut on_the_law = false;
+                    for step in 0..=1000 {
+                        let s = s_far + (length - s_far) * f64::from(step) / 1000.0;
+                        let under = drawn(s) < head_section_law_mm(tip, s, law) - 1.0e-9;
+                        assert!(!(on_the_law && under), "{law:?} tip {tip} s {s}: back under the law");
+                        on_the_law |= !under;
+                    }
+                    // The link is under the law at its far end: the law there is
+                    // fatter than the tip, and the ratio is the cube-law's.
+                    let at_end = head_section_law_mm(tip, s_far, law);
+                    assert!(at_end > tip);
+                    assert!(section_stress_ratio(tip, tip, s_far, law) > 1.0);
+                    assert!((section_stress_ratio(tip, at_end, s_far, law) - 1.0).abs() < 1e-9);
+                }
+                // A long head meets the law before the joint: more than one
+                // frustum, and the tangent polyline carries it on.
+                let long = head_profile_with_link(tip, ball, link, s_far + 8.0, law);
+                assert!(long.knots.len() >= 3, "{law:?}: {:?}", long.knots);
+            }
+        }
+        // A link on the (floored) law needs no cone of its own.
+        let aligned = HeadLaw { cos_lean: 1.0, cos_phi_abs: 1.0, sin_phi: 0.0 };
+        let flat = head_profile_with_link(0.1, 0.14, 0.3, 1.0, aligned);
+        assert!(flat.knots.iter().all(|k| (k[1] - 0.1).abs() < 1e-12), "{:?}", flat.knots);
+    }
+
+    #[test]
+    fn a_link_shorter_than_a_layer_plus_a_pixel_is_refused_at_load() {
+        let allowance = 0.05 + 0.019;
+        assert!(check_link_mm(0.3, allowance).is_ok());
+        assert!(check_link_mm(allowance, allowance).is_ok());
+        assert!(check_link_mm(0.0, allowance).is_ok(), "zero switches the link off");
+        assert!(check_link_mm(0.05, allowance).is_err());
+        assert!(check_link_mm(-0.3, allowance).is_err());
+        assert!(check_link_mm(f64::NAN, allowance).is_err());
     }
 
     #[test]
@@ -1743,6 +2042,7 @@ mod tests {
             cos_lean_max: cos_lean(),
             cells: vec![9, 9, 8, 8, 8, 7, 7, 7],
             ball_allowance_mm: 0.0,
+            link_mm: 0.0,
             drawn_straight: false,
             law_planned: HeadLaw::envelope(cos_lean()),
             law_drawn: None,
@@ -1834,6 +2134,8 @@ mod tests {
             joint_radius_mm: 0.22,
             gap_mm: 0.3,
             profile_knots_mm: vec![[0.0, 0.07], [0.52, 0.22]],
+            link_mm: 0.0,
+            link_radius_mm: 0.0,
         };
         assert_eq!(payload.profile_knots_mm.len(), 2);
     }
@@ -1879,6 +2181,7 @@ mod constructor_tests {
             allowance_mm: allowance(),
             cos_lean_max: cos_lean(),
             max_radius_mm: 1.0,
+            link_mm: 0.0,
             typical_tip_radius_mm: 0.15,
             max_normal_z: -70.0_f64.to_radians().cos(),
             layer_height_mm: H,
@@ -2080,6 +2383,30 @@ mod constructor_tests {
             seat_cell: 5,
             k_top,
         }
+    }
+
+    /// THE LINK moves the joint (Craig 2026-10-08): `K = D + (g + 2R + L + r_K)u`,
+    /// so with the link the head is `L` longer than the same head without it
+    /// plus the growth of the joint for the longer lever, and the head keeps the
+    /// registered link.
+    #[test]
+    fn the_planned_joint_stands_the_link_beyond_the_ball() {
+        let grid = grid();
+        let (plain, mut linked) = (rule(0.0), rule(0.0));
+        linked.link_mm = 0.3;
+        let mut req = request(D, 0.15, 41);
+        req.ball_radius_mm = 0.21;
+        let without = plan_head(&req, &plain, &grid).expect("a head without a link");
+        let with = plan_head(&req, &linked, &grid).expect("a head with a link");
+        assert!((with.link_mm - 0.3).abs() < 1e-15 && without.link_mm == 0.0);
+        let length = |head: &Head| vec3::dist(head.contact_mm, head.joint_mm);
+        for head in [&without, &with] {
+            let want = GAP + 2.0 * 0.21 + head.link_mm + head.joint_radius_mm;
+            assert!((length(head) - want).abs() < 1e-9, "|DK| = {} against {want}", length(head));
+            assert!((head.lever_gap_mm() + head.joint_radius_mm - want).abs() < 1e-9);
+        }
+        assert!(with.joint_radius_mm > without.joint_radius_mm, "a longer lever grows the joint");
+        assert!(length(&with) > length(&without) + 0.3, "the link and the joint's growth");
     }
 
     #[test]
