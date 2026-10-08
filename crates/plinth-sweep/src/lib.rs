@@ -3569,6 +3569,12 @@ fn off_normal_straight_tips(
         let reason = refusals
             .iter()
             .find_map(|(reason, ids)| ids.contains(&strut.id).then_some(*reason));
+        // A seat in a hidden cavity is meant to stay straight (Craig ruling
+        // 2026-10-05: no heads, and no final gap, in a hidden cavity). It is
+        // counted among the refusals and is not a warning here.
+        if reason == Some(heads::HeadRefusal::HiddenCavity) {
+            continue;
+        }
         found.push((strut.id, cos_x.clamp(-1.0, 1.0).acos().to_degrees(), reason));
     }
     found
