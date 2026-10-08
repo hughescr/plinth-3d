@@ -3714,6 +3714,18 @@ fn print_sweep_disclosure(
             .map(|(reason, ids)| format!("{reason:?}: {} {ids:?}", ids.len()))
             .collect::<Vec<_>>()
             .join(", ");
+        // The seats placement never asked for a head (Craig 2026-10-08): the
+        // counts sit beside the refusals; the normals each decision read follow
+        // as one line per seat, collected and printed once.
+        let not_asked_total: usize = heads.skips.values().map(Vec::len).sum();
+        let not_asked = heads
+            .skips
+            .iter()
+            .filter(|(_, ids)| !ids.is_empty())
+            .map(|(reason, ids)| format!("{reason:?}: {}", ids.len()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let reasons = format!("{reasons}; {not_asked_total} not asked for a head ({not_asked})");
         println!(
             "[sweep {model}] heads: {} built (steep faces at placement, plus the grazers converted), {straight} kept a \
              straight tip ({reasons}); drawn {}; link: the bare leading cylinder of the head, \
@@ -3756,6 +3768,37 @@ fn print_sweep_disclosure(
                 "[sweep {model}] WARNING heads: members that kept a straight tip, by reason: {}",
                 warned.join("; ")
             );
+        }
+        if !heads.skipped_seats.is_empty() {
+            // Angles are off straight down (0 = faces the plate, 90 = a wall).
+            let off_down = |n: [f64; 3]| (-n[2]).clamp(-1.0, 1.0).acos().to_degrees();
+            let normal = |n: Option<[f64; 3]>| {
+                n.map_or_else(
+                    || "not measured".to_owned(),
+                    |n| format!("({:.3}, {:.3}, {:.3}) {:.1} deg off down", n[0], n[1], n[2], off_down(n)),
+                )
+            };
+            let lines = heads
+                .skipped_seats
+                .iter()
+                .map(|seat| {
+                    format!(
+                        "[sweep {model}] heads: member {} not asked for a head ({:?}): seat \
+                         ({:.3}, {:.3}, {:.3}) mm, {:.3} mm above the plate; facet normal {}; \
+                         footprint normal {}",
+                        seat.id,
+                        seat.reason,
+                        seat.seat_mm[0],
+                        seat.seat_mm[1],
+                        seat.seat_mm[2],
+                        seat.seat_mm[2] - seat.plate_z_mm,
+                        normal(seat.facet),
+                        normal(seat.footprint),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            println!("{lines}");
         }
         println!(
             "[sweep {model}] heads: {} steep at placement, {} added where a straight shaft \

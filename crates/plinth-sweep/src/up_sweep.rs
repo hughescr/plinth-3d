@@ -26,7 +26,7 @@ use crate::drain::DrainKeepOut;
 use crate::grid::Grid;
 use crate::heads::{
     check_head, plan_head, placement_normals, planned_tip_radius_mm, Head, HeadCapsule, HeadCheckCtx, HeadRefusal,
-    HeadRequest, HeadRule, HeadsOutcome, PlacementBall, PlacementEnv,
+    HeadRequest, HeadRule, HeadSkip, HeadsOutcome, PlacementBall, PlacementEnv, SkippedSeat,
 };
 use crate::lean::LeanLaw;
 use crate::reach::ReachState;
@@ -786,6 +786,8 @@ impl HeadsState {
     pub fn publish(&self, into: &mut HeadsOutcome) {
         into.built = self.outcome.built;
         into.refusals.clone_from(&self.outcome.refusals);
+        into.skips.clone_from(&self.outcome.skips);
+        into.skipped_seats.clone_from(&self.outcome.skipped_seats);
         let mut sorted = self.residuals_deg.clone();
         sorted.sort_by(f64::total_cmp);
         if let Some(&max) = sorted.last() {
@@ -1652,15 +1654,46 @@ fn aligned_lattice_cells(
     cells
 }
 
+/// Why [`plan_seat_head`] returned no head.
+#[derive(Debug)]
+enum HeadExit {
+    /// A head was asked for and refused: counted by reason and member id.
+    Refused(HeadRefusal),
+    /// No head was asked for: counted by reason, and logged with the normals
+    /// the decision read (Craig 2026-10-08). The member id is filled in by
+    /// the caller.
+    Skipped(SkippedSeat),
+}
+
+/// The search prune on the nearest face's unit normal `facet`: `Some(reason)`
+/// when the seat wants no head and the footprint query is not worth asking. A
+/// facet that faces up, or is steeper than the seat-face band admits, wants no
+/// head; a facet more than [`HEAD_PRUNE_MARGIN_DEG`] below the skim angle is
+/// too flat for the footprint to bring it over.
+fn facet_skip(facet: [f64; 3], rule: &HeadRule, tip_radius_lb_mm: f64) -> Option<HeadSkip> {
+    let facet_cos = -facet[2];
+    if facet_cos <= 0.0 {
+        return Some(HeadSkip::FacetFacesUp);
+    }
+    if facet[2] >= rule.max_normal_z {
+        return Some(HeadSkip::FacetSteeperThanBand);
+    }
+    let secant = 1.0 + rule.allowance_mm / (rule.gap_mm + tip_radius_lb_mm);
+    let skim_deg = (1.0 / secant).clamp(-1.0, 1.0).acos().to_degrees();
+    (facet_cos > (skim_deg - HEAD_PRUNE_MARGIN_DEG).max(0.0).to_radians().cos())
+        .then_some(HeadSkip::FacetTooFlat)
+}
+
 /// **Plan and check one articulated head for the seat at `cell`** (layer
 /// `seating.layer`), before anything rests on the arm. `tip_radius_lb_mm` is
 /// the lower bound on the tip's drawn radius (what the seat's demand needs).
 ///
-/// `Ok((head, residual_deg))` when a head is built. `Err(None)` when the seat
-/// keeps the straight tip and NOTHING is counted (heads off, a facet that is
-/// not steep, a face too flat to be worth the footprint query:
-/// [`HEAD_PRUNE_MARGIN_DEG`]). `Err(Some(reason))` for every other refusal,
-/// which the caller counts by reason and member id.
+/// `Ok((head, residual_deg))` when a head is built. `Err(Skipped)` when no
+/// head is asked for (heads off, a facet that is not steep, a face too flat to
+/// be worth the footprint query: [`HEAD_PRUNE_MARGIN_DEG`], a footprint normal
+/// that is not steep): the caller counts it by reason and logs the normals.
+/// `Err(Refused(reason))` for every other refusal, which the caller counts by
+/// reason and member id.
 ///
 /// The nearest model face to the seat's axis point is named by ONE surface
 /// query, which gives the facet's normal for the prune, the seat triangle's
@@ -1671,9 +1704,14 @@ fn plan_seat_head(
     accepted: &[HeadCapsule],
     cell: usize,
     tip_radius_lb_mm: f64,
-) -> Result<(Head, f64), Option<HeadRefusal>> {
+) -> Result<(Head, f64), HeadExit> {
+    let skipped = |reason, seat_mm, plate_z_mm, facet, footprint| {
+        HeadExit::Skipped(SkippedSeat { id: 0, reason, seat_mm, plate_z_mm, facet, footprint })
+    };
     let Some(env) = seating.clearance.and_then(|clear| clear.heads.map(|env| (clear, env))) else {
-        return Err(None);
+        let grid = seating.grid;
+        let seat_mm = [grid.center_x_mm(grid.col_of(cell)), grid.center_y_mm(grid.row_of(cell)), 0.0];
+        return Err(skipped(HeadSkip::HeadsOff, seat_mm, 0.0, None, None));
     };
     let (clear, env) = env;
     let rule = env.rule;
@@ -1685,7 +1723,7 @@ fn plan_seat_head(
     let tip_radius_lb_mm =
         planned_tip_radius_mm(tip_radius_lb_mm, &rule, |radius| env.profiles.ball_factor(radius));
     let Some(surface) = clear.surface.map(|surface| surface.0) else {
-        return Err(Some(HeadRefusal::NoSurface));
+        return Err(HeadExit::Refused(HeadRefusal::NoSurface));
     };
     let grid = seating.grid;
     #[expect(clippy::cast_precision_loss, reason = "a layer index is exact in f64")]
@@ -1699,23 +1737,15 @@ fn plan_seat_head(
     let (Some(&face_point), Some(&face), Some(&facet_raw)) =
         (closest.first(), faces.first(), normals.first())
     else {
-        return Err(Some(HeadRefusal::NoSurface));
+        return Err(HeadExit::Refused(HeadRefusal::NoSurface));
     };
     let (Ok(face), Some(facet)) = (u32::try_from(face), geom_kernel::vec3::normalize(facet_raw))
     else {
-        return Err(Some(HeadRefusal::NoSurface));
+        return Err(HeadExit::Refused(HeadRefusal::NoSurface));
     };
-    // The search prune. A facet that faces up, or is steeper than the seat-face
-    // band admits, wants no head; a facet more than the margin below the skim
-    // angle is too flat for the footprint to bring it over.
-    let facet_cos = -facet[2];
-    if facet_cos <= 0.0 || facet[2] >= rule.max_normal_z {
-        return Err(None);
-    }
-    let secant = 1.0 + rule.allowance_mm / (rule.gap_mm + tip_radius_lb_mm);
-    let skim_deg = (1.0 / secant).clamp(-1.0, 1.0).acos().to_degrees();
-    if facet_cos > (skim_deg - HEAD_PRUNE_MARGIN_DEG).max(0.0).to_radians().cos() {
-        return Err(None);
+    // The search prune (see [`facet_skip`]).
+    if let Some(reason) = facet_skip(facet, &rule, tip_radius_lb_mm) {
+        return Err(skipped(reason, axis_point, rule.plate_z_mm, Some(facet), None));
     }
     let ball = PlacementBall::from_profiles(axis_point, face, facet, tip_radius_lb_mm, env.profiles);
     let placement = PlacementEnv {
@@ -1724,9 +1754,9 @@ fn plan_seat_head(
         max_normal_z: rule.max_normal_z,
     };
     let Some(found) = placement_normals(&placement, &[ball]).into_iter().next() else {
-        return Err(Some(HeadRefusal::NoFootprint));
+        return Err(HeadExit::Refused(HeadRefusal::NoFootprint));
     };
-    let (unit, residual_deg) = found.map_err(Some)?;
+    let (unit, residual_deg) = found.map_err(HeadExit::Refused)?;
     // The head's axis runs through the DRAWN seat (the cell centre at the seat
     // layer's own z, `adapter::drawn_ends`), because the lowering seats the
     // ball along `u` from there: a head axis through the footprint's ball
@@ -1749,8 +1779,16 @@ fn plan_seat_head(
     };
     let head = match plan_head(&request, &rule, grid) {
         Ok(head) => head,
-        Err(HeadRefusal::NotSteep) => return Err(None),
-        Err(reason) => return Err(Some(reason)),
+        Err(HeadRefusal::NotSteep) => {
+            return Err(skipped(
+                HeadSkip::FootprintNotSteep,
+                axis_point,
+                rule.plate_z_mm,
+                Some(facet),
+                Some(unit),
+            ));
+        }
+        Err(reason) => return Err(HeadExit::Refused(reason)),
     };
     let ctx = HeadCheckCtx {
         grid,
@@ -1764,7 +1802,7 @@ fn plan_seat_head(
         layer_height_mm: rule.layer_height_mm,
         separation_mm: env.separation_mm,
     };
-    check_head(&head, tip_radius_lb_mm, &ctx, accepted).map_err(Some)?;
+    check_head(&head, tip_radius_lb_mm, &ctx, accepted).map_err(HeadExit::Refused)?;
     Ok((head, residual_deg))
 }
 
@@ -1906,8 +1944,11 @@ fn commit_seat(
             clear.radius_lower_bound_mm(covered.len() as f64 * grid.cell_area_mm2())
         });
         match plan_seat_head(seating, history, &scratch.heads.accepted, cell, lower_bound) {
-            Err(None) => {}
-            Err(Some(reason)) => {
+            Err(HeadExit::Skipped(seat)) => {
+                scratch.heads.outcome.skips.entry(seat.reason).or_default().push(id);
+                scratch.heads.outcome.skipped_seats.push(SkippedSeat { id, ..seat });
+            }
+            Err(HeadExit::Refused(reason)) => {
                 scratch.heads.outcome.refusals.entry(reason).or_default().push(id);
             }
             Ok((head, residual_deg)) => {
@@ -4480,5 +4521,54 @@ mod head_first_tests {
         );
         assert_eq!(kept.landing, Landing::Strut { id: 7, layer: 190 });
         assert!(kept.path.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod head_skip_tests {
+    use super::{facet_skip, HeadsState};
+    use crate::heads::{HeadRule, HeadSkip, HeadsOutcome, SkippedSeat, TYPICAL_TIP_RADIUS_MM};
+
+    fn rule() -> HeadRule {
+        HeadRule {
+            gap_mm: 0.3,
+            allowance_mm: 0.1,
+            cos_lean_max: 0.5373,
+            max_radius_mm: 1.0,
+            link_mm: 0.0,
+            typical_tip_radius_mm: TYPICAL_TIP_RADIUS_MM,
+            max_normal_z: -0.34,
+            layer_height_mm: 0.05,
+            plate_z_mm: 0.0,
+        }
+    }
+
+    /// The facet exits that used to return silently each name their reason,
+    /// and a skipped seat survives the publish into the run report.
+    #[test]
+    fn every_silent_facet_exit_names_a_reason_and_is_published() {
+        let rule = rule();
+        let tilt = |deg: f64| [deg.to_radians().sin(), 0.0, -deg.to_radians().cos()];
+        assert_eq!(facet_skip([0.0, 0.0, 1.0], &rule, 0.15), Some(HeadSkip::FacetFacesUp));
+        assert_eq!(facet_skip([1.0, 0.0, 0.0], &rule, 0.15), Some(HeadSkip::FacetFacesUp));
+        assert_eq!(facet_skip(tilt(80.0), &rule, 0.15), Some(HeadSkip::FacetSteeperThanBand));
+        assert_eq!(facet_skip(tilt(5.0), &rule, 0.15), Some(HeadSkip::FacetTooFlat));
+        assert_eq!(facet_skip(tilt(45.0), &rule, 0.15), None);
+
+        let seat = SkippedSeat {
+            id: 7,
+            reason: HeadSkip::FacetTooFlat,
+            seat_mm: [1.0, 2.0, 3.0],
+            plate_z_mm: 0.0,
+            facet: Some(tilt(5.0)),
+            footprint: None,
+        };
+        let mut state = HeadsState::default();
+        state.outcome.skips.entry(seat.reason).or_default().push(seat.id);
+        state.outcome.skipped_seats.push(seat);
+        let mut report = HeadsOutcome::default();
+        state.publish(&mut report);
+        assert_eq!(report.skips[&HeadSkip::FacetTooFlat], vec![7]);
+        assert_eq!(report.skipped_seats, vec![seat]);
     }
 }

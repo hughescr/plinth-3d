@@ -860,6 +860,46 @@ pub enum HeadRefusal {
     PostUncleared,
 }
 
+/// Why placement did NOT ask for a head at a seat: the exits of the plan that
+/// are not refusals of a head that was asked for (Craig 2026-10-08: every
+/// reason a seat gets no angled head is logged). Logging only; no outcome
+/// reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum HeadSkip {
+    /// The run has no head envelope (heads off), so no seat is asked.
+    HeadsOff,
+    /// The nearest model face to the seat's axis point does not look down
+    /// (its normal's `z` is zero or positive).
+    FacetFacesUp,
+    /// The nearest face looks down but is steeper than the seat-face band
+    /// admits (its normal's `z` is at or above the rule's `max_normal_z`).
+    FacetSteeperThanBand,
+    /// The nearest face is more than the prune margin below the skim angle:
+    /// too flat to be worth the footprint query (the footprint normal is not
+    /// measured for this exit).
+    FacetTooFlat,
+    /// The footprint normal was measured and the trigger does not hold on it
+    /// ([`HeadRefusal::NotSteep`] from the plan).
+    FootprintNotSteep,
+}
+
+/// One seat that was not asked for a head, with what the decision read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SkippedSeat {
+    /// The member id the arm got.
+    pub id: u32,
+    /// Why.
+    pub reason: HeadSkip,
+    /// The seat's axis point (lowering frame, plate at `plate_z_mm`), mm.
+    pub seat_mm: [f64; 3],
+    /// Where the plate stands in that frame, mm.
+    pub plate_z_mm: f64,
+    /// The unit normal of the nearest model face, when one was found.
+    pub facet: Option<[f64; 3]>,
+    /// The footprint normal, when it was measured.
+    pub footprint: Option<[f64; 3]>,
+}
+
 /// What a run did about heads: the path-hit witness for every one.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HeadsOutcome {
@@ -867,6 +907,11 @@ pub struct HeadsOutcome {
     pub built: usize,
     /// Seats that kept the straight tip, per reason, with the member ids.
     pub refusals: BTreeMap<HeadRefusal, Vec<u32>>,
+    /// Seats that were never asked for a head, per reason, with the member
+    /// ids (logging only).
+    pub skips: BTreeMap<HeadSkip, Vec<u32>>,
+    /// The same seats, with the normals each decision read, in member order.
+    pub skipped_seats: Vec<SkippedSeat>,
     /// Placement residual, in degrees: the angle between the normal the seat
     /// was placed with and the refined one (max, median).
     pub placement_residual_deg_max: f64,
