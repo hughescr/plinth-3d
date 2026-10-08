@@ -199,8 +199,8 @@ fn a_load_joining_a_head_span_is_booked_from_the_joint_down() {
     // The contact and every slot between it and the joint carry the host's own
     // load only: the area-law tip is the control's, bit for bit.
     assert_eq!(
-        host_joined.tip_radius_mm(),
-        host_control.tip_radius_mm(),
+        host_joined.tip_radius_mm().to_bits(),
+        host_control.tip_radius_mm().to_bits(),
         "the arm's tip radius equals its own area-law tip"
     );
     assert_eq!(

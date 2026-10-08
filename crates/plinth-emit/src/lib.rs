@@ -2537,9 +2537,8 @@ mod tests {
 
     #[test]
     #[expect(
-        clippy::cast_possible_truncation,
         clippy::float_cmp,
-        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+        reason = "exact pins over hand-written, bounded fixture values. See \
               docs/evidence/remediation-2026-08-26/census/cast-audit.md"
     )]
     fn plate_root_joiner_uses_frozen_horizontal_ring_normal() {

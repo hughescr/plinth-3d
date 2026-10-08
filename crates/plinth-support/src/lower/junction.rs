@@ -927,7 +927,11 @@ mod tests {
                 // thin ring of the host above is buried in it.
                 assert!(
                     inside_hull(&hull, *corner, 1e-9)
-                        && (buried_thin_ring || hull.vertices.iter().any(|v| v == corner)),
+                        && (buried_thin_ring
+                            || hull
+                                .vertices
+                                .iter()
+                                .any(|v| v.map(f64::to_bits) == corner.map(f64::to_bits))),
                     "a ring corner is a hull vertex, bit for bit"
                 );
             }

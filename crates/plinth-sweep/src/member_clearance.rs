@@ -678,6 +678,11 @@ fn landing_zone_mm(
 ///
 /// A WARNING quantity, never a gate: emit and warn. Batch-first: one contact
 /// disc batch, one nearest-point batch and one clearance batch for the field.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the field, the layer plan and the three registered quantities the census reads \
+              (gap, lean-law zone factor, hidden cavity); a bundle would exist for this call only"
+)]
 pub(crate) fn model_clearance_census(
     surface: Option<&geom_kernel::NativeSurface>,
     struts: &[crate::SweepStrut],

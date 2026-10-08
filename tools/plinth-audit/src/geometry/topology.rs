@@ -428,7 +428,7 @@ pub fn measure(ctx: &GeoCtx) -> TopologyReport {
 /// classify (an open or grazed mesh).
 enum EmittedSolid {
     Analytic(Primitive),
-    Drawn { mesh: Mesh, header: Primitive },
+    Drawn { mesh: Box<Mesh>, header: Primitive },
 }
 
 impl EmittedSolid {
@@ -438,7 +438,7 @@ impl EmittedSolid {
             return Some(Self::Analytic(prim));
         }
         Some(Self::Drawn {
-            mesh: Mesh::weld_tolerant(&rec.soup, WELD_TOL_MM),
+            mesh: Box::new(Mesh::weld_tolerant(&rec.soup, WELD_TOL_MM)),
             header: prim,
         })
     }

@@ -1239,6 +1239,10 @@ mod actual_lean_sizing {
     /// envelope. The post under `K` starts from its own section, not the
     /// joint's.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the contact slot is pinned to the exact area-law tip value the re-size leaves"
+    )]
     fn the_resized_joint_follows_the_drawn_post_below_and_above_the_envelope() {
         let (grid, mut vertical) = field(0);
         let envelope = final_joint_radius_mm(TIP, length_of(&vertical[0]), COS_MAX);
@@ -1415,6 +1419,10 @@ mod heads_everywhere {
     /// SABOTAGE: make `post_is_collinear_with_head` always true and the leaning
     /// half goes red; always false and the vertical half does.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the contact slot is pinned to the exact area-law tip value the re-size leaves"
+    )]
     fn a_flat_face_keeps_its_head_over_a_leaning_post_and_drops_it_over_a_vertical_one() {
         let (grid, mut leaning) = flat_field(250);
         assert!(
