@@ -243,6 +243,110 @@ fn drawn_root(group: &[&SupportPrimitive]) -> Option<([f64; 3], f64)> {
         .min_by(|a, b| a.0[2].total_cmp(&b.0[2]))
 }
 
+/// **Where a member's planned base stands against the line it is drawn on**
+/// (re-pinned 2026-10-08, v20 milestone). The junction pass
+/// (`plinth-support/src/lower/junction.rs`, landed with L2 e21327b) pulls a
+/// landed branch's end back from the landing point `K` along the branch's OWN
+/// axis by `t = r_max tan(d / 2)`, `r_max` the largest radius meeting at `K`
+/// and `d` the branch's deflection from straight-on against the host's
+/// continuation. So the planned base `(x, y)` must lie on the xy line of the
+/// drawn bottom frustum's axis (perpendicular miss at most 1e-6 mm), and its
+/// offset along that line may not exceed that pull-back. A plate member has no
+/// pull-back, and a member whose base moved at all must carry the junction's
+/// hull record (so the move is the junction pass's and nothing else's). The
+/// hull record is no shaft frustum and is not read for the axis.
+fn base_on_drawn_axis(
+    group: &[&SupportPrimitive],
+    host: Option<&[&SupportPrimitive]>,
+    base: [f64; 2],
+) -> Result<f64, String> {
+    use plinth_support::FrustumRingNormal;
+    // (end a, end b, widest radius) of every shaft frustum.
+    let shaft = |g: &[&SupportPrimitive]| -> Vec<([f64; 3], [f64; 3], f64)> {
+        g.iter()
+            .filter(|p| {
+                !matches!(
+                    p.segment_kind,
+                    SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere
+                ) && !matches!(p.ring_normal, FrustumRingNormal::Junction(_))
+            })
+            .map(|p| {
+                (
+                    point(p.start_mm),
+                    point(p.end_mm),
+                    p.start_radius_mm.get().max(p.end_radius_mm.get()),
+                )
+            })
+            .collect()
+    };
+    let frusta = shaft(group);
+    // The bottom frustum: the one holding the lowest point; `lo` that point.
+    let (lo, hi, _) = frusta
+        .iter()
+        .map(|&(a, b, r)| if a[2] <= b[2] { (a, b, r) } else { (b, a, r) })
+        .min_by(|x, y| x.0[2].total_cmp(&y.0[2]))
+        .ok_or("no shaft frustum")?;
+    let (dx, dy) = (hi[0] - lo[0], hi[1] - lo[1]);
+    let run = dx.hypot(dy);
+    let (rx, ry) = (base[0] - lo[0], base[1] - lo[1]);
+    let (along, perp) = if run > 1.0e-9 {
+        let (ux, uy) = (dx / run, dy / run);
+        (rx * ux + ry * uy, (rx * uy - ry * ux).abs())
+    } else {
+        (0.0, rx.hypot(ry))
+    };
+    if perp > 1.0e-6 {
+        return Err(format!("the base is {perp} mm off the drawn axis line"));
+    }
+    let offset = along.abs();
+    if offset > 1.0e-6
+        && !group
+            .iter()
+            .any(|p| matches!(p.ring_normal, FrustumRingNormal::Junction(_)))
+    {
+        return Err(format!(
+            "the base is {offset} mm along the drawn axis line but the member carries no junction hull"
+        ));
+    }
+    let norm = |v: [f64; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    // The most the junction pass may pull this end back (a 3D length; its
+    // horizontal part is at most that).
+    let bound = host.map_or(0.0, |host| {
+        let host_frusta = shaft(host);
+        let r_max = host_frusta
+            .iter()
+            .chain(frusta.iter())
+            .map(|f| f.2)
+            .fold(0.0_f64, f64::max);
+        let ends = || host_frusta.iter().flat_map(|f| [f.0, f.1]);
+        let (Some(top), Some(bottom)) = (
+            ends().max_by(|x, y| x[2].total_cmp(&y[2])),
+            ends().min_by(|x, y| x[2].total_cmp(&y[2])),
+        ) else {
+            return 0.0;
+        };
+        let up_host = [top[0] - bottom[0], top[1] - bottom[1], top[2] - bottom[2]];
+        let up_branch = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+        let lens = norm(up_host) * norm(up_branch);
+        if lens <= 0.0 {
+            return 0.0;
+        }
+        // The branch's deflection from straight-on against the host below: the
+        // angle between the branch's downward continuation and the host's
+        // downward direction.
+        let dot = up_host[0] * up_branch[0] + up_host[1] * up_branch[1] + up_host[2] * up_branch[2];
+        r_max * (0.5 * (dot / lens).clamp(-1.0, 1.0).acos()).tan()
+    });
+    if offset <= bound + 1.0e-6 {
+        Ok(offset)
+    } else {
+        Err(format!(
+            "the base is {offset} mm along the drawn axis line, more than the junction \
+             pull-back bound {bound}"
+        ))
+    }
+}
+
 #[derive(Default, Debug)]
 struct Census {
     members: usize,
@@ -296,13 +400,16 @@ fn census(plan: &SweepPlan, emission: &SweepEmission) -> Census {
             plan.grid.center_y_mm(plan.grid.row_of(base_cell)) + base_shift[1],
         ];
         let (root_point, _) = drawn_root(group).expect("every member has a shaft");
-        assert!(
-            (root_point[0] - base[0]).abs() <= 1e-6 && (root_point[1] - base[1]).abs() <= 1e-6,
-            "member {} does not land where its strut's base is: drawn {:?}, planned {:?}",
-            strut.id,
-            root_point,
-            base
-        );
+        let host_group = match strut.landing {
+            Landing::Strut { id, .. } => groups.get(id as usize),
+            Landing::Plate | Landing::Model { .. } => None,
+        };
+        if let Err(why) = base_on_drawn_axis(group, host_group.map(Vec::as_slice), base) {
+            panic!(
+                "member {} does not land where its strut's base is: drawn {:?}, planned {:?}: {why}",
+                strut.id, root_point, base
+            );
+        }
         out.member_frusta += group
             .iter()
             .filter(|primitive| primitive.segment_kind == SupportSegmentKind::Member)

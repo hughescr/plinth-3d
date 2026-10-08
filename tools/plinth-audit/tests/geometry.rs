@@ -84,8 +84,9 @@ fn build() -> (Vec<u8>, Ids) {
     let post1 = s.frustum(M, k1, 0.30, [1.0, 0.0, -3.0], 0.30);
 
     // Head 2: ball R 0.2, a THIN straight link (r 0.1) then a cone that widens.
-    // The radius reaches 0.2 at 0.95 + 0.4/3 = 1.0833 along the head; the
-    // ball's surface is 0.2 along; link = 0.8833.
+    // The link is the bare constant-radius run (83866bf): 0.95 long from the
+    // ball centre, leaving the ball sphere at sqrt(0.2^2 - 0.1^2) = 0.1732
+    // along; link = 0.95 - 0.1732 = 0.7768, radius 0.1.
     let k2 = [-3.0, 0.0, -1.4];
     let head2_tip = s.tip([-3.0, 0.0, -0.05], 0.20, [0.0, 0.0, -1.0]);
     s.frustum(T, [-3.0, 0.0, -0.05], 0.10, [-3.0, 0.0, -1.0], 0.10);
@@ -215,9 +216,11 @@ fn the_planted_heads_are_measured_from_the_drawn_records() {
     let b = (0.7f64 / 2.0).atan();
     assert!((h1.phi_deg.expect("phi") - (b - a).abs().to_degrees()).abs() < 1e-3);
 
-    // Head 2: a thin link before the cone reaches the ball radius.
-    let want = 0.95 + 0.4 / 3.0 - 0.2;
+    // Head 2: a thin link, the bare constant-radius run from where it leaves
+    // the ball sphere to where the cone starts (link definition of 83866bf).
+    let want = 0.95 - (0.2f64 * 0.2 - 0.1 * 0.1).sqrt();
     assert!((h2.link_mm - want).abs() < 1e-4, "link {} want {want}", h2.link_mm);
+    assert!((h2.link_r_mm - 0.1).abs() < 1e-6, "link radius {}", h2.link_r_mm);
     assert!(h2.post_lean_deg.expect("lean").abs() < 1e-6, "vertical post");
 }
 

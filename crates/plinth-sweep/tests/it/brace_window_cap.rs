@@ -101,13 +101,19 @@ fn grade(plan: &SweepPlan, emission: &SweepEmission, step: f64) -> Joints {
         if brace.kind != StrutKind::Brace {
             continue;
         }
-        // The brace's drawn radius: its widest emitted section.
+        // The brace's drawn radius: its widest emitted section. A junction
+        // hull record (L2, 2026-10-08) is the convex hull of the rings that
+        // meet at a landing, up to the HOST's ring; it is no section of the
+        // brace and is not read here.
         let brace_mm = groups[index]
             .iter()
             .filter(|primitive| {
                 !matches!(
                     primitive.segment_kind,
                     SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere
+                ) && !matches!(
+                    primitive.ring_normal,
+                    plinth_support::FrustumRingNormal::Junction(_)
                 )
             })
             .flat_map(|primitive| [primitive.start_radius_mm.get(), primitive.end_radius_mm.get()])
