@@ -1065,7 +1065,30 @@ pub(crate) fn head_payload(strut: &crate::SweepStrut) -> Option<plinth_support::
         .sqrt();
     // The law the head was SIZED with: the drawn post's (stored by the final
     // re-size), so the polyline and the joint radius above are one law.
-    let profile_knots_mm = crate::heads::head_polyline_law_mm(r_t, length, head.law());
+    //
+    // THE LINK (Craig 2026-10-08): a head with a registered link is the ball,
+    // a bare cylinder of the tip's radius, then a cone; the knots carried are
+    // the cone's, from the link's planned far end. A head with no link keeps
+    // the bending law's polyline from the contact centre.
+    let (profile_knots_mm, link_mm, link_radius_mm) = if head.link_mm > 0.0 {
+        let ball_mm = plinth_core::m0_constants().map_or(0.0, |constants| {
+            constants
+                .evidence()
+                .chitubox_tip_contact_profiles()
+                .value()
+                .ball_factor(r_t)
+                * r_t
+        });
+        let profile =
+            crate::heads::head_profile_with_link(r_t, ball_mm, head.link_mm, length, head.law());
+        (profile.knots, head.link_mm, profile.link_radius_mm)
+    } else {
+        (
+            crate::heads::head_polyline_law_mm(r_t, length, head.law()),
+            0.0,
+            0.0,
+        )
+    };
     Some(plinth_support::SweepHead {
         contact_mm: head.contact_mm,
         unit: head.unit,
@@ -1073,6 +1096,8 @@ pub(crate) fn head_payload(strut: &crate::SweepStrut) -> Option<plinth_support::
         joint_radius_mm,
         gap_mm: head.gap_mm,
         profile_knots_mm,
+        link_mm,
+        link_radius_mm,
     })
 }
 

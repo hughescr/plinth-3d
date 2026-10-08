@@ -88,6 +88,8 @@ impl ModelGeometry {
             r.set("ball_r_mm", jn(h.ball_r_mm));
             r.set("ball_height_mm", Json::num_or_null(h.ball_height_mm));
             r.set("link_mm", jn(h.link_mm));
+            r.set("link_r_mm", jn(h.link_r_mm));
+            r.set("link_r_over_ball", jn(h.link_r_mm / h.ball_r_mm));
             r.set("ring_clearance_mm", jn(h.ring_clearance_mm));
             r.set("ring_points_inside", Json::usize(h.ring_points_inside));
             r.set("joint", Json::usize(h.joint));
@@ -226,6 +228,11 @@ impl ModelGeometry {
         Headline {
             heads: self.heads.len(),
             link_zero: self.heads.iter().filter(|h| h.link_mm <= 0.0).count(),
+            link_wide: self
+                .heads
+                .iter()
+                .filter(|h| h.link_mm > 0.0 && h.link_r_mm >= h.ball_r_mm)
+                .count(),
             ring_min: rings.iter().copied().fold(f64::INFINITY, f64::min),
             ring_median: median(&rings),
             ring_max: rings.iter().copied().fold(f64::NEG_INFINITY, f64::max),
@@ -258,7 +265,11 @@ impl ModelGeometry {
         let mut s = String::new();
         let _ = writeln!(s, "model {:?}: {} records, {:.1} s", self.name, self.records, self.seconds);
 
-        let _ = writeln!(s, "\n[1] heads: {} (link 0 mm on {})", h.heads, h.link_zero);
+        let _ = writeln!(
+            s,
+            "\n[1] heads: {} (link 0 mm on {}; link radius at or over the ball's on {})",
+            h.heads, h.link_zero, h.link_wide
+        );
         if !self.heads.is_empty() {
             let _ = writeln!(
                 s,
@@ -272,22 +283,32 @@ impl ModelGeometry {
             let links: Vec<f64> = self.heads.iter().map(|x| x.link_mm).collect();
             let _ = writeln!(
                 s,
-                "    link: max {:.3} mm, median {:.3} mm",
+                "    link: min {:.3} / median {:.3} / max {:.3} mm",
+                links.iter().copied().fold(f64::INFINITY, f64::min),
+                median(&links).unwrap_or(f64::NAN),
                 links.iter().copied().fold(0.0, f64::max),
-                median(&links).unwrap_or(f64::NAN)
+            );
+            let ratios: Vec<f64> = self.heads.iter().map(|x| x.link_r_mm / x.ball_r_mm).collect();
+            let _ = writeln!(
+                s,
+                "    link radius over ball radius: min {:.3} / median {:.3} / max {:.3}",
+                ratios.iter().copied().fold(f64::INFINITY, f64::min),
+                median(&ratios).unwrap_or(f64::NAN),
+                ratios.iter().copied().fold(0.0, f64::max),
             );
             let _ = writeln!(
                 s,
-                "    tip  ball_r  ball_h  link  ring_min  joint  joint_r  post  lean   phi"
+                "    tip  ball_r  ball_h  link  link_r  ring_min  joint  joint_r  post  lean   phi"
             );
             for r in &self.heads {
                 let _ = writeln!(
                     s,
-                    "    {:>4} {:>6.3} {:>7} {:>5.3} {:>8.3} {:>6} {:>7.4} {:>5} {:>6} {:>6}",
+                    "    {:>4} {:>6.3} {:>7} {:>5.3} {:>6.3} {:>8.3} {:>6} {:>7.4} {:>5} {:>6} {:>6}",
                     r.tip,
                     r.ball_r_mm,
                     r.ball_height_mm.map_or("n/a".to_string(), |x| format!("{x:.3}")),
                     r.link_mm,
+                    r.link_r_mm,
                     r.ring_clearance_mm,
                     r.joint,
                     r.joint_r_mm,
@@ -430,6 +451,8 @@ impl ModelGeometry {
 pub struct Headline {
     pub heads: usize,
     pub link_zero: usize,
+    /// Heads whose link is as wide as the contact ball or wider.
+    pub link_wide: usize,
     pub ring_min: f64,
     pub ring_median: Option<f64>,
     pub ring_max: f64,

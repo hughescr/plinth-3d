@@ -7,9 +7,14 @@
 //!
 //! Everything is measured from the drawn records:
 //!
-//! * `link_mm`: axial length (along the head polyline) from where the head
-//!   leaves the ball surface to where the drawn radius first reaches the ball
-//!   radius. It is 0 when the radius at the ball exit already is at least `R`.
+//! * `link_mm`, `link_r_mm`: the LINK is the bare leading constant-radius run
+//!   of the chain (every frustum from the ball on whose two radii differ by at
+//!   most 1e-4 mm, the file is f32). `link_mm` is its axial length, measured
+//!   from where its ring leaves the ball sphere (`sqrt(R² - r²)` from the
+//!   centre; the run's start where `r >= R`) to where the radius first rises;
+//!   `link_r_mm` is its radius. A chain whose first frustum widens (a cone
+//!   from the ball) has no link: 0. The link may be as wide as the ball or
+//!   wider (`link_r_mm >= R`); the headline counts those.
 //! * `ring_clearance_mm`: the smallest distance from 24 samples of the cone's
 //!   narrow-end ring to the model triangles. The cone is the first frustum of
 //!   the chain that widens (its start circle is the narrow end); a chain with
@@ -41,6 +46,8 @@ pub struct HeadRow {
     /// inside the solid. `None` when the parity test was indeterminate.
     pub ball_height_mm: Option<f64>,
     pub link_mm: f64,
+    /// The link's radius; 0 where there is no link.
+    pub link_r_mm: f64,
     pub ring_clearance_mm: f64,
     pub ring_points_inside: usize,
     pub joint: usize,
@@ -122,48 +129,48 @@ fn walk_one(ctx: &GeoCtx, tip: usize, taper: usize) -> Option<HeadWalk> {
     None
 }
 
-/// Axial link length along the polyline; see the module note.
+/// Two radii of the f32 file are the same radius to within this, mm.
+pub const FLAT_TOLERANCE_MM: f64 = 1.0e-4;
+
+/// The leading constant-radius run of the chain: `(radius, axial end)`, the
+/// end measured along the polyline from the chain's start (the ball centre).
+/// `None` when the first frustum widens or narrows.
+fn leading_run(chain: &[Seg]) -> Option<(f64, f64)> {
+    let first = chain.first()?;
+    if (first.r1 - first.r0).abs() > FLAT_TOLERANCE_MM {
+        return None;
+    }
+    let radius = first.r0;
+    let mut end = 0.0;
+    for seg in chain {
+        if (seg.r1 - seg.r0).abs() > FLAT_TOLERANCE_MM || (seg.r0 - radius).abs() > FLAT_TOLERANCE_MM {
+            break;
+        }
+        end += seg.len();
+    }
+    Some((radius, end))
+}
+
+/// Axial link length: the bare leading constant-radius run, from where its
+/// ring leaves the ball sphere to where the radius first rises; see the
+/// module note. 0 where the first frustum widens.
 #[must_use]
 pub fn link_length_mm(chain: &[Seg], ball_r: f64) -> f64 {
-    let total: f64 = chain.iter().map(Seg::len).sum();
-    let radius_at = |s: f64| -> Option<f64> {
-        let mut acc = 0.0;
-        for seg in chain {
-            let l = seg.len();
-            if s <= acc + l || std::ptr::eq(seg, chain.last()?) {
-                let f = if l > 0.0 { ((s - acc) / l).clamp(0.0, 1.0) } else { 0.0 };
-                return Some(seg.r0 + (seg.r1 - seg.r0) * f);
-            }
-            acc += l;
-        }
-        None
+    let Some((radius, end)) = leading_run(chain) else {
+        return 0.0;
     };
-    if ball_r >= total {
-        return 0.0;
-    }
-    if radius_at(ball_r).is_some_and(|r| r >= ball_r) {
-        return 0.0;
-    }
-    // First s >= R where the radius reaches R, segment by segment.
-    let mut acc = 0.0;
-    for seg in chain {
-        let l = seg.len();
-        let (lo, hi) = (acc, acc + l);
-        acc = hi;
-        if hi <= ball_r || l <= 0.0 {
-            continue;
-        }
-        let s_from = lo.max(ball_r);
-        let r_from = seg.r0 + (seg.r1 - seg.r0) * ((s_from - lo) / l);
-        if r_from >= ball_r {
-            return s_from - ball_r;
-        }
-        if seg.r1 >= ball_r && seg.r1 > r_from {
-            let s_cross = s_from + (ball_r - r_from) / (seg.r1 - r_from) * (hi - s_from);
-            return s_cross - ball_r;
-        }
-    }
-    total - ball_r
+    let exit = if radius < ball_r {
+        (ball_r * ball_r - radius * radius).sqrt()
+    } else {
+        0.0
+    };
+    (end - exit).max(0.0)
+}
+
+/// The link's radius; 0 where there is no link (the first frustum widens).
+#[must_use]
+pub fn link_radius_mm(chain: &[Seg]) -> f64 {
+    leading_run(chain).map_or(0.0, |(radius, _)| radius)
 }
 
 /// The post below `K`: its first segment's far end and the steepest lean.
@@ -249,6 +256,7 @@ pub fn measure_heads(ctx: &GeoCtx, walks: &[HeadWalk]) -> Vec<HeadRow> {
             ball_r_mm: r,
             ball_height_mm,
             link_mm: link_length_mm(&w.chain, r),
+            link_r_mm: link_radius_mm(&w.chain),
             ring_clearance_mm: ring_min,
             ring_points_inside: ring_inside,
             joint: w.joint,
@@ -276,23 +284,46 @@ mod tests {
     }
 
     #[test]
-    fn a_cone_wider_than_the_ball_at_exit_has_no_link() {
+    fn a_cone_from_the_ball_has_no_link() {
         let chain = [seg(0.0, 0.1, 1.0, 0.2)];
         assert!(link_length_mm(&chain, 0.07).abs() < 1e-12);
+        assert!(link_length_mm(&chain, 0.3).abs() < 1e-12);
+        assert!(link_radius_mm(&chain).abs() < 1e-12);
     }
 
     #[test]
-    fn a_thin_cylinder_then_a_cone_has_the_thin_length_as_link() {
-        // Ball R 0.2. Cylinder r 0.1 from s=0 to 1.0, then a cone 0.1 -> 0.4
-        // over 1.0. The radius reaches 0.2 at s = 1.333; link = 1.333 - 0.2.
-        let chain = [seg(0.0, 0.1, 1.0, 0.1), seg(1.0, 0.1, 2.0, 0.4)];
+    fn a_thin_cylinder_then_a_cone_has_the_cylinder_beyond_the_ball_as_link() {
+        // Ball R 0.2, cylinder r 0.1 from the centre to s = 0.5, then a cone.
+        // The cylinder leaves the ball at sqrt(0.2^2 - 0.1^2) = 0.1732.
+        let chain = [seg(0.0, 0.1, 0.5, 0.1), seg(0.5, 0.1, 1.5, 0.4)];
         let link = link_length_mm(&chain, 0.2);
-        assert!((link - (1.0 + 1.0 / 3.0 - 0.2)).abs() < 1e-9, "{link}");
+        assert!((link - (0.5 - (0.04_f64 - 0.01).sqrt())).abs() < 1e-9, "{link}");
+        assert!((link_radius_mm(&chain) - 0.1).abs() < 1e-12);
     }
 
     #[test]
-    fn a_chain_that_never_reaches_the_ball_radius_is_all_link() {
+    fn a_link_wider_than_the_ball_is_a_link_with_its_radius() {
+        // Ball R 0.1; a cylinder r 0.15 from the centre to s = 0.4 is a link of
+        // 0.4 (it never sits inside the ball), and its radius is over the ball's.
+        let chain = [seg(0.0, 0.15, 0.4, 0.15), seg(0.4, 0.15, 1.0, 0.3)];
+        assert!((link_length_mm(&chain, 0.1) - 0.4).abs() < 1e-9);
+        assert!((link_radius_mm(&chain) - 0.15).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_run_of_equal_cylinders_is_one_link_and_the_f32_noise_is_flat() {
+        let chain = [
+            seg(0.0, 0.1, 0.3, 0.1),
+            seg(0.3, 0.1, 0.6, 0.100_05),
+            seg(0.6, 0.100_05, 1.0, 0.2),
+        ];
+        let link = link_length_mm(&chain, 0.2);
+        assert!((link - (0.6 - (0.04_f64 - 0.01).sqrt())).abs() < 1e-9, "{link}");
+    }
+
+    #[test]
+    fn a_chain_that_never_rises_is_all_link() {
         let chain = [seg(0.0, 0.1, 1.0, 0.1)];
-        assert!((link_length_mm(&chain, 0.2) - 0.8).abs() < 1e-9);
+        assert!((link_length_mm(&chain, 0.2) - (1.0 - (0.04_f64 - 0.01).sqrt())).abs() < 1e-9);
     }
 }

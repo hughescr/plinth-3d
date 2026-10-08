@@ -110,6 +110,7 @@ pub struct M0EvidenceConstants {
     decimation_max_p999_deviation_mm: Derived<f64>,
     decimation_max_p99_deviation_mm: Derived<f64>,
     final_clearance_gap_mm: Measured<f64>,
+    head_link_mm: Measured<f64>,
     l_first_loss_mm: Measured<f64>,
     l_span_allowed_mm: Derived<f64>,
     l_span_crit_mm: Derived<f64>,
@@ -461,6 +462,17 @@ impl M0EvidenceConstants {
                 None,
                 "EXTERNAL REQUIREMENT -- field data, NOT physics. Craig ruling 2026-08-22, field experience: 0.3mm gap features are preserved fine in prints. THE QUANTITY: a TRUE surface-to-surface gap in mm -- the shortest distance from the arm's own SOLID SURFACE to the model surface, i.e. the kernel's axis-to-surface distance MINUS the arm radius at the nearest station. It is not a centreline distance and not a radius; a number carried between the two lands one arm-radius wrong. WHAT IT DECIDES: the FINAL clearance pass, and only that pass -- the one whose verdict actually refuses an arm. Today that is brace::exact_clearance_rows and the grading of load-assigned radii, over BOTH contact-declaring members (struts, model rungs, CCO model anchors) and non-contact members (shoots, transients), which are graded full-length against the whole surface. WHAT IT IS NOT: the placement-family search margin. STANDOFF_MM (0.600 mm) grades CCO candidacy clearance_survival, rewire changed-set validation, and brace evaluate_candidates (owner ruling R-1495, 2026-08-22), where the demand PRUNES a search and refuses nothing final; a candidate it drops leaves the tournament, it does not condemn a contact. The two demands are deliberately different numbers with deliberately different jobs, and the ONE predicate reads whichever its stage registered -- see the two-tier ruling of 2026-08-22 and STANDOFF_MM's own entry. WHY THIS IS THE ONLY REFUSING NUMBER: a search margin may be generous because its cost is a lost candidate; the final demand's cost is a refused model, so it must be the number the owner will actually accept off the plate. No physics derives 0.300 mm and none is claimed for it. It is registered as an honestly-labelled external requirement so that a future coupon measurement of gap-feature preservation supersedes it rather than colliding with it. HONESTY PRECONDITION: this number only means what it says because the clearance test it feeds grades a TRUE gap. Before the honest-exemption change of 2026-08-22 the test skipped a radius-proportional length of every contact-declaring arm and read its verdict at the boundary station, so the graded quantity was neither the true gap nor a fixed function of it; the measured audit (.git/mask-honesty-evidence) found the old rule excusing an arm 0.242 mm INSIDE the model while refusing a same-axis thinner arm with 0.569 mm of real gap. A demanded gap registered against that predicate would have been a number about nothing. STATUS OF THAT PRECONDITION -- MET, as of commits 0a72bc8 and edcadd6, and recorded here rather than assumed (raised as challenge finding B2, 2026-08-22; cleared by honest-exemption-2026-08-22.md section 8 steps 3-6, which is the park its section 10.7 describes). Every contact's seat zone is now FROZEN at its creation site, at all four production mints -- the initial stub mint, brace model rungs, cco model anchors, and cco bifurcation, which inherits its host's zone by move rather than recomputing it -- and all four grading sites (brace::exact_clearance_rows, brace::evaluate_candidates, cco::clearance_survival, rewire::validate_changed_geometry) hand the kernel inset0 = inset1 = 0 and grade the FULL axis against the whole surface MINUS that frozen face set. The retired radius-proportional PR-2 mask reaches no distance call any more: it survives only as the transit window of brace::axis_illegal_rows, the penetration-interval screen, where a length measured from the seat is the right shape because the seat embed IS a length along the axis, and where zeroing it would condemn every seated arm for its own designed embed. The graded quantity is therefore a TRUE gap and this 0.300 is demanded of it. MEASURED through the production final pass by brace::tests::a_thinner_arm_never_grades_worse_than_a_fatter_one_through_the_production_final_pass -- the trip-wire's successor, on the same table-plus-foreign-panel fixture at |cos| = 0.2: a thin arm (r = 0.20 mm) grades -0.45 and is REFUSED, and a fat arm (r = 0.90 mm) on the SAME axis and the SAME surface grades -1.15 and is also REFUSED, so thin >= fat. At the pre-ruling single demand of 0.600 the same two rows read -0.75 and -1.45, both refused. BEFORE the change that pair read -0.45 REFUSED against +0.05 LEGAL (-0.75 against -0.25 at 0.600), which is the inversion this precondition was about: the thin arm did not move and the fat arm went from LEGAL to REFUSED. Under the frozen rule, monotonicity in the radius is a THEOREM rather than a fact about that fixture -- the tested station set is the whole axis and the tested face set is frozen, so the graded clearance is C - r_max - gap. The value is NOT the defect and never moved for it; the predicate was, and it is fixed.",
             )?,
+            head_link_mm: Measured::new(
+                0.300,
+                EvidenceSource::owner_decision(
+                    EvidenceId::new("head-link-owner-ruling-2026-10-08")?,
+                    "docs/engineering-journal/03-physics-and-constants.md",
+                    "§3.5",
+                    exact_date("2026-10-08")?,
+                )?,
+                None,
+                "EXTERNAL REQUIREMENT -- an owner ruling, NOT physics. Craig, 2026-10-08, on the articulated heads: the contact ball is joined to the cone by a bare LINK, a cylinder of the tip's own radius, and the link is 0.3 to 0.6 mm long (\"short is fine\"); 0.300 mm is the bottom of his range. THE QUANTITY: the axial length of the link, from where its cylinder leaves the contact ball's surface to where the cone starts, measured on the emitted file. WHAT IT DECIDES: where a head's joint sphere stands, K = D + (g + 2R + HEAD_LINK_MM + r_K)u with g = FINAL_CLEARANCE_GAP_MM, so the cone's narrow end stands at least g off the model; and the length of the link the drawing emits. A link shorter than one layer plus one pixel (0.069 mm on the Saturn 4 Ultra at 0.05 mm layers) does not print as a link and is refused when the sweep starts. NOT SIZED BY THE BENDING LAW: the law puts the section at the link's far end at 1.3 to 3.9 times the contact ball for a side-loaded head, so a link of the tip's own radius lies under it, as Craig's own ChituBox Light tip does; every such head is warned with its stress ratio, and a coupon is what will size the margin.",
+            )?,
             l_first_loss_mm,
             l_span_allowed_mm: Derived::new(
                 l_span_allowed_value,
@@ -754,6 +766,16 @@ impl M0EvidenceConstants {
         &self.final_clearance_gap_mm
     }
 
+    /// The length of the bare LINK between an articulated head's contact ball
+    /// and its cone, in mm: 0.300 mm, Craig's ruling of 2026-10-08 ("neck
+    /// 0.3-0.6, short is fine"), the bottom of his range. An external
+    /// requirement, not physics; it is held at or above one layer plus one
+    /// pixel when the sweep starts.
+    #[must_use]
+    pub const fn head_link_mm(&self) -> &Measured<f64> {
+        &self.head_link_mm
+    }
+
     #[must_use]
     pub const fn condition_shift_max(&self) -> &Measured<f64> {
         &self.condition_shift_max
@@ -982,7 +1004,7 @@ impl M0EvidenceConstants {
     }
 
     /// Returns the complete declaration batch in stable ID order.
-    pub fn descriptors(&self) -> Result<[ConstantDescriptor; 52], RegistryError> {
+    pub fn descriptors(&self) -> Result<[ConstantDescriptor; 53], RegistryError> {
         Ok([
             ConstantDescriptor::from_derived(
                 ConstantId::from("CCO_X_PAIR_LOAD_DISCOUNT"),
@@ -1061,6 +1083,12 @@ impl M0EvidenceConstants {
                 "mm",
                 SCALAR,
                 &self.final_clearance_gap_mm,
+            )?,
+            ConstantDescriptor::from_measured(
+                ConstantId::from("HEAD_LINK_MM"),
+                "mm",
+                SCALAR,
+                &self.head_link_mm,
             )?,
             ConstantDescriptor::from_derived(
                 ConstantId::from("LAMINA_REACH_RATIO"),

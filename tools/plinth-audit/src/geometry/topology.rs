@@ -458,6 +458,15 @@ impl EmittedSolid {
                 let Some(hit) = mesh.nearest_surface(p) else {
                     return header.signed_distance(p);
                 };
+                // A point ON the welded surface (a ring corner that is a vertex
+                // of a convex-hull record) is on it: the parity test cannot
+                // classify such a point, and the header fallback would measure
+                // it against a frustum the hull does not follow (Cylinder, lane
+                // N: 16 of 24 corners of a branch end read 0.529 mm proud of a
+                // hull whose vertices they are, to 0.0000 mm).
+                if hit.distance_mm <= WELD_TOL_MM {
+                    return 0.0;
+                }
                 match mesh.point_inside(p) {
                     Inside::Inside => -hit.distance_mm,
                     Inside::Outside => hit.distance_mm,
@@ -501,4 +510,51 @@ fn hull_row(ctx: &GeoCtx, i: usize, mesh: &Mesh) -> Option<HullRow> {
         facets: mesh.tri_count(),
         min_lateral_nz: min_nz,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::reader::Soup;
+
+    /// A unit tetrahedron, outward faces.
+    fn tetra() -> Soup {
+        let (a, b, c, d) = (
+            [0.0f32, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        );
+        Soup {
+            tris: vec![[a, c, b], [a, b, d], [a, d, c], [b, c, d]],
+            source_offset: 0,
+        }
+    }
+
+    /// A ring corner that is a vertex of a convex-hull record is ON that
+    /// record's surface: distance 0, never the header frustum's distance
+    /// (lane N, Cylinder record 387: 16 of 24 corners read 0.529 mm proud of
+    /// a hull whose vertices they are).
+    #[test]
+    fn a_point_on_a_drawn_solids_surface_is_at_distance_zero_not_the_headers() {
+        let solid = EmittedSolid::Drawn {
+            mesh: Box::new(Mesh::weld_tolerant(&tetra(), WELD_TOL_MM)),
+            // A header frustum 5 mm away, which the mesh does not follow.
+            header: Primitive::Frustum {
+                a: [5.0, 5.0, 5.0],
+                ra: 0.5,
+                b: [5.0, 5.0, 5.2],
+                rb: 0.5,
+            },
+        };
+        for corner in [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] {
+            assert!(
+                solid.signed_distance(corner).abs() <= WELD_TOL_MM,
+                "corner {corner:?} read {}",
+                solid.signed_distance(corner)
+            );
+        }
+        assert!(solid.signed_distance([2.0, 0.0, 0.0]) > 0.9);
+        assert!(solid.signed_distance([0.2, 0.2, 0.2]) < 0.0);
+    }
 }
