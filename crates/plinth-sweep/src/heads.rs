@@ -860,6 +860,112 @@ pub enum HeadRefusal {
     PostUncleared,
 }
 
+/// Why placement did NOT ask for a head at a seat: the exits of the plan that
+/// are not refusals of a head that was asked for (Craig 2026-10-08: every
+/// reason a seat gets no angled head is logged). Logging only; no outcome
+/// reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum HeadSkip {
+    /// The run has no head envelope (heads off), so no seat is asked.
+    HeadsOff,
+    /// The nearest model face to the seat's axis point does not look down
+    /// (its normal's `z` is zero or positive: a ceiling-side face or a
+    /// vertical wall), and no down-facing face in the seat-face band was
+    /// found to read instead ([`nearest_band_face`]).
+    FacetNotDownFacing,
+    /// The nearest face looks down but is steeper than the seat-face band
+    /// admits (its normal's `z` is at or above the rule's `max_normal_z`),
+    /// and no band face was found to read instead.
+    FacetSteeperThanBand,
+    /// The nearest face is more than the prune margin below the skim angle:
+    /// too flat to be worth the footprint query (the footprint normal is not
+    /// measured for this exit).
+    FacetTooFlat,
+    /// The footprint normal was measured and the trigger does not hold on it
+    /// ([`HeadRefusal::NotSteep`] from the plan).
+    FootprintNotSteep,
+}
+
+/// The ids of the model's faces inside the seat-face band: outward normal `z`
+/// below `max_normal_z`. Built once per run; [`nearest_band_face`] reads it.
+#[must_use]
+pub fn band_face_ids(mesh: &Mesh, max_normal_z: f64) -> Vec<u32> {
+    let verts = mesh.verts();
+    mesh.tris()
+        .iter()
+        .enumerate()
+        .filter_map(|(id, t)| {
+            let a = *verts.get(t[0] as usize)?;
+            let b = *verts.get(t[1] as usize)?;
+            let c = *verts.get(t[2] as usize)?;
+            let unit = vec3::normalize(vec3::cross(vec3::sub(b, a), vec3::sub(c, a)))?;
+            (unit[2] < max_normal_z).then_some(u32::try_from(id).ok()?)
+        })
+        .collect()
+}
+
+/// **The nearest face inside the seat-face band to `point`**: its closest
+/// point, id and unit normal. A seat whose axis point lies on the edge between
+/// a down-facing face and a vertical wall has the WALL as its nearest face of
+/// any slope, and that reads as no seat at all; the face it actually supports
+/// is the nearest one the seat-face rule admits (the rule
+/// [`crate::tip_landing::tip_seat_faces`] applies to every finished tip).
+/// `None` when `band` is empty or the query names no face.
+#[must_use]
+pub fn nearest_band_face(
+    surface: &NativeSurface,
+    mesh: &Mesh,
+    band: &[u32],
+    point: [f64; 3],
+) -> Option<([f64; 3], u32, [f64; 3])> {
+    use geom_kernel::{
+        AllowedFaceProjectionLimits, AllowedFaceProjectionOutcome, AllowedFaceProjectionPolicy,
+    };
+    if band.is_empty() {
+        return None;
+    }
+    let limits = AllowedFaceProjectionLimits {
+        max_points: usize::MAX,
+        max_allowed_faces: usize::MAX,
+        max_total_node_visits: usize::MAX,
+        max_total_triangle_tests: usize::MAX,
+        max_memory_bytes: usize::MAX,
+    };
+    let outcomes = surface
+        .project_allowed_faces_batch(
+            band,
+            &[point],
+            AllowedFaceProjectionPolicy { max_distance_mm: None },
+            limits,
+        )
+        .ok()?;
+    let AllowedFaceProjectionOutcome::Projected(found) = outcomes.into_iter().next()? else {
+        return None;
+    };
+    let verts = mesh.verts();
+    let t = mesh.tris().get(found.face_id as usize)?;
+    let (a, b, c) = (*verts.get(t[0] as usize)?, *verts.get(t[1] as usize)?, *verts.get(t[2] as usize)?);
+    let normal = vec3::normalize(vec3::cross(vec3::sub(b, a), vec3::sub(c, a)))?;
+    Some((found.point, found.face_id, normal))
+}
+
+/// One seat that was not asked for a head, with what the decision read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SkippedSeat {
+    /// The member id the arm got.
+    pub id: u32,
+    /// Why.
+    pub reason: HeadSkip,
+    /// The seat's axis point (lowering frame, plate at `plate_z_mm`), mm.
+    pub seat_mm: [f64; 3],
+    /// Where the plate stands in that frame, mm.
+    pub plate_z_mm: f64,
+    /// The unit normal of the nearest model face, when one was found.
+    pub facet: Option<[f64; 3]>,
+    /// The footprint normal, when it was measured.
+    pub footprint: Option<[f64; 3]>,
+}
+
 /// What a run did about heads: the path-hit witness for every one.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HeadsOutcome {
@@ -867,6 +973,11 @@ pub struct HeadsOutcome {
     pub built: usize,
     /// Seats that kept the straight tip, per reason, with the member ids.
     pub refusals: BTreeMap<HeadRefusal, Vec<u32>>,
+    /// Seats that were never asked for a head, per reason, with the member
+    /// ids (logging only).
+    pub skips: BTreeMap<HeadSkip, Vec<u32>>,
+    /// The same seats, with the normals each decision read, in member order.
+    pub skipped_seats: Vec<SkippedSeat>,
     /// Placement residual, in degrees: the angle between the normal the seat
     /// was placed with and the refined one (max, median).
     pub placement_residual_deg_max: f64,
