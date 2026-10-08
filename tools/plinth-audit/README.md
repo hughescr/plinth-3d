@@ -34,6 +34,41 @@ cargo test  --release          # unit + fixture + real-artifact suites
 Exit code is 0 only when every model passed all ten gating invariants
 (`support_invariants_pass`); that is not a claim the print is safe.
 
+## `geometry`: head, intrusion, junction and contact-angle numbers
+
+```sh
+plinth-audit geometry <file.chitubox>... [--json] [--threads <n>]
+```
+
+Measures from the emitted file only (record headers, record meshes, model
+mesh); it grades nothing and exits 0. Several files print each summary and one
+baseline table row per file. Code: `src/geometry/`.
+
+1. **Heads** (`heads.rs`): a tip whose taper/member chain reaches a joint ball.
+   Ball radius and signed centre height over the model, link length (axial
+   length from the ball surface to where the drawn radius reaches the ball
+   radius; 0 when it already does), cone-start ring (24 samples) distance to the
+   model, joint radius, steepest post lean, phi'. Where two chains reach one
+   joint, the shorter is the head.
+2. **Intrusion** (`intrusion.rs`): header surface of every taper, member, flare
+   and joint sampled (pre-trim) against the model solid. `depth_mm` excludes
+   the record's own contact ball sphere; `depth_with_ball_mm` excludes nothing
+   (what the v19 diagnosis measured).
+3. **Junction topology** (`topology.rs`): per record mesh (1e-5 weld) open and
+   non-manifold edges, degenerate triangles, signed volume; end-ring mismatch
+   of collinear equal-radius neighbours; frusta under one pixel; flat shoulders
+   (radius step over one pixel on a straight chain); landed branch ends (free
+   end centre inside another solid) with ring vertices outside every other solid
+   and the largest proud distance, against the union and against the host alone;
+   smallest lateral facet n_z of Member records whose mesh is not their frustum.
+4. **Straight contacts** (`contacts.rs`): angle between the shaft and the
+   area-weighted normal within `max(2R, 0.15)` mm, the skim law
+   `(g + r_t)(sec x - 1) > layer + pixel` (registry values), shaft clearance
+   over the skim zone.
+
+Batch shape: one welded model mesh and grid per file; per record, one triangle
+fetch per run of sample rings; records run in parallel (`PLINTH_THREADS`).
+
 ## Implementing one invariant
 
 Edit **exactly one file** under `src/checks/`. `src/checks/mod.rs` already
