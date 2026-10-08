@@ -167,7 +167,7 @@ pub(crate) fn convert(
             seat_cell: u32::try_from(struts[g].cell).unwrap_or(u32::MAX),
             k_top: struts[g].k_top,
         };
-        let planned = plan_graze_head(&request, &rule, grid).and_then(|head| {
+        let planned = plan_restricted(&request, &rule, grid).and_then(|(head, cos_cap)| {
             let ctx = HeadCheckCtx {
                 grid,
                 history: &index,
@@ -180,10 +180,10 @@ pub(crate) fn convert(
                 layer_height_mm: height,
                 separation_mm: rule.gap_mm,
             };
-            check_head(&head, tip_lb, &ctx, &accepted).map(|()| head)
+            check_head(&head, tip_lb, &ctx, &accepted).map(|()| (head, cos_cap))
         });
-        let head = match planned {
-            Ok(head) => head,
+        let (head, cos_cap) = match planned {
+            Ok(found) => found,
             Err(reason) => {
                 outcome.refusals.entry(reason).or_default().push(id);
                 outcome.graze_reasons.push((id, GrazeReason::Refused(reason)));
@@ -200,7 +200,9 @@ pub(crate) fn convert(
             plate_z_mm: joins.plate_z_mm,
             margin_mm,
         };
-        let candidates = candidates_for(env, struts, &arms, &slot_of, g, &head, joint_cell);        let widest = head.joint_radius_mm.max(struts[g].tip_radius_mm());
+        let candidates =
+            candidates_for(env, struts, &arms, &slot_of, g, &head, joint_cell, cos_cap);
+        let widest = head.joint_radius_mm.max(struts[g].tip_radius_mm());
         let mut chosen: Option<(Candidate, Vec<u32>)> = None;
         let mut batch: Vec<(Candidate, Vec<u32>)> = Vec::new();
         let mut candidates = candidates.into_iter().peekable();
@@ -284,10 +286,53 @@ pub(crate) fn convert(
     converted
 }
 
+/// **Plan the head for the steepest lean its joint can carry.** The joint of
+/// a head is planned to carry every post the lean law admits under the head
+/// axis (`heads::solve_joint_for_axis`), and on a face tilted 40 degrees or
+/// more that joint exceeds the registered maximum radius: [`HeadRefusal::JointOverMax`].
+/// At placement that refuses the head. Here the post is chosen afterwards, so
+/// the cap is lowered instead: the largest lean at which the joint still fits
+/// is found by bisection on `cos λmax` (a numerical resolution, not a
+/// physical number), and only posts inside it are offered. Returns the head
+/// and the `cos λmax` it was planned at; the registered law's own value when it
+/// fits whole. Still `JointOverMax` when even a vertical post does not fit.
+fn plan_restricted(
+    request: &HeadRequest,
+    rule: &HeadRule,
+    grid: &crate::grid::Grid,
+) -> Result<(crate::heads::Head, f64), HeadRefusal> {
+    match plan_graze_head(request, rule, grid) {
+        Ok(head) => Ok((head, rule.cos_lean_max)),
+        Err(HeadRefusal::JointOverMax) => {
+            let at = |cos_lean_max: f64| {
+                plan_graze_head(request, &HeadRule { cos_lean_max, ..*rule }, grid)
+            };
+            // A vertical post only: the least the joint can be asked to carry.
+            at(1.0)?;
+            let (mut fails, mut fits) = (rule.cos_lean_max, 1.0_f64);
+            for _ in 0..24 {
+                let middle = 0.5 * (fails + fits);
+                if at(middle).is_ok() {
+                    fits = middle;
+                } else {
+                    fails = middle;
+                }
+            }
+            at(fits).map(|head| (head, fits))
+        }
+        Err(other) => Err(other),
+    }
+}
+
 /// Where the post from `head`'s joint may land, in the order they are tried:
 /// the arm's own host from the highest layer its seat zone leaves free down to
 /// the host's lowest, then the plate under `K`. Only candidates the lean law
 /// admits are listed (arithmetic only); the rest of the tests are the caller's.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the field, its arms, the head and the joint's cell and lean cap; a bundle would \
+              exist for this call only"
+)]
 fn candidates_for(
     env: &GrazeEnv<'_>,
     struts: &[SweepStrut],
@@ -296,17 +341,23 @@ fn candidates_for(
     g: usize,
     head: &crate::heads::Head,
     joint_cell: usize,
+    cos_cap: f64,
 ) -> Vec<Candidate> {
     let slender = env.joins.slender;
     let grid = slender.grid;
     let height = slender.layer_height_mm;
     let k_joint = head.k_joint;
+    // The steepest lean the joint was planned for: `tan` of the cap angle is
+    // the most sideways travel per layer, in layer heights.
+    let tan_cap = (1.0 - cos_cap * cos_cap).max(0.0).sqrt() / cos_cap.max(f64::MIN_POSITIVE);
     let admitted = |base_cell: usize, k_bottom: usize| -> bool {
         let Some(layers) = k_joint.checked_sub(k_bottom).filter(|&n| n > 0) else {
             return false;
         };
         let lateral_mm = crate::cell_distance_mm(grid, joint_cell, base_cell);
-        lateral_mm <= 0.0 || slender.lean.descent_cost_mm(layers, lateral_mm).is_some()
+        #[expect(clippy::cast_precision_loss, reason = "a layer count is exact in f64")]
+        let within_cap = lateral_mm <= layers as f64 * height * tan_cap + 1.0e-9;
+        within_cap && (lateral_mm <= 0.0 || slender.lean.descent_cost_mm(layers, lateral_mm).is_some())
     };
     let mut out = Vec::new();
     if let Landing::Strut { id, .. } = struts[g].landing {

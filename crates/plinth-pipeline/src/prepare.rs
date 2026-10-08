@@ -3715,7 +3715,7 @@ fn print_sweep_disclosure(
             .collect::<Vec<_>>()
             .join(", ");
         println!(
-            "[sweep {model}] heads: {} built at placement on steep faces, {straight} kept a \
+            "[sweep {model}] heads: {} built (steep faces at placement, plus the grazers converted), {straight} kept a \
              straight tip ({reasons}); drawn {}; neck: drawn link thinner than the contact ball, \
              measured from drawn frusta, mm min/median/max {} ({} heads with no link); \
              stand-off mm {} (gap {final_gap_mm}); \
