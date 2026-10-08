@@ -51,6 +51,7 @@ pub mod footprint;
 pub mod footprint_normal;
 pub(crate) mod frame;
 pub mod frame_bands;
+pub mod graze;
 pub mod grid;
 pub mod head_join;
 #[cfg(test)]
@@ -915,6 +916,12 @@ pub struct SweepPolicy {
     /// **On in production.** The drill turns it off, which puts back the
     /// field the sizing left, and watches grown posts keep their intrusions.
     pub clearance_reroute: bool,
+    /// Whether a straight tip whose shaft would graze the model gets an angled
+    /// head and a re-landed post (Craig 2026-10-08: a head only where needed;
+    /// [`graze`]). **On in production.** A test of a rule that reads a field
+    /// with arms landed on arms turns it off, because converting a grazer moves
+    /// the arm off its host.
+    pub graze_heads: bool,
     /// Whether every member is sized for its worst SINGLE peel event, routed on
     /// its own ([`per_event`], rule a′, owner-approved 2026-09-29), and the
     /// load insertion triggered by one event's routed load. **On in
@@ -1039,6 +1046,7 @@ impl SweepPolicy {
             member_clearance: true,
             drawn_solid_descent: true,
             clearance_reroute: true,
+            graze_heads: true,
             per_event_sizing: true,
             unrooted_routing: true,
             handed_column_ledger: true,
@@ -1448,6 +1456,15 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_clearance_reroute(mut self) -> Self {
         self.clearance_reroute = false;
+        self
+    }
+
+    /// Leave every grazing straight tip straight (the field this engine
+    /// finished before the graze conversion). For a test of a rule that reads
+    /// arms landed on arms, which the conversion would move; and sabotage.
+    #[must_use]
+    pub const fn without_graze_heads(mut self) -> Self {
+        self.graze_heads = false;
         self
     }
 
@@ -2481,6 +2498,43 @@ pub fn run_sweep_with_holes(
             stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
         ));
     }
+    // --- graze heads: a head only where a straight shaft would graze --------
+    //
+    // Craig 2026-10-08. Steep faces got their heads at placement; a gentler
+    // face keeps its straight tip unless the straight shaft comes within the
+    // final gap of the model beyond the contact ball. Those tips are converted
+    // HERE, while layout moves are still allowed: the head puts the joint about
+    // 1.8 mm under the seat and the post has to be re-landed (lower on its own
+    // host, or on the plate under the joint), which no pass after the footprint
+    // rule can do. Before the head joins and the ties, so they plan around the
+    // new heads. A grazer that cannot be converted stays straight and is
+    // warned about at the end (`graze_kept`).
+    let mut graze_outcome = heads::HeadsOutcome::default();
+    if let Some((profiles, rule)) = head_registry.filter(|_| policy.graze_heads) {
+        let graze_env = graze::GrazeEnv {
+            joins: &head_join_context,
+            profiles,
+            rule,
+            flare_factor: policy.flare_r_factor,
+        };
+        if graze::convert(&graze_env, &mut struts, &mut graze_outcome) > 0 {
+            outcome = down_sweep::run(
+                &grid,
+                &slices,
+                &mut struts,
+                sizing,
+                insertion,
+                &keep_out,
+                &unrooted,
+            );
+            set_interior(&mut struts, &history);
+            landings.record("graze heads", &landing_check::check_landings(&struts, height));
+            stranded_branch_outcome.lapping_by_lane.push((
+                "graze heads",
+                stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
+            ));
+        }
+    }
     // --- head joins: a lander joins a trunk BELOW its seat zone -----------
     //
     // After every pass that sets a landing (descent, un-merge, congestion, the
@@ -2999,6 +3053,15 @@ pub fn run_sweep_with_holes(
     report.counters.stranded_seats = greedy.stranded_seats;
     report.counters.island_hex_bound = greedy.island_hex_bound;
     greedy.heads.publish(&mut report.heads);
+    // The heads the graze conversion added (Craig 2026-10-08) join the
+    // placement count; its refusals join the placement refusals by reason.
+    report.heads.built += graze_outcome.built;
+    for (reason, ids) in graze_outcome.refusals {
+        report.heads.refusals.entry(reason).or_default().extend(ids);
+    }
+    report.heads.graze_converted = graze_outcome.graze_converted;
+    report.heads.graze_asked = graze_outcome.graze_asked;
+    report.heads.graze_reasons = graze_outcome.graze_reasons;
     report.heads.downgraded_after_sizing = heads_downgraded;
     report.heads.kept_short_of_clearance = head_downgrades.kept_with_warning;
 
@@ -3139,18 +3202,6 @@ pub fn run_sweep_with_holes(
     // move touched comes out unchanged, and the clearance warnings are read
     // again on the sizes that stand.
     if let Some((profiles, rule)) = head_registry {
-        // THE COLLINEAR DROP (v19 fix, 2026-10-08): a head is planned at every
-        // seat, so one whose post arrives along its axis (within the skim law)
-        // is drawn straight. It reads the post the file draws, now that the
-        // moves have settled, and runs BEFORE the re-size so the re-size sees
-        // the dropped hosts' straight lines.
-        sweep_plan.report.heads.collinear_dropped = down_sweep::drop_collinear_heads(
-            &sweep_plan.grid,
-            &mut sweep_plan.struts,
-            sizing,
-            rule.gap_mm,
-            rule.allowance_mm,
-        );
         size_heads_for_final_posts(
             &sweep_plan.grid,
             &mut sweep_plan.struts,
@@ -3202,15 +3253,46 @@ pub fn run_sweep_with_holes(
         outcome.final_off_face = off_face;
     }
     finish_heads(&mut sweep_plan);
+    // **EVERY STRAIGHT TIP THAT STILL GRAZES THE MODEL** (Craig 2026-10-08),
+    // measured on the arms exactly as they go to the lowering, after the
+    // footprint slides: each is named in the log with its clearance, its angle
+    // off the face normal and why it stayed straight (the conversion's own
+    // reason, or "made by a later slide"). Warned, never refused.
     if let Some((_, rule)) = head_registry {
         let arms = adapter::arms_of(&sweep_plan);
-        sweep_plan.report.heads.off_normal_straight = off_normal_straight_tips(
+        let members: Vec<usize> = (0..sweep_plan.struts.len()).collect();
+        let rows = member_clearance::graze_census(
+            head_join_context.surface(),
             &sweep_plan.struts,
+            &members,
             &arms,
-            &sweep_plan.report.heads.refusals,
+            plan,
+            plate_z,
             rule.gap_mm,
             rule.allowance_mm,
+            &history.hidden,
         );
+        let reasons = std::mem::take(&mut sweep_plan.report.heads.graze_reasons);
+        sweep_plan.report.heads.graze_kept = rows
+            .iter()
+            .map(|row| {
+                let id = sweep_plan.struts[row.index].id;
+                heads::GrazeKept {
+                    id,
+                    angle_deg: row.angle_deg,
+                    clearance_mm: row.clearance_mm,
+                    reason: if sweep_plan.struts[row.index].kind == StrutKind::Arm {
+                        reasons
+                            .iter()
+                            .find_map(|(who, reason)| (*who == id).then_some(*reason))
+                            .unwrap_or(heads::GrazeReason::LateSlide)
+                    } else {
+                        heads::GrazeReason::NotAnArm
+                    },
+                }
+            })
+            .collect();
+        sweep_plan.report.heads.graze_reasons = reasons;
     }
     // WHAT THE EMITTED FIELD STILL HAS IN A SEAT ZONE (head-join, 2026-09-29),
     // measured on the arms exactly as they go to the lowering: the ties may
@@ -3527,59 +3609,6 @@ fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> Unmer
 /// field. The angle between `u` and the measured final normal is the residual
 /// published in [`report::SweepReport::heads`] (max, median); an arm with no
 /// measured normal adds none. Batch-first: one pass over the struts.
-/// **Straight tips that meet their face off its normal beyond the skim law**
-/// (v19 fix, 2026-10-08), measured on the finished field: for every live support
-/// arm drawn as a straight tip (no head, or a head given up), the angle
-/// between its seat normal and the line it is drawn on, from its seat down to
-/// its base. A tip whose angle fails the skim law
-/// ([`heads::skims`], at the tip's own radius) has a shaft that grazes the
-/// model next to the contact: a head was wanted. Every such tip should be a
-/// seat whose head was refused, and the refusal is returned with it
-/// (`None` for a head the final sizing gave up, or an arm no head was asked of).
-///
-/// One batch pass, no geometry beyond the arms the lowering gets. A head
-/// dropped as collinear is measured like any other straight tip and passes
-/// (its post is within the skim law of its axis); only its seat-to-base chord
-/// differs from the post's by the head's small lateral run.
-fn off_normal_straight_tips(
-    struts: &[SweepStrut],
-    arms: &[plinth_support::SweepArm],
-    refusals: &std::collections::BTreeMap<heads::HeadRefusal, Vec<u32>>,
-    gap_mm: f64,
-    allowance_mm: f64,
-) -> Vec<(u32, f64, Option<heads::HeadRefusal>)> {
-    let mut found = Vec::new();
-    for (strut, arm) in struts.iter().zip(arms) {
-        if strut.kind != StrutKind::Arm
-            || !slenderness::live(strut)
-            || strut.head.as_ref().is_some_and(|head| !head.drawn_straight)
-        {
-            continue;
-        }
-        let (Some(normal), Some(shaft)) = (
-            geom_kernel::vec3::normalize(strut.seat_normal),
-            geom_kernel::vec3::normalize(geom_kernel::vec3::sub(arm.base_mm, arm.seat_mm)),
-        ) else {
-            continue;
-        };
-        let cos_x = geom_kernel::vec3::dot(normal, shaft);
-        if !heads::skims(strut.tip_radius_mm(), cos_x, gap_mm, allowance_mm) {
-            continue;
-        }
-        let reason = refusals
-            .iter()
-            .find_map(|(reason, ids)| ids.contains(&strut.id).then_some(*reason));
-        // A seat in a hidden cavity is meant to stay straight (Craig ruling
-        // 2026-10-05: no heads, and no final gap, in a hidden cavity). It is
-        // counted among the refusals and is not a warning here.
-        if reason == Some(heads::HeadRefusal::HiddenCavity) {
-            continue;
-        }
-        found.push((strut.id, cos_x.clamp(-1.0, 1.0).acos().to_degrees(), reason));
-    }
-    found
-}
-
 fn finish_heads(plan: &mut SweepPlan) {
     let mut residuals_deg: Vec<f64> = Vec::new();
     for strut in &mut plan.struts {

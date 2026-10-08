@@ -3715,7 +3715,7 @@ fn print_sweep_disclosure(
             .collect::<Vec<_>>()
             .join(", ");
         println!(
-            "[sweep {model}] heads: {} built at placement on steep faces, {straight} kept a \
+            "[sweep {model}] heads: {} built (steep faces at placement, plus the grazers converted), {straight} kept a \
              straight tip ({reasons}); drawn {}; neck: drawn link thinner than the contact ball, \
              measured from drawn frusta, mm min/median/max {} ({} heads with no link); \
              stand-off mm {} (gap {final_gap_mm}); \
@@ -3757,29 +3757,52 @@ fn print_sweep_disclosure(
             );
         }
         println!(
-            "[sweep {model}] heads everywhere: {} planned at placement, {} dropped to the straight \
-             tip because their post arrives along the normal (collinear), {} straight tips meet \
-             their face off the normal beyond the skim law; loads held from a head span to the \
-             joint {}; joins in a head span at the first survey {}",
-            heads.built,
-            heads.collinear_dropped.len(),
-            heads.off_normal_straight.len(),
+            "[sweep {model}] heads: {} steep at placement, {} added where a straight shaft \
+             grazed ({} grazers seen at the conversion), {} grazing tips kept straight; loads \
+             held from a head span to the joint {}; joins in a head span at the first survey {}",
+            heads.built.saturating_sub(heads.graze_converted.len()),
+            heads.graze_converted.len(),
+            heads.graze_asked,
+            heads.graze_kept.len(),
             report.counters.head_span_merges_held_to_joint,
             report.head_join.joins_in_head_span,
         );
-        if !heads.off_normal_straight.is_empty() {
+        if !heads.graze_converted.is_empty() {
+            println!(
+                "[sweep {model}] heads added where a straight shaft grazed: {:?}",
+                heads.graze_converted
+            );
+        }
+        if !heads.graze_kept.is_empty() {
             let named = heads
-                .off_normal_straight
+                .graze_kept
                 .iter()
-                .map(|(id, degrees, reason)| match reason {
-                    Some(reason) => format!("{id} ({degrees:.1} deg, {reason:?})"),
-                    None => format!("{id} ({degrees:.1} deg, no head asked or given up)"),
+                .map(|kept| {
+                    use plinth_sweep::heads::GrazeReason;
+                    let why = match kept.reason {
+                        GrazeReason::CarriesMembers => "carries members".to_owned(),
+                        GrazeReason::Refused(reason) => format!("head refused: {reason:?}"),
+                        GrazeReason::NoLegalPost => "no legal post".to_owned(),
+                        GrazeReason::NotAnArm => "a brace, mast or tie".to_owned(),
+                        GrazeReason::HostNearModel => {
+                            "a member below it stands near the model, a re-route could not move its head"
+                                .to_owned()
+                        }
+                        GrazeReason::HostTooThin => {
+                            "its host is thinner than the joint (the post would raise it) and the plate under the joint is blocked or crowded".to_owned()
+                        }
+                        GrazeReason::LateSlide => "made by a later slide".to_owned(),
+                    };
+                    format!(
+                        "{} ({:.1} deg off the normal, shaft {:.3} mm from the model, {why})",
+                        kept.id, kept.angle_deg, kept.clearance_mm
+                    )
                 })
                 .collect::<Vec<_>>()
                 .join("; ");
             println!(
-                "[sweep {model}] WARNING heads: straight tips off their face normal beyond the \
-                 skim law: {named}"
+                "[sweep {model}] WARNING heads: straight tips whose shaft grazes the model \
+                 (closer than the final gap beyond the ball): {named}"
             );
         }
         if !heads.downgraded_after_sizing.is_empty() {

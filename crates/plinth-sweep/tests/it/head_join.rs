@@ -803,8 +803,14 @@ fn without_the_rule_a_leaned_head_reaches_its_seat_plane_with_the_sum() {
 #[test]
 fn a_sum_that_crosses_the_seat_plane_off_the_model_is_left_alone() {
     let mesh = flipped(&mesh_for(&round_25()));
-    let unruled = round_25_flipped_with(&production().without_seat_face_band().without_head_join());
-    let plan = round_25_flipped_with(&production().without_seat_face_band());
+    // The graze conversion is off on both plans (2026-10-08): it moves a
+    // grazing tip off its host onto a post of its own (measured: 10 of this
+    // fixture's arms), and arm 6's landers are what the test grades.
+    let unruled = round_25_flipped_with(
+        &production().without_seat_face_band().without_head_join().without_graze_heads(),
+    );
+    let plan =
+        round_25_flipped_with(&production().without_seat_face_band().without_graze_heads());
     let clearance = final_clearance_mm();
     let off_model: Vec<u32> = grade(&unruled, &landed_arms(&[&unruled]), &mesh)
         .into_iter()

@@ -840,6 +840,20 @@ fn measure(
     profiles: &[Vec<f64>],
     members: &[usize],
 ) -> Vec<Option<Head>> {
+    let arms = measured_arms(context, struts, profiles, members);
+    heads_of(struts.len(), members, &arms, context.layer_plan)
+}
+
+/// The arms of `members` as the lowering will get them on the LIVE field: each
+/// one's seat face now, its arm built unshifted with its drawn profile
+/// (`profiles` is indexed by strut). One seat-face query, one footprint
+/// normal batch. The graze census reads these too ([`crate::graze`]).
+pub(crate) fn measured_arms(
+    context: &HeadJoinContext<'_>,
+    struts: &[SweepStrut],
+    profiles: &[Vec<f64>],
+    members: &[usize],
+) -> Vec<SweepArm> {
     let grid = context.slender.grid;
     let height = context.slender.layer_height_mm;
     let mut tips: Vec<SweepStrut> = members.iter().map(|&index| struts[index].clone()).collect();
@@ -867,8 +881,7 @@ fn measure(
         &mut faces,
         &seat_triangles,
     );
-    let arms: Vec<SweepArm> = tips
-        .iter_mut()
+    tips.iter_mut()
         .zip(&faces)
         .zip(members)
         .map(|((tip, face), &index)| {
@@ -882,8 +895,7 @@ fn measure(
                 profiles[index].clone(),
             )
         })
-        .collect();
-    heads_of(struts.len(), members, &arms, context.layer_plan)
+        .collect()
 }
 
 /// What one survey found.
@@ -1119,7 +1131,7 @@ type Move = (usize, Landing, usize, Vec<u32>);
     clippy::cast_precision_loss,
     reason = "a layer index bounded by the plan's own layer count is exact in f64"
 )]
-fn base_point(context: &HeadJoinContext<'_>, cell: usize, layer: usize) -> [f64; 3] {
+pub(crate) fn base_point(context: &HeadJoinContext<'_>, cell: usize, layer: usize) -> [f64; 3] {
     let grid = context.slender.grid;
     [
         grid.center_x_mm(grid.col_of(cell)),
