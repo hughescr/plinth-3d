@@ -735,6 +735,8 @@ pub enum GrazeReason {
     /// No post from the joint lands legally (lean law or path) on the arm's
     /// own host or the plate.
     NoLegalPost,
+    /// A brace, a mast or a tie: warned, never converted.
+    NotAnArm,
     /// The arm was made or moved after the conversion ran.
     LateSlide,
 }

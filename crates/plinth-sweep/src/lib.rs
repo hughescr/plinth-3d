@@ -3260,10 +3260,14 @@ pub fn run_sweep_with_holes(
                     id,
                     angle_deg: row.angle_deg,
                     clearance_mm: row.clearance_mm,
-                    reason: reasons
-                        .iter()
-                        .find_map(|(who, reason)| (*who == id).then_some(*reason))
-                        .unwrap_or(heads::GrazeReason::LateSlide),
+                    reason: if sweep_plan.struts[row.index].kind == StrutKind::Arm {
+                        reasons
+                            .iter()
+                            .find_map(|(who, reason)| (*who == id).then_some(*reason))
+                            .unwrap_or(heads::GrazeReason::LateSlide)
+                    } else {
+                        heads::GrazeReason::NotAnArm
+                    },
                 }
             })
             .collect();

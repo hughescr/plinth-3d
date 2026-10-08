@@ -927,14 +927,16 @@ pub(crate) struct GrazeRow {
 /// **Straight tips whose shaft grazes the model** (Craig 2026-10-08: a head
 /// only where a straight tip's shaft would graze), on the arms exactly as the
 /// lowering gets them. The audit's report 4, run inside the engine: for each
-/// live support arm in `members` that seats into the model, has no drawn head
+/// live member in `members` that seats into the model, has no drawn head
 /// (none, or one given up) and is not wholly in a hidden cavity, with `x` the
 /// angle between its seat normal and the drawn shaft axis from the ball
 /// centre, the tip grazes when the arrival skims ([`crate::heads::skims`], at
 /// the shaft's start radius) AND the drawn solid, read from the axial
 /// `sqrt(R^2 - r_t^2)` where the shaft leaves the ball out to
 /// `R + (g + r_t) / cos x` (the whole shaft when `cos x <= 0`), comes within
-/// `gap_mm` of the model. Braces, masts and ties are not read.
+/// `gap_mm` of the model. The caller picks `members`: the conversion offers
+/// support arms only; the final warning offers every member, so a brace, a
+/// mast or a tie whose tip grazes is named too (warned, never converted).
 ///
 /// `arms[i]` is the lowering input of `struts[members[i]]`. Rows come in
 /// member order. Batch-first: one contact-disc batch and ONE frustum
@@ -977,8 +979,7 @@ pub(crate) fn graze_census(
     let mut angle_deg: Vec<Option<f64>> = vec![None; members.len()];
     for (slot, (&member, arm)) in members.iter().zip(arms).enumerate() {
         let strut = &struts[member];
-        if strut.kind != crate::StrutKind::Arm
-            || !crate::slenderness::live(strut)
+        if !crate::slenderness::live(strut)
             || strut.head.as_ref().is_some_and(|head| !head.drawn_straight)
             || !arm.seats_into_model
             || strut.k_bottom == usize::MAX
