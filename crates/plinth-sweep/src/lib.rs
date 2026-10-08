@@ -3230,6 +3230,20 @@ pub fn run_sweep_with_holes(
             |radius| profiles.ball_factor(radius),
             &mut sweep_plan.report.heads,
         );
+        // THE CENSUS ON THE ROOTS THE FILE DRAWS (v20 milestone, 2026-10-08):
+        // the census above was taken before this second sizing, and a headed
+        // post's root is rebuilt here, so the published area described roots
+        // the file does not draw. Measure again on the final struts.
+        if sweep_plan.report.heads.resized_after_moves > 0 {
+            let census = congestion::measure(
+                &sweep_plan.grid,
+                &history,
+                &sweep_plan.struts,
+                policy.flare_r_factor,
+            );
+            sweep_plan.report.congestion_lane.still_congested = census.all.congested();
+            sweep_plan.report.congestion_lane.after = census;
+        }
     }
     // THE NORMAL ON THE EMITTED FIELD (`footprint_normal`, Craig ruling
     // 2026-10-05): the slides and the ends that follow them moved balls after
