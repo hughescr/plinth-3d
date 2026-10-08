@@ -244,23 +244,28 @@ fn convert_one(
     tip_lb_mm: f64,
 ) -> Result<Option<Converted>, HeadRefusal> {
     let (head, cos_cap) = plan_checked(field, g, request, tip_lb_mm, None)?;
-    let Some((candidate, post)) = choose_post(field, g, &head, cos_cap) else {
+    // The first plan's joint is the fat one (the steepest lean it can carry),
+    // so its post is only FOUND here, to learn the lean the arm really gets.
+    let Some((candidate, _)) = choose_post(field, g, &head, cos_cap, false) else {
         return Ok(None);
     };
     // The joint is sized for ITS post: the lean the post really has, which is
     // at most the cap the first plan used. Planned again for that lean the
     // joint is smaller, K stands a little higher, and the same base is a
-    // longer, gentler post; if anything fails the first plan stands.
+    // longer, gentler post. The post must then not raise its host.
     let cos_post = lean_cos(field, &head, &candidate);
     if cos_post > cos_cap + 1.0e-6 && cos_post <= 1.0 {
-        let tighter = plan_checked(field, g, request, tip_lb_mm, Some(cos_post));
-        if let Ok((tight, cos_tight)) = tighter {
-            if let Some((tight_candidate, tight_post)) = choose_post(field, g, &tight, cos_tight) {
+        if let Ok((tight, cos_tight)) = plan_checked(field, g, request, tip_lb_mm, Some(cos_post))
+        {
+            if let Some((tight_candidate, tight_post)) =
+                choose_post(field, g, &tight, cos_tight, true)
+            {
                 return Ok(Some((tight, tight_candidate, tight_post)));
             }
         }
     }
-    Ok(Some((head, candidate, post)))
+    // No gentler plan: the first one stands if its post does not raise its host.
+    Ok(choose_post(field, g, &head, cos_cap, true).map(|(candidate, post)| (head, candidate, post)))
 }
 
 /// The cosine of the lean from vertical of the post from `head`'s joint to
@@ -319,6 +324,7 @@ fn choose_post(
     g: usize,
     head: &Head,
     cos_cap: f64,
+    not_raising: bool,
 ) -> Option<(Candidate, Vec<u32>)> {
     let env = field.env;
     let joins = env.joins;
@@ -334,7 +340,7 @@ fn choose_post(
         plate_z_mm: joins.plate_z_mm,
         margin_mm: field.margin_mm,
     };
-    let candidates = candidates_for(field, g, head, joint_cell, cos_cap);
+    let candidates = candidates_for(field, g, head, joint_cell, cos_cap, not_raising);
     let widest = head.joint_radius_mm.max(field.struts[g].tip_radius_mm());
     let mut batch: Vec<(Candidate, Vec<u32>)> = Vec::new();
     let mut candidates = candidates.into_iter().peekable();
@@ -445,6 +451,7 @@ fn candidates_for(
     head: &Head,
     joint_cell: usize,
     cos_cap: f64,
+    not_raising: bool,
 ) -> Vec<Candidate> {
     let struts = field.struts;
     let slender = field.env.joins.slender;
@@ -490,7 +497,7 @@ fn candidates_for(
             // the laid tube's root laps, the flat slab's lapped root, an
             // overloaded host). A lander does not make its host fat.
             let host_radius = host.radius_mm.get(layer - host.k_bottom).copied().unwrap_or(0.0);
-            if host_radius + 1.0e-9 < head.joint_radius_mm {
+            if not_raising && host_radius + 1.0e-9 < head.joint_radius_mm {
                 continue;
             }
             if admitted(base_cell, layer) {
