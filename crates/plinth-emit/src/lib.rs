@@ -11,8 +11,8 @@ use chitubox_io::{
     SupportMode, SupportRecord, TriangleSoup,
 };
 #[cfg(test)]
-use geom_kernel::vec3::dot;
-use geom_kernel::vec3::{add, cross, norm, scale, sub};
+use geom_kernel::vec3::{dot, scale};
+use geom_kernel::vec3::{add, cross, norm, sub};
 use geom_kernel::SoupTriangle;
 use plinth_core::{m0_constants, PositiveFinite, PrinterProfile};
 use plinth_mesh::Mesh;
@@ -188,6 +188,42 @@ pub struct SeatTrimReport {
     /// geometry, and this names why.
     #[serde(default)]
     pub batch_error: Option<String>,
+    /// **THE TRIM MUST NEVER SILENTLY HIDE AN INTRUSION** (heads v19 fixes,
+    /// 2026-10-08). Every `Member`, joint-sphere and junction-hull record the
+    /// model solid removed material from, with the volume removed: what a
+    /// trimmed shaft span loses to the seat plane and the model, and, measured
+    /// without cutting anything, what a joint sphere or a hull stands inside
+    /// the model by. Tapers and tips are not listed: cutting them to the seat
+    /// is what the trim is for.
+    #[serde(default)]
+    pub member_cuts: Vec<MemberCut>,
+    /// One pixel-cube of resin in millionths of a mm³: the registered XY pixel
+    /// pitch in x times in y times the layer height. A cut above it is
+    /// reported as a warning ([`Self::intrusions`]).
+    #[serde(default)]
+    pub pixel_cube_micro_mm3: u64,
+}
+
+impl SeatTrimReport {
+    /// The records whose cut is above one pixel-cube of resin: the trim
+    /// removed a visible volume from a part that is not a tip.
+    pub fn intrusions(&self) -> impl Iterator<Item = &MemberCut> {
+        self.member_cuts
+            .iter()
+            .filter(|cut| cut.removed_micro_mm3 > self.pixel_cube_micro_mm3)
+    }
+}
+
+/// One `Member`, joint or hull record the model solid removed material from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemberCut {
+    /// The primitive index (before any record is left out).
+    pub record: usize,
+    /// `"member"`, `"joint"` or `"hull"`.
+    pub kind: String,
+    /// The volume removed, in millionths of a mm³.
+    pub removed_micro_mm3: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -368,6 +404,20 @@ pub fn failed_audit_path(target: &Path) -> PathBuf {
     target.with_file_name(name)
 }
 
+/// One pixel-cube of resin in millionths of a mm³: the printer's XY pixel pitch
+/// in x times in y times its layer height.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a registered pixel-cube is a small positive volume, far below u64::MAX millionths"
+)]
+fn pixel_cube_micro_mm3(printer: &PrinterProfile) -> u64 {
+    let pitch_x_mm = printer.pixel_pitch_x_um().value() / 1000.0;
+    let pitch_y_mm = printer.pixel_pitch_y_um().value() / 1000.0;
+    let layer_mm = *printer.default_layer_height_mm().value();
+    (pitch_x_mm * pitch_y_mm * layer_mm * 1.0e6).round().max(0.0) as u64
+}
+
 fn write_staged(
     model: &SupportedModel,
     request: &EmitRequest,
@@ -377,8 +427,9 @@ fn write_staged(
     let geometry = model_triangle_soup(model.mesh(), center)?;
     let lift = model.lift_mm().get();
     let lift = f32_of(lift)?;
-    let (records, seat_trim) =
+    let (records, mut seat_trim) =
         build_records_trimmed(model.primitives(), center, Some(model.mesh()))?;
+    seat_trim.pixel_cube_micro_mm3 = pixel_cube_micro_mm3(&request.printer);
     // The audit reopens the file and pairs every record with its primitive, so
     // it is given exactly the primitives whose records were written.
     let written: std::borrow::Cow<'_, [SupportPrimitive]> =
@@ -1144,7 +1195,11 @@ fn build_records_trimmed(
     // Outward first: the boolean backend reads orientation as inside/outside.
     wind_outward(&mut soups)?;
     let report = match model {
-        Some(mesh) => trim_to_seats(primitives, &mut soups, mesh, center),
+        Some(mesh) => {
+            let mut report = trim_to_seats(primitives, &mut soups, mesh, center);
+            measure_untrimmed_intrusions(primitives, &soups, mesh, center, &mut report);
+            report
+        }
         None => SeatTrimReport::default(),
     };
     // A record wholly inside the model is left out (`trim_to_seats`); every
@@ -1239,6 +1294,12 @@ fn trim_to_seats(
             continue;
         };
         removed_mm3 += (result.whole_volume - result.after_subtraction_volume).max(0.0);
+        note_member_cut(
+            &mut report,
+            &primitives[index],
+            index,
+            result.whole_volume - result.after_subtraction_volume,
+        );
         let vertices = kept.vertices();
         soups[index] = kept
             .triangles()
@@ -1291,6 +1352,12 @@ fn trim_to_seats(
                             report.records_kept_outside_model_after_empty_trim += 1;
                             removed_mm3 +=
                                 (result.whole_volume - result.after_subtraction_volume).max(0.0);
+                            note_member_cut(
+                                &mut report,
+                                &primitives[index],
+                                index,
+                                result.whole_volume - result.after_subtraction_volume,
+                            );
                             let vertices = kept.vertices();
                             soups[index] = kept
                                 .triangles()
@@ -1301,6 +1368,12 @@ fn trim_to_seats(
                         None => {
                             report.records_dropped_wholly_inside_model += 1;
                             report.dropped_record_indices.push(index);
+                            note_member_cut(
+                                &mut report,
+                                &primitives[index],
+                                index,
+                                result.whole_volume,
+                            );
                         }
                     }
                 }
@@ -1312,6 +1385,120 @@ fn trim_to_seats(
     }
     report.removed_volume_milli_mm3 = (removed_mm3 * 1000.0).round() as u64;
     report
+}
+
+/// Note the volume the model solid removed from one `Member`, joint or hull
+/// record, when it is at least a millionth of a mm³ (below that is the boolean
+/// backend's rounding). Tapers and tips are not noted: cutting them to the seat
+/// is what the trim is for.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a removed volume is clamped non-negative and far below u64::MAX millionths of a mm3"
+)]
+fn note_member_cut(
+    report: &mut SeatTrimReport,
+    primitive: &SupportPrimitive,
+    index: usize,
+    removed_mm3: f64,
+) {
+    let kind = match (primitive.segment_kind, &primitive.ring_normal) {
+        (SupportSegmentKind::Member, FrustumRingNormal::Junction(_)) => "hull",
+        (SupportSegmentKind::Member, _) => "member",
+        (SupportSegmentKind::JointSphere, _) => "joint",
+        _ => return,
+    };
+    let micro = (removed_mm3.max(0.0) * 1.0e6).round();
+    if micro >= 1.0 {
+        report.member_cuts.push(MemberCut {
+            record: index,
+            kind: kind.to_owned(),
+            removed_micro_mm3: micro as u64,
+        });
+    }
+}
+
+/// **Measure, without cutting, what every joint sphere and junction hull
+/// stands inside the model by.** Neither carries a seat trim, so the trim never
+/// cuts them; but a trim that reports only what it cut would hide an intrusion
+/// it did not touch. ONE more batched call asks the boolean backend for each
+/// piece's volume before and after the model is subtracted, with a half-space
+/// that keeps everything; the cut meshes are thrown away. A call that fails is
+/// named in `batch_error` and measures nothing.
+fn measure_untrimmed_intrusions(
+    primitives: &[SupportPrimitive],
+    soups: &[Vec<SoupTriangle>],
+    mesh: &Mesh,
+    center: [f64; 3],
+    report: &mut SeatTrimReport,
+) {
+    let wanted: Vec<usize> = primitives
+        .iter()
+        .enumerate()
+        .filter(|(_, primitive)| {
+            primitive.seat_trim.is_none()
+                && match primitive.segment_kind {
+                    SupportSegmentKind::JointSphere => true,
+                    SupportSegmentKind::Member => {
+                        matches!(primitive.ring_normal, FrustumRingNormal::Junction(_))
+                    }
+                    _ => false,
+                }
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let mut kept_indices = Vec::with_capacity(wanted.len());
+    let mut pieces = Vec::with_capacity(wanted.len());
+    let mut keep = Vec::with_capacity(wanted.len());
+    for index in wanted {
+        let Some(piece) = weld(&soups[index]) else {
+            continue;
+        };
+        let lowest = piece
+            .vertices()
+            .iter()
+            .map(|vertex| vertex[2])
+            .fold(f64::INFINITY, f64::min);
+        keep.push(plinth_solid::KeepHalfSpace {
+            normal: [0.0, 0.0, 1.0],
+            offset: lowest - 1.0,
+        });
+        pieces.push(piece);
+        kept_indices.push(index);
+    }
+    if pieces.is_empty() {
+        return;
+    }
+    let model_soup: Vec<SoupTriangle> = mesh
+        .tris()
+        .iter()
+        .map(|triangle| triangle.map(|corner| sub_center(mesh.verts()[corner as usize], center)))
+        .collect();
+    let Some(solid) = weld(&model_soup) else {
+        return;
+    };
+    match plinth_solid::ManifoldBackend.trim_and_subtract_each(
+        &solid,
+        &pieces,
+        &keep,
+        plinth_solid::BooleanLimits::UNLIMITED,
+    ) {
+        Ok(results) => {
+            for (&index, result) in kept_indices.iter().zip(&results) {
+                note_member_cut(
+                    report,
+                    &primitives[index],
+                    index,
+                    result.whole_volume - result.after_subtraction_volume,
+                );
+            }
+        }
+        Err(error) => {
+            report.batch_error.get_or_insert_with(|| {
+                format!("the intrusion measurement of joints and hulls did not run: {error}")
+            });
+        }
+    }
 }
 
 /// One closed soup as an indexed mesh: corners that are the same point to the
@@ -1391,6 +1578,16 @@ fn record_frame_and_soup(
         }
         SupportSegmentKind::RaftPad => raft_pad_triangles(start, r_start, r_end, raft_sides)?,
         SupportSegmentKind::RaftBridge => raft_bridge_triangles(start, end, r_start, r_end)?,
+        SupportSegmentKind::Member
+            if matches!(primitive.ring_normal, FrustumRingNormal::Junction(_)) =>
+        {
+            match &primitive.ring_normal {
+                FrustumRingNormal::Junction(rings) => {
+                    junction_hull_triangles(rings, center, frustum_sides)?
+                }
+                _ => return Err(EmitError::RecordEncodingRejected),
+            }
+        }
         SupportSegmentKind::ContactTaper
         | SupportSegmentKind::Member
         | SupportSegmentKind::RootFlare => frustum_triangles(
@@ -1539,27 +1736,19 @@ fn frustum_triangles(
     sides: usize,
     ring_normal: FrustumRingNormal,
 ) -> Result<Vec<SoupTriangle>, EmitError> {
-    if sides < 3 || !r_start.is_finite() || !r_end.is_finite() {
-        return Err(EmitError::RecordEncodingRejected);
-    }
-    let axis = sub(end, start);
-    let axis_length = norm(axis);
-    if !axis_length.is_finite() || axis_length <= f64::EPSILON {
-        return Err(EmitError::RecordEncodingRejected);
-    }
-    let normal = match ring_normal {
-        FrustumRingNormal::SegmentAxis => scale(axis, 1.0 / axis_length),
-        FrustumRingNormal::PlateZ => [0.0, 0.0, 1.0],
+    let plate_z = match ring_normal {
+        FrustumRingNormal::SegmentAxis => false,
+        FrustumRingNormal::PlateZ => true,
+        // A junction hull is not a frustum; `junction_hull_triangles` draws it.
+        FrustumRingNormal::Junction(_) => return Err(EmitError::RecordEncodingRejected),
     };
-    let (u, v) = perpendicular_basis(normal)?;
-    let mut ring_start = Vec::with_capacity(sides);
-    let mut ring_end = Vec::with_capacity(sides);
-    for index in 0..sides {
-        let angle = std::f64::consts::TAU * index as f64 / sides as f64;
-        let radial = add(scale(u, angle.cos()), scale(v, angle.sin()));
-        ring_start.push(add(start, scale(radial, r_start)));
-        ring_end.push(add(end, scale(radial, r_end)));
-    }
+    // THE ONE RING ROUTINE (`plinth_support::frustum_ring`): the same code
+    // makes a junction hull's rings from this frustum's own `start`, `end` and
+    // radius, so a hull ring equals this frustum's ring bit for bit.
+    let ring_start = plinth_support::frustum_ring(start, end, r_start, true, plate_z, sides)
+        .ok_or(EmitError::RecordEncodingRejected)?;
+    let ring_end = plinth_support::frustum_ring(start, end, r_end, false, plate_z, sides)
+        .ok_or(EmitError::RecordEncodingRejected)?;
     let mut triangles = Vec::with_capacity(sides * 4);
     for index in 0..sides {
         let next = (index + 1) % sides;
@@ -1796,19 +1985,32 @@ fn raft_bridge_triangles(
         .to_vec())
 }
 
-fn perpendicular_basis(normal: [f64; 3]) -> Result<([f64; 3], [f64; 3]), EmitError> {
-    let reference = if normal[0].abs() < 0.9 {
-        [1.0, 0.0, 0.0]
-    } else {
-        [0.0, 1.0, 0.0]
-    };
-    let u = cross(normal, reference);
-    let length = norm(u);
-    if !length.is_finite() || length <= f64::EPSILON {
-        return Err(EmitError::RecordEncodingRejected);
+/// The triangles of a junction hull: the convex hull of the end rings it names.
+/// Each ring is made by the one ring routine from its neighbour frustum's own
+/// start and end (centre-subtracted exactly as that frustum's record is), so the
+/// hull's ring corners are the neighbour's ring corners bit for bit and are
+/// vertices of the hull.
+fn junction_hull_triangles(
+    rings: &plinth_support::JunctionRings,
+    center: [f64; 3],
+    sides: usize,
+) -> Result<Vec<SoupTriangle>, EmitError> {
+    let mut points: Vec<[f64; 3]> = Vec::with_capacity(3 * sides);
+    for ring in rings.rings() {
+        let corners = plinth_support::frustum_ring(
+            sub_center(finite_point(ring.frustum_start_mm), center),
+            sub_center(finite_point(ring.frustum_end_mm), center),
+            ring.radius_mm.get(),
+            ring.at_start,
+            ring.plate_z,
+            sides,
+        )
+        .ok_or(EmitError::RecordEncodingRejected)?;
+        points.extend(corners);
     }
-    let u = scale(u, 1.0 / length);
-    Ok((u, cross(normal, u)))
+    plinth_support::convex_hull(&points)
+        .map(|hull| hull.soup())
+        .ok_or(EmitError::RecordEncodingRejected)
 }
 
 /// Wind a whole gathered batch of soups outward in one kernel call.
@@ -2234,6 +2436,108 @@ mod tests {
 
     #[test]
     #[expect(
+        clippy::float_cmp,
+        reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
+    fn a_junction_hull_is_one_closed_outward_member_record_on_the_neighbours_own_rings() {
+        let center = [1.0, 2.0, 3.0];
+        let radius = |value: f64| PositiveFinite::new(value).unwrap();
+        let member = |start: [f64; 3], end: [f64; 3], r_start: f64, r_end: f64| {
+            primitive_with_radii(SupportSegmentKind::Member, start, end, r_start, r_end)
+        };
+        // A landed branch leaning 41 degrees onto a host: the host above (thin),
+        // the host below (wide) and the branch, each ending on a ring near K.
+        let above = member([1.0, 2.0, 6.0], [1.0, 2.0, 3.0], 0.2342, 0.2342);
+        let below = member([1.0, 2.0, 2.7], [1.0, 2.0, 0.0], 0.761, 0.761);
+        let branch = member([3.0, 2.0, 5.5], [1.2, 2.0, 3.2], 0.761, 0.761);
+        let ring = |frustum: &SupportPrimitive, at_start: bool| plinth_support::HullRing {
+            frustum_start_mm: frustum.start_mm,
+            frustum_end_mm: frustum.end_mm,
+            radius_mm: if at_start {
+                frustum.start_radius_mm
+            } else {
+                frustum.end_radius_mm
+            },
+            at_start,
+            plate_z: false,
+        };
+        let rings = plinth_support::JunctionRings([
+            Some(ring(&branch, false)),
+            Some(ring(&below, true)),
+            Some(ring(&above, false)),
+        ]);
+        let hull = SupportPrimitive {
+            segment_kind: SupportSegmentKind::Member,
+            start_mm: branch.end_mm,
+            end_mm: below.start_mm,
+            start_radius_mm: radius(0.761),
+            end_radius_mm: radius(0.761),
+            contact_depth_mm: None,
+            ring_normal: FrustumRingNormal::Junction(rings),
+            sphere_geometry: None,
+            seat_trim: None,
+        };
+        let primitives = [above.clone(), branch.clone(), below.clone(), hull.clone()];
+        // The record: a Member (type 3) with the two largest rings' centres.
+        let records = build_records(&primitives, center).unwrap();
+        let record = &records[3];
+        assert_eq!(record.segment_type, SegmentType::JOINER);
+        assert_eq!(record.start, point_f32(sub_center(finite_point(branch.end_mm), center)).unwrap());
+        assert_eq!(record.end, point_f32(sub_center(finite_point(below.start_mm), center)).unwrap());
+        // Closed, wound outward, positive volume.
+        let triangles = wire_triangles(&record.mesh.xyz);
+        assert_watertight(&triangles, "junction hull");
+        assert_convex_soup_is_wound_outward(&triangles, "junction hull");
+        let volume: f64 = triangles
+            .iter()
+            .map(|t| dot(t[0], cross(t[1], t[2])))
+            .sum::<f64>()
+            / 6.0;
+        assert!(volume > 0.0, "volume {volume}");
+        // Its rings ARE the neighbours' rings, bit for bit (before the f32 cast).
+        let (_, hull_soup) = record_frame_and_soup(&hull, center, 24, 8).unwrap();
+        let hull_corners: std::collections::HashSet<[u64; 3]> =
+            hull_soup.iter().flatten().map(|p| point_bits(*p)).collect();
+        for (frustum, at_start) in [(&branch, false), (&below, true), (&above, false)] {
+            let (_, soup) = record_frame_and_soup(frustum, center, 24, 8).unwrap();
+            let start = sub_center(finite_point(frustum.start_mm), center);
+            let end = sub_center(finite_point(frustum.end_mm), center);
+            let (ring_centre, ring_radius) = if at_start {
+                (start, frustum.start_radius_mm.get())
+            } else {
+                (end, frustum.end_radius_mm.get())
+            };
+            let axis = geom_kernel::vec3::normalize(sub(end, start)).unwrap();
+            let on_ring: Vec<[f64; 3]> = soup
+                .iter()
+                .flatten()
+                .copied()
+                .filter(|p| {
+                    dot(sub(*p, ring_centre), axis).abs() < 1e-9
+                        && (norm(sub(*p, ring_centre)) - ring_radius).abs() < 1e-9
+                })
+                .collect();
+            assert!(!on_ring.is_empty());
+            let found = on_ring
+                .iter()
+                .filter(|p| hull_corners.contains(&point_bits(**p)))
+                .count();
+            // The wide rings are the hull's boundary; the thin ring of the host
+            // above is buried in it and need not be a vertex.
+            if ring_radius > 0.5 {
+                assert!(
+                    on_ring.iter().all(|p| hull_corners.contains(&point_bits(*p))),
+                    "only {found} of {} ring corners are hull vertices",
+                    on_ring.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
         clippy::float_cmp,
         reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
               docs/evidence/remediation-2026-08-26/census/cast-audit.md"

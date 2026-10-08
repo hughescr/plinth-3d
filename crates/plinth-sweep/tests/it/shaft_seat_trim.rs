@@ -110,6 +110,8 @@ fn lowest_sample(primitive: &SupportPrimitive, trim: SeatTrim) -> f64 {
             geom_kernel::vec3::normalize(geom_kernel::vec3::sub(end, start)).expect("an axis")
         }
         FrustumRingNormal::PlateZ => [0.0, 0.0, 1.0],
+        // A junction hull is not a frustum and carries no trim (L2, 2026-10-08).
+        FrustumRingNormal::Junction(_) => return f64::INFINITY,
     };
     let reference = if normal[0].abs() < 0.9 {
         [1.0, 0.0, 0.0]

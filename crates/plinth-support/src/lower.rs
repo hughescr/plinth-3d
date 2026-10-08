@@ -18,6 +18,8 @@ use crate::{
     BuildFrame, FrustumRingNormal, SphereGeometry, SupportPrimitive, SupportSegmentKind,
 };
 
+mod junction;
+
 const ZERO_LENGTH_MM: f64 = 1e-9;
 
 /// **Placeholder, format parity — how far a sweep foot reaches INTO its raft
@@ -859,10 +861,21 @@ fn primitive_digest(
             }
             None => digest.byte(0),
         }
-        digest.byte(match primitive.ring_normal {
-            FrustumRingNormal::SegmentAxis => 0,
-            FrustumRingNormal::PlateZ => 1,
-        });
+        match primitive.ring_normal {
+            FrustumRingNormal::SegmentAxis => digest.byte(0),
+            FrustumRingNormal::PlateZ => digest.byte(1),
+            FrustumRingNormal::Junction(rings) => {
+                digest.byte(2);
+                for ring in rings.rings() {
+                    for coordinate in ring.frustum_start_mm.into_iter().chain(ring.frustum_end_mm) {
+                        digest.u64(coordinate.get().to_bits());
+                    }
+                    digest.u64(ring.radius_mm.get().to_bits());
+                    digest.byte(u8::from(ring.at_start));
+                    digest.byte(u8::from(ring.plate_z));
+                }
+            }
+        }
         match primitive.sphere_geometry.as_ref() {
             Some(geometry) => {
                 if let Some((center, axis)) = geometry.tip_authority() {
@@ -1183,9 +1196,14 @@ pub struct SweepLowering {
     /// Per headed arm, in arm order: the neck's first ring radius over the
     /// ball's solid radius where the neck leaves it (above 1 when wider).
     pub head_neck_ratio: Vec<f64>,
-    /// Per headed arm, in arm order: the bare length along `u` between the
-    /// ball's surface and the joint sphere's surface, `|K - C| - R - r_K`
-    /// (`C` the ball centre, `R` the ball radius). May be zero or negative.
+    /// Per headed arm, in arm order: the DRAWN LINK, measured from the head's
+    /// drawn frusta (Craig 2026-10-07): the length along `u` from where the
+    /// head solid leaves the contact ball's surface to the first point where
+    /// the drawn radius reaches the ball's radius `R`. `0` when the drawn head
+    /// is already as wide as the ball where it leaves it. (Until 2026-10-08
+    /// this held the PLANNED gap `|K - C| - R - r_K`, which the drawn file did
+    /// not have: median 0.96 mm reported, 0 mm drawn.) The field keeps its name
+    /// because the sweep adapter copies it by name.
     pub head_stalk_mm: Vec<f64>,
     /// Per headed arm, in arm order: the joint's clearance from the seat
     /// plane, `(K - D)·u - r_K`. It equals `g` when the joint has not grown.
@@ -1394,8 +1412,22 @@ fn lower_sweep_arms_of(
         ..SweepLowering::default()
     };
     let mut feet: Vec<crate::raft::SweepFoot> = Vec::with_capacity(arms.len());
+    // Where each arm's records stand, for the junction pass below.
+    let mut arm_ends: Vec<usize> = Vec::with_capacity(arms.len());
+    let mut junction_arms: Vec<junction::JunctionArm> = Vec::with_capacity(arms.len());
     for arm in arms {
+        let arm_start = out.primitives.len();
         let lowered = lower_one_sweep_arm(arm, config, plate, &mut out.primitives);
+        let emitted = !matches!(
+            lowered.outcome,
+            ArmOutcome::ZeroLength | ArmOutcome::InvalidGeometry
+        );
+        junction_arms.push(junction::JunctionArm {
+            landed: emitted && arm.landing == SweepArmLanding::Landed,
+            shaft: (emitted && lowered.shaft.1 > 0)
+                .then_some((arm_start + lowered.shaft.0, lowered.shaft.1)),
+        });
+        arm_ends.push(out.primitives.len());
         feet.extend(lowered.foot);
         match lowered.outcome {
             ArmOutcome::Built => {}
@@ -1438,6 +1470,42 @@ fn lower_sweep_arms_of(
             return Err(SweepLoweringError::PrimitiveLimit {
                 limit: max_primitives,
             });
+        }
+    }
+    // LANDED JUNCTIONS AS HULLS (heads v19 fixes, L2): each landed branch
+    // whose end ring is not already inside its host meets it in the convex
+    // hull of the end rings that meet there. The pass edits the shafts of the
+    // arms it joins and adds one hull record per junction, after the branch.
+    let sides = registered_emit_sides();
+    if sides >= 3 {
+        let edits = junction::hull_junctions(
+            &out.primitives,
+            &junction_arms,
+            junction::JunctionRules {
+                pixel_pitch_mm: config.pixel_pitch_mm,
+                layer_height_mm: config.layer_height_mm.get(),
+                sides,
+            },
+        );
+        if edits.hulled > 0 {
+            let mut rebuilt: Vec<SupportPrimitive> =
+                Vec::with_capacity(out.primitives.len() + edits.hulled);
+            let mut from = 0;
+            for (index, &end) in arm_ends.iter().enumerate() {
+                let slice = &out.primitives[from..end];
+                match (&edits.shafts[index], junction_arms[index].shaft) {
+                    (Some(shaft), Some((first, len))) => {
+                        let offset = first - from;
+                        rebuilt.extend_from_slice(&slice[..offset]);
+                        rebuilt.extend(shaft.iter().cloned());
+                        rebuilt.extend_from_slice(&slice[offset + len..]);
+                    }
+                    _ => rebuilt.extend_from_slice(slice),
+                }
+                rebuilt.extend(edits.hulls[index].iter().cloned());
+                from = end;
+            }
+            out.primitives = rebuilt;
         }
     }
     // THE RAFT (fix/sweep-raft, 2026-09-29): one pad under every plate foot,
@@ -1496,6 +1564,8 @@ fn emitted_solid_volume_mm3(primitive: &SupportPrimitive) -> f64 {
                 FrustumRingNormal::PlateZ => {
                     (primitive.start_mm[2].get() - primitive.end_mm[2].get()).abs()
                 }
+                // A junction hull is not a frustum: the hull of its rings.
+                FrustumRingNormal::Junction(rings) => return junction_hull_volume_mm3(&rings),
             };
             PI * length / 3.0 * (r0.powi(2) + r0 * r1 + r1.powi(2))
         }
@@ -1522,6 +1592,103 @@ fn emitted_solid_volume_mm3(primitive: &SupportPrimitive) -> f64 {
             geom_kernel::vec3::dist(plan(primitive.start_mm), plan(primitive.end_mm)) * r0 * r1
         }
     }
+}
+
+/// **The drawn link between the contact ball and the head's wide part**, in mm
+/// along the head axis, from the DRAWN frusta.
+///
+/// `frusta` are the head's drawn cones as `([a, r] at the start, [a, r] at the
+/// end)`, `a` the distance along the head axis from the ball's centre, `r` the
+/// drawn radius there, in order. The head solid leaves the ball's surface at
+/// the first `a` where the head's section clears the ball's: `r(a)² + a² ≥ R²`.
+/// The link runs from there to the first `a` where the drawn radius reaches the
+/// ball's radius `R`. It is `0` when the drawn radius at the ball's surface is
+/// already `R` or more (the head is wider than the ball from the moment it
+/// leaves it), and when the head never leaves the ball. If the radius never
+/// reaches `R` the link runs to the last frustum's end.
+fn drawn_link_mm(frusta: &[([f64; 2], [f64; 2])], ball_radius: f64) -> f64 {
+    let ball_sq = ball_radius * ball_radius;
+    let radius_in = |&([a0, r0], [a1, r1]): &([f64; 2], [f64; 2]), a: f64| -> f64 {
+        let t = if a1 > a0 { ((a - a0) / (a1 - a0)).clamp(0.0, 1.0) } else { 0.0 };
+        r0 + (r1 - r0) * t
+    };
+    // Where the head leaves the ball.
+    let mut exit: Option<(f64, usize)> = None;
+    for (index, frustum) in frusta.iter().enumerate() {
+        let ([a0, r0], [a1, r1]) = *frustum;
+        let length = a1 - a0;
+        if length.is_nan() || length <= 0.0 {
+            continue;
+        }
+        let f0 = r0 * r0 + a0 * a0 - ball_sq;
+        if f0 >= 0.0 {
+            exit = Some((a0, index));
+            break;
+        }
+        // (r0 + k x)² + (a0 + x)² = R², the positive root (f0 < 0 gives one).
+        let k = (r1 - r0) / length;
+        let (qa, qb) = (k * k + 1.0, 2.0 * (r0 * k + a0));
+        let x = (-qb + (qb * qb - 4.0 * qa * f0).max(0.0).sqrt()) / (2.0 * qa);
+        if x <= length {
+            exit = Some((a0 + x, index));
+            break;
+        }
+    }
+    let Some((exit_at, exit_index)) = exit else {
+        return 0.0;
+    };
+    if radius_in(&frusta[exit_index], exit_at) >= ball_radius {
+        return 0.0;
+    }
+    // Where the drawn radius first reaches the ball's.
+    let mut reach = frusta.last().map_or(exit_at, |last| last.1[0]);
+    for frustum in &frusta[exit_index..] {
+        let ([a0, r0], [a1, r1]) = *frustum;
+        if r1 >= ball_radius && a1 > a0 {
+            let from = exit_at.max(a0);
+            let r_from = radius_in(frustum, from);
+            if r_from >= ball_radius {
+                reach = from;
+            } else {
+                reach = a0 + (ball_radius - r0) / (r1 - r0) * (a1 - a0);
+            }
+            break;
+        }
+    }
+    (reach - exit_at).max(0.0)
+}
+
+/// `chitubox_emit_n_sides`: the polygon every frustum ring and hull ring is
+/// drawn with, read once. `0` when the registry cannot be read.
+fn registered_emit_sides() -> usize {
+    static SIDES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *SIDES.get_or_init(|| {
+        m0_constants().map_or(0, |constants| {
+            usize::try_from(constants.placeholders().chitubox_emit_n_sides().diagnostic().get())
+                .unwrap_or(0)
+        })
+    })
+}
+
+/// The solid one junction hull encloses, in mm³: the hull of its rings, made
+/// with the emitter's own ring routine and polygon.
+fn junction_hull_volume_mm3(rings: &crate::JunctionRings) -> f64 {
+    let sides = registered_emit_sides();
+    let mut points: Vec<[f64; 3]> = Vec::with_capacity(3 * sides);
+    for ring in rings.rings() {
+        let Some(corners) = crate::hull::frustum_ring(
+            ring.frustum_start_mm.map(Finite::get),
+            ring.frustum_end_mm.map(Finite::get),
+            ring.radius_mm.get(),
+            ring.at_start,
+            ring.plate_z,
+            sides,
+        ) else {
+            return 0.0;
+        };
+        points.extend(corners);
+    }
+    crate::hull::convex_hull(&points).map_or(0.0, |hull| hull.volume().max(0.0))
 }
 
 enum ArmOutcome {
@@ -1580,6 +1747,9 @@ struct ArmLowering {
     head: Option<HeadDrawn>,
     /// The arm carried a head that could not be drawn and was drawn straight.
     head_drawn_straight: bool,
+    /// Where the drawn shaft frusta stand among the arm's own records:
+    /// `(offset, length)`. The junction pass edits exactly these.
+    shaft: (usize, usize),
 }
 
 /// The measurements of one drawn head.
@@ -1603,6 +1773,7 @@ impl ArmLowering {
             boss: None,
             head: None,
             head_drawn_straight: false,
+            shaft: (0, 0),
         }
     }
 }
@@ -1753,8 +1924,20 @@ fn push_head_segment(
         }
         None => knots[0][1],
     };
+    // A first frustum shorter than one registered XY pixel is merged into the
+    // next (heads v19 fixes, L2): the knots within a pixel of the start are
+    // dropped and the first frustum starts at the widest radius among them. The
+    // head widens toward the joint, so the new chord stands on or above the
+    // polyline it replaces at every station.
+    let merged = knots
+        .partition_point(|knot| knot[0] < s_start + config.pixel_pitch_mm)
+        .min(knots.len() - 1)
+        .max(past);
+    let first_radius = knots[past..merged]
+        .iter()
+        .fold(first_radius, |widest, knot| widest.max(knot[1]));
     let clipped: Vec<[f64; 2]> = std::iter::once([s_start, first_radius])
-        .chain(knots[past..].iter().copied())
+        .chain(knots[merged..].iter().copied())
         .collect();
     let on_axis = |s: f64| -> Option<[Finite; 3]> {
         let t = (s - s_start) / (length - s_start);
@@ -1836,8 +2019,168 @@ pub struct DrawnSpan {
 /// one part in a billion.
 const PROFILE_RELATIVE_SLACK: f64 = 1.0e-9;
 
-/// **THE DRAWN PROFILE OF ONE MEMBER** (2026-09-28): the fewest straight spans,
-/// from `from_z` (the top of the drawn shaft: the tip ball's centre, or the
+/// The two registered readings [`drawn_spans`] finishes the chords with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DrawnSpanRules {
+    /// The radius a cone may widen per mm of height, going down: the lean
+    /// law's own `cot(theta_sat)`, `theta_sat = centre - transition / 2` from
+    /// the registered overhang angle and weight transition (32.5 degrees at
+    /// 45 and 25: 1.5697, which is 0.0785 mm of radius per 0.05 mm layer). The
+    /// adapter's load-step cone reads the same two numbers
+    /// (`plinth_sweep::lean::LeanLaw::max_step_mm`, `h * cot(theta_sat)`): the
+    /// layer height cancels, so the slope needs none. Two readers of one law.
+    cone_slope: f64,
+    /// One registered XY pixel pitch: a frustum shorter than this is below
+    /// what the printer resolves and is merged into its neighbour.
+    min_span_mm: f64,
+}
+
+fn drawn_span_rules() -> Option<DrawnSpanRules> {
+    static RULES: std::sync::OnceLock<Option<DrawnSpanRules>> = std::sync::OnceLock::new();
+    *RULES.get_or_init(|| {
+        let constants = m0_constants().ok()?;
+        let placeholders = constants.placeholders();
+        let saturated_deg = placeholders.overhang_angle_deg().diagnostic().get()
+            - 0.5 * placeholders.overhang_weight_transition_deg().diagnostic().get();
+        (saturated_deg > 0.0 && saturated_deg < 90.0).then_some(())?;
+        Some(DrawnSpanRules {
+            cone_slope: 1.0 / saturated_deg.to_radians().tan(),
+            min_span_mm: crate::contact::registered_pixel_pitch_mm(constants),
+        })
+    })
+}
+
+/// Merge every span shorter than `min_len` into a neighbour (the one below, or
+/// the one above for the last). The merged span keeps the wider of the two
+/// radii at the end the sliver was on, so it stays on or above the ledger over
+/// both.
+fn merge_short_spans(mut spans: Vec<DrawnSpan>, min_len: f64) -> Vec<DrawnSpan> {
+    let length = |span: &DrawnSpan| span.top_z_mm - span.bottom_z_mm;
+    while spans.len() > 1 {
+        let Some(short) = (0..spans.len())
+            .filter(|&index| length(&spans[index]) < min_len)
+            .min_by(|&a, &b| length(&spans[a]).total_cmp(&length(&spans[b])))
+        else {
+            break;
+        };
+        if short + 1 < spans.len() {
+            let (sliver, below) = (spans[short], spans[short + 1]);
+            spans[short + 1] = DrawnSpan {
+                top_z_mm: sliver.top_z_mm,
+                bottom_z_mm: below.bottom_z_mm,
+                top_radius_mm: sliver.top_radius_mm.max(below.top_radius_mm),
+                bottom_radius_mm: below.bottom_radius_mm,
+            };
+            spans.remove(short);
+        } else {
+            let (above, sliver) = (spans[short - 1], spans[short]);
+            spans[short - 1] = DrawnSpan {
+                top_z_mm: above.top_z_mm,
+                bottom_z_mm: sliver.bottom_z_mm,
+                top_radius_mm: above.top_radius_mm,
+                bottom_radius_mm: above.bottom_radius_mm.max(sliver.bottom_radius_mm),
+            };
+            spans.pop();
+        }
+    }
+    spans
+}
+
+/// Draw every bare radius step, going down, as a cone: a span ending narrower
+/// than the next one starts is cut `h` above the step, and a cone of at most
+/// `slope` mm of radius per mm of height (and at least `min_len` long) runs from
+/// the chord there to the wide radius. The cone sits ABOVE the step, where the
+/// ledger asks for the thin value and the cone only adds section; below the
+/// step the ledger asks for the wide value, which the cone has reached. A span
+/// too short to hold the cone keeps its shoulder.
+fn cone_the_shoulders(spans: Vec<DrawnSpan>, slope: f64, min_len: f64) -> Vec<DrawnSpan> {
+    let mut out: Vec<DrawnSpan> = Vec::with_capacity(spans.len() + 4);
+    for span in spans {
+        let Some(above) = out.last().copied() else {
+            out.push(span);
+            continue;
+        };
+        let (thin, wide) = (above.bottom_radius_mm, span.top_radius_mm);
+        let length = above.top_z_mm - above.bottom_z_mm;
+        let continuous = above.bottom_z_mm.to_bits() == span.top_z_mm.to_bits();
+        if !(continuous && wide > thin * (1.0 + PROFILE_RELATIVE_SLACK) && length > 0.0) {
+            out.push(span);
+            continue;
+        }
+        // dr/dh of the span above going up; the cone's radius at height h is
+        // `thin + g h` on the chord, and must meet `wide` at the step.
+        let g = (above.top_radius_mm - above.bottom_radius_mm) / length;
+        let denominator = slope + g;
+        let height = if denominator > 0.0 {
+            ((wide - thin) / denominator).max(min_len)
+        } else {
+            f64::INFINITY
+        };
+        if height >= length * (1.0 - PROFILE_RELATIVE_SLACK) {
+            out.push(span);
+            continue;
+        }
+        let cut_z = above.bottom_z_mm + height;
+        let chord = thin + g * height;
+        if let Some(last) = out.last_mut() {
+            last.bottom_z_mm = cut_z;
+            last.bottom_radius_mm = chord;
+        }
+        out.push(DrawnSpan {
+            top_z_mm: cut_z,
+            bottom_z_mm: above.bottom_z_mm,
+            top_radius_mm: chord,
+            bottom_radius_mm: wide,
+        });
+        out.push(span);
+    }
+    out
+}
+
+/// **THE DRAWN PROFILE OF ONE MEMBER**: the fewest straight spans, from
+/// `from_z` down to `to_z`, whose section is at least the area law's own
+/// section at every height ([`drawn_chords`]), finished by the two rules of the
+/// 2026-10-08 junction round:
+///
+/// * **A bare radius step is a cone, not a shoulder.** Where the profile steps
+///   wider going down and nothing lands there, the step is drawn as a cone at
+///   the lean law's slope instead of a flat annulus (15 on the Cylinder at
+///   v19).
+/// * **A frustum shorter than one registered XY pixel is merged into its
+///   neighbour** (5 on the Cylinder at v19, the shortest 0.001 mm).
+///
+/// The registry is read once. Unreadable, the chords are returned as they are.
+#[must_use]
+pub fn drawn_spans(
+    profile: &[f64],
+    base_z: f64,
+    seat_z: f64,
+    from_z: f64,
+    to_z: f64,
+    start_radius: f64,
+    end_radius: f64,
+) -> Vec<DrawnSpan> {
+    let spans = drawn_chords(
+        profile,
+        base_z,
+        seat_z,
+        from_z,
+        to_z,
+        start_radius,
+        end_radius,
+    );
+    match drawn_span_rules() {
+        Some(rules) => cone_the_shoulders(
+            merge_short_spans(spans, rules.min_span_mm),
+            rules.cone_slope,
+            rules.min_span_mm,
+        ),
+        None => spans,
+    }
+}
+
+/// The chords of [`drawn_spans`] before the cone and merge rules: the fewest
+/// straight spans, from `from_z` (the top of the drawn shaft: the tip ball's centre, or the
 /// seat of a member with no ball) down to `to_z` (where the shaft ends: the
 /// landing, the boss top, or the plate for a plate arm too short for a boss),
 /// whose section is at least the area
@@ -1882,8 +2225,7 @@ const PROFILE_RELATIVE_SLACK: f64 = 1.0e-9;
     reason = "a slot index bounded by the profile length is exact in f64, and the f64 -> usize \
               cast is reached only for a floored, positive index clamped to the profile length"
 )]
-#[must_use]
-pub fn drawn_spans(
+fn drawn_chords(
     profile: &[f64],
     base_z: f64,
     seat_z: f64,
@@ -2489,6 +2831,8 @@ fn frustum_bite_outside_ball(
             geom_kernel::vec3::normalize(geom_kernel::vec3::sub(end, start))
         }
         FrustumRingNormal::PlateZ => Some([0.0, 0.0, 1.0]),
+        // A junction hull carries no seat trim and is never graded against one.
+        FrustumRingNormal::Junction(_) => None,
     };
     let Some(ring_normal) = ring_normal else {
         return 0.0;
@@ -2746,11 +3090,34 @@ fn lower_one_sweep_arm(
             ) else {
                 return ArmLowering::refused(ArmOutcome::InvalidGeometry);
             };
+            // THE LINK, MEASURED FROM THE DRAWN FRUSTA (Craig 2026-10-07): the
+            // bare length where the drawn head is thinner than the contact
+            // ball. v19 reported the planned gap between the two spheres
+            // (median 0.96 mm) while the file drew the head wider than the
+            // ball from the ball's surface on: a drawn link of 0.
+            let head_frusta: Vec<([f64; 2], [f64; 2])> = head_pieces
+                .iter()
+                .filter(|piece| {
+                    matches!(
+                        piece.segment_kind,
+                        SupportSegmentKind::ContactTaper | SupportSegmentKind::Member
+                    )
+                })
+                .map(|piece| {
+                    let along = |point: [Finite; 3]| {
+                        geom_kernel::vec3::dot(
+                            head.unit,
+                            geom_kernel::vec3::sub(point.map(Finite::get), head.centre),
+                        )
+                    };
+                    (
+                        [along(piece.start_mm), piece.start_radius_mm.get()],
+                        [along(piece.end_mm), piece.end_radius_mm.get()],
+                    )
+                })
+                .collect();
+            let stalk_mm = drawn_link_mm(&head_frusta, ball_radius.get());
             staged.append(&mut head_pieces);
-            let to_joint = geom_kernel::vec3::sub(head.head.joint_mm, head.centre);
-            let stalk_mm = geom_kernel::vec3::norm(to_joint)
-                - ball_radius.get()
-                - head.head.joint_radius_mm;
             let standoff_mm = geom_kernel::vec3::dot(
                 head.unit,
                 geom_kernel::vec3::sub(head.head.joint_mm, head.head.contact_mm),
@@ -2811,6 +3178,9 @@ fn lower_one_sweep_arm(
     };
     let spans: usize;
     let mut boss = None;
+    // Where the shaft frusta begin among this arm's records: after the ball,
+    // the head and the joint sphere, and before the plate flare.
+    let shaft_offset = staged.len();
     let outcome = match arm.landing {
         SweepArmLanding::Landed => {
             if distance(shaft_top, base) <= ZERO_LENGTH_MM {
@@ -2968,6 +3338,7 @@ fn lower_one_sweep_arm(
         boss,
         head: head_drawn,
         head_drawn_straight,
+        shaft: (shaft_offset, spans),
     }
 }
 
@@ -3008,6 +3379,7 @@ fn frustum_reaches_model_side(primitive: &SupportPrimitive, trim: crate::SeatTri
             geom_kernel::vec3::normalize(geom_kernel::vec3::sub(end, start))
         }
         FrustumRingNormal::PlateZ => Some([0.0, 0.0, 1.0]),
+        FrustumRingNormal::Junction(_) => None,
     };
     let Some(ring_normal) = ring_normal else {
         return false;
@@ -4341,8 +4713,51 @@ mod headed_arm_tests {
 }
 
 #[cfg(test)]
+mod drawn_link_tests {
+    use super::drawn_link_mm;
+
+    const BALL: f64 = 0.15;
+
+    #[test]
+    fn a_head_as_wide_as_the_ball_from_its_surface_on_has_no_link() {
+        // v19's heads: the first frustum starts at the ball's centre at a
+        // radius at or over the ball's own.
+        for first in [BALL, 1.2 * BALL, 3.0 * BALL] {
+            let frusta = [([0.0, first], [1.0, first + 0.2]), ([1.0, first + 0.2], [1.5, 0.9])];
+            assert!(drawn_link_mm(&frusta, BALL).abs() < 1e-12, "first radius {first}");
+        }
+    }
+
+    #[test]
+    fn the_link_of_a_ball_a_cylinder_and_a_cone_is_the_bare_length_from_the_ball() {
+        // A cylinder of radius 0.05 from the ball's centre to 1.0, then a cone
+        // widening to 0.40 at 1.5. The head leaves the ball where
+        // r² + a² = R², at sqrt(R² - r²); the drawn radius reaches R on the cone.
+        let r = 0.05;
+        let frusta = [([0.0, r], [1.0, r]), ([1.0, r], [1.5, 0.40])];
+        let exit = (BALL * BALL - r * r).sqrt();
+        let reach = 1.0 + (BALL - r) / (0.40 - r) * 0.5;
+        let expected = reach - exit;
+        let link = drawn_link_mm(&frusta, BALL);
+        assert!((link - expected).abs() < 1e-12, "{link} vs {expected}");
+        // With the cone starting at the ball's own radius, the link is exactly
+        // the cylinder's length less the part inside the ball.
+        let abrupt = [([0.0, r], [1.0, r]), ([1.0, BALL], [1.5, 0.40])];
+        let link = drawn_link_mm(&abrupt, BALL);
+        assert!((link - (1.0 - exit)).abs() < 1e-12, "{link} vs {}", 1.0 - exit);
+    }
+
+    #[test]
+    fn a_head_that_never_leaves_the_ball_or_never_widens_is_measured_without_panic() {
+        assert!(drawn_link_mm(&[], BALL).abs() < 1e-12);
+        let thin = [([0.0, 0.05], [2.0, 0.05])];
+        assert!((drawn_link_mm(&thin, BALL) - (2.0 - (BALL * BALL - 0.0025_f64).sqrt())).abs() < 1e-12);
+    }
+}
+
+#[cfg(test)]
 mod drawn_span_ramp_tests {
-    use super::{drawn_spans, DrawnSpan};
+    use super::{drawn_chords, drawn_spans, DrawnSpan};
 
     /// The lean law's radius change per 0.05 mm layer (the adapter's collar).
     const D: f64 = 0.078_485;
@@ -4417,27 +4832,57 @@ mod drawn_span_ramp_tests {
     }
 
     #[test]
-    fn a_single_step_keeps_its_shoulder() {
+    fn a_single_step_is_a_cone_at_the_lean_law_not_a_shoulder() {
+        // The lean law's slope: cot(45 - 25 / 2 = 32.5 deg) mm of radius per mm.
+        let slope = 1.0 / 32.5_f64.to_radians().tan();
         let mut profile = repeat(0.3, 4);
         profile.extend(repeat(0.6, 4));
         let spans = spans_of(&profile, 0.3, 0.6);
-        assert_eq!(
-            spans,
-            vec![
-                DrawnSpan {
-                    top_z_mm: 8.0,
-                    bottom_z_mm: 4.0,
-                    top_radius_mm: 0.3,
-                    bottom_radius_mm: 0.3
-                },
-                DrawnSpan {
-                    top_z_mm: 4.0,
-                    bottom_z_mm: 0.0,
-                    top_radius_mm: 0.6,
-                    bottom_radius_mm: 0.6
-                },
-            ]
+        assert_continuous(&spans, 8.0);
+        assert_eq!(spans.len(), 3, "{spans:?}");
+        // No shoulder: every cut joins equal radii.
+        for pair in spans.windows(2) {
+            assert!(
+                (pair[0].bottom_radius_mm - pair[1].top_radius_mm).abs() < 1e-12,
+                "a flat shoulder at z {}: {spans:?}",
+                pair[0].bottom_z_mm
+            );
+        }
+        // The cone sits ABOVE the step (the ledger asks 0.3 there), ends on the
+        // step at the wide radius, and is no flatter than the lean law.
+        let cone = spans[1];
+        assert!((cone.bottom_z_mm - 4.0).abs() < 1e-12);
+        assert!((cone.bottom_radius_mm - 0.6).abs() < 1e-12);
+        let height = cone.top_z_mm - cone.bottom_z_mm;
+        assert!(height > 0.0 && cone.top_radius_mm >= 0.3 - 1e-12);
+        let drawn_slope = (cone.bottom_radius_mm - cone.top_radius_mm) / height;
+        assert!(drawn_slope <= slope + 1e-9, "{drawn_slope} vs the law's {slope}");
+        assert!(
+            (drawn_slope - slope).abs() < 1e-9,
+            "a step this size uses the law's own slope: {drawn_slope} vs {slope}"
         );
+        // And the section never drops under the ledger.
+        assert!(spans[0].bottom_radius_mm >= 0.3 - 1e-12);
+    }
+
+    #[test]
+    fn a_frustum_shorter_than_one_pixel_is_merged_into_its_neighbour() {
+        // The shaft's top stands 0.001 mm over a slot boundary (z = 2), and the
+        // ledger steps there: the chords alone leave a 0.001 mm first frustum
+        // (the Cylinder's 437).
+        let profile = [0.5, 0.5, 0.3, 0.3];
+        let chords = drawn_chords(&profile, 0.0, 4.0, 2.001, 0.0, 0.3, 0.5);
+        assert!(
+            chords.iter().any(|s| s.top_z_mm - s.bottom_z_mm < 0.0015),
+            "red before: the chords hold a 0.001 mm frustum: {chords:?}"
+        );
+        let spans = drawn_spans(&profile, 0.0, 4.0, 2.001, 0.0, 0.3, 0.5);
+        assert!(
+            spans.iter().all(|s| s.top_z_mm - s.bottom_z_mm >= 0.019),
+            "no span under one registered pixel pitch remains: {spans:?}"
+        );
+        assert_continuous(&spans, 2.001);
+        assert!(spans[0].top_radius_mm >= 0.3 && spans.last().unwrap().bottom_radius_mm >= 0.5);
     }
 
     #[test]
@@ -4449,17 +4894,19 @@ mod drawn_span_ramp_tests {
         profile.extend(repeat(0.8, 3));
         let spans = spans_of(&profile, 0.3, 0.8);
         assert_continuous(&spans, 11.0);
-        // The lone step is a shoulder: a span ends at 0.3 on z = 8.
-        let at_step = spans
-            .iter()
-            .find(|s| (s.bottom_z_mm - 8.0).abs() < 1e-12)
-            .expect("a span ends at the step");
-        assert!((at_step.bottom_radius_mm - 0.3).abs() < 1e-12, "{spans:?}");
+        // The lone step is a cone just above z = 8 (the span below it starts at
+        // 0.5 there, and the cone reaches 0.5 exactly on it): no shoulder.
         let below = spans
             .iter()
             .find(|s| (s.top_z_mm - 8.0).abs() < 1e-12)
             .expect("a span starts at the step");
         assert!((below.top_radius_mm - 0.5).abs() < 1e-12, "{spans:?}");
+        let cone = spans
+            .iter()
+            .find(|s| (s.bottom_z_mm - 8.0).abs() < 1e-12)
+            .expect("a cone ends on the step");
+        assert!((cone.bottom_radius_mm - 0.5).abs() < 1e-12, "{spans:?}");
+        assert!(cone.top_radius_mm < 0.5 && cone.top_radius_mm >= 0.3 - 1e-12, "{spans:?}");
         // The ramp (cuts at z = 5, 4, 3) is continuous.
         for z in [5.0, 4.0, 3.0] {
             for pair in spans.windows(2).filter(|p| (p[0].bottom_z_mm - z).abs() < 1e-12) {
