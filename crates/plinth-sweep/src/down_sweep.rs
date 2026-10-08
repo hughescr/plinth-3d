@@ -441,31 +441,118 @@ pub struct SizingPolicy {
 ///
 /// `r_t` is THIS run's tip radius, the area law at the contact slot, and the
 /// contact slot keeps the pure area law (the ball is the contact, so it is
-/// never raised). Then, with `c` the head's own `cos λmax`:
+/// never raised). Then, with the head's law `law` ([`crate::heads::Head::law`]:
+/// the planned one on every pass, the drawn one after
+/// [`resize_heads_to_drawn_posts`]):
 ///
 /// * head layers `k_joint+1` up to, not including, the contact slot (the
-///   ledger's last slot, layer `k_top - 1`): `head_section_mm(r_t, s(k), c)`,
-///   where `s(k)` is the axial distance from `D` of the head axis at the
-///   layer's z, clamped to `[0, |DK|]`;
-/// * the joint layer: `r_K,eff = final_joint_radius_mm(r_t, |DK|, c)`, the
-///   head law at the measured `|DK|` and the FINAL tip. `K` is frozen, so the
-///   lever is fixed whatever the ball's size: the joint follows the final tip
-///   down as well as up, and no planned value enters;
-/// * post layers below the joint: `post_section_mm(r_led, r_t, lever, c)`,
-///   with the lever `|DK|·(1 − σ/ℓ)` falling linearly down the post's chord
-///   from `K` to its base (`σ/ℓ` is the chord fraction at the layer's z). The
-///   post never narrows going down (the engine's own rule for a printed
-///   member), so the section is carried down as a running maximum that starts
-///   at `r_K,eff`: the post under `K` is never narrower than the ball.
+///   ledger's last slot, layer `k_top - 1`): `head_section_law_mm(r_t, s(k),
+///   law)`, where `s(k)` is the axial distance from `D` of the head axis at
+///   the layer's z, clamped to `[0, |DK|]`;
+/// * the joint layer: `r_K,eff = final_joint_radius_law_mm(r_t, |DK|, law)`,
+///   the head law at the measured `|DK|` and the FINAL tip. `K` is frozen, so
+///   the lever is fixed whatever the ball's size: the joint follows the final
+///   tip down as well as up, and no planned value enters;
+/// * post layers below the joint: `post_section_law_mm(r_led, r_t, lever,
+///   law)`, with the lever `|DK|·(1 − σ/ℓ)` falling linearly down the post's
+///   chord from `K` to its base (`σ/ℓ` is the chord fraction at the layer's
+///   z). The post never narrows going down (the engine's own rule for a
+///   printed member), so the section is carried down as a running maximum. It
+///   starts at the post's OWN section at the lever `|DK|`, NOT at the joint's
+///   radius (Craig's ruling A, v18: each part is sized for its own
+///   requirement; the joint size is never carried down the column).
 ///
-/// Returns the effective joint radius, or `None` when nothing was applied.
+/// The ledger on entry is the pure area law; a copy is kept in
+/// [`crate::heads::Head::ledger_radius_mm`] for the final re-size and a
+/// downgrade. Returns the effective joint radius, or `None` when nothing was
+/// applied.
+fn apply_head_minimum(strut: &mut SweepStrut, sizing: SizingPolicy) -> Option<f64> {
+    // On entry `radius_mm` is the pure area-law ledger (the sizing pass wrote it
+    // from scratch): keep a copy, the final re-size and a downgrade rebuild the
+    // strut from it.
+    let slots = strut.radius_mm.len();
+    let head = strut.head.as_mut()?;
+    head.ledger_radius_mm.clone_from(&strut.radius_mm);
+    let law = head.law();
+    size_head_from_ledger(strut, sizing, law, slots)
+}
+
+/// **Re-size every live headed strut for the post it is DRAWN with** (v19
+/// fix, Craig 2026-10-07: "size joints and posts for their ACTUAL lean").
+///
+/// Run once, after the last pass that re-routes or re-lands and before the
+/// downgrade and the finished-field census. For each headed strut that is
+/// drawn as a head, the post is the straight line the lowering draws from the
+/// EXACT joint `K` (not its cell centre) to the base
+/// ([`crate::adapter::drawn_post_ends`]): its lean gives `c = cos` (no clamp at
+/// the lean law's maximum: a post drawn at 60.9 degrees grows its joint) and
+/// the angle to the head's axis gives `|cos phi'|` and `sin phi'`, enveloped
+/// over the post's segments ([`crate::heads::HeadLaw::enveloped`]) and stored
+/// as [`crate::heads::Head::law_drawn`]. The head, joint and post slots are
+/// then rebuilt from the saved area-law ledger
+/// ([`crate::heads::Head::ledger_radius_mm`]) under that law, so a radius may
+/// SHRINK as well as grow. `K` and `|DK|` stay frozen. One pass over
+/// `struts`; returns how many were re-sized.
+pub fn resize_heads_to_drawn_posts(
+    grid: &Grid,
+    struts: &mut [SweepStrut],
+    sizing: SizingPolicy,
+) -> usize {
+    let mut resized = 0;
+    for strut in struts.iter_mut() {
+        let Some(head) = strut.head.as_ref() else {
+            continue;
+        };
+        let slots = strut.radius_mm.len();
+        if head.drawn_straight
+            || head.ledger_radius_mm.len() != slots
+            || !crate::slenderness::live(strut)
+        {
+            continue;
+        }
+        let (post_top, post_base) = crate::adapter::drawn_post_ends(
+            grid,
+            sizing.plate_z_mm,
+            sizing.layer_height_mm,
+            strut,
+        );
+        // The drawn post is one straight segment from `K` to the base.
+        let Some(segment) = crate::heads::HeadLaw::of_post(
+            head.unit,
+            std::array::from_fn(|axis| post_base[axis] - post_top[axis]),
+        ) else {
+            continue;
+        };
+        let Some(law) = crate::heads::HeadLaw::enveloped(&[segment]) else {
+            continue;
+        };
+        let Some(head) = strut.head.as_mut() else {
+            continue;
+        };
+        head.law_drawn = Some(law);
+        strut.radius_mm.clone_from(&head.ledger_radius_mm);
+        if size_head_from_ledger(strut, sizing, law, slots).is_some() {
+            resized += 1;
+        }
+    }
+    resized
+}
+
+/// The head, joint and post slots of `strut` under `law`, written over the
+/// ledger now in `radius_mm` (each slot is its ledger value or the law's
+/// section, whichever is larger). See [`apply_head_minimum`] for the layout.
+/// Returns the joint's radius.
 #[expect(
     clippy::cast_precision_loss,
     reason = "layer indices bounded by the plan's own layer count are exact in f64"
 )]
-fn apply_head_minimum(strut: &mut SweepStrut, sizing: SizingPolicy) -> Option<f64> {
+fn size_head_from_ledger(
+    strut: &mut SweepStrut,
+    sizing: SizingPolicy,
+    law: crate::heads::HeadLaw,
+    slots: usize,
+) -> Option<f64> {
     let head = strut.head.as_ref()?;
-    let slots = strut.radius_mm.len();
     // The ledger spans layers `k_bottom ..= k_top - 1` (`ledger_len`), so the
     // contact slot is the LAST slot, and the joint must stand under it.
     let alive = strut.k_bottom != usize::MAX
@@ -477,7 +564,6 @@ fn apply_head_minimum(strut: &mut SweepStrut, sizing: SizingPolicy) -> Option<f6
         return None;
     }
     let h = sizing.layer_height_mm;
-    let c = head.cos_lean_max;
     let r_t = strut.radius_mm[slots - 1];
     let joint_slot = head.k_joint - strut.k_bottom;
     let z_of = |layer: usize| sizing.plate_z_mm + layer as f64 * h;
@@ -489,7 +575,7 @@ fn apply_head_minimum(strut: &mut SweepStrut, sizing: SizingPolicy) -> Option<f6
     // final tip below the planned one gets the smaller ball).
     let to_k: [f64; 3] = std::array::from_fn(|axis| head.joint_mm[axis] - head.contact_mm[axis]);
     let length = to_k.iter().map(|v| v * v).sum::<f64>().sqrt();
-    let r_k_eff = crate::heads::final_joint_radius_mm(r_t, length, c);
+    let r_k_eff = crate::heads::final_joint_radius_law_mm(r_t, length, law);
     // The head: axial distance from D along u to the layer's z.
     let u_z = head.unit[2];
     let mut section = Vec::with_capacity(slots);
@@ -500,13 +586,17 @@ fn apply_head_minimum(strut: &mut SweepStrut, sizing: SizingPolicy) -> Option<f6
         } else {
             0.0
         };
-        section.push((slot, crate::heads::head_section_mm(r_t, s, c)));
+        section.push((slot, crate::heads::head_section_law_mm(r_t, s, law)));
     }
     // The post: the chord from K down to the base at the post's own z span.
     let k_z = head.joint_mm[2];
     let base_z = z_of(strut.k_bottom);
     let span = k_z - base_z;
-    let mut running = r_k_eff;
+    // The running maximum starts at the post's own section at the full lever
+    // `|DK|` over the ledger just under `K`, not at the joint's radius.
+    let mut running = joint_slot.checked_sub(1).map_or(0.0, |below| {
+        crate::heads::post_section_law_mm(strut.radius_mm[below], r_t, length, law)
+    });
     for slot in (0..joint_slot).rev() {
         let z = z_of(strut.k_bottom + slot);
         let fraction = if span > f64::EPSILON {
@@ -515,7 +605,7 @@ fn apply_head_minimum(strut: &mut SweepStrut, sizing: SizingPolicy) -> Option<f6
             1.0
         };
         let lever = length * (1.0 - fraction);
-        let wanted = crate::heads::post_section_mm(strut.radius_mm[slot], r_t, lever, c);
+        let wanted = crate::heads::post_section_law_mm(strut.radius_mm[slot], r_t, lever, law);
         running = running.max(wanted).max(strut.radius_mm[slot]);
         section.push((slot, running));
     }

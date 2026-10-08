@@ -2776,11 +2776,23 @@ pub fn run_sweep_with_holes(
     // or leaves a bare neck under the rasterisation allowance, is drawn as the
     // straight tip (the post keeps its route; the members joined to it follow
     // the line now drawn) and counted in the heads line.
-    let heads_downgraded = head_registry.map_or_else(Vec::new, |(profiles, rule)| {
+    //
+    // **FIRST, EVERY HEAD IS SIZED FOR THE POST IT IS DRAWN WITH** (v19 fix,
+    // 2026-10-07; Craig approved sizing for the ACTUAL lean, not the 57.5 degree
+    // worst case). After the last pass that re-routes or re-lands, the head,
+    // joint and post are rebuilt from the saved area-law ledger under the
+    // exact law of the drawn post (`c` and the head-to-post angle measured from
+    // the exact K). K and |DK| stay frozen; a radius may shrink or grow.
+    // The downgrade below reads these sizes.
+    if head_registry.is_some() {
+        down_sweep::resize_heads_to_drawn_posts(&grid, &mut struts, sizing);
+    }
+    let head_downgrades = head_registry.map_or_else(heads::HeadDowngrades::default, |(profiles, rule)| {
         heads::downgrade_grown_heads(&mut struts, rule.allowance_mm, |radius| {
             profiles.ball_factor(radius)
         })
     });
+    let heads_downgraded = head_downgrades.downgraded;
     landings.finished = landing_check::check_landings(&struts, height);
     landings.load_gap_mm2 =
         outcome.injected_load_mm2 - outcome.plate_reaction_mm2 - outcome.uncarried_load_mm2;
@@ -2971,6 +2983,7 @@ pub fn run_sweep_with_holes(
     report.counters.island_hex_bound = greedy.island_hex_bound;
     greedy.heads.publish(&mut report.heads);
     report.heads.downgraded_after_sizing = heads_downgraded;
+    report.heads.kept_short_of_clearance = head_downgrades.kept_with_warning;
 
     // ------------------------------------------------ what each tip seats INTO
     //

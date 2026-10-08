@@ -147,6 +147,9 @@ fn fixture_planned(headed: bool, planned_tip_mm: Option<f64>) -> Fixture {
         cells: head_cells.clone(),
         ball_allowance_mm: 0.0,
         drawn_straight: false,
+        law_planned: plinth_sweep::heads::HeadLaw::envelope(c),
+        law_drawn: None,
+        ledger_radius_mm: Vec::new(),
     };
     let mut path = vec![joint_cell; k_joint + 1];
     path.extend_from_slice(&head_cells);

@@ -114,9 +114,30 @@ pub struct Head {
     /// post are moved by the displacement between the post's old axis (`K` to
     /// the base) and the straight line now drawn.
     pub drawn_straight: bool,
+    /// The law the head was PLANNED with: the direction of the admissible
+    /// post that gave the largest joint ([`solve_joint_for_axis`]). Every pass
+    /// before the final re-size sizes the head, joint and post on it.
+    pub law_planned: HeadLaw,
+    /// The law the head is DRAWN with: `c` = cos of the drawn post's lean and
+    /// the head-to-post angle `phi'` measured from the exact `K`
+    /// ([`HeadLaw::of_post`]). `None` until the final re-size
+    /// ([`crate::down_sweep::resize_heads_to_drawn_posts`]) has run.
+    pub law_drawn: Option<HeadLaw>,
+    /// The area-law ledger radii of the whole strut, one per slot, saved
+    /// before the head minimum was applied on the last down-sweep pass. The
+    /// final re-size and a downgrade rebuild the strut from it. Empty until
+    /// the first down-sweep pass has run.
+    pub ledger_radius_mm: Vec<f64>,
 }
 
 impl Head {
+    /// The law the head is drawn with: the drawn one once the final re-size
+    /// has run, the planned one before it.
+    #[must_use]
+    pub fn law(&self) -> HeadLaw {
+        self.law_drawn.unwrap_or(self.law_planned)
+    }
+
     /// The gap the joint law reads: `g + hb`, so `|DK| = lever_gap_mm + r_K`.
     #[must_use]
     pub fn lever_gap_mm(&self) -> f64 {
@@ -216,12 +237,246 @@ pub fn solve_bend(
     })
 }
 
+/// **The two angles that size a head, joint and post** (the exact two-force
+/// law, plan `heads-v19-fixes-plan.md` section "Physics check"). The post
+/// pushes along its own axis with `F/c`, where `c = cos` of the post's lean
+/// from vertical. The head sees that force at the angle `phi'` between the
+/// head's axis line and the post's axis line: `cos phi'` of it is axial and
+/// `sin phi'` of it is transverse, and the transverse part acts through the
+/// lever `s`. The head's section is then
+///
+/// ```text
+/// r(s)³ = (r_t²/c) · ( r · |cos phi'| + 4 · s · sin phi' )
+/// ```
+///
+/// and the post's, at a `lever` below the joint over a ledger section `r_led`,
+/// `r³ = r_led²·r + (4·r_t²/c) · sin phi' · lever`. Both terms are physics.
+/// [`HeadLaw::envelope`] (`|cos| = sin = 1`) is the law's upper bound for
+/// every post the lean law admits, and the form the code used before.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeadLaw {
+    /// `c`: cosine of the post's lean from vertical.
+    pub cos_lean: f64,
+    /// `|cos phi'|`.
+    pub cos_phi_abs: f64,
+    /// `sin phi'`.
+    pub sin_phi: f64,
+}
+
+impl HeadLaw {
+    /// The envelope at `c`: `|cos phi'| = sin phi' = 1`.
+    #[must_use]
+    pub const fn envelope(cos_lean: f64) -> Self {
+        Self {
+            cos_lean,
+            cos_phi_abs: 1.0,
+            sin_phi: 1.0,
+        }
+    }
+
+    /// The law of a post that runs along the unit direction `post_dir` (from
+    /// `K` toward the base) under a head whose axis is the unit `head_unit`.
+    /// `c` is read off the post (no clamp at the lean law's maximum: a post
+    /// that leans further than the law admits grows its joint). `None` where
+    /// the post does not descend.
+    #[must_use]
+    pub fn of_post(head_unit: [f64; 3], post_dir: [f64; 3]) -> Option<Self> {
+        let post = vec3::normalize(post_dir)?;
+        let unit = vec3::normalize(head_unit)?;
+        let cos_lean = -post[2];
+        if !(cos_lean.is_finite() && cos_lean > 0.0) {
+            return None;
+        }
+        let along = vec3::dot(unit, post).clamp(-1.0, 1.0);
+        Some(Self {
+            cos_lean,
+            cos_phi_abs: along.abs(),
+            sin_phi: (1.0 - along * along).max(0.0).sqrt(),
+        })
+    }
+
+    /// The larger of each angle term over `laws` (the head and joint are drawn
+    /// for the steepest and the most side-loading post segment alike), with
+    /// the smallest `c`. `None` for no law.
+    #[must_use]
+    pub fn enveloped(laws: &[Self]) -> Option<Self> {
+        let (first, rest) = laws.split_first()?;
+        Some(rest.iter().fold(*first, |acc, law| Self {
+            cos_lean: acc.cos_lean.min(law.cos_lean),
+            cos_phi_abs: acc.cos_phi_abs.max(law.cos_phi_abs),
+            sin_phi: acc.sin_phi.max(law.sin_phi),
+        }))
+    }
+}
+
+/// The head's section at axial distance `s_mm` from the contact centre under
+/// the law `law`: the root of `r³ = (r_t²/c)(r·|cos phi'| + 4·s·sin phi')`,
+/// never thinner than the contact `r_t` (a head with no axial or transverse
+/// load is still as thick as the area-law tip it carries). At the envelope
+/// and `s = 0` this is `r_t/√c`, the neck's start.
+#[must_use]
+pub fn head_section_law_mm(tip_radius_mm: f64, s_mm: f64, law: HeadLaw) -> f64 {
+    let root_a = tip_radius_mm / law.cos_lean.sqrt();
+    let ledger = root_a * law.cos_phi_abs.sqrt();
+    section_radius_mm(ledger, root_a, s_mm * law.sin_phi).max(tip_radius_mm)
+}
+
 /// The head's section at axial distance `s_mm` from the contact centre:
-/// `r³ = (r_t²/c)(r + 4s)`. At `s = 0` this is `r_t/√c`, the neck's start.
+/// `r³ = (r_t²/c)(r + 4s)`, the envelope. At `s = 0` this is `r_t/√c`, the
+/// neck's start.
 #[must_use]
 pub fn head_section_mm(tip_radius_mm: f64, s_mm: f64, cos_lean_max: f64) -> f64 {
-    let ledger = tip_radius_mm / cos_lean_max.sqrt();
-    section_radius_mm(ledger, ledger, s_mm)
+    head_section_law_mm(tip_radius_mm, s_mm, HeadLaw::envelope(cos_lean_max))
+}
+
+/// One candidate post direction's joint: the root of
+/// `r³ = a·r·|cos phi'| + 4·a·sin phi'·(g' + r)`, `a = r_t²/c`, i.e. the head
+/// law at the lever `|DK| = g' + r`. `P` and `Q` are the cubic `r³ = P·r + Q`.
+fn joint_cubic(a: f64, cos_phi_abs: f64, sin_phi: f64, lever_gap_mm: f64) -> (f64, f64) {
+    (
+        a * (cos_phi_abs + 4.0 * sin_phi),
+        4.0 * a * sin_phi * lever_gap_mm,
+    )
+}
+
+/// The positive root of `r³ = p·r + q` (`p, q >= 0`), by bisection.
+fn cubic_root(p: f64, q: f64) -> f64 {
+    let (mut low, mut high) = (0.0_f64, p.sqrt() + q.cbrt());
+    for _ in 0..BISECTIONS {
+        let mid = 0.5 * (low + high);
+        if mid * (mid * mid - p) - q >= 0.0 {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+    high
+}
+
+/// Lean steps of the placement envelope's direction grid, `0 ..= λmax`.
+const ENVELOPE_LEAN_STEPS: usize = 24;
+/// Azimuth steps of the grid, `0 ..= π` (the law is symmetric about the head's
+/// own vertical plane).
+const ENVELOPE_AZIMUTH_STEPS: usize = 64;
+/// Shrink rounds of the local refinement around the grid's best direction: a
+/// numerical resolution (the maximum is smooth), not a physical number.
+const ENVELOPE_REFINE_ROUNDS: usize = 40;
+
+/// **The joint of a head axis `unit` at the placement, as the maximum of the
+/// exact law over every admissible post** (a post pointing down with a lean
+/// in `[0, λmax]`, `cos λmax = cos_lean_max`, at every azimuth).
+///
+/// For a post at lean `θ` and azimuth `α` from the head's own vertical plane,
+/// `cos phi' = cos φu·cos θ + sin φu·sin θ·cos α`, where `φu` is the head
+/// axis's angle from straight down. The joint is the root of the cubic of
+/// [`joint_cubic`] at the planned lever `|DK| = g' + r_K`; the largest root is
+/// found on a fixed dense grid of `(θ, α)` and polished by a shrinking local
+/// search, so it is a numerical maximum, not a threshold. It carries every
+/// post the lean law admits, so a later re-route can never overload the joint.
+/// Never under the area-law tip `r_t`. `None` where it exceeds
+/// `max_radius_mm`. Also returns the law of the winning direction, the one the
+/// passes before the final re-size size on.
+#[must_use]
+pub fn solve_joint_for_axis(
+    tip_radius_mm: f64,
+    lever_gap_mm: f64,
+    unit: [f64; 3],
+    cos_lean_max: f64,
+    max_radius_mm: f64,
+) -> Option<(BendSolution, HeadLaw)> {
+    let usable = tip_radius_mm.is_finite()
+        && tip_radius_mm > 0.0
+        && lever_gap_mm.is_finite()
+        && lever_gap_mm >= 0.0
+        && cos_lean_max.is_finite()
+        && cos_lean_max > 0.0
+        && max_radius_mm.is_finite();
+    let unit = vec3::normalize(unit).filter(|_| usable)?;
+    let cos_up = (-unit[2]).clamp(-1.0, 1.0);
+    let (cos_u, sin_u) = (cos_up, (1.0 - cos_up * cos_up).max(0.0).sqrt());
+    let lean_max = cos_lean_max.clamp(f64::MIN_POSITIVE, 1.0).acos();
+    let tip_squared = tip_radius_mm * tip_radius_mm;
+    // The law at a `(lean, azimuth)`.
+    let law_at = |lean: f64, azimuth: f64| -> HeadLaw {
+        let cos_phi = (cos_u * lean.cos() + sin_u * lean.sin() * azimuth.cos()).clamp(-1.0, 1.0);
+        HeadLaw {
+            cos_lean: lean.cos().max(f64::MIN_POSITIVE),
+            cos_phi_abs: cos_phi.abs(),
+            sin_phi: (1.0 - cos_phi * cos_phi).max(0.0).sqrt(),
+        }
+    };
+    let excess = |radius: f64, law: HeadLaw| -> f64 {
+        let a = tip_squared / law.cos_lean;
+        let (p, q) = joint_cubic(a, law.cos_phi_abs, law.sin_phi, lever_gap_mm);
+        radius * (radius * radius - p) - q
+    };
+    // Running best: the radius, the law that gave it and its `(lean,
+    // azimuth)`. The area-law tip is the floor (`|cos phi'| = 0` and `s = 0`
+    // give a root of zero); a post exactly along the head carries the contact
+    // with no transverse load.
+    let mut best = (tip_radius_mm, HeadLaw { cos_lean: 1.0, cos_phi_abs: 1.0, sin_phi: 0.0 });
+    let mut winner = (0.0_f64, 0.0_f64);
+    // The root is the unique positive zero of a function that is negative
+    // below it and positive above, so a candidate beats the best exactly when
+    // it is still negative at the best radius.
+    let mut consider = |lean: f64, azimuth: f64| {
+        let law = law_at(lean, azimuth);
+        if excess(best.0, law) < 0.0 {
+            let a = tip_squared / law.cos_lean;
+            let (p, q) = joint_cubic(a, law.cos_phi_abs, law.sin_phi, lever_gap_mm);
+            best = (cubic_root(p, q).max(best.0), law);
+            Some((lean, azimuth))
+        } else {
+            None
+        }
+    };
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "grid step counts of at most 64 are exact in f64"
+    )]
+    let (lean_step, azimuth_step) = (
+        lean_max / ENVELOPE_LEAN_STEPS as f64,
+        core::f64::consts::PI / ENVELOPE_AZIMUTH_STEPS as f64,
+    );
+    for i in 0..=ENVELOPE_LEAN_STEPS {
+        #[expect(clippy::cast_precision_loss, reason = "a grid index is exact in f64")]
+        let lean = lean_step * i as f64;
+        for j in 0..=ENVELOPE_AZIMUTH_STEPS {
+            #[expect(clippy::cast_precision_loss, reason = "a grid index is exact in f64")]
+            let azimuth = azimuth_step * j as f64;
+            winner = consider(lean, azimuth).unwrap_or(winner);
+        }
+    }
+    // Polish: a compass search around the grid's winner on the same domain,
+    // its step halving each round.
+    let (mut step_lean, mut step_azimuth) = (lean_step, azimuth_step);
+    for _ in 0..ENVELOPE_REFINE_ROUNDS {
+        let centre = winner;
+        for dl in [-1.0_f64, 0.0, 1.0] {
+            for da in [-1.0_f64, 0.0, 1.0] {
+                winner = consider(
+                    (centre.0 + dl * step_lean).clamp(0.0, lean_max),
+                    (centre.1 + da * step_azimuth).clamp(0.0, core::f64::consts::PI),
+                )
+                .unwrap_or(winner);
+            }
+        }
+        step_lean *= 0.5;
+        step_azimuth *= 0.5;
+    }
+    let (radius, law) = best;
+    if radius > max_radius_mm {
+        return None;
+    }
+    let length_mm = lever_gap_mm + radius;
+    Some((
+        BendSolution {
+            joint_radius_mm: radius,
+            length_mm,
+            lever_mm: length_mm,
+        },
+        law,
+    ))
 }
 
 /// The joint: `r_K³ = (r_t²/c)(r_K + 4(g + r_K))`, solved over
@@ -257,6 +512,12 @@ pub fn final_joint_radius_mm(tip_radius_mm: f64, head_length_mm: f64, cos_lean_m
     head_section_mm(tip_radius_mm, head_length_mm, cos_lean_max)
 }
 
+/// [`final_joint_radius_mm`] under the exact law `law`.
+#[must_use]
+pub fn final_joint_radius_law_mm(tip_radius_mm: f64, head_length_mm: f64, law: HeadLaw) -> f64 {
+    head_section_law_mm(tip_radius_mm, head_length_mm, law)
+}
+
 /// **The head drawn as a polyline of straight frusta that never goes under
 /// its section law** ([`head_section_mm`]): `(s, r)` knots from the contact
 /// centre (`s = 0`) to the joint (`s = length_mm`), where `s` is the distance
@@ -273,25 +534,58 @@ pub fn final_joint_radius_mm(tip_radius_mm: f64, head_length_mm: f64, cos_lean_m
 /// to the contact. A head of no length is the single point at the contact.
 #[must_use]
 pub fn head_polyline_mm(tip_radius_mm: f64, length_mm: f64, cos_lean_max: f64) -> Vec<[f64; 2]> {
-    const TANGENTS: usize = 4;
-    let start = head_section_mm(tip_radius_mm, 0.0, cos_lean_max);
+    head_polyline_law_mm(tip_radius_mm, length_mm, HeadLaw::envelope(cos_lean_max))
+}
+
+/// [`head_polyline_mm`] under the exact law `law` (`r³ = P·r + Q·s` with
+/// `P = (r_t²/c)|cos phi'|` and `Q = 4(r_t²/c) sin phi'`; the slope is
+/// `Q/(3r² − P)`, falling as `r` grows, so the law is concave and the tangents
+/// lie over it). Where `P` is under `r_t²` the law's root at the contact is
+/// thinner than the tip, and the section is floored at `r_t` until the root
+/// passes it at `s₀`; the polyline then holds `r_t` to `s₀` and puts its three
+/// tangents on `[s₀, L]`, so it is still at most four frusta and never under
+/// the floored law. A head the floor holds to its end is the straight
+/// cylinder of radius `r_t`.
+#[must_use]
+pub fn head_polyline_law_mm(tip_radius_mm: f64, length_mm: f64, law: HeadLaw) -> Vec<[f64; 2]> {
+    let start = head_section_law_mm(tip_radius_mm, 0.0, law);
     if !(length_mm.is_finite() && length_mm > 0.0) {
         return vec![[0.0, start]];
     }
-    let a = tip_radius_mm * tip_radius_mm / cos_lean_max;
+    let a = tip_radius_mm * tip_radius_mm / law.cos_lean;
+    let p = a * law.cos_phi_abs;
+    let q = 4.0 * a * law.sin_phi;
+    // Where the floor stops holding: the root passes `r_t` at `s₀`.
+    let floor_end = if p < tip_radius_mm * tip_radius_mm {
+        if q > 0.0 {
+            (tip_radius_mm * (tip_radius_mm * tip_radius_mm - p)) / q
+        } else {
+            f64::INFINITY
+        }
+    } else {
+        0.0
+    };
+    if floor_end >= length_mm {
+        return vec![[0.0, start], [length_mm, start]];
+    }
+    let tangent_count = if floor_end > 0.0 { 3_usize } else { 4_usize };
+    let span = length_mm - floor_end;
     // The tangent points `(s, r, slope)`.
-    let tangents: Vec<[f64; 3]> = (0..TANGENTS)
+    let tangents: Vec<[f64; 3]> = (0..tangent_count)
         .map(|index| {
             #[expect(
                 clippy::cast_precision_loss,
                 reason = "a tangent index of at most 3 is exact in f64"
             )]
-            let s = length_mm * (index as f64 / (TANGENTS - 1) as f64).powi(3);
-            let r = head_section_mm(tip_radius_mm, s, cos_lean_max);
-            [s, r, 4.0 * a / (3.0 * r * r - a)]
+            let s = floor_end + span * (index as f64 / (tangent_count - 1) as f64).powi(3);
+            let r = head_section_law_mm(tip_radius_mm, s, law);
+            [s, r, q / (3.0 * r * r - p)]
         })
         .collect();
     let mut knots = vec![[0.0, start]];
+    if floor_end > 0.0 {
+        knots.push([floor_end, tip_radius_mm]);
+    }
     for pair in tangents.windows(2) {
         let [s_lo, r_lo, m_lo] = pair[0];
         let [s_hi, r_hi, m_hi] = pair[1];
@@ -306,7 +600,7 @@ pub fn head_polyline_mm(tip_radius_mm: f64, length_mm: f64, cos_lean_max: f64) -
         .clamp(s_lo, s_hi);
         knots.push([s, r_lo + m_lo * (s - s_lo)]);
     }
-    knots.push([length_mm, head_section_mm(tip_radius_mm, length_mm, cos_lean_max)]);
+    knots.push([length_mm, head_section_law_mm(tip_radius_mm, length_mm, law)]);
     knots
 }
 
@@ -320,10 +614,27 @@ pub fn post_section_mm(
     lever_mm: f64,
     cos_lean_max: f64,
 ) -> f64 {
+    post_section_law_mm(
+        ledger_radius_mm,
+        tip_radius_mm,
+        lever_mm,
+        HeadLaw::envelope(cos_lean_max),
+    )
+}
+
+/// [`post_section_mm`] under the exact law `law`:
+/// `r³ = r_led²·r + (4r_t²/c)·sin phi'·lever`.
+#[must_use]
+pub fn post_section_law_mm(
+    ledger_radius_mm: f64,
+    tip_radius_mm: f64,
+    lever_mm: f64,
+    law: HeadLaw,
+) -> f64 {
     section_radius_mm(
         ledger_radius_mm,
-        tip_radius_mm / cos_lean_max.sqrt(),
-        lever_mm,
+        tip_radius_mm / law.cos_lean.sqrt(),
+        lever_mm * law.sin_phi,
     )
 }
 
@@ -380,6 +691,44 @@ pub struct HeadsOutcome {
     /// the clearance (stand-off below `g`): the member ids. See
     /// [`downgrade_grown_heads`].
     pub downgraded_after_sizing: Vec<u32>,
+    /// Heads KEPT although the final sizing left the joint's stand-off under
+    /// `g` or the bare neck under the allowance (emit and warn, never
+    /// refuse): one warning per member, in id order. See
+    /// [`downgrade_grown_heads`].
+    pub kept_short_of_clearance: Vec<HeadClearanceWarning>,
+}
+
+/// The warning for a head kept although its drawn clearance is short.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeadClearanceWarning {
+    /// The member's id.
+    pub member: u32,
+    /// The joint's stand-off from the seat plane, `(K - D)·u - r_K`, mm.
+    pub standoff_mm: f64,
+    /// The contact ball's height over the plane at the final tip, `2R`, mm.
+    pub ball_height_mm: f64,
+    /// The bare neck, `stand-off - ball height`, mm.
+    pub neck_mm: f64,
+}
+
+impl std::fmt::Display for HeadClearanceWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "member {}: stand-off {:.3} mm, ball height {:.3} mm, neck {:.3} mm",
+            self.member, self.standoff_mm, self.ball_height_mm, self.neck_mm
+        )
+    }
+}
+
+/// What [`downgrade_grown_heads`] did.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HeadDowngrades {
+    /// Heads that could not be drawn (no joint slot): given up to the
+    /// straight tip, in strut order.
+    pub downgraded: Vec<u32>,
+    /// Heads kept with a short stand-off or neck, one warning each.
+    pub kept_with_warning: Vec<HeadClearanceWarning>,
 }
 
 // ---------------------------------------------------------------------------
@@ -510,9 +859,12 @@ pub fn plan_head(req: &HeadRequest, rule: &HeadRule, grid: &Grid) -> Result<Head
     // The joint stands `g` beyond the ball's far side, not beyond the plane:
     // the ball stands up to `2R` over the plane, and the lever is `|DK|`.
     let ball_allowance_mm = ball_allowance_of(req.ball_radius_mm);
-    let Some(joint) = solve_joint(
+    // The joint carries EVERY post the lean law admits under THIS head axis
+    // (the numerical maximum of the exact law, not the 90 degree envelope).
+    let Some((joint, law_planned)) = solve_joint_for_axis(
         req.tip_radius_lb_mm,
         rule.gap_mm + ball_allowance_mm,
+        unit,
         rule.cos_lean_max,
         rule.max_radius_mm,
     ) else {
@@ -562,6 +914,9 @@ pub fn plan_head(req: &HeadRequest, rule: &HeadRule, grid: &Grid) -> Result<Head
         cells,
         ball_allowance_mm,
         drawn_straight: false,
+        law_planned,
+        law_drawn: None,
+        ledger_radius_mm: Vec::new(),
     })
 }
 
@@ -608,37 +963,40 @@ pub fn planned_tip_radius_mm(
     estimate
 }
 
-/// **Downgrade every head the final sizing grew across the clearance or onto
-/// its own ball** (orchestrator ruling 2026-10-06). A head is frozen at
-/// placement and only its radii grow. It is given up when, at the FINAL tip
-/// radius, either
+/// **Give up every head that cannot be drawn, and warn on every head whose
+/// drawn clearance is short** (orchestrator ruling 2026-10-07, after v19: the
+/// downgrade left joint-sized posts under straight tips, a 0.965 mm column on
+/// the Cylinder, and the drawn file was worse than either form).
 ///
-/// * the joint's stand-off from the seat plane, `(K - D)·u - r_K`, is below the
-///   gap `g` (the sphere stands inside the clearance and would cut the model), or
-/// * the bare neck is under `neck_min_mm`: the stand-off less the ball's
-///   height over the plane, `2R` at the final tip radius (an upper bound: a
-///   seated ball stands lower, so the drawn neck is never shorter than this).
-///   Below it the ball and the joint sphere run together and nothing is left
-///   to hinge on.
+/// A head is frozen at placement and only its radii change. It is given up
+/// ONLY when the ledger has no joint slot to draw it from. Such a member goes
+/// back to today's straight tip: the arm is DRAWN straight from its seat to
+/// its base ([`Head::drawn_straight`]), and EVERY slot of the strut is reset
+/// to the area-law ledger saved before the head minimum
+/// ([`Head::ledger_radius_mm`]), so no joint-sized slot stays under the
+/// straight tip. The strut keeps the head, its landing, its base AND its path
+/// (it is NOT re-routed): the members that landed on the post were placed
+/// against the cells it stood in, and the drawing moves them by the
+/// displacement between the old axis and the straight line
+/// ([`crate::adapter`]).
 ///
-/// Such a member goes back to today's straight tip: the arm is DRAWN straight
-/// from its seat to its base ([`Head::drawn_straight`]). The strut keeps the
-/// head, its landing, its base AND its path (it is NOT re-routed): the members
-/// that landed on the post were placed against the cells it stood in, and the
-/// drawing moves them by the displacement between the old axis and the
-/// straight line ([`crate::adapter`]). Its section from the joint up falls
-/// back to the area law at the tip (the head minimum goes with the head). A
-/// head the ledger cannot draw (no joint slot) is given up the same way.
+/// When, at the FINAL tip radius, the joint's stand-off from the seat plane,
+/// `(K - D)·u - r_K`, is below the gap `g`, or the bare neck (the stand-off
+/// less the ball's height over the plane, `2R`, an upper bound) is under
+/// `neck_min_mm`, the head is KEPT, `drawn_straight` stays false, and the
+/// member is named in [`HeadDowngrades::kept_with_warning`] with its
+/// stand-off, ball height and neck. Emit and warn, never refuse: a straight
+/// tip on a steep face is the defect the head exists to cure.
 ///
 /// `ball_factor_at` is the registered contact-sphere factor at a tip radius.
 /// One pass over `struts`, after the last sizing and before anything reads the
-/// finished field. Returns the downgraded members' ids, in id order.
+/// finished field.
 pub fn downgrade_grown_heads(
     struts: &mut [crate::SweepStrut],
     neck_min_mm: f64,
     ball_factor_at: impl Fn(f64) -> f64,
-) -> Vec<u32> {
-    let mut downgraded = Vec::new();
+) -> HeadDowngrades {
+    let mut outcome = HeadDowngrades::default();
     for strut in struts.iter_mut() {
         let Some(head) = strut.head.as_ref() else {
             continue;
@@ -649,28 +1007,32 @@ pub fn downgrade_grown_heads(
         let along = vec3::dot(vec3::sub(head.joint_mm, head.contact_mm), head.unit);
         let joint_slot = head.k_joint.checked_sub(strut.k_bottom);
         let joint_radius = joint_slot.and_then(|slot| strut.radius_mm.get(slot).copied());
-        let tip = strut.tip_radius_mm();
-        let ball_height = ball_allowance_of(ball_factor_at(tip) * tip);
-        let grown = joint_radius.is_none_or(|radius| {
-            let standoff = along - radius;
-            standoff < head.gap_mm - 1e-9 || standoff - ball_height < neck_min_mm - 1e-9
-        });
-        if !grown {
-            continue;
-        }
-        downgraded.push(strut.id);
-        if let Some(head) = strut.head.as_mut() {
+        let Some(joint_radius) = joint_radius else {
+            // The head cannot be drawn: today's straight tip, from the ledger.
+            outcome.downgraded.push(strut.id);
+            let slots = strut.radius_mm.len();
+            let Some(head) = strut.head.as_mut() else {
+                continue;
+            };
             head.drawn_straight = true;
-        }
-        let slots = strut.radius_mm.len();
-        let (Some(joint_slot), Some(&tip)) = (joint_slot, strut.radius_mm.last()) else {
+            if head.ledger_radius_mm.len() == slots {
+                strut.radius_mm.clone_from(&head.ledger_radius_mm);
+            }
             continue;
         };
-        for radius in strut.radius_mm.iter_mut().take(slots).skip(joint_slot) {
-            *radius = tip;
+        let tip = strut.tip_radius_mm();
+        let ball_height = ball_allowance_of(ball_factor_at(tip) * tip);
+        let standoff = along - joint_radius;
+        if standoff < head.gap_mm - 1e-9 || standoff - ball_height < neck_min_mm - 1e-9 {
+            outcome.kept_with_warning.push(HeadClearanceWarning {
+                member: strut.id,
+                standoff_mm: standoff,
+                ball_height_mm: ball_height,
+                neck_mm: standoff - ball_height,
+            });
         }
     }
-    downgraded
+    outcome
 }
 
 /// One tip's question to [`placement_normals`].
@@ -1054,8 +1416,9 @@ pub fn check_head(
 #[cfg(test)]
 mod tests {
     use super::{
-        final_joint_radius_mm, head_polyline_mm, head_section_mm, post_section_mm,
-        section_radius_mm, solve_bend, solve_joint, Head,
+        final_joint_radius_law_mm, final_joint_radius_mm, head_polyline_law_mm, head_polyline_mm,
+        head_section_law_mm, head_section_mm, post_section_law_mm, post_section_mm,
+        section_radius_mm, solve_bend, solve_joint, solve_joint_for_axis, Head, HeadLaw,
     };
     use crate::{Landing, SeatFace, SweepStrut};
 
@@ -1156,6 +1519,132 @@ mod tests {
         }
         // No length: only the contact point.
         assert_eq!(head_polyline_mm(0.05, 0.0, c).len(), 1);
+        // The exact law (HeadLaw), including the floored cases: never under
+        // the law, the ends exact to the bit, the knots strictly rising in s,
+        // at most four frusta, and the envelope law is the old polyline.
+        for tip in [0.05, 0.115, 0.15] {
+            assert_eq!(
+                head_polyline_law_mm(tip, length, HeadLaw::envelope(c)),
+                head_polyline_mm(tip, length, c),
+                "the envelope is the old polyline, bit for bit"
+            );
+            for (cos_lean, cos_phi_abs, sin_phi) in [
+                (c, 1.0, 1.0),
+                (1.0, 0.447, 0.894),
+                (0.486, 0.217, 0.976),
+                (c, 0.3, 0.95),
+                (1.0, 0.0, 1.0),
+                (1.0, 1.0, 0.0),
+                (0.8, 0.2, 0.0),
+            ] {
+                let law = HeadLaw { cos_lean, cos_phi_abs, sin_phi };
+                let knots = head_polyline_law_mm(tip, length, law);
+                let bits = |point: [f64; 2]| point.map(f64::to_bits);
+                assert!(knots.len() >= 2 && knots.len() <= 5, "{law:?}: {knots:?}");
+                assert_eq!(bits(knots[0]), bits([0.0, head_section_law_mm(tip, 0.0, law)]), "{law:?}");
+                assert_eq!(
+                    bits(knots[knots.len() - 1]),
+                    bits([length, head_section_law_mm(tip, length, law)]),
+                    "{law:?}"
+                );
+                assert!(knots.windows(2).all(|w| w[0][0] < w[1][0]), "{law:?}: {knots:?}");
+                for step in 0..=1000 {
+                    let s = length * f64::from(step) / 1000.0;
+                    let at = knots
+                        .windows(2)
+                        .find(|w| s <= w[1][0])
+                        .map(|w| w[0][1] + (w[1][1] - w[0][1]) * (s - w[0][0]) / (w[1][0] - w[0][0]))
+                        .expect("s lies in the polyline");
+                    let under = head_section_law_mm(tip, s, law);
+                    assert!(at >= under - 1.0e-9, "{law:?} tip {tip}, s {s}: {at} under {under}");
+                    assert!(under >= tip - 1e-15, "the section is never thinner than the contact");
+                }
+            }
+        }
+    }
+
+    /// The exact law is the envelope at `|cos phi'| = sin phi' = 1`; a head
+    /// whose post runs along its axis and stands straight (`phi' = 0`,
+    /// `c = 1`) carries no transverse load and is the contact's own radius at
+    /// every `s`; the post law takes the same angle.
+    #[test]
+    fn the_exact_law_is_the_envelope_at_its_corner_and_the_tip_when_aligned() {
+        let c = cos_lean();
+        for tip in [0.05, 0.115] {
+            for s in [0.0, 0.3, 1.344] {
+                assert_eq!(
+                    head_section_law_mm(tip, s, HeadLaw::envelope(c)).to_bits(),
+                    head_section_mm(tip, s, c).to_bits()
+                );
+                let aligned = HeadLaw { cos_lean: 1.0, cos_phi_abs: 1.0, sin_phi: 0.0 };
+                assert!((head_section_law_mm(tip, s, aligned) - tip).abs() < 1e-12, "tip {tip}, s {s}");
+            }
+            assert_eq!(
+                post_section_law_mm(0.1, tip, 0.8, HeadLaw::envelope(c)).to_bits(),
+                post_section_mm(0.1, tip, 0.8, c).to_bits()
+            );
+            // The post law reads the same angle: no transverse load, no growth.
+            let aligned = HeadLaw { cos_lean: 1.0, cos_phi_abs: 1.0, sin_phi: 0.0 };
+            assert!((post_section_law_mm(0.1, tip, 0.8, aligned) - 0.1).abs() < 1e-12);
+        }
+        // `of_post`: a vertical post under a 45 degree head is phi' = 45.
+        let law = HeadLaw::of_post([0.6, 0.0, -0.8], [0.0, 0.0, -1.0]).expect("descends");
+        assert!((law.cos_lean - 1.0).abs() < 1e-12);
+        assert!((law.cos_phi_abs - 0.8).abs() < 1e-12 && (law.sin_phi - 0.6).abs() < 1e-12);
+        // A post that does not descend has no law.
+        assert!(HeadLaw::of_post([0.6, 0.0, -0.8], [1.0, 0.0, 0.0]).is_none());
+    }
+
+    /// The per-axis placement envelope is the numerical maximum of the exact
+    /// law over every admissible post: for 1000 sampled directions (lean up to
+    /// 57.5 degrees, any azimuth) and several head axes, the exact law at the
+    /// planned `|DK|` never exceeds the envelope joint. Anti-vacuity: the
+    /// envelope is strictly under the old worst case for a head along the
+    /// vertical, and above the aligned post's radius.
+    #[test]
+    fn the_placement_envelope_carries_every_admissible_post() {
+        let c = cos_lean();
+        let lean_max = c.acos();
+        let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        for unit in [
+            [0.66, 0.0, -0.75],
+            [0.0, 0.0, -1.0],
+            [0.0, 0.95, -0.31],
+            [-0.6, 0.6, -0.529_150_262_212_918_1],
+        ] {
+            for tip in [0.05, 0.15] {
+                let (joint, _) = solve_joint_for_axis(tip, GAP_MM + 0.1, unit, c, 1.0)
+                    .expect("fits");
+                let length = joint.length_mm;
+                let unit = geom_kernel::vec3::normalize(unit).expect("a unit");
+                for _ in 0..1000 {
+                    let (lean, azimuth) = (next() * lean_max, next() * core::f64::consts::TAU);
+                    let post = [lean.sin() * azimuth.cos(), lean.sin() * azimuth.sin(), -lean.cos()];
+                    let law = HeadLaw::of_post(unit, post).expect("descends");
+                    let carried = final_joint_radius_law_mm(tip, length, law);
+                    assert!(
+                        carried <= joint.joint_radius_mm + 1e-9,
+                        "unit {unit:?} tip {tip}: post {post:?} needs {carried}, envelope {}",
+                        joint.joint_radius_mm
+                    );
+                }
+                // Never above the old 90 degree worst case.
+                let worst = solve_joint(tip, GAP_MM + 0.1, c, 1.0).expect("fits");
+                assert!(joint.joint_radius_mm <= worst.joint_radius_mm + 1e-12);
+            }
+        }
+        // A head along the vertical can only be loaded along its own axis
+        // by a vertical post, and tilted by a leaning one: the envelope is
+        // under the old worst case by a wide margin.
+        let (flat, _) = solve_joint_for_axis(0.05, GAP_MM, [0.0, 0.0, -1.0], c, 1.0).expect("fits");
+        let worst = solve_joint(0.05, GAP_MM, c, 1.0).expect("fits");
+        assert!(flat.joint_radius_mm < 0.97 * worst.joint_radius_mm, "{flat:?} against {worst:?}");
     }
 
     #[test]
@@ -1242,6 +1731,9 @@ mod tests {
             cells: vec![9, 9, 8, 8, 8, 7, 7, 7],
             ball_allowance_mm: 0.0,
             drawn_straight: false,
+            law_planned: HeadLaw::envelope(cos_lean()),
+            law_drawn: None,
+            ledger_radius_mm: Vec::new(),
         }
     }
 
@@ -1532,9 +2024,11 @@ mod constructor_tests {
             let contact = [D[0], D[1], D[2] + plate_z];
             let head = worked_head(contact, plate_z);
             let u = unit_at(41.3);
-            assert!((head.joint_radius_mm - 0.2204).abs() < 1e-4, "{}", head.joint_radius_mm);
+            // The joint carries every post the lean law admits under THIS
+            // 41.3 degree axis: 0.2124, under the 90 degree worst case's 0.2204.
+            assert!((head.joint_radius_mm - 0.2124).abs() < 1e-4, "{}", head.joint_radius_mm);
             let length = vec3::dist(head.contact_mm, head.joint_mm);
-            assert!((length - 0.5204).abs() < 1e-4, "|DK| = {length}");
+            assert!((length - 0.5124).abs() < 1e-4, "|DK| = {length}");
             for axis in 0..3 {
                 assert!((head.contact_mm[axis] - contact[axis]).abs() < 1e-12, "D");
                 let want = contact[axis] + (GAP + head.joint_radius_mm) * u[axis];
@@ -1592,11 +2086,29 @@ mod constructor_tests {
         let grid = grid();
         let r = rule(0.0);
         let refusal = |req: HeadRequest| plan_head(&req, &r, &grid).expect_err("a refusal");
-        let over = refusal(request(D, 0.30, 41));
-        println!("r 0.30 -> {over:?}");
+        // The per-axis envelope (this head's own 41.3 degree axis) carries more
+        // than the 90 degree worst case did, so the threshold moves up from
+        // 0.2944: find it by bisection on the envelope itself.
+        let fits = |tip: f64| {
+            super::solve_joint_for_axis(tip, GAP, unit_at(41.3), r.cos_lean_max, r.max_radius_mm)
+                .is_some()
+        };
+        let (mut fit, mut over_tip) = (0.2943, 0.6);
+        assert!(fits(fit) && !fits(over_tip));
+        for _ in 0..60 {
+            let mid = 0.5 * (fit + over_tip);
+            if fits(mid) {
+                fit = mid;
+            } else {
+                over_tip = mid;
+            }
+        }
+        assert!(fit > 0.2944, "the per-axis threshold {fit} is above the worst case's");
+        let over = refusal(request(D, over_tip + 1e-6, 41));
+        println!("r {over_tip} -> {over:?}");
         assert_eq!(over, HeadRefusal::JointOverMax);
-        // Just under the threshold of 0.2944 still builds.
-        assert!(plan_head(&request(D, 0.2943, 41), &r, &grid).is_ok());
+        // Just under the threshold still builds.
+        assert!(plan_head(&request(D, fit - 1e-6, 41), &r, &grid).is_ok());
         // K below layer 1: D at 0.3 puts K under the plate.
         let low = refusal(request([1.5, 1.0, 0.3], 0.05, 41));
         println!("K under the plate -> {low:?}");
