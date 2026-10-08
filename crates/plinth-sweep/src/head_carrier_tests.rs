@@ -1365,10 +1365,15 @@ mod graze_conversion {
     /// away and landed on the host's shaft at layer 100, and, when `carried`,
     /// a third arm (id 2) landed on the grazer.
     fn field(grid: &Grid, carried: bool) -> Vec<SweepStrut> {
+        field_on(grid, carried, 1.0)
+    }
+
+    /// [`field`] on a host of radius `host_radius`. A trunk as thick as the
+    /// registered maximum takes the post: a lander does not make its host fat,
+    /// so a host thinner than the joint is not offered.
+    fn field_on(grid: &Grid, carried: bool, host_radius: f64) -> Vec<SweepStrut> {
         let host_col = 30;
-        // A trunk as thick as the registered maximum: a lander does not make
-        // its host fat, so a thinner host than the joint is not offered.
-        let host = straight(grid, 0, 150, host_col, K_TOP, 1.0);
+        let host = straight(grid, 0, 150, host_col, K_TOP, host_radius);
         let mut grazer = straight(grid, 1, 150, host_col + RUN_COLS, K_TOP, 0.05);
         grazer.landing = Landing::Strut { id: 0, layer: OLD_LANDING };
         grazer.k_bottom = OLD_LANDING;
@@ -1482,5 +1487,21 @@ mod graze_conversion {
             outcome.graze_reasons.contains(&(1, GrazeReason::CarriesMembers)),
             "named with its reason: {outcome:?}"
         );
+    }
+
+    /// A host thinner than the joint would be RAISED by the post: the arm
+    /// keeps its straight tip and the run says why. The same field on a thick
+    /// trunk converts (the first test), so the host's radius is the only
+    /// difference. SABOTAGE: drop the `not_raising` test in `candidates_for`
+    /// and the thin host takes the post.
+    #[test]
+    fn a_grazing_tip_whose_host_is_thinner_than_the_joint_stays_straight() {
+        let grid = grid();
+        let mut struts = field_on(&grid, false, 0.2);
+        let (converted, outcome) = convert(&grid, &mut struts);
+        assert_eq!(converted, 0, "{outcome:?}");
+        assert_eq!(outcome.graze_asked, 1, "anti-vacuity: it grazes: {outcome:?}");
+        assert!(struts[1].head.is_none());
+        assert_eq!(outcome.graze_reasons, vec![(1, GrazeReason::HostTooThin)]);
     }
 }

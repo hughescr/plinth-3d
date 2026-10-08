@@ -3784,6 +3784,9 @@ fn print_sweep_disclosure(
                         GrazeReason::Refused(reason) => format!("head refused: {reason:?}"),
                         GrazeReason::NoLegalPost => "no legal post".to_owned(),
                         GrazeReason::NotAnArm => "a brace, mast or tie".to_owned(),
+                        GrazeReason::HostTooThin => {
+                            "its host is thinner than the joint, the post would raise it".to_owned()
+                        }
                         GrazeReason::LateSlide => "made by a later slide".to_owned(),
                     };
                     format!(

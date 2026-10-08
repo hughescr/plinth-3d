@@ -735,6 +735,12 @@ pub enum GrazeReason {
     /// No post from the joint lands legally (lean law or path) on the arm's
     /// own host or the plate.
     NoLegalPost,
+    /// The post lands only on a host thinner than the joint, so it would
+    /// RAISE the host (a lander does not make its host fat). The joint is
+    /// fat because the face is steep and the post is sized for the full lever
+    /// `|DK|` (the sizing ruling left to Craig: a post that falls back to its
+    /// ledger section would fit hosts it cannot fit today).
+    HostTooThin,
     /// A brace, a mast or a tie: warned, never converted.
     NotAnArm,
     /// The arm was made or moved after the conversion ran.

@@ -201,14 +201,12 @@ pub(crate) fn convert(
             margin_mm,
         };
         let found = match convert_one(&field, g, &request, tip_lb) {
-            Ok(Some(found)) => found,
-            Ok(None) => {
-                outcome.graze_reasons.push((id, GrazeReason::NoLegalPost));
-                continue;
-            }
+            Ok(found) => found,
             Err(reason) => {
-                outcome.refusals.entry(reason).or_default().push(id);
-                outcome.graze_reasons.push((id, GrazeReason::Refused(reason)));
+                if let GrazeReason::Refused(refusal) = reason {
+                    outcome.refusals.entry(refusal).or_default().push(id);
+                }
+                outcome.graze_reasons.push((id, reason));
                 continue;
             }
         };
@@ -235,19 +233,21 @@ type Converted = (Head, Candidate, Vec<u32>);
 
 /// Plan, check and land one grazer's head: the head for the steepest lean its
 /// joint can carry, the post it gets, then the head again for that post's own
-/// lean. `Ok(None)` when no post lands; `Err` for the planner's or the
-/// checks' refusal.
+/// lean. `Err` names why the arm stays straight: the planner's or the checks'
+/// refusal, no post that lands, or a host too thin to take the post without
+/// being raised.
 fn convert_one(
     field: &Field<'_>,
     g: usize,
     request: &HeadRequest,
     tip_lb_mm: f64,
-) -> Result<Option<Converted>, HeadRefusal> {
-    let (head, cos_cap) = plan_checked(field, g, request, tip_lb_mm, None)?;
+) -> Result<Converted, GrazeReason> {
+    let (head, cos_cap) = plan_checked(field, g, request, tip_lb_mm, None)
+        .map_err(GrazeReason::Refused)?;
     // The first plan's joint is the fat one (the steepest lean it can carry),
     // so its post is only FOUND here, to learn the lean the arm really gets.
     let Some((candidate, _)) = choose_post(field, g, &head, cos_cap, false) else {
-        return Ok(None);
+        return Err(GrazeReason::NoLegalPost);
     };
     // The joint is sized for ITS post: the lean the post really has, which is
     // at most the cap the first plan used. Planned again for that lean the
@@ -260,12 +260,14 @@ fn convert_one(
             if let Some((tight_candidate, tight_post)) =
                 choose_post(field, g, &tight, cos_tight, true)
             {
-                return Ok(Some((tight, tight_candidate, tight_post)));
+                return Ok((tight, tight_candidate, tight_post));
             }
         }
     }
     // No gentler plan: the first one stands if its post does not raise its host.
-    Ok(choose_post(field, g, &head, cos_cap, true).map(|(candidate, post)| (head, candidate, post)))
+    choose_post(field, g, &head, cos_cap, true)
+        .map(|(candidate, post)| (head, candidate, post))
+        .ok_or(GrazeReason::HostTooThin)
 }
 
 /// The cosine of the lean from vertical of the post from `head`'s joint to
