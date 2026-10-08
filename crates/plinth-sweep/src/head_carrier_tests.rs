@@ -1366,7 +1366,9 @@ mod graze_conversion {
     /// a third arm (id 2) landed on the grazer.
     fn field(grid: &Grid, carried: bool) -> Vec<SweepStrut> {
         let host_col = 30;
-        let host = straight(grid, 0, 150, host_col, K_TOP, 0.2);
+        // A trunk as thick as the registered maximum: a lander does not make
+        // its host fat, so a thinner host than the joint is not offered.
+        let host = straight(grid, 0, 150, host_col, K_TOP, 1.0);
         let mut grazer = straight(grid, 1, 150, host_col + RUN_COLS, K_TOP, 0.05);
         grazer.landing = Landing::Strut { id: 0, layer: OLD_LANDING };
         grazer.k_bottom = OLD_LANDING;

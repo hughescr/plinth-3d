@@ -274,11 +274,18 @@ fn flat_disc_tips_seat_by_the_law() {
         ];
         let length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
         let sin_tilt = (axis[0] * axis[0] + axis[1] * axis[1]).sqrt() / length;
-        if sin_tilt > 1e-9 {
+        // A HEADED arm (a straight tip whose shaft would graze the model gets
+        // an angled head, Craig 2026-10-08) is excused: its end disc is the
+        // head's, square to the face by construction, and the chord from its
+        // seat to its base is the head plus a post, not the axis the clause
+        // reads. The disc's grazers are exactly such arms (arm 177: 34 degrees
+        // off the normal, clearance 0.01 mm).
+        let straight_tip = arm.head.is_none();
+        if straight_tip && sin_tilt > 1e-9 {
             leaned_arms += 1;
         }
         assert!(
-            embed_mm >= arm.tip_radius_mm * sin_tilt - 1e-9,
+            !straight_tip || embed_mm >= arm.tip_radius_mm * sin_tilt - 1e-9,
             "arm {index}: buried {embed_mm:.6} mm under a horizontal face while leaning with \
              sin(tilt) {sin_tilt:.6} and a tip radius of {:.6} mm, so part of its end disc never \
              meets the model",
@@ -339,7 +346,12 @@ fn flat_disc_tips_seat_by_the_law() {
 fn the_seat_trim_is_the_carried_face_and_never_moves_the_seat() {
     let mesh = flat_disc();
     let (plan, layers, frame, min_z) = plan_of(&mesh);
-    let arms = arms_of(&plan);
+    // STRAIGHT tips only: a headed arm (a graze conversion, Craig 2026-10-08)
+    // always carries its own seat plane, the head's, so it is trimmed with a
+    // measured face whether or not the arm's face point is dropped. This test
+    // is about the face point of a straight tip.
+    let arms: Vec<SweepArm> =
+        arms_of(&plan).into_iter().filter(|arm| arm.head.is_none()).collect();
     let honest = lower_sweep_arms(&arms, frame, &layers, MAX_PRIMITIVES, MAX_PRIMITIVE_BYTES)
         .expect("the lowering refuses only about the request");
     let faceless: Vec<SweepArm> = arms
