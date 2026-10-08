@@ -91,12 +91,23 @@ struct Expectation {
     min_failures: usize,
 }
 
+/// A `.claude` directory is the editing harness's bookkeeping (it plants an
+/// empty `.claude/.cc-writes` beside files it writes), never a fixture. Every
+/// walk below skips it, the on-disk count included, so the discovery gate
+/// compares fixture directories with fixture directories.
+fn is_harness_dir(p: &Path) -> bool {
+    p.file_name().and_then(|s| s.to_str()) == Some(".claude")
+}
+
 fn collect_expect_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for e in entries.filter_map(Result::ok) {
         let p = e.path();
+        if p.is_dir() && is_harness_dir(&p) {
+            continue;
+        }
         if p.is_dir() {
             // Fixtures live one directory per fixture -- `<name>/<name>.expect.json`
             // -- so discovery MUST descend. A flat scan finds nothing and the
@@ -387,7 +398,7 @@ fn fixture_dirs_on_disk() -> Vec<String> {
         .expect("fixtures/ must exist and be readable")
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .filter(|p| p.is_dir())
+        .filter(|p| p.is_dir() && !is_harness_dir(p))
         .filter_map(|p| p.file_name()?.to_str().map(str::to_string))
         .collect();
     names.sort();
@@ -402,7 +413,7 @@ fn fixture_artifacts_on_disk() -> Vec<String> {
         };
         for e in entries.filter_map(Result::ok) {
             let p = e.path();
-            if p.is_dir() {
+            if p.is_dir() && !is_harness_dir(&p) {
                 walk(&p, out);
             } else if p.extension().and_then(|s| s.to_str()) == Some("chitubox") {
                 out.push(dir_and_stem(&p));
