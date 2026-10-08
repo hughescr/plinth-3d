@@ -88,6 +88,7 @@ pub(crate) mod designed_embed;
 pub(crate) mod digest_seal;
 pub mod dyadic;
 pub mod forest;
+pub mod hull;
 #[allow(
     dead_code,
     reason = "crate-private initial terminal construction is consumed by the pending support runner integration"
@@ -180,6 +181,7 @@ pub use lower::{
     DrawnSpan, RootBoss, ShaftSeatBite, SweepArm, SweepArmLanding, SweepLowering,
     SweepHead, SweepLoweringError, SweepRootFlare, TipContactDisc, NATIVE_FOOT_PAD_OVERLAP_MM,
 };
+pub use hull::{convex_hull, frustum_ring, ConvexHull};
 /// TEST-ONLY, behind the quarantined `seat-minimum-probe` feature.
 #[cfg(feature = "seat-minimum-probe")]
 pub use lower::lower_sweep_arms_with_pinned_seat_minimum;
@@ -203,10 +205,42 @@ pub struct SupportRequest {
 /// Which normal defines capped-frustum end rings. A plate-root column uses
 /// horizontal rings even when its centreline is angled; every other rod uses
 /// ordinary centreline-normal rings.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// [`Self::Junction`] marks a `Member` record that is not a frustum at all: the
+/// convex hull of the end rings of the neighbour frusta it names (the junction
+/// hull, [`hull`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FrustumRingNormal {
     SegmentAxis,
     PlateZ,
+    Junction(JunctionRings),
+}
+
+/// One end ring of a neighbour frustum a junction hull is built over: the
+/// neighbour's own `start` and `end` (so the emitter makes the ring with the same
+/// axis vector and sign the neighbour is drawn with), the ring's radius, and which
+/// end of the neighbour it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HullRing {
+    pub frustum_start_mm: [Finite; 3],
+    pub frustum_end_mm: [Finite; 3],
+    pub radius_mm: PositiveFinite,
+    /// The ring at the neighbour's start (`true`) or its end (`false`).
+    pub at_start: bool,
+    /// The neighbour's rings are horizontal ([`FrustumRingNormal::PlateZ`]).
+    pub plate_z: bool,
+}
+
+/// The rings of one junction hull: two or three (the branch, the host below and
+/// the host above), unused slots `None`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct JunctionRings(pub [Option<HullRing>; 3]);
+
+impl JunctionRings {
+    /// The rings that are present, in slot order.
+    pub fn rings(&self) -> impl Iterator<Item = &HullRing> {
+        self.0.iter().flatten()
+    }
 }
 
 /// Closed support-domain vocabulary. Wire-format identities belong to `plinth-emit`.
@@ -693,6 +727,13 @@ impl SupportPrimitive {
                 self.segment_kind,
                 SupportSegmentKind::Member | SupportSegmentKind::ContactTaper
             ),
+            // A junction hull is a `Member` record with at least two rings and
+            // no seat trim.
+            FrustumRingNormal::Junction(rings) => {
+                self.segment_kind == SupportSegmentKind::Member
+                    && self.seat_trim.is_none()
+                    && rings.rings().count() >= 2
+            }
         };
         let sphere_poles_match = match (self.segment_kind, &self.sphere_geometry) {
             (SupportSegmentKind::ContactSphere, Some(geometry)) if geometry.is_tip() => {
