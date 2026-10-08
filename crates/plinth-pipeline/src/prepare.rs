@@ -3721,6 +3721,7 @@ fn print_sweep_disclosure(
              stand-off mm {} (gap {final_gap_mm}); \
              joints grown {} (largest stand-off deficit {:.4} mm); downgraded after sizing: {} \
              ({} joins on their posts followed onto the straight line drawn, largest shift {:.3} mm); \
+             sized again for the post after the seat moves: {}; \
              necks wider than ball {} (largest first-ring/ball-cap ratio {:.3}); \
              placement normal residual {:.3} deg max, {:.3} median; u against final footprint \
              normal {:.3} deg max, {:.3} median; lip-seat bites on headed arms {} (must be 0)",
@@ -3734,6 +3735,7 @@ fn print_sweep_disclosure(
             heads.downgraded_after_sizing.len(),
             emission.downgraded_joins,
             emission.downgraded_follow_max_mm,
+            heads.resized_after_moves,
             emission.head_necks_wider_than_ball,
             emission.head_neck_ratio.iter().copied().fold(0.0_f64, f64::max),
             heads.placement_residual_deg_max,

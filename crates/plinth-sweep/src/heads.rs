@@ -696,6 +696,11 @@ pub struct HeadsOutcome {
     /// refuse): one warning per member, in id order. See
     /// [`downgrade_grown_heads`].
     pub kept_short_of_clearance: Vec<HeadClearanceWarning>,
+    /// Heads whose sections changed when they were sized AGAIN after the
+    /// footprint rule's seat moves, because a host's move tilted the post the
+    /// file draws (v19 fix, 2026-10-07): the path-hit witness for the final
+    /// sizing. See [`crate::size_heads_for_final_posts`].
+    pub resized_after_moves: usize,
 }
 
 /// The warning for a head kept although its drawn clearance is short.

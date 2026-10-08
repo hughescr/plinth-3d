@@ -3112,6 +3112,25 @@ pub fn run_sweep_with_holes(
         );
     }
     sweep_plan.report.seat_footprint = footprint;
+    // **HEADS ARE SIZED FOR THE FINAL POST** (v19 fix, 2026-10-07): the first
+    // sizing above ran before this rule created its seat moves, and the adapter
+    // follows a host's move at the base of every member that lands on it while a
+    // headed child's joint K stays frozen. That tilts the post the file draws
+    // without touching the radii sized for the old tilt. Re-run the same sizing
+    // now that the moves have settled, so the law reads the emitted post axis.
+    // It rebuilds every head from its saved area-law ledger, so a field no
+    // move touched comes out unchanged, and the clearance warnings are read
+    // again on the sizes that stand.
+    if let Some((profiles, rule)) = head_registry {
+        size_heads_for_final_posts(
+            &sweep_plan.grid,
+            &mut sweep_plan.struts,
+            sizing,
+            rule.allowance_mm,
+            |radius| profiles.ball_factor(radius),
+            &mut sweep_plan.report.heads,
+        );
+    }
     // THE NORMAL ON THE EMITTED FIELD (`footprint_normal`, Craig ruling
     // 2026-10-05): the slides and the ends that follow them moved balls after
     // their normals were measured, so measure once more on the arms exactly as
@@ -3218,6 +3237,37 @@ pub fn run_sweep_with_holes(
     }
     sweep_plan.report.sweep_digest = digest(&sweep_plan.struts);
     Ok(sweep_plan)
+}
+
+/// **Size every head for the post the FILE draws** (v19 fix, 2026-10-07), run
+/// after the footprint rule has settled its seat moves. The adapter follows a
+/// host's move at the base of each member that lands on it while a headed
+/// child's joint `K` stays frozen, so a move tilts the post; the first sizing
+/// (before the moves) cannot know. This runs
+/// [`down_sweep::resize_heads_to_drawn_posts`] again, which rebuilds each head,
+/// joint and post from its saved area-law ledger (a field no move touched comes
+/// out unchanged), then reads the clearance warnings on the sizes that stand.
+/// `heads.resized_after_moves` counts the heads whose sections changed.
+pub(crate) fn size_heads_for_final_posts(
+    grid: &grid::Grid,
+    struts: &mut [SweepStrut],
+    sizing: down_sweep::SizingPolicy,
+    neck_min_mm: f64,
+    ball_factor_at: impl Fn(f64) -> f64,
+    heads: &mut heads::HeadsOutcome,
+) {
+    let before: Vec<Vec<f64>> = struts.iter().map(|strut| strut.radius_mm.clone()).collect();
+    if down_sweep::resize_heads_to_drawn_posts(grid, struts, sizing) == 0 {
+        return;
+    }
+    heads.resized_after_moves = struts
+        .iter()
+        .zip(&before)
+        .filter(|(strut, was)| strut.head.is_some() && strut.radius_mm != **was)
+        .count();
+    let again = heads::downgrade_grown_heads(struts, neck_min_mm, ball_factor_at);
+    heads.downgraded_after_sizing.extend(again.downgraded);
+    heads.kept_short_of_clearance = again.kept_with_warning;
 }
 
 /// Publish the unbraced runs of a finished field: the longest with its own

@@ -1274,4 +1274,68 @@ mod actual_lean_sizing {
         resize_heads_to_drawn_posts(&grid, &mut leaning, sizing());
         assert_eq!(leaning[0].radius_mm, before);
     }
+    /// **A host whose seat moves tilts the post of a headed child that lands
+    /// on it** (review finding, 2026-10-07). The first sizing runs before the
+    /// footprint rule creates that move, so it sized the joint and post for a
+    /// vertical post; the adapter then follows the host at the post's base
+    /// while `K` stays frozen. `size_heads_for_final_posts`, run after the
+    /// moves, must read the post the file draws: the stored law is that of the
+    /// line from `K` to the host-shifted base, and the sections grow with it.
+    /// SABOTAGE: leave the body of `size_heads_for_final_posts` empty (or drop
+    /// its call after `footprint::apply`) and the child keeps the vertical
+    /// post's sections, so every assertion below goes red.
+    #[test]
+    fn a_host_move_after_the_first_sizing_resizes_the_headed_child_for_its_final_post() {
+        const LANDING: usize = 40;
+        let (grid, mut one) = field(0);
+        let mut child = one.remove(0);
+        let joint_cell = grid.index(150, 270);
+        child.id = 1;
+        child.landing = Landing::Strut { id: 0, layer: LANDING };
+        child.k_bottom = LANDING;
+        child.radius_mm = child.radius_mm.split_off(LANDING);
+        child.carried_mm2 = vec![0.0; child.radius_mm.len()];
+        child.set_post(child.landing, LANDING, vec![cell_u32(joint_cell); K_JOINT - LANDING + 1]);
+        child.head.as_mut().expect("a head").ledger_radius_mm = child.radius_mm.clone();
+        assert!(child.head_intact(), "the fixture's head must be intact");
+        let host = straight(&grid, 0, 150, 270, K_TOP, 0.3);
+        let mut struts = vec![host, child];
+        // The first sizing: nothing has moved, the post is vertical.
+        assert_eq!(resize_heads_to_drawn_posts(&grid, &mut struts, sizing()), 1);
+        let first = struts[1].radius_mm.clone();
+        let first_lean = struts[1].head.as_ref().expect("a head").law_drawn.expect("a law").cos_lean;
+        assert!((first_lean - 1.0).abs() < 1e-9, "a vertical post: {first_lean}");
+        // The footprint rule moves the host's seat by 4.05 mm along x; its
+        // axis moves linearly from nothing at its base (layer 0) to the slide
+        // at its seat (layer 108), so the child's base, on the host at layer
+        // 40, follows by 1.5 mm. The post then runs 3.0 mm down, 1.5 mm across.
+        let slide = 4.05;
+        struts[0].seat_face = SeatFace {
+            point_mm: None,
+            shift_mm: [slide, 0.0, 0.0],
+            footprint: crate::Footprint::MovedOntoFace,
+        };
+        let mut heads = crate::heads::HeadsOutcome::default();
+        crate::size_heads_for_final_posts(&grid, &mut struts, sizing(), 0.1, |_| 0.5, &mut heads);
+        assert_eq!(heads.resized_after_moves, 1, "the child was sized again");
+        let law = struts[1].head.as_ref().expect("a head").law_drawn.expect("a law");
+        let across = slide * LANDING as f64 / K_TOP as f64;
+        let down = (K_JOINT - LANDING) as f64 * H;
+        let expected = down / across.hypot(down);
+        assert!(
+            (law.cos_lean - expected).abs() < 1e-6,
+            "the law reads the final post: {} against {expected}",
+            law.cos_lean
+        );
+        assert!(
+            struts[1].radius_mm[K_JOINT - LANDING] > first[K_JOINT - LANDING] + 1e-6,
+            "the joint grew for the tilted post: {} against {}",
+            struts[1].radius_mm[K_JOINT - LANDING],
+            first[K_JOINT - LANDING]
+        );
+        // A second pass with the moves settled changes nothing.
+        let settled = struts[1].radius_mm.clone();
+        crate::size_heads_for_final_posts(&grid, &mut struts, sizing(), 0.1, |_| 0.5, &mut heads);
+        assert_eq!(struts[1].radius_mm, settled);
+    }
 }
