@@ -595,10 +595,7 @@ fn root_boss_top_at(
     let available_above_raft = terminal_z_mm - raft_top;
     let minimum_boss_height = (min_no_bend - config.raft_height_mm.get()).max(0.0);
     let effective = minimum_boss_height.max(boss_height_mm.min(available_above_raft / 2.0));
-    Some(
-        finite(raft_top + effective)
-            .map(|top| [rootward_xy[0], rootward_xy[1], top]),
-    )
+    Some(finite(raft_top + effective).map(|top| [rootward_xy[0], rootward_xy[1], top]))
 }
 
 /// The z of the terminal a plate-rooted sweep member's boss top is measured
@@ -771,7 +768,10 @@ impl SweepRootFlare {
         };
         let boss = root_boss_top_at(
             seated_seat[2],
-            [finite(local.base_mm[0]).ok()?, finite(local.base_mm[1]).ok()?],
+            [
+                finite(local.base_mm[0]).ok()?,
+                finite(local.base_mm[1]).ok()?,
+            ],
             self.config.root_boss.height_mm(),
             self.config,
         )
@@ -1350,7 +1350,14 @@ pub fn lower_sweep_arms(
     max_primitives: usize,
     max_primitive_bytes: usize,
 ) -> Result<SweepLowering, SweepLoweringError> {
-    lower_sweep_arms_of(arms, frame, layers, max_primitives, max_primitive_bytes, None)
+    lower_sweep_arms_of(
+        arms,
+        frame,
+        layers,
+        max_primitives,
+        max_primitive_bytes,
+        None,
+    )
 }
 
 /// [`lower_sweep_arms`], with the PR-1(a) rasterisation allowance PINNED.
@@ -1487,9 +1494,25 @@ fn lower_sweep_arms_of(
                 sides,
             },
         );
-        if edits.hulled > 0 {
+        // Emit and warn: a landed junction that could be neither cut into its
+        // host nor filled keeps the old flat cap, and says so.
+        if edits.crowded + edits.undrawable > 0 {
+            eprintln!(
+                "WARNING junction hulls: {} landed junctions kept the old flat cap ({} crowded, \
+                 {} undrawable); {} hulled, {} filled with an added hull, {} buried in the host, \
+                 {} with no host",
+                edits.crowded + edits.undrawable,
+                edits.crowded,
+                edits.undrawable,
+                edits.hulled,
+                edits.filled,
+                edits.buried,
+                edits.no_host,
+            );
+        }
+        if edits.hulled + edits.filled > 0 {
             let mut rebuilt: Vec<SupportPrimitive> =
-                Vec::with_capacity(out.primitives.len() + edits.hulled);
+                Vec::with_capacity(out.primitives.len() + edits.hulled + edits.filled);
             let mut from = 0;
             for (index, &end) in arm_ends.iter().enumerate() {
                 let slice = &out.primitives[from..end];
@@ -1609,7 +1632,11 @@ fn emitted_solid_volume_mm3(primitive: &SupportPrimitive) -> f64 {
 fn drawn_link_mm(frusta: &[([f64; 2], [f64; 2])], ball_radius: f64) -> f64 {
     let ball_sq = ball_radius * ball_radius;
     let radius_in = |&([a0, r0], [a1, r1]): &([f64; 2], [f64; 2]), a: f64| -> f64 {
-        let t = if a1 > a0 { ((a - a0) / (a1 - a0)).clamp(0.0, 1.0) } else { 0.0 };
+        let t = if a1 > a0 {
+            ((a - a0) / (a1 - a0)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         r0 + (r1 - r0) * t
     };
     // Where the head leaves the ball.
@@ -1664,8 +1691,14 @@ fn registered_emit_sides() -> usize {
     static SIDES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *SIDES.get_or_init(|| {
         m0_constants().map_or(0, |constants| {
-            usize::try_from(constants.placeholders().chitubox_emit_n_sides().diagnostic().get())
-                .unwrap_or(0)
+            usize::try_from(
+                constants
+                    .placeholders()
+                    .chitubox_emit_n_sides()
+                    .diagnostic()
+                    .get(),
+            )
+            .unwrap_or(0)
         })
     })
 }
@@ -1820,7 +1853,10 @@ fn headed_tip<'a>(arm: &'a SweepArm, config: LoweringConfig) -> Option<HeadedTip
             .profile_knots_mm
             .iter()
             .all(|[s, radius]| s.is_finite() && *s >= 0.0 && radius.is_finite() && *radius > 0.0)
-        && head.profile_knots_mm.windows(2).all(|pair| pair[0][0] < pair[1][0]))
+        && head
+            .profile_knots_mm
+            .windows(2)
+            .all(|pair| pair[0][0] < pair[1][0]))
     {
         return None;
     }
@@ -1859,7 +1895,10 @@ fn headed_tip<'a>(arm: &'a SweepArm, config: LoweringConfig) -> Option<HeadedTip
     };
     let to_joint = geom_kernel::vec3::dot(unit, geom_kernel::vec3::sub(head.joint_mm, start));
     let rise = start[2] - head.joint_mm[2];
-    if !(to_joint.is_finite() && to_joint > ZERO_LENGTH_MM && rise.is_finite() && rise > ZERO_LENGTH_MM)
+    if !(to_joint.is_finite()
+        && to_joint > ZERO_LENGTH_MM
+        && rise.is_finite()
+        && rise > ZERO_LENGTH_MM)
     {
         return None;
     }
@@ -1905,7 +1944,8 @@ fn push_head_segment(
     // `start` stands `s_start` along `u` from the contact centre `D`: on the
     // plane (0) or the ball centre above it.
     let s_start =
-        geom_kernel::vec3::dot(headed.unit, geom_kernel::vec3::sub(start, head.contact_mm)).max(0.0);
+        geom_kernel::vec3::dot(headed.unit, geom_kernel::vec3::sub(start, head.contact_mm))
+            .max(0.0);
     // A NaN start or length is not before the joint either.
     if s_start.partial_cmp(&length) != Some(std::cmp::Ordering::Less) {
         return None;
@@ -2041,7 +2081,11 @@ fn drawn_span_rules() -> Option<DrawnSpanRules> {
         let constants = m0_constants().ok()?;
         let placeholders = constants.placeholders();
         let saturated_deg = placeholders.overhang_angle_deg().diagnostic().get()
-            - 0.5 * placeholders.overhang_weight_transition_deg().diagnostic().get();
+            - 0.5
+                * placeholders
+                    .overhang_weight_transition_deg()
+                    .diagnostic()
+                    .get();
         (saturated_deg > 0.0 && saturated_deg < 90.0).then_some(())?;
         Some(DrawnSpanRules {
             cone_slope: 1.0 / saturated_deg.to_radians().tan(),
@@ -2051,9 +2095,19 @@ fn drawn_span_rules() -> Option<DrawnSpanRules> {
 }
 
 /// Merge every span shorter than `min_len` into a neighbour (the one below, or
-/// the one above for the last). The merged span keeps the wider of the two
-/// radii at the end the sliver was on, so it stays on or above the ledger over
-/// both.
+/// the one above for the last) as ONE straight span that stays on or above both
+/// originals over their whole height.
+///
+/// The originals are straight between three heights: the top of the upper span,
+/// the junction, and the bottom of the lower span. One line is on or above both
+/// exactly when it is on or above the three values there (the junction's value
+/// is the wider of the two radii that meet). Where the line between the outer
+/// radii dips below the junction's, it is raised by turning it about the end
+/// that must not move: the bottom end when the pair is not at the member's top
+/// (the raised top then stands wider than the span above, a face that looks up
+/// and is drawn as a cone by [`cone_the_shoulders`]), the top end when the pair
+/// is at the member's top (the lower neighbour's top is raised to match, so no
+/// face looks down). A pair that is the whole member moves both ends together.
 fn merge_short_spans(mut spans: Vec<DrawnSpan>, min_len: f64) -> Vec<DrawnSpan> {
     let length = |span: &DrawnSpan| span.top_z_mm - span.bottom_z_mm;
     while spans.len() > 1 {
@@ -2063,25 +2117,50 @@ fn merge_short_spans(mut spans: Vec<DrawnSpan>, min_len: f64) -> Vec<DrawnSpan> 
         else {
             break;
         };
-        if short + 1 < spans.len() {
-            let (sliver, below) = (spans[short], spans[short + 1]);
-            spans[short + 1] = DrawnSpan {
-                top_z_mm: sliver.top_z_mm,
-                bottom_z_mm: below.bottom_z_mm,
-                top_radius_mm: sliver.top_radius_mm.max(below.top_radius_mm),
-                bottom_radius_mm: below.bottom_radius_mm,
-            };
-            spans.remove(short);
+        let upper_index = if short + 1 < spans.len() {
+            short
         } else {
-            let (above, sliver) = (spans[short - 1], spans[short]);
-            spans[short - 1] = DrawnSpan {
-                top_z_mm: above.top_z_mm,
-                bottom_z_mm: sliver.bottom_z_mm,
-                top_radius_mm: above.top_radius_mm,
-                bottom_radius_mm: above.bottom_radius_mm.max(sliver.bottom_radius_mm),
-            };
-            spans.pop();
+            short - 1
+        };
+        let (upper, lower) = (spans[upper_index], spans[upper_index + 1]);
+        let (top_z, bottom_z, junction_z) = (upper.top_z_mm, lower.bottom_z_mm, upper.bottom_z_mm);
+        let (mut top_r, mut bottom_r) = (upper.top_radius_mm, lower.bottom_radius_mm);
+        let needed = upper.bottom_radius_mm.max(lower.top_radius_mm);
+        let total = top_z - bottom_z;
+        let above_junction = top_z - junction_z;
+        let below_junction = junction_z - bottom_z;
+        if total > 0.0 {
+            let line_at_junction = top_r + (bottom_r - top_r) * (above_junction / total);
+            let dip = needed - line_at_junction;
+            if dip > needed * PROFILE_RELATIVE_SLACK {
+                let first = upper_index == 0;
+                let last = upper_index + 2 == spans.len();
+                if (first && last)
+                    || (first && above_junction <= 0.0)
+                    || (!first && below_junction <= 0.0)
+                {
+                    top_r += dip;
+                    bottom_r += dip;
+                } else if first {
+                    bottom_r = top_r + (needed - top_r) * (total / above_junction);
+                    if let Some(next) = spans.get_mut(upper_index + 2) {
+                        next.top_radius_mm = next.top_radius_mm.max(bottom_r);
+                    }
+                } else {
+                    top_r = bottom_r + (needed - bottom_r) * (total / below_junction);
+                }
+            }
+        } else {
+            top_r = top_r.max(bottom_r);
+            bottom_r = top_r;
         }
+        spans[upper_index] = DrawnSpan {
+            top_z_mm: top_z,
+            bottom_z_mm: bottom_z,
+            top_radius_mm: top_r,
+            bottom_radius_mm: bottom_r,
+        };
+        spans.remove(upper_index + 1);
     }
     spans
 }
@@ -2091,20 +2170,30 @@ fn merge_short_spans(mut spans: Vec<DrawnSpan>, min_len: f64) -> Vec<DrawnSpan> 
 /// `slope` mm of radius per mm of height (and at least `min_len` long) runs from
 /// the chord there to the wide radius. The cone sits ABOVE the step, where the
 /// ledger asks for the thin value and the cone only adds section; below the
-/// step the ledger asks for the wide value, which the cone has reached. A span
-/// too short to hold the cone keeps its shoulder.
-fn cone_the_shoulders(spans: Vec<DrawnSpan>, slope: f64, min_len: f64) -> Vec<DrawnSpan> {
-    let mut out: Vec<DrawnSpan> = Vec::with_capacity(spans.len() + 4);
-    for span in spans {
-        let Some(above) = out.last().copied() else {
-            out.push(span);
-            continue;
-        };
-        let (thin, wide) = (above.bottom_radius_mm, span.top_radius_mm);
+/// step the ledger asks for the wide value, which the cone has reached.
+///
+/// Steps are taken from the bottom up, so a span that has to give way to a
+/// cone and so widens at its top passes the step on to the span above it.
+/// Three cases, for the span above a step of height `length` and a cone that
+/// needs `height` of it:
+///
+/// * the cone fits and leaves at least `min_len` of the span: cut there;
+/// * it fits but the rest would be shorter than `min_len`, or it needs the whole
+///   span: the whole span is the cone (from its own top radius to the wide one,
+///   at the law's slope or shallower);
+/// * it needs more than the span has: the span becomes the law's cone exactly
+///   and its top, now wider, is a step for the span above. A span at the top of
+///   the member keeps its own top radius and is drawn steeper than the law. The
+///   profile is continuous in every case, never a flat shoulder.
+fn cone_the_shoulders(mut spans: Vec<DrawnSpan>, slope: f64, min_len: f64) -> Vec<DrawnSpan> {
+    let mut k = spans.len().saturating_sub(1);
+    while k > 0 {
+        k -= 1;
+        let (above, below) = (spans[k], spans[k + 1]);
+        let (thin, wide) = (above.bottom_radius_mm, below.top_radius_mm);
         let length = above.top_z_mm - above.bottom_z_mm;
-        let continuous = above.bottom_z_mm.to_bits() == span.top_z_mm.to_bits();
+        let continuous = above.bottom_z_mm.to_bits() == below.top_z_mm.to_bits();
         if !(continuous && wide > thin * (1.0 + PROFILE_RELATIVE_SLACK) && length > 0.0) {
-            out.push(span);
             continue;
         }
         // dr/dh of the span above going up; the cone's radius at height h is
@@ -2116,25 +2205,29 @@ fn cone_the_shoulders(spans: Vec<DrawnSpan>, slope: f64, min_len: f64) -> Vec<Dr
         } else {
             f64::INFINITY
         };
-        if height >= length * (1.0 - PROFILE_RELATIVE_SLACK) {
-            out.push(span);
-            continue;
+        if height < length - min_len {
+            let cut_z = above.bottom_z_mm + height;
+            let chord = thin + g * height;
+            spans[k].bottom_z_mm = cut_z;
+            spans[k].bottom_radius_mm = chord;
+            spans.insert(
+                k + 1,
+                DrawnSpan {
+                    top_z_mm: cut_z,
+                    bottom_z_mm: above.bottom_z_mm,
+                    top_radius_mm: chord,
+                    bottom_radius_mm: wide,
+                },
+            );
+        } else if height <= length * (1.0 + PROFILE_RELATIVE_SLACK) || k == 0 {
+            spans[k].bottom_radius_mm = wide;
+        } else {
+            spans[k].top_radius_mm = wide - slope * length;
+            spans[k].bottom_radius_mm = wide;
+            // The span's top is wider now: the step above it is the next one.
         }
-        let cut_z = above.bottom_z_mm + height;
-        let chord = thin + g * height;
-        if let Some(last) = out.last_mut() {
-            last.bottom_z_mm = cut_z;
-            last.bottom_radius_mm = chord;
-        }
-        out.push(DrawnSpan {
-            top_z_mm: cut_z,
-            bottom_z_mm: above.bottom_z_mm,
-            top_radius_mm: chord,
-            bottom_radius_mm: wide,
-        });
-        out.push(span);
     }
-    out
+    spans
 }
 
 /// **THE DRAWN PROFILE OF ONE MEMBER**: the fewest straight spans, from
@@ -3035,8 +3128,7 @@ fn lower_one_sweep_arm(
     // straight and counted. `None` is the straight arm.
     let mut head_pieces: Vec<SupportPrimitive> = Vec::new();
     let headed = headed_tip(arm, config).and_then(|headed| {
-        push_head_segment(&headed, config, &mut head_pieces)
-            .map(|segment| (headed, segment))
+        push_head_segment(&headed, config, &mut head_pieces).map(|segment| (headed, segment))
     });
     let head_drawn_straight = arm.head.is_some() && headed.is_none();
     let (seated_seat, center, seat) = if arm.seats_into_model {
@@ -3133,8 +3225,8 @@ fn lower_one_sweep_arm(
                 clippy::cast_precision_loss,
                 reason = "a post's slot count is bounded by the plan's layer count, exact in f64"
             )]
-            let slots_top_z = base[2].get()
-                + arm.radius_profile_mm.len() as f64 * config.layer_height_mm.get();
+            let slots_top_z =
+                base[2].get() + arm.radius_profile_mm.len() as f64 * config.layer_height_mm.get();
             (
                 joint,
                 joint_radius,
@@ -3270,9 +3362,12 @@ fn lower_one_sweep_arm(
                     {
                         return ArmLowering::refused(ArmOutcome::ZeroLength);
                     }
-                    let Some(drawn) =
-                        shaft(shaft_top, foot_point, FrustumRingNormal::PlateZ, &mut staged)
-                    else {
+                    let Some(drawn) = shaft(
+                        shaft_top,
+                        foot_point,
+                        FrustumRingNormal::PlateZ,
+                        &mut staged,
+                    ) else {
                         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
                     };
                     spans = drawn;
@@ -3312,7 +3407,10 @@ fn lower_one_sweep_arm(
     // The emit boundary's own contract, asked HERE, so one bad arm is dropped
     // and counted rather than failing the whole field at
     // `SupportedModel::from_parts` with nothing said about which arm did it.
-    if staged.iter().any(|primitive| !primitive.is_semantically_valid()) {
+    if staged
+        .iter()
+        .any(|primitive| !primitive.is_semantically_valid())
+    {
         return ArmLowering::refused(ArmOutcome::InvalidGeometry);
     }
     // The foot the raft pad must cover: the LOWEST record of a plate arm — its
@@ -4306,8 +4404,16 @@ mod sweep_root_flare_tests {
                 plate_arm([0.0, 0.0, 15.3], [3.0, 1.0], 7.3, 0.12, down),
                 7.3,
             ),
-            ("tall vertical", plate_arm([0.0, 0.0, 8.0], [0.0, 0.0], 0.0, 0.2, down), 0.0),
-            ("short leaned", plate_arm([0.0, 0.0, 2.0], [0.8, 0.0], 0.0, 0.1, tilted), 0.0),
+            (
+                "tall vertical",
+                plate_arm([0.0, 0.0, 8.0], [0.0, 0.0], 0.0, 0.2, down),
+                0.0,
+            ),
+            (
+                "short leaned",
+                plate_arm([0.0, 0.0, 2.0], [0.8, 0.0], 0.0, 0.1, tilted),
+                0.0,
+            ),
             (
                 "tall leaned mast-like (no ball)",
                 SweepArm {
@@ -4323,8 +4429,12 @@ mod sweep_root_flare_tests {
             let (door_top, door_bottom) = door
                 .plate_shaft_of(arm, *plate_z)
                 .unwrap_or_else(|| panic!("{what}: the door found no shaft"));
-            for (name, drawn, answered) in [("top", top, door_top), ("bottom", bottom, door_bottom)] {
-                let gap = (0..3).map(|i| (drawn[i] - answered[i]).powi(2)).sum::<f64>().sqrt();
+            for (name, drawn, answered) in [("top", top, door_top), ("bottom", bottom, door_bottom)]
+            {
+                let gap = (0..3)
+                    .map(|i| (drawn[i] - answered[i]).powi(2))
+                    .sum::<f64>()
+                    .sqrt();
                 assert!(
                     gap < 1e-6,
                     "{what}: the door's shaft {name} {answered:?} is {gap:.3e} mm from the \
@@ -4346,7 +4456,10 @@ mod sweep_root_flare_tests {
         }
         // Anti-vacuity: the four leaning posts draw their shaft off the
         // planned axis; the vertical post does not.
-        assert_eq!(off_the_planned_axis, 4, "{off_the_planned_axis} shafts left the planned axis");
+        assert_eq!(
+            off_the_planned_axis, 4,
+            "{off_the_planned_axis} shafts left the planned axis"
+        );
         assert!(door
             .plate_shaft_of(
                 &SweepArm {
@@ -4537,14 +4650,21 @@ mod headed_arm_tests {
             let n = unit();
             // The ball first, its axis parallel to u.
             let ball = &drawn[0];
-            assert_eq!(ball.segment_kind, SupportSegmentKind::ContactSphere, "{what}");
+            assert_eq!(
+                ball.segment_kind,
+                SupportSegmentKind::ContactSphere,
+                "{what}"
+            );
             let (centre, axis) = ball
                 .sphere_geometry
                 .as_ref()
                 .and_then(crate::SphereGeometry::tip_authority)
                 .expect("a tip ball");
             for i in 0..3 {
-                assert!((axis[i].get() - n[i]).abs() < 1e-12, "{what}: ball axis {axis:?}");
+                assert!(
+                    (axis[i].get() - n[i]).abs() < 1e-12,
+                    "{what}: ball axis {axis:?}"
+                );
             }
             let centre = point(centre);
             // The joint sphere sits AT the carried K, radius r_K.
@@ -4581,20 +4701,34 @@ mod headed_arm_tests {
             assert_eq!(point(neck.last().expect("a neck").end_mm), k, "{what}");
             // The post: Member records from K to the base.
             let post = &drawn[joint_at + 1..];
-            assert!(post.iter().all(|p| p.segment_kind == SupportSegmentKind::Member));
+            assert!(post
+                .iter()
+                .all(|p| p.segment_kind == SupportSegmentKind::Member));
             assert_eq!(point(post[0].start_mm), k, "{what}");
-            assert_eq!(point(post.last().expect("a post").end_mm), arm.base_mm, "{what}");
+            assert_eq!(
+                point(post.last().expect("a post").end_mm),
+                arm.base_mm,
+                "{what}"
+            );
             // The seat trim cuts no head piece.
             let bite = tip_shaft_seat_bites(std::slice::from_ref(&arm), &layers())
                 .expect("a valid request")[0]
                 .expect("measured")
                 .bite_mm;
-            assert!(bite.abs() < 1e-12, "{what}: the trim bites the head: {bite}");
+            assert!(
+                bite.abs() < 1e-12,
+                "{what}: the trim bites the head: {bite}"
+            );
             // The counters: one head, stand-off g (the joint has not grown),
             // none drawn straight.
-            let lowering =
-                lower_sweep_arms(std::slice::from_ref(&arm), frame(), &layers(), 100_000, 1 << 30)
-                    .expect("a valid request");
+            let lowering = lower_sweep_arms(
+                std::slice::from_ref(&arm),
+                frame(),
+                &layers(),
+                100_000,
+                1 << 30,
+            )
+            .expect("a valid request");
             assert_eq!(lowering.tips_headed, 1, "{what}");
             assert_eq!(lowering.heads_drawn_straight, 0, "{what}");
             assert_eq!(lowering.head_standoff_mm.len(), 1);
@@ -4649,17 +4783,18 @@ mod headed_arm_tests {
                 let p = point(p);
                 (0..3).map(|axis| (p[axis] - contact[axis]) * u[axis]).sum()
             };
-            let ends: Vec<(f64, f64)> = std::iter::once((
-                along(neck[0].start_mm),
-                neck[0].start_radius_mm.get(),
-            ))
-            .chain(
-                neck.iter()
-                    .map(|p| (along(p.end_mm), p.end_radius_mm.get())),
-            )
-            .collect();
+            let ends: Vec<(f64, f64)> =
+                std::iter::once((along(neck[0].start_mm), neck[0].start_radius_mm.get()))
+                    .chain(
+                        neck.iter()
+                            .map(|p| (along(p.end_mm), p.end_radius_mm.get())),
+                    )
+                    .collect();
             let (s_start, s_end) = (ends[0].0, ends[ends.len() - 1].0);
-            assert!((s_end - length).abs() < 1e-9, "tip {tip}: the head ends at K");
+            assert!(
+                (s_end - length).abs() < 1e-9,
+                "tip {tip}: the head ends at K"
+            );
             let drawn_at = |s: f64| -> f64 {
                 let pair = ends
                     .windows(2)
@@ -4670,7 +4805,10 @@ mod headed_arm_tests {
             for step in 0..=200 {
                 let s = s_start + (s_end - s_start) * f64::from(step) / 200.0;
                 let (got, want) = (drawn_at(s), law(tip, s));
-                assert!(got >= want - 1e-9, "tip {tip}, s {s}: drawn {got} under the law {want}");
+                assert!(
+                    got >= want - 1e-9,
+                    "tip {tip}, s {s}: drawn {got} under the law {want}"
+                );
             }
             // Volumes over [s_start, L]: the frusta against the law (Simpson).
             let drawn_volume: f64 = neck
@@ -4723,8 +4861,14 @@ mod drawn_link_tests {
         // v19's heads: the first frustum starts at the ball's centre at a
         // radius at or over the ball's own.
         for first in [BALL, 1.2 * BALL, 3.0 * BALL] {
-            let frusta = [([0.0, first], [1.0, first + 0.2]), ([1.0, first + 0.2], [1.5, 0.9])];
-            assert!(drawn_link_mm(&frusta, BALL).abs() < 1e-12, "first radius {first}");
+            let frusta = [
+                ([0.0, first], [1.0, first + 0.2]),
+                ([1.0, first + 0.2], [1.5, 0.9]),
+            ];
+            assert!(
+                drawn_link_mm(&frusta, BALL).abs() < 1e-12,
+                "first radius {first}"
+            );
         }
     }
 
@@ -4744,14 +4888,20 @@ mod drawn_link_tests {
         // the cylinder's length less the part inside the ball.
         let abrupt = [([0.0, r], [1.0, r]), ([1.0, BALL], [1.5, 0.40])];
         let link = drawn_link_mm(&abrupt, BALL);
-        assert!((link - (1.0 - exit)).abs() < 1e-12, "{link} vs {}", 1.0 - exit);
+        assert!(
+            (link - (1.0 - exit)).abs() < 1e-12,
+            "{link} vs {}",
+            1.0 - exit
+        );
     }
 
     #[test]
     fn a_head_that_never_leaves_the_ball_or_never_widens_is_measured_without_panic() {
         assert!(drawn_link_mm(&[], BALL).abs() < 1e-12);
         let thin = [([0.0, 0.05], [2.0, 0.05])];
-        assert!((drawn_link_mm(&thin, BALL) - (2.0 - (BALL * BALL - 0.0025_f64).sqrt())).abs() < 1e-12);
+        assert!(
+            (drawn_link_mm(&thin, BALL) - (2.0 - (BALL * BALL - 0.0025_f64).sqrt())).abs() < 1e-12
+        );
     }
 }
 
@@ -4765,7 +4915,10 @@ mod drawn_span_ramp_tests {
     /// Spans of a shaft whose pieces are one unit tall, given TOP-DOWN per
     /// piece requirements; the shaft runs from the top of the first piece to
     /// the bottom of the last.
-    #[expect(clippy::cast_precision_loss, reason = "a small piece count is exact in f64")]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a small piece count is exact in f64"
+    )]
     fn spans_of(top_down: &[f64], start: f64, end: f64) -> Vec<DrawnSpan> {
         let n = top_down.len();
         let bottom_first: Vec<f64> = top_down.iter().rev().copied().collect();
@@ -4856,7 +5009,10 @@ mod drawn_span_ramp_tests {
         let height = cone.top_z_mm - cone.bottom_z_mm;
         assert!(height > 0.0 && cone.top_radius_mm >= 0.3 - 1e-12);
         let drawn_slope = (cone.bottom_radius_mm - cone.top_radius_mm) / height;
-        assert!(drawn_slope <= slope + 1e-9, "{drawn_slope} vs the law's {slope}");
+        assert!(
+            drawn_slope <= slope + 1e-9,
+            "{drawn_slope} vs the law's {slope}"
+        );
         assert!(
             (drawn_slope - slope).abs() < 1e-9,
             "a step this size uses the law's own slope: {drawn_slope} vs {slope}"
@@ -4885,6 +5041,74 @@ mod drawn_span_ramp_tests {
         assert!(spans[0].top_radius_mm >= 0.3 && spans.last().unwrap().bottom_radius_mm >= 0.5);
     }
 
+    /// A shaft with a thin slot over a wide slot (0.05 mm each, as in the review
+    /// traces): the ledger asks 0.30 above z = 0.05 and 0.37 below it. The
+    /// drawn spans from `from_z` to `to_z` must be continuous, no flat shoulder,
+    /// none shorter than one registered pixel pitch, and on or above the ledger
+    /// at every height.
+    fn assert_sound_over_a_thin_slot_on_a_wide_one(from_z: f64, to_z: f64) {
+        let spans = drawn_spans(&[0.37, 0.30], 0.0, 0.10, from_z, to_z, 0.30, 0.37);
+        assert!((spans[0].top_z_mm - from_z).abs() < 1e-12, "{spans:?}");
+        assert!(
+            (spans.last().unwrap().bottom_z_mm - to_z).abs() < 1e-12,
+            "{spans:?}"
+        );
+        for pair in spans.windows(2) {
+            assert!(
+                (pair[0].bottom_z_mm - pair[1].top_z_mm).abs() < 1e-12,
+                "{spans:?}"
+            );
+            assert!(
+                (pair[0].bottom_radius_mm - pair[1].top_radius_mm).abs() < 1e-9,
+                "a flat shoulder at z {}: {spans:?}",
+                pair[0].bottom_z_mm
+            );
+        }
+        for span in &spans {
+            assert!(
+                span.top_z_mm - span.bottom_z_mm >= 0.019 - 1e-12,
+                "a frustum under one pixel pitch: {spans:?}"
+            );
+        }
+        for step in 0..=200_u32 {
+            let z = to_z + (from_z - to_z) * (f64::from(step) + 0.37) / 200.37;
+            let ledger = if z < 0.05 { 0.37 } else { 0.30 };
+            let drawn = spans
+                .iter()
+                .filter(|s| s.bottom_z_mm - 1e-12 <= z && z <= s.top_z_mm + 1e-12)
+                .map(|s| {
+                    let t = (s.top_z_mm - z) / (s.top_z_mm - s.bottom_z_mm);
+                    s.top_radius_mm + (s.bottom_radius_mm - s.top_radius_mm) * t
+                })
+                .fold(0.0_f64, f64::max);
+            assert!(
+                drawn >= ledger - 1e-9,
+                "section {drawn} under the ledger {ledger} at z {z}: {spans:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_last_span_merged_keeps_the_ledger_over_its_whole_height() {
+        // Chords: 0.05 mm at 0.30, then 0.01 mm at 0.37. A straight 0.30 -> 0.37
+        // line over the 0.06 mm reaches 0.37 only at its foot (red before).
+        assert_sound_over_a_thin_slot_on_a_wide_one(0.10, 0.04);
+    }
+
+    #[test]
+    fn a_cone_never_leaves_a_sliver_of_the_span_it_cuts() {
+        // Two 0.05 mm spans: the law's cone takes 0.0446 mm of the upper one and
+        // would leave 0.0054 mm (red before).
+        assert_sound_over_a_thin_slot_on_a_wide_one(0.10, 0.0);
+    }
+
+    #[test]
+    fn a_step_near_the_shaft_top_is_a_continuous_cone_not_a_shoulder() {
+        // The upper span is 0.04 mm, shorter than the cone: v19-fix review kept the
+        // flat 0.30 -> 0.37 annulus here (red before).
+        assert_sound_over_a_thin_slot_on_a_wide_one(0.09, 0.0);
+    }
+
     #[test]
     fn a_ramp_next_to_a_single_step_changes_only_the_ramp() {
         // thin, a lone step up to mid, flat, then a two-rise ramp to wide.
@@ -4906,10 +5130,16 @@ mod drawn_span_ramp_tests {
             .find(|s| (s.bottom_z_mm - 8.0).abs() < 1e-12)
             .expect("a cone ends on the step");
         assert!((cone.bottom_radius_mm - 0.5).abs() < 1e-12, "{spans:?}");
-        assert!(cone.top_radius_mm < 0.5 && cone.top_radius_mm >= 0.3 - 1e-12, "{spans:?}");
+        assert!(
+            cone.top_radius_mm < 0.5 && cone.top_radius_mm >= 0.3 - 1e-12,
+            "{spans:?}"
+        );
         // The ramp (cuts at z = 5, 4, 3) is continuous.
         for z in [5.0, 4.0, 3.0] {
-            for pair in spans.windows(2).filter(|p| (p[0].bottom_z_mm - z).abs() < 1e-12) {
+            for pair in spans
+                .windows(2)
+                .filter(|p| (p[0].bottom_z_mm - z).abs() < 1e-12)
+            {
                 assert!((pair[0].bottom_radius_mm - pair[1].top_radius_mm).abs() < 1e-12);
             }
         }
@@ -4951,7 +5181,10 @@ mod drawn_span_ramp_tests {
     }
 
     #[test]
-    #[expect(clippy::cast_precision_loss, reason = "small cut indices are exact in f64")]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "small cut indices are exact in f64"
+    )]
     fn random_stepped_profiles_stay_above_the_ledger_and_ramps_are_continuous() {
         for seed in 0..400_u64 {
             let mut rng = Lcg(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32);

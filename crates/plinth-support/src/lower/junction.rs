@@ -32,18 +32,21 @@
 //!    ([`crate::hull::frustum_ring`]), so a hull ring equals its neighbour's ring
 //!    bit for bit.
 //!
-//! A junction that cannot be drawn this way is left as v19 drew it and counted:
-//! the host chain is too crowded (an earlier hull already took the arc), the hull
-//! is flat, or the host has nothing above the landing point and begins with the
-//! contact taper. Emit and warn, never refuse.
+//! A junction that cannot be cut into the host this way (the host chain is too
+//! crowded because an earlier hull already took the arc, or the host has nothing
+//! above the landing point and begins with the contact taper, or a piece cannot be
+//! drawn) is FILLED instead: the host and the branch stay as they are, and an added
+//! hull of the branch's whole end ring and the host's own sections a pull-back
+//! above and below the landing point covers the wedge the branch end leaves
+//! outside the host. Only a junction that cannot even be filled (a flat hull, a
+//! ring that cannot be made) keeps the old flat cap; it is counted, and the caller
+//! warns. Emit and warn, never refuse.
 
 use geom_kernel::vec3::{add, dot, norm, normalize, scale, sub};
 use plinth_core::{Finite, PositiveFinite};
 
 use crate::hull::{convex_hull, frustum_ring};
-use crate::{
-    FrustumRingNormal, HullRing, JunctionRings, SupportPrimitive, SupportSegmentKind,
-};
+use crate::{FrustumRingNormal, HullRing, JunctionRings, SupportPrimitive, SupportSegmentKind};
 
 type V = [f64; 3];
 
@@ -77,8 +80,14 @@ pub(super) struct JunctionOutcome {
     /// The hull records to place right after an arm's last record.
     pub hulls: Vec<Vec<SupportPrimitive>>,
     pub hulled: usize,
+    /// Junctions the host could not be cut for (crowded by an earlier hull, or the
+    /// host begins with the contact taper), filled with an ADDED hull of the
+    /// branch's whole end ring and the host's sections beside the landing point.
+    pub filled: usize,
     pub buried: usize,
     pub no_host: usize,
+    /// Junctions neither cut nor filled, left with the old flat cap: the warning
+    /// the caller prints.
     pub crowded: usize,
     pub undrawable: usize,
 }
@@ -327,12 +336,10 @@ pub(super) fn hull_junctions(
         let below_len = bottom_arc - s_k;
         let has_above = above_len > rules.pixel_pitch_mm;
         let has_below = below_len > rules.pixel_pitch_mm;
-        if !has_above && host[0].segment_kind == SupportSegmentKind::ContactTaper {
-            // The landing point is within a pixel of the contact taper's start:
-            // there is no host above to keep the taper on.
-            outcome.undrawable += 1;
-            continue;
-        }
+        // The landing point within a pixel of the contact taper's start: there is
+        // no host above to keep the taper on, so the host cannot be cut here and
+        // the junction is filled with an added hull instead.
+        let taper_blocks = !has_above && host[0].segment_kind == SupportSegmentKind::ContactTaper;
         // The collar: widening-downward frusta directly above K's own frustum.
         let contiguous = |g: usize| (host_arcs[g].1 - host_arcs[g + 1].0).abs() <= 1.0e-9;
         let mut run: Option<(usize, usize)> = None;
@@ -390,172 +397,296 @@ pub(super) fn hull_junctions(
                 .iter()
                 .any(|&(lo, hi)| take.0 < hi + 1.0e-9 && take.1 > lo - 1.0e-9)
         };
-        if overlaps(&locked[h], host_take) || overlaps(&locked[a], branch_take) {
-            outcome.crowded += 1;
-            continue;
-        }
+        let crowded = overlaps(&locked[h], host_take) || overlaps(&locked[a], branch_take);
+        // The junction cannot be cut into the host (crowded, or the taper is in the
+        // way, or a piece is undrawable below): it is filled instead, with the hull
+        // of the branch's whole end ring and the host's own sections a pull-back
+        // above and below the landing point. The host and the branch stay as they
+        // are, and the hull covers the wedge the branch end leaves outside the host.
+        let fill_rings = FillRings {
+            branch: last,
+            host: &host,
+            host_arcs: &host_arcs,
+            frame: frame_h,
+            s_k,
+            above: slot_above.map(|i| pulls[i].max(rules.pixel_pitch_mm).min(0.5 * above_len)),
+            below: slot_below.map(|i| pulls[i].max(rules.pixel_pitch_mm).min(0.5 * below_len)),
+        };
+        let mut skip = if taper_blocks {
+            Some(Skip::Undrawable)
+        } else if crowded {
+            Some(Skip::Crowded)
+        } else {
+            None
+        };
         // 6. THE PIECES. The host above (with the collar dropped and a thin
         // extension to its ring), the host below, and the branch's shortened end.
-        let mut upper: Vec<SupportPrimitive> = Vec::new();
-        let mut lower: Vec<SupportPrimitive> = Vec::new();
-        let mut ok = true;
-        for (i, s) in host.iter().enumerate() {
-            let (a0, a1) = host_arcs[i];
-            let in_run = collar.is_some_and(|(top, bottom)| (top..=bottom).contains(&i));
-            if !in_run && a1 <= cut_top + 1.0e-12 {
-                upper.push(s.clone());
-            } else if !in_run && a0 < cut_top - 1.0e-12 && has_above {
-                let t = (cut_top - a0) / (a1 - a0);
-                let end = lerp(pt(s.start_mm), pt(s.end_mm), t);
-                let r = radius_at(s, host_arcs[i], cut_top);
-                match with_end(s, end, r) {
-                    Some(piece) => upper.push(piece),
-                    None => ok = false,
-                }
-            }
-            if a0 >= q_b - 1.0e-12 && !in_run {
-                lower.push(s.clone());
-            } else if a1 > q_b + 1.0e-12 && a0 < q_b && !in_run && has_below {
-                let t = (q_b - a0) / (a1 - a0);
-                let start = lerp(pt(s.start_mm), pt(s.end_mm), t);
-                let r = radius_at(s, host_arcs[i], q_b);
-                match with_start(s, start, r) {
-                    Some(piece) => lower.push(piece),
-                    None => ok = false,
-                }
-            }
-        }
-        // Collar dropped: the thin host runs on, at its own radius, to its ring.
-        if let (Some((top, _)), true) = (collar, has_above) {
-            let reach = upper.last().map_or(top_arc, |u| frame_h.arc(pt(u.end_mm)));
-            if q_a > reach + 1.0e-12 {
-                let from = upper.last().map_or_else(|| pt(host[top].start_mm), |u| pt(u.end_mm));
-                let to = add(frame_h.origin, scale(frame_h.dir, q_a));
-                let r = r_thin.unwrap_or(r_l);
-                let long_enough = norm(sub(to, from)) >= rules.pixel_pitch_mm;
-                match (upper.last().cloned(), long_enough) {
-                    (Some(prev), false) => match with_end(&prev, to, prev.end_radius_mm.get()) {
-                        Some(stretched) => {
-                            let at = upper.len() - 1;
-                            upper[at] = stretched;
+        if skip.is_none() {
+            skip = 'build: {
+                let mut upper: Vec<SupportPrimitive> = Vec::new();
+                let mut lower: Vec<SupportPrimitive> = Vec::new();
+                let mut ok = true;
+                for (i, s) in host.iter().enumerate() {
+                    let (a0, a1) = host_arcs[i];
+                    let in_run = collar.is_some_and(|(top, bottom)| (top..=bottom).contains(&i));
+                    if !in_run && a1 <= cut_top + 1.0e-12 {
+                        upper.push(s.clone());
+                    } else if !in_run && a0 < cut_top - 1.0e-12 && has_above {
+                        let t = (cut_top - a0) / (a1 - a0);
+                        let end = lerp(pt(s.start_mm), pt(s.end_mm), t);
+                        let r = radius_at(s, host_arcs[i], cut_top);
+                        match with_end(s, end, r) {
+                            Some(piece) => upper.push(piece),
+                            None => ok = false,
                         }
-                        None => ok = false,
-                    },
-                    (prev, _) => {
-                        let ring_normal = prev
-                            .as_ref()
-                            .map_or(host[top].ring_normal, |p| p.ring_normal);
-                        match (fin(from), fin(to), PositiveFinite::new(r)) {
-                            (Some(start_mm), Some(end_mm), Ok(radius)) => {
-                                upper.push(SupportPrimitive {
-                                    segment_kind: SupportSegmentKind::Member,
-                                    start_mm,
-                                    end_mm,
-                                    start_radius_mm: radius,
-                                    end_radius_mm: radius,
-                                    contact_depth_mm: None,
-                                    ring_normal,
-                                    sphere_geometry: None,
-                                    seat_trim: None,
-                                });
-                            }
-                            _ => ok = false,
+                    }
+                    if a0 >= q_b - 1.0e-12 && !in_run {
+                        lower.push(s.clone());
+                    } else if a1 > q_b + 1.0e-12 && a0 < q_b && !in_run && has_below {
+                        let t = (q_b - a0) / (a1 - a0);
+                        let start = lerp(pt(s.start_mm), pt(s.end_mm), t);
+                        let r = radius_at(s, host_arcs[i], q_b);
+                        match with_start(s, start, r) {
+                            Some(piece) => lower.push(piece),
+                            None => ok = false,
                         }
                     }
                 }
-            }
+                // Collar dropped: the thin host runs on, at its own radius, to its ring.
+                if let (Some((top, _)), true) = (collar, has_above) {
+                    let reach = upper.last().map_or(top_arc, |u| frame_h.arc(pt(u.end_mm)));
+                    if q_a > reach + 1.0e-12 {
+                        let from = upper
+                            .last()
+                            .map_or_else(|| pt(host[top].start_mm), |u| pt(u.end_mm));
+                        let to = add(frame_h.origin, scale(frame_h.dir, q_a));
+                        let r = r_thin.unwrap_or(r_l);
+                        let long_enough = norm(sub(to, from)) >= rules.pixel_pitch_mm;
+                        match (upper.last().cloned(), long_enough) {
+                            (Some(prev), false) => {
+                                match with_end(&prev, to, prev.end_radius_mm.get()) {
+                                    Some(stretched) => {
+                                        let at = upper.len() - 1;
+                                        upper[at] = stretched;
+                                    }
+                                    None => ok = false,
+                                }
+                            }
+                            (prev, _) => {
+                                let ring_normal = prev
+                                    .as_ref()
+                                    .map_or(host[top].ring_normal, |p| p.ring_normal);
+                                match (fin(from), fin(to), PositiveFinite::new(r)) {
+                                    (Some(start_mm), Some(end_mm), Ok(radius)) => {
+                                        upper.push(SupportPrimitive {
+                                            segment_kind: SupportSegmentKind::Member,
+                                            start_mm,
+                                            end_mm,
+                                            start_radius_mm: radius,
+                                            end_radius_mm: radius,
+                                            contact_depth_mm: None,
+                                            ring_normal,
+                                            sphere_geometry: None,
+                                            seat_trim: None,
+                                        });
+                                    }
+                                    _ => ok = false,
+                                }
+                            }
+                        }
+                    }
+                }
+                // The branch's end, pulled back.
+                let mut spans_a_new = spans_a.clone();
+                if t_b > 0.0 {
+                    let fraction = 1.0 - t_b / len_b;
+                    let end = lerp(pt(last.start_mm), pt(last.end_mm), fraction);
+                    let (r0, r1) = radii(last);
+                    match (
+                        with_end(last, end, r0 + (r1 - r0) * fraction),
+                        spans_a_new.last_mut(),
+                    ) {
+                        (Some(piece), Some(slot)) => *slot = piece,
+                        _ => ok = false,
+                    }
+                }
+                if !ok || (has_above && upper.is_empty()) || (has_below && lower.is_empty()) {
+                    break 'build Some(Skip::Undrawable);
+                }
+                // 7. THE RINGS and the hull.
+                let Some(branch_last) = spans_a_new.last() else {
+                    break 'build Some(Skip::Undrawable);
+                };
+                let rings = [
+                    Some(ring_of(branch_last, false)),
+                    lower
+                        .first()
+                        .filter(|_| has_below)
+                        .map(|s| ring_of(s, true)),
+                    upper
+                        .last()
+                        .filter(|_| has_above)
+                        .map(|s| ring_of(s, false)),
+                ];
+                let Some(record) = hull_record(rings, rules.sides) else {
+                    break 'build Some(Skip::Undrawable);
+                };
+                outcome.hulls[a].push(record);
+                // 8. COMMIT.
+                let mut host_new = upper;
+                host_new.extend(lower);
+                outcome.shafts[h] = Some(host_new);
+                outcome.shafts[a] = Some(spans_a_new);
+                locked[h].push(host_take);
+                locked[a].push(branch_take);
+                outcome.hulled += 1;
+                None
+            };
         }
-        // The branch's end, pulled back.
-        let mut spans_a_new = spans_a.clone();
-        if t_b > 0.0 {
-            let fraction = 1.0 - t_b / len_b;
-            let end = lerp(pt(last.start_mm), pt(last.end_mm), fraction);
-            let (r0, r1) = radii(last);
-            match (with_end(last, end, r0 + (r1 - r0) * fraction), spans_a_new.last_mut()) {
-                (Some(piece), Some(slot)) => *slot = piece,
-                _ => ok = false,
-            }
-        }
-        if !ok || (has_above && upper.is_empty()) || (has_below && lower.is_empty()) {
-            outcome.undrawable += 1;
-            continue;
-        }
-        // 7. THE RINGS and the hull.
-        let Some(branch_last) = spans_a_new.last() else {
-            continue;
-        };
-        let ring_of = |s: &SupportPrimitive, at_start: bool| HullRing {
-            frustum_start_mm: s.start_mm,
-            frustum_end_mm: s.end_mm,
-            radius_mm: if at_start {
-                s.start_radius_mm
+        // A junction that could not be cut into the host is filled, not left as the
+        // old flat cap; only one that cannot even be filled is counted as skipped.
+        if let Some(why) = skip {
+            if let Some(record) = fill_rings.record(rules.sides) {
+                outcome.hulls[a].push(record);
+                outcome.filled += 1;
             } else {
-                s.end_radius_mm
-            },
-            at_start,
-            plate_z: s.ring_normal == FrustumRingNormal::PlateZ,
-        };
-        let rings = [
-            Some(ring_of(branch_last, false)),
-            lower.first().filter(|_| has_below).map(|s| ring_of(s, true)),
-            upper.last().filter(|_| has_above).map(|s| ring_of(s, false)),
-        ];
-        let mut points: Vec<V> = Vec::with_capacity(3 * rules.sides);
-        let mut ring_ok = true;
-        for ring in rings.iter().flatten() {
-            match frustum_ring(
-                pt(ring.frustum_start_mm),
-                pt(ring.frustum_end_mm),
-                ring.radius_mm.get(),
-                ring.at_start,
-                ring.plate_z,
-                rules.sides,
-            ) {
-                Some(corners) => points.extend(corners),
-                None => ring_ok = false,
+                match why {
+                    Skip::Crowded => outcome.crowded += 1,
+                    Skip::Undrawable => outcome.undrawable += 1,
+                }
             }
         }
-        let hull = ring_ok.then(|| convex_hull(&points)).flatten();
-        if hull.is_none_or(|h| h.volume() <= 0.0) {
-            outcome.undrawable += 1;
-            continue;
-        }
-        // The record's own start and end: the centres of the two largest rings.
-        let mut present: Vec<&HullRing> = rings.iter().flatten().collect();
-        present.sort_by(|x, y| y.radius_mm.get().total_cmp(&x.radius_mm.get()));
-        let centre = |r: &HullRing| {
-            if r.at_start {
-                r.frustum_start_mm
-            } else {
-                r.frustum_end_mm
-            }
-        };
-        let (first, second) = (present[0], present[1]);
-        if centre(first) == centre(second) {
-            outcome.undrawable += 1;
-            continue;
-        }
-        outcome.hulls[a].push(SupportPrimitive {
-            segment_kind: SupportSegmentKind::Member,
-            start_mm: centre(first),
-            end_mm: centre(second),
-            start_radius_mm: first.radius_mm,
-            end_radius_mm: second.radius_mm,
-            contact_depth_mm: None,
-            ring_normal: FrustumRingNormal::Junction(JunctionRings(rings)),
-            sphere_geometry: None,
-            seat_trim: None,
-        });
-        // 8. COMMIT.
-        let mut host_new = upper;
-        host_new.extend(lower);
-        outcome.shafts[h] = Some(host_new);
-        outcome.shafts[a] = Some(spans_a_new);
-        locked[h].push(host_take);
-        locked[a].push(branch_take);
-        outcome.hulled += 1;
     }
     outcome
+}
+
+/// Why a junction could not be cut into its host.
+#[derive(Clone, Copy)]
+enum Skip {
+    Crowded,
+    Undrawable,
+}
+
+fn ring_of(s: &SupportPrimitive, at_start: bool) -> HullRing {
+    HullRing {
+        frustum_start_mm: s.start_mm,
+        frustum_end_mm: s.end_mm,
+        radius_mm: if at_start {
+            s.start_radius_mm
+        } else {
+            s.end_radius_mm
+        },
+        at_start,
+        plate_z: s.ring_normal == FrustumRingNormal::PlateZ,
+    }
+}
+
+/// The hull record of up to three rings: the convex hull of their corners, as a
+/// `Member` record whose start and end are the centres of the two largest rings.
+/// `None` when a ring cannot be made, the hull is flat, or the two largest rings
+/// share a centre.
+fn hull_record(rings: [Option<HullRing>; 3], sides: usize) -> Option<SupportPrimitive> {
+    let mut points: Vec<V> = Vec::with_capacity(3 * sides);
+    for ring in rings.iter().flatten() {
+        points.extend(frustum_ring(
+            pt(ring.frustum_start_mm),
+            pt(ring.frustum_end_mm),
+            ring.radius_mm.get(),
+            ring.at_start,
+            ring.plate_z,
+            sides,
+        )?);
+    }
+    if convex_hull(&points)?.volume() <= 0.0 {
+        return None;
+    }
+    // The record's own start and end: the centres of the two largest rings.
+    let mut present: Vec<&HullRing> = rings.iter().flatten().collect();
+    present.sort_by(|x, y| y.radius_mm.get().total_cmp(&x.radius_mm.get()));
+    let centre = |r: &HullRing| {
+        if r.at_start {
+            r.frustum_start_mm
+        } else {
+            r.frustum_end_mm
+        }
+    };
+    let (first, second) = (*present.first()?, *present.get(1)?);
+    if centre(first) == centre(second) {
+        return None;
+    }
+    Some(SupportPrimitive {
+        segment_kind: SupportSegmentKind::Member,
+        start_mm: centre(first),
+        end_mm: centre(second),
+        start_radius_mm: first.radius_mm,
+        end_radius_mm: second.radius_mm,
+        contact_depth_mm: None,
+        ring_normal: FrustumRingNormal::Junction(JunctionRings(rings)),
+        sphere_geometry: None,
+        seat_trim: None,
+    })
+}
+
+/// What an ADDED hull is made from: the branch as it stands, the host as it
+/// stands, and how far above and below the landing point the host's sections are
+/// taken (the junction's own pull-backs, never less than one pixel pitch, `None`
+/// where the host does not continue that way).
+struct FillRings<'a> {
+    branch: &'a SupportPrimitive,
+    host: &'a [SupportPrimitive],
+    host_arcs: &'a [(f64, f64)],
+    frame: Frame,
+    s_k: f64,
+    above: Option<f64>,
+    below: Option<f64>,
+}
+
+impl FillRings<'_> {
+    /// The host's section at `arc`, drawn the way the host's own frustum draws its
+    /// end rings: a virtual frustum on the host's axis that ends (above) or starts
+    /// (below) there, at the host's radius there.
+    fn host_ring(&self, arc: f64, above: bool) -> Option<HullRing> {
+        let tolerance = 1.0e-12;
+        let index = if above {
+            (0..self.host.len())
+                .find(|&i| self.host_arcs[i].0 < arc && arc <= self.host_arcs[i].1 + tolerance)
+        } else {
+            (0..self.host.len())
+                .find(|&i| self.host_arcs[i].0 - tolerance <= arc && arc < self.host_arcs[i].1)
+        }?;
+        let s = &self.host[index];
+        let (a0, a1) = self.host_arcs[index];
+        let at = lerp(
+            pt(s.start_mm),
+            pt(s.end_mm),
+            ((arc - a0) / (a1 - a0)).clamp(0.0, 1.0),
+        );
+        let radius = PositiveFinite::new(radius_at(s, self.host_arcs[index], arc)).ok()?;
+        let plate_z = s.ring_normal == FrustumRingNormal::PlateZ;
+        Some(if above {
+            HullRing {
+                frustum_start_mm: s.start_mm,
+                frustum_end_mm: fin(at)?,
+                radius_mm: radius,
+                at_start: false,
+                plate_z,
+            }
+        } else {
+            HullRing {
+                frustum_start_mm: fin(at)?,
+                frustum_end_mm: s.end_mm,
+                radius_mm: radius,
+                at_start: true,
+                plate_z,
+            }
+        })
+    }
+
+    fn record(&self, sides: usize) -> Option<SupportPrimitive> {
+        let above = self.above.and_then(|t| self.host_ring(self.s_k - t, true));
+        let below = self.below.and_then(|t| self.host_ring(self.s_k + t, false));
+        hull_record([Some(ring_of(self.branch, false)), below, above], sides)
+    }
 }
 
 #[cfg(test)]
@@ -629,12 +760,14 @@ mod tests {
         ];
         let lean = lean_deg.to_radians();
         let length = 3.2;
-        let branch_start = [
-            k[0] + length * lean.sin(),
-            k[1],
-            k[2] + length * lean.cos(),
-        ];
-        let branch = frustum(SupportSegmentKind::Member, branch_start, k, r_branch, r_branch);
+        let branch_start = [k[0] + length * lean.sin(), k[1], k[2] + length * lean.cos()];
+        let branch = frustum(
+            SupportSegmentKind::Member,
+            branch_start,
+            k,
+            r_branch,
+            r_branch,
+        );
         let mut primitives = host.to_vec();
         primitives.push(branch);
         let arms = vec![
@@ -726,10 +859,15 @@ mod tests {
         assert_eq!(out.hulled, 1, "{out:?}");
         let hull_record = &out.hulls[1][0];
         let hull = hull_of(hull_record);
-        assert!(closed_and_outward(&hull), "closed 2-manifold, positive volume");
+        assert!(
+            closed_and_outward(&hull),
+            "closed 2-manifold, positive volume"
+        );
         let volume = hull.volume();
         let two_rings = branch_and_below_volume(hull_record);
-        println!("401/295 hull volume {volume:.4} mm3 (branch and host below alone {two_rings:.4})");
+        println!(
+            "401/295 hull volume {volume:.4} mm3 (branch and host below alone {two_rings:.4})"
+        );
         assert!(
             (0.89..0.91).contains(&two_rings),
             "the plan expects about 0.90 mm3 for the branch and the host below, got {two_rings}"
@@ -841,8 +979,14 @@ mod tests {
                 })
                 .fold(f64::NEG_INFINITY, f64::max)
         };
-        let proud = old_cap.iter().map(|&corner| excess(corner)).fold(0.0_f64, f64::max);
-        assert!(proud >= 0.2, "red before: the v19 cap rim stood {proud} mm out of the host");
+        let proud = old_cap
+            .iter()
+            .map(|&corner| excess(corner))
+            .fold(0.0_f64, f64::max);
+        assert!(
+            proud >= 0.2,
+            "red before: the v19 cap rim stood {proud} mm out of the host"
+        );
     }
 
     #[test]
@@ -880,12 +1024,93 @@ mod tests {
         let hull = hull_of(&out.hulls[1][0]);
         assert!(closed_and_outward(&hull));
         let two_rings = branch_and_below_volume(&out.hulls[1][0]);
-        println!("423/352 hull volume {:.4} mm3 (branch and host below alone {two_rings:.4})", hull.volume());
+        println!(
+            "423/352 hull volume {:.4} mm3 (branch and host below alone {two_rings:.4})",
+            hull.volume()
+        );
         assert!(
             (2.30..2.37).contains(&two_rings),
             "the plan expects about 2.34 mm3 for the branch and the host below, got {two_rings}"
         );
         assert!(hull.volume() >= two_rings);
+    }
+
+    #[test]
+    fn a_crowded_junction_is_filled_with_an_added_hull_not_left_as_a_cap() {
+        // Two branches land 0.1 mm apart on one vertical host: the first takes the
+        // arc, the second cannot be cut into the host. v19 and the first version of
+        // this pass left it as a flat cap whose rim stands out of the host.
+        let host = frustum(
+            SupportSegmentKind::Member,
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, -10.0],
+            0.9,
+            0.9,
+        );
+        let lean = 40.0_f64.to_radians();
+        let branch = |x_sign: f64, z: f64, r: f64| {
+            frustum(
+                SupportSegmentKind::Member,
+                [x_sign * 3.0 * lean.sin(), 0.0, z + 3.0 * lean.cos()],
+                [0.0, 0.0, z],
+                r,
+                r,
+            )
+        };
+        let primitives = vec![host, branch(1.0, -5.0, 0.9), branch(-1.0, -5.1, 0.8)];
+        let arms = vec![
+            JunctionArm {
+                landed: false,
+                shaft: Some((0, 1)),
+            },
+            JunctionArm {
+                landed: true,
+                shaft: Some((1, 1)),
+            },
+            JunctionArm {
+                landed: true,
+                shaft: Some((2, 1)),
+            },
+        ];
+        let out = hull_junctions(&primitives, &arms, rules());
+        assert_eq!(out.hulled, 1, "{out:?}");
+        assert_eq!(out.filled, 1, "the crowded junction is filled: {out:?}");
+        assert_eq!(out.crowded + out.undrawable, 0, "{out:?}");
+        // The thicker branch (arm 1) is cut in first; the thinner one is filled.
+        let filled_arm = 2;
+        assert_eq!(out.hulls[1].len(), 1, "{out:?}");
+        let filled = out.hulls[filled_arm].first().expect("the added hull");
+        let hull = hull_of(filled);
+        assert!(
+            closed_and_outward(&hull),
+            "added hull is closed and outward"
+        );
+        assert!(
+            out.shafts[filled_arm].is_none(),
+            "the filled branch is not cut"
+        );
+        // Every corner of the filled branch's end ring is inside its added hull or
+        // inside the host the junction left.
+        let host_after = out.shafts[0]
+            .as_ref()
+            .expect("host edited by the first hull");
+        let flat = (std::f64::consts::PI / 24.0).cos();
+        let end = &primitives[filled_arm];
+        for corner in frustum_ring(
+            pt(end.start_mm),
+            pt(end.end_mm),
+            end.end_radius_mm.get(),
+            false,
+            false,
+            SIDES,
+        )
+        .expect("ring")
+        {
+            assert!(
+                inside_hull(&hull, corner, 1e-9) || inside_chain(corner, host_after, flat),
+                "ring corner {corner:?} of the crowded branch stands outside every solid"
+            );
+        }
     }
 
     #[test]
