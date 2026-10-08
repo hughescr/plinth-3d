@@ -1584,8 +1584,18 @@ pub fn check_head(
 ) -> Result<(), HeadRefusal> {
     let (d, k, r_k) = (head.contact_mm, head.joint_mm, head.joint_radius_mm);
     // (a) The hidden-cavity map speaks the raster frame: the plate at z = 0.
+    // A seat in a hidden cavity is exempt (Craig 2026-10-08): the test is made on
+    // the head without its link, as before the link existed. With the link the
+    // joint stands `L` further out and the whole solid could poke through the
+    // cavity wall, which gave heads to cavity seats (Cylinder, 20 members on
+    // one such head's post).
     let raster = |p: [f64; 3]| [p[0], p[1], p[2] - ctx.plate_z_mm];
-    if ctx.history.hidden.segment_hidden(raster(d), raster(k), r_k) {
+    let k_unlinked = vec3::sub(k, vec3::scale(head.unit, head.link_mm));
+    if ctx
+        .history
+        .hidden
+        .segment_hidden(raster(d), raster(k_unlinked), r_k)
+    {
         return Err(HeadRefusal::HiddenCavity);
     }
     // (b)
@@ -2667,11 +2677,17 @@ mod constructor_tests {
             seat_cell: 5,
             k_top: 381,
         };
-        let head = plan_head(&req, &rule(0.0), &cavity_grid).expect("a head in the cavity");
         let surface = surface_of(&mesh);
         let mut history = ColumnHistory::new(&cavity_grid);
         let keep_out = DrainKeepOut::none();
-        let check = |history: &ColumnHistory| {
+        // With and without the link: the cavity exemption holds for both.
+        let mut linked = rule(0.0);
+        linked.link_mm = 0.3;
+        let heads: Vec<_> = [rule(0.0), linked]
+            .iter()
+            .map(|rule| plan_head(&req, rule, &cavity_grid).expect("a head in the cavity"))
+            .collect();
+        let check = |history: &ColumnHistory, head: &Head| {
             let ctx = HeadCheckCtx {
                 grid: &cavity_grid,
                 history,
@@ -2682,13 +2698,17 @@ mod constructor_tests {
                 layer_height_mm: H,
                 separation_mm: SEPARATION,
             };
-            check_head(&head, 0.05, &ctx, &[])
+            check_head(head, 0.05, &ctx, &[])
         };
-        assert_eq!(check(&history), Ok(()), "control: no map");
+        for head in &heads {
+            assert_eq!(check(&history, head), Ok(()), "control: no map");
+        }
         history.hidden = map;
-        let verdict = check(&history);
-        println!("head in a hidden cavity -> {verdict:?}");
-        assert_eq!(verdict, Err(HeadRefusal::HiddenCavity));
+        for head in &heads {
+            let verdict = check(&history, head);
+            println!("head in a hidden cavity (link {}) -> {verdict:?}", head.link_mm);
+            assert_eq!(verdict, Err(HeadRefusal::HiddenCavity));
+        }
     }
 
     #[test]
