@@ -1773,6 +1773,7 @@ mod census_tests {
             cos_lean_max: 0.5373,
             cells: Vec::new(),
             ball_allowance_mm: 0.0,
+            link_mm: 0.0,
             drawn_straight: false,
             law_planned: crate::heads::HeadLaw::envelope(0.5373),
             law_drawn: None,

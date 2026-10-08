@@ -1434,6 +1434,7 @@ mod graze_conversion {
             max_normal_z: context.seat_faces.max_normal_z(),
             layer_height_mm: H,
             plate_z_mm: 0.0,
+            link_mm: 0.0,
         };
         let env = crate::graze::GrazeEnv { joins: &joins, profiles, rule, flare_factor: 1.6 };
         let mut outcome = HeadsOutcome::default();
