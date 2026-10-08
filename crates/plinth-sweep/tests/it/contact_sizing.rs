@@ -126,7 +126,11 @@ fn the_shaft_below_a_head_junction_carries_the_sum() {
             plinth_sweep::SweepPolicy::from_registry()
                 .expect("the registry")
                 .without_drawn_solid_descent()
-                .without_clearance_reroute(),
+                .without_clearance_reroute()
+                // The graze conversion (2026-10-08) moves a grazing tip off the
+                // head it lands on onto a post of its own (measured: 10 arms of
+                // this fixture), which dissolves the junctions graded here.
+                .without_graze_heads(),
         ),
     );
     let heads = head_junctions(&plan);

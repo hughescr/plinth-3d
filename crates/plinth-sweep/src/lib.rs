@@ -916,6 +916,12 @@ pub struct SweepPolicy {
     /// **On in production.** The drill turns it off, which puts back the
     /// field the sizing left, and watches grown posts keep their intrusions.
     pub clearance_reroute: bool,
+    /// Whether a straight tip whose shaft would graze the model gets an angled
+    /// head and a re-landed post (Craig 2026-10-08: a head only where needed;
+    /// [`graze`]). **On in production.** A test of a rule that reads a field
+    /// with arms landed on arms turns it off, because converting a grazer moves
+    /// the arm off its host.
+    pub graze_heads: bool,
     /// Whether every member is sized for its worst SINGLE peel event, routed on
     /// its own ([`per_event`], rule a′, owner-approved 2026-09-29), and the
     /// load insertion triggered by one event's routed load. **On in
@@ -1040,6 +1046,7 @@ impl SweepPolicy {
             member_clearance: true,
             drawn_solid_descent: true,
             clearance_reroute: true,
+            graze_heads: true,
             per_event_sizing: true,
             unrooted_routing: true,
             handed_column_ledger: true,
@@ -1449,6 +1456,15 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_clearance_reroute(mut self) -> Self {
         self.clearance_reroute = false;
+        self
+    }
+
+    /// Leave every grazing straight tip straight (the field this engine
+    /// finished before the graze conversion). For a test of a rule that reads
+    /// arms landed on arms, which the conversion would move; and sabotage.
+    #[must_use]
+    pub const fn without_graze_heads(mut self) -> Self {
+        self.graze_heads = false;
         self
     }
 
@@ -2494,8 +2510,13 @@ pub fn run_sweep_with_holes(
     // new heads. A grazer that cannot be converted stays straight and is
     // warned about at the end (`graze_kept`).
     let mut graze_outcome = heads::HeadsOutcome::default();
-    if let Some((profiles, rule)) = head_registry {
-        let graze_env = graze::GrazeEnv { joins: &head_join_context, profiles, rule };
+    if let Some((profiles, rule)) = head_registry.filter(|_| policy.graze_heads) {
+        let graze_env = graze::GrazeEnv {
+            joins: &head_join_context,
+            profiles,
+            rule,
+            flare_factor: policy.flare_r_factor,
+        };
         if graze::convert(&graze_env, &mut struts, &mut graze_outcome) > 0 {
             outcome = down_sweep::run(
                 &grid,

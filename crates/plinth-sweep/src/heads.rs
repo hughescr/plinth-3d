@@ -736,7 +736,8 @@ pub enum GrazeReason {
     /// own host or the plate.
     NoLegalPost,
     /// The post lands only on a host thinner than the joint, so it would
-    /// RAISE the host (a lander does not make its host fat). The joint is
+    /// RAISE the host (a lander does not make its host fat), and the plate
+    /// under the joint is not free either. The joint is
     /// fat because the face is steep and the post is sized for the full lever
     /// `|DK|` (the sizing ruling left to Craig: a post that falls back to its
     /// ledger section would fit hosts it cannot fit today).

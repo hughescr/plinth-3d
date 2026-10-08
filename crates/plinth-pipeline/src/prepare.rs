@@ -3789,7 +3789,7 @@ fn print_sweep_disclosure(
                                 .to_owned()
                         }
                         GrazeReason::HostTooThin => {
-                            "its host is thinner than the joint, the post would raise it".to_owned()
+                            "its host is thinner than the joint (the post would raise it) and the plate under the joint is blocked or crowded".to_owned()
                         }
                         GrazeReason::LateSlide => "made by a later slide".to_owned(),
                     };

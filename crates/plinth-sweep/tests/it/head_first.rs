@@ -304,11 +304,24 @@ fn the_heads_switch_fires_both_ways() {
     let slab = flat_slab();
     let slab_on = run(&slab, &policy());
     let slab_off = run(&slab, &off);
-    assert_eq!(slab_on.plan.report.heads.built, 0, "a flat face gets no head");
+    // A flat face gets no STEEP-FACE head. Since 2026-10-08 a tip whose shaft
+    // grazes the model gets a graze head wherever it stands, so the steep
+    // count is the built count less the graze conversions, and the digests
+    // are compared when nothing was converted.
+    let slab_graze = slab_on.plan.report.heads.graze_converted.len();
     assert_eq!(
-        slab_on.plan.report.sweep_digest, slab_off.plan.report.sweep_digest,
-        "a flat fixture digests the same with heads on and off"
+        slab_on.plan.report.heads.built - slab_graze,
+        0,
+        "a flat face gets no steep-face head ({slab_graze} graze heads converted; \
+         graze census asked {})",
+        slab_on.plan.report.heads.graze_asked
     );
+    if slab_graze == 0 {
+        assert_eq!(
+            slab_on.plan.report.sweep_digest, slab_off.plan.report.sweep_digest,
+            "a flat fixture digests the same with heads on and off"
+        );
+    }
     // The ball: heads built on, none off, and the digests differ.
     let mesh = ball(7.0, [0.0, 0.0, 7.0], 48, 72);
     let on = run(&mesh, &policy());

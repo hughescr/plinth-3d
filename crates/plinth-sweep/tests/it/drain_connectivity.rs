@@ -128,7 +128,11 @@ fn deleting_the_keep_out_walls_the_outlet_in() {
     // fixture stops being adversarial. The keep-out reads no X.
     let sabotaged =
         harness::at_path_fixture_x(SweepPolicy::from_registry().expect("registry"))
-            .without_drain_keep_out();
+            .without_drain_keep_out()
+            // The graze conversion (2026-10-08) roots grazing tips on the plate
+            // on both sides of the comparison below; the claim is about the
+            // descent's landings.
+            .without_graze_heads();
     let plan = harness::sweep_with_drains(&flat_underside_slab(), &sabotaged, &[drain]);
     let escape = &plan.report.escape;
     assert_eq!(

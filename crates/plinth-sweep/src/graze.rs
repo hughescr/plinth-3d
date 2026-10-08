@@ -41,15 +41,21 @@
 //!    joint fat. The post the arm actually gets leans less, so the head is
 //!    planned a second time for that lean, and kept if its post still lands.
 //!
-//! A plate arm is not converted: its post would stand on the plate under a new
-//! joint and lap the roots around it (measured: the laid tube's root laps, the
-//! flat slab's stranded seats), and a grazer that cannot be converted is warned.
+//! **The plate under `K` is the last candidate, for every arm** (a plate arm,
+//! a model arm and a host arm alike): a vertical post from the joint to the
+//! plate. It is judged like any other candidate (path, model clearance) and
+//! one test more: a NEW plate root keeps clear of every root already on the
+//! plate, its flared disc sized as the congestion census sizes one
+//! ([`crate::congestion::clear_of_placed`]). A root that would lap another is
+//! refused as that candidate alone; the grazer then stays straight and is
+//! warned. A converted arm's own root joins the discs, so a later grazer sees it.
 //!
 //! The caller re-runs the down-sweep, which sizes the joint and post at the
 //! post the file draws.
 
 use geom_kernel::vec3;
 
+use crate::congestion::RootDisc;
 use crate::head_join::{self, HeadJoinContext};
 use crate::heads::{
     check_head, plan_graze_head, planned_tip_radius_mm, GrazeReason, Head, HeadCapsule,
@@ -63,6 +69,9 @@ pub(crate) struct GrazeEnv<'a> {
     pub joins: &'a HeadJoinContext<'a>,
     pub profiles: &'a plinth_core::TipContactProfiles,
     pub rule: HeadRule,
+    /// The root flare's radius factor (`policy.flare_r_factor`): sizes the
+    /// disc a new plate root is tested with.
+    pub flare_factor: f64,
 }
 
 /// One place the post from the joint may land.
@@ -88,6 +97,9 @@ struct Field<'a> {
     slot_of: &'a [Option<usize>],
     index: &'a ColumnHistory,
     accepted: &'a [HeadCapsule],
+    /// The roots on the plate, flared as the congestion census sizes them.
+    roots: &'a [RootDisc],
+    flare_factor: f64,
     surface: &'a geom_kernel::NativeSurface,
     floor_z_mm: f64,
     margin_mm: f64,
@@ -170,6 +182,13 @@ pub(crate) fn convert(
     // stamped beside the old, so a later grazer sees both (conservative).
     let mut index = ColumnHistory::new(grid);
     crate::congestion::stamp_all(&mut index, struts, height);
+    let flare_factor = if env.flare_factor.is_finite() && env.flare_factor > 0.0 {
+        env.flare_factor
+    } else {
+        1.0
+    };
+    let mut roots =
+        crate::congestion::root_discs_drawn(grid, slender.history, struts, &profiles, flare_factor);
     let carries = crate::landing_check::carries_someone(struts);
     let mut accepted: Vec<HeadCapsule> = struts
         .iter()
@@ -235,6 +254,8 @@ pub(crate) fn convert(
             slot_of: &slot_of,
             index: &index,
             accepted: &accepted,
+            roots: &roots,
+            flare_factor,
             surface,
             floor_z_mm,
             margin_mm,
@@ -253,6 +274,26 @@ pub(crate) fn convert(
         let (head, candidate, mut post_path) = found;
         post_path.push(head.joint_cell);
         accepted.push(HeadCapsule::of(&head));
+        if matches!(candidate.landing, Landing::Plate) {
+            // The new root joins the plate's discs (and the arm's old one, if
+            // it had one, leaves), sized as `choose_post` tested it.
+            if let Some(slot) = crate::congestion::disc_slot(&roots, id) {
+                roots.remove(slot);
+            }
+            let bare = head.joint_radius_mm.max(struts[g].tip_radius_mm());
+            let under = slender.history.column_max_model.get(candidate.base_cell);
+            crate::congestion::push_disc(
+                &mut roots,
+                grid,
+                id,
+                candidate.base_cell,
+                bare * flare_factor,
+                bare,
+                under.is_some_and(|under| *under != 0),
+            );
+        } else if let Some(slot) = crate::congestion::disc_slot(&roots, id) {
+            roots.remove(slot);
+        }
         let strut = &mut struts[g];
         strut.head = Some(head);
         strut.straight_fallback = None;
@@ -398,6 +439,42 @@ fn choose_post(
             {
                 continue;
             }
+            // A NEW PLATE ROOT keeps clear of every root already on the
+            // plate (its own old root excepted). Refused as this candidate
+            // alone: the other landings are still tried.
+            if matches!(candidate.landing, Landing::Plate) {
+                // A post of its own is a free run from the plate to the joint,
+                // drawn at the section the arm's own load needs (the arm's base
+                // section; the joint's section is only its top). Longer than
+                // the slenderness law lets a post of that section stand
+                // unbraced, it would need braces the later passes may not be
+                // able to place (measured: the tall stilt plate, 40 posts of
+                // 32 mm at 0.29 mm radius, 30 runs left over the limit). The
+                // host landings share their host's braced shaft and are not
+                // asked.
+                #[expect(clippy::cast_precision_loss, reason = "a layer count is exact in f64")]
+                let run_mm = head.k_joint.saturating_sub(candidate.k_bottom) as f64
+                    * slender.layer_height_mm;
+                let drawn_mm = field.struts[g]
+                    .radius_mm
+                    .first()
+                    .copied()
+                    .unwrap_or(0.0)
+                    .max(field.struts[g].tip_radius_mm());
+                if run_mm > slender.law.max_unbraced_mm(drawn_mm) {
+                    continue;
+                }
+                let own = crate::congestion::disc_slot(field.roots, id);
+                if !crate::congestion::clear_of_placed(
+                    slender.grid,
+                    candidate.base_cell,
+                    widest * field.flare_factor,
+                    field.roots,
+                    own,
+                ) {
+                    continue;
+                }
+            }
             let excepted: Vec<u32> = std::iter::once(id).chain(candidate.host).collect();
             let Ok(path) = crate::slenderness::segment_path_sized(
                 slender,
@@ -483,8 +560,9 @@ fn plan_restricted(
 }
 
 /// Where the post from `head`'s joint may land, in the order they are tried:
-/// the arm's own host from the highest layer its seat zone leaves free down to
-/// the host's lowest. Only candidates the lean law admits are listed
+/// the arm's own host (when it has one) from the highest layer its seat zone
+/// leaves free down to the host's lowest, then the plate under the joint.
+/// Only candidates the lean law admits are listed
 /// (arithmetic only); the rest of the tests are [`choose_post`]'s.
 fn candidates_for(
     field: &Field<'_>,
@@ -513,16 +591,41 @@ fn candidates_for(
             && (lateral_mm <= 0.0 || slender.lean.descent_cost_mm(layers, lateral_mm).is_some())
     };
     let mut out = Vec::new();
-    // Only an arm that rests on a member: a plate arm or a model arm would
-    // need a new root (see the module comment).
-    let Landing::Strut { id, .. } = struts[g].landing else {
-        return out;
-    };
+    // The arm's own host first, when it rests on a member.
+    if let Landing::Strut { id, .. } = struts[g].landing {
+        host_candidates(field, id, head, not_raising, &admitted, &mut out);
+    }
+    // The plate under the joint is the last candidate, for every arm: a
+    // vertical post, judged by the same tests as the rest (and by the root
+    // test, in `choose_post`).
+    if admitted(joint_cell, 0) {
+        out.push(Candidate {
+            landing: Landing::Plate,
+            k_bottom: 0,
+            base_cell: joint_cell,
+            host: None,
+        });
+    }
+    out
+}
+
+/// The host-post candidates of [`candidates_for`], highest layer first.
+fn host_candidates(
+    field: &Field<'_>,
+    id: u32,
+    head: &Head,
+    not_raising: bool,
+    admitted: &dyn Fn(usize, usize) -> bool,
+    out: &mut Vec<Candidate>,
+) {
+    let struts = field.struts;
+    let height = field.env.joins.slender.layer_height_mm;
+    let k_joint = head.k_joint;
     let host_index = id as usize;
     let Some(host) = struts.get(host_index).filter(|host| {
         host.id == id && host.kind == StrutKind::Arm && host.k_bottom != usize::MAX
     }) else {
-        return out;
+        return;
     };
     let zone = host_zone_layers(field, host_index, head.joint_radius_mm);
     let cap = host
@@ -551,7 +654,6 @@ fn candidates_for(
             }
         }
     }
-    out
 }
 
 /// How many layers under a straight host's own contact a joining post must

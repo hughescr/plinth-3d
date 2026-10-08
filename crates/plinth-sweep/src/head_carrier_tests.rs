@@ -1377,7 +1377,12 @@ mod graze_conversion {
         let mut grazer = straight(grid, 1, 150, host_col + RUN_COLS, K_TOP, 0.05);
         grazer.landing = Landing::Strut { id: 0, layer: OLD_LANDING };
         grazer.k_bottom = OLD_LANDING;
-        grazer.radius_mm = vec![0.05; K_TOP - OLD_LANDING + 1];
+        // A shaft of 0.3 mm over a 0.05 mm tip: a post of its own may stand
+        // 15 mm unbraced, so the plate under K (about 8 mm down) is allowed.
+        grazer.radius_mm = vec![0.3; K_TOP - OLD_LANDING + 1];
+        if let Some(tip) = grazer.radius_mm.last_mut() {
+            *tip = 0.05;
+        }
         grazer.carried_mm2 = vec![0.0; K_TOP - OLD_LANDING + 1];
         let span = K_TOP - OLD_LANDING;
         grazer.path = (0..=span)
@@ -1428,7 +1433,7 @@ mod graze_conversion {
             layer_height_mm: H,
             plate_z_mm: 0.0,
         };
-        let env = crate::graze::GrazeEnv { joins: &joins, profiles, rule };
+        let env = crate::graze::GrazeEnv { joins: &joins, profiles, rule, flare_factor: 1.6 };
         let mut outcome = HeadsOutcome::default();
         let converted = crate::graze::convert(&env, struts, &mut outcome);
         (converted, outcome)
@@ -1489,19 +1494,94 @@ mod graze_conversion {
         );
     }
 
-    /// A host thinner than the joint would be RAISED by the post: the arm
-    /// keeps its straight tip and the run says why. The same field on a thick
-    /// trunk converts (the first test), so the host's radius is the only
-    /// difference. SABOTAGE: drop the `not_raising` test in `candidates_for`
-    /// and the thin host takes the post.
+    /// A host thinner than the joint would be RAISED by the post, so no host
+    /// post is offered; the plate under the joint is (brief 3e.3), and a thin
+    /// host no longer ends the search. The post goes down to the plate under K,
+    /// a vertical post. SABOTAGE: drop the plate candidate in `candidates_for`
+    /// and the arm stays straight with `HostTooThin` (the earlier behaviour).
     #[test]
-    fn a_grazing_tip_whose_host_is_thinner_than_the_joint_stays_straight() {
+    fn a_grazing_tip_whose_host_is_thinner_than_the_joint_lands_on_the_plate_under_k() {
         let grid = grid();
         let mut struts = field_on(&grid, false, 0.2);
         let (converted, outcome) = convert(&grid, &mut struts);
-        assert_eq!(converted, 0, "{outcome:?}");
         assert_eq!(outcome.graze_asked, 1, "anti-vacuity: it grazes: {outcome:?}");
+        assert_eq!(converted, 1, "{outcome:?}");
+        assert_eq!(outcome.graze_converted, vec![1]);
+        let grazer = &struts[1];
+        let head = grazer.head.as_ref().expect("the grazer carries a head now");
+        assert_eq!(grazer.landing, Landing::Plate, "the post stands on the plate");
+        assert_eq!(grazer.k_bottom, 0);
+        assert_eq!(grazer.base_cell(), head.joint_cell as usize, "under K");
+        assert!(grazer.head_intact(), "the head is carried by the path");
+        let check = check_landings(&struts, H);
+        assert!(check.clean(), "{check:?}");
+    }
+
+    /// The plate candidate is refused alone when its new root would lap a root
+    /// already on the plate: the thin-host arm then stays straight with the
+    /// reason. A plate arm (id 2, root radius 1.0 mm, 2.75 mm from the joint's
+    /// column and clear of the post's shaft) is the other root.
+    /// SABOTAGE: drop the root test in `choose_post` and the arm converts.
+    #[test]
+    fn a_plate_root_that_would_lap_another_is_refused_and_the_arm_stays_straight() {
+        let grid = grid();
+        // Where the unblocked field puts the root: the blocker stands 2.75 mm
+        // (55 columns) from it, on the far side from the host.
+        let mut probe = field_on(&grid, false, 0.2);
+        let (probed, _) = convert(&grid, &mut probe);
+        assert_eq!(probed, 1, "anti-vacuity: unblocked, the arm lands on the plate");
+        let root_col = grid.col_of(probe[1].base_cell());
+        let mut struts = field_on(&grid, false, 0.2);
+        struts.push(straight(&grid, 2, 150, root_col + 40, 100, 1.0));
+        let (converted, outcome) = convert(&grid, &mut struts);
+        assert_eq!(outcome.graze_asked, 1, "anti-vacuity: it grazes: {outcome:?}");
+        assert_eq!(converted, 0, "{outcome:?}");
         assert!(struts[1].head.is_none());
         assert_eq!(outcome.graze_reasons, vec![(1, GrazeReason::HostTooThin)]);
+    }
+
+    /// A post of its own that would stand longer than the slenderness law lets
+    /// its section stand unbraced is not offered: the plate under K is about
+    /// 8 mm down and a 0.05 mm shaft may stand 2.5 mm. (Measured on the tall
+    /// stilt plate: 40 posts of 32 mm at 0.29 mm radius left 30 runs over the
+    /// limit.) SABOTAGE: drop the run test in `choose_post` and it converts.
+    #[test]
+    fn a_plate_post_longer_than_its_unbraced_limit_is_not_offered() {
+        let grid = grid();
+        let mut struts = field_on(&grid, false, 0.2);
+        struts[1].radius_mm = vec![0.05; struts[1].radius_mm.len()];
+        let (converted, outcome) = convert(&grid, &mut struts);
+        assert_eq!(outcome.graze_asked, 1, "anti-vacuity: it grazes: {outcome:?}");
+        assert_eq!(converted, 0, "{outcome:?}");
+        assert!(struts[1].head.is_none());
+        assert_eq!(outcome.graze_reasons, vec![(1, GrazeReason::HostTooThin)]);
+    }
+
+    /// A grazing PLATE arm is converted too: its post moves to the plate under
+    /// K (brief 3e.3: the candidate list is not empty for a plate arm), and its
+    /// old root leaves the plate. The arm leans 50 degrees off the slab's
+    /// normal from the plate to the slab. SABOTAGE: return early for a
+    /// non-host arm in `candidates_for` and it stays straight.
+    #[test]
+    fn a_grazing_plate_arm_gets_a_head_and_a_post_on_the_plate_under_k() {
+        let grid = grid();
+        let run_cols = 238;
+        let col = 270;
+        let mut arm = straight(&grid, 0, 150, col, K_TOP, 0.3);
+        if let Some(tip) = arm.radius_mm.last_mut() {
+            *tip = 0.05;
+        }
+        arm.path = (0..=K_TOP)
+            .map(|slot| cell_u32(grid.index(150, col - run_cols + (run_cols * slot) / K_TOP)))
+            .collect();
+        let mut struts = vec![arm];
+        let (converted, outcome) = convert(&grid, &mut struts);
+        assert_eq!(outcome.graze_asked, 1, "anti-vacuity: it grazes: {outcome:?}");
+        assert_eq!(converted, 1, "{outcome:?}");
+        let arm = &struts[0];
+        let head = arm.head.as_ref().expect("the arm carries a head now");
+        assert_eq!(arm.landing, Landing::Plate);
+        assert_eq!(arm.base_cell(), head.joint_cell as usize, "the post stands under K");
+        assert!(arm.head_intact());
     }
 }
