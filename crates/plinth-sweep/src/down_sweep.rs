@@ -155,6 +155,13 @@ pub struct DownSweepOutcome {
     /// The load those reads moved, in mm². It still reaches the plate: the
     /// shaft below the contact carries it.
     pub contact_merge_load_moved_mm2: f64,
+    /// Loads that landed on a HEADED arm between its contact and its joint and
+    /// were held until the arm's joint layer, so the tip and the head slots
+    /// stay sized for the arm's own load (v19 fix, 2026-10-08), and the load
+    /// they moved, in mm². The path-hit witness for that hold: zero on a field
+    /// where no member joined a head span.
+    pub head_span_merges_held_to_joint: u64,
+    pub head_span_load_held_mm2: f64,
     /// Reads where a lander's load arrived at the contact slot of an arm that
     /// has NO slot below it (a one-layer arm that terminates at its own tip
     /// layer). There is no shaft under the contact to take the load, so it
@@ -532,6 +539,74 @@ pub fn resize_heads_to_drawn_posts(
         }
     }
     resized
+}
+
+/// **Whether a post arriving this far off a head's axis still reaches the model
+/// square enough to need no head** (the skim law of [`crate::heads::skims`]):
+/// `(g + r_t)(sec x − 1) <= layer + pixel`, with `x` the angle between the
+/// head's axis `unit` and the post's direction `post_dir` (both unit, both
+/// pointing down the arm). `false` for a post that does not descend with the
+/// head (`cos x <= 0`).
+#[must_use]
+pub fn post_is_collinear_with_head(
+    unit: [f64; 3],
+    post_dir: [f64; 3],
+    tip_radius_mm: f64,
+    gap_mm: f64,
+    allowance_mm: f64,
+) -> bool {
+    let cos_x = unit.iter().zip(post_dir).map(|(a, b)| a * b).sum::<f64>();
+    cos_x > 0.0 && !crate::heads::skims(tip_radius_mm, cos_x, gap_mm, allowance_mm)
+}
+
+/// **The collinear drop** (v19 fix, 2026-10-08): a head is planned at EVERY
+/// seat, so a seat whose post then arrives along the face normal carries a
+/// head that adds nothing. Every live headed strut whose drawn post (the line
+/// the lowering draws from the exact joint `K` to the shaft's end,
+/// [`drawn_shafts`]) lies within the skim law of the head's axis
+/// ([`post_is_collinear_with_head`], at the strut's own tip radius) is set
+/// [`crate::heads::Head::drawn_straight`] and every slot is put back on the
+/// area-law ledger saved before the head minimum: no joint ball is drawn and
+/// no joint-sized post is left. `K` lies on the axis through the seat, so the
+/// drawn arm and the post it replaces are the same line to within the skim
+/// angle; the members joined to the post follow the small offset exactly as
+/// they follow a downgraded head ([`crate::adapter::downgraded_line_offset`]).
+///
+/// One batch pass; returns the ids dropped, in strut order. Run after the
+/// footprint rule's moves have settled and BEFORE the final re-size, so the
+/// re-size reads the dropped hosts' straight lines.
+pub fn drop_collinear_heads(
+    grid: &Grid,
+    struts: &mut [SweepStrut],
+    sizing: SizingPolicy,
+    gap_mm: f64,
+    allowance_mm: f64,
+) -> Vec<u32> {
+    let shafts = drawn_shafts(grid, struts, sizing);
+    let mut dropped = Vec::new();
+    for (strut, shaft) in struts.iter_mut().zip(shafts) {
+        let Some((post_top, post_base)) = shaft else {
+            continue;
+        };
+        let tip = strut.tip_radius_mm();
+        let Some(head) = strut.head.as_mut() else {
+            continue;
+        };
+        let Some(post) = geom_kernel::vec3::normalize(std::array::from_fn(|axis| {
+            post_base[axis] - post_top[axis]
+        })) else {
+            continue;
+        };
+        if !post_is_collinear_with_head(head.unit, post, tip, gap_mm, allowance_mm) {
+            continue;
+        }
+        head.drawn_straight = true;
+        if head.ledger_radius_mm.len() == strut.radius_mm.len() {
+            strut.radius_mm.clone_from(&head.ledger_radius_mm);
+        }
+        dropped.push(strut.id);
+    }
+    dropped
 }
 
 /// **The shaft the file draws for each live headed strut**, `(top, bottom)` in
@@ -1792,11 +1867,30 @@ fn sweep_pass(
                 // before, and is counted. Sabotage: `defer_to_shaft = false`
                 // turns `contact_sizing::` red.
                 let at_contact = reads_peel && layer + 1 == struts[index].k_top;
-                let defer_to_shaft = at_contact && !arm.terminating;
+                // AND NO LOAD ENTERS A HEADED ARM BETWEEN ITS CONTACT AND ITS
+                // JOINT (v19 fix, 2026-10-08; physics: a load that joins in the
+                // head span does not pass through the contact). It waits in
+                // `pending` until the arm reaches its joint's layer, so the
+                // tip, the head slots and the joint's own lever are sized for
+                // the arm's own load, and the shaft below the joint carries
+                // the sum. Same hold as the contact slot's above.
+                let in_head_span = reads_peel
+                    && struts[index]
+                        .joint_hold_layer()
+                        .is_some_and(|joint| layer > joint);
+                let defer_to_shaft = (at_contact || in_head_span) && !arm.terminating;
                 let merged = if defer_to_shaft {
                     if pending[index] > 0.0 {
-                        outcome.contact_merges_moved_below += 1;
-                        outcome.contact_merge_load_moved_mm2 += pending[index];
+                        if at_contact {
+                            outcome.contact_merges_moved_below += 1;
+                            outcome.contact_merge_load_moved_mm2 += pending[index];
+                        } else if struts[index].joint_hold_layer().is_some_and(|joint| layer == joint + 1)
+                        {
+                            // Counted once per held load: at the last layer
+                            // before the joint, where it is released.
+                            outcome.head_span_merges_held_to_joint += 1;
+                            outcome.head_span_load_held_mm2 += pending[index];
+                        }
                     }
                     0.0
                 } else {

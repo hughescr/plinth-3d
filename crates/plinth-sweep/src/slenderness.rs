@@ -6803,6 +6803,7 @@ fn screen_model_ties(
         model.layer_plan,
         plate_z,
         context.final_clearance_mm,
+        context.lean.face_zone_factor(),
         &context.history.hidden,
     );
     let near: BTreeSet<u32> = census.within_gap.iter().map(|row| row.member).collect();
@@ -6863,6 +6864,7 @@ fn screen_model_ties(
             model.layer_plan,
             plate_z,
             context.final_clearance_mm,
+            context.lean.face_zone_factor(),
             &context.history.hidden,
         );
         if !tie_confirmed_clear(&alone) {

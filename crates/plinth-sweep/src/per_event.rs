@@ -420,7 +420,10 @@ fn junction_layer(parent: &SweepStrut, landed: usize, layers: usize) -> Option<u
     if top < parent.k_bottom {
         return None;
     }
-    let first = landed.min(top);
+    // A load that enters a headed arm between its contact and its joint is
+    // read at the joint, never above it (v19 fix, 2026-10-08;
+    // [`SweepStrut::joint_hold_layer`]).
+    let first = parent.joint_hold_layer().map_or(landed.min(top), |joint| landed.min(top).min(joint));
     if first < parent.k_bottom {
         return None;
     }

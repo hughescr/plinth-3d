@@ -685,6 +685,7 @@ pub(crate) fn model_clearance_census(
     layer_plan: &plinth_core::LayerPlan,
     plate_z_mm: f64,
     tier: f64,
+    zone_factor: f64,
     cavity: &crate::cavity::HiddenCavity,
 ) -> crate::report::MemberModelClearance {
     let mut census = crate::report::MemberModelClearance {
@@ -794,18 +795,28 @@ pub(crate) fn model_clearance_census(
             let seat_zone = match disc {
                 // A headed arm's post stands outside the contact zone.
                 Some(disc) if arm.seats_into_model && disc.head_joint_radius_mm.is_some() => 0.0,
-                Some(disc) if arm.seats_into_model => {
-                    let along = geom_kernel::vec3::dot(disc.outward_normal, axis);
-                    let over = geom_kernel::vec3::dot(
-                        disc.outward_normal,
-                        geom_kernel::vec3::sub(disc.ball_centre_mm, disc.centre_mm),
-                    );
-                    if along > 0.0 {
-                        disc.ball_radius_mm.max((tier + radius - over) / along)
-                    } else {
-                        f64::INFINITY
-                    }
-                }
+                // **The exempt zone is sized at the CONTACT, never at the span**
+                // (v19 fix, 2026-10-08, ruling 2d). The zone is the stretch
+                // over which the arm's own tip-sized shaft still stands within
+                // the gap of the seat plane, so it is read at the contact
+                // ball's radius and capped by the lean law's factor, as every
+                // other contact zone is ([`contact_zone_mm`]). It used each
+                // span's OWN radius, so a fat span, steeply off the normal,
+                // exempted itself (v19 Cylinder: record 460, r 0.965, was
+                // exempt out to 3.0 mm and its 0.144 mm intrusion was never
+                // read). Any span wider than the tip, outside the ball, is
+                // always measured now.
+                Some(disc) if arm.seats_into_model => disc.ball_radius_mm.max(contact_zone_mm(
+                    Some(ContactFace {
+                        point: disc.centre_mm,
+                        normal: disc.outward_normal,
+                    }),
+                    disc.ball_centre_mm,
+                    axis,
+                    disc.ball_radius_mm,
+                    tier,
+                    zone_factor,
+                )),
                 _ => 0.0,
             };
             let landing_zone = match faces.get(index).copied().flatten() {
@@ -1199,6 +1210,9 @@ mod census_tests {
     const GAP: f64 = 0.3;
     const H: f64 = 0.05;
     const PLATE: f64 = -5.0;
+    /// The lean law's zone factor (`hypot(max step, h) / h`) at the registered
+    /// 45 degree law over 25 degrees of transition.
+    const ZONE: f64 = 1.84;
 
     fn boxed(low: [f64; 3], high: [f64; 3]) -> NativeSurface {
         let verts: Vec<[f64; 3]> = (0..8)
@@ -1317,7 +1331,7 @@ mod census_tests {
         let (struts, arms) = (vec![post.0], vec![post.1]);
         let layers = plinth_core::LayerPlan::new(PLATE, vec![H; 400]).expect("a uniform plan");
         let none = crate::cavity::HiddenCavity::none();
-        let census = model_clearance_census(Some(surface), &struts, &arms, &layers, PLATE, GAP, &none);
+        let census = model_clearance_census(Some(surface), &struts, &arms, &layers, PLATE, GAP, ZONE, &none);
         let root = plinth_support::drawn_root_radius_mm(&arms[0].radius_profile_mm, arms[0].tip_radius_mm);
         let spans = plinth_support::drawn_spans(
             &arms[0].radius_profile_mm,
@@ -1365,7 +1379,7 @@ mod census_tests {
             two.0.cell = cell(grid, 5.0, 5.5);
             assert!(!one.0.interior && !two.0.interior, "anti-vacuity: the scar flag is false for both");
             let (struts, arms) = (vec![one.0, two.0], vec![one.1, two.1]);
-            model_clearance_census(Some(&wall), &struts, &arms, &layers, PLATE, GAP, cavity)
+            model_clearance_census(Some(&wall), &struts, &arms, &layers, PLATE, GAP, ZONE, cavity)
         };
         let named = |census: &crate::report::MemberModelClearance| {
             census.within_gap.iter().map(|near| near.member).collect::<Vec<_>>()
@@ -1448,6 +1462,68 @@ mod census_tests {
         );
     }
 
+    /// **The seat zone is the CONTACT's, never the span's** (v19 fix,
+    /// 2026-10-08, ruling 2d). A straight tip (tip radius 0.2) leans 55 degrees
+    /// off the flat underside it seats on (the model's face at `z = 0`) and
+    /// its shaft is drawn 0.965 mm thick, as the v19 Cylinder's record 460 was.
+    /// That fat span is deep inside the model 0.7 mm from the ball: its own
+    /// radius used to stretch the exempt zone to where the solid just clears
+    /// the gap (about 2.0 mm), so the intrusion was never read. Sized at the
+    /// contact ball it is read and named. The control: the same lean with a
+    /// tip-sized shaft is a legitimate contact zone and stays unnamed.
+    /// SABOTAGE: put `radius` (the span's own) back in the zone and the first
+    /// assertion goes red.
+    #[test]
+    fn a_fat_off_normal_span_does_not_exempt_itself_from_the_census() {
+        let surface = block();
+        let layers = plinth_core::LayerPlan::new(PLATE, vec![H; 400]).expect("a uniform plan");
+        let nowhere = crate::cavity::HiddenCavity::none();
+        // 55 degrees off the normal: inside the lean law (the zone factor's
+        // 1 / 1.84 allows up to 57.1).
+        let (sin, cos) = (0.819_f64, 0.574_f64);
+        let census_with_shaft = |shaft: f64| {
+            let (mut strut, mut arm) = member(
+                0,
+                StrutKind::Arm,
+                Landing::Strut { id: 9, layer: 0 },
+                [0.0, 0.0],
+                -2.565,
+                0.0,
+                0.2,
+            );
+            arm.base_mm = [5.0 * sin, 0.0, -5.0 * cos];
+            arm.seat_normal_mm = [0.0, 0.0, -1.0];
+            arm.seat_face_point_mm = Some([0.0, 0.0, 0.0]);
+            arm.seats_into_model = true;
+            arm.tip_radius_mm = 0.2;
+            arm.radius_profile_mm = vec![shaft; arm.radius_profile_mm.len()];
+            strut.radius_mm = arm.radius_profile_mm.clone();
+            model_clearance_census(
+                Some(&surface),
+                &[strut],
+                &[arm],
+                &layers,
+                PLATE,
+                GAP,
+                ZONE,
+                &nowhere,
+            )
+        };
+        let fat = census_with_shaft(0.965);
+        assert_eq!(fat.members_measured, 1, "{fat:?}");
+        assert_eq!(fat.within_gap.len(), 1, "the fat span's intrusion is read: {fat:?}");
+        assert!(
+            fat.within_gap[0].clearance_mm < 0.0,
+            "it is inside the model: {}",
+            fat.within_gap[0].clearance_mm
+        );
+        let thin = census_with_shaft(0.2);
+        assert!(
+            thin.within_gap.is_empty(),
+            "a tip-sized shaft on the same lean is inside its contact zone only: {thin:?}"
+        );
+    }
+
     /// The census names the ARM whose drawn shaft passes the wall inside the
     /// gap, and only it: the same arm a millimetre out, an arm that lands on
     /// the top face, and a mast clear of everything, are clear. (Until this
@@ -1467,7 +1543,7 @@ mod census_tests {
         let (struts, arms): (Vec<SweepStrut>, Vec<SweepArm>) = members.into_iter().unzip();
         let layers = plinth_core::LayerPlan::new(PLATE, vec![H; 400]).expect("a uniform plan");
         let nowhere = crate::cavity::HiddenCavity::none();
-        let census = model_clearance_census(Some(&surface), &struts, &arms, &layers, PLATE, GAP, &nowhere);
+        let census = model_clearance_census(Some(&surface), &struts, &arms, &layers, PLATE, GAP, ZONE, &nowhere);
         assert!(census.ran);
         assert_eq!(census.members_unmeasured, 0, "{census:?}");
         assert_eq!(census.members_measured, 4, "{census:?}");
@@ -1477,7 +1553,7 @@ mod census_tests {
         let gap = census.within_gap[0].clearance_mm;
         assert!((gap - 0.15).abs() < 1e-6, "the near shaft stands {gap} mm off the wall");
         // No surface, no census: the census says it did not run.
-        let none = model_clearance_census(None, &struts, &arms, &layers, PLATE, GAP, &nowhere);
+        let none = model_clearance_census(None, &struts, &arms, &layers, PLATE, GAP, ZONE, &nowhere);
         assert!(!none.ran && none.within_gap.is_empty());
     }
 }

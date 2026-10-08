@@ -1339,3 +1339,170 @@ mod actual_lean_sizing {
         assert_eq!(struts[1].radius_mm, settled);
     }
 }
+
+// ---------------------------------------------------------------------------
+// v19 fix, lane L4 (2026-10-08): a head is planned at EVERY seat; the post that
+// arrives along the normal is drawn straight (the collinear drop); a load that
+// joins a head span is booked from the joint down; the straight tips that stay
+// off their normal are counted with their refusal.
+// ---------------------------------------------------------------------------
+
+mod heads_everywhere {
+    use super::*;
+    use crate::down_sweep::{drop_collinear_heads, resize_heads_to_drawn_posts, SizingPolicy};
+    use crate::heads::HeadRefusal;
+    use plinth_support::{SweepArm, SweepArmLanding};
+
+    const K_TOP: usize = 108;
+    const K_JOINT: usize = 100;
+    const TIP: f64 = 0.1;
+    const GAP: f64 = 0.3;
+    /// `layer + pixel`, the registered rasterisation allowance (heads.rs tests).
+    const ALLOWANCE: f64 = 0.0692;
+
+    fn sizing() -> SizingPolicy {
+        SizingPolicy {
+            x_allowed: 12.0,
+            tip_radius_min_mm: 0.05,
+            tip_radius_max_mm: 1.0,
+            owner_growth_ceiling_mm: 0.4,
+            alpha: 1.0,
+            lamina_reach_mm: 2.13,
+            straight_reach: true,
+            tip_column_roots: true,
+            per_event: true,
+            handed_column_ledger: true,
+            layer_height_mm: H,
+            plate_z_mm: 0.0,
+        }
+    }
+
+    /// A head on a FLAT underside: `u` straight down, `K` 0.4 mm under the
+    /// contact, over a post that runs `run_cols` columns sideways to the plate
+    /// (0 = vertical). The ledger is saved as the down-sweep would.
+    fn flat_field(run_cols: usize) -> (Grid, Vec<SweepStrut>) {
+        let grid = grid();
+        let (row, col) = (150, 270);
+        let joint_cell = grid.index(row, col);
+        let z = |layer: usize| f64::from(u32::try_from(layer).expect("small")) * H;
+        let k = [grid.center_x_mm(col), grid.center_y_mm(row), z(K_JOINT)];
+        let d = [k[0], k[1], k[2] + 0.4];
+        let mut strut = straight(&grid, 0, row, col, K_TOP, 0.06);
+        strut.cell = joint_cell;
+        strut.center_mm = [d[0], d[1]];
+        strut.radius_mm.truncate(K_TOP);
+        *strut.radius_mm.last_mut().expect("a ledger") = TIP;
+        let post: Vec<u32> = (0..=K_JOINT)
+            .map(|slot| cell_u32(grid.index(row, col - run_cols + (run_cols * slot) / K_JOINT)))
+            .collect();
+        give_head(&mut strut, K_JOINT, joint_cell, Some(post));
+        {
+            let head = strut.head.as_mut().expect("a head");
+            head.unit = [0.0, 0.0, -1.0];
+            head.contact_mm = d;
+            head.joint_mm = k;
+            head.ledger_radius_mm = strut.radius_mm.clone();
+        }
+        (grid, vec![strut])
+    }
+
+    /// RED before the lane (no head was planned on a flat face, so there was
+    /// no collinear drop to speak of and a leaning post kept a straight tip).
+    /// A head on a flat underside whose post leans 68 degrees keeps its head:
+    /// tip, cone, a joint bigger than the tip, and the post from K, sized for
+    /// the lean. The SAME head over a vertical post is dropped to the straight
+    /// tip (no joint ball, every slot back on the area-law ledger).
+    /// SABOTAGE: make `post_is_collinear_with_head` always true and the leaning
+    /// half goes red; always false and the vertical half does.
+    #[test]
+    fn a_flat_face_keeps_its_head_over_a_leaning_post_and_drops_it_over_a_vertical_one() {
+        let (grid, mut leaning) = flat_field(250);
+        assert!(
+            drop_collinear_heads(&grid, &mut leaning, sizing(), GAP, ALLOWANCE).is_empty(),
+            "a post 68 degrees off the normal is not collinear"
+        );
+        let head = leaning[0].head.as_ref().expect("a head");
+        assert!(!head.drawn_straight, "the head is kept over a leaning post");
+        assert_eq!(resize_heads_to_drawn_posts(&grid, &mut leaning, sizing()), 1);
+        let kept = &leaning[0];
+        assert_eq!(kept.radius_mm[K_TOP - 1], TIP, "the contact stays the area-law tip");
+        assert!(
+            kept.radius_mm[K_JOINT] > TIP * 1.5,
+            "a joint sized for the leaning post stands over the tip: {}",
+            kept.radius_mm[K_JOINT]
+        );
+        assert!(
+            kept.radius_mm[K_JOINT + 1..K_TOP].iter().all(|r| *r >= TIP - 1e-12),
+            "the cone is never thinner than the tip"
+        );
+
+        let (grid, mut vertical) = flat_field(0);
+        let ledger = vertical[0].head.as_ref().expect("a head").ledger_radius_mm.clone();
+        let dropped = drop_collinear_heads(&grid, &mut vertical, sizing(), GAP, ALLOWANCE);
+        assert_eq!(dropped, vec![0], "a vertical post under a flat face is collinear");
+        let head = vertical[0].head.as_ref().expect("the head record stays");
+        assert!(head.drawn_straight);
+        assert_eq!(vertical[0].radius_mm, ledger, "every slot is back on the area-law ledger");
+        // A second pass drops nothing: it is a straight arm now.
+        assert!(drop_collinear_heads(&grid, &mut vertical, sizing(), GAP, ALLOWANCE).is_empty());
+    }
+
+    /// The skim law at the drop: 12 degrees off passes at tip 0.1, 40 does not.
+    #[test]
+    fn the_drop_threshold_is_the_skim_law() {
+        use crate::down_sweep::post_is_collinear_with_head;
+        let unit = [0.0, 0.0, -1.0];
+        let off = |deg: f64| [deg.to_radians().sin(), 0.0, -deg.to_radians().cos()];
+        assert!(post_is_collinear_with_head(unit, off(12.0), TIP, GAP, ALLOWANCE));
+        assert!(!post_is_collinear_with_head(unit, off(40.0), TIP, GAP, ALLOWANCE));
+        // A post that does not descend with the head never passes.
+        assert!(!post_is_collinear_with_head(unit, [0.0, 0.0, 1.0], TIP, GAP, ALLOWANCE));
+    }
+
+    /// A hand-made arm for the census of straight tips: seat at the origin,
+    /// base `(dx, 0, -5)`, seat normal straight down.
+    fn arm_to(strut: &SweepStrut, dx: f64) -> SweepArm {
+        SweepArm {
+            seat_mm: [0.0, 0.0, 0.0],
+            base_mm: [dx, 0.0, -5.0],
+            tip_radius_mm: strut.tip_radius_mm(),
+            radius_profile_mm: strut.radius_mm.clone(),
+            seat_normal_mm: [0.0, 0.0, -1.0],
+            seat_face_point_mm: None,
+            landing: SweepArmLanding::Plate,
+            seats_into_model: true,
+            head: None,
+        }
+    }
+
+    /// A refused seat is COUNTED and named: the straight tip that meets its
+    /// face off the normal beyond the skim law comes back with the refusal
+    /// recorded for it; a square one, and one that still carries its head, do
+    /// not. SABOTAGE: return an empty list and the first assertion goes red.
+    #[test]
+    fn a_refused_seat_that_stays_off_normal_is_counted_with_its_reason() {
+        let grid = grid();
+        let make = |id: u32| {
+            let mut strut =
+                straight(&grid, id, 10, 10 + usize::try_from(id).expect("small"), 100, TIP);
+            strut.seat_normal = [0.0, 0.0, -1.0];
+            strut
+        };
+        let (square, leaning, headed_arm) = (make(0), make(1), {
+            let mut strut = make(2);
+            let cell = strut.cell;
+            give_head(&mut strut, 90, cell, None);
+            strut
+        });
+        let arms = [arm_to(&square, 0.0), arm_to(&leaning, 4.0), arm_to(&headed_arm, 4.0)];
+        let struts = [square, leaning, headed_arm];
+        let mut refusals = std::collections::BTreeMap::new();
+        refusals.insert(HeadRefusal::NoPost, vec![1_u32]);
+        let found = crate::off_normal_straight_tips(&struts, &arms, &refusals, GAP, ALLOWANCE);
+        assert_eq!(found.len(), 1, "only the leaning straight tip is off its normal: {found:?}");
+        let (id, degrees, reason) = found[0];
+        assert_eq!(id, 1);
+        assert!((degrees - 38.66).abs() < 0.01, "atan(4/5) = 38.66 degrees: {degrees}");
+        assert_eq!(reason, Some(HeadRefusal::NoPost), "its refusal is named");
+    }
+}
