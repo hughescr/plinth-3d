@@ -406,6 +406,23 @@ impl SweepStrut {
         head.k_joint.checked_sub(clear)
     }
 
+    /// **The highest layer a load that lands on this arm is ever booked at**
+    /// (v19 fix, 2026-10-08): the layer of the head's joint `K` for a headed
+    /// arm, `None` for a straight one (and for a headed arm whose joint stands
+    /// below its lowest layer). A load that enters a headed arm between the
+    /// contact `D` and the joint `K` does not pass through the contact, so it
+    /// is booked from the joint slot DOWN, never into the tip or the head
+    /// slots: the sum must not size the tip, and the head, joint and post are
+    /// sized for the arm's own load (ruling 2c). One definition for the
+    /// down-sweep's hand-off, the per-event pass and the head-join booking.
+    #[must_use]
+    pub fn joint_hold_layer(&self) -> Option<usize> {
+        self.head
+            .as_ref()
+            .map(|head| head.k_joint)
+            .filter(|&joint| self.k_bottom == usize::MAX || joint >= self.k_bottom)
+    }
+
     /// Set what lies BELOW the head: the landing, the lowest layer and the
     /// post's cells. A straight arm takes exactly the three assignments it
     /// always did. A headed arm keeps its head: its path becomes `post_path`
@@ -3122,6 +3139,18 @@ pub fn run_sweep_with_holes(
     // move touched comes out unchanged, and the clearance warnings are read
     // again on the sizes that stand.
     if let Some((profiles, rule)) = head_registry {
+        // THE COLLINEAR DROP (v19 fix, 2026-10-08): a head is planned at every
+        // seat, so one whose post arrives along its axis (within the skim law)
+        // is drawn straight. It reads the post the file draws, now that the
+        // moves have settled, and runs BEFORE the re-size so the re-size sees
+        // the dropped hosts' straight lines.
+        sweep_plan.report.heads.collinear_dropped = down_sweep::drop_collinear_heads(
+            &sweep_plan.grid,
+            &mut sweep_plan.struts,
+            sizing,
+            rule.gap_mm,
+            rule.allowance_mm,
+        );
         size_heads_for_final_posts(
             &sweep_plan.grid,
             &mut sweep_plan.struts,
@@ -3173,6 +3202,16 @@ pub fn run_sweep_with_holes(
         outcome.final_off_face = off_face;
     }
     finish_heads(&mut sweep_plan);
+    if let Some((_, rule)) = head_registry {
+        let arms = adapter::arms_of(&sweep_plan);
+        sweep_plan.report.heads.off_normal_straight = off_normal_straight_tips(
+            &sweep_plan.struts,
+            &arms,
+            &sweep_plan.report.heads.refusals,
+            rule.gap_mm,
+            rule.allowance_mm,
+        );
+    }
     // WHAT THE EMITTED FIELD STILL HAS IN A SEAT ZONE (head-join, 2026-09-29),
     // measured on the arms exactly as they go to the lowering: the ties may
     // have raised a trunk's drawn section after the rule ran, and a footprint
@@ -3231,6 +3270,7 @@ pub fn run_sweep_with_holes(
             plan,
             plate_z,
             policy.final_clearance_gap_mm,
+            law.face_zone_factor(),
             &history.hidden,
         );
         sweep_plan.report.hidden_cavity = history.hidden.census();
@@ -3487,6 +3527,59 @@ fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> Unmer
 /// field. The angle between `u` and the measured final normal is the residual
 /// published in [`report::SweepReport::heads`] (max, median); an arm with no
 /// measured normal adds none. Batch-first: one pass over the struts.
+/// **Straight tips that meet their face off its normal beyond the skim law**
+/// (v19 fix, 2026-10-08), measured on the finished field: for every live support
+/// arm drawn as a straight tip (no head, or a head given up), the angle
+/// between its seat normal and the line it is drawn on, from its seat down to
+/// its base. A tip whose angle fails the skim law
+/// ([`heads::skims`], at the tip's own radius) has a shaft that grazes the
+/// model next to the contact: a head was wanted. Every such tip should be a
+/// seat whose head was refused, and the refusal is returned with it
+/// (`None` for a head the final sizing gave up, or an arm no head was asked of).
+///
+/// One batch pass, no geometry beyond the arms the lowering gets. A head
+/// dropped as collinear is measured like any other straight tip and passes
+/// (its post is within the skim law of its axis); only its seat-to-base chord
+/// differs from the post's by the head's small lateral run.
+fn off_normal_straight_tips(
+    struts: &[SweepStrut],
+    arms: &[plinth_support::SweepArm],
+    refusals: &std::collections::BTreeMap<heads::HeadRefusal, Vec<u32>>,
+    gap_mm: f64,
+    allowance_mm: f64,
+) -> Vec<(u32, f64, Option<heads::HeadRefusal>)> {
+    let mut found = Vec::new();
+    for (strut, arm) in struts.iter().zip(arms) {
+        if strut.kind != StrutKind::Arm
+            || !slenderness::live(strut)
+            || strut.head.as_ref().is_some_and(|head| !head.drawn_straight)
+        {
+            continue;
+        }
+        let (Some(normal), Some(shaft)) = (
+            geom_kernel::vec3::normalize(strut.seat_normal),
+            geom_kernel::vec3::normalize(geom_kernel::vec3::sub(arm.base_mm, arm.seat_mm)),
+        ) else {
+            continue;
+        };
+        let cos_x = geom_kernel::vec3::dot(normal, shaft);
+        if !heads::skims(strut.tip_radius_mm(), cos_x, gap_mm, allowance_mm) {
+            continue;
+        }
+        let reason = refusals
+            .iter()
+            .find_map(|(reason, ids)| ids.contains(&strut.id).then_some(*reason));
+        // A seat in a hidden cavity is meant to stay straight (Craig ruling
+        // 2026-10-05: no heads, and no final gap, in a hidden cavity). It is
+        // counted among the refusals and is not a warning here.
+        if reason == Some(heads::HeadRefusal::HiddenCavity) {
+            continue;
+        }
+        found.push((strut.id, cos_x.clamp(-1.0, 1.0).acos().to_degrees(), reason));
+    }
+    found
+}
+
 fn finish_heads(plan: &mut SweepPlan) {
     let mut residuals_deg: Vec<f64> = Vec::new();
     for strut in &mut plan.struts {
@@ -4550,6 +4643,7 @@ fn build_report(
             removal_passes_rolled_back,
             lean_candidates_priced: 0,
             contact_merges_moved_below: outcome.contact_merges_moved_below,
+            head_span_merges_held_to_joint: outcome.head_span_merges_held_to_joint,
             contact_merges_kept_at_single_slot: outcome.contact_merges_kept_at_single_slot,
             // Set by the caller, which holds the up-sweep's scratch.
             ..PathHits::default()

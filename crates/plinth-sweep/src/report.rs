@@ -566,6 +566,10 @@ pub struct PathHits {
     /// means no arm landed on another arm's head, which a green
     /// `contact_sizing` test must not be allowed to mean.
     pub contact_merges_moved_below: u64,
+    /// Loads that landed on a HEADED arm between its contact and its joint and
+    /// were held to the joint's layer (v19 fix, 2026-10-08). Zero means no
+    /// member joined a head span.
+    pub head_span_merges_held_to_joint: u64,
     /// The same, at an arm with no slot below its contact: the load stays in
     /// the one slot (there is no shaft to take it) and is counted here.
     pub contact_merges_kept_at_single_slot: u64,

@@ -641,8 +641,12 @@ pub fn post_section_law_mm(
 /// Why a seat kept today's straight tip instead of a head.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HeadRefusal {
-    /// The face is not steep: flat faces and Round discs keep the straight tip.
-    NotSteep,
+    /// The seat's face does not look down inside the seat-face band (it looks
+    /// up, or is steeper than the band admits): there is no seat plane to
+    /// stand a head on. A flat underside is NOT this: it gets a head too
+    /// (v19 fix, 2026-10-08), and drops to the straight tip only when its post
+    /// arrives along the normal ([`crate::down_sweep::drop_collinear_heads`]).
+    NotDownFacing,
     /// No down-facing face was found for the seat.
     NoSurface,
     /// The footprint normal could not be measured.
@@ -701,6 +705,17 @@ pub struct HeadsOutcome {
     /// file draws (v19 fix, 2026-10-07): the path-hit witness for the final
     /// sizing. See [`crate::size_heads_for_final_posts`].
     pub resized_after_moves: usize,
+    /// Heads planned at a seat and then drawn straight because the post that
+    /// arrives at them lies within the skim law of the head's axis (v19 fix,
+    /// 2026-10-08: a head is planned at every seat with a seat plane): the
+    /// member ids. See [`crate::down_sweep::drop_collinear_heads`].
+    pub collinear_dropped: Vec<u32>,
+    /// Straight tips that meet their face OFF its normal beyond the skim law
+    /// (the shaft grazes the model), as `(member id, degrees off the normal,
+    /// the head refusal that left it straight, if one is recorded)`. Measured
+    /// on the finished field by [`crate::off_normal_straight_tips`]. A warning
+    /// quantity: every one is a refusal the run counted by reason.
+    pub off_normal_straight: Vec<(u32, f64, Option<HeadRefusal>)>,
 }
 
 /// The warning for a head kept although its drawn clearance is short.
@@ -791,17 +806,6 @@ pub struct HeadRule {
     pub plate_z_mm: f64,
 }
 
-/// Whether a face with outward unit normal `z` component `unit_z` is steep
-/// enough for a head at tip radius `tip_radius_lb_mm`: the face is admitted
-/// (faces down, below the rule's `max_normal_z`) and a vertical post would
-/// skim it ([`skims`] at `cos x = −unit_z`).
-#[must_use]
-pub fn head_triggers(unit_z: f64, tip_radius_lb_mm: f64, rule: &HeadRule) -> bool {
-    unit_z < 0.0
-        && unit_z < rule.max_normal_z
-        && skims(tip_radius_lb_mm, -unit_z, rule.gap_mm, rule.allowance_mm)
-}
-
 /// One seat's question to [`plan_head`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HeadRequest {
@@ -840,7 +844,11 @@ fn cell_holding(grid: &Grid, x_mm: f64, y_mm: f64) -> Option<usize> {
 
 /// **Plan one head**, once, at placement. Steps, in order, each a refusal:
 ///
-/// 1. [`HeadRefusal::NotSteep`] unless the trigger holds ([`head_triggers`]);
+/// 1. [`HeadRefusal::NotDownFacing`] unless the axis looks down inside the
+///    seat-face band (`u_z < 0` and `u_z < max_normal_z`). There is no
+///    steepness gate (v19 fix, 2026-10-08): a head is planned at every seat
+///    that has a seat plane, on any slope, and a post that arrives along `u`
+///    is drawn straight afterwards;
 /// 2. [`HeadRefusal::JointOverMax`] if [`solve_joint`] has no root;
 /// 3. `D = A − ((A − P)·u)·u`, `K = D + (g + hb + r_K)·u` with `hb = 2R` the
 ///    ball's height over the plane (exact: never snapped to a cell centre);
@@ -858,8 +866,8 @@ pub fn plan_head(req: &HeadRequest, rule: &HeadRule, grid: &Grid) -> Result<Head
     let Some(unit) = vec3::normalize(req.unit) else {
         return Err(HeadRefusal::NoFootprint);
     };
-    if !head_triggers(unit[2], req.tip_radius_lb_mm, rule) {
-        return Err(HeadRefusal::NotSteep);
+    if !(unit[2] < 0.0 && unit[2] < rule.max_normal_z) {
+        return Err(HeadRefusal::NotDownFacing);
     }
     // The joint stands `g` beyond the ball's far side, not beyond the plane:
     // the ball stands up to `2R` over the plane, and the lever is `|DK|`.
@@ -1840,7 +1848,7 @@ mod tests {
 #[cfg(test)]
 mod constructor_tests {
     use super::{
-        check_head, head_triggers, plan_head, placement_normals, skims, Head, HeadCapsule,
+        check_head, plan_head, placement_normals, skims, Head, HeadCapsule,
         HeadCheckCtx, HeadRefusal, HeadRequest, HeadRule, PlacementBall, PlacementEnv,
     };
     use crate::cavity::fixtures as cavity;
@@ -1992,32 +2000,20 @@ mod constructor_tests {
         Scene::of(quads_mesh(&quads))
     }
 
-    // ---- (1) the trigger ---------------------------------------------------
+    // ---- (1) the skim law -----------------------------------------------------
 
     #[test]
-    fn the_trigger_table() {
-        let r = rule(0.0);
-        let cases = [
-            (0.05, 32.0, false),
-            (0.05, 35.0, true),
-            (0.15, 31.0, true),
-            (0.05, 0.0, false),
-            // Beyond the admitted band: 75 degrees from down, past 70.
-            (0.05, 75.0, false),
-        ];
-        for (radius, deg, expected) in cases {
-            let got = head_triggers(unit_at(deg)[2], radius, &r);
-            println!("trigger r {radius} at {deg} deg -> {got}");
-            assert_eq!(got, expected, "r {radius} at {deg} deg");
-        }
+    fn the_skim_law() {
         assert!((allowance() - 0.0692).abs() < 1e-12);
         // The bare law: a grazing (non-positive) cosine skims, a square one does not.
         assert!(skims(0.05, 0.0, GAP, allowance()));
         assert!(skims(0.05, -0.2, GAP, allowance()));
         assert!(skims(0.05, f64::NAN, GAP, allowance()));
         assert!(!skims(0.05, 1.0, GAP, allowance()));
-        // A face that points up is never steep.
-        assert!(!head_triggers(0.5, 0.05, &r));
+        // 35 degrees off the normal skims at r 0.05, 32 does not (the old
+        // trigger table, now the collinear drop's threshold).
+        assert!(skims(0.05, 35.0_f64.to_radians().cos(), GAP, allowance()));
+        assert!(!skims(0.05, 32.0_f64.to_radians().cos(), GAP, allowance()));
     }
 
     // ---- (2) the worked head -----------------------------------------------
@@ -2126,13 +2122,18 @@ mod constructor_tests {
         assert_eq!(flat_top, HeadRefusal::NoPost);
         // The axis leaves the raster.
         assert_eq!(refusal(request([7.9, 1.0, 2.03], 0.05, 41)), HeadRefusal::NoPost);
-        // Not steep: straight down, and a face beyond the admitted band.
-        let straight = HeadRequest { unit: unit_at(0.0), ..request(D, 0.05, 41) };
-        assert_eq!(refusal(straight), HeadRefusal::NotSteep);
+        // A face beyond the admitted band has no seat plane: refused. A flat
+        // underside (straight down) and a shallow slope are NOT refused any
+        // more: every seat with a seat plane is planned (v19 fix, 2026-10-08).
         let beyond = HeadRequest { unit: unit_at(75.0), ..request(D, 0.05, 41) };
-        assert_eq!(refusal(beyond), HeadRefusal::NotSteep);
+        assert_eq!(refusal(beyond), HeadRefusal::NotDownFacing);
+        let up = HeadRequest { unit: [0.0, 0.0, 1.0], ..request(D, 0.05, 41) };
+        assert_eq!(refusal(up), HeadRefusal::NotDownFacing);
+        let straight = HeadRequest { unit: unit_at(0.0), ..request(D, 0.05, 41) };
+        let flat = plan_head(&straight, &r, &grid).expect("a flat underside is planned");
+        assert!((flat.unit[2] + 1.0).abs() < 1e-12);
         let shallow = HeadRequest { unit: unit_at(32.0), ..request(D, 0.05, 41) };
-        assert_eq!(refusal(shallow), HeadRefusal::NotSteep);
+        assert!(plan_head(&shallow, &r, &grid).is_ok());
     }
 
     // ---- (4) check_head ----------------------------------------------------------

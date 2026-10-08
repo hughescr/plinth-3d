@@ -3756,6 +3756,32 @@ fn print_sweep_disclosure(
                 warned.join("; ")
             );
         }
+        println!(
+            "[sweep {model}] heads everywhere: {} planned at placement, {} dropped to the straight \
+             tip because their post arrives along the normal (collinear), {} straight tips meet \
+             their face off the normal beyond the skim law; loads held from a head span to the \
+             joint {}; joins in a head span at the first survey {}",
+            heads.built,
+            heads.collinear_dropped.len(),
+            heads.off_normal_straight.len(),
+            report.counters.head_span_merges_held_to_joint,
+            report.head_join.joins_in_head_span,
+        );
+        if !heads.off_normal_straight.is_empty() {
+            let named = heads
+                .off_normal_straight
+                .iter()
+                .map(|(id, degrees, reason)| match reason {
+                    Some(reason) => format!("{id} ({degrees:.1} deg, {reason:?})"),
+                    None => format!("{id} ({degrees:.1} deg, no head asked or given up)"),
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            println!(
+                "[sweep {model}] WARNING heads: straight tips off their face normal beyond the \
+                 skim law: {named}"
+            );
+        }
         if !heads.downgraded_after_sizing.is_empty() {
             println!(
                 "[sweep {model}] WARNING heads: {} heads built at placement went back to a \

@@ -153,6 +153,7 @@ pub(crate) fn clearance_violators(
         joins.layer_plan,
         joins.plate_z_mm,
         joins.clearance_mm,
+        joins.slender.lean.face_zone_factor(),
         &joins.slender.history.hidden,
     );
     let mut named = 0;

@@ -166,6 +166,11 @@ pub struct HeadJoinOutcome {
     /// clearance of its seat plane AND of the model) when the rule first ran,
     /// before it moved anything.
     pub joins_in_seat_zone_before: usize,
+    /// Of those, the joins that stood in a HEADED host's head span or on its
+    /// joint sphere (above its joinable top): always in the zone, re-landed at
+    /// the joint or below when a join exists (v19 fix, 2026-10-08). The
+    /// path-hit witness for that rule.
+    pub joins_in_head_span: usize,
     /// Joins, at that first survey, whose sum-sized section was within the
     /// clearance of the host's seat plane but clear of the model: the plane is
     /// not the model there (a steep face), and the join is left alone. The
@@ -317,6 +322,9 @@ struct Join {
     layer: usize,
     /// The slot of the parent the lander's load is booked into.
     booked: usize,
+    /// The lander stands on a headed parent's head span or joint sphere
+    /// (above its joinable top): always in the rule's zone.
+    in_head_span: bool,
 }
 
 /// One drawn section of a shaft: the centre of its ring, the shaft's unit
@@ -721,7 +729,10 @@ pub(crate) fn booked_slot(host: &SweepStrut, layer: usize) -> usize {
     } else {
         contact
     };
-    layer.min(under_contact)
+    // A HEADED host's head span is not a place a load enters (v19 fix,
+    // 2026-10-08): booked at the joint's layer at the highest.
+    host.joint_hold_layer()
+        .map_or(layer.min(under_contact), |joint| layer.min(under_contact).min(joint))
 }
 
 /// Every join on a support arm in `struts`: a member landed on a support arm,
@@ -730,7 +741,7 @@ pub(crate) fn booked_slot(host: &SweepStrut, layer: usize) -> usize {
 /// booked into the same slot as one at the head (Round 50 at its committed
 /// flip: arms 66, 68, 83, 98, their sums across the seat plane by 0.33 to
 /// 0.48 mm on `cb28bdd`, which looked at head landings only).
-fn arm_joins(struts: &[SweepStrut]) -> Vec<Join> {
+fn arm_joins(struts: &[SweepStrut], layer_height_mm: f64) -> Vec<Join> {
     let mut joins = Vec::new();
     for (child, strut) in struts.iter().enumerate() {
         let Landing::Strut { id, layer } = strut.landing else {
@@ -749,11 +760,23 @@ fn arm_joins(struts: &[SweepStrut]) -> Vec<Join> {
         {
             continue;
         }
+        // A lander ABOVE a headed host's joinable top stands in its head span
+        // or on its joint sphere: a load that enters there does not pass
+        // through the contact (v19 fix, 2026-10-08, ruling 2c). Such a join is
+        // always re-landed at the joint or below when a join exists
+        // ([`candidate_joins`]), whatever the seat plane says, and listed
+        // when it cannot be. A head given up (`drawn_straight`) is a straight
+        // arm again and joinable anywhere.
+        let in_head_span = host.head.as_ref().is_some_and(|head| !head.drawn_straight)
+            && host
+                .joinable_top_layer(layer_height_mm)
+                .is_none_or(|top| layer > top);
         joins.push(Join {
             child,
             parent,
             layer,
             booked: booked_slot(host, layer),
+            in_head_span,
         });
     }
     joins
@@ -881,6 +904,9 @@ struct Survey {
     /// ([`crate::adapter::LoadStepTaper`]): path-hit witnesses.
     cone_sections_graded: usize,
     held_by_cone: usize,
+    /// Joins that stand in a headed host's head span or on its joint sphere,
+    /// listed in the zone without a geometry test.
+    in_head_span: usize,
     in_zone: Vec<Join>,
     heads: Vec<Option<Head>>,
     profiles: Vec<Vec<f64>>,
@@ -912,6 +938,7 @@ fn grade(
         near_by_interior: 0,
         cone_sections_graded: 0,
         held_by_cone: 0,
+        in_head_span: 0,
         in_zone: Vec::new(),
         heads,
         profiles,
@@ -924,6 +951,13 @@ fn grade(
     let cones = crate::adapter::load_step_cones(struts, context.slender.load_step_taper);
     let mut held: Vec<(Join, Section)> = Vec::new();
     for join in joins {
+        // A lander in a headed host's head span is in the zone by definition
+        // (v19 fix, 2026-10-08): its load must enter at the joint or below.
+        if join.in_head_span {
+            out.in_head_span += 1;
+            out.in_zone.push(join);
+            continue;
+        }
         let host = &struts[join.parent];
         let Some(head) = out.heads.get(join.parent).copied().flatten() else {
             out.unmeasured += 1;
@@ -976,7 +1010,7 @@ fn grade(
         return out;
     }
     let Some(surface) = context.surface() else {
-        out.in_zone = held.into_iter().map(|(join, _)| join).collect();
+        out.in_zone.extend(held.into_iter().map(|(join, _)| join));
         return out;
     };
     let sections: Vec<Section> = held.iter().map(|(_, section)| *section).collect();
@@ -1002,7 +1036,7 @@ fn grade(
 
 /// Survey the LIVE field inside the sweep.
 fn survey(context: &HeadJoinContext<'_>, struts: &[SweepStrut]) -> Survey {
-    let joins = arm_joins(struts);
+    let joins = arm_joins(struts, context.slender.layer_height_mm);
     if joins.is_empty() {
         return grade(context, struts, joins, Vec::new(), Vec::new());
     }
@@ -1038,7 +1072,7 @@ pub(crate) fn census(
     struts: &[SweepStrut],
     arms: &[SweepArm],
 ) -> Census {
-    let joins = arm_joins(struts);
+    let joins = arm_joins(struts, context.slender.layer_height_mm);
     let examined = joins.len();
     if joins.is_empty() || arms.len() != struts.len() {
         return Census {
@@ -1448,6 +1482,7 @@ pub(crate) fn apply(
     if first {
         outcome.joins_examined = found.examined;
         outcome.joins_in_seat_zone_before = found.in_zone.len();
+        outcome.joins_in_head_span = found.in_head_span;
         outcome.joins_off_the_model = found.off_the_model;
         outcome.joins_held_by_load_cone = found.held_by_cone;
     }
@@ -1715,7 +1750,13 @@ mod head_carrier_join_tests {
             child.landing = Landing::Strut { id: 0, layer: k_top - 1 };
             child.k_bottom = k_top - 1;
             let struts = vec![host, child];
-            let join = Join { child: 1, parent: 0, layer: k_top - 1, booked: k_top - 1 };
+            let join = Join {
+                child: 1,
+                parent: 0,
+                layer: k_top - 1,
+                booked: k_top - 1,
+                in_head_span: false,
+            };
             candidate_joins(&struts, &join, H)
         };
         let on_head = lander(headed(&grid, 0, 150, 150, k_top, k_joint, 0.3));
@@ -1723,6 +1764,37 @@ mod head_carrier_join_tests {
         assert_eq!(on_head.iter().map(|&(_, layer)| layer).max(), Some(joinable));
         let on_straight = lander(straight(&grid, 0, 150, 150, k_top, 0.3));
         assert_eq!(on_straight.iter().map(|&(_, layer)| layer).max(), Some(k_top - 2));
+    }
+
+    /// **A lander in a headed host's head span is always in the rule's zone,
+    /// and its load is booked at the joint's layer at the highest** (v19 fix,
+    /// 2026-10-08). 0.25 mm under the contact (layer 195 of a head over layers
+    /// 191..=200, joint at 190) and on the joint sphere (layer 187, over the
+    /// joinable top 185) are in the head span; a landing at 185 is not. A head
+    /// given up (`drawn_straight`) is a straight arm again.
+    /// SABOTAGE: take `in_head_span` out of `arm_joins` and the first two
+    /// assertions go red; take the joint out of `booked_slot` and the booked
+    /// layers read 195 and 187.
+    #[test]
+    fn a_lander_in_the_head_span_is_listed_and_booked_at_the_joint() {
+        use super::{arm_joins, booked_slot};
+        let grid = grid();
+        let (k_top, k_joint) = (200, 190);
+        let joins_at = |layer: usize, drawn_straight: bool| {
+            let mut host = headed(&grid, 0, 150, 150, k_top, k_joint, 0.3);
+            host.head.as_mut().expect("a head").drawn_straight = drawn_straight;
+            let mut child = straight(&grid, 1, 150, 160, k_top, 0.1);
+            child.landing = Landing::Strut { id: 0, layer };
+            child.k_bottom = layer;
+            let struts = vec![host, child];
+            let joins = arm_joins(&struts, H);
+            assert_eq!(joins.len(), 1);
+            (joins[0].in_head_span, joins[0].booked, booked_slot(&struts[0], layer))
+        };
+        assert_eq!(joins_at(195, false), (true, k_joint, k_joint), "in the head span");
+        assert_eq!(joins_at(187, false), (true, 187, 187), "on the joint sphere");
+        assert_eq!(joins_at(185, false), (false, 185, 185), "at the joinable top");
+        assert_eq!(joins_at(195, true), (false, k_joint, k_joint), "a straight arm again");
     }
 }
 
