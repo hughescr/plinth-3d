@@ -483,8 +483,9 @@ fn apply_head_minimum(strut: &mut SweepStrut, sizing: SizingPolicy) -> Option<f6
 /// Run once, after the last pass that re-routes or re-lands and before the
 /// downgrade and the finished-field census. For each headed strut that is
 /// drawn as a head, the post is the straight line the lowering draws from the
-/// EXACT joint `K` (not its cell centre) to the base
-/// ([`crate::adapter::drawn_post_ends`]): its lean gives `c = cos` (no clamp at
+/// EXACT joint `K` (not its cell centre) to the shaft's drawn end: the boss
+/// top for a plate-rooted post, the host-shifted base for a landed one
+/// ([`drawn_shafts`], not the planned K-to-base chord): its lean gives `c = cos` (no clamp at
 /// the lean law's maximum: a post drawn at 60.9 degrees grows its joint) and
 /// the angle to the head's axis gives `|cos phi'|` and `sin phi'`, enveloped
 /// over the post's segments ([`crate::heads::HeadLaw::enveloped`]) and stored
@@ -499,24 +500,19 @@ pub fn resize_heads_to_drawn_posts(
     sizing: SizingPolicy,
 ) -> usize {
     let mut resized = 0;
-    for strut in struts.iter_mut() {
+    let shafts = drawn_shafts(grid, struts, sizing);
+    for (strut, shaft) in struts.iter_mut().zip(shafts) {
         let Some(head) = strut.head.as_ref() else {
             continue;
         };
         let slots = strut.radius_mm.len();
-        if head.drawn_straight
-            || head.ledger_radius_mm.len() != slots
-            || !crate::slenderness::live(strut)
-        {
+        let Some((post_top, post_base)) = shaft else {
+            continue;
+        };
+        if head.drawn_straight || head.ledger_radius_mm.len() != slots {
             continue;
         }
-        let (post_top, post_base) = crate::adapter::drawn_post_ends(
-            grid,
-            sizing.plate_z_mm,
-            sizing.layer_height_mm,
-            strut,
-        );
-        // The drawn post is one straight segment from `K` to the base.
+        // The drawn post is one straight segment from `K` to the shaft's end.
         let Some(segment) = crate::heads::HeadLaw::of_post(
             head.unit,
             std::array::from_fn(|axis| post_base[axis] - post_top[axis]),
@@ -536,6 +532,84 @@ pub fn resize_heads_to_drawn_posts(
         }
     }
     resized
+}
+
+/// **The shaft the file draws for each live headed strut**, `(top, bottom)` in
+/// the drawn frame, or `None` for a strut the final re-size leaves alone (no
+/// head, a head already drawn straight, a dead strut). One batch pass.
+///
+/// This is the line the lowering emits, not the planned K-to-base chord:
+/// * a plate-rooted post ends at its BOSS TOP over the foot
+///   ([`plinth_support::SweepRootFlare::plate_shaft_of`], the lowering's own
+///   answer), which is higher than the base and so steeper than the chord;
+/// * a landed post's base moves with the drawing offset of the host it lands
+///   on ([`crate::footprint::followed_shifts_drawn`], the same displacements
+///   the adapter applies when it builds the arms).
+fn drawn_shafts(
+    grid: &Grid,
+    struts: &[SweepStrut],
+    sizing: SizingPolicy,
+) -> Vec<Option<([f64; 3], [f64; 3])>> {
+    let candidate = |strut: &SweepStrut| {
+        strut.head.as_ref().is_some_and(|head| {
+            !head.drawn_straight
+                && head.ledger_radius_mm.len() == strut.radius_mm.len()
+                && crate::slenderness::live(strut)
+        })
+    };
+    if !struts.iter().any(candidate) {
+        return vec![None; struts.len()];
+    }
+    let (plate, h) = (sizing.plate_z_mm, sizing.layer_height_mm);
+    let flare = plinth_support::SweepRootFlare::registered(h).ok();
+    // Each member's drawn line off its planned one, exactly as the adapter
+    // builds the offsets the hosts' junctions follow.
+    let offsets: Vec<Option<crate::adapter::LineOffset>> = struts
+        .iter()
+        .map(|strut| {
+            if strut.head.as_ref().is_some_and(|head| head.drawn_straight) {
+                crate::adapter::downgraded_line_offset(flare.as_ref(), grid, plate, h, strut)
+            } else {
+                flare.as_ref().and_then(|flare| {
+                    crate::adapter::planned_line_offset(flare, grid, plate, h, strut)
+                })
+            }
+        })
+        .collect();
+    let followed = if offsets.iter().any(Option::is_some) {
+        crate::footprint::followed_shifts_drawn(struts, &offsets)
+    } else {
+        crate::footprint::followed_shifts(struts)
+    };
+    struts
+        .iter()
+        .zip(followed)
+        .map(|(strut, followed)| {
+            if !candidate(strut) {
+                return None;
+            }
+            let head = strut.head.as_ref()?;
+            let (seat, base) = crate::adapter::drawn_ends(grid, plate, h, strut);
+            let moved = |point: [f64; 3], by: Option<[f64; 3]>| -> [f64; 3] {
+                by.map_or(point, |by| std::array::from_fn(|axis| point[axis] + by[axis]))
+            };
+            let base = moved(base, followed.base_mm);
+            let arm = crate::adapter::sweep_arm(
+                strut,
+                moved(seat, followed.seat_mm),
+                base,
+                None,
+                Vec::new(),
+            );
+            let plate_shaft = match &flare {
+                Some(flare) if strut.landing == crate::Landing::Plate => {
+                    flare.plate_shaft_of(&arm, plate)
+                }
+                _ => None,
+            };
+            Some(plate_shaft.unwrap_or((head.joint_mm, base)))
+        })
+        .collect()
 }
 
 /// The head, joint and post slots of `strut` under `law`, written over the

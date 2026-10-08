@@ -1253,12 +1253,15 @@ mod actual_lean_sizing {
         let post_top = vertical[0].radius_mm[K_JOINT - 1];
         assert!((post_top - own).abs() < 1e-12, "post under K {post_top} against its own {own}");
         assert!((post_top - exact).abs() > 1e-6, "not the joint's radius {exact}");
-        // 68 degrees: 12.5 mm of run over 5.0 mm of height = 250 columns.
+        // 12.5 mm of run over 5.0 mm of height = 250 columns: 68.2 degrees
+        // from K to the plate, but the file's plate post ends at its BOSS TOP
+        // (about 1.2 mm up), a steeper line of about 73 degrees. The law reads
+        // the drawn shaft, not the chord (review finding, 2026-10-08).
         let (grid, mut leaning) = field(250);
         assert_eq!(resize_heads_to_drawn_posts(&grid, &mut leaning, sizing()), 1);
         let law = leaning[0].head.as_ref().expect("a head").law_drawn.expect("a drawn law");
         let lean_deg = law.cos_lean.acos().to_degrees();
-        assert!(lean_deg > 67.0 && lean_deg < 69.0, "the drawn lean {lean_deg}");
+        assert!(lean_deg > 72.0 && lean_deg < 74.5, "the drawn lean {lean_deg}");
         assert!(
             joint_of(&leaning[0]) > envelope,
             "a 68 degree post grows the joint past the envelope: {} against {envelope}",
