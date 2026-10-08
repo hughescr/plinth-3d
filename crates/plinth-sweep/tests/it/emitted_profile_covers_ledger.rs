@@ -21,10 +21,37 @@
 //!
 //! | `a_brace_raises_no_trunk_on_the_brace_pair` | with every brace thickened past any trunk's ledger, the lowering raises no member to a brace (rule R2, 2026-10-03: the lane never builds a brace thicker than its posts, and the brace-junction raise is deleted); every member still covers its own ledger |
 //!
+//! | `a_thinned_brace_and_a_detached_branch_still_fail_on_the_brace_pair` | sabotage of the real emission: a brace drawn at half its ledger is reported under-drawn, and a branch whose trunk is lifted off its root is reported detached |
+//!
 //! A branch whose root does not touch the trunk its ledger names (the
 //! stilt plate carried 11 such un-merged branches until fix/no-dangling; every
 //! fixture now pins 0) is counted EXACTLY per fixture and printed; it is not an
 //! inversion and no profile can fix it.
+//!
+//! **What the grading reads as something other than a plain frustum** (since
+//! the junction hulls of L2 and the articulated heads of v18):
+//!
+//! - A junction hull record (`FrustumRingNormal::Junction`) is the convex hull
+//!   of the end rings that meet at a landed junction, not a frustum from its
+//!   `start` to its `end`. It is read as the hull it is: the frustum between
+//!   every two of its rings is a guaranteed part of it (`hull_cones`). The
+//!   hull pass puts the record after the BRANCH; the host it cuts into has no
+//!   shaft there, so the host's drawn solid is that record too
+//!   (`with_foreign_hulls`, tied to the host by a ring that is an end of one of
+//!   the host's frusta).
+//! - Inside a hull the section tapers between the members that meet. A ledger
+//!   slot a hull covers (its rings' heights, and the one layer above them where
+//!   the junction pass drops the host's load-step collar) is graded against the
+//!   thinnest ring of the hull; a slot no hull and no frustum covers is still a
+//!   failure.
+//! - A headed member's ball, link, cone and joint (everything above the head's
+//!   joint sphere) are sized by the head rules, not the ledger, and are not
+//!   graded.
+//! - A branch is attached to its trunk when its root is inside a drawn trunk
+//!   section, or within its own root radius of the trunk's drawn solid (shaft or
+//!   hull, read without the branch's own rings: the junction pass pulls the
+//!   trunk back from the landing point and fills the gap with a hull). Those
+//!   branches are counted and printed as joined across a junction.
 //!
 //! How the tests are kept from passing vacuously: each counts the slots and
 //! junctions it graded and fails on zero; each requires the member it grades
@@ -34,7 +61,8 @@
 //! under a root flare, another lane's territory) are counted and printed.
 //!
 //! Sabotage: revert the lowering to one frustum per member (delete the
-//! breakpoint pass) and all three tests go red.
+//! breakpoint pass) and all three tests go red; the sabotage test above pins
+//! that the hull reading does not blind the grading.
 
 // Layer counts from finite model-scale lengths, in test-local arithmetic.
 #![allow(
@@ -45,7 +73,9 @@
 
 use plinth_core::{m0_constants, Finite, LayerPlan, PositiveFinite};
 use plinth_mesh::{make_brace_pair, make_lonely_peak, make_tall_stilt_plate, Mesh};
-use plinth_support::{BuildFrame, SupportPrimitive, SupportSegmentKind};
+use plinth_support::{
+    BuildFrame, FrustumRingNormal, HullRing, SupportPrimitive, SupportSegmentKind,
+};
 use plinth_sweep::{to_primitives, Landing, StrutKind, SweepEmission, SweepPlan, SweepPolicy};
 
 const LIFT_MM: f64 = 5.0;
@@ -136,6 +166,246 @@ pub(crate) fn members(emission: &SweepEmission) -> Vec<Vec<&SupportPrimitive>> {
     groups
 }
 
+/// The radius of the frustum from `a` (radius `ra`) to `b` (radius `rb`) at
+/// height `z`, linear in its own axial parameter, or `None` outside its span.
+fn frustum_radius_at(a: [f64; 3], b: [f64; 3], ra: f64, rb: f64, z: f64) -> Option<f64> {
+    let (low, high) = (a[2].min(b[2]), a[2].max(b[2]));
+    if (a[2] - b[2]).abs() <= 0.0 || z < low || z > high {
+        return None;
+    }
+    let t = (a[2] - z) / (a[2] - b[2]);
+    Some(ra + t * (rb - ra))
+}
+
+/// A frustum between two end-ring centres: what two rings of a junction hull
+/// guarantee between them.
+#[derive(Clone, Copy, Debug)]
+struct Cone {
+    a: [f64; 3],
+    ra: f64,
+    b: [f64; 3],
+    rb: f64,
+}
+
+fn is_hull(primitive: &SupportPrimitive) -> bool {
+    matches!(primitive.ring_normal, FrustumRingNormal::Junction(_))
+}
+
+fn ring_centre(ring: &HullRing) -> [f64; 3] {
+    point(if ring.at_start {
+        ring.frustum_start_mm
+    } else {
+        ring.frustum_end_mm
+    })
+}
+
+/// **A junction hull read as the hull it is** (L2, `lower/junction.rs`): the
+/// convex hull of the end rings that meet at a landed junction. A convex hull
+/// holds every segment between a point of one ring and a point of another, so
+/// between the centres of any two of its rings it holds at least the frustum
+/// of the two ring radii (the blend of two discs is a disc of the blended
+/// radius). That frustum is the guaranteed lower bound read here; the hull
+/// itself is wider. The record's own `start`/`end`/radii name only its two
+/// largest rings and say nothing about the third.
+///
+/// `without` names members whose own rings are left out: the root of a branch
+/// is, trivially, inside the hull cone from the branch's own ring, so the
+/// host's solid is read without the branch's rings.
+fn hull_cones(primitive: &SupportPrimitive, without: &[&SupportPrimitive]) -> Vec<Cone> {
+    let FrustumRingNormal::Junction(rings) = primitive.ring_normal else {
+        return Vec::new();
+    };
+    let rings: Vec<&HullRing> = rings
+        .rings()
+        .filter(|ring| !without.iter().any(|member| ring_is_an_end_of(ring, member)))
+        .collect();
+    let mut cones = Vec::new();
+    for (i, first) in rings.iter().enumerate() {
+        for second in &rings[i + 1..] {
+            cones.push(Cone {
+                a: ring_centre(first),
+                ra: first.radius_mm.get(),
+                b: ring_centre(second),
+                rb: second.radius_mm.get(),
+            });
+        }
+    }
+    cones
+}
+
+/// A hull ring holds the frustum it was made from as that frustum stood when
+/// the hull was made; a later junction on the same shaft may have cut that
+/// frustum shorter. The ring's centre and radius are still an end of a shaft
+/// frustum the member is drawn with, and that is what ties a ring to a member.
+fn ring_is_an_end_of(ring: &HullRing, member: &SupportPrimitive) -> bool {
+    if is_hull(member)
+        || matches!(
+            member.segment_kind,
+            SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere
+        )
+    {
+        return false;
+    }
+    let centre = ring_centre(ring);
+    let radius = ring.radius_mm.get();
+    let same = |end: [f64; 3], end_radius: f64| {
+        end.iter()
+            .zip(&centre)
+            .all(|(a, b)| (a - b).abs() <= 1.0e-9)
+            && (end_radius - radius).abs() <= 1.0e-9
+    };
+    same(point(member.start_mm), member.start_radius_mm.get())
+        || same(point(member.end_mm), member.end_radius_mm.get())
+}
+
+/// Every shaft frustum of `group`, and every pair of rings of its junction
+/// hulls (without the rings of the `without` members), as cones: the solid a
+/// member is known to draw.
+fn solid_cones(group: &[&SupportPrimitive], without: &[&SupportPrimitive]) -> Vec<Cone> {
+    group
+        .iter()
+        .filter(|primitive| {
+            !matches!(
+                primitive.segment_kind,
+                SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere
+            )
+        })
+        .flat_map(|primitive| {
+            if is_hull(primitive) {
+                hull_cones(primitive, without)
+            } else {
+                vec![Cone {
+                    a: point(primitive.start_mm),
+                    ra: primitive.start_radius_mm.get(),
+                    b: point(primitive.end_mm),
+                    rb: primitive.end_radius_mm.get(),
+                }]
+            }
+        })
+        .collect()
+}
+
+/// How far `p` stands outside a capped cone (0 inside): the axial overshoot
+/// past a flat end cap and the lateral excess over the section there, together.
+fn distance_to_cone(p: [f64; 3], cone: &Cone) -> f64 {
+    let axis = [
+        cone.b[0] - cone.a[0],
+        cone.b[1] - cone.a[1],
+        cone.b[2] - cone.a[2],
+    ];
+    let rel = [p[0] - cone.a[0], p[1] - cone.a[1], p[2] - cone.a[2]];
+    let length_sq = axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2];
+    if length_sq <= 0.0 {
+        let miss = rel[0].hypot(rel[1]).hypot(rel[2]);
+        return (miss - cone.ra.max(cone.rb)).max(0.0);
+    }
+    let length = length_sq.sqrt();
+    let tau = (rel[0] * axis[0] + rel[1] * axis[1] + rel[2] * axis[2]) / length_sq;
+    let overshoot = if tau < 0.0 {
+        -tau * length
+    } else if tau > 1.0 {
+        (tau - 1.0) * length
+    } else {
+        0.0
+    };
+    let perpendicular = [
+        rel[0] - tau * axis[0],
+        rel[1] - tau * axis[1],
+        rel[2] - tau * axis[2],
+    ];
+    let lateral = perpendicular[0]
+        .hypot(perpendicular[1])
+        .hypot(perpendicular[2]);
+    let radius = cone.ra + tau.clamp(0.0, 1.0) * (cone.rb - cone.ra);
+    overshoot.hypot((lateral - radius).max(0.0))
+}
+
+/// The junction hull records of the whole emission that name a frustum of
+/// `group` among their rings, in addition to the ones the group holds itself.
+/// The hull pass puts a hull record after the BRANCH it joins; the host it cuts
+/// into is drawn thinner or shorter beside it, so the host's drawn solid there
+/// is that record.
+fn with_foreign_hulls<'a>(
+    emission: &'a SweepEmission,
+    groups: &[Vec<&'a SupportPrimitive>],
+) -> Vec<Vec<&'a SupportPrimitive>> {
+    let hulls: Vec<&SupportPrimitive> = emission
+        .primitives
+        .iter()
+        .filter(|primitive| is_hull(primitive))
+        .collect();
+    groups
+        .iter()
+        .map(|group| {
+            let mut extended = group.clone();
+            for hull in &hulls {
+                let FrustumRingNormal::Junction(rings) = hull.ring_normal else {
+                    continue;
+                };
+                let names_a_frustum_of_the_group = rings
+                    .rings()
+                    .any(|ring| group.iter().any(|member| ring_is_an_end_of(ring, member)));
+                if names_a_frustum_of_the_group
+                    && !extended.iter().any(|held| std::ptr::eq(*held, *hull))
+                {
+                    extended.push(hull);
+                }
+            }
+            extended
+        })
+        .collect()
+}
+
+/// The floor a junction hull sets for the section at height `z`: the thinnest
+/// end ring of the hull that spans `z` (the widest such floor if several do).
+/// A hull between a thick member and a thin one tapers from one to the other;
+/// it is never thinner than the thinnest ring it joins, and a ledger slot it
+/// covers is graded against that, not against the thick member's ledger.
+///
+/// The hull spans the heights of its ring centres, plus `collar_mm` above the
+/// highest: the junction pass drops the host's load-step collar when it ends
+/// within one layer above the landing point (`JunctionRules::layer_height_mm`),
+/// so the slot of the ledger step just above the hull is the junction's too.
+fn hull_floor_at(group: &[&SupportPrimitive], z: f64, collar_mm: f64) -> Option<f64> {
+    group
+        .iter()
+        .filter_map(|primitive| {
+            let FrustumRingNormal::Junction(rings) = primitive.ring_normal else {
+                return None;
+            };
+            let low = rings
+                .rings()
+                .map(|r| ring_centre(r)[2])
+                .fold(f64::INFINITY, f64::min);
+            let high = rings
+                .rings()
+                .map(|r| ring_centre(r)[2])
+                .fold(f64::NEG_INFINITY, f64::max);
+            (z >= low && z <= high + collar_mm + 1.0e-9).then(|| {
+                rings
+                    .rings()
+                    .map(|r| r.radius_mm.get())
+                    .fold(f64::INFINITY, f64::min)
+            })
+        })
+        .reduce(f64::max)
+}
+
+/// The height below which a headed member's post begins: the centre of the
+/// head's joint sphere (the first joint sphere, after the ball, the link and
+/// the cone). Everything above it is the head, sized by the head rules (ball,
+/// link, cone, joint), not by the load ledger. `None` for a member without a
+/// head.
+fn head_floor_z(group: &[&SupportPrimitive]) -> Option<f64> {
+    if group.first()?.segment_kind != SupportSegmentKind::ContactSphere {
+        return None;
+    }
+    group
+        .iter()
+        .find(|primitive| primitive.segment_kind == SupportSegmentKind::JointSphere)
+        .map(|joint| 0.5 * (point(joint.start_mm)[2] + point(joint.end_mm)[2]))
+}
+
 /// The widest emitted section of one member at height `z`, or `None` when no
 /// primitive of the member spans `z`. Frusta are read as linear in their own
 /// axial parameter (the emitted record's own definition); a ball is read as a
@@ -161,15 +431,13 @@ pub(crate) fn drawn_radius_at(group: &[&SupportPrimitive], z: f64) -> Option<f64
                     (along.abs() < r0).then(|| (r0 * r0 - along * along).sqrt())
                 }
             }
-            _ => {
-                let (low, high) = (start[2].min(end[2]), start[2].max(end[2]));
-                if (start[2] - end[2]).abs() <= 0.0 || z < low || z > high {
-                    None
-                } else {
-                    let t = (start[2] - z) / (start[2] - end[2]);
-                    Some(r0 + t * (r1 - r0))
-                }
-            }
+            // A junction hull record is the convex hull of end rings, not a
+            // frustum from its `start` to its `end`.
+            _ if is_hull(primitive) => hull_cones(primitive, &[])
+                .iter()
+                .filter_map(|cone| frustum_radius_at(cone.a, cone.b, cone.ra, cone.rb, z))
+                .reduce(f64::max),
+            _ => frustum_radius_at(start, end, r0, r1, z),
         };
         if let Some(radius) = here {
             widest = Some(widest.map_or(radius, |best: f64| best.max(radius)));
@@ -184,10 +452,11 @@ fn axis_miss_at(group: &[&SupportPrimitive], point: [f64; 3]) -> Option<f64> {
     group
         .iter()
         .filter(|primitive| {
-            !matches!(
-                primitive.segment_kind,
-                SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere
-            )
+            !is_hull(primitive)
+                && !matches!(
+                    primitive.segment_kind,
+                    SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere
+                )
         })
         .filter_map(|primitive| {
             let start = self::point(primitive.start_mm);
@@ -260,7 +529,6 @@ fn base_on_drawn_axis(
     host: Option<&[&SupportPrimitive]>,
     base: [f64; 2],
 ) -> Result<f64, String> {
-    use plinth_support::FrustumRingNormal;
     // (end a, end b, widest radius) of every shaft frustum.
     let shaft = |g: &[&SupportPrimitive]| -> Vec<([f64; 3], [f64; 3], f64)> {
         g.iter()
@@ -361,6 +629,20 @@ struct Census {
     /// defect of the same field report, which no drawing of the profile can
     /// fix. Counted and printed, never graded as an inversion.
     detached: Vec<(u32, u32, f64)>,
+    /// Branches whose root stands off the trunk's drawn shaft sections but
+    /// within their own root radius of the trunk's drawn solid, because the
+    /// junction pass cut the trunk back there (child, parent, distance mm).
+    /// Joined, not graded for inversion.
+    joined_across_a_junction: Vec<(u32, u32, f64)>,
+    /// Ledger slots inside a head (ball, link, cone, joint): sized by the head
+    /// rules, not graded against the ledger.
+    slots_in_head: usize,
+    /// Ledger slots inside a member's drawn span with no emitted section at
+    /// all (member id, height above the plate).
+    gap_slots: Vec<(u32, f64)>,
+    /// Ledger slots inside a junction hull thinner than the ledger there:
+    /// graded against the thinnest ring the hull joins.
+    slots_in_junction_hull: usize,
     /// Brace tops graded against their host, and brace tops whose seat point
     /// is not on the host's drawn section at all (printed, not graded).
     brace_tops_graded: usize,
@@ -392,7 +674,12 @@ fn census(plan: &SweepPlan, emission: &SweepEmission) -> Census {
     // (fix/tip-trim, 2026-09-28: `footprint::followed_shifts`, zero where
     // nothing moved).
     let followed = plinth_sweep::footprint::followed_shifts(&plan.struts);
-    for ((strut, group), follow) in plan.struts.iter().zip(&groups).zip(&followed) {
+    // Each member with the junction hulls that cut into it (see
+    // `with_foreign_hulls`): the host's drawn solid is its own frusta and those.
+    let extended = with_foreign_hulls(emission, &groups);
+    for (index, ((strut, group), follow)) in
+        plan.struts.iter().zip(&groups).zip(&followed).enumerate()
+    {
         let base_cell = strut.base_cell();
         let base_shift = follow.base_mm.unwrap_or([0.0; 3]);
         let base = [
@@ -415,6 +702,7 @@ fn census(plan: &SweepPlan, emission: &SweepEmission) -> Census {
             .filter(|primitive| primitive.segment_kind == SupportSegmentKind::Member)
             .count();
         let lowest = root_point[2];
+        let head_floor = head_floor_z(group);
         let mut short_length = 0.0;
         let mut worst_ratio = f64::INFINITY;
         for (slot, required) in strut.radius_mm.iter().enumerate() {
@@ -423,10 +711,27 @@ fn census(plan: &SweepPlan, emission: &SweepEmission) -> Census {
                 out.slots_below_lowest_point += 1;
                 continue;
             }
-            out.slots_graded += 1;
-            let Some(drawn) = drawn_radius_at(group, z) else {
-                out.gaps_inside_member += 1;
+            // The head (ball, link, cone, joint) is sized by the head rules,
+            // not by the ledger: its link and cone are ruled thinner than the
+            // post below them.
+            if head_floor.is_some_and(|floor| z > floor) {
+                out.slots_in_head += 1;
                 continue;
+            }
+            out.slots_graded += 1;
+            let Some(drawn) = drawn_radius_at(&extended[index], z) else {
+                out.gaps_inside_member += 1;
+                out.gap_slots.push((strut.id, z - plate));
+                continue;
+            };
+            // Inside a junction hull the section tapers between the members
+            // that meet there; it is graded against the thinnest ring.
+            let required = match hull_floor_at(&extended[index], z, height) {
+                Some(floor) if floor < *required => {
+                    out.slots_in_junction_hull += 1;
+                    floor
+                }
+                _ => *required,
             };
             if drawn < required * (1.0 - RELATIVE_SLACK) {
                 short_length += height;
@@ -440,7 +745,7 @@ fn census(plan: &SweepPlan, emission: &SweepEmission) -> Census {
     }
     // THE JUNCTION CLAUSE: a trunk is at least as thick as each branch where
     // the branch lands on it.
-    for (strut, group) in plan.struts.iter().zip(&groups) {
+    for (index, (strut, group)) in plan.struts.iter().zip(&groups).enumerate() {
         let Landing::Strut { id, .. } = strut.landing else {
             continue;
         };
@@ -448,14 +753,37 @@ fn census(plan: &SweepPlan, emission: &SweepEmission) -> Census {
             continue;
         };
         let (root_point, child_root) = drawn_root(group).expect("every member has a shaft");
-        let trunk = drawn_radius_at(&groups[parent_index], root_point[2]).unwrap_or(0.0);
-        let miss = axis_miss_at(&groups[parent_index], root_point).unwrap_or(f64::INFINITY);
+        let trunk = drawn_radius_at(&extended[parent_index], root_point[2]).unwrap_or(0.0);
+        let miss = axis_miss_at(&extended[parent_index], root_point).unwrap_or(f64::INFINITY);
         if miss > trunk {
-            out.detached.push((strut.id, id, miss));
+            // The root is not inside a drawn shaft section of the trunk. The
+            // junction pass pulls the trunk's shaft back from the landing
+            // point and fills the gap with a hull, so the branch's end may
+            // stand on the trunk's axis in that gap or a hair past the hull's
+            // end ring. It is joined when the end disc (the branch's own root
+            // radius) reaches the trunk's drawn solid, shaft or hull;
+            // detached when it does not.
+            let reach = solid_cones(&extended[parent_index], group)
+                .iter()
+                .map(|cone| distance_to_cone(root_point, cone))
+                .fold(f64::INFINITY, f64::min);
+            if reach > child_root {
+                out.detached.push((strut.id, id, reach));
+            } else {
+                out.joined_across_a_junction.push((strut.id, id, reach));
+            }
             continue;
         }
         out.junctions_graded += 1;
-        if trunk < child_root * (1.0 - RELATIVE_SLACK) {
+        // Where the branch ends in a junction hull, the junction is the hull:
+        // it tapers between the members that meet and is never thinner than
+        // the thinnest ring, so the branch's root is graded against that.
+        let hull_floor = [&extended[index], &extended[parent_index]]
+            .into_iter()
+            .filter_map(|held| hull_floor_at(held, root_point[2], height))
+            .reduce(f64::max);
+        let branch = hull_floor.map_or(child_root, |floor| child_root.min(floor));
+        if trunk < branch * (1.0 - RELATIVE_SLACK) {
             out.inversions
                 .push((strut.id, id, root_point[2] - plate, child_root, trunk));
         }
@@ -469,8 +797,8 @@ fn census(plan: &SweepPlan, emission: &SweepEmission) -> Census {
             continue;
         };
         let (top_point, brace_top) = drawn_top(group).expect("every member has a shaft");
-        let trunk = drawn_radius_at(&groups[host_index], top_point[2]).unwrap_or(0.0);
-        let miss = axis_miss_at(&groups[host_index], top_point).unwrap_or(f64::INFINITY);
+        let trunk = drawn_radius_at(&extended[host_index], top_point[2]).unwrap_or(0.0);
+        let miss = axis_miss_at(&extended[host_index], top_point).unwrap_or(f64::INFINITY);
         if miss > trunk {
             out.brace_tops_off_host.push((strut.id, host_id, miss));
             continue;
@@ -528,6 +856,14 @@ fn grade_with(
         found.under_drawn_members.len(),
         found.inversions.len(),
         found.gaps_inside_member,
+    );
+    println!(
+        "{name}: {} slots in a head (not graded), {} slots in a junction hull (graded against \
+         its thinnest ring), {} branches joined across a junction hull {:?}",
+        found.slots_in_head,
+        found.slots_in_junction_hull,
+        found.joined_across_a_junction.len(),
+        found.joined_across_a_junction,
     );
     assert!(
         found.slots_graded > 0,
@@ -644,8 +980,9 @@ fn a_brace_raises_no_trunk_on_the_brace_pair() {
     );
     assert!(
         found.under_drawn_members.is_empty() && found.gaps_inside_member == 0,
-        "every member still covers its own ledger: {:?}",
-        found.under_drawn_members
+        "every member still covers its own ledger: {:?}; gap slots (member, z above plate): {:?}",
+        found.under_drawn_members,
+        found.gap_slots
     );
     assert!(
         found.brace_tops_graded > 0 && !found.inversions.is_empty(),
@@ -669,5 +1006,156 @@ fn emitted_profile_covers_the_ledger_on_the_tall_stilt_plate() {
         "make_tall_stilt_plate",
         &make_tall_stilt_plate().expect("the tall stilt plate fixture"),
         0,
+    );
+}
+
+/// **Sabotage: the junction-hull reading must not make the grading blind.**
+/// On the brace pair's real emission, (1) a brace whose shaft is drawn at half
+/// its ledger must be reported under-drawn, and (2) a branch whose trunk is
+/// moved off its root (every part of the trunk above its lowest frustum lifted
+/// 50 mm) must be reported detached. Both are controlled against the same
+/// emission unedited, which grades clean.
+#[test]
+fn a_thinned_brace_and_a_detached_branch_still_fail_on_the_brace_pair() {
+    let policy = crate::harness::at_path_fixture_seating(
+        SweepPolicy::from_registry().expect("the registry supplies every sweep number"),
+    );
+    let mesh = make_brace_pair().expect("the brace pair fixture");
+    let (plan, emission) = plan_of_with(&mesh, &policy, |_| {});
+    let clean = census(&plan, &emission);
+    assert!(
+        clean.under_drawn_members.is_empty()
+            && clean.detached.is_empty()
+            && clean.gaps_inside_member == 0,
+        "control: the unedited emission grades clean"
+    );
+
+    // (1) A brace drawn at half its ledger.
+    let brace_index = plan
+        .struts
+        .iter()
+        .position(|strut| strut.kind == StrutKind::Brace)
+        .expect("the brace pair places braces at this seating");
+    let brace_id = plan.struts[brace_index].id;
+    let mut thinned = emission.clone();
+    let target: Vec<*const SupportPrimitive> = members(&thinned)[brace_index]
+        .iter()
+        .map(|primitive| std::ptr::from_ref::<SupportPrimitive>(primitive))
+        .collect();
+    let mut halved = 0_usize;
+    for primitive in &mut thinned.primitives {
+        let ours = target
+            .iter()
+            .any(|held| std::ptr::eq(*held, std::ptr::from_ref::<SupportPrimitive>(primitive)));
+        let shaft = matches!(
+            primitive.segment_kind,
+            SupportSegmentKind::Member | SupportSegmentKind::ContactTaper
+        ) && !is_hull(primitive);
+        if ours && shaft {
+            primitive.start_radius_mm =
+                PositiveFinite::new(0.5 * primitive.start_radius_mm.get()).expect("positive");
+            primitive.end_radius_mm =
+                PositiveFinite::new(0.5 * primitive.end_radius_mm.get()).expect("positive");
+            halved += 1;
+        }
+    }
+    assert!(halved > 0, "anti-vacuity: the brace has a shaft to thin");
+    let found = census(&plan, &thinned);
+    assert!(
+        found.under_drawn_members.iter().any(|m| m.0 == brace_id),
+        "a brace drawn at half its ledger must be reported under-drawn: {:?}",
+        found.under_drawn_members
+    );
+
+    // (2) A trunk lifted off the root of a branch that lands on it.
+    let groups = members(&emission);
+    let extended = with_foreign_hulls(&emission, &groups);
+    let mut lifted_for = None;
+    for (child_index, strut) in plan.struts.iter().enumerate() {
+        let Landing::Strut { id, .. } = strut.landing else {
+            continue;
+        };
+        let Some(parent_index) = plan.struts.iter().position(|parent| parent.id == id) else {
+            continue;
+        };
+        let (root_point, child_root) = drawn_root(&groups[child_index]).expect("a shaft");
+        let parent_shaft: Vec<&&SupportPrimitive> = groups[parent_index]
+            .iter()
+            .filter(|primitive| {
+                !is_hull(primitive)
+                    && !matches!(
+                        primitive.segment_kind,
+                        SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere
+                    )
+            })
+            .collect();
+        let lowest_top = parent_shaft
+            .iter()
+            .min_by(|a, b| {
+                point(a.start_mm)[2]
+                    .min(point(a.end_mm)[2])
+                    .total_cmp(&point(b.start_mm)[2].min(point(b.end_mm)[2]))
+            })
+            .map(|bottom| point(bottom.start_mm)[2].max(point(bottom.end_mm)[2]));
+        if lowest_top.is_some_and(|top| root_point[2] > top + child_root + 1.0)
+            && extended[parent_index].len() > 1
+        {
+            lifted_for = Some((strut.id, id, parent_index, lowest_top.expect("some")));
+            break;
+        }
+    }
+    let (child_id, parent_id, parent_index, keep_below) =
+        lifted_for.expect("a branch lands on a trunk above the trunk's lowest frustum");
+    let mut detached_emission = emission.clone();
+    let lift_targets: Vec<*const SupportPrimitive> = members(&detached_emission)[parent_index]
+        .iter()
+        .map(|primitive| std::ptr::from_ref::<SupportPrimitive>(primitive))
+        .collect();
+    for primitive in &mut detached_emission.primitives {
+        let ours = lift_targets
+            .iter()
+            .any(|held| std::ptr::eq(*held, std::ptr::from_ref::<SupportPrimitive>(primitive)));
+        let low = point(primitive.start_mm)[2].min(point(primitive.end_mm)[2]);
+        if ours && is_hull(primitive) {
+            // The trunk's own junction hulls go with it, rings included.
+            let FrustumRingNormal::Junction(rings) = primitive.ring_normal else {
+                unreachable!("is_hull")
+            };
+            let lift =
+                |p: [Finite; 3]| [p[0], p[1], Finite::new(p[2].get() + 50.0).expect("finite")];
+            let lifted = rings.0.map(|ring| {
+                ring.map(|ring| HullRing {
+                    frustum_start_mm: lift(ring.frustum_start_mm),
+                    frustum_end_mm: lift(ring.frustum_end_mm),
+                    ..ring
+                })
+            });
+            primitive.ring_normal =
+                FrustumRingNormal::Junction(plinth_support::JunctionRings(lifted));
+            primitive.start_mm = lift(primitive.start_mm);
+            primitive.end_mm = lift(primitive.end_mm);
+        }
+        if ours
+            && !is_hull(primitive)
+            && !matches!(
+                primitive.segment_kind,
+                SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere
+            )
+            && low >= keep_below - 1.0e-9
+        {
+            for end in [&mut primitive.start_mm, &mut primitive.end_mm] {
+                end[2] = Finite::new(end[2].get() + 50.0).expect("finite");
+            }
+        }
+    }
+    let found = census(&plan, &detached_emission);
+    assert!(
+        found
+            .detached
+            .iter()
+            .any(|d| d.0 == child_id && d.1 == parent_id),
+        "branch {child_id} with its trunk {parent_id} lifted off its root must be reported \
+         detached: {:?}",
+        found.detached
     );
 }
