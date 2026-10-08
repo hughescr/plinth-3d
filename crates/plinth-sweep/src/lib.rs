@@ -1783,6 +1783,9 @@ pub fn run_sweep_with_holes(
     } else {
         None
     };
+    let band_faces = head_registry
+        .map(|(_, rule)| heads::band_face_ids(mesh, rule.max_normal_z))
+        .unwrap_or_default();
     let descent_clearance = policy.drawn_solid_descent.then(|| up_sweep::DescentClearance {
         layer_height_mm: height,
         plate_z_mm: plate_z,
@@ -1799,6 +1802,7 @@ pub fn run_sweep_with_holes(
             mesh,
             profiles,
             rule,
+            band_faces: &band_faces,
             // A head keeps the final gap from every stamped shaft and every
             // earlier head, the same clearance a member keeps from the model.
             separation_mm: policy.final_clearance_gap_mm,

@@ -751,6 +751,9 @@ pub struct HeadEnv<'a> {
     pub mesh: &'a plinth_mesh::Mesh,
     pub profiles: &'a plinth_core::TipContactProfiles,
     pub rule: HeadRule,
+    /// The ids of the model's faces inside the seat-face band
+    /// ([`crate::heads::band_face_ids`]): what a seat on a wall's edge reads.
+    pub band_faces: &'a [u32],
     /// The clearance a head keeps from stamped shafts and earlier heads.
     pub separation_mm: f64,
 }
@@ -1673,7 +1676,7 @@ enum HeadExit {
 fn facet_skip(facet: [f64; 3], rule: &HeadRule, tip_radius_lb_mm: f64) -> Option<HeadSkip> {
     let facet_cos = -facet[2];
     if facet_cos <= 0.0 {
-        return Some(HeadSkip::FacetFacesUp);
+        return Some(HeadSkip::FacetNotDownFacing);
     }
     if facet[2] >= rule.max_normal_z {
         return Some(HeadSkip::FacetSteeperThanBand);
@@ -1743,8 +1746,26 @@ fn plan_seat_head(
     else {
         return Err(HeadExit::Refused(HeadRefusal::NoSurface));
     };
-    // The search prune (see [`facet_skip`]).
-    if let Some(reason) = facet_skip(facet, &rule, tip_radius_lb_mm) {
+    // The search prune (see [`facet_skip`]). Where the nearest face of ANY
+    // slope is not a down-facing face (a seat on the edge between the curved
+    // face it supports and a vertical wall: Cylinder members 144 and 151), the
+    // seat reads the nearest face INSIDE the seat-face band instead.
+    let mut skip = facet_skip(facet, &rule, tip_radius_lb_mm);
+    let (face_point, face, facet) = if matches!(
+        skip,
+        Some(HeadSkip::FacetNotDownFacing | HeadSkip::FacetSteeperThanBand)
+    ) {
+        match crate::heads::nearest_band_face(surface, env.mesh, env.band_faces, axis_point) {
+            Some((point, band_face, normal)) => {
+                skip = facet_skip(normal, &rule, tip_radius_lb_mm);
+                (point, band_face, normal)
+            }
+            None => (face_point, face, facet),
+        }
+    } else {
+        (face_point, face, facet)
+    };
+    if let Some(reason) = skip {
         return Err(skipped(reason, axis_point, rule.plate_z_mm, Some(facet), None));
     }
     let ball = PlacementBall::from_profiles(axis_point, face, facet, tip_radius_lb_mm, env.profiles);
@@ -4549,8 +4570,8 @@ mod head_skip_tests {
     fn every_silent_facet_exit_names_a_reason_and_is_published() {
         let rule = rule();
         let tilt = |deg: f64| [deg.to_radians().sin(), 0.0, -deg.to_radians().cos()];
-        assert_eq!(facet_skip([0.0, 0.0, 1.0], &rule, 0.15), Some(HeadSkip::FacetFacesUp));
-        assert_eq!(facet_skip([1.0, 0.0, 0.0], &rule, 0.15), Some(HeadSkip::FacetFacesUp));
+        assert_eq!(facet_skip([0.0, 0.0, 1.0], &rule, 0.15), Some(HeadSkip::FacetNotDownFacing));
+        assert_eq!(facet_skip([1.0, 0.0, 0.0], &rule, 0.15), Some(HeadSkip::FacetNotDownFacing));
         assert_eq!(facet_skip(tilt(80.0), &rule, 0.15), Some(HeadSkip::FacetSteeperThanBand));
         assert_eq!(facet_skip(tilt(5.0), &rule, 0.15), Some(HeadSkip::FacetTooFlat));
         assert_eq!(facet_skip(tilt(45.0), &rule, 0.15), None);
@@ -4570,5 +4591,52 @@ mod head_skip_tests {
         state.publish(&mut report);
         assert_eq!(report.skips[&HeadSkip::FacetTooFlat], vec![7]);
         assert_eq!(report.skipped_seats, vec![seat]);
+    }
+
+    /// A seat whose axis point lies on the edge between a 45 degree
+    /// down-facing face and a vertical wall: the nearest face of any slope is
+    /// the wall (skipped as not down-facing), the nearest face in the band is
+    /// the slope, and the slope passes the prune, so the footprint query is
+    /// reached (Cylinder members 144 and 151).
+    #[test]
+    fn a_seat_on_a_walls_edge_reads_the_band_face_and_reaches_the_footprint_query() {
+        use crate::heads::{band_face_ids, nearest_band_face};
+        use geom_kernel::{NativeSurface, NativeSurfaceConfig};
+        let rule = rule();
+        let s = 45.0_f64.to_radians();
+        let (sin, cos) = (s.sin(), s.cos());
+        // Face 0: the slope, outward normal (sin, 0, -cos). Face 1: a wall in
+        // the plane x = 0, outward normal (-1, 0, 0).
+        let verts = vec![
+            [0.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [2.0 * cos, 0.0, 2.0 * sin],
+            [0.0, 0.0, -2.0],
+        ];
+        let tris = vec![[0, 1, 2], [0, 1, 3]];
+        let mesh = plinth_mesh::Mesh::new(verts, tris).expect("two triangles");
+        let surface = NativeSurface::from_indexed(
+            mesh.verts(),
+            mesh.tris(),
+            NativeSurfaceConfig { grid_pitch_mm: 0.25, max_grid_bytes: 64 << 20 },
+        )
+        .expect("a surface");
+        let seat = [-0.01, 0.5, -0.5];
+
+        let (_, _, faces, normals) = surface.project(&[seat]);
+        assert_eq!(faces[0], 1, "the wall is the nearest face of any slope");
+        assert_eq!(
+            facet_skip(normals[0], &rule, 0.15),
+            Some(HeadSkip::FacetNotDownFacing),
+            "read as it is today, the seat is skipped"
+        );
+
+        let band = band_face_ids(&mesh, rule.max_normal_z);
+        assert_eq!(band, vec![0], "only the slope is in the band");
+        let (_, face, normal) =
+            nearest_band_face(&surface, &mesh, &band, seat).expect("a band face");
+        assert_eq!(face, 0);
+        assert!((normal[0] - sin).abs() < 1e-9 && (normal[2] + cos).abs() < 1e-9, "{normal:?}");
+        assert_eq!(facet_skip(normal, &rule, 0.15), None, "the footprint query is asked");
     }
 }
