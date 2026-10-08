@@ -1063,7 +1063,9 @@ pub(crate) fn head_payload(strut: &crate::SweepStrut) -> Option<plinth_support::
         .map(|axis| (head.joint_mm[axis] - head.contact_mm[axis]).powi(2))
         .sum::<f64>()
         .sqrt();
-    let profile_knots_mm = crate::heads::head_polyline_mm(r_t, length, head.cos_lean_max);
+    // The law the head was SIZED with: the drawn post's (stored by the final
+    // re-size), so the polyline and the joint radius above are one law.
+    let profile_knots_mm = crate::heads::head_polyline_law_mm(r_t, length, head.law());
     Some(plinth_support::SweepHead {
         contact_mm: head.contact_mm,
         unit: head.unit,

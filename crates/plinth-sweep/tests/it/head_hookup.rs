@@ -147,6 +147,9 @@ fn fixture_planned(headed: bool, planned_tip_mm: Option<f64>) -> Fixture {
         cells: head_cells.clone(),
         ball_allowance_mm: 0.0,
         drawn_straight: false,
+        law_planned: plinth_sweep::heads::HeadLaw::envelope(c),
+        law_drawn: None,
+        ledger_radius_mm: Vec::new(),
     };
     let mut path = vec![joint_cell; k_joint + 1];
     path.extend_from_slice(&head_cells);
@@ -505,13 +508,14 @@ fn a_joint_the_placement_maximum_would_refuse_still_grows() {
         "the deficit is the whole growth: {}",
         emission.max_standoff_deficit_mm
     );
-    // The post under the joint is never narrower than the ball, and at least
-    // the section of a lever within 10 percent of |DK|.
+    // The post under the joint is sized for its OWN requirement (Craig's
+    // ruling A, v19 fix: the joint size is not carried down the column): at
+    // least the section of a lever within 10 percent of |DK|.
     let just_under = struts[0].radius_mm[slot(fx.k_joint) - 1];
     let lower_bound = plinth_sweep::heads::post_section_mm(r_t, r_t, 0.9 * fx.length_mm, c);
     assert!(
-        just_under >= lower_bound && just_under >= r_k - 1e-12,
-        "post {just_under} under the lever's section {lower_bound} or the ball {r_k}"
+        just_under >= lower_bound,
+        "post {just_under} under the lever's section {lower_bound}"
     );
 }
 
@@ -543,12 +547,12 @@ fn a_final_tip_below_the_planned_one_shrinks_the_joint_and_the_post_keeps_up() {
         "the joint slot holds the final-tip law {expected}, not the planned {}: {joint}",
         fx.planned_joint_mm
     );
+    // The post is sized for its own requirement and never narrows going down
+    // (ruling A: the joint's size is not carried down the column).
+    let post = &struts[0].radius_mm[..slot(fx.k_joint)];
     assert!(
-        struts[0].radius_mm[..slot(fx.k_joint)]
-            .iter()
-            .all(|&radius| radius >= expected - 1e-12),
-        "a post slot under K is narrower than the ball: {:?}",
-        &struts[0].radius_mm[..slot(fx.k_joint)]
+        post.windows(2).all(|pair| pair[0] >= pair[1] - 1e-12),
+        "the post narrows going down: {post:?}"
     );
     let payload = arms[0].head.as_ref().expect("a head");
     assert!((payload.joint_radius_mm - expected).abs() < 1e-9);

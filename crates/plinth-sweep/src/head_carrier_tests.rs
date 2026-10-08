@@ -82,6 +82,9 @@ fn head_of(strut: &SweepStrut, k_joint: usize, joint_cell: usize) -> Head {
         cells: vec![cell_u32(strut.cell); strut.k_top - k_joint],
         ball_allowance_mm: 0.0,
         drawn_straight: false,
+        law_planned: crate::heads::HeadLaw::envelope(0.5373),
+        law_drawn: None,
+        ledger_radius_mm: Vec::new(),
     }
 }
 
@@ -970,10 +973,12 @@ mod head_first_rulings {
     }
 
     /// (neck) A head whose stand-off clears the gap but whose neck, at the
-    /// FINAL tip radius's ball, is under the rasterisation allowance is given
-    /// up; the same head with a smaller ball is kept.
+    /// FINAL tip radius's ball, is under the rasterisation allowance is KEPT
+    /// (v19 fix, 2026-10-07: emit and warn, never refuse), with exactly one
+    /// warning naming the member, the stand-off, the ball height and the neck;
+    /// the same head with a smaller ball needs no warning.
     #[test]
-    fn a_head_whose_final_ball_leaves_no_neck_is_downgraded() {
+    fn a_grown_head_with_a_joint_slot_keeps_its_head_and_warns_once() {
         let grid = grid();
         // Along u: 0.5 mm * 0.75 / |u| = 0.3754 mm; r_K 0.05: stand-off 0.3254.
         let fresh = || {
@@ -983,13 +988,52 @@ mod head_first_rulings {
         };
         // Ball 0.1 mm high at tip 0.1 with factor 0.5: neck 0.2254 over 0.1.
         let mut kept = fresh();
-        assert!(downgrade_grown_heads(&mut kept, 0.1, |_| 0.5).is_empty(), "a neck of 0.2254 stands");
+        let quiet = downgrade_grown_heads(&mut kept, 0.1, |_| 0.5);
+        assert!(quiet.downgraded.is_empty() && quiet.kept_with_warning.is_empty(), "a neck of 0.2254 stands");
         assert!(!kept[0].head.as_ref().expect("a head").drawn_straight);
         // Ball 0.3 mm high at factor 1.5: neck 0.0254, under the allowance
-        // though the stand-off (0.3254) is above the gap (0.3).
-        let mut given_up = fresh();
-        assert_eq!(downgrade_grown_heads(&mut given_up, 0.1, |_| 1.5), vec![0]);
-        assert!(given_up[0].head.as_ref().expect("a head").drawn_straight);
+        // though the stand-off (0.3254) is above the gap (0.3). The head is
+        // kept, drawn as a head, and warned about exactly once.
+        let mut grown = fresh();
+        let before = grown[0].clone();
+        let loud = downgrade_grown_heads(&mut grown, 0.1, |_| 1.5);
+        assert!(loud.downgraded.is_empty(), "the head is kept: {loud:?}");
+        assert_eq!(loud.kept_with_warning.len(), 1, "exactly one warning: {loud:?}");
+        let warning = loud.kept_with_warning[0];
+        assert_eq!(warning.member, 0);
+        assert!((warning.ball_height_mm - 0.3).abs() < 1e-12, "{warning:?}");
+        assert!((warning.neck_mm - (warning.standoff_mm - 0.3)).abs() < 1e-12, "{warning:?}");
+        assert!((warning.neck_mm - 0.0254).abs() < 1e-3, "{warning:?}");
+        assert!(!grown[0].head.as_ref().expect("a head").drawn_straight);
+        assert_eq!(grown[0], before, "a kept head changes nothing in the strut");
+    }
+
+    /// (v19 fix) A head the ledger cannot draw (no joint slot) is the ONE head
+    /// given up, and EVERY slot of the strut ends equal to the area-law ledger
+    /// saved before the head minimum: no joint-sized post is left under the
+    /// straight tip.
+    #[test]
+    fn a_downgraded_strut_with_no_joint_slot_ends_with_every_slot_on_its_ledger() {
+        let grid = grid();
+        let mut strut = headed(&grid, 0, 150, 150, 200, 190, 0.05);
+        let ledger: Vec<f64> = (0..strut.radius_mm.len())
+            .map(|slot| 0.05 + 1e-4 * f64::from(u32::try_from(slot).expect("small")))
+            .collect();
+        // The sized (head-minimum) field: joint-sized all down the column.
+        strut.radius_mm = vec![0.965; ledger.len()];
+        {
+            let head = strut.head.as_mut().expect("a head");
+            head.ledger_radius_mm.clone_from(&ledger);
+            // The joint stands under the strut's lowest layer: no joint slot.
+            head.k_joint = 0;
+        }
+        strut.k_bottom = 5;
+        let mut struts = vec![strut];
+        let outcome = downgrade_grown_heads(&mut struts, 0.0, |_| 0.0);
+        assert_eq!(outcome.downgraded, vec![0], "{outcome:?}");
+        assert!(outcome.kept_with_warning.is_empty());
+        assert!(struts[0].head.as_ref().is_some_and(|head| head.drawn_straight));
+        assert_eq!(struts[0].radius_mm, ledger, "every slot is the ledger's");
     }
 
     /// (follow) The members landed on a downgraded post stand on its OLD axis
@@ -1049,10 +1093,11 @@ mod head_first_rulings {
         assert!(crate::adapter::downgraded_line_offset(None, &grid, 0.0, H, &strut).is_none());
     }
 
-    /// (b) A joint whose final stand-off is under `g` goes back to the straight
-    /// tip; one that stands `g` off, and a straight arm, are untouched.
+    /// (b) A joint whose final stand-off is under `g` is KEPT and warned about
+    /// (emit and warn); one that stands `g` off, and a straight arm, are
+    /// untouched and silent.
     #[test]
-    fn a_head_the_final_sizing_grew_across_the_clearance_is_downgraded() {
+    fn a_head_the_final_sizing_grew_across_the_clearance_is_kept_and_warned() {
         let grid = grid();
         // |DK| along u = 0.5 mm * 0.75 = 0.375 mm: a joint of 0.05 stands 0.325
         // off (kept); a joint of 0.2204 stands 0.1546 off (grown).
@@ -1072,24 +1117,16 @@ mod head_first_rulings {
         struts[1].radius_mm[190] = 0.2204;
         let before = struts[0].clone();
         let straight_before = struts[2].clone();
-        let path_before = struts[1].path.clone();
-        let downgraded = downgrade_grown_heads(&mut struts, 0.0, |_| 0.0);
-        assert_eq!(downgraded, vec![1], "only the grown joint is downgraded");
+        let after_arm = struts[1].clone();
+        let outcome = downgrade_grown_heads(&mut struts, 0.0, |_| 0.0);
+        assert!(outcome.downgraded.is_empty(), "no head is given up: {outcome:?}");
+        assert_eq!(outcome.kept_with_warning.len(), 1, "one warning, for the grown joint");
+        assert_eq!(outcome.kept_with_warning[0].member, 1);
+        assert!(outcome.kept_with_warning[0].standoff_mm < 0.3, "{outcome:?}");
         assert_eq!(struts[0], before, "a joint that stands the gap off is untouched");
         assert_eq!(struts[2], straight_before, "a straight arm is untouched");
-        let arm = &struts[1];
-        assert!(
-            arm.head.as_ref().is_some_and(|head| head.drawn_straight),
-            "the head is drawn straight (and kept, with its route)"
-        );
-        assert_eq!(arm.landing, Landing::Plate, "the post keeps its landing");
-        assert_eq!(arm.k_bottom, 0);
-        assert!(
-            arm.radius_mm[190..].iter().all(|&radius| (radius - 0.1).abs() < 1e-12),
-            "above the post the head minimum falls back to the tip's own radius: {:?}",
-            &arm.radius_mm[188..]
-        );
-        assert_eq!(arm.path, path_before, "the post keeps its route: the path is not rewritten");
+        assert_eq!(struts[1], after_arm, "the warned head and its sizes are untouched");
+        assert!(struts[1].head.as_ref().is_some_and(|head| !head.drawn_straight));
     }
 
     /// (b) A leaned post keeps its base, its landing and its path (the members
@@ -1105,11 +1142,12 @@ mod head_first_rulings {
         let base = post[0] as usize;
         let joint_cell = post[190] as usize;
         give_head(&mut strut, 190, joint_cell, Some(post));
-        *strut.radius_mm.last_mut().expect("a ledger") = 0.1;
-        strut.radius_mm[190] = 0.2204;
+        // The ledger stops under the joint: the head cannot be drawn.
+        strut.radius_mm.truncate(190);
+        strut.head.as_mut().expect("a head").ledger_radius_mm = vec![0.05; 190];
         let mut struts = vec![strut];
         let path_before = struts[0].path.clone();
-        assert_eq!(downgrade_grown_heads(&mut struts, 0.0, |_| 0.0), vec![0]);
+        assert_eq!(downgrade_grown_heads(&mut struts, 0.0, |_| 0.0).downgraded, vec![0]);
         let arm = &struts[0];
         assert!(arm.head.as_ref().is_some_and(|head| head.drawn_straight));
         assert_eq!(arm.base_cell(), base, "the base stays where the post landed");
@@ -1117,5 +1155,187 @@ mod head_first_rulings {
         assert!(arm.is_leaned());
         let check = check_landings(&struts, H);
         assert!(check.heads_not_intact.is_empty(), "the route is untouched: {check:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// v19 fix, lane L1 (2026-10-07): heads, joints and posts are sized for the
+// post they are DRAWN with, not for the 57.5 degree worst case.
+// ---------------------------------------------------------------------------
+
+mod actual_lean_sizing {
+    use super::*;
+    use crate::down_sweep::{resize_heads_to_drawn_posts, SizingPolicy};
+    use crate::heads::final_joint_radius_mm;
+
+    const K_TOP: usize = 108;
+    const K_JOINT: usize = 100;
+    const TIP: f64 = 0.1;
+    const COS_MAX: f64 = 0.5373;
+
+    fn sizing() -> SizingPolicy {
+        SizingPolicy {
+            x_allowed: 12.0,
+            tip_radius_min_mm: 0.05,
+            tip_radius_max_mm: 1.0,
+            owner_growth_ceiling_mm: 0.4,
+            alpha: 1.0,
+            lamina_reach_mm: 2.13,
+            straight_reach: true,
+            tip_column_roots: true,
+            per_event: true,
+            handed_column_ledger: true,
+            layer_height_mm: H,
+            plate_z_mm: 0.0,
+        }
+    }
+
+    /// A head whose axis `u = (0, 10, -1)/sqrt 101` is nearly horizontal, with
+    /// its joint `K` exactly over a cell centre, standing over a post that
+    /// runs to `run_cols` columns away along x (0 = vertical). The ledger has
+    /// one slot per layer, 0.06 mm at the tip's neighbours and `TIP` at the
+    /// contact, and was saved by hand as the down-sweep would.
+    fn field(run_cols: usize) -> (Grid, Vec<SweepStrut>) {
+        let grid = grid();
+        let (row, col) = (150, 270);
+        let joint_cell = grid.index(row, col);
+        let z = |layer: usize| f64::from(u32::try_from(layer).expect("small")) * H;
+        let k = [grid.center_x_mm(col), grid.center_y_mm(row), z(K_JOINT)];
+        // `L u = (0, 0.8, -0.08)`: `|DK|` = 0.8 * sqrt(101) / 10.
+        let d = [k[0], k[1] - 0.8, k[2] + 0.08];
+        let mut strut = straight(&grid, 0, row, col, K_TOP, 0.06);
+        // The seat cell is the contact's own, 16 rows from the joint's.
+        strut.cell = grid.index(row - 16, col);
+        strut.center_mm = [d[0], d[1]];
+        strut.radius_mm.truncate(K_TOP);
+        *strut.radius_mm.last_mut().expect("a ledger") = TIP;
+        let post: Vec<u32> = (0..=K_JOINT)
+            .map(|slot| cell_u32(grid.index(row, col - run_cols + (run_cols * slot) / K_JOINT)))
+            .collect();
+        give_head(&mut strut, K_JOINT, joint_cell, Some(post));
+        {
+            let head = strut.head.as_mut().expect("a head");
+            let unit = [0.0, 10.0 / 101.0_f64.sqrt(), -1.0 / 101.0_f64.sqrt()];
+            head.unit = unit;
+            head.contact_mm = d;
+            head.joint_mm = k;
+            head.ledger_radius_mm = strut.radius_mm.clone();
+        }
+        (grid, vec![strut])
+    }
+
+    fn joint_of(strut: &SweepStrut) -> f64 {
+        strut.radius_mm[K_JOINT]
+    }
+
+    fn length_of(strut: &SweepStrut) -> f64 {
+        let head = strut.head.as_ref().expect("a head");
+        (0..3).map(|axis| (head.joint_mm[axis] - head.contact_mm[axis]).powi(2)).sum::<f64>().sqrt()
+    }
+
+    /// A vertical post below a near-horizontal head: the exact joint is far
+    /// under the 57.5 degree envelope's. A post drawn at 68 degrees (past the
+    /// lean law's maximum, no clamp) side-loads the same head and is ABOVE the
+    /// envelope. The post under `K` starts from its own section, not the
+    /// joint's.
+    #[test]
+    fn the_resized_joint_follows_the_drawn_post_below_and_above_the_envelope() {
+        let (grid, mut vertical) = field(0);
+        let envelope = final_joint_radius_mm(TIP, length_of(&vertical[0]), COS_MAX);
+        assert_eq!(resize_heads_to_drawn_posts(&grid, &mut vertical, sizing()), 1);
+        let law = vertical[0].head.as_ref().expect("a head").law_drawn.expect("a drawn law");
+        assert!((law.cos_lean - 1.0).abs() < 1e-9, "a vertical post: {law:?}");
+        let exact = joint_of(&vertical[0]);
+        assert!(exact < 0.9 * envelope, "vertical post: {exact} against the envelope {envelope}");
+        // The post below K starts from its OWN section at the full lever
+        // |DK| over its ledger (Craig's ruling A), not from the joint's radius.
+        let own = crate::heads::post_section_law_mm(0.06, TIP, length_of(&vertical[0]), law);
+        let post_top = vertical[0].radius_mm[K_JOINT - 1];
+        assert!((post_top - own).abs() < 1e-12, "post under K {post_top} against its own {own}");
+        assert!((post_top - exact).abs() > 1e-6, "not the joint's radius {exact}");
+        // 12.5 mm of run over 5.0 mm of height = 250 columns: 68.2 degrees
+        // from K to the plate, but the file's plate post ends at its BOSS TOP
+        // (about 1.2 mm up), a steeper line of about 73 degrees. The law reads
+        // the drawn shaft, not the chord (review finding, 2026-10-08).
+        let (grid, mut leaning) = field(250);
+        assert_eq!(resize_heads_to_drawn_posts(&grid, &mut leaning, sizing()), 1);
+        let law = leaning[0].head.as_ref().expect("a head").law_drawn.expect("a drawn law");
+        let lean_deg = law.cos_lean.acos().to_degrees();
+        assert!(lean_deg > 72.0 && lean_deg < 74.5, "the drawn lean {lean_deg}");
+        assert!(
+            joint_of(&leaning[0]) > envelope,
+            "a 68 degree post grows the joint past the envelope: {} against {envelope}",
+            joint_of(&leaning[0])
+        );
+        // The head slots follow the same law, and the contact stays the area-law tip.
+        assert_eq!(leaning[0].radius_mm[K_TOP - 1], TIP);
+        // A second pass with the same input is idempotent (rebuilt from the ledger).
+        let before = leaning[0].radius_mm.clone();
+        resize_heads_to_drawn_posts(&grid, &mut leaning, sizing());
+        assert_eq!(leaning[0].radius_mm, before);
+    }
+    /// **A host whose seat moves tilts the post of a headed child that lands
+    /// on it** (review finding, 2026-10-07). The first sizing runs before the
+    /// footprint rule creates that move, so it sized the joint and post for a
+    /// vertical post; the adapter then follows the host at the post's base
+    /// while `K` stays frozen. `size_heads_for_final_posts`, run after the
+    /// moves, must read the post the file draws: the stored law is that of the
+    /// line from `K` to the host-shifted base, and the sections grow with it.
+    /// SABOTAGE: leave the body of `size_heads_for_final_posts` empty (or drop
+    /// its call after `footprint::apply`) and the child keeps the vertical
+    /// post's sections, so every assertion below goes red.
+    #[test]
+    fn a_host_move_after_the_first_sizing_resizes_the_headed_child_for_its_final_post() {
+        const LANDING: usize = 40;
+        let (grid, mut one) = field(0);
+        let mut child = one.remove(0);
+        let joint_cell = grid.index(150, 270);
+        child.id = 1;
+        child.landing = Landing::Strut { id: 0, layer: LANDING };
+        child.k_bottom = LANDING;
+        child.radius_mm = child.radius_mm.split_off(LANDING);
+        child.carried_mm2 = vec![0.0; child.radius_mm.len()];
+        child.set_post(child.landing, LANDING, vec![cell_u32(joint_cell); K_JOINT - LANDING + 1]);
+        child.head.as_mut().expect("a head").ledger_radius_mm = child.radius_mm.clone();
+        assert!(child.head_intact(), "the fixture's head must be intact");
+        let host = straight(&grid, 0, 150, 270, K_TOP, 0.3);
+        let mut struts = vec![host, child];
+        // The first sizing: nothing has moved, the post is vertical.
+        assert_eq!(resize_heads_to_drawn_posts(&grid, &mut struts, sizing()), 1);
+        let first = struts[1].radius_mm.clone();
+        let first_lean = struts[1].head.as_ref().expect("a head").law_drawn.expect("a law").cos_lean;
+        assert!((first_lean - 1.0).abs() < 1e-9, "a vertical post: {first_lean}");
+        // The footprint rule moves the host's seat by 4.05 mm along x; its
+        // axis moves linearly from nothing at its base (layer 0) to the slide
+        // at its seat (layer 108), so the child's base, on the host at layer
+        // 40, follows by 1.5 mm. The post then runs 3.0 mm down, 1.5 mm across.
+        let slide = 4.05;
+        struts[0].seat_face = SeatFace {
+            point_mm: None,
+            shift_mm: [slide, 0.0, 0.0],
+            footprint: crate::Footprint::MovedOntoFace,
+        };
+        let mut heads = crate::heads::HeadsOutcome::default();
+        crate::size_heads_for_final_posts(&grid, &mut struts, sizing(), 0.1, |_| 0.5, &mut heads);
+        assert_eq!(heads.resized_after_moves, 1, "the child was sized again");
+        let law = struts[1].head.as_ref().expect("a head").law_drawn.expect("a law");
+        let across = slide * LANDING as f64 / K_TOP as f64;
+        let down = (K_JOINT - LANDING) as f64 * H;
+        let expected = down / across.hypot(down);
+        assert!(
+            (law.cos_lean - expected).abs() < 1e-6,
+            "the law reads the final post: {} against {expected}",
+            law.cos_lean
+        );
+        assert!(
+            struts[1].radius_mm[K_JOINT - LANDING] > first[K_JOINT - LANDING] + 1e-6,
+            "the joint grew for the tilted post: {} against {}",
+            struts[1].radius_mm[K_JOINT - LANDING],
+            first[K_JOINT - LANDING]
+        );
+        // A second pass with the moves settled changes nothing.
+        let settled = struts[1].radius_mm.clone();
+        crate::size_heads_for_final_posts(&grid, &mut struts, sizing(), 0.1, |_| 0.5, &mut heads);
+        assert_eq!(struts[1].radius_mm, settled);
     }
 }
