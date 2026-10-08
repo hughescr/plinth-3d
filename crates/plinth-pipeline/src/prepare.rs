@@ -2540,6 +2540,39 @@ fn sweep_and_emit(
              shaft segment in this file is UNTRIMMED"
         );
     }
+    // THE TRIM NEVER SILENTLY HIDES AN INTRUSION (heads v19 fixes, 2026-10-08):
+    // every Member, joint and junction-hull record the model solid removed more
+    // than one pixel-cube of resin from is named.
+    let hulls = supported
+        .primitives()
+        .iter()
+        .filter(|primitive| {
+            matches!(
+                primitive.ring_normal,
+                plinth_support::FrustumRingNormal::Junction(_)
+            )
+        })
+        .count();
+    println!(
+        "[sweep {model}] junction hulls in the file: {hulls}; model-side cuts of Member/joint/hull \
+         records above one pixel-cube ({} um3): {} of {} cut",
+        trim.pixel_cube_micro_mm3,
+        trim.intrusions().count(),
+        trim.member_cuts.len(),
+    );
+    for cut in trim.intrusions() {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a cut volume in millionths of a mm3 is far inside f64's exact range"
+        )]
+        let removed_mm3 = cut.removed_micro_mm3 as f64 / 1.0e6;
+        println!(
+            "[sweep {model}] WARNING seat trim: {} record {} has {removed_mm3:.6} mm3 inside the \
+             model (above one pixel-cube; a member is cut to the model, a joint or hull is \
+             measured and left whole)",
+            cut.kind, cut.record,
+        );
+    }
 
     Ok(Some(ChainOutcome {
         model: model.clone(),
@@ -3683,7 +3716,8 @@ fn print_sweep_disclosure(
             .join(", ");
         println!(
             "[sweep {model}] heads: {} built at placement on steep faces, {straight} kept a \
-             straight tip ({reasons}); drawn {}; visible neck (bare stalk, ball to joint) mm {}; \
+             straight tip ({reasons}); drawn {}; neck: drawn link thinner than the contact ball, \
+             measured from drawn frusta, mm min/median/max {} ({} heads with no link); \
              stand-off mm {} (gap {final_gap_mm}); \
              joints grown {} (largest stand-off deficit {:.4} mm); downgraded after sizing: {} \
              ({} joins on their posts followed onto the straight line drawn, largest shift {:.3} mm); \
@@ -3693,6 +3727,7 @@ fn print_sweep_disclosure(
             heads.built,
             emission.tips_headed,
             spread(&emission.head_stalk_mm),
+            emission.head_stalk_mm.iter().filter(|link| **link <= 0.0).count(),
             spread(&emission.head_standoff_mm),
             emission.joints_grown,
             emission.max_standoff_deficit_mm,

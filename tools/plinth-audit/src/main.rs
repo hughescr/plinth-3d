@@ -48,8 +48,90 @@ EXIT CODE: 0 only when every model passes all ten gating invariants. That is
            pass still cannot see.
 ";
 
+const GEOMETRY_USAGE: &str = "\
+plinth-audit geometry -- head, intrusion, junction and contact-angle numbers
+measured from the emitted bytes alone.
+
+USAGE:
+  plinth-audit geometry <file.chitubox>... [--json] [--threads <n>]
+
+  One file: the full summary (or, with --json, its document). Several files:
+  each summary, then one baseline table row per file (with --json, an array).
+  Exit code 0 when every file was read; it grades nothing.
+";
+
+/// `plinth-audit geometry ...`: no invariant verdict, only measurements.
+fn geometry_main(args: &[String]) -> ! {
+    use plinth_audit::geometry::{report, Params};
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        print!("{GEOMETRY_USAGE}");
+        std::process::exit(0);
+    }
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut want_json = false;
+    let mut params = Params::default();
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => want_json = true,
+            "--threads" => {
+                i += 1;
+                params.threads = args
+                    .get(i)
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .filter(|&n| n > 0)
+                    .unwrap_or_else(|| {
+                        eprintln!("plinth-audit geometry: --threads wants a positive integer");
+                        std::process::exit(2);
+                    });
+            }
+            other if other.starts_with("--") => {
+                eprintln!("plinth-audit geometry: unknown option {other:?}\n\n{GEOMETRY_USAGE}");
+                std::process::exit(2);
+            }
+            other => files.push(PathBuf::from(other)),
+        }
+        i += 1;
+    }
+    if files.is_empty() {
+        eprintln!("plinth-audit geometry: no input file\n\n{GEOMETRY_USAGE}");
+        std::process::exit(2);
+    }
+    let mut results = Vec::new();
+    for f in &files {
+        match report::analyse_file(f, params) {
+            Ok(r) => results.push(r),
+            Err(e) => {
+                eprintln!("plinth-audit geometry: {e}");
+                std::process::exit(2);
+            }
+        }
+    }
+    if want_json {
+        let mut docs: Vec<_> = results.iter().map(report::FileGeometry::to_json).collect();
+        let doc = if docs.len() == 1 {
+            docs.remove(0)
+        } else {
+            plinth_audit::json::Json::Arr(docs)
+        };
+        print!("{}", doc.to_pretty());
+    } else {
+        for r in &results {
+            print!("{}", r.summary());
+            println!();
+        }
+        if results.len() > 1 {
+            print!("{}", report::table(&results));
+        }
+    }
+    std::process::exit(0);
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().is_some_and(|a| a == "geometry") {
+        geometry_main(&argv[1..]);
+    }
     if argv.is_empty() || argv.iter().any(|a| a == "-h" || a == "--help") {
         print!("{USAGE}");
         std::process::exit(if argv.is_empty() { 2 } else { 0 });

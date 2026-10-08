@@ -46,6 +46,7 @@
 //! | [`vec3`] | vector algebra, point-triangle distance, ray/triangle, segment/segment |
 //! | [`mesh`] | welding, closure, winding, components, spatial index, ray parity, nearest surface |
 //! | [`primitives`] | analytic support solids, exact chords, and mesh-versus-record verification |
+//! | [`geometry`] | the `geometry` subcommand: heads, intrusion, junction topology and contact angles, measured from the emitted file |
 //! | [`graph`] | support-graph reconstruction from endpoint coincidence, with ambiguity represented |
 //! | [`seat`] | the shared seat reconstruction I1, I2, I3, I5 and I6 all read |
 //! | [`raster`] | the run-length printer-grid rasteriser, full containment |
@@ -68,6 +69,7 @@ pub mod check;
 pub mod checks;
 pub mod consts;
 pub mod context;
+pub mod geometry;
 pub mod graph;
 pub mod json;
 pub mod mesh;

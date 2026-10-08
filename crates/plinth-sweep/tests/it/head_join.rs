@@ -412,6 +412,8 @@ fn grade(plan: &SweepPlan, ids: &[u32], mesh: &Mesh) -> Vec<Trunk> {
                         .expect("an axis")
                 }
                 FrustumRingNormal::PlateZ => [0.0, 0.0, 1.0],
+                // A junction hull is not a frustum (L2, 2026-10-08).
+                FrustumRingNormal::Junction(_) => continue,
             };
             for station in 0..STATIONS {
                 #[expect(clippy::cast_precision_loss, reason = "a station index below 33")]

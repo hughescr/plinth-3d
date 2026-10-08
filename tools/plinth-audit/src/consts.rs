@@ -206,6 +206,14 @@ pub const DEFAULT_CONTACT_DEPTH_MM: f64 = 0.100;
 /// is loosening a ruling rather than configuring an instrument.
 pub const DEFAULT_CONTACT_DEPTH_MAX_MM: f64 = 0.300;
 
+/// `g`: the registered FINAL clearance gap, 0.300 mm of true surface-to-surface
+/// clearance between a support and the model (Craig ruling 2026-08-22,
+/// `FINAL_CLEARANCE_GAP_MM`, `plinth-core/src/constants/evidence.rs`). The
+/// `geometry` subcommand reads it for the skim law `(g + r_t)(sec x - 1) >
+/// layer + pixel`. The file carries no gap field, so the registry is the only
+/// source.
+pub const FINAL_CLEARANCE_GAP_MM: f64 = 0.300;
+
 /// Ball factor `f`. **Placeholder**, `BALL_FACTOR_STUB`.
 pub const BALL_FACTOR_STUB: f64 = 1.5;
 /// `X_ALLOWED = floor(25.00 / 2) = 12`. Derived: the arm snaps at
