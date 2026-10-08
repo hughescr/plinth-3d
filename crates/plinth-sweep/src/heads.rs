@@ -1584,18 +1584,8 @@ pub fn check_head(
 ) -> Result<(), HeadRefusal> {
     let (d, k, r_k) = (head.contact_mm, head.joint_mm, head.joint_radius_mm);
     // (a) The hidden-cavity map speaks the raster frame: the plate at z = 0.
-    // A seat in a hidden cavity is exempt (Craig 2026-10-08): the test is made on
-    // the head without its link, as before the link existed. With the link the
-    // joint stands `L` further out and the whole solid could poke through the
-    // cavity wall, which gave heads to cavity seats (Cylinder, 20 members on
-    // one such head's post).
     let raster = |p: [f64; 3]| [p[0], p[1], p[2] - ctx.plate_z_mm];
-    let k_unlinked = vec3::sub(k, vec3::scale(head.unit, head.link_mm));
-    if ctx
-        .history
-        .hidden
-        .segment_hidden(raster(d), raster(k_unlinked), r_k)
-    {
+    if ctx.history.hidden.segment_hidden(raster(d), raster(k), r_k) {
         return Err(HeadRefusal::HiddenCavity);
     }
     // (b)

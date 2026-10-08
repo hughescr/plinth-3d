@@ -2190,9 +2190,15 @@ fn merge_short_spans(mut spans: Vec<DrawnSpan>, min_len: f64) -> Vec<DrawnSpan> 
             if dip > needed * PROFILE_RELATIVE_SLACK {
                 let first = upper_index == 0;
                 let last = upper_index + 2 == spans.len();
+                // A short span at the end that must not move has almost no lever:
+                // turning the line about that end by `total / short` raises the
+                // other end by thousands of times the dip (a 0.4 micron span at
+                // the top of a 1.4 mm post drew a 41 mm radius, Cylinder with the
+                // link, 2026-10-08). Under one `min_len` the pair is raised by
+                // the dip instead, both ends together.
                 if (first && last)
-                    || (first && above_junction <= 0.0)
-                    || (!first && below_junction <= 0.0)
+                    || (first && above_junction < min_len)
+                    || (!first && below_junction < min_len)
                 {
                     top_r += dip;
                     bottom_r += dip;
@@ -5009,6 +5015,41 @@ mod drawn_link_tests {
         assert!(
             (drawn_link_mm(&thin, BALL) - (2.0 - (BALL * BALL - 0.0025_f64).sqrt())).abs() < 1e-12
         );
+    }
+}
+
+#[cfg(test)]
+mod merged_short_span_tests {
+    /// A post whose top stands a micron over a slot boundary (the Cylinder's
+    /// arm 113 once the link moved its joint, 2026-10-08): the top span is
+    /// 0.4 micron long, and turning the merged line about the top end by
+    /// `total / short` drew a 41.7 mm radius (55 000 mm3 of resin on a 1 000 mm3
+    /// model). No drawn radius may exceed the widest ledger radius.
+    #[test]
+    fn a_micron_span_at_the_top_of_a_post_is_merged_without_a_lever() {
+        let mut profile = vec![0.857_588_436_496_121_9; 2];
+        profile.extend(std::iter::repeat_n(0.797_348_443_985_570_3, 26));
+        profile.push(0.783_887_290_440_891_4);
+        let spans = super::drawn_spans(
+            &profile,
+            -1.0,
+            0.450_000_000_000_000_2,
+            0.400_427_588_615_468_7,
+            -1.0,
+            0.783_887_290_440_891_4,
+            0.857_588_436_496_121_9,
+        );
+        let widest = 0.857_588_436_496_121_9 * 1.05;
+        for span in &spans {
+            assert!(
+                span.top_radius_mm <= widest && span.bottom_radius_mm <= widest,
+                "a radius over the widest ledger value: {spans:?}"
+            );
+        }
+        // The drawn section is never under the ledger: the top is at least the
+        // thin radius, the bottom reaches the root.
+        assert!(spans[0].top_radius_mm >= 0.783_887_290_440_891_4 - 1e-12);
+        assert!((spans[spans.len() - 1].bottom_radius_mm - 0.857_588_436_496_121_9).abs() < 1e-9);
     }
 }
 

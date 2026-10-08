@@ -159,11 +159,13 @@ fn grade(name: &str, mesh: &Mesh) -> (usize, usize) {
     assert!(heads.built > 0, "{name}: no head was built, so nothing is graded");
     // A head the final sizing grew across the clearance went back to the
     // straight tip (orchestrator ruling 2026-10-06): built = kept + downgraded.
+    // A head planned at a seat whose post then arrives along the face normal is
+    // drawn straight too (the collinear drop, v19 fix 2026-10-08).
     let downgraded = &heads.downgraded_after_sizing;
     assert_eq!(
-        headed.len() + downgraded.len(),
+        headed.len() + downgraded.len() + heads.collinear_dropped.len(),
         heads.built,
-        "{name}: every head built is kept or downgraded after the sizing"
+        "{name}: every head built is kept, dropped as collinear or downgraded after the sizing"
     );
     for &id in downgraded {
         assert!(
