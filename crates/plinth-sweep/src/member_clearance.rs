@@ -1731,12 +1731,16 @@ mod tests {
     /// inside its 0.8 mm section: the flat-ended solids overlap by
     /// `0.5818 − 0.8 − 0.1 = −0.3182` mm. Hand-derived.
     ///
-    /// The lowering draws this profile as two spans, 0.8 mm below `z = 8` and
-    /// 0.1 mm above. The walk reads each span round-ended about its axis (a
-    /// capsule, which holds the frustum): the 0.8 mm span's top end `(0,0,8)`
-    /// is `(0.6 − 0.1·s)/√(1 + s²) = 0.5724` mm from the candidate's line,
-    /// `s = 0.2/1.1`, so the walk reports `−0.3276` mm, beyond the true
-    /// `−0.3182`: the capsule errs only toward refusal.
+    /// The lowering draws this profile as three spans: 0.8 mm below `z = 8`,
+    /// then the bare step as a cone ABOVE it (junction round, 2026-10-08: no
+    /// flat shoulder) from 0.8 mm at `z = 8` to 0.1 mm at
+    /// `z_c = 8 + 0.7·tan(32.5°) = 8.4459` (the registered lean law's
+    /// saturated slope, `1/tan(45° − 25°/2)` mm of radius per mm), then 0.1 mm
+    /// to the tip. The walk reads each span round-ended about its axis at its
+    /// wider end's radius (a capsule, which holds the frustum): the cone's top
+    /// end `(0,0,z_c)` is `(0.6 − (z_c − 7.9)·s)/√(1 + s²) = 0.4927` mm from
+    /// the candidate's line, `s = 0.2/1.1`, so the walk reports `−0.4073` mm,
+    /// beyond the flat-ended `−0.3182`: the capsule errs only toward refusal.
     ///
     /// Control: the same candidate beside an arm of 0.1 mm all along is clear
     /// (0.4 mm axis gap against 0.2 mm of radii), so the rule does not refuse
@@ -1757,7 +1761,8 @@ mod tests {
         );
         assert_eq!(found.id, 3);
         let s: f64 = 0.2 / 1.1;
-        let expected = (0.6 - 0.1 * s) / (1.0 + s * s).sqrt() - 0.8 - 0.1;
+        let cone_top = 8.0 + 0.7 * 32.5_f64.to_radians().tan();
+        let expected = (0.6 - (cone_top - 7.9) * s) / (1.0 + s * s).sqrt() - 0.8 - 0.1;
         assert!(
             (found.gap_mm - expected).abs() < 1.0e-9,
             "{found:?} against {expected}"
