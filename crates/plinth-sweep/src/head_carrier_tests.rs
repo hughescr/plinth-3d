@@ -1345,172 +1345,140 @@ mod actual_lean_sizing {
 }
 
 // ---------------------------------------------------------------------------
-// v19 fix, lane L4 (2026-10-08): a head is planned at EVERY seat; the post that
-// arrives along the normal is drawn straight (the collinear drop); a load that
-// joins a head span is booked from the joint down; the straight tips that stay
-// off their normal are counted with their refusal.
+// Craig 2026-10-08: a head ONLY where a straight shaft would graze the model.
+// The conversion re-lands the post from the new joint within the lean law; an
+// arm that carries members stays straight and is named.
 // ---------------------------------------------------------------------------
 
-mod heads_everywhere {
+mod graze_conversion {
     use super::*;
-    use crate::down_sweep::{drop_collinear_heads, resize_heads_to_drawn_posts, SizingPolicy};
-    use crate::heads::HeadRefusal;
-    use plinth_support::{SweepArm, SweepArmLanding};
+    use crate::heads::{GrazeReason, HeadsOutcome};
 
-    const K_TOP: usize = 108;
-    const K_JOINT: usize = 100;
-    const TIP: f64 = 0.1;
-    const GAP: f64 = 0.3;
-    /// `layer + pixel`, the registered rasterisation allowance (heads.rs tests).
-    const ALLOWANCE: f64 = 0.0692;
+    const K_TOP: usize = 200;
+    /// The grazer's old landing on the host, 5 mm under the slab.
+    const OLD_LANDING: usize = 100;
+    /// Columns between the grazer and its host: 6 mm, 50 degrees off the
+    /// normal over the 5 mm drop to the old landing.
+    const RUN_COLS: usize = 120;
 
-    fn sizing() -> SizingPolicy {
-        SizingPolicy {
-            x_allowed: 12.0,
-            tip_radius_min_mm: 0.05,
-            tip_radius_max_mm: 1.0,
-            owner_growth_ceiling_mm: 0.4,
-            alpha: 1.0,
-            lamina_reach_mm: 2.13,
-            straight_reach: true,
-            tip_column_roots: true,
-            per_event: true,
-            handed_column_ledger: true,
+    /// A host (id 0) standing straight under the slab, the grazer (id 1) 6 mm
+    /// away and landed on the host's shaft at layer 100, and, when `carried`,
+    /// a third arm (id 2) landed on the grazer.
+    fn field(grid: &Grid, carried: bool) -> Vec<SweepStrut> {
+        let host_col = 30;
+        let host = straight(grid, 0, 150, host_col, K_TOP, 0.2);
+        let mut grazer = straight(grid, 1, 150, host_col + RUN_COLS, K_TOP, 0.05);
+        grazer.landing = Landing::Strut { id: 0, layer: OLD_LANDING };
+        grazer.k_bottom = OLD_LANDING;
+        grazer.radius_mm = vec![0.05; K_TOP - OLD_LANDING + 1];
+        grazer.carried_mm2 = vec![0.0; K_TOP - OLD_LANDING + 1];
+        let span = K_TOP - OLD_LANDING;
+        grazer.path = (0..=span)
+            .map(|slot| cell_u32(grid.index(150, host_col + (RUN_COLS * slot) / span)))
+            .collect();
+        let mut out = vec![host, grazer];
+        if carried {
+            let mut rider = straight(grid, 2, 150, host_col + RUN_COLS, 151, 0.05);
+            rider.landing = Landing::Strut { id: 1, layer: 150 };
+            rider.k_bottom = 150;
+            rider.radius_mm = vec![0.05; 2];
+            rider.carried_mm2 = vec![0.0; 2];
+            out.push(rider);
+        }
+        out
+    }
+
+    /// Run the conversion on `struts` over the slab fixture.
+    fn convert(grid: &Grid, struts: &mut [SweepStrut]) -> (usize, HeadsOutcome) {
+        let history = ColumnHistory::new(grid);
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
+        let law = crate::slenderness::SlendernessLaw::new(50.0, 0.05, 1.0, 32.5);
+        let context = slender_context(grid, &history, &keep_out, &lean, &law);
+        let mesh = slab_mesh();
+        let plan = plinth_core::LayerPlan::new(0.0, vec![H; 300]).expect("a uniform plan");
+        let surface = std::cell::OnceCell::new();
+        let joins = crate::head_join::HeadJoinContext {
+            slender: &context,
+            mesh: &mesh,
+            layer_plan: &plan,
+            plate_z_mm: 0.0,
+            clearance_mm: 0.3,
+            standoff_mm: 0.6,
+            surface_pitch_mm: 0.5,
+            surface_max_bytes: 1 << 28,
+            surface: &surface,
+        };
+        let constants = plinth_core::m0_constants().expect("the registry");
+        let profiles = constants.evidence().chitubox_tip_contact_profiles().value();
+        let rule = crate::heads::HeadRule {
+            gap_mm: 0.3,
+            allowance_mm: 0.0692,
+            cos_lean_max: lean.cos_max_lean(),
+            max_radius_mm: 1.0,
+            typical_tip_radius_mm: crate::heads::TYPICAL_TIP_RADIUS_MM,
+            max_normal_z: context.seat_faces.max_normal_z(),
             layer_height_mm: H,
             plate_z_mm: 0.0,
-        }
-    }
-
-    /// A head on a FLAT underside: `u` straight down, `K` 0.4 mm under the
-    /// contact, over a post that runs `run_cols` columns sideways to the plate
-    /// (0 = vertical). The ledger is saved as the down-sweep would.
-    fn flat_field(run_cols: usize) -> (Grid, Vec<SweepStrut>) {
-        let grid = grid();
-        let (row, col) = (150, 270);
-        let joint_cell = grid.index(row, col);
-        let z = |layer: usize| f64::from(u32::try_from(layer).expect("small")) * H;
-        let k = [grid.center_x_mm(col), grid.center_y_mm(row), z(K_JOINT)];
-        let d = [k[0], k[1], k[2] + 0.4];
-        let mut strut = straight(&grid, 0, row, col, K_TOP, 0.06);
-        strut.cell = joint_cell;
-        strut.center_mm = [d[0], d[1]];
-        strut.radius_mm.truncate(K_TOP);
-        *strut.radius_mm.last_mut().expect("a ledger") = TIP;
-        let post: Vec<u32> = (0..=K_JOINT)
-            .map(|slot| cell_u32(grid.index(row, col - run_cols + (run_cols * slot) / K_JOINT)))
-            .collect();
-        give_head(&mut strut, K_JOINT, joint_cell, Some(post));
-        {
-            let head = strut.head.as_mut().expect("a head");
-            head.unit = [0.0, 0.0, -1.0];
-            head.contact_mm = d;
-            head.joint_mm = k;
-            head.ledger_radius_mm = strut.radius_mm.clone();
-        }
-        (grid, vec![strut])
-    }
-
-    /// RED before the lane (no head was planned on a flat face, so there was
-    /// no collinear drop to speak of and a leaning post kept a straight tip).
-    /// A head on a flat underside whose post leans 68 degrees keeps its head:
-    /// tip, cone, a joint bigger than the tip, and the post from K, sized for
-    /// the lean. The SAME head over a vertical post is dropped to the straight
-    /// tip (no joint ball, every slot back on the area-law ledger).
-    /// SABOTAGE: make `post_is_collinear_with_head` always true and the leaning
-    /// half goes red; always false and the vertical half does.
-    #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "the contact slot is pinned to the exact area-law tip value the re-size leaves"
-    )]
-    fn a_flat_face_keeps_its_head_over_a_leaning_post_and_drops_it_over_a_vertical_one() {
-        let (grid, mut leaning) = flat_field(250);
-        assert!(
-            drop_collinear_heads(&grid, &mut leaning, sizing(), GAP, ALLOWANCE).is_empty(),
-            "a post 68 degrees off the normal is not collinear"
-        );
-        let head = leaning[0].head.as_ref().expect("a head");
-        assert!(!head.drawn_straight, "the head is kept over a leaning post");
-        assert_eq!(resize_heads_to_drawn_posts(&grid, &mut leaning, sizing()), 1);
-        let kept = &leaning[0];
-        assert_eq!(kept.radius_mm[K_TOP - 1], TIP, "the contact stays the area-law tip");
-        assert!(
-            kept.radius_mm[K_JOINT] > TIP * 1.5,
-            "a joint sized for the leaning post stands over the tip: {}",
-            kept.radius_mm[K_JOINT]
-        );
-        assert!(
-            kept.radius_mm[K_JOINT + 1..K_TOP].iter().all(|r| *r >= TIP - 1e-12),
-            "the cone is never thinner than the tip"
-        );
-
-        let (grid, mut vertical) = flat_field(0);
-        let ledger = vertical[0].head.as_ref().expect("a head").ledger_radius_mm.clone();
-        let dropped = drop_collinear_heads(&grid, &mut vertical, sizing(), GAP, ALLOWANCE);
-        assert_eq!(dropped, vec![0], "a vertical post under a flat face is collinear");
-        let head = vertical[0].head.as_ref().expect("the head record stays");
-        assert!(head.drawn_straight);
-        assert_eq!(vertical[0].radius_mm, ledger, "every slot is back on the area-law ledger");
-        // A second pass drops nothing: it is a straight arm now.
-        assert!(drop_collinear_heads(&grid, &mut vertical, sizing(), GAP, ALLOWANCE).is_empty());
-    }
-
-    /// The skim law at the drop: 12 degrees off passes at tip 0.1, 40 does not.
-    #[test]
-    fn the_drop_threshold_is_the_skim_law() {
-        use crate::down_sweep::post_is_collinear_with_head;
-        let unit = [0.0, 0.0, -1.0];
-        let off = |deg: f64| [deg.to_radians().sin(), 0.0, -deg.to_radians().cos()];
-        assert!(post_is_collinear_with_head(unit, off(12.0), TIP, GAP, ALLOWANCE));
-        assert!(!post_is_collinear_with_head(unit, off(40.0), TIP, GAP, ALLOWANCE));
-        // A post that does not descend with the head never passes.
-        assert!(!post_is_collinear_with_head(unit, [0.0, 0.0, 1.0], TIP, GAP, ALLOWANCE));
-    }
-
-    /// A hand-made arm for the census of straight tips: seat at the origin,
-    /// base `(dx, 0, -5)`, seat normal straight down.
-    fn arm_to(strut: &SweepStrut, dx: f64) -> SweepArm {
-        SweepArm {
-            seat_mm: [0.0, 0.0, 0.0],
-            base_mm: [dx, 0.0, -5.0],
-            tip_radius_mm: strut.tip_radius_mm(),
-            radius_profile_mm: strut.radius_mm.clone(),
-            seat_normal_mm: [0.0, 0.0, -1.0],
-            seat_face_point_mm: None,
-            landing: SweepArmLanding::Plate,
-            seats_into_model: true,
-            head: None,
-        }
-    }
-
-    /// A refused seat is COUNTED and named: the straight tip that meets its
-    /// face off the normal beyond the skim law comes back with the refusal
-    /// recorded for it; a square one, and one that still carries its head, do
-    /// not. SABOTAGE: return an empty list and the first assertion goes red.
-    #[test]
-    fn a_refused_seat_that_stays_off_normal_is_counted_with_its_reason() {
-        let grid = grid();
-        let make = |id: u32| {
-            let mut strut =
-                straight(&grid, id, 10, 10 + usize::try_from(id).expect("small"), 100, TIP);
-            strut.seat_normal = [0.0, 0.0, -1.0];
-            strut
         };
-        let (square, leaning, headed_arm) = (make(0), make(1), {
-            let mut strut = make(2);
-            let cell = strut.cell;
-            give_head(&mut strut, 90, cell, None);
-            strut
-        });
-        let arms = [arm_to(&square, 0.0), arm_to(&leaning, 4.0), arm_to(&headed_arm, 4.0)];
-        let struts = [square, leaning, headed_arm];
-        let mut refusals = std::collections::BTreeMap::new();
-        refusals.insert(HeadRefusal::NoPost, vec![1_u32]);
-        let found = crate::off_normal_straight_tips(&struts, &arms, &refusals, GAP, ALLOWANCE);
-        assert_eq!(found.len(), 1, "only the leaning straight tip is off its normal: {found:?}");
-        let (id, degrees, reason) = found[0];
-        assert_eq!(id, 1);
-        assert!((degrees - 38.66).abs() < 0.01, "atan(4/5) = 38.66 degrees: {degrees}");
-        assert_eq!(reason, Some(HeadRefusal::NoPost), "its refusal is named");
+        let env = crate::graze::GrazeEnv { joins: &joins, profiles, rule };
+        let mut outcome = HeadsOutcome::default();
+        let converted = crate::graze::convert(&env, struts, &mut outcome);
+        (converted, outcome)
+    }
+
+    /// RED before the lane (nothing converted a grazing straight tip). A tip
+    /// that leans 50 degrees off the slab's underside, landed on a host 6 mm
+    /// away, grazes the slab: it gets a head, and its post is RE-LANDED lower
+    /// on the same host, inside the lean law, because the joint stands about
+    /// 1.8 mm under the seat and the old landing is now too steep for it.
+    /// SABOTAGE: drop the lean filter in `candidates_for` and the post keeps
+    /// the highest layer, which breaks the law (the last assertion goes red);
+    /// drop the census and nothing is converted (the first one does).
+    #[test]
+    fn a_grazing_tip_gets_a_head_and_its_post_is_re_landed_lower_within_the_lean_law() {
+        let grid = grid();
+        let mut struts = field(&grid, false);
+        let (converted, outcome) = convert(&grid, &mut struts);
+        assert_eq!(outcome.graze_asked, 1, "anti-vacuity: the census names the grazer: {outcome:?}");
+        assert_eq!(converted, 1, "{outcome:?}");
+        assert_eq!(outcome.graze_converted, vec![1]);
+        assert_eq!(outcome.built, 1);
+        let grazer = &struts[1];
+        let head = grazer.head.as_ref().expect("the grazer carries a head now");
+        assert!(grazer.head_intact(), "the head is carried by the path");
+        assert!(struts[0].head.is_none(), "the square host keeps its straight tip");
+        let Landing::Strut { id: 0, layer } = grazer.landing else {
+            panic!("the post stays on its host: {:?}", grazer.landing);
+        };
+        assert!(layer < OLD_LANDING, "re-landed LOWER on the host: {layer}");
+        assert_eq!(grazer.k_bottom, layer);
+        let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
+        let lateral = crate::cell_distance_mm(&grid, head.joint_cell as usize, grazer.base_cell());
+        assert!(
+            lean.descent_cost_mm(head.k_joint - layer, lateral).is_some(),
+            "the post from K ({} layers, {lateral:.2} mm sideways) is inside the lean law",
+            head.k_joint - layer
+        );
+        let check = check_landings(&struts, H);
+        assert!(check.clean(), "{check:?}");
+    }
+
+    /// An arm another member rests on is not converted: moving its post would
+    /// move theirs. It stays straight and the run names it with the reason.
+    /// SABOTAGE: drop the `carries` guard and the carrier is converted.
+    #[test]
+    fn a_grazing_tip_that_carries_a_member_stays_straight_and_is_named() {
+        let grid = grid();
+        let mut struts = field(&grid, true);
+        let before = struts[1].clone();
+        let (converted, outcome) = convert(&grid, &mut struts);
+        assert_eq!(converted, 0, "{outcome:?}");
+        assert!(outcome.graze_asked >= 1, "anti-vacuity: it grazes: {outcome:?}");
+        assert_eq!(struts[1], before, "the carrier is untouched");
+        assert!(
+            outcome.graze_reasons.contains(&(1, GrazeReason::CarriesMembers)),
+            "named with its reason: {outcome:?}"
+        );
     }
 }

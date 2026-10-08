@@ -1,5 +1,5 @@
-//! **A head on every off-normal contact; a joining load is booked from the
-//! joint down** (v19 fix, lane L4, 2026-10-08).
+//! **A joining load is booked from the joint down** (v19 fix, lane L4,
+//! 2026-10-08; heads are planned only where needed, Craig 2026-10-08).
 //!
 //! The join test hand-places two arms under a slab and calls the down-sweep
 //! directly (the way `per_event_sizing` does), so the up-sweep's placement

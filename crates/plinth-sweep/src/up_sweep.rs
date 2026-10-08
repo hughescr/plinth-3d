@@ -761,6 +761,13 @@ impl core::fmt::Debug for HeadEnv<'_> {
     }
 }
 
+/// The margin, in degrees, below the skim angle under which a seat's facet is
+/// too flat to ask the footprint for a head. A SEARCH PRUNE and not a rule:
+/// the footprint normal differs from the seat facet's by at most 9.88 degrees
+/// on the v16 corpus, and [`plan_head`] still decides on the footprint's own
+/// normal. It only saves the footprint query on faces no head could want.
+const HEAD_PRUNE_MARGIN_DEG: f64 = 15.0;
+
 /// The running state of heads across one sweep: the accepted heads' capsules
 /// (the placement tests' "earlier heads"), what was built or refused, and the
 /// placement residuals.
@@ -1649,11 +1656,11 @@ fn aligned_lattice_cells(
 /// `seating.layer`), before anything rests on the arm. `tip_radius_lb_mm` is
 /// the lower bound on the tip's drawn radius (what the seat's demand needs).
 ///
-/// `Ok((head, residual_deg))` when a head is built. `Err(None)` only when
-/// heads are off. `Err(Some(reason))` for every refusal, which the caller
-/// counts by reason and member id and the run warns on (v19 fix, 2026-10-08:
-/// a head is planned at EVERY seat that has a seat plane, whatever its slope,
-/// and a refusal is never silent).
+/// `Ok((head, residual_deg))` when a head is built. `Err(None)` when the seat
+/// keeps the straight tip and NOTHING is counted (heads off, a facet that is
+/// not steep, a face too flat to be worth the footprint query:
+/// [`HEAD_PRUNE_MARGIN_DEG`]). `Err(Some(reason))` for every other refusal,
+/// which the caller counts by reason and member id.
 ///
 /// The nearest model face to the seat's axis point is named by ONE surface
 /// query, which gives the facet's normal for the prune, the seat triangle's
@@ -1698,16 +1705,17 @@ fn plan_seat_head(
     else {
         return Err(Some(HeadRefusal::NoSurface));
     };
-    // A facet that faces up, or is steeper than the seat-face band admits, has
-    // no seat plane to stand a head on: counted, never silent. There is NO
-    // flatness prune (v19 fix, 2026-10-08, orchestrator ruling on Craig's
-    // proposal): a flat underside is asked for a head like any other face,
-    // because the descent below may still lean the post 40 to 57 degrees off
-    // the normal, and a straight tip would then graze the model with its
-    // shaft. A post that does arrive along the normal is drawn straight after
-    // layout ([`crate::down_sweep::drop_collinear_heads`]).
-    if -facet[2] <= 0.0 || facet[2] >= rule.max_normal_z {
-        return Err(Some(HeadRefusal::NotDownFacing));
+    // The search prune. A facet that faces up, or is steeper than the seat-face
+    // band admits, wants no head; a facet more than the margin below the skim
+    // angle is too flat for the footprint to bring it over.
+    let facet_cos = -facet[2];
+    if facet_cos <= 0.0 || facet[2] >= rule.max_normal_z {
+        return Err(None);
+    }
+    let secant = 1.0 + rule.allowance_mm / (rule.gap_mm + tip_radius_lb_mm);
+    let skim_deg = (1.0 / secant).clamp(-1.0, 1.0).acos().to_degrees();
+    if facet_cos > (skim_deg - HEAD_PRUNE_MARGIN_DEG).max(0.0).to_radians().cos() {
+        return Err(None);
     }
     let ball = PlacementBall::from_profiles(axis_point, face, facet, tip_radius_lb_mm, env.profiles);
     let placement = PlacementEnv {
@@ -1739,10 +1747,16 @@ fn plan_seat_head(
         seat_cell: u32::try_from(cell).unwrap_or(u32::MAX),
         k_top: seating.layer,
     };
-    let head = plan_head(&request, &rule, grid).map_err(Some)?;
+    let head = match plan_head(&request, &rule, grid) {
+        Ok(head) => head,
+        Err(HeadRefusal::NotSteep) => return Err(None),
+        Err(reason) => return Err(Some(reason)),
+    };
     let ctx = HeadCheckCtx {
         grid,
         history,
+        hidden: &history.hidden,
+        except: &[],
         keep_out: seating.keep_out,
         surface: Some(surface),
         mesh: env.mesh,
@@ -1878,13 +1892,14 @@ fn commit_seat(
         reach.end_journal();
     }
 
-    // **THE ARTICULATED HEAD** (Craig 2026-10-06; on EVERY seat from the v19
-    // fix, 2026-10-08), now that the seat cell and what it covers are final and
-    // before anything rests on the arm: the arm's top is a short straight head
-    // along the footprint normal to a joint sphere, and the post descends from
-    // the joint. Where the head cannot be built the arm keeps today's straight
-    // tip, counted by reason (every refusal is counted and warned). A head
-    // whose post then arrives along the normal is drawn straight after layout.
+    // **THE ARTICULATED HEAD** (Craig 2026-10-06), now that the seat cell and
+    // what it covers are final and before anything rests on the arm: on a steep
+    // face the arm's top is a short straight head along the footprint normal to
+    // a joint sphere, and the post descends from the joint. Where the head
+    // cannot be built the arm keeps today's straight tip, counted by reason;
+    // `NotSteep` and a face too flat to ask are not counted at all. A shaft
+    // that would graze the model on a gentler face is converted later, where
+    // layout can still move the post ([`crate::graze`]).
     let mut head_built: Option<Head> = None;
     if clearance.is_some_and(|clear| clear.heads.is_some()) {
         let lower_bound = clearance.map_or(0.0, |clear| {
@@ -2657,28 +2672,28 @@ fn descend_cleared(
 /// (the drawn post is that far off its grid route). The straight post under the
 /// joint always stands on the free side (it moves along `-z`, and `u_z < 0`).
 #[derive(Clone, Copy, Debug)]
-struct PostPlane {
+pub(crate) struct PostPlane {
     /// The joint `K`, exact, in the lowering's frame.
-    joint_mm: [f64; 3],
+    pub(crate) joint_mm: [f64; 3],
     /// The contact centre `D`.
-    contact_mm: [f64; 3],
+    pub(crate) contact_mm: [f64; 3],
     /// The outward normal `u` of the seat plane.
-    unit: [f64; 3],
+    pub(crate) unit: [f64; 3],
     /// An UPPER bound on the post's radius (the registered maximum): the
     /// joint grows with the final tip and the sizing may thicken the post
     /// toward its base, and a ring of that radius must still stand off the
     /// plane.
-    radius_mm: f64,
+    pub(crate) radius_mm: f64,
     /// The plate's z in the lowering's frame (the grid's axis points have it at 0).
-    plate_z_mm: f64,
+    pub(crate) plate_z_mm: f64,
     /// The margin the base keeps from the plane.
-    margin_mm: f64,
+    pub(crate) margin_mm: f64,
 }
 
 impl PostPlane {
     /// Whether a post from the joint to the axis point `base` (raster frame:
     /// the plate at z = 0) stays on the free side of the plane.
-    fn admits(&self, base: [f64; 3]) -> bool {
+    pub(crate) fn admits(&self, base: [f64; 3]) -> bool {
         use geom_kernel::vec3;
         let base = [base[0], base[1], base[2] + self.plate_z_mm];
         let to_base = vec3::sub(base, self.joint_mm);

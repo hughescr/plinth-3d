@@ -910,6 +910,189 @@ pub(crate) fn model_clearance_census(
     census
 }
 
+/// One straight tip whose shaft grazes the model ([`graze_census`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct GrazeRow {
+    /// The strut's index in the field.
+    pub index: usize,
+    /// Degrees between the seat normal and the drawn shaft axis from the ball
+    /// centre.
+    pub angle_deg: f64,
+    /// The smallest measured clearance of the shaft's drawn solid, over the
+    /// stretch from the ball out to `R + (g + r_t) / cos x`, mm (an upper
+    /// bound under the gap counts as its value).
+    pub clearance_mm: f64,
+}
+
+/// **Straight tips whose shaft grazes the model** (Craig 2026-10-08: a head
+/// only where a straight tip's shaft would graze), on the arms exactly as the
+/// lowering gets them. The audit's report 4, run inside the engine: for each
+/// live support arm in `members` that seats into the model, has no drawn head
+/// (none, or one given up) and is not wholly in a hidden cavity, with `x` the
+/// angle between its seat normal and the drawn shaft axis from the ball
+/// centre, the tip grazes when the arrival skims ([`crate::heads::skims`], at
+/// the shaft's start radius) AND the drawn solid, read from the axial
+/// `sqrt(R^2 - r_t^2)` where the shaft leaves the ball out to
+/// `R + (g + r_t) / cos x` (the whole shaft when `cos x <= 0`), comes within
+/// `gap_mm` of the model. Braces, masts and ties are not read.
+///
+/// `arms[i]` is the lowering input of `struts[members[i]]`. Rows come in
+/// member order. Batch-first: one contact-disc batch and ONE frustum
+/// clearance call for the field; a member the kernel did not decide is not a
+/// grazer here (it is unmeasured, not clear).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the field, the layer plan and the registered quantities the census reads (gap, \
+              allowance, cavity); a bundle would exist for this call only"
+)]
+pub(crate) fn graze_census(
+    surface: Option<&geom_kernel::NativeSurface>,
+    struts: &[crate::SweepStrut],
+    members: &[usize],
+    arms: &[plinth_support::SweepArm],
+    layer_plan: &plinth_core::LayerPlan,
+    plate_z_mm: f64,
+    gap_mm: f64,
+    allowance_mm: f64,
+    cavity: &crate::cavity::HiddenCavity,
+) -> Vec<GrazeRow> {
+    let Some(surface) = surface else {
+        return Vec::new();
+    };
+    let height = layer_plan.heights_mm().first().copied().unwrap_or(0.0);
+    let flare = plinth_support::SweepRootFlare::registered(height).ok();
+    let discs = plinth_support::tip_contact_discs(arms, layer_plan)
+        .unwrap_or_else(|_| vec![None; arms.len()]);
+    // One row per drawn span of a candidate; the candidate's slot in `members`.
+    let mut owner: Vec<usize> = Vec::new();
+    let (mut p0s, mut p1s, mut top_radii, mut bottom_radii, mut inset0s, mut inset1s) = (
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    // Per slot: the angle of a candidate that skims.
+    let mut angle_deg: Vec<Option<f64>> = vec![None; members.len()];
+    for (slot, (&member, arm)) in members.iter().zip(arms).enumerate() {
+        let strut = &struts[member];
+        if strut.kind != crate::StrutKind::Arm
+            || !crate::slenderness::live(strut)
+            || strut.head.as_ref().is_some_and(|head| !head.drawn_straight)
+            || !arm.seats_into_model
+            || strut.k_bottom == usize::MAX
+            || strut.k_top <= strut.k_bottom
+            || cavity.member_hidden(strut, crate::cavity::arm_radius_mm(arm))
+        {
+            continue;
+        }
+        let Some(disc) = discs.get(slot).copied().flatten() else {
+            continue;
+        };
+        let top = disc.ball_centre_mm;
+        let bottom = if strut.landing == crate::Landing::Plate {
+            match flare.as_ref().and_then(|flare| flare.plate_shaft_of(arm, plate_z_mm)) {
+                Some((_, bottom)) => bottom,
+                None => continue,
+            }
+        } else {
+            arm.base_mm
+        };
+        let length = geom_kernel::vec3::dist(top, bottom);
+        let rise = top[2] - bottom[2];
+        if !(length.is_finite() && length > 0.0 && rise > 0.0) {
+            continue;
+        }
+        let axis = geom_kernel::vec3::scale(geom_kernel::vec3::sub(bottom, top), 1.0 / length);
+        let Some(normal) = geom_kernel::vec3::normalize(disc.outward_normal) else {
+            continue;
+        };
+        let cos_x = geom_kernel::vec3::dot(normal, axis).clamp(-1.0, 1.0);
+        let r_t = arm.tip_radius_mm;
+        if !crate::heads::skims(r_t, cos_x, gap_mm, allowance_mm) {
+            continue;
+        }
+        let ball = disc.ball_radius_mm;
+        let from_ball = (ball * ball - r_t * r_t).max(0.0).sqrt();
+        let to = if cos_x > 0.0 { (ball + (gap_mm + r_t) / cos_x).min(length) } else { length };
+        if to <= from_ball {
+            continue;
+        }
+        angle_deg[slot] = Some(cos_x.acos().to_degrees());
+        let root = plinth_support::drawn_root_radius_mm(&arm.radius_profile_mm, arm.tip_radius_mm);
+        let spans = plinth_support::drawn_spans(
+            &arm.radius_profile_mm,
+            arm.base_mm[2],
+            arm.seat_mm[2],
+            top[2],
+            bottom[2],
+            r_t,
+            root,
+        );
+        let at = |z: f64| -> ([f64; 3], f64) {
+            let t = ((top[2] - z) / rise).clamp(0.0, 1.0);
+            (
+                std::array::from_fn(|axis_index| top[axis_index] + t * (bottom[axis_index] - top[axis_index])),
+                t * length,
+            )
+        };
+        for span in spans {
+            let (from, a0) = at(span.top_z_mm);
+            let (end, a1) = at(span.bottom_z_mm);
+            // The stretch of this span inside the tested range; none -> skip.
+            if a1 <= a0 || a1 <= from_ball || a0 >= to {
+                continue;
+            }
+            owner.push(slot);
+            p0s.push(from);
+            p1s.push(end);
+            top_radii.push(span.top_radius_mm.max(0.0));
+            bottom_radii.push(span.bottom_radius_mm.max(0.0));
+            inset0s.push((from_ball - a0).max(0.0));
+            inset1s.push((a1 - to).max(0.0));
+        }
+    }
+    let rows = surface
+        .segment_frustum_clearance_classified(
+            &p0s,
+            &p1s,
+            &top_radii,
+            &bottom_radii,
+            0.0,
+            &inset0s,
+            &inset1s,
+        )
+        .unwrap_or_default();
+    let mut worst: Vec<Option<f64>> = vec![None; members.len()];
+    for (row, &slot) in rows.iter().zip(&owner) {
+        let reading = match *row {
+            geom_kernel::SegmentClearanceClassified::Measured { clearance_mm, .. } => {
+                Some(clearance_mm)
+            }
+            geom_kernel::SegmentClearanceClassified::UpperBound { clearance_mm, .. }
+                if clearance_mm < gap_mm =>
+            {
+                Some(clearance_mm)
+            }
+            _ => None,
+        };
+        if let Some(clearance) = reading {
+            if worst[slot].is_none_or(|now| clearance < now) {
+                worst[slot] = Some(clearance);
+            }
+        }
+    }
+    members
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, &index)| {
+            let (angle_deg, clearance_mm) = (angle_deg[slot]?, worst[slot]?);
+            (clearance_mm < gap_mm - 1.0e-9).then_some(GrazeRow { index, angle_deg, clearance_mm })
+        })
+        .collect()
+}
+
 /// One standing member's solid as the tie rungs test against: its straight
 /// axis and the radius it is drawn at along it.
 #[derive(Clone, Debug)]
@@ -1207,7 +1390,7 @@ pub(crate) fn indexed_surface(verts: &[[f64; 3]], tris: &[[u32; 3]]) -> geom_ker
 /// box whose top face is `z = 2` and whose `+X` wall is `x = 5`.
 #[cfg(test)]
 mod census_tests {
-    use super::{model_clearance_census, model_landing_zones_mm};
+    use super::{graze_census, model_clearance_census, model_landing_zones_mm};
     use crate::{Landing, SeatFace, StrutKind, SweepStrut};
     use geom_kernel::{NativeSurface, NativeSurfaceConfig};
     use plinth_support::{SweepArm, SweepArmLanding};
@@ -1527,6 +1710,93 @@ mod census_tests {
             thin.within_gap.is_empty(),
             "a tip-sized shaft on the same lean is inside its contact zone only: {thin:?}"
         );
+    }
+
+    /// `layer + pixel`, the registered rasterisation allowance of the skim law.
+    const ALLOWANCE: f64 = 0.0692;
+
+    /// A tip of radius 0.1 seated into the flat underside `z = 2` of a slab at
+    /// `(xy)`, its shaft running to a base `dx` sideways and 7 mm down, the seat
+    /// normal straight down: `atan(dx / 7)` off the normal.
+    fn tip_to(id: u32, xy: [f64; 2], dx: f64) -> (SweepStrut, SweepArm) {
+        let on_a_support = Landing::Strut { id: 99, layer: 0 };
+        let (strut, mut arm) = member(id, StrutKind::Arm, on_a_support, xy, PLATE, 2.0, 0.1);
+        arm.base_mm = [xy[0] + dx, xy[1], PLATE];
+        arm.seat_normal_mm = [0.0, 0.0, -1.0];
+        arm.seat_face_point_mm = Some([xy[0], xy[1], 2.0]);
+        arm.seats_into_model = true;
+        (strut, arm)
+    }
+
+    fn graze_rows_of(
+        tips: Vec<(SweepStrut, SweepArm)>,
+        cavity: &crate::cavity::HiddenCavity,
+    ) -> Vec<super::GrazeRow> {
+        let slab = boxed([-10.0, -10.0, 2.0], [10.0, 10.0, 4.0]);
+        let (struts, arms): (Vec<SweepStrut>, Vec<SweepArm>) = tips.into_iter().unzip();
+        let members: Vec<usize> = (0..struts.len()).collect();
+        let layers = plinth_core::LayerPlan::new(PLATE, vec![H; 400]).expect("a uniform plan");
+        graze_census(Some(&slab), &struts, &members, &arms, &layers, PLATE, GAP, ALLOWANCE, cavity)
+    }
+
+    /// **The graze census** (Craig 2026-10-08: a head only where a straight
+    /// shaft would graze). A tip that skims (50 degrees off the underside's
+    /// normal) AND whose shaft stands within the final gap of the model beyond
+    /// the ball is named, with its angle; the same tip at 20 degrees skims
+    /// nothing and is not; a tip in a sealed cavity is skipped; so is one that
+    /// carries a head. SABOTAGE: drop the skims test in `graze_census` and the
+    /// 30 degree control (which does not skim but stands near the plane) is
+    /// named; drop the clearance test and the clear 50 degree tip is named.
+    #[test]
+    fn the_graze_census_names_the_tip_whose_shaft_skims_and_stands_near_the_model() {
+        let none = crate::cavity::HiddenCavity::none();
+        let rows = graze_rows_of(vec![tip_to(0, [0.0, 0.0], 7.0 * 50.0_f64.to_radians().tan())], &none);
+        assert_eq!(rows.len(), 1, "a 50 degree tip on a flat underside grazes: {rows:?}");
+        assert!((rows[0].angle_deg - 50.0).abs() < 0.01, "{rows:?}");
+        assert!(rows[0].clearance_mm < GAP, "{rows:?}");
+        for degrees in [0.0_f64, 20.0, 30.0] {
+            let square = graze_rows_of(vec![tip_to(0, [0.0, 0.0], 7.0 * degrees.to_radians().tan())], &none);
+            assert!(square.is_empty(), "{degrees} degrees does not skim: {square:?}");
+        }
+        // A head carried: not a straight tip.
+        let (mut headed_tip, arm) = tip_to(0, [0.0, 0.0], 7.0 * 50.0_f64.to_radians().tan());
+        headed_tip.head = Some(crate::heads::Head {
+            contact_mm: [0.0, 0.0, 2.0],
+            unit: [0.0, 0.0, -1.0],
+            joint_mm: [0.0, 0.0, 0.2],
+            k_joint: 4,
+            joint_cell: 0,
+            joint_radius_mm: 0.2,
+            planned_tip_radius_mm: 0.1,
+            gap_mm: GAP,
+            cos_lean_max: 0.5373,
+            cells: Vec::new(),
+            ball_allowance_mm: 0.0,
+            drawn_straight: false,
+            law_planned: crate::heads::HeadLaw::envelope(0.5373),
+            law_drawn: None,
+            ledger_radius_mm: Vec::new(),
+        });
+        assert!(graze_rows_of(vec![(headed_tip, arm)], &none).is_empty(), "a headed arm is skipped");
+    }
+
+    /// A grazing tip standing wholly in a sealed hidden cavity is skipped
+    /// (Craig ruling 2026-10-05: no final gap there); the same tip with no
+    /// map, and in an open pocket, is named.
+    #[test]
+    fn the_graze_census_skips_a_tip_in_a_sealed_cavity() {
+        use crate::cavity::fixtures::{cavity_box_at, cell, map_of_at};
+        let sealed = map_of_at(&cavity_box_at(false, false, PLATE), &[], PLATE);
+        let dx = 7.0 * 50.0_f64.to_radians().tan();
+        let tip = || {
+            let mut tip = tip_to(0, [5.0, 5.0], dx);
+            tip.0.cell = cell(&sealed.1, 5.0, 5.0);
+            tip
+        };
+        let open = graze_rows_of(vec![tip()], &crate::cavity::HiddenCavity::none());
+        assert_eq!(open.len(), 1, "anti-vacuity: named without the map: {open:?}");
+        let hidden = graze_rows_of(vec![tip()], &sealed.0);
+        assert!(hidden.is_empty(), "a member in a sealed cavity is not read: {hidden:?}");
     }
 
     /// The census names the ARM whose drawn shaft passes the wall inside the
