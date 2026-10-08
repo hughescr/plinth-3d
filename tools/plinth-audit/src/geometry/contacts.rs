@@ -28,8 +28,6 @@ pub const NORMAL_RADIUS_FLOOR_MM: f64 = 0.15;
 /// Axial spacing of the shaft clearance rings, mm.
 const CLEARANCE_STEP_MM: f64 = 0.02;
 const CLEARANCE_AZIMUTH: usize = 24;
-/// Points nearer than this to the model get an inside test, mm.
-const SIGN_NEAR_MM: f64 = 0.05;
 
 #[derive(Clone, Debug)]
 pub struct ContactRow {
@@ -137,10 +135,28 @@ fn shaft_clearance(
         for t in &tris {
             d = d.min(v::point_triangle_closest(p, t[0], t[1], t[2]).0);
         }
-        let signed = if d < SIGN_NEAR_MM && ctx.inside(p, hits) == Some(true) {
-            -d
+        // Every sample is signed: a point deeper inside the model than any
+        // outside point is the minimum, however far it is from the surface.
+        // (An indeterminate parity test counts as outside.)
+        let signed = if ctx.inside(p, hits) == Some(true) {
+            // The local list is exact only up to `reach`; deeper points get
+            // the unbounded nearest-surface distance.
+            let depth = if d <= reach {
+                d
+            } else {
+                ctx.mesh.nearest_surface(p).map_or(reach, |h| h.distance_mm)
+            };
+            -depth
+        } else if d <= reach || best > reach {
+            // Outside and nothing nearer than `reach` is listed: the exact
+            // distance matters only while no sample has set a smaller minimum.
+            if d <= reach {
+                d
+            } else {
+                ctx.mesh.nearest_surface(p).map_or(d, |h| h.distance_mm)
+            }
         } else {
-            d
+            continue;
         };
         best = best.min(signed);
     }

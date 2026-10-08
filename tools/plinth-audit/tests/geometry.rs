@@ -65,6 +65,9 @@ struct Ids {
     slivers: Vec<usize>,
     good_box: usize,
     inverted_box: usize,
+    deep: usize,
+    buried_tip: usize,
+    landed_in_hull: usize,
 }
 
 fn build() -> (Vec<u8>, Ids) {
@@ -138,6 +141,21 @@ fn build() -> (Vec<u8>, Ids) {
         .map(|[a, b, c]| [a, c, b])
         .collect();
 
+    // A member buried 1.2 mm deep in the middle of the box: every surface sample
+    // is at least 1.2 mm from the model boundary (deeper than any search radius).
+    let deep = s.frustum(M, [3.0, -1.0, 1.2], 0.2, [3.0, -1.0, 1.8], 0.2);
+
+    // A contact buried in the model: ball centre 0.15 inside the underside, a
+    // r 0.08 taper running outward 0.1 mm. The shaft samples outside the ball
+    // sit 0.07 and 0.05 mm inside the model.
+    let buried_tip = s.tip([0.0, 4.0, 0.15], 0.10, [0.0, 0.0, -1.0]);
+    s.frustum(T, [0.0, 4.0, 0.15], 0.08, [0.0, 4.0, 0.05], 0.08);
+
+    // A thin branch whose end lands inside the emitted box of `good_box` but
+    // outside that record's header cylinder (radius 0.2 about x = 12, y = 0):
+    // (12.15, 0.15) is 0.212 from the axis.
+    let landed_in_hull = s.frustum(M, [12.15, 0.15, -0.2], 0.02, [12.15, 0.15, -1.5], 0.02);
+
     let file = SynthFile::new().with_model(SynthModel {
         name: "planted".into(),
         translate_mm: [0.0, 0.0, 5.0],
@@ -156,6 +174,9 @@ fn build() -> (Vec<u8>, Ids) {
             slivers: vec![sl1, sl2],
             good_box,
             inverted_box,
+            deep,
+            buried_tip,
+            landed_in_hull,
         },
     )
 }
@@ -211,7 +232,19 @@ fn the_planted_intrusion_is_found_in_the_header_geometry() {
         .expect("the intruder is ranked");
     // The end cap centre is 1.0 above the underside and 2.0 from every other face.
     assert!((r.depth_mm - 1.0).abs() < 1e-3, "{}", r.depth_mm);
-    assert_eq!(m.intrusion.count_above, 1, "only the intruder is inside");
+    // Three records enter the model: the intruder, the buried member and the
+    // buried contact's taper (beyond its own ball).
+    assert_eq!(m.intrusion.count_above, 3, "{:?}", m.intrusion.ranked);
+
+    // A member wholly inside the box, at least 1.2 mm from every face and 1.5 mm
+    // at its middle ring: the depth is not capped by any search radius.
+    let deep = m
+        .intrusion
+        .ranked
+        .iter()
+        .find(|r| r.record == ids.deep)
+        .expect("the buried member is ranked");
+    assert!((deep.depth_mm - 1.5).abs() < 1e-3, "{}", deep.depth_mm);
 }
 
 #[test]
@@ -219,9 +252,9 @@ fn the_planted_junctions_are_counted() {
     let (m, ids) = analyse_planted();
     let t = &m.topology;
     // The writer's UV spheres are open at the poles (a known defect of the test
-    // writer, six balls here), and one frustum has a cap triangle removed: all
-    // seven are found, the other frusta are closed.
-    assert_eq!(t.mesh.open_records, 6 + 1, "open edges {}", t.mesh.open_edges);
+    // writer, seven balls here), and one frustum has a cap triangle removed: all
+    // eight are found, the other frusta are closed.
+    assert_eq!(t.mesh.open_records, 7 + 1, "open edges {}", t.mesh.open_edges);
     assert!(t.mesh.open_edges >= 3);
     // An inward-wound closed record has a volume <= 0; the outward one does not.
     // (The writer's own frusta wind inconsistently, so the list has more.)
@@ -250,13 +283,24 @@ fn the_planted_junctions_are_counted() {
     assert_eq!(proud.len(), 1, "{:?}", t.landed);
     let want = (0.2f64 * 0.2 + 0.6 * 0.6).sqrt() - 0.5;
     assert!((proud[0] - want).abs() < 1e-3, "got {} want {want}", proud[0]);
+
+    // A thin branch ends inside the EMITTED box of `good_box` (a hull-like
+    // record) though outside its header cylinder: it is a landed end, and its
+    // ring is wholly inside the host.
+    let l = t
+        .landed
+        .iter()
+        .find(|l| l.record == ids.landed_in_hull && l.slot == 1)
+        .unwrap_or_else(|| panic!("landed end in the emitted box: {:?}", t.landed));
+    assert_eq!(l.host, Some(ids.good_box));
+    assert!(l.ring_vertices > 0 && l.proud_mm < 1e-9 && l.proud_host_mm < 1e-9, "{l:?}");
 }
 
 #[test]
 fn the_planted_straight_contacts_are_graded_by_the_skim_law() {
     let (m, ids) = analyse_planted();
     let c = &m.contacts;
-    assert_eq!(c.straight, 2, "the two heads are not straight contacts");
+    assert_eq!(c.straight, 3, "the two heads are not straight contacts");
     let tilted = c.rows.iter().find(|r| r.tip == ids.tilted_tip).expect("tilted");
     let square = c.rows.iter().find(|r| r.tip == ids.square_tip).expect("square");
     assert!((tilted.off_normal_deg.expect("x") - 50.0).abs() < 0.5, "{:?}", tilted.off_normal_deg);
@@ -272,6 +316,15 @@ fn the_planted_straight_contacts_are_graded_by_the_skim_law() {
     );
     assert!(sq > tl, "square {sq} tilted {tl}");
     assert!((tilted.ball_height_mm.expect("h") - 0.02).abs() < 1e-4);
+
+    // A buried contact: the shaft leaves the ball sphere (R 0.1) at 0.06 mm
+    // along, where it is 0.09 mm inside the underside, and ends 0.05 inside.
+    // The clearance is NEGATIVE (about -0.09; the ring spacing resolves it to
+    // within 0.01), not the +0.05 an unsigned distance would give.
+    let buried = c.rows.iter().find(|r| r.tip == ids.buried_tip).expect("buried");
+    assert!((buried.ball_height_mm.expect("h") + 0.15).abs() < 1e-4);
+    let bc = buried.shaft_clearance_mm.expect("clearance");
+    assert!((bc + 0.09).abs() < 0.01, "buried shaft clearance {bc}");
 }
 
 // ---------------------------------------------------------------------------
@@ -369,4 +422,123 @@ fn v19_lonely_peak_straight_shafts_clear_the_model_by_the_anchor_amounts() {
         assert!((got - want).abs() < 0.005, "tip {tip}: got {got:.4}, anchor {want}");
     }
     assert_eq!(m.headline().off_normal_skim, 12, "the diagnosis counted 12");
+}
+
+// ---------------------------------------------------------------------------
+// The consumer path: the compiled binary, its dispatch and its --json
+// ---------------------------------------------------------------------------
+
+fn run_cli(args: &[&std::ffi::OsStr]) -> (bool, String, String) {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_plinth-audit"))
+        .arg("geometry")
+        .args(args)
+        .env("PLINTH_THREADS", "2")
+        .output()
+        .expect("spawn plinth-audit");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+fn cli_json(path: &Path) -> plinth_audit::json::Json {
+    let (ok, stdout, stderr) = run_cli(&[path.as_os_str(), std::ffi::OsStr::new("--json")]);
+    assert!(ok, "geometry --json failed: {stderr}");
+    plinth_audit::json::parse(&stdout).unwrap_or_else(|e| panic!("bad JSON ({e:?}): {stdout}"))
+}
+
+#[test]
+fn the_binary_dispatches_geometry_and_writes_json_for_the_planted_scene() {
+    let (bytes, ids) = build();
+    let dir = std::env::temp_dir().join(format!("plinth-audit-geometry-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("planted.chitubox");
+    std::fs::write(&path, &bytes).expect("write planted file");
+
+    let doc = cli_json(&path);
+    let model = &doc.get("models").and_then(|m| m.as_array()).expect("models")[0];
+    assert_eq!(model.get("heads").and_then(|h| h.as_array()).expect("heads").len(), 2);
+    let ranked = model
+        .get("intrusion")
+        .and_then(|i| i.get("ranked"))
+        .and_then(|r| r.as_array())
+        .expect("ranked");
+    let deep = ranked
+        .iter()
+        .find(|r| r.get("record").and_then(|x| x.as_f64()) == Some(ids.deep as f64))
+        .expect("the buried member is in the JSON");
+    let d = deep.get("depth_mm").and_then(|x| x.as_f64()).expect("depth");
+    assert!((d - 1.5).abs() < 1e-3, "{d}");
+    let landed = model
+        .get("topology")
+        .and_then(|t| t.get("landed_ends"))
+        .and_then(|l| l.as_array())
+        .expect("landed_ends");
+    assert!(
+        landed
+            .iter()
+            .any(|l| l.get("record").and_then(|x| x.as_f64()) == Some(ids.landed_in_hull as f64)),
+        "the end inside the emitted box is a landed end"
+    );
+
+    // The human summary is the default output and names the file.
+    let (ok, text, stderr) = run_cli(&[path.as_os_str()]);
+    assert!(ok, "{stderr}");
+    assert!(text.contains("planted.chitubox") && text.contains("sha256"), "{text}");
+
+    // A bad path is a usage error, not a crash.
+    let (ok, _, stderr) = run_cli(&[std::ffi::OsStr::new("/nonexistent/none.chitubox")]);
+    assert!(!ok && stderr.contains("plinth-audit geometry"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file the real emitter wrote (committed under `corpus/baseline`), through
+/// the real binary. It has no joint records, so it has no heads; what matters
+/// is that the reader, the four reports and the JSON all accept real bytes.
+#[test]
+fn the_binary_reads_a_file_the_real_emitter_wrote() {
+    let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("corpus")
+        .join("baseline")
+        .join("Sphere.chitubox");
+    if !p.exists() {
+        eprintln!("SKIP: {} is absent", p.display());
+        return;
+    }
+    let doc = cli_json(&p);
+    let model = &doc.get("models").and_then(|m| m.as_array()).expect("models")[0];
+    let records = model.get("records").and_then(|r| r.as_f64()).expect("records");
+    assert!(records > 0.0, "the real file has support records");
+    for key in ["heads", "intrusion", "topology", "contacts"] {
+        assert!(model.get(key).is_some(), "missing {key}");
+    }
+}
+
+#[test]
+fn the_binary_prints_the_baseline_table_for_the_v19_files() {
+    let dir = v19_dir();
+    let files: Vec<PathBuf> = ["Cylinder", "Sphere"]
+        .iter()
+        .map(|s| dir.join(s).join(format!("{s}.chitubox")))
+        .collect();
+    if files.iter().any(|f| !f.exists()) {
+        eprintln!("SKIP: v19 files absent under {}", dir.display());
+        return;
+    }
+    let args: Vec<&std::ffi::OsStr> = files.iter().map(|f| f.as_os_str()).collect();
+    let (ok, text, stderr) = run_cli(&args);
+    assert!(ok, "{stderr}");
+    let row = |name: &str| {
+        text.lines()
+            .find(|l| l.starts_with(name) && l.contains(char::is_numeric))
+            .unwrap_or_else(|| panic!("no table row for {name}:\n{text}"))
+            .split_whitespace()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(row("Cylinder")[1], "33");
+    assert_eq!(row("Sphere")[1], "18");
 }

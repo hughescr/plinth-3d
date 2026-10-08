@@ -10,7 +10,7 @@
 //! are the mesh vertices on the end plane, not points rebuilt from the header.
 
 use super::{is_chain_frustum, par_map, GeoCtx};
-use crate::mesh::Mesh;
+use crate::mesh::{Inside, Mesh};
 use crate::primitives::Primitive;
 use crate::reader::{RecordKind, SupportRecord};
 use crate::vec3::{self as v, Aabb, V3};
@@ -313,7 +313,9 @@ pub fn measure(ctx: &GeoCtx) -> TopologyReport {
     }
 
     // --- landed branch ends --------------------------------------------------
-    let boxes: Vec<Option<Aabb>> = ctx.prims.iter().map(|p| p.map(|p| p.aabb())).collect();
+    // The solids a landing is judged against are the EMITTED ones: the header
+    // primitive where the record mesh lies on it, the record mesh itself where
+    // it does not (a convex hull, a trimmed record). Built once per record.
     let solid_ids: Vec<usize> = (0..n)
         .filter(|&i| {
             ctx.prims[i].is_some()
@@ -326,6 +328,14 @@ pub fn measure(ctx: &GeoCtx) -> TopologyReport {
                 )
         })
         .collect();
+    let built = par_map(solid_ids.len(), ctx.params.threads, |k| {
+        EmittedSolid::build(ctx.rec(solid_ids[k]), ctx.prims[solid_ids[k]])
+    });
+    let mut solids: Vec<Option<EmittedSolid>> = (0..n).map(|_| None).collect();
+    for (k, s) in built.into_iter().enumerate() {
+        solids[solid_ids[k]] = s;
+    }
+    let boxes: Vec<Option<Aabb>> = solids.iter().map(|s| s.as_ref().map(EmittedSolid::aabb)).collect();
     let mut ends: Vec<(usize, usize)> = Vec::new();
     for &i in &solid_ids {
         if !is_chain_frustum(ctx.rec(i).kind) {
@@ -339,7 +349,7 @@ pub fn measure(ctx: &GeoCtx) -> TopologyReport {
             let inside_other = solid_ids.iter().any(|&j| {
                 j != i
                     && boxes[j].is_some_and(|b| b.contains(p))
-                    && ctx.prims[j].is_some_and(|pr| pr.contains(p))
+                    && solids[j].as_ref().is_some_and(|s| s.signed_distance(p) <= 0.0)
             });
             if inside_other {
                 ends.push((i, slot));
@@ -359,8 +369,12 @@ pub fn measure(ctx: &GeoCtx) -> TopologyReport {
             if j == i {
                 continue;
             }
-            if let Some(pr) = ctx.prims[j] {
-                let s = pr.signed_distance(p);
+            let Some(b) = boxes[j] else { continue };
+            if !b.contains(p) {
+                continue;
+            }
+            if let Some(sol) = &solids[j] {
+                let s = sol.signed_distance(p);
                 if s <= 0.0 && host.is_none_or(|(hs, _)| s < hs) {
                     host = Some((s, j));
                 }
@@ -368,9 +382,9 @@ pub fn measure(ctx: &GeoCtx) -> TopologyReport {
         }
         let mut proud_host = 0.0f64;
         if let Some((_, h)) = host {
-            if let Some(pr) = ctx.prims[h] {
+            if let Some(sol) = &solids[h] {
                 for q in &ring {
-                    proud_host = proud_host.max(pr.signed_distance(*q));
+                    proud_host = proud_host.max(sol.signed_distance(*q));
                 }
             }
         }
@@ -384,8 +398,8 @@ pub fn measure(ctx: &GeoCtx) -> TopologyReport {
                 if !b.expanded(rad.max(1.0)).contains(*q) {
                     continue;
                 }
-                if let Some(pr) = ctx.prims[j] {
-                    m = m.min(pr.signed_distance(*q));
+                if let Some(sol) = &solids[j] {
+                    m = m.min(sol.signed_distance(*q));
                 }
             }
             if m > 0.0 && m.is_finite() {
@@ -405,6 +419,53 @@ pub fn measure(ctx: &GeoCtx) -> TopologyReport {
     });
     rep.landed = landed;
     rep
+}
+
+/// The solid a record actually draws. Where its mesh lies on the header
+/// primitive the primitive stands for it (exact and cheap). Where it does not
+/// (a convex-hull junction, a trimmed record) the welded record mesh is the
+/// solid, with the header primitive as the fallback for a point the mesh cannot
+/// classify (an open or grazed mesh).
+enum EmittedSolid {
+    Analytic(Primitive),
+    Drawn { mesh: Mesh, header: Primitive },
+}
+
+impl EmittedSolid {
+    fn build(rec: &SupportRecord, prim: Option<Primitive>) -> Option<Self> {
+        let prim = prim?;
+        if rec.soup.is_empty() || prim.verify_against_soup(rec).agrees {
+            return Some(Self::Analytic(prim));
+        }
+        Some(Self::Drawn {
+            mesh: Mesh::weld_tolerant(&rec.soup, WELD_TOL_MM),
+            header: prim,
+        })
+    }
+
+    fn aabb(&self) -> Aabb {
+        match self {
+            Self::Analytic(p) => p.aabb(),
+            Self::Drawn { mesh, .. } => mesh.bbox,
+        }
+    }
+
+    /// Signed distance to the drawn surface, negative inside.
+    fn signed_distance(&self, p: V3) -> f64 {
+        match self {
+            Self::Analytic(prim) => prim.signed_distance(p),
+            Self::Drawn { mesh, header } => {
+                let Some(hit) = mesh.nearest_surface(p) else {
+                    return header.signed_distance(p);
+                };
+                match mesh.point_inside(p) {
+                    Inside::Inside => -hit.distance_mm,
+                    Inside::Outside => hit.distance_mm,
+                    Inside::Indeterminate => header.signed_distance(p),
+                }
+            }
+        }
+    }
 }
 
 /// A Member whose mesh does not lie on its header frustum: its smallest

@@ -17,8 +17,10 @@
 //!
 //! Batch shape: the sample rings of one record are cut into runs; the model
 //! triangles within [`NEAR_MM`] of a run's box are fetched once per run, and
-//! every sample of the run tests against that short list. Parity (the inside
-//! test) runs only for samples that have a triangle within [`NEAR_MM`].
+//! every sample of the run tests against that short list. Near samples that
+//! cannot raise a maximum skip the parity test; far samples (no triangle within
+//! [`NEAR_MM`]) always take it, and a far sample found inside gets its exact
+//! depth from the unbounded nearest-surface search.
 
 use super::{par_map, ring_points, GeoCtx};
 use crate::mesh::RayHit;
@@ -30,11 +32,11 @@ use crate::vec3::{self as v, Aabb, V3};
 pub const AXIAL_STEP_MM: f64 = 0.05;
 /// Points per ring.
 pub const AZIMUTH_SAMPLES: usize = 24;
-/// Samples farther than this from every model triangle are not near the
-/// model, so they are not inside any shell thinner than this. Records buried
-/// deeper than this inside the solid do not occur in an emitted field (a
-/// support enters the solid from outside, so its near-surface rings are
-/// sampled first); they would be reported at the depth of those rings.
+/// Search radius of the cheap local triangle fetch. It only speeds the common
+/// case (a sample near the surface); it never limits an outcome. A sample with
+/// no triangle within this radius still gets the inside test, and when it is
+/// inside its depth comes from an unbounded nearest-surface search, so a
+/// record buried deeper than this reports its true depth.
 pub const NEAR_MM: f64 = 1.0;
 /// Rings per run of one triangle fetch.
 const RUN_RINGS: usize = 12;
@@ -154,10 +156,10 @@ fn measure_record(ctx: &GeoCtx, ri: usize) -> Option<RecordIntrusion> {
         for p in run.iter().flatten() {
             bb.add_point(*p);
         }
+        // Every triangle within NEAR_MM of the run's box. A sample whose
+        // nearest listed triangle is farther than NEAR_MM is therefore farther
+        // than NEAR_MM from the whole model; the list may well be empty.
         let near = ctx.mesh.triangles_in_box(&bb.expanded(NEAR_MM));
-        if near.is_empty() {
-            continue;
-        }
         let tris: Vec<[V3; 3]> = near.iter().map(|&t| ctx.mesh.tri(t)).collect();
         for &p in run.iter().flatten() {
             let in_ball = balls.iter().any(|(c, r)| v::dist(*c, p) < *r);
@@ -168,14 +170,24 @@ fn measure_record(ctx: &GeoCtx, ri: usize) -> Option<RecordIntrusion> {
             for t in &tris {
                 d = d.min(v::point_triangle_closest(p, t[0], t[1], t[2]).0);
             }
-            // Skip the inside test when this sample cannot beat any depth it
-            // could still raise.
-            let useful = d <= NEAR_MM && (d > best_all || (!in_ball && d > best));
-            if !useful {
+            let known = d <= NEAR_MM;
+            // Near samples skip the inside test when they cannot beat any depth
+            // they could still raise. A far sample has no such bound: it may be
+            // deep inside the solid, so it always gets the test.
+            if known && !(d > best_all || (!in_ball && d > best)) {
                 continue;
             }
             match ctx.inside(p, &mut hits) {
                 Some(true) => {
+                    // Far inside points get their exact depth from the
+                    // unbounded nearest-surface search.
+                    let d = if known {
+                        d
+                    } else {
+                        ctx.mesh
+                            .nearest_surface(p)
+                            .map_or(NEAR_MM, |h| h.distance_mm)
+                    };
                     best_all = best_all.max(d);
                     if !in_ball && d > best {
                         best = d;
