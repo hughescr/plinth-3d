@@ -3784,6 +3784,10 @@ fn print_sweep_disclosure(
                         GrazeReason::Refused(reason) => format!("head refused: {reason:?}"),
                         GrazeReason::NoLegalPost => "no legal post".to_owned(),
                         GrazeReason::NotAnArm => "a brace, mast or tie".to_owned(),
+                        GrazeReason::HostNearModel => {
+                            "a member below it stands near the model, a re-route could not move its head"
+                                .to_owned()
+                        }
                         GrazeReason::HostTooThin => {
                             "its host is thinner than the joint, the post would raise it".to_owned()
                         }

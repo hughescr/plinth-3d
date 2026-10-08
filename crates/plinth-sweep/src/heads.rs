@@ -741,6 +741,10 @@ pub enum GrazeReason {
     /// `|DK|` (the sizing ruling left to Craig: a post that falls back to its
     /// ledger section would fit hosts it cannot fit today).
     HostTooThin,
+    /// A member below the arm (its host or the host's own) stands within the
+    /// final gap of the model: the clearance re-route would have to move it
+    /// with the head on it, and it never moves a headed arm.
+    HostNearModel,
     /// A brace, a mast or a tie: warned, never converted.
     NotAnArm,
     /// The arm was made or moved after the conversion ran.

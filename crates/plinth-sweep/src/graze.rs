@@ -145,6 +145,26 @@ pub(crate) fn convert(
     for (slot, &member) in members.iter().enumerate() {
         slot_of[member] = Some(slot);
     }
+    // Members whose drawn solid already stands within the final gap of the
+    // model, in ONE census call. The clearance re-route moves such a member
+    // with everything that rests on it, and it never moves a headed arm: a
+    // head converted under one would lock the re-route out (the overhang
+    // table's post 26: `clearance_census::a_rerouted_field...`).
+    let subset: Vec<SweepStrut> = members.iter().map(|&member| struts[member].clone()).collect();
+    let near_model: std::collections::BTreeSet<u32> = crate::member_clearance::model_clearance_census(
+        Some(surface),
+        &subset,
+        &arms,
+        joins.layer_plan,
+        joins.plate_z_mm,
+        rule.gap_mm,
+        slender.lean.face_zone_factor(),
+        &slender.history.hidden,
+    )
+    .within_gap
+    .iter()
+    .map(|near| near.member)
+    .collect();
     // The field's shafts, every grazer's old one included: each grazer is
     // excepted from its own checks, and a converted arm's new shaft is
     // stamped beside the old, so a later grazer sees both (conservative).
@@ -166,6 +186,25 @@ pub(crate) fn convert(
         let Some(slot) = slot_of[g] else { continue };
         if carries[g] {
             outcome.graze_reasons.push((id, GrazeReason::CarriesMembers));
+            continue;
+        }
+        // A host chain with a member near the model: left straight, warned.
+        let mut chain = struts[g].landing;
+        let mut hops = 0_usize;
+        let mut host_near_model = false;
+        while let Landing::Strut { id: host, .. } = chain {
+            if near_model.contains(&host) {
+                host_near_model = true;
+                break;
+            }
+            hops += 1;
+            match struts.get(host as usize) {
+                Some(next) if hops <= struts.len() => chain = next.landing,
+                _ => break,
+            }
+        }
+        if host_near_model {
+            outcome.graze_reasons.push((id, GrazeReason::HostNearModel));
             continue;
         }
         let arm = &arms[slot];
