@@ -37,6 +37,7 @@ mod head_first;
 mod head_hookup;
 mod head_join;
 mod heads_everywhere;
+mod high_poly_keeps_every_rung;
 mod lattice_align;
 mod lip_seat_sized;
 mod load_insertion;

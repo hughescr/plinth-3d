@@ -610,6 +610,22 @@ pub enum RemovalCoverage {
     AnyLayerUnchecked,
 }
 
+/// **The sweep's own memory budget for the model surface index**, in bytes:
+/// 1 GiB (fix/surface-budget, 2026-10-09).
+///
+/// A memory ceiling, not a physics value. It is sized from the measured index
+/// estimate of 700-770 bytes per face (Awakened Tree, 429k faces, needs about
+/// 300 MiB; Bat Cat Owl, 129k faces, 87 MiB), so 1 GiB covers about 1.3 million
+/// faces, far under the machine ceiling of about 100 GB. A surface over it is
+/// not built, and that is a model-level WARNING in the log and the SUMMARY line
+/// (`SweepRunReport::model_surface_built`), never silent.
+///
+/// This replaced the borrowed `DECIMATION_PROBE_MAX_GRID_BYTES` (64 MiB, a
+/// decimation placeholder): on a mesh over about 94k faces that cap left the
+/// sweep with no surface, so thickening was refused "for the model", the D8
+/// model ties never ran and no head was built. Decimation keeps its own cap.
+pub const MODEL_SURFACE_MAX_BYTES: u64 = 1 << 30;
+
 /// Everything the sweep reads, gathered once from the registry.
 #[derive(Clone, Copy, Debug)]
 pub struct SweepPolicy {
@@ -890,11 +906,11 @@ pub struct SweepPolicy {
     /// lean law's largest step per layer. **On in production.** The drill
     /// turns it off, and the shoulders come back.
     pub load_step_taper: bool,
-    /// `DECIMATION_PROBE_GRID_PITCH_MM` and `DECIMATION_PROBE_MAX_GRID_BYTES`:
-    /// the registered parity-grid pitch and byte cap of a distance-probe
-    /// surface index. The head-join rule builds one over the model to measure
-    /// a moved member's clearance; the clearance itself is a BVH walk and does
-    /// not depend on the pitch.
+    /// `DECIMATION_PROBE_GRID_PITCH_MM` (the registered parity-grid pitch of a
+    /// distance-probe surface index) and [`MODEL_SURFACE_MAX_BYTES`] (the
+    /// sweep's own byte budget for it). The sweep builds one over the model to
+    /// measure clearance, thicken, tie and head; the clearance itself is a BVH
+    /// walk and does not depend on the pitch.
     pub surface_index_pitch_mm: f64,
     pub surface_index_max_bytes: u64,
     /// Whether a brace or a mast must clear the model by the final gap and
@@ -1045,10 +1061,7 @@ impl SweepPolicy {
                 .decimation_probe_grid_pitch_mm()
                 .diagnostic()
                 .get(),
-            surface_index_max_bytes: placeholders
-                .decimation_probe_max_grid_bytes()
-                .diagnostic()
-                .get(),
+            surface_index_max_bytes: MODEL_SURFACE_MAX_BYTES,
             member_clearance: true,
             drawn_solid_descent: true,
             clearance_reroute: true,
@@ -3383,8 +3396,12 @@ pub fn run_sweep_with_holes(
     // lowering. Published and warned on, never refused.
     {
         let emitted = adapter::arms_of(&sweep_plan);
+        // `surface()` builds the surface if nothing has yet, so after this
+        // call the cell is settled and the flag below is the whole truth.
+        let surface = head_join_context.surface();
+        sweep_plan.report.model_surface_built = surface.is_some();
         sweep_plan.report.member_model_clearance = member_clearance::model_clearance_census(
-            head_join_context.surface(),
+            surface,
             &sweep_plan.struts,
             &emitted,
             plan,
@@ -4612,6 +4629,8 @@ fn build_report(
         lip_seat: crate::lip_seat::LipSeatOutcome::default(),
         clearance_reroute: crate::lip_seat::LipSeatOutcome::default(),
         member_model_clearance: report::MemberModelClearance::default(),
+        // Set by the caller once the surface cell has been read.
+        model_surface_built: false,
         hidden_cavity: cavity::CavityCensus::default(),
         junctions_at_parent_top,
         junctions_mid_shaft,

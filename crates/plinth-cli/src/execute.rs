@@ -23,6 +23,7 @@ use plinth_pipeline::{
     prepare, registered_decimation_budget, registered_support_request, AssumedPrintSize,
     ModelPreparationOutcome, ModelPreparationReport, OrientationPolicy, PipelineError,
     PipelineExitCode, PreWriteGate, PrepareReport, PrepareRequest, SupportedGeometry,
+    SweepModelWarnings,
 };
 
 use crate::{CacheMode, OrientSelection, PlacementSelection, PrepareSelection};
@@ -232,7 +233,8 @@ fn print_report(selection: &PrepareSelection, report: &PrepareReport) {
     }
 
     println!(
-        "SUMMARY  emitted={emitted}  gate-refused={refused}  failed={failed}  stopped={stopped}"
+        "SUMMARY  emitted={emitted}  gate-refused={refused}  failed={failed}  stopped={stopped}{}",
+        sweep_warning_summary(&report.models)
     );
     if refused > 0 {
         // Said outright, because a refused model looks like a missing file and
@@ -246,6 +248,52 @@ fn print_report(selection: &PrepareSelection, report: &PrepareReport) {
     for line in near_parallel_lines(near_parallel_counts()) {
         println!("{line}");
     }
+}
+
+/// The sweep's two model-level warnings for the SUMMARY line
+/// (fix/surface-budget, 2026-10-09), read off the emitted models.
+///
+/// Always present, with `none` / `0 in none` when nothing is wrong, so a quiet
+/// run and a run that never counted do not look alike.
+fn sweep_warning_summary(models: &[ModelPreparationReport]) -> String {
+    let rows: Vec<(&str, SweepModelWarnings)> = models
+        .iter()
+        .filter_map(|model| match &model.outcome {
+            ModelPreparationOutcome::Artifact { sweep_warnings, .. } => {
+                Some((model.model.as_str(), *sweep_warnings))
+            }
+            _ => None,
+        })
+        .collect();
+    sweep_warning_summary_of(&rows)
+}
+
+/// [`sweep_warning_summary`] on already-extracted rows, so the wording is
+/// testable without building a whole report.
+fn sweep_warning_summary_of(rows: &[(&str, SweepModelWarnings)]) -> String {
+    let join = |names: Vec<&str>| {
+        if names.is_empty() {
+            "none".to_owned()
+        } else {
+            names.join(",")
+        }
+    };
+    let missing: Vec<&str> = rows
+        .iter()
+        .filter(|(_, w)| w.model_surface_missing)
+        .map(|(name, _)| *name)
+        .collect();
+    let unbraced: Vec<&str> = rows
+        .iter()
+        .filter(|(_, w)| w.unbraced_over_limit_runs > 0)
+        .map(|(name, _)| *name)
+        .collect();
+    let runs: usize = rows.iter().map(|(_, w)| w.unbraced_over_limit_runs).sum();
+    format!(
+        "  model-surface-missing={}  unbraced-over-limit={runs} in {}",
+        join(missing),
+        join(unbraced),
+    )
 }
 
 /// The end-of-run near-parallel disclosure, built rather than printed so the
@@ -1171,7 +1219,27 @@ mod tests {
     use super::{
         coverage_gap_warning_lines, coverage_lines, coverage_repair_lines, near_parallel_lines,
         no_orient_lines, orientation_source_lines, remedies_tried_line, repair_lines,
+        sweep_warning_summary_of, SweepModelWarnings,
     };
+
+    /// The SUMMARY line names the models whose surface is missing and counts
+    /// the unbraced runs over their limit, and says so when there are none.
+    #[test]
+    fn the_summary_line_names_missing_surfaces_and_counts_unbraced_runs() {
+        let quiet = SweepModelWarnings::default();
+        let bad = SweepModelWarnings {
+            model_surface_missing: true,
+            unbraced_over_limit_runs: 9,
+        };
+        assert_eq!(
+            sweep_warning_summary_of(&[("a", quiet), ("b", bad), ("c", bad)]),
+            "  model-surface-missing=b,c  unbraced-over-limit=18 in b,c"
+        );
+        assert_eq!(
+            sweep_warning_summary_of(&[("a", quiet)]),
+            "  model-surface-missing=none  unbraced-over-limit=0 in none"
+        );
+    }
 
     /// Counts with exactly one site charged.
     ///
