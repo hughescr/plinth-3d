@@ -1135,12 +1135,14 @@ pub fn search(
             .iter()
             .map(|entry| grid.candidates()[entry.candidate].direction)
             .collect();
+        let phase_before = geom_kernel::perf::set_phase(geom_kernel::perf::Phase::Prefilter);
         let prefiltered = measurer.measure_support_demand(
             mesh,
             &exact.table,
             &admitted_directions,
             crate::demand::DemandFidelity::Prefilter,
         );
+        geom_kernel::perf::set_phase(phase_before);
         for (index, entry) in commit_record.ranking.iter_mut().enumerate() {
             let mut row = CommitDemandRecord::unmeasured(
                 entry.candidate,
@@ -1175,12 +1177,14 @@ pub fn search(
             .iter()
             .map(|entry| grid.candidates()[entry.candidate].direction)
             .collect();
+        let phase_before = geom_kernel::perf::set_phase(geom_kernel::perf::Phase::Production);
         let produced = measurer.measure_support_demand(
             mesh,
             &exact.table,
             &finalist_directions,
             crate::demand::DemandFidelity::Production,
         );
+        geom_kernel::perf::set_phase(phase_before);
         for (index, entry) in commit_record.ranking[..finalists].iter_mut().enumerate() {
             let Some(row) = commit_tier_demand
                 .iter_mut()

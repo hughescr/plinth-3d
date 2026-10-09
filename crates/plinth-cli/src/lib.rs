@@ -27,7 +27,7 @@ use plinth_pipeline::{OutputProfile, Placement};
 
 pub const ROOT_USAGE: &str = "Usage: plinth <subcommand>\n\nSubcommands:\n  prepare  Prepare every source model in a directory\n\nOptions:\n  -h, --help     Show help\n  -V, --version  Show version";
 
-pub const PREPARE_USAGE: &str = "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|none|pinned:DIR] [--no-orient=LIST] [--placement legacy|sweep] [--wall-mm MM] [--no-cache]\n\nOptions:\n  --input-models-dir DIR  Directory containing source models\n  --output PROFILE       Output profile; exactly: saturn4-ultra\n  --out-dir DIR          Destination directory\n  --orient MODE          dense (default) searches every model's build orientation; none uses every model exactly as drawn (no rotation; still centred and lifted off the plate); pinned:DIR replays the rotation DIR/<stem>.pipeline.json records, per model by stem.\n                         One model is used as drawn under any mode when it is named in --no-orient, carries the Finder tag plinth-no-rotate (macOS), has plinth-no-rotate in its user.xdg.tags attribute (Linux), or has a marker file <stem>.asdrawn beside it (any platform). The report says, per model, \"as drawn (<reason>)\" or \"orientation searched\"\n  --no-orient=LIST       Use these models exactly as drawn, under any --orient mode: a comma-separated list of file names in the input directory, with or without .stl, and simple globs (* any run of characters, ? one character), e.g. --no-orient=Round_*,make_overhang_table. Also --no-orient LIST; may be given more than once. A name that matches no model prints a WARNING and the run continues\n  --placement MODE       legacy (default) is the sealed support run and its pre-write gates; sweep is the EXPERIMENTAL slice-sweep core, which runs NO pre-write gate; it leans and merges arms onto other shafts, ties long members with |X| braces, thickened roots and masts, and keeps each brace's and mast's solid clear of the model and of other members, but draws no joint spheres and does not clearance-check an arm's own shaft against the model\n  --wall-mm MM           Hollow shell wall thickness in mm, no finer than the frozen hollow voxel pitch; omit for the registered default, raise it for a piece that gets handled\n  --no-cache             Disable cache use for this request\n  -h, --help             Show help";
+pub const PREPARE_USAGE: &str = "Usage: plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--orient dense|none|pinned:DIR] [--no-orient=LIST] [--placement legacy|sweep] [--wall-mm MM] [--no-cache] [--perf DIR]\n\nOptions:\n  --input-models-dir DIR  Directory containing source models\n  --output PROFILE       Output profile; exactly: saturn4-ultra\n  --out-dir DIR          Destination directory\n  --orient MODE          dense (default) searches every model's build orientation; none uses every model exactly as drawn (no rotation; still centred and lifted off the plate); pinned:DIR replays the rotation DIR/<stem>.pipeline.json records, per model by stem.\n                         One model is used as drawn under any mode when it is named in --no-orient, carries the Finder tag plinth-no-rotate (macOS), has plinth-no-rotate in its user.xdg.tags attribute (Linux), or has a marker file <stem>.asdrawn beside it (any platform). The report says, per model, \"as drawn (<reason>)\" or \"orientation searched\"\n  --no-orient=LIST       Use these models exactly as drawn, under any --orient mode: a comma-separated list of file names in the input directory, with or without .stl, and simple globs (* any run of characters, ? one character), e.g. --no-orient=Round_*,make_overhang_table. Also --no-orient LIST; may be given more than once. A name that matches no model prints a WARNING and the run continues\n  --placement MODE       legacy (default) is the sealed support run and its pre-write gates; sweep is the EXPERIMENTAL slice-sweep core, which runs NO pre-write gate; it leans and merges arms onto other shafts, ties long members with |X| braces, thickened roots and masts, and keeps each brace's and mast's solid clear of the model and of other members, but draws no joint spheres and does not clearance-check an arm's own shaft against the model\n  --wall-mm MM           Hollow shell wall thickness in mm, no finer than the frozen hollow voxel pitch; omit for the registered default, raise it for a piece that gets handled\n  --no-cache             Disable cache use for this request\n  --perf DIR             Write per-model work counters and phase times to DIR/<model>.perf.json (outside the output folder; the emitted file is unchanged). PLINTH_PERF_DIR=DIR does the same when --perf is absent\n  -h, --help             Show help";
 
 /// Whether this request may use a `plinth-pipeline` cache.
 ///
@@ -145,6 +145,9 @@ pub struct PrepareSelection {
     /// value straight to `plinth_hollow::HollowRequest::wall_mm`.
     pub wall_mm: PositiveFinite,
     pub cache: CacheMode,
+    /// `--perf DIR`: where the write-only per-model counter sidecars go. It
+    /// reaches no decision and no digested output.
+    pub perf_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -293,6 +296,7 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
     let mut no_orient = NoOrientList::default();
     let mut cache = CacheMode::Enabled;
     let mut no_cache_seen = false;
+    let mut perf_dir = None;
     let mut index = 0;
     while index < arguments.len() {
         let argument = &arguments[index];
@@ -314,6 +318,9 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
                     &mut index,
                     PathBuf::from,
                 )?;
+            }
+            Some("--perf") => {
+                set_value(&mut perf_dir, "--perf", arguments, &mut index, PathBuf::from)?;
             }
             Some("--output") => {
                 let raw = take_value("--output", arguments, &mut index)?;
@@ -435,6 +442,7 @@ fn parse_prepare(arguments: &[OsString]) -> Result<CliAction, ParseError> {
             None => registered_wall_default()?,
         },
         cache,
+        perf_dir,
     }))
 }
 
@@ -515,6 +523,24 @@ mod tests {
         // compatibility representation sits between CLI and policy assembly.
         fn later_prepare_request_resolver(_: PrepareSelection) {}
         later_prepare_request_resolver(parsed);
+    }
+
+    /// `--perf DIR` only names where the write-only counters go; absent, no
+    /// counting happens, and it can be given once.
+    #[test]
+    fn perf_names_a_sidecar_folder_and_defaults_to_off() {
+        assert_eq!(selection(parse_args(stable_arguments()).unwrap()).perf_dir, None);
+        let mut arguments = stable_arguments().to_vec();
+        arguments.extend(["--perf", "counters"]);
+        assert_eq!(
+            selection(parse_args(arguments.clone()).unwrap()).perf_dir,
+            Some(PathBuf::from("counters"))
+        );
+        arguments.extend(["--perf", "again"]);
+        assert!(matches!(
+            parse_args(arguments),
+            Err(ParseError::DuplicateFlag("--perf"))
+        ));
     }
 
     /// The three sanctioned spellings, and nothing between them.

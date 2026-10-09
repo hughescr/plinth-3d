@@ -480,6 +480,32 @@ With the variable unset no file is opened and nothing is written — the trail i
 instrumentation, and it changes no verdict either way. The run summary names the file and
 the row count when one is open.
 
+## Measuring work: `--perf DIR`
+
+A speed change is judged by exact counts of the work it removes, because a wall-clock gain
+below about 5 % does not show above the noise. `plinth prepare … --perf DIR` (or
+`PLINTH_PERF_DIR=DIR` when the flag is absent) writes `DIR/<model>.perf.json`
+(`plinth-perf/1`): per phase (`Load`, `Repair`, `Decimate`, `OrientTable`, `Prefilter`,
+`Production`, `Hollow`, `SealFields`, `FinalSweep`, `Emit`) the wall time, the counters and the
+span times, plus `totals`. The file is rewritten at every phase change with
+`"partial": true`, so a killed run still says where it was, and written last with
+`"partial": false`. It sits outside the model's output folder, so no digest sees it.
+
+- **Write-only.** `geom_kernel::perf` has no read API; no engine code can branch on a count or
+  a clock. With the flag off, a charge is one `Relaxed` load. The emitted `.chitubox` is
+  byte-identical with `--perf` off and on; check it when you touch a charge.
+- **Batch-first.** A kernel counts into local integers and charges once per query, call or
+  batch, never inside a per-triangle or per-cell loop. A brute-force scan is charged as
+  `rows * faces` before its `par_iter`.
+- **Classes.** `work` counters are exact logical work and must be equal at every thread
+  count; `sched` counters (`frame.*.speculative`: the deferred-pair batch is sized by the
+  thread count) are recorded and never compared. A `work` counter that differs between 4 and
+  16 threads is a defect.
+- **Adding a counter.** Append one line to `works!` in `rust/geom_kernel/src/perf.rs` and call
+  `perf::add` from the file that owns the site (`plinth_sweep::perf` re-exports it for
+  `plinth-pipeline`). `crates/plinth-sweep/tests/it/perf_counters.rs` runs a real sweep at 1
+  and 8 threads and compares the sidecars.
+
 ## Corpus provisioning
 
 The test models are inputs, not source, and are not stored in git — the largest is over

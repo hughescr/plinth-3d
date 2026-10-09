@@ -960,6 +960,11 @@ fn sweep_pass(
 ) -> DownSweepOutcome {
     let cells = grid.cells();
     let area = grid.cell_area_mm2();
+    crate::perf::add(crate::PerfWork::SweepDownPasses, 1);
+    crate::perf::add(
+        crate::PerfWork::SweepDownCellLayers,
+        crate::perf::count(cells).saturating_mul(crate::perf::count(slices.len())),
+    );
     let mut outcome = DownSweepOutcome {
         min_layer_area_mm2: f64::INFINITY,
         ..DownSweepOutcome::default()

@@ -264,6 +264,14 @@ pub fn footprint_pairs(
 fn scan_rows(mesh: &Mesh, centres_mm: &[[f64; 3]], radii_mm: &[f64]) -> Vec<Vec<u32>> {
     let verts = mesh.verts();
     let tris = mesh.tris();
+    crate::perf::add(
+        crate::PerfWork::NearestFootprintNormalRows,
+        crate::perf::count(centres_mm.len()),
+    );
+    crate::perf::add(
+        crate::PerfWork::NearestFootprintNormalTrisTested,
+        crate::perf::count(centres_mm.len()).saturating_mul(crate::perf::count(tris.len())),
+    );
     centres_mm
         .par_iter()
         .zip(radii_mm.par_iter())
@@ -712,6 +720,14 @@ fn nearest_admitted(mesh: &Mesh, queries: &[([f64; 3], f64)]) -> Vec<Option<(u32
             Some(([a, b, c], unit))
         })
         .collect();
+    crate::perf::add(
+        crate::PerfWork::NearestFootprintNormalRows,
+        crate::perf::count(queries.len()),
+    );
+    crate::perf::add(
+        crate::PerfWork::NearestFootprintNormalTrisTested,
+        crate::perf::count(queries.len()).saturating_mul(crate::perf::count(faces.len())),
+    );
     queries
         .par_iter()
         .map(|&(point, max_normal_z)| {

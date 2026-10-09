@@ -1526,6 +1526,12 @@ pub fn slice_stack(
     planes: &[f64],
     limits: SliceStackLimits,
 ) -> Result<Vec<Vec<SliceSolid>>, GenericPerceptionError> {
+    let _perf_span = geom_kernel::perf::span(geom_kernel::perf::Span::SliceStack);
+    geom_kernel::perf::add(geom_kernel::perf::Work::SliceStackCalls, 1);
+    geom_kernel::perf::add(
+        geom_kernel::perf::Work::SliceLayers,
+        geom_kernel::perf::count(planes.len()),
+    );
     let surface = NativeSurface::from_indexed(
         mesh.verts(),
         mesh.tris(),
@@ -1535,6 +1541,7 @@ pub fn slice_stack(
         },
     )
     .map_err(|error| GenericPerceptionError::Surface(error.to_string()))?;
+    geom_kernel::perf::add(geom_kernel::perf::Work::SliceSurfaceBuilds, 1);
     let sliced = surface
         .slice_z_batch(
             planes,

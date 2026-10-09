@@ -1512,6 +1512,7 @@ fn chamfer_distance(grid: &Grid, member: &[bool], out: &mut [f32]) {
     let rows = grid.rows();
     let pitch = grid.pitch_mm() as f32;
     let diagonal = pitch * core::f32::consts::SQRT_2;
+    crate::perf::add(crate::PerfWork::ReachChamferCells, crate::perf::count(grid.cells()));
     for cell in 0..grid.cells() {
         out[cell] = if member[cell] { f32::INFINITY } else { 0.0 };
     }

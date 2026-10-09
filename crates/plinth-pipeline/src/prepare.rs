@@ -57,6 +57,7 @@ use plinth_hollow::{
 use plinth_mesh::{load_binary_stl, WeldPolicy};
 use plinth_orient::{run as run_orientation, OrientRequest, OrientedModel};
 use plinth_support::{run_support, SupportRequest, SupportRunError};
+use plinth_sweep::perf::{set_phase, Phase as PerfPhase};
 
 use crate::coverage_evidence::{self, RenderMesh};
 use crate::{
@@ -925,14 +926,19 @@ pub fn prepare(request: PrepareRequest) -> Result<PrepareReport, PipelineError> 
             continue;
         }
 
-        models.push(prepare_one(
+        // Write-only perf sidecar, one per model, outside the model's output
+        // folder; a no-op unless the CLI switched `--perf` on.
+        plinth_sweep::perf::begin_model(model.as_str());
+        let prepared = prepare_one(
             &model,
             &source_path,
             &target,
             &policy,
             listed,
             request.stop_after,
-        ));
+        );
+        plinth_sweep::perf::end_model();
+        models.push(prepared);
     }
 
     Ok(PrepareReport {
@@ -1101,10 +1107,12 @@ fn prepare_one(
     // bit-identical with the reason in `RepairEvidence::actions_skipped`, and
     // every stage below judges the model exactly as it did before this stage
     // existed.
+    set_phase(PerfPhase::Repair);
     clock.entering("MeshRepair");
     let (mesh, evidence) = plinth_mesh::repair_mesh(&mesh).into_parts();
     repair = Some(evidence);
 
+    set_phase(PerfPhase::Decimate);
     clock.entering("Decimation");
     let outcome = match run_decimation(&mesh, policy.resources.decimation()) {
         Ok(outcome) => outcome,
@@ -1148,6 +1156,7 @@ fn prepare_one(
         );
     }
 
+    set_phase(PerfPhase::OrientTable);
     clock.entering("Orientation");
     // **As drawn?** (GitHub issue #1, owner spec 2026-10-01.) `--orient none`
     // marks every model; then the run's `--no-orient` list; otherwise this
@@ -1521,6 +1530,7 @@ pub fn run_from_oriented(
     // Its own clock, scoped to the hollow-and-drill stage it times. This is the
     // longest silent stretch on a big model before the sealed run starts.
     let clock = plinth_support::StageClock::start(format!("model {model}"));
+    set_phase(PerfPhase::Hollow);
     clock.entering("Hollow");
     let output = match hollow_stage(oriented, &policy.hollow) {
         Ok(output) => output,
@@ -1921,6 +1931,7 @@ pub fn seal_and_emit(
             source,
         })
     })?;
+    set_phase(PerfPhase::SealFields);
     let delicacy_field = prepared_delicacy_field(hollowed.mesh()).map_err(|source| {
         ChainStop::new(PipelineError::Delicacy {
             model: model.clone(),
@@ -1999,6 +2010,7 @@ pub fn seal_and_emit(
     // times; `run_support` starts a second one for the stage chain inside it,
     // and both lines say which scope they are measured from.
     let clock = plinth_support::StageClock::start(format!("model {model}"));
+    set_phase(PerfPhase::Other);
     clock.entering("SealedSupportRun");
     let sealed = run_support(hollowed, policy.support.clone(), input);
     let authority = sealed.map_err(|source| {
@@ -2109,6 +2121,7 @@ pub fn seal_and_emit(
     // `into_supported_model` and `plinth_emit::write` -- so a refusal leaves
     // no file at `target` at all. There is no override parameter and there is
     // not going to be one.
+    set_phase(PerfPhase::Emit);
     clock.entering("PreWriteGateAndEmit");
     let gated = match crate::judge_then_emit(
         model,
@@ -2335,6 +2348,7 @@ fn sweep_and_emit(
     stop_after: Option<StageStop>,
 ) -> Result<Option<ChainOutcome>, ChainStop> {
     let clock = plinth_support::StageClock::start(format!("model {model}"));
+    set_phase(PerfPhase::FinalSweep);
     clock.entering("SliceSweepPlacement");
 
     // The sweep's own frame: `plate_z = min_z - lift`, exactly as
@@ -2493,6 +2507,7 @@ fn sweep_and_emit(
             },
         )?;
 
+    set_phase(PerfPhase::Emit);
     clock.entering("EmitWithoutGates");
     // A failed write leaves no file AT THE TARGET: `plinth_emit::write` clears
     // it on every failure path. An artifact an EARLIER run left at the same

@@ -5,7 +5,8 @@
 //!    rayon sum/reduce/fold over floats anywhere.
 //!  * No HashMap/HashSet iteration feeds any result (parity grids are CSR;
 //!    the pool cache is a Vec).
-//!  * No wall-clock reads in the kernel.
+//!  * No wall-clock reads in the kernel (the write-only span timers of `perf.rs`
+//!    excepted: nothing reads them back).
 //!  * Mutable state is confined to result-inert caches and telemetry atomics.
 
 mod bvh;
@@ -22,6 +23,12 @@ mod moller;
 /// module already caches.
 pub mod par;
 mod parity;
+/// Write-only work counters, phase wall time and span timers for the speed
+/// rounds (`plinth prepare --perf DIR`); off by default and result-inert.
+///
+/// Public because the pipeline, the sweep and the CLI charge and switch it.
+/// It has no read API, so no engine code can branch on a count or a clock.
+pub mod perf;
 mod point_index;
 /// 2D polygon and segment primitives on `[f64; 2]` slice-loop points.
 ///

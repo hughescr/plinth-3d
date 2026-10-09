@@ -41,6 +41,16 @@ use crate::{CacheMode, OrientSelection, PlacementSelection, PrepareSelection};
 /// unreadable file is a nuisance, the refusal is a safety verdict, and a script
 /// that only sees `1` learns nothing about it.
 pub fn execute(selection: PrepareSelection) -> ExitCode {
+    // Write-only counters: `--perf DIR`, else `PLINTH_PERF_DIR`. Off by
+    // default; nothing below reads them back and the output is unchanged.
+    if let Some(dir) = selection
+        .perf_dir
+        .clone()
+        .or_else(|| std::env::var_os("PLINTH_PERF_DIR").map(std::path::PathBuf::from))
+        .filter(|dir| !dir.as_os_str().is_empty())
+    {
+        geom_kernel::perf::enable(dir);
+    }
     let request = match resolve(&selection) {
         Ok(request) => request,
         Err(error) => return fail(&error),

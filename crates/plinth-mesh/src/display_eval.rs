@@ -114,6 +114,7 @@
 //! spatial query and no per-face kernel call anywhere in this file.  Every
 //! fold is serial in source index order.
 
+use geom_kernel::perf::{self, Span, Work};
 use geom_kernel::vec3::{cross, dot, norm, sub};
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, V3};
 
@@ -592,6 +593,10 @@ fn neighbourhood_pass(
     curvature_by_face: &[f64],
     settings: DisplaySettings,
 ) -> Neighbourhood {
+    let _perf_span = perf::span(Span::DisplayPass);
+    // Write-only tallies for `perf`: faces walked and frontier entries examined.
+    let mut walked_faces = 0_usize;
+    let mut walked_pairs = 0_usize;
     let face_count = geometry.normals.len();
     let radius_sq = settings.detail_radius_mm() * settings.detail_radius_mm();
     let resolution = settings.change_resolution_rad();
@@ -662,6 +667,9 @@ fn neighbourhood_pass(
             }
         }
 
+        walked_faces += 1;
+        walked_pairs += frontier.len();
+
         // The folds wholly inside the neighbourhood, each counted once (from
         // its lower-indexed face), above the change resolution.
         let mut sums = (0.0_f64, 0.0_f64, 0.0_f64, f64::INFINITY, 0.0_f64);
@@ -697,6 +705,10 @@ fn neighbourhood_pass(
         }
     }
 
+    if perf::enabled() {
+        perf::add(Work::DisplayFaces, perf::count(walked_faces));
+        perf::add(Work::DisplayPairsMeasured, perf::count(walked_pairs));
+    }
     Neighbourhood { detail, curvature }
 }
 
