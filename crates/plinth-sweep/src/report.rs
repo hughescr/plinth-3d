@@ -375,6 +375,14 @@ pub struct SweepRunReport {
     /// Every member's drawn solid against the model on the finished field,
     /// arm shafts included (fix/morel-long-posts, 2026-10-02).
     pub member_model_clearance: MemberModelClearance,
+    /// **Whether the model surface was built** (fix/surface-budget,
+    /// 2026-10-09). Every rung that reads the model (the drawn-solid descent,
+    /// lip seats, heads, head joins, the clearance census, thickening's
+    /// "does it enter the gap" check and the D8 model ties) needs it. `false`
+    /// means the surface index was over `surface_index_max_bytes` or could not
+    /// be built, and those rungs did NOT run; the run log and the SUMMARY line
+    /// say so. It is never silent.
+    pub model_surface_built: bool,
     /// The hidden-cavity map the final gap's exemption reads (Craig ruling
     /// 2026-10-05; [`crate::cavity`]): what the flood found. Empty on a model
     /// with no enclosed air.

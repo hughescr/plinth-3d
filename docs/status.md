@@ -16,6 +16,14 @@ or has a `<stem>.asdrawn` marker beside it (GitHub issue #1). See
 [`README.md`](../README.md) for the full command and [`docs/architecture.md`](architecture.md)
 for the stage-by-stage pipeline this drives.
 
+The `SUMMARY` line ends with two sweep counters that an emitted file can still be wrong on:
+`model-surface-missing=<models>` (the sweep could not build the model surface, so thickening
+for the model, the D8 model ties, heads and the clearance census did not run on those models)
+and `unbraced-over-limit=<runs> in <models>` (posts that stand over their slenderness limit on
+the finished field). Both are warnings on an emitted file, never a refusal. The surface has its
+own 1 GiB memory budget (`plinth_sweep::MODEL_SURFACE_MAX_BYTES`, about 750 bytes per face, so
+about 1.3 million faces); decimation keeps its own, smaller cap.
+
 ## Corpus state
 
 **24 of the 37 real corpus minis emit a ChituBox file end to end** (MEASURED 2026-08-25,

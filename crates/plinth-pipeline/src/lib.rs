@@ -470,6 +470,27 @@ pub struct ContactAttestationDisclosure {
     pub grown_contact_tips: Vec<plinth_support::GrownContactTipDisclosure>,
 }
 
+/// The sweep's model-level warnings, carried on an emitted artifact so the run
+/// SUMMARY line can count them (fix/surface-budget, 2026-10-09). The sweep's
+/// full disclosure goes to stdout only; these two are the ones that must never
+/// be missed, because each one means a file that looks fine and has thin
+/// posts in it.
+///
+/// `Default` is "nothing to warn about", which is what a report frozen before
+/// this field existed reads as.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SweepModelWarnings {
+    /// The model surface could not be built, so every rung that reads the
+    /// model (thickening, the D8 model ties, heads, head joins, the clearance
+    /// census) did NOT run on this model.
+    #[serde(default)]
+    pub model_surface_missing: bool,
+    /// Unbraced runs over their own limit on the finished field (the
+    /// `unbraced_run_over_limit` warnings), counted in full.
+    #[serde(default)]
+    pub unbraced_over_limit_runs: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ModelPreparationOutcome {
@@ -679,6 +700,11 @@ pub enum ModelPreparationOutcome {
         /// understates an old run rather than fabricating anything.
         #[serde(default)]
         coverage_warning: Option<Box<CoverageGapWarning>>,
+        /// The sweep's model-level warnings (fix/surface-budget, 2026-10-09):
+        /// whether the model surface was missing, and how many unbraced runs
+        /// stand over their limit. The CLI prints both in the SUMMARY line.
+        #[serde(default)]
+        sweep_warnings: SweepModelWarnings,
     },
     Stopped {
         after: StageStop,
@@ -1965,6 +1991,7 @@ mod tests {
                         pending_gates: Vec::new(),
                         load_warnings: None,
                         coverage_warning: None,
+                        sweep_warnings: SweepModelWarnings::default(),
                     },
                 },
                 ModelPreparationReport {
@@ -2065,6 +2092,7 @@ mod tests {
                         pending_gates: Vec::new(),
                         load_warnings: None,
                         coverage_warning: None,
+                        sweep_warnings: SweepModelWarnings::default(),
                     },
                 ),
                 model("refused", refused),

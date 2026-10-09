@@ -783,6 +783,10 @@ pub struct ChainOutcome {
     /// measured this artifact as leaving unsupported, and why the repair
     /// search stopped. `None` means the coverage verdict was accepted.
     pub coverage_warning: Option<crate::coverage_evidence::CoverageGapWarning>,
+    /// The sweep's model-level warnings (fix/surface-budget, 2026-10-09): the
+    /// missing model surface and the unbraced runs over their limit. Default
+    /// (nothing to warn about) on a path that ran no sweep.
+    pub sweep_warnings: crate::SweepModelWarnings,
     pub primitive_count: usize,
     pub lift_mm: f64,
     pub plate_z_mm: f64,
@@ -2253,6 +2257,7 @@ pub fn seal_and_emit(
         // is derived from the report either way, so a report that names no
         // uncovered island produces no warning and cannot cry wolf.
         coverage_warning,
+        sweep_warnings: crate::SweepModelWarnings::default(),
         primitive_count: gated.primitive_count,
         lift_mm: gated.lift_mm,
         plate_z_mm: gated.plate_z_mm,
@@ -2599,6 +2604,10 @@ fn sweep_and_emit(
         pending_gates: PreWriteGate::ALL.to_vec(),
         load_warnings: None,
         coverage_warning: None,
+        sweep_warnings: crate::SweepModelWarnings {
+            model_surface_missing: !plan.report.model_surface_built,
+            unbraced_over_limit_runs: plan.report.slenderness_lane.warnings.len(),
+        },
         primitive_count,
         lift_mm: supported.lift_mm().get(),
         plate_z_mm: supported.plate_z_mm().get(),
@@ -2636,6 +2645,19 @@ fn print_sweep_disclosure(
 ) {
     let report = &plan.report;
     println!("[sweep {model}] {}", report.render_disclosure());
+    // A model-level WARNING, never silent (fix/surface-budget, 2026-10-09):
+    // without the surface the sweep refuses to thicken a post "for the model",
+    // runs no D8 model tie and builds no head, so long thin posts can stand.
+    if !report.model_surface_built {
+        println!(
+            "[sweep {model}] WARNING MODEL SURFACE MISSING: the model surface could not be built \
+             (its index memory estimate is over the sweep's {} byte budget, or the build failed). \
+             Thickening for the model, the D8 model ties, heads, head joins and the clearance \
+             census did NOT run on this model; thin unbraced posts may stand [a WARNING on an \
+             emitted file, never a refusal]",
+            plinth_sweep::MODEL_SURFACE_MAX_BYTES,
+        );
+    }
     println!(
         "[sweep {model}] arms {} (plate {}, model {}, arm {}, interior {}); \
          seat spacing mean {:.3} mm p95 {:.3} mm max {:.3} mm; \
@@ -3583,6 +3605,14 @@ fn print_sweep_disclosure(
             shake.pressure_kpa / top.px,
         );
     }
+    // The FULL count comes first: the listing below stops at 20 lines.
+    println!(
+        "[sweep {model}] {}unbraced runs over their own limit on the finished field: {} \
+         (the first {} are listed below)",
+        if lane.warnings.is_empty() { "" } else { "WARNING " },
+        lane.warnings.len(),
+        lane.warnings.len().min(20),
+    );
     for warning in lane.warnings.iter().take(20) {
         println!(
             "[sweep {model}]   unbraced_run_over_limit: arm {} layers {}..{} runs {:.3} mm \
@@ -4156,6 +4186,9 @@ fn artifact_outcome(outcome: ChainOutcome) -> ModelPreparationOutcome {
         // this is the coverage the gate measured it as NOT having. `None`
         // means the coverage verdict was accepted, never that it went unasked.
         coverage_warning: outcome.coverage_warning.map(Box::new),
+        // fix/surface-budget (2026-10-09): the sweep's two model-level
+        // warnings reach the SUMMARY line.
+        sweep_warnings: outcome.sweep_warnings,
     }
 }
 
@@ -4832,6 +4865,10 @@ mod tests {
                 closure_reason: Some("NoImprovingRepair".to_owned()),
                 closure_attempts: 2,
             }),
+            sweep_warnings: crate::SweepModelWarnings {
+                model_surface_missing: true,
+                unbraced_over_limit_runs: 9,
+            },
             primitive_count: 0,
             lift_mm: 5.0,
             plate_z_mm: 0.0,
@@ -4851,11 +4888,21 @@ mod tests {
             pending_gates,
             load_warnings,
             coverage_warning,
+            sweep_warnings,
             ..
         } = artifact_outcome(outcome)
         else {
             panic!("a completed chain reports an artifact");
         };
+        // fix/surface-budget (2026-10-09): a missing model surface and the
+        // unbraced runs over their limit must reach the SUMMARY line.
+        assert_eq!(
+            sweep_warnings,
+            crate::SweepModelWarnings {
+                model_surface_missing: true,
+                unbraced_over_limit_runs: 9,
+            },
+        );
         // WARNING MODE (owner ruling, 2026-08-29): the Load gate's evidence
         // must reach the report unchanged, not get dropped on this hop and
         // silently read back as "the gate found nothing".

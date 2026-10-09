@@ -343,6 +343,7 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         pending_gates,
         load_warnings,
         coverage_warning,
+        sweep_warnings: _,
     } = outcome(&report, "mini")
     else {
         panic!(
