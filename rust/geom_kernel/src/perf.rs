@@ -664,6 +664,8 @@ thread_local! {
     static SITE: Cell<u8> = const { Cell::new(0) };
     /// Faces the last segment walk on this thread tested ([`walk_tris`]).
     static WALK_TRIS: Cell<u64> = const { Cell::new(0) };
+    /// The id of the innermost open frame on this thread, 0 when none.
+    static POSE_ID: Cell<u64> = const { Cell::new(0) };
 }
 
 /// One open pose frame ([`Span::SweepRun`]).
@@ -1067,6 +1069,7 @@ fn push_frame(phase: Phase) -> usize {
         .flatten()
         .unwrap_or_else(|| "unlabelled".to_owned());
     let id = pose_id(&label);
+    let _ = POSE_ID.try_with(|cell| cell.set(id));
     FRAMES
         .try_with(|frames| {
             let mut frames = frames.borrow_mut();
@@ -1097,6 +1100,7 @@ fn pop_frame(depth: usize, wall_ns: u64) {
             if let Some(outer) = frames.last_mut() {
                 outer.nested_ns = outer.nested_ns.saturating_add(wall_ns);
             }
+            let _ = POSE_ID.try_with(|cell| cell.set(frames.last().map_or(0, |outer| outer.id)));
             Some(frame)
         })
         .ok()
@@ -1146,18 +1150,11 @@ pub fn with_pose_slot<T: Any + Default, R>(f: impl FnOnce(&mut T) -> R) -> Optio
         .flatten()
 }
 
-/// The pose id of this thread's innermost frame, 0 when none.
+/// The pose id of this thread's innermost frame, 0 when none. Kept in its own
+/// cell so a row can be stored from inside [`with_pose_slot`], where the frame
+/// list is borrowed.
 fn current_pose() -> u64 {
-    FRAMES
-        .try_with(|frames| {
-            frames
-                .try_borrow()
-                .ok()
-                .and_then(|frames| frames.last().map(|frame| frame.id))
-        })
-        .ok()
-        .flatten()
-        .unwrap_or(0)
+    POSE_ID.try_with(Cell::get).unwrap_or(0)
 }
 
 /// The span of the sizing site the last `sweep.down.calls.*` charge on this
@@ -1884,8 +1881,10 @@ mod tests {
                 let _pass = span(Span::SweepPass);
                 std::thread::sleep(Duration::from_millis(2));
             }
-            // The inner frame's slot is its own.
             row(Rows::TipBatch, &[7, 9, 11]);
+            // A row stored from inside the slot closure (where the frame list
+            // is borrowed) still carries the pose id.
+            with_pose_slot(|_: &mut u32| row(Rows::TipBatch, &[1, 2, 3]));
         }
         {
             let _mark = stage("test.stage");
@@ -1904,6 +1903,8 @@ mod tests {
         assert!(inner.contains("\"down.pass\":{\"calls\":1"), "{inner}");
         assert!(!outer.contains("\"nested_ms\":0.000"), "the outer frame saw the nested one: {outer}");
         let want = format!("[5,{},7,9,11]", pose_id("pose A"));
+        assert!(text.contains(&want), "{want} not in {text}");
+        let want = format!("[5,{},1,2,3]", pose_id("pose A"));
         assert!(text.contains(&want), "{want} not in {text}");
         assert!(text.contains("\"tip.batch\":{\"cols\":[\"phase\",\"pose\",\"rows\",\"faces\",\"wall_ns\"]"), "{text}");
         assert!(text.contains("\"label\":\"test.stage\",\"calls\":1"), "{text}");
