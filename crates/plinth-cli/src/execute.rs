@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 
+use geom_kernel::par::{budget_counts, resolve_threads, Budget, BudgetCounts};
 use geom_kernel::telemetry::{near_parallel_counts, NearParallelCounts, NearParallelSite};
 use plinth_hollow::HollowRequest;
 use plinth_orient::PinnedBaseline;
@@ -286,6 +287,34 @@ fn print_report(selection: &PrepareSelection, report: &PrepareReport) {
     // Read ONCE, here, after every model in the run has been prepared.
     for line in near_parallel_lines(near_parallel_counts()) {
         println!("{line}");
+    }
+    println!("{}", thread_budget_line(budget_counts(), resolve_threads()));
+}
+
+/// The `[threads]` run-log line: the thread count, where it came from, and how
+/// the kernel batches reached their pool.
+///
+/// With the execution budget installed (the `plinth` binary does) the width is
+/// the installed one and `cross` / `cold` should read zero: every batch ran
+/// `inline` in the one pool. Without it (a test calling [`execute`] directly,
+/// or the pool failed to build) the line says so and shows what the next batch
+/// WOULD use. Telemetry only: never sealed, never read back.
+fn thread_budget_line(counts: BudgetCounts, resolved: Budget) -> String {
+    let paths = format!(
+        "inline {}, cross {}, cold {}",
+        counts.inline, counts.cross, counts.cold
+    );
+    match counts.installed {
+        Some(budget) => format!(
+            "[threads] budget {} ({}): {paths}",
+            budget.threads,
+            budget.source.label()
+        ),
+        None => format!(
+            "[threads] budget not installed; per-call pools of width {} ({}): {paths}",
+            resolved.threads,
+            resolved.source.label()
+        ),
     }
 }
 
@@ -1253,13 +1282,49 @@ mod tests {
         ModelPreparationReport, RepairRunReport, UncoveredIslandSummary,
     };
 
+    use geom_kernel::par::{Budget, BudgetCounts, BudgetSource};
     use geom_kernel::telemetry::{NearParallelCounts, NearParallelSite};
 
     use super::{
         coverage_gap_warning_lines, coverage_lines, coverage_repair_lines, near_parallel_lines,
         no_orient_lines, orientation_source_lines, remedies_tried_line, repair_lines,
-        sweep_warning_summary_of, SweepModelWarnings,
+        sweep_warning_summary_of, thread_budget_line, SweepModelWarnings,
     };
+
+    /// The `[threads]` line names the width, its source and the three path
+    /// counts, installed or not.
+    #[test]
+    fn the_threads_line_shows_width_source_and_path_hits() {
+        let installed = Budget {
+            threads: 12,
+            source: BudgetSource::PerfCores,
+        };
+        let counts = BudgetCounts {
+            installed: Some(installed),
+            inline: 7,
+            cross: 0,
+            cold: 0,
+        };
+        assert_eq!(
+            thread_budget_line(counts, installed),
+            "[threads] budget 12 (sysctl hw.perflevel0.physicalcpu): inline 7, cross 0, cold 0"
+        );
+        let env = Budget {
+            threads: 3,
+            source: BudgetSource::Env,
+        };
+        let loose = BudgetCounts {
+            installed: None,
+            inline: 0,
+            cross: 2,
+            cold: 5,
+        };
+        assert_eq!(
+            thread_budget_line(loose, env),
+            "[threads] budget not installed; per-call pools of width 3 (PLINTH_THREADS): \
+             inline 0, cross 2, cold 5"
+        );
+    }
 
     /// The SUMMARY line names the models whose surface is missing and counts
     /// the unbraced runs over their limit, and says so when there are none.

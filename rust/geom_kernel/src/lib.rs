@@ -783,7 +783,10 @@ impl NativeSurface {
 /// Effective thread count the next batch operation will use.
 ///
 /// Each operation re-reads `PLINTH_THREADS`, so changes take effect without
-/// rebuilding the surface or process-global Rayon configuration.
+/// rebuilding the surface or process-global Rayon configuration. When it is
+/// unset (or not a positive integer) the width is auto-detected once per
+/// process: the macOS performance-core count, else `available_parallelism`
+/// (see [`par::resolve_threads`] for the source).
 pub fn current_threads() -> usize {
     par::current_threads()
 }
