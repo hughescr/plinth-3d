@@ -56,12 +56,33 @@
 //! final sidecar has no open spans. A checkpoint is diagnostic evidence and is
 //! never compared against another run.
 //!
+//! # Pose records, rows and stage marks (X0, 2026-10-10)
+//!
+//! Three additive sections of the sidecar, all write-only and all off with the
+//! counters:
+//!
+//! * **`poses`**: every [`Span::SweepRun`] opens a *frame* on its thread. The
+//!   frame sums the time of every span that closes on that thread while it is
+//!   the innermost frame, and on close becomes one record (phase, label, wall
+//!   time, per-span calls and thread time). This is how the winning pose of the
+//!   orientation search is priced alone: the global span table sums all poses.
+//!   [`pose_label`] names the next frame. A frame that runs while another frame
+//!   of the same thread is open (rayon work stealing) is added to the outer
+//!   frame's `nested_ms`, so the outer wall can be corrected.
+//! * **`rows`**: [`row`] stores one small fixed-width record per call, batch
+//!   or search ([`Rows`]). The multiset of non-time columns does not depend on
+//!   the thread count; the sidecar sorts the rows. Medians and shares are read
+//!   from rows afterwards, never inside the product.
+//! * **`stages`**: [`stage`] times a named region of a stage (Decimate,
+//!   OrientTable, Hollow, Emit) by a static label.
+//!
 //! # Adding a counter
 //!
 //! Append one line to `works!` below, then call [`add`] from a file that owns
 //! the site. Order is the sidecar order; append-only keeps diffs readable.
 
-use std::cell::Cell;
+use std::any::Any;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering::Relaxed as Relax;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize};
@@ -314,16 +335,80 @@ works! {
     /// Faces found inside their own neighbourhood across all display walks
     /// (exceeds `display.faces` exactly when some walk expanded).
     DisplayMembersTotal, "display.members_total", Work;
+    /// Down-sweep runs (`down_sweep::run`, per-event form) that the reuse
+    /// probe measured. One per run, so it equals the sum of the
+    /// `sweep.down.calls.*` counters.
+    ReuseRuns, "reuse.runs", Work;
+    /// Of those, runs with no earlier run in the same pose frame: nothing to
+    /// reuse from.
+    ReuseFirstRuns, "reuse.first_runs", Work;
+    /// Of those, runs whose live members equal the previous run's exactly.
+    ReuseUnchangedRuns, "reuse.unchanged_runs", Work;
+    /// Layers of the measured runs, summed.
+    ReuseLayers, "reuse.layers", Work;
+    /// Layers above the highest changed member's top (the prefix a resumed
+    /// sweep skips), summed. A first run counts none.
+    ReuseLayersAboveMember, "reuse.layers_above.member", Work;
+    /// Layers above the highest layer whose live-member fingerprint changed,
+    /// summed. At least the member figure.
+    ReuseLayersAboveLayer, "reuse.layers_above.layer", Work;
+    /// Active (layer, band) pairs below the changed prefix, summed. Zero
+    /// unless the band probe is on (`PLINTH_PERF_BANDS=1`).
+    ReuseBandsTotal, "reuse.bands_total", Work;
+    /// Of those, pairs whose hash equals the previous run's.
+    ReuseBandsEqual, "reuse.bands_equal", Work;
+    /// Batched clearance calls (`clearance_rows_excluding`).
+    ClearBatches, "clear.batches", Work;
+    /// Rows of those batches.
+    ClearBatchRows, "clear.batch_rows", Work;
+    /// Faces tested across those batches.
+    ClearBatchTris, "clear.batch_tris", Work;
+    /// The largest single row's faces tested, summed over batches.
+    ClearBatchTrisMaxRow, "clear.batch_tris_max_row", Work;
+    /// Main brace partner searches (`tie_by_crosses`, `tie_by_band_set`).
+    PartnerSearches, "brace.partner_searches", Work;
+    /// Candidates those searches planned (trials).
+    PartnerTrials, "brace.partner_trials", Work;
+    /// Searches that built something.
+    PartnerWins, "brace.partner_wins", Work;
+    /// Sum of the winning candidates' ranks (0 = nearest).
+    PartnerWinRankSum, "brace.partner_win_rank_sum", Work;
 }
 
 const WORK_N: usize = Work::ALL.len();
+
+impl Work {
+    /// The sizing-site span a `sweep.down.calls.*` charge names, for the next
+    /// `down_sweep::run` on this thread. Every call site charges its counter
+    /// just before it calls `run`, so the charge doubles as the site label.
+    #[must_use]
+    pub const fn size_span(self) -> Option<Span> {
+        match self {
+            Self::SweepDownCallInitial => Some(Span::SizeInitial),
+            Self::SweepDownCallRemoval => Some(Span::SizeRemoval),
+            Self::SweepDownCallMergesUndone => Some(Span::SizeMergesUndone),
+            Self::SweepDownCallCongestion => Some(Span::SizeCongestion),
+            Self::SweepDownCallCongestionTrial => Some(Span::SizeCongestionTrial),
+            Self::SweepDownCallStrandedRound => Some(Span::SizeStrandedRound),
+            Self::SweepDownCallStrandedPutBack => Some(Span::SizeStrandedPutBack),
+            Self::SweepDownCallForcedMerges => Some(Span::SizeForcedMerges),
+            Self::SweepDownCallUnmergeAfterMerges => Some(Span::SizeUnmergeAfterMerges),
+            Self::SweepDownCallGraze => Some(Span::SizeGraze),
+            Self::SweepDownCallHeadJoin => Some(Span::SizeHeadJoin),
+            Self::SweepDownCallLipSeat => Some(Span::SizeLipSeat),
+            Self::SweepDownCallTies => Some(Span::SizeTies),
+            Self::SweepDownCallModelTies => Some(Span::SizeModelTies),
+            _ => None,
+        }
+    }
+}
 
 /// A timed region. The sidecar reports calls, summed thread time and the
 /// longest call, per phase.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Span {
-    /// One `run_sweep_with_holes`.
+    /// One `run_sweep_with_holes`. Also opens a pose frame.
     SweepRun,
     /// One `slice_stack`.
     SliceStack,
@@ -333,9 +418,75 @@ pub enum Span {
     Curvature,
     /// One display neighbourhood pass.
     DisplayPass,
+    /// One `down_sweep::sweep_pass`.
+    SweepPass,
+    /// A layer's rasterisation inside a pass (a pure function of the layer).
+    PassPrefix,
+    /// The routing field's clearance build (a pure function of the layer's cover); inside `down.pass.route`.
+    PassClearance,
+    /// `route_within_cover`, clearance build included.
+    PassRoute,
+    /// The dense per-cell loops of a layer: fills, spread, max, model-section check, end-of-layer copies.
+    PassDense,
+    /// The load-insertion step of a layer, trigger scan included.
+    PassInsertion,
+    /// The band probe's own hashing (measurement cost, inside `down.pass`).
+    PassBandHash,
+    /// One whole per-event `down_sweep::run`.
+    DownRun,
+    /// `per_event::size`, inside `down.run`.
+    PerEventSize,
+    /// A `down_sweep::run` from the first sizing site.
+    SizeInitial,
+    /// ... the under-loaded removal loop.
+    SizeRemoval,
+    /// ... after merges the trunk cannot carry are undone.
+    SizeMergesUndone,
+    /// ... after the congestion lane.
+    SizeCongestion,
+    /// ... the congestion lane's trial.
+    SizeCongestionTrial,
+    /// ... after a stranded-seat branch round.
+    SizeStrandedRound,
+    /// ... after stranded-seat branches are put back.
+    SizeStrandedPutBack,
+    /// ... after the slenderness lane's forced merges.
+    SizeForcedMerges,
+    /// ... after the un-merge of overgrown forced merges.
+    SizeUnmergeAfterMerges,
+    /// ... after graze heads.
+    SizeGraze,
+    /// ... after a head-join pass.
+    SizeHeadJoin,
+    /// ... inside the lip-seat rule's sizing.
+    SizeLipSeat,
+    /// ... after a tie pass.
+    SizeTies,
+    /// ... after a model-tie pass.
+    SizeModelTies,
+    /// A `run` whose call site charged no `sweep.down.calls.*` counter.
+    SizeOther,
+    /// `lip_seat::apply`.
+    LipApply,
+    /// `lip_seat::measure_sized`.
+    LipMeasure,
+    /// `lip_seat::blame`.
+    LipBlame,
+    /// `lip_seat::clearance_violators`.
+    LipViolators,
+    /// One batched clearance call (`clearance_rows_excluding`).
+    ClearBatch,
+    /// One tip-landing nearest-face scan.
+    TipNearest,
+    /// One main brace partner search.
+    PartnerSearch,
+    /// One candidate of a partner search.
+    PartnerTrial,
+    /// One tie pass of the slenderness lane (`apply_ties_with_model`).
+    BraceLane,
 }
 
-const SPAN_N: usize = 5;
+const SPAN_N: usize = 38;
 
 impl Span {
     /// Every span.
@@ -345,6 +496,39 @@ impl Span {
         Self::StageShake,
         Self::Curvature,
         Self::DisplayPass,
+        Self::SweepPass,
+        Self::PassPrefix,
+        Self::PassClearance,
+        Self::PassRoute,
+        Self::PassDense,
+        Self::PassInsertion,
+        Self::PassBandHash,
+        Self::DownRun,
+        Self::PerEventSize,
+        Self::SizeInitial,
+        Self::SizeRemoval,
+        Self::SizeMergesUndone,
+        Self::SizeCongestion,
+        Self::SizeCongestionTrial,
+        Self::SizeStrandedRound,
+        Self::SizeStrandedPutBack,
+        Self::SizeForcedMerges,
+        Self::SizeUnmergeAfterMerges,
+        Self::SizeGraze,
+        Self::SizeHeadJoin,
+        Self::SizeLipSeat,
+        Self::SizeTies,
+        Self::SizeModelTies,
+        Self::SizeOther,
+        Self::LipApply,
+        Self::LipMeasure,
+        Self::LipBlame,
+        Self::LipViolators,
+        Self::ClearBatch,
+        Self::TipNearest,
+        Self::PartnerSearch,
+        Self::PartnerTrial,
+        Self::BraceLane,
     ];
 
     /// The sidecar label.
@@ -356,6 +540,39 @@ impl Span {
             Self::StageShake => "shake.check",
             Self::Curvature => "delicacy.curvature",
             Self::DisplayPass => "display.neighbourhood",
+            Self::SweepPass => "down.pass",
+            Self::PassPrefix => "down.pass.prefix",
+            Self::PassClearance => "down.pass.clearance",
+            Self::PassRoute => "down.pass.route",
+            Self::PassDense => "down.pass.dense",
+            Self::PassInsertion => "down.pass.insertion",
+            Self::PassBandHash => "probe.band_hash",
+            Self::DownRun => "down.run",
+            Self::PerEventSize => "down.per_event",
+            Self::SizeInitial => "sizing.initial",
+            Self::SizeRemoval => "sizing.removal",
+            Self::SizeMergesUndone => "sizing.merges_undone",
+            Self::SizeCongestion => "sizing.congestion",
+            Self::SizeCongestionTrial => "sizing.congestion_trial",
+            Self::SizeStrandedRound => "sizing.stranded_round",
+            Self::SizeStrandedPutBack => "sizing.stranded_put_back",
+            Self::SizeForcedMerges => "sizing.forced_merges",
+            Self::SizeUnmergeAfterMerges => "sizing.unmerge_after_merges",
+            Self::SizeGraze => "sizing.graze",
+            Self::SizeHeadJoin => "sizing.head_join",
+            Self::SizeLipSeat => "sizing.lip_seat",
+            Self::SizeTies => "sizing.ties",
+            Self::SizeModelTies => "sizing.model_ties",
+            Self::SizeOther => "sizing.other",
+            Self::LipApply => "lip_seat.apply",
+            Self::LipMeasure => "lip_seat.measure",
+            Self::LipBlame => "lip_seat.blame",
+            Self::LipViolators => "lip_seat.violators",
+            Self::ClearBatch => "clearance.batch",
+            Self::TipNearest => "nearest.tip",
+            Self::PartnerSearch => "brace.partner_search",
+            Self::PartnerTrial => "brace.partner_trial",
+            Self::BraceLane => "brace.lane",
         }
     }
 
@@ -438,7 +655,145 @@ thread_local! {
     static MY_SHARD: Cell<usize> = const { Cell::new(usize::MAX) };
     /// `(solves, points)` while a [`capture_frames`] scope is open on this thread.
     static CAPTURE: Cell<Option<(u64, u64)>> = const { Cell::new(None) };
+    /// The pose frames open on this thread, innermost last.
+    static FRAMES: RefCell<Vec<Frame>> = const { RefCell::new(Vec::new()) };
+    /// The label the next frame takes ([`pose_label`]).
+    static PENDING_LABEL: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// The sizing site named by the last `sweep.down.calls.*` charge, as a
+    /// `Span` index plus one; 0 = none ([`size_span`]).
+    static SITE: Cell<u8> = const { Cell::new(0) };
+    /// Faces the last segment walk on this thread tested ([`walk_tris`]).
+    static WALK_TRIS: Cell<u64> = const { Cell::new(0) };
 }
+
+/// One open pose frame ([`Span::SweepRun`]).
+struct Frame {
+    phase: Phase,
+    label: String,
+    id: u64,
+    span_ns: [u64; SPAN_N],
+    span_calls: [u64; SPAN_N],
+    /// Wall time of frames that ran nested inside this one on this thread.
+    nested_ns: u64,
+    /// Scratch for one probe ([`with_pose_slot`]).
+    slot: Option<Box<dyn Any>>,
+}
+
+/// A closed frame: one pose's sweep.
+struct PoseRecord {
+    phase: Phase,
+    label: String,
+    id: u64,
+    wall_ns: u64,
+    nested_ns: u64,
+    span_ns: [u64; SPAN_N],
+    span_calls: [u64; SPAN_N],
+}
+
+/// One fixed-width record of a call, batch or search. The first two columns
+/// of every row are the phase and the pose id; `cols` follow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Rows {
+    /// One per-event `down_sweep::run`: how much of it a resumed sweep could
+    /// skip (see `reuse_probe`).
+    DownReuse,
+    /// One batched clearance call.
+    ClearBatch,
+    /// One tip-landing nearest-face scan.
+    TipBatch,
+    /// One main brace partner search.
+    PartnerSearch,
+}
+
+/// The widest row payload.
+pub const ROW_WIDTH: usize = 12;
+const ROWS_N: usize = 4;
+
+impl Rows {
+    /// Every kind.
+    pub const ALL: [Self; ROWS_N] = [
+        Self::DownReuse,
+        Self::ClearBatch,
+        Self::TipBatch,
+        Self::PartnerSearch,
+    ];
+
+    /// The sidecar label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::DownReuse => "down.reuse",
+            Self::ClearBatch => "clear.batch",
+            Self::TipBatch => "tip.batch",
+            Self::PartnerSearch => "brace.partner_search",
+        }
+    }
+
+    /// The payload column names, after `phase` and `pose`. A name ending in
+    /// `_ns` is a time: reported, never compared.
+    #[must_use]
+    pub const fn cols(self) -> &'static [&'static str] {
+        match self {
+            // dirty_* is the number of layers from the bottom up to and
+            // including the highest changed one (0 = nothing changed), so
+            // `layers - dirty_*` is the prefix above it.
+            Self::DownReuse => &[
+                "site",
+                "layers",
+                "cells",
+                "first",
+                "dirty_member",
+                "dirty_layer",
+                "bands_total",
+                "bands_equal",
+            ],
+            Self::ClearBatch => &[
+                "rows",
+                "tris",
+                "tris_max_row",
+                "frustum",
+                "excluded",
+                "wall_ns",
+                "row_ns_sum",
+                "row_ns_max",
+            ],
+            Self::TipBatch => &["rows", "faces", "wall_ns"],
+            Self::PartnerSearch => &[
+                "kind",
+                "candidates",
+                "trials",
+                "win_rank_plus1",
+                "wall_ns",
+                "trial_ns_sum",
+                "win_trial_ns",
+            ],
+        }
+    }
+}
+
+struct RowRec {
+    kind: Rows,
+    phase: Phase,
+    pose: u64,
+    cols: [u64; ROW_WIDTH],
+}
+
+/// One named stage region ([`stage`]).
+struct StageRec {
+    phase: Phase,
+    label: &'static str,
+    calls: u64,
+    ns: u64,
+    max_ns: u64,
+}
+
+static POSES: Mutex<Vec<PoseRecord>> = Mutex::new(Vec::new());
+static ROW_STORE: Mutex<Vec<RowRec>> = Mutex::new(Vec::new());
+static ROWS_DROPPED: AtomicU64 = AtomicU64::new(0);
+static STAGES: Mutex<Vec<StageRec>> = Mutex::new(Vec::new());
+/// Row cap per model; rows past it are counted, not stored.
+const ROW_CAP: usize = 1_000_000;
 
 fn my_shard() -> &'static Shard {
     let slot = MY_SHARD.with(|cell| {
@@ -556,6 +911,10 @@ pub fn begin_model(model: &str) {
         for shard in &TABLE {
             shard.zero();
         }
+        lock_clear(&POSES);
+        lock_clear(&ROW_STORE);
+        lock_clear(&STAGES);
+        ROWS_DROPPED.store(0, Relax);
         PHASE.store(Phase::Load as u8, Relax);
         let now = Instant::now();
         *slot = Some(ModelSlot {
@@ -617,6 +976,9 @@ pub fn add(work: Work, n: u64) {
 
 #[inline(never)]
 fn add_enabled(work: Work, n: u64) {
+    if let Some(site) = work.size_span() {
+        SITE.with(|cell| cell.set(site as u8 + 1));
+    }
     let phase = PHASE.load(Relax) as usize;
     my_shard().work[phase.min(PHASE_N - 1)][work as usize].fetch_add(n, Relax);
 }
@@ -642,15 +1004,21 @@ pub fn span(span: Span) -> SpanGuard {
         let cell = &my_shard().spans[phase.index()][span.index()];
         cell.start_in.fetch_add(start_ns, Relax);
         cell.entered.fetch_add(1, Relax);
-        SpanGuard(Some((span, phase, started, start_ns)))
+        let depth = if span == Span::SweepRun {
+            push_frame(phase)
+        } else {
+            0
+        };
+        SpanGuard(Some((span, phase, started, start_ns)), depth)
     } else {
-        SpanGuard(None)
+        SpanGuard(None, 0)
     }
 }
 
-/// Charges its region's time to a [`Span`] on drop.
+/// Charges its region's time to a [`Span`] on drop. A [`Span::SweepRun`]
+/// guard also owns the pose frame it opened (`.1` is its depth).
 #[must_use = "a span measures until it is dropped"]
-pub struct SpanGuard(Option<(Span, Phase, Instant, u64)>);
+pub struct SpanGuard(Option<(Span, Phase, Instant, u64)>, usize);
 
 impl Drop for SpanGuard {
     fn drop(&mut self) {
@@ -661,6 +1029,239 @@ impl Drop for SpanGuard {
             cell.max_ns.fetch_max(ns, Relax);
             cell.start_out.fetch_add(start_ns, Relax);
             cell.calls.fetch_add(1, Relax);
+            if self.1 > 0 {
+                pop_frame(self.1, ns);
+            } else {
+                charge_frame(span, ns);
+            }
+        }
+    }
+}
+
+// ----------------------------------------------------------- pose frames
+
+/// FNV-1a over `text`, cut to 48 bits so the id survives a JSON number.
+fn pose_id(text: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash & 0xFFFF_FFFF_FFFF
+}
+
+/// Name the next frame this thread opens (the next [`Span::SweepRun`]). The
+/// closure runs only when counting is on.
+pub fn pose_label(label: impl FnOnce() -> String) {
+    if enabled() {
+        let text = label();
+        let _ = PENDING_LABEL.try_with(|cell| *cell.borrow_mut() = Some(text));
+    }
+}
+
+/// Open a frame; returns its depth (at least 1), or 0 when it could not.
+fn push_frame(phase: Phase) -> usize {
+    let label = PENDING_LABEL
+        .try_with(|cell| cell.borrow_mut().take())
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "unlabelled".to_owned());
+    let id = pose_id(&label);
+    FRAMES
+        .try_with(|frames| {
+            let mut frames = frames.borrow_mut();
+            frames.push(Frame {
+                phase,
+                label,
+                id,
+                span_ns: [0; SPAN_N],
+                span_calls: [0; SPAN_N],
+                nested_ns: 0,
+                slot: None,
+            });
+            frames.len()
+        })
+        .unwrap_or(0)
+}
+
+/// Close the frame at `depth` (and any left open above it) into a record.
+fn pop_frame(depth: usize, wall_ns: u64) {
+    let closed = FRAMES
+        .try_with(|frames| {
+            let mut frames = frames.borrow_mut();
+            if frames.len() < depth {
+                return None;
+            }
+            frames.truncate(depth);
+            let frame = frames.pop()?;
+            if let Some(outer) = frames.last_mut() {
+                outer.nested_ns = outer.nested_ns.saturating_add(wall_ns);
+            }
+            Some(frame)
+        })
+        .ok()
+        .flatten();
+    if let Some(frame) = closed {
+        if let Ok(mut poses) = POSES.lock() {
+            poses.push(PoseRecord {
+                phase: frame.phase,
+                label: frame.label,
+                id: frame.id,
+                wall_ns,
+                nested_ns: frame.nested_ns,
+                span_ns: frame.span_ns,
+                span_calls: frame.span_calls,
+            });
+        }
+    }
+}
+
+/// Add a closed span to the innermost frame of this thread, if any.
+fn charge_frame(span: Span, ns: u64) {
+    let _ = FRAMES.try_with(|frames| {
+        if let Ok(mut frames) = frames.try_borrow_mut() {
+            if let Some(top) = frames.last_mut() {
+                top.span_ns[span.index()] = top.span_ns[span.index()].saturating_add(ns);
+                top.span_calls[span.index()] += 1;
+            }
+        }
+    });
+}
+
+/// Run `f` on the innermost pose frame's scratch value of type `T`, creating
+/// it with `T::default()` on first use. `None` when counting is off or this
+/// thread has no frame. `f` must not open or drop a span.
+pub fn with_pose_slot<T: Any + Default, R>(f: impl FnOnce(&mut T) -> R) -> Option<R> {
+    if !enabled() {
+        return None;
+    }
+    FRAMES
+        .try_with(|frames| {
+            let mut frames = frames.try_borrow_mut().ok()?;
+            let frame = frames.last_mut()?;
+            let slot = frame.slot.get_or_insert_with(|| Box::new(T::default()));
+            Some(f(slot.downcast_mut::<T>()?))
+        })
+        .ok()
+        .flatten()
+}
+
+/// The pose id of this thread's innermost frame, 0 when none.
+fn current_pose() -> u64 {
+    FRAMES
+        .try_with(|frames| {
+            frames
+                .try_borrow()
+                .ok()
+                .and_then(|frames| frames.last().map(|frame| frame.id))
+        })
+        .ok()
+        .flatten()
+        .unwrap_or(0)
+}
+
+/// The span of the sizing site the last `sweep.down.calls.*` charge on this
+/// thread named, taking the name (a later `run` without a charge reads
+/// [`Span::SizeOther`]).
+pub fn size_span() -> SpanGuard {
+    if !enabled() {
+        return SpanGuard(None, 0);
+    }
+    let named = SITE.with(|cell| cell.replace(0));
+    span(Span::ALL.get(usize::from(named).wrapping_sub(1)).copied().unwrap_or(Span::SizeOther))
+}
+
+/// The sizing-site index (`Span` index) the last charge named, without
+/// taking it; `u64::MAX` when none. For rows.
+#[must_use]
+pub fn size_site_peek() -> u64 {
+    let named = SITE.with(Cell::get);
+    if named == 0 {
+        u64::MAX
+    } else {
+        u64::from(named) - 1
+    }
+}
+
+/// The faces the last segment walk on this thread tested; set by the walk,
+/// read by the batch loop that called it. Zero when counting is off.
+pub fn note_walk_tris(n: u64) {
+    WALK_TRIS.with(|cell| cell.set(n));
+}
+
+/// Take the value [`note_walk_tris`] left.
+#[must_use]
+pub fn walk_tris() -> u64 {
+    WALK_TRIS.with(|cell| cell.replace(0))
+}
+
+// ------------------------------------------------------- rows and stages
+
+fn lock_clear<T>(store: &Mutex<Vec<T>>) {
+    if let Ok(mut guard) = store.lock() {
+        guard.clear();
+    }
+}
+
+/// Store one row of `kind`. `payload` longer than [`ROW_WIDTH`] is cut.
+pub fn row(kind: Rows, payload: &[u64]) {
+    if !enabled() {
+        return;
+    }
+    let mut cols = [0_u64; ROW_WIDTH];
+    for (slot, value) in cols.iter_mut().zip(payload) {
+        *slot = *value;
+    }
+    let rec = RowRec {
+        kind,
+        phase: Phase::from_index(PHASE.load(Relax)),
+        pose: current_pose(),
+        cols,
+    };
+    if let Ok(mut store) = ROW_STORE.lock() {
+        if store.len() < ROW_CAP {
+            store.push(rec);
+            return;
+        }
+    }
+    ROWS_DROPPED.fetch_add(1, Relax);
+}
+
+/// Time a named region of a stage; charged when the guard drops. Inert when
+/// counting is off.
+#[must_use = "a stage mark measures until it is dropped"]
+pub fn stage(label: &'static str) -> StageGuard {
+    if enabled() {
+        StageGuard(Some((label, Phase::from_index(PHASE.load(Relax)), Instant::now())))
+    } else {
+        StageGuard(None)
+    }
+}
+
+/// Charges a stage region on drop.
+#[must_use = "a stage mark measures until it is dropped"]
+pub struct StageGuard(Option<(&'static str, Phase, Instant)>);
+
+impl Drop for StageGuard {
+    fn drop(&mut self) {
+        if let Some((label, phase, started)) = self.0.take() {
+            let ns = ns_between(started, Instant::now());
+            if let Ok(mut stages) = STAGES.lock() {
+                match stages.iter_mut().find(|s| s.phase == phase && s.label == label) {
+                    Some(rec) => {
+                        rec.calls += 1;
+                        rec.ns = rec.ns.saturating_add(ns);
+                        rec.max_ns = rec.max_ns.max(ns);
+                    }
+                    None => stages.push(StageRec {
+                        phase,
+                        label,
+                        calls: 1,
+                        ns,
+                        max_ns: ns,
+                    }),
+                }
+            }
         }
     }
 }
@@ -876,7 +1477,7 @@ fn serialise(slot: &ModelSlot, partial: bool, now: Instant) -> String {
     format!(
         "{{\"schema\":\"plinth-perf/1\",\"model\":{},\"partial\":{partial},\"threads\":{},\
          \"checkpoint_unix_ms\":{unix_ms},\"active_phase\":{},\"wall_ms\":{},\"phases\":[{}],\
-         \"totals\":{{\"work\":{},\"sched\":{}}}}}\n",
+         \"totals\":{{\"work\":{},\"sched\":{}}},{}}}\n",
         json_string(&slot.model),
         crate::par::current_threads(),
         json_string(active.label()),
@@ -884,6 +1485,102 @@ fn serialise(slot: &ModelSlot, partial: bool, now: Instant) -> String {
         phases.join(","),
         work_object(&totals, Class::Work, false),
         work_object(&totals, Class::Sched, false),
+        extras_json(),
+    )
+}
+
+/// The `span_labels`, `poses`, `stages` and `rows` keys, without braces. The
+/// span index in a row's `site` column indexes `span_labels`. Everything is
+/// sorted so equal content serialises equally.
+fn extras_json() -> String {
+    let labels: Vec<String> = Span::ALL.iter().map(|s| json_string(s.label())).collect();
+    let mut poses = Vec::new();
+    if let Ok(store) = POSES.lock() {
+        let mut order: Vec<&PoseRecord> = store.iter().collect();
+        order.sort_by(|a, b| {
+            (a.phase.index(), &a.label, a.wall_ns).cmp(&(b.phase.index(), &b.label, b.wall_ns))
+        });
+        for rec in order {
+            let mut spans = Vec::new();
+            for s in Span::ALL {
+                let calls = rec.span_calls[s.index()];
+                if calls > 0 {
+                    spans.push(format!(
+                        "{}:{{\"calls\":{calls},\"thread_ms\":{}}}",
+                        json_string(s.label()),
+                        ms(rec.span_ns[s.index()])
+                    ));
+                }
+            }
+            poses.push(format!(
+                "{{\"phase\":{},\"label\":{},\"id\":{},\"wall_ms\":{},\"nested_ms\":{},\"spans\":{{{}}}}}",
+                json_string(rec.phase.label()),
+                json_string(&rec.label),
+                rec.id,
+                ms(rec.wall_ns),
+                ms(rec.nested_ns),
+                spans.join(",")
+            ));
+        }
+    }
+    let mut stages = Vec::new();
+    if let Ok(store) = STAGES.lock() {
+        let mut order: Vec<&StageRec> = store.iter().collect();
+        order.sort_by(|a, b| (a.phase.index(), a.label).cmp(&(b.phase.index(), b.label)));
+        for rec in order {
+            stages.push(format!(
+                "{{\"phase\":{},\"label\":{},\"calls\":{},\"thread_ms\":{},\"max_ms\":{}}}",
+                json_string(rec.phase.label()),
+                json_string(rec.label),
+                rec.calls,
+                ms(rec.ns),
+                ms(rec.max_ns)
+            ));
+        }
+    }
+    let mut kinds = Vec::new();
+    if let Ok(store) = ROW_STORE.lock() {
+        for kind in Rows::ALL {
+            let mut data: Vec<(usize, u64, [u64; ROW_WIDTH])> = store
+                .iter()
+                .filter(|r| r.kind == kind)
+                .map(|r| (r.phase.index(), r.pose, r.cols))
+                .collect();
+            if data.is_empty() {
+                continue;
+            }
+            data.sort_unstable();
+            let names: Vec<String> = ["phase", "pose"]
+                .into_iter()
+                .chain(kind.cols().iter().copied())
+                .map(json_string)
+                .collect();
+            let lines: Vec<String> = data
+                .iter()
+                .map(|(phase, pose, cols)| {
+                    let mut line = format!("[{phase},{pose}");
+                    for value in &cols[..kind.cols().len().min(ROW_WIDTH)] {
+                        line.push_str(&format!(",{value}"));
+                    }
+                    line.push(']');
+                    line
+                })
+                .collect();
+            kinds.push(format!(
+                "{}:{{\"cols\":[{}],\"data\":[{}]}}",
+                json_string(kind.label()),
+                names.join(","),
+                lines.join(",")
+            ));
+        }
+    }
+    format!(
+        "\"span_labels\":[{}],\"poses\":[{}],\"stages\":[{}],\"rows\":{{{}}},\"rows_dropped\":{}",
+        labels.join(","),
+        poses.join(","),
+        stages.join(","),
+        kinds.join(","),
+        ROWS_DROPPED.load(Relax)
     )
 }
 
@@ -1156,6 +1853,60 @@ mod tests {
         let under = std::fs::read_to_string(dir.join("A_B.perf.json")).expect("A_B");
         assert!(spaced.contains("\"sweep.runs\":1"), "{spaced}");
         assert!(under.contains("\"sweep.runs\":2"), "{under}");
+        ENABLED.store(false, Relax);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pose_frames_rows_stages_and_sites_reach_the_sidecar() {
+        let _guard = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = scratch("frames-rows");
+        enable(dir.clone(), HOUR);
+        begin_model("fr");
+        set_phase(Phase::Production);
+        assert!(with_pose_slot(|n: &mut u32| *n += 1).is_none(), "no frame yet");
+        pose_label(|| "pose A".to_owned());
+        {
+            let _run = span(Span::SweepRun);
+            add(Work::SweepDownCallLipSeat, 1);
+            assert_eq!(size_site_peek(), Span::SizeLipSeat as u64);
+            {
+                let _size = size_span();
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            assert_eq!(size_site_peek(), u64::MAX, "the site is taken once");
+            assert_eq!(with_pose_slot(|n: &mut u32| { *n += 1; *n }), Some(1));
+            assert_eq!(with_pose_slot(|n: &mut u32| { *n += 1; *n }), Some(2));
+            // A frame opened inside another is a nested one for the outer.
+            pose_label(|| "inner".to_owned());
+            {
+                let _inner = span(Span::SweepRun);
+                let _pass = span(Span::SweepPass);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            // The inner frame's slot is its own.
+            row(Rows::TipBatch, &[7, 9, 11]);
+        }
+        {
+            let _mark = stage("test.stage");
+        }
+        end_model();
+        let text = std::fs::read_to_string(dir.join("fr.perf.json")).expect("final");
+        assert!(text.contains("\"label\":\"pose A\""), "{text}");
+        assert!(text.contains("\"label\":\"inner\""), "{text}");
+        // The sizing span reached the outer frame, the pass span the inner one.
+        let outer = &text[text.find("\"label\":\"pose A\"").expect("outer")..];
+        let outer = &outer[..outer.find("}}").expect("end of outer") + 2];
+        assert!(outer.contains("\"sizing.lip_seat\":{\"calls\":1"), "{outer}");
+        assert!(!outer.contains("\"down.pass\""), "{outer}");
+        let inner = &text[text.find("\"label\":\"inner\"").expect("inner")..];
+        let inner = &inner[..inner.find("}}").expect("end of inner") + 2];
+        assert!(inner.contains("\"down.pass\":{\"calls\":1"), "{inner}");
+        assert!(!outer.contains("\"nested_ms\":0.000"), "the outer frame saw the nested one: {outer}");
+        let want = format!("[5,{},7,9,11]", pose_id("pose A"));
+        assert!(text.contains(&want), "{want} not in {text}");
+        assert!(text.contains("\"tip.batch\":{\"cols\":[\"phase\",\"pose\",\"rows\",\"faces\",\"wall_ns\"]"), "{text}");
+        assert!(text.contains("\"label\":\"test.stage\",\"calls\":1"), "{text}");
         ENABLED.store(false, Relax);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -97,6 +97,8 @@ fn value_of(object: &str, label: &str) -> u64 {
 fn work_counters_are_equal_at_1_and_8_threads_and_fire() {
     let root = unique_directory("on");
     let mut works = Vec::new();
+    // The reuse rows hold no time column, so they are equal at every width too.
+    let mut reuse_rows = Vec::new();
     for threads in [1_usize, 8] {
         let dir = root.join(format!("t{threads}"));
         run_child(threads, Some(&dir));
@@ -105,8 +107,16 @@ fn work_counters_are_equal_at_1_and_8_threads_and_fire() {
         assert!(text.contains("\"schema\":\"plinth-perf/1\""), "{text}");
         let totals = &text[text.find("\"totals\"").expect("totals")..];
         works.push(object_of(totals, "work").to_owned());
+        reuse_rows.push(object_of(&text, "down.reuse").to_owned());
+        // The pose frame of the sweep names its sizing sites and pass spans.
+        for label in ["sizing.initial", "down.run", "down.pass", "down.per_event"] {
+            assert!(text.contains(&format!("\"{label}\":{{\"calls\":")), "no {label} span: {text}");
+        }
+        assert!(text.contains("\"label\":\"unlabelled\""), "{text}");
+        assert!(text.contains("\"brace.partner_search\":{\"cols\":"), "no partner rows: {text}");
     }
     assert_eq!(works[0], works[1], "work counters moved with the thread count");
+    assert_eq!(reuse_rows[0], reuse_rows[1], "reuse rows moved with the thread count");
 
     // Anti-vacuity: the instrumented paths ran on this fixture.
     let work = &works[0];
@@ -119,10 +129,33 @@ fn work_counters_are_equal_at_1_and_8_threads_and_fire() {
         "frame.points.committed",
         "brace.partner_calls",
         "brace.partner_scanned",
+        "brace.partner_searches",
+        "brace.partner_trials",
+        "reuse.runs",
+        "reuse.layers",
+        "clear.batches",
+        "clear.batch_rows",
         "shake.checks",
     ] {
         assert!(value_of(work, label) > 0, "{label} stayed zero: {work}");
     }
+    // Every down-sweep call is measured by the probe: one run per site charge.
+    let calls: u64 = [
+        "initial", "removal", "merges_undone", "congestion", "congestion_trial", "stranded_round",
+        "stranded_put_back", "forced_merges", "unmerge_after_merges", "graze", "head_join",
+        "lip_seat", "ties", "model_ties",
+    ]
+    .iter()
+    .map(|site| {
+        let needle = format!("\"sweep.down.calls.{site}\":");
+        work.find(&needle).map_or(0, |_| value_of(work, &format!("sweep.down.calls.{site}")))
+    })
+    .sum();
+    assert_eq!(value_of(work, "reuse.runs"), calls, "{work}");
+    assert!(
+        value_of(work, "clear.batch_tris_max_row") <= value_of(work, "clear.batch_tris"),
+        "a row cannot test more faces than its batch: {work}"
+    );
     assert!(
         value_of(work, "sweep.down.cell_layers") >= value_of(work, "sweep.down.passes"),
         "cell-layers are at least one per pass"

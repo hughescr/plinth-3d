@@ -1309,8 +1309,15 @@ pub fn run(
         return Ok(BudgetSearchOutcome::SkippedScaleSuspicious { scale });
     }
 
-    match select_feature_protection(original, budget.probe) {
-        Ok((protected, _)) => Ok(run_budget_search(original, &protected, budget)?),
+    // Write-only stage marks (X0, 2026-10-10); inert unless `--perf` is on.
+    let protection_mark = geom_kernel::perf::stage("decimate.feature_protection");
+    let protection = select_feature_protection(original, budget.probe);
+    drop(protection_mark);
+    match protection {
+        Ok((protected, _)) => {
+            let _search_mark = geom_kernel::perf::stage("decimate.budget_search");
+            Ok(run_budget_search(original, &protected, budget)?)
+        }
         // A probe that produced no candidate is a refusal to reduce, not an
         // execution failure: the model is too coarse for the probe ratio to
         // leave anything behind, which is precisely the case for reducing
@@ -1390,6 +1397,7 @@ pub fn select_feature_protection(
     probe_config: ProbeConfig,
 ) -> Result<(Vec<bool>, FeatureProtectionTrace), FeatureProtectionError> {
     let policy = feature_protection_policy()?;
+    let probe_mark = geom_kernel::perf::stage("decimate.protection_probe_simplify");
     let probe = simplify_locked(
         original,
         &SimplifyRequest {
@@ -1414,11 +1422,15 @@ pub fn select_feature_protection(
             }
         }
     })?;
+    drop(probe_mark);
+    let backward_mark = geom_kernel::perf::stage("decimate.protection_backward_map");
     let errors = backward_error_map(original, &probe.mesh, probe_config).map_err(|error| {
         FeatureProtectionError::ProbeBackward {
             message: error.to_string(),
         }
     })?;
+    drop(backward_mark);
+    let _select_mark = geom_kernel::perf::stage("decimate.protection_select");
     // The backward error map that decides the entire protected set was
     // computed against `probe.mesh`, which may have been repaired. Whichever
     // way the selection goes, the trace that documents it says so.
@@ -1738,12 +1750,14 @@ fn run_budget_search(
     // This canonical identity probe establishes that the original itself is
     // auditable and exactly within budget. It is intentionally not eligible to
     // win the reduction search.
+    let identity_mark = geom_kernel::perf::stage("decimate.identity_probe");
     let initial = canonical_identity_step(original, protected, budget.probe).map_err(|error| {
         BudgetSearchError::SearchExecution {
             phase: "ratio-high precondition",
             message: error,
         }
     })?;
+    drop(identity_mark);
     let initial_passed = within_budget(&initial.probe, error_budget)
         && !initial.reduced
         && initial.output_face_count == original.tris().len();
@@ -1767,7 +1781,10 @@ fn run_budget_search(
     let mut high = policy.ratio_high;
     for _ in 0..policy.bisections {
         let midpoint = (low + high) / 2.0;
-        let step = match sampled_step(original, &mut request, midpoint, budget.probe, error_budget)
+        let step_mark = geom_kernel::perf::stage("decimate.bisection_step");
+        let sampled = sampled_step(original, &mut request, midpoint, budget.probe, error_budget);
+        drop(step_mark);
+        let step = match sampled
             .map_err(|error| BudgetSearchError::SearchExecution {
                 phase: "ratio bisection",
                 message: error,
@@ -1842,6 +1859,7 @@ fn run_budget_search(
         );
     }
 
+    let _final_mark = geom_kernel::perf::stage("decimate.final_verify");
     for candidate in candidates {
         request.target_ratio = candidate.ratio;
         let final_outcome = match simplify_locked(original, &request) {

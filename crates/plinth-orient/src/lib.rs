@@ -184,7 +184,9 @@ pub fn search_and_orient(
     let outcome = search::search(&mesh, request, demand).map_err(OrientError::Search)?;
     let selection = outcome.winner().selection;
     let transform = transform_for(selection)?;
+    let transform_mark = geom_kernel::perf::stage("orient.transform_mesh");
     let (mesh, transform) = transform_mesh(mesh, transform)?;
+    drop(transform_mark);
     let orientation = OrientationReport {
         provenance: OrientationProvenance::DenseSweep(Box::new(outcome.into_record())),
         selection,

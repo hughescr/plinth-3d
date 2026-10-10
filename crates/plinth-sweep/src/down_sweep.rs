@@ -758,6 +758,12 @@ pub fn run(
     keep_out: &DrainKeepOut,
     unrooted: &UnrootedColumns,
 ) -> DownSweepOutcome {
+    // Write-only `perf` marks (X0): the sizing site this run was called from
+    // (named by the `sweep.down.calls.*` charge just before the call), the
+    // run's own span, and the reuse probe's fingerprint of the members.
+    let site = crate::perf::size_site_peek();
+    let _size_span = crate::perf::size_span();
+    let _run_span = crate::perf::span(crate::perf::Span::DownRun);
     let l_max = sizing.x_allowed
         * core::f64::consts::PI
         * sizing.tip_radius_max_mm
@@ -787,6 +793,7 @@ pub fn run(
     let mut geometry_exhausted = 0_u64;
     let mut evaluations = 0_u64;
     let mut passes = 0_usize;
+    crate::reuse_probe::begin(grid.cells(), slices.len(), struts, site);
     loop {
         let mut log = crate::per_event::RouteLog::new(slices.len());
         let mut refused_here = Vec::new();
@@ -803,6 +810,9 @@ pub fn run(
             &mut refused_here,
         );
         passes += 1;
+        if passes == 1 {
+            crate::reuse_probe::end_first_pass();
+        }
         inserted += outcome.arms_inserted_by_load;
         geometry_exhausted += outcome.insertion_geometry_exhausted;
         refused.extend(refused_here);
@@ -810,7 +820,10 @@ pub fn run(
             .iter()
             .flat_map(|strut| strut.carried_mm2.iter().copied())
             .fold(0.0_f64, f64::max);
-        let sized = crate::per_event::size(grid, slices, struts, &log, sizing, l_max);
+        let sized = {
+            let _per_event_span = crate::perf::span(crate::perf::Span::PerEventSize);
+            crate::per_event::size(grid, slices, struts, &log, sizing, l_max)
+        };
         outcome.overloaded.clear();
         let (worst, worst_id) = apply_per_event_ledger(
             grid,
@@ -965,6 +978,13 @@ fn sweep_pass(
         crate::PerfWork::SweepDownCellLayers,
         crate::perf::count(cells).saturating_mul(crate::perf::count(slices.len())),
     );
+    let _pass_span = crate::perf::span(crate::perf::Span::SweepPass);
+    // Pass 1 of a per-event run (its trigger table is empty) feeds the reuse
+    // probe's band hashes when `PLINTH_PERF_BANDS=1` (write-only).
+    let probe_bands = triggers.is_some_and(HashMap::is_empty) && crate::reuse_probe::collecting();
+    if probe_bands {
+        crate::reuse_probe::begin_bands(slices.len(), cells, grid.cols());
+    }
     let mut outcome = DownSweepOutcome {
         min_layer_area_mm2: f64::INFINITY,
         ..DownSweepOutcome::default()
@@ -1090,7 +1110,10 @@ fn sweep_pass(
 
     for layer in (0..slices.len()).rev() {
         outcome.rasteriser_entries += 1;
-        rasterize_into(grid, &slices[layer], &mut scratch, &mut masks);
+        {
+            let _prefix_span = crate::perf::span(crate::perf::Span::PassPrefix);
+            rasterize_into(grid, &slices[layer], &mut scratch, &mut masks);
+        }
         let model_cells = masks.carrier_cells();
         let layer_area = model_cells as f64 * area;
         if model_cells > 0 {
@@ -1239,8 +1262,11 @@ fn sweep_pass(
         // re-route below is needed, and the next pass re-measures.
         let mut inserted_here = false;
         loop {
-            load_out.iter_mut().for_each(|value| *value = 0.0);
-            peel_fed.fill(false);
+            {
+                let _fill_span = crate::perf::span(crate::perf::Span::PassDense);
+                load_out.iter_mut().for_each(|value| *value = 0.0);
+                peel_fed.fill(false);
+            }
             incoming = 0.0;
             placed = 0.0;
             lost = 0.0;
@@ -1273,6 +1299,7 @@ fn sweep_pass(
             } else {
                 &carriers
             };
+            let route_span = crate::perf::span(crate::perf::Span::PassRoute);
             let route = route_within_cover(
                 grid,
                 &cover_above,
@@ -1293,6 +1320,7 @@ fn sweep_pass(
                     clear_built: &mut route_clear_built,
                 },
             );
+            drop(route_span);
             outcome.route_sightlines_clear += route.sightlines.clear;
             outcome.route_sightlines_blocked += route.sightlines.blocked;
             route_converged = route.converged;
@@ -1342,6 +1370,7 @@ fn sweep_pass(
                     }
                 }
             }
+            let dense_span = crate::perf::span(crate::perf::Span::PassDense);
             for cell in 0..cells {
                 let load = load_in[cell];
                 if load <= 0.0 {
@@ -1486,10 +1515,12 @@ fn sweep_pass(
                     load_out[cell] = 0.0;
                 }
             }
+            drop(dense_span);
 
             if !insertion.enabled {
                 break;
             }
+            let _insertion_span = crate::perf::span(crate::perf::Span::PassInsertion);
             insert.hosts.clear();
             insert.host_load.clear();
             insert.host_keys.clear();
@@ -1984,7 +2015,27 @@ fn sweep_pass(
         // than a per-arm removal.
         growing.retain(|&index| struts[index].k_bottom == usize::MAX);
 
+        // The reuse probe's band hashes of this layer, after the member phase
+        // (write-only; pass 1 of a per-event run, `PLINTH_PERF_BANDS=1`).
+        if probe_bands {
+            let _hash_span = crate::perf::span(crate::perf::Span::PassBandHash);
+            let arm_values: Vec<(usize, u64)> = layer_arms
+                .iter()
+                .filter(|arm| !arm.is_growing)
+                .map(|arm| {
+                    let strut = &struts[arm.index];
+                    let value = crate::reuse_probe::slot_value(
+                        strut.carried_mm2.get(arm.slot).copied().unwrap_or(0.0),
+                        strut.radius_mm.get(arm.slot).copied().unwrap_or(0.0),
+                    );
+                    (strut.cell_at(layer), value)
+                })
+                .collect();
+            crate::reuse_probe::layer_done(layer, grid.cols(), &load_out, &carriers, &arm_values);
+        }
+
         // --- the model's own section is checked, never resized --------------
+        let end_span = crate::perf::span(crate::perf::Span::PassDense);
         if model_cells > 0 {
             check_model_sections(
                 grid,
@@ -2003,6 +2054,7 @@ fn sweep_pass(
         // This layer's cover is the next iteration's "above".
         cover_above.copy_from_slice(&masks.cover);
         carriers_above.copy_from_slice(&carriers);
+        drop(end_span);
         if rule_active {
             handed_prev.clear();
             for &cell in unrooted_here {
@@ -2453,6 +2505,7 @@ fn route_within_cover(
         };
     }
     if !*clear_built {
+        let _clearance_span = crate::perf::span(crate::perf::Span::PassClearance);
         crate::reach::clearance_mm(grid, cover_above, clear);
         *clear_built = true;
     }

@@ -563,6 +563,13 @@ impl SweepDemand {
         // deferred) so the plan can be emitted as it is; every other
         // measurement is the pricing sweep, which skips the rigid-share
         // diagnostic and the frame ledger.
+        // Names this pose's perf frame (write-only; the closure runs only
+        // with `--perf`), so the winner's own spans can be told from the other
+        // finalists' in the sidecar's `poses`.
+        perf::pose_label(|| {
+            let up = candidate.get();
+            format!("{} ({:+.4},{:+.4},{:+.4})", fidelity.label(), up[0], up[1], up[2])
+        });
         let started = Instant::now();
         let plan = match &settings.retained_policy {
             Some(policy) => run_sweep_with_holes(&transformed, &layers, policy, &[], &[]),

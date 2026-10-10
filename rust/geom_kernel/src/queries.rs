@@ -2594,6 +2594,10 @@ impl NativeSurface {
             crate::perf::add(crate::perf::Work::SegWalkNodesVisited, nodes_visited);
             crate::perf::add(crate::perf::Work::SegWalkNodesPruned, nodes_pruned);
             crate::perf::add(crate::perf::Work::SegWalkTrisTested, tris_tested);
+            // The batch loop that called this walk reads it back (per-row
+            // share of the batch's faces); thread-local, so no row sees
+            // another's.
+            crate::perf::note_walk_tris(tris_tested);
         }
         (best_d, best_pt, near_parallel)
     }
@@ -2880,18 +2884,65 @@ impl NativeSurface {
                 excluded_faces.len(),
             )?;
         }
-        Ok(par::run(|| {
+        // Write-only batch tally for `perf`: per row, faces tested and time,
+        // folded with integer sums and maxima (order-free), one charge and one
+        // row per batch. Off, `timing` is false and the loop is the plain one.
+        let timing = crate::perf::enabled();
+        let _batch_span = crate::perf::span(crate::perf::Span::ClearBatch);
+        let batch_started = timing.then(std::time::Instant::now);
+        let tris_sum = std::sync::atomic::AtomicU64::new(0);
+        let tris_max = std::sync::atomic::AtomicU64::new(0);
+        let ns_sum = std::sync::atomic::AtomicU64::new(0);
+        let ns_max = std::sync::atomic::AtomicU64::new(0);
+        let rows = Ok(par::run(|| {
             (0..n)
                 .into_par_iter()
                 .map(|i| {
                     let excluded = excluded_faces.get(i).copied().unwrap_or(&[]);
-                    self.seg_clear_one_excluding(
+                    let row_started = timing.then(std::time::Instant::now);
+                    let result = self.seg_clear_one_excluding(
                         p0s[i], p1s[i], r0s[i], r1s[i], standoff, inset0s[i], inset1s[i], excluded,
                         frustum,
-                    )
+                    );
+                    if let Some(started) = row_started {
+                        let tris = crate::perf::walk_tris();
+                        let ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                        let relaxed = std::sync::atomic::Ordering::Relaxed;
+                        tris_sum.fetch_add(tris, relaxed);
+                        tris_max.fetch_max(tris, relaxed);
+                        ns_sum.fetch_add(ns, relaxed);
+                        ns_max.fetch_max(ns, relaxed);
+                    }
+                    result
                 })
                 .collect()
-        }))
+        }));
+        if let Some(started) = batch_started {
+            let relaxed = std::sync::atomic::Ordering::Relaxed;
+            let (rows_n, tris, tris_top) = (
+                crate::perf::count(n),
+                tris_sum.load(relaxed),
+                tris_max.load(relaxed),
+            );
+            crate::perf::add(crate::perf::Work::ClearBatches, 1);
+            crate::perf::add(crate::perf::Work::ClearBatchRows, rows_n);
+            crate::perf::add(crate::perf::Work::ClearBatchTris, tris);
+            crate::perf::add(crate::perf::Work::ClearBatchTrisMaxRow, tris_top);
+            crate::perf::row(
+                crate::perf::Rows::ClearBatch,
+                &[
+                    rows_n,
+                    tris,
+                    tris_top,
+                    u64::from(frustum),
+                    u64::from(!excluded_faces.is_empty()),
+                    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                    ns_sum.load(relaxed),
+                    ns_max.load(relaxed),
+                ],
+            );
+        }
+        rows
     }
 
     /// Every global face ID within `within_mm[i]` of segment `i`, one batched

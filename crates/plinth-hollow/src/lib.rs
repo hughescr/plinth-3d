@@ -993,6 +993,8 @@ pub fn run(
     }
     let settings = HollowSettings::from_request(request)?;
     let (solid, orientation) = model.into_parts();
+    // Write-only stage marks (X0, 2026-10-10); inert unless `--perf` is on.
+    let shell_mark = geom_kernel::perf::stage("hollow.create_shell");
     let candidate = match create_shell_recording_repair(
         solid.clone(),
         settings,
@@ -1008,15 +1010,19 @@ pub fn run(
             )
         }
     };
+    drop(shell_mark);
     // Drain planning and drilling consume the candidate, and with it the only
     // other copy of the repair's measurement. Take it first.
     let cavity_repair = candidate.cavity().resources().cavity_repair();
+    let drains_mark = geom_kernel::perf::stage("hollow.plan_drains");
     let planned = drains::plan_drains(candidate).map_err(|failure| {
         HollowStageFailure::after_cavity_repair(
             HollowError::DrainPlanning(failure.into_reason()),
             cavity_repair,
         )
     })?;
+    drop(drains_mark);
+    let _drill_mark = geom_kernel::perf::stage("hollow.drill");
     let drilled = drilling::drill_planned_shell(planned).map_err(|failure| {
         HollowStageFailure::after_cavity_repair(
             HollowError::Drilling(failure.into_reason()),

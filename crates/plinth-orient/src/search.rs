@@ -988,6 +988,9 @@ pub fn search(
     // The exact rung first: if the production mesh cannot be scored there is no
     // orientation to commit to and the whole sweep refuses by name.
     let scar_free = request.scar_free();
+    // Write-only stage marks (X0, 2026-10-10): where the OrientTable phase
+    // spends its time. Inert unless `--perf` is on.
+    let exact_mark = geom_kernel::perf::stage("orient.rung_exact");
     let exact = rung(mesh, EXACT_LOD, None, scar_free).map_err(|error| match error {
         RungError::Score(error) => SearchError::ExactUnscorable(error),
         RungError::Simplify(_) | RungError::BelowFloor { .. } | RungError::NoCascadeSource => {
@@ -996,10 +999,12 @@ pub fn search(
             ))
         }
     })?;
+    drop(exact_mark);
 
     // L1, then L2 cascaded FROM L1 — a refinement-consistent coarsening, so a
     // rank cannot invert merely because two independent QEM runs chose
     // different edges.
+    let l1_mark = geom_kernel::perf::stage("orient.rung_l1");
     let l1 = build_proxy_rung(
         mesh,
         L1_LOD,
@@ -1007,7 +1012,9 @@ pub fn search(
         request.ladder,
         scar_free,
     );
+    drop(l1_mark);
     let l1 = record_fallback(l1, L1_LOD, EXACT_LOD, &mut fallbacks);
+    let l2_mark = geom_kernel::perf::stage("orient.rung_l2");
     let l2 = match l1.as_ref().and_then(Rung::proxy_mesh) {
         Some(source) => build_proxy_rung(
             source,
@@ -1023,6 +1030,7 @@ pub fn search(
         // no proxy here to measure, so the record must not describe one.
         None => Err(RungError::NoCascadeSource),
     };
+    drop(l2_mark);
     let l2 = record_fallback(
         l2,
         L2_LOD,
@@ -1035,8 +1043,10 @@ pub fn search(
 
     // The grid's rest-pose block is read off the tier that scores it: rest poses
     // are a property of the geometry being searched.
+    let grid_mark = geom_kernel::perf::stage("orient.grid");
     let grid = SweepGrid::build(&coarse.table, request.grid)?;
     let directions = grid.directions();
+    drop(grid_mark);
 
     let mut tiers = Vec::with_capacity(3);
     let mut refusals = Vec::new();
@@ -1073,6 +1083,11 @@ pub fn search(
         ),
         (SearchTier::Commit, &exact, None),
     ] {
+        let tier_mark = geom_kernel::perf::stage(match tier {
+            SearchTier::Coarse => "orient.score_coarse",
+            SearchTier::Refine => "orient.score_refine",
+            SearchTier::Commit => "orient.score_commit",
+        });
         let mut record = score_tier(
             tier,
             rung,
@@ -1084,6 +1099,7 @@ pub fn search(
             &mut refusals,
             &mut work,
         )?;
+        drop(tier_mark);
         record.promoted = width.map_or(0, |width| record.ranking.len().min(width));
         record.escorted = if tier == SearchTier::Commit {
             escorted
@@ -1217,6 +1233,7 @@ pub fn search(
         rerank_commit(&mut commit_record.ranking, &commit_tier_demand);
     }
 
+    let record_mark = geom_kernel::perf::stage("orient.record");
     let commit = tiers.last().expect("three tiers were scored");
     let winner_rank = commit
         .ranking
@@ -1274,6 +1291,7 @@ pub fn search(
         search_digest: String::new(),
     };
     record.search_digest = digest_record(&record)?;
+    drop(record_mark);
     Ok(SweepOutcome { winner, record })
 }
 
@@ -1455,12 +1473,14 @@ fn rung(
     proxy: Option<SearchProxy>,
     scar_free: bool,
 ) -> Result<Rung, RungError> {
+    let table_mark = geom_kernel::perf::stage("orient.face_table");
     let table = if scar_free {
         OrientFaceTable::without_delicacy(mesh, lod)
     } else {
         OrientFaceTable::build(mesh, lod)
     }
     .map_err(RungError::Score)?;
+    drop(table_mark);
     let record = LodRecord {
         lod: lod.to_owned(),
         mesh_fingerprint: table.mesh_fingerprint().to_owned(),
@@ -1492,7 +1512,9 @@ fn build_proxy_rung(
     ladder: LadderSettings,
     scar_free: bool,
 ) -> Result<Rung, RungError> {
+    let simplify_mark = geom_kernel::perf::stage("orient.simplify");
     let proxy = SearchProxy::simplify(source, ratio).map_err(RungError::Simplify)?;
+    drop(simplify_mark);
     let faces = proxy.mesh().tris().len();
     if faces < ladder.min_faces() {
         return Err(RungError::BelowFloor {

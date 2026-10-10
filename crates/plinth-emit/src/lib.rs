@@ -423,12 +423,18 @@ fn write_staged(
     request: &EmitRequest,
     staging: &Path,
 ) -> Result<EmitReport, EmitError> {
+    // Write-only stage marks (X0, 2026-10-10): where the Emit phase spends its
+    // time. Inert unless `--perf` is on.
+    let soup_mark = geom_kernel::perf::stage("emit.model_soup");
     let center = mesh_bbox_center(model.mesh()).ok_or(EmitError::RecordEncodingRejected)?;
     let geometry = model_triangle_soup(model.mesh(), center)?;
+    drop(soup_mark);
     let lift = model.lift_mm().get();
     let lift = f32_of(lift)?;
+    let records_mark = geom_kernel::perf::stage("emit.build_records");
     let (records, mut seat_trim) =
         build_records_trimmed(model.primitives(), center, Some(model.mesh()))?;
+    drop(records_mark);
     seat_trim.pixel_cube_micro_mm3 = pixel_cube_micro_mm3(&request.printer);
     // The audit reopens the file and pairs every record with its primitive, so
     // it is given exactly the primitives whose records were written.
@@ -447,6 +453,7 @@ fn write_staged(
             )
         };
 
+    let project_mark = geom_kernel::perf::stage("emit.project");
     let mut project = Project::new_empty();
     let index = project
         .add_model(ModelSource {
@@ -480,12 +487,16 @@ fn write_staged(
             }])
             .map_err(|_| EmitError::RecordEncodingRejected)?;
     }
+    drop(project_mark);
+    let save_mark = geom_kernel::perf::stage("emit.save");
     project
         .save(staging)
         .map_err(|_| EmitError::TargetUnavailable {
             path: request.target_path.clone(),
         })?;
+    drop(save_mark);
 
+    let audit_mark = geom_kernel::perf::stage("emit.audit_disk");
     let mut report = audit_disk(
         staging,
         &request.printer,
@@ -502,6 +513,7 @@ fn write_staged(
         finding,
         kept_at: staging.to_path_buf(),
     })?;
+    drop(audit_mark);
     report.seat_trim = Box::new(seat_trim);
     Ok(report)
 }
