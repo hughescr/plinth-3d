@@ -13,6 +13,9 @@ mod display_eval;
 mod fixtures;
 mod io;
 mod repair;
+#[cfg(feature = "serial-oracle")]
+pub mod surface_oracle;
+mod surface_par;
 mod topology;
 mod triage;
 

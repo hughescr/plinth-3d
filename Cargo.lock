@@ -1142,6 +1142,7 @@ version = "0.1.0"
 dependencies = [
  "geom_kernel",
  "plinth-core",
+ "rayon",
  "robust",
  "serde",
  "serde_json",

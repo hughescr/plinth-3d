@@ -114,11 +114,14 @@
 //! spatial query and no per-face kernel call anywhere in this file.  Every
 //! fold is serial in source index order.
 
+use std::ops::Range;
+
 use geom_kernel::perf::{self, Span, Work};
 use geom_kernel::vec3::{cross, dot, norm, sub};
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, V3};
 
 use crate::delicacy::FaceTable;
+use crate::surface_par::ScratchPool;
 use crate::delicacy_eval::{welded_angle_defect, FaceGeometryPass, WeldedAngleDefect};
 use crate::display::{
     DisplayBuildConfig, DisplayError, DisplayFaceValue, DisplayField, DisplaySettings,
@@ -170,7 +173,7 @@ pub fn evaluate_display(
         &folds,
         &curvature_by_face,
         settings,
-    );
+    )?;
 
     let mut values = Vec::with_capacity(face_count);
     for (face, &visible) in visibility.iter().enumerate() {
@@ -585,6 +588,18 @@ fn spread_of_folds(sums: (f64, f64, f64, f64, f64)) -> f64 {
 /// own side walls, and that spurious detail on a large area out-voted a
 /// genuinely delicate blade authored on the underside (make_raking_blade,
 /// 2026-09-04).  No new constant: the band is the radius the term already has.
+///
+/// # Parallel, and bit-identical to the serial walk (2026-10-09)
+///
+/// The pass is a GATHER: face `f` writes only `detail[f]` and `curvature[f]`,
+/// and every sum inside a walk is formed in that walk's own frontier order,
+/// which depends only on the topology.  So fixed 1024-face blocks run as an
+/// index-parallel map-collect and are concatenated in block order.  A block
+/// takes pooled scratch (stamps, frontier, member list) and the stamps are
+/// keyed by the GLOBAL face index, which is unique across the run, so a stamp
+/// another block or worker left behind never equals the current seed.  The
+/// serial body is kept as `neighbourhood_pass_serial`; every test compares
+/// against it bit for bit.
 fn neighbourhood_pass(
     mesh: &Mesh,
     geometry: &FaceGeometryPass,
@@ -592,11 +607,324 @@ fn neighbourhood_pass(
     folds: &Folds,
     curvature_by_face: &[f64],
     settings: DisplaySettings,
-) -> Neighbourhood {
+) -> Result<Neighbourhood, DisplayError> {
     let _perf_span = perf::span(Span::DisplayPass);
-    // Write-only tallies for `perf`: faces walked and frontier entries examined.
-    let mut walked_faces = 0_usize;
-    let mut walked_pairs = 0_usize;
+    let band_fraction = border_band_fraction(mesh, geometry, settings.detail_radius_mm());
+    let inputs = NeighbourhoodInputs {
+        geometry,
+        topology,
+        folds,
+        curvature_by_face,
+        band_fraction: &band_fraction,
+        radius_sq: settings.detail_radius_mm() * settings.detail_radius_mm(),
+        resolution: settings.change_resolution_rad(),
+    };
+    let (neighbourhood, counts) =
+        geom_kernel::run_in_pool(|| {
+            neighbourhood_blocks::<ExactWalk>(&inputs, NEIGHBOURHOOD_BLOCK_FACES)
+        })
+        .map_err(|error| DisplayError::Kernel(error.to_string()))?;
+    if perf::enabled() {
+        perf::add(Work::DisplayFaces, perf::count(counts.faces_walked));
+        perf::add(Work::DisplayPairsMeasured, perf::count(counts.pairs_measured));
+        perf::add(Work::DisplayMembersTotal, perf::count(counts.members_total));
+    }
+    Ok(neighbourhood)
+}
+
+/// Faces per block of the neighbourhood pass (execution only, never a value).
+const NEIGHBOURHOOD_BLOCK_FACES: usize = 1024;
+
+/// The flat, read-only view every neighbourhood walk shares.
+struct NeighbourhoodInputs<'a> {
+    geometry: &'a FaceGeometryPass,
+    topology: &'a crate::FaceTopology,
+    folds: &'a Folds,
+    curvature_by_face: &'a [f64],
+    band_fraction: &'a [f64],
+    radius_sq: f64,
+    resolution: f64,
+}
+
+/// What the walks did, counted (path hits), summed over blocks as integers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct WalkCounts {
+    /// Non-degenerate faces whose neighbourhood was walked.
+    faces_walked: usize,
+    /// Frontier entries examined across all walks.
+    pairs_measured: usize,
+    /// Faces found inside their seed's neighbourhood, across all walks. Every
+    /// walk has its own face as a member, so this exceeds `faces_walked`
+    /// exactly when some walk expanded beyond its seed.
+    members_total: usize,
+}
+
+/// One worker's reusable walk state.
+struct WalkScratch {
+    stamp: Vec<u32>,
+    inside_stamp: Vec<u32>,
+    frontier: Vec<u32>,
+    visited: Vec<u32>,
+    members: Vec<usize>,
+}
+
+/// One block's per-face results, in face order.
+struct NeighbourhoodBlock {
+    detail: Vec<f64>,
+    curvature: Vec<f64>,
+    counts: WalkCounts,
+}
+
+/// The seed and reset rules of a walk. The production type ([`ExactWalk`]) is
+/// the serial rule; the test module implements deliberately broken ones to
+/// show the tests can see them.
+trait WalkHooks {
+    /// The stamp value that marks "visited by this face's walk".
+    fn seed(face: usize) -> u32;
+    /// Whether the visited stamps are reset after each walk.
+    const RESET_STAMPS: bool = true;
+    /// Whether the expansion loop skips a face's first neighbour.
+    const SKIP_FIRST_NEIGHBOUR: bool = false;
+}
+
+/// The production rules: the seed is the global face index, stamps are reset.
+struct ExactWalk;
+impl WalkHooks for ExactWalk {
+    fn seed(face: usize) -> u32 {
+        u32::try_from(face).unwrap_or(u32::MAX)
+    }
+}
+
+/// Runs every block in the ambient pool and concatenates in block order.
+fn neighbourhood_blocks<W: WalkHooks + Sync>(
+    inp: &NeighbourhoodInputs<'_>,
+    block_faces: usize,
+) -> (Neighbourhood, WalkCounts) {
+    use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+
+    assert!(block_faces >= 1, "a block holds at least one face");
+    let face_count = inp.geometry.normals.len();
+    let pool = ScratchPool::<WalkScratch>::new();
+    let blocks: Vec<Range<usize>> = (0..face_count)
+        .step_by(block_faces)
+        .map(|start| start..face_count.min(start + block_faces))
+        .collect();
+    let results: Vec<NeighbourhoodBlock> = blocks
+        .par_iter()
+        .map(|block| {
+            let mut scratch = pool.take(|| WalkScratch {
+                stamp: vec![u32::MAX; face_count],
+                inside_stamp: vec![u32::MAX; face_count],
+                frontier: Vec::new(),
+                visited: Vec::new(),
+                members: Vec::new(),
+            });
+            let out = neighbourhood_block::<W>(inp, block.clone(), &mut scratch);
+            pool.put(scratch);
+            out
+        })
+        .collect();
+    let mut detail = Vec::with_capacity(face_count);
+    let mut curvature = Vec::with_capacity(face_count);
+    let mut counts = WalkCounts::default();
+    for block in results {
+        detail.extend_from_slice(&block.detail);
+        curvature.extend_from_slice(&block.curvature);
+        counts.faces_walked += block.counts.faces_walked;
+        counts.pairs_measured += block.counts.pairs_measured;
+        counts.members_total += block.counts.members_total;
+    }
+    (Neighbourhood { detail, curvature }, counts)
+}
+
+/// The per-face walk of the serial body, verbatim, for the faces of `faces`.
+fn neighbourhood_block<W: WalkHooks>(
+    inp: &NeighbourhoodInputs<'_>,
+    faces: Range<usize>,
+    scratch: &mut WalkScratch,
+) -> NeighbourhoodBlock {
+    let geometry = inp.geometry;
+    let topology = inp.topology;
+    let folds = inp.folds;
+    let indptr = topology.indptr();
+    let indices = topology.indices();
+    let WalkScratch {
+        stamp,
+        inside_stamp,
+        frontier,
+        visited,
+        members,
+    } = scratch;
+    let mut detail = Vec::with_capacity(faces.len());
+    let mut curvature = Vec::with_capacity(faces.len());
+    let mut counts = WalkCounts::default();
+
+    for face in faces {
+        if geometry.degenerate[face] {
+            detail.push(0.0);
+            curvature.push(0.0);
+            continue;
+        }
+        let seed = W::seed(face);
+        let origin = geometry.centroids[face];
+        let ring = topology.neighbors(face).unwrap_or(&[]);
+
+        frontier.clear();
+        visited.clear();
+        members.clear();
+        let own = u32::try_from(face).unwrap_or(u32::MAX);
+        frontier.push(own);
+        stamp[face] = seed;
+        visited.push(own);
+
+        let mut curvature_total = 0.0_f64;
+
+        let mut head = 0_usize;
+        while head < frontier.len() {
+            let current = frontier[head] as usize;
+            head += 1;
+            let inside = current == face
+                || u32::try_from(current).is_ok_and(|index| ring.contains(&index))
+                || {
+                    let offset = sub(geometry.centroids[current], origin);
+                    dot(offset, offset) <= inp.radius_sq
+                };
+            if !inside {
+                continue;
+            }
+            inside_stamp[current] = seed;
+            members.push(current);
+            if !geometry.degenerate[current] {
+                curvature_total += inp.curvature_by_face[current];
+            }
+            // Expand only from faces that are themselves inside; a face outside
+            // the radius is neither counted nor walked through.
+            if let Some(neighbours) = topology.neighbors(current) {
+                let skip = usize::from(W::SKIP_FIRST_NEIGHBOUR);
+                for &next in neighbours.iter().skip(skip) {
+                    if stamp[next as usize] == seed {
+                        continue;
+                    }
+                    stamp[next as usize] = seed;
+                    visited.push(next);
+                    frontier.push(next);
+                }
+            }
+        }
+
+        counts.faces_walked += 1;
+        counts.pairs_measured += frontier.len();
+        counts.members_total += members.len();
+
+        // The folds wholly inside the neighbourhood, each counted once (from
+        // its lower-indexed face), above the change resolution.
+        let mut sums = (0.0_f64, 0.0_f64, 0.0_f64, f64::INFINITY, 0.0_f64);
+        for &member in members.iter() {
+            let (Some(&start), Some(&end)) = (indptr.get(member), indptr.get(member + 1)) else {
+                continue;
+            };
+            let range = start as usize..end as usize;
+            for ((&other, &angle), &length) in indices[range.clone()]
+                .iter()
+                .zip(&folds.angle[range.clone()])
+                .zip(&folds.length[range])
+            {
+                let other = other as usize;
+                if other <= member || inside_stamp.get(other) != Some(&seed) {
+                    continue;
+                }
+                if angle <= inp.resolution {
+                    continue;
+                }
+                let weight = length * angle;
+                sums.0 += weight;
+                sums.1 += weight * angle;
+                sums.2 += weight * angle.ln();
+                sums.3 = sums.3.min(angle);
+                sums.4 = sums.4.max(angle);
+            }
+        }
+        detail.push(spread_of_folds(sums) * inp.band_fraction[face]);
+        curvature.push(curvature_total);
+        if W::RESET_STAMPS {
+            for &touched in visited.iter() {
+                stamp[touched as usize] = u32::MAX;
+            }
+        }
+    }
+    NeighbourhoodBlock {
+        detail,
+        curvature,
+        counts,
+    }
+}
+
+/// Both neighbourhood passes on one mesh, for the witness example
+/// (`surface_oracle`).
+#[cfg(feature = "serial-oracle")]
+pub(crate) struct NeighbourhoodComparison {
+    pub(crate) parallel_detail: Vec<f64>,
+    pub(crate) parallel_curvature: Vec<f64>,
+    pub(crate) serial_detail: Vec<f64>,
+    pub(crate) serial_curvature: Vec<f64>,
+    pub(crate) faces_walked: usize,
+    pub(crate) members_total: usize,
+    pub(crate) non_degenerate_faces: usize,
+}
+
+/// Runs the display field's own setup, then the parallel and the serial
+/// neighbourhood pass over it.
+#[cfg(feature = "serial-oracle")]
+pub(crate) fn compare_neighbourhood_passes(
+    mesh: &Mesh,
+) -> Result<NeighbourhoodComparison, DisplayError> {
+    let settings = DisplaySettings::production()?;
+    let geometry = FaceGeometryPass::run(mesh);
+    let WeldedAngleDefect {
+        topology,
+        defect,
+        unusable,
+    } = welded_angle_defect(mesh, &geometry).map_err(DisplayError::Topology)?;
+    let curvature = curvature_by_face(mesh, &geometry, &topology, &defect, &unusable);
+    let folds = fold_pass(mesh, &geometry, &topology);
+    let serial = neighbourhood_pass_serial(mesh, &geometry, &topology, &folds, &curvature, settings);
+    let band_fraction = border_band_fraction(mesh, &geometry, settings.detail_radius_mm());
+    let inputs = NeighbourhoodInputs {
+        geometry: &geometry,
+        topology: &topology,
+        folds: &folds,
+        curvature_by_face: &curvature,
+        band_fraction: &band_fraction,
+        radius_sq: settings.detail_radius_mm() * settings.detail_radius_mm(),
+        resolution: settings.change_resolution_rad(),
+    };
+    let (parallel, counts) = geom_kernel::run_in_pool(|| {
+        neighbourhood_blocks::<ExactWalk>(&inputs, NEIGHBOURHOOD_BLOCK_FACES)
+    })
+    .map_err(|error| DisplayError::Kernel(error.to_string()))?;
+    Ok(NeighbourhoodComparison {
+        parallel_detail: parallel.detail,
+        parallel_curvature: parallel.curvature,
+        serial_detail: serial.detail,
+        serial_curvature: serial.curvature,
+        faces_walked: counts.faces_walked,
+        members_total: counts.members_total,
+        non_degenerate_faces: geometry.degenerate.iter().filter(|d| !**d).count(),
+    })
+}
+
+/// The serial pass exactly as it stood before the parallel one (2026-10-09):
+/// frozen former production code, the test oracle and the witness example's
+/// reference. Counters are not charged.
+#[cfg(any(test, feature = "serial-oracle"))]
+fn neighbourhood_pass_serial(
+    mesh: &Mesh,
+    geometry: &FaceGeometryPass,
+    topology: &crate::FaceTopology,
+    folds: &Folds,
+    curvature_by_face: &[f64],
+    settings: DisplaySettings,
+) -> Neighbourhood {
     let face_count = geometry.normals.len();
     let radius_sq = settings.detail_radius_mm() * settings.detail_radius_mm();
     let resolution = settings.change_resolution_rad();
@@ -667,9 +995,6 @@ fn neighbourhood_pass(
             }
         }
 
-        walked_faces += 1;
-        walked_pairs += frontier.len();
-
         // The folds wholly inside the neighbourhood, each counted once (from
         // its lower-indexed face), above the change resolution.
         let mut sums = (0.0_f64, 0.0_f64, 0.0_f64, f64::INFINITY, 0.0_f64);
@@ -705,10 +1030,6 @@ fn neighbourhood_pass(
         }
     }
 
-    if perf::enabled() {
-        perf::add(Work::DisplayFaces, perf::count(walked_faces));
-        perf::add(Work::DisplayPairsMeasured, perf::count(walked_pairs));
-    }
     Neighbourhood { detail, curvature }
 }
 
@@ -886,5 +1207,261 @@ mod band_tests {
              {small_top:.6}; a face far larger than the detail radius is being read as \
              articulated surface"
         );
+    }
+}
+
+/// The parallel neighbourhood pass against its frozen serial oracle
+/// (2026-10-09), with the sabotages that show the tests can see a broken one.
+#[cfg(test)]
+mod walk_tests {
+    use super::*;
+    use crate::delicacy_eval::tests::gridded_cube;
+    use crate::{make_recessed_disc, make_thin_fin};
+
+    /// A sabotage: every face uses seed 0 AND the visited stamps are never
+    /// reset, so a later face's walk finds its neighbours already stamped and
+    /// does not push them (members shrink), and a stale inside-stamp admits
+    /// folds from outside the neighbourhood. This is the hazard a parallel
+    /// pass must avoid: a reused seed with pooled scratch.
+    struct CollideSeeds;
+    impl WalkHooks for CollideSeeds {
+        fn seed(_face: usize) -> u32 {
+            0
+        }
+        const RESET_STAMPS: bool = false;
+    }
+
+    /// A sabotage: the expansion loop skips each face's first neighbour, so an
+    /// eligible face is never visited.
+    struct DropFirstNeighbour;
+    impl WalkHooks for DropFirstNeighbour {
+        fn seed(face: usize) -> u32 {
+            ExactWalk::seed(face)
+        }
+        const SKIP_FIRST_NEIGHBOUR: bool = true;
+    }
+
+    /// A positive control: only the stamp reset is skipped, with unique global
+    /// seeds. A stale stamp can never equal a later seed, so the bits must NOT
+    /// move; this is what lets pooled scratch go uncleaned between blocks.
+    struct SkipResetOnly;
+    impl WalkHooks for SkipResetOnly {
+        fn seed(face: usize) -> u32 {
+            ExactWalk::seed(face)
+        }
+        const RESET_STAMPS: bool = false;
+    }
+
+    /// Everything a pass reads, built the way `evaluate_display` builds it.
+    struct Prepared {
+        geometry: FaceGeometryPass,
+        topology: crate::FaceTopology,
+        folds: Folds,
+        curvature: Vec<f64>,
+        band_fraction: Vec<f64>,
+    }
+
+    fn settings() -> DisplaySettings {
+        DisplaySettings::production().expect("display settings")
+    }
+
+    fn prepare(mesh: &Mesh) -> Prepared {
+        let geometry = FaceGeometryPass::run(mesh);
+        let WeldedAngleDefect {
+            topology,
+            defect,
+            unusable,
+        } = welded_angle_defect(mesh, &geometry).expect("welded defect");
+        let curvature = curvature_by_face(mesh, &geometry, &topology, &defect, &unusable);
+        let folds = fold_pass(mesh, &geometry, &topology);
+        let band_fraction = border_band_fraction(mesh, &geometry, settings().detail_radius_mm());
+        Prepared {
+            geometry,
+            topology,
+            folds,
+            curvature,
+            band_fraction,
+        }
+    }
+
+    impl Prepared {
+        fn inputs(&self) -> NeighbourhoodInputs<'_> {
+            let radius = settings().detail_radius_mm();
+            NeighbourhoodInputs {
+                geometry: &self.geometry,
+                topology: &self.topology,
+                folds: &self.folds,
+                curvature_by_face: &self.curvature,
+                band_fraction: &self.band_fraction,
+                radius_sq: radius * radius,
+                resolution: settings().change_resolution_rad(),
+            }
+        }
+    }
+
+    fn in_pool<R: Send>(threads: usize, body: impl FnOnce() -> R + Send) -> R {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("local rayon pool")
+            .install(body)
+    }
+
+    fn bits(values: &[f64]) -> Vec<u64> {
+        values.iter().map(|value| value.to_bits()).collect()
+    }
+
+    fn fixtures() -> Vec<(&'static str, Mesh)> {
+        vec![
+            ("gridded_cube(8)", gridded_cube(8)),
+            ("gridded_cube(16)", gridded_cube(16)),
+            ("thin_fin", make_thin_fin().expect("thin fin")),
+            (
+                "recessed_disc",
+                make_recessed_disc(11.5, 12.5, 3.5, 2.5, 10.0, 96).expect("recessed disc"),
+            ),
+        ]
+    }
+
+    fn serial_of(mesh: &Mesh, prepared: &Prepared) -> Neighbourhood {
+        neighbourhood_pass_serial(
+            mesh,
+            &prepared.geometry,
+            &prepared.topology,
+            &prepared.folds,
+            &prepared.curvature,
+            settings(),
+        )
+    }
+
+    fn differs(parallel: &Neighbourhood, serial: &Neighbourhood) -> bool {
+        bits(&parallel.detail) != bits(&serial.detail)
+            || bits(&parallel.curvature) != bits(&serial.curvature)
+    }
+
+    /// **The parallel pass is the serial walk, bit for bit**, in pools of 1, 3
+    /// and 8 workers and blocks of 1, 7 and 1024 faces, on four fixtures, with
+    /// both outputs (detail and neighbourhood curvature) compared by bits.
+    #[test]
+    fn the_parallel_pass_equals_the_serial_oracle_bit_for_bit() {
+        for (name, mesh) in fixtures() {
+            let prepared = prepare(&mesh);
+            let serial = serial_of(&mesh, &prepared);
+            for threads in [1_usize, 3, 4, 8, 16] {
+                for block in [1_usize, 7, 1024] {
+                    let inputs = prepared.inputs();
+                    let (parallel, _) =
+                        in_pool(threads, || neighbourhood_blocks::<ExactWalk>(&inputs, block));
+                    assert!(
+                        !differs(&parallel, &serial),
+                        "{name}: threads {threads} block {block}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The production entry (`neighbourhood_pass`, kernel pool) equals the
+    /// oracle.
+    #[test]
+    fn the_production_entry_equals_the_serial_oracle() {
+        for (name, mesh) in fixtures() {
+            let prepared = prepare(&mesh);
+            let serial = serial_of(&mesh, &prepared);
+            let parallel = neighbourhood_pass(
+                &mesh,
+                &prepared.geometry,
+                &prepared.topology,
+                &prepared.folds,
+                &prepared.curvature,
+                settings(),
+            )
+            .expect("parallel pass");
+            assert!(!differs(&parallel, &serial), "{name}");
+        }
+    }
+
+    /// Path hits: every non-degenerate face is walked, the walks really
+    /// expand (the members of all walks exceed the walks themselves), and the
+    /// folds above the change resolution exist so the detail term is not
+    /// vacuously zero.
+    #[test]
+    fn the_walks_expand_and_every_face_is_walked() {
+        let mut any_detail = false;
+        for (name, mesh) in fixtures() {
+            let prepared = prepare(&mesh);
+            let inputs = prepared.inputs();
+            let (parallel, counts) =
+                in_pool(3, || neighbourhood_blocks::<ExactWalk>(&inputs, 7));
+            let walkable = prepared.geometry.degenerate.iter().filter(|d| !**d).count();
+            assert_eq!(counts.faces_walked, walkable, "{name}");
+            assert!(counts.members_total > counts.faces_walked, "{name}: {counts:?}");
+            assert!(counts.pairs_measured >= counts.members_total, "{name}: {counts:?}");
+            any_detail |= parallel.detail.iter().any(|detail| *detail > 0.0);
+        }
+        // A cube holds one fold magnitude (change, not detail), so only some
+        // fixtures carry detail; the detail term must be non-vacuous overall.
+        assert!(any_detail, "no fixture has any detail; the bit comparison would be vacuous");
+    }
+
+    /// **Sabotage 1 (colliding seeds).** With every face on seed 0 and no
+    /// reset, the walks change (one worker, so the order is fixed): the bits
+    /// differ from the oracle on at least one face of every fixture that has
+    /// neighbourhoods to share.
+    #[test]
+    fn sabotage_colliding_seeds_change_the_bits() {
+        let mut seen = 0;
+        for (name, mesh) in fixtures() {
+            let prepared = prepare(&mesh);
+            let serial = serial_of(&mesh, &prepared);
+            let inputs = prepared.inputs();
+            let (broken, _) = in_pool(1, || neighbourhood_blocks::<CollideSeeds>(&inputs, 7));
+            if differs(&broken, &serial) {
+                seen += 1;
+            } else {
+                println!("{name}: colliding seeds did not change the bits");
+            }
+        }
+        assert!(seen > 0, "no fixture could see colliding seeds");
+    }
+
+    /// **Sabotage 2 (dropped neighbour).** Skipping each face's first
+    /// neighbour must change the bits on at least one face.
+    #[test]
+    fn sabotage_dropping_the_first_neighbour_changes_the_bits() {
+        let mut seen = 0;
+        for (_, mesh) in fixtures() {
+            let prepared = prepare(&mesh);
+            let serial = serial_of(&mesh, &prepared);
+            let inputs = prepared.inputs();
+            let (broken, _) = in_pool(3, || neighbourhood_blocks::<DropFirstNeighbour>(&inputs, 7));
+            if differs(&broken, &serial) {
+                seen += 1;
+            }
+        }
+        assert!(seen > 0, "no fixture could see a dropped neighbour");
+    }
+
+    /// **Positive control.** Skipping ONLY the stamp reset, with unique global
+    /// seeds, leaves every bit unchanged at every width and block size:
+    /// pooled scratch needs no clearing between faces or blocks.
+    #[test]
+    fn skipping_only_the_stamp_reset_does_not_change_the_bits() {
+        for (name, mesh) in fixtures() {
+            let prepared = prepare(&mesh);
+            let serial = serial_of(&mesh, &prepared);
+            let inputs = prepared.inputs();
+            for threads in [1_usize, 3, 4, 8, 16] {
+                for block in [1_usize, 7, 1024] {
+                    let (parallel, _) = in_pool(threads, || {
+                        neighbourhood_blocks::<SkipResetOnly>(&inputs, block)
+                    });
+                    assert!(
+                        !differs(&parallel, &serial),
+                        "{name}: threads {threads} block {block}"
+                    );
+                }
+            }
+        }
     }
 }

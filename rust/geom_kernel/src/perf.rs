@@ -301,6 +301,19 @@ works! {
     ShakeBatches, "shake.batches", Work;
     /// Skyline `f64`s of those frames, summed.
     ShakeSkylineEntries, "shake.skyline_entries", Work;
+    /// Vertex blocks of the curvature spread, overflow remainders included
+    /// (a fixed plan: independent of the thread count).
+    DelicacyBlocks, "delicacy.blocks", Work;
+    /// Waves of those blocks.
+    DelicacyWaves, "delicacy.waves", Work;
+    /// Blocks that hit the pair cap and continued as a remainder.
+    DelicacyOverflowSplits, "delicacy.overflow_splits", Work;
+    /// Faces that received two or more curvature addends: the only faces
+    /// where the order of the serial replay can matter.
+    DelicacyFacesMultiplyCharged, "delicacy.faces_multiply_charged", Work;
+    /// Faces found inside their own neighbourhood across all display walks
+    /// (exceeds `display.faces` exactly when some walk expanded).
+    DisplayMembersTotal, "display.members_total", Work;
 }
 
 const WORK_N: usize = Work::ALL.len();

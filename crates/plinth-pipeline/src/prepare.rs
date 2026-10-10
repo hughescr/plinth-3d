@@ -1931,21 +1931,6 @@ pub fn seal_and_emit(
             source,
         })
     })?;
-    set_phase(PerfPhase::SealFields);
-    let delicacy_field = prepared_delicacy_field(hollowed.mesh()).map_err(|source| {
-        ChainStop::new(PipelineError::Delicacy {
-            model: model.clone(),
-            source,
-        })
-    })?;
-    let delicacy = delicacy_field
-        .face_values()
-        .iter()
-        .map(|value| value.weight())
-        .collect::<Vec<_>>();
-
-    let input = policy.resources.support_input(&layers, &delicacy, &[]);
-
     // **The placement selector.** Both engines end at the same
     // `SupportedModel` -> `plinth_emit::write` boundary, but they do NOT share
     // the pre-write gate set: `judge_then_emit` judges a
@@ -1954,7 +1939,17 @@ pub fn seal_and_emit(
     // says so by reporting every gate as pending — the same disclosure channel
     // the legacy path uses for a gate that is not yet ported. See the sweep
     // path's own comment.
+    //
+    // **The fork sits BEFORE the prepared delicacy field** (2026-10-09). The
+    // sweep reads two registered caps off the support input, and the caps are
+    // copies of constants that do not depend on the field (`input()` scales
+    // only `max_grid_bytes` and `minima_knn_max_work` by the field's length,
+    // and the sweep reads neither). Nothing else on this path consumes the
+    // per-face delicacy sidecar, so the field is out of scope here and the
+    // compiler proves it: building it was ~24 s of serial curvature on the
+    // 129 k-face Bat_Cat_Owl for a number no sweep stage reads.
     if policy.placement == crate::Placement::Sweep {
+        let input = policy.resources.support_input(&layers, &[], &[]);
         return sweep_and_emit(
             model,
             source_faces,
@@ -1982,6 +1977,21 @@ pub fn seal_and_emit(
             stop_after,
         );
     }
+
+    // Legacy placement only: the sealed run reads the per-face delicacy field.
+    set_phase(PerfPhase::SealFields);
+    let delicacy_field = prepared_delicacy_field(hollowed.mesh()).map_err(|source| {
+        ChainStop::new(PipelineError::Delicacy {
+            model: model.clone(),
+            source,
+        })
+    })?;
+    let delicacy = delicacy_field
+        .face_values()
+        .iter()
+        .map(|value| value.weight())
+        .collect::<Vec<_>>();
+    let input = policy.resources.support_input(&layers, &delicacy, &[]);
 
     // A refusal without the bounds it was measured against is not a
     // measurement; carry the model-scaled caps on the failure path, as the
