@@ -34,10 +34,27 @@
 //! # Sidecar
 //!
 //! `<dir>/<model>.perf.json`, schema `plinth-perf/1`, written (atomically,
-//! temp file then rename) at every phase change as `"partial": true` and at
-//! [`end_model`] as `"partial": false`. A failed write is a WARNING on stderr,
-//! never a failure of the model. The sidecar is outside the model's output
-//! folder, so no digest sees it.
+//! temp file then rename) at every phase change and at every checkpoint tick
+//! as `"partial": true`, and at [`end_model`] as `"partial": false`. A failed
+//! write is a WARNING on stderr, never a failure of the model. The sidecar is
+//! outside the model's output folder, so no digest sees it.
+//!
+//! The file name keeps the model's name as it is. Only characters that a file
+//! name cannot hold (path separators, `:` and the other Windows-reserved
+//! characters, control characters) and `%` itself are written as `%XX` per
+//! UTF-8 byte, so two distinct model names never share a sidecar.
+//!
+//! # Checkpoints
+//!
+//! [`enable`] starts one plain thread (not a rayon worker, so no pool changes
+//! size) that rewrites the partial sidecar every `checkpoint` period. A run
+//! that is killed deep inside one phase therefore still leaves the counters
+//! of the work finished so far. Spans count their entry too, so a span still
+//! open at a checkpoint (a three-hour production batch inside one
+//! `sweep.run`) shows as `open` and `open_ms`. Open time is approximate (the
+//! cells are read without a lock and the result is clamped at zero); the
+//! final sidecar has no open spans. A checkpoint is diagnostic evidence and is
+//! never compared against another run.
 //!
 //! # Adding a counter
 //!
@@ -48,8 +65,8 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering::Relaxed as Relax;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize};
-use std::sync::Mutex;
-use std::time::Instant;
+use std::sync::{Mutex, Once, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Whether a counter is exact logical work (compared across runs and thread
 /// counts) or depends on scheduling (recorded, never compared).
@@ -331,18 +348,28 @@ impl Span {
 
 const SHARDS: usize = 64;
 
+/// `entered` and `start_in` move on entry; `calls` (completed), `ns`,
+/// `max_ns` and `start_out` on drop. The starts are nanoseconds since
+/// [`EPOCH`], summed with wrapping adds, so at any instant the open count is
+/// `entered - calls` and the open time is `open * now - (start_in - start_out)`.
 struct SpanCell {
+    entered: AtomicU64,
     calls: AtomicU64,
     ns: AtomicU64,
     max_ns: AtomicU64,
+    start_in: AtomicU64,
+    start_out: AtomicU64,
 }
 
 impl SpanCell {
     const fn new() -> Self {
         Self {
+            entered: AtomicU64::new(0),
             calls: AtomicU64::new(0),
             ns: AtomicU64::new(0),
             max_ns: AtomicU64::new(0),
+            start_in: AtomicU64::new(0),
+            start_out: AtomicU64::new(0),
         }
     }
 }
@@ -370,9 +397,12 @@ impl Shard {
         }
         for row in &self.spans {
             for cell in row {
+                cell.entered.store(0, Relax);
                 cell.calls.store(0, Relax);
                 cell.ns.store(0, Relax);
                 cell.max_ns.store(0, Relax);
+                cell.start_in.store(0, Relax);
+                cell.start_out.store(0, Relax);
             }
         }
     }
@@ -412,15 +442,77 @@ struct ModelSlot {
 
 static DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 static SLOT: Mutex<Option<ModelSlot>> = Mutex::new(None);
+/// The zero of every span start time.
+static EPOCH: OnceLock<Instant> = OnceLock::new();
+/// Checkpoint period in milliseconds; the ticker re-reads it every slice.
+static CHECKPOINT_MS: AtomicU64 = AtomicU64::new(DEFAULT_CHECKPOINT_MS);
+static TICKER: Once = Once::new();
+
+/// The period used when the caller names none.
+pub const DEFAULT_CHECKPOINT: Duration = Duration::from_secs(60);
+const DEFAULT_CHECKPOINT_MS: u64 = 60_000;
+/// The ticker wakes at least this often to compare the clock with the period.
+const TICK_SLICE: Duration = Duration::from_millis(50);
+
+fn epoch() -> Instant {
+    *EPOCH.get_or_init(Instant::now)
+}
+
+fn since_epoch(at: Instant) -> u64 {
+    ns_between(epoch(), at)
+}
 
 // -------------------------------------------------------------------- API
 
-/// Switch counting on and name the sidecar folder. Called by the CLI only.
-pub fn enable(dir: PathBuf) {
+/// Switch counting on, name the sidecar folder and start the checkpoint
+/// thread, which rewrites the partial sidecar every `checkpoint` (at least one
+/// millisecond). Called by the CLI only. A second call changes the folder and
+/// the period; the one thread keeps running.
+pub fn enable(dir: PathBuf, checkpoint: Duration) {
     if let Ok(mut slot) = DIR.lock() {
         *slot = Some(dir);
     }
+    epoch();
+    let period = u64::try_from(checkpoint.as_millis()).unwrap_or(u64::MAX).max(1);
+    CHECKPOINT_MS.store(period, Relax);
     ENABLED.store(true, Relax);
+    TICKER.call_once(|| {
+        let started = std::thread::Builder::new()
+            .name("plinth-perf-checkpoint".to_owned())
+            .spawn(ticker);
+        if let Err(error) = started {
+            eprintln!("WARNING: perf checkpoint thread not started: {error}");
+        }
+    });
+}
+
+/// The checkpoint thread: forever, wake in short slices and write a partial
+/// sidecar each time a full period has passed.
+fn ticker() {
+    let mut last = Instant::now();
+    loop {
+        let period = Duration::from_millis(CHECKPOINT_MS.load(Relax));
+        let wait = period.saturating_sub(last.elapsed()).min(TICK_SLICE);
+        std::thread::sleep(wait);
+        if last.elapsed() >= Duration::from_millis(CHECKPOINT_MS.load(Relax)) {
+            last = Instant::now();
+            checkpoint_now();
+        }
+    }
+}
+
+/// Write a partial sidecar for the model in flight, if any. Under the slot
+/// lock, so it can neither interleave with `set_phase` nor land after
+/// `end_model` has taken the slot (a later tick finds none and writes nothing).
+fn checkpoint_now() {
+    if !enabled() {
+        return;
+    }
+    if let Ok(guard) = SLOT.lock() {
+        if let Some(slot) = guard.as_ref() {
+            write_sidecar(slot, true, Instant::now());
+        }
+    }
 }
 
 /// Whether counting is on. One `Relaxed` load.
@@ -438,12 +530,14 @@ pub fn begin_model(model: &str) {
     let Some(dir) = DIR.lock().ok().and_then(|slot| slot.clone()) else {
         return;
     };
-    for shard in &TABLE {
-        shard.zero();
-    }
-    PHASE.store(Phase::Load as u8, Relax);
-    let now = Instant::now();
+    // Zero and publish under the slot lock, so a checkpoint tick never reads a
+    // half-zeroed table.
     if let Ok(mut slot) = SLOT.lock() {
+        for shard in &TABLE {
+            shard.zero();
+        }
+        PHASE.store(Phase::Load as u8, Relax);
+        let now = Instant::now();
         *slot = Some(ModelSlot {
             model: model.to_owned(),
             dir,
@@ -519,7 +613,16 @@ pub fn count(n: usize) -> u64 {
 #[inline]
 pub fn span(span: Span) -> SpanGuard {
     if ENABLED.load(Relax) {
-        SpanGuard(Some((span, Phase::from_index(PHASE.load(Relax)), Instant::now())))
+        let phase = Phase::from_index(PHASE.load(Relax));
+        let started = Instant::now();
+        let start_ns = since_epoch(started);
+        // The entry is visible at once, so a checkpoint taken while the span
+        // is still open can show it. Start first, count second: a reader that
+        // sees the count sees the start.
+        let cell = &my_shard().spans[phase.index()][span.index()];
+        cell.start_in.fetch_add(start_ns, Relax);
+        cell.entered.fetch_add(1, Relax);
+        SpanGuard(Some((span, phase, started, start_ns)))
     } else {
         SpanGuard(None)
     }
@@ -527,16 +630,17 @@ pub fn span(span: Span) -> SpanGuard {
 
 /// Charges its region's time to a [`Span`] on drop.
 #[must_use = "a span measures until it is dropped"]
-pub struct SpanGuard(Option<(Span, Phase, Instant)>);
+pub struct SpanGuard(Option<(Span, Phase, Instant, u64)>);
 
 impl Drop for SpanGuard {
     fn drop(&mut self) {
-        if let Some((span, phase, started)) = self.0.take() {
+        if let Some((span, phase, started, start_ns)) = self.0.take() {
             let ns = ns_between(started, Instant::now());
             let cell = &my_shard().spans[phase.index()][span.index()];
-            cell.calls.fetch_add(1, Relax);
             cell.ns.fetch_add(ns, Relax);
             cell.max_ns.fetch_max(ns, Relax);
+            cell.start_out.fetch_add(start_ns, Relax);
+            cell.calls.fetch_add(1, Relax);
         }
     }
 }
@@ -606,13 +710,30 @@ fn ns_between(from: Instant, to: Instant) -> u64 {
     u64::try_from(to.saturating_duration_since(from).as_nanos()).unwrap_or(u64::MAX)
 }
 
+/// One span's sums over all shards, in one phase.
+#[derive(Clone, Copy, Default)]
+struct SpanSum {
+    /// Completed calls.
+    calls: u64,
+    /// Summed duration of completed calls.
+    ns: u64,
+    /// Longest completed call.
+    max_ns: u64,
+    /// Spans entered and not yet dropped, as far as the racy read can tell.
+    open: u64,
+    /// Time those open spans have been running, clamped at zero.
+    open_ns: u64,
+}
+
 /// Sums over all shards: `work[phase][counter]` and `spans[phase][span]`.
 type WorkSums = Vec<Vec<u64>>;
-type SpanSums = Vec<Vec<(u64, u64, u64)>>;
+type SpanSums = Vec<Vec<SpanSum>>;
 
 fn sum_shards() -> (WorkSums, SpanSums) {
     let mut work = vec![vec![0_u64; WORK_N]; PHASE_N];
-    let mut spans = vec![vec![(0_u64, 0_u64, 0_u64); SPAN_N]; PHASE_N];
+    let mut spans = vec![vec![SpanSum::default(); SPAN_N]; PHASE_N];
+    // (entered, start_in, start_out) summed with wrapping adds, per cell.
+    let mut open_raw = vec![vec![(0_u64, 0_u64, 0_u64); SPAN_N]; PHASE_N];
     for shard in &TABLE {
         for (phase, row) in shard.work.iter().enumerate() {
             for (index, cell) in row.iter().enumerate() {
@@ -621,11 +742,35 @@ fn sum_shards() -> (WorkSums, SpanSums) {
         }
         for (phase, row) in shard.spans.iter().enumerate() {
             for (index, cell) in row.iter().enumerate() {
+                // Writers add the start, then the count. Read the count, then
+                // the start, so a counted span has its start in the sum.
+                let calls = cell.calls.load(Relax);
+                let start_out = cell.start_out.load(Relax);
+                let entered = cell.entered.load(Relax);
+                let start_in = cell.start_in.load(Relax);
                 let sum = &mut spans[phase][index];
-                sum.0 += cell.calls.load(Relax);
-                sum.1 += cell.ns.load(Relax);
-                sum.2 = sum.2.max(cell.max_ns.load(Relax));
+                sum.calls += calls;
+                sum.ns += cell.ns.load(Relax);
+                sum.max_ns = sum.max_ns.max(cell.max_ns.load(Relax));
+                let raw = &mut open_raw[phase][index];
+                raw.0 = raw.0.wrapping_add(entered);
+                raw.1 = raw.1.wrapping_add(start_in);
+                raw.2 = raw.2.wrapping_add(start_out);
             }
+        }
+    }
+    // The clock is read after every cell, so no observed entry starts later.
+    let now_ns = since_epoch(Instant::now());
+    for (phase, row) in spans.iter_mut().enumerate() {
+        for (index, sum) in row.iter_mut().enumerate() {
+            let (entered, start_in, start_out) = open_raw[phase][index];
+            sum.open = entered.saturating_sub(sum.calls);
+            // open * now - (sum of the open starts); the start sums wrap, so
+            // their difference is exact modulo 2^64. Anything that does not
+            // fit (a torn read) clamps to zero.
+            let starts = i128::from(start_in.wrapping_sub(start_out));
+            let open_ns = i128::from(sum.open) * i128::from(now_ns) - starts;
+            sum.open_ns = u64::try_from(open_ns.max(0)).unwrap_or(0);
         }
     }
     (work, spans)
@@ -678,13 +823,18 @@ fn serialise(slot: &ModelSlot, partial: bool, now: Instant) -> String {
         }
         let mut span_parts = Vec::new();
         for s in Span::ALL {
-            let (calls, ns, max_ns) = spans[phase.index()][s.index()];
-            if calls > 0 {
+            let sum = spans[phase.index()][s.index()];
+            // The final sidecar is exact: every span has closed, and a leaked
+            // guard is not reported as running.
+            let (open, open_ns) = if partial { (sum.open, sum.open_ns) } else { (0, 0) };
+            if sum.calls > 0 || open > 0 {
                 span_parts.push(format!(
-                    "{}:{{\"calls\":{calls},\"thread_ms\":{},\"max_ms\":{}}}",
+                    "{}:{{\"calls\":{},\"open\":{open},\"thread_ms\":{},\"open_ms\":{},\"max_ms\":{}}}",
                     json_string(s.label()),
-                    ms(ns),
-                    ms(max_ns)
+                    sum.calls,
+                    ms(sum.ns),
+                    ms(open_ns),
+                    ms(sum.max_ns)
                 ));
             }
         }
@@ -730,12 +880,30 @@ fn write_sidecar(slot: &ModelSlot, partial: bool, now: Instant) {
     }
 }
 
+/// The model's name as a file stem. Valid stems pass through unchanged
+/// (`A B` stays `A B`, and differs from `A_B`). A character no file name can
+/// hold, and `%` (the escape), becomes `%XX` per UTF-8 byte; the map is
+/// injective, so distinct names never share a sidecar.
+fn file_stem(model: &str) -> String {
+    let mut out = String::with_capacity(model.len());
+    for c in model.chars() {
+        let reserved = c.is_control()
+            || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '%');
+        if reserved {
+            let mut buffer = [0_u8; 4];
+            for byte in c.encode_utf8(&mut buffer).bytes() {
+                out.push_str(&format!("%{byte:02X}"));
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn write_atomic(dir: &Path, model: &str, text: &str) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    let stem: String = model
-        .chars()
-        .map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' })
-        .collect();
+    let stem = file_stem(model);
     let tmp = dir.join(format!("{stem}.perf.json.tmp"));
     let done = dir.join(format!("{stem}.perf.json"));
     std::fs::write(&tmp, text)?;
@@ -750,6 +918,18 @@ mod tests {
 
     /// The counters are process-global, so these tests run one at a time.
     static SERIAL: TestMutex<()> = TestMutex::new(());
+
+    /// A period long enough that the ticker never fires inside a test.
+    const HOUR: Duration = Duration::from_secs(3600);
+
+    /// The text of the `"<key>":{...}` object inside `text`, braces included.
+    fn object_of<'a>(text: &'a str, key: &str) -> &'a str {
+        let needle = format!("\"{key}\":{{");
+        let start = text.find(&needle).unwrap_or_else(|| panic!("no {key} in {text}"));
+        let from = start + needle.len() - 1;
+        let end = text[from..].find('}').expect("closing brace") + from + 1;
+        &text[from..end]
+    }
 
     fn totals_of(w: Work) -> u64 {
         let (work, _) = sum_shards();
@@ -785,7 +965,7 @@ mod tests {
     fn on_sums_exactly_and_equal_at_every_width() {
         let _guard = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = scratch("widths");
-        enable(dir.clone());
+        enable(dir.clone(), HOUR);
         let mut seen = Vec::new();
         for width in [1_usize, 4, 16] {
             begin_model("widths");
@@ -815,7 +995,7 @@ mod tests {
     fn phase_attribution_and_final_sidecar() {
         let _guard = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = scratch("phases");
-        enable(dir.clone());
+        enable(dir.clone(), HOUR);
         begin_model("phased");
         add(Work::SweepRuns, 1);
         assert_eq!(set_phase(Phase::Production), Phase::Load);
@@ -843,7 +1023,7 @@ mod tests {
     fn captured_frames_are_classified_by_the_caller() {
         let _guard = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = scratch("frames");
-        enable(dir.clone());
+        enable(dir.clone(), HOUR);
         begin_model("frames");
         frame_solve(10);
         let (_, held) = capture_frames(|| {
@@ -856,6 +1036,106 @@ mod tests {
         assert_eq!(totals_of(Work::FrameSolvesSpeculative), 2);
         assert_eq!(totals_of(Work::FramePointsSpeculative), 10);
         end_model();
+        ENABLED.store(false, Relax);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checkpoint_shows_an_open_span_and_the_closed_one_after() {
+        let _guard = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = scratch("open");
+        enable(dir.clone(), HOUR);
+        begin_model("open");
+        set_phase(Phase::Production);
+        let outer = span(Span::SweepRun);
+        let inner = span(Span::SweepRun);
+        std::thread::sleep(Duration::from_millis(5));
+        checkpoint_now();
+        let text = std::fs::read_to_string(dir.join("open.perf.json")).expect("checkpoint");
+        assert!(text.contains("\"partial\":true"), "{text}");
+        let run = object_of(&text, "sweep.run");
+        assert!(run.contains("\"calls\":0,\"open\":2,"), "{run}");
+        assert!(!run.contains("\"open_ms\":0.000"), "{run}");
+        // One of the two overlapping spans closes: one open, one call.
+        drop(inner);
+        checkpoint_now();
+        let text = std::fs::read_to_string(dir.join("open.perf.json")).expect("checkpoint");
+        let run = object_of(&text, "sweep.run");
+        assert!(run.contains("\"calls\":1,\"open\":1,"), "{run}");
+        drop(outer);
+        checkpoint_now();
+        let text = std::fs::read_to_string(dir.join("open.perf.json")).expect("checkpoint");
+        let run = object_of(&text, "sweep.run");
+        assert!(run.contains("\"calls\":2,\"open\":0,"), "{run}");
+        assert!(run.contains("\"open_ms\":0.000"), "{run}");
+        end_model();
+        ENABLED.store(false, Relax);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The killed-run case: no phase change and no `end_model`, yet the
+    /// counters of the finished work and the open span reach the file.
+    #[test]
+    fn checkpoint_thread_writes_mid_phase_work_without_a_phase_change() {
+        let _guard = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = scratch("ticker");
+        enable(dir.clone(), Duration::from_millis(20));
+        begin_model("ticker");
+        set_phase(Phase::Production);
+        let path = dir.join("ticker.perf.json");
+        let entry = std::fs::read_to_string(&path).expect("phase-change snapshot");
+        assert!(entry.contains("\"sweep.runs\":0"), "{entry}");
+        let _open = span(Span::SweepRun);
+        add(Work::SweepRuns, 3);
+        let mut seen = String::new();
+        for _ in 0..250 {
+            std::thread::sleep(Duration::from_millis(20));
+            seen = std::fs::read_to_string(&path).unwrap_or_default();
+            if seen.contains("\"sweep.runs\":3") && seen.contains("\"open\":1") {
+                break;
+            }
+        }
+        assert!(seen.contains("\"partial\":true"), "{seen}");
+        assert!(seen.contains("\"sweep.runs\":3"), "{seen}");
+        assert!(seen.contains("\"open\":1"), "{seen}");
+        assert!(seen.contains("\"active_phase\":\"Production\""), "{seen}");
+        // Slow the ticker down again before the final write.
+        enable(dir.clone(), HOUR);
+        end_model();
+        let last = std::fs::read_to_string(&path).expect("final");
+        assert!(last.contains("\"partial\":false"), "{last}");
+        // A tick after the end finds no model and leaves the final file alone.
+        checkpoint_now();
+        assert_eq!(std::fs::read_to_string(&path).expect("final"), last);
+        ENABLED.store(false, Relax);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn distinct_model_names_get_distinct_sidecars() {
+        assert_eq!(file_stem("A B"), "A B");
+        assert_eq!(file_stem("A_B"), "A_B");
+        assert_eq!(file_stem("Café-1.0"), "Café-1.0");
+        assert_eq!(file_stem("a:b"), "a%3Ab");
+        assert_eq!(file_stem("a%3Ab"), "a%253Ab");
+        let names = ["A B", "A_B", "A:B", "A%3AB", "A/B", "A\\B", "A\tB", "a b"];
+        let mut stems: Vec<String> = names.iter().map(|n| file_stem(n)).collect();
+        stems.sort_unstable();
+        stems.dedup();
+        assert_eq!(stems.len(), names.len(), "{stems:?}");
+
+        let _guard = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = scratch("names");
+        enable(dir.clone(), HOUR);
+        for (name, runs) in [("A B", 1_u64), ("A_B", 2)] {
+            begin_model(name);
+            add(Work::SweepRuns, runs);
+            end_model();
+        }
+        let spaced = std::fs::read_to_string(dir.join("A B.perf.json")).expect("A B");
+        let under = std::fs::read_to_string(dir.join("A_B.perf.json")).expect("A_B");
+        assert!(spaced.contains("\"sweep.runs\":1"), "{spaced}");
+        assert!(under.contains("\"sweep.runs\":2"), "{under}");
         ENABLED.store(false, Relax);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -38,7 +38,7 @@ fn child_runs_one_sweep() {
     }
     let dir = env::var_os("PLINTH_PERF_DIR");
     if let Some(dir) = &dir {
-        perf::enable(PathBuf::from(dir));
+        perf::enable(PathBuf::from(dir), perf::DEFAULT_CHECKPOINT);
     }
     assert_eq!(perf::enabled(), dir.is_some(), "counting is on only when asked");
     perf::begin_model("stilt");

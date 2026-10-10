@@ -49,7 +49,23 @@ pub fn execute(selection: PrepareSelection) -> ExitCode {
         .or_else(|| std::env::var_os("PLINTH_PERF_DIR").map(std::path::PathBuf::from))
         .filter(|dir| !dir.as_os_str().is_empty())
     {
-        geom_kernel::perf::enable(dir);
+        // `PLINTH_PERF_CHECKPOINT_S` (whole seconds, default 60) sets how often
+        // a running model's partial sidecar is rewritten, so a killed run
+        // still leaves its counters.
+        let checkpoint = match std::env::var("PLINTH_PERF_CHECKPOINT_S") {
+            Ok(text) => match text.trim().parse::<u64>() {
+                Ok(seconds) if seconds > 0 => std::time::Duration::from_secs(seconds),
+                _ => {
+                    eprintln!(
+                        "WARNING: PLINTH_PERF_CHECKPOINT_S={text:?} is not a positive whole \
+                         number of seconds; using 60"
+                    );
+                    geom_kernel::perf::DEFAULT_CHECKPOINT
+                }
+            },
+            Err(_) => geom_kernel::perf::DEFAULT_CHECKPOINT,
+        };
+        geom_kernel::perf::enable(dir, checkpoint);
     }
     let request = match resolve(&selection) {
         Ok(request) => request,

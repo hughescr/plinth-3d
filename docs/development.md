@@ -487,9 +487,14 @@ below about 5 % does not show above the noise. `plinth prepare … --perf DIR` (
 `PLINTH_PERF_DIR=DIR` when the flag is absent) writes `DIR/<model>.perf.json`
 (`plinth-perf/1`): per phase (`Load`, `Repair`, `Decimate`, `OrientTable`, `Prefilter`,
 `Production`, `Hollow`, `SealFields`, `FinalSweep`, `Emit`) the wall time, the counters and the
-span times, plus `totals`. The file is rewritten at every phase change with
-`"partial": true`, so a killed run still says where it was, and written last with
-`"partial": false`. It sits outside the model's output folder, so no digest sees it.
+span times, plus `totals`. The file is rewritten at every phase change and every
+`PLINTH_PERF_CHECKPOINT_S` seconds (default 60, by one plain checkpoint thread) with
+`"partial": true`, so a killed run still says where it was and what it had finished, and
+written last with `"partial": false`. A span still running at a checkpoint shows as `open`
+and `open_ms` (approximate, never compared); the final file has none. The file name keeps the
+model's name (`A B` gives `A B.perf.json`, distinct from `A_B.perf.json`); only characters a
+file name cannot hold, and `%`, become `%XX`. It sits outside the model's output folder, so no
+digest sees it.
 
 - **Write-only.** `geom_kernel::perf` has no read API; no engine code can branch on a count or
   a clock. With the flag off, a charge is one `Relaxed` load. The emitted `.chitubox` is
