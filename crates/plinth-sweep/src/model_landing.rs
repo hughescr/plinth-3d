@@ -235,6 +235,14 @@ pub fn model_landing_scar(
         })
         .collect();
 
+    crate::perf::add(
+        crate::PerfWork::NearestModelLandingRows,
+        crate::perf::count(landings.len()),
+    );
+    crate::perf::add(
+        crate::PerfWork::NearestModelLandingTrisTested,
+        crate::perf::count(landings.len()).saturating_mul(crate::perf::count(triangles.len())),
+    );
     // One parallel pass over the landing set. Ties go to the lower face index,
     // which is `geom_kernel`'s own nearest-face rule, so two runs of the same
     // pose charge the same face.

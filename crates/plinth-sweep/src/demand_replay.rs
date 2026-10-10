@@ -223,6 +223,11 @@ fn replay_once(
         return Pass::Verified;
     };
     let highest = doomed_layers().max().unwrap_or(lowest);
+    crate::perf::add(crate::PerfWork::ReplayCalls, 1);
+    crate::perf::add(
+        crate::PerfWork::ReplayCellLayers,
+        crate::perf::count(grid.cells()).saturating_mul(crate::perf::count(context.layers)),
+    );
     let mut creep = if context.creep_weight {
         SurfaceCreep::new(
             context.mesh,

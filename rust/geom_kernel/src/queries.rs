@@ -2531,13 +2531,20 @@ impl NativeSurface {
         let mut best_d = f64::INFINITY;
         let mut best_pt: V3 = [f64::NAN; 3];
         let mut near_parallel = 0u32;
+        // Write-only tallies for `perf` (nothing reads them back): integer
+        // increments on locals, one charge per walk.
+        let mut nodes_visited = 0u64;
+        let mut nodes_pruned = 0u64;
+        let mut tris_tested = 0u64;
         STACK.with(|s| {
             let mut stack = s.borrow_mut();
             stack.clear();
             stack.push(0);
             while let Some(ni) = stack.pop() {
+                nodes_visited += 1;
                 let node = &self.bvh.nodes[ni as usize];
                 if box_box_dist(smin, smax, node.bmin, node.bmax) - slack > best_d {
+                    nodes_pruned += 1;
                     continue;
                 }
                 if node.leaf {
@@ -2554,6 +2561,7 @@ impl NativeSurface {
                         if !excluded.is_empty() && excluded.binary_search(&tid).is_ok() {
                             continue;
                         }
+                        tris_tested += 1;
                         let (d, pt, np) = face_cost(tid as usize);
                         if np {
                             near_parallel += 1;
@@ -2581,6 +2589,12 @@ impl NativeSurface {
                 }
             }
         });
+        if crate::perf::enabled() {
+            crate::perf::add(crate::perf::Work::SegWalkQueries, 1);
+            crate::perf::add(crate::perf::Work::SegWalkNodesVisited, nodes_visited);
+            crate::perf::add(crate::perf::Work::SegWalkNodesPruned, nodes_pruned);
+            crate::perf::add(crate::perf::Work::SegWalkTrisTested, tris_tested);
+        }
         (best_d, best_pt, near_parallel)
     }
 

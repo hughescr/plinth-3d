@@ -73,6 +73,7 @@
 //! is serial in source index order, so the result does not depend on how the
 //! kernel's index-parallel map-collect was scheduled.
 
+use geom_kernel::perf::{self, Span, Work};
 use geom_kernel::vec3::{add, cross, dot, norm, normalize, scale, sub};
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, V3};
 
@@ -397,6 +398,7 @@ fn curvature_by_face(
     geometry: &FaceGeometryPass,
     radius_mm: f64,
 ) -> Result<(Vec<f64>, CurvatureSpreadCounts), DelicacyError> {
+    let _perf_span = perf::span(Span::Curvature);
     // The accumulation itself lives in `welded_angle_defect`, shared with
     // the display-face evaluator. The per-vertex READING delicacy takes of it
     // — normalized ABSOLUTE defect — is unchanged; what changed on 2026-10-01
@@ -518,6 +520,12 @@ fn curvature_by_face(
             continue;
         }
         by_face.push((charged / area).clamp(0.0, 1.0));
+    }
+    // Write-only perf charge, once per spread (never read back).
+    if perf::enabled() {
+        perf::add(Work::DelicacyVerticesSpread, perf::count(counts.vertices_spread));
+        perf::add(Work::DelicacyPairsMeasured, perf::count(counts.pairs_measured));
+        perf::add(Work::DelicacyPairsCharged, perf::count(counts.pairs_charged));
     }
     Ok((by_face, counts))
 }

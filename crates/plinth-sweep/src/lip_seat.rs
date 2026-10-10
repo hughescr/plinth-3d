@@ -198,6 +198,7 @@ fn solid_clearances(
     let discs = plinth_support::tip_contact_discs(arms, layer_plan)
         .unwrap_or_else(|_| vec![None; arms.len()]);
     let n = arms.len();
+    crate::perf::add(crate::PerfWork::LipSeatClearanceRows, crate::perf::count(n));
     let seats: Vec<[f64; 3]> = arms.iter().map(|arm| arm.seat_mm).collect();
     // A plate member's DRAWN shaft ends at its boss top over its foot, not on
     // the plate under the planned line (fix/morel-long-posts, 2026-10-02:

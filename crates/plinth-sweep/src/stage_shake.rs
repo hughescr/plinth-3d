@@ -135,6 +135,8 @@ pub fn check(
     law: &SlendernessLaw,
     pressure_kpa: f64,
 ) -> StageShake {
+    let _perf_span = crate::perf::span(crate::perf::Span::StageShake);
+    crate::perf::add(crate::PerfWork::ShakeChecks, 1);
     let mut out = StageShake {
         pressure_kpa,
         ..StageShake::default()
@@ -294,6 +296,7 @@ pub fn check(
         if !growing.contains(&true) {
             continue;
         }
+        crate::perf::add(crate::PerfWork::ShakeStages, 1);
         // A diagonal JOINS its two posts at this stage once it is finished,
         // or once its lower half has met its twin's.
         let joins = |d: &Diagonal| d.bottom < stage && (d.top <= stage || d.meet.is_some_and(|m| m[2] <= z));

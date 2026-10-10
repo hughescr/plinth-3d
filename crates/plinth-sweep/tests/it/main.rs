@@ -52,6 +52,7 @@ mod oracle_disc;
 mod oracle_ramp;
 mod oracle_tee;
 mod per_event_sizing;
+mod perf_counters;
 mod orient_demand;
 mod orient_demand_parallel;
 mod pitch_invariance;

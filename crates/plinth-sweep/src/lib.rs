@@ -82,6 +82,11 @@ use plinth_mesh::Mesh;
 use plinth_support::perception::{slice_stack, SliceStackLimits};
 use thiserror::Error;
 
+/// The write-only perf counters (`geom_kernel::perf`), re-exported so
+/// `plinth-pipeline`, which has no `geom_kernel` dependency, can set phases.
+pub use geom_kernel::perf;
+use geom_kernel::perf::Work as PerfWork;
+
 pub use adapter::{arms_of, to_primitives, LoadStepTaper, SweepEmission};
 pub use congestion::{CongestionCensus, CongestionOutcome, CongestionReport};
 pub use drain::{DrainKeepOut, DrainSpec, DrainVerdict, EscapeReport};
@@ -1592,6 +1597,8 @@ pub fn run_sweep_with_holes(
     drains: &[DrainSpec],
     vents: &[DrainSpec],
 ) -> Result<SweepPlan, SweepError> {
+    let _perf_span = perf::span(perf::Span::SweepRun);
+    perf::add(PerfWork::SweepRuns, 1);
     let (min_z, max_z, min_x, max_x, min_y, max_y) = bounds(mesh)?;
     let plate_z = plan.z0_mm();
     let height = uniform_height(plan)?;
@@ -1950,6 +1957,7 @@ pub fn run_sweep_with_holes(
     } else {
         down_sweep::InsertionPolicy::disabled()
     };
+    perf::add(PerfWork::SweepDownCallInitial, 1);
     let mut outcome = down_sweep::run(
         &grid,
         &slices,
@@ -2048,6 +2056,7 @@ pub fn run_sweep_with_holes(
                 rolled_back = attempt > 0;
                 break;
             }
+            perf::add(PerfWork::SweepDownCallRemoval, 1);
             outcome = down_sweep::run(
                 &grid,
                 &slices,
@@ -2115,6 +2124,7 @@ pub fn run_sweep_with_holes(
             break;
         }
         merges_refused_by_radius += unmerged.undone;
+        perf::add(PerfWork::SweepDownCallMergesUndone, 1);
         outcome = down_sweep::run(
             &grid,
             &slices,
@@ -2181,6 +2191,7 @@ pub fn run_sweep_with_holes(
                 break;
             }
             congestion_outcome.rounds_used += 1;
+            perf::add(PerfWork::SweepDownCallCongestion, 1);
             outcome = down_sweep::run(
                 &grid,
                 &slices,
@@ -2355,6 +2366,7 @@ pub fn run_sweep_with_holes(
                 break;
             }
             stranded_branch_outcome.rounds += 1;
+            perf::add(PerfWork::SweepDownCallStrandedRound, 1);
             outcome = down_sweep::run(
                 &grid,
                 &slices,
@@ -2372,6 +2384,7 @@ pub fn run_sweep_with_holes(
                 &mut stranded_branch_outcome,
             );
             if undone > 0 {
+                perf::add(PerfWork::SweepDownCallStrandedPutBack, 1);
                 outcome = down_sweep::run(
                     &grid,
                     &slices,
@@ -2404,6 +2417,7 @@ pub fn run_sweep_with_holes(
     if slenderness_outcome.merges_forced > 0 {
         // A moved arm has a stale ledger; the same down-sweep that sized the
         // field sizes it again.
+        perf::add(PerfWork::SweepDownCallForcedMerges, 1);
         outcome = down_sweep::run(
             &grid,
             &slices,
@@ -2436,6 +2450,7 @@ pub fn run_sweep_with_holes(
             }
             merges_refused_by_radius += unmerged.undone;
             unmerged_after_merges += unmerged.undone;
+            perf::add(PerfWork::SweepDownCallUnmergeAfterMerges, 1);
             outcome = down_sweep::run(
                 &grid,
                 &slices,
@@ -2555,6 +2570,7 @@ pub fn run_sweep_with_holes(
             flare_factor: policy.flare_r_factor,
         };
         if graze::convert(&graze_env, &mut struts, &mut graze_outcome) > 0 {
+            perf::add(PerfWork::SweepDownCallGraze, 1);
             outcome = down_sweep::run(
                 &grid,
                 &slices,
@@ -2598,6 +2614,8 @@ pub fn run_sweep_with_holes(
             if moved == 0 {
                 break;
             }
+            perf::add(PerfWork::SweepHeadJoinPasses, 1);
+            perf::add(PerfWork::SweepDownCallHeadJoin, 1);
             outcome = down_sweep::run(
                 &grid,
                 &slices,
@@ -2664,10 +2682,12 @@ pub fn run_sweep_with_holes(
             break;
         }
         slenderness_outcome.tie_passes += 1;
+        perf::add(PerfWork::SweepTiePasses, 1);
         // Anything the pass added or thickened has a stale ledger; the same
         // down-sweep that sized the field sizes the braces and the masts,
         // splits both shafts at every junction the crosses made, and keeps
         // every thickened root as a minimum beside the area law.
+        perf::add(PerfWork::SweepDownCallTies, 1);
         outcome = down_sweep::run(
             &grid,
             &slices,
@@ -2718,6 +2738,8 @@ pub fn run_sweep_with_holes(
                     break;
                 }
                 slenderness_outcome.tie_passes += 1;
+                perf::add(PerfWork::SweepTiePasses, 1);
+                perf::add(PerfWork::SweepDownCallModelTies, 1);
                 outcome = down_sweep::run(
                     &grid,
                     &slices,
@@ -3857,6 +3879,7 @@ impl LipSeatRun<'_> {
                     start = Some((struts.clone(), outcome.clone()));
                 }
                 outcome.passes += 1;
+                perf::add(PerfWork::LipSeatPasses, 1);
                 if !self.across_passes {
                     standing.clear();
                 }
@@ -3916,6 +3939,7 @@ impl LipSeatRun<'_> {
                         if reruns < self.passes {
                             reruns += 1;
                             outcome.reruns += 1;
+                            perf::add(PerfWork::LipSeatReruns, 1);
                             continue 'run;
                         }
                         outcome.runs_withdrawn += 1;
@@ -3946,6 +3970,7 @@ impl LipSeatRun<'_> {
         context: &slenderness::SlendernessContext<'_>,
         struts: &mut Vec<SweepStrut>,
     ) -> down_sweep::DownSweepOutcome {
+        perf::add(PerfWork::SweepDownCallLipSeat, 1);
         let sized = down_sweep::run(
             context.grid,
             self.slices,
@@ -4256,6 +4281,7 @@ fn withdraw_idle_flank_arms(
     let try_without = |doomed: &[bool]| {
         let mut trial = struts.clone();
         let remap = drop_members(&mut trial, doomed);
+        perf::add(PerfWork::SweepDownCallCongestionTrial, 1);
         let trial_outcome = down_sweep::run(
             grid, slices, &mut trial, sizing, insertion, keep_out, unrooted,
         );

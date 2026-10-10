@@ -41,6 +41,32 @@ use crate::{CacheMode, OrientSelection, PlacementSelection, PrepareSelection};
 /// unreadable file is a nuisance, the refusal is a safety verdict, and a script
 /// that only sees `1` learns nothing about it.
 pub fn execute(selection: PrepareSelection) -> ExitCode {
+    // Write-only counters: `--perf DIR`, else `PLINTH_PERF_DIR`. Off by
+    // default; nothing below reads them back and the output is unchanged.
+    if let Some(dir) = selection
+        .perf_dir
+        .clone()
+        .or_else(|| std::env::var_os("PLINTH_PERF_DIR").map(std::path::PathBuf::from))
+        .filter(|dir| !dir.as_os_str().is_empty())
+    {
+        // `PLINTH_PERF_CHECKPOINT_S` (whole seconds, default 60) sets how often
+        // a running model's partial sidecar is rewritten, so a killed run
+        // still leaves its counters.
+        let checkpoint = match std::env::var("PLINTH_PERF_CHECKPOINT_S") {
+            Ok(text) => match text.trim().parse::<u64>() {
+                Ok(seconds) if seconds > 0 => std::time::Duration::from_secs(seconds),
+                _ => {
+                    eprintln!(
+                        "WARNING: PLINTH_PERF_CHECKPOINT_S={text:?} is not a positive whole \
+                         number of seconds; using 60"
+                    );
+                    geom_kernel::perf::DEFAULT_CHECKPOINT
+                }
+            },
+            Err(_) => geom_kernel::perf::DEFAULT_CHECKPOINT,
+        };
+        geom_kernel::perf::enable(dir, checkpoint);
+    }
     let request = match resolve(&selection) {
         Ok(request) => request,
         Err(error) => return fail(&error),

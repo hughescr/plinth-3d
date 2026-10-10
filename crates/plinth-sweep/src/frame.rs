@@ -229,6 +229,7 @@ impl Frame {
         also: Option<MemberStiffness<N>>,
     ) -> FrameSolution {
         let n = self.points.len();
+        crate::perf::frame_solve(n);
         let mut moved = vec![[0.0; 3]; n];
         let mut solved = vec![true; n];
         if n == 0 {

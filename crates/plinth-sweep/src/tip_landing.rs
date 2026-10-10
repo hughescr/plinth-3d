@@ -578,6 +578,11 @@ fn nearest_faces(
     triangles: &[[[f64; 3]; 3]],
     landings: &[TipLanding],
 ) -> Vec<Option<(usize, f64)>> {
+    crate::perf::add(crate::PerfWork::NearestTipRows, crate::perf::count(landings.len()));
+    crate::perf::add(
+        crate::PerfWork::NearestTipTrisTested,
+        crate::perf::count(landings.len()).saturating_mul(crate::perf::count(triangles.len())),
+    );
     landings
         .par_iter()
         .map(|landing| {

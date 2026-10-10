@@ -1884,6 +1884,7 @@ pub(crate) fn apply_ties_with_model(
     // applies nothing. Every round that continues applied at least one remedy,
     // so the rounds are bounded by the same bound the remedies are.
     'rounds: for _round in 0..=context.max_struts {
+        crate::perf::add(crate::PerfWork::BraceRounds, 1);
         let before = applied;
         let mut queued = vec![false; struts.len()];
         // BRANCHES BEFORE THEIR TRUNKS. Thickening a member raises every trunk
@@ -3198,7 +3199,11 @@ fn tie_by_band_set(
         if batch.is_empty() {
             break;
         }
-        let counted: Vec<BandCount> = batch
+        // Each pair's frame solves are held back (write-only `perf` tally) and
+        // classified below: the pairs up to and including the one the scan
+        // takes are the work the serial scan does; the rest of the batch ran
+        // only because the batch is sized by the thread count.
+        let counted: Vec<(BandCount, crate::perf::FrameTally)> = batch
             .par_iter()
             .map(|pair| {
                 let panel = Panel {
@@ -3212,10 +3217,18 @@ fn tie_by_band_set(
                     band_set_layers(run, n, pair.depth, pair.floor)
                         .map(|layers| panel_bands(run, &layers, pair.brace_mm))
                 };
-                count_bands(&panel, ratio_s, fixed_point, &layout)
+                crate::perf::capture_frames(|| {
+                    count_bands(&panel, ratio_s, fixed_point, &layout)
+                })
             })
             .collect();
-        for (pair, count) in batch.iter().zip(counted) {
+        let mut taken = false;
+        for (pair, (count, tally)) in batch.iter().zip(counted) {
+            if taken {
+                tally.speculate();
+                continue;
+            }
+            tally.commit();
             if let BandCount::PastCeiling { most_bands, .. } = count {
                 if most_bands > 0 {
                     miss.past_ceiling = Some(PastCeiling {
@@ -3234,9 +3247,12 @@ fn tie_by_band_set(
                             most_bands,
                         }),
                     });
-                    break 'scan;
+                    taken = true;
                 }
             }
+        }
+        if taken {
+            break 'scan;
         }
         if batch.len() < batch_len.min(deferred.len() - at) {
             // The batch ended where a pair could no longer be the one.
@@ -5676,6 +5692,9 @@ fn partner_candidates(
             .then_with(|| a.1.cmp(&b.1))
             .then_with(|| a.2.cmp(&b.2))
     });
+    crate::perf::add(crate::PerfWork::BracePartnerCalls, 1);
+    crate::perf::add(crate::PerfWork::BracePartnerScanned, crate::perf::count(struts.len()));
+    crate::perf::add(crate::PerfWork::BracePartnerReturned, crate::perf::count(ordered.len()));
     ordered
         .into_iter()
         .map(|(_, cell, member)| (member, cell))
