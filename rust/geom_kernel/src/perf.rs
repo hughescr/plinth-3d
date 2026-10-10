@@ -294,6 +294,13 @@ works! {
     CacheWinnerPlanHit, "cache.winner_plan.hit", Work;
     /// Winner-plan cache misses (zero until round 1 wires them).
     CacheWinnerPlanMiss, "cache.winner_plan.miss", Work;
+    /// Stage frames the shake check put to the solver.
+    ShakeFramesSolved, "shake.frames_solved", Work;
+    /// Batches those frames were solved in (a function of the skyline sizes
+    /// and the solve budget only).
+    ShakeBatches, "shake.batches", Work;
+    /// Skyline `f64`s of those frames, summed.
+    ShakeSkylineEntries, "shake.skyline_entries", Work;
 }
 
 const WORK_N: usize = Work::ALL.len();

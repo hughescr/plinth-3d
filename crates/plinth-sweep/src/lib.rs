@@ -978,6 +978,13 @@ pub struct SweepPolicy {
     /// in a WARNING. On for every emitted field; [`run_sweep`], the orientation
     /// search's pricing entry, turns it off because no score reads it.
     pub rigid_share_diagnostic: bool,
+    /// Whether the construction-stage shake check ([`stage_shake`]) runs on
+    /// the finished field. It sizes nothing and moves nothing; its result is
+    /// only a WARNING line in the log. On for every emitted field;
+    /// [`run_sweep`], the orientation search's pricing entry, turns it off
+    /// because no score reads it (the result reads as "did not run":
+    /// `StageShake::default()`).
+    pub stage_shake_diagnostic: bool,
     pub limits: SweepLimits,
 }
 
@@ -1076,6 +1083,7 @@ impl SweepPolicy {
             handed_column_ledger: true,
             flank_relief_check: true,
             rigid_share_diagnostic: true,
+            stage_shake_diagnostic: true,
             limits: SweepLimits {
                 cell_layer_budget: placeholders.sweep_cell_layer_budget().diagnostic().get(),
                 ..SweepLimits::production()
@@ -1542,6 +1550,15 @@ impl SweepPolicy {
         self.flank_relief_check = false;
         self
     }
+
+    /// Skip the construction-stage shake check, as the orientation search's
+    /// pricing entry does. **Sabotage only** in a test that expects the
+    /// result: the check's result stays `StageShake::default()`.
+    #[must_use]
+    pub const fn without_stage_shake(mut self) -> Self {
+        self.stage_shake_diagnostic = false;
+        self
+    }
 }
 
 /// Place and size a support field for one oriented, lifted mesh.
@@ -1553,9 +1570,10 @@ impl SweepPolicy {
 /// belong to the sealed-run gates rather than to this engine.
 ///
 /// This is the entry the orientation search prices every candidate pose
-/// through, so it skips the rigid-body diagnostic ([`rigid_share`]): that one
-/// is a WARNING about the field that is emitted, and it decides nothing a
-/// candidate pose is scored on.
+/// through, so it skips the rigid-body diagnostic ([`rigid_share`]) and the
+/// construction-stage shake check ([`stage_shake`]): both are WARNINGS about
+/// the field that is emitted, and they decide nothing a candidate pose is
+/// scored on.
 pub fn run_sweep(
     mesh: &Mesh,
     plan: &LayerPlan,
@@ -1563,6 +1581,7 @@ pub fn run_sweep(
 ) -> Result<SweepPlan, SweepError> {
     let policy = SweepPolicy {
         rigid_share_diagnostic: false,
+        stage_shake_diagnostic: false,
         ..*policy
     };
     run_sweep_with_drains(mesh, plan, &policy, &[])
@@ -2940,14 +2959,18 @@ pub fn run_sweep_with_holes(
     // R9 + D6 (Craig ruling 2026-10-03): the construction-stage shake check
     // on the finished field, at the stated brace peel pressure. A WARNING
     // only: it reads the field and changes nothing.
-    slenderness_outcome.stage_shake = stage_shake::check(
-        &grid,
-        &struts,
-        &finished_profiles,
-        height,
-        &slenderness_law,
-        policy.stage_shake_brace_peel_kpa,
-    );
+    slenderness_outcome.stage_shake = if policy.stage_shake_diagnostic {
+        stage_shake::check(
+            &grid,
+            &struts,
+            &finished_profiles,
+            height,
+            &slenderness_law,
+            policy.stage_shake_brace_peel_kpa,
+        )
+    } else {
+        stage_shake::StageShake::default()
+    };
     slenderness_outcome.longest_run_mm = 0.0;
     slenderness_outcome.longest_run_limit_mm = 0.0;
     // WHAT THE MAST'S PLACEMENT-TIME RADIUS GOT WRONG, measured on the sized
