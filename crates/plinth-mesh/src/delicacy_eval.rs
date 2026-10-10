@@ -73,6 +73,8 @@
 //! is serial in source index order, so the result does not depend on how the
 //! kernel's index-parallel map-collect was scheduled.
 
+use std::ops::Range;
+
 use geom_kernel::perf::{self, Span, Work};
 use geom_kernel::vec3::{add, cross, dot, norm, normalize, scale, sub};
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, V3};
@@ -81,6 +83,7 @@ use crate::delicacy::{
     DelicacyBuildConfig, DelicacyError, DelicacyFaceValue, DelicacyField, DelicacySettings,
     FaceTable,
 };
+use crate::surface_par::{spread_range, Exact, ScratchPool, SpreadHooks, SpreadPlan, WaveStats};
 use crate::{
     build_face_topology, Mesh, TopologyError, WeldPolicy, TOPOLOGY_CUT_BOUNDARY, TOPOLOGY_CUT_DEGENERATE,
     TOPOLOGY_CUT_DUPLICATE, TOPOLOGY_CUT_NONMANIFOLD, TOPOLOGY_CUT_POINT_ONLY,
@@ -390,15 +393,96 @@ pub(crate) struct CurvatureSpreadCounts {
 /// # Batch-first
 ///
 /// One shared angle-defect accumulation, one vertex-to-face table, then one
-/// walk per curved vertex over a shared scratch frontier and a stamp that is
-/// never cleared (each vertex stamps with its own index). Serial in vertex
-/// order, so every face's sum is accumulated in the same order on every run.
+/// walk per curved vertex over a per-worker scratch frontier and a stamp that
+/// is never cleared (each vertex stamps with its own index, and each vertex is
+/// walked exactly once in the run).
+///
+/// # Parallel, and bit-identical to the serial walk (2026-10-09)
+///
+/// The walks run as fixed vertex blocks in waves (`surface_par`); each block
+/// returns its `(face, value * inside)` pairs in walk order, and a serial
+/// replay applies the blocks in ascending vertex order. Every face therefore
+/// receives the same addends in the same order as the serial walk, at any
+/// thread count (see `surface_par`'s module doc). The serial body is kept as
+/// `curvature_by_face_serial` and every test compares against it bit for bit.
 fn curvature_by_face(
     mesh: &Mesh,
     geometry: &FaceGeometryPass,
     radius_mm: f64,
 ) -> Result<(Vec<f64>, CurvatureSpreadCounts), DelicacyError> {
     let _perf_span = perf::span(Span::Curvature);
+    let (by_face, spread) = curvature_parallel(mesh, geometry, radius_mm)?;
+    // Write-only perf charge, once per spread (never read back).
+    if perf::enabled() {
+        let counts = spread.counts;
+        perf::add(Work::DelicacyVerticesSpread, perf::count(counts.vertices_spread));
+        perf::add(Work::DelicacyPairsMeasured, perf::count(counts.pairs_measured));
+        perf::add(Work::DelicacyPairsCharged, perf::count(counts.pairs_charged));
+        perf::add(Work::DelicacyBlocks, perf::count(spread.waves.blocks));
+        perf::add(Work::DelicacyWaves, perf::count(spread.waves.waves));
+        perf::add(
+            Work::DelicacyOverflowSplits,
+            perf::count(spread.waves.overflow_splits),
+        );
+        perf::add(
+            Work::DelicacyFacesMultiplyCharged,
+            perf::count(spread.faces_multiply_charged),
+        );
+    }
+    Ok((by_face, spread.counts))
+}
+
+/// The production spread: serial setup, then the walks in the kernel pool.
+pub(crate) fn curvature_parallel(
+    mesh: &Mesh,
+    geometry: &FaceGeometryPass,
+    radius_mm: f64,
+) -> Result<(Vec<f64>, SpreadOutcome), DelicacyError> {
+    let setup = curvature_setup(mesh, geometry)?;
+    let inputs = setup.inputs(mesh, geometry, radius_mm * radius_mm);
+    let spread = geom_kernel::run_in_pool(|| {
+        spread_all::<Exact>(&inputs, &SpreadPlan::PRODUCTION)
+    })
+    .map_err(|error| DelicacyError::Kernel(error.to_string()))?;
+    let by_face = charge_to_by_face(geometry, &spread.charge);
+    Ok((by_face, spread))
+}
+
+/// What the curvature walks read, built once and serially: the welded
+/// topology, each vertex's normalized absolute angle defect, each vertex's
+/// position and its non-degenerate incident faces as one CSR table.
+struct CurvatureSetup {
+    topology: crate::FaceTopology,
+    vertex_curvature: Vec<f64>,
+    position: Vec<V3>,
+    offsets: Vec<usize>,
+    incident: Vec<usize>,
+}
+
+impl CurvatureSetup {
+    fn inputs<'a>(
+        &'a self,
+        mesh: &'a Mesh,
+        geometry: &'a FaceGeometryPass,
+        radius_sq: f64,
+    ) -> CurvatureSpreadInputs<'a> {
+        CurvatureSpreadInputs {
+            mesh,
+            geometry,
+            topology: &self.topology,
+            value: &self.vertex_curvature,
+            position: &self.position,
+            offsets: &self.offsets,
+            incident: &self.incident,
+            radius_sq,
+        }
+    }
+}
+
+fn curvature_setup(
+    mesh: &Mesh,
+    geometry: &FaceGeometryPass,
+) -> Result<CurvatureSetup, DelicacyError> {
     // The accumulation itself lives in `welded_angle_defect`, shared with
     // the display-face evaluator. The per-vertex READING delicacy takes of it
     // — normalized ABSOLUTE defect — is unchanged; what changed on 2026-10-01
@@ -461,13 +545,245 @@ fn curvature_by_face(
         }
     }
 
+    // The block streams index faces and vertices as `u32`, and the stamp uses
+    // `u32::MAX` for "unstamped". A mesh that large cannot be built (the mesh
+    // itself indexes with `u32`), so this is a reported limit, not a wrap.
+    if tris.len() >= u32::MAX as usize || welded_count >= u32::MAX as usize {
+        return Err(DelicacyError::Kernel(
+            "the curvature spread indexes faces and vertices with u32".to_owned(),
+        ));
+    }
+    Ok(CurvatureSetup {
+        topology,
+        vertex_curvature,
+        position,
+        offsets,
+        incident,
+    })
+}
+
+/// The flat, read-only view the curvature walks share (a struct of slices, so
+/// a block walk is a pure function of it).
+pub(crate) struct CurvatureSpreadInputs<'a> {
+    mesh: &'a Mesh,
+    geometry: &'a FaceGeometryPass,
+    topology: &'a crate::FaceTopology,
+    /// Normalized absolute angle defect per welded vertex.
+    value: &'a [f64],
+    position: &'a [V3],
+    /// CSR offsets of each vertex's non-degenerate incident faces.
+    offsets: &'a [usize],
+    incident: &'a [usize],
+    radius_sq: f64,
+}
+
+/// One worker's reusable walk state: the face stamp and the frontier.
+///
+/// The stamp is keyed by the walking vertex's index and is never cleared:
+/// each vertex is walked exactly once in the run, so a stamp left by another
+/// vertex's walk (on this worker, in another block) never equals the current
+/// vertex.
+struct SpreadScratch {
+    stamp: Vec<u32>,
+    frontier: Vec<usize>,
+}
+
+/// What one vertex block contributes, in walk order.
+struct BlockContributions {
+    /// Charged faces, in the order the serial walk charges them.
+    faces: Vec<u32>,
+    /// `value * inside` for the face at the same slot.
+    amounts: Vec<f64>,
+    /// `Some(s)`: vertices `[block.start, s)` are in this output and `s` is the
+    /// first unprocessed vertex (`start < s < end`). `None`: the whole block.
+    stopped_at: Option<u32>,
+    counts: CurvatureSpreadCounts,
+}
+
+/// The `charge` array and everything counted while building it.
+pub(crate) struct SpreadOutcome {
+    charge: Vec<f64>,
+    pub(crate) counts: CurvatureSpreadCounts,
+    /// Faces that received at least two addends: the only faces where the
+    /// order of addition can matter.
+    pub(crate) faces_multiply_charged: usize,
+    pub(crate) waves: WaveStats,
+}
+
+/// One block of the spread: the serial loop body for `vertices`, except that a
+/// charge is PUSHED as `(face, value * inside)` instead of added.
+///
+/// The pair cap is checked only AFTER a vertex's walk completes, so a block
+/// always finishes its first vertex and `stopped_at` is never the block's own
+/// start (nor its end: the last vertex never stops).
+fn spread_block(
+    inp: &CurvatureSpreadInputs<'_>,
+    vertices: Range<u32>,
+    cap: usize,
+    scratch: &mut SpreadScratch,
+    out: &mut BlockContributions,
+) {
+    let tris = inp.mesh.tris();
+    let SpreadScratch { stamp, frontier } = scratch;
+    for vertex_id in vertices.clone() {
+        let vertex = vertex_id as usize;
+        let value = inp.value[vertex];
+        if value <= 0.0 {
+            continue;
+        }
+        out.counts.vertices_spread += 1;
+        let centre = inp.position[vertex];
+        frontier.clear();
+        for &face in &inp.incident[inp.offsets[vertex]..inp.offsets[vertex + 1]] {
+            // A face incident at two corners (a sliver) is listed twice.
+            if stamp[face] != vertex_id {
+                stamp[face] = vertex_id;
+                frontier.push(face);
+            }
+        }
+        let ring = frontier.len();
+        let mut head = 0_usize;
+        while head < frontier.len() {
+            let face = frontier[head];
+            head += 1;
+            out.counts.pairs_measured += 1;
+            let inside = ball_face_area_mm2(inp.mesh, inp.geometry, face, centre, inp.radius_sq);
+            if inside <= 0.0 {
+                continue;
+            }
+            out.counts.pairs_charged += 1;
+            if head > ring {
+                out.counts.pairs_charged_beyond_ring += 1;
+            }
+            // `face < tris.len() < u32::MAX`, checked in `curvature_setup`.
+            out.faces.push(u32::try_from(face).unwrap_or(u32::MAX));
+            out.amounts.push(value * inside);
+            // Expand only from a face that is itself inside the ball, so the
+            // neighbourhood stays connected through the surface.
+            if let Some(neighbours) = inp.topology.neighbors(face) {
+                for &next in neighbours {
+                    let next = next as usize;
+                    if next >= tris.len()
+                        || inp.geometry.degenerate[next]
+                        || stamp[next] == vertex_id
+                    {
+                        continue;
+                    }
+                    stamp[next] = vertex_id;
+                    frontier.push(next);
+                }
+            }
+        }
+        if out.faces.len() >= cap && vertex_id + 1 < vertices.end {
+            out.stopped_at = Some(vertex_id + 1);
+            break;
+        }
+    }
+}
+
+/// Runs the whole spread in the AMBIENT rayon pool (the production caller
+/// installs the kernel pool; tests install pools of their own widths).
+fn spread_all<H: SpreadHooks>(inp: &CurvatureSpreadInputs<'_>, plan: &SpreadPlan) -> SpreadOutcome {
+    let face_count = inp.mesh.tris().len();
+    let welded_count = inp.value.len();
+    let scratch_pool = ScratchPool::<SpreadScratch>::new();
+    let spread = |block: Range<u32>| {
+        let mut scratch = scratch_pool.take(|| SpreadScratch {
+            stamp: vec![u32::MAX; face_count],
+            frontier: Vec::new(),
+        });
+        let mut out = BlockContributions {
+            faces: Vec::new(),
+            amounts: Vec::new(),
+            stopped_at: None,
+            counts: CurvatureSpreadCounts::default(),
+        };
+        spread_block(inp, block, plan.pairs_per_block_cap, &mut scratch, &mut out);
+        scratch_pool.put(scratch);
+        out
+    };
+
+    let mut charge = vec![0.0_f64; face_count];
+    // Addends received per face, saturating at 2 (only "more than one" matters).
+    let mut addends = vec![0_u8; face_count];
+    let mut counts = CurvatureSpreadCounts::default();
+    let mut faces_multiply_charged = 0_usize;
+    let mut waves = WaveStats::default();
+    let mut replay = |out: &BlockContributions| {
+        for (&face, &amount) in out.faces.iter().zip(&out.amounts) {
+            let face = face as usize;
+            charge[face] += amount;
+            match addends[face] {
+                0 => addends[face] = 1,
+                1 => {
+                    addends[face] = 2;
+                    faces_multiply_charged += 1;
+                }
+                _ => {}
+            }
+        }
+        counts.vertices_spread += out.counts.vertices_spread;
+        counts.pairs_measured += out.counts.pairs_measured;
+        counts.pairs_charged += out.counts.pairs_charged;
+        counts.pairs_charged_beyond_ring += out.counts.pairs_charged_beyond_ring;
+    };
+    // `welded_count < u32::MAX`, checked in `curvature_setup`.
+    spread_range::<H, _, _, _, _>(
+        0..u32::try_from(welded_count).unwrap_or(u32::MAX),
+        plan.block_vertices,
+        plan,
+        &mut waves,
+        &spread,
+        &|out: &BlockContributions| out.stopped_at,
+        &mut replay,
+    );
+    SpreadOutcome {
+        charge,
+        counts,
+        faces_multiply_charged,
+        waves,
+    }
+}
+
+/// Reads each face's summed charge as its mean over the face's area.
+fn charge_to_by_face(geometry: &FaceGeometryPass, charge: &[f64]) -> Vec<f64> {
+    let mut by_face = Vec::with_capacity(charge.len());
+    for (face, &charged) in charge.iter().enumerate() {
+        let area = geometry.areas_mm2[face];
+        // `is_nan() || <= 0` is `!(area > 0.0)`, NaN included.
+        if geometry.degenerate[face] || area.is_nan() || area <= 0.0 {
+            by_face.push(0.0);
+            continue;
+        }
+        by_face.push((charged / area).clamp(0.0, 1.0));
+    }
+    by_face
+}
+
+/// The serial walk exactly as it stood before the parallel spread (2026-10-09):
+/// frozen former production code, kept as the test oracle and the witness
+/// example's reference. Not a re-implementation: setup, the per-pair body and
+/// the final normalisation are the same functions and lines production uses;
+/// only the schedule (one vertex at a time, adding straight into `charge`)
+/// differs.
+#[cfg(any(test, feature = "serial-oracle"))]
+pub(crate) fn curvature_by_face_serial(
+    mesh: &Mesh,
+    geometry: &FaceGeometryPass,
+    radius_mm: f64,
+) -> Result<(Vec<f64>, CurvatureSpreadCounts), DelicacyError> {
+    let setup = curvature_setup(mesh, geometry)?;
     let radius_sq = radius_mm * radius_mm;
+    let tris = mesh.tris();
+    let welded_count = setup.vertex_curvature.len();
+    let (position, offsets, incident, topology) =
+        (&setup.position, &setup.offsets, &setup.incident, &setup.topology);
     let mut charge = vec![0.0_f64; tris.len()];
     let mut stamp = vec![usize::MAX; tris.len()];
     let mut frontier: Vec<usize> = Vec::new();
     let mut counts = CurvatureSpreadCounts::default();
     for vertex in 0..welded_count {
-        let value = vertex_curvature[vertex];
+        let value = setup.vertex_curvature[vertex];
         if value <= 0.0 {
             continue;
         }
@@ -510,24 +826,7 @@ fn curvature_by_face(
             }
         }
     }
-
-    let mut by_face = Vec::with_capacity(tris.len());
-    for (face, &charged) in charge.iter().enumerate() {
-        let area = geometry.areas_mm2[face];
-        // `is_nan() || <= 0` is `!(area > 0.0)`, NaN included.
-        if geometry.degenerate[face] || area.is_nan() || area <= 0.0 {
-            by_face.push(0.0);
-            continue;
-        }
-        by_face.push((charged / area).clamp(0.0, 1.0));
-    }
-    // Write-only perf charge, once per spread (never read back).
-    if perf::enabled() {
-        perf::add(Work::DelicacyVerticesSpread, perf::count(counts.vertices_spread));
-        perf::add(Work::DelicacyPairsMeasured, perf::count(counts.pairs_measured));
-        perf::add(Work::DelicacyPairsCharged, perf::count(counts.pairs_charged));
-    }
-    Ok((by_face, counts))
+    Ok((charge_to_by_face(geometry, &charge), counts))
 }
 
 /// The exact area of `face` inside the ball of radius `sqrt(radius_sq)`
@@ -762,7 +1061,7 @@ fn thinness_by_face(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{make_box_default, make_thin_fin, make_thin_fin_with, Mesh};
 
@@ -930,7 +1229,7 @@ mod tests {
     /// A closed `[0, 8]³` box whose every face is an `n x n` grid of 2-triangle
     /// cells, with integer-exact coordinates so `n = 1` and `n = 8` describe
     /// the same surface bit for bit and weld exactly.
-    fn gridded_cube(n: u32) -> Mesh {
+    pub(crate) fn gridded_cube(n: u32) -> Mesh {
         let coordinate = |i: u32| 8.0 * f64::from(i) / f64::from(n);
         let mut index = std::collections::HashMap::new();
         let mut verts = Vec::new();
@@ -1133,5 +1432,236 @@ mod tests {
             }
             other => panic!("expected a named budget refusal, got {other}"),
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // The parallel spread against its frozen serial oracle (2026-10-09).
+    // ---------------------------------------------------------------------
+
+    /// Runs `body` inside a local rayon pool of exactly `threads` workers.
+    fn in_pool<R: Send>(threads: usize, body: impl FnOnce() -> R + Send) -> R {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("local rayon pool")
+            .install(body)
+    }
+
+    /// A sabotage: replay each wave's blocks in descending order.
+    struct ReverseBlocks;
+    impl SpreadHooks for ReverseBlocks {
+        const REVERSE_BLOCKS: bool = true;
+    }
+
+    /// A sabotage: never replay an overflow remainder.
+    struct DropRemainder;
+    impl SpreadHooks for DropRemainder {
+        const DROP_REMAINDER: bool = true;
+    }
+
+    fn bits(values: &[f64]) -> Vec<u64> {
+        values.iter().map(|value| value.to_bits()).collect()
+    }
+
+    /// The fixtures the order of the replay can show on: a gridded cube (eight
+    /// curved corners whose balls overlap many faces), a thin fin, a recessed
+    /// disc.
+    fn spread_fixtures() -> Vec<(&'static str, Mesh)> {
+        vec![
+            ("gridded_cube(8)", gridded_cube(8)),
+            ("gridded_cube(16)", gridded_cube(16)),
+            ("thin_fin", make_thin_fin().expect("thin fin")),
+            (
+                "recessed_disc",
+                crate::make_recessed_disc(11.5, 12.5, 3.5, 2.5, 10.0, 96).expect("recessed disc"),
+            ),
+        ]
+    }
+
+    /// Runs the spread of `mesh` under a hook type and a plan, in a pool of
+    /// `threads`, and returns `(by_face, outcome)`.
+    fn run_spread<H: SpreadHooks>(
+        mesh: &Mesh,
+        plan: SpreadPlan,
+        threads: usize,
+    ) -> (Vec<f64>, SpreadOutcome) {
+        let geometry = FaceGeometryPass::run(mesh);
+        let radius = settings().thin_feature_mm();
+        let setup = curvature_setup(mesh, &geometry).expect("setup");
+        let inputs = setup.inputs(mesh, &geometry, radius * radius);
+        let outcome = in_pool(threads, || spread_all::<H>(&inputs, &plan));
+        (charge_to_by_face(&geometry, &outcome.charge), outcome)
+    }
+
+    fn plan(block_vertices: u32, cap: usize) -> SpreadPlan {
+        SpreadPlan {
+            block_vertices,
+            wave_blocks: 32,
+            pairs_per_block_cap: cap,
+        }
+    }
+
+    /// **The parallel spread is the serial walk, bit for bit.** Across pool
+    /// widths 1, 3 and 8, block lengths 1, 7 and 512 and caps 1, 3 and 1 Mi,
+    /// on four fixtures: every face's bits equal the oracle's, and the work
+    /// counters equal the oracle's, which proves every vertex was processed
+    /// exactly once (none dropped, none repeated by an overflow remainder).
+    #[test]
+    fn the_parallel_spread_equals_the_serial_oracle_bit_for_bit() {
+        let radius = settings().thin_feature_mm();
+        for (name, mesh) in spread_fixtures() {
+            let geometry = FaceGeometryPass::run(&mesh);
+            let (serial, serial_counts) =
+                curvature_by_face_serial(&mesh, &geometry, radius).expect("serial oracle");
+            for threads in [1_usize, 3, 4, 8, 16] {
+                for block in [1_u32, 7, 512] {
+                    for cap in [1_usize, 3, 1 << 20] {
+                        let (parallel, outcome) =
+                            run_spread::<Exact>(&mesh, plan(block, cap), threads);
+                        assert_eq!(
+                            bits(&parallel),
+                            bits(&serial),
+                            "{name}: threads {threads} block {block} cap {cap}"
+                        );
+                        assert_eq!(
+                            outcome.counts, serial_counts,
+                            "{name}: threads {threads} block {block} cap {cap}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The production entry (`curvature_by_face`, kernel pool, production plan)
+    /// equals the oracle on the same fixtures.
+    #[test]
+    fn the_production_entry_equals_the_serial_oracle() {
+        let radius = settings().thin_feature_mm();
+        for (name, mesh) in spread_fixtures() {
+            let geometry = FaceGeometryPass::run(&mesh);
+            let (serial, serial_counts) =
+                curvature_by_face_serial(&mesh, &geometry, radius).expect("serial oracle");
+            let (parallel, counts) =
+                curvature_by_face(&mesh, &geometry, radius).expect("parallel spread");
+            assert_eq!(bits(&parallel), bits(&serial), "{name}");
+            assert_eq!(counts, serial_counts, "{name}");
+        }
+    }
+
+    /// Path hits: the faces where order can matter exist on the fixture, and a
+    /// small cap really forces the overflow path. At block 7, cap 3 on
+    /// `gridded_cube(8)` the corner vertex (vertex 0) charges more than 3
+    /// pairs, so its block stops after one vertex and the rest of the block
+    /// runs again as a remainder.
+    #[test]
+    fn the_replay_order_matters_somewhere_and_the_overflow_path_fires() {
+        let multiply_charged: Vec<usize> = spread_fixtures()
+            .iter()
+            .map(|(_, mesh)| {
+                run_spread::<Exact>(mesh, plan(7, 1 << 20), 3)
+                    .1
+                    .faces_multiply_charged
+            })
+            .collect();
+        assert!(
+            multiply_charged.iter().any(|&faces| faces > 0),
+            "no fixture has a face with two addends; none can show order: {multiply_charged:?}"
+        );
+        let mesh = gridded_cube(8);
+        let (_, outcome) = run_spread::<Exact>(&mesh, plan(7, 3), 3);
+        assert!(outcome.waves.overflow_splits > 0, "{:?}", outcome.waves);
+        assert!(outcome.waves.blocks > outcome.waves.waves && outcome.waves.waves >= 1);
+        // The production plan on the same mesh needs no overflow.
+        let (_, calm) = run_spread::<Exact>(&mesh, SpreadPlan::PRODUCTION, 3);
+        assert_eq!(calm.waves.overflow_splits, 0);
+    }
+
+    /// `stopped_at` is the FIRST UNPROCESSED vertex of a block: strictly
+    /// inside it, never the block's own start (every block makes progress) and
+    /// never its end (the last vertex never stops), and an early stop never
+    /// leaves a vertex's walk half done (the prefix plus the remainder covers
+    /// the block).
+    #[test]
+    fn a_stopped_block_reports_a_first_unprocessed_vertex_strictly_inside_it() {
+        let mesh = gridded_cube(8);
+        let geometry = FaceGeometryPass::run(&mesh);
+        let setup = curvature_setup(&mesh, &geometry).expect("setup");
+        let radius = settings().thin_feature_mm();
+        let inputs = setup.inputs(&mesh, &geometry, radius * radius);
+        let vertices = u32::try_from(inputs.value.len()).expect("small mesh");
+        let mut stopped = 0;
+        for block_len in [1_u32, 2, 7, 512] {
+            for block in crate::surface_par::chunk(&(0..vertices), block_len) {
+                for cap in [1_usize, 3, 1 << 20] {
+                    let mut scratch = SpreadScratch {
+                        stamp: vec![u32::MAX; mesh.tris().len()],
+                        frontier: Vec::new(),
+                    };
+                    let mut out = BlockContributions {
+                        faces: Vec::new(),
+                        amounts: Vec::new(),
+                        stopped_at: None,
+                        counts: CurvatureSpreadCounts::default(),
+                    };
+                    spread_block(&inputs, block.clone(), cap, &mut scratch, &mut out);
+                    if let Some(at) = out.stopped_at {
+                        stopped += 1;
+                        assert!(
+                            block.start < at && at < block.end,
+                            "block {block:?} cap {cap} stopped at {at}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(stopped > 0, "no block ever stopped; the cap rule was not exercised");
+    }
+
+    /// An empty range runs no blocks, and `chunk` refuses a zero length.
+    #[test]
+    fn an_empty_vertex_range_runs_no_blocks() {
+        let mut stats = WaveStats::default();
+        in_pool(2, || {
+            spread_range::<Exact, (), _, _, _>(
+                4..4,
+                8,
+                &SpreadPlan::PRODUCTION,
+                &mut stats,
+                &|_: Range<u32>| (),
+                &|(): &()| None,
+                &mut |(): &()| {},
+            );
+        });
+        assert_eq!(stats, WaveStats::default());
+    }
+
+    /// **Sabotage 1 (replay order).** Replaying a wave's blocks in the wrong
+    /// order must change at least one face's bits on at least one fixture; if
+    /// no fixture can see it, the fixtures are too sparse to show order and
+    /// the equality test above proves nothing about the replay.
+    #[test]
+    fn sabotage_reversed_block_replay_changes_the_bits() {
+        let mut seen = 0;
+        for (name, mesh) in spread_fixtures() {
+            let (honest, _) = run_spread::<Exact>(&mesh, plan(7, 1 << 20), 3);
+            let (broken, _) = run_spread::<ReverseBlocks>(&mesh, plan(7, 1 << 20), 3);
+            if bits(&honest) != bits(&broken) {
+                seen += 1;
+                println!("{name}: reversed replay changes the bits");
+            }
+        }
+        assert!(seen > 0, "no fixture shows the replay order; use a denser one");
+    }
+
+    /// **Sabotage 2 (remainder).** Dropping the overflow remainder at block 7,
+    /// cap 3 must change the result: those vertices are never spread.
+    #[test]
+    fn sabotage_dropping_the_overflow_remainder_changes_the_bits() {
+        let mesh = gridded_cube(8);
+        let (honest, _) = run_spread::<Exact>(&mesh, plan(7, 3), 3);
+        let (broken, outcome) = run_spread::<DropRemainder>(&mesh, plan(7, 3), 3);
+        assert!(outcome.waves.overflow_splits > 0);
+        assert_ne!(bits(&honest), bits(&broken));
     }
 }

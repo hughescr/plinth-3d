@@ -511,6 +511,41 @@ digest sees it.
   `plinth-pipeline`). `crates/plinth-sweep/tests/it/perf_counters.rs` runs a real sweep at 1
   and 8 threads and compares the sidecars.
 
+## Surface fields: parallel walks, serial oracle
+
+`plinth-mesh` computes two per-face fields with a surface walk per vertex or face: delicacy's
+curvature (`delicacy_eval::curvature_by_face`) and the display field's neighbourhood pass
+(`display_eval::neighbourhood_pass`). Both run in parallel inside `geom_kernel::run_in_pool`
+and give the same bits at every thread count.
+
+- **Curvature** is a scatter (`charge[face] += value * inside`), so the serial addition
+  order is part of the answer. Fixed vertex blocks (`surface_par.rs`: 512 vertices, 32 blocks
+  per wave) each return their `(face, value * inside)` pairs in walk order; a serial replay
+  applies the blocks in ascending order. A block that reaches its pair cap stops after a
+  finished vertex and its remainder is replayed in place, so the cap changes only when an
+  addend is computed, never the addend or its place.
+- **The display pass** is a gather (face `f` writes only its own slots), so fixed 1024-face
+  blocks are concatenated in block order. Scratch is pooled per worker, and the visited stamps
+  are keyed by the global face index, which is unique, so stale stamps never collide.
+- **Oracle.** `curvature_by_face_serial` and `neighbourhood_pass_serial` are the walks as they
+  were before the split. The unit tests compare the parallel code against them bit for bit
+  (pools of 1, 3, 4, 8, 16 workers; block lengths and caps that force the overflow path) and
+  run a sabotage for each hazard. `examples/surface_field_witness.rs` (feature `serial-oracle`)
+  does the same on real STL files; run it under the CPU lock:
+
+  ```sh
+  PLINTH_WITNESS_WIDTHS="1 4 16" cargo run --release --offline -p plinth-mesh \
+      --features serial-oracle --example surface_field_witness -- model.stl
+  ```
+- **Counters** (`--perf`): `delicacy.blocks`, `delicacy.waves`, `delicacy.overflow_splits`,
+  `delicacy.faces_multiply_charged` (faces with two or more addends, the only faces where order
+  can matter), `display.faces` (walks) and `display.members_total` (always larger when any
+  walk expanded).
+- **The sweep placement computes no seal field.** `prepare` forks to `sweep_and_emit` before
+  `prepared_delicacy_field`: nothing on the sweep path reads that field, so the legacy
+  placement alone pays for it (phase `SealFields`). A mesh whose seal field cannot be measured
+  therefore no longer refuses a sweep run.
+
 ## Corpus provisioning
 
 The test models are inputs, not source, and are not stored in git — the largest is over
