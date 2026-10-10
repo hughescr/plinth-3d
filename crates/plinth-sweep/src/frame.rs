@@ -235,18 +235,56 @@ impl Frame {
         if n == 0 {
             return FrameSolution { moved, solved };
         }
+        let (pieces, members_of) = self.plan_pieces();
+        let mut force = vec![[0.0; 3]; n];
+        for &(node, f) in loads {
+            if let Some(slot) = force.get_mut(node) {
+                *slot = vec3::add(*slot, f);
+            }
+        }
+        for order in &pieces {
+            let loaded = order
+                .iter()
+                .any(|&node| force[node].iter().any(|&c| c != 0.0) && !self.fixed[node]);
+            if !loaded {
+                continue;
+            }
+            let first = self.solve_piece::<N>(order, &members_of, &force, stiffness, &[0, 2]);
+            // The second set carries no load (the right side is zeros along
+            // `y`); it is factored for the pivots only.
+            let second = first.is_some().then(|| {
+                also.is_none_or(|other| {
+                    self.solve_piece::<N>(order, &members_of, &force, other, &[1])
+                        .is_some()
+                })
+            });
+            match first.filter(|_| second == Some(true)) {
+                Some(piece) => {
+                    for (node, u) in piece {
+                        moved[node] = u;
+                    }
+                }
+                None => {
+                    for &node in order {
+                        solved[node] = false;
+                    }
+                }
+            }
+        }
+        FrameSolution { moved, solved }
+    }
+
+    /// The connected pieces of the frame, each listed in reverse Cuthill-McKee
+    /// order, and the members that start at each node. Integer work only: no
+    /// float is read, so the plan is the same for every load set.
+    fn plan_pieces(&self) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
+        let n = self.points.len();
         let mut adjacent: Vec<Vec<usize>> = vec![Vec::new(); n];
         let mut members_of: Vec<Vec<usize>> = vec![Vec::new(); n];
         for (index, &(a, b, _)) in self.members.iter().enumerate() {
             adjacent[a].push(b);
             adjacent[b].push(a);
             members_of[a].push(index);
-        }
-        let mut force = vec![[0.0; 3]; n];
-        for &(node, f) in loads {
-            if let Some(slot) = force.get_mut(node) {
-                *slot = vec3::add(*slot, f);
-            }
         }
         // Connected pieces, each listed in reverse Cuthill-McKee order.
         let mut piece_of = vec![usize::MAX; n];
@@ -281,36 +319,95 @@ impl Frame {
             order.reverse();
             pieces.push(order);
         }
-        for order in &pieces {
-            let loaded = order
-                .iter()
-                .any(|&node| force[node].iter().any(|&c| c != 0.0) && !self.fixed[node]);
-            if !loaded {
-                continue;
+        (pieces, members_of)
+    }
+
+    /// The skyline of one piece, from integers only: the free dofs, the
+    /// member dof lists in assembly order, and for each column the first row
+    /// any member couples in.
+    fn piece_layout<const N: usize>(
+        &self,
+        order: &[usize],
+        members_of: &[Vec<usize>],
+    ) -> PieceLayout<N> {
+        // Freedoms per node: 6 in a full solve, 3 in a planar one.
+        let per_node = N / 2;
+        // Free dofs, `per_node` per free node, numbered in the piece's order.
+        let mut dof_of: Vec<Option<usize>> = vec![None; self.points.len()];
+        let mut free_nodes: Vec<usize> = Vec::new();
+        for &node in order {
+            if !self.fixed[node] {
+                dof_of[node] = Some(per_node * free_nodes.len());
+                free_nodes.push(node);
             }
-            let first = self.solve_piece::<N>(order, &members_of, &force, stiffness, &[0, 2]);
-            // The second set carries no load (the right side is zeros along
-            // `y`); it is factored for the pivots only.
-            let second = first.is_some().then(|| {
-                also.is_none_or(|other| {
-                    self.solve_piece::<N>(order, &members_of, &force, other, &[1])
-                        .is_some()
-                })
-            });
-            match first.filter(|_| second == Some(true)) {
-                Some(piece) => {
-                    for (node, u) in piece {
-                        moved[node] = u;
+        }
+        let size = per_node * free_nodes.len();
+        // The skyline: for each column, the first row any member couples in.
+        let mut first: Vec<usize> = (0..size).collect();
+        let mut coupled: Vec<(usize, [usize; N])> = Vec::new();
+        if size > 0 {
+            for &node in order {
+                for &member in &members_of[node] {
+                    let (a, b, _) = self.members[member];
+                    let mut dofs = [usize::MAX; N];
+                    for (end, at) in [a, b].into_iter().enumerate() {
+                        if let Some(base) = dof_of[at] {
+                            for q in 0..per_node {
+                                dofs[per_node * end + q] = base + q;
+                            }
+                        }
                     }
-                }
-                None => {
-                    for &node in order {
-                        solved[node] = false;
+                    let lowest = dofs.iter().copied().filter(|&d| d != usize::MAX).min();
+                    if let Some(lowest) = lowest {
+                        for &d in dofs.iter().filter(|&&d| d != usize::MAX) {
+                            first[d] = first[d].min(lowest);
+                        }
+                        coupled.push((member, dofs));
                     }
                 }
             }
         }
-        FrameSolution { moved, solved }
+        // Column `j` holds rows `first[j]..=j`, starting at `start[j]`.
+        let mut start = vec![0_usize; size + 1];
+        for j in 0..size {
+            start[j + 1] = start[j] + (j - first[j] + 1);
+        }
+        PieceLayout {
+            free_nodes,
+            size,
+            first,
+            start,
+            coupled,
+        }
+    }
+
+    /// How many `f64`s the skyline factorisation of [`Frame::solve`] holds for
+    /// these loads, summed over the pieces that carry one: the memory a solve
+    /// needs, from the same integer plan the solve uses. A frame with no
+    /// loaded piece needs none.
+    pub(crate) fn skyline_entries(&self, loads: &[(usize, [f64; 3])]) -> usize {
+        let n = self.points.len();
+        if n == 0 {
+            return 0;
+        }
+        let (pieces, members_of) = self.plan_pieces();
+        let mut force = vec![[0.0; 3]; n];
+        for &(node, f) in loads {
+            if let Some(slot) = force.get_mut(node) {
+                *slot = vec3::add(*slot, f);
+            }
+        }
+        let mut entries = 0_usize;
+        for order in &pieces {
+            let loaded = order
+                .iter()
+                .any(|&node| force[node].iter().any(|&c| c != 0.0) && !self.fixed[node]);
+            if loaded {
+                let layout = self.piece_layout::<12>(order, &members_of);
+                entries += layout.start[layout.size];
+            }
+        }
+        entries
     }
 
     /// One connected piece, nodes in solve order. `None` when it is singular.
@@ -322,55 +419,25 @@ impl Frame {
         member_stiffness: MemberStiffness<N>,
         planar_axes: &[usize],
     ) -> Option<Vec<(usize, [f64; 3])>> {
-        // Freedoms per node, and the force axes the translations carry: all
-        // three in a full solve, `planar_axes` in a planar one.
+        // The force axes the translations carry: all three in a full solve,
+        // `planar_axes` in a planar one.
         let per_node = N / 2;
         let axes: &[usize] = if per_node == 6 { &[0, 1, 2] } else { planar_axes };
-        // Free dofs, `per_node` per free node, numbered in the piece's order.
-        let mut dof_of: Vec<Option<usize>> = vec![None; self.points.len()];
-        let mut free_nodes: Vec<usize> = Vec::new();
-        for &node in order {
-            if !self.fixed[node] {
-                dof_of[node] = Some(per_node * free_nodes.len());
-                free_nodes.push(node);
-            }
-        }
-        let size = per_node * free_nodes.len();
+        let PieceLayout {
+            free_nodes,
+            size,
+            first,
+            start,
+            coupled,
+        } = self.piece_layout::<N>(order, members_of);
         if size == 0 {
             return Some(Vec::new());
         }
-        // The skyline: for each column, the first row any member couples in.
-        let mut first: Vec<usize> = (0..size).collect();
-        let mut stiffness: Vec<([usize; N], [[f64; N]; N])> = Vec::new();
-        for &node in order {
-            for &member in &members_of[node] {
-                let (a, b, radius) = self.members[member];
-                let k = member_stiffness(self.points[a], self.points[b], radius);
-                let mut dofs = [usize::MAX; N];
-                for (end, at) in [a, b].into_iter().enumerate() {
-                    if let Some(base) = dof_of[at] {
-                        for q in 0..per_node {
-                            dofs[per_node * end + q] = base + q;
-                        }
-                    }
-                }
-                let lowest = dofs.iter().copied().filter(|&d| d != usize::MAX).min();
-                if let Some(lowest) = lowest {
-                    for &d in dofs.iter().filter(|&&d| d != usize::MAX) {
-                        first[d] = first[d].min(lowest);
-                    }
-                }
-                stiffness.push((dofs, k));
-            }
-        }
-        // Column `j` holds rows `first[j]..=j`, starting at `start[j]`.
-        let mut start = vec![0_usize; size + 1];
-        for j in 0..size {
-            start[j + 1] = start[j] + (j - first[j] + 1);
-        }
         let mut sky = vec![0.0_f64; start[size]];
         let at = |row: usize, col: usize| start[col] + (row - first[col]);
-        for (dofs, k) in &stiffness {
+        for &(member, dofs) in &coupled {
+            let (a, b, radius) = self.members[member];
+            let k = member_stiffness(self.points[a], self.points[b], radius);
             for (p, &row) in dofs.iter().enumerate() {
                 if row == usize::MAX {
                     continue;
@@ -384,25 +451,8 @@ impl Frame {
             }
         }
         let diagonal: Vec<f64> = (0..size).map(|j| sky[at(j, j)]).collect();
-        // Cholesky K = Uᵀ U, column by column, in place.
-        for j in 0..size {
-            for i in first[j]..j {
-                let from = first[i].max(first[j]);
-                let mut sum = sky[at(i, j)];
-                for m in from..i {
-                    sum -= sky[at(m, i)] * sky[at(m, j)];
-                }
-                sky[at(i, j)] = sum / sky[at(i, i)];
-            }
-            let mut pivot = sky[at(j, j)];
-            for m in first[j]..j {
-                pivot -= sky[at(m, j)] * sky[at(m, j)];
-            }
-            if !(pivot.is_finite() && pivot > PIVOT_NOISE * diagonal[j].abs().max(f64::MIN_POSITIVE))
-            {
-                return None;
-            }
-            sky[at(j, j)] = pivot.sqrt();
+        if !factor(&first, &start, &mut sky, &diagonal) {
+            return None;
         }
         let mut rhs = vec![0.0_f64; size];
         for (index, &node) in free_nodes.iter().enumerate() {
@@ -410,22 +460,7 @@ impl Frame {
                 rhs[per_node * index + slot] = force[node][axis];
             }
         }
-        // Uᵀ y = f.
-        for j in 0..size {
-            let mut sum = rhs[j];
-            for m in first[j]..j {
-                sum -= sky[at(m, j)] * rhs[m];
-            }
-            rhs[j] = sum / sky[at(j, j)];
-        }
-        // U x = y.
-        for j in (0..size).rev() {
-            rhs[j] /= sky[at(j, j)];
-            let value = rhs[j];
-            for m in first[j]..j {
-                rhs[m] -= sky[at(m, j)] * value;
-            }
-        }
+        substitute(&first, &start, &sky, &mut rhs);
         if rhs.iter().any(|value| !value.is_finite()) {
             return None;
         }
@@ -442,6 +477,83 @@ impl Frame {
                 })
                 .collect(),
         )
+    }
+}
+
+/// The integer plan of one piece's skyline ([`Frame::piece_layout`]).
+struct PieceLayout<const N: usize> {
+    /// The piece's free nodes, in solve order.
+    free_nodes: Vec<usize>,
+    /// Free dofs.
+    size: usize,
+    /// For each column, the first row any member couples in.
+    first: Vec<usize>,
+    /// Column `j` holds rows `first[j]..=j`, starting at `start[j]`.
+    start: Vec<usize>,
+    /// `(member, dofs)` for every member with a free end, in assembly order.
+    coupled: Vec<(usize, [usize; N])>,
+}
+
+/// Cholesky `K = Uᵀ U` of a skyline matrix, column by column, in place.
+/// `false` when a pivot is not positive (the piece is a mechanism).
+///
+/// Each column is a slice, so the inner products run over two contiguous
+/// runs instead of an index map per entry. The products and the subtractions
+/// run in the same order as the entry-by-entry form (`tests::
+/// the_sliced_factor_is_the_entrywise_factor_to_the_last_bit`): no `mul_add`,
+/// no iterator `sum`, the same left-to-right chain.
+fn factor(first: &[usize], start: &[usize], sky: &mut [f64], diagonal: &[f64]) -> bool {
+    for j in 0..first.len() {
+        let (done, rest) = sky.split_at_mut(start[j]);
+        let column = &mut rest[..start[j + 1] - start[j]];
+        let top = first[j];
+        for i in top..j {
+            let (low, from) = (first[i], first[i].max(top));
+            let left = &done[start[i]..start[i + 1]];
+            let mut sum = column[i - top];
+            for (a, b) in left[from - low..i - low]
+                .iter()
+                .zip(&column[from - top..i - top])
+            {
+                sum -= a * b;
+            }
+            column[i - top] = sum / left[i - low];
+        }
+        let mut pivot = column[j - top];
+        for value in &column[..j - top] {
+            pivot -= value * value;
+        }
+        if !(pivot.is_finite() && pivot > PIVOT_NOISE * diagonal[j].abs().max(f64::MIN_POSITIVE)) {
+            return false;
+        }
+        column[j - top] = pivot.sqrt();
+    }
+    true
+}
+
+/// `Uᵀ y = f` then `U x = y`, in place on `rhs`, from the factor of
+/// [`factor`].
+fn substitute(first: &[usize], start: &[usize], sky: &[f64], rhs: &mut [f64]) {
+    let size = first.len();
+    // Uᵀ y = f.
+    for j in 0..size {
+        let column = &sky[start[j]..start[j + 1]];
+        let top = first[j];
+        let mut sum = rhs[j];
+        for (value, known) in column[..j - top].iter().zip(&rhs[top..j]) {
+            sum -= value * known;
+        }
+        rhs[j] = sum / column[j - top];
+    }
+    // U x = y.
+    for j in (0..size).rev() {
+        let column = &sky[start[j]..start[j + 1]];
+        let top = first[j];
+        rhs[j] /= column[j - top];
+        let value = rhs[j];
+        for (entry, slot) in column[..j - top].iter().zip(&mut rhs[top..j]) {
+            *slot -= entry * value;
+        }
     }
 }
 
@@ -962,6 +1074,150 @@ mod tests {
         let sideways = [(out, [0.0, 0.3, 0.0])];
         let (one, two) = (bent.solve(&sideways), bent.solve_in_plane(&sideways));
         assert_eq!(one.moved, two.moved);
+    }
+
+    /// The factor and substitution as they were written entry by entry (an
+    /// index map per access), kept as the reference for the sliced form.
+    fn entrywise_solve(
+        first: &[usize],
+        start: &[usize],
+        sky: &mut [f64],
+        rhs: &mut [f64],
+    ) -> bool {
+        let size = first.len();
+        let at = |row: usize, col: usize| start[col] + (row - first[col]);
+        for j in 0..size {
+            for i in first[j]..j {
+                let from = first[i].max(first[j]);
+                let mut sum = sky[at(i, j)];
+                for m in from..i {
+                    sum -= sky[at(m, i)] * sky[at(m, j)];
+                }
+                sky[at(i, j)] = sum / sky[at(i, i)];
+            }
+            let mut pivot = sky[at(j, j)];
+            for m in first[j]..j {
+                pivot -= sky[at(m, j)] * sky[at(m, j)];
+            }
+            if !(pivot.is_finite() && pivot > 0.0) {
+                return false;
+            }
+            sky[at(j, j)] = pivot.sqrt();
+        }
+        for j in 0..size {
+            let mut sum = rhs[j];
+            for m in first[j]..j {
+                sum -= sky[at(m, j)] * rhs[m];
+            }
+            rhs[j] = sum / sky[at(j, j)];
+        }
+        for j in (0..size).rev() {
+            rhs[j] /= sky[at(j, j)];
+            let value = rhs[j];
+            for m in first[j]..j {
+                rhs[m] -= sky[at(m, j)] * value;
+            }
+        }
+        true
+    }
+
+    /// A deterministic diagonally dominant skyline matrix of `size` columns
+    /// and column height up to `height`.
+    fn skyline(size: usize, height: usize) -> (Vec<usize>, Vec<usize>, Vec<f64>, Vec<f64>) {
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut bits = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            u32::try_from(state >> 32).unwrap()
+        };
+        let unit = |value: u32| f64::from(value) / 4_294_967_296.0;
+        let first: Vec<usize> = (0..size)
+            .map(|j| j.saturating_sub(usize::try_from(bits()).unwrap() % height))
+            .collect();
+        // Any envelope is a valid profile: the factor's fill stays inside it.
+        let mut start = vec![0_usize; size + 1];
+        for j in 0..size {
+            start[j + 1] = start[j] + (j - first[j] + 1);
+        }
+        let mut sky = vec![0.0_f64; start[size]];
+        for j in 0..size {
+            for row in first[j]..j {
+                sky[start[j] + (row - first[j])] = unit(bits()) - 0.5;
+            }
+            sky[start[j] + (j - first[j])] =
+                4.0 * f64::from(u32::try_from(height).unwrap()) + 1.0 + unit(bits());
+        }
+        let rhs: Vec<f64> = (0..size).map(|_| unit(bits()) - 0.5).collect();
+        (first, start, sky, rhs)
+    }
+
+    /// (d): the sliced factor and substitution give the entrywise ones to the
+    /// last bit.
+    #[test]
+    fn the_sliced_factor_is_the_entrywise_factor_to_the_last_bit() {
+        for (size, height) in [(30, 6), (400, 60), (1500, 200)] {
+            let (first, start, sky, rhs) = skyline(size, height);
+            let diagonal: Vec<f64> = (0..size).map(|j| sky[start[j] + (j - first[j])]).collect();
+            let (mut a, mut x) = (sky.clone(), rhs.clone());
+            let (mut b, mut y) = (sky, rhs);
+            assert!(entrywise_solve(&first, &start, &mut a, &mut x));
+            assert!(super::factor(&first, &start, &mut b, &diagonal));
+            super::substitute(&first, &start, &b, &mut y);
+            let bits = |v: &[f64]| v.iter().map(|value| value.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&a), bits(&b), "factor, size {size}");
+            assert_eq!(bits(&x), bits(&y), "solution, size {size}");
+        }
+    }
+
+    /// Timing for the gate on (d) (kept only at >= 10 % gain): run with
+    /// `--ignored --nocapture` under `--release`.
+    #[test]
+    #[ignore = "timing only"]
+    fn time_the_sliced_factor_against_the_entrywise_one() {
+        let (first, start, sky, rhs) = skyline(6000, 400);
+        let diagonal: Vec<f64> = (0..6000).map(|j| sky[start[j] + (j - first[j])]).collect();
+        let best = |run: &dyn Fn() -> f64| (0..5).map(|_| run()).fold(f64::INFINITY, f64::min);
+        let old = best(&|| {
+            let (mut a, mut x) = (sky.clone(), rhs.clone());
+            let began = std::time::Instant::now();
+            assert!(entrywise_solve(&first, &start, &mut a, &mut x));
+            std::hint::black_box(&x);
+            began.elapsed().as_secs_f64()
+        });
+        let new = best(&|| {
+            let (mut b, mut y) = (sky.clone(), rhs.clone());
+            let began = std::time::Instant::now();
+            assert!(super::factor(&first, &start, &mut b, &diagonal));
+            super::substitute(&first, &start, &b, &mut y);
+            std::hint::black_box(&y);
+            began.elapsed().as_secs_f64()
+        });
+        println!("entrywise {old:.4} s, sliced {new:.4} s, gain {:.1} %", 100.0 * (old - new) / old);
+    }
+
+    /// The memory a solve needs is read from the integer plan: a loaded
+    /// cantilever has a skyline, the same cantilever with no load has none.
+    #[test]
+    fn the_skyline_size_counts_loaded_pieces_only() {
+        let mut frame = Frame::new();
+        let mut previous = frame.node([0.0, 0.0, 0.0], true);
+        for step in 1..=5 {
+            let node = frame.node([0.0, 0.0, f64::from(step)], false);
+            frame.member(previous, node, 0.3);
+            previous = node;
+        }
+        assert_eq!(frame.skyline_entries(&[]), 0);
+        let loaded = frame.skyline_entries(&[(previous, [1.0, 0.0, 0.0])]);
+        // 5 free nodes, 6 dofs each, numbered tip first; a chain couples each
+        // node to the one below it, so column heights are 1..=6 for the first
+        // node and 7..=12 for each next (the free node below, then its own).
+        let mut sky = 0;
+        for j in 0..30_usize {
+            let top = if j < 6 { 0 } else { (j / 6 - 1) * 6 };
+            sky += j - top + 1;
+        }
+        assert_eq!(loaded, sky);
     }
 
     /// Nodes within the merge tolerance are one node.

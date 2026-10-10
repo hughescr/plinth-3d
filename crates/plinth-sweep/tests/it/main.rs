@@ -67,6 +67,7 @@ mod seat_face;
 mod shaft_landing;
 mod shaft_seat_trim;
 mod slenderness_lane;
+mod stage_shake_diagnostic;
 mod tapered_load_steps;
 mod tip_contact_scar;
 mod tip_seating;
