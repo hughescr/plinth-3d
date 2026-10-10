@@ -148,6 +148,7 @@
 //! carry says nothing about where anything will land or carry. A prefilter
 //! row therefore carries a stated absence, not a zero.
 
+use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
 use plinth_core::{m0_constants, LayerPlan};
@@ -156,7 +157,10 @@ use plinth_orient::demand::{DemandFidelity, MeasuredSupportDemand, SupportDemand
 use plinth_orient::{ObjectiveWeights, OrientFaceTable, UpDirection};
 use rayon::prelude::*;
 
-use crate::{model_landing, run_sweep, tip_landing, StrutKind, SweepPolicy};
+use crate::{
+    complete_for_emission, model_landing, perf, run_sweep, run_sweep_with_holes, tip_landing,
+    DrainSpec, StrutKind, SweepPlan, SweepPolicy,
+};
 
 /// See the module doc's "Two rasters" section.
 const DEMAND_PITCH_MULTIPLIER: f64 = 10.0;
@@ -251,13 +255,22 @@ struct DemandSettings {
     /// number rather than a second read of it.
     down_limit: f64,
     policy: SweepPolicy,
+    /// `Some` when this batch keeps its plans for emission
+    /// ([`RetainingSweepDemand`], production fidelity only): the policy those
+    /// plans are swept under, [`production_measurement_policy`] of the
+    /// registered one. `None` everywhere else.
+    retained_policy: Option<SweepPolicy>,
 }
 
 impl DemandSettings {
-    fn read(fidelity: DemandFidelity) -> Result<Self, String> {
+    fn read(fidelity: DemandFidelity, retain: bool) -> Result<Self, String> {
         let constants = m0_constants().map_err(|error| error.to_string())?;
         let policy = SweepPolicy::from_registry().map_err(|error| error.to_string())?;
         let weights = ObjectiveWeights::registered().map_err(|error| error.to_string())?;
+        // The registered policy as the emitted field is swept under, before any
+        // demand-only switch below: the retained plans' policy is built from it.
+        let retained_policy = (retain && matches!(fidelity, DemandFidelity::Production))
+            .then(|| production_measurement_policy(policy));
         let policy = match fidelity {
             DemandFidelity::Prefilter => {
                 let coarse_pitch = policy.working_pitch_mm * DEMAND_PITCH_MULTIPLIER;
@@ -317,7 +330,190 @@ impl DemandSettings {
                 .get(),
             down_limit: weights.down_limit(),
             policy,
+            retained_policy,
         })
+    }
+}
+
+/// The policy a RETAINED production measurement is swept under: the emitted
+/// policy with the shake check deferred ([`SweepPolicy::stage_shake_capture`]),
+/// and nothing else changed. So the frame ledger and the rigid-share diagnostic
+/// run as they do on the emitted field, and the retained plan is the plan the
+/// seal would compute. None of the three moves a strut (`tests/it/frame_ledger.rs`;
+/// the rigid share and the shake only read the field), which is why the
+/// measured scalars and the ranking do not change.
+#[must_use]
+pub const fn production_measurement_policy(emitted: SweepPolicy) -> SweepPolicy {
+    SweepPolicy {
+        stage_shake_capture: true,
+        ..emitted
+    }
+}
+
+/// A production measurement of one finalist pose, kept whole.
+#[derive(Clone, Debug)]
+pub struct RetainedPlan {
+    /// The candidate direction this plan was measured for.
+    pub up: UpDirection,
+    /// The oriented mesh the sweep ran on. The reuse key compares its bits.
+    pub mesh: Mesh,
+    /// The layer plan the sweep ran under.
+    pub layers: LayerPlan,
+    /// The policy the sweep ran under ([`production_measurement_policy`]).
+    pub policy: SweepPolicy,
+    /// The plan, its shake check still deferred.
+    pub plan: SweepPlan,
+    /// Wall seconds of the sweep. Evidence only; it is in no digest.
+    pub sweep_seconds: f64,
+}
+
+/// Why a retained plan was not reused. The first failing check in key order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReuseMiss {
+    /// Reuse is switched off for this run (`--no-cache`).
+    Disabled,
+    /// The orientation search kept no plan for the pose that won: the winner
+    /// is not a production finalist, or the run did not search.
+    NotRetained,
+    /// The emitted mesh is not bit-equal to the measured one (a drilled shell,
+    /// or a legacy pose whose committed rotation differs by ulps).
+    MeshDiffers,
+    /// The emitted layer plan is not bit-equal to the measured one.
+    LayersDiffer,
+    /// The emitted sweep policy differs from the measured one.
+    PolicyDiffers,
+    /// The emitted sweep has drains or vents; the measurement had none.
+    HolesPresent,
+}
+
+/// The reuse key: `None` when the retained plan is exactly what a fresh
+/// `run_sweep_with_holes(mesh, layers, emitted, drains, vents)` would compute
+/// (up to the deferred shake check), else the first thing that differs.
+///
+/// Key order: the mesh bit for bit; the layer plan bit for bit; the whole
+/// policy; no holes.
+#[must_use]
+pub fn reuse_miss(
+    retained: &RetainedPlan,
+    mesh: &Mesh,
+    layers: &LayerPlan,
+    emitted: &SweepPolicy,
+    drains: &[DrainSpec],
+    vents: &[DrainSpec],
+) -> Option<ReuseMiss> {
+    if !meshes_bit_equal(&retained.mesh, mesh) {
+        return Some(ReuseMiss::MeshDiffers);
+    }
+    if !layers_bit_equal(&retained.layers, layers) {
+        return Some(ReuseMiss::LayersDiffer);
+    }
+    if retained.policy != production_measurement_policy(*emitted) {
+        return Some(ReuseMiss::PolicyDiffers);
+    }
+    if !drains.is_empty() || !vents.is_empty() {
+        return Some(ReuseMiss::HolesPresent);
+    }
+    None
+}
+
+/// Reuse a retained plan for emission: on a hit, a copy of the plan with its
+/// shake check run, else the reason it missed. Counts `cache.winner_plan.hit`
+/// or `.miss`.
+///
+/// # Errors
+///
+/// A [`ReuseMiss`] when the key does not match; the caller then plans the field
+/// as it always did.
+pub fn reuse_for(
+    retained: &RetainedPlan,
+    mesh: &Mesh,
+    layers: &LayerPlan,
+    emitted: &SweepPolicy,
+    drains: &[DrainSpec],
+    vents: &[DrainSpec],
+) -> Result<SweepPlan, ReuseMiss> {
+    if let Some(miss) = reuse_miss(retained, mesh, layers, emitted, drains, vents) {
+        perf::add(perf::Work::CacheWinnerPlanMiss, 1);
+        return Err(miss);
+    }
+    perf::add(perf::Work::CacheWinnerPlanHit, 1);
+    let mut plan = retained.plan.clone();
+    complete_for_emission(&mut plan);
+    Ok(plan)
+}
+
+fn meshes_bit_equal(left: &Mesh, right: &Mesh) -> bool {
+    left.verts().len() == right.verts().len()
+        && left.verts().iter().zip(right.verts()).all(|(a, b)| {
+            a[0].to_bits() == b[0].to_bits()
+                && a[1].to_bits() == b[1].to_bits()
+                && a[2].to_bits() == b[2].to_bits()
+        })
+        && left.tris() == right.tris()
+        && left.weld_policy() == right.weld_policy()
+}
+
+fn layers_bit_equal(left: &LayerPlan, right: &LayerPlan) -> bool {
+    left.z0_mm().to_bits() == right.z0_mm().to_bits()
+        && left.heights_mm().len() == right.heights_mm().len()
+        && left
+            .heights_mm()
+            .iter()
+            .zip(right.heights_mm())
+            .all(|(a, b)| a.to_bits() == b.to_bits())
+}
+
+/// [`SweepDemand`] that also KEEPS the production plan of every finalist, so
+/// the pipeline can emit the winner's plan instead of sweeping it again.
+///
+/// It measures exactly as [`SweepDemand::production`] does (same pose, same
+/// layers, same registry read, same scars) and returns the same numbers; the
+/// only difference is that the production sweep runs under
+/// [`production_measurement_policy`] and the plan is stored. The prefilter
+/// never retains.
+pub struct RetainingSweepDemand {
+    inner: SweepDemand,
+    retained: Mutex<Vec<RetainedPlan>>,
+}
+
+impl RetainingSweepDemand {
+    /// The production measurer, retaining.
+    #[must_use]
+    pub const fn production() -> Self {
+        Self {
+            inner: SweepDemand::production(),
+            retained: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Drain the store: every kept plan, in candidate order.
+    pub fn drain(&self) -> Vec<RetainedPlan> {
+        std::mem::take(&mut *self.retained.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Drain the store and return the first plan whose mesh is bit-equal to
+    /// `oriented` (the mesh the search committed). Every other plan is dropped.
+    /// At most one finalist can match: the grid de-duplicates directions.
+    pub fn take_winner(&self, oriented: &Mesh) -> Option<RetainedPlan> {
+        self.drain()
+            .into_iter()
+            .find(|retained| meshes_bit_equal(&retained.mesh, oriented))
+    }
+
+    /// **Sabotage only** (`WinnerPlanReuse::SabotageOtherPose`): drain the
+    /// store and return the first plan that is NOT the winner's, relabelled
+    /// with `oriented` as its mesh so the reuse key passes. The emitted field
+    /// is then another pose's field, and the byte-identity checks must go red.
+    /// `None` when the search kept no other pose.
+    #[doc(hidden)]
+    pub fn take_other_pose_relabelled(&self, oriented: &Mesh) -> Option<RetainedPlan> {
+        self.drain()
+            .into_iter()
+            .find(|retained| !meshes_bit_equal(&retained.mesh, oriented))
+            .map(|mut retained| {
+                retained.mesh = oriented.clone();
+                retained
+            })
     }
 }
 
@@ -332,7 +528,7 @@ impl SweepDemand {
         settings: &DemandSettings,
         landing_scar: ModelLandingScarPolicy,
         tip_scar: TipContactScarPolicy,
-    ) -> Result<MeasuredSupportDemand, String> {
+    ) -> Result<(MeasuredSupportDemand, Option<RetainedPlan>), String> {
         // Oriented exactly as the eventual winner would be
         // (`plinth_orient::oriented_recentered_mesh` is the same
         // `transform_for`/`transform_mesh` pair `search_and_orient` applies
@@ -363,8 +559,17 @@ impl SweepDemand {
         let layers = LayerPlan::new(plate_z, vec![layer_height_mm; layer_count])
             .map_err(|error| error.to_string())?;
 
-        let plan =
-            run_sweep(&transformed, &layers, &settings.policy).map_err(|error| error.to_string())?;
+        // A RETAINED measurement sweeps under the emitted policy (shake check
+        // deferred) so the plan can be emitted as it is; every other
+        // measurement is the pricing sweep, which skips the rigid-share
+        // diagnostic and the frame ledger.
+        let started = Instant::now();
+        let plan = match &settings.retained_policy {
+            Some(policy) => run_sweep_with_holes(&transformed, &layers, policy, &[], &[]),
+            None => run_sweep(&transformed, &layers, &settings.policy),
+        }
+        .map_err(|error| error.to_string())?;
+        let sweep_seconds = started.elapsed().as_secs_f64();
 
         // The model-landing scar, on the PRODUCTION raster only. Two reasons
         // it is not measured at `Prefilter`: the coarse raster's arms are not
@@ -426,7 +631,7 @@ impl SweepDemand {
             .iter()
             .filter(|strut| strut.kind == StrutKind::Mast)
             .count();
-        Ok(MeasuredSupportDemand {
+        let measured = MeasuredSupportDemand {
             support_area_cm2: burden_cm2(arm_count, settings.tip_radius_mm),
             struts: arm_count,
             braces: brace_count,
@@ -440,7 +645,81 @@ impl SweepDemand {
             landing_scar_raw_mm2: landing.as_ref().map(|scar| scar.raw_mm2),
             tip_scar_raw_mm2: tip.as_ref().map(|scar| scar.raw_mm2),
             fidelity,
-        })
+        };
+        let retained = settings.retained_policy.map(|policy| RetainedPlan {
+            up: candidate,
+            mesh: transformed,
+            layers,
+            policy,
+            plan,
+            sweep_seconds,
+        });
+        Ok((measured, retained))
+    }
+
+    /// One batch of measurements. `retain` keeps the production plans (see
+    /// [`RetainingSweepDemand`]); the numbers returned are the same either way.
+    /// The plans come back in candidate order, one per measured pose.
+    fn measure_batch(
+        mesh: &Mesh,
+        table: &OrientFaceTable,
+        candidates: &[UpDirection],
+        fidelity: DemandFidelity,
+        retain: bool,
+        landing_scar: ModelLandingScarPolicy,
+        tip_scar: TipContactScarPolicy,
+    ) -> (Vec<Result<MeasuredSupportDemand, String>>, Vec<RetainedPlan>) {
+        let started = Instant::now();
+        let settings = match DemandSettings::read(fidelity, retain) {
+            Ok(settings) => settings,
+            // Emit and warn: one named failure per candidate, so the caller
+            // keeps its proxy for all of them rather than the search refusing.
+            Err(error) => {
+                return (
+                    candidates.iter().map(|_| Err(error.clone())).collect(),
+                    Vec::new(),
+                )
+            }
+        };
+        // The registry was already read ONCE above into `settings`; every
+        // candidate in the batch shares that one read rather than a per-pose
+        // registry call. Each pose's own sweep (`measure_one`) allocates its
+        // own scratch and touches no state shared with any other pose, so the
+        // batch is embarrassingly parallel: `into_par_iter` is index-parallel
+        // and `collect` on a slice-backed rayon iterator preserves the
+        // original candidate order, so the result vector lines up with
+        // `candidates` exactly as the serial `.map` did (proved bit-identical
+        // to the serial path by
+        // `plinth-sweep/tests/orient_demand_parallel.rs`).
+        let raw: Vec<Result<(MeasuredSupportDemand, Option<RetainedPlan>), String>> = candidates
+            .par_iter()
+            .map(|candidate| {
+                Self::measure_one(
+                    mesh,
+                    table,
+                    *candidate,
+                    fidelity,
+                    &settings,
+                    landing_scar,
+                    tip_scar,
+                )
+            })
+            .collect();
+        // Split serially, in candidate order, so the kept plans have a fixed
+        // order whatever thread finished first.
+        let mut measured = Vec::with_capacity(raw.len());
+        let mut retained = Vec::new();
+        for result in raw {
+            match result {
+                Ok((one, plan)) => {
+                    measured.push(Ok(one));
+                    retained.extend(plan);
+                }
+                Err(error) => measured.push(Err(error)),
+            }
+        }
+        Self::log_batch(candidates, &measured, fidelity, started);
+        (measured, retained)
     }
 }
 
@@ -460,44 +739,61 @@ impl SupportDemandMeasurer for SweepDemand {
         candidates: &[UpDirection],
         fidelity: DemandFidelity,
     ) -> Vec<Result<MeasuredSupportDemand, String>> {
-        let started = Instant::now();
-        let settings = match DemandSettings::read(fidelity) {
-            Ok(settings) => settings,
-            // Emit and warn: one named failure per candidate, so the caller
-            // keeps its proxy for all of them rather than the search refusing.
-            Err(error) => return candidates.iter().map(|_| Err(error.clone())).collect(),
-        };
-        // The registry was already read ONCE above into `settings`; every
-        // candidate in the batch shares that one read rather than a per-pose
-        // registry call. Each pose's own sweep (`measure_one`) allocates its
-        // own scratch and touches no state shared with any other pose, so the
-        // batch is embarrassingly parallel: `into_par_iter` is index-parallel
-        // and `collect` on a slice-backed rayon iterator preserves the
-        // original candidate order, so the result vector lines up with
-        // `candidates` exactly as the serial `.map` did (proved bit-identical
-        // to the serial path by
-        // `plinth-sweep/tests/orient_demand_parallel.rs`).
-        let measured: Vec<Result<MeasuredSupportDemand, String>> = candidates
-            .par_iter()
-            .map(|candidate| {
-                Self::measure_one(
-                    mesh,
-                    table,
-                    *candidate,
-                    fidelity,
-                    &settings,
-                    self.landing_scar,
-                    self.tip_scar,
-                )
-            })
-            .collect();
+        Self::measure_batch(
+            mesh,
+            table,
+            candidates,
+            fidelity,
+            false,
+            self.landing_scar,
+            self.tip_scar,
+        )
+        .0
+    }
+}
+
+impl SupportDemandMeasurer for RetainingSweepDemand {
+    fn measure_support_demand(
+        &self,
+        mesh: &Mesh,
+        table: &OrientFaceTable,
+        candidates: &[UpDirection],
+        fidelity: DemandFidelity,
+    ) -> Vec<Result<MeasuredSupportDemand, String>> {
+        let retain = matches!(fidelity, DemandFidelity::Production);
+        let (measured, retained) = SweepDemand::measure_batch(
+            mesh,
+            table,
+            candidates,
+            fidelity,
+            retain,
+            self.inner.landing_scar,
+            self.inner.tip_scar,
+        );
+        // A production batch REPLACES what the previous one left; the
+        // prefilter keeps nothing and so leaves the store alone.
+        if retain {
+            *self.retained.lock().unwrap_or_else(PoisonError::into_inner) = retained;
+        }
+        measured
+    }
+}
+
+impl SweepDemand {
+    /// The one-line disclosure of a batch.
+    fn log_batch(
+        candidates: &[UpDirection],
+        measured: &[Result<MeasuredSupportDemand, String>],
+        fidelity: DemandFidelity,
+        started: Instant,
+    ) {
         // Disclosure, not a record: the cost of this stage is printed where a
         // reader of the run log will see it, and is deliberately kept OUT of
         // the sealed `DenseSweepRecord`, whose digest must not depend on a
         // clock.
         let poses: Vec<String> = candidates
             .iter()
-            .zip(&measured)
+            .zip(measured)
             .map(|(candidate, result)| {
                 let up = candidate.get();
                 let (arms, stiffening, burden, landing, tip) = match result {
@@ -547,7 +843,6 @@ impl SupportDemandMeasurer for SweepDemand {
             started.elapsed().as_secs_f64(),
             poses.join("; "),
         );
-        measured
     }
 }
 

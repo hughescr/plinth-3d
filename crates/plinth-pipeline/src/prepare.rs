@@ -788,6 +788,10 @@ pub struct ChainOutcome {
     /// missing model surface and the unbraced runs over their limit. Default
     /// (nothing to warn about) on a path that ran no sweep.
     pub sweep_warnings: crate::SweepModelWarnings,
+    /// Where the emitted sweep plan came from (`None` on a path that ran no
+    /// sweep). In memory only, for tests and the log; see
+    /// [`crate::SweepPlanSourceNote`].
+    pub sweep_plan_source: Option<SweepPlanSource>,
     pub primitive_count: usize,
     pub lift_mm: f64,
     pub plate_z_mm: f64,
@@ -808,6 +812,32 @@ pub struct StagePolicy {
     pub hollow: HollowRequest,
     pub support: SupportRequest,
     pub resources: PrepareResourcePolicy,
+    /// Whether the winning pose's production plan, measured by the orientation
+    /// search, may be emitted instead of being planned again.
+    pub winner_plan_reuse: WinnerPlanReuse,
+}
+
+/// Whether the plan the orientation search measured for the winning pose may be
+/// emitted as it is (`r1-winner-reuse`). The retained plan is a cache, so
+/// `--no-cache` ([`crate::PrepareRequest::no_cache`]) switches it off and every
+/// plan is computed in the seal, as before. The bytes are the same either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WinnerPlanReuse {
+    Enabled,
+    Disabled,
+    /// **Sabotage only.** Emit another finalist's plan than the winner's, with
+    /// the reuse key made to pass. The byte-identity checks must go red under it.
+    #[doc(hidden)]
+    SabotageOtherPose,
+}
+
+/// Where an emitted sweep plan came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SweepPlanSource {
+    /// The orientation search's production measurement of this pose.
+    Reused,
+    /// Planned in the seal, because the retained plan could not be used.
+    Planned(plinth_sweep::orient_demand::ReuseMiss),
 }
 
 impl StagePolicy {
@@ -835,6 +865,13 @@ impl StagePolicy {
             hollow: request.hollow.clone(),
             support: request.support.clone(),
             resources,
+            // `--no-cache` is the one cache-bypass control, and the retained
+            // plan is a cache.
+            winner_plan_reuse: if request.no_cache {
+                WinnerPlanReuse::Disabled
+            } else {
+                WinnerPlanReuse::Enabled
+            },
         })
     }
 }
@@ -868,13 +905,32 @@ impl StagePolicy {
 /// - [`PipelineError::ResourcePolicy`] when the run's stage limits will not
 ///   assemble from the ratified authorities.
 pub fn prepare(request: PrepareRequest) -> Result<PrepareReport, PipelineError> {
+    prepare_with_reuse(request, None)
+}
+
+/// [`prepare`] with the winner-plan reuse set by the caller instead of read
+/// from the request's `no_cache`. **For the sabotage test only**
+/// ([`WinnerPlanReuse::SabotageOtherPose`]); every other caller uses
+/// [`prepare`].
+///
+/// # Errors
+///
+/// As [`prepare`].
+#[doc(hidden)]
+pub fn prepare_with_reuse(
+    request: PrepareRequest,
+    reuse: Option<WinnerPlanReuse>,
+) -> Result<PrepareReport, PipelineError> {
     let sources = enumerate_sources(&request.input_models_dir)?;
     std::fs::create_dir_all(&request.output_dir).map_err(|source| PipelineError::OutputFolder {
         path: request.output_dir.clone(),
         source,
     })?;
-    let policy = StagePolicy::for_request(&request)
+    let mut policy = StagePolicy::for_request(&request)
         .map_err(|source| PipelineError::ResourcePolicy { source })?;
+    if let Some(reuse) = reuse {
+        policy.winner_plan_reuse = reuse;
+    }
 
     // **`--no-orient=<list>`, matched once over the whole folder** (owner spec
     // 2026-10-01): which entry names each source, and which entries named no
@@ -1179,12 +1235,14 @@ fn prepare_one(
             plinth_orient::as_drawn::probe_source(source_path)
         }
     };
-    let oriented = match orient_model(
+    let (oriented, winner) = match orient_model(
         model,
         decimated,
         &policy.orientation,
         probe.reason,
         policy.resources.orient(),
+        policy.placement,
+        policy.winner_plan_reuse,
     ) {
         Ok(oriented) => oriented,
         Err(stop) => return report(&repair, assumed, failure(&stop)),
@@ -1218,7 +1276,15 @@ fn prepare_one(
         );
     }
 
-    match run_from_oriented(model, source_faces, oriented, policy, target, stop_after) {
+    match run_from_oriented_reusing(
+        model,
+        source_faces,
+        oriented,
+        policy,
+        target,
+        stop_after,
+        winner.as_ref().map_err(|miss| *miss),
+    ) {
         // The provenance travels with the artifact. Two of the four
         // `SupportedGeometry` values mean "the chain could not use the geometry
         // it planned and substituted another", and a report that dropped them
@@ -1372,20 +1438,36 @@ fn failure(stop: &ChainStop) -> ModelPreparationOutcome {
 /// ANY of the switches makes the model as drawn). That includes a pinned run:
 /// a marked model is not refused for lacking a baseline, because it does not
 /// need one.
+///
+/// **The winner's plan.** Under `DenseSweep` with the sweep engine and reuse
+/// on, the search measures its finalists through a
+/// [`plinth_sweep::orient_demand::RetainingSweepDemand`] and the plan of the
+/// pose that won comes back with the model (`r1-winner-reuse`). `Err` says why
+/// there is none; the seal then plans the field as it always did.
 fn orient_model(
     model: &ModelId,
     decimated: DecimatedModel,
     policy: &OrientationPolicy,
     as_drawn: Option<plinth_orient::as_drawn::AsDrawnReason>,
     limits: plinth_orient::OrientSearchLimits,
-) -> Result<OrientedModel, ChainStop> {
+    placement: crate::Placement,
+    reuse: WinnerPlanReuse,
+) -> Result<(OrientedModel, RetainedWinner), ChainStop> {
+    // Why no plan comes back from the arms that retain nothing.
+    let absent = if reuse == WinnerPlanReuse::Disabled {
+        plinth_sweep::orient_demand::ReuseMiss::Disabled
+    } else {
+        plinth_sweep::orient_demand::ReuseMiss::NotRetained
+    };
     if let Some(reason) = as_drawn {
-        return plinth_orient::orient_as_drawn(decimated, reason).map_err(|source| {
-            ChainStop::new(PipelineError::Orient {
-                model: model.clone(),
-                source,
-            })
-        });
+        return plinth_orient::orient_as_drawn(decimated, reason)
+            .map(|oriented| (oriented, Err(absent)))
+            .map_err(|source| {
+                ChainStop::new(PipelineError::Orient {
+                    model: model.clone(),
+                    source,
+                })
+            });
     }
     match policy {
         // Reached only when the caller did not pass the run-wide reason,
@@ -1395,6 +1477,7 @@ fn orient_model(
             decimated,
             plinth_orient::as_drawn::AsDrawnReason::OrientNone,
         )
+        .map(|oriented| (oriented, Err(absent)))
         .map_err(|source| {
             ChainStop::new(PipelineError::Orient {
                 model: model.clone(),
@@ -1415,13 +1498,32 @@ fn orient_model(
             // orientation stage is shared by both `--placement` engines, so
             // wiring the real sweep-demand measurer here fixes the double-
             // charged-flat-pose defect for legacy and sweep placement alike.
-            let demand = plinth_sweep::SweepDemand::production();
-            plinth_orient::search_and_orient(decimated, &request, Some(&demand)).map_err(|source| {
+            let orient_error = |source| {
                 ChainStop::new(PipelineError::Orient {
                     model: model.clone(),
                     source,
                 })
-            })
+            };
+            // THE WINNER'S PLAN (`r1-winner-reuse`): with the sweep engine and
+            // reuse on, the finalists' production plans are kept, and the one
+            // for the pose that won is handed to the seal, which would
+            // otherwise plan the same field again. The legacy engine never
+            // reads a sweep plan, so it keeps the plain measurer.
+            if placement == crate::Placement::Sweep && reuse != WinnerPlanReuse::Disabled {
+                let demand = plinth_sweep::orient_demand::RetainingSweepDemand::production();
+                let oriented = plinth_orient::search_and_orient(decimated, &request, Some(&demand))
+                    .map_err(orient_error)?;
+                let winner = if reuse == WinnerPlanReuse::SabotageOtherPose {
+                    demand.take_other_pose_relabelled(oriented.mesh())
+                } else {
+                    demand.take_winner(oriented.mesh())
+                };
+                return Ok((oriented, winner.ok_or(plinth_sweep::orient_demand::ReuseMiss::NotRetained)));
+            }
+            let demand = plinth_sweep::SweepDemand::production();
+            plinth_orient::search_and_orient(decimated, &request, Some(&demand))
+                .map(|oriented| (oriented, Err(absent)))
+                .map_err(orient_error)
         }
         OrientationPolicy::Pinned(baselines) => {
             let Some(pinned) = baselines.get(model.as_str()) else {
@@ -1435,6 +1537,7 @@ fn orient_model(
                     pinned: pinned.clone(),
                 },
             )
+            .map(|oriented| (oriented, Err(absent)))
             .map_err(|source| {
                 ChainStop::new(PipelineError::Orient {
                     model: model.clone(),
@@ -1444,6 +1547,10 @@ fn orient_model(
         }
     }
 }
+
+/// The winning pose's production plan, or why there is none.
+type RetainedWinner =
+    Result<plinth_sweep::orient_demand::RetainedPlan, plinth_sweep::orient_demand::ReuseMiss>;
 
 /// Run the whole chain from an oriented model to a written artifact, taking the
 /// real hollow stage and letting the sealed support run decide what it can
@@ -1518,6 +1625,34 @@ pub fn run_from_oriented(
     target: &Path,
     stop_after: Option<StageStop>,
 ) -> Result<Option<ChainOutcome>, ChainStop> {
+    run_from_oriented_reusing(
+        model,
+        source_faces,
+        oriented,
+        policy,
+        target,
+        stop_after,
+        Err(plinth_sweep::orient_demand::ReuseMiss::NotRetained),
+    )
+}
+
+/// [`run_from_oriented`], handed the plan the orientation search measured for
+/// the winning pose (`r1-winner-reuse`). `winner` is `Err(reason)` when there is
+/// none. Each seal below tries it against ITS OWN mesh: a drilled shell misses on
+/// the mesh, and the solid reserve behind it can still hit.
+///
+/// # Errors
+///
+/// As [`run_from_oriented`].
+pub fn run_from_oriented_reusing(
+    model: &ModelId,
+    source_faces: usize,
+    oriented: OrientedModel,
+    policy: &StagePolicy,
+    target: &Path,
+    stop_after: Option<StageStop>,
+    winner: Result<&plinth_sweep::orient_demand::RetainedPlan, plinth_sweep::orient_demand::ReuseMiss>,
+) -> Result<Option<ChainOutcome>, ChainStop> {
     // Hold the oriented solid before the hollow stage consumes it. `OrientedModel`
     // is move-only and exposes no from-parts constructor, so a pre-clone of its two
     // `Clone` halves is the only way a caller can keep a reserve across a hollow
@@ -1578,7 +1713,7 @@ pub fn run_from_oriented(
             if stop_after == Some(StageStop::Hollow) {
                 return Ok(None);
             }
-            return seal_and_emit(
+            return seal_and_emit_reusing(
                 model,
                 source_faces,
                 solid,
@@ -1586,6 +1721,7 @@ pub fn run_from_oriented(
                 policy,
                 target,
                 stop_after,
+                winner,
             );
         }
     };
@@ -1595,7 +1731,7 @@ pub fn run_from_oriented(
             if stop_after == Some(StageStop::Hollow) {
                 return Ok(None);
             }
-            return seal_and_emit(
+            return seal_and_emit_reusing(
                 model,
                 source_faces,
                 *solid,
@@ -1603,6 +1739,7 @@ pub fn run_from_oriented(
                 policy,
                 target,
                 stop_after,
+                winner,
             );
         }
         HollowStageOutput::AwaitingInternalSupport(candidate) => candidate,
@@ -1625,7 +1762,7 @@ pub fn run_from_oriented(
     let drilled = (*candidate).approve_hollow();
     let drilled_faces = drilled.mesh().tris().len();
 
-    match seal_and_emit(
+    match seal_and_emit_reusing(
         model,
         source_faces,
         drilled,
@@ -1633,6 +1770,7 @@ pub fn run_from_oriented(
         policy,
         target,
         stop_after,
+        winner,
     ) {
         Ok(outcome) => Ok(outcome),
         // **Only a support refusal reaches the reserve.** The gate speaks about
@@ -1659,7 +1797,7 @@ pub fn run_from_oriented(
                 reserve_wall,
                 &refused_shell,
             )?;
-            seal_and_emit(
+            seal_and_emit_reusing(
                 model,
                 source_faces,
                 solid,
@@ -1671,6 +1809,7 @@ pub fn run_from_oriented(
                 policy,
                 target,
                 stop_after,
+                winner,
             )
             // The substituted solid failed or was refused in its own right.
             // Without this the report would say only what the *solid* did, and
@@ -1860,14 +1999,6 @@ fn hollow_error_refuses_this_geometry(error: &HollowError) -> bool {
 ///
 /// [`ChainStop`] carrying the typed stage error; a gate stop additionally
 /// carries the gate and the geometry it judged, and leaves no file at `target`.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
-          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
-          or clamped into range after it (read site by site, 2026-08-26). See \
-          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
-)]
 pub fn seal_and_emit(
     model: &ModelId,
     source_faces: usize,
@@ -1876,6 +2007,48 @@ pub fn seal_and_emit(
     policy: &StagePolicy,
     target: &Path,
     stop_after: Option<StageStop>,
+) -> Result<Option<ChainOutcome>, ChainStop> {
+    seal_and_emit_reusing(
+        model,
+        source_faces,
+        hollowed,
+        supported_geometry,
+        policy,
+        target,
+        stop_after,
+        Err(plinth_sweep::orient_demand::ReuseMiss::NotRetained),
+    )
+}
+
+/// [`seal_and_emit`], offered the plan the orientation search measured for the
+/// winning pose (`winner`, `r1-winner-reuse`; `Err(reason)` when there is none).
+/// The sweep path emits it when its reuse key matches this model's mesh, layers
+/// and policy, and plans the field itself otherwise. The legacy engine ignores it.
+///
+/// # Errors
+///
+/// As [`seal_and_emit`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "seal_and_emit's seven arguments and the winner's plan; grouping them would only rename the same facts"
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts on lattice or step arithmetic: Rust's `as` saturates at the integer \
+          bounds and maps NaN to 0, and every site in this function is range-checked before the cast \
+          or clamped into range after it (read site by site, 2026-08-26). See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
+pub fn seal_and_emit_reusing(
+    model: &ModelId,
+    source_faces: usize,
+    hollowed: HollowedModel,
+    supported_geometry: SupportedGeometry,
+    policy: &StagePolicy,
+    target: &Path,
+    stop_after: Option<StageStop>,
+    winner: Result<&plinth_sweep::orient_demand::RetainedPlan, plinth_sweep::orient_demand::ReuseMiss>,
 ) -> Result<Option<ChainOutcome>, ChainStop> {
     let prepared_faces = hollowed.mesh().tris().len();
     let hollow_disposition = hollowed.history().hollow().disposition();
@@ -1975,6 +2148,7 @@ pub fn seal_and_emit(
             },
             target,
             stop_after,
+            winner,
         );
     }
 
@@ -2281,6 +2455,7 @@ pub fn seal_and_emit(
         // uncovered island produces no warning and cannot cry wolf.
         coverage_warning,
         sweep_warnings: crate::SweepModelWarnings::default(),
+        sweep_plan_source: None,
         primitive_count: gated.primitive_count,
         lift_mm: gated.lift_mm,
         plate_z_mm: gated.plate_z_mm,
@@ -2356,6 +2531,7 @@ fn sweep_and_emit(
     hollow: HollowCarryOut,
     target: &Path,
     stop_after: Option<StageStop>,
+    winner: Result<&plinth_sweep::orient_demand::RetainedPlan, plinth_sweep::orient_demand::ReuseMiss>,
 ) -> Result<Option<ChainOutcome>, ChainStop> {
     let clock = plinth_support::StageClock::start(format!("model {model}"));
     set_phase(PerfPhase::FinalSweep);
@@ -2442,19 +2618,54 @@ fn sweep_and_emit(
         })
         .unwrap_or_default();
     let started = std::time::Instant::now();
-    let plan = plinth_sweep::run_sweep_with_holes(
-        hollowed.mesh(),
-        &sweep_layers,
-        &policy,
-        &drains,
-        &vents,
-    )
-    .map_err(|source| {
-        ChainStop::new(PipelineError::Sweep {
-            model: model.clone(),
-            source,
-        })
-    })?;
+    // THE WINNER'S PLAN (`r1-winner-reuse`): the orientation search already
+    // swept this pose at production fidelity. When the mesh, the layers, the
+    // policy and the (empty) holes are bit-for-bit those of this sweep, the
+    // retained plan IS the value this sweep would compute, so it is emitted as
+    // it is. Any difference, and the field is planned here as it always was.
+    let reused = match winner {
+        Ok(retained) => plinth_sweep::orient_demand::reuse_for(
+            retained,
+            hollowed.mesh(),
+            &sweep_layers,
+            &policy,
+            &drains,
+            &vents,
+        )
+        .map(|plan| (plan, retained)),
+        Err(miss) => {
+            plinth_sweep::perf::add(plinth_sweep::perf::Work::CacheWinnerPlanMiss, 1);
+            Err(miss)
+        }
+    };
+    let (plan, sweep_plan_source) = match reused {
+        Ok((plan, retained)) => {
+            let up = retained.up.get();
+            println!(
+                "[sweep {model}] placement plan: reused from the orientation search's production \
+                 measurement of pose ({:+.4},{:+.4},{:+.4}), measured in {:.2} s",
+                up[0], up[1], up[2], retained.sweep_seconds,
+            );
+            (plan, SweepPlanSource::Reused)
+        }
+        Err(miss) => {
+            println!("[sweep {model}] placement plan: planned (reason {miss:?})");
+            let plan = plinth_sweep::run_sweep_with_holes(
+                hollowed.mesh(),
+                &sweep_layers,
+                &policy,
+                &drains,
+                &vents,
+            )
+            .map_err(|source| {
+                ChainStop::new(PipelineError::Sweep {
+                    model: model.clone(),
+                    source,
+                })
+            })?;
+            (plan, SweepPlanSource::Planned(miss))
+        }
+    };
     let sweep_seconds = started.elapsed().as_secs_f64();
 
     let frame = plinth_support::BuildFrame::new(
@@ -2633,6 +2844,7 @@ fn sweep_and_emit(
             model_surface_missing: !plan.report.model_surface_built,
             unbraced_over_limit_runs: plan.report.slenderness_lane.warnings.len(),
         },
+        sweep_plan_source: Some(sweep_plan_source),
         primitive_count,
         lift_mm: supported.lift_mm().get(),
         plate_z_mm: supported.plate_z_mm().get(),
@@ -4214,6 +4426,8 @@ fn artifact_outcome(outcome: ChainOutcome) -> ModelPreparationOutcome {
         // fix/surface-budget (2026-10-09): the sweep's two model-level
         // warnings reach the SUMMARY line.
         sweep_warnings: outcome.sweep_warnings,
+        // In memory only (`serde(skip)`): where the sweep plan came from.
+        sweep_plan_source: crate::SweepPlanSourceNote(outcome.sweep_plan_source),
     }
 }
 
@@ -4894,6 +5108,7 @@ mod tests {
                 model_surface_missing: true,
                 unbraced_over_limit_runs: 9,
             },
+            sweep_plan_source: None,
             primitive_count: 0,
             lift_mm: 5.0,
             plate_z_mm: 0.0,

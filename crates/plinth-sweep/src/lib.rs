@@ -44,6 +44,7 @@
 pub mod adapter;
 pub mod cavity;
 pub mod congestion;
+pub mod deferred_shake;
 pub(crate) mod demand_replay;
 pub mod down_sweep;
 pub mod drain;
@@ -89,6 +90,7 @@ use geom_kernel::perf::Work as PerfWork;
 
 pub use adapter::{arms_of, to_primitives, LoadStepTaper, SweepEmission};
 pub use congestion::{CongestionCensus, CongestionOutcome, CongestionReport};
+pub use deferred_shake::complete_for_emission;
 pub use drain::{DrainKeepOut, DrainSpec, DrainVerdict, EscapeReport};
 pub use limits::SweepLimits;
 pub use model_landing::{model_landing_scar, model_landings, ModelLanding, ModelLandingScar};
@@ -535,6 +537,10 @@ pub struct SweepPlan {
     /// How the plan's load steps are drawn ([`adapter::LoadStepTaper`]): the
     /// sweep's rules measured this profile, and the lowering draws it.
     pub load_step_taper: adapter::LoadStepTaper,
+    /// The construction-stage shake check, when [`SweepPolicy::stage_shake_capture`]
+    /// deferred it: the snapshot [`complete_for_emission`] runs. `None` on every
+    /// plan that ran the check in the sweep, and on a completed plan.
+    pub deferred_stage_shake: Option<Box<deferred_shake::DeferredStageShake>>,
 }
 
 impl SweepPlan {
@@ -632,7 +638,12 @@ pub enum RemovalCoverage {
 pub const MODEL_SURFACE_MAX_BYTES: u64 = 1 << 30;
 
 /// Everything the sweep reads, gathered once from the registry.
-#[derive(Clone, Copy, Debug)]
+///
+/// `PartialEq` is derived on purpose: the winner-plan reuse key
+/// ([`orient_demand::reuse_for`]) compares whole policies, so a field added
+/// later joins the key by itself and a mismatch fails closed (the plan is
+/// computed again), never into a stale reuse.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SweepPolicy {
     /// `LAMINA_REACH_RATIO`, the placement value.
     pub kappa: f64,
@@ -985,6 +996,18 @@ pub struct SweepPolicy {
     /// because no score reads it (the result reads as "did not run":
     /// `StageShake::default()`).
     pub stage_shake_diagnostic: bool,
+    /// Whether the construction-stage shake check ([`stage_shake`]) is DEFERRED:
+    /// instead of running at the end of the sweep, the sweep stores a snapshot
+    /// of exactly what the check reads ([`deferred_shake::DeferredStageShake`])
+    /// on the plan, and [`complete_for_emission`] runs it later. The numbers are
+    /// the same, since the snapshot is taken on the very line the in-run check
+    /// reads. Off for every emitted field; on only in the orientation search's
+    /// production measurement of the finalists, whose retained plan may be
+    /// emitted (`orient_demand::RetainingSweepDemand`), so the three losers pay
+    /// a copy of a few vectors and only the winner pays the check.
+    /// Capture wins over [`Self::stage_shake_diagnostic`]: with capture on, the
+    /// check never runs in the sweep.
+    pub stage_shake_capture: bool,
     pub limits: SweepLimits,
 }
 
@@ -1084,6 +1107,7 @@ impl SweepPolicy {
             flank_relief_check: true,
             rigid_share_diagnostic: true,
             stage_shake_diagnostic: true,
+            stage_shake_capture: false,
             limits: SweepLimits {
                 cell_layer_budget: placeholders.sweep_cell_layer_budget().diagnostic().get(),
                 ..SweepLimits::production()
@@ -2959,17 +2983,36 @@ pub fn run_sweep_with_holes(
     // R9 + D6 (Craig ruling 2026-10-03): the construction-stage shake check
     // on the finished field, at the stated brace peel pressure. A WARNING
     // only: it reads the field and changes nothing.
-    slenderness_outcome.stage_shake = if policy.stage_shake_diagnostic {
-        stage_shake::check(
+    //
+    // Three cases. DEFERRED when the plan may be emitted later by someone else
+    // (the winner plan the orientation search measured): the snapshot is taken
+    // on this very line, from the very arguments, so `complete_for_emission`
+    // computes the same numbers. Otherwise run now when
+    // `stage_shake_diagnostic` is on, or skipped (the result reads as "did not
+    // run": `StageShake::default()`) when it is off.
+    let deferred_stage_shake = if policy.stage_shake_capture {
+        Some(Box::new(deferred_shake::DeferredStageShake::capture(
             &grid,
             &struts,
-            &finished_profiles,
+            finished_profiles,
             height,
-            &slenderness_law,
+            slenderness_law,
             policy.stage_shake_brace_peel_kpa,
-        )
+        )))
     } else {
-        stage_shake::StageShake::default()
+        slenderness_outcome.stage_shake = if policy.stage_shake_diagnostic {
+            stage_shake::check(
+                &grid,
+                &struts,
+                &finished_profiles,
+                height,
+                &slenderness_law,
+                policy.stage_shake_brace_peel_kpa,
+            )
+        } else {
+            stage_shake::StageShake::default()
+        };
+        None
     };
     slenderness_outcome.longest_run_mm = 0.0;
     slenderness_outcome.longest_run_limit_mm = 0.0;
@@ -3195,6 +3238,7 @@ pub fn run_sweep_with_holes(
         struts,
         report,
         load_step_taper,
+        deferred_stage_shake,
     };
     // THE FOOTPRINT RULE (fix/tip-trim, 2026-09-28): every tip's contact disc,
     // as the lowering will deliver it, graded against the eroded carrier
