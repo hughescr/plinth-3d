@@ -31,3 +31,4 @@ mod prepare_folder;
 mod repair_prepass;
 mod round100_emit;
 mod tip_trim;
+mod winner_plan_reuse;

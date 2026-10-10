@@ -192,11 +192,24 @@ fn print_report(selection: &PrepareSelection, report: &PrepareReport) {
         selection.output_dir.display(),
         plinth_pipeline::OutputProfile::SATURN4_ULTRA_CLI_VALUE,
         selection.wall_mm.get(),
-        match selection.cache {
-            // No cache exists yet. Saying "bypassed" would describe machinery
-            // that is not there; this states what actually happened.
-            CacheMode::Enabled => "no cache implemented (flag absent)",
-            CacheMode::Disabled => "no cache implemented (--no-cache is a no-op)",
+        match (selection.cache, selection.placement) {
+            // No cache persists between runs. The one cache there is lives
+            // inside a run: under `--placement sweep` the plan the orientation
+            // search measured for the winning pose is emitted instead of being
+            // planned again (`r1-winner-reuse`), and `--no-cache` turns that
+            // off. Under the legacy engine nothing is cached, so the flag is
+            // a no-op. Saying "bypassed" would describe machinery that is not
+            // there; this states what actually happened.
+            (CacheMode::Enabled, PlacementSelection::Sweep) => {
+                "in-run winner-plan reuse on, no cache between runs (flag absent)"
+            }
+            (CacheMode::Disabled, PlacementSelection::Sweep) => {
+                "in-run winner-plan reuse off (--no-cache), no cache between runs"
+            }
+            (CacheMode::Enabled, PlacementSelection::Legacy) => "no cache implemented (flag absent)",
+            (CacheMode::Disabled, PlacementSelection::Legacy) => {
+                "no cache implemented (--no-cache is a no-op)"
+            }
         }
     );
 

@@ -491,6 +491,18 @@ pub struct SweepModelWarnings {
     pub unbraced_over_limit_runs: usize,
 }
 
+/// [`prepare::SweepPlanSource`] as an in-memory note on a report: `None` where
+/// no sweep ran. It compares EQUAL to every other note, so a report with the
+/// note equals the same report read back from disk, where it is absent.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SweepPlanSourceNote(pub Option<prepare::SweepPlanSource>);
+
+impl PartialEq for SweepPlanSourceNote {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ModelPreparationOutcome {
@@ -705,6 +717,13 @@ pub enum ModelPreparationOutcome {
         /// stand over their limit. The CLI prints both in the SUMMARY line.
         #[serde(default)]
         sweep_warnings: SweepModelWarnings,
+        /// Where this artifact's sweep plan came from: planned in the seal, or
+        /// reused from the orientation search's production measurement
+        /// (`r1-winner-reuse`). **In memory only**: never written to a report
+        /// (`serde(skip)`) and never compared (see [`SweepPlanSourceNote`]), so
+        /// the records are unchanged. Tests read it to prove the reuse path ran.
+        #[serde(skip)]
+        sweep_plan_source: SweepPlanSourceNote,
     },
     Stopped {
         after: StageStop,
@@ -1992,6 +2011,7 @@ mod tests {
                         load_warnings: None,
                         coverage_warning: None,
                         sweep_warnings: SweepModelWarnings::default(),
+                        sweep_plan_source: SweepPlanSourceNote::default(),
                     },
                 },
                 ModelPreparationReport {
@@ -2093,6 +2113,7 @@ mod tests {
                         load_warnings: None,
                         coverage_warning: None,
                         sweep_warnings: SweepModelWarnings::default(),
+                        sweep_plan_source: SweepPlanSourceNote::default(),
                     },
                 ),
                 model("refused", refused),

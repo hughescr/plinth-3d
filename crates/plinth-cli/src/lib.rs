@@ -31,7 +31,11 @@ pub const PREPARE_USAGE: &str = "Usage: plinth prepare --input-models-dir DIR --
 
 /// Whether this request may use a `plinth-pipeline` cache.
 ///
-/// **No cache exists yet, so `Disabled` changes no computation.** The spelling
+/// **No cache persists between runs. The one cache there is lives inside a run:
+/// under `--placement sweep`, `Disabled` makes the seal plan the winning pose
+/// again instead of emitting the plan the orientation search measured for it
+/// (`r1-winner-reuse`); the emitted bytes are the same either way. Under the
+/// legacy engine `Disabled` changes no computation.** The spelling
 /// is kept anyway, and is not dead surface: `06-conventions.md` § 6 makes
 /// cache-disabled equality CI-mandatory and names *this exact flag* as the one
 /// and only cache-off mechanism — "one spelling, defined here, used verbatim in
