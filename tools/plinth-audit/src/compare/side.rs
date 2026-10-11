@@ -47,6 +47,14 @@ pub struct RecInfo {
     /// Largest distance of an emitted vertex from the header surface, or the
     /// shortfall of the mesh ends against the header ends, whichever is larger.
     pub dev_mm: f64,
+    /// The same without the model's cut taken out (`dev_mm` is what T0 reads; this is for the reader).
+    pub dev_raw_mm: f64,
+    /// `dev_mm` split: the mesh falls short of its header by `dev_in_mm`, reaches past it by
+    /// `dev_out_mm` (both 0 for a record within the one-voxel allowance).
+    pub dev_in_mm: f64,
+    pub dev_out_mm: f64,
+    /// How far the header's rings lie outside the closed mesh (see [`MeshDev::cover`]).
+    pub cover_gap_mm: Option<f64>,
     /// Smallest section radius of the emitted mesh along the record axis
     /// (frusta only).
     pub sec_r: Option<f64>,
@@ -213,6 +221,8 @@ pub struct ModelFacts {
     pub audit: AuditFacts,
     pub heads: HeadFacts,
     pub floating: Vec<Comp>,
+    /// The pixels of all floating components, as a raster (H1 compares floating material voxel by voxel).
+    pub float_r: RunRaster,
     pub thin_joins: usize,
     pub islands: Vec<Island>,
     pub model_bbox: [f64; 6],
@@ -345,6 +355,117 @@ fn mesh_dev(p: &Primitive, rec: &crate::reader::SupportRecord) -> f64 {
         }
     }
     dev
+}
+
+/// [`mesh_dev`] with the model's own cut taken out. A record that ends in the model is trimmed
+/// by it: the emitted mesh stops at the model surface, so the cut vertices lie on that surface
+/// and are not on the header's, and a header end that is inside the model has no mesh end. That
+/// is the model's doing, not a disagreement between the record's mesh and its header, so these
+/// vertices and these ends are left out. Everything else is measured as in [`mesh_dev`]. Only a
+/// record already past the one-voxel allowance is looked at again (the model queries are dear).
+fn mesh_dev_free(p: &Primitive, rec: &crate::reader::SupportRecord, model: &Mesh, raw: f64) -> MeshDev {
+    if !raw.is_finite() || raw <= k::T0_MESH_HEADER_MM {
+        return MeshDev { free: raw, inward: 0.0, outward: 0.0, cover: None };
+    }
+    let on_model = |q: V3| model.nearest_surface(q).is_some_and(|h| h.distance_mm <= k::T0_MODEL_TRIM_MM);
+    let in_model = |q: V3| on_model(q) || model.point_inside(q) == crate::mesh::Inside::Inside;
+    let ag = p.verify_against_soup(rec);
+    // `outward`: the mesh reaches past its header (a bulb). `inward`: it falls short of it.
+    let (mut inward, mut outward) = (0.0f64, ag.bbox_overflow_mm);
+    let (a, b) = (rec.start_mm, rec.end_mm);
+    let len = v::dist(a, b);
+    let frustum = rec.kind.is_frustum() && len > 0.0;
+    let ax = if frustum { v::mul(v::sub(b, a), 1.0 / len) } else { [0.0; 3] };
+    let (mut t0, mut t1) = (f64::MAX, f64::MIN);
+    for i in 0..rec.soup.len() {
+        for j in 0..3 {
+            let q = rec.soup.v(i, j);
+            // A vertex the header surface already agrees with needs no model query.
+            let sd = p.signed_distance(q);
+            let cut = sd.abs() > k::T0_MESH_HEADER_MM && on_model(q);
+            if !cut {
+                // Negative inside: a vertex inside the header surface is a mesh that fell short there.
+                outward = outward.max(sd);
+                inward = inward.max(-sd);
+            }
+            if frustum {
+                let d = v::sub(q, a);
+                let t = v::dot(d, ax);
+                t0 = t0.min(t);
+                t1 = t1.max(t);
+                let rho = v::norm(v::sub(d, v::mul(ax, t)));
+                let r_t = rec.r_start + (rec.r_end - rec.r_start) * (t / len).clamp(0.0, 1.0);
+                if rho > 0.05 * r_t && !cut {
+                    outward = outward.max(rho - r_t);
+                    inward = inward.max(r_t - rho);
+                }
+            }
+        }
+    }
+    if frustum {
+        // A shortfall at an end is the model's when that header end is inside the model.
+        let start_gap = if in_model(a) { 0.0 } else { t0.max(0.0) };
+        let end_gap = if in_model(b) { 0.0 } else { (len - t1).max(0.0) };
+        inward = inward.max(start_gap).max(end_gap);
+        // A mesh that starts before its header end reaches past it.
+        outward = outward.max((-t0).max(0.0)).max((t1 - len).max(0.0));
+    }
+    let free = inward.max(outward);
+    // A junction between members is drawn as the convex hull of the meeting end circles (owner
+    // ruling v18), not as the record's own frustum, so its mesh is not on its header and need
+    // not be. What the header does fix is the material: the mesh must COVER the header. Sample
+    // five rings of the header (both ends and between) and measure how far outside the closed
+    // mesh each point is; a point inside the model is the model's.
+    let mut cover = None;
+    if frustum && rec.kind.is_frustum() {
+        let mesh = Mesh::weld_tolerant(&rec.soup, 1.0e-5);
+        if mesh.closure.is_closed() {
+            let (u, w) = perpendicular_pair(ax);
+            let mut gap = 0.0f64;
+            for ti in 0..=4 {
+                let t = f64::from(ti) / 4.0;
+                let c = v::add(a, v::mul(v::sub(b, a), t));
+                let r = rec.r_start + (rec.r_end - rec.r_start) * t;
+                for s in 0..24 {
+                    let ang = f64::from(s) * std::f64::consts::TAU / 24.0;
+                    let q = v::add(c, v::add(v::mul(u, r * ang.cos()), v::mul(w, r * ang.sin())));
+                    if in_model(q) {
+                        continue;
+                    }
+                    let d = match mesh.point_inside(q) {
+                        crate::mesh::Inside::Inside => 0.0,
+                        _ => mesh.nearest_surface(q).map_or(f64::INFINITY, |h| h.distance_mm),
+                    };
+                    gap = gap.max(d);
+                }
+            }
+            cover = Some(gap);
+        }
+    }
+    MeshDev { free: cover.map_or(free, |c| c.min(free)), inward, outward, cover }
+}
+
+/// Two unit vectors perpendicular to the unit vector `ax` and to each other.
+fn perpendicular_pair(ax: V3) -> (V3, V3) {
+    let helper = if ax[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+    let u = v::normalize(v::cross(ax, helper)).unwrap_or([1.0, 0.0, 0.0]);
+    let w = v::normalize(v::cross(ax, u)).unwrap_or([0.0, 1.0, 0.0]);
+    (u, w)
+}
+
+/// A record's mesh against its header, with the model's cut left out, split by direction.
+#[derive(Clone, Copy, Debug)]
+pub struct MeshDev {
+    /// The larger of the two (what T0 reads).
+    pub free: f64,
+    /// The mesh falls short of its header by this much (material missing).
+    pub inward: f64,
+    /// The mesh reaches past its header by this much (a bulb).
+    pub outward: f64,
+    /// How far the header's own rings lie outside the (closed) mesh: 0 when the mesh covers its
+    /// header, whatever else its shape. `None` for an open mesh or a ball. `free` is the smaller of
+    /// the two readings.
+    pub cover: Option<f64>,
 }
 
 /// Smallest section radius of a frustum record's mesh: the vertices' distance to the header
@@ -599,7 +720,10 @@ fn analyse_model(
             // A record whose header has no solid (zero length) has nothing to compare its mesh
             // with; I8 reports it as GEOM_DEGENERATE and H4 carries that. A record that shipped
             // no triangles at all is infinitely far from its header.
-            let dev_mm = p.as_ref().map_or_else(|_| if r.soup.is_empty() { f64::INFINITY } else { 0.0 }, |p| mesh_dev(p, r));
+            let dev_raw_mm = p.as_ref().map_or_else(|_| if r.soup.is_empty() { f64::INFINITY } else { 0.0 }, |p| mesh_dev(p, r));
+            // The gate reads the deviation with the model's own cut taken out (T0).
+            let md = p.as_ref().map_or(MeshDev { free: dev_raw_mm, inward: 0.0, outward: 0.0, cover: None }, |p| mesh_dev_free(p, r, &ctx.model_mesh, dev_raw_mm));
+            let dev_mm = md.free;
             RecInfo {
                 kind: r.kind,
                 a: r.start_mm,
@@ -609,6 +733,10 @@ fn analyse_model(
                 mid: r.ball_centre().unwrap_or_else(|| v::midpoint(r.start_mm, r.end_mm)),
                 len: r.axis_length_mm(),
                 dev_mm,
+                dev_raw_mm,
+                dev_in_mm: md.inward,
+                dev_out_mm: md.outward,
+                cover_gap_mm: md.cover,
                 sec_r: section_min(r),
             }
         })
@@ -791,6 +919,7 @@ fn analyse_model(
         audit,
         heads,
         floating: gr.floating,
+        float_r: band::raster_of(&grid, gr.float_layers),
         thin_joins: gr.thin_joins,
         islands: isl,
         model_bbox: facts_bbox,

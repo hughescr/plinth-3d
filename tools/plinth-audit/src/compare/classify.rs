@@ -9,7 +9,6 @@ use super::matching::{self, diff_items_with, match_records, match_tips};
 use super::side::{FileFacts, Item, ModelFacts, ModelRaster, RecInfo};
 use super::verdict::{Classes, Row, Status, Verdict};
 use crate::json::Json;
-use crate::reader::RecordKind;
 use crate::vec3::{self as v, V3};
 
 /// How the comparison is run.
@@ -23,11 +22,107 @@ pub struct Options {
     pub require_logs: bool,
     /// The noise allowances (`consts::Noise::measured()` is the gate; `none()` is the strict reading).
     pub noise: k::Noise,
+    /// List every item behind a row, not the first few (the piece-by-piece triage of a verdict).
+    pub full_listing: bool,
+    /// What the lane promises (`--declared`); `bench.sh --declared` is the same word.
+    pub declared: Option<DeclaredClass>,
+    /// Expected changes the lane declares (`--declare-change`), each one a plan change.
+    pub declared_changes: DeclaredChanges,
+}
+
+/// The class a lane promises, in the words of `bench.sh --declared`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeclaredClass {
+    Identical,
+    Equivalent,
+    PlanChanged,
+    MeshChanged,
+}
+
+impl DeclaredClass {
+    /// `IDENTICAL`, `EQUIVALENT`, `PLAN-CHANGED` or `MESH-CHANGED`.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "IDENTICAL" => Self::Identical,
+            "EQUIVALENT" => Self::Equivalent,
+            "PLAN-CHANGED" => Self::PlanChanged,
+            "MESH-CHANGED" => Self::MeshChanged,
+            _ => return None,
+        })
+    }
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Identical => "IDENTICAL",
+            Self::Equivalent => "EQUIVALENT",
+            Self::PlanChanged => "PLAN-CHANGED",
+            Self::MeshChanged => "MESH-CHANGED",
+        }
+    }
+    /// Is a computed verdict within what the lane promised? (`bench.sh` makes the real decision,
+    /// with the exact-byte rule and the classes; this is the same matrix for a direct reader.)
+    #[must_use]
+    pub fn allows(self, v: Verdict) -> bool {
+        match self {
+            Self::Identical => v == Verdict::Identical,
+            Self::Equivalent => matches!(v, Verdict::Identical | Verdict::Equivalent),
+            Self::PlanChanged => matches!(v, Verdict::Identical | Verdict::Equivalent | Verdict::PlanChanged),
+            Self::MeshChanged => v == Verdict::MeshChanged,
+        }
+    }
+}
+
+/// Expected changes a lane declares. Each one widens exactly one row, by the amount the change
+/// explains, and nothing else; an undeclared change of the same kind stays a finding.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DeclaredChanges {
+    /// N2: twin seats are merged (Q2). A reference contact with no match whose ball is overlapped
+    /// by a candidate contact is a merge, not a loss.
+    pub contact_merge: bool,
+}
+
+impl DeclaredChanges {
+    /// Parse one `--declare-change` word.
+    pub fn add(&mut self, word: &str) -> Result<(), String> {
+        match word {
+            "contact-merge" => self.contact_merge = true,
+            other => return Err(format!("unknown declared change {other:?} (known: contact-merge)")),
+        }
+        Ok(())
+    }
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.contact_merge
+    }
+    #[must_use]
+    pub fn names(self) -> Vec<&'static str> {
+        let mut v = Vec::new();
+        if self.contact_merge {
+            v.push("contact-merge");
+        }
+        v
+    }
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { band_voxels: 1, assume_consumer_matched: false, require_logs: false, noise: k::Noise::measured() }
+        Self {
+            band_voxels: 1,
+            assume_consumer_matched: false,
+            require_logs: false,
+            noise: k::Noise::measured(),
+            full_listing: false,
+            declared: None,
+            declared_changes: DeclaredChanges::default(),
+        }
+    }
+}
+
+impl Options {
+    /// How many items of a listing to keep: `n` normally, all of them under `--full-listing`.
+    fn lim(&self, n: usize) -> usize {
+        if self.full_listing { usize::MAX } else { n }
     }
 }
 
@@ -58,6 +153,60 @@ fn nearest_rec(recs: &[RecInfo], p: V3) -> String {
     } else {
         "none".into()
     }
+}
+
+/// The records among `idx` whose axis passes within `margin` mm (plus the record's own radius) of the box.
+fn recs_near_box(recs: &[RecInfo], idx: &[usize], lo: V3, hi: V3, margin: f64) -> Vec<usize> {
+    idx.iter()
+        .copied()
+        .filter(|&i| {
+            let r = &recs[i];
+            let m = margin + r.ra.max(r.rb);
+            let (a, b) = if r.kind.is_ball() { (r.mid, r.mid) } else { (r.a, r.b) };
+            (0..=16).any(|s| {
+                let p = v::add(a, v::mul(v::sub(b, a), f64::from(s) / 16.0));
+                (0..3).all(|d| p[d] >= lo[d] - m && p[d] <= hi[d] + m)
+            })
+        })
+        .collect()
+}
+
+/// `--probe x,y,z,r`: every support record of either file whose axis passes within `r` mm of the
+/// point, with whether the other file has the matching record. For piece-by-piece triage.
+#[must_use]
+pub fn probe(r: &FileFacts, c: &FileFacts, p: V3, radius: f64) -> Vec<String> {
+    let mut out = Vec::new();
+    for mi in 0..r.models.len().min(c.models.len()) {
+        let (a, b) = (&r.models[mi], &c.models[mi]);
+        let m = match_records(&a.recs, &b.recs);
+        let mut cand_hit = vec![None; b.recs.len()];
+        for (i, j) in m.iter().enumerate() {
+            if let Some(j) = j {
+                cand_hit[*j] = Some(i);
+            }
+        }
+        let desc = |x: &RecInfo| {
+            let (s, e) = if x.kind.is_ball() { (x.mid, x.mid) } else { (x.a, x.b) };
+            format!("{} ({:.3},{:.3},{:.3})->({:.3},{:.3},{:.3}) len {:.3} radii {:.3}/{:.3} mesh-dev {:.4}", x.kind.label(), s[0], s[1], s[2], e[0], e[1], e[2], x.len, x.ra, x.rb, x.dev_mm)
+        };
+        // A NaN z (`--probe x,y,any,r`) ignores height: every record whose plan position is near.
+        let flat = p[2].is_nan();
+        let near = |x: &RecInfo| {
+            let (mut s, mut e) = if x.kind.is_ball() { (x.mid, x.mid) } else { (x.a, x.b) };
+            let mut q = p;
+            if flat {
+                (s[2], e[2], q[2]) = (0.0, 0.0, 0.0);
+            }
+            seg_dist(q, s, e) <= radius + x.ra.max(x.rb)
+        };
+        for (i, x) in a.recs.iter().enumerate().filter(|(_, x)| near(x)) {
+            out.push(format!("ref  r{i} {} => {}", desc(x), m[i].map_or("NOT IN CANDIDATE".into(), |j| format!("cand r{j}"))));
+        }
+        for (j, x) in b.recs.iter().enumerate().filter(|(_, x)| near(x)) {
+            out.push(format!("cand r{j} {} => {}", desc(x), cand_hit[j].map_or("NOT IN REFERENCE".into(), |i| format!("ref r{i}"))));
+        }
+    }
+    out
 }
 
 fn seg_dist(p: V3, a: V3, b: V3) -> f64 {
@@ -233,16 +382,16 @@ fn mesh_class(r: &FileFacts, c: &FileFacts, mi: usize, pose_changed: bool, o: &O
 // Tier 0
 // ---------------------------------------------------------------------------
 
-fn trimmed(kind: RecordKind) -> bool {
-    matches!(kind, RecordKind::ContactSphere | RecordKind::ContactTaper)
-}
-
-fn tier0_mesh_header(a: &ModelFacts, b: &ModelFacts, matched: Option<&[Option<usize>]>, sfx: &str, noise: &k::Noise) -> Row {
-    let mut worst_trim_ref = [0.0f64; 2];
+fn tier0_mesh_header(a: &ModelFacts, b: &ModelFacts, matched: Option<&[Option<usize>]>, sfx: &str, noise: &k::Noise, lim: usize) -> Row {
+    // The reference's own worst disagreement of each record kind. A record the reference does not
+    // have (a new junction, a merged member) is held to what the reference itself draws for its
+    // kind (G7: the reference has 145 of 1430 records past one voxel, worst 0.616 mm, from the
+    // junction hulls that the owner's v18 ruling draws instead of frusta), not to zero.
+    let mut worst_ref: std::collections::HashMap<&'static str, f64> = std::collections::HashMap::new();
     for r in &a.recs {
-        if trimmed(r.kind) && r.dev_mm.is_finite() {
-            let ix = usize::from(r.kind == RecordKind::ContactTaper);
-            worst_trim_ref[ix] = worst_trim_ref[ix].max(r.dev_mm);
+        if r.dev_mm.is_finite() {
+            let e = worst_ref.entry(r.kind.label()).or_insert(0.0);
+            *e = e.max(r.dev_mm);
         }
     }
     let mut ref_of_cand: Vec<Option<usize>> = vec![None; b.recs.len()];
@@ -257,14 +406,19 @@ fn tier0_mesh_header(a: &ModelFacts, b: &ModelFacts, matched: Option<&[Option<us
     // Calibration record of `T0_MESH_REL_NOISE`: the reference's own deviation of each flagged record.
     let ref_dev = |j: usize| ref_of_cand[j].map(|i| a.recs[i].dev_mm);
     for (j, rc) in b.recs.iter().enumerate() {
+        // What the reference itself draws for this kind of record: the junction hulls are not on their
+        // headers by the owner's ruling, and a hull changes with the members that meet there.
+        let kind_worst = worst_ref.get(rc.kind.label()).copied().unwrap_or(0.0).max(k::T0_MESH_HEADER_MM) * (1.0 + k::T0_RATE_SLACK) + k::T0_TRIMMED_SLACK_MM;
         let allowed = match ref_of_cand[j] {
             Some(i) => {
                 let rd = a.recs[i].dev_mm;
-                if rd.is_finite() { rd * (1.0 + noise.t0_rel) + k::T0_MESH_HEADER_MM } else { f64::INFINITY }
+                let own = if rd.is_finite() { rd * (1.0 + noise.t0_rel) + k::T0_MESH_HEADER_MM } else { f64::INFINITY };
+                // A record that already disagrees with its header in the reference is a hull: it
+                // may change as far as the reference's hulls go. A record that agreed (a frustum)
+                // gets only its own allowance, so a planted shrink of a good record still fails.
+                if noise.t0_by_ref && rd.is_finite() && rd > k::T0_MESH_HEADER_MM { own.max(kind_worst) } else { own }
             }
-            None if trimmed(rc.kind) => {
-                worst_trim_ref[usize::from(rc.kind == RecordKind::ContactTaper)].max(k::T0_MESH_HEADER_MM) + k::T0_TRIMMED_SLACK_MM
-            }
+            None if noise.t0_by_ref => kind_worst,
             None => k::T0_MESH_HEADER_MM,
         };
         if rc.dev_mm > allowed {
@@ -274,15 +428,35 @@ fn tier0_mesh_header(a: &ModelFacts, b: &ModelFacts, matched: Option<&[Option<us
     bad.sort_by(|x, y| y.0.total_cmp(&x.0));
     let detail: Vec<String> = bad
         .iter()
-        .take(40)
-        .map(|(_, j, d)| format!("r{j} {} mesh is {d:.4} mm from its header at {} (reference record: {})", b.recs[*j].kind.label(), p3(b.recs[*j].mid), ref_dev(*j).map_or("unmatched".into(), |r| format!("{r:.4} mm"))))
+        .take(lim)
+        .map(|(_, j, d)| {
+            let rc = &b.recs[*j];
+            format!("r{j} {} (length {:.3} mm, radii {:.3}/{:.3}) mesh is {d:.4} mm from its header with the model's cut left out ({:.4} mm with it; short of the header by {:.4}, past it by {:.4}; header rings outside the mesh by {}) at {} (reference record: {})", rc.kind.label(), rc.len, rc.ra, rc.rb, rc.dev_raw_mm, rc.dev_in_mm, rc.dev_out_mm, rc.cover_gap_mm.map_or("n/a (open mesh)".into(), |c| format!("{c:.4}")), p3(rc.mid), ref_dev(*j).map_or("unmatched".into(), |r| format!("{r:.4} mm")))
+        })
         .collect();
+    let beyond = |m: &ModelFacts| {
+        let v: Vec<f64> = m.recs.iter().map(|r| r.dev_mm).filter(|d| *d > k::T0_MESH_HEADER_MM).collect();
+        (v.len(), v.iter().copied().fold(0.0, f64::max))
+    };
+    let (rb, cb) = (beyond(a), beyond(b));
+    // The share of records past one voxel may not rise by more than the noise slack: a shift of
+    // the engine's drawing shows here even when each new record is within the reference's worst.
+    let rate_limit = if noise.t0_by_ref && !a.recs.is_empty() {
+        (rb.0 as f64 / a.recs.len() as f64 * b.recs.len() as f64 * (1.0 + k::T0_RATE_SLACK)).ceil() as usize + k::T0_RATE_PLUS
+    } else {
+        usize::MAX
+    };
+    let rate_fail = noise.t0_by_ref && cb.0 > rate_limit;
+    let mut detail = detail;
+    if rate_fail {
+        detail.insert(0, format!("the share of records past one voxel rose: reference {} of {}, candidate {} of {}, limit {rate_limit}", rb.0, a.recs.len(), cb.0, b.recs.len()));
+    }
     Row::new(
         &format!("T0.mesh_header{sfx}"),
         "each record's emitted mesh agrees with its header",
-        status_of(!bad.is_empty(), false),
-        format!("{} of {} records beyond the allowance; worst excess {:.4} mm", bad.len(), b.recs.len(), bad.first().map_or(0.0, |x| x.0)),
-        &format!("mesh within {:.3} mm of the header, or of the reference's matched record (trimmed tips: the reference's own worst)", k::T0_MESH_HEADER_MM),
+        status_of(!bad.is_empty() || rate_fail, false),
+        format!("{} of {} records beyond the allowance; worst excess {:.4} mm (records beyond one voxel at all: reference {} of {}, worst {:.4} mm; candidate {} of {}, worst {:.4} mm)", bad.len(), b.recs.len(), bad.first().map_or(0.0, |x| x.0), rb.0, a.recs.len(), rb.1, cb.0, b.recs.len(), cb.1),
+        &format!("mesh within {:.3} mm of the header, with the model's cut left out; or of the reference's matched record; a new record: the reference's own worst for its kind; the share past one voxel rises by at most {:.0} % plus {} records", k::T0_MESH_HEADER_MM, 100.0 * k::T0_RATE_SLACK, k::T0_RATE_PLUS),
     )
     .with_detail(detail)
 }
@@ -380,7 +554,7 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
         format!("ref {}, cand {}", a.frame_ok, b.frame_ok),
         "no support solid below the plate",
     ));
-    rows.push(tier0_mesh_header(a, b, rec_match.as_deref(), sfx, &o.noise));
+    rows.push(tier0_mesh_header(a, b, rec_match.as_deref(), sfx, &o.noise, o.lim(40)));
     let ras_bad: Vec<String> = [("ref", a), ("cand", b)]
         .iter()
         .flat_map(|(n, m)| {
@@ -450,6 +624,22 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
         ));
     }
 
+    // Records present in one file only (a removed member, a new brace): the places where the design
+    // changed. Noise allowances do not reach an item beside one (matching::Allowance::veto).
+    let (cand_new_recs, ref_lost_recs): (Vec<usize>, Vec<usize>) = rec_match.as_ref().map_or_else(Default::default, |m| {
+        let mut hit = vec![false; b.recs.len()];
+        for j in m.iter().flatten() {
+            hit[*j] = true;
+        }
+        let lost = m.iter().enumerate().filter(|(_, j)| j.is_none()).map(|(i, _)| i).collect();
+        let added = hit.iter().enumerate().filter(|(_, h)| !**h).map(|(j, _)| j).collect();
+        (added, lost)
+    });
+    let disturbed: Vec<(V3, V3)> = {
+        let seg = |r: &RecInfo| if r.kind.is_ball() { (r.mid, r.mid) } else { (r.a, r.b) };
+        ref_lost_recs.iter().map(|&i| seg(&a.recs[i])).chain(cand_new_recs.iter().map(|&j| seg(&b.recs[j]))).collect()
+    };
+
     // ---- H1 floating material ----------------------------------------------
     {
         let name = &a.name;
@@ -460,11 +650,10 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
         let (fail, value, detail) = if !raster_ok {
             (false, "rasters unavailable".to_string(), vec![])
         } else if same_frame {
-            let new: Vec<&band::Comp> = b
-                .floating
-                .iter()
-                .filter(|fb| !a.floating.iter().any(|fa| (fa.k - fb.k).abs() <= 1 && (fa.cx - fb.cx).hypot(fa.cy - fb.cy) < 0.2))
-                .collect();
+            // Floating material of the candidate that is not floating in the reference, voxel by
+            // voxel (3D, within the band): a piece that floats in both files is not new.
+            let (nf, pieces) = band::new_floating(&a.float_r, &b.float_r, &b.m, tol_a.as_ref(), &b.grid, o.band_voxels);
+            let new: Vec<&band::Comp> = nf.iter().map(|x| &x.comp).collect();
             // Flicker: when no material moved beyond the band (the drift is inside the EQUIVALENT
             // limits), a piece that is "newly floating" and made of material the reference already
             // had within the band is connectivity flicker of unchanged material, not new material:
@@ -472,11 +661,41 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
             // make material. A planted float is new material (none of it inside the band); a cut that
             // matters removes enough material to show as drift.
             let drift_small = drift_summary.is_some_and(|(vx, big)| vx <= k::EQ_DRIFT_VOXELS && big < k::EQ_DRIFT_BLOB_VOXELS);
-            let inside = match (&tol_a, drift_small) {
-                (Some(t), true) => band::pixels_inside(&b.u, t, &new, &b.grid),
-                _ => vec![0; new.len()],
-            };
-            let excused: Vec<bool> = new.iter().zip(&inside).map(|(x, &i)| i as f64 >= o.noise.h1_old_fraction * x.px as f64 && drift_small && o.noise.h1_old_fraction > 0.0).collect();
+            let inside: Vec<i64> = if drift_small { nf.iter().map(|x| x.inside).collect() } else { vec![0; new.len()] };
+            {
+                let mut pj = Json::Arr(Vec::new());
+                for p in pieces.iter().filter(|p| p.added > 0).take(200) {
+                    let mut j = Json::obj();
+                    j.set("voxels", Json::int(p.vox));
+                    j.set("new_voxels", Json::int(p.added));
+                    j.set("layers", Json::nums([p.k0 as f64, p.k1 as f64]));
+                    j.set("xy_box_mm", Json::nums(p.bb));
+                    pj.push(j);
+                }
+                ev.set("h1_floating_pieces_with_new_voxels", pj);
+                ev.set("h1_floating_pieces", Json::usize(pieces.len()));
+            }
+            // A piece that floats in both files is not new. A 3D piece of the candidate's floating
+            // material is the reference's piece when at least `H1_PIECE_MATCH_MIN_VOX` of its voxels
+            // lie within the band of the reference's floating material; the voxels beyond the band
+            // are then the piece's growth (its break moved), and they are excused while the growth
+            // stays within max(64 voxels, 10 % of the part it shares with the reference). A piece
+            // that grew more is floating material the reference did not have: it is judged as new.
+            let piece_same: Vec<bool> = pieces
+                .iter()
+                .map(|p| {
+                    let shared = p.vox - p.added;
+                    shared >= k::H1_PIECE_MATCH_MIN_VOX && p.added as f64 <= (k::H1_FLOAT_TOTAL as f64).max(k::H1_GROWTH_FRACTION * shared as f64)
+                })
+                .collect();
+            let in_same_piece = |x: &band::NewFloat| piece_same.get(x.piece).copied().unwrap_or(false);
+            let excused: Vec<bool> = nf
+                .iter()
+                .zip(&inside)
+                .map(|(x, &i)| in_same_piece(x) || (i as f64 >= o.noise.h1_old_fraction * x.comp.px as f64 && drift_small && o.noise.h1_old_fraction > 0.0))
+                .collect();
+            let piece_excused_n = nf.iter().filter(|x| in_same_piece(x)).count();
+            ev.set("h1_pieces_floating_in_both", Json::usize(piece_same.iter().filter(|&&s| s).count()));
             {
                 let mut j = Json::Arr(Vec::new());
                 for ((x, &i), &e) in new.iter().zip(&inside).zip(&excused).filter(|((x, _), _)| x.px >= 8).take(60) {
@@ -493,16 +712,52 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
             let flicker_n = excused.iter().filter(|&&e| e).count();
             let kept: Vec<&band::Comp> = new.iter().zip(&excused).filter(|(_, &e)| !e).map(|(x, _)| *x).collect();
             let new_all = new.len();
+            let all_new: Vec<(&band::Comp, i64, bool)> = new.iter().zip(&inside).zip(&excused).map(|((x, &i), &e)| (*x, i, e)).collect();
             let new = kept;
             let big = new.iter().filter(|x| x.px >= k::H1_FLOAT_PX).count();
             let tot: i64 = new.iter().map(|x| x.px).sum();
-            let det = new
-                .iter()
-                .filter(|x| x.px >= 4)
-                .take(8)
-                .map(|x| format!("new floating k={} {} px at ({:.3},{:.3}) near {}", x.k, x.px, x.cx, x.cy, nearest_rec(&b.recs, [x.cx, x.cy, b.grid.layer_z_mm(x.k)])))
-                .collect();
-            (big > 0 || tot > k::H1_FLOAT_TOTAL, format!("{} new floating components ({} of {} px or more), {tot} new floating voxels; {flicker_n} of {new_all} candidate pieces excused as connectivity flicker of material inside the band; ref {} / cand {} floating overall", new.len(), big, k::H1_FLOAT_PX, a.floating.len(), b.floating.len()), det)
+            let mut det: Vec<String> = if o.full_listing {
+                // Every candidate piece, excused or not, with the nearest reference floating
+                // piece in plan (any layer), so a break that moved can be told from new material.
+                all_new
+                    .iter()
+                    .map(|&(x, i, e)| {
+                        let near_ref = a
+                            .floating
+                            .iter()
+                            .map(|fa| ((fa.cx - x.cx).hypot(fa.cy - x.cy), fa.k - x.k, fa.px))
+                            .min_by(|p, q| p.0.total_cmp(&q.0).then(p.1.abs().cmp(&q.1.abs())))
+                            .map_or("none".to_string(), |(d, dk, px)| format!("{d:.3} mm away, {dk:+} layers, {px} px"));
+                        format!(
+                            "new floating k={} {} px at ({:.3},{:.3}) inside_band_px={i} excused={e} near {} ; nearest reference floating piece: {near_ref}",
+                            x.k, x.px, x.cx, x.cy, nearest_rec(&b.recs, [x.cx, x.cy, b.grid.layer_z_mm(x.k)])
+                        )
+                    })
+                    .collect()
+            } else {
+                new.iter()
+                    .filter(|x| x.px >= 4)
+                    .take(8)
+                    .map(|x| format!("new floating k={} {} px at ({:.3},{:.3}) near {}", x.k, x.px, x.cx, x.cy, nearest_rec(&b.recs, [x.cx, x.cy, b.grid.layer_z_mm(x.k)])))
+                    .collect()
+            };
+            if o.full_listing {
+                for (pi, p) in pieces.iter().enumerate().filter(|(_, p)| p.added > 0) {
+                    let lo = [p.bb[0], p.bb[2], b.grid.layer_z_mm(p.k0)];
+                    let hi = [p.bb[1], p.bb[3], b.grid.layer_z_mm(p.k1)];
+                    let cn = recs_near_box(&b.recs, &cand_new_recs, lo, hi, 0.15);
+                    let rl = recs_near_box(&a.recs, &ref_lost_recs, lo, hi, 0.15);
+                    let nm = |recs: &[RecInfo], v: &[usize]| v.iter().take(6).map(|&i| format!("r{i}:{}", recs[i].kind.label())).collect::<Vec<_>>().join(",");
+                    det.push(format!(
+                        "PIECE layers {}-{} {} voxels ({} model), {} of them new ({} model), {} xy box ({:.3}..{:.3}, {:.3}..{:.3}) near {}; records here that exist in one file only: candidate {} [{}], reference {} [{}]",
+                        p.k0, p.k1, p.vox, p.tagged, p.added, p.added_tagged,
+                        if piece_same[pi] { "SAME-AS-REFERENCE (floats in both, growth small)" } else if p.vox > p.added { "FLOATS-IN-BOTH-BUT-GREW-MORE" } else { "NEW-PIECE" },
+                        p.bb[0], p.bb[1], p.bb[2], p.bb[3], nearest_rec(&b.recs, [p.centroid[0], p.centroid[1], p.centroid[2]]),
+                        cn.len(), nm(&b.recs, &cn), rl.len(), nm(&a.recs, &rl)
+                    ));
+                }
+            }
+            (big > 0 || tot > k::H1_FLOAT_TOTAL, format!("{} new floating components ({} of {} px or more), {tot} new floating voxels; {flicker_n} of {new_all} candidate components excused ({piece_excused_n} of a piece that floats in the reference too and grew little; the rest as connectivity flicker of material inside the band); ref {} / cand {} floating components overall", new.len(), big, k::H1_FLOAT_PX, a.floating.len(), b.floating.len()), det)
         } else {
             let cb = b.floating.iter().filter(|x| x.px >= k::H1_FLOAT_PX).count();
             let rb = a.floating.iter().filter(|x| x.px >= k::H1_FLOAT_PX).count();
@@ -529,18 +784,6 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
     // ---- H4 audit invariants, per matched item ------------------------------------
     let mut h4_rows: Vec<Row> = Vec::new();
     let mut h4_ev: Vec<Json> = Vec::new();
-    // Records present in one file only (a removed member, a new brace): the places where the design
-    // changed. Noise allowances do not reach an item beside one (matching::Allowance::veto).
-    let disturbed: Vec<(V3, V3)> = rec_match.as_ref().map_or_else(Vec::new, |m| {
-        let mut hit = vec![false; b.recs.len()];
-        for j in m.iter().flatten() {
-            hit[*j] = true;
-        }
-        let seg = |r: &RecInfo| if r.kind.is_ball() { (r.mid, r.mid) } else { (r.a, r.b) };
-        let lost = m.iter().enumerate().filter(|(_, j)| j.is_none()).map(|(i, _)| seg(&a.recs[i]));
-        let added = hit.iter().enumerate().filter(|(_, h)| !**h).map(|(j, _)| seg(&b.recs[j]));
-        lost.chain(added).collect()
-    });
     {
         let (aa, ab) = (&a.audit, &b.audit);
         if !aa.ran || !ab.ran {
@@ -574,18 +817,28 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
                         i9_bad.extend(d.worse.iter().filter_map(|&(_, j)| ci[j].anchor));
                     }
                     let mut det: Vec<String> = Vec::new();
-                    for &j in d.new_failing.iter().take(6) {
+                    // Under --full-listing every item says whether the design changed beside it (a
+                    // record in one file only within H4_MATCH_MM): an item where it did not is noise.
+                    let tag = |it: &Item| -> String {
+                        if o.full_listing {
+                            let kind = it.record.and_then(|r| b.recs.get(r)).map_or("-", |r| r.kind.label());
+                            format!(" [record kind {kind}; design changed beside it: {}]", if veto(it) { "yes" } else { "no" })
+                        } else {
+                            String::new()
+                        }
+                    };
+                    for &j in d.new_failing.iter().take(o.lim(6)) {
                         let it = &ci[j];
-                        det.push(format!("NEW {} contact={:?} record={:?} at {}", it.code, it.contact, it.record, it.anchor.map_or("-".into(), p3)));
+                        det.push(format!("NEW {} contact={:?} record={:?} at {}{}", it.code, it.contact, it.record, it.anchor.map_or("-".into(), p3), tag(it)));
                     }
-                    for &(i, j) in d.worse.iter().take(4) {
-                        det.push(format!("WORSE {} {:.5} -> {:.5} at {}", ci[j].code, ri[i].severity, ci[j].severity, ci[j].anchor.map_or("-".into(), p3)));
+                    for &(i, j) in d.worse.iter().take(o.lim(4)) {
+                        det.push(format!("WORSE {} {:.5} -> {:.5} at {}{}", ci[j].code, ri[i].severity, ci[j].severity, ci[j].anchor.map_or("-".into(), p3), tag(&ci[j])));
                     }
-                    for &j in d.lost_evaluation.iter().take(4) {
-                        det.push(format!("CANNOT EVALUATE {} at {}", ci[j].code, ci[j].anchor.map_or("-".into(), p3)));
+                    for &j in d.lost_evaluation.iter().take(o.lim(4)) {
+                        det.push(format!("CANNOT EVALUATE {} at {}{}", ci[j].code, ci[j].anchor.map_or("-".into(), p3), tag(&ci[j])));
                     }
-                    for &(j, kind) in d.absorbed.iter().take(4) {
-                        det.push(format!("FLICKER ({kind}, inside the noise band) {} severity {:.5} at {}", ci[j].code, ci[j].severity, ci[j].anchor.map_or("-".into(), p3)));
+                    for &(j, kind) in d.absorbed.iter().take(o.lim(4)) {
+                        det.push(format!("FLICKER ({kind}, inside the noise band) {} severity {:.5} at {}{}", ci[j].code, ci[j].severity, ci[j].anchor.map_or("-".into(), p3), tag(&ci[j])));
                     }
                     let fail = !d.new_failing.is_empty() || !d.worse.is_empty();
                     h4_rows.push(
@@ -737,8 +990,8 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
         rows.push(Row::new(&format!("N1{sfx}"), "support volume", status_of(n1.abs() > k::N1_FRACTION, false), format!("{:+.2} % ({:.3} -> {:.3} mm3)", 100.0 * n1, sv_a * a.grid.voxel_volume_mm3(), sv_b * b.grid.voxel_volume_mm3()), "within +-5 %"));
         // N2 contacts.
         let matched = match_tips(&a.recs, &a.tips, &b.recs, &b.tips);
-        let frac = if a.tips.is_empty() { 1.0 } else { matched.len() as f64 / a.tips.len() as f64 };
-        let cnt = if a.tips.is_empty() { 0.0 } else { b.tips.len() as f64 / a.tips.len() as f64 - 1.0 };
+        let mut frac = if a.tips.is_empty() { 1.0 } else { matched.len() as f64 / a.tips.len() as f64 };
+        let mut cnt = if a.tips.is_empty() { 0.0 } else { b.tips.len() as f64 / a.tips.len() as f64 - 1.0 };
         let mut det = Vec::new();
         let mut matched_r = std::collections::HashSet::new();
         let mut matched_c = std::collections::HashSet::new();
@@ -749,21 +1002,70 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
             max_d = max_d.max(d);
             max_dr = max_dr.max((b.recs[j].ra / a.recs[i].ra - 1.0).abs());
         }
-        for &i in a.tips.iter().filter(|i| !matched_r.contains(i)).take(6) {
-            det.push(format!("LOST contact r{i} at {} r={:.3} layer {}", p3(a.recs[i].mid), a.recs[i].ra, a.grid.layer_at_or_below(a.recs[i].mid[2])));
+        // Nearest contact of the other file, for the reader: a lost contact with a survivor close by
+        // is a merge; one with none is a loss.
+        let nearest_tip = |recs: &[RecInfo], tips: &[usize], p: V3| -> String {
+            tips.iter()
+                .map(|&t| (v::dist(recs[t].mid, p), t))
+                .min_by(|x, y| x.0.total_cmp(&y.0))
+                .map_or("none".into(), |(d, t)| format!("nearest contact of the other file r{t} {d:.3} mm away, r={:.3}", recs[t].ra))
+        };
+        for &i in a.tips.iter().filter(|i| !matched_r.contains(i)).take(o.lim(6)) {
+            det.push(format!("LOST contact r{i} at {} r={:.3} layer {}; {}", p3(a.recs[i].mid), a.recs[i].ra, a.grid.layer_at_or_below(a.recs[i].mid[2]), nearest_tip(&b.recs, &b.tips, a.recs[i].mid)));
         }
-        for &j in b.tips.iter().filter(|j| !matched_c.contains(j)).take(6) {
-            det.push(format!("NEW contact r{j} at {} r={:.3} layer {}", p3(b.recs[j].mid), b.recs[j].ra, b.grid.layer_at_or_below(b.recs[j].mid[2])));
+        for &j in b.tips.iter().filter(|j| !matched_c.contains(j)).take(o.lim(6)) {
+            det.push(format!("NEW contact r{j} at {} r={:.3} layer {}; {}", p3(b.recs[j].mid), b.recs[j].ra, b.grid.layer_at_or_below(b.recs[j].mid[2]), nearest_tip(&a.recs, &a.tips, b.recs[j].mid)));
         }
         let lost = a.tips.len() - matched.len();
         let newc = b.tips.len() - matched.len();
+        // DECLARED CONTACT MERGE (`--declare-change contact-merge`, a lane that merges twin seats).
+        // A reference contact with no match at 0.1 mm is a merge when a candidate contact's ball
+        // overlaps its ball: that is the twin rule itself (a seat whose tip ball overlaps the ball
+        // of an arm already seated in its column is raised into that arm). A candidate contact with
+        // no match is the survivor of a merge when a reference contact's ball overlaps it. Only the
+        // contacts that are NOT explained this way count against N2: the count may not move by more
+        // than 5 % of the reference's, and not more than 5 % of the reference contacts may be lost
+        // with no survivor. A contact lost with no survivor beside it stays a finding.
+        let mut merge_note = String::new();
+        if o.declared_changes.contact_merge && !a.tips.is_empty() {
+            let ha = matching::Hash3::new(a.tips.iter().map(|&i| (i, a.recs[i].mid)), 1.0);
+            let hb = matching::Hash3::new(b.tips.iter().map(|&j| (j, b.recs[j].mid)), 1.0);
+            // The twin lies in the same COLUMN: the two balls overlap in plan, and the later seat is
+            // up to a few layers higher (the raised arm keeps its column and takes the new layer).
+            let overlaps = |x: &RecInfo, y: &RecInfo| {
+                (x.mid[0] - y.mid[0]).hypot(x.mid[1] - y.mid[1]) <= x.ra + y.ra && (x.mid[2] - y.mid[2]).abs() <= k::N2_MERGE_DZ_MM
+            };
+            let merged: Vec<usize> = a.tips.iter().copied().filter(|i| !matched_r.contains(i)).filter(|&i| hb.near(a.recs[i].mid).any(|j| overlaps(&a.recs[i], &b.recs[j]))).collect();
+            let survivors: Vec<usize> = b.tips.iter().copied().filter(|j| !matched_c.contains(j)).filter(|&j| ha.near(b.recs[j].mid).any(|i| overlaps(&a.recs[i], &b.recs[j]))).collect();
+            let (un_lost, un_new) = (lost - merged.len(), newc - survivors.len());
+            let n = a.tips.len() as f64;
+            frac = 1.0 - un_lost as f64 / n;
+            cnt = (un_new as f64 - un_lost as f64) / n;
+            merge_note = format!("; declared contact-merge: {} of {lost} lost contacts merged into a contact whose ball overlaps theirs, {} of {newc} new contacts are such survivors, so {un_lost} lost and {un_new} new are unexplained", merged.len(), survivors.len());
+            ev.set("contacts_declared_merge", {
+                let mut m = Json::obj();
+                m.set("merged", Json::usize(merged.len()));
+                m.set("survivors_new", Json::usize(survivors.len()));
+                m.set("lost_unexplained", Json::usize(un_lost));
+                m.set("new_unexplained", Json::usize(un_new));
+                m
+            });
+            if o.full_listing {
+                for &i in a.tips.iter().filter(|i| !matched_r.contains(i)) {
+                    det.push(format!("{} contact r{i}: {}", if merged.contains(&i) { "MERGED" } else { "LOST, NO SURVIVOR" }, p3(a.recs[i].mid)));
+                }
+                for &j in b.tips.iter().filter(|j| !matched_c.contains(j)) {
+                    det.push(format!("{} contact r{j}: {}", if survivors.contains(&j) { "SURVIVOR" } else { "NEW, NO SOURCE" }, p3(b.recs[j].mid)));
+                }
+            }
+        }
         ev.set("contacts_ref", Json::usize(a.tips.len()));
         ev.set("contacts_cand", Json::usize(b.tips.len()));
         ev.set("contacts_matched", Json::usize(matched.len()));
         ev.set("contacts_max_offset_mm", Json::num(max_d));
         ev.set("contacts_max_dr_over_r", Json::num(max_dr));
         rows.push(
-            Row::new(&format!("N2{sfx}"), "contacts", status_of(cnt.abs() > k::N2_COUNT_FRACTION || frac < k::N2_MATCHED_FRACTION, false), format!("count {} -> {} ({:+.2} %); {:.1} % of reference contacts matched within {} mm; lost {lost}, new {newc}; max offset {max_d:.4} mm, max |dr/r| {max_dr:.4}", a.tips.len(), b.tips.len(), 100.0 * cnt, 100.0 * frac, k::MATCH_MM), "count within +-5 % and 95 % matched")
+            Row::new(&format!("N2{sfx}"), "contacts", status_of(cnt.abs() > k::N2_COUNT_FRACTION || frac < k::N2_MATCHED_FRACTION, false), format!("count {} -> {} ({:+.2} % net of declared merges); {:.1} % of reference contacts matched within {} mm (or merged, when declared); lost {lost}, new {newc}; max offset {max_d:.4} mm, max |dr/r| {max_dr:.4}{merge_note}", a.tips.len(), b.tips.len(), 100.0 * cnt, 100.0 * frac, k::MATCH_MM), "count within +-5 % and 95 % matched")
                 .with_detail(det),
         );
         // N3 member sections along each matched contact's path.
@@ -837,7 +1139,7 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
         }
         rows.push(
             Row::new(&format!("N3{sfx}"), "member sections along each contact's path (shared trunks included)", status_of(!thin.is_empty(), evaluated == 0 && !matched.is_empty()), format!("{} path or member sections (of {evaluated} evaluated matched paths) more than 15 % thinner without an I3 margin of 1.5x ({waived} paths waived by margin); worst ratio {}", thin.len(), if worst_ratio == f64::MAX { "n/a".into() } else { format!("{worst_ratio:.3}") }), "no path more than 15 % thinner unless its I3 margin stays at 1.5x")
-                .with_detail(thin.into_iter().take(8).collect()),
+                .with_detail(thin.into_iter().take(o.lim(8)).collect()),
         );
         // N4 thin joins.
         let n4_ind = (open && consumer_unverified) || ((a.floating.iter().any(|f| in_bco_junction(&a.name, f, &a.grid)) || b.floating.iter().any(|f| in_bco_junction(&b.name, f, &b.grid))) && consumer_unverified);
@@ -882,7 +1184,7 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
         };
         rows.push(
             Row::new(&format!("N5{sfx}"), "bracing", status_of(!over.is_empty() || sway_fail, sway_ind), format!("{} posts newly over the slenderness limit {s_lim} (record span over diameter); {sway_txt}", over.len()), "no post over its limit that was not over before; sway rise at most 10 %")
-                .with_detail(over.into_iter().take(8).collect()),
+                .with_detail(over.into_iter().take(o.lim(8)).collect()),
         );
         // EQUIVALENT clauses.
         let drift_ok = drift_summary.is_some_and(|(vx, big)| vx <= k::EQ_DRIFT_VOXELS && big < k::EQ_DRIFT_BLOB_VOXELS);
@@ -1037,6 +1339,20 @@ pub fn compare(r: &FileFacts, c: &FileFacts, o: &Options) -> Outcome {
     } else {
         Verdict::PlanChanged
     };
+    if o.declared.is_some() || o.declared_changes.any() {
+        let class = o.declared.map_or("none", DeclaredClass::name);
+        let within = o.declared.is_none_or(|d| d.allows(verdict));
+        rows.insert(
+            0,
+            Row::new(
+                "C.declared",
+                "what the lane declared",
+                Status::Info,
+                format!("declared {class}, changes [{}]; computed {}: {}", o.declared_changes.names().join(", "), verdict.name(), if within { "within the declaration" } else { "NOT within the declaration" }),
+                "report only; bench.sh judges (the exit code is the computed verdict's)",
+            ),
+        );
+    }
     Outcome { verdict, classes, rows, evidence: ev, layers_tsv, compare_seconds: t0.elapsed().as_secs_f64() }
 }
 

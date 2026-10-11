@@ -74,7 +74,8 @@ fetch per run of sample rings; records run in parallel (`PLINTH_THREADS`).
 ```sh
 plinth-audit compare <ref.chitubox> <cand.chitubox> [--out-dir D] [--json] [--band N] \
     [--ref-log F --cand-log F] [--ref-poses F --cand-poses F] [--require-logs] \
-    [--assume-consumer-matched] [--no-geometry] [--threads N]
+    [--assume-consumer-matched] [--no-geometry] [--threads N] [--no-flicker] [--low-memory] \
+    [--declared CLASS] [--declare-change WORD[,WORD]] [--full-listing] [--probe x,y,z,r]
 ```
 
 Replaces the sha256 gate for output-changing lanes (`ROUND-PLAN-v2.md` §1; owner
@@ -130,6 +131,42 @@ decisions O1-O4 of 2026-10-10). Reads only the emitted bytes, the engine `.log` 
    compares in at most 12 s (the whole set in 62 s); the table is in the report.
    `--low-memory` analyses the two files one after the other: the peak of the largest
    model (make_laid_tube) falls from 5.4 to 3.2 GB for 2 s more.
+
+8. **Declared changes and the false alarms of the first real use (G7, 2026-10-11; report
+   `perf-2026-10-09/wave1b/G7-REPORT.md`).** The first lane to change output on purpose (Q12: lean
+   limit plus twin merge) was refused on rows that measured the change, or that measured the engine's
+   own drawing, and not a loss. Four fixes, each at its cause:
+   - **H1 matches floating pieces, not components.** The floating material of each file is a raster.
+     Candidate floating voxels more than one voxel from the reference's floating voxels are new; a 3D
+     piece that shares at least 8 voxels with the reference's floating material is the reference's
+     piece, and its growth (its break moved) is excused up to max(64 voxels, 10 % of the shared part).
+     A piece that grew more, and a piece the reference does not have, are judged by the old limits
+     (a component of 16 px, 64 voxels in all).
+   - **T0 reads the mesh against its header with the model's cut left out.** A record that ends in
+     the model is trimmed by it: mesh vertices on the model surface, and a header end inside the
+     model, are the model's and not a disagreement. A mesh that covers its header (the junction hulls
+     of the owner's v18 ruling are not on their headers) is measured by what its header's rings stick
+     out of it. A record the reference does not have, or one that was already off its header there,
+     may be as far off as the reference's own worst of its kind (plus 25 %); the share of records past
+     one voxel may rise by 25 % plus 2 records. A good record that gets worse still fails.
+   - **I5 grounds a member that stands on the model.** The owner's ruling: a valid seat is the plate,
+     the model surface (a cavity wall included) or another support. A MEMBER that no ground reaches
+     and whose cured voxels, grown by one voxel, meet the model's cured raster is grounded. A tip with
+     an invalid seat is not (that is I1), nor is a taper beside one.
+   - **`--declared CLASS` and `--declare-change contact-merge`.** `--declared` takes the words of
+     `bench.sh --declared` (IDENTICAL, EQUIVALENT, PLAN-CHANGED, MESH-CHANGED); it is recorded in
+     `verdict.json` and a `C.declared` row says whether the computed verdict is within it. The exit
+     code stays the computed verdict's; `bench.sh` judges. `--declare-change contact-merge` (needs
+     PLAN-CHANGED or MESH-CHANGED) widens N2 only: a reference contact with no match at 0.1 mm is a
+     merge when a candidate contact lies in its column (balls overlap in plan, at most 0.5 mm apart in
+     height), and a new contact is the survivor of a merge when a reference contact lies in its column.
+     Only contacts not explained that way count against N2's 5 % limits, so a contact lost with no
+     survivor beside it is still a finding. `bench.sh --declare-change` passes both flags.
+   - **Triage tools.** `--full-listing` lists every item behind every row (the default keeps the first
+     few) and says, for each audit item, whether the design changed beside it and, for each
+     floating piece, whether the reference floats it and which records exist in one file only
+     there. `--probe x,y,z,r` prints the support records of both files near a point (`any` for z
+     ignores height) with their match in the other file.
 
 Test instruments: `plinth-audit mutate <in> <out> <spec>...` plants one change in a
 real file (jitter, `cjitter` (the mesh follows its header, as an engine's output does),

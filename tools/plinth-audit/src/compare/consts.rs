@@ -47,6 +47,12 @@ pub const T0_TRIMMED_SLACK_MM: f64 = 0.0;
 /// established and the audit refuses to run (E; the audit's own tolerance is
 /// 1e-6 mm, which a sub-voxel change in a flare foot would trip).
 pub const T0_FRAME_SLACK_MM: f64 = VOXEL_TIGHT_MM;
+/// A mesh vertex this close to the model surface is a vertex of the model's cut (the record ends in
+/// the model and the emitted mesh stops at the model surface), not a disagreement between the
+/// record's mesh and its header (G7). Two voxels: the engine ends a taper 0.016-0.024 mm from the
+/// model by design (the seat gap), a distance that one voxel (0.0187) splits, and a micron of noise
+/// then moves a vertex across it (Bat_Cat_Owl r45, cjitter 1e-3 seed 3, with one voxel).
+pub const T0_MODEL_TRIM_MM: f64 = 2.0 * VOXEL_TIGHT_MM;
 
 // ---- flicker allowance (G6) ---------------------------------------------------
 //
@@ -142,6 +148,14 @@ pub const N3_NOISE_MM: f64 = VOXEL_MM;
 /// that agrees (disagreement 0) gets nothing, so a planted shrink of a good record still fails.
 /// M: the largest growth beyond the one-voxel allowance in the calibration pairs is 1.97 %.
 pub const T0_MESH_REL_NOISE: f64 = 0.02;
+/// T0: the share of records whose mesh is past one voxel from its header may rise by this fraction
+/// of the reference's share, plus [`T0_RATE_PLUS`] records, before T0 fails. E (G7, first real use):
+/// the reference holds 145 of 1430 (Deinonychus), 10 of 186 (Bat_Cat_Owl), 53 of 1172 (Cylinder) from
+/// the junction hulls; the Q12 candidate holds 104 of 1219, 10 of 162, 53 of 1164, so the ratios of
+/// the shares are 0.84, 1.15 and 1.00. Re-measure when a lane changes the hull drawing.
+pub const T0_RATE_SLACK: f64 = 0.25;
+/// ... and this many records on top, for a small model (E, with [`T0_RATE_SLACK`]).
+pub const T0_RATE_PLUS: usize = 2;
 
 /// H1: a newly floating piece is connectivity flicker when at least this fraction of its pixels
 /// lie inside the 1-voxel band of the reference's cured material and the drift is small. M: 1.00
@@ -169,6 +183,8 @@ pub struct Noise {
     pub items: bool,
     pub n3_mm: f64,
     pub t0_rel: f64,
+    /// T0: a record the reference does not have is held to the reference's own worst of its kind.
+    pub t0_by_ref: bool,
     pub h1_old_fraction: f64,
     pub h2_attach_px: i64,
     pub h6_skim_fraction: f64,
@@ -184,6 +200,7 @@ impl Noise {
             items: true,
             n3_mm: N3_NOISE_MM,
             t0_rel: T0_MESH_REL_NOISE,
+            t0_by_ref: true,
             h1_old_fraction: H1_OLD_FRACTION,
             h2_attach_px: H2_ATTACH_NOISE_PX,
             h6_skim_fraction: H6_SKIM_NOISE_FRACTION,
@@ -194,7 +211,7 @@ impl Noise {
     /// No allowance at all.
     #[must_use]
     pub const fn none() -> Self {
-        Self { items: false, n3_mm: 0.0, t0_rel: 0.0, h1_old_fraction: 0.0, h2_attach_px: 0, h6_skim_fraction: 0.0, n4_fraction: 0.0, cap_fraction: 0.0 }
+        Self { items: false, n3_mm: 0.0, t0_rel: 0.0, t0_by_ref: false, h1_old_fraction: 0.0, h2_attach_px: 0, h6_skim_fraction: 0.0, n4_fraction: 0.0, cap_fraction: 0.0 }
     }
     /// Band of an item code (see [`flicker_band`]); 0 when the allowance is off.
     #[must_use]
@@ -215,6 +232,14 @@ pub const H1_LATERAL_PX: i64 = 1;
 pub const H1_FLOAT_PX: i64 = 16;
 /// New floating voxels in total above this fail (S, plan).
 pub const H1_FLOAT_TOTAL: i64 = 64;
+/// A 3D piece of the candidate's floating material is "floating in both files" when at least this
+/// many of its voxels lie within the band of the reference's floating material (E; a piece that
+/// shares fewer is new material that happens to touch an old piece).
+pub const H1_PIECE_MATCH_MIN_VOX: i64 = 8;
+/// A piece that floats in both files may float over this fraction more of itself, or over
+/// [`H1_FLOAT_TOTAL`] more voxels, whichever is larger, before the growth counts as new floating
+/// material (S: the plan's 10 % band; G7: its break moved by a layer or two).
+pub const H1_GROWTH_FRACTION: f64 = 0.10;
 /// A model island of this many px or more must keep support (S, plan; 0.01 mm2).
 pub const H2_ISLAND_PX: i64 = 38;
 /// Islands are matched by layer and centroid within this distance, mm (E).
@@ -244,6 +269,10 @@ pub const EQ_DRIFT_BLOB_VOXELS: i64 = 64;
 pub const N1_FRACTION: f64 = 0.05;
 /// N2 contact count band (S, plan).
 pub const N2_COUNT_FRACTION: f64 = 0.05;
+/// N2, declared contact merge: a merged twin lies within this height of the contact that took its
+/// place, mm (E, G7: the Bat_Cat_Owl survivor sits 0.38 mm and 7 layers above the twin it absorbed;
+/// the twin rule puts both in one column and raises the earlier arm to the later layer).
+pub const N2_MERGE_DZ_MM: f64 = 0.5;
 /// N2 share of the reference contacts matched within [`MATCH_MM`] (S, plan).
 pub const N2_MATCHED_FRACTION: f64 = 0.95;
 /// N3 no member may get thinner than this fraction of itself unless I3 holds (S, plan).

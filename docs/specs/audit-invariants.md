@@ -642,6 +642,24 @@ Clause (ii) is the three-seat rule of `docs/physics.md` §8: plate, model surfac
 including a cavity's own interior, or another support. Standing on another support is
 handled by connectivity, not by a third ground clause.
 
+**Clause (iii), a member that stands on the model surface (added 2026-10-11, G7; owner
+ruling: a valid seat is the plate, the model surface including a cavity, or another
+support).** Clause (ii) grounds a TIP, and only a tip. A post whose foot stands on the model
+has no tip at that end and was reported an orphan (Deinonychus Q12: 11-12 mm posts whose
+0.05 mm foot member ends 0.016-0.024 mm from the model, tip into the model above). So:
+
+```
+(iii) a MEMBER record (type 3) that no ground of (i) or (ii) reaches, and whose cured
+      voxels grown by one voxel (a box: one column, one row, one layer) meet the cured
+      raster of M, is grounded
+```
+
+It is the print's own test (the grid H1 grounds on). It runs only for a member that no
+ground reaches, so a tip whose seat is invalid stays I1's failure and is never grounded by
+touching the model beside it, and a taper next to such a tip is not grounded either. A
+model whose raster does not build (an open mesh) grounds nothing here. The count is
+`grounded_via_model_surface` in the measured block.
+
 **Predicate.**
 
 ```

@@ -392,3 +392,122 @@ fn options_default_is_the_gate() {
     assert_eq!(o.band_voxels, 1);
     assert!(!o.assume_consumer_matched);
 }
+
+// ---- G7: the false alarms of the first real use (Q12) --------------------------------------------
+
+/// Lowest and highest z of the cube model of the base file.
+fn cube_z() -> (f64, f64) {
+    let f = ChituboxFile::open(Path::new(BASE)).expect("parses");
+    let zs = f.models[0].model_soup.tris.iter().flatten().map(|p| f64::from(p[2]));
+    (zs.clone().fold(f64::MAX, f64::min), zs.fold(f64::MIN, f64::max))
+}
+
+/// Compare `reference` with `candidate`, both written as given (no mutation applied).
+fn run_pair(name: &str, reference: &SynthFile, candidate: &SynthFile, tweak: impl Fn(&mut Args)) -> Run {
+    let (rd, cd) = (dir(&format!("{name}-ref")), dir(&format!("{name}-cand")));
+    poses(&rd, "x", "identity");
+    poses(&cd, "x", "identity");
+    let (r, c) = (write(reference, &rd, "x"), write(candidate, &cd, "x"));
+    let mut a = args(&r, &c);
+    tweak(&mut a);
+    compare_paths(&a)
+}
+
+#[test]
+fn a_piece_that_floats_in_both_files_is_not_new_floating_material() {
+    // The reference floats a small piece. The candidate floats the same piece one layer higher: its
+    // break moved by a layer. That is not new floating material (H1 matches pieces, voxel by voxel).
+    let float = |z: f64| Mutation::Float { at: [3.0, 3.0, z], radius: 0.055 };
+    let mut r = base();
+    apply(&mut r, &float(-3.0));
+    let mut c = base();
+    apply(&mut c, &float(-2.98));
+    let run = run_pair("h1-both", &r, &c, |_| {});
+    assert_eq!(row(&run, "H1").status, Status::Pass, "{}", show(&run));
+    // Control: the same piece in a different place is a new piece, and the old one is gone.
+    let mut elsewhere = base();
+    apply(&mut elsewhere, &Mutation::Float { at: [-3.0, -3.0, -3.0], radius: 0.055 });
+    let run = run_pair("h1-moved", &r, &elsewhere, |_| {});
+    assert_eq!(row(&run, "H1").status, Status::Fail, "a float 6 mm away is new material:\n{}", show(&run));
+}
+
+#[test]
+fn a_mesh_cut_by_the_model_agrees_with_its_header_and_a_short_one_does_not() {
+    let (zmin, _) = cube_z();
+    // A post whose header goes 0.3 mm into the cube; its mesh stops at the cube's underside.
+    let post = |mesh_top: f64| {
+        let mut r = SynthRecord::new(RecordKind::Member, [0.0, 0.0, -3.0], [0.0, 0.0, zmin + 0.3], 0.2, 0.2);
+        r.soup = SynthRecord::new(RecordKind::Member, [0.0, 0.0, -3.0], [0.0, 0.0, mesh_top], 0.2, 0.2).with_matching_soup().soup;
+        r
+    };
+    let mut cut = base();
+    cut.models[0].records.push(post(zmin));
+    let run = run_pair("t0-cut", &base(), &cut, |_| {});
+    assert_eq!(row(&run, "T0.mesh_header").status, Status::Pass, "the model made the cut:\n{}", show(&run));
+    // Control: the mesh ends 0.3 mm short of the cube. Nothing explains that.
+    let mut short = base();
+    short.models[0].records.push(post(zmin - 0.3));
+    let run = run_pair("t0-short", &base(), &short, |_| {});
+    assert_eq!(row(&run, "T0.mesh_header").status, Status::Fail, "{}", show(&run));
+}
+
+#[test]
+fn a_member_standing_on_the_model_surface_is_grounded_and_one_above_it_is_an_orphan() {
+    let (_, zmax) = cube_z();
+    // A post standing on the cube's top face (owner ruling: a valid seat is the plate, the model
+    // surface, or another support).
+    let post = |foot: f64| SynthRecord::new(RecordKind::Member, [0.0, 0.0, foot], [0.0, 0.0, foot + 2.0], 0.2, 0.2).with_matching_soup();
+    let mut on = base();
+    on.models[0].records.push(post(zmax - 0.005));
+    let run = run_pair("i5-on", &base(), &on, |_| {});
+    let i5 = row(&run, "H4.i5");
+    assert!(!i5.detail.iter().any(|d| d.contains("PATH_ORPHAN")), "a post on the model surface is not an orphan:\n{}\n{:?}", show(&run), i5.detail);
+    // Control: 0.5 mm above the cube it touches nothing.
+    let mut above = base();
+    above.models[0].records.push(post(zmax + 0.5));
+    let run = run_pair("i5-above", &base(), &above, |_| {});
+    let i5 = row(&run, "H4.i5");
+    assert!(i5.detail.iter().any(|d| d.contains("PATH_ORPHAN")), "a post in the air is an orphan:\n{}\n{:?}", show(&run), i5.detail);
+}
+
+#[test]
+fn a_declared_contact_merge_passes_a_twin_and_still_fails_a_contact_lost_without_a_survivor() {
+    // The reference has a second contact in the first contact's column (a twin 0.12 mm aside); the
+    // candidate has merged it away. Undeclared, that is a lost contact (N2). Declared, it is a merge.
+    let tip = kind_index(&base(), RecordKind::ContactSphere, 0);
+    let twin_of = |delta: [f64; 3]| {
+        let mut r = base();
+        let t = r.models[0].records[tip].clone();
+        r.models[0].records.push(t);
+        let at = r.models[0].records.len() - 1;
+        apply(&mut r, &Mutation::Move { record: at, delta });
+        r
+    };
+    let declare = |a: &mut Args| {
+        a.declared = Some(plinth_audit::compare::classify::DeclaredClass::PlanChanged);
+        a.declared_changes.contact_merge = true;
+    };
+    let near = twin_of([0.12, 0.0, 0.0]);
+    let undeclared = run_pair("n2-undeclared", &near, &base(), |_| {});
+    assert_eq!(row(&undeclared, "N2").status, Status::Fail, "{}", show(&undeclared));
+    let declared = run_pair("n2-declared", &near, &base(), declare);
+    assert_eq!(row(&declared, "N2").status, Status::Pass, "{}", show(&declared));
+    // A contact lost 4 mm from every survivor is not a merge, declared or not.
+    let far = twin_of([3.0, 0.0, 0.0]);
+    let declared = run_pair("n2-far", &far, &base(), declare);
+    assert_eq!(row(&declared, "N2").status, Status::Fail, "{}", show(&declared));
+    // The declaration is recorded and the verdict stays the computed one.
+    assert!(declared.outcome.rows.iter().any(|r| r.id == "C.declared"));
+}
+
+#[test]
+fn a_declared_change_needs_a_declared_plan_change() {
+    use plinth_audit::compare::parse_args;
+    let argv = |v: &[&str]| v.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+    assert!(parse_args(&argv(&["a", "b", "--declare-change", "contact-merge"])).is_err());
+    assert!(parse_args(&argv(&["a", "b", "--declared", "EQUIVALENT", "--declare-change", "contact-merge"])).is_err());
+    let ok = parse_args(&argv(&["a", "b", "--declared", "PLAN-CHANGED", "--declare-change", "contact-merge"])).expect("parses");
+    assert!(ok.declared_changes.contact_merge);
+    assert!(parse_args(&argv(&["a", "b", "--declared", "PLAN-CHANGED", "--declare-change", "nonsense"])).is_err());
+    assert!(parse_args(&argv(&["a", "b", "--declared", "SORT-OF"])).is_err());
+}

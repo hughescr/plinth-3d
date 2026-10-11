@@ -300,6 +300,53 @@ impl Check for LoadPath {
         }
 
         // -------------------------------------------------------------
+        // 3a. Clause (iii): a MEMBER that stands on the model surface is grounded.
+        //
+        //    Owner ruling (G7, 2026-10-11, restating `supports-may-seat-on-model`): a valid
+        //    seat is the plate, the model surface (a cavity wall included), or another
+        //    support. Clause (ii) above grounds a TIP, and only a tip, with a valid seat.
+        //    A post whose foot stands on the model (Deinonychus r872 and r875: an 11-12 mm
+        //    post whose 0.05 mm foot member ends 0.016-0.024 mm from the model, tip into the
+        //    model above it) has no tip at that end, so it was reported an orphan, though
+        //    nothing in it is loose.
+        //
+        //    The test is the print's own: the member's cured voxels, grown by one voxel,
+        //    meet the model's cured raster (the grid H1 grounds on, one voxel in each
+        //    direction). It runs only for a MEMBER that no ground reaches, so a tip with an
+        //    invalid seat stays I1's failure and is never grounded here, and a taper next to
+        //    an invalid tip is not grounded by touching the model beside it. A model whose
+        //    raster does not build (an open mesh) grounds nothing here.
+        // -------------------------------------------------------------
+        let mut adj_all = adj.clone();
+        for i in 0..n {
+            for &(j, _) in &adj_indet[i] {
+                adj_all[i].push(j);
+            }
+        }
+        let mut n_ground_model = 0usize;
+        {
+            let reach0 = bfs_reachable(n, &adj_all, |i| ground[i] || ground_indet[i]);
+            let loose: Vec<usize> = ok
+                .iter()
+                .filter(|&&(i, _)| !reach0[i] && ctx.model.records[i].kind == RecordKind::Member)
+                .map(|&(i, _)| i)
+                .collect();
+            if !loose.is_empty() {
+                if let Ok(model_raster) = ctx.model_raster() {
+                    for i in loose {
+                        let touches = ctx
+                            .record_raster(i)
+                            .is_ok_and(|r| r.grown(1).intersect(model_raster).pixel_count > 0);
+                        if touches {
+                            ground[i] = true;
+                            n_ground_model += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        // -------------------------------------------------------------
         // 3b. Clause (d), plate roots: every FLARE stands ON the plate.
         //
         //    A FLARE record (wire 4) is by format definition a plate root
@@ -391,12 +438,6 @@ impl Check for LoadPath {
         //    neighbour strictly closer, by construction of BFS.
         // -------------------------------------------------------------
         let reachable_strict = bfs_reachable(n, &adj, |i| ground[i]);
-        let mut adj_all = adj.clone();
-        for i in 0..n {
-            for &(j, _) in &adj_indet[i] {
-                adj_all[i].push(j);
-            }
-        }
         let reachable_optimistic =
             bfs_reachable(n, &adj_all, |i| ground[i] || ground_indet[i]);
 
@@ -629,6 +670,7 @@ impl Check for LoadPath {
         measured.set("records_degenerate", Json::usize(n_degenerate));
         measured.set("grounded_via_plate", Json::usize(n_ground_plate));
         measured.set("grounded_via_seat", Json::usize(n_ground_seat));
+        measured.set("grounded_via_model_surface", Json::usize(n_ground_model));
         measured.set("connected_not_grounded", Json::usize(n_connected));
         measured.set("orphaned", Json::usize(n_orphan));
         measured.set("free_ends", Json::usize(n_free_end));
