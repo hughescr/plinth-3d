@@ -583,7 +583,12 @@ fn nearest_faces(
         crate::PerfWork::NearestTipTrisTested,
         crate::perf::count(landings.len()).saturating_mul(crate::perf::count(triangles.len())),
     );
-    landings
+    // Brute force: every row tests every face, so a batch has no row skew by
+    // construction. The row records its size and wall time beside the
+    // kernel's clearance batches (write-only; inert when counting is off).
+    let _scan_span = crate::perf::span(crate::perf::Span::TipNearest);
+    let scan_started = crate::perf::enabled().then(std::time::Instant::now);
+    let nearest = landings
         .par_iter()
         .map(|landing| {
             let mut best_distance = f64::INFINITY;
@@ -600,7 +605,18 @@ fn nearest_faces(
             }
             best_face.map(|face| (face, best_distance.sqrt()))
         })
-        .collect()
+        .collect();
+    if let Some(started) = scan_started {
+        crate::perf::row(
+            crate::perf::Rows::TipBatch,
+            &[
+                crate::perf::count(landings.len()),
+                crate::perf::count(triangles.len()),
+                u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            ],
+        );
+    }
+    nearest
 }
 
 /// The tip-contact scar of one finished plan, against the fields the

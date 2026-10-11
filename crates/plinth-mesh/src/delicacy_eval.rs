@@ -138,15 +138,23 @@ pub fn evaluate_delicacy(
         });
     }
 
+    // Write-only stage marks (X0, 2026-10-10): where the face table's time
+    // goes beside the `delicacy.curvature` span. Inert unless `--perf` is on.
+    let bind_mark = perf::stage("orient.delicacy.bind");
     let table = FaceTable::bind(mesh, lod)?;
+    drop(bind_mark);
     let face_count = table.face_count();
     if face_count == 0 {
         return DelicacyField::from_face_values(table, settings, Vec::new());
     }
 
+    let geometry_mark = perf::stage("orient.delicacy.geometry");
     let geometry = FaceGeometryPass::run(mesh);
+    drop(geometry_mark);
     let (curvature, _counts) = curvature_by_face(mesh, &geometry, settings.thin_feature_mm())?;
+    let thinness_mark = perf::stage("orient.delicacy.thinness");
     let thinness = thinness_by_face(mesh, &geometry, settings.thin_feature_mm(), config)?;
+    drop(thinness_mark);
 
     // One blend pass, serial in face order.  Both proxies are already in
     // `[0, 1]`, and the convex combination of two values in `[0, 1]` is in

@@ -142,6 +142,7 @@ pub(crate) fn clearance_violators(
     arms: &[SweepArm],
     exclude: &[u32],
 ) -> (Vec<bool>, usize) {
+    let _perf_span = crate::perf::span(crate::perf::Span::LipViolators);
     let mut flags = vec![false; struts.len()];
     let Some(surface) = joins.surface() else {
         return (flags, 0);
@@ -693,6 +694,7 @@ pub(crate) fn apply(
     refused: &[(u32, usize)],
     outcome: &mut LipSeatOutcome,
 ) -> Vec<Relanding> {
+    let _perf_span = crate::perf::span(crate::perf::Span::LipApply);
     let context = joins.slender;
     let surface = joins.surface();
     let tier = joins.clearance_mm;
@@ -1300,6 +1302,7 @@ pub(crate) fn measure_sized(
     struts: &[SweepStrut],
     sized: &crate::down_sweep::DownSweepOutcome,
 ) -> SizedField {
+    let _perf_span = crate::perf::span(crate::perf::Span::LipMeasure);
     let mut overloaded: Vec<(u32, f64)> = Vec::new();
     for row in &sized.overloaded {
         match overloaded.iter_mut().find(|(id, _)| *id == row.strut_id) {
@@ -1445,6 +1448,7 @@ pub(crate) fn blame(
     before: &SizedField,
     after: &SizedField,
 ) -> (Blamed, usize, usize) {
+    let _perf_span = crate::perf::span(crate::perf::Span::LipBlame);
     let was = |id: u32| -> f64 {
         before
             .overloaded

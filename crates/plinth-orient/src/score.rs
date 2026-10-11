@@ -1005,6 +1005,7 @@ impl OrientFaceTable {
         // states it: under `WeldPolicy::None` an STL soup shares no vertices, so
         // every edge reads as a boundary and the closure check below would
         // refuse every model on disk.
+        let _assemble_mark = geom_kernel::perf::stage("orient.table.assemble");
         let topology =
             build_face_topology(mesh, WeldPolicy::ExactBits).map_err(ScoreError::Topology)?;
         let counts = topology.counts();

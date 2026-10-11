@@ -1866,6 +1866,7 @@ pub(crate) fn apply_ties_with_model(
     if !law.binds() {
         return 0;
     }
+    let _perf_span = crate::perf::span(crate::perf::Span::BraceLane);
     let grid = context.grid;
     let height = context.layer_height_mm;
     let first_new = struts.len();
@@ -2785,6 +2786,7 @@ fn tie_by_crosses(
     // off or refused.
     let mut thicken_mm3: Option<Option<f64>> = None;
     let candidates = partner_candidates(context, struts, id, k);
+    let tally = SearchTally::start(0, candidates.len());
     for (rank, &(partner, cell)) in candidates.iter().enumerate() {
         let Some(plane) = plane_between(context.grid, here, cell) else {
             continue;
@@ -2794,6 +2796,7 @@ fn tie_by_crosses(
         if !new_plane_holds(&state.ties[id as usize], k, plane, run.sway_deg) {
             continue;
         }
+        let trial = tally.trial();
         outcome.cross_bands_planned += 1;
         let Some(plan) = plan_cross(
             context, state, struts, id, partner, k, run, may_move, outcome,
@@ -2863,6 +2866,7 @@ fn tie_by_crosses(
         }
         commit_cross(context, state, struts, plan, outcome);
         outcome.braces_added += 1;
+        trial.won(rank);
         return Ok(());
     }
     Err(miss)
@@ -2918,6 +2922,7 @@ fn tie_by_band_set(
     let planes = if run.sway_deg.is_none() { 2 } else { 1 };
     let mut thicken_mm3: Option<Option<f64>> = None;
     let candidates = partner_candidates(context, struts, id, k);
+    let tally = SearchTally::start(1, candidates.len());
     // THE PAIRS THE LEDGER OFF LEAVES UNCLASSIFIED (`frame_ledger`): those
     // with room for bands but no band set that can be planned at any count.
     // Such a pair can never be built on, so the only thing its class can
@@ -2935,6 +2940,7 @@ fn tie_by_band_set(
         if !new_plane_holds(&state.ties[id as usize], k, plane, run.sway_deg) {
             continue;
         }
+        let trial = tally.trial();
         let gap_mm = crate::cell_distance_mm(grid, here, cell);
         let depth = context.lean.layers_to_reach(gap_mm);
         let Some(partner_mm) = partner_radius_over(state, struts, partner, run) else {
@@ -3162,6 +3168,7 @@ fn tie_by_band_set(
         outcome.frame_bands_beyond_fixed_point += bands.saturating_sub(fixed_point);
         outcome.frame_most_bands_in_a_set = outcome.frame_most_bands_in_a_set.max(bands);
         outcome.frame_highest_ratio_braced = outcome.frame_highest_ratio_braced.max(ratio);
+        trial.won(rank);
         return Ok(());
     }
     // The pairs set aside: the highest ceiling first, the earliest of equals,
@@ -5699,6 +5706,103 @@ fn partner_candidates(
         .into_iter()
         .map(|(_, cell, member)| (member, cell))
         .collect()
+}
+
+/// A write-only tally of ONE main partner search (X0, 2026-10-10): how many
+/// candidates it planned (trials), what the trials cost, and the rank of the
+/// one that built something. Nothing in the search reads it; it is charged
+/// to `perf` when the search ends, on every exit path, and costs nothing
+/// when counting is off (no clock is read).
+struct SearchTally {
+    started: Option<std::time::Instant>,
+    kind: u64,
+    candidates: u64,
+    trials: core::cell::Cell<u64>,
+    trial_ns: core::cell::Cell<u64>,
+    win_rank: core::cell::Cell<Option<u64>>,
+    win_trial_ns: core::cell::Cell<u64>,
+    _span: crate::perf::SpanGuard,
+}
+
+impl SearchTally {
+    /// `kind` 0 is the single-cross search, 1 the band-set search.
+    fn start(kind: u64, candidates: usize) -> Self {
+        Self {
+            started: crate::perf::enabled().then(std::time::Instant::now),
+            kind,
+            candidates: crate::perf::count(candidates),
+            trials: core::cell::Cell::new(0),
+            trial_ns: core::cell::Cell::new(0),
+            win_rank: core::cell::Cell::new(None),
+            win_trial_ns: core::cell::Cell::new(0),
+            _span: crate::perf::span(crate::perf::Span::PartnerSearch),
+        }
+    }
+
+    /// One candidate being planned; it counts and is timed until it drops.
+    fn trial(&self) -> PartnerTrial<'_> {
+        PartnerTrial {
+            tally: self,
+            started: self.started.map(|_| std::time::Instant::now()),
+            _span: crate::perf::span(crate::perf::Span::PartnerTrial),
+        }
+    }
+}
+
+impl Drop for SearchTally {
+    fn drop(&mut self) {
+        let Some(started) = self.started else {
+            return;
+        };
+        let win = self.win_rank.get();
+        crate::perf::add(crate::PerfWork::PartnerSearches, 1);
+        crate::perf::add(crate::PerfWork::PartnerTrials, self.trials.get());
+        if let Some(rank) = win {
+            crate::perf::add(crate::PerfWork::PartnerWins, 1);
+            crate::perf::add(crate::PerfWork::PartnerWinRankSum, rank);
+        }
+        crate::perf::row(
+            crate::perf::Rows::PartnerSearch,
+            &[
+                self.kind,
+                self.candidates,
+                self.trials.get(),
+                win.map_or(0, |rank| rank + 1),
+                u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                self.trial_ns.get(),
+                self.win_trial_ns.get(),
+            ],
+        );
+    }
+}
+
+/// One timed candidate of a [`SearchTally`].
+struct PartnerTrial<'a> {
+    tally: &'a SearchTally,
+    started: Option<std::time::Instant>,
+    _span: crate::perf::SpanGuard,
+}
+
+impl PartnerTrial<'_> {
+    fn elapsed_ns(&self) -> u64 {
+        self.started
+            .map_or(0, |at| u64::try_from(at.elapsed().as_nanos()).unwrap_or(u64::MAX))
+    }
+
+    /// This candidate built something, at `rank` (0 = nearest).
+    fn won(&self, rank: usize) {
+        self.tally.win_rank.set(Some(crate::perf::count(rank)));
+        self.tally.win_trial_ns.set(self.elapsed_ns());
+    }
+}
+
+impl Drop for PartnerTrial<'_> {
+    fn drop(&mut self) {
+        self.tally.trials.set(self.tally.trials.get() + 1);
+        self.tally
+            .trial_ns
+            .set(self.tally.trial_ns.get().saturating_add(self.elapsed_ns()));
+    }
 }
 
 /// Plan the two crossing diagonals of an `|X|` between `a` and `b` with its

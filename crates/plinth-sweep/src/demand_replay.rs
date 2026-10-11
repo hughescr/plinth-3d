@@ -130,6 +130,13 @@ pub struct ReplayOutcome {
     pub refused_within_first_loss: u64,
     /// Whether the restart bound ran out and every doomed arm was restored.
     pub exhausted: bool,
+    /// Layers the replays actually walked, summed over every replay. A replay
+    /// that returns early (a restart, a restore-all, or the carries agreeing
+    /// above the highest doomed seat) walks fewer than `ReplayContext::layers`.
+    /// `perf` charges `cells * layers_visited` as `replay.cell_layers`; it used
+    /// to charge `cells * layers` at the top of every replay, which over-counted
+    /// every early exit (X0, 2026-10-10).
+    pub layers_visited: u64,
 }
 
 /// Restore every tentatively doomed arm whose removal would leave a demand
@@ -178,12 +185,22 @@ pub(crate) fn refuse_unrooted_demand(
         restore_all(doomed, &mut blame_u, &mut outcome);
         outcome.exhausted = true;
     }
+    crate::perf::add(
+        crate::PerfWork::ReplayCellLayers,
+        replay_cell_layers(context.grid.cells(), outcome.layers_visited),
+    );
     let ratio = context.first_loss_ratio as f32;
     outcome.refused_within_first_loss = blame_u
         .iter()
         .filter(|u| u.is_finite() && **u <= ratio)
         .count() as u64;
     outcome
+}
+
+/// The `replay.cell_layers` charge: the cells of the grid times the layers the
+/// replays walked, saturating.
+fn replay_cell_layers(cells: usize, layers_visited: u64) -> u64 {
+    crate::perf::count(cells).saturating_mul(layers_visited)
 }
 
 fn restore_all(doomed: &mut [bool], blame_u: &mut [f32], outcome: &mut ReplayOutcome) {
@@ -224,10 +241,6 @@ fn replay_once(
     };
     let highest = doomed_layers().max().unwrap_or(lowest);
     crate::perf::add(crate::PerfWork::ReplayCalls, 1);
-    crate::perf::add(
-        crate::PerfWork::ReplayCellLayers,
-        crate::perf::count(grid.cells()).saturating_mul(crate::perf::count(context.layers)),
-    );
     let mut creep = if context.creep_weight {
         SurfaceCreep::new(
             context.mesh,
@@ -270,6 +283,9 @@ fn replay_once(
     };
 
     for layer in 0..context.layers {
+        // Every exit below, a return or the end of the loop, has walked
+        // exactly the layers counted here.
+        outcome.layers_visited += 1;
         rasterize_into(grid, &context.slices[layer], &mut scratch, &mut masks);
         if masks.cover.iter().all(|filled| !*filled) {
             // The up-sweep's own empty-layer reset, for both sets.
@@ -569,6 +585,187 @@ mod tests {
         let mut doomed = vec![false, false, true];
         let outcome = run(&mesh, &place, &mut doomed);
         assert_eq!(doomed, vec![false, false, false], "{outcome:?}");
+    }
+
+    /// X0 (2026-10-10): `replay.cell_layers` is charged for the layers a
+    /// replay WALKED. The old charge, `cells * context.layers` at the top of
+    /// every replay, counted all 50 layers here although this replay stops at
+    /// layer 20. A duplicate of the arm at x 2.0 is doomed: the proposed set
+    /// equals the current one, so a non-first replay sees equal carries at the
+    /// highest doomed seat (layer 20) and returns there, 21 layers walked
+    /// (layers 0..=20). The first replay of the same call walks the whole
+    /// model, so only the early exit tells the two charges apart.
+    #[test]
+    fn a_replay_that_exits_early_is_charged_only_for_the_layers_it_walked() {
+        use super::{replay_cell_layers, replay_once, Pass, ReplayOutcome};
+        let mesh = fixture(false);
+        let (grid, _) = plan_grid(0.0, -0.5, 4.0, 0.5, LAYERS, H, 1.0, u64::MAX);
+        let planes: Vec<f64> = (0..LAYERS).map(|l| (l as f64 + 0.5) * H).collect();
+        let slices = slice_stack(&mesh, &planes, SliceStackLimits::production()).expect("slices");
+        let struts = vec![
+            arm(&grid, 0, 0.9, 20),
+            arm(&grid, 1, 2.0, 20),
+            arm(&grid, 2, 2.0, 20),
+            arm(&grid, 3, 3.1, 20),
+        ];
+        let context = ReplayContext {
+            grid: &grid,
+            slices: &slices,
+            planes: &planes,
+            mesh: &mesh,
+            kappa: KAPPA,
+            layer_height_mm: H,
+            layers: LAYERS,
+            straight_reach: true,
+            creep_weight: false,
+            creep_overhang_cut: true,
+            overhang_centre_deg: 45.0,
+            overhang_transition_deg: 25.0,
+            max_restarts: 3,
+            first_loss_ratio: 2.592 / 2.130,
+        };
+        let mut roots: Vec<Vec<usize>> = vec![Vec::new(); LAYERS];
+        roots[20] = vec![0, 1, 2, 3];
+        let mut doomed = vec![false, false, true, false];
+        let mut blame = vec![f32::NEG_INFINITY; struts.len()];
+        let mut outcome = ReplayOutcome::default();
+        let pass = replay_once(&context, &struts, &roots, &mut doomed, &mut blame, &mut outcome, false);
+        assert!(matches!(pass, Pass::Verified));
+        assert_eq!(outcome.layers_visited, 21, "layers 0..=20 were walked: {outcome:?}");
+        let cells = grid.cells() as u64;
+        assert_eq!(replay_cell_layers(grid.cells(), outcome.layers_visited), cells * 21);
+        assert_ne!(
+            replay_cell_layers(grid.cells(), outcome.layers_visited),
+            cells * LAYERS as u64,
+            "the old charge, cells * context.layers"
+        );
+
+        // The first replay of the same field walks the whole model.
+        let mut doomed = vec![false, false, true, false];
+        let whole = refuse_unrooted_demand(&context, &struts, &mut doomed);
+        assert_eq!(doomed, vec![false, false, true, false], "{whole:?}");
+        assert_eq!(whole.replays, 1);
+        assert_eq!(whole.layers_visited, LAYERS as u64, "{whole:?}");
+    }
+
+    /// The production early-exit call, shared by the child below and its
+    /// parent. Four arms on the two-slab fixture: `G` (0.9) and `H` (3.1) are
+    /// kept on `S1`; `A` duplicates `G` (same cell, layer 20) and is doomed;
+    /// `D` (0.9, layer 40) is doomed and is the only root of `S2`. At layer 40
+    /// the first replay finds `S2` unrooted in the proposed set and blames the
+    /// nearest doomed arm: `A` and `D` tie on distance and `A` has the lower
+    /// index, so `A` (seated BELOW the layer) is restored and the replay will
+    /// restart; the next cells of the same layer blame `D`, which is restored
+    /// too. The replay returns `Restart` at layer 40 with nothing left doomed,
+    /// so the call ends after ONE replay that walked 41 layers (0..=40), not 50.
+    fn production_early_exit() -> (super::ReplayOutcome, Vec<bool>, usize) {
+        let mesh = fixture(true);
+        let (grid, _) = plan_grid(0.0, -0.5, 4.0, 0.5, LAYERS, H, 1.0, u64::MAX);
+        let planes: Vec<f64> = (0..LAYERS).map(|l| (l as f64 + 0.5) * H).collect();
+        let slices = slice_stack(&mesh, &planes, SliceStackLimits::production()).expect("slices");
+        let struts = vec![
+            arm(&grid, 0, 0.9, 20),
+            arm(&grid, 1, 3.1, 20),
+            arm(&grid, 2, 0.9, 20),
+            arm(&grid, 3, 0.9, 40),
+        ];
+        let context = ReplayContext {
+            grid: &grid,
+            slices: &slices,
+            planes: &planes,
+            mesh: &mesh,
+            kappa: KAPPA,
+            layer_height_mm: H,
+            layers: LAYERS,
+            straight_reach: true,
+            creep_weight: false,
+            creep_overhang_cut: true,
+            overhang_centre_deg: 45.0,
+            overhang_transition_deg: 25.0,
+            max_restarts: 3,
+            first_loss_ratio: 2.592 / 2.130,
+        };
+        let mut doomed = vec![false, false, true, true];
+        let outcome = refuse_unrooted_demand(&context, &struts, &mut doomed);
+        (outcome, doomed, grid.cells())
+    }
+
+    const EARLY_EXIT_CHILD_MODE: &str = "PLINTH_REPLAY_CELL_LAYERS_CHILD";
+    const EARLY_EXIT_CHILD_TEST: &str =
+        "demand_replay::tests::child_runs_the_production_early_exit";
+
+    /// Not a test of its own: the body the parent below launches in a fresh
+    /// process, where the process-global perf counters are its own. Without
+    /// the marker variable it returns at once. It switches counting on, makes
+    /// the production call and records what the charge must be.
+    #[test]
+    fn child_runs_the_production_early_exit() {
+        let Some(dir) = std::env::var_os("PLINTH_REPLAY_CELL_LAYERS_DIR") else {
+            return;
+        };
+        if std::env::var_os(EARLY_EXIT_CHILD_MODE).is_none() {
+            return;
+        }
+        let dir = std::path::PathBuf::from(dir);
+        crate::perf::enable(dir.clone(), crate::perf::DEFAULT_CHECKPOINT);
+        crate::perf::begin_model("replay");
+        let (outcome, doomed, cells) = production_early_exit();
+        crate::perf::end_model();
+        assert_eq!(doomed, vec![false; 4], "{outcome:?}");
+        assert_eq!(outcome.replays, 1, "{outcome:?}");
+        assert_eq!(outcome.refused, 2, "{outcome:?}");
+        assert_eq!(outcome.layers_visited, 41, "layers 0..=40 were walked: {outcome:?}");
+        std::fs::write(dir.join("expected"), format!("{}", cells as u64 * outcome.layers_visited))
+            .expect("write the expected charge");
+    }
+
+    /// X0 regression witness for the counter the PRODUCTION path emits. The
+    /// child makes a `refuse_unrooted_demand` call with perf on in which the
+    /// replay exits early; the parent reads the sidecar and requires
+    /// `replay.cell_layers` to be `cells * layers walked`, and different from
+    /// the old charge `cells * context.layers * replays`. Sabotage check:
+    /// charging `context.layers * outcome.replays` at the `perf::add` in
+    /// `refuse_unrooted_demand` fails this test (and only this one).
+    #[test]
+    fn the_emitted_replay_cell_layers_counter_charges_the_layers_walked() {
+        let dir = std::env::temp_dir().join(format!(
+            "plinth-replay-cell-layers-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch directory");
+        let status = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+            .arg("--exact")
+            .arg(EARLY_EXIT_CHILD_TEST)
+            .arg("--nocapture")
+            .env(EARLY_EXIT_CHILD_MODE, "1")
+            .env("PLINTH_REPLAY_CELL_LAYERS_DIR", &dir)
+            .status()
+            .expect("launch the child");
+        assert!(status.success(), "child failed: {status}");
+        let expected: u64 = std::fs::read_to_string(dir.join("expected"))
+            .expect("the child wrote its expectation")
+            .parse()
+            .expect("a count");
+        let text = std::fs::read_to_string(dir.join("replay.perf.json")).expect("final sidecar");
+        assert!(text.contains("\"partial\":false"), "{text}");
+        let totals = &text[text.find("\"totals\"").expect("totals")..];
+        let work = &totals[totals.find("\"work\":{").expect("work object")..];
+        let at = work.find("\"replay.cell_layers\":").expect("the counter is emitted");
+        let emitted: u64 = work[at + "\"replay.cell_layers\":".len()..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .expect("a count");
+        let (_, _, cells) = production_early_exit();
+        let old_charge = cells as u64 * LAYERS as u64;
+        assert!(expected > 0 && expected < old_charge, "{expected} vs {old_charge}");
+        assert_eq!(emitted, expected, "emitted replay.cell_layers is not cells * layers walked");
+        assert_ne!(emitted, old_charge, "the old charge, cells * layers * replays");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The joint counterfactual. Doom the arm at 0.9 AND the middle one: the

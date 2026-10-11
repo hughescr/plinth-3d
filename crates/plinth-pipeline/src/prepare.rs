@@ -1220,6 +1220,9 @@ fn prepare_one(
     // recorded, the first that holds. The probe reads one extended attribute
     // and checks one sibling path; a tag it cannot decode is a warning carried
     // on the disclosure, never a refusal.
+    // Write-only `perf` stage marks (X0, 2026-10-10) bracket the stretches of
+    // the OrientTable phase, to attribute its wall time; inert without `--perf`.
+    let probe_mark = plinth_sweep::perf::stage("orient.as_drawn_probe");
     let probe = match (&policy.orientation, listed) {
         (OrientationPolicy::AsDrawn, _) => plinth_orient::as_drawn::AsDrawnProbe {
             reason: Some(plinth_orient::as_drawn::AsDrawnReason::OrientNone),
@@ -1235,6 +1238,8 @@ fn prepare_one(
             plinth_orient::as_drawn::probe_source(source_path)
         }
     };
+    drop(probe_mark);
+    let orient_mark = plinth_sweep::perf::stage("orient.orient_model");
     let (oriented, winner) = match orient_model(
         model,
         decimated,
@@ -1247,6 +1252,7 @@ fn prepare_one(
         Ok(oriented) => oriented,
         Err(stop) => return report(&repair, assumed, failure(&stop)),
     };
+    drop(orient_mark);
     // **The chosen orientation, read once and carried on every disposition
     // from here down.** The closure is SHADOWED rather than given a fourth
     // parameter so that the eleven call sites above and below stay as they
@@ -1485,12 +1491,14 @@ fn orient_model(
             })
         }),
         OrientationPolicy::DenseSweep => {
+            let registry_mark = plinth_sweep::perf::stage("orient.registry_request");
             let mut request = plinth_orient::registered_sweep_request().map_err(|source| {
                 ChainStop::new(PipelineError::Orient {
                     model: model.clone(),
                     source,
                 })
             })?;
+            drop(registry_mark);
             // The run's resource policy owns the work budget; the registry owns
             // every number that can change a score. Neither owns the other's.
             request.limits = limits;
@@ -1513,11 +1521,13 @@ fn orient_model(
                 let demand = plinth_sweep::orient_demand::RetainingSweepDemand::production();
                 let oriented = plinth_orient::search_and_orient(decimated, &request, Some(&demand))
                     .map_err(orient_error)?;
+                let take_mark = plinth_sweep::perf::stage("orient.take_winner");
                 let winner = if reuse == WinnerPlanReuse::SabotageOtherPose {
                     demand.take_other_pose_relabelled(oriented.mesh())
                 } else {
                     demand.take_winner(oriented.mesh())
                 };
+                drop(take_mark);
                 return Ok((oriented, winner.ok_or(plinth_sweep::orient_demand::ReuseMiss::NotRetained)));
             }
             let demand = plinth_sweep::SweepDemand::production();
@@ -1659,15 +1669,20 @@ pub fn run_from_oriented_reusing(
     // *error* -- the `HollowedWithSolidReserve` reserve below exists only once the
     // stage has already succeeded. Both clones are dropped unread on every path
     // that does not error.
+    let clones_mark = plinth_sweep::perf::stage("orient.reserve_clones");
     let hollow_error_reserve_mesh = oriented.mesh().clone();
     let hollow_error_reserve_history = oriented.history().clone();
+    drop(clones_mark);
 
     // Its own clock, scoped to the hollow-and-drill stage it times. This is the
     // longest silent stretch on a big model before the sealed run starts.
     let clock = plinth_support::StageClock::start(format!("model {model}"));
     set_phase(PerfPhase::Hollow);
     clock.entering("Hollow");
-    let output = match hollow_stage(oriented, &policy.hollow) {
+    let hollow_mark = plinth_sweep::perf::stage("hollow.stage");
+    let hollowed_result = hollow_stage(oriented, &policy.hollow);
+    drop(hollow_mark);
+    let output = match hollowed_result {
         Ok(output) => output,
         // OQ-1's anticipated case, reached for the first time by the Weeping
         // Treant (FU-34, then FU-49 -- which is fixed, and the treant now
@@ -2050,6 +2065,10 @@ pub fn seal_and_emit_reusing(
     stop_after: Option<StageStop>,
     winner: Result<&plinth_sweep::orient_demand::RetainedPlan, plinth_sweep::orient_demand::ReuseMiss>,
 ) -> Result<Option<ChainOutcome>, ChainStop> {
+    // Write-only `perf` mark (X0): the stretch of the Hollow phase that is not
+    // the hollow stage itself. Dropped before the sweep path starts its own
+    // phases.
+    let prelude_mark = plinth_sweep::perf::stage("hollow.seal_prelude");
     let prepared_faces = hollowed.mesh().tris().len();
     let hollow_disposition = hollowed.history().hollow().disposition();
     // Read here, beside the disposition, because the hollowed model is the
@@ -2121,6 +2140,7 @@ pub fn seal_and_emit_reusing(
     // per-face delicacy sidecar, so the field is out of scope here and the
     // compiler proves it: building it was ~24 s of serial curvature on the
     // 129 k-face Bat_Cat_Owl for a number no sweep stage reads.
+    drop(prelude_mark);
     if policy.placement == crate::Placement::Sweep {
         let input = policy.resources.support_input(&layers, &[], &[]);
         return sweep_and_emit(
@@ -2738,13 +2758,16 @@ fn sweep_and_emit(
     // report as WARNINGS), and a file that cannot be read back keeps its bytes
     // BESIDE the target (`plinth_emit::failed_audit_path`), which this removal
     // does not touch (fix/round100-emit, 2026-09-29).
-    let emit = match plinth_emit::write(
+    let emit_mark = plinth_sweep::perf::stage("emit.write");
+    let written = plinth_emit::write(
         &supported,
         &EmitRequest {
             target_path: target.to_path_buf(),
             printer: inputs.printer.clone(),
         },
-    ) {
+    );
+    drop(emit_mark);
+    let emit = match written {
         Ok(report) => report,
         Err(source) => {
             let _ = std::fs::remove_file(target);
