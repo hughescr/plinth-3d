@@ -88,6 +88,38 @@ pub struct ItemDiff {
     pub lost_evaluation: Vec<usize>,
     /// Reference failing items that no longer fail.
     pub resolved: usize,
+    /// Candidate items that moved across their own threshold inside the measured noise
+    /// band ([`Allowance`]): `(candidate index, "new" or "lost")`. They are reported and
+    /// counted, and they decide nothing.
+    pub absorbed: Vec<(usize, &'static str)>,
+}
+
+/// The flicker allowance for one invariant (see `consts::flicker_band`).
+///
+/// An audit item sits near its own threshold in a legitimate file and moves across it
+/// under noise that changes nothing physical. Such a crossing is not a regression when
+/// it is small (`band`: the candidate item's severity is within the measured noise of its
+/// code) and rare (`cap`: no more crossings than the noise ever produced, as a count of
+/// the invariant's checked items). Past the cap nothing is absorbed: many crossings in
+/// one invariant are a shift, not flicker. And noise is noise on an unchanged design: an item
+/// beside a record that exists in only one of the two files (`veto`) is a consequence of that
+/// change, never flicker.
+pub struct Allowance<'a> {
+    /// Noise band of an item, in the severity units of its code: for a new failing item
+    /// (`false`) or for the growth of an item that already failed (`true`).
+    pub band: &'a dyn Fn(&Item, bool) -> f64,
+    /// True for an item that stands beside a record present in only one file.
+    pub veto: &'a dyn Fn(&Item) -> bool,
+    /// The most items one invariant may absorb.
+    pub cap: usize,
+}
+
+impl Allowance<'_> {
+    /// No allowance: every crossing counts (the strict reading, and the unit tests').
+    #[must_use]
+    pub fn none() -> Allowance<'static> {
+        Allowance { band: &|_, _| 0.0, veto: &|_| false, cap: 0 }
+    }
 }
 
 fn item_pairs(ri: &[&Item], ci: &[&Item]) -> Vec<(usize, usize)> {
@@ -130,6 +162,12 @@ fn item_pairs(ri: &[&Item], ci: &[&Item]) -> Vec<(usize, usize)> {
 /// Diff one invariant's items, matched by place (and code where there is a choice).
 #[must_use]
 pub fn diff_items(r: &[Item], c: &[Item]) -> ItemDiff {
+    diff_items_with(r, c, &Allowance::none())
+}
+
+/// [`diff_items`] with a flicker allowance.
+#[must_use]
+pub fn diff_items_with(r: &[Item], c: &[Item], allow: &Allowance) -> ItemDiff {
     // A failing item whose severity is under the noise floor of its own
     // quantity (one pixel of area, one voxel of volume, one voxel of length)
     // is quantisation, not a defect: it is not an item at all.
@@ -180,11 +218,15 @@ pub fn diff_items(r: &[Item], c: &[Item]) -> ItemDiff {
         let (a, b) = (ri[i], ci[j]);
         match (a.indeterminate, b.indeterminate) {
             (false, false) => {
-                if b.severity > a.severity * (1.0 + k::H4_WORSE_FRACTION) + b.floor.max(a.floor) {
+                if b.severity > a.severity * (1.0 + k::H4_WORSE_FRACTION) + b.floor.max(a.floor).max(if (allow.veto)(b) { 0.0 } else { (allow.band)(b, true) }) {
                     d.worse.push((i, j));
                 }
             }
-            (false, true) => d.lost_evaluation.push(j),
+            // The reference already fails here, so the candidate not being able to decide is the
+            // same gate (a failing item and an indeterminate one both block) and no step back.
+            // An indeterminate candidate item with NO reference item at its place is different:
+            // the reference passed there, and that is counted below as lost evaluation.
+            (false, true) => {}
             (true, false) => d.new_failing.push(j),
             (true, true) => {}
         }
@@ -209,6 +251,18 @@ pub fn diff_items(r: &[Item], c: &[Item]) -> ItemDiff {
     }
     for p in &mut d.worse {
         *p = (rmap[p.0], cmap[p.1]);
+    }
+    // Flicker: a new failing item inside its code's noise band, or an item the candidate can no
+    // longer evaluate. All of them or none: past the cap the invariant has shifted.
+    let small = |j: &usize| !c[*j].indeterminate && !(allow.veto)(&c[*j]) && c[*j].severity <= (allow.band)(&c[*j], false);
+    let loose = |j: &usize| !(allow.veto)(&c[*j]);
+    let n_new = d.new_failing.iter().filter(|j| small(j)).count();
+    let n_lost = d.lost_evaluation.iter().filter(|j| loose(j)).count();
+    if n_new + n_lost > 0 && n_new + n_lost <= allow.cap {
+        d.absorbed.extend(d.new_failing.iter().filter(|j| small(j)).map(|&j| (j, "new")));
+        d.new_failing.retain(|j| !small(j));
+        d.absorbed.extend(d.lost_evaluation.iter().filter(|j| loose(j)).map(|&j| (j, "lost")));
+        d.lost_evaluation.retain(|j| !loose(j));
     }
     d
 }
@@ -255,6 +309,7 @@ mod tests {
             anchor: Some(at),
             severity: sev,
             floor: 0.0,
+            scale: 1.0,
             contact: None,
             record: None,
         }
@@ -280,7 +335,38 @@ mod tests {
     fn losing_the_ability_to_evaluate_is_not_a_pass() {
         let r = vec![item("A", [0.0; 3], 1.0, false)];
         let c = vec![item("A_INDETERMINATE", [0.0; 3], 1.0, true)];
-        assert_eq!(diff_items(&r, &c).lost_evaluation.len(), 1);
+        // Where the reference passed (no item), the candidate that cannot decide is a loss.
         assert_eq!(diff_items(&[], &c).lost_evaluation.len(), 1);
+        // Where the reference already failed, indeterminate blocks just as a failure does.
+        assert_eq!(diff_items(&r, &c).lost_evaluation.len(), 0);
+        assert_eq!(diff_items(&r, &c).new_failing.len(), 0);
+    }
+
+    #[test]
+    fn flicker_is_absorbed_only_inside_the_band_and_the_cap() {
+        let band = |it: &Item, _worse: bool| if it.code == "A" { 0.5 } else { 0.0 };
+        let never = |_: &Item| false;
+        let r: Vec<Item> = vec![];
+        // Two small new failures and one lost evaluation, cap 3: all absorbed.
+        let c = vec![item("A", [0.0; 3], 0.4, false), item("A", [5.0; 3], 0.1, false), item("A_INDETERMINATE", [9.0; 3], 1.0, true)];
+        let d = diff_items_with(&r, &c, &Allowance { band: &band, veto: &never, cap: 3 });
+        assert!(d.new_failing.is_empty() && d.lost_evaluation.is_empty(), "{d:?}");
+        assert_eq!(d.absorbed.len(), 3);
+        // Cap 2: three crossings are a shift, so none is absorbed.
+        let d = diff_items_with(&r, &c, &Allowance { band: &band, veto: &never, cap: 2 });
+        assert_eq!((d.new_failing.len(), d.lost_evaluation.len(), d.absorbed.len()), (2, 1, 0));
+        // An item past its band is never absorbed, whatever the cap.
+        let big = vec![item("A", [0.0; 3], 0.6, false)];
+        let d = diff_items_with(&r, &big, &Allowance { band: &band, veto: &never, cap: 9 });
+        assert_eq!((d.new_failing.len(), d.absorbed.len()), (1, 0));
+        // An item beside a record that exists in one file only is a consequence, not noise.
+        let near_change = |it: &Item| it.anchor.is_some_and(|p| p[0] < 1.0);
+        let d = diff_items_with(&r, &c, &Allowance { band: &band, veto: &near_change, cap: 3 });
+        assert_eq!((d.new_failing.len(), d.absorbed.len()), (1, 2), "the item at x=0 stays a finding");
+        // A matched item grows by the band without being worse; past it, it is.
+        let r1 = vec![item("A", [0.0; 3], 1.0, false)];
+        let w = |sev: f64| diff_items_with(&r1, &[item("A", [0.001, 0.0, 0.0], sev, false)], &Allowance { band: &band, veto: &never, cap: 0 }).worse.len();
+        assert_eq!(w(1.55), 0, "10 % plus the 0.5 band");
+        assert_eq!(w(1.65), 1);
     }
 }

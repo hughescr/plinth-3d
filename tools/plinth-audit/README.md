@@ -104,21 +104,39 @@ decisions O1-O4 of 2026-10-10). Reads only the emitted bytes, the engine `.log` 
    r83. Nothing here has been matched to a ChituBox slice; `--assume-consumer-matched`
    lifts the rule once it has.
 
-6. **Calibration state (G3, 2026-10-10; report `perf-2026-10-09/wave1/G-REPORT.md`).**
-   The thresholds are still the plan's estimates. On the real BCO and Deinonychus
-   files the gate is EQUIVALENT for one-ulp f32 noise and for 2e-6 mm radius noise on
-   BCO, and it is REGRESSION for 0.001 mm noise on BCO and for any radius noise on
-   Deinonychus: the audit's per-item checks (I1, I6, I8) flicker on items near their
-   own thresholds. Until the H4 rule gets a flicker allowance, expect REGRESSION on
-   any real output-changing lane, and EQUIVALENT only for noise under about 1e-4 mm.
-   Compare cost is dominated by the audit and the raster (Round_100: 15 min), not by
-   the comparison.
+6. **Flicker allowance (G6, 2026-10-11; report `perf-2026-10-09/wave1b/G6-REPORT.md`).**
+   An audit item that sits near its own threshold crosses it under noise that changes
+   nothing physical. The gate absorbs such a crossing only when all of these hold: the
+   design is unchanged beside it (no record present in one file only within 0.15 mm);
+   its severity is inside the band measured for its code (`src/compare/consts.rs`,
+   "flicker allowance": every number there carries its provenance and was read off
+   jittered pairs run with `--no-flicker`); and the invariant has absorbed no more
+   crossings than the noise ever produced (3.1 % ... 4.8 % of its checked items, rounded
+   down, so a model with fewer than 21 items absorbs none). The same measured noise sets
+   the floors of N3 (a section that moved under one voxel did not change), T0 (growth of a
+   mesh-versus-header gap that already exists), H1 (a newly floating piece made only of
+   material already inside the 1-voxel band, when no drift beyond the band exists), H2, H6.
+   `--no-flicker` switches every allowance off (the strict reading; the sabotage case).
+   What it cannot do: noise of 1e-3 mm on Deinonychus turns short, wide members and moves a
+   contact's area as far as a halved contact would, so it stays REGRESSION there (report).
+   A real change inside the bands that touches few enough items is invisible by design;
+   the blessed-set comparison bounds the drift of a series of them.
+7. **Cost.** The ownership partition of I2/I3/I4 was a scan of every contact for every
+   subdivision sample; it now charges a whole triangle to the one contact that can own
+   it and scans only the contacts a straddling sample can still choose among (same samples,
+   same owners, tested against the old scan). I3 evaluates its contacts on several
+   threads (`PLINTH_THREADS`), in contact order, so the outcome is the sequential one.
+   The model raster is built once per file and shared with the audit. A fast-set model
+   compares in at most 12 s (the whole set in 62 s); the table is in the report.
+   `--low-memory` analyses the two files one after the other: the peak of the largest
+   model (make_laid_tube) falls from 5.4 to 3.2 GB for 2 s more.
 
 Test instruments: `plinth-audit mutate <in> <out> <spec>...` plants one change in a
-real file (jitter, one-ulp, f16, mesh shrink, scale a record, remove, move, float,
-rotate, split the model); `plinth-audit stl-jitter <in.stl> <out.stl> <rot-rad>
-<scale-ulps>` makes the input for the real-engine jitter baseline. Fixtures and the
-sabotage (band 0 must fail the jitter fixture) are in `tests/compare.rs`.
+real file (jitter, `cjitter` (the mesh follows its header, as an engine's output does),
+one-ulp, f16, mesh shrink, scale a record, remove, move, float, rotate, split the model;
+`jitter`, `cjitter` and `ulp` take a seed); `plinth-audit stl-jitter <in.stl> <out.stl>
+<rot-rad> <scale-ulps>` makes the input for the real-engine jitter baseline. Fixtures and
+the sabotage (band 0 must fail the jitter fixture) are in `tests/compare.rs`.
 
 ## Implementing one invariant
 

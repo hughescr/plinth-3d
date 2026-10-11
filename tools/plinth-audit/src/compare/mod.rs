@@ -53,6 +53,9 @@ OPTIONS:
   --require-logs                 a missing log makes H5 INDETERMINATE (the bench sets this)
   --assume-consumer-matched      lift the INDETERMINATE rule for open meshes and the BCO
                                  junction (only after G5 has matched a ChituBox slice sample)
+  --no-flicker                   switch off every noise allowance (consts.rs, \"flicker allowance\"):
+                                 the strict reading, for calibration and as the sabotage case
+  --low-memory                   analyse the two files one after the other (half the peak memory)
   -h, --help                     this text
 
 EXIT: 1 REGRESSION, 3 INDETERMINATE, 2 POSE-CHANGED, 4 MESH-CHANGED, 10 PLAN-CHANGED,
@@ -75,6 +78,10 @@ pub struct Args {
     pub no_geometry: bool,
     pub require_logs: bool,
     pub assume_consumer_matched: bool,
+    /// Switch every noise allowance off (the strict reading; calibration and sabotage).
+    pub no_flicker: bool,
+    /// Analyse the two files one after the other (half the peak memory, more wall time).
+    pub low_memory: bool,
 }
 
 /// Parse the arguments after `compare`.
@@ -98,6 +105,8 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--no-geometry" => a.no_geometry = true,
             "--require-logs" => a.require_logs = true,
             "--assume-consumer-matched" => a.assume_consumer_matched = true,
+            "--no-flicker" => a.no_flicker = true,
+            "--low-memory" => a.low_memory = true,
             "--threads" => {
                 a.threads = take("--threads")?.parse().ok().filter(|&n| n > 0).ok_or("--threads wants a positive integer")?;
             }
@@ -156,19 +165,34 @@ pub fn compare_paths(a: &Args) -> Run {
             };
         }
     }
-    let (rf, cf) = std::thread::scope(|sc| {
-        let h = sc.spawn(|| {
-            let t = Instant::now();
-            (side::analyse(&a.reference, a.ref_log.as_deref(), a.ref_poses.as_deref(), &set), t.elapsed().as_secs_f64())
-        });
+    let (rf, cf) = if a.low_memory {
+        // One file at a time: the peak is one analysis, not two (laid_tube: 5.4 GB to about half).
+        let t = Instant::now();
+        let r = side::analyse(&a.reference, a.ref_log.as_deref(), a.ref_poses.as_deref(), &set);
+        let rt = t.elapsed().as_secs_f64();
         let t = Instant::now();
         let c = side::analyse(&a.candidate, a.cand_log.as_deref(), a.cand_poses.as_deref(), &set);
-        let ct = t.elapsed().as_secs_f64();
-        let (r, rt) = h.join().unwrap_or_else(|_| (Err("reference analysis panicked".into()), 0.0));
-        ((r, rt), (c, ct))
-    });
+        ((r, rt), (c, t.elapsed().as_secs_f64()))
+    } else {
+        std::thread::scope(|sc| {
+            let h = sc.spawn(|| {
+                let t = Instant::now();
+                (side::analyse(&a.reference, a.ref_log.as_deref(), a.ref_poses.as_deref(), &set), t.elapsed().as_secs_f64())
+            });
+            let t = Instant::now();
+            let c = side::analyse(&a.candidate, a.cand_log.as_deref(), a.cand_poses.as_deref(), &set);
+            let ct = t.elapsed().as_secs_f64();
+            let (r, rt) = h.join().unwrap_or_else(|_| (Err("reference analysis panicked".into()), 0.0));
+            ((r, rt), (c, ct))
+        })
+    };
     let analyse_s = (rf.1, cf.1);
-    let opts = Options { band_voxels: a.band, assume_consumer_matched: a.assume_consumer_matched, require_logs: a.require_logs };
+    let opts = Options {
+        band_voxels: a.band,
+        assume_consumer_matched: a.assume_consumer_matched,
+        require_logs: a.require_logs,
+        noise: if a.no_flicker { consts::Noise::none() } else { consts::Noise::measured() },
+    };
     let outcome = match (&rf.0, &cf.0) {
         (Ok(r), Ok(c)) => classify::compare(r, c, &opts),
         (Err(e), _) => failed_outcome(Verdict::Indeterminate, "T0.parse", "the reference does not parse", e),
@@ -227,6 +251,7 @@ fn side_json(label: &str, path: &Path, f: &Result<FileFacts, String>) -> Json {
                     ph.set(k, Json::num(v));
                 }
                 j.set("seconds", ph);
+                j.set("audit_check_seconds", Json::nums(m.audit.check_s.iter().copied()));
                 models.push(j);
             }
             o.set("models", models);
@@ -253,6 +278,7 @@ pub fn verdict_json(a: &Args, run: &Run) -> Json {
     opt.set("band_voxels", Json::int(a.band));
     opt.set("assume_consumer_matched", Json::Bool(a.assume_consumer_matched));
     opt.set("require_logs", Json::Bool(a.require_logs));
+    opt.set("flicker_allowance", Json::Bool(!a.no_flicker));
     opt.set("geometry", Json::Bool(!a.no_geometry));
     d.set("options", opt);
     let mut cm = Json::obj();

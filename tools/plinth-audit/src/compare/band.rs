@@ -390,6 +390,38 @@ pub struct Drift {
     pub beyond: RunRaster,
     pub voxels: u64,
     pub blobs: Vec<Blob>,
+    /// The tolerance mask of the first raster (what "within the band of `a`" means).
+    pub tol_a: RunRaster,
+}
+
+/// For each component, the number of its pixels that lie inside `tol` (a tolerance mask) on the
+/// same layer. The components are those of [`grounding`] on `u` (shared-face labelling); each is
+/// found again by its layer, pixel count and centroid.
+#[must_use]
+pub fn pixels_inside(u: &RunRaster, tol: &RunRaster, comps: &[&Comp], g: &RasterGrid) -> Vec<i64> {
+    let mut by_layer: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+    for (i, c) in comps.iter().enumerate() {
+        by_layer.entry(c.k).or_default().push(i);
+    }
+    let mut out = vec![0i64; comps.len()];
+    for (kk, idxs) in by_layer {
+        let Some(l) = u.layer(kk) else { continue };
+        let rr = RowRuns::from_layer(l);
+        let (labels, n) = rr.label(InPlaneJoin::SharedFace);
+        let stats = comp_stats(&rr, &labels, n, g, kk);
+        let mut inside = vec![0i64; n];
+        if let Some(tl) = tol.layer(kk) {
+            let trr = RowRuns::from_layer(tl);
+            overlap_join(&rr, &trr, |i, _, len| inside[labels[i] as usize] += len);
+        }
+        for ci in idxs {
+            let c = comps[ci];
+            if let Some(s) = stats.iter().position(|s| s.px == c.px && (s.cx - c.cx).abs() < 1e-9 && (s.cy - c.cy).abs() < 1e-9) {
+                out[ci] = inside[s];
+            }
+        }
+    }
+    out
 }
 
 /// Voxels of one raster that are more than `grow` voxels from the other.
@@ -403,7 +435,7 @@ pub fn drift(a: &RunRaster, b: &RunRaster, g: &RasterGrid, grow: i64) -> Drift {
     let added = b.difference(&ta);
     let beyond = removed.union(&added);
     let blobs = blobs(&beyond, &added, g);
-    Drift { voxels: beyond.pixel_count, removed, added, beyond, blobs }
+    Drift { voxels: beyond.pixel_count, removed, added, beyond, blobs, tol_a: ta }
 }
 
 #[cfg(test)]

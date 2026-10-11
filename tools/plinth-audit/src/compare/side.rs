@@ -150,6 +150,9 @@ pub struct Item {
     pub anchor: Option<V3>,
     pub severity: f64,
     pub floor: f64,
+    /// The item's own requirement in the units of `severity` (a contact's required area, a
+    /// seat's required depth), so a noise band can be a fraction of it; 1 when the code has none.
+    pub scale: f64,
     pub contact: Option<usize>,
     pub record: Option<usize>,
 }
@@ -164,6 +167,8 @@ pub struct AuditFacts {
     pub counts: Vec<(usize, usize, usize)>,
     /// Per contact: I3 `a_min / a_required`, when both were measured.
     pub i3_margin: HashMap<usize, f64>,
+    /// Wall seconds per invariant (I1..I10), for the cost report.
+    pub check_s: Vec<f64>,
 }
 
 /// H6: the heads and straight contacts of the geometry report.
@@ -433,6 +438,18 @@ fn severity(inv: usize, code: &str, vals: &Json) -> (f64, f64) {
     }
 }
 
+/// The requirement a deficit is measured against (see [`Item::scale`]); 1 when there is none.
+fn scale_of(inv: usize, code: &str, vals: &Json) -> f64 {
+    let f = |key: &str| vals.get(key).and_then(Json::as_f64).filter(|x| x.is_finite() && *x > 0.0);
+    match (inv, code) {
+        (0, "SEAT_DEPTH_SHALLOW") => f("h_required_mm"),
+        (0, "SEAT_DEPTH_DECLARED_MISMATCH") => f("declared_mm"),
+        (1, "CONTACT_AREA_SHORT") | (2, "MIN_SECTION_SHORT") => f("a_required_mm2"),
+        _ => None,
+    }
+    .unwrap_or(1.0)
+}
+
 fn anchor_of(f: &Failure, ctx: &ModelContext) -> Option<V3> {
     let g = |key: &str| f.values.get(key);
     if let Some(c) = g("centroid_mm").or_else(|| g("breach_centroid_mm")).and_then(|j| {
@@ -482,7 +499,9 @@ fn run_audit(ctx: &ModelContext) -> AuditFacts {
     out.ran = true;
     let gating = checks::gating();
     for (inv, chk) in gating.iter().enumerate() {
+        let tc = Instant::now();
         let o: CheckOutcome = chk.run(ctx);
+        out.check_s.push(tc.elapsed().as_secs_f64());
         out.counts.push((o.checked, o.failed, o.indeterminate));
         for f in &o.failures {
             let indeterminate = f.code.ends_with("_INDETERMINATE");
@@ -494,6 +513,7 @@ fn run_audit(ctx: &ModelContext) -> AuditFacts {
                 anchor: anchor_of(f, ctx),
                 severity,
                 floor,
+                scale: scale_of(inv, f.code, &f.values),
                 contact: f.contact,
                 record: f.record,
             });
@@ -566,7 +586,7 @@ fn analyse_model(
 ) -> ModelFacts {
     let t0 = Instant::now();
     let audit_ctx = AuditContext { file, options, sidecar: None, sidecar_absence: Some("compare".into()) };
-    let ctx = ModelContext::build(&audit_ctx, mi);
+    let mut ctx = ModelContext::build(&audit_ctx, mi);
     let model = ctx.model;
     let mut secs = Phase { build: t0.elapsed().as_secs_f64(), ..Phase::default() };
 
@@ -619,7 +639,22 @@ fn analyse_model(
         let s = support_raster(model, grid, &budget);
         (hm.join().unwrap_or_else(|_| (RunRaster::empty(grid), ModelRaster::Failed("raster thread panicked".into()))), s)
     });
-    let (m, model_raster) = m_res;
+    let (m0, model_raster) = m_res;
+    // A closed mesh's raster is the very raster the audit asks the context for: hand it over
+    // so the checks share it (one copy held, not two; the audit's own build is skipped).
+    let shared = model_raster == ModelRaster::Closed;
+    let mut m_own: Option<RunRaster> = None;
+    if shared {
+        ctx.preset_model_raster(m0);
+    } else {
+        m_own = Some(m0);
+    }
+    let empty_m = RunRaster::empty(grid);
+    let m: &RunRaster = match (&m_own, shared) {
+        (Some(r), _) => r,
+        (None, true) => ctx.model_raster().unwrap_or(&empty_m),
+        (None, false) => &empty_m,
+    };
     let (s, support_raster_err) = match s_res {
         Ok(s) => (s, None),
         Err(e) => (RunRaster::empty(grid), Some(e)),
@@ -631,7 +666,7 @@ fn analyse_model(
     let t2 = Instant::now();
     let gr = band::grounding(&u, &grid, k::H1_LATERAL_PX);
     let s_rr = band::layer_rr(&s);
-    let isl: Vec<Island> = band::islands(&m, &s_rr, &grid)
+    let isl: Vec<Island> = band::islands(m, &s_rr, &grid)
         .into_iter()
         .filter(|c| c.px >= 2)
         .map(|c| {
@@ -731,6 +766,7 @@ fn analyse_model(
     let model_tris = model.model_soup.len();
     let name = model.name.clone();
     let translate = model.translate_mm;
+    let m = if shared { ctx.take_model_raster().unwrap_or_else(|| RunRaster::empty(grid)) } else { m_own.unwrap_or_else(|| RunRaster::empty(grid)) };
     drop(ctx);
 
     let t4 = Instant::now();

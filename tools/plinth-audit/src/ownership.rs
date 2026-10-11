@@ -166,8 +166,12 @@ impl Default for SampleBudget {
 /// Streaming: no sample is stored. One pass over the down-facing triangles,
 /// each subdivided on an explicit stack, each terminal centroid charged to its
 /// nearest same-component contact.
+///
+/// This is the REFERENCE form: one scan of every contact per terminal sample.
+/// It is kept for the tests, which hold [`partition`] (the pruned form) to it.
+#[cfg(test)]
 #[must_use]
-pub fn partition(
+pub fn partition_brute(
     m: &Mesh,
     demand: &DemandSet,
     sites: &[ContactSite],
@@ -277,6 +281,207 @@ pub fn partition(
             } else {
                 [0.0; 3]
             };
+            if largest.is_none_or(|(_, best, _)| unowned_by_component[cmp] > best) {
+                largest = Some((cmp, unowned_by_component[cmp], centroid));
+            }
+        }
+    }
+
+    let accounted_mm2 = a_owned_mm2.iter().sum::<f64>() + a_unowned_mm2;
+    Ownership {
+        a_owned_mm2,
+        a_unowned_mm2,
+        components_without_contact,
+        largest_unowned_component: largest,
+        samples,
+        accounted_mm2,
+        budget_exceeded,
+    }
+}
+
+/// One node of the pruned subdivision: a (sub-)triangle and the contacts that
+/// can still own part of it, as a range of the shared candidate arena.
+struct Node {
+    t: [V3; 3],
+    depth: u32,
+    lo: usize,
+    len: usize,
+}
+
+/// Number of dyadic halvings a triangle of longest edge `longest` still takes
+/// before its terminal samples (the loop of the reference form, in closed form).
+fn extra_levels(mut longest: f64, mut depth: u32, budget: &SampleBudget) -> u32 {
+    let mut n = 0;
+    while longest > budget.max_edge_mm && depth < budget.max_depth {
+        longest *= 0.5;
+        depth += 1;
+        n += 1;
+    }
+    n
+}
+
+/// Build the complete Voronoi partition of the demand set among the contacts.
+///
+/// The same partition as the reference form, with the same sample count and the
+/// same budget rule, at a small fraction of the cost. A (sub-)triangle whose
+/// every point is nearer to one contact than to any other, by more than the
+/// tie tolerance, is charged to that contact whole: every terminal sample under
+/// it would have chosen the same contact, and the dyadic subdivision keeps the
+/// sum of the sample areas equal to the triangle's area. The candidate list of
+/// a triangle is the contacts whose nearest point to it lies within the
+/// smallest farthest-vertex distance (plus the tolerance); the children inherit
+/// it. Only triangles that straddle a Voronoi boundary are subdivided to the
+/// terminal edge, and each such sample scans the few candidates left, not every
+/// contact. Measured cost: see `G6-REPORT.md`.
+#[must_use]
+pub fn partition(
+    m: &Mesh,
+    demand: &DemandSet,
+    sites: &[ContactSite],
+    budget: &SampleBudget,
+) -> Ownership {
+    let mut a_owned_mm2 = vec![0.0f64; sites.len()];
+    let mut a_unowned_mm2 = 0.0f64;
+    let mut samples: u64 = 0;
+    let mut budget_exceeded = None;
+
+    let mut by_component: Vec<Vec<usize>> = vec![Vec::new(); m.component_count];
+    for (i, s) in sites.iter().enumerate() {
+        if let Some(cmp) = s.component {
+            if cmp < by_component.len() {
+                by_component[cmp].push(i);
+            }
+        }
+    }
+
+    let mut unowned_by_component = vec![0.0f64; m.component_count];
+    let mut centroid_acc: Vec<(V3, f64)> = vec![([0.0; 3], 0.0); m.component_count];
+
+    // The arena holds every candidate list of the triangle being split. It is
+    // cleared per top-level triangle, so it never outgrows one triangle's tree.
+    let mut arena: Vec<usize> = Vec::new();
+    let mut stack: Vec<Node> = Vec::with_capacity(64);
+    'tris: for ti in 0..m.tri_count() {
+        let d = demand.per_triangle_mm2[ti];
+        if d <= 0.0 {
+            continue;
+        }
+        let comp = m.component_of_tri[ti] as usize;
+        let cands: &[usize] = by_component.get(comp).map_or(&[], Vec::as_slice);
+        let facet_area = m.areas[ti];
+        if facet_area <= 0.0 {
+            continue;
+        }
+        let density = d / facet_area;
+
+        arena.clear();
+        arena.extend_from_slice(cands);
+        stack.clear();
+        stack.push(Node { t: m.tri(ti), depth: 0, lo: 0, len: cands.len() });
+        while let Some(node) = stack.pop() {
+            let t = node.t;
+            let longest = v::dist(t[0], t[1]).max(v::dist(t[1], t[2])).max(v::dist(t[2], t[0]));
+            let splits = longest > budget.max_edge_mm && node.depth < budget.max_depth;
+            let (mut lo, mut len) = (node.lo, node.len);
+
+            // Prune the candidate list against this triangle.
+            if len >= 2 && splits {
+                let mag = t.iter().map(|p| v::inf_norm(*p)).fold(0.0, f64::max);
+                let mut far_min = f64::INFINITY;
+                for &ci in &arena[lo..lo + len] {
+                    let p = sites[ci].p0;
+                    let far = v::dist(p, t[0]).max(v::dist(p, t[1])).max(v::dist(p, t[2]));
+                    far_min = far_min.min(far);
+                }
+                let new_lo = arena.len();
+                for k in lo..lo + len {
+                    let ci = arena[k];
+                    let p = sites[ci].p0;
+                    let tol = 2.0 * c::tol_geom_mag(mag.max(v::inf_norm(p)));
+                    if v::point_triangle_closest(p, t[0], t[1], t[2]).0 <= far_min + tol {
+                        arena.push(ci);
+                    }
+                }
+                lo = new_lo;
+                len = arena.len() - new_lo;
+            }
+
+            if len == 0 {
+                // No contact on this surface component: the whole triangle is unowned.
+                let n = if splits { extra_levels(longest, node.depth, budget) } else { 0 };
+                samples = samples.saturating_add(1u64 << (2 * n).min(62));
+                if samples > budget.max_samples {
+                    budget_exceeded = Some(budget.max_samples);
+                    break 'tris;
+                }
+                let w = v::tri_area(t[0], t[1], t[2]) * density;
+                let x = [
+                    (t[0][0] + t[1][0] + t[2][0]) / 3.0,
+                    (t[0][1] + t[1][1] + t[2][1]) / 3.0,
+                    (t[0][2] + t[1][2] + t[2][2]) / 3.0,
+                ];
+                a_unowned_mm2 += w;
+                unowned_by_component[comp] += w;
+                centroid_acc[comp].0 = v::add(centroid_acc[comp].0, v::mul(x, w));
+                centroid_acc[comp].1 += w;
+                continue;
+            }
+            if len == 1 {
+                // One contact can own anything here: charge the triangle whole.
+                let n = if splits { extra_levels(longest, node.depth, budget) } else { 0 };
+                samples = samples.saturating_add(1u64 << (2 * n).min(62));
+                if samples > budget.max_samples {
+                    budget_exceeded = Some(budget.max_samples);
+                    break 'tris;
+                }
+                a_owned_mm2[arena[lo]] += v::tri_area(t[0], t[1], t[2]) * density;
+                continue;
+            }
+            if splits {
+                let m01 = v::midpoint(t[0], t[1]);
+                let m12 = v::midpoint(t[1], t[2]);
+                let m20 = v::midpoint(t[2], t[0]);
+                let depth = node.depth + 1;
+                stack.push(Node { t: [t[0], m01, m20], depth, lo, len });
+                stack.push(Node { t: [m01, t[1], m12], depth, lo, len });
+                stack.push(Node { t: [m20, m12, t[2]], depth, lo, len });
+                stack.push(Node { t: [m01, m12, m20], depth, lo, len });
+                continue;
+            }
+            // A terminal sample with two or more candidates left: the reference scan.
+            samples += 1;
+            if samples > budget.max_samples {
+                budget_exceeded = Some(budget.max_samples);
+                break 'tris;
+            }
+            let w = v::tri_area(t[0], t[1], t[2]) * density;
+            let x = [
+                (t[0][0] + t[1][0] + t[2][0]) / 3.0,
+                (t[0][1] + t[1][1] + t[2][1]) / 3.0,
+                (t[0][2] + t[1][2] + t[2][2]) / 3.0,
+            ];
+            let list = &arena[lo..lo + len];
+            let mut best = list[0];
+            let mut best_d = v::dist(x, sites[best].p0);
+            for &ci in &list[1..] {
+                let dd = v::dist(x, sites[ci].p0);
+                let tol = c::tol_geom(x, sites[ci].p0);
+                if dd < best_d - tol || (dd <= best_d + tol && sites[ci].contact_id < sites[best].contact_id) {
+                    best = ci;
+                    best_d = best_d.min(dd);
+                }
+            }
+            a_owned_mm2[best] += w;
+        }
+    }
+
+    let mut components_without_contact: Vec<usize> = Vec::new();
+    let mut largest: Option<(usize, f64, V3)> = None;
+    for cmp in 0..m.component_count {
+        if unowned_by_component[cmp] > 0.0 {
+            components_without_contact.push(cmp);
+            let (acc, wsum) = centroid_acc[cmp];
+            let centroid = if wsum > 0.0 { v::mul(acc, 1.0 / wsum) } else { [0.0; 3] };
             if largest.is_none_or(|(_, best, _)| unowned_by_component[cmp] > best) {
                 largest = Some((cmp, unowned_by_component[cmp], centroid));
             }
@@ -408,6 +613,44 @@ mod tests {
         );
         // Clause (b): the partition identity holds.
         assert!((o.accounted_mm2 - d.total_mm2).abs() <= c::tol_sum(d.total_mm2));
+    }
+
+    /// The pruned partition is the reference partition: same samples, same owners.
+    /// Contacts sit on, near and across the Voronoi boundaries (a tie, a chain of
+    /// three, a contact far outside the face, a contact on a second component's list).
+    #[test]
+    fn the_pruned_partition_equals_the_reference_scan() {
+        let m = Mesh::weld_exact(&slab_soup(10.0, 7.0));
+        let d = DemandSet::build(&m);
+        let pts = [
+            [2.5, 3.5, 0.0],
+            [7.5, 3.5, 0.0],
+            [5.0, 0.2, 0.0],
+            [5.0, 6.9, 0.0],
+            [5.0, 3.5, 0.0],
+            [9.9, 0.1, 0.4],
+            [-3.0, 3.5, 0.0],
+            [4.0, 2.0, 0.0],
+            [4.0, 2.0, 0.0],
+        ];
+        let sites: Vec<ContactSite> = pts.iter().enumerate().map(|(i, p)| ContactSite { contact_id: i, p0: *p, component: Some(0) }).collect();
+        let a = partition(&m, &d, &sites, &SampleBudget::default());
+        let b = partition_brute(&m, &d, &sites, &SampleBudget::default());
+        assert_eq!(a.samples, b.samples);
+        assert!(a.budget_exceeded.is_none() && b.budget_exceeded.is_none());
+        // Every sample goes to the same owner in both forms (the same scan and tie rule decide
+        // the boundary samples), so the areas differ only by the order of the float sums.
+        for (i, (x, y)) in a.a_owned_mm2.iter().zip(&b.a_owned_mm2).enumerate() {
+            assert!((x - y).abs() < 1e-7, "contact {i}: {x} vs {y}");
+        }
+        assert!((a.accounted_mm2 - b.accounted_mm2).abs() < 1e-9);
+        // With no contact at all the unowned area and its centroid agree.
+        let a0 = partition(&m, &d, &[], &SampleBudget::default());
+        let b0 = partition_brute(&m, &d, &[], &SampleBudget::default());
+        assert_eq!(a0.samples, b0.samples);
+        assert!((a0.a_unowned_mm2 - b0.a_unowned_mm2).abs() < 1e-9);
+        let (ca, cb) = (a0.largest_unowned_component.expect("a"), b0.largest_unowned_component.expect("b"));
+        assert!(v::dist(ca.2, cb.2) < 1e-6, "{:?} {:?}", ca.2, cb.2);
     }
 
     #[test]

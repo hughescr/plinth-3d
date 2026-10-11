@@ -5,7 +5,7 @@
 
 use super::band::{self, Blob};
 use super::consts as k;
-use super::matching::{self, diff_items, match_records, match_tips};
+use super::matching::{self, diff_items_with, match_records, match_tips};
 use super::side::{FileFacts, Item, ModelFacts, ModelRaster, RecInfo};
 use super::verdict::{Classes, Row, Status, Verdict};
 use crate::json::Json;
@@ -21,11 +21,13 @@ pub struct Options {
     pub assume_consumer_matched: bool,
     /// A missing log makes H5 INDETERMINATE (the bench sets this); otherwise H5 is reported as not assessed.
     pub require_logs: bool,
+    /// The noise allowances (`consts::Noise::measured()` is the gate; `none()` is the strict reading).
+    pub noise: k::Noise,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { band_voxels: 1, assume_consumer_matched: false, require_logs: false }
+        Self { band_voxels: 1, assume_consumer_matched: false, require_logs: false, noise: k::Noise::measured() }
     }
 }
 
@@ -235,7 +237,7 @@ fn trimmed(kind: RecordKind) -> bool {
     matches!(kind, RecordKind::ContactSphere | RecordKind::ContactTaper)
 }
 
-fn tier0_mesh_header(a: &ModelFacts, b: &ModelFacts, matched: Option<&[Option<usize>]>, sfx: &str) -> Row {
+fn tier0_mesh_header(a: &ModelFacts, b: &ModelFacts, matched: Option<&[Option<usize>]>, sfx: &str, noise: &k::Noise) -> Row {
     let mut worst_trim_ref = [0.0f64; 2];
     for r in &a.recs {
         if trimmed(r.kind) && r.dev_mm.is_finite() {
@@ -252,11 +254,13 @@ fn tier0_mesh_header(a: &ModelFacts, b: &ModelFacts, matched: Option<&[Option<us
         }
     }
     let mut bad: Vec<(f64, usize, f64)> = Vec::new();
+    // Calibration record of `T0_MESH_REL_NOISE`: the reference's own deviation of each flagged record.
+    let ref_dev = |j: usize| ref_of_cand[j].map(|i| a.recs[i].dev_mm);
     for (j, rc) in b.recs.iter().enumerate() {
         let allowed = match ref_of_cand[j] {
             Some(i) => {
                 let rd = a.recs[i].dev_mm;
-                if rd.is_finite() { rd + k::T0_MESH_HEADER_MM } else { f64::INFINITY }
+                if rd.is_finite() { rd * (1.0 + noise.t0_rel) + k::T0_MESH_HEADER_MM } else { f64::INFINITY }
             }
             None if trimmed(rc.kind) => {
                 worst_trim_ref[usize::from(rc.kind == RecordKind::ContactTaper)].max(k::T0_MESH_HEADER_MM) + k::T0_TRIMMED_SLACK_MM
@@ -270,8 +274,8 @@ fn tier0_mesh_header(a: &ModelFacts, b: &ModelFacts, matched: Option<&[Option<us
     bad.sort_by(|x, y| y.0.total_cmp(&x.0));
     let detail: Vec<String> = bad
         .iter()
-        .take(8)
-        .map(|(_, j, d)| format!("r{j} {} mesh is {d:.4} mm from its header at {}", b.recs[*j].kind.label(), p3(b.recs[*j].mid)))
+        .take(40)
+        .map(|(_, j, d)| format!("r{j} {} mesh is {d:.4} mm from its header at {} (reference record: {})", b.recs[*j].kind.label(), p3(b.recs[*j].mid), ref_dev(*j).map_or("unmatched".into(), |r| format!("{r:.4} mm"))))
         .collect();
     Row::new(
         &format!("T0.mesh_header{sfx}"),
@@ -286,6 +290,33 @@ fn tier0_mesh_header(a: &ModelFacts, b: &ModelFacts, matched: Option<&[Option<us
 // ---------------------------------------------------------------------------
 // Per-model comparison
 // ---------------------------------------------------------------------------
+
+/// What one invariant's item diff held, item by item: the calibration record of the flicker
+/// bands (`consts::flicker_band` is read off the largest values of these in jittered pairs).
+fn h4_evidence(inv: usize, checked: usize, ri: &[Item], ci: &[Item], d: &matching::ItemDiff) -> Json {
+    let item = |it: &Item, extra: f64| {
+        let mut o = Json::obj();
+        o.set("code", Json::str(it.code.clone()));
+        o.set("severity", Json::num(it.severity));
+        o.set("floor", Json::num(it.floor));
+        o.set("scale", Json::num(it.scale));
+        o.set("delta", Json::num(extra));
+        o
+    };
+    let mut o = Json::obj();
+    o.set("invariant", Json::str(crate::checks::GATING_IDS[inv]));
+    o.set("checked", Json::usize(checked));
+    o.set("new_failing", Json::Arr(d.new_failing.iter().map(|&j| item(&ci[j], ci[j].severity)).collect()));
+    o.set("worse", Json::Arr(d.worse.iter().map(|&(i, j)| item(&ci[j], ci[j].severity - ri[i].severity)).collect()));
+    o.set("lost_evaluation", Json::Arr(d.lost_evaluation.iter().map(|&j| item(&ci[j], 0.0)).collect()));
+    o.set("absorbed", Json::Arr(d.absorbed.iter().map(|&(j, kind)| {
+        let mut x = item(&ci[j], ci[j].severity);
+        x.set("kind", Json::str(kind));
+        x
+    }).collect()));
+    o.set("resolved", Json::usize(d.resolved));
+    o
+}
 
 fn in_bco_junction(name: &str, c: &band::Comp, grid: &crate::raster::RasterGrid) -> bool {
     let n = name.to_lowercase().replace(['_', ' '], "");
@@ -349,7 +380,7 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
         format!("ref {}, cand {}", a.frame_ok, b.frame_ok),
         "no support solid below the plate",
     ));
-    rows.push(tier0_mesh_header(a, b, rec_match.as_deref(), sfx));
+    rows.push(tier0_mesh_header(a, b, rec_match.as_deref(), sfx, &o.noise));
     let ras_bad: Vec<String> = [("ref", a), ("cand", b)]
         .iter()
         .flat_map(|(n, m)| {
@@ -379,6 +410,7 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
 
     // ---- drift (report, EQUIVALENT, blobs) ------------------------------
     let mut drift_summary = None;
+    let mut tol_a: Option<crate::raster::RunRaster> = None;
     let mut layers_tsv = String::new();
     if raster_ok && same_frame {
         let d = band::drift(&a.u, &b.u, &a.grid, o.band_voxels);
@@ -408,6 +440,7 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
         let big: Vec<Blob> = d.blobs.iter().filter(|x| x.vox >= 8).cloned().collect();
         ev.set("drift_blobs_8plus", Json::usize(big.len()));
         drift_summary = Some((d.voxels, d.blobs.first().map_or(0, |x| x.vox)));
+        tol_a = Some(d.tol_a);
         rows.push(Row::new(
             &format!("R.drift{sfx}"),
             "voxels beyond the 1-voxel band (report)",
@@ -432,6 +465,35 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
                 .iter()
                 .filter(|fb| !a.floating.iter().any(|fa| (fa.k - fb.k).abs() <= 1 && (fa.cx - fb.cx).hypot(fa.cy - fb.cy) < 0.2))
                 .collect();
+            // Flicker: when no material moved beyond the band (the drift is inside the EQUIVALENT
+            // limits), a piece that is "newly floating" and made of material the reference already
+            // had within the band is connectivity flicker of unchanged material, not new material:
+            // a sub-voxel motion can cut a one-voxel neck of a thin tip in the raster, but it cannot
+            // make material. A planted float is new material (none of it inside the band); a cut that
+            // matters removes enough material to show as drift.
+            let drift_small = drift_summary.is_some_and(|(vx, big)| vx <= k::EQ_DRIFT_VOXELS && big < k::EQ_DRIFT_BLOB_VOXELS);
+            let inside = match (&tol_a, drift_small) {
+                (Some(t), true) => band::pixels_inside(&b.u, t, &new, &b.grid),
+                _ => vec![0; new.len()],
+            };
+            let excused: Vec<bool> = new.iter().zip(&inside).map(|(x, &i)| i as f64 >= o.noise.h1_old_fraction * x.px as f64 && drift_small && o.noise.h1_old_fraction > 0.0).collect();
+            {
+                let mut j = Json::Arr(Vec::new());
+                for ((x, &i), &e) in new.iter().zip(&inside).zip(&excused).filter(|((x, _), _)| x.px >= 8).take(60) {
+                    let mut o = Json::obj();
+                    o.set("layer", Json::int(x.k));
+                    o.set("px", Json::int(x.px));
+                    o.set("inside_band_px", Json::int(i));
+                    o.set("excused", Json::Bool(e));
+                    j.push(o);
+                }
+                ev.set("h1_new_floating", j);
+                ev.set("h1_drift_small", Json::Bool(drift_small));
+            }
+            let flicker_n = excused.iter().filter(|&&e| e).count();
+            let kept: Vec<&band::Comp> = new.iter().zip(&excused).filter(|(_, &e)| !e).map(|(x, _)| *x).collect();
+            let new_all = new.len();
+            let new = kept;
             let big = new.iter().filter(|x| x.px >= k::H1_FLOAT_PX).count();
             let tot: i64 = new.iter().map(|x| x.px).sum();
             let det = new
@@ -440,7 +502,7 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
                 .take(8)
                 .map(|x| format!("new floating k={} {} px at ({:.3},{:.3}) near {}", x.k, x.px, x.cx, x.cy, nearest_rec(&b.recs, [x.cx, x.cy, b.grid.layer_z_mm(x.k)])))
                 .collect();
-            (big > 0 || tot > k::H1_FLOAT_TOTAL, format!("{} new floating components ({} of {} px or more), {tot} new floating voxels; ref {} / cand {} floating overall", new.len(), big, k::H1_FLOAT_PX, a.floating.len(), b.floating.len()), det)
+            (big > 0 || tot > k::H1_FLOAT_TOTAL, format!("{} new floating components ({} of {} px or more), {tot} new floating voxels; {flicker_n} of {new_all} candidate pieces excused as connectivity flicker of material inside the band; ref {} / cand {} floating overall", new.len(), big, k::H1_FLOAT_PX, a.floating.len(), b.floating.len()), det)
         } else {
             let cb = b.floating.iter().filter(|x| x.px >= k::H1_FLOAT_PX).count();
             let rb = a.floating.iter().filter(|x| x.px >= k::H1_FLOAT_PX).count();
@@ -466,6 +528,19 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
 
     // ---- H4 audit invariants, per matched item ------------------------------------
     let mut h4_rows: Vec<Row> = Vec::new();
+    let mut h4_ev: Vec<Json> = Vec::new();
+    // Records present in one file only (a removed member, a new brace): the places where the design
+    // changed. Noise allowances do not reach an item beside one (matching::Allowance::veto).
+    let disturbed: Vec<(V3, V3)> = rec_match.as_ref().map_or_else(Vec::new, |m| {
+        let mut hit = vec![false; b.recs.len()];
+        for j in m.iter().flatten() {
+            hit[*j] = true;
+        }
+        let seg = |r: &RecInfo| if r.kind.is_ball() { (r.mid, r.mid) } else { (r.a, r.b) };
+        let lost = m.iter().enumerate().filter(|(_, j)| j.is_none()).map(|(i, _)| seg(&a.recs[i]));
+        let added = hit.iter().enumerate().filter(|(_, h)| !**h).map(|(j, _)| seg(&b.recs[j]));
+        lost.chain(added).collect()
+    });
     {
         let (aa, ab) = (&a.audit, &b.audit);
         if !aa.ran || !ab.ran {
@@ -488,7 +563,12 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
                 let id = format!("H4.i{}{sfx}", inv + 1);
                 let title = crate::checks::GATING_TITLES[inv];
                 if same_frame {
-                    let d = diff_items(&ri, &ci);
+                    let checked = aa.counts.get(inv).map_or(0, |c| c.0);
+                    let band = |it: &Item, worse: bool| o.noise.band(&it.code, it.scale, worse);
+                    let veto = |it: &Item| it.anchor.is_some_and(|p| disturbed.iter().any(|&(x, y)| seg_dist(p, x, y) <= k::H4_MATCH_MM));
+                    let allow = matching::Allowance { band: &band, veto: &veto, cap: if o.noise.items { o.noise.cap(checked) } else { 0 } };
+                    let d = diff_items_with(&ri, &ci, &allow);
+                    h4_ev.push(h4_evidence(inv, checked, &ri, &ci, &d));
                     if inv == 8 {
                         i9_bad.extend(d.new_failing.iter().filter_map(|&j| ci[j].anchor));
                         i9_bad.extend(d.worse.iter().filter_map(|&(_, j)| ci[j].anchor));
@@ -504,6 +584,9 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
                     for &j in d.lost_evaluation.iter().take(4) {
                         det.push(format!("CANNOT EVALUATE {} at {}", ci[j].code, ci[j].anchor.map_or("-".into(), p3)));
                     }
+                    for &(j, kind) in d.absorbed.iter().take(4) {
+                        det.push(format!("FLICKER ({kind}, inside the noise band) {} severity {:.5} at {}", ci[j].code, ci[j].severity, ci[j].anchor.map_or("-".into(), p3)));
+                    }
                     let fail = !d.new_failing.is_empty() || !d.worse.is_empty();
                     h4_rows.push(
                         Row::new(
@@ -511,8 +594,8 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
                             title,
                             status_of(fail, !d.lost_evaluation.is_empty()),
                             format!(
-                                "new failing {}, worse {}, cannot evaluate {}, resolved {} (ref {} items, cand {})",
-                                d.new_failing.len(), d.worse.len(), d.lost_evaluation.len(), d.resolved, ri.len(), ci.len()
+                                "new failing {}, worse {}, cannot evaluate {}, resolved {}, flicker absorbed {} of {} allowed (ref {} items, cand {})",
+                                d.new_failing.len(), d.worse.len(), d.lost_evaluation.len(), d.resolved, d.absorbed.len(), allow.cap, ri.len(), ci.len()
                             ),
                             "no new failing item, no matched item over 10 % worse, no item the reference evaluated left unevaluated",
                         )
@@ -541,6 +624,8 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
         }
     }
 
+    ev.set("h4", Json::Arr(h4_ev));
+
     // ---- H2 ---------------------------------------------------------------------------
     {
         let open_ind = open && consumer_unverified;
@@ -550,11 +635,19 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
             let mut lost = 0usize;
             let mut contact_lost = 0usize;
             let mut det = Vec::new();
+            let mut h2_ev: Vec<Json> = Vec::new();
             for ia in a.islands.iter().filter(|x| x.c.px >= k::H2_ISLAND_PX) {
                 let Some(ib) = b.islands.iter().find(|x| x.c.k == ia.c.k && (x.c.cx - ia.c.cx).hypot(x.c.cy - ia.c.cy) < k::H2_MATCH_MM) else {
                     continue;
                 };
-                if ia.c.attach > 0 && ib.c.attach == 0 {
+                if ia.c.attach != ib.c.attach && ia.c.attach.min(ib.c.attach) <= 16 {
+                    let mut o = Json::obj();
+                    o.set("island_px", Json::int(ia.c.px));
+                    o.set("attach_ref", Json::int(ia.c.attach));
+                    o.set("attach_cand", Json::int(ib.c.attach));
+                    h2_ev.push(o);
+                }
+                if ia.c.attach > o.noise.h2_attach_px && ib.c.attach == 0 {
                     lost += 1;
                     det.push(format!("island k={} {} px at ({:.3},{:.3}) lost ALL support below it ({} px -> 0)", ia.c.k, ia.c.px, ia.c.cx, ia.c.cy, ia.c.attach));
                 }
@@ -570,9 +663,24 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
                     }
                 }
             }
+            ev.set("h2_low_attach_changes", Json::Arr(h2_ev));
+            // Islands with no bearing at all, counted; a count may rise by the share the noise moved
+            // (an island of a pixel or two of bearing flips between 0 and 1 under sub-voxel motion).
             let un = |m: &ModelFacts| m.islands.iter().filter(|x| x.c.px >= k::H2_ISLAND_PX && x.c.attach == 0).count();
-            let (ur, uc) = (un(a), un(b));
-            (lost > 0 || contact_lost > 0 || uc > ur, format!("islands losing all support {lost}, losing contacts {contact_lost}; unsupported islands of {} px or more {ur} -> {uc}", k::H2_ISLAND_PX), det)
+            // A candidate island with no bearing whose reference island bore at most the noise
+            // (a pixel or two) is the same island at the edge of its threshold: not a new one.
+            let uc_new = b
+                .islands
+                .iter()
+                .filter(|x| x.c.px >= k::H2_ISLAND_PX && x.c.attach == 0)
+                .filter(|ib| {
+                    !a.islands.iter().any(|ia| ia.c.k == ib.c.k && (ia.c.cx - ib.c.cx).hypot(ia.c.cy - ib.c.cy) < k::H2_MATCH_MM && ia.c.attach > 0 && ia.c.attach <= o.noise.h2_attach_px)
+                })
+                .count();
+            let (ur, uc) = (un(a), uc_new);
+            let n_isl = a.islands.iter().filter(|x| x.c.px >= k::H2_ISLAND_PX).count();
+            let slack = if o.noise.h2_attach_px > 0 { o.noise.cap(n_isl) } else { 0 };
+            (lost > 0 || contact_lost > 0 || uc > ur + slack, format!("islands losing all support {lost}, losing contacts {contact_lost}; unsupported islands of {} px or more {ur} -> {uc} (count slack {slack})", k::H2_ISLAND_PX), det)
         } else {
             let un = |m: &ModelFacts| m.islands.iter().filter(|x| x.c.px >= k::H2_ISLAND_PX && x.c.attach == 0).count();
             let (ur, uc) = (un(a), un(b));
@@ -608,7 +716,8 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
         if !x.measured || !y.measured {
             rows.push(Row::new(&format!("H6{sfx}"), "defective heads do not rise", Status::Skipped, "geometry report not run".into(), ""));
         } else {
-            let fail = y.defective > x.defective || y.skim_violations > x.skim_violations;
+            let skim_allow = (o.noise.h6_skim_fraction * x.skim_violations as f64).ceil() as usize;
+            let fail = y.defective > x.defective || y.skim_violations > x.skim_violations + skim_allow;
             rows.push(Row::new(
                 &format!("H6{sfx}"),
                 "defective heads do not rise",
@@ -660,6 +769,7 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
         // N3 member sections along each matched contact's path.
         let (mut thin, mut waived, mut worst_ratio, mut sec_eq) = (Vec::new(), 0usize, f64::MAX, true);
         let mut evaluated = 0usize;
+        let mut n3_ev: Vec<(f64, f64)> = Vec::new();
         // Each member on a path is held to its own section: one minimum over the whole path
         // lets a narrow unchanged taper hide the thinning of a thicker member. The path
         // minimum is kept as well, for members that no record of the other file matches.
@@ -672,7 +782,11 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
             let waivable = margin.is_some_and(|m| m >= 1.5);
             let mut tip_thin = false;
             let mut tip_waived = false;
-            let mut judge = |ratio: f64, msg: &dyn Fn() -> String, key: Option<usize>| {
+            let mut judge = |from: f64, to: f64, msg: &dyn Fn() -> String, key: Option<usize>| {
+                // A section that moved by no more than the noise of its own measurement is not a
+                // change, whatever its ratio: on a sub-voxel tip radius a few microns are most of it.
+                let ratio = if (from - to).abs() > o.noise.n3_mm { to / from } else { 1.0 };
+                n3_ev.push((from, to));
                 worst_ratio = worst_ratio.min(ratio);
                 if (ratio - 1.0).abs() > k::EQ_SECTION {
                     sec_eq = false;
@@ -689,7 +803,7 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
                     }
                 }
             };
-            judge(y / x, &|| format!("contact r{j} at {}: path minimum section {x:.4} -> {y:.4} mm ({:+.1} %), I3 margin {}", p3(b.recs[j].mid), 100.0 * (y / x - 1.0), margin.map_or("unmeasured".into(), |m| format!("{m:.2}x"))), None);
+            judge(*x, *y, &|| format!("contact r{j} at {}: path minimum section {x:.4} -> {y:.4} mm ({:+.1} %), I3 margin {}", p3(b.recs[j].mid), 100.0 * (y / x - 1.0), margin.map_or("unmeasured".into(), |m| format!("{m:.2}x"))), None);
             let bset: std::collections::HashSet<usize> = b.path_members.get(&j).map(|v| v.iter().copied().collect()).unwrap_or_default();
             for &m in a.path_members.get(&i).map(Vec::as_slice).unwrap_or_default() {
                 let Some(n) = rec_match[m] else { continue };
@@ -700,11 +814,26 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
                 if xr <= 0.0 {
                     continue;
                 }
-                judge(yr / xr, &|| format!("member r{n} at {} on the path of contact r{j}: section {xr:.4} -> {yr:.4} mm ({:+.1} %), I3 margin {}", p3(b.recs[n].mid), 100.0 * (yr / xr - 1.0), margin.map_or("unmeasured".into(), |q| format!("{q:.2}x"))), Some(n));
+                judge(xr, yr, &|| format!("member r{n} at {} on the path of contact r{j}: section {xr:.4} -> {yr:.4} mm ({:+.1} %), I3 margin {}", p3(b.recs[n].mid), 100.0 * (yr / xr - 1.0), margin.map_or("unmeasured".into(), |q| format!("{q:.2}x"))), Some(n));
             }
             if tip_waived && !tip_thin {
                 waived += 1;
             }
+        }
+        {
+            // Calibration record of N3_NOISE_MM: every section pair whose ratio moved by more than
+            // the EQUIVALENT limit, with the absolute change (largest first).
+            let mut moved: Vec<(f64, f64, f64)> = n3_ev.iter().filter(|(f, t)| *f > 0.0 && (t / f - 1.0).abs() > k::EQ_SECTION).map(|&(f, t)| ((f - t).abs(), f, t)).collect();
+            moved.sort_by(|x, y| y.0.total_cmp(&x.0));
+            let mut j = Json::Arr(Vec::new());
+            for (d, f, t) in moved.iter().take(40) {
+                let mut o = Json::obj();
+                o.set("abs_change_mm", Json::num(*d));
+                o.set("from_mm", Json::num(*f));
+                o.set("to_mm", Json::num(*t));
+                j.push(o);
+            }
+            ev.set("n3_ratio_moved", j);
         }
         rows.push(
             Row::new(&format!("N3{sfx}"), "member sections along each contact's path (shared trunks included)", status_of(!thin.is_empty(), evaluated == 0 && !matched.is_empty()), format!("{} path or member sections (of {evaluated} evaluated matched paths) more than 15 % thinner without an I3 margin of 1.5x ({waived} paths waived by margin); worst ratio {}", thin.len(), if worst_ratio == f64::MAX { "n/a".into() } else { format!("{worst_ratio:.3}") }), "no path more than 15 % thinner unless its I3 margin stays at 1.5x")
@@ -712,7 +841,7 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
         );
         // N4 thin joins.
         let n4_ind = (open && consumer_unverified) || ((a.floating.iter().any(|f| in_bco_junction(&a.name, f, &a.grid)) || b.floating.iter().any(|f| in_bco_junction(&b.name, f, &b.grid))) && consumer_unverified);
-        let allow = ((a.thin_joins as f64 * k::N4_FRACTION).ceil() as i64).max(k::N4_MIN_RISE);
+        let allow = ((a.thin_joins as f64 * k::N4_FRACTION.max(o.noise.n4_fraction)).ceil() as i64).max(k::N4_MIN_RISE);
         let rise = b.thin_joins as i64 - a.thin_joins as i64;
         rows.push(Row::new(&format!("N4{sfx}"), "thin joins", status_of(rise > allow, n4_ind && raster_ok), format!("{} -> {} (rise {rise}, allowed {allow})", a.thin_joins, b.thin_joins), "rise at most max(10 %, 20)"));
         // N5 bracing.

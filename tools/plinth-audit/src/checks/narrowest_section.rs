@@ -126,9 +126,9 @@ use crate::consts as c;
 use crate::context::ModelContext;
 use crate::graph::SupportGraph;
 use crate::json::Json;
-use crate::primitives::Primitive;
-use crate::raster::RunRaster;
-use crate::reader::RecordKind;
+use crate::primitives::{GeomError, Primitive};
+use crate::raster::{Budget, RasterGrid, RunRaster};
+use crate::reader::{RecordKind, SupportRecord};
 use crate::seat::Seat;
 use crate::vec3::{self as v, V3};
 use std::collections::{HashSet, VecDeque};
@@ -187,20 +187,30 @@ impl Check for NarrowestSection {
         // could-not-measure-at-all indeterminates below.
         let mut band_indeterminate_count = 0usize;
 
-        for seat in &ctx.seats {
+        // Every contact is evaluated on its own (its walk, its per-contact raster and its
+        // stations read nothing another contact writes), so the contacts are evaluated in
+        // parallel and the loop below reads the results in contact order: the outcome is the
+        // sequential one, bit for bit. The shared products (the ownership partition) are
+        // built first, here, because the context builds them lazily and is not `Sync`.
+        let ownership_exceeded = ctx.ownership().budget_exceeded.is_some();
+        let a_owned: Vec<Option<f64>> = ctx.seats.iter().map(|s| ctx.a_owned_mm2(s.contact_id)).collect();
+        let shared = Shared {
+            graph: &ctx.graph,
+            primitives: &ctx.primitives,
+            records: &ctx.model.records,
+            grid: ctx.grid,
+            budget: ctx.audit.options.raster_budget,
+            ownership_exceeded,
+            ground: &ground,
+        };
+        let seats = &ctx.seats;
+        let evals = par_map(seats.len(), crate::geometry::default_threads(), |i| {
+            evaluate_contact(&shared, &seats[i], a_owned[i], step)
+        });
+
+        for (seat, ev) in ctx.seats.iter().zip(evals) {
             let cid = seat.contact_id;
-            // Ground is computed FRESH per contact, excluding `cid` itself
-            // from clause (ii): a tip's own valid seat grounds OTHER
-            // primitives' walks (a brace that lands a second, independent
-            // anchor in the model), never its own -- otherwise every
-            // properly-embedded tip terminates its own walk at distance
-            // zero and I3 degenerates into re-grading the tip alone, which
-            // is exactly the defect this invariant exists to catch. See the
-            // module docs.
-            let is_ground_for_this_walk = |r: usize| ground[r] && r != cid;
-            let dist = ctx.graph.distance_to_ground(&is_ground_for_this_walk);
-            let in_degree = in_degree_of(&ctx.graph, &dist);
-            match evaluate_contact(ctx, seat, &dist, &in_degree, step) {
+            match ev {
                 Ok(r) => {
                     let a_required_mm2 = r.a_owned_mm2 / x_allowed;
                     let tol = c::tol_area(r.a_owned_mm2, x_allowed);
@@ -554,12 +564,12 @@ struct Seg {
 /// walk's stopping point) is degenerate along its own centreline and
 /// contributes no arc length of its own -- its solid is still part of the
 /// per-contact raster, so nearby stations see its bulk.
-fn build_segments(ctx: &ModelContext, seat: &Seat, path: &[usize]) -> Option<Vec<Seg>> {
+fn build_segments(ctx: &Shared, seat: &Seat, path: &[usize]) -> Option<Vec<Seg>> {
     let u = seat.u?;
     let h = seat.h_delivered_mm?;
     let r_ball = seat.r_ball_mm;
     let e0 = v::add(seat.p0, v::mul(u, h));
-    let tip_rec = &ctx.model.records[path[0]];
+    let tip_rec = &ctx.records[path[0]];
     let centre = v::midpoint(tip_rec.start_mm, tip_rec.end_mm);
 
     let mut segs: Vec<Seg> = Vec::with_capacity(path.len());
@@ -650,6 +660,28 @@ fn locate(segs: &[Seg], cum: &[f64], s: f64) -> (usize, f64) {
 // The section area at one station
 // ---------------------------------------------------------------------------
 
+/// A multiplicative hash for the flood fill's visited set. The set is only asked "is this cell in
+/// it" and "how many", so the hash cannot change a result; the default SipHash was most of the
+/// cost of a station.
+#[derive(Default, Clone, Copy)]
+struct CellHasher(u64);
+
+impl std::hash::Hasher for CellHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ u64::from(b)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+    }
+    fn write_i32(&mut self, i: i32) {
+        self.0 = (self.0.rotate_left(5) ^ u64::from(i as u32)).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+type CellSet = HashSet<(i32, i32), std::hash::BuildHasherDefault<CellHasher>>;
+
 /// How many flood-fill cells one station's quadrature may visit before it is
 /// declared unmeasurable rather than left to run away. Sized off the local
 /// primitive's own nominal radius (with generous headroom for a bulge near a
@@ -679,7 +711,7 @@ fn cross_section_area(
     if !raster.contains_point(pos) {
         return None;
     }
-    let mut visited: HashSet<(i32, i32)> = HashSet::new();
+    let mut visited: CellSet = HashSet::default();
     let mut frontier: VecDeque<(i32, i32)> = VecDeque::new();
     visited.insert((0, 0));
     frontier.push_back((0, 0));
@@ -737,11 +769,60 @@ fn indet(reason: &'static str, path: Vec<usize>) -> EvalIndeterminate {
     EvalIndeterminate { reason, path }
 }
 
+/// What one contact's evaluation reads of the model, as plain shared data (`Sync`), so the
+/// contacts can be evaluated on several threads. Everything lazy in the context (the
+/// ownership partition) is built before this is made.
+struct Shared<'a> {
+    graph: &'a SupportGraph,
+    primitives: &'a [Result<Primitive, GeomError>],
+    records: &'a [SupportRecord],
+    grid: RasterGrid,
+    budget: Budget,
+    ownership_exceeded: bool,
+    ground: &'a [bool],
+}
+
+impl Shared<'_> {
+    fn primitive(&self, record: usize) -> Result<&Primitive, GeomError> {
+        self.primitives[record].as_ref().map_err(|e| *e)
+    }
+}
+
+/// `f(0..n)` on up to `threads` threads, results in index order. Work is handed out by an atomic
+/// counter, so uneven items (a long stilt, a short post) balance themselves.
+fn par_map<T: Send>(n: usize, threads: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    let workers = threads.clamp(1, n.max(1));
+    if workers == 1 {
+        return (0..n).map(f).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut parts: Vec<Vec<(usize, T)>> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..workers)
+            .map(|_| {
+                sc.spawn(|| {
+                    let mut mine = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if i >= n {
+                            break;
+                        }
+                        mine.push((i, f(i)));
+                    }
+                    mine
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap_or_default()).collect()
+    });
+    let mut all: Vec<(usize, T)> = parts.drain(..).flatten().collect();
+    all.sort_by_key(|x| x.0);
+    all.into_iter().map(|x| x.1).collect()
+}
+
 fn evaluate_contact(
-    ctx: &ModelContext,
+    ctx: &Shared,
     seat: &Seat,
-    dist: &[Option<u32>],
-    in_degree: &[usize],
+    a_owned_mm2: Option<f64>,
     step: f64,
 ) -> Result<EvalOk, EvalIndeterminate> {
     let cid = seat.contact_id;
@@ -753,17 +834,30 @@ fn evaluate_contact(
     if seat.entry_component.is_none() {
         return Err(indet("ownership_indeterminate", vec![cid]));
     }
-    if ctx.ownership().budget_exceeded.is_some() {
+    if ctx.ownership_exceeded {
         return Err(indet("ownership_indeterminate", vec![cid]));
     }
-    let Some(a_owned_mm2) = ctx.a_owned_mm2(cid) else {
+    let Some(a_owned_mm2) = a_owned_mm2 else {
         return Err(indet("ownership_indeterminate", vec![cid]));
     };
     if !a_owned_mm2.is_finite() || a_owned_mm2 < 0.0 {
         return Err(indet("ownership_indeterminate", vec![cid]));
     }
 
-    let path = match walk_path(&ctx.graph, dist, in_degree, cid) {
+    // Ground is computed FRESH per contact, excluding `cid` itself
+    // from clause (ii): a tip's own valid seat grounds OTHER
+    // primitives' walks (a brace that lands a second, independent
+    // anchor in the model), never its own -- otherwise every
+    // properly-embedded tip terminates its own walk at distance
+    // zero and I3 degenerates into re-grading the tip alone, which
+    // is exactly the defect this invariant exists to catch. See the
+    // module docs.
+    let is_ground_for_this_walk = |r: usize| ctx.ground[r] && r != cid;
+    let dist = ctx.graph.distance_to_ground(&is_ground_for_this_walk);
+    let in_degree = in_degree_of(ctx.graph, &dist);
+    let (dist, in_degree) = (&dist[..], &in_degree[..]);
+
+    let path = match walk_path(ctx.graph, dist, in_degree, cid) {
         PathOutcome::Path(p) => p,
         PathOutcome::Open => return Err(indet("path_open", vec![cid])),
         PathOutcome::Cycle => return Err(indet("path_cycles", vec![cid])),
@@ -777,7 +871,7 @@ fn evaluate_contact(
         }
     }
     let raster_path =
-        match RunRaster::from_primitives(&path_prims, ctx.grid, &ctx.audit.options.raster_budget)
+        match RunRaster::from_primitives(&path_prims, ctx.grid, &ctx.budget)
         {
             Ok(r) => r,
             Err(_) => return Err(indet("section_component_empty", path)),
