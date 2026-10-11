@@ -262,6 +262,16 @@ reached no carrier (`tests/it/twin_merge.rs` grades this). Twins in two differen
 6 % of the pairs) are not merged: the raised arm would have to change column. A pair that overlaps
 only after the sizing has grown the tips is not seen at seating.
 
+The arm a twin was merged into keeps the place its twin gave it (`SweepStrut::twin_host`). Before the
+merge the twin's shaft landed on that arm, and an arm another member rests on is never re-routed by the
+passes that move arms: the congestion lean, the lip-seat re-landing, the graze conversion and the
+slenderness merges (`landing_check::carries_someone`); lip-seat also leans a whole arm along one axis
+when its tip meets a steep face, which is the 30-46 deg post this rule removes. A merged host that those
+passes could move leaned away as a lone leaf: first measured at 5.55 mm out for a 0.018 mm sliver
+between two census root discs (Deinonychus arm 183), and four ridge posts that stood vertical leaned
+33-46 deg over a free vertical landing. The host is therefore counted as carrying, in `carries_someone`
+and in the congestion lean, and lip-seat locks it outright. A bite it cannot lose stays a seat-trim WARNING.
+
 **The clearance re-route after the final sizing.** The up-sweep places an arm at a lower bound
 of the radius it is later drawn at (the area law and the thickening grow it), so after the final
 sizing and the ties the census names every arm whose drawn solid stands within the final gap

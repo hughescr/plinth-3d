@@ -54,7 +54,7 @@ pub(crate) fn straight(
         interior: false,
         radius_mm: vec![radius; k_top + 1],
         carried_mm2: vec![0.0; k_top + 1],
-        covered_demand: Vec::new(),
+        covered_demand: Vec::new(), twin_host: false,
         inserted_by_load: false,
         path: Vec::new(),
         seat_face: SeatFace::default(),
@@ -315,6 +315,57 @@ fn the_congestion_lean_never_re_routes_a_headed_arm() {
     assert!(outcome.headed_kept >= 1, "the pass fired on the headed arm: {outcome:?}");
     assert_eq!(struts[1].path, path_before, "the headed arm's route is untouched");
     assert_heads_honoured(&before, &tops, &struts, "congestion lean");
+}
+
+/// QUALITY LANE Q2 (2026-10-10), congestion lean. Two stacked plate roots, one
+/// of them an arm a twin seat was merged into (`twin_host`): the twin rested on
+/// it before the merge, so the lean never moved it, and the merge must keep it
+/// so. Without the flag the same pair leans BOTH roots (the control run).
+/// SABOTAGE: drop the `twin_host` loop in `congestion::lean_congested_roots`
+/// and the host is re-routed, to the nearest clear plate cell outside the
+/// silhouette (Deinonychus arm 183: 5.55 mm for a 0.018 mm sliver of overlap).
+#[test]
+fn the_congestion_lean_never_re_routes_an_arm_a_twin_was_merged_into() {
+    let grid = grid();
+    let history = ColumnHistory::new(&grid);
+    let keep_out = crate::drain::DrainKeepOut::none();
+    let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
+    let context = crate::congestion::CongestionContext {
+        grid: &grid,
+        history: &history,
+        keep_out: &keep_out,
+        lean: &lean,
+        layer_height_mm: H,
+        layers: 500,
+        flare_factor: 1.6,
+        tip_radius_min_mm: 0.05,
+        hex_separation_mm: 1.0,
+        x_allowed: 18.0,
+        outward_lean: true,
+        flank_arms: false,
+        max_struts: 1_000,
+    };
+    let pair = || {
+        vec![
+            straight(&grid, 0, 150, 150, 200, 0.3),
+            straight(&grid, 1, 150, 156, 200, 0.3),
+        ]
+    };
+    // Control: neither is a host, so the pass re-routes at least one of them,
+    // and the one it would spare in the run below is among those it moves.
+    let mut control = pair();
+    let mut control_outcome = crate::congestion::CongestionOutcome::default();
+    crate::congestion::apply_remedies(&context, &mut control, &mut control_outcome);
+    assert!(
+        !control[1].path.is_empty(),
+        "anti-vacuity: without the flag the second root is leaned: {control_outcome:?}"
+    );
+    let mut struts = pair();
+    struts[1].twin_host = true;
+    let mut outcome = crate::congestion::CongestionOutcome::default();
+    let moved = crate::congestion::apply_remedies(&context, &mut struts, &mut outcome);
+    assert!(outcome.arms_leaned >= 1 && moved >= 1, "the other root was leaned: {outcome:?}");
+    assert!(struts[1].path.is_empty(), "the merged host's route is untouched");
 }
 
 // ---------------------------------------------------------- forced merges

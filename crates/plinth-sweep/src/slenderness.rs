@@ -5116,7 +5116,7 @@ fn tie_by_mast(
         interior: false,
         radius_mm: Vec::new(),
         carried_mm2: Vec::new(),
-        covered_demand: Vec::new(),
+        covered_demand: Vec::new(), twin_host: false,
         inserted_by_load: true,
         path: Vec::new(),
         seat_face: crate::SeatFace::default(),
@@ -6282,7 +6282,7 @@ fn push_brace(
         interior: false,
         radius_mm: Vec::new(),
         carried_mm2: Vec::new(),
-        covered_demand: Vec::new(),
+        covered_demand: Vec::new(), twin_host: false,
         // A brace roots no demand cell, so the removal pass's coverage test
         // would be vacuously true for it; the same flag that protects a
         // load-inserted arm protects this one, for the same reason.
@@ -6815,7 +6815,7 @@ fn tie_member(grid: &Grid, id: u32, post: u32, plan: &TiePlan, radius_mm: f64) -
         interior: false,
         radius_mm: vec![radius_mm; span],
         carried_mm2: vec![0.0; span],
-        covered_demand: Vec::new(),
+        covered_demand: Vec::new(), twin_host: false,
         // A tie roots no demand cell, so the removal pass's coverage test
         // would be vacuously true for it; the flag that protects a
         // load-inserted arm protects it, for the same reason.
@@ -7408,7 +7408,7 @@ mod tests {
             interior: false,
             radius_mm: vec![radius; 80],
             carried_mm2: vec![0.0; 80],
-            covered_demand: Vec::new(),
+            covered_demand: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             seat_face: crate::SeatFace::default(),

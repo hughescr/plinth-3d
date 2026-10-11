@@ -2223,7 +2223,7 @@ mod tests {
             interior: false,
             radius_mm: vec![0.2, 0.15, 0.1, 0.05],
             carried_mm2: vec![4.0, 3.0, 2.0, 1.0],
-            covered_demand: Vec::new(),
+            covered_demand: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             seat_face: SeatFace::default(),

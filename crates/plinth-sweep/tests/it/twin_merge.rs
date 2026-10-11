@@ -11,6 +11,7 @@
 //! | test | what it asserts | how it is kept from passing vacuously |
 //! |---|---|---|
 //! | `a_spike_gets_one_arm_not_two` | with the rule, no two arms of a straight spike stand with tip balls that overlap at the smallest tip, and the arm count falls | the merged-seat counter is positive with the rule on and zero off, and the off run MUST hold an overlapping pair |
+//! | `a_merged_host_is_marked_and_stays_straight` | the arm a twin is merged into is marked `twin_host` and stays in its column | the marked-arm count must be positive with the rule on and zero off |
 //! | `a_merged_spike_keeps_all_its_load` | the merge loses no load: the plate carries what it carried, nothing is left uncarried, and the two sweeps agree | the off run is the control, and the merged-seat counter must be positive |
 //!
 //! The second test is the one that failed the first form of the rule (the twin
@@ -108,6 +109,28 @@ fn a_spike_gets_one_arm_not_two() {
     let (on, off, policy) = runs(&spike(0.4, 6.0, 2.0));
     assert!(on.report.counters.twin_seats_merged > 0);
     assert!(overlapping_pairs(&on, &policy) < overlapping_pairs(&off, &policy));
+}
+
+/// The arm a twin is merged into is marked (`twin_host`), which is what keeps
+/// the passes that re-route arms (congestion lean, lip-seat, graze, the
+/// slenderness merges) from leaning it once its twin is gone; on a straight
+/// spike it stays straight to the plate. The control (rule off) has no host.
+#[test]
+fn a_merged_host_is_marked_and_stays_straight() {
+    for (w, h) in [(0.8, 6.0), (0.5, 4.0)] {
+        let (on, off, _) = runs(&spike(w, h, 0.0));
+        let hosts: Vec<&SweepStrut> = arms(&on).into_iter().filter(|arm| arm.twin_host).collect();
+        assert!(!hosts.is_empty(), "spike {w} x {h}: no arm was marked, so this grades nothing");
+        assert!(
+            u64::try_from(hosts.len()).expect("small") <= on.report.counters.twin_seats_merged,
+            "spike {w} x {h}: more hosts than merges"
+        );
+        assert!(
+            hosts.iter().all(|arm| !arm.is_leaned()),
+            "spike {w} x {h}: a merged host was leaned away from its column"
+        );
+        assert!(arms(&off).iter().all(|arm| !arm.twin_host), "spike {w} x {h}: the control marked a host");
+    }
 }
 
 #[test]

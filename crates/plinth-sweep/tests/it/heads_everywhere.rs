@@ -109,7 +109,7 @@ fn arm(id: u32, cell: usize, center: [f64; 2]) -> SweepStrut {
         interior: false,
         radius_mm: Vec::new(),
         carried_mm2: Vec::new(),
-        covered_demand: Vec::new(),
+        covered_demand: Vec::new(), twin_host: false,
         inserted_by_load: false,
         path: Vec::new(),
         straight_fallback: None,

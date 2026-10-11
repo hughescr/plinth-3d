@@ -242,6 +242,14 @@ pub struct SweepStrut {
     /// Demand cells this arm newly rooted when it went in. The removal pass
     /// asks whether a survivor still covers each of them.
     pub covered_demand: Vec<usize>,
+    /// A twin seat was merged into this arm ([`up_sweep::twin_host`], owner
+    /// ruling 2026-10-10). Before the merge the twin's shaft landed on this
+    /// arm, and an arm another member rests on is never moved by the passes
+    /// that re-route arms (`landing_check::carries_someone`). The merge must
+    /// not strip that protection: the arm it absorbed the twin into would
+    /// otherwise be re-landed by those passes as a lone leaf (Deinonychus arm
+    /// 183: leaned 5.55 mm out for a 0.018 mm sliver of two census discs).
+    pub twin_host: bool,
     /// Placed by the down-sweep because the registered area law asked for the
     /// section, not by the up-sweep because reach asked for the cover. Such an
     /// arm roots no demand cell — `covered_demand` is empty by construction —
@@ -5011,7 +5019,7 @@ mod removal_tests {
             interior: false,
             radius_mm: Vec::new(),
             carried_mm2: Vec::new(),
-            covered_demand: Vec::new(),
+            covered_demand: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             seat_face: crate::SeatFace::default(),
@@ -5178,7 +5186,7 @@ mod removal_tests {
             // Below minimum_load_mm2: this is exactly the state that made a
             // load-inserted arm a removal candidate before the fix.
             carried_mm2: vec![0.5],
-            covered_demand: Vec::new(),
+            covered_demand: Vec::new(), twin_host: false,
             inserted_by_load: true,
             path: Vec::new(),
             seat_face: crate::SeatFace::default(),
@@ -5223,7 +5231,7 @@ mod removal_tests {
             interior: false,
             radius_mm: vec![0.1],
             carried_mm2: vec![carried],
-            covered_demand: Vec::new(),
+            covered_demand: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             seat_face: crate::SeatFace::default(),

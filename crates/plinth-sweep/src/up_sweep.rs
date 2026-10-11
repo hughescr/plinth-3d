@@ -1950,6 +1950,7 @@ fn raise_host_seat(
         head.cells.extend(core::iter::repeat_n(seat, steps));
     }
     host.k_top = layer;
+    host.twin_host = true;
     host.covered_demand.extend_from_slice(covered);
 }
 
@@ -2244,6 +2245,7 @@ fn commit_seat(
         radius_mm: Vec::new(),
         carried_mm2: Vec::new(),
         covered_demand: covered,
+        twin_host: false,
         inserted_by_load: false,
         // Recorded ONLY for a leaned arm, and recorded NOW, because the column
         // history this reads is a running state that will not say the same
