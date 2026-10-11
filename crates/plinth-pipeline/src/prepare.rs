@@ -3876,12 +3876,19 @@ fn print_sweep_disclosure(
     for warning in lane.warnings.iter().take(20) {
         println!(
             "[sweep {model}]   unbraced_run_over_limit: arm {} layers {}..{} runs {:.3} mm \
-             against a limit of {:.3} mm",
+             against a limit of {:.3} mm; refused by: {}; descent last changed by: {}",
             warning.strut_id,
             warning.k_lo,
             warning.k_top,
             warning.length_mm,
             warning.limit_mm,
+            lane.refusal_notes
+                .get(&warning.strut_id)
+                .map_or("the ladder never gave this run up (a later change left it over)", String::as_str),
+            lane.last_moved_by
+                .get(&warning.strut_id)
+                .copied()
+                .unwrap_or("not recorded"),
         );
     }
     println!(

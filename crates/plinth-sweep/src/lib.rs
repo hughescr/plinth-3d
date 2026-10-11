@@ -68,6 +68,7 @@ pub(crate) mod model_tie;
 pub mod orient_demand;
 pub mod peel;
 pub mod per_event;
+pub(crate) mod provenance;
 pub mod raster;
 pub mod reach;
 pub mod report;
@@ -2021,6 +2022,10 @@ pub fn run_sweep_with_holes(
         "up-sweep and down-sweep",
         &landing_check::check_landings(&struts, height),
     );
+    // Which pass last moved each member, for the unbraced-run warnings (log
+    // text only, see `provenance`). One note after each pass that edits a landing.
+    let mut moves = provenance::Moves::default();
+    moves.note("up-sweep and down-sweep", &struts);
     let mut removals = 0_u64;
     let mut removals_refused_by_span = 0_u64;
     let mut removal_passes_rolled_back = 0_u64;
@@ -2136,6 +2141,7 @@ pub fn run_sweep_with_holes(
         removals += accepted as u64;
     }
     landings.record("removal", &landing_check::check_landings(&struts, height));
+    moves.note("removal and re-sizing", &struts);
     // The interior test again, now that the down-sweep has added arms of its
     // own. Same test, same column history; running it twice is cheaper than
     // giving the down-sweep a reason to know about the up-sweep's history.
@@ -2180,6 +2186,7 @@ pub fn run_sweep_with_holes(
         );
     }
     landings.record("un-merge", &landing_check::check_landings(&struts, height));
+    moves.note("un-merge", &struts);
 
     // AND ONCE MORE, ON THE FINISHED FIELD. `unmerge_overgrown` moves an arm
     // off its trunk and onto whatever the descent recorded as its straight
@@ -2293,6 +2300,7 @@ pub fn run_sweep_with_holes(
     congestion_outcome.at_lane_exit =
         congestion::measure(&grid, &history, &struts, policy.flare_r_factor);
     landings.record("congestion", &landing_check::check_landings(&struts, height));
+    moves.note("congestion", &struts);
 
     // (`seat_face_rule`, the faces a tip may carry, is fixed above the
     // up-sweep: the head rule reads it too.)
@@ -2445,6 +2453,7 @@ pub fn run_sweep_with_holes(
             "stranded-seat branches",
             &landing_check::check_landings(&struts, height),
         );
+        moves.note("stranded-seat branches", &struts);
     }
     stranded_branch_outcome.branches_kept = stranded_branch_outcome.branches.len();
     stranded_branch_outcome.lapping_ids_after =
@@ -2454,6 +2463,7 @@ pub fn run_sweep_with_holes(
     let (mut slenderness_outcome, forced_merges) =
         slenderness::apply_merges(&slenderness_context, &mut struts);
     landings.record("slenderness merges", &landing_check::check_landings(&struts, height));
+    moves.note("slenderness merges", &struts);
     stranded_branch_outcome.lapping_by_lane.push((
         "slenderness merges",
         stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
@@ -2528,6 +2538,7 @@ pub fn run_sweep_with_holes(
             "un-merge after slenderness merges",
             &landing_check::check_landings(&struts, height),
         );
+        moves.note("un-merge after slenderness merges", &struts);
         stranded_branch_outcome.lapping_by_lane.push((
             "un-merge after slenderness merges",
             stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
@@ -2589,6 +2600,7 @@ pub fn run_sweep_with_holes(
     }
     if policy.lip_seat {
         landings.record("lip seats", &landing_check::check_landings(&struts, height));
+        moves.note("lip seats", &struts);
         stranded_branch_outcome.lapping_by_lane.push((
             "lip seats",
             stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
@@ -2626,6 +2638,7 @@ pub fn run_sweep_with_holes(
             );
             set_interior(&mut struts, &history);
             landings.record("graze heads", &landing_check::check_landings(&struts, height));
+            moves.note("graze heads", &struts);
             stranded_branch_outcome.lapping_by_lane.push((
                 "graze heads",
                 stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
@@ -2672,6 +2685,7 @@ pub fn run_sweep_with_holes(
             set_interior(&mut struts, &history);
         }
         landings.record("head joins", &landing_check::check_landings(&struts, height));
+        moves.note("head joins", &struts);
         stranded_branch_outcome.lapping_by_lane.push((
             "head joins",
             stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
@@ -2699,6 +2713,7 @@ pub fn run_sweep_with_holes(
             "lip seats after head joins",
             &landing_check::check_landings(&struts, height),
         );
+        moves.note("lip seats after head joins", &struts);
         stranded_branch_outcome.lapping_by_lane.push((
             "lip seats after head joins",
             stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
@@ -2804,6 +2819,7 @@ pub fn run_sweep_with_holes(
         .map(|strut| strut.id)
         .collect();
     landings.record("slenderness ties", &landing_check::check_landings(&struts, height));
+    moves.note("slenderness ties", &struts);
     stranded_branch_outcome.lapping_by_lane.push((
         "slenderness ties",
         stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
@@ -2852,6 +2868,7 @@ pub fn run_sweep_with_holes(
             "clearance re-route",
             &landing_check::check_landings(&struts, height),
         );
+        moves.note("clearance re-route", &struts);
         // **THE TIES ARE PLANNED AGAIN WHERE THE RE-ROUTE MOVED ANYTHING**
         // (lane cylinder-bracing, rule D, 2026-10-05). The ladder above ran on
         // the field BEFORE the re-route, so a run the move made (a branch
@@ -2931,6 +2948,7 @@ pub fn run_sweep_with_holes(
                 "ties after the clearance re-route",
                 &landing_check::check_landings(&struts, height),
             );
+            moves.note("ties after the clearance re-route", &struts);
         }
     }
     // The finished field's own check, and the load it lost if any landing is
@@ -3037,6 +3055,16 @@ pub fn run_sweep_with_holes(
             &mast_ids,
         );
     publish_runs(&mut slenderness_outcome, &slenderness_after, &[]);
+    // The pass that last moved each member that has a run, for the warning
+    // lines (log text only).
+    slenderness_outcome.last_moved_by = slenderness_after
+        .iter()
+        .filter_map(|run| {
+            struts
+                .get(run.strut_id as usize)
+                .map(|strut| (run.strut_id, moves.last(strut)))
+        })
+        .collect();
 
     // The congestion census AFTER, from the same function that measured it
     // before, read off the FINISHED field — so what is published describes the
