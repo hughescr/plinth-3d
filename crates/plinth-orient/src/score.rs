@@ -503,14 +503,14 @@ impl OrientSearchLimits {
         const VERTEX_PRODUCTS: usize = 1 << 34;
         // 2 × 1_287_360 × 2048 = 5_272_698_880 → 2^33.
         const SECTION_BREAKPOINTS: usize = 1 << 33;
-        // The treant's own per-candidate working set is 80_674_560 bytes
+        // The treant's own per-candidate working set is 173_364_480 bytes
         // (`per_candidate_bytes` below). Four candidates in flight is the
         // smallest tile worth calling batched, so the byte ceiling is
-        // next_power_of_two(4 × that) = 2^29 — the one cap whose multiplier is
+        // next_power_of_two(4 × that) = 2^30 — the one cap whose multiplier is
         // the tile width rather than the usual 2×, because this cap also *sizes*
         // the tile and a 2× ceiling would force a two-candidate tile on the
         // largest model.
-        const WORKING_BYTES: usize = 1 << 29;
+        const WORKING_BYTES: usize = 1 << 30;
         Self {
             max_candidates: Self::MAX_CANDIDATES,
             max_candidate_face_products: FACE_PRODUCTS,
@@ -528,15 +528,16 @@ impl OrientSearchLimits {
 /// (`verts × 2` f64) and the heights (`verts` f64) that
 /// [`project_vertices`] builds, and then the section solver's own three —
 /// [`crate::section::build_profile`]'s sort permutation (`verts` u32), its
-/// distinct-height breakpoint list (up to `verts` f64) and its per-interval
-/// quadratic coefficient array (up to `verts` × `[f64; 3]`).  The last three
-/// were omitted when this guard was first written, which undercharged the
-/// treant by 36 bytes per vertex — 46 MB on a mesh whose whole charge was 34 MB.
+/// distinct-height breakpoint list (up to `verts` f64) and its segment tree of
+/// quadratic coefficients (`2 × next_power_of_two(intervals)` nodes, so at most
+/// `4 × verts` × `[f64; 3]`).  The last three were omitted when this guard was
+/// first written, which undercharged the treant by 36 bytes per vertex — 46 MB
+/// on a mesh whose whole charge was 34 MB.
 fn per_candidate_bytes(faces: usize, verts: usize) -> usize {
     const F64: usize = std::mem::size_of::<f64>();
     const U32: usize = std::mem::size_of::<u32>();
-    // NZ column + plane + heights + sort permutation + breakpoints + coefficients.
-    let vertex_side = (2 * F64 + F64 + U32 + F64 + 3 * F64).saturating_mul(verts);
+    // NZ column + plane + heights + sort permutation + breakpoints + tree.
+    let vertex_side = (2 * F64 + F64 + U32 + F64 + 4 * 3 * F64).saturating_mul(verts);
     faces.saturating_mul(F64).saturating_add(vertex_side)
 }
 

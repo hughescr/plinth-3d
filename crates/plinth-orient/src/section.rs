@@ -36,11 +36,36 @@
 //!
 //! Within one face the two crossing edges are fixed, and both crossing points
 //! are linear in `t`, so the face's contribution is a **quadratic in `t`** whose
-//! breakpoints are exactly the vertex heights.  Accumulating each face's three
-//! coefficients into a per-interval difference array and prefix-summing gives
-//! every interval's quadratic in `Θ(V log V + F)`, after which the supremum is
-//! the max over interval endpoints and interior stationary points.  No step, no
-//! margin, no aliasing, no tolerance.
+//! breakpoints are exactly the vertex heights.  Each face's sub-interval is
+//! charged to the `O(log V)` nodes of a segment tree over the height intervals
+//! that tile it, and one top-down pass hands every node's quadratic to its
+//! children, which gives every interval's quadratic in `Θ(V log V + F log V)`.
+//! The supremum is then the max over interval endpoints and interior
+//! stationary points.  No step, no margin, no aliasing, no tolerance.
+//!
+//! # Why a tree and local heights, not a prefix sum in `t`
+//!
+//! A face whose corners differ in height by `w` has crossing points that move
+//! `L / w` per unit height, so its quadratic's coefficients grow like
+//! `(L / w)²`.  A facet that lies horizontal in exact arithmetic (every rest
+//! pose has one) has corners a few ulps apart once projected: `w = 1.8e-15` mm
+//! and a coefficient of 7e30 on the corpus Cylinder.  The solver used to write
+//! every quadratic in the absolute height `t` and prefix-sum the coefficients
+//! of all faces into one running polynomial.  One sliver then absorbed every
+//! other face's coefficients (7e30 has an ulp of 1e15) and left that rounding
+//! behind when it was subtracted, so the section function was wrong for the
+//! whole height range above it: 75 to 6.6e6 mm² on 62 congruent 900 mm² poses
+//! (Lane 0b, `wave1b/STAGE-JITTER.md`, 2026-10-11).
+//!
+//! Here no quadratic is ever written in `t` and nothing is ever subtracted.
+//! A face is charged to a tree node in that node's **own** height coordinate
+//! `r = t − (node's lowest breakpoint)`, and only to nodes inside its own
+//! sub-interval, so `r` never exceeds the face's own `w`: each of its terms is
+//! bounded by the chord's own `|p|·L`, whatever `w` is.  A node's quadratic is
+//! shifted to a child's origin by at most the node's own height, which every
+//! face charged to it spans.  So the absolute rounding error of an interval is
+//! `O(ε · Σ|p|·L)` over the faces that cross it, the same for a sliver as for
+//! a tall face, and a sliver's quadratic never reaches an interval outside it.
 //!
 //! # The stated precondition
 //!
@@ -85,18 +110,23 @@ pub(crate) enum SectionRefusal {
 /// quadratic per height interval, breakpoints at the vertex heights.
 pub(crate) struct SectionProfile {
     breakpoints: Vec<f64>,
-    /// One absolute `(t², t, 1)` triple per interval, already prefix-summed.
-    coefficients: Vec<[f64; 3]>,
+    /// The segment tree, heap-ordered (node 1 is the root, node `k`'s children
+    /// are `2k` and `2k + 1`), over `leaves` = the interval count rounded up
+    /// to a power of two.  After [`build_profile`] the leaf of interval `i`,
+    /// `tree[leaves + i]`, holds that interval's `(r², r, 1)` coefficients in
+    /// its own local height `r = t − breakpoints[i]`; padding leaves stay zero.
+    /// Empty when the body has no extent.
+    tree: Vec<[f64; 3]>,
+    leaves: usize,
 }
 
 /// Builds the exact area function.
 ///
 /// `tau` holds each vertex's height along the candidate direction **already
 /// shifted so the minimum is zero**; `xy` holds each vertex's coordinates in the
-/// candidate's own in-plane basis.  The shift is not cosmetic: each face's
-/// quadratic is stored as `V_p + b·(t − h_p)` expanded into `a + b·t`, and `|a|`
-/// grows with `|h_p|`, so a model far from the origin would lose precision on
-/// thin faces for no reason.  Shifting costs one subtraction per vertex.
+/// candidate's own in-plane basis.  Every quadratic is written in a local
+/// height (module docs), so the shift no longer carries the conditioning; it
+/// keeps breakpoint differences exact where heights are small.
 pub(crate) fn build_profile(
     tris: &[[u32; 3]],
     degenerate: &[bool],
@@ -110,34 +140,60 @@ pub(crate) fn build_profile(
         // direction, so every section is empty.
         return SectionProfile {
             breakpoints,
-            coefficients: Vec::new(),
+            tree: Vec::new(),
+            leaves: 0,
         };
     }
 
-    // Difference array over intervals; one extra slot so a face ending at the
-    // last interval needs no bounds special case.
-    let mut coefficients = vec![[0.0_f64; 3]; intervals + 1];
+    let leaves = intervals.next_power_of_two();
+    let mut tree = vec![[0.0_f64; 3]; 2 * leaves];
     for (face, triangle) in tris.iter().enumerate() {
         if degenerate[face] {
             // A zero-area face bounds nothing; it can only contribute noise.
             continue;
         }
-        accumulate_face(*triangle, xy, tau, &breakpoints, &mut coefficients);
+        accumulate_face(*triangle, xy, tau, &breakpoints, leaves, &mut tree);
     }
 
-    // Serial prefix sum in ascending interval order (determinism law: never a
-    // parallel fold over floats).
-    let mut running = [0.0_f64; 3];
-    for interval in coefficients.iter_mut().take(intervals) {
-        for (accumulated, delta) in running.iter_mut().zip(*interval) {
-            *accumulated += delta;
+    // Top-down, serial, ascending node order (determinism law: never a
+    // parallel fold over floats): a parent precedes its children, so each
+    // node is complete before it is handed down.
+    let levels = leaves.trailing_zeros();
+    for node in 1..leaves {
+        let depth = node.ilog2();
+        let span = leaves >> depth;
+        let low = (node << (levels - depth)) - leaves;
+        if low >= intervals {
+            // Padding only: no breakpoint, no face.
+            continue;
         }
-        *interval = running;
+        let parent = tree[node];
+        add_into(&mut tree[2 * node], parent);
+        let middle = low + span / 2;
+        if middle < intervals {
+            let shift = breakpoints[middle] - breakpoints[low];
+            add_into(&mut tree[2 * node + 1], shifted(parent, shift));
+        }
     }
-    coefficients.truncate(intervals);
     SectionProfile {
         breakpoints,
-        coefficients,
+        tree,
+        leaves,
+    }
+}
+
+/// `q(r + shift)` as coefficients in `r`.
+fn shifted([square, linear, constant]: [f64; 3], shift: f64) -> [f64; 3] {
+    [
+        square,
+        2.0 * square * shift + linear,
+        (square * shift + linear) * shift + constant,
+    ]
+}
+
+fn add_into(target: &mut [f64; 3], delta: [f64; 3]) {
+    for (accumulated, value) in target.iter_mut().zip(delta) {
+        *accumulated += value;
     }
 }
 
@@ -150,15 +206,15 @@ impl SectionProfile {
 
     /// Exact supremum of the cross-section area over the whole height range.
     pub(crate) fn peak_mm2(&self) -> Result<f64, SectionRefusal> {
-        if self.coefficients.is_empty() {
+        let intervals = self.intervals();
+        if intervals == 0 {
             return Ok(0.0);
         }
         let mut peak = f64::NEG_INFINITY;
-        for (interval, coefficients) in self.coefficients.iter().enumerate() {
+        for interval in 0..intervals {
             let value = interval_supremum(
-                *coefficients,
-                self.breakpoints[interval],
-                self.breakpoints[interval + 1],
+                self.tree[self.leaves + interval],
+                self.breakpoints[interval + 1] - self.breakpoints[interval],
             )?;
             if value > peak {
                 peak = value;
@@ -180,7 +236,8 @@ impl SectionProfile {
     /// the area function can genuinely step there (a flat face), and the upper
     /// limit is the one a layer at that height would print.
     pub(crate) fn area_at(&self, tau: f64) -> Result<f64, SectionRefusal> {
-        if self.coefficients.is_empty() {
+        let intervals = self.intervals();
+        if intervals == 0 {
             return Ok(0.0);
         }
         let last = self.breakpoints.len() - 1;
@@ -191,13 +248,22 @@ impl SectionProfile {
             .breakpoints
             .partition_point(|value| *value <= tau)
             .saturating_sub(1)
-            .min(self.coefficients.len() - 1);
-        let [square, linear, constant] = self.coefficients[interval];
-        let area = (square * tau + linear) * tau + constant;
+            .min(intervals - 1);
+        let [square, linear, constant] = self.tree[self.leaves + interval];
+        let local = tau - self.breakpoints[interval];
+        let area = (square * local + linear) * local + constant;
         if area.is_finite() {
             Ok(canonical_zero(area))
         } else {
             Err(SectionRefusal::NonFinite)
+        }
+    }
+
+    fn intervals(&self) -> usize {
+        if self.tree.is_empty() {
+            0
+        } else {
+            self.breakpoints.len() - 1
         }
     }
 }
@@ -229,7 +295,7 @@ fn distinct_heights(tau: &[f64]) -> Vec<f64> {
     heights
 }
 
-/// Adds one face's two sub-interval quadratics into the difference array.
+/// Charges one face's two sub-interval quadratics to the segment tree.
 #[allow(
     clippy::float_cmp,
     reason = "bit-equal lowest and highest corner heights is the definition of \
@@ -243,7 +309,8 @@ fn accumulate_face(
     xy: &[[f64; 2]],
     tau: &[f64],
     breakpoints: &[f64],
-    coefficients: &mut [[f64; 3]],
+    leaves: usize,
+    tree: &mut [[f64; 3]],
 ) {
     // Corner slots sorted by height, ties by vertex index: `slot[k]` is the
     // position *within the triangle's winding cycle* of the k-th lowest corner,
@@ -265,121 +332,140 @@ fn accumulate_face(
     // Lower sub-interval: pivot is the lowest corner, whose outgoing winding
     // edge climbs (the upward crossing) and whose incoming edge descends.
     if height(low) < height(mid) {
-        add_range(
-            quadratic(
-                triangle,
-                xy,
-                tau,
-                low,
-                (low + 2) % 3, // prev(low): the downward crossing
-                (low + 1) % 3, // next(low): the upward crossing
-            ),
-            height(low),
-            height(mid),
-            breakpoints,
-            coefficients,
-        );
+        chord(
+            triangle,
+            xy,
+            tau,
+            low,
+            (low + 2) % 3, // prev(low): the downward crossing
+            (low + 1) % 3, // next(low): the upward crossing
+        )
+        .charge(height(low), height(mid), breakpoints, leaves, tree);
     }
     // Upper sub-interval: pivot is the highest corner, whose outgoing edge
     // descends (the downward crossing) and whose incoming edge climbs.
     if height(mid) < height(high) {
-        add_range(
-            quadratic(
-                triangle,
-                xy,
-                tau,
-                high,
-                (high + 1) % 3, // next(high): the downward crossing
-                (high + 2) % 3, // prev(high): the upward crossing
-            ),
-            height(mid),
-            height(high),
-            breakpoints,
-            coefficients,
-        );
+        chord(
+            triangle,
+            xy,
+            tau,
+            high,
+            (high + 1) % 3, // next(high): the downward crossing
+            (high + 2) % 3, // prev(high): the upward crossing
+        )
+        .charge(height(mid), height(high), breakpoints, leaves, tree);
     }
 }
 
-/// The `(t², t, 1)` coefficients of `½·(p_down × p_up)` for one sub-interval,
-/// where both crossing points are parametrized from the shared pivot corner.
-fn quadratic(
+/// One face's chord over one sub-interval, written from its pivot corner.
+///
+/// Both crossing points are `p(t) = P + s·b` with `s = t − h_pivot`, so the
+/// chord's shoelace term is
+/// `½·(p_down × p_up) = ½·(s·X + s²·Y)`, `X = P × (b_up − b_down)`,
+/// `Y = b_down × b_up` (`P × P` vanishes).  Nothing here is expanded about
+/// `t = 0`; [`Chord::at`] re-expands about a node's own origin.
+#[derive(Clone, Copy)]
+struct Chord {
+    h_pivot: f64,
+    linear: f64,
+    square: f64,
+}
+
+fn chord(
     triangle: [u32; 3],
     xy: &[[f64; 2]],
     tau: &[f64],
     pivot: usize,
     down: usize,
     up: usize,
-) -> [f64; 3] {
+) -> Chord {
     let point = |corner: usize| xy[triangle[corner] as usize];
     let height = |corner: usize| tau[triangle[corner] as usize];
     let (origin, h_pivot) = (point(pivot), height(pivot));
-
-    // p(t) = origin + slope·(t − h_pivot) = a + b·t
-    let line = |corner: usize| {
+    let slope = |corner: usize| {
         let target = point(corner);
         let span = height(corner) - h_pivot;
-        let slope = [
+        [
             (target[0] - origin[0]) / span,
             (target[1] - origin[1]) / span,
-        ];
-        (
-            [
-                origin[0] - slope[0] * h_pivot,
-                origin[1] - slope[1] * h_pivot,
-            ],
-            slope,
-        )
+        ]
     };
-    let (a_down, b_down) = line(down);
-    let (a_up, b_up) = line(up);
-
-    [
-        0.5 * (b_down[0] * b_up[1] - b_down[1] * b_up[0]),
-        0.5 * (a_down[0] * b_up[1] + b_down[0] * a_up[1]
-            - a_down[1] * b_up[0]
-            - b_down[1] * a_up[0]),
-        0.5 * (a_down[0] * a_up[1] - a_down[1] * a_up[0]),
-    ]
-}
-
-/// Charges one quadratic to every interval inside `[low, high]`.
-///
-/// Both bounds are vertex heights, so both are members of the breakpoint list
-/// and the lookups are exact rather than nearest.
-fn add_range(
-    quadratic: [f64; 3],
-    low: f64,
-    high: f64,
-    breakpoints: &[f64],
-    coefficients: &mut [[f64; 3]],
-) {
-    let start = breakpoints.partition_point(|value| *value < low);
-    let end = breakpoints.partition_point(|value| *value < high);
-    for (accumulated, delta) in coefficients[start].iter_mut().zip(quadratic) {
-        *accumulated += delta;
-    }
-    for (accumulated, delta) in coefficients[end].iter_mut().zip(quadratic) {
-        *accumulated -= delta;
+    let (b_down, b_up) = (slope(down), slope(up));
+    Chord {
+        h_pivot,
+        linear: origin[0] * (b_up[1] - b_down[1]) - origin[1] * (b_up[0] - b_down[0]),
+        square: b_down[0] * b_up[1] - b_down[1] * b_up[0],
     }
 }
 
-/// Supremum of one interval's quadratic over its closed range.
+impl Chord {
+    /// The `(r², r, 1)` coefficients of this chord's term in the local height
+    /// `r = t − origin`.  With `e = origin − h_pivot`, `s = e + r`.
+    fn at(self, origin: f64) -> [f64; 3] {
+        let e = origin - self.h_pivot;
+        [
+            0.5 * self.square,
+            0.5 * (2.0 * e * self.square + self.linear),
+            0.5 * e * (e * self.square + self.linear),
+        ]
+    }
+
+    /// Charges this chord to the tree nodes that exactly tile the intervals
+    /// inside `[low, high]`, each in its own node's local height.
+    ///
+    /// Both bounds are vertex heights, so both are members of the breakpoint
+    /// list and the lookups are exact rather than nearest.  Every node charged
+    /// lies inside `[low, high]`, so its local height never exceeds this
+    /// sub-interval's own.
+    fn charge(
+        self,
+        low: f64,
+        high: f64,
+        breakpoints: &[f64],
+        leaves: usize,
+        tree: &mut [[f64; 3]],
+    ) {
+        let start = breakpoints.partition_point(|value| *value < low);
+        let end = breakpoints.partition_point(|value| *value < high);
+        let (mut left, mut right) = (start + leaves, end + leaves);
+        // `level` is the height above the leaves: a node `k` there covers the
+        // intervals from `(k << level) - leaves`.
+        let mut level = 0_u32;
+        while left < right {
+            if left & 1 == 1 {
+                let origin = breakpoints[(left << level) - leaves];
+                add_into(&mut tree[left], self.at(origin));
+                left += 1;
+            }
+            if right & 1 == 1 {
+                right -= 1;
+                let origin = breakpoints[(right << level) - leaves];
+                add_into(&mut tree[right], self.at(origin));
+            }
+            left >>= 1;
+            right >>= 1;
+            level += 1;
+        }
+    }
+}
+
+/// Supremum of one interval's quadratic, in its local height, over `[0, width]`.
 ///
 /// The closed range is deliberate: at a breakpoint the open-interval polynomial
 /// evaluates to the section's limit from inside, which is the supremum a flat
 /// top or bottom face reaches but never attains.
-fn interval_supremum(coefficients: [f64; 3], low: f64, high: f64) -> Result<f64, SectionRefusal> {
+fn interval_supremum(coefficients: [f64; 3], width: f64) -> Result<f64, SectionRefusal> {
     let [square, linear, constant] = coefficients;
     if !(square.is_finite() && linear.is_finite() && constant.is_finite()) {
         return Err(SectionRefusal::NonFinite);
     }
-    let evaluate = |t: f64| (square * t + linear) * t + constant;
-    let mut best = evaluate(low).max(evaluate(high));
+    let evaluate = |r: f64| (square * r + linear) * r + constant;
+    let mut best = constant.max(evaluate(width));
     if square < 0.0 {
         // Concave: the interior stationary point is the maximum. A convex
         // interval's stationary point is a minimum and is deliberately skipped.
         let stationary = -linear / (2.0 * square);
-        if stationary > low && stationary < high {
+        if stationary > 0.0 && stationary < width {
             best = best.max(evaluate(stationary));
         }
     }
