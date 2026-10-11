@@ -1133,62 +1133,6 @@ pub(crate) fn apply(
                 outcome.candidates_refused_clearance += 1;
                 continue;
             }
-            // **A LEAN THE SLENDERNESS LAW CANNOT HOLD IS NOT TAKEN** (Q1,
-            // 2026-10-10, `DEINO-DIAGNOSIS.md` fix 1). The re-landing leans the
-            // WHOLE arm along one straight axis. Where that axis runs within
-            // the final gap of the model, the slenderness ladder cannot
-            // thicken it (the thicker solid would enter the gap) and the arm
-            // ends as an `unbraced_run_over_limit` warning on a long thin rod
-            // (Deinonychus arms 215 and 220: runs 3.3x and 5.3x their limit).
-            // The thickest radius that still keeps the gap follows from the
-            // clearance just measured: the spare gap, `clearance - gap`, is
-            // the radius it can grow by, up to the registered maximum. The
-            // run is the chord the ladder measures (`slenderness::run_length`:
-            // the drop and the lateral move between the seat and base cells)
-            // and its limit is the existing `S * r`. The cheapest descent that
-            // passed every other test is the lean the rule would take; if its
-            // run exceeds the limit at that radius the rule takes none, and
-            // the arm keeps its seat and today's seat-bite WARNING. (Walking
-            // on to dearer descents would cost one kernel clearance read each
-            // over lists tens of thousands long: 8 times slower on
-            // Deinonychus.) No new constant: `S`, the gap and the maximum radius are
-            // the law's own. The clearance re-route is not asked (it was sent
-            // for the gap itself), and a mover in a hidden cavity, where the
-            // gap does not apply, is not asked either.
-            if !trigger.is_clearance() && !hidden(first) {
-                if let Some(now) = after[first] {
-                    let strut = &struts[index_of];
-                    #[expect(
-                        clippy::cast_precision_loss,
-                        reason = "a layer count bounded by the plan's own layer count is exact in f64"
-                    )]
-                    let drop_mm = strut.k_top.saturating_sub(proposal.candidate.k_bottom) as f64
-                        * context.layer_height_mm;
-                    let run_mm = drop_mm.hypot(crate::cell_distance_mm(
-                        context.grid,
-                        strut.cell,
-                        proposal.candidate.cell,
-                    ));
-                    let fit_mm = thickest_radius_keeping_gap_mm(
-                        drawn_max_radius_mm(&trial[first]),
-                        now,
-                        tier,
-                        context.law.max_radius_mm(),
-                    );
-                    if run_mm > context.law.max_unbraced_mm(fit_mm) {
-                        outcome.candidates_refused_slender += 1;
-                        // The cheapest descent that passed every other test
-                        // cannot be held: the arm keeps its seat and does not
-                        // walk the rest of its candidates (each costs a
-                        // kernel clearance read; walking them all made the
-                        // rule 8 times slower on Deinonychus).
-                        let job = &mut pending[proposal.slot];
-                        job.refused_slender = true;
-                        job.next = job.candidates.len();
-                        continue;
-                    }
-                }
-            }
             // The mover keeps its section; each child is no worse than it was.
             let mover_keeps = measured[first].as_ref().map_or(trigger.is_clearance(), |bite| !over_limit(bite));
             let children_hold =
@@ -1283,6 +1227,64 @@ pub(crate) fn apply(
                 outcome.candidates_refused_path += 1;
                 continue;
             };
+            // **A LEAN THE SLENDERNESS LAW CANNOT HOLD IS NOT TAKEN** (Q1,
+            // 2026-10-10, `DEINO-DIAGNOSIS.md` fix 1). The re-landing leans the
+            // WHOLE arm along one straight axis. Where that axis runs within
+            // the final gap of the model, the slenderness ladder cannot
+            // thicken it (the thicker solid would enter the gap) and the arm
+            // ends as an `unbraced_run_over_limit` warning on a long thin rod
+            // (Deinonychus arms 215 and 220: runs 3.3x and 5.3x their limit).
+            // The thickest radius that still keeps the gap follows from the
+            // clearance just measured: the spare gap, `clearance - gap`, is
+            // the radius it can grow by, up to the registered maximum. The
+            // run is the chord the ladder measures (`slenderness::run_length`:
+            // the drop and the lateral move between the seat and base cells)
+            // and its limit is the existing `S * r`.
+            //
+            // This is the LAST test, after the plate, root, measured-section,
+            // lock and live-path tests above: a descent one of those refuses
+            // is not admissible and never ends the search. The cheapest
+            // ADMISSIBLE descent is the lean the rule would take; if its run
+            // exceeds the limit at that radius the rule takes none, and the
+            // arm keeps its seat and today's seat-bite WARNING. (Walking on to
+            // dearer admissible descents would cost one kernel clearance read
+            // each over lists tens of thousands long: 8 times slower on
+            // Deinonychus.) No new constant: `S`, the gap and the maximum
+            // radius are the law's own. The clearance re-route is not asked
+            // (it was sent for the gap itself), and a mover in a hidden
+            // cavity, where the gap does not apply, is not asked either.
+            if !trigger.is_clearance() && !hidden(first) {
+                if let Some(now) = after[first] {
+                    let strut = &struts[index_of];
+                    #[expect(
+                        clippy::cast_precision_loss,
+                        reason = "a layer count bounded by the plan's own layer count is exact in f64"
+                    )]
+                    let drop_mm = strut.k_top.saturating_sub(proposal.candidate.k_bottom) as f64
+                        * context.layer_height_mm;
+                    let run_mm = drop_mm.hypot(crate::cell_distance_mm(
+                        context.grid,
+                        strut.cell,
+                        proposal.candidate.cell,
+                    ));
+                    let fit_mm = thickest_radius_keeping_gap_mm(
+                        drawn_max_radius_mm(&trial[first]),
+                        now,
+                        tier,
+                        context.law.max_radius_mm(),
+                    );
+                    if run_mm > context.law.max_unbraced_mm(fit_mm) {
+                        outcome.candidates_refused_slender += 1;
+                        // The cheapest admissible descent cannot be held: the
+                        // arm keeps its seat and does not walk the rest of its
+                        // candidates.
+                        let job = &mut pending[proposal.slot];
+                        job.refused_slender = true;
+                        job.next = job.candidates.len();
+                        continue;
+                    }
+                }
+            }
             outcome.candidates_verified += 1;
             let strut = &mut struts[index_of];
             let was = (
