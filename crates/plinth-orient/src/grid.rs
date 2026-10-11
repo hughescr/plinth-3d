@@ -354,11 +354,30 @@ fn count(value: f64, id: &'static str) -> Result<usize, ScoreError> {
     Ok(value as usize)
 }
 
+/// The order the rest-pose block is enumerated in (block 1).
+///
+/// The kept SET of rest poses is the same in both: the heaviest
+/// `ORIENT_REST_POSE_MAX` reference bins, ties at the cut to the lowest bin
+/// index. Only the enumeration order differs, and the enumeration order is
+/// the tie-break key and the dedupe precedence (module doc).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RestOrder {
+    /// Heaviest bin first. The recorded order. A rounding change in two bin
+    /// areas that are close can swap them, and every later id moves.
+    #[default]
+    ByArea,
+    /// Ascending reference-bin index. The order depends only on WHICH bins
+    /// are kept, never on how their areas compare (pose-stability Lane A,
+    /// `PLINTH_ORIENT_ABLATE=exact-grid`).
+    ByBinIndex,
+}
+
 /// The deduplicated candidate list, in the order that is the tie-break key.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SweepGrid {
     candidates: Vec<Candidate>,
     settings: GridSettings,
+    rest_order: RestOrder,
     legacy_count: usize,
     rest_pose_count: usize,
     fibonacci_count: usize,
@@ -378,17 +397,38 @@ pub struct SweepGrid {
 impl SweepGrid {
     /// Builds the grid for one model.
     ///
-    /// The rest-pose block is derived from `table`, which must be the **coarse
-    /// tier's own** table: rest poses are a property of the geometry being
-    /// searched, and reading them off a different LOD than the one that scores
-    /// them is the same class of mistake D-4 outlaws for delicacy.
+    /// The rest-pose block is derived from `table`. The recorded search hands
+    /// it the **coarse tier's own** table (rest poses are a property of the
+    /// geometry being searched). Pose-stability Lane A relaxes that: with
+    /// `PLINTH_ORIENT_ABLATE=exact-grid` the search hands the grid the EXACT
+    /// table while the coarse tier still scores on its proxy, because the
+    /// coarse proxy's collapse order follows the input's last float bits, so
+    /// 87-105 of 128 rest bins changed under a 1-ulp jitter of the input
+    /// (`wave1b/STAGE-JITTER.md`). The D-4 analogy (do not read one LOD's
+    /// geometry for another LOD's decision) was about SCORES; the grid
+    /// decides which directions exist, not what they score. The orchestrator
+    /// ruled this reading on 2026-10-11.
     ///
     /// # Errors
     ///
     /// [`ScoreError::InvalidDirection`] if an accumulated rest-pose direction
     /// degenerates, which it can only do if a bin's faces cancel exactly.
     pub fn build(table: &OrientFaceTable, settings: GridSettings) -> Result<Self, ScoreError> {
-        Self::build_observed(table, settings, &mut Unobserved).map(|(grid, _)| grid)
+        Self::build_observed(table, settings, RestOrder::ByArea, &mut Unobserved)
+            .map(|(grid, _)| grid)
+    }
+
+    /// [`Self::build`] with the rest-pose block in `order`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::build`].
+    pub fn build_ordered(
+        table: &OrientFaceTable,
+        settings: GridSettings,
+        order: RestOrder,
+    ) -> Result<Self, ScoreError> {
+        Self::build_observed(table, settings, order, &mut Unobserved).map(|(grid, _)| grid)
     }
 
     /// [`Self::build`] with an observer on the rest-pose binning pass, also
@@ -401,6 +441,7 @@ impl SweepGrid {
     pub(crate) fn build_observed<O: BinObserver>(
         table: &OrientFaceTable,
         settings: GridSettings,
+        order: RestOrder,
         observer: &mut O,
     ) -> Result<(Self, RestBins), ScoreError> {
         let mut admitted = Admitted::default();
@@ -444,7 +485,7 @@ impl SweepGrid {
         let legacy_count = admitted.candidates.len();
 
         // Block 1.
-        let (rest, bins) = rest_poses(table, settings, observer)?;
+        let (rest, bins) = rest_poses(table, settings, order, observer)?;
         for pose in &rest {
             admitted.push(
                 CandidateBlock::RestPose,
@@ -495,6 +536,7 @@ impl SweepGrid {
         let grid = Self {
             candidates,
             settings,
+            rest_order: order,
             legacy_count,
             rest_pose_count,
             fibonacci_count,
@@ -547,6 +589,11 @@ impl SweepGrid {
     #[must_use]
     pub const fn settings(&self) -> GridSettings {
         self.settings
+    }
+    /// The order the rest-pose block was enumerated in.
+    #[must_use]
+    pub const fn rest_order(&self) -> RestOrder {
+        self.rest_order
     }
     #[must_use]
     pub const fn legacy_count(&self) -> usize {
@@ -650,12 +697,23 @@ fn covering(candidates: &[Candidate], direction: UpDirection, cosine: f64) -> Op
 /// once, accumulating both areas for every pose at once; the fold is serial in
 /// face order, so the result is bit-identical at any thread count.
 fn flat_faces(table: &OrientFaceTable, rest: &[UpDirection], cosine: f64) -> Vec<UpDirection> {
+    flat_faces_of(table.normals(), table.areas_mm2(), rest, cosine)
+}
+
+/// [`flat_faces`] over bare face arrays, so the two strict boundaries it
+/// decides (`facing > cosine`, `flat > side − flat`) can be tested one ulp
+/// either side with hand-written faces.
+fn flat_faces_of(
+    normals: &[[f64; 3]],
+    areas: &[f64],
+    rest: &[UpDirection],
+    cosine: f64,
+) -> Vec<UpDirection> {
     // The side a rest pose `u` lays on the plate faces `n = −u`.
     let sides: Vec<[f64; 3]> = rest.iter().map(|pose| pose.antipode().get()).collect();
     let mut flat = vec![0.0_f64; sides.len()];
     let mut side = vec![0.0_f64; sides.len()];
-    let areas = table.areas_mm2();
-    for (face, normal) in table.normals().iter().enumerate() {
+    for (face, normal) in normals.iter().enumerate() {
         let face_area = areas[face];
         if face_area <= 0.0 || !face_area.is_finite() {
             continue;
@@ -720,6 +778,7 @@ pub fn fibonacci_directions(count: usize) -> Result<Vec<UpDirection>, ScoreError
 fn rest_poses<O: BinObserver>(
     table: &OrientFaceTable,
     settings: GridSettings,
+    rest_order: RestOrder,
     observer: &mut O,
 ) -> Result<(Vec<RestPose>, RestBins), ScoreError> {
     let reference = fibonacci_directions(settings.reference_bins)?;
@@ -752,17 +811,11 @@ fn rest_poses<O: BinObserver>(
         accumulated[best][2] += face_area * down[2];
     }
 
-    // Heaviest bins first, ties by lowest bin index. `sort_by` is stable, so the
-    // index tie-break is the input order and needs no second key.
-    let mut order: Vec<usize> = (0..bins).filter(|bin| area[*bin] > 0.0).collect();
-    order.sort_by(|left, right| {
-        area[*right]
-            .partial_cmp(&area[*left])
-            .expect("accumulated areas are finite")
-    });
+    let order = heaviest_bins(&area);
 
-    let mut poses = Vec::with_capacity(settings.rest_pose_max.min(order.len()));
-    for bin in order.iter().copied().take(settings.rest_pose_max) {
+    let kept = kept_bins(&order, settings.rest_pose_max, rest_order);
+    let mut poses = Vec::with_capacity(kept.len());
+    for bin in kept {
         // A bin whose faces cancel exactly has no pose; it is skipped rather
         // than normalized into a direction nothing supports.
         if let Ok(direction) = UpDirection::new(accumulated[bin]) {
@@ -777,6 +830,32 @@ fn rest_poses<O: BinObserver>(
             order,
         },
     ))
+}
+
+/// The occupied bins, heaviest first, ties by lowest bin index (G2). The first
+/// `ORIENT_REST_POSE_MAX` are kept; two bins of equal area at the cut resolve
+/// to the lower index, which is the bin's own key.
+fn heaviest_bins(area: &[f64]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..area.len()).filter(|bin| area[*bin] > 0.0).collect();
+    // `sort_by` is stable and the input is ascending, so the index tie-break
+    // is the input order; it is also spelled out as the second key.
+    order.sort_by(|left, right| {
+        area[*right]
+            .partial_cmp(&area[*left])
+            .expect("accumulated areas are finite")
+            .then(left.cmp(right))
+    });
+    order
+}
+
+/// The G2 cut: the first `keep` bins of `order` (heaviest first), enumerated
+/// in `rest_order`. The kept SET does not depend on `rest_order`.
+pub(crate) fn kept_bins(order: &[usize], keep: usize, rest_order: RestOrder) -> Vec<usize> {
+    let mut kept: Vec<usize> = order.iter().copied().take(keep).collect();
+    if rest_order == RestOrder::ByBinIndex {
+        kept.sort_unstable();
+    }
+    kept
 }
 
 /// The reference bin nearest `down` (and, when `SECOND`, the runner-up): the
@@ -1008,7 +1087,8 @@ mod tests {
     #[test]
     fn a_cube_yields_its_six_axis_rest_poses() {
         let settings = GridSettings::registered().unwrap();
-        let (poses, _) = rest_poses(&table(), settings, &mut Unobserved).unwrap();
+        let (poses, _) =
+            rest_poses(&table(), settings, RestOrder::ByArea, &mut Unobserved).unwrap();
         assert_eq!(poses.len(), 6, "a cube has exactly six face-down poses");
         for pose in &poses {
             let u = pose.direction.get();
@@ -1043,10 +1123,12 @@ mod tests {
         let settings = GridSettings::registered().unwrap();
         let table = table();
         let (plain, plain_bins) =
-            SweepGrid::build_observed(&table, settings, &mut Unobserved).unwrap();
+            SweepGrid::build_observed(&table, settings, RestOrder::ByArea, &mut Unobserved)
+                .unwrap();
         let mut recorder = Recorder::default();
         let (watched, watched_bins) =
-            SweepGrid::build_observed(&table, settings, &mut recorder).unwrap();
+            SweepGrid::build_observed(&table, settings, RestOrder::ByArea, &mut recorder)
+                .unwrap();
         assert_eq!(plain.digest(), watched.digest());
         assert_eq!(plain.candidates(), watched.candidates());
         assert_eq!(plain.rest_pose_entries(), watched.rest_pose_entries());
@@ -1076,6 +1158,253 @@ mod tests {
         assert_eq!(first.digest(), second.digest());
         assert_eq!(first.candidates(), second.candidates());
         assert_eq!(first.digest().len(), 64);
+    }
+
+    // ---------------------------------------------------------------------
+    // Lane A: the G1-G4 boundaries, one ulp either side. Each test shows the
+    // decision flips AT the boundary (and only there), that a diagnostic
+    // margin classifies the event AMBIGUOUS there, and that the same inputs
+    // moved one ulp AWAY from every boundary decide the same way and read
+    // clear.
+
+    use crate::diag::{boundary_event, BoundaryEvent};
+
+    /// `x` moved by `k` ulps toward +infinity (sign-aware).
+    fn bump(x: f64, k: i64) -> f64 {
+        // Toward +infinity adds to the bit pattern of a non-negative float and
+        // subtracts from a negative one's.
+        let away_from_zero = x.is_sign_negative() == (k < 0);
+        let bits = x.to_bits();
+        let steps = k.unsigned_abs();
+        f64::from_bits(if away_from_zero { bits + steps } else { bits - steps })
+    }
+
+    /// A few ulps of 1.0: the scale rounding works at in these tests.
+    const ULPS: f64 = 8.0 * f64::EPSILON;
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the tie IS the exact-equality case: a face exactly between two bins. See \
+              docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
+    fn g1_a_face_one_ulp_either_side_of_a_bin_tie_flips_the_bin_and_reads_ambiguous() {
+        let settings = GridSettings::registered().unwrap();
+        let reference = fibonacci_directions(settings.reference_bins()).unwrap();
+        let (r0, r1) = (reference[0].get(), reference[1].get());
+        let bisector = vec3::normalize(vec3::add(r0, r1)).unwrap();
+        // The dot product of two unit vectors rounds at 1.1e-16. Walk the
+        // component that separates the two bins most, in steps of that size,
+        // across the tie: the samples next to it sit within a few ulps of it.
+        let axis = (0..3)
+            .max_by(|l, r| (r0[*l] - r1[*l]).abs().total_cmp(&(r0[*r] - r1[*r]).abs()))
+            .unwrap();
+        let (mut above, mut tied, mut below) = (0, 0, 0);
+        let (mut nearest_above, mut nearest_below) = (f64::INFINITY, f64::INFINITY);
+        for k in -64..=64 {
+            let mut down = bisector;
+            // A step of one ulp just below 1.0: the scale the dots round at,
+            // whatever the component's own magnitude.
+            down[axis] += f64::from(k) * (f64::EPSILON / 2.0);
+            let (best, best_dot, second, second_dot) = nearest_bins::<true>(down, &reference);
+            let (d0, d1) = (vec3::dot(down, r0), vec3::dot(down, r1));
+            assert!([best, second].iter().all(|bin| *bin <= 1), "{best} {second}");
+            if d0 > d1 {
+                above += 1;
+                nearest_above = nearest_above.min(d0 - d1);
+                assert_eq!(best, 0, "bin 0 is nearer by {:e}", d0 - d1);
+            } else if d0 == d1 {
+                tied += 1;
+                assert_eq!(best, 0, "a tie goes to the lowest bin index");
+            } else {
+                below += 1;
+                nearest_below = nearest_below.min(d1 - d0);
+                assert_eq!(best, 1, "bin 1 is nearer by {:e}", d1 - d0);
+            }
+            // The recorded gap is `best - second`, never negative, and it equals
+            // the dots' difference.
+            assert_eq!((best_dot - second_dot).to_bits(), (d0 - d1).abs().to_bits());
+        }
+        assert!(above > 0 && below > 0, "the scan crosses the tie: {above} {tied} {below}");
+        // The samples nearest the tie sit at rounding scale on each side, and
+        // that margin classifies AMBIGUOUS; the far samples would not.
+        assert_eq!(boundary_event(nearest_above, ULPS), BoundaryEvent::Ambiguous);
+        assert_eq!(boundary_event(nearest_below, ULPS), BoundaryEvent::Ambiguous);
+
+        // Away from the boundary: bin 0's own centre, each component one ulp
+        // (of 1.0) either way, picks bin 0 with a gap far above the rounding
+        // scale.
+        let centre = r0;
+        let ulp = f64::EPSILON / 2.0;
+        for a in [-1.0, 0.0, 1.0] {
+            for b in [-1.0, 0.0, 1.0] {
+                for c in [-1.0, 0.0, 1.0] {
+                    let down = [centre[0] + a * ulp, centre[1] + b * ulp, centre[2] + c * ulp];
+                    let (best, best_dot, _, second_dot) = nearest_bins::<true>(down, &reference);
+                    assert_eq!(best, 0);
+                    assert_eq!(boundary_event(best_dot - second_dot, ULPS), BoundaryEvent::Clear);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g2_bins_of_equal_area_at_the_cut_resolve_to_the_lower_bin_and_one_ulp_decides() {
+        // Bins 1 and 3 compete for the last of three places.
+        let area = |a: f64, b: f64| vec![10.0, a, 9.0, b, 1.0];
+        let kept = |areas: &[f64], order| kept_bins(&heaviest_bins(areas), 3, order);
+        let eight = 8.0_f64;
+        let up = bump(eight, 1);
+        let down = bump(eight, -1);
+        for (a, b, winner) in [(eight, eight, 1), (eight, up, 3), (eight, down, 1)] {
+            let areas = area(a, b);
+            let by_area = kept(&areas, RestOrder::ByArea);
+            let by_index = kept(&areas, RestOrder::ByBinIndex);
+            assert!(by_area.contains(&winner), "{by_area:?} for {a:e} {b:e}");
+            let mut sorted = by_area.clone();
+            sorted.sort_unstable();
+            assert_eq!(by_index, sorted, "the same SET, in ascending bin order");
+            // The gap that decided it, read as the diagnostics read it.
+            let rel = (a - b).abs() / a.max(b);
+            assert_eq!(boundary_event(rel, 1e-12), BoundaryEvent::Ambiguous, "{a:e} {b:e}");
+        }
+        // Away from the cut every bin keeps its place under 1-ulp noise, and
+        // the margin reads clear.
+        let far = area(8.0, 4.0);
+        for noise in [-1, 0, 1] {
+            let jittered: Vec<f64> = far.iter().map(|x| bump(*x, noise)).collect();
+            assert_eq!(kept(&jittered, RestOrder::ByBinIndex), vec![0, 1, 2]);
+        }
+        assert_eq!(boundary_event((8.0 - 4.0) / 8.0, 1e-12), BoundaryEvent::Clear);
+    }
+
+    /// Two kept bins whose areas differ by one ulp swap places when they are
+    /// listed heaviest-first (every later id would renumber, design D2) and
+    /// do not when they are listed by bin index.
+    #[test]
+    fn g2_the_enumeration_order_of_two_near_equal_kept_bins_is_stable_only_by_bin_index() {
+        let low = 9.0_f64;
+        let high = bump(low, 1);
+        let a = heaviest_bins(&[low, high, 1.0]);
+        let b = heaviest_bins(&[high, low, 1.0]);
+        assert_eq!(kept_bins(&a, 2, RestOrder::ByArea), vec![1, 0]);
+        assert_eq!(kept_bins(&b, 2, RestOrder::ByArea), vec![0, 1], "heaviest-first swapped");
+        assert_eq!(kept_bins(&a, 2, RestOrder::ByBinIndex), vec![0, 1]);
+        assert_eq!(kept_bins(&b, 2, RestOrder::ByBinIndex), vec![0, 1], "bin order held");
+    }
+
+    #[test]
+    fn g3_a_lattice_point_one_ulp_either_side_of_the_dedupe_radius_after_a_rest_pose() {
+        let cosine = GridSettings::registered().unwrap().dedupe_cosine();
+        let x = (1.0 - cosine * cosine).sqrt();
+        // A rest pose is admitted before the lattice, so it is the EARLIER
+        // candidate the lattice point is measured against.
+        let probe = |z: f64| -> (bool, f64) {
+            let mut admitted = Admitted::default();
+            admitted.push(
+                CandidateBlock::RestPose,
+                CandidateKey::Rest(5),
+                UpDirection::MODEL_UP,
+                None,
+                cosine,
+            );
+            admitted.push(
+                CandidateBlock::Fibonacci,
+                CandidateKey::Fib(9),
+                UpDirection::raw([x, 0.0, z]),
+                None,
+                cosine,
+            );
+            let kept = admitted.attempts[1].kept.is_some();
+            (kept, vec3::dot([x, 0.0, z], [0.0, 0.0, 1.0]) - cosine)
+        };
+        for (z, kept) in [
+            (bump(cosine, -1), true),
+            (cosine, true),
+            (bump(cosine, 1), false),
+        ] {
+            let (got, margin) = probe(z);
+            assert_eq!(got, kept, "z = {z:e}");
+            assert_eq!(boundary_event(margin, ULPS), BoundaryEvent::Ambiguous);
+        }
+        // A degree inside and a degree outside: the same decision under 1-ulp
+        // noise, and a margin far above the rounding scale.
+        let (inside, outside) = ((0.5_f64).to_radians().cos(), (2.0_f64).to_radians().cos());
+        for noise in [-1, 0, 1] {
+            let (near, near_margin) = probe(bump(inside, noise));
+            let (far, far_margin) = probe(bump(outside, noise));
+            assert!(!near && far);
+            assert_eq!(boundary_event(near_margin, ULPS), BoundaryEvent::Clear);
+            assert_eq!(boundary_event(far_margin, ULPS), BoundaryEvent::Clear);
+        }
+    }
+
+    #[test]
+    fn g4_a_face_one_ulp_either_side_of_the_flat_radius_and_a_fifty_percent_share() {
+        let cosine = GridSettings::registered().unwrap().dedupe_cosine();
+        // The pose rests the +Z side on the plate: u = -Z, n = +Z.
+        let pose = [UpDirection::raw([0.0, 0.0, -1.0])];
+        let flat_pose = |normals: &[[f64; 3]], areas: &[f64]| -> bool {
+            !flat_faces_of(normals, areas, &pose, cosine).is_empty()
+        };
+        // Face A is exactly flat and small; face B is large and sits at
+        // `facing = z`. The pose is flat iff B counts toward the flat part.
+        let case = |z: f64| flat_pose(&[[0.0, 0.0, 1.0], [0.1, 0.0, z]], &[1.0, 10.0]);
+        assert!(!case(bump(cosine, -1)), "one ulp outside the radius");
+        assert!(!case(cosine), "ON the radius is outside (strict >)");
+        assert!(case(bump(cosine, 1)), "one ulp inside the radius");
+        for z in [bump(cosine, -1), cosine, bump(cosine, 1)] {
+            assert_eq!(boundary_event(z - cosine, ULPS), BoundaryEvent::Ambiguous);
+        }
+        let (inside, outside) = ((0.5_f64).to_radians().cos(), (2.0_f64).to_radians().cos());
+        for noise in [-1, 0, 1] {
+            assert!(case(bump(inside, noise)), "0.5 deg stays flat");
+            assert!(!case(bump(outside, noise)), "2 deg stays side");
+            assert_eq!(boundary_event(bump(inside, noise) - cosine, ULPS), BoundaryEvent::Clear);
+            assert_eq!(boundary_event(bump(outside, noise) - cosine, ULPS), BoundaryEvent::Clear);
+        }
+
+        // The 50 % share: A is flat with projected area `a`; B faces at 0.5
+        // (side only) with area 2, so its projection is exactly 1.0. At
+        // a = 1.0 the flat part is exactly half the side: NOT flat (strict).
+        let normals = [[0.0, 0.0, 1.0], [0.5_f64.acos().sin(), 0.0, 0.5]];
+        let share = |a: f64| flat_pose(&normals, &[a, 2.0]);
+        assert!(!share(bump(1.0, -1)));
+        assert!(!share(1.0), "exactly 50 % is not flat");
+        assert!(share(bump(1.0, 1)));
+        // (flat - (side - flat)) / side, the diagnostics' flat-share margin.
+        let margin = |a: f64| (a - ((a + 1.0) - a)) / (a + 1.0);
+        for a in [bump(1.0, -1), 1.0, bump(1.0, 1)] {
+            assert_eq!(boundary_event(margin(a), ULPS), BoundaryEvent::Ambiguous);
+        }
+        assert!(share(1.5) && !share(0.5), "away from 50 % the share decides the same way");
+        assert_eq!(boundary_event(margin(1.5), ULPS), BoundaryEvent::Clear);
+    }
+
+    /// `exact-grid`'s ordering on a whole table: the same rest-bin SET as the
+    /// recorded ordering, ascending by bin, and a grid that still starts with
+    /// identity and the legacy 13.
+    #[test]
+    fn the_by_bin_index_order_keeps_the_rest_bins_and_the_legacy_lead() {
+        let settings = GridSettings::registered().unwrap();
+        let table = table();
+        let area = SweepGrid::build_ordered(&table, settings, RestOrder::ByArea).unwrap();
+        let index = SweepGrid::build_ordered(&table, settings, RestOrder::ByBinIndex).unwrap();
+        assert_eq!(area.rest_order(), RestOrder::ByArea);
+        assert_eq!(index.rest_order(), RestOrder::ByBinIndex);
+        let bins = |grid: &SweepGrid| -> Vec<usize> {
+            grid.rest_pose_entries().iter().map(|pose| pose.bin).collect()
+        };
+        let mut by_area = bins(&area);
+        by_area.sort_unstable();
+        assert_eq!(bins(&index), by_area);
+        assert_eq!(index.candidates()[0].direction, UpDirection::MODEL_UP);
+        assert_eq!(index.legacy_count(), 13);
+        assert_eq!(
+            SweepGrid::build(&table, settings).unwrap().digest(),
+            area.digest(),
+            "build() is the recorded ordering"
+        );
     }
 
     #[test]
