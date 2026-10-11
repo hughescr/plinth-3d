@@ -676,7 +676,7 @@ impl CommitDemandRecord {
 
     /// `true` when this candidate carries a production-raster burden, which
     /// is the only fidelity allowed to crown a pose.
-    fn measured_at_production(&self) -> bool {
+    pub(crate) fn measured_at_production(&self) -> bool {
         self.fidelity.as_deref() == Some(crate::demand::DemandFidelity::Production.label())
     }
 }
@@ -1002,12 +1002,11 @@ pub fn search(
         );
     }
     let config = switches.config(perf_on);
-    let (outcome, diagnostics) = search_core(mesh, request, demand, config.as_ref())?;
+    // The `orient.json` write happens inside `search_core`, in the same
+    // diagnostic perf phase as the collection.
+    let (outcome, _) = search_core(mesh, request, demand, config.as_ref(), true)?;
     if switches.digest {
         eprintln!("[orient] search_digest {}", outcome.record.search_digest);
-    }
-    if let Some(diagnostics) = &diagnostics {
-        crate::diag::write_orient_json(&outcome.record, diagnostics);
     }
     Ok(outcome)
 }
@@ -1024,18 +1023,22 @@ pub fn search_with_diagnostics(
     demand: Option<&dyn crate::demand::SupportDemandMeasurer>,
     config: &crate::diag::DiagnosticsConfig,
 ) -> Result<(SweepOutcome, crate::diag::SweepDiagnostics), SearchError> {
-    let (outcome, diagnostics) = search_core(mesh, request, demand, Some(config))?;
+    let (outcome, diagnostics) = search_core(mesh, request, demand, Some(config), false)?;
     Ok((
         outcome,
         diagnostics.expect("search_core returns diagnostics whenever it is given a config"),
     ))
 }
 
+/// The search. With `diag`, also collects the diagnostics; with `write_json`
+/// too, writes them to `<perf-dir>/<model>.orient.json` (both inside the
+/// diagnostic perf phase).
 pub(crate) fn search_core(
     mesh: &Mesh,
     request: &SweepRequest,
     demand: Option<&dyn crate::demand::SupportDemandMeasurer>,
     diag: Option<&crate::diag::DiagnosticsConfig>,
+    write_json: bool,
 ) -> Result<(SweepOutcome, Option<crate::diag::SweepDiagnostics>), SearchError> {
     let mut fallbacks = Vec::new();
     // The diagnostics' captures: copies taken in place, read by nothing here.
@@ -1100,7 +1103,15 @@ pub(crate) fn search_core(
     // The grid's rest-pose block is read off the tier that scores it: rest poses
     // are a property of the geometry being searched.
     let grid_mark = geom_kernel::perf::stage("orient.grid");
-    let grid = SweepGrid::build(&coarse.table, request.grid)?;
+    // With the diagnostics on, the SAME binning pass is watched by an
+    // observer (G1/G2); with them off the pass carries no observer at all.
+    let (grid, grid_capture) = if diag.is_some() {
+        let mut observer = crate::diag::GridObserver::default();
+        let (grid, bins) = SweepGrid::build_observed(&coarse.table, request.grid, &mut observer)?;
+        (grid, Some(observer.finish(bins)))
+    } else {
+        (SweepGrid::build(&coarse.table, request.grid)?, None)
+    };
     let directions = grid.directions();
     drop(grid_mark);
 
@@ -1378,20 +1389,28 @@ pub(crate) fn search_core(
 
     // The diagnostics are built from the FINISHED record and nothing they
     // compute is read back (module doc, `crate::diag`).
-    let diagnostics = diag.map(|config| {
-        let _mark = geom_kernel::perf::stage("orient.diag");
-        crate::diag::build(&crate::diag::DiagInputs {
-            config,
-            mesh,
-            request,
-            grid: &grid,
-            grid_table: &coarse.table,
-            grid_table_lod: coarse.lod,
-            exact_table: &exact.table,
-            demand,
-            tiers: &record.tiers,
-            snapshots: &raw,
-            record: &record,
+    let diagnostics = diag.zip(grid_capture.as_ref()).map(|(config, grid_capture)| {
+        crate::diag::in_diagnostic_phase(|| {
+            let build_mark = geom_kernel::perf::stage("orient.diag");
+            let diagnostics = crate::diag::build(&crate::diag::DiagInputs {
+                config,
+                mesh,
+                request,
+                grid: &grid,
+                grid_capture,
+                grid_table: &coarse.table,
+                grid_table_lod: coarse.lod,
+                exact_table: &exact.table,
+                demand,
+                tiers: &record.tiers,
+                snapshots: &raw,
+                record: &record,
+            });
+            drop(build_mark);
+            if write_json {
+                crate::diag::write_orient_json(&record, &diagnostics);
+            }
+            diagnostics
         })
     });
     Ok((SweepOutcome { winner, record }, diagnostics))

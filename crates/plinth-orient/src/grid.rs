@@ -202,6 +202,44 @@ impl<'de> serde::Deserialize<'de> for CandidateKey {
     }
 }
 
+/// Watches the rest-pose binning pass (the G1 decision of the pose-stability
+/// design) from the inside, so the diagnostics read the production scan
+/// instead of repeating it. It sees each binned face once, in face order,
+/// after the face's bin is fixed; it cannot change the choice.
+///
+/// [`Unobserved`] is the production observer. Its `TRACKS_SECOND` is `false`,
+/// so the production instantiation of the scan carries no second-best
+/// bookkeeping and no call.
+pub(crate) trait BinObserver {
+    /// Whether the scan also tracks each face's second-best bin.
+    const TRACKS_SECOND: bool;
+    /// Called once before the scan: the table's face count and the bin count.
+    fn begin(&mut self, faces: usize, bins: usize);
+    /// A face the scan binned. `second` and `second_dot` hold the runner-up
+    /// bin only when [`Self::TRACKS_SECOND`].
+    fn face(&mut self, face: usize, best: usize, best_dot: f64, second: usize, second_dot: f64);
+}
+
+/// The observer that observes nothing.
+pub(crate) struct Unobserved;
+
+impl BinObserver for Unobserved {
+    const TRACKS_SECOND: bool = false;
+    fn begin(&mut self, _faces: usize, _bins: usize) {}
+    fn face(&mut self, _face: usize, _best: usize, _best_dot: f64, _second: usize, _second_dot: f64) {}
+}
+
+/// What the binning pass accumulated, before the rest-pose cut.
+pub(crate) struct RestBins {
+    /// Summed face area per reference bin.
+    pub area: Vec<f64>,
+    /// Area-weighted sum of the down normals per reference bin.
+    pub accumulated: Vec<[f64; 3]>,
+    /// The occupied bins, heaviest first, ties by lowest bin index. The grid
+    /// keeps the first `rest_pose_max` of them.
+    pub order: Vec<usize>,
+}
+
 /// One direction the grid TRIED to admit, in the order it tried, with the
 /// id it received (`None` when an earlier candidate covered it).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -350,6 +388,21 @@ impl SweepGrid {
     /// [`ScoreError::InvalidDirection`] if an accumulated rest-pose direction
     /// degenerates, which it can only do if a bin's faces cancel exactly.
     pub fn build(table: &OrientFaceTable, settings: GridSettings) -> Result<Self, ScoreError> {
+        Self::build_observed(table, settings, &mut Unobserved).map(|(grid, _)| grid)
+    }
+
+    /// [`Self::build`] with an observer on the rest-pose binning pass, also
+    /// returning what that pass accumulated. The grid is the same grid for any
+    /// observer: the observer only reads.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::build`].
+    pub(crate) fn build_observed<O: BinObserver>(
+        table: &OrientFaceTable,
+        settings: GridSettings,
+        observer: &mut O,
+    ) -> Result<(Self, RestBins), ScoreError> {
         let mut admitted = Admitted::default();
         let cosine = settings.dedupe_cosine();
 
@@ -391,7 +444,7 @@ impl SweepGrid {
         let legacy_count = admitted.candidates.len();
 
         // Block 1.
-        let rest = rest_poses(table, settings)?;
+        let (rest, bins) = rest_poses(table, settings, observer)?;
         for pose in &rest {
             admitted.push(
                 CandidateBlock::RestPose,
@@ -439,7 +492,7 @@ impl SweepGrid {
         poses.dedup();
 
         let digest = direction_digest(&candidates);
-        Ok(Self {
+        let grid = Self {
             candidates,
             settings,
             legacy_count,
@@ -452,7 +505,8 @@ impl SweepGrid {
             keys,
             attempts,
             rest,
-        })
+        };
+        Ok((grid, bins))
     }
 
     /// The provenance key of every candidate, parallel to
@@ -663,10 +717,11 @@ pub fn fibonacci_directions(count: usize) -> Result<Vec<UpDirection>, ScoreError
 }
 
 /// Face-aligned rest poses: the hull substitute of the module doc.
-fn rest_poses(
+fn rest_poses<O: BinObserver>(
     table: &OrientFaceTable,
     settings: GridSettings,
-) -> Result<Vec<RestPose>, ScoreError> {
+    observer: &mut O,
+) -> Result<(Vec<RestPose>, RestBins), ScoreError> {
     let reference = fibonacci_directions(settings.reference_bins)?;
     let bins = reference.len();
     let mut area = vec![0.0_f64; bins];
@@ -677,6 +732,7 @@ fn rest_poses(
     // bit-identical at any thread count.
     let areas = table.areas_mm2();
     let normals = table.normals();
+    observer.begin(normals.len(), bins);
     for (face, normal) in normals.iter().enumerate() {
         let face_area = areas[face];
         if face_area <= 0.0 || !face_area.is_finite() {
@@ -684,17 +740,12 @@ fn rest_poses(
         }
         // The direction that puts this face DOWN.
         let down = [-normal[0], -normal[1], -normal[2]];
-        let mut best = 0_usize;
-        let mut best_dot = f64::NEG_INFINITY;
-        for (bin, candidate) in reference.iter().enumerate() {
-            let v = candidate.get();
-            let dot = vec3::dot(down, v);
-            // Strict `>`: the lowest bin index wins a tie.
-            if dot > best_dot {
-                best_dot = dot;
-                best = bin;
-            }
-        }
+        let (best, best_dot, second, second_dot) = if O::TRACKS_SECOND {
+            nearest_bins::<true>(down, &reference)
+        } else {
+            nearest_bins::<false>(down, &reference)
+        };
+        observer.face(face, best, best_dot, second, second_dot);
         area[best] += face_area;
         accumulated[best][0] += face_area * down[0];
         accumulated[best][1] += face_area * down[1];
@@ -709,17 +760,56 @@ fn rest_poses(
             .partial_cmp(&area[*left])
             .expect("accumulated areas are finite")
     });
-    order.truncate(settings.rest_pose_max);
 
-    let mut poses = Vec::with_capacity(order.len());
-    for bin in order {
+    let mut poses = Vec::with_capacity(settings.rest_pose_max.min(order.len()));
+    for bin in order.iter().copied().take(settings.rest_pose_max) {
         // A bin whose faces cancel exactly has no pose; it is skipped rather
         // than normalized into a direction nothing supports.
         if let Ok(direction) = UpDirection::new(accumulated[bin]) {
             poses.push(RestPose { bin, direction });
         }
     }
-    Ok(poses)
+    Ok((
+        poses,
+        RestBins {
+            area,
+            accumulated,
+            order,
+        },
+    ))
+}
+
+/// The reference bin nearest `down` (and, when `SECOND`, the runner-up): the
+/// grid's one scan over the bins. `best` is chosen by strict `>`, so the
+/// lowest bin index wins a tie, and the choice does not depend on `SECOND`;
+/// the production instantiation (`SECOND = false`) is the scan with the
+/// second-best bookkeeping compiled out.
+#[inline]
+fn nearest_bins<const SECOND: bool>(
+    down: [f64; 3],
+    reference: &[UpDirection],
+) -> (usize, f64, usize, f64) {
+    let mut best = 0_usize;
+    let mut best_dot = f64::NEG_INFINITY;
+    let mut second = 0_usize;
+    let mut second_dot = f64::NEG_INFINITY;
+    for (bin, candidate) in reference.iter().enumerate() {
+        let v = candidate.get();
+        let dot = vec3::dot(down, v);
+        // Strict `>`: the lowest bin index wins a tie.
+        if dot > best_dot {
+            if SECOND {
+                second = best;
+                second_dot = best_dot;
+            }
+            best_dot = dot;
+            best = bin;
+        } else if SECOND && dot > second_dot {
+            second = bin;
+            second_dot = dot;
+        }
+    }
+    (best, best_dot, second, second_dot)
 }
 
 /// SHA-256 over the raw f64 bits of every admitted direction, in order.
@@ -753,7 +843,8 @@ pub fn direction_set_digest(directions: &[UpDirection]) -> String {
     hex(hasher)
 }
 
-fn hex(hasher: Sha256) -> String {
+/// The lower-case hex of a finished hash.
+pub(crate) fn hex(hasher: Sha256) -> String {
     let digest = hasher.finalize();
     let mut text = String::with_capacity(digest.len() * 2);
     for byte in digest {
@@ -917,13 +1008,62 @@ mod tests {
     #[test]
     fn a_cube_yields_its_six_axis_rest_poses() {
         let settings = GridSettings::registered().unwrap();
-        let poses = rest_poses(&table(), settings).unwrap();
+        let (poses, _) = rest_poses(&table(), settings, &mut Unobserved).unwrap();
         assert_eq!(poses.len(), 6, "a cube has exactly six face-down poses");
         for pose in &poses {
             let u = pose.direction.get();
             let axes = u.iter().filter(|value| value.abs() > 0.5).count();
             assert_eq!(axes, 1, "a cube rest pose is an axis direction: {u:?}");
         }
+    }
+
+    /// Records every call and tracks the runner-up bin.
+    #[derive(Default)]
+    struct Recorder {
+        begun: Option<(usize, usize)>,
+        seen: Vec<(usize, usize, usize)>,
+    }
+
+    impl BinObserver for Recorder {
+        const TRACKS_SECOND: bool = true;
+        fn begin(&mut self, faces: usize, bins: usize) {
+            self.begun = Some((faces, bins));
+        }
+        fn face(&mut self, face: usize, best: usize, best_dot: f64, second: usize, second_dot: f64) {
+            assert!(best_dot >= second_dot);
+            self.seen.push((face, best, second));
+        }
+    }
+
+    /// An observer reads the scan and changes nothing: the grid, its rest-pose
+    /// sums and its bin order are the unobserved ones, bit for bit, and the
+    /// observer saw each binned face once, in face order.
+    #[test]
+    fn an_observer_does_not_change_the_grid_or_the_bins() {
+        let settings = GridSettings::registered().unwrap();
+        let table = table();
+        let (plain, plain_bins) =
+            SweepGrid::build_observed(&table, settings, &mut Unobserved).unwrap();
+        let mut recorder = Recorder::default();
+        let (watched, watched_bins) =
+            SweepGrid::build_observed(&table, settings, &mut recorder).unwrap();
+        assert_eq!(plain.digest(), watched.digest());
+        assert_eq!(plain.candidates(), watched.candidates());
+        assert_eq!(plain.rest_pose_entries(), watched.rest_pose_entries());
+        assert_eq!(plain.digest(), SweepGrid::build(&table, settings).unwrap().digest());
+        assert_eq!(plain_bins.order, watched_bins.order);
+        let bits = |sums: &[[f64; 3]]| -> Vec<[u64; 3]> {
+            sums.iter().map(|v| v.map(f64::to_bits)).collect()
+        };
+        assert_eq!(bits(&plain_bins.accumulated), bits(&watched_bins.accumulated));
+        assert_eq!(
+            plain_bins.area.iter().map(|a| a.to_bits()).collect::<Vec<_>>(),
+            watched_bins.area.iter().map(|a| a.to_bits()).collect::<Vec<_>>()
+        );
+        assert_eq!(recorder.begun, Some((table.face_count(), settings.reference_bins())));
+        assert_eq!(recorder.seen.len(), table.face_count());
+        assert!(recorder.seen.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert!(recorder.seen.iter().all(|(_, best, second)| best != second));
     }
 
     /// The grid is a pure function of `(mesh, registered constants)`, and the
