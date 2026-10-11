@@ -648,6 +648,126 @@ mod tests {
         assert_eq!(whole.layers_visited, LAYERS as u64, "{whole:?}");
     }
 
+    /// The production early-exit call, shared by the child below and its
+    /// parent. Four arms on the two-slab fixture: `G` (0.9) and `H` (3.1) are
+    /// kept on `S1`; `A` duplicates `G` (same cell, layer 20) and is doomed;
+    /// `D` (0.9, layer 40) is doomed and is the only root of `S2`. At layer 40
+    /// the first replay finds `S2` unrooted in the proposed set and blames the
+    /// nearest doomed arm: `A` and `D` tie on distance and `A` has the lower
+    /// index, so `A` (seated BELOW the layer) is restored and the replay will
+    /// restart; the next cells of the same layer blame `D`, which is restored
+    /// too. The replay returns `Restart` at layer 40 with nothing left doomed,
+    /// so the call ends after ONE replay that walked 41 layers (0..=40), not 50.
+    fn production_early_exit() -> (super::ReplayOutcome, Vec<bool>, usize) {
+        let mesh = fixture(true);
+        let (grid, _) = plan_grid(0.0, -0.5, 4.0, 0.5, LAYERS, H, 1.0, u64::MAX);
+        let planes: Vec<f64> = (0..LAYERS).map(|l| (l as f64 + 0.5) * H).collect();
+        let slices = slice_stack(&mesh, &planes, SliceStackLimits::production()).expect("slices");
+        let struts = vec![
+            arm(&grid, 0, 0.9, 20),
+            arm(&grid, 1, 3.1, 20),
+            arm(&grid, 2, 0.9, 20),
+            arm(&grid, 3, 0.9, 40),
+        ];
+        let context = ReplayContext {
+            grid: &grid,
+            slices: &slices,
+            planes: &planes,
+            mesh: &mesh,
+            kappa: KAPPA,
+            layer_height_mm: H,
+            layers: LAYERS,
+            straight_reach: true,
+            creep_weight: false,
+            creep_overhang_cut: true,
+            overhang_centre_deg: 45.0,
+            overhang_transition_deg: 25.0,
+            max_restarts: 3,
+            first_loss_ratio: 2.592 / 2.130,
+        };
+        let mut doomed = vec![false, false, true, true];
+        let outcome = refuse_unrooted_demand(&context, &struts, &mut doomed);
+        (outcome, doomed, grid.cells())
+    }
+
+    const EARLY_EXIT_CHILD_MODE: &str = "PLINTH_REPLAY_CELL_LAYERS_CHILD";
+    const EARLY_EXIT_CHILD_TEST: &str =
+        "demand_replay::tests::child_runs_the_production_early_exit";
+
+    /// Not a test of its own: the body the parent below launches in a fresh
+    /// process, where the process-global perf counters are its own. Without
+    /// the marker variable it returns at once. It switches counting on, makes
+    /// the production call and records what the charge must be.
+    #[test]
+    fn child_runs_the_production_early_exit() {
+        let Some(dir) = std::env::var_os("PLINTH_REPLAY_CELL_LAYERS_DIR") else {
+            return;
+        };
+        if std::env::var_os(EARLY_EXIT_CHILD_MODE).is_none() {
+            return;
+        }
+        let dir = std::path::PathBuf::from(dir);
+        crate::perf::enable(dir.clone(), crate::perf::DEFAULT_CHECKPOINT);
+        crate::perf::begin_model("replay");
+        let (outcome, doomed, cells) = production_early_exit();
+        crate::perf::end_model();
+        assert_eq!(doomed, vec![false; 4], "{outcome:?}");
+        assert_eq!(outcome.replays, 1, "{outcome:?}");
+        assert_eq!(outcome.refused, 2, "{outcome:?}");
+        assert_eq!(outcome.layers_visited, 41, "layers 0..=40 were walked: {outcome:?}");
+        std::fs::write(dir.join("expected"), format!("{}", cells as u64 * outcome.layers_visited))
+            .expect("write the expected charge");
+    }
+
+    /// X0 regression witness for the counter the PRODUCTION path emits. The
+    /// child makes a `refuse_unrooted_demand` call with perf on in which the
+    /// replay exits early; the parent reads the sidecar and requires
+    /// `replay.cell_layers` to be `cells * layers walked`, and different from
+    /// the old charge `cells * context.layers * replays`. Sabotage check:
+    /// charging `context.layers * outcome.replays` at the `perf::add` in
+    /// `refuse_unrooted_demand` fails this test (and only this one).
+    #[test]
+    fn the_emitted_replay_cell_layers_counter_charges_the_layers_walked() {
+        let dir = std::env::temp_dir().join(format!(
+            "plinth-replay-cell-layers-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch directory");
+        let status = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+            .arg("--exact")
+            .arg(EARLY_EXIT_CHILD_TEST)
+            .arg("--nocapture")
+            .env(EARLY_EXIT_CHILD_MODE, "1")
+            .env("PLINTH_REPLAY_CELL_LAYERS_DIR", &dir)
+            .status()
+            .expect("launch the child");
+        assert!(status.success(), "child failed: {status}");
+        let expected: u64 = std::fs::read_to_string(dir.join("expected"))
+            .expect("the child wrote its expectation")
+            .parse()
+            .expect("a count");
+        let text = std::fs::read_to_string(dir.join("replay.perf.json")).expect("final sidecar");
+        assert!(text.contains("\"partial\":false"), "{text}");
+        let totals = &text[text.find("\"totals\"").expect("totals")..];
+        let work = &totals[totals.find("\"work\":{").expect("work object")..];
+        let at = work.find("\"replay.cell_layers\":").expect("the counter is emitted");
+        let emitted: u64 = work[at + "\"replay.cell_layers\":".len()..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .expect("a count");
+        let (_, _, cells) = production_early_exit();
+        let old_charge = cells as u64 * LAYERS as u64;
+        assert!(expected > 0 && expected < old_charge, "{expected} vs {old_charge}");
+        assert_eq!(emitted, expected, "emitted replay.cell_layers is not cells * layers walked");
+        assert_ne!(emitted, old_charge, "the old charge, cells * layers * replays");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The joint counterfactual. Doom the arm at 0.9 AND the middle one: the
     /// replay finds the near end unrooted, restores the NEAREST doomed arm
     /// (0.9, not 2.0), and the middle one still goes.
