@@ -50,6 +50,10 @@ fn peaks(mesh: &Mesh, directions: &[[f64; 3]]) -> Vec<f64> {
 }
 
 /// `mesh` with every coordinate stored as f32, the way an STL carries it.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the narrowing to f32 is the point: it models what an STL stores"
+)]
 fn as_stored(mesh: &Mesh) -> Mesh {
     let verts = mesh
         .verts()
@@ -61,6 +65,10 @@ fn as_stored(mesh: &Mesh) -> Mesh {
 
 /// `mesh` rotated about +Z by `radians` and scaled by `1 + ulps * 2^-23`, then
 /// stored as f32: `plinth-audit stl-jitter`, the input jitter Lane 0b used.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the narrowing to f32 is the point: it models what an STL stores"
+)]
 fn jittered(mesh: &Mesh, radians: f64, ulps: f64) -> Mesh {
     let (sin, cos) = radians.sin_cos();
     let scale = 1.0 + ulps * f64::powi(2.0, -23);
