@@ -181,3 +181,12 @@ across parallel work items, because float addition is not associative and a para
 makes the answer depend on the thread count. One workspace-wide thread control,
 `PLINTH_THREADS`, and every parallel path carries a test that runs it at several thread
 counts and asserts the outputs are *identical*, not close.
+
+**One execution budget.** `plinth prepare` runs inside a single pool of `k` workers
+(`geom_kernel::par::install_budget`); the kernel batches and every bare `par_iter` share it, so
+the process holds `k` workers plus the sleeping main thread. `k` is `PLINTH_THREADS` when set to
+a positive integer; otherwise it is detected, never hard-coded: on macOS the performance-core
+count (`sysctl hw.perflevel0.physicalcpu`), elsewhere or on failure `available_parallelism`.
+`RAYON_NUM_THREADS` is ignored by the binary. The run log ends with
+`[threads] budget k (source): inline N, cross C, cold D`; `cross` and `cold` count kernel
+batches that left the budget pool and read zero in a normal run.

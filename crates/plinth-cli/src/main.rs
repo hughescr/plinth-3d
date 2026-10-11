@@ -21,7 +21,19 @@ fn main() -> ExitCode {
         // the pre-write physics gates refused one -- whatever else the run also
         // hit, because 3 is the code callers act on -- and otherwise the first
         // non-zero stage code in report order. A usage error below still exits 2.
-        Ok(CliAction::Prepare(selection)) => execute(selection),
+        //
+        // The whole run happens inside the one execution-budget pool, so the
+        // kernel's batches and every bare `par_iter` share `k` workers instead
+        // of a kernel pool plus rayon's global pool.
+        Ok(CliAction::Prepare(selection)) => {
+            let (code, budget) = geom_kernel::par::install_budget(move || execute(selection));
+            if let Err(error) = budget {
+                println!(
+                    "[threads] WARNING budget pool not built ({error}); per-call pools were used"
+                );
+            }
+            code
+        }
         Err(error) => {
             eprintln!("plinth: {error}\n\n{ROOT_USAGE}");
             ExitCode::from(2)

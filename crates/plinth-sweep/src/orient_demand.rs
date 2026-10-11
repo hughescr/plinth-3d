@@ -698,8 +698,14 @@ impl SweepDemand {
         // `candidates` exactly as the serial `.map` did (proved bit-identical
         // to the serial path by
         // `plinth-sweep/tests/orient_demand_parallel.rs`).
+        //
+        // `with_max_len(1)`: one pose per job, so the 16 prefilter poses
+        // balance by stealing on any width instead of in fixed pairs. It
+        // changes only how the range is split; the indexed collect keeps
+        // candidate order.
         let raw: Vec<Result<(MeasuredSupportDemand, Option<RetainedPlan>), String>> = candidates
             .par_iter()
+            .with_max_len(1)
             .map(|candidate| {
                 Self::measure_one(
                     mesh,
