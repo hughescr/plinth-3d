@@ -55,7 +55,10 @@ every test that re-runs its own executable with `--exact <test name>` under a ch
 `PLINTH_THREADS` (inside `it` the name would gain a module prefix and the child would run
 nothing): `plinth-decimate/tests/thread_sweep.rs`, `plinth-orient/tests/orient_thread_sweep.rs`,
 `plinth-verify/tests/coverage_gate.rs`, and `geom_kernel/tests/{allowed_face_projection,
-native_api, point_index}.rs`. The `trybuild` suites (`tests/compile_fail.rs`) and all of
+native_api, point_index}.rs`. A test that diffs a process-wide counter (for example
+`geom_kernel/tests/allowed_face_projection_index_reuse.rs`, which reads the BVH and parity
+build counters) also needs a process to itself: tests in one program run in parallel threads,
+and their builds would land inside its window. The `trybuild` suites (`tests/compile_fail.rs`) and all of
 `plinth-support/tests/` (whose slow suites are run one at a time on purpose) are also left as
 they were. Before adding a test that sets environment variables, changes the working directory,
 installs a panic hook or a global allocator, or times itself, keep it separate the same way:

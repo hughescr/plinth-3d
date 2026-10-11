@@ -1,3 +1,9 @@
+//! Kept as its own test program on purpose. `index_construction_attempt_counts`
+//! reads process-wide counters, so any other test that builds a surface in the
+//! same process (tests run on parallel threads) lands inside this test's
+//! before/after window. A process of its own, with a single test, has no such
+//! neighbour. Do not add a second test to this file.
+
 use geom_kernel::testkit::{
     build_from_tris, build_surface_budget, grid_mesh, index_construction_attempt_counts,
 };
