@@ -554,9 +554,9 @@ the stage that made it. It decides nothing.
   the diagnostics only. They add to the perf counters, so such a run is not a timing run.
   `extra=` directions are scored on the exact table first; with no separate measurer the
   rows keep those scores, with `production_terms: null` and the reason in `error`.
-- **`PLINTH_ORIENT_ABLATE`** (comma-separated; unset means both off; pose-stability Lane A).
+- **`PLINTH_ORIENT_ABLATE`** (comma-separated; unset means every word off; pose-stability Lanes A and C).
   An ablation measures one change at a time on one binary and is deleted when the change is
-  promoted or dropped. With both words off the search, the record, `search_digest` and the
+  promoted or dropped. With every word off the search, the record, `search_digest` and the
   emitted bytes are the recorded ones. `exact-grid` builds the candidate grid from the EXACT
   table instead of the coarse proxy's and lists the rest poses in ascending reference-bin
   order instead of heaviest-first (the kept bins are the same rule; only the proxy
@@ -565,7 +565,10 @@ the stage that made it. It decides nothing.
   not read its output as a production run. `exact-shadow` is out of band: after the record
   is final it scores the SAME C1 and C2 input key sets on the exact table and repeats each
   cut, into `orient.json` (`diagnostics.exact_shadow`, `C1x`/`C2x`); it needs `--perf` and
-  changes nothing.
+  changes nothing. `exact-score` (Lane C) retires the proxy tiers: the coarse, refine and
+  commit tiers all score on the exact table and the cuts keep their widths. With `exact-grid`
+  too, the L1 and L2 proxy meshes are not built at all; alone, the proxy rung is still built
+  because the grid reads it. It CHANGES the search: use `--no-cache`.
 
 ## Surface fields: parallel walks, serial oracle
 
