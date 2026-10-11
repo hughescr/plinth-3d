@@ -69,7 +69,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::grid::{Candidate, CandidateBlock, GridSettings, SweepGrid};
+use crate::grid::{Candidate, CandidateBlock, GridSettings, RestOrder, SweepGrid};
 use crate::score::{
     score_candidates, CandidateOutcome, CandidateRefusalReason, CandidateTerms, ObjectiveWeights,
     OrientFaceTable, OrientSearchLimits, PeelForceCorners, ScoreError,
@@ -1002,13 +1002,45 @@ pub fn search(
         );
     }
     let config = switches.config(perf_on);
+    let ablation = crate::ablate::Ablation::from_env();
+    for warning in &ablation.warnings {
+        eprintln!("WARNING: PLINTH_ORIENT_ABLATE: {warning}");
+    }
+    if ablation.exact_shadow && config.is_none() {
+        eprintln!(
+            "WARNING: PLINTH_ORIENT_ABLATE: exact-shadow needs --perf with the diagnostics on \
+             (it has nowhere to go otherwise); ignored"
+        );
+    }
+    if ablation.exact_grid {
+        eprintln!(
+            "[orient] ABLATION exact-grid: the candidate grid is built from the exact table \
+             (an experiment, not the recorded search; use --no-cache)"
+        );
+    }
     // The `orient.json` write happens inside `search_core`, in the same
     // diagnostic perf phase as the collection.
-    let (outcome, _) = search_core(mesh, request, demand, config.as_ref(), true)?;
+    let (outcome, _) = search_core(mesh, request, demand, config.as_ref(), true, &ablation)?;
     if switches.digest {
         eprintln!("[orient] search_digest {}", outcome.record.search_digest);
     }
     Ok(outcome)
+}
+
+/// [`search`] with the ablation given instead of read from the environment,
+/// and the diagnostics (when `config` is `Some`) returned instead of written.
+///
+/// # Errors
+///
+/// As [`search`].
+pub fn search_ablated(
+    mesh: &Mesh,
+    request: &SweepRequest,
+    demand: Option<&dyn crate::demand::SupportDemandMeasurer>,
+    config: Option<&crate::diag::DiagnosticsConfig>,
+    ablation: &crate::ablate::Ablation,
+) -> Result<(SweepOutcome, Option<crate::diag::SweepDiagnostics>), SearchError> {
+    search_core(mesh, request, demand, config, false, ablation)
 }
 
 /// [`search`] with the diagnostics returned instead of written, whatever the
@@ -1023,7 +1055,14 @@ pub fn search_with_diagnostics(
     demand: Option<&dyn crate::demand::SupportDemandMeasurer>,
     config: &crate::diag::DiagnosticsConfig,
 ) -> Result<(SweepOutcome, crate::diag::SweepDiagnostics), SearchError> {
-    let (outcome, diagnostics) = search_core(mesh, request, demand, Some(config), false)?;
+    let (outcome, diagnostics) = search_core(
+        mesh,
+        request,
+        demand,
+        Some(config),
+        false,
+        &crate::ablate::Ablation::default(),
+    )?;
     Ok((
         outcome,
         diagnostics.expect("search_core returns diagnostics whenever it is given a config"),
@@ -1039,6 +1078,7 @@ pub(crate) fn search_core(
     demand: Option<&dyn crate::demand::SupportDemandMeasurer>,
     diag: Option<&crate::diag::DiagnosticsConfig>,
     write_json: bool,
+    ablation: &crate::ablate::Ablation,
 ) -> Result<(SweepOutcome, Option<crate::diag::SweepDiagnostics>), SearchError> {
     let mut fallbacks = Vec::new();
     // The diagnostics' captures: copies taken in place, read by nothing here.
@@ -1101,16 +1141,27 @@ pub(crate) fn search_core(
     let refine = l1.as_ref().unwrap_or(&exact);
 
     // The grid's rest-pose block is read off the tier that scores it: rest poses
-    // are a property of the geometry being searched.
+    // are a property of the geometry being searched. ABLATION `exact-grid`
+    // (pose-stability Lane A) reads them off the exact table instead, in
+    // ascending bin order; the coarse tier still scores on its proxy.
+    let (grid_rung, rest_order) = if ablation.exact_grid {
+        (&exact, RestOrder::ByBinIndex)
+    } else {
+        (coarse, RestOrder::ByArea)
+    };
     let grid_mark = geom_kernel::perf::stage("orient.grid");
     // With the diagnostics on, the SAME binning pass is watched by an
     // observer (G1/G2); with them off the pass carries no observer at all.
     let (grid, grid_capture) = if diag.is_some() {
         let mut observer = crate::diag::GridObserver::default();
-        let (grid, bins) = SweepGrid::build_observed(&coarse.table, request.grid, &mut observer)?;
+        let (grid, bins) =
+            SweepGrid::build_observed(&grid_rung.table, request.grid, rest_order, &mut observer)?;
         (grid, Some(observer.finish(bins)))
     } else {
-        (SweepGrid::build(&coarse.table, request.grid)?, None)
+        (
+            SweepGrid::build_ordered(&grid_rung.table, request.grid, rest_order)?,
+            None,
+        )
     };
     let directions = grid.directions();
     drop(grid_mark);
@@ -1157,7 +1208,8 @@ pub(crate) fn search_core(
         });
         let mut record = score_tier(
             tier,
-            rung,
+            &rung.table,
+            rung.lod,
             &grid,
             &directions,
             &admitted,
@@ -1398,8 +1450,9 @@ pub(crate) fn search_core(
                 request,
                 grid: &grid,
                 grid_capture,
-                grid_table: &coarse.table,
-                grid_table_lod: coarse.lod,
+                grid_table: &grid_rung.table,
+                grid_table_lod: grid_rung.lod,
+                ablation,
                 exact_table: &exact.table,
                 demand,
                 tiers: &record.tiers,
@@ -1473,11 +1526,53 @@ impl Rung {
     }
 }
 
+/// The exact-shadow's scoring (pose-stability Lane A, out of band): the
+/// candidates `admitted`, scored on `table` and ranked by the search's own
+/// comparator, with nothing recorded in the search's work counters or
+/// refusals. Returns the ranking and the number of refused candidates.
+///
+/// # Errors
+///
+/// As the tier scoring: a table that cannot score, or no candidate surviving.
+pub(crate) fn shadow_rank(
+    table: &OrientFaceTable,
+    lod: &str,
+    grid: &SweepGrid,
+    admitted: &[usize],
+    weights: ObjectiveWeights,
+    limits: OrientSearchLimits,
+) -> Result<(Vec<RankedCandidate>, usize), SearchError> {
+    let mut refusals = Vec::new();
+    let mut work = WorkRecord {
+        charged_face_direction_products: 0,
+        charged_vertex_direction_products: 0,
+        charged_section_breakpoints: 0,
+        executed_face_direction_products: 0,
+        executed_vertex_direction_products: 0,
+        executed_section_breakpoints: 0,
+    };
+    let directions = grid.directions();
+    let record = score_tier(
+        SearchTier::Coarse,
+        table,
+        lod,
+        grid,
+        &directions,
+        admitted,
+        weights,
+        limits,
+        &mut refusals,
+        &mut work,
+    )?;
+    Ok((record.ranking, refusals.len()))
+}
+
 /// Scores one tier and ranks it.
 #[allow(clippy::too_many_arguments)]
 fn score_tier(
     tier: SearchTier,
-    rung: &Rung,
+    table: &OrientFaceTable,
+    lod: &str,
     grid: &SweepGrid,
     directions: &[crate::score::UpDirection],
     admitted: &[usize],
@@ -1488,7 +1583,7 @@ fn score_tier(
 ) -> Result<TierRecord, SearchError> {
     let subset: Vec<crate::score::UpDirection> =
         admitted.iter().map(|index| directions[*index]).collect();
-    let scored = score_candidates(&rung.table, &subset, weights, limits)?;
+    let scored = score_candidates(table, &subset, weights, limits)?;
     let plan = scored.plan();
     let meter = scored.meter();
     work.charged_face_direction_products += plan.face_direction_products;
@@ -1551,7 +1646,7 @@ fn score_tier(
     Ok(TierRecord {
         tier,
         fidelity: tier.fidelity(),
-        lod: rung.lod.to_owned(),
+        lod: lod.to_owned(),
         scored: subset.len(),
         ranked: ranking.len(),
         promoted: 0,
