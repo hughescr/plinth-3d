@@ -54,7 +54,7 @@ pub(crate) fn straight(
         interior: false,
         radius_mm: vec![radius; k_top + 1],
         carried_mm2: vec![0.0; k_top + 1],
-        covered_demand: Vec::new(),
+        covered_demand: Vec::new(), twin_host: false,
         inserted_by_load: false,
         path: Vec::new(),
         seat_face: SeatFace::default(),
@@ -315,6 +315,57 @@ fn the_congestion_lean_never_re_routes_a_headed_arm() {
     assert!(outcome.headed_kept >= 1, "the pass fired on the headed arm: {outcome:?}");
     assert_eq!(struts[1].path, path_before, "the headed arm's route is untouched");
     assert_heads_honoured(&before, &tops, &struts, "congestion lean");
+}
+
+/// QUALITY LANE Q2 (2026-10-10), congestion lean. Two stacked plate roots, one
+/// of them an arm a twin seat was merged into (`twin_host`): the twin rested on
+/// it before the merge, so the lean never moved it, and the merge must keep it
+/// so. Without the flag the same pair leans BOTH roots (the control run).
+/// SABOTAGE: drop the `twin_host` loop in `congestion::lean_congested_roots`
+/// and the host is re-routed, to the nearest clear plate cell outside the
+/// silhouette (Deinonychus arm 183: 5.55 mm for a 0.018 mm sliver of overlap).
+#[test]
+fn the_congestion_lean_never_re_routes_an_arm_a_twin_was_merged_into() {
+    let grid = grid();
+    let history = ColumnHistory::new(&grid);
+    let keep_out = crate::drain::DrainKeepOut::none();
+    let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
+    let context = crate::congestion::CongestionContext {
+        grid: &grid,
+        history: &history,
+        keep_out: &keep_out,
+        lean: &lean,
+        layer_height_mm: H,
+        layers: 500,
+        flare_factor: 1.6,
+        tip_radius_min_mm: 0.05,
+        hex_separation_mm: 1.0,
+        x_allowed: 18.0,
+        outward_lean: true,
+        flank_arms: false,
+        max_struts: 1_000,
+    };
+    let pair = || {
+        vec![
+            straight(&grid, 0, 150, 150, 200, 0.3),
+            straight(&grid, 1, 150, 156, 200, 0.3),
+        ]
+    };
+    // Control: neither is a host, so the pass re-routes at least one of them,
+    // and the one it would spare in the run below is among those it moves.
+    let mut control = pair();
+    let mut control_outcome = crate::congestion::CongestionOutcome::default();
+    crate::congestion::apply_remedies(&context, &mut control, &mut control_outcome);
+    assert!(
+        !control[1].path.is_empty(),
+        "anti-vacuity: without the flag the second root is leaned: {control_outcome:?}"
+    );
+    let mut struts = pair();
+    struts[1].twin_host = true;
+    let mut outcome = crate::congestion::CongestionOutcome::default();
+    let moved = crate::congestion::apply_remedies(&context, &mut struts, &mut outcome);
+    assert!(outcome.arms_leaned >= 1 && moved >= 1, "the other root was leaned: {outcome:?}");
+    assert!(struts[1].path.is_empty(), "the merged host's route is untouched");
 }
 
 // ---------------------------------------------------------- forced merges
@@ -1588,10 +1639,79 @@ mod graze_conversion {
             plate_z_mm: 0.0,
             link_mm: 0.0,
         };
-        let env = crate::graze::GrazeEnv { joins: &joins, profiles, rule, flare_factor: 1.6 };
+        let planes: Vec<f64> = (0..300).map(|layer| (f64::from(layer) + 0.5) * H).collect();
+        let slices = plinth_support::perception::slice_stack(
+            &mesh,
+            &planes,
+            plinth_support::perception::SliceStackLimits::production(),
+        )
+        .expect("the slab slices");
+        let env = crate::graze::GrazeEnv {
+            joins: &joins,
+            profiles,
+            rule,
+            flare_factor: 1.6,
+            slices: &slices,
+        };
         let mut outcome = HeadsOutcome::default();
         let converted = crate::graze::convert(&env, struts, &mut outcome);
         (converted, outcome)
+    }
+
+    /// [`field`] with the grazer standing over `grazer_col` and its host
+    /// [`RUN_COLS`] columns away, on whichever side leaves room.
+    fn field_at(grid: &Grid, grazer_col: usize) -> Vec<SweepStrut> {
+        let host_col = if grazer_col >= RUN_COLS { grazer_col - RUN_COLS } else { grazer_col + RUN_COLS };
+        let host = straight(grid, 0, 150, host_col, K_TOP, 1.0);
+        let mut grazer = straight(grid, 1, 150, grazer_col, K_TOP, 0.05);
+        grazer.landing = Landing::Strut { id: 0, layer: OLD_LANDING };
+        grazer.k_bottom = OLD_LANDING;
+        grazer.radius_mm = vec![0.3; K_TOP - OLD_LANDING + 1];
+        if let Some(tip) = grazer.radius_mm.last_mut() {
+            *tip = 0.05;
+        }
+        grazer.carried_mm2 = vec![0.0; K_TOP - OLD_LANDING + 1];
+        let span = K_TOP - OLD_LANDING;
+        grazer.path = (0..=span)
+            .map(|slot| {
+                let col = if grazer_col >= host_col {
+                    host_col + ((grazer_col - host_col) * slot) / span
+                } else {
+                    host_col - ((host_col - grazer_col) * slot) / span
+                };
+                cell_u32(grid.index(150, col))
+            })
+            .collect();
+        vec![host, grazer]
+    }
+
+    /// **A head never slides, so a tip the footprint rule would slide is not
+    /// given one** (quality lane Q2, Deinonychus arm 133). Two identical
+    /// grazers differ in one thing, where they stand on the slab's underside:
+    /// in the middle the whole contact disc lies on the face and the tip gets
+    /// its head; 0.075 mm from the slab's edge the disc hangs off the face, the
+    /// footprint rule would slide the straight tip onto the face, and a head
+    /// converted at the seat cell would keep the disc off the face and lose
+    /// the slide's reach. That tip stays straight, named `SlidesToItsFace`.
+    /// SABOTAGE: drop the `slides_to_face` test in `graze::convert` and the
+    /// edge tip converts (the second block goes red); the middle tip is the
+    /// control that the grade does not refuse everything.
+    #[test]
+    fn a_grazing_tip_whose_disc_hangs_off_its_face_is_left_straight_for_the_slide() {
+        let grid = grid();
+        // Control: in the middle of the face, the disc is on it.
+        let mut middle = field_at(&grid, 150);
+        let (converted, outcome) = convert(&grid, &mut middle);
+        assert_eq!(outcome.graze_asked, 1, "anti-vacuity: it grazes: {outcome:?}");
+        assert_eq!(converted, 1, "a tip with its disc on the face is converted: {outcome:?}");
+        // The edge: column 1 stands 0.075 mm inside the slab's x = 0 wall.
+        let mut edge = field_at(&grid, 1);
+        let before = edge[1].clone();
+        let (converted, outcome) = convert(&grid, &mut edge);
+        assert_eq!(outcome.graze_asked, 1, "anti-vacuity: it grazes: {outcome:?}");
+        assert_eq!(converted, 0, "{outcome:?}");
+        assert_eq!(edge[1], before, "the straight tip is untouched, for the slide");
+        assert_eq!(outcome.graze_reasons, vec![(1, GrazeReason::SlidesToItsFace)]);
     }
 
     /// RED before the lane (nothing converted a grazing straight tip). A tip

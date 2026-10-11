@@ -808,9 +808,20 @@ pub(crate) fn apply(
     } else {
         children_of.clone()
     };
+    //
+    // **The arm a twin seat was merged into is never re-landed here**
+    // (`SweepStrut::twin_host`, quality lane Q2, 2026-10-10). This pass leans
+    // a WHOLE arm along one axis to the plate when its tip meets a steep face
+    // (`DEINO-DIAGNOSIS.md`, cause 3): that is the 30-46 degree post the merge
+    // exists to remove. The merged arm keeps the straight post (and head) the
+    // merge gave it, and a bite it cannot lose is a seat-trim WARNING, as for
+    // every arm this pass leaves. Measured on the Deinonychus: with the host
+    // free to lean, four ridge posts that stood vertical before the merge
+    // leaned 33-46 degrees over a free vertical landing; locked, none does.
     let mut locked: Vec<bool> = (0..struts.len())
         .map(|member| {
-            carries[member]
+            struts[member].twin_host
+                || carries[member]
                 && (tied[member]
                     || if trigger.is_clearance() {
                         followers_of[member].iter().any(|&follower| {
@@ -2205,7 +2216,7 @@ mod frame_lock_tests {
             interior: false,
             radius_mm: Vec::new(),
             carried_mm2: Vec::new(),
-            covered_demand: Vec::new(),
+            covered_demand: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             straight_fallback: None,
@@ -2272,7 +2283,7 @@ mod put_back_tests {
             interior: false,
             radius_mm: Vec::new(),
             carried_mm2: Vec::new(),
-            covered_demand: Vec::new(),
+            covered_demand: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             straight_fallback: None,
@@ -2393,7 +2404,7 @@ mod blame_attribution_tests {
             interior: false,
             radius_mm: Vec::new(),
             carried_mm2: Vec::new(),
-            covered_demand: Vec::new(),
+            covered_demand: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             straight_fallback: None,
@@ -2679,7 +2690,7 @@ mod model_landing_tests {
             interior: false,
             radius_mm: vec![0.1; SEAT_LAYER - k_bottom + 1],
             carried_mm2: Vec::new(),
-            covered_demand: Vec::new(),
+            covered_demand: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             straight_fallback: None,

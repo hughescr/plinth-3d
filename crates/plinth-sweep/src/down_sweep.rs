@@ -2329,7 +2329,7 @@ fn insert_for_load(
                 carried_mm2: Vec::new(),
                 // Placed by the area law, not by reach: it roots no demand
                 // cell, and the removal pass must not be told otherwise.
-                covered_demand: Vec::new(),
+                covered_demand: Vec::new(), twin_host: false,
                 inserted_by_load: true,
                 // Written TOP-DOWN while the arm grows, reversed with the
                 // ledger the moment it lands.

@@ -244,6 +244,48 @@ any surface keeps the longest zones, since placement cannot refuse every seated 
 census, which cannot run either, warns.)
 The lip-seat gate is unchanged: a member may land "no nearer than it stood".
 
+**One support per spike (quality lane Q2, owner ruling 2026-10-10).** A sharp tip first appears as a
+hairline the raster covers but does not carry, so the next layer, the first that carries, finds its
+column unrooted and seats a second arm one layer above the first (before the rule, 53 pairs of tip
+balls overlapped on the Deinonychus, 29 of them under 0.1 mm apart). The second arm's shaft stood
+in the first arm's head's way (`HitsMember`, 49 of 68 refusals), and with no head the whole arm
+leaned to the plate.
+Now a seat whose tip ball overlaps the ball of an arm already seated in the SAME column (`|c1 - c2| <
+r1 + r2` at the smallest tip the area law allows for each seat's demand, times the registered ball
+factor; both balls on the column's axis, so the distance is the height between the seats, read from
+where the earlier arm first seated) raises that arm to the new layer and gives it the demand the
+seat would have covered (`up_sweep::twin_host`, `raise_host_seat`). The raised arm keeps its landing,
+post and head; it is alive on the new layer, so the down-sweep routes the twin's load into its
+contact and sizes it for both. Dropping the second seat WITHOUT raising the first was built and
+measured first and is wrong: no arm was alive on the new layer, and 75 mm2 of Deinonychus load
+reached no carrier (`tests/it/twin_merge.rs` grades this). Twins in two different columns (about
+6 % of the pairs) are not merged: the raised arm would have to change column. A pair that overlaps
+only after the sizing has grown the tips is not seen at seating.
+
+The arm a twin was merged into keeps the place its twin gave it (`SweepStrut::twin_host`). Before the
+merge the twin's shaft landed on that arm, and an arm another member rests on is never re-routed by the
+passes that move arms: the congestion lean, the lip-seat re-landing, the graze conversion and the
+slenderness merges (`landing_check::carries_someone`); lip-seat also leans a whole arm along one axis
+when its tip meets a steep face, which is the 30-46 deg post this rule removes. A merged host that those
+passes could move leaned away as a lone leaf: first measured at 5.55 mm out for a 0.018 mm sliver
+between two census root discs (Deinonychus arm 183), and four ridge posts that stood vertical leaned
+33-46 deg over a free vertical landing. The host is therefore counted as carrying, in `carries_someone`
+and in the congestion lean, and lip-seat locks it outright. A bite it cannot lose stays a seat-trim WARNING.
+
+**A contact that carries an island keeps the reach it had (quality lane Q2, round 3).** With the twin
+arms gone, a Deinonychus arm whose head had been refused for `HitsMember` (the twin's shaft stood in the
+way) could now take the graze head (`graze::convert`: 1 conversion before the rule, 2 after). The
+straight arm it replaced was slid 0.18 mm along its seat face by the footprint rule, whose whole job is
+to put the contact disc on the face; that slide put its ball's section at the birth layer of a 24-pixel
+detached island 0.14 mm inside the island's contour (audit island at layer 169). A head is frozen at
+placement and the footprint rule never slides it (`Footprint::MoveRefused`), so the converted arm kept
+its ball at the seat cell, 22 % of its disc off the face, and its section at the same layer missed the
+island by 0.03 mm. The cause is not the merge's routing but the order of the passes: the graze
+conversion plans the head before the footprint slide exists. The rule now: a grazer whose straight tip's
+contact disc is not wholly on its face (graded by `footprint::regrade`, the footprint rule's own disc,
+lattice and rim, in ONE batched pass over the grazers) is left straight, named `SlidesToItsFace`, and the
+slide runs as it always did. No tolerance is new; the grade is the footprint rule's.
+
 **The clearance re-route after the final sizing.** The up-sweep places an arm at a lower bound
 of the radius it is later drawn at (the area law and the thickening grow it), so after the final
 sizing and the ties the census names every arm whose drawn solid stands within the final gap

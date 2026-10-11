@@ -68,7 +68,7 @@ fn post(grid: &Grid, id: u32, col: usize, layers: usize) -> SweepStrut {
         interior: false,
         radius_mm: vec![RADIUS; layers],
         carried_mm2: vec![0.0; layers],
-        covered_demand: Vec::new(),
+        covered_demand: Vec::new(), twin_host: false,
         inserted_by_load: false,
         path: Vec::new(),
         seat_face: SeatFace::default(),

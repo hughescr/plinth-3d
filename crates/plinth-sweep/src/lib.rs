@@ -243,6 +243,14 @@ pub struct SweepStrut {
     /// Demand cells this arm newly rooted when it went in. The removal pass
     /// asks whether a survivor still covers each of them.
     pub covered_demand: Vec<usize>,
+    /// A twin seat was merged into this arm ([`up_sweep::twin_host`], owner
+    /// ruling 2026-10-10). Before the merge the twin's shaft landed on this
+    /// arm, and an arm another member rests on is never moved by the passes
+    /// that re-route arms (`landing_check::carries_someone`). The merge must
+    /// not strip that protection: the arm it absorbed the twin into would
+    /// otherwise be re-landed by those passes as a lone leaf (Deinonychus arm
+    /// 183: leaned 5.55 mm out for a 0.018 mm sliver of two census discs).
+    pub twin_host: bool,
     /// Placed by the down-sweep because the registered area law asked for the
     /// section, not by the up-sweep because reach asked for the cover. Such an
     /// arm roots no demand cell — `covered_demand` is empty by construction —
@@ -713,6 +721,13 @@ pub struct SweepPolicy {
     /// beside the one it laps, as before (the Cylinder's drain ring).
     /// Sabotage and comparison only; nothing in the pipeline turns it off.
     pub stranded_branch: bool,
+    /// Whether a seat whose tip ball overlaps an earlier seat's tip ball is
+    /// merged into that seat instead of drawn as a second arm
+    /// (`up_sweep::twin_host`, owner ruling 2026-10-10). **On in production.**
+    /// With it false every such twin is drawn, as before: its shaft then blocks
+    /// the first arm's head and the twin leans away (`DEINO-DIAGNOSIS.md`).
+    /// Sabotage and comparison only; nothing in the pipeline turns it off.
+    pub twin_merge: bool,
     /// Whether reach and load routing measure a lateral run as its straight
     /// length (`reach::any_angle_relax`, 2026-09-30). **On in production.**
     /// With it false both sweeps fall back to the 8-neighbour chamfer, which
@@ -1060,6 +1075,7 @@ impl SweepPolicy {
             creep_overhang_cut: true,
             stranded_seating: true,
             stranded_branch: true,
+            twin_merge: true,
             straight_reach: true,
             island_seating: true,
             seat_face_band: true,
@@ -1276,6 +1292,16 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_stranded_branch(mut self) -> Self {
         self.stranded_branch = false;
+        self
+    }
+
+    /// Draw every twin seat as its own arm, as before 2026-10-10.
+    /// **Sabotage and comparison only**: with it set, a sharp tip's second
+    /// seat one layer above the first is drawn again, and its shaft blocks the
+    /// first arm's head.
+    #[must_use]
+    pub const fn without_twin_merge(mut self) -> Self {
+        self.twin_merge = false;
         self
     }
 
@@ -1723,6 +1749,7 @@ pub fn run_sweep_with_holes(
         GreedyScratch::legacy(&grid, lamina_reach_mm)
     };
     greedy.stranded_seating = policy.stranded_seating;
+    greedy.twin_merge = policy.twin_merge;
     greedy.separation_mm = if policy.straight_reach {
         up_sweep::hex_separation_mm(lamina_reach_mm, grid.pitch_mm())
     } else {
@@ -2624,6 +2651,7 @@ pub fn run_sweep_with_holes(
             profiles,
             rule,
             flare_factor: policy.flare_r_factor,
+            slices: &slices,
         };
         if graze::convert(&graze_env, &mut struts, &mut graze_outcome) > 0 {
             perf::add(PerfWork::SweepDownCallGraze, 1);
@@ -3205,6 +3233,7 @@ pub fn run_sweep_with_holes(
     report.counters.island_seats_saved = greedy.seats_saved;
     report.counters.island_seats = greedy.island_seats;
     report.counters.stranded_seats = greedy.stranded_seats;
+    report.counters.twin_seats_merged = greedy.twin_merges;
     report.counters.island_hex_bound = greedy.island_hex_bound;
     greedy.heads.publish(&mut report.heads);
     // The heads the graze conversion added (Craig 2026-10-08) join the
@@ -5019,7 +5048,7 @@ mod removal_tests {
             interior: false,
             radius_mm: Vec::new(),
             carried_mm2: Vec::new(),
-            covered_demand: Vec::new(),
+            covered_demand: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             seat_face: crate::SeatFace::default(),
@@ -5186,7 +5215,7 @@ mod removal_tests {
             // Below minimum_load_mm2: this is exactly the state that made a
             // load-inserted arm a removal candidate before the fix.
             carried_mm2: vec![0.5],
-            covered_demand: Vec::new(),
+            covered_demand: Vec::new(), twin_host: false,
             inserted_by_load: true,
             path: Vec::new(),
             seat_face: crate::SeatFace::default(),
@@ -5231,7 +5260,7 @@ mod removal_tests {
             interior: false,
             radius_mm: vec![0.1],
             carried_mm2: vec![carried],
-            covered_demand: Vec::new(),
+            covered_demand: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             seat_face: crate::SeatFace::default(),

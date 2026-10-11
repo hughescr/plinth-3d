@@ -1051,6 +1051,14 @@ pub enum GrazeReason {
     /// final gap of the model: the clearance re-route would have to move it
     /// with the head on it, and it never moves a headed arm.
     HostNearModel,
+    /// The straight tip's contact disc hangs off its seat face, so the
+    /// footprint rule will slide the tip along the face to put the whole disc
+    /// on it ([`crate::footprint`]). A head is frozen and never slides: the
+    /// head would keep the disc where the seat cell is, partly off the face,
+    /// and the contact would lose the reach the slide gives it (quality lane
+    /// Q2, Deinonychus: a 0.18 mm slide put the contact under a 24-pixel
+    /// island, the head left it 0.018 mm short).
+    SlidesToItsFace,
     /// A brace, a mast or a tie: warned, never converted.
     NotAnArm,
     /// The arm was made or moved after the conversion ran.
@@ -2223,7 +2231,7 @@ mod tests {
             interior: false,
             radius_mm: vec![0.2, 0.15, 0.1, 0.05],
             carried_mm2: vec![4.0, 3.0, 2.0, 1.0],
-            covered_demand: Vec::new(),
+            covered_demand: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             seat_face: SeatFace::default(),

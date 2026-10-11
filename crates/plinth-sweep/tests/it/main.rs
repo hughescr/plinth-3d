@@ -72,6 +72,7 @@ mod tapered_load_steps;
 mod tip_contact_scar;
 mod tip_seating;
 mod toed_slab_pose;
+mod twin_merge;
 mod vacated_column;
 mod wall_creep;
 mod winner_plan_retained;
