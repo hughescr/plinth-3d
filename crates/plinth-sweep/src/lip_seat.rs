@@ -59,7 +59,13 @@
 //!    foot on the plate comes to lap a root it did not, is put back and its
 //!    descent refused from then on; where several moves broke the same
 //!    member, the longest goes back first, alone, and the field is sized
-//!    again before the next (fix/lip-seat-blame, 2026-10-01).
+//!    again before the next (fix/lip-seat-blame, 2026-10-01). **A lean the
+//!    slenderness law cannot hold is not taken** (Q1, 2026-10-10): when the
+//!    cheapest descent that passed every test runs longer than `S` times the
+//!    thickest radius at which the arm still keeps the final gap (the spare
+//!    gap measured for it, up to the registered maximum radius), the arm keeps
+//!    its seat and falls to item 3. Seat-bite triggers only; the clearance
+//!    re-route is not asked.
 //! 2. **A seat further in on the same face.** The footprint rule
 //!    (`footprint.rs`) already slides a seat along its face; a tip whose disc
 //!    is on its face but whose shaft the trim still bites joins its search,
@@ -218,15 +224,7 @@ fn solid_clearances(
                 .map_or(arm.base_mm, |(_, bottom)| bottom)
         })
         .collect();
-    let radii: Vec<f64> = arms
-        .iter()
-        .map(|arm| {
-            arm.radius_profile_mm
-                .iter()
-                .copied()
-                .fold(arm.tip_radius_mm, f64::max)
-        })
-        .collect();
+    let radii: Vec<f64> = arms.iter().map(drawn_max_radius_mm).collect();
     let insets: Vec<f64> = arms
         .iter()
         .zip(&discs)
@@ -264,6 +262,30 @@ fn solid_clearances(
                     .collect()
             },
         )
+}
+
+/// The widest radius the arm is drawn at: the solid that [`solid_clearances`]
+/// reads against the model is the arm's axis at this one radius.
+fn drawn_max_radius_mm(arm: &SweepArm) -> f64 {
+    arm.radius_profile_mm
+        .iter()
+        .copied()
+        .fold(arm.tip_radius_mm, f64::max)
+}
+
+/// **The thickest radius at which an arm keeps the final gap**, from the
+/// clearance this module already measured for it: `clearance_mm` is the gap
+/// between the model and the arm's axis solid drawn at `drawn_mm`, so growing
+/// the radius by `clearance_mm - gap_mm` spends exactly the spare gap. It never
+/// exceeds `max_mm`, the registered maximum radius, and is never below the
+/// drawn radius (an arm already inside the gap cannot be thickened at all).
+fn thickest_radius_keeping_gap_mm(
+    drawn_mm: f64,
+    clearance_mm: f64,
+    gap_mm: f64,
+    max_mm: f64,
+) -> f64 {
+    (drawn_mm + (clearance_mm - gap_mm).max(0.0)).min(max_mm.max(drawn_mm))
 }
 
 /// One arm the finished field still has with its shaft cut by its seat trim.
@@ -398,6 +420,13 @@ pub struct LipSeatOutcome {
     /// Refused because a moved member's drawn solid would come nearer the
     /// model than the final gap, or than it already stood.
     pub candidates_refused_clearance: usize,
+    /// Refused because the lean's straight run is longer than `S` times the
+    /// thickest radius at which the arm keeps the final gap, so the slenderness
+    /// ladder could neither thicken nor otherwise hold it (Q1, 2026-10-10).
+    pub candidates_refused_slender: usize,
+    /// Of the arms kept with no admissible descent, those that had a lean
+    /// refused for its slenderness (they keep the seat-bite WARNING).
+    pub kept_for_slenderness: usize,
     /// Moved members (a mover, a follower) whose solid was NOT read against
     /// the final gap because it stands in a hidden cavity (Craig ruling
     /// 2026-10-05): the path hit of that ruling in the landing search.
@@ -506,6 +535,9 @@ struct Pending {
     candidates: Vec<Candidate>,
     next: usize,
     children: Vec<usize>,
+    /// The cheapest descent that passed every other test was refused because
+    /// the lean cannot be held ([`apply`]); the arm keeps its seat.
+    refused_slender: bool,
 }
 
 /// A child following its moved host: `(child index, the cell it now lands
@@ -727,6 +759,7 @@ pub(crate) fn apply(
     outcome.kept_carrying = 0;
     outcome.headed_kept = 0;
     outcome.kept_no_candidate = 0;
+    outcome.kept_for_slenderness = 0;
     outcome.kept_locked_by_tie = 0;
     outcome.kept_locked_by_non_arm_below = 0;
     outcome.kept_behind_a_follower_also_sent = 0;
@@ -883,6 +916,7 @@ pub(crate) fn apply(
             candidates,
             next: 0,
             children,
+            refused_slender: false,
         });
     }
 
@@ -1193,6 +1227,64 @@ pub(crate) fn apply(
                 outcome.candidates_refused_path += 1;
                 continue;
             };
+            // **A LEAN THE SLENDERNESS LAW CANNOT HOLD IS NOT TAKEN** (Q1,
+            // 2026-10-10, `DEINO-DIAGNOSIS.md` fix 1). The re-landing leans the
+            // WHOLE arm along one straight axis. Where that axis runs within
+            // the final gap of the model, the slenderness ladder cannot
+            // thicken it (the thicker solid would enter the gap) and the arm
+            // ends as an `unbraced_run_over_limit` warning on a long thin rod
+            // (Deinonychus arms 215 and 220: runs 3.3x and 5.3x their limit).
+            // The thickest radius that still keeps the gap follows from the
+            // clearance just measured: the spare gap, `clearance - gap`, is
+            // the radius it can grow by, up to the registered maximum. The
+            // run is the chord the ladder measures (`slenderness::run_length`:
+            // the drop and the lateral move between the seat and base cells)
+            // and its limit is the existing `S * r`.
+            //
+            // This is the LAST test, after the plate, root, measured-section,
+            // lock and live-path tests above: a descent one of those refuses
+            // is not admissible and never ends the search. The cheapest
+            // ADMISSIBLE descent is the lean the rule would take; if its run
+            // exceeds the limit at that radius the rule takes none, and the
+            // arm keeps its seat and today's seat-bite WARNING. (Walking on to
+            // dearer admissible descents would cost one kernel clearance read
+            // each over lists tens of thousands long: 8 times slower on
+            // Deinonychus.) No new constant: `S`, the gap and the maximum
+            // radius are the law's own. The clearance re-route is not asked
+            // (it was sent for the gap itself), and a mover in a hidden
+            // cavity, where the gap does not apply, is not asked either.
+            if !trigger.is_clearance() && !hidden(first) {
+                if let Some(now) = after[first] {
+                    let strut = &struts[index_of];
+                    #[expect(
+                        clippy::cast_precision_loss,
+                        reason = "a layer count bounded by the plan's own layer count is exact in f64"
+                    )]
+                    let drop_mm = strut.k_top.saturating_sub(proposal.candidate.k_bottom) as f64
+                        * context.layer_height_mm;
+                    let run_mm = drop_mm.hypot(crate::cell_distance_mm(
+                        context.grid,
+                        strut.cell,
+                        proposal.candidate.cell,
+                    ));
+                    let fit_mm = thickest_radius_keeping_gap_mm(
+                        drawn_max_radius_mm(&trial[first]),
+                        now,
+                        tier,
+                        context.law.max_radius_mm(),
+                    );
+                    if run_mm > context.law.max_unbraced_mm(fit_mm) {
+                        outcome.candidates_refused_slender += 1;
+                        // The cheapest admissible descent cannot be held: the
+                        // arm keeps its seat and does not walk the rest of its
+                        // candidates.
+                        let job = &mut pending[proposal.slot];
+                        job.refused_slender = true;
+                        job.next = job.candidates.len();
+                        continue;
+                    }
+                }
+            }
             outcome.candidates_verified += 1;
             let strut = &mut struts[index_of];
             let was = (
@@ -1263,6 +1355,9 @@ pub(crate) fn apply(
             outcome.kept_carrying += 1;
         } else {
             outcome.kept_no_candidate += 1;
+            if job.refused_slender {
+                outcome.kept_for_slenderness += 1;
+            }
         }
     }
     moved
@@ -2814,7 +2909,36 @@ mod model_landing_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{min_drop_mm, top_aligned};
+    use super::{min_drop_mm, thickest_radius_keeping_gap_mm, top_aligned};
+
+    /// The spare gap is the radius the arm can grow by, up to the maximum, and
+    /// an arm already inside the gap cannot grow at all.
+    #[test]
+    fn the_thickest_radius_spends_the_spare_gap_up_to_the_maximum() {
+        // 0.058 mm drawn, 0.298 mm clear of the model, a 0.3 mm final gap: inside
+        // the gap already, so no growth (Deinonychus arm 215).
+        assert!((thickest_radius_keeping_gap_mm(0.058, 0.298, 0.3, 1.0) - 0.058).abs() < 1e-12);
+        // 0.5 mm clear leaves 0.2 mm to grow by.
+        assert!((thickest_radius_keeping_gap_mm(0.058, 0.5, 0.3, 1.0) - 0.258).abs() < 1e-12);
+        // Open space is capped by the registered maximum radius.
+        assert!((thickest_radius_keeping_gap_mm(0.058, f64::INFINITY, 0.3, 1.0) - 1.0).abs() < 1e-12);
+        // A drawn radius past the maximum is not shrunk.
+        assert!((thickest_radius_keeping_gap_mm(1.2, 5.0, 0.3, 1.0) - 1.2).abs() < 1e-12);
+    }
+
+    /// With S = 40 a 12.347 mm lean at 0.092 mm needs 0.309 mm: refused where
+    /// the gap allows 0.092 mm, admitted where it allows the maximum.
+    #[test]
+    fn a_lean_past_s_times_the_thickest_fit_is_over_its_limit() {
+        let law = crate::slenderness::SlendernessLaw::new(40.0, 0.05, 1.0, 40.0);
+        let tight = thickest_radius_keeping_gap_mm(0.092, 0.30, 0.3, law.max_radius_mm());
+        assert!(12.347 > law.max_unbraced_mm(tight));
+        let open = thickest_radius_keeping_gap_mm(0.092, 2.0, 0.3, law.max_radius_mm());
+        assert!(12.347 <= law.max_unbraced_mm(open));
+        // A disabled law constrains nothing.
+        let off = crate::slenderness::SlendernessLaw::disabled();
+        assert!(12.347 <= off.max_unbraced_mm(tight));
+    }
 
     /// **A MOVED CHILD IS ASKED ON ITS PROPOSED PATH** (challenger round 3,
     /// 2026-10-05). The landing search exempted a follower from the final gap

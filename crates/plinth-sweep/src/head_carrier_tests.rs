@@ -889,6 +889,158 @@ fn the_lip_seat_pass_never_re_lands_a_headed_arm_on_either_trigger() {
     }
 }
 
+/// Closed boxes `(min, max)` as one mesh: the slab the arm seats under, and a
+/// wall beside its shaft.
+fn boxes_mesh(boxes: &[([f64; 3], [f64; 3])]) -> plinth_mesh::Mesh {
+    const SIDES: [[u32; 3]; 12] = [
+        [0, 2, 1],
+        [1, 2, 3],
+        [4, 5, 6],
+        [5, 7, 6],
+        [0, 1, 4],
+        [1, 5, 4],
+        [2, 6, 3],
+        [3, 6, 7],
+        [0, 4, 2],
+        [2, 4, 6],
+        [1, 3, 5],
+        [3, 7, 5],
+    ];
+    let mut verts: Vec<[f64; 3]> = Vec::new();
+    let mut tris: Vec<[u32; 3]> = Vec::new();
+    for (lo, hi) in boxes {
+        let first = u32::try_from(verts.len()).expect("a few vertices");
+        for corner in 0..8_u32 {
+            verts.push([
+                if corner & 1 == 0 { lo[0] } else { hi[0] },
+                if (corner >> 1) & 1 == 0 { lo[1] } else { hi[1] },
+                if (corner >> 2) & 1 == 0 { lo[2] } else { hi[2] },
+            ]);
+        }
+        tris.extend(SIDES.iter().map(|tri| [first + tri[0], first + tri[1], first + tri[2]]));
+    }
+    plinth_mesh::Mesh::new(verts, tris).expect("closed boxes")
+}
+
+/// **THE SLENDERNESS REFUSAL IS THE LAST TEST, NOT THE FIRST** (Q1 review,
+/// 2026-10-11). The lip-seat rule refuses a lean the slenderness law cannot
+/// hold, and stops there for the arm. It once stopped at the cheapest
+/// descent that cleared the model, BEFORE the plate-root test: a descent
+/// whose flared root lapped an existing root, and which the root test would
+/// have discarded, ended the whole search, although a later descent clear of
+/// that root, with room to thicken, satisfied both rules.
+///
+/// An arm seated under a slab leans -X to a plate root. A low wall 0.305 mm
+/// from the axis of the cheapest descent leaves the solid no room to grow
+/// (its clearance reads 0.305 mm against the 0.3 mm gap, so the radius that
+/// fits is the drawn 0.1 mm plus 0.005 mm). The next descents lie farther
+/// from the wall and read 0.31 mm clear (0.1107 mm fits). The ratio `S` is set
+/// to 95 so that the run of every descent in play, about 10.2 mm, lies between
+/// the two limits: over `S * 0.105 = 9.98 mm` for the cheapest, under
+/// `S * 0.1107 = 10.5 mm` for the later ones.
+///
+/// CONTROL (anti-vacuity): with no other root the cheapest descent is
+/// admissible, trips the law, and the arm is kept for it. TEST: an existing
+/// root, drawn 0.6 mm wide at the end of a short one-cell post (so no cell
+/// near it reads as a landing on the post), laps that cheapest descent; the
+/// root test discards it, and the arm re-lands on a later one that holds.
+/// SABOTAGE (run on the committed `5260311` ordering): the arm is kept for
+/// slenderness at the cheapest descent and the root test is never reached
+/// (`candidates_refused_roots` 0, `moved` 0).
+#[test]
+fn an_inadmissible_cheapest_descent_does_not_end_the_slenderness_search() {
+    let grid = grid();
+    let history = ColumnHistory::new(&grid);
+    let keep_out = crate::drain::DrainKeepOut::none();
+    let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
+    let law = crate::slenderness::SlendernessLaw::new(95.0, 0.05, 1.0, 32.5);
+    let off = crate::slenderness::SlendernessLaw::disabled();
+    let mesh = boxes_mesh(&[
+        ([0.0, 0.0, 10.0], [15.0, 15.0, 12.0]),
+        ([2.0, 7.93, 0.5], [13.0, 8.93, 3.0]),
+    ]);
+    let plan = plinth_core::LayerPlan::new(0.0, vec![H; 300]).expect("a uniform plan");
+    let bite = plinth_support::ShaftSeatBite {
+        bite_mm: 0.2,
+        approach_deg: 60.0,
+        limit_deg: 20.0,
+    };
+    // Re-land arm 0 under `law`, with a second plate member (a root drawn
+    // 0.6 mm wide) at `root_col` of the arm's row when given. Returns the
+    // field, the outcome and the number of moves.
+    let run = |law: &crate::slenderness::SlendernessLaw, root_col: Option<usize>| {
+        let context = slender_context(&grid, &history, &keep_out, &lean, law);
+        let surface = std::cell::OnceCell::new();
+        let joins = crate::head_join::HeadJoinContext {
+            slender: &context,
+            mesh: &mesh,
+            layer_plan: &plan,
+            plate_z_mm: 0.0,
+            clearance_mm: 0.3,
+            standoff_mm: 0.6,
+            surface_pitch_mm: 0.1,
+            surface_max_bytes: 1 << 28,
+            surface: &surface,
+        };
+        let mut struts = vec![straight(&grid, 0, 150, 150, 200, 0.1)];
+        if let Some(col) = root_col {
+            struts.push(straight(&grid, 1, 150, col, 2, 0.05));
+        }
+        let mut arms = tilted_arms(&grid, &mut struts);
+        // The root is DRAWN wide (a heavy load below a short post) while its
+        // post stays one cell wide, so no cell near it reads as a landing on
+        // the post: the search offers the plate there and the root test is
+        // what discards it.
+        if root_col.is_some() {
+            arms[1].radius_profile_mm = vec![0.6; 3];
+        }
+        let mut bites = vec![None; struts.len()];
+        bites[0] = Some(bite);
+        let mut outcome = crate::lip_seat::LipSeatOutcome::default();
+        let moves = crate::lip_seat::apply(
+            &joins,
+            &plan,
+            0.0,
+            &mut struts,
+            &arms,
+            &bites,
+            crate::lip_seat::Trigger::SeatBite,
+            &[],
+            &mut outcome,
+        );
+        (struts, outcome, moves.len())
+    };
+    // The cheapest descent with no law at all: the one the root test must
+    // discard in the TEST below.
+    let (free, _, moved) = run(&off, None);
+    assert_eq!(moved, 1, "anti-vacuity: the arm has a descent when nothing limits the lean");
+    let cheapest = free[0].base_cell();
+    // CONTROL: the law on, no other root. The cheapest descent is
+    // admissible, its run is over S times the radius that fits beside the
+    // wall, and the arm keeps its seat, kept for slenderness.
+    let (kept, outcome, moved) = run(&law, None);
+    assert_eq!(moved, 0, "the cheapest descent trips the law: {outcome:?}");
+    assert_eq!(outcome.candidates_refused_slender, 1, "{outcome:?}");
+    assert_eq!(outcome.kept_for_slenderness, 1, "{outcome:?}");
+    assert_eq!(outcome.candidates_refused_roots, 0, "{outcome:?}");
+    assert_eq!(kept[0].landing, Landing::Plate);
+    assert_eq!(kept[0].base_cell(), kept[0].cell, "the arm keeps its seat");
+    // TEST: a root whose flared disc laps that cheapest descent. The root
+    // test discards it, and the search goes on to a descent clear of the
+    // root, where the wall is farther and the run fits.
+    let (moved_to, outcome, moved) = run(&law, Some(106));
+    assert!(
+        outcome.candidates_refused_roots >= 1,
+        "the root test reached the cheapest descent: {outcome:?}"
+    );
+    assert_eq!(moved, 1, "the arm re-lands on a later descent: {outcome:?}");
+    assert_eq!(outcome.candidates_refused_slender, 0, "{outcome:?}");
+    assert_eq!(outcome.kept_for_slenderness, 0, "{outcome:?}");
+    assert_eq!(outcome.candidates_verified, 1, "{outcome:?}");
+    assert_ne!(moved_to[0].base_cell(), cheapest, "not the descent the root discarded");
+    assert!(moved_to[0].is_leaned(), "the arm leans to its new root");
+}
+
 // ---------------------------------------------------------------------------
 // The head-first lane's two rulings of 2026-10-06: a head is planned at an
 // ESTIMATE of the final tip radius, and a head the final sizing grew across the

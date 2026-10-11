@@ -238,6 +238,12 @@ impl SlendernessLaw {
         self.ratio
     }
 
+    /// The registered maximum tip radius, the thickest any member may be made.
+    #[must_use]
+    pub const fn max_radius_mm(&self) -> f64 {
+        self.r_max_mm
+    }
+
     /// `L_max(r) = S · r` — the longest run of member at radius `r` that may
     /// stand with nothing holding it sideways.
     #[must_use]
@@ -382,6 +388,12 @@ pub struct SlendernessOutcome {
     pub masts_dropped: usize,
     /// Remedy 4: runs that stayed over the limit, one entry each.
     pub warnings: Vec<UnbracedWarning>,
+    /// For each member whose run the ladder gave up on, what each rung
+    /// counted when it last did (log text only; the last attempt wins).
+    pub refusal_notes: std::collections::BTreeMap<u32, Vec<(&'static str, String)>>,
+    /// For each member with a run, the pass that last changed its descent
+    /// (`provenance`; log text only).
+    pub last_moved_by: std::collections::BTreeMap<u32, &'static str>,
     /// The worst run left standing, and the limit it is measured against.
     pub longest_run_mm: f64,
     pub longest_run_limit_mm: f64,
@@ -444,6 +456,9 @@ pub struct SlendernessOutcome {
     pub members_thickened: usize,
     pub thicken_refused_radius: usize,
     pub thicken_refused_disc: usize,
+    /// Thickening attempts that found no plan at all (nothing to raise, or no
+    /// room to read). Counted for the warning lines only.
+    pub thicken_refused_no_plan: usize,
     /// Thickenings refused because the raised solid, of the member or of a
     /// trunk raised with it, would enter the model's final clearance gap where
     /// the solid as drawn now does not (R2, 2026-10-04). A path-hit witness.
@@ -1944,6 +1959,9 @@ pub(crate) fn apply_ties_with_model(
                 let Some(run) = run else {
                     continue 'members;
                 };
+                // What the rungs have counted so far, so a run that no rung
+                // holds can say which refused it (log text only).
+                let tally_before = RungTally::of(outcome);
                 // A CROSS takes the first of the ties the run needs, evenly
                 // spaced; the member is measured again before the next one.
                 // A mast plans its own layer ([`mast_tie_layer`]).
@@ -2082,6 +2100,21 @@ pub(crate) fn apply_ties_with_model(
                 // No admissible remedy this round: the run is set aside, and
                 // if no later round finds it one, the census at the end of the
                 // sweep names it as a warning.
+                let enabled = [
+                    context.brace,
+                    context.thicken,
+                    context.mast,
+                    context.model_tie && model.is_some(),
+                ];
+                let rungs = tally_before.describe_since(&RungTally::of(outcome), enabled);
+                let notes = outcome.refusal_notes.entry(run.strut_id).or_default();
+                for (label, text) in rungs {
+                    match notes.iter_mut().find(|(known, _)| *known == label) {
+                        Some(slot) => slot.1 = text,
+                        None => notes.push((label, text)),
+                    }
+                }
+                notes.sort_by_key(|(label, _)| RUNG_ORDER.iter().position(|rung| rung == label));
                 exhausted.insert(run_key(&run));
             }
         }
@@ -3530,6 +3563,138 @@ impl CrossMiss {
     }
 }
 
+/// The ladder's rungs in the order the warning lines name them.
+const RUNG_ORDER: [&str; 4] = ["cross bands", "thicken", "mast", "model tie"];
+
+/// The refusal counters of the ladder's rungs, read before and after one
+/// attempt on one run, so the run that no rung could hold can say which rungs
+/// refused it and why (diagnosis item 10, 2026-10-10). Log text only: it reads
+/// counters the rungs already keep and changes nothing.
+#[derive(Clone, Copy, Debug, Default)]
+struct RungTally {
+    bands: BandRefusals,
+    bands_not_fitting: usize,
+    cross_thicken_cheaper: usize,
+    cross_past_ceiling: usize,
+    thicken_no_plan: usize,
+    thicken_radius: usize,
+    thicken_disc: usize,
+    thicken_model: usize,
+    mast_cells: usize,
+    mast_by_model: usize,
+    mast_by_member: usize,
+    mast_by_panel: usize,
+    mast_thicker: usize,
+    tie_tried: usize,
+    tie_no_surface: usize,
+    tie_no_candidate: usize,
+    tie_frame: usize,
+}
+
+impl RungTally {
+    fn of(outcome: &SlendernessOutcome) -> Self {
+        Self {
+            bands: outcome.brace_band_refusals,
+            bands_not_fitting: outcome.brace_bands_refused,
+            cross_thicken_cheaper: outcome.crosses_refused_thicken_cheaper,
+            cross_past_ceiling: outcome.crosses_refused_past_pair_ceiling,
+            thicken_no_plan: outcome.thicken_refused_no_plan,
+            thicken_radius: outcome.thicken_refused_radius,
+            thicken_disc: outcome.thicken_refused_disc,
+            thicken_model: outcome.thicken_refused_model,
+            mast_cells: outcome.mast_cells_refused,
+            mast_by_model: outcome.mast_cells_refused_by_model,
+            mast_by_member: outcome.mast_cells_refused_by_member,
+            mast_by_panel: outcome.mast_cells_refused_by_panel,
+            mast_thicker: outcome.mast_cells_refused_thicker_than_member,
+            tie_tried: outcome.model_tie_runs_tried,
+            tie_no_surface: outcome.model_tie_refused_no_surface,
+            tie_no_candidate: outcome.model_tie_refused_no_candidate,
+            tie_frame: outcome.model_tie_refused_frame,
+        }
+    }
+
+    /// What each rung that was on refused between `self` and `after`, in
+    /// ladder order: `enabled` is cross bands, thicken, mast, model tie. A rung
+    /// that was on and counted nothing says so (no partner or room was found).
+    fn describe_since(&self, after: &Self, enabled: [bool; 4]) -> Vec<(&'static str, String)> {
+        let d = |now: usize, was: usize| now.saturating_sub(was);
+        let mut rungs: Vec<(&'static str, String)> = Vec::new();
+        let mut part = |on: bool, label: &'static str, items: &[(&str, usize)]| {
+            if !on {
+                return;
+            }
+            let list: Vec<String> = items
+                .iter()
+                .filter(|(_, count)| *count > 0)
+                .map(|(name, count)| format!("{name} {count}"))
+                .collect();
+            rungs.push((
+                label,
+                if list.is_empty() {
+                    "tried, nothing counted (no partner or room found)".to_owned()
+                } else {
+                    list.join(", ")
+                },
+            ));
+        };
+        let (b, a) = (&self.bands, &after.bands);
+        part(
+            enabled[0],
+            "cross bands",
+            &[
+                ("no partner shaft fit", d(after.bands_not_fitting, self.bands_not_fitting)),
+                ("no gap", d(a.no_gap, b.no_gap)),
+                ("below plate", d(a.below_plate, b.below_plate)),
+                ("in flare", d(a.in_flare, b.in_flare)),
+                ("off a post", d(a.off_a_post, b.off_a_post)),
+                ("too flat", d(a.too_flat, b.too_flat)),
+                ("ring under plate", d(a.ring_under_plate, b.ring_under_plate)),
+                ("path through drain", d(a.path_drain, b.path_drain)),
+                ("path through model", d(a.path_model, b.path_model)),
+                ("path through member", d(a.path_member, b.path_member)),
+                ("solid within model gap", d(a.solid_model, b.solid_model)),
+                ("solid in member", d(a.solid_member, b.solid_member)),
+                ("diagonal thicker than post", d(a.thicker_than_post, b.thicker_than_post)),
+                ("thickening cheaper", d(after.cross_thicken_cheaper, self.cross_thicken_cheaper)),
+                ("past two-post ceiling", d(after.cross_past_ceiling, self.cross_past_ceiling)),
+            ],
+        );
+        part(
+            enabled[1],
+            "thicken",
+            &[
+                ("no plan", d(after.thicken_no_plan, self.thicken_no_plan)),
+                ("root past the maximum radius", d(after.thicken_radius, self.thicken_radius)),
+                ("new lap of a root", d(after.thicken_disc, self.thicken_disc)),
+                ("enters the model gap", d(after.thicken_model, self.thicken_model)),
+            ],
+        );
+        part(
+            enabled[2],
+            "mast",
+            &[
+                ("no cell", d(after.mast_cells, self.mast_cells)),
+                ("cell near model", d(after.mast_by_model, self.mast_by_model)),
+                ("cell near member", d(after.mast_by_member, self.mast_by_member)),
+                ("panel", d(after.mast_by_panel, self.mast_by_panel)),
+                ("thicker than member", d(after.mast_thicker, self.mast_thicker)),
+            ],
+        );
+        part(
+            enabled[3],
+            "model tie",
+            &[
+                ("tried", d(after.tie_tried, self.tie_tried)),
+                ("no model surface in reach", d(after.tie_no_surface, self.tie_no_surface)),
+                ("no candidate passed", d(after.tie_no_candidate, self.tie_no_candidate)),
+                ("no tie count holds the frame", d(after.tie_frame, self.tie_frame)),
+            ],
+        );
+        rungs
+    }
+}
+
 /// A pair a run is past the two-post ceiling of (D9), as measured when its
 /// cross was refused.
 #[derive(Clone, Copy, Debug)]
@@ -3909,7 +4074,10 @@ fn thicken_to(
     outcome: &mut SlendernessOutcome,
 ) -> bool {
     match plan_thicken(context, state, struts, run, fits) {
-        None => false,
+        None => {
+            outcome.thicken_refused_no_plan += 1;
+            false
+        }
         Some(Err(ThickenRefusal::Radius)) => {
             outcome.thicken_refused_radius += 1;
             false
@@ -9367,5 +9535,33 @@ mod tests {
         assert!(!super::tie_confirmed_clear(&census(0, 0, 0, 0)), "nothing read, nothing hidden");
         assert!(!super::tie_confirmed_clear(&census(0, 0, 1, 0)), "a span undecided");
         assert!(!super::tie_confirmed_clear(&census(1, 0, 0, 1)), "inside the gap");
+    }
+}
+
+#[cfg(test)]
+mod rung_tally_tests {
+    use super::{RungTally, SlendernessOutcome};
+
+    /// A rung that was on and counted nothing says so; a rung that was off says
+    /// nothing; a counter that moved is named with its count, in ladder order.
+    #[test]
+    fn the_tally_names_what_each_rung_that_was_on_refused() {
+        let before = SlendernessOutcome::default();
+        let mut after = SlendernessOutcome::default();
+        after.thicken_refused_model += 1;
+        after.brace_band_refusals.path_model += 2;
+        after.mast_cells_refused += 3;
+        let noted = RungTally::of(&before)
+            .describe_since(&RungTally::of(&after), [true, true, true, false]);
+        let labels: Vec<&str> = noted.iter().map(|(label, _)| *label).collect();
+        assert_eq!(labels, ["cross bands", "thicken", "mast"], "the model tie was off");
+        assert_eq!(noted[0].1, "path through model 2");
+        assert_eq!(noted[1].1, "enters the model gap 1");
+        assert_eq!(noted[2].1, "no cell 3");
+        let quiet = RungTally::of(&before)
+            .describe_since(&RungTally::of(&before), [false, false, false, true]);
+        assert_eq!(quiet.len(), 1);
+        assert_eq!(quiet[0].0, "model tie");
+        assert!(quiet[0].1.starts_with("tried, nothing counted"));
     }
 }
