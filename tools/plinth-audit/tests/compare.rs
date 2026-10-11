@@ -511,3 +511,53 @@ fn a_declared_change_needs_a_declared_plan_change() {
     assert!(parse_args(&argv(&["a", "b", "--declared", "PLAN-CHANGED", "--declare-change", "nonsense"])).is_err());
     assert!(parse_args(&argv(&["a", "b", "--declared", "SORT-OF"])).is_err());
 }
+
+/// A declared contact merge excuses a contact that moved beyond the 0.1 mm match in N2, but the
+/// load path of that contact (the survivor) is still held to N3's thinning limit. The reference's
+/// first contact moves 0.11 mm and the first member is thinned by 20 % (below the 15 % limit
+/// without an I3 margin of 1.5x).
+#[test]
+fn a_declared_survivor_is_judged_by_n3_and_a_relocated_contact_alone_passes() {
+    let b = base();
+    // Records 0 to 3 are the first support chain (contact down to the plate); record 2 is a member on it.
+    let tip = kind_index(&b, RecordKind::ContactSphere, 0);
+    let member = 2;
+    assert_eq!(b.models[0].records[member].kind, RecordKind::Member, "fixture layout");
+    let declare = |a: &mut Args| {
+        a.declared = Some(plinth_audit::compare::classify::DeclaredClass::PlanChanged);
+        a.declared_changes.contact_merge = true;
+    };
+    // A contact moved alone is cut from its path: the comparison cannot be made, which is
+    // INDETERMINATE, not a pass.
+    {
+        let mut m = b.clone();
+        apply(&mut m, &Mutation::Move { record: tip, delta: [0.11, 0.0, 0.0] });
+        let run = run_pair("n3-survivor-alone", &b, &m, declare);
+        assert_eq!(row(&run, "N3").status, Status::Indeterminate, "{}", show(&run));
+    }
+    let relocated = |thin: Option<f64>| {
+        let mut m = b.clone();
+        for record in 0..=3 {
+            apply(&mut m, &Mutation::Move { record, delta: [0.11, 0.0, 0.0] });
+        }
+        if let Some(f) = thin {
+            apply(&mut m, &Mutation::ScaleRecord { record: member, factor: f });
+        }
+        m
+    };
+    // Control: relocation alone, declared, is a merge and the path is unchanged.
+    let run = run_pair("n3-survivor-move", &b, &relocated(None), declare);
+    assert_eq!(row(&run, "N2").status, Status::Pass, "{}", show(&run));
+    assert_eq!(row(&run, "N3").status, Status::Pass, "{}", show(&run));
+    // The defect: relocation plus a 20 % thinner member on the same path.
+    let run = run_pair("n3-survivor-thin", &b, &relocated(Some(0.8)), declare);
+    assert_eq!(row(&run, "N2").status, Status::Pass, "N2 excuses the relocation:\n{}", show(&run));
+    assert_eq!(row(&run, "N3").status, Status::Fail, "N3 must still see the survivor's thinner path:\n{}", show(&run));
+    // Control: the same thinning without the relocation fails N3 as before.
+    let run = run_pair("n3-thin-only", &b, &{
+        let mut m = b.clone();
+        apply(&mut m, &Mutation::ScaleRecord { record: member, factor: 0.8 });
+        m
+    }, declare);
+    assert_eq!(row(&run, "N3").status, Status::Fail, "{}", show(&run));
+}

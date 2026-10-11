@@ -161,7 +161,11 @@ decisions O1-O4 of 2026-10-10). Reads only the emitted bytes, the engine `.log` 
      merge when a candidate contact lies in its column (balls overlap in plan, at most 0.5 mm apart in
      height), and a new contact is the survivor of a merge when a reference contact lies in its column.
      Only contacts not explained that way count against N2's 5 % limits, so a contact lost with no
-     survivor beside it is still a finding. `bench.sh --declare-change` passes both flags.
+     survivor beside it is still a finding. A merged reference contact is paired with the nearest
+     surviving candidate contact whose ball overlaps its own, and N3 judges that pair's load path
+     (path minimum and members) like a 0.1 mm match, so a relocated contact cannot hide a thinner
+     path; a survivor whose path cannot be measured makes N3 INDETERMINATE. `bench.sh --declare-change`
+     passes both flags.
    - **Triage tools.** `--full-listing` lists every item behind every row (the default keeps the first
      few) and says, for each audit item, whether the design changed beside it and, for each
      floating piece, whether the reference floats it and which records exist in one file only

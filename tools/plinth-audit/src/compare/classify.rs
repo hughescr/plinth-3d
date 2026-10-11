@@ -1027,6 +1027,10 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
         // than 5 % of the reference's, and not more than 5 % of the reference contacts may be lost
         // with no survivor. A contact lost with no survivor beside it stays a finding.
         let mut merge_note = String::new();
+        // Declared correspondences (reference contact, surviving candidate contact) that N3 judges
+        // beside the 0.1 mm matches: a relocated contact is the same load path in a new place, and
+        // its sections are held to the same thinning limit.
+        let mut merge_pairs: Vec<(usize, usize, f64)> = Vec::new();
         if o.declared_changes.contact_merge && !a.tips.is_empty() {
             let ha = matching::Hash3::new(a.tips.iter().map(|&i| (i, a.recs[i].mid)), 1.0);
             let hb = matching::Hash3::new(b.tips.iter().map(|&j| (j, b.recs[j].mid)), 1.0);
@@ -1037,6 +1041,21 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
             };
             let merged: Vec<usize> = a.tips.iter().copied().filter(|i| !matched_r.contains(i)).filter(|&i| hb.near(a.recs[i].mid).any(|j| overlaps(&a.recs[i], &b.recs[j]))).collect();
             let survivors: Vec<usize> = b.tips.iter().copied().filter(|j| !matched_c.contains(j)).filter(|&j| ha.near(b.recs[j].mid).any(|i| overlaps(&a.recs[i], &b.recs[j]))).collect();
+            // Each merged reference contact answers to the nearest surviving candidate contact whose
+            // ball overlaps its own (in plan distance, then height). A merge into a candidate that
+            // already matched a reference contact adds no pair: that candidate's path is judged
+            // against its own match.
+            let survivor_set: std::collections::HashSet<usize> = survivors.iter().copied().collect();
+            for &i in &merged {
+                let best = hb
+                    .near(a.recs[i].mid)
+                    .filter(|j| survivor_set.contains(j) && overlaps(&a.recs[i], &b.recs[*j]))
+                    .map(|j| (v::dist(a.recs[i].mid, b.recs[j].mid), j))
+                    .min_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
+                if let Some((d, j)) = best {
+                    merge_pairs.push((i, j, d));
+                }
+            }
             let (un_lost, un_new) = (lost - merged.len(), newc - survivors.len());
             let n = a.tips.len() as f64;
             frac = 1.0 - un_lost as f64 / n;
@@ -1077,9 +1096,24 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
         // minimum is kept as well, for members that no record of the other file matches.
         let rec_match = match_records(&a.recs, &b.recs);
         let mut seen_member = std::collections::HashSet::new();
-        for &(i, j, _) in &matched {
-            let (Some(x), Some(y)) = (a.path_sec_r.get(&i), b.path_sec_r.get(&j)) else { continue };
+        let n3_pairs: Vec<(usize, usize, f64)> = matched.iter().copied().chain(merge_pairs.iter().copied()).collect();
+        let n_matched = matched.len();
+        let mut survivor_unassessed = 0usize;
+        let mut survivor_evaluated = 0usize;
+        for (pair_ix, &(i, j, _)) in n3_pairs.iter().enumerate() {
+            let is_survivor = pair_ix >= n_matched;
+            let (Some(x), Some(y)) = (a.path_sec_r.get(&i), b.path_sec_r.get(&j)) else {
+                // A declared correspondence whose path cannot be measured cannot be compared:
+                // that is INDETERMINATE, not a pass.
+                if is_survivor {
+                    survivor_unassessed += 1;
+                }
+                continue;
+            };
             evaluated += 1;
+            if is_survivor {
+                survivor_evaluated += 1;
+            }
             let margin = b.audit.i3_margin.get(&j).copied();
             let waivable = margin.is_some_and(|m| m >= 1.5);
             let mut tip_thin = false;
@@ -1107,10 +1141,32 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
             };
             judge(*x, *y, &|| format!("contact r{j} at {}: path minimum section {x:.4} -> {y:.4} mm ({:+.1} %), I3 margin {}", p3(b.recs[j].mid), 100.0 * (y / x - 1.0), margin.map_or("unmeasured".into(), |m| format!("{m:.2}x"))), None);
             let bset: std::collections::HashSet<usize> = b.path_members.get(&j).map(|v| v.iter().copied().collect()).unwrap_or_default();
+            // A survivor's chain moved with its contact, so a member of the reference path has no
+            // record within 0.1 mm. It answers to the member of the survivor's path of the same
+            // kind that lies nearest once the chain's own shift (contact to contact) is taken out.
+            let shift = if is_survivor { Some(v::sub(b.recs[j].mid, a.recs[i].mid)) } else { None };
+            let mut taken_n: std::collections::HashSet<usize> = std::collections::HashSet::new();
             for &m in a.path_members.get(&i).map(Vec::as_slice).unwrap_or_default() {
-                let Some(n) = rec_match[m] else { continue };
-                if !bset.contains(&n) {
-                    continue;
+                let direct = rec_match[m].filter(|n| bset.contains(n));
+                let relocated = || {
+                    let s = shift?;
+                    let ra = &a.recs[m];
+                    let (pa, pb) = (v::add(ra.a, s), v::add(ra.b, s));
+                    bset.iter()
+                        .copied()
+                        .filter(|n| !taken_n.contains(n) && b.recs[*n].kind == ra.kind)
+                        .map(|n| {
+                            let rb = &b.recs[n];
+                            let cost = (v::dist(pa, rb.a) + v::dist(pb, rb.b)).min(v::dist(pa, rb.b) + v::dist(pb, rb.a));
+                            (cost, n)
+                        })
+                        .filter(|(c, _)| *c <= 2.0 * k::MATCH_MM)
+                        .min_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)))
+                        .map(|(_, n)| n)
+                };
+                let Some(n) = direct.or_else(relocated) else { continue };
+                if is_survivor {
+                    taken_n.insert(n);
                 }
                 let (Some(xr), Some(yr)) = (a.recs[m].sec_r, b.recs[n].sec_r) else { continue };
                 if xr <= 0.0 {
@@ -1137,8 +1193,15 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
             }
             ev.set("n3_ratio_moved", j);
         }
+        ev.set("n3_declared_survivor_paths", {
+            let mut m = Json::obj();
+            m.set("pairs", Json::usize(merge_pairs.len()));
+            m.set("evaluated", Json::usize(survivor_evaluated));
+            m.set("unassessed", Json::usize(survivor_unassessed));
+            m
+        });
         rows.push(
-            Row::new(&format!("N3{sfx}"), "member sections along each contact's path (shared trunks included)", status_of(!thin.is_empty(), evaluated == 0 && !matched.is_empty()), format!("{} path or member sections (of {evaluated} evaluated matched paths) more than 15 % thinner without an I3 margin of 1.5x ({waived} paths waived by margin); worst ratio {}", thin.len(), if worst_ratio == f64::MAX { "n/a".into() } else { format!("{worst_ratio:.3}") }), "no path more than 15 % thinner unless its I3 margin stays at 1.5x")
+            Row::new(&format!("N3{sfx}"), "member sections along each contact's path (shared trunks included)", status_of(!thin.is_empty(), (evaluated == 0 && !matched.is_empty()) || survivor_unassessed > 0), format!("{} path or member sections (of {evaluated} evaluated matched paths, {survivor_evaluated} of them to declared-merge survivors; {survivor_unassessed} survivor paths could not be measured) more than 15 % thinner without an I3 margin of 1.5x ({waived} paths waived by margin); worst ratio {}", thin.len(), if worst_ratio == f64::MAX { "n/a".into() } else { format!("{worst_ratio:.3}") }), "no path more than 15 % thinner unless its I3 margin stays at 1.5x; a declared survivor's path is judged like a matched one")
                 .with_detail(thin.into_iter().take(o.lim(8)).collect()),
         );
         // N4 thin joins.
