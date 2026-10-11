@@ -3882,9 +3882,20 @@ fn print_sweep_disclosure(
             warning.k_top,
             warning.length_mm,
             warning.limit_mm,
-            lane.refusal_notes
-                .get(&warning.strut_id)
-                .map_or("the ladder never gave this run up (a later change left it over)", String::as_str),
+            lane.refusal_notes.get(&warning.strut_id).map_or_else(
+                || {
+                    "no rung recorded a refusal (the ladder saw it within its limit or ended \
+                     first; the footprint moves may have lengthened it)"
+                        .to_owned()
+                },
+                |rungs| {
+                    rungs
+                        .iter()
+                        .map(|(label, text)| format!("{label}: {text}"))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                },
+            ),
             lane.last_moved_by
                 .get(&warning.strut_id)
                 .copied()

@@ -384,7 +384,7 @@ pub struct SlendernessOutcome {
     pub warnings: Vec<UnbracedWarning>,
     /// For each member whose run the ladder gave up on, what each rung
     /// counted when it last did (log text only; the last attempt wins).
-    pub refusal_notes: std::collections::BTreeMap<u32, String>,
+    pub refusal_notes: std::collections::BTreeMap<u32, Vec<(&'static str, String)>>,
     /// For each member with a run, the pass that last changed its descent
     /// (`provenance`; log text only).
     pub last_moved_by: std::collections::BTreeMap<u32, &'static str>,
@@ -2094,10 +2094,21 @@ pub(crate) fn apply_ties_with_model(
                 // No admissible remedy this round: the run is set aside, and
                 // if no later round finds it one, the census at the end of the
                 // sweep names it as a warning.
-                outcome.refusal_notes.insert(
-                    run.strut_id,
-                    tally_before.describe_since(&RungTally::of(outcome)),
-                );
+                let enabled = [
+                    context.brace,
+                    context.thicken,
+                    context.mast,
+                    context.model_tie && model.is_some(),
+                ];
+                let rungs = tally_before.describe_since(&RungTally::of(outcome), enabled);
+                let notes = outcome.refusal_notes.entry(run.strut_id).or_default();
+                for (label, text) in rungs {
+                    match notes.iter_mut().find(|(known, _)| *known == label) {
+                        Some(slot) => slot.1 = text,
+                        None => notes.push((label, text)),
+                    }
+                }
+                notes.sort_by_key(|(label, _)| RUNG_ORDER.iter().position(|rung| rung == label));
                 exhausted.insert(run_key(&run));
             }
         }
@@ -3546,6 +3557,9 @@ impl CrossMiss {
     }
 }
 
+/// The ladder's rungs in the order the warning lines name them.
+const RUNG_ORDER: [&str; 4] = ["cross bands", "thicken", "mast", "model tie"];
+
 /// The refusal counters of the ladder's rungs, read before and after one
 /// attempt on one run, so the run that no rung could hold can say which rungs
 /// refused it and why (diagnosis item 10, 2026-10-10). Log text only: it reads
@@ -3594,22 +3608,33 @@ impl RungTally {
         }
     }
 
-    /// What each rung refused between `self` and `after`, in ladder order.
-    fn describe_since(&self, after: &Self) -> String {
+    /// What each rung that was on refused between `self` and `after`, in
+    /// ladder order: `enabled` is cross bands, thicken, mast, model tie. A rung
+    /// that was on and counted nothing says so (no partner or room was found).
+    fn describe_since(&self, after: &Self, enabled: [bool; 4]) -> Vec<(&'static str, String)> {
         let d = |now: usize, was: usize| now.saturating_sub(was);
-        let mut rungs: Vec<String> = Vec::new();
-        let mut part = |label: &str, items: &[(&str, usize)]| {
+        let mut rungs: Vec<(&'static str, String)> = Vec::new();
+        let mut part = |on: bool, label: &'static str, items: &[(&str, usize)]| {
+            if !on {
+                return;
+            }
             let list: Vec<String> = items
                 .iter()
                 .filter(|(_, count)| *count > 0)
                 .map(|(name, count)| format!("{name} {count}"))
                 .collect();
-            if !list.is_empty() {
-                rungs.push(format!("{label}: {}", list.join(", ")));
-            }
+            rungs.push((
+                label,
+                if list.is_empty() {
+                    "tried, nothing counted (no partner or room found)".to_owned()
+                } else {
+                    list.join(", ")
+                },
+            ));
         };
         let (b, a) = (&self.bands, &after.bands);
         part(
+            enabled[0],
             "cross bands",
             &[
                 ("no partner shaft fit", d(after.bands_not_fitting, self.bands_not_fitting)),
@@ -3630,6 +3655,7 @@ impl RungTally {
             ],
         );
         part(
+            enabled[1],
             "thicken",
             &[
                 ("no plan", d(after.thicken_no_plan, self.thicken_no_plan)),
@@ -3639,6 +3665,7 @@ impl RungTally {
             ],
         );
         part(
+            enabled[2],
             "mast",
             &[
                 ("no cell", d(after.mast_cells, self.mast_cells)),
@@ -3649,6 +3676,7 @@ impl RungTally {
             ],
         );
         part(
+            enabled[3],
             "model tie",
             &[
                 ("tried", d(after.tie_tried, self.tie_tried)),
@@ -3657,11 +3685,7 @@ impl RungTally {
                 ("no tie count holds the frame", d(after.tie_frame, self.tie_frame)),
             ],
         );
-        if rungs.is_empty() {
-            "no rung counted a refusal".to_owned()
-        } else {
-            rungs.join("; ")
-        }
+        rungs
     }
 }
 
