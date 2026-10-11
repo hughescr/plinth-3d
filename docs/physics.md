@@ -244,6 +244,24 @@ any surface keeps the longest zones, since placement cannot refuse every seated 
 census, which cannot run either, warns.)
 The lip-seat gate is unchanged: a member may land "no nearer than it stood".
 
+**One support per spike (quality lane Q2, owner ruling 2026-10-10).** A sharp tip first appears as a
+hairline the raster covers but does not carry, so the next layer, the first that carries, finds its
+column unrooted and seats a second arm one layer above the first (before the rule, 53 pairs of tip
+balls overlapped on the Deinonychus, 29 of them under 0.1 mm apart). The second arm's shaft stood
+in the first arm's head's way (`HitsMember`, 49 of 68 refusals), and with no head the whole arm
+leaned to the plate.
+Now a seat whose tip ball overlaps the ball of an arm already seated in the SAME column (`|c1 - c2| <
+r1 + r2` at the smallest tip the area law allows for each seat's demand, times the registered ball
+factor; both balls on the column's axis, so the distance is the height between the seats, read from
+where the earlier arm first seated) raises that arm to the new layer and gives it the demand the
+seat would have covered (`up_sweep::twin_host`, `raise_host_seat`). The raised arm keeps its landing,
+post and head; it is alive on the new layer, so the down-sweep routes the twin's load into its
+contact and sizes it for both. Dropping the second seat WITHOUT raising the first was built and
+measured first and is wrong: no arm was alive on the new layer, and 75 mm2 of Deinonychus load
+reached no carrier (`tests/it/twin_merge.rs` grades this). Twins in two different columns (about
+6 % of the pairs) are not merged: the raised arm would have to change column. A pair that overlaps
+only after the sizing has grown the tips is not seen at seating.
+
 **The clearance re-route after the final sizing.** The up-sweep places an arm at a lower bound
 of the radius it is later drawn at (the area law and the thickening grow it), so after the final
 sizing and the ties the census names every arm whose drawn solid stands within the final gap

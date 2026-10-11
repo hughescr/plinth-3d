@@ -3917,7 +3917,8 @@ fn print_sweep_disclosure(
         "[sweep {model}] seat placement: up-sweep seats {} against a hex covering lower bound of \
          {} over the islands of demand they cover (ratio {:.3}, bound at the measured reach); \
          islands measured with several coverings {}, won by a covering other than the global \
-         lattice {}, seats saved against the global lattice's own count {}; straight-line reach: \
+         lattice {}, seats saved against the global lattice's own count {}; twin seats merged into \
+         the arm whose tip ball they overlap {}; straight-line reach: \
          sightlines {} clear / {} bent in the reach field, {} / {} in the routing field; seat \
          faces: {} member tops (arms and braces) carry the nearest overhang face, {} of them \
          beside a nearer wall or face steeper than the overhang band, which they do not seat on{}",
@@ -3927,6 +3928,7 @@ fn print_sweep_disclosure(
         report.counters.islands_compared,
         report.counters.islands_realigned,
         report.counters.island_seats_saved,
+        report.counters.twin_seats_merged,
         report.counters.sightlines_clear,
         report.counters.sightlines_blocked,
         report.counters.route_sightlines_clear,

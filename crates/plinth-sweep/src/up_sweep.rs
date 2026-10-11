@@ -242,6 +242,27 @@ impl ColumnHistory {
         });
     }
 
+    /// Raise the top of arm `id`'s span in `cell` from `from_k_top` to
+    /// `to_k_top`, and the column's top-strut stamp with it: the arm's seat
+    /// moved up a few layers in the column it already stands in
+    /// ([`raise_host_seat`]). A span that is not there is left alone.
+    pub(crate) fn raise_shaft_top(&mut self, id: u32, cell: usize, from_k_top: usize, to_k_top: usize) {
+        let mut slot = self.shaft_head.get(cell).copied().unwrap_or(u32::MAX);
+        while slot != u32::MAX {
+            let span = &mut self.shaft_spans[slot as usize];
+            if span.id == id && span.k_top as usize == from_k_top {
+                span.k_top = u32::try_from(to_k_top).unwrap_or(u32::MAX);
+                break;
+            }
+            slot = span.next;
+        }
+        let stamp = u32::try_from(to_k_top + 1).unwrap_or(u32::MAX);
+        if self.top_strut[cell] < stamp {
+            self.top_strut[cell] = stamp;
+            self.top_strut_id[cell] = id;
+        }
+    }
+
     /// Take back the spans a [`Self::stamp_shaft`] of a STRAIGHT shaft at
     /// `cell` added, given the span count from just before that stamp.
     ///
@@ -502,6 +523,14 @@ pub struct GreedyScratch {
     /// branch rule ([`crate::stranded_branch`]) finds the members this rule
     /// seated once the field is sized.
     pub stranded_seat_cells: Vec<(usize, usize)>,
+    /// Whether a seat whose tip ball overlaps an earlier seat's is merged into
+    /// it ([`twin_host`]). `false` is the sabotage form
+    /// ([`crate::SweepPolicy::without_twin_merge`]).
+    pub twin_merge: bool,
+    /// Seats merged that way. Path-hit witness.
+    pub twin_merges: u64,
+    /// Where each arm that has been raised first seated (arm id to layer).
+    twin_first_seat: BTreeMap<u32, usize>,
     /// The articulated heads built so far, and what was refused
     /// ([`HeadsState`]); empty unless the sweep runs with heads.
     pub heads: HeadsState,
@@ -583,6 +612,9 @@ impl GreedyScratch {
             stranded_seating: true,
             stranded_seats: 0,
             stranded_seat_cells: Vec::new(),
+            twin_merge: true,
+            twin_merges: 0,
+            twin_first_seat: BTreeMap::new(),
             heads: HeadsState::default(),
         }
     }
@@ -1827,6 +1859,100 @@ fn plan_seat_head(
     Ok((head, residual_deg))
 }
 
+/// The contact-ball radius of a seat that covers `cells` demand cells, at the
+/// smallest tip the area law allows for that demand
+/// ([`DescentClearance::radius_lower_bound_mm`]) times the registered ball
+/// factor of that tip (one without the contact-ball table). The smallest tip is
+/// the one that is certain, so two balls that overlap at this size overlap at
+/// any size the sizing later gives them.
+fn twin_ball_mm(clear: &DescentClearance<'_>, cells: usize, cell_area_mm2: f64) -> f64 {
+    #[expect(clippy::cast_precision_loss, reason = "a covered-cell count is exact in f64")]
+    let radius = clear.radius_lower_bound_mm(cells as f64 * cell_area_mm2);
+    clear.heads.map_or(1.0, |env| env.profiles.ball_factor(radius)) * radius
+}
+
+/// The earlier arm a seat at `cell` on this layer is a twin of, if any: the
+/// arm whose SEAT stands in this very column, below this layer, and whose tip
+/// ball overlaps the ball this seat would draw (`|c1 - c2| < r1 + r2`, a
+/// geometric identity and no tolerance; both balls on the column's axis, so
+/// the distance is the height between the two seats).
+///
+/// The height is read from where the earlier arm FIRST seated
+/// (`first_seat_layer`), not from where earlier merges have since raised it,
+/// so a column of seats one layer apart cannot chain a tip upward past the
+/// ball it started with. Candidates are the spans of the column's own shaft
+/// chain, so the lookup reads the few arms that cross this column, not the
+/// arm list; ties go to the lowest id.
+fn twin_host(
+    seating: &Seating<'_>,
+    clear: &DescentClearance<'_>,
+    struts: &[SweepStrut],
+    history: &ColumnHistory,
+    first_seat_layer: &BTreeMap<u32, usize>,
+    cell: usize,
+    covered_cells: usize,
+) -> Option<u32> {
+    let layer = seating.layer;
+    let cell_area = seating.grid.cell_area_mm2();
+    let new_ball = twin_ball_mm(clear, covered_cells, cell_area);
+    // (layers between the seats, id): nearest first, then the lowest id.
+    let mut best: Option<(usize, u32)> = None;
+    let mut slot = history.shaft_head.get(cell).copied().unwrap_or(u32::MAX);
+    while slot != u32::MAX {
+        let span = history.shaft_spans[slot as usize];
+        slot = span.next;
+        let Some(host) = struts.get(span.id as usize).filter(|host| host.id == span.id) else {
+            continue;
+        };
+        // The span that holds the host's SEAT: its top layer, in its seat cell.
+        if host.cell != cell
+            || host.kind != crate::StrutKind::Arm
+            || host.inserted_by_load
+            || span.k_top as usize != host.k_top
+            || host.k_top >= layer
+        {
+            continue;
+        }
+        let first = first_seat_layer.get(&host.id).copied().unwrap_or(host.k_top);
+        let layers_apart = layer.saturating_sub(first);
+        #[expect(clippy::cast_precision_loss, reason = "a layer count is exact in f64")]
+        let distance = layers_apart as f64 * clear.layer_height_mm;
+        let reach = new_ball + twin_ball_mm(clear, host.covered_demand.len(), cell_area);
+        if distance < reach && best.is_none_or(|nearest| (layers_apart, host.id) < nearest) {
+            best = Some((layers_apart, host.id));
+        }
+    }
+    best.map(|(_, id)| id)
+}
+
+/// Raise `host`'s seat to `layer`, in the column it already stands in, and
+/// give it the demand a twin seat there would have covered.
+///
+/// The arm keeps everything below: its landing, its post, its head (the
+/// head's millimetre geometry is frozen at placement and is not touched). Its
+/// bookkeeping gains the cells of the layers it now spans: its `k_top`, the
+/// seat cell on its path (leaned or headed arms) and on the head's cell list,
+/// and its shaft span and column top in the history, so the down-sweep sees an
+/// arm alive on the new layer and routes the twin's load into its contact.
+fn raise_host_seat(
+    host: &mut SweepStrut,
+    history: &mut ColumnHistory,
+    layer: usize,
+    covered: &[usize],
+) {
+    let steps = layer - host.k_top;
+    let seat = u32::try_from(host.cell).unwrap_or(u32::MAX);
+    history.raise_shaft_top(host.id, host.cell, host.k_top, layer);
+    if !host.path.is_empty() {
+        host.path.extend(core::iter::repeat_n(seat, steps));
+    }
+    if let Some(head) = host.head.as_mut() {
+        head.cells.extend(core::iter::repeat_n(seat, steps));
+    }
+    host.k_top = layer;
+    host.covered_demand.extend_from_slice(covered);
+}
+
 /// Seat one arm for real at `cell`: descend, root it, record it and stamp the
 /// column history. Returns the demand rows it changed (`lo > hi` when none).
 fn commit_seat(
@@ -1862,6 +1988,44 @@ fn commit_seat(
         reach.begin_journal();
     }
     let mut covered = root_and_clear(seating, cell, reach, scratch);
+
+    // **ONE SUPPORT PER SPIKE** (owner ruling 2026-10-10, `DEINO-DIAGNOSIS.md`).
+    // A sharp tip first appears as a hairline the raster covers but does not
+    // carry, so the next layer, the first that carries, finds its column
+    // unrooted and seats a second arm one layer above the first, 0.03-0.09 mm
+    // from it. The second arm's shaft then stands in the first arm's way (the
+    // head check refuses it `HitsMember`) and leans away on its own. When this
+    // seat's tip ball overlaps the ball of an arm already seated in this very
+    // column, there is one contact, not two: that arm RISES to this layer and
+    // takes this seat's demand, so the down-sweep finds an arm alive on this
+    // layer and sizes its contact for both loads. (Dropping the seat without
+    // raising the arm was built and measured first: it leaves this layer with
+    // no arm alive on it, and 75 mm2 of load on the Deinonychus reached no
+    // carrier.)
+    if let Some(clear) = clearance.filter(|_| scratch.twin_merge) {
+        if let Some(host) = twin_host(
+            seating,
+            clear,
+            &struts[..],
+            history,
+            &scratch.twin_first_seat,
+            cell,
+            covered.len(),
+        ) {
+            reach.end_journal();
+            let (mut dirty_lo, mut dirty_hi) = (usize::MAX, 0_usize);
+            for &touched in &covered {
+                let row = touched / cols;
+                dirty_lo = dirty_lo.min(row);
+                dirty_hi = dirty_hi.max(row);
+            }
+            let host_strut = &mut struts[host as usize];
+            scratch.twin_first_seat.entry(host).or_insert(host_strut.k_top);
+            raise_host_seat(host_strut, history, layer, &covered);
+            scratch.twin_merges += 1;
+            return (dirty_lo, dirty_hi);
+        }
+    }
     let mut trial = LayerOutcome::empty();
     let mut descent = descend_cleared(
         grid,

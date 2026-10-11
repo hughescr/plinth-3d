@@ -712,6 +712,13 @@ pub struct SweepPolicy {
     /// beside the one it laps, as before (the Cylinder's drain ring).
     /// Sabotage and comparison only; nothing in the pipeline turns it off.
     pub stranded_branch: bool,
+    /// Whether a seat whose tip ball overlaps an earlier seat's tip ball is
+    /// merged into that seat instead of drawn as a second arm
+    /// (`up_sweep::twin_host`, owner ruling 2026-10-10). **On in production.**
+    /// With it false every such twin is drawn, as before: its shaft then blocks
+    /// the first arm's head and the twin leans away (`DEINO-DIAGNOSIS.md`).
+    /// Sabotage and comparison only; nothing in the pipeline turns it off.
+    pub twin_merge: bool,
     /// Whether reach and load routing measure a lateral run as its straight
     /// length (`reach::any_angle_relax`, 2026-09-30). **On in production.**
     /// With it false both sweeps fall back to the 8-neighbour chamfer, which
@@ -1059,6 +1066,7 @@ impl SweepPolicy {
             creep_overhang_cut: true,
             stranded_seating: true,
             stranded_branch: true,
+            twin_merge: true,
             straight_reach: true,
             island_seating: true,
             seat_face_band: true,
@@ -1275,6 +1283,16 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_stranded_branch(mut self) -> Self {
         self.stranded_branch = false;
+        self
+    }
+
+    /// Draw every twin seat as its own arm, as before 2026-10-10.
+    /// **Sabotage and comparison only**: with it set, a sharp tip's second
+    /// seat one layer above the first is drawn again, and its shaft blocks the
+    /// first arm's head.
+    #[must_use]
+    pub const fn without_twin_merge(mut self) -> Self {
+        self.twin_merge = false;
         self
     }
 
@@ -1722,6 +1740,7 @@ pub fn run_sweep_with_holes(
         GreedyScratch::legacy(&grid, lamina_reach_mm)
     };
     greedy.stranded_seating = policy.stranded_seating;
+    greedy.twin_merge = policy.twin_merge;
     greedy.separation_mm = if policy.straight_reach {
         up_sweep::hex_separation_mm(lamina_reach_mm, grid.pitch_mm())
     } else {
@@ -3177,6 +3196,7 @@ pub fn run_sweep_with_holes(
     report.counters.island_seats_saved = greedy.seats_saved;
     report.counters.island_seats = greedy.island_seats;
     report.counters.stranded_seats = greedy.stranded_seats;
+    report.counters.twin_seats_merged = greedy.twin_merges;
     report.counters.island_hex_bound = greedy.island_hex_bound;
     greedy.heads.publish(&mut report.heads);
     // The heads the graze conversion added (Craig 2026-10-08) join the
