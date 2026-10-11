@@ -54,6 +54,7 @@
 //! | [`sidecar`] | the optional `.coverage.repair.json`, where `null` never becomes zero |
 //! | [`check`] | the [`check::Check`] trait, [`check::CheckOutcome`], [`check::Failure`] |
 //! | [`checks`] | the ten invariants plus the non-gating report, one file each |
+//! | [`compare`] | `plinth-audit compare <ref> <cand>`: the similarity gate between two emitted files |
 //! | [`context`] | declared inputs and the shared per-model context |
 //! | [`run`] | the driver and the output document |
 //! | [`json`] | hand-rolled JSON value, reader and writer |
@@ -67,6 +68,7 @@
 
 pub mod check;
 pub mod checks;
+pub mod compare;
 pub mod consts;
 pub mod context;
 pub mod geometry;

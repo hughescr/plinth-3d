@@ -132,6 +132,15 @@ fn main() {
     if argv.first().is_some_and(|a| a == "geometry") {
         geometry_main(&argv[1..]);
     }
+    if argv.first().is_some_and(|a| a == "compare") {
+        std::process::exit(plinth_audit::compare::main(&argv[1..]));
+    }
+    if argv.first().is_some_and(|a| a == "mutate") {
+        std::process::exit(plinth_audit::compare::mutate::main(&argv[1..]));
+    }
+    if argv.first().is_some_and(|a| a == "stl-jitter") {
+        std::process::exit(plinth_audit::compare::mutate::stl_main(&argv[1..]));
+    }
     if argv.is_empty() || argv.iter().any(|a| a == "-h" || a == "--help") {
         print!("{USAGE}");
         std::process::exit(if argv.is_empty() { 2 } else { 0 });
