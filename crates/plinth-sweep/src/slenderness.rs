@@ -238,6 +238,12 @@ impl SlendernessLaw {
         self.ratio
     }
 
+    /// The registered maximum tip radius, the thickest any member may be made.
+    #[must_use]
+    pub const fn max_radius_mm(&self) -> f64 {
+        self.r_max_mm
+    }
+
     /// `L_max(r) = S · r` — the longest run of member at radius `r` that may
     /// stand with nothing holding it sideways.
     #[must_use]
@@ -9529,5 +9535,33 @@ mod tests {
         assert!(!super::tie_confirmed_clear(&census(0, 0, 0, 0)), "nothing read, nothing hidden");
         assert!(!super::tie_confirmed_clear(&census(0, 0, 1, 0)), "a span undecided");
         assert!(!super::tie_confirmed_clear(&census(1, 0, 0, 1)), "inside the gap");
+    }
+}
+
+#[cfg(test)]
+mod rung_tally_tests {
+    use super::{RungTally, SlendernessOutcome};
+
+    /// A rung that was on and counted nothing says so; a rung that was off says
+    /// nothing; a counter that moved is named with its count, in ladder order.
+    #[test]
+    fn the_tally_names_what_each_rung_that_was_on_refused() {
+        let before = SlendernessOutcome::default();
+        let mut after = SlendernessOutcome::default();
+        after.thicken_refused_model += 1;
+        after.brace_band_refusals.path_model += 2;
+        after.mast_cells_refused += 3;
+        let noted = RungTally::of(&before)
+            .describe_since(&RungTally::of(&after), [true, true, true, false]);
+        let labels: Vec<&str> = noted.iter().map(|(label, _)| *label).collect();
+        assert_eq!(labels, ["cross bands", "thicken", "mast"], "the model tie was off");
+        assert_eq!(noted[0].1, "path through model 2");
+        assert_eq!(noted[1].1, "enters the model gap 1");
+        assert_eq!(noted[2].1, "no cell 3");
+        let quiet = RungTally::of(&before)
+            .describe_since(&RungTally::of(&before), [false, false, false, true]);
+        assert_eq!(quiet.len(), 1);
+        assert_eq!(quiet[0].0, "model tie");
+        assert!(quiet[0].1.starts_with("tried, nothing counted"));
     }
 }

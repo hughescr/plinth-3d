@@ -3130,9 +3130,10 @@ fn print_sweep_disclosure(
              angle at which the seat trim keeps their section (deepest cut into a shaft outside \
              its ball {:.4} mm, widest approach {:.1} deg); {} re-landed at a smaller angle to \
              the same seat{} ({} of them on the model below); kept: {} carrying another member, \
-             {} with no admissible descent; \
+             {} with no admissible descent ({} of them had a lean refused for its slenderness); \
              candidates {} priced, {} refused by the path test, {} by the plate rule, {} by the \
-             lowering's own measurement, {} by the solid's clearance from the model{}, {} by a new \
+             lowering's own measurement, {} by the solid's clearance from the model{}, {} by a lean \
+             longer than S times the thickest radius that keeps the final gap, {} by a new \
              plate root touching another, {} verified; put back once the field was sized: {} \
              whose host chain came out overloaded, {} whose root came to lap another ({} sized \
              checks; unexplained by any re-landing: {} newly overloaded members, {} new root \
@@ -3154,6 +3155,7 @@ fn print_sweep_disclosure(
             lip.relanded_on_model,
             lip.kept_carrying,
             lip.kept_no_candidate,
+            lip.kept_for_slenderness,
             lip.candidates_priced,
             lip.candidates_refused_path,
             lip.candidates_refused_plate,
@@ -3165,6 +3167,7 @@ fn print_sweep_disclosure(
             } else {
                 ""
             },
+            lip.candidates_refused_slender,
             lip.candidates_refused_roots,
             lip.candidates_verified,
             lip.moves_put_back_host_load,
