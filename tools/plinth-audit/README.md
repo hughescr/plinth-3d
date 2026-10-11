@@ -69,6 +69,57 @@ baseline table row per file. Code: `src/geometry/`.
 Batch shape: one welded model mesh and grid per file; per record, one triangle
 fetch per run of sample rings; records run in parallel (`PLINTH_THREADS`).
 
+## `compare`: the similarity gate between two emitted files
+
+```sh
+plinth-audit compare <ref.chitubox> <cand.chitubox> [--out-dir D] [--json] [--band N] \
+    [--ref-log F --cand-log F] [--ref-poses F --cand-poses F] [--require-logs] \
+    [--assume-consumer-matched] [--no-geometry] [--threads N]
+```
+
+Replaces the sha256 gate for output-changing lanes (`ROUND-PLAN-v2.md` §1; owner
+decisions O1-O4 of 2026-10-10). Reads only the emitted bytes, the engine `.log` and
+`poses.tsv` (found by the run-recipe layout when not given). Code: `src/compare/`.
+
+1. **Rasterise what prints.** Model and supports are rasterised from the EMITTED
+   triangle meshes on the printer grid. The support raster is the union of every
+   record's mesh (`RunRaster::from_mesh_unclosed`, non-zero winding), never the
+   header primitives.
+2. **Class first.** *Pose* from the committed transform (`poses.tsv`/log text and the
+   file's translate; the emitted frame only when no text exists), *mesh* separately.
+   A regression overrides either class.
+3. **Tier 0** valid file (parse, model count, container round trip, plate/frame, mesh
+   against header within one voxel of the reference's own record). **Tier 1** H1
+   floating material, H2 island support, H3 model drift, H4 every audit invariant
+   I1-I10 matched per item (new failing item, matched item over 10 % worse, an item
+   the reference evaluated left unevaluated), H5 engine-log counts, H6 heads.
+   **Tier 2** N1 volume, N2 contacts, N3 sections along each contact's path, N4 thin
+   joins, N5 bracing (posts and the log's tied-post sway). EQUIVALENT is computed.
+4. **Exit codes** (most severe wins): 1 REGRESSION, 3 INDETERMINATE, 2 POSE-CHANGED,
+   4 MESH-CHANGED, 10 PLAN-CHANGED, 0 IDENTICAL or EQUIVALENT, 64 usage or I/O error.
+   `verdict.json` carries every class and every row; a failing verdict blocks
+   promotion and never deletes the emitted file.
+5. **INDETERMINATE until the consumer match (G5):** raster structural checks (H1, H2,
+   N4) on a model mesh that does not close (Cylinder) and at the BCO v22 junction near
+   r83. Nothing here has been matched to a ChituBox slice; `--assume-consumer-matched`
+   lifts the rule once it has.
+
+6. **Calibration state (G3, 2026-10-10; report `perf-2026-10-09/wave1/G-REPORT.md`).**
+   The thresholds are still the plan's estimates. On the real BCO and Deinonychus
+   files the gate is EQUIVALENT for one-ulp f32 noise and for 2e-6 mm radius noise on
+   BCO, and it is REGRESSION for 0.001 mm noise on BCO and for any radius noise on
+   Deinonychus: the audit's per-item checks (I1, I6, I8) flicker on items near their
+   own thresholds. Until the H4 rule gets a flicker allowance, expect REGRESSION on
+   any real output-changing lane, and EQUIVALENT only for noise under about 1e-4 mm.
+   Compare cost is dominated by the audit and the raster (Round_100: 15 min), not by
+   the comparison.
+
+Test instruments: `plinth-audit mutate <in> <out> <spec>...` plants one change in a
+real file (jitter, one-ulp, f16, mesh shrink, scale a record, remove, move, float,
+rotate, split the model); `plinth-audit stl-jitter <in.stl> <out.stl> <rot-rad>
+<scale-ulps>` makes the input for the real-engine jitter baseline. Fixtures and the
+sabotage (band 0 must fail the jitter fixture) are in `tests/compare.rs`.
+
 ## Implementing one invariant
 
 Edit **exactly one file** under `src/checks/`. `src/checks/mod.rs` already

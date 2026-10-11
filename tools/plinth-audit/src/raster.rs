@@ -445,10 +445,36 @@ impl RunRaster {
     /// that row band is removed, because such an edge enters the pixel between
     /// the two scanlines and full containment then fails.
     pub fn from_mesh(m: &Mesh, grid: RasterGrid, budget: &Budget) -> Result<Self, RasterError> {
+        Self::from_mesh_with(m, grid, budget, false)
+    }
+
+    /// The same fill as [`Self::from_mesh`] but for a mesh that need not be
+    /// closed: the non-zero winding scanline runs on whatever surface there
+    /// is. Used by `compare` for (a) the union of every support record's
+    /// emitted mesh, whose members touch and overlap, so edges are shared by
+    /// more than two triangles, and (b) a model mesh that does not close. For
+    /// (b) the result is NOT evidence of what a slicer would cure: the caller
+    /// must report any structural finding on it as indeterminate until the
+    /// consumer match (G5) has been done. Equal crossings are ordered
+    /// entering-first so touching solids never open a one-pixel seam.
+    pub fn from_mesh_unclosed(
+        m: &Mesh,
+        grid: RasterGrid,
+        budget: &Budget,
+    ) -> Result<Self, RasterError> {
+        Self::from_mesh_with(m, grid, budget, true)
+    }
+
+    fn from_mesh_with(
+        m: &Mesh,
+        grid: RasterGrid,
+        budget: &Budget,
+        allow_unclosed: bool,
+    ) -> Result<Self, RasterError> {
         if m.is_empty() {
             return Ok(Self::empty(grid));
         }
-        if !m.closure.is_closed() {
+        if !allow_unclosed && !m.closure.is_closed() {
             return Err(RasterError::MeshNotClosed);
         }
         let bounds = m.bbox;
@@ -544,7 +570,15 @@ impl RunRaster {
 
             let mut boundary_spans: Vec<Vec<(f64, f64)>> = Vec::with_capacity(nb);
             for cr in &mut crossings {
-                cr.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                if allow_unclosed {
+                    cr.sort_by(|a, b| {
+                        a.0.partial_cmp(&b.0)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then(b.1.cmp(&a.1))
+                    });
+                } else {
+                    cr.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                }
                 let mut spans = Vec::new();
                 let mut wind = 0i32;
                 let mut open_x = 0.0f64;
