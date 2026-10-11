@@ -115,6 +115,40 @@ fn sub_voxel_lattice_jitter_is_equivalent_and_zero_band_fails_it() {
     );
 }
 
+/// The largest distance of any emitted mesh vertex from its record's own header solid, over the model.
+fn worst_mesh_gap_mm(s: &SynthFile) -> f64 {
+    let bytes = s.to_bytes();
+    let f = ChituboxFile::parse(Path::new("gap"), &bytes).expect("parses");
+    let mut worst = 0.0f64;
+    for r in &f.models[0].records {
+        if let Ok(p) = plinth_audit::primitives::Primitive::from_record(r) {
+            worst = worst.max(p.verify_against_soup(r).max_surface_deviation_mm);
+        }
+    }
+    worst
+}
+
+/// Noise that keeps the design a design: the mesh follows its header. The independent-noise
+/// fixture does not, and on a short fat member (0.02 mm long, 0.6 mm across) a micron on each end
+/// turns the header axis by a few degrees and parts mesh and header by tens of microns.
+#[test]
+fn consistent_jitter_keeps_every_mesh_on_its_header_and_independent_jitter_does_not() {
+    let mut b = base();
+    let slab = SynthRecord::new(RecordKind::Member, [3.0, 3.0, -3.0], [3.0, 3.0, -2.98], 0.58, 0.60).with_matching_soup();
+    b.models[0].records.push(slab);
+    assert!(worst_mesh_gap_mm(&b) < 1e-5, "the fixture itself is consistent");
+    let mut c = b.clone();
+    apply(&mut c, &Mutation::JitterConsistent { amp_mm: 1.0e-3, model: false, support: true, radii: true, seed: 0 });
+    assert!(worst_mesh_gap_mm(&c) < 1.0e-4, "mesh left its header by {} mm", worst_mesh_gap_mm(&c));
+    let mut i = b.clone();
+    apply(&mut i, &Mutation::Jitter { amp_mm: 1.0e-3, model: false, support: true, radii: true, seed: 0 });
+    assert!(worst_mesh_gap_mm(&i) > 3.0e-3, "independent noise left only {} mm", worst_mesh_gap_mm(&i));
+    // a different seed is a different draw
+    let mut d = b.clone();
+    apply(&mut d, &Mutation::JitterConsistent { amp_mm: 1.0e-3, model: false, support: true, radii: true, seed: 1 });
+    assert_ne!(c.to_bytes(), d.to_bytes());
+}
+
 #[test]
 fn f16_conversion_is_seen() {
     // trivial_cube sits within 5 mm of the origin, so half precision costs at most 0.002 mm there:

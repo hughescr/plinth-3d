@@ -564,6 +564,19 @@ impl<'a> ModelContext<'a> {
             .as_ref()
     }
 
+    /// Hand the context a model raster that the caller built with exactly the call of
+    /// [`Self::model_raster`] (this context's welded mesh, grid and raster budget), so the checks
+    /// share it instead of building a second copy. `compare` builds the model raster on a thread
+    /// of its own before the audit runs; without this each file held it twice.
+    pub fn preset_model_raster(&self, r: RunRaster) {
+        let _ = self.model_raster.set(Ok(r));
+    }
+
+    /// Take the model raster back out (built here or preset), once the checks are done.
+    pub fn take_model_raster(&mut self) -> Option<RunRaster> {
+        self.model_raster.take().and_then(Result::ok)
+    }
+
     /// The cured raster of one record's own solid. **Not cached**: it is a
     /// per-record product and a check that needs many should batch them.
     pub fn record_raster(&self, record: usize) -> Result<RunRaster, RasterError> {

@@ -88,9 +88,20 @@ pub fn to_synth(file: &ChituboxFile) -> SynthFile {
 #[derive(Clone, Debug)]
 pub enum Mutation {
     /// Noise of up to `amp_mm` on model vertices, record soups and record headers.
-    Jitter { amp_mm: f64, model: bool, support: bool, radii: bool },
+    /// `seed` picks another noise draw (0 is the calibration prototype's own).
+    Jitter { amp_mm: f64, model: bool, support: bool, radii: bool, seed: u64 },
+    /// Noise on the design that stays a design: every support record's header ends and radii
+    /// move by up to `amp_mm`, and the record's mesh is carried with them by the similarity map
+    /// that takes the old header solid onto the new one (rotate, stretch along the axis, scale
+    /// the radius). The mesh therefore still IS the header's solid, as an engine's own output
+    /// is. `Jitter` moves header and mesh independently, which no engine can emit and which on
+    /// a short fat member (0.02 mm long, 0.58 mm across) turns a 1 micron end move into a
+    /// 4 degree axis turn and a 0.04 mm mesh-versus-header gap.
+    JitterConsistent { amp_mm: f64, model: bool, support: bool, radii: bool, seed: u64 },
     /// Every coordinate moves by -1, 0 or +1 ulp (what f32 arithmetic would change).
     Ulp,
+    /// The same with another draw: `ulp:<seed>`.
+    UlpSeed(u64),
     /// Every coordinate and radius rounded through half precision.
     F16,
     /// Scale one record's emitted mesh about its own axis; the header is left alone.
@@ -150,18 +161,103 @@ fn scale_soup(rec: &mut SynthRecord, factor: f64, header_radii: bool) {
     }
 }
 
+fn rodrigues(vv: V3, k: V3, cos: f64, sin: f64) -> V3 {
+    // v cos + (k x v) sin + k (k . v) (1 - cos)
+    v::add(v::add(v::mul(vv, cos), v::mul(v::cross(k, vv), sin)), v::mul(k, v::dot(k, vv) * (1.0 - cos)))
+}
+
+/// Move one record's header ends and radii by noise and carry its mesh onto the new header
+/// solid (see [`Mutation::JitterConsistent`]). Ends are keyed on their own f32 bits exactly as
+/// in [`Mutation::Jitter`], so records that share an end still share it.
+fn jitter_record_consistent(r: &mut SynthRecord, e: f64, sk: u64, radii: bool) {
+    let raft = r.kind == RecordKind::RaftPadOrBridge;
+    let (a0, b0, ra0, rb0) = (r.start_mm, r.end_mm, r.r_start, r.r_end);
+    for end in [&mut r.start_mm, &mut r.end_mm] {
+        let f = [end[0] as f32, end[1] as f32, end[2] as f32];
+        for a in 0..3 {
+            if raft && a == 2 {
+                continue;
+            }
+            end[a] = f64::from((end[a] + vnoise(f, a as u64 + sk, e)) as f32);
+        }
+    }
+    if radii && !raft {
+        r.r_start = (r.r_start + vnoise([r.r_start as f32, 1.0, 2.0], 7 + sk, e)).max(0.0);
+        r.r_end = (r.r_end + vnoise([r.r_end as f32, 1.0, 2.0], 7 + sk, e)).max(0.0);
+    }
+    let (a1, b1, ra1, rb1) = (r.start_mm, r.end_mm, r.r_start, r.r_end);
+    if r.kind.is_ball() {
+        let (c0, c1) = (v::midpoint(a0, b0), v::midpoint(a1, b1));
+        let f = if ra0 > 1e-9 { ra1 / ra0 } else { 1.0 };
+        for t in &mut r.soup {
+            map_tri(t, |p| v::add(c1, v::mul(v::sub(p, c0), f)));
+        }
+        return;
+    }
+    let (len0, len1) = (v::dist(a0, b0), v::dist(a1, b1));
+    if len0 <= 1e-9 || len1 <= 1e-9 {
+        let d = v::sub(a1, a0);
+        for t in &mut r.soup {
+            map_tri(t, |p| v::add(p, d));
+        }
+        return;
+    }
+    let ax0 = v::mul(v::sub(b0, a0), 1.0 / len0);
+    let ax1 = v::mul(v::sub(b1, a1), 1.0 / len1);
+    let cr = v::cross(ax0, ax1);
+    let sin = v::norm(cr);
+    let cos = v::dot(ax0, ax1);
+    let k = if sin > 1e-15 { v::mul(cr, 1.0 / sin) } else { [0.0, 0.0, 1.0] };
+    let stretch = len1 / len0;
+    for t in &mut r.soup {
+        map_tri(t, |p| {
+            let d = v::sub(p, a0);
+            let along = v::dot(d, ax0);
+            let perp = v::sub(d, v::mul(ax0, along));
+            let tr = (along / len0).clamp(0.0, 1.0);
+            let r0 = ra0 + (rb0 - ra0) * tr;
+            let r1 = ra1 + (rb1 - ra1) * tr;
+            let f = if r0 > 1e-9 { r1 / r0 } else { 1.0 };
+            let perp1 = if sin > 1e-15 { rodrigues(v::mul(perp, f), k, cos, sin) } else { v::mul(perp, f) };
+            v::add(v::add(a1, v::mul(ax1, along * stretch)), perp1)
+        });
+    }
+}
+
 /// Apply one change.
 pub fn apply(s: &mut SynthFile, m: &Mutation) {
     match m {
-        Mutation::Jitter { amp_mm, model, support, radii } => {
-            let e = *amp_mm;
+        Mutation::JitterConsistent { amp_mm, model, support, radii, seed } => {
+            let sk = seed.wrapping_mul(0x51_7C_C1);
             for md in &mut s.models {
                 if *model {
                     for t in &mut md.mesh {
                         for p in t.iter_mut() {
                             let o = *p;
                             for a in 0..3 {
-                                p[a] = (f64::from(o[a]) + vnoise(o, a as u64, e)) as f32;
+                                p[a] = (f64::from(o[a]) + vnoise(o, a as u64 + sk, *amp_mm)) as f32;
+                            }
+                        }
+                    }
+                }
+                if *support {
+                    for r in &mut md.records {
+                        jitter_record_consistent(r, *amp_mm, sk, *radii);
+                    }
+                }
+            }
+        }
+        Mutation::Jitter { amp_mm, model, support, radii, seed } => {
+            let e = *amp_mm;
+            // Seed 0 keys the axes 0, 1, 2 and 7 exactly as the prototype did.
+            let sk = seed.wrapping_mul(0x51_7C_C1);
+            for md in &mut s.models {
+                if *model {
+                    for t in &mut md.mesh {
+                        for p in t.iter_mut() {
+                            let o = *p;
+                            for a in 0..3 {
+                                p[a] = (f64::from(o[a]) + vnoise(o, a as u64 + sk, e)) as f32;
                             }
                         }
                     }
@@ -178,7 +274,7 @@ pub fn apply(s: &mut SynthFile, m: &Mutation) {
                             for p in t.iter_mut() {
                                 let o = *p;
                                 for a in 0..3 {
-                                    p[a] = (f64::from(o[a]) + vnoise(o, a as u64, e)) as f32;
+                                    p[a] = (f64::from(o[a]) + vnoise(o, a as u64 + sk, e)) as f32;
                                 }
                             }
                         }
@@ -188,23 +284,24 @@ pub fn apply(s: &mut SynthFile, m: &Mutation) {
                                 if raft && a == 2 {
                                     continue;
                                 }
-                                end[a] = f64::from((end[a] + vnoise(f, a as u64, e)) as f32);
+                                end[a] = f64::from((end[a] + vnoise(f, a as u64 + sk, e)) as f32);
                             }
                         }
                         if *radii && !raft {
-                            r.r_start += vnoise([r.r_start as f32, 1.0, 2.0], 7, e);
-                            r.r_end += vnoise([r.r_end as f32, 1.0, 2.0], 7, e);
+                            r.r_start += vnoise([r.r_start as f32, 1.0, 2.0], 7 + sk, e);
+                            r.r_end += vnoise([r.r_end as f32, 1.0, 2.0], 7 + sk, e);
                         }
                     }
                 }
             }
         }
-        Mutation::Ulp => {
+        Mutation::Ulp | Mutation::UlpSeed(_) => {
+            let sk = if let Mutation::UlpSeed(s) = m { s.wrapping_mul(0x51_7C_C1) } else { 0 };
             for md in &mut s.models {
                 for t in &mut md.mesh {
                     for p in t.iter_mut() {
                         for a in 0..3 {
-                            p[a] = ulp_step(p[a], a as u64);
+                            p[a] = ulp_step(p[a], a as u64 + sk);
                         }
                     }
                 }
@@ -212,17 +309,17 @@ pub fn apply(s: &mut SynthFile, m: &Mutation) {
                     for t in &mut r.soup {
                         for p in t.iter_mut() {
                             for a in 0..3 {
-                                p[a] = ulp_step(p[a], a as u64);
+                                p[a] = ulp_step(p[a], a as u64 + sk);
                             }
                         }
                     }
                     for end in [&mut r.start_mm, &mut r.end_mm] {
                         for a in 0..3 {
-                            end[a] = f64::from(ulp_step(end[a] as f32, a as u64));
+                            end[a] = f64::from(ulp_step(end[a] as f32, a as u64 + sk));
                         }
                     }
-                    r.r_start = f64::from(ulp_step(r.r_start as f32, 9));
-                    r.r_end = f64::from(ulp_step(r.r_end as f32, 9));
+                    r.r_start = f64::from(ulp_step(r.r_start as f32, 9 + sk));
+                    r.r_end = f64::from(ulp_step(r.r_end as f32, 9 + sk));
                 }
             }
         }
@@ -379,9 +476,23 @@ pub fn parse_spec(spec: &str) -> Result<Mutation, String> {
                 model: which != "support",
                 support: which != "model",
                 radii: p.get(3).is_some_and(|x| *x == "radii"),
+                seed: p.get(4).map_or(Ok(0), |s| s.parse::<u64>().map_err(|_| format!("bad seed {s:?} in {spec:?}")))?,
             }
         }
-        "ulp" => Mutation::Ulp,
+        "cjitter" => {
+            let which = p.get(2).copied().unwrap_or("both");
+            Mutation::JitterConsistent {
+                amp_mm: f(p.get(1).ok_or("cjitter needs an amplitude")?)?,
+                model: which != "support",
+                support: which != "model",
+                radii: p.get(3).is_some_and(|x| *x == "radii"),
+                seed: p.get(4).map_or(Ok(0), |s| s.parse::<u64>().map_err(|_| format!("bad seed {s:?} in {spec:?}")))?,
+            }
+        }
+        "ulp" => match p.get(1) {
+            None => Mutation::Ulp,
+            Some(s) => Mutation::UlpSeed(s.parse::<u64>().map_err(|_| format!("bad seed {s:?} in {spec:?}"))?),
+        },
         "f16" => Mutation::F16,
         "shrink" => {
             need(3)?;
@@ -424,7 +535,7 @@ pub fn parse_spec(spec: &str) -> Result<Mutation, String> {
 /// `plinth-audit mutate <in.chitubox> <out.chitubox> <spec>...`
 pub fn main(argv: &[String]) -> i32 {
     if argv.len() < 3 {
-        eprintln!("usage: plinth-audit mutate <in.chitubox> <out.chitubox> <spec>...\n  specs: jitter:<mm>[:model|support|both[:radii]] ulp f16 shrink:<rec>:<f> shrink-all:<f> scale:<rec>:<f> remove:<a,b> move:<rec>:<dx,dy,dz> float:<x,y,z>:<r> rotz180 split shift:<dx,dy,dz> shiftall:<dx,dy,dz>");
+        eprintln!("usage: plinth-audit mutate <in.chitubox> <out.chitubox> <spec>...\n  specs: jitter:<mm>[:model|support|both[:radii[:seed]]] cjitter:<mm>[...same] (mesh follows the header) ulp[:seed] f16 shrink:<rec>:<f> shrink-all:<f> scale:<rec>:<f> remove:<a,b> move:<rec>:<dx,dy,dz> float:<x,y,z>:<r> rotz180 split shift:<dx,dy,dz> shiftall:<dx,dy,dz>");
         return 64;
     }
     let file = match ChituboxFile::open(std::path::Path::new(&argv[0])) {
