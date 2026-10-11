@@ -193,4 +193,17 @@ pub trait SupportDemandMeasurer {
         candidates: &[UpDirection],
         fidelity: DemandFidelity,
     ) -> Vec<Result<MeasuredSupportDemand, String>>;
+
+    /// A SEPARATE measurer for the diagnostics (`PLINTH_ORIENT_DIAG=prod-all`
+    /// or `extra=`): it measures exactly as `self` does but keeps nothing.
+    ///
+    /// A retaining measurer replaces its retained production batch on every
+    /// production call, so a diagnostic batch run through it would evict the
+    /// winner's plan. The diagnostics therefore never use `self`; they use the
+    /// measurer this returns, and what it measures never enters the ranking.
+    /// `None` (the default) means there is none, and the diagnostics then
+    /// skip the extra production measurements and say so.
+    fn diagnostic_measurer(&self) -> Option<Box<dyn SupportDemandMeasurer>> {
+        None
+    }
 }

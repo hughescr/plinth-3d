@@ -32,6 +32,7 @@
 
 pub mod as_drawn;
 pub mod demand;
+pub mod diag;
 pub mod grid;
 mod score;
 pub mod search;
