@@ -157,8 +157,15 @@ pub fn evaluate_display(
         return DisplayField::from_face_values(table, settings, Vec::new());
     }
 
+    // Write-only stage marks (X0, 2026-10-10), beside the
+    // `display.neighbourhood` span. Inert unless `--perf` is on.
+    let geometry_mark = perf::stage("orient.display.geometry");
     let geometry = FaceGeometryPass::run(mesh);
+    drop(geometry_mark);
+    let visibility_mark = perf::stage("orient.display.visibility");
     let visibility = visibility_by_face(mesh, &geometry, settings, config)?;
+    drop(visibility_mark);
+    let welded_mark = perf::stage("orient.display.welded_folds");
     let WeldedAngleDefect {
         topology,
         defect,
@@ -166,6 +173,7 @@ pub fn evaluate_display(
     } = welded_angle_defect(mesh, &geometry).map_err(DisplayError::Topology)?;
     let curvature_by_face = curvature_by_face(mesh, &geometry, &topology, &defect, &unusable);
     let folds = fold_pass(mesh, &geometry, &topology);
+    drop(welded_mark);
     let neighbourhood = neighbourhood_pass(
         mesh,
         &geometry,
