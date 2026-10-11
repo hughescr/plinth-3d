@@ -534,9 +534,16 @@ the stage that made it. It decides nothing.
   nearest earlier one, with the angle and dot margin to the radius. G4 (flat-face escort):
   per rest pose the flat share and a hash of its flat-face set, the 256 smallest facing
   margins, and the candidates covering each flat pose. The escort's decisions. C1 to C4:
-  K, the rows either side of the cut and the next 8 rejected. Three full copies of the
-  commit ranking (exact table, after the prefilter, after production), because the record
-  reprices it in place.
+  K, the rows either side of the cut and the next 8 rejected. Each row says whether its
+  burden was measured at the production raster; the commit comparator puts production rows
+  first before it reads a score, so a cut carries `score_gap` only when both rows are in one
+  class (`decided_by: "score"`), and `decided_by: "production_fidelity"` with no gap when
+  precedence decided. Three full copies of the commit ranking (exact table, after the
+  prefilter, after production), because the record reprices it in place.
+- **Cost.** G1 and G2 are read off the grid's own binning pass through an observer, not
+  rescanned; with the diagnostics off that pass carries no observer. The collection and the
+  `orient.json` write run in the sidecar's `Diagnostic` phase (the `OrientTable` phase
+  excludes them), and `prod-all`/`extra=` work counters land there too.
 - **`PLINTH_ORIENT_DIAG`** (comma-separated; unset means on when `--perf` is on):
   `off` collects nothing; `digest` prints `[orient] search_digest <sha256>` to stderr, with
   no `--perf` needed (the check that the digest did not move); `prod-all` also measures every
@@ -545,6 +552,8 @@ the stage that made it. It decides nothing.
   final, through a separate non-retaining measurer
   (`SupportDemandMeasurer::diagnostic_measurer`), never the retaining one, and are written to
   the diagnostics only. They add to the perf counters, so such a run is not a timing run.
+  `extra=` directions are scored on the exact table first; with no separate measurer the
+  rows keep those scores, with `production_terms: null` and the reason in `error`.
 
 ## Surface fields: parallel walks, serial oracle
 
