@@ -201,6 +201,10 @@ pub struct ModelFacts {
     pub posts: Vec<Post>,
     /// Per tip: smallest mesh section radius along its path to ground.
     pub path_sec_r: HashMap<usize, f64>,
+    /// Per tip: the records on its path to ground that have a mesh section (the tip
+    /// itself first), so N3 can hold each member to its own section and a narrow
+    /// unchanged member cannot hide the thinning of a thicker one.
+    pub path_members: HashMap<usize, Vec<usize>>,
     pub audit: AuditFacts,
     pub heads: HeadFacts,
     pub floating: Vec<Comp>,
@@ -672,8 +676,13 @@ fn analyse_model(
     };
     let dist = ctx.graph.distance_to_ground(&is_ground);
     let mut path_sec_r = HashMap::new();
+    let mut path_members: HashMap<usize, Vec<usize>> = HashMap::new();
     for &t in &tips {
         let mut cur = t;
+        let mut members: Vec<usize> = Vec::new();
+        if recs[t].sec_r.is_some() {
+            members.push(t);
+        }
         let mut best = recs[t].sec_r.unwrap_or(f64::INFINITY);
         let mut guard = 0;
         while let Some(d) = dist[cur] {
@@ -693,6 +702,7 @@ fn analyse_model(
                     cur = n;
                     if let Some(r) = recs[cur].sec_r {
                         best = best.min(r);
+                        members.push(cur);
                     }
                 }
                 None => break,
@@ -700,6 +710,7 @@ fn analyse_model(
         }
         if best.is_finite() {
             path_sec_r.insert(t, best);
+            path_members.insert(t, members);
         }
     }
 
@@ -740,6 +751,7 @@ fn analyse_model(
         recs,
         tips,
         path_sec_r,
+        path_members,
         audit,
         heads,
         floating: gr.floating,

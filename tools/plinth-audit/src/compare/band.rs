@@ -52,6 +52,30 @@ pub fn overlap_join(a: &RowRuns, b: &RowRuns, mut f: impl FnMut(usize, usize, i6
     }
 }
 
+/// Visit every (run in a, run in b) pair whose pixels touch by a face or a corner:
+/// rows differ by at most one and the column spans overlap or abut. This is the
+/// 3D corner rule between two adjacent layers (a voxel and any of the nine voxels
+/// above or below it), the same rule the in-plane `SharedFaceOrCorner` label uses.
+pub fn corner_join(a: &RowRuns, b: &RowRuns, mut f: impl FnMut(usize, usize)) {
+    for &(ra, sa, ea) in &a.groups {
+        for rb in (ra - 1)..=(ra + 1) {
+            let Ok(g) = b.groups.binary_search_by_key(&rb, |x| x.0) else { continue };
+            let (_, sb, eb) = b.groups[g];
+            let bruns = &b.runs[sb..eb];
+            for i in sa..ea {
+                let x = a.runs[i].1;
+                let first = bruns.partition_point(|(_, y)| y.c1 < x.c0);
+                for (off, (_, y)) in bruns[first..].iter().enumerate() {
+                    if y.c0 > x.c1 {
+                        break;
+                    }
+                    f(i, sb + first + off);
+                }
+            }
+        }
+    }
+}
+
 pub fn comp_stats(rr: &RowRuns, labels: &[u32], n: usize, g: &RasterGrid, kk: i64) -> Vec<Comp> {
     let mut v: Vec<Comp> = (0..n)
         .map(|_| Comp {
@@ -302,7 +326,7 @@ pub fn blobs(x: &RunRaster, add: &RunRaster, g: &RasterGrid) -> Vec<Blob> {
         if let Some((pk, prr, pgid)) = &prev {
             if *pk == l.k - 1 {
                 let mut pairs = Vec::new();
-                overlap_join(&rr, prr, |i, j, _| pairs.push((gid[i], pgid[j])));
+                corner_join(&rr, prr, |i, j| pairs.push((gid[i], pgid[j])));
                 for (a, b) in pairs {
                     let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
                     if ra != rb {
@@ -380,4 +404,46 @@ pub fn drift(a: &RunRaster, b: &RunRaster, g: &RasterGrid, grow: i64) -> Drift {
     let beyond = removed.union(&added);
     let blobs = blobs(&beyond, &added, g);
     Drift { voxels: beyond.pixel_count, removed, added, beyond, blobs }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn raster(g: RasterGrid, voxels: &[(i64, i64, i64)]) -> RunRaster {
+        let mut by_layer: BTreeMap<i64, BTreeMap<i64, Vec<Run>>> = BTreeMap::new();
+        for &(k, row, col) in voxels {
+            by_layer.entry(k).or_default().entry(row).or_default().push(Run { c0: col, c1: col + 1 });
+        }
+        let layers: Vec<Layer> = by_layer.into_iter().map(|(k, rows)| Layer { k, z_mm: g.layer_z_mm(k), rows }).collect();
+        let pixel_count = voxels.len() as u64;
+        RunRaster { grid: g, layers, pixel_count, run_count: pixel_count }
+    }
+
+    /// One voxel per layer, stepping one column per layer: corner-connected in 3D, and no
+    /// exact XY overlap between layers. The blob is one blob of all 64 voxels.
+    #[test]
+    fn diagonal_staircase_across_layers_is_one_blob() {
+        let g = RasterGrid::saturn4(0.0);
+        let vox: Vec<_> = (0..64).map(|i| (i, 10, 100 + i)).collect();
+        let x = raster(g, &vox);
+        let b = blobs(&x, &RunRaster::empty(g), &g);
+        assert_eq!(b.len(), 1, "{b:?}");
+        assert_eq!(b[0].vox, 64);
+        // Row steps and mixed steps join too; a gap of two columns or two rows does not.
+        let vox: Vec<_> = (0..8).map(|i| (i, 10 + i, 100 - i)).collect();
+        assert_eq!(blobs(&raster(g, &vox), &RunRaster::empty(g), &g).len(), 1);
+        let apart = raster(g, &[(0, 10, 100), (1, 10, 102), (2, 12, 102)]);
+        assert_eq!(blobs(&apart, &RunRaster::empty(g), &g).len(), 3);
+    }
+
+    #[test]
+    fn corner_join_pairs_touching_runs_only() {
+        let t = |rows: &[(i64, Vec<Run>)]| RowRuns::from_row_table(rows);
+        let a = t(&[(5, vec![Run { c0: 10, c1: 12 }])]);
+        let b = t(&[(4, vec![Run { c0: 12, c1: 14 }, Run { c0: 15, c1: 16 }]), (7, vec![Run { c0: 10, c1: 12 }])]);
+        let mut got = Vec::new();
+        corner_join(&a, &b, |i, j| got.push((i, j)));
+        assert_eq!(got, vec![(0, 0)], "abutting at a corner joins; a gap of one pixel and two rows do not");
+    }
 }

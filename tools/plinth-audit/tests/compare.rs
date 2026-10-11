@@ -163,6 +163,41 @@ fn one_member_halved_is_a_regression() {
     assert_eq!(row(&run, "N3").status, Status::Fail, "{}", show(&run));
 }
 
+/// The first Member split in two collinear halves in series on the same path: a thick one and
+/// a thin one. Returns the file and the index of the thick half.
+fn thick_then_thin() -> (SynthFile, usize) {
+    let mut s = base();
+    let mi = kind_index(&s, RecordKind::Member, 0);
+    let r = s.models[0].records[mi].clone();
+    let mid = [(r.start_mm[0] + r.end_mm[0]) / 2.0, (r.start_mm[1] + r.end_mm[1]) / 2.0, (r.start_mm[2] + r.end_mm[2]) / 2.0];
+    let lo = SynthRecord::new(RecordKind::Member, r.start_mm, mid, 0.6, 0.6).with_matching_soup();
+    let hi = SynthRecord::new(RecordKind::Member, mid, r.end_mm, 0.3, 0.3).with_matching_soup();
+    s.models[0].records[mi] = lo;
+    s.models[0].records.insert(mi + 1, hi);
+    (s, mi)
+}
+
+/// A narrow unchanged member on the same path must not hide the thinning of a thicker one:
+/// halving the 0.6 mm half leaves it at 0.3 mm, the same as the path minimum, so a single
+/// minimum over the path sees no change at all.
+#[test]
+fn thinning_a_thick_member_behind_a_narrow_unchanged_one_fails_n3() {
+    let (b, thick) = thick_then_thin();
+    let mut m = b.clone();
+    apply(&mut m, &Mutation::ScaleRecord { record: thick, factor: 0.5 });
+    let (rd, cd) = (dir("masked-ref"), dir("masked-cand"));
+    poses(&rd, "x", "identity");
+    poses(&cd, "x", "identity");
+    let (r, c) = (write(&b, &rd, "x"), write(&m, &cd, "x"));
+    let run = compare_paths(&args(&r, &c));
+    let (rf, cf) = (run.ref_facts.as_ref().expect("ref"), run.cand_facts.as_ref().expect("cand"));
+    // The masking premise: the path minimum of every tip is the same in both files.
+    let (ra, rc) = (&rf.models[0], &cf.models[0]);
+    let masked = ra.path_sec_r.values().zip(ra.path_sec_r.keys()).any(|(x, t)| rc.path_sec_r.get(t).is_some_and(|y| (y / x - 1.0).abs() < 0.05) && ra.path_members[t].len() > 1);
+    assert!(masked, "fixture must be one where the path minimum is unchanged: {:?} -> {:?}", ra.path_sec_r, rc.path_sec_r);
+    assert_eq!(row(&run, "N3").status, Status::Fail, "{}", show(&run));
+}
+
 #[test]
 fn contact_attachment_area_halved_fails_i2() {
     // Seat depth h = R - d with d = 0.2932 mm, R = 0.4886 mm: the cut disc has a^2 = R^2 - d^2.

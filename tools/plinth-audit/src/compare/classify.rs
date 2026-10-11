@@ -660,25 +660,54 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
         // N3 member sections along each matched contact's path.
         let (mut thin, mut waived, mut worst_ratio, mut sec_eq) = (Vec::new(), 0usize, f64::MAX, true);
         let mut evaluated = 0usize;
+        // Each member on a path is held to its own section: one minimum over the whole path
+        // lets a narrow unchanged taper hide the thinning of a thicker member. The path
+        // minimum is kept as well, for members that no record of the other file matches.
+        let rec_match = match_records(&a.recs, &b.recs);
+        let mut seen_member = std::collections::HashSet::new();
         for &(i, j, _) in &matched {
             let (Some(x), Some(y)) = (a.path_sec_r.get(&i), b.path_sec_r.get(&j)) else { continue };
             evaluated += 1;
-            let ratio = y / x;
-            worst_ratio = worst_ratio.min(ratio);
-            if (ratio - 1.0).abs() > k::EQ_SECTION {
-                sec_eq = false;
-            }
-            if ratio < 1.0 - k::N3_THINNER {
-                let margin = b.audit.i3_margin.get(&j).copied();
-                if margin.is_some_and(|m| m >= 1.5) {
-                    waived += 1;
-                } else {
-                    thin.push(format!("contact r{j} at {}: path section {x:.4} -> {y:.4} mm ({:+.1} %), I3 margin {}", p3(b.recs[j].mid), 100.0 * (ratio - 1.0), margin.map_or("unmeasured".into(), |m| format!("{m:.2}x"))));
+            let margin = b.audit.i3_margin.get(&j).copied();
+            let waivable = margin.is_some_and(|m| m >= 1.5);
+            let mut tip_thin = false;
+            let mut tip_waived = false;
+            let mut judge = |ratio: f64, msg: &dyn Fn() -> String, key: Option<usize>| {
+                worst_ratio = worst_ratio.min(ratio);
+                if (ratio - 1.0).abs() > k::EQ_SECTION {
+                    sec_eq = false;
                 }
+                if ratio < 1.0 - k::N3_THINNER {
+                    if waivable {
+                        tip_waived = true;
+                    } else {
+                        // A trunk shared by several paths is reported once.
+                        if key.is_none_or(|m| seen_member.insert(m)) {
+                            thin.push(msg());
+                        }
+                        tip_thin = true;
+                    }
+                }
+            };
+            judge(y / x, &|| format!("contact r{j} at {}: path minimum section {x:.4} -> {y:.4} mm ({:+.1} %), I3 margin {}", p3(b.recs[j].mid), 100.0 * (y / x - 1.0), margin.map_or("unmeasured".into(), |m| format!("{m:.2}x"))), None);
+            let bset: std::collections::HashSet<usize> = b.path_members.get(&j).map(|v| v.iter().copied().collect()).unwrap_or_default();
+            for &m in a.path_members.get(&i).map(Vec::as_slice).unwrap_or_default() {
+                let Some(n) = rec_match[m] else { continue };
+                if !bset.contains(&n) {
+                    continue;
+                }
+                let (Some(xr), Some(yr)) = (a.recs[m].sec_r, b.recs[n].sec_r) else { continue };
+                if xr <= 0.0 {
+                    continue;
+                }
+                judge(yr / xr, &|| format!("member r{n} at {} on the path of contact r{j}: section {xr:.4} -> {yr:.4} mm ({:+.1} %), I3 margin {}", p3(b.recs[n].mid), 100.0 * (yr / xr - 1.0), margin.map_or("unmeasured".into(), |q| format!("{q:.2}x"))), Some(n));
+            }
+            if tip_waived && !tip_thin {
+                waived += 1;
             }
         }
         rows.push(
-            Row::new(&format!("N3{sfx}"), "member sections along each contact's path (shared trunks included)", status_of(!thin.is_empty(), evaluated == 0 && !matched.is_empty()), format!("{} of {evaluated} evaluated matched paths more than 15 % thinner without an I3 margin of 1.5x ({waived} waived by margin); worst ratio {}", thin.len(), if worst_ratio == f64::MAX { "n/a".into() } else { format!("{worst_ratio:.3}") }), "no path more than 15 % thinner unless its I3 margin stays at 1.5x")
+            Row::new(&format!("N3{sfx}"), "member sections along each contact's path (shared trunks included)", status_of(!thin.is_empty(), evaluated == 0 && !matched.is_empty()), format!("{} path or member sections (of {evaluated} evaluated matched paths) more than 15 % thinner without an I3 margin of 1.5x ({waived} paths waived by margin); worst ratio {}", thin.len(), if worst_ratio == f64::MAX { "n/a".into() } else { format!("{worst_ratio:.3}") }), "no path more than 15 % thinner unless its I3 margin stays at 1.5x")
                 .with_detail(thin.into_iter().take(8).collect()),
         );
         // N4 thin joins.
