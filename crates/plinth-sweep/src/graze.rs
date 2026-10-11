@@ -72,6 +72,10 @@ pub(crate) struct GrazeEnv<'a> {
     /// The root flare's radius factor (`policy.flare_r_factor`): sizes the
     /// disc a new plate root is tested with.
     pub flare_factor: f64,
+    /// The model's layer slices: the footprint rule's own carried-face rasters
+    /// grade the straight tips' contact discs against them
+    /// ([`crate::footprint::regrade`]).
+    pub slices: &'a [Vec<plinth_support::perception::SliceSolid>],
 }
 
 /// One place the post from the joint may land.
@@ -157,12 +161,39 @@ pub(crate) fn convert(
     for (slot, &member) in members.iter().enumerate() {
         slot_of[member] = Some(slot);
     }
+    // **A HEAD NEVER SLIDES, SO A TIP THE FOOTPRINT RULE WOULD SLIDE IS NOT
+    // GIVEN ONE** (quality lane Q2, 2026-10-11). The footprint rule runs last
+    // and slides a straight tip along its face until the whole contact disc
+    // lies on it; that slide is what puts the contact under the face's cured
+    // region at the layer the face is born (Deinonychus arm 133: a 0.18 mm
+    // slide, the contact ball's section at the island's birth layer
+    // overlapping a 24-pixel island by 0.14 mm). A head is frozen at
+    // placement: converted here at the seat cell, before the slide, it keeps a
+    // disc partly off its face and the reach the slide gave is gone (the same
+    // ball size, 0.03 mm short of the island). The tips whose discs hang off their
+    // faces are found in ONE batched grade of the grazers, with the footprint
+    // rule's own disc, lattice and rim (`footprint::regrade`), and are left
+    // straight; the slide then runs as it always did.
+    let subset: Vec<SweepStrut> = members.iter().map(|&member| struts[member].clone()).collect();
+    let grazer_slots: Vec<usize> = rows.iter().filter_map(|row| slot_of[row.index]).collect();
+    let slides_to_face: std::collections::BTreeSet<usize> = crate::footprint::regrade(
+        grid,
+        env.slices,
+        &subset,
+        &arms,
+        &grazer_slots,
+        joins.layer_plan,
+        joins.plate_z_mm,
+        height,
+    )
+    .into_iter()
+    .map(|(slot, _)| slot)
+    .collect();
     // Members whose drawn solid already stands within the final gap of the
     // model, in ONE census call. The clearance re-route moves such a member
     // with everything that rests on it, and it never moves a headed arm: a
     // head converted under one would lock the re-route out (the overhang
     // table's post 26: `clearance_census::a_rerouted_field...`).
-    let subset: Vec<SweepStrut> = members.iter().map(|&member| struts[member].clone()).collect();
     let near_model: std::collections::BTreeSet<u32> = crate::member_clearance::model_clearance_census(
         Some(surface),
         &subset,
@@ -205,6 +236,10 @@ pub(crate) fn convert(
         let Some(slot) = slot_of[g] else { continue };
         if carries[g] {
             outcome.graze_reasons.push((id, GrazeReason::CarriesMembers));
+            continue;
+        }
+        if slides_to_face.contains(&slot) {
+            outcome.graze_reasons.push((id, GrazeReason::SlidesToItsFace));
             continue;
         }
         // A host chain with a member near the model: left straight, warned.

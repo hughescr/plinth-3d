@@ -4127,6 +4127,10 @@ fn print_sweep_disclosure(
                         GrazeReason::HostTooThin => {
                             "its host is thinner than the joint (the post would raise it) and the plate under the joint is blocked or crowded".to_owned()
                         }
+                        GrazeReason::SlidesToItsFace => {
+                            "its contact disc hangs off the face, the footprint rule slides it and a head cannot slide"
+                                .to_owned()
+                        }
                         GrazeReason::LateSlide => "made by a later slide".to_owned(),
                     };
                     format!(

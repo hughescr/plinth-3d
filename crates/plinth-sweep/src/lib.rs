@@ -2639,6 +2639,7 @@ pub fn run_sweep_with_holes(
             profiles,
             rule,
             flare_factor: policy.flare_r_factor,
+            slices: &slices,
         };
         if graze::convert(&graze_env, &mut struts, &mut graze_outcome) > 0 {
             perf::add(PerfWork::SweepDownCallGraze, 1);

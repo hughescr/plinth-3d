@@ -272,6 +272,20 @@ between two census root discs (Deinonychus arm 183), and four ridge posts that s
 33-46 deg over a free vertical landing. The host is therefore counted as carrying, in `carries_someone`
 and in the congestion lean, and lip-seat locks it outright. A bite it cannot lose stays a seat-trim WARNING.
 
+**A contact that carries an island keeps the reach it had (quality lane Q2, round 3).** With the twin
+arms gone, a Deinonychus arm whose head had been refused for `HitsMember` (the twin's shaft stood in the
+way) could now take the graze head (`graze::convert`: 1 conversion before the rule, 2 after). The
+straight arm it replaced was slid 0.18 mm along its seat face by the footprint rule, whose whole job is
+to put the contact disc on the face; that slide put its ball's section at the birth layer of a 24-pixel
+detached island 0.14 mm inside the island's contour (audit island at layer 169). A head is frozen at
+placement and the footprint rule never slides it (`Footprint::MoveRefused`), so the converted arm kept
+its ball at the seat cell, 22 % of its disc off the face, and its section at the same layer missed the
+island by 0.03 mm. The cause is not the merge's routing but the order of the passes: the graze
+conversion plans the head before the footprint slide exists. The rule now: a grazer whose straight tip's
+contact disc is not wholly on its face (graded by `footprint::regrade`, the footprint rule's own disc,
+lattice and rim, in ONE batched pass over the grazers) is left straight, named `SlidesToItsFace`, and the
+slide runs as it always did. No tolerance is new; the grade is the footprint rule's.
+
 **The clearance re-route after the final sizing.** The up-sweep places an arm at a lower bound
 of the radius it is later drawn at (the area law and the thickening grow it), so after the final
 sizing and the ties the census names every arm whose drawn solid stands within the final gap
