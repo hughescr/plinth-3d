@@ -406,7 +406,8 @@ pub struct CutDiagnostics {
     pub last_kept: Option<KeyedRanked>,
     pub first_rejected: Option<KeyedRanked>,
     pub next_rejected: Vec<KeyedRanked>,
-    /// Rows below the cut that reach the next stage anyway, by right.
+    /// Rows below the cut that the escort added to the next stage's input, by
+    /// right. Only C2 has an escort; every other cut lists none.
     pub rescued_by_escort: Vec<CandidateKey>,
 }
 
@@ -548,6 +549,15 @@ pub(crate) fn build(inputs: &DiagInputs<'_>) -> SweepDiagnostics {
             .collect()
     };
 
+    // The search escorts only after the refine tier (C2). Every other cut
+    // passes its top k and nothing else, so nothing is rescued there.
+    let no_rescue = BTreeSet::new();
+    let escort_added: BTreeSet<usize> = escort
+        .by_right
+        .iter()
+        .filter(|row| row.added)
+        .map(|row| row.id)
+        .collect();
     let mut cuts = Vec::new();
     let ladder = inputs.request.ladder;
     if let Some(coarse) = inputs.tiers.first() {
@@ -559,6 +569,7 @@ pub(crate) fn build(inputs: &DiagInputs<'_>) -> SweepDiagnostics {
             &coarse.ranking,
             keys,
             &by_right_ids,
+            &no_rescue,
         ));
     }
     if let Some(refine) = inputs.tiers.get(1) {
@@ -570,6 +581,7 @@ pub(crate) fn build(inputs: &DiagInputs<'_>) -> SweepDiagnostics {
             &refine.ranking,
             keys,
             &by_right_ids,
+            &escort_added,
         ));
     }
     if let Some(after_prefilter) = &inputs.snapshots.after_prefilter {
@@ -582,6 +594,7 @@ pub(crate) fn build(inputs: &DiagInputs<'_>) -> SweepDiagnostics {
             after_prefilter,
             keys,
             &by_right_ids,
+            &no_rescue,
         ));
     }
     if let Some(after_production) = &inputs.snapshots.after_production {
@@ -593,6 +606,7 @@ pub(crate) fn build(inputs: &DiagInputs<'_>) -> SweepDiagnostics {
             after_production,
             keys,
             &by_right_ids,
+            &no_rescue,
         ));
     }
 
@@ -656,6 +670,9 @@ fn keyed_row(
     }
 }
 
+/// One cut of the funnel. `rescued` holds the ids this cut's escort added to
+/// the next stage's input; it is empty for every cut without an escort.
+#[allow(clippy::too_many_arguments)]
 fn cut(
     name: &str,
     stage: &str,
@@ -664,6 +681,7 @@ fn cut(
     ranking: &[RankedCandidate],
     keys: &[CandidateKey],
     by_right: &BTreeSet<usize>,
+    rescued: &BTreeSet<usize>,
 ) -> CutDiagnostics {
     let row = |index: usize| ranking.get(index).map(|entry| keyed_row(entry, keys, by_right));
     let last_kept = k.checked_sub(1).and_then(row);
@@ -676,7 +694,7 @@ fn cut(
     let rescued_by_escort: Vec<CandidateKey> = ranking
         .iter()
         .skip(k)
-        .filter(|entry| by_right.contains(&entry.candidate))
+        .filter(|entry| rescued.contains(&entry.candidate))
         .map(|entry| keys[entry.candidate])
         .collect();
     CutDiagnostics {
@@ -2082,6 +2100,28 @@ mod tests {
         }
         let c4 = &d.cuts[3];
         assert_eq!(c4.last_kept.as_ref().map(|row| row.candidate), Some(record.winner.candidate));
+
+        // Escort rescues exist only where the search escorts (C2), and match
+        // the next stage's actual input: the refine rows below the cut that
+        // reached the commit tier, and no others.
+        for index in [0, 2, 3] {
+            assert!(d.cuts[index].rescued_by_escort.is_empty(), "{}", d.cuts[index].name);
+        }
+        let c2 = &d.cuts[1];
+        let below_cut: Vec<usize> = record.tiers[1]
+            .ranking
+            .iter()
+            .skip(c2.k)
+            .map(|row| row.candidate)
+            .collect();
+        let reached_commit: Vec<CandidateKey> = below_cut
+            .iter()
+            .filter(|id| commit_ids.contains(id))
+            .map(|id| d.candidates[*id].key)
+            .collect();
+        assert_eq!(c2.rescued_by_escort, reached_commit);
+        let added_by_right: usize = c2.rescued_by_escort.len();
+        assert!(added_by_right <= d.escort.added, "rescues are a subset of the escort's additions");
 
         // Snapshots are COPIES of the commit ranking at three moments.
         assert_eq!(d.snapshots.exact_table.len(), commit.ranking.len());
