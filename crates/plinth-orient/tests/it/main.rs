@@ -20,4 +20,5 @@ mod orientation_dense_sweep;
 mod orientation_rederivation;
 mod orientation_scoring;
 mod peel_demand_override;
+mod pose_diagnostics;
 mod tessellation_invariance;

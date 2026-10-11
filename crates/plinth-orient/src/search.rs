@@ -408,7 +408,7 @@ pub struct TermsRecord {
 }
 
 impl TermsRecord {
-    fn new(terms: CandidateTerms) -> Result<Self, SearchError> {
+    pub(crate) fn new(terms: CandidateTerms) -> Result<Self, SearchError> {
         Ok(Self {
             support_area_cm2: finite(terms.support_area_cm2)?,
             peak_xsec_cm2: finite(terms.peak_xsec_cm2)?,
@@ -451,7 +451,7 @@ impl TermsRecord {
     /// `None` on every path that reaches a `Some` for it here (and likewise
     /// for `self.tip_scar_raw_mm2`), because only the commit tier's
     /// production stage passes either and it visits each finalist once.
-    fn repriced(
+    pub(crate) fn repriced(
         self,
         weights: ObjectiveWeights,
         support_area_cm2: f64,
@@ -978,12 +978,68 @@ struct Rung {
 /// record's `commit_tier_demand`). `None` reproduces the pre-LANE-3 proxy-
 /// only objective exactly, which is what every test in this crate that does
 /// not itself exercise the override passes.
+///
+/// # Diagnostics (`PLINTH_ORIENT_DIAG`, [`crate::diag`])
+///
+/// With `--perf` on, the pose-stability diagnostics are collected and written
+/// to `<perf-dir>/<model>.orient.json`. They are a separate value
+/// ([`crate::diag::SweepDiagnostics`]): the record, its digest and the winner
+/// are the same with them on or off.
 pub fn search(
     mesh: &Mesh,
     request: &SweepRequest,
     demand: Option<&dyn crate::demand::SupportDemandMeasurer>,
 ) -> Result<SweepOutcome, SearchError> {
+    let switches = crate::diag::Switches::from_env();
+    for warning in &switches.warnings {
+        eprintln!("WARNING: PLINTH_ORIENT_DIAG: {warning}");
+    }
+    let perf_on = geom_kernel::perf::enabled();
+    if switches.wants_production_sweeps() && !switches.off && !perf_on {
+        eprintln!(
+            "WARNING: PLINTH_ORIENT_DIAG: prod-all and extra= need --perf (the diagnostics have \
+             nowhere to go without it); ignored"
+        );
+    }
+    let config = switches.config(perf_on);
+    let (outcome, diagnostics) = search_core(mesh, request, demand, config.as_ref())?;
+    if switches.digest {
+        eprintln!("[orient] search_digest {}", outcome.record.search_digest);
+    }
+    if let Some(diagnostics) = &diagnostics {
+        crate::diag::write_orient_json(&outcome.record, diagnostics);
+    }
+    Ok(outcome)
+}
+
+/// [`search`] with the diagnostics returned instead of written, whatever the
+/// environment says. The outcome is the one [`search`] returns.
+///
+/// # Errors
+///
+/// As [`search`].
+pub fn search_with_diagnostics(
+    mesh: &Mesh,
+    request: &SweepRequest,
+    demand: Option<&dyn crate::demand::SupportDemandMeasurer>,
+    config: &crate::diag::DiagnosticsConfig,
+) -> Result<(SweepOutcome, crate::diag::SweepDiagnostics), SearchError> {
+    let (outcome, diagnostics) = search_core(mesh, request, demand, Some(config))?;
+    Ok((
+        outcome,
+        diagnostics.expect("search_core returns diagnostics whenever it is given a config"),
+    ))
+}
+
+pub(crate) fn search_core(
+    mesh: &Mesh,
+    request: &SweepRequest,
+    demand: Option<&dyn crate::demand::SupportDemandMeasurer>,
+    diag: Option<&crate::diag::DiagnosticsConfig>,
+) -> Result<(SweepOutcome, Option<crate::diag::SweepDiagnostics>), SearchError> {
     let mut fallbacks = Vec::new();
+    // The diagnostics' captures: copies taken in place, read by nothing here.
+    let mut raw = crate::diag::RawSnapshots::default();
 
     // The exact rung first: if the production mesh cannot be scored there is no
     // orientation to commit to and the whole sweep refuses by name.
@@ -1106,6 +1162,9 @@ pub fn search(
         } else {
             0
         };
+        if diag.is_some() && tier == SearchTier::Commit {
+            raw.exact_table.clone_from(&record.ranking);
+        }
         let promoted: Vec<usize> = record
             .ranking
             .iter()
@@ -1116,6 +1175,9 @@ pub fn search(
             let (set, added) = escort(&promoted, &by_right);
             escorted = added;
             admitted = set;
+            if diag.is_some() {
+                raw.promoted_to_commit.clone_from(&promoted);
+            }
         } else {
             admitted = promoted;
         }
@@ -1186,6 +1248,9 @@ pub fn search(
             commit_tier_demand.push(row);
         }
         rerank_commit(&mut commit_record.ranking, &commit_tier_demand);
+        if diag.is_some() {
+            raw.after_prefilter = Some(commit_record.ranking.clone());
+        }
 
         // ---- stage 2: the finalists, at the production pitch --------------
         let finalists = request.ladder.commit_top_k().min(commit_record.ranking.len());
@@ -1231,6 +1296,24 @@ pub fn search(
             }
         }
         rerank_commit(&mut commit_record.ranking, &commit_tier_demand);
+        #[cfg(test)]
+        {
+            if diag.is_some_and(|config| config.sabotage_feed_rerank) {
+                sabotage_feed_rerank(
+                    &mut commit_record.ranking,
+                    &mut commit_tier_demand,
+                    &raw,
+                    &grid,
+                    mesh,
+                    &exact.table,
+                    request,
+                    measurer,
+                );
+            }
+        }
+        if diag.is_some() {
+            raw.after_production = Some(commit_record.ranking.clone());
+        }
     }
 
     let record_mark = geom_kernel::perf::stage("orient.record");
@@ -1292,7 +1375,75 @@ pub fn search(
     };
     record.search_digest = digest_record(&record)?;
     drop(record_mark);
-    Ok(SweepOutcome { winner, record })
+
+    // The diagnostics are built from the FINISHED record and nothing they
+    // compute is read back (module doc, `crate::diag`).
+    let diagnostics = diag.map(|config| {
+        let _mark = geom_kernel::perf::stage("orient.diag");
+        crate::diag::build(&crate::diag::DiagInputs {
+            config,
+            mesh,
+            request,
+            grid: &grid,
+            grid_table: &coarse.table,
+            grid_table_lod: coarse.lod,
+            exact_table: &exact.table,
+            demand,
+            tiers: &record.tiers,
+            snapshots: &raw,
+            record: &record,
+        })
+    });
+    Ok((SweepOutcome { winner, record }, diagnostics))
+}
+
+/// TEST ONLY: the defect the diagnostics must never have. Feeds the
+/// separate measurer's production numbers for EVERY admitted pose into the
+/// commit ranking and re-ranks, so a test can show that comparing the record
+/// and its digest with the diagnostics on and off would catch it.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn sabotage_feed_rerank(
+    ranking: &mut [RankedCandidate],
+    rows: &mut [CommitDemandRecord],
+    raw: &crate::diag::RawSnapshots,
+    grid: &SweepGrid,
+    mesh: &Mesh,
+    exact_table: &OrientFaceTable,
+    request: &SweepRequest,
+    measurer: &dyn crate::demand::SupportDemandMeasurer,
+) {
+    let Some(diagnostic) = measurer.diagnostic_measurer() else {
+        return;
+    };
+    let items: Vec<crate::diag::DiagItem> = raw
+        .exact_table
+        .iter()
+        .map(|entry| crate::diag::DiagItem {
+            label: String::new(),
+            key: None,
+            candidate: Some(entry.candidate),
+            direction: grid.candidates()[entry.candidate].direction,
+            exact_terms: entry.terms,
+        })
+        .collect();
+    let leaked = crate::diag::measure_items(
+        diagnostic.as_ref(),
+        mesh,
+        exact_table,
+        request.weights,
+        items,
+    );
+    for entry in ranking.iter_mut() {
+        let row = leaked.iter().find(|row| row.candidate == Some(entry.candidate));
+        if let Some(terms) = row.and_then(|row| row.production_terms) {
+            entry.terms = terms;
+        }
+    }
+    for row in rows.iter_mut() {
+        row.fidelity = Some(crate::demand::DemandFidelity::Production.label().to_owned());
+    }
+    rerank_commit(ranking, rows);
 }
 
 impl Rung {
@@ -1432,7 +1583,7 @@ fn score_tier(
 /// field-2026-09-28/round50.md` Q2). A disc adds one candidate here (its
 /// other flat pose is identity, already legacy); a part with no flat face
 /// adds none.
-fn escort(promoted: &[usize], by_right: &[usize]) -> (Vec<usize>, usize) {
+pub(crate) fn escort(promoted: &[usize], by_right: &[usize]) -> (Vec<usize>, usize) {
     let mut set: BTreeSet<usize> = promoted.iter().copied().collect();
     let mut added = 0_usize;
     for candidate in by_right {
@@ -1443,7 +1594,7 @@ fn escort(promoted: &[usize], by_right: &[usize]) -> (Vec<usize>, usize) {
     (set.into_iter().collect(), added)
 }
 
-fn describe(reason: CandidateRefusalReason) -> String {
+pub(crate) fn describe(reason: CandidateRefusalReason) -> String {
     match reason {
         CandidateRefusalReason::NonFiniteTerm { term, value } => {
             format!("{term} evaluated to {value}")

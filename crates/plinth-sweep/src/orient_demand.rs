@@ -763,6 +763,11 @@ impl SupportDemandMeasurer for SweepDemand {
         )
         .0
     }
+
+    fn diagnostic_measurer(&self) -> Option<Box<dyn SupportDemandMeasurer>> {
+        // A plain `SweepDemand` already retains nothing.
+        Some(Box::new(*self))
+    }
 }
 
 impl SupportDemandMeasurer for RetainingSweepDemand {
@@ -789,6 +794,13 @@ impl SupportDemandMeasurer for RetainingSweepDemand {
             *self.retained.lock().unwrap_or_else(PoisonError::into_inner) = retained;
         }
         measured
+    }
+
+    fn diagnostic_measurer(&self) -> Option<Box<dyn SupportDemandMeasurer>> {
+        // The diagnostics must not touch the retained batch (a production
+        // call REPLACES it, so a diagnostic batch would evict the winner's
+        // plan): hand them the non-retaining measurer with the same policies.
+        Some(Box::new(self.inner))
     }
 }
 

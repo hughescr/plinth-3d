@@ -967,6 +967,35 @@ pub fn end_model() {
     }
 }
 
+/// Write `bytes` next to the sidecar of the model in flight, as
+/// `<dir>/<stem>.<ext>` (atomically: a temporary file, then a rename).
+/// Write-only like everything here: nothing reads it back. `Ok(None)` when
+/// counting is off or no model is in flight.
+///
+/// # Errors
+///
+/// Any I/O error from creating the folder, writing or renaming; the caller
+/// decides whether that matters (the diagnostics warn and go on).
+pub fn write_side_file(ext: &str, bytes: &[u8]) -> std::io::Result<Option<PathBuf>> {
+    if !enabled() {
+        return Ok(None);
+    }
+    let target = SLOT.lock().ok().and_then(|guard| {
+        guard
+            .as_ref()
+            .map(|slot| (slot.dir.clone(), file_stem(&slot.model)))
+    });
+    let Some((dir, stem)) = target else {
+        return Ok(None);
+    };
+    std::fs::create_dir_all(&dir)?;
+    let tmp = dir.join(format!("{stem}.{ext}.tmp"));
+    let done = dir.join(format!("{stem}.{ext}"));
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, &done)?;
+    Ok(Some(done))
+}
+
 /// Add `n` to counter `work` in the current phase. Returns at once when off.
 #[inline]
 pub fn add(work: Work, n: u64) {
@@ -1729,6 +1758,27 @@ mod tests {
         assert!(text.contains("\"sweep.runs\":1"), "{text}");
         assert!(text.contains("\"sweep.runs\":64"), "{text}");
         assert!(text.contains("\"sweep.run\":{\"calls\":1"), "{text}");
+        ENABLED.store(false, Relax);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_side_file_lands_beside_the_sidecar_and_only_while_a_model_is_in_flight() {
+        let _guard = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = scratch("sidefile");
+        ENABLED.store(false, Relax);
+        assert!(write_side_file("orient.json", b"x").expect("off").is_none());
+        enable(dir.clone(), HOUR);
+        end_model();
+        assert!(write_side_file("orient.json", b"x").expect("no model").is_none());
+        begin_model("A B");
+        let written = write_side_file("orient.json", b"{\"k\":1}")
+            .expect("written")
+            .expect("a model is in flight");
+        assert_eq!(written, dir.join("A B.orient.json"));
+        assert_eq!(std::fs::read(&written).expect("read back"), b"{\"k\":1}");
+        assert!(!dir.join("A B.orient.json.tmp").exists());
+        end_model();
         ENABLED.store(false, Relax);
         let _ = std::fs::remove_dir_all(&dir);
     }

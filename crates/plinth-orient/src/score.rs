@@ -184,6 +184,13 @@ impl UpDirection {
     /// The authored up direction, which is also the identity candidate.
     pub const MODEL_UP: Self = Self([0.0, 0.0, 1.0]);
 
+    /// TEST ONLY: a direction holding exactly these components, unnormalized,
+    /// so a boundary test can place a dot product on a chosen bit pattern.
+    #[cfg(test)]
+    pub(crate) const fn raw(direction: [f64; 3]) -> Self {
+        Self(direction)
+    }
+
     /// Normalizes a finite, non-degenerate direction.
     ///
     /// # Errors

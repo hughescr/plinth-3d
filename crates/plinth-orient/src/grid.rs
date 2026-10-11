@@ -145,6 +145,79 @@ pub enum CandidateBlock {
     Fibonacci,
 }
 
+/// A candidate's provenance key: where its direction came from, named by
+/// something that survives re-numbering.
+///
+/// A [`Candidate::id`] is a position in the deduplicated vector, so one
+/// dropped direction renumbers every later id (pose-stability design, D2). The
+/// key does not move: a legacy direction and a lattice point are fixed bits,
+/// and a rest pose is named by the reference bin whose faces it averages.
+/// Diagnostics only: nothing in the search reads a key, and no recorded
+/// structure carries one, so the search record and its digest are unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CandidateKey {
+    /// Index into the legacy thirteen, `0..13`.
+    Legacy(u8),
+    /// Index of the reference bin (`0..ORIENT_REST_POSE_REFERENCE_BINS`).
+    Rest(u32),
+    /// Index into the Fibonacci lattice, `0..ORIENT_FIBONACCI_COUNT`.
+    Fib(u32),
+}
+
+impl std::fmt::Display for CandidateKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Legacy(k) => write!(f, "legacy:{k}"),
+            Self::Rest(b) => write!(f, "rest:{b}"),
+            Self::Fib(i) => write!(f, "fib:{i}"),
+        }
+    }
+}
+
+impl std::str::FromStr for CandidateKey {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let bad = || format!("{text:?} is not a candidate key (legacy:K, rest:B or fib:I)");
+        let (kind, number) = text.split_once(':').ok_or_else(bad)?;
+        match kind {
+            "legacy" => number.parse().map(Self::Legacy).map_err(|_| bad()),
+            "rest" => number.parse().map(Self::Rest).map_err(|_| bad()),
+            "fib" => number.parse().map(Self::Fib).map_err(|_| bad()),
+            _ => Err(bad()),
+        }
+    }
+}
+
+impl serde::Serialize for CandidateKey {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CandidateKey {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = <String as serde::Deserialize>::deserialize(deserializer)?;
+        text.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// One direction the grid TRIED to admit, in the order it tried, with the
+/// id it received (`None` when an earlier candidate covered it).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GridAttempt {
+    pub key: CandidateKey,
+    pub direction: UpDirection,
+    pub kept: Option<usize>,
+}
+
+/// A rest pose and the reference bin it was averaged from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RestPose {
+    pub bin: usize,
+    pub direction: UpDirection,
+}
+
 /// One candidate: its id, where it came from, the direction itself, and the
 /// selection a report would record for it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -255,6 +328,13 @@ pub struct SweepGrid {
     flat_face_poses: Vec<usize>,
     duplicates_dropped: usize,
     digest: String,
+    /// Provenance, for diagnostics only (see [`CandidateKey`]); parallel to
+    /// `candidates`.
+    keys: Vec<CandidateKey>,
+    /// Every direction the build tried to admit, kept or dropped.
+    attempts: Vec<GridAttempt>,
+    /// The rest poses before dedupe, with their reference bins.
+    rest: Vec<RestPose>,
 }
 
 impl SweepGrid {
@@ -270,14 +350,13 @@ impl SweepGrid {
     /// [`ScoreError::InvalidDirection`] if an accumulated rest-pose direction
     /// degenerates, which it can only do if a bin's faces cancel exactly.
     pub fn build(table: &OrientFaceTable, settings: GridSettings) -> Result<Self, ScoreError> {
-        let mut candidates: Vec<Candidate> = Vec::new();
-        let mut duplicates_dropped = 0_usize;
+        let mut admitted = Admitted::default();
         let cosine = settings.dedupe_cosine();
 
         // Block 0. Built through the pinned path's own rotation builder, so a
         // dense winner at one of these angles produces the same bits the pinned
         // path would.
-        for entry in LEGACY_THIRTEEN {
+        for (legacy_index, entry) in LEGACY_THIRTEEN.into_iter().enumerate() {
             let (selection, matrix) = match entry {
                 None => (BaselineSelection::Identity, None),
                 Some((axis, degrees)) => (
@@ -301,50 +380,57 @@ impl SweepGrid {
                 None => UpDirection::MODEL_UP,
                 Some(matrix) => UpDirection::new(matrix[2])?,
             };
-            push_unique(
-                &mut candidates,
-                &mut duplicates_dropped,
+            admitted.push(
                 CandidateBlock::Legacy,
+                CandidateKey::Legacy(u8::try_from(legacy_index).unwrap_or(u8::MAX)),
                 direction,
                 Some(selection),
                 cosine,
             );
         }
-        let legacy_count = candidates.len();
+        let legacy_count = admitted.candidates.len();
 
         // Block 1.
         let rest = rest_poses(table, settings)?;
-        for direction in &rest {
-            push_unique(
-                &mut candidates,
-                &mut duplicates_dropped,
+        for pose in &rest {
+            admitted.push(
                 CandidateBlock::RestPose,
-                *direction,
+                CandidateKey::Rest(u32::try_from(pose.bin).unwrap_or(u32::MAX)),
+                pose.direction,
                 None,
                 cosine,
             );
         }
-        let rest_pose_count = candidates.len() - legacy_count;
+        let rest_pose_count = admitted.candidates.len() - legacy_count;
 
         // Block 2.
-        for direction in fibonacci_directions(settings.fibonacci_count)? {
-            push_unique(
-                &mut candidates,
-                &mut duplicates_dropped,
+        for (lattice_index, direction) in fibonacci_directions(settings.fibonacci_count)?
+            .into_iter()
+            .enumerate()
+        {
+            admitted.push(
                 CandidateBlock::Fibonacci,
+                CandidateKey::Fib(u32::try_from(lattice_index).unwrap_or(u32::MAX)),
                 direction,
                 None,
                 cosine,
             );
         }
-        let fibonacci_count = candidates.len() - legacy_count - rest_pose_count;
+        let fibonacci_count = admitted.candidates.len() - legacy_count - rest_pose_count;
+        let Admitted {
+            candidates,
+            keys,
+            attempts,
+            duplicates_dropped,
+        } = admitted;
 
         // The flat faces, and the pose that rests each one on the plate,
         // resolved to the candidate that covers it — the EARLIEST within the
         // dedupe tolerance, which is the one dedupe kept (a flat face resting
         // at +Z is identity, the legacy candidate 0) — ascending, once each.
         // No candidate is added: every such pose is already a rest pose.
-        let flat = flat_faces(table, &rest, cosine);
+        let rest_directions: Vec<UpDirection> = rest.iter().map(|pose| pose.direction).collect();
+        let flat = flat_faces(table, &rest_directions, cosine);
         let mut poses: Vec<usize> = flat
             .iter()
             .filter_map(|face_down| covering(&candidates, *face_down, cosine))
@@ -363,7 +449,31 @@ impl SweepGrid {
             flat_face_poses: poses,
             duplicates_dropped,
             digest,
+            keys,
+            attempts,
+            rest,
         })
+    }
+
+    /// The provenance key of every candidate, parallel to
+    /// [`Self::candidates`]. Diagnostics only.
+    #[must_use]
+    pub fn keys(&self) -> &[CandidateKey] {
+        &self.keys
+    }
+
+    /// Every direction the build tried to admit, in the order it tried, kept
+    /// or dropped. Diagnostics only.
+    #[must_use]
+    pub fn attempts(&self) -> &[GridAttempt] {
+        &self.attempts
+    }
+
+    /// The rest poses before dedupe, each with its reference bin.
+    /// Diagnostics only.
+    #[must_use]
+    pub fn rest_pose_entries(&self) -> &[RestPose] {
+        &self.rest
     }
 
     #[must_use]
@@ -419,34 +529,57 @@ impl SweepGrid {
     }
 }
 
-/// Appends a direction unless an EARLIER candidate already covers it.
-fn push_unique(
-    candidates: &mut Vec<Candidate>,
-    duplicates_dropped: &mut usize,
-    block: CandidateBlock,
-    direction: UpDirection,
-    selection: Option<BaselineSelection>,
-    cosine: f64,
-) {
-    let u = direction.get();
-    for existing in candidates.iter() {
-        let v = existing.direction.get();
-        if vec3::dot(u, v) > cosine {
-            *duplicates_dropped += 1;
-            return;
+/// The candidates admitted so far, with the provenance diagnostics read off
+/// the same pass.
+#[derive(Default)]
+struct Admitted {
+    candidates: Vec<Candidate>,
+    keys: Vec<CandidateKey>,
+    attempts: Vec<GridAttempt>,
+    duplicates_dropped: usize,
+}
+
+impl Admitted {
+    /// Appends a direction unless an EARLIER candidate already covers it.
+    fn push(
+        &mut self,
+        block: CandidateBlock,
+        key: CandidateKey,
+        direction: UpDirection,
+        selection: Option<BaselineSelection>,
+        cosine: f64,
+    ) {
+        let u = direction.get();
+        for existing in &self.candidates {
+            let v = existing.direction.get();
+            if vec3::dot(u, v) > cosine {
+                self.duplicates_dropped += 1;
+                self.attempts.push(GridAttempt {
+                    key,
+                    direction,
+                    kept: None,
+                });
+                return;
+            }
         }
+        let id = self.candidates.len();
+        self.candidates.push(Candidate {
+            id,
+            block,
+            direction,
+            selection: selection.unwrap_or_else(|| up_selection(direction)),
+        });
+        self.keys.push(key);
+        self.attempts.push(GridAttempt {
+            key,
+            direction,
+            kept: Some(id),
+        });
     }
-    let id = candidates.len();
-    candidates.push(Candidate {
-        id,
-        block,
-        direction,
-        selection: selection.unwrap_or_else(|| up_selection(direction)),
-    });
 }
 
 /// The earliest candidate within the dedupe tolerance of `direction` — the one
-/// [`push_unique`] kept for it — or `None` when nothing covers it.
+/// [`Admitted::push`] kept for it — or `None` when nothing covers it.
 fn covering(candidates: &[Candidate], direction: UpDirection, cosine: f64) -> Option<usize> {
     let u = direction.get();
     candidates
@@ -533,7 +666,7 @@ pub fn fibonacci_directions(count: usize) -> Result<Vec<UpDirection>, ScoreError
 fn rest_poses(
     table: &OrientFaceTable,
     settings: GridSettings,
-) -> Result<Vec<UpDirection>, ScoreError> {
+) -> Result<Vec<RestPose>, ScoreError> {
     let reference = fibonacci_directions(settings.reference_bins)?;
     let bins = reference.len();
     let mut area = vec![0.0_f64; bins];
@@ -583,7 +716,7 @@ fn rest_poses(
         // A bin whose faces cancel exactly has no pose; it is skipped rather
         // than normalized into a direction nothing supports.
         if let Ok(direction) = UpDirection::new(accumulated[bin]) {
-            poses.push(direction);
+            poses.push(RestPose { bin, direction });
         }
     }
     Ok(poses)
@@ -732,6 +865,42 @@ mod tests {
         );
     }
 
+    /// The dedupe test is `dot > cosine`, STRICT: a direction exactly on the
+    /// radius is kept, one ulp inside it is dropped. The provenance record
+    /// (`attempts`, `keys`) tells the two apart and agrees with the decision.
+    #[test]
+    fn the_dedupe_radius_is_strict_and_the_attempt_log_records_each_decision() {
+        let cosine = GridSettings::registered().unwrap().dedupe_cosine();
+        let x = (1.0 - cosine * cosine).sqrt();
+        for (z, kept) in [
+            (cosine, true),
+            (f64::from_bits(cosine.to_bits() + 1), false),
+            (f64::from_bits(cosine.to_bits() - 1), true),
+        ] {
+            let mut admitted = Admitted::default();
+            admitted.push(
+                CandidateBlock::Legacy,
+                CandidateKey::Legacy(0),
+                UpDirection::MODEL_UP,
+                Some(BaselineSelection::Identity),
+                cosine,
+            );
+            admitted.push(
+                CandidateBlock::Fibonacci,
+                CandidateKey::Fib(9),
+                UpDirection::raw([x, 0.0, z]),
+                None,
+                cosine,
+            );
+            assert_eq!(admitted.candidates.len(), if kept { 2 } else { 1 }, "z = {z:e}");
+            assert_eq!(admitted.duplicates_dropped, usize::from(!kept));
+            assert_eq!(admitted.attempts.len(), 2, "the dropped direction is still logged");
+            assert_eq!(admitted.attempts[1].key, CandidateKey::Fib(9));
+            assert_eq!(admitted.attempts[1].kept, kept.then_some(1));
+            assert_eq!(admitted.keys.len(), admitted.candidates.len());
+        }
+    }
+
     /// A cube's six faces are all flat faces, and all six resting poses are
     /// named for the escort; the one that rests the authored bottom down is
     /// identity, the legacy candidate that already covers it.
@@ -751,7 +920,7 @@ mod tests {
         let poses = rest_poses(&table(), settings).unwrap();
         assert_eq!(poses.len(), 6, "a cube has exactly six face-down poses");
         for pose in &poses {
-            let u = pose.get();
+            let u = pose.direction.get();
             let axes = u.iter().filter(|value| value.abs() > 0.5).count();
             assert_eq!(axes, 1, "a cube rest pose is an axis direction: {u:?}");
         }
