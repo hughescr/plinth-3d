@@ -561,3 +561,80 @@ fn a_declared_survivor_is_judged_by_n3_and_a_relocated_contact_alone_passes() {
     }, declare);
     assert_eq!(row(&run, "N3").status, Status::Fail, "{}", show(&run));
 }
+
+/// The reference's first chain with its member r2 split 0.30 mm below its top (r2 above, r3 below).
+fn split_chain() -> SynthFile {
+    let mut r = base();
+    let old = r.models[0].records[2].clone();
+    assert_eq!(old.kind, RecordKind::Member, "fixture layout");
+    let mut mid = old.start_mm;
+    mid[2] -= 0.30;
+    r.models[0].records[2] = SynthRecord::new(RecordKind::Member, old.start_mm, mid, old.r_start, old.r_start).with_matching_soup();
+    r.models[0].records.insert(3, SynthRecord::new(RecordKind::Member, mid, old.end_mm, old.r_end, old.r_end).with_matching_soup());
+    r
+}
+
+/// The split chain reshaped: moved `dx` mm sideways (records 0 to 4), its internal joint moved
+/// `dz` mm down, and the upper segment's radius scaled by `factor`; meshes follow their headers.
+fn reshaped(r: &SynthFile, dx: f64, dz: f64, factor: Option<f64>) -> SynthFile {
+    let mut c = r.clone();
+    if dx != 0.0 {
+        for record in 0..=4 {
+            apply(&mut c, &Mutation::Move { record, delta: [dx, 0.0, 0.0] });
+        }
+    }
+    if let Some(f) = factor {
+        apply(&mut c, &Mutation::ScaleRecord { record: 2, factor: f });
+    }
+    c.models[0].records[2].end_mm[2] -= dz;
+    c.models[0].records[3].start_mm[2] -= dz;
+    for i in [2, 3] {
+        c.models[0].records[i].soup = c.models[0].records[i].clone().with_matching_soup().soup;
+    }
+    c
+}
+
+/// Review of 2b83dc1 (P1): a declared survivor's chain relocated 0.101 mm with its internal joint
+/// moved 0.201 mm down and the upper segment thinned at constant volume (section 0.489 -> 0.378 mm,
+/// -22.6 %). No record of the survivor's path matches the two reshaped members, even after the
+/// chain's shift; they were dropped and N3 passed. Every member is now judged, by height when no
+/// record matches it.
+#[test]
+fn a_reshaped_survivor_path_that_got_thinner_fails_n3() {
+    let declare = |a: &mut Args| {
+        a.declared = Some(plinth_audit::compare::classify::DeclaredClass::PlanChanged);
+        a.declared_changes.contact_merge = true;
+    };
+    let r = split_chain();
+    let factor = (0.30f64 / (0.30 + 0.201)).sqrt();
+    let run = run_pair("n3-reshape-thin", &r, &reshaped(&r, 0.101, 0.201, Some(factor)), declare);
+    assert_eq!(row(&run, "N2").status, Status::Pass, "N2 excuses the relocation:\n{}", show(&run));
+    assert_eq!(row(&run, "N3").status, Status::Fail, "the reshaped path is thinner:\n{}\n{:?}", show(&run), row(&run, "N3").detail);
+    assert_eq!(run.outcome.verdict, Verdict::Regression);
+    // Control: the same reshape with the radii kept is the same path in a new place.
+    let run = run_pair("n3-reshape-same", &r, &reshaped(&r, 0.101, 0.201, None), declare);
+    assert_eq!(row(&run, "N3").status, Status::Pass, "{}\n{:?}", show(&run), row(&run, "N3").detail);
+    // The same reshape on a contact that did not move (matched within 0.1 mm) is judged the same way.
+    let run = run_pair("n3-reshape-matched", &r, &reshaped(&r, 0.0, 0.201, Some(factor)), |_| {});
+    assert_eq!(row(&run, "N3").status, Status::Fail, "{}\n{:?}", show(&run), row(&run, "N3").detail);
+}
+
+/// Review of 2b83dc1 (P2): a detached member (floating in both files) made 0.10 mm longer and
+/// thinner at constant volume floats 20 new pixels of material the reference never had. The
+/// same-piece growth allowance excused it, even with every noise allowance off (`--no-flicker`).
+#[test]
+fn a_floating_member_made_longer_is_new_floating_material_with_or_without_the_allowance() {
+    let mut r = base();
+    r.models[0].records.push(SynthRecord::new(RecordKind::Member, [3.0, 3.0, -3.0], [3.0, 3.0, -2.0], 0.055, 0.055).with_matching_soup());
+    let mut c = r.clone();
+    let last = c.models[0].records.last_mut().expect("record");
+    last.end_mm[2] += 0.10;
+    last.r_start /= 1.10f64.sqrt();
+    last.r_end = last.r_start;
+    last.soup = last.clone().with_matching_soup().soup;
+    for strict in [true, false] {
+        let run = run_pair(&format!("h1-extend-{strict}"), &r, &c, |a| a.no_flicker = strict);
+        assert_eq!(row(&run, "H1").status, Status::Fail, "no_flicker={strict}:\n{}", show(&run));
+        assert_eq!(run.outcome.verdict, Verdict::Regression, "no_flicker={strict}");
+    }
+}

@@ -9,6 +9,7 @@ use super::matching::{self, diff_items_with, match_records, match_tips};
 use super::side::{FileFacts, Item, ModelFacts, ModelRaster, RecInfo};
 use super::verdict::{Classes, Row, Status, Verdict};
 use crate::json::Json;
+use crate::reader::RecordKind;
 use crate::vec3::{self as v, V3};
 
 /// How the comparison is run.
@@ -214,6 +215,72 @@ fn seg_dist(p: V3, a: V3, b: V3) -> f64 {
     let l2 = v::dot(ab, ab);
     let t = if l2 > 0.0 { (v::dot(v::sub(p, a), ab) / l2).clamp(0.0, 1.0) } else { 0.0 };
     v::dist(p, v::add(a, v::mul(ab, t)))
+}
+
+/// Section radius of a frustum record at height `z`: its header radius there (linear along the
+/// axis), scaled by the ratio of the emitted mesh's smallest section to the header's smallest
+/// radius. A level record has one height and answers with its smallest section.
+fn sec_at(r: &RecInfo, z: f64) -> Option<f64> {
+    const Z_EPS_MM: f64 = 1.0e-6;
+    let sec = r.sec_r?;
+    let (z0, z1) = (r.a[2], r.b[2]);
+    if z < z0.min(z1) - Z_EPS_MM || z > z0.max(z1) + Z_EPS_MM {
+        return None;
+    }
+    if (z1 - z0).abs() <= Z_EPS_MM {
+        return Some(sec);
+    }
+    let base = r.ra.min(r.rb);
+    let scale = if base > 0.0 { sec / base } else { 1.0 };
+    let t = ((z - z0) / (z1 - z0)).clamp(0.0, 1.0);
+    Some(scale * (r.ra + (r.rb - r.ra) * t))
+}
+
+/// The thinnest section of a path (its members `members`) at height `z`, and the record that has it.
+fn profile_at(recs: &[RecInfo], members: &[usize], z: f64) -> Option<(f64, usize)> {
+    members.iter().filter_map(|&m| sec_at(&recs[m], z).map(|s| (s, m))).min_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)))
+}
+
+/// The worst height of a member judged by height (N3).
+struct HeightJudgement {
+    z: f64,
+    from: f64,
+    to: f64,
+    ref_rec: usize,
+    cand_rec: usize,
+}
+
+/// N3 by height: record `r`, a member of one path that no record of the other path matches, judged
+/// at each of its heights that both paths reach. At each height the reference path's thinnest
+/// section there is held against the candidate path's thinnest, the candidate taking the thickest
+/// of its values within [`k::N3_JOINT_SHIFT_MM`] above and below (a joint that moved by less than
+/// the match tolerance is the same joint). The worst height is returned; when no height of `r`
+/// has a section in both paths, the reason.
+fn height_judgement(ra: &[RecInfo], pa: &[usize], rb: &[RecInfo], pb: &[usize], r: &RecInfo) -> Result<HeightJudgement, String> {
+    let span = |recs: &[RecInfo], v: &[usize]| {
+        v.iter().filter(|&&m| recs[m].sec_r.is_some()).fold((f64::MAX, f64::MIN), |(lo, hi), &m| (lo.min(recs[m].a[2].min(recs[m].b[2])), hi.max(recs[m].a[2].max(recs[m].b[2]))))
+    };
+    let ((la, ha), (lb, hb)) = (span(ra, pa), span(rb, pb));
+    let (rlo, rhi) = (r.a[2].min(r.b[2]), r.a[2].max(r.b[2]));
+    let lo = rlo.max(la).max(lb);
+    let hi = rhi.min(ha).min(hb);
+    let heights = || format!("its heights {rlo:.3}..{rhi:.3} mm; reference path {la:.3}..{ha:.3}, candidate path {lb:.3}..{hb:.3}");
+    if lo > hi {
+        return Err(format!("outside the heights both paths reach: {}", heights()));
+    }
+    let step = k::N3_HEIGHT_STEP_MM;
+    let w = (k::N3_JOINT_SHIFT_MM / step).round() as i64;
+    let n = ((hi - lo) / step).ceil() as usize;
+    let mut best: Option<HeightJudgement> = None;
+    for s in 0..=n {
+        let z = (lo + step * s as f64).min(hi);
+        let Some((from, ref_rec)) = profile_at(ra, pa, z).filter(|x| x.0 > 0.0) else { continue };
+        let Some((to, cand_rec)) = (-w..=w).filter_map(|d| profile_at(rb, pb, z + step * d as f64)).max_by(|x, y| x.0.total_cmp(&y.0).then(y.1.cmp(&x.1))) else { continue };
+        if best.as_ref().is_none_or(|b| to / from < b.to / b.from) {
+            best = Some(HeightJudgement { z, from, to, ref_rec, cand_rec });
+        }
+    }
+    best.ok_or_else(|| format!("no height with a section in both paths: {}", heights()))
 }
 
 fn status_of(fail: bool, ind: bool) -> Status {
@@ -661,7 +728,7 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
             // make material. A planted float is new material (none of it inside the band); a cut that
             // matters removes enough material to show as drift.
             let drift_small = drift_summary.is_some_and(|(vx, big)| vx <= k::EQ_DRIFT_VOXELS && big < k::EQ_DRIFT_BLOB_VOXELS);
-            let inside: Vec<i64> = if drift_small { nf.iter().map(|x| x.inside).collect() } else { vec![0; new.len()] };
+            let inside: Vec<i64> = nf.iter().map(|x| x.inside).collect();
             {
                 let mut pj = Json::Arr(Vec::new());
                 for p in pieces.iter().filter(|p| p.added > 0).take(200) {
@@ -677,10 +744,14 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
             }
             // A piece that floats in both files is not new. A 3D piece of the candidate's floating
             // material is the reference's piece when at least `H1_PIECE_MATCH_MIN_VOX` of its voxels
-            // lie within the band of the reference's floating material; the voxels beyond the band
-            // are then the piece's growth (its break moved), and they are excused while the growth
-            // stays within max(64 voxels, 10 % of the part it shares with the reference). A piece
-            // that grew more is floating material the reference did not have: it is judged as new.
+            // lie within the band of the reference's floating material and its growth stays within
+            // max(64 voxels, 10 % of the part it shares with the reference). The growth (its break
+            // moved) is excused only as noise is: under the noise allowance (`--no-flicker` turns it
+            // off) and only where it is material the reference already cured, within the band (the
+            // same old-material rule as the flicker below). Floating material the reference did not
+            // have at all (a detached member made longer) is new, whatever piece it grows from.
+            let allowance = o.noise.h1_old_fraction > 0.0;
+            let old_material = |x: &band::NewFloat| x.inside as f64 >= o.noise.h1_old_fraction * x.comp.px as f64;
             let piece_same: Vec<bool> = pieces
                 .iter()
                 .map(|p| {
@@ -688,12 +759,8 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
                     shared >= k::H1_PIECE_MATCH_MIN_VOX && p.added as f64 <= (k::H1_FLOAT_TOTAL as f64).max(k::H1_GROWTH_FRACTION * shared as f64)
                 })
                 .collect();
-            let in_same_piece = |x: &band::NewFloat| piece_same.get(x.piece).copied().unwrap_or(false);
-            let excused: Vec<bool> = nf
-                .iter()
-                .zip(&inside)
-                .map(|(x, &i)| in_same_piece(x) || (i as f64 >= o.noise.h1_old_fraction * x.comp.px as f64 && drift_small && o.noise.h1_old_fraction > 0.0))
-                .collect();
+            let in_same_piece = |x: &band::NewFloat| allowance && old_material(x) && piece_same.get(x.piece).copied().unwrap_or(false);
+            let excused: Vec<bool> = nf.iter().map(|x| in_same_piece(x) || (allowance && drift_small && old_material(x))).collect();
             let piece_excused_n = nf.iter().filter(|x| in_same_piece(x)).count();
             ev.set("h1_pieces_floating_in_both", Json::usize(piece_same.iter().filter(|&&s| s).count()));
             {
@@ -1092,14 +1159,19 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
         let mut evaluated = 0usize;
         let mut n3_ev: Vec<(f64, f64)> = Vec::new();
         // Each member on a path is held to its own section: one minimum over the whole path
-        // lets a narrow unchanged taper hide the thinning of a thicker member. The path
-        // minimum is kept as well, for members that no record of the other file matches.
+        // lets a narrow unchanged taper hide the thinning of a thicker member. A member that no
+        // record of the other path matches is judged by height (`height_judgement`), never dropped.
+        // The path minimum is kept as well.
         let rec_match = match_records(&a.recs, &b.recs);
         let mut seen_member = std::collections::HashSet::new();
         let n3_pairs: Vec<(usize, usize, f64)> = matched.iter().copied().chain(merge_pairs.iter().copied()).collect();
         let n_matched = matched.len();
         let mut survivor_unassessed = 0usize;
         let mut survivor_evaluated = 0usize;
+        // Paths with a reference member that could be judged neither by a matching record nor by
+        // height, and the members judged by height.
+        let (mut unassessed_paths, mut members_unassessed, mut members_by_height) = (0usize, 0usize, 0usize);
+        let mut unassessed_det: Vec<String> = Vec::new();
         for (pair_ix, &(i, j, _)) in n3_pairs.iter().enumerate() {
             let is_survivor = pair_ix >= n_matched;
             let (Some(x), Some(y)) = (a.path_sec_r.get(&i), b.path_sec_r.get(&j)) else {
@@ -1114,6 +1186,7 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
             if is_survivor {
                 survivor_evaluated += 1;
             }
+            let mut path_unassessed = false;
             let margin = b.audit.i3_margin.get(&j).copied();
             let waivable = margin.is_some_and(|m| m >= 1.5);
             let mut tip_thin = false;
@@ -1140,39 +1213,71 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
                 }
             };
             judge(*x, *y, &|| format!("contact r{j} at {}: path minimum section {x:.4} -> {y:.4} mm ({:+.1} %), I3 margin {}", p3(b.recs[j].mid), 100.0 * (y / x - 1.0), margin.map_or("unmeasured".into(), |m| format!("{m:.2}x"))), None);
-            let bset: std::collections::HashSet<usize> = b.path_members.get(&j).map(|v| v.iter().copied().collect()).unwrap_or_default();
-            // A survivor's chain moved with its contact, so a member of the reference path has no
-            // record within 0.1 mm. It answers to the member of the survivor's path of the same
-            // kind that lies nearest once the chain's own shift (contact to contact) is taken out.
-            let shift = if is_survivor { Some(v::sub(b.recs[j].mid, a.recs[i].mid)) } else { None };
-            let mut taken_n: std::collections::HashSet<usize> = std::collections::HashSet::new();
-            for &m in a.path_members.get(&i).map(Vec::as_slice).unwrap_or_default() {
-                let direct = rec_match[m].filter(|n| bset.contains(n));
-                let relocated = || {
-                    let s = shift?;
-                    let ra = &a.recs[m];
-                    let (pa, pb) = (v::add(ra.a, s), v::add(ra.b, s));
-                    bset.iter()
-                        .copied()
-                        .filter(|n| !taken_n.contains(n) && b.recs[*n].kind == ra.kind)
-                        .map(|n| {
-                            let rb = &b.recs[n];
-                            let cost = (v::dist(pa, rb.a) + v::dist(pb, rb.b)).min(v::dist(pa, rb.b) + v::dist(pb, rb.a));
-                            (cost, n)
-                        })
-                        .filter(|(c, _)| *c <= 2.0 * k::MATCH_MM)
-                        .min_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)))
-                        .map(|(_, n)| n)
+            let margin_txt = || margin.map_or("unmeasured".into(), |q| format!("{q:.2}x"));
+            let (pa, pb): (&[usize], &[usize]) = (a.path_members.get(&i).map(Vec::as_slice).unwrap_or_default(), b.path_members.get(&j).map(Vec::as_slice).unwrap_or_default());
+            let bset: std::collections::HashSet<usize> = pb.iter().copied().collect();
+            // 1. A member of the reference path answers to the record of the candidate path that
+            //    matches it within 0.1 mm at both ends.
+            let mut covered_b: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            let mut open_a: Vec<usize> = Vec::new();
+            for &m in pa {
+                let Some(n) = rec_match[m].filter(|n| bset.contains(n)) else {
+                    open_a.push(m);
+                    continue;
                 };
-                let Some(n) = direct.or_else(relocated) else { continue };
-                if is_survivor {
-                    taken_n.insert(n);
-                }
+                covered_b.insert(n);
                 let (Some(xr), Some(yr)) = (a.recs[m].sec_r, b.recs[n].sec_r) else { continue };
                 if xr <= 0.0 {
                     continue;
                 }
-                judge(xr, yr, &|| format!("member r{n} at {} on the path of contact r{j}: section {xr:.4} -> {yr:.4} mm ({:+.1} %), I3 margin {}", p3(b.recs[n].mid), 100.0 * (yr / xr - 1.0), margin.map_or("unmeasured".into(), |q| format!("{q:.2}x"))), Some(n));
+                judge(xr, yr, &|| format!("member r{n} at {} on the path of contact r{j}: section {xr:.4} -> {yr:.4} mm ({:+.1} %), I3 margin {}", p3(b.recs[n].mid), 100.0 * (yr / xr - 1.0), margin_txt()), Some(n));
+            }
+            // 2. The contact frustum answers to the contact frustum (it moves with its contact).
+            let taper = |recs: &[RecInfo], v: &[usize]| v.first().copied().filter(|&t| recs[t].kind == RecordKind::ContactTaper);
+            let tapers = taper(&a.recs, pa).zip(taper(&b.recs, pb));
+            if let Some((tm, tn)) = tapers {
+                if open_a.contains(&tm) && !covered_b.contains(&tn) {
+                    open_a.retain(|&m| m != tm);
+                    covered_b.insert(tn);
+                    if let (Some(xr), Some(yr)) = (a.recs[tm].sec_r, b.recs[tn].sec_r) {
+                        if xr > 0.0 {
+                            judge(xr, yr, &|| format!("contact frustum r{tn} of contact r{j} (reference r{tm} of contact r{i}): section {xr:.4} -> {yr:.4} mm ({:+.1} %), I3 margin {}", 100.0 * (yr / xr - 1.0), margin_txt()), Some(tn));
+                        }
+                    }
+                }
+            }
+            // 3. Every other member, of either path, that no record of the other path matches is
+            //    judged by height: the thinnest section of each whole path (contact frustum
+            //    included) at the member's heights (a reshaped chain: a joint that moved, a member
+            //    split or thinned). No member is dropped: a reference member with no candidate
+            //    section at any of its heights leaves the path UNASSESSED (N3 INDETERMINATE).
+            let open_b: Vec<usize> = pb.iter().copied().filter(|n| !covered_b.contains(n)).collect();
+            if !open_a.is_empty() || !open_b.is_empty() {
+                let (ta, tb) = tapers.map_or((None, None), |(x, y)| (Some(x), Some(y)));
+                let jobs = open_a.iter().filter(|&&m| Some(m) != ta).map(|&m| (true, m)).chain(open_b.iter().filter(|&&n| Some(n) != tb).map(|&n| (false, n)));
+                for (on_ref, rec) in jobs {
+                    let r = if on_ref { &a.recs[rec] } else { &b.recs[rec] };
+                    match height_judgement(&a.recs, pa, &b.recs, pb, r) {
+                        Ok(h) => {
+                            members_by_height += 1;
+                            let (z, from, to, ma, nb) = (h.z, h.from, h.to, h.ref_rec, h.cand_rec);
+                            let side = if on_ref { "reference member" } else { "candidate member" };
+                            judge(from, to, &|| format!("{side} r{rec} (no record of the other path matches it) judged by height on the path of contact r{j} (reference contact r{i}): at z {z:.3} the thinnest section {from:.4} (reference r{ma}) -> {to:.4} mm (candidate r{nb}) ({:+.1} %), I3 margin {}", 100.0 * (to / from - 1.0), margin_txt()), Some(nb));
+                        }
+                        Err(why) if on_ref => {
+                            members_unassessed += 1;
+                            path_unassessed = true;
+                            unassessed_det.push(format!("UNASSESSED reference member r{rec} ({}, {:.3} mm) on the path of contact r{i} (candidate contact r{j}): {why}", r.kind.label(), r.len));
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+            if path_unassessed {
+                unassessed_paths += 1;
+                if is_survivor {
+                    survivor_unassessed += 1;
+                }
             }
             if tip_waived && !tip_thin {
                 waived += 1;
@@ -1200,9 +1305,17 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
             m.set("unassessed", Json::usize(survivor_unassessed));
             m
         });
+        ev.set("n3_members_by_height", {
+            let mut m = Json::obj();
+            m.set("judged", Json::usize(members_by_height));
+            m.set("reference_members_unassessed", Json::usize(members_unassessed));
+            m.set("paths_unassessed", Json::usize(unassessed_paths));
+            m
+        });
+        let n3_ind = (evaluated == 0 && !matched.is_empty()) || survivor_unassessed > 0 || unassessed_paths > 0;
         rows.push(
-            Row::new(&format!("N3{sfx}"), "member sections along each contact's path (shared trunks included)", status_of(!thin.is_empty(), (evaluated == 0 && !matched.is_empty()) || survivor_unassessed > 0), format!("{} path or member sections (of {evaluated} evaluated matched paths, {survivor_evaluated} of them to declared-merge survivors; {survivor_unassessed} survivor paths could not be measured) more than 15 % thinner without an I3 margin of 1.5x ({waived} paths waived by margin); worst ratio {}", thin.len(), if worst_ratio == f64::MAX { "n/a".into() } else { format!("{worst_ratio:.3}") }), "no path more than 15 % thinner unless its I3 margin stays at 1.5x; a declared survivor's path is judged like a matched one")
-                .with_detail(thin.into_iter().take(o.lim(8)).collect()),
+            Row::new(&format!("N3{sfx}"), "member sections along each contact's path (shared trunks included)", status_of(!thin.is_empty(), n3_ind), format!("{} path or member sections (of {evaluated} evaluated matched paths, {survivor_evaluated} of them to declared-merge survivors; {survivor_unassessed} survivor paths could not be measured or judged) more than 15 % thinner without an I3 margin of 1.5x ({waived} paths waived by margin); {members_by_height} members with no matching record judged by height, {members_unassessed} reference members on {unassessed_paths} paths could not be judged; worst ratio {}", thin.len(), if worst_ratio == f64::MAX { "n/a".into() } else { format!("{worst_ratio:.3}") }), "no path more than 15 % thinner unless its I3 margin stays at 1.5x; a declared survivor's path is judged like a matched one; a member no record matches is judged by the thinnest section at its heights, and one that cannot be is INDETERMINATE")
+                .with_detail(thin.into_iter().take(o.lim(8)).chain(unassessed_det.into_iter().take(o.lim(4))).collect()),
         );
         // N4 thin joins.
         let n4_ind = (open && consumer_unverified) || ((a.floating.iter().any(|f| in_bco_junction(&a.name, f, &a.grid)) || b.floating.iter().any(|f| in_bco_junction(&b.name, f, &b.grid))) && consumer_unverified);

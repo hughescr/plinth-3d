@@ -139,9 +139,12 @@ decisions O1-O4 of 2026-10-10). Reads only the emitted bytes, the engine `.log` 
    - **H1 matches floating pieces, not components.** The floating material of each file is a raster.
      Candidate floating voxels more than one voxel from the reference's floating voxels are new; a 3D
      piece that shares at least 8 voxels with the reference's floating material is the reference's
-     piece, and its growth (its break moved) is excused up to max(64 voxels, 10 % of the shared part).
-     A piece that grew more, and a piece the reference does not have, are judged by the old limits
-     (a component of 16 px, 64 voxels in all).
+     piece, and its growth (its break moved) is excused up to max(64 voxels, 10 % of the shared part),
+     but only under the noise allowance (`--no-flicker` turns it off) and only for growth made of
+     material the reference already cured, within the band (the flicker rule's old-material test). A
+     detached member made longer floats material the reference never had: it is new, whatever piece
+     it grows from. A piece that grew more, and a piece the reference does not have, are judged by the
+     old limits (a component of 16 px, 64 voxels in all).
    - **T0 reads the mesh against its header with the model's cut left out.** A record that ends in
      the model is trimmed by it: mesh vertices on the model surface, and a header end inside the
      model, are the model's and not a disagreement. A mesh that covers its header (the junction hulls
@@ -166,6 +169,16 @@ decisions O1-O4 of 2026-10-10). Reads only the emitted bytes, the engine `.log` 
      (path minimum and members) like a 0.1 mm match, so a relocated contact cannot hide a thinner
      path; a survivor whose path cannot be measured makes N3 INDETERMINATE. `bench.sh --declare-change`
      passes both flags.
+   - **N3 drops no path member.** On every judged path (a 0.1 mm match or a declared survivor) a
+     member answers to the record of the other path that matches it within 0.1 mm at both ends; the
+     contact frustum answers to the contact frustum. Any other member, of either path (a joint that
+     moved, a member split, reshaped or thinned), is judged by height: at each of its heights, the
+     thinnest section of the reference path there against the thinnest of the candidate path, the
+     candidate taking its thickest value within 0.05 mm above or below (a joint that moved by less
+     than the match tolerance is the same joint). A section is the header radius at that height,
+     scaled by the emitted mesh's own smallest section. A reference member at heights the candidate
+     path does not reach (the path now ends on the model, or on another support, higher up) cannot be
+     judged: N3 is INDETERMINATE and lists it as UNASSESSED.
    - **Triage tools.** `--full-listing` lists every item behind every row (the default keeps the first
      few) and says, for each audit item, whether the design changed beside it and, for each
      floating piece, whether the reference floats it and which records exist in one file only
