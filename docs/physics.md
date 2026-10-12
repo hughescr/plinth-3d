@@ -585,9 +585,10 @@ pass that applies it):
   lowering therefore plans the hulls on the field as the old law drew it
   (`adapter::hull_reference_arms`, from `CertifiedHead::today_radius_mm`) and keeps those
   records bit for bit (`lower_sweep_arms_with_hull_reference`, `junction::keep_planned_hulls`).
-  The shaft of an arm a hull joins is the arm's own outside the junction's arcs and the old
-  field's inside them, and it meets each arc on the radius the hull ring has. A reference whose
-  shafts do not line up with the arms' is not used, and the lowering warns.
+  The shaft of an arm a hull cuts is the arm's own outside the junction's arcs (its frusta and
+  cones are not reshaped, so load-step cones keep their slope) and the old field's thin run
+  inside them. A filled junction edits no shaft. A reference whose shafts do not line up with
+  the arms' is not used, and the lowering warns.
 * **Report, never refuse.** The log prints the largest certified demand over the drawn chords and
   warns when one exceeds `1 + 1e-9`. The link-overstress warning is read at the link end that is
   drawn and says when the joint is sized for what the link can pass.

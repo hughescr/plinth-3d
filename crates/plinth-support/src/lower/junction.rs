@@ -80,10 +80,10 @@ pub(super) struct JunctionOutcome {
     /// The hull records to place right after an arm's last record.
     pub hulls: Vec<Vec<SupportPrimitive>>,
     /// Per arm, the arcs of its shaft (in the arm's own frame, from the first
-    /// frustum's start) that the junctions made here edit or read: the host arc
-    /// a hull replaces, the branch end it shortens, the host sections and the
-    /// branch end a filled hull's rings stand on. [`keep_planned_hulls`] keeps
-    /// the shaft inside them as this pass left it.
+    /// frustum's start) that the junctions made here replace: the host arc a
+    /// hull replaces and the branch end it shortens. A filled junction edits no
+    /// shaft and has none. [`keep_planned_hulls`] puts the shaft inside them, as
+    /// this pass left it, into another field's shaft.
     pub windows: Vec<Vec<(f64, f64)>>,
     pub hulled: usize,
     /// Junctions the host could not be cut for (crowded by an earlier hull, or the
@@ -562,13 +562,7 @@ pub(super) fn hull_junctions(
         if let Some(why) = skip {
             if let Some(record) = fill_rings.record(rules.sides) {
                 outcome.hulls[a].push(record);
-                // The host sections the rings stand on, and the branch's last
-                // frustum whose end ring is one of them, are read as they are.
-                outcome.windows[h].push((
-                    s_k - fill_rings.above.unwrap_or(0.0),
-                    s_k + fill_rings.below.unwrap_or(0.0),
-                ));
-                outcome.windows[a].push((frame_a.arc(pt(last.start_mm)), frame_a.arc(pt(last.end_mm))));
+                // A filled junction edits no shaft: no window.
                 outcome.filled += 1;
             } else {
                 match why {
@@ -593,11 +587,16 @@ const ARC_EPSILON_MM: f64 = 1.0e-9;
 /// pull-backs and rings, and the hull mesh moves with them. This runs the pass
 /// on the REFERENCE field (`reference_*`, the arms as the old sizing drew
 /// them) and returns its outcome with every hull record as it made it. The
-/// shaft of each arm a junction edited or read is the arm's own, drawn from
-/// `primitives`, except inside the junction's arcs ([`JunctionOutcome::windows`]),
-/// where it is the reference's, as the pass left it. Where the arm's own shaft
-/// meets a window its radius is the reference's there, so the shaft stops on
-/// the radius its hull ring has.
+/// shaft of each arm a junction cut is the arm's own, drawn from `primitives`,
+/// except inside the junction's arcs ([`JunctionOutcome::windows`]), where it is
+/// the reference's, as the pass left it (the thin run that replaces a dropped
+/// collar). The arm's own frusta are not reshaped to meet a ring: a piece of the
+/// reference inside an arc starts on the arm's radius at the arc, and the arm
+/// stops at the arc's end with its own radius, so the arm's cones keep the slope
+/// they were drawn with and the hull ring and the arm differ by whatever the
+/// two radii differ by there (the ledger around a junction is kept at today's
+/// radius, so by nothing but the chord the fit draws). A filled junction edits
+/// no shaft.
 ///
 /// `None` when an arm that a junction edits has no shaft here, or its shaft is
 /// not on the reference's line: nothing of the reference is used then.
@@ -717,7 +716,12 @@ fn chain_radius_at(chain: &[SupportPrimitive], arcs: &[(f64, f64)], x: f64, star
 }
 
 /// The shaft `real` outside every window and `edited` (the reference's, as the
-/// junction pass left it) inside: one chain, top-down.
+/// junction pass left it) inside: one chain, top-down. The arm's own frusta are
+/// never touched: where a window meets one, the reference's piece inside the
+/// window starts (or ends) on the arm's radius there, so the chain is
+/// continuous and the arm's own cones keep the slope they were drawn with. The
+/// hull ring is the reference's; the arm meets it within whatever the two
+/// radii differ by at the ring.
 fn splice_shaft(
     real: &[SupportPrimitive],
     edited: &[SupportPrimitive],
@@ -726,8 +730,6 @@ fn splice_shaft(
 ) -> Option<Vec<SupportPrimitive>> {
     let real_arcs = arcs(frame, real);
     let edited_arcs = arcs(frame, edited);
-    let opens = |x: f64| windows.iter().any(|w| (w.0 - x).abs() <= ARC_EPSILON_MM);
-    let closes = |x: f64| windows.iter().any(|w| (w.1 - x).abs() <= ARC_EPSILON_MM);
     let mut keyed: Vec<(f64, SupportPrimitive)> = Vec::with_capacity(real.len() + edited.len());
     for (s, &arc) in real.iter().zip(&real_arcs) {
         let mut spans: Vec<(f64, f64)> = Vec::new();
@@ -745,17 +747,20 @@ fn splice_shaft(
             spans.push((x, arc.1));
         }
         for (lo, hi) in spans {
-            // Where the shaft meets a window it takes the reference's radius.
-            let forced_lo = if closes(lo) { chain_radius_at(edited, &edited_arcs, lo, true) } else { None };
-            let forced_hi = if opens(hi) { chain_radius_at(edited, &edited_arcs, hi, false) } else { None };
-            keyed.push((lo, clip_piece(s, arc, (lo, hi), (forced_lo, forced_hi))?));
+            keyed.push((lo, clip_piece(s, arc, (lo, hi), (None, None))?));
         }
     }
     for &(lo, hi) in windows {
+        // The arm's radius where it meets the window: its piece that ends on
+        // the window's top, and its piece that starts on the window's foot.
+        let on_top = lo.is_finite().then(|| chain_radius_at(real, &real_arcs, lo, false)).flatten();
+        let on_foot = hi.is_finite().then(|| chain_radius_at(real, &real_arcs, hi, true)).flatten();
         for (s, &arc) in edited.iter().zip(&edited_arcs) {
             let (from, to) = (arc.0.max(lo), arc.1.min(hi));
             if to - from > ARC_EPSILON_MM {
-                keyed.push((from, clip_piece(s, arc, (from, to), (None, None))?));
+                let start = if (from - lo).abs() <= ARC_EPSILON_MM { on_top } else { None };
+                let end = if (to - hi).abs() <= ARC_EPSILON_MM { on_foot } else { None };
+                keyed.push((from, clip_piece(s, arc, (from, to), (start, end))?));
             }
         }
     }
@@ -1348,8 +1353,8 @@ mod tests {
             .expect("the shafts line up");
         assert_eq!(kept.hulls, planned.hulls, "every hull record is the reference's, bit for bit");
         assert_eq!((kept.hulled, kept.filled), (planned.hulled, planned.filled));
-        // Every ring of a kept hull is an end of a frustum the arms are drawn
-        // with, on the ring's centre and radius.
+        // Every ring of a kept hull stands on a frustum end of the arms, on the
+        // ring's centre (the arcs are the reference's).
         let host = kept.shafts[0].as_ref().expect("host kept");
         let branch = kept.shafts[1].as_ref().expect("branch kept");
         let FrustumRingNormal::Junction(rings) = kept.hulls[1][0].ring_normal else {
@@ -1358,22 +1363,27 @@ mod tests {
         for ring in rings.rings() {
             let centre = ring_centre(ring);
             let found = host.iter().chain(branch.iter()).any(|s| {
-                let end = |p: [Finite; 3], r: PositiveFinite| {
-                    norm(sub(pt(p), centre)) < 1.0e-9 && (r.get() - ring.radius_mm.get()).abs() < 1.0e-12
-                };
-                end(s.start_mm, s.start_radius_mm) || end(s.end_mm, s.end_radius_mm)
+                norm(sub(pt(s.start_mm), centre)) < 1.0e-9 || norm(sub(pt(s.end_mm), centre)) < 1.0e-9
             });
-            assert!(found, "ring at {centre:?} r {} names no drawn frustum end", ring.radius_mm.get());
+            assert!(found, "ring at {centre:?} meets no drawn frustum end");
         }
         // Outside the junction the arm is its own: the host's last frustum
-        // keeps the field's 0.70 where the reference had 0.761.
+        // keeps the field's 0.70 where the reference had 0.761, and the host
+        // below starts on the ring's centre with the field's radius.
         let last = host.last().expect("host");
         assert!((last.end_radius_mm.get() - 0.70).abs() < 1.0e-12, "{}", last.end_radius_mm.get());
         let below = host
             .iter()
             .find(|s| (pt(s.start_mm)[2] - ring_centre(rings.rings().nth(1).expect("ring")) [2]).abs() < 1.0e-9)
             .expect("the host below starts on its ring");
-        assert!((below.start_radius_mm.get() - 0.761).abs() < 1.0e-12, "it starts on the ring's radius");
+        assert!((below.start_radius_mm.get() - 0.70).abs() < 1.0e-12, "it keeps the field's radius");
+        // The chain is unbroken top to bottom around the cut: the host's
+        // frusta that stand above the ring end where the next one starts.
+        let upper_ring = ring_centre(rings.rings().nth(2).expect("ring"));
+        assert!(
+            host.iter().any(|s| norm(sub(pt(s.end_mm), upper_ring)) < 1.0e-9),
+            "the host above runs to its ring"
+        );
         // A shaft that is not the reference's line is not used.
         let (mut moved, moved_arms, _) = junction(0.2342, 0.70, 0.66, 41.0, 0.05);
         moved[0].start_mm = fin([0.01, 0.0, -13.9]).expect("finite");
