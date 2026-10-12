@@ -33,9 +33,11 @@
 //!   grows contains the one before it, so the real contact never falls as it
 //!   grows.
 //! * **A limit stops it, with a WARNING** (emit and warn, never refuse): the
-//!   ball of the largest load-sized tip the registry draws (the profile ball of
-//!   `TIP_RADIUS_MAX_LEGACY_MM`), or a ball whose growth found no more surface
-//!   (the patch ends: a knife edge, a thin feature).
+//!   owner's growth-for-attachment ceiling (the profile ball of a tip of
+//!   `TIP_RADIUS_MAX_GROWN_SCAR_MM`, 0.400 mm radius: the largest scar he
+//!   accepts for a tip enlarged beyond what the load law asked; a ball the
+//!   load law already drew larger is not grown), or a ball whose growth found
+//!   no more surface (the patch ends: a knife edge, a thin feature).
 //!
 //! # Tolerance and the search
 //!
@@ -64,7 +66,8 @@ pub const MAX_ROUNDS: usize = 8;
 /// Why a tip's real contact is still short of plan after the growth.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShortReason {
-    /// The ball reached the largest ball the registry draws.
+    /// The ball is at the growth-for-attachment ceiling, or the load law drew
+    /// it larger already.
     BallLimit,
     /// The ball grew and found no more model surface: the patch ends.
     NoMoreSurface,
@@ -77,7 +80,10 @@ impl ShortReason {
     #[must_use]
     pub const fn words(self) -> &'static str {
         match self {
-            Self::BallLimit => "the ball reached the largest ball the registry draws",
+            Self::BallLimit => {
+                "the ball is at the owner's growth-for-attachment ceiling (a 0.4 mm-radius tip's \
+                 ball), or the load law already drew it larger"
+            }
             Self::NoMoreSurface => "a larger ball found no more model surface (the patch ends)",
             Self::SearchRounds => "the radius search ran out of rounds",
         }

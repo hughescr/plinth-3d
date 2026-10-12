@@ -917,8 +917,9 @@ normal, the PLANNED disc, and which shaft spans are cut at all.
 measured exactly (`footprint_normal::triangle_disc_area` over the connected, admitted footprint),
 against the planned disc (the ungrown ball's section in the seat plane). A tip short of plan keeps
 its seat depth and has its BALL grown (`plinth_sweep::contact_growth`; the grown ball keeps the
-ungrown one's deepest point along the seat normal and contains it), up to the profile ball of the
-largest load-sized tip; a tip a limit leaves short is warned. It runs once before the footprint
+ungrown one's deepest point along the seat normal and contains it), up to the owner's
+growth-for-attachment ceiling (the profile ball of a `TIP_RADIUS_MAX_GROWN_SCAR_MM` tip, 0.400 mm
+radius; a ball the load law drew larger is not grown); a tip a limit leaves short is warned. It runs once before the footprint
 rule (so the rule grades the ball the file gets) and once more on the finished field.
 
 **Corrected (2026-09-29, review-fixes).** The trim is about the shaft's SOLID, not about how the

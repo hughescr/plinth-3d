@@ -388,6 +388,9 @@ struct Frame {
     /// `tan` of the face's slope from horizontal, for the vertical window.
     tan_slope: f64,
     ball_radius: f64,
+    /// The UNGROWN ball's radius: the search radius is about the tip's own
+    /// feature, not about how far its ball grew for contact.
+    planned_ball_radius: f64,
     /// The seat's outward unit normal, and the drawn ball centre's height
     /// over the disc plane along it (`d`, negative under the plane).
     normal: [f64; 3],
@@ -420,6 +423,7 @@ impl Frame {
             e2,
             tan_slope,
             ball_radius: disc.ball_radius_mm,
+            planned_ball_radius: disc.planned_ball_radius_mm,
             normal,
             centre_height: geom_kernel::vec3::dot(
                 geom_kernel::vec3::sub(disc.ball_centre_mm, disc.centre_mm),
@@ -896,7 +900,7 @@ pub(crate) fn apply(
             offset,
             geom_kernel::vec3::scale(normal, geom_kernel::vec3::dot(offset, normal)),
         );
-        let search_mm = SEARCH_RADIUS_BALL_DIAMETERS * 2.0 * frame.ball_radius
+        let search_mm = SEARCH_RADIUS_BALL_DIAMETERS * 2.0 * frame.planned_ball_radius
             + geom_kernel::vec3::norm(in_plane)
             + 2.0 * pitch;
         let disc_reach = offsets

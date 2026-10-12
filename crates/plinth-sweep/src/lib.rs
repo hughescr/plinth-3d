@@ -3360,7 +3360,9 @@ pub fn run_sweep_with_holes(
         .report
         .seat_footprint_normal
         .enabled
-        .then(|| contact_ball_limit_mm(policy.tip_radius_max_mm))
+        .then(|| {
+            contact_ball_limit_mm(policy.owner_growth_ceiling_mm.min(policy.tip_radius_max_mm))
+        })
         .flatten();
     if let Some(limit_mm) = contact_limit_mm {
         sweep_plan.report.seat_contact =
@@ -3911,10 +3913,14 @@ fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> Unmer
     }
 }
 
-/// **The largest contact ball the registry draws** (the growth limit of
-/// [`contact_growth`]): the owner's ChituBox ball of the largest load-sized
-/// tip, `TIP_RADIUS_MAX_LEGACY_MM` (`tip_radius_max_mm`). `None` where the
-/// registry cannot be read: no ball is grown, and the contact is not measured.
+/// **The largest ball growth for attachment may draw** (the growth limit of
+/// [`contact_growth`]): the owner's ChituBox ball of a tip at the registered
+/// growth-for-attachment ceiling, `TIP_RADIUS_MAX_GROWN_SCAR_MM` (0.400 mm
+/// radius, the owner's field data: the largest scar he accepts for a tip
+/// enlarged beyond what the load law asked, purely to attach), never above
+/// `TIP_RADIUS_MAX_LEGACY_MM`. A ball the load law already drew larger is not
+/// grown at all. `None` where the registry cannot be read: no ball is grown,
+/// and the contact is not measured.
 fn contact_ball_limit_mm(tip_radius_max_mm: f64) -> Option<f64> {
     let constants = m0_constants().ok()?;
     let factor = constants

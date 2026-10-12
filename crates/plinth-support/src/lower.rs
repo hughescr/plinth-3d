@@ -2966,6 +2966,10 @@ pub struct TipContactDisc {
     pub radius_mm: f64,
     /// The emitted ball's own radius `R`: the ungrown ball, or the grown one.
     pub ball_radius_mm: f64,
+    /// The UNGROWN ball's radius `R₀` (the owner's ChituBox ball for the tip
+    /// size): the size every rule that is about the tip's own feature reads
+    /// (the footprint rule's search radius), whatever the ball grew to.
+    pub planned_ball_radius_mm: f64,
     /// The emitted ball's CENTRE, which is also where the drawn shaft starts
     /// (the taper runs from here to the landing). The sweep's head-join rule
     /// (2026-09-29) measures a trunk's shaft from this point, so it reads the
@@ -3036,6 +3040,7 @@ pub fn tip_contact_discs(
                 outward_normal: normal,
                 radius_mm: tip_seat.contact_disc_radius_mm,
                 ball_radius_mm: tip_seat.drawn_ball_radius_mm,
+                planned_ball_radius_mm: ball_radius_mm,
                 ball_centre_mm: center,
                 post_top_mm: headed.as_ref().map_or(center, |head| head.head.joint_mm),
                 head_joint_radius_mm: headed.as_ref().map(|head| head.head.joint_radius_mm),
