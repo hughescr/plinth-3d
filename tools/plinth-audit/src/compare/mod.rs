@@ -56,6 +56,18 @@ OPTIONS:
   --no-flicker                   switch off every noise allowance (consts.rs, \"flicker allowance\"):
                                  the strict reading, for calibration and as the sabotage case
   --low-memory                   analyse the two files one after the other (half the peak memory)
+  --full-listing                 list EVERY item behind every row in verdict.json and the summary
+                                 (the default keeps the first few); for piece-by-piece triage
+  --declared CLASS               what the lane promises, as bench.sh --declared: IDENTICAL, EQUIVALENT,
+                                 PLAN-CHANGED or MESH-CHANGED. Recorded in verdict.json and listed in a
+                                 C.declared row (within the declaration or not); the exit code stays the
+                                 computed verdict's, and bench.sh makes the pass/fail decision
+  --declare-change WORD[,WORD]   an expected change the lane declares (needs --declared PLAN-CHANGED or
+                                 MESH-CHANGED). contact-merge: twin seats are merged, so a reference
+                                 contact with no match whose ball is overlapped by a candidate contact
+                                 is a merge, not a loss (N2); a loss with no survivor beside it is not
+  --probe x,y,z,r               print the support records of both files whose axis passes within
+                                 r mm of the point, with their match in the other file (repeatable)
   -h, --help                     this text
 
 EXIT: 1 REGRESSION, 3 INDETERMINATE, 2 POSE-CHANGED, 4 MESH-CHANGED, 10 PLAN-CHANGED,
@@ -82,6 +94,14 @@ pub struct Args {
     pub no_flicker: bool,
     /// Analyse the two files one after the other (half the peak memory, more wall time).
     pub low_memory: bool,
+    /// List every item behind every row (verdict.json and the summary), not the first few.
+    pub full_listing: bool,
+    /// `--probe x,y,z,r`: print the support records of both files near each point (triage).
+    pub probes: Vec<(crate::vec3::V3, f64)>,
+    /// `--declared CLASS`: what the lane promises (the same word as `bench.sh --declared`).
+    pub declared: Option<classify::DeclaredClass>,
+    /// `--declare-change WORD`: expected changes (a plan change each); see [`classify::DeclaredChanges`].
+    pub declared_changes: classify::DeclaredChanges,
 }
 
 /// Parse the arguments after `compare`.
@@ -107,6 +127,25 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--assume-consumer-matched" => a.assume_consumer_matched = true,
             "--no-flicker" => a.no_flicker = true,
             "--low-memory" => a.low_memory = true,
+            "--full-listing" => a.full_listing = true,
+            "--declared" => {
+                let s = take("--declared")?;
+                a.declared = Some(classify::DeclaredClass::parse(&s).ok_or_else(|| format!("--declared wants IDENTICAL, EQUIVALENT, PLAN-CHANGED or MESH-CHANGED, got {s:?}"))?);
+            }
+            "--declare-change" => {
+                let s = take("--declare-change")?;
+                for w in s.split(',').filter(|w| !w.is_empty()) {
+                    a.declared_changes.add(w)?;
+                }
+            }
+            "--probe" => {
+                let s = take("--probe")?;
+                let v: Vec<f64> = s.split(',').filter_map(|x| if x.trim() == "any" { Some(f64::NAN) } else { x.trim().parse().ok() }).collect();
+                if v.len() != 4 {
+                    return Err("--probe wants x,y,z,r (mm)".into());
+                }
+                a.probes.push(([v[0], v[1], v[2]], v[3]));
+            }
             "--threads" => {
                 a.threads = take("--threads")?.parse().ok().filter(|&n| n > 0).ok_or("--threads wants a positive integer")?;
             }
@@ -120,6 +159,9 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
     }
     if files.len() != 2 {
         return Err(format!("expected <ref> and <cand>, got {} file(s)", files.len()));
+    }
+    if a.declared_changes.any() && !matches!(a.declared, Some(classify::DeclaredClass::PlanChanged | classify::DeclaredClass::MeshChanged)) {
+        return Err("--declare-change needs --declared PLAN-CHANGED or MESH-CHANGED: a declared change is a plan change".into());
     }
     a.candidate = files.pop().unwrap_or_default();
     a.reference = files.pop().unwrap_or_default();
@@ -192,6 +234,9 @@ pub fn compare_paths(a: &Args) -> Run {
         assume_consumer_matched: a.assume_consumer_matched,
         require_logs: a.require_logs,
         noise: if a.no_flicker { consts::Noise::none() } else { consts::Noise::measured() },
+        full_listing: a.full_listing,
+        declared: a.declared,
+        declared_changes: a.declared_changes,
     };
     let outcome = match (&rf.0, &cf.0) {
         (Ok(r), Ok(c)) => classify::compare(r, c, &opts),
@@ -263,6 +308,14 @@ fn side_json(label: &str, path: &Path, f: &Result<FileFacts, String>) -> Json {
     o
 }
 
+/// What each `--probe` found: its point, radius and the records near it. Empty when either file
+/// could not be read.
+#[must_use]
+pub fn probe_report(a: &Args, run: &Run) -> Vec<(crate::vec3::V3, f64, Vec<String>)> {
+    let (Ok(r), Ok(c)) = (&run.ref_facts, &run.cand_facts) else { return Vec::new() };
+    a.probes.iter().map(|(p, rad)| (*p, *rad, classify::probe(r, c, *p, *rad))).collect()
+}
+
 /// The `verdict.json` document.
 #[must_use]
 pub fn verdict_json(a: &Args, run: &Run) -> Json {
@@ -280,6 +333,8 @@ pub fn verdict_json(a: &Args, run: &Run) -> Json {
     opt.set("require_logs", Json::Bool(a.require_logs));
     opt.set("flicker_allowance", Json::Bool(!a.no_flicker));
     opt.set("geometry", Json::Bool(!a.no_geometry));
+    opt.set("declared", a.declared.map_or(Json::Null, |c| Json::str(c.name())));
+    opt.set("declared_changes", Json::Arr(a.declared_changes.names().into_iter().map(Json::str).collect()));
     d.set("options", opt);
     let mut cm = Json::obj();
     cm.set("status", Json::str(if a.assume_consumer_matched { "assumed matched" } else { "pending G5" }));
@@ -289,6 +344,18 @@ pub fn verdict_json(a: &Args, run: &Run) -> Json {
     d.set("candidate", side_json("cand", &a.candidate, &run.cand_facts));
     d.set("rows", Json::Arr(out.rows.iter().map(verdict::Row::to_json).collect()));
     d.set("evidence", out.evidence.clone());
+    if !a.probes.is_empty() {
+        let mut probes = Json::Arr(Vec::new());
+        for (p, rad, lines) in probe_report(a, run) {
+            let mut o = Json::obj();
+            // z is `null` for a probe that ignores height (`any`).
+            o.set("point", Json::Arr(p.iter().map(|x| Json::num_or_null(Some(*x))).collect()));
+            o.set("radius_mm", Json::num(rad));
+            o.set("records", Json::Arr(lines.into_iter().map(Json::str).collect()));
+            probes.push(o);
+        }
+        d.set("probes", probes);
+    }
     let mut cost = Json::obj();
     cost.set("wall_s", Json::num(run.wall_s));
     cost.set("analyse_ref_s", Json::num(run.analyse_s.0));
@@ -314,7 +381,7 @@ pub fn summary(a: &Args, run: &Run) -> String {
     for r in &out.rows {
         s.push_str(&format!("  {:<14} {:<13} {}  [{}]\n", r.id, r.status.as_str().to_uppercase(), r.value, r.name));
         if r.status != Status::Pass && r.status != Status::Info {
-            for d in r.detail.iter().take(5) {
+            for d in r.detail.iter().take(if a.full_listing { usize::MAX } else { 5 }) {
                 s.push_str(&format!("                   - {d}\n"));
             }
         }
@@ -354,9 +421,16 @@ pub fn main(argv: &[String]) -> i32 {
         }
     }
     if args.json {
+        // Standard output is one JSON document; the probes are in it, under "probes".
         print!("{}", doc.to_pretty());
     } else {
         print!("{}", summary(&args, &run));
+        for (p, rad, lines) in probe_report(&args, &run) {
+            println!("probe ({:.3},{:.3},{:.3}) within {rad} mm:", p[0], p[1], p[2]);
+            for l in lines {
+                println!("  {l}");
+            }
+        }
     }
     run.outcome.verdict.exit_code()
 }

@@ -132,6 +132,9 @@ pub struct Grounding {
     pub floating: Vec<Comp>,
     /// Grounded components whose overlap with the layer below is under [`k::N4_THIN_PX`].
     pub thin_joins: usize,
+    /// The pixels of every floating component, as a raster (so floating material can be
+    /// compared between two files voxel by voxel, not component by component).
+    pub float_layers: Vec<Layer>,
 }
 
 /// Bottom-up grounding on the cured union: a component is grounded when it
@@ -173,6 +176,15 @@ pub fn grounding(u: &RunRaster, g: &RasterGrid, lateral_px: i64) -> Grounding {
                 }
             }
         }
+        if grounded.iter().any(|x| !x) {
+            let mut rows: BTreeMap<i64, Vec<Run>> = BTreeMap::new();
+            for (i, (row, run)) in rr.runs.iter().enumerate() {
+                if !grounded[labels[i] as usize] {
+                    rows.entry(*row).or_default().push(*run);
+                }
+            }
+            out.float_layers.push(Layer { k: l.k, z_mm: g.layer_z_mm(l.k), rows });
+        }
         if l.k > 0 || grounded.iter().any(|x| !x) {
             let stats = comp_stats(&rr, &labels, n, g, l.k);
             for (c, mut s) in stats.into_iter().enumerate() {
@@ -190,6 +202,65 @@ pub fn grounding(u: &RunRaster, g: &RasterGrid, lateral_px: i64) -> Grounding {
         prev = Some((l.k, rr, per_run));
     }
     out
+}
+
+/// A raster from layers (ascending `k`, no empty layer), with its counts.
+#[must_use]
+pub fn raster_of(g: &RasterGrid, layers: Vec<Layer>) -> RunRaster {
+    let pixel_count = layers.iter().map(Layer::pixel_count).sum();
+    let run_count = layers.iter().flat_map(|l| l.rows.values()).map(|v| v.len() as u64).sum();
+    RunRaster { grid: *g, layers, pixel_count, run_count }
+}
+
+/// One component (one layer) of floating material that the reference did not have.
+#[derive(Clone, Debug)]
+pub struct NewFloat {
+    pub comp: Comp,
+    /// Its pixels that lie inside the reference's tolerance mask of CURED material (material the
+    /// reference already had, within the band, that became disconnected).
+    pub inside: i64,
+    /// The 3D floating piece of the candidate this component belongs to (index into the pieces).
+    pub piece: usize,
+}
+
+/// The floating material of the candidate that is not within `grow` voxels (3D) of the
+/// reference's floating material: per-layer components, and the 3D pieces of the candidate's
+/// floating material (`added` of a piece = its new voxels). A piece that floats in both files
+/// is matched by place, voxel by voxel, not by the centroid of one layer's component.
+#[must_use]
+pub fn new_floating(fa: &RunRaster, fb: &RunRaster, model_b: &RunRaster, tol_u_a: Option<&RunRaster>, g: &RasterGrid, grow: i64) -> (Vec<NewFloat>, Vec<Blob>) {
+    let tol_f = tolerance(fa, grow);
+    let n = fb.difference(&tol_f);
+    // `tagged` of a piece = its model voxels (the rest is support).
+    let (pieces, layer_roots) = blobs_members(fb, &n, model_b, g);
+    let index_of: HashMap<usize, usize> = pieces.iter().enumerate().map(|(i, p)| (p.root, i)).collect();
+    let mut out = Vec::new();
+    for l in &n.layers {
+        let rr = RowRuns::from_layer(l);
+        let (labels, cnt) = rr.label(InPlaneJoin::SharedFace);
+        let stats = comp_stats(&rr, &labels, cnt, g, l.k);
+        let mut inside = vec![0i64; cnt];
+        if let Some(tl) = tol_u_a.and_then(|t| t.layer(l.k)) {
+            let trr = RowRuns::from_layer(tl);
+            overlap_join(&rr, &trr, |i, _, len| inside[labels[i] as usize] += len);
+        }
+        // The piece of each component: the blob of the candidate floating layer its pixels lie in.
+        let mut piece = vec![usize::MAX; cnt];
+        if let Some(fl) = fb.layer(l.k) {
+            let frr = RowRuns::from_layer(fl);
+            let (flabels, _) = frr.label(InPlaneJoin::SharedFaceOrCorner);
+            if let Some(roots) = layer_roots.get(&l.k) {
+                overlap_join(&rr, &frr, |i, j, _| {
+                    let root = roots[flabels[j] as usize];
+                    piece[labels[i] as usize] = index_of.get(&root).copied().unwrap_or(usize::MAX);
+                });
+            }
+        }
+        for (c, s) in stats.into_iter().enumerate() {
+            out.push(NewFloat { comp: s, inside: inside[c], piece: piece[c] });
+        }
+    }
+    (out, pieces)
 }
 
 /// Model island births (I7-style): components of the model raster with no model
@@ -236,37 +307,14 @@ pub fn islands(m: &RunRaster, s_rr: &HashMap<i64, RowRuns>, g: &RasterGrid) -> V
 /// one voxel" of `src` and is not counted as drift. `grow` = 0 gives the
 /// sabotage case (band set to zero).
 pub fn tolerance(src: &RunRaster, grow: i64) -> RunRaster {
-    let Some((k0, k1)) = src.layer_range() else {
-        return RunRaster::empty(src.grid);
-    };
-    let mut layers = Vec::new();
-    for kk in (k0 - grow)..=(k1 + grow) {
-        let mut rows: BTreeMap<i64, Vec<Run>> = BTreeMap::new();
-        for k3 in (kk - grow)..=(kk + grow) {
-            if let Some(l) = src.layer(k3) {
-                for (row, runs) in &l.rows {
-                    for r in runs {
-                        for dr in -grow..=grow {
-                            rows.entry(row + dr)
-                                .or_default()
-                                .push(Run { c0: r.c0 - grow, c1: r.c1 + grow });
-                        }
-                    }
-                }
-            }
-        }
-        if rows.is_empty() {
-            continue;
-        }
-        let rows = rows.into_iter().map(|(r, v)| (r, merge_runs(v))).collect();
-        layers.push(Layer { k: kk, z_mm: src.grid.layer_z_mm(kk), rows });
-    }
-    RunRaster { grid: src.grid, layers, pixel_count: 0, run_count: 0 }
+    src.grown(grow)
 }
 
 /// A 3D drift blob (corner-connected) with its extent.
 #[derive(Clone, Debug)]
 pub struct Blob {
+    /// Internal id of the blob (the union-find root); see [`blobs_members`].
+    pub root: usize,
     pub vox: i64,
     /// Voxels of the blob that exist only in the candidate.
     pub added: i64,
@@ -275,11 +323,30 @@ pub struct Blob {
     /// x0, x1, y0, y1 in mm.
     pub bb: [f64; 4],
     pub centroid: [f64; 3],
+    /// Voxels of the blob that lie in the `tag` raster given to [`blobs_tagged`] (0 for [`blobs`]).
+    pub tagged: i64,
+    /// Of the `added` voxels, those that also lie in the `tag` raster.
+    pub added_tagged: i64,
 }
 
 /// Connected drift blobs of `x`; `add` marks the candidate-only voxels.
 pub fn blobs(x: &RunRaster, add: &RunRaster, g: &RasterGrid) -> Vec<Blob> {
+    blobs_tagged(x, add, &RunRaster::empty(*g), g)
+}
+
+/// [`blobs`] that also counts, per blob, the voxels that lie in `tag` (for example the model
+/// raster: how much of a floating piece is model and how much support).
+pub fn blobs_tagged(x: &RunRaster, add: &RunRaster, tag: &RunRaster, g: &RasterGrid) -> Vec<Blob> {
+    blobs_members(x, add, tag, g).0
+}
+
+/// [`blobs_tagged`] that also says, for every layer of `x`, which blob (`Blob::root`) each
+/// connected component of that layer (labelled with `InPlaneJoin::SharedFaceOrCorner`, in
+/// label order) belongs to.
+pub fn blobs_members(x: &RunRaster, add: &RunRaster, tag: &RunRaster, g: &RasterGrid) -> (Vec<Blob>, HashMap<i64, Vec<usize>>) {
     struct Acc {
+        tag: i64,
+        add_tag: i64,
         vox: i64,
         add: i64,
         k0: i64,
@@ -297,9 +364,12 @@ pub fn blobs(x: &RunRaster, add: &RunRaster, g: &RasterGrid) -> Vec<Blob> {
         i
     }
     let add_rr = layer_rr(add);
+    let tag_rr = layer_rr(tag);
+    let add_tag_rr = layer_rr(&add.intersect(tag));
     let mut parent: Vec<usize> = Vec::new();
     let mut stats: Vec<Acc> = Vec::new();
     let mut prev: Option<(i64, RowRuns, Vec<usize>)> = None;
+    let mut layer_ids: Vec<(i64, Vec<usize>)> = Vec::new();
     for l in &x.layers {
         let rr = RowRuns::from_layer(l);
         let (labels, n) = rr.label(InPlaneJoin::SharedFaceOrCorner);
@@ -309,9 +379,19 @@ pub fn blobs(x: &RunRaster, add: &RunRaster, g: &RasterGrid) -> Vec<Blob> {
         if let Some(arr) = add_rr.get(&l.k) {
             overlap_join(&rr, arr, |i, _, len| addpx[labels[i] as usize] += len);
         }
+        let mut tagpx = vec![0i64; n];
+        if let Some(arr) = tag_rr.get(&l.k) {
+            overlap_join(&rr, arr, |i, _, len| tagpx[labels[i] as usize] += len);
+        }
+        let mut addtagpx = vec![0i64; n];
+        if let Some(arr) = add_tag_rr.get(&l.k) {
+            overlap_join(&rr, arr, |i, _, len| addtagpx[labels[i] as usize] += len);
+        }
         for (c, st) in cs.iter().enumerate() {
             parent.push(base + c);
             stats.push(Acc {
+                tag: tagpx[c],
+                add_tag: addtagpx[c],
                 vox: st.px,
                 add: addpx[c],
                 k0: l.k,
@@ -335,6 +415,7 @@ pub fn blobs(x: &RunRaster, add: &RunRaster, g: &RasterGrid) -> Vec<Blob> {
                 }
             }
         }
+        layer_ids.push((l.k, (0..n).map(|c| base + c).collect()));
         prev = Some((l.k, rr, gid));
     }
     let mut acc: HashMap<usize, Acc> = HashMap::new();
@@ -342,6 +423,8 @@ pub fn blobs(x: &RunRaster, add: &RunRaster, g: &RasterGrid) -> Vec<Blob> {
         let r = find(&mut parent, i);
         let s = &stats[i];
         let e = acc.entry(r).or_insert(Acc {
+            tag: 0,
+            add_tag: 0,
             vox: 0,
             add: 0,
             k0: i64::MAX,
@@ -353,6 +436,8 @@ pub fn blobs(x: &RunRaster, add: &RunRaster, g: &RasterGrid) -> Vec<Blob> {
         });
         e.vox += s.vox;
         e.add += s.add;
+        e.tag += s.tag;
+        e.add_tag += s.add_tag;
         e.k0 = e.k0.min(s.k0);
         e.k1 = e.k1.max(s.k1);
         e.bb = [
@@ -365,22 +450,29 @@ pub fn blobs(x: &RunRaster, add: &RunRaster, g: &RasterGrid) -> Vec<Blob> {
         e.sy += s.sy;
         e.sz += s.sz;
     }
+    let layer_roots: HashMap<i64, Vec<usize>> = layer_ids
+        .into_iter()
+        .map(|(k, ids)| (k, ids.into_iter().map(|i| find(&mut parent, i)).collect()))
+        .collect();
     let mut v: Vec<Blob> = acc
-        .into_values()
-        .map(|e| {
+        .into_iter()
+        .map(|(root, e)| {
             let n = e.vox.max(1) as f64;
             Blob {
+                root,
                 vox: e.vox,
                 added: e.add,
                 k0: e.k0,
                 k1: e.k1,
                 bb: e.bb,
                 centroid: [e.sx / n, e.sy / n, e.sz / n],
+                tagged: e.tag,
+                added_tagged: e.add_tag,
             }
         })
         .collect();
-    v.sort_by(|a, b| b.vox.cmp(&a.vox).then(a.k0.cmp(&b.k0)));
-    v
+    v.sort_by(|a, b| b.vox.cmp(&a.vox).then(a.k0.cmp(&b.k0)).then(a.root.cmp(&b.root)));
+    (v, layer_roots)
 }
 
 /// Drift beyond the band between two rasters, both ways.
