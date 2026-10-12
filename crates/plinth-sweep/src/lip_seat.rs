@@ -63,9 +63,11 @@
 //!    slenderness law cannot hold is not taken** (Q1, 2026-10-10): when the
 //!    cheapest descent that passed every test runs longer than `S` times the
 //!    thickest radius at which the arm still keeps the final gap (the spare
-//!    gap measured for it, up to the registered maximum radius), the arm keeps
-//!    its seat and falls to item 3. Seat-bite triggers only; the clearance
-//!    re-route is not asked.
+//!    gap measured for it, up to the registered maximum radius), and the arm
+//!    as it stands is a support (longer than one layer, its solid not inside
+//!    the model; q12 regressions, 2026-10-12), the arm keeps its seat and
+//!    falls to item 3. Seat-bite triggers only; the clearance re-route is not
+//!    asked.
 //! 2. **A seat further in on the same face.** The footprint rule
 //!    (`footprint.rs`) already slides a seat along its face; a tip whose disc
 //!    is on its face but whose shaft the trim still bites joins its search,
@@ -288,6 +290,47 @@ fn thickest_radius_keeping_gap_mm(
     (drawn_mm + (clearance_mm - gap_mm).max(0.0)).min(max_mm.max(drawn_mm))
 }
 
+/// **Whether a proposed lean is longer than the slenderness law holds at the
+/// thickest radius its measured clearance leaves room for** (Q1): the lean
+/// `arm` (drawn as the trial draws it, measured `now` clear of the model in
+/// the pass's one batched clearance read) for `strut`, landing as `candidate`
+/// proposes. The run is the chord the ladder measures; the radius is the drawn
+/// radius grown by the spare gap ([`thickest_radius_keeping_gap_mm`]), up to
+/// the registered maximum. Arithmetic only: no kernel read of its own.
+///
+/// **Not the thicken rung's taper** (q12 regressions, 2026-10-12, review).
+/// A lean leaving its seat face reads its minimum clearance at the gap itself
+/// (its seat zone ends where the solid first stands the gap clear of the seat
+/// plane), so this reading leaves it no room to grow anywhere, although the
+/// rung's taper (tip kept, root raised away from the seat face) would hold
+/// many such leans clear of the model. Admitting those (`ff2e64c`, the taper
+/// drawn as a frustum and read against the model) took ten more leans on
+/// Deinonychus that Q12 kept as standing arms, two of them the long slanted
+/// runs Q12 removed (8.4 mm at 48 deg and 12.7 mm at 30 deg, each about 6 mm
+/// sideways; `q12/REGRESSIONS.md`), while the arms it was meant for are
+/// taken by the kept-arm test in [`apply`] instead: a lean refused here is
+/// refused only while the arm as it stands is a support. Whether a held lean
+/// should replace a standing support is the owner's call, open.
+fn lean_too_slender(
+    context: &SlendernessContext<'_>,
+    strut: &SweepStrut,
+    candidate: &Candidate,
+    arm: &SweepArm,
+    now: f64,
+    tier: f64,
+) -> bool {
+    let law = context.law;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a layer count bounded by the plan's own layer count is exact in f64"
+    )]
+    let drop_mm = strut.k_top.saturating_sub(candidate.k_bottom) as f64 * context.layer_height_mm;
+    let run_mm = drop_mm.hypot(crate::cell_distance_mm(context.grid, strut.cell, candidate.cell));
+    let fit_mm =
+        thickest_radius_keeping_gap_mm(drawn_max_radius_mm(arm), now, tier, law.max_radius_mm());
+    run_mm > law.max_unbraced_mm(fit_mm)
+}
+
 /// One arm the finished field still has with its shaft cut by its seat trim.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LipSeatWarning {
@@ -421,12 +464,20 @@ pub struct LipSeatOutcome {
     /// model than the final gap, or than it already stood.
     pub candidates_refused_clearance: usize,
     /// Refused because the lean's straight run is longer than `S` times the
-    /// thickest radius at which the arm keeps the final gap, so the slenderness
-    /// ladder could neither thicken nor otherwise hold it (Q1, 2026-10-10).
+    /// thickest radius at which the arm keeps the final gap, while the arm as
+    /// it stands is a support (Q1, 2026-10-10; q12 regressions, 2026-10-12).
     pub candidates_refused_slender: usize,
     /// Of the arms kept with no admissible descent, those that had a lean
     /// refused for its slenderness (they keep the seat-bite WARNING).
     pub kept_for_slenderness: usize,
+    /// The arms that had a lean refused for its slenderness (each once), the
+    /// last pass's list.
+    pub kept_for_slenderness_ids: Vec<u32>,
+    /// Leans the slenderness test refused that were TAKEN anyway, because the
+    /// arm as it stands is no support (a one-layer stub, or a solid inside the
+    /// model): nothing better to keep (q12 regressions, 2026-10-12). The path
+    /// hit of that test.
+    pub slender_taken_kept_not_clear: usize,
     /// Moved members (a mover, a follower) whose solid was NOT read against
     /// the final gap because it stands in a hidden cavity (Craig ruling
     /// 2026-10-05): the path hit of that ruling in the landing search.
@@ -760,6 +811,8 @@ pub(crate) fn apply(
     outcome.headed_kept = 0;
     outcome.kept_no_candidate = 0;
     outcome.kept_for_slenderness = 0;
+    outcome.kept_for_slenderness_ids.clear();
+    outcome.slender_taken_kept_not_clear = 0;
     outcome.kept_locked_by_tie = 0;
     outcome.kept_locked_by_non_arm_below = 0;
     outcome.kept_behind_a_follower_also_sent = 0;
@@ -1250,7 +1303,19 @@ pub(crate) fn apply(
             // the radius it can grow by, up to the registered maximum. The
             // run is the chord the ladder measures (`slenderness::run_length`:
             // the drop and the lateral move between the seat and base cells)
-            // and its limit is the existing `S * r`.
+            // and its limit is the existing `S * r` ([`lean_too_slender`]:
+            // arithmetic on this pass's batched clearance read, no kernel
+            // call of its own; why not the thicken rung's taper, there).
+            //
+            // **AND ONLY WHERE THE ARM AS IT STANDS IS A SUPPORT** (q12
+            // regressions, 2026-10-12). The refusal trades the lean for the arm
+            // already there, so that arm must be one: a shaft longer than one
+            // layer, whose solid does not enter the model (`before[first]`,
+            // measured above in the same batch; unmeasured is not proof of
+            // entry). The Morel base's arm 44 stood as a stub one layer long
+            // onto the model wall beside its seat, its tip off its face (Q12
+            // kept it in place of its 7.5 mm plate lean). There the lean is
+            // taken as before Q1 and left to the ladder.
             //
             // This is the LAST test, after the plate, root, measured-section,
             // lock and live-path tests above: a descent one of those refuses
@@ -1264,37 +1329,40 @@ pub(crate) fn apply(
             // radius are the law's own. The clearance re-route is not asked
             // (it was sent for the gap itself), and a mover in a hidden
             // cavity, where the gap does not apply, is not asked either.
-            if !trigger.is_clearance() && !hidden(first) {
-                if let Some(now) = after[first] {
-                    let strut = &struts[index_of];
-                    #[expect(
-                        clippy::cast_precision_loss,
-                        reason = "a layer count bounded by the plan's own layer count is exact in f64"
-                    )]
-                    let drop_mm = strut.k_top.saturating_sub(proposal.candidate.k_bottom) as f64
-                        * context.layer_height_mm;
-                    let run_mm = drop_mm.hypot(crate::cell_distance_mm(
-                        context.grid,
-                        strut.cell,
-                        proposal.candidate.cell,
-                    ));
-                    let fit_mm = thickest_radius_keeping_gap_mm(
-                        drawn_max_radius_mm(&trial[first]),
+            let too_slender = (!trigger.is_clearance() && !hidden(first))
+                .then_some(after[first])
+                .flatten()
+                .is_some_and(|now| {
+                    lean_too_slender(
+                        context,
+                        &struts[index_of],
+                        &proposal.candidate,
+                        &trial[first],
                         now,
                         tier,
-                        context.law.max_radius_mm(),
-                    );
-                    if run_mm > context.law.max_unbraced_mm(fit_mm) {
-                        outcome.candidates_refused_slender += 1;
-                        // The cheapest admissible descent cannot be held: the
-                        // arm keeps its seat and does not walk the rest of its
-                        // candidates.
-                        let job = &mut pending[proposal.slot];
-                        job.refused_slender = true;
-                        job.next = job.candidates.len();
-                        continue;
+                    )
+                });
+            if too_slender {
+                let standing = &struts[index_of];
+                let kept_is_a_support = before[first].is_none_or(|was| was >= -CLEARANCE_SLACK_MM)
+                    && standing.k_top > standing.k_bottom.saturating_add(1);
+                if kept_is_a_support {
+                    outcome.candidates_refused_slender += 1;
+                    // The cheapest admissible descent cannot be held: the arm
+                    // keeps its seat and does not walk the rest of its
+                    // candidates.
+                    let job = &mut pending[proposal.slot];
+                    job.refused_slender = true;
+                    job.next = job.candidates.len();
+                    let id = struts[index_of].id;
+                    if !outcome.kept_for_slenderness_ids.contains(&id) {
+                        outcome.kept_for_slenderness_ids.push(id);
                     }
+                    continue;
                 }
+                // The path hit of the kept-arm test: a lean the law cannot
+                // hold, taken because the arm as it stands is no better.
+                outcome.slender_taken_kept_not_clear += 1;
             }
             outcome.candidates_verified += 1;
             let strut = &mut struts[index_of];

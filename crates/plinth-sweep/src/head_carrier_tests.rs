@@ -1092,6 +1092,172 @@ fn an_inadmissible_cheapest_descent_does_not_end_the_slenderness_search() {
     assert!(moved_to[0].is_leaned(), "the arm leans to its new root");
 }
 
+/// **THE SLENDERNESS REFUSAL KEEPS AN ARM ONLY WHERE THAT ARM IS A SUPPORT**
+/// (q12 regressions, 2026-10-12, `q12/REGRESSIONS.md`). The refusal trades
+/// the lean for the arm as it stands. On the Morel base that arm (44) was a
+/// stub one layer long onto the model wall beside its seat, tip off its face,
+/// and Q12 kept it in place of a 7.5 mm lean to the plate that the ladder had
+/// held before.
+///
+/// The configuration of the test above (law S = 95, the wall 0.305 mm from
+/// the cheapest descent, whose run trips the law). CONTROL: the arm stands as
+/// a straight post to the plate, and is kept, its lean refused. TEST: the same
+/// seat stands as a one-layer stub onto the model; the lean is taken, counted
+/// as taken for want of a support to keep. SABOTAGE (run by hand, 2026-10-12:
+/// refuse whenever `lean_too_slender`): the stub is kept (`moved` 0).
+#[test]
+fn a_one_layer_stub_is_not_kept_in_place_of_a_lean() {
+    let grid = grid();
+    let history = ColumnHistory::new(&grid);
+    let keep_out = crate::drain::DrainKeepOut::none();
+    let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
+    let law = crate::slenderness::SlendernessLaw::new(95.0, 0.05, 1.0, 32.5);
+    let mesh = boxes_mesh(&[
+        ([0.0, 0.0, 10.0], [15.0, 15.0, 12.0]),
+        ([2.0, 7.93, 0.5], [13.0, 8.93, 3.0]),
+    ]);
+    let plan = plinth_core::LayerPlan::new(0.0, vec![H; 300]).expect("a uniform plan");
+    let bite = plinth_support::ShaftSeatBite {
+        bite_mm: 0.2,
+        approach_deg: 60.0,
+        limit_deg: 20.0,
+    };
+    let run = |stub: bool| {
+        let context = slender_context(&grid, &history, &keep_out, &lean, &law);
+        let surface = std::cell::OnceCell::new();
+        let joins = crate::head_join::HeadJoinContext {
+            slender: &context,
+            mesh: &mesh,
+            layer_plan: &plan,
+            plate_z_mm: 0.0,
+            clearance_mm: 0.3,
+            standoff_mm: 0.6,
+            surface_pitch_mm: 0.1,
+            surface_max_bytes: 1 << 28,
+            surface: &surface,
+        };
+        let mut arm = straight(&grid, 0, 150, 150, 200, 0.1);
+        if stub {
+            arm.k_bottom = 199;
+            arm.landing = Landing::Model { layer: 199 };
+            arm.radius_mm = vec![0.1; 2];
+            arm.carried_mm2 = vec![0.0; 2];
+        }
+        let mut struts = vec![arm];
+        let arms = tilted_arms(&grid, &mut struts);
+        let mut outcome = crate::lip_seat::LipSeatOutcome::default();
+        let moves = crate::lip_seat::apply(
+            &joins,
+            &plan,
+            0.0,
+            &mut struts,
+            &arms,
+            &[Some(bite)],
+            crate::lip_seat::Trigger::SeatBite,
+            &[],
+            &mut outcome,
+        );
+        (struts, outcome, moves.len())
+    };
+    let (kept, outcome, moved) = run(false);
+    assert_eq!(moved, 0, "CONTROL: the straight post is kept: {outcome:?}");
+    assert_eq!(outcome.kept_for_slenderness_ids, vec![0], "{outcome:?}");
+    assert_eq!(outcome.slender_taken_kept_not_clear, 0, "{outcome:?}");
+    assert_eq!(kept[0].k_bottom, 0);
+    let (taken, outcome, moved) = run(true);
+    assert_eq!(moved, 1, "the stub is not kept in place of the lean: {outcome:?}");
+    assert_eq!(outcome.slender_taken_kept_not_clear, 1, "PATH HIT: {outcome:?}");
+    assert_eq!(outcome.candidates_refused_slender, 0, "{outcome:?}");
+    assert!(outcome.kept_for_slenderness_ids.is_empty(), "{outcome:?}");
+    assert!(taken[0].is_leaned(), "the arm leans to the plate");
+    assert_eq!(taken[0].landing, Landing::Plate);
+}
+
+/// **A LEAN ONLY THE THICKEN RUNG'S TAPER WOULD HOLD IS REFUSED WHILE THE ARM
+/// STANDS AS A SUPPORT** (q12 regressions, 2026-10-12, review). A lean leaving
+/// its seat face reads its clearance at the gap itself, so the uniform reading
+/// (`S` times the thickest radius that keeps the gap) leaves it no room to
+/// grow, although the rung's taper (tip kept, root raised away from the face)
+/// would hold it clear of the model. Admitting such leans (`ff2e64c`) took ten
+/// more leans on Deinonychus than Q12 did, two of them the long slanted runs
+/// Q12 removed; the arms the taper reading was for (`make_brace_pair` arm 3,
+/// the Morel base's arm 44) emit as before without it.
+///
+/// A slab over a straight 0.1 mm arm, at S = 50 (a run of about 10.2 mm, which
+/// needs a uniform 0.2 mm: more than the measured clearance leaves room for;
+/// with no wall the taper stands clear of the slab, the fixture on which
+/// `ff2e64c` took the lean). TEST: the arm stands as a straight post to the
+/// plate, a support, and is kept, its lean refused. CONTROL: the same seat
+/// stands as a one-layer stub onto the model; the lean is taken (the kept-arm
+/// test), so the refusal above is the slenderness test's and not a fixture
+/// with no admissible lean. SABOTAGE: the taper admission (`ff2e64c`
+/// `lean_too_slender` stage 2) takes the TEST lean, which that commit's own
+/// test asserted on this fixture (`moved` 1).
+#[test]
+fn a_lean_only_the_taper_would_hold_is_refused_while_the_arm_stands() {
+    let grid = grid();
+    let history = ColumnHistory::new(&grid);
+    let keep_out = crate::drain::DrainKeepOut::none();
+    let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
+    let law = crate::slenderness::SlendernessLaw::new(50.0, 0.05, 1.0, 32.5);
+    let mesh = boxes_mesh(&[([0.0, 0.0, 10.0], [15.0, 15.0, 12.0])]);
+    let plan = plinth_core::LayerPlan::new(0.0, vec![H; 300]).expect("a uniform plan");
+    let bite = plinth_support::ShaftSeatBite {
+        bite_mm: 0.2,
+        approach_deg: 60.0,
+        limit_deg: 20.0,
+    };
+    let run = |stub: bool| {
+        let context = slender_context(&grid, &history, &keep_out, &lean, &law);
+        let surface = std::cell::OnceCell::new();
+        let joins = crate::head_join::HeadJoinContext {
+            slender: &context,
+            mesh: &mesh,
+            layer_plan: &plan,
+            plate_z_mm: 0.0,
+            clearance_mm: 0.3,
+            standoff_mm: 0.6,
+            surface_pitch_mm: 0.1,
+            surface_max_bytes: 1 << 28,
+            surface: &surface,
+        };
+        let mut arm = straight(&grid, 0, 150, 150, 200, 0.1);
+        if stub {
+            arm.k_bottom = 199;
+            arm.landing = Landing::Model { layer: 199 };
+            arm.radius_mm = vec![0.1; 2];
+            arm.carried_mm2 = vec![0.0; 2];
+        }
+        let mut struts = vec![arm];
+        let arms = tilted_arms(&grid, &mut struts);
+        let mut outcome = crate::lip_seat::LipSeatOutcome::default();
+        let moves = crate::lip_seat::apply(
+            &joins,
+            &plan,
+            0.0,
+            &mut struts,
+            &arms,
+            &[Some(bite)],
+            crate::lip_seat::Trigger::SeatBite,
+            &[],
+            &mut outcome,
+        );
+        (struts, outcome, moves.len())
+    };
+    let (kept, outcome, moved) = run(false);
+    assert_eq!(moved, 0, "the standing post is kept, the lean refused: {outcome:?}");
+    assert_eq!(outcome.candidates_refused_slender, 1, "PATH HIT: {outcome:?}");
+    assert_eq!(outcome.kept_for_slenderness_ids, vec![0], "{outcome:?}");
+    assert_eq!(outcome.slender_taken_kept_not_clear, 0, "{outcome:?}");
+    assert_eq!(kept[0].base_cell(), kept[0].cell, "the arm keeps its seat");
+    assert_eq!(kept[0].k_bottom, 0, "and its post to the plate");
+    let (taken, outcome, moved) = run(true);
+    assert_eq!(moved, 1, "CONTROL: a lean exists and a stub does not keep it out: {outcome:?}");
+    assert_eq!(outcome.slender_taken_kept_not_clear, 1, "{outcome:?}");
+    assert!(taken[0].is_leaned(), "the arm leans to the plate");
+    assert_eq!(taken[0].landing, Landing::Plate);
+}
+
 // ---------------------------------------------------------------------------
 // The head-first lane's two rulings of 2026-10-06: a head is planned at an
 // ESTIMATE of the final tip radius, and a head the final sizing grew across the
