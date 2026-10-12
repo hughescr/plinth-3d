@@ -3135,7 +3135,8 @@ fn print_sweep_disclosure(
              the lowering's own measurement, {} by the solid's clearance from the model{}, {} by a \
              lean the thicken rung cannot hold within the final gap while the arm as it stands \
              is a support ({} such leans taken because it is not: a one-layer stub or a solid \
-             inside the model), {} by a new \
+             inside the model; {} leans no uniform radius holds taken because the rung's \
+             taper holds them clear of the model), {} by a new \
              plate root touching another, {} verified; put back once the field was sized: {} \
              whose host chain came out overloaded, {} whose root came to lap another ({} sized \
              checks; unexplained by any re-landing: {} newly overloaded members, {} new root \
@@ -3172,6 +3173,7 @@ fn print_sweep_disclosure(
             },
             lip.candidates_refused_slender,
             lip.slender_taken_kept_not_clear,
+            lip.slender_held_by_taper,
             lip.candidates_refused_roots,
             lip.candidates_verified,
             lip.moves_put_back_host_load,

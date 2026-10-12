@@ -1173,6 +1173,87 @@ fn a_one_layer_stub_is_not_kept_in_place_of_a_lean() {
     assert_eq!(taken[0].landing, Landing::Plate);
 }
 
+/// **A LEAN THE THICKEN RUNG'S TAPER HOLDS IS NOT REFUSED** (q12 regressions,
+/// 2026-10-12, `q12/REGRESSIONS.md` items 1 and 2). A lean leaving its seat
+/// face reads its clearance at the gap itself (its seat zone ends where the
+/// solid first stands the gap clear of the seat plane), so the uniform reading
+/// (`S` times the thickest uniform radius that keeps the gap) leaves it no
+/// room to grow anywhere. Q12 refused every such lean: `make_brace_pair` lost
+/// both masts and both thickened post roots, and the Morel base's arm 44 lost
+/// its 5.2 mm trunk and was emitted as a 0.17 mm stub. The rung itself keeps
+/// the tip and raises the root, which stands far from the seat face.
+///
+/// The configuration of the tests above, at S = 50 (a slab over a straight
+/// 0.1 mm arm, a run of about 10.2 mm, which needs a uniform 0.2 mm: more than
+/// the measured clearance leaves room for). CONTROL: the low wall
+/// beside the cheapest descent, which the tapered root would enter: the lean
+/// is refused and the arm kept. TEST: no wall; the uniform reading still
+/// refuses (the path hit counts only leans it refused), the taper is clear
+/// of the model, and the arm leans to the plate. SABOTAGE (run by hand,
+/// 2026-10-12): `lean_too_slender` returns `Cannot` where it returns `Taper`
+/// (the Q12 reading), the arm is kept (`moved` 0); the taper read through the
+/// capsule entry point (`segment_clearance_classified`, the wider radius all
+/// along), it reads 0.18 mm clear of the slab and the arm is kept.
+#[test]
+fn a_lean_the_thicken_taper_holds_is_taken() {
+    let grid = grid();
+    let history = ColumnHistory::new(&grid);
+    let keep_out = crate::drain::DrainKeepOut::none();
+    let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
+    let law = crate::slenderness::SlendernessLaw::new(50.0, 0.05, 1.0, 32.5);
+    let slab =([0.0, 0.0, 10.0], [15.0, 15.0, 12.0]);
+    let wall = ([2.0, 7.93, 0.5], [13.0, 8.93, 3.0]);
+    let plan = plinth_core::LayerPlan::new(0.0, vec![H; 300]).expect("a uniform plan");
+    let bite = plinth_support::ShaftSeatBite {
+        bite_mm: 0.2,
+        approach_deg: 60.0,
+        limit_deg: 20.0,
+    };
+    let run = |boxes: &[([f64; 3], [f64; 3])]| {
+        let mesh = boxes_mesh(boxes);
+        let context = slender_context(&grid, &history, &keep_out, &lean, &law);
+        let surface = std::cell::OnceCell::new();
+        let joins = crate::head_join::HeadJoinContext {
+            slender: &context,
+            mesh: &mesh,
+            layer_plan: &plan,
+            plate_z_mm: 0.0,
+            clearance_mm: 0.3,
+            standoff_mm: 0.6,
+            surface_pitch_mm: 0.1,
+            surface_max_bytes: 1 << 28,
+            surface: &surface,
+        };
+        let mut struts = vec![straight(&grid, 0, 150, 150, 200, 0.1)];
+        let arms = tilted_arms(&grid, &mut struts);
+        let mut outcome = crate::lip_seat::LipSeatOutcome::default();
+        let moves = crate::lip_seat::apply(
+            &joins,
+            &plan,
+            0.0,
+            &mut struts,
+            &arms,
+            &[Some(bite)],
+            crate::lip_seat::Trigger::SeatBite,
+            &[],
+            &mut outcome,
+        );
+        (struts, outcome, moves.len())
+    };
+    let (kept, outcome, moved) = run(&[slab, wall]);
+    assert_eq!(moved, 0, "CONTROL: the taper would enter the gap at the wall: {outcome:?}");
+    assert_eq!(outcome.candidates_refused_slender, 1, "{outcome:?}");
+    assert_eq!(outcome.slender_held_by_taper, 0, "{outcome:?}");
+    assert_eq!(kept[0].base_cell(), kept[0].cell, "the arm keeps its seat");
+    let (taken, outcome, moved) = run(&[slab]);
+    assert!(outcome.slender_held_by_taper >= 1, "PATH HIT: the uniform reading refused it: {outcome:?}");
+    assert_eq!(outcome.candidates_refused_slender, 0, "{outcome:?}");
+    assert!(outcome.kept_for_slenderness_ids.is_empty(), "{outcome:?}");
+    assert_eq!(moved, 1, "the lean the taper holds is taken: {outcome:?}");
+    assert!(taken[0].is_leaned(), "the arm leans to the plate");
+    assert_eq!(taken[0].landing, Landing::Plate);
+}
+
 // ---------------------------------------------------------------------------
 // The head-first lane's two rulings of 2026-10-06: a head is planned at an
 // ESTIMATE of the final tip radius, and a head the final sizing grew across the
