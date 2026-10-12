@@ -585,10 +585,23 @@ pass that applies it):
   lowering therefore plans the hulls on the field as the old law drew it
   (`adapter::hull_reference_arms`, from `CertifiedHead::today_radius_mm`) and keeps those
   records bit for bit (`lower_sweep_arms_with_hull_reference`, `junction::keep_planned_hulls`).
-  The shaft of an arm a hull cuts is the arm's own outside the junction's arcs (its frusta and
-  cones are not reshaped, so load-step cones keep their slope) and the old field's thin run
-  inside them. A filled junction edits no shaft. A reference whose shafts do not line up with
-  the arms' is not used, and the lowering warns.
+  The shaft of an arm a hull cuts is the arm's own outside the junction's arcs and the old
+  field's thin run inside them. A filled junction edits no shaft. A reference whose shafts do
+  not line up with the arms' is not used, and the lowering warns.
+* **The ring the shaft meets is the old ring, to the bit.** Where a hull ring stands on a cut of
+  the shaft (the end of the host above a hull, the start of the host below it, the end of a
+  shortened branch), the arm's frustum there ends on the ring's centre and radius, so the drawn
+  ring and the hull ring are one ring. The arm's chord differs from the ring by the fit's chord
+  noise (the ring is the old law's radius). The difference is closed by a taper along the arm's
+  own pieces, walking away from the ring (`junction::plan_transition`): it closes at
+  `|difference| / pixel pitch` per mm at the fastest, and never so fast that a piece narrows going
+  up by more than the lean law's step (`cot(theta_sat)` per mm of height, the slope the
+  load-step cones are drawn at); a piece already at that slope carries the offset unchanged and
+  the offset closes on the next piece that has room. A ring thicker than the chord gives a shaft
+  never thinner than its chord (certified wherever the chord is). A ring thinner than the chord
+  (the old law's radius, kept by R8) gives a shaft that rises from it to the chord. The log's
+  `junction rings:` line counts both and the largest dip under the chord; a ring no taper can
+  reach is left on the arm's own radius and warned.
 * **Report, never refuse.** The log prints the largest certified demand over the drawn chords and
   warns when one exceeds `1 + 1e-9`. The link-overstress warning is read at the link end that is
   drawn and says when the joint is sized for what the link can pass.

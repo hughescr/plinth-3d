@@ -1548,6 +1548,7 @@ fn lower_sweep_arms_of(
             pixel_pitch_mm: config.pixel_pitch_mm,
             layer_height_mm: config.layer_height_mm.get(),
             sides,
+            cone_slope: drawn_span_rules().map_or(0.0, |rules| rules.cone_slope),
         };
         // R8: the hulls are planned on the reference field when one is given,
         // and kept on this one; else the pass runs on the arms as they are.
@@ -1580,6 +1581,34 @@ fn lower_sweep_arms_of(
         let edits = kept.unwrap_or_else(|| {
             junction::hull_junctions(&out.primitives, &junction_arms, rules)
         });
+        let rings = edits.rings;
+        if rings.exact + rings.thicker + rings.thinner + rings.unmet > 0 {
+            eprintln!(
+                "junction rings: {} kept hull rings met by the shaft on the ring's own radius \
+                 ({} already equal, {} thicker than the chord and tapered down to it, {} \
+                 thinner and tapered up to it; largest difference closed {:.6} mm, largest dip \
+                 under the chord {:.6} mm), {} not met",
+                rings.exact + rings.thicker + rings.thinner,
+                rings.exact,
+                rings.thicker,
+                rings.thinner,
+                rings.max_gap_mm,
+                rings.max_under_chord_mm,
+                rings.unmet,
+            );
+        }
+        if rings.unmet > 0 {
+            eprintln!(
+                "WARNING junction rings: {} kept hull rings could not be met on their own \
+                 radius ({} with no piece of the arm at the cut, {} at a piece a taper may not \
+                 change, {} where the pieces ran out before the difference closed); the shaft \
+                 meets them on its own radius (emit and warn)",
+                rings.unmet,
+                rings.unmet_no_piece,
+                rings.unmet_not_adjustable,
+                rings.unmet_ran_out,
+            );
+        }
         // Emit and warn: a landed junction that could be neither cut into its
         // host nor filled keeps the old flat cap, and says so.
         if edits.crowded + edits.undrawable > 0 {

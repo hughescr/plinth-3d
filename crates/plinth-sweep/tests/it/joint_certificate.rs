@@ -282,7 +282,7 @@ fn junction_hulls(primitives: &[SupportPrimitive]) -> Vec<SupportPrimitive> {
 /// which the run prints.
 #[test]
 fn the_certified_field_keeps_every_junction_hull_of_the_old_law_field() {
-    let (mut hulls, mut moved_without_the_reference, mut thinned) = (0_usize, 0_usize, 0_usize);
+    let (mut hulls, mut moved_without_the_reference, mut thinned, mut rings_met) = (0_usize, 0_usize, 0_usize, 0_usize);
     // The tall stilt plate is the pinned fixture with mid-shaft landings.
     let with_hulls = vec![(
         "tall stilt plate",
@@ -294,6 +294,49 @@ fn the_certified_field_keeps_every_junction_hull_of_the_old_law_field() {
         let (kept, old) = (junction_hulls(&on.emission.primitives), junction_hulls(&off.emission.primitives));
         assert_eq!(kept, old, "{name}: the certified field's hulls are not the old law's");
         hulls += old.len();
+        // The boundary geometry too: wherever a hull ring stands on the end of a
+        // drawn member frustum, that frustum ends on the ring's radius, to the bit
+        // (the shaft meets the old ring, not the chord of the resized shaft).
+        for hull in &kept {
+            let plinth_support::FrustumRingNormal::Junction(rings) = hull.ring_normal else {
+                continue;
+            };
+            for ring in rings.rings() {
+                let centre = point(if ring.at_start { ring.frustum_start_mm } else { ring.frustum_end_mm });
+                let axis = geom_kernel::vec3::normalize(geom_kernel::vec3::sub(
+                    point(ring.frustum_end_mm),
+                    point(ring.frustum_start_mm),
+                ));
+                for member in on.emission.primitives.iter().filter(|p| {
+                    matches!(p.segment_kind, SupportSegmentKind::Member | SupportSegmentKind::ContactTaper)
+                        && !matches!(p.ring_normal, plinth_support::FrustumRingNormal::Junction(_))
+                }) {
+                    // The ring's own neighbour: a frustum on the same axis. (Another
+                    // member can end on the same point, at its own radius: a branch
+                    // landing on a host's piece boundary.)
+                    let member_axis = geom_kernel::vec3::normalize(geom_kernel::vec3::sub(
+                        point(member.end_mm),
+                        point(member.start_mm),
+                    ));
+                    let parallel = match (axis, member_axis) {
+                        (Some(a), Some(b)) => geom_kernel::vec3::norm(geom_kernel::vec3::cross(a, b)) < 1e-6,
+                        _ => false,
+                    };
+                    if !parallel {
+                        continue;
+                    }
+                    for (end, radius) in [(member.start_mm, member.start_radius_mm), (member.end_mm, member.end_radius_mm)] {
+                        if near(point(end), centre, 1e-9) {
+                            assert_eq!(
+                                radius, ring.radius_mm,
+                                "{name}: a frustum ends on a hull ring's centre at another radius"
+                            );
+                            rings_met += 1;
+                        }
+                    }
+                }
+            }
+        }
         thinned += on
             .plan
             .struts
@@ -327,6 +370,7 @@ fn the_certified_field_keeps_every_junction_hull_of_the_old_law_field() {
             moved_without_the_reference += 1;
         }
     }
-    println!("hulls {hulls}, shafts thinned {thinned}, fixtures whose hulls move without the reference {moved_without_the_reference}");
+    println!("hulls {hulls}, hull rings met by a frustum end {rings_met}, shafts thinned {thinned}, fixtures whose hulls move without the reference {moved_without_the_reference}");
     assert!(hulls > 0, "no fixture has a junction hull: the test would pass vacuously");
+    assert!(rings_met > 0, "no hull ring stands on a frustum end: the ring check would pass vacuously");
 }
