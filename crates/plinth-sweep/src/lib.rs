@@ -68,6 +68,7 @@ pub(crate) mod model_tie;
 pub mod orient_demand;
 pub mod peel;
 pub mod per_event;
+pub(crate) mod provenance;
 pub mod raster;
 pub mod reach;
 pub mod report;
@@ -242,6 +243,14 @@ pub struct SweepStrut {
     /// Demand cells this arm newly rooted when it went in. The removal pass
     /// asks whether a survivor still covers each of them.
     pub covered_demand: Vec<usize>,
+    /// A twin seat was merged into this arm ([`up_sweep::twin_host`], owner
+    /// ruling 2026-10-10). Before the merge the twin's shaft landed on this
+    /// arm, and an arm another member rests on is never moved by the passes
+    /// that re-route arms (`landing_check::carries_someone`). The merge must
+    /// not strip that protection: the arm it absorbed the twin into would
+    /// otherwise be re-landed by those passes as a lone leaf (Deinonychus arm
+    /// 183: leaned 5.55 mm out for a 0.018 mm sliver of two census discs).
+    pub twin_host: bool,
     /// Placed by the down-sweep because the registered area law asked for the
     /// section, not by the up-sweep because reach asked for the cover. Such an
     /// arm roots no demand cell — `covered_demand` is empty by construction —
@@ -712,6 +721,13 @@ pub struct SweepPolicy {
     /// beside the one it laps, as before (the Cylinder's drain ring).
     /// Sabotage and comparison only; nothing in the pipeline turns it off.
     pub stranded_branch: bool,
+    /// Whether a seat whose tip ball overlaps an earlier seat's tip ball is
+    /// merged into that seat instead of drawn as a second arm
+    /// (`up_sweep::twin_host`, owner ruling 2026-10-10). **On in production.**
+    /// With it false every such twin is drawn, as before: its shaft then blocks
+    /// the first arm's head and the twin leans away (`DEINO-DIAGNOSIS.md`).
+    /// Sabotage and comparison only; nothing in the pipeline turns it off.
+    pub twin_merge: bool,
     /// Whether reach and load routing measure a lateral run as its straight
     /// length (`reach::any_angle_relax`, 2026-09-30). **On in production.**
     /// With it false both sweeps fall back to the 8-neighbour chamfer, which
@@ -1059,6 +1075,7 @@ impl SweepPolicy {
             creep_overhang_cut: true,
             stranded_seating: true,
             stranded_branch: true,
+            twin_merge: true,
             straight_reach: true,
             island_seating: true,
             seat_face_band: true,
@@ -1275,6 +1292,16 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_stranded_branch(mut self) -> Self {
         self.stranded_branch = false;
+        self
+    }
+
+    /// Draw every twin seat as its own arm, as before 2026-10-10.
+    /// **Sabotage and comparison only**: with it set, a sharp tip's second
+    /// seat one layer above the first is drawn again, and its shaft blocks the
+    /// first arm's head.
+    #[must_use]
+    pub const fn without_twin_merge(mut self) -> Self {
+        self.twin_merge = false;
         self
     }
 
@@ -1722,6 +1749,7 @@ pub fn run_sweep_with_holes(
         GreedyScratch::legacy(&grid, lamina_reach_mm)
     };
     greedy.stranded_seating = policy.stranded_seating;
+    greedy.twin_merge = policy.twin_merge;
     greedy.separation_mm = if policy.straight_reach {
         up_sweep::hex_separation_mm(lamina_reach_mm, grid.pitch_mm())
     } else {
@@ -2021,6 +2049,10 @@ pub fn run_sweep_with_holes(
         "up-sweep and down-sweep",
         &landing_check::check_landings(&struts, height),
     );
+    // Which pass last moved each member, for the unbraced-run warnings (log
+    // text only, see `provenance`). One note after each pass that edits a landing.
+    let mut moves = provenance::Moves::default();
+    moves.note("up-sweep and down-sweep", &struts);
     let mut removals = 0_u64;
     let mut removals_refused_by_span = 0_u64;
     let mut removal_passes_rolled_back = 0_u64;
@@ -2136,6 +2168,7 @@ pub fn run_sweep_with_holes(
         removals += accepted as u64;
     }
     landings.record("removal", &landing_check::check_landings(&struts, height));
+    moves.note("removal and re-sizing", &struts);
     // The interior test again, now that the down-sweep has added arms of its
     // own. Same test, same column history; running it twice is cheaper than
     // giving the down-sweep a reason to know about the up-sweep's history.
@@ -2180,6 +2213,7 @@ pub fn run_sweep_with_holes(
         );
     }
     landings.record("un-merge", &landing_check::check_landings(&struts, height));
+    moves.note("un-merge", &struts);
 
     // AND ONCE MORE, ON THE FINISHED FIELD. `unmerge_overgrown` moves an arm
     // off its trunk and onto whatever the descent recorded as its straight
@@ -2293,6 +2327,7 @@ pub fn run_sweep_with_holes(
     congestion_outcome.at_lane_exit =
         congestion::measure(&grid, &history, &struts, policy.flare_r_factor);
     landings.record("congestion", &landing_check::check_landings(&struts, height));
+    moves.note("congestion", &struts);
 
     // (`seat_face_rule`, the faces a tip may carry, is fixed above the
     // up-sweep: the head rule reads it too.)
@@ -2445,6 +2480,7 @@ pub fn run_sweep_with_holes(
             "stranded-seat branches",
             &landing_check::check_landings(&struts, height),
         );
+        moves.note("stranded-seat branches", &struts);
     }
     stranded_branch_outcome.branches_kept = stranded_branch_outcome.branches.len();
     stranded_branch_outcome.lapping_ids_after =
@@ -2454,6 +2490,7 @@ pub fn run_sweep_with_holes(
     let (mut slenderness_outcome, forced_merges) =
         slenderness::apply_merges(&slenderness_context, &mut struts);
     landings.record("slenderness merges", &landing_check::check_landings(&struts, height));
+    moves.note("slenderness merges", &struts);
     stranded_branch_outcome.lapping_by_lane.push((
         "slenderness merges",
         stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
@@ -2528,6 +2565,7 @@ pub fn run_sweep_with_holes(
             "un-merge after slenderness merges",
             &landing_check::check_landings(&struts, height),
         );
+        moves.note("un-merge after slenderness merges", &struts);
         stranded_branch_outcome.lapping_by_lane.push((
             "un-merge after slenderness merges",
             stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
@@ -2589,6 +2627,7 @@ pub fn run_sweep_with_holes(
     }
     if policy.lip_seat {
         landings.record("lip seats", &landing_check::check_landings(&struts, height));
+        moves.note("lip seats", &struts);
         stranded_branch_outcome.lapping_by_lane.push((
             "lip seats",
             stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
@@ -2612,6 +2651,7 @@ pub fn run_sweep_with_holes(
             profiles,
             rule,
             flare_factor: policy.flare_r_factor,
+            slices: &slices,
         };
         if graze::convert(&graze_env, &mut struts, &mut graze_outcome) > 0 {
             perf::add(PerfWork::SweepDownCallGraze, 1);
@@ -2626,6 +2666,7 @@ pub fn run_sweep_with_holes(
             );
             set_interior(&mut struts, &history);
             landings.record("graze heads", &landing_check::check_landings(&struts, height));
+            moves.note("graze heads", &struts);
             stranded_branch_outcome.lapping_by_lane.push((
                 "graze heads",
                 stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
@@ -2672,6 +2713,7 @@ pub fn run_sweep_with_holes(
             set_interior(&mut struts, &history);
         }
         landings.record("head joins", &landing_check::check_landings(&struts, height));
+        moves.note("head joins", &struts);
         stranded_branch_outcome.lapping_by_lane.push((
             "head joins",
             stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
@@ -2699,6 +2741,7 @@ pub fn run_sweep_with_holes(
             "lip seats after head joins",
             &landing_check::check_landings(&struts, height),
         );
+        moves.note("lip seats after head joins", &struts);
         stranded_branch_outcome.lapping_by_lane.push((
             "lip seats after head joins",
             stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
@@ -2804,6 +2847,7 @@ pub fn run_sweep_with_holes(
         .map(|strut| strut.id)
         .collect();
     landings.record("slenderness ties", &landing_check::check_landings(&struts, height));
+    moves.note("slenderness ties", &struts);
     stranded_branch_outcome.lapping_by_lane.push((
         "slenderness ties",
         stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
@@ -2852,6 +2896,7 @@ pub fn run_sweep_with_holes(
             "clearance re-route",
             &landing_check::check_landings(&struts, height),
         );
+        moves.note("clearance re-route", &struts);
         // **THE TIES ARE PLANNED AGAIN WHERE THE RE-ROUTE MOVED ANYTHING**
         // (lane cylinder-bracing, rule D, 2026-10-05). The ladder above ran on
         // the field BEFORE the re-route, so a run the move made (a branch
@@ -2931,6 +2976,7 @@ pub fn run_sweep_with_holes(
                 "ties after the clearance re-route",
                 &landing_check::check_landings(&struts, height),
             );
+            moves.note("ties after the clearance re-route", &struts);
         }
     }
     // The finished field's own check, and the load it lost if any landing is
@@ -3037,6 +3083,16 @@ pub fn run_sweep_with_holes(
             &mast_ids,
         );
     publish_runs(&mut slenderness_outcome, &slenderness_after, &[]);
+    // The pass that last moved each member that has a run, for the warning
+    // lines (log text only).
+    slenderness_outcome.last_moved_by = slenderness_after
+        .iter()
+        .filter_map(|run| {
+            struts
+                .get(run.strut_id as usize)
+                .map(|strut| (run.strut_id, moves.last(strut)))
+        })
+        .collect();
 
     // The congestion census AFTER, from the same function that measured it
     // before, read off the FINISHED field — so what is published describes the
@@ -3177,6 +3233,7 @@ pub fn run_sweep_with_holes(
     report.counters.island_seats_saved = greedy.seats_saved;
     report.counters.island_seats = greedy.island_seats;
     report.counters.stranded_seats = greedy.stranded_seats;
+    report.counters.twin_seats_merged = greedy.twin_merges;
     report.counters.island_hex_bound = greedy.island_hex_bound;
     greedy.heads.publish(&mut report.heads);
     // The heads the graze conversion added (Craig 2026-10-08) join the
@@ -4991,7 +5048,7 @@ mod removal_tests {
             interior: false,
             radius_mm: Vec::new(),
             carried_mm2: Vec::new(),
-            covered_demand: Vec::new(),
+            covered_demand: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             seat_face: crate::SeatFace::default(),
@@ -5158,7 +5215,7 @@ mod removal_tests {
             // Below minimum_load_mm2: this is exactly the state that made a
             // load-inserted arm a removal candidate before the fix.
             carried_mm2: vec![0.5],
-            covered_demand: Vec::new(),
+            covered_demand: Vec::new(), twin_host: false,
             inserted_by_load: true,
             path: Vec::new(),
             seat_face: crate::SeatFace::default(),
@@ -5203,7 +5260,7 @@ mod removal_tests {
             interior: false,
             radius_mm: vec![0.1],
             carried_mm2: vec![carried],
-            covered_demand: Vec::new(),
+            covered_demand: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             seat_face: crate::SeatFace::default(),

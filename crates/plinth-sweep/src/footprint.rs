@@ -1594,7 +1594,7 @@ mod move_check_tests {
             interior: false,
             radius_mm: vec![0.1; 100],
             carried_mm2: vec![0.0; 100],
-            covered_demand: Vec::new(),
+            covered_demand: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             straight_fallback: None,

@@ -175,6 +175,13 @@ pub fn stands_at(parent: &SweepStrut, cell: usize, layer: usize) -> bool {
 pub fn carries_someone(struts: &[SweepStrut]) -> Vec<bool> {
     let mut carries = vec![false; struts.len()];
     for strut in struts {
+        // An arm a twin seat was merged into carried that twin before the
+        // merge (`SweepStrut::twin_host`): it stays where it stands.
+        if strut.twin_host {
+            if let Some(flag) = carries.get_mut(strut.id as usize) {
+                *flag = true;
+            }
+        }
         if let Landing::Strut { id, .. } = strut.landing {
             if let Some(flag) = carries.get_mut(id as usize) {
                 *flag = true;
@@ -323,7 +330,7 @@ mod tests {
             interior: false,
             radius_mm: Vec::new(),
             carried_mm2: Vec::new(),
-            covered_demand: Vec::new(),
+            covered_demand: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             seat_face: crate::SeatFace::default(),
@@ -384,6 +391,18 @@ mod tests {
         let broken = check_landings(&[trunk, child], 0.05);
         assert_eq!(broken.parent_elsewhere, vec![1]);
         assert_eq!(broken.unrooted, vec![1]);
+    }
+
+    /// An arm a twin seat was merged into counts as carrying someone, as it
+    /// did when the twin rested on it, so the passes that never move a parent
+    /// (`lip_seat`, `graze`, the slenderness merges) leave it where it stands.
+    #[test]
+    fn an_arm_a_twin_was_merged_into_carries_its_twins_place() {
+        let plain = arm(0, 5, 100, 0, Landing::Plate);
+        let mut host = arm(1, 9, 100, 0, Landing::Plate);
+        assert_eq!(super::carries_someone(&[plain.clone(), host.clone()]), vec![false, false]);
+        host.twin_host = true;
+        assert_eq!(super::carries_someone(&[plain, host]), vec![false, true]);
     }
 
     /// A cycle roots nothing, and the walk terminates.

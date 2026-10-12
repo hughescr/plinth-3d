@@ -633,6 +633,13 @@ fn lean_congested_roots(
             }
         }
     }
+    // THE ARM A TWIN WAS MERGED INTO KEEPS ITS TWIN'S PLACE: the twin it
+    // absorbed rested on it, so before the merge it was not a candidate.
+    for strut in struts.iter().filter(|strut| strut.twin_host) {
+        if let Some(flag) = carries_someone.get_mut(strut.id as usize) {
+            *flag = true;
+        }
+    }
     let mut moved = 0_usize;
     for id in congested {
         // A HEADED arm is never re-routed: its head is frozen at placement.
@@ -953,7 +960,7 @@ fn seat_flank_arms(
             interior: false,
             radius_mm: Vec::new(),
             carried_mm2: Vec::new(),
-            covered_demand: Vec::new(),
+            covered_demand: Vec::new(), twin_host: false,
             // A flank arm roots no demand cell — it exists to take load off a
             // crowded footprint, not to cover reach — so the removal pass's
             // coverage test would be vacuously true for it. The same flag the

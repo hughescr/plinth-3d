@@ -606,6 +606,11 @@ pub struct PathHits {
     /// one in reach stood in a drain's escape cylinder
     /// (`up_sweep::stranded_seat_for`). Zero on a model without drains.
     pub stranded_seats: u64,
+    /// Seats NOT drawn because an earlier seat's tip ball overlapped theirs
+    /// (`up_sweep::twin_host`, 2026-10-10): their demand went to that seat.
+    /// Zero on a model with no sharp tip, which a green twin test must not be
+    /// allowed to mean.
+    pub twin_seats_merged: u64,
     pub island_hex_bound: u64,
     /// The finished plan's member tops (arms and braces) given a carried face,
     /// those whose NEAREST down-facing face was a wall or a face steeper than

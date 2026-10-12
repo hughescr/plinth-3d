@@ -1471,7 +1471,7 @@ mod census_tests {
             interior: false,
             radius_mm: vec![r; k_top - k_bottom + 1],
             carried_mm2: Vec::new(),
-            covered_demand: Vec::new(),
+            covered_demand: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             straight_fallback: None,
