@@ -1484,58 +1484,6 @@ fn drawn_at_with(
     (radius.is_finite() && radius > 0.0).then_some(radius)
 }
 
-/// **The root the thicken rung would raise a whole-member run to**, or `None`
-/// where even the registered maximum radius cannot hold it: the rung's own
-/// taper ([`plan_thicken`]), tip kept at `top_mm`, the root raised, each layer
-/// the larger of that taper and `drawn_bottom_first`, graded by the same
-/// equivalent radius against `run_mm`. The lip-seat rule asks it before it
-/// takes a lean (Q1), so the lean it refuses is one this rung could not
-/// hold, not one a uniform radius could not (q12 regressions, 2026-10-12: on
-/// `make_brace_pair` the uniform reading refused a 12.6 mm lean that this
-/// taper holds at a 0.4 mm root clear of the model).
-pub(crate) fn taper_root_to_hold_mm(
-    law: &SlendernessLaw,
-    drawn_bottom_first: &[f64],
-    top_mm: f64,
-    run_mm: f64,
-) -> Option<f64> {
-    let n = drawn_bottom_first.len().max(1);
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "a slot count bounded by the plan's own layer count is exact in f64"
-    )]
-    let steps = n.saturating_sub(1).max(1) as f64;
-    let holds = |root: f64| {
-        equivalent_radius(n, |j| {
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "a slot index bounded by the layer count is exact in f64"
-            )]
-            let t = j as f64 / steps;
-            let wanted = root * (1.0 - t) + top_mm * t;
-            Some(drawn_bottom_first.get(j).map_or(wanted, |&here| here.max(wanted)))
-        })
-        .is_some_and(|radius| law.max_unbraced_mm(radius) >= run_mm)
-    };
-    let low_start = top_mm.min(law.r_max_mm);
-    if holds(low_start) {
-        return Some(low_start);
-    }
-    if !holds(law.r_max_mm) {
-        return None;
-    }
-    let (mut low, mut high) = (low_start, law.r_max_mm);
-    for _ in 0..64 {
-        let middle = 0.5 * (low + high);
-        if holds(middle) {
-            high = middle;
-        } else {
-            low = middle;
-        }
-    }
-    Some(high)
-}
-
 /// `r_eq` of `n` layers, bottom first, from a radius per layer: the uniform
 /// radius whose cantilever sways as far (see [`UnbracedRun::radius_mm`]).
 /// Layers with no radius are left out and the weights re-normalised.

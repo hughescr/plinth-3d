@@ -1173,44 +1173,41 @@ fn a_one_layer_stub_is_not_kept_in_place_of_a_lean() {
     assert_eq!(taken[0].landing, Landing::Plate);
 }
 
-/// **A LEAN THE THICKEN RUNG'S TAPER HOLDS IS NOT REFUSED** (q12 regressions,
-/// 2026-10-12, `q12/REGRESSIONS.md` items 1 and 2). A lean leaving its seat
-/// face reads its clearance at the gap itself (its seat zone ends where the
-/// solid first stands the gap clear of the seat plane), so the uniform reading
-/// (`S` times the thickest uniform radius that keeps the gap) leaves it no
-/// room to grow anywhere. Q12 refused every such lean: `make_brace_pair` lost
-/// both masts and both thickened post roots, and the Morel base's arm 44 lost
-/// its 5.2 mm trunk and was emitted as a 0.17 mm stub. The rung itself keeps
-/// the tip and raises the root, which stands far from the seat face.
+/// **A LEAN ONLY THE THICKEN RUNG'S TAPER WOULD HOLD IS REFUSED WHILE THE ARM
+/// STANDS AS A SUPPORT** (q12 regressions, 2026-10-12, review). A lean leaving
+/// its seat face reads its clearance at the gap itself, so the uniform reading
+/// (`S` times the thickest radius that keeps the gap) leaves it no room to
+/// grow, although the rung's taper (tip kept, root raised away from the face)
+/// would hold it clear of the model. Admitting such leans (`ff2e64c`) took ten
+/// more leans on Deinonychus than Q12 did, two of them the long slanted runs
+/// Q12 removed; the arms the taper reading was for (`make_brace_pair` arm 3,
+/// the Morel base's arm 44) emit as before without it.
 ///
-/// The configuration of the tests above, at S = 50 (a slab over a straight
-/// 0.1 mm arm, a run of about 10.2 mm, which needs a uniform 0.2 mm: more than
-/// the measured clearance leaves room for). CONTROL: the low wall
-/// beside the cheapest descent, which the tapered root would enter: the lean
-/// is refused and the arm kept. TEST: no wall; the uniform reading still
-/// refuses (the path hit counts only leans it refused), the taper is clear
-/// of the model, and the arm leans to the plate. SABOTAGE (run by hand,
-/// 2026-10-12): `lean_too_slender` returns `Cannot` where it returns `Taper`
-/// (the Q12 reading), the arm is kept (`moved` 0); the taper read through the
-/// capsule entry point (`segment_clearance_classified`, the wider radius all
-/// along), it reads 0.18 mm clear of the slab and the arm is kept.
+/// A slab over a straight 0.1 mm arm, at S = 50 (a run of about 10.2 mm, which
+/// needs a uniform 0.2 mm: more than the measured clearance leaves room for;
+/// with no wall the taper stands clear of the slab, the fixture on which
+/// `ff2e64c` took the lean). TEST: the arm stands as a straight post to the
+/// plate, a support, and is kept, its lean refused. CONTROL: the same seat
+/// stands as a one-layer stub onto the model; the lean is taken (the kept-arm
+/// test), so the refusal above is the slenderness test's and not a fixture
+/// with no admissible lean. SABOTAGE: the taper admission (`ff2e64c`
+/// `lean_too_slender` stage 2) takes the TEST lean, which that commit's own
+/// test asserted on this fixture (`moved` 1).
 #[test]
-fn a_lean_the_thicken_taper_holds_is_taken() {
+fn a_lean_only_the_taper_would_hold_is_refused_while_the_arm_stands() {
     let grid = grid();
     let history = ColumnHistory::new(&grid);
     let keep_out = crate::drain::DrainKeepOut::none();
     let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
     let law = crate::slenderness::SlendernessLaw::new(50.0, 0.05, 1.0, 32.5);
-    let slab =([0.0, 0.0, 10.0], [15.0, 15.0, 12.0]);
-    let wall = ([2.0, 7.93, 0.5], [13.0, 8.93, 3.0]);
+    let mesh = boxes_mesh(&[([0.0, 0.0, 10.0], [15.0, 15.0, 12.0])]);
     let plan = plinth_core::LayerPlan::new(0.0, vec![H; 300]).expect("a uniform plan");
     let bite = plinth_support::ShaftSeatBite {
         bite_mm: 0.2,
         approach_deg: 60.0,
         limit_deg: 20.0,
     };
-    let run = |boxes: &[([f64; 3], [f64; 3])]| {
-        let mesh = boxes_mesh(boxes);
+    let run = |stub: bool| {
         let context = slender_context(&grid, &history, &keep_out, &lean, &law);
         let surface = std::cell::OnceCell::new();
         let joins = crate::head_join::HeadJoinContext {
@@ -1224,7 +1221,14 @@ fn a_lean_the_thicken_taper_holds_is_taken() {
             surface_max_bytes: 1 << 28,
             surface: &surface,
         };
-        let mut struts = vec![straight(&grid, 0, 150, 150, 200, 0.1)];
+        let mut arm = straight(&grid, 0, 150, 150, 200, 0.1);
+        if stub {
+            arm.k_bottom = 199;
+            arm.landing = Landing::Model { layer: 199 };
+            arm.radius_mm = vec![0.1; 2];
+            arm.carried_mm2 = vec![0.0; 2];
+        }
+        let mut struts = vec![arm];
         let arms = tilted_arms(&grid, &mut struts);
         let mut outcome = crate::lip_seat::LipSeatOutcome::default();
         let moves = crate::lip_seat::apply(
@@ -1240,16 +1244,16 @@ fn a_lean_the_thicken_taper_holds_is_taken() {
         );
         (struts, outcome, moves.len())
     };
-    let (kept, outcome, moved) = run(&[slab, wall]);
-    assert_eq!(moved, 0, "CONTROL: the taper would enter the gap at the wall: {outcome:?}");
-    assert_eq!(outcome.candidates_refused_slender, 1, "{outcome:?}");
-    assert_eq!(outcome.slender_held_by_taper, 0, "{outcome:?}");
+    let (kept, outcome, moved) = run(false);
+    assert_eq!(moved, 0, "the standing post is kept, the lean refused: {outcome:?}");
+    assert_eq!(outcome.candidates_refused_slender, 1, "PATH HIT: {outcome:?}");
+    assert_eq!(outcome.kept_for_slenderness_ids, vec![0], "{outcome:?}");
+    assert_eq!(outcome.slender_taken_kept_not_clear, 0, "{outcome:?}");
     assert_eq!(kept[0].base_cell(), kept[0].cell, "the arm keeps its seat");
-    let (taken, outcome, moved) = run(&[slab]);
-    assert!(outcome.slender_held_by_taper >= 1, "PATH HIT: the uniform reading refused it: {outcome:?}");
-    assert_eq!(outcome.candidates_refused_slender, 0, "{outcome:?}");
-    assert!(outcome.kept_for_slenderness_ids.is_empty(), "{outcome:?}");
-    assert_eq!(moved, 1, "the lean the taper holds is taken: {outcome:?}");
+    assert_eq!(kept[0].k_bottom, 0, "and its post to the plate");
+    let (taken, outcome, moved) = run(true);
+    assert_eq!(moved, 1, "CONTROL: a lean exists and a stub does not keep it out: {outcome:?}");
+    assert_eq!(outcome.slender_taken_kept_not_clear, 1, "{outcome:?}");
     assert!(taken[0].is_leaned(), "the arm leans to the plate");
     assert_eq!(taken[0].landing, Landing::Plate);
 }

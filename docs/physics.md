@@ -295,18 +295,24 @@ posts; measured 2026-10-12), so it is counted
 (`twin_seats_headed_host`) and left open (`q12/REGRESSIONS.md`).
 
 **A lean the slenderness law cannot hold is not taken, where the arm already stands as a support
-(quality lane Q1, refined 2026-10-12).** The lip-seat rule leans a whole arm along one axis. Where the
-ladder's thicken rung cannot hold that run (its taper, tip kept, root raised up to the registered
-maximum radius, with the thickened frustum keeping the final gap where the lean as drawn does), the
-lean is refused and the arm keeps its seat with its seat-bite warning (Deinonychus arms 215 and 220).
-Two things are read, not assumed. The clearance of a lean leaving its seat face is the gap itself (its
-seat zone ends where the solid first stands the gap clear of the seat plane), so a uniform radius
-taken from that minimum is the drawn radius everywhere; the rung's own frustum is read instead. And
-the refusal trades the lean for the arm as it stands, so that arm must be a support: a shaft longer
-than one layer whose solid does not enter the model. On the Morel base the kept arm was a one-layer
-stub onto the model wall beside its seat, tip off its face; on `make_brace_pair` it stood 0.149 mm
-inside the model, and the clearance re-route took the very lean later, after the ladder had planned
-the field without it, so both masts and both thickened post roots were lost. There the lean is taken.
+(quality lane Q1, refined 2026-10-12).** The lip-seat rule leans a whole arm along one axis. Where its
+run is longer than `S` times the thickest radius at which it keeps the final gap (the drawn radius
+grown by the spare gap measured for it, up to the registered maximum), the lean is refused and the arm
+keeps its seat with its seat-bite warning (Deinonychus arms 215 and 220). The refusal trades the lean
+for the arm as it stands, so that arm must be a support: a shaft longer than one layer whose solid
+does not enter the model. On the Morel base the kept arm (44) was a one-layer stub onto the model wall
+beside its seat, tip off its face; there the lean is taken. The test is arithmetic on the clearance
+the rule already reads for every proposal in one batched kernel call.
+
+This reading is conservative and that is a known, open trade. A lean leaving its seat face reads its
+clearance at the gap itself (its seat zone ends where the solid first stands the gap clear of the seat
+plane), so it reads "cannot grow", although the thicken rung's taper (tip kept, root raised away from
+the face) would hold many such leans clear of the model. Admitting those (tried 2026-10-12, `ff2e64c`)
+took ten more leans on Deinonychus than Q12 did, two of them the long slanted runs Q12 removed (8.4 mm
+at 48 deg and 12.7 mm at 30 deg, each about 6 mm sideways, both with model below), and changed
+`make_brace_pair` only at arm 3 (kept, its seat slid along its face; both masts placed either way).
+Whether a lean the taper holds should replace a standing support is the owner's call
+(`q12/REGRESSIONS.md`).
 
 **The clearance re-route after the final sizing.** The up-sweep places an arm at a lower bound
 of the radius it is later drawn at (the area law and the thickening grow it), so after the final

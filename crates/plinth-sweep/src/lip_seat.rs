@@ -61,11 +61,13 @@
 //!    member, the longest goes back first, alone, and the field is sized
 //!    again before the next (fix/lip-seat-blame, 2026-10-01). **A lean the
 //!    slenderness law cannot hold is not taken** (Q1, 2026-10-10): when the
-//!    cheapest descent that passed every test runs longer than the slenderness
-//!    ladder's thicken rung can hold (its taper, tip kept, root raised up to
-//!    the registered maximum radius) while the thickened solid keeps the final
-//!    gap, the arm keeps its seat and falls to item 3. Seat-bite triggers
-//!    only; the clearance re-route is not asked.
+//!    cheapest descent that passed every test runs longer than `S` times the
+//!    thickest radius at which the arm still keeps the final gap (the spare
+//!    gap measured for it, up to the registered maximum radius), and the arm
+//!    as it stands is a support (longer than one layer, its solid not inside
+//!    the model; q12 regressions, 2026-10-12), the arm keeps its seat and
+//!    falls to item 3. Seat-bite triggers only; the clearance re-route is not
+//!    asked.
 //! 2. **A seat further in on the same face.** The footprint rule
 //!    (`footprint.rs`) already slides a seat along its face; a tip whose disc
 //!    is on its face but whose shaft the trim still bites joins its search,
@@ -202,37 +204,6 @@ fn solid_clearances(
     plate_z_mm: f64,
     tier: f64,
 ) -> Vec<Option<f64>> {
-    let radii: Vec<f64> = arms.iter().map(drawn_max_radius_mm).collect();
-    solid_clearances_tapered(surface, arms, on_model, layer_plan, plate_z_mm, tier, &radii, &radii)
-}
-
-/// [`solid_clearances`] with each solid a FRUSTUM: radius `top_radii[i]` at
-/// the seat end and `bottom_radii[i]` at the base. The seat zone ends where
-/// that frustum first stands `tier` clear of the seat plane: at distance `s`
-/// along the axis the plane is `s * along` away and the radius has grown by
-/// `s * k`, `k = (bottom - top) / length`, so `s = (tier + top) / (along - k)`
-/// (with equal radii, exactly the cylinder's `(tier + r) / along`). A frustum
-/// that never leaves its seat plane's gap (`along <= k`) has nothing outside
-/// its seat zone and reads `None`.
-///
-/// The kernel reads the row as the frustum the file draws
-/// (`segment_frustum_clearance_classified`), bit-identical to the capsule
-/// entry point for equal radii, so [`solid_clearances`] reads as it always
-/// did. The capsule entry point reads a tapered row at its WIDER radius all
-/// along: the thicken rung's root, 10 mm from the seat, was read beside the
-/// seat face, and a lean the taper holds read 0.18 mm clear of a slab it
-/// stands 0.31 mm from (`a_lean_the_thicken_taper_holds_is_taken`, 2026-10-12).
-#[expect(clippy::too_many_arguments, reason = "the batched SoA shape of the kernel call it wraps")]
-fn solid_clearances_tapered(
-    surface: &NativeSurface,
-    arms: &[SweepArm],
-    on_model: &[bool],
-    layer_plan: &LayerPlan,
-    plate_z_mm: f64,
-    tier: f64,
-    top_radii: &[f64],
-    bottom_radii: &[f64],
-) -> Vec<Option<f64>> {
     let discs = plinth_support::tip_contact_discs(arms, layer_plan)
         .unwrap_or_else(|_| vec![None; arms.len()]);
     let n = arms.len();
@@ -255,41 +226,36 @@ fn solid_clearances_tapered(
                 .map_or(arm.base_mm, |(_, bottom)| bottom)
         })
         .collect();
+    let radii: Vec<f64> = arms.iter().map(drawn_max_radius_mm).collect();
     let insets: Vec<f64> = arms
         .iter()
         .zip(&discs)
-        .zip(top_radii.iter().zip(bottom_radii))
+        .zip(&radii)
         .zip(&bases)
-        .map(|(((arm, disc), (&top, &bottom)), &base)| {
+        .map(|(((arm, disc), &radius), &base)| {
             let Some(disc) = disc else {
                 return f64::INFINITY;
             };
-            let offset = geom_kernel::vec3::sub(base, arm.seat_mm);
-            let Some(axis) = geom_kernel::vec3::normalize(offset) else {
+            let Some(axis) =
+                geom_kernel::vec3::normalize(geom_kernel::vec3::sub(base, arm.seat_mm))
+            else {
                 return f64::INFINITY;
             };
             let reach =
                 geom_kernel::vec3::norm(geom_kernel::vec3::sub(disc.ball_centre_mm, arm.seat_mm))
                     + disc.ball_radius_mm;
             let along = geom_kernel::vec3::dot(disc.outward_normal, axis);
-            // The radius grows by `k` per millimetre of axis; zero for a
-            // cylinder, so every caller that passes equal radii reads as it did.
-            let k = if bottom > top {
-                (bottom - top) / geom_kernel::vec3::norm(offset)
-            } else {
-                0.0
-            };
-            if along <= k {
+            if along <= 0.0 {
                 return f64::INFINITY;
             }
-            reach.max((tier + top) / (along - k))
+            reach.max((tier + radius) / along)
         })
         .collect();
     let landing_zones = crate::member_clearance::model_landing_zones_mm(
-        surface, &seats, &bases, bottom_radii, on_model, tier,
+        surface, &seats, &bases, &radii, on_model, tier,
     );
     surface
-        .segment_frustum_clearance_classified(&seats, &bases, top_radii, bottom_radii, 0.0, &insets, &landing_zones)
+        .segment_clearance_classified(&seats, &bases, &radii, &radii, 0.0, &insets, &landing_zones)
         .map_or_else(
             |_| vec![None; n],
             |rows| {
@@ -324,41 +290,35 @@ fn thickest_radius_keeping_gap_mm(
     (drawn_mm + (clearance_mm - gap_mm).max(0.0)).min(max_mm.max(drawn_mm))
 }
 
-/// **Whether the slenderness ladder's thicken rung cannot hold a proposed
-/// lean** (Q1): the lean `arm` (drawn as the trial draws it, measured `now`
-/// clear of the model) for `strut`, landing as `candidate` proposes.
+/// **Whether a proposed lean is longer than the slenderness law holds at the
+/// thickest radius its measured clearance leaves room for** (Q1): the lean
+/// `arm` (drawn as the trial draws it, measured `now` clear of the model in
+/// the pass's one batched clearance read) for `strut`, landing as `candidate`
+/// proposes. The run is the chord the ladder measures; the radius is the drawn
+/// radius grown by the spare gap ([`thickest_radius_keeping_gap_mm`]), up to
+/// the registered maximum. Arithmetic only: no kernel read of its own.
 ///
-/// 1. Arithmetic: the run (the chord the ladder measures) against `S` times
-///    the thickest UNIFORM radius the measured clearance leaves room for
-///    ([`thickest_radius_keeping_gap_mm`]). A run within it is held.
-/// 2. Otherwise the rung's own remedy: the root its taper needs with the tip
-///    kept ([`crate::slenderness::taper_root_to_hold_mm`]; none at all below
-///    the maximum radius means it cannot hold), drawn as that frustum and read
-///    against the model. It cannot hold where that frustum comes nearer the
-///    model than the gap, or than the lean as drawn already stands.
-///
-/// Stage 2 exists because the clearance of a lean leaving its seat face is
-/// about the gap itself: the seat zone ends where the solid first stands the
-/// gap clear of the seat plane, so the minimum is read there, at the TIP end,
-/// where the rung never adds radius. Stage 1 alone reads such a lean as
-/// "cannot grow at all" wherever it stands (`make_brace_pair` arm 3 and the
-/// Morel base's arm 44 read 0.3000 and 0.3002 mm; q12 regressions,
-/// 2026-10-12).
-///
-/// One kernel read of one row, at most once per arm per pass: it is asked only
-/// of the cheapest descent that passed every other test, and either answer
-/// ends that arm's search (a refusal keeps the seat, an admission commits the
-/// move). A lean with no measured frustum is not refused: nothing proves it
-/// cannot be held.
+/// **Not the thicken rung's taper** (q12 regressions, 2026-10-12, review).
+/// A lean leaving its seat face reads its minimum clearance at the gap itself
+/// (its seat zone ends where the solid first stands the gap clear of the seat
+/// plane), so this reading leaves it no room to grow anywhere, although the
+/// rung's taper (tip kept, root raised away from the seat face) would hold
+/// many such leans clear of the model. Admitting those (`ff2e64c`, the taper
+/// drawn as a frustum and read against the model) took ten more leans on
+/// Deinonychus that Q12 kept as standing arms, two of them the long slanted
+/// runs Q12 removed (8.4 mm at 48 deg and 12.7 mm at 30 deg, each about 6 mm
+/// sideways; `q12/REGRESSIONS.md`), while the arms it was meant for are
+/// taken by the kept-arm test in [`apply`] instead: a lean refused here is
+/// refused only while the arm as it stands is a support. Whether a held lean
+/// should replace a standing support is the owner's call, open.
 fn lean_too_slender(
     context: &SlendernessContext<'_>,
-    surface: Option<&NativeSurface>,
     strut: &SweepStrut,
     candidate: &Candidate,
     arm: &SweepArm,
     now: f64,
-    (layer_plan, plate_z_mm, tier): (&LayerPlan, f64, f64),
-) -> LeanHold {
+    tier: f64,
+) -> bool {
     let law = context.law;
     #[expect(
         clippy::cast_precision_loss,
@@ -366,48 +326,9 @@ fn lean_too_slender(
     )]
     let drop_mm = strut.k_top.saturating_sub(candidate.k_bottom) as f64 * context.layer_height_mm;
     let run_mm = drop_mm.hypot(crate::cell_distance_mm(context.grid, strut.cell, candidate.cell));
-    let drawn = drawn_max_radius_mm(arm);
-    if run_mm <= law.max_unbraced_mm(thickest_radius_keeping_gap_mm(drawn, now, tier, law.max_radius_mm())) {
-        return LeanHold::Uniform;
-    }
-    let top = arm.radius_profile_mm.last().copied().unwrap_or(arm.tip_radius_mm);
-    let Some(root) = crate::slenderness::taper_root_to_hold_mm(law, &arm.radius_profile_mm, top, run_mm) else {
-        return LeanHold::Cannot;
-    };
-    let Some(surface) = surface else {
-        return LeanHold::Unmeasured;
-    };
-    let on_model = [matches!(candidate.landing, Landing::Model { .. })];
-    let enters_gap = solid_clearances_tapered(
-        surface,
-        std::slice::from_ref(arm),
-        &on_model,
-        layer_plan,
-        plate_z_mm,
-        tier,
-        &[top],
-        &[root.max(drawn)],
-    )
-    .first()
-    .copied()
-    .flatten()
-    .is_some_and(|clear| clear < tier.min(now) - CLEARANCE_SLACK_MM);
-    if enters_gap { LeanHold::Cannot } else { LeanHold::Taper }
-}
-
-/// What [`lean_too_slender`] found for one proposed lean.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LeanHold {
-    /// Held by a uniform radius the measured clearance leaves room for.
-    Uniform,
-    /// Not held uniformly, held by the thicken rung's taper clear of the
-    /// model (the q12-regression path: `make_brace_pair`, the Morel base).
-    Taper,
-    /// Not held uniformly and no surface to read the taper against: not
-    /// refused, nothing proves it cannot be held.
-    Unmeasured,
-    /// The thicken rung cannot hold it within the final gap.
-    Cannot,
+    let fit_mm =
+        thickest_radius_keeping_gap_mm(drawn_max_radius_mm(arm), now, tier, law.max_radius_mm());
+    run_mm > law.max_unbraced_mm(fit_mm)
 }
 
 /// One arm the finished field still has with its shaft cut by its seat trim.
@@ -542,10 +463,9 @@ pub struct LipSeatOutcome {
     /// Refused because a moved member's drawn solid would come nearer the
     /// model than the final gap, or than it already stood.
     pub candidates_refused_clearance: usize,
-    /// Refused because the lean's straight run is longer than the slenderness
-    /// ladder's thicken rung can hold with the thickened solid keeping the
-    /// final gap, while the arm as it stands is a support (Q1, 2026-10-10;
-    /// q12 regressions, 2026-10-12).
+    /// Refused because the lean's straight run is longer than `S` times the
+    /// thickest radius at which the arm keeps the final gap, while the arm as
+    /// it stands is a support (Q1, 2026-10-10; q12 regressions, 2026-10-12).
     pub candidates_refused_slender: usize,
     /// Of the arms kept with no admissible descent, those that had a lean
     /// refused for its slenderness (they keep the seat-bite WARNING).
@@ -553,18 +473,11 @@ pub struct LipSeatOutcome {
     /// The arms that had a lean refused for its slenderness (each once), the
     /// last pass's list.
     pub kept_for_slenderness_ids: Vec<u32>,
-    /// Leans the thicken rung cannot hold that were TAKEN anyway, because the
+    /// Leans the slenderness test refused that were TAKEN anyway, because the
     /// arm as it stands is no support (a one-layer stub, or a solid inside the
     /// model): nothing better to keep (q12 regressions, 2026-10-12). The path
     /// hit of that test.
     pub slender_taken_kept_not_clear: usize,
-    /// Leans the uniform-radius reading would have refused (the run longer
-    /// than `S` times the thickest uniform radius the measured clearance leaves
-    /// room for) that the thicken rung's taper holds clear of the model, and
-    /// so were not refused: the path hit of the q12-regression fix that gave
-    /// `make_brace_pair` its masts and the Morel base's arm 44 its trunk back
-    /// (`q12/REGRESSIONS.md`, 2026-10-12). Summed over every pass.
-    pub slender_held_by_taper: usize,
     /// Moved members (a mover, a follower) whose solid was NOT read against
     /// the final gap because it stands in a hidden cavity (Craig ruling
     /// 2026-10-05): the path hit of that ruling in the landing search.
@@ -1385,12 +1298,14 @@ pub(crate) fn apply(
             // thicken it (the thicker solid would enter the gap) and the arm
             // ends as an `unbraced_run_over_limit` warning on a long thin rod
             // (Deinonychus arms 215 and 220: runs 3.3x and 5.3x their limit).
-            // The test is the thicken rung's own: the root that rung's taper
-            // (tip kept) needs to hold the run, and whether that frustum
-            // keeps the gap ([`lean_too_slender`]). The run is the chord the
-            // ladder measures (`slenderness::run_length`: the drop and the
-            // lateral move between the seat and base cells) and its limit is
-            // the existing `S * r`.
+            // The thickest radius that still keeps the gap follows from the
+            // clearance just measured: the spare gap, `clearance - gap`, is
+            // the radius it can grow by, up to the registered maximum. The
+            // run is the chord the ladder measures (`slenderness::run_length`:
+            // the drop and the lateral move between the seat and base cells)
+            // and its limit is the existing `S * r` ([`lean_too_slender`]:
+            // arithmetic on this pass's batched clearance read, no kernel
+            // call of its own; why not the thicken rung's taper, there).
             //
             // **AND ONLY WHERE THE ARM AS IT STANDS IS A SUPPORT** (q12
             // regressions, 2026-10-12). The refusal trades the lean for the arm
@@ -1398,12 +1313,9 @@ pub(crate) fn apply(
             // layer, whose solid does not enter the model (`before[first]`,
             // measured above in the same batch; unmeasured is not proof of
             // entry). The Morel base's arm 44 stood as a stub one layer long
-            // onto the model wall beside its seat, its tip off its face; the
-            // brace pair's arm 3 stood 0.149 mm INSIDE the model, and the
-            // clearance re-route took the very lean refused here after the
-            // ladder had planned the field without it, so its two masts and
-            // both thickened post roots were lost. There the lean is taken as
-            // before Q1 and left to the ladder.
+            // onto the model wall beside its seat, its tip off its face (Q12
+            // kept it in place of its 7.5 mm plate lean). There the lean is
+            // taken as before Q1 and left to the ladder.
             //
             // This is the LAST test, after the plate, root, measured-section,
             // lock and live-path tests above: a descent one of those refuses
@@ -1417,24 +1329,20 @@ pub(crate) fn apply(
             // radius are the law's own. The clearance re-route is not asked
             // (it was sent for the gap itself), and a mover in a hidden
             // cavity, where the gap does not apply, is not asked either.
-            let hold = (!trigger.is_clearance() && !hidden(first))
+            let too_slender = (!trigger.is_clearance() && !hidden(first))
                 .then_some(after[first])
                 .flatten()
-                .map(|now| {
+                .is_some_and(|now| {
                     lean_too_slender(
                         context,
-                        surface,
                         &struts[index_of],
                         &proposal.candidate,
                         &trial[first],
                         now,
-                        (layer_plan, plate_z_mm, tier),
+                        tier,
                     )
                 });
-            if hold == Some(LeanHold::Taper) {
-                outcome.slender_held_by_taper += 1;
-            }
-            if hold == Some(LeanHold::Cannot) {
+            if too_slender {
                 let standing = &struts[index_of];
                 let kept_is_a_support = before[first].is_none_or(|was| was >= -CLEARANCE_SLACK_MM)
                     && standing.k_top > standing.k_bottom.saturating_add(1);
