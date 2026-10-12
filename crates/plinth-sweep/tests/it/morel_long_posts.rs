@@ -301,10 +301,10 @@ fn every_brace_end_on_the_laid_tube_meets_its_posts_drawn_solid() {
         // run the merge would have joined is braced instead: 1028 ends, 48 on
         // leaning plate posts and 21 missing on the planned line (measured
         // 2026-10-11, release). The rule under test lives in the adapter and
-        // reads neither the merge nor the lip-seat lean.
-        // REVIEW after the Q12-regression fix (quality/q12-regressions-2026-10-11):
-        // this knob masks the Q1 effect on the witness field; drop it if the
-        // fix brings the planned-line misses back without it.
+        // reads neither the merge nor the lip-seat lean. Reviewed after the
+        // Q12-regression fix (quality/q12-regressions-2026-10-11, 2026-10-12):
+        // without the knob the field still misses nothing on the planned line,
+        // so the knob stays.
         (
             "creep cut off",
             policy()

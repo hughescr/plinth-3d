@@ -286,6 +286,28 @@ contact disc is not wholly on its face (graded by `footprint::regrade`, the foot
 lattice and rim, in ONE batched pass over the grazers) is left straight, named `SlidesToItsFace`, and the
 slide runs as it always did. No tolerance is new; the grade is the footprint rule's.
 
+A twin merged into a HEADED arm is carried by that arm's frozen head, planned at placement for the
+host's own seat: the twin's load goes out along the head's lever `|DK|`, and the head law
+(`r^3 = a(r + 4L)`, `a = r_t^2/c`) sizes the joint, and the post under it, for that cantilever. On
+`make_laid_tube` four such merges grew 3 mm columns from r 0.23 to r 0.82-1.0 (+63 mm3); refusing
+headed hosts restores them but brings Deinonychus defects back (2 thin unbraced rods, 2 leaning
+posts; measured 2026-10-12), so it is counted
+(`twin_seats_headed_host`) and left open (`q12/REGRESSIONS.md`).
+
+**A lean the slenderness law cannot hold is not taken, where the arm already stands as a support
+(quality lane Q1, refined 2026-10-12).** The lip-seat rule leans a whole arm along one axis. Where the
+ladder's thicken rung cannot hold that run (its taper, tip kept, root raised up to the registered
+maximum radius, with the thickened frustum keeping the final gap where the lean as drawn does), the
+lean is refused and the arm keeps its seat with its seat-bite warning (Deinonychus arms 215 and 220).
+Two things are read, not assumed. The clearance of a lean leaving its seat face is the gap itself (its
+seat zone ends where the solid first stands the gap clear of the seat plane), so a uniform radius
+taken from that minimum is the drawn radius everywhere; the rung's own frustum is read instead. And
+the refusal trades the lean for the arm as it stands, so that arm must be a support: a shaft longer
+than one layer whose solid does not enter the model. On the Morel base the kept arm was a one-layer
+stub onto the model wall beside its seat, tip off its face; on `make_brace_pair` it stood 0.149 mm
+inside the model, and the clearance re-route took the very lean later, after the ladder had planned
+the field without it, so both masts and both thickened post roots were lost. There the lean is taken.
+
 **The clearance re-route after the final sizing.** The up-sweep places an arm at a lower bound
 of the radius it is later drawn at (the area law and the thickening grow it), so after the final
 sizing and the ties the census names every arm whose drawn solid stands within the final gap

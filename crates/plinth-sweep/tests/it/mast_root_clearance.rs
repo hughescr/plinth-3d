@@ -297,10 +297,9 @@ fn deleting_the_clearance_rule_brings_the_overlapping_masts_back() {
     // (was 4 and 3, measured 2026-10-11 on develop 2d2381a); with the rule off
     // it places 1 and 3 masts, 0 and 2 lapping pairs (measured 2026-10-11,
     // release). The clearance rule reads no lip-seat lean; refusing the twin
-    // merge as well changes nothing.
-    // REVIEW after the Q12-regression fix (quality/q12-regressions-2026-10-11):
-    // this knob masks the Q1 effect on the drill; drop it if the fix brings
-    // the masts back without it.
+    // merge as well changes nothing. Reviewed after the Q12-regression fix
+    // (quality/q12-regressions-2026-10-11, 2026-10-12): without the knob the
+    // drill still places no mast, so the knob stays.
     let fixture =
         crate::harness::at_path_fixture_seating(crate::harness::at_path_fixture_x(policy()))
             .without_creep_overhang_cut()
