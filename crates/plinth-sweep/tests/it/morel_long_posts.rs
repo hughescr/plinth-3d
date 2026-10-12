@@ -291,13 +291,28 @@ fn every_brace_end_on_the_laid_tube_meets_its_posts_drawn_solid() {
         // (measured 2026-10-05; the model refused 0 thickenings in either).
         // The rule under test lives in the adapter and does not read the
         // descent.
+        // RE-PINNED 2026-10-11 (merge of quality Q12, Q1 + Q2, into develop):
+        // the witness field also refuses the slenderness merge
+        // (`without_slenderness_merge`, the remedy-1 sabotage knob). Q1 keeps
+        // the seat of a lean the slenderness law cannot hold, so the same
+        // field has 348 ends, 22 on leaning plate posts and none missing on the
+        // planned line (was 448, 30 and 3, measured 2026-10-11 on develop
+        // 2d2381a, the same fixture and knobs). With the merge refused every
+        // run the merge would have joined is braced instead: 1028 ends, 48 on
+        // leaning plate posts and 21 missing on the planned line (measured
+        // 2026-10-11, release). The rule under test lives in the adapter and
+        // reads neither the merge nor the lip-seat lean.
+        // REVIEW after the Q12-regression fix (quality/q12-regressions-2026-10-11):
+        // this knob masks the Q1 effect on the witness field; drop it if the
+        // fix brings the planned-line misses back without it.
         (
             "creep cut off",
             policy()
                 .without_creep_overhang_cut()
                 .without_brace_cap()
                 .without_brace_window()
-                .without_drawn_solid_descent(),
+                .without_drawn_solid_descent()
+                .without_slenderness_merge(),
             true,
         ),
     ] {

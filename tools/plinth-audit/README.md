@@ -74,7 +74,8 @@ fetch per run of sample rings; records run in parallel (`PLINTH_THREADS`).
 ```sh
 plinth-audit compare <ref.chitubox> <cand.chitubox> [--out-dir D] [--json] [--band N] \
     [--ref-log F --cand-log F] [--ref-poses F --cand-poses F] [--require-logs] \
-    [--assume-consumer-matched] [--no-geometry] [--threads N]
+    [--assume-consumer-matched] [--no-geometry] [--threads N] [--no-flicker] [--low-memory] \
+    [--declared CLASS] [--declare-change WORD[,WORD]] [--full-listing] [--probe x,y,z,r]
 ```
 
 Replaces the sha256 gate for output-changing lanes (`ROUND-PLAN-v2.md` §1; owner
@@ -130,6 +131,69 @@ decisions O1-O4 of 2026-10-10). Reads only the emitted bytes, the engine `.log` 
    compares in at most 12 s (the whole set in 62 s); the table is in the report.
    `--low-memory` analyses the two files one after the other: the peak of the largest
    model (make_laid_tube) falls from 5.4 to 3.2 GB for 2 s more.
+
+8. **Declared changes and the false alarms of the first real use (G7, 2026-10-11; report
+   `perf-2026-10-09/wave1b/G7-REPORT.md`).** The first lane to change output on purpose (Q12: lean
+   limit plus twin merge) was refused on rows that measured the change, or that measured the engine's
+   own drawing, and not a loss. Four fixes, each at its cause:
+   - **H1 matches floating pieces, not components.** The floating material of each file is a raster.
+     Candidate floating voxels more than one voxel from the reference's floating voxels are new; a 3D
+     piece that shares at least 8 voxels with the reference's floating material is the reference's
+     piece, and its growth (its break moved) is excused up to max(64 voxels, 10 % of the shared part),
+     but only under the noise allowance (`--no-flicker` turns it off) and only for growth made of
+     material the reference already cured, within the band (the flicker rule's old-material test). A
+     detached member made longer floats material the reference never had: it is new, whatever piece
+     it grows from. A piece that grew more, and a piece the reference does not have, are judged by the
+     old limits (a component of 16 px, 64 voxels in all).
+   - **T0 reads the mesh against its header with the model's cut left out.** A record that ends in
+     the model is trimmed by it: mesh vertices on the model surface, and a header end inside the
+     model, are the model's and not a disagreement. A mesh that covers its header (the junction hulls
+     of the owner's v18 ruling are not on their headers) is measured by what its header's rings stick
+     out of it, unless some of the mesh lies outside the header's capsule (the axis segment swept by
+     its larger radius, which a hull of the end circles never leaves): that excess stays in the
+     reading, so a mesh far larger than its header still fails. A record the reference does not have, or one that was already off its header there,
+     may be as far off as the reference's own worst of its kind (plus 25 %); the share of records past
+     one voxel may rise by 25 % plus 2 records. A good record that gets worse still fails.
+   - **I5 grounds a member that stands on the model.** The owner's ruling: a valid seat is the plate,
+     the model surface (a cavity wall included) or another support. A MEMBER that no ground reaches
+     and whose cured voxels, grown by one voxel, meet the model's cured raster is grounded. A tip with
+     an invalid seat is not (that is I1), nor is a taper beside one. The same ruling applies to the
+     free-end test: an end disc inside the model or within one layer of its surface is seated on it
+     and is not a free end.
+   - **`--declared CLASS` and `--declare-change contact-merge`.** `--declared` takes the words of
+     `bench.sh --declared` (IDENTICAL, EQUIVALENT, PLAN-CHANGED, MESH-CHANGED); it is recorded in
+     `verdict.json` and a `C.declared` row says whether the computed verdict is within it. The exit
+     code stays the computed verdict's; `bench.sh` judges. `--declare-change contact-merge` (needs
+     PLAN-CHANGED or MESH-CHANGED) widens N2 only: a reference contact with no match at 0.1 mm is a
+     merge when a candidate contact lies in its column (balls overlap in plan, at most 0.5 mm apart in
+     height), and a new contact is the survivor of a merge when a reference contact lies in its column.
+     Only contacts not explained that way count against N2's 5 % limits, so a contact lost with no
+     survivor beside it is still a finding. A merged reference contact is paired with the nearest
+     surviving candidate contact whose ball overlaps its own, and N3 judges that pair's load path
+     (path minimum and members) like a 0.1 mm match, so a relocated contact cannot hide a thinner
+     path; a survivor whose path cannot be measured makes N3 INDETERMINATE. `bench.sh --declare-change`
+     passes both flags.
+   - **N3 drops no path member.** On every judged path (a 0.1 mm match or a declared survivor) a
+     member answers to the record of the other path that matches it within 0.1 mm at both ends; the
+     contact frustum answers to the contact frustum. Any other member, of either path (a joint that
+     moved, a member split, reshaped or thinned), is judged by height: at each of its heights, a
+     candidate member's own section against the reference path's thinnest section there, or the
+     reference path's thinnest section against the candidate path's thinnest, for a reference
+     member. The 0.05 mm window
+     (the other path takes the value most favourable to the member within 0.05 mm above or below)
+     aligns joints only: it applies within 0.05 mm of the member's own end joints, never to a
+     member's middle, and never to a member no longer than 0.10 mm, so a short or thin member is not
+     hidden by its neighbours. Each height is read through the absolute noise allowance first, then
+     the worst height is taken. A section is the header radius at that height, scaled by the
+     emitted mesh's own smallest section. A reference member at heights the candidate
+     path does not reach (the path now ends on the model, or on another support, higher up) cannot be
+     judged: N3 is INDETERMINATE and lists it as UNASSESSED.
+   - **Triage tools.** `--full-listing` lists every item behind every row (the default keeps the first
+     few) and says, for each audit item, whether the design changed beside it and, for each
+     floating piece, whether the reference floats it and which records exist in one file only
+     there. `--probe x,y,z,r` prints the support records of both files near a point (`any` for z
+     ignores height) with their match in the other file. With `--json` they are in the document,
+     under `probes`; nothing else goes to standard output.
 
 Test instruments: `plinth-audit mutate <in> <out> <spec>...` plants one change in a
 real file (jitter, `cjitter` (the mesh follows its header, as an engine's output does),

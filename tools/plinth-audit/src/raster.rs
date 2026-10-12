@@ -297,6 +297,49 @@ impl RunRaster {
         out
     }
 
+    /// This raster grown by `grow` voxels in every direction: layers `k-grow..=k+grow`, each run
+    /// widened by `grow` columns and `grow` rows. A voxel of another raster inside the result is
+    /// within `grow` voxels (a box, corners included) of this one. A mask: its counts are not
+    /// kept. `grow` 0 returns the raster itself.
+    #[must_use]
+    pub fn grown(&self, grow: i64) -> Self {
+        let Some((k0, k1)) = self.layer_range() else {
+            return Self::empty(self.grid);
+        };
+        fn merge(mut v: Vec<Run>) -> Vec<Run> {
+            v.sort_by_key(|x| x.c0);
+            let mut out: Vec<Run> = Vec::new();
+            for x in v {
+                match out.last_mut() {
+                    Some(l) if x.c0 <= l.c1 => l.c1 = l.c1.max(x.c1),
+                    _ => out.push(x),
+                }
+            }
+            out
+        }
+        let mut layers = Vec::new();
+        for kk in (k0 - grow)..=(k1 + grow) {
+            let mut rows: BTreeMap<i64, Vec<Run>> = BTreeMap::new();
+            for k3 in (kk - grow)..=(kk + grow) {
+                if let Some(l) = self.layer(k3) {
+                    for (row, runs) in &l.rows {
+                        for r in runs {
+                            for dr in -grow..=grow {
+                                rows.entry(row + dr).or_default().push(Run { c0: r.c0 - grow, c1: r.c1 + grow });
+                            }
+                        }
+                    }
+                }
+            }
+            if rows.is_empty() {
+                continue;
+            }
+            let rows = rows.into_iter().map(|(r, v)| (r, merge(v))).collect();
+            layers.push(Layer { k: kk, z_mm: self.grid.layer_z_mm(kk), rows });
+        }
+        Self { grid: self.grid, layers, pixel_count: 0, run_count: 0 }
+    }
+
     /// Boolean intersection of two rasters on the same grid.
     #[must_use]
     pub fn intersect(&self, other: &Self) -> Self {

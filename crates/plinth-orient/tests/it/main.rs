@@ -21,4 +21,5 @@ mod orientation_rederivation;
 mod orientation_scoring;
 mod peel_demand_override;
 mod pose_diagnostics;
+mod section_conditioning;
 mod tessellation_invariance;

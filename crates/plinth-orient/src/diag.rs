@@ -21,9 +21,15 @@
 //!   so a diagnostic batch through it would evict the winner's plan. What the
 //!   separate measurer returns is written to the diagnostics and goes nowhere
 //!   else; it never reaches `rerank_commit`.
-//! * Collection is batch-first: one dense pass per stage over the same tables
-//!   the search used, bounded selections for the "smallest margin" lists, and
-//!   one production batch for every extra pose.
+//! * Collection is batch-first: G1 and G2 are read off the grid's own binning
+//!   pass through an observer ([`GridObserver`]; the production scan is the
+//!   one scan, and with no observer it carries no extra work), one dense pass
+//!   for G4, bounded selections for the "smallest margin" lists, and one
+//!   production batch for every extra pose.
+//! * The diagnostics' time is not the pipeline's: [`crate::search`] runs the
+//!   build and the `orient.json` write in `geom_kernel::perf::Phase::Diagnostic`
+//!   and restores the phase afterwards, so the perf sidecar's own phases
+//!   (`OrientTable`, `Prefilter`, `Production`) do not count it.
 //!
 //! # Switches (`PLINTH_ORIENT_DIAG`)
 //!
@@ -50,18 +56,19 @@ use plinth_mesh::Mesh;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::ablate::Ablation;
 use crate::demand::{DemandFidelity, MeasuredSupportDemand, SupportDemandMeasurer};
 use crate::grid::{
-    fibonacci_directions, CandidateBlock, CandidateKey, GridAttempt, GridSettings, SweepGrid,
+    hex, kept_bins, BinObserver, CandidateBlock, CandidateKey, GridAttempt, GridSettings, RestBins,
+    RestOrder, SweepGrid,
 };
 use crate::score::{
-    score_candidates, CandidateOutcome, ObjectiveWeights, OrientFaceTable, ScoreError,
-    UpDirection,
+    score_candidates, CandidateOutcome, ObjectiveWeights, OrientFaceTable, UpDirection,
 };
 use crate::search::{DenseSweepRecord, RankedCandidate, SweepRequest, TermsRecord, TierRecord};
 
 /// The diagnostics' own schema.
-pub const DIAGNOSTICS_SCHEMA_VERSION: u32 = 1;
+pub const DIAGNOSTICS_SCHEMA_VERSION: u32 = 3;
 
 /// The pose-identity tolerance of the stability contract (design section 3):
 /// two directions within this angle are "the same pose". One face changing bin
@@ -192,17 +199,18 @@ pub struct SweepDiagnostics {
     /// Candidate id to provenance key and direction.
     pub candidates: Vec<CandidateRow>,
     /// G1, G2 and G4 are read off the table the grid was built from
-    /// ([`Self::grid_table_lod`]); `None` only if the reference lattice could
-    /// not be built.
+    /// ([`Self::grid_table_lod`]).
     pub grid_table_lod: String,
-    pub g1: Option<G1Diagnostics>,
-    pub g2: Option<G2Diagnostics>,
+    /// Read off the grid's own binning pass (see [`GridObserver`]).
+    pub g1: G1Diagnostics,
+    pub g2: G2Diagnostics,
     /// G3 for EVERY direction the grid tried, kept or dropped.
     pub g3: Vec<G3Row>,
     pub g4: G4Diagnostics,
-    /// `true` when the diagnostic re-scan of the reference bins reproduced the
-    /// grid's rest poses bit for bit (so G1 and G2 describe the grid that
-    /// was searched), and its flat-pose count the grid's.
+    /// `true` when the rest poses rebuilt from the captured G1/G2 data are
+    /// the grid's rest poses bit for bit (so G1 and G2 describe the grid that
+    /// was searched), and the diagnostic G4 pass found the grid's flat-pose
+    /// count.
     pub reproduces_grid: bool,
     pub escort: EscortDiagnostics,
     /// C1 to C4, as many as ran.
@@ -214,6 +222,82 @@ pub struct SweepDiagnostics {
     /// `extra=`: the given directions, scored and measured the same way.
     pub extras: Vec<DiagnosticScore>,
     pub notes: Vec<String>,
+    /// Which ablation words were on for this search (schema 3).
+    #[serde(default)]
+    pub ablation: AblationRecord,
+    /// `exact-shadow`: the proxy cuts' inputs scored on the exact table (schema
+    /// 3). `None` when not requested.
+    #[serde(default)]
+    pub exact_shadow: Option<ExactShadow>,
+}
+
+/// The ablation words a search ran with, so an `orient.json` says which
+/// search it describes.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AblationRecord {
+    pub exact_grid: bool,
+    /// Every funnel tier scored on the exact table (schema 3).
+    #[serde(default)]
+    pub exact_score: bool,
+    pub exact_shadow: bool,
+    /// `"by_area"` (recorded) or `"by_bin_index"` (`exact-grid`).
+    pub rest_order: String,
+}
+
+/// `exact-shadow` (design Lane A, R6): C1 and C2 repeated on the EXACT table
+/// over the SAME input key sets the proxy cuts saw. It scores and ranks with
+/// the search's own comparator and decides nothing: the real run's cuts stand.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExactShadow {
+    /// C1 on the exact table: the whole grid, as the coarse proxy saw it.
+    pub c1: ShadowCut,
+    /// C2 on the exact table: the candidates the REAL C1 passed on.
+    pub c2: ShadowCut,
+}
+
+/// One cut repeated on the exact table.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ShadowCut {
+    /// The exact-table cut, in the shape of the real ones (`C1x`, `C2x`).
+    pub cut: CutDiagnostics,
+    /// The key set scored: identical to the proxy cut's input.
+    pub input: Vec<KeyedId>,
+    /// Every scored row on the exact table, best first, full terms.
+    pub ranking: Vec<KeyedRanked>,
+    /// The top `k` on the exact table.
+    pub kept: Vec<KeyedId>,
+    /// The top `k` the proxy cut kept from the same input.
+    pub proxy_kept: Vec<KeyedId>,
+    /// The two kept key sets are equal.
+    pub same_kept_set: bool,
+    /// C2 only: the commit tier's input after the escort, exact shadow.
+    pub admitted: Option<Vec<KeyedId>>,
+    /// C2 only: the commit tier's input in the real run.
+    pub proxy_admitted: Option<Vec<KeyedId>>,
+    /// Candidates the exact table refused (excluded from the ranking).
+    pub refused: usize,
+}
+
+/// A margin's standing against its envelope (design section 3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoundaryEvent {
+    /// The margin is above the envelope: a change of that size cannot cross it.
+    Clear,
+    /// The margin is at or below the envelope (or not a number): a change of
+    /// that size can cross it, so the decision is not claimed stable.
+    Ambiguous,
+}
+
+/// Classifies a boundary margin against the envelope measured for its stage.
+/// The envelope is an input; this function owns no number.
+#[must_use]
+pub fn boundary_event(margin: f64, envelope: f64) -> BoundaryEvent {
+    if margin.abs() > envelope {
+        BoundaryEvent::Clear
+    } else {
+        BoundaryEvent::Ambiguous
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -239,6 +323,12 @@ pub struct KeyedRanked {
     /// Carried to the commit tier by right (the legacy thirteen and the
     /// flat-face poses), not by promotion.
     pub by_right: bool,
+    /// The row's burden was measured at the production raster. The commit
+    /// comparator sorts production-measured rows ahead of the rest whatever
+    /// their scores, so scores compare only inside one class. `false` for
+    /// every ranking that predates the production measurement.
+    #[serde(default)]
+    pub measured_at_production: bool,
     pub terms: TermsRecord,
 }
 
@@ -393,6 +483,18 @@ pub struct EscortDiagnostics {
     pub admitted: Vec<KeyedId>,
 }
 
+/// What decided a cut between its last kept row and its first rejected row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CutBasis {
+    /// The comparator went to the score: the rows are in one fidelity class
+    /// (or the cut has fewer than two rows), and `score_gap` is the margin.
+    Score,
+    /// The kept row is production-measured and the rejected one is not: the
+    /// comparator put the kept row first before it looked at any score.
+    ProductionFidelity,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CutDiagnostics {
     /// `"C1"` to `"C4"`.
@@ -401,7 +503,12 @@ pub struct CutDiagnostics {
     pub lod: String,
     pub k: usize,
     pub ranked: usize,
-    /// Score of the first rejected row minus the last kept row.
+    /// What put the last kept row ahead of the first rejected one.
+    pub decided_by: CutBasis,
+    /// Score of the first rejected row minus the last kept row. `Some` only
+    /// when the two rows are in one fidelity class ([`CutBasis::Score`]); when
+    /// production precedence decided, a score difference is not the margin and
+    /// is not reported.
     pub score_gap: Option<f64>,
     pub last_kept: Option<KeyedRanked>,
     pub first_rejected: Option<KeyedRanked>,
@@ -477,8 +584,11 @@ pub(crate) struct DiagInputs<'a> {
     pub mesh: &'a Mesh,
     pub request: &'a SweepRequest,
     pub grid: &'a SweepGrid,
+    /// What the observer saw in the grid's own binning pass.
+    pub grid_capture: &'a GridCapture,
     pub grid_table: &'a OrientFaceTable,
     pub grid_table_lod: &'a str,
+    pub ablation: &'a Ablation,
     pub exact_table: &'a OrientFaceTable,
     pub demand: Option<&'a dyn SupportDemandMeasurer>,
     pub tiers: &'a [TierRecord],
@@ -515,19 +625,15 @@ pub(crate) fn build(inputs: &DiagInputs<'_>) -> SweepDiagnostics {
         })
         .collect();
 
-    let (g1, g2, rest_reproduced) = match g1_g2(inputs.grid_table, settings, grid) {
-        Ok((g1, g2, reproduced)) => (Some(g1), Some(g2), reproduced),
-        Err(error) => {
-            notes.push(format!("G1/G2 unavailable: {error}"));
-            (None, None, false)
-        }
-    };
+    let (g1, g2, rest_reproduced) =
+        g1_g2(inputs.grid_table, inputs.grid_capture, settings, grid);
     let g3 = g3_rows(grid.attempts(), settings);
     let g4 = g4_diagnostics(inputs.grid_table, settings, grid);
     let flat_reproduced = g4.flat_poses == grid.flat_face_count();
     if !rest_reproduced {
         notes.push(
-            "the diagnostic re-scan did not reproduce the grid's rest poses bit for bit".to_owned(),
+            "the rest poses rebuilt from the captured binning pass are not the grid's, bit for bit"
+                .to_owned(),
         );
     }
     if !flat_reproduced {
@@ -542,11 +648,28 @@ pub(crate) fn build(inputs: &DiagInputs<'_>) -> SweepDiagnostics {
         keys,
     );
 
-    let keyed = |ranking: &[RankedCandidate]| -> Vec<KeyedRanked> {
-        ranking
-            .iter()
-            .map(|entry| keyed_row(entry, keys, &by_right_ids))
-            .collect()
+    // Before the production measurement no row is production-measured; after
+    // it, the record's commit-demand rows say which are.
+    let none_at_production = BTreeSet::new();
+    let at_production: BTreeSet<usize> = inputs
+        .record
+        .commit_tier_demand
+        .iter()
+        .filter(|row| row.measured_at_production())
+        .map(|row| row.candidate)
+        .collect();
+    let before = RowKeys {
+        keys,
+        by_right: &by_right_ids,
+        at_production: &none_at_production,
+    };
+    let after = RowKeys {
+        keys,
+        by_right: &by_right_ids,
+        at_production: &at_production,
+    };
+    let keyed = |rows: &RowKeys<'_>, ranking: &[RankedCandidate]| -> Vec<KeyedRanked> {
+        ranking.iter().map(|entry| rows.row(entry)).collect()
     };
 
     // The search escorts only after the refine tier (C2). Every other cut
@@ -567,8 +690,7 @@ pub(crate) fn build(inputs: &DiagInputs<'_>) -> SweepDiagnostics {
             &coarse.lod,
             ladder.refine_top_k(),
             &coarse.ranking,
-            keys,
-            &by_right_ids,
+            &before,
             &no_rescue,
         ));
     }
@@ -579,8 +701,7 @@ pub(crate) fn build(inputs: &DiagInputs<'_>) -> SweepDiagnostics {
             &refine.lod,
             ladder.commit_top_k(),
             &refine.ranking,
-            keys,
-            &by_right_ids,
+            &before,
             &escort_added,
         ));
     }
@@ -592,8 +713,7 @@ pub(crate) fn build(inputs: &DiagInputs<'_>) -> SweepDiagnostics {
             crate::search::EXACT_LOD,
             finalists,
             after_prefilter,
-            keys,
-            &by_right_ids,
+            &before,
             &no_rescue,
         ));
     }
@@ -604,19 +724,37 @@ pub(crate) fn build(inputs: &DiagInputs<'_>) -> SweepDiagnostics {
             crate::search::EXACT_LOD,
             1,
             after_production,
-            keys,
-            &by_right_ids,
+            &after,
             &no_rescue,
         ));
     }
 
     let snapshots = Snapshots {
-        exact_table: keyed(&inputs.snapshots.exact_table),
-        after_prefilter: inputs.snapshots.after_prefilter.as_deref().map(keyed),
-        after_production: inputs.snapshots.after_production.as_deref().map(keyed),
+        exact_table: keyed(&before, &inputs.snapshots.exact_table),
+        after_prefilter: inputs
+            .snapshots
+            .after_prefilter
+            .as_deref()
+            .map(|ranking| keyed(&before, ranking)),
+        after_production: inputs
+            .snapshots
+            .after_production
+            .as_deref()
+            .map(|ranking| keyed(&after, ranking)),
     };
 
     let (production_all, extras) = production_diagnostics(inputs, &mut notes);
+    let exact_shadow = exact_shadow(inputs, &escort, &mut notes);
+    let ablation = AblationRecord {
+        exact_grid: inputs.ablation.exact_grid,
+        exact_score: inputs.ablation.exact_score,
+        exact_shadow: inputs.ablation.exact_shadow,
+        rest_order: match grid.rest_order() {
+            RestOrder::ByArea => "by_area",
+            RestOrder::ByBinIndex => "by_bin_index",
+        }
+        .to_owned(),
+    };
 
     SweepDiagnostics {
         schema_version: DIAGNOSTICS_SCHEMA_VERSION,
@@ -638,7 +776,132 @@ pub(crate) fn build(inputs: &DiagInputs<'_>) -> SweepDiagnostics {
         production_all,
         extras,
         notes,
+        ablation,
+        exact_shadow,
     }
+}
+
+/// `exact-shadow`: C1 and C2 repeated on the exact table over the proxy cuts'
+/// own input key sets. Out of band: it runs after the record is final and
+/// nothing it computes is read back.
+fn exact_shadow(
+    inputs: &DiagInputs<'_>,
+    real_escort: &EscortDiagnostics,
+    notes: &mut Vec<String>,
+) -> Option<ExactShadow> {
+    if !inputs.ablation.exact_shadow {
+        return None;
+    }
+    let grid = inputs.grid;
+    let keys = grid.keys();
+    let ladder = inputs.request.ladder;
+    let (Some(coarse), Some(refine)) = (inputs.tiers.first(), inputs.tiers.get(1)) else {
+        notes.push("exact-shadow: the record has no C1/C2 tiers; nothing shadowed".to_owned());
+        return None;
+    };
+    let _mark = geom_kernel::perf::stage("orient.diag_shadow");
+    let by_right: BTreeSet<usize> = by_right_ids(grid).into_iter().collect();
+    let none_at_production = BTreeSet::new();
+    let no_rescue = BTreeSet::new();
+    let rows = RowKeys {
+        keys,
+        by_right: &by_right,
+        at_production: &none_at_production,
+    };
+    let keyed_id = |id: &usize| KeyedId {
+        id: *id,
+        key: keys[*id],
+    };
+    let key_set = |ids: &[KeyedId]| -> BTreeSet<CandidateKey> { ids.iter().map(|k| k.key).collect() };
+    let weights = inputs.request.weights;
+    let limits = inputs.request.limits;
+    let exact_lod = crate::search::EXACT_LOD;
+
+    let mut shadow = |name: &str,
+                      stage: &str,
+                      k: usize,
+                      input: &[usize],
+                      proxy_ranking: &[RankedCandidate],
+                      proxy_promoted: usize,
+                      rescue_escort: bool|
+     -> Option<ShadowCut> {
+        let (ranking, refused) = match crate::search::shadow_rank(
+            inputs.exact_table,
+            exact_lod,
+            grid,
+            input,
+            weights,
+            limits,
+        ) {
+            Ok(done) => done,
+            Err(error) => {
+                notes.push(format!("exact-shadow {name}: the exact table could not rank: {error}"));
+                return None;
+            }
+        };
+        let kept: Vec<KeyedId> = ranking.iter().take(k).map(|r| keyed_id(&r.candidate)).collect();
+        let proxy_kept: Vec<KeyedId> = proxy_ranking
+            .iter()
+            .take(proxy_promoted)
+            .map(|r| keyed_id(&r.candidate))
+            .collect();
+        let (admitted, proxy_admitted) = if rescue_escort {
+            let kept_ids: Vec<usize> = ranking.iter().take(k).map(|r| r.candidate).collect();
+            let shadow_escort = escort_decisions(
+                &kept_ids,
+                &legacy_ids(grid),
+                grid.flat_face_poses(),
+                keys,
+            );
+            (
+                Some(shadow_escort.admitted),
+                Some(real_escort.admitted.clone()),
+            )
+        } else {
+            (None, None)
+        };
+        Some(ShadowCut {
+            cut: cut(name, stage, exact_lod, k, &ranking, &rows, &no_rescue),
+            input: input.iter().map(keyed_id).collect(),
+            ranking: ranking.iter().map(|entry| rows.row(entry)).collect(),
+            same_kept_set: key_set(&kept) == key_set(&proxy_kept),
+            kept,
+            proxy_kept,
+            admitted,
+            proxy_admitted,
+            refused,
+        })
+    };
+
+    // C1: the whole grid, exactly the set the coarse tier scored.
+    let c1_input: Vec<usize> = (0..grid.candidates().len()).collect();
+    let c1 = shadow(
+        "C1x",
+        "coarse -> refine, exact-table shadow",
+        ladder.refine_top_k(),
+        &c1_input,
+        &coarse.ranking,
+        coarse.promoted,
+        false,
+    )?;
+    // C2: the candidates the REAL C1 passed on, so the two C2 cuts compare on
+    // one input even where the C1 cuts differ.
+    let c2_input: Vec<usize> = coarse
+        .ranking
+        .iter()
+        .take(coarse.promoted)
+        .map(|r| r.candidate)
+        .collect();
+    let c2 = shadow(
+        "C2x",
+        "refine -> commit, exact-table shadow",
+        ladder.commit_top_k(),
+        &c2_input,
+        &refine.ranking,
+        refine.promoted,
+        true,
+    )?;
+    Some(ExactShadow { c1, c2 })
 }
 
 fn legacy_ids(grid: &SweepGrid) -> Vec<usize> {
@@ -656,38 +919,62 @@ fn by_right_ids(grid: &SweepGrid) -> Vec<usize> {
     ids
 }
 
-fn keyed_row(
-    entry: &RankedCandidate,
-    keys: &[CandidateKey],
-    by_right: &BTreeSet<usize>,
-) -> KeyedRanked {
-    KeyedRanked {
-        rank: entry.rank,
-        candidate: entry.candidate,
-        key: keys[entry.candidate],
-        by_right: by_right.contains(&entry.candidate),
-        terms: entry.terms,
+/// What a ranking row needs to become a [`KeyedRanked`].
+struct RowKeys<'a> {
+    keys: &'a [CandidateKey],
+    by_right: &'a BTreeSet<usize>,
+    /// The candidates whose burden was measured at the production raster in
+    /// the ranking being read.
+    at_production: &'a BTreeSet<usize>,
+}
+
+impl RowKeys<'_> {
+    fn row(&self, entry: &RankedCandidate) -> KeyedRanked {
+        KeyedRanked {
+            rank: entry.rank,
+            candidate: entry.candidate,
+            key: self.keys[entry.candidate],
+            by_right: self.by_right.contains(&entry.candidate),
+            measured_at_production: self.at_production.contains(&entry.candidate),
+            terms: entry.terms,
+        }
+    }
+}
+
+/// What decided between a cut's last kept row and its first rejected one: the
+/// commit comparator sorts production-measured rows ahead of the rest before
+/// it reads a score, so the score difference is the margin only inside one
+/// fidelity class.
+fn cut_basis(kept: &KeyedRanked, rejected: &KeyedRanked) -> CutBasis {
+    if kept.measured_at_production == rejected.measured_at_production {
+        CutBasis::Score
+    } else {
+        CutBasis::ProductionFidelity
     }
 }
 
 /// One cut of the funnel. `rescued` holds the ids this cut's escort added to
 /// the next stage's input; it is empty for every cut without an escort.
-#[allow(clippy::too_many_arguments)]
 fn cut(
     name: &str,
     stage: &str,
     lod: &str,
     k: usize,
     ranking: &[RankedCandidate],
-    keys: &[CandidateKey],
-    by_right: &BTreeSet<usize>,
+    rows: &RowKeys<'_>,
     rescued: &BTreeSet<usize>,
 ) -> CutDiagnostics {
-    let row = |index: usize| ranking.get(index).map(|entry| keyed_row(entry, keys, by_right));
+    let row = |index: usize| ranking.get(index).map(|entry| rows.row(entry));
     let last_kept = k.checked_sub(1).and_then(row);
     let first_rejected = row(k);
-    let score_gap = match (&last_kept, &first_rejected) {
-        (Some(kept), Some(rejected)) => Some(rejected.terms.score.get() - kept.terms.score.get()),
+    let decided_by = match (&last_kept, &first_rejected) {
+        (Some(kept), Some(rejected)) => cut_basis(kept, rejected),
+        _ => CutBasis::Score,
+    };
+    let score_gap = match (&last_kept, &first_rejected, decided_by) {
+        (Some(kept), Some(rejected), CutBasis::Score) => {
+            Some(rejected.terms.score.get() - kept.terms.score.get())
+        }
         _ => None,
     };
     let next_rejected: Vec<KeyedRanked> = (k + 1..k + 1 + NEXT_REJECTED).filter_map(row).collect();
@@ -695,7 +982,7 @@ fn cut(
         .iter()
         .skip(k)
         .filter(|entry| rescued.contains(&entry.candidate))
-        .map(|entry| keys[entry.candidate])
+        .map(|entry| rows.keys[entry.candidate])
         .collect();
     CutDiagnostics {
         name: name.to_owned(),
@@ -703,6 +990,7 @@ fn cut(
         lod: lod.to_owned(),
         k,
         ranked: ranking.len(),
+        decided_by,
         score_gap,
         last_kept,
         first_rejected,
@@ -755,15 +1043,6 @@ fn rest_key(bin: usize) -> CandidateKey {
     CandidateKey::Rest(u32::try_from(bin).unwrap_or(u32::MAX))
 }
 
-fn hex_digest(hasher: Sha256) -> String {
-    let digest = hasher.finalize();
-    let mut text = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        text.push_str(&format!("{byte:02x}"));
-    }
-    text
-}
-
 /// The angle between two unit vectors in degrees, by the chord, which keeps
 /// its digits where `acos(dot)` loses them near zero.
 fn angle_deg(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -771,6 +1050,8 @@ fn angle_deg(a: [f64; 3], b: [f64; 3]) -> f64 {
     2.0 * (chord / 2.0).min(1.0).asin().to_degrees()
 }
 
+/// One face's best and second-best bins, ordered by gap then face index: the
+/// order of the "smallest gaps" list.
 struct GapRow {
     gap: f64,
     face: usize,
@@ -780,52 +1061,49 @@ struct GapRow {
     second_dot: f64,
 }
 
-/// G1 and G2 off the table the grid was built from: one dense faces x bins
-/// pass, the same fold order as the grid's own (so the accumulated sums are
-/// bit-identical to it), keeping the second-best bin per face as well.
-fn g1_g2(
-    table: &OrientFaceTable,
-    settings: GridSettings,
-    grid: &SweepGrid,
-) -> Result<(G1Diagnostics, G2Diagnostics, bool), ScoreError> {
-    let reference = fibonacci_directions(settings.reference_bins())?;
-    let bins = reference.len();
-    let normals = table.normals();
-    let areas = table.areas_mm2();
-    let faces = normals.len();
+impl PartialEq for GapRow {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+impl Eq for GapRow {}
+impl PartialOrd for GapRow {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for GapRow {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.gap
+            .total_cmp(&other.gap)
+            .then(self.face.cmp(&other.face))
+    }
+}
 
-    let mut face_bin = vec![u32::MAX; faces];
-    let mut area = vec![0.0_f64; bins];
-    let mut accumulated = vec![[0.0_f64; 3]; bins];
-    let mut gap_rows: Vec<GapRow> = Vec::new();
-    for (face, normal) in normals.iter().enumerate() {
-        let face_area = areas[face];
-        if face_area <= 0.0 || !face_area.is_finite() {
-            continue;
-        }
-        let down = [-normal[0], -normal[1], -normal[2]];
-        let (mut best, mut best_dot) = (0_usize, f64::NEG_INFINITY);
-        let (mut second, mut second_dot) = (0_usize, f64::NEG_INFINITY);
-        for (bin, candidate) in reference.iter().enumerate() {
-            let dot = vec3::dot(down, candidate.get());
-            // Strict `>`, as the grid's: the lowest bin index wins a tie.
-            if dot > best_dot {
-                second = best;
-                second_dot = best_dot;
-                best = bin;
-                best_dot = dot;
-            } else if dot > second_dot {
-                second = bin;
-                second_dot = dot;
-            }
-        }
-        face_bin[face] = u32::try_from(best).unwrap_or(u32::MAX);
-        area[best] += face_area;
-        accumulated[best][0] += face_area * down[0];
-        accumulated[best][1] += face_area * down[1];
-        accumulated[best][2] += face_area * down[2];
-        if bins >= 2 {
-            gap_rows.push(GapRow {
+/// Watches the grid's own faces x bins pass (G1) and keeps what the G1 lists
+/// need: every face's bin and the faces with the smallest best-second gap.
+/// The grid runs the pass once; this only reads it, so the accumulated sums
+/// G2 reports are the ones the grid built its rest poses from.
+#[derive(Default)]
+pub(crate) struct GridObserver {
+    bins: usize,
+    face_bin: Vec<u32>,
+    gaps: Smallest<GapRow>,
+}
+
+impl BinObserver for GridObserver {
+    const TRACKS_SECOND: bool = true;
+
+    fn begin(&mut self, faces: usize, bins: usize) {
+        self.bins = bins;
+        self.face_bin = vec![u32::MAX; faces];
+        self.gaps = Smallest::new(SMALLEST_MARGINS);
+    }
+
+    fn face(&mut self, face: usize, best: usize, best_dot: f64, second: usize, second_dot: f64) {
+        self.face_bin[face] = u32::try_from(best).unwrap_or(u32::MAX);
+        if self.bins >= 2 {
+            self.gaps.offer(GapRow {
                 gap: best_dot - second_dot,
                 face,
                 best,
@@ -835,25 +1113,60 @@ fn g1_g2(
             });
         }
     }
+}
+
+impl GridObserver {
+    /// Joins what the observer saw with what the pass accumulated.
+    pub(crate) fn finish(self, bins: RestBins) -> GridCapture {
+        GridCapture {
+            bins: self.bins,
+            face_bin: self.face_bin,
+            gaps: self.gaps.into_sorted(),
+            rest: bins,
+        }
+    }
+}
+
+/// Everything G1 and G2 need from the grid's binning pass.
+pub(crate) struct GridCapture {
+    bins: usize,
+    /// Every face's bin (`u32::MAX` for a face the pass skips).
+    face_bin: Vec<u32>,
+    /// The smallest-gap faces, smallest first.
+    gaps: Vec<GapRow>,
+    rest: RestBins,
+}
+
+/// G1 and G2 off the grid's own binning pass ([`GridObserver`], and the
+/// accumulated areas and sums the pass returned). Nothing is rescanned. The
+/// rest poses are rebuilt from the captured sums by the grid's own rule and
+/// compared with the grid's, so the last value says the data describe the
+/// grid that was searched.
+fn g1_g2(
+    table: &OrientFaceTable,
+    capture: &GridCapture,
+    settings: GridSettings,
+    grid: &SweepGrid,
+) -> (G1Diagnostics, G2Diagnostics, bool) {
+    let GridCapture {
+        bins,
+        face_bin,
+        gaps,
+        rest,
+    } = capture;
+    let RestBins {
+        area,
+        accumulated,
+        order,
+    } = rest;
+    let areas = table.areas_mm2();
 
     let mut hasher = Sha256::new();
-    for bin in &face_bin {
+    for bin in face_bin {
         hasher.update(bin.to_le_bytes());
     }
     let binned_faces = face_bin.iter().filter(|bin| **bin != u32::MAX).count();
-
-    let by_gap = |left: &GapRow, right: &GapRow| {
-        left.gap
-            .total_cmp(&right.gap)
-            .then(left.face.cmp(&right.face))
-    };
-    let take = SMALLEST_MARGINS.min(gap_rows.len());
-    if take > 0 {
-        gap_rows.select_nth_unstable_by(take - 1, by_gap);
-        gap_rows.truncate(take);
-    }
-    gap_rows.sort_by(by_gap);
-    let smallest_gaps = gap_rows
+    let smallest_gaps = gaps
         .iter()
         .map(|row| G1Face {
             face: row.face,
@@ -866,18 +1179,14 @@ fn g1_g2(
         })
         .collect();
 
-    // G2: heaviest bins first, ties by lowest bin index (stable sort).
-    let mut order: Vec<usize> = (0..bins).filter(|bin| area[*bin] > 0.0).collect();
-    order.sort_by(|left, right| {
-        area[*right]
-            .partial_cmp(&area[*left])
-            .unwrap_or(Ordering::Equal)
-    });
+    // G2: the pass already ordered the bins (heaviest first, ties by lowest
+    // bin index).
     let occupied_bins = order.len();
     let keep = settings.rest_pose_max();
 
+    // The kept bins, enumerated in the order the grid was built in.
     let mut reproduced_poses = Vec::new();
-    for bin in order.iter().take(keep) {
+    for bin in &kept_bins(order, keep, grid.rest_order()) {
         if let Ok(direction) = UpDirection::new(accumulated[*bin]) {
             reproduced_poses.push((*bin, direction));
         }
@@ -924,12 +1233,12 @@ fn g1_g2(
         })
         .min_by(|left, right| left.rel_gap.total_cmp(&right.rel_gap));
 
-    Ok((
+    (
         G1Diagnostics {
-            faces,
+            faces: face_bin.len(),
             binned_faces,
-            bins,
-            face_to_bin_sha256: hex_digest(hasher),
+            bins: *bins,
+            face_to_bin_sha256: hex(hasher),
             smallest_gaps,
         },
         G2Diagnostics {
@@ -941,7 +1250,7 @@ fn g1_g2(
             min_adjacent_rel_gap,
         },
         reproduced,
-    ))
+    )
 }
 
 // --------------------------------------------------------------------- G3
@@ -1031,30 +1340,80 @@ impl Ord for MarginItem {
     }
 }
 
-/// Keeps the `SMALLEST_MARGINS` smallest items offered.
-struct Smallest(BinaryHeap<MarginItem>);
+/// Keeps the `cap` smallest items offered: a bounded max-heap, so a list of
+/// every face or pair is never held.
+struct Smallest<T: Ord> {
+    heap: BinaryHeap<T>,
+    cap: usize,
+}
 
-impl Smallest {
-    fn offer(&mut self, item: MarginItem) {
-        if self.0.len() < SMALLEST_MARGINS {
-            self.0.push(item);
-        } else if self.0.peek().is_some_and(|worst| item < *worst) {
-            self.0.pop();
-            self.0.push(item);
+impl<T: Ord> Default for Smallest<T> {
+    fn default() -> Self {
+        Self::new(SMALLEST_MARGINS)
+    }
+}
+
+impl<T: Ord> Smallest<T> {
+    fn new(cap: usize) -> Self {
+        Self {
+            heap: BinaryHeap::with_capacity(cap.saturating_add(1)),
+            cap,
         }
     }
 
-    fn into_faces(self, poses: &[CandidateKey]) -> Vec<G4Face> {
-        self.0
-            .into_sorted_vec()
-            .into_iter()
-            .map(|item| G4Face {
-                face: item.face,
-                pose: poses[item.pose],
-                facing: item.facing,
-                margin: item.margin,
-            })
-            .collect()
+    fn offer(&mut self, item: T) {
+        if self.heap.len() < self.cap {
+            self.heap.push(item);
+        } else if self.heap.peek().is_some_and(|worst| item < *worst) {
+            self.heap.pop();
+            self.heap.push(item);
+        }
+    }
+
+    /// The kept items, smallest first.
+    fn into_sorted(self) -> Vec<T> {
+        self.heap.into_sorted_vec()
+    }
+}
+
+fn margin_faces(list: Smallest<MarginItem>, poses: &[CandidateKey]) -> Vec<G4Face> {
+    list.into_sorted()
+        .into_iter()
+        .map(|item| G4Face {
+            face: item.face,
+            pose: poses[item.pose],
+            facing: item.facing,
+            margin: item.margin,
+        })
+        .collect()
+}
+
+/// The two candidates nearest a direction, found in the scan that reads every
+/// dot product anyway: larger dot first, ties to the lower id. This is the
+/// order a full sort by `(dot descending, id ascending)` would give, kept
+/// without holding or sorting all candidates.
+#[derive(Default)]
+struct NearestTwo([Option<(usize, f64)>; 2]);
+
+impl NearestTwo {
+    /// `true` when `(id, dot)` sorts before `other` (a larger dot, or an equal
+    /// one at a lower id).
+    fn before(id: usize, dot: f64, other: (usize, f64)) -> bool {
+        dot.total_cmp(&other.1).then(other.0.cmp(&id)) == Ordering::Greater
+    }
+
+    fn offer(&mut self, id: usize, dot: f64) {
+        let [first, second] = &mut self.0;
+        if first.is_none_or(|best| Self::before(id, dot, best)) {
+            *second = *first;
+            *first = Some((id, dot));
+        } else if second.is_none_or(|next| Self::before(id, dot, next)) {
+            *second = Some((id, dot));
+        }
+    }
+
+    fn ids(&self) -> impl Iterator<Item = usize> + '_ {
+        self.0.iter().flatten().map(|(id, _)| *id)
     }
 }
 
@@ -1096,8 +1455,8 @@ fn g4_diagnostics(table: &OrientFaceTable, settings: GridSettings, grid: &SweepG
             hasher
         })
         .collect();
-    let mut flat_list = Smallest(BinaryHeap::new());
-    let mut side_list = Smallest(BinaryHeap::new());
+    let mut flat_list = Smallest::new(SMALLEST_MARGINS);
+    let mut side_list = Smallest::new(SMALLEST_MARGINS);
     let areas = table.areas_mm2();
     for (face, normal) in table.normals().iter().enumerate() {
         let face_area = areas[face];
@@ -1144,7 +1503,7 @@ fn g4_diagnostics(table: &OrientFaceTable, settings: GridSettings, grid: &SweepG
             margin_rel: flat_share_margin(flat[pose], side[pose]),
             is_flat: is_flat_pose(flat[pose], side[pose]),
             flat_faces: flat_faces[pose],
-            flat_set_sha256: hex_digest(hasher),
+            flat_set_sha256: hex(hasher),
         })
         .collect();
 
@@ -1155,15 +1514,14 @@ fn g4_diagnostics(table: &OrientFaceTable, settings: GridSettings, grid: &SweepG
         .map(|(rest_pose, pose)| {
             let u = rest_pose.direction.get();
             let mut covering: Option<usize> = None;
-            let mut by_angle: Vec<(usize, f64)> = Vec::new();
+            let mut nearest = NearestTwo::default();
             for candidate in grid.candidates() {
                 let dot = vec3::dot(u, candidate.direction.get());
                 if covering.is_none() && dot > cosine {
                     covering = Some(candidate.id);
                 }
-                by_angle.push((candidate.id, dot));
+                nearest.offer(candidate.id, dot);
             }
-            by_angle.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
             let as_ref = |id: usize| {
                 g3_ref(
                     grid.keys()[id],
@@ -1176,7 +1534,7 @@ fn g4_diagnostics(table: &OrientFaceTable, settings: GridSettings, grid: &SweepG
             G4Cover {
                 pose: pose.key,
                 covering: covering.map(as_ref),
-                nearest: by_angle.iter().take(2).map(|(id, _)| as_ref(*id)).collect(),
+                nearest: nearest.ids().map(as_ref).collect(),
             }
         })
         .collect();
@@ -1187,10 +1545,35 @@ fn g4_diagnostics(table: &OrientFaceTable, settings: GridSettings, grid: &SweepG
         flat_poses: poses.iter().filter(|pose| pose.is_flat).count(),
         poses,
         escorted_ids: grid.flat_face_poses().to_vec(),
-        smallest_flat_margins: flat_list.into_faces(&pose_keys),
-        smallest_side_margins: side_list.into_faces(&pose_keys),
+        smallest_flat_margins: margin_faces(flat_list, &pose_keys),
+        smallest_side_margins: margin_faces(side_list, &pose_keys),
         covers,
     }
+}
+
+// ------------------------------------------------------------- perf phase
+
+/// Restores the perf phase it replaced when dropped, on every path.
+struct PhaseGuard(geom_kernel::perf::Phase);
+
+impl Drop for PhaseGuard {
+    fn drop(&mut self) {
+        geom_kernel::perf::set_phase_quiet(self.0);
+    }
+}
+
+/// Runs `work` in [`geom_kernel::perf::Phase::Diagnostic`], so the diagnostics'
+/// time, and the work counters of any production sweep they run, are not the
+/// pipeline's own phase's (the one they replaced, `OrientTable` for the build)
+/// and the perf sidecar can say what they cost. The phase is restored
+/// afterwards. Inert unless `--perf` is on. The two phase changes write no
+/// partial sidecar (`set_phase_quiet`): that write is the largest cost in a
+/// bracket this short.
+pub(crate) fn in_diagnostic_phase<R>(work: impl FnOnce() -> R) -> R {
+    let _restore = PhaseGuard(geom_kernel::perf::set_phase_quiet(
+        geom_kernel::perf::Phase::Diagnostic,
+    ));
+    work()
 }
 
 // ------------------------------------------- prod-all and extra= (separate)
@@ -1275,6 +1658,10 @@ pub(crate) fn production_diagnostics(
     if !config.prod_all && config.extra.is_empty() {
         return (None, Vec::new());
     }
+    // The extras are scored on the exact table first: that needs no
+    // measurer, so a run without one still reports what the table says.
+    let (extra_items, extra_notes) = extra_items(inputs);
+    notes.extend(extra_notes);
     let Some(measurer) = inputs
         .demand
         .and_then(|demand| demand.diagnostic_measurer())
@@ -1284,7 +1671,8 @@ pub(crate) fn production_diagnostics(
              no production sweep was run"
                 .to_owned(),
         );
-        return (config.prod_all.then(Vec::new), Vec::new());
+        let extras = extra_items.into_iter().map(unmeasured_score).collect();
+        return (config.prod_all.then(Vec::new), extras);
     };
     // One batch: the admitted poses first (prod-all), then the extras.
     let mut items = if config.prod_all {
@@ -1293,8 +1681,6 @@ pub(crate) fn production_diagnostics(
         Vec::new()
     };
     let prod_all_count = items.len();
-    let (extra_items, extra_notes) = extra_items(inputs);
-    notes.extend(extra_notes);
     items.extend(extra_items);
     let mut rows = measure_items(
         measurer.as_ref(),
@@ -1305,6 +1691,25 @@ pub(crate) fn production_diagnostics(
     );
     let extras = rows.split_off(prod_all_count.min(rows.len()));
     (config.prod_all.then_some(rows), extras)
+}
+
+/// Why a pose carries no production measurement when there was no measurer to
+/// ask.
+const MEASUREMENT_UNAVAILABLE: &str =
+    "production measurement unavailable: no separate non-retaining measurer";
+
+/// A pose with its exact-table terms and no production measurement.
+fn unmeasured_score(item: DiagItem) -> DiagnosticScore {
+    DiagnosticScore {
+        label: item.label,
+        key: item.key,
+        candidate: item.candidate,
+        direction: item.direction.get(),
+        exact_terms: Some(item.exact_terms),
+        production_terms: None,
+        demand: None,
+        error: Some(MEASUREMENT_UNAVAILABLE.to_owned()),
+    }
 }
 
 /// Every commit-admitted pose with its exact-table terms.
@@ -1391,6 +1796,9 @@ pub fn orient_json(
 
 /// Writes `<perf-dir>/<model>.orient.json` while a perf model is in flight.
 /// A failure is a warning: a diagnostic never fails a search.
+///
+/// Serializing and writing are diagnostic work; the caller runs this inside
+/// [`in_diagnostic_phase`].
 pub(crate) fn write_orient_json(record: &DenseSweepRecord, diagnostics: &SweepDiagnostics) {
     let bytes = match orient_json(record, diagnostics) {
         Ok(bytes) => bytes,
@@ -1412,6 +1820,7 @@ mod tests {
     use plinth_mesh::{make_overhang_table, make_recessed_disc, Mesh};
 
     use super::*;
+    use crate::grid::fibonacci_directions;
     use crate::search::{escort, search_core, search_with_diagnostics};
 
     fn request() -> SweepRequest {
@@ -1516,6 +1925,18 @@ mod tests {
         (table, grid, settings)
     }
 
+    /// The grid built with the diagnostics' observer on its binning pass, as
+    /// `search` builds it.
+    fn observed(mesh: &Mesh) -> (OrientFaceTable, SweepGrid, GridSettings, GridCapture) {
+        let settings = GridSettings::registered().expect("registered grid settings");
+        let table = OrientFaceTable::build(mesh, "test").expect("a closed mesh");
+        let mut observer = GridObserver::default();
+        let (grid, bins) =
+            SweepGrid::build_observed(&table, settings, RestOrder::ByArea, &mut observer)
+                .expect("a grid");
+        (table, grid, settings, observer.finish(bins))
+    }
+
     // --------------------------------------------------- switches and keys
 
     #[test]
@@ -1608,9 +2029,9 @@ mod tests {
         // A face whose DOWN direction is the bisector of bins 0 and 1 is a tie.
         let bisector = vec3::normalize(vec3::add(r0, r1)).expect("bisector");
         let mesh = cube_pointing([-bisector[0], -bisector[1], -bisector[2]]);
-        let (table, grid, settings) = table_and_grid(&mesh);
-        let (g1, _, reproduced) = g1_g2(&table, settings, &grid).expect("G1/G2");
-        assert!(reproduced, "the re-scan reproduces the grid's rest poses");
+        let (table, grid, settings, capture) = observed(&mesh);
+        let (g1, _, reproduced) = g1_g2(&table, &capture, settings, &grid);
+        assert!(reproduced, "the captured pass rebuilds the grid's rest poses");
         let tied = &g1.smallest_gaps[0];
         assert!(tied.gap < 1e-12, "a bisector face is within rounding of a tie: {}", tied.gap);
         let pair: BTreeSet<CandidateKey> = [tied.best, tied.second].into_iter().collect();
@@ -1628,21 +2049,75 @@ mod tests {
 
     #[test]
     fn the_g1_hash_moves_when_any_face_changes_bin() {
-        let (table_a, grid_a, settings) = table_and_grid(&cube_pointing([0.0, 0.0, 1.0]));
-        let (table_b, grid_b, _) = table_and_grid(&cube_pointing([0.0, 0.3, 0.953_939_201_416_945_7]));
-        let a = g1_g2(&table_a, settings, &grid_a).expect("a").0;
-        let b = g1_g2(&table_b, settings, &grid_b).expect("b").0;
-        let again = g1_g2(&table_a, settings, &grid_a).expect("again").0;
+        let (table_a, grid_a, settings, capture_a) = observed(&cube_pointing([0.0, 0.0, 1.0]));
+        let (table_b, grid_b, _, capture_b) =
+            observed(&cube_pointing([0.0, 0.3, 0.953_939_201_416_945_7]));
+        let (table_c, grid_c, _, capture_c) = observed(&cube_pointing([0.0, 0.0, 1.0]));
+        let a = g1_g2(&table_a, &capture_a, settings, &grid_a).0;
+        let b = g1_g2(&table_b, &capture_b, settings, &grid_b).0;
+        let again = g1_g2(&table_c, &capture_c, settings, &grid_c).0;
         assert_eq!(a.face_to_bin_sha256, again.face_to_bin_sha256, "reproducible");
         assert_ne!(a.face_to_bin_sha256, b.face_to_bin_sha256);
+    }
+
+    /// The bounded top-K the observer keeps is the K smallest gaps of the full
+    /// list, in the same order, and every face's bin is what a plain scan over
+    /// the reference lattice picks (the lowest index on a tie).
+    #[test]
+    fn g1_is_the_full_scan_truncated_to_the_smallest_gaps() {
+        let (table, grid, settings, capture) = observed(&uv_sphere(10.0, 20, 40));
+        assert!(table.face_count() > SMALLEST_MARGINS, "the list must actually be cut");
+        let (g1, _, reproduced) = g1_g2(&table, &capture, settings, &grid);
+        assert!(reproduced);
+        let reference = fibonacci_directions(settings.reference_bins()).expect("reference");
+        let mut rows = Vec::new();
+        let mut hasher = Sha256::new();
+        for (face, normal) in table.normals().iter().enumerate() {
+            let down = [-normal[0], -normal[1], -normal[2]];
+            let mut dots: Vec<(usize, f64)> = reference
+                .iter()
+                .enumerate()
+                .map(|(bin, r)| (bin, vec3::dot(down, r.get())))
+                .collect();
+            dots.sort_by(|l, r| r.1.total_cmp(&l.1).then(l.0.cmp(&r.0)));
+            let ((best, best_dot), (second, second_dot)) = (dots[0], dots[1]);
+            hasher.update(u32::try_from(best).expect("bin").to_le_bytes());
+            rows.push((best_dot - second_dot, face, best, second));
+        }
+        assert_eq!(g1.face_to_bin_sha256, hex(hasher), "every face's bin");
+        rows.sort_by(|l, r| l.0.total_cmp(&r.0).then(l.1.cmp(&r.1)));
+        assert_eq!(g1.smallest_gaps.len(), SMALLEST_MARGINS);
+        for (got, want) in g1.smallest_gaps.iter().zip(&rows) {
+            assert_eq!(got.gap.to_bits(), want.0.to_bits());
+            assert_eq!(got.face, want.1);
+            assert_eq!((got.best, got.second), (rest_key(want.2), rest_key(want.3)));
+        }
+    }
+
+    /// The bounded heap keeps the K smallest in order for any offer order,
+    /// ties included.
+    #[test]
+    fn the_smallest_list_is_a_bounded_sorted_selection() {
+        let values: Vec<usize> = (0..200).map(|i| (i * 37 + 11) % 50).collect();
+        for cap in [0, 1, 7, 50, 500] {
+            let mut list = Smallest::new(cap);
+            for (index, value) in values.iter().enumerate() {
+                list.offer((*value, index));
+                assert!(list.heap.len() <= cap, "never holds more than {cap}");
+            }
+            let mut want: Vec<(usize, usize)> = values.iter().copied().zip(0..).collect();
+            want.sort_unstable();
+            want.truncate(cap);
+            assert_eq!(list.into_sorted(), want, "cap {cap}");
+        }
     }
 
     // ---------------------------------------------------------------- G2
 
     #[test]
     fn g2_names_the_bins_either_side_of_the_cut_and_their_area_gap() {
-        let (table, grid, settings) = table_and_grid(&uv_sphere(10.0, 20, 40));
-        let (_, g2, reproduced) = g2_of(&table, settings, &grid);
+        let (table, grid, settings, capture) = observed(&uv_sphere(10.0, 20, 40));
+        let (_, g2, reproduced) = g1_g2(&table, &capture, settings, &grid);
         assert!(reproduced);
         assert_eq!(g2.rest_pose_max, 128);
         assert!(g2.occupied_bins > 137, "the sphere fills more bins than the cut keeps");
@@ -1659,14 +2134,6 @@ mod tests {
         assert!(adjacent.rank < 127 && adjacent.rel_gap >= 0.0);
         assert!(g2.ranked[..128].iter().all(|row| row.direction.is_some()));
         assert!(g2.ranked[128..].iter().all(|row| row.direction.is_none()));
-    }
-
-    fn g2_of(
-        table: &OrientFaceTable,
-        settings: GridSettings,
-        grid: &SweepGrid,
-    ) -> (G1Diagnostics, G2Diagnostics, bool) {
-        g1_g2(table, settings, grid).expect("G1/G2")
     }
 
     // ---------------------------------------------------------------- G3
@@ -1946,7 +2413,9 @@ mod tests {
         let request = request();
 
         let off = Primary::new(true);
-        let (baseline, none) = search_core(&mesh, &request, Some(&off), None).expect("search");
+        let (baseline, none) =
+            search_core(&mesh, &request, Some(&off), None, false, &Ablation::default())
+                .expect("search");
         assert!(none.is_none(), "no config, no diagnostics");
         let baseline_calls = drained(&off.calls);
         assert!(drained(&off.diagnostic_calls).is_empty(), "off means off");
@@ -2009,7 +2478,9 @@ mod tests {
         let mesh = make_overhang_table().expect("the fixture");
         let request = request();
         let clean = Primary::new(true);
-        let (baseline, _) = search_core(&mesh, &request, Some(&clean), None).expect("search");
+        let (baseline, _) =
+            search_core(&mesh, &request, Some(&clean), None, false, &Ablation::default())
+                .expect("search");
 
         let leaky = Primary::new(true);
         let mut sabotaged = config(Vec::new());
@@ -2039,8 +2510,167 @@ mod tests {
         );
         assert!(drained(&plain.diagnostic_calls).is_empty());
         let (baseline, _) =
-            search_core(&mesh, &request(), Some(&Primary::new(false)), None).expect("search");
+            search_core(
+                &mesh,
+                &request(),
+                Some(&Primary::new(false)),
+                None,
+                false,
+                &Ablation::default(),
+            )
+            .expect("search");
         assert_eq!(outcome.record(), baseline.record());
+    }
+
+    /// Production succeeds for the first finalist only, and at a HIGHER burden
+    /// than the prefilter gave: the lone production row wins by precedence
+    /// while a prefilter-only row below it scores lower.
+    struct OneFinalist;
+
+    impl SupportDemandMeasurer for OneFinalist {
+        fn measure_support_demand(
+            &self,
+            _mesh: &Mesh,
+            _table: &OrientFaceTable,
+            candidates: &[UpDirection],
+            fidelity: DemandFidelity,
+        ) -> Vec<Result<MeasuredSupportDemand, String>> {
+            candidates
+                .iter()
+                .enumerate()
+                .map(|(index, candidate)| match fidelity {
+                    DemandFidelity::Prefilter => Ok(measured(primary_area(candidate), fidelity)),
+                    DemandFidelity::Production if index == 0 => {
+                        Ok(measured(primary_area(candidate) + 5.0, fidelity))
+                    }
+                    DemandFidelity::Production => Err("no production sweep".to_owned()),
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn a_cut_that_production_precedence_decides_reports_no_score_margin() {
+        let mesh = make_overhang_table().expect("the fixture");
+        let (outcome, d) = search_with_diagnostics(
+            &mesh,
+            &request(),
+            Some(&OneFinalist),
+            &DiagnosticsConfig::default(),
+        )
+        .expect("search");
+        let c4 = d.cuts.iter().find(|cut| cut.name == "C4").expect("C4");
+        let kept = c4.last_kept.as_ref().expect("the winner");
+        let rejected = c4.first_rejected.as_ref().expect("a runner-up");
+        assert_eq!(kept.candidate, outcome.record().winner.candidate);
+        assert!(kept.measured_at_production && !rejected.measured_at_production);
+        assert!(
+            rejected.terms.score.get() < kept.terms.score.get(),
+            "the premise: the prefilter-only row scores LOWER, so a score gap would be negative"
+        );
+        assert_eq!(c4.decided_by, CutBasis::ProductionFidelity);
+        assert_eq!(c4.score_gap, None, "precedence, not score, put the winner first");
+
+        // Every other cut compares rows of one class and keeps its margin.
+        for cut in d.cuts.iter().filter(|cut| cut.name != "C4") {
+            assert_eq!(cut.decided_by, CutBasis::Score, "{}", cut.name);
+            assert!(cut.score_gap.is_some(), "{}", cut.name);
+        }
+        // The snapshots say which rows were production-measured.
+        let after = d.snapshots.after_production.as_ref().expect("after production");
+        assert_eq!(after.iter().filter(|row| row.measured_at_production).count(), 1);
+        assert!(after[0].measured_at_production);
+        let mut before = d
+            .snapshots
+            .exact_table
+            .iter()
+            .chain(d.snapshots.after_prefilter.iter().flatten());
+        assert!(before.all(|row| !row.measured_at_production));
+    }
+
+    #[test]
+    fn the_cut_basis_is_the_fidelity_class_not_the_score() {
+        let mesh = make_overhang_table().expect("the fixture");
+        let (_, d) = search_with_diagnostics(
+            &mesh,
+            &request(),
+            Some(&Primary::new(true)),
+            &DiagnosticsConfig::default(),
+        )
+        .expect("search");
+        let c4 = d.cuts.iter().find(|cut| cut.name == "C4").expect("C4");
+        // Three production finalists: the winner and the runner-up are one
+        // class, so the score margin stands.
+        let (kept, rejected) = (
+            c4.last_kept.as_ref().expect("winner"),
+            c4.first_rejected.as_ref().expect("runner-up"),
+        );
+        assert!(kept.measured_at_production && rejected.measured_at_production);
+        assert_eq!(c4.decided_by, CutBasis::Score);
+        assert_eq!(
+            c4.score_gap.map(f64::to_bits),
+            Some((rejected.terms.score.get() - kept.terms.score.get()).to_bits())
+        );
+        assert_eq!(cut_basis(rejected, kept), CutBasis::Score, "same class either way");
+        let mut prefilter_row = rejected.clone();
+        prefilter_row.measured_at_production = false;
+        assert_eq!(cut_basis(kept, &prefilter_row), CutBasis::ProductionFidelity);
+    }
+
+    #[test]
+    fn without_a_measurer_the_extras_keep_their_exact_scores() {
+        let mesh = make_overhang_table().expect("the fixture");
+        let extra = UpDirection::new([1.0, 0.0, 1.0]).expect("a direction");
+        let with_measurer = Primary::new(true);
+        let (_, full) =
+            search_with_diagnostics(&mesh, &request(), Some(&with_measurer), &config(vec![extra]))
+                .expect("search");
+        let scored = full.extras[0].exact_terms.expect("the exact-table score");
+        assert!(full.extras[0].production_terms.is_some(), "with a measurer it is priced too");
+
+        let plain = Primary::new(false);
+        let cases: [Option<&dyn SupportDemandMeasurer>; 2] = [None, Some(&plain)];
+        for demand in cases {
+            let (_, d) = search_with_diagnostics(&mesh, &request(), demand, &config(vec![extra]))
+                .expect("search");
+            assert_eq!(d.production_all, Some(Vec::new()));
+            assert_eq!(d.extras.len(), 1, "the extra is still reported");
+            let row = &d.extras[0];
+            assert_eq!(row.label, "extra:0");
+            assert_eq!(row.direction.map(f64::to_bits), extra.get().map(f64::to_bits));
+            assert_eq!(row.exact_terms, Some(scored), "the same exact-table score");
+            assert!(row.production_terms.is_none() && row.demand.is_none());
+            assert!(
+                row.error.as_deref().is_some_and(|reason| reason.contains("unavailable")),
+                "{:?}",
+                row.error
+            );
+            assert!(d.notes.iter().any(|note| note.contains("no separate non-retaining measurer")));
+        }
+    }
+
+    #[test]
+    fn the_two_nearest_are_what_a_full_sort_would_keep() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for round in 0..400_usize {
+            let count = round % 13;
+            // Few distinct values, so ties are the common case.
+            let dots: Vec<f64> = (0..count).map(|_| (next() % 5) as f64 / 4.0).collect();
+            let mut two = NearestTwo::default();
+            for (id, dot) in dots.iter().enumerate() {
+                two.offer(id, *dot);
+            }
+            let mut sorted: Vec<(usize, f64)> = dots.iter().copied().enumerate().collect();
+            sorted.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
+            let want: Vec<usize> = sorted.iter().take(2).map(|(id, _)| *id).collect();
+            assert_eq!(two.ids().collect::<Vec<_>>(), want, "{dots:?}");
+        }
     }
 
     #[test]
@@ -2100,6 +2730,10 @@ mod tests {
         }
         let c4 = &d.cuts[3];
         assert_eq!(c4.last_kept.as_ref().map(|row| row.candidate), Some(record.winner.candidate));
+        assert!(
+            d.cuts.iter().all(|cut| cut.decided_by == CutBasis::Score && cut.score_gap.is_some()),
+            "every cut here compares rows of one fidelity class"
+        );
 
         // Escort rescues exist only where the search escorts (C2), and match
         // the next stage's actual input: the refine rows below the cut that
@@ -2183,6 +2817,249 @@ mod tests {
             d.cuts.iter().map(|cut| (&cut.name, cut.k)).collect::<Vec<_>>()
         );
         assert_eq!(back.snapshots.exact_table.len(), d.snapshots.exact_table.len());
-        assert_eq!(back.g1.as_ref().map(|g| &g.face_to_bin_sha256), d.g1.as_ref().map(|g| &g.face_to_bin_sha256));
+        assert_eq!(back.g1.face_to_bin_sha256, d.g1.face_to_bin_sha256);
+    }
+
+    // ------------------------------------------------- Lane A: ablations
+
+    fn ablated(
+        mesh: &Mesh,
+        ablation: &Ablation,
+    ) -> (crate::search::SweepOutcome, SweepDiagnostics) {
+        let (outcome, d) = crate::search::search_ablated(
+            mesh,
+            &request(),
+            Some(&Primary::new(true)),
+            Some(&DiagnosticsConfig::default()),
+            ablation,
+        )
+        .expect("search");
+        (outcome, d.expect("diagnostics were asked for"))
+    }
+
+    fn rest_bins(d: &SweepDiagnostics) -> Vec<u32> {
+        d.candidates
+            .iter()
+            .filter_map(|row| match row.key {
+                CandidateKey::Rest(bin) => Some(bin),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// With every word off, the search is the recorded one: the ablated entry
+    /// point and the plain one return the same record and digest.
+    #[test]
+    fn with_the_ablation_off_the_search_is_the_recorded_one() {
+        let mesh = make_overhang_table().expect("the fixture");
+        let (plain, plain_d) = ablated(&mesh, &Ablation::default());
+        let (with, _) = search_with_diagnostics(
+            &mesh,
+            &request(),
+            Some(&Primary::new(true)),
+            &DiagnosticsConfig::default(),
+        )
+        .expect("search");
+        assert_eq!(plain.record(), with.record());
+        assert_eq!(plain.record().search_digest, with.record().search_digest);
+        assert_eq!(plain_d.ablation.rest_order, "by_area");
+        assert!(!plain_d.ablation.exact_grid && plain_d.exact_shadow.is_none());
+    }
+
+    /// `exact-shadow` is out of band: the record, the digest and the winner are
+    /// the shadow-off ones, and the shadow scores the SAME input key sets as
+    /// the proxy cuts on the exact table.
+    #[test]
+    fn the_exact_shadow_changes_nothing_and_scores_the_proxy_cuts_own_inputs() {
+        let mesh = make_overhang_table().expect("the fixture");
+        let (off, off_d) = ablated(&mesh, &Ablation::default());
+        let shadow_on = Ablation {
+            exact_shadow: true,
+            ..Ablation::default()
+        };
+        let (on, d) = ablated(&mesh, &shadow_on);
+        assert_eq!(on.record(), off.record(), "bytes of the record");
+        assert_eq!(on.record().search_digest, off.record().search_digest);
+        assert_eq!(on.winner(), off.winner());
+        assert_eq!(d.candidates, off_d.candidates, "the grid is the same grid");
+        assert!(off_d.exact_shadow.is_none());
+
+        let shadow = d.exact_shadow.expect("the shadow was asked for");
+        let record = on.record();
+        let (c1, c2) = (&shadow.c1, &shadow.c2);
+        // C1: the whole grid, the set the coarse tier scored.
+        assert_eq!(c1.input.len(), record.grid.candidates);
+        assert_eq!(c1.cut.k, request().ladder.refine_top_k());
+        assert_eq!(c1.ranking.len() + c1.refused, c1.input.len());
+        assert_eq!(c1.kept.len(), c1.cut.k.min(c1.ranking.len()));
+        // C2: the real C1's output, on one input for both cuts.
+        let real_c1: BTreeSet<CandidateKey> =
+            c1.proxy_kept.iter().map(|k| k.key).collect();
+        let c2_in: BTreeSet<CandidateKey> = c2.input.iter().map(|k| k.key).collect();
+        assert_eq!(real_c1, c2_in);
+        assert_eq!(c2.cut.k, request().ladder.commit_top_k());
+        let admitted = c2.admitted.as_ref().expect("C2 carries the escort");
+        let proxy_admitted = c2.proxy_admitted.as_ref().expect("and the real set");
+        assert_eq!(
+            proxy_admitted.iter().map(|k| k.id).collect::<Vec<_>>(),
+            d.escort.admitted.iter().map(|k| k.id).collect::<Vec<_>>()
+        );
+        assert!(admitted.len() >= c2.kept.len());
+        // The shadow rows ARE the exact-table scores the commit tier computed
+        // for the same candidates: same table, same directions, same bits.
+        let exact_rows: std::collections::BTreeMap<usize, &KeyedRanked> = d
+            .snapshots
+            .exact_table
+            .iter()
+            .map(|row| (row.candidate, row))
+            .collect();
+        let mut compared = 0;
+        for row in &c1.ranking {
+            if let Some(commit_row) = exact_rows.get(&row.candidate) {
+                assert_eq!(
+                    row.terms.score.get().to_bits(),
+                    commit_row.terms.score.get().to_bits(),
+                    "{}",
+                    row.key
+                );
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, exact_rows.len(), "every commit-tier row is in the C1 shadow");
+        assert!(c1.ranking.windows(2).all(|w| w[0].terms.score.get() <= w[1].terms.score.get()));
+    }
+
+    /// `exact-grid` reads the grid off the exact table in ascending bin order.
+    /// Everything else is the same funnel: the diagnostics rebuild the grid
+    /// bit for bit, and the escort still lands the flat poses.
+    #[test]
+    fn exact_grid_enumerates_the_rest_poses_by_bin_index_off_the_exact_table() {
+        let mesh = make_recessed_disc(24.0, 25.0, 3.5, 2.5, 22.5, 128).expect("a disc");
+        let exact_grid = Ablation {
+            exact_grid: true,
+            ..Ablation::default()
+        };
+        let (_, off) = ablated(&mesh, &Ablation::default());
+        let (on_outcome, on) = ablated(&mesh, &exact_grid);
+        assert_eq!(on.grid_table_lod, crate::search::EXACT_LOD);
+        assert!(on.ablation.exact_grid);
+        assert_eq!(on.ablation.rest_order, "by_bin_index");
+        assert!(on.reproduces_grid, "{:?}", on.notes);
+        let bins = rest_bins(&on);
+        assert!(bins.windows(2).all(|w| w[0] < w[1]), "ascending: {bins:?}");
+        // A disc's proxy may or may not exist; either way the flat faces are
+        // found and escorted, and the commit tier is scored on the exact LOD.
+        assert_eq!(on.g4.flat_poses, 2);
+        assert_eq!(on_outcome.record().grid.flat_faces, 2);
+        // The rest-pose KEY SET is a property of the geometry the grid read.
+        // Where the coarse tier fell back to the exact table, both runs read
+        // the same table, so only the order differs.
+        if off.grid_table_lod == crate::search::EXACT_LOD {
+            let mut a = rest_bins(&off);
+            a.sort_unstable();
+            assert_eq!(a, bins);
+        }
+    }
+
+    /// `exact-score` retires the proxy tiers (design D-12). Sabotage guard: the
+    /// switch-off run on the SAME mesh scores its coarse tier on a proxy LOD with
+    /// different scores, so the assertions below can fail; with the switch on,
+    /// every tier names the exact LOD and every row carries the exact table's bits.
+    #[test]
+    fn exact_score_bypasses_the_proxy_tiers_and_scores_every_tier_on_the_exact_table() {
+        // Over the 256-face proxy floor, so the off run really builds L1 and L2.
+        let mesh = make_recessed_disc(24.0, 25.0, 3.5, 2.5, 22.5, 600).expect("a disc");
+        let score_only = Ablation {
+            exact_score: true,
+            ..Ablation::default()
+        };
+        let both = Ablation {
+            exact_grid: true,
+            exact_score: true,
+            ..Ablation::default()
+        };
+        let grid_only = Ablation {
+            exact_grid: true,
+            ..Ablation::default()
+        };
+        let (off, off_d) = ablated(&mesh, &Ablation::default());
+        let exact_lod = crate::search::EXACT_LOD;
+        // The precondition that makes the guard bite: off uses a proxy here.
+        assert_ne!(off.record().tiers[0].lod, exact_lod, "fixture has no proxy tier");
+        let off_exact: std::collections::BTreeMap<usize, u64> = off_d
+            .snapshots
+            .exact_table
+            .iter()
+            .map(|row| (row.candidate, row.terms.score.get().to_bits()))
+            .collect();
+        assert!(
+            off.record().tiers[0]
+                .ranking
+                .iter()
+                .any(|row| off_exact.get(&row.candidate).is_some_and(|bits| *bits != row.terms.score.get().to_bits())),
+            "off: the proxy coarse scores differ from the exact ones"
+        );
+
+        for (name, ablation) in [("exact-score", &score_only), ("exact-grid+exact-score", &both)] {
+            let (on, d) = ablated(&mesh, ablation);
+            assert!(d.ablation.exact_score, "{name}");
+            let record = on.record();
+            assert_eq!(record.tiers.len(), 3, "{name}: the record keeps its three cuts");
+            for tier in &record.tiers {
+                assert_eq!(tier.lod, exact_lod, "{name}: {:?}", tier.tier);
+            }
+            let exact_rows: std::collections::BTreeMap<usize, u64> = d
+                .snapshots
+                .exact_table
+                .iter()
+                .map(|row| (row.candidate, row.terms.score.get().to_bits()))
+                .collect();
+            let mut compared = 0;
+            // The commit tier is repriced in place by the demand measurer, so
+            // only the C1 and C2 tiers still hold the raw table scores.
+            for tier in &record.tiers[..2] {
+                for row in &tier.ranking {
+                    if let Some(bits) = exact_rows.get(&row.candidate) {
+                        assert_eq!(*bits, row.terms.score.get().to_bits(), "{name} cand {}", row.candidate);
+                        compared += 1;
+                    }
+                }
+            }
+            // Every commit-tier candidate is in the C1 ranking (it scored them all).
+            assert!(compared >= exact_rows.len(), "{name}: {compared}");
+            // One scorer: the later cuts keep the best of the same ranking.
+            let c1: Vec<usize> = record.tiers[0].ranking.iter().map(|r| r.candidate).collect();
+            let top = request().ladder.refine_top_k().min(c1.len());
+            let c2_in: BTreeSet<usize> = record.tiers[1].ranking.iter().map(|r| r.candidate).collect();
+            assert_eq!(c2_in, c1[..top].iter().copied().collect::<BTreeSet<_>>(), "{name}");
+            // Nothing was built for the tiers, so nothing can have fallen back for
+            // them; `exact-score` alone may still record the grid proxy's fallbacks.
+            assert_eq!(record.fallbacks.is_empty(), ablation.exact_grid, "{name}: {:?}", record.fallbacks);
+        }
+        // Proxies are built only when something still reads them.
+        let (both_outcome, _) = ablated(&mesh, &both);
+        assert_eq!(both_outcome.record().lods.len(), 1, "no L1/L2 built or recorded");
+        let (score_outcome, _) = ablated(&mesh, &score_only);
+        assert_eq!(score_outcome.record().lods.len(), off.record().lods.len(), "the grid still reads the proxy");
+
+        // The scoring switch does not touch the grid: same candidates as the
+        // grid ablation (or off) alone.
+        let (_, both_d) = ablated(&mesh, &both);
+        let (_, grid_d) = ablated(&mesh, &grid_only);
+        assert_eq!(both_d.candidates, grid_d.candidates);
+        let (_, score_d) = ablated(&mesh, &score_only);
+        assert_eq!(score_d.candidates, off_d.candidates);
+    }
+
+    /// The boundary classifier owns no number: a margin at or below the
+    /// envelope is AMBIGUOUS, above it is clear, and a NaN is never clear.
+    #[test]
+    fn a_margin_at_or_below_its_envelope_is_ambiguous() {
+        assert_eq!(boundary_event(0.0, 1e-9), BoundaryEvent::Ambiguous);
+        assert_eq!(boundary_event(1e-9, 1e-9), BoundaryEvent::Ambiguous);
+        assert_eq!(boundary_event(-1e-9, 1e-9), BoundaryEvent::Ambiguous);
+        assert_eq!(boundary_event(2e-9, 1e-9), BoundaryEvent::Clear);
+        assert_eq!(boundary_event(-2e-9, 1e-9), BoundaryEvent::Clear);
+        assert_eq!(boundary_event(f64::NAN, 1e-9), BoundaryEvent::Ambiguous);
     }
 }

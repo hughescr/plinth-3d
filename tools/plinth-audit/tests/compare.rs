@@ -392,3 +392,406 @@ fn options_default_is_the_gate() {
     assert_eq!(o.band_voxels, 1);
     assert!(!o.assume_consumer_matched);
 }
+
+// ---- G7: the false alarms of the first real use (Q12) --------------------------------------------
+
+/// Lowest and highest z of the cube model of the base file.
+fn cube_z() -> (f64, f64) {
+    let f = ChituboxFile::open(Path::new(BASE)).expect("parses");
+    let zs = f.models[0].model_soup.tris.iter().flatten().map(|p| f64::from(p[2]));
+    (zs.clone().fold(f64::MAX, f64::min), zs.fold(f64::MIN, f64::max))
+}
+
+/// Compare `reference` with `candidate`, both written as given (no mutation applied).
+fn run_pair(name: &str, reference: &SynthFile, candidate: &SynthFile, tweak: impl Fn(&mut Args)) -> Run {
+    let (rd, cd) = (dir(&format!("{name}-ref")), dir(&format!("{name}-cand")));
+    poses(&rd, "x", "identity");
+    poses(&cd, "x", "identity");
+    let (r, c) = (write(reference, &rd, "x"), write(candidate, &cd, "x"));
+    let mut a = args(&r, &c);
+    tweak(&mut a);
+    compare_paths(&a)
+}
+
+#[test]
+fn a_piece_that_floats_in_both_files_is_not_new_floating_material() {
+    // The reference floats a small piece. The candidate floats the same piece one layer higher: its
+    // break moved by a layer. That is not new floating material (H1 matches pieces, voxel by voxel).
+    let float = |z: f64| Mutation::Float { at: [3.0, 3.0, z], radius: 0.055 };
+    let mut r = base();
+    apply(&mut r, &float(-3.0));
+    let mut c = base();
+    apply(&mut c, &float(-2.98));
+    let run = run_pair("h1-both", &r, &c, |_| {});
+    assert_eq!(row(&run, "H1").status, Status::Pass, "{}", show(&run));
+    // Control: the same piece in a different place is a new piece, and the old one is gone.
+    let mut elsewhere = base();
+    apply(&mut elsewhere, &Mutation::Float { at: [-3.0, -3.0, -3.0], radius: 0.055 });
+    let run = run_pair("h1-moved", &r, &elsewhere, |_| {});
+    assert_eq!(row(&run, "H1").status, Status::Fail, "a float 6 mm away is new material:\n{}", show(&run));
+}
+
+#[test]
+fn a_mesh_cut_by_the_model_agrees_with_its_header_and_a_short_one_does_not() {
+    let (zmin, _) = cube_z();
+    // A post whose header goes 0.3 mm into the cube; its mesh stops at the cube's underside.
+    let post = |mesh_top: f64| {
+        let mut r = SynthRecord::new(RecordKind::Member, [0.0, 0.0, -3.0], [0.0, 0.0, zmin + 0.3], 0.2, 0.2);
+        r.soup = SynthRecord::new(RecordKind::Member, [0.0, 0.0, -3.0], [0.0, 0.0, mesh_top], 0.2, 0.2).with_matching_soup().soup;
+        r
+    };
+    let mut cut = base();
+    cut.models[0].records.push(post(zmin));
+    let run = run_pair("t0-cut", &base(), &cut, |_| {});
+    assert_eq!(row(&run, "T0.mesh_header").status, Status::Pass, "the model made the cut:\n{}", show(&run));
+    // Control: the mesh ends 0.3 mm short of the cube. Nothing explains that.
+    let mut short = base();
+    short.models[0].records.push(post(zmin - 0.3));
+    let run = run_pair("t0-short", &base(), &short, |_| {});
+    assert_eq!(row(&run, "T0.mesh_header").status, Status::Fail, "{}", show(&run));
+}
+
+#[test]
+fn a_member_standing_on_the_model_surface_is_grounded_and_one_above_it_is_an_orphan() {
+    let (_, zmax) = cube_z();
+    // A post standing on the cube's top face (owner ruling: a valid seat is the plate, the model
+    // surface, or another support).
+    let post = |foot: f64| SynthRecord::new(RecordKind::Member, [0.0, 0.0, foot], [0.0, 0.0, foot + 2.0], 0.2, 0.2).with_matching_soup();
+    let mut on = base();
+    on.models[0].records.push(post(zmax - 0.005));
+    let run = run_pair("i5-on", &base(), &on, |_| {});
+    let i5 = row(&run, "H4.i5");
+    assert!(!i5.detail.iter().any(|d| d.contains("PATH_ORPHAN")), "a post on the model surface is not an orphan:\n{}\n{:?}", show(&run), i5.detail);
+    // Control: 0.5 mm above the cube it touches nothing.
+    let mut above = base();
+    above.models[0].records.push(post(zmax + 0.5));
+    let run = run_pair("i5-above", &base(), &above, |_| {});
+    let i5 = row(&run, "H4.i5");
+    assert!(i5.detail.iter().any(|d| d.contains("PATH_ORPHAN")), "a post in the air is an orphan:\n{}\n{:?}", show(&run), i5.detail);
+}
+
+#[test]
+fn a_declared_contact_merge_passes_a_twin_and_still_fails_a_contact_lost_without_a_survivor() {
+    // The reference has a second contact in the first contact's column (a twin 0.12 mm aside); the
+    // candidate has merged it away. Undeclared, that is a lost contact (N2). Declared, it is a merge.
+    let tip = kind_index(&base(), RecordKind::ContactSphere, 0);
+    let twin_of = |delta: [f64; 3]| {
+        let mut r = base();
+        let t = r.models[0].records[tip].clone();
+        r.models[0].records.push(t);
+        let at = r.models[0].records.len() - 1;
+        apply(&mut r, &Mutation::Move { record: at, delta });
+        r
+    };
+    let declare = |a: &mut Args| {
+        a.declared = Some(plinth_audit::compare::classify::DeclaredClass::PlanChanged);
+        a.declared_changes.contact_merge = true;
+    };
+    let near = twin_of([0.12, 0.0, 0.0]);
+    let undeclared = run_pair("n2-undeclared", &near, &base(), |_| {});
+    assert_eq!(row(&undeclared, "N2").status, Status::Fail, "{}", show(&undeclared));
+    let declared = run_pair("n2-declared", &near, &base(), declare);
+    assert_eq!(row(&declared, "N2").status, Status::Pass, "{}", show(&declared));
+    // A contact lost 4 mm from every survivor is not a merge, declared or not.
+    let far = twin_of([3.0, 0.0, 0.0]);
+    let declared = run_pair("n2-far", &far, &base(), declare);
+    assert_eq!(row(&declared, "N2").status, Status::Fail, "{}", show(&declared));
+    // The declaration is recorded and the verdict stays the computed one.
+    assert!(declared.outcome.rows.iter().any(|r| r.id == "C.declared"));
+}
+
+#[test]
+fn a_declared_change_needs_a_declared_plan_change() {
+    use plinth_audit::compare::parse_args;
+    let argv = |v: &[&str]| v.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+    assert!(parse_args(&argv(&["a", "b", "--declare-change", "contact-merge"])).is_err());
+    assert!(parse_args(&argv(&["a", "b", "--declared", "EQUIVALENT", "--declare-change", "contact-merge"])).is_err());
+    let ok = parse_args(&argv(&["a", "b", "--declared", "PLAN-CHANGED", "--declare-change", "contact-merge"])).expect("parses");
+    assert!(ok.declared_changes.contact_merge);
+    assert!(parse_args(&argv(&["a", "b", "--declared", "PLAN-CHANGED", "--declare-change", "nonsense"])).is_err());
+    assert!(parse_args(&argv(&["a", "b", "--declared", "SORT-OF"])).is_err());
+}
+
+/// A declared contact merge excuses a contact that moved beyond the 0.1 mm match in N2, but the
+/// load path of that contact (the survivor) is still held to N3's thinning limit. The reference's
+/// first contact moves 0.11 mm and the first member is thinned by 20 % (below the 15 % limit
+/// without an I3 margin of 1.5x).
+#[test]
+fn a_declared_survivor_is_judged_by_n3_and_a_relocated_contact_alone_passes() {
+    let b = base();
+    // Records 0 to 3 are the first support chain (contact down to the plate); record 2 is a member on it.
+    let tip = kind_index(&b, RecordKind::ContactSphere, 0);
+    let member = 2;
+    assert_eq!(b.models[0].records[member].kind, RecordKind::Member, "fixture layout");
+    let declare = |a: &mut Args| {
+        a.declared = Some(plinth_audit::compare::classify::DeclaredClass::PlanChanged);
+        a.declared_changes.contact_merge = true;
+    };
+    // A contact moved alone is cut from its path: the comparison cannot be made, which is
+    // INDETERMINATE, not a pass.
+    {
+        let mut m = b.clone();
+        apply(&mut m, &Mutation::Move { record: tip, delta: [0.11, 0.0, 0.0] });
+        let run = run_pair("n3-survivor-alone", &b, &m, declare);
+        assert_eq!(row(&run, "N3").status, Status::Indeterminate, "{}", show(&run));
+    }
+    let relocated = |thin: Option<f64>| {
+        let mut m = b.clone();
+        for record in 0..=3 {
+            apply(&mut m, &Mutation::Move { record, delta: [0.11, 0.0, 0.0] });
+        }
+        if let Some(f) = thin {
+            apply(&mut m, &Mutation::ScaleRecord { record: member, factor: f });
+        }
+        m
+    };
+    // Control: relocation alone, declared, is a merge and the path is unchanged.
+    let run = run_pair("n3-survivor-move", &b, &relocated(None), declare);
+    assert_eq!(row(&run, "N2").status, Status::Pass, "{}", show(&run));
+    assert_eq!(row(&run, "N3").status, Status::Pass, "{}", show(&run));
+    // The defect: relocation plus a 20 % thinner member on the same path.
+    let run = run_pair("n3-survivor-thin", &b, &relocated(Some(0.8)), declare);
+    assert_eq!(row(&run, "N2").status, Status::Pass, "N2 excuses the relocation:\n{}", show(&run));
+    assert_eq!(row(&run, "N3").status, Status::Fail, "N3 must still see the survivor's thinner path:\n{}", show(&run));
+    // Control: the same thinning without the relocation fails N3 as before.
+    let run = run_pair("n3-thin-only", &b, &{
+        let mut m = b.clone();
+        apply(&mut m, &Mutation::ScaleRecord { record: member, factor: 0.8 });
+        m
+    }, declare);
+    assert_eq!(row(&run, "N3").status, Status::Fail, "{}", show(&run));
+}
+
+/// The reference's first chain with its member r2 split 0.30 mm below its top (r2 above, r3 below).
+fn split_chain() -> SynthFile {
+    let mut r = base();
+    let old = r.models[0].records[2].clone();
+    assert_eq!(old.kind, RecordKind::Member, "fixture layout");
+    let mut mid = old.start_mm;
+    mid[2] -= 0.30;
+    r.models[0].records[2] = SynthRecord::new(RecordKind::Member, old.start_mm, mid, old.r_start, old.r_start).with_matching_soup();
+    r.models[0].records.insert(3, SynthRecord::new(RecordKind::Member, mid, old.end_mm, old.r_end, old.r_end).with_matching_soup());
+    r
+}
+
+/// The split chain reshaped: moved `dx` mm sideways (records 0 to 4), its internal joint moved
+/// `dz` mm down, and the upper segment's radius scaled by `factor`; meshes follow their headers.
+fn reshaped(r: &SynthFile, dx: f64, dz: f64, factor: Option<f64>) -> SynthFile {
+    let mut c = r.clone();
+    if dx != 0.0 {
+        for record in 0..=4 {
+            apply(&mut c, &Mutation::Move { record, delta: [dx, 0.0, 0.0] });
+        }
+    }
+    if let Some(f) = factor {
+        apply(&mut c, &Mutation::ScaleRecord { record: 2, factor: f });
+    }
+    c.models[0].records[2].end_mm[2] -= dz;
+    c.models[0].records[3].start_mm[2] -= dz;
+    for i in [2, 3] {
+        c.models[0].records[i].soup = c.models[0].records[i].clone().with_matching_soup().soup;
+    }
+    c
+}
+
+/// Review of 2b83dc1 (P1): a declared survivor's chain relocated 0.101 mm with its internal joint
+/// moved 0.201 mm down and the upper segment thinned at constant volume (section 0.489 -> 0.378 mm,
+/// -22.6 %). No record of the survivor's path matches the two reshaped members, even after the
+/// chain's shift; they were dropped and N3 passed. Every member is now judged, by height when no
+/// record matches it.
+#[test]
+fn a_reshaped_survivor_path_that_got_thinner_fails_n3() {
+    let declare = |a: &mut Args| {
+        a.declared = Some(plinth_audit::compare::classify::DeclaredClass::PlanChanged);
+        a.declared_changes.contact_merge = true;
+    };
+    let r = split_chain();
+    let factor = (0.30f64 / (0.30 + 0.201)).sqrt();
+    let run = run_pair("n3-reshape-thin", &r, &reshaped(&r, 0.101, 0.201, Some(factor)), declare);
+    assert_eq!(row(&run, "N2").status, Status::Pass, "N2 excuses the relocation:\n{}", show(&run));
+    assert_eq!(row(&run, "N3").status, Status::Fail, "the reshaped path is thinner:\n{}\n{:?}", show(&run), row(&run, "N3").detail);
+    assert_eq!(run.outcome.verdict, Verdict::Regression);
+    // Control: the same reshape with the radii kept is the same path in a new place.
+    let run = run_pair("n3-reshape-same", &r, &reshaped(&r, 0.101, 0.201, None), declare);
+    assert_eq!(row(&run, "N3").status, Status::Pass, "{}\n{:?}", show(&run), row(&run, "N3").detail);
+    // The same reshape on a contact that did not move (matched within 0.1 mm) is judged the same way.
+    let run = run_pair("n3-reshape-matched", &r, &reshaped(&r, 0.0, 0.201, Some(factor)), |_| {});
+    assert_eq!(row(&run, "N3").status, Status::Fail, "{}\n{:?}", show(&run), row(&run, "N3").detail);
+}
+
+/// Review of 2b83dc1 (P2): a detached member (floating in both files) made 0.10 mm longer and
+/// thinner at constant volume floats 20 new pixels of material the reference never had. The
+/// same-piece growth allowance excused it, even with every noise allowance off (`--no-flicker`).
+#[test]
+fn a_floating_member_made_longer_is_new_floating_material_with_or_without_the_allowance() {
+    let mut r = base();
+    r.models[0].records.push(SynthRecord::new(RecordKind::Member, [3.0, 3.0, -3.0], [3.0, 3.0, -2.0], 0.055, 0.055).with_matching_soup());
+    let mut c = r.clone();
+    let last = c.models[0].records.last_mut().expect("record");
+    last.end_mm[2] += 0.10;
+    last.r_start /= 1.10f64.sqrt();
+    last.r_end = last.r_start;
+    last.soup = last.clone().with_matching_soup().soup;
+    for strict in [true, false] {
+        let run = run_pair(&format!("h1-extend-{strict}"), &r, &c, |a| a.no_flicker = strict);
+        assert_eq!(row(&run, "H1").status, Status::Fail, "no_flicker={strict}:\n{}", show(&run));
+        assert_eq!(run.outcome.verdict, Verdict::Regression, "no_flicker={strict}");
+    }
+}
+
+/// The first chain's member r2 split in three collinear members, the middle one `len` mm long and
+/// centred on the old member's middle (r2 above, r3 the middle, r4 below).
+fn three_part_chain(len: f64) -> SynthFile {
+    let mut r = base();
+    let old = r.models[0].records[2].clone();
+    assert_eq!(old.kind, RecordKind::Member, "fixture layout");
+    let (mut p, mut q) = (old.start_mm, old.start_mm);
+    p[2] = (old.start_mm[2] + old.end_mm[2]) * 0.5 + len * 0.5;
+    q[2] = p[2] - len;
+    r.models[0].records[2] = SynthRecord::new(RecordKind::Member, old.start_mm, p, old.r_start, old.r_start).with_matching_soup();
+    r.models[0].records.insert(3, SynthRecord::new(RecordKind::Member, p, q, old.r_start, old.r_start).with_matching_soup());
+    r.models[0].records.insert(4, SynthRecord::new(RecordKind::Member, q, old.end_mm, old.r_end, old.r_end).with_matching_soup());
+    r
+}
+
+/// `three_part_chain` with both middle joints moved `dz` mm down and the middle member's radii
+/// scaled by `factor`; meshes follow their headers.
+fn necked(r: &SynthFile, dz: f64, factor: f64) -> SynthFile {
+    let mut c = r.clone();
+    c.models[0].records[2].end_mm[2] -= dz;
+    c.models[0].records[3].start_mm[2] -= dz;
+    c.models[0].records[3].end_mm[2] -= dz;
+    c.models[0].records[4].start_mm[2] -= dz;
+    c.models[0].records[3].r_start *= factor;
+    c.models[0].records[3].r_end *= factor;
+    for i in [2, 3, 4] {
+        c.models[0].records[i].soup = c.models[0].records[i].clone().with_matching_soup().soup;
+    }
+    c
+}
+
+/// Review round 3 (P1): the joint-shift window replaced every candidate section by the thickest one
+/// within 0.05 mm, so an unmatched member shorter than 0.10 mm was hidden by its thicker neighbours.
+/// A 0.08 mm middle member moved 0.11 mm down with its radii scaled by 0.7 (section 0.489 -> 0.342
+/// mm, -30 %) came out N3 PASS and EQUIVALENT, with or without the noise allowance. The window now
+/// aligns joints only: a member is judged by its own section, and the window reaches only 0.05 mm
+/// from its end joints.
+#[test]
+fn a_short_member_thinned_between_thicker_neighbours_fails_n3() {
+    for len in [0.04, 0.08, 0.10, 0.12, 0.30] {
+        let r = three_part_chain(len);
+        for strict in [true, false] {
+            let run = run_pair(&format!("n3-neck-{len}-{strict}"), &r, &necked(&r, 0.11, 0.7), |a| a.no_flicker = strict);
+            assert_eq!(row(&run, "N3").status, Status::Fail, "len {len} no_flicker={strict}:\n{}\n{:?}", show(&run), row(&run, "N3").detail);
+            assert_eq!(run.outcome.verdict, Verdict::Regression, "len {len} no_flicker={strict}");
+        }
+        // Control: the same shifted joints with the radii kept are the same path.
+        let run = run_pair(&format!("n3-neck-same-{len}"), &r, &necked(&r, 0.11, 1.0), |_| {});
+        assert_eq!(row(&run, "N3").status, Status::Pass, "len {len}:\n{}\n{:?}", show(&run), row(&run, "N3").detail);
+    }
+}
+
+/// The first chain with its member r2 a taper from `top` to `bottom` mm of radius, of record kind
+/// `kind`. No record of one kind matches a record of another, so a Member in one file and a
+/// RootFlare in the other, in the same place, are two members that nothing matches (and nothing
+/// else moves).
+fn tapered_chain(kind: RecordKind, top: f64, bottom: f64) -> SynthFile {
+    let mut r = base();
+    let m = &mut r.models[0].records[2];
+    (m.kind, m.r_start, m.r_end) = (kind, top, bottom);
+    m.soup = m.clone().with_matching_soup().soup;
+    r
+}
+
+/// Review round 3 (a): the worst height was chosen on the raw ratio before the absolute noise
+/// allowance, so a sub-voxel change at a small radius at the top of a member (0.050 -> 0.035 mm:
+/// -30 %, 0.015 mm) hid a 20 % thinning over the rest of it (0.04 mm and more). Each height is now
+/// read through the allowance first.
+#[test]
+fn a_sub_voxel_change_at_a_small_radius_does_not_hide_a_thinning_elsewhere_on_the_member() {
+    // The reference member tapers 0.05 -> 0.20 mm. The candidate member (a record of another kind,
+    // so nothing matches it) tapers 0.035 -> 0.16 mm: 30 % thinner at the top, 20 % at the bottom.
+    let r = tapered_chain(RecordKind::Member, 0.05, 0.20);
+    let run = run_pair("n3-small-radius", &r, &tapered_chain(RecordKind::RootFlare, 0.035, 0.16), |_| {});
+    assert_eq!(row(&run, "N3").status, Status::Fail, "{}\n{:?}", show(&run), row(&run, "N3").detail);
+    // Control: the change at the small radius alone (0.050 -> 0.035 mm, 0.015 mm, under one voxel)
+    // is still noise.
+    let run = run_pair("n3-small-radius-alone", &r, &tapered_chain(RecordKind::RootFlare, 0.035, 0.20), |_| {});
+    assert_eq!(row(&run, "N3").status, Status::Pass, "{}\n{:?}", show(&run), row(&run, "N3").detail);
+}
+
+/// Reverse the winding of the end caps of record `i`'s frustum mesh (`frustum_soup` writes its caps
+/// the other way round from its sides, so its mesh is not a closed surface; the engine's meshes are).
+fn close_mesh(s: &mut SynthFile, i: usize) {
+    for (k, t) in s.models[0].records[i].soup.iter_mut().enumerate() {
+        if k % 4 >= 2 {
+            t.swap(1, 2);
+        }
+    }
+}
+
+/// Review round 3 (b): a closed frustum mesh far larger than its header covers the header, and the
+/// cover reading (`min(free, cover)`) erased it from T0. A junction drawn as a hull of the end
+/// circles also covers its header and lies outside it, but within the header's capsule: that one
+/// still passes.
+#[test]
+fn a_closed_mesh_far_larger_than_its_header_fails_t0_and_a_junction_hull_does_not() {
+    let mut b = base();
+    close_mesh(&mut b, 2);
+    close_mesh(&mut b, 1);
+    for factor in [1.6, 0.5] {
+        let mut c = b.clone();
+        apply(&mut c, &Mutation::ShrinkMesh { record: 2, factor });
+        let run = run_pair(&format!("t0-size-{factor}"), &b, &c, |_| {});
+        assert_eq!(row(&run, "T0.mesh_header").status, Status::Fail, "factor {factor}:\n{}", show(&run));
+    }
+    // Control: record 1 is a taper (0.326 -> 0.489 mm). A cylinder of the larger radius covers it
+    // and stays inside its capsule.
+    let mut hull = b.clone();
+    let t = hull.models[0].records[1].clone();
+    hull.models[0].records[1].soup = SynthRecord::new(RecordKind::ContactTaper, t.start_mm, t.end_mm, t.r_end, t.r_end).with_matching_soup().soup;
+    close_mesh(&mut hull, 1);
+    let run = run_pair("t0-hull", &b, &hull, |_| {});
+    assert_eq!(row(&run, "T0.mesh_header").status, Status::Pass, "{}", show(&run));
+}
+
+/// Review round 3 (c): a member grounded by standing on the model surface still had its foot
+/// reported as a free end.
+#[test]
+fn the_foot_of_a_member_standing_on_the_model_is_not_a_free_end() {
+    let (_, zmax) = cube_z();
+    let mut on = base();
+    on.models[0].records.push(SynthRecord::new(RecordKind::Member, [0.0, 0.0, zmax - 0.005], [0.0, 0.0, zmax + 2.0], 0.2, 0.2).with_matching_soup());
+    let run = run_pair("i5-foot", &base(), &on, |_| {});
+    let i5 = row(&run, "H4.i5");
+    let foot = format!("at (0.000,0.000,{:.3})", zmax - 0.005);
+    assert!(!i5.detail.iter().any(|d| d.contains("PATH_FREE_END") && d.contains(&foot)), "the foot is on the model:\n{}\n{:?}", show(&run), i5.detail);
+    // The other end is in the air: that one is still a free end.
+    let top = format!("at (0.000,0.000,{:.3})", zmax + 2.0);
+    assert!(i5.detail.iter().any(|d| d.contains("PATH_FREE_END") && d.contains(&top)), "{}\n{:?}", show(&run), i5.detail);
+}
+
+/// Review round 3 (d): `--json --probe` wrote the probe text after the JSON document.
+#[test]
+fn json_output_with_a_probe_is_one_json_document() {
+    // Two files that differ (identical bytes are not analysed, so nothing could be probed).
+    let (rd, cd) = (dir("json-probe-ref"), dir("json-probe-cand"));
+    poses(&rd, "x", "identity");
+    poses(&cd, "x", "identity");
+    let mut m = base();
+    apply(&mut m, &Mutation::Ulp);
+    let (p, q) = (write(&base(), &rd, "x"), write(&m, &cd, "x"));
+    let (p, q) = (p.to_str().expect("utf8"), q.to_str().expect("utf8"));
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_plinth-audit"))
+        .args(["compare", p, q, "--json", "--probe", "1,1,-2,0.5", "--probe", "0,0,any,1"])
+        .output()
+        .expect("runs");
+    let text = String::from_utf8(out.stdout).expect("utf8");
+    let t = text.trim();
+    assert!(t.starts_with('{') && t.ends_with('}'), "stdout is one JSON object, got:\n{text}");
+    assert!(!text.contains("probe ("), "no probe text outside the document:\n{text}");
+    assert!(text.contains("\"probes\""), "the probes are in the document:\n{text}");
+    // The text mode still prints them.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_plinth-audit")).args(["compare", p, q, "--probe", "1,1,-2,0.5"]).output().expect("runs");
+    assert!(String::from_utf8(out.stdout).expect("utf8").contains("probe (1.000,1.000,-2.000)"));
+}

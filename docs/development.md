@@ -534,9 +534,16 @@ the stage that made it. It decides nothing.
   nearest earlier one, with the angle and dot margin to the radius. G4 (flat-face escort):
   per rest pose the flat share and a hash of its flat-face set, the 256 smallest facing
   margins, and the candidates covering each flat pose. The escort's decisions. C1 to C4:
-  K, the rows either side of the cut and the next 8 rejected. Three full copies of the
-  commit ranking (exact table, after the prefilter, after production), because the record
-  reprices it in place.
+  K, the rows either side of the cut and the next 8 rejected. Each row says whether its
+  burden was measured at the production raster; the commit comparator puts production rows
+  first before it reads a score, so a cut carries `score_gap` only when both rows are in one
+  class (`decided_by: "score"`), and `decided_by: "production_fidelity"` with no gap when
+  precedence decided. Three full copies of the commit ranking (exact table, after the
+  prefilter, after production), because the record reprices it in place.
+- **Cost.** G1 and G2 are read off the grid's own binning pass through an observer, not
+  rescanned; with the diagnostics off that pass carries no observer. The collection and the
+  `orient.json` write run in the sidecar's `Diagnostic` phase (the `OrientTable` phase
+  excludes them), and `prod-all`/`extra=` work counters land there too.
 - **`PLINTH_ORIENT_DIAG`** (comma-separated; unset means on when `--perf` is on):
   `off` collects nothing; `digest` prints `[orient] search_digest <sha256>` to stderr, with
   no `--perf` needed (the check that the digest did not move); `prod-all` also measures every
@@ -545,6 +552,23 @@ the stage that made it. It decides nothing.
   final, through a separate non-retaining measurer
   (`SupportDemandMeasurer::diagnostic_measurer`), never the retaining one, and are written to
   the diagnostics only. They add to the perf counters, so such a run is not a timing run.
+  `extra=` directions are scored on the exact table first; with no separate measurer the
+  rows keep those scores, with `production_terms: null` and the reason in `error`.
+- **`PLINTH_ORIENT_ABLATE`** (comma-separated; unset means every word off; pose-stability Lanes A and C).
+  An ablation measures one change at a time on one binary and is deleted when the change is
+  promoted or dropped. With every word off the search, the record, `search_digest` and the
+  emitted bytes are the recorded ones. `exact-grid` builds the candidate grid from the EXACT
+  table instead of the coarse proxy's and lists the rest poses in ascending reference-bin
+  order instead of heaviest-first (the kept bins are the same rule; only the proxy
+  collapse order, which follows the input's last float bits, and the area order are gone);
+  the coarse tier still scores on its proxy. It CHANGES the search: use `--no-cache`, and do
+  not read its output as a production run. `exact-shadow` is out of band: after the record
+  is final it scores the SAME C1 and C2 input key sets on the exact table and repeats each
+  cut, into `orient.json` (`diagnostics.exact_shadow`, `C1x`/`C2x`); it needs `--perf` and
+  changes nothing. `exact-score` (Lane C) retires the proxy tiers: the coarse, refine and
+  commit tiers all score on the exact table and the cuts keep their widths. With `exact-grid`
+  too, the L1 and L2 proxy meshes are not built at all; alone, the proxy rung is still built
+  because the grid reads it. It CHANGES the search: use `--no-cache`.
 
 ## Surface fields: parallel walks, serial oracle
 

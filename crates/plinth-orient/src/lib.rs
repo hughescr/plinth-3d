@@ -30,6 +30,7 @@
 //! it runs only on an explicit operator mark, and its provenance names the mark.
 #![forbid(unsafe_code)]
 
+pub mod ablate;
 pub mod as_drawn;
 pub mod demand;
 pub mod diag;

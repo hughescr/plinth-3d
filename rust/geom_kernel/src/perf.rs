@@ -113,10 +113,14 @@ pub enum Phase {
     SealFields,
     FinalSweep,
     Emit,
+    /// Pose-search diagnostics (`plinth_orient::diag`): work done for the
+    /// diagnostics alone, so a run that collects them still reports the
+    /// pipeline's own phases without it.
+    Diagnostic,
     Other,
 }
 
-const PHASE_N: usize = 11;
+const PHASE_N: usize = 12;
 
 impl Phase {
     /// Every phase, in run order.
@@ -131,6 +135,7 @@ impl Phase {
         Self::SealFields,
         Self::FinalSweep,
         Self::Emit,
+        Self::Diagnostic,
         Self::Other,
     ];
 
@@ -148,6 +153,7 @@ impl Phase {
             Self::SealFields => "SealFields",
             Self::FinalSweep => "FinalSweep",
             Self::Emit => "Emit",
+            Self::Diagnostic => "Diagnostic",
             Self::Other => "Other",
         }
     }
@@ -168,6 +174,7 @@ impl Phase {
             7 => Self::SealFields,
             8 => Self::FinalSweep,
             9 => Self::Emit,
+            10 => Self::Diagnostic,
             _ => Self::Other,
         }
     }
@@ -932,6 +939,19 @@ pub fn begin_model(model: &str) {
 /// Enter `phase` and return the one it replaces. Call from the pipeline's
 /// main thread after a join only. Writes a partial sidecar.
 pub fn set_phase(phase: Phase) -> Phase {
+    switch_phase(phase, true)
+}
+
+/// [`set_phase`] without the partial sidecar write. For a short bracket
+/// (the diagnostics' own phase) whose two writes would cost more than the
+/// work inside it: rewriting a large sidecar twice is hundreds of
+/// milliseconds on a big model. The checkpoint thread still rewrites the
+/// partial sidecar on its period, and [`end_model`] writes the final one.
+pub fn set_phase_quiet(phase: Phase) -> Phase {
+    switch_phase(phase, false)
+}
+
+fn switch_phase(phase: Phase, write: bool) -> Phase {
     let previous = Phase::from_index(PHASE.load(Relax));
     if !enabled() {
         return previous;
@@ -944,7 +964,9 @@ pub fn set_phase(phase: Phase) -> Phase {
                 slot.phase_wall_ns[previous.index()].saturating_add(spent);
             slot.phase_since = now;
             PHASE.store(phase as u8, Relax);
-            write_sidecar(slot, true, now);
+            if write {
+                write_sidecar(slot, true, now);
+            }
         }
     }
     previous
@@ -1731,6 +1753,29 @@ mod tests {
         let expected: u64 = (0..10_000_u64).map(|i| i % 7).sum();
         assert!(seen.iter().all(|&s| s == (10_000, expected)), "{seen:?}");
         ENABLED.store(false, Relax);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_quiet_phase_switch_attributes_work_and_writes_no_partial_sidecar() {
+        let _guard = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = scratch("quiet");
+        enable(dir.clone(), HOUR);
+        begin_model("quiet");
+        let sidecar = dir.join("quiet.perf.json");
+        let _ = std::fs::remove_file(&sidecar);
+        assert_eq!(set_phase_quiet(Phase::Diagnostic), Phase::Load);
+        add(Work::SweepRuns, 3);
+        assert_eq!(set_phase_quiet(Phase::Load), Phase::Diagnostic);
+        assert!(!sidecar.exists(), "a quiet switch writes no partial sidecar");
+        // The loud one still does.
+        assert_eq!(set_phase(Phase::Emit), Phase::Load);
+        assert!(sidecar.exists());
+        end_model();
+        let text = std::fs::read_to_string(&sidecar).expect("final");
+        assert!(text.contains("{\"phase\":\"Diagnostic\""), "{text}");
+        let diagnostic = text.split("{\"phase\":\"Diagnostic\"").nth(1).expect("the phase");
+        assert!(diagnostic.contains("\"sweep.runs\":3"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
