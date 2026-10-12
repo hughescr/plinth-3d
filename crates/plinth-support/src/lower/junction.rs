@@ -90,6 +90,11 @@ pub(super) struct JunctionOutcome {
     /// shaft and has none. [`keep_planned_hulls`] puts the shaft inside them, as
     /// this pass left it, into another field's shaft.
     pub windows: Vec<Vec<(f64, f64)>>,
+    /// Per arm, the ring of its last frustum that a FILLED junction's added hull
+    /// takes whole (the branch's end ring). A filled junction edits no shaft and
+    /// has no window, but its hull still stands on that ring:
+    /// [`keep_planned_hulls`] meets it as it meets the ring at a window's edge.
+    pub end_rings: Vec<Option<EndRing>>,
     /// How the kept hull rings were met ([`keep_planned_hulls`] only).
     pub rings: RingStats,
     pub hulled: usize,
@@ -103,6 +108,13 @@ pub(super) struct JunctionOutcome {
     /// the caller prints.
     pub crowded: usize,
     pub undrawable: usize,
+}
+
+/// The end ring of an arm's last frustum, as a filled junction's hull takes it.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct EndRing {
+    pub centre: [Finite; 3],
+    pub radius_mm: f64,
 }
 
 /// What happened at the kept hull rings that stand at a shaft's cut ([`keep_planned_hulls`]).
@@ -306,6 +318,7 @@ pub(super) fn hull_junctions(
         shafts: vec![None; count],
         hulls: vec![Vec::new(); count],
         windows: vec![Vec::new(); count],
+        end_rings: vec![None; count],
         ..JunctionOutcome::default()
     };
     let original = |arm: usize| -> &[SupportPrimitive] {
@@ -609,7 +622,12 @@ pub(super) fn hull_junctions(
         if let Some(why) = skip {
             if let Some(record) = fill_rings.record(rules.sides) {
                 outcome.hulls[a].push(record);
-                // A filled junction edits no shaft: no window.
+                // A filled junction edits no shaft: no window. Its hull takes the
+                // branch's end ring whole, which a kept hull must meet.
+                outcome.end_rings[a] = Some(EndRing {
+                    centre: last.end_mm,
+                    radius_mm: last.end_radius_mm.get(),
+                });
                 outcome.filled += 1;
             } else {
                 match why {
@@ -676,6 +694,7 @@ pub(super) fn keep_planned_hulls(
         shafts: vec![None; count],
         hulls: planned.hulls.clone(),
         windows: planned.windows.clone(),
+        end_rings: planned.end_rings.clone(),
         rings: RingStats::default(),
         hulled: planned.hulled,
         filled: planned.filled,
@@ -686,7 +705,8 @@ pub(super) fn keep_planned_hulls(
     };
     for index in 0..count {
         let windows = merged_windows(&planned.windows[index]);
-        if windows.is_empty() {
+        let end_ring = planned.end_rings[index];
+        if windows.is_empty() && end_ring.is_none() {
             continue;
         }
         let real = shaft_of(primitives, arms[index])?;
@@ -699,7 +719,7 @@ pub(super) fn keep_planned_hulls(
             return None;
         }
         let edited = planned.shafts[index].clone().unwrap_or(original);
-        let (shaft, stats) = splice_shaft(&real, &edited, frame, &windows, rules)?;
+        let (shaft, stats) = splice_shaft(&real, &edited, frame, &windows, end_ring, rules)?;
         kept.shafts[index] = Some(shaft);
         kept.rings.add(stats);
     }
@@ -781,12 +801,15 @@ fn chain_radius_at(chain: &[SupportPrimitive], arcs: &[(f64, f64)], x: f64, star
 /// the chain is continuous. Where a window holds no piece of the reference, its
 /// edge is a hull ring: the arm's frustum there ends on the ring's centre and
 /// radius, and the arm's own pieces taper from the ring out to its chord
-/// ([`bring_to_ring`]). Everywhere else the arm's own frusta are untouched.
+/// ([`bring_to_ring`]); so is the arm's last frustum when a filled junction's
+/// added hull takes its end ring (`end_ring`, no window). Everywhere else the
+/// arm's own frusta are untouched.
 fn splice_shaft(
     real: &[SupportPrimitive],
     edited: &[SupportPrimitive],
     frame: Frame,
     windows: &[(f64, f64)],
+    end_ring: Option<EndRing>,
     rules: JunctionRules,
 ) -> Option<(Vec<SupportPrimitive>, RingStats)> {
     let real_arcs = arcs(frame, real);
@@ -841,7 +864,23 @@ fn splice_shaft(
         lean_slope_per_arc: rules.cone_slope * frame.dir[2].abs(),
         pitch_mm: rules.pixel_pitch_mm,
     };
-    for edge in ring_edges(edited, &edited_arcs, windows) {
+    let mut edges = ring_edges(edited, &edited_arcs, windows);
+    // A filled junction's hull stands on the arm's end ring (no window): the
+    // arm's last frustum ends on it. An end inside a window is the reference's.
+    if let (Some(ring), Some(&(_, end_arc))) = (end_ring, real_arcs.last()) {
+        let inside_window = windows
+            .iter()
+            .any(|&(lo, hi)| lo - ARC_EPSILON_MM <= end_arc && end_arc <= hi + ARC_EPSILON_MM);
+        if !inside_window {
+            edges.push(RingEdge {
+                arc: end_arc,
+                shaft_above: true,
+                centre: ring.centre,
+                radius: ring.radius_mm,
+            });
+        }
+    }
+    for edge in edges {
         match bring_to_ring(&mut placed, &edge, taper) {
             RingOutcome::Met { gap } => {
                 stats.max_gap_mm = stats.max_gap_mm.max(gap.abs());
@@ -1792,6 +1831,54 @@ mod tests {
                 "ring corner {corner:?} of the crowded branch stands outside every solid"
             );
         }
+    }
+
+    /// A FILLED junction has no window, but its added hull stands on the branch's
+    /// end ring: the kept hull is met there on the reference's radius too.
+    #[test]
+    fn a_filled_hulls_end_ring_is_met_on_the_reference_radius() {
+        let lean = 40.0_f64.to_radians();
+        let field_of = |host_r: f64, filled_r: f64| {
+            let branch = |x_sign: f64, z: f64, r: f64| {
+                frustum(
+                    SupportSegmentKind::Member,
+                    [x_sign * 3.0 * lean.sin(), 0.0, z + 3.0 * lean.cos()],
+                    [0.0, 0.0, z],
+                    r,
+                    r,
+                )
+            };
+            vec![
+                frustum(SupportSegmentKind::Member, [0.0, 0.0, 0.0], [0.0, 0.0, -10.0], host_r, host_r),
+                branch(1.0, -5.0, 0.9),
+                branch(-1.0, -5.1, filled_r),
+            ]
+        };
+        let arms = vec![
+            JunctionArm { landed: false, shaft: Some((0, 1)) },
+            JunctionArm { landed: true, shaft: Some((1, 1)) },
+            JunctionArm { landed: true, shaft: Some((2, 1)) },
+        ];
+        let (reference, field) = (field_of(0.9, 0.8), field_of(0.9, 0.76));
+        let planned = hull_junctions(&reference, &arms, rules());
+        assert_eq!(planned.filled, 1, "{planned:?}");
+        let kept = keep_planned_hulls(&field, &arms, &reference, &arms, rules()).expect("the shafts line up");
+        assert_eq!(kept.hulls, planned.hulls, "the filled hull is the reference's, bit for bit");
+        let shaft = kept.shafts[2].as_ref().expect("the filled branch's shaft is met on the ring");
+        let last = shaft.last().expect("a piece");
+        assert_eq!(last.end_mm, reference[2].end_mm, "ends on the ring's centre");
+        assert_eq!(last.end_radius_mm, reference[2].end_radius_mm, "ends on the reference's radius, to the bit");
+        assert_eq!(shaft[0].start_radius_mm, field[2].start_radius_mm, "and is the field's own chord away from the ring");
+        assert_eq!((kept.rings.thicker, kept.rings.unmet), (1, 0), "{:?}", kept.rings);
+        // The same field with equal radii edits nothing there.
+        let same = keep_planned_hulls(&reference, &arms, &reference, &arms, rules()).expect("lines up");
+        assert_eq!(
+            (same.rings.thicker, same.rings.thinner, same.rings.unmet),
+            (0, 0, 0),
+            "{:?}",
+            same.rings
+        );
+        assert_eq!(same.rings.exact, kept.rings.exact + 1, "{:?} {:?}", same.rings, kept.rings);
     }
 
     fn ring_centre(ring: &HullRing) -> V {

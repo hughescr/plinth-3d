@@ -586,11 +586,12 @@ pass that applies it):
   (`adapter::hull_reference_arms`, from `CertifiedHead::today_radius_mm`) and keeps those
   records bit for bit (`lower_sweep_arms_with_hull_reference`, `junction::keep_planned_hulls`).
   The shaft of an arm a hull cuts is the arm's own outside the junction's arcs and the old
-  field's thin run inside them. A filled junction edits no shaft. A reference whose shafts do
+  field's thin run inside them. A filled junction cuts nothing out of a shaft. A reference whose shafts do
   not line up with the arms' is not used, and the lowering warns.
 * **The ring the shaft meets is the old ring, to the bit.** Where a hull ring stands on a cut of
   the shaft (the end of the host above a hull, the start of the host below it, the end of a
-  shortened branch), the arm's frustum there ends on the ring's centre and radius, so the drawn
+  shortened branch; and the end of the branch a FILLED junction's added hull takes whole, which
+  has no window), the arm's frustum there ends on the ring's centre and radius, so the drawn
   ring and the hull ring are one ring. The arm's chord differs from the ring by the fit's chord
   noise (the ring is the old law's radius). The difference is closed by a taper along the arm's
   own pieces, walking away from the ring (`junction::plan_transition`): it closes at
