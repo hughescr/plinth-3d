@@ -332,6 +332,15 @@ pub struct FootprintNormal {
     pub area_mm2: f64,
     /// Faces in the connected, admitted footprint.
     pub faces: usize,
+    /// **The real contact**, mm² ([`crate::contact_growth`], 2026-10-12): the
+    /// same admitted footprint, its faces joined where they share an edge by
+    /// POSITION (the same two corner points), not only by vertex index. A
+    /// model loaded as a triangle soup carries every corner under its own
+    /// index, so an index join never leaves the seat triangle there: measured
+    /// on Bat_Cat_Owl, "largest footprint 1 faces", and a contact of 0.10 mm²
+    /// against 4.30 planned. [`Self::area_mm2`] and the normal keep the index
+    /// join (their own rule, unchanged by this lane).
+    pub contact_area_mm2: f64,
 }
 
 /// The footprint normal of every ball, in ball order: `None` where the
@@ -455,6 +464,46 @@ fn footprint_of_row(
         area += face.area_mm2;
         faces += 1;
     }
+    // THE REAL CONTACT: the same walk with corners joined by POSITION, so a
+    // triangle-soup model (every corner its own index) still joins its faces.
+    let contact_area_mm2 = {
+        let key = |id: u32| verts.get(id as usize).map(|p| p.map(f64::to_bits));
+        let mut canonical: std::collections::HashMap<[u64; 3], u32> =
+            std::collections::HashMap::with_capacity(admitted.len() * 3);
+        let mut joined: Vec<usize> = (0..admitted.len()).collect();
+        let mut by_point: Vec<(u32, u32, usize)> = Vec::with_capacity(admitted.len() * 3);
+        for (index, face) in admitted.iter().enumerate() {
+            let ids = face.ids.map(|id| {
+                key(id).map_or(id, |bits| *canonical.entry(bits).or_insert(id))
+            });
+            let [a, b, c] = ids;
+            by_point.extend([(a, b), (b, c), (c, a)].map(|(p, q)| (p.min(q), p.max(q), index)));
+        }
+        by_point.sort_unstable();
+        for pair in by_point.windows(2) {
+            if pair[0].0 != pair[1].0 || pair[0].1 != pair[1].1 {
+                continue;
+            }
+            let (Some(&p), Some(&q)) = (verts.get(pair[0].0 as usize), verts.get(pair[0].1 as usize))
+            else {
+                continue;
+            };
+            if distance_to_segment(ball.centre_mm, p, q) > ball.radius_mm {
+                continue;
+            }
+            let (x, y) = (find(&mut joined, pair[0].2), find(&mut joined, pair[1].2));
+            if x != y {
+                joined[x.max(y)] = x.min(y);
+            }
+        }
+        let root = find(&mut joined, seed);
+        admitted
+            .iter()
+            .enumerate()
+            .filter(|&(index, _)| find(&mut joined, index) == root)
+            .map(|(_, face)| face.area_mm2)
+            .sum::<f64>()
+    };
     // NO AREA, NO FOOTPRINT: a covered area at rounding level of the ball's
     // own cross-section is nothing to average.
     let has_area = area.is_finite() && area > f64::EPSILON * ball.radius_mm * ball.radius_mm;
@@ -468,6 +517,7 @@ fn footprint_of_row(
         normal: if same_as_facet { ball.facet_normal } else { mean },
         area_mm2: area,
         faces,
+        contact_area_mm2,
     })
 }
 

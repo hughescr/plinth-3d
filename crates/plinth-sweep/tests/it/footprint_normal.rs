@@ -597,6 +597,7 @@ fn a_slid_tip_is_measured_at_its_moved_ball() {
         landing: SweepArmLanding::Landed,
         seats_into_model: true,
         head: None,
+        contact_ball_radius_mm: None,
     };
     let before = seat_at(0.3);
     let site = TipSite {

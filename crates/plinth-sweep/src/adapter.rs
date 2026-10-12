@@ -1036,6 +1036,9 @@ pub(crate) fn sweep_arm(
         // unchanged.
         seats_into_model: strut.kind.seats_on_model(),
         head,
+        // The ball grown for its real contact (`contact_growth`), or the
+        // owner's ChituBox ball.
+        contact_ball_radius_mm: strut.seat_face.contact_ball_radius_mm,
     }
 }
 

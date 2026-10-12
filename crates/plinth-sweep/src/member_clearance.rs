@@ -1493,6 +1493,7 @@ mod census_tests {
             },
             seats_into_model: false,
             head: None,
+            contact_ball_radius_mm: None,
         };
         (strut, arm)
     }

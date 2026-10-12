@@ -24,6 +24,7 @@ mod bracing_rework;
 mod chitubox_geometry;
 mod clearance_census;
 mod congestion_lane;
+mod contact_growth;
 mod contact_sizing;
 mod drain_connectivity;
 mod drain_rim_routing;

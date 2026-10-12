@@ -2785,19 +2785,37 @@ fn sweep_and_emit(
     )]
     let removed_mm3 = trim.removed_volume_milli_mm3 as f64 / 1000.0;
     println!(
-        "[sweep {model}] seat trim in the file: {} records cut in one batched call; {} cut by \
-         their seat plane, {} further cut by the model solid; {removed_mm3:.3} mm3 of support \
-         removed; of the records the trim would have removed entirely, {} keep only their part \
-         outside the model, {} lie WHOLLY INSIDE the model and are left out of the file (a \
-         WARNING of a seat that failed), and {} were left untrimmed because the re-cut could not \
-         run",
+        "[sweep {model}] seat trim in the file: {} records cut to the model mesh in one batched \
+         call (no plane cut); {} cut by the model solid; {} split by the model, keeping the piece \
+         that holds the shaft end, {} far-side pieces left out; {removed_mm3:.3} mm3 of support \
+         removed; {} records lie WHOLLY INSIDE the model and are left out of the file (a WARNING \
+         of a seat that failed)",
         trim.records_trimmed,
-        trim.records_cut_by_seat_plane,
         trim.records_cut_by_model,
-        trim.records_kept_outside_model_after_empty_trim,
+        trim.records_split,
+        trim.far_side_pieces.len(),
         trim.records_dropped_wholly_inside_model,
-        trim.records_left_whole_after_empty_trim,
     );
+    // EVERY FAR-SIDE PIECE IS NAMED (Craig 2026-10-12): a piece of a cut tip,
+    // taper or shaft span that does not hold the shaft end would print as a
+    // loose bit, so it is left out of the file and warned with its volume.
+    for piece in &trim.far_side_pieces {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a piece volume in millionths of a mm3 and a gap in microns are far inside \
+                      f64's exact range"
+        )]
+        let (volume_mm3, gap_mm) = (
+            piece.volume_micro_mm3 as f64 / 1.0e6,
+            piece.distance_from_shaft_um as f64 / 1.0e3,
+        );
+        println!(
+            "[sweep {model}] WARNING seat trim: {} record {} had a piece past the model's far \
+             side ({volume_mm3:.6} mm3, {gap_mm:.3} mm from its shaft end); it touches nothing \
+             of the support and is left out of the file",
+            piece.kind, piece.record,
+        );
+    }
     if let Some(error) = &trim.batch_error {
         println!(
             "[sweep {model}] WARNING the seat trim did not run ({error}); every tip and first \
@@ -3017,13 +3035,14 @@ fn print_sweep_disclosure(
             .count();
         let footprint = &report.seat_footprint;
         println!(
-            "[sweep {model}] seat trim: {} tips (and their first shaft segments) trimmed to the \
-             support side of their seat face and out of the model, and {} further Member spans \
-             of those shafts that reach the model side of the seat plane, {} of them on the raster \
-             seat's plane for want of a measured face; contact disc at the face min {:.4} p50 \
-             {:.4} max {:.4} mm, {below_at_face} below its own tip radius; raster seat from the \
-             face min {:+.4} p50 {:+.4} max {:+.4} mm (positive = below a down-facing face). \
-             Footprint: {} discs graded, {} on their face as placed, {} seats MOVED along the \
+            "[sweep {model}] seat trim: {} tips (and their first shaft segments) cut to the \
+             model mesh, and {} further Member spans of those shafts that reach the model side \
+             of the seat plane, {} of them on the raster seat's plane for want of a measured \
+             face; PLANNED contact disc (the ungrown ball in the seat plane) min {:.4} p50 {:.4} \
+             max {:.4} mm, {below_at_face} below its own tip radius; raster seat from the face \
+             min {:+.4} p50 {:+.4} max {:+.4} mm (positive = below a down-facing face). \
+             Footprint (graded on the real surface inside the drawn ball): {} discs graded, {} \
+             on their face as placed, {} seats MOVED along the \
              face onto it (longest {:.4} mm; {} members joined to a moved axis moved with it, \
              by up to {:.4} mm), {} on a knife edge, {} left in place because every on-face \
              seat broke a rule of the finished field; moves refused by the lean law {}, by an \
@@ -3073,6 +3092,46 @@ fn print_sweep_disclosure(
                  unbraced run's limit or the drain keep-out for it or a member joined to it, so \
                  it keeps its seat, trimmed, with {:.1}% of its disc on the face",
                 fraction * 100.0
+            );
+        }
+        // THE REAL CONTACT (Craig 2026-10-12): the model surface inside every
+        // seated tip's drawn ball, against its planned disc, and the balls
+        // grown until it reaches plan.
+        let contact = &report.seat_contact;
+        if contact.enabled {
+            println!(
+                "[sweep {model}] real contact: {} seated tips measured; planned {:.4} mm2, real \
+                 {:.4} mm2 at the ungrown ball ({} short of plan) and {:.4} mm2 at the drawn ball; \
+                 {} balls grown (largest x{:.3}, limit {:.4} mm radius) in {} round(s); {} still \
+                 short of plan",
+                contact.tips_measured,
+                contact.planned_mm2,
+                contact.real_ungrown_mm2,
+                contact.short_ungrown,
+                contact.real_drawn_mm2,
+                contact.grown,
+                contact.max_growth_ratio,
+                contact.limit_ball_radius_mm,
+                contact.rounds,
+                contact.short.len(),
+            );
+            for short in &contact.short {
+                println!(
+                    "[sweep {model}] WARNING tip of arm {} has {:.4} mm2 of real contact against \
+                     {:.4} mm2 planned ({:.1}%), ball {:.4} mm (planned {:.4} mm): {}",
+                    short.strut,
+                    short.real_mm2,
+                    short.planned_mm2,
+                    100.0 * short.real_mm2 / short.planned_mm2.max(f64::MIN_POSITIVE),
+                    short.ball_radius_mm,
+                    short.planned_ball_radius_mm,
+                    short.reason.words(),
+                );
+            }
+        } else {
+            println!(
+                "[sweep {model}] real contact: NOT measured on this field (no footprint sites or \
+                 no registry); no ball was grown"
             );
         }
         // THE HEAD-JOIN RULE (2026-09-29).

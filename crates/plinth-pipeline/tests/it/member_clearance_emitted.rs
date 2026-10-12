@@ -333,13 +333,13 @@ fn no_record_in_the_file_lies_wholly_inside_the_model() {
         .map(|(record, _)| *record)
         .collect();
     println!(
-        "laid tube: {} non-ball records; {} wholly inside the model {wholly:?}; the trim kept {} \
-         outside the model, dropped {}, left {} whole",
+        "laid tube: {} non-ball records; {} wholly inside the model {wholly:?}; the trim split \
+         {}, dropped {} far-side pieces and {} records wholly inside",
         file.meshes.len(),
         wholly.len(),
-        file.trim.records_kept_outside_model_after_empty_trim,
+        file.trim.records_split,
+        file.trim.far_side_pieces.len(),
         file.trim.records_dropped_wholly_inside_model,
-        file.trim.records_left_whole_after_empty_trim,
     );
     assert!(
         !file.meshes.is_empty(),

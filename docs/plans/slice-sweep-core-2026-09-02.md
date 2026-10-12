@@ -897,17 +897,29 @@ flare ends on its raft PAD top again, `plate_z + raft_height − 0.002 mm` (the 
 and the pad stands on `plate_z`. The same for the short column. A fourth step follows the arms:
 one pad per plate foot and MST bridges, planned once for the field.
 
-**As built (2026-09-28, fix/tip-trim; field report "tip-clip").** Steps 1 and 2 are TRIMMED to
-the seat. The ball goes to the full depth the seat law asks for (owner ruling 2026-09-05: never
-retract), and the tip ball and the first shaft segment then keep only
-`primitive ∩ {support side of the seat face's plane} ∖ model solid`. The plane is the carried
-face's own (the nearest DOWN-FACING mesh face to the tip, its closest point and outward normal,
-`tip_landing::tip_seat_faces`), not the raster seat, which the layer grid puts up to half a layer
-off the face. `plinth-emit` does the cut for the whole field in ONE batched Manifold call
-(`plinth_solid::ManifoldBackend::trim_and_subtract_each`: each piece `TrimByPlane`, then minus the
-model, imported once). This replaced the horizontal "far face" clip on the ball's top, which left
-every ball buried below it, said nothing about a face's edge, and never touched the taper. The
-record's `start`/`end`/radii are unchanged; only its soup is cut.
+**As built (2026-09-28, fix/tip-trim; cut to the model mesh 2026-10-12, Craig: "cut using the
+actual model mesh").** Steps 1 and 2 are CUT TO THE MODEL. The ball goes to the full depth the
+seat law asks for (owner ruling 2026-09-05: never retract), and the tip ball and the first shaft
+segment then keep `primitive ∖ model solid`, and of that only the connected piece that holds the
+shaft end (the ball's pole along the shaft, a frustum's end toward the base). A piece past the
+model's far side (the far side of a thin wall the ball straddles, a sliver past a ridge) is left
+out of the file and WARNED with its volume (`SeatTrimReport::far_side_pieces`). No plane cuts
+anything. `plinth-emit` does the cut for the whole field in ONE batched Manifold call
+(`plinth_solid::ManifoldBackend::trim_and_subtract_each`, its half-space keeping all of each
+piece, the model imported once) and splits each result into its connected pieces in Rust. The
+record's `start`/`end`/radii are unchanged; only its soup is cut. A plane through one seat point
+cut the ball as well until 2026-10-12; on curved undersides it removed ball the model never
+touched and the file got 32 % (Bat_Cat_Owl) and 30 % (Deinonychus) of the planned contact
+(`quality-2026-10-10/joint/TIP-TRUNCATION.md`). The seat plane survives as data: the seat law's
+normal, the PLANNED disc, and which shaft spans are cut at all.
+
+**The real contact (2026-10-12).** The contact is the model surface inside the drawn ball,
+measured exactly (`footprint_normal::triangle_disc_area` over the connected, admitted footprint),
+against the planned disc (the ungrown ball's section in the seat plane). A tip short of plan keeps
+its seat depth and has its BALL grown (`plinth_sweep::contact_growth`; the grown ball keeps the
+ungrown one's deepest point along the seat normal and contains it), up to the profile ball of the
+largest load-sized tip; a tip a limit leaves short is warned. It runs once before the footprint
+rule (so the rule grades the ball the file gets) and once more on the finished field.
 
 **Corrected (2026-09-29, review-fixes).** The trim is about the shaft's SOLID, not about how the
 drawn profile cuts it into records: every further `Member` span of a seated shaft whose solid
@@ -916,10 +928,12 @@ of the plane distance over its two end rings, `lower.rs::frustum_reaches_model_s
 face a profile break one slot under the seat left such a span emitted whole. Published as
 `shaft_members_trimmed_to_seat`; pinned by `plinth-sweep` `tests/it/shaft_seat_trim.rs`.
 
-The **footprint rule** goes with it (`plinth_sweep::footprint`): the contact disc the trim leaves
-(the ball's section in the seat plane, computed by the lowering's own derivation,
-`plinth_support::tip_contact_discs`) must lie on the seat face, graded in the eroded carrier
-rasters. A seat whose disc hangs off the face slides along the face to the nearest position whose
+The **footprint rule** goes with it (`plinth_sweep::footprint`): the planned contact disc (the
+ball's section in the seat plane, computed by the lowering's own derivation,
+`plinth_support::tip_contact_discs`) must lie on the seat face, graded on the REAL surface since
+2026-10-12: a disc sample is on the face when the model surface crosses the drawn ball's chord
+along the seat normal through it, within one pixel (one batched ray cast; the eroded carrier
+rasters stand in only where the surface index is absent). A seat whose disc hangs off the face slides along the face to the nearest position whose
 whole disc is on it (search bounded by the ball diameter plus the lean's offset of the disc plus
 the carrier mask's two-cell margin, a pruning Placeholder); a member joined
 to a moved axis (a branch landing, a brace top) moves with it (`footprint::followed_shifts`). A

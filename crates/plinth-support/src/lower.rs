@@ -1008,19 +1008,14 @@ pub struct SweepArm {
     /// the face whose normal is [`Self::seat_normal_mm`] — or `None` where no
     /// face was measured (fix/tip-trim, 2026-09-28).
     ///
-    /// With the outward normal it is the SEAT PLANE the tip ball and the first
-    /// shaft segment are trimmed to ([`crate::SeatTrim`]). It is the model's
-    /// own surface, not `seat_mm`: `seat_mm` is the bottom of the first cured
-    /// LAMINA, which the layer raster puts up to half a layer above or below
-    /// the true face, and a trim a quarter-layer below the face would leave the
-    /// contact disc floating under the model. `None` falls back to the plane
-    /// through `seat_mm`, which the model difference still makes safe on the
-    /// model side.
-    ///
-    /// It replaces `available_seat_depth_mm`, the cured thickness above the
-    /// seat that set the old horizontal far-face clip. That plane lies on the
-    /// model side of the seat plane, so the seat trim removes everything it
-    /// removed and more.
+    /// With the outward normal it is the SEAT PLANE ([`crate::SeatTrim`]): the
+    /// plane the PLANNED contact disc lies in, and the one that says which
+    /// shaft spans reach the model side and are cut to the model. Nothing is
+    /// cut to this plane since 2026-10-12 (the emitter cuts to the model mesh).
+    /// It is the model's own surface, not `seat_mm`: `seat_mm` is the bottom of
+    /// the first cured LAMINA, which the layer raster puts up to half a layer
+    /// above or below the true face. `None` falls back to the plane through
+    /// `seat_mm`.
     pub seat_face_point_mm: Option<[f64; 3]>,
     pub landing: SweepArmLanding,
     /// Whether this member's TOP is a seat INTO the model.
@@ -1042,6 +1037,17 @@ pub struct SweepArm {
     /// An arm whose head cannot be drawn is drawn straight and counted
     /// ([`SweepLowering::heads_drawn_straight`]).
     pub head: Option<SweepHead>,
+    /// **The tip ball grown so its REAL contact reaches plan** (Craig
+    /// 2026-10-12: cut to the mesh, area governs; orchestrator ruling of the
+    /// same date: keep the seat depth, grow the ball). `None` draws the
+    /// owner's ChituBox ball for this tip size (`ball factor × tip radius`).
+    /// A value above that ball draws a larger ball with the SAME deepest
+    /// point along the seat normal, so the seat depth does not change: the
+    /// new ball contains the old one and is tangent to it there. A value at or
+    /// below it is ignored. The sweep measures the model surface inside the
+    /// ball and sets this (`plinth_sweep::contact_growth`); the planned
+    /// contact ([`TipContactDisc::radius_mm`]) is always the ungrown ball's.
+    pub contact_ball_radius_mm: Option<f64>,
 }
 
 /// What the sweep decided about one arm's head ([`SweepArm::head`]). Every
@@ -1882,9 +1888,13 @@ struct TipSeat {
     /// measured.
     trim: Option<crate::SeatTrim>,
     face_measured: bool,
-    /// The contact disc the trim leaves: the ball's section in the seat plane.
-    /// Filled by the caller once the ball exists.
+    /// The PLANNED contact disc: the ungrown ball's section in the seat plane,
+    /// the area the seat was sized for. Filled by the caller once the ball
+    /// exists.
     contact_disc_radius_mm: f64,
+    /// The radius the ball is DRAWN with: the ungrown ChituBox ball, or the
+    /// larger ball [`SweepArm::contact_ball_radius_mm`] asks for.
+    drawn_ball_radius_mm: f64,
     /// `seat_mm` measured from the seat plane along the outward normal.
     raster_seat_offset_mm: f64,
     /// The law's smallest term — the registered contact depth — was the
@@ -2013,6 +2023,8 @@ fn headed_tip<'a>(arm: &'a SweepArm, config: LoweringConfig) -> Option<HeadedTip
         ..arm.clone()
     };
     let (seated, centre, tip_seat) = seated_ball(&seating, unit, tip_radius, ball_radius, config);
+    // The ball as drawn: grown where the sweep asked for more contact.
+    let ball_radius = tip_seat.drawn_ball_radius_mm;
     let trim = tip_seat.trim.filter(|_| tip_seat.face_measured)?;
     let normal = trim.outward_normal();
     let centre_height_mm = trim.support_side_distance_mm(centre);
@@ -2729,15 +2741,15 @@ fn drawn_chords(
 /// reaches this (its axial travel is inside the diameter cap by construction),
 /// so no ordinary seat moves for this reason.
 ///
-/// **The geometry is TRIMMED, never the seat retracted** (owner ruling,
-/// 2026-09-05; rule of 2026-09-28). The tip goes to the FULL depth the area
-/// term asks for, whatever the skin above it is. What bounds the emitted
-/// GEOMETRY is the seat trim returned here: the seat face's own plane, which
-/// the emitter cuts the ball and the first shaft segment to, together with the
-/// model solid itself. Land-at-strike holds — nothing stands inside the model
-/// or past its far side — by cutting the geometry rather than by starving the
-/// contact. (Until 2026-09-28 a horizontal far-face plane did this job for the
-/// ball's top alone.)
+/// **The geometry is CUT, never the seat retracted** (owner ruling,
+/// 2026-09-05; cut to the model mesh, Craig 2026-10-12). The tip goes to the
+/// FULL depth the area term asks for, whatever the skin above it is. What
+/// bounds the emitted GEOMETRY is the model solid itself: the emitter keeps
+/// `ball ∖ model` and the piece of it that holds the shaft end
+/// ([`crate::SeatTrim`]). Land-at-strike holds — nothing stands inside the
+/// model or past its far side — by cutting the geometry rather than by
+/// starving the contact. The seat plane returned here is data: the normal the
+/// law used, the planned disc, and which shaft spans are cut at all.
 fn seat_tip(
     arm: &SweepArm,
     unit: [f64; 3],
@@ -2862,6 +2874,7 @@ fn seat_tip(
             trim,
             face_measured,
             contact_disc_radius_mm: 0.0,
+            drawn_ball_radius_mm: 0.0,
             raster_seat_offset_mm,
             // `law_depth_mm` is a `max` over three terms of which the
             // rasterisation allowance is one, so it can never be below the
@@ -2890,12 +2903,13 @@ fn seated_ball(
     let (seated, mut tip_seat) = seat_tip(arm, unit, tip_radius_mm, config);
     let center: [f64; 3] =
         std::array::from_fn(|index| seated[index] + ball_radius_mm * unit[index]);
-    // TRIM, NEVER RETRACT (owner ruling 2026-09-05, rule of 2026-09-28). The
-    // ball is at the full depth the area law asked for; the emitter keeps only
-    // its part on the support side of the seat face and outside the model
-    // (`SeatTrim`). What that leaves in the seat plane is the contact disc,
-    // `sqrt(R² − d²)` for a centre `d` on the support side, measured here from
-    // the SAME plane the emitter cuts to.
+    // CUT, NEVER RETRACT (owner ruling 2026-09-05; cut to the model mesh,
+    // 2026-10-12). The ball is at the full depth the area law asked for; the
+    // emitter keeps its part outside the model (`SeatTrim`). The PLANNED
+    // contact is the ball's section in the seat plane, `sqrt(R² − d²)` for a
+    // centre `d` on the support side: the disc a flat face takes. The real
+    // contact is the model surface inside the ball, which the sweep measures
+    // (`plinth_sweep::contact_growth`).
     //
     // THE FACE MUST BE ONE THE BALL MEETS. The carried face is the nearest
     // down-facing mesh face to the tip's landing point; on a sculpted surface
@@ -2915,6 +2929,24 @@ fn seated_ball(
         let d = trim.support_side_distance_mm(center);
         tip_seat.contact_disc_radius_mm = (ball_radius_mm * ball_radius_mm - d * d).max(0.0).sqrt();
     }
+    // THE GROWN BALL (Craig 2026-10-12, area governs; the seat depth stays).
+    // The ball the sweep asks for keeps the ungrown ball's DEEPEST point along
+    // the seat's outward normal, so it reaches no deeper into the model on the
+    // seat plane: it contains the ungrown ball and is tangent to it there. The
+    // planned disc above stays the ungrown ball's: it is the area the seat was
+    // sized for, and the sweep grows the ball until the real contact reaches it.
+    tip_seat.drawn_ball_radius_mm = ball_radius_mm;
+    let grown = arm
+        .contact_ball_radius_mm
+        .filter(|grown| grown.is_finite() && *grown > ball_radius_mm);
+    let center = match grown {
+        Some(grown) => {
+            let normal = tip_seat.trim.map_or(unit, |trim| trim.outward_normal());
+            tip_seat.drawn_ball_radius_mm = grown;
+            std::array::from_fn(|index| center[index] + (grown - ball_radius_mm) * normal[index])
+        }
+        None => center,
+    };
     (seated, center, tip_seat)
 }
 
@@ -2925,9 +2957,14 @@ pub struct TipContactDisc {
     pub centre_mm: [f64; 3],
     /// The seat face's OUTWARD unit normal (the plane's normal).
     pub outward_normal: [f64; 3],
-    /// The disc's radius, `sqrt(R² − d²)`; zero when the ball misses the plane.
+    /// The PLANNED disc's radius, `sqrt(R₀² − d₀²)` for the UNGROWN ball
+    /// (`R₀`, centre `d₀` on the support side); zero when that ball misses the
+    /// plane. Its area is the contact the seat was sized for. The file's real
+    /// contact is the model surface inside the drawn ball (the emitter cuts
+    /// to the mesh, not to this plane), which the sweep measures and grows the
+    /// ball for ([`SweepArm::contact_ball_radius_mm`]).
     pub radius_mm: f64,
-    /// The emitted ball's own radius `R`.
+    /// The emitted ball's own radius `R`: the ungrown ball, or the grown one.
     pub ball_radius_mm: f64,
     /// The emitted ball's CENTRE, which is also where the drawn shaft starts
     /// (the taper runs from here to the landing). The sweep's head-join rule
@@ -2998,7 +3035,7 @@ pub fn tip_contact_discs(
                 centre_mm: std::array::from_fn(|index| center[index] - d * normal[index]),
                 outward_normal: normal,
                 radius_mm: tip_seat.contact_disc_radius_mm,
-                ball_radius_mm,
+                ball_radius_mm: tip_seat.drawn_ball_radius_mm,
                 ball_centre_mm: center,
                 post_top_mm: headed.as_ref().map_or(center, |head| head.head.joint_mm),
                 head_joint_radius_mm: headed.as_ref().map(|head| head.head.joint_radius_mm),
@@ -3374,11 +3411,18 @@ fn lower_one_sweep_arm(
     let head_drawn_straight = arm.head.is_some() && headed.is_none();
     let (seated_seat, center, seat) = if arm.seats_into_model {
         // THE SEAT and its trim: `seated_ball`, the one derivation.
-        let (seated_seat, center_raw, tip_seat) = match &headed {
+        let (seated_seat, center_raw, mut tip_seat) = match &headed {
             Some((head, _)) => (head.seated, head.centre, head.tip_seat),
             None => seated_ball(arm, unit, tip_radius.get(), ball_radius.get(), config),
         };
         let ball_unit = headed.as_ref().map_or(unit, |(head, _)| head.unit);
+        // The ball as drawn (grown where the sweep asked for more contact),
+        // and the direction its shaft leaves it in: the emitter keeps the
+        // piece of every cut record that holds that end.
+        let Ok(ball_radius) = positive(tip_seat.drawn_ball_radius_mm) else {
+            return ArmLowering::refused(ArmOutcome::InvalidGeometry);
+        };
+        tip_seat.trim = tip_seat.trim.map(|trim| trim.with_shaft_unit(ball_unit));
         let (Ok(center), Ok(unit_finite)) = (finite3(center_raw), finite3(ball_unit)) else {
             return ArmLowering::refused(ArmOutcome::InvalidGeometry);
         };
@@ -3449,7 +3493,7 @@ fn lower_one_sweep_arm(
                     )
                 })
                 .collect();
-            let stalk_mm = drawn_link_mm(&head_frusta, ball_radius.get());
+            let stalk_mm = drawn_link_mm(&head_frusta, head.ball_radius_mm);
             staged.append(&mut head_pieces);
             let standoff_mm = geom_kernel::vec3::dot(
                 head.unit,
@@ -3617,12 +3661,12 @@ fn lower_one_sweep_arm(
             }
         }
     };
-    // THE SHAFT IS TRIMMED TO THE SAME SEAT (fix/tip-trim, 2026-09-28;
-    // every span, review-fixes 2026-09-29). The taper starts at the ball
-    // centre, and on a leaned arm or under a sloped face its start cap stands
-    // through the seat plane and past the face's edge exactly where the ball
-    // does ("a chunk of post", tip-clip.md). The same plane and the same
-    // model difference apply.
+    // THE SHAFT IS CUT TO THE SAME MODEL (fix/tip-trim, 2026-09-28; every
+    // span, review-fixes 2026-09-29; the mesh, not a plane, 2026-10-12). The
+    // taper starts at the ball centre, and on a leaned arm or under a sloped
+    // face its start cap can reach into the model where the ball does ("a
+    // chunk of post", tip-clip.md). The same model difference and the same
+    // shaft-end piece rule apply.
     //
     // The rule is about the SOLID, not about how it is cut into records: the
     // drawn profile breaks one straight shaft into several spans wherever the
@@ -4352,6 +4396,7 @@ mod shaft_seat_bite_tests {
             landing: SweepArmLanding::Landed,
             seats_into_model: true,
             head: None,
+            contact_ball_radius_mm: None,
         }
     }
 
@@ -4479,6 +4524,7 @@ mod sweep_root_flare_tests {
             landing: SweepArmLanding::Plate,
             seats_into_model: true,
             head: None,
+            contact_ball_radius_mm: None,
         }
     }
 
@@ -4846,6 +4892,7 @@ mod headed_arm_tests {
             landing: SweepArmLanding::Landed,
             seats_into_model: true,
             head: Some(head),
+            contact_ball_radius_mm: None,
         }
     }
 

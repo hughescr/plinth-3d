@@ -44,6 +44,7 @@
 pub mod adapter;
 pub mod cavity;
 pub mod congestion;
+pub mod contact_growth;
 pub mod deferred_shake;
 pub(crate) mod demand_replay;
 pub mod down_sweep;
@@ -324,6 +325,11 @@ pub struct SeatFace {
     /// whole contact disc lies on the face. Zero when it did not move.
     pub shift_mm: [f64; 3],
     pub footprint: Footprint,
+    /// **The tip ball grown so its real contact reaches plan**
+    /// ([`contact_growth`], Craig 2026-10-12): the radius the lowering draws
+    /// the ball at ([`plinth_support::SweepArm::contact_ball_radius_mm`]).
+    /// `None` draws the owner's ChituBox ball for the tip size.
+    pub contact_ball_radius_mm: Option<f64>,
 }
 
 /// The footprint rule's verdict on one tip ([`footprint`]).
@@ -3337,10 +3343,34 @@ pub fn run_sweep_with_holes(
         load_step_taper,
         deferred_stage_shake,
     };
+    // THE NORMAL AT A SLID BALL (`footprint_normal`, Craig ruling 2026-10-05):
+    // a proposed slide is validated with the footprint normal measured on the
+    // MOVED arm, the seat triangle re-derived at the slid seat.
+    let measure_env = footprint_normal::MeasureEnv {
+        mesh,
+        surface: head_join_context.surface(),
+        layer_plan: plan,
+    };
+    // THE REAL CONTACT, FIRST PASS (Craig 2026-10-12): the file's tip is cut
+    // to the model mesh, so its contact is the model surface inside the drawn
+    // ball. Every seated tip short of its planned disc on a curved underside
+    // has its ball grown now, so the footprint rule below grades the ball the
+    // file will get; the grown ball is measured again on the finished field.
+    let contact_limit_mm = sweep_plan
+        .report
+        .seat_footprint_normal
+        .enabled
+        .then(|| contact_ball_limit_mm(policy.tip_radius_max_mm))
+        .flatten();
+    if let Some(limit_mm) = contact_limit_mm {
+        sweep_plan.report.seat_contact =
+            grow_contact_balls(&measure_env, &mut sweep_plan, &footprint_sites, limit_mm);
+    }
     // THE FOOTPRINT RULE (fix/tip-trim, 2026-09-28): every tip's contact disc,
-    // as the lowering will deliver it, graded against the eroded carrier
-    // rasters; a seat whose disc hangs off its face moves along the face, and
-    // a true knife edge is warned about. It moves seats, so the digest is
+    // as the lowering will deliver it, graded against the REAL model surface
+    // (the gap from each sample to the surface, inside the drawn ball;
+    // 2026-10-12); a seat whose disc hangs off its face moves along the face,
+    // and a true knife edge is warned about. It moves seats, so the digest is
     // re-taken over the finished field.
     let arms = adapter::arms_of(&sweep_plan);
     //
@@ -3366,19 +3396,12 @@ pub fn run_sweep_with_holes(
         chord_slack,
         keep_out: &keep_out,
     };
-    // THE NORMAL AT A SLID BALL (`footprint_normal`, Craig ruling 2026-10-05):
-    // a proposed slide is validated with the footprint normal measured on the
-    // MOVED arm, the seat triangle re-derived at the slid seat.
-    let measure_env = footprint_normal::MeasureEnv {
-        mesh,
-        surface: head_join_context.surface(),
-        layer_plan: plan,
-    };
     let mut slid_remeasured = 0_usize;
     let mut slid_max_change_deg = 0.0_f64;
     let footprint = footprint::apply(
         &sweep_plan.grid,
         &slices,
+        measure_env.surface,
         &mut sweep_plan.struts,
         &arms,
         plan,
@@ -3475,6 +3498,7 @@ pub fn run_sweep_with_holes(
             off_face = footprint::regrade(
                 &sweep_plan.grid,
                 &slices,
+                measure_env.surface,
                 &sweep_plan.struts,
                 &final_arms,
                 &remeasured.changed,
@@ -3496,6 +3520,24 @@ pub fn run_sweep_with_holes(
         outcome.final_max_change_deg = remeasured.max_change_deg;
         outcome.final_regraded = remeasured.changed.len();
         outcome.final_off_face = off_face;
+    }
+    // THE REAL CONTACT ON THE FINISHED FIELD (Craig 2026-10-12): the slides
+    // and their followers moved balls, and the normals were measured once
+    // more, so every seated tip's real contact is measured again on the arms
+    // exactly as the lowering gets them (the seat triangle re-derived where a
+    // tip slid) and every ball short of plan is grown from the ungrown one.
+    if let Some(limit_mm) = contact_limit_mm {
+        let shifts: Vec<Option<[f64; 3]>> = sweep_plan
+            .struts
+            .iter()
+            .map(|strut| {
+                (strut.seat_face.footprint == Footprint::MovedOntoFace)
+                    .then_some(strut.seat_face.shift_mm)
+            })
+            .collect();
+        let sites = footprint_normal::reseat_sites(mesh, &footprint_sites, &shifts);
+        sweep_plan.report.seat_contact =
+            grow_contact_balls(&measure_env, &mut sweep_plan, &sites, limit_mm);
     }
     finish_heads(&mut sweep_plan);
     // **EVERY STRAIGHT TIP THAT STILL GRAZES THE MODEL** (Craig 2026-10-08),
@@ -3867,6 +3909,45 @@ fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> Unmer
         kept_carrying,
         stale_landings,
     }
+}
+
+/// **The largest contact ball the registry draws** (the growth limit of
+/// [`contact_growth`]): the owner's ChituBox ball of the largest load-sized
+/// tip, `TIP_RADIUS_MAX_LEGACY_MM` (`tip_radius_max_mm`). `None` where the
+/// registry cannot be read: no ball is grown, and the contact is not measured.
+fn contact_ball_limit_mm(tip_radius_max_mm: f64) -> Option<f64> {
+    let constants = m0_constants().ok()?;
+    let factor = constants
+        .evidence()
+        .chitubox_tip_contact_profiles()
+        .value()
+        .ball_factor(tip_radius_max_mm);
+    let limit = factor * tip_radius_max_mm;
+    (limit.is_finite() && limit > 0.0).then_some(limit)
+}
+
+/// **Measure every seated tip's real contact and grow the short balls**
+/// ([`contact_growth::grow`]) from the UNGROWN ball, and write the radius each
+/// ball is drawn at onto its strut. `sites` are the footprint sites in strut
+/// order (re-derived where a tip slid). "Reaches plan" is to within one pixel
+/// of area: the grid pitch squared.
+fn grow_contact_balls(
+    env: &footprint_normal::MeasureEnv<'_>,
+    plan: &mut SweepPlan,
+    sites: &[Option<footprint_normal::TipSite>],
+    limit_ball_radius_mm: f64,
+) -> contact_growth::ContactOutcome {
+    for strut in &mut plan.struts {
+        strut.seat_face.contact_ball_radius_mm = None;
+    }
+    let arms = adapter::arms_of(plan);
+    let pixel_area_mm2 = plan.grid.pitch_mm() * plan.grid.pitch_mm();
+    let (outcome, grown) =
+        contact_growth::grow(env, &arms, sites, limit_ball_radius_mm, pixel_area_mm2);
+    for (strut, radius) in plan.struts.iter_mut().zip(grown) {
+        strut.seat_face.contact_ball_radius_mm = radius;
+    }
+    outcome
 }
 
 /// **A headed arm carries its own seat plane** (the finish of the head
@@ -4829,6 +4910,7 @@ fn build_report(
         stranded_branch: crate::stranded_branch::StrandedBranchOutcome::default(),
         seat_footprint: crate::footprint::FootprintOutcome::default(),
         seat_footprint_normal: crate::footprint_normal::FootprintNormalOutcome::default(),
+        seat_contact: crate::contact_growth::ContactOutcome::default(),
         head_join: crate::head_join::HeadJoinOutcome::default(),
         per_event: outcome.per_event.clone(),
         rigid_share: crate::rigid_share::RigidShareReport::default(),

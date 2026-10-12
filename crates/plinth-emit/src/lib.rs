@@ -10,9 +10,7 @@ use chitubox_io::{
     ModelGeometry, ModelSource, Placement, PlacementUpdate, Project, SegmentType, SupportBatch,
     SupportMode, SupportRecord, TriangleSoup,
 };
-#[cfg(test)]
-use geom_kernel::vec3::{dot, scale};
-use geom_kernel::vec3::{add, cross, norm, sub};
+use geom_kernel::vec3::{add, cross, dot, norm, scale, sub};
 use geom_kernel::SoupTriangle;
 use plinth_core::{m0_constants, PositiveFinite, PrinterProfile};
 use plinth_mesh::Mesh;
@@ -145,32 +143,32 @@ impl AuditCheck {
     }
 }
 
-/// **THE SEAT TRIM, as the emitter carried it out** (fix/tip-trim, 2026-09-28).
+/// **THE SEAT TRIM, as the emitter carried it out** (fix/tip-trim, 2026-09-28;
+/// cut to the model mesh, Craig 2026-10-12).
 ///
-/// Every tip ball and the first shaft segment of every seated arm keep only
-/// `primitive ∩ {support side of the seat face's plane} ∖ model solid`, done
-/// for the whole field in ONE batched native call. These are its path hits.
+/// Every tip ball, the first shaft segment of every seated arm and every
+/// further span that carries the trim keep `primitive ∖ model solid`, done for
+/// the whole field in ONE batched native call, and of that only the connected
+/// piece that holds the shaft end ([`plinth_support::SeatTrim`]). No plane
+/// cuts anything. These are its path hits.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SeatTrimReport {
     /// Records that carried a seat trim and went through the batched call.
     pub records_trimmed: usize,
-    /// Of those, records the seat-face half-space removed material from.
-    pub records_cut_by_seat_plane: usize,
-    /// Of those, records the model-solid difference removed material from
-    /// AFTER the half-space: the concave and straddling cases a plane cannot
-    /// see.
+    /// Of those, records the model-solid difference removed material from.
     pub records_cut_by_model: usize,
-    /// Records the trim would have removed entirely AND whose re-cut against
-    /// the model alone could not run (the second batched call failed): such a
-    /// record keeps its UNTRIMMED geometry and is counted here. Until
-    /// fix/member-clearance (2026-09-29) every emptied record was kept whole.
-    pub records_left_whole_after_empty_trim: usize,
-    /// Records the seat trim emptied that still have solid OUTSIDE the model:
-    /// they keep `primitive ∖ model solid` (the seat plane cannot be honoured,
-    /// the model always is). A WARNING of a seat whose plane missed.
+    /// Of those, records the model cut into more than one piece. Each keeps
+    /// the piece that holds its shaft end; the others are
+    /// [`Self::far_side_pieces`].
     #[serde(default)]
-    pub records_kept_outside_model_after_empty_trim: usize,
+    pub records_split: usize,
+    /// **Every piece dropped because it does not hold the shaft end**: the far
+    /// side of a thin wall the ball straddles, a sliver past a ridge. It
+    /// would print as a loose bit. Each is a WARNING with its volume; the
+    /// record keeps its other piece.
+    #[serde(default)]
+    pub far_side_pieces: Vec<FarSidePiece>,
     /// Records that lie WHOLLY INSIDE the model: nothing of them is outside
     /// the model solid, so nothing of them can print as support. They are
     /// left out of the file (fix/member-clearance, 2026-09-29: "the seat trim
@@ -212,6 +210,22 @@ impl SeatTrimReport {
             .iter()
             .filter(|cut| cut.removed_micro_mm3 > self.pixel_cube_micro_mm3)
     }
+}
+
+/// One piece of a cut record that does not hold the record's shaft end, and so
+/// was left out of the file ([`SeatTrimReport::far_side_pieces`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FarSidePiece {
+    /// The primitive index (before any record is left out).
+    pub record: usize,
+    /// `"tip"`, `"taper"`, `"member"` (or `"hull"`, `"joint"`).
+    pub kind: String,
+    /// The piece's volume, in millionths of a mm³.
+    pub volume_micro_mm3: u64,
+    /// How far the piece stands from the record's shaft end, in microns:
+    /// the gap it would print across as a loose bit.
+    pub distance_from_shaft_um: u64,
 }
 
 /// One `Member`, joint or hull record the model solid removed material from.
@@ -1165,20 +1179,21 @@ fn build_records(
 /// registered frustum/raft side counts are likewise read exactly once, here,
 /// rather than once per primitive.
 ///
-/// **THE SEAT TRIM** (fix/tip-trim, 2026-09-28). A seated tip ball and the
-/// first segment of its shaft keep only `primitive ∩ {support side of the seat
-/// face's plane} ∖ model solid`. ChituBox renders exactly this mesh, so this is
-/// where the rule has to hold. The whole field goes through ONE batched native
-/// call ([`plinth_solid::ManifoldBackend::trim_and_subtract_each`], the same
-/// Manifold backend `plinth-hollow` drills with): every piece welded once,
+/// **THE SEAT TRIM** (fix/tip-trim, 2026-09-28; cut to the model mesh, Craig
+/// 2026-10-12). A seated tip ball and the shaft spans that carry its trim keep
+/// `primitive ∖ model solid`, and of that only the connected piece holding the
+/// shaft end ([`trim_to_seats`]). ChituBox renders exactly this mesh, so this
+/// is where the rule has to hold. The whole field goes through ONE batched
+/// native call ([`plinth_solid::ManifoldBackend::trim_and_subtract_each`], the
+/// same Manifold backend `plinth-hollow` drills with): every piece welded once,
 /// the model imported once, no per-record crossing. The record's own
 /// `start`/`end`/radii are untouched; only its soup is cut.
 ///
 /// Without a model (`model: None`, the unit tests' single-record path) no
 /// record is trimmed. Emit and warn throughout: a batch the backend rejects
-/// leaves every record untrimmed and says why in the report, and a piece the
-/// trim would remove entirely keeps only its part outside the model, or, with
-/// nothing outside, is left out of the file; both are counted.
+/// leaves every record untrimmed and says why in the report, a piece that
+/// does not hold the shaft end is left out with a warning, and a record with
+/// nothing outside the model is left out of the file; all are counted.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
@@ -1226,7 +1241,26 @@ fn build_records_trimmed(
     Ok((records, report))
 }
 
-/// The seat trim over a whole field, in place on the wound soups.
+/// **The seat trim over a whole field, in place on the wound soups: cut to the
+/// model MESH, not to a plane** (Craig 2026-10-12).
+///
+/// Every record that carries a seat trim keeps `primitive ∖ model solid`, from
+/// ONE batched native call (the half-space each piece is handed keeps all of
+/// it). The model can cut a record into several pieces: the ball straddles a
+/// thin wall, or reaches past a ridge. The piece that holds the record's SHAFT
+/// END (the ball's pole along the shaft, a frustum's end further along it) is
+/// what the support carries; every other piece stands past the model's far
+/// side or beyond a ridge, touches nothing of the support, and would print as
+/// a loose bit. It is left out and WARNED with its volume
+/// ([`SeatTrimReport::far_side_pieces`]). A record with nothing outside the
+/// model is left out of the file, as before.
+///
+/// Until 2026-10-12 each piece was also cut by the half-space on the support
+/// side of a plane through ONE seat point. On a curved or tilted underside
+/// that plane removed ball the model never touched: the file got 32 % of the
+/// planned contact on Bat_Cat_Owl and 30 % on Deinonychus. The model
+/// difference alone already removes everything inside the model; the
+/// connected-piece rule does the far-side protection the plane used to.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -1251,19 +1285,23 @@ fn trim_to_seats(
     }
     let mut pieces = Vec::with_capacity(trimmed.len());
     let mut keep = Vec::with_capacity(trimmed.len());
-    for &(index, trim) in &trimmed {
+    for &(index, _) in &trimmed {
         let Some(piece) = weld(&soups[index]) else {
             report.batch_error = Some(format!("record {index}: its soup does not weld closed"));
             return report;
         };
-        pieces.push(piece);
-        // In the record's model-centred frame, as the soup is.
-        let normal = trim.outward_normal();
-        let point = sub_center(trim.point_mm(), center);
+        // NO PLANE: a half-space below every vertex of the piece keeps all of
+        // it, so the native call is the model difference alone.
+        let lowest = piece
+            .vertices()
+            .iter()
+            .map(|vertex| vertex[2])
+            .fold(f64::INFINITY, f64::min);
         keep.push(plinth_solid::KeepHalfSpace {
-            normal,
-            offset: geom_kernel::vec3::dot(normal, point),
+            normal: [0.0, 0.0, 1.0],
+            offset: lowest - 1.0,
         });
+        pieces.push(piece);
     }
     // The model as ONE indexed solid, welded by point identity: a mesh can be
     // closed by position while carrying the same corner under two indices (a
@@ -1290,113 +1328,181 @@ fn trim_to_seats(
             return report;
         }
     };
+    // Each cut record's pieces, split and chosen: pure Rust over the meshes
+    // the one native call returned, linear in their triangles, no further
+    // native crossing.
+    let chosen: Vec<Option<KeptPiece>> = trimmed
+        .iter()
+        .zip(&results)
+        .map(|(&(index, trim), result)| {
+            result
+                .mesh
+                .as_ref()
+                .map(|kept| keep_shaft_piece(kept, shaft_end(&primitives[index], trim, center)))
+        })
+        .collect();
     let mut removed_mm3 = 0.0_f64;
-    let mut emptied: Vec<usize> = Vec::new();
-    for (position, (&(index, _), result)) in trimmed.iter().zip(&results).enumerate() {
+    for ((&(index, _), result), kept) in trimmed.iter().zip(&results).zip(chosen) {
         report.records_trimmed += 1;
         // "Removed material" means more than the backend's own rounding: a
         // relative part in a billion of the piece.
         let noise = 1e-9 * result.whole_volume.abs();
-        report.records_cut_by_seat_plane +=
-            usize::from(result.whole_volume - result.after_half_space_volume > noise);
         report.records_cut_by_model +=
-            usize::from(result.after_half_space_volume - result.after_subtraction_volume > noise);
-        let Some(kept) = &result.mesh else {
-            emptied.push(position);
+            usize::from(result.whole_volume - result.after_subtraction_volume > noise);
+        // A RECORD WITH NOTHING OUTSIDE THE MODEL is never kept whole inside
+        // it (fix/member-clearance, 2026-09-29): it prints as model and nothing
+        // else, and is left out of the file with a named warning.
+        let Some(kept) = kept else {
+            report.records_dropped_wholly_inside_model += 1;
+            report.dropped_record_indices.push(index);
+            note_member_cut(&mut report, &primitives[index], index, result.whole_volume);
             continue;
         };
-        removed_mm3 += (result.whole_volume - result.after_subtraction_volume).max(0.0);
-        note_member_cut(
-            &mut report,
-            &primitives[index],
-            index,
-            result.whole_volume - result.after_subtraction_volume,
-        );
-        let vertices = kept.vertices();
-        soups[index] = kept
-            .triangles()
-            .iter()
-            .map(|triangle| triangle.map(|corner| vertices[corner as usize]))
-            .collect();
-    }
-    // A RECORD THE TRIM EMPTIED IS NEVER KEPT WHOLE INSIDE THE MODEL
-    // (fix/member-clearance, 2026-09-29). Its seat plane cannot be honoured,
-    // but the model can: ONE more batched call re-cuts every such piece
-    // against the model alone (a half-space that keeps the whole piece). What
-    // is left outside the model is kept; a piece with nothing outside is
-    // wholly inside the model, prints as model and nothing else, and is left
-    // out of the file with a named warning. Until then every emptied record
-    // kept its whole untrimmed soup, inside the model (165 on the Cylinder at
-    // c33dc8e).
-    if !emptied.is_empty() {
-        let second: Vec<plinth_solid::Mesh> = emptied
-            .iter()
-            .map(|&position| pieces[position].clone())
-            .collect();
-        let keep_all: Vec<plinth_solid::KeepHalfSpace> = emptied
-            .iter()
-            .zip(&second)
-            .map(|(&position, piece)| {
-                let normal = keep[position].normal;
-                let lowest = piece
-                    .vertices()
-                    .iter()
-                    .map(|vertex| geom_kernel::vec3::dot(normal, *vertex))
-                    .fold(f64::INFINITY, f64::min);
-                // Below every vertex of the piece: the plane keeps all of it.
-                plinth_solid::KeepHalfSpace {
-                    normal,
-                    offset: lowest - 1.0,
-                }
-            })
-            .collect();
-        match plinth_solid::ManifoldBackend.trim_and_subtract_each(
-            &solid,
-            &second,
-            &keep_all,
-            plinth_solid::BooleanLimits::UNLIMITED,
-        ) {
-            Ok(outside) => {
-                for (&position, result) in emptied.iter().zip(&outside) {
-                    let index = trimmed[position].0;
-                    match &result.mesh {
-                        Some(kept) => {
-                            report.records_kept_outside_model_after_empty_trim += 1;
-                            removed_mm3 +=
-                                (result.whole_volume - result.after_subtraction_volume).max(0.0);
-                            note_member_cut(
-                                &mut report,
-                                &primitives[index],
-                                index,
-                                result.whole_volume - result.after_subtraction_volume,
-                            );
-                            let vertices = kept.vertices();
-                            soups[index] = kept
-                                .triangles()
-                                .iter()
-                                .map(|triangle| triangle.map(|corner| vertices[corner as usize]))
-                                .collect();
-                        }
-                        None => {
-                            report.records_dropped_wholly_inside_model += 1;
-                            report.dropped_record_indices.push(index);
-                            note_member_cut(
-                                &mut report,
-                                &primitives[index],
-                                index,
-                                result.whole_volume,
-                            );
-                        }
-                    }
-                }
-            }
-            Err(_) => {
-                report.records_left_whole_after_empty_trim += emptied.len();
-            }
+        let kind = record_kind(&primitives[index]);
+        report.records_split += usize::from(!kept.dropped.is_empty());
+        let mut dropped_mm3 = 0.0_f64;
+        for &(volume_mm3, distance_mm) in &kept.dropped {
+            dropped_mm3 += volume_mm3.max(0.0);
+            report.far_side_pieces.push(FarSidePiece {
+                record: index,
+                kind: kind.to_owned(),
+                volume_micro_mm3: (volume_mm3.max(0.0) * 1.0e6).round() as u64,
+                distance_from_shaft_um: (distance_mm.max(0.0) * 1.0e3).round() as u64,
+            });
         }
+        let removed = result.whole_volume - result.after_subtraction_volume + dropped_mm3;
+        removed_mm3 += removed.max(0.0);
+        note_member_cut(&mut report, &primitives[index], index, removed);
+        soups[index] = kept.soup;
     }
     report.removed_volume_milli_mm3 = (removed_mm3 * 1000.0).round() as u64;
     report
+}
+
+/// A cut record's kept piece, and the pieces left out.
+struct KeptPiece {
+    /// The piece that holds the shaft end, as a soup.
+    soup: Vec<SoupTriangle>,
+    /// Every other piece: `(volume mm³, distance from the shaft end mm)`.
+    dropped: Vec<(f64, f64)>,
+}
+
+/// The kind a far-side piece is named by.
+fn record_kind(primitive: &SupportPrimitive) -> &'static str {
+    match (primitive.segment_kind, &primitive.ring_normal) {
+        (SupportSegmentKind::ContactSphere, _) => "tip",
+        (SupportSegmentKind::ContactTaper, _) => "taper",
+        (SupportSegmentKind::Member, FrustumRingNormal::Junction(_)) => "hull",
+        (SupportSegmentKind::JointSphere, _) => "joint",
+        _ => "member",
+    }
+}
+
+/// **The point a cut record's kept piece must hold: its SHAFT END**, in the
+/// record's model-centred frame. For the tip ball, its pole along the shaft
+/// direction (where the taper leaves it); for a frustum, its end further along
+/// the shaft (toward the base). The model sits on the other side.
+fn shaft_end(
+    primitive: &SupportPrimitive,
+    trim: plinth_support::SeatTrim,
+    center: [f64; 3],
+) -> [f64; 3] {
+    let shaft = trim.shaft_unit();
+    let start = sub_center(finite_point(primitive.start_mm), center);
+    let end = sub_center(finite_point(primitive.end_mm), center);
+    match primitive.segment_kind {
+        SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere => {
+            let middle = midpoint(start, end);
+            add(middle, scale(shaft, primitive.start_radius_mm.get()))
+        }
+        _ => {
+            if dot(sub(end, start), shaft) >= 0.0 {
+                end
+            } else {
+                start
+            }
+        }
+    }
+}
+
+/// Split a cut record into its connected pieces (triangles that share a
+/// corner, by index or by the same point to the bit) and keep the one nearest
+/// `anchor`. Every other piece is returned with its volume and its distance
+/// from `anchor`.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a vertex index of a mesh the backend itself validated fits usize on every supported \
+              target"
+)]
+fn keep_shaft_piece(kept: &plinth_solid::Mesh, anchor: [f64; 3]) -> KeptPiece {
+    let vertices = kept.vertices();
+    let triangles = kept.triangles();
+    let mut parent: Vec<usize> = (0..vertices.len()).collect();
+    // Corners at the same point are one corner, whatever their index.
+    let mut first_at: std::collections::HashMap<[u64; 3], usize> =
+        std::collections::HashMap::with_capacity(vertices.len());
+    for (index, &vertex) in vertices.iter().enumerate() {
+        let first = *first_at.entry(edge_key(vertex)).or_insert(index);
+        parent[index] = first;
+    }
+    fn find(parent: &mut [usize], mut node: usize) -> usize {
+        while parent[node] != node {
+            parent[node] = parent[parent[node]];
+            node = parent[node];
+        }
+        node
+    }
+    for triangle in triangles {
+        let [a, b, c] = triangle.map(|corner| corner as usize);
+        for (p, q) in [(a, b), (b, c)] {
+            let (x, y) = (find(&mut parent, p), find(&mut parent, q));
+            if x != y {
+                parent[x.max(y)] = x.min(y);
+            }
+        }
+    }
+    // Pieces in order of their first triangle, so the answer never depends on
+    // a hash order.
+    let mut piece_of_root: std::collections::BTreeMap<usize, usize> =
+        std::collections::BTreeMap::new();
+    let mut piece_of_triangle = Vec::with_capacity(triangles.len());
+    for triangle in triangles {
+        let root = find(&mut parent, triangle[0] as usize);
+        let next = piece_of_root.len();
+        piece_of_triangle.push(*piece_of_root.entry(root).or_insert(next));
+    }
+    let pieces = piece_of_root.len();
+    let corners = |triangle: &[u64; 3]| triangle.map(|corner| vertices[corner as usize]);
+    if pieces <= 1 {
+        return KeptPiece {
+            soup: triangles.iter().map(corners).collect(),
+            dropped: Vec::new(),
+        };
+    }
+    let mut volume = vec![0.0_f64; pieces];
+    let mut distance = vec![f64::INFINITY; pieces];
+    for (triangle, &piece) in triangles.iter().zip(&piece_of_triangle) {
+        let [a, b, c] = corners(triangle);
+        volume[piece] += dot(a, cross(b, c)) / 6.0;
+        let closest = geom_kernel::closest_on_tri(anchor, a, b, c);
+        distance[piece] = distance[piece].min(norm(sub(anchor, closest)));
+    }
+    // The nearest piece holds the shaft end; a tie keeps the first.
+    let keep = (0..pieces)
+        .min_by(|&x, &y| distance[x].total_cmp(&distance[y]).then(x.cmp(&y)))
+        .unwrap_or(0);
+    KeptPiece {
+        soup: triangles
+            .iter()
+            .zip(&piece_of_triangle)
+            .filter(|&(_, &piece)| piece == keep)
+            .map(|(triangle, _)| corners(triangle))
+            .collect(),
+        dropped: (0..pieces)
+            .filter(|&piece| piece != keep)
+            .map(|piece| (volume[piece], distance[piece]))
+            .collect(),
+    }
 }
 
 /// Note the volume the model solid removed from one `Member`, joint or hull
@@ -3094,43 +3200,237 @@ mod tests {
             && vertex[2] < 2.0 - 1e-9
     }
 
-    /// THE SEAT TRIM ITSELF (fix/tip-trim, 2026-09-28). Every trimmed record
-    /// keeps nothing on the model side of its seat plane, nothing inside the
-    /// model, and stays closed; the cut disc lies in the plane.
+    /// THE SEAT TRIM ITSELF, cut to the model mesh (Craig 2026-10-12). Every
+    /// trimmed record keeps nothing inside the model and stays closed; the cut
+    /// surface lies ON the model's faces; and NO PLANE cuts it: the ball at
+    /// the slab's edge keeps the part that wraps up past the bottom face
+    /// outside the side face, which the old seat-plane half-space removed.
     #[test]
-    fn a_trimmed_tip_and_taper_keep_only_the_support_side_outside_the_model() {
+    fn a_trimmed_tip_and_taper_keep_their_part_outside_the_model_and_no_plane_cuts_them() {
         let (model, primitives) = trimmed_edge_tip();
         let center = [0.0; 3];
         let (records, report) =
             build_records_trimmed(&primitives, center, Some(&model)).expect("records");
         assert_eq!(report.records_trimmed, 2, "{report:?}");
-        assert_eq!(report.records_cut_by_seat_plane, 2, "{report:?}");
+        // The ball reaches into the slab; the taper's start cap (a plane used
+        // to cut it) does not, and is left whole.
+        assert_eq!(report.records_cut_by_model, 1, "{report:?}");
         assert!(report.batch_error.is_none(), "{report:?}");
-        assert_eq!(report.records_left_whole_after_empty_trim, 0, "{report:?}");
+        assert!(report.far_side_pieces.is_empty(), "{report:?}");
+        let mut above_the_seat_plane = 0;
         for (index, record) in records.iter().enumerate() {
             let triangles = wire_triangles(&record.mesh.xyz);
             assert!(!triangles.is_empty(), "record {index} kept nothing");
-            let mut on_plane = 0;
             for vertex in triangles.iter().flatten() {
-                assert!(
-                    vertex[2] <= 1e-6,
-                    "record {index}: a vertex at z {} stands on the model side of the seat plane",
-                    vertex[2]
-                );
                 assert!(
                     !inside_slab(*vertex),
                     "record {index}: vertex {vertex:?} is inside the model"
                 );
-                on_plane += usize::from(vertex[2].abs() <= 1e-6);
+                above_the_seat_plane += usize::from(vertex[2] > 1e-3);
             }
-            assert!(
-                on_plane > 0,
-                "record {index}: the cut left no disc in the seat plane"
-            );
             // Shared corners are one indexed vertex in the backend's output,
             // so they round to the same f32 and pair up by point identity.
             assert_watertight(&triangles, "a trimmed record");
         }
+        assert!(
+            above_the_seat_plane > 0,
+            "nothing of the ball wraps past the seat plane outside the side face: a plane still \
+             cuts it"
+        );
+    }
+
+    /// A slab `thickness` mm thick, bottom face at z = 0, and a tip ball of
+    /// radius 0.3 whose centre stands `below` mm under that face on a vertical
+    /// arm: the ball straddles the slab when `below + 0.3 > thickness`.
+    fn tip_under_a_slab(thickness: f64, below: f64, shaft: [f64; 3]) -> (Mesh, Vec<SupportPrimitive>) {
+        let model = plinth_mesh::make_box([10.0, 10.0, thickness], [0.0, 0.0, 0.0]).unwrap();
+        let trim = plinth_support::SeatTrim::new([0.0, 0.0, 0.0], [0.0, 0.0, -1.0])
+            .unwrap()
+            .with_shaft_unit(shaft);
+        let radius = 0.3;
+        let centre = [0.0, 0.0, -below];
+        let mut ball = primitive_with_radii(
+            SupportSegmentKind::ContactSphere,
+            [centre[0], centre[1], centre[2] + radius],
+            [centre[0], centre[1], centre[2] - radius],
+            radius,
+            radius,
+        );
+        ball.seat_trim = Some(trim);
+        (model, vec![ball])
+    }
+
+    /// THE FAR SIDE OF A THIN WALL (Craig 2026-10-12). A ball that straddles a
+    /// wall thinner than itself comes out of the model difference in two
+    /// pieces: the support-side piece that holds the shaft end, and a cap that
+    /// pokes through the wall's top. The cap is dropped and warned with its
+    /// volume; the record keeps the shaft piece only.
+    #[test]
+    fn a_ball_through_a_thin_wall_drops_its_far_side_piece_and_warns() {
+        // Wall z in [0, 0.1]; ball centre 0.15 below, radius 0.3: it reaches
+        // z = 0.15, so a 0.05 mm cap stands above the wall.
+        let (model, primitives) = tip_under_a_slab(0.1, 0.15, [0.0, 0.0, -1.0]);
+        let (records, report) =
+            build_records_trimmed(&primitives, [0.0; 3], Some(&model)).expect("records");
+        assert!(report.batch_error.is_none(), "{report:?}");
+        assert_eq!(report.records_split, 1, "{report:?}");
+        assert_eq!(report.far_side_pieces.len(), 1, "{report:?}");
+        let piece = &report.far_side_pieces[0];
+        assert_eq!(piece.kind, "tip");
+        // A spherical cap of height 0.05 on a ball of radius 0.3, faceted.
+        let cap = std::f64::consts::PI * 0.05 * 0.05 * (3.0 * 0.3 - 0.05) / 3.0;
+        #[expect(clippy::cast_precision_loss, reason = "a small test volume")]
+        let dropped = piece.volume_micro_mm3 as f64 / 1.0e6;
+        assert!(
+            dropped > 0.5 * cap && dropped < 1.1 * cap,
+            "the dropped piece is {dropped} mm3, the cap is {cap} mm3"
+        );
+        // The wall is 0.1 thick and the shaft end 0.45 below its bottom.
+        assert!(piece.distance_from_shaft_um >= 500, "{piece:?}");
+        let kept = wire_triangles(&records[0].mesh.xyz);
+        assert!(!kept.is_empty());
+        for vertex in kept.iter().flatten() {
+            assert!(
+                vertex[2] <= 1e-5,
+                "a vertex at z {} of the far-side cap is still in the record",
+                vertex[2]
+            );
+        }
+        assert_watertight(&kept, "the kept shaft piece");
+    }
+
+    /// SABOTAGE of the far-side rule: the same ball with its shaft said to
+    /// leave UPWARD keeps the cap and drops the support-side piece. So the
+    /// piece kept is decided by the shaft end, not by size or order.
+    #[test]
+    fn the_shaft_end_decides_which_piece_of_a_split_ball_is_kept() {
+        let (model, primitives) = tip_under_a_slab(0.1, 0.15, [0.0, 0.0, 1.0]);
+        let (records, report) =
+            build_records_trimmed(&primitives, [0.0; 3], Some(&model)).expect("records");
+        assert_eq!(report.far_side_pieces.len(), 1, "{report:?}");
+        let kept = wire_triangles(&records[0].mesh.xyz);
+        assert!(
+            kept.iter().flatten().all(|vertex| vertex[2] >= 0.1 - 1e-5),
+            "an upward shaft keeps the cap above the wall"
+        );
+        // And a wall thicker than the ball's reach does not split it at all.
+        let (model, primitives) = tip_under_a_slab(1.0, 0.15, [0.0, 0.0, -1.0]);
+        let (_, report) =
+            build_records_trimmed(&primitives, [0.0; 3], Some(&model)).expect("records");
+        assert_eq!(report.records_split, 0, "{report:?}");
+        assert!(report.far_side_pieces.is_empty(), "{report:?}");
+    }
+
+    /// A horizontal prism of `sides` faces, radius `radius`, axis along X at
+    /// height `radius`, one vertex at the bottom: a convex underside.
+    fn laid_prism(radius: f64, length: f64, sides: u32) -> Mesh {
+        let mut verts = Vec::new();
+        for end in [-0.5 * length, 0.5 * length] {
+            for k in 0..sides {
+                let theta = -std::f64::consts::FRAC_PI_2
+                    + std::f64::consts::TAU * f64::from(k) / f64::from(sides);
+                verts.push([end, radius * theta.cos(), radius + radius * theta.sin()]);
+            }
+        }
+        let mut tris = Vec::new();
+        for k in 0..sides {
+            let next = (k + 1) % sides;
+            tris.push([k, next, sides + next]);
+            tris.push([k, sides + next, sides + k]);
+        }
+        for k in 1..sides - 1 {
+            tris.push([0, k + 1, k]);
+            tris.push([sides, sides + k, sides + k + 1]);
+        }
+        let mut mesh = Mesh::new(verts, tris).unwrap();
+        // Outward, whichever way the fans above were written.
+        let triangles: Vec<SoupTriangle> = mesh
+            .tris()
+            .iter()
+            .map(|t| t.map(|corner| mesh.verts()[corner as usize]))
+            .collect();
+        let volume: f64 = triangles.iter().map(|[a, b, c]| dot(*a, cross(*b, *c))).sum();
+        if volume < 0.0 {
+            let flipped: Vec<[u32; 3]> = mesh.tris().iter().map(|t| [t[0], t[2], t[1]]).collect();
+            mesh = Mesh::new(mesh.verts().to_vec(), flipped).unwrap();
+        }
+        mesh
+    }
+
+    /// THE CURVED UNDERSIDE (TIP-TRUNCATION.md, Bat_Cat_Owl tip 0). A ball
+    /// seated under a convex underside: every face the cut made lies ON the
+    /// model surface (nothing is cut where the model is not), and the cut
+    /// surface is wider than the disc a plane through the lowest point leaves
+    /// on the model.
+    #[test]
+    fn a_ball_under_a_curved_underside_is_cut_only_where_the_model_is() {
+        let radius_model = 2.0;
+        let model = laid_prism(radius_model, 6.0, 384);
+        // Ball radius 0.5, its pole 0.05 deep: centre 0.45 below the lowest
+        // point (z = 0), on a vertical arm.
+        let ball_radius = 0.5;
+        let centre = [0.0, 0.0, -0.45];
+        let trim = plinth_support::SeatTrim::new([0.0, 0.0, 0.0], [0.0, 0.0, -1.0])
+            .unwrap()
+            .with_shaft_unit([0.0, 0.0, -1.0]);
+        let mut ball = primitive_with_radii(
+            SupportSegmentKind::ContactSphere,
+            [centre[0], centre[1], centre[2] + ball_radius],
+            [centre[0], centre[1], centre[2] - ball_radius],
+            ball_radius,
+            ball_radius,
+        );
+        ball.seat_trim = Some(trim);
+        let (records, report) =
+            build_records_trimmed(&[ball], [0.0; 3], Some(&model)).expect("records");
+        assert!(report.batch_error.is_none(), "{report:?}");
+        assert_eq!(report.records_cut_by_model, 1, "{report:?}");
+        let kept = wire_triangles(&records[0].mesh.xyz);
+        // Every vertex lies on the ball's sphere or ON the prism's surface
+        // (axis at y = 0, z = 2; facets within the sagitta): a plane cut would
+        // leave vertices on neither. A face whose centroid is on the model is
+        // contact.
+        let off_model = |p: [f64; 3]| (p[1].hypot(p[2] - radius_model) - radius_model).abs();
+        let mut cut_area = 0.0;
+        for [a, b, c] in &kept {
+            for p in [a, b, c] {
+                let off_sphere = (norm(sub(*p, centre)) - ball_radius).abs();
+                assert!(
+                    off_model(*p) < 2e-3 || off_sphere < 1e-5,
+                    "vertex {p:?} lies neither on the model ({} off) nor on the ball ({off_sphere} \
+                     off): a plane cut it",
+                    off_model(*p)
+                );
+            }
+            let centroid = scale(add(add(*a, *b), *c), 1.0 / 3.0);
+            if off_model(centroid) < 2e-3 {
+                cut_area += 0.5 * norm(cross(sub(*b, *a), sub(*c, *a)));
+            }
+        }
+        // The model surface inside the ball, integrated on a fine grid over
+        // the smooth cylinder. A plane through the lowest point touches it on
+        // one line only (area 0): everything else of that disc hangs under
+        // the curve. The mesh cut takes the whole patch.
+        let step = 0.001;
+        let mut patch = 0.0;
+        for i in -300..=300 {
+            for j in -300..=300 {
+                let (x, y) = (f64::from(i) * step, f64::from(j) * step);
+                let root = (radius_model * radius_model - y * y).sqrt();
+                let z = radius_model - root;
+                if x * x + y * y + (z - centre[2]).powi(2) < ball_radius * ball_radius {
+                    patch += step * step * (1.0 + (y / root).powi(2)).sqrt();
+                }
+            }
+        }
+        assert!(
+            // The emitted ball is a faceted polyhedron inscribed in the
+            // sphere, so its patch is somewhat smaller than the smooth one's.
+            cut_area > 0.7 * patch && cut_area <= 1.001 * patch,
+            "the contact on the model is {cut_area} mm2; the model surface inside the ball is \
+             {patch} mm2"
+        );
+        assert_watertight(&kept, "the cut ball");
     }
 
     /// SABOTAGE: the trim not run. The same two records built WITHOUT the

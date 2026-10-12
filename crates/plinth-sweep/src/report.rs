@@ -351,6 +351,11 @@ pub struct SweepRunReport {
     /// footprint, how many moved off their seat triangle's normal and by how
     /// much, and the tips that kept the triangle's normal.
     pub seat_footprint_normal: crate::footprint_normal::FootprintNormalOutcome,
+    /// The REAL contact (Craig 2026-10-12: the tip is cut to the model mesh):
+    /// the model surface inside every seated tip's drawn ball against the
+    /// planned disc, the balls grown until it reaches plan, and the tips a
+    /// limit left short.
+    pub seat_contact: crate::contact_growth::ContactOutcome,
     /// The head-join rule (2026-09-29): member-on-arm joins graded against the
     /// trunk's seat zone, the landers moved down their trunk, the joins kept
     /// by reason, and the finished field's census.

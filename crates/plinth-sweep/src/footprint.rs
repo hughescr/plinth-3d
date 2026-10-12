@@ -41,18 +41,22 @@
 //! a cell no sample sits in, by at most its sagitta, `(pitch/4)² / 8r`, which
 //! is 0.0004 mm at the smallest registered tip. Moves are verified the same
 //! way: the disc the lowering re-derives for a moved seat is sampled, lattice
-//! and rim, in one more batched raster pass per round. A sample is ON the face when the
-//! model is carried in its column within the raster's own vertical
-//! uncertainty above it: up to two laminae (the slice is taken at the lamina
-//! mid-plane, so the first slice showing a face can be one lamina above it,
-//! and one more for the carrier mask's inward rounding), plus the rise a
-//! sloped face needs for the carrier mask to clear its own two-cell inward
-//! bound, `2 · pitch · tan(slope)`. Every term is a resolution of the raster
-//! itself, not a new physical number. (A first cut also capped the window at
-//! the ball's own diameter; on a steep face under a minimum-radius tip that
-//! cap is smaller than the raster can resolve and graded real face as edge,
-//! so it was dropped. A column outside the silhouette is empty at every
-//! height, so the wider window cannot pass a disc that hangs off an edge.)
+//! and rim, in one more batched pass per round.
+//!
+//! **A sample is ON the face when the REAL model surface is inside the drawn
+//! ball over it** (Craig 2026-10-12: the tip is cut to the model mesh, so the
+//! file has contact there exactly then). Along the seat normal through the
+//! sample, the ball spans a chord; the sample is on the face when the model
+//! surface crosses that chord, within one pixel (the printer cannot part two
+//! solids closer than that). ONE batched ray cast against the model's surface
+//! index grades every sample of a pass ([`touching`]); the search lattice, a
+//! prefilter only, reads the ball's widest chord. Until 2026-10-12 a sample
+//! was on the face when the model was carried in its raster column within two
+//! laminae plus `2 · pitch · tan(slope)` above it: a disc hanging 0.1 mm
+//! under a curved underside passed, and 14 of 29 Bat_Cat_Owl discs graded
+//! "on their face" hung up to 0.17 mm under it. That raster window survives
+//! only where the surface index is absent (its memory cap) or the cast is
+//! refused ([`carried`]).
 //!
 //! # The one pruning bound (a disclosed Placeholder, it decides no outcome)
 //!
@@ -96,6 +100,7 @@
 //! (repeated only when a broken rule removes a move). No per-tip raster query,
 //! no per-tip registry read.
 
+use geom_kernel::NativeSurface;
 use plinth_core::LayerPlan;
 use plinth_support::perception::SliceSolid;
 use plinth_support::{SweepArm, TipContactDisc};
@@ -360,6 +365,19 @@ struct Sample {
     cell: Option<usize>,
     k_lo: usize,
     k_hi: usize,
+    /// The ball's chord through the sample along the seat normal, from its
+    /// support-side end inward ([`touching`]): the sample is on the face when
+    /// the REAL model surface crosses this chord.
+    chord: Chord,
+}
+
+/// A ball's chord along the seat normal: from `origin` (on the ball, support
+/// side) along `inward` (the inward unit normal) for `length` mm.
+#[derive(Clone, Copy, Debug)]
+struct Chord {
+    origin: [f64; 3],
+    inward: [f64; 3],
+    length: f64,
 }
 
 /// A tip's disc plane and the lattice laid in it.
@@ -370,6 +388,10 @@ struct Frame {
     /// `tan` of the face's slope from horizontal, for the vertical window.
     tan_slope: f64,
     ball_radius: f64,
+    /// The seat's outward unit normal, and the drawn ball centre's height
+    /// over the disc plane along it (`d`, negative under the plane).
+    normal: [f64; 3],
+    centre_height: f64,
 }
 
 impl Frame {
@@ -398,7 +420,33 @@ impl Frame {
             e2,
             tan_slope,
             ball_radius: disc.ball_radius_mm,
+            normal,
+            centre_height: geom_kernel::vec3::dot(
+                geom_kernel::vec3::sub(disc.ball_centre_mm, disc.centre_mm),
+                normal,
+            ),
         })
+    }
+
+    /// The drawn ball's chord along the normal through `p` (a point of the
+    /// disc plane). `exact`: the chord at `p`'s own distance from the disc
+    /// centre; otherwise the ball's widest chord (the search prefilter, which
+    /// grades a column for any disc position near it).
+    fn chord(&self, p: [f64; 3], exact: bool) -> Chord {
+        let rho = if exact {
+            geom_kernel::vec3::dist(p, self.centre)
+        } else {
+            0.0
+        };
+        let half = (self.ball_radius * self.ball_radius - rho * rho).max(0.0).sqrt();
+        Chord {
+            origin: geom_kernel::vec3::add(
+                p,
+                geom_kernel::vec3::scale(self.normal, self.centre_height + half),
+            ),
+            inward: self.normal.map(|component| -component),
+            length: 2.0 * half,
+        }
     }
 
     fn point(&self, pitch: f64, u: f64, v: f64) -> [f64; 3] {
@@ -452,7 +500,9 @@ fn sample_at(
     layers: usize,
     frame: &Frame,
     p: [f64; 3],
+    exact: bool,
 ) -> Sample {
+    let chord = frame.chord(p, exact);
     let col = grid.col_coord(p[0]).floor();
     let row = grid.row_coord(p[1]).floor();
     let cell =
@@ -477,7 +527,70 @@ fn sample_at(
         cell,
         k_lo: lamina(p[2]),
         k_hi: lamina(p[2] + rise.max(height)),
+        chord,
     }
+}
+
+/// **Grade samples on the REAL model surface** (Craig 2026-10-12): a sample is
+/// on the face when the model surface crosses the drawn ball's chord through
+/// it ([`touching`]), within one pixel. Where the model's surface index is
+/// absent (its memory cap) or the batched cast is refused, the raster grade
+/// ([`carried`]) stands in.
+fn graded(
+    grid: &Grid,
+    slices: &[Vec<SliceSolid>],
+    surface: Option<&NativeSurface>,
+    samples: &[Sample],
+    layers_rasterised: &mut usize,
+) -> Vec<bool> {
+    surface
+        .and_then(|surface| touching(surface, samples, grid.pitch_mm()))
+        .unwrap_or_else(|| carried(grid, slices, samples, layers_rasterised))
+}
+
+/// **The gap to the real surface, per sample, in ONE batched ray cast.** The
+/// emitter keeps `ball ∖ model` (no plane), so the file has contact over a
+/// sample exactly when the model surface lies inside the drawn ball along the
+/// seat normal there: a crossing of the sample's chord, from its support-side
+/// end, within its length plus one pixel (`tolerance_mm`: the printer cannot
+/// part two solids closer than that). A ray whose crossing the arithmetic
+/// could not decide, with no decided crossing, is graded off the face (the
+/// side that warns). `None` when the cast is refused.
+///
+/// Until 2026-10-12 a sample was on the face when the model was carried in its
+/// raster column within two laminae plus `2 · pitch · tan(slope)` above it,
+/// so a disc 0.1 mm under a curved surface passed (14 of 29 Bat_Cat_Owl discs
+/// graded on their face hung up to 0.17 mm under it).
+fn touching(surface: &NativeSurface, samples: &[Sample], tolerance_mm: f64) -> Option<Vec<bool>> {
+    if samples.is_empty() {
+        return Some(Vec::new());
+    }
+    let origins: Vec<[f64; 3]> = samples.iter().map(|sample| sample.chord.origin).collect();
+    let directions: Vec<[f64; 3]> = samples.iter().map(|sample| sample.chord.inward).collect();
+    let reach = samples
+        .iter()
+        .map(|sample| sample.chord.length)
+        .fold(0.0_f64, f64::max)
+        + tolerance_mm;
+    let cast = surface
+        .cast_rays_classified(&origins, &directions, reach)
+        .ok()?;
+    let row = |index: usize| -> &[f64] {
+        let lo = usize::try_from(cast.offsets.get(index).copied().unwrap_or(0)).unwrap_or(0);
+        let hi = usize::try_from(cast.offsets.get(index + 1).copied().unwrap_or(0)).unwrap_or(0);
+        cast.t_all.get(lo..hi).unwrap_or(&[])
+    };
+    Some(
+        samples
+            .iter()
+            .enumerate()
+            .map(|(index, sample)| {
+                row(index)
+                    .iter()
+                    .any(|&t| t <= sample.chord.length + tolerance_mm)
+            })
+            .collect(),
+    )
 }
 
 /// ONE ascending pass: for every sample, whether the carrier mask covers its
@@ -560,6 +673,7 @@ fn disc_offsets(radius_in_pitches: f64) -> Vec<(i32, i32)> {
 pub(crate) fn regrade(
     grid: &Grid,
     slices: &[Vec<SliceSolid>],
+    surface: Option<&NativeSurface>,
     struts: &[SweepStrut],
     arms: &[SweepArm],
     which: &[usize],
@@ -589,12 +703,12 @@ pub(crate) fn regrade(
         let lattice = offsets.iter().map(|&(u, v)| (f64::from(u), f64::from(v)));
         for (u, v) in lattice.chain(rim) {
             let p = frame.point(pitch, u, v);
-            samples.push(sample_at(grid, plate_z, height, layers, &frame, p));
+            samples.push(sample_at(grid, plate_z, height, layers, &frame, p, true));
             owner.push(position);
         }
     }
     let mut layers_rasterised = 0;
-    let hit = carried(grid, slices, &samples, &mut layers_rasterised);
+    let hit = graded(grid, slices, surface, &samples, &mut layers_rasterised);
     let mut on = vec![0_usize; which.len()];
     let mut total = vec![0_usize; which.len()];
     for (&position, &is_hit) in owner.iter().zip(&hit) {
@@ -653,6 +767,7 @@ fn disc_lattice(
 pub(crate) fn apply(
     grid: &Grid,
     slices: &[Vec<SliceSolid>],
+    surface: Option<&NativeSurface>,
     struts: &mut [SweepStrut],
     arms: &[SweepArm],
     layer_plan: &LayerPlan,
@@ -694,12 +809,12 @@ pub(crate) fn apply(
         let rim = rim.iter().map(|&(u, v)| (u, v, true));
         for (u, v, on_rim) in lattice.chain(rim) {
             let p = frame.point(pitch, u, v);
-            samples.push(sample_at(grid, plate_z, height, layers, frame, p));
+            samples.push(sample_at(grid, plate_z, height, layers, frame, p, true));
             owner.push((arm, on_rim));
         }
     }
     outcome.disc_samples = samples.len();
-    let hit = carried(grid, slices, &samples, &mut outcome.layers_rasterised);
+    let hit = graded(grid, slices, surface, &samples, &mut outcome.layers_rasterised);
     let mut on = vec![0_usize; arms.len()];
     let mut total = vec![0_usize; arms.len()];
     let mut lattice_missed = vec![false; arms.len()];
@@ -801,7 +916,7 @@ pub(crate) fn apply(
         for u in -half_width..=half_width {
             for v in -half_width..=half_width {
                 let p = frame.point(pitch, f64::from(u), f64::from(v));
-                lattice.push(sample_at(grid, plate_z, height, layers, frame, p));
+                lattice.push(sample_at(grid, plate_z, height, layers, frame, p, false));
             }
         }
         // Candidate moves nearest first; ties broken by the offset itself so
@@ -820,7 +935,7 @@ pub(crate) fn apply(
         });
     }
     outcome.search_samples = lattice.len();
-    let lattice_hit = carried(grid, slices, &lattice, &mut outcome.layers_rasterised);
+    let lattice_hit = graded(grid, slices, surface, &lattice, &mut outcome.layers_rasterised);
     let on_lattice = |search: &Search, u: i32, v: i32| -> bool {
         let w = search.half_width;
         if u.abs() > w || v.abs() > w {
@@ -1006,7 +1121,7 @@ pub(crate) fn apply(
                 .map(|(u, v)| (f64::from(u), f64::from(v)));
             for (u, v) in lattice.chain(rim_points(disc.radius_mm / pitch)) {
                 let p = real.point(pitch, u, v);
-                verify_samples.push(sample_at(grid, plate_z, height, layers, &real, p));
+                verify_samples.push(sample_at(grid, plate_z, height, layers, &real, p, true));
             }
             verify_span.push((first, verify_samples.len()));
             verify.push((
@@ -1015,9 +1130,10 @@ pub(crate) fn apply(
             ));
         }
         outcome.verify_samples += verify_samples.len();
-        let verify_hit = carried(
+        let verify_hit = graded(
             grid,
             slices,
+            surface,
             &verify_samples,
             &mut outcome.layers_rasterised,
         );
