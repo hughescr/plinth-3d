@@ -60,10 +60,12 @@ pub struct LandingCheck {
     /// Members whose landing names the PLATE or the MODEL but whose shaft
     /// stops above it: a plate landing with `k_bottom != 0`, or a model
     /// landing at `layer` with `k_bottom != layer`. The landing kind alone
-    /// says nothing about where the lower end is drawn; until 2026-10-12 this
-    /// check took the kind on trust, and the Morel base's arm 44 was emitted as
-    /// a 0.17 mm stub in the air while the log said "0 unrooted" (quality
-    /// lane Q12, `q12/REGRESSIONS.md`). Strut ids.
+    /// says nothing about where the lower end is drawn, and until 2026-10-12
+    /// this check took the kind on trust. It is a ledger-against-shaft
+    /// invariant, not the catch for the Morel base's arm 44 (Q12): that stub's
+    /// lower end stood 0.015 mm from the model surface, its landing was
+    /// `Model`, and "0 unrooted" was true of it. The lip-seat rule's kept-arm
+    /// test prevents it at its cause (`q12/REGRESSIONS.md`). Strut ids.
     pub ground_short: Vec<u32>,
     /// Braces whose top seats on a member that no longer stands in the brace's
     /// seat cell at the brace's top layer.
@@ -415,9 +417,10 @@ mod tests {
 
     /// A plate or model landing is rooted only where the shaft reaches it: a
     /// plate arm whose lower end stops above layer 0, or a model arm whose
-    /// lower end is not the model layer it names, stands on nothing (the Morel
-    /// base's arm 44 in Q12: a stub one layer long, landing still `Plate`).
-    /// Anything resting on it is unrooted with it.
+    /// lower end is not the model layer it names, stands on nothing. Anything
+    /// resting on it is unrooted with it. (This is not the Morel base's arm 44
+    /// of Q12, which landed on the model with its lower end at the model: the
+    /// kept-arm test in `lip_seat` prevents that stub, `q12/REGRESSIONS.md`.)
     #[test]
     fn a_plate_or_model_landing_whose_shaft_stops_above_it_is_unrooted() {
         let plate = arm(0, 5, 100, 0, Landing::Plate);

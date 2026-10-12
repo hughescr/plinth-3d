@@ -204,6 +204,48 @@ fn solid_clearances(
     plate_z_mm: f64,
     tier: f64,
 ) -> Vec<Option<f64>> {
+    let n = arms.len();
+    let frame = solid_frame(surface, arms, on_model, layer_plan, plate_z_mm, tier);
+    surface
+        .segment_clearance_classified(
+            &frame.seats,
+            &frame.bases,
+            &frame.radii,
+            &frame.radii,
+            0.0,
+            &frame.insets,
+            &frame.landing_zones,
+        )
+        .map_or_else(
+            |_| vec![None; n],
+            |rows| {
+                rows.into_iter()
+                    .map(SegmentClearanceClassified::clearance_mm)
+                    .collect()
+            },
+        )
+}
+
+/// What [`solid_clearances`] and [`drawn_solid_clearances`] read per member:
+/// the drawn segment's two ends, its widest drawn radius, and the lengths at
+/// each end the kernel leaves untested (its own seat zone, its own landing
+/// zone).
+struct SolidFrame {
+    seats: Vec<[f64; 3]>,
+    bases: Vec<[f64; 3]>,
+    radii: Vec<f64>,
+    insets: Vec<f64>,
+    landing_zones: Vec<f64>,
+}
+
+fn solid_frame(
+    surface: &NativeSurface,
+    arms: &[SweepArm],
+    on_model: &[bool],
+    layer_plan: &LayerPlan,
+    plate_z_mm: f64,
+    tier: f64,
+) -> SolidFrame {
     let discs = plinth_support::tip_contact_discs(arms, layer_plan)
         .unwrap_or_else(|_| vec![None; arms.len()]);
     let n = arms.len();
@@ -254,16 +296,108 @@ fn solid_clearances(
     let landing_zones = crate::member_clearance::model_landing_zones_mm(
         surface, &seats, &bases, &radii, on_model, tier,
     );
-    surface
-        .segment_clearance_classified(&seats, &bases, &radii, &radii, 0.0, &insets, &landing_zones)
-        .map_or_else(
-            |_| vec![None; n],
-            |rows| {
-                rows.into_iter()
-                    .map(SegmentClearanceClassified::clearance_mm)
-                    .collect()
-            },
-        )
+    SolidFrame {
+        seats,
+        bases,
+        radii,
+        insets,
+        landing_zones,
+    }
+}
+
+/// **The same clearance read on the solid the file draws**: each member as the
+/// straight spans the lowering gives it ([`plinth_support::drawn_spans`], the
+/// one rule: chords on or above the area law's section at every height),
+/// every span read as the frustum it is, in ONE batched kernel call, with the
+/// same seat and landing zones left untested as [`solid_clearances`] leaves.
+/// [`solid_clearances`] reads the axis at the member's WIDEST radius all along,
+/// a lower bound on the clearance of the drawn solid: a tapered or stepped
+/// member can read inside the model there while its thinner shaft stands
+/// clear. The
+/// least clearance over a member's spans; `None` where the kernel did not
+/// decide, or nothing is left to test after the zones.
+fn drawn_solid_clearances(
+    surface: &NativeSurface,
+    arms: &[SweepArm],
+    on_model: &[bool],
+    layer_plan: &LayerPlan,
+    plate_z_mm: f64,
+    tier: f64,
+) -> Vec<Option<f64>> {
+    let n = arms.len();
+    let frame = solid_frame(surface, arms, on_model, layer_plan, plate_z_mm, tier);
+    let mut owner: Vec<usize> = Vec::new();
+    let mut p0s: Vec<[f64; 3]> = Vec::new();
+    let mut p1s: Vec<[f64; 3]> = Vec::new();
+    let mut top_radii: Vec<f64> = Vec::new();
+    let mut bottom_radii: Vec<f64> = Vec::new();
+    let mut inset0s: Vec<f64> = Vec::new();
+    let mut inset1s: Vec<f64> = Vec::new();
+    for (index, arm) in arms.iter().enumerate() {
+        let (seat, base) = (frame.seats[index], frame.bases[index]);
+        let rise = seat[2] - base[2];
+        let length = geom_kernel::vec3::norm(geom_kernel::vec3::sub(seat, base));
+        if rise.partial_cmp(&0.0) != Some(core::cmp::Ordering::Greater) {
+            continue;
+        }
+        let root = plinth_support::drawn_root_radius_mm(&arm.radius_profile_mm, arm.tip_radius_mm);
+        let spans = plinth_support::drawn_spans(
+            &arm.radius_profile_mm,
+            arm.base_mm[2],
+            arm.seat_mm[2],
+            seat[2],
+            base[2],
+            arm.tip_radius_mm,
+            root,
+        );
+        // The point of the axis at height `z`, and its distance from the seat.
+        let at = |z: f64| -> ([f64; 3], f64) {
+            let t = ((seat[2] - z) / rise).clamp(0.0, 1.0);
+            (
+                std::array::from_fn(|axis| seat[axis] + t * (base[axis] - seat[axis])),
+                t * length,
+            )
+        };
+        for span in spans {
+            let (from, a0) = at(span.top_z_mm);
+            let (to, a1) = at(span.bottom_z_mm);
+            let inset0 = (frame.insets[index] - a0).max(0.0);
+            let inset1 = (frame.landing_zones[index] - (length - a1)).max(0.0);
+            if a1 <= a0 || inset0 + inset1 >= a1 - a0 {
+                continue;
+            }
+            owner.push(index);
+            p0s.push(from);
+            p1s.push(to);
+            top_radii.push(span.top_radius_mm.max(0.0));
+            bottom_radii.push(span.bottom_radius_mm.max(0.0));
+            inset0s.push(inset0);
+            inset1s.push(inset1);
+        }
+    }
+    let mut out: Vec<Option<f64>> = vec![None; n];
+    if owner.is_empty() {
+        return out;
+    }
+    let Ok(rows) = surface.segment_frustum_clearance_classified(
+        &p0s,
+        &p1s,
+        &top_radii,
+        &bottom_radii,
+        0.0,
+        &inset0s,
+        &inset1s,
+    ) else {
+        return out;
+    };
+    for (row, &index) in rows.into_iter().zip(&owner) {
+        if let Some(clearance) = row.clearance_mm() {
+            if out[index].is_none_or(|least| clearance < least) {
+                out[index] = Some(clearance);
+            }
+        }
+    }
+    out
 }
 
 /// The widest radius the arm is drawn at: the solid that [`solid_clearances`]
@@ -475,8 +609,9 @@ pub struct LipSeatOutcome {
     pub kept_for_slenderness_ids: Vec<u32>,
     /// Leans the slenderness test refused that were TAKEN anyway, because the
     /// arm as it stands is no support (a one-layer stub, or a solid inside the
-    /// model): nothing better to keep (q12 regressions, 2026-10-12). The path
-    /// hit of that test.
+    /// model, or it floats above its ground): nothing better to keep (q12
+    /// regressions, 2026-10-12). The path hit of that test. Summed over every
+    /// pass, like [`Self::candidates_refused_slender`].
     pub slender_taken_kept_not_clear: usize,
     /// Moved members (a mover, a follower) whose solid was NOT read against
     /// the final gap because it stands in a hidden cavity (Craig ruling
@@ -812,7 +947,6 @@ pub(crate) fn apply(
     outcome.kept_no_candidate = 0;
     outcome.kept_for_slenderness = 0;
     outcome.kept_for_slenderness_ids.clear();
-    outcome.slender_taken_kept_not_clear = 0;
     outcome.kept_locked_by_tie = 0;
     outcome.kept_locked_by_non_arm_below = 0;
     outcome.kept_behind_a_follower_also_sent = 0;
@@ -904,6 +1038,22 @@ pub(crate) fn apply(
                 && !locked[index_of]
         })
         .collect();
+
+    // Which members stand on the plate or the model through a chain of
+    // landings that holds, as the field stands as this pass begins (one
+    // `O(struts)` walk, [`crate::landing_check::check_landings`]): the
+    // kept-arm test below reads it, since an arm floating above its ground
+    // (or resting on one that does) is no support to keep.
+    let rooted: Vec<bool> = {
+        let check = crate::landing_check::check_landings(struts, context.layer_height_mm);
+        let mut rooted = vec![true; struts.len()];
+        for id in &check.unrooted {
+            if let Some(flag) = rooted.get_mut(*id as usize) {
+                *flag = false;
+            }
+        }
+        rooted
+    };
 
     // ---- stage 1: price every candidate descent of every arm sent.
     let mut pending: Vec<Pending> = Vec::new();
@@ -1089,7 +1239,7 @@ pub(crate) fn apply(
         //
         // One batch for the round, and one for the same members as they
         // stand.
-        let (after, before) = match surface {
+        let (after, before, standing_drawn) = match surface {
             Some(surface) => {
                 let movers: Vec<usize> = proposals
                     .iter()
@@ -1116,26 +1266,60 @@ pub(crate) fn apply(
                     .iter()
                     .map(|&member| matches!(struts[member].landing, Landing::Model { .. }))
                     .collect();
-                (
-                    solid_clearances(
+                let after = solid_clearances(
+                    surface,
+                    &trial,
+                    &trial_on_model,
+                    layer_plan,
+                    plate_z_mm,
+                    tier,
+                );
+                let before = solid_clearances(
+                    surface,
+                    &standing,
+                    &standing_on_model,
+                    layer_plan,
+                    plate_z_mm,
+                    tier,
+                );
+                // **The standing movers the widest-radius reading puts inside
+                // the model are read again on the solid the file draws** (the
+                // kept-arm test below asks whether the arm as it stands enters
+                // the model, and a tapered or stepped arm reads inside there
+                // while its thinner shaft clears): one more batched call, over
+                // those members only, none when there are none.
+                let mut drawn = before.clone();
+                let doubtful: Vec<usize> = first_of
+                    .iter()
+                    .copied()
+                    .filter(|&slot| before[slot].is_some_and(|was| was < -CLEARANCE_SLACK_MM))
+                    .collect();
+                if !doubtful.is_empty() {
+                    let doubtful_arms: Vec<SweepArm> =
+                        doubtful.iter().map(|&slot| standing[slot].clone()).collect();
+                    let doubtful_on_model: Vec<bool> =
+                        doubtful.iter().map(|&slot| standing_on_model[slot]).collect();
+                    let read = drawn_solid_clearances(
                         surface,
-                        &trial,
-                        &trial_on_model,
+                        &doubtful_arms,
+                        &doubtful_on_model,
                         layer_plan,
                         plate_z_mm,
                         tier,
-                    ),
-                    solid_clearances(
-                        surface,
-                        &standing,
-                        &standing_on_model,
-                        layer_plan,
-                        plate_z_mm,
-                        tier,
-                    ),
-                )
+                    );
+                    for (&slot, clearance) in doubtful.iter().zip(read) {
+                        // Undecided on the drawn solid: the widest-radius
+                        // reading stands.
+                        drawn[slot] = clearance.or(before[slot]);
+                    }
+                }
+                (after, before, drawn)
             }
-            None => (vec![None; trial.len()], vec![None; trial.len()]),
+            None => (
+                vec![None; trial.len()],
+                vec![None; trial.len()],
+                vec![None; trial.len()],
+            ),
         };
         for (proposal, &first) in proposals.into_iter().zip(&first_of) {
             let index_of = pending[proposal.slot].index;
@@ -1310,9 +1494,14 @@ pub(crate) fn apply(
             // **AND ONLY WHERE THE ARM AS IT STANDS IS A SUPPORT** (q12
             // regressions, 2026-10-12). The refusal trades the lean for the arm
             // already there, so that arm must be one: a shaft longer than one
-            // layer, whose solid does not enter the model (`before[first]`,
-            // measured above in the same batch; unmeasured is not proof of
-            // entry). The Morel base's arm 44 stood as a stub one layer long
+            // layer, standing on its ground (`rooted`: the landing walk, so
+            // not floating above the plate or the model, nor resting on a
+            // member that is), whose solid does not enter the model
+            // (`standing_drawn`: the widest-radius reading of `before`, and
+            // where that reads inside the model, the solid the file draws,
+            // since a tapered arm's thinner shaft can clear a wall its widest
+            // radius would enter; unmeasured is not proof of entry). The Morel
+            // base's arm 44 stood as a stub one layer long
             // onto the model wall beside its seat, its tip off its face (Q12
             // kept it in place of its 7.5 mm plate lean). There the lean is
             // taken as before Q1 and left to the ladder.
@@ -1344,8 +1533,10 @@ pub(crate) fn apply(
                 });
             if too_slender {
                 let standing = &struts[index_of];
-                let kept_is_a_support = before[first].is_none_or(|was| was >= -CLEARANCE_SLACK_MM)
-                    && standing.k_top > standing.k_bottom.saturating_add(1);
+                let kept_is_a_support = standing_drawn[first]
+                    .is_none_or(|was| was >= -CLEARANCE_SLACK_MM)
+                    && standing.k_top > standing.k_bottom.saturating_add(1)
+                    && rooted[index_of];
                 if kept_is_a_support {
                     outcome.candidates_refused_slender += 1;
                     // The cheapest admissible descent cannot be held: the arm
@@ -1354,10 +1545,9 @@ pub(crate) fn apply(
                     let job = &mut pending[proposal.slot];
                     job.refused_slender = true;
                     job.next = job.candidates.len();
-                    let id = struts[index_of].id;
-                    if !outcome.kept_for_slenderness_ids.contains(&id) {
-                        outcome.kept_for_slenderness_ids.push(id);
-                    }
+                    // Once per arm: its job ends here (`next` is spent), and
+                    // the list is cleared at the start of the pass.
+                    outcome.kept_for_slenderness_ids.push(struts[index_of].id);
                     continue;
                 }
                 // The path hit of the kept-arm test: a lean the law cannot

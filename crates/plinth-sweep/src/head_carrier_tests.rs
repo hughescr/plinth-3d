@@ -1258,6 +1258,166 @@ fn a_lean_only_the_taper_would_hold_is_refused_while_the_arm_stands() {
     assert_eq!(taken[0].landing, Landing::Plate);
 }
 
+/// The slab-and-plate fixture of the kept-arm tests (a slab over arm 0, law
+/// `S = law_s`), with `mesh` as the model: re-land arm 0 `passes` times on
+/// PRODUCTION [`crate::lip_seat::apply`], each pass on a fresh copy of
+/// `arm` and all into ONE outcome (as the sweep passes its one outcome through
+/// every pass). Returns the last pass's field, the outcome and the moves.
+fn lip_seat_passes(
+    mesh: &plinth_mesh::Mesh,
+    law_s: f64,
+    arm: &SweepStrut,
+    passes: usize,
+) -> (Vec<SweepStrut>, crate::lip_seat::LipSeatOutcome, usize) {
+    let grid = grid();
+    let history = ColumnHistory::new(&grid);
+    let keep_out = crate::drain::DrainKeepOut::none();
+    let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
+    let law = crate::slenderness::SlendernessLaw::new(law_s, 0.05, 1.0, 32.5);
+    let plan = plinth_core::LayerPlan::new(0.0, vec![H; 300]).expect("a uniform plan");
+    let bite = plinth_support::ShaftSeatBite {
+        bite_mm: 0.2,
+        approach_deg: 60.0,
+        limit_deg: 20.0,
+    };
+    let context = slender_context(&grid, &history, &keep_out, &lean, &law);
+    let surface = std::cell::OnceCell::new();
+    let joins = crate::head_join::HeadJoinContext {
+        slender: &context,
+        mesh,
+        layer_plan: &plan,
+        plate_z_mm: 0.0,
+        clearance_mm: 0.3,
+        standoff_mm: 0.6,
+        surface_pitch_mm: 0.1,
+        surface_max_bytes: 1 << 28,
+        surface: &surface,
+    };
+    let mut outcome = crate::lip_seat::LipSeatOutcome::default();
+    let mut last = Vec::new();
+    let mut moved = 0;
+    for _ in 0..passes {
+        let mut struts = vec![arm.clone()];
+        let arms = tilted_arms(&grid, &mut struts);
+        moved = crate::lip_seat::apply(
+            &joins,
+            &plan,
+            0.0,
+            &mut struts,
+            &arms,
+            &[Some(bite)],
+            crate::lip_seat::Trigger::SeatBite,
+            &[],
+            &mut outcome,
+        )
+        .len();
+        last = struts;
+    }
+    (last, outcome, moved)
+}
+
+/// A straight 0.1 mm arm seated under the slab (layer 200) whose shaft is
+/// three layers long, landing as given.
+fn short_arm(landing: Landing, k_bottom: usize) -> SweepStrut {
+    let mut arm = straight(&grid(), 0, 150, 150, 200, 0.1);
+    arm.k_bottom = k_bottom;
+    arm.landing = landing;
+    arm.radius_mm = vec![0.1; 201 - k_bottom];
+    arm.carried_mm2 = vec![0.0; 201 - k_bottom];
+    arm
+}
+
+/// **AN ARM THAT FLOATS ABOVE ITS GROUND IS NO SUPPORT TO KEEP** (lip-seat
+/// guard review, 2026-10-12). The slenderness refusal keeps the arm as it
+/// stands, so that arm must stand on something. A clear three-layer arm
+/// (`k_top` 200, `k_bottom` 198) that claims `Landing::Plate` ends two layers
+/// above the plate in the ledger's own terms (`landing_check::ground_short`):
+/// it passed the clearance and length tests and was kept.
+///
+/// The fixture of `a_lean_only_the_taper_would_hold_is_refused_while_the_arm_stands`
+/// (S = 50, a slab, no wall). CONTROL: the same arm landing on the model at
+/// its own lower layer (`Model { layer: 198 }`) is rooted, a support: kept,
+/// its lean refused (path hit `candidates_refused_slender` 1; the lean is
+/// slender, so the next assertion is the guard's and not a fixture with no
+/// lean). TEST: the arm claiming the plate at layer 198 is not rooted: the
+/// lean is taken. SABOTAGE (by hand, the `rooted[index_of]` term of the
+/// kept-arm test removed): the floating arm is kept (`moved` 0).
+#[test]
+fn an_arm_floating_above_its_ground_is_not_kept_in_place_of_a_lean() {
+    let mesh = boxes_mesh(&[([0.0, 0.0, 10.0], [15.0, 15.0, 12.0])]);
+    let (kept, outcome, moved) =
+        lip_seat_passes(&mesh, 50.0, &short_arm(Landing::Model { layer: 198 }, 198), 1);
+    assert_eq!(moved, 0, "CONTROL: the rooted arm is kept: {outcome:?}");
+    assert_eq!(outcome.candidates_refused_slender, 1, "{outcome:?}");
+    assert_eq!(outcome.slender_taken_kept_not_clear, 0, "{outcome:?}");
+    assert_eq!(kept[0].k_bottom, 198);
+    let (taken, outcome, moved) = lip_seat_passes(&mesh, 50.0, &short_arm(Landing::Plate, 198), 1);
+    assert_eq!(moved, 1, "the floating arm is not kept: {outcome:?}");
+    assert_eq!(outcome.slender_taken_kept_not_clear, 1, "PATH HIT: {outcome:?}");
+    assert_eq!(outcome.candidates_refused_slender, 0, "{outcome:?}");
+    assert!(taken[0].is_leaned(), "the arm leans to the plate");
+}
+
+/// **THE COUNT OF LEANS TAKEN FOR WANT OF A SUPPORT IS SUMMED OVER EVERY
+/// PASS** (lip-seat guard review, 2026-10-12). The sweep calls the rule
+/// several times (the pass, its fixed point, the pass after the head joins)
+/// with one outcome, and the count was reset at the start of each call, so
+/// the final disclosure read only the last call's. Two passes on the one-layer
+/// stub of `a_one_layer_stub_is_not_kept_in_place_of_a_lean`, each taking its
+/// lean, count 2. SABOTAGE (by hand, the reset restored): the count reads 1.
+#[test]
+fn the_count_of_leans_taken_for_want_of_a_support_sums_over_passes() {
+    let mesh = boxes_mesh(&[([0.0, 0.0, 10.0], [15.0, 15.0, 12.0])]);
+    let stub = short_arm(Landing::Model { layer: 199 }, 199);
+    let (_, outcome, moved) = lip_seat_passes(&mesh, 50.0, &stub, 1);
+    assert_eq!((moved, outcome.slender_taken_kept_not_clear), (1, 1), "{outcome:?}");
+    let (_, outcome, moved) = lip_seat_passes(&mesh, 50.0, &stub, 2);
+    assert_eq!(moved, 1, "{outcome:?}");
+    assert_eq!(outcome.slender_taken_kept_not_clear, 2, "{outcome:?}");
+}
+
+/// **A TAPERED ARM IS READ ON THE SOLID THE FILE DRAWS, NOT ON ITS WIDEST
+/// RADIUS ALL ALONG** (lip-seat guard review, 2026-10-12). The kept-arm test
+/// asks whether the arm as it stands enters the model. The batched clearance
+/// read draws the axis at the arm's widest radius over its whole length, so
+/// an arm fat at its root and thin under the seat read inside a wall that its
+/// thin shaft stands clear of, was called no support, and its lean was taken
+/// in its place (a too-slender lean, around Q1).
+///
+/// The slab fixture (S = 30: a run of about 10.2 mm is over `S * 0.19`) with a low wall 0.15 mm beside the axis at 5.5 to
+/// 7 mm height, where the arm is drawn 0.1 mm (0.19 mm below layer 100, 5 mm
+/// up). The widest radius, 0.19 mm, would enter the wall by 0.04 mm; the drawn
+/// 0.1 mm shaft stands 0.05 mm clear. CONTROL: the same arm drawn 0.19 mm all
+/// along really enters the wall: it is no support and the lean is taken (so
+/// the wall does bite at that radius). TEST: the tapered arm is kept, its lean
+/// refused (path hit `candidates_refused_slender` 1). SABOTAGE (by hand, the
+/// guard reads `before` in place of `standing_drawn`): the tapered arm is
+/// called no support and the lean is taken (`moved` 1).
+#[test]
+fn a_tapered_arm_clear_of_a_wall_on_its_drawn_solid_is_kept() {
+    let grid = grid();
+    let (ax, ay) = (grid.center_x_mm(150), grid.center_y_mm(150));
+    let mesh = boxes_mesh(&[
+        ([0.0, 0.0, 10.0], [15.0, 15.0, 12.0]),
+        ([ax + 0.15, ay - 2.0, 5.5], [ax + 4.0, ay + 2.0, 7.0]),
+    ]);
+    let arm_with = |radius_at: &dyn Fn(usize) -> f64| {
+        let mut arm = straight(&grid, 0, 150, 150, 200, 0.1);
+        arm.radius_mm = (0..=200).map(radius_at).collect();
+        arm
+    };
+    let uniform = arm_with(&|_| 0.19);
+    let (_, outcome, moved) = lip_seat_passes(&mesh, 30.0, &uniform, 1);
+    assert_eq!(moved, 1, "CONTROL: a 0.19 mm shaft enters the wall, no support: {outcome:?}");
+    assert_eq!(outcome.slender_taken_kept_not_clear, 1, "{outcome:?}");
+    let taper = arm_with(&|layer| if layer < 100 { 0.19 } else { 0.1 });
+    let (kept, outcome, moved) = lip_seat_passes(&mesh, 30.0, &taper, 1);
+    assert_eq!(moved, 0, "the tapered arm clears the wall on its drawn solid: {outcome:?}");
+    assert_eq!(outcome.candidates_refused_slender, 1, "PATH HIT: {outcome:?}");
+    assert_eq!(outcome.slender_taken_kept_not_clear, 0, "{outcome:?}");
+    assert_eq!(kept[0].k_bottom, 0, "and keeps its post to the plate");
+}
+
 // ---------------------------------------------------------------------------
 // The head-first lane's two rulings of 2026-10-06: a head is planned at an
 // ESTIMATE of the final tip radius, and a head the final sizing grew across the
