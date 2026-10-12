@@ -289,10 +289,20 @@ fn deleting_the_clearance_rule_brings_the_overlapping_masts_back() {
     // no thicker than the arm it ties; on this configuration that refused
     // every mast with the clearance rule in force and deleted (0 and 0,
     // measured 2026-10-03). The clearance rule reads no brace radius.
+    //
+    // RE-PINNED 2026-10-11 (merge of quality Q12, Q1 + Q2, into develop): and
+    // with the lip-seat rule off (`without_lip_seat`). Q1 keeps the seat of a
+    // lean the slenderness law cannot hold, so on this configuration the field
+    // places 0 masts with the clearance rule in force and 0 with it deleted
+    // (was 4 and 3, measured 2026-10-11 on develop 2d2381a); with the rule off
+    // it places 1 and 3 masts, 0 and 2 lapping pairs (measured 2026-10-11,
+    // release). The clearance rule reads no lip-seat lean; refusing the twin
+    // merge as well changes nothing.
     let fixture =
         crate::harness::at_path_fixture_seating(crate::harness::at_path_fixture_x(policy()))
             .without_creep_overhang_cut()
-            .without_brace_cap();
+            .without_brace_cap()
+            .without_lip_seat();
     let clean = sweep_with(&mesh, 0.0, &fixture);
     let sabotaged = sweep_with(&mesh, 0.0, &fixture.without_mast_root_clearance());
 
