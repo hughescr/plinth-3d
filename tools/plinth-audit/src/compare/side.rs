@@ -377,6 +377,7 @@ fn mesh_dev_free(p: &Primitive, rec: &crate::reader::SupportRecord, model: &Mesh
     let frustum = rec.kind.is_frustum() && len > 0.0;
     let ax = if frustum { v::mul(v::sub(b, a), 1.0 / len) } else { [0.0; 3] };
     let (mut t0, mut t1) = (f64::MAX, f64::MIN);
+    let mut capsule_out = 0.0f64;
     for i in 0..rec.soup.len() {
         for j in 0..3 {
             let q = rec.soup.v(i, j);
@@ -399,6 +400,12 @@ fn mesh_dev_free(p: &Primitive, rec: &crate::reader::SupportRecord, model: &Mesh
                     outward = outward.max(rho - r_t);
                     inward = inward.max(r_t - rho);
                 }
+                if !cut {
+                    // How far the vertex lies outside the header's capsule (the axis segment
+                    // swept by the larger radius): see `capsule_out` below.
+                    let past_end = t - t.clamp(0.0, len);
+                    capsule_out = capsule_out.max(rho.hypot(past_end) - rec.r_start.max(rec.r_end));
+                }
             }
         }
     }
@@ -415,7 +422,11 @@ fn mesh_dev_free(p: &Primitive, rec: &crate::reader::SupportRecord, model: &Mesh
     // ruling v18), not as the record's own frustum, so its mesh is not on its header and need
     // not be. What the header does fix is the material: the mesh must COVER the header. Sample
     // five rings of the header (both ends and between) and measure how far outside the closed
-    // mesh each point is; a point inside the model is the model's.
+    // mesh each point is; a point inside the model is the model's. Covering is not enough on
+    // its own, because a mesh far larger than its header covers it: a hull of end circles lies
+    // within the header's capsule (every vertex is on a circle of the header's own radius about a
+    // header end), so a vertex beyond the capsule (`capsule_out`) is oversize that no junction
+    // explains and stays in `free`.
     let mut cover = None;
     if frustum && rec.kind.is_frustum() {
         let mesh = Mesh::weld_tolerant(&rec.soup, 1.0e-5);
@@ -442,7 +453,7 @@ fn mesh_dev_free(p: &Primitive, rec: &crate::reader::SupportRecord, model: &Mesh
             cover = Some(gap);
         }
     }
-    MeshDev { free: cover.map_or(free, |c| c.min(free)), inward, outward, cover }
+    MeshDev { free: cover.map_or(free, |c| c.min(free).max(capsule_out.min(free))), inward, outward, cover }
 }
 
 /// Two unit vectors perpendicular to the unit vector `ax` and to each other.

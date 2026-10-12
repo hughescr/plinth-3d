@@ -524,6 +524,7 @@ impl Check for LoadPath {
         // 6. Free ends: clause (b), per frustum end disc.
         // -------------------------------------------------------------
         let mut n_free_end = 0usize;
+        let mut n_end_on_model = 0usize;
         let mut n_fusion_end = 0usize;
         for &(i, p) in &ok {
             let rec = &ctx.model.records[i];
@@ -543,6 +544,15 @@ impl Check for LoadPath {
                         // neighbour is at most this value and was already
                         // tested there.
                         n_fusion_end += 1;
+                    }
+                    // An end that stands on the model surface (inside it, or within one layer
+                    // of it) is seated on the model, a valid ground (owner ruling, clause
+                    // (iii) above), not a member ending in free space.
+                    EndStatus::Free(_)
+                        if support_below::on_model_mesh(&ctx.model_mesh, end_point, layer)
+                            == support_below::OnModel::Yes =>
+                    {
+                        n_end_on_model += 1;
                     }
                     EndStatus::Free(nearest) => {
                         n_free_end += 1;
@@ -674,6 +684,7 @@ impl Check for LoadPath {
         measured.set("connected_not_grounded", Json::usize(n_connected));
         measured.set("orphaned", Json::usize(n_orphan));
         measured.set("free_ends", Json::usize(n_free_end));
+        measured.set("ends_on_model_surface", Json::usize(n_end_on_model));
         measured.set("fusion_uncertain_ends", Json::usize(n_fusion_end));
         measured.set("indeterminate_connectivity", Json::usize(n_indet_conn));
         measured.set("overlap_edges", Json::usize(n_overlap_edges));

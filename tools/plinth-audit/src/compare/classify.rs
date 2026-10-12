@@ -250,13 +250,23 @@ struct HeightJudgement {
     cand_rec: usize,
 }
 
-/// N3 by height: record `r`, a member of one path that no record of the other path matches, judged
-/// at each of its heights that both paths reach. At each height the reference path's thinnest
-/// section there is held against the candidate path's thinnest, the candidate taking the thickest
-/// of its values within [`k::N3_JOINT_SHIFT_MM`] above and below (a joint that moved by less than
-/// the match tolerance is the same joint). The worst height is returned; when no height of `r`
-/// has a section in both paths, the reason.
-fn height_judgement(ra: &[RecInfo], pa: &[usize], rb: &[RecInfo], pb: &[usize], r: &RecInfo) -> Result<HeightJudgement, String> {
+/// N3 by height: record `rec`, a member of one path (the reference path when `on_ref`) that no
+/// record of the other path matches, judged at each of its heights that both paths reach. A
+/// candidate member is held by its own section there, with no window, against the reference
+/// path's thinnest section; a reference member is held by the reference path's thinnest section
+/// there against the candidate path's thinnest (the candidate path, whole: it is the thing that
+/// must not be thinner), with no window. The joint-shift tolerance [`k::N3_JOINT_SHIFT_MM`] only aligns corresponding
+/// joints: within that distance of either end of the member, the other path takes the value most
+/// favourable to the member over the window (the thickest, for a reference member; the thinnest,
+/// for a candidate member), because a joint that moved by less than the match tolerance is the
+/// same joint. Away from its end joints, and everywhere on a member no longer than the window (two
+/// shifts), no window applies: a thin or short member is never hidden by its neighbours. Each
+/// height is read through the noise allowance `noise_mm` first (a section that moved by no more
+/// than that is unchanged), then the worst height is returned. When no height of the member has a
+/// section in both paths, the reason.
+fn height_judgement(ra: &[RecInfo], pa: &[usize], rb: &[RecInfo], pb: &[usize], rec: usize, on_ref: bool, noise_mm: f64) -> Result<HeightJudgement, String> {
+    const Z_EPS_MM: f64 = 1.0e-9;
+    let r = if on_ref { &ra[rec] } else { &rb[rec] };
     let span = |recs: &[RecInfo], v: &[usize]| {
         v.iter().filter(|&&m| recs[m].sec_r.is_some()).fold((f64::MAX, f64::MIN), |(lo, hi), &m| (lo.min(recs[m].a[2].min(recs[m].b[2])), hi.max(recs[m].a[2].max(recs[m].b[2]))))
     };
@@ -269,18 +279,50 @@ fn height_judgement(ra: &[RecInfo], pa: &[usize], rb: &[RecInfo], pb: &[usize], 
         return Err(format!("outside the heights both paths reach: {}", heights()));
     }
     let step = k::N3_HEIGHT_STEP_MM;
-    let w = (k::N3_JOINT_SHIFT_MM / step).round() as i64;
+    let shift = k::N3_JOINT_SHIFT_MM;
+    let w = (shift / step).round() as i64;
+    // A member no longer than the whole window has no height away from its joints.
+    let windowed_member = rhi - rlo > 2.0 * shift + Z_EPS_MM;
+    let near_joint = |z: f64| windowed_member && (z - rlo < shift - Z_EPS_MM || rhi - z < shift - Z_EPS_MM);
     let n = ((hi - lo) / step).ceil() as usize;
-    let mut best: Option<HeightJudgement> = None;
-    for s in 0..=n {
-        let z = (lo + step * s as f64).min(hi);
-        let Some((from, ref_rec)) = profile_at(ra, pa, z).filter(|x| x.0 > 0.0) else { continue };
-        let Some((to, cand_rec)) = (-w..=w).filter_map(|d| profile_at(rb, pb, z + step * d as f64)).max_by(|x, y| x.0.total_cmp(&y.0).then(y.1.cmp(&x.1))) else { continue };
-        if best.as_ref().is_none_or(|b| to / from < b.to / b.from) {
-            best = Some(HeightJudgement { z, from, to, ref_rec, cand_rec });
+    // The grid, plus where the window ends and the member's middle: a member a little longer than
+    // the window has a short stretch that is judged bare.
+    let mut zs: Vec<f64> = (0..=n).map(|s| (lo + step * s as f64).min(hi)).collect();
+    if windowed_member {
+        zs.extend([rlo + shift, rhi - shift, 0.5 * (rlo + rhi)].into_iter().filter(|z| (lo..=hi).contains(z)));
+    }
+    // The worst height so far, by (ratio read through the noise allowance, raw ratio).
+    let mut best: Option<((f64, f64), HeightJudgement)> = None;
+    for z in zs {
+        let windowed = near_joint(z);
+        let (from, ref_rec, to, cand_rec) = if on_ref {
+            // The reference path's own thinnest section there: a thin structure the reference
+            // also has beside the member (a matched twin) is part of what the member stood on.
+            let Some((from, ref_rec)) = profile_at(ra, pa, z).filter(|x| x.0 > 0.0) else { continue };
+            let other = if windowed {
+                (-w..=w).filter_map(|d| profile_at(rb, pb, z + step * d as f64)).max_by(|x, y| x.0.total_cmp(&y.0).then(y.1.cmp(&x.1)))
+            } else {
+                profile_at(rb, pb, z)
+            };
+            let Some((to, cand_rec)) = other else { continue };
+            (from, ref_rec, to, cand_rec)
+        } else {
+            let Some(own) = sec_at(r, z) else { continue };
+            let other = if windowed {
+                (-w..=w).filter_map(|d| profile_at(ra, pa, z + step * d as f64)).filter(|x| x.0 > 0.0).min_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)))
+            } else {
+                profile_at(ra, pa, z).filter(|x| x.0 > 0.0)
+            };
+            let Some((from, ref_rec)) = other else { continue };
+            (from, ref_rec, own, rec)
+        };
+        let raw = to / from;
+        let read = if (from - to).abs() > noise_mm { raw } else { 1.0 };
+        if best.as_ref().is_none_or(|(b, _)| read.total_cmp(&b.0).then(raw.total_cmp(&b.1)).is_lt()) {
+            best = Some(((read, raw), HeightJudgement { z, from, to, ref_rec, cand_rec }));
         }
     }
-    best.ok_or_else(|| format!("no height with a section in both paths: {}", heights()))
+    best.map(|(_, h)| h).ok_or_else(|| format!("no height with a section in both paths: {}", heights()))
 }
 
 fn status_of(fail: bool, ind: bool) -> Status {
@@ -1247,9 +1289,11 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
                 }
             }
             // 3. Every other member, of either path, that no record of the other path matches is
-            //    judged by height: the thinnest section of each whole path (contact frustum
-            //    included) at the member's heights (a reshaped chain: a joint that moved, a member
-            //    split or thinned). No member is dropped: a reference member with no candidate
+            //    judged by height: the member's own section at each of its heights against the
+            //    thinnest section of the other path there (contact frustum included), with the
+            //    0.05 mm joint-shift window only within 0.05 mm of the member's own end joints
+            //    (a reshaped chain: a joint that moved, a member split or thinned). No member is
+            //    hidden by its neighbours and none is dropped: a reference member with no candidate
             //    section at any of its heights leaves the path UNASSESSED (N3 INDETERMINATE).
             let open_b: Vec<usize> = pb.iter().copied().filter(|n| !covered_b.contains(n)).collect();
             if !open_a.is_empty() || !open_b.is_empty() {
@@ -1257,12 +1301,12 @@ fn compare_model(r: &FileFacts, c: &FileFacts, mi: usize, o: &Options, sfx: &str
                 let jobs = open_a.iter().filter(|&&m| Some(m) != ta).map(|&m| (true, m)).chain(open_b.iter().filter(|&&n| Some(n) != tb).map(|&n| (false, n)));
                 for (on_ref, rec) in jobs {
                     let r = if on_ref { &a.recs[rec] } else { &b.recs[rec] };
-                    match height_judgement(&a.recs, pa, &b.recs, pb, r) {
+                    match height_judgement(&a.recs, pa, &b.recs, pb, rec, on_ref, o.noise.n3_mm) {
                         Ok(h) => {
                             members_by_height += 1;
                             let (z, from, to, ma, nb) = (h.z, h.from, h.to, h.ref_rec, h.cand_rec);
                             let side = if on_ref { "reference member" } else { "candidate member" };
-                            judge(from, to, &|| format!("{side} r{rec} (no record of the other path matches it) judged by height on the path of contact r{j} (reference contact r{i}): at z {z:.3} the thinnest section {from:.4} (reference r{ma}) -> {to:.4} mm (candidate r{nb}) ({:+.1} %), I3 margin {}", 100.0 * (to / from - 1.0), margin_txt()), Some(nb));
+                            judge(from, to, &|| format!("{side} r{rec} (no record of the other path matches it) judged by height on the path of contact r{j} (reference contact r{i}): at z {z:.3} the section {from:.4} (reference r{ma}) -> {to:.4} mm (candidate r{nb}) ({:+.1} %), I3 margin {}", 100.0 * (to / from - 1.0), margin_txt()), Some(nb));
                         }
                         Err(why) if on_ref => {
                             members_unassessed += 1;

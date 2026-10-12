@@ -660,6 +660,10 @@ touching the model beside it, and a taper next to such a tip is not grounded eit
 model whose raster does not build (an open mesh) grounds nothing here. The count is
 `grounded_via_model_surface` in the measured block.
 
+The same ruling applies to the free-end test below: an end disc that lies inside M, or
+within one layer of its surface (`support_below::on_model_mesh`), is seated on the model and
+is not a free end. The count is `ends_on_model_surface` in the measured block.
+
 **Predicate.**
 
 ```

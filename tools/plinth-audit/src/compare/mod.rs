@@ -308,6 +308,14 @@ fn side_json(label: &str, path: &Path, f: &Result<FileFacts, String>) -> Json {
     o
 }
 
+/// What each `--probe` found: its point, radius and the records near it. Empty when either file
+/// could not be read.
+#[must_use]
+pub fn probe_report(a: &Args, run: &Run) -> Vec<(crate::vec3::V3, f64, Vec<String>)> {
+    let (Ok(r), Ok(c)) = (&run.ref_facts, &run.cand_facts) else { return Vec::new() };
+    a.probes.iter().map(|(p, rad)| (*p, *rad, classify::probe(r, c, *p, *rad))).collect()
+}
+
 /// The `verdict.json` document.
 #[must_use]
 pub fn verdict_json(a: &Args, run: &Run) -> Json {
@@ -336,6 +344,18 @@ pub fn verdict_json(a: &Args, run: &Run) -> Json {
     d.set("candidate", side_json("cand", &a.candidate, &run.cand_facts));
     d.set("rows", Json::Arr(out.rows.iter().map(verdict::Row::to_json).collect()));
     d.set("evidence", out.evidence.clone());
+    if !a.probes.is_empty() {
+        let mut probes = Json::Arr(Vec::new());
+        for (p, rad, lines) in probe_report(a, run) {
+            let mut o = Json::obj();
+            // z is `null` for a probe that ignores height (`any`).
+            o.set("point", Json::Arr(p.iter().map(|x| Json::num_or_null(Some(*x))).collect()));
+            o.set("radius_mm", Json::num(rad));
+            o.set("records", Json::Arr(lines.into_iter().map(Json::str).collect()));
+            probes.push(o);
+        }
+        d.set("probes", probes);
+    }
     let mut cost = Json::obj();
     cost.set("wall_s", Json::num(run.wall_s));
     cost.set("analyse_ref_s", Json::num(run.analyse_s.0));
@@ -401,14 +421,13 @@ pub fn main(argv: &[String]) -> i32 {
         }
     }
     if args.json {
+        // Standard output is one JSON document; the probes are in it, under "probes".
         print!("{}", doc.to_pretty());
     } else {
         print!("{}", summary(&args, &run));
-    }
-    if let (Ok(r), Ok(c)) = (&run.ref_facts, &run.cand_facts) {
-        for (p, rad) in &args.probes {
+        for (p, rad, lines) in probe_report(&args, &run) {
             println!("probe ({:.3},{:.3},{:.3}) within {rad} mm:", p[0], p[1], p[2]);
-            for l in classify::probe(r, c, *p, *rad) {
+            for l in lines {
                 println!("  {l}");
             }
         }

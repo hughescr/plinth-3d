@@ -638,3 +638,160 @@ fn a_floating_member_made_longer_is_new_floating_material_with_or_without_the_al
         assert_eq!(run.outcome.verdict, Verdict::Regression, "no_flicker={strict}");
     }
 }
+
+/// The first chain's member r2 split in three collinear members, the middle one `len` mm long and
+/// centred on the old member's middle (r2 above, r3 the middle, r4 below).
+fn three_part_chain(len: f64) -> SynthFile {
+    let mut r = base();
+    let old = r.models[0].records[2].clone();
+    assert_eq!(old.kind, RecordKind::Member, "fixture layout");
+    let (mut p, mut q) = (old.start_mm, old.start_mm);
+    p[2] = (old.start_mm[2] + old.end_mm[2]) * 0.5 + len * 0.5;
+    q[2] = p[2] - len;
+    r.models[0].records[2] = SynthRecord::new(RecordKind::Member, old.start_mm, p, old.r_start, old.r_start).with_matching_soup();
+    r.models[0].records.insert(3, SynthRecord::new(RecordKind::Member, p, q, old.r_start, old.r_start).with_matching_soup());
+    r.models[0].records.insert(4, SynthRecord::new(RecordKind::Member, q, old.end_mm, old.r_end, old.r_end).with_matching_soup());
+    r
+}
+
+/// `three_part_chain` with both middle joints moved `dz` mm down and the middle member's radii
+/// scaled by `factor`; meshes follow their headers.
+fn necked(r: &SynthFile, dz: f64, factor: f64) -> SynthFile {
+    let mut c = r.clone();
+    c.models[0].records[2].end_mm[2] -= dz;
+    c.models[0].records[3].start_mm[2] -= dz;
+    c.models[0].records[3].end_mm[2] -= dz;
+    c.models[0].records[4].start_mm[2] -= dz;
+    c.models[0].records[3].r_start *= factor;
+    c.models[0].records[3].r_end *= factor;
+    for i in [2, 3, 4] {
+        c.models[0].records[i].soup = c.models[0].records[i].clone().with_matching_soup().soup;
+    }
+    c
+}
+
+/// Review round 3 (P1): the joint-shift window replaced every candidate section by the thickest one
+/// within 0.05 mm, so an unmatched member shorter than 0.10 mm was hidden by its thicker neighbours.
+/// A 0.08 mm middle member moved 0.11 mm down with its radii scaled by 0.7 (section 0.489 -> 0.342
+/// mm, -30 %) came out N3 PASS and EQUIVALENT, with or without the noise allowance. The window now
+/// aligns joints only: a member is judged by its own section, and the window reaches only 0.05 mm
+/// from its end joints.
+#[test]
+fn a_short_member_thinned_between_thicker_neighbours_fails_n3() {
+    for len in [0.04, 0.08, 0.10, 0.12, 0.30] {
+        let r = three_part_chain(len);
+        for strict in [true, false] {
+            let run = run_pair(&format!("n3-neck-{len}-{strict}"), &r, &necked(&r, 0.11, 0.7), |a| a.no_flicker = strict);
+            assert_eq!(row(&run, "N3").status, Status::Fail, "len {len} no_flicker={strict}:\n{}\n{:?}", show(&run), row(&run, "N3").detail);
+            assert_eq!(run.outcome.verdict, Verdict::Regression, "len {len} no_flicker={strict}");
+        }
+        // Control: the same shifted joints with the radii kept are the same path.
+        let run = run_pair(&format!("n3-neck-same-{len}"), &r, &necked(&r, 0.11, 1.0), |_| {});
+        assert_eq!(row(&run, "N3").status, Status::Pass, "len {len}:\n{}\n{:?}", show(&run), row(&run, "N3").detail);
+    }
+}
+
+/// The first chain with its member r2 a taper from `top` to `bottom` mm of radius, of record kind
+/// `kind`. No record of one kind matches a record of another, so a Member in one file and a
+/// RootFlare in the other, in the same place, are two members that nothing matches (and nothing
+/// else moves).
+fn tapered_chain(kind: RecordKind, top: f64, bottom: f64) -> SynthFile {
+    let mut r = base();
+    let m = &mut r.models[0].records[2];
+    (m.kind, m.r_start, m.r_end) = (kind, top, bottom);
+    m.soup = m.clone().with_matching_soup().soup;
+    r
+}
+
+/// Review round 3 (a): the worst height was chosen on the raw ratio before the absolute noise
+/// allowance, so a sub-voxel change at a small radius at the top of a member (0.050 -> 0.035 mm:
+/// -30 %, 0.015 mm) hid a 20 % thinning over the rest of it (0.04 mm and more). Each height is now
+/// read through the allowance first.
+#[test]
+fn a_sub_voxel_change_at_a_small_radius_does_not_hide_a_thinning_elsewhere_on_the_member() {
+    // The reference member tapers 0.05 -> 0.20 mm. The candidate member (a record of another kind,
+    // so nothing matches it) tapers 0.035 -> 0.16 mm: 30 % thinner at the top, 20 % at the bottom.
+    let r = tapered_chain(RecordKind::Member, 0.05, 0.20);
+    let run = run_pair("n3-small-radius", &r, &tapered_chain(RecordKind::RootFlare, 0.035, 0.16), |_| {});
+    assert_eq!(row(&run, "N3").status, Status::Fail, "{}\n{:?}", show(&run), row(&run, "N3").detail);
+    // Control: the change at the small radius alone (0.050 -> 0.035 mm, 0.015 mm, under one voxel)
+    // is still noise.
+    let run = run_pair("n3-small-radius-alone", &r, &tapered_chain(RecordKind::RootFlare, 0.035, 0.20), |_| {});
+    assert_eq!(row(&run, "N3").status, Status::Pass, "{}\n{:?}", show(&run), row(&run, "N3").detail);
+}
+
+/// Reverse the winding of the end caps of record `i`'s frustum mesh (`frustum_soup` writes its caps
+/// the other way round from its sides, so its mesh is not a closed surface; the engine's meshes are).
+fn close_mesh(s: &mut SynthFile, i: usize) {
+    for (k, t) in s.models[0].records[i].soup.iter_mut().enumerate() {
+        if k % 4 >= 2 {
+            t.swap(1, 2);
+        }
+    }
+}
+
+/// Review round 3 (b): a closed frustum mesh far larger than its header covers the header, and the
+/// cover reading (`min(free, cover)`) erased it from T0. A junction drawn as a hull of the end
+/// circles also covers its header and lies outside it, but within the header's capsule: that one
+/// still passes.
+#[test]
+fn a_closed_mesh_far_larger_than_its_header_fails_t0_and_a_junction_hull_does_not() {
+    let mut b = base();
+    close_mesh(&mut b, 2);
+    close_mesh(&mut b, 1);
+    for factor in [1.6, 0.5] {
+        let mut c = b.clone();
+        apply(&mut c, &Mutation::ShrinkMesh { record: 2, factor });
+        let run = run_pair(&format!("t0-size-{factor}"), &b, &c, |_| {});
+        assert_eq!(row(&run, "T0.mesh_header").status, Status::Fail, "factor {factor}:\n{}", show(&run));
+    }
+    // Control: record 1 is a taper (0.326 -> 0.489 mm). A cylinder of the larger radius covers it
+    // and stays inside its capsule.
+    let mut hull = b.clone();
+    let t = hull.models[0].records[1].clone();
+    hull.models[0].records[1].soup = SynthRecord::new(RecordKind::ContactTaper, t.start_mm, t.end_mm, t.r_end, t.r_end).with_matching_soup().soup;
+    close_mesh(&mut hull, 1);
+    let run = run_pair("t0-hull", &b, &hull, |_| {});
+    assert_eq!(row(&run, "T0.mesh_header").status, Status::Pass, "{}", show(&run));
+}
+
+/// Review round 3 (c): a member grounded by standing on the model surface still had its foot
+/// reported as a free end.
+#[test]
+fn the_foot_of_a_member_standing_on_the_model_is_not_a_free_end() {
+    let (_, zmax) = cube_z();
+    let mut on = base();
+    on.models[0].records.push(SynthRecord::new(RecordKind::Member, [0.0, 0.0, zmax - 0.005], [0.0, 0.0, zmax + 2.0], 0.2, 0.2).with_matching_soup());
+    let run = run_pair("i5-foot", &base(), &on, |_| {});
+    let i5 = row(&run, "H4.i5");
+    let foot = format!("at (0.000,0.000,{:.3})", zmax - 0.005);
+    assert!(!i5.detail.iter().any(|d| d.contains("PATH_FREE_END") && d.contains(&foot)), "the foot is on the model:\n{}\n{:?}", show(&run), i5.detail);
+    // The other end is in the air: that one is still a free end.
+    let top = format!("at (0.000,0.000,{:.3})", zmax + 2.0);
+    assert!(i5.detail.iter().any(|d| d.contains("PATH_FREE_END") && d.contains(&top)), "{}\n{:?}", show(&run), i5.detail);
+}
+
+/// Review round 3 (d): `--json --probe` wrote the probe text after the JSON document.
+#[test]
+fn json_output_with_a_probe_is_one_json_document() {
+    // Two files that differ (identical bytes are not analysed, so nothing could be probed).
+    let (rd, cd) = (dir("json-probe-ref"), dir("json-probe-cand"));
+    poses(&rd, "x", "identity");
+    poses(&cd, "x", "identity");
+    let mut m = base();
+    apply(&mut m, &Mutation::Ulp);
+    let (p, q) = (write(&base(), &rd, "x"), write(&m, &cd, "x"));
+    let (p, q) = (p.to_str().expect("utf8"), q.to_str().expect("utf8"));
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_plinth-audit"))
+        .args(["compare", p, q, "--json", "--probe", "1,1,-2,0.5", "--probe", "0,0,any,1"])
+        .output()
+        .expect("runs");
+    let text = String::from_utf8(out.stdout).expect("utf8");
+    let t = text.trim();
+    assert!(t.starts_with('{') && t.ends_with('}'), "stdout is one JSON object, got:\n{text}");
+    assert!(!text.contains("probe ("), "no probe text outside the document:\n{text}");
+    assert!(text.contains("\"probes\""), "the probes are in the document:\n{text}");
+    // The text mode still prints them.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_plinth-audit")).args(["compare", p, q, "--probe", "1,1,-2,0.5"]).output().expect("runs");
+    assert!(String::from_utf8(out.stdout).expect("utf8").contains("probe (1.000,1.000,-2.000)"));
+}

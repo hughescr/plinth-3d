@@ -277,11 +277,12 @@ pub const N2_MERGE_DZ_MM: f64 = 0.5;
 pub const N2_MATCHED_FRACTION: f64 = 0.95;
 /// N3 no member may get thinner than this fraction of itself unless I3 holds (S, plan).
 pub const N3_THINNER: f64 = 0.15;
-/// N3 by height (a path member that no record of the other path matches): the candidate's section
-/// at a height is the thickest it has within this distance above or below, mm, so a joint that
-/// moved by less than the record match tolerance ([`MATCH_MM`], both ways) is the same joint and a
-/// section change that lasts less than that height is not judged on its own (S: half of
-/// [`MATCH_MM`]; the path minimum still holds every section).
+/// N3 by height (a path member that no record of the other path matches): within this distance of
+/// either end of the member, the other path's section is the one most favourable to the member
+/// over this distance above and below, mm, so a joint that moved by less than the record match
+/// tolerance ([`MATCH_MM`], both ways) is the same joint. It aligns joints only: away from its
+/// end joints, and on a member no longer than twice this distance, a member is judged with no
+/// window (S: half of [`MATCH_MM`]).
 pub const N3_JOINT_SHIFT_MM: f64 = MATCH_MM / 2.0;
 /// N3 by height: the heights sampled along a member, mm (S: half of [`N3_JOINT_SHIFT_MM`], so the
 /// window above has five samples).
