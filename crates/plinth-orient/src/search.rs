@@ -1018,6 +1018,12 @@ pub fn search(
              (an experiment, not the recorded search; use --no-cache)"
         );
     }
+    if ablation.exact_score {
+        eprintln!(
+            "[orient] ABLATION exact-score: every funnel tier scores on the exact table, the \
+             proxy tiers are retired (an experiment, not the recorded search; use --no-cache)"
+        );
+    }
     // The `orient.json` write happens inside `search_core`, in the same
     // diagnostic perf phase as the collection.
     let (outcome, _) = search_core(mesh, request, demand, config.as_ref(), true, &ablation)?;
@@ -1100,45 +1106,63 @@ pub(crate) fn search_core(
     })?;
     drop(exact_mark);
 
-    // L1, then L2 cascaded FROM L1 — a refinement-consistent coarsening, so a
-    // rank cannot invert merely because two independent QEM runs chose
-    // different edges.
-    let l1_mark = geom_kernel::perf::stage("orient.rung_l1");
-    let l1 = build_proxy_rung(
-        mesh,
-        L1_LOD,
-        request.ladder.l1_ratio(),
-        request.ladder,
-        scar_free,
-    );
-    drop(l1_mark);
-    let l1 = record_fallback(l1, L1_LOD, EXACT_LOD, &mut fallbacks);
-    let l2_mark = geom_kernel::perf::stage("orient.rung_l2");
-    let l2 = match l1.as_ref().and_then(Rung::proxy_mesh) {
-        Some(source) => build_proxy_rung(
-            source,
-            L2_LOD,
-            request.ladder.l2_of_l1_ratio(),
+    // ABLATION `exact-score` with `exact-grid` (pose-stability Lane C): every tier
+    // scores on the exact table and the grid reads it too, so no proxy is built.
+    // `exact-score` alone still builds them: the grid reads the coarse proxy.
+    let build_proxies = !(ablation.exact_score && ablation.exact_grid);
+    let (l1, l2) = if build_proxies {
+        // L1, then L2 cascaded FROM L1 — a refinement-consistent coarsening, so a
+        // rank cannot invert merely because two independent QEM runs chose
+        // different edges.
+        let l1_mark = geom_kernel::perf::stage("orient.rung_l1");
+        let l1 = build_proxy_rung(
+            mesh,
+            L1_LOD,
+            request.ladder.l1_ratio(),
             request.ladder,
             scar_free,
-        ),
-        // No L1 means no cascade source. Coarsening the exact mesh directly
-        // would produce an L2 that is not a coarsening of the L1 that is not
-        // there, which is precisely the independent-QEM-run inversion the
-        // cascade exists to prevent. It is recorded as its own reason: there is
-        // no proxy here to measure, so the record must not describe one.
-        None => Err(RungError::NoCascadeSource),
+        );
+        drop(l1_mark);
+        let l1 = record_fallback(l1, L1_LOD, EXACT_LOD, &mut fallbacks);
+        let l2_mark = geom_kernel::perf::stage("orient.rung_l2");
+        let l2 = match l1.as_ref().and_then(Rung::proxy_mesh) {
+            Some(source) => build_proxy_rung(
+                source,
+                L2_LOD,
+                request.ladder.l2_of_l1_ratio(),
+                request.ladder,
+                scar_free,
+            ),
+            // No L1 means no cascade source. Coarsening the exact mesh directly
+            // would produce an L2 that is not a coarsening of the L1 that is not
+            // there, which is precisely the independent-QEM-run inversion the
+            // cascade exists to prevent. It is recorded as its own reason: there is
+            // no proxy here to measure, so the record must not describe one.
+            None => Err(RungError::NoCascadeSource),
+        };
+        drop(l2_mark);
+        let l2 = record_fallback(
+            l2,
+            L2_LOD,
+            if l1.is_some() { L1_LOD } else { EXACT_LOD },
+            &mut fallbacks,
+        );
+        (l1, l2)
+    } else {
+        (None, None)
     };
-    drop(l2_mark);
-    let l2 = record_fallback(
-        l2,
-        L2_LOD,
-        if l1.is_some() { L1_LOD } else { EXACT_LOD },
-        &mut fallbacks,
-    );
 
-    let coarse = l2.as_ref().or(l1.as_ref()).unwrap_or(&exact);
-    let refine = l1.as_ref().unwrap_or(&exact);
+    // The grid's table: the coarse proxy's, unless `exact-grid` reads the exact one.
+    let proxy_coarse = l2.as_ref().or(l1.as_ref()).unwrap_or(&exact);
+    // ABLATION `exact-score` retires the funnel's proxy tiers (design D-12): the
+    // coarse, refine and commit tiers all score on the exact table. The tier
+    // widths (the cuts) are unchanged; with one scorer each cut keeps the best
+    // of the same ranking, so the proxies cannot reorder the survivors.
+    let (coarse, refine) = if ablation.exact_score {
+        (&exact, &exact)
+    } else {
+        (proxy_coarse, l1.as_ref().unwrap_or(&exact))
+    };
 
     // The grid's rest-pose block is read off the tier that scores it: rest poses
     // are a property of the geometry being searched. ABLATION `exact-grid`
@@ -1147,7 +1171,7 @@ pub(crate) fn search_core(
     let (grid_rung, rest_order) = if ablation.exact_grid {
         (&exact, RestOrder::ByBinIndex)
     } else {
-        (coarse, RestOrder::ByArea)
+        (proxy_coarse, RestOrder::ByArea)
     };
     let grid_mark = geom_kernel::perf::stage("orient.grid");
     // With the diagnostics on, the SAME binning pass is watched by an

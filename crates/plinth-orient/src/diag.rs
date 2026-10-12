@@ -236,6 +236,9 @@ pub struct SweepDiagnostics {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AblationRecord {
     pub exact_grid: bool,
+    /// Every funnel tier scored on the exact table (schema 3).
+    #[serde(default)]
+    pub exact_score: bool,
     pub exact_shadow: bool,
     /// `"by_area"` (recorded) or `"by_bin_index"` (`exact-grid`).
     pub rest_order: String,
@@ -744,6 +747,7 @@ pub(crate) fn build(inputs: &DiagInputs<'_>) -> SweepDiagnostics {
     let exact_shadow = exact_shadow(inputs, &escort, &mut notes);
     let ablation = AblationRecord {
         exact_grid: inputs.ablation.exact_grid,
+        exact_score: inputs.ablation.exact_score,
         exact_shadow: inputs.ablation.exact_shadow,
         rest_order: match grid.rest_order() {
             RestOrder::ByArea => "by_area",
@@ -2955,6 +2959,96 @@ mod tests {
             a.sort_unstable();
             assert_eq!(a, bins);
         }
+    }
+
+    /// `exact-score` retires the proxy tiers (design D-12). Sabotage guard: the
+    /// switch-off run on the SAME mesh scores its coarse tier on a proxy LOD with
+    /// different scores, so the assertions below can fail; with the switch on,
+    /// every tier names the exact LOD and every row carries the exact table's bits.
+    #[test]
+    fn exact_score_bypasses_the_proxy_tiers_and_scores_every_tier_on_the_exact_table() {
+        // Over the 256-face proxy floor, so the off run really builds L1 and L2.
+        let mesh = make_recessed_disc(24.0, 25.0, 3.5, 2.5, 22.5, 600).expect("a disc");
+        let score_only = Ablation {
+            exact_score: true,
+            ..Ablation::default()
+        };
+        let both = Ablation {
+            exact_grid: true,
+            exact_score: true,
+            ..Ablation::default()
+        };
+        let grid_only = Ablation {
+            exact_grid: true,
+            ..Ablation::default()
+        };
+        let (off, off_d) = ablated(&mesh, &Ablation::default());
+        let exact_lod = crate::search::EXACT_LOD;
+        // The precondition that makes the guard bite: off uses a proxy here.
+        assert_ne!(off.record().tiers[0].lod, exact_lod, "fixture has no proxy tier");
+        let off_exact: std::collections::BTreeMap<usize, u64> = off_d
+            .snapshots
+            .exact_table
+            .iter()
+            .map(|row| (row.candidate, row.terms.score.get().to_bits()))
+            .collect();
+        assert!(
+            off.record().tiers[0]
+                .ranking
+                .iter()
+                .any(|row| off_exact.get(&row.candidate).is_some_and(|bits| *bits != row.terms.score.get().to_bits())),
+            "off: the proxy coarse scores differ from the exact ones"
+        );
+
+        for (name, ablation) in [("exact-score", &score_only), ("exact-grid+exact-score", &both)] {
+            let (on, d) = ablated(&mesh, ablation);
+            assert!(d.ablation.exact_score, "{name}");
+            let record = on.record();
+            assert_eq!(record.tiers.len(), 3, "{name}: the record keeps its three cuts");
+            for tier in &record.tiers {
+                assert_eq!(tier.lod, exact_lod, "{name}: {:?}", tier.tier);
+            }
+            let exact_rows: std::collections::BTreeMap<usize, u64> = d
+                .snapshots
+                .exact_table
+                .iter()
+                .map(|row| (row.candidate, row.terms.score.get().to_bits()))
+                .collect();
+            let mut compared = 0;
+            // The commit tier is repriced in place by the demand measurer, so
+            // only the C1 and C2 tiers still hold the raw table scores.
+            for tier in &record.tiers[..2] {
+                for row in &tier.ranking {
+                    if let Some(bits) = exact_rows.get(&row.candidate) {
+                        assert_eq!(*bits, row.terms.score.get().to_bits(), "{name} cand {}", row.candidate);
+                        compared += 1;
+                    }
+                }
+            }
+            // Every commit-tier candidate is in the C1 ranking (it scored them all).
+            assert!(compared >= exact_rows.len(), "{name}: {compared}");
+            // One scorer: the later cuts keep the best of the same ranking.
+            let c1: Vec<usize> = record.tiers[0].ranking.iter().map(|r| r.candidate).collect();
+            let top = request().ladder.refine_top_k().min(c1.len());
+            let c2_in: BTreeSet<usize> = record.tiers[1].ranking.iter().map(|r| r.candidate).collect();
+            assert_eq!(c2_in, c1[..top].iter().copied().collect::<BTreeSet<_>>(), "{name}");
+            // Nothing was built for the tiers, so nothing can have fallen back for
+            // them; `exact-score` alone may still record the grid proxy's fallbacks.
+            assert_eq!(record.fallbacks.is_empty(), ablation.exact_grid, "{name}: {:?}", record.fallbacks);
+        }
+        // Proxies are built only when something still reads them.
+        let (both_outcome, _) = ablated(&mesh, &both);
+        assert_eq!(both_outcome.record().lods.len(), 1, "no L1/L2 built or recorded");
+        let (score_outcome, _) = ablated(&mesh, &score_only);
+        assert_eq!(score_outcome.record().lods.len(), off.record().lods.len(), "the grid still reads the proxy");
+
+        // The scoring switch does not touch the grid: same candidates as the
+        // grid ablation (or off) alone.
+        let (_, both_d) = ablated(&mesh, &both);
+        let (_, grid_d) = ablated(&mesh, &grid_only);
+        assert_eq!(both_d.candidates, grid_d.candidates);
+        let (_, score_d) = ablated(&mesh, &score_only);
+        assert_eq!(score_d.candidates, off_d.candidates);
     }
 
     /// The boundary classifier owns no number: a margin at or below the

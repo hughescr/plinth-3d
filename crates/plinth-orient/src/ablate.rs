@@ -9,10 +9,11 @@
 //! | word | effect |
 //! |---|---|
 //! | `exact-grid` | build the candidate grid (G1-G4) from the EXACT table instead of the coarse proxy's, and enumerate the rest poses in ascending reference-bin order instead of heaviest-first. The coarse tier still scores on its proxy. CHANGES the search. |
+//! | `exact-score` | retire the funnel's proxy tiers (design D-12): the coarse, refine and commit tiers all score on the EXACT table, so the L1/L2 proxy meshes are not scored at all. With `exact-grid` too, they are not built either (the grid then reads the exact table); alone, the proxy rung still feeds the grid. The cuts keep their widths. CHANGES the search. |
 //! | `exact-shadow` | out of band: after the record is final, score the SAME C1 and C2 input key sets on the exact table and repeat each cut. Written to the diagnostics only; needs `--perf`. Changes nothing. |
 //!
 //! Comma-separated. Unknown words warn and are ignored. A run with
-//! `exact-grid` on is not a production run: its cache key does not carry the
+//! `exact-grid` or `exact-score` on is not a production run: its cache key does not carry the
 //! switch, so use `--no-cache` with it.
 
 /// The parsed `PLINTH_ORIENT_ABLATE`.
@@ -20,6 +21,8 @@
 pub struct Ablation {
     /// Build the grid from the exact table, rest poses in bin order.
     pub exact_grid: bool,
+    /// Score every funnel tier on the exact table (no L1/L2 scoring).
+    pub exact_score: bool,
     /// Out of band: score the proxy cuts' inputs on the exact table.
     pub exact_shadow: bool,
     /// Words that did not parse; the caller prints them.
@@ -45,6 +48,7 @@ impl Ablation {
         {
             match word {
                 "exact-grid" => ablation.exact_grid = true,
+                "exact-score" => ablation.exact_score = true,
                 "exact-shadow" => ablation.exact_shadow = true,
                 "off" => {}
                 other => ablation
@@ -58,7 +62,7 @@ impl Ablation {
     /// Whether any word is on.
     #[must_use]
     pub const fn any(&self) -> bool {
-        self.exact_grid || self.exact_shadow
+        self.exact_grid || self.exact_score || self.exact_shadow
     }
 }
 
@@ -77,6 +81,8 @@ mod tests {
         let bad = Ablation::parse("exact-shadow,exact_grid");
         assert!(bad.exact_shadow && !bad.exact_grid);
         assert_eq!(bad.warnings.len(), 1);
+        let score = Ablation::parse("exact-score");
+        assert!(score.exact_score && !score.exact_grid && score.any() && score.warnings.is_empty());
         assert!(!Ablation::parse("off").any());
     }
 }
