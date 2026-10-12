@@ -755,22 +755,33 @@ fn certify_one(
     }
     // ---- the head: one solve for the cone knots and the joint radius (R5).
     let profile = jc::certified_profile(seat, &[], pitch_mm).ok_or(OldLawReason::Infeasible)?;
-    // A member that lands on the head (above the joint) loads the cone: shared.
+    // A member that enters at or above the joint loads the cone or the joint
+    // itself: shared. K lies inside layer `k_joint`, so a landing on that layer
+    // enters AT K, not below it (a source entering at K needs a larger joint,
+    // joint_cert.rs `a_foreign_source_at_the_joint_grows_the_joint...`), and a
+    // brace seated within one layer of K does too.
     for &l in field.landers[i].iter().chain(&field.seated[i]) {
         if let Landing::Strut { layer, .. } = field.struts[l].landing {
-            if layer > head.k_joint {
+            if layer >= head.k_joint {
                 return Err(OldLawReason::Shared);
             }
         }
         if field.struts[l].seat_on_strut == Some(strut.id) {
             if let Some(gl) = field.geo[l].as_ref() {
-                if gl.top[2] > g.top[2] - 1.0e-9 {
+                if gl.top[2] > g.top[2] - h {
                     return Err(OldLawReason::Shared);
                 }
             }
         }
     }
-    // Anything else touching the certified head solids loads it too.
+    // Anything else whose DRAWN body touches the certified head solids loads it
+    // too, at the point where it touches: a member landing below K whose body
+    // crosses the cone or the joint is such a source. The members routed through
+    // this one are NOT excused here (they are excused only for the post, whose
+    // entries they already carry, below): their feed enters the head where
+    // their body meets it, not where they land, and the cone and the joint are
+    // sized for the head's own contact alone, so a head so entered keeps the old
+    // law and is counted (R1).
     let new_head = head_frusta(seat, &profile.knots, profile.joint_radius_mm, None);
     let head_box = {
         let mut lo = [f64::INFINITY; 3];
@@ -784,16 +795,16 @@ fn certify_one(
         }
         (lo, hi)
     };
-    let related = related_set(field, i);
     for (j, gj) in field.geo.iter().enumerate() {
         let Some(gj) = gj else { continue };
-        if j == i || related.contains(&j) || boxes_apart(&gj.bounds, &head_box) {
+        if j == i || boxes_apart(&gj.bounds, &head_box) {
             continue;
         }
         if gj.frusta.iter().any(|f| new_head.iter().any(|m| m.touches(f))) {
             return Err(OldLawReason::Shared);
         }
     }
+    let related = related_set(field, i);
     // ---- the post.
     let today = strut.radius_mm.clone();
     let ledger = &head.ledger_radius_mm;
@@ -1114,6 +1125,7 @@ fn certify_one(
         slots_kept: stats[1],
         slots_pinned: stats[2],
         drawn_max,
+        today_radius_mm: today,
     };
     Ok((radii, cert))
 }

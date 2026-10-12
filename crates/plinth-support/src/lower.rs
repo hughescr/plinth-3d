@@ -1370,6 +1370,45 @@ pub fn lower_sweep_arms(
 ) -> Result<SweepLowering, SweepLoweringError> {
     lower_sweep_arms_of(
         arms,
+        None,
+        frame,
+        layers,
+        max_primitives,
+        max_primitive_bytes,
+        None,
+    )
+}
+
+/// [`lower_sweep_arms`], with the junction hulls PLANNED on another field of
+/// arms and KEPT on this one (R8, Craig 2026-10-11).
+///
+/// `hull_reference` is the field as an earlier sizing drew it (same members,
+/// same order, same ends); `None` is [`lower_sweep_arms`]. The junction pass
+/// ([`junction::hull_junctions`]) decides its hosts, its pull-backs, its cut
+/// arcs and its rings from the shafts it is given, so a member whose radii
+/// moved would move every ring on it. Here the pass runs on the reference
+/// field's shafts, and the hulls it makes are the hulls the file gets, record
+/// for record. The shafts of the arms they join are the arms' own, cut at the
+/// reference's arcs with the reference's radii there
+/// ([`junction::keep_planned_hulls`]): the hull ring and the shaft that meets
+/// it agree, and nothing a hull covers is drawn twice. A reference whose shafts
+/// do not line up with the arms' is not used: the pass runs on the arms and the
+/// lowering says so.
+///
+/// # Errors
+///
+/// The same request-shaped errors [`lower_sweep_arms`] returns.
+pub fn lower_sweep_arms_with_hull_reference(
+    arms: &[SweepArm],
+    hull_reference: Option<&[SweepArm]>,
+    frame: BuildFrame,
+    layers: &LayerPlan,
+    max_primitives: usize,
+    max_primitive_bytes: usize,
+) -> Result<SweepLowering, SweepLoweringError> {
+    lower_sweep_arms_of(
+        arms,
+        hull_reference,
         frame,
         layers,
         max_primitives,
@@ -1401,6 +1440,7 @@ pub fn lower_sweep_arms_with_pinned_seat_minimum(
 ) -> Result<SweepLowering, SweepLoweringError> {
     lower_sweep_arms_of(
         arms,
+        None,
         frame,
         layers,
         max_primitives,
@@ -1411,6 +1451,7 @@ pub fn lower_sweep_arms_with_pinned_seat_minimum(
 
 fn lower_sweep_arms_of(
     arms: &[SweepArm],
+    hull_reference: Option<&[SweepArm]>,
     frame: BuildFrame,
     layers: &LayerPlan,
     max_primitives: usize,
@@ -1503,15 +1544,42 @@ fn lower_sweep_arms_of(
     // arms it joins and adds one hull record per junction, after the branch.
     let sides = registered_emit_sides();
     if sides >= 3 {
-        let edits = junction::hull_junctions(
-            &out.primitives,
-            &junction_arms,
-            junction::JunctionRules {
-                pixel_pitch_mm: config.pixel_pitch_mm,
-                layer_height_mm: config.layer_height_mm.get(),
-                sides,
-            },
-        );
+        let rules = junction::JunctionRules {
+            pixel_pitch_mm: config.pixel_pitch_mm,
+            layer_height_mm: config.layer_height_mm.get(),
+            sides,
+        };
+        // R8: the hulls are planned on the reference field when one is given,
+        // and kept on this one; else the pass runs on the arms as they are.
+        let kept = hull_reference
+            .filter(|reference| reference.len() == arms.len())
+            .and_then(|reference| {
+                let (reference_primitives, reference_arms) = lower_hull_reference(
+                    arms,
+                    reference,
+                    &out.primitives,
+                    &arm_ends,
+                    &junction_arms,
+                    config,
+                    plate,
+                );
+                junction::keep_planned_hulls(
+                    &out.primitives,
+                    &junction_arms,
+                    &reference_primitives,
+                    &reference_arms,
+                    rules,
+                )
+            });
+        if hull_reference.is_some() && kept.is_none() {
+            eprintln!(
+                "WARNING junction hulls: the reference field's shafts do not line up with the \
+                 arms'; the hulls were planned on the arms as they are (emit and warn)"
+            );
+        }
+        let edits = kept.unwrap_or_else(|| {
+            junction::hull_junctions(&out.primitives, &junction_arms, rules)
+        });
         // Emit and warn: a landed junction that could be neither cut into its
         // host nor filled keeps the old flat cap, and says so.
         if edits.crowded + edits.undrawable > 0 {
@@ -1581,6 +1649,50 @@ fn lower_sweep_arms_of(
         }
     }
     Ok(out)
+}
+
+/// **The reference field, lowered** (R8): the records and the junction arms of
+/// `reference`, arm for arm. An arm the reference leaves as it is shares its
+/// records with the field's (no second lowering of it); the rest are lowered
+/// into a scratch list, with no counter, foot or seat kept.
+fn lower_hull_reference(
+    arms: &[SweepArm],
+    reference: &[SweepArm],
+    primitives: &[SupportPrimitive],
+    arm_ends: &[usize],
+    junction_arms: &[junction::JunctionArm],
+    config: LoweringConfig,
+    plate: f64,
+) -> (Vec<SupportPrimitive>, Vec<junction::JunctionArm>) {
+    let mut out: Vec<SupportPrimitive> = Vec::with_capacity(primitives.len());
+    let mut reference_arms: Vec<junction::JunctionArm> = Vec::with_capacity(arms.len());
+    let mut from = 0;
+    for (index, arm) in arms.iter().enumerate() {
+        let end = arm_ends[index];
+        let start = out.len();
+        if reference[index] == *arm {
+            out.extend_from_slice(&primitives[from..end]);
+            reference_arms.push(junction::JunctionArm {
+                landed: junction_arms[index].landed,
+                shaft: junction_arms[index]
+                    .shaft
+                    .map(|(first, len)| (start + (first - from), len)),
+            });
+        } else {
+            let lowered = lower_one_sweep_arm(&reference[index], config, plate, &mut out);
+            let emitted = !matches!(
+                lowered.outcome,
+                ArmOutcome::ZeroLength | ArmOutcome::InvalidGeometry
+            );
+            reference_arms.push(junction::JunctionArm {
+                landed: emitted && reference[index].landing == SweepArmLanding::Landed,
+                shaft: (emitted && lowered.shaft.1 > 0)
+                    .then_some((start + lowered.shaft.0, lowered.shaft.1)),
+            });
+        }
+        from = end;
+    }
+    (out, reference_arms)
 }
 
 /// The solid one emitted record encloses, in mm³, from its own fields.

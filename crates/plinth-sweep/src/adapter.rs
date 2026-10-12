@@ -38,7 +38,7 @@
 //! (`docs/physics.md`:284-324), realised by the layer index rather than by a
 //! second ray cast.
 
-use plinth_support::{lower_sweep_arms, SweepArm, SweepArmLanding, SweepLowering, SweepLoweringError};
+use plinth_support::{lower_sweep_arms_with_hull_reference, SweepArm, SweepArmLanding, SweepLowering, SweepLoweringError};
 use plinth_support::{BuildFrame, SupportPrimitive};
 use plinth_core::LayerPlan;
 
@@ -198,6 +198,9 @@ pub fn to_primitives(
     max_primitive_bytes: usize,
 ) -> Result<SweepEmission, SweepLoweringError> {
     let (arms, raised) = arms_and_junction_raises(plan);
+    // R8: the junction hulls are planned on the field the old law drew and kept
+    // on the certified one.
+    let hull_reference = hull_reference_arms(plan);
     let SweepLowering {
         primitives,
         arms_dropped_zero_length,
@@ -231,8 +234,9 @@ pub fn to_primitives(
         head_neck_ratio,
         head_stalk_mm,
         head_standoff_mm,
-    } = lower_sweep_arms(
+    } = lower_sweep_arms_with_hull_reference(
         &arms,
+        hull_reference.as_deref(),
         frame,
         layers,
         max_primitives,
@@ -526,12 +530,9 @@ pub(crate) struct JunctionRaises {
 /// raise, a support arm's junction that the raise widened past its ledger
 /// draws the same cone from the raised width (2026-10-07), so a branch
 /// thicker than its host leaves no shoulder above the junction either.
-fn junction_profiles(plan: &SweepPlan) -> (Vec<Vec<f64>>, JunctionRaises) {
-    drawn_profiles(&plan.struts, plan.load_step_taper)
-}
-
-/// [`junction_profiles`] over a bare strut set: the profile every member is
-/// DRAWN at, slot by slot from its own `k_bottom`.
+///
+/// The profile every member is DRAWN at, slot by slot from its own `k_bottom`,
+/// over a bare strut set.
 ///
 /// The slenderness lane measures its runs on exactly this (owner ruling
 /// 2026-09-29: "measure runs on the DRAWN profile"), so the section the lane
@@ -1015,7 +1016,7 @@ pub(crate) fn sweep_arm(
         // a mid-shaft junction thinner than its own ledger and thinner
         // than the branch landing on it. The lowering draws the fewest
         // straight spans that stay on or above this profile.
-        // Raised where a thicker branch joins (`junction_profiles`).
+        // Raised where a thicker branch joins (`drawn_profiles`).
         radius_profile_mm: profile,
         // Both measured by the sweep at its own finished seat
         // (`run_sweep_with_drains`); nothing is re-derived here. The
@@ -1129,10 +1130,55 @@ pub(crate) fn head_payload(strut: &crate::SweepStrut) -> Option<plinth_support::
 }
 
 fn arms_and_junction_raises(plan: &SweepPlan) -> (Vec<SweepArm>, JunctionRaises) {
+    arms_and_junction_raises_over(plan, &plan.struts)
+}
+
+/// **The field the junction hulls were planned on** (R8, Craig 2026-10-11): the
+/// arms of the plan with every certified head on the old law's ledger and head
+/// again, drawn through the very same construction. The lowering plans every
+/// junction hull on these arms and keeps those hulls (and the shaft they were
+/// cut from) on the certified field; `None` when no head was certified, so a
+/// field the certificate did not touch is bit-identical to what it was.
+#[must_use]
+pub fn hull_reference_arms(plan: &SweepPlan) -> Option<Vec<SweepArm>> {
+    let reference = hull_reference_struts(&plan.struts)?;
+    Some(arms_and_junction_raises_over(plan, &reference).0)
+}
+
+/// [`hull_reference_arms`]' strut set: a clone of the plan's with each certified
+/// head's ledger and head payload as the old law left them.
+fn hull_reference_struts(struts: &[crate::SweepStrut]) -> Option<Vec<crate::SweepStrut>> {
+    let is_certified = |strut: &crate::SweepStrut| {
+        strut
+            .head
+            .as_ref()
+            .is_some_and(|head| head.certified.is_some() && !head.drawn_straight)
+    };
+    if !struts.iter().any(is_certified) {
+        return None;
+    }
+    let mut reference = struts.to_vec();
+    for strut in &mut reference {
+        if !is_certified(strut) {
+            continue;
+        }
+        let Some(head) = strut.head.as_mut() else { continue };
+        let Some(certified) = head.certified.take() else { continue };
+        if certified.today_radius_mm.len() == strut.radius_mm.len() {
+            strut.radius_mm = certified.today_radius_mm;
+        }
+    }
+    Some(reference)
+}
+
+fn arms_and_junction_raises_over(
+    plan: &SweepPlan,
+    struts: &[crate::SweepStrut],
+) -> (Vec<SweepArm>, JunctionRaises) {
     let height = plan.layer_height_mm;
     let plate = plan.plate_z_mm;
     let grid = &plan.grid;
-    let (mut profiles, raised) = junction_profiles(plan);
+    let (mut profiles, raised) = drawn_profiles(struts, plan.load_step_taper);
     // THE FOOTPRINT RULE's move (fix/tip-trim, 2026-09-28): a seat whose
     // contact disc hung off its face slides ALONG the face; a member joined to
     // a moved axis follows it at the junction (`footprint::followed_shifts`).
@@ -1163,7 +1209,7 @@ fn arms_and_junction_raises(plan: &SweepPlan) -> (Vec<SweepArm>, JunctionRaises)
             profile,
         )
     };
-    let followed = crate::footprint::followed_shifts(&plan.struts);
+    let followed = crate::footprint::followed_shifts(struts);
     // A JUNCTION IS ON THE DRAWN SHAFT (fix/morel-long-posts, 2026-10-02): a
     // leaning plate post's file shaft runs to its boss top over its foot, off
     // the line it was planned on (`drawn_line_offset`), and every branch and
@@ -1177,14 +1223,13 @@ fn arms_and_junction_raises(plan: &SweepPlan) -> (Vec<SweepArm>, JunctionRaises)
     // K-to-base route they were placed on; their offset is the displacement
     // between the two lines ([`downgraded_line_offset`]).
     let flare = plinth_support::SweepRootFlare::registered(height).ok();
-    let any_straight_head = plan
-        .struts
+    let any_straight_head = struts
         .iter()
         .any(|strut| strut.head.as_ref().is_some_and(|head| head.drawn_straight));
     let offsets: Vec<Option<LineOffset>> = if flare.is_none() && !any_straight_head {
         Vec::new()
     } else {
-        plan.struts
+        struts
             .iter()
             .zip(&followed)
             .map(|(strut, followed)| {
@@ -1204,20 +1249,19 @@ fn arms_and_junction_raises(plan: &SweepPlan) -> (Vec<SweepArm>, JunctionRaises)
             })
             .collect()
     };
-    let raised = downgraded_follow_of(&plan.struts, &offsets, raised);
+    let raised = downgraded_follow_of(struts, &offsets, raised);
     let followed = if offsets.iter().any(Option::is_some) {
-        crate::footprint::followed_shifts_drawn(&plan.struts, &offsets)
+        crate::footprint::followed_shifts_drawn(struts, &offsets)
     } else {
         followed
     };
-    let arms = plan
-        .struts
+    let arms = struts
         .iter()
         .zip(profiles.iter_mut())
         .zip(followed)
         .map(|((strut, profile), followed)| build(strut, followed, std::mem::take(profile)))
         .collect();
-    (arms, joints_grown_of(&plan.struts, raised))
+    (arms, joints_grown_of(struts, raised))
 }
 
 /// **Where a head's joint grew** (the lowering draws the joint at the ledger

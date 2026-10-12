@@ -573,9 +573,21 @@ pass that applies it):
   along a straight record), summed over every source that loads it from its entry down: the head's
   contact, every member landed on it (and what is routed through it), every brace, and every
   member whose drawn solid is fused into it. The lowering's chords never draw below the slot step.
-* **Kept as today.** A slot whose need is above today's radius, a slot a junction hull's ring
-  stands on (the hull keeps today's geometry), and a head another member loads above its joint
-  (shared) keep the old law and are counted (`joint certificate:` line of the log).
+* **Kept as today.** A slot whose need is above today's radius and a slot a junction hull's ring
+  stands on keep today's radius. A head that another member loads at or above its joint (shared)
+  keeps the old law and is counted (`joint certificate:` line of the log): a member that lands on
+  the joint's layer or above, a brace seated within one layer of the joint, or ANY other member's
+  drawn body (routed descendants included) that touches the certified link, cone or joint. The
+  cone and joint are sized for the head's own contact alone, and a feed that enters there would
+  need a larger joint.
+* **Junction hulls are today's, exactly (R8).** A junction hull's host, pull-backs, cut arcs and
+  rings are planned from the radii of the shaft, so a thinner shaft would move every ring. The
+  lowering therefore plans the hulls on the field as the old law drew it
+  (`adapter::hull_reference_arms`, from `CertifiedHead::today_radius_mm`) and keeps those
+  records bit for bit (`lower_sweep_arms_with_hull_reference`, `junction::keep_planned_hulls`).
+  The shaft of an arm a hull joins is the arm's own outside the junction's arcs and the old
+  field's inside them, and it meets each arc on the radius the hull ring has. A reference whose
+  shafts do not line up with the arms' is not used, and the lowering warns.
 * **Report, never refuse.** The log prints the largest certified demand over the drawn chords and
   warns when one exceeds `1 + 1e-9`. The link-overstress warning is read at the link end that is
   drawn and says when the joint is sized for what the link can pass.

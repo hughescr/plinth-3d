@@ -282,3 +282,48 @@ fn a_head_another_member_lands_on_is_shared_and_keeps_the_old_law() {
     assert_eq!(shared[0].radius_mm, old[0].radius_mm, "the old law, bit for bit");
     assert!(crate::adapter::head_payload(&shared[0]).is_some_and(|payload| !payload.certified));
 }
+
+/// A member of radius 0.08 standing over `(row, col)` from layer `k_bottom` to
+/// `k_top`, landed on member 0 at `layer`.
+fn lander_on_post(grid: &Grid, row: usize, col: usize, layer: usize, k_top: usize) -> SweepStrut {
+    let mut s = straight(grid, 1, row, col, 90, 0.08);
+    s.landing = Landing::Strut { id: 0, layer };
+    s.k_bottom = layer;
+    s.k_top = k_top;
+    s.radius_mm = vec![0.08; k_top - layer + 1];
+    s.carried_mm2 = vec![0.0; k_top - layer + 1];
+    s.seat_face = SeatFace::default();
+    s
+}
+
+/// Run the certified sizing on the fixture with one extra member and return the
+/// head's reason for keeping the old law (`None`: certified).
+fn old_law_reason_with(extra: impl Fn(&Grid) -> SweepStrut) -> Option<OldLawReason> {
+    let plan = plan();
+    let (grid, mut field) = field(0, FLAT);
+    field.push(extra(&grid));
+    resize_heads_certified(&grid, &mut field, sizing(), &context(&plan), PITCH_MM);
+    let head = field[0].head.as_ref().expect("a head");
+    assert_eq!(head.certified.is_none(), head.old_law.is_some(), "a head is certified or counted, never both");
+    head.old_law
+}
+
+/// R1: a member that lands ON THE LAYER OF THE JOINT enters at `K`, where the
+/// joint's section carries it, and the certified joint is sized for the head's
+/// own contact alone: such a head keeps the old law.
+#[test]
+fn a_member_landing_on_the_joint_layer_makes_the_head_shared() {
+    let reason = old_law_reason_with(|grid| lander_on_post(grid, 150, 290, K_JOINT, K_JOINT + 4));
+    assert_eq!(reason, Some(OldLawReason::Shared));
+}
+
+/// R1: a member that lands BELOW the joint but whose drawn body crosses the cone
+/// feeds the cone where it crosses, not where it lands: the head keeps the old
+/// law. The same member standing clear of the head leaves it certified.
+#[test]
+fn a_member_landing_below_the_joint_but_crossing_the_cone_makes_the_head_shared() {
+    let crossing = old_law_reason_with(|grid| lander_on_post(grid, 134, 270, K_JOINT - 3, K_JOINT + 6));
+    assert_eq!(crossing, Some(OldLawReason::Shared), "a body through the cone loads it");
+    let clear = old_law_reason_with(|grid| lander_on_post(grid, 150, 290, K_JOINT - 3, K_JOINT + 6));
+    assert_eq!(clear, None, "a member standing clear below the joint is carried by the post only");
+}

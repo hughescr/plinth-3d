@@ -563,7 +563,7 @@ pub(crate) fn resize_heads_certified(
     if resized == 0 {
         return resized;
     }
-    let arms = drawn_arms(grid, struts, sizing, |strut| crate::slenderness::live(strut));
+    let arms = drawn_arms(grid, struts, sizing, crate::slenderness::live);
     crate::joint_size::certify(struts, sizing, ctx, arms, pitch_mm);
     resized
 }

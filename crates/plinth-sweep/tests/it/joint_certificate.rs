@@ -265,3 +265,69 @@ fn the_certified_posts_hold_the_capacity_of_their_sources() {
         );
     }
 }
+
+fn junction_hulls(primitives: &[SupportPrimitive]) -> Vec<SupportPrimitive> {
+    primitives
+        .iter()
+        .filter(|p| matches!(p.ring_normal, plinth_support::FrustumRingNormal::Junction(_)))
+        .cloned()
+        .collect()
+}
+
+/// R8: the junction hulls of the certified field are the old law's, record for
+/// record. The sabotage that proves the equality has teeth is the unit test
+/// `junction::tests::the_planned_hulls_are_kept_on_a_field_whose_radii_moved`
+/// (the pass run on the moved field makes a different hull); on this fixture
+/// the thinned shafts happen to leave the bare lowering's hulls unchanged too,
+/// which the run prints.
+#[test]
+fn the_certified_field_keeps_every_junction_hull_of_the_old_law_field() {
+    let (mut hulls, mut moved_without_the_reference, mut thinned) = (0_usize, 0_usize, 0_usize);
+    // The tall stilt plate is the pinned fixture with mid-shaft landings.
+    let with_hulls = vec![(
+        "tall stilt plate",
+        plinth_mesh::make_tall_stilt_plate().expect("the tall stilt plate fixture"),
+    )];
+    for (name, mesh) in with_hulls {
+        let on = run(&mesh, &policy());
+        let off = run(&mesh, &policy().without_joint_certificate());
+        let (kept, old) = (junction_hulls(&on.emission.primitives), junction_hulls(&off.emission.primitives));
+        assert_eq!(kept, old, "{name}: the certified field's hulls are not the old law's");
+        hulls += old.len();
+        thinned += on
+            .plan
+            .struts
+            .iter()
+            .zip(&off.plan.struts)
+            .filter(|(a, b)| a.radius_mm.iter().zip(&b.radius_mm).any(|(x, y)| x < &(y - 1e-9)))
+            .count();
+        // The same plan lowered with no reference field.
+        let frame = BuildFrame::new(
+            Finite::new(on.plan.plate_z_mm).expect("a finite plate"),
+            PositiveFinite::new(harness::LIFT_MM).expect("a positive lift"),
+        );
+        let (min_z, max_z) = harness::z_span(&mesh);
+        let height = harness::layer_height_mm();
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a layer count is a finite positive quotient of model-scale lengths"
+        )]
+        let count = (((max_z - (min_z - harness::LIFT_MM)) / height).ceil() as usize).max(1);
+        let layers = LayerPlan::new(min_z - harness::LIFT_MM, vec![height; count]).expect("a uniform layer plan");
+        let bare = plinth_support::lower_sweep_arms(
+            &plinth_sweep::arms_of(&on.plan),
+            frame,
+            &layers,
+            MAX_PRIMITIVES,
+            MAX_PRIMITIVE_BYTES,
+        )
+        .expect("the lowering refuses only about the request");
+        if junction_hulls(&bare.primitives) != old {
+            moved_without_the_reference += 1;
+        }
+    }
+    println!("hulls {hulls}, shafts thinned {thinned}, fixtures whose hulls move without the reference {moved_without_the_reference}");
+    assert!(hulls > 0, "no fixture has a junction hull: the test would pass vacuously");
+    assert!(thinned > 0, "the certificate thinned no shaft: the test would pass vacuously");
+}

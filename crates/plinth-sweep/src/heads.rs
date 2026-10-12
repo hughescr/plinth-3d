@@ -165,6 +165,11 @@ pub struct CertifiedHead {
     /// The largest certified demand over the drawn head and the drawn post
     /// chords (1 means exactly at capacity; above 1 + 1e-9 is warned).
     pub drawn_max: f64,
+    /// The member's ledger as the old law left it before the certificate
+    /// rewrote it, slot by slot: the geometry the junction hulls are planned on
+    /// and keep (R8). The adapter builds a reference field from these radii
+    /// ([`crate::adapter::hull_reference_arms`]).
+    pub today_radius_mm: Vec<f64>,
 }
 
 /// Why a head stayed on the old law (R1: when the entry topology cannot be
