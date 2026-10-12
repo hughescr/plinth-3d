@@ -547,6 +547,42 @@ attested and legally scarred) is an unresolved doctrine question, and keeping in
 clear of a cavity's drain and vent bores is an unbuilt refusal. Neither loosens anything already
 shipped; both are future work — see `docs/status.md` and `docs/plans/support-clearance.md`.
 
+### The articulated head is sized for what its contact can pass (Craig, 2026-10-11)
+
+A headed tip is a contact ball, a bare link, a cone and a joint sphere on top of a post. Until
+2026-10-11 the cone, the joint and the post were sized by a bending law of the lean (`heads.rs`)
+for a load line the contact cannot pass: on Deinonychus support A a link of radius 0.428 mm
+carried a joint sphere of radius 1.333 mm, and the post, the host column and the plate foot
+inherited the size. **Craig's ruling:** the "post is never thinner than a joint" rule stays; the
+joint is fixed at its cause.
+
+The rule now (`joint_cert.rs` holds the bound and its proofs in comments, `joint_size.rs` the
+pass that applies it):
+
+* **A local capacity certificate, not a network-strength claim.** The resized section never fails
+  before the contacts that feed it. Each feed is two real sections in series (the seat disc and
+  the link; the ball equator and the taper for a straight tip; a brace's own section), and the
+  loads that break neither are exactly a polytope in (axial force, the two end moments, squared
+  twist). Photopolymer resin is brittle, so the criterion is the maximum principal stress
+  (Rankine, `s + tau^2 <= 1`) with the same `sigma_allow` the area law uses; no new constant.
+* **One authoritative profile.** The cone knots and the joint radius come from one solve and
+  travel together through `Head::certified`, `head_payload` and the lowering, which draws them
+  verbatim (the joint sphere is the last knot's radius, not a wider one).
+* **Certified everywhere.** On a straight frustum the demand is `A/r^2 + B/r^3 + C/r^6`, whose
+  maximum is analytic. A post slot takes the larger of its two end needs (the bound is convex
+  along a straight record), summed over every source that loads it from its entry down: the head's
+  contact, every member landed on it (and what is routed through it), every brace, and every
+  member whose drawn solid is fused into it. The lowering's chords never draw below the slot step.
+* **Kept as today.** A slot whose need is above today's radius, a slot a junction hull's ring
+  stands on (the hull keeps today's geometry), and a head another member loads above its joint
+  (shared) keep the old law and are counted (`joint certificate:` line of the log).
+* **Report, never refuse.** The log prints the largest certified demand over the drawn chords and
+  warns when one exceeds `1 + 1e-9`. The link-overstress warning is read at the link end that is
+  drawn and says when the joint is sized for what the link can pass.
+
+What it does not claim: stiffness falls as sections thin (the link dominates compliance), and a
+thinner path moves a little load onto a neighbour. Only a frame solve or a coupon settles that.
+
 ## 9. Admissibility: emergence, area sufficiency, attestation, buried surface
 
 **Seat depth** (unchanged since 2026-08-04, still the formula every seating family reads)

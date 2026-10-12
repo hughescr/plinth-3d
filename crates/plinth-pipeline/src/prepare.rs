@@ -4070,6 +4070,31 @@ fn print_sweep_disclosure(
             heads.final_normal_residual_deg_median,
             report.lip_seat.headed_bites,
         );
+        let certificate = heads.joint_certificate;
+        println!(
+            "[sweep {model}] joint certificate: {} heads sized for what their contact can pass \
+             (post slots: {} certified, {} kept at today's radius, {} kept under a junction hull); \
+             {} stayed on the old law (shared {}, no seat {}, no profile {}), {} not sized; \
+             largest certified demand on any drawn chord {:.9}; chords over 1 + 1e-9: {}",
+            certificate.certified,
+            certificate.slots_certified,
+            certificate.slots_kept,
+            certificate.slots_pinned,
+            certificate.old_law_shared + certificate.old_law_no_seat + certificate.old_law_infeasible,
+            certificate.old_law_shared,
+            certificate.old_law_no_seat,
+            certificate.old_law_infeasible,
+            certificate.not_sized,
+            certificate.worst_drawn_max,
+            certificate.over_one,
+        );
+        if certificate.over_one > 0 {
+            println!(
+                "[sweep {model}] WARNING joint certificate: {} drawn heads exceed the certified \
+                 capacity by more than 1e-9 (emit and warn, never refuse)",
+                certificate.over_one
+            );
+        }
         let warned = heads
             .refusals
             .iter()

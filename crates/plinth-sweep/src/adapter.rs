@@ -1070,6 +1070,32 @@ pub(crate) fn head_payload(strut: &crate::SweepStrut) -> Option<plinth_support::
     // a bare cylinder of the tip's radius, then a cone; the knots carried are
     // the cone's, from the link's planned far end. A head with no link keeps
     // the bending law's polyline from the contact centre.
+    //
+    // THE CERTIFIED PROFILE (Craig 2026-10-11): a head sized by the joint
+    // certificate carries ONE profile, the cone knots and the joint radius from
+    // one solve ([`crate::joint_cert::certified_profile`]); the payload reads
+    // them and never recomputes the old law.
+    if let Some(cert) = &head.certified {
+        let radius_r_t = cert.profile.knots.first().map_or(r_t, |knot| knot[1]);
+        debug_assert!(
+            (cert.profile.joint_radius_mm
+                - cert.profile.knots.last().map_or(0.0, |knot| knot[1]))
+            .abs()
+                <= 1.0e-12,
+            "the joint radius is the last knot's"
+        );
+        return Some(plinth_support::SweepHead {
+            contact_mm: head.contact_mm,
+            unit: head.unit,
+            joint_mm: head.joint_mm,
+            joint_radius_mm: cert.profile.joint_radius_mm,
+            gap_mm: head.gap_mm,
+            profile_knots_mm: cert.profile.knots.clone(),
+            link_mm: head.link_mm,
+            link_radius_mm: radius_r_t,
+            certified: true,
+        });
+    }
     let (profile_knots_mm, link_mm, link_radius_mm) = if head.link_mm > 0.0 {
         let ball_mm = plinth_core::m0_constants().map_or(0.0, |constants| {
             constants
@@ -1098,6 +1124,7 @@ pub(crate) fn head_payload(strut: &crate::SweepStrut) -> Option<plinth_support::
         profile_knots_mm,
         link_mm,
         link_radius_mm,
+        certified: false,
     })
 }
 

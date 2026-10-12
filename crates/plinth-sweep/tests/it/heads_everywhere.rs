@@ -150,6 +150,8 @@ fn field(setup: &Setup, landed_at: Option<usize>) -> Vec<SweepStrut> {
         law_planned: HeadLaw::envelope(0.5373),
         law_drawn: None,
         ledger_radius_mm: Vec::new(),
+        certified: None,
+        old_law: None,
     });
     host.set_post(Landing::Plate, 0, vec![cell_u32(host_cell); K_JOINT + 1]);
     assert!(host.head_intact(), "the fixture's head must be intact");

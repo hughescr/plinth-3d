@@ -135,6 +135,49 @@ pub struct Head {
     /// final re-size and a downgrade rebuild the strut from it. Empty until
     /// the first down-sweep pass has run.
     pub ledger_radius_mm: Vec<f64>,
+    /// **The certified sizing of this head** (Craig 2026-10-11: size the joint
+    /// for what the contact CAN pass): the cone knots and the joint radius from
+    /// ONE solve ([`crate::joint_cert::certified_profile`]), the post sized
+    /// for the loads that reach it ([`crate::joint_size`]). Set by the final
+    /// sizing ([`crate::down_sweep::resize_heads_to_drawn_posts`]); the adapter
+    /// and the lowering read the knots and the joint radius from here, never
+    /// from the old law. `None`: the head is on the old law
+    /// ([`Self::old_law`] says why).
+    pub certified: Option<CertifiedHead>,
+    /// Why this head stayed on the old law, when the final sizing ran and could
+    /// not certify it.
+    pub old_law: Option<OldLawReason>,
+}
+
+/// The certified sizing of one head and what it cost, from
+/// [`crate::joint_size::certify`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct CertifiedHead {
+    /// The cone knots `(s, r)` from the link's far end to `K`, and the joint
+    /// radius: one profile (R5).
+    pub profile: crate::joint_cert::CertifiedProfile,
+    /// Post slots sized by the certificate (at or under today's radius),
+    /// slots that kept today's radius because the need was above it, and
+    /// slots that kept it because a junction hull's ring stands on them (R8).
+    pub slots_certified: usize,
+    pub slots_kept: usize,
+    pub slots_pinned: usize,
+    /// The largest certified demand over the drawn head and the drawn post
+    /// chords (1 means exactly at capacity; above 1 + 1e-9 is warned).
+    pub drawn_max: f64,
+}
+
+/// Why a head stayed on the old law (R1: when the entry topology cannot be
+/// established, leave it on the old law and count it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OldLawReason {
+    /// The lowering's seat for the tip could not be derived.
+    NoSeat,
+    /// Another member loads the head (lands on it, or its drawn solid touches
+    /// the certified head): the shared head.
+    Shared,
+    /// No certified profile exists below the safety cap.
+    Infeasible,
 }
 
 impl Head {
@@ -746,14 +789,26 @@ pub struct LinkOverstress {
     pub ball_radius_mm: f64,
     /// Stress over allowed stress at the link's far end ([`section_stress_ratio`]).
     pub stress_ratio: f64,
+    /// The head is sized by the joint certificate: the joint and the cone are
+    /// sized for what this link can pass, so the link is the weakest fuse by
+    /// construction and the bending law above it is only the old reference.
+    pub certified: bool,
 }
 
 impl std::fmt::Display for LinkOverstress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "member {}: link radius {:.3} mm (ball {:.3} mm) carries {:.1} times the allowed stress",
-            self.member, self.link_radius_mm, self.ball_radius_mm, self.stress_ratio
+            "member {}: link radius {:.3} mm (ball {:.3} mm) carries {:.1} times the allowed stress{}",
+            self.member,
+            self.link_radius_mm,
+            self.ball_radius_mm,
+            self.stress_ratio,
+            if self.certified {
+                " (joint sized for what the link can pass)"
+            } else {
+                ""
+            }
         )
     }
 }
@@ -777,17 +832,19 @@ pub fn link_overstress(
             }
             let tip = strut.tip_radius_mm();
             let ball = ball_factor_at(tip) * tip;
-            let ratio = section_stress_ratio(
-                tip,
-                tip,
-                ball_allowance_of(ball) + link_mm,
-                head.law(),
+            // A certified head is read at the link end the file DRAWS (the first
+            // knot of its cone); the old law at the planned end.
+            let link_end = head.certified.as_ref().map_or_else(
+                || ball_allowance_of(ball) + link_mm,
+                |cert| cert.profile.knots.first().map_or(0.0, |knot| knot[0]),
             );
+            let ratio = section_stress_ratio(tip, tip, link_end, head.law());
             (ratio > 1.0 + 1.0e-9).then_some(LinkOverstress {
                 member: strut.id,
                 link_radius_mm: tip,
                 ball_radius_mm: ball,
                 stress_ratio: ratio,
+                certified: head.certified.is_some(),
             })
         })
         .collect()
@@ -1028,6 +1085,61 @@ pub struct HeadsOutcome {
     /// link is the contact's own size, so the law is not met there and only a
     /// coupon can size the margin). See [`link_overstress`].
     pub link_overstress: Vec<LinkOverstress>,
+    /// The joint-sizing certificate on the finished field
+    /// ([`crate::joint_size`]): how many heads are sized for what their contact
+    /// can pass, how many stayed on the old law and why, and the worst certified
+    /// demand over the drawn head and post chords.
+    pub joint_certificate: JointCertificate,
+}
+
+/// See [`HeadsOutcome::joint_certificate`]. Counts of drawn heads (not
+/// downgraded), read off the finished strut set.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct JointCertificate {
+    pub certified: usize,
+    pub old_law_shared: usize,
+    pub old_law_no_seat: usize,
+    pub old_law_infeasible: usize,
+    /// Drawn heads the final sizing never reached (no sizing ran).
+    pub not_sized: usize,
+    pub slots_certified: usize,
+    pub slots_kept: usize,
+    pub slots_pinned: usize,
+    /// The largest certified demand over any drawn chord (at most 1 + 1e-9).
+    pub worst_drawn_max: f64,
+    /// Heads whose drawn chords exceed 1 + 1e-9: warned, never refused.
+    pub over_one: usize,
+}
+
+impl JointCertificate {
+    /// Read the counts off the finished strut set. One pass.
+    #[must_use]
+    pub fn of(struts: &[crate::SweepStrut]) -> Self {
+        let mut out = Self::default();
+        for head in struts
+            .iter()
+            .filter(|strut| crate::slenderness::live(strut))
+            .filter_map(|strut| strut.head.as_ref().filter(|head| !head.drawn_straight))
+        {
+            match (&head.certified, head.old_law) {
+                (Some(c), _) => {
+                    out.certified += 1;
+                    out.slots_certified += c.slots_certified;
+                    out.slots_kept += c.slots_kept;
+                    out.slots_pinned += c.slots_pinned;
+                    out.worst_drawn_max = out.worst_drawn_max.max(c.drawn_max);
+                    if c.drawn_max > 1.0 + 1.0e-9 {
+                        out.over_one += 1;
+                    }
+                }
+                (None, Some(OldLawReason::Shared)) => out.old_law_shared += 1,
+                (None, Some(OldLawReason::NoSeat)) => out.old_law_no_seat += 1,
+                (None, Some(OldLawReason::Infeasible)) => out.old_law_infeasible += 1,
+                (None, None) => out.not_sized += 1,
+            }
+        }
+        out
+    }
 }
 
 /// Why a grazing straight tip was left straight.
@@ -1336,6 +1448,8 @@ fn plan_head_on_axis(
         law_planned,
         law_drawn: None,
         ledger_radius_mm: Vec::new(),
+        certified: None,
+        old_law: None,
     })
 }
 
@@ -2262,6 +2376,8 @@ mod tests {
             law_planned: HeadLaw::envelope(cos_lean()),
             law_drawn: None,
             ledger_radius_mm: Vec::new(),
+            certified: None,
+            old_law: None,
         }
     }
 
@@ -2351,6 +2467,7 @@ mod tests {
             profile_knots_mm: vec![[0.0, 0.07], [0.52, 0.22]],
             link_mm: 0.0,
             link_radius_mm: 0.0,
+            certified: false,
         };
         assert_eq!(payload.profile_knots_mm.len(), 2);
     }

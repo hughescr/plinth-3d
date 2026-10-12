@@ -1778,6 +1778,8 @@ mod census_tests {
             law_planned: crate::heads::HeadLaw::envelope(0.5373),
             law_drawn: None,
             ledger_radius_mm: Vec::new(),
+            certified: None,
+            old_law: None,
         });
         assert!(graze_rows_of(vec![(headed_tip, arm)], &none).is_empty(), "a headed arm is skipped");
     }

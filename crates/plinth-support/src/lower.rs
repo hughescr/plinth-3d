@@ -1079,6 +1079,11 @@ pub struct SweepHead {
     /// `r_L`: the link's radius, mm. Read only when [`Self::link_mm`] is
     /// above zero.
     pub link_radius_mm: f64,
+    /// The head is sized by the joint certificate (Craig 2026-10-11): the cone
+    /// knots and the joint radius are ONE profile, certified on every frustum
+    /// and at `K`. The lowering draws the chain verbatim, with no pixel merge
+    /// and no widening of the joint sphere past the last knot.
+    pub certified: bool,
 }
 
 /// What lowering one sweep field produced, and everything it had to warn about.
@@ -1951,6 +1956,30 @@ fn push_head_segment(
     // follows the ball as it is seated. A cone knot within one XY pixel of the
     // link's end would be a frustum shorter than a pixel and is merged into the
     // next; the cone starts at the link's radius, never wider.
+    //
+    // A CERTIFIED head (Craig 2026-10-11) is drawn verbatim: the link, then the
+    // certified knots as they stand (the first is the link's far end), with no
+    // pixel merge, because every frustum and the joint were certified as drawn.
+    if head.certified && head.link_mm > 0.0 && head.link_radius_mm > 0.0 {
+        if let Some(cone_start) = knots.first().filter(|knot| knot[0] > s_start + LINK_MIN_LENGTH_MM) {
+            let chain: Vec<[f64; 2]> = std::iter::once([s_start, head.link_radius_mm])
+                .chain(knots.iter().copied())
+                .collect();
+            debug_assert!(
+                (cone_start[1] - head.link_radius_mm).abs() <= 1.0e-12,
+                "a certified cone starts at the link's radius"
+            );
+            let ball = headed.ball_radius_mm;
+            return push_head_chain(
+                headed,
+                config,
+                &chain,
+                staged,
+                head.link_radius_mm >= ball,
+                head.link_radius_mm / ball,
+            );
+        }
+    }
     if head.link_mm > 0.0 && head.link_radius_mm > 0.0 {
         let link_radius = head.link_radius_mm;
         let ball = headed.ball_radius_mm;
@@ -2074,7 +2103,17 @@ fn push_head_chain(
     let spans = clipped.len() - 1;
     let end_radius = clipped.last()?[1];
     let geometry = SphereGeometry::joint(finite3(joint).ok()?);
-    let radius = positive(head.joint_radius_mm.max(end_radius)).ok()?;
+    // A certified head's joint is the certified radius, the last knot's own;
+    // the old law keeps the wider of the two.
+    let radius = if head.certified {
+        debug_assert!(
+            (head.joint_radius_mm - end_radius).abs() <= 1.0e-9,
+            "the certified joint is the cone's last radius"
+        );
+        positive(head.joint_radius_mm).ok()?
+    } else {
+        positive(head.joint_radius_mm.max(end_radius)).ok()?
+    };
     let (start_mm, end_mm) = geometry.canonical_poles(radius).ok()?;
     staged.push(SupportPrimitive {
         segment_kind: SupportSegmentKind::JointSphere,
@@ -4642,6 +4681,7 @@ mod headed_arm_tests {
             profile_knots_mm: knots(tip, length),
             link_mm: 0.0,
             link_radius_mm: 0.0,
+            certified: false,
         }
     }
 

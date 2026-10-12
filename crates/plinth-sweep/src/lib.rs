@@ -58,6 +58,10 @@ pub mod head_join;
 #[cfg(test)]
 mod head_carrier_tests;
 pub mod heads;
+pub mod joint_cert;
+pub(crate) mod joint_size;
+#[cfg(test)]
+mod joint_size_tests;
 pub mod landing_check;
 pub mod lean;
 pub mod limits;
@@ -939,6 +943,12 @@ pub struct SweepPolicy {
     /// lean law's largest step per layer. **On in production.** The drill
     /// turns it off, and the shoulders come back.
     pub load_step_taper: bool,
+    /// Whether every head's cone, joint and post are sized for what the
+    /// contact can pass ([`joint_size`], Craig 2026-10-11) instead of by the
+    /// bending law of the lean ([`heads`]). **On in production.** `false` is
+    /// the sabotage form: today's joint, which the certificate's tests prove
+    /// is too fat.
+    pub joint_certificate: bool,
     /// `DECIMATION_PROBE_GRID_PITCH_MM` (the registered parity-grid pitch of a
     /// distance-probe surface index) and [`MODEL_SURFACE_MAX_BYTES`] (the
     /// sweep's own byte budget for it). The sweep builds one over the model to
@@ -1110,6 +1120,7 @@ impl SweepPolicy {
             lip_seat: true,
             lip_seat_across_passes: true,
             load_step_taper: true,
+            joint_certificate: true,
             surface_index_pitch_mm: placeholders
                 .decimation_probe_grid_pitch_mm()
                 .diagnostic()
@@ -1443,6 +1454,14 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_load_step_taper(mut self) -> Self {
         self.load_step_taper = false;
+        self
+    }
+
+    /// Size every head by the bending law of the lean, as before 2026-10-11.
+    /// **Sabotage and comparison only** (`tests/it/joint_certificate.rs`).
+    #[must_use]
+    pub const fn without_joint_certificate(mut self) -> Self {
+        self.joint_certificate = false;
         self
     }
 
@@ -3004,8 +3023,28 @@ pub fn run_sweep_with_holes(
     // exact law of the drawn post (`c` and the head-to-post angle measured from
     // the exact K). K and |DK| stay frozen; a radius may shrink or grow.
     // The downgrade below reads these sizes.
-    if head_registry.is_some() {
-        down_sweep::resize_heads_to_drawn_posts(&grid, &mut struts, sizing);
+    //
+    // **THEN THE JOINT CERTIFICATE** (Craig 2026-10-11: "if the joint's
+    // mis-sized, fix THAT"): the same call sizes every head for what its contact
+    // can pass and the post for the loads that reach it; a head it cannot
+    // certify keeps the old law, counted.
+    if let Some((_, rule)) = head_registry {
+        if policy.joint_certificate {
+            let context = joint_size::JointContext {
+                layers: plan,
+                taper: load_step_taper,
+                slenderness_ratio: if slenderness_law.binds() { slenderness_law.ratio() } else { 0.0 },
+            };
+            down_sweep::resize_heads_certified(
+                &grid,
+                &mut struts,
+                sizing,
+                &context,
+                rule.allowance_mm - rule.layer_height_mm,
+            );
+        } else {
+            down_sweep::resize_heads_to_drawn_posts(&grid, &mut struts, sizing);
+        }
     }
     let head_downgrades = head_registry.map_or_else(heads::HeadDowngrades::default, |(profiles, rule)| {
         heads::downgrade_grown_heads(&mut struts, rule.allowance_mm, |radius| {
@@ -3386,6 +3425,11 @@ pub fn run_sweep_with_holes(
     // move touched comes out unchanged, and the clearance warnings are read
     // again on the sizes that stand.
     if let Some((profiles, rule)) = head_registry {
+        let context = joint_size::JointContext {
+            layers: plan,
+            taper: load_step_taper,
+            slenderness_ratio: if slenderness_law.binds() { slenderness_law.ratio() } else { 0.0 },
+        };
         size_heads_for_final_posts(
             &sweep_plan.grid,
             &mut sweep_plan.struts,
@@ -3393,6 +3437,9 @@ pub fn run_sweep_with_holes(
             rule.allowance_mm,
             |radius| profiles.ball_factor(radius),
             &mut sweep_plan.report.heads,
+            policy
+                .joint_certificate
+                .then_some((&context, rule.allowance_mm - rule.layer_height_mm)),
         );
         // THE CENSUS ON THE ROOTS THE FILE DRAWS (v20 milestone, 2026-10-08):
         // the census above was taken before this second sizing, and a headed
@@ -3569,6 +3616,7 @@ pub fn run_sweep_with_holes(
             |radius| profiles.ball_factor(radius),
         );
     }
+    sweep_plan.report.heads.joint_certificate = heads::JointCertificate::of(&sweep_plan.struts);
     sweep_plan.report.sweep_digest = digest(&sweep_plan.struts);
     Ok(sweep_plan)
 }
@@ -3589,9 +3637,16 @@ pub(crate) fn size_heads_for_final_posts(
     neck_min_mm: f64,
     ball_factor_at: impl Fn(f64) -> f64,
     heads: &mut heads::HeadsOutcome,
+    certificate: Option<(&joint_size::JointContext<'_>, f64)>,
 ) {
     let before: Vec<Vec<f64>> = struts.iter().map(|strut| strut.radius_mm.clone()).collect();
-    if down_sweep::resize_heads_to_drawn_posts(grid, struts, sizing) == 0 {
+    let resized = match certificate {
+        Some((context, pitch_mm)) => {
+            down_sweep::resize_heads_certified(grid, struts, sizing, context, pitch_mm)
+        }
+        None => down_sweep::resize_heads_to_drawn_posts(grid, struts, sizing),
+    };
+    if resized == 0 {
         return;
     }
     heads.resized_after_moves = struts

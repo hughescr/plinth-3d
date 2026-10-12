@@ -86,6 +86,8 @@ fn head_of(strut: &SweepStrut, k_joint: usize, joint_cell: usize) -> Head {
         law_planned: crate::heads::HeadLaw::envelope(0.5373),
         law_drawn: None,
         ledger_radius_mm: Vec::new(),
+        certified: None,
+        old_law: None,
     }
 }
 
@@ -1525,7 +1527,7 @@ mod actual_lean_sizing {
             footprint: crate::Footprint::MovedOntoFace,
         };
         let mut heads = crate::heads::HeadsOutcome::default();
-        crate::size_heads_for_final_posts(&grid, &mut struts, sizing(), 0.1, |_| 0.5, &mut heads);
+        crate::size_heads_for_final_posts(&grid, &mut struts, sizing(), 0.1, |_| 0.5, &mut heads, None);
         assert_eq!(heads.resized_after_moves, 1, "the child was sized again");
         let law = struts[1].head.as_ref().expect("a head").law_drawn.expect("a law");
         let across = slide * LANDING as f64 / K_TOP as f64;
@@ -1544,7 +1546,7 @@ mod actual_lean_sizing {
         );
         // A second pass with the moves settled changes nothing.
         let settled = struts[1].radius_mm.clone();
-        crate::size_heads_for_final_posts(&grid, &mut struts, sizing(), 0.1, |_| 0.5, &mut heads);
+        crate::size_heads_for_final_posts(&grid, &mut struts, sizing(), 0.1, |_| 0.5, &mut heads, None);
         assert_eq!(struts[1].radius_mm, settled);
     }
 }
