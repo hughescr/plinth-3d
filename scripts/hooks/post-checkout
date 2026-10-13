@@ -11,7 +11,8 @@
 #   - a worktree that already has a target/ (a branch switch inside it) is never touched;
 #   - the hook never fails a checkout: every problem is reported and ignored.
 #
-# What it does: (1) clone the gitignored corpus meshes (corpus/models/*.stl) from the main checkout;
+# What it does: (1) clone the gitignored corpus meshes (corpus/models/*.stl) and exports/ from the
+# main checkout;
 # (2) clone the seed target directory (registry dependencies already compiled, for the release,
 # gate and debug profiles) into <worktree>/target, so the first build compiles only this
 # workspace's own crates. See scripts/seed-target.sh for why the seed holds no workspace artifacts.
@@ -42,6 +43,10 @@ if [ -d "$MAIN/corpus/models" ]; then
         [ -f "$stl" ] || continue
         [ -e "$ROOT/corpus/models/$(basename "$stl")" ] || /bin/cp -c "$stl" "$ROOT/corpus/models/" 2>/dev/null
     done
+fi
+# exports/ (gitignored run outputs) holds the sample artifact tools/plinth-audit's tests read.
+if [ -d "$MAIN/exports" ] && [ ! -e "$ROOT/exports" ]; then
+    /bin/cp -cR "$MAIN/exports" "$ROOT/exports" 2>/dev/null
 fi
 
 SEED="${PLINTH_TARGET_SEED:-$(dirname "$MAIN")/.plinth-target}"

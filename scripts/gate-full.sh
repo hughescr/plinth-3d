@@ -5,7 +5,9 @@
 #     `--profile gate`, plus the ignored tests (`--include-ignored`: the slow legacy-runner
 #     grinders that scripts/test-fast.sh skips), and the separate tools/plinth-audit workspace
 #     (built `--release`; it has no gate profile);
-#   - independent test binaries run side by side, at most -j at a time (default 3);
+#   - independent test binaries run side by side, at most -j at a time (default 4). The big
+#     binaries each use every core, so this buys time only where a binary leaves cores idle (the
+#     single-threaded legacy-runner grinders, the audit fixtures);
 #   - the result is compared with scripts/known-reds.txt: PASS / NEW-RED / FIXED-RED, exit 1 on
 #     any NEW-RED, exit 2 when something did not build.
 #
@@ -14,9 +16,12 @@
 #   cpu_lock_run <label> <cap-s> -- scripts/gate-full.sh [options]
 #
 # Options:
-#   -j N              test binaries run side by side (default 3)
+#   -j N              test binaries run side by side (default 4)
 #   --all-features    also run the workspace with --all-features (a second pass)
-#   --skip-ignored    do not run `#[ignore]`d tests
+#   --skip-ignored    do not run `#[ignore]`d tests. The ignored set holds a_spec6_removal, which
+#                     grinds for over 2 hours under a loaded machine, and tests that read local
+#                     minis; without them the run finishes in about the time of the plinth-sweep
+#                     suite. Use it for the routine milestone and run the full set before a merge.
 #   --no-audit        leave out tools/plinth-audit
 #   --known FILE      known-reds list (default: scripts/known-reds.txt next to this script)
 #   --out DIR         keep logs and verdict files here (default: a fresh temp dir)
@@ -29,7 +34,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 cd "$ROOT" || exit 2
 
-JOBS=3; ALLF=0; IGNORED=(--include-ignored); AUDIT=1; KNOWN="$HERE/known-reds.txt"; OUT=""
+JOBS=4; ALLF=0; IGNORED=(--include-ignored); AUDIT=1; KNOWN="$HERE/known-reds.txt"; OUT=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -j) JOBS="$2"; shift ;;
