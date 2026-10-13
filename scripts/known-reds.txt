@@ -18,6 +18,7 @@ plinth-pipeline::lib::tests::the_committed_prepare_fixtures_stay_under_the_ancho
 plinth-support::a4_transactional_controller::the_raking_blade_reports_a_measured_class_per_route  # legacy runner: 55 vs 54 candidates
 plinth-support::ratchet_harness::support_ratchets_do_not_regress  # legacy runner: Cylinder abandoned_load 27.8 mm2
 plinth-support::support_runner_integration::public_runner_measures_sealed_coverage_with_its_islands_patches_and_resource_plan  # legacy runner: digest pair
+plinth-audit::real_artifacts::the_sphere_reconstruction_reproduces_the_measured_facts  # reads the gitignored legacy export exports/sphere-first-artifact.chitubox (2026-08-31): 18 of 24 seats established
 
 # --- red because the owner's tagged cube is outside the repository --------------------------------
 # These two read ../cube.stl relative to the plinth-3d checkout, which is dnd-campaigns/cube.stl in

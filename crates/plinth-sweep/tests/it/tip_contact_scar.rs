@@ -45,11 +45,11 @@
 //! Every assertion below is a comparison between two measurements or a
 //! comparison against zero, per the brief.
 
+use crate::harness::memo_run_sweep;
 use plinth_core::{m0_constants, LayerPlan};
 use plinth_orient::demand::{DemandFidelity, MeasuredSupportDemand, SupportDemandMeasurer};
 use plinth_orient::search::{search, SweepRequest};
 use plinth_orient::{ObjectiveWeights, OrientFaceTable, UpDirection};
-use crate::harness::memo_run_sweep;
 use plinth_sweep::{tip_contact_scar, SweepDemand, SweepPlan, SweepPolicy};
 
 /// The model's authored +Z stays up: the blade, authored hanging below the

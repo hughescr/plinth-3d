@@ -58,11 +58,11 @@
 // Layer counts from finite model-scale lengths, in test-local arithmetic.
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
+use crate::harness::memo_run_sweep;
 use geom_kernel::{closest_on_tri, segment_segment_distance, vec3};
 use plinth_core::{m0_constants, LayerPlan};
 use plinth_mesh::Mesh;
 use plinth_orient::UpDirection;
-use crate::harness::memo_run_sweep;
 use plinth_sweep::{arms_of, SweepPlan, SweepPolicy};
 
 /// What the lowered field looks like from underneath.
