@@ -6646,7 +6646,7 @@ mod pole_collar_tests {
         assert!(geom_kernel::vec3::dot(geom_kernel::vec3::sub(pole, ring), along).abs() < 1e-9);
         assert!((geom_kernel::vec3::dist(pole, ring) - rho).abs() < 1e-9);
         let to_ring = geom_kernel::vec3::dist(centre, ring);
-        assert!((to_ring.mul_add(to_ring, rho * rho) - BALL * BALL).abs() < 1e-9, "a circle of the ball");
+        assert!((geom_kernel::vec3::norm([to_ring, rho, 0.0]) - BALL).abs() < 1e-9, "a circle of the ball");
         assert!(rho > SHAFT, "the collar holds what the shaft did not: {rho}");
         assert!((taper.end_radius_mm.get() - rho).abs() < 1e-12);
         // The collar's underside leans the law's saturation angle from vertical.
@@ -6665,7 +6665,7 @@ mod pole_collar_tests {
         let centre = [0.0, 0.0, 0.0];
         assert!(pole_collar(centre, 0.8947, &shaft(centre, [0.0, 0.0, -3.0], 0.671)).is_none());
         let leaning = [0.63, -1.061, -0.962];
-        let sin = (0.63_f64.hypot(1.061)) / (0.63_f64.hypot(1.061)).hypot(0.962);
+        let sin = geom_kernel::vec3::norm([0.63, 1.061, 0.0]) / geom_kernel::vec3::norm(leaning);
         assert!(pole_collar(centre, 0.999 * 0.671 / sin, &shaft(centre, leaning, 0.671)).is_none());
         let past = [3.0, 0.0, -1.0];
         let (_, steeper) = pole_collar(centre, 0.8947, &shaft(centre, past, 0.671)).expect("71.6 degrees");
