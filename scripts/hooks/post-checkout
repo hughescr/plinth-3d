@@ -11,8 +11,9 @@
 #   - a worktree that already has a target/ (a branch switch inside it) is never touched;
 #   - the hook never fails a checkout: every problem is reported and ignored.
 #
-# What it does: clone the seed target directory (registry dependencies already compiled, for the
-# release, gate and debug profiles) into <worktree>/target, so the first build compiles only this
+# What it does: (1) clone the gitignored corpus meshes (corpus/models/*.stl) from the main checkout;
+# (2) clone the seed target directory (registry dependencies already compiled, for the release,
+# gate and debug profiles) into <worktree>/target, so the first build compiles only this
 # workspace's own crates. See scripts/seed-target.sh for why the seed holds no workspace artifacts.
 #
 # What it does NOT do (all measured 2026-10-13, docs/development.md "Build speed"):
@@ -31,6 +32,18 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
 
 COMMON="$(cd "$(git rev-parse --git-common-dir)" 2>/dev/null && pwd)"
 MAIN="$(dirname "$COMMON")"
+
+# The corpus meshes are gitignored inputs (corpus/models/*.stl), so a new worktree has none and
+# every test that loads one fails with RequiredCorpusModelMissing. Clone them from the main
+# checkout (copy-on-write, no extra disk; /bin/cp because only the macOS cp has -c).
+if [ -d "$MAIN/corpus/models" ]; then
+    mkdir -p "$ROOT/corpus/models"
+    for stl in "$MAIN"/corpus/models/*.stl; do
+        [ -f "$stl" ] || continue
+        [ -e "$ROOT/corpus/models/$(basename "$stl")" ] || /bin/cp -c "$stl" "$ROOT/corpus/models/" 2>/dev/null
+    done
+fi
+
 SEED="${PLINTH_TARGET_SEED:-$(dirname "$MAIN")/.plinth-target}"
 [ -d "$SEED" ] || { echo "post-checkout: no target seed at $SEED; the first build will be cold" >&2; exit 0; }
 
