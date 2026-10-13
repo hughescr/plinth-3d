@@ -130,7 +130,7 @@ fn the_census_counts_the_root_flares_the_file_draws_under_a_raised_post() {
     let count = (((max_z - plate_z) / height).ceil() as usize).saturating_add(1);
     let layers = LayerPlan::new(plate_z, vec![height; count]).expect("a uniform layer plan");
     let policy = SweepPolicy::from_registry().expect("the registry supplies every sweep number");
-    let mut plan = plinth_sweep::run_sweep(&mesh, &layers, &policy)
+    let mut plan = crate::harness::memo_run_sweep(&mesh, &layers, &policy)
         .expect("the sweep emits and warns; it never refuses");
     let grid = plan.grid;
     let flare = policy.flare_r_factor;

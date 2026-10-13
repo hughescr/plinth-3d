@@ -153,7 +153,7 @@ use plinth_orient::{
     orient_as_drawn, registered_sweep_request, search_and_orient, BaselineSelection,
     OrientationProvenance, OrientedModel,
 };
-use plinth_sweep::{run_sweep, SweepDemand, SweepPlan, SweepPolicy};
+use plinth_sweep::{SweepDemand, SweepPlan, SweepPolicy};
 
 const HEIGHT_MM: f64 = 3.5;
 const FLOOR_Z_MM: f64 = 1.0;
@@ -488,7 +488,7 @@ pub(crate) fn place_with(mesh: &Mesh, name: &str, policy: &SweepPolicy) -> Sweep
     let layer_count = (((max_z - plate_z) / height).ceil() as usize).saturating_add(1).max(1);
     let layers = LayerPlan::new(plate_z, vec![height; layer_count])
         .unwrap_or_else(|error| panic!("{name}: a uniform layer plan: {error}"));
-    run_sweep(mesh, &layers, policy)
+    harness::memo_run_sweep(mesh, &layers, policy)
         .unwrap_or_else(|error| panic!("{name}: the sweep emits and warns; it must not refuse: {error}"))
 }
 

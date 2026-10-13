@@ -162,7 +162,7 @@ fn plan_of(mesh: &Mesh) -> (SweepPlan, LayerPlan, BuildFrame, f64) {
         .max(1);
     let layers = LayerPlan::new(plate_z, vec![height; count]).expect("a uniform layer plan");
     let policy = SweepPolicy::from_registry().expect("the registry supplies every sweep number");
-    let plan = plinth_sweep::run_sweep(mesh, &layers, &policy)
+    let plan = crate::harness::memo_run_sweep(mesh, &layers, &policy)
         .expect("the sweep emits and warns; it never refuses");
     let frame = BuildFrame::new(
         Finite::new(plate_z).expect("a finite plate"),

@@ -1345,7 +1345,13 @@ fn public_runner_measures_sealed_coverage_with_its_islands_patches_and_resource_
 /// (10.3, 7.2, 19.0) took `unrouted_no_winner` 3 -> 4, and trial 28 at
 /// (10.3, 7.8, 19.0) killed the whole chain with
 /// `Lowering(RootRunTooShort { .. })`.
+///
+/// Ignored in the default run: it is a deliberate red (it reports FINDING 1 and panics with its
+/// own `expect` message) that takes about 8 minutes (496 s measured under `--profile gate`,
+/// 2026-10-13) in the legacy runner, which is not on the `--placement sweep` path.
+/// `scripts/gate-full.sh` runs it; `scripts/known-reds.txt` lists it.
 #[test]
+#[ignore = "slow legacy-runner test: run with scripts/gate-full.sh"]
 fn closure_repairs_censored_dust_because_that_repair_closes_a_real_hole() {
     let hollowed = identity_hollowed(shelf_with_dust_beside_a_row_less_hole());
     let delicacy = real_delicacy(&hollowed);
@@ -1646,7 +1652,13 @@ fn half_buried_table() -> Mesh {
 /// The measured cost of that refusal was three corpus models' artifacts
 /// (Deinonychus, Skeleton_2, Tavey), each one whose ownerless island's true
 /// uncovered area was dust the registered A3 censor already forgives.
+///
+/// Ignored in the default run: it grinds through the legacy runner's coverage-repair trials for
+/// 65 to 80 minutes (stopped at 45 minutes on 2026-10-08 with 458 of 1,028 trials left;
+/// `docs/development.md`, "The four documented reds"), and the legacy runner is not on the
+/// `--placement sweep` path. `scripts/gate-full.sh` runs it.
 #[test]
+#[ignore = "slow legacy-runner test: run with scripts/gate-full.sh"]
 fn a_spec6_removal_discloses_its_ownerless_islands_and_lets_the_measurement_rule() {
     let hollowed = identity_hollowed(half_buried_table());
     let delicacy = vec![0.0; hollowed.mesh().tris().len()];

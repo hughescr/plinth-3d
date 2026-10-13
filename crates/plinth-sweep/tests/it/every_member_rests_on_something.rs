@@ -58,11 +58,12 @@
 // Layer counts from finite model-scale lengths, in test-local arithmetic.
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
+use crate::harness::memo_run_sweep;
 use geom_kernel::{closest_on_tri, segment_segment_distance, vec3};
 use plinth_core::{m0_constants, LayerPlan};
 use plinth_mesh::Mesh;
 use plinth_orient::UpDirection;
-use plinth_sweep::{arms_of, run_sweep, SweepPlan, SweepPolicy};
+use plinth_sweep::{arms_of, SweepPlan, SweepPolicy};
 
 /// What the lowered field looks like from underneath.
 struct Rooting {
@@ -117,7 +118,7 @@ fn swept_with(mesh: &Mesh, policy: &SweepPolicy) -> (Mesh, SweepPlan) {
     let plate_z = min_z - lift_mm;
     let count = (((max_z - plate_z) / height).ceil().max(1.0) as usize) + 1;
     let layers = LayerPlan::new(plate_z, vec![height; count]).expect("a layer plan");
-    let plan = run_sweep(&mesh, &layers, policy).expect("the sweep emits and warns");
+    let plan = memo_run_sweep(&mesh, &layers, policy).expect("the sweep emits and warns");
     (mesh, plan)
 }
 

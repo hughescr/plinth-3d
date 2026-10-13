@@ -31,6 +31,71 @@ cargo test --workspace --profile gate --offline    # lane loop
 cargo test --workspace --release      --offline    # merge gate
 ```
 
+## The test loop: scripts, known reds, a warm new worktree
+
+Measured 2026-10-13 on an M3 Max, gate profile, through the CPU lock (timing mode).
+
+```sh
+scripts/test-fast.sh                 # lane loop: changed crates + dependents, PASS / NEW-RED / FIXED-RED
+scripts/test-fast.sh --base HEAD plinth-sweep -- some_filter   # one crate, one test-name filter
+scripts/gate-full.sh                 # milestone: every test binary, ignored tests too, side by side
+```
+
+- **`scripts/test-fast.sh`** runs `cargo test --profile gate` for the crates you name, or by default
+  for the crates changed against `develop` (`--base REF` changes the reference; `--base HEAD` means
+  only your uncommitted edits) plus every workspace crate that depends on them
+  (`--no-dependents` leaves those out). Test binaries run three at a time. A change to the root
+  `Cargo.toml` or `Cargo.lock` counts as a change to every crate. Ignored tests do not run.
+- **`scripts/gate-full.sh`** is the test half of the merge gate: every workspace test binary and
+  doctest under `--profile gate` with `--include-ignored`, the separate `tools/plinth-audit`
+  workspace (built `--release`: it has no gate profile), at most `-j` binaries at once. Use it at a
+  milestone, not per lane. `--skip-ignored` leaves out the ignored tests (the grinders, and tests
+  that read local minis); that is the routine milestone run, 24 minutes. The big binaries each
+  use every core, so running them side by side saves little except around the single-threaded
+  grinders. The ignored set is red where its inputs are absent; those tests are in
+  `known-reds.txt` marked "ignored".
+- **`scripts/known-reds.txt`** lists the tests that are red on `develop` today, one line each:
+  `<package>::<test program>::<test path> => <signature> ;; <signature>  # reason` (`lib` for a
+  library's unit tests). A signature is a fixed string from the test's panic message that its
+  failure text must contain. Both scripts print each run against the list: `PASS` (nothing failed
+  outside the list), `NEW-RED` (a failure that is not listed, or a test binary that did not
+  complete: no libtest summary line, or an exit status other than 0 and 101; exit status 1),
+  `CHANGED-RED` (a listed test failing with a different message: exit status 1, so a known name
+  cannot hide a new defect), `FIXED-RED` (a listed test that passes: delete its line). A change
+  that fixes a red removes its line in the same commit; nobody adds a line to hide a failure
+  without the signature and the reason beside it. `scripts/test-units-selftest.sh` checks this
+  verdict logic on synthetic logs (no cargo needed); run it after changing `scripts/lib`.
+- **Slow legacy-runner tests are `#[ignore]`d** with the reason
+  `slow legacy-runner test: run with scripts/gate-full.sh`. The legacy runner is not on the
+  `--placement sweep` path; a regression in it shows at the milestone, not in the lane loop.
+- **plinth-sweep integration tests share their sweeps.** `tests/harness` computes each distinct
+  sweep (same mesh, layer plan, policy and hole lists, compared by value) once per test program;
+  `sweep`, `sweep_with`, `sweep_with_drains` and `memo_run_sweep` all go through it, and every
+  caller gets its own copy. A test that grades the run itself (counters, timings) calls
+  `sweep_with_uncached` or `plinth_sweep::run_sweep*`. A new test that sweeps a shared fixture
+  must use the harness entry, not call `run_sweep` itself, or the suite pays the sweep again.
+- **A new worktree starts warm.** The `post-checkout` hook (source `scripts/hooks/post-checkout`;
+  install with `scripts/install-hooks.sh`, once per clone and after any change to the hook) clones
+  `../.plinth-target`, a target directory holding only compiled registry dependencies, into the
+  new worktree's `target/`, and clones the gitignored corpus meshes in from the main checkout. It
+  writes no `.cargo/config.toml`: `incremental = false` doubled the cost of a gate rebuild, and the
+  sccache wrapper never ran (the CPU lock sets `RUSTC_WRAPPER` empty for every locked job). Renew
+  the seed with `scripts/refresh-seed.sh` when `Cargo.lock` changes (the hook says when it is
+  stale). A stale seed is slower, never wrong.
+- **Vendored C++ builds in parallel.** `plinth-solid` names `cc` with its `parallel` feature as a
+  build dependency, so the 19 Manifold translation units compile together.
+
+| step | before | after |
+|---|---|---|
+| plinth-solid build script, cold gate build (wall) | 19.6 s | 6.5 s |
+| first `cargo test --profile gate --workspace --no-run` in a new worktree | 60.3 s | 32.4 s |
+| edit `plinth-sweep/slenderness.rs` -> same build | 10.1 s | 2.8 s |
+| edit `plinth-support/lower/junction.rs` -> same build | 18.1 s | 3.1 s |
+| plinth-sweep `tests/it` under gate, test wall | 1565 s | 1142 s |
+| `test-fast.sh --base HEAD` after a `plinth-verify` edit | | 3 s (183 s with dependents: plinth-pipeline, plinth-cli) |
+| `gate-full.sh --skip-ignored` (72 test binaries, 2,748 tests) | about 6,550 s one binary at a time (release, 2026-10-08) | 1,456 s |
+| `gate-full.sh` with the ignored tests | | not finished in 140 min: `a_spec6_removal` alone needs 65-80 min on a quiet machine |
+
 ## Where integration tests go
 
 Each crate's integration tests are ONE test program, `tests/it/main.rs`, with one module per
@@ -609,7 +674,9 @@ and give the same bits at every thread count.
 
 The test models are inputs, not source, and are not stored in git — the largest is over
 20 MB. A fresh worktree therefore starts with an **empty** `corpus/models/`, because
-`.gitignore` keeps the STLs out of git. Link them in from a checkout that has them:
+`.gitignore` keeps the STLs out of git. The `post-checkout` hook clones them in from the main
+checkout when it creates a worktree (see "The test loop"). For a worktree made before the hook, or
+by hand, link them in from a checkout that has them:
 
 ```sh
 NEW_WT=/path/to/your/worktree
