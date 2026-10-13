@@ -67,6 +67,7 @@ mod root_disc_as_drawn;
 mod round_bases_ratchet;
 mod sabotage;
 mod seat_face;
+mod seated_line;
 mod shaft_landing;
 mod shaft_seat_trim;
 mod slenderness_lane;

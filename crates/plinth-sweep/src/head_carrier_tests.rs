@@ -679,6 +679,7 @@ fn the_footprint_rule_never_slides_a_headed_arm() {
         0.0,
         H,
         &limits,
+        false,
         |members: &[usize], _: &[plinth_support::SweepArm], _: &[[f64; 3]]| {
             vec![[0.0, 0.0, -1.0]; members.len()]
         },
@@ -924,7 +925,10 @@ fn the_lip_seat_pass_never_re_lands_a_headed_arm_on_either_trigger() {
             let bites = vec![Some(bite)];
             let violators = [true];
             let trigger = if clearance {
-                crate::lip_seat::Trigger::Clearance { violators: &violators }
+                crate::lip_seat::Trigger::Clearance {
+                    violators: &violators,
+                    foot_sizing: None,
+                }
             } else {
                 crate::lip_seat::Trigger::SeatBite
             };

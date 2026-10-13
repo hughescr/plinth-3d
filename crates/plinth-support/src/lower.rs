@@ -698,6 +698,51 @@ impl SweepRootFlare {
         self.config.raft_height_mm.get()
     }
 
+    /// **The straight line the lowering draws ANY seated member's shaft
+    /// along** (fix lane A, 2026-10-12): a plate-rooted member's is
+    /// [`Self::plate_shaft_of`]; a member landed on another member or on the
+    /// model runs from its seated ball's CENTRE (the grown ball's, where
+    /// [`SweepArm::contact_ball_radius_mm`] grows it: [`seated_ball`] moves the
+    /// centre out along the seat normal) to its base. A member whose ball is
+    /// seated along a tilted normal, and above all one whose ball grew, draws
+    /// its shaft off the seat-to-base line it was planned on: on Deinonychus
+    /// (`joint/out-fix/final`) a 0.533 mm grown ball put its host's shaft
+    /// 0.25 mm from the planned axis where a branch landed, and the branch's
+    /// end printed in air. A rule that puts a junction on a member's shaft
+    /// reads it here.
+    ///
+    /// `None` for a headed member (its post is drawn from the carried joint,
+    /// on the line it was planned on), a member that does not seat into the
+    /// model, or one the lowering refuses to draw.
+    #[must_use]
+    pub fn shaft_line_of(&self, arm: &SweepArm, plate_z_mm: f64) -> Option<([f64; 3], [f64; 3])> {
+        if arm.landing == SweepArmLanding::Plate {
+            return self.plate_shaft_of(arm, plate_z_mm);
+        }
+        if !arm.seats_into_model || arm.head.is_some() {
+            return None;
+        }
+        // Read in this door's plate-at-zero frame, as `plate_shaft_of` reads.
+        let lift = |point: [f64; 3], by: f64| [point[0], point[1], point[2] + by];
+        let local = SweepArm {
+            seat_mm: lift(arm.seat_mm, -plate_z_mm),
+            base_mm: lift(arm.base_mm, -plate_z_mm),
+            seat_face_point_mm: arm.seat_face_point_mm.map(|point| lift(point, -plate_z_mm)),
+            ..arm.clone()
+        };
+        let delta: [f64; 3] =
+            std::array::from_fn(|index| local.base_mm[index] - local.seat_mm[index]);
+        let length = delta.iter().map(|value| value * value).sum::<f64>().sqrt();
+        if !length.is_finite() || length <= ZERO_LENGTH_MM {
+            return None;
+        }
+        let unit = delta.map(|value| value / length);
+        let tip_radius = positive(local.tip_radius_mm).ok()?.get();
+        let ball_radius = self.config.sweep_ball_factor(tip_radius) * tip_radius;
+        let (_, centre, _) = seated_ball(&local, unit, tip_radius, ball_radius, self.config);
+        Some((lift(centre, plate_z_mm), arm.base_mm))
+    }
+
     /// **The straight line [`lower_sweep_arms`] draws a plate-rooted member's
     /// SHAFT along** (fix/morel-long-posts, 2026-10-02): from the shaft's top
     /// (the seated ball centre of a member that seats into the model, its

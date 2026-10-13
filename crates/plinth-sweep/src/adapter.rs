@@ -131,6 +131,13 @@ pub struct SweepEmission {
     /// the line now drawn. Without it each stood that far off its post.
     pub downgraded_joins: usize,
     pub downgraded_follow_max_mm: f64,
+    /// Members landed or seated on a member whose seated ball puts its drawn
+    /// shaft off the line it was planned on (its ball's centre stands off
+    /// the seat along a tilted normal, further where the ball grew), and the
+    /// largest displacement that moved one onto the drawn shaft (fix lane A,
+    /// 2026-10-12). Without it each stood that far off its host.
+    pub seated_line_joins: usize,
+    pub seated_line_follow_max_mm: f64,
     /// Members whose drawn profile the JUNCTION CLAUSE raised above their
     /// ledger, from the junction down to their root, because a thicker branch
     /// joins them. A brace raises nothing since 2026-10-03 (rule R2), so this
@@ -301,6 +308,8 @@ pub fn to_primitives(
         max_standoff_deficit_mm: raised.max_standoff_deficit_mm,
         downgraded_joins: raised.downgraded_joins,
         downgraded_follow_max_mm: raised.downgraded_follow_max_mm,
+        seated_line_joins: raised.seated_line_joins,
+        seated_line_follow_max_mm: raised.seated_line_follow_max_mm,
         members_raised_to_a_branch: raised.members,
         arm_junctions_inverted_in_ledger: raised.arm_ledger_inversions,
         load_steps_tapered: raised.load_steps_tapered,
@@ -505,6 +514,11 @@ pub(crate) struct JunctionRaises {
     /// ([`downgraded_follow_of`]).
     downgraded_joins: usize,
     downgraded_follow_max_mm: f64,
+    /// Joins on a member whose seated ball puts its drawn shaft off its
+    /// planned line, and the largest displacement that moved one onto it
+    /// ([`drawn_line_offset`], fix lane A 2026-10-12): the path hits.
+    seated_line_joins: usize,
+    seated_line_follow_max_mm: f64,
     /// Members whose drawn profile was raised anywhere.
     members: usize,
     /// Load steps drawn as a cone ([`LoadStepTaper`]), and the layers the
@@ -923,21 +937,21 @@ pub fn drawn_line_offset(
     arm: &SweepArm,
     plate_z_mm: f64,
 ) -> Option<LineOffset> {
-    if arm.landing != SweepArmLanding::Plate {
-        return None;
-    }
-    // A vertical member's drawn line is its planned line (the boss stands
-    // under its own seat); nothing moves, bit for bit.
     // A HEADED arm's post is planned from the head's joint `K`, not from the
     // seat (which stays the contact seat so the lowering recognises the head,
     // [`plinth_support::SweepRootFlare::plate_shaft_of`]); `K` is an absolute
     // drawn-frame point, like the arm's other points.
     let planned_top = arm.head.as_ref().map_or(arm.seat_mm, |head| head.joint_mm);
-    let same = |a: f64, b: f64| a.partial_cmp(&b) == Some(std::cmp::Ordering::Equal);
-    if same(planned_top[0], arm.base_mm[0]) && same(planned_top[1], arm.base_mm[1]) {
-        return None;
-    }
-    let (top, bottom) = flare.plate_shaft_of(arm, plate_z_mm)?;
+    // THE SHAFT STARTS AT THE SEATED BALL'S CENTRE (fix lane A, 2026-10-12):
+    // a member landed on another member, or a vertical plate post, draws its
+    // shaft from its ball's centre, which the seat law puts off the seat along
+    // a tilted normal and a grown ball puts further off
+    // ([`plinth_support::SweepRootFlare::shaft_line_of`]). Until then only a
+    // LEANING plate post was read, and a 0.533 mm grown ball left its host's
+    // drawn shaft 0.25 mm from the branch that landed on the planned line
+    // (Deinonychus arm 160 on post 162). A member whose drawn line IS its
+    // planned line returns `None`, bit for bit.
+    let (top, bottom) = flare.shaft_line_of(arm, plate_z_mm)?;
     let rise = top[2] - bottom[2];
     if !(rise.is_finite() && rise > 0.0) {
         return None;
@@ -954,7 +968,9 @@ pub fn drawn_line_offset(
         let drawn = drawn_at(planned[2]);
         [drawn[0] - planned[0], drawn[1] - planned[1], 0.0]
     };
-    Some((off(planned_top), off(arm.base_mm)))
+    let offset = (off(planned_top), off(arm.base_mm));
+    let zero = |v: [f64; 3]| v.iter().all(|c| c.partial_cmp(&0.0) == Some(std::cmp::Ordering::Equal));
+    (!(zero(offset.0) && zero(offset.1))).then_some(offset)
 }
 
 /// [`drawn_line_offset`] for a member as it stands in the plan, before any
@@ -1279,9 +1295,13 @@ fn arms_and_junction_raises_over(
                     return downgraded_line_offset(flare.as_ref(), grid, plate, height, strut);
                 }
                 let flare = flare.as_ref()?;
-                (strut.landing == Landing::Plate
-                    && strut.kind != crate::StrutKind::Brace
-                    && strut.is_leaned())
+                // A leaning plate post (its boss stands over its foot), and
+                // every member that seats a ball into the model (its shaft
+                // starts at the ball's centre, off its seat along the seat
+                // normal; fix lane A, 2026-10-12).
+                (strut.kind != crate::StrutKind::Brace
+                    && ((strut.landing == Landing::Plate && strut.is_leaned())
+                        || strut.kind.seats_on_model()))
                 // A headed arm keeps its contact seat (the lowering's own
                 // `headed_tip` needs it to recognise the head);
                 // `drawn_line_offset` measures the POST's line from the
@@ -1354,13 +1374,18 @@ fn downgraded_follow_of(
             _ => None,
         };
         for (host, layer) in [seat_join, base_join].into_iter().flatten() {
-            if !straight(host) {
-                continue;
-            }
             let Some(Some(offset)) = offsets.get(host) else {
                 continue;
             };
             let at = offset_at(offset, &struts[host], layer);
+            if !straight(host) {
+                if struts[host].kind.seats_on_model() && struts[host].head.is_none() {
+                    raised.seated_line_joins += 1;
+                    raised.seated_line_follow_max_mm =
+                        raised.seated_line_follow_max_mm.max(at[0].hypot(at[1]));
+                }
+                continue;
+            }
             raised.downgraded_joins += 1;
             raised.downgraded_follow_max_mm = raised.downgraded_follow_max_mm.max(at[0].hypot(at[1]));
         }

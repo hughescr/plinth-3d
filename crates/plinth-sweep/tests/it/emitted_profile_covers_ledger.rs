@@ -688,20 +688,16 @@ fn census(plan: &SweepPlan, emission: &SweepEmission) -> Census {
     // The landing is the base cell's centre, moved with its host's drawn axis
     // when the footprint rule slid that host's seat along its face
     // (fix/tip-trim, 2026-09-28: `footprint::followed_shifts`, zero where
-    // nothing moved).
-    let followed = plinth_sweep::footprint::followed_shifts(&plan.struts);
+    // nothing moved), and with its host's DRAWN shaft where that shaft starts
+    // at a seated ball off the planned line (fix lane A, 2026-10-12:
+    // `adapter::drawn_line_offset`): the base the lowering is handed.
+    let drawn = plinth_sweep::arms_of(plan);
     // Each member with the junction hulls that cut into it (see
     // `with_foreign_hulls`): the host's drawn solid is its own frusta and those.
     let extended = with_foreign_hulls(emission, &groups);
-    for (index, ((strut, group), follow)) in
-        plan.struts.iter().zip(&groups).zip(&followed).enumerate()
+    for (index, ((strut, group), arm)) in plan.struts.iter().zip(&groups).zip(&drawn).enumerate()
     {
-        let base_cell = strut.base_cell();
-        let base_shift = follow.base_mm.unwrap_or([0.0; 3]);
-        let base = [
-            plan.grid.center_x_mm(plan.grid.col_of(base_cell)) + base_shift[0],
-            plan.grid.center_y_mm(plan.grid.row_of(base_cell)) + base_shift[1],
-        ];
+        let base = [arm.base_mm[0], arm.base_mm[1]];
         let (root_point, _) = drawn_root(group).expect("every member has a shaft");
         let host_group = match strut.landing {
             Landing::Strut { id, .. } => groups.get(id as usize),

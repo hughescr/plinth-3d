@@ -580,6 +580,22 @@ slicer cures that patch in free resin. Two tip rules are held to this:
   or along a tilted face's strike stays on the laminae the tip was placed under)
   (`footprint::keeps_seat`); otherwise the tip tries its next candidate and, when
   none keeps the seat, keeps its own with a warning (`Footprint::MoveRefused`).
+- **A footprint slide leaves nothing it held over air** (fix lane A). The seat is one point; a
+  ball holds every cell its section covers at the layer the cell cures on or the one under it. Every
+  cell where model may stand (`cover`) that the ungrown placed ball holds and the ungrown moved ball
+  does not must join, through cells of its own layer where model surely stands (`carry`), a cell with
+  model surely under it, a cell the moved ball holds, or the edge of the window the slide reaches
+  (`footprint::keeps_ground`). The no-climb clause alone passed a 0.51 mm slide DOWN a face that
+  left its seat island floating, and slides that kept the seat point uncovered material beside it.
+- **A junction stands on the shaft the file draws.** A seated member's shaft starts at its ball's
+  centre, which the seat law puts off the seat along the seat normal and contact growth puts further
+  off. Every member landed or seated on such a shaft follows the drawn line, exactly as it follows a
+  leaning plate post's boss line (`adapter::drawn_line_offset`, read on
+  `plinth_support::SweepRootFlare::shaft_line_of`).
+- **A model foot fits at the size it is drawn.** The descent checks a foot at the tip's minimum;
+  on the sized field the foot is drawn for the load it passes. The clearance re-route also sends a
+  model landing whose load-sized foot does not lie wholly on the model, and offers it only model
+  candidates that fit that foot; one with none left keeps its landing with a warning.
 
 Land-at-strike is a **ratified design principle** — the standing answer for how the engine
 should treat a stub that runs into the model — rather than a claim that every piece of it is

@@ -999,6 +999,15 @@ pub struct SweepPolicy {
     /// with arms landed on arms turns it off, because converting a grazer moves
     /// the arm off its host.
     pub graze_heads: bool,
+    /// Whether a footprint slide must leave nothing the placed ball held over
+    /// air ([`footprint`]'s ground check, fix lane A 2026-10-12). **On in
+    /// production.** Off only for its sabotage drill.
+    pub footprint_ground: bool,
+    /// Whether the clearance re-route also re-lands a model landing whose
+    /// foot, sized for the load it passes on the sized field, does not lie
+    /// wholly on the model (fix lane A 2026-10-12). **On in production.** Off
+    /// only for its sabotage drill.
+    pub refit_model_feet: bool,
     /// Whether every member is sized for its worst SINGLE peel event, routed on
     /// its own ([`per_event`], rule a′, owner-approved 2026-09-29), and the
     /// load insertion triggered by one event's routed load. **On in
@@ -1143,6 +1152,8 @@ impl SweepPolicy {
             drawn_solid_descent: true,
             clearance_reroute: true,
             graze_heads: true,
+            footprint_ground: true,
+            refit_model_feet: true,
             per_event_sizing: true,
             unrooted_routing: true,
             handed_column_ledger: true,
@@ -1581,6 +1592,22 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_graze_heads(mut self) -> Self {
         self.graze_heads = false;
+        self
+    }
+
+    /// Let a footprint slide take its ball from under material it held (the
+    /// rule before 2026-10-12). **Sabotage only.**
+    #[must_use]
+    pub const fn without_footprint_ground(mut self) -> Self {
+        self.footprint_ground = false;
+        self
+    }
+
+    /// Leave a model landing whose sized foot does not fit where the descent
+    /// put it (the rule before 2026-10-12). **Sabotage only.**
+    #[must_use]
+    pub const fn without_model_foot_refit(mut self) -> Self {
+        self.refit_model_feet = false;
         self
     }
 
@@ -2642,6 +2669,7 @@ pub fn run_sweep_with_holes(
         passes: policy.strut_removal_passes,
         enabled: policy.lip_seat,
         across_passes: policy.lip_seat_across_passes,
+        refit_feet: policy.refit_model_feet,
     };
     // Descents a sized field put back (arm id, base cell), refused for the
     // rest of the rule, both runs.
@@ -3487,6 +3515,7 @@ pub fn run_sweep_with_holes(
         plate_z,
         height,
         &limits,
+        policy.footprint_ground,
         |members: &[usize], moved: &[plinth_support::SweepArm], shifts: &[[f64; 3]]| {
             let sites: Vec<Option<footprint_normal::TipSite>> = members
                 .iter()
@@ -4147,6 +4176,10 @@ struct LipSeatRun<'a> {
     passes: u32,
     enabled: bool,
     across_passes: bool,
+    /// Whether the clearance re-route also sends, and re-lands to fit, a
+    /// model landing whose load-sized foot does not fit (fix lane A,
+    /// 2026-10-12; [`SweepPolicy::refit_model_feet`]).
+    refit_feet: bool,
 }
 
 /// What a [`LipSeatRun`] is sent by.
@@ -4238,17 +4271,26 @@ impl LipSeatRun<'_> {
                     }
                     RunMode::Clearance { exclude } => {
                         let named;
-                        (violators, named) =
-                            lip_seat::clearance_violators(joins, struts, &arms, exclude);
+                        let misfits;
+                        (violators, named, misfits) = lip_seat::clearance_violators(
+                            joins,
+                            struts,
+                            &arms,
+                            exclude,
+                            self.refit_feet.then_some(self.sizing),
+                        );
                         if pass == 0 && reruns == 0 {
                             outcome.clearance_violators_first = named;
+                            outcome.foot_misfits_first = misfits;
                         }
                         outcome.clearance_violators_last = named;
+                        outcome.foot_misfits_last = misfits;
                         if named == 0 {
                             break;
                         }
                         lip_seat::Trigger::Clearance {
                             violators: &violators,
+                            foot_sizing: self.refit_feet.then_some(self.sizing),
                         }
                     }
                 };

@@ -170,6 +170,10 @@ pub struct FootprintOutcome {
     /// ball no longer holds the seat the tip was placed for ([`keeps_seat`],
     /// joint review P2): the path hits of that rule.
     pub moves_refused_off_seat: usize,
+    /// Of those, the ones refused because the moved ball would leave model
+    /// cells the placed ball held over nothing ([`keeps_ground`], fix lane A
+    /// 2026-10-12): the path hits of that check.
+    pub moves_refused_off_ground: usize,
     /// THE LIP-SEAT RULE's remedy 2 (2026-09-29): tips whose disc was on its
     /// face but whose shaft the seat trim cut outside its ball, searched for a
     /// seat further along the same face; those moved there; and slides of
@@ -657,6 +661,8 @@ fn carried(
 struct Slid {
     ball_centre: [f64; 3],
     ball_radius: f64,
+    /// The UNGROWN ball's radius (the owner's ball for the tip size).
+    planned_ball_radius: f64,
     disc_centre: [f64; 3],
     disc_radius: f64,
     /// The seat plane's outward unit normal.
@@ -668,10 +674,28 @@ impl Slid {
         Self {
             ball_centre: disc.ball_centre_mm,
             ball_radius: disc.ball_radius_mm,
+            planned_ball_radius: disc.planned_ball_radius_mm,
             disc_centre: disc.centre_mm,
             disc_radius: disc.radius_mm,
             normal: disc.outward_normal,
         }
+    }
+
+    /// The UNGROWN ball: the lowering grows a ball by keeping its deepest
+    /// point along the outward normal (`plinth_support`'s `seated_ball`), so
+    /// the ungrown centre stands `(R - R0)` back along the normal. Every ball
+    /// the finished field's contact growth draws CONTAINS this one, so what
+    /// it holds the file holds.
+    fn ungrown(&self) -> ([f64; 3], f64) {
+        let planned = self.planned_ball_radius.min(self.ball_radius);
+        if planned.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+            return (self.ball_centre, self.ball_radius);
+        }
+        let back = self.ball_radius - planned;
+        (
+            std::array::from_fn(|axis| self.ball_centre[axis] - back * self.normal[axis]),
+            planned,
+        )
     }
 
     /// The contact disc's lowest point: its centre less its radius times the
@@ -709,6 +733,373 @@ fn keeps_seat(seat: [f64; 3], placed: Slid, moved: Slid, pitch: f64, height: f64
         return true;
     }
     moved.lowest_mm() <= placed.lowest_mm() + height
+}
+
+/// The cured model around ONE searched tip, as the ground check reads it
+/// ([`keeps_ground`]): the sweep's own two masks of each layer the tip's ball
+/// spans (and the one under it), cut to a window of the grid. `cover` (any
+/// overlap, rounded outward) says where model MAY be, so a cell it names is
+/// one the slide must not leave over air; `carry` (full containment, eroded)
+/// says where model surely is, so only it joins a cell to its neighbours or
+/// stands under it. Both read in their safe direction: the check never claims
+/// ground the raster is not sure of.
+struct GroundWindow {
+    row0: usize,
+    col0: usize,
+    rows: usize,
+    cols: usize,
+    layer0: usize,
+    layers: usize,
+    /// Bit 0 `cover`, bit 1 `carry`, per (layer, row, col) of the window.
+    bits: Vec<u8>,
+}
+
+impl GroundWindow {
+    const COVER: u8 = 1;
+    const CARRY: u8 = 2;
+
+    fn slot(&self, row: usize, col: usize, layer: usize) -> Option<usize> {
+        let (r, c, k) = (
+            row.checked_sub(self.row0)?,
+            col.checked_sub(self.col0)?,
+            layer.checked_sub(self.layer0)?,
+        );
+        (r < self.rows && c < self.cols && k < self.layers)
+            .then_some((k * self.rows + r) * self.cols + c)
+    }
+
+    fn has(&self, row: usize, col: usize, layer: usize, bit: u8) -> bool {
+        self.slot(row, col, layer)
+            .is_some_and(|slot| self.bits[slot] & bit != 0)
+    }
+}
+
+/// The windows the ground check reads, one per searched tip: ONE ascending
+/// pass over the layers any of them spans, each layer rasterised once
+/// ([`rasterize_into`], the sweep's own masks). `balls[i]` is the i-th tip's
+/// UNGROWN placed ball and `reach[i]` the window's half-width in mm.
+fn ground_windows(
+    grid: &Grid,
+    slices: &[Vec<SliceSolid>],
+    plate_z: f64,
+    height: f64,
+    balls: &[([f64; 3], f64)],
+    reach: &[f64],
+) -> Vec<GroundWindow> {
+    let pitch = grid.pitch_mm();
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "raster coordinates and layer indices of a ball near the model are small and clamped at zero"
+    )]
+    let index_of = |value: f64| value.max(0.0).floor() as usize;
+    let mut windows: Vec<GroundWindow> = balls
+        .iter()
+        .zip(reach)
+        .map(|(&(centre, radius), &reach)| {
+            let col0 = index_of(grid.col_coord(centre[0] - reach));
+            let row0 = index_of(grid.row_coord(centre[1] - reach));
+            let col1 = index_of(grid.col_coord(centre[0] + reach) + 1.0).min(grid.cols());
+            let row1 = index_of(grid.row_coord(centre[1] + reach) + 1.0).min(grid.rows());
+            let layer0 = index_of((centre[2] - radius - plate_z) / height).saturating_sub(2);
+            let layer1 = (index_of((centre[2] + radius - plate_z) / height) + 2).min(slices.len());
+            let (rows, cols) = (row1.saturating_sub(row0), col1.saturating_sub(col0));
+            let layers = layer1.saturating_sub(layer0);
+            GroundWindow {
+                row0,
+                col0,
+                rows,
+                cols,
+                layer0,
+                layers,
+                bits: vec![0; rows * cols * layers],
+            }
+        })
+        .collect();
+    if !(pitch > 0.0 && height > 0.0) || windows.is_empty() {
+        return windows;
+    }
+    let mut opening: Vec<Vec<usize>> = vec![Vec::new(); slices.len()];
+    for (index, window) in windows.iter().enumerate() {
+        for slot in opening.iter_mut().skip(window.layer0).take(window.layers) {
+            slot.push(index);
+        }
+    }
+    let mut scratch = RasterScratch::new(grid);
+    let mut masks = LayerMasks::default();
+    for (layer, solids) in slices.iter().enumerate() {
+        if opening[layer].is_empty() {
+            continue;
+        }
+        rasterize_into(grid, solids, &mut scratch, &mut masks);
+        for &index in &opening[layer] {
+            let window = &mut windows[index];
+            for r in 0..window.rows {
+                for c in 0..window.cols {
+                    let cell = grid.index(window.row0 + r, window.col0 + c);
+                    let bits = u8::from(masks.cover[cell]) * GroundWindow::COVER
+                        + u8::from(masks.carry[cell]) * GroundWindow::CARRY;
+                    let slot = ((layer - window.layer0) * window.rows + r) * window.cols + c;
+                    window.bits[slot] = bits;
+                }
+            }
+        }
+    }
+    windows
+}
+
+/// What the ground check reads for one tip ([`keeps_ground`]).
+struct Ground<'a> {
+    grid: &'a Grid,
+    window: &'a GroundWindow,
+    plate_z: f64,
+    height: f64,
+}
+
+impl Ground<'_> {
+    /// The height a slicer cures layer `layer` at: its mid-plane.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a layer index bounded by the plan's own layer count is exact in f64"
+    )]
+    fn layer_mid_z(&self, layer: usize) -> f64 {
+        self.plate_z + (layer as f64 + 0.5) * self.height
+    }
+
+    fn centre_of(&self, cell: usize) -> [f64; 2] {
+        [
+            self.grid.center_x_mm(self.grid.col_of(cell)),
+            self.grid.center_y_mm(self.grid.row_of(cell)),
+        ]
+    }
+
+    /// Whether the ball `(centre, radius)` HOLDS the model cell `cell` at
+    /// `layer`: its section at that layer's mid-plane, or at the mid-plane of
+    /// the layer under it (where the cell is cured ONTO it), covers the whole
+    /// cell, the cell's centre at least half a cell diagonal inside the
+    /// circle. The raster knows the model only to within its cell, so a cell
+    /// the ball only grazes is not one it is known to hold.
+    fn holds(&self, (centre, radius): ([f64; 3], f64), cell: usize, layer: usize) -> bool {
+        let [x, y] = self.centre_of(cell);
+        let rho = (x - centre[0]).hypot(y - centre[1])
+            + crate::member_clearance::raster_half_diagonal_mm(self.grid);
+        [Some(layer), layer.checked_sub(1)]
+            .into_iter()
+            .flatten()
+            .any(|k| {
+                let dz = self.layer_mid_z(k) - centre[2];
+                let section_sq = radius * radius - dz * dz;
+                section_sq > 0.0 && rho * rho <= section_sq
+            })
+    }
+
+    /// Model MAY stand in this cell at this layer (`cover`).
+    fn may_be_model(&self, cell: usize, layer: usize) -> bool {
+        self.window.has(
+            self.grid.row_of(cell),
+            self.grid.col_of(cell),
+            layer,
+            GroundWindow::COVER,
+        )
+    }
+
+    /// Model surely stands in this cell at this layer (`carry`).
+    fn is_model(&self, cell: usize, layer: usize) -> bool {
+        self.window.has(
+            self.grid.row_of(cell),
+            self.grid.col_of(cell),
+            layer,
+            GroundWindow::CARRY,
+        )
+    }
+
+    /// Whether the window holds this cell at all.
+    fn in_store(&self, cell: usize) -> bool {
+        let (row, col) = (self.grid.row_of(cell), self.grid.col_of(cell));
+        row >= self.window.row0
+            && row < self.window.row0 + self.window.rows
+            && col >= self.window.col0
+            && col < self.window.col0 + self.window.cols
+    }
+}
+
+/// **A slide leaves nothing it held over air** (fix lane A, 2026-10-12).
+///
+/// [`keeps_seat`] asks about ONE point, the seat; but a ball holds every
+/// cured cell its section covers at the layer the cell cures on, or the one
+/// under it, and a slide that keeps the seat point can still take the ball
+/// from under the material beside it. Measured on Deinonychus (`joint/
+/// out-fix/final`, slicer view with a one-pixel lateral allowance): arm 101
+/// slid 0.51 mm DOWN its slope (passing the no-climb clause) and the 121
+/// pixels of its own seat island at 7.925 mm floated; arms 92, 60 and 133
+/// slid 0.10-0.22 mm with the seat still inside the moved ball, and 131, 97
+/// and 44 pixels beside their seats, which the unmoved balls had held,
+/// floated.
+///
+/// So every cell where model may stand that the UNGROWN placed ball holds (in
+/// the ball's whole height, layer by layer) and the ungrown moved ball does
+/// not, must still be held by something else: it must join, through cells
+/// of ITS OWN layer where model surely stands, a cell with model surely
+/// under it (carried from below), a cell the moved ball holds, or the edge of
+/// the window the check reads (material that runs further than both balls
+/// and the slide is someone else's to carry, and is left to the rules that
+/// placed it). The ungrown balls are compared because the finished field's
+/// contact growth only ever grows a ball to one that contains its ungrown
+/// ball. A first cut read the up-sweep's `cover` record for all three
+/// questions; its outward rounding joined arm 101's seat island to the slope
+/// beside it through a cell the slicer leaves open, and passed the slide.
+///
+/// Read on the sweep's own two masks ([`GroundWindow`]); no new number: the
+/// window is the two balls and the slide, plus the raster's own two-cell edge.
+fn keeps_ground(ground: &Ground<'_>, placed: Slid, moved: Slid) -> bool {
+    let before = placed.ungrown();
+    let after = moved.ungrown();
+    let grid = ground.grid;
+    let pitch = grid.pitch_mm();
+    if !(pitch > 0.0 && ground.height > 0.0) || grid.cells() == 0 {
+        return true;
+    }
+    let travel = (after.0[0] - before.0[0]).hypot(after.0[1] - before.0[1]);
+    let reach = before.1 + after.1 + travel + 2.0 * pitch;
+    let [cx, cy] = [before.0[0], before.0[1]];
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "raster coordinates of a window a few ball radii across are small, clamped to the grid"
+    )]
+    let span = |coord: f64, count: usize| -> (usize, usize) {
+        let lo = (coord - reach / pitch).floor().max(0.0) as usize;
+        let hi = ((coord + reach / pitch).ceil().max(0.0) as usize).min(count.saturating_sub(1));
+        (lo, hi)
+    };
+    let (c0, c1) = span(grid.col_coord(cx), grid.cols());
+    let (r0, r1) = span(grid.row_coord(cy), grid.rows());
+    if c1 < c0 || r1 < r0 {
+        return true;
+    }
+    let width = c1 - c0 + 1;
+    let local = |row: usize, col: usize| (row - r0) * width + (col - c0);
+    let in_window = |cell: usize| {
+        let [x, y] = ground.centre_of(cell);
+        let (row, col) = (grid.row_of(cell), grid.col_of(cell));
+        (r0..=r1).contains(&row)
+            && (c0..=c1).contains(&col)
+            && (x - cx).hypot(y - cy) <= reach
+            && ground.in_store(cell)
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "layer indices of a ball's height over the plate are small and clamped at zero"
+    )]
+    let layer_of = |z: f64| ((z - ground.plate_z) / ground.height).max(0.0) as usize;
+    let lowest = layer_of(before.0[2] - before.1).saturating_sub(1);
+    let highest = layer_of(before.0[2] + before.1) + 1;
+    // Which walk reached each cell of the layer (0: none). Every walk that
+    // ended before this one found ground (an ungrounded one returns at once),
+    // so a cell an EARLIER walk reached is ground for this one.
+    let mut seen = vec![0_u32; width * (r1 - r0 + 1)];
+    let mut walk = 0_u32;
+    let mut queue: Vec<usize> = Vec::new();
+    for layer in lowest..=highest {
+        seen.iter_mut().for_each(|stamp| *stamp = 0);
+        for row in r0..=r1 {
+            for col in c0..=c1 {
+                let cell = grid.index(row, col);
+                if seen[local(row, col)] != 0
+                    || !ground.may_be_model(cell, layer)
+                    || !ground.holds(before, cell, layer)
+                    || ground.holds(after, cell, layer)
+                {
+                    continue;
+                }
+                // A cell the placed ball held and the moved one does not:
+                // the component of its layer it lies in must be held some
+                // other way. The whole component is walked, so a later lost
+                // cell in it is already decided.
+                let mut grounded = false;
+                walk += 1;
+                queue.clear();
+                queue.push(cell);
+                seen[local(row, col)] = walk;
+                // A cell where model only MAY stand is the uncertain edge of
+                // whatever surely stands within the raster's own rounding band
+                // (`cover` rounds out one cell, `carry` in one and erodes one
+                // more in Y): it belongs to that material, so the walk starts
+                // from it too. Without this the rim ring of a flat disc's
+                // first lamina joined nothing, and every rim slide of the
+                // flipped Round 25 was refused.
+                let band: isize = if ground.is_model(cell, layer) { 0 } else { 2 };
+                for dr in -band..=band {
+                    for dc in -band..=band {
+                        let (Some(nr), Some(nc)) =
+                            (row.checked_add_signed(dr), col.checked_add_signed(dc))
+                        else {
+                            continue;
+                        };
+                        if !((r0..=r1).contains(&nr) && (c0..=c1).contains(&nc)) {
+                            continue;
+                        }
+                        let near = grid.index(nr, nc);
+                        if !(ground.is_model(near, layer) && in_window(near)) {
+                            continue;
+                        }
+                        match seen[local(nr, nc)] {
+                            0 => {
+                                seen[local(nr, nc)] = walk;
+                                queue.push(near);
+                            }
+                            stamp if stamp != walk => grounded = true,
+                            _ => {}
+                        }
+                    }
+                }
+                while let Some(at) = queue.pop() {
+                    if (layer > 0 && ground.is_model(at, layer - 1)) || ground.holds(after, at, layer) {
+                        grounded = true;
+                    }
+                    let (ar, ac) = (grid.row_of(at), grid.col_of(at));
+                    for dr in -1_isize..=1 {
+                        for dc in -1_isize..=1 {
+                            if dr == 0 && dc == 0 {
+                                continue;
+                            }
+                            let (Some(nr), Some(nc)) =
+                                (ar.checked_add_signed(dr), ac.checked_add_signed(dc))
+                            else {
+                                continue;
+                            };
+                            if nr >= grid.rows() || nc >= grid.cols() {
+                                continue;
+                            }
+                            let next = grid.index(nr, nc);
+                            if !ground.is_model(next, layer) {
+                                continue;
+                            }
+                            if !in_window(next) {
+                                // It runs past everything the slide touched.
+                                grounded = true;
+                                continue;
+                            }
+                            let slot = local(nr, nc);
+                            match seen[slot] {
+                                0 => {
+                                    seen[slot] = walk;
+                                    queue.push(next);
+                                }
+                                stamp if stamp != walk => grounded = true,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                if !grounded {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// The integer lattice offsets inside a disc of `radius` pitches, centre first.
@@ -850,6 +1241,7 @@ pub(crate) fn apply(
     plate_z: f64,
     height: f64,
     limits: &MoveLimits<'_>,
+    ground_check: bool,
     mut remeasure: impl FnMut(&[usize], &[SweepArm], &[[f64; 3]]) -> Vec<[f64; 3]>,
 ) -> FootprintOutcome {
     let mut outcome = FootprintOutcome::default();
@@ -1017,6 +1409,7 @@ pub(crate) fn apply(
                     geom_kernel::vec3::scale(frame.normal, frame.centre_height),
                 ),
                 ball_radius: frame.ball_radius,
+                planned_ball_radius: frame.planned_ball_radius,
                 disc_centre: frame.centre,
                 disc_radius: discs[arm].map_or(0.0, |disc| disc.radius_mm),
                 normal: frame.normal,
@@ -1025,6 +1418,31 @@ pub(crate) fn apply(
     }
     outcome.search_samples = lattice.len();
     let lattice_hit = graded(grid, slices, surface, &lattice, &mut outcome.layers_rasterised);
+    // THE GROUND EACH SEARCHED TIP HOLDS (`keeps_ground`): one window per
+    // tip, wide enough for its ball moved anywhere the search may take it,
+    // every layer rasterised once.
+    let windows: Vec<GroundWindow> = if ground_check {
+        let balls: Vec<([f64; 3], f64)> =
+            searches.iter().map(|search| search.slid.ungrown()).collect();
+        let reach: Vec<f64> = searches
+            .iter()
+            .map(|search| {
+                let (_, radius) = search.slid.ungrown();
+                f64::from(search.half_width) * pitch + 2.0 * radius + 4.0 * pitch
+            })
+            .collect();
+        ground_windows(grid, slices, plate_z, height, &balls, &reach)
+    } else {
+        Vec::new()
+    };
+    let ground_of = |slot: usize| {
+        windows.get(slot).map(|window| Ground {
+            grid,
+            window,
+            plate_z,
+            height,
+        })
+    };
     let on_lattice = |search: &Search, u: i32, v: i32| -> bool {
         let w = search.half_width;
         if u.abs() > w || v.abs() > w {
@@ -1110,6 +1528,12 @@ pub(crate) fn apply(
                 };
                 if !keeps_seat(seat, search.slid, rigid, pitch, height) {
                     outcome.moves_refused_off_seat += 1;
+                    refused_by_limits[slot] = true;
+                    continue;
+                }
+                if ground_of(slot).is_some_and(|ground| !keeps_ground(&ground, search.slid, rigid)) {
+                    outcome.moves_refused_off_seat += 1;
+                    outcome.moves_refused_off_ground += 1;
                     refused_by_limits[slot] = true;
                     continue;
                 }
@@ -1234,6 +1658,14 @@ pub(crate) fn apply(
                 height,
             ) {
                 outcome.moves_refused_off_seat += 1;
+                refused_by_limits[*slot] = true;
+                continue;
+            }
+            if ground_of(*slot)
+                .is_some_and(|ground| !keeps_ground(&ground, search.slid, Slid::of(&disc)))
+            {
+                outcome.moves_refused_off_seat += 1;
+                outcome.moves_refused_off_ground += 1;
                 refused_by_limits[*slot] = true;
                 continue;
             }
@@ -1798,6 +2230,150 @@ fn followed_shifts_with(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod ground_tests {
+    //! [`keeps_ground`] on hand-built masks: the Deinonychus arm-101 slide
+    //! (0.51 mm down its face, the seat island at 7.925 mm left over air),
+    //! and the two kinds of slide the check must keep admitting.
+
+    use super::{keeps_ground, keeps_seat, Ground, GroundWindow, Slid};
+    use crate::grid::lay_out_at;
+
+    const PITCH: f64 = 0.05;
+    const H: f64 = 0.05;
+    const SIDE: usize = 100;
+    /// The layer the island's first lamina cures on.
+    const K: usize = 50;
+
+    /// A 5 x 5 mm window of the grid over the ball's whole height and two
+    /// layers either side (`K - 14 ..= K + 2`), model (cover and carry)
+    /// wherever `model(row, col, layer)` says.
+    fn window(model: impl Fn(usize, usize, usize) -> bool) -> GroundWindow {
+        let (layer0, layers) = (K - 14, 17);
+        let mut bits = vec![0; SIDE * SIDE * layers];
+        for k in 0..layers {
+            for r in 0..SIDE {
+                for c in 0..SIDE {
+                    if model(r, c, layer0 + k) {
+                        bits[(k * SIDE + r) * SIDE + c] = GroundWindow::COVER | GroundWindow::CARRY;
+                    }
+                }
+            }
+        }
+        GroundWindow {
+            row0: 0,
+            col0: 0,
+            rows: SIDE,
+            cols: SIDE,
+            layer0,
+            layers,
+            bits,
+        }
+    }
+
+    /// A ball of radius 0.4 mm centred at `(x, 2.5)`, its centre 0.2 mm under
+    /// the island's first lamina: its section under the lamina holds the
+    /// cells within about 0.33 mm of its axis.
+    fn ball(x: f64) -> Slid {
+        #[expect(clippy::cast_precision_loss, reason = "a small layer index")]
+        let lamina = K as f64 * H;
+        Slid {
+            ball_centre: [x, 2.5, lamina - 0.2],
+            ball_radius: 0.4,
+            planned_ball_radius: 0.4,
+            disc_centre: [x, 2.5, lamina - 0.2],
+            disc_radius: 0.3,
+            normal: [0.0, 0.0, -1.0],
+        }
+    }
+
+    /// The island: model from layer `K` up, over a 0.3 mm square at (2.5, 2.5).
+    fn island(r: usize, c: usize, k: usize) -> bool {
+        k >= K && (47..53).contains(&r) && (47..53).contains(&c)
+    }
+
+    #[test]
+    fn a_slide_that_takes_the_ball_from_under_an_island_is_refused() {
+        let grid = lay_out_at(0.0, 0.0, PITCH, SIDE, SIDE);
+        let masks = window(island);
+        let ground = Ground {
+            grid: &grid,
+            window: &masks,
+            plate_z: 0.0,
+            height: H,
+        };
+        let (placed, moved) = (ball(2.5), ball(3.0));
+        // The premise, and the defect: the old rule passes this slide (it
+        // does not climb), and the island is left over nothing.
+        assert!(
+            keeps_seat([2.5, 2.5, 2.5], placed, moved, PITCH, H),
+            "premise: the pre-2026-10-12 rule admits the slide"
+        );
+        assert!(!keeps_ground(&ground, placed, moved), "the island must keep its ball");
+        // Control: no slide holds what it held.
+        assert!(keeps_ground(&ground, placed, placed));
+    }
+
+    #[test]
+    fn a_slide_along_one_lamina_keeps_its_ground() {
+        // A level face: the island's first lamina runs the whole window, so
+        // the cells the slide uncovers join, in their own layer, cells the
+        // moved ball still holds (the flat discs' rim slides).
+        let grid = lay_out_at(0.0, 0.0, PITCH, SIDE, SIDE);
+        let masks = window(|_, _, k| k >= K);
+        let ground = Ground {
+            grid: &grid,
+            window: &masks,
+            plate_z: 0.0,
+            height: H,
+        };
+        assert!(keeps_ground(&ground, ball(2.5), ball(2.8)));
+    }
+
+    #[test]
+    fn a_rim_slide_onto_a_flat_lamina_keeps_its_ground() {
+        // A flat disc's first lamina as the sweep rasterises it: model surely
+        // stands (`carry`) up to column 49, and may stand (`cover`) two cells
+        // further, the raster's rounding band. A ball on the rim slides inward:
+        // the ring cells it leaves are the uncertain edge of the lamina and
+        // join it (the flipped Round 25's rim tips).
+        let grid = lay_out_at(0.0, 0.0, PITCH, SIDE, SIDE);
+        let mut masks = window(|_, c, k| k >= K && c < 50);
+        for k in 0..masks.layers {
+            if masks.layer0 + k < K {
+                continue;
+            }
+            for r in 0..SIDE {
+                for c in 50..52 {
+                    masks.bits[(k * SIDE + r) * SIDE + c] = GroundWindow::COVER;
+                }
+            }
+        }
+        let ground = Ground {
+            grid: &grid,
+            window: &masks,
+            plate_z: 0.0,
+            height: H,
+        };
+        assert!(keeps_ground(&ground, ball(2.6), ball(2.3)));
+    }
+
+    #[test]
+    fn material_with_model_under_it_is_not_the_balls_to_keep() {
+        // The "island" is the end of a column of model that runs on down
+        // past the ball: it is carried from below, whatever the ball does.
+        let grid = lay_out_at(0.0, 0.0, PITCH, SIDE, SIDE);
+        let masks = window(|r, c, _| island(r, c, K));
+        let ground = Ground {
+            grid: &grid,
+            window: &masks,
+            plate_z: 0.0,
+            height: H,
+        };
+        assert!(keeps_ground(&ground, ball(2.5), ball(3.0)));
+    }
 }
 
 #[cfg(test)]

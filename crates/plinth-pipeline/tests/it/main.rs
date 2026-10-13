@@ -18,6 +18,7 @@ mod chain;
 mod a4_noncoverage_gate_drift;
 mod a4_production_door;
 mod cylinder_drain_ring;
+mod deinonychus_witness_spots;
 mod dual_cavity_real_pipeline;
 mod first_artifact;
 mod lip_seat;

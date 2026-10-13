@@ -121,15 +121,33 @@ pub(crate) enum Trigger<'a> {
     /// wherever it lands (it was sent for the gap, so "no nearer than it
     /// stood" would license it to stay inside), and an arm that has no seat
     /// bite to compare is not refused for having none.
-    Clearance { violators: &'a [bool] },
+    ///
+    /// `foot_sizing` sizes a model landing's foot for the load it passes on
+    /// the SIZED field (`size_arm(carried at the landing)`, the law
+    /// [`crate::model_feet`] draws it by), so a candidate onto the model must
+    /// fit that foot, not the tip's minimum (fix lane A, 2026-10-12).
+    Clearance {
+        violators: &'a [bool],
+        foot_sizing: Option<crate::down_sweep::SizingPolicy>,
+    },
 }
 
 impl Trigger<'_> {
+    /// The law a model landing's foot is sized by on this trigger: the
+    /// clearance re-route runs on the sized field and reads it; the lip-seat
+    /// rule runs before and keeps the tip's minimum.
+    const fn foot_sizing(self) -> Option<crate::down_sweep::SizingPolicy> {
+        match self {
+            Trigger::Clearance { foot_sizing, .. } => foot_sizing,
+            Trigger::SeatBite => None,
+        }
+    }
+
     /// Whether member `index` is sent to be re-landed, given its measured bite.
     fn sends(self, index: usize, bite: Option<&ShaftSeatBite>) -> bool {
         match self {
             Trigger::SeatBite => bite.is_some_and(over_limit),
-            Trigger::Clearance { violators } => violators.get(index).copied().unwrap_or(false),
+            Trigger::Clearance { violators, .. } => violators.get(index).copied().unwrap_or(false),
         }
     }
 
@@ -149,12 +167,42 @@ pub(crate) fn clearance_violators(
     struts: &[SweepStrut],
     arms: &[SweepArm],
     exclude: &[u32],
-) -> (Vec<bool>, usize) {
+    foot_sizing: Option<crate::down_sweep::SizingPolicy>,
+) -> (Vec<bool>, usize, usize) {
     let _perf_span = crate::perf::span(crate::perf::Span::LipViolators);
     let mut flags = vec![false; struts.len()];
     let Some(surface) = joins.surface() else {
-        return (flags, 0);
+        return (flags, 0, 0);
     };
+    // A MODEL LANDING WHOSE FOOT NO LONGER FITS (fix lane A, 2026-10-12): the
+    // descent checked the foot at the tip's minimum, and the sized field draws
+    // it for the load it passes (`model_feet`), which on Deinonychus left the
+    // foot under the wrist of the long-fingered hand 38 % on the model. Such
+    // an arm is sent to be re-landed, onto a candidate whose foot fits at the
+    // sized radius (`price`); one none fits stays, and the census warns.
+    let misfits: Vec<u32> = foot_sizing.map_or_else(Vec::new, |sizing| {
+        struts
+            .iter()
+            .filter(|strut| {
+                matches!(strut.landing, crate::Landing::Model { .. })
+                    && strut.k_bottom != usize::MAX
+                    && strut.kind == StrutKind::Arm
+            })
+            .filter(|strut| {
+                let carried = strut.carried_mm2.first().copied().unwrap_or(0.0).max(0.0);
+                let radius = crate::down_sweep::size_arm(carried, sizing);
+                let (on, total) = crate::up_sweep::foot_on_model(
+                    joins.slender.grid,
+                    joins.slender.history,
+                    strut.base_cell(),
+                    strut.k_bottom,
+                    radius,
+                );
+                on < total
+            })
+            .map(|strut| strut.id)
+            .collect()
+    });
     let census = crate::member_clearance::model_clearance_census(
         Some(surface),
         struts,
@@ -174,7 +222,8 @@ pub(crate) fn clearance_violators(
         .within_gap
         .iter()
         .map(|row| (row.member, row.kind))
-        .chain(buried.iter().map(|row| (row.host_member, row.host_kind)));
+        .chain(buried.iter().map(|row| (row.host_member, row.host_kind)))
+        .chain(misfits.iter().map(|&id| (id, StrutKind::Arm)));
     let mut named = 0;
     for (member, kind) in named_rows {
         if kind != StrutKind::Arm || exclude.contains(&member) {
@@ -191,7 +240,7 @@ pub(crate) fn clearance_violators(
             }
         }
     }
-    (flags, named)
+    (flags, named, misfits.len())
 }
 
 /// The kernel's solid clearance from the model of each member's drawn
@@ -607,6 +656,11 @@ pub struct LipSeatOutcome {
     /// wholly on cured model there (lane 2, 2026-10-12, `MODEL-FEET.md` F2;
     /// [`crate::up_sweep::foot_on_model`]).
     pub candidates_refused_foot: usize,
+    /// Model landings the clearance re-route sent because their foot, sized
+    /// for the load it passes on the sized field, does not lie wholly on the
+    /// model (fix lane A, 2026-10-12), at the first pass and the last.
+    pub foot_misfits_first: usize,
+    pub foot_misfits_last: usize,
     pub candidates_refused_path: usize,
     pub candidates_refused_plate: usize,
     pub candidates_refused_measured: usize,
@@ -1135,6 +1189,7 @@ pub(crate) fn apply(
             &to_move,
             &children,
             trigger.is_clearance(),
+            trigger.foot_sizing(),
             outcome,
         );
         let id = strut.id;
@@ -2139,6 +2194,7 @@ fn price(
     to_move: &[bool],
     children: &[usize],
     arms_only: bool,
+    foot_sizing: Option<crate::down_sweep::SizingPolicy>,
     outcome: &mut LipSeatOutcome,
 ) -> Vec<Candidate> {
     let grid = context.grid;
@@ -2162,6 +2218,15 @@ fn price(
     } else {
         0.0
     };
+    // ON THE SIZED FIELD (the clearance re-route; fix lane A, 2026-10-12)
+    // the foot is drawn for the load it passes, `size_arm(carried at the
+    // landing)` ([`crate::model_feet`]), and that is the foot a model landing
+    // must fit. Deinonychus arms 103, 154, 159, 184 and 200 were landed at
+    // the tip's minimum and their feet grew past their faces afterwards.
+    let foot_radius_mm = foot_sizing.map_or(foot_radius_mm, |sizing| {
+        let carried = strut.carried_mm2.first().copied().unwrap_or(0.0).max(0.0);
+        crate::down_sweep::size_arm(carried, sizing).max(foot_radius_mm)
+    });
     let cos_limit = limit_deg.to_radians().cos();
     // The search box: no descent travels further sideways than the lean law
     // lets it over the arm's whole height, nor further than the straight
@@ -3072,6 +3137,7 @@ mod model_landing_tests {
             &[true],
             &[],
             arms_only,
+            None,
             &mut outcome,
         )
         .into_iter()

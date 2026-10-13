@@ -3047,7 +3047,8 @@ fn print_sweep_disclosure(
              by up to {:.4} mm), {} on a knife edge, {} left in place because every on-face \
              seat broke a rule of the finished field; moves refused by the lean law {}, by an \
              unbraced run's limit {}, by the drain keep-out {} ({} member checks), for leaving \
-             the seat the tip was placed for {}; {} disc \
+             the seat the tip was placed for {} ({} of them for leaving model it held over \
+             nothing); {} disc \
              samples + {} search samples + {} move-verify samples over {} layers, {} round(s); \
              {} tips off their face at the disc's rim alone (lattice on the face)",
             emission.tips_trimmed_to_seat,
@@ -3072,6 +3073,7 @@ fn print_sweep_disclosure(
             footprint.moves_refused_drain,
             footprint.members_checked,
             footprint.moves_refused_off_seat,
+            footprint.moves_refused_off_ground,
             footprint.disc_samples,
             footprint.search_samples,
             footprint.verify_samples,
@@ -3365,7 +3367,8 @@ fn print_sweep_disclosure(
         println!(
             "[sweep {model}] clearance re-route after the final sizing ({}): {} arms within the \
              final gap on the first pass (the lip-seat rule's own re-landings left alone), {} on \
-             the last; {} passes; {} candidates priced, {} refused by the path test, {} by the \
+             the last (of them model landings whose load-sized foot does not fit: {} first, {} \
+             last); {} passes; {} candidates priced, {} refused by the path test, {} by the \
              plate rule, {} by the clearance of the moved solid, {} by the roots, {} by the \
              lowering's measurement; {} arms re-landed ({} on the model, {} children moved with \
              them); {} kept carrying on the last pass ({} with a cross tied to them, {} with a \
@@ -3376,6 +3379,8 @@ fn print_sweep_disclosure(
             if reroute.enabled { "on" } else { "off" },
             reroute.clearance_violators_first,
             reroute.clearance_violators_last,
+            reroute.foot_misfits_first,
+            reroute.foot_misfits_last,
             reroute.passes,
             reroute.candidates_priced,
             reroute.candidates_refused_path,
@@ -4223,6 +4228,12 @@ fn print_sweep_disclosure(
             heads.final_normal_residual_deg_max,
             heads.final_normal_residual_deg_median,
             report.lip_seat.headed_bites,
+        );
+        println!(
+            "[sweep {model}] junctions on a seated ball's drawn shaft: {} members landed or \
+             seated on a member whose shaft starts at its ball's centre, off its planned line, \
+             moved onto the drawn shaft (largest {:.4} mm)",
+            emission.seated_line_joins, emission.seated_line_follow_max_mm,
         );
         let certificate = heads.joint_certificate;
         println!(
