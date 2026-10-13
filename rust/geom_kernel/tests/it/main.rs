@@ -15,6 +15,7 @@
 //! new test belongs here as `tests/it/<name>.rs` plus a `mod` line. See
 //! `docs/development.md`, "Where integration tests go".
 
+mod bounded_clearance;
 mod canon_contracts;
 mod face_excluded_clearance;
 mod geometry;

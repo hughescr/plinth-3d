@@ -794,7 +794,19 @@ struct Pending {
     /// The cheapest descent that passed every other test was refused because
     /// the lean cannot be held ([`apply`]); the arm keeps its seat.
     refused_slender: bool,
+    /// **The mover's own solid clearance, read ahead** ([`read_movers`]): by
+    /// candidate index, the path the read was drawn on and the read.
+    ahead: std::collections::HashMap<usize, (Vec<u32>, Option<f64>)>,
+    /// How many candidates the next read-ahead of this arm takes, from the
+    /// one a round proposes (doubled at each read-ahead, up to
+    /// [`READ_AHEAD_MAX`]).
+    window: usize,
 }
+
+/// The most candidates one arm's read-ahead takes in one batch. A batch
+/// size only: every read is the same pure function of the candidate and its
+/// path whichever batch carries it, so the field does not depend on it.
+const READ_AHEAD_MAX: usize = 64;
 
 /// A child following its moved host: `(child index, the cell it now lands
 /// in, its new path)`.
@@ -804,6 +816,8 @@ type Follow = (usize, usize, Vec<u32>);
 /// path, and each child's new path onto the moved axis.
 struct Proposal {
     slot: usize,
+    /// The candidate's index in its arm's list.
+    at: usize,
     candidate: Candidate,
     path: Vec<u32>,
     children: Vec<Follow>,
@@ -954,6 +968,318 @@ fn trial_arm(
         arm.seat_face_point_mm,
         top_aligned(&arm.radius_profile_mm, strut.k_top - strut.k_bottom),
     )
+}
+
+/// What every solid read of one [`apply`] pass is taken against.
+struct ReadFrame<'a> {
+    surface: &'a NativeSurface,
+    layer_plan: &'a LayerPlan,
+    plate_z_mm: f64,
+    tier: f64,
+}
+
+impl ReadFrame<'_> {
+    /// [`solid_clearances`] of `arms`, one batch.
+    fn solid(&self, arms: &[SweepArm], on_model: &[bool]) -> Vec<Option<f64>> {
+        solid_clearances(
+            self.surface,
+            arms,
+            on_model,
+            self.layer_plan,
+            self.plate_z_mm,
+            self.tier,
+        )
+    }
+
+    /// [`solid_clearances`] of `arms`, one batch, where only a clearance at
+    /// or above `at_least[i]` is wanted: a row the kernel proves below its
+    /// bound reads `None`, as an undecided row does, and every other row is
+    /// the full reading ([`NativeSurface::segment_clearance_classified_at_least`]).
+    fn solid_at_least(&self, arms: &[SweepArm], on_model: &[bool], at_least: &[f64]) -> Vec<Option<f64>> {
+        let n = arms.len();
+        let frame = solid_frame(
+            self.surface,
+            arms,
+            on_model,
+            self.layer_plan,
+            self.plate_z_mm,
+            self.tier,
+        );
+        self.surface
+            .segment_clearance_classified_at_least(
+                &frame.seats,
+                &frame.bases,
+                &frame.radii,
+                &frame.radii,
+                0.0,
+                &frame.insets,
+                &frame.landing_zones,
+                at_least,
+            )
+            .map_or_else(
+                |_| vec![None; n],
+                |rows| {
+                    rows.into_iter()
+                        .map(|row| row.and_then(SegmentClearanceClassified::clearance_mm))
+                        .collect()
+                },
+            )
+    }
+}
+
+/// The least clearance a moved member's solid must read to be admitted
+/// ([`apply`]): the final gap outright for a mover onto a new root, or any
+/// mover of the clearance re-route; else no nearer than it stood
+/// (`min(gap, max(was, 0))`), less the comparison's slack.
+fn admitted_at_least(outright: bool, was: Option<f64>, tier: f64) -> f64 {
+    let minimum = if outright {
+        tier
+    } else {
+        tier.min(was.unwrap_or(tier).max(0.0))
+    };
+    minimum - CLEARANCE_SLACK_MM
+}
+
+/// **The members of one [`apply`] pass as they stand**, read once each.
+///
+/// A member's standing solid is `arms[member]` (fixed for the pass), read
+/// with its landing on the model or not as `struts[member]` stands; an arm
+/// that moves leaves the pending list and a child that moves keeps its
+/// landing, so a read keyed by the member and that flag is the read every
+/// round would have made. `drawn` holds, for a mover the widest-radius
+/// reading puts inside the model, its re-read on the solid the file draws
+/// ([`drawn_solid_clearances`]; the kept-arm test asks whether the arm as it
+/// stands enters the model, and a tapered or stepped arm reads inside there
+/// while its thinner shaft clears).
+#[derive(Default)]
+struct StandingReads {
+    before: std::collections::HashMap<(usize, bool), Option<f64>>,
+    drawn: std::collections::HashMap<(usize, bool), Option<f64>>,
+}
+
+impl StandingReads {
+    fn key(member: usize, struts: &[SweepStrut]) -> (usize, bool) {
+        (member, matches!(struts[member].landing, Landing::Model { .. }))
+    }
+
+    /// Read every member of `members` not read yet, in one batch; with
+    /// `movers`, the doubtful ones again on the drawn solid, in one more.
+    fn read(
+        &mut self,
+        frame: &ReadFrame<'_>,
+        arms: &[SweepArm],
+        struts: &[SweepStrut],
+        members: &[usize],
+        movers: bool,
+    ) {
+        let mut keys: Vec<(usize, bool)> = members
+            .iter()
+            .map(|&member| Self::key(member, struts))
+            .filter(|key| !self.before.contains_key(key))
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        if !keys.is_empty() {
+            let standing: Vec<SweepArm> = keys.iter().map(|&(member, _)| arms[member].clone()).collect();
+            let on_model: Vec<bool> = keys.iter().map(|&(_, on)| on).collect();
+            for (key, value) in keys.into_iter().zip(frame.solid(&standing, &on_model)) {
+                self.before.insert(key, value);
+            }
+        }
+        if !movers {
+            return;
+        }
+        let mut doubtful: Vec<(usize, bool)> = members
+            .iter()
+            .map(|&member| Self::key(member, struts))
+            .filter(|key| {
+                !self.drawn.contains_key(key)
+                    && self
+                        .before
+                        .get(key)
+                        .copied()
+                        .flatten()
+                        .is_some_and(|was| was < -CLEARANCE_SLACK_MM)
+            })
+            .collect();
+        doubtful.sort_unstable();
+        doubtful.dedup();
+        if doubtful.is_empty() {
+            return;
+        }
+        let doubtful_arms: Vec<SweepArm> =
+            doubtful.iter().map(|&(member, _)| arms[member].clone()).collect();
+        let doubtful_on_model: Vec<bool> = doubtful.iter().map(|&(_, on)| on).collect();
+        let read = drawn_solid_clearances(
+            frame.surface,
+            &doubtful_arms,
+            &doubtful_on_model,
+            frame.layer_plan,
+            frame.plate_z_mm,
+            frame.tier,
+        );
+        for (key, clearance) in doubtful.into_iter().zip(read) {
+            // Undecided on the drawn solid: the widest-radius reading stands.
+            let was = self.before.get(&key).copied().flatten();
+            self.drawn.insert(key, clearance.or(was));
+        }
+    }
+
+    /// The member's widest-radius reading as it stands (`None` unread).
+    fn before(&self, member: usize, struts: &[SweepStrut]) -> Option<f64> {
+        self.before.get(&Self::key(member, struts)).copied().flatten()
+    }
+
+    /// The mover's standing reading on the solid the file draws where the
+    /// widest-radius reading puts it inside the model, else that reading.
+    fn drawn(&self, member: usize, struts: &[SweepStrut]) -> Option<f64> {
+        let key = Self::key(member, struts);
+        self.drawn
+            .get(&key)
+            .copied()
+            .unwrap_or_else(|| self.before.get(&key).copied().flatten())
+    }
+}
+
+/// **Each proposal's mover read on its trial solid**, into `after` at its
+/// first slot, through the arm's read-ahead store (`Pending::ahead`).
+///
+/// A mover's trial solid is a pure function of its candidate and the path it
+/// would take ([`trial_arm`]); the round loop walks an arm's candidates one
+/// per round, so an arm refused for its clearance (Deinonychus: some 340 000
+/// such candidates) used to cost a kernel call of one or two rows per round.
+/// Where a round's proposal has no stored read on its own path, the arm's
+/// next `window` candidates are proposed against the index as it stands
+/// ([`propose`]) and read with it, every such arm in ONE batch, and the
+/// window doubles (up to [`READ_AHEAD_MAX`]). A stored read is used only
+/// when the round proposes that candidate on the very path it was read on,
+/// so the field is the one the one-at-a-time reads made.
+///
+/// Each read asks only whether the mover clears what the test in [`apply`]
+/// demands of it ([`admitted_at_least`]: `outright` for the clearance
+/// re-route, or per candidate a new root; else no nearer than `was(member)`,
+/// its standing read): a read proven below that is `None`, which that test
+/// refuses exactly as it refuses a reading below it, and every other read is
+/// the full one. The value of a refused mover's read is used nowhere else
+/// (the slenderness test reads only a mover that cleared; a mover in a
+/// hidden cavity is admitted without it).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the read frame, the field and its index, the pending arms and this round's proposals"
+)]
+fn read_movers(
+    frame: &ReadFrame<'_>,
+    context: &SlendernessContext<'_>,
+    index: &ColumnHistory,
+    struts: &[SweepStrut],
+    arms: &[SweepArm],
+    pending: &mut [Pending],
+    proposals: &[Proposal],
+    trial: &[SweepArm],
+    first_of: &[usize],
+    clearance: bool,
+    was: impl Fn(usize) -> Option<f64>,
+    after: &mut [Option<f64>],
+) {
+    struct Row {
+        slot: usize,
+        at: usize,
+        path: Vec<u32>,
+        solid: SweepArm,
+        on_model: bool,
+        at_least: f64,
+    }
+    let plate_z_mm = frame.plate_z_mm;
+    let at_least = |member: usize, landing: Landing| {
+        admitted_at_least(
+            clearance || !matches!(landing, Landing::Strut { .. }),
+            was(member),
+            frame.tier,
+        )
+    };
+    let mut rows: Vec<Row> = Vec::new();
+    let mut ahead_hits = 0_usize;
+    for (proposal, &first) in proposals.iter().zip(first_of) {
+        let job = &pending[proposal.slot];
+        if job
+            .ahead
+            .get(&proposal.at)
+            .is_some_and(|(path, _)| *path == proposal.path)
+        {
+            ahead_hits += 1;
+            continue;
+        }
+        rows.push(Row {
+            slot: proposal.slot,
+            at: proposal.at,
+            path: proposal.path.clone(),
+            solid: trial[first].clone(),
+            on_model: matches!(proposal.candidate.landing, Landing::Model { .. }),
+            at_least: at_least(job.index, proposal.candidate.landing),
+        });
+        let end = proposal.at.saturating_add(job.window).min(job.candidates.len());
+        for at in proposal.at + 1..end {
+            if job.ahead.contains_key(&at) {
+                continue;
+            }
+            let candidate = job.candidates[at];
+            let Some((path, _)) = propose(
+                context,
+                index,
+                struts,
+                job.index,
+                candidate,
+                &job.children,
+                clearance,
+            ) else {
+                continue;
+            };
+            let solid = trial_arm(
+                context,
+                plate_z_mm,
+                struts,
+                arms,
+                job.index,
+                candidate.landing,
+                candidate.k_bottom,
+                &path,
+            );
+            rows.push(Row {
+                slot: proposal.slot,
+                at,
+                path,
+                solid,
+                on_model: matches!(candidate.landing, Landing::Model { .. }),
+                at_least: at_least(job.index, candidate.landing),
+            });
+        }
+        let job = &mut pending[proposal.slot];
+        job.window = job.window.saturating_mul(2).min(READ_AHEAD_MAX);
+    }
+    crate::perf::add(crate::PerfWork::LipSeatMoverReads, crate::perf::count(proposals.len()));
+    crate::perf::add(crate::PerfWork::LipSeatMoverReadsAhead, crate::perf::count(ahead_hits));
+    if !rows.is_empty() {
+        let mut solids: Vec<SweepArm> = Vec::with_capacity(rows.len());
+        let mut on_model: Vec<bool> = Vec::with_capacity(rows.len());
+        let mut bounds: Vec<f64> = Vec::with_capacity(rows.len());
+        let mut keys: Vec<(usize, usize, Vec<u32>)> = Vec::with_capacity(rows.len());
+        for row in rows {
+            solids.push(row.solid);
+            on_model.push(row.on_model);
+            bounds.push(row.at_least);
+            keys.push((row.slot, row.at, row.path));
+        }
+        let reads = frame.solid_at_least(&solids, &on_model, &bounds);
+        for ((slot, at, path), read) in keys.into_iter().zip(reads) {
+            pending[slot].ahead.insert(at, (path, read));
+        }
+    }
+    for (proposal, &first) in proposals.iter().zip(first_of) {
+        after[first] = pending[proposal.slot]
+            .ahead
+            .remove(&proposal.at)
+            .and_then(|(_, read)| read);
+    }
 }
 
 /// **Remedy 1: a smaller angle to the same seat.** Re-land every arm over its
@@ -1202,12 +1528,15 @@ pub(crate) fn apply(
             next: 0,
             children,
             refused_slender: false,
+            ahead: std::collections::HashMap::new(),
+            window: 1,
         });
     }
 
     // ---- stages 2 and 3, in rounds: each pending arm's next candidate whose
     // path clears, then all of them measured by the lowering in one call.
     let mut moved: Vec<Relanding> = Vec::new();
+    let mut standing_reads = StandingReads::default();
     let mut open: Vec<usize> = (0..pending.len()).collect();
     let mut done = vec![false; pending.len()];
     while !open.is_empty() {
@@ -1233,6 +1562,7 @@ pub(crate) fn apply(
                     Some((path, children)) => {
                         proposals.push(Proposal {
                             slot,
+                            at: job.next - 1,
                             candidate,
                             path,
                             children,
@@ -1278,8 +1608,36 @@ pub(crate) fn apply(
                 ));
             }
         }
-        let measured = plinth_support::tip_shaft_seat_bites(&trial, layer_plan)
-            .unwrap_or_else(|_| vec![None; trial.len()]);
+        // Whether each proposal's members stand wholly in a hidden cavity
+        // (read once per proposal; see the loop below for the rule).
+        let hidden_of: Vec<Vec<bool>> = proposals
+            .iter()
+            .zip(&first_of)
+            .map(|(proposal, &first)| {
+                let index_of = pending[proposal.slot].index;
+                proposal_hidden(
+                    &context.history.hidden,
+                    ProposedAxis {
+                        k_bottom: proposal.candidate.k_bottom,
+                        k_top: struts[index_of].k_top,
+                        base_cell: Some(proposal.candidate.cell),
+                        seat_cell: struts[index_of].cell,
+                        path: &proposal.path,
+                        radius_mm: crate::cavity::arm_radius_mm(&trial[first]),
+                    },
+                    proposal.children.iter().enumerate().map(|(offset, (child, _, path))| {
+                        ProposedAxis {
+                            k_bottom: struts[*child].k_bottom,
+                            k_top: struts[*child].k_top,
+                            base_cell: None,
+                            seat_cell: struts[*child].cell,
+                            path,
+                            radius_mm: crate::cavity::arm_radius_mm(&trial[first + 1 + offset]),
+                        }
+                    }),
+                )
+            })
+            .collect();
         // THE SOLID, not only the centreline: each moved member's drawn
         // segment against the model, as the head-join rule measures a moved
         // lander (the kernel's clearance, its own seat zone untested, and its
@@ -1308,91 +1666,139 @@ pub(crate) fn apply(
         //   rim (arm 127, for-craig-v10), while every model landing a move
         //   proposed read the same strike and was refused.
         //
-        // One batch for the round, and one for the same members as they
-        // stand.
-        let (after, before, standing_drawn) = match surface {
+        //
+        // **Read once, in batches, and only what is asked** (speed lane B,
+        // 2026-10-13). Every read here is a pure function of the member's
+        // drawn solid and of whether it lands on the model, so the value does
+        // not depend on the batch that carries it:
+        //
+        // * a member AS IT STANDS (`before`, and the drawn-solid re-read of a
+        //   standing mover the widest-radius reading puts inside the model)
+        //   does not change while this pass runs (`arms` is fixed, and an arm
+        //   that moves leaves the pending list), so it is read once per pass
+        //   ([`StandingReads`]) rather than once per round;
+        // * a mover's own trial solid depends only on its candidate and the
+        //   path it would take, so it is read AHEAD for the candidates that
+        //   follow it in its list, against the index as it stands now, in
+        //   one batch with every other arm's; a round uses a read only when
+        //   its path is the one the round proposes ([`read_movers`]);
+        // * a child's solid, and every member's measured seat bite, are asked
+        //   only where the mover's own solid clears (the test below reads the
+        //   mover first and stops at the first member that fails).
+        //
+        // Measured on Deinonychus (lane A, c941e69): the round loop read every
+        // mover and every follower twice per round (trial and standing), one
+        // or two rows per kernel call, over some 340 000 refused candidates;
+        // 300 s of the 335 s run was this loop on one pose.
+        let rows = trial.len();
+        let mut after: Vec<Option<f64>> = vec![None; rows];
+        let mut before: Vec<Option<f64>> = vec![None; rows];
+        let mover_clears: Vec<bool> = match surface {
+            None => vec![true; proposals.len()],
             Some(surface) => {
+                let frame = ReadFrame {
+                    surface,
+                    layer_plan,
+                    plate_z_mm,
+                    tier,
+                };
+                // The movers as they stand first: what each must not come
+                // nearer than bounds its trial read.
                 let movers: Vec<usize> = proposals
                     .iter()
-                    .flat_map(|proposal| {
-                        std::iter::once(pending[proposal.slot].index)
-                            .chain(proposal.children.iter().map(|(child, _, _)| *child))
-                    })
+                    .map(|proposal| pending[proposal.slot].index)
                     .collect();
-                let standing: Vec<SweepArm> =
-                    movers.iter().map(|&member| arms[member].clone()).collect();
-                // Which of them land on the model: the mover as proposed (its
-                // children land on it), and each as it stands now.
-                let trial_on_model: Vec<bool> = proposals
-                    .iter()
-                    .flat_map(|proposal| {
-                        std::iter::once(matches!(
-                            proposal.candidate.landing,
-                            Landing::Model { .. }
-                        ))
-                        .chain(proposal.children.iter().map(|_| false))
-                    })
-                    .collect();
-                let standing_on_model: Vec<bool> = movers
-                    .iter()
-                    .map(|&member| matches!(struts[member].landing, Landing::Model { .. }))
-                    .collect();
-                let after = solid_clearances(
-                    surface,
+                standing_reads.read(&frame, arms, struts, &movers, true);
+                for (&member, &first) in movers.iter().zip(&first_of) {
+                    before[first] = standing_reads.before(member, struts);
+                }
+                read_movers(
+                    &frame,
+                    context,
+                    &index,
+                    struts,
+                    arms,
+                    &mut pending,
+                    &proposals,
                     &trial,
-                    &trial_on_model,
-                    layer_plan,
-                    plate_z_mm,
-                    tier,
+                    &first_of,
+                    trigger.is_clearance(),
+                    |member| standing_reads.before(member, struts),
+                    &mut after,
                 );
-                let before = solid_clearances(
-                    surface,
-                    &standing,
-                    &standing_on_model,
-                    layer_plan,
-                    plate_z_mm,
-                    tier,
-                );
-                // **The standing movers the widest-radius reading puts inside
-                // the model are read again on the solid the file draws** (the
-                // kept-arm test below asks whether the arm as it stands enters
-                // the model, and a tapered or stepped arm reads inside there
-                // while its thinner shaft clears): one more batched call, over
-                // those members only, none when there are none.
-                let mut drawn = before.clone();
-                let doubtful: Vec<usize> = first_of
+                let clears: Vec<bool> = proposals
                     .iter()
-                    .copied()
-                    .filter(|&slot| before[slot].is_some_and(|was| was < -CLEARANCE_SLACK_MM))
+                    .zip(&first_of)
+                    .zip(&hidden_of)
+                    .map(|((proposal, &first), hidden)| {
+                        hidden[0] || {
+                            let new_root = !matches!(proposal.candidate.landing, Landing::Strut { .. });
+                            let at_least =
+                                admitted_at_least(new_root || trigger.is_clearance(), before[first], tier);
+                            after[first].is_some_and(|now| now >= at_least)
+                        }
+                    })
                     .collect();
-                if !doubtful.is_empty() {
-                    let doubtful_arms: Vec<SweepArm> =
-                        doubtful.iter().map(|&slot| standing[slot].clone()).collect();
-                    let doubtful_on_model: Vec<bool> =
-                        doubtful.iter().map(|&slot| standing_on_model[slot]).collect();
-                    let read = drawn_solid_clearances(
-                        surface,
-                        &doubtful_arms,
-                        &doubtful_on_model,
-                        layer_plan,
-                        plate_z_mm,
-                        tier,
+                // The children of the movers that clear, as they stand, then
+                // their trial solids in one batch, each asked only whether it
+                // comes no nearer than it stood.
+                let follower_slots: Vec<usize> = proposals
+                    .iter()
+                    .zip(&first_of)
+                    .zip(&clears)
+                    .filter(|(_, &clear)| clear)
+                    .flat_map(|((proposal, &first), _)| first + 1..=first + proposal.children.len())
+                    .collect();
+                if !follower_slots.is_empty() {
+                    let followers: Vec<usize> = proposals
+                        .iter()
+                        .zip(&clears)
+                        .filter(|(_, &clear)| clear)
+                        .flat_map(|(proposal, _)| proposal.children.iter().map(|(child, _, _)| *child))
+                        .collect();
+                    standing_reads.read(&frame, arms, struts, &followers, false);
+                    for (&slot, &member) in follower_slots.iter().zip(&followers) {
+                        before[slot] = standing_reads.before(member, struts);
+                    }
+                    let follower_arms: Vec<SweepArm> =
+                        follower_slots.iter().map(|&slot| trial[slot].clone()).collect();
+                    let bounds: Vec<f64> = follower_slots
+                        .iter()
+                        .map(|&slot| admitted_at_least(false, before[slot], tier))
+                        .collect();
+                    let read = frame.solid_at_least(
+                        &follower_arms,
+                        &vec![false; follower_arms.len()],
+                        &bounds,
                     );
-                    for (&slot, clearance) in doubtful.iter().zip(read) {
-                        // Undecided on the drawn solid: the widest-radius
-                        // reading stands.
-                        drawn[slot] = clearance.or(before[slot]);
+                    for (&slot, value) in follower_slots.iter().zip(read) {
+                        after[slot] = value;
                     }
                 }
-                (after, before, drawn)
+                clears
             }
-            None => (
-                vec![None; trial.len()],
-                vec![None; trial.len()],
-                vec![None; trial.len()],
-            ),
         };
-        for (proposal, &first) in proposals.into_iter().zip(&first_of) {
+        // Every member of a proposal whose mover clears, as the lowering
+        // measures its seat bite: one call for the round.
+        let mut measured: Vec<Option<ShaftSeatBite>> = vec![None; rows];
+        {
+            let slots: Vec<usize> = proposals
+                .iter()
+                .zip(&first_of)
+                .zip(&mover_clears)
+                .filter(|(_, &clear)| clear)
+                .flat_map(|((proposal, &first), _)| first..=first + proposal.children.len())
+                .collect();
+            if !slots.is_empty() {
+                let arms_read: Vec<SweepArm> = slots.iter().map(|&slot| trial[slot].clone()).collect();
+                let bites = plinth_support::tip_shaft_seat_bites(&arms_read, layer_plan)
+                    .unwrap_or_else(|_| vec![None; arms_read.len()]);
+                for (&slot, bite) in slots.iter().zip(bites) {
+                    measured[slot] = bite;
+                }
+            }
+        }
+        for ((proposal, &first), hidden_slots) in proposals.into_iter().zip(&first_of).zip(hidden_of) {
             let index_of = pending[proposal.slot].index;
             // A mover that stands on a NEW root (the plate or the model)
             // must clear the gap outright; a mover joined to a member, and
@@ -1414,26 +1820,7 @@ pub(crate) fn apply(
             // (challenger round 3, 2026-10-05: a child moved beside another
             // wall can carry its solid out of the hidden voxels while its old
             // axis stays inside), each with the SOLID its trial arm is drawn
-            // at (round 2).
-            let hidden_slots = proposal_hidden(
-                &context.history.hidden,
-                ProposedAxis {
-                    k_bottom: proposal.candidate.k_bottom,
-                    k_top: struts[index_of].k_top,
-                    base_cell: Some(proposal.candidate.cell),
-                    seat_cell: struts[index_of].cell,
-                    path: &proposal.path,
-                    radius_mm: crate::cavity::arm_radius_mm(&trial[first]),
-                },
-                proposal.children.iter().enumerate().map(|(offset, (child, _, path))| ProposedAxis {
-                    k_bottom: struts[*child].k_bottom,
-                    k_top: struts[*child].k_top,
-                    base_cell: None,
-                    seat_cell: struts[*child].cell,
-                    path,
-                    radius_mm: crate::cavity::arm_radius_mm(&trial[first + 1 + offset]),
-                }),
-            );
+            // at (round 2). Read for every proposal above (`hidden_of`).
             let hidden = |slot: usize| hidden_slots[slot - first];
             let clear = surface.is_none()
                 || (first..=first + proposal.children.len()).all(|slot| {
@@ -1604,7 +1991,8 @@ pub(crate) fn apply(
                 });
             if too_slender {
                 let standing = &struts[index_of];
-                let kept_is_a_support = standing_drawn[first]
+                let kept_is_a_support = standing_reads
+                    .drawn(index_of, struts)
                     .is_none_or(|was| was >= -CLEARANCE_SLACK_MM)
                     && standing.k_top > standing.k_bottom.saturating_add(1)
                     && rooted[index_of];

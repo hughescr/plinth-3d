@@ -1001,10 +1001,27 @@ fn keeps_ground(ground: &Ground<'_>, placed: Slid, moved: Slid) -> bool {
     let mut seen = vec![0_u32; width * (r1 - r0 + 1)];
     let mut walk = 0_u32;
     let mut queue: Vec<usize> = Vec::new();
+    // Only a cell whose centre lies within the placed ball's radius of its
+    // centre can be one it holds (`Ground::holds`: the section is never wider
+    // than the ball), so the scan for lost cells keeps to that square, in the
+    // same row-major order; the walks still range over the whole window.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "raster coordinates of a ball near the model are small and clamped to the window"
+    )]
+    let held = |coord: f64, lo: usize, hi: usize| -> (usize, usize) {
+        let half = before.1 / pitch;
+        let from = ((coord - half).floor().max(0.0) as usize).max(lo);
+        let to = ((coord + half).ceil().max(0.0) as usize).min(hi);
+        (from, to)
+    };
+    let (scan_c0, scan_c1) = held(grid.col_coord(cx), c0, c1);
+    let (scan_r0, scan_r1) = held(grid.row_coord(cy), r0, r1);
     for layer in lowest..=highest {
         seen.iter_mut().for_each(|stamp| *stamp = 0);
-        for row in r0..=r1 {
-            for col in c0..=c1 {
+        for row in scan_r0..=scan_r1 {
+            for col in scan_c0..=scan_c1 {
                 let cell = grid.index(row, col);
                 if seen[local(row, col)] != 0
                     || !ground.may_be_model(cell, layer)
@@ -1054,7 +1071,17 @@ fn keeps_ground(ground: &Ground<'_>, placed: Slid, moved: Slid) -> bool {
                         }
                     }
                 }
-                while let Some(at) = queue.pop() {
+                // The walk stops at its first ground. Every seed is stamped by
+                // then, so each piece of material the walk started from holds
+                // a cell stamped by it, and a later walk that meets any of
+                // that material reaches one of its stamps and is grounded by
+                // it, as it would have been by the whole walk (a walk that
+                // finds no ground returns at once, so every earlier stamp is
+                // a grounded walk's). The answer is the whole walk's.
+                while !grounded {
+                    let Some(at) = queue.pop() else {
+                        break;
+                    };
                     if (layer > 0 && ground.is_model(at, layer - 1)) || ground.holds(after, at, layer) {
                         grounded = true;
                     }
@@ -2375,6 +2402,10 @@ mod ground_tests {
         assert!(keeps_ground(&ground, ball(2.5), ball(3.0)));
     }
 }
+
+#[cfg(test)]
+#[path = "footprint_ground_tests.rs"]
+mod ground_oracle_tests;
 
 #[cfg(test)]
 mod move_check_tests {
