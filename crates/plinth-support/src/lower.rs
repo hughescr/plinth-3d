@@ -716,7 +716,9 @@ impl SweepRootFlare {
     /// [`Self::plate_shaft_of`]; a member landed on another member or on the
     /// model runs from its seated ball's CENTRE (the grown ball's, where
     /// [`SweepArm::contact_ball_radius_mm`] grows it: [`seated_ball`] moves the
-    /// centre out along the seat normal) to its base. A member whose ball is
+    /// centre out along the seat normal) to its base; a MODEL landing runs to
+    /// its foot ball's centre instead ([`model_foot_ball`]), which the foot's
+    /// own seat law moves sideways off the base. A member whose ball is
     /// seated along a tilted normal, and above all one whose ball grew, draws
     /// its shaft off the seat-to-base line it was planned on: on Deinonychus
     /// (`joint/out-fix/final`) a 0.533 mm grown ball put its host's shaft
@@ -753,7 +755,22 @@ impl SweepRootFlare {
         let tip_radius = positive(local.tip_radius_mm).ok()?.get();
         let ball_radius = self.config.sweep_ball_factor(tip_radius) * tip_radius;
         let (_, centre, _) = seated_ball(&local, unit, tip_radius, ball_radius, self.config);
-        Some((lift(centre, plate_z_mm), arm.base_mm))
+        // A MODEL LANDING's shaft runs to the model-foot ball's centre, which
+        // the foot's own seat law moves off the planned base along its face
+        // normal ([`model_foot_ball`], the function the lowering calls). A foot
+        // that cannot be built ends flat on the model at the base, as drawn.
+        let bottom = match local.landing {
+            SweepArmLanding::Model(foot) => {
+                let local_foot = ModelFoot {
+                    face_point_mm: foot.face_point_mm.map(|point| lift(point, -plate_z_mm)),
+                    ..foot
+                };
+                model_foot_ball(&local, &local_foot, self.config)
+                    .map_or(arm.base_mm, |ball| lift(ball.centre, plate_z_mm))
+            }
+            _ => arm.base_mm,
+        };
+        Some((lift(centre, plate_z_mm), bottom))
     }
 
     /// **The straight line [`lower_sweep_arms`] draws a plate-rooted member's
@@ -4325,6 +4342,21 @@ fn lower_one_sweep_arm(
 /// back at it, the collar runs to the shaft's end at the shaft's radius there
 /// and is reported as steeper than the law (emit and warn).
 ///
+/// **The ring convention.** All of the above is for rings NORMAL to the axis
+/// ([`FrustumRingNormal::SegmentAxis`]). A plate-root column is drawn with
+/// HORIZONTAL rings ([`FrustumRingNormal::PlateZ`]): its section at a height
+/// is a horizontal circle about the axis point at that height. There a
+/// "station" is a height (`(z - z_top) / along_z`, so a station difference is
+/// still a length along the axis), the section that holds the pole is the
+/// horizontal distance from the pole to the axis at the pole's height, and the
+/// underside of the collar leans `atan(tan θ + k_z)` from vertical, `k_z`
+/// being the radius lost per mm of HEIGHT: the axis moves `tan θ` sideways per
+/// mm of drop and the narrowing adds `k_z` to it (tangents add, where angles
+/// add for normal rings). The widened taper above the pole is then a
+/// horizontal section about the axis, not a circle of the ball, so it can
+/// stand outside the ball on the side away from the pole; it is the section
+/// that convention needs to hold the pole.
+///
 /// Returns the shaft's spans, collar first, to stand in place of `shaft`;
 /// `None` where the pole is held by the shaft as drawn, or the shaft is not a
 /// straight run from the ball centre downward. `shaft` is the arm's drawn
@@ -4343,7 +4375,25 @@ fn pole_collar(
         return None;
     }
     let along = axis.map(|value| value / total);
-    let station = |point: [f64; 3]| geom_kernel::vec3::dot(geom_kernel::vec3::sub(point, top), along);
+    // The ring convention the shaft is drawn in; a junction hull is no shaft.
+    let horizontal_rings = match shaft.first()?.ring_normal {
+        FrustumRingNormal::SegmentAxis => false,
+        FrustumRingNormal::PlateZ => true,
+        FrustumRingNormal::Junction(_) => return None,
+    };
+    // A station is the axis parameter of a point's RING: its projection onto
+    // the axis for normal rings, the axis point at its height for horizontal
+    // ones (which needs a descending axis).
+    if horizontal_rings && along[2] >= 0.0 {
+        return None;
+    }
+    let station = |point: [f64; 3]| {
+        if horizontal_rings {
+            (point[2] - top[2]) / along[2]
+        } else {
+            geom_kernel::vec3::dot(geom_kernel::vec3::sub(point, top), along)
+        }
+    };
     // The drawn section at a station: the spans holding it, interpolated; at
     // a step between two spans, the wider.
     let radius_at = |s: f64| -> Option<f64> {
@@ -4363,6 +4413,8 @@ fn pole_collar(
     if !(pole_station > ZERO_LENGTH_MM && pole_station < total) {
         return None;
     }
+    // The axis point in the pole's ring plane: for horizontal rings it is at
+    // the pole's height, so the distance is the horizontal one.
     let foot = geom_kernel::vec3::add(top, geom_kernel::vec3::scale(along, pole_station));
     let hold_radius = geom_kernel::vec3::dist(pole, foot);
     let shaft_radius = radius_at(pole_station)?;
@@ -4370,12 +4422,20 @@ fn pole_collar(
         return None;
     }
     // The axis's lean from vertical, and the room the law leaves the collar's
-    // underside beyond it.
+    // underside beyond it: the angle left for normal rings, the tangent left
+    // for horizontal ones. The length is along the axis either way.
     let lean = (-along[2]).clamp(-1.0, 1.0).acos();
-    let room = rules.cone_slope.atan() - lean;
-    let wanted = (room > 0.0).then(|| {
-        ((hold_radius - shaft_radius) / room.tan()).max(rules.min_span_mm)
-    });
+    let wanted = if horizontal_rings {
+        let room = rules.cone_slope - lean.tan();
+        (room > 0.0).then(|| {
+            ((hold_radius - shaft_radius) / room / (-along[2])).max(rules.min_span_mm)
+        })
+    } else {
+        let room = rules.cone_slope.atan() - lean;
+        (room > 0.0).then(|| {
+            ((hold_radius - shaft_radius) / room.tan()).max(rules.min_span_mm)
+        })
+    };
     let (mut end_station, steeper_than_law) = match wanted {
         Some(length) if pole_station + length < total => (pole_station + length, false),
         _ => (total, true),
@@ -4406,10 +4466,12 @@ fn pole_collar(
     }
     let (end_station, end_radius) = collar_end;
     // Above the pole's station the taper widens from the shaft's own top to
-    // the ring that holds the pole. Every ring of it lies inside the ball
-    // (`s² + r(s)²` is convex and at most `R²` at both ends), so nothing of it
-    // shows and the seat plane bites no more of the shaft than before; it is
-    // only never drawn under the shaft's own profile there either.
+    // the ring that holds the pole. For normal rings every ring of it lies
+    // inside the ball (`s² + r(s)²` is convex and at most `R²` at both ends),
+    // so nothing of it shows and the seat plane bites no more of the shaft
+    // than before; for horizontal rings it is the section that holds the pole
+    // and no more (see above). Either way it is never drawn under the shaft's
+    // own profile there.
     let top_radius = stations
         .iter()
         .map(|&(s0, _)| s0)
@@ -6654,6 +6716,59 @@ mod pole_collar_tests {
         let lean = (-along[2]).acos();
         let k = (rho - SHAFT) / geom_kernel::vec3::dist(ring, point(collar.end_mm));
         assert!((lean + k.atan() - rules.cone_slope.atan()).abs() < 1e-9);
+    }
+
+    /// The same defect on a PLATE-ROOT column (joint review, 2026-10-13): its
+    /// rings are HORIZONTAL ([`FrustumRingNormal::PlateZ`]), so the section at
+    /// the ball's lowest point is a horizontal circle about the axis point at
+    /// the pole's height. The collar once held the perpendicular distance to
+    /// the axis (`d·cos(lean)` short of the horizontal distance `d`) and kept
+    /// the horizontal rings, so a 0.533 mm ball on a 0.12 mm column leaning
+    /// 36 degrees printed its lowest point over air. Graded on the primitives
+    /// it returns: the horizontal section at the pole's height reaches the
+    /// pole, and the collar's underside (the axis's sideways run per mm of
+    /// drop, plus the radius lost per mm of drop) leans the law's saturation
+    /// angle.
+    #[test]
+    fn a_plate_root_columns_collar_holds_the_pole_in_horizontal_sections() {
+        const BALL: f64 = 0.533;
+        const SHAFT: f64 = 0.12;
+        let centre = [8.0, 0.0, 6.0];
+        let bottom = [0.0, 0.0, -5.0];
+        let column = vec![frustum(
+            SupportSegmentKind::Member,
+            centre.map(|value| Finite::new(value).unwrap()),
+            bottom.map(|value| Finite::new(value).unwrap()),
+            PositiveFinite::new(SHAFT).unwrap(),
+            PositiveFinite::new(SHAFT).unwrap(),
+            None,
+            FrustumRingNormal::PlateZ,
+        )];
+        let (drawn, steeper) = pole_collar(centre, BALL, &column).expect("the pole stands outside the column");
+        assert!(!steeper);
+        assert!(drawn.iter().all(|span| span.ring_normal == FrustumRingNormal::PlateZ));
+        let point = |p: [Finite; 3]| p.map(Finite::get);
+        let pole = [centre[0], centre[1], centre[2] - BALL];
+        // The horizontal distance from the pole to the axis at its height.
+        let along_run = (centre[0] - bottom[0]) / (centre[2] - bottom[2]);
+        let to_pole = (centre[0] - along_run * BALL - pole[0]).abs();
+        let (taper, collar) = (&drawn[0], &drawn[1]);
+        let ring = point(collar.start_mm);
+        assert!((ring[2] - pole[2]).abs() < 1e-9, "the holding ring is at the pole's height");
+        assert!(
+            (collar.start_radius_mm.get() - to_pole).abs() < 1e-9,
+            "the horizontal section reaches the pole: {} for {to_pole}",
+            collar.start_radius_mm.get()
+        );
+        assert!((taper.end_radius_mm.get() - to_pole).abs() < 1e-9);
+        // The underside: tan(lean) + radius lost per mm of drop = cot(saturation).
+        let rules = drawn_span_rules().expect("the registry reads");
+        let end = point(collar.end_mm);
+        let drop = ring[2] - end[2];
+        assert!(drop > 0.0);
+        let underside = along_run + (collar.start_radius_mm.get() - collar.end_radius_mm.get()) / drop;
+        assert!((underside - rules.cone_slope).abs() < 1e-9, "{underside} against {}", rules.cone_slope);
+        assert!((collar.end_radius_mm.get() - SHAFT).abs() < 1e-12);
     }
 
     /// Controls: the same ball on a vertical shaft, and a ball no wider than
