@@ -120,7 +120,7 @@ pub(crate) fn plan_of_with(
         .saturating_add(1)
         .max(1);
     let layers = LayerPlan::new(plate_z, vec![height; count]).expect("a uniform layer plan");
-    let mut plan = plinth_sweep::run_sweep(mesh, &layers, policy)
+    let mut plan = crate::harness::memo_run_sweep(mesh, &layers, policy)
         .expect("the sweep emits and warns; it never refuses");
     edit(&mut plan);
     let frame = BuildFrame::new(

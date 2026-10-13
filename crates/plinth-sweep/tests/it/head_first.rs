@@ -32,9 +32,7 @@
 use plinth_core::{Finite, LayerPlan, PositiveFinite};
 use plinth_mesh::Mesh;
 use plinth_support::BuildFrame;
-use plinth_sweep::{
-    arms_of, run_sweep_with_drains, to_primitives, Landing, SweepEmission, SweepPlan, SweepPolicy,
-};
+use plinth_sweep::{arms_of, to_primitives, Landing, SweepEmission, SweepPlan, SweepPolicy};
 
 use crate::harness;
 
@@ -118,7 +116,7 @@ fn run(mesh: &Mesh, policy: &SweepPolicy) -> Run {
     )]
     let count = (((max_z - plate_z) / height).ceil() as usize).max(1);
     let layers = LayerPlan::new(plate_z, vec![height; count]).expect("a uniform layer plan");
-    let plan = run_sweep_with_drains(mesh, &layers, policy, &[])
+    let plan = harness::memo_run_sweep_with_holes(mesh, &layers, policy, &[], &[])
         .expect("the sweep emits and warns; it never refuses");
     Run { plan, layers }
 }

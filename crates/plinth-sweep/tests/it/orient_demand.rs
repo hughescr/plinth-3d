@@ -10,7 +10,8 @@ use plinth_core::{m0_constants, LayerPlan};
 use plinth_mesh::{make_overhang_table, make_tall_stilt_plate};
 use plinth_orient::demand::{DemandFidelity, SupportDemandMeasurer};
 use plinth_orient::{OrientFaceTable, UpDirection};
-use plinth_sweep::{burden_cm2, run_sweep, StrutKind, SweepDemand, SweepPlan, SweepPolicy};
+use crate::harness::memo_run_sweep;
+use plinth_sweep::{burden_cm2, StrutKind, SweepDemand, SweepPlan, SweepPolicy};
 
 /// The scoring table the commit tier hands the measurer. Built here exactly as
 /// `plinth_orient::search` builds its Exact rung, so the fragility and display
@@ -158,7 +159,7 @@ fn swept_at(mesh: &plinth_mesh::Mesh, candidate: UpDirection) -> SweepPlan {
     )]
     let count = (((max_z - plate_z) / layer_height_mm).ceil().max(1.0) as usize) + 1;
     let layers = LayerPlan::new(plate_z, vec![layer_height_mm; count]).expect("a layer plan");
-    run_sweep(&transformed, &layers, &policy).expect("a sweepable fixture")
+    memo_run_sweep(&transformed, &layers, &policy).expect("a sweepable fixture")
 }
 
 /// **Anti-vacuity, and the sabotage this fix must survive.** The slenderness

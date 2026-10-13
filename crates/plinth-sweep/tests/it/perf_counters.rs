@@ -21,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::harness;
 
-use harness::sweep_with;
+use harness::sweep_with_uncached;
 use plinth_mesh::make_tall_stilt_plate;
 use plinth_sweep::{perf, SweepPolicy};
 
@@ -44,7 +44,8 @@ fn child_runs_one_sweep() {
     perf::begin_model("stilt");
     let policy = SweepPolicy::from_registry().expect("the registry supplies every number");
     let mesh = make_tall_stilt_plate().expect("the tall stilt plate fixture");
-    let plan = sweep_with(&mesh, 0.1, &policy);
+    // Uncached: the counters count the run, so a remembered plan would read zero.
+    let plan = sweep_with_uncached(&mesh, &policy);
     assert!(plan.report.struts_total > 0, "the sweep placed nothing");
     perf::end_model();
 }
