@@ -326,25 +326,37 @@ fn thread_budget_line(counts: BudgetCounts, resolved: Budget) -> String {
 /// the reason, and the resin it costs against the planned hollow (or the
 /// whole solid, an upper bound, when no hollow volume was planned).
 fn not_hollowed_line(warning: &NotHollowed) -> String {
-    let basis = warning.planned_hollow_mm3.map_or_else(
+    let cost_ml = warning.resin_cost_mm3 / 1000.0;
+    let cost = warning.planned_hollow_mm3.map_or_else(
         || {
             format!(
-                "up to the whole solid, {:.1} mm3: no hollow volume was planned before the failure",
+                "costs up to {cost_ml:.2} mL more resin (the whole solid, {:.1} mm3; penalty \
+                 unknown: no hollow volume was planned before the failure)",
                 warning.solid_mm3
             )
         },
         |hollow| {
             format!(
-                "solid {:.1} mm3 - planned hollow {hollow:.1} mm3",
+                "costs {cost_ml:.2} mL more resin (solid {:.1} mm3 - planned hollow {hollow:.1} mm3)",
                 warning.solid_mm3
             )
         },
     );
     format!(
-        "  WARNING NOT HOLLOWED  emitted SOLID; costs {:.2} mL more resin ({basis}); reason: {}",
-        warning.resin_cost_mm3 / 1000.0,
+        "  WARNING NOT HOLLOWED  emitted SOLID; {cost}; reason: {}",
         warning.reason
     )
+}
+
+/// One model's entry in the NOT HOLLOWED summary: the measured resin cost
+/// when a hollow volume was planned, else the whole-solid upper bound, marked
+/// as such so it never reads as a measured penalty.
+fn not_hollowed_summary_row(model: &str, warning: &NotHollowed) -> String {
+    let cost_ml = warning.resin_cost_mm3 / 1000.0;
+    match warning.planned_hollow_mm3 {
+        Some(_) => format!("{model} (+{cost_ml:.2} mL)"),
+        None => format!("{model} (up to +{cost_ml:.2} mL; penalty unknown)"),
+    }
 }
 
 /// One line after the SUMMARY naming every model emitted SOLID after a failed
@@ -356,11 +368,7 @@ fn not_hollowed_summary(models: &[ModelPreparationReport]) -> Option<String> {
             ModelPreparationOutcome::Artifact {
                 not_hollowed: Some(warning),
                 ..
-            } => Some(format!(
-                "{} (+{:.2} mL)",
-                model.model.as_str(),
-                warning.resin_cost_mm3 / 1000.0
-            )),
+            } => Some(not_hollowed_summary_row(model.model.as_str(), warning)),
             _ => None,
         })
         .collect();
@@ -1349,8 +1357,9 @@ mod tests {
 
     use super::{
         coverage_gap_warning_lines, coverage_lines, coverage_repair_lines, near_parallel_lines,
-        no_orient_lines, orientation_source_lines, remedies_tried_line, repair_lines,
-        not_hollowed_line, sweep_warning_summary_of, thread_budget_line, SweepModelWarnings,
+        no_orient_lines, not_hollowed_line, not_hollowed_summary_row, orientation_source_lines,
+        remedies_tried_line, repair_lines, sweep_warning_summary_of, thread_budget_line,
+        SweepModelWarnings,
     };
 
     /// The model-block WARNING names the reason and the resin cost, and says
@@ -1373,10 +1382,38 @@ mod tests {
             resin_cost_mm3: 21_176.0,
             ..planned
         };
-        assert!(not_hollowed_line(&unknown).contains(
-            "costs 21.18 mL more resin (up to the whole solid, 21176.0 mm3: no hollow volume was \
-             planned before the failure)"
-        ));
+        assert_eq!(
+            not_hollowed_line(&unknown),
+            "  WARNING NOT HOLLOWED  emitted SOLID; costs up to 21.18 mL more resin (the whole \
+             solid, 21176.0 mm3; penalty unknown: no hollow volume was planned before the \
+             failure); reason: drilling proof refused: x"
+        );
+    }
+
+    /// The SUMMARY row states a measured cost plainly and an unknown one as
+    /// an upper bound, never as a bare `+X mL`.
+    #[test]
+    fn the_not_hollowed_summary_row_qualifies_an_unknown_cost() {
+        let planned = plinth_pipeline::prepare::NotHollowed {
+            reason: "drilling proof refused: x".to_owned(),
+            solid_mm3: 21_176.0,
+            planned_hollow_mm3: Some(8_960.0),
+            resin_cost_mm3: 12_216.0,
+        };
+        assert_eq!(
+            not_hollowed_summary_row("Cylinder", &planned),
+            "Cylinder (+12.22 mL)"
+        );
+        let unknown = plinth_pipeline::prepare::NotHollowed {
+            solid_mm3: 28_728.0,
+            planned_hollow_mm3: None,
+            resin_cost_mm3: 28_728.0,
+            ..planned
+        };
+        assert_eq!(
+            not_hollowed_summary_row("PreHollowed", &unknown),
+            "PreHollowed (up to +28.73 mL; penalty unknown)"
+        );
     }
 
     /// The `[threads]` line names the width, its source and the three path
