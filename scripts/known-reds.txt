@@ -10,7 +10,6 @@
 # --- red in the default run (what scripts/test-fast.sh sees) --------------------------------------
 plinth-sweep::it::prefilter_no_brace::the_prefilter_measures_no_brace_mast_or_tie  # path hit: the full coarse ladder places 0 braces, 5 ties
 plinth-hollow::it::no_private_vector_algebra::crate_src_carries_no_private_vector_algebra  # source lint
-plinth-hollow::lib::tests::round_50_and_round_100_rasterize_under_the_unchanged_production_cap
 plinth-pipeline::it::no_private_vector_algebra::crate_src_carries_no_uncited_private_vector_algebra  # mul_add in coverage_evidence.rs
 plinth-pipeline::it::dual_cavity_real_pipeline::at_bore_hollows_the_near_chamber_alone_after_the_real_preprocessing  # dual-chamber hollowing
 plinth-pipeline::it::dual_cavity_real_pipeline::separated_drains_each_disconnected_chamber_on_its_own_after_the_real_preprocessing  # dual-chamber hollowing
@@ -35,3 +34,4 @@ plinth-sweep::it::clearance_census::a_lander_never_joins_inside_its_hosts_contac
 plinth-sweep::it::morel_long_posts::the_morel_cap_arms_land_on_the_base_and_clear_it  # ignored: needs the local Morel base mini
 plinth-sweep::it::morel_pose::the_morel_base_lands_textured_top_up_by_more_than_its_supports_can_move  # ignored: needs the local Morel base mini
 plinth-decimate::it::local_minis_repair::local_minis_zero_volume_repair  # ignored: needs the local minis (PLINTH_MINIS_DIR)
+plinth-hollow::lib::tests::round_50_and_round_100_rasterize_under_the_unchanged_production_cap  # ignored: needs the local minis (PLINTH_MINIS_DIR)
