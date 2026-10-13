@@ -3,9 +3,12 @@
 # the crates changed against develop, plus every workspace crate that depends on them), then a
 # verdict against scripts/known-reds.txt:
 #
-#   PASS       no failing test outside the known-reds list
-#   NEW-RED    a failing test that is not listed: a regression, exit status 1
-#   FIXED-RED  a listed test that passes now: delete its line from known-reds.txt
+#   PASS         no failing test outside the known-reds list
+#   NEW-RED      a failing test that is not listed, or a test binary that did not complete
+#                (no libtest summary, unexpected exit status): a regression, exit status 1
+#   CHANGED-RED  a listed test that fails with a different message than its listed signature:
+#                exit status 1
+#   FIXED-RED    a listed test that passes now: delete its line from known-reds.txt
 #
 # Slow legacy-runner tests are `#[ignore]`d and do not run here; scripts/gate-full.sh runs them.
 # Wrap the call in the CPU lock like every other cargo command:

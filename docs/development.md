@@ -54,12 +54,17 @@ scripts/gate-full.sh                 # milestone: every test binary, ignored tes
   use every core, so running them side by side saves little except around the single-threaded
   grinders. The ignored set is red where its inputs are absent; those tests are in
   `known-reds.txt` marked "ignored".
-- **`scripts/known-reds.txt`** lists the tests that are red on `develop` today, one id per line
-  (`<package>::<test program>::<test path>`, `lib` for a library's unit tests) with the reason.
-  Both scripts print each run against it: `PASS` (nothing failed outside the list), `NEW-RED`
-  (a failure that is not listed: a regression, exit status 1), `FIXED-RED` (a listed test that
-  passes: delete its line). A change that fixes a red removes its line in the same commit; nobody
-  adds a line to hide a failure without the reason beside it.
+- **`scripts/known-reds.txt`** lists the tests that are red on `develop` today, one line each:
+  `<package>::<test program>::<test path> => <signature> ;; <signature>  # reason` (`lib` for a
+  library's unit tests). A signature is a fixed string from the test's panic message that its
+  failure text must contain. Both scripts print each run against the list: `PASS` (nothing failed
+  outside the list), `NEW-RED` (a failure that is not listed, or a test binary that did not
+  complete: no libtest summary line, or an exit status other than 0 and 101; exit status 1),
+  `CHANGED-RED` (a listed test failing with a different message: exit status 1, so a known name
+  cannot hide a new defect), `FIXED-RED` (a listed test that passes: delete its line). A change
+  that fixes a red removes its line in the same commit; nobody adds a line to hide a failure
+  without the signature and the reason beside it. `scripts/test-units-selftest.sh` checks this
+  verdict logic on synthetic logs (no cargo needed); run it after changing `scripts/lib`.
 - **Slow legacy-runner tests are `#[ignore]`d** with the reason
   `slow legacy-runner test: run with scripts/gate-full.sh`. The legacy runner is not on the
   `--placement sweep` path; a regression in it shows at the milestone, not in the lane loop.
