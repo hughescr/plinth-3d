@@ -90,6 +90,14 @@
 //! tip still moved onto its face by a later candidate, and without the check
 //! two members left leaning at 1.575 and 1.586 against the law's 1.5697.
 //!
+//! A move must also keep the support the tip was placed to give (joint review
+//! P2, 2026-10-12): the moved ball must still hold the original seat, to
+//! within one pixel, or the moved disc must still reach down to the seat's
+//! lamina ([`keeps_seat`]). A disc wholly on some face higher up is not
+//! support for the material under the seat; a candidate that leaves it is
+//! refused like a move that breaks a rule, and a tip with none left keeps its
+//! seat as a [`Footprint::MoveRefused`].
+//!
 //! # Batching
 //!
 //! Every sample of every tip is graded in ONE ascending pass over the layer
@@ -157,6 +165,10 @@ pub struct FootprintOutcome {
     pub moves_refused_slenderness: usize,
     pub moves_refused_drain: usize,
     pub members_checked: usize,
+    /// On-face candidates and re-derived moves refused because the moved
+    /// ball no longer holds the seat the tip was placed for ([`keeps_seat`],
+    /// joint review P2): the path hits of that rule.
+    pub moves_refused_off_seat: usize,
     /// THE LIP-SEAT RULE's remedy 2 (2026-09-29): tips whose disc was on its
     /// face but whose shaft the seat trim cut outside its ball, searched for a
     /// seat further along the same face; those moved there; and slides of
@@ -639,6 +651,61 @@ fn carried(
     hit
 }
 
+/// A slid tip's ball and the contact disc it cuts in its seat plane.
+#[derive(Clone, Copy, Debug)]
+struct Slid {
+    ball_centre: [f64; 3],
+    ball_radius: f64,
+    disc_centre: [f64; 3],
+    disc_radius: f64,
+    /// The seat plane's outward unit normal.
+    normal: [f64; 3],
+}
+
+impl Slid {
+    fn of(disc: &TipContactDisc) -> Self {
+        Self {
+            ball_centre: disc.ball_centre_mm,
+            ball_radius: disc.ball_radius_mm,
+            disc_centre: disc.centre_mm,
+            disc_radius: disc.radius_mm,
+            normal: disc.outward_normal,
+        }
+    }
+}
+
+/// **A slide keeps the support it was placed to give** (joint review P2,
+/// 2026-10-12). `seat` is the point the reach criterion placed the tip for
+/// (the bottom of the first cured lamina there). The slide keeps it when
+/// either
+///
+/// * the moved ball still HOLDS the seat, to within one pixel (`pitch`: the
+///   printer cannot part two solids closer than that, the tolerance the grade
+///   itself reads); the tip's own ball holds its seat by construction (the
+///   seat law drives it INTO the model there); or
+/// * the moved contact disc, which lies on the face, still reaches DOWN to the
+///   seat's lamina: its lowest point is no more than one layer (`height`)
+///   above the seat. A slide across a level face, or along a tilted face's
+///   strike, stays on the lamina the tip was placed under (the rim tips of a
+///   flat disc slide inward this way; a section move slides along its face).
+///
+/// What it refuses is a slide UP the layers onto a contact that no longer
+/// meets them: a disc wholly on SOME face is not support for the material
+/// the tip was placed under. Deinonychus's ball 310 slid 0.79 mm up its
+/// slope (its centre 0.27 mm higher) onto a whole-disc contact, and the 829 +
+/// 1356 pixels it had held at 7.575 and 7.625 mm were left over nothing
+/// (`joint/out-fix/final`).
+fn keeps_seat(seat: [f64; 3], slid: Slid, pitch: f64, height: f64) -> bool {
+    if geom_kernel::vec3::dist(seat, slid.ball_centre) <= slid.ball_radius + pitch {
+        return true;
+    }
+    // The disc's lowest point: its centre less its radius times the plane's
+    // tilt from level (the horizontal part of the unit normal).
+    let tilt = slid.normal[0].hypot(slid.normal[1]).min(1.0);
+    let lowest = slid.disc_centre[2] - slid.disc_radius * tilt;
+    lowest <= seat[2] + height
+}
+
 /// The integer lattice offsets inside a disc of `radius` pitches, centre first.
 #[expect(
     clippy::cast_possible_truncation,
@@ -886,6 +953,9 @@ pub(crate) fn apply(
         first: usize,
         candidates: Vec<(i32, i32)>,
         next: usize,
+        /// The ball and disc before any move: the prefilter moves them
+        /// rigidly with each candidate ([`keeps_seat`]).
+        slid: Slid,
     }
     let mut searches: Vec<Search> = Vec::with_capacity(failing.len());
     let mut lattice: Vec<Sample> = Vec::new();
@@ -936,6 +1006,16 @@ pub(crate) fn apply(
             first,
             candidates,
             next: 0,
+            slid: Slid {
+                ball_centre: geom_kernel::vec3::add(
+                    frame.centre,
+                    geom_kernel::vec3::scale(frame.normal, frame.centre_height),
+                ),
+                ball_radius: frame.ball_radius,
+                disc_centre: frame.centre,
+                disc_radius: discs[arm].map_or(0.0, |disc| disc.radius_mm),
+                normal: frame.normal,
+            },
         });
     }
     outcome.search_samples = lattice.len();
@@ -985,7 +1065,7 @@ pub(crate) fn apply(
         let mut proposals: Vec<(usize, (i32, i32))> = Vec::new();
         for &slot in &pending {
             let search = &mut searches[slot];
-            let Some((_, offsets, rim)) = &frames[search.arm] else {
+            let Some((frame, offsets, rim)) = &frames[search.arm] else {
                 continue;
             };
             // The rim read back at its nearest search-lattice point: a
@@ -999,17 +1079,37 @@ pub(crate) fn apply(
                 .iter()
                 .map(|&(u, v)| (u.round() as i32, v.round() as i32))
                 .collect();
+            let seat = arms[search.arm].seat_mm;
             while search.next < search.candidates.len() {
                 let (i, j) = search.candidates[search.next];
                 search.next += 1;
-                if offsets
+                if !offsets
                     .iter()
                     .chain(&rim_cells)
                     .all(|&(u, v)| on_lattice(search, u + i, v + j))
                 {
-                    proposals.push((slot, (i, j)));
-                    break;
+                    continue;
                 }
+                // An on-face candidate whose ball and disc, moved rigidly with
+                // it, no longer keep the seat it was placed for (`keeps_seat`)
+                // is a refused move; the ball the lowering re-derives is held
+                // to the same rule below.
+                let slide = geom_kernel::vec3::sub(
+                    frame.point(pitch, f64::from(i), f64::from(j)),
+                    frame.centre,
+                );
+                let rigid = Slid {
+                    ball_centre: geom_kernel::vec3::add(search.slid.ball_centre, slide),
+                    disc_centre: geom_kernel::vec3::add(search.slid.disc_centre, slide),
+                    ..search.slid
+                };
+                if !keeps_seat(seat, rigid, pitch, height) {
+                    outcome.moves_refused_off_seat += 1;
+                    refused_by_limits[slot] = true;
+                    continue;
+                }
+                proposals.push((slot, (i, j)));
+                break;
             }
         }
         if proposals.is_empty() {
@@ -1116,6 +1216,16 @@ pub(crate) fn apply(
             let Some(disc) = disc.filter(|disc| disc.radius_mm > 0.0) else {
                 continue;
             };
+            // THE SEAT IT WAS PLACED FOR (joint review P2): the ball the file
+            // will get at the moved seat must still hold the seat the reach
+            // criterion asked support for. A refusal is a refused move: the
+            // tip tries its next candidate, and keeps its seat, warned, when
+            // none is left.
+            if !keeps_seat(arms[search.arm].seat_mm, Slid::of(&disc), pitch, height) {
+                outcome.moves_refused_off_seat += 1;
+                refused_by_limits[*slot] = true;
+                continue;
+            }
             let Some(real) = Frame::of(&disc) else {
                 continue;
             };

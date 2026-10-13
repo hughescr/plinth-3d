@@ -3046,7 +3046,8 @@ fn print_sweep_disclosure(
              face onto it (longest {:.4} mm; {} members joined to a moved axis moved with it, \
              by up to {:.4} mm), {} on a knife edge, {} left in place because every on-face \
              seat broke a rule of the finished field; moves refused by the lean law {}, by an \
-             unbraced run's limit {}, by the drain keep-out {} ({} member checks); {} disc \
+             unbraced run's limit {}, by the drain keep-out {} ({} member checks), for leaving \
+             the seat the tip was placed for {}; {} disc \
              samples + {} search samples + {} move-verify samples over {} layers, {} round(s); \
              {} tips off their face at the disc's rim alone (lattice on the face)",
             emission.tips_trimmed_to_seat,
@@ -3070,6 +3071,7 @@ fn print_sweep_disclosure(
             footprint.moves_refused_slenderness,
             footprint.moves_refused_drain,
             footprint.members_checked,
+            footprint.moves_refused_off_seat,
             footprint.disc_samples,
             footprint.search_samples,
             footprint.verify_samples,
@@ -3102,8 +3104,9 @@ fn print_sweep_disclosure(
             println!(
                 "[sweep {model}] real contact: {} seated tips measured; planned {:.4} mm2, real \
                  {:.4} mm2 at the ungrown ball ({} short of plan) and {:.4} mm2 at the drawn ball; \
-                 {} balls grown (largest x{:.3}, limit {:.4} mm radius) in {} round(s); {} still \
-                 short of plan",
+                 {} balls grown (largest x{:.3}, limit {:.4} mm radius) in {} round(s); {} held \
+                 below the limit so the ball's lowest point stays on its shaft ({} of them left \
+                 short by it); {} still short of plan",
                 contact.tips_measured,
                 contact.planned_mm2,
                 contact.real_ungrown_mm2,
@@ -3113,6 +3116,8 @@ fn print_sweep_disclosure(
                 contact.max_growth_ratio,
                 contact.limit_ball_radius_mm,
                 contact.rounds,
+                contact.carried_bound,
+                contact.stopped_by_overhang,
                 contact.short.len(),
             );
             for short in &contact.short {

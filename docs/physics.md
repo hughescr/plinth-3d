@@ -533,6 +533,25 @@ changes has its disc graded again and a disc now off its face is warned about. B
 `plinth_sweep::footprint_normal`
 (`tests/it/footprint_normal.rs`); never run in the orientation prefilter.
 
+### Every change to a tip keeps layerwise support (joint review, 2026-10-12)
+
+A solid that is connected when finished can still start a layer with nothing under it, and the
+slicer cures that patch in free resin. Two tip rules are held to this:
+
+- **A grown ball prints from its own shaft.** The ball's horizontal sections below its equator
+  widen upward, each holding the one below, so its only possible new island is its LOWEST point,
+  and that prints only when it lies inside the shaft the ball stands on (a straight arm's taper at
+  the tip radius, a head's link). Contact growth moves the ball out along its seat normal; on an
+  oblique shaft the lowest point leaves the shaft. Each tip's growth is bounded by the largest ball
+  whose lowest point stays inside (`plinth_support::carried_ball_radii_mm`); a tip it stops short
+  of plan is warned (`ShortReason::Overhang`).
+- **A footprint slide keeps the seat it was placed for.** A disc wholly on some face higher up is
+  not support for the material the tip was placed under. A slide is accepted only if the moved ball
+  still holds the original seat to within one pixel, or the moved disc still reaches down to within
+  one layer of the seat (a slide across a level face or along a tilted face's strike stays on the
+  seat's lamina) (`footprint::keeps_seat`); otherwise the tip tries its next candidate and, when
+  none keeps the seat, keeps its own with a warning (`Footprint::MoveRefused`).
+
 Land-at-strike is a **ratified design principle** — the standing answer for how the engine
 should treat a stub that runs into the model — rather than a claim that every piece of it is
 built. Build status belongs to `docs/status.md`.

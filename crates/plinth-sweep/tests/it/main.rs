@@ -31,6 +31,7 @@ mod drain_rim_routing;
 mod emitted_profile_covers_ledger;
 mod every_member_rests_on_something;
 mod flank_relief;
+mod footprint_keeps_seat;
 mod footprint_moves_hold_the_rules;
 mod footprint_normal;
 mod frame_ledger;

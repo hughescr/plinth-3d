@@ -38,6 +38,16 @@
 //!   accepts for a tip enlarged beyond what the load law asked; a ball the
 //!   load law already drew larger is not grown), or a ball whose growth found
 //!   no more surface (the patch ends: a knife edge, a thin feature).
+//! * **A grown ball must print from its own shaft** (joint review P1,
+//!   2026-10-12). The only part of a ball that starts a new layer island is
+//!   its lowest point; it prints when it lies inside the shaft the ball stands
+//!   on. The grown ball moves out along its seat normal, and on an oblique
+//!   shaft its lowest point leaves the shaft: the file then cures a patch over
+//!   nothing (Bat_Cat_Owl: a 0.270 mm ball on a 0.097 mm taper, a new
+//!   97-pixel island at 10.425 mm). Each tip's growth is therefore also
+//!   bounded by the largest ball whose lowest point stays inside its shaft
+//!   ([`plinth_support::carried_ball_radii_mm`], the lowering's own
+//!   derivation), and a tip it stops is warned with [`ShortReason::Overhang`].
 //!
 //! # Tolerance and the search
 //!
@@ -71,6 +81,9 @@ pub enum ShortReason {
     BallLimit,
     /// The ball grew and found no more model surface: the patch ends.
     NoMoreSurface,
+    /// A larger ball's lowest point would stand outside the shaft it stands
+    /// on and print as a new island.
+    Overhang,
     /// [`MAX_ROUNDS`] ran out.
     SearchRounds,
 }
@@ -85,6 +98,10 @@ impl ShortReason {
                  ball), or the load law already drew it larger"
             }
             Self::NoMoreSurface => "a larger ball found no more model surface (the patch ends)",
+            Self::Overhang => {
+                "a larger ball's lowest point would stand outside its shaft and print as a new \
+                 island"
+            }
             Self::SearchRounds => "the radius search ran out of rounds",
         }
     }
@@ -126,6 +143,11 @@ pub struct ContactOutcome {
     pub rounds: usize,
     /// The largest ball the registry draws, mm (the growth limit).
     pub limit_ball_radius_mm: f64,
+    /// Tips short of plan whose growth is bounded below that limit because a
+    /// larger ball's lowest point would leave its shaft (the path hits of the
+    /// carried bound), and of those, the ones it stopped short of plan.
+    pub carried_bound: usize,
+    pub stopped_by_overhang: usize,
     /// Tips still short after the growth, with why.
     pub short: Vec<ContactShort>,
     /// Per strut: `(real mm², planned mm²)` at the drawn ball, `None` for a
@@ -230,6 +252,20 @@ pub fn grow(
         real: f64,
         previous: Option<(f64, f64)>,
         reason: Option<ShortReason>,
+        /// This tip's growth limit, and whether it is the carried bound
+        /// (below the registry's).
+        limit: f64,
+        overhang: bool,
+    }
+    impl Search {
+        /// Why a tip stopped at its limit.
+        const fn at_limit(&self) -> ShortReason {
+            if self.overhang {
+                ShortReason::Overhang
+            } else {
+                ShortReason::BallLimit
+            }
+        }
     }
     let mut searches: Vec<Search> = Vec::new();
     for (position, answer) in first.iter().enumerate() {
@@ -254,7 +290,27 @@ pub fn grow(
             real,
             previous: None,
             reason: None,
+            limit: limit_ball_radius_mm,
+            overhang: false,
         });
+    }
+    // THE CARRIED BOUND (joint review P1): the largest ball each short tip's
+    // shaft carries, in one call. A tip it cannot be read for is not grown
+    // (the side that keeps the file printable).
+    let searched: Vec<SweepArm> = searches
+        .iter()
+        .map(|search| working[search.tip].clone())
+        .collect();
+    let ceilings = vec![limit_ball_radius_mm; searched.len()];
+    let carried = plinth_support::carried_ball_radii_mm(&searched, &ceilings, env.layer_plan)
+        .unwrap_or_else(|_| vec![None; searched.len()]);
+    for (search, carried) in searches.iter_mut().zip(carried) {
+        let bound = carried.unwrap_or(search.ungrown_radius);
+        if bound < limit_ball_radius_mm {
+            search.limit = bound.max(search.ungrown_radius);
+            search.overhang = true;
+            outcome.carried_bound += 1;
+        }
     }
     let mut active: Vec<usize> = (0..searches.len()).collect();
     while !active.is_empty() && outcome.rounds < MAX_ROUNDS {
@@ -265,8 +321,8 @@ pub fn grow(
         let mut proposed: Vec<(usize, f64)> = Vec::with_capacity(active.len());
         for &slot in &active {
             let search = &mut searches[slot];
-            if search.radius >= limit_ball_radius_mm {
-                search.reason = Some(ShortReason::BallLimit);
+            if search.radius >= search.limit {
+                search.reason = Some(search.at_limit());
                 continue;
             }
             let next = match search.previous {
@@ -285,7 +341,7 @@ pub fn grow(
             let next = next
                 .min(2.0 * search.radius)
                 .max(search.radius)
-                .min(limit_ball_radius_mm);
+                .min(search.limit);
             if !(next.is_finite() && next > search.radius) {
                 search.reason = Some(ShortReason::NoMoreSurface);
                 continue;
@@ -314,8 +370,8 @@ pub fn grow(
             // A larger ball that took no more surface is not drawn: the
             // patch ends, and the ball stays at the last radius that gained.
             if real <= search.real {
-                search.reason = Some(if radius >= limit_ball_radius_mm {
-                    ShortReason::BallLimit
+                search.reason = Some(if radius >= search.limit {
+                    search.at_limit()
                 } else {
                     ShortReason::NoMoreSurface
                 });
@@ -347,6 +403,9 @@ pub fn grow(
                 .max(search.radius / search.ungrown_radius);
         }
         if search.real + area_tolerance_mm2 < search.planned {
+            if search.reason == Some(ShortReason::Overhang) {
+                outcome.stopped_by_overhang += 1;
+            }
             outcome.short.push(ContactShort {
                 strut,
                 real_mm2: search.real,

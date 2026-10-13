@@ -177,7 +177,8 @@ pub use initial::ContactConstructionLimits;
 /// `lower` stays crate-private: this exposes the primitive chain, not the
 /// forest data model behind it.
 pub use lower::{
-    drawn_root_radius_mm, drawn_spans, lower_sweep_arms, lower_sweep_arms_with_hull_reference,
+    carried_ball_radii_mm, drawn_root_radius_mm, drawn_spans, lower_sweep_arms,
+    lower_sweep_arms_with_hull_reference,
     model_foot_discs, tip_contact_discs, tip_shaft_seat_bites,
     DrawnSpan, ModelFoot, RootBoss, ShaftSeatBite, SweepArm, SweepArmLanding, SweepLowering,
     SweepHead, SweepLoweringError, SweepRootFlare, TipContactDisc, NATIVE_FOOT_PAD_OVERLAP_MM,

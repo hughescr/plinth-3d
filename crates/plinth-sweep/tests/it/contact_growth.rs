@@ -13,9 +13,12 @@
 //! * a patch smaller than the ball (a knife edge, a thin feature): a larger
 //!   ball finds no more surface, and the tip is named for it.
 
-use plinth_core::LayerPlan;
+use plinth_core::{Finite, LayerPlan, PositiveFinite};
 use plinth_mesh::Mesh;
-use plinth_support::{SweepArm, SweepArmLanding};
+use plinth_support::{
+    lower_sweep_arms, BuildFrame, SupportPrimitive, SupportSegmentKind, SweepArm,
+    SweepArmLanding,
+};
 use plinth_sweep::contact_growth::{grow, ShortReason};
 use plinth_sweep::footprint_normal::{MeasureEnv, TipSite};
 
@@ -242,6 +245,121 @@ fn a_limit_leaves_the_dome_tip_short_and_named() {
     assert_eq!(outcome.short.len(), 1, "{outcome:?}");
     assert_eq!(outcome.short[0].reason, ShortReason::BallLimit);
     assert!(outcome.short[0].real_mm2 < outcome.short[0].planned_mm2);
+}
+
+/// Whether `point` lies inside one of `primitives` other than its contact
+/// sphere: a frustum (radius interpolated along its axis) or a sphere. Read
+/// from the lowering's own output, not from the rule under test.
+fn inside_other_solid(primitives: &[SupportPrimitive], point: [f64; 3]) -> bool {
+    primitives.iter().any(|piece| {
+        if piece.segment_kind == SupportSegmentKind::ContactSphere {
+            return false;
+        }
+        let a = piece.start_mm.map(Finite::get);
+        let b = piece.end_mm.map(Finite::get);
+        let axis = geom_kernel::vec3::sub(b, a);
+        let length = geom_kernel::vec3::norm(axis);
+        if piece.sphere_geometry.is_some() || length <= 1e-12 {
+            let centre: [f64; 3] = std::array::from_fn(|i| 0.5 * (a[i] + b[i]));
+            return geom_kernel::vec3::dist(point, centre) <= piece.start_radius_mm.get();
+        }
+        let t = geom_kernel::vec3::dot(geom_kernel::vec3::sub(point, a), axis) / (length * length);
+        if !(0.0..=1.0).contains(&t) {
+            return false;
+        }
+        let radius = piece.start_radius_mm.get()
+            + t * (piece.end_radius_mm.get() - piece.start_radius_mm.get());
+        let foot = geom_kernel::vec3::add(a, geom_kernel::vec3::scale(axis, t));
+        geom_kernel::vec3::dist(point, foot) <= radius
+    })
+}
+
+/// The arm lowered alone by the production lowering, and its drawn ball's
+/// lowest point.
+fn drawn_ball_pole(arm: &SweepArm, layers: &LayerPlan) -> (Vec<SupportPrimitive>, [f64; 3], f64) {
+    let frame = BuildFrame::new(
+        Finite::new(layers.z0_mm()).expect("finite plate"),
+        PositiveFinite::new(1.0).expect("positive lift"),
+    );
+    let primitives = lower_sweep_arms(std::slice::from_ref(arm), frame, layers, 1_000, 1 << 24)
+        .expect("the lowering refuses only about the request")
+        .primitives;
+    let ball = primitives
+        .iter()
+        .find(|piece| piece.segment_kind == SupportSegmentKind::ContactSphere)
+        .expect("a seated tip draws its ball");
+    let (a, b) = (ball.start_mm.map(Finite::get), ball.end_mm.map(Finite::get));
+    let radius = ball.start_radius_mm.get();
+    let pole = [0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]), 0.5 * (a[2] + b[2]) - radius];
+    (primitives, pole, radius)
+}
+
+/// **A grown ball prints from its own shaft** (joint review P1, 2026-10-12).
+/// The dome tip seated 45° up the dome's flank, on an arm along the face
+/// normal there (inside the lean law): it is short of plan, as the dome's
+/// lowest tip is, and growing it moves the ball out along the normal until
+/// its lowest point leaves the 0.3 mm taper and cures over nothing
+/// (Bat_Cat_Owl's 0.270 mm ball on a 0.097 mm taper). The growth stops at the
+/// largest ball whose lowest point the shaft still holds, named, and the
+/// lowering's own records hold that point; a ball a little larger does not.
+#[test]
+fn a_grown_ball_on_an_oblique_shaft_keeps_its_lowest_point_inside_its_shaft() {
+    let mesh = dome();
+    let layers = plan();
+    let env = MeasureEnv {
+        mesh: &mesh,
+        surface: None,
+        layer_plan: &layers,
+    };
+    // On z = r^2 / 2 the slope is r, so the face 45 degrees off horizontal is
+    // at r = tan 45; its outward normal leans 45 degrees from straight down.
+    let r = 45.0_f64.to_radians().tan();
+    let seat = [r, 0.0, r * r / 2.0];
+    let normal = geom_kernel::vec3::normalize([r, 0.0, -1.0]).expect("a normal");
+    let oblique = SweepArm {
+        base_mm: geom_kernel::vec3::add(seat, geom_kernel::vec3::scale(normal, 10.0)),
+        seat_normal_mm: normal,
+        ..arm(seat)
+    };
+    let site = site_at(&mesh, seat);
+    let (outcome, grown) = grow(
+        &env,
+        std::slice::from_ref(&oblique),
+        &[Some(site)],
+        2.0,
+        PIXEL_AREA_MM2,
+    );
+    println!("{outcome:?}; drawn {grown:?}");
+    // The path fires: the tip is short, its shaft bounds its growth, and the
+    // bound is what leaves it short (a growth it wanted and did not get).
+    assert_eq!(outcome.short_ungrown, 1, "{outcome:?}");
+    assert_eq!(outcome.carried_bound, 1, "{outcome:?}");
+    assert_eq!(outcome.stopped_by_overhang, 1, "{outcome:?}");
+    assert_eq!(outcome.short.len(), 1, "{outcome:?}");
+    assert_eq!(outcome.short[0].reason, ShortReason::Overhang);
+    let drawn = grown[0].expect("the tip still grows up to its shaft's bound");
+    let draw = |radius: f64| {
+        drawn_ball_pole(
+            &SweepArm {
+                contact_ball_radius_mm: Some(radius),
+                ..oblique.clone()
+            },
+            &layers,
+        )
+    };
+    let (pieces, pole, radius) = draw(drawn);
+    assert!((radius - drawn).abs() < 1e-9, "the file draws the grown ball");
+    assert!(
+        inside_other_solid(&pieces, pole),
+        "the drawn ball's lowest point {pole:?} is outside its shaft"
+    );
+    // SABOTAGE WITNESS: one percent larger, the lowest point is outside every
+    // other solid of the arm (the defect this test can see).
+    let (pieces, pole, _) = draw(1.01 * drawn);
+    assert!(
+        !inside_other_solid(&pieces, pole),
+        "a ball past the bound still prints, so the bound is not tight"
+    );
 }
 
 #[test]

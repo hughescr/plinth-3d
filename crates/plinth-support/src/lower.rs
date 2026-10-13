@@ -3203,6 +3203,146 @@ pub fn tip_contact_discs(
         .collect())
 }
 
+/// How far inside its own drawn shaft a seated tip's ball's LOWEST point
+/// stands, mm (negative outside), on the arm exactly as the lowering draws it:
+/// the ball the arm asks for ([`SweepArm::contact_ball_radius_mm`]), centred
+/// where [`seated_ball`] or [`headed_tip`] puts it, against the shaft the ball
+/// hands its load to (a straight arm's taper from the ball centre toward its
+/// base at the tip's radius; a head's span from its start toward the joint
+/// `K` at the link's radius, or the head's narrowest knot where no link is
+/// drawn). The narrowest section that shaft has near the ball is used, so a
+/// shaft that widens below can only carry more. `None` for an arm with no
+/// seated ball.
+fn ball_pole_margin_mm(arm: &SweepArm, config: LoweringConfig) -> Option<f64> {
+    if !arm.seats_into_model {
+        return None;
+    }
+    let delta = geom_kernel::vec3::sub(arm.base_mm, arm.seat_mm);
+    let length = geom_kernel::vec3::norm(delta);
+    let tip_radius = arm.tip_radius_mm;
+    if !(length.is_finite() && length > ZERO_LENGTH_MM && tip_radius.is_finite() && tip_radius > 0.0)
+    {
+        return None;
+    }
+    let unit = delta.map(|value| value / length);
+    let (centre, ball_radius, start, end, near_radius) = match headed_tip(arm, config) {
+        Some(head) => {
+            let link = head.head.link_mm > 0.0 && head.head.link_radius_mm > 0.0;
+            let near = if link {
+                head.head.link_radius_mm
+            } else {
+                head.head
+                    .profile_knots_mm
+                    .iter()
+                    .map(|knot| knot[1])
+                    .fold(f64::INFINITY, f64::min)
+            };
+            (
+                head.centre,
+                head.ball_radius_mm,
+                head.start,
+                head.head.joint_mm,
+                near,
+            )
+        }
+        None => {
+            let ball_radius = config.sweep_ball_factor(tip_radius) * tip_radius;
+            let (_, centre, seat) = seated_ball(arm, unit, tip_radius, ball_radius, config);
+            (
+                centre,
+                seat.drawn_ball_radius_mm,
+                centre,
+                arm.base_mm,
+                tip_radius,
+            )
+        }
+    };
+    let axis = geom_kernel::vec3::sub(end, start);
+    let span = geom_kernel::vec3::norm(axis);
+    if !(span.is_finite() && span > ZERO_LENGTH_MM && near_radius.is_finite()) {
+        return None;
+    }
+    let along = axis.map(|value| value / span);
+    let pole = [centre[0], centre[1], centre[2] - ball_radius];
+    let reach = geom_kernel::vec3::dot(geom_kernel::vec3::sub(pole, start), along).clamp(0.0, span);
+    let foot = geom_kernel::vec3::add(start, geom_kernel::vec3::scale(along, reach));
+    let margin = near_radius - geom_kernel::vec3::dist(pole, foot);
+    margin.is_finite().then_some(margin)
+}
+
+/// **The largest ball each seated tip may be drawn at and still print from its
+/// own shaft** (joint review P1, 2026-10-12), in arm order, for a growth
+/// ceiling per arm.
+///
+/// A ball's horizontal sections below its equator grow upward, each holding
+/// the one below it, so the ONLY part of a ball that starts a new layer island
+/// is its lowest point. That point prints from the solid under it when it lies
+/// inside the shaft the ball stands on ([`ball_pole_margin_mm`]); outside it,
+/// the slicer cures a patch with nothing beneath it, however well the finished
+/// solid is connected higher up. A ball grown for contact moves out along its
+/// seat normal, and on an oblique shaft its lowest point leaves the shaft:
+/// Bat_Cat_Owl's 0.270 mm ball on a 0.097 mm taper, Deinonychus's 0.533 mm ball
+/// on a 0.078 mm link (`joint/out-fix/final`, a new 97-pixel and a 634-pixel
+/// island).
+///
+/// For each arm: the ungrown ball's radius `R₀` where `R₀`'s own lowest point
+/// is already outside its shaft (growth would only move it further out), else
+/// the largest radius in `[R₀, ceiling]` whose lowest point is inside it, by
+/// bisection (a search resolution, it decides nothing the geometry does not).
+/// `None` for an arm with no seated ball. Pure arithmetic per arm, one call
+/// for the whole field.
+///
+/// # Errors
+///
+/// Only about the request, as [`lower_sweep_arms`].
+pub fn carried_ball_radii_mm(
+    arms: &[SweepArm],
+    ceilings_mm: &[f64],
+    layers: &LayerPlan,
+) -> Result<Vec<Option<f64>>, SweepLoweringError> {
+    /// Halvings of `[R₀, ceiling]`: far finer than one pixel.
+    const BISECTIONS: usize = 48;
+    let frame = BuildFrame::new(
+        Finite::new(layers.z0_mm()).map_err(|_| SweepLoweringError::MissingLayerHeight)?,
+        PositiveFinite::new(1.0).map_err(|_| SweepLoweringError::InvalidLimits)?,
+    );
+    let config = LoweringConfig::current(frame, layers, 1, 1)?;
+    Ok(arms
+        .iter()
+        .zip(ceilings_mm)
+        .map(|(arm, &ceiling)| {
+            // The arm without its profile (no reader below needs it), its
+            // ball set per probe.
+            let mut probe = SweepArm {
+                radius_profile_mm: Vec::new(),
+                contact_ball_radius_mm: None,
+                ..arm.clone()
+            };
+            let ungrown = config.sweep_ball_factor(arm.tip_radius_mm) * arm.tip_radius_mm;
+            let mut carried = |radius: f64| -> Option<bool> {
+                probe.contact_ball_radius_mm = (radius > ungrown).then_some(radius);
+                ball_pole_margin_mm(&probe, config).map(|margin| margin >= 0.0)
+            };
+            if !carried(ungrown)? || !(ceiling.is_finite() && ceiling > ungrown) {
+                return Some(ungrown);
+            }
+            if carried(ceiling)? {
+                return Some(ceiling);
+            }
+            let (mut holds, mut fails) = (ungrown, ceiling);
+            for _ in 0..BISECTIONS {
+                let mid = 0.5 * (holds + fails);
+                if carried(mid)? {
+                    holds = mid;
+                } else {
+                    fails = mid;
+                }
+            }
+            Some(holds)
+        })
+        .collect())
+}
+
 /// **The contact disc every model-landed arm's FOOT will deliver**
 /// ([`SweepArmLanding::Model`]), by the lowering's own derivation
 /// ([`model_foot_ball`]) without lowering anything (lane 2, 2026-10-12). In
