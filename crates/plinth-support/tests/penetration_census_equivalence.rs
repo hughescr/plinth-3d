@@ -1057,11 +1057,19 @@ fn fu8g_h5_tilted_wall_census_equals_execution_bit_for_bit_on_an_undecidable_row
     // return the same payload BYTE FOR BYTE — demonstrated on a row whose
     // crossings are genuinely undecidable, which is strictly better evidence
     // than demonstrating it on rows that could never have exercised the band.
-    // `[0, 12]` is MEASURED, printed above; the production shape reaches the
+    // `[0, 6]` is MEASURED, printed above; the production shape reaches the
     // band too here, because the axis ray alone is enough on this fixture.
+    //
+    // It was `[0, 12]` until 2026-10-13, and the derivation of the change is
+    // the kernel's plane-side test: a ray whose whole span stays strictly on
+    // one side of a facet's plane cannot cross it, and is now a decided MISS.
+    // The offset rays displaced in x by the 0.02 mm radius run wholly outside
+    // (or wholly inside) the raked wall's plane, so they are decided; the
+    // axis ray and the rays displaced only along y start ON the plane at
+    // `x = 2` and stay undecidable, two facets each: 3 x 2 = 6.
     for (shape, expected_near_parallel) in [
         (PRODUCTION_SHAPE, &[0, 2][..]),
-        (ALL_RAYS_SHAPE, &[0, 12][..]),
+        (ALL_RAYS_SHAPE, &[0, 6][..]),
     ] {
         let (census, _intervals) =
             assert_census_matches_execution(&surface, &rows, shape, expected_near_parallel);

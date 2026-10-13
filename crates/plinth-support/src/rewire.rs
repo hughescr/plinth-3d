@@ -2691,11 +2691,15 @@ mod tests {
     /// whose clearance is only BOUNDED is not published.**
     ///
     /// The plant is a pair of moves that differ by `2e-17 mm` of x-drift in the
-    /// changed member's axis, against one wall triangle at `x = 1` for which
-    /// `det = -200 * dv_x` exactly. Both rows carry the SAME clearance f64; one
-    /// is `Measured` and clears, the other is `UpperBound` — the walk skipped an
-    /// undecidable pierce candidate, so the number is an upper bound and the
-    /// true clearance may be negative.
+    /// changed member's axis, against one wall triangle in the axis's own plane
+    /// `x = 0`, 1 mm to its side (`(0,1,-5)`, `(0,1,15)`, `(0,11,-5)`), for
+    /// which `det = 200 * dv_x` exactly. Both rows carry the SAME clearance
+    /// f64; one is `Measured` and clears, the other is `UpperBound` — the walk
+    /// skipped a pierce candidate neither the kernel's plane-side test (the
+    /// drifted axis starts on the plane) nor its bounding-sphere test can
+    /// decide, so the number is an upper bound the walk cannot affirm. (Until
+    /// 2026-10-13 the wall stood at `x = 1`; the plane-side test now decides
+    /// that face as a miss, and the plant moved into the plane.)
     ///
     /// The input class that changes: a move with a comfortably POSITIVE-looking
     /// clearance whose walk could not affirm it. This stage commits the move it
@@ -2705,7 +2709,7 @@ mod tests {
     #[test]
     fn a_rewire_move_whose_clearance_is_only_bounded_is_not_published() {
         let mesh = Mesh::new(
-            vec![[1.0, -10.0, 0.0], [1.0, 10.0, 0.0], [1.0, 0.0, 10.0]],
+            vec![[0.0, 1.0, -5.0], [0.0, 1.0, 15.0], [0.0, 11.0, -5.0]],
             vec![[0, 1, 2]],
         )
         .unwrap();

@@ -4,9 +4,9 @@
 //!
 //! Consolidation census result for THIS crate
 //! (`docs/plans/geometry-consolidation.md` OP-7/OP-9,
-//! `feature/stage0-bytes-audit`): `plinth-pipeline` has no `geom_kernel`
-//! dependency (Cause B in the census's history section -- the edge never
-//! existed) and its `src/` carries exactly one private-vector-algebra site,
+//! `feature/stage0-bytes-audit`): `plinth-pipeline` depends on `geom_kernel`
+//! for the canonical `vec3` algebra alone (the not-hollowed warning's solid
+//! volume, 2026-10-13) and its `src/` carries exactly one private-vector-algebra site,
 //! `coverage_evidence.rs`'s `island_view_basis` render-basis construction and
 //! its sibling `dot` helper. Both are evidence-only: they feed an SVG panel
 //! shown to the owner on a coverage refusal, never a gate input

@@ -462,3 +462,186 @@ fn the_proximity_qualification_declines_rather_than_guesses() {
          closest approach it yields is not one"
     );
 }
+
+// ---- the plane-side qualification (2026-10-13, Cylinder vent) -------------
+//
+// The bounding-sphere test cannot clear a face that is LONGER than its distance
+// from the ray: the sphere through the face's own vertices then contains the
+// ray. A drilled bore's wall is that face, seen from the bore's own axis. The
+// plane-side test asks the other question — does the ray's whole accepted span
+// stay strictly on one side of the face's plane — under a derived forward error
+// bound. These tests pin it.
+//
+// SABOTAGE (recorded by hand, 2026-10-13): with the `span_clears_plane` arm
+// removed from `ray_triangle_classified`, three tests below fail
+// (`NearParallel` where `Miss` is asserted): the two bore-wall tests and the
+// climbing-away half of the crossing test. The crossing half and the coplanar
+// test still pass, as they must: neither may be decided by this arm.
+
+/// The determinant the kernel computes, recomputed here from the literals so
+/// band membership is a fact of the fixture, not a claim of the code.
+fn det_of(dv: [f64; 3], e1: [f64; 3], e2: [f64; 3]) -> f64 {
+    let pvec = [
+        dv[1] * e2[2] - dv[2] * e2[1],
+        dv[2] * e2[0] - dv[0] * e2[2],
+        dv[0] * e2[1] - dv[1] * e2[0],
+    ];
+    e1[0] * pvec[0] + e1[1] * pvec[1] + e1[2] * pvec[2]
+}
+
+/// The distance from the ray's LINE to the centre of the triangle's bounding
+/// sphere, minus that sphere's radius — negative when the sphere contains the
+/// line, so the bounding-sphere test cannot clear the face. The witness that
+/// a row really needed the new arm.
+fn sphere_reach(o: [f64; 3], dv: [f64; 3], v0: [f64; 3], e1: [f64; 3], e2: [f64; 3]) -> f64 {
+    use geom_kernel::vec3::{add, dot, norm, scale, sub};
+    let c = add(v0, scale(add(e1, e2), 1.0 / 3.0));
+    let r = [v0, add(v0, e1), add(v0, e2)]
+        .iter()
+        .map(|vertex| norm(sub(*vertex, c)))
+        .fold(0.0_f64, f64::max);
+    let to_c = sub(c, o);
+    let along = dot(to_c, dv) / dot(dv, dv);
+    norm(sub(to_c, scale(dv, along))) - r
+}
+
+/// A NEARLY parallel bore-wall face 1.24 mm from the axis is a decided miss.
+///
+/// The face is 5 mm long (longer than the 2.5 mm wall it lines) and tilted by
+/// 1e-15 in y over its length, so the determinant is exactly
+/// `-0.32 · 1e-15 = -3.2e-16`: inside the band, nonzero. Its bounding sphere
+/// contains the axis, so the old proximity test could not clear it.
+#[test]
+fn a_nearly_parallel_bore_wall_beside_the_axis_is_a_miss() {
+    let o = [0.0, 0.0, 0.0];
+    let dv = [1.0, 0.0, 0.0];
+    let v0 = [-1.0, 1.24, -0.16];
+    let e1 = [5.0, 1.0e-15, 0.0];
+    let e2 = [0.0, 0.0, 0.32];
+    let det = det_of(dv, e1, e2);
+    assert!(det != 0.0 && det.abs() <= 1.0e-14, "in the band: {det:e}");
+    assert!(
+        sphere_reach(o, dv, v0, e1, e2) < 0.0,
+        "the face's bounding sphere contains the axis, so only the plane test can decide it"
+    );
+    assert_eq!(
+        ray_triangle_classified(o, dv, v0, e1, e2, 8.0),
+        RayTriangleClass::Miss,
+        "the axis never comes within 1.24 mm of the face's plane"
+    );
+}
+
+/// A whole 24-sided bore drilled along an OBLIQUE axis, cast along that axis:
+/// every wall face is EXACTLY parallel to the axis in real arithmetic, and the
+/// rounded vertices put some of them in the determinant band. Every one must
+/// come back a non-hit and none undecidable.
+///
+/// This is the Cylinder vent's shape: r 1.25 mm, 24 sides (facet midlines
+/// 1.25·cos 7.5° = 1.239 mm from the axis), 2.5 mm long.
+#[test]
+fn every_wall_face_of_an_oblique_bore_is_decided_from_its_own_axis() {
+    use geom_kernel::vec3::{add, cross, normalize, scale, sub};
+    let d = normalize([1.0, 2.0, 3.0]).expect("axis");
+    let u = normalize(cross(d, [1.0, 0.0, 0.0])).expect("u");
+    let w = cross(d, u);
+    let c = [10.3, -4.7, 21.9];
+    let (radius, half) = (1.25_f64, 1.25_f64);
+    let ring = |k: usize| {
+        let theta = std::f64::consts::TAU * (k % 24) as f64 / 24.0;
+        add(scale(u, radius * theta.cos()), scale(w, radius * theta.sin()))
+    };
+    let o = sub(c, scale(d, 4.0));
+    let (mut band, mut sphere_blind, mut faces) = (0_u32, 0_u32, 0_u32);
+    for k in 0..24 {
+        let a = add(sub(c, scale(d, half)), ring(k));
+        let b = add(add(c, scale(d, half)), ring(k));
+        let a2 = add(sub(c, scale(d, half)), ring(k + 1));
+        let b2 = add(add(c, scale(d, half)), ring(k + 1));
+        for (v0, p1, p2) in [(a, b, b2), (a, b2, a2)] {
+            let (e1, e2) = (sub(p1, v0), sub(p2, v0));
+            let det = det_of(d, e1, e2);
+            let class = ray_triangle_classified(o, d, v0, e1, e2, 8.0);
+            faces += 1;
+            if det != 0.0 && det.abs() <= 1.0e-14 {
+                band += 1;
+                if sphere_reach(o, d, v0, e1, e2) < 0.0 {
+                    sphere_blind += 1;
+                }
+            }
+            assert!(
+                matches!(class, RayTriangleClass::Miss | RayTriangleClass::ExactParallel),
+                "face {k}: a bore wall seen from its own axis is a non-hit, decided: {class:?} (det {det:e})"
+            );
+        }
+    }
+    // COUNTED ROWS: the fixture must actually reach the band, with faces the
+    // sphere cannot clear, or it tests nothing.
+    assert_eq!(faces, 48);
+    assert!(band >= 4, "the rounded wall must land faces in the band, got {band}");
+    assert!(
+        sphere_blind >= 4,
+        "and some of those must be faces whose bounding sphere holds the axis, got {sphere_blind}"
+    );
+    println!("oblique bore: {faces} faces, {band} in the band, {sphere_blind} the sphere cannot clear");
+}
+
+/// A near-parallel face the span REALLY crosses stays undecidable.
+///
+/// Bore-scale version of the §O4 counterexample: a 5 mm face in the z = 0
+/// plane, and a ray that climbs through that plane at t = 0.05 at the
+/// interior point (0.05, 0, 0) (u = 0.21, v = 0.5). The plane test sees the
+/// two ends of the span on opposite sides and must decline.
+#[test]
+fn a_near_parallel_face_the_span_really_crosses_stays_undecidable() {
+    let o = [0.0, 0.0, -1.0e-16];
+    let dv = [1.0, 0.0, 2.0e-15];
+    let v0 = [-1.0, -0.16, 0.0];
+    let e1 = [5.0, 0.0, 0.0];
+    let e2 = [0.0, 0.32, 0.0];
+    let det = det_of(dv, e1, e2);
+    assert!(det != 0.0 && det.abs() <= 1.0e-14, "in the band: {det:e}");
+    assert_eq!(
+        ray_triangle_classified(o, dv, v0, e1, e2, 8.0),
+        RayTriangleClass::NearParallel,
+        "a real interior crossing must never be decided as a miss"
+    );
+    // The same face, the same direction, with the ray started 1e-16 on the
+    // OTHER side and climbing away: it never reaches the plane. The bound is
+    // RELATIVE to the terms that make up the side value (here 1e-16 x 1.6),
+    // not an absolute closeness, so even this offset is decided: a miss.
+    let above = [0.0, 0.0, 1.0e-16];
+    assert_eq!(
+        ray_triangle_classified(above, dv, v0, e1, e2, 8.0),
+        RayTriangleClass::Miss,
+        "a ray that starts above the plane and climbs away never meets it"
+    );
+}
+
+/// A ray lying IN an oblique triangle's plane is never a miss by the plane
+/// test: its side value is zero up to rounding, inside the bound.
+#[test]
+fn a_coplanar_ray_is_never_decided_by_the_plane_test() {
+    use geom_kernel::vec3::{add, normalize, scale, sub};
+    let v0 = [0.1, 0.2, 0.3];
+    let e1 = [1.1, 0.7, -0.3];
+    let e2 = [0.2, 1.3, 0.9];
+    let mut undecided = 0_u32;
+    for step in 1..=40 {
+        let f = f64::from(step) / 41.0;
+        let o = add(v0, add(scale(e1, 0.2 * f), scale(e2, 0.2)));
+        let dv = normalize(sub(scale(e1, 1.0 + f), scale(e2, 0.5))).expect("in-plane direction");
+        let det = det_of(dv, e1, e2);
+        let class = ray_triangle_classified(o, dv, v0, e1, e2, 0.05);
+        if det != 0.0 && det.abs() <= 1.0e-14 {
+            undecided += 1;
+            assert_eq!(
+                class,
+                RayTriangleClass::NearParallel,
+                "row {step}: an in-plane ray in the band is undecidable, never a miss"
+            );
+        } else {
+            assert_eq!(class, RayTriangleClass::ExactParallel, "row {step}: det {det:e}");
+        }
+    }
+    assert!(undecided >= 5, "the battery must reach the band, got {undecided}");
+}

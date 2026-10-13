@@ -1172,6 +1172,7 @@ name = "plinth-pipeline"
 version = "0.1.0"
 dependencies = [
  "chitubox_io",
+ "geom_kernel",
  "plinth-core",
  "plinth-decimate",
  "plinth-emit",

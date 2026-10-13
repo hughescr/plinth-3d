@@ -3289,10 +3289,24 @@ mod tests {
              no legal tip can cure; if none survive here this test is asserting \
              about an empty list"
         );
-        // Nothing was cured, so nothing may be recorded as grown. The two lists
-        // are complements on this fixture, and a row in both would mean the
-        // engine claimed to have both saved and abandoned the same contact.
-        assert!(build.grown().is_empty());
+        // The grown and the refused lists are complements: a row in both would
+        // mean the engine claimed to have both saved and abandoned the same
+        // contact.
+        //
+        // **One contact IS cured here since 2026-10-13**, and it is measured,
+        // not assumed: terminal 25, seated at (-0.855, -0.017, 9.925) mm and
+        // carrying 0.0 mm², attests at the 0.4 mm rung and is shrunk back to
+        // 0.293 mm. The only change is the kernel's plane-side test
+        // (`geom_kernel::moller`, `span_clears_plane`), which now decides
+        // near-parallel faces whose plane a ray never reaches: the same tree
+        // with that arm disabled grows nothing. The other refused stubs are
+        // still refused below, so the disclosure this test pins still fires.
+        let grown: Vec<u32> = build.grown().iter().map(|grown| grown.terminal).collect();
+        assert_eq!(grown, vec![25], "grown: {:?}", build.grown());
+        assert!(
+            unreachable.iter().all(|stub| !grown.contains(&stub.terminal)),
+            "a terminal may be grown or refused, never both"
+        );
 
         let mut abandoned_mm2 = 0.0;
         let mut walked = 0_usize;

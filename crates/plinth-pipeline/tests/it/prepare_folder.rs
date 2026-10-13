@@ -345,6 +345,7 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
         coverage_warning,
         sweep_warnings: _,
         sweep_plan_source: _,
+        not_hollowed,
     } = outcome(&report, "mini")
     else {
         panic!(
@@ -805,6 +806,9 @@ fn a_folder_of_models_emits_one_artifact_each_and_one_bad_model_costs_only_itsel
             reason: plinth_hollow::SolidDecisionReason::BelowThreshold
         }
     );
+    // The savings gate's own decision is a judgement, not a failure to hollow:
+    // it prints its measurement and raises no not-hollowed WARNING.
+    assert_eq!(not_hollowed, &None);
     // The repair reaches the report. This model decided solid before a cavity
     // was ever selected, so there is nothing to record -- and `None` is the
     // claim "no repair result exists here", which is what distinguishes it from
@@ -1148,12 +1152,24 @@ fn a_model_that_cannot_close_its_coverage_emits_and_names_the_gap() {
     // is still vetoed (it joins the same zero-improvement/regression pool the
     // other 54 already sat in), so this fixture still commits nothing and its
     // stop reason (§B.3's zero-score guard, asserted below) is unchanged.
+    //
+    // **Re-measured 2026-10-13, from `(55, 0)` and `(202, 106, 106)` to
+    // `(53, 0)` and `(77, 24, 24)`, for the kernel's PLANE-SIDE TEST**
+    // (`geom_kernel::moller`, `span_clears_plane`): a near-parallel face whose
+    // plane the ray's whole span never reaches is now a decided miss rather than
+    // `NearParallel`. Measured, not inferred: the same tree with only that arm
+    // disabled reproduces `(55, 0)` and `(202, 106, 106)` exactly. The blade's
+    // razor faces are nearly parallel to many of its seat rays: the pool the
+    // screen is offered is 77 seats where it was 202 (the contacts placed
+    // before the repair loop are decided by the same kernel answers), and it
+    // drops 24 of them as undecidable where it dropped 106. `commits` stays 0
+    // and the stop reason, asserted below, is unchanged.
     let repair = repair_report
         .as_ref()
         .expect("a model that spent the repair controller states what it spent");
     assert_eq!(
         (repair.trials, repair.commits),
-        (55, 0),
+        (53, 0),
         "the raking blade tries every candidate that could help and commits none: {repair:?}"
     );
     assert_eq!(
@@ -1162,7 +1178,7 @@ fn a_model_that_cannot_close_its_coverage_emits_and_names_the_gap() {
             repair.prescreen.dropped,
             repair.prescreen.dropped_by_cause.get("undecidable_geometry"),
         ),
-        (202, 106, Some(&106)),
+        (77, 24, Some(&24)),
         "the trials this fixture no longer spends are accounted for by name on the report, not \
          merely absent from the count: {repair:?}"
     );
@@ -1662,6 +1678,7 @@ fn a_model_with_no_pinned_baseline_is_refused_rather_than_given_a_neighbours() {
     let ModelPreparationOutcome::Artifact {
         geometry,
         hollow_disposition,
+        not_hollowed,
         ..
     } = outcome(&report, "sphere")
     else {
@@ -1696,6 +1713,31 @@ fn a_model_with_no_pinned_baseline_is_refused_rather_than_given_a_neighbours() {
             reason: plinth_hollow::SolidDecisionReason::BelowThreshold
         },
         "a substituted solid may not report a savings verdict nobody measured"
+    );
+    // EMIT AND WARN (2026-10-13): the drilled shell existed and was refused,
+    // so the solid is warned with its cost against that shell's own drilled
+    // material volume: positive (the solid holds more resin than the shell)
+    // and less than the whole solid.
+    //
+    // SABOTAGE (recorded by hand, 2026-10-13): with the support-refusal
+    // branch's `warn_not_hollowed` wrapper removed in `prepare.rs`, this
+    // `expect` fails.
+    let warning = not_hollowed
+        .as_deref()
+        .expect("a solid substituted for a refused shell carries the not-hollowed warning");
+    assert!(
+        warning.reason.starts_with("the drilled shell was refused at "),
+        "{}",
+        warning.reason
+    );
+    let hollow = warning
+        .planned_hollow_mm3
+        .expect("the drilled shell's material volume is the baseline");
+    assert!(
+        (warning.resin_cost_mm3 - (warning.solid_mm3 - hollow)).abs() < 1.0e-9
+            && warning.resin_cost_mm3 > 0.0
+            && warning.resin_cost_mm3 < warning.solid_mm3,
+        "cost = solid - drilled shell: {warning:?}"
     );
 }
 

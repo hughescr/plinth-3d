@@ -11347,22 +11347,30 @@ mod tests {
     ///
     /// # The plant, and why this pair is the whole argument
     ///
-    /// One wall triangle at `x = 1` with `e1 = (0,20,0)` and `e2 = (0,10,10)`,
-    /// for which `det = -200 * dv_x` exactly. Two candidates differ ONLY in the
-    /// x-drift of their axis, by `2e-17 mm`:
+    /// One wall triangle IN THE AXIS'S OWN PLANE `x = 0`, standing 1 mm to the
+    /// side of it: vertices `(0,1,-5)`, `(0,1,15)`, `(0,11,-5)`, so
+    /// `e1 = (0,0,20)`, `e2 = (0,10,0)` and `det = 200 * dv_x` exactly. Two
+    /// candidates differ ONLY in the x-drift of their axis, by `2e-17 mm`:
     ///
     /// | axis drift | `det` | kernel row | MEASURED clearance |
     /// |---|---|---|---|
-    /// | `0` | `-0e0` (exactly parallel — a genuine prune) | `Measured` | `+0.30000000000000004 mm` |
-    /// | `2e-17` | `-4e-15` (inside `DET_EPS = 1e-14`, nonzero) | `UpperBound` | `+0.30000000000000004 mm` |
+    /// | `0` | `0e0` (exactly in the plane — a genuine prune) | `Measured` | `+0.30000000000000004 mm` |
+    /// | `2e-17` | `4e-15` (inside `DET_EPS = 1e-14`, nonzero) | `UpperBound` | `+0.30000000000000004 mm` |
+    ///
+    /// The drifted axis starts ON the wall's plane and leaves it by 2e-17 mm,
+    /// within the triangle's bounding sphere, so neither the kernel's
+    /// plane-side test nor its bounding-sphere test can decide the pierce
+    /// candidate. (Until 2026-10-13 the wall stood at `x = 1`, a full
+    /// millimetre off the axis's plane; the plane-side test now decides that
+    /// face as a miss, as it should, and the plant moved into the plane.)
     ///
     /// The two numbers are the same f64. Under the retired
     /// `segment_clearance_excluding` float shim the two rows were the same
     /// answer, and both survived. They are not the same answer: the second walk
     /// SKIPPED an undecidable pierce candidate, so `+0.300` is an upper bound
-    /// and the true clearance may be anything at or below it, including
-    /// negative. That is the input class this site now refuses — a comfortably
-    /// positive-LOOKING clearance on a candidate whose survivors are emitted.
+    /// the kernel cannot affirm. That is the input class this site now refuses
+    /// — a comfortably positive-LOOKING clearance on a candidate whose
+    /// survivors are emitted.
     ///
     /// The second input class, `Unmeasured`, is pinned in `brace.rs`
     /// (`a_row_whose_exclusion_set_erased_every_face_does_not_clear`) against
@@ -11380,7 +11388,7 @@ mod tests {
     )]
     fn a_candidate_whose_clearance_cannot_be_affirmed_does_not_survive() {
         let wall = geom_kernel::testkit::build_from_tris(vec![
-            1.0, -10.0, 0.0, 1.0, 10.0, 0.0, 1.0, 0.0, 10.0, //
+            0.0, 1.0, -5.0, 0.0, 1.0, 15.0, 0.0, 11.0, -5.0, //
         ]);
         let policy = seat_contact_policy(0.05).unwrap();
         const RADIUS_MM: f64 = 0.1;
