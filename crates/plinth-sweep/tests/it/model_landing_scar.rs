@@ -40,6 +40,12 @@
 //! table's arm and landing counts still hold (the 2026-09-28 baseline already
 //! read the blade-down landing scar as 0.20483 mm²); (d) pins the new pose.
 //!
+//! **Superseded 2026-10-12 (lane 2, model feet).** A model landing now takes
+//! its whole load-sized foot or is not taken, so the blade-down pose's one seat
+//! on the 0.03 mm blade goes elsewhere and the table's blade-down row no longer
+//! holds; (a) pins that outcome. Landings are charged their foot's REAL contact,
+//! not the widest section.
+//!
 //! Every assertion below is a comparison between two measurements or a
 //! comparison against zero, per the brief.
 
@@ -113,57 +119,81 @@ fn swept(mesh: &plinth_mesh::Mesh, direction: [f64; 3]) -> (plinth_mesh::Mesh, S
 ///
 /// Non-vacuity is asserted twice over: both poses must actually seat arms on
 /// the model, or the comparison is about nothing.
+///
+/// **Superseded 2026-10-12 (lane 2, `MODEL-FEET.md` F2).** The blade-down
+/// pose's one model landing stood on the 0.03 mm blade itself: a foot whose
+/// load-sized contact cannot lie on a blade that thin. A model landing now
+/// takes its whole foot or is not taken, so that arm goes elsewhere and the
+/// blade-down pose seats NOTHING on the delicate feature. The comparison this
+/// test made has no blade-down seat left to make it with; what it now pins is
+/// that outcome, with the descent's own count as the witness that the foot
+/// rule moved it, and the blade-up pose's landings (on the slab, where every
+/// foot fits) still measured and charged.
 #[test]
-fn the_blade_down_pose_is_charged_against_a_more_fragile_face_than_the_blade_up_pose() {
+fn the_blade_down_pose_no_longer_seats_on_the_blade_and_the_blade_up_pose_still_lands() {
     let mesh = plinth_mesh::make_raking_blade().expect("the raking blade fixture");
     let table = table_for(&mesh);
 
-    let mut totals = Vec::new();
-    let mut worst_fragility = Vec::new();
-    for direction in [BLADE_DOWN, BLADE_UP] {
-        let (oriented, plan) = swept(&mesh, direction);
-        let scar = model_landing_scar(&oriented, &plan, table.delicacy(), table.display())
-            .expect("the table carries a fragility field");
+    let (down_mesh, down) = swept(&mesh, BLADE_DOWN);
+    let down_scar = model_landing_scar(&down_mesh, &down, table.delicacy(), table.display())
+        .expect("the table carries a fragility field");
+    let feet = &down.report.model_feet;
+    assert!(
+        feet.descent_straight_replaced
+            + feet.descent_candidates_refused
+            + u64::try_from(feet.relanding_candidates_refused).expect("a count")
+            > 0,
+        "the foot rule must have fired on the blade-down pose: {feet:?}"
+    );
+    let (up_mesh, up) = swept(&mesh, BLADE_UP);
+    let up_scar = model_landing_scar(&up_mesh, &up, table.delicacy(), table.display())
+        .expect("the table carries a fragility field");
+    assert!(up_scar.landings > 0, "the blade-up pose still lands on the slab");
+    assert_eq!(up_scar.feet_unmeasured, 0, "every foot on a finished field is measured");
+    let up_most = up_scar
+        .charges
+        .iter()
+        .map(|charge| table.delicacy()[charge.face])
+        .fold(0.0_f64, f64::max);
+    for charge in &down_scar.charges {
         assert!(
-            scar.landings > 0,
-            "this pose seats no arm on the model at all, so the comparison would be vacuous"
+            table.delicacy()[charge.face] <= up_most,
+            "a blade-down seat is still charged against a face ({}) more delicate than every \
+             blade-up seat ({up_most}): an arm stands on the blade",
+            table.delicacy()[charge.face]
         );
-        assert_eq!(
-            scar.mapped, scar.landings,
-            "every seat on a closed mesh must find a face to be charged against"
-        );
-        assert!(
-            scar.raw_mm2 > 0.0,
-            "a pose that seats arms on a mesh with a fragility field must be charged for them"
-        );
-        let fragilities: Vec<f64> = scar
-            .charges
-            .iter()
-            .map(|charge| table.delicacy()[charge.face])
-            .collect();
-        let least = fragilities
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min);
-        let most = fragilities.iter().copied().fold(0.0_f64, f64::max);
-        totals.push(scar.raw_mm2);
-        worst_fragility.push((least, most));
     }
+}
 
-    let (down_least, _) = worst_fragility[0];
-    let (_, up_most) = worst_fragility[1];
+/// The pre-2026-10-12 comparison, kept for the blade-UP pose alone: every seat
+/// that lands is mapped and charged.
+#[test]
+fn the_blade_up_pose_is_charged_for_every_seat_it_lands() {
+    let mesh = plinth_mesh::make_raking_blade().expect("the raking blade fixture");
+    let table = table_for(&mesh);
+
+    let (oriented, plan) = swept(&mesh, BLADE_UP);
+    let scar = model_landing_scar(&oriented, &plan, table.delicacy(), table.display())
+        .expect("the table carries a fragility field");
     assert!(
-        down_least > up_most,
-        "the blade-down pose's least fragile seat ({down_least}) should still be charged against a \
-         more delicate face than the blade-up pose's most fragile seat ({up_most}); if this \
-         inverts, the term is no longer reporting that the arm is on the delicate feature"
+        scar.landings > 0,
+        "this pose seats no arm on the model at all, so the test would be vacuous"
+    );
+    assert_eq!(
+        scar.mapped, scar.landings,
+        "every seat on a closed mesh must find a face to be charged against"
     );
     assert!(
-        totals[0] > totals[1],
-        "the blade-down pose ({}) should be charged more landing scar than the blade-up pose ({})",
-        totals[0],
-        totals[1]
+        scar.raw_mm2 > 0.0,
+        "a pose that seats arms on a mesh with a fragility field must be charged for them"
     );
+    // The contact charged is the FOOT's real contact, never the widest
+    // section's full disc.
+    for charge in &scar.charges {
+        let strut = &plan.struts[charge.strut];
+        let foot = strut.seat_face.foot.expect("every model landing has a measured foot");
+        assert!((charge.contact_mm2 - foot.scar_mm2()).abs() < 1e-12);
+    }
 }
 
 /// (b) A model whose arms all reach the plate is charged nothing, and its

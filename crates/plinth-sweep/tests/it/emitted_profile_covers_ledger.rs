@@ -150,8 +150,24 @@ pub(crate) fn members(emission: &SweepEmission) -> Vec<Vec<&SupportPrimitive>> {
         ) {
             continue;
         }
+        // A MODEL FOOT (lane 2, 2026-10-12) is a contact ball at the LOWER
+        // end of its own member: its centre is the end of the record before
+        // it. It closes that member and starts none.
+        let is_foot = |ball: &SupportPrimitive| {
+            groups
+                .last()
+                .and_then(|group| group.last())
+                .is_some_and(|last| {
+                    let end = point(last.end_mm);
+                    let centre: [f64; 3] = std::array::from_fn(|axis| {
+                        0.5 * (point(ball.start_mm)[axis] + point(ball.end_mm)[axis])
+                    });
+                    last.segment_kind != SupportSegmentKind::ContactSphere
+                        && (0..3).all(|axis| (end[axis] - centre[axis]).abs() < 1e-9)
+                })
+        };
         let starts_new = match primitive.segment_kind {
-            SupportSegmentKind::ContactSphere => true,
+            SupportSegmentKind::ContactSphere => !is_foot(primitive),
             SupportSegmentKind::ContactTaper => !groups
                 .last()
                 .and_then(|group| group.last())
