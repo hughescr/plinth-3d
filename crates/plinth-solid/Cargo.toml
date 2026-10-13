@@ -14,5 +14,10 @@ cxx = { workspace = true }
 thiserror = { workspace = true }
 
 [build-dependencies]
+# `parallel` lets the cc crate (shared with cxx-build, so cargo unifies the feature)
+# compile the 19 translation units of vendored Manifold at once instead of one after
+# another: it was the longest unit of a cold build (about 20 s on one core). It only
+# changes how many compiler processes run together; every object file is unchanged.
+cc = { version = "1", features = ["parallel"] }
 cxx-build = { workspace = true }
 sha2 = "0.10"
