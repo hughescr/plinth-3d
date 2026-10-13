@@ -1,0 +1,46 @@
+#!/bin/sh
+# git post-checkout hook: give a NEW linked worktree a warm target directory.
+#
+# Source of truth: scripts/hooks/post-checkout in the repository. Installed with
+# scripts/install-hooks.sh into the shared hooks directory of the main checkout (git runs it for
+# every worktree). Do not edit the installed copy.
+#
+# It fires on every checkout and on `git worktree add`. The guards make it do something only for a
+# linked worktree that has no target/ yet:
+#   - the main checkout is never touched;
+#   - a worktree that already has a target/ (a branch switch inside it) is never touched;
+#   - the hook never fails a checkout: every problem is reported and ignored.
+#
+# What it does: clone the seed target directory (registry dependencies already compiled, for the
+# release, gate and debug profiles) into <worktree>/target, so the first build compiles only this
+# workspace's own crates. See scripts/seed-target.sh for why the seed holds no workspace artifacts.
+#
+# What it does NOT do (all measured 2026-10-13, docs/development.md "Build speed"):
+#   - no .cargo/config.toml. It used to write `incremental = false` (which doubled the cost of a
+#     `--profile gate` edit-rebuild: 5.3 s to 11.1 s) and an sccache wrapper (dead: the CPU lock
+#     sets RUSTC_WRAPPER empty for every locked job, and every cargo call is locked).
+
+case "$(git rev-parse --git-dir 2>/dev/null)" in
+    */.git/worktrees/*) ;;   # linked worktree: proceed
+    *) exit 0 ;;             # main checkout: do nothing, ever
+esac
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
+[ -z "$ROOT" ] && exit 0
+[ -e "$ROOT/target" ] && exit 0
+
+COMMON="$(cd "$(git rev-parse --git-common-dir)" 2>/dev/null && pwd)"
+MAIN="$(dirname "$COMMON")"
+SEED="${PLINTH_TARGET_SEED:-$(dirname "$MAIN")/.plinth-target}"
+[ -d "$SEED" ] || { echo "post-checkout: no target seed at $SEED; the first build will be cold" >&2; exit 0; }
+
+# The script from this worktree's own tree if the branch has it, else the main checkout's.
+SCRIPT="$ROOT/scripts/seed-target.sh"
+[ -x "$SCRIPT" ] || SCRIPT="$MAIN/scripts/seed-target.sh"
+[ -x "$SCRIPT" ] || { echo "post-checkout: no scripts/seed-target.sh; the first build will be cold" >&2; exit 0; }
+
+command -v cargo >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 \
+    || { echo "post-checkout: cargo or jq not on PATH; target not seeded" >&2; exit 0; }
+
+"$SCRIPT" "$SEED" "$ROOT" >&2 || echo "post-checkout: seeding failed; the first build will be cold" >&2
+exit 0
