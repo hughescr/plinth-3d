@@ -274,16 +274,17 @@ fn inside_other_solid(primitives: &[SupportPrimitive], point: [f64; 3]) -> bool 
     })
 }
 
-/// The arm lowered alone by the production lowering, and its drawn ball's
-/// lowest point.
-fn drawn_ball_pole(arm: &SweepArm, layers: &LayerPlan) -> (Vec<SupportPrimitive>, [f64; 3], f64) {
+/// The arm lowered alone by the production lowering, its drawn ball's lowest
+/// point and radius, and how many pole collars the lowering drew.
+fn drawn_ball_pole(arm: &SweepArm, layers: &LayerPlan) -> (Vec<SupportPrimitive>, [f64; 3], f64, usize) {
     let frame = BuildFrame::new(
         Finite::new(layers.z0_mm()).expect("finite plate"),
         PositiveFinite::new(1.0).expect("positive lift"),
     );
-    let primitives = lower_sweep_arms(std::slice::from_ref(arm), frame, layers, 1_000, 1 << 24)
-        .expect("the lowering refuses only about the request")
-        .primitives;
+    let lowering = lower_sweep_arms(std::slice::from_ref(arm), frame, layers, 1_000, 1 << 24)
+        .expect("the lowering refuses only about the request");
+    let collars = lowering.tip_pole_collars;
+    let primitives = lowering.primitives;
     let ball = primitives
         .iter()
         .find(|piece| piece.segment_kind == SupportSegmentKind::ContactSphere)
@@ -291,7 +292,7 @@ fn drawn_ball_pole(arm: &SweepArm, layers: &LayerPlan) -> (Vec<SupportPrimitive>
     let (a, b) = (ball.start_mm.map(Finite::get), ball.end_mm.map(Finite::get));
     let radius = ball.start_radius_mm.get();
     let pole = [0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]), 0.5 * (a[2] + b[2]) - radius];
-    (primitives, pole, radius)
+    (primitives, pole, radius, collars)
 }
 
 /// **A grown ball prints from its own shaft** (joint review P1, 2026-10-12).
@@ -347,18 +348,22 @@ fn a_grown_ball_on_an_oblique_shaft_keeps_its_lowest_point_inside_its_shaft() {
             &layers,
         )
     };
-    let (pieces, pole, radius) = draw(drawn);
+    let (pieces, pole, radius, collars) = draw(drawn);
     assert!((radius - drawn).abs() < 1e-9, "the file draws the grown ball");
+    assert_eq!(collars, 0, "at the bound the shaft itself holds the lowest point");
     assert!(
         inside_other_solid(&pieces, pole),
         "the drawn ball's lowest point {pole:?} is outside its shaft"
     );
-    // SABOTAGE WITNESS: one percent larger, the lowest point is outside every
-    // other solid of the arm (the defect this test can see).
-    let (pieces, pole, _) = draw(1.01 * drawn);
+    // The bound is tight: one percent larger, the bare shaft no longer holds
+    // the lowest point, and the lowering's pole collar
+    // (`plinth_support::lower::pole_collar`, joint review 2026-10-13) is what
+    // holds it then.
+    let (pieces, pole, _, collars) = draw(1.01 * drawn);
+    assert_eq!(collars, 1, "a ball past the bound needs the collar, so the bound is tight");
     assert!(
-        !inside_other_solid(&pieces, pole),
-        "a ball past the bound still prints, so the bound is not tight"
+        inside_other_solid(&pieces, pole),
+        "the collar holds the lowest point {pole:?} of a ball past the bound"
     );
 }
 
