@@ -1616,17 +1616,21 @@ mod graze_conversion {
 
     /// Run the conversion on `struts` over the slab fixture.
     fn convert(grid: &Grid, struts: &mut [SweepStrut]) -> (usize, HeadsOutcome) {
+        convert_on(grid, struts, &slab_mesh())
+    }
+
+    /// [`convert`] over any model `mesh`.
+    fn convert_on(grid: &Grid, struts: &mut [SweepStrut], mesh: &plinth_mesh::Mesh) -> (usize, HeadsOutcome) {
         let history = ColumnHistory::new(grid);
         let keep_out = crate::drain::DrainKeepOut::none();
         let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
         let law = crate::slenderness::SlendernessLaw::new(50.0, 0.05, 1.0, 32.5);
         let context = slender_context(grid, &history, &keep_out, &lean, &law);
-        let mesh = slab_mesh();
         let plan = plinth_core::LayerPlan::new(0.0, vec![H; 300]).expect("a uniform plan");
         let surface = std::cell::OnceCell::new();
         let joins = crate::head_join::HeadJoinContext {
             slender: &context,
-            mesh: &mesh,
+            mesh,
             layer_plan: &plan,
             plate_z_mm: 0.0,
             clearance_mm: 0.3,
@@ -1650,7 +1654,7 @@ mod graze_conversion {
         };
         let planes: Vec<f64> = (0..300).map(|layer| (f64::from(layer) + 0.5) * H).collect();
         let slices = plinth_support::perception::slice_stack(
-            &mesh,
+            mesh,
             &planes,
             plinth_support::perception::SliceStackLimits::production(),
         )
@@ -1690,6 +1694,60 @@ mod graze_conversion {
                 };
                 cell_u32(grid.index(150, col))
             })
+            .collect();
+        vec![host, grazer]
+    }
+
+    /// **F3 (`MODEL-FEET.md`, case B): a straight tip is judged again at the
+    /// radius the final sizing gave it.** A tip at column 150 leans 25 degrees
+    /// off the slab's underside onto a host 47 columns (2.35 mm) away over the
+    /// 5 mm drop. At the planning radius placement reads (0.15 mm,
+    /// [`crate::heads::TYPICAL_TIP_RADIUS_MM`]) and up to 0.3 mm its shaft does
+    /// not skim, so the conversion asks nothing and the tip stays straight. The
+    /// final sizing grows it to 0.4 mm: at that radius and that angle its drawn
+    /// shaft grazes the face, and the same conversion, asked again on the sized
+    /// field, gives it a head. That is the second conversion the pipeline now
+    /// runs after the final sizing; SABOTAGE: without it the tip is judged only
+    /// at the radius it had first, which is the first assertion here.
+    #[test]
+    fn a_tip_the_final_sizing_grew_into_a_graze_is_converted_when_asked_again() {
+        let grid = grid();
+        let sized_at = |radius: f64| {
+            let mut field = field_at_run(&grid, 150, 47);
+            for slot in &mut field[1].radius_mm {
+                *slot = radius;
+            }
+            field
+        };
+        for radius in [crate::heads::TYPICAL_TIP_RADIUS_MM, 0.3] {
+            let mut planned = sized_at(radius);
+            let (converted, outcome) = convert(&grid, &mut planned);
+            assert_eq!(
+                (outcome.graze_asked, converted),
+                (0, 0),
+                "at {radius} mm it does not graze, and stays straight: {outcome:?}"
+            );
+        }
+        let mut sized = sized_at(0.4);
+        let (converted, outcome) = convert(&grid, &mut sized);
+        assert_eq!(outcome.graze_asked, 1, "at its final radius it grazes: {outcome:?}");
+        assert_eq!(converted, 1, "asked again, it is given a head: {outcome:?}");
+        assert_eq!(outcome.graze_converted, vec![1]);
+        assert!(sized[1].head.as_ref().is_some_and(|head| !head.drawn_straight && head.planned_tip_radius_mm >= 0.4 - 1e-9));
+    }
+
+    /// [`field_at`] with the host `run` columns from the grazer.
+    fn field_at_run(grid: &Grid, grazer_col: usize, run: usize) -> Vec<SweepStrut> {
+        let host_col = grazer_col - run;
+        let host = straight(grid, 0, 150, host_col, K_TOP, 1.0);
+        let mut grazer = straight(grid, 1, 150, grazer_col, K_TOP, 0.05);
+        grazer.landing = Landing::Strut { id: 0, layer: OLD_LANDING };
+        grazer.k_bottom = OLD_LANDING;
+        grazer.radius_mm = vec![0.3; K_TOP - OLD_LANDING + 1];
+        grazer.carried_mm2 = vec![0.0; K_TOP - OLD_LANDING + 1];
+        let span = K_TOP - OLD_LANDING;
+        grazer.path = (0..=span)
+            .map(|slot| cell_u32(grid.index(150, host_col + ((grazer_col - host_col) * slot) / span)))
             .collect();
         vec![host, grazer]
     }

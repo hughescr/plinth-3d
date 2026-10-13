@@ -3011,6 +3011,67 @@ pub fn run_sweep_with_holes(
             moves.note("ties after the clearance re-route", &struts);
         }
     }
+    // --- graze heads AGAIN, at the final radius (`MODEL-FEET.md` F3) -------
+    //
+    // The conversion above judged each straight tip on the field the lip
+    // seats left, at the radius it had then. The head joins, the ties, the
+    // re-route and their sizings came after: a tip grown past the radius it
+    // was judged at (case B: planned at 0.15 mm, drawn at 0.671 mm and leaned
+    // 41 degrees, 29 off its face normal) or an arm moved since then was
+    // never asked again, and the head decision made at placement assumed a
+    // vertical post at the planning radius. So the SAME conversion runs once
+    // more on the sized field, measuring each straight shaft as the lowering
+    // will draw it at its final radius and its drawn angle to the face: a
+    // grazer gets a head where a post from the joint lands legally (on its own
+    // host or the plate; the joint and post are then sized by the
+    // certificate below), and otherwise stays straight with its reason and is
+    // warned on the finished field. Nothing it moves is re-landed by another
+    // pass: a converted arm's post is chosen clear of the model by the final
+    // gap and of the members by path, and an arm another member rests on (a
+    // tie included) is never converted.
+    if let Some((profiles, rule)) = head_registry.filter(|_| policy.graze_heads) {
+        let graze_env = graze::GrazeEnv {
+            joins: &head_join_context,
+            profiles,
+            rule,
+            flare_factor: policy.flare_r_factor,
+            slices: &slices,
+        };
+        let mut late = heads::HeadsOutcome::default();
+        let converted = graze::convert(&graze_env, &mut struts, &mut late);
+        if converted > 0 {
+            perf::add(PerfWork::SweepDownCallGraze, 1);
+            outcome = down_sweep::run(
+                &grid,
+                &slices,
+                &mut struts,
+                sizing,
+                insertion,
+                &keep_out,
+                &unrooted,
+            );
+            set_interior(&mut struts, &history);
+            landings.record(
+                "graze heads at the final radius",
+                &landing_check::check_landings(&struts, height),
+            );
+            moves.note("graze heads at the final radius", &struts);
+        }
+        // The late verdict on a member replaces the first one: it is the
+        // reason on the field the file gets.
+        graze_outcome
+            .graze_reasons
+            .retain(|(id, _)| !late.graze_reasons.iter().any(|(late_id, _)| late_id == id));
+        graze_outcome.graze_reasons.extend(late.graze_reasons);
+        graze_outcome.graze_reasons.sort_by_key(|(id, _)| *id);
+        graze_outcome.graze_asked_late = late.graze_asked;
+        graze_outcome.graze_converted_late.clone_from(&late.graze_converted);
+        graze_outcome.graze_converted.extend(late.graze_converted);
+        graze_outcome.built += late.built;
+        for (reason, ids) in late.refusals {
+            graze_outcome.refusals.entry(reason).or_default().extend(ids);
+        }
+    }
     // The finished field's own check, and the load it lost if any landing is
     // broken: the down-sweep hands a child's load to its named parent at the
     // landing layer, and a parent that does not stand there never picks it
@@ -3276,6 +3337,7 @@ pub fn run_sweep_with_holes(
     report.counters.descent_solid_uncleared = descent_tally.uncleared;
     report.counters.descent_solid_lean_candidates_refused = descent_tally.lean_candidates_refused;
     report.counters.descent_solid_seats_moved = descent_tally.seats_moved;
+    report.counters.descent_head_offset_charged = descent_tally.offset_charged;
     // The descent's F2 tallies (lane 2, 2026-10-12): the foot census on the
     // finished field fills the rest of this outcome.
     report.model_feet.descent_candidates_refused = descent_tally.foot_candidates_refused;
@@ -3301,6 +3363,8 @@ pub fn run_sweep_with_holes(
     }
     report.heads.graze_converted = graze_outcome.graze_converted;
     report.heads.graze_asked = graze_outcome.graze_asked;
+    report.heads.graze_asked_late = graze_outcome.graze_asked_late;
+    report.heads.graze_converted_late = graze_outcome.graze_converted_late;
     report.heads.graze_reasons = graze_outcome.graze_reasons;
     report.heads.downgraded_after_sizing = heads_downgraded;
     report.heads.kept_short_of_clearance = head_downgrades.kept_with_warning;
@@ -3693,6 +3757,9 @@ pub fn run_sweep_with_holes(
             law.face_zone_factor(),
             &history.hidden,
         );
+        // No tip or head inside another member's drawn solid (F4): warned.
+        sweep_plan.report.member_model_clearance.tips_inside =
+            member_clearance::tips_inside_members(&sweep_plan.struts, &emitted, plan, plate_z);
         sweep_plan.report.hidden_cavity = history.hidden.census();
     }
     // THE LINK UNDER THE LAW (Craig 2026-10-08): the link is the contact's own

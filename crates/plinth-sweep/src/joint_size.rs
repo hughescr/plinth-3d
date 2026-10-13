@@ -1119,11 +1119,28 @@ fn certify_one(
         };
         radii[slot] = cone_radius(s).max(ledger[slot]);
     }
+    // ---- P3 (`CHONKY.md`): a post slot that keeps today's radius (or a
+    // hull's) although the certificate computed a LARGER need for it is drawn
+    // under its own need. The certificate keeps it (it never grows a post past
+    // today's), so it is counted and warned here, never refused.
+    let mut slots_under_need = 0_usize;
+    let mut worst_under_need: Option<(f64, f64)> = None;
+    for slot in 0..=joint_slot {
+        let (need, drawn) = (needs[slot], radii[slot]);
+        if drawn > 0.0 && need > drawn * (1.0 + 1.0e-9) {
+            slots_under_need += 1;
+            if worst_under_need.is_none_or(|(n, d)| need * d > n * drawn) {
+                worst_under_need = Some((need, drawn));
+            }
+        }
+    }
     let cert = CertifiedHead {
         profile,
         slots_certified: stats[0],
         slots_kept: stats[1],
         slots_pinned: stats[2],
+        slots_under_need,
+        worst_under_need,
         drawn_max,
         today_radius_mm: today,
     };

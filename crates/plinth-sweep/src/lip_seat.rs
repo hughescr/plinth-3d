@@ -163,18 +163,30 @@ pub(crate) fn clearance_violators(
         joins.slender.lean.face_zone_factor(),
         &joins.slender.history.hidden,
     );
+    // An arm whose drawn solid holds another member's tip or head (F4,
+    // `MODEL-FEET.md`) is sent too: moving it off the tip is the remedy, since
+    // a tip never moves here.
+    let buried =
+        crate::member_clearance::tips_inside_members(struts, arms, joins.layer_plan, joins.plate_z_mm);
+    let named_rows = census
+        .within_gap
+        .iter()
+        .map(|row| (row.member, row.kind))
+        .chain(buried.iter().map(|row| (row.host_member, row.host_kind)));
     let mut named = 0;
-    for row in &census.within_gap {
-        if row.kind != StrutKind::Arm || exclude.contains(&row.member) {
+    for (member, kind) in named_rows {
+        if kind != StrutKind::Arm || exclude.contains(&member) {
             continue;
         }
-        let slot = match struts.get(row.member as usize) {
-            Some(strut) if strut.id == row.member => Some(row.member as usize),
-            _ => struts.iter().position(|strut| strut.id == row.member),
+        let slot = match struts.get(member as usize) {
+            Some(strut) if strut.id == member => Some(member as usize),
+            _ => struts.iter().position(|strut| strut.id == member),
         };
         if let Some(slot) = slot {
-            flags[slot] = true;
-            named += 1;
+            if !flags[slot] {
+                flags[slot] = true;
+                named += 1;
+            }
         }
     }
     (flags, named)

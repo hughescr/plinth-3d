@@ -3327,7 +3327,8 @@ fn print_sweep_disclosure(
              {} replaced by a leaned descent that clears the preferred margin; {} replaced by \
              one that clears the final gap only; {} cleared by no descent (kept, warned by the \
              census); {} lean candidates refused; {} seats moved to a cell covering the same \
-             demand; {} thickenings refused for the model ({} raised slots flagged by the \
+             demand; {} head-post leans onto a member charged for the moment of their \
+             offset; {} thickenings refused for the model ({} raised slots flagged by the \
              raster, {} of them measured clear by the census's predicate, {} proved inside the \
              gap already as drawn, {} undecided and so not refused; {} raised members in a \
              hidden cavity not read)",
@@ -3340,6 +3341,7 @@ fn print_sweep_disclosure(
             hits.descent_solid_uncleared,
             hits.descent_solid_lean_candidates_refused,
             hits.descent_solid_seats_moved,
+            hits.descent_head_offset_charged,
             report.slenderness_lane.thicken_refused_model,
             report.slenderness_lane.thicken_slots_flagged,
             report.slenderness_lane.thicken_slots_measured_clear,
@@ -3468,6 +3470,29 @@ fn print_sweep_disclosure(
                 near.witness_mm[1],
                 near.witness_mm[2],
                 clearance.gap_mm,
+            );
+        }
+        if !clearance.tips_inside.is_empty() {
+            let named: Vec<String> = clearance
+                .tips_inside
+                .iter()
+                .map(|row| {
+                    format!(
+                        "tip of arm {} (ball {:.3} mm) inside {:?} {} by {:.3} mm",
+                        row.tip_member,
+                        2.0 * row.ball_radius_mm,
+                        row.host_kind,
+                        row.host_member,
+                        row.depth_mm
+                    )
+                })
+                .collect();
+            println!(
+                "[sweep {model}] WARNING tips inside another member's drawn solid (the ball's \
+                 centre or the head's axis): {} ({}); the clearance re-route was sent each \
+                 holding arm it could move (emit and warn, never refuse)",
+                clearance.tips_inside.len(),
+                named.join("; ")
             );
         }
         for warning in &lip.over_limit_after {
@@ -4213,6 +4238,15 @@ fn print_sweep_disclosure(
                 certificate.over_one
             );
         }
+        if let Some((member, need, drawn)) = certificate.worst_under_need {
+            println!(
+                "[sweep {model}] WARNING joint certificate: {} heads keep {} post slots under the \
+                 radius the certificate computes for them (today's radius or a hull's is kept, \
+                 never grown); worst member {member}: drawn {drawn:.3} mm against a need of \
+                 {need:.3} mm (emit and warn, never refuse)",
+                certificate.heads_under_need, certificate.slots_under_need,
+            );
+        }
         let warned = heads
             .refusals
             .iter()
@@ -4273,6 +4307,14 @@ fn print_sweep_disclosure(
                 heads.graze_converted
             );
         }
+        println!(
+            "[sweep {model}] heads at the final radius: the graze conversion asked again after \
+             the final sizing, the ties and the clearance re-route saw {} grazers and gave {} a \
+             head {:?}",
+            heads.graze_asked_late,
+            heads.graze_converted_late.len(),
+            heads.graze_converted_late,
+        );
         if !heads.graze_kept.is_empty() {
             let named = heads
                 .graze_kept

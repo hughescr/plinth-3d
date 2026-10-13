@@ -742,10 +742,16 @@ pub struct DescentTally {
     /// no candidate was found: kept, and WARNED with the percent on the model
     /// on the finished field (emit and warn).
     pub foot_straight_kept: u64,
+    /// **Head-post leans onto a member charged for their offset**
+    /// (`CHONKY.md` P1, [`offset_moment_path_mm`]): lean candidates of a
+    /// head's post onto another member whose price rose by the moment their
+    /// sideways offset hands the host. The path-hit witness of the charge.
+    pub offset_charged: u64,
 }
 
 impl DescentTally {
     pub(crate) fn absorb(&mut self, other: &DescentTally) {
+        self.offset_charged += other.offset_charged;
         self.foot_candidates_refused += other.foot_candidates_refused;
         self.foot_straight_replaced += other.foot_straight_replaced;
         self.foot_straight_kept += other.foot_straight_kept;
@@ -2784,6 +2790,49 @@ pub(crate) fn deferred_path_mm(landing: Landing, k_bottom: usize, layer_height_m
     }
 }
 
+/// **What a headed post's landing on ANOTHER MEMBER still owes for its
+/// sideways offset** (`CHONKY.md` P1, 2026-10-12), in the same currency as
+/// [`deferred_path_mm`] and the lean law: mm of the arm's own section.
+///
+/// [`deferred_path_mm`] prices a landing on a member at zero further path:
+/// the host has already paid for its own way down. That holds for the AXIAL
+/// load only. The head's contact `D` carries its load down a vertical line;
+/// a post that lands on a host whose axis stands `e` sideways of `D` hands the
+/// host that load at a lever `e`, and with nothing holding the host's top
+/// sideways (the engine cannot claim the model does) the host carries the
+/// moment all the way to the plate. The engine's own stress form
+/// ([`crate::heads::section_radius_mm`], `r³ = r_a²·r + 4·r_t²·e`) gives the
+/// section that moment needs, so the host's extra material per mm of its
+/// remaining path, in units of the post's own axial section `π r_a²`, is
+/// `(r(e)² − r(e_K)²) / r_a²`: the lever the head ITSELF imposes, `e_K` (the
+/// horizontal offset of the joint `K` from `D`), is subtracted, because every
+/// post from `K`, a vertical drop to the plate included, carries it anyway.
+/// The host's remaining path is bounded below by the landing's own height,
+/// `k_bottom · h`, as [`deferred_path_mm`] bounds a model landing's.
+///
+/// `r_a` is the post's foot lower bound (the area law on what the seat
+/// covers; the tip at that bound is the same radius). A landing straight
+/// under `K` (`e = e_K`) owes nothing, so a vertical drop onto a host is
+/// priced as before; only a LEAN onto a host is charged, and by physics: a
+/// post that leans 3 mm onto a column instead of dropping clear to the plate
+/// pays for the column the lean makes fat. No constant is introduced.
+pub(crate) fn offset_moment_path_mm(
+    offset_mm: f64,
+    joint_offset_mm: f64,
+    axial_radius_mm: f64,
+    below_mm: f64,
+) -> f64 {
+    if !(axial_radius_mm > 0.0 && below_mm > 0.0 && offset_mm.is_finite() && joint_offset_mm.is_finite()) {
+        return 0.0;
+    }
+    let need = |lever_mm: f64| {
+        crate::heads::section_radius_mm(axial_radius_mm, axial_radius_mm, lever_mm.max(0.0))
+    };
+    let (at_landing, at_joint) = (need(offset_mm), need(joint_offset_mm));
+    let extra = (at_landing * at_landing - at_joint * at_joint) / (axial_radius_mm * axial_radius_mm);
+    below_mm * extra.max(0.0)
+}
+
 /// One candidate landing for a descent, priced but not yet path-checked.
 #[derive(Clone, Copy, Debug)]
 struct LeanCandidate {
@@ -3008,6 +3057,12 @@ fn descend_cleared_from(
     foot_radius_mm: f64,
 ) -> Descent {
     let from_joint = running_layer != layer;
+    // A head's post (P1): the contact `D` its load hangs from, and the lever
+    // the head itself puts between `D` and the joint, horizontally.
+    let offset_charge = post_plane.filter(|_| foot_radius_mm > 0.0).map(|plane| {
+        let (contact, joint) = (plane.contact_mm, plane.joint_mm);
+        (contact, (joint[0] - contact[0]).hypot(joint[1] - contact[1]))
+    });
     let (straight_landing, straight_bottom, straight_rooted, head_blocked) =
         descend_below(history, cell, layer, running_layer);
     let foot_fits = |base_cell: usize, k_bottom: usize| {
@@ -3276,7 +3331,20 @@ fn descend_cleared_from(
             let Some(length_mm) = law.descent_cost_mm(descent_layers, lateral_mm) else {
                 continue;
             };
-            let cost_mm = length_mm + deferred_path_mm(landing, k_bottom, law.layer_height_mm());
+            let mut cost_mm = length_mm + deferred_path_mm(landing, k_bottom, law.layer_height_mm());
+            // A head's post that leans onto another member pays for the
+            // moment its sideways offset hands that member (P1).
+            if let (Landing::Strut { .. }, Some((contact, joint_offset_mm))) = (landing, offset_charge) {
+                let offset_mm = (grid.center_x_mm(grid.col_of(candidate)) - contact[0])
+                    .hypot(grid.center_y_mm(grid.row_of(candidate)) - contact[1]);
+                #[expect(clippy::cast_precision_loss, reason = "a layer index is exact in f64")]
+                let below_mm = k_bottom as f64 * law.layer_height_mm();
+                let owed = offset_moment_path_mm(offset_mm, joint_offset_mm, foot_radius_mm, below_mm);
+                if owed > 0.0 {
+                    outcome.solid.offset_charged += 1;
+                }
+                cost_mm += owed;
+            }
             outcome.lean_candidates_priced += 1;
             if straight_is_clear && cost_mm >= straight_cost {
                 continue;
@@ -4839,6 +4907,71 @@ mod head_first_tests {
         );
         assert_eq!(kept.landing, Landing::Strut { id: 7, layer: 190 });
         assert!(kept.path.is_empty());
+    }
+
+    /// **P1 (`CHONKY.md`): a head's post that leans onto another member pays
+    /// for the moment its offset hands the host.** A joint at layer 100 over an
+    /// open plate, and a trunk 1 mm to one side whose top stands at layer 80:
+    /// the lean onto the trunk (about 2.7 mm of lean-law path) is cheaper than
+    /// the 5 mm drop to the plate, so with the offset free (SABOTAGE: no foot
+    /// radius, so no charge) the post leans onto the trunk. Charged, the trunk
+    /// would carry the contact's load at a 1 mm lever for 4 mm down, which the
+    /// stress form prices far over the drop: the post drops straight to the
+    /// plate, and the charged candidate is counted.
+    #[test]
+    fn a_head_post_pays_for_the_offset_it_hands_a_host_and_drops_clear_instead() {
+        use super::{offset_moment_path_mm, PostPlane};
+        let grid = grid();
+        let mut history = ColumnHistory::new(&grid);
+        let joint_cell = grid.index(150, 150);
+        let pitch = grid.pitch_mm();
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a small cell count")]
+        let cols = (1.0 / pitch).round() as usize;
+        let trunk_cell = grid.index(150, 150 + cols);
+        history.top_strut[trunk_cell] = 81;
+        history.top_strut_id[trunk_cell] = 3;
+        history.stamp_shaft(3, 0, 80, trunk_cell, &[]);
+        let law = LeanLaw::new(H, 45.0, 25.0);
+        let keep_out = DrainKeepOut::none();
+        let joint = [grid.center_x_mm(150), grid.center_y_mm(150), 100.0 * H];
+        let plane = PostPlane {
+            joint_mm: joint,
+            contact_mm: [joint[0], joint[1], joint[2] + 1.8],
+            unit: [0.0, 0.0, -1.0],
+            radius_mm: 0.2,
+            plate_z_mm: 0.0,
+            margin_mm: 0.07,
+        };
+        let descend = |foot_radius_mm: f64| {
+            let mut scratch = Vec::new();
+            let mut counts = LayerOutcome::empty();
+            let post = descend_cleared_from(
+                &grid, &history, &keep_out, &law, true, 4.0, joint_cell, 100, 150, &mut scratch,
+                &mut counts, None, 0.0, Some(&plane), foot_radius_mm,
+            );
+            (post, counts.solid.offset_charged)
+        };
+        let (free, charged_free) = descend(0.0);
+        assert_eq!(free.landing, Landing::Strut { id: 3, layer: 80 }, "SABOTAGE: with the offset free the post leans onto the trunk");
+        assert_eq!(charged_free, 0);
+        let (post, charged) = descend(0.1);
+        assert_eq!(post.landing, Landing::Plate, "charged for its offset the post drops clear to the plate");
+        assert!(post.path.is_empty(), "a straight drop");
+        assert!(charged > 0, "the lean onto the trunk was priced with the charge");
+
+        // The charge itself: zero straight under the joint, rising with the
+        // offset, and the stress form's section ratio over the host's path.
+        assert_eq!(offset_moment_path_mm(0.4, 0.4, 0.1, 4.0).to_bits(), 0.0_f64.to_bits());
+        assert_eq!(
+            offset_moment_path_mm(0.2, 0.4, 0.1, 4.0).to_bits(),
+            0.0_f64.to_bits(),
+            "nearer than the joint's own lever owes nothing"
+        );
+        let one = offset_moment_path_mm(1.0, 0.0, 0.1, 4.0);
+        let two = offset_moment_path_mm(2.0, 0.0, 0.1, 4.0);
+        assert!(one > 0.0 && two > one);
+        let r = crate::heads::section_radius_mm(0.1, 0.1, 1.0);
+        assert!((one - 4.0 * (r * r - 0.01) / 0.01).abs() < 1e-9);
     }
 }
 

@@ -306,6 +306,29 @@ and the model-tie passes run again on the field it left (they act only on runs o
 because the move can make a run (a branch on a new host) or lower a limit (the old host's re-size
 makes its sections thinner).
 
+**No tip or head inside another member's drawn solid** (`MODEL-FEET.md` F4, 2026-10-12). The
+Deinonychus tip 145 had its 0.13 mm ball and its whole head inside column 142, and no rule measured
+an arm's drawn solid against another arm's tip. `member_clearance::tips_inside_members` reads each
+seated tip as the segment from its ball centre to where its post starts (the head's axis; the ball
+centre alone for a straight tip) against every other member's drawn spans, each a frustum: the tip
+is inside where the segment comes nearer a span's axis than the span's drawn radius there. A member
+that lands or seats on the tip's own arm is joined to it by plan and is not read. The holding member,
+when it is an arm, is sent to the clearance re-route (a tip never moves there; moving the holder off
+it is the remedy), and the finished field's census warns on every tip still inside, with its host and
+depth. The re-route never moves a headed arm or one that carries a headed member, so case B's
+column (it carries the headed tip) stays and is warned.
+
+**The graze conversion runs again at the final radius** (`MODEL-FEET.md` F3, 2026-10-12). The
+conversion judges each straight tip on the field the lip seats left, at the radius it had then; the
+head decision at placement assumed a vertical post at the planning radius (0.15 mm). The head joins,
+ties, re-route and their sizings come after, and a tip they grow (case B: 0.15 mm planned, 0.671 mm
+drawn, leaned 41 deg, 29 off its face normal) was never asked again. So the same conversion runs once
+more after the clearance re-route, on the sized field, measuring each straight shaft as the lowering
+draws it at its final radius and drawn angle; a grazer gets a head where a post from the joint lands
+legally, and otherwise stays straight with its reason (`heads at the final radius:` line; the
+finished field's graze warning names the rest). A tip the footprint rule slides afterwards is still
+"made by a later slide".
+
 **The final gap does not apply inside a hidden cavity** (owner ruling 2026-10-05, on the
 2026-08-31 ruling that supports hidden in a cavity are never removed or cleaned). The test is
 the cavity itself (`cavity.rs`), not the scar flag `SweepStrut::interior` (model above the landing
@@ -574,7 +597,10 @@ pass that applies it):
   contact, every member landed on it (and what is routed through it), every brace, and every
   member whose drawn solid is fused into it. The lowering's chords never draw below the slot step.
 * **Kept as today.** A slot whose need is above today's radius and a slot a junction hull's ring
-  stands on keep today's radius. A head that another member loads at or above its joint (shared)
+  stands on keep today's radius. Such a slot is drawn under the certificate's own need, so it is
+  counted and the log warns with the worst member (`heads keep N post slots under the radius the
+  certificate computes`; `CHONKY.md` P3: Deinonychus support A's column keeps 1.286 against a need
+  of 1.395-1.603). The certificate never grows a post; the warning says where it stands short. A head that another member loads at or above its joint (shared)
   keeps the old law and is counted (`joint certificate:` line of the log): a member that lands on
   the joint's layer or above, a brace seated within one layer of the joint, or ANY other member's
   drawn body (routed descendants included) that touches the certified link, cone or joint. The
@@ -609,6 +635,22 @@ pass that applies it):
 
 What it does not claim: stiffness falls as sections thin (the link dominates compliance), and a
 thinner path moves a little load onto a neighbour. Only a frame solve or a coupon settles that.
+
+**A head's post that leans onto another member pays for the moment its offset hands the host**
+(`CHONKY.md` P1, 2026-10-12). The descent prices a landing on a member at zero further path: the
+host has already paid for its own way down (`up_sweep::deferred_path_mm`). That holds for the axial
+load only. The contact `D` carries its load down a vertical line, and a post that lands on a host
+whose axis stands `e` sideways of `D` hands the host that load at a lever `e`; with nothing holding
+the host's top sideways (the engine cannot claim the model does) the host carries the moment to the
+plate. The engine's own stress form (`heads::section_radius_mm`, `r^3 = r_a^2 r + 4 r_t^2 e`) gives the
+section it needs, so the lean is charged the host's extra material per mm of its remaining path
+(at least the landing's own height, `k_bottom h`), in units of the post's own axial section:
+`k_bottom h (r(e)^2 - r(e_K)^2) / r_a^2` (`up_sweep::offset_moment_path_mm`). `e_K`, the horizontal
+lever the head itself puts between `D` and the joint, is subtracted: every post from `K` carries
+it, a vertical drop to the plate included, so a landing straight under `K` owes nothing. Only a head
+post's LEAN onto a member is charged; no constant is new. Deinonychus support A (`CHONKY.md`): the
+3.5 mm arm onto B's column is gone, the post drops vertically from `K` (r 1.01) to its own foot, and
+the path from the contact to the plate falls from 48.9 to 27.9 mm3 of emitted mesh.
 
 ## 9. Admissibility: emergence, area sufficiency, attestation, buried surface
 

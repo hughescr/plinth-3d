@@ -327,3 +327,73 @@ fn a_member_landing_below_the_joint_but_crossing_the_cone_makes_the_head_shared(
     let clear = old_law_reason_with(|grid| lander_on_post(grid, 150, 290, K_JOINT - 3, K_JOINT + 6));
     assert_eq!(clear, None, "a member standing clear below the joint is carried by the post only");
 }
+
+/// A fat straight tip `cols` columns along x from the post, landed on it at
+/// `layer` and leaning onto it: its contact loads the post at a lever.
+fn offset_lander(grid: &Grid, cols: usize, layer: usize, k_top: usize, tip: f64) -> SweepStrut {
+    let (row, col) = (150, 270 - cols);
+    let mut s = straight(grid, 1, row, col, k_top, tip);
+    s.landing = Landing::Strut { id: 0, layer };
+    s.k_bottom = layer;
+    let span = k_top - layer;
+    s.path = (0..span)
+        .map(|slot| cell_u32(grid.index(row, 270 - (cols * (span - slot)) / span)))
+        .collect();
+    s.radius_mm = vec![tip; span + 1];
+    s.carried_mm2 = vec![0.0; span + 1];
+    s.seat_normal = [0.0, 0.0, -1.0];
+    s.seat_face = SeatFace {
+        point_mm: Some([grid.center_x_mm(col), grid.center_y_mm(row), z(k_top)]),
+        ..SeatFace::default()
+    };
+    s
+}
+
+/// **P3 (`CHONKY.md`): a post slot drawn under the certificate's own need is
+/// counted and named, never refused.** The certificate never grows a post past
+/// today's radius: where its own need is larger it keeps today's (or a hull's),
+/// and until this count nothing said so. Here the steep head's own lever needs
+/// more than the old law drew under it, so slots are kept under their need, and
+/// a fat tip leaning onto the post from far to one side raises the need further.
+/// Only a kept or pinned slot can be under its need (a certified slot is sized
+/// at or over it), and the census over the field names the worst member.
+/// CONTROL: the flat head's certified slots are never counted.
+#[test]
+fn a_post_slot_kept_under_its_certified_need_is_counted_and_named() {
+    let plan = plan();
+    let ratio = |cert: &crate::heads::CertifiedHead| cert.worst_under_need.map_or(1.0, |(need, drawn)| need / drawn);
+    let sized = |tilt: f64, lander: bool| {
+        let (grid, mut members) = field(0, tilt);
+        if lander {
+            members.push(offset_lander(&grid, 120, 40, 90, 0.4));
+        }
+        resize_heads_certified(&grid, &mut members, sizing(), &context(&plan), PITCH_MM);
+        members
+    };
+    let steep = sized(STEEP, false);
+    let cert = steep[0].head.as_ref().and_then(|head| head.certified.as_ref()).expect("certified");
+    assert!(cert.slots_under_need > 0, "the steep head's own lever needs more than the old law drew");
+    assert!(cert.slots_under_need <= cert.slots_kept + cert.slots_pinned, "only a kept slot can be under its need");
+    let (need, drawn) = cert.worst_under_need.expect("a worst slot");
+    assert!(need > drawn, "need {need} over drawn {drawn}");
+    let census = crate::heads::JointCertificate::of(&steep);
+    assert_eq!((census.heads_under_need, census.slots_under_need), (1, cert.slots_under_need));
+    assert_eq!(census.worst_under_need, Some((steep[0].id, need, drawn)));
+
+    let loaded = sized(STEEP, true);
+    let loaded_cert = loaded[0].head.as_ref().and_then(|head| head.certified.as_ref()).expect("certified");
+    assert!(
+        ratio(loaded_cert) > ratio(cert),
+        "the offset load raises the worst shortfall: {} against {}",
+        ratio(loaded_cert),
+        ratio(cert)
+    );
+
+    // The flat head's post is partly certified (thinned to its need) and
+    // partly kept: only the kept slots are counted, never a certified one.
+    let flat = sized(FLAT, false);
+    let flat_cert = flat[0].head.as_ref().and_then(|head| head.certified.as_ref()).expect("certified");
+    assert!(flat_cert.slots_certified > 0 && flat_cert.slots_kept > 0, "the control certifies and keeps");
+    assert!(flat_cert.slots_under_need <= flat_cert.slots_kept + flat_cert.slots_pinned);
+    assert!(flat_cert.slots_under_need < flat_cert.slots_certified + flat_cert.slots_kept + flat_cert.slots_pinned);
+}

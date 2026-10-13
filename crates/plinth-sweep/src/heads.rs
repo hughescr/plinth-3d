@@ -165,6 +165,13 @@ pub struct CertifiedHead {
     /// The largest certified demand over the drawn head and the drawn post
     /// chords (1 means exactly at capacity; above 1 + 1e-9 is warned).
     pub drawn_max: f64,
+    /// Post slots whose drawn radius stays under the certificate's own
+    /// computed need for them (a slot that kept today's radius, or a hull's,
+    /// although the need is larger: `CHONKY.md` P3). Warned, never refused.
+    pub slots_under_need: usize,
+    /// The worst such slot: `(need, drawn)` radii in mm, the largest
+    /// `need / drawn`. `None` when no slot is under its need.
+    pub worst_under_need: Option<(f64, f64)>,
     /// The member's ledger as the old law left it before the certificate
     /// rewrote it, slot by slot: the geometry the junction hulls are planned on
     /// and keep (R8). The adapter builds a reference field from these radii
@@ -1077,6 +1084,14 @@ pub struct HeadsOutcome {
     /// (the path-hit witness for the census at that point): zero means the
     /// conversion never saw one.
     pub graze_asked: usize,
+    /// **The conversion again, at the final radius** (`MODEL-FEET.md` F3,
+    /// 2026-10-12): straight tips whose shaft grazes the model on the field
+    /// the final sizing, the ties and the clearance re-route left (a tip
+    /// grown past the radius it was first judged at, or an arm moved after
+    /// the first conversion), and of those, the ones given a head then. The
+    /// converted ids are in [`Self::graze_converted`] too.
+    pub graze_asked_late: usize,
+    pub graze_converted_late: Vec<u32>,
     /// Why each grazer the conversion looked at and left straight stayed so,
     /// `(member id, reason)`, in id order.
     pub graze_reasons: Vec<(u32, GrazeReason)>,
@@ -1114,6 +1129,14 @@ pub struct JointCertificate {
     pub worst_drawn_max: f64,
     /// Heads whose drawn chords exceed 1 + 1e-9: warned, never refused.
     pub over_one: usize,
+    /// Certified heads with at least one post slot drawn under the
+    /// certificate's own need for it, and how many such slots in all
+    /// ([`CertifiedHead::slots_under_need`]): warned, never refused.
+    pub heads_under_need: usize,
+    pub slots_under_need: usize,
+    /// The worst of them: `(member id, need, drawn)`, radii in mm, the
+    /// largest `need / drawn`.
+    pub worst_under_need: Option<(u32, f64, f64)>,
 }
 
 impl JointCertificate {
@@ -1121,10 +1144,12 @@ impl JointCertificate {
     #[must_use]
     pub fn of(struts: &[crate::SweepStrut]) -> Self {
         let mut out = Self::default();
-        for head in struts
+        for (id, head) in struts
             .iter()
             .filter(|strut| crate::slenderness::live(strut))
-            .filter_map(|strut| strut.head.as_ref().filter(|head| !head.drawn_straight))
+            .filter_map(|strut| {
+                strut.head.as_ref().filter(|head| !head.drawn_straight).map(|head| (strut.id, head))
+            })
         {
             match (&head.certified, head.old_law) {
                 (Some(c), _) => {
@@ -1135,6 +1160,18 @@ impl JointCertificate {
                     out.worst_drawn_max = out.worst_drawn_max.max(c.drawn_max);
                     if c.drawn_max > 1.0 + 1.0e-9 {
                         out.over_one += 1;
+                    }
+                    if c.slots_under_need > 0 {
+                        out.heads_under_need += 1;
+                        out.slots_under_need += c.slots_under_need;
+                    }
+                    if let Some((need, drawn)) = c.worst_under_need {
+                        let worse = out
+                            .worst_under_need
+                            .is_none_or(|(_, n, d)| need * d > n * drawn);
+                        if worse {
+                            out.worst_under_need = Some((id, need, drawn));
+                        }
                     }
                 }
                 (None, Some(OldLawReason::Shared)) => out.old_law_shared += 1,

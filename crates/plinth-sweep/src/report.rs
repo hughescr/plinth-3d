@@ -490,6 +490,28 @@ pub struct MemberModelClearance {
     pub smallest_clearance_mm: Option<f64>,
     /// The members under the gap, in member order.
     pub within_gap: Vec<MemberNearModel>,
+    /// **Tips and heads buried in ANOTHER member's drawn solid** (`MODEL-FEET.md`
+    /// F4, 2026-10-12; `member_clearance::tips_inside_members`), in tip
+    /// order: the member whose solid holds it, and how deep. Warned, never
+    /// refused; the clearance re-route is sent the holding member first.
+    pub tips_inside: Vec<TipInsideMember>,
+}
+
+/// One tip whose contact ball's centre, or its head's axis from the ball to
+/// the joint, lies inside another member's drawn shaft
+/// ([`MemberModelClearance::tips_inside`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TipInsideMember {
+    /// The arm whose tip is buried.
+    pub tip_member: u32,
+    /// The member whose drawn solid holds it, and its kind.
+    pub host_member: u32,
+    pub host_kind: crate::StrutKind,
+    /// How far inside the host's solid the tip's axis reaches, mm (the host's
+    /// drawn radius there less the axis distance).
+    pub depth_mm: f64,
+    /// The tip's drawn contact ball radius, mm.
+    pub ball_radius_mm: f64,
 }
 
 /// The unrooted-column rule on one run: what the up-sweep left unrooted, and
@@ -579,6 +601,9 @@ pub struct PathHits {
     pub descent_solid_uncleared: u64,
     pub descent_solid_lean_candidates_refused: u64,
     pub descent_solid_seats_moved: u64,
+    /// Head-post lean candidates onto another member charged for the moment
+    /// their sideways offset hands the host (`CHONKY.md` P1).
+    pub descent_head_offset_charged: u64,
     /// Down-sweep reads where a lander's load reached a support arm's contact
     /// slot and was booked one slot lower, into the shaft (2026-09-29). Zero
     /// means no arm landed on another arm's head, which a green
