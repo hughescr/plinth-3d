@@ -547,9 +547,10 @@ slicer cures that patch in free resin. Two tip rules are held to this:
   of plan is warned (`ShortReason::Overhang`).
 - **A footprint slide keeps the seat it was placed for.** A disc wholly on some face higher up is
   not support for the material the tip was placed under. A slide is accepted only if the moved ball
-  still holds the original seat to within one pixel, or the moved disc still reaches down to within
-  one layer of the seat (a slide across a level face or along a tilted face's strike stays on the
-  seat's lamina) (`footprint::keeps_seat`); otherwise the tip tries its next candidate and, when
+  still holds the original seat to within one pixel, or the slide does not climb: the moved disc's
+  lowest point stands no more than one layer above the placed disc's (a slide across a level face
+  or along a tilted face's strike stays on the laminae the tip was placed under)
+  (`footprint::keeps_seat`); otherwise the tip tries its next candidate and, when
   none keeps the seat, keeps its own with a warning (`Footprint::MoveRefused`).
 
 Land-at-strike is a **ratified design principle** — the standing answer for how the engine

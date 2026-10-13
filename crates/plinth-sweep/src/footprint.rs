@@ -92,8 +92,9 @@
 //!
 //! A move must also keep the support the tip was placed to give (joint review
 //! P2, 2026-10-12): the moved ball must still hold the original seat, to
-//! within one pixel, or the moved disc must still reach down to the seat's
-//! lamina ([`keeps_seat`]). A disc wholly on some face higher up is not
+//! within one pixel, or the slide must not climb (the moved disc's lowest
+//! point within one layer of the placed disc's) ([`keeps_seat`]). A disc
+//! wholly on some face higher up is not
 //! support for the material under the seat; a candidate that leaves it is
 //! refused like a move that breaks a rule, and a tip with none left keeps its
 //! seat as a [`Footprint::MoveRefused`].
@@ -672,6 +673,13 @@ impl Slid {
             normal: disc.outward_normal,
         }
     }
+
+    /// The contact disc's lowest point: its centre less its radius times the
+    /// plane's tilt from level (the horizontal part of the unit normal).
+    fn lowest_mm(&self) -> f64 {
+        let tilt = self.normal[0].hypot(self.normal[1]).min(1.0);
+        self.disc_centre[2] - self.disc_radius * tilt
+    }
 }
 
 /// **A slide keeps the support it was placed to give** (joint review P2,
@@ -683,11 +691,12 @@ impl Slid {
 ///   printer cannot part two solids closer than that, the tolerance the grade
 ///   itself reads); the tip's own ball holds its seat by construction (the
 ///   seat law drives it INTO the model there); or
-/// * the moved contact disc, which lies on the face, still reaches DOWN to the
-///   seat's lamina: its lowest point is no more than one layer (`height`)
-///   above the seat. A slide across a level face, or along a tilted face's
-///   strike, stays on the lamina the tip was placed under (the rim tips of a
-///   flat disc slide inward this way; a section move slides along its face).
+/// * the slide does not CLIMB: the moved contact disc's lowest point stands
+///   no more than one layer (`height`) above the lowest point of the disc the
+///   tip had before the move (`placed`). A slide across a level face, or
+///   along a tilted face's strike, stays on the laminae the tip was placed
+///   under (the rim tips of a flat disc slide inward this way; a section move
+///   slides along its face).
 ///
 /// What it refuses is a slide UP the layers onto a contact that no longer
 /// meets them: a disc wholly on SOME face is not support for the material
@@ -695,15 +704,11 @@ impl Slid {
 /// slope (its centre 0.27 mm higher) onto a whole-disc contact, and the 829 +
 /// 1356 pixels it had held at 7.575 and 7.625 mm were left over nothing
 /// (`joint/out-fix/final`).
-fn keeps_seat(seat: [f64; 3], slid: Slid, pitch: f64, height: f64) -> bool {
-    if geom_kernel::vec3::dist(seat, slid.ball_centre) <= slid.ball_radius + pitch {
+fn keeps_seat(seat: [f64; 3], placed: Slid, moved: Slid, pitch: f64, height: f64) -> bool {
+    if geom_kernel::vec3::dist(seat, moved.ball_centre) <= moved.ball_radius + pitch {
         return true;
     }
-    // The disc's lowest point: its centre less its radius times the plane's
-    // tilt from level (the horizontal part of the unit normal).
-    let tilt = slid.normal[0].hypot(slid.normal[1]).min(1.0);
-    let lowest = slid.disc_centre[2] - slid.disc_radius * tilt;
-    lowest <= seat[2] + height
+    moved.lowest_mm() <= placed.lowest_mm() + height
 }
 
 /// The integer lattice offsets inside a disc of `radius` pitches, centre first.
@@ -1103,7 +1108,7 @@ pub(crate) fn apply(
                     disc_centre: geom_kernel::vec3::add(search.slid.disc_centre, slide),
                     ..search.slid
                 };
-                if !keeps_seat(seat, rigid, pitch, height) {
+                if !keeps_seat(seat, search.slid, rigid, pitch, height) {
                     outcome.moves_refused_off_seat += 1;
                     refused_by_limits[slot] = true;
                     continue;
@@ -1221,7 +1226,13 @@ pub(crate) fn apply(
             // criterion asked support for. A refusal is a refused move: the
             // tip tries its next candidate, and keeps its seat, warned, when
             // none is left.
-            if !keeps_seat(arms[search.arm].seat_mm, Slid::of(&disc), pitch, height) {
+            if !keeps_seat(
+                arms[search.arm].seat_mm,
+                search.slid,
+                Slid::of(&disc),
+                pitch,
+                height,
+            ) {
                 outcome.moves_refused_off_seat += 1;
                 refused_by_limits[*slot] = true;
                 continue;
