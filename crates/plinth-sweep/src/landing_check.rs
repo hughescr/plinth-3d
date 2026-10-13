@@ -23,8 +23,9 @@
 //! A `Landing::Strut { id, layer }` is valid only when the parent STANDS THERE
 //! NOW: it exists, it spans `layer` (`k_bottom <= layer <= k_top`), the child's
 //! own base is at that layer, and the parent's axis occupies the child's base
-//! cell at that layer. A member is ROOTED when its landing is the plate or the
-//! model, or a valid landing on a rooted member. A brace's TOP is a lateral
+//! cell at that layer. A member is ROOTED when it lands on the plate with its
+//! shaft reaching layer 0, on the model with its shaft reaching the layer the
+//! landing names, or validly on a rooted member. A brace's TOP is a lateral
 //! tie, not a load path, but a tie to a member that has moved away ties
 //! nothing, so detached brace tops are published beside the landings.
 //!
@@ -56,6 +57,16 @@ pub struct LandingCheck {
     /// Members whose parent spans the layer but stands in a DIFFERENT cell
     /// there — the parent was moved sideways out from under the child.
     pub parent_elsewhere: Vec<u32>,
+    /// Members whose landing names the PLATE or the MODEL but whose shaft
+    /// stops above it: a plate landing with `k_bottom != 0`, or a model
+    /// landing at `layer` with `k_bottom != layer`. The landing kind alone
+    /// says nothing about where the lower end is drawn, and until 2026-10-12
+    /// this check took the kind on trust. It is a ledger-against-shaft
+    /// invariant, not the catch for the Morel base's arm 44 (Q12): that stub's
+    /// lower end stood 0.015 mm from the model surface, its landing was
+    /// `Model`, and "0 unrooted" was true of it. The lip-seat rule's kept-arm
+    /// test prevents it at its cause (`q12/REGRESSIONS.md`). Strut ids.
+    pub ground_short: Vec<u32>,
     /// Braces whose top seats on a member that no longer stands in the brace's
     /// seat cell at the brace's top layer.
     pub brace_tops_detached: Vec<u32>,
@@ -85,7 +96,7 @@ impl LandingCheck {
     /// Invalid landings of either kind.
     #[must_use]
     pub fn invalid_landings(&self) -> usize {
-        self.parent_absent.len() + self.parent_elsewhere.len()
+        self.parent_absent.len() + self.parent_elsewhere.len() + self.ground_short.len()
     }
 
     /// Whether this check found nothing to warn about.
@@ -246,6 +257,17 @@ pub fn check_landings(struts: &[SweepStrut], layer_height_mm: f64) -> LandingChe
                 // Never landed at all: nothing under it.
                 own_valid[index] = false;
                 check.parent_absent.push(strut.id);
+            } else {
+                // The plate is layer 0 and a model landing names its layer:
+                // the shaft must reach it.
+                let ground = match strut.landing {
+                    Landing::Model { layer } => layer,
+                    _ => 0,
+                };
+                if strut.k_bottom != ground {
+                    own_valid[index] = false;
+                    check.ground_short.push(strut.id);
+                }
             }
             continue;
         };
@@ -400,6 +422,32 @@ mod tests {
         let broken = check_landings(&[trunk, child], 0.05);
         assert_eq!(broken.parent_elsewhere, vec![1]);
         assert_eq!(broken.unrooted, vec![1]);
+    }
+
+    /// A plate or model landing is rooted only where the shaft reaches it: a
+    /// plate arm whose lower end stops above layer 0, or a model arm whose
+    /// lower end is not the model layer it names, stands on nothing. Anything
+    /// resting on it is unrooted with it. (This is not the Morel base's arm 44
+    /// of Q12, which landed on the model with its lower end at the model: the
+    /// kept-arm test in `lip_seat` prevents that stub, `q12/REGRESSIONS.md`.)
+    #[test]
+    fn a_plate_or_model_landing_whose_shaft_stops_above_it_is_unrooted() {
+        let plate = arm(0, 5, 100, 0, Landing::Plate);
+        let model = arm(1, 6, 100, 45, Landing::Model { layer: 45 });
+        let child = arm(2, 5, 120, 60, Landing::Strut { id: 0, layer: 60 });
+        assert!(check_landings(&[plate.clone(), model.clone(), child.clone()], 0.05).clean());
+
+        let mut stub = plate;
+        stub.k_bottom = 99;
+        let mut short = model;
+        short.k_bottom = 50;
+        let mut child = child;
+        child.k_bottom = 99;
+        child.landing = Landing::Strut { id: 0, layer: 99 };
+        let broken = check_landings(&[stub, short, child], 0.05);
+        assert_eq!(broken.ground_short, vec![0, 1]);
+        assert_eq!(broken.unrooted, vec![0, 1, 2]);
+        assert_eq!(broken.invalid_landings(), 2);
     }
 
     /// An arm a twin seat was merged into counts as carrying someone, as it

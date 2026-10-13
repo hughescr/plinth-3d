@@ -3353,6 +3353,7 @@ pub fn run_sweep_with_holes(
     report.counters.island_seats = greedy.island_seats;
     report.counters.stranded_seats = greedy.stranded_seats;
     report.counters.twin_seats_merged = greedy.twin_merges;
+    report.counters.twin_seats_headed_host = greedy.twin_headed_hosts;
     report.counters.island_hex_bound = greedy.island_hex_bound;
     greedy.heads.publish(&mut report.heads);
     // The heads the graze conversion added (Craig 2026-10-08) join the
@@ -5391,6 +5392,9 @@ mod removal_tests {
     fn a_merged_arm_moves_with_its_branches_or_not_at_all() {
         let mut trunk = arm(0, 0, 40, 10);
         trunk.radius_mm = vec![1.0; 30];
+        // A trunk whose shaft ends at layer 10 stands on the model there: a
+        // plate landing must reach layer 0 (`landing_check`, 2026-10-12).
+        trunk.landing = Landing::Model { layer: 10 };
         let mut child = arm(1, 7, 60, 30);
         child.landing = Landing::Strut { id: 0, layer: 30 };
         // Its base in the trunk's own column, then leaned out to its seat.

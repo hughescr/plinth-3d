@@ -3253,10 +3253,12 @@ fn print_sweep_disclosure(
              angle at which the seat trim keeps their section (deepest cut into a shaft outside \
              its ball {:.4} mm, widest approach {:.1} deg); {} re-landed at a smaller angle to \
              the same seat{} ({} of them on the model below); kept: {} carrying another member, \
-             {} with no admissible descent ({} of them had a lean refused for its slenderness); \
-             candidates {} priced, {} refused by the path test, {} by the plate rule, {} by the \
-             lowering's own measurement, {} by the solid's clearance from the model{}, {} by a lean \
-             longer than S times the thickest radius that keeps the final gap, {} by a new \
+             {} with no admissible descent ({} of them had a lean refused for its slenderness \
+             {:?}); candidates {} priced, {} refused by the path test, {} by the plate rule, {} by \
+             the lowering's own measurement, {} by the solid's clearance from the model{}, {} by a \
+             lean longer than the slenderness law holds at the thickest radius that keeps the \
+             final gap while the arm as it stands is a support ({} such leans taken because it \
+             is not: a one-layer stub or a solid inside the model), {} by a new \
              plate root touching another, {} verified; put back once the field was sized: {} \
              whose host chain came out overloaded, {} whose root came to lap another ({} sized \
              checks; unexplained by any re-landing: {} newly overloaded members, {} new root \
@@ -3279,6 +3281,7 @@ fn print_sweep_disclosure(
             lip.kept_carrying,
             lip.kept_no_candidate,
             lip.kept_for_slenderness,
+            lip.kept_for_slenderness_ids,
             lip.candidates_priced,
             lip.candidates_refused_path,
             lip.candidates_refused_plate,
@@ -3291,6 +3294,7 @@ fn print_sweep_disclosure(
                 ""
             },
             lip.candidates_refused_slender,
+            lip.slender_taken_kept_not_clear,
             lip.candidates_refused_roots,
             lip.candidates_verified,
             lip.moves_put_back_host_load,
@@ -4087,7 +4091,8 @@ fn print_sweep_disclosure(
          {} over the islands of demand they cover (ratio {:.3}, bound at the measured reach); \
          islands measured with several coverings {}, won by a covering other than the global \
          lattice {}, seats saved against the global lattice's own count {}; twin seats merged into \
-         the arm whose tip ball they overlap {}; straight-line reach: \
+         the arm whose tip ball they overlap {} ({} of them into a headed arm, whose frozen head \
+         then carries the twin's load along its lever); straight-line reach: \
          sightlines {} clear / {} bent in the reach field, {} / {} in the routing field; seat \
          faces: {} member tops (arms and braces) carry the nearest overhang face, {} of them \
          beside a nearer wall or face steeper than the overhang band, which they do not seat on{}",
@@ -4098,6 +4103,7 @@ fn print_sweep_disclosure(
         report.counters.islands_realigned,
         report.counters.island_seats_saved,
         report.counters.twin_seats_merged,
+        report.counters.twin_seats_headed_host,
         report.counters.sightlines_clear,
         report.counters.sightlines_blocked,
         report.counters.route_sightlines_clear,

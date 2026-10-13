@@ -646,6 +646,10 @@ pub struct PathHits {
     /// Zero on a model with no sharp tip, which a green twin test must not be
     /// allowed to mean.
     pub twin_seats_merged: u64,
+    /// Of `twin_seats_merged`, those merged into a HEADED arm: its frozen
+    /// head carries the twin's load along its lever, and the head law sizes
+    /// its joint and post for that (q12 regressions, 2026-10-12, item 3).
+    pub twin_seats_headed_host: u64,
     pub island_hex_bound: u64,
     /// The finished plan's member tops (arms and braces) given a carried face,
     /// those whose NEAREST down-facing face was a wall or a face steeper than
@@ -913,7 +917,8 @@ impl SweepRunReport {
             out,
             "Landings: {verdict}. Finished field: {} member-on-member landings checked; {} \
              unrooted members {:?}; {} landed on a parent that is not there at the landing \
-             layer, {} on a parent that stands in another cell there; {} brace tops tied to a \
+             layer, {} on a parent that stands in another cell there, {} {:?} landed on the plate or \
+             the model with the shaft ending above it; {} brace tops tied to a \
              member that has moved; {} heads whose path no longer carries them, {} members \
              joined above a head's joint (both must be 0); \
              load gap (injected - plate reaction - uncarried) {:.4} mm2, \
@@ -929,6 +934,8 @@ impl SweepRunReport {
             finished.unrooted,
             finished.parent_absent.len(),
             finished.parent_elsewhere.len(),
+            finished.ground_short.len(),
+            finished.ground_short,
             finished.brace_tops_detached.len(),
             finished.heads_not_intact.len(),
             finished.joins_above_joint.len(),

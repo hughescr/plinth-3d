@@ -529,6 +529,9 @@ pub struct GreedyScratch {
     pub twin_merge: bool,
     /// Seats merged that way. Path-hit witness.
     pub twin_merges: u64,
+    /// Of [`Self::twin_merges`], those merged into a HEADED arm, whose frozen
+    /// head then carries the twin's load along its lever (log only).
+    pub twin_headed_hosts: u64,
     /// Where each arm that has been raised first seated (arm id to layer).
     twin_first_seat: BTreeMap<u32, usize>,
     /// The articulated heads built so far, and what was refused
@@ -614,6 +617,7 @@ impl GreedyScratch {
             stranded_seat_cells: Vec::new(),
             twin_merge: true,
             twin_merges: 0,
+            twin_headed_hosts: 0,
             twin_first_seat: BTreeMap::new(),
             heads: HeadsState::default(),
         }
@@ -2035,6 +2039,16 @@ fn commit_seat(
             cell,
             covered.len(),
         ) {
+            // A HEADED host keeps its head, planned at placement for its own
+            // seat's load and frozen: raised, it carries the twin's load out
+            // along that head's lever `|DK|`, and the head law sizes the joint
+            // and the post below it for that cantilever (`make_laid_tube`:
+            // q12/REGRESSIONS.md item 3, left open: refusing headed hosts
+            // brings Deinonychus defects back, 2 thin unbraced rods and 2
+            // leaning posts). Counted, so the log says where.
+            if struts[host as usize].head.is_some() {
+                scratch.twin_headed_hosts += 1;
+            }
             reach.end_journal();
             let (mut dirty_lo, mut dirty_hi) = (usize::MAX, 0_usize);
             for &touched in &covered {
