@@ -3108,7 +3108,8 @@ fn print_sweep_disclosure(
                  {:.4} mm2 at the ungrown ball ({} short of plan) and {:.4} mm2 at the drawn ball; \
                  {} balls grown (largest x{:.3}, limit {:.4} mm radius) in {} round(s); {} held \
                  below the limit so the ball's lowest point stays on its shaft ({} of them left \
-                 short by it); {} still short of plan",
+                 short by it); {} still short of plan; {} balls whose lowest point stood outside \
+                 their shaft as planned given a collar that holds it{}",
                 contact.tips_measured,
                 contact.planned_mm2,
                 contact.real_ungrown_mm2,
@@ -3121,6 +3122,16 @@ fn print_sweep_disclosure(
                 contact.carried_bound,
                 contact.stopped_by_overhang,
                 contact.short.len(),
+                emission.tip_pole_collars,
+                if emission.tip_pole_collars_steeper_than_law > 0 {
+                    format!(
+                        " (WARNING: {} of those collars lean further from vertical than the lean \
+                         law admits, on a shaft that already does or is too short to narrow back)",
+                        emission.tip_pole_collars_steeper_than_law
+                    )
+                } else {
+                    String::new()
+                },
             );
             for short in &contact.short {
                 println!(
@@ -4097,7 +4108,10 @@ fn print_sweep_disclosure(
          islands measured with several coverings {}, won by a covering other than the global \
          lattice {}, seats saved against the global lattice's own count {}; twin seats merged into \
          the arm whose tip ball they overlap {} ({} of them into a headed arm, whose frozen head \
-         then carries the twin's load along its lever); straight-line reach: \
+         then carries the twin's load along its lever); first layers over nothing at the \
+         printer's pixel {}, {} of them rooted only through the cover's rounding: {} already \
+         held by an arm inside, {} given an arm seated inside, {} left without one{}; \
+         straight-line reach: \
          sightlines {} clear / {} bent in the reach field, {} / {} in the routing field; seat \
          faces: {} member tops (arms and braces) carry the nearest overhang face, {} of them \
          beside a nearer wall or face steeper than the overhang band, which they do not seat on{}",
@@ -4109,6 +4123,16 @@ fn print_sweep_disclosure(
         report.counters.island_seats_saved,
         report.counters.twin_seats_merged,
         report.counters.twin_seats_headed_host,
+        report.counters.births_found,
+        report.counters.births_bridged,
+        report.counters.births_held,
+        report.counters.births_seated,
+        report.counters.births_unseated,
+        if report.counters.births_unseated > 0 {
+            " (WARNING: their first layer prints with nothing under it)"
+        } else {
+            ""
+        },
         report.counters.sightlines_clear,
         report.counters.sightlines_blocked,
         report.counters.route_sightlines_clear,

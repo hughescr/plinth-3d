@@ -650,6 +650,18 @@ pub struct PathHits {
     /// head carries the twin's load along its lever, and the head law sizes
     /// its joint and post for that (q12 regressions, 2026-10-12, item 3).
     pub twin_seats_headed_host: u64,
+    /// First layers over nothing at the printer's pixel (`births.rs`, joint
+    /// review 2026-10-13): found over the stack; of those, rooted by the reach
+    /// field only through the cover's outward rounding (bridged); of those,
+    /// already held by an arm of their layer standing in them, given an arm
+    /// seated inside them, and left without one (a WARNING: their first
+    /// layer prints over air). Zero bridged on a field whose cover never
+    /// joined a new piece to rooted material.
+    pub births_found: u64,
+    pub births_bridged: u64,
+    pub births_held: u64,
+    pub births_seated: u64,
+    pub births_unseated: u64,
     pub island_hex_bound: u64,
     /// The finished plan's member tops (arms and braces) given a carried face,
     /// those whose NEAREST down-facing face was a wall or a face steeper than

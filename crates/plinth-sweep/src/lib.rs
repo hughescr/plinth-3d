@@ -42,6 +42,7 @@
 #![forbid(unsafe_code)]
 
 pub mod adapter;
+pub(crate) mod births;
 pub mod cavity;
 pub mod congestion;
 pub mod contact_growth;
@@ -745,6 +746,13 @@ pub struct SweepPolicy {
     /// the first arm's head and the twin leans away (`DEINO-DIAGNOSIS.md`).
     /// Sabotage and comparison only; nothing in the pipeline turns it off.
     pub twin_merge: bool,
+    /// Whether a first layer over nothing, found at the printer's pixel, that
+    /// the reach field roots only through the cover's outward rounding gets an
+    /// arm seated inside it (`births.rs`, joint review 2026-10-13). **On in
+    /// production.** With it false such a birth is left to the lateral bridge
+    /// that hid it, as before, and prints with nothing under its first layer.
+    /// Sabotage and comparison only; nothing in the pipeline turns it off.
+    pub birth_seats: bool,
     /// Whether reach and load routing measure a lateral run as its straight
     /// length (`reach::any_angle_relax`, 2026-09-30). **On in production.**
     /// With it false both sweeps fall back to the 8-neighbour chamfer, which
@@ -1108,6 +1116,7 @@ impl SweepPolicy {
             stranded_seating: true,
             stranded_branch: true,
             twin_merge: true,
+            birth_seats: true,
             straight_reach: true,
             island_seating: true,
             seat_face_band: true,
@@ -1337,6 +1346,16 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_twin_merge(mut self) -> Self {
         self.twin_merge = false;
+        self
+    }
+
+    /// Leave a bridged birth to the lateral bridge, as before 2026-10-13.
+    /// **Sabotage and comparison only**: with it set, a first layer over
+    /// nothing that the cover's rounding joined to rooted material gets no
+    /// arm and prints over air (`births.rs`).
+    #[must_use]
+    pub const fn without_birth_seats(mut self) -> Self {
+        self.birth_seats = false;
         self
     }
 
@@ -1974,6 +1993,25 @@ pub fn run_sweep_with_holes(
     } else {
         reach::SurfaceCreep::disabled(&grid)
     };
+    // Every layer's first layers over nothing, at the printer's pixel, in one
+    // pass over the stack (`births.rs`). None where the rule is off or the
+    // registry cannot be read (emit and warn: the count says so).
+    let births = match (policy.birth_seats, m0_constants().ok()) {
+        (true, Some(constants)) => {
+            let printer = constants.saturn4_ultra();
+            births::Births::build(
+                &grid,
+                &slices,
+                printer.pixel_pitch_x_um().value() / 1000.0,
+                printer.pixel_pitch_y_um().value() / 1000.0,
+            )
+        }
+        _ => births::Births::none(),
+    };
+    let mut birth_tally = births::BirthTally {
+        found: births.count(),
+        ..births::BirthTally::default()
+    };
 
     for (layer, solids) in slices.iter().enumerate().take(layers) {
         rasteriser_entries += 1;
@@ -1998,7 +2036,10 @@ pub fn run_sweep_with_holes(
             &creep,
             &mut reach,
         );
-        let outcome = up_sweep::place_layer_cleared(
+        // THE BIRTHS THE COVER BRIDGED (`births.rs`, joint review
+        // 2026-10-13): read now, before any seat of this layer roots anything.
+        let bridged = births.bridged(layer, &masks.cover, &reach);
+        let mut outcome = up_sweep::place_layer_cleared(
             &grid,
             layer,
             &masks.cover,
@@ -2013,6 +2054,41 @@ pub fn run_sweep_with_holes(
             policy.limits.max_struts,
             descent_clearance.as_ref(),
         );
+        if !bridged.is_empty() {
+            let layer_births = births.at(layer);
+            let wanted: Vec<&births::Birth> =
+                bridged.iter().filter_map(|&index| layer_births.get(index)).collect();
+            let seated = up_sweep::seat_births(
+                &grid,
+                layer,
+                &masks.cover,
+                &keep_out,
+                &law,
+                policy.shaft_landings,
+                policy.kappa,
+                &mut reach,
+                &mut history,
+                &mut greedy,
+                &mut struts,
+                policy.limits.max_struts,
+                descent_clearance.as_ref(),
+                &wanted,
+                &mut outcome,
+            );
+            birth_tally.bridged += bridged.len();
+            birth_tally.held += seated.held;
+            birth_tally.seated += seated.seated;
+            birth_tally.unseated += seated.unseated;
+            // A birth left with no arm inside is unrooted, as the replay reads
+            // it, and reported as residual demand: emit and warn.
+            let roots: Vec<usize> = struts
+                .iter()
+                .filter(|strut| strut.k_top == layer)
+                .map(|strut| strut.cell)
+                .collect();
+            outcome.residual_demand +=
+                births.unroot_unseated(layer, &bridged, &roots, &masks.cover, &mut reach);
+        }
         descent_tally.absorb(&outcome.solid);
         // What the up-sweep left UNROOTED here, by its own predicate, for the
         // down-sweep's routing ([`down_sweep::UnrootedColumns`]). Read only on
@@ -2133,6 +2209,7 @@ pub fn run_sweep_with_holes(
         overhang_transition_deg: policy.overhang_transition_deg,
         max_restarts: policy.strut_removal_passes,
         first_loss_ratio: policy.kappa_first_loss / policy.kappa,
+        births: &births,
     };
     for _ in 0..policy.strut_removal_passes {
         // THE PASS IS UNDONE AS A WHOLE IF IT MAKES THE FIELD WORSE. The
@@ -3382,6 +3459,11 @@ pub fn run_sweep_with_holes(
     report.counters.stranded_seats = greedy.stranded_seats;
     report.counters.twin_seats_merged = greedy.twin_merges;
     report.counters.twin_seats_headed_host = greedy.twin_headed_hosts;
+    report.counters.births_found = birth_tally.found as u64;
+    report.counters.births_bridged = birth_tally.bridged as u64;
+    report.counters.births_held = birth_tally.held as u64;
+    report.counters.births_seated = birth_tally.seated as u64;
+    report.counters.births_unseated = birth_tally.unseated as u64;
     report.counters.island_hex_bound = greedy.island_hex_bound;
     greedy.heads.publish(&mut report.heads);
     // The heads the graze conversion added (Craig 2026-10-08) join the

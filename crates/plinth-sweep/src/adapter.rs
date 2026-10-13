@@ -90,6 +90,11 @@ pub struct SweepEmission {
     /// seat plane and carry its seat trim
     /// ([`plinth_support::SweepLowering::shaft_members_trimmed_to_seat`]).
     pub shaft_members_trimmed_to_seat: usize,
+    /// Seated balls whose lowest point stood outside their shaft, given a
+    /// collar that holds it, and those whose collar is steeper than the lean
+    /// law ([`plinth_support::SweepLowering::tip_pole_collars`]).
+    pub tip_pole_collars: usize,
+    pub tip_pole_collars_steeper_than_law: usize,
     /// Arms that reached the lowering with no radius profile (a caller
     /// defect; zero on every sweep field).
     pub arms_without_profile: usize,
@@ -240,6 +245,8 @@ pub fn to_primitives(
         arms_drawn_in_spans,
         profile_member_frusta,
         shaft_members_trimmed_to_seat,
+        tip_pole_collars,
+        tip_pole_collars_steeper_than_law,
         arms_without_profile,
         drawn_volume_mm3,
         drawn_shaft_volume_mm3,
@@ -290,6 +297,8 @@ pub fn to_primitives(
         arms_drawn_in_spans,
         profile_member_frusta,
         shaft_members_trimmed_to_seat,
+        tip_pole_collars,
+        tip_pole_collars_steeper_than_law,
         arms_without_profile,
         drawn_volume_mm3,
         drawn_shaft_volume_mm3,

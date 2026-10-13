@@ -94,6 +94,10 @@ pub(crate) struct ReplayContext<'a> {
     /// placement's 2.130 mm). **Reporting only**: it says how far past the
     /// placement's reach each refused cell lies, and decides nothing.
     pub first_loss_ratio: f64,
+    /// The up-sweep's births ([`crate::births`]): a bridged birth with no arm
+    /// of its layer standing in it is unrooted here exactly as the placement
+    /// left it, in both arm sets.
+    pub births: &'a crate::births::Births,
 }
 
 /// What one call measured. Path-hit counters and the refusals.
@@ -314,8 +318,20 @@ fn replay_once(
             &creep,
             &mut current,
         );
+        // The up-sweep's bridged births, read where it read them: before any
+        // root of this layer relaxes.
+        let bridged_current = context.births.bridged(layer, &masks.cover, &current);
         for &index in &roots_by_layer[layer] {
             relax(&mut current, &masks.cover, struts[index].cell, &mut queue, &mut touched);
+        }
+        if !bridged_current.is_empty() {
+            let roots: Vec<usize> = roots_by_layer[layer]
+                .iter()
+                .map(|&index| struts[index].cell)
+                .collect();
+            context
+                .births
+                .unroot_unseated(layer, &bridged_current, &roots, &masks.cover, &mut current);
         }
         if first {
             outcome.baseline_unrooted_cells += masks
@@ -339,6 +355,7 @@ fn replay_once(
             &creep,
             trial,
         );
+        let bridged_trial = context.births.bridged(layer, &masks.cover, trial);
         for &index in &roots_by_layer[layer] {
             if !doomed[index] {
                 relax(trial, &masks.cover, struts[index].cell, &mut queue, &mut touched);
@@ -347,6 +364,18 @@ fn replay_once(
         // Every cell the current set roots and the proposed one does not
         // restores the nearest doomed arm that could have rooted it.
         loop {
+            // A bridged birth no surviving arm of this layer stands in is
+            // unrooted, however a relax reached it (again after a restore).
+            if !bridged_trial.is_empty() {
+                let roots: Vec<usize> = roots_by_layer[layer]
+                    .iter()
+                    .filter(|&&index| !doomed[index])
+                    .map(|&index| struts[index].cell)
+                    .collect();
+                context
+                    .births
+                    .unroot_unseated(layer, &bridged_trial, &roots, &masks.cover, trial);
+            }
             fresh.clear();
             for cell in 0..grid.cells() {
                 if masks.cover[cell] && trial.u[cell] > 1.0 && current.u[cell] <= 1.0 {
@@ -531,6 +560,7 @@ mod tests {
             overhang_transition_deg: 25.0,
             max_restarts: 3,
             first_loss_ratio: 2.592 / 2.130,
+            births: &crate::births::Births::none(),
         };
         refuse_unrooted_demand(&context, &struts, doomed)
     }
@@ -623,6 +653,7 @@ mod tests {
             overhang_transition_deg: 25.0,
             max_restarts: 3,
             first_loss_ratio: 2.592 / 2.130,
+            births: &crate::births::Births::none(),
         };
         let mut roots: Vec<Vec<usize>> = vec![Vec::new(); LAYERS];
         roots[20] = vec![0, 1, 2, 3];
@@ -684,6 +715,7 @@ mod tests {
             overhang_transition_deg: 25.0,
             max_restarts: 3,
             first_loss_ratio: 2.592 / 2.130,
+            births: &crate::births::Births::none(),
         };
         let mut doomed = vec![false, false, true, true];
         let outcome = refuse_unrooted_demand(&context, &struts, &mut doomed);

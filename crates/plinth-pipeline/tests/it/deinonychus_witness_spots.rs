@@ -10,9 +10,15 @@
 //! | (0.250, 20.397) k135 | 97 px beside arm 60's seat | footprint slide 0.19 mm, the seat point still inside the ball |
 //! | (7.586, 21.270) k169 | 44 px beside arm 133's seat | footprint slide 0.19 mm, the same |
 //! | (1.580, -23.459) k173 | arm 160's lower end, 55 px | post 162's ball grew to 0.533 mm and its drawn shaft left the planned axis arm 160 landed on |
+//! | (-11.919, -6.408) k154 | 131 px of model, no record | a first layer over nothing 0.04-0.06 mm beside grounded model, which the cover's outward rounding joined to it, so no tip was placed; `for-craig-joint` held it by a footprint slide of arm 92 the rules no longer make |
+//! | (1.414, 9.439) k101 | 14 px of the chest tip's ball | the owner's 0.8947 mm ball on a 0.6710 mm shaft leaning 52.1 degrees: its lowest point stood outside the shaft |
 //!
 //! The first three are pinned by `footprint::keeps_ground`, the fourth by
-//! `adapter::drawn_line_offset` reading every seated member's drawn shaft.
+//! `adapter::drawn_line_offset` reading every seated member's drawn shaft,
+//! the fifth by the sweep's birth seats (`births.rs`: a birth at the
+//! printer's pixel that the reach field roots only laterally gets an arm
+//! inside it) and the sixth by the lowering's pole collar
+//! (`plinth_support::lower::pole_collar`).
 //!
 //! # What is graded
 //!
@@ -32,11 +38,7 @@
 //! spot (it fires where the defect would be).
 //!
 //! Local input (`PLINTH_MINIS_DIR`, the uncommitted Deinonychus mini) and a
-//! five-minute production run, so `#[ignore]`d in the gate. The residual
-//! spot at (-11.919, -6.408) k154 is not graded: no tip was ever placed for
-//! that island (the sweep's outward-rounded cover joins it to arm 95's,
-//! 0.03 mm away), and the reference held it only by a footprint slide of arm
-//! 92 that the rules no longer make.
+//! five-minute production run, so `#[ignore]`d in the gate.
 
 // Pixel arithmetic of a window a millimetre or so across, in test-local code.
 #![allow(
@@ -64,11 +66,13 @@ const HALF_WINDOW_MM: f64 = 1.0;
 const NEAR_MM: f64 = 0.3;
 
 /// (x, y, layer) of each spot, in the emitted file's frame.
-const SPOTS: [(f64, f64, usize); 4] = [
+const SPOTS: [(f64, f64, usize); 6] = [
     (12.380, 15.395, 158),
     (0.250, 20.397, 135),
     (7.586, 21.270, 169),
     (1.580, -23.459, 173),
+    (-11.919, -6.408, 154),
+    (1.414, 9.439, 101),
 ];
 
 type Tri = [[f64; 3]; 3];

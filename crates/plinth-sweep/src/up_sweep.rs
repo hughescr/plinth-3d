@@ -1154,6 +1154,126 @@ pub fn place_layer_cleared(
     outcome
 }
 
+/// What [`seat_births`] did on one layer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BirthSeats {
+    /// Bridged births an arm of this layer already stood in.
+    pub held: usize,
+    /// Bridged births given an arm seated inside them.
+    pub seated: usize,
+    /// Bridged births left with no arm inside: no cell of theirs was a legal
+    /// seat (outside the cover, or in a drain's escape cylinder), the seat
+    /// moved off them for a clear descent, or the strut limit was reached.
+    /// A WARNING, never a refusal.
+    pub unseated: usize,
+}
+
+/// **Seat every bridged birth of this layer that no arm stands in**
+/// ([`crate::births`]), after the layer's own placement.
+///
+/// The seat is the birth's cell holding the most of its pixels among those
+/// whose column held no model one layer down (the true underside, so the arm
+/// descends rather than landing on the model under its own seat), or among
+/// all its legal cells where none is. It is seated as any seat is
+/// ([`commit_seat`]): rooted, descended, head planned, recorded; its cells
+/// are put back in the demand set first, unrooted, so what it roots is
+/// recorded as its own.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the same inputs as `place_layer_cleared`, plus the births; bundling them into a \
+              struct would move the argument list rather than shorten it"
+)]
+pub(crate) fn seat_births(
+    grid: &Grid,
+    layer: usize,
+    cover: &[bool],
+    keep_out: &DrainKeepOut,
+    law: &LeanLaw,
+    shaft_landings: bool,
+    kappa: f64,
+    reach: &mut ReachState,
+    history: &mut ColumnHistory,
+    scratch: &mut GreedyScratch,
+    struts: &mut Vec<SweepStrut>,
+    max_struts: usize,
+    clearance: Option<&DescentClearance<'_>>,
+    births: &[&crate::births::Birth],
+    outcome: &mut LayerOutcome,
+) -> BirthSeats {
+    let mut tally = BirthSeats::default();
+    if births.is_empty() {
+        return tally;
+    }
+    let seating = Seating {
+        grid,
+        layer,
+        cover,
+        keep_out,
+        law,
+        shaft_landings,
+        kappa,
+        separation_mm: scratch.separation_mm,
+        max_struts,
+        clearance,
+    };
+    let mut seats: Vec<usize> = struts
+        .iter()
+        .filter(|strut| strut.k_top == layer)
+        .map(|strut| strut.cell)
+        .collect();
+    for birth in births {
+        if birth.cells.iter().any(|cell| seats.contains(cell)) {
+            tally.held += 1;
+            continue;
+        }
+        if struts.len() >= max_struts {
+            tally.unseated += 1;
+            continue;
+        }
+        let legal = |cell: &usize| cover[*cell] && keep_out.admits(*cell, layer);
+        let underside = |cell: &usize| history.top_model[*cell] as usize != layer;
+        let most_pixels = |filter: &dyn Fn(&usize) -> bool| {
+            birth
+                .cells
+                .iter()
+                .zip(&birth.pixels)
+                .filter(|(cell, _)| legal(cell) && filter(cell))
+                .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+                .map(|(cell, _)| *cell)
+        };
+        let Some(seed) = most_pixels(&underside).or_else(|| most_pixels(&|_| true)) else {
+            tally.unseated += 1;
+            continue;
+        };
+        for &cell in &birth.cells {
+            if cover[cell] {
+                reach.unroot(cell);
+                scratch.demand_bits[cell] = true;
+            }
+        }
+        let before = struts.len();
+        commit_seat(&seating, seed, reach, history, scratch, struts, outcome);
+        // Whatever the seat left of the birth is not demand any more: the
+        // birth is the arm's, or (moved off it) reported below.
+        for &cell in &birth.cells {
+            scratch.demand_bits[cell] = false;
+        }
+        // A twin merge raises an older arm to this layer instead of adding
+        // one, so every arm now topped here is read.
+        let seated_in = struts
+            .iter()
+            .filter(|strut| strut.k_top == layer)
+            .any(|strut| birth.cells.contains(&strut.cell));
+        seats.extend(struts[before..].iter().map(|strut| strut.cell));
+        if seated_in {
+            tally.seated += 1;
+        } else {
+            tally.unseated += 1;
+        }
+    }
+    tally
+}
+
 /// `max(1, ⌈area / hex cell⌉)` for an island of `cells` cells.
 #[expect(
     clippy::cast_precision_loss,
