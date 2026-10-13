@@ -158,11 +158,23 @@ pub(crate) struct LoweringConfig {
     joint: JointConfig,
     max_primitives: usize,
     max_primitive_bytes: usize,
+    /// Whether a seated ball whose lowest point stands outside its shaft gets
+    /// a pole collar ([`pole_collar`]). On for everything drawn; off only
+    /// where the shaft itself is measured ([`tip_shaft_seat_bites`]): the
+    /// collar is resin added outside the shaft, and the seat plane cutting it
+    /// takes nothing of the shaft's own section.
+    pole_collars: bool,
 }
 
 impl LoweringConfig {
     pub(crate) const fn joint_config(self) -> JointConfig {
         self.joint
+    }
+
+    /// The same configuration, drawing no pole collar.
+    const fn without_pole_collars(mut self) -> Self {
+        self.pole_collars = false;
+        self
     }
 
     /// **The contact-sphere factor of a SWEEP tip of `tip_radius_mm` RADIUS**:
@@ -218,6 +230,7 @@ impl LoweringConfig {
             joint: JointConfig::current(frame.plate_z_mm(), joint_factor),
             max_primitives,
             max_primitive_bytes,
+            pole_collars: true,
         })
     }
 }
@@ -3514,7 +3527,7 @@ pub fn tip_shaft_seat_bites(
         Finite::new(plate_z).map_err(|_| SweepLoweringError::MissingLayerHeight)?,
         PositiveFinite::new(1.0).map_err(|_| SweepLoweringError::InvalidLimits)?,
     );
-    let config = LoweringConfig::current(frame, layers, 1, 1)?;
+    let config = LoweringConfig::current(frame, layers, 1, 1)?.without_pole_collars();
     let mut scratch: Vec<SupportPrimitive> = Vec::new();
     Ok(arms
         .iter()
@@ -3961,12 +3974,11 @@ fn lower_one_sweep_arm(
             staged,
         )
     };
-    let spans: usize;
+    let mut spans: usize;
     let mut boss = None;
     // Where the shaft frusta begin among this arm's records: after the ball,
-    // the head and the joint sphere (and a pole collar, inserted below once
-    // the shaft is drawn), and before the plate flare.
-    let mut shaft_offset = staged.len();
+    // the head and the joint sphere, and before the plate flare.
+    let shaft_offset = staged.len();
     // A MODEL FOOT (lane 2, 2026-10-12): the ball the shaft narrows to, by the
     // top tip's own seat derivation. An arm whose foot cannot be built ends
     // flat on the model as before, and is counted.
@@ -4168,19 +4180,22 @@ fn lower_one_sweep_arm(
     };
     // THE BALL'S LOWEST POINT PRINTS FROM ITS SHAFT (joint review, 2026-10-13):
     // a straight seated arm whose drawn ball reaches outside the shaft it
-    // leaves along gets a collar there, inserted before the shaft so the
-    // shaft window and the plate arm's last record are unchanged in kind.
+    // leaves along has its shaft's top drawn as a collar that holds it. The
+    // collar replaces the top of the shaft in place, so the shaft window stays
+    // the arm's drawn shaft and the taper still follows the ball.
     let pole_collar_drawn = match (&headed, seat.as_ref()) {
-        (None, Some(tip_seat)) => pole_collar(
+        (None, Some(tip_seat)) if config.pole_collars => pole_collar(
             center.map(Finite::get),
             tip_seat.drawn_ball_radius_mm,
             &staged[shaft_offset..shaft_offset + spans],
         ),
         _ => None,
     };
-    let pole_collar_steeper = pole_collar_drawn.map(|(collar, steeper_than_law)| {
-        staged.insert(shaft_offset, collar);
-        shaft_offset += 1;
+    let pole_collar_steeper = pole_collar_drawn.map(|(collared, steeper_than_law)| {
+        let drawn = collared.len();
+        let _replaced: Vec<SupportPrimitive> =
+            staged.splice(shaft_offset..shaft_offset + spans, collared).collect();
+        spans = drawn;
         steeper_than_law
     });
     // THE SHAFT IS CUT TO THE SAME MODEL (fix/tip-trim, 2026-09-28; every
@@ -4289,23 +4304,28 @@ fn lower_one_sweep_arm(
 /// 5.075 mm). The contact growth cannot help there: the OWNER'S ball for that
 /// tip size (`ball factor × r`) already fails, since `sin θ > 1/f`.
 ///
-/// The ball keeps the owner's size and its contact. The shaft is given a
-/// collar instead: a frustum on the shaft's own axis from the station of the
-/// pole, at the radius that holds it, narrowing to the shaft's section. Its
-/// top ring IS a circle of the ball (`(R cos θ)² + (R sin θ)² = R²`), so its
-/// top disc lies inside the ball and the pole lies on its rim; its underside
-/// then descends from the pole, which is no longer a lowest point. The
-/// underside of a cone narrowing at `k` (radius per mm of axis) on an axis
-/// leaning `θ` leans `θ + atan k` from vertical, so the collar narrows over
-/// the length that keeps that at the lean law's saturation angle, the one an
-/// arm's own underside may take (`drawn_span_rules`, `atan(cone_slope)`, read
-/// by the foot cone and the shoulder cones too). No new number: the ball, the
-/// shaft and that law.
+/// The ball keeps the owner's size and its contact. The shaft's top is drawn
+/// with a collar instead, on the shaft's own axis: the taper from the ball
+/// centre widens, wholly inside the ball, to the ring at the pole's station
+/// whose radius holds the pole, and a collar narrows from that ring to the
+/// shaft's own section. That ring IS a circle of the ball
+/// (`(R cos θ)² + (R sin θ)² = R²`), so the pole lies on the collar's surface
+/// and the collar's underside descends from it: the pole is no longer a
+/// lowest point. Nothing of the shaft outside the ball changes above the
+/// pole, so the seat plane bites no more of it. The underside of a cone narrowing
+/// at `k` (radius per mm of axis) on an axis leaning `θ` leans `θ + atan k`
+/// from vertical, so the collar narrows over the length that keeps that at the
+/// lean law's saturation angle, the one an arm's own underside may take
+/// (`drawn_span_rules`, `atan(cone_slope)`, read by the foot cone and the
+/// shoulder cones too). The collar is never drawn under the shaft's own
+/// profile, and the spans below it are the shaft's, cut where it ends. No new
+/// number: the ball, the shaft and that law.
 ///
 /// Where the shaft already leans past that angle, or is too short to narrow
 /// back at it, the collar runs to the shaft's end at the shaft's radius there
 /// and is reported as steeper than the law (emit and warn).
 ///
+/// Returns the shaft's spans, collar first, to stand in place of `shaft`;
 /// `None` where the pole is held by the shaft as drawn, or the shaft is not a
 /// straight run from the ball centre downward. `shaft` is the arm's drawn
 /// spans, top first, all on one axis ([`push_drawn_shaft`]).
@@ -4313,7 +4333,7 @@ fn pole_collar(
     centre: [f64; 3],
     ball_radius_mm: f64,
     shaft: &[SupportPrimitive],
-) -> Option<(SupportPrimitive, bool)> {
+) -> Option<(Vec<SupportPrimitive>, bool)> {
     let rules = drawn_span_rules()?;
     let top = shaft.first()?.start_mm.map(Finite::get);
     let bottom = shaft.last()?.end_mm.map(Finite::get);
@@ -4324,15 +4344,19 @@ fn pole_collar(
     }
     let along = axis.map(|value| value / total);
     let station = |point: [f64; 3]| geom_kernel::vec3::dot(geom_kernel::vec3::sub(point, top), along);
-    // The drawn section at a station: the span holding it, interpolated.
+    // The drawn section at a station: the spans holding it, interpolated; at
+    // a step between two spans, the wider.
     let radius_at = |s: f64| -> Option<f64> {
-        shaft.iter().find_map(|span| {
-            let (s0, s1) = (station(span.start_mm.map(Finite::get)), station(span.end_mm.map(Finite::get)));
-            (s1 > s0 && s >= s0 - ZERO_LENGTH_MM && s <= s1 + ZERO_LENGTH_MM).then(|| {
-                let t = ((s - s0) / (s1 - s0)).clamp(0.0, 1.0);
-                span.start_radius_mm.get() + (span.end_radius_mm.get() - span.start_radius_mm.get()) * t
+        shaft
+            .iter()
+            .filter_map(|span| {
+                let (s0, s1) = (station(span.start_mm.map(Finite::get)), station(span.end_mm.map(Finite::get)));
+                (s1 > s0 && s >= s0 - ZERO_LENGTH_MM && s <= s1 + ZERO_LENGTH_MM).then(|| {
+                    let t = ((s - s0) / (s1 - s0)).clamp(0.0, 1.0);
+                    span.start_radius_mm.get() + (span.end_radius_mm.get() - span.start_radius_mm.get()) * t
+                })
             })
-        })
+            .reduce(f64::max)
     };
     let pole = [centre[0], centre[1], centre[2] - ball_radius_mm];
     let pole_station = station(pole);
@@ -4352,22 +4376,94 @@ fn pole_collar(
     let wanted = (room > 0.0).then(|| {
         ((hold_radius - shaft_radius) / room.tan()).max(rules.min_span_mm)
     });
-    let (end_station, steeper_than_law) = match wanted {
+    let (mut end_station, steeper_than_law) = match wanted {
         Some(length) if pole_station + length < total => (pole_station + length, false),
         _ => (total, true),
     };
-    let end_radius = radius_at(end_station)?.min(hold_radius);
-    let end = geom_kernel::vec3::add(top, geom_kernel::vec3::scale(along, end_station));
-    let collar = frustum(
+    let stations: Vec<(f64, f64)> = shaft
+        .iter()
+        .map(|span| (station(span.start_mm.map(Finite::get)), station(span.end_mm.map(Finite::get))))
+        .collect();
+    // A remainder shorter than one pixel is no span: the collar runs on to
+    // the end of the span it would have cut.
+    if let Some(&(_, s1)) = stations.iter().find(|(s0, s1)| *s0 < end_station && end_station < *s1) {
+        if s1 - end_station < rules.min_span_mm {
+            end_station = s1;
+        }
+    }
+    // The narrowing never passes under the shaft's own profile: a span
+    // boundary inside it wider than its line (a step of the profile) ends it
+    // there, on that boundary's section, which only makes it gentler.
+    let line = |s: f64, end: (f64, f64)| hold_radius + (end.1 - hold_radius) * (s - pole_station) / (end.0 - pole_station);
+    let mut collar_end = (end_station, radius_at(end_station)?);
+    for &(s0, _) in &stations {
+        if s0 > pole_station + ZERO_LENGTH_MM && s0 < collar_end.0 - ZERO_LENGTH_MM {
+            let radius = radius_at(s0)?;
+            if radius > line(s0, collar_end) {
+                collar_end = (s0, radius);
+            }
+        }
+    }
+    let (end_station, end_radius) = collar_end;
+    // Above the pole's station the taper widens from the shaft's own top to
+    // the ring that holds the pole. Every ring of it lies inside the ball
+    // (`s² + r(s)²` is convex and at most `R²` at both ends), so nothing of it
+    // shows and the seat plane bites no more of the shaft than before; it is
+    // only never drawn under the shaft's own profile there either.
+    let top_radius = stations
+        .iter()
+        .map(|&(s0, _)| s0)
+        .filter(|&s0| s0 < pole_station - ZERO_LENGTH_MM)
+        .filter_map(|s0| {
+            radius_at(s0).map(|radius| {
+                let t = s0 / pole_station;
+                (radius - hold_radius * t) / (1.0 - t)
+            })
+        })
+        .fold(0.0, f64::max);
+    let first = shaft.first()?;
+    let at = |s: f64| finite3(geom_kernel::vec3::add(top, geom_kernel::vec3::scale(along, s))).ok();
+    let collar_bottom = if end_station >= total { shaft.last()?.end_mm } else { at(end_station)? };
+    let mut drawn = Vec::with_capacity(shaft.len() + 2);
+    drawn.push(frustum(
+        first.segment_kind,
+        first.start_mm,
+        at(pole_station)?,
+        positive(top_radius).ok()?,
+        positive(hold_radius).ok()?,
+        first.contact_depth_mm,
+        first.ring_normal,
+    ));
+    drawn.push(frustum(
         SupportSegmentKind::Member,
-        finite3(foot).ok()?,
-        finite3(end).ok()?,
+        at(pole_station)?,
+        collar_bottom,
         positive(hold_radius).ok()?,
         positive(end_radius).ok()?,
         None,
-        FrustumRingNormal::SegmentAxis,
-    );
-    Some((collar, steeper_than_law))
+        first.ring_normal,
+    ));
+    for (span, &(s0, s1)) in shaft.iter().zip(&stations) {
+        if s1 <= end_station + ZERO_LENGTH_MM {
+            continue;
+        }
+        if s0 >= end_station - ZERO_LENGTH_MM {
+            drawn.push(span.clone());
+            continue;
+        }
+        // The span the collar ends in, from the collar's end down: a chained
+        // member (the taper is the collar now).
+        drawn.push(frustum(
+            SupportSegmentKind::Member,
+            at(end_station)?,
+            span.end_mm,
+            positive(end_radius).ok()?,
+            span.end_radius_mm,
+            None,
+            span.ring_normal,
+        ));
+    }
+    Some((drawn, steeper_than_law))
 }
 
 /// **The root a member is DRAWN with** — the section its plate boss is sized
@@ -5285,10 +5381,7 @@ mod sweep_root_flare_tests {
 
     /// The shaft's two ends as the file has them: the start of its first
     /// shaft record (the taper, or the first chained member) and the end of
-    /// its last one, read from the lowered primitives of the arm alone. A
-    /// seated arm's shaft starts at its taper: a pole collar ([`pole_collar`],
-    /// a `Member` drawn before the taper) holds the ball's lowest point and is
-    /// not the shaft.
+    /// its last one, read from the lowered primitives of the arm alone.
     fn drawn_shaft_ends(arm: &SweepArm, plate_z: f64) -> ([f64; 3], [f64; 3]) {
         let layers = LayerPlan::new(plate_z, vec![H; 400]).expect("a uniform plan");
         let frame = BuildFrame::new(
@@ -5309,11 +5402,7 @@ mod sweep_root_flare_tests {
             })
             .collect();
         let point = |p: &[Finite; 3]| [p[0].get(), p[1].get(), p[2].get()];
-        let first = shaft
-            .iter()
-            .find(|primitive| primitive.segment_kind == SupportSegmentKind::ContactTaper)
-            .or_else(|| shaft.first())
-            .expect("a drawn shaft");
+        let first = shaft.first().expect("a drawn shaft");
         let last = shaft.last().expect("a drawn shaft");
         (point(&first.start_mm), point(&last.end_mm))
     }
@@ -6520,9 +6609,12 @@ mod pole_collar_tests {
     /// Deinonychus's chest tip (`joint/out-fix2/final`, records 141 and 142):
     /// the owner's 0.8947 mm ball on a 0.6710 mm shaft leaning 52.1 degrees.
     /// Its lowest point stood 0.035 mm outside the shaft and printed 14
-    /// pixels over air at 5.075 mm. The collar's top ring is a circle of the
-    /// ball through that point, it narrows to the shaft, and its underside
-    /// leans exactly the lean law's saturation angle.
+    /// pixels over air at 5.075 mm. The shaft's taper still starts at the ball
+    /// centre at the shaft's radius and widens, inside the ball, to the ring
+    /// at the pole's station that reaches the pole (a circle of the ball);
+    /// the collar narrows from that ring to the shaft's section with its
+    /// underside at the lean law's saturation angle; the shaft runs on below
+    /// it unchanged.
     #[test]
     fn a_ball_whose_lowest_point_leaves_its_oblique_shaft_gets_a_collar_that_holds_it() {
         const BALL: f64 = 0.8947;
@@ -6530,28 +6622,37 @@ mod pole_collar_tests {
         let centre = [1.413, 9.439, -6.009];
         let bottom = [2.043, 8.378, -6.971];
         let pole = [centre[0], centre[1], centre[2] - BALL];
-        let (collar, steeper) =
+        let (drawn, steeper) =
             pole_collar(centre, BALL, &shaft(centre, bottom, SHAFT)).expect("the pole stands outside the shaft");
         assert!(!steeper, "52.1 degrees leaves the law room on a 1.56 mm shaft");
+        assert_eq!(drawn.len(), 3, "the taper, the collar and the shaft below it");
+        let (taper, collar, rest) = (&drawn[0], &drawn[1], &drawn[2]);
+        assert_eq!(taper.segment_kind, SupportSegmentKind::ContactTaper);
         assert_eq!(collar.segment_kind, SupportSegmentKind::Member);
-        let start = collar.start_mm.map(Finite::get);
-        let end = collar.end_mm.map(Finite::get);
-        let rho = collar.start_radius_mm.get();
-        // The pole is on the collar's top ring, and that ring is on the ball.
-        let along = geom_kernel::vec3::normalize(geom_kernel::vec3::sub(end, start)).unwrap();
-        assert!(geom_kernel::vec3::dot(geom_kernel::vec3::sub(pole, start), along).abs() < 1e-9);
-        assert!((geom_kernel::vec3::dist(pole, start) - rho).abs() < 1e-9);
-        let to_start = geom_kernel::vec3::dist(centre, start);
-        assert!((to_start.mul_add(to_start, rho * rho) - BALL * BALL).abs() < 1e-9);
-        assert!(rho > SHAFT, "the ring holds what the shaft did not: {rho}");
-        // It narrows to the shaft, on the shaft's own axis.
+        assert_eq!(rest.segment_kind, SupportSegmentKind::Member);
+        let point = |p: [Finite; 3]| p.map(Finite::get);
+        assert!(geom_kernel::vec3::dist(point(taper.start_mm), centre) < 1e-12, "it starts at the ball centre");
+        assert!((taper.start_radius_mm.get() - SHAFT).abs() < 1e-12, "at the shaft's own radius");
+        assert_eq!(collar.start_mm, taper.end_mm);
+        assert_eq!(rest.start_mm, collar.end_mm);
+        assert!(geom_kernel::vec3::dist(point(rest.end_mm), bottom) < 1e-12);
         assert!((collar.end_radius_mm.get() - SHAFT).abs() < 1e-12);
-        let shaft_axis = geom_kernel::vec3::normalize(geom_kernel::vec3::sub(bottom, centre)).unwrap();
-        assert!(geom_kernel::vec3::dist(along, shaft_axis) < 1e-9);
-        // Its underside leans the law's saturation angle from vertical.
+        assert!((rest.start_radius_mm.get() - SHAFT).abs() < 1e-12);
+        // The ring between the taper and the collar reaches the pole and is a
+        // circle of the ball, on the shaft's own axis.
+        let along = geom_kernel::vec3::normalize(geom_kernel::vec3::sub(bottom, centre)).unwrap();
+        let ring = point(collar.start_mm);
+        let rho = collar.start_radius_mm.get();
+        assert!(geom_kernel::vec3::dot(geom_kernel::vec3::sub(pole, ring), along).abs() < 1e-9);
+        assert!((geom_kernel::vec3::dist(pole, ring) - rho).abs() < 1e-9);
+        let to_ring = geom_kernel::vec3::dist(centre, ring);
+        assert!((to_ring.mul_add(to_ring, rho * rho) - BALL * BALL).abs() < 1e-9, "a circle of the ball");
+        assert!(rho > SHAFT, "the collar holds what the shaft did not: {rho}");
+        assert!((taper.end_radius_mm.get() - rho).abs() < 1e-12);
+        // The collar's underside leans the law's saturation angle from vertical.
         let rules = drawn_span_rules().expect("the registry reads");
         let lean = (-along[2]).acos();
-        let k = (rho - SHAFT) / geom_kernel::vec3::dist(start, end);
+        let k = (rho - SHAFT) / geom_kernel::vec3::dist(ring, point(collar.end_mm));
         assert!((lean + k.atan() - rules.cone_slope.atan()).abs() < 1e-9);
     }
 
