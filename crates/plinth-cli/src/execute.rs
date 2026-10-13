@@ -20,6 +20,7 @@ use geom_kernel::par::{budget_counts, resolve_threads, Budget, BudgetCounts};
 use geom_kernel::telemetry::{near_parallel_counts, NearParallelCounts, NearParallelSite};
 use plinth_hollow::HollowRequest;
 use plinth_orient::PinnedBaseline;
+use plinth_pipeline::prepare::NotHollowed;
 use plinth_pipeline::{
     prepare, registered_decimation_budget, registered_support_request, AssumedPrintSize,
     ModelPreparationOutcome, ModelPreparationReport, OrientationPolicy, PipelineError,
@@ -276,6 +277,9 @@ fn print_report(selection: &PrepareSelection, report: &PrepareReport) {
         "SUMMARY  emitted={emitted}  gate-refused={refused}  failed={failed}  stopped={stopped}{}",
         sweep_warning_summary(&report.models)
     );
+    if let Some(line) = not_hollowed_summary(&report.models) {
+        println!("{line}");
+    }
     if refused > 0 {
         // Said outright, because a refused model looks like a missing file and
         // the natural next move is to go looking for the switch that turns the
@@ -316,6 +320,57 @@ fn thread_budget_line(counts: BudgetCounts, resolved: Budget) -> String {
             resolved.source.label()
         ),
     }
+}
+
+/// The model-block WARNING for a model emitted SOLID after a failed hollow:
+/// the reason, and the resin it costs against the planned hollow (or the
+/// whole solid, an upper bound, when no hollow volume was planned).
+fn not_hollowed_line(warning: &NotHollowed) -> String {
+    let basis = warning.planned_hollow_mm3.map_or_else(
+        || {
+            format!(
+                "up to the whole solid, {:.1} mm3: no hollow volume was planned before the failure",
+                warning.solid_mm3
+            )
+        },
+        |hollow| {
+            format!(
+                "solid {:.1} mm3 - planned hollow {hollow:.1} mm3",
+                warning.solid_mm3
+            )
+        },
+    );
+    format!(
+        "  WARNING NOT HOLLOWED  emitted SOLID; costs {:.2} mL more resin ({basis}); reason: {}",
+        warning.resin_cost_mm3 / 1000.0,
+        warning.reason
+    )
+}
+
+/// One line after the SUMMARY naming every model emitted SOLID after a failed
+/// hollow, with its resin cost; `None` when there is none.
+fn not_hollowed_summary(models: &[ModelPreparationReport]) -> Option<String> {
+    let rows: Vec<String> = models
+        .iter()
+        .filter_map(|model| match &model.outcome {
+            ModelPreparationOutcome::Artifact {
+                not_hollowed: Some(warning),
+                ..
+            } => Some(format!(
+                "{} (+{:.2} mL)",
+                model.model.as_str(),
+                warning.resin_cost_mm3 / 1000.0
+            )),
+            _ => None,
+        })
+        .collect();
+    (!rows.is_empty()).then(|| {
+        format!(
+            "  WARNING NOT HOLLOWED  {} model(s) emitted SOLID after a failed hollow: {}",
+            rows.len(),
+            rows.join(", ")
+        )
+    })
 }
 
 /// The sweep's two model-level warnings for the SUMMARY line
@@ -564,6 +619,7 @@ fn print_model(model: &ModelPreparationReport) {
             pending_gates,
             load_warnings,
             coverage_warning,
+            not_hollowed,
             ..
         } => {
             println!(
@@ -572,6 +628,12 @@ fn print_model(model: &ModelPreparationReport) {
                 emit.support_record_count,
                 emit.artifact_bytes
             );
+            // EMIT AND WARN (2026-10-13): the run set out to hollow this model
+            // and the file holds the SOLID. Said first, under the result,
+            // with what it costs in resin.
+            if let Some(warning) = not_hollowed {
+                println!("{}", not_hollowed_line(warning));
+            }
             // EMIT AND WARN (fix/round100-emit, 2026-09-29): a file that reads
             // back but fails a disk-audit check is kept, and every failed check
             // is named here: which check, which record, what value.
@@ -1288,8 +1350,34 @@ mod tests {
     use super::{
         coverage_gap_warning_lines, coverage_lines, coverage_repair_lines, near_parallel_lines,
         no_orient_lines, orientation_source_lines, remedies_tried_line, repair_lines,
-        sweep_warning_summary_of, thread_budget_line, SweepModelWarnings,
+        not_hollowed_line, sweep_warning_summary_of, thread_budget_line, SweepModelWarnings,
     };
+
+    /// The model-block WARNING names the reason and the resin cost, and says
+    /// which baseline the cost is stated against.
+    #[test]
+    fn the_not_hollowed_line_states_reason_and_resin_cost() {
+        let planned = plinth_pipeline::prepare::NotHollowed {
+            reason: "drilling proof refused: x".to_owned(),
+            solid_mm3: 21_176.0,
+            planned_hollow_mm3: Some(8_960.0),
+            resin_cost_mm3: 12_216.0,
+        };
+        assert_eq!(
+            not_hollowed_line(&planned),
+            "  WARNING NOT HOLLOWED  emitted SOLID; costs 12.22 mL more resin (solid 21176.0 mm3 \
+             - planned hollow 8960.0 mm3); reason: drilling proof refused: x"
+        );
+        let unknown = plinth_pipeline::prepare::NotHollowed {
+            planned_hollow_mm3: None,
+            resin_cost_mm3: 21_176.0,
+            ..planned
+        };
+        assert!(not_hollowed_line(&unknown).contains(
+            "costs 21.18 mL more resin (up to the whole solid, 21176.0 mm3: no hollow volume was \
+             planned before the failure)"
+        ));
+    }
 
     /// The `[threads]` line names the width, its source and the three path
     /// counts, installed or not.

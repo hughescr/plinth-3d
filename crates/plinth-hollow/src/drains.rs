@@ -119,6 +119,11 @@ pub enum CandidateUnavailable {
     /// reached — it is evidence, not a distance, and there is no `t` to report
     /// because a non-`Hit` Möller result carries no usable one.
     NearParallel { faces: u32 },
+    /// This candidate was planned, drilled, and its centerline proof on the
+    /// DRILLED mesh did not pass (undecidable or blocked), so the drill stage
+    /// asked for the next-ranked candidate in its place
+    /// ([`replan_excluding`]). Not a refusal of the model.
+    DrillProofFailed,
 }
 
 /// Sole move-forward authority after H1a. There is still exactly one mesh and
@@ -159,6 +164,17 @@ impl PlannedShell {
         (self.shell, self.cavity, self.cavity_field, self.drain_plan)
     }
 
+    /// The same shell, cavity and field with a new plan from
+    /// [`replan_excluding`].
+    #[must_use]
+    pub fn with_drain_plan(self, (drain_plan, planner_accounting): (DrainPlan, PlannerAccounting)) -> Self {
+        Self {
+            drain_plan,
+            planner_accounting,
+            ..self
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn with_test_refilled_field(mut self, excluded: &[bool]) -> Self {
         self.cavity_field
@@ -182,6 +198,11 @@ impl DrainPlanningFailure {
     #[must_use]
     pub fn into_candidate(self) -> ShellCandidate {
         *self.candidate
+    }
+    /// The untouched candidate the refusal hands back, borrowed.
+    #[must_use]
+    pub fn candidate(&self) -> &ShellCandidate {
+        &self.candidate
     }
 
     #[must_use]
@@ -591,7 +612,7 @@ struct PlannerPolicy {
 /// Plans the exact frozen H1a candidates through one canonical batched native
 /// ray query. On refusal it returns the untouched move-only candidate.
 pub fn plan_drains(candidate: ShellCandidate) -> Result<PlannedShell, DrainPlanningFailure> {
-    match plan(&candidate) {
+    match plan(&PlanInput::of(&candidate), &[]) {
         Ok((drain_plan, planner_accounting)) => {
             let (shell, cavity, cavity_field) = candidate.into_parts();
             Ok(PlannedShell {
@@ -609,8 +630,78 @@ pub fn plan_drains(candidate: ShellCandidate) -> Result<PlannedShell, DrainPlann
     }
 }
 
+/// Plan again for the same shell, with every candidate that produced one of
+/// `excluded`'s holes struck out (`CandidateUnavailable::DrillProofFailed`).
+///
+/// The drill stage calls this when the centerline proof on the DRILLED mesh
+/// cannot pass for a planned opening: the next-ranked candidate for that
+/// opening takes its place, exactly as the planner's own selection already
+/// moves past a candidate whose exit ray is undecidable or whose rear
+/// over-travel breaks the skin. Every other choice is unchanged, because the
+/// selection is per site and per chamber and is deterministic on the same
+/// shell. A candidate is identified by its role, origin and direction, which
+/// [`HoleGeometry`] carries verbatim.
+///
+/// # Errors
+///
+/// The planner's own refusal when no chamber is left with a drained-and-vented
+/// pair once the exclusions are applied.
+pub fn replan_excluding(
+    planned: &PlannedShell,
+    excluded: &[HoleGeometry],
+) -> Result<(DrainPlan, PlannerAccounting), DrainPlanningRefusal> {
+    plan(
+        &PlanInput {
+            mesh: planned.shell(),
+            cavity: planned.cavity(),
+            cavity_field: planned.cavity_field(),
+        },
+        excluded,
+    )
+}
+
+/// What the planner reads: the shell, its cavity evidence and its field,
+/// borrowed — from a [`ShellCandidate`] on the first plan, or from a
+/// [`PlannedShell`] when the drill stage asks for a re-plan.
+struct PlanInput<'a> {
+    mesh: &'a plinth_mesh::Mesh,
+    cavity: &'a CavityEvidence,
+    cavity_field: &'a CavityField,
+}
+
+impl<'a> PlanInput<'a> {
+    const fn of(candidate: &'a ShellCandidate) -> Self {
+        Self {
+            mesh: candidate.mesh(),
+            cavity: candidate.cavity(),
+            cavity_field: candidate.cavity_field(),
+        }
+    }
+    const fn mesh(&self) -> &'a plinth_mesh::Mesh {
+        self.mesh
+    }
+    const fn cavity(&self) -> &'a CavityEvidence {
+        self.cavity
+    }
+    const fn cavity_field(&self) -> &'a CavityField {
+        self.cavity_field
+    }
+}
+
+/// Is this candidate the one that produced `hole`? Compared BIT FOR BIT: the
+/// hole copies the candidate's origin and direction verbatim, and a re-plan
+/// of the same shell recomputes both bit for bit, so identity is the question
+/// and no tolerance belongs in it.
+fn produced(candidate: &Candidate, hole: &HoleGeometry) -> bool {
+    let bits = |value: [f64; 3]| value.map(f64::to_bits);
+    hole.role == candidate.role
+        && bits(hole.center_mm.map(Finite::get)) == bits(candidate.origin)
+        && bits(hole.direction.map(Finite::get)) == bits(candidate.direction)
+}
+
 fn plan(
-    candidate: &ShellCandidate,
+    candidate: &PlanInput<'_>,
+    excluded: &[HoleGeometry],
 ) -> Result<(DrainPlan, PlannerAccounting), DrainPlanningRefusal> {
     let constants = m0_constants().map_err(|_| DrainPlanningRefusal::Constants)?;
     let policy = constants.placeholders();
@@ -880,6 +971,26 @@ fn plan(
             ),
             &mut unavailable_candidates,
         )?;
+    }
+    // Candidates whose drilled bore already failed its centerline proof
+    // (`replan_excluding`). Struck out before selection, so the selection
+    // below picks the next-ranked candidate for that opening.
+    if !excluded.is_empty() {
+        for candidate in &candidates {
+            if excluded.iter().any(|hole| produced(candidate, hole))
+                && paths[candidate.id].take().is_some()
+            {
+                unavailable_candidates.push(CandidateDiagnostic {
+                    role: candidate.role,
+                    lobe_id: candidate.lobe_id,
+                    site: candidate.site,
+                    direction: candidate.direction.map(|value| {
+                        Finite::new(value).expect("normalized registered direction is finite")
+                    }),
+                    reason: CandidateUnavailable::DrillProofFailed,
+                });
+            }
+        }
     }
 
     // **One drain per lobe, one vent per chamber, and the pair travels
@@ -1919,7 +2030,7 @@ fn high_sites(
           docs/evidence/remediation-2026-08-26/census/cast-audit.md"
 )]
 fn planner_preflight(
-    candidate: &ShellCandidate,
+    candidate: &PlanInput<'_>,
     field: &CavityField,
     chambers: &Chambers,
     resources: H0ResourceDiagnostics,
@@ -3518,7 +3629,7 @@ mod tests {
             policy.hollow_vent_top_band_mm().diagnostic().get(),
         );
         let preflight = planner_preflight(
-            &unlimited,
+            &PlanInput::of(&unlimited),
             unlimited.cavity_field(),
             &chambers,
             unlimited.cavity().resources(),
@@ -3546,7 +3657,10 @@ mod tests {
         assert_eq!(preflight.normalized_direction_bytes, 480);
         // The whole charge, including the ray-query batch the census measures
         // once the query index exists.
-        let exact = plan(&unlimited).expect("uncapped plan").1.requested_bytes();
+        let exact = plan(&PlanInput::of(&unlimited), &[])
+            .expect("uncapped plan")
+            .1
+            .requested_bytes();
         assert!(exact > preflight.requested_bytes);
 
         let exact_candidate = frozen_candidate();
@@ -3583,7 +3697,8 @@ mod tests {
     fn the_ray_query_charge_follows_counted_crossings_not_the_shell_face_count() {
         let candidate = frozen_candidate();
         let faces = candidate.mesh().tris().len();
-        let (_, accounting) = plan(&candidate).expect("frozen field must retain an enclosed plan");
+        let (_, accounting) = plan(&PlanInput::of(&candidate), &[])
+            .expect("frozen field must retain an enclosed plan");
         let rays = accounting.candidate_count();
         let crossings = accounting.ray_crossings();
         assert!(rays > 0 && crossings > 0);
@@ -3696,7 +3811,7 @@ mod tests {
             policy.hollow_vent_top_band_mm().diagnostic().get(),
         );
         let preflight = planner_preflight(
-            &unlimited,
+            &PlanInput::of(&unlimited),
             unlimited.cavity_field(),
             &chambers,
             unlimited.cavity().resources(),
@@ -3721,7 +3836,7 @@ mod tests {
             },
         )
         .expect("unequal-capacity planner preflight");
-        let exact = plan(&unlimited)
+        let exact = plan(&PlanInput::of(&unlimited), &[])
             .expect("uncapped unequal-capacity plan")
             .1
             .requested_bytes();

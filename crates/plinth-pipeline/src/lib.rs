@@ -724,6 +724,13 @@ pub enum ModelPreparationOutcome {
         /// the records are unchanged. Tests read it to prove the reuse path ran.
         #[serde(skip)]
         sweep_plan_source: SweepPlanSourceNote,
+        /// EMIT AND WARN (2026-10-13): the run set out to hollow this model and
+        /// the file holds the SOLID, for a reason that is a failure to hollow
+        /// (not the savings or no-cavity decision). The reason and the resin it
+        /// costs; the CLI prints a WARNING line for it in the model block and
+        /// after the SUMMARY. Absent from a report when `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        not_hollowed: Option<Box<prepare::NotHollowed>>,
     },
     Stopped {
         after: StageStop,
@@ -2012,6 +2019,7 @@ mod tests {
                         coverage_warning: None,
                         sweep_warnings: SweepModelWarnings::default(),
                         sweep_plan_source: SweepPlanSourceNote::default(),
+                        not_hollowed: None,
                     },
                 },
                 ModelPreparationReport {
@@ -2114,6 +2122,7 @@ mod tests {
                         coverage_warning: None,
                         sweep_warnings: SweepModelWarnings::default(),
                         sweep_plan_source: SweepPlanSourceNote::default(),
+                        not_hollowed: None,
                     },
                 ),
                 model("refused", refused),

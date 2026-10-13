@@ -9,6 +9,10 @@ publish = false
 workspace = true
 
 [dependencies]
+# The vec3 algebra alone, for the volume of a solid the run emits in place of
+# the shell it set out to make (the not-hollowed warning). No cycle: geom_kernel
+# depends on no `plinth-*` crate.
+geom_kernel = { path = "../../rust/geom_kernel" }
 plinth-core = { path = "../plinth-core" }
 plinth-decimate = { path = "../plinth-decimate" }
 plinth-emit = { path = "../plinth-emit" }

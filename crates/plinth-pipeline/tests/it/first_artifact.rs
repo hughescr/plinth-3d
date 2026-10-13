@@ -526,6 +526,37 @@ fn hollow_stage_refusal_falls_back_to_the_oriented_solid_and_still_emits() {
          SupportedGeometry::HollowStageRefused needs re-deriving with it"
     );
 
+    // EMIT AND WARN (2026-10-13): a model the run set out to hollow and
+    // emitted solid carries a not-hollowed record — the reason and the resin
+    // it costs — out to the report the CLI warns from. The triage refused
+    // before any shell was planned, so the cost is the whole solid's volume.
+    // The solid's volume is the fixture's own: the 30 mm box plus the 12 mm
+    // box, both wound outward by `make_box` and so both counted positive
+    // (30^3 + 12^3 = 28728 mm3) — measured here from the mesh the file holds.
+    //
+    // SABOTAGE (recorded by hand, 2026-10-13): with the HollowStageRefused
+    // branch's `warn_not_hollowed` wrapper removed in `prepare.rs`, this
+    // assertion fails with `None`.
+    let warning = outcome
+        .not_hollowed
+        .as_ref()
+        .expect("a model emitted solid after a refused hollow must carry the warning");
+    assert!(
+        warning.reason.contains("pre-hollowed input"),
+        "the warning states the refusal: {}",
+        warning.reason
+    );
+    assert_eq!(warning.planned_hollow_mm3, None, "no shell was planned");
+    assert_eq!(
+        warning.resin_cost_mm3, warning.solid_mm3,
+        "with no planned hollow, the cost stated is the whole solid's volume"
+    );
+    assert!(
+        (warning.solid_mm3 - 28_728.0).abs() < 1.0e-6,
+        "the solid's volume, from its mesh: {}",
+        warning.solid_mm3
+    );
+
     // The oriented solid reached support planning intact -- the pre-clone is a
     // reserve, not a decimation step.
     assert_eq!(

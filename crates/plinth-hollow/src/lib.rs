@@ -895,6 +895,10 @@ impl HollowedWithSolidReserve {
 pub struct HollowStageFailure {
     error: HollowError,
     cavity_repair: Option<CavityRepairEvidence>,
+    /// The hollow (shell material) volume the stage had planned when it
+    /// failed: the source solid's volume minus the planned cavity, in mm3.
+    /// `None` when the failure came before a shell was built.
+    planned_hollow_mm3: Option<Finite>,
 }
 
 impl HollowStageFailure {
@@ -904,6 +908,7 @@ impl HollowStageFailure {
         Self {
             error,
             cavity_repair: None,
+            planned_hollow_mm3: None,
         }
     }
 
@@ -916,7 +921,23 @@ impl HollowStageFailure {
         Self {
             error,
             cavity_repair: Some(cavity_repair),
+            planned_hollow_mm3: None,
         }
+    }
+
+    /// The same failure, recording the shell the stage had planned: its
+    /// material volume is the source volume minus the planned cavity.
+    #[must_use]
+    pub fn with_planned_shell(mut self, cavity: CavityEvidence) -> Self {
+        self.planned_hollow_mm3 =
+            Finite::new(cavity.source_volume_mm3().get() - cavity.cavity_volume_mm3().get()).ok();
+        self
+    }
+
+    /// The hollow volume planned before the failure; see the field.
+    #[must_use]
+    pub const fn planned_hollow_mm3(&self) -> Option<Finite> {
+        self.planned_hollow_mm3
     }
 
     #[must_use]
@@ -1016,18 +1037,24 @@ pub fn run(
     let cavity_repair = candidate.cavity().resources().cavity_repair();
     let drains_mark = geom_kernel::perf::stage("hollow.plan_drains");
     let planned = drains::plan_drains(candidate).map_err(|failure| {
+        let cavity = *failure.candidate().cavity();
         HollowStageFailure::after_cavity_repair(
             HollowError::DrainPlanning(failure.into_reason()),
             cavity_repair,
         )
+        .with_planned_shell(cavity)
     })?;
     drop(drains_mark);
     let _drill_mark = geom_kernel::perf::stage("hollow.drill");
-    let drilled = drilling::drill_planned_shell(planned).map_err(|failure| {
+    // Ranked: a planned opening whose drilled bore cannot be proven gives way
+    // to the next-ranked candidate, rather than refusing the whole hollow.
+    let drilled = drilling::drill_planned_shell_ranked(planned).map_err(|failure| {
+        let cavity = *failure.planned().cavity();
         HollowStageFailure::after_cavity_repair(
             HollowError::Drilling(failure.into_reason()),
             cavity_repair,
         )
+        .with_planned_shell(cavity)
     })?;
     let reserve_history = orientation;
     let hollowed = drilled.into_hollowed_model(reserve_history.clone());
@@ -1114,6 +1141,7 @@ fn convert_shell_failure_to_solid(
             _ => Err(HollowStageFailure {
                 error: HollowError::InvalidArithmetic,
                 cavity_repair,
+                planned_hollow_mm3: None,
             }),
         },
         // The two repair-caused decisions. They travel as their own
@@ -1137,6 +1165,7 @@ fn convert_shell_failure_to_solid(
             _ => Err(HollowStageFailure {
                 error: HollowError::InvalidArithmetic,
                 cavity_repair,
+                planned_hollow_mm3: None,
             }),
         },
         // FU-55, the ruling this whole function exists to carry: a shell
@@ -1158,11 +1187,13 @@ fn convert_shell_failure_to_solid(
             Err(error) => Err(HollowStageFailure {
                 error,
                 cavity_repair,
+                planned_hollow_mm3: None,
             }),
         },
         error => Err(HollowStageFailure {
             error,
             cavity_repair,
+            planned_hollow_mm3: None,
         }),
     }
 }

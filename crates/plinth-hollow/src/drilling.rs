@@ -231,12 +231,37 @@ pub struct DrillingEvidence {
     final_cavity_mm3: Finite,
     boolean_input_primitive_units: u64,
     boolean_marshaled_input_bytes: u64,
+    /// Planned openings whose drilled bore failed its centerline proof and
+    /// were replaced by the next-ranked candidate
+    /// ([`drill_planned_shell_ranked`]), in the order they were replaced.
+    /// Empty — and absent from the serialized record — when the first plan
+    /// proved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    superseded: Vec<SupersededOpening>,
+}
+
+/// One planned opening the drill stage gave up on in favour of the next-ranked
+/// candidate, and why.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupersededOpening {
+    pub role: HoleRole,
+    pub lobe_id: Option<u32>,
+    pub center_mm: [Finite; 3],
+    pub direction: [Finite; 3],
+    /// The centerline proof's refusal, as text.
+    pub reason: String,
 }
 
 impl DrillingEvidence {
     #[must_use]
     pub fn holes(&self) -> &[DrilledHoleEvidence] {
         &self.holes
+    }
+    /// Openings replaced by the next-ranked candidate; see the field.
+    #[must_use]
+    pub fn superseded(&self) -> &[SupersededOpening] {
+        &self.superseded
     }
     #[must_use]
     pub const fn cavity_voxels(&self) -> usize {
@@ -527,6 +552,11 @@ impl DrillingFailure {
     pub fn into_planned(self) -> PlannedShell {
         *self.planned
     }
+    /// The planned shell the refusal hands back, borrowed.
+    #[must_use]
+    pub fn planned(&self) -> &PlannedShell {
+        &self.planned
+    }
 
     #[must_use]
     pub fn into_reason(self) -> DrillingRefusal {
@@ -628,6 +658,20 @@ pub enum DrillingRefusal {
         hole: usize,
         undecidable_faces: u32,
     },
+    /// The centerline proof failed for a planned opening, and every
+    /// next-ranked candidate the planner could offer in its place failed too,
+    /// or none was left ([`drill_planned_shell_ranked`]). `first` is the
+    /// refusal of the opening as first planned; `tried` counts the drilled
+    /// plans whose proof did not pass.
+    #[error(
+        "no ranked {role:?} candidate proved: {tried} drilled plan(s) failed the centerline \
+         proof and no untried candidate is left; the first refusal: {first}"
+    )]
+    CandidatesExhausted {
+        role: HoleRole,
+        tried: usize,
+        first: Box<DrillingRefusal>,
+    },
     /// The census walk and the collecting walk disagreed about how many
     /// undecidable faces a row reached.
     ///
@@ -692,6 +736,83 @@ fn agree_on_near_parallel(
 
 pub fn drill_planned_shell(planned: PlannedShell) -> Result<HollowedAndDrilled, DrillingFailure> {
     drill_planned_shell_with_limits(planned, DrillingLimits::production())
+}
+
+/// [`drill_planned_shell`], and when the centerline proof on the drilled mesh
+/// fails for a PLANNED opening (undecidable or blocked), the next-ranked
+/// candidate for that opening instead of a refusal of the whole hollow.
+///
+/// The planner already moves past a candidate whose own exit ray is
+/// undecidable (§EXT-1 site 17); this does the same for a candidate whose bore
+/// cannot be proven AFTER the Boolean (site 18). Each round strikes out one
+/// more candidate and plans again on the same shell
+/// ([`crate::drains::replan_excluding`]), so the loop ends: at the latest when
+/// the planner has no drained-and-vented chamber left to offer, and then it
+/// refuses with [`DrillingRefusal::CandidatesExhausted`]. A refusal for any
+/// other reason, or for an opening the audit added (which the planner did not
+/// rank), is returned as it is.
+///
+/// Every replaced opening is recorded in
+/// [`DrillingEvidence::superseded`].
+pub fn drill_planned_shell_ranked(
+    planned: PlannedShell,
+) -> Result<HollowedAndDrilled, DrillingFailure> {
+    drill_ranked_with(planned, drill_planned_shell)
+}
+
+/// The loop of [`drill_planned_shell_ranked`], with the single drill attempt
+/// passed in so a test can make one attempt fail on purpose.
+fn drill_ranked_with(
+    mut planned: PlannedShell,
+    mut drill_once: impl FnMut(PlannedShell) -> Result<HollowedAndDrilled, DrillingFailure>,
+) -> Result<HollowedAndDrilled, DrillingFailure> {
+    let mut excluded: Vec<HoleGeometry> = Vec::new();
+    let mut superseded: Vec<SupersededOpening> = Vec::new();
+    let mut first: Option<DrillingRefusal> = None;
+    loop {
+        let planned_holes = planned.drain_plan().holes().len();
+        let failure = match drill_once(planned) {
+            Ok(mut drilled) => {
+                drilled.evidence.superseded = superseded;
+                return Ok(drilled);
+            }
+            Err(failure) => failure,
+        };
+        let hole = match failure.reason() {
+            DrillingRefusal::UndecidedOpening { hole, .. } | DrillingRefusal::BlockedOpening { hole }
+                if *hole < planned_holes =>
+            {
+                *hole
+            }
+            _ => return Err(failure),
+        };
+        let reason = failure.reason().clone();
+        let returned = failure.into_planned();
+        let failed = returned.drain_plan().holes()[hole].clone();
+        superseded.push(SupersededOpening {
+            role: failed.role,
+            lobe_id: failed.lobe_id,
+            center_mm: failed.center_mm,
+            direction: failed.direction,
+            reason: reason.to_string(),
+        });
+        let role = failed.role;
+        let first_reason = first.get_or_insert(reason).clone();
+        excluded.push(failed);
+        match crate::drains::replan_excluding(&returned, &excluded) {
+            Ok(next) => planned = returned.with_drain_plan(next),
+            Err(_) => {
+                return Err(DrillingFailure {
+                    planned: Box::new(returned),
+                    reason: DrillingRefusal::CandidatesExhausted {
+                        role,
+                        tried: excluded.len(),
+                        first: Box::new(first_reason),
+                    },
+                })
+            }
+        }
+    }
 }
 
 pub fn drill_planned_shell_with_limits(
@@ -910,6 +1031,7 @@ fn drill(
         final_cavity_mm3: finite(final_cavity_mm3)?,
         boolean_input_primitive_units: input.operand_primitive_units,
         boolean_marshaled_input_bytes: input.logical_marshaled_input_bytes,
+        superseded: Vec::new(),
     };
     Ok((mesh, evidence, audit))
 }
@@ -2525,6 +2647,122 @@ mod tests {
             load_binary_stl(&path, WeldPolicy::None).expect("committed analytic Sphere fixture");
         plan_drains(create_shell(mesh, registered_settings()).expect("Sphere shell"))
             .expect("Sphere drain plan")
+    }
+
+    fn vent_index(plan: &PlannedShell) -> usize {
+        plan.drain_plan()
+            .holes()
+            .iter()
+            .position(|hole| hole.role == HoleRole::Vent)
+            .expect("the Sphere plan has a vent")
+    }
+
+    /// A refusal of the kind the Cylinder vent hit, for `hole` of `planned`.
+    fn undecided(planned: PlannedShell, hole: usize) -> DrillingFailure {
+        DrillingFailure {
+            planned: Box::new(planned),
+            reason: DrillingRefusal::UndecidedOpening {
+                hole,
+                undecidable_faces: 2,
+            },
+        }
+    }
+
+    /// **The Cylinder case.** The first-ranked vent's centerline proof fails
+    /// on the drilled mesh (made to fail here, as the kernel made it fail on
+    /// the flat Cylinder before its plane-side test); the drill stage must
+    /// take the NEXT-ranked vent and hollow, not refuse the model.
+    ///
+    /// SABOTAGE (recorded by hand, 2026-10-13): with `drill_ranked_with`
+    /// returning every failure as it is (no re-plan), this test fails with
+    /// `UndecidedOpening { hole: 1, .. }`, the flat Cylinder's refusal.
+    #[test]
+    fn an_unprovable_vent_gives_way_to_the_next_ranked_vent() {
+        let planned = sphere_plan();
+        let vent = vent_index(&planned);
+        let first_vent = planned.drain_plan().holes()[vent].clone();
+        let first_drain = planned.drain_plan().holes()[0].clone();
+        let mut attempts = 0_usize;
+        let drilled = drill_ranked_with(planned, |plan| {
+            attempts += 1;
+            let index = vent_index(&plan);
+            if plan.drain_plan().holes()[index] == first_vent {
+                Err(undecided(plan, index))
+            } else {
+                drill_planned_shell(plan)
+            }
+        })
+        .expect("the next-ranked vent proves, so the model hollows");
+        assert_eq!(attempts, 2, "one failed drill, one re-planned drill");
+        let holes = drilled.evidence().holes();
+        let used_vent = holes
+            .iter()
+            .find(|hole| hole.role == HoleRole::Vent)
+            .expect("a vent was drilled");
+        // A vent is its site and its direction; the outer exit differs when
+        // either does.
+        assert!(
+            (used_vent.center_mm, used_vent.exact_outer_exit_mm)
+                != (first_vent.center_mm, first_vent.outer_exit_mm),
+            "the vent drilled is not the one that failed"
+        );
+        assert_eq!(
+            holes[0].center_mm, first_drain.center_mm,
+            "the drain, which proved, is unchanged by the vent's re-plan"
+        );
+        let superseded = drilled.evidence().superseded();
+        assert_eq!(superseded.len(), 1, "the replaced vent is on the record");
+        assert_eq!(superseded[0].role, HoleRole::Vent);
+        assert_eq!(superseded[0].center_mm, first_vent.center_mm);
+        assert!(superseded[0].reason.contains("undecidable"), "{}", superseded[0].reason);
+        assert!(
+            drilled
+                .drain_plan()
+                .unavailable_candidates()
+                .iter()
+                .any(|diagnostic| diagnostic.reason
+                    == crate::drains::CandidateUnavailable::DrillProofFailed),
+            "and the planner names why it moved past that candidate"
+        );
+    }
+
+    /// When no ranked candidate proves, the model is refused — by name, with
+    /// the first refusal and the count of drilled plans that failed — and never
+    /// loops: each round strikes out one more candidate.
+    #[test]
+    fn when_every_ranked_vent_fails_the_refusal_says_so() {
+        let planned = sphere_plan();
+        let mut attempts = 0_usize;
+        let refused = drill_ranked_with(planned, |plan| {
+            attempts += 1;
+            let index = vent_index(&plan);
+            Err(undecided(plan, index))
+        })
+        .expect_err("no vent can prove");
+        let DrillingRefusal::CandidatesExhausted { role, tried, first } = refused.reason() else {
+            panic!("expected CandidatesExhausted, got {:?}", refused.reason());
+        };
+        assert_eq!(*role, HoleRole::Vent);
+        assert_eq!(*tried, attempts, "every drilled plan that failed is counted");
+        assert!(attempts >= 2, "more than one vent candidate was tried, got {attempts}");
+        assert!(matches!(**first, DrillingRefusal::UndecidedOpening { .. }));
+    }
+
+    /// A refusal that is not about a planned opening's centerline is returned
+    /// unchanged, on the first attempt.
+    #[test]
+    fn other_refusals_are_not_retried() {
+        let mut attempts = 0_usize;
+        let refused = drill_ranked_with(sphere_plan(), |plan| {
+            attempts += 1;
+            Err(DrillingFailure {
+                planned: Box::new(plan),
+                reason: DrillingRefusal::Boolean,
+            })
+        })
+        .expect_err("a Boolean refusal stands");
+        assert_eq!(attempts, 1);
+        assert_eq!(refused.reason(), &DrillingRefusal::Boolean);
     }
 
     fn orientation_history() -> OrientationHistory {

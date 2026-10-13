@@ -9204,10 +9204,11 @@ mod tests {
     ///
     /// The fixture: a 4 mm plate post of radius 0.05 mm under a flat slab, a
     /// wall box over its top 0.5 mm whose near face stands 0.38 mm from the
-    /// axis, with that face tilted by ONE unit in the last place of one vertex
-    /// (a facet of a round wall, never exactly parallel to the shaft, so the
-    /// kernel's determinant guard reads the pierce candidate as
-    /// `NearParallel`). The plan raises the root to 0.26 mm and keeps the tip,
+    /// axis and whose side face lies in the shaft's own plane, raked by a few
+    /// ulps so its plane crosses the axis inside the slot that is read (a
+    /// facet never exactly parallel to the shaft, which the kernel's
+    /// determinant guard reads as `NearParallel` and neither its plane-side
+    /// nor its bounding-sphere test can settle). The plan raises the root to 0.26 mm and keeps the tip,
     /// which is 0.076 mm at the wall's lowest layer, so the committed solid
     /// stands 0.304 mm from the face: clear, and read as an upper bound.
     ///
@@ -9245,15 +9246,33 @@ mod tests {
         };
         // (refused, the committed read of the wall's lowest slot, the reads).
         let read = |wall_from: f64, tilted: bool| {
-            let wall = ([cx + wall_from, cy - 0.5, 3.5], [cx + wall_from + 0.5, cy + 0.5, 4.0]);
+            let wall = ([cx + wall_from, cy, 3.5], [cx + wall_from + 3.0, cy + 0.5, 4.0]);
             let mut history = crate::up_sweep::ColumnHistory::new(&grid);
             cure_box(&grid, &mut history, slab.0, slab.1);
             cure_box(&grid, &mut history, wall.0, wall.1);
             let (mut verts, tris) = crate::member_clearance::boxes_mesh(&[slab, wall]);
             if tilted {
-                // Corner 0 of the wall (vertex 8) one ulp across: the wall's
-                // near face is no longer exactly parallel to the shaft.
-                verts[8][0] = f64::from_bits(verts[8][0].to_bits() + 1);
+                // The wall's -y face (corners 0, 1 at z = 3.5 and 4, 5 at
+                // z = 4.0; vertices 8, 9, 12, 13) lies in the shaft's own plane
+                // `y = cy`, and is raked about a horizontal line: 3 ulps of `cy`
+                // below that plane at its foot and 53 above it at its top. Its
+                // plane therefore crosses the shaft axis at
+                // `z = 3.5 + 0.5 * 3 / 56 = 3.527`, inside the 3.50..3.55 slot
+                // read below, so the axis segment really straddles the face's
+                // plane and the kernel's plane-side test cannot decide it; the
+                // face runs 3 mm along x, so its bounding sphere holds the axis
+                // and the sphere test cannot either. `det = 7.5e-15` on both of
+                // its triangles: nonzero, inside `DET_EPS`. (Until 2026-10-13
+                // the plant was the near face 0.38 mm off the axis, tilted by
+                // one ulp; that face never reaches the shaft's span, and the
+                // plane-side test now decides it as a miss, as it should.)
+                let ulps = |k: i64| f64::from_bits(cy.to_bits().wrapping_add_signed(k));
+                for vertex in [8, 9] {
+                    verts[vertex][1] = ulps(-3);
+                }
+                for vertex in [12, 13] {
+                    verts[vertex][1] = ulps(53);
+                }
             }
             let surface = crate::member_clearance::indexed_surface(&verts, &tris);
             let context = super::SlendernessContext {
