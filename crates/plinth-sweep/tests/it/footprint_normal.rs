@@ -214,6 +214,7 @@ fn ball(mesh: &Mesh, centre: [f64; 3], radius: f64, seed: [f64; 3], facet: [f64;
         seat_face: face_near(mesh, seed),
         facet_normal: facet,
         max_normal_z: admitted_z(),
+        min_normal_z: f64::NEG_INFINITY,
     }
 }
 

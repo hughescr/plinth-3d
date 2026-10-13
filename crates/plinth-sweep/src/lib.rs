@@ -68,6 +68,7 @@ pub mod lean;
 pub mod limits;
 pub mod lip_seat;
 pub(crate) mod member_clearance;
+pub mod model_feet;
 pub mod model_landing;
 pub(crate) mod model_tie;
 pub mod orient_demand;
@@ -330,6 +331,12 @@ pub struct SeatFace {
     /// the ball at ([`plinth_support::SweepArm::contact_ball_radius_mm`]).
     /// `None` draws the owner's ChituBox ball for the tip size.
     pub contact_ball_radius_mm: Option<f64>,
+    /// **The FOOT of an arm that lands on the model** ([`model_feet`], lane
+    /// 2, 2026-10-12): the landed face, the load-sized contact, and how much
+    /// of it stands on the model, measured once the field is final. `None`
+    /// for every other landing, and for a model landing on a field the foot
+    /// was never measured on (drawn flat, as before).
+    pub foot: Option<model_feet::FootFace>,
 }
 
 /// The footprint rule's verdict on one tip ([`footprint`]).
@@ -3269,6 +3276,11 @@ pub fn run_sweep_with_holes(
     report.counters.descent_solid_uncleared = descent_tally.uncleared;
     report.counters.descent_solid_lean_candidates_refused = descent_tally.lean_candidates_refused;
     report.counters.descent_solid_seats_moved = descent_tally.seats_moved;
+    // The descent's F2 tallies (lane 2, 2026-10-12): the foot census on the
+    // finished field fills the rest of this outcome.
+    report.model_feet.descent_candidates_refused = descent_tally.foot_candidates_refused;
+    report.model_feet.descent_straight_replaced = descent_tally.foot_straight_replaced;
+    report.model_feet.descent_straight_kept = descent_tally.foot_straight_kept;
     report.counters.sightlines_clear = reach.sightlines_clear;
     report.counters.sightlines_blocked = reach.sightlines_blocked;
     report.counters.route_sightlines_clear = outcome.route_sightlines_clear;
@@ -3542,6 +3554,39 @@ pub fn run_sweep_with_holes(
             grow_contact_balls(&measure_env, &mut sweep_plan, &sites, limit_mm);
     }
     finish_heads(&mut sweep_plan);
+    // THE MODEL FEET ON THE FINISHED FIELD (lane 2, 2026-10-12,
+    // `MODEL-FEET.md` F1/F2): every arm that lands on the model gets its
+    // landed face, its load-sized contact (the down-sweep's load at the
+    // landing, before any minimum) and the share of that contact on cured
+    // model, measured here once the landings and their followers have
+    // settled; the lowering draws the foot from it, and its real contact
+    // prices the scar. A foot not wholly on the model is warned, and named
+    // beside the landing check.
+    {
+        let descent = std::mem::take(&mut sweep_plan.report.model_feet);
+        let mut feet = model_feet::measure(&measure_env, &mut sweep_plan, &history, sizing);
+        feet.descent_candidates_refused = descent.descent_candidates_refused;
+        feet.descent_straight_replaced = descent.descent_straight_replaced;
+        feet.descent_straight_kept = descent.descent_straight_kept;
+        feet.relanding_candidates_refused = lip_seat_outcome.candidates_refused_foot
+            + clearance_reroute_outcome.candidates_refused_foot;
+        let finished = &mut sweep_plan.report.landing_check.finished;
+        finished.model_feet = feet.feet;
+        finished.model_feet_partial = feet
+            .partial
+            .iter()
+            .map(|partial| {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "a percent in 0..=100, rounded to tenths, fits u32"
+                )]
+                let tenths = (partial.on_model_pct * 10.0).round().max(0.0) as u32;
+                (partial.id, tenths)
+            })
+            .collect();
+        sweep_plan.report.model_feet = feet;
+    }
     // **EVERY STRAIGHT TIP THAT STILL GRAZES THE MODEL** (Craig 2026-10-08),
     // measured on the arms exactly as they go to the lowering, after the
     // footprint slides: each is named in the log with its clearance, its angle
@@ -4917,6 +4962,7 @@ fn build_report(
         seat_footprint: crate::footprint::FootprintOutcome::default(),
         seat_footprint_normal: crate::footprint_normal::FootprintNormalOutcome::default(),
         seat_contact: crate::contact_growth::ContactOutcome::default(),
+        model_feet: crate::model_feet::ModelFeetOutcome::default(),
         head_join: crate::head_join::HeadJoinOutcome::default(),
         per_event: outcome.per_event.clone(),
         rigid_share: crate::rigid_share::RigidShareReport::default(),

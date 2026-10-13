@@ -321,6 +321,9 @@ pub struct FootprintBall {
     /// A face is admitted when its outward unit normal's `z` is below this
     /// ([`SeatFaceRule::max_normal_z`]).
     pub max_normal_z: f64,
+    /// ... and above this: `-∞` for a tip, whose seat faces look down; `0`
+    /// for a MODEL FOOT ([`crate::model_feet`]), whose landed faces look up.
+    pub min_normal_z: f64,
 }
 
 /// What [`footprint_normals`] found for one tip.
@@ -402,7 +405,7 @@ fn footprint_of_row(
         let Some(normal) = vec3::normalize(vec3::cross(vec3::sub(b, a), vec3::sub(c, a))) else {
             continue;
         };
-        let is_admitted = normal[2] < ball.max_normal_z;
+        let is_admitted = normal[2] < ball.max_normal_z && normal[2] > ball.min_normal_z;
         if !is_admitted {
             continue;
         }
@@ -717,6 +720,7 @@ pub fn measure_arms(
                     seat_face: site.face,
                     facet_normal: site.facet_normal,
                     max_normal_z: site.max_normal_z,
+                    min_normal_z: f64::NEG_INFINITY,
                 })
             })
             .collect();

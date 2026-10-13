@@ -146,6 +146,19 @@ pub struct SweepEmission {
     /// above the ledger: the rule's path hits on the emitted field.
     pub load_steps_tapered: usize,
     pub load_step_layers_raised: usize,
+    /// The lowering's MODEL FOOT counters (lane 2, 2026-10-12;
+    /// [`plinth_support::SweepLowering::model_feet_drawn`] and siblings):
+    /// feet drawn, without a measured face, coned, too short for their cone,
+    /// left flat, and per foot its load-sized radius, planned disc radius and
+    /// ball radius.
+    pub model_feet_drawn: usize,
+    pub model_feet_without_measured_face: usize,
+    pub model_foot_cones: usize,
+    pub model_foot_cones_too_short: usize,
+    pub model_feet_flat: usize,
+    pub model_foot_radius_mm: Vec<f64>,
+    pub model_foot_contact_disc_radius_mm: Vec<f64>,
+    pub model_foot_ball_radius_mm: Vec<f64>,
 }
 
 impl SweepEmission {
@@ -234,6 +247,14 @@ pub fn to_primitives(
         head_neck_ratio,
         head_stalk_mm,
         head_standoff_mm,
+        model_feet_drawn,
+        model_feet_without_measured_face,
+        model_foot_cones,
+        model_foot_cones_too_short,
+        model_feet_flat,
+        model_foot_radius_mm,
+        model_foot_contact_disc_radius_mm,
+        model_foot_ball_radius_mm,
     } = lower_sweep_arms_with_hull_reference(
         &arms,
         hull_reference.as_deref(),
@@ -284,6 +305,14 @@ pub fn to_primitives(
         arm_junctions_inverted_in_ledger: raised.arm_ledger_inversions,
         load_steps_tapered: raised.load_steps_tapered,
         load_step_layers_raised: raised.load_step_layers_raised,
+        model_feet_drawn,
+        model_feet_without_measured_face,
+        model_foot_cones,
+        model_foot_cones_too_short,
+        model_feet_flat,
+        model_foot_radius_mm,
+        model_foot_contact_disc_radius_mm,
+        model_foot_ball_radius_mm,
     })
 }
 
@@ -1026,9 +1055,19 @@ pub(crate) fn sweep_arm(
         // so it stays on the same plane.
         seat_normal_mm,
         seat_face_point_mm,
-        landing: match strut.landing {
-            Landing::Plate => SweepArmLanding::Plate,
-            Landing::Model { .. } | Landing::Strut { .. } => SweepArmLanding::Landed,
+        landing: match (strut.landing, strut.seat_face.foot) {
+            (Landing::Plate, _) => SweepArmLanding::Plate,
+            // A MODEL FOOT (lane 2, 2026-10-12): the landed face and the
+            // load-sized contact the sweep measured on the finished field.
+            // A model landing it never measured ends flat, as before.
+            (Landing::Model { .. }, Some(foot)) => {
+                SweepArmLanding::Model(plinth_support::ModelFoot {
+                    face_point_mm: foot.face.map(|face| face.point_mm),
+                    face_normal_mm: foot.face.map_or([0.0; 3], |face| face.normal),
+                    contact_radius_mm: foot.contact_radius_mm,
+                })
+            }
+            (Landing::Model { .. } | Landing::Strut { .. }, _) => SweepArmLanding::Landed,
         },
         // A brace seats on another arm and a mast tops out in free
         // space; neither may be given a tip ball. Every arm the reach

@@ -600,6 +600,7 @@ fn a_member_on_a_headed_child_follows_the_post_line_to_the_joint() {
         shift_mm: slide,
         footprint: crate::Footprint::MovedOntoFace,
         contact_ball_radius_mm: None,
+        foot: None,
     };
     let child_cell = grid.index(150, 156);
     let mut child = straight(&grid, 1, 150, 156, k_top, 0.1);
@@ -717,6 +718,7 @@ fn a_headed_child_on_a_sliding_host_keeps_its_head_and_its_post_follows() {
         shift_mm: slide,
         footprint: crate::Footprint::MovedOntoFace,
         contact_ball_radius_mm: None,
+        foot: None,
     };
     let child_cell = grid.index(150, 156);
     let mut child = straight(&grid, 1, 150, 156, k_top, 0.1);
@@ -1529,6 +1531,7 @@ mod actual_lean_sizing {
             shift_mm: [slide, 0.0, 0.0],
             footprint: crate::Footprint::MovedOntoFace,
             contact_ball_radius_mm: None,
+            foot: None,
         };
         let mut heads = crate::heads::HeadsOutcome::default();
         crate::size_heads_for_final_posts(&grid, &mut struts, sizing(), 0.1, |_| 0.5, &mut heads, None);

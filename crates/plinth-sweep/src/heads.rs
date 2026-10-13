@@ -1666,6 +1666,7 @@ fn footprint_pass(
             seat_face: ball.seat_face,
             facet_normal: ball.facet_normal,
             max_normal_z: env.max_normal_z,
+            min_normal_z: f64::NEG_INFINITY,
         })
         .collect();
     footprint_normals(env.mesh, &pairs, &questions)

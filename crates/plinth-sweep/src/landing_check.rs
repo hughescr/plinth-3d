@@ -70,6 +70,15 @@ pub struct LandingCheck {
     /// brace top seated on it, at a layer the joint sphere or the head
     /// occupies. Strut ids of the joining members. Must be 0.
     pub joins_above_joint: Vec<u32>,
+    /// **Model landings measured for their foot** (lane 2, 2026-10-12,
+    /// [`crate::model_feet`]): filled on the finished field only. A model
+    /// landing is ROOTED by definition, but a foot that is not wholly on the
+    /// model is never called rooted without saying so.
+    pub model_feet: usize,
+    /// Of those, the feet NOT wholly on cured model: `(strut id, tenths of a
+    /// percent of the contact disc on the model)`. A warning on an emitted
+    /// file, never a refusal; not an unrooted member.
+    pub model_feet_partial: Vec<(u32, u32)>,
 }
 
 impl LandingCheck {

@@ -414,6 +414,10 @@ pub struct LipSeatOutcome {
     /// member, the drain keep-out), refused by the plate rule, refused by the
     /// lowering's own measurement (the arithmetic admitted them), and verified.
     pub candidates_priced: usize,
+    /// Model landings not offered because the arm's foot would not lie
+    /// wholly on cured model there (lane 2, 2026-10-12, `MODEL-FEET.md` F2;
+    /// [`crate::up_sweep::foot_on_model`]).
+    pub candidates_refused_foot: usize,
     pub candidates_refused_path: usize,
     pub candidates_refused_plate: usize,
     pub candidates_refused_measured: usize,
@@ -1876,6 +1880,18 @@ fn price(
     if k_top == 0 || height <= 0.0 {
         return out;
     }
+    // The least contact the arm's foot must deliver: its narrowest ledger
+    // section (the tip's, sized for the tip's own load; the foot passes more).
+    let foot_radius_mm = strut
+        .radius_mm
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    let foot_radius_mm = if foot_radius_mm.is_finite() {
+        foot_radius_mm
+    } else {
+        0.0
+    };
     let cos_limit = limit_deg.to_radians().cos();
     // The search box: no descent travels further sideways than the lean law
     // lets it over the arm's whole height, nor further than the straight
@@ -1997,6 +2013,23 @@ fn price(
                 (None, Some(model_at)) => (Landing::Model { layer: model_at }, model_at),
                 (None, None) => (Landing::Plate, 0),
             };
+            // A MODEL LANDING TAKES ITS WHOLE FOOT (lane 2, 2026-10-12): the
+            // same predicate the up-sweep's descent reads, at a lower bound on
+            // the foot's contact (the arm's own tip section: the foot passes
+            // at least its tip's load).
+            if matches!(landing, Landing::Model { .. }) {
+                let (on, total) = crate::up_sweep::foot_on_model(
+                    grid,
+                    context.history,
+                    cell,
+                    k_bottom,
+                    foot_radius_mm,
+                );
+                if on < total {
+                    outcome.candidates_refused_foot += 1;
+                    continue;
+                }
+            }
             #[expect(
                 clippy::cast_precision_loss,
                 reason = "a layer count bounded by the plan's own layer count is exact in f64"

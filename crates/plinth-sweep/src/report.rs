@@ -356,6 +356,11 @@ pub struct SweepRunReport {
     /// planned disc, the balls grown until it reaches plan, and the tips a
     /// limit left short.
     pub seat_contact: crate::contact_growth::ContactOutcome,
+    /// The MODEL FEET (lane 2, 2026-10-12, `MODEL-FEET.md`): every arm that
+    /// lands on the model, its load-sized contact, how much of it stands on
+    /// the model, its real contact against its load's need, and what the
+    /// descent and the re-landings refused for a foot that did not fit.
+    pub model_feet: crate::model_feet::ModelFeetOutcome,
     /// The head-join rule (2026-09-29): member-on-arm joins graded against the
     /// trunk's seat zone, the landers moved down their trunk, the joins kept
     /// by reason, and the finished field's census.
@@ -913,6 +918,35 @@ impl SweepRunReport {
             self.slenderness_lane.merges_refused_stale_shaft,
         )
         .expect("writing to a String cannot fail");
+        // A MODEL LANDING IS ROOTED, BUT ITS FOOT MAY NOT FIT (lane 2,
+        // 2026-10-12): said here, beside the rooting verdict, never folded
+        // into it.
+        if finished.model_feet > 0 {
+            let partial = &finished.model_feet_partial;
+            let listed: Vec<String> = partial
+                .iter()
+                .map(|&(id, tenths)| format!("{id} {}.{}%", tenths / 10, tenths % 10))
+                .collect();
+            if partial.is_empty() {
+                writeln!(
+                    out,
+                    "Model feet: {} model landings, every foot's load-sized contact wholly on \
+                     cured model.",
+                    finished.model_feet
+                )
+            } else {
+                writeln!(
+                    out,
+                    "Model feet: WARNING {} of {} model landings are rooted with only part of \
+                     their foot's load-sized contact on cured model (a warning on an emitted \
+                     file, never a refusal): {}.",
+                    partial.len(),
+                    finished.model_feet,
+                    listed.join(", ")
+                )
+            }
+            .expect("writing to a String cannot fail");
+        }
         out
     }
 }

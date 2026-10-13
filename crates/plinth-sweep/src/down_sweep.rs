@@ -2460,7 +2460,7 @@ pub(crate) fn combine_carried(previous: f64, own: f64, merged: f64) -> f64 {
 /// its root and its NARROWEST section is at the tip, which is where the law is
 /// evaluated and exactly what `docs/physics.md`:89-92 asks for. The law holds
 /// at every layer, not only at the contact.
-fn size_arm(carried_mm2: f64, sizing: SizingPolicy) -> f64 {
+pub(crate) fn size_arm(carried_mm2: f64, sizing: SizingPolicy) -> f64 {
     let required_area = carried_mm2 / sizing.x_allowed;
     let radius = (required_area / core::f64::consts::PI).sqrt();
     radius.clamp(sizing.tip_radius_min_mm, sizing.tip_radius_max_mm)

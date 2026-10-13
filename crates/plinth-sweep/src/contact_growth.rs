@@ -162,6 +162,7 @@ fn measure(
             seat_face: site.face,
             facet_normal: site.facet_normal,
             max_normal_z: site.max_normal_z,
+            min_normal_z: f64::NEG_INFINITY,
         });
     }
     let mut out = vec![None; arms.len()];

@@ -24,6 +24,7 @@ mod lip_seat;
 mod load_gate_area_law;
 mod load_gate_warning_mode_corpus_survey;
 mod member_clearance_emitted;
+mod model_feet_emitted;
 mod no_private_vector_algebra;
 mod orient_as_drawn;
 mod plate_contact;

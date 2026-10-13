@@ -155,6 +155,7 @@ fn arm(cell: usize, k_top: usize, path: Vec<u32>) -> SweepStrut {
             shift_mm: [0.0; 3],
             footprint: Footprint::NotGraded,
             contact_ball_radius_mm: None,
+            foot: None,
         },
         seat_normal: [0.0; 3],
     }

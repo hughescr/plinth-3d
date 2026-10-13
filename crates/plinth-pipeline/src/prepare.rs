@@ -3134,6 +3134,65 @@ fn print_sweep_disclosure(
                  no registry); no ball was grown"
             );
         }
+        // THE MODEL FEET (lane 2, 2026-10-12, `MODEL-FEET.md`): every arm that
+        // lands on the model ends in a seated, trimmed contact ball sized by
+        // the area law for the load the foot passes, and must take its whole
+        // contact on the model.
+        let feet = &report.model_feet;
+        let foot_radius = SweepLowering::distribution(&emission.model_foot_radius_mm)
+            .unwrap_or((0.0, 0.0, 0.0));
+        println!(
+            "[sweep {model}] model feet: {} model landings measured ({} landed faces found, {} \
+             real contacts measured); {} feet drawn ({} coned to the foot, {} too short for \
+             their cone, {} on the raster surface's plane for want of a measured face, {} left \
+             flat); load-sized contact radius min {:.4} p50 {:.4} max {:.4} mm; contact the \
+             loads need {:.4} mm2, planned discs {:.4} mm2, real contact (the scar) {:.4} mm2, \
+             against {:.4} mm2 the old flat ends (the widest section) would have left; {} feet \
+             with real contact short of their load's need; {} feet not wholly on cured model; \
+             descent: {} model candidates refused for their foot, {} straight descents moved to \
+             a candidate whose foot fits, {} kept with a foot that does not fit; re-landings: {} \
+             model candidates refused for their foot",
+            feet.feet,
+            feet.faces_measured,
+            feet.contacts_measured,
+            emission.model_feet_drawn,
+            emission.model_foot_cones,
+            emission.model_foot_cones_too_short,
+            emission.model_feet_without_measured_face,
+            emission.model_feet_flat,
+            foot_radius.0,
+            foot_radius.1,
+            foot_radius.2,
+            feet.need_mm2,
+            feet.planned_mm2,
+            feet.real_mm2,
+            feet.flat_end_mm2,
+            feet.short_of_need.len(),
+            feet.partial.len(),
+            feet.descent_candidates_refused,
+            feet.descent_straight_replaced,
+            feet.descent_straight_kept,
+            feet.relanding_candidates_refused,
+        );
+        for partial in &feet.partial {
+            println!(
+                "[sweep {model}] WARNING model foot of arm {} has {:.1}% of its load-sized \
+                 contact disc (radius {:.4} mm) on cured model; it keeps this landing (the \
+                 search found no candidate whose foot fits at the load it knew then, or later \
+                 load grew the foot) (emit and warn)",
+                partial.id, partial.on_model_pct, partial.contact_radius_mm,
+            );
+        }
+        for short in &feet.short_of_need {
+            println!(
+                "[sweep {model}] WARNING model foot of arm {} has {:.4} mm2 of real contact \
+                 against {:.4} mm2 its load needs ({:.1}%)",
+                short.id,
+                short.real_mm2,
+                short.need_mm2,
+                100.0 * short.real_mm2 / short.need_mm2.max(f64::MIN_POSITIVE),
+            );
+        }
         // THE HEAD-JOIN RULE (2026-09-29).
         let rule = &report.head_join;
         println!(
