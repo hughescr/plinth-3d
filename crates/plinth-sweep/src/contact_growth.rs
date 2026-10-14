@@ -335,6 +335,10 @@ pub struct ContactOutcome {
     /// past one of those ceilings (round 5 review, 2026-10-14): at the ceiling,
     /// never under their shaft end.
     pub reduced: usize,
+    /// Struts whose owner's ball a reduction would have left a birth
+    /// uncovered by, and which keep it (set by the caller that grades births,
+    /// `grow_contact_balls`; they are the tips a second contact is for).
+    pub kept_for_births: Vec<usize>,
     /// The balls as drawn that are still wider than their feature (the shaft
     /// end they stand on is wider than the feature), one row each.
     pub over_feature: Vec<ProfileOver>,

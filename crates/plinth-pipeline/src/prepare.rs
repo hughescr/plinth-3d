@@ -3335,8 +3335,16 @@ fn print_sweep_disclosure(
                     "[sweep {model}] WARNING tip of arm {} draws a ball of {:.4} mm radius (a \
                      contact disc {:.4} mm wide) on a feature whose narrowest cured chord at the \
                      strike layer is {:.4} mm: the ball is already as small as its shaft end \
-                     allows",
+                     and the births it holds allow",
                     over.strut, over.ball_radius_mm, over.disc_width_mm, over.chord_mm,
+                );
+            }
+            if !contact.kept_for_births.is_empty() {
+                println!(
+                    "[sweep {model}] profile balls kept at the owner's size because a smaller \
+                     ball would leave a first layer over nothing uncovered (arms {:?}); these are \
+                     the tips a second contact is for",
+                    contact.kept_for_births,
                 );
             }
             for short in &contact.short {

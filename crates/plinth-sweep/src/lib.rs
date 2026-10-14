@@ -4405,11 +4405,13 @@ fn grow_contact_balls(
     // ball kept at the owner's size covers what it covered.
     let lost = births_lost_by_reduction(plan, &arms, &grown, births, env.layer_plan);
     if !lost.is_empty() {
+        let kept: Vec<usize> = lost.iter().map(|&(strut, _)| strut).collect();
         for (strut, profile_mm) in lost {
             bounds[strut].hold_floor_mm = Some(profile_mm);
         }
         (outcome, grown) =
             contact_growth::grow(env, &arms, sites, &bounds, limits, pixel_area_mm2);
+        outcome.kept_for_births = kept;
     }
     for (strut, radius) in plan.struts.iter_mut().zip(grown) {
         strut.seat_face.contact_ball_radius_mm = radius;
