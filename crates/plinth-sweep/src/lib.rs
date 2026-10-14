@@ -51,6 +51,7 @@ pub(crate) mod demand_replay;
 pub mod down_sweep;
 pub mod drain;
 pub mod feature_chord;
+pub mod foot_neck;
 pub mod footprint;
 pub mod footprint_normal;
 pub(crate) mod frame;
@@ -2520,6 +2521,7 @@ pub fn run_sweep_with_holes(
             policy.tip_radius_max_mm,
             policy.overhang_centre_deg - 0.5 * policy.overhang_transition_deg,
         )
+        .with_foot_sizing(policy.x_allowed)
     } else {
         slenderness::SlendernessLaw::disabled()
     };
@@ -3996,6 +3998,7 @@ fn publish_runs(
                 k_top: run.k_top,
                 length_mm: run.length_mm,
                 limit_mm: run.limit_mm,
+                neck_share: run.neck_share,
             });
         }
     }

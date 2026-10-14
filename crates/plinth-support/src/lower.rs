@@ -6650,6 +6650,109 @@ mod model_foot_tests {
         assert_eq!(none.model_feet_flat, 1);
         assert_eq!(none.arms_dropped_invalid_geometry, 0, "the arm still emits");
     }
+
+    /// The Member frusta of a lowered arm, bottom first, as
+    /// `(z bottom, z top, radius at the bottom, radius at the top)`.
+    fn member_spans(lowered: &SweepLowering) -> Vec<(f64, f64, f64, f64)> {
+        let mut spans: Vec<(f64, f64, f64, f64)> = lowered
+            .primitives
+            .iter()
+            .filter(|p| p.segment_kind == SupportSegmentKind::Member)
+            .map(|p| {
+                let (s, e) = (p.start_mm[2].get(), p.end_mm[2].get());
+                if s < e {
+                    (s, e, p.start_radius_mm.get(), p.end_radius_mm.get())
+                } else {
+                    (e, s, p.end_radius_mm.get(), p.start_radius_mm.get())
+                }
+            })
+            .filter(|span| span.1 - span.0 > 1.0e-9)
+            .collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        spans
+    }
+
+    /// The first downward-facing annular step in `spans` that the printer
+    /// cannot bridge: two frusta that meet at a plane where the upper one starts
+    /// wider than the lower one ends by MORE than `max_step_mm`, the radius one
+    /// layer may overhang its neighbour below (the lean law's `h * cot(theta_sat)`,
+    /// the step the load-step cones are drawn at). A staircase of steps no larger
+    /// than that is a cone to the printer.
+    fn first_downward_step(
+        spans: &[(f64, f64, f64, f64)],
+        max_step_mm: f64,
+    ) -> Option<(f64, f64, f64)> {
+        spans.windows(2).find_map(|pair| {
+            let (low, up) = (pair[0], pair[1]);
+            ((up.0 - low.1).abs() < 1.0e-9 && up.2 > low.3 + max_step_mm * (1.0 + 1.0e-6))
+                .then_some((up.0, up.2, low.3))
+        })
+    }
+
+    /// **A bay-local widening is drawn as a cone, never as a step** (flare lane,
+    /// challenger 7). A post that is thin under a bay and wide through it (0.06
+    /// mm below layer 30, 0.30 mm from the bay, narrowing again above) is lowered
+    /// by the production `drawn_chords`, `merge_short_spans` and
+    /// `cone_the_shoulders`: when the profile widens by a RAMP at the permitted
+    /// underside slope, every widening is a frustum no steeper than the lean
+    /// law's slope and no two frusta meet in a downward-facing step. The same
+    /// post with the bay's width written as a bare step (no ramp) is the profile
+    /// the challenger reproduced, and the lowering draws the step there: the
+    /// check below finds it, so it is a check that can fail.
+    #[test]
+    fn a_widening_under_a_bay_is_drawn_as_a_cone_and_a_bare_step_is_found() {
+        let slope = drawn_span_rules().expect("the registry").cone_slope;
+        let per_layer = (6.0 - 1.0) / 100.0;
+        let gain = slope * per_layer;
+        // (a handful of layers: the cast is exact)
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let ramp_layers = ((0.30_f64 - 0.06) / gain).ceil() as usize;
+        let with_ramp: Vec<f64> = (0..100)
+            .map(|j| {
+                let tip = 0.1;
+                if j < 30 {
+                    0.06
+                } else if j < 30 + ramp_layers {
+                    (0.06 + gain * (j - 30 + 1) as f64).min(0.30)
+                } else if j < 70 {
+                    0.30
+                } else {
+                    0.30 + (tip - 0.30) * (j - 70) as f64 / 29.0
+                }
+            })
+            .collect();
+        let bare: Vec<f64> = (0..100)
+            .map(|j| if j < 30 { 0.06 } else if j < 70 { 0.30 } else { 0.1 })
+            .collect();
+        let draw = |profile: Vec<f64>| {
+            let mut arm = landed_arm(foot());
+            arm.radius_profile_mm = profile;
+            member_spans(&lower(&[arm]))
+        };
+        let ramped = draw(with_ramp);
+        let max_step = gain;
+        assert!(
+            first_downward_step(&ramped, max_step).is_none(),
+            "the ramped widening has a downward-facing step past one layer's overhang: {:?}",
+            first_downward_step(&ramped, max_step)
+        );
+        for span in &ramped {
+            let rise = span.1 - span.0;
+            assert!(
+                (span.3 - span.2) / rise <= slope * (1.0 + 1.0e-6),
+                "a frustum widens upward faster than the permitted underside slope {slope}: {span:?}"
+            );
+        }
+        assert!(
+            ramped.iter().any(|span| span.2.max(span.3) > 0.29),
+            "anti-vacuity: the bay's width is drawn"
+        );
+        let stepped = draw(bare);
+        assert!(
+            first_downward_step(&stepped, max_step).is_some(),
+            "the check finds the bare step the lowering draws for it: {stepped:?}"
+        );
+    }
 }
 
 #[cfg(test)]

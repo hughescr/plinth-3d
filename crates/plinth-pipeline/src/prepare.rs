@@ -4214,13 +4214,23 @@ fn print_sweep_disclosure(
     );
     for warning in lane.warnings.iter().take(20) {
         println!(
-            "[sweep {model}]   unbraced_run_over_limit: arm {} layers {}..{} runs {:.3} mm \
-             against a limit of {:.3} mm; refused by: {}; descent last changed by: {}",
+            "[sweep {model}]   {}: arm {} layers {}..{} runs {:.3} mm \
+             against a limit of {:.3} mm{}; refused by: {}; descent last changed by: {}",
+            if warning.neck_share >= 1.0 {
+                "foot_neck_over_limit"
+            } else {
+                "unbraced_run_over_limit"
+            },
             warning.strut_id,
             warning.k_lo,
             warning.k_top,
             warning.length_mm,
             warning.limit_mm,
+            if warning.neck_share > 0.0 {
+                format!(" (the model foot's neck and cone alone use {:.2} of the pixel)", warning.neck_share)
+            } else {
+                String::new()
+            },
             lane.refusal_notes.get(&warning.strut_id).map_or_else(
                 || {
                     "no rung recorded a refusal (the ladder saw it within its limit or ended \
@@ -4241,6 +4251,17 @@ fn print_sweep_disclosure(
                 .unwrap_or("not recorded"),
         );
     }
+    println!(
+        "[sweep {model}] model feet read through their neck: {} foot runs taken up by the ladder; \
+         {} thickenings refused because the neck and cone take the whole pixel; {} thickenings \
+         written bay-local on a connected frame that held; {} kept raised from the foot because \
+         the frame did not hold; {} posts widened at a band's joints to the diagonal's radius",
+        lane.foot_runs_read_through_neck,
+        lane.thicken_refused_neck,
+        lane.thicken_bay_local,
+        lane.carry_down_kept_frame,
+        lane.posts_raised_at_a_joint,
+    );
     println!(
         "[sweep {model}] slenderness p50 {:.1}:1 max {:.1}:1; overloaded arms {}; \
          model sections over X_ALLOWED {}; peel field {:?} (area {:?}, tilt {:?}); \
