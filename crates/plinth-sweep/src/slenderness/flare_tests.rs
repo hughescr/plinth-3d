@@ -77,7 +77,7 @@ fn post(
         center_mm: [grid.center_x_mm(col), grid.center_y_mm(row)],
         kind: StrutKind::Arm,
         min_radius_mm: 0.0,
-        thickened_mm: Vec::new(),
+        thickened_mm: Vec::new(), foot_radius_mm: None,
         seat_on_strut: None,
         k_top,
         k_bottom: 0,
@@ -197,9 +197,34 @@ fn thicken_refuses_a_foot_run_its_neck_cannot_hold_and_sizes_the_rest() {
     let over = over_runs(&grid, &state, &struts, &law, 0);
     assert_eq!(over.len(), 1);
     let mut outcome = SlendernessOutcome::default();
-    assert!(!super::thicken(&context, &mut state, &mut struts, &over[0], &mut outcome));
+    // The shaft cannot hold the run through a 0.05 mm neck at any width, so the
+    // neck is what grows (round 6, the enlarge-foot rung): counted as a neck
+    // refusal first, then handed to the foot.
+    assert!(super::thicken(&context, &mut state, &mut struts, &over[0], &mut outcome));
     assert_eq!(outcome.thicken_refused_neck, 1, "{outcome:?}");
-    assert!(struts[0].thickened_mm.is_empty(), "nothing is written for a neck no width holds");
+    assert_eq!(outcome.feet_enlarged, 1, "{outcome:?}");
+    assert!(
+        struts[0].foot_radius_mm.is_some_and(|radius| radius > 0.05 + 1e-9),
+        "the foot is wider than the hairline it was: {:?}",
+        struts[0].foot_radius_mm
+    );
+    // A run no foot up to the registered maximum holds goes on to the other rungs:
+    // the store is put back, nothing is written, and the refusal is counted.
+    let mut hopeless = vec![post(&grid, 0, 100, 4000, Landing::Model { layer: 0 }, &|_| 0.05)];
+    let hopeless_context = super::SlendernessContext { layers: 4001, ..context };
+    let mut hopeless_state = TieState::build(&hopeless_context, &hopeless);
+    let hopeless_over = over_runs(&grid, &hopeless_state, &hopeless, &law, 0);
+    let mut hopeless_outcome = SlendernessOutcome::default();
+    assert!(!super::thicken(
+        &hopeless_context,
+        &mut hopeless_state,
+        &mut hopeless,
+        &hopeless_over[0],
+        &mut hopeless_outcome
+    ));
+    assert_eq!(hopeless_outcome.foot_enlarge_refused, 1, "{hopeless_outcome:?}");
+    assert_eq!(hopeless[0].foot_radius_mm, None, "the store is put back");
+    assert!(hopeless[0].thickened_mm.is_empty(), "nothing is written for a run no foot holds");
     // The same post on the plate is thickened: the refusal is the foot's.
     let mut plate = vec![post(&grid, 0, 100, 226, Landing::Plate, &|_| 0.05)];
     let mut plate_state = TieState::build(&context, &plate);
@@ -249,6 +274,104 @@ fn thicken_refuses_a_foot_run_its_neck_cannot_hold_and_sizes_the_rest() {
     assert!(
         blind_after.iter().any(UnbracedRun::over_limit),
         "the blind root leaves the run over its limit once the neck is read: {blind_after:?}"
+    );
+}
+
+/// **T5 (round 6): an enlarged foot is the foot that is read, measured and
+/// drawn** (challenger point 3). A 0.05 mm hairline foot under an 11.3 mm run no
+/// shaft can hold is enlarged by the rung; the radius it stores is the one the
+/// structural reading takes ([`SlendernessLaw::foot_contact`], which
+/// `run_reading` and the frame checks call), the one the final measurement takes
+/// (`model_feet::foot_radius_mm`, the same function, which a late measurement
+/// can only raise), the one the adapter hands the lowering, and the radius of the
+/// foot ball the lowering emits.
+///
+/// SABOTAGE: an `enlarge_foot` that returns false (the rung off) leaves the
+/// store `None` and fails the first assertion; a measurement that sized the foot
+/// by the area law alone (the radius before this round, 0.05 mm) fails the
+/// second; a lowering that took the root radius (not the stored one) fails the
+/// last.
+#[test]
+fn an_enlarged_foot_is_the_foot_that_is_read_measured_and_drawn() {
+    use plinth_core::{Finite, LayerPlan, PositiveFinite};
+    use plinth_support::{lower_sweep_arms, BuildFrame, SupportSegmentKind};
+    let grid = crate::grid::lay_out_at(0.0, 0.0, H, 200, 200);
+    let history = crate::up_sweep::ColumnHistory::new(&grid);
+    let keep_out = crate::drain::DrainKeepOut::none();
+    let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
+    // The production law: the owner's foot rule on, as the final measurement has it.
+    let law = feet_law().with_owner_foot_rule();
+    let context = context(&grid, &history, &keep_out, &lean, &law);
+    let mut struts = vec![post(&grid, 0, 100, 226, Landing::Model { layer: 0 }, &|_| 0.05)];
+    let mut state = TieState::build(&context, &struts);
+    let over = over_runs(&grid, &state, &struts, &law, 0);
+    let mut outcome = SlendernessOutcome::default();
+    assert!(super::thicken(&context, &mut state, &mut struts, &over[0], &mut outcome), "{outcome:?}");
+    let enlarged = struts[0].foot_radius_mm.expect("the rung stored the foot it chose");
+    assert!(enlarged > 0.05 + 1e-9, "anti-vacuity: the foot grew past the hairline: {enlarged}");
+    // THE STRUCTURAL READING takes the stored radius.
+    let (read, _) = law.foot_contact(&struts[0]).expect("a model foot is read");
+    assert!(read >= enlarged - 1e-12, "the reading ({read}) is the stored foot ({enlarged}) or wider");
+    // THE FINAL MEASUREMENT takes it too, and cannot overwrite it with the area law's.
+    let body = crate::model_feet::foot_body_radius_mm(&struts[0]);
+    let measured = crate::model_feet::foot_radius_mm(0.0, 12.0, 0.05, 1.0, body, struts[0].foot_radius_mm);
+    assert!(
+        (measured - read).abs() < 1e-12,
+        "measurement ({measured}) and reading ({read}) are one function"
+    );
+    let overwritten = crate::model_feet::foot_radius_mm(0.0, 12.0, 0.05, 1.0, 0.05, None);
+    assert!(
+        (overwritten - 0.05).abs() < 1e-12 && measured > overwritten + 1e-9,
+        "anti-vacuity: the area law alone reads {overwritten}"
+    );
+    // THE ADAPTER AND THE LOWERING: the foot ball is wider by the owner's ratio.
+    let centre = struts[0].center_mm;
+    let strut = {
+        let mut strut = struts[0].clone();
+        strut.seat_face.foot = Some(crate::model_feet::FootFace {
+            face: Some(crate::model_feet::LandedFace {
+                normal: [0.0, 0.0, 1.0],
+                point_mm: [centre[0], centre[1], 0.0],
+                face: 0,
+            }),
+            contact_radius_mm: measured,
+            need_mm2: 0.0,
+            on_model_cells: 1,
+            disc_cells: 1,
+            planned_mm2: 0.0,
+            real_mm2: None,
+        });
+        strut
+    };
+    let arm = crate::adapter::sweep_arm(
+        &strut,
+        [centre[0], centre[1], 226.0 * H],
+        [centre[0], centre[1], 0.0],
+        None,
+        state.profiles[0].clone(),
+    );
+    let layers = LayerPlan::new(0.0, vec![H; 400]).expect("a uniform layer plan");
+    let frame = BuildFrame::new(
+        Finite::new(0.0).expect("finite plate"),
+        PositiveFinite::new(5.0).expect("positive lift"),
+    );
+    let lowered = lower_sweep_arms(std::slice::from_ref(&arm), frame, &layers, 100_000, 1 << 30)
+        .expect("the lowering refuses only about the request");
+    let root = state.profiles[0].first().copied().expect("a root");
+    let drawn_foot = lowered.model_foot_radius_mm[0];
+    assert!(
+        (drawn_foot - measured.min(root)).abs() < 1e-9,
+        "the lowering draws the foot the structure was read through: {drawn_foot} against {measured} (root {root})"
+    );
+    let foot_ball = lowered
+        .primitives
+        .iter()
+        .rfind(|p| p.segment_kind == SupportSegmentKind::ContactSphere)
+        .expect("a foot ball");
+    assert!(
+        foot_ball.start_radius_mm.get() >= 1.25 * drawn_foot - 1e-9,
+        "the ball ({}) is wider than its neck ({drawn_foot})",
+        foot_ball.start_radius_mm.get()
     );
 }
 
@@ -455,6 +578,66 @@ fn a_bay_local_thickening_is_planned_checked_and_committed_as_one_thing() {
     }
     assert!(struts[0].thickened_mm[local.apex] >= plan.root - 1.0e-12);
     assert!(state.profiles[0][local.apex] >= plan.root - 1.0e-12);
+}
+
+/// **T3 (round 6): a post under a band widens in ONE cone from its foot to the
+/// root at the run's base, never a hairline under a fat section** (the owner's
+/// picture 28, the middle post: "a hairline lower half"). The same two footed
+/// posts and bands as above with no wall beside the foot: the plan's ramp starts at
+/// the foot's first layer, reaches the root at the run's base, rises by the same
+/// amount every layer and never steeper than the permitted underside slope, so
+/// the radius along the post is unimodal (widest at the base of the run, none
+/// under the cone thinner than the cone). With a cured wall beside the foot the
+/// cone would enter the final gap and the steepest ramp higher up is taken
+/// (`a_bay_local_thickening_is_planned_checked_and_committed_as_one_thing`).
+///
+/// SABOTAGE: `bay_local_span(.., lower_cone = false)` (the round-5 ramp) starts the
+/// ramp at the bay, not at the foot, and fails the first assertion.
+#[test]
+fn a_post_under_a_band_widens_in_one_cone_from_its_foot() {
+    let grid = crate::grid::lay_out_at(0.0, 0.0, H, 200, 200);
+    let history = crate::up_sweep::ColumnHistory::new(&grid);
+    let keep_out = crate::drain::DrainKeepOut::none();
+    let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
+    let law = feet_law();
+    let context = context(&grid, &history, &keep_out, &lean, &law);
+    let mut outcome = SlendernessOutcome::default();
+    let bands = [(20, 40), (50, 70), (80, 100)];
+    let (struts, state) = footed_pair(&grid, &context, &bands, 200, 0.10, 40, &mut outcome);
+    let run = run_above_the_bands(&grid, &state, &struts, &law);
+    let fits = |post: &crate::foot_neck::Reading| run.length_mm <= law.max_unbraced_mm(post.radius_mm);
+    let base = super::plan_thicken(&context, &state, &struts, &run, &fits)
+        .expect("a plan")
+        .expect("not refused");
+    // The cone's own plan (the ladder takes it where it is the cheaper of the
+    // two plans; here its root is the connected frame's, larger than the local
+    // run's, and the plan taken may be either).
+    let plan = super::bay_local_plan(&context, &state, &struts, &run, &base, true)
+        .expect("a lower-cone plan whose connected frame holds");
+    let local = plan.local.expect("the plan is bay-local");
+    assert_eq!(local.start, struts[0].k_bottom + 1, "the cone starts at the foot: {local:?}");
+    assert_eq!(local.apex, run.k_lo, "and reaches the root at the run's base: {local:?}");
+    // One straight cone: the same gain every layer, never under the foot's own radius,
+    // never steeper than the permitted underside slope per layer.
+    let slope_per_layer = law.cone_slope() * H;
+    assert!(local.gain_per_layer_mm <= slope_per_layer + 1e-12, "{local:?} against {slope_per_layer}");
+    let foot = super::drawn_at(&struts[0], &state.profiles[0], struts[0].k_bottom).expect("a foot radius");
+    let mut previous = plan.wanted(0, local.start);
+    assert!((previous - foot).abs() < 1e-9, "the cone starts at the foot's radius: {previous} against {foot}");
+    for layer in local.start + 1..=local.apex {
+        let here = plan.wanted(0, layer);
+        assert!(
+            (here - previous - local.gain_per_layer_mm).abs() < 1e-9 || layer == local.apex,
+            "layer {layer}: {previous} -> {here}"
+        );
+        assert!(here >= previous - 1e-12, "unimodal: no layer is thinner than the one below it");
+        previous = here;
+    }
+    assert!((plan.wanted(0, local.apex) - plan.root).abs() < 1e-9);
+    // The steepest-ramp form it replaces starts higher, and is the same root.
+    let steep = super::bay_local_span(&context, &state, &struts, &run, plan.root, false)
+        .expect("the steepest ramp");
+    assert!(steep.start > local.start, "anti-vacuity: the old ramp starts at {} not at the foot", steep.start);
 }
 
 /// **R2 for a model-footed post: raise it at the joint, never refuse the band for

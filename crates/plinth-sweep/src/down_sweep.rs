@@ -2448,7 +2448,7 @@ fn insert_for_load(
                 ],
                 kind: crate::StrutKind::Arm,
                 min_radius_mm: 0.0,
-                thickened_mm: Vec::new(),
+                thickened_mm: Vec::new(), foot_radius_mm: None,
                 seat_on_strut: None,
                 k_top: layer + 1,
                 // Still growing: the descent decides where this stops, the

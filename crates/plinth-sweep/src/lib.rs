@@ -224,6 +224,18 @@ pub struct SweepStrut {
     /// member some load reaches still grows under the law. Keyed by absolute
     /// layer so it survives a re-run that re-sizes the ledger.
     pub thickened_mm: Vec<f64>,
+    /// **The foot contact radius this model-landed post was given** (round 6,
+    /// 2026-10-14), the one authoritative store: the enlarge-foot rung of the
+    /// slenderness lane writes it where a run cannot hold through the area
+    /// law's hairline neck, and [`model_feet::foot_radius_mm`] (the ONE reader)
+    /// takes the larger of it and the owner's foot rule. The structural reading
+    /// ([`slenderness::SlendernessLaw::foot_contact`]: candidate sizing,
+    /// `run_reading`, the frame checks), the final foot measurement
+    /// ([`model_feet::measure`]), the adapter and the lowering all read the
+    /// foot through that reader, so a foot enlarged here is the foot that is
+    /// checked and the foot that is drawn. `None`: the rule's own radius. It
+    /// only ever raises a foot; a later measurement cannot overwrite it.
+    pub foot_radius_mm: Option<f64>,
     /// For a brace, the arm its TOP seats on. `None` for everything else.
     ///
     /// The bottom end of a brace is its `landing`, which the ledger already
@@ -2617,6 +2629,7 @@ fn run_sweep_inner(
             policy.overhang_centre_deg - 0.5 * policy.overhang_transition_deg,
         )
         .with_foot_sizing(policy.x_allowed)
+        .with_owner_foot_rule()
     } else {
         slenderness::SlendernessLaw::disabled()
     };
@@ -3684,7 +3697,6 @@ fn run_sweep_inner(
             &slices,
             policy.x_allowed,
             limits,
-            &births,
         );
     }
     // THE FOOTPRINT RULE (fix/tip-trim, 2026-09-28): every tip's contact disc,
@@ -3865,7 +3877,6 @@ fn run_sweep_inner(
             &slices,
             policy.x_allowed,
             limits,
-            &births,
         );
     }
     finish_heads(&mut sweep_plan);
@@ -4322,7 +4333,6 @@ fn tip_bounds(
     slices: &[Vec<plinth_support::perception::SliceSolid>],
     x_allowed: f64,
     reach_mm: f64,
-    births: &births::Births,
 ) -> Vec<contact_growth::TipBounds> {
     let height = plan.layer_height_mm;
     let points: Vec<Option<(usize, [f64; 2])>> = arms
@@ -4354,19 +4364,6 @@ fn tip_bounds(
                 .flatten()
                 .map(|carried| carried.max(0.0) / x_allowed),
             feature_chord_mm: chord,
-            // The births this tip was seated to hold stay inside its ball
-            // (the placement's hold, measured from the same column centre).
-            hold_floor_mm: strut
-                .held_births
-                .iter()
-                .filter_map(|&(layer, id)| {
-                    births
-                        .at(layer)
-                        .iter()
-                        .find(|birth| birth.id == id)
-                        .map(|birth| birth.reach_from(strut.center_mm))
-                })
-                .reduce(f64::max),
         })
         .collect()
 }
@@ -4384,7 +4381,6 @@ fn grow_contact_balls(
     slices: &[Vec<plinth_support::perception::SliceSolid>],
     x_allowed: f64,
     limits: contact_growth::GrowthLimits,
-    births: &births::Births,
 ) -> contact_growth::ContactOutcome {
     for strut in &mut plan.struts {
         strut.seat_face.contact_ball_radius_mm = None;
@@ -4393,118 +4389,15 @@ fn grow_contact_balls(
     let pixel_area_mm2 = plan.grid.pitch_mm() * plan.grid.pitch_mm();
     // A chord wider than twice the largest ball can bound no ball: the window
     // the section is read in is that wide on each side.
-    let mut bounds = tip_bounds(plan, &arms, slices, x_allowed, 2.0 * limits.ball_radius_mm, births);
-    let (mut outcome, mut grown) =
-        contact_growth::grow(env, &arms, sites, &bounds, limits, pixel_area_mm2);
-    // A BALL DRAWN SMALLER MUST STILL STAND UNDER EVERY PIECE OF MODEL THE
-    // OWNER'S BALL STOOD UNDER (round 5 review, 2026-10-14): a piece of model
-    // that starts a layer with nothing under it is held only by the support
-    // cured beneath it, and the owner's ball may be what did. A tip whose
-    // reduced ball would leave such a piece (a birth) uncovered keeps the
-    // owner's ball, and the field is graded again. One round settles it: a
-    // ball kept at the owner's size covers what it covered.
-    let lost = births_lost_by_reduction(plan, &arms, &grown, births, env.layer_plan);
-    if !lost.is_empty() {
-        let kept: Vec<usize> = lost.iter().map(|&(strut, _)| strut).collect();
-        for (strut, profile_mm) in lost {
-            bounds[strut].hold_floor_mm = Some(profile_mm);
-        }
-        (outcome, grown) =
-            contact_growth::grow(env, &arms, sites, &bounds, limits, pixel_area_mm2);
-        outcome.kept_for_births = kept;
-    }
+    let bounds = tip_bounds(plan, &arms, slices, x_allowed, 2.0 * limits.ball_radius_mm);
+    // NO BALL IS DRAWN SMALLER THAN THE OWNER'S (round 6, 2026-10-14), so every
+    // birth the owner's ball stood under is still stood under: the round-5
+    // reduction and its births guard are gone, and so is the second grading.
+    let (outcome, grown) = contact_growth::grow(env, &arms, sites, &bounds, limits, pixel_area_mm2);
     for (strut, radius) in plan.struts.iter_mut().zip(grown) {
         strut.seat_face.contact_ball_radius_mm = radius;
     }
     outcome
-}
-
-/// **The tips whose reduced ball leaves a birth uncovered**, with the owner's
-/// ball radius each is to keep (see [`grow_contact_balls`]). A birth at layer
-/// `j` is stood under by a ball when the ball's section at the lamina under it
-/// (`j - 1`), about the ball centre, reaches a pixel of it; the owner's ball
-/// reaches it and the reduced one does not. One batched
-/// disc call per ball size, then arithmetic over the births of the layers the
-/// owner's ball spans.
-fn births_lost_by_reduction(
-    plan: &SweepPlan,
-    arms: &[plinth_support::SweepArm],
-    grown: &[Option<f64>],
-    births: &births::Births,
-    layers: &LayerPlan,
-) -> Vec<(usize, f64)> {
-    let candidates: Vec<usize> = (0..arms.len())
-        .filter(|&row| arms[row].seats_into_model && grown[row].is_some())
-        .collect();
-    if candidates.is_empty() {
-        return Vec::new();
-    }
-    let profile_arms: Vec<plinth_support::SweepArm> = candidates
-        .iter()
-        .map(|&row| plinth_support::SweepArm {
-            contact_ball_radius_mm: None,
-            ..arms[row].clone()
-        })
-        .collect();
-    let drawn_arms: Vec<plinth_support::SweepArm> = candidates
-        .iter()
-        .map(|&row| plinth_support::SweepArm {
-            contact_ball_radius_mm: grown[row],
-            ..arms[row].clone()
-        })
-        .collect();
-    let (Ok(profile), Ok(drawn)) = (
-        plinth_support::tip_contact_discs(&profile_arms, layers),
-        plinth_support::tip_contact_discs(&drawn_arms, layers),
-    ) else {
-        return Vec::new();
-    };
-    let height = plan.layer_height_mm;
-    let mut lost = Vec::new();
-    for ((&row, profile), drawn) in candidates.iter().zip(&profile).zip(&drawn) {
-        let (Some(profile), Some(drawn)) = (profile, drawn) else {
-            continue;
-        };
-        // Only a ball drawn smaller than the owner's can leave a birth.
-        if drawn.ball_radius_mm >= profile.ball_radius_mm * (1.0 - 1e-9) {
-            continue;
-        }
-        let section = |disc: &plinth_support::TipContactDisc, z: f64| -> f64 {
-            let rise = z - disc.ball_centre_mm[2];
-            (disc.ball_radius_mm * disc.ball_radius_mm - rise * rise).max(0.0).sqrt()
-        };
-        let low = profile.ball_centre_mm[2] - profile.ball_radius_mm;
-        let high = profile.ball_centre_mm[2] + profile.ball_radius_mm;
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "a non-negative rounded layer index of a bounded layer count"
-        )]
-        let (first, last) = (
-            (((low - plan.plate_z_mm) / height).floor().max(1.0)) as usize,
-            (((high - plan.plate_z_mm) / height).ceil().max(1.0)) as usize,
-        );
-        let owner_centre = [profile.ball_centre_mm[0], profile.ball_centre_mm[1]];
-        let drawn_centre = [drawn.ball_centre_mm[0], drawn.ball_centre_mm[1]];
-        'layers: for layer in first..=last {
-            // The lamina under layer `layer`.
-            #[expect(clippy::cast_precision_loss, reason = "a layer index")]
-            let under_z = plan.plate_z_mm + (layer as f64 - 0.5) * height;
-            let (owner_reach, drawn_reach) = (section(profile, under_z), section(drawn, under_z));
-            if owner_reach <= 0.0 {
-                continue;
-            }
-            for birth in births.at(layer) {
-                if birth.touches_disc(owner_centre, owner_reach)
-                    && !birth.touches_disc(drawn_centre, drawn_reach)
-                {
-                    lost.push((row, profile.ball_radius_mm));
-                    break 'layers;
-                }
-            }
-        }
-    }
-    lost
 }
 
 /// **A headed arm carries its own seat plane** (the finish of the head
@@ -5749,7 +5642,7 @@ mod removal_tests {
             center_mm: [0.0, 0.0],
             kind: crate::StrutKind::Arm,
             min_radius_mm: 0.0,
-            thickened_mm: Vec::new(),
+            thickened_mm: Vec::new(), foot_radius_mm: None,
             seat_on_strut: None,
             k_top,
             k_bottom,
@@ -5917,7 +5810,7 @@ mod removal_tests {
             center_mm: [0.0, 0.0],
             kind: crate::StrutKind::Arm,
             min_radius_mm: 0.0,
-            thickened_mm: Vec::new(),
+            thickened_mm: Vec::new(), foot_radius_mm: None,
             seat_on_strut: None,
             k_top: 5,
             k_bottom: 0,
@@ -5964,7 +5857,7 @@ mod removal_tests {
             center_mm: [0.0, 0.0],
             kind: crate::StrutKind::Arm,
             min_radius_mm: 0.0,
-            thickened_mm: Vec::new(),
+            thickened_mm: Vec::new(), foot_radius_mm: None,
             seat_on_strut: None,
             k_top: 5,
             k_bottom,

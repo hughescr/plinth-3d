@@ -3297,8 +3297,8 @@ fn print_sweep_disclosure(
                  limit {:.4} mm radius) in {} round(s); {} held below the limit so the ball's \
                  lowest point stays on its shaft ({} of them left short by it); {} left short by \
                  the ball-to-shaft ratio and {} by a feature narrower than the load's contact; \
-                 {} profile balls past their feature's chord and {} past the ratio, {} of them \
-                 drawn smaller (at the ceiling, never under their shaft end); {} still short of \
+                 {} profile balls past their feature's chord and {} past the ratio (kept at the \
+                 owner's size: no ball is drawn under it); {} still short of \
                  the need; {} balls whose lowest point \
                  stood outside their shaft as planned given a collar that holds it{}",
                 contact.tips_measured,
@@ -3317,7 +3317,6 @@ fn print_sweep_disclosure(
                 contact.feature_bound,
                 contact.ungrown_over_feature,
                 contact.ungrown_over_ratio,
-                contact.reduced,
                 contact.short.len(),
                 emission.tip_pole_collars,
                 if emission.tip_pole_collars_steeper_than_law > 0 {
@@ -3334,17 +3333,9 @@ fn print_sweep_disclosure(
                 println!(
                     "[sweep {model}] WARNING tip of arm {} draws a ball of {:.4} mm radius (a \
                      contact disc {:.4} mm wide) on a feature whose narrowest cured chord at the \
-                     strike layer is {:.4} mm: the ball is already as small as its shaft end \
-                     and the births it holds allow",
+                     strike layer is {:.4} mm: the ball is the owner's ball for its neck, the \
+                     smallest it is drawn",
                     over.strut, over.ball_radius_mm, over.disc_width_mm, over.chord_mm,
-                );
-            }
-            if !contact.kept_for_births.is_empty() {
-                println!(
-                    "[sweep {model}] profile balls kept at the owner's size because a smaller \
-                     ball would leave a first layer over nothing uncovered (arms {:?}); these are \
-                     the tips a second contact is for",
-                    contact.kept_for_births,
                 );
             }
             for short in &contact.short {
@@ -4302,12 +4293,16 @@ fn print_sweep_disclosure(
         "[sweep {model}] model feet read through their neck: {} foot runs taken up by the ladder; \
          {} thickenings refused because the neck and cone take the whole pixel; {} thickenings \
          written bay-local on a connected frame that held; {} kept raised from the foot because \
-         the frame did not hold; {} posts widened at a band's joints to the diagonal's radius",
+         the frame did not hold; {} posts widened at a band's joints to the diagonal's radius; \
+         enlarge-foot rung: {} runs handed to the foot, {} feet enlarged, {} runs no foot held",
         lane.foot_runs_read_through_neck,
         lane.thicken_refused_neck,
         lane.thicken_bay_local,
         lane.carry_down_kept_frame,
         lane.posts_raised_at_a_joint,
+        lane.foot_enlarge_tried,
+        lane.feet_enlarged,
+        lane.foot_enlarge_refused,
     );
     println!(
         "[sweep {model}] slenderness p50 {:.1}:1 max {:.1}:1; overloaded arms {}; \

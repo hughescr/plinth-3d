@@ -53,6 +53,85 @@ use crate::tip_landing::{nearest_faces, triangles_of, TipLanding};
 use crate::up_sweep::{foot_on_model, ColumnHistory};
 use crate::{Landing, SweepPlan};
 
+/// **THE FOOT'S CONTACT RADIUS: the one reader** (round 6, 2026-10-14). The
+/// candidate sizing and frame checks of the slenderness lane
+/// ([`crate::slenderness::SlendernessLaw::foot_contact`]), the final
+/// measurement ([`measure`]), the adapter and the lowering all take the foot's
+/// radius from here, so the radius a run is read through is the radius the file
+/// draws.
+///
+/// It is the largest of three, inside the registered clamps:
+///
+/// * the area law's radius for the load the foot passes
+///   (`pi r^2 >= carried / X_ALLOWED`, [`size_arm`]'s own law);
+/// * the owner's foot rule: the neck under the ChituBox tail contact of a body
+///   of this size ([`plinth_core::TailContactProfiles::neck_radius_mm`]: the
+///   tail touch is a DIAMETER, the sphere's radius half of it, and the neck the
+///   sphere over the tip table's ratio at the neck's own size), never wider than
+///   the body it stands under (a ball more than 1.5 times its shaft is no
+///   neck);
+/// * the radius the enlarge-foot rung gave this post
+///   ([`crate::SweepStrut::foot_radius_mm`]), which only ever raises a foot.
+///
+/// `body_radius_mm` is the post's width at the foot: the area-law section and
+/// any width the slenderness lane has written there.
+#[must_use]
+pub(crate) fn foot_radius_mm(
+    carried_mm2: f64,
+    x_allowed: f64,
+    r_min_mm: f64,
+    r_max_mm: f64,
+    body_radius_mm: f64,
+    stored_mm: Option<f64>,
+) -> f64 {
+    let area = if x_allowed > 0.0 {
+        (carried_mm2.max(0.0) / x_allowed / core::f64::consts::PI).sqrt()
+    } else {
+        0.0
+    };
+    let owner = owner_foot_neck_mm(body_radius_mm).min(body_radius_mm);
+    area.max(owner)
+        .max(stored_mm.filter(|stored| stored.is_finite()).unwrap_or(0.0))
+        .clamp(r_min_mm, r_max_mm)
+}
+
+/// The owner's ball-to-neck ratio at a neck of `neck_radius_mm` RADIUS (his tip
+/// table, linear in diameter, held outside it), 1.25 to 1.5; 1.25 where the
+/// registry cannot be read.
+#[must_use]
+pub(crate) fn owner_ball_factor(neck_radius_mm: f64) -> f64 {
+    plinth_core::m0_constants().map_or(1.25, |constants| {
+        constants
+            .evidence()
+            .chitubox_tip_contact_profiles()
+            .value()
+            .ball_factor(neck_radius_mm)
+    })
+}
+
+/// The neck of the owner's foot contact under a body of `body_radius_mm`, or 0
+/// where the registry cannot be read.
+fn owner_foot_neck_mm(body_radius_mm: f64) -> f64 {
+    if !(body_radius_mm.is_finite() && body_radius_mm > 0.0) {
+        return 0.0;
+    }
+    plinth_core::m0_constants().map_or(0.0, |constants| {
+        plinth_core::chitubox_tail_touch_profiles().neck_radius_mm(
+            body_radius_mm,
+            constants.evidence().chitubox_tip_contact_profiles().value(),
+        )
+    })
+}
+
+/// The post's width at its foot, as the foot rule reads it: the ledger's root
+/// and the slenderness width written at the post's first layer.
+#[must_use]
+pub(crate) fn foot_body_radius_mm(strut: &crate::SweepStrut) -> f64 {
+    let ledger = strut.radius_mm.first().copied().unwrap_or(0.0);
+    let written = strut.thickened_mm.get(strut.k_bottom).copied().unwrap_or(0.0);
+    ledger.max(written)
+}
+
 /// The face a model foot stands on.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LandedFace {
@@ -238,7 +317,19 @@ pub fn measure(
         });
         let strut = &plan.struts[index];
         let carried = strut.carried_mm2.first().copied().unwrap_or(0.0).max(0.0);
-        let radius = size_arm(carried, sizing);
+        // THE ONE READER of the foot's radius (round 6): the same function the
+        // slenderness lane reads the foot through, on the post's own state, so a
+        // foot enlarged there is the foot measured and drawn here, never
+        // overwritten by a later measurement.
+        let radius = foot_radius_mm(
+            carried,
+            sizing.x_allowed,
+            sizing.tip_radius_min_mm,
+            sizing.tip_radius_max_mm,
+            foot_body_radius_mm(strut),
+            strut.foot_radius_mm,
+        )
+        .max(size_arm(carried, sizing));
         let (on, total) =
             foot_on_model(&plan.grid, history, strut.base_cell(), strut.k_bottom, radius);
         let flat_root = strut.radius_mm.first().copied().unwrap_or(radius);

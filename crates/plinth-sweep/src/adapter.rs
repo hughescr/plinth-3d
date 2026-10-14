@@ -171,6 +171,9 @@ pub struct SweepEmission {
     pub model_foot_radius_mm: Vec<f64>,
     pub model_foot_contact_disc_radius_mm: Vec<f64>,
     pub model_foot_ball_radius_mm: Vec<f64>,
+    /// Knee spheres the lowering wrote where a member's chained frusta turn by
+    /// more than a pixel of their section (round 6).
+    pub knee_spheres: usize,
 }
 
 impl SweepEmission {
@@ -269,6 +272,7 @@ pub fn to_primitives(
         model_foot_radius_mm,
         model_foot_contact_disc_radius_mm,
         model_foot_ball_radius_mm,
+        knee_spheres,
     } = lower_sweep_arms_with_hull_reference(
         &arms,
         hull_reference.as_deref(),
@@ -331,6 +335,7 @@ pub fn to_primitives(
         model_foot_radius_mm,
         model_foot_contact_disc_radius_mm,
         model_foot_ball_radius_mm,
+        knee_spheres,
     })
 }
 
@@ -1060,6 +1065,13 @@ pub(crate) fn sweep_arm(
         }
         None => (strut.seat_normal, seat_face_point_mm),
     };
+    // A foot is never wider than the post it stands under: a ball more than
+    // 1.5 times the shaft that leaves it is no neck (the owner's ratio ruling).
+    let root_mm = profile
+        .first()
+        .copied()
+        .filter(|root| root.is_finite() && *root > 0.0)
+        .unwrap_or(f64::INFINITY);
     SweepArm {
         seat_mm,
         base_mm,
@@ -1089,7 +1101,7 @@ pub(crate) fn sweep_arm(
                 SweepArmLanding::Model(plinth_support::ModelFoot {
                     face_point_mm: foot.face.map(|face| face.point_mm),
                     face_normal_mm: foot.face.map_or([0.0; 3], |face| face.normal),
-                    contact_radius_mm: foot.contact_radius_mm,
+                    contact_radius_mm: foot.contact_radius_mm.min(root_mm),
                 })
             }
             (Landing::Model { .. } | Landing::Strut { .. }, _) => SweepArmLanding::Landed,
@@ -1429,7 +1441,7 @@ mod tests {
             center_mm: [f64::from(id), 0.0],
             kind,
             min_radius_mm: 0.0,
-            thickened_mm: Vec::new(),
+            thickened_mm: Vec::new(), foot_radius_mm: None,
             seat_on_strut: None,
             k_top: k_bottom + ledger.len(),
             k_bottom,

@@ -46,7 +46,7 @@ pub(crate) fn straight(
         center_mm: [grid.center_x_mm(col), grid.center_y_mm(row)],
         kind: StrutKind::Arm,
         min_radius_mm: 0.0,
-        thickened_mm: Vec::new(),
+        thickened_mm: Vec::new(), foot_radius_mm: None,
         seat_on_strut: None,
         k_top,
         k_bottom: 0,

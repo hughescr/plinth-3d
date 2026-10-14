@@ -65,6 +65,7 @@ mod lip_seat_sized;
 mod load_insertion;
 mod mast_root_clearance;
 mod member_clearance;
+mod member_profile;
 mod model_landing_scar;
 #[cfg(feature = "slow-tests")]
 mod morel_long_posts;
