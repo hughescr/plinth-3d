@@ -1437,7 +1437,7 @@ mod tests {
             interior: false,
             carried_mm2: vec![0.0; ledger.len()],
             radius_mm: ledger,
-            covered_demand: Vec::new(), twin_host: false,
+            covered_demand: Vec::new(), held_birth_cells: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             seat_face: crate::SeatFace::default(),

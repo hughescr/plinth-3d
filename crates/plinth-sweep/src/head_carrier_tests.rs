@@ -54,7 +54,7 @@ pub(crate) fn straight(
         interior: false,
         radius_mm: vec![radius; k_top + 1],
         carried_mm2: vec![0.0; k_top + 1],
-        covered_demand: Vec::new(), twin_host: false,
+        covered_demand: Vec::new(), held_birth_cells: Vec::new(), twin_host: false,
         inserted_by_load: false,
         path: Vec::new(),
         seat_face: SeatFace::default(),

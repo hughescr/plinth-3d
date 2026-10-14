@@ -325,10 +325,9 @@ fn replay_once(
             relax(&mut current, &masks.cover, struts[index].cell, &mut queue, &mut touched);
         }
         if !bridged_current.is_empty() {
-            let roots: Vec<usize> = roots_by_layer[layer]
-                .iter()
-                .flat_map(|&index| crate::births::root_cells(&struts[index]))
-                .collect();
+            let roots = crate::births::BirthRoots::of(
+                roots_by_layer[layer].iter().map(|&index| &struts[index]),
+            );
             context
                 .births
                 .unroot_unseated(layer, &bridged_current, &roots, &masks.cover, &mut current);
@@ -367,11 +366,12 @@ fn replay_once(
             // A bridged birth no surviving arm of this layer stands in is
             // unrooted, however a relax reached it (again after a restore).
             if !bridged_trial.is_empty() {
-                let roots: Vec<usize> = roots_by_layer[layer]
-                    .iter()
-                    .filter(|&&index| !doomed[index])
-                    .flat_map(|&index| crate::births::root_cells(&struts[index]))
-                    .collect();
+                let roots = crate::births::BirthRoots::of(
+                    roots_by_layer[layer]
+                        .iter()
+                        .filter(|&&index| !doomed[index])
+                        .map(|&index| &struts[index]),
+                );
                 context
                     .births
                     .unroot_unseated(layer, &bridged_trial, &roots, &masks.cover, trial);
@@ -522,7 +522,7 @@ mod tests {
             interior: false,
             radius_mm: Vec::new(),
             carried_mm2: Vec::new(),
-            covered_demand: Vec::new(), twin_host: false,
+            covered_demand: Vec::new(), held_birth_cells: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             seat_face: crate::SeatFace::default(),
@@ -798,6 +798,93 @@ mod tests {
         assert_eq!(emitted, expected, "emitted replay.cell_layers is not cells * layers walked");
         assert_ne!(emitted, old_charge, "the old charge, cells * layers * replays");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// JOINT REVIEW 2026-10-13. A birth's own arm is doomed, and a neighbour
+    /// that survives covers ONE ordinary cell of the birth (reach, not
+    /// contact), its seat outside the birth and its tip ball unable to hold
+    /// it. Replay must restore the birth's arm: before the fix it took it
+    /// away (0 refusals, 0 newly unrooted), because every covered cell counted
+    /// as a root of the birth.
+    ///
+    /// Three runs on one real sliced two-box mesh, the real births, raster and
+    /// reach: the neighbour covering one cell, covering all but one cell
+    /// (partial), and holding the whole birth by footprint, which is the only
+    /// kind of coverage that lets the birth's own arm go.
+    #[test]
+    fn a_neighbours_reach_over_part_of_a_birth_does_not_let_its_own_arm_go() {
+        use crate::births::Births;
+        let body = make_box([2.03, 0.3, 1.0], [1.015, 0.15, 0.0]).expect("body");
+        let island = make_box([0.3, 0.3, 0.5], [2.2, 0.15, 0.5]).expect("island");
+        let offset = u32::try_from(body.verts().len()).expect("small");
+        let mut verts = body.verts().to_vec();
+        verts.extend_from_slice(island.verts());
+        let mut tris = body.tris().to_vec();
+        tris.extend(island.tris().iter().map(|t| t.map(|v| v + offset)));
+        let mesh = Mesh::new(verts, tris).expect("two boxes");
+        let grid = crate::grid::lay_out_at(-0.5, -0.5, 0.05, 80, 40);
+        let planes: Vec<f64> = (0..20).map(|l| (l as f64 + 0.5) * 0.05).collect();
+        let slices = slice_stack(&mesh, &planes, SliceStackLimits::production()).expect("slices");
+        let births = Births::build(&grid, &slices, 0.014, 0.019);
+        let birth = births.at(10).first().expect("a birth at layer 10").clone();
+        assert!(birth.cells.len() > 2, "a birth of several cells: {birth:?}");
+        let at = |id: u32, x: f64, y: f64| {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "fixture coordinates inside the grid's own bounds"
+            )]
+            let cell = grid.index(grid.row_coord(y).floor() as usize, grid.col_coord(x).floor() as usize);
+            let mut strut = arm(&grid, id, x, 10);
+            strut.cell = cell;
+            strut.center_mm = [x, y];
+            strut
+        };
+        let context = ReplayContext {
+            grid: &grid,
+            slices: &slices,
+            planes: &planes,
+            mesh: &mesh,
+            kappa: KAPPA,
+            layer_height_mm: H,
+            layers: 20,
+            straight_reach: true,
+            creep_weight: false,
+            creep_overhang_cut: false,
+            overhang_centre_deg: 45.0,
+            overhang_transition_deg: 10.0,
+            max_restarts: 5,
+            first_loss_ratio: 1.2,
+            births: &births,
+        };
+        let replay = |covered: Vec<usize>, held: Vec<usize>| {
+            let mut host = at(1, 2.025, 0.125);
+            assert!(!birth.cells.contains(&host.cell), "the neighbour's seat is outside the birth");
+            host.covered_demand = covered;
+            host.held_birth_cells = held;
+            let mut direct = at(2, 2.225, 0.125);
+            direct.covered_demand = birth.cells.clone();
+            direct.held_birth_cells = birth.cells.clone();
+            let mut ground = at(0, 1.025, 0.125);
+            ground.k_top = 0;
+            let field = vec![ground, host, direct];
+            let mut doomed = vec![false, false, true];
+            let outcome = refuse_unrooted_demand(&context, &field, &mut doomed);
+            (doomed[2], outcome)
+        };
+        let last = *birth.cells.last().expect("cells");
+        let (removed, outcome) = replay(vec![last], Vec::new());
+        assert!(!removed, "one ordinary covered cell holds nothing: {outcome:?}");
+        assert_eq!(outcome.refused, 1, "{outcome:?}");
+        assert_eq!(outcome.newly_unrooted_cells, birth.cells.len() as u64, "{outcome:?}");
+        let most = birth.cells[..birth.cells.len() - 1].to_vec();
+        let (removed, outcome) = replay(most.clone(), Vec::new());
+        assert!(!removed, "all but one covered cell holds nothing either: {outcome:?}");
+        let (removed, outcome) = replay(most.clone(), most);
+        assert!(!removed, "all but one cell held by footprint is a partial hold: {outcome:?}");
+        let (removed, outcome) = replay(birth.cells.clone(), birth.cells.clone());
+        assert!(removed, "a whole birth held by footprint lets the birth's arm go: {outcome:?}");
+        assert_eq!(outcome.refused, 0, "{outcome:?}");
     }
 
     /// The joint counterfactual. Doom the arm at 0.9 AND the middle one: the

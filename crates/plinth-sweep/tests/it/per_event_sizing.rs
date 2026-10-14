@@ -144,7 +144,7 @@ fn arm(cell: usize, k_top: usize, path: Vec<u32>) -> SweepStrut {
         interior: false,
         radius_mm: Vec::new(),
         carried_mm2: Vec::new(),
-        covered_demand: Vec::new(), twin_host: false,
+        covered_demand: Vec::new(), held_birth_cells: Vec::new(), twin_host: false,
         inserted_by_load: false,
         path,
         straight_fallback: None,

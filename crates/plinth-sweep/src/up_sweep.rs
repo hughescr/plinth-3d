@@ -1242,6 +1242,15 @@ pub(crate) fn seat_births(
                         covered.push(cell);
                     }
                 }
+                // The birth is held by contact, not by reach: recorded apart
+                // from the cells the arm covers laterally, which hold no
+                // birth they only partly touch.
+                let held = &mut struts[host].held_birth_cells;
+                for &cell in &birth.cells {
+                    if !held.contains(&cell) {
+                        held.push(cell);
+                    }
+                }
                 tally.held += 1;
                 continue;
             }
@@ -2447,6 +2456,7 @@ fn commit_seat(
         radius_mm: Vec::new(),
         carried_mm2: Vec::new(),
         covered_demand: covered,
+        held_birth_cells: Vec::new(),
         twin_host: false,
         inserted_by_load: false,
         // Recorded ONLY for a leaned arm, and recorded NOW, because the column

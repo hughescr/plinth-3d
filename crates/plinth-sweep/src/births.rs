@@ -84,12 +84,40 @@ impl Birth {
     }
 }
 
-/// The cells an arm roots on its own layer: its seat cell and the cells it
-/// covers (the demand it rooted, and the births it holds by footprint,
-/// [`crate::up_sweep::seat_births`]). What [`Births::unroot_unseated`] reads as
-/// "a root of the layer stands in the birth".
-pub(crate) fn root_cells(strut: &crate::SweepStrut) -> impl Iterator<Item = usize> + '_ {
-    std::iter::once(strut.cell).chain(strut.covered_demand.iter().copied())
+/// What stands in a layer's births as contact, from the arms seated on it:
+/// the seat cells, and the cells of the births those arms hold by footprint
+/// ([`crate::up_sweep::seat_births`]). What [`Births::unroot_unseated`] reads
+/// as "a root of the layer stands in the birth": a seat cell inside the
+/// birth, or EVERY cell of the birth held by footprint.
+///
+/// NOT the cells an arm covers laterally (`covered_demand`): reach over a
+/// cell of a birth is not contact with the birth. A neighbour whose reach
+/// covers one cell of a birth, with its seat outside the birth and a tip ball
+/// that cannot contain it, leaves the birth's pixels with nothing under them
+/// (joint review, 2026-10-13: the removal replay took a birth's own arm away
+/// on the strength of one such cell). Nor does one cell of a footprint-held
+/// birth hold a second birth that merely shares that working-raster cell.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BirthRoots {
+    seats: Vec<usize>,
+    held: Vec<usize>,
+}
+
+impl BirthRoots {
+    /// The roots of these arms.
+    pub(crate) fn of<'a>(struts: impl IntoIterator<Item = &'a crate::SweepStrut>) -> Self {
+        let mut roots = Self::default();
+        for strut in struts {
+            roots.seats.push(strut.cell);            roots.held.extend_from_slice(&strut.held_birth_cells);
+        }
+        roots
+    }
+
+    /// Whether a root stands in `birth`.
+    fn hold(&self, birth: &Birth) -> bool {
+        birth.cells.iter().any(|cell| self.seats.contains(cell))
+            || (!birth.cells.is_empty() && birth.cells.iter().all(|cell| self.held.contains(cell)))
+    }
 }
 
 /// Every layer's births, found once for the whole stack.
@@ -224,14 +252,13 @@ impl Births {
     }
 
     /// Unroot every bridged birth of this layer that no root of the layer
-    /// stands in (`roots`: the cells of the arms seated on this layer, with
-    /// the cells they cover ([`root_cells`]), in any order). Returns the cover
+    /// stands in (`roots`: the arms seated on this layer, [`BirthRoots`]). Returns the cover
     /// cells so unrooted.
     pub(crate) fn unroot_unseated(
         &self,
         layer: usize,
         bridged: &[usize],
-        roots: &[usize],
+        roots: &BirthRoots,
         cover: &[bool],
         reach: &mut ReachState,
     ) -> usize {
@@ -241,7 +268,7 @@ impl Births {
             let Some(birth) = births.get(index) else {
                 continue;
             };
-            if birth.cells.iter().any(|cell| roots.contains(cell)) {
+            if roots.hold(birth) {
                 continue;
             }
             for &cell in &birth.cells {
