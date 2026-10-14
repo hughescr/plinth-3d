@@ -357,7 +357,7 @@ impl UnrootedColumns {
 /// (`crate::SweepLimits`), passed through so a field the insertion grows
 /// cannot outrun it.
 #[derive(Clone, Copy, Debug)]
-pub struct InsertionPolicy {
+pub struct InsertionPolicy<'a> {
     pub enabled: bool,
     pub max_struts: usize,
     /// Bounded rounds per layer. Each round computes the number of carriers
@@ -365,9 +365,58 @@ pub struct InsertionPolicy {
     /// normally suffices and further rounds only handle the case where the
     /// first round's own arms are themselves over the limit.
     pub max_rounds: usize,
+    /// **The contact each tip could really make**, measured on a first run of
+    /// this model (round 5 review, 2026-10-14): a tip whose load needs more
+    /// contact than its feature gives is relieved at its tip layer by the same
+    /// insertion that relieves an arm over the area law's maximum, so a second
+    /// contact is placed beside it. `None` is the area law's limit alone.
+    pub contact_caps: Option<&'a ContactCaps>,
 }
 
-impl InsertionPolicy {
+/// The contact area (mm²) each seated tip of a first run really made, keyed by
+/// the tip's seat column and seat layer, for a second run to relieve
+/// ([`InsertionPolicy::contact_caps`]).
+#[derive(Clone, Debug, Default)]
+pub struct ContactCaps {
+    by_tip: HashMap<(usize, usize), f64>,
+}
+
+impl ContactCaps {
+    /// Record that the tip seated in column `cell` at layer `k_top` made
+    /// `contact_mm2` of real contact.
+    pub fn insert(&mut self, cell: usize, k_top: usize, contact_mm2: f64) {
+        self.by_tip.insert((cell, k_top), contact_mm2);
+    }
+
+    /// Tips recorded.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.by_tip.len()
+    }
+
+    /// Whether no tip is recorded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.by_tip.is_empty()
+    }
+}
+
+impl InsertionPolicy<'_> {
+    /// The most peel one event may route into `strut` at `layer` before it is
+    /// relieved: the area law's `l_max`, and at a tip's own layer no more than
+    /// the contact that tip really made carries (`contact × X_ALLOWED`).
+    fn limit(&self, strut: &SweepStrut, layer: usize, l_max: f64, x_allowed: f64) -> f64 {
+        match self.contact_caps {
+            Some(caps) if layer + 1 == strut.k_top => caps
+                .by_tip
+                .get(&(strut.cell, strut.k_top))
+                .map_or(l_max, |contact| l_max.min(contact * x_allowed)),
+            _ => l_max,
+        }
+    }
+}
+
+impl InsertionPolicy<'static> {
     /// The production authority: insertion on, four rounds, the caller's own
     /// strut cap.
     #[must_use]
@@ -376,6 +425,7 @@ impl InsertionPolicy {
             enabled: true,
             max_struts,
             max_rounds: 4,
+            contact_caps: None,
         }
     }
 
@@ -388,6 +438,18 @@ impl InsertionPolicy {
             enabled: false,
             max_struts: 0,
             max_rounds: 0,
+            contact_caps: None,
+        }
+    }
+}
+
+impl<'a> InsertionPolicy<'a> {
+    /// The same authority with a first run's tip contacts to relieve.
+    #[must_use]
+    pub const fn with_contact_caps(self, caps: &'a ContactCaps) -> Self {
+        Self {
+            contact_caps: Some(caps),
+            ..self
         }
     }
 }
@@ -875,7 +937,10 @@ pub fn run(
             .fold(0.0_f64, f64::max);
         let sized = {
             let _per_event_span = crate::perf::span(crate::perf::Span::PerEventSize);
-            crate::per_event::size(grid, slices, struts, &log, sizing, l_max)
+            let members: &[SweepStrut] = struts;
+            crate::per_event::size(grid, slices, members, &log, sizing, &|member, layer| {
+                insertion.limit(&members[member], layer, l_max, sizing.x_allowed)
+            })
         };
         outcome.overloaded.clear();
         let (worst, worst_id) = apply_per_event_ledger(
@@ -1576,6 +1641,7 @@ fn sweep_pass(
             let _insertion_span = crate::perf::span(crate::perf::Span::PassInsertion);
             insert.hosts.clear();
             insert.host_load.clear();
+            insert.host_limit.clear();
             insert.host_keys.clear();
             match triggers {
                 // THE PER-EVENT TRIGGER. The load an arm is relieved for is
@@ -1591,9 +1657,16 @@ fn sweep_pass(
                     for &id in &alive_by_layer[layer] {
                         let key = crate::per_event::entry(id as usize, layer);
                         if let Some(&load) = table.get(&key) {
-                            if load > l_max {
+                            let limit = insertion.limit(
+                                &struts[id as usize],
+                                layer,
+                                l_max,
+                                sizing.x_allowed,
+                            );
+                            if load > limit {
                                 insert.hosts.push(struts[id as usize].cell_at(layer));
                                 insert.host_load.push(load);
+                                insert.host_limit.push(limit);
                                 insert.host_keys.push(key);
                             }
                         }
@@ -1616,6 +1689,7 @@ fn sweep_pass(
                     }
                     for &cell in &insert.hosts {
                         insert.host_load.push(load_out[cell]);
+                        insert.host_limit.push(l_max);
                     }
                     if !insert.host_load.iter().any(|&load| load > l_max) {
                         break;
@@ -2169,6 +2243,10 @@ struct InsertScratch {
     /// The load that triggers each host's relief, parallel to `hosts`: one
     /// event's routed load in production, the max-field load under sabotage.
     host_load: Vec<f64>,
+    /// The load each host is relieved above, parallel to `hosts`: the area
+    /// law's `l_max`, or at a tip's own layer no more than the contact that
+    /// tip really made carries ([`InsertionPolicy::contact_caps`]).
+    host_limit: Vec<f64>,
     /// Each host's per-event trigger key, parallel to `hosts` (empty under
     /// sabotage), so a trigger the geometry refused is not re-tried.
     host_keys: Vec<u64>,
@@ -2185,6 +2263,7 @@ impl InsertScratch {
         Self {
             hosts: Vec::new(),
             host_load: Vec::new(),
+            host_limit: Vec::new(),
             host_keys: Vec::new(),
             host_slot: vec![u32::MAX; cells],
             buckets: Vec::new(),
@@ -2273,7 +2352,7 @@ fn insert_for_load(
     scratch.buckets.resize(scratch.hosts.len(), Vec::new());
     let mut any_overloaded = false;
     for (slot, &cell) in scratch.hosts.iter().enumerate() {
-        if scratch.host_load[slot] > l_max {
+        if scratch.host_load[slot] > scratch.host_limit[slot] {
             scratch.host_slot[cell] = u32::try_from(slot).unwrap_or(u32::MAX);
             any_overloaded = true;
         }
@@ -2315,7 +2394,7 @@ fn insert_for_load(
         if footprint.is_empty() {
             continue;
         }
-        let wanted = (routed / l_max).ceil().max(1.0);
+        let wanted = (routed / scratch.host_limit[slot]).ceil().max(1.0);
         #[expect(
             clippy::cast_sign_loss,
             reason = "a ratio of two positive loads, ceil-ed and floored at 1"

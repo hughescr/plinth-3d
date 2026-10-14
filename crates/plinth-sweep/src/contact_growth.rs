@@ -26,8 +26,8 @@
 //! # The rule
 //!
 //! * **The target** is what the tip's LOAD needs, `π r_load²` with `r_load`
-//!   the area law before its minimums and clamps ([`TipBounds::need_mm2`]),
-//!   and never more than the disc the seat law sized for the profile ball:
+//!   the area law before its minimums and clamps ([`TipBounds::need_mm2`]);
+//!   the growth aims at no more than the disc the seat law sized for the profile ball:
 //!   the UNGROWN ball's section in the seat plane
 //!   ([`plinth_support::TipContactDisc::radius_mm`]), area `π a²`. A tip at
 //!   the 0.05 mm minimum needs far less than its ball gives and is not grown.
@@ -65,15 +65,25 @@
 //!      shaft the ball stands on ([`plinth_support::carried_ball_radii_mm`]).
 //!
 //!   A tip a ceiling stops short of its target is WARNED with the reason and
-//!   the shortfall ([`ShortReason`]). Where the feature is narrower than the
-//!   contact its load needs ([`ShortReason::FeatureWidth`]) the second contact
-//!   along the feature belongs to the placement, which has run by the time the
-//!   field is final; the warning is how it is reported.
+//!   the shortfall ([`ShortReason`]), graded against the load's whole need
+//!   (the growth aims at no more than the profile disc, but a load that needs
+//!   more than that disc is reported short,
+//!   [`ShortReason::BeyondProfileDisc`]). Where the feature is narrower than
+//!   the contact its load needs ([`ShortReason::FeatureWidth`]) the second
+//!   contact along the feature belongs to the placement, which has run by the
+//!   time the field is final: [`crate::run_sweep_with_second_contact`] records
+//!   what each short tip really made and runs the placement again with that
+//!   as the load the tip may carry, and the warning is what remains.
 //!
-//! The profile balls themselves (factor × tip radius, a table of 1.25 to 1.5)
-//! are the owner's ChituBox balls for the tip size and are drawn as they are:
-//! the lowering ignores a requested ball at or below them. A profile ball that
-//! is wider than its feature is counted ([`ContactOutcome::ungrown_over_feature`]).
+//! The ceilings bind the profile balls too (review 2026-10-14, BALLS-FLARE
+//! A(2)). The profile balls (factor × tip radius, a table of 1.25 to 1.5) are
+//! the owner's ChituBox balls for the tip size; one wider than its feature
+//! (or past the ratio) is counted ([`ContactOutcome::ungrown_over_feature`])
+//! and drawn at the ceiling ([`ContactOutcome::reduced`]), by the lowering's
+//! request below the profile ball (same deepest point), but never under the
+//! shaft end it stands on and never under what holds the births the placement
+//! left to it ([`TipBounds::hold_floor_mm`]). One still past its feature at
+//! that floor is warned ([`ContactOutcome::over_feature`]).
 //!
 //! # Tolerance and the search
 //!
@@ -158,6 +168,13 @@ pub struct TipBounds {
     /// The narrowest cured chord of the model section through the seat at the
     /// strike layer, mm ([`crate::feature_chord`]).
     pub feature_chord_mm: Option<f64>,
+    /// The smallest ball that still holds every birth this tip was seated to
+    /// hold, mm: the placement let this tip's contact ball stand for the
+    /// pieces of model whose every pixel lies inside it
+    /// ([`crate::SweepStrut::held_births`]), and a ball drawn smaller than
+    /// they reach leaves them with nothing under them. A ball is never
+    /// reduced below it.
+    pub hold_floor_mm: Option<f64>,
 }
 
 /// Why a tip's real contact is still short of its target after the growth.
@@ -180,6 +197,11 @@ pub enum ShortReason {
     /// A larger ball gained less contact than a flat face would: it only
     /// wraps the flanks.
     FlankOnly,
+    /// The tip has the contact the growth aims at (the disc the seat law
+    /// sized for the profile ball) and the load needs more: the radius clamp
+    /// or the seat's geometry left that disc smaller than the load (review
+    /// P1, 2026-10-14). The ball is not grown past the disc.
+    BeyondProfileDisc,
 }
 
 impl ShortReason {
@@ -203,11 +225,16 @@ impl ShortReason {
             }
             Self::FeatureWidth => {
                 "feature narrower than its load's contact (a ball wider than the feature only \
-                 wraps its flanks; the second contact along it is not placed at this stage)"
+                 wraps its flanks; the second contact the placement was asked for found no room \
+                 beside it, or did not bring the field nearer its loads' needs)"
             }
             Self::FlankOnly => {
                 "a larger ball gained less contact than a flat face would (it only wraps the \
                  flanks of the feature)"
+            }
+            Self::BeyondProfileDisc => {
+                "the load needs more than the disc the seat law sized for the profile ball (the \
+                 radius clamp or the seat's geometry); the ball is not grown past that disc"
             }
         }
     }
@@ -230,18 +257,41 @@ pub struct ContactShort {
     pub reason: ShortReason,
 }
 
-/// One profile ball drawn past a ceiling it cannot be brought under (the
-/// lowering never draws a ball below the owner's profile ball).
+/// One ball drawn past its feature's chord because it cannot be brought under
+/// it (it is never drawn narrower than the shaft end it stands on).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ProfileOver {
     /// The strut index.
     pub strut: usize,
-    /// The profile ball's radius, mm.
+    /// The drawn ball's radius, mm.
     pub ball_radius_mm: f64,
-    /// The width of the contact disc that ball plans, mm.
+    /// The width of the contact disc that ball cuts, mm.
     pub disc_width_mm: f64,
     /// The feature's narrowest cured chord at the strike layer, mm.
     pub chord_mm: f64,
+}
+
+/// What the second-contact attempt did ([`crate::run_sweep_with_second_contact`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SecondContactOutcome {
+    /// Whether a second run was made.
+    pub attempted: bool,
+    /// Tips of the first run whose real contact sized a second one.
+    pub tips_capped: usize,
+    /// Tips short of their need, and the summed shortfall (mm²), arms, in the
+    /// first run and in the second.
+    pub first_short: usize,
+    pub first_shortfall_mm2: f64,
+    pub first_arms: usize,
+    pub second_short: usize,
+    pub second_shortfall_mm2: f64,
+    pub second_arms: usize,
+    /// Unbraced runs over their own limit on the finished field, in each.
+    pub first_unbraced: usize,
+    pub second_unbraced: usize,
+    /// Whether the second plan is the one kept (it leaves the smaller
+    /// shortfall and no more unbraced runs over their limit).
+    pub kept_second: bool,
 }
 
 /// What the contact measurement and growth did on one field.
@@ -277,11 +327,16 @@ pub struct ContactOutcome {
     /// whose ceiling is the feature's chord (the path hits of those rules).
     pub ratio_bound: usize,
     pub feature_bound: usize,
-    /// Profile balls (never grown, never shrunk) already past a ceiling: wider
+    /// Profile balls (the owner's, before any reduction) past a ceiling: wider
     /// than their feature's chord, and past the ball-to-shaft ratio.
     pub ungrown_over_feature: usize,
     pub ungrown_over_ratio: usize,
-    /// The profile balls counted in `ungrown_over_feature`, one row each.
+    /// Profile balls drawn SMALLER than the owner's ball because they stood
+    /// past one of those ceilings (round 5 review, 2026-10-14): at the ceiling,
+    /// never under their shaft end.
+    pub reduced: usize,
+    /// The balls as drawn that are still wider than their feature (the shaft
+    /// end they stand on is wider than the feature), one row each.
     pub over_feature: Vec<ProfileOver>,
     /// Tips still short after the growth, with why.
     pub short: Vec<ContactShort>,
@@ -376,6 +431,38 @@ fn ball_radius_for_chord_mm(chord_mm: f64, delta_mm: f64) -> f64 {
     (half * half + delta_mm * delta_mm) / (2.0 * delta_mm)
 }
 
+/// The width of the contact disc a ball of radius `ball_mm` that keeps its
+/// pole at depth `delta_mm` cuts in the seat plane, mm (the inverse of
+/// [`ball_radius_for_chord_mm`]).
+fn disc_width_for_ball_mm(ball_mm: f64, delta_mm: f64) -> f64 {
+    2.0 * (2.0 * ball_mm * delta_mm - delta_mm * delta_mm).max(0.0).sqrt()
+}
+
+/// **The two ceilings that are the rules of round 5 for one tip, and the seat
+/// depth they are read at**: the top of the owner's ball-to-shaft ratio range
+/// times the shaft, and the largest ball whose contact disc is no wider than
+/// the feature's narrowest cured chord. `f64::INFINITY` where a rule is off or
+/// its input unknown.
+fn ball_caps(
+    rule: GrowthRule,
+    max_ball_ratio: f64,
+    tip_radius_mm: f64,
+    feature_chord_mm: Option<f64>,
+    measured: &Measured,
+) -> (f64, f64, f64) {
+    let depth = seat_depth_mm(measured.planned_ball_mm, measured.planned_disc_mm);
+    let ratio_cap = if rule.shaft_ratio_ceiling {
+        max_ball_ratio * tip_radius_mm
+    } else {
+        f64::INFINITY
+    };
+    let feature_cap = match feature_chord_mm {
+        Some(chord) if rule.feature_ceiling => ball_radius_for_chord_mm(chord, depth),
+        _ => f64::INFINITY,
+    };
+    (ratio_cap, feature_cap, depth)
+}
+
 /// **Measure every seated tip's real contact and grow the short ones' balls**
 /// (module doc). `arms` are the field exactly as the lowering gets it, with
 /// NO grown ball (`contact_ball_radius_mm: None`), in strut order; `sites` the
@@ -420,14 +507,76 @@ pub fn grow(
         })
         .collect();
     let tip_sites: Vec<Option<TipSite>> = tips.iter().map(|&index| sites[index]).collect();
-    let first = measure(env, &working, &tip_sites);
+    let profile = measure(env, &working, &tip_sites);
+    // THE PROFILE BALLS UNDER A CEILING (round 5 review, 2026-10-14): a ball
+    // the owner's table draws wider than its feature (or past the top of his
+    // ratio range) is drawn at the ceiling, never under its shaft end
+    // (BALLS-FLARE A(2): the cap is on grown AND ungrown balls). One batched
+    // measurement of those balls at their reduced radius; every rule below then
+    // starts from the ball as drawn.
+    let mut reduced_to: Vec<Option<f64>> = profile
+        .iter()
+        .enumerate()
+        .map(|(position, answer)| {
+            let measured = (*answer)?;
+            let strut = tips[position];
+            let tip_bounds = bounds.get(strut).copied().unwrap_or_default();
+            let (ratio_cap, feature_cap, _) = ball_caps(
+                rule,
+                limits.max_ball_ratio,
+                arms[strut].tip_radius_mm,
+                tip_bounds.feature_chord_mm,
+                &measured,
+            );
+            let cap = feature_cap.min(ratio_cap);
+            if !(cap.is_finite() && measured.planned_ball_mm > cap * (1.0 + 1e-9)) {
+                return None;
+            }
+            // Never under the shaft end the ball stands on, nor under what
+            // holds the births the placement left to it.
+            let reduced = cap
+                .max(arms[strut].tip_radius_mm)
+                .max(tip_bounds.hold_floor_mm.unwrap_or(0.0));
+            (reduced < measured.planned_ball_mm * (1.0 - 1e-9)).then_some(reduced)
+        })
+        .collect();
+    let mut first = profile.clone();
+    let reduced_rows: Vec<usize> = (0..reduced_to.len())
+        .filter(|&at| reduced_to[at].is_some())
+        .collect();
+    if !reduced_rows.is_empty() {
+        let reduced_arms: Vec<SweepArm> = reduced_rows
+            .iter()
+            .map(|&at| SweepArm {
+                contact_ball_radius_mm: reduced_to[at],
+                ..working[at].clone()
+            })
+            .collect();
+        let reduced_sites: Vec<Option<TipSite>> =
+            reduced_rows.iter().map(|&at| tip_sites[at]).collect();
+        let answers = measure(env, &reduced_arms, &reduced_sites);
+        for (&at, answer) in reduced_rows.iter().zip(answers) {
+            match answer {
+                Some(measured) => first[at] = Some(measured),
+                // A tip whose reduced ball cannot be measured keeps the
+                // owner's ball (the side that changes nothing unread).
+                None => reduced_to[at] = None,
+            }
+        }
+    }
     // Per tip: target, ungrown radius, and the search state.
     struct Search {
         tip: usize,
-        /// The contact the load needs, no more than the profile disc.
+        /// The contact the growth aims at: the load's need, no more than the
+        /// profile disc.
         target: f64,
+        /// The contact the load needs, mm²: what the tip is graded and warned
+        /// against, whatever the growth's own bound.
+        need: f64,
         /// The profile disc, mm².
         profile_disc: f64,
+        /// The owner's profile ball, mm.
+        profile_radius: f64,
         ungrown_radius: f64,
         radius: f64,
         real: f64,
@@ -450,50 +599,60 @@ pub fn grow(
     }
     let mut searches: Vec<Search> = Vec::new();
     for (position, answer) in first.iter().enumerate() {
-        let Some(measured) = *answer else {
+        let (Some(measured), Some(profile_measured)) = (*answer, profile[position]) else {
             continue;
         };
         let strut = tips[position];
         let tip_bounds = bounds.get(strut).copied().unwrap_or_default();
         let plan = measured.planned_mm2;
-        let need = tip_bounds.need_mm2.filter(|need| need.is_finite() && *need >= 0.0);
-        let target = match need {
-            Some(need) if rule.load_need_target => plan.min(need),
+        let need_known = tip_bounds.need_mm2.filter(|need| need.is_finite() && *need >= 0.0);
+        // WHAT THE LOAD NEEDS is what the tip is graded and warned against
+        // (review P1, 2026-10-14): never cut down to the profile disc, which a
+        // radius clamp or the seat geometry can leave smaller than the load.
+        // The growth's own aim stays no more than that disc.
+        let need = match need_known {
+            Some(need) if rule.load_need_target => need,
             _ => plan,
         };
-        let depth = seat_depth_mm(measured.planned_ball_mm, measured.planned_disc_mm);
-        // The ceilings that are the rules of this round. A profile ball that
-        // stands past one is counted and left (the lowering draws nothing
-        // below the owner's ball for the tip size).
-        let ratio_cap = if rule.shaft_ratio_ceiling {
-            limits.max_ball_ratio * arms[strut].tip_radius_mm
-        } else {
-            f64::INFINITY
-        };
-        let feature_cap = match tip_bounds.feature_chord_mm {
-            Some(chord) if rule.feature_ceiling => ball_radius_for_chord_mm(chord, depth),
-            _ => f64::INFINITY,
-        };
-        if measured.planned_ball_mm > ratio_cap * (1.0 + 1e-9) {
+        let target = need.min(plan);
+        let (ratio_cap, feature_cap, depth) = ball_caps(
+            rule,
+            limits.max_ball_ratio,
+            arms[strut].tip_radius_mm,
+            tip_bounds.feature_chord_mm,
+            &profile_measured,
+        );
+        // The profile balls past a ceiling are drawn at it (`reduced_to`); one
+        // still past it after that (its shaft end is wider than the ceiling)
+        // is named.
+        if profile_measured.planned_ball_mm > ratio_cap * (1.0 + 1e-9) {
             outcome.ungrown_over_ratio += 1;
         }
-        if measured.planned_ball_mm > feature_cap * (1.0 + 1e-9) {
+        if profile_measured.planned_ball_mm > feature_cap * (1.0 + 1e-9) {
             outcome.ungrown_over_feature += 1;
-            if let Some(chord) = tip_bounds.feature_chord_mm {
+        }
+        if let Some(chord) = tip_bounds.feature_chord_mm.filter(|_| rule.feature_ceiling) {
+            let drawn = measured.drawn_radius_mm;
+            let width = disc_width_for_ball_mm(drawn, depth);
+            if width > chord * (1.0 + 1e-9) && depth > 1e-9 {
                 outcome.over_feature.push(ProfileOver {
                     strut,
-                    ball_radius_mm: measured.planned_ball_mm,
-                    disc_width_mm: 2.0 * measured.planned_disc_mm,
+                    ball_radius_mm: drawn,
+                    disc_width_mm: width,
                     chord_mm: chord,
                 });
             }
         }
+        if let Some(reduced) = reduced_to[position] {
+            outcome.reduced += 1;
+            grown[strut] = Some(reduced);
+        }
         outcome.tips_measured += 1;
-        outcome.planned_mm2 += target;
+        outcome.planned_mm2 += need;
         outcome.profile_disc_mm2 += plan;
-        outcome.real_ungrown_mm2 += measured.real_mm2;
-        outcome.per_strut[strut] = Some((measured.real_mm2, target));
-        if measured.real_mm2 + area_tolerance_mm2 >= target {
+        outcome.real_ungrown_mm2 += profile_measured.real_mm2;
+        outcome.per_strut[strut] = Some((measured.real_mm2, need));
+        if measured.real_mm2 + area_tolerance_mm2 >= need {
             outcome.real_drawn_mm2 += measured.real_mm2;
             continue;
         }
@@ -509,10 +668,20 @@ pub fn grow(
                 limit_reason = reason;
             }
         }
+        // The contact the growth aims at is met and the load's need is not:
+        // the disc the seat law sized for the profile ball is smaller than the
+        // load (the radius clamp, or the seat's geometry). The ball is not
+        // grown past that disc; the tip is named.
+        if measured.real_mm2 + area_tolerance_mm2 >= target {
+            limit = measured.drawn_radius_mm;
+            limit_reason = ShortReason::BeyondProfileDisc;
+        }
         searches.push(Search {
             tip: position,
             target,
+            need,
             profile_disc: plan,
+            profile_radius: profile_measured.planned_ball_mm,
             ungrown_radius: measured.drawn_radius_mm,
             radius: measured.drawn_radius_mm,
             real: measured.real_mm2,
@@ -637,7 +806,7 @@ pub fn grow(
     for search in &searches {
         let strut = tips[search.tip];
         outcome.real_drawn_mm2 += search.real;
-        outcome.per_strut[strut] = Some((search.real, search.target));
+        outcome.per_strut[strut] = Some((search.real, search.need));
         // A ball that found no area at all (its seat triangle never entered
         // it) is not grown: the growth bought nothing.
         let bought = search.radius > search.ungrown_radius
@@ -649,14 +818,19 @@ pub fn grow(
                 .max_growth_ratio
                 .max(search.radius / search.ungrown_radius);
         }
-        if search.real + area_tolerance_mm2 < search.target {
+        if search.real + area_tolerance_mm2 < search.need {
             // A tip that never got a round (its ceiling is its own ball) is
-            // named by that ceiling.
-            let reason = search.reason.unwrap_or(if search.radius >= search.limit {
-                search.at_limit()
+            // named by that ceiling; one that reached the contact the growth
+            // aims at and not the load's need is named for the disc.
+            let reason = if search.real + area_tolerance_mm2 >= search.target {
+                ShortReason::BeyondProfileDisc
             } else {
-                ShortReason::SearchRounds
-            });
+                search.reason.unwrap_or(if search.radius >= search.limit {
+                    search.at_limit()
+                } else {
+                    ShortReason::SearchRounds
+                })
+            };
             match reason {
                 ShortReason::Overhang => outcome.stopped_by_overhang += 1,
                 ShortReason::ShaftRatio => outcome.ratio_bound += 1,
@@ -666,10 +840,10 @@ pub fn grow(
             outcome.short.push(ContactShort {
                 strut,
                 real_mm2: search.real,
-                planned_mm2: search.target,
+                planned_mm2: search.need,
                 profile_disc_mm2: search.profile_disc,
                 ball_radius_mm: if bought { search.radius } else { search.ungrown_radius },
-                planned_ball_radius_mm: search.ungrown_radius,
+                planned_ball_radius_mm: search.profile_radius,
                 reason,
             });
         }

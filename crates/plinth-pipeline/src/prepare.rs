@@ -2834,6 +2834,43 @@ fn sweep_and_emit(
             (plan, SweepPlanSource::Planned(miss))
         }
     };
+    // A SECOND CONTACT for every tip whose feature gave it less contact than
+    // its load needs (round 5 review, 2026-10-14): the placement runs again
+    // with those tips' real contacts as their limit; kept where it leaves the
+    // field nearer its loads' needs.
+    let plan = plinth_sweep::run_sweep_with_second_contact(
+        plan,
+        hollowed.mesh(),
+        &sweep_layers,
+        &policy,
+        &drains,
+        &vents,
+    )
+    .map_err(|source| {
+        ChainStop::new(PipelineError::Sweep {
+            model: model.clone(),
+            source,
+        })
+    })?;
+    let second = &plan.report.seat_second_contact;
+    if second.attempted {
+        println!(
+            "[sweep {model}] second contact: {} short tips sized a second contact from the \
+             contact they really made; placement run again: {} arms and {} tips short by {:.4} \
+             mm2 ({} unbraced runs over their limit) against {} arms and {} short by {:.4} mm2 \
+             ({} such runs) before; the {} plan is kept",
+            second.tips_capped,
+            second.second_arms,
+            second.second_short,
+            second.second_shortfall_mm2,
+            second.second_unbraced,
+            second.first_arms,
+            second.first_short,
+            second.first_shortfall_mm2,
+            second.first_unbraced,
+            if second.kept_second { "second" } else { "first" },
+        );
+    }
     let sweep_seconds = started.elapsed().as_secs_f64();
 
     let frame = plinth_support::BuildFrame::new(
@@ -3260,8 +3297,9 @@ fn print_sweep_disclosure(
                  limit {:.4} mm radius) in {} round(s); {} held below the limit so the ball's \
                  lowest point stays on its shaft ({} of them left short by it); {} left short by \
                  the ball-to-shaft ratio and {} by a feature narrower than the load's contact; \
-                 {} profile balls past their feature's chord and {} past the ratio (drawn as the \
-                 owner's profile ball); {} still short of the need; {} balls whose lowest point \
+                 {} profile balls past their feature's chord and {} past the ratio, {} of them \
+                 drawn smaller (at the ceiling, never under their shaft end); {} still short of \
+                 the need; {} balls whose lowest point \
                  stood outside their shaft as planned given a collar that holds it{}",
                 contact.tips_measured,
                 contact.planned_mm2,
@@ -3279,6 +3317,7 @@ fn print_sweep_disclosure(
                 contact.feature_bound,
                 contact.ungrown_over_feature,
                 contact.ungrown_over_ratio,
+                contact.reduced,
                 contact.short.len(),
                 emission.tip_pole_collars,
                 if emission.tip_pole_collars_steeper_than_law > 0 {
@@ -3293,10 +3332,10 @@ fn print_sweep_disclosure(
             );
             for over in &contact.over_feature {
                 println!(
-                    "[sweep {model}] WARNING tip of arm {} draws the owner's profile ball ({:.4} mm \
-                     radius, a contact disc {:.4} mm wide) on a feature whose narrowest cured chord \
-                     at the strike layer is {:.4} mm: the ball is not grown, and not drawn smaller \
-                     than the owner's ball for its tip size",
+                    "[sweep {model}] WARNING tip of arm {} draws a ball of {:.4} mm radius (a \
+                     contact disc {:.4} mm wide) on a feature whose narrowest cured chord at the \
+                     strike layer is {:.4} mm: the ball is already as small as its shaft end \
+                     allows",
                     over.strut, over.ball_radius_mm, over.disc_width_mm, over.chord_mm,
                 );
             }

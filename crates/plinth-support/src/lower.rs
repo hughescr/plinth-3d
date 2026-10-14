@@ -1150,8 +1150,11 @@ pub struct SweepArm {
     /// owner's ChituBox ball for this tip size (`ball factor × tip radius`).
     /// A value above that ball draws a larger ball with the SAME deepest
     /// point along the seat normal, so the seat depth does not change: the
-    /// new ball contains the old one and is tangent to it there. A value at or
-    /// below it is ignored. The sweep measures the model surface inside the
+    /// new ball contains the old one and is tangent to it there. A value
+    /// BELOW it (round 5, 2026-10-14) draws a smaller ball with the same
+    /// deepest point, down to the tip radius (a value under the tip radius is
+    /// ignored): the sweep asks for it where the owner's ball is wider than the
+    /// feature it touches. The sweep measures the model surface inside the
     /// ball and sets this (`plinth_sweep::contact_growth`); the planned
     /// contact ([`TipContactDisc::radius_mm`]) is always the ungrown ball's.
     pub contact_ball_radius_mm: Option<f64>,
@@ -3113,10 +3116,17 @@ fn seated_ball(
     // seat plane: it contains the ungrown ball and is tangent to it there. The
     // planned disc above stays the ungrown ball's: it is the area the seat was
     // sized for, and the sweep grows the ball until the real contact reaches it.
+    //
+    // THE REDUCED BALL (round 5, 2026-10-14): a request BELOW the owner's ball
+    // keeps the same deepest point and draws the smaller ball, so the contact
+    // disc it cuts in the seat plane is narrower; the sweep asks for it where
+    // the owner's ball is wider than the feature it touches. It is never
+    // narrower than its own shaft end (`tip_radius_mm`): a ball thinner than
+    // the rod under it is no ball.
     tip_seat.drawn_ball_radius_mm = ball_radius_mm;
-    let grown = arm
-        .contact_ball_radius_mm
-        .filter(|grown| grown.is_finite() && *grown > ball_radius_mm);
+    let grown = arm.contact_ball_radius_mm.filter(|grown| {
+        grown.is_finite() && *grown >= tip_radius_mm && (*grown - ball_radius_mm).abs() > 1e-12
+    });
     let center = match grown {
         Some(grown) => {
             let normal = tip_seat.trim.map_or(unit, |trim| trim.outward_normal());

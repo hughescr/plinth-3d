@@ -501,19 +501,28 @@ fn a_tip_is_grown_toward_its_loads_need_and_not_the_profile_disc() {
     let bounds = [TipBounds {
         need_mm2: Some(need),
         feature_chord_mm: None,
+        ..TipBounds::default()
     }];
     let (outcome, grown) = grow(&env, &one(&tip), &sites, &bounds, without_flat_gain_stop(2.0), PIXEL_AREA_MM2);
     println!("{outcome:?}");
     assert!((outcome.planned_mm2 - need).abs() < 1e-12, "the target is the need: {outcome:?}");
     assert_eq!(outcome.short_ungrown, 0, "{outcome:?}");
     assert!(grown[0].is_none(), "the ball is not grown past what the load needs: {outcome:?}");
-    // The need never raises the target above the profile disc.
+    // The need never raises the growth's aim above the profile disc, and is
+    // never cut down to it either: the tip is graded and warned against the
+    // load (review P1, 2026-10-14).
     let big = [TipBounds {
         need_mm2: Some(100.0),
         feature_chord_mm: None,
+        ..TipBounds::default()
     }];
     let (capped, _) = grow(&env, &one(&tip), &sites, &big, without_flat_gain_stop(2.0), PIXEL_AREA_MM2);
-    assert!((capped.planned_mm2 - unbounded.planned_mm2).abs() < 1e-12, "{capped:?}");
+    assert!((capped.planned_mm2 - 100.0).abs() < 1e-12, "the need is kept: {capped:?}");
+    assert!(
+        capped.real_drawn_mm2 <= unbounded.planned_mm2 * (1.0 + 1e-9),
+        "the ball is not grown past the profile disc: {capped:?}"
+    );
+    assert_eq!(capped.short.len(), 1, "{capped:?}");
     // SABOTAGE: the old rule ignores the need and grows the same ball.
     let (old, old_grown) = grow(&env, &[tip], &sites, &bounds, plan_target(2.0), PIXEL_AREA_MM2);
     assert!(old_grown[0].is_some(), "the old target is the profile disc: {old:?}");
@@ -571,6 +580,7 @@ fn a_ball_is_no_wider_than_the_feature_it_touches() {
     let bounds = [TipBounds {
         need_mm2: None,
         feature_chord_mm: Some(chord),
+        ..TipBounds::default()
     }];
     // The widest tip radius (and so the ratio ceiling) that leaves the
     // feature the binding ceiling.
@@ -599,23 +609,74 @@ fn a_ball_is_no_wider_than_the_feature_it_touches() {
     };
     let (outcome, grown) = grow(&env, &one(&wide), &sites, &bounds, limits, PIXEL_AREA_MM2);
     println!("{outcome:?}; drawn {grown:?}");
-    // The profile ball is already past the edge: counted, left as it is.
+    // The profile ball is past the edge: counted, and DRAWN SMALLER (the cap is
+    // on ungrown balls too, BALLS-FLARE A(2)), down to its shaft end, which is
+    // itself wider than this edge: named.
     let profile = plinth_support::tip_contact_discs(&one(&wide), &layers).expect("discs")[0]
         .expect("a disc")
         .ball_radius_mm;
     assert!(disc_width(None) > chord, "anti-vacuity: the profile disc is wider than the edge");
     assert_eq!(outcome.ungrown_over_feature, 1, "{outcome:?}");
-    // It is not grown a hair past the profile ball, and the shortfall is warned.
-    assert!(grown[0].is_none() || grown[0].is_some_and(|r| r <= profile + 1e-12), "{grown:?}");
+    assert_eq!(outcome.reduced, 1, "{outcome:?}");
+    let drawn = grown[0].expect("the profile ball is drawn smaller");
+    assert!(drawn < profile - 1e-9, "drawn {drawn} against the profile ball {profile}");
+    assert!(
+        (drawn - wide.tip_radius_mm).abs() < 1e-12,
+        "never under the shaft end: {drawn} against {}",
+        wide.tip_radius_mm
+    );
+    assert_eq!(outcome.over_feature.len(), 1, "still wider than the edge: {outcome:?}");
     assert_eq!(outcome.short.len(), 1, "{outcome:?}");
     assert_eq!(outcome.short[0].reason, ShortReason::FeatureWidth, "{outcome:?}");
     assert_eq!(outcome.feature_bound, 1, "{outcome:?}");
+    // A feature a little narrower than the profile disc, and wider than the
+    // shaft end's: the profile ball comes down to the chord, not past it.
+    let narrower = 0.9 * disc_width(None);
+    assert!(disc_width(Some(wide.tip_radius_mm)) < narrower, "anti-vacuity: room under the profile ball");
+    let (reduced, reduced_grown) = grow(
+        &env,
+        &one(&wide),
+        &sites,
+        &[TipBounds {
+            need_mm2: None,
+            feature_chord_mm: Some(narrower),
+            ..TipBounds::default()
+        }],
+        limits,
+        PIXEL_AREA_MM2,
+    );
+    println!("{reduced:?}; drawn {reduced_grown:?}");
+    let radius = reduced_grown[0].expect("drawn smaller");
+    assert!(radius < profile - 1e-9, "{radius} against {profile}");
+    assert!(
+        disc_width(reduced_grown[0]) <= narrower + 1e-9,
+        "the reduced disc is {} wide on a {narrower} feature",
+        disc_width(reduced_grown[0])
+    );
+    assert!(reduced.over_feature.is_empty(), "{reduced:?}");
+    // A ball that holds a birth the placement left to it is not drawn under
+    // what reaches that birth's farthest pixel.
+    let (held, held_grown) = grow(
+        &env,
+        &one(&wide),
+        &sites,
+        &[TipBounds {
+            need_mm2: None,
+            feature_chord_mm: Some(narrower),
+            hold_floor_mm: Some(profile),
+        }],
+        limits,
+        PIXEL_AREA_MM2,
+    );
+    assert_eq!(held.reduced, 0, "{held:?}");
+    assert!(held_grown[0].is_none(), "{held_grown:?}");
     // A feature wide enough to hold the profile disc and a bit more bounds the
     // growth at exactly the chord: the drawn disc is no wider than it.
     let wider = 1.4 * disc_width(None);
     let bounds = [TipBounds {
         need_mm2: None,
         feature_chord_mm: Some(wider),
+        ..TipBounds::default()
     }];
     let (outcome, grown) = grow(&env, &one(&wide), &sites, &bounds, limits, PIXEL_AREA_MM2);
     println!("{outcome:?}; drawn {grown:?}");
@@ -628,4 +689,49 @@ fn a_ball_is_no_wider_than_the_feature_it_touches() {
         "the old rule draws a disc {} wide on a {wider} feature: {old:?}",
         disc_width(old_grown[0])
     );
+}
+
+/// **A load that needs more than the profile disc is reported short** (review
+/// P1, 2026-10-14). A flat face takes exactly its profile disc; a load that
+/// needs 0.4 mm² of it (the radius clamp left the disc smaller) was graded
+/// against `min(plan, need)` and reported sufficient with no warning. The need
+/// is kept for the grade and the warning, and the ball is not grown past the
+/// disc.
+#[test]
+fn a_load_that_needs_more_than_the_profile_disc_is_reported_short() {
+    let mesh = sheet(1.5, 60, |_, _| 0.0);
+    let layers = plan();
+    let env = MeasureEnv {
+        mesh: &mesh,
+        surface: None,
+        layer_plan: &layers,
+    };
+    let seat = [0.013, -0.021, 0.0];
+    let site = site_at(&mesh, seat);
+    let tip = arm(seat);
+    let with_need = |need: f64| {
+        grow(
+            &env,
+            &one(&tip),
+            &[Some(site)],
+            &[TipBounds {
+                need_mm2: Some(need),
+                feature_chord_mm: None,
+                ..TipBounds::default()
+            }],
+            registered(2.0),
+            PIXEL_AREA_MM2,
+        )
+    };
+    let (met, _) = with_need(0.2);
+    assert_eq!(met.short.len(), 0, "anti-vacuity: 0.2 mm2 is within the disc: {met:?}");
+    let (outcome, grown) = with_need(0.4);
+    println!("{outcome:?}");
+    assert!((outcome.planned_mm2 - 0.4).abs() < 1e-12, "the need is kept: {outcome:?}");
+    assert!(outcome.real_drawn_mm2 < 0.4 - PIXEL_AREA_MM2, "the contact is the disc: {outcome:?}");
+    assert_eq!(outcome.short.len(), 1, "{outcome:?}");
+    assert_eq!(outcome.short[0].reason, ShortReason::BeyondProfileDisc, "{outcome:?}");
+    assert!((outcome.short[0].planned_mm2 - 0.4).abs() < 1e-12, "{outcome:?}");
+    assert!(grown[0].is_none(), "the ball is not grown past the disc: {outcome:?}");
+    assert_eq!(outcome.per_strut[0].map(|row| (row.1 * 1e6).round()), Some(400_000.0), "{outcome:?}");
 }

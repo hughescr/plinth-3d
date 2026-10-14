@@ -327,6 +327,71 @@ fn a_leaned_arm_that_catches_one_event_at_two_heights_carries_the_sum() {
     );
 }
 
+/// **A tip that made less contact than its load needs is given a second
+/// contact** (round 5 review, 2026-10-14, `BALLS-FLARE.md` A(4)). One arm
+/// seated under a slab carries the slab's event. With no contact recorded for
+/// it, the load is within the area law's maximum and the down-sweep inserts
+/// nothing; with the contact it "really made" recorded as a small fraction of
+/// that load's need, the same load-driven insertion that relieves an arm over
+/// the maximum places carriers beside it, and the load routes between them.
+#[test]
+fn a_tip_that_made_less_contact_than_its_load_needs_gets_a_second_carrier() {
+    let h = height();
+    let slab_bottom = 8.0 * h;
+    let mesh = boxes(&[([2.0, 1.0, 3.0 * h], 0.0, 0.0, slab_bottom)]);
+    let top = slab_bottom + 3.0 * h;
+    let setup = setup(&mesh, top + h, 3.0, true);
+    let seat = cell_at(&setup.grid, 0.0, 0.0);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a small positive layer index"
+    )]
+    let k_top = (slab_bottom / h).round() as usize;
+    let run = |caps: Option<&down_sweep::ContactCaps>| {
+        let mut struts = vec![arm(seat, k_top, Vec::new())];
+        let insertion = match caps {
+            Some(caps) => InsertionPolicy::new(1000).with_contact_caps(caps),
+            None => InsertionPolicy::new(1000),
+        };
+        let outcome = down_sweep::run(
+            &setup.grid,
+            &setup.slices,
+            &mut struts,
+            setup.sizing,
+            insertion,
+            &DrainKeepOut::none(),
+            &down_sweep::UnrootedColumns::none(),
+        );
+        (struts, outcome)
+    };
+    let (plain, _) = run(None);
+    let tip_load = plain[0].carried_mm2.last().copied().expect("a ledger");
+    let need = tip_load / setup.sizing.x_allowed;
+    // The contact the tip "really made": a fifth of what its load needs.
+    let mut caps = down_sweep::ContactCaps::default();
+    caps.insert(seat, k_top, 0.2 * need);
+    let (relieved, outcome) = run(Some(&caps));
+    println!(
+        "plain {} arms; with the cap {} arms ({} inserted by load); the tip's load {tip_load:.5} \
+         -> {:.5} mm2",
+        plain.len(),
+        relieved.len(),
+        outcome.arms_inserted_by_load,
+        relieved[0].carried_mm2.last().copied().unwrap_or(0.0),
+    );
+    assert_eq!(plain.len(), 1, "anti-vacuity: the slab's load is within the maximum");
+    assert!(relieved.len() > 1, "a second carrier is placed: {} arms", relieved.len());
+    assert!(
+        relieved[0].carried_mm2.last().copied().unwrap_or(f64::INFINITY) < tip_load,
+        "the load routes between them"
+    );
+    assert!(
+        relieved[1..].iter().all(|strut| strut.inserted_by_load && strut.k_top == k_top),
+        "the carriers are seated on the same underside"
+    );
+}
+
 /// On a real fixture through the whole sweep: every event is conserved, the
 /// pass fired, and no member is sized above what the max field would have
 /// charged it except by a same-event sum the max field under-counted.

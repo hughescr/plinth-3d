@@ -581,9 +581,12 @@ ball. The ball grows (`plinth_sweep::contact_growth`) only toward what the tip's
 is never a lump on its shaft or wider than the feature it seats on (owner, Bat_Cat_Owl: the balls were "much
 bigger than the support column or the feature that is being supported").
 
-- **The target is the load, not the profile disc.** `min(load need, planned disc)`: the need is the
-  down-sweep's carried load at the contact over `X_ALLOWED`, `π r_load²`, before the radius minimum and
-  clamps. A tip at the 0.05 mm minimum needs far less than its ball gives and is not grown.
+- **The target is the load, not the profile disc.** The need is the down-sweep's carried load at the
+  contact over `X_ALLOWED`, `π r_load²`, before the radius minimum and clamps. A tip at the 0.05 mm minimum
+  needs far less than its ball gives and is not grown. The growth aims at `min(need, planned disc)`, but the
+  tip is graded and warned against the whole need: where a radius clamp or the seat geometry leaves the
+  profile disc smaller than the load, the tip is reported short (`ShortReason::BeyondProfileDisc`), not
+  sufficient.
 - **A step must pay for itself.** A face that is flat at the kept seat depth `δ` gains `2 π δ` of area per
   mm of ball radius. A step that gains less only wraps the flanks (`ShortReason::FlankOnly`). On a convex
   underside every step gains less, so such a ball keeps the owner's profile size.
@@ -592,10 +595,20 @@ bigger than the support column or the feature that is being supported").
   section through the seat at the strike layer (`plinth_sweep::feature_chord`: the cured joint is only as
   strong as its narrowest section, and past it the break moves into the model); and the shaft's own carry
   (above). A tip a ceiling leaves short of its need is warned with the shortfall and the reason.
-- **Profile balls are not drawn smaller.** The lowering draws no ball below the owner's profile ball for the
-  tip size. One already wider than its feature is counted and warned
-  (`ContactOutcome::ungrown_over_feature`), not shrunk. The second contact along a feature too narrow for its
-  load's contact belongs to the placement, which has run before the field is final.
+- **The ceilings bind the owner's profile ball too.** A profile ball wider than its feature (or past the
+  ratio) is drawn smaller, at the ceiling (`SweepArm::contact_ball_radius_mm` below the profile ball keeps
+  the same deepest point), counted in `ContactOutcome::reduced`. Three floors: the shaft end the ball stands
+  on (a ball thinner than its rod is no ball), and the smallest ball that still holds every birth the
+  placement left to this tip's ball (`SweepStrut::held_births`, `TipBounds::hold_floor_mm`). A ball still
+  past its feature at the floor is warned (`ContactOutcome::over_feature`).
+- **A second contact for a tip its feature leaves short.** The contact growth runs on the finished field, so
+  the placement could not know what a feature gives. `run_sweep_with_second_contact` records, for each tip
+  left short, the contact it really made, and runs the placement again with that contact as the load the
+  tip may carry at its tip layer (`down_sweep::ContactCaps`): the load-driven insertion that relieves an
+  arm over the area law's maximum then seats a carrier beside the tip on the same underside and the load
+  routes between them. The second plan is kept only where it leaves the summed shortfall (mm²) smaller.
+  Costs one more sweep; reported in the log (`second contact:` line) and `SweepRunReport::seat_second_contact`.
+  A tip left short after it is warned as before.
 
 ### Every change to a tip keeps layerwise support (joint review, 2026-10-12)
 

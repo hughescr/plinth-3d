@@ -79,12 +79,20 @@ impl Birth {
     /// about `centre_mm` (read at the corners of each cell's pixel box, so a
     /// box inside the disc has all its pixels inside).
     pub(crate) fn inside_disc(&self, centre_mm: [f64; 2], radius_mm: f64) -> bool {
-        !self.extents.is_empty()
-            && self.extents.iter().all(|&[min_x, min_y, max_x, max_y]| {
+        !self.extents.is_empty() && self.reach_from(centre_mm) <= radius_mm
+    }
+
+    /// The radius of the smallest disc about `centre_mm` that holds every
+    /// pixel of the birth ([`Self::inside_disc`] at its limit), mm.
+    pub(crate) fn reach_from(&self, centre_mm: [f64; 2]) -> f64 {
+        self.extents
+            .iter()
+            .map(|&[min_x, min_y, max_x, max_y]| {
                 let far_x = (min_x - centre_mm[0]).abs().max((max_x - centre_mm[0]).abs());
                 let far_y = (min_y - centre_mm[1]).abs().max((max_y - centre_mm[1]).abs());
-                far_x.hypot(far_y) <= radius_mm
+                far_x.hypot(far_y)
             })
+            .fold(0.0, f64::max)
     }
 }
 
