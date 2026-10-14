@@ -3880,8 +3880,6 @@ fn run_sweep_inner(
         );
     }
     finish_heads(&mut sweep_plan);
-    let undrawable = downgrade_undrawable_heads(&mut sweep_plan, measure_env.layer_plan);
-    sweep_plan.report.heads.downgraded_after_sizing.extend(undrawable);
     // THE MODEL FEET ON THE FINISHED FIELD (lane 2, 2026-10-12,
     // `MODEL-FEET.md` F1/F2): every arm that lands on the model gets its
     // landed face, its load-sized contact (the down-sweep's load at the
@@ -4434,52 +4432,6 @@ fn finish_heads(plan: &mut SweepPlan) {
     };
     plan.report.heads.final_normal_residual_deg_max = residuals_deg[residuals_deg.len() - 1];
     plan.report.heads.final_normal_residual_deg_median = median;
-}
-
-/// **A head the lowering cannot draw is a straight tip, sized as one** (round 6,
-/// 2026-10-14; the owner's picture 31: a tiny ball on a much fatter flat-topped
-/// post). The lowering draws a carried head only where its ball meets the head's
-/// seat plane and the joint stands past the ball ([`plinth_support::tip_contact_discs`]
-/// reports no joint radius for one it cannot); any other is drawn as a straight
-/// tip from the seat to the base, and its post kept the head's sizing: the
-/// joint-sized running maximum the head minimum wrote down the whole post
-/// (Deinonychus: 0.198 -> 0.233 under a 0.067 mm ball, 6 mm of fat post for a
-/// hairline tip). Such a head is given up the way [`heads::downgrade_grown_heads`]
-/// gives one up for want of a joint slot: it is marked drawn straight (so the
-/// adapter moves the members landed on its post by the displacement to the
-/// straight line) and its slots are rebuilt from the area-law ledger saved before
-/// the head minimum, never under the width the slenderness lane gave a layer.
-/// One batched disc call over the field. Returns the struts given up.
-fn downgrade_undrawable_heads(plan: &mut SweepPlan, layers: &LayerPlan) -> Vec<u32> {
-    if plan.struts.iter().all(|strut| strut.head.is_none()) {
-        return Vec::new();
-    }
-    let arms = adapter::arms_of(plan);
-    let Ok(discs) = plinth_support::tip_contact_discs(&arms, layers) else {
-        return Vec::new();
-    };
-    let mut given_up = Vec::new();
-    for (strut, (arm, disc)) in plan.struts.iter_mut().zip(arms.iter().zip(&discs)) {
-        let drawn = disc.as_ref().is_some_and(|disc| disc.head_joint_radius_mm.is_some());
-        if arm.head.is_none() || drawn || !slenderness::live(strut) {
-            continue;
-        }
-        let Some(head) = strut.head.as_mut() else {
-            continue;
-        };
-        head.drawn_straight = true;
-        if head.ledger_radius_mm.len() == strut.radius_mm.len() {
-            let k_bottom = strut.k_bottom;
-            let thickened = &strut.thickened_mm;
-            for (slot, radius) in strut.radius_mm.iter_mut().enumerate() {
-                let wanted = head.ledger_radius_mm[slot]
-                    .max(thickened.get(k_bottom + slot).copied().unwrap_or(0.0));
-                *radius = wanted;
-            }
-        }
-        given_up.push(strut.id);
-    }
-    given_up
 }
 
 /// What one un-merge pass did.

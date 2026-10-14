@@ -1823,9 +1823,11 @@ fn lower_sweep_arms_of(
     // After the junction pass (which draws the bends of landed junctions) and
     // before the raft, so they are part of the arms' own solid for everything
     // that reads the finished records.
-    let knees = knee_spheres(&out.primitives, config.pixel_pitch_mm);
+    let knees = knees_after(&out.primitives, config.pixel_pitch_mm);
     out.knee_spheres = knees.len();
-    out.primitives.extend(knees);
+    if !knees.is_empty() {
+        out.primitives = insert_knees(std::mem::take(&mut out.primitives), knees);
+    }
     // THE RAFT (fix/sweep-raft, 2026-09-29): one pad under every plate foot,
     // MST bridges between the pads, planned ONCE for the whole field from the
     // feet the arms actually emitted, and appended after every support record
@@ -1923,8 +1925,19 @@ fn lower_hull_reference(
 /// pixel of axis are not bends, and records of different arms never share a
 /// vertex to a micron. One batched scan over the finished records.
 fn knee_spheres(primitives: &[SupportPrimitive], pixel_mm: f64) -> Vec<SupportPrimitive> {
-    let mut knees: Vec<SupportPrimitive> = Vec::new();
-    for pair in primitives.windows(2) {
+    knees_after(primitives, pixel_mm)
+        .into_iter()
+        .map(|(_, sphere)| sphere)
+        .collect()
+}
+
+/// The knee spheres with the index of the record each stands after (the first of
+/// the two frusta that meet at it), so [`insert_knees`] writes each one into its
+/// own member's run of records, as a head's joint sphere is: a reader that takes
+/// a member as the records from its ball to its foot sees the knee in it.
+fn knees_after(primitives: &[SupportPrimitive], pixel_mm: f64) -> Vec<(usize, SupportPrimitive)> {
+    let mut knees: Vec<(usize, SupportPrimitive)> = Vec::new();
+    for (index, pair) in primitives.windows(2).enumerate() {
         let (a, b) = (&pair[0], &pair[1]);
         if !(matches!(
             a.segment_kind,
@@ -1968,19 +1981,38 @@ fn knee_spheres(primitives: &[SupportPrimitive], pixel_mm: f64) -> Vec<SupportPr
         let Ok((start_mm, end_mm)) = geometry.canonical_poles(sphere_radius) else {
             continue;
         };
-        knees.push(SupportPrimitive {
-            segment_kind: SupportSegmentKind::JointSphere,
-            start_mm,
-            end_mm,
-            start_radius_mm: sphere_radius,
-            end_radius_mm: sphere_radius,
-            contact_depth_mm: None,
-            ring_normal: FrustumRingNormal::SegmentAxis,
-            sphere_geometry: Some(geometry),
-            seat_trim: None,
-        });
+        knees.push((
+            index,
+            SupportPrimitive {
+                segment_kind: SupportSegmentKind::JointSphere,
+                start_mm,
+                end_mm,
+                start_radius_mm: sphere_radius,
+                end_radius_mm: sphere_radius,
+                contact_depth_mm: None,
+                ring_normal: FrustumRingNormal::SegmentAxis,
+                sphere_geometry: Some(geometry),
+                seat_trim: None,
+            },
+        ));
     }
     knees
+}
+
+/// Write each knee sphere into `primitives` straight after the record it stands
+/// after ([`knees_after`]), keeping the order of everything else.
+fn insert_knees(primitives: Vec<SupportPrimitive>, knees: Vec<(usize, SupportPrimitive)>) -> Vec<SupportPrimitive> {
+    let mut rebuilt = Vec::with_capacity(primitives.len() + knees.len());
+    let mut knees = knees.into_iter().peekable();
+    for (index, primitive) in primitives.into_iter().enumerate() {
+        rebuilt.push(primitive);
+        while knees.peek().is_some_and(|(after, _)| *after == index) {
+            if let Some((_, sphere)) = knees.next() {
+                rebuilt.push(sphere);
+            }
+        }
+    }
+    rebuilt
 }
 
 /// Two records meet when their shared vertex agrees to this: a tenth of a micron,
@@ -2989,85 +3021,85 @@ fn drawn_chords(
     spans
 }
 
-/// The first slot boundary under `from_z` inside the shaft (the cut
-/// [`drawn_chords`] makes first), or `to_z` where there is none: where the head
-/// cone of [`lead_from_the_neck`] ends.
-fn first_slot_boundary_below(
-    slots: usize,
-    base_z: f64,
-    seat_z: f64,
-    from_z: f64,
-    to_z: f64,
-) -> f64 {
-    let rise = seat_z - base_z;
-    if slots == 0 || !rise.is_finite() || rise <= 0.0 {
-        return to_z;
-    }
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "a slot count bounded by the profile length is exact in f64"
-    )]
-    let slot_height = rise / slots as f64;
-    let first = ((from_z - base_z) / slot_height).floor();
-    let mut z = base_z + first * slot_height;
-    if z >= from_z - ZERO_LENGTH_MM {
-        z -= slot_height;
-    }
-    if z.is_finite() && z > to_z + ZERO_LENGTH_MM {
-        z
-    } else {
-        to_z
-    }
-}
-
-/// **THE NECK IS THE FIRST DRAWN RADIUS** (round 6, 2026-10-14; the owner's
-/// picture 31: a 0.067 mm ball on a much fatter flat-topped post). The shaft
-/// leaves its contact ball at the neck's radius `start_radius` AT the ball's
-/// centre. Where the ledger asks for more than the neck in the first slot (a
-/// lander in the head zone), the first span used to start at the ledger's value
-/// there, a flat top the ball sat on. It starts at the neck now and widens, going
-/// down, to the ledger's value over the first slot (`first_cut_z`, the first
-/// slot boundary below the top, or the shaft's end): a cone that faces up and
-/// prints at any slope, drawn along the member axis. The widening is all the
-/// first slot allows: the ledger's value is the radius the carried load needs
-/// from there down, and the neck is only the radius AT the centre (the head's
-/// design envelope is the cone, the carried load's minimum the floor under it;
-/// where the load asks for more, the load wins). A span that already starts at
-/// the neck is untouched, bit for bit.
-fn lead_from_the_neck(spans: &mut Vec<DrawnSpan>, start_radius: f64, first_cut_z: f64) {
-    let Some(first) = spans.first().copied() else {
+/// **THE NECK IS THE FIRST DRAWN RADIUS, AND A HEAD CONE CARRIES IT TO THE SHAFT**
+/// (round 6, 2026-10-14; the owner's picture 31: a 0.067 mm ball on a much
+/// fatter flat-topped post, and picture 28's "tapering as they head up/down").
+///
+/// The shaft leaves its contact ball at the neck's radius `start_radius` AT the
+/// ball's centre. Where the first span starts wider than the neck (the section
+/// asked for at the very top of the post stands above the tip's own: a head
+/// minimum, a slenderness width, the joint-sized running maximum of a head the
+/// lowering cannot draw: no load lands in the first layer, whose carried load is
+/// the tip's own), that wider value used to be drawn as a flat top the ball
+/// stood on. It is drawn as the head cone of the owner's profile instead: from
+/// the neck, linear in the axis, to the section the shaft has `head_z_mm` of
+/// height down (his `supporttiplength` at the neck's size, 1.5 to 3.0 mm, taken
+/// along the axis), and the shaft is unchanged from there. A cone widening going
+/// down faces up and prints at any slope. Between the centre and the cone's end
+/// the section is the cone's, narrower than the section the first span asked for
+/// there: the top of a post carries almost none of its sway (the cantilever's
+/// weight is `(l - x)^3`), and nothing lands there. A span that already starts at
+/// the neck is untouched, bit for bit; a shaft shorter than the cone is one cone.
+fn head_cone_from_the_neck(spans: &mut Vec<DrawnSpan>, start_radius: f64, head_z_mm: f64) {
+    let (Some(first), Some(last)) = (spans.first().copied(), spans.last().copied()) else {
         return;
     };
     if !(start_radius.is_finite()
         && start_radius > 0.0
+        && head_z_mm.is_finite()
+        && head_z_mm > ZERO_LENGTH_MM
         && first.top_radius_mm > start_radius * (1.0 + PROFILE_RELATIVE_SLACK))
     {
         return;
     }
-    let drop = first.top_z_mm - first.bottom_z_mm;
-    let to_cut = first.top_z_mm - first_cut_z;
-    if !drop.is_finite() || drop <= 0.0 || to_cut <= ZERO_LENGTH_MM || to_cut >= drop - ZERO_LENGTH_MM {
-        // One slot (or less) is the whole span: the cone is the span.
-        spans[0].top_radius_mm = start_radius;
+    let top_z = first.top_z_mm;
+    let cone_end_z = (top_z - head_z_mm).max(last.bottom_z_mm);
+    if top_z - cone_end_z <= ZERO_LENGTH_MM {
         return;
     }
-    let radius_at_cut =
-        first.top_radius_mm + (first.bottom_radius_mm - first.top_radius_mm) * (to_cut / drop);
-    spans[0] = DrawnSpan {
-        top_z_mm: first_cut_z,
-        bottom_z_mm: first.bottom_z_mm,
-        top_radius_mm: radius_at_cut,
-        bottom_radius_mm: first.bottom_radius_mm,
+    // The wider section any span has at the cone's end (a shoulder there reads the
+    // wide side: the cone must not end under what stands below it).
+    let radius_at = |z: f64| -> f64 {
+        spans
+            .iter()
+            .filter(|span| z <= span.top_z_mm + ZERO_LENGTH_MM && z >= span.bottom_z_mm - ZERO_LENGTH_MM)
+            .map(|span| {
+                let drop = span.top_z_mm - span.bottom_z_mm;
+                if drop <= ZERO_LENGTH_MM {
+                    span.top_radius_mm.max(span.bottom_radius_mm)
+                } else {
+                    span.top_radius_mm
+                        + (span.bottom_radius_mm - span.top_radius_mm) * ((span.top_z_mm - z) / drop)
+                }
+            })
+            .fold(0.0_f64, f64::max)
     };
-    spans.insert(
-        0,
-        DrawnSpan {
-            top_z_mm: first.top_z_mm,
-            bottom_z_mm: first_cut_z,
-            top_radius_mm: start_radius,
-            bottom_radius_mm: radius_at_cut,
-        },
-    );
+    let end_radius = radius_at(cone_end_z).max(start_radius);
+    let mut drawn = vec![DrawnSpan {
+        top_z_mm: top_z,
+        bottom_z_mm: cone_end_z,
+        top_radius_mm: start_radius,
+        bottom_radius_mm: end_radius,
+    }];
+    for span in spans.iter() {
+        if span.bottom_z_mm >= cone_end_z - ZERO_LENGTH_MM {
+            continue;
+        }
+        if span.top_z_mm > cone_end_z + ZERO_LENGTH_MM {
+            let drop = span.top_z_mm - span.bottom_z_mm;
+            let at_cut = span.top_radius_mm
+                + (span.bottom_radius_mm - span.top_radius_mm) * ((span.top_z_mm - cone_end_z) / drop);
+            drawn.push(DrawnSpan {
+                top_z_mm: cone_end_z,
+                bottom_z_mm: span.bottom_z_mm,
+                top_radius_mm: at_cut,
+                bottom_radius_mm: span.bottom_radius_mm,
+            });
+        } else {
+            drawn.push(*span);
+        }
+    }
+    *spans = drawn;
 }
 
 /// The tip seat for one arm, by the law in `docs/physics.md` §9, bounded by
@@ -4808,17 +4840,50 @@ fn push_drawn_shaft(
     // THE NECK IS THE FIRST DRAWN RADIUS (round 6): the sweep's readers keep
     // reading the ledger's chords ([`drawn_spans`], conservative: the ledger's
     // value is the wider); the file leaves the ball at the neck.
-    lead_from_the_neck(
-        &mut spans,
-        shaft.tip_radius.get(),
-        first_slot_boundary_below(
-            arm.radius_profile_mm.len(),
-            arm.base_mm[2],
-            shaft.profile_top_z_mm,
-            top_z,
-            bottom_z,
-        ),
-    );
+    //
+    // * A TIP whose first span stands past the owner's ball-to-neck range (more
+    //   than the top of his table, 1.5, times the neck) is not carrying its own
+    //   load there: it is a plateau (a head minimum, a slenderness width, the
+    //   joint-sized running maximum of a head the lowering cannot draw), and it is
+    //   drawn as the owner's head cone, his `supporttiplength` at the neck's size
+    //   (1.5 to 3.0 mm along the axis; the spans are in height).
+    // * Any other first span that starts past the neck widens to the ledger over
+    //   one layer, so the shaft still leaves the ball at the neck. The post under a
+    //   head leaves the certified joint sphere the same way (its neck is the
+    //   joint's radius, and the sphere is never narrower than what leaves it by
+    //   more than one layer), and is never given the owner's head cone: its
+    //   section is a real part of a load path.
+    let slot_z = if arm.radius_profile_mm.is_empty() {
+        0.0
+    } else {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a slot count bounded by the profile length is exact in f64"
+        )]
+        let slots = arm.radius_profile_mm.len() as f64;
+        (shaft.profile_top_z_mm - arm.base_mm[2]) / slots
+    };
+    let max_ratio = config
+        .tip_contact_profiles
+        .profiles()
+        .iter()
+        .map(plinth_core::TipContactProfile::ball_factor)
+        .fold(0.0_f64, f64::max);
+    let plateau = spans.first().map_or(0.0, |span| span.top_radius_mm);
+    let head_z = if shaft.first_kind == SupportSegmentKind::ContactTaper
+        && plateau > max_ratio * shaft.tip_radius.get()
+    {
+        let along = geom_kernel::vec3::norm(geom_kernel::vec3::sub(
+            shaft.top.map(Finite::get),
+            shaft.bottom.map(Finite::get),
+        ));
+        let axial_per_height = if top_z > bottom_z { along / (top_z - bottom_z) } else { 1.0 };
+        plinth_core::chitubox_tip_length_profiles().tip_length_mm(2.0 * shaft.tip_radius.get())
+            / axial_per_height.max(1.0)
+    } else {
+        slot_z
+    };
+    head_cone_from_the_neck(&mut spans, shaft.tip_radius.get(), head_z);
     // A point on the straight axis at height `z`, by the same parameter the
     // spans were cut at, so a shared end is the same number on both spans.
     let on_axis = |z: f64| -> Option<[Finite; 3]> {
@@ -7140,6 +7205,21 @@ mod pole_collar_tests {
         assert!((wider_below[0].start_radius_mm.get() - 0.5044).abs() < 1e-12);
         let wider_above = knee_spheres(&bent(26.3, 0.5044, 0.31, 1.0), pixel);
         assert!((wider_above[0].start_radius_mm.get() - 0.5044).abs() < 1e-12);
+        // The sphere is written between the two frusta of its own member, as a head's
+        // joint sphere is, and nothing else moves.
+        let pieces = bent(26.3, 0.5044, 0.5044, 1.0);
+        let placed = insert_knees(pieces.clone(), knees_after(&pieces, pixel));
+        let kinds: Vec<SupportSegmentKind> = placed.iter().map(|p| p.segment_kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                SupportSegmentKind::ContactTaper,
+                SupportSegmentKind::JointSphere,
+                SupportSegmentKind::Member
+            ]
+        );
+        assert_eq!(placed[0], pieces[0]);
+        assert_eq!(placed[2], pieces[1]);
         // Controls: no turn, a turn under a pixel of section, and pieces under a pixel long.
         assert!(knee_spheres(&bent(0.0, 0.5, 0.5, 1.0), pixel).is_empty());
         assert!(knee_spheres(&bent(2.0, 0.3, 0.3, 1.0), pixel).is_empty(), "0.3 sin(2 deg) = 0.0105 < 0.0189");

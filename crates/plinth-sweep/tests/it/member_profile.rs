@@ -108,15 +108,28 @@ fn a_shaft_leaves_its_ball_at_the_neck_and_widens_to_the_ledger() {
         .map(|p| p.start_radius_mm.get().max(p.end_radius_mm.get()))
         .fold(0.0_f64, f64::max);
     assert!((widest - 0.233).abs() < 1e-9, "the ledger is carried down: {widest}");
+    // THE HEAD CONE (the owner's `supporttiplength` at a 0.1 mm neck: 1.5 mm): one
+    // straight cone from the neck to the ledger, 1.5 mm along the axis.
     let first = shaft[0];
+    let length = geom_kernel::vec3::dist(
+        first.start_mm.map(Finite::get),
+        first.end_mm.map(Finite::get),
+    );
+    assert!((length - 1.5).abs() < 1e-6, "the head cone is the owner's tip length: {length} mm");
     assert!(
-        first.end_radius_mm.get() > first.start_radius_mm.get() + 1e-6,
-        "the first span widens, going down: {} to {}",
+        (first.start_radius_mm.get() - 0.05).abs() < 1e-9
+            && (first.end_radius_mm.get() - 0.233).abs() < 1e-9,
+        "from the neck to the ledger: {} to {}",
         first.start_radius_mm.get(),
         first.end_radius_mm.get()
     );
-    let drop = (first.start_mm[2].get() - first.end_mm[2].get()).abs();
-    assert!(drop <= 2.0 * H + 1e-9, "the widening is the first layers, not the post: {drop} mm");
+    // And the post below it is the ledger, unchanged.
+    for span in &shaft[1..] {
+        assert!(
+            span.start_radius_mm.get() >= 0.233 - 1e-9 && span.end_radius_mm.get() >= 0.233 - 1e-9,
+            "below the cone the shaft keeps the ledger: {span:?}"
+        );
+    }
 }
 
 /// A shaft that is exactly as wide as its load needs is its own neck: nothing

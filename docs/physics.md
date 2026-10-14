@@ -611,11 +611,14 @@ A member reads, from the model down: contact ball, neck, a cone widening to the 
 cases where it did not.
 
 - **A ball is wider than its neck, and the shaft leaves it at the neck.** The first drawn radius is the
-  neck's, at the ball centre (`plinth_support::lower::lead_from_the_neck`); where the ledger asks for
-  more in the first slot the shaft widens, going down, over that slot (a cone that prints at any
-  slope). A head that the lowering cannot draw is given up as a straight tip and sized as one
-  (`downgrade_undrawable_heads`: the joint-sized running maximum of the head minimum, 0.198 -> 0.233 under
-  a 0.067 mm ball, is dropped; picture 31).
+  neck's, at the ball centre (`plinth_support::lower::head_cone_from_the_neck`). A tip whose first span
+  stands past the top of the owner's ball-to-neck table (1.5) times the neck is not carrying its own load
+  there: it is a plateau (the joint-sized running maximum of a head the lowering cannot draw, 0.198 -> 0.233
+  under a 0.067 mm ball, picture 31), and it is drawn as the owner's head cone, his `supporttiplength` at
+  the neck's size (1.5 to 3.0 mm, `TipLengthProfiles`), from the neck to the section the shaft has that far
+  down. Any other first span that starts past the neck, and the post under a head leaving its joint
+  sphere, widens to the ledger over one layer (a cone widening going down prints at any slope). A span
+  that already starts at the neck is untouched.
 - **A model foot is the owner's tail contact.** The foot's contact radius is the largest of the area
   law's, the neck under the ChituBox tail contact of a body of this size (`TailContactProfiles::neck_radius_mm`:
   the tail touch is a DIAMETER, the ball's radius half of it, the neck the ball over the tip table's

@@ -187,6 +187,105 @@ fn ratio_by_diameter<P>(
     ratio(below) + t * (ratio(above) - ratio(below))
 }
 
+/// The owner's four profiles' head cone length, `(name, top_support.
+/// supporttipupdiameter, top_support.supporttiplength)` in mm: the DIAMETER of the
+/// cone at its upper end (where it leaves the contact ball's centre) and the
+/// length the cone runs to the shaft, transcribed from `docs/evidence/
+/// chitubox-support-profiles-2026-09-30.cfgx` (a test reads the export and
+/// compares).
+pub const CHITUBOX_TIP_LENGTH_ROWS: [(&str, f64, f64); 4] = [
+    ("Light", 0.2, 2.0),
+    ("Middle", 0.4, 2.0),
+    ("Heavy", 0.6, 3.0),
+    ("Ultralight", 0.15, 1.5),
+];
+
+#[derive(Clone, Debug, PartialEq)]
+struct TipLengthRow {
+    tip_up_diameter_mm: f64,
+    length_mm: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum TipLengthProfilesError {
+    #[error("a tip-length table needs at least one profile")]
+    Empty,
+    #[error("a tip-length row needs a finite, positive diameter and length")]
+    NonPositive,
+    #[error("two profiles share a tip-up diameter; the table cannot be read by tip size")]
+    DuplicateTipSize,
+}
+
+/// **The owner's head cone length, read by neck size** (round 6, 2026-10-14): the
+/// length of the cone that carries a contact's neck out to the shaft, linear in
+/// the neck's DIAMETER between the two profiles whose tip-up diameters bracket
+/// it, held at the end profile's own length outside the table (never
+/// extrapolated; the rule of [`TipContactProfiles`]). 1.5 to 3.0 mm.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TipLengthProfiles {
+    rows: Vec<TipLengthRow>,
+}
+
+impl TipLengthProfiles {
+    /// Build from `(name, tip-up DIAMETER, length)` rows in any order.
+    ///
+    /// # Errors
+    ///
+    /// An empty table, a non-finite or non-positive number, or two rows at one size.
+    pub fn new<I, S>(rows: I) -> Result<Self, TipLengthProfilesError>
+    where
+        I: IntoIterator<Item = (S, f64, f64)>,
+        S: Into<String>,
+    {
+        let mut table: Vec<TipLengthRow> = Vec::new();
+        for (_name, diameter, length) in rows {
+            if !(diameter.is_finite() && diameter > 0.0 && length.is_finite() && length > 0.0) {
+                return Err(TipLengthProfilesError::NonPositive);
+            }
+            table.push(TipLengthRow {
+                tip_up_diameter_mm: diameter,
+                length_mm: length,
+            });
+        }
+        if table.is_empty() {
+            return Err(TipLengthProfilesError::Empty);
+        }
+        table.sort_by(|a, b| a.tip_up_diameter_mm.total_cmp(&b.tip_up_diameter_mm));
+        if table
+            .windows(2)
+            .any(|pair| pair[1].tip_up_diameter_mm <= pair[0].tip_up_diameter_mm)
+        {
+            return Err(TipLengthProfilesError::DuplicateTipSize);
+        }
+        Ok(Self { rows: table })
+    }
+
+    /// The head cone's length, mm, for a neck of `neck_diameter_mm` DIAMETER.
+    #[must_use]
+    pub fn tip_length_mm(&self, neck_diameter_mm: f64) -> f64 {
+        ratio_by_diameter(
+            &self.rows,
+            neck_diameter_mm,
+            |row| row.tip_up_diameter_mm,
+            |row| row.length_mm,
+        )
+    }
+}
+
+/// The owner's head cone lengths ([`CHITUBOX_TIP_LENGTH_ROWS`]).
+///
+/// # Panics
+///
+/// Never for the committed rows (a test builds the table).
+#[must_use]
+pub fn chitubox_tip_length_profiles() -> &'static TipLengthProfiles {
+    static TABLE: std::sync::OnceLock<TipLengthProfiles> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        TipLengthProfiles::new(CHITUBOX_TIP_LENGTH_ROWS)
+            .expect("the owner's committed tip-length rows are valid")
+    })
+}
+
 /// The owner's four profiles' foot contact, `(name, middle_support.
 /// supportmiddlediameter, bottom_support.supporttouchtaildiameter)` in mm
 /// DIAMETER, transcribed from `docs/evidence/chitubox-support-profiles-
@@ -643,6 +742,42 @@ mod tests {
                 "{name}: supporttouchtaildiameter"
             );
         }
+    }
+
+    /// The head cone length reads the owner's `supporttiplength` at each profile's own
+    /// tip-up diameter, linear in diameter between, held outside: the table equals the
+    /// committed export by name.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the rows transcribe the export's decimal literals exactly; equality is the claim"
+    )]
+    fn the_tip_lengths_equal_the_committed_profile_export_and_read_by_neck_size() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("docs/evidence/chitubox-support-profiles-2026-09-30.cfgx");
+        let raw = std::fs::read_to_string(&path).expect("the committed export is readable");
+        let export: serde_json::Value = serde_json::from_str(&raw).expect("the export is JSON");
+        let profiles = export["support"].as_array().expect("a support array");
+        let table = chitubox_tip_length_profiles();
+        for profile in profiles {
+            let field = |key: &str| {
+                profile["top_support"][key]["currentvalue"]
+                    .as_f64()
+                    .expect("a top_support field")
+            };
+            let (diameter, length) = (field("supporttipupdiameter"), field("supporttiplength"));
+            assert_eq!(table.tip_length_mm(diameter), length, "{}", profile["name"]);
+        }
+        assert_eq!(CHITUBOX_TIP_LENGTH_ROWS.len(), profiles.len());
+        // Halfway between Middle (0.4, 2.0) and Heavy (0.6, 3.0).
+        assert!((table.tip_length_mm(0.5) - 2.5).abs() < 1e-12);
+        // Held outside the owner's range, never extrapolated.
+        assert!((table.tip_length_mm(0.05) - 1.5).abs() < 1e-12);
+        assert!((table.tip_length_mm(5.0) - 3.0).abs() < 1e-12);
+        assert!((table.tip_length_mm(f64::NAN) - 1.5).abs() < 1e-12);
+        assert!(TipLengthProfiles::new(Vec::<(&str, f64, f64)>::new()).is_err());
+        assert!(TipLengthProfiles::new([("a", 0.2, 2.0), ("b", 0.2, 3.0)]).is_err());
     }
 
     const CHITUBOX_TIP_CONTACT_ROWS_FOR_TESTS: [(&str, f64, f64); 4] = [
