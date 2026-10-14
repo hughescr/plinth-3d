@@ -50,6 +50,7 @@ pub mod deferred_shake;
 pub(crate) mod demand_replay;
 pub mod down_sweep;
 pub mod drain;
+pub mod feature_chord;
 pub mod footprint;
 pub mod footprint_normal;
 pub(crate) mod frame;
@@ -779,6 +780,13 @@ pub struct SweepPolicy {
     /// 2026-09-30), rather than the nearest face with any downward component.
     /// **On in production.** Sabotage and comparison only.
     pub seat_face_band: bool,
+    /// Which rules bound the growth of a tip ball for its real contact
+    /// ([`contact_growth`], round 5, 2026-10-14): the load's need as the
+    /// target, the feature and ball-to-shaft ceilings, and the flat-face gain
+    /// test. [`contact_growth::GrowthRule::REGISTERED`] in production; the
+    /// growth as it was on 2026-10-12 is the sabotage form
+    /// ([`SweepPolicy::with_plan_target_growth`]).
+    pub contact_growth: contact_growth::GrowthRule,
     /// Whether a support arm's seat normal is the area-weighted average over
     /// its contact footprint (`footprint_normal`, Craig ruling 2026-10-05)
     /// rather than the normal of one seat triangle. **On in production.** The
@@ -1130,6 +1138,7 @@ impl SweepPolicy {
             straight_reach: true,
             island_seating: true,
             seat_face_band: true,
+            contact_growth: contact_growth::GrowthRule::REGISTERED,
             footprint_normal: true,
             heads: true,
             shaft_landings: true,
@@ -1376,6 +1385,16 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_straight_reach(mut self) -> Self {
         self.straight_reach = false;
+        self
+    }
+
+    /// Grow tip balls as on 2026-10-12: toward the profile ball's disc, to
+    /// the registry's ceiling, stopping only at zero gain. **Sabotage and
+    /// comparison only** (`tests/it/contact_growth.rs`): with it set, Bat_Cat_Owl
+    /// has six balls over 1.5 times their shaft.
+    #[must_use]
+    pub const fn with_plan_target_growth(mut self) -> Self {
+        self.contact_growth = contact_growth::GrowthRule::PLAN_TARGET;
         self
     }
 
@@ -3554,12 +3573,21 @@ pub fn run_sweep_with_holes(
         .seat_footprint_normal
         .enabled
         .then(|| {
-            contact_ball_limit_mm(policy.owner_growth_ceiling_mm.min(policy.tip_radius_max_mm))
+            contact_growth_limits(
+                policy.owner_growth_ceiling_mm.min(policy.tip_radius_max_mm),
+                policy.contact_growth,
+            )
         })
         .flatten();
-    if let Some(limit_mm) = contact_limit_mm {
-        sweep_plan.report.seat_contact =
-            grow_contact_balls(&measure_env, &mut sweep_plan, &footprint_sites, limit_mm);
+    if let Some(limits) = contact_limit_mm {
+        sweep_plan.report.seat_contact = grow_contact_balls(
+            &measure_env,
+            &mut sweep_plan,
+            &footprint_sites,
+            &slices,
+            policy.x_allowed,
+            limits,
+        );
     }
     // THE FOOTPRINT RULE (fix/tip-trim, 2026-09-28): every tip's contact disc,
     // as the lowering will deliver it, graded against the REAL model surface
@@ -3722,7 +3750,7 @@ pub fn run_sweep_with_holes(
     // more, so every seated tip's real contact is measured again on the arms
     // exactly as the lowering gets them (the seat triangle re-derived where a
     // tip slid) and every ball short of plan is grown from the ungrown one.
-    if let Some(limit_mm) = contact_limit_mm {
+    if let Some(limits) = contact_limit_mm {
         let shifts: Vec<Option<[f64; 3]>> = sweep_plan
             .struts
             .iter()
@@ -3732,8 +3760,14 @@ pub fn run_sweep_with_holes(
             })
             .collect();
         let sites = footprint_normal::reseat_sites(mesh, &footprint_sites, &shifts);
-        sweep_plan.report.seat_contact =
-            grow_contact_balls(&measure_env, &mut sweep_plan, &sites, limit_mm);
+        sweep_plan.report.seat_contact = grow_contact_balls(
+            &measure_env,
+            &mut sweep_plan,
+            &sites,
+            &slices,
+            policy.x_allowed,
+            limits,
+        );
     }
     finish_heads(&mut sweep_plan);
     // THE MODEL FEET ON THE FINISHED FIELD (lane 2, 2026-10-12,
@@ -4151,35 +4185,102 @@ fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> Unmer
 /// `TIP_RADIUS_MAX_LEGACY_MM`. A ball the load law already drew larger is not
 /// grown at all. `None` where the registry cannot be read: no ball is grown,
 /// and the contact is not measured.
-fn contact_ball_limit_mm(tip_radius_max_mm: f64) -> Option<f64> {
+///
+/// Also the top of the owner's ball-to-shaft ratio range: the largest ball
+/// factor of his profile table (1.5), the ceiling on how much wider than its
+/// shaft any ball may be drawn (round 5, 2026-10-14).
+fn contact_growth_limits(
+    tip_radius_max_mm: f64,
+    rule: contact_growth::GrowthRule,
+) -> Option<contact_growth::GrowthLimits> {
     let constants = m0_constants().ok()?;
-    let factor = constants
-        .evidence()
-        .chitubox_tip_contact_profiles()
-        .value()
-        .ball_factor(tip_radius_max_mm);
-    let limit = factor * tip_radius_max_mm;
-    (limit.is_finite() && limit > 0.0).then_some(limit)
+    let profiles = constants.evidence().chitubox_tip_contact_profiles();
+    let table = profiles.value();
+    let limit = table.ball_factor(tip_radius_max_mm) * tip_radius_max_mm;
+    let max_ratio = table
+        .profiles()
+        .iter()
+        .map(plinth_core::TipContactProfile::ball_factor)
+        .fold(0.0_f64, f64::max);
+    (limit.is_finite() && limit > 0.0 && max_ratio.is_finite() && max_ratio > 1.0).then_some(
+        contact_growth::GrowthLimits {
+            ball_radius_mm: limit,
+            max_ball_ratio: max_ratio,
+            rule,
+        },
+    )
+}
+
+/// **What the field knows about each seated tip's load and feature**
+/// ([`contact_growth::TipBounds`]), in strut order: the contact the load needs
+/// (the down-sweep's carried load at the contact over `X_ALLOWED`, before the
+/// radius clamps), and the narrowest cured chord of the model section through
+/// the arm's seat at its strike layer ([`feature_chord`]). One batched pass.
+fn tip_bounds(
+    plan: &SweepPlan,
+    arms: &[plinth_support::SweepArm],
+    slices: &[Vec<plinth_support::perception::SliceSolid>],
+    x_allowed: f64,
+    reach_mm: f64,
+) -> Vec<contact_growth::TipBounds> {
+    let height = plan.layer_height_mm;
+    let points: Vec<Option<(usize, [f64; 2])>> = arms
+        .iter()
+        .map(|arm| {
+            if !arm.seats_into_model || height <= 0.0 {
+                return None;
+            }
+            // The layer the seat stands on: the first cured lamina over it.
+            let layer = ((arm.seat_mm[2] - plan.plate_z_mm) / height).round();
+            (layer >= 0.0).then(|| {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "a non-negative rounded layer index of a bounded layer count"
+                )]
+                let layer = layer as usize;
+                (layer, [arm.seat_mm[0], arm.seat_mm[1]])
+            })
+        })
+        .collect();
+    let chords = feature_chord::narrowest_chords_mm(slices, &points, reach_mm);
+    plan.struts
+        .iter()
+        .zip(chords)
+        .map(|(strut, chord)| contact_growth::TipBounds {
+            need_mm2: (x_allowed > 0.0)
+                .then(|| strut.carried_mm2.last().copied())
+                .flatten()
+                .map(|carried| carried.max(0.0) / x_allowed),
+            feature_chord_mm: chord,
+        })
+        .collect()
 }
 
 /// **Measure every seated tip's real contact and grow the short balls**
 /// ([`contact_growth::grow`]) from the UNGROWN ball, and write the radius each
 /// ball is drawn at onto its strut. `sites` are the footprint sites in strut
 /// order (re-derived where a tip slid). "Reaches plan" is to within one pixel
-/// of area: the grid pitch squared.
+/// of area: the grid pitch squared. The target is the load's need and the
+/// feature bounds the ball ([`tip_bounds`], [`contact_growth`]).
 fn grow_contact_balls(
     env: &footprint_normal::MeasureEnv<'_>,
     plan: &mut SweepPlan,
     sites: &[Option<footprint_normal::TipSite>],
-    limit_ball_radius_mm: f64,
+    slices: &[Vec<plinth_support::perception::SliceSolid>],
+    x_allowed: f64,
+    limits: contact_growth::GrowthLimits,
 ) -> contact_growth::ContactOutcome {
     for strut in &mut plan.struts {
         strut.seat_face.contact_ball_radius_mm = None;
     }
     let arms = adapter::arms_of(plan);
     let pixel_area_mm2 = plan.grid.pitch_mm() * plan.grid.pitch_mm();
+    // A chord wider than twice the largest ball can bound no ball: the window
+    // the section is read in is that wide on each side.
+    let bounds = tip_bounds(plan, &arms, slices, x_allowed, 2.0 * limits.ball_radius_mm);
     let (outcome, grown) =
-        contact_growth::grow(env, &arms, sites, limit_ball_radius_mm, pixel_area_mm2);
+        contact_growth::grow(env, &arms, sites, &bounds, limits, pixel_area_mm2);
     for (strut, radius) in plan.struts.iter_mut().zip(grown) {
         strut.seat_face.contact_ball_radius_mm = radius;
     }

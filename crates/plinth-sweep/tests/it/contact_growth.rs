@@ -19,8 +19,31 @@ use plinth_support::{
     lower_sweep_arms, BuildFrame, SupportPrimitive, SupportSegmentKind, SweepArm,
     SweepArmLanding,
 };
-use plinth_sweep::contact_growth::{grow, ShortReason};
+use plinth_sweep::contact_growth::{
+    grow, GrowthLimits, GrowthRule, ShortReason, TipBounds,
+};
 use plinth_sweep::footprint_normal::{MeasureEnv, TipSite};
+
+/// The registered rules, with the registry's growth ceiling `ball_radius_mm`
+/// and the owner's ratio range top, 1.5.
+fn registered(ball_radius_mm: f64) -> GrowthLimits {
+    GrowthLimits {
+        ball_radius_mm,
+        max_ball_ratio: 1.5,
+        rule: GrowthRule::REGISTERED,
+    }
+}
+
+/// The growth of 2026-10-12 (target the profile disc, stop at zero gain, no
+/// ceiling but the registry's and the shaft's carry): the mechanics tests
+/// below ran on it and still exercise the search, the carried bound and the
+/// reasons. Round 5's rules are graded after them.
+fn plan_target(ball_radius_mm: f64) -> GrowthLimits {
+    GrowthLimits {
+        rule: GrowthRule::PLAN_TARGET,
+        ..registered(ball_radius_mm)
+    }
+}
 
 /// One pixel of area on the Saturn 4 Ultra grid, about (0.02 mm)².
 const PIXEL_AREA_MM2: f64 = 0.0004;
@@ -121,7 +144,7 @@ fn a_ball_under_a_dome_grows_until_its_real_contact_reaches_plan_at_the_same_dep
     };
     let seat = [0.0, 0.0, 0.0];
     let site = site_at(&mesh, seat);
-    let (outcome, grown) = grow(&env, &[arm(seat)], &[Some(site)], 2.0, PIXEL_AREA_MM2);
+    let (outcome, grown) = grow(&env, &[arm(seat)], &[Some(site)], &[], plan_target(2.0), PIXEL_AREA_MM2);
     println!("{outcome:?}");
     assert_eq!(outcome.tips_measured, 1);
     // The path fires: the ungrown ball takes less than its plan.
@@ -193,7 +216,15 @@ fn a_triangle_soup_measures_the_same_real_contact_as_the_indexed_mesh() {
             surface: None,
             layer_plan: &layers,
         };
-        grow(&env, &[arm(seat)], &[Some(site_at(mesh, seat))], 2.0, PIXEL_AREA_MM2).0
+        grow(
+            &env,
+            &[arm(seat)],
+            &[Some(site_at(mesh, seat))],
+            &[],
+            plan_target(2.0),
+            PIXEL_AREA_MM2,
+        )
+        .0
     };
     let (a, b) = (measure(&indexed), measure(&loose));
     assert!(a.real_ungrown_mm2 > 0.5 * a.planned_mm2, "{a:?}");
@@ -215,7 +246,7 @@ fn a_flat_underside_takes_its_whole_planned_disc_and_grows_nothing() {
     };
     let seat = [0.013, -0.021, 0.0];
     let site = site_at(&mesh, seat);
-    let (outcome, grown) = grow(&env, &[arm(seat)], &[Some(site)], 2.0, PIXEL_AREA_MM2);
+    let (outcome, grown) = grow(&env, &[arm(seat)], &[Some(site)], &[], registered(2.0), PIXEL_AREA_MM2);
     assert_eq!(outcome.tips_measured, 1);
     assert_eq!(outcome.short_ungrown, 0, "{outcome:?}");
     assert_eq!(outcome.grown, 0, "{outcome:?}");
@@ -240,7 +271,14 @@ fn a_limit_leaves_the_dome_tip_short_and_named() {
     let ungrown = plinth_support::tip_contact_discs(&[arm(seat)], &layers).expect("discs")[0]
         .expect("a disc")
         .ball_radius_mm;
-    let (outcome, grown) = grow(&env, &[arm(seat)], &[Some(site)], ungrown, PIXEL_AREA_MM2);
+    let (outcome, grown) = grow(
+        &env,
+        &[arm(seat)],
+        &[Some(site)],
+        &[],
+        plan_target(ungrown),
+        PIXEL_AREA_MM2,
+    );
     assert!(grown[0].is_none(), "{outcome:?}");
     assert_eq!(outcome.short.len(), 1, "{outcome:?}");
     assert_eq!(outcome.short[0].reason, ShortReason::BallLimit);
@@ -327,7 +365,8 @@ fn a_grown_ball_on_an_oblique_shaft_keeps_its_lowest_point_inside_its_shaft() {
         &env,
         std::slice::from_ref(&oblique),
         &[Some(site)],
-        2.0,
+        &[],
+        plan_target(2.0),
         PIXEL_AREA_MM2,
     );
     println!("{outcome:?}; drawn {grown:?}");
@@ -379,8 +418,209 @@ fn a_patch_smaller_than_the_ball_is_named_when_a_larger_ball_finds_no_more_surfa
     };
     let seat = [0.0, 0.0, 0.0];
     let site = site_at(&mesh, seat);
-    let (outcome, _) = grow(&env, &[arm(seat)], &[Some(site)], 2.0, PIXEL_AREA_MM2);
+    let (outcome, _) = grow(&env, &[arm(seat)], &[Some(site)], &[], plan_target(2.0), PIXEL_AREA_MM2);
     assert_eq!(outcome.short.len(), 1, "{outcome:?}");
     assert_eq!(outcome.short[0].reason, ShortReason::NoMoreSurface, "{outcome:?}");
     assert!((outcome.short[0].real_mm2 - 0.24 * 0.24).abs() < 1e-9, "{outcome:?}");
+}
+
+// ---------------------------------------------------------------------------
+// ROUND 5 (2026-10-14): the growth is bounded by the load and by the feature.
+// Owner on Bat_Cat_Owl: the tip balls are "much bigger than the support column
+// or the feature that is being supported". Each test below runs the registered
+// rules against the same scene under the rule of 2026-10-12
+// (`GrowthRule::PLAN_TARGET`, the sabotage form): the old rule must FAIL the
+// assertion, or the test proves nothing.
+// ---------------------------------------------------------------------------
+
+/// The registered rules with the flat-gain stop off: isolates the rule a test
+/// is about from the stop that would end the growth first on a convex dome.
+fn without_flat_gain_stop(ball_radius_mm: f64) -> GrowthLimits {
+    GrowthLimits {
+        rule: GrowthRule {
+            flat_gain_stop: false,
+            ..GrowthRule::REGISTERED
+        },
+        ..registered(ball_radius_mm)
+    }
+}
+
+/// The dome tip's scene: the mesh, the layer plan, and the arm.
+fn dome_scene() -> (Mesh, LayerPlan, SweepArm, TipSite) {
+    let mesh = dome();
+    let layers = plan();
+    let seat = [0.0, 0.0, 0.0];
+    let site = site_at(&mesh, seat);
+    (mesh, layers, arm(seat), site)
+}
+
+/// **A step must pay for itself** (rule 3). A convex underside curves away from
+/// the ball: every step of radius gains less than a flat face would, so the
+/// ball only wraps the flanks. It is not grown, and the tip is warned with the
+/// reason. The rule of 2026-10-12 grew the same ball (the dome test above).
+#[test]
+fn a_ball_whose_step_gains_less_than_a_flat_face_would_is_not_grown() {
+    let (mesh, layers, tip, site) = dome_scene();
+    let env = MeasureEnv {
+        mesh: &mesh,
+        surface: None,
+        layer_plan: &layers,
+    };
+    let (outcome, grown) = grow(&env, &[tip.clone()], &[Some(site)], &[], registered(2.0), PIXEL_AREA_MM2);
+    println!("{outcome:?}");
+    assert_eq!(outcome.short_ungrown, 1, "anti-vacuity: the tip is short: {outcome:?}");
+    assert!(grown[0].is_none(), "a convex face gains less than a flat one: {outcome:?}");
+    assert_eq!(outcome.short.len(), 1, "{outcome:?}");
+    assert_eq!(outcome.short[0].reason, ShortReason::FlankOnly, "{outcome:?}");
+    // SABOTAGE: the 2026-10-12 rule grows the same ball.
+    let (old, old_grown) = grow(&env, &[tip], &[Some(site)], &[], plan_target(2.0), PIXEL_AREA_MM2);
+    assert!(old_grown[0].is_some(), "the old rule grows it: {old:?}");
+}
+
+/// **The target is the load's need** (rule 1). A tip whose load needs less
+/// than the profile ball's disc is satisfied by the contact it has; the old
+/// target, the profile disc, grew it.
+#[test]
+fn a_tip_is_grown_toward_its_loads_need_and_not_the_profile_disc() {
+    let (mesh, layers, tip, site) = dome_scene();
+    let env = MeasureEnv {
+        mesh: &mesh,
+        surface: None,
+        layer_plan: &layers,
+    };
+    let sites = [Some(site)];
+    let unbounded = grow(&env, &[tip.clone()], &sites, &[], without_flat_gain_stop(2.0), PIXEL_AREA_MM2).0;
+    assert_eq!(unbounded.short_ungrown, 1, "anti-vacuity: short of the profile disc: {unbounded:?}");
+    // The load needs 60 % of what the ungrown ball already takes.
+    let need = 0.6 * unbounded.real_ungrown_mm2;
+    let bounds = [TipBounds {
+        need_mm2: Some(need),
+        feature_chord_mm: None,
+    }];
+    let (outcome, grown) = grow(&env, &[tip.clone()], &sites, &bounds, without_flat_gain_stop(2.0), PIXEL_AREA_MM2);
+    println!("{outcome:?}");
+    assert!((outcome.planned_mm2 - need).abs() < 1e-12, "the target is the need: {outcome:?}");
+    assert_eq!(outcome.short_ungrown, 0, "{outcome:?}");
+    assert!(grown[0].is_none(), "the ball is not grown past what the load needs: {outcome:?}");
+    // The need never raises the target above the profile disc.
+    let big = [TipBounds {
+        need_mm2: Some(100.0),
+        feature_chord_mm: None,
+    }];
+    let (capped, _) = grow(&env, &[tip.clone()], &sites, &big, without_flat_gain_stop(2.0), PIXEL_AREA_MM2);
+    assert!((capped.planned_mm2 - unbounded.planned_mm2).abs() < 1e-12, "{capped:?}");
+    // SABOTAGE: the old rule ignores the need and grows the same ball.
+    let (old, old_grown) = grow(&env, &[tip], &sites, &bounds, plan_target(2.0), PIXEL_AREA_MM2);
+    assert!(old_grown[0].is_some(), "the old target is the profile disc: {old:?}");
+}
+
+/// **No drawn ball is wider than 1.5 times its shaft** (rule 2, the top of the
+/// owner's ratio range), on the lowering's own output. The dome is left short
+/// of its target by the ceiling, and warned with that reason. The old rule
+/// draws a ball past the ratio.
+#[test]
+fn no_drawn_ball_is_wider_than_one_and_a_half_times_its_shaft() {
+    let (mesh, layers, tip, site) = dome_scene();
+    let env = MeasureEnv {
+        mesh: &mesh,
+        surface: None,
+        layer_plan: &layers,
+    };
+    let sites = [Some(site)];
+    let drawn_ratio = |grown: Option<f64>| {
+        let (_, _, radius, _) = drawn_ball_pole(
+            &SweepArm {
+                contact_ball_radius_mm: grown,
+                ..tip.clone()
+            },
+            &layers,
+        );
+        radius / tip.tip_radius_mm
+    };
+    let (outcome, grown) = grow(&env, &[tip.clone()], &sites, &[], without_flat_gain_stop(2.0), PIXEL_AREA_MM2);
+    println!("{outcome:?}; drawn {grown:?}");
+    let ratio = drawn_ratio(grown[0]);
+    assert!(outcome.ratio_bound >= 1, "anti-vacuity: the ratio ceiling stopped it: {outcome:?}");
+    assert!(ratio <= 1.5 + 1e-9, "the drawn ball is {ratio} times its shaft");
+    assert_eq!(outcome.short[0].reason, ShortReason::ShaftRatio, "{outcome:?}");
+    // SABOTAGE: the old rule's drawn ball is past the ratio.
+    let (_, old_grown) = grow(&env, &[tip.clone()], &sites, &[], plan_target(2.0), PIXEL_AREA_MM2);
+    assert!(drawn_ratio(old_grown[0]) > 1.5, "the old rule draws {}", drawn_ratio(old_grown[0]));
+}
+
+/// **No ball is wider than the feature it touches** (rule 2, the feature
+/// ceiling): a contact disc no wider than the narrowest cured chord. A knife
+/// edge 0.14 mm wide under the dome tip: the disc of the drawn ball is no wider
+/// than the chord, and the tip is warned that the feature is narrower than its
+/// load's contact. The old rule runs the ball past the edge.
+#[test]
+fn a_ball_is_no_wider_than_the_feature_it_touches() {
+    let (mesh, layers, tip, site) = dome_scene();
+    let env = MeasureEnv {
+        mesh: &mesh,
+        surface: None,
+        layer_plan: &layers,
+    };
+    let sites = [Some(site)];
+    let chord = 0.14;
+    let bounds = [TipBounds {
+        need_mm2: None,
+        feature_chord_mm: Some(chord),
+    }];
+    // The widest tip radius (and so the ratio ceiling) that leaves the
+    // feature the binding ceiling.
+    let wide = SweepArm {
+        tip_radius_mm: 0.6,
+        ..tip.clone()
+    };
+    let limits = without_flat_gain_stop(2.0);
+    let disc_width = |grown: Option<f64>| {
+        let disc = plinth_support::tip_contact_discs(
+            &[SweepArm {
+                contact_ball_radius_mm: grown,
+                ..wide.clone()
+            }],
+            &layers,
+        )
+        .expect("discs")[0]
+            .expect("a disc");
+        // The grown ball keeps the pole depth: its section in the seat plane.
+        let ungrown = plinth_support::tip_contact_discs(&[wide.clone()], &layers).expect("discs")[0]
+            .expect("a disc");
+        let depth = ungrown.ball_radius_mm
+            - (ungrown.ball_radius_mm.powi(2) - ungrown.radius_mm.powi(2)).sqrt();
+        let radius = disc.ball_radius_mm;
+        2.0 * (2.0 * radius * depth - depth * depth).max(0.0).sqrt()
+    };
+    let (outcome, grown) = grow(&env, &[wide.clone()], &sites, &bounds, limits, PIXEL_AREA_MM2);
+    println!("{outcome:?}; drawn {grown:?}");
+    // The profile ball is already past the edge: counted, left as it is.
+    let profile = plinth_support::tip_contact_discs(&[wide.clone()], &layers).expect("discs")[0]
+        .expect("a disc")
+        .ball_radius_mm;
+    assert!(disc_width(None) > chord, "anti-vacuity: the profile disc is wider than the edge");
+    assert_eq!(outcome.ungrown_over_feature, 1, "{outcome:?}");
+    // It is not grown a hair past the profile ball, and the shortfall is warned.
+    assert!(grown[0].is_none() || grown[0].is_some_and(|r| r <= profile + 1e-12), "{grown:?}");
+    assert_eq!(outcome.short.len(), 1, "{outcome:?}");
+    assert_eq!(outcome.short[0].reason, ShortReason::FeatureWidth, "{outcome:?}");
+    assert_eq!(outcome.feature_bound, 1, "{outcome:?}");
+    // A feature wide enough to hold the profile disc and a bit more bounds the
+    // growth at exactly the chord: the drawn disc is no wider than it.
+    let wider = 1.4 * disc_width(None);
+    let bounds = [TipBounds {
+        need_mm2: None,
+        feature_chord_mm: Some(wider),
+    }];
+    let (outcome, grown) = grow(&env, &[wide.clone()], &sites, &bounds, limits, PIXEL_AREA_MM2);
+    println!("{outcome:?}; drawn {grown:?}");
+    let drawn = disc_width(grown[0]);
+    assert!(drawn <= wider + 1e-9, "the drawn disc is {drawn} wide on a {wider} feature");
+    // SABOTAGE: the old rule draws the disc past the feature.
+    let (old, old_grown) = grow(&env, &[wide.clone()], &sites, &bounds, plan_target(2.0), PIXEL_AREA_MM2);
+    assert!(
+        disc_width(old_grown[0]) > wider,
+        "the old rule draws a disc {} wide on a {wider} feature: {old:?}",
+        disc_width(old_grown[0])
+    );
 }
