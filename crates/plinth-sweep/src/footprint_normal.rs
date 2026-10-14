@@ -852,6 +852,58 @@ pub fn reseat_sites(
     out
 }
 
+/// The site of each tip from its seat-face point (a point on its seat
+/// triangle), as [`refine`] derives it from the seat-face measurement: the
+/// nearest face the rule admits, and where the mesh has no admitted face at
+/// all, the nearest down-facing one (the rule's own fallback). `None` where a
+/// tip has no point or the mesh has no down-facing face.
+///
+/// One batched pass over the tips with a point ([`nearest_admitted`]), and a
+/// second only over those the rule found no face for.
+#[must_use]
+pub(crate) fn sites_at(
+    mesh: &Mesh,
+    points_mm: &[Option<[f64; 3]>],
+    rule: SeatFaceRule,
+) -> Vec<Option<TipSite>> {
+    let mut out: Vec<Option<TipSite>> = vec![None; points_mm.len()];
+    let any_down = SeatFaceRule::any_down_facing();
+    let rows: Vec<usize> = (0..points_mm.len())
+        .filter(|&index| points_mm[index].is_some())
+        .collect();
+    let queries: Vec<([f64; 3], f64)> = rows
+        .iter()
+        .filter_map(|&index| points_mm[index].map(|point| (point, rule.max_normal_z())))
+        .collect();
+    let mut found = nearest_admitted(mesh, &queries);
+    let missing: Vec<usize> = (0..found.len()).filter(|&row| found[row].is_none()).collect();
+    if !missing.is_empty() {
+        let again: Vec<([f64; 3], f64)> = missing
+            .iter()
+            .map(|&row| (queries[row].0, any_down.max_normal_z()))
+            .collect();
+        for (&row, answer) in missing.iter().zip(nearest_admitted(mesh, &again)) {
+            found[row] = answer;
+        }
+    }
+    for ((&index, answer), &(point, _)) in rows.iter().zip(&found).zip(&queries) {
+        let Some((face, facet_normal)) = *answer else {
+            continue;
+        };
+        out[index] = Some(TipSite {
+            face,
+            landing_mm: point,
+            facet_normal,
+            max_normal_z: if rule.admits(facet_normal[2]) {
+                rule.max_normal_z()
+            } else {
+                any_down.max_normal_z()
+            },
+        });
+    }
+    out
+}
+
 /// Replace every support arm's seat normal in `faces` (one facet's unit normal
 /// and closest point, [`crate::tip_landing::tip_seat_faces_with_ids`]'s answer,
 /// in strut order, `ids` the seat triangles) by its FOOTPRINT normal. The seat

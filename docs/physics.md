@@ -294,18 +294,21 @@ headed hosts restores them but brings Deinonychus defects back (2 thin unbraced 
 posts; measured 2026-10-12), so it is counted
 (`twin_seats_headed_host`) and left open (`q12/REGRESSIONS.md`).
 
-**A lean the slenderness law cannot hold is not taken, where the arm already stands as a support
-(quality lane Q1, refined 2026-10-12).** The lip-seat rule leans a whole arm along one axis. Where its
-run is longer than `S` times the thickest radius at which it keeps the final gap (the drawn radius
-grown by the spare gap measured for it, up to the registered maximum), the lean is refused and the arm
-keeps its seat with its seat-bite warning (Deinonychus arms 215 and 220). The refusal trades the lean
-for the arm as it stands, so that arm must be a support: standing on its ground, its solid not
-entering the model, and either a shaft longer than one layer or a one-layer stub resting on another
-member (joint round 4, 2026-10-13: Bat_Cat_Owl's stub on its sibling chain took a 4.8 mm lean as a
-0.10 mm rod 5.4 times over `S * r`; a member's chain carries a stub). On the Morel base the kept arm
-(44) was a one-layer stub onto the model wall beside its seat, tip off its face; there the lean is
-taken. The test is arithmetic on the clearance the rule already reads for every proposal in one
-batched kernel call.
+**A lean the slenderness law cannot hold is taken only where its tip seats and the standing arm's
+does not (quality lane Q1, refined 2026-10-12 and 2026-10-14).** The lip-seat rule leans a whole arm
+along one axis. Where its run is longer than `S` times the thickest radius at which it keeps the final
+gap (the drawn radius grown by the spare gap measured for it, up to the registered maximum), the lean
+is refused and the arm keeps its seat with its seat-bite warning (Deinonychus arms 215 and 220). The
+refusal trades the lean for the arm as it stands, so that arm must be there to keep: standing on its
+ground, its solid not entering the model. Then the lean replaces it only if the lean's tip really
+seats on its face and the standing arm's tip does not. Seating is the real contact (the model surface
+inside the drawn ball, measured exactly) reaching the planned contact to within one pixel of area, the
+ball growth's own test, read for both tips in one batched call per round. The shape of the standing
+arm decides nothing: a shape test ("a one-layer stub on the model is no support") took Bat_Cat_Owl
+arm 20's 40 degree lean, a 0.10 mm rod 3.4 times over `S * r`, in place of a stub on the claw's
+0.018 mm edge; both tips had 0.0000 mm2 of contact, so the lean added a rod and no seat (joint round 5,
+`CLAW-POST.md`). The slenderness test itself is arithmetic on the clearance the rule already reads for
+every proposal in one batched kernel call.
 
 **One contact, one arm, at a first layer over nothing (joint round 4).** A birth the cover bridged to
 rooted material is given an arm only if no arm of its layer stands in it or holds it. An arm holds a
