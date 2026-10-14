@@ -2693,7 +2693,7 @@ fn run_sweep_inner(
     // after, the lane first clears every leaf it can, and this rule branches
     // only the stranded members the lane left lapping. The ids are found here,
     // after the lane, because withdrawing idle flank arms renumbers members.
-    let stranded = stranded_branch::stranded_ids(&struts, &greedy.stranded_seat_cells);
+    let mut stranded = stranded_branch::stranded_ids(&struts, &greedy.stranded_seat_cells);
     let mut stranded_branch_outcome = stranded_branch::StrandedBranchOutcome {
         enabled: policy.stranded_branch,
         stranded_members: stranded.len(),
@@ -2898,6 +2898,9 @@ fn run_sweep_inner(
     ) {
         outcome = sized;
     }
+    if drop_unheld(&mut struts, &mut lip_seat_outcome, &mut lip_seat_refused, &mut stranded) {
+        outcome = lip_seat_run.size(&slenderness_context, &mut struts);
+    }
     if policy.lip_seat {
         landings.record("lip seats", &landing_check::check_landings(&struts, height));
         moves.note("lip seats", &struts);
@@ -3009,6 +3012,9 @@ fn run_sweep_inner(
             &mut lip_seat_refused,
         ) {
             outcome = sized;
+        }
+        if drop_unheld(&mut struts, &mut lip_seat_outcome, &mut lip_seat_refused, &mut stranded) {
+            outcome = lip_seat_run.size(&slenderness_context, &mut struts);
         }
         landings.record(
             "lip seats after head joins",
@@ -4873,6 +4879,47 @@ fn remove_under_loaded(
     doomed.iter().filter(|flag| **flag).count()
 }
 
+/// **Drop the arms the lip-seat run found to hold nothing**
+/// ([`lip_seat::holds_nothing`]): their tip touches the model nowhere, neither
+/// does their lean, and nothing rests on them. The ids after them are
+/// renumbered, so the id lists the sweep keeps across the lip-seat stage
+/// (`refused`, `stranded`) are re-pointed. Returns whether any arm went, in
+/// which case the caller sizes the field again.
+fn drop_unheld(
+    struts: &mut Vec<SweepStrut>,
+    outcome: &mut lip_seat::LipSeatOutcome,
+    refused: &mut Vec<(u32, usize)>,
+    stranded: &mut Vec<u32>,
+) -> bool {
+    if outcome.unheld_pending.is_empty() {
+        return false;
+    }
+    let pending = std::mem::take(&mut outcome.unheld_pending);
+    let mut doomed = vec![false; struts.len()];
+    for unheld in &pending {
+        if let Some(flag) = doomed.get_mut(unheld.arm as usize) {
+            *flag = true;
+        }
+    }
+    let remap = drop_members(struts, &doomed);
+    let mapped = |id: u32| {
+        remap
+            .get(id as usize)
+            .copied()
+            .filter(|fresh| *fresh != u32::MAX)
+    };
+    refused.retain_mut(|(id, _)| mapped(*id).is_some_and(|fresh| {
+        *id = fresh;
+        true
+    }));
+    stranded.retain_mut(|id| mapped(*id).is_some_and(|fresh| {
+        *id = fresh;
+        true
+    }));
+    outcome.unheld.extend(pending);
+    true
+}
+
 /// Remove the doomed members and renumber the rest, re-pointing every landing
 /// and every recorded fallback at the new ids. A landing on a removed member
 /// falls through to the plate rather than pointing at nothing. Returns the
@@ -5608,7 +5655,7 @@ fn digest(struts: &[SweepStrut]) -> String {
 
 #[cfg(test)]
 mod removal_tests {
-    use super::{plan_grid, unmerge_overgrown, Landing, SweepStrut};
+    use super::{drop_unheld, lip_seat, plan_grid, unmerge_overgrown, Landing, SweepStrut};
 
     /// The screen and the span test alone, as these fixtures have always been
     /// graded. The multi-layer replay needs a mesh and its slices, so it is
@@ -5878,6 +5925,42 @@ mod removal_tests {
         // The candidate reads below the minimum load; the neighbour reads well
         // above it, so only one of the two is ever a candidate.
         vec![bare(0, 0, 0, 0.5), bare(1, 1, neighbour_bottom, 10.0)]
+    }
+
+    /// **Dropping an arm that holds nothing renumbers the rest and every id
+    /// list the sweep keeps** (round 6, `NUB-CLAW.md` part 1): a member that
+    /// landed on a later one lands on its new id, and the lists of ids the
+    /// lip-seat stage carries (`refused`, `stranded`) follow, the dropped
+    /// arm's entries going with it. The warning keeps the arm's old id.
+    #[test]
+    fn dropping_an_unheld_arm_renumbers_the_ids_the_sweep_keeps() {
+        let mut struts = removal_pair(0);
+        let mut lander = struts[1].clone();
+        lander.id = 2;
+        lander.landing = Landing::Strut { id: 1, layer: 3 };
+        struts.push(lander);
+        let mut outcome = lip_seat::LipSeatOutcome::default();
+        outcome.unheld_pending.push(lip_seat::UnheldArm {
+            arm: 0,
+            load_mm2: 0.0003,
+            seat_mm: [1.0, 2.0, 3.0],
+        });
+        let mut refused = vec![(0_u32, 5_usize), (1, 7), (2, 9)];
+        let mut stranded = vec![0_u32, 1, 2];
+
+        assert!(drop_unheld(&mut struts, &mut outcome, &mut refused, &mut stranded));
+
+        assert_eq!(struts.iter().map(|strut| strut.id).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(struts[1].landing, Landing::Strut { id: 0, layer: 3 });
+        assert_eq!(refused, vec![(0, 7), (1, 9)]);
+        assert_eq!(stranded, vec![0, 1]);
+        assert!(outcome.unheld_pending.is_empty());
+        assert_eq!(outcome.unheld.len(), 1);
+        assert_eq!(outcome.unheld[0].arm, 0, "the warning names the arm as it was");
+        assert!(
+            !drop_unheld(&mut struts, &mut outcome, &mut refused, &mut stranded),
+            "nothing pending: nothing dropped"
+        );
     }
 
     /// The counterpart: a REACH-placed arm (`inserted_by_load: false`) below
