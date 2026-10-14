@@ -960,7 +960,7 @@ fn seat_flank_arms(
             interior: false,
             radius_mm: Vec::new(),
             carried_mm2: Vec::new(),
-            covered_demand: Vec::new(), held_birth_cells: Vec::new(), twin_host: false,
+            covered_demand: Vec::new(), held_births: Vec::new(), twin_host: false,
             // A flank arm roots no demand cell — it exists to take load off a
             // crowded footprint, not to cover reach — so the removal pass's
             // coverage test would be vacuously true for it. The same flag the

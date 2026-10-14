@@ -1641,7 +1641,7 @@ mod census_tests {
             interior: false,
             radius_mm: vec![r; k_top - k_bottom + 1],
             carried_mm2: Vec::new(),
-            covered_demand: Vec::new(), held_birth_cells: Vec::new(), twin_host: false,
+            covered_demand: Vec::new(), held_births: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             straight_fallback: None,

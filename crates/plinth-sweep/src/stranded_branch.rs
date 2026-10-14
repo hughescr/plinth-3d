@@ -767,7 +767,7 @@ mod tests {
             interior: false,
             radius_mm: radius.to_vec(),
             carried_mm2: vec![0.0; radius.len()],
-            covered_demand: Vec::new(), held_birth_cells: Vec::new(), twin_host: false,
+            covered_demand: Vec::new(), held_births: Vec::new(), twin_host: false,
             inserted_by_load: false,
             seat_face: crate::SeatFace::default(),
             seat_normal: [0.0; 3],

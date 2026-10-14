@@ -250,14 +250,16 @@ pub struct SweepStrut {
     /// Demand cells this arm newly rooted when it went in. The removal pass
     /// asks whether a survivor still covers each of them.
     pub covered_demand: Vec<usize>,
-    /// The cells of births this arm holds by footprint: every pixel of the
-    /// birth lies inside the arm's planned tip ball, so its one contact
-    /// touches them all ([`up_sweep::seat_births`], [`births`]). Only these,
-    /// with the seat cell, are what the births rule reads as "a root of the
-    /// layer stands in the birth" ([`births::BirthRoots`]); a cell this arm
-    /// covers laterally through `covered_demand` is reach, not contact, and
-    /// holds nothing of a birth it only partly touches.
-    pub held_birth_cells: Vec<usize>,
+    /// The births this arm holds by footprint, by identity (layer, birth id,
+    /// [`births::BirthKey`]): every pixel of the birth lies inside the arm's
+    /// planned tip ball, so its one contact touches them all
+    /// ([`up_sweep::seat_births`], [`births`]). Only these, with the seat
+    /// cell, are what the births rule reads as "a root of the layer stands in
+    /// the birth" ([`births::BirthRoots`]); a cell this arm covers laterally
+    /// through `covered_demand` is reach, not contact, and holds nothing of a
+    /// birth it only partly touches, and a second birth that falls in the
+    /// same working cells as a held one is not held with it.
+    pub held_births: Vec<births::BirthKey>,
     /// A twin seat was merged into this arm ([`up_sweep::twin_host`], owner
     /// ruling 2026-10-10). Before the merge the twin's shaft landed on this
     /// arm, and an arm another member rests on is never moved by the passes
@@ -2089,7 +2091,7 @@ pub fn run_sweep_with_holes(
             birth_tally.unseated += seated.unseated;
             // A birth left with no arm inside is unrooted, as the replay reads
             // it, and reported as residual demand: emit and warn.
-            let roots = births::BirthRoots::of(struts.iter().filter(|strut| strut.k_top == layer));
+            let roots = births::BirthRoots::of(layer, struts.iter().filter(|strut| strut.k_top == layer));
             outcome.residual_demand +=
                 births.unroot_unseated(layer, &bridged, &roots, &masks.cover, &mut reach);
         }
@@ -5433,7 +5435,7 @@ mod removal_tests {
             interior: false,
             radius_mm: Vec::new(),
             carried_mm2: Vec::new(),
-            covered_demand: Vec::new(), held_birth_cells: Vec::new(), twin_host: false,
+            covered_demand: Vec::new(), held_births: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             seat_face: crate::SeatFace::default(),
@@ -5603,7 +5605,7 @@ mod removal_tests {
             // Below minimum_load_mm2: this is exactly the state that made a
             // load-inserted arm a removal candidate before the fix.
             carried_mm2: vec![0.5],
-            covered_demand: Vec::new(), held_birth_cells: Vec::new(), twin_host: false,
+            covered_demand: Vec::new(), held_births: Vec::new(), twin_host: false,
             inserted_by_load: true,
             path: Vec::new(),
             seat_face: crate::SeatFace::default(),
@@ -5648,7 +5650,7 @@ mod removal_tests {
             interior: false,
             radius_mm: vec![0.1],
             carried_mm2: vec![carried],
-            covered_demand: Vec::new(), held_birth_cells: Vec::new(), twin_host: false,
+            covered_demand: Vec::new(), held_births: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             seat_face: crate::SeatFace::default(),

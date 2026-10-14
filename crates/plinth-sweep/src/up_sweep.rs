@@ -1244,12 +1244,12 @@ pub(crate) fn seat_births(
                 }
                 // The birth is held by contact, not by reach: recorded apart
                 // from the cells the arm covers laterally, which hold no
-                // birth they only partly touch.
-                let held = &mut struts[host].held_birth_cells;
-                for &cell in &birth.cells {
-                    if !held.contains(&cell) {
-                        held.push(cell);
-                    }
+                // birth they only partly touch, and by the birth's identity,
+                // not its cells: another birth in the same working cells is
+                // not held by a ball that did not contain ITS pixels.
+                let held = &mut struts[host].held_births;
+                if !held.contains(&(layer, birth.id)) {
+                    held.push((layer, birth.id));
                 }
                 tally.held += 1;
                 continue;
@@ -2456,7 +2456,7 @@ fn commit_seat(
         radius_mm: Vec::new(),
         carried_mm2: Vec::new(),
         covered_demand: covered,
-        held_birth_cells: Vec::new(),
+        held_births: Vec::new(),
         twin_host: false,
         inserted_by_load: false,
         // Recorded ONLY for a leaned arm, and recorded NOW, because the column
@@ -4574,7 +4574,8 @@ mod descent_tests {
         let layer = 5;
         let first = grid.index(20, 20);
         let (x0, y0) = (grid.center_x_mm(20), grid.center_y_mm(20));
-        let birth = |cell: usize, x: f64| crate::births::Birth {
+        let birth = |id: usize, cell: usize, x: f64| crate::births::Birth {
+            id,
             cells: vec![cell],
             pixels: vec![1],
             extents: vec![[x, y0, x, y0]],
@@ -4586,7 +4587,7 @@ mod descent_tests {
             let mut scratch = super::GreedyScratch::new(&grid, 4.0);
             let mut struts = Vec::new();
             let mut outcome = outcome();
-            let near_first = birth(first, x0);
+            let near_first = birth(0, first, x0);
             let wanted = [&near_first, second];
             let seats = super::seat_births(
                 &grid,
@@ -4607,7 +4608,7 @@ mod descent_tests {
             );
             (seats, struts)
         };
-        let (seats, struts) = run(&birth(grid.index(20, 21), x0 + 0.03));
+        let (seats, struts) = run(&birth(1, grid.index(20, 21), x0 + 0.03));
         assert_eq!((seats.held, seats.seated, seats.unseated), (1, 1, 0));
         assert_eq!(struts.len(), 1, "one contact, one arm");
         assert!(
@@ -4615,7 +4616,12 @@ mod descent_tests {
             "the arm covers the cell of the birth it holds: {:?}",
             struts[0].covered_demand
         );
-        let (seats, struts) = run(&birth(grid.index(20, 30), x0 + 0.5));
+        assert_eq!(
+            struts[0].held_births,
+            vec![(layer, 1)],
+            "the hold is recorded by the held birth's identity"
+        );
+        let (seats, struts) = run(&birth(1, grid.index(20, 30), x0 + 0.5));
         assert_eq!((seats.held, seats.seated), (0, 2), "CONTROL: a birth outside the ball is seated");
         assert_eq!(struts.len(), 2);
     }

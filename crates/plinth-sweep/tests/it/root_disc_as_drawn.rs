@@ -103,7 +103,7 @@ fn member(
         interior: false,
         radius_mm: vec![radius; slots],
         carried_mm2: vec![0.0; slots],
-        covered_demand: Vec::new(), held_birth_cells: Vec::new(), twin_host: false,
+        covered_demand: Vec::new(), held_births: Vec::new(), twin_host: false,
         inserted_by_load: kind != StrutKind::Arm,
         path: Vec::new(),
         straight_fallback: None,

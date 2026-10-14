@@ -326,6 +326,7 @@ fn replay_once(
         }
         if !bridged_current.is_empty() {
             let roots = crate::births::BirthRoots::of(
+                layer,
                 roots_by_layer[layer].iter().map(|&index| &struts[index]),
             );
             context
@@ -367,6 +368,7 @@ fn replay_once(
             // unrooted, however a relax reached it (again after a restore).
             if !bridged_trial.is_empty() {
                 let roots = crate::births::BirthRoots::of(
+                    layer,
                     roots_by_layer[layer]
                         .iter()
                         .filter(|&&index| !doomed[index])
@@ -522,7 +524,7 @@ mod tests {
             interior: false,
             radius_mm: Vec::new(),
             carried_mm2: Vec::new(),
-            covered_demand: Vec::new(), held_birth_cells: Vec::new(), twin_host: false,
+            covered_demand: Vec::new(), held_births: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             seat_face: crate::SeatFace::default(),
@@ -857,14 +859,16 @@ mod tests {
             first_loss_ratio: 1.2,
             births: &births,
         };
-        let replay = |covered: Vec<usize>, held: Vec<usize>| {
+        let replay = |covered: Vec<usize>, held: bool| {
             let mut host = at(1, 2.025, 0.125);
             assert!(!birth.cells.contains(&host.cell), "the neighbour's seat is outside the birth");
             host.covered_demand = covered;
-            host.held_birth_cells = held;
+            if held {
+                host.held_births = vec![(10, birth.id)];
+            }
             let mut direct = at(2, 2.225, 0.125);
             direct.covered_demand = birth.cells.clone();
-            direct.held_birth_cells = birth.cells.clone();
+            direct.held_births = vec![(10, birth.id)];
             let mut ground = at(0, 1.025, 0.125);
             ground.k_top = 0;
             let field = vec![ground, host, direct];
@@ -873,17 +877,106 @@ mod tests {
             (doomed[2], outcome)
         };
         let last = *birth.cells.last().expect("cells");
-        let (removed, outcome) = replay(vec![last], Vec::new());
+        let (removed, outcome) = replay(vec![last], false);
         assert!(!removed, "one ordinary covered cell holds nothing: {outcome:?}");
         assert_eq!(outcome.refused, 1, "{outcome:?}");
         assert_eq!(outcome.newly_unrooted_cells, birth.cells.len() as u64, "{outcome:?}");
         let most = birth.cells[..birth.cells.len() - 1].to_vec();
-        let (removed, outcome) = replay(most.clone(), Vec::new());
+        let (removed, outcome) = replay(most, false);
         assert!(!removed, "all but one covered cell holds nothing either: {outcome:?}");
-        let (removed, outcome) = replay(most.clone(), most);
-        assert!(!removed, "all but one cell held by footprint is a partial hold: {outcome:?}");
-        let (removed, outcome) = replay(birth.cells.clone(), birth.cells.clone());
+        let (removed, outcome) = replay(birth.cells.clone(), true);
         assert!(removed, "a whole birth held by footprint lets the birth's arm go: {outcome:?}");
+        assert_eq!(outcome.refused, 0, "{outcome:?}");
+    }
+
+    /// JOINT REVIEW 2026-10-13, `birth_alias`. Two births of one layer fall in
+    /// the same working-raster cell (a 0.4 mm grid, cell 21) while only one
+    /// fits the holder's tip ball: A (the small box, 25 pixels) lies inside a
+    /// 0.22 mm ball centred at (0.3, 0.2); B (the long box, 100 pixels, 0.44 to
+    /// 0.78 mm in X) does not. The holder holds A by footprint. Replay must
+    /// still restore B's own doomed arm: before the fix the hold was kept as
+    /// cells, so A's hold covered B too and B's arm went (0 refusals), leaving
+    /// B's first layer with nothing under it.
+    ///
+    /// One real sliced three-box mesh, the real births, raster and reach. Two
+    /// controls: nothing held (B's arm is restored, one refusal) and B itself
+    /// held (B's arm goes).
+    #[test]
+    fn a_birth_sharing_the_working_cells_of_a_held_birth_is_not_held_with_it() {
+        use crate::births::Births;
+        let boxes = [
+            make_box([0.1, 0.5, 1.0], [0.05, 0.0, 0.0]).expect("wall"),
+            make_box([0.015, 0.020, 0.5], [0.1175, 0.05, 0.5]).expect("small"),
+            make_box([0.086, 0.020, 0.5], [0.153, 0.085, 0.5]).expect("long"),
+        ];
+        let (mut verts, mut tris) = (Vec::new(), Vec::new());
+        for part in &boxes {
+            let offset = u32::try_from(verts.len()).expect("small");
+            verts.extend(part.verts().iter().map(|v| [v[0] * 4.0, v[1] * 4.0, v[2]]));
+            tris.extend(part.tris().iter().map(|t| t.map(|v| v + offset)));
+        }
+        let mesh = Mesh::new(verts, tris).expect("three boxes");
+        let grid = crate::grid::lay_out_at(0.0, -0.8, 0.4, 10, 10);
+        let planes: Vec<f64> = (0..20).map(|l| (l as f64 + 0.5) * 0.05).collect();
+        let slices = slice_stack(&mesh, &planes, SliceStackLimits::production()).expect("slices");
+        let births = Births::build(&grid, &slices, 0.014, 0.019);
+        assert_eq!(births.at(10).len(), 2, "two births at layer 10: {:?}", births.at(10));
+        let (a, b) = (&births.at(10)[0], &births.at(10)[1]);
+        assert_eq!(a.cells, b.cells, "the births share their working cells");
+        assert_eq!(a.cells.len(), 1);
+        let ball = ([0.3, 0.2], 0.22);
+        assert!(a.inside_disc(ball.0, ball.1), "A fits the holder's ball: {a:?}");
+        assert!(!b.inside_disc(ball.0, ball.1), "B does not: {b:?}");
+        assert_ne!(a.id, b.id);
+        let at = |id: u32, x: f64, y: f64, k_top: usize| {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "fixture coordinates inside the grid's own bounds"
+            )]
+            let cell = grid.index(grid.row_coord(y).floor() as usize, grid.col_coord(x).floor() as usize);
+            let mut strut = arm(&grid, id, x, k_top);
+            strut.cell = cell;
+            strut.center_mm = [x, y];
+            strut
+        };
+        let context = ReplayContext {
+            grid: &grid,
+            slices: &slices,
+            planes: &planes,
+            mesh: &mesh,
+            kappa: 42.6,
+            layer_height_mm: H,
+            layers: 20,
+            straight_reach: true,
+            creep_weight: false,
+            creep_overhang_cut: false,
+            overhang_centre_deg: 45.0,
+            overhang_transition_deg: 10.0,
+            max_restarts: 5,
+            first_loss_ratio: 1.2,
+            births: &births,
+        };
+        let replay = |held: &[usize]| {
+            let mut host = at(1, 0.3, 0.2, 10);
+            assert!(!a.cells.contains(&host.cell), "the holder's seat is outside the births' cell");
+            host.covered_demand = a.cells.clone();
+            host.held_births = held.iter().map(|&id| (10, id)).collect();
+            host.radius_mm = vec![0.22; 11];
+            let own = at(2, 0.742, 0.34, 10);
+            let ground = at(0, 0.2, 0.2, 0);
+            let mut doomed = vec![false, false, true];
+            let outcome = refuse_unrooted_demand(&context, &[ground, host, own], &mut doomed);
+            (doomed[2], outcome)
+        };
+        let (removed, outcome) = replay(&[]);
+        assert!(!removed, "CONTROL: nothing held, B's arm stays: {outcome:?}");
+        assert_eq!(outcome.refused, 1, "{outcome:?}");
+        let (removed, outcome) = replay(&[a.id]);
+        assert!(!removed, "A held by footprint does not hold B in the same cells: {outcome:?}");
+        assert_eq!(outcome.refused, 1, "{outcome:?}");
+        let (removed, outcome) = replay(&[a.id, b.id]);
+        assert!(removed, "CONTROL: B held itself lets B's arm go: {outcome:?}");
         assert_eq!(outcome.refused, 0, "{outcome:?}");
     }
 

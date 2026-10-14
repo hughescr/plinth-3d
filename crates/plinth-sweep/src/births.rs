@@ -62,6 +62,10 @@ use crate::reach::ReachState;
 /// many of its pixels each holds (parallel, sorted by cell).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Birth {
+    /// This birth's place in its layer's births ([`Births::at`]): with the
+    /// layer, its identity ([`BirthKey`]). Two births that fall in the same
+    /// working-raster cells are still two births.
+    pub id: usize,
     pub cells: Vec<usize>,
     pub pixels: Vec<u32>,
     /// The box (`[min x, min y, max x, max y]`, mm) of the pixel centres each
@@ -84,39 +88,49 @@ impl Birth {
     }
 }
 
+/// A birth's identity: its layer and its place in that layer's births.
+pub(crate) type BirthKey = (usize, usize);
+
 /// What stands in a layer's births as contact, from the arms seated on it:
-/// the seat cells, and the cells of the births those arms hold by footprint
-/// ([`crate::up_sweep::seat_births`]). What [`Births::unroot_unseated`] reads
-/// as "a root of the layer stands in the birth": a seat cell inside the
-/// birth, or EVERY cell of the birth held by footprint.
+/// the seat cells, and the births those arms hold by footprint
+/// ([`crate::up_sweep::seat_births`]), by identity. What
+/// [`Births::unroot_unseated`] reads as "a root of the layer stands in the
+/// birth": a seat cell inside the birth, or the birth itself held by
+/// footprint.
 ///
 /// NOT the cells an arm covers laterally (`covered_demand`): reach over a
 /// cell of a birth is not contact with the birth. A neighbour whose reach
 /// covers one cell of a birth, with its seat outside the birth and a tip ball
 /// that cannot contain it, leaves the birth's pixels with nothing under them
 /// (joint review, 2026-10-13: the removal replay took a birth's own arm away
-/// on the strength of one such cell). Nor does one cell of a footprint-held
-/// birth hold a second birth that merely shares that working-raster cell.
+/// on the strength of one such cell). Nor does a footprint hold on one birth
+/// hold a second birth that merely falls in the same working-raster cells:
+/// two births can share every cell while only one fits the holder's ball
+/// (joint review, 2026-10-13, `birth_alias`), so a hold is recorded for the
+/// birth whose own pixels were tested and for no other.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct BirthRoots {
     seats: Vec<usize>,
+    /// Ids ([`Birth::id`]) of the births held, all on the roots' own layer.
     held: Vec<usize>,
 }
 
 impl BirthRoots {
-    /// The roots of these arms.
-    pub(crate) fn of<'a>(struts: impl IntoIterator<Item = &'a crate::SweepStrut>) -> Self {
+    /// The roots of these arms, all topped on `layer`.
+    pub(crate) fn of<'a>(layer: usize, struts: impl IntoIterator<Item = &'a crate::SweepStrut>) -> Self {
         let mut roots = Self::default();
         for strut in struts {
-            roots.seats.push(strut.cell);            roots.held.extend_from_slice(&strut.held_birth_cells);
+            roots.seats.push(strut.cell);
+            roots
+                .held
+                .extend(strut.held_births.iter().filter(|key| key.0 == layer).map(|key| key.1));
         }
         roots
     }
 
     /// Whether a root stands in `birth`.
     fn hold(&self, birth: &Birth) -> bool {
-        birth.cells.iter().any(|cell| self.seats.contains(cell))
-            || (!birth.cells.is_empty() && birth.cells.iter().all(|cell| self.held.contains(cell)))
+        birth.cells.iter().any(|cell| self.seats.contains(cell)) || self.held.contains(&birth.id)
     }
 }
 
@@ -335,8 +349,9 @@ fn births_of(grid: &Grid, runs: &[Run], previous: &[Run], pitch_x_mm: f64, pitch
     births
         .into_values()
         .filter(|cells| !cells.is_empty())
-        .map(|held| {
-            let mut birth = Birth::default();
+        .enumerate()
+        .map(|(id, held)| {
+            let mut birth = Birth { id, ..Birth::default() };
             for (cell, (pixels, extent)) in held {
                 birth.cells.push(cell);
                 birth.pixels.push(pixels);
