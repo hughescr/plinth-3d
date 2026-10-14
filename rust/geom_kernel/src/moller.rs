@@ -162,10 +162,12 @@ pub enum RayTriangleClass {
     /// all. The band says the ray is nearly parallel to the triangle's plane
     /// and says nothing whatever about whether the ray goes near the triangle,
     /// so a ray passing far to one side of a wall it runs alongside is a miss
-    /// on the geometry no matter what its determinant does. See
-    /// `ray_clears_triangle`, which decides that second case and which declines
-    /// — leaving [`Self::NearParallel`] — whenever its own arithmetic cannot
-    /// settle the question.
+    /// on the geometry no matter what its determinant does. Two predicates
+    /// decide that second case, and each declines — leaving
+    /// [`Self::NearParallel`] — whenever its own arithmetic cannot settle the
+    /// question: `span_clears_plane` (the whole accepted span lies strictly on
+    /// one side of the triangle's plane, under a derived error bound) and
+    /// `ray_clears_triangle` (the ray clears the triangle's bounding sphere).
     Miss,
     /// `0.0 < |det| <= DET_EPS`, AND the ray is not shown to clear the triangle:
     /// the determinant is nonzero but inside the uncertainty band, and the
@@ -263,6 +265,11 @@ pub fn ray_triangle_classified(
         RayTriangleClass::Miss
     } else if det == 0.0 {
         RayTriangleClass::ExactParallel
+    } else if span_clears_plane(tvec, dv, e1, e2, t_max) {
+        // Nearly parallel, and the whole accepted span stays strictly on one
+        // side of the triangle's plane: it cannot meet the plane, so it cannot
+        // meet the triangle. The bore wall beside a drilled axis is this case.
+        RayTriangleClass::Miss
     } else if ray_clears_triangle(tvec, dv, e1, e2, t_max) {
         // Nearly parallel, and never within reach of this triangle at all:
         // there is nothing here to be uncertain about.
@@ -285,6 +292,106 @@ pub fn dedup_loc_into(ts: &[f64], dt: f64, keep: &mut Vec<f64>) {
                 keep.push(x);
             }
         }
+    }
+}
+
+/// Does the whole accepted ray span lie strictly on ONE side of the triangle's
+/// plane?
+///
+/// The span is the one the acceptance test reads, `t ∈ [-EPS, t_max + EPS]`,
+/// widened outward by one rounding of its upper end. If the ray never reaches
+/// the plane over that span, it cannot cross the triangle, which lies in the
+/// plane — so a `true` here is a definite miss **on the geometry**, whatever
+/// the determinant is doing. This is the case the bounding-sphere test
+/// ([`ray_clears_triangle`]) cannot settle: a long face that runs alongside
+/// the ray close by, such as the wall of a drilled bore around that bore's own
+/// axis. The face is longer than its distance from the axis, so its bounding
+/// sphere contains the axis, but its plane does not.
+///
+/// **This can only move `NearParallel` to `Miss`.** It is called only after
+/// the determinant has failed `|det| > DET_EPS`, where `hit` is already false,
+/// so the agreement contract with the pinned [`ray_triangle`] is untouched.
+///
+/// # The test, and its error bound (no tolerance is chosen here)
+///
+/// Everything is in the `v0`-local frame: `p = o - v0` (the caller's `tvec`),
+/// and the triangle is `0, e1, e2`. With `N = e1 × e2`, the signed side of the
+/// ray point at parameter `s` is the affine function
+/// `side(s) = A + s·B`, `A = p·N`, `B = dv·N` — the orient3d determinant of
+/// the triangle and that point. An affine function with the same strict sign
+/// at both ends of an interval has that sign on the whole interval, so two
+/// evaluations decide the span.
+///
+/// Each evaluation is compared with a FORWARD ERROR BOUND on itself, derived
+/// from the standard floating-point model `fl(a ∘ b) = (a ∘ b)(1 + δ)`,
+/// `|δ| <= u = f64::EPSILON / 2`, with `γ_k = k·u / (1 - k·u)`. Write
+/// `m_i = |e1_j·e2_k| + |e1_k·e2_j|` for the absolute value of each cross
+/// component's two products:
+///
+/// * `n = cross(e1, e2)`: `|n_i - N_i| <= γ_2·m_i`, and `|n_i| <= (1 + γ_2)·m_i`.
+/// * `p` was rounded once by `o - v0`: `|p_i - P_i| <= γ_1·|p_i|`.
+/// * `dot` is a left-to-right sum of three products:
+///   `|fl(p·n) - p·n| <= γ_3·Σ|p_i||n_i|`, and the same for `dv·n`.
+/// * Together, `|A - A*| <= (γ_3(1 + γ_2) + γ_2 + γ_1)·Σ|p_i|·m_i
+///   ≈ 6u·Σ|p_i|·m_i`, and `|B - B*| <= ≈ 5u·Σ|dv_i|·m_i` (`dv` is exact
+///   input).
+/// * `side(s) = fl(A + fl(s·B))` adds at most `≈ 2u·(|A| + |s|·|B|)`.
+///
+/// So `|side(s) - side*(s)| <= ≈ 8u·(Σ|p_i|·m_i + |s|·Σ|dv_i|·m_i)`. The code
+/// uses `8·f64::EPSILON = 16u` times the computed magnitudes: double the
+/// first-order bound, which covers the `O(u²)` terms and the rounding of the
+/// magnitudes themselves. It is a property of the arithmetic, not an opinion
+/// about closeness.
+///
+/// Gradual underflow is the one place the relative model fails: a product
+/// that lands below `f64::MIN_POSITIVE` carries an ABSOLUTE error of up to
+/// half the smallest subnormal, `η = 2^-1075`. There are two such products per
+/// cross component, three per dot, and one in `s·B`, and the cross components'
+/// errors are then multiplied by `|p_i|` or `|dv_i|`, so they add at most
+/// `η·(2Σ|p_i| + 2|s|·Σ|dv_i| + 3 + 3|s| + 1)`. The code adds
+/// `4·2^-1074·(1 + Σ|p_i| + |s|·(1 + Σ|dv_i|))`, which is more than that.
+///
+/// # It declines whenever the arithmetic is unsound
+///
+/// The lesson of [`ray_clears_triangle`] holds here: a predicate that refines
+/// an uncertainty must decline when it cannot settle the question. An
+/// infinite or NaN `t_max`, an overflow anywhere, or a side value within its
+/// own bound of zero (a ray IN the plane, or one that really crosses it) all
+/// return `false` and leave the case `NearParallel`.
+fn span_clears_plane(p: V3, dv: V3, e1: V3, e2: V3, t_max: f64) -> bool {
+    let n = cross(e1, e2);
+    let m = [
+        (e1[1] * e2[2]).abs() + (e1[2] * e2[1]).abs(),
+        (e1[2] * e2[0]).abs() + (e1[0] * e2[2]).abs(),
+        (e1[0] * e2[1]).abs() + (e1[1] * e2[0]).abs(),
+    ];
+    let a = dot(p, n);
+    let b = dot(dv, n);
+    let a_mag = p[0].abs() * m[0] + p[1].abs() * m[1] + p[2].abs() * m[2];
+    let b_mag = dv[0].abs() * m[0] + dv[1].abs() * m[1] + dv[2].abs() * m[2];
+    let p_sum = p[0].abs() + p[1].abs() + p[2].abs();
+    let dv_sum = dv[0].abs() + dv[1].abs() + dv[2].abs();
+    // The acceptance span's two ends. The upper end is rounded once by the
+    // addition, so it is pushed outward by one more ulp-sized step: covering a
+    // slightly longer span can only make this test decline more often.
+    let s_lo = -EPS;
+    let s_hi_rounded = t_max + EPS;
+    let s_hi = s_hi_rounded + s_hi_rounded.abs() * f64::EPSILON;
+    let smallest_subnormal = f64::from_bits(1);
+    let side = |s: f64| -> Option<f64> {
+        let value = a + s * b;
+        let bound = 8.0 * f64::EPSILON * (a_mag + s.abs() * b_mag)
+            + 4.0 * smallest_subnormal * (1.0 + p_sum + s.abs() * (1.0 + dv_sum));
+        // A side value that is not finite, or a bound that is not, decides
+        // nothing; neither does one inside its own error bound.
+        if !(value.is_finite() && bound.is_finite()) || value.abs() <= bound {
+            return None;
+        }
+        Some(value)
+    };
+    match (side(s_lo), side(s_hi)) {
+        (Some(lo), Some(hi)) => (lo > 0.0) == (hi > 0.0),
+        _ => false,
     }
 }
 

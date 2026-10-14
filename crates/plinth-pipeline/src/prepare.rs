@@ -792,10 +792,92 @@ pub struct ChainOutcome {
     /// sweep). In memory only, for tests and the log; see
     /// [`crate::SweepPlanSourceNote`].
     pub sweep_plan_source: Option<SweepPlanSource>,
+    /// EMIT AND WARN (2026-10-13): the model was to be hollowed and the file
+    /// holds the SOLID instead, for a reason that is a failure rather than the
+    /// hollow stage's own size judgement. `None` on a hollowed model and on a
+    /// savings-gate or no-cavity decision, which print their own measurement.
+    pub not_hollowed: Option<NotHollowed>,
     pub primitive_count: usize,
     pub lift_mm: f64,
     pub plate_z_mm: f64,
     pub emit: plinth_emit::EmitReport,
+}
+
+/// A model the run set out to hollow that is emitted SOLID: why, and the resin
+/// that costs.
+///
+/// `resin_cost_mm3` is the solid's volume minus the hollow volume that was
+/// planned (`solid_mm3 - planned_hollow_mm3`), or the whole solid volume when
+/// no hollow volume was planned before the failure (`planned_hollow_mm3` is
+/// then `None`, and the figure is an upper bound).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NotHollowed {
+    /// The refusal or decision, as text.
+    pub reason: String,
+    /// The emitted solid's volume, measured from its mesh.
+    pub solid_mm3: f64,
+    /// The hollow (shell material) volume that was planned or drilled, when
+    /// one was.
+    pub planned_hollow_mm3: Option<f64>,
+    pub resin_cost_mm3: f64,
+}
+
+impl NotHollowed {
+    /// The record for `solid` (the mesh the file holds instead of the shell).
+    #[must_use]
+    pub fn of(reason: String, solid: &plinth_mesh::Mesh, planned_hollow_mm3: Option<f64>) -> Self {
+        let solid_mm3 = mesh_volume_mm3(solid);
+        Self {
+            reason,
+            solid_mm3,
+            planned_hollow_mm3,
+            resin_cost_mm3: planned_hollow_mm3.map_or(solid_mm3, |hollow| solid_mm3 - hollow),
+        }
+    }
+}
+
+/// A closed mesh's enclosed volume, `Σ v0 · (v1 × v2) / 6` over its triangles
+/// in one pass.
+fn mesh_volume_mm3(mesh: &plinth_mesh::Mesh) -> f64 {
+    use geom_kernel::vec3::{cross, dot};
+    let verts = mesh.verts();
+    mesh.tris()
+        .iter()
+        .map(|tri| {
+            dot(
+                verts[tri[0] as usize],
+                cross(verts[tri[1] as usize], verts[tri[2] as usize]),
+            )
+        })
+        .sum::<f64>()
+        / 6.0
+}
+
+/// Attach the not-hollowed record to an emitted outcome.
+fn warn_not_hollowed(
+    result: Result<Option<ChainOutcome>, ChainStop>,
+    not_hollowed: NotHollowed,
+) -> Result<Option<ChainOutcome>, ChainStop> {
+    result.map(|outcome| {
+        outcome.map(|mut outcome| {
+            outcome.not_hollowed = Some(not_hollowed);
+            outcome
+        })
+    })
+}
+
+/// Which solid decisions of the hollow stage are FAILURES to hollow, as
+/// opposed to its own judgement that the model is not worth hollowing (no
+/// cavity, or a saving under the registered minimum — those print their own
+/// measurement and are not warned).
+const fn decided_solid_is_a_failure(reason: SolidDecisionReason) -> bool {
+    !matches!(
+        reason,
+        SolidDecisionReason::NoCavity
+            | SolidDecisionReason::NoCavityAfterRepair
+            | SolidDecisionReason::BelowThreshold
+            | SolidDecisionReason::BelowThresholdAfterRepair
+    )
 }
 
 /// Everything one model's stage chain needs beyond the model itself, gathered
@@ -1718,6 +1800,13 @@ pub fn run_from_oriented_reusing(
                 Finite::new(policy.hollow.wall_mm.get())
                     .expect("a PositiveFinite wall is always finite"),
             );
+            // EMIT AND WARN: the solid goes out, and the run says what that
+            // costs against the hollow that was planned (if one was).
+            let not_hollowed = NotHollowed::of(
+                format!("the hollow stage refused this geometry: {refusal}"),
+                &hollow_error_reserve_mesh,
+                failure.planned_hollow_mm3().map(Finite::get),
+            );
             let solid = substitute_solid_for_hollow_stage_failure(
                 model,
                 hollow_error_reserve_mesh,
@@ -1728,15 +1817,18 @@ pub fn run_from_oriented_reusing(
             if stop_after == Some(StageStop::Hollow) {
                 return Ok(None);
             }
-            return seal_and_emit_reusing(
-                model,
-                source_faces,
-                solid,
-                SupportedGeometry::HollowStageRefused { refusal },
-                policy,
-                target,
-                stop_after,
-                winner,
+            return warn_not_hollowed(
+                seal_and_emit_reusing(
+                    model,
+                    source_faces,
+                    solid,
+                    SupportedGeometry::HollowStageRefused { refusal },
+                    policy,
+                    target,
+                    stop_after,
+                    winner,
+                ),
+                not_hollowed,
             );
         }
     };
@@ -1746,7 +1838,22 @@ pub fn run_from_oriented_reusing(
             if stop_after == Some(StageStop::Hollow) {
                 return Ok(None);
             }
-            return seal_and_emit_reusing(
+            // A solid decision that is a failure to hollow (an under-walled
+            // shell, an undrainable cavity) is warned; the savings gate's and
+            // the no-cavity decisions are the stage's own judgement and print
+            // their own measurement. No hollow volume reaches this record, so
+            // the cost stated is the whole solid's (an upper bound).
+            let not_hollowed = match solid.history().hollow().disposition() {
+                HollowDisposition::Solid { reason } if decided_solid_is_a_failure(reason) => {
+                    Some(NotHollowed::of(
+                        format!("the hollow stage decided solid: {reason:?}"),
+                        solid.mesh(),
+                        None,
+                    ))
+                }
+                _ => None,
+            };
+            let result = seal_and_emit_reusing(
                 model,
                 source_faces,
                 *solid,
@@ -1756,6 +1863,10 @@ pub fn run_from_oriented_reusing(
                 stop_after,
                 winner,
             );
+            return match not_hollowed {
+                Some(not_hollowed) => warn_not_hollowed(result, not_hollowed),
+                None => result,
+            };
         }
         HollowStageOutput::AwaitingInternalSupport(candidate) => candidate,
     };
@@ -1774,6 +1885,15 @@ pub fn run_from_oriented_reusing(
     // FU-37: the wall this drilled shell was requested at, carried onto the
     // reserve the same way `reserve_cavity_repair` is just above.
     let reserve_wall = candidate.hollowed().history().hollow().wall();
+    // The drilled shell's own material volume: what the file would have held
+    // had support accepted it, and so the baseline the solid's cost is stated
+    // against if support refuses it.
+    let drilled_material_mm3 = candidate
+        .hollowed()
+        .history()
+        .hollow()
+        .drilling_evidence()
+        .map(|evidence| evidence.drilled_material_mm3().get());
     let drilled = (*candidate).approve_hollow();
     let drilled_faces = drilled.mesh().tris().len();
 
@@ -1804,6 +1924,14 @@ pub fn run_from_oriented_reusing(
             // successful one by emitting a solid, the failing one by returning
             // the solid's own error.
             let refused_shell = DrilledShellRefusal::from_stop(drilled_faces, &stop);
+            let not_hollowed = NotHollowed::of(
+                format!(
+                    "the drilled shell was refused at {}: {}",
+                    refused_shell.stage, refused_shell.detail
+                ),
+                &reserve_mesh,
+                drilled_material_mm3,
+            );
             let solid = substitute_solid_for_refused_shell(
                 model,
                 reserve_mesh,
@@ -1812,19 +1940,22 @@ pub fn run_from_oriented_reusing(
                 reserve_wall,
                 &refused_shell,
             )?;
-            seal_and_emit_reusing(
-                model,
-                source_faces,
-                solid,
-                SupportedGeometry::DrilledShellRefusedBySupport {
-                    drilled_faces,
-                    stage: Some(refused_shell.stage),
-                    refusal: refused_shell.detail.clone(),
-                },
-                policy,
-                target,
-                stop_after,
-                winner,
+            warn_not_hollowed(
+                seal_and_emit_reusing(
+                    model,
+                    source_faces,
+                    solid,
+                    SupportedGeometry::DrilledShellRefusedBySupport {
+                        drilled_faces,
+                        stage: Some(refused_shell.stage),
+                        refusal: refused_shell.detail.clone(),
+                    },
+                    policy,
+                    target,
+                    stop_after,
+                    winner,
+                ),
+                not_hollowed,
             )
             // The substituted solid failed or was refused in its own right.
             // Without this the report would say only what the *solid* did, and
@@ -2097,6 +2228,21 @@ pub fn seal_and_emit_reusing(
                 .collect()
         })
         .unwrap_or_default();
+    // Openings the drill stage replaced with the next-ranked candidate because
+    // the first one's centerline proof failed on the drilled mesh. Stdout only;
+    // the model hollowed, so this is a record, not a warning.
+    if let Some(evidence) = hollowed.history().hollow().drilling_evidence() {
+        for opening in evidence.superseded() {
+            let at = opening.center_mm.map(Finite::get);
+            let dir = opening.direction.map(Finite::get);
+            println!(
+                "[hollow {model}] opening replaced: the planned {:?} at ({:.3}, {:.3}, {:.3}) mm, \
+                 direction ({:+.4}, {:+.4}, {:+.4}), failed its centerline proof on the drilled \
+                 mesh ({}); the next-ranked candidate was drilled instead",
+                opening.role, at[0], at[1], at[2], dir[0], dir[1], dir[2], opening.reason
+            );
+        }
+    }
 
     let (min_z, max_z) = hollowed
         .mesh()
@@ -2476,6 +2622,8 @@ pub fn seal_and_emit_reusing(
         coverage_warning,
         sweep_warnings: crate::SweepModelWarnings::default(),
         sweep_plan_source: None,
+        // Set by the caller that substituted a solid, after this returns.
+        not_hollowed: None,
         primitive_count: gated.primitive_count,
         lift_mm: gated.lift_mm,
         plate_z_mm: gated.plate_z_mm,
@@ -2886,6 +3034,8 @@ fn sweep_and_emit(
             unbraced_over_limit_runs: plan.report.slenderness_lane.warnings.len(),
         },
         sweep_plan_source: Some(sweep_plan_source),
+        // Set by the caller that substituted a solid, after this returns.
+        not_hollowed: None,
         primitive_count,
         lift_mm: supported.lift_mm().get(),
         plate_z_mm: supported.plate_z_mm().get(),
@@ -4709,6 +4859,8 @@ fn artifact_outcome(outcome: ChainOutcome) -> ModelPreparationOutcome {
         sweep_warnings: outcome.sweep_warnings,
         // In memory only (`serde(skip)`): where the sweep plan came from.
         sweep_plan_source: crate::SweepPlanSourceNote(outcome.sweep_plan_source),
+        // 2026-10-13: emitted SOLID after a failed hollow, with the resin cost.
+        not_hollowed: outcome.not_hollowed.map(Box::new),
     }
 }
 
@@ -5390,6 +5542,12 @@ mod tests {
                 unbraced_over_limit_runs: 9,
             },
             sweep_plan_source: None,
+            not_hollowed: Some(NotHollowed {
+                reason: "drilling proof refused: fixture".to_owned(),
+                solid_mm3: 21_176.0,
+                planned_hollow_mm3: Some(8_960.0),
+                resin_cost_mm3: 12_216.0,
+            }),
             primitive_count: 0,
             lift_mm: 5.0,
             plate_z_mm: 0.0,
@@ -5410,11 +5568,19 @@ mod tests {
             load_warnings,
             coverage_warning,
             sweep_warnings,
+            not_hollowed,
             ..
         } = artifact_outcome(outcome)
         else {
             panic!("a completed chain reports an artifact");
         };
+        // 2026-10-13: a model emitted solid after a failed hollow carries its
+        // reason and resin cost to the report, where the CLI warns on it.
+        assert_eq!(
+            not_hollowed.as_deref().map(|warning| warning.resin_cost_mm3),
+            Some(12_216.0),
+            "the not-hollowed warning must reach the run report unchanged"
+        );
         // fix/surface-budget (2026-10-09): a missing model surface and the
         // unbraced runs over their limit must reach the SUMMARY line.
         assert_eq!(
@@ -5574,5 +5740,39 @@ mod tests {
         );
         assert_eq!(ownerless_islands[1].island_id(), None);
         assert_eq!(ownerless_islands[1].measured_uncovered_area_mm2(), None);
+    }
+
+    /// The not-hollowed record's arithmetic, and which solid decisions it is
+    /// raised for.
+    ///
+    /// A 10 mm box is 1000 mm3. Against a planned 400 mm3 hollow the solid
+    /// costs 600 mm3; with no hollow planned the cost stated is the whole
+    /// 1000 mm3. The savings gate's and the no-cavity decisions are the hollow
+    /// stage's own judgement and are not warned; every other solid decision is.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "exact pins over a box whose volume is exactly representable"
+    )]
+    fn not_hollowed_states_the_solid_minus_the_planned_hollow() {
+        let cube = plinth_mesh::make_box([10.0; 3], [0.0; 3]).expect("box fixture");
+        let planned = NotHollowed::of("x".to_owned(), &cube, Some(400.0));
+        assert_eq!(planned.solid_mm3, 1000.0);
+        assert_eq!(planned.resin_cost_mm3, 600.0);
+        let unknown = NotHollowed::of("x".to_owned(), &cube, None);
+        assert_eq!(unknown.resin_cost_mm3, 1000.0);
+
+        for (reason, warned) in [
+            (SolidDecisionReason::NoCavity, false),
+            (SolidDecisionReason::NoCavityAfterRepair, false),
+            (SolidDecisionReason::BelowThreshold, false),
+            (SolidDecisionReason::BelowThresholdAfterRepair, false),
+            (SolidDecisionReason::CavityBelowDrainThroat, true),
+            (SolidDecisionReason::ShellUnderWalled, true),
+            (SolidDecisionReason::DrilledShellRefused, true),
+            (SolidDecisionReason::HollowStageRefused, true),
+        ] {
+            assert_eq!(decided_solid_is_a_failure(reason), warned, "{reason:?}");
+        }
     }
 }

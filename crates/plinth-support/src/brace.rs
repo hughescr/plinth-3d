@@ -8115,9 +8115,18 @@ mod tests {
         // `ExactParallel` and a prune. The 2e-15 mm tilt is what keeps this
         // plant inside the band, and it is real geometry rather than a trig
         // residue — see `tilted_near_parallel_face` for the full history.
+        //
+        // The centre sits ON the tilted face's plane, `z = 1e-15 * y`, at
+        // `y = 0.5` (`z = 5e-16`, and `4 * 5e-16 = 0.5 * 4e-15` exactly, so the
+        // orient3d side value is exactly zero). A centre 5e-16 below that plane
+        // (`z = 0`, the plant until 2026-10-13) is a rim ray that never reaches
+        // the plane at all, and the kernel's plane-side test now decides it as a
+        // MISS — correctly. A ray that starts on the face's interior and runs
+        // nearly along it is the one whose crossing no arithmetic at this scale
+        // can decide.
         let surface = tilted_near_parallel_face();
         let planted = surface
-            .sphere_breach_classified(&[[0.4, 0.5, 0.0]], &[0.2], 1.0e-9, 90.0, 16)
+            .sphere_breach_classified(&[[0.4, 0.5, 5.0e-16]], &[0.2], 1.0e-9, 90.0, 16)
             .expect("planted sphere batch");
 
         // NON-VACUITY: the plant fires, and it fires on a sphere the breach

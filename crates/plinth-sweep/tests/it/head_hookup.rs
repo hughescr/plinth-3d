@@ -101,7 +101,7 @@ fn fixture_planned(headed: bool, planned_tip_mm: Option<f64>) -> Fixture {
     let count = (((max_z - plate_z) / h).ceil() as usize).saturating_add(1);
     let layers = LayerPlan::new(plate_z, vec![h; count]).expect("a uniform layer plan");
     let policy = SweepPolicy::from_registry().expect("the registry");
-    let mut plan = plinth_sweep::run_sweep(&mesh, &layers, &policy).expect("the sweep emits");
+    let mut plan = harness::memo_run_sweep(&mesh, &layers, &policy).expect("the sweep emits");
     let grid = plan.grid;
 
     let c = cos_lean();

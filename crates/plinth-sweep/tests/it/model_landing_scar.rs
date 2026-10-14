@@ -49,11 +49,12 @@
 //! Every assertion below is a comparison between two measurements or a
 //! comparison against zero, per the brief.
 
+use crate::harness::memo_run_sweep;
 use plinth_core::{m0_constants, LayerPlan};
 use plinth_orient::demand::{DemandFidelity, MeasuredSupportDemand, SupportDemandMeasurer};
 use plinth_orient::search::{search, SweepRequest};
 use plinth_orient::{OrientFaceTable, UpDirection};
-use plinth_sweep::{model_landing_scar, run_sweep, SweepDemand, SweepPlan, SweepPolicy};
+use plinth_sweep::{model_landing_scar, SweepDemand, SweepPlan, SweepPolicy};
 
 /// The model's authored +Z stays up: the blade, authored hanging below the
 /// slab, is DOWN.
@@ -104,7 +105,7 @@ fn swept(mesh: &plinth_mesh::Mesh, direction: [f64; 3]) -> (plinth_mesh::Mesh, S
     )]
     let count = (((max_z - plate_z) / layer_height_mm).ceil().max(1.0) as usize) + 1;
     let layers = LayerPlan::new(plate_z, vec![layer_height_mm; count]).expect("a layer plan");
-    let plan = run_sweep(&transformed, &layers, &policy).expect("a sweepable fixture");
+    let plan = memo_run_sweep(&transformed, &layers, &policy).expect("a sweepable fixture");
     (transformed, plan)
 }
 

@@ -22,7 +22,11 @@
 
 use plinth_core::{m0_constants, LayerPlan};
 use plinth_mesh::Mesh;
-use plinth_sweep::{run_sweep_with_drains, DrainSpec, SweepPlan, SweepPolicy};
+use plinth_sweep::{
+    run_sweep, run_sweep_with_drains, run_sweep_with_holes, DrainSpec, SweepError, SweepPlan,
+    SweepPolicy,
+};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// The registered lift. Always applied: a zero-lift pose is never a candidate.
 pub const LIFT_MM: f64 = 5.0;
@@ -223,13 +227,151 @@ pub fn sweep_with(mesh: &Mesh, _pitch_mm: f64, policy: &SweepPolicy) -> SweepPla
 /// One layer plan and one lift, exactly as above, so a comparison of two drain
 /// lists cannot accidentally compare two frames as well.
 pub fn sweep_with_drains(mesh: &Mesh, policy: &SweepPolicy, drains: &[DrainSpec]) -> SweepPlan {
+    let plan = harness_layer_plan(mesh);
+    memo_run_sweep_with_holes(mesh, &plan, policy, drains, &[])
+        .expect("the sweep emits and warns; it never refuses")
+}
+
+/// [`sweep_with_drains`] WITHOUT the memo: always runs the sweep. For a test
+/// that grades the run itself (the performance counters count the sweep, so a
+/// remembered plan would leave them at zero), not the plan the run produced.
+pub fn sweep_with_uncached(mesh: &Mesh, policy: &SweepPolicy) -> SweepPlan {
+    let plan = harness_layer_plan(mesh);
+    run_sweep_with_drains(mesh, &plan, policy, &[])
+        .expect("the sweep emits and warns; it never refuses")
+}
+
+/// The one layer plan every harness sweep uses: the registered layer height,
+/// the plate [`LIFT_MM`] under the model.
+fn harness_layer_plan(mesh: &Mesh) -> LayerPlan {
     let height = layer_height_mm();
     let (min_z, max_z) = z_span(mesh);
     let plate_z = min_z - LIFT_MM;
     let layers = (((max_z - plate_z) / height).ceil() as usize).max(1);
-    let plan = LayerPlan::new(plate_z, vec![height; layers]).expect("a uniform layer plan");
-    run_sweep_with_drains(mesh, &plan, policy, drains)
-        .expect("the sweep emits and warns; it never refuses")
+    LayerPlan::new(plate_z, vec![height; layers]).expect("a uniform layer plan")
+}
+
+// ---------------------------------------------------------------------------
+// Sweep memo.
+//
+// Many tests sweep the very same fixture under the very same policy (the laid
+// tube alone is swept with one policy by a dozen tests, a minute or more each
+// time). A sweep is a pure function of its arguments, so inside ONE test
+// program the same arguments are computed once and every later caller gets a
+// copy of the result. Nothing is shared by reference: a caller owns its copy
+// and may mutate it.
+//
+// The key is the WHOLE argument list compared by value (`PartialEq` on the
+// mesh, the layer plan, the policy and the hole lists), not a hash and not a
+// Debug string: two calls share a result only when every argument is equal,
+// and a policy field added later joins the key by itself. A sabotage pair
+// (the same mesh under a policy with one rule switched off) therefore still
+// runs BOTH sweeps. Callers that are racing for the same key wait for the one
+// that is computing it instead of computing it again.
+//
+// What this must not hide: a test that grades the RUN rather than the plan
+// (counters, timings, a sweep inside a changed environment) calls
+// [`sweep_with_uncached`] or `plinth_sweep::run_sweep*` directly.
+// ---------------------------------------------------------------------------
+
+/// Which library entry a memo cell stands for: `run_sweep` switches two
+/// diagnostics off in the policy it is given, `run_sweep_with_holes` does not,
+/// so the two never share a cell.
+#[derive(Clone, Copy, PartialEq)]
+enum MemoEntry {
+    Sweep,
+    Holes,
+}
+
+struct MemoCell {
+    entry: MemoEntry,
+    mesh: Mesh,
+    layers: LayerPlan,
+    policy: SweepPolicy,
+    drains: Vec<DrainSpec>,
+    vents: Vec<DrainSpec>,
+    result: OnceLock<Result<SweepPlan, SweepError>>,
+}
+
+impl MemoCell {
+    fn matches(
+        &self,
+        entry: MemoEntry,
+        mesh: &Mesh,
+        layers: &LayerPlan,
+        policy: &SweepPolicy,
+        drains: &[DrainSpec],
+        vents: &[DrainSpec],
+    ) -> bool {
+        self.entry == entry
+            && self.policy == *policy
+            && self.drains == drains
+            && self.vents == vents
+            && self.layers == *layers
+            && self.mesh == *mesh
+    }
+}
+
+static SWEEP_MEMO: Mutex<Vec<Arc<MemoCell>>> = Mutex::new(Vec::new());
+
+fn memo_cell(
+    entry: MemoEntry,
+    mesh: &Mesh,
+    layers: &LayerPlan,
+    policy: &SweepPolicy,
+    drains: &[DrainSpec],
+    vents: &[DrainSpec],
+) -> Arc<MemoCell> {
+    // The lock covers only the lookup and the insert, never a sweep, and a
+    // panic elsewhere cannot leave the list half-written.
+    let mut cells = SWEEP_MEMO
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(found) = cells
+        .iter()
+        .find(|cell| cell.matches(entry, mesh, layers, policy, drains, vents))
+    {
+        return Arc::clone(found);
+    }
+    let cell = Arc::new(MemoCell {
+        entry,
+        mesh: mesh.clone(),
+        layers: layers.clone(),
+        policy: *policy,
+        drains: drains.to_vec(),
+        vents: vents.to_vec(),
+        result: OnceLock::new(),
+    });
+    cells.push(Arc::clone(&cell));
+    cell
+}
+
+/// `plinth_sweep::run_sweep`, computed once per distinct argument list in this
+/// test program.
+pub fn memo_run_sweep(
+    mesh: &Mesh,
+    layers: &LayerPlan,
+    policy: &SweepPolicy,
+) -> Result<SweepPlan, SweepError> {
+    let cell = memo_cell(MemoEntry::Sweep, mesh, layers, policy, &[], &[]);
+    cell.result
+        .get_or_init(|| run_sweep(mesh, layers, policy))
+        .clone()
+}
+
+/// `plinth_sweep::run_sweep_with_holes`, computed once per distinct argument
+/// list in this test program.
+pub fn memo_run_sweep_with_holes(
+    mesh: &Mesh,
+    layers: &LayerPlan,
+    policy: &SweepPolicy,
+    drains: &[DrainSpec],
+    vents: &[DrainSpec],
+) -> Result<SweepPlan, SweepError> {
+    let cell = memo_cell(MemoEntry::Holes, mesh, layers, policy, drains, vents);
+    cell.result
+        .get_or_init(|| run_sweep_with_holes(mesh, layers, policy, drains, vents))
+        .clone()
 }
 
 pub fn z_span(mesh: &Mesh) -> (f64, f64) {

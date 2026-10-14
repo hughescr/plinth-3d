@@ -97,7 +97,7 @@ fn place(mesh: &Mesh) -> SweepPlan {
     let count = (((max_z - plate_z) / height).ceil() as usize).saturating_add(1);
     let layers = LayerPlan::new(plate_z, vec![height; count]).expect("a uniform layer plan");
     let policy = SweepPolicy::from_registry().expect("the registry supplies every sweep number");
-    plinth_sweep::run_sweep(mesh, &layers, &policy)
+    crate::harness::memo_run_sweep(mesh, &layers, &policy)
         .expect("the sweep emits and warns; it never refuses")
 }
 

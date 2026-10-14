@@ -26,9 +26,9 @@ use plinth_core::{m0_constants, LayerPlan};
 use plinth_mesh::{make_brace_pair, make_tall_stilt_plate, Mesh};
 use plinth_orient::demand::{DemandFidelity, SupportDemandMeasurer};
 use plinth_orient::{OrientFaceTable, UpDirection};
-use plinth_sweep::{run_sweep, StrutKind, SweepDemand, SweepPlan, SweepPolicy};
+use plinth_sweep::{StrutKind, SweepDemand, SweepPlan, SweepPolicy};
 
-use crate::harness::sweep_with;
+use crate::harness::{memo_run_sweep, sweep_with};
 
 fn count(plan: &SweepPlan, kind: StrutKind) -> usize {
     plan.struts.iter().filter(|strut| strut.kind == kind).count()
@@ -83,7 +83,7 @@ fn demand_sweep_up(mesh: &Mesh, policy: &SweepPolicy, up: UpDirection) -> SweepP
     )]
     let count = (((max_z - plate_z) / height).ceil().max(1.0) as usize) + 1;
     let layers = LayerPlan::new(plate_z, vec![height; count]).expect("a layer plan");
-    run_sweep(&transformed, &layers, policy).expect("a sweepable fixture")
+    memo_run_sweep(&transformed, &layers, policy).expect("a sweepable fixture")
 }
 
 /// A pose at which the tall stilt plate's COARSE sweep (the prefilter's own
