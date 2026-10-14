@@ -299,10 +299,20 @@ posts; measured 2026-10-12), so it is counted
 run is longer than `S` times the thickest radius at which it keeps the final gap (the drawn radius
 grown by the spare gap measured for it, up to the registered maximum), the lean is refused and the arm
 keeps its seat with its seat-bite warning (Deinonychus arms 215 and 220). The refusal trades the lean
-for the arm as it stands, so that arm must be a support: a shaft longer than one layer whose solid
-does not enter the model. On the Morel base the kept arm (44) was a one-layer stub onto the model wall
-beside its seat, tip off its face; there the lean is taken. The test is arithmetic on the clearance
-the rule already reads for every proposal in one batched kernel call.
+for the arm as it stands, so that arm must be a support: standing on its ground, its solid not
+entering the model, and either a shaft longer than one layer or a one-layer stub resting on another
+member (joint round 4, 2026-10-13: Bat_Cat_Owl's stub on its sibling chain took a 4.8 mm lean as a
+0.10 mm rod 5.4 times over `S * r`; a member's chain carries a stub). On the Morel base the kept arm
+(44) was a one-layer stub onto the model wall beside its seat, tip off its face; there the lean is
+taken. The test is arithmetic on the clearance the rule already reads for every proposal in one
+batched kernel call.
+
+**One contact, one arm, at a first layer over nothing (joint round 4).** A birth the cover bridged to
+rooted material is given an arm only if no arm of its layer stands in it or holds it. An arm holds a
+birth when every pixel of the birth lies inside the arm's planned tip ball (the contact ball of its
+smallest tip): one contact touches them all. Bat_Cat_Owl seated four arms 0.05-0.1 mm apart on one
+layer, and the third hung as a long thin rod. The holder covers the held birth's cells, which is how
+the reach field and the removal replay read the birth as rooted.
 
 This reading is conservative and that is a known, open trade. A lean leaving its seat face reads its
 clearance at the gap itself (its seat zone ends where the solid first stands the gap clear of the seat
@@ -333,6 +343,29 @@ diagonal is sized for drag, not for a load path. When the re-route moved anythin
 and the model-tie passes run again on the field it left (they act only on runs over their limit),
 because the move can make a run (a branch on a new host) or lower a limit (the old host's re-size
 makes its sections thinner).
+
+**No tip or head inside another member's drawn solid** (`MODEL-FEET.md` F4, 2026-10-12). The
+Deinonychus tip 145 had its 0.13 mm ball and its whole head inside column 142, and no rule measured
+an arm's drawn solid against another arm's tip. `member_clearance::tips_inside_members` reads each
+seated tip as the segment from its ball centre to where its post starts (the head's axis; the ball
+centre alone for a straight tip) against every other member's drawn spans, each a frustum: the tip
+is inside where the segment comes nearer a span's axis than the span's drawn radius there. A member
+that lands or seats on the tip's own arm is joined to it by plan and is not read. The holding member,
+when it is an arm, is sent to the clearance re-route (a tip never moves there; moving the holder off
+it is the remedy), and the finished field's census warns on every tip still inside, with its host and
+depth. The re-route never moves a headed arm or one that carries a headed member, so case B's
+column (it carries the headed tip) stays and is warned.
+
+**The graze conversion runs again at the final radius** (`MODEL-FEET.md` F3, 2026-10-12). The
+conversion judges each straight tip on the field the lip seats left, at the radius it had then; the
+head decision at placement assumed a vertical post at the planning radius (0.15 mm). The head joins,
+ties, re-route and their sizings come after, and a tip they grow (case B: 0.15 mm planned, 0.671 mm
+drawn, leaned 41 deg, 29 off its face normal) was never asked again. So the same conversion runs once
+more after the clearance re-route, on the sized field, measuring each straight shaft as the lowering
+draws it at its final radius and drawn angle; a grazer gets a head where a post from the joint lands
+legally, and otherwise stays straight with its reason (`heads at the final radius:` line; the
+finished field's graze warning names the rest). A tip the footprint rule slides afterwards is still
+"made by a later slide".
 
 **The final gap does not apply inside a hidden cavity** (owner ruling 2026-10-05, on the
 2026-08-31 ruling that supports hidden in a cavity are never removed or cleaned). The test is
@@ -538,6 +571,42 @@ changes has its disc graded again and a disc now off its face is warned about. B
 `plinth_sweep::footprint_normal`
 (`tests/it/footprint_normal.rs`); never run in the orientation prefilter.
 
+### Every change to a tip keeps layerwise support (joint review, 2026-10-12)
+
+A solid that is connected when finished can still start a layer with nothing under it, and the
+slicer cures that patch in free resin. Two tip rules are held to this:
+
+- **A grown ball prints from its own shaft.** The ball's horizontal sections below its equator
+  widen upward, each holding the one below, so its only possible new island is its LOWEST point,
+  and that prints only when it lies inside the shaft the ball stands on (a straight arm's taper at
+  the tip radius, a head's link). Contact growth moves the ball out along its seat normal; on an
+  oblique shaft the lowest point leaves the shaft. Each tip's growth is bounded by the largest ball
+  whose lowest point stays inside (`plinth_support::carried_ball_radii_mm`); a tip it stops short
+  of plan is warned (`ShortReason::Overhang`).
+- **A footprint slide keeps the seat it was placed for.** A disc wholly on some face higher up is
+  not support for the material the tip was placed under. A slide is accepted only if the moved ball
+  still holds the original seat to within one pixel, or the slide does not climb: the moved disc's
+  lowest point stands no more than one layer above the placed disc's (a slide across a level face
+  or along a tilted face's strike stays on the laminae the tip was placed under)
+  (`footprint::keeps_seat`); otherwise the tip tries its next candidate and, when
+  none keeps the seat, keeps its own with a warning (`Footprint::MoveRefused`).
+- **A footprint slide leaves nothing it held over air** (fix lane A). The seat is one point; a
+  ball holds every cell its section covers at the layer the cell cures on or the one under it. Every
+  cell where model may stand (`cover`) that the ungrown placed ball holds and the ungrown moved ball
+  does not must join, through cells of its own layer where model surely stands (`carry`), a cell with
+  model surely under it, a cell the moved ball holds, or the edge of the window the slide reaches
+  (`footprint::keeps_ground`). The no-climb clause alone passed a 0.51 mm slide DOWN a face that
+  left its seat island floating, and slides that kept the seat point uncovered material beside it.
+- **A junction stands on the shaft the file draws.** A seated member's shaft starts at its ball's
+  centre, which the seat law puts off the seat along the seat normal and contact growth puts further
+  off. Every member landed or seated on such a shaft follows the drawn line, exactly as it follows a
+  leaning plate post's boss line (`adapter::drawn_line_offset`, read on
+  `plinth_support::SweepRootFlare::shaft_line_of`).
+- **A model foot fits at the size it is drawn.** The descent checks a foot at the tip's minimum;
+  on the sized field the foot is drawn for the load it passes. The clearance re-route also sends a
+  model landing whose load-sized foot does not lie wholly on the model, and offers it only model
+  candidates that fit that foot; one with none left keeps its landing with a warning.
+
 Land-at-strike is a **ratified design principle** — the standing answer for how the engine
 should treat a stub that runs into the model — rather than a claim that every piece of it is
 built. Build status belongs to `docs/status.md`.
@@ -574,6 +643,88 @@ carries the transferred load onward to its own supports (as opposed to the conta
 attested and legally scarred) is an unresolved doctrine question, and keeping interior arms
 clear of a cavity's drain and vent bores is an unbuilt refusal. Neither loosens anything already
 shipped; both are future work — see `docs/status.md` and `docs/plans/support-clearance.md`.
+
+### The articulated head is sized for what its contact can pass (Craig, 2026-10-11)
+
+A headed tip is a contact ball, a bare link, a cone and a joint sphere on top of a post. Until
+2026-10-11 the cone, the joint and the post were sized by a bending law of the lean (`heads.rs`)
+for a load line the contact cannot pass: on Deinonychus support A a link of radius 0.428 mm
+carried a joint sphere of radius 1.333 mm, and the post, the host column and the plate foot
+inherited the size. **Craig's ruling:** the "post is never thinner than a joint" rule stays; the
+joint is fixed at its cause.
+
+The rule now (`joint_cert.rs` holds the bound and its proofs in comments, `joint_size.rs` the
+pass that applies it):
+
+* **A local capacity certificate, not a network-strength claim.** The resized section never fails
+  before the contacts that feed it. Each feed is two real sections in series (the seat disc and
+  the link; the ball equator and the taper for a straight tip; a brace's own section), and the
+  loads that break neither are exactly a polytope in (axial force, the two end moments, squared
+  twist). Photopolymer resin is brittle, so the criterion is the maximum principal stress
+  (Rankine, `s + tau^2 <= 1`) with the same `sigma_allow` the area law uses; no new constant.
+* **One authoritative profile.** The cone knots and the joint radius come from one solve and
+  travel together through `Head::certified`, `head_payload` and the lowering, which draws them
+  verbatim (the joint sphere is the last knot's radius, not a wider one).
+* **Certified everywhere.** On a straight frustum the demand is `A/r^2 + B/r^3 + C/r^6`, whose
+  maximum is analytic. A post slot takes the larger of its two end needs (the bound is convex
+  along a straight record), summed over every source that loads it from its entry down: the head's
+  contact, every member landed on it (and what is routed through it), every brace, and every
+  member whose drawn solid is fused into it. The lowering's chords never draw below the slot step.
+* **Kept as today.** A slot whose need is above today's radius and a slot a junction hull's ring
+  stands on keep today's radius. Such a slot is drawn under the certificate's own need, so it is
+  counted and the log warns with the worst member (`heads keep N post slots under the radius the
+  certificate computes`; `CHONKY.md` P3: Deinonychus support A's column keeps 1.286 against a need
+  of 1.395-1.603). The certificate never grows a post; the warning says where it stands short. A head that another member loads at or above its joint (shared)
+  keeps the old law and is counted (`joint certificate:` line of the log): a member that lands on
+  the joint's layer or above, a brace seated within one layer of the joint, or ANY other member's
+  drawn body (routed descendants included) that touches the certified link, cone or joint. The
+  cone and joint are sized for the head's own contact alone, and a feed that enters there would
+  need a larger joint.
+* **Junction hulls are today's, exactly (R8).** A junction hull's host, pull-backs, cut arcs and
+  rings are planned from the radii of the shaft, so a thinner shaft would move every ring. The
+  lowering therefore plans the hulls on the field as the old law drew it
+  (`adapter::hull_reference_arms`, from `CertifiedHead::today_radius_mm`) and keeps those
+  records bit for bit (`lower_sweep_arms_with_hull_reference`, `junction::keep_planned_hulls`).
+  The shaft of an arm a hull cuts is the arm's own outside the junction's arcs and the old
+  field's thin run inside them. A filled junction cuts nothing out of a shaft. A reference whose shafts do
+  not line up with the arms' is not used, and the lowering warns.
+* **The ring the shaft meets is the old ring, to the bit.** Where a hull ring stands on a cut of
+  the shaft (the end of the host above a hull, the start of the host below it, the end of a
+  shortened branch; and the end of the branch a FILLED junction's added hull takes whole, which
+  has no window), the arm's frustum there ends on the ring's centre and radius, so the drawn
+  ring and the hull ring are one ring. The arm's chord differs from the ring by the fit's chord
+  noise (the ring is the old law's radius). The difference is closed by a taper along the arm's
+  own pieces, walking away from the ring (`junction::plan_transition`): it closes at
+  `|difference| / pixel pitch` per mm at the fastest, and never so fast that a piece narrows going
+  up by more than the lean law's step (`cot(theta_sat)` per mm of height, the slope the
+  load-step cones are drawn at); a piece already at that slope carries the offset unchanged and
+  the offset closes on the next piece that has room. A ring thicker than the chord gives a shaft
+  never thinner than its chord (certified wherever the chord is). A ring thinner than the chord
+  (the old law's radius, kept by R8) gives a shaft that rises from it to the chord. The log's
+  `junction rings:` line counts both and the largest dip under the chord; a ring no taper can
+  reach is left on the arm's own radius and warned.
+* **Report, never refuse.** The log prints the largest certified demand over the drawn chords and
+  warns when one exceeds `1 + 1e-9`. The link-overstress warning is read at the link end that is
+  drawn and says when the joint is sized for what the link can pass.
+
+What it does not claim: stiffness falls as sections thin (the link dominates compliance), and a
+thinner path moves a little load onto a neighbour. Only a frame solve or a coupon settles that.
+
+**A head's post that leans onto another member pays for the moment its offset hands the host**
+(`CHONKY.md` P1, 2026-10-12). The descent prices a landing on a member at zero further path: the
+host has already paid for its own way down (`up_sweep::deferred_path_mm`). That holds for the axial
+load only. The contact `D` carries its load down a vertical line, and a post that lands on a host
+whose axis stands `e` sideways of `D` hands the host that load at a lever `e`; with nothing holding
+the host's top sideways (the engine cannot claim the model does) the host carries the moment to the
+plate. The engine's own stress form (`heads::section_radius_mm`, `r^3 = r_a^2 r + 4 r_t^2 e`) gives the
+section it needs, so the lean is charged the host's extra material per mm of its remaining path
+(at least the landing's own height, `k_bottom h`), in units of the post's own axial section:
+`k_bottom h (r(e)^2 - r(e_K)^2) / r_a^2` (`up_sweep::offset_moment_path_mm`). `e_K`, the horizontal
+lever the head itself puts between `D` and the joint, is subtracted: every post from `K` carries
+it, a vertical drop to the plate included, so a landing straight under `K` owes nothing. Only a head
+post's LEAN onto a member is charged; no constant is new. Deinonychus support A (`CHONKY.md`): the
+3.5 mm arm onto B's column is gone, the post drops vertically from `K` (r 1.01) to its own foot, and
+the path from the contact to the plate falls from 48.9 to 27.9 mm3 of emitted mesh.
 
 ## 9. Admissibility: emergence, area sufficiency, attestation, buried surface
 

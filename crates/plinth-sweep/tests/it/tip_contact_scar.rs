@@ -176,6 +176,7 @@ fn the_blade_down_pose_pays_more_tip_scar_on_average_more_fragile_faces_than_bla
 /// handful of tips land there in both flip poses. `None` is still reserved
 /// for a pose nobody measured — the point this test actually needs to prove.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn a_disc_that_mostly_lands_on_an_already_counted_face_still_carries_a_measured_some() {
     let mesh = plinth_mesh::make_recessed_disc(24.0, 25.0, 3.5, 2.5, 22.5, 128)
         .expect("the Round 50 profile");
@@ -202,6 +203,7 @@ fn a_disc_that_mostly_lands_on_an_already_counted_face_still_carries_a_measured_
               run that withheld it, plus that scar. A tolerance would pass on a fold that rounded \
               differently, which is exactly what must not happen"
 )]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn withholding_the_tip_scar_on_a_disc_carries_none_not_zero() {
     let mesh = plinth_mesh::make_recessed_disc(24.0, 25.0, 3.5, 2.5, 22.5, 128)
         .expect("the Round 50 profile");
@@ -264,6 +266,7 @@ fn withholding_the_tip_scar_on_a_disc_carries_none_not_zero() {
 /// term is a term-sized error, twelve orders of magnitude above 1e-9 relative,
 /// so the loosened comparison can still only ever pass on a complete sum.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn the_scar_raw_is_exactly_its_four_named_halves() {
     let mesh = plinth_mesh::make_raking_blade().expect("the raking blade fixture");
     let request = SweepRequest::registered().expect("the registered sweep configuration");
@@ -357,6 +360,7 @@ fn the_scar_raw_is_exactly_its_four_named_halves() {
     reason = "the pinned pose is an exact axis direction, and the two poses' shifts are compared for \
               inequality: a tolerance would let two different charges pass as equal"
 )]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn withholding_the_tip_scar_moves_the_committed_numbers_but_not_this_pose() {
     let mesh = plinth_mesh::make_raking_blade().expect("the raking blade fixture");
     let request = SweepRequest::registered().expect("the registered sweep configuration");

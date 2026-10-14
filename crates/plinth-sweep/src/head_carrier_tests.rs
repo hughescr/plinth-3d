@@ -54,7 +54,7 @@ pub(crate) fn straight(
         interior: false,
         radius_mm: vec![radius; k_top + 1],
         carried_mm2: vec![0.0; k_top + 1],
-        covered_demand: Vec::new(), twin_host: false,
+        covered_demand: Vec::new(), held_births: Vec::new(), twin_host: false,
         inserted_by_load: false,
         path: Vec::new(),
         seat_face: SeatFace::default(),
@@ -86,6 +86,8 @@ fn head_of(strut: &SweepStrut, k_joint: usize, joint_cell: usize) -> Head {
         law_planned: crate::heads::HeadLaw::envelope(0.5373),
         law_drawn: None,
         ledger_radius_mm: Vec::new(),
+        certified: None,
+        old_law: None,
     }
 }
 
@@ -597,6 +599,8 @@ fn a_member_on_a_headed_child_follows_the_post_line_to_the_joint() {
         point_mm: None,
         shift_mm: slide,
         footprint: crate::Footprint::MovedOntoFace,
+        contact_ball_radius_mm: None,
+        foot: None,
     };
     let child_cell = grid.index(150, 156);
     let mut child = straight(&grid, 1, 150, 156, k_top, 0.1);
@@ -668,12 +672,14 @@ fn the_footprint_rule_never_slides_a_headed_arm() {
     let outcome = crate::footprint::apply(
         &grid,
         &[],
+        None,
         &mut struts,
         &arms,
         &plan,
         0.0,
         H,
         &limits,
+        false,
         |members: &[usize], _: &[plinth_support::SweepArm], _: &[[f64; 3]]| {
             vec![[0.0, 0.0, -1.0]; members.len()]
         },
@@ -712,6 +718,8 @@ fn a_headed_child_on_a_sliding_host_keeps_its_head_and_its_post_follows() {
         point_mm: None,
         shift_mm: slide,
         footprint: crate::Footprint::MovedOntoFace,
+        contact_ball_radius_mm: None,
+        foot: None,
     };
     let child_cell = grid.index(150, 156);
     let mut child = straight(&grid, 1, 150, 156, k_top, 0.1);
@@ -917,7 +925,10 @@ fn the_lip_seat_pass_never_re_lands_a_headed_arm_on_either_trigger() {
             let bites = vec![Some(bite)];
             let violators = [true];
             let trigger = if clearance {
-                crate::lip_seat::Trigger::Clearance { violators: &violators }
+                crate::lip_seat::Trigger::Clearance {
+                    violators: &violators,
+                    foot_sizing: None,
+                }
             } else {
                 crate::lip_seat::Trigger::SeatBite
             };
@@ -1269,6 +1280,17 @@ fn lip_seat_passes(
     arm: &SweepStrut,
     passes: usize,
 ) -> (Vec<SweepStrut>, crate::lip_seat::LipSeatOutcome, usize) {
+    lip_seat_field_passes(mesh, law_s, std::slice::from_ref(arm), passes)
+}
+
+/// [`lip_seat_passes`] on a field of several members: the seat bite is read on
+/// the LAST one (the arm under test); the others stand as they are.
+fn lip_seat_field_passes(
+    mesh: &plinth_mesh::Mesh,
+    law_s: f64,
+    field: &[SweepStrut],
+    passes: usize,
+) -> (Vec<SweepStrut>, crate::lip_seat::LipSeatOutcome, usize) {
     let grid = grid();
     let history = ColumnHistory::new(&grid);
     let keep_out = crate::drain::DrainKeepOut::none();
@@ -1297,15 +1319,19 @@ fn lip_seat_passes(
     let mut last = Vec::new();
     let mut moved = 0;
     for _ in 0..passes {
-        let mut struts = vec![arm.clone()];
+        let mut struts = field.to_vec();
         let arms = tilted_arms(&grid, &mut struts);
+        let mut bites = vec![None; field.len()];
+        if let Some(last_bite) = bites.last_mut() {
+            *last_bite = Some(bite);
+        }
         moved = crate::lip_seat::apply(
             &joins,
             &plan,
             0.0,
             &mut struts,
             &arms,
-            &[Some(bite)],
+            &bites,
             crate::lip_seat::Trigger::SeatBite,
             &[],
             &mut outcome,
@@ -1356,6 +1382,65 @@ fn an_arm_floating_above_its_ground_is_not_kept_in_place_of_a_lean() {
     assert_eq!(outcome.slender_taken_kept_not_clear, 1, "PATH HIT: {outcome:?}");
     assert_eq!(outcome.candidates_refused_slender, 0, "{outcome:?}");
     assert!(taken[0].is_leaned(), "the arm leans to the plate");
+}
+
+/// **A ONE-LAYER STUB ON A ROOTED MEMBER IS A SUPPORT: ITS OVER-SLENDER LEAN
+/// IS REFUSED** (joint round 4, 2026-10-13, `joint/LONG-ROD.md`). Bat_Cat_Owl
+/// arm 33 stood one layer long on its sibling 32, whose chain reached the plate
+/// through the fat slanted post; the stub test took its 12 mm lean to the plate
+/// (a 0.10 mm rod, 5.4 times over `S * r`) as if it were a stub on the model
+/// wall. A member's chain carries it; only a stub on the MODEL has nothing
+/// to keep.
+///
+/// The fixture of `an_arm_floating_above_its_ground_is_not_kept_in_place_of_a_lean`
+/// (S = 50, a slab). TEST: the stub rests on post 0, a straight plate post:
+/// kept, its lean refused (path hit `candidates_refused_slender` 1, nothing
+/// taken for want of a support). CONTROLS: the same stub on the model is not
+/// kept (the lean is taken, as before), and the same stub on a post that
+/// floats above the plate is not kept (`rooted`). SABOTAGE (by hand, the
+/// `on_a_member` term of `kept_arm_is_a_support` removed, which restores the
+/// layer-count test): the TEST stub's lean is taken (`moved` 1).
+#[test]
+fn a_one_layer_stub_on_a_rooted_member_is_kept_in_place_of_a_lean() {
+    let mesh = boxes_mesh(&[([0.0, 0.0, 10.0], [15.0, 15.0, 12.0])]);
+    let grid = grid();
+    // The post stands one cell beside the stub's seat, as a sibling does; the
+    // stub reaches it by a one-layer lean (a landing on a member needs the
+    // member at the stub's base cell: `landing_check::stands_at`). Its own
+    // column is clear below, as the owl's was.
+    let post = straight(&grid, 0, 150, 151, 199, 0.1);
+    let post_cell = u32::try_from(post.cell).expect("a small cell");
+    let stub = |landing: Landing| {
+        let mut arm = straight(&grid, 1, 150, 150, 200, 0.1);
+        arm.k_bottom = 199;
+        arm.landing = landing;
+        if matches!(landing, Landing::Strut { .. }) {
+            arm.path = vec![post_cell, u32::try_from(arm.cell).expect("a small cell")];
+        }
+        arm.radius_mm = vec![0.1; 2];
+        arm.carried_mm2 = vec![0.0; 2];
+        arm
+    };
+    let on_post = Landing::Strut { id: 0, layer: 199 };
+    let (kept, outcome, moved) =
+        lip_seat_field_passes(&mesh, 50.0, &[post.clone(), stub(on_post)], 1);
+    assert_eq!(moved, 0, "the stub on a rooted member is kept: {outcome:?}");
+    assert_eq!(outcome.candidates_refused_slender, 1, "PATH HIT: {outcome:?}");
+    assert_eq!(outcome.kept_for_slenderness_ids, vec![1], "{outcome:?}");
+    assert_eq!(outcome.slender_taken_kept_not_clear, 0, "{outcome:?}");
+    assert_eq!(kept[1].landing, on_post, "it keeps its member");
+    let (taken, outcome, moved) =
+        lip_seat_field_passes(&mesh, 50.0, &[post.clone(), stub(Landing::Model { layer: 199 })], 1);
+    assert_eq!(moved, 1, "CONTROL: a stub on the model is not kept: {outcome:?}");
+    assert_eq!(outcome.slender_taken_kept_not_clear, 1, "{outcome:?}");
+    assert!(taken[1].is_leaned(), "the stub on the model leans to the plate");
+    let mut floating = post;
+    floating.k_bottom = 150;
+    floating.radius_mm = vec![0.1; 50];
+    floating.carried_mm2 = vec![0.0; 50];
+    let (_, outcome, moved) = lip_seat_field_passes(&mesh, 50.0, &[floating, stub(on_post)], 1);
+    assert_eq!(moved, 1, "CONTROL: a stub on a floating post is not kept: {outcome:?}");
+    assert_eq!(outcome.slender_taken_kept_not_clear, 1, "{outcome:?}");
 }
 
 /// **THE COUNT OF LEANS TAKEN FOR WANT OF A SUPPORT IS SUMMED OVER EVERY
@@ -1849,9 +1934,11 @@ mod actual_lean_sizing {
             point_mm: None,
             shift_mm: [slide, 0.0, 0.0],
             footprint: crate::Footprint::MovedOntoFace,
+            contact_ball_radius_mm: None,
+            foot: None,
         };
         let mut heads = crate::heads::HeadsOutcome::default();
-        crate::size_heads_for_final_posts(&grid, &mut struts, sizing(), 0.1, |_| 0.5, &mut heads);
+        crate::size_heads_for_final_posts(&grid, &mut struts, sizing(), 0.1, |_| 0.5, &mut heads, None);
         assert_eq!(heads.resized_after_moves, 1, "the child was sized again");
         let law = struts[1].head.as_ref().expect("a head").law_drawn.expect("a law");
         let across = slide * LANDING as f64 / K_TOP as f64;
@@ -1870,7 +1957,7 @@ mod actual_lean_sizing {
         );
         // A second pass with the moves settled changes nothing.
         let settled = struts[1].radius_mm.clone();
-        crate::size_heads_for_final_posts(&grid, &mut struts, sizing(), 0.1, |_| 0.5, &mut heads);
+        crate::size_heads_for_final_posts(&grid, &mut struts, sizing(), 0.1, |_| 0.5, &mut heads, None);
         assert_eq!(struts[1].radius_mm, settled);
     }
 }
@@ -1933,17 +2020,21 @@ mod graze_conversion {
 
     /// Run the conversion on `struts` over the slab fixture.
     fn convert(grid: &Grid, struts: &mut [SweepStrut]) -> (usize, HeadsOutcome) {
+        convert_on(grid, struts, &slab_mesh())
+    }
+
+    /// [`convert`] over any model `mesh`.
+    fn convert_on(grid: &Grid, struts: &mut [SweepStrut], mesh: &plinth_mesh::Mesh) -> (usize, HeadsOutcome) {
         let history = ColumnHistory::new(grid);
         let keep_out = crate::drain::DrainKeepOut::none();
         let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
         let law = crate::slenderness::SlendernessLaw::new(50.0, 0.05, 1.0, 32.5);
         let context = slender_context(grid, &history, &keep_out, &lean, &law);
-        let mesh = slab_mesh();
         let plan = plinth_core::LayerPlan::new(0.0, vec![H; 300]).expect("a uniform plan");
         let surface = std::cell::OnceCell::new();
         let joins = crate::head_join::HeadJoinContext {
             slender: &context,
-            mesh: &mesh,
+            mesh,
             layer_plan: &plan,
             plate_z_mm: 0.0,
             clearance_mm: 0.3,
@@ -1967,7 +2058,7 @@ mod graze_conversion {
         };
         let planes: Vec<f64> = (0..300).map(|layer| (f64::from(layer) + 0.5) * H).collect();
         let slices = plinth_support::perception::slice_stack(
-            &mesh,
+            mesh,
             &planes,
             plinth_support::perception::SliceStackLimits::production(),
         )
@@ -2007,6 +2098,60 @@ mod graze_conversion {
                 };
                 cell_u32(grid.index(150, col))
             })
+            .collect();
+        vec![host, grazer]
+    }
+
+    /// **F3 (`MODEL-FEET.md`, case B): a straight tip is judged again at the
+    /// radius the final sizing gave it.** A tip at column 150 leans 25 degrees
+    /// off the slab's underside onto a host 47 columns (2.35 mm) away over the
+    /// 5 mm drop. At the planning radius placement reads (0.15 mm,
+    /// [`crate::heads::TYPICAL_TIP_RADIUS_MM`]) and up to 0.3 mm its shaft does
+    /// not skim, so the conversion asks nothing and the tip stays straight. The
+    /// final sizing grows it to 0.4 mm: at that radius and that angle its drawn
+    /// shaft grazes the face, and the same conversion, asked again on the sized
+    /// field, gives it a head. That is the second conversion the pipeline now
+    /// runs after the final sizing; SABOTAGE: without it the tip is judged only
+    /// at the radius it had first, which is the first assertion here.
+    #[test]
+    fn a_tip_the_final_sizing_grew_into_a_graze_is_converted_when_asked_again() {
+        let grid = grid();
+        let sized_at = |radius: f64| {
+            let mut field = field_at_run(&grid, 150, 47);
+            for slot in &mut field[1].radius_mm {
+                *slot = radius;
+            }
+            field
+        };
+        for radius in [crate::heads::TYPICAL_TIP_RADIUS_MM, 0.3] {
+            let mut planned = sized_at(radius);
+            let (converted, outcome) = convert(&grid, &mut planned);
+            assert_eq!(
+                (outcome.graze_asked, converted),
+                (0, 0),
+                "at {radius} mm it does not graze, and stays straight: {outcome:?}"
+            );
+        }
+        let mut sized = sized_at(0.4);
+        let (converted, outcome) = convert(&grid, &mut sized);
+        assert_eq!(outcome.graze_asked, 1, "at its final radius it grazes: {outcome:?}");
+        assert_eq!(converted, 1, "asked again, it is given a head: {outcome:?}");
+        assert_eq!(outcome.graze_converted, vec![1]);
+        assert!(sized[1].head.as_ref().is_some_and(|head| !head.drawn_straight && head.planned_tip_radius_mm >= 0.4 - 1e-9));
+    }
+
+    /// [`field_at`] with the host `run` columns from the grazer.
+    fn field_at_run(grid: &Grid, grazer_col: usize, run: usize) -> Vec<SweepStrut> {
+        let host_col = grazer_col - run;
+        let host = straight(grid, 0, 150, host_col, K_TOP, 1.0);
+        let mut grazer = straight(grid, 1, 150, grazer_col, K_TOP, 0.05);
+        grazer.landing = Landing::Strut { id: 0, layer: OLD_LANDING };
+        grazer.k_bottom = OLD_LANDING;
+        grazer.radius_mm = vec![0.3; K_TOP - OLD_LANDING + 1];
+        grazer.carried_mm2 = vec![0.0; K_TOP - OLD_LANDING + 1];
+        let span = K_TOP - OLD_LANDING;
+        grazer.path = (0..=span)
+            .map(|slot| cell_u32(grid.index(150, host_col + ((grazer_col - host_col) * slot) / span)))
             .collect();
         vec![host, grazer]
     }

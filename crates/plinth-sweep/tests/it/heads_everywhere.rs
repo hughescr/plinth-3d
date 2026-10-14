@@ -109,7 +109,7 @@ fn arm(id: u32, cell: usize, center: [f64; 2]) -> SweepStrut {
         interior: false,
         radius_mm: Vec::new(),
         carried_mm2: Vec::new(),
-        covered_demand: Vec::new(), twin_host: false,
+        covered_demand: Vec::new(), held_births: Vec::new(), twin_host: false,
         inserted_by_load: false,
         path: Vec::new(),
         straight_fallback: None,
@@ -119,6 +119,8 @@ fn arm(id: u32, cell: usize, center: [f64; 2]) -> SweepStrut {
             point_mm: None,
             shift_mm: [0.0; 3],
             footprint: Footprint::NotGraded,
+            contact_ball_radius_mm: None,
+            foot: None,
         },
         seat_normal: [0.0; 3],
     }
@@ -150,6 +152,8 @@ fn field(setup: &Setup, landed_at: Option<usize>) -> Vec<SweepStrut> {
         law_planned: HeadLaw::envelope(0.5373),
         law_drawn: None,
         ledger_radius_mm: Vec::new(),
+        certified: None,
+        old_law: None,
     });
     host.set_post(Landing::Plate, 0, vec![cell_u32(host_cell); K_JOINT + 1]);
     assert!(host.head_intact(), "the fixture's head must be intact");

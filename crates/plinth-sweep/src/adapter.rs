@@ -38,7 +38,7 @@
 //! (`docs/physics.md`:284-324), realised by the layer index rather than by a
 //! second ray cast.
 
-use plinth_support::{lower_sweep_arms, SweepArm, SweepArmLanding, SweepLowering, SweepLoweringError};
+use plinth_support::{lower_sweep_arms_with_hull_reference, SweepArm, SweepArmLanding, SweepLowering, SweepLoweringError};
 use plinth_support::{BuildFrame, SupportPrimitive};
 use plinth_core::LayerPlan;
 
@@ -90,6 +90,11 @@ pub struct SweepEmission {
     /// seat plane and carry its seat trim
     /// ([`plinth_support::SweepLowering::shaft_members_trimmed_to_seat`]).
     pub shaft_members_trimmed_to_seat: usize,
+    /// Seated balls whose lowest point stood outside their shaft, given a
+    /// collar that holds it, and those whose collar is steeper than the lean
+    /// law ([`plinth_support::SweepLowering::tip_pole_collars`]).
+    pub tip_pole_collars: usize,
+    pub tip_pole_collars_steeper_than_law: usize,
     /// Arms that reached the lowering with no radius profile (a caller
     /// defect; zero on every sweep field).
     pub arms_without_profile: usize,
@@ -131,6 +136,13 @@ pub struct SweepEmission {
     /// the line now drawn. Without it each stood that far off its post.
     pub downgraded_joins: usize,
     pub downgraded_follow_max_mm: f64,
+    /// Members landed or seated on a member whose seated ball puts its drawn
+    /// shaft off the line it was planned on (its ball's centre stands off
+    /// the seat along a tilted normal, further where the ball grew), and the
+    /// largest displacement that moved one onto the drawn shaft (fix lane A,
+    /// 2026-10-12). Without it each stood that far off its host.
+    pub seated_line_joins: usize,
+    pub seated_line_follow_max_mm: f64,
     /// Members whose drawn profile the JUNCTION CLAUSE raised above their
     /// ledger, from the junction down to their root, because a thicker branch
     /// joins them. A brace raises nothing since 2026-10-03 (rule R2), so this
@@ -146,6 +158,19 @@ pub struct SweepEmission {
     /// above the ledger: the rule's path hits on the emitted field.
     pub load_steps_tapered: usize,
     pub load_step_layers_raised: usize,
+    /// The lowering's MODEL FOOT counters (lane 2, 2026-10-12;
+    /// [`plinth_support::SweepLowering::model_feet_drawn`] and siblings):
+    /// feet drawn, without a measured face, coned, too short for their cone,
+    /// left flat, and per foot its load-sized radius, planned disc radius and
+    /// ball radius.
+    pub model_feet_drawn: usize,
+    pub model_feet_without_measured_face: usize,
+    pub model_foot_cones: usize,
+    pub model_foot_cones_too_short: usize,
+    pub model_feet_flat: usize,
+    pub model_foot_radius_mm: Vec<f64>,
+    pub model_foot_contact_disc_radius_mm: Vec<f64>,
+    pub model_foot_ball_radius_mm: Vec<f64>,
 }
 
 impl SweepEmission {
@@ -198,6 +223,9 @@ pub fn to_primitives(
     max_primitive_bytes: usize,
 ) -> Result<SweepEmission, SweepLoweringError> {
     let (arms, raised) = arms_and_junction_raises(plan);
+    // R8: the junction hulls are planned on the field the old law drew and kept
+    // on the certified one.
+    let hull_reference = hull_reference_arms(plan);
     let SweepLowering {
         primitives,
         arms_dropped_zero_length,
@@ -217,6 +245,8 @@ pub fn to_primitives(
         arms_drawn_in_spans,
         profile_member_frusta,
         shaft_members_trimmed_to_seat,
+        tip_pole_collars,
+        tip_pole_collars_steeper_than_law,
         arms_without_profile,
         drawn_volume_mm3,
         drawn_shaft_volume_mm3,
@@ -231,8 +261,17 @@ pub fn to_primitives(
         head_neck_ratio,
         head_stalk_mm,
         head_standoff_mm,
-    } = lower_sweep_arms(
+        model_feet_drawn,
+        model_feet_without_measured_face,
+        model_foot_cones,
+        model_foot_cones_too_short,
+        model_feet_flat,
+        model_foot_radius_mm,
+        model_foot_contact_disc_radius_mm,
+        model_foot_ball_radius_mm,
+    } = lower_sweep_arms_with_hull_reference(
         &arms,
+        hull_reference.as_deref(),
         frame,
         layers,
         max_primitives,
@@ -258,6 +297,8 @@ pub fn to_primitives(
         arms_drawn_in_spans,
         profile_member_frusta,
         shaft_members_trimmed_to_seat,
+        tip_pole_collars,
+        tip_pole_collars_steeper_than_law,
         arms_without_profile,
         drawn_volume_mm3,
         drawn_shaft_volume_mm3,
@@ -276,10 +317,20 @@ pub fn to_primitives(
         max_standoff_deficit_mm: raised.max_standoff_deficit_mm,
         downgraded_joins: raised.downgraded_joins,
         downgraded_follow_max_mm: raised.downgraded_follow_max_mm,
+        seated_line_joins: raised.seated_line_joins,
+        seated_line_follow_max_mm: raised.seated_line_follow_max_mm,
         members_raised_to_a_branch: raised.members,
         arm_junctions_inverted_in_ledger: raised.arm_ledger_inversions,
         load_steps_tapered: raised.load_steps_tapered,
         load_step_layers_raised: raised.load_step_layers_raised,
+        model_feet_drawn,
+        model_feet_without_measured_face,
+        model_foot_cones,
+        model_foot_cones_too_short,
+        model_feet_flat,
+        model_foot_radius_mm,
+        model_foot_contact_disc_radius_mm,
+        model_foot_ball_radius_mm,
     })
 }
 
@@ -472,6 +523,11 @@ pub(crate) struct JunctionRaises {
     /// ([`downgraded_follow_of`]).
     downgraded_joins: usize,
     downgraded_follow_max_mm: f64,
+    /// Joins on a member whose seated ball puts its drawn shaft off its
+    /// planned line, and the largest displacement that moved one onto it
+    /// ([`drawn_line_offset`], fix lane A 2026-10-12): the path hits.
+    seated_line_joins: usize,
+    seated_line_follow_max_mm: f64,
     /// Members whose drawn profile was raised anywhere.
     members: usize,
     /// Load steps drawn as a cone ([`LoadStepTaper`]), and the layers the
@@ -526,12 +582,9 @@ pub(crate) struct JunctionRaises {
 /// raise, a support arm's junction that the raise widened past its ledger
 /// draws the same cone from the raised width (2026-10-07), so a branch
 /// thicker than its host leaves no shoulder above the junction either.
-fn junction_profiles(plan: &SweepPlan) -> (Vec<Vec<f64>>, JunctionRaises) {
-    drawn_profiles(&plan.struts, plan.load_step_taper)
-}
-
-/// [`junction_profiles`] over a bare strut set: the profile every member is
-/// DRAWN at, slot by slot from its own `k_bottom`.
+///
+/// The profile every member is DRAWN at, slot by slot from its own `k_bottom`,
+/// over a bare strut set.
 ///
 /// The slenderness lane measures its runs on exactly this (owner ruling
 /// 2026-09-29: "measure runs on the DRAWN profile"), so the section the lane
@@ -893,21 +946,21 @@ pub fn drawn_line_offset(
     arm: &SweepArm,
     plate_z_mm: f64,
 ) -> Option<LineOffset> {
-    if arm.landing != SweepArmLanding::Plate {
-        return None;
-    }
-    // A vertical member's drawn line is its planned line (the boss stands
-    // under its own seat); nothing moves, bit for bit.
     // A HEADED arm's post is planned from the head's joint `K`, not from the
     // seat (which stays the contact seat so the lowering recognises the head,
     // [`plinth_support::SweepRootFlare::plate_shaft_of`]); `K` is an absolute
     // drawn-frame point, like the arm's other points.
     let planned_top = arm.head.as_ref().map_or(arm.seat_mm, |head| head.joint_mm);
-    let same = |a: f64, b: f64| a.partial_cmp(&b) == Some(std::cmp::Ordering::Equal);
-    if same(planned_top[0], arm.base_mm[0]) && same(planned_top[1], arm.base_mm[1]) {
-        return None;
-    }
-    let (top, bottom) = flare.plate_shaft_of(arm, plate_z_mm)?;
+    // THE SHAFT STARTS AT THE SEATED BALL'S CENTRE (fix lane A, 2026-10-12):
+    // a member landed on another member, or a vertical plate post, draws its
+    // shaft from its ball's centre, which the seat law puts off the seat along
+    // a tilted normal and a grown ball puts further off
+    // ([`plinth_support::SweepRootFlare::shaft_line_of`]). Until then only a
+    // LEANING plate post was read, and a 0.533 mm grown ball left its host's
+    // drawn shaft 0.25 mm from the branch that landed on the planned line
+    // (Deinonychus arm 160 on post 162). A member whose drawn line IS its
+    // planned line returns `None`, bit for bit.
+    let (top, bottom) = flare.shaft_line_of(arm, plate_z_mm)?;
     let rise = top[2] - bottom[2];
     if !(rise.is_finite() && rise > 0.0) {
         return None;
@@ -924,7 +977,9 @@ pub fn drawn_line_offset(
         let drawn = drawn_at(planned[2]);
         [drawn[0] - planned[0], drawn[1] - planned[1], 0.0]
     };
-    Some((off(planned_top), off(arm.base_mm)))
+    let offset = (off(planned_top), off(arm.base_mm));
+    let zero = |v: [f64; 3]| v.iter().all(|c| c.partial_cmp(&0.0) == Some(std::cmp::Ordering::Equal));
+    (!(zero(offset.0) && zero(offset.1))).then_some(offset)
 }
 
 /// [`drawn_line_offset`] for a member as it stands in the plan, before any
@@ -1015,7 +1070,7 @@ pub(crate) fn sweep_arm(
         // a mid-shaft junction thinner than its own ledger and thinner
         // than the branch landing on it. The lowering draws the fewest
         // straight spans that stay on or above this profile.
-        // Raised where a thicker branch joins (`junction_profiles`).
+        // Raised where a thicker branch joins (`drawn_profiles`).
         radius_profile_mm: profile,
         // Both measured by the sweep at its own finished seat
         // (`run_sweep_with_drains`); nothing is re-derived here. The
@@ -1025,9 +1080,19 @@ pub(crate) fn sweep_arm(
         // so it stays on the same plane.
         seat_normal_mm,
         seat_face_point_mm,
-        landing: match strut.landing {
-            Landing::Plate => SweepArmLanding::Plate,
-            Landing::Model { .. } | Landing::Strut { .. } => SweepArmLanding::Landed,
+        landing: match (strut.landing, strut.seat_face.foot) {
+            (Landing::Plate, _) => SweepArmLanding::Plate,
+            // A MODEL FOOT (lane 2, 2026-10-12): the landed face and the
+            // load-sized contact the sweep measured on the finished field.
+            // A model landing it never measured ends flat, as before.
+            (Landing::Model { .. }, Some(foot)) => {
+                SweepArmLanding::Model(plinth_support::ModelFoot {
+                    face_point_mm: foot.face.map(|face| face.point_mm),
+                    face_normal_mm: foot.face.map_or([0.0; 3], |face| face.normal),
+                    contact_radius_mm: foot.contact_radius_mm,
+                })
+            }
+            (Landing::Model { .. } | Landing::Strut { .. }, _) => SweepArmLanding::Landed,
         },
         // A brace seats on another arm and a mast tops out in free
         // space; neither may be given a tip ball. Every arm the reach
@@ -1035,6 +1100,9 @@ pub(crate) fn sweep_arm(
         // unchanged.
         seats_into_model: strut.kind.seats_on_model(),
         head,
+        // The ball grown for its real contact (`contact_growth`), or the
+        // owner's ChituBox ball.
+        contact_ball_radius_mm: strut.seat_face.contact_ball_radius_mm,
     }
 }
 
@@ -1070,6 +1138,32 @@ pub(crate) fn head_payload(strut: &crate::SweepStrut) -> Option<plinth_support::
     // a bare cylinder of the tip's radius, then a cone; the knots carried are
     // the cone's, from the link's planned far end. A head with no link keeps
     // the bending law's polyline from the contact centre.
+    //
+    // THE CERTIFIED PROFILE (Craig 2026-10-11): a head sized by the joint
+    // certificate carries ONE profile, the cone knots and the joint radius from
+    // one solve ([`crate::joint_cert::certified_profile`]); the payload reads
+    // them and never recomputes the old law.
+    if let Some(cert) = &head.certified {
+        let radius_r_t = cert.profile.knots.first().map_or(r_t, |knot| knot[1]);
+        debug_assert!(
+            (cert.profile.joint_radius_mm
+                - cert.profile.knots.last().map_or(0.0, |knot| knot[1]))
+            .abs()
+                <= 1.0e-12,
+            "the joint radius is the last knot's"
+        );
+        return Some(plinth_support::SweepHead {
+            contact_mm: head.contact_mm,
+            unit: head.unit,
+            joint_mm: head.joint_mm,
+            joint_radius_mm: cert.profile.joint_radius_mm,
+            gap_mm: head.gap_mm,
+            profile_knots_mm: cert.profile.knots.clone(),
+            link_mm: head.link_mm,
+            link_radius_mm: radius_r_t,
+            certified: true,
+        });
+    }
     let (profile_knots_mm, link_mm, link_radius_mm) = if head.link_mm > 0.0 {
         let ball_mm = plinth_core::m0_constants().map_or(0.0, |constants| {
             constants
@@ -1098,14 +1192,60 @@ pub(crate) fn head_payload(strut: &crate::SweepStrut) -> Option<plinth_support::
         profile_knots_mm,
         link_mm,
         link_radius_mm,
+        certified: false,
     })
 }
 
 fn arms_and_junction_raises(plan: &SweepPlan) -> (Vec<SweepArm>, JunctionRaises) {
+    arms_and_junction_raises_over(plan, &plan.struts)
+}
+
+/// **The field the junction hulls were planned on** (R8, Craig 2026-10-11): the
+/// arms of the plan with every certified head on the old law's ledger and head
+/// again, drawn through the very same construction. The lowering plans every
+/// junction hull on these arms and keeps those hulls (and the shaft they were
+/// cut from) on the certified field; `None` when no head was certified, so a
+/// field the certificate did not touch is bit-identical to what it was.
+#[must_use]
+pub fn hull_reference_arms(plan: &SweepPlan) -> Option<Vec<SweepArm>> {
+    let reference = hull_reference_struts(&plan.struts)?;
+    Some(arms_and_junction_raises_over(plan, &reference).0)
+}
+
+/// [`hull_reference_arms`]' strut set: a clone of the plan's with each certified
+/// head's ledger and head payload as the old law left them.
+fn hull_reference_struts(struts: &[crate::SweepStrut]) -> Option<Vec<crate::SweepStrut>> {
+    let is_certified = |strut: &crate::SweepStrut| {
+        strut
+            .head
+            .as_ref()
+            .is_some_and(|head| head.certified.is_some() && !head.drawn_straight)
+    };
+    if !struts.iter().any(is_certified) {
+        return None;
+    }
+    let mut reference = struts.to_vec();
+    for strut in &mut reference {
+        if !is_certified(strut) {
+            continue;
+        }
+        let Some(head) = strut.head.as_mut() else { continue };
+        let Some(certified) = head.certified.take() else { continue };
+        if certified.today_radius_mm.len() == strut.radius_mm.len() {
+            strut.radius_mm = certified.today_radius_mm;
+        }
+    }
+    Some(reference)
+}
+
+fn arms_and_junction_raises_over(
+    plan: &SweepPlan,
+    struts: &[crate::SweepStrut],
+) -> (Vec<SweepArm>, JunctionRaises) {
     let height = plan.layer_height_mm;
     let plate = plan.plate_z_mm;
     let grid = &plan.grid;
-    let (mut profiles, raised) = junction_profiles(plan);
+    let (mut profiles, raised) = drawn_profiles(struts, plan.load_step_taper);
     // THE FOOTPRINT RULE's move (fix/tip-trim, 2026-09-28): a seat whose
     // contact disc hung off its face slides ALONG the face; a member joined to
     // a moved axis follows it at the junction (`footprint::followed_shifts`).
@@ -1136,7 +1276,7 @@ fn arms_and_junction_raises(plan: &SweepPlan) -> (Vec<SweepArm>, JunctionRaises)
             profile,
         )
     };
-    let followed = crate::footprint::followed_shifts(&plan.struts);
+    let followed = crate::footprint::followed_shifts(struts);
     // A JUNCTION IS ON THE DRAWN SHAFT (fix/morel-long-posts, 2026-10-02): a
     // leaning plate post's file shaft runs to its boss top over its foot, off
     // the line it was planned on (`drawn_line_offset`), and every branch and
@@ -1150,14 +1290,13 @@ fn arms_and_junction_raises(plan: &SweepPlan) -> (Vec<SweepArm>, JunctionRaises)
     // K-to-base route they were placed on; their offset is the displacement
     // between the two lines ([`downgraded_line_offset`]).
     let flare = plinth_support::SweepRootFlare::registered(height).ok();
-    let any_straight_head = plan
-        .struts
+    let any_straight_head = struts
         .iter()
         .any(|strut| strut.head.as_ref().is_some_and(|head| head.drawn_straight));
     let offsets: Vec<Option<LineOffset>> = if flare.is_none() && !any_straight_head {
         Vec::new()
     } else {
-        plan.struts
+        struts
             .iter()
             .zip(&followed)
             .map(|(strut, followed)| {
@@ -1165,9 +1304,13 @@ fn arms_and_junction_raises(plan: &SweepPlan) -> (Vec<SweepArm>, JunctionRaises)
                     return downgraded_line_offset(flare.as_ref(), grid, plate, height, strut);
                 }
                 let flare = flare.as_ref()?;
-                (strut.landing == Landing::Plate
-                    && strut.kind != crate::StrutKind::Brace
-                    && strut.is_leaned())
+                // A leaning plate post (its boss stands over its foot), and
+                // every member that seats a ball into the model (its shaft
+                // starts at the ball's centre, off its seat along the seat
+                // normal; fix lane A, 2026-10-12).
+                (strut.kind != crate::StrutKind::Brace
+                    && ((strut.landing == Landing::Plate && strut.is_leaned())
+                        || strut.kind.seats_on_model()))
                 // A headed arm keeps its contact seat (the lowering's own
                 // `headed_tip` needs it to recognise the head);
                 // `drawn_line_offset` measures the POST's line from the
@@ -1177,20 +1320,19 @@ fn arms_and_junction_raises(plan: &SweepPlan) -> (Vec<SweepArm>, JunctionRaises)
             })
             .collect()
     };
-    let raised = downgraded_follow_of(&plan.struts, &offsets, raised);
+    let raised = downgraded_follow_of(struts, &offsets, raised);
     let followed = if offsets.iter().any(Option::is_some) {
-        crate::footprint::followed_shifts_drawn(&plan.struts, &offsets)
+        crate::footprint::followed_shifts_drawn(struts, &offsets)
     } else {
         followed
     };
-    let arms = plan
-        .struts
+    let arms = struts
         .iter()
         .zip(profiles.iter_mut())
         .zip(followed)
         .map(|((strut, profile), followed)| build(strut, followed, std::mem::take(profile)))
         .collect();
-    (arms, joints_grown_of(&plan.struts, raised))
+    (arms, joints_grown_of(struts, raised))
 }
 
 /// **Where a head's joint grew** (the lowering draws the joint at the ledger
@@ -1241,13 +1383,18 @@ fn downgraded_follow_of(
             _ => None,
         };
         for (host, layer) in [seat_join, base_join].into_iter().flatten() {
-            if !straight(host) {
-                continue;
-            }
             let Some(Some(offset)) = offsets.get(host) else {
                 continue;
             };
             let at = offset_at(offset, &struts[host], layer);
+            if !straight(host) {
+                if struts[host].kind.seats_on_model() && struts[host].head.is_none() {
+                    raised.seated_line_joins += 1;
+                    raised.seated_line_follow_max_mm =
+                        raised.seated_line_follow_max_mm.max(at[0].hypot(at[1]));
+                }
+                continue;
+            }
             raised.downgraded_joins += 1;
             raised.downgraded_follow_max_mm = raised.downgraded_follow_max_mm.max(at[0].hypot(at[1]));
         }
@@ -1290,7 +1437,7 @@ mod tests {
             interior: false,
             carried_mm2: vec![0.0; ledger.len()],
             radius_mm: ledger,
-            covered_demand: Vec::new(), twin_host: false,
+            covered_demand: Vec::new(), held_births: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             seat_face: crate::SeatFace::default(),

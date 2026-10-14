@@ -78,6 +78,7 @@ fn graded(name: &str, mesh: &Mesh) {
 }
 
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn the_ledger_off_builds_the_same_field_on_the_tall_stilt_plate() {
     graded("tall stilt plate", &make_tall_stilt_plate().expect("fixture"));
 }
@@ -88,6 +89,7 @@ fn the_ledger_off_builds_the_same_field_on_the_brace_pair() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn the_ledger_off_builds_the_same_field_on_the_laid_tube() {
     graded("laid tube", &make_laid_tube().expect("fixture"));
 }

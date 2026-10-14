@@ -229,6 +229,13 @@ works! {
     SegWalkNodesPruned, "kernel.seg_walk.nodes_pruned", Work;
     /// Faces whose segment distance those walks computed.
     SegWalkTrisTested, "kernel.seg_walk.tris_tested", Work;
+    /// Bounded clearance rows put to the refusal search first
+    /// (`segment_clearance_classified_at_least`).
+    SegProveQueries, "kernel.seg_prove.queries", Work;
+    /// Of those, rows the search refused (no full walk run).
+    SegProveRefused, "kernel.seg_prove.refused", Work;
+    /// Faces whose segment distance the refusal search computed.
+    SegProveTrisTested, "kernel.seg_prove.tris_tested", Work;
     /// Tip landings put to the nearest-face scan (`tip_landing`).
     NearestTipRows, "nearest.tip.rows", Work;
     /// Landing-times-face pairs of that scan (`rows * faces`).
@@ -297,6 +304,10 @@ works! {
     LipSeatReruns, "lip_seat.reruns", Work;
     /// Arms put to the lip-seat solid-clearance batch (`rows`).
     LipSeatClearanceRows, "lip_seat.clearance_rows", Work;
+    /// Mover reads the lip-seat round loop asked for (one per proposal).
+    LipSeatMoverReads, "lip_seat.mover_reads", Work;
+    /// Of those, reads a batch had already taken ahead on the same path.
+    LipSeatMoverReadsAhead, "lip_seat.mover_reads_ahead", Work;
     /// Brace partner searches (`partner_candidates` calls).
     BracePartnerCalls, "brace.partner_calls", Work;
     /// Members scanned by those searches.

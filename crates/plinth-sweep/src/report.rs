@@ -351,6 +351,16 @@ pub struct SweepRunReport {
     /// footprint, how many moved off their seat triangle's normal and by how
     /// much, and the tips that kept the triangle's normal.
     pub seat_footprint_normal: crate::footprint_normal::FootprintNormalOutcome,
+    /// The REAL contact (Craig 2026-10-12: the tip is cut to the model mesh):
+    /// the model surface inside every seated tip's drawn ball against the
+    /// planned disc, the balls grown until it reaches plan, and the tips a
+    /// limit left short.
+    pub seat_contact: crate::contact_growth::ContactOutcome,
+    /// The MODEL FEET (lane 2, 2026-10-12, `MODEL-FEET.md`): every arm that
+    /// lands on the model, its load-sized contact, how much of it stands on
+    /// the model, its real contact against its load's need, and what the
+    /// descent and the re-landings refused for a foot that did not fit.
+    pub model_feet: crate::model_feet::ModelFeetOutcome,
     /// The head-join rule (2026-09-29): member-on-arm joins graded against the
     /// trunk's seat zone, the landers moved down their trunk, the joins kept
     /// by reason, and the finished field's census.
@@ -480,6 +490,28 @@ pub struct MemberModelClearance {
     pub smallest_clearance_mm: Option<f64>,
     /// The members under the gap, in member order.
     pub within_gap: Vec<MemberNearModel>,
+    /// **Tips and heads buried in ANOTHER member's drawn solid** (`MODEL-FEET.md`
+    /// F4, 2026-10-12; `member_clearance::tips_inside_members`), in tip
+    /// order: the member whose solid holds it, and how deep. Warned, never
+    /// refused; the clearance re-route is sent the holding member first.
+    pub tips_inside: Vec<TipInsideMember>,
+}
+
+/// One tip whose contact ball's centre, or its head's axis from the ball to
+/// the joint, lies inside another member's drawn shaft
+/// ([`MemberModelClearance::tips_inside`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TipInsideMember {
+    /// The arm whose tip is buried.
+    pub tip_member: u32,
+    /// The member whose drawn solid holds it, and its kind.
+    pub host_member: u32,
+    pub host_kind: crate::StrutKind,
+    /// How far inside the host's solid the tip's axis reaches, mm (the host's
+    /// drawn radius there less the axis distance).
+    pub depth_mm: f64,
+    /// The tip's drawn contact ball radius, mm.
+    pub ball_radius_mm: f64,
 }
 
 /// The unrooted-column rule on one run: what the up-sweep left unrooted, and
@@ -569,6 +601,9 @@ pub struct PathHits {
     pub descent_solid_uncleared: u64,
     pub descent_solid_lean_candidates_refused: u64,
     pub descent_solid_seats_moved: u64,
+    /// Head-post lean candidates onto another member charged for the moment
+    /// their sideways offset hands the host (`CHONKY.md` P1).
+    pub descent_head_offset_charged: u64,
     /// Down-sweep reads where a lander's load reached a support arm's contact
     /// slot and was booked one slot lower, into the shaft (2026-09-29). Zero
     /// means no arm landed on another arm's head, which a green
@@ -615,6 +650,18 @@ pub struct PathHits {
     /// head carries the twin's load along its lever, and the head law sizes
     /// its joint and post for that (q12 regressions, 2026-10-12, item 3).
     pub twin_seats_headed_host: u64,
+    /// First layers over nothing at the printer's pixel (`births.rs`, joint
+    /// review 2026-10-13): found over the stack; of those, rooted by the reach
+    /// field only through the cover's outward rounding (bridged); of those,
+    /// already held by an arm of their layer standing in them, given an arm
+    /// seated inside them, and left without one (a WARNING: their first
+    /// layer prints over air). Zero bridged on a field whose cover never
+    /// joined a new piece to rooted material.
+    pub births_found: u64,
+    pub births_bridged: u64,
+    pub births_held: u64,
+    pub births_seated: u64,
+    pub births_unseated: u64,
     pub island_hex_bound: u64,
     /// The finished plan's member tops (arms and braces) given a carried face,
     /// those whose NEAREST down-facing face was a wall or a face steeper than
@@ -915,6 +962,35 @@ impl SweepRunReport {
             self.slenderness_lane.merges_refused_stale_shaft,
         )
         .expect("writing to a String cannot fail");
+        // A MODEL LANDING IS ROOTED, BUT ITS FOOT MAY NOT FIT (lane 2,
+        // 2026-10-12): said here, beside the rooting verdict, never folded
+        // into it.
+        if finished.model_feet > 0 {
+            let partial = &finished.model_feet_partial;
+            let listed: Vec<String> = partial
+                .iter()
+                .map(|&(id, tenths)| format!("{id} {}.{}%", tenths / 10, tenths % 10))
+                .collect();
+            if partial.is_empty() {
+                writeln!(
+                    out,
+                    "Model feet: {} model landings, every foot's load-sized contact wholly on \
+                     cured model.",
+                    finished.model_feet
+                )
+            } else {
+                writeln!(
+                    out,
+                    "Model feet: WARNING {} of {} model landings are rooted with only part of \
+                     their foot's load-sized contact on cured model (a warning on an emitted \
+                     file, never a refusal): {}.",
+                    partial.len(),
+                    finished.model_feet,
+                    listed.join(", ")
+                )
+            }
+            .expect("writing to a String cannot fail");
+        }
         out
     }
 }

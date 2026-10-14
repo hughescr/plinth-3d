@@ -103,6 +103,7 @@ fn required_scar_mm2(plan: &plinth_sweep::SweepPlan) -> f64 {
 /// the max-field order sums the per-column maxima of hundreds of layers and
 /// inserts arms for load that never arrives at once.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn the_insertion_trigger_reads_one_event_and_the_max_field_would_insert_for_a_sum() {
     let mesh = tilted_disc();
     let policy = SweepPolicy::from_registry()

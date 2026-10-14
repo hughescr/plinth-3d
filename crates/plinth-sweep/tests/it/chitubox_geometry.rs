@@ -90,6 +90,7 @@ fn arm(index: usize, tip_radius_mm: f64) -> SweepArm {
         landing: SweepArmLanding::Plate,
         seats_into_model: true,
         head: None,
+        contact_ball_radius_mm: None,
     }
 }
 

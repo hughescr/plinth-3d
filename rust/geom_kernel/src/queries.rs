@@ -2494,7 +2494,11 @@ impl NativeSurface {
         b: V3,
         excluded: &[u32],
     ) -> (f64, V3, u32) {
-        self.seg_surface_walk_excluding(a, b, excluded, 0.0, |tid| self.seg_tri_dist(a, b, tid))
+        let (best_d, best_pt, near_parallel, _) =
+            self.seg_surface_walk_excluding(a, b, excluded, 0.0, |_| false, |tid| {
+                self.seg_tri_dist(a, b, tid)
+            });
+        (best_d, best_pt, near_parallel)
     }
 
     /// The branch-and-bound walk behind [`Self::seg_surface_min_excluding`],
@@ -2509,6 +2513,13 @@ impl NativeSurface {
     /// `distance - radius_at_the_nearest_point`, which is at least
     /// `distance - r_max`, so `slack = r_max` keeps the prune a true lower
     /// bound.
+    ///
+    /// `stop(best)` is asked each time the least cost falls; once it says
+    /// yes the walk ends there and the fourth element is `true`. The least
+    /// cost only ever falls, so a `stop` that holds for every cost at or
+    /// below one it held for (a "below this bound" test) proves the full
+    /// walk's answer lies there too. `|_| false` is the full walk, bit for
+    /// bit: the prune and the faces tested do not depend on `stop`.
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_possible_wrap,
@@ -2524,13 +2535,15 @@ impl NativeSurface {
         b: V3,
         excluded: &[u32],
         slack: f64,
+        stop: impl Fn(f64) -> bool,
         mut face_cost: impl FnMut(usize) -> (f64, V3, bool),
-    ) -> (f64, V3, u32) {
+    ) -> (f64, V3, u32, bool) {
         let smin = box_min(a, b);
         let smax = box_max(a, b);
         let mut best_d = f64::INFINITY;
         let mut best_pt: V3 = [f64::NAN; 3];
         let mut near_parallel = 0u32;
+        let mut stopped = false;
         // Write-only tallies for `perf` (nothing reads them back): integer
         // increments on locals, one charge per walk.
         let mut nodes_visited = 0u64;
@@ -2570,7 +2583,14 @@ impl NativeSurface {
                             best_d = d;
                             best_pt = pt;
                             // pierce early-out allowed (spec sec 3.3)
+                            if stop(best_d) {
+                                stopped = true;
+                                break;
+                            }
                         }
+                    }
+                    if stopped {
+                        break;
                     }
                 } else {
                     let l = node.a as usize;
@@ -2599,7 +2619,95 @@ impl NativeSurface {
             // another's.
             crate::perf::note_walk_tris(tris_tested);
         }
-        (best_d, best_pt, near_parallel)
+        (best_d, best_pt, near_parallel, stopped)
+    }
+
+    /// **Whether some face proves the capsule row `[a, b]` below its bound**:
+    /// a face whose segment distance `d` (the walk's own [`Self::seg_tri_dist`],
+    /// so the very number the walk would take) reads `d - thresh < at_least`.
+    /// The walk's answer is the least such `d` over every face, so one such
+    /// face proves its clearance below the bound too, whatever else it finds.
+    ///
+    /// The walk itself bounds a subtree by its box's distance from the
+    /// segment's own BOX, which for a long slanted segment is most of the
+    /// model, so a row near a wall can test thousands of faces before it
+    /// reaches the near one. This search cuts the segment into pieces about as
+    /// long as the distance it is looking within (`at_least + thresh`), bounds
+    /// each subtree by its distance from each piece's box, and skips one that
+    /// cannot hold a face within that distance; it stops at the first face
+    /// that proves the row below. `false` proves nothing (the caller runs the
+    /// full walk): finding no face is never read as a pass.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "a piece count of a finite segment over a positive length, clamped to 1..=u16::MAX; \
+                  BVH node indices are 32-bit by the kernel's named limit, as in the walk"
+    )]
+    fn seg_face_below(&self, a: V3, b: V3, thresh: f64, at_least: f64) -> bool {
+        let within = at_least + thresh;
+        if !(within > 0.0 && within.is_finite()) {
+            return false;
+        }
+        let length = norm(sub(b, a));
+        if !length.is_finite() {
+            return false;
+        }
+        let pieces = (length / within).ceil().clamp(1.0, f64::from(u16::MAX)) as usize;
+        let mut tris_tested = 0u64;
+        let mut found = false;
+        STACK.with(|s| {
+            let mut stack = s.borrow_mut();
+            'pieces: for piece in 0..pieces {
+                let t0 = piece as f64 / pieces as f64;
+                let t1 = (piece + 1) as f64 / pieces as f64;
+                let p = add(a, scale(sub(b, a), t0));
+                let q = add(a, scale(sub(b, a), t1));
+                let (pmin, pmax) = (box_min(p, q), box_max(p, q));
+                stack.clear();
+                stack.push(0);
+                while let Some(ni) = stack.pop() {
+                    let node = &self.bvh.nodes[ni as usize];
+                    if box_box_dist(pmin, pmax, node.bmin, node.bmax) - thresh >= at_least {
+                        continue;
+                    }
+                    if node.leaf {
+                        let start = node.a as usize;
+                        let cnt = node.b as usize;
+                        for &tid in &self.bvh.order[start..start + cnt] {
+                            tris_tested += 1;
+                            let (d, _, _) = self.seg_tri_dist(a, b, tid as usize);
+                            if d - thresh < at_least {
+                                found = true;
+                                break 'pieces;
+                            }
+                        }
+                    } else {
+                        let l = node.a as usize;
+                        let r = node.b as usize;
+                        let dl = box_box_dist(pmin, pmax, self.bvh.nodes[l].bmin, self.bvh.nodes[l].bmax);
+                        let dr = box_box_dist(pmin, pmax, self.bvh.nodes[r].bmin, self.bvh.nodes[r].bmax);
+                        if dl <= dr {
+                            stack.push(r as i32);
+                            stack.push(l as i32);
+                        } else {
+                            stack.push(l as i32);
+                            stack.push(r as i32);
+                        }
+                    }
+                }
+            }
+        });
+        if crate::perf::enabled() {
+            crate::perf::add(crate::perf::Work::SegProveQueries, 1);
+            crate::perf::add(crate::perf::Work::SegProveRefused, u64::from(found));
+            crate::perf::add(crate::perf::Work::SegProveTrisTested, tris_tested);
+            if found {
+                crate::perf::note_walk_tris(tris_tested);
+            }
+        }
+        found
     }
 
     /// One segment clearance. Tier-1 open-space branch is NOT reproduced
@@ -2626,6 +2734,13 @@ impl NativeSurface {
     /// before the census rule, and still every caller that is not the census.
     /// `true` is the frustum the file draws (see below). A row whose two radii
     /// are equal reads the same either way, bit for bit.
+    ///
+    /// `at_least`: a row whose walk PROVES its clearance below this number
+    /// (the least cost so far, read as a clearance, is already under it; the
+    /// least cost only falls) ends there and comes back `None`. Every other
+    /// row is the full answer, bit for bit: the walk prunes and tests the
+    /// same faces whatever `at_least` is. `f64::NEG_INFINITY` never ends a
+    /// walk.
     #[allow(clippy::too_many_arguments)]
     fn seg_clear_one_excluding(
         &self,
@@ -2638,17 +2753,18 @@ impl NativeSurface {
         inset1: f64,
         excluded: &[u32],
         frustum: bool,
-    ) -> SegmentClearanceClassified {
+        at_least: f64,
+    ) -> Option<SegmentClearanceClassified> {
         let d = sub(p1, p0);
         let l = norm(d);
         if l < 1e-9 {
-            return SegmentClearanceClassified::Unmeasured(UnmeasuredSegment::DegenerateAxis);
+            return Some(SegmentClearanceClassified::Unmeasured(UnmeasuredSegment::DegenerateAxis));
         }
         let u = scale(d, 1.0 / l);
         let s_lo = inset0;
         let s_hi = l - inset1;
         if s_hi - s_lo <= 1e-9 {
-            return SegmentClearanceClassified::Unmeasured(UnmeasuredSegment::InsetsConsumeAxis);
+            return Some(SegmentClearanceClassified::Unmeasured(UnmeasuredSegment::InsetsConsumeAxis));
         }
         let a = add(p0, scale(u, s_lo));
         let b = add(p0, scale(u, s_hi));
@@ -2663,14 +2779,6 @@ impl NativeSurface {
         // bit for bit; a tapered one, when the caller asks for the frustum, is
         // measured per face, exactly.
         let tapered = frustum && (r_hi - r_lo).abs() > TAPER_EPS_MM;
-        let (best_d, best_pt, near_parallel_faces) = if tapered {
-            let (r_a, r_b) = (r_lo, r_hi);
-            self.seg_surface_walk_excluding(a, b, excluded, r_a.max(r_b), |tid| {
-                self.seg_tri_frustum_cost(a, b, r_a, r_b, tid)
-            })
-        } else {
-            self.seg_surface_min_excluding(a, b, excluded)
-        };
         // For a tapered row `best_d` is already `distance - radius` at the
         // nearest point, so only the standoff is left to subtract.
         let thresh = if tapered {
@@ -2678,6 +2786,34 @@ impl NativeSurface {
         } else {
             r_lo.max(r_hi) + standoff
         };
+        // The clearance below is `best_d - thresh`, and a floating-point
+        // subtraction of one number is monotone in the other, so a least cost
+        // that already reads under `at_least` proves the walk's answer does.
+        let below = |best: f64| best - thresh < at_least;
+        // A bounded capsule row first looks for ONE face that proves it below
+        // its bound, near the segment only; the full walk runs only when none
+        // is found (see `seg_face_below`).
+        if !tapered
+            && excluded.is_empty()
+            && at_least > f64::NEG_INFINITY
+            && self.seg_face_below(a, b, thresh, at_least)
+        {
+            return None;
+        }
+        let (best_d, best_pt, near_parallel_faces, stopped) = if tapered {
+            let (r_a, r_b) = (r_lo, r_hi);
+            self.seg_surface_walk_excluding(a, b, excluded, r_a.max(r_b), below, |tid| {
+                self.seg_tri_frustum_cost(a, b, r_a, r_b, tid)
+            })
+        } else {
+            // `seg_surface_min_excluding`'s walk, with the stop.
+            self.seg_surface_walk_excluding(a, b, excluded, 0.0, below, |tid| {
+                self.seg_tri_dist(a, b, tid)
+            })
+        };
+        if stopped {
+            return None;
+        }
         // NO CANDIDATE IS NOT A MEASUREMENT. `seg_surface_min_excluding` seeds
         // `best_d` with `f64::INFINITY` and only ever lowers it, so a
         // non-finite `best_d` means the walk found no face to measure against.
@@ -2689,7 +2825,7 @@ impl NativeSurface {
         // "clearance" that reads as the best possible result. It is the worst:
         // nothing was tested.
         if !best_d.is_finite() {
-            return SegmentClearanceClassified::Unmeasured(UnmeasuredSegment::AllFacesExcluded);
+            return Some(SegmentClearanceClassified::Unmeasured(UnmeasuredSegment::AllFacesExcluded));
         }
         let clr = best_d - thresh;
         // clearance-vs-0 threshold band (spec sec 5.4 item 3)
@@ -2702,16 +2838,16 @@ impl NativeSurface {
         // along: a value that passes every `>= threshold` test standing in for
         // an answer nobody has.
         if near_parallel_faces > 0 {
-            return SegmentClearanceClassified::UpperBound {
+            return Some(SegmentClearanceClassified::UpperBound {
                 clearance_mm: clr,
                 witness: best_pt,
                 near_parallel_faces,
-            };
+            });
         }
-        SegmentClearanceClassified::Measured {
+        Some(SegmentClearanceClassified::Measured {
             clearance_mm: clr,
             witness: best_pt,
-        }
+        })
     }
 
     // Same rationale as `seg_clear_one_excluding` immediately above: this is
@@ -2854,6 +2990,34 @@ impl NativeSurface {
         self.clearance_rows_excluding(p0s, p1s, r0s, r1s, standoff, inset0s, inset1s, &[], true)
     }
 
+    /// **THE CLEARANCE PREDICATE, asked only whether each row reaches a bound**
+    /// (speed lane B, 2026-10-13). [`Self::segment_clearance_classified`],
+    /// row for row, except that a row whose walk proves its clearance below
+    /// `at_least[i]` stops there and comes back `None`. Every row that comes
+    /// back `Some` is the full answer, bit for bit (the walk prunes and tests
+    /// the same faces); a `None` row's full answer is a measured clearance
+    /// below the bound, or an upper bound below it, so a caller that only
+    /// admits a MEASURED clearance at or above the bound refuses it either
+    /// way. For a search that refuses most of what it reads: a near face
+    /// usually ends the walk within its first leaves.
+    #[allow(clippy::too_many_arguments)]
+    pub fn segment_clearance_classified_at_least(
+        &self,
+        p0s: &[V3],
+        p1s: &[V3],
+        r0s: &[f64],
+        r1s: &[f64],
+        standoff: f64,
+        inset0s: &[f64],
+        inset1s: &[f64],
+        at_least: &[f64],
+    ) -> Result<Vec<Option<SegmentClearanceClassified>>, BatchInputError> {
+        BatchInputError::require_len("segment_clearance", "at_least", p0s.len(), at_least.len())?;
+        self.clearance_rows_bounded(
+            p0s, p1s, r0s, r1s, standoff, inset0s, inset1s, &[], false, at_least,
+        )
+    }
+
     /// The batch loop behind the clearance entry points: one row per input, in
     /// order, `frustum` choosing the reading of a tapered row (see
     /// [`Self::seg_clear_one_excluding`]).
@@ -2870,6 +3034,37 @@ impl NativeSurface {
         excluded_faces: &[&[u32]],
         frustum: bool,
     ) -> Result<Vec<SegmentClearanceClassified>, BatchInputError> {
+        Ok(self
+            .clearance_rows_bounded(
+                p0s, p1s, r0s, r1s, standoff, inset0s, inset1s, excluded_faces, frustum, &[],
+            )?
+            .into_iter()
+            // With no bound a walk never stops, so every row is `Some`; the
+            // fallback is the "nothing was tested" answer, never a pass.
+            .map(|row| {
+                row.unwrap_or(SegmentClearanceClassified::Unmeasured(
+                    UnmeasuredSegment::AllFacesExcluded,
+                ))
+            })
+            .collect())
+    }
+
+    /// [`Self::clearance_rows_excluding`] with a per-row bound (`at_least`,
+    /// empty for none; see [`Self::segment_clearance_classified_at_least`]).
+    #[allow(clippy::too_many_arguments)]
+    fn clearance_rows_bounded(
+        &self,
+        p0s: &[V3],
+        p1s: &[V3],
+        r0s: &[f64],
+        r1s: &[f64],
+        standoff: f64,
+        inset0s: &[f64],
+        inset1s: &[f64],
+        excluded_faces: &[&[u32]],
+        frustum: bool,
+        at_least: &[f64],
+    ) -> Result<Vec<Option<SegmentClearanceClassified>>, BatchInputError> {
         let n = p0s.len();
         BatchInputError::require_len("segment_clearance", "p1s", n, p1s.len())?;
         BatchInputError::require_len("segment_clearance", "r0s", n, r0s.len())?;
@@ -2901,8 +3096,16 @@ impl NativeSurface {
                     let excluded = excluded_faces.get(i).copied().unwrap_or(&[]);
                     let row_started = timing.then(std::time::Instant::now);
                     let result = self.seg_clear_one_excluding(
-                        p0s[i], p1s[i], r0s[i], r1s[i], standoff, inset0s[i], inset1s[i], excluded,
+                        p0s[i],
+                        p1s[i],
+                        r0s[i],
+                        r1s[i],
+                        standoff,
+                        inset0s[i],
+                        inset1s[i],
+                        excluded,
                         frustum,
+                        at_least.get(i).copied().unwrap_or(f64::NEG_INFINITY),
                     );
                     if let Some(started) = row_started {
                         let tris = crate::perf::walk_tris();

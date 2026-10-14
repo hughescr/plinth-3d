@@ -177,8 +177,10 @@ pub use initial::ContactConstructionLimits;
 /// `lower` stays crate-private: this exposes the primitive chain, not the
 /// forest data model behind it.
 pub use lower::{
-    drawn_root_radius_mm, drawn_spans, lower_sweep_arms, tip_contact_discs, tip_shaft_seat_bites,
-    DrawnSpan, RootBoss, ShaftSeatBite, SweepArm, SweepArmLanding, SweepLowering,
+    carried_ball_radii_mm, drawn_root_radius_mm, drawn_spans, lower_sweep_arms,
+    lower_sweep_arms_with_hull_reference,
+    model_foot_discs, tip_contact_discs, tip_shaft_seat_bites,
+    DrawnSpan, ModelFoot, RootBoss, ShaftSeatBite, SweepArm, SweepArmLanding, SweepLowering,
     SweepHead, SweepLoweringError, SweepRootFlare, TipContactDisc, NATIVE_FOOT_PAD_OVERLAP_MM,
 };
 pub use hull::{convex_hull, frustum_ring, ConvexHull};
@@ -504,44 +506,52 @@ pub struct SupportPrimitive {
     /// Required authority for type-7/type-9 sphere records; absent for
     /// frusta and raft records.
     pub sphere_geometry: Option<SphereGeometry>,
-    /// **The seat face this primitive may not cross** (fix/tip-trim,
-    /// 2026-09-28). Present on a seated arm's tip ball, on the first segment
-    /// of its shaft, and on every further `Member` span of that shaft whose
-    /// solid reaches the model side of the plane (review-fixes 2026-09-29: the
-    /// drawn profile can cut the shaft into records inside that band), and on
-    /// nothing else. The emitter keeps only the
-    /// part of the primitive on the support side of this plane that is also
-    /// outside the model solid; the record's own `start`/`end`/radii are
+    /// **This primitive is cut to the model mesh** (fix/tip-trim, 2026-09-28;
+    /// cut to the mesh, not a plane, Craig 2026-10-12). Present on a seated
+    /// arm's tip ball, on the first segment of its shaft, and on every further
+    /// `Member` span of that shaft whose solid reaches the model side of the
+    /// seat plane (review-fixes 2026-09-29: the drawn profile can cut the shaft
+    /// into records inside that band), and on nothing else. The emitter keeps
+    /// only the part of the primitive outside the model solid that holds the
+    /// shaft end ([`SeatTrim`]); the record's own `start`/`end`/radii are
     /// untouched.
     pub seat_trim: Option<SeatTrim>,
 }
 
-/// **THE SEAT FACE'S PLANE** (fix/tip-trim, 2026-09-28): a point on the model
-/// face a tip carries and that face's OUTWARD unit normal.
+/// **THE SEAT A TIP IS CUT TO** (fix/tip-trim, 2026-09-28; the rule changed
+/// 2026-10-12): a point on the model face a tip carries, that face's OUTWARD
+/// unit normal, and the direction the shaft leaves the ball in.
 ///
-/// *The rule.* A tip ball and its arm's shaft (the first segment, and every
-/// further span the plane crosses) keep only
-/// `primitive ∩ {p : (p − point)·n ≥ 0} ∖ model solid`. The half-space is the
-/// support side of the face; the model difference removes what a plane cannot
-/// see (a concave corner, a ball straddling two faces). What survives meets the
-/// face in a flat cut disc lying ON the face — the contact area the seat law
-/// sized — and nothing stands inside the model or past its far side.
+/// *The rule (Craig 2026-10-12: "cut using the actual model mesh").* A tip
+/// ball and its arm's shaft (the first segment, and every further span that
+/// reaches the model side of the seat plane) keep `primitive ∖ model solid`,
+/// and of that only the connected piece that holds the SHAFT END: a piece past
+/// the model's far side (the far side of a thin wall the ball straddles, a
+/// sliver beyond a ridge) does not touch the shaft, would print as a loose
+/// bit, and is dropped and WARNED with its volume. No plane cuts anything. The
+/// contact is the model surface inside the ball, wherever that surface is.
 ///
-/// It replaces the horizontal "far face" clip, which cut only the ball's top
-/// at the column's own cured thickness: a horizontal plane says nothing about
-/// a face's edge, it left every ball buried below it, and it never touched the
-/// taper (`plinth-evidence/.../field-2026-09-28/tip-clip.md`). The far face
-/// lies on the model side of the seat plane, so the half-space already removes
-/// everything the far-face plane did.
+/// Until 2026-10-12 the kept part was `primitive ∩ {p : (p − point)·n ≥ 0} ∖
+/// model solid`. A plane through ONE seat point fits only a flat face: on a
+/// curved or tilted underside it removed ball that never touched the model,
+/// and the contact the file got was 32 % of plan on Bat_Cat_Owl and 30 % on
+/// Deinonychus (`plinth-evidence/.../quality-2026-10-10/joint/
+/// TIP-TRUNCATION.md`). The plane survives only as data: the seat law's
+/// normal, the planned contact disc ([`crate::TipContactDisc`]), and which
+/// shaft spans are cut to the model at all.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SeatTrim {
     point_mm: [Finite; 3],
     outward_normal: [Finite; 3],
+    /// The unit direction the shaft leaves the ball in (ball centre → base).
+    /// The emitter keeps the piece nearest the shaft end along it.
+    shaft_unit: [Finite; 3],
 }
 
 impl SeatTrim {
     /// A seat plane through `point_mm` with outward normal `outward`,
-    /// normalised here once.
+    /// normalised here once. The shaft direction defaults to the outward
+    /// normal ([`Self::with_shaft_unit`] sets the arm's own).
     ///
     /// # Errors
     ///
@@ -549,10 +559,22 @@ impl SeatTrim {
     /// non-finite normal.
     pub fn new(point_mm: [f64; 3], outward: [f64; 3]) -> Result<Self, SupportError> {
         let unit = geom_kernel::vec3::normalize(outward).ok_or(SupportError::InvalidPrimitive)?;
+        let unit = finite_array(unit)?;
         Ok(Self {
             point_mm: finite_array(point_mm)?,
-            outward_normal: finite_array(unit)?,
+            outward_normal: unit,
+            shaft_unit: unit,
         })
+    }
+
+    /// The same seat with the shaft leaving the ball along `shaft` (normalised
+    /// here). A zero or non-finite direction keeps the one it had.
+    #[must_use]
+    pub fn with_shaft_unit(self, shaft: [f64; 3]) -> Self {
+        match geom_kernel::vec3::normalize(shaft).and_then(|unit| finite_array(unit).ok()) {
+            Some(shaft_unit) => Self { shaft_unit, ..self },
+            None => self,
+        }
     }
 
     #[must_use]
@@ -563,6 +585,12 @@ impl SeatTrim {
     #[must_use]
     pub fn outward_normal(&self) -> [f64; 3] {
         self.outward_normal.map(Finite::get)
+    }
+
+    /// The unit direction the shaft leaves the ball in.
+    #[must_use]
+    pub fn shaft_unit(&self) -> [f64; 3] {
+        self.shaft_unit.map(Finite::get)
     }
 
     /// Signed distance of `p` from the plane: positive on the SUPPORT side,

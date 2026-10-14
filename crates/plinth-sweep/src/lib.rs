@@ -42,8 +42,10 @@
 #![forbid(unsafe_code)]
 
 pub mod adapter;
+pub(crate) mod births;
 pub mod cavity;
 pub mod congestion;
+pub mod contact_growth;
 pub mod deferred_shake;
 pub(crate) mod demand_replay;
 pub mod down_sweep;
@@ -58,11 +60,16 @@ pub mod head_join;
 #[cfg(test)]
 mod head_carrier_tests;
 pub mod heads;
+pub mod joint_cert;
+pub(crate) mod joint_size;
+#[cfg(test)]
+mod joint_size_tests;
 pub mod landing_check;
 pub mod lean;
 pub mod limits;
 pub mod lip_seat;
 pub(crate) mod member_clearance;
+pub mod model_feet;
 pub mod model_landing;
 pub(crate) mod model_tie;
 pub mod orient_demand;
@@ -243,6 +250,16 @@ pub struct SweepStrut {
     /// Demand cells this arm newly rooted when it went in. The removal pass
     /// asks whether a survivor still covers each of them.
     pub covered_demand: Vec<usize>,
+    /// The births this arm holds by footprint, by identity (layer, birth id,
+    /// [`births::BirthKey`]): every pixel of the birth lies inside the arm's
+    /// planned tip ball, so its one contact touches them all
+    /// ([`up_sweep::seat_births`], [`births`]). Only these, with the seat
+    /// cell, are what the births rule reads as "a root of the layer stands in
+    /// the birth" ([`births::BirthRoots`]); a cell this arm covers laterally
+    /// through `covered_demand` is reach, not contact, and holds nothing of a
+    /// birth it only partly touches, and a second birth that falls in the
+    /// same working cells as a held one is not held with it.
+    pub held_births: Vec<births::BirthKey>,
     /// A twin seat was merged into this arm ([`up_sweep::twin_host`], owner
     /// ruling 2026-10-10). Before the merge the twin's shaft landed on this
     /// arm, and an arm another member rests on is never moved by the passes
@@ -320,6 +337,17 @@ pub struct SeatFace {
     /// whole contact disc lies on the face. Zero when it did not move.
     pub shift_mm: [f64; 3],
     pub footprint: Footprint,
+    /// **The tip ball grown so its real contact reaches plan**
+    /// ([`contact_growth`], Craig 2026-10-12): the radius the lowering draws
+    /// the ball at ([`plinth_support::SweepArm::contact_ball_radius_mm`]).
+    /// `None` draws the owner's ChituBox ball for the tip size.
+    pub contact_ball_radius_mm: Option<f64>,
+    /// **The FOOT of an arm that lands on the model** ([`model_feet`], lane
+    /// 2, 2026-10-12): the landed face, the load-sized contact, and how much
+    /// of it stands on the model, measured once the field is final. `None`
+    /// for every other landing, and for a model landing on a field the foot
+    /// was never measured on (drawn flat, as before).
+    pub foot: Option<model_feet::FootFace>,
 }
 
 /// The footprint rule's verdict on one tip ([`footprint`]).
@@ -728,6 +756,13 @@ pub struct SweepPolicy {
     /// the first arm's head and the twin leans away (`DEINO-DIAGNOSIS.md`).
     /// Sabotage and comparison only; nothing in the pipeline turns it off.
     pub twin_merge: bool,
+    /// Whether a first layer over nothing, found at the printer's pixel, that
+    /// the reach field roots only through the cover's outward rounding gets an
+    /// arm seated inside it (`births.rs`, joint review 2026-10-13). **On in
+    /// production.** With it false such a birth is left to the lateral bridge
+    /// that hid it, as before, and prints with nothing under its first layer.
+    /// Sabotage and comparison only; nothing in the pipeline turns it off.
+    pub birth_seats: bool,
     /// Whether reach and load routing measure a lateral run as its straight
     /// length (`reach::any_angle_relax`, 2026-09-30). **On in production.**
     /// With it false both sweeps fall back to the 8-neighbour chamfer, which
@@ -939,6 +974,12 @@ pub struct SweepPolicy {
     /// lean law's largest step per layer. **On in production.** The drill
     /// turns it off, and the shoulders come back.
     pub load_step_taper: bool,
+    /// Whether every head's cone, joint and post are sized for what the
+    /// contact can pass ([`joint_size`], Craig 2026-10-11) instead of by the
+    /// bending law of the lean ([`heads`]). **On in production.** `false` is
+    /// the sabotage form: today's joint, which the certificate's tests prove
+    /// is too fat.
+    pub joint_certificate: bool,
     /// `DECIMATION_PROBE_GRID_PITCH_MM` (the registered parity-grid pitch of a
     /// distance-probe surface index) and [`MODEL_SURFACE_MAX_BYTES`] (the
     /// sweep's own byte budget for it). The sweep builds one over the model to
@@ -976,6 +1017,15 @@ pub struct SweepPolicy {
     /// with arms landed on arms turns it off, because converting a grazer moves
     /// the arm off its host.
     pub graze_heads: bool,
+    /// Whether a footprint slide must leave nothing the placed ball held over
+    /// air ([`footprint`]'s ground check, fix lane A 2026-10-12). **On in
+    /// production.** Off only for its sabotage drill.
+    pub footprint_ground: bool,
+    /// Whether the clearance re-route also re-lands a model landing whose
+    /// foot, sized for the load it passes on the sized field, does not lie
+    /// wholly on the model (fix lane A 2026-10-12). **On in production.** Off
+    /// only for its sabotage drill.
+    pub refit_model_feet: bool,
     /// Whether every member is sized for its worst SINGLE peel event, routed on
     /// its own ([`per_event`], rule a′, owner-approved 2026-09-29), and the
     /// load insertion triggered by one event's routed load. **On in
@@ -1076,6 +1126,7 @@ impl SweepPolicy {
             stranded_seating: true,
             stranded_branch: true,
             twin_merge: true,
+            birth_seats: true,
             straight_reach: true,
             island_seating: true,
             seat_face_band: true,
@@ -1110,6 +1161,7 @@ impl SweepPolicy {
             lip_seat: true,
             lip_seat_across_passes: true,
             load_step_taper: true,
+            joint_certificate: true,
             surface_index_pitch_mm: placeholders
                 .decimation_probe_grid_pitch_mm()
                 .diagnostic()
@@ -1119,6 +1171,8 @@ impl SweepPolicy {
             drawn_solid_descent: true,
             clearance_reroute: true,
             graze_heads: true,
+            footprint_ground: true,
+            refit_model_feet: true,
             per_event_sizing: true,
             unrooted_routing: true,
             handed_column_ledger: true,
@@ -1305,6 +1359,16 @@ impl SweepPolicy {
         self
     }
 
+    /// Leave a bridged birth to the lateral bridge, as before 2026-10-13.
+    /// **Sabotage and comparison only**: with it set, a first layer over
+    /// nothing that the cover's rounding joined to rooted material gets no
+    /// arm and prints over air (`births.rs`).
+    #[must_use]
+    pub const fn without_birth_seats(mut self) -> Self {
+        self.birth_seats = false;
+        self
+    }
+
     /// Measure reach and routing on the 8-neighbour chamfer again -- the
     /// metric this engine had before 2026-09-30. **Sabotage and comparison
     /// only**: with it set, a root no longer reaches `κ·h` at 22.5° off an axis
@@ -1446,6 +1510,14 @@ impl SweepPolicy {
         self
     }
 
+    /// Size every head by the bending law of the lean, as before 2026-10-11.
+    /// **Sabotage and comparison only** (`tests/it/joint_certificate.rs`).
+    #[must_use]
+    pub const fn without_joint_certificate(mut self) -> Self {
+        self.joint_certificate = false;
+        self
+    }
+
     /// Let a brace be thicker than the posts it joins (rule R2 off). With the
     /// junction raise deleted (2026-10-03) such a brace is drawn thicker than
     /// its post. **Sabotage only**; nothing in the pipeline sets it.
@@ -1549,6 +1621,22 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_graze_heads(mut self) -> Self {
         self.graze_heads = false;
+        self
+    }
+
+    /// Let a footprint slide take its ball from under material it held (the
+    /// rule before 2026-10-12). **Sabotage only.**
+    #[must_use]
+    pub const fn without_footprint_ground(mut self) -> Self {
+        self.footprint_ground = false;
+        self
+    }
+
+    /// Leave a model landing whose sized foot does not fit where the descent
+    /// put it (the rule before 2026-10-12). **Sabotage only.**
+    #[must_use]
+    pub const fn without_model_foot_refit(mut self) -> Self {
+        self.refit_model_feet = false;
         self
     }
 
@@ -1915,6 +2003,25 @@ pub fn run_sweep_with_holes(
     } else {
         reach::SurfaceCreep::disabled(&grid)
     };
+    // Every layer's first layers over nothing, at the printer's pixel, in one
+    // pass over the stack (`births.rs`). None where the rule is off or the
+    // registry cannot be read (emit and warn: the count says so).
+    let births = match (policy.birth_seats, m0_constants().ok()) {
+        (true, Some(constants)) => {
+            let printer = constants.saturn4_ultra();
+            births::Births::build(
+                &grid,
+                &slices,
+                printer.pixel_pitch_x_um().value() / 1000.0,
+                printer.pixel_pitch_y_um().value() / 1000.0,
+            )
+        }
+        _ => births::Births::none(),
+    };
+    let mut birth_tally = births::BirthTally {
+        found: births.count(),
+        ..births::BirthTally::default()
+    };
 
     for (layer, solids) in slices.iter().enumerate().take(layers) {
         rasteriser_entries += 1;
@@ -1939,7 +2046,10 @@ pub fn run_sweep_with_holes(
             &creep,
             &mut reach,
         );
-        let outcome = up_sweep::place_layer_cleared(
+        // THE BIRTHS THE COVER BRIDGED (`births.rs`, joint review
+        // 2026-10-13): read now, before any seat of this layer roots anything.
+        let bridged = births.bridged(layer, &masks.cover, &reach);
+        let mut outcome = up_sweep::place_layer_cleared(
             &grid,
             layer,
             &masks.cover,
@@ -1954,6 +2064,37 @@ pub fn run_sweep_with_holes(
             policy.limits.max_struts,
             descent_clearance.as_ref(),
         );
+        if !bridged.is_empty() {
+            let layer_births = births.at(layer);
+            let wanted: Vec<&births::Birth> =
+                bridged.iter().filter_map(|&index| layer_births.get(index)).collect();
+            let seated = up_sweep::seat_births(
+                &grid,
+                layer,
+                &masks.cover,
+                &keep_out,
+                &law,
+                policy.shaft_landings,
+                policy.kappa,
+                &mut reach,
+                &mut history,
+                &mut greedy,
+                &mut struts,
+                policy.limits.max_struts,
+                descent_clearance.as_ref(),
+                &wanted,
+                &mut outcome,
+            );
+            birth_tally.bridged += bridged.len();
+            birth_tally.held += seated.held;
+            birth_tally.seated += seated.seated;
+            birth_tally.unseated += seated.unseated;
+            // A birth left with no arm inside is unrooted, as the replay reads
+            // it, and reported as residual demand: emit and warn.
+            let roots = births::BirthRoots::of(layer, struts.iter().filter(|strut| strut.k_top == layer));
+            outcome.residual_demand +=
+                births.unroot_unseated(layer, &bridged, &roots, &masks.cover, &mut reach);
+        }
         descent_tally.absorb(&outcome.solid);
         // What the up-sweep left UNROOTED here, by its own predicate, for the
         // down-sweep's routing ([`down_sweep::UnrootedColumns`]). Read only on
@@ -2074,6 +2215,7 @@ pub fn run_sweep_with_holes(
         overhang_transition_deg: policy.overhang_transition_deg,
         max_restarts: policy.strut_removal_passes,
         first_loss_ratio: policy.kappa_first_loss / policy.kappa,
+        births: &births,
     };
     for _ in 0..policy.strut_removal_passes {
         // THE PASS IS UNDONE AS A WHOLE IF IT MAKES THE FIELD WORSE. The
@@ -2610,6 +2752,7 @@ pub fn run_sweep_with_holes(
         passes: policy.strut_removal_passes,
         enabled: policy.lip_seat,
         across_passes: policy.lip_seat_across_passes,
+        refit_feet: policy.refit_model_feet,
     };
     // Descents a sized field put back (arm id, base cell), refused for the
     // rest of the rule, both runs.
@@ -2979,6 +3122,67 @@ pub fn run_sweep_with_holes(
             moves.note("ties after the clearance re-route", &struts);
         }
     }
+    // --- graze heads AGAIN, at the final radius (`MODEL-FEET.md` F3) -------
+    //
+    // The conversion above judged each straight tip on the field the lip
+    // seats left, at the radius it had then. The head joins, the ties, the
+    // re-route and their sizings came after: a tip grown past the radius it
+    // was judged at (case B: planned at 0.15 mm, drawn at 0.671 mm and leaned
+    // 41 degrees, 29 off its face normal) or an arm moved since then was
+    // never asked again, and the head decision made at placement assumed a
+    // vertical post at the planning radius. So the SAME conversion runs once
+    // more on the sized field, measuring each straight shaft as the lowering
+    // will draw it at its final radius and its drawn angle to the face: a
+    // grazer gets a head where a post from the joint lands legally (on its own
+    // host or the plate; the joint and post are then sized by the
+    // certificate below), and otherwise stays straight with its reason and is
+    // warned on the finished field. Nothing it moves is re-landed by another
+    // pass: a converted arm's post is chosen clear of the model by the final
+    // gap and of the members by path, and an arm another member rests on (a
+    // tie included) is never converted.
+    if let Some((profiles, rule)) = head_registry.filter(|_| policy.graze_heads) {
+        let graze_env = graze::GrazeEnv {
+            joins: &head_join_context,
+            profiles,
+            rule,
+            flare_factor: policy.flare_r_factor,
+            slices: &slices,
+        };
+        let mut late = heads::HeadsOutcome::default();
+        let converted = graze::convert(&graze_env, &mut struts, &mut late);
+        if converted > 0 {
+            perf::add(PerfWork::SweepDownCallGraze, 1);
+            outcome = down_sweep::run(
+                &grid,
+                &slices,
+                &mut struts,
+                sizing,
+                insertion,
+                &keep_out,
+                &unrooted,
+            );
+            set_interior(&mut struts, &history);
+            landings.record(
+                "graze heads at the final radius",
+                &landing_check::check_landings(&struts, height),
+            );
+            moves.note("graze heads at the final radius", &struts);
+        }
+        // The late verdict on a member replaces the first one: it is the
+        // reason on the field the file gets.
+        graze_outcome
+            .graze_reasons
+            .retain(|(id, _)| !late.graze_reasons.iter().any(|(late_id, _)| late_id == id));
+        graze_outcome.graze_reasons.extend(late.graze_reasons);
+        graze_outcome.graze_reasons.sort_by_key(|(id, _)| *id);
+        graze_outcome.graze_asked_late = late.graze_asked;
+        graze_outcome.graze_converted_late.clone_from(&late.graze_converted);
+        graze_outcome.graze_converted.extend(late.graze_converted);
+        graze_outcome.built += late.built;
+        for (reason, ids) in late.refusals {
+            graze_outcome.refusals.entry(reason).or_default().extend(ids);
+        }
+    }
     // The finished field's own check, and the load it lost if any landing is
     // broken: the down-sweep hands a child's load to its named parent at the
     // landing layer, and a parent that does not stand there never picks it
@@ -3004,8 +3208,28 @@ pub fn run_sweep_with_holes(
     // exact law of the drawn post (`c` and the head-to-post angle measured from
     // the exact K). K and |DK| stay frozen; a radius may shrink or grow.
     // The downgrade below reads these sizes.
-    if head_registry.is_some() {
-        down_sweep::resize_heads_to_drawn_posts(&grid, &mut struts, sizing);
+    //
+    // **THEN THE JOINT CERTIFICATE** (Craig 2026-10-11: "if the joint's
+    // mis-sized, fix THAT"): the same call sizes every head for what its contact
+    // can pass and the post for the loads that reach it; a head it cannot
+    // certify keeps the old law, counted.
+    if let Some((_, rule)) = head_registry {
+        if policy.joint_certificate {
+            let context = joint_size::JointContext {
+                layers: plan,
+                taper: load_step_taper,
+                slenderness_ratio: if slenderness_law.binds() { slenderness_law.ratio() } else { 0.0 },
+            };
+            down_sweep::resize_heads_certified(
+                &grid,
+                &mut struts,
+                sizing,
+                &context,
+                rule.allowance_mm - rule.layer_height_mm,
+            );
+        } else {
+            down_sweep::resize_heads_to_drawn_posts(&grid, &mut struts, sizing);
+        }
     }
     let head_downgrades = head_registry.map_or_else(heads::HeadDowngrades::default, |(profiles, rule)| {
         heads::downgrade_grown_heads(&mut struts, rule.allowance_mm, |radius| {
@@ -3224,6 +3448,12 @@ pub fn run_sweep_with_holes(
     report.counters.descent_solid_uncleared = descent_tally.uncleared;
     report.counters.descent_solid_lean_candidates_refused = descent_tally.lean_candidates_refused;
     report.counters.descent_solid_seats_moved = descent_tally.seats_moved;
+    report.counters.descent_head_offset_charged = descent_tally.offset_charged;
+    // The descent's F2 tallies (lane 2, 2026-10-12): the foot census on the
+    // finished field fills the rest of this outcome.
+    report.model_feet.descent_candidates_refused = descent_tally.foot_candidates_refused;
+    report.model_feet.descent_straight_replaced = descent_tally.foot_straight_replaced;
+    report.model_feet.descent_straight_kept = descent_tally.foot_straight_kept;
     report.counters.sightlines_clear = reach.sightlines_clear;
     report.counters.sightlines_blocked = reach.sightlines_blocked;
     report.counters.route_sightlines_clear = outcome.route_sightlines_clear;
@@ -3235,6 +3465,11 @@ pub fn run_sweep_with_holes(
     report.counters.stranded_seats = greedy.stranded_seats;
     report.counters.twin_seats_merged = greedy.twin_merges;
     report.counters.twin_seats_headed_host = greedy.twin_headed_hosts;
+    report.counters.births_found = birth_tally.found as u64;
+    report.counters.births_bridged = birth_tally.bridged as u64;
+    report.counters.births_held = birth_tally.held as u64;
+    report.counters.births_seated = birth_tally.seated as u64;
+    report.counters.births_unseated = birth_tally.unseated as u64;
     report.counters.island_hex_bound = greedy.island_hex_bound;
     greedy.heads.publish(&mut report.heads);
     // The heads the graze conversion added (Craig 2026-10-08) join the
@@ -3245,6 +3480,8 @@ pub fn run_sweep_with_holes(
     }
     report.heads.graze_converted = graze_outcome.graze_converted;
     report.heads.graze_asked = graze_outcome.graze_asked;
+    report.heads.graze_asked_late = graze_outcome.graze_asked_late;
+    report.heads.graze_converted_late = graze_outcome.graze_converted_late;
     report.heads.graze_reasons = graze_outcome.graze_reasons;
     report.heads.downgraded_after_sizing = heads_downgraded;
     report.heads.kept_short_of_clearance = head_downgrades.kept_with_warning;
@@ -3299,10 +3536,36 @@ pub fn run_sweep_with_holes(
         load_step_taper,
         deferred_stage_shake,
     };
+    // THE NORMAL AT A SLID BALL (`footprint_normal`, Craig ruling 2026-10-05):
+    // a proposed slide is validated with the footprint normal measured on the
+    // MOVED arm, the seat triangle re-derived at the slid seat.
+    let measure_env = footprint_normal::MeasureEnv {
+        mesh,
+        surface: head_join_context.surface(),
+        layer_plan: plan,
+    };
+    // THE REAL CONTACT, FIRST PASS (Craig 2026-10-12): the file's tip is cut
+    // to the model mesh, so its contact is the model surface inside the drawn
+    // ball. Every seated tip short of its planned disc on a curved underside
+    // has its ball grown now, so the footprint rule below grades the ball the
+    // file will get; the grown ball is measured again on the finished field.
+    let contact_limit_mm = sweep_plan
+        .report
+        .seat_footprint_normal
+        .enabled
+        .then(|| {
+            contact_ball_limit_mm(policy.owner_growth_ceiling_mm.min(policy.tip_radius_max_mm))
+        })
+        .flatten();
+    if let Some(limit_mm) = contact_limit_mm {
+        sweep_plan.report.seat_contact =
+            grow_contact_balls(&measure_env, &mut sweep_plan, &footprint_sites, limit_mm);
+    }
     // THE FOOTPRINT RULE (fix/tip-trim, 2026-09-28): every tip's contact disc,
-    // as the lowering will deliver it, graded against the eroded carrier
-    // rasters; a seat whose disc hangs off its face moves along the face, and
-    // a true knife edge is warned about. It moves seats, so the digest is
+    // as the lowering will deliver it, graded against the REAL model surface
+    // (the gap from each sample to the surface, inside the drawn ball;
+    // 2026-10-12); a seat whose disc hangs off its face moves along the face,
+    // and a true knife edge is warned about. It moves seats, so the digest is
     // re-taken over the finished field.
     let arms = adapter::arms_of(&sweep_plan);
     //
@@ -3328,25 +3591,19 @@ pub fn run_sweep_with_holes(
         chord_slack,
         keep_out: &keep_out,
     };
-    // THE NORMAL AT A SLID BALL (`footprint_normal`, Craig ruling 2026-10-05):
-    // a proposed slide is validated with the footprint normal measured on the
-    // MOVED arm, the seat triangle re-derived at the slid seat.
-    let measure_env = footprint_normal::MeasureEnv {
-        mesh,
-        surface: head_join_context.surface(),
-        layer_plan: plan,
-    };
     let mut slid_remeasured = 0_usize;
     let mut slid_max_change_deg = 0.0_f64;
     let footprint = footprint::apply(
         &sweep_plan.grid,
         &slices,
+        measure_env.surface,
         &mut sweep_plan.struts,
         &arms,
         plan,
         plate_z,
         height,
         &limits,
+        policy.footprint_ground,
         |members: &[usize], moved: &[plinth_support::SweepArm], shifts: &[[f64; 3]]| {
             let sites: Vec<Option<footprint_normal::TipSite>> = members
                 .iter()
@@ -3387,6 +3644,11 @@ pub fn run_sweep_with_holes(
     // move touched comes out unchanged, and the clearance warnings are read
     // again on the sizes that stand.
     if let Some((profiles, rule)) = head_registry {
+        let context = joint_size::JointContext {
+            layers: plan,
+            taper: load_step_taper,
+            slenderness_ratio: if slenderness_law.binds() { slenderness_law.ratio() } else { 0.0 },
+        };
         size_heads_for_final_posts(
             &sweep_plan.grid,
             &mut sweep_plan.struts,
@@ -3394,6 +3656,9 @@ pub fn run_sweep_with_holes(
             rule.allowance_mm,
             |radius| profiles.ball_factor(radius),
             &mut sweep_plan.report.heads,
+            policy
+                .joint_certificate
+                .then_some((&context, rule.allowance_mm - rule.layer_height_mm)),
         );
         // THE CENSUS ON THE ROOTS THE FILE DRAWS (v20 milestone, 2026-10-08):
         // the census above was taken before this second sizing, and a headed
@@ -3429,6 +3694,7 @@ pub fn run_sweep_with_holes(
             off_face = footprint::regrade(
                 &sweep_plan.grid,
                 &slices,
+                measure_env.surface,
                 &sweep_plan.struts,
                 &final_arms,
                 &remeasured.changed,
@@ -3451,7 +3717,58 @@ pub fn run_sweep_with_holes(
         outcome.final_regraded = remeasured.changed.len();
         outcome.final_off_face = off_face;
     }
+    // THE REAL CONTACT ON THE FINISHED FIELD (Craig 2026-10-12): the slides
+    // and their followers moved balls, and the normals were measured once
+    // more, so every seated tip's real contact is measured again on the arms
+    // exactly as the lowering gets them (the seat triangle re-derived where a
+    // tip slid) and every ball short of plan is grown from the ungrown one.
+    if let Some(limit_mm) = contact_limit_mm {
+        let shifts: Vec<Option<[f64; 3]>> = sweep_plan
+            .struts
+            .iter()
+            .map(|strut| {
+                (strut.seat_face.footprint == Footprint::MovedOntoFace)
+                    .then_some(strut.seat_face.shift_mm)
+            })
+            .collect();
+        let sites = footprint_normal::reseat_sites(mesh, &footprint_sites, &shifts);
+        sweep_plan.report.seat_contact =
+            grow_contact_balls(&measure_env, &mut sweep_plan, &sites, limit_mm);
+    }
     finish_heads(&mut sweep_plan);
+    // THE MODEL FEET ON THE FINISHED FIELD (lane 2, 2026-10-12,
+    // `MODEL-FEET.md` F1/F2): every arm that lands on the model gets its
+    // landed face, its load-sized contact (the down-sweep's load at the
+    // landing, before any minimum) and the share of that contact on cured
+    // model, measured here once the landings and their followers have
+    // settled; the lowering draws the foot from it, and its real contact
+    // prices the scar. A foot not wholly on the model is warned, and named
+    // beside the landing check.
+    {
+        let descent = std::mem::take(&mut sweep_plan.report.model_feet);
+        let mut feet = model_feet::measure(&measure_env, &mut sweep_plan, &history, sizing);
+        feet.descent_candidates_refused = descent.descent_candidates_refused;
+        feet.descent_straight_replaced = descent.descent_straight_replaced;
+        feet.descent_straight_kept = descent.descent_straight_kept;
+        feet.relanding_candidates_refused = lip_seat_outcome.candidates_refused_foot
+            + clearance_reroute_outcome.candidates_refused_foot;
+        let finished = &mut sweep_plan.report.landing_check.finished;
+        finished.model_feet = feet.feet;
+        finished.model_feet_partial = feet
+            .partial
+            .iter()
+            .map(|partial| {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "a percent in 0..=100, rounded to tenths, fits u32"
+                )]
+                let tenths = (partial.on_model_pct * 10.0).round().max(0.0) as u32;
+                (partial.id, tenths)
+            })
+            .collect();
+        sweep_plan.report.model_feet = feet;
+    }
     // **EVERY STRAIGHT TIP THAT STILL GRAZES THE MODEL** (Craig 2026-10-08),
     // measured on the arms exactly as they go to the lowering, after the
     // footprint slides: each is named in the log with its clearance, its angle
@@ -3558,6 +3875,9 @@ pub fn run_sweep_with_holes(
             law.face_zone_factor(),
             &history.hidden,
         );
+        // No tip or head inside another member's drawn solid (F4): warned.
+        sweep_plan.report.member_model_clearance.tips_inside =
+            member_clearance::tips_inside_members(&sweep_plan.struts, &emitted, plan, plate_z);
         sweep_plan.report.hidden_cavity = history.hidden.census();
     }
     // THE LINK UNDER THE LAW (Craig 2026-10-08): the link is the contact's own
@@ -3570,6 +3890,7 @@ pub fn run_sweep_with_holes(
             |radius| profiles.ball_factor(radius),
         );
     }
+    sweep_plan.report.heads.joint_certificate = heads::JointCertificate::of(&sweep_plan.struts);
     sweep_plan.report.sweep_digest = digest(&sweep_plan.struts);
     Ok(sweep_plan)
 }
@@ -3590,9 +3911,16 @@ pub(crate) fn size_heads_for_final_posts(
     neck_min_mm: f64,
     ball_factor_at: impl Fn(f64) -> f64,
     heads: &mut heads::HeadsOutcome,
+    certificate: Option<(&joint_size::JointContext<'_>, f64)>,
 ) {
     let before: Vec<Vec<f64>> = struts.iter().map(|strut| strut.radius_mm.clone()).collect();
-    if down_sweep::resize_heads_to_drawn_posts(grid, struts, sizing) == 0 {
+    let resized = match certificate {
+        Some((context, pitch_mm)) => {
+            down_sweep::resize_heads_certified(grid, struts, sizing, context, pitch_mm)
+        }
+        None => down_sweep::resize_heads_to_drawn_posts(grid, struts, sizing),
+    };
+    if resized == 0 {
         return;
     }
     heads.resized_after_moves = struts
@@ -3815,6 +4143,49 @@ fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> Unmer
     }
 }
 
+/// **The largest ball growth for attachment may draw** (the growth limit of
+/// [`contact_growth`]): the owner's ChituBox ball of a tip at the registered
+/// growth-for-attachment ceiling, `TIP_RADIUS_MAX_GROWN_SCAR_MM` (0.400 mm
+/// radius, the owner's field data: the largest scar he accepts for a tip
+/// enlarged beyond what the load law asked, purely to attach), never above
+/// `TIP_RADIUS_MAX_LEGACY_MM`. A ball the load law already drew larger is not
+/// grown at all. `None` where the registry cannot be read: no ball is grown,
+/// and the contact is not measured.
+fn contact_ball_limit_mm(tip_radius_max_mm: f64) -> Option<f64> {
+    let constants = m0_constants().ok()?;
+    let factor = constants
+        .evidence()
+        .chitubox_tip_contact_profiles()
+        .value()
+        .ball_factor(tip_radius_max_mm);
+    let limit = factor * tip_radius_max_mm;
+    (limit.is_finite() && limit > 0.0).then_some(limit)
+}
+
+/// **Measure every seated tip's real contact and grow the short balls**
+/// ([`contact_growth::grow`]) from the UNGROWN ball, and write the radius each
+/// ball is drawn at onto its strut. `sites` are the footprint sites in strut
+/// order (re-derived where a tip slid). "Reaches plan" is to within one pixel
+/// of area: the grid pitch squared.
+fn grow_contact_balls(
+    env: &footprint_normal::MeasureEnv<'_>,
+    plan: &mut SweepPlan,
+    sites: &[Option<footprint_normal::TipSite>],
+    limit_ball_radius_mm: f64,
+) -> contact_growth::ContactOutcome {
+    for strut in &mut plan.struts {
+        strut.seat_face.contact_ball_radius_mm = None;
+    }
+    let arms = adapter::arms_of(plan);
+    let pixel_area_mm2 = plan.grid.pitch_mm() * plan.grid.pitch_mm();
+    let (outcome, grown) =
+        contact_growth::grow(env, &arms, sites, limit_ball_radius_mm, pixel_area_mm2);
+    for (strut, radius) in plan.struts.iter_mut().zip(grown) {
+        strut.seat_face.contact_ball_radius_mm = radius;
+    }
+    outcome
+}
+
 /// **A headed arm carries its own seat plane** (the finish of the head
 /// contract): after the final seat faces are assigned and the emitted normals
 /// re-measured, each headed arm's `seat_normal` is the head's `u` and its seat
@@ -3893,6 +4264,10 @@ struct LipSeatRun<'a> {
     passes: u32,
     enabled: bool,
     across_passes: bool,
+    /// Whether the clearance re-route also sends, and re-lands to fit, a
+    /// model landing whose load-sized foot does not fit (fix lane A,
+    /// 2026-10-12; [`SweepPolicy::refit_model_feet`]).
+    refit_feet: bool,
 }
 
 /// What a [`LipSeatRun`] is sent by.
@@ -3984,17 +4359,26 @@ impl LipSeatRun<'_> {
                     }
                     RunMode::Clearance { exclude } => {
                         let named;
-                        (violators, named) =
-                            lip_seat::clearance_violators(joins, struts, &arms, exclude);
+                        let misfits;
+                        (violators, named, misfits) = lip_seat::clearance_violators(
+                            joins,
+                            struts,
+                            &arms,
+                            exclude,
+                            self.refit_feet.then_some(self.sizing),
+                        );
                         if pass == 0 && reruns == 0 {
                             outcome.clearance_violators_first = named;
+                            outcome.foot_misfits_first = misfits;
                         }
                         outcome.clearance_violators_last = named;
+                        outcome.foot_misfits_last = misfits;
                         if named == 0 {
                             break;
                         }
                         lip_seat::Trigger::Clearance {
                             violators: &violators,
+                            foot_sizing: self.refit_feet.then_some(self.sizing),
                         }
                     }
                 };
@@ -4775,6 +5159,8 @@ fn build_report(
         stranded_branch: crate::stranded_branch::StrandedBranchOutcome::default(),
         seat_footprint: crate::footprint::FootprintOutcome::default(),
         seat_footprint_normal: crate::footprint_normal::FootprintNormalOutcome::default(),
+        seat_contact: crate::contact_growth::ContactOutcome::default(),
+        model_feet: crate::model_feet::ModelFeetOutcome::default(),
         head_join: crate::head_join::HeadJoinOutcome::default(),
         per_event: outcome.per_event.clone(),
         rigid_share: crate::rigid_share::RigidShareReport::default(),
@@ -5049,7 +5435,7 @@ mod removal_tests {
             interior: false,
             radius_mm: Vec::new(),
             carried_mm2: Vec::new(),
-            covered_demand: Vec::new(), twin_host: false,
+            covered_demand: Vec::new(), held_births: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             seat_face: crate::SeatFace::default(),
@@ -5219,7 +5605,7 @@ mod removal_tests {
             // Below minimum_load_mm2: this is exactly the state that made a
             // load-inserted arm a removal candidate before the fix.
             carried_mm2: vec![0.5],
-            covered_demand: Vec::new(), twin_host: false,
+            covered_demand: Vec::new(), held_births: Vec::new(), twin_host: false,
             inserted_by_load: true,
             path: Vec::new(),
             seat_face: crate::SeatFace::default(),
@@ -5264,7 +5650,7 @@ mod removal_tests {
             interior: false,
             radius_mm: vec![0.1],
             carried_mm2: vec![carried],
-            covered_demand: Vec::new(), twin_host: false,
+            covered_demand: Vec::new(), held_births: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             seat_face: crate::SeatFace::default(),

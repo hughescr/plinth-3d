@@ -364,6 +364,7 @@ fn assert_braces_and_masts_clear_the_model(name: &str, fixture: &Fixture) {
 /// Rule 1 on the stilt plate (red on `c33dc8e`: struts 180 and 181 enter the
 /// leg by 0.244 mm).
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn no_brace_or_mast_comes_within_the_final_gap_of_the_model_on_the_stilt_plate() {
     assert_braces_and_masts_clear_the_model("tall stilt plate", stilt());
 }
@@ -380,6 +381,7 @@ fn no_brace_or_mast_comes_within_the_final_gap_of_the_model_on_the_brace_pair() 
 /// Rule 2: no brace or mast shares volume with any member it is not joined to
 /// (red on `c33dc8e`: 8 brace pairs on the stilt plate, up to 0.454 mm).
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn no_brace_or_mast_interpenetrates_a_member_it_is_not_joined_to_on_the_stilt_plate() {
     let fixture = stilt();
     let plan = &fixture.plan;
@@ -479,6 +481,7 @@ fn planes_by_post_layer(plan: &SweepPlan) -> BTreeMap<(u32, usize), Vec<f64>> {
 /// at k 350 with planes 0, 60 and 120). A plane one post could spare but its
 /// partner has as its only plane there is the partner's tie, not a surplus.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn no_post_takes_a_plane_its_other_planes_at_that_layer_already_hold_on_the_stilt_plate() {
     let plan = &stilt().plan;
     let by = planes_by_post_layer(plan);
@@ -673,6 +676,7 @@ fn no_mast_is_thicker_than_the_member_it_braces_on_the_lonely_peak_without_thick
 /// stands where a disc refusal put it; and the thicken rung is reached
 /// (anti-vacuity).
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn the_stilt_plate_places_no_mast_for_a_refused_root_disc() {
     let plan = &stilt().plan;
     let lane = &plan.report.slenderness_lane;
@@ -715,6 +719,7 @@ fn the_stilt_plate_places_no_mast_for_a_refused_root_disc() {
 /// measured 2026-10-01). At `S` = 40 (Craig ruling 2026-10-02) one post (11)
 /// is over at print time, and it is warned (measured 2026-10-02).
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn every_run_holds_with_crosses_credited_from_their_band_top_on_the_stilt_plate() {
     let plan = &stilt().plan;
     let mut struts = plan.struts.clone();

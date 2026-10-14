@@ -70,7 +70,7 @@ fn arm(cell: usize, k_top: usize) -> SweepStrut {
         interior: false,
         radius_mm: vec![0.1; k_top],
         carried_mm2: vec![0.0; k_top],
-        covered_demand: Vec::new(), twin_host: false,
+        covered_demand: Vec::new(), held_births: Vec::new(), twin_host: false,
         inserted_by_load: false,
         path: Vec::new(),
         straight_fallback: None,

@@ -22,8 +22,12 @@
 //! ([`crate::Landing::Model`]):
 //!
 //! ```text
-//! scar_mm2 = pi * r_seat^2 * (fragility(landed face) + D(landed face))
+//! scar_mm2 = A_contact * (fragility(landed face) + D(landed face))
 //! ```
+//!
+//! `A_contact` is the FOOT's REAL contact (lane 2, 2026-10-12): the model
+//! surface inside the foot ball the file draws ([`crate::model_feet`]). See
+//! "The contact is the foot's" below.
 //!
 //! summed over the arms, in mm². That is the identical product the down-facing
 //! fold uses — an area in mm², times the delicacy of the surface it is charged
@@ -36,17 +40,24 @@
 //! fields come from the `OrientFaceTable` the objective was scored against, and
 //! the geometry comes from the same oriented mesh the sweep planned on.
 //!
-//! ## `r_seat` is the radius where the arm LANDS, not `tip_radius_mm()`
+//! ## The contact is the FOOT's, at the end where the arm LANDS
 //!
 //! [`crate::SweepStrut::tip_radius_mm`] is the radius at `k_top` — the narrow
 //! end, where the arm touches the surface it CARRIES. That end's scar is
 //! already priced: the surface it touches is a down-facing surface and its area
 //! is in the down-facing fold. The end this module prices is the other one, at
-//! `k_bottom`, where the arm seats on the model, and the contact it leaves
-//! there is its own section at that layer — `radius_mm[0]`, the widest, because
-//! the area law grows an arm downward as load accumulates. Charging the tip
-//! radius here would under-state the real contact by the whole growth of the
-//! arm.
+//! `k_bottom`, where the arm seats on the model.
+//!
+//! Until 2026-10-12 the arm ended there in its own flat section, and the
+//! contact was priced as `π · radius_mm[0]²`, the WIDEST section (the area law
+//! plus any slenderness minimum), as a full disc even where 44 % of it hung in
+//! the air (`MODEL-FEET.md`, Deinonychus rec 810). Since lane 2 the arm ends in
+//! a FOOT: a ball seated and trimmed like a top tip, its contact sized by the
+//! area law for the load the foot passes. The contact charged is the foot's
+//! REAL contact, the model surface inside the drawn ball
+//! ([`crate::model_feet::FootFace::scar_mm2`]). A plan whose feet were never
+//! measured (no finished-field measurement) falls back to the widest section,
+//! and is counted in [`ModelLandingScar::feet_unmeasured`].
 //!
 //! ## Interior landings are counted, not discounted
 //!
@@ -90,8 +101,16 @@ pub struct ModelLanding {
     /// The seat point: the centre of the cell the arm's axis occupies where it
     /// lands, at that landing layer's own slicing plane.
     pub point_mm: [f64; 3],
-    /// The arm's own radius at its seat — the contact it leaves on the model.
+    /// The arm's own section at its landing layer (`radius_mm[0]`, the
+    /// widest). Published for comparison; it is NOT what is charged when the
+    /// foot was measured.
     pub radius_mm: f64,
+    /// **The contact charged**, mm²: the foot's real contact
+    /// ([`crate::model_feet::FootFace::scar_mm2`]), or `π · radius_mm²` where
+    /// the foot was never measured.
+    pub contact_mm2: f64,
+    /// Whether [`Self::contact_mm2`] is the measured foot's.
+    pub foot_measured: bool,
     /// Model material stands above this seat in the same column.
     pub interior: bool,
 }
@@ -108,7 +127,9 @@ pub struct LandingCharge {
     /// this is a raster half-cell at most; a large value means the seat was
     /// charged to a face it does not touch and is a reason to look.
     pub distance_mm: f64,
-    /// `π r_seat² × (fragility + D)` of that face.
+    /// The contact charged, mm² ([`ModelLanding::contact_mm2`]).
+    pub contact_mm2: f64,
+    /// `A_contact × (fragility + D)` of that face.
     pub scar_mm2: f64,
     pub interior: bool,
 }
@@ -129,6 +150,10 @@ pub struct ModelLandingScar {
     pub mapped: usize,
     /// Of those, how many had model material above them (see the module doc).
     pub interior: usize,
+    /// Of [`Self::landings`], how many were charged the widest section
+    /// because their foot was never measured. Zero on every finished
+    /// production field.
+    pub feet_unmeasured: usize,
     /// Every seat that was charged, in strut order, with the face it was
     /// charged against.
     ///
@@ -164,6 +189,10 @@ pub fn model_landings(plan: &SweepPlan) -> Vec<ModelLanding> {
             reason = "a layer index, bounded by the sweep's own layer count at ~1e4, is exact in f64"
         )]
         let z_mm = plan.plate_z_mm + (layer as f64 + 0.5) * plan.layer_height_mm;
+        // The section at the landing layer: the first entry is `k_bottom`. An
+        // arm the down-sweep never sized has an empty ledger and no contact.
+        let radius_mm = strut.radius_mm.first().copied().unwrap_or(0.0);
+        let foot = strut.seat_face.foot;
         landings.push(ModelLanding {
             strut: index,
             point_mm: [
@@ -171,10 +200,11 @@ pub fn model_landings(plan: &SweepPlan) -> Vec<ModelLanding> {
                 plan.grid.center_y_mm(plan.grid.row_of(cell)),
                 z_mm,
             ],
-            // The seat radius: the first entry is the layer `k_bottom`, which
-            // is where the arm lands. An arm the down-sweep never sized has an
-            // empty ledger and no contact to charge.
-            radius_mm: strut.radius_mm.first().copied().unwrap_or(0.0),
+            radius_mm,
+            contact_mm2: foot.map_or(core::f64::consts::PI * radius_mm * radius_mm, |foot| {
+                foot.scar_mm2()
+            }),
+            foot_measured: foot.is_some(),
             interior: strut.interior,
         });
     }
@@ -215,6 +245,7 @@ pub fn model_landing_scar(
             landings: 0,
             mapped: 0,
             interior: 0,
+            feet_unmeasured: 0,
             charges: Vec::new(),
         });
     }
@@ -264,7 +295,7 @@ pub fn model_landing_scar(
                 }
             }
             best_face.map(|face| {
-                let contact = core::f64::consts::PI * landing.radius_mm * landing.radius_mm;
+                let contact = landing.contact_mm2;
                 // The same association the down-facing fold uses: the
                 // fragility product first, the display increment (NOT scaled
                 // by fragility) on top of it, so a zero display field
@@ -275,6 +306,7 @@ pub fn model_landing_scar(
                     strut: landing.strut,
                     face,
                     distance_mm: best_distance.sqrt(),
+                    contact_mm2: contact,
                     scar_mm2: fragile + contact * display.get(face).copied().unwrap_or(0.0),
                     interior: landing.interior,
                 }
@@ -294,6 +326,7 @@ pub fn model_landing_scar(
         landings: landings.len(),
         mapped: charges.len(),
         interior,
+        feet_unmeasured: landings.iter().filter(|landing| !landing.foot_measured).count(),
         charges,
     })
 }

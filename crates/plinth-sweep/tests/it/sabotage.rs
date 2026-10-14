@@ -99,6 +99,7 @@ fn the_spread_search_and_the_strut_share_read_both_fire_on_the_disc() {
 /// load and are under-sized. The injection must fire exactly once per arm that
 /// lands on model.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn the_landing_injection_fires_exactly_once_per_model_landing() {
     let plan = sweep(&make_cavity_box(40.0, 3.0).unwrap(), 0.10);
     let hits = plan.report.counters;

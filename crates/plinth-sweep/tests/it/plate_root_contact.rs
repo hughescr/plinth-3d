@@ -129,6 +129,7 @@ fn arm_at(
         landing,
         seats_into_model: seats,
         head: None,
+        contact_ball_radius_mm: None,
     }
 }
 

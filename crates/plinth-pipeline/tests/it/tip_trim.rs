@@ -17,11 +17,15 @@
 //!
 //! # The rules
 //!
-//! * **Rule 2 (trim).** A tip ball and the first shaft segment of its arm keep
-//!   only `primitive ∩ {support side of the seat face's plane} ∖ model solid`.
-//! * **Rule 1 (footprint).** The whole contact disc that trim leaves lies ON
-//!   the seat face: a seat whose disc would hang off an edge is moved onto the
-//!   face; only a true knife edge keeps an overhang, with a WARNING.
+//! * **Rule 2 (trim; cut to the model mesh, Craig 2026-10-12).** A tip ball
+//!   and the first shaft segment of its arm keep `primitive ∖ model solid`,
+//!   and of that only the piece that holds the shaft end. No plane cuts them:
+//!   a rim ball may wrap round the disc's edge, outside the silhouette and
+//!   above the underside, touching the side wall (until 2026-10-12 a seat
+//!   plane cut that away, and with it real contact on every curved seat).
+//! * **Rule 1 (footprint).** The whole contact disc lies ON the seat face: a
+//!   seat whose disc would hang off an edge is moved onto the face; only a
+//!   true knife edge keeps an overhang, with a WARNING.
 //!
 //! # What is graded, and how the file is read
 //!
@@ -36,10 +40,9 @@
 //! 1. no tip/taper vertex lies inside the model by more than the tolerance
 //!    (parity of a ray cast, AND farther than the tolerance from every model
 //!    triangle, so a vertex ON the surface is never counted);
-//! 2. no tip/taper vertex lies on the MODEL side of its tip's seat plane;
-//! 3. no tip/taper vertex lies outside the model's silhouette (its plan-view
-//!    convex hull; the disc is convex in plan) while above the underside plane;
-//! 4. (rule 1) every tip vertex lying ON its seat plane lies on a down-facing
+//! 2. every tip and taper record is ONE connected piece (no far-side piece is
+//!    kept as a loose bit);
+//! 3. (rule 1) every tip vertex lying ON its seat plane lies on a down-facing
 //!    model face of that plane — the contact disc does not hang off the face.
 //!
 //! The fixture is the PROCEDURAL `Round 25` (the same `make_recessed_disc`
@@ -108,9 +111,10 @@ struct Tip {
     vertices: Vec<Point>,
 }
 
+/// A taper whose top is a tip's ball centre: the first segment of a seated
+/// arm.
 struct Taper {
     record: usize,
-    tip: usize,
     vertices: Vec<Point>,
 }
 
@@ -247,9 +251,8 @@ fn emitted() -> &'static Emitted {
                 .iter()
                 .position(|tip| distance(tip.centre, top) <= 1e-4);
             match owner {
-                Some(tip) => tapers.push(Taper {
+                Some(_) => tapers.push(Taper {
                     record: index,
-                    tip,
                     vertices: points(&record.mesh.xyz),
                 }),
                 None => unmatched_tapers += 1,
@@ -491,19 +494,43 @@ impl Tally {
     }
 }
 
-/// One record's vertices graded against the three rule-2 checks.
-fn grade_rule_2(
-    record: usize,
-    vertices: &[Point],
-    plane_z: f64,
-    underside_z: f64,
-    emitted: &Emitted,
-    hull: &[[f64; 2]],
-    tallies: &mut [Tally; 3],
-) {
+/// The connected pieces of a record's triangle soup (`vertices` in triangle
+/// order): triangles that share a corner, by the same f32 point.
+fn pieces(vertices: &[Point]) -> usize {
+    let key = |p: Point| p.map(f64::to_bits);
+    let mut id: std::collections::HashMap<[u64; 3], usize> = std::collections::HashMap::new();
+    let corners: Vec<usize> = vertices
+        .iter()
+        .map(|&p| {
+            let next = id.len();
+            *id.entry(key(p)).or_insert(next)
+        })
+        .collect();
+    let mut parent: Vec<usize> = (0..id.len()).collect();
+    fn find(parent: &mut [usize], mut node: usize) -> usize {
+        while parent[node] != node {
+            parent[node] = parent[parent[node]];
+            node = parent[node];
+        }
+        node
+    }
+    for triangle in corners.chunks_exact(3) {
+        for (p, q) in [(triangle[0], triangle[1]), (triangle[1], triangle[2])] {
+            let (x, y) = (find(&mut parent, p), find(&mut parent, q));
+            if x != y {
+                parent[x.max(y)] = x.min(y);
+            }
+        }
+    }
+    (0..parent.len())
+        .filter(|&node| find(&mut parent, node) == node)
+        .count()
+}
+
+/// One record graded against the two rule-2 checks: no vertex inside the
+/// model, and the record is ONE piece (a far-side piece is never kept).
+fn grade_rule_2(record: usize, vertices: &[Point], emitted: &Emitted, tallies: &mut [Tally; 2]) {
     let mut inside = 0.0_f64;
-    let mut model_side = 0.0_f64;
-    let mut outside = 0.0_f64;
     for &p in vertices {
         if inside_by_parity(p, &emitted.model) {
             let depth = distance_to_model(p, &emitted.model);
@@ -511,50 +538,27 @@ fn grade_rule_2(
                 inside = inside.max(depth);
             }
         }
-        let above = p[2] - plane_z;
-        if above > TOLERANCE_MM {
-            model_side = model_side.max(above);
-        }
-        let out = outside_silhouette_by(p, hull);
-        if out > TOLERANCE_MM && p[2] > underside_z + TOLERANCE_MM {
-            outside = outside.max(out);
-        }
     }
     if inside > 0.0 {
         tallies[0].add(record, inside, "vertex inside the model");
     }
-    if model_side > 0.0 {
-        tallies[1].add(
-            record,
-            model_side,
-            "vertex on the model side of the seat plane",
-        );
-    }
-    if outside > 0.0 {
-        tallies[2].add(
-            record,
-            outside,
-            "vertex outside the silhouette above the underside",
-        );
+    let count = pieces(vertices);
+    if count > 1 {
+        #[expect(clippy::cast_precision_loss, reason = "a small piece count")]
+        tallies[1].add(record, count as f64, "record in several pieces (count, not mm)");
     }
 }
 
 #[test]
-fn round_25_at_the_flip_keeps_every_tip_and_first_segment_on_the_support_side_of_its_seat() {
+fn round_25_at_the_flip_cuts_every_tip_and_first_segment_to_the_model_in_one_piece() {
     let emitted = emitted();
     let planes = down_facing_planes(&emitted.model);
     let hull = silhouette(&emitted.model);
-    let underside_z = emitted
-        .model
-        .iter()
-        .flat_map(|t| t.iter().map(|p| p[2]))
-        .fold(f64::INFINITY, f64::min);
     assert!(
         planes.len() >= 2,
         "the flipped disc has two down-facing faces (ring underside, recess ceiling); found {}",
         planes.len()
     );
-    let seats = seat_planes(emitted, &planes);
 
     // A grader that saw nothing proves nothing. Rim tips are the population
     // the defect lives in: a ball centre within one ball diameter of the edge.
@@ -564,44 +568,22 @@ fn round_25_at_the_flip_keeps_every_tip_and_first_segment_on_the_support_side_of
         .filter(|tip| -outside_silhouette_by(tip.centre, &hull) <= 2.0 * tip.radius)
         .count();
 
-    let mut tip_tallies: [Tally; 3] = Default::default();
-    for (tip, &seat) in emitted.tips.iter().zip(&seats) {
-        grade_rule_2(
-            tip.record,
-            &tip.vertices,
-            planes[seat].0,
-            underside_z,
-            emitted,
-            &hull,
-            &mut tip_tallies,
-        );
+    let mut tip_tallies: [Tally; 2] = Default::default();
+    for tip in &emitted.tips {
+        grade_rule_2(tip.record, &tip.vertices, emitted, &mut tip_tallies);
     }
-    let mut taper_tallies: [Tally; 3] = Default::default();
+    let mut taper_tallies: [Tally; 2] = Default::default();
     for taper in &emitted.tapers {
-        grade_rule_2(
-            taper.record,
-            &taper.vertices,
-            planes[seats[taper.tip]].0,
-            underside_z,
-            emitted,
-            &hull,
-            &mut taper_tallies,
-        );
+        grade_rule_2(taper.record, &taper.vertices, emitted, &mut taper_tallies);
     }
-    let summary = |label: &str, tallies: &[Tally; 3]| {
+    let summary = |label: &str, tallies: &[Tally; 2]| {
         format!(
-            "{label}: inside the model {} (worst {:.4} mm; {:?}), model side of the seat plane {} \
-             (worst {:.4} mm; {:?}), outside the silhouette above the underside {} (worst {:.4} \
-             mm; {:?})",
+            "{label}: inside the model {} (worst {:.4} mm; {:?}), in several pieces {} ({:?})",
             tallies[0].records,
             tallies[0].worst_mm,
             tallies[0].first,
             tallies[1].records,
-            tallies[1].worst_mm,
             tallies[1].first,
-            tallies[2].records,
-            tallies[2].worst_mm,
-            tallies[2].first,
         )
     };
     println!(

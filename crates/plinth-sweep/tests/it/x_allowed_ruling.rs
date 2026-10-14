@@ -119,6 +119,7 @@ fn every_law_sized_tip_carries_eighteen_times_its_own_section() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn the_same_field_at_x_twelve_has_one_and_a_half_times_the_tip_section() {
     let at_registry = registry_policy();
     let mut at_twelve = registry_policy();
@@ -188,6 +189,7 @@ fn the_same_field_at_x_twelve_has_one_and_a_half_times_the_tip_section() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn the_disclosure_states_the_tip_ceiling_from_the_x_the_run_sized_with() {
     let (_, maximum) = clamps_mm();
     let mesh = table();

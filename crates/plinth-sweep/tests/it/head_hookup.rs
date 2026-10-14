@@ -151,6 +151,8 @@ fn fixture_planned(headed: bool, planned_tip_mm: Option<f64>) -> Fixture {
         law_planned: plinth_sweep::heads::HeadLaw::envelope(c),
         law_drawn: None,
         ledger_radius_mm: Vec::new(),
+        certified: None,
+        old_law: None,
     };
     let mut path = vec![joint_cell; k_joint + 1];
     path.extend_from_slice(&head_cells);
@@ -171,7 +173,7 @@ fn fixture_planned(headed: bool, planned_tip_mm: Option<f64>) -> Fixture {
         interior: false,
         radius_mm: Vec::new(),
         carried_mm2: Vec::new(),
-        covered_demand: Vec::new(), twin_host: false,
+        covered_demand: Vec::new(), held_births: Vec::new(), twin_host: false,
         inserted_by_load: false,
         path: if headed { path } else { Vec::new() },
         straight_fallback: None,
@@ -199,7 +201,7 @@ fn fixture_planned(headed: bool, planned_tip_mm: Option<f64>) -> Fixture {
         interior: false,
         radius_mm: Vec::new(),
         carried_mm2: Vec::new(),
-        covered_demand: Vec::new(), twin_host: false,
+        covered_demand: Vec::new(), held_births: Vec::new(), twin_host: false,
         inserted_by_load: false,
         path: Vec::new(),
         straight_fallback: None,

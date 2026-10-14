@@ -279,7 +279,12 @@ fn the_slab_load_walks_inward_to_the_legs_and_conserves_through_them() {
             // fix/drawn-solid-clearance R2.2): its candidates land on shafts
             // whatever the shaft-landing knob says, and this claim is about
             // the descent's landing rule.
-            .without_clearance_reroute(),
+            .without_clearance_reroute()
+            // And without the joint certificate (2026-10-11): it sizes a headed
+            // post for the loads that reach it, not by the area law, so the
+            // roots' area is no longer the landing rule's alone. Held, as the
+            // slenderness lane is.
+            .without_joint_certificate(),
     );
     let straight = harness::sweep_with(
         &make_overhang_table().unwrap(),
@@ -289,6 +294,7 @@ fn the_slab_load_walks_inward_to_the_legs_and_conserves_through_them() {
             .with_working_pitch_mm(0.05)
             .without_slenderness()
             .without_clearance_reroute()
+            .without_joint_certificate()
             .without_shaft_landings(),
     );
     println!(

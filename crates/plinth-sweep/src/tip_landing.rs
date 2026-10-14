@@ -556,7 +556,7 @@ fn seat_faces(
 }
 
 /// One read of the mesh's vertex triples, in face order.
-fn triangles_of(mesh: &Mesh) -> Vec<[[f64; 3]; 3]> {
+pub(crate) fn triangles_of(mesh: &Mesh) -> Vec<[[f64; 3]; 3]> {
     let verts = mesh.verts();
     mesh.tris()
         .iter()
@@ -574,7 +574,7 @@ fn triangles_of(mesh: &Mesh) -> Vec<[[f64; 3]; 3]> {
 ///
 /// One parallel pass over `landings × faces`. Shared by the tip SCAR and the
 /// tip SEAT so both are answered about the same face.
-fn nearest_faces(
+pub(crate) fn nearest_faces(
     triangles: &[[[f64; 3]; 3]],
     landings: &[TipLanding],
 ) -> Vec<Option<(usize, f64)>> {

@@ -214,6 +214,7 @@ fn ball(mesh: &Mesh, centre: [f64; 3], radius: f64, seed: [f64; 3], facet: [f64;
         seat_face: face_near(mesh, seed),
         facet_normal: facet,
         max_normal_z: admitted_z(),
+        min_normal_z: f64::NEG_INFINITY,
     }
 }
 
@@ -597,6 +598,7 @@ fn a_slid_tip_is_measured_at_its_moved_ball() {
         landing: SweepArmLanding::Landed,
         seats_into_model: true,
         head: None,
+        contact_ball_radius_mm: None,
     };
     let before = seat_at(0.3);
     let site = TipSite {

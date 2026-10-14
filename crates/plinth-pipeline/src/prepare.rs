@@ -2933,19 +2933,37 @@ fn sweep_and_emit(
     )]
     let removed_mm3 = trim.removed_volume_milli_mm3 as f64 / 1000.0;
     println!(
-        "[sweep {model}] seat trim in the file: {} records cut in one batched call; {} cut by \
-         their seat plane, {} further cut by the model solid; {removed_mm3:.3} mm3 of support \
-         removed; of the records the trim would have removed entirely, {} keep only their part \
-         outside the model, {} lie WHOLLY INSIDE the model and are left out of the file (a \
-         WARNING of a seat that failed), and {} were left untrimmed because the re-cut could not \
-         run",
+        "[sweep {model}] seat trim in the file: {} records cut to the model mesh in one batched \
+         call (no plane cut); {} cut by the model solid; {} split by the model, keeping the piece \
+         that holds the shaft end, {} far-side pieces left out; {removed_mm3:.3} mm3 of support \
+         removed; {} records lie WHOLLY INSIDE the model and are left out of the file (a WARNING \
+         of a seat that failed)",
         trim.records_trimmed,
-        trim.records_cut_by_seat_plane,
         trim.records_cut_by_model,
-        trim.records_kept_outside_model_after_empty_trim,
+        trim.records_split,
+        trim.far_side_pieces.len(),
         trim.records_dropped_wholly_inside_model,
-        trim.records_left_whole_after_empty_trim,
     );
+    // EVERY FAR-SIDE PIECE IS NAMED (Craig 2026-10-12): a piece of a cut tip,
+    // taper or shaft span that does not hold the shaft end would print as a
+    // loose bit, so it is left out of the file and warned with its volume.
+    for piece in &trim.far_side_pieces {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a piece volume in millionths of a mm3 and a gap in microns are far inside \
+                      f64's exact range"
+        )]
+        let (volume_mm3, gap_mm) = (
+            piece.volume_micro_mm3 as f64 / 1.0e6,
+            piece.distance_from_shaft_um as f64 / 1.0e3,
+        );
+        println!(
+            "[sweep {model}] WARNING seat trim: {} record {} had a piece past the model's far \
+             side ({volume_mm3:.6} mm3, {gap_mm:.3} mm from its shaft end); it touches nothing \
+             of the support and is left out of the file",
+            piece.kind, piece.record,
+        );
+    }
     if let Some(error) = &trim.batch_error {
         println!(
             "[sweep {model}] WARNING the seat trim did not run ({error}); every tip and first \
@@ -3167,17 +3185,20 @@ fn print_sweep_disclosure(
             .count();
         let footprint = &report.seat_footprint;
         println!(
-            "[sweep {model}] seat trim: {} tips (and their first shaft segments) trimmed to the \
-             support side of their seat face and out of the model, and {} further Member spans \
-             of those shafts that reach the model side of the seat plane, {} of them on the raster \
-             seat's plane for want of a measured face; contact disc at the face min {:.4} p50 \
-             {:.4} max {:.4} mm, {below_at_face} below its own tip radius; raster seat from the \
-             face min {:+.4} p50 {:+.4} max {:+.4} mm (positive = below a down-facing face). \
-             Footprint: {} discs graded, {} on their face as placed, {} seats MOVED along the \
+            "[sweep {model}] seat trim: {} tips (and their first shaft segments) cut to the \
+             model mesh, and {} further Member spans of those shafts that reach the model side \
+             of the seat plane, {} of them on the raster seat's plane for want of a measured \
+             face; PLANNED contact disc (the ungrown ball in the seat plane) min {:.4} p50 {:.4} \
+             max {:.4} mm, {below_at_face} below its own tip radius; raster seat from the face \
+             min {:+.4} p50 {:+.4} max {:+.4} mm (positive = below a down-facing face). \
+             Footprint (graded on the real surface inside the drawn ball): {} discs graded, {} \
+             on their face as placed, {} seats MOVED along the \
              face onto it (longest {:.4} mm; {} members joined to a moved axis moved with it, \
              by up to {:.4} mm), {} on a knife edge, {} left in place because every on-face \
              seat broke a rule of the finished field; moves refused by the lean law {}, by an \
-             unbraced run's limit {}, by the drain keep-out {} ({} member checks); {} disc \
+             unbraced run's limit {}, by the drain keep-out {} ({} member checks), for leaving \
+             the seat the tip was placed for {} ({} of them for leaving model it held over \
+             nothing); {} disc \
              samples + {} search samples + {} move-verify samples over {} layers, {} round(s); \
              {} tips off their face at the disc's rim alone (lattice on the face)",
             emission.tips_trimmed_to_seat,
@@ -3201,6 +3222,8 @@ fn print_sweep_disclosure(
             footprint.moves_refused_slenderness,
             footprint.moves_refused_drain,
             footprint.members_checked,
+            footprint.moves_refused_off_seat,
+            footprint.moves_refused_off_ground,
             footprint.disc_samples,
             footprint.search_samples,
             footprint.verify_samples,
@@ -3223,6 +3246,119 @@ fn print_sweep_disclosure(
                  unbraced run's limit or the drain keep-out for it or a member joined to it, so \
                  it keeps its seat, trimmed, with {:.1}% of its disc on the face",
                 fraction * 100.0
+            );
+        }
+        // THE REAL CONTACT (Craig 2026-10-12): the model surface inside every
+        // seated tip's drawn ball, against its planned disc, and the balls
+        // grown until it reaches plan.
+        let contact = &report.seat_contact;
+        if contact.enabled {
+            println!(
+                "[sweep {model}] real contact: {} seated tips measured; planned {:.4} mm2, real \
+                 {:.4} mm2 at the ungrown ball ({} short of plan) and {:.4} mm2 at the drawn ball; \
+                 {} balls grown (largest x{:.3}, limit {:.4} mm radius) in {} round(s); {} held \
+                 below the limit so the ball's lowest point stays on its shaft ({} of them left \
+                 short by it); {} still short of plan; {} balls whose lowest point stood outside \
+                 their shaft as planned given a collar that holds it{}",
+                contact.tips_measured,
+                contact.planned_mm2,
+                contact.real_ungrown_mm2,
+                contact.short_ungrown,
+                contact.real_drawn_mm2,
+                contact.grown,
+                contact.max_growth_ratio,
+                contact.limit_ball_radius_mm,
+                contact.rounds,
+                contact.carried_bound,
+                contact.stopped_by_overhang,
+                contact.short.len(),
+                emission.tip_pole_collars,
+                if emission.tip_pole_collars_steeper_than_law > 0 {
+                    format!(
+                        " (WARNING: {} of those collars lean further from vertical than the lean \
+                         law admits, on a shaft that already does or is too short to narrow back)",
+                        emission.tip_pole_collars_steeper_than_law
+                    )
+                } else {
+                    String::new()
+                },
+            );
+            for short in &contact.short {
+                println!(
+                    "[sweep {model}] WARNING tip of arm {} has {:.4} mm2 of real contact against \
+                     {:.4} mm2 planned ({:.1}%), ball {:.4} mm (planned {:.4} mm): {}",
+                    short.strut,
+                    short.real_mm2,
+                    short.planned_mm2,
+                    100.0 * short.real_mm2 / short.planned_mm2.max(f64::MIN_POSITIVE),
+                    short.ball_radius_mm,
+                    short.planned_ball_radius_mm,
+                    short.reason.words(),
+                );
+            }
+        } else {
+            println!(
+                "[sweep {model}] real contact: NOT measured on this field (no footprint sites or \
+                 no registry); no ball was grown"
+            );
+        }
+        // THE MODEL FEET (lane 2, 2026-10-12, `MODEL-FEET.md`): every arm that
+        // lands on the model ends in a seated, trimmed contact ball sized by
+        // the area law for the load the foot passes, and must take its whole
+        // contact on the model.
+        let feet = &report.model_feet;
+        let foot_radius = SweepLowering::distribution(&emission.model_foot_radius_mm)
+            .unwrap_or((0.0, 0.0, 0.0));
+        println!(
+            "[sweep {model}] model feet: {} model landings measured ({} landed faces found, {} \
+             real contacts measured); {} feet drawn ({} coned to the foot, {} too short for \
+             their cone, {} on the raster surface's plane for want of a measured face, {} left \
+             flat); load-sized contact radius min {:.4} p50 {:.4} max {:.4} mm; contact the \
+             loads need {:.4} mm2, planned discs {:.4} mm2, real contact (the scar) {:.4} mm2, \
+             against {:.4} mm2 the old flat ends (the widest section) would have left; {} feet \
+             with real contact short of their load's need; {} feet not wholly on cured model; \
+             descent: {} model candidates refused for their foot, {} straight descents moved to \
+             a candidate whose foot fits, {} kept with a foot that does not fit; re-landings: {} \
+             model candidates refused for their foot",
+            feet.feet,
+            feet.faces_measured,
+            feet.contacts_measured,
+            emission.model_feet_drawn,
+            emission.model_foot_cones,
+            emission.model_foot_cones_too_short,
+            emission.model_feet_without_measured_face,
+            emission.model_feet_flat,
+            foot_radius.0,
+            foot_radius.1,
+            foot_radius.2,
+            feet.need_mm2,
+            feet.planned_mm2,
+            feet.real_mm2,
+            feet.flat_end_mm2,
+            feet.short_of_need.len(),
+            feet.partial.len(),
+            feet.descent_candidates_refused,
+            feet.descent_straight_replaced,
+            feet.descent_straight_kept,
+            feet.relanding_candidates_refused,
+        );
+        for partial in &feet.partial {
+            println!(
+                "[sweep {model}] WARNING model foot of arm {} has {:.1}% of its load-sized \
+                 contact disc (radius {:.4} mm) on cured model; it keeps this landing (the \
+                 search found no candidate whose foot fits at the load it knew then, or later \
+                 load grew the foot) (emit and warn)",
+                partial.id, partial.on_model_pct, partial.contact_radius_mm,
+            );
+        }
+        for short in &feet.short_of_need {
+            println!(
+                "[sweep {model}] WARNING model foot of arm {} has {:.4} mm2 of real contact \
+                 against {:.4} mm2 its load needs ({:.1}%)",
+                short.id,
+                short.real_mm2,
+                short.need_mm2,
+                100.0 * short.real_mm2 / short.need_mm2.max(f64::MIN_POSITIVE),
             );
         }
         // THE HEAD-JOIN RULE (2026-09-29).
@@ -3285,7 +3421,8 @@ fn print_sweep_disclosure(
              the lowering's own measurement, {} by the solid's clearance from the model{}, {} by a \
              lean longer than the slenderness law holds at the thickest radius that keeps the \
              final gap while the arm as it stands is a support ({} such leans taken because it \
-             is not: a one-layer stub or a solid inside the model), {} by a new \
+             is not: a one-layer stub on the model, a solid inside the model, or an arm off its \
+             ground), {} by a new \
              plate root touching another, {} verified; put back once the field was sized: {} \
              whose host chain came out overloaded, {} whose root came to lap another ({} sized \
              checks; unexplained by any re-landing: {} newly overloaded members, {} new root \
@@ -3363,7 +3500,8 @@ fn print_sweep_disclosure(
              {} replaced by a leaned descent that clears the preferred margin; {} replaced by \
              one that clears the final gap only; {} cleared by no descent (kept, warned by the \
              census); {} lean candidates refused; {} seats moved to a cell covering the same \
-             demand; {} thickenings refused for the model ({} raised slots flagged by the \
+             demand; {} head-post leans onto a member charged for the moment of their \
+             offset; {} thickenings refused for the model ({} raised slots flagged by the \
              raster, {} of them measured clear by the census's predicate, {} proved inside the \
              gap already as drawn, {} undecided and so not refused; {} raised members in a \
              hidden cavity not read)",
@@ -3376,6 +3514,7 @@ fn print_sweep_disclosure(
             hits.descent_solid_uncleared,
             hits.descent_solid_lean_candidates_refused,
             hits.descent_solid_seats_moved,
+            hits.descent_head_offset_charged,
             report.slenderness_lane.thicken_refused_model,
             report.slenderness_lane.thicken_slots_flagged,
             report.slenderness_lane.thicken_slots_measured_clear,
@@ -3390,7 +3529,8 @@ fn print_sweep_disclosure(
         println!(
             "[sweep {model}] clearance re-route after the final sizing ({}): {} arms within the \
              final gap on the first pass (the lip-seat rule's own re-landings left alone), {} on \
-             the last; {} passes; {} candidates priced, {} refused by the path test, {} by the \
+             the last (of them model landings whose load-sized foot does not fit: {} first, {} \
+             last); {} passes; {} candidates priced, {} refused by the path test, {} by the \
              plate rule, {} by the clearance of the moved solid, {} by the roots, {} by the \
              lowering's measurement; {} arms re-landed ({} on the model, {} children moved with \
              them); {} kept carrying on the last pass ({} with a cross tied to them, {} with a \
@@ -3401,6 +3541,8 @@ fn print_sweep_disclosure(
             if reroute.enabled { "on" } else { "off" },
             reroute.clearance_violators_first,
             reroute.clearance_violators_last,
+            reroute.foot_misfits_first,
+            reroute.foot_misfits_last,
             reroute.passes,
             reroute.candidates_priced,
             reroute.candidates_refused_path,
@@ -3504,6 +3646,29 @@ fn print_sweep_disclosure(
                 near.witness_mm[1],
                 near.witness_mm[2],
                 clearance.gap_mm,
+            );
+        }
+        if !clearance.tips_inside.is_empty() {
+            let named: Vec<String> = clearance
+                .tips_inside
+                .iter()
+                .map(|row| {
+                    format!(
+                        "tip of arm {} (ball {:.3} mm) inside {:?} {} by {:.3} mm",
+                        row.tip_member,
+                        2.0 * row.ball_radius_mm,
+                        row.host_kind,
+                        row.host_member,
+                        row.depth_mm
+                    )
+                })
+                .collect();
+            println!(
+                "[sweep {model}] WARNING tips inside another member's drawn solid (the ball's \
+                 centre or the head's axis): {} ({}); the clearance re-route was sent each \
+                 holding arm it could move (emit and warn, never refuse)",
+                clearance.tips_inside.len(),
+                named.join("; ")
             );
         }
         for warning in &lip.over_limit_after {
@@ -4094,7 +4259,10 @@ fn print_sweep_disclosure(
          islands measured with several coverings {}, won by a covering other than the global \
          lattice {}, seats saved against the global lattice's own count {}; twin seats merged into \
          the arm whose tip ball they overlap {} ({} of them into a headed arm, whose frozen head \
-         then carries the twin's load along its lever); straight-line reach: \
+         then carries the twin's load along its lever); first layers over nothing at the \
+         printer's pixel {}, {} of them rooted only through the cover's rounding: {} already \
+         held by an arm inside, {} given an arm seated inside, {} left without one{}; \
+         straight-line reach: \
          sightlines {} clear / {} bent in the reach field, {} / {} in the routing field; seat \
          faces: {} member tops (arms and braces) carry the nearest overhang face, {} of them \
          beside a nearer wall or face steeper than the overhang band, which they do not seat on{}",
@@ -4106,6 +4274,16 @@ fn print_sweep_disclosure(
         report.counters.island_seats_saved,
         report.counters.twin_seats_merged,
         report.counters.twin_seats_headed_host,
+        report.counters.births_found,
+        report.counters.births_bridged,
+        report.counters.births_held,
+        report.counters.births_seated,
+        report.counters.births_unseated,
+        if report.counters.births_unseated > 0 {
+            " (WARNING: their first layer prints with nothing under it)"
+        } else {
+            ""
+        },
         report.counters.sightlines_clear,
         report.counters.sightlines_blocked,
         report.counters.route_sightlines_clear,
@@ -4226,6 +4404,46 @@ fn print_sweep_disclosure(
             heads.final_normal_residual_deg_median,
             report.lip_seat.headed_bites,
         );
+        println!(
+            "[sweep {model}] junctions on a seated ball's drawn shaft: {} members landed or \
+             seated on a member whose shaft starts at its ball's centre, off its planned line, \
+             moved onto the drawn shaft (largest {:.4} mm)",
+            emission.seated_line_joins, emission.seated_line_follow_max_mm,
+        );
+        let certificate = heads.joint_certificate;
+        println!(
+            "[sweep {model}] joint certificate: {} heads sized for what their contact can pass \
+             (post slots: {} certified, {} kept at today's radius, {} kept under a junction hull); \
+             {} stayed on the old law (shared {}, no seat {}, no profile {}), {} not sized; \
+             largest certified demand on any drawn chord {:.9}; chords over 1 + 1e-9: {}",
+            certificate.certified,
+            certificate.slots_certified,
+            certificate.slots_kept,
+            certificate.slots_pinned,
+            certificate.old_law_shared + certificate.old_law_no_seat + certificate.old_law_infeasible,
+            certificate.old_law_shared,
+            certificate.old_law_no_seat,
+            certificate.old_law_infeasible,
+            certificate.not_sized,
+            certificate.worst_drawn_max,
+            certificate.over_one,
+        );
+        if certificate.over_one > 0 {
+            println!(
+                "[sweep {model}] WARNING joint certificate: {} drawn heads exceed the certified \
+                 capacity by more than 1e-9 (emit and warn, never refuse)",
+                certificate.over_one
+            );
+        }
+        if let Some((member, need, drawn)) = certificate.worst_under_need {
+            println!(
+                "[sweep {model}] WARNING joint certificate: {} heads keep {} post slots under the \
+                 radius the certificate computes for them (today's radius or a hull's is kept, \
+                 never grown); worst member {member}: drawn {drawn:.3} mm against a need of \
+                 {need:.3} mm (emit and warn, never refuse)",
+                certificate.heads_under_need, certificate.slots_under_need,
+            );
+        }
         let warned = heads
             .refusals
             .iter()
@@ -4286,6 +4504,14 @@ fn print_sweep_disclosure(
                 heads.graze_converted
             );
         }
+        println!(
+            "[sweep {model}] heads at the final radius: the graze conversion asked again after \
+             the final sizing, the ties and the clearance re-route saw {} grazers and gave {} a \
+             head {:?}",
+            heads.graze_asked_late,
+            heads.graze_converted_late.len(),
+            heads.graze_converted_late,
+        );
         if !heads.graze_kept.is_empty() {
             let named = heads
                 .graze_kept

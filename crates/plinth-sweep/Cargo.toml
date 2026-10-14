@@ -8,6 +8,13 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+# Test-only. Off: the slow tests in tests/it are ignored or not built, and the lane loop
+# (scripts/test-fast.sh) runs the rest in about a minute. On: they run like any other test.
+# build.rs turns it on when PLINTH_SLOW_TESTS=1 is set; scripts/gate-full.sh and
+# `scripts/test-fast.sh --slow` set that variable. No source under src/ reads it.
+slow-tests = []
+
 [dependencies]
 # For `geom_kernel::closest_on_tri` alone -- the workspace's canonical
 # point-vs-triangle closest point, which src/model_landing.rs uses to charge a

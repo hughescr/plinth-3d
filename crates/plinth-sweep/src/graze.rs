@@ -176,9 +176,14 @@ pub(crate) fn convert(
     // straight; the slide then runs as it always did.
     let subset: Vec<SweepStrut> = members.iter().map(|&member| struts[member].clone()).collect();
     let grazer_slots: Vec<usize> = rows.iter().filter_map(|row| slot_of[row.index]).collect();
+    // The raster grade (no surface): this predicts an EDGE the slide would
+    // fix, before any ball is grown for its contact. A curved seat's ungrown
+    // ball reads short on the real surface here, and its ball is grown later
+    // (`contact_growth`), not slid.
     let slides_to_face: std::collections::BTreeSet<usize> = crate::footprint::regrade(
         grid,
         env.slices,
+        None,
         &subset,
         &arms,
         &grazer_slots,

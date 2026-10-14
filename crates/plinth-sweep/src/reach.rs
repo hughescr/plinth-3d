@@ -229,6 +229,13 @@ impl ReachState {
         self.u[cell] <= 1.0
     }
 
+    /// Take a cell's potential back to unreachable ([`crate::births`]: a
+    /// first layer over nothing that only a lateral bridge in the cover
+    /// rooted). Journaled like every other write.
+    pub(crate) fn unroot(&mut self, cell: usize) {
+        self.write(cell, f32::INFINITY, NO_ANCHOR);
+    }
+
     /// Start recording every write [`relax_from_root`] makes. A trial
     /// placement that is then undone leaves the field bit-for-bit as it was.
     pub fn begin_journal(&mut self) {

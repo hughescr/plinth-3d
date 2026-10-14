@@ -189,6 +189,7 @@ fn run(policy: &SweepPolicy) -> (Grading, SweepEmission, f64) {
 }
 
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn no_load_step_on_the_cylinder_narrows_faster_than_the_lean_law() {
     let policy = SweepPolicy::from_registry().expect("the registry supplies every sweep number");
     let (graded, emission, _) = run(&policy);
@@ -211,6 +212,7 @@ fn no_load_step_on_the_cylinder_narrows_faster_than_the_lean_law() {
 /// The drill: the taper off is the engine before 2026-10-02, and the same
 /// grading must find its shoulders.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn sabotage_without_the_taper_the_cylinder_has_shoulders_again() {
     let policy = SweepPolicy::from_registry()
         .expect("the registry supplies every sweep number")

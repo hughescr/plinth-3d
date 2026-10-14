@@ -5,6 +5,9 @@
 #     `--profile gate`, plus the ignored tests (`--include-ignored`: the slow legacy-runner
 #     grinders that scripts/test-fast.sh skips), and the separate tools/plinth-audit workspace
 #     (built `--release`; it has no gate profile);
+#   - plinth-sweep's slow integration tests (heavy fixtures; about 130 of the 276 in tests/it,
+#     which scripts/test-fast.sh leaves out) run always, also under --skip-ignored: this script
+#     sets PLINTH_SLOW_TESTS=1 for every cargo call;
 #   - independent test binaries run side by side, at most -j at a time (default 4). The big
 #     binaries each use every core, so this buys time only where a binary leaves cores idle (the
 #     single-threaded legacy-runner grinders, the audit fixtures);
@@ -47,6 +50,8 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+# The same value for the build and for every test program's cargo call, so plinth-sweep builds once.
+export PLINTH_SLOW_TESTS=1
 [ -n "$OUT" ] || OUT="$(mktemp -d "${TMPDIR:-/tmp}/gate-full.XXXXXX")"
 mkdir -p "$OUT/logs"
 

@@ -480,6 +480,10 @@ fn apply_head_minimum(strut: &mut SweepStrut, sizing: SizingPolicy) -> Option<f6
     let slots = strut.radius_mm.len();
     let head = strut.head.as_mut()?;
     head.ledger_radius_mm.clone_from(&strut.radius_mm);
+    // A pass that re-sizes the ledger is the old law again: the certificate is
+    // rewritten by the final sizing only.
+    head.certified = None;
+    head.old_law = None;
     let law = head.law();
     size_head_from_ledger(strut, sizing, law, slots)
 }
@@ -534,11 +538,45 @@ pub fn resize_heads_to_drawn_posts(
         };
         head.law_drawn = Some(law);
         strut.radius_mm.clone_from(&head.ledger_radius_mm);
+        head.certified = None;
         if size_head_from_ledger(strut, sizing, law, slots).is_some() {
             resized += 1;
         }
     }
     resized
+}
+
+/// **The final re-size with the joint certificate** (Craig 2026-10-11: "the
+/// joint is mis-sized, fix THAT"). [`resize_heads_to_drawn_posts`] first sizes
+/// every head on the old law (today's geometry, and the fallback); then
+/// [`crate::joint_size::certify`] rewrites the cone, joint and post of every
+/// head it can certify, and leaves the rest on the old law, counted
+/// ([`crate::heads::JointCertificate`]). Returns what the old re-size returns.
+pub(crate) fn resize_heads_certified(
+    grid: &Grid,
+    struts: &mut [SweepStrut],
+    sizing: SizingPolicy,
+    ctx: &crate::joint_size::JointContext<'_>,
+    pitch_mm: f64,
+) -> usize {
+    let resized = resize_heads_to_drawn_posts(grid, struts, sizing);
+    if resized == 0 {
+        return resized;
+    }
+    let arms = drawn_arms(grid, struts, sizing, crate::slenderness::live);
+    crate::joint_size::certify(struts, sizing, ctx, arms, pitch_mm);
+    resized
+}
+
+/// A live member as the lowering gets it: its arm (head payload on the old law
+/// until the certificate rewrites it), and the shaft line it is drawn on.
+pub(crate) struct DrawnArm {
+    pub arm: plinth_support::SweepArm,
+    /// The shaft's top: the joint `K` of a headed member, the plate shaft's
+    /// ball centre, or the member's seat.
+    pub top: [f64; 3],
+    /// The shaft's bottom: the boss top of a plate member, else its landing.
+    pub bottom: [f64; 3],
 }
 
 /// **The shaft the file draws for each live headed strut**, `(top, bottom)` in
@@ -564,8 +602,22 @@ fn drawn_shafts(
                 && crate::slenderness::live(strut)
         })
     };
-    if !struts.iter().any(candidate) {
-        return vec![None; struts.len()];
+    drawn_arms(grid, struts, sizing, candidate)
+        .into_iter()
+        .map(|drawn| drawn.map(|drawn| (drawn.top, drawn.bottom)))
+        .collect()
+}
+
+/// [`drawn_shafts`] for every member `include` names, with its arm: one batch
+/// pass. The shaft of a member with no plate shaft is `(K or seat, base)`.
+pub(crate) fn drawn_arms(
+    grid: &Grid,
+    struts: &[SweepStrut],
+    sizing: SizingPolicy,
+    candidate: impl Fn(&SweepStrut) -> bool,
+) -> Vec<Option<DrawnArm>> {
+    if !struts.iter().any(&candidate) {
+        return (0..struts.len()).map(|_| None).collect();
     }
     let (plate, h) = (sizing.plate_z_mm, sizing.layer_height_mm);
     let flare = plinth_support::SweepRootFlare::registered(h).ok();
@@ -595,26 +647,27 @@ fn drawn_shafts(
             if !candidate(strut) {
                 return None;
             }
-            let head = strut.head.as_ref()?;
             let (seat, base) = crate::adapter::drawn_ends(grid, plate, h, strut);
             let moved = |point: [f64; 3], by: Option<[f64; 3]>| -> [f64; 3] {
                 by.map_or(point, |by| std::array::from_fn(|axis| point[axis] + by[axis]))
             };
+            let seat = moved(seat, followed.seat_mm);
             let base = moved(base, followed.base_mm);
-            let arm = crate::adapter::sweep_arm(
-                strut,
-                moved(seat, followed.seat_mm),
-                base,
-                None,
-                Vec::new(),
-            );
+            let arm = crate::adapter::sweep_arm(strut, seat, base, None, Vec::new());
             let plate_shaft = match &flare {
                 Some(flare) if strut.landing == crate::Landing::Plate => {
                     flare.plate_shaft_of(&arm, plate)
                 }
                 _ => None,
             };
-            Some(plate_shaft.unwrap_or((head.joint_mm, base)))
+            // A headed member's post starts at the carried joint.
+            let own_top = strut
+                .head
+                .as_ref()
+                .filter(|head| !head.drawn_straight)
+                .map_or(seat, |head| head.joint_mm);
+            let (top, bottom) = plate_shaft.unwrap_or((own_top, base));
+            Some(DrawnArm { arm, top, bottom })
         })
         .collect()
 }
@@ -2329,7 +2382,7 @@ fn insert_for_load(
                 carried_mm2: Vec::new(),
                 // Placed by the area law, not by reach: it roots no demand
                 // cell, and the removal pass must not be told otherwise.
-                covered_demand: Vec::new(), twin_host: false,
+                covered_demand: Vec::new(), held_births: Vec::new(), twin_host: false,
                 inserted_by_load: true,
                 // Written TOP-DOWN while the arm grows, reversed with the
                 // ledger the moment it lands.
@@ -2407,7 +2460,7 @@ pub(crate) fn combine_carried(previous: f64, own: f64, merged: f64) -> f64 {
 /// its root and its NARROWEST section is at the tip, which is where the law is
 /// evaluated and exactly what `docs/physics.md`:89-92 asks for. The law holds
 /// at every layer, not only at the contact.
-fn size_arm(carried_mm2: f64, sizing: SizingPolicy) -> f64 {
+pub(crate) fn size_arm(carried_mm2: f64, sizing: SizingPolicy) -> f64 {
     let required_area = carried_mm2 / sizing.x_allowed;
     let radius = (required_area / core::f64::consts::PI).sqrt();
     radius.clamp(sizing.tip_radius_min_mm, sizing.tip_radius_max_mm)

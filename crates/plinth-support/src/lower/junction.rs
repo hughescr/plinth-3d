@@ -61,6 +61,11 @@ pub(super) struct JunctionRules {
     pub layer_height_mm: f64,
     /// `chitubox_emit_n_sides`, the polygon every ring is drawn with.
     pub sides: usize,
+    /// The radius a cone may change per mm of height, the lean law's own
+    /// `cot(theta_sat)` ([`super::DrawnSpanRules`]). A kept hull ring is met by a
+    /// taper that never narrows faster than this going up. `0.0` (no law
+    /// registered) draws no taper: the shaft is left as the arm's own.
+    pub cone_slope: f64,
 }
 
 /// One arm as the pass sees it: whether it lands on something, and where its
@@ -79,6 +84,19 @@ pub(super) struct JunctionOutcome {
     pub shafts: Vec<Option<Vec<SupportPrimitive>>>,
     /// The hull records to place right after an arm's last record.
     pub hulls: Vec<Vec<SupportPrimitive>>,
+    /// Per arm, the arcs of its shaft (in the arm's own frame, from the first
+    /// frustum's start) that the junctions made here replace: the host arc a
+    /// hull replaces and the branch end it shortens. A filled junction edits no
+    /// shaft and has none. [`keep_planned_hulls`] puts the shaft inside them, as
+    /// this pass left it, into another field's shaft.
+    pub windows: Vec<Vec<(f64, f64)>>,
+    /// Per arm, the ring of its last frustum that a FILLED junction's added hull
+    /// takes whole (the branch's end ring). A filled junction edits no shaft and
+    /// has no window, but its hull still stands on that ring:
+    /// [`keep_planned_hulls`] meets it as it meets the ring at a window's edge.
+    pub end_rings: Vec<Option<EndRing>>,
+    /// How the kept hull rings were met ([`keep_planned_hulls`] only).
+    pub rings: RingStats,
     pub hulled: usize,
     /// Junctions the host could not be cut for (crowded by an earlier hull, or the
     /// host begins with the contact taper), filled with an ADDED hull of the
@@ -90,6 +108,53 @@ pub(super) struct JunctionOutcome {
     /// the caller prints.
     pub crowded: usize,
     pub undrawable: usize,
+}
+
+/// The end ring of an arm's last frustum, as a filled junction's hull takes it.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct EndRing {
+    pub centre: [Finite; 3],
+    pub radius_mm: f64,
+}
+
+/// What happened at the kept hull rings that stand at a shaft's cut ([`keep_planned_hulls`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct RingStats {
+    /// Rings the arm's shaft already met on the ring's own radius.
+    pub exact: usize,
+    /// Rings thicker than the arm's chord there: the shaft is drawn on the ring
+    /// radius and tapers down to its chord, never thinner than the chord.
+    pub thicker: usize,
+    /// Rings thinner than the arm's chord there (the ring is the old law's
+    /// radius): the shaft is drawn on the ring radius and tapers up to its chord.
+    pub thinner: usize,
+    /// Rings no taper could reach (no piece to taper, or the pieces ran out
+    /// before the offset closed): the shaft meets them on its own radius.
+    pub unmet: usize,
+    /// Of those: no piece of the arm stands at the edge, the piece there is not
+    /// one a taper may change (a sphere), and the pieces ran out.
+    pub unmet_no_piece: usize,
+    pub unmet_not_adjustable: usize,
+    pub unmet_ran_out: usize,
+    /// The largest radius difference closed at a ring, mm.
+    pub max_gap_mm: f64,
+    /// The largest difference between a ring's radius and the arm's chord that
+    /// the taper left under the chord, mm (a thinner ring).
+    pub max_under_chord_mm: f64,
+}
+
+impl RingStats {
+    fn add(&mut self, other: Self) {
+        self.exact += other.exact;
+        self.thicker += other.thicker;
+        self.thinner += other.thinner;
+        self.unmet += other.unmet;
+        self.unmet_no_piece += other.unmet_no_piece;
+        self.unmet_not_adjustable += other.unmet_not_adjustable;
+        self.unmet_ran_out += other.unmet_ran_out;
+        self.max_gap_mm = self.max_gap_mm.max(other.max_gap_mm);
+        self.max_under_chord_mm = self.max_under_chord_mm.max(other.max_under_chord_mm);
+    }
 }
 
 fn pt(p: [Finite; 3]) -> V {
@@ -252,6 +317,8 @@ pub(super) fn hull_junctions(
     let mut outcome = JunctionOutcome {
         shafts: vec![None; count],
         hulls: vec![Vec::new(); count],
+        windows: vec![Vec::new(); count],
+        end_rings: vec![None; count],
         ..JunctionOutcome::default()
     };
     let original = |arm: usize| -> &[SupportPrimitive] {
@@ -539,6 +606,13 @@ pub(super) fn hull_junctions(
                 outcome.shafts[a] = Some(spans_a_new);
                 locked[h].push(host_take);
                 locked[a].push(branch_take);
+                // A host with nothing to keep above (or below) the landing point
+                // drops the sliver of host there: the window runs to its end.
+                outcome.windows[h].push((
+                    if has_above { host_take.0 } else { f64::NEG_INFINITY },
+                    if has_below { host_take.1 } else { f64::INFINITY },
+                ));
+                outcome.windows[a].push(branch_take);
                 outcome.hulled += 1;
                 None
             };
@@ -548,6 +622,12 @@ pub(super) fn hull_junctions(
         if let Some(why) = skip {
             if let Some(record) = fill_rings.record(rules.sides) {
                 outcome.hulls[a].push(record);
+                // A filled junction edits no shaft: no window. Its hull takes the
+                // branch's end ring whole, which a kept hull must meet.
+                outcome.end_rings[a] = Some(EndRing {
+                    centre: last.end_mm,
+                    radius_mm: last.end_radius_mm.get(),
+                });
                 outcome.filled += 1;
             } else {
                 match why {
@@ -558,6 +638,639 @@ pub(super) fn hull_junctions(
         }
     }
     outcome
+}
+
+/// How far two shafts' frames may differ and still be one shaft, mm.
+const SAME_SHAFT_TOLERANCE_MM: f64 = 1.0e-7;
+/// Arc length below which a piece is not a piece, mm.
+const ARC_EPSILON_MM: f64 = 1.0e-9;
+
+/// **Keep the hulls the reference field planned** (R8, Craig 2026-10-11).
+///
+/// The pass above reads a shaft's radii at its cut arcs, its collar and its
+/// last frustum's length, so a member whose radii moved gets different hosts,
+/// pull-backs and rings, and the hull mesh moves with them. This runs the pass
+/// on the REFERENCE field (`reference_*`, the arms as the old sizing drew
+/// them) and returns its outcome with every hull record as it made it. The
+/// shaft of each arm a junction cut is the arm's own, drawn from `primitives`,
+/// except inside the junction's arcs ([`JunctionOutcome::windows`]), where it is
+/// the reference's, as the pass left it (the thin run that replaces a dropped
+/// collar). A filled junction edits no shaft.
+///
+/// **The ring is the reference's, to the bit.** Where a hull ring stands on a
+/// cut of the shaft (the end of the host above the hull, the start of the host
+/// below it, the end of the shortened branch), the arm's frustum there ends on
+/// the ring's centre and on the ring's radius, so the hull ring and the drawn
+/// ring are one ring and the file's boundary geometry is the old law's. The
+/// arm's chord differs from the ring by the chord noise of the fit (the ring is
+/// the old law's radius, the chord is the new sizing's); that difference is
+/// closed by a taper along the arm's own pieces from the ring outward
+/// ([`plan_transition`]): a ring thicker than the chord gives a shaft that is
+/// never thinner than the chord (certified wherever the chord is); a ring
+/// thinner than the chord gives a shaft that rises from the ring's radius (the
+/// kept, old-law radius) to the chord. The taper's slope is limited so no piece
+/// narrows going up faster than the lean law's step: where a cone already runs
+/// at that limit the offset is carried unchanged along it and closed further on.
+///
+/// `None` when an arm that a junction edits has no shaft here, or its shaft is
+/// not on the reference's line: nothing of the reference is used then.
+pub(super) fn keep_planned_hulls(
+    primitives: &[SupportPrimitive],
+    arms: &[JunctionArm],
+    reference_primitives: &[SupportPrimitive],
+    reference_arms: &[JunctionArm],
+    rules: JunctionRules,
+) -> Option<JunctionOutcome> {
+    let count = arms.len();
+    if reference_arms.len() != count {
+        return None;
+    }
+    let planned = hull_junctions(reference_primitives, reference_arms, rules);
+    let shaft_of = |prims: &'_ [SupportPrimitive], arm: JunctionArm| -> Option<Vec<SupportPrimitive>> {
+        let (first, len) = arm.shaft?;
+        prims.get(first..first + len).map(<[SupportPrimitive]>::to_vec)
+    };
+    let mut kept = JunctionOutcome {
+        shafts: vec![None; count],
+        hulls: planned.hulls.clone(),
+        windows: planned.windows.clone(),
+        end_rings: planned.end_rings.clone(),
+        rings: RingStats::default(),
+        hulled: planned.hulled,
+        filled: planned.filled,
+        buried: planned.buried,
+        no_host: planned.no_host,
+        crowded: planned.crowded,
+        undrawable: planned.undrawable,
+    };
+    for index in 0..count {
+        let windows = merged_windows(&planned.windows[index]);
+        let end_ring = planned.end_rings[index];
+        if windows.is_empty() && end_ring.is_none() {
+            continue;
+        }
+        let real = shaft_of(primitives, arms[index])?;
+        let original = shaft_of(reference_primitives, reference_arms[index])?;
+        let (frame, reference_frame) = (Frame::of(&real)?, Frame::of(&original)?);
+        let end_of = |spans: &[SupportPrimitive]| spans.last().map(|s| pt(s.end_mm));
+        if norm(sub(frame.origin, reference_frame.origin)) > SAME_SHAFT_TOLERANCE_MM
+            || norm(sub(end_of(&real)?, end_of(&original)?)) > SAME_SHAFT_TOLERANCE_MM
+        {
+            return None;
+        }
+        let edited = planned.shafts[index].clone().unwrap_or(original);
+        let (shaft, stats) = splice_shaft(&real, &edited, frame, &windows, end_ring, rules)?;
+        kept.shafts[index] = Some(shaft);
+        kept.rings.add(stats);
+    }
+    Some(kept)
+}
+
+/// Windows sorted and joined where they touch.
+fn merged_windows(windows: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let mut sorted: Vec<(f64, f64)> = windows
+        .iter()
+        .map(|&(a, b)| (a.min(b), a.max(b)))
+        .collect();
+    sorted.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let mut out: Vec<(f64, f64)> = Vec::with_capacity(sorted.len());
+    for window in sorted {
+        match out.last_mut() {
+            Some(last) if window.0 <= last.1 + ARC_EPSILON_MM => last.1 = last.1.max(window.1),
+            _ => out.push(window),
+        }
+    }
+    out
+}
+
+/// The piece of `s` (spanning arcs `arc`) between arcs `lo` and `hi`; its radius
+/// at an end it was cut at is `radius_lo` / `radius_hi`, else the frustum's own.
+fn clip_piece(
+    s: &SupportPrimitive,
+    arc: (f64, f64),
+    (lo, hi): (f64, f64),
+    (radius_lo, radius_hi): (Option<f64>, Option<f64>),
+) -> Option<SupportPrimitive> {
+    let span = arc.1 - arc.0;
+    let at = |x: f64| lerp(pt(s.start_mm), pt(s.end_mm), ((x - arc.0) / span).clamp(0.0, 1.0));
+    let mut piece = s.clone();
+    let cut_start = lo > arc.0 + ARC_EPSILON_MM;
+    let cut_end = hi < arc.1 - ARC_EPSILON_MM;
+    if cut_start {
+        piece.start_mm = fin(at(lo))?;
+        if piece.segment_kind == SupportSegmentKind::ContactTaper {
+            piece.segment_kind = SupportSegmentKind::Member;
+            piece.contact_depth_mm = None;
+        }
+    }
+    if cut_end {
+        piece.end_mm = fin(at(hi))?;
+    }
+    if let Some(radius) = radius_lo.or_else(|| cut_start.then(|| radius_at(s, arc, lo))) {
+        piece.start_radius_mm = PositiveFinite::new(radius).ok()?;
+    }
+    if let Some(radius) = radius_hi.or_else(|| cut_end.then(|| radius_at(s, arc, hi))) {
+        piece.end_radius_mm = PositiveFinite::new(radius).ok()?;
+    }
+    Some(piece)
+}
+
+/// The radius the reference chain has at arc `x`: of the frustum whose arc is
+/// nearest (a chain that ends at `x` answers with its last radius). `starts`
+/// prefers the frustum that begins at `x`, else the one that ends there.
+fn chain_radius_at(chain: &[SupportPrimitive], arcs: &[(f64, f64)], x: f64, starts: bool) -> Option<f64> {
+    let mut best: Option<(f64, bool, f64)> = None;
+    for (s, &arc) in chain.iter().zip(arcs) {
+        let at = x.clamp(arc.0, arc.1);
+        let distance = (x - at).abs();
+        let on_the_edge = if starts { (at - arc.0).abs() <= ARC_EPSILON_MM } else { (at - arc.1).abs() <= ARC_EPSILON_MM };
+        let better = best.is_none_or(|(d, edge, _)| {
+            distance < d - ARC_EPSILON_MM || (distance <= d + ARC_EPSILON_MM && on_the_edge && !edge)
+        });
+        if better {
+            best = Some((distance, on_the_edge, radius_at(s, arc, at)));
+        }
+    }
+    best.map(|(_, _, radius)| radius)
+}
+
+/// The shaft `real` outside every window and `edited` (the reference's, as the
+/// junction pass left it) inside: one chain, top-down. Where a window meets the
+/// arm and the reference has a piece inside it (the thin run that replaces a
+/// dropped collar), that piece starts (or ends) on the arm's radius there, so
+/// the chain is continuous. Where a window holds no piece of the reference, its
+/// edge is a hull ring: the arm's frustum there ends on the ring's centre and
+/// radius, and the arm's own pieces taper from the ring out to its chord
+/// ([`bring_to_ring`]); so is the arm's last frustum when a filled junction's
+/// added hull takes its end ring (`end_ring`, no window). Everywhere else the
+/// arm's own frusta are untouched.
+fn splice_shaft(
+    real: &[SupportPrimitive],
+    edited: &[SupportPrimitive],
+    frame: Frame,
+    windows: &[(f64, f64)],
+    end_ring: Option<EndRing>,
+    rules: JunctionRules,
+) -> Option<(Vec<SupportPrimitive>, RingStats)> {
+    let real_arcs = arcs(frame, real);
+    let edited_arcs = arcs(frame, edited);
+    let mut placed: Vec<Placed> = Vec::with_capacity(real.len() + edited.len() + 2);
+    for (s, &arc) in real.iter().zip(&real_arcs) {
+        let mut spans: Vec<(f64, f64)> = Vec::new();
+        let mut x = arc.0;
+        for &(lo, hi) in windows {
+            if hi <= x + ARC_EPSILON_MM || lo >= arc.1 - ARC_EPSILON_MM {
+                continue;
+            }
+            if lo > x + ARC_EPSILON_MM {
+                spans.push((x, lo));
+            }
+            x = x.max(hi);
+        }
+        if arc.1 - x > ARC_EPSILON_MM {
+            spans.push((x, arc.1));
+        }
+        for (lo, hi) in spans {
+            placed.push(Placed {
+                lo,
+                hi,
+                piece: clip_piece(s, arc, (lo, hi), (None, None))?,
+                outside: true,
+            });
+        }
+    }
+    for &(lo, hi) in windows {
+        // The arm's radius where it meets the window: its piece that ends on
+        // the window's top, and its piece that starts on the window's foot.
+        let on_top = lo.is_finite().then(|| chain_radius_at(real, &real_arcs, lo, false)).flatten();
+        let on_foot = hi.is_finite().then(|| chain_radius_at(real, &real_arcs, hi, true)).flatten();
+        for (s, &arc) in edited.iter().zip(&edited_arcs) {
+            let (from, to) = (arc.0.max(lo), arc.1.min(hi));
+            if to - from > ARC_EPSILON_MM {
+                let start = if (from - lo).abs() <= ARC_EPSILON_MM { on_top } else { None };
+                let end = if (to - hi).abs() <= ARC_EPSILON_MM { on_foot } else { None };
+                placed.push(Placed {
+                    lo: from,
+                    hi: to,
+                    piece: clip_piece(s, arc, (from, to), (start, end))?,
+                    outside: false,
+                });
+            }
+        }
+    }
+    placed.sort_by(|x, y| x.lo.total_cmp(&y.lo));
+    let mut stats = RingStats::default();
+    let taper = TaperRules {
+        lean_slope_per_arc: rules.cone_slope * frame.dir[2].abs(),
+        pitch_mm: rules.pixel_pitch_mm,
+    };
+    let mut edges = ring_edges(edited, &edited_arcs, windows);
+    // A filled junction's hull stands on the arm's end ring (no window): the
+    // arm's last frustum ends on it. An end inside a window is the reference's.
+    if let (Some(ring), Some(&(_, end_arc))) = (end_ring, real_arcs.last()) {
+        let inside_window = windows
+            .iter()
+            .any(|&(lo, hi)| lo - ARC_EPSILON_MM <= end_arc && end_arc <= hi + ARC_EPSILON_MM);
+        if !inside_window {
+            edges.push(RingEdge {
+                arc: end_arc,
+                shaft_above: true,
+                centre: ring.centre,
+                radius: ring.radius_mm,
+            });
+        }
+    }
+    for edge in edges {
+        match bring_to_ring(&mut placed, &edge, taper) {
+            RingOutcome::Met { gap } => {
+                stats.max_gap_mm = stats.max_gap_mm.max(gap.abs());
+                if gap.abs() <= RING_EXACT_MM {
+                    stats.exact += 1;
+                } else if gap > 0.0 {
+                    stats.thicker += 1;
+                } else {
+                    stats.thinner += 1;
+                    stats.max_under_chord_mm = stats.max_under_chord_mm.max(-gap);
+                }
+            }
+            RingOutcome::Unmet(why) => {
+                stats.unmet += 1;
+                match why {
+                    Unmet::NoPiece => stats.unmet_no_piece += 1,
+                    Unmet::NotAdjustable => stats.unmet_not_adjustable += 1,
+                    Unmet::RanOut => stats.unmet_ran_out += 1,
+                }
+            }
+        }
+    }
+    Some((placed.into_iter().map(|p| p.piece).collect(), stats))
+}
+
+/// Radius difference below which a ring and the arm's chord are one radius, mm.
+const RING_EXACT_MM: f64 = 1.0e-9;
+/// How far an edge of a window may stand from an end of the reference's piece
+/// and still be that piece's end, mm (the two frames agree to
+/// [`SAME_SHAFT_TOLERANCE_MM`]).
+const RING_TOLERANCE_MM: f64 = 1.0e-6;
+/// The part of the room under the lean law's step a taper may use.
+const ROOM_SAFETY: f64 = 0.999;
+
+/// A piece of the spliced shaft and the arcs it spans; `outside` for a piece
+/// of the arm's own, not of the reference.
+struct Placed {
+    lo: f64,
+    hi: f64,
+    piece: SupportPrimitive,
+    outside: bool,
+}
+
+/// A hull ring that stands on a cut of the shaft: the reference's piece ends
+/// (`shaft_above`, the arm lies above the cut) or starts there, on `centre` and
+/// `radius`, and nothing of the reference lies inside the window past it.
+struct RingEdge {
+    arc: f64,
+    shaft_above: bool,
+    centre: [Finite; 3],
+    radius: f64,
+}
+
+/// The ring edges of `windows` on a shaft: an edge where the reference's
+/// shaft (`edited`) has a piece that ends (the window's top) or starts (its
+/// foot) there and no piece that runs on into the window.
+fn ring_edges(
+    edited: &[SupportPrimitive],
+    edited_arcs: &[(f64, f64)],
+    windows: &[(f64, f64)],
+) -> Vec<RingEdge> {
+    let mut edges = Vec::new();
+    let near = |a: f64, b: f64| (a - b).abs() <= RING_TOLERANCE_MM;
+    for &(lo, hi) in windows {
+        if lo.is_finite() {
+            let runs_on = edited_arcs
+                .iter()
+                .any(|&(a, b)| near(a, lo) && b > lo + ARC_EPSILON_MM);
+            let ends = edited_arcs.iter().rposition(|&(_, b)| near(b, lo));
+            if let (false, Some(i)) = (runs_on, ends) {
+                edges.push(RingEdge {
+                    arc: lo,
+                    shaft_above: true,
+                    centre: edited[i].end_mm,
+                    radius: edited[i].end_radius_mm.get(),
+                });
+            }
+        }
+        if hi.is_finite() {
+            let runs_on = edited_arcs
+                .iter()
+                .any(|&(a, b)| near(b, hi) && a < hi - ARC_EPSILON_MM);
+            let starts = edited_arcs.iter().position(|&(a, _)| near(a, hi));
+            if let (false, Some(i)) = (runs_on, starts) {
+                edges.push(RingEdge {
+                    arc: hi,
+                    shaft_above: false,
+                    centre: edited[i].start_mm,
+                    radius: edited[i].start_radius_mm.get(),
+                });
+            }
+        }
+    }
+    edges
+}
+
+/// The taper's two readings.
+#[derive(Clone, Copy)]
+struct TaperRules {
+    /// The most a piece may narrow going up, mm of radius per mm of its arc.
+    lean_slope_per_arc: f64,
+    /// A piece shorter than this is below what the printer resolves.
+    pitch_mm: f64,
+}
+
+enum RingOutcome {
+    /// The arm's frustum at the edge now ends on the ring; `gap` is the ring's
+    /// radius minus the arm's chord there.
+    Met { gap: f64 },
+    Unmet(Unmet),
+}
+
+/// Why a ring was not met.
+#[derive(Clone, Copy)]
+enum Unmet {
+    NoPiece,
+    NotAdjustable,
+    RanOut,
+}
+
+/// One piece of the arm walking away from a ring: its arc length, and its
+/// radius at the end nearer the ring and at the other end.
+#[derive(Clone, Copy, Debug)]
+struct Step {
+    len: f64,
+    near: f64,
+    far: f64,
+    /// Whether the piece may be cut in two (a contact taper or a trimmed piece
+    /// keeps its length: its offset closes at its far end instead).
+    splittable: bool,
+}
+
+/// What the taper does to one [`Step`]: the radius added at its near end and at
+/// its far end, and, when the offset closes inside the step, how far from the
+/// near end (the step is cut there, and the rest is untouched).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct StepPlan {
+    near_offset: f64,
+    far_offset: f64,
+    split: Option<f64>,
+}
+
+/// **The taper from a hull ring out to the arm's own chord.** The radius to add
+/// to the arm's pieces, walking away from the ring: `e0` at the ring (the ring's
+/// radius minus the arm's chord there), closing to zero.
+///
+/// The offset closes at a rate of at most `|e0| / pitch` per mm of arc (a
+/// frustum shorter than the printer's pixel is not drawn), and no faster than
+/// the room a piece has: the piece's narrowing going up, plus the offset's own
+/// change, stays within the lean law's step (`lean_slope_per_arc`), the limit
+/// the load-step cones are drawn at. Where a piece is already at that limit
+/// the offset is carried along it unchanged and closed on the next piece that
+/// has room. A closing that would leave a piece shorter than a pixel (the
+/// closing point too near either end of its piece) is spread over the whole
+/// piece instead. `None` when the pieces run out before the offset closes.
+fn plan_transition(steps: &[Step], e0: f64, shaft_above: bool, taper: TaperRules) -> Option<Vec<StepPlan>> {
+    if taper.lean_slope_per_arc.is_nan()
+        || taper.pitch_mm.is_nan()
+        || taper.lean_slope_per_arc <= 0.0
+        || taper.pitch_mm <= 0.0
+        || !e0.is_finite()
+    {
+        return None;
+    }
+    let sign = e0.signum();
+    let target_rate = e0.abs() / taper.pitch_mm;
+    // Closing the offset raises the narrowing going up when the arm lies above
+    // a thicker ring (the offset falls going up) or below a thinner one (it
+    // rises going down); otherwise it lowers it.
+    let raises_narrowing = (shaft_above && e0 > 0.0) || (!shaft_above && e0 < 0.0);
+    let mut plan = Vec::with_capacity(steps.len().min(4));
+    let mut offset = e0;
+    for step in steps {
+        if step.len.is_nan() || step.len <= 0.0 {
+            return None;
+        }
+        let narrowing = if shaft_above {
+            (step.near - step.far) / step.len
+        } else {
+            (step.far - step.near) / step.len
+        };
+        let room = if raises_narrowing {
+            taper.lean_slope_per_arc - narrowing
+        } else {
+            taper.lean_slope_per_arc + narrowing
+        };
+        let rate = target_rate.min((room * ROOM_SAFETY).max(0.0));
+        if rate <= 0.0 {
+            plan.push(StepPlan {
+                near_offset: offset,
+                far_offset: offset,
+                split: None,
+            });
+            continue;
+        }
+        let magnitude = offset.abs();
+        let reach = magnitude / rate;
+        if reach > step.len * (1.0 + 1.0e-12) {
+            let far = sign * (magnitude - rate * step.len);
+            plan.push(StepPlan {
+                near_offset: offset,
+                far_offset: far,
+                split: None,
+            });
+            offset = far;
+            continue;
+        }
+        let split = (step.splittable && reach >= taper.pitch_mm && step.len - reach >= taper.pitch_mm)
+            .then_some(reach);
+        plan.push(StepPlan {
+            near_offset: offset,
+            far_offset: 0.0,
+            split,
+        });
+        return Some(plan);
+    }
+    None
+}
+
+/// Draw the arm's frustum at a hull ring on the ring's centre and radius, and
+/// taper the arm's own pieces from there to its chord ([`plan_transition`]).
+/// Nothing changes (`Unmet`) when no piece of the arm stands at the edge, a piece
+/// in the way is not a plain member, or the pieces run out first.
+fn bring_to_ring(placed: &mut Vec<Placed>, edge: &RingEdge, taper: TaperRules) -> RingOutcome {
+    let near_index = if edge.shaft_above {
+        placed
+            .iter()
+            .rposition(|p| p.outside && (p.hi - edge.arc).abs() <= RING_TOLERANCE_MM)
+    } else {
+        placed
+            .iter()
+            .position(|p| p.outside && (p.lo - edge.arc).abs() <= RING_TOLERANCE_MM)
+    };
+    let Some(near_index) = near_index else {
+        return RingOutcome::Unmet(Unmet::NoPiece);
+    };
+    // A piece a taper may change the radii of: a member or the contact taper
+    // (never a sphere). Only a plain member may be cut in two.
+    let plain = |p: &Placed| {
+        p.outside
+            && matches!(
+                p.piece.segment_kind,
+                SupportSegmentKind::Member | SupportSegmentKind::ContactTaper
+            )
+            && p.piece.sphere_geometry.is_none()
+    };
+    let splittable = |p: &Placed| {
+        p.piece.segment_kind == SupportSegmentKind::Member && p.piece.seat_trim.is_none()
+    };
+    // The pieces walking away from the ring, while they join end to end.
+    let mut chain: Vec<usize> = vec![near_index];
+    loop {
+        let last = chain[chain.len() - 1];
+        let next = if edge.shaft_above {
+            last.checked_sub(1)
+        } else {
+            Some(last + 1).filter(|&n| n < placed.len())
+        };
+        let Some(next) = next else { break };
+        let gap = if edge.shaft_above {
+            placed[last].lo - placed[next].hi
+        } else {
+            placed[next].lo - placed[last].hi
+        };
+        if !(plain(&placed[next]) && gap.abs() <= RING_TOLERANCE_MM) {
+            break;
+        }
+        chain.push(next);
+    }
+    if !plain(&placed[near_index]) {
+        return RingOutcome::Unmet(Unmet::NotAdjustable);
+    }
+    let steps: Vec<Step> = chain
+        .iter()
+        .map(|&i| {
+            let p = &placed[i];
+            let (start, end) = (p.piece.start_radius_mm.get(), p.piece.end_radius_mm.get());
+            let (near, far) = if edge.shaft_above { (end, start) } else { (start, end) };
+            Step {
+                len: p.hi - p.lo,
+                near,
+                far,
+                splittable: splittable(p),
+            }
+        })
+        .collect();
+    let gap = edge.radius - steps[0].near;
+    if gap.abs() > RING_EXACT_MM {
+        let Some(plan) = plan_transition(&steps, gap, edge.shaft_above, taper) else {
+            return RingOutcome::Unmet(Unmet::RanOut);
+        };
+        let mut replaced: Vec<(usize, Vec<Placed>)> = Vec::with_capacity(plan.len());
+        for (k, step_plan) in plan.iter().enumerate() {
+            let Some(pieces) = retapered(&placed[chain[k]], step_plan, edge.shaft_above) else {
+                return RingOutcome::Unmet(Unmet::NotAdjustable);
+            };
+            replaced.push((chain[k], pieces));
+        }
+        let mut next: Vec<Placed> = Vec::with_capacity(placed.len() + 1);
+        let mut by_index: Vec<Option<Vec<Placed>>> = (0..placed.len()).map(|_| None).collect();
+        for (i, pieces) in replaced {
+            by_index[i] = Some(pieces);
+        }
+        for (i, p) in std::mem::take(placed).into_iter().enumerate() {
+            match by_index[i].take() {
+                Some(pieces) => next.extend(pieces),
+                None => next.push(p),
+            }
+        }
+        *placed = next;
+    }
+    // The frustum at the ring ends on the ring's centre and radius, to the bit.
+    let at = if edge.shaft_above {
+        placed
+            .iter()
+            .rposition(|p| p.outside && (p.hi - edge.arc).abs() <= RING_TOLERANCE_MM)
+    } else {
+        placed
+            .iter()
+            .position(|p| p.outside && (p.lo - edge.arc).abs() <= RING_TOLERANCE_MM)
+    };
+    let Some(at) = at else {
+        return RingOutcome::Unmet(Unmet::NoPiece);
+    };
+    let Ok(radius) = PositiveFinite::new(edge.radius) else {
+        return RingOutcome::Unmet(Unmet::NotAdjustable);
+    };
+    let piece = &mut placed[at].piece;
+    if edge.shaft_above {
+        piece.end_mm = edge.centre;
+        piece.end_radius_mm = radius;
+    } else {
+        piece.start_mm = edge.centre;
+        piece.start_radius_mm = radius;
+    }
+    RingOutcome::Met { gap }
+}
+
+/// The piece of the arm with the taper step applied: its radii moved by the
+/// step's offsets and, when the step closes inside it, cut there in two.
+fn retapered(placed: &Placed, plan: &StepPlan, shaft_above: bool) -> Option<Vec<Placed>> {
+    let piece = &placed.piece;
+    let (start_r, end_r) = (piece.start_radius_mm.get(), piece.end_radius_mm.get());
+    let positive = |r: f64| PositiveFinite::new(r).ok();
+    let Some(distance) = plan.split else {
+        let mut whole = piece.clone();
+        if shaft_above {
+            whole.end_radius_mm = positive(end_r + plan.near_offset)?;
+            whole.start_radius_mm = positive(start_r + plan.far_offset)?;
+        } else {
+            whole.start_radius_mm = positive(start_r + plan.near_offset)?;
+            whole.end_radius_mm = positive(end_r + plan.far_offset)?;
+        }
+        return Some(vec![Placed {
+            lo: placed.lo,
+            hi: placed.hi,
+            piece: whole,
+            outside: true,
+        }]);
+    };
+    let span = placed.hi - placed.lo;
+    let cut_arc = if shaft_above { placed.hi - distance } else { placed.lo + distance };
+    let t = ((cut_arc - placed.lo) / span).clamp(0.0, 1.0);
+    let cut_point = fin(lerp(pt(piece.start_mm), pt(piece.end_mm), t))?;
+    let cut_radius = positive(start_r + (end_r - start_r) * t)?;
+    let (mut upper, mut lower) = (piece.clone(), piece.clone());
+    upper.end_mm = cut_point;
+    upper.end_radius_mm = cut_radius;
+    lower.start_mm = cut_point;
+    lower.start_radius_mm = cut_radius;
+    if shaft_above {
+        // The near part is the lower one.
+        lower.end_radius_mm = positive(end_r + plan.near_offset)?;
+    } else {
+        upper.start_radius_mm = positive(start_r + plan.near_offset)?;
+    }
+    Some(vec![
+        Placed {
+            lo: placed.lo,
+            hi: cut_arc,
+            piece: upper,
+            outside: true,
+        },
+        Placed {
+            lo: cut_arc,
+            hi: placed.hi,
+            piece: lower,
+            outside: true,
+        },
+    ])
 }
 
 /// Why a junction could not be cut into its host.
@@ -697,12 +1410,15 @@ mod tests {
     const SIDES: usize = 24;
     const PITCH_MM: f64 = 0.019;
     const LAYER_MM: f64 = 0.05;
+    /// cot(32.5 degrees): the lean law's step per mm of height.
+    const CONE_SLOPE: f64 = 1.5697;
 
     fn rules() -> JunctionRules {
         JunctionRules {
             pixel_pitch_mm: PITCH_MM,
             layer_height_mm: LAYER_MM,
             sides: SIDES,
+            cone_slope: CONE_SLOPE,
         }
     }
 
@@ -1115,6 +1831,228 @@ mod tests {
                 "ring corner {corner:?} of the crowded branch stands outside every solid"
             );
         }
+    }
+
+    /// A FILLED junction has no window, but its added hull stands on the branch's
+    /// end ring: the kept hull is met there on the reference's radius too.
+    #[test]
+    fn a_filled_hulls_end_ring_is_met_on_the_reference_radius() {
+        let lean = 40.0_f64.to_radians();
+        let field_of = |host_r: f64, filled_r: f64| {
+            let branch = |x_sign: f64, z: f64, r: f64| {
+                frustum(
+                    SupportSegmentKind::Member,
+                    [x_sign * 3.0 * lean.sin(), 0.0, z + 3.0 * lean.cos()],
+                    [0.0, 0.0, z],
+                    r,
+                    r,
+                )
+            };
+            vec![
+                frustum(SupportSegmentKind::Member, [0.0, 0.0, 0.0], [0.0, 0.0, -10.0], host_r, host_r),
+                branch(1.0, -5.0, 0.9),
+                branch(-1.0, -5.1, filled_r),
+            ]
+        };
+        let arms = vec![
+            JunctionArm { landed: false, shaft: Some((0, 1)) },
+            JunctionArm { landed: true, shaft: Some((1, 1)) },
+            JunctionArm { landed: true, shaft: Some((2, 1)) },
+        ];
+        let (reference, field) = (field_of(0.9, 0.8), field_of(0.9, 0.76));
+        let planned = hull_junctions(&reference, &arms, rules());
+        assert_eq!(planned.filled, 1, "{planned:?}");
+        let kept = keep_planned_hulls(&field, &arms, &reference, &arms, rules()).expect("the shafts line up");
+        assert_eq!(kept.hulls, planned.hulls, "the filled hull is the reference's, bit for bit");
+        let shaft = kept.shafts[2].as_ref().expect("the filled branch's shaft is met on the ring");
+        let last = shaft.last().expect("a piece");
+        assert_eq!(last.end_mm, reference[2].end_mm, "ends on the ring's centre");
+        assert_eq!(last.end_radius_mm, reference[2].end_radius_mm, "ends on the reference's radius, to the bit");
+        assert_eq!(shaft[0].start_radius_mm, field[2].start_radius_mm, "and is the field's own chord away from the ring");
+        assert_eq!((kept.rings.thicker, kept.rings.unmet), (1, 0), "{:?}", kept.rings);
+        // The same field with equal radii edits nothing there.
+        let same = keep_planned_hulls(&reference, &arms, &reference, &arms, rules()).expect("lines up");
+        assert_eq!(
+            (same.rings.thicker, same.rings.thinner, same.rings.unmet),
+            (0, 0, 0),
+            "{:?}",
+            same.rings
+        );
+        assert_eq!(same.rings.exact, kept.rings.exact + 1, "{:?} {:?}", same.rings, kept.rings);
+    }
+
+    fn ring_centre(ring: &HullRing) -> V {
+        if ring.at_start {
+            pt(ring.frustum_start_mm)
+        } else {
+            pt(ring.frustum_end_mm)
+        }
+    }
+
+    /// R8: the hulls are the REFERENCE field's, record for record, on a field
+    /// whose radii moved; the shaft meets each hull ring on the ring's radius.
+    #[test]
+    fn the_planned_hulls_are_kept_on_a_field_whose_radii_moved() {
+        // The reference: the v19 401 over 295 junction. The field: the same
+        // geometry with a thinner post and a thinner branch.
+        let (reference, reference_arms, _) = junction(0.2342, 0.761, 0.761, 41.0, 0.05);
+        let (field, field_arms, _) = junction(0.2342, 0.70, 0.66, 41.0, 0.05);
+        let planned = hull_junctions(&reference, &reference_arms, rules());
+        assert_eq!(planned.hulled, 1, "{planned:?}");
+        let alone = hull_junctions(&field, &field_arms, rules());
+        // SABOTAGE: the pass run on the moved field makes a different hull.
+        assert_ne!(
+            alone.hulls[1], planned.hulls[1],
+            "the moved radii must move the hull, or this test proves nothing"
+        );
+        let kept = keep_planned_hulls(&field, &field_arms, &reference, &reference_arms, rules())
+            .expect("the shafts line up");
+        assert_eq!(kept.hulls, planned.hulls, "every hull record is the reference's, bit for bit");
+        assert_eq!((kept.hulled, kept.filled), (planned.hulled, planned.filled));
+        // Every ring of a kept hull is met by a drawn frustum end on the ring's
+        // centre AND radius, to the bit (the arcs and the rings are the
+        // reference's), though the field's radii are not the reference's.
+        let host = kept.shafts[0].as_ref().expect("host kept");
+        let branch = kept.shafts[1].as_ref().expect("branch kept");
+        let FrustumRingNormal::Junction(rings) = kept.hulls[1][0].ring_normal else {
+            panic!("a hull");
+        };
+        for ring in rings.rings() {
+            let centre = ring_centre(ring);
+            let found = host.iter().chain(branch.iter()).any(|s| {
+                let (end, radius) = if ring.at_start {
+                    (s.start_mm, s.start_radius_mm)
+                } else {
+                    (s.end_mm, s.end_radius_mm)
+                };
+                norm(sub(pt(end), centre)) < 1.0e-9 && radius == ring.radius_mm
+            });
+            assert!(found, "ring at {centre:?} is not met on its own radius {}", ring.radius_mm.get());
+        }
+        assert!(kept.rings.thicker >= 1 && kept.rings.unmet == 0, "{:?}", kept.rings);
+        // Outside the junction the arm is its own: the host's last frustum
+        // keeps the field's 0.70 where the reference had 0.761, and between the
+        // ring (0.761) and there the host tapers down: nothing narrows going up
+        // faster than the lean law's step.
+        let last = host.last().expect("host");
+        assert!((last.end_radius_mm.get() - 0.70).abs() < 1.0e-12, "{}", last.end_radius_mm.get());
+        let below = host
+            .iter()
+            .find(|s| (pt(s.start_mm)[2] - ring_centre(rings.rings().nth(1).expect("ring"))[2]).abs() < 1.0e-9)
+            .expect("the host below starts on its ring");
+        assert!(
+            (below.start_radius_mm.get() - 0.761).abs() < 1.0e-12,
+            "it starts on the ring's radius"
+        );
+        for s in host.iter().chain(branch.iter()) {
+            let length = norm(sub(pt(s.end_mm), pt(s.start_mm)));
+            let narrowing_up = (s.end_radius_mm.get() - s.start_radius_mm.get()) / length;
+            assert!(
+                narrowing_up <= CONE_SLOPE * (1.0 + 1.0e-9),
+                "a piece narrows going up by {narrowing_up} per mm: {s:?}"
+            );
+        }
+        // The chain is unbroken top to bottom around the cut: the host's
+        // frusta that stand above the ring end where the next one starts.
+        let upper_ring = ring_centre(rings.rings().nth(2).expect("ring"));
+        assert!(
+            host.iter().any(|s| norm(sub(pt(s.end_mm), upper_ring)) < 1.0e-9),
+            "the host above runs to its ring"
+        );
+        for pair in host.windows(2) {
+            if norm(sub(pt(pair[0].end_mm), pt(pair[1].start_mm))) < 1.0e-9 {
+                assert!(
+                    (pair[0].end_radius_mm.get() - pair[1].start_radius_mm.get()).abs() < 1.0e-12,
+                    "the host is not continuous in radius: {pair:?}"
+                );
+            }
+        }
+        // A shaft that is not the reference's line is not used.
+        let (mut moved, moved_arms, _) = junction(0.2342, 0.70, 0.66, 41.0, 0.05);
+        moved[0].start_mm = fin([0.01, 0.0, -13.9]).expect("finite");
+        assert!(keep_planned_hulls(&moved, &moved_arms, &reference, &reference_arms, rules()).is_none());
+    }
+
+    fn taper() -> TaperRules {
+        TaperRules {
+            lean_slope_per_arc: CONE_SLOPE,
+            pitch_mm: PITCH_MM,
+        }
+    }
+
+    /// The narrowing going up, mm of radius per mm of arc, of a step after a plan
+    /// (an unsplit step: both ends moved).
+    fn narrowing_after(step: &Step, plan: &StepPlan, shaft_above: bool) -> f64 {
+        let (near, far) = (step.near + plan.near_offset, step.far + plan.far_offset);
+        if shaft_above {
+            (near - far) / step.len
+        } else {
+            (far - near) / step.len
+        }
+    }
+
+    /// The taper never narrows a piece going up faster than the lean law's step
+    /// (where it started within it), on either side of the ring, for a ring
+    /// thicker or thinner than the chord; a piece already at the limit carries the
+    /// offset unchanged; the offset closes; and no piece it cuts is shorter than a
+    /// pixel.
+    #[test]
+    fn the_ring_taper_stays_within_the_lean_laws_step() {
+        let pieces = [
+            // radius at the near end, at the far end, arc length
+            (0.60, 0.60 - CONE_SLOPE * 0.10, 0.10), // a cone at the limit, narrowing away from a ring above
+            (0.60 - CONE_SLOPE * 0.10, 0.30, 0.50),
+            (0.30, 0.30, 1.0),
+        ];
+        let mut closed = 0;
+        for shaft_above in [true, false] {
+            for gap in [0.004, -0.004, 0.06, -0.06, 1.0e-5] {
+                // Walking away from the ring: above the ring the far end is the
+                // top (narrower), below it the far end is the bottom (wider).
+                let steps: Vec<Step> = pieces
+                    .iter()
+                    .map(|&(near, far, len)| {
+                        if shaft_above {
+                            Step { len, near, far, splittable: true }
+                        } else {
+                            Step { len, near: far, far: near, splittable: true }
+                        }
+                    })
+                    .collect();
+                let plan = plan_transition(&steps, gap, shaft_above, taper())
+                    .unwrap_or_else(|| panic!("above {shaft_above}, gap {gap}: pieces ran out"));
+                closed += 1;
+                let last = plan.last().expect("a plan");
+                assert!(last.far_offset.abs() < 1.0e-15, "the offset closes");
+                let mut previous = gap;
+                for (step, step_plan) in steps.iter().zip(&plan) {
+                    assert!((step_plan.near_offset - previous).abs() < 1.0e-12, "continuous");
+                    previous = step_plan.far_offset;
+                    if step_plan.split.is_none() {
+                        let after = narrowing_after(step, step_plan, shaft_above);
+                        assert!(after <= CONE_SLOPE * (1.0 + 1.0e-9), "narrows {after}");
+                        assert!(after >= -CONE_SLOPE * (1.0 + 1.0e-9), "widens {after}");
+                    }
+                    if let Some(split) = step_plan.split {
+                        assert!(split >= PITCH_MM && step.len - split >= PITCH_MM, "no fragment: {split}");
+                    }
+                }
+            }
+        }
+        assert_eq!(closed, 10);
+        // The first step is a cone at the limit: a ring thicker than the chord
+        // above it cannot close there, the offset rides along it.
+        let steps = [Step { len: 0.10, near: 0.60, far: 0.60 - CONE_SLOPE * 0.10, splittable: true }];
+        let plan = plan_transition(&steps, 0.004, true, taper());
+        assert!(plan.is_none(), "one piece at the limit cannot close an offset that raises its narrowing");
+    }
+
+    #[test]
+    fn a_ring_taper_that_runs_out_of_pieces_is_unmet() {
+        let steps = [Step { len: 0.02, near: 0.5, far: 0.5, splittable: true }];
+        // 0.06 mm of radius needs 0.04 mm of 1.57 slope: more than the piece has.
+        assert!(plan_transition(&steps, 0.06, true, taper()).is_none());
+        assert!(plan_transition(&steps, 0.06, true, TaperRules { lean_slope_per_arc: 0.0, ..taper() }).is_none());
     }
 
     #[test]

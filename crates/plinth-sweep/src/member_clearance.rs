@@ -745,26 +745,11 @@ pub(crate) fn model_clearance_census(
             continue;
         }
         let disc = discs.get(index).copied().flatten();
-        // The POST starts at the ball centre, or at the joint `K` of a headed
-        // arm: the neck and the joint sphere are the contact, and the post's
-        // own zone there is zero by construction.
-        let top = match disc {
-            Some(disc) if arm.seats_into_model => disc.post_top_mm,
-            _ => arm.seat_mm,
-        };
-        let post_start_radius = disc
-            .and_then(|disc| disc.head_joint_radius_mm)
-            .unwrap_or(arm.tip_radius_mm);
-        let bottom = if strut.landing == crate::Landing::Plate {
-            match flare.as_ref().and_then(|flare| flare.plate_shaft_of(arm, plate_z_mm)) {
-                Some((_, bottom)) => bottom,
-                None => {
-                    unmeasured_member[index] = true;
-                    continue;
-                }
-            }
-        } else {
-            arm.base_mm
+        let Some((top, bottom, post_start_radius)) =
+            drawn_shaft_ends(strut, arm, disc, flare.as_ref(), plate_z_mm)
+        else {
+            unmeasured_member[index] = true;
+            continue;
         };
         let length = geom_kernel::vec3::dist(top, bottom);
         let rise = top[2] - bottom[2];
@@ -909,6 +894,191 @@ pub(crate) fn model_clearance_census(
     }
     census
 }
+
+/// The drawn shaft of one member as the file draws it: its top (the ball
+/// centre, or the joint `K` of a headed arm, where the post starts; a member
+/// with no ball starts at its seat), its bottom (its landing, or its boss top
+/// for a plate member) and the radius its top span starts at. `None` where a
+/// plate member's boss cannot be derived.
+fn drawn_shaft_ends(
+    strut: &crate::SweepStrut,
+    arm: &plinth_support::SweepArm,
+    disc: Option<plinth_support::TipContactDisc>,
+    flare: Option<&plinth_support::SweepRootFlare>,
+    plate_z_mm: f64,
+) -> Option<([f64; 3], [f64; 3], f64)> {
+    // The POST starts at the ball centre, or at the joint `K` of a headed
+    // arm: the neck and the joint sphere are the contact, and the post's
+    // own zone there is zero by construction.
+    let top = match disc {
+        Some(disc) if arm.seats_into_model => disc.post_top_mm,
+        _ => arm.seat_mm,
+    };
+    let post_start_radius = disc
+        .and_then(|disc| disc.head_joint_radius_mm)
+        .unwrap_or(arm.tip_radius_mm);
+    let bottom = if strut.landing == crate::Landing::Plate {
+        flare.and_then(|flare| flare.plate_shaft_of(arm, plate_z_mm))?.1
+    } else {
+        arm.base_mm
+    };
+    Some((top, bottom, post_start_radius))
+}
+
+/// One drawn shaft span of a member, as [`tips_inside_members`] reads it.
+struct Span {
+    member: usize,
+    top: [f64; 3],
+    bottom: [f64; 3],
+    top_radius_mm: f64,
+    bottom_radius_mm: f64,
+}
+
+/// **No tip or head lies inside another member's drawn solid** (`MODEL-FEET.md`
+/// F4, 2026-10-12). Deinonychus, `for-craig-joint`: tip 145's 0.13 mm ball and
+/// its whole head stood inside column 142 (82 % of the ball's surface inside
+/// it, none showing), and no rule measured an arm's drawn solid against
+/// another arm's tip or head (the run report said so).
+///
+/// Each seated tip is read as the segment from its contact ball's centre to
+/// where its post starts (the ball centre itself for a straight arm, the joint
+/// `K` for a headed one: the head's axis). Each OTHER member is read as the
+/// spans the file draws its shaft as ([`plinth_support::drawn_spans`], from
+/// [`drawn_shaft_ends`]), each a frustum. The tip is inside a member where the
+/// segment comes nearer a span's axis than that span's drawn radius at the
+/// nearest point. A member that lands or seats ON the tip's own arm is joined
+/// to it by plan and is the landing check's to answer for, so it is not read
+/// here; a member the tip's arm lands on is (case B: 145 lands on 142's post,
+/// and its head is inside 142's column above the landing).
+///
+/// One row per buried tip, its deepest host. A WARNING census, never a gate;
+/// the clearance re-route is sent each holding member that is an arm
+/// ([`crate::lip_seat::clearance_violators`]). Batch-first: one contact-disc
+/// batch for the field, the spans bucketed once in a plan grid, and each tip
+/// reads only the buckets its own segment spans.
+#[must_use]
+pub(crate) fn tips_inside_members(
+    struts: &[crate::SweepStrut],
+    arms: &[plinth_support::SweepArm],
+    layer_plan: &plinth_core::LayerPlan,
+    plate_z_mm: f64,
+) -> Vec<crate::report::TipInsideMember> {
+    /// The bucket side, mm: a packing size for the lookup and nothing else
+    /// (every span a tip could be inside is in a bucket its segment reads,
+    /// whatever the size).
+    const BUCKET_MM: f64 = 1.0;
+    let height = layer_plan.heights_mm().first().copied().unwrap_or(0.0);
+    let flare = plinth_support::SweepRootFlare::registered(height).ok();
+    let discs = plinth_support::tip_contact_discs(arms, layer_plan)
+        .unwrap_or_else(|_| vec![None; arms.len()]);
+    let mut spans: Vec<Span> = Vec::new();
+    for (index, (strut, arm)) in struts.iter().zip(arms).enumerate() {
+        if strut.k_bottom == usize::MAX || strut.k_top <= strut.k_bottom {
+            continue;
+        }
+        let disc = discs.get(index).copied().flatten();
+        let Some((top, bottom, post_start_radius)) =
+            drawn_shaft_ends(strut, arm, disc, flare.as_ref(), plate_z_mm)
+        else {
+            continue;
+        };
+        let rise = top[2] - bottom[2];
+        if !(rise.is_finite() && rise > 0.0) {
+            continue;
+        }
+        let root = plinth_support::drawn_root_radius_mm(&arm.radius_profile_mm, arm.tip_radius_mm);
+        let at = |z: f64| -> [f64; 3] {
+            let t = ((top[2] - z) / rise).clamp(0.0, 1.0);
+            std::array::from_fn(|axis| top[axis] + t * (bottom[axis] - top[axis]))
+        };
+        for span in plinth_support::drawn_spans(
+            &arm.radius_profile_mm,
+            arm.base_mm[2],
+            arm.seat_mm[2],
+            top[2],
+            bottom[2],
+            post_start_radius,
+            root,
+        ) {
+            spans.push(Span {
+                member: index,
+                top: at(span.top_z_mm),
+                bottom: at(span.bottom_z_mm),
+                top_radius_mm: span.top_radius_mm.max(0.0),
+                bottom_radius_mm: span.bottom_radius_mm.max(0.0),
+            });
+        }
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a bucket index of a model-scale coordinate over a 1 mm bucket"
+    )]
+    let bucket = |value: f64| (value / BUCKET_MM).floor() as i64;
+    let mut buckets: std::collections::HashMap<(i64, i64), Vec<usize>> = std::collections::HashMap::new();
+    for (slot, span) in spans.iter().enumerate() {
+        let reach = span.top_radius_mm.max(span.bottom_radius_mm);
+        let (x0, x1) = (span.top[0].min(span.bottom[0]) - reach, span.top[0].max(span.bottom[0]) + reach);
+        let (y0, y1) = (span.top[1].min(span.bottom[1]) - reach, span.top[1].max(span.bottom[1]) + reach);
+        for bx in bucket(x0)..=bucket(x1) {
+            for by in bucket(y0)..=bucket(y1) {
+                buckets.entry((bx, by)).or_default().push(slot);
+            }
+        }
+    }
+    let joined_to = |host: usize, tip: usize| {
+        let tip_id = struts[tip].id;
+        matches!(struts[host].landing, crate::Landing::Strut { id, .. } if id == tip_id)
+            || struts[host].seat_on_strut == Some(tip_id)
+    };
+    let mut rows = Vec::new();
+    for (tip, (strut, arm)) in struts.iter().zip(arms).enumerate() {
+        if strut.kind != crate::StrutKind::Arm || strut.k_bottom == usize::MAX || !arm.seats_into_model {
+            continue;
+        }
+        let Some(disc) = discs.get(tip).copied().flatten() else { continue };
+        let (from, to) = (disc.ball_centre_mm, disc.post_top_mm);
+        let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut deepest: Option<(usize, f64)> = None;
+        for bx in bucket(from[0].min(to[0]))..=bucket(from[0].max(to[0])) {
+            for by in bucket(from[1].min(to[1]))..=bucket(from[1].max(to[1])) {
+                let Some(list) = buckets.get(&(bx, by)) else { continue };
+                for &slot in list {
+                    let span = &spans[slot];
+                    if span.member == tip || joined_to(span.member, tip) || !seen.insert(slot) {
+                        continue;
+                    }
+                    let (distance, _, on_span) =
+                        segment_segment_distance_min(from, to, span.top, span.bottom);
+                    let length = geom_kernel::vec3::dist(span.top, span.bottom);
+                    let t = if length > 0.0 {
+                        (geom_kernel::vec3::dist(span.top, on_span) / length).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let radius = span.top_radius_mm + t * (span.bottom_radius_mm - span.top_radius_mm);
+                    let depth = radius - distance;
+                    if depth > CONTAINMENT_SLACK_MM && deepest.is_none_or(|(_, worst)| depth > worst) {
+                        deepest = Some((span.member, depth));
+                    }
+                }
+            }
+        }
+        if let Some((host, depth_mm)) = deepest {
+            rows.push(crate::report::TipInsideMember {
+                tip_member: strut.id,
+                host_member: struts[host].id,
+                host_kind: struts[host].kind,
+                depth_mm,
+                ball_radius_mm: disc.ball_radius_mm,
+            });
+        }
+    }
+    rows
+}
+
+/// Float noise on "the tip's axis is inside the span": the segment distance
+/// read against a radius on the same numbers, and nothing more.
+const CONTAINMENT_SLACK_MM: f64 = 1.0e-9;
 
 /// One straight tip whose shaft grazes the model ([`graze_census`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1471,7 +1641,7 @@ mod census_tests {
             interior: false,
             radius_mm: vec![r; k_top - k_bottom + 1],
             carried_mm2: Vec::new(),
-            covered_demand: Vec::new(), twin_host: false,
+            covered_demand: Vec::new(), held_births: Vec::new(), twin_host: false,
             inserted_by_load: false,
             path: Vec::new(),
             straight_fallback: None,
@@ -1493,6 +1663,7 @@ mod census_tests {
             },
             seats_into_model: false,
             head: None,
+            contact_ball_radius_mm: None,
         };
         (strut, arm)
     }
@@ -1778,6 +1949,8 @@ mod census_tests {
             law_planned: crate::heads::HeadLaw::envelope(0.5373),
             law_drawn: None,
             ledger_radius_mm: Vec::new(),
+            certified: None,
+            old_law: None,
         });
         assert!(graze_rows_of(vec![(headed_tip, arm)], &none).is_empty(), "a headed arm is skipped");
     }
@@ -1832,6 +2005,47 @@ mod census_tests {
         // No surface, no census: the census says it did not run.
         let none = model_clearance_census(None, &struts, &arms, &layers, PLATE, GAP, ZONE, &nowhere);
         assert!(!none.ran && none.within_gap.is_empty());
+    }
+
+    /// **A tip inside another member's drawn solid is named** (`MODEL-FEET.md`
+    /// F4, case B: tip 145's ball and head inside column 142). A 0.6 mm column
+    /// stands from z = 0 to the plate; a 0.1 mm tip seated at z = -1 lands on
+    /// it below. With its ball centre 0.5 mm off the column's axis the tip is
+    /// inside by 0.1 mm and named with the column as its host; 0.7 mm off,
+    /// the ball's SURFACE still overlaps the column but its centre is outside,
+    /// and nothing is named (the rule reads the tip's axis against the host's
+    /// drawn radius; SABOTAGE: reading the tip's ball radius into it, or the
+    /// host's axis alone, flips one of the two). A column that LANDS on the tip's
+    /// own arm is joined to it by plan and is not read.
+    #[test]
+    fn a_tip_inside_another_members_drawn_solid_is_named() {
+        let layers = plinth_core::LayerPlan::new(PLATE, vec![H; 400]).expect("a uniform plan");
+        let field = |offset: f64, column_lands_on_tip: bool| {
+            let column_landing =
+                if column_lands_on_tip { Landing::Strut { id: 1, layer: 0 } } else { Landing::Plate };
+            let column = member(0, StrutKind::Arm, column_landing, [0.0, 0.0], PLATE, 0.0, 0.6);
+            let (mut strut, mut arm) =
+                member(1, StrutKind::Arm, Landing::Strut { id: 0, layer: 40 }, [offset, 0.0], -3.0, -1.0, 0.1);
+            arm.base_mm = [0.0, 0.0, -3.0];
+            arm.seats_into_model = true;
+            arm.seat_normal_mm = [0.0, 0.0, -1.0];
+            arm.seat_face_point_mm = Some(arm.seat_mm);
+            strut.seat_normal = [0.0, 0.0, -1.0];
+            let (struts, arms): (Vec<SweepStrut>, Vec<SweepArm>) = [column, (strut, arm)].into_iter().unzip();
+            super::tips_inside_members(&struts, &arms, &layers, PLATE)
+        };
+        let inside = field(0.5, false);
+        assert_eq!(inside.len(), 1, "{inside:?}");
+        assert_eq!((inside[0].tip_member, inside[0].host_member), (1, 0));
+        assert_eq!(inside[0].host_kind, StrutKind::Arm);
+        // The ball centre sits a little down the leaned axis from the seat, so
+        // a little nearer the column's axis than the seat's 0.5 mm.
+        assert!(inside[0].depth_mm > 0.09 && inside[0].depth_mm < 0.2, "inside by about 0.1 mm: {inside:?}");
+        assert!(inside[0].ball_radius_mm > 0.1, "the drawn ball is wider than the tip");
+        let touching = field(0.7, false);
+        assert!(touching.is_empty(), "the ball's surface overlaps, its centre is outside: {touching:?}");
+        let joined = field(0.5, true);
+        assert!(joined.is_empty(), "a member landed on the tip's own arm is joined by plan: {joined:?}");
     }
 }
 

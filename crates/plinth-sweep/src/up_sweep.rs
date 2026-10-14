@@ -733,10 +733,32 @@ pub struct DescentTally {
     /// Seats moved to another cell that covers the SAME demand because no
     /// descent from the first cell cleared.
     pub seats_moved: u64,
+    /// **Model landings whose foot does not fit** (lane 2, 2026-10-12,
+    /// `MODEL-FEET.md` F2): lean candidates onto the model refused because
+    /// the foot's contact disc does not lie wholly on cured model
+    /// ([`foot_on_model`]).
+    pub foot_candidates_refused: u64,
+    /// Straight descents onto the model whose foot does not fit, replaced by
+    /// another candidate the search priced (a lean, a merge, the plate, or a
+    /// model landing whose foot fits).
+    pub foot_straight_replaced: u64,
+    /// Straight descents onto the model whose foot does not fit and for which
+    /// no candidate was found: kept, and WARNED with the percent on the model
+    /// on the finished field (emit and warn).
+    pub foot_straight_kept: u64,
+    /// **Head-post leans onto a member charged for their offset**
+    /// (`CHONKY.md` P1, [`offset_moment_path_mm`]): lean candidates of a
+    /// head's post onto another member whose price rose by the moment their
+    /// sideways offset hands the host. The path-hit witness of the charge.
+    pub offset_charged: u64,
 }
 
 impl DescentTally {
     pub(crate) fn absorb(&mut self, other: &DescentTally) {
+        self.offset_charged += other.offset_charged;
+        self.foot_candidates_refused += other.foot_candidates_refused;
+        self.foot_straight_replaced += other.foot_straight_replaced;
+        self.foot_straight_kept += other.foot_straight_kept;
         self.tested += other.tested;
         self.inside_preferred_margin += other.inside_preferred_margin;
         self.in_hidden_cavity += other.in_hidden_cavity;
@@ -1130,6 +1152,178 @@ pub fn place_layer_cleared(
 
     outcome.residual_demand += scratch.demand_bits.iter().filter(|bit| **bit).count();
     outcome
+}
+
+/// What [`seat_births`] did on one layer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BirthSeats {
+    /// Bridged births an arm of this layer already stood in, or whose pixels
+    /// all lay inside the planned tip ball of one.
+    pub held: usize,
+    /// Bridged births given an arm seated inside them.
+    pub seated: usize,
+    /// Bridged births left with no arm inside: no cell of theirs was a legal
+    /// seat (outside the cover, or in a drain's escape cylinder), the seat
+    /// moved off them for a clear descent, or the strut limit was reached.
+    /// A WARNING, never a refusal.
+    pub unseated: usize,
+}
+
+/// **Seat every bridged birth of this layer that no arm stands in**
+/// ([`crate::births`]), after the layer's own placement.
+///
+/// The seat is the birth's cell holding the most of its pixels among those
+/// whose column held no model one layer down (the true underside, so the arm
+/// descends rather than landing on the model under its own seat), or among
+/// all its legal cells where none is. It is seated as any seat is
+/// ([`commit_seat`]): rooted, descended, head planned, recorded; its cells
+/// are put back in the demand set first, unrooted, so what it roots is
+/// recorded as its own.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the same inputs as `place_layer_cleared`, plus the births; bundling them into a \
+              struct would move the argument list rather than shorten it"
+)]
+pub(crate) fn seat_births(
+    grid: &Grid,
+    layer: usize,
+    cover: &[bool],
+    keep_out: &DrainKeepOut,
+    law: &LeanLaw,
+    shaft_landings: bool,
+    kappa: f64,
+    reach: &mut ReachState,
+    history: &mut ColumnHistory,
+    scratch: &mut GreedyScratch,
+    struts: &mut Vec<SweepStrut>,
+    max_struts: usize,
+    clearance: Option<&DescentClearance<'_>>,
+    births: &[&crate::births::Birth],
+    outcome: &mut LayerOutcome,
+) -> BirthSeats {
+    let mut tally = BirthSeats::default();
+    if births.is_empty() {
+        return tally;
+    }
+    let seating = Seating {
+        grid,
+        layer,
+        cover,
+        keep_out,
+        law,
+        shaft_landings,
+        kappa,
+        separation_mm: scratch.separation_mm,
+        max_struts,
+        clearance,
+    };
+    let mut seats: Vec<usize> = struts
+        .iter()
+        .filter(|strut| strut.k_top == layer)
+        .map(|strut| strut.cell)
+        .collect();
+    for birth in births {
+        if birth.cells.iter().any(|cell| seats.contains(cell)) {
+            tally.held += 1;
+            continue;
+        }
+        // ONE CONTACT, ONE ARM (joint round 4, 2026-10-13, `LONG-ROD.md`): a
+        // birth whose pixels all lie inside the planned tip ball of an arm
+        // seated on this layer is held by that arm's contact. Bat_Cat_Owl
+        // seated four arms 0.05-0.1 mm apart under one ball; the third began
+        // as a one-layer stub on the second and leaned out as a 0.10 mm rod.
+        // The host covers the birth's cells from here on, which is how the
+        // reach field and the removal replay read it as held.
+        if let Some(clear) = clearance {
+            if let Some(host) = footprint_host(clear, grid.cell_area_mm2(), struts, layer, birth) {
+                let covered = &mut struts[host].covered_demand;
+                for &cell in &birth.cells {
+                    if cover[cell] && !covered.contains(&cell) {
+                        covered.push(cell);
+                    }
+                }
+                // The birth is held by contact, not by reach: recorded apart
+                // from the cells the arm covers laterally, which hold no
+                // birth they only partly touch, and by the birth's identity,
+                // not its cells: another birth in the same working cells is
+                // not held by a ball that did not contain ITS pixels.
+                let held = &mut struts[host].held_births;
+                if !held.contains(&(layer, birth.id)) {
+                    held.push((layer, birth.id));
+                }
+                tally.held += 1;
+                continue;
+            }
+        }
+        if struts.len() >= max_struts {
+            tally.unseated += 1;
+            continue;
+        }
+        let legal = |cell: &usize| cover[*cell] && keep_out.admits(*cell, layer);
+        let underside = |cell: &usize| history.top_model[*cell] as usize != layer;
+        let most_pixels = |filter: &dyn Fn(&usize) -> bool| {
+            birth
+                .cells
+                .iter()
+                .zip(&birth.pixels)
+                .filter(|(cell, _)| legal(cell) && filter(cell))
+                .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+                .map(|(cell, _)| *cell)
+        };
+        let Some(seed) = most_pixels(&underside).or_else(|| most_pixels(&|_| true)) else {
+            tally.unseated += 1;
+            continue;
+        };
+        for &cell in &birth.cells {
+            if cover[cell] {
+                reach.unroot(cell);
+                scratch.demand_bits[cell] = true;
+            }
+        }
+        let before = struts.len();
+        commit_seat(&seating, seed, reach, history, scratch, struts, outcome);
+        // Whatever the seat left of the birth is not demand any more: the
+        // birth is the arm's, or (moved off it) reported below.
+        for &cell in &birth.cells {
+            scratch.demand_bits[cell] = false;
+        }
+        // A twin merge raises an older arm to this layer instead of adding
+        // one, so every arm now topped here is read.
+        let seated_in = struts
+            .iter()
+            .filter(|strut| strut.k_top == layer)
+            .any(|strut| birth.cells.contains(&strut.cell));
+        seats.extend(struts[before..].iter().map(|strut| strut.cell));
+        if seated_in {
+            tally.seated += 1;
+        } else {
+            tally.unseated += 1;
+        }
+    }
+    tally
+}
+
+/// The arm seated on `layer` whose planned tip ball (the contact ball of its
+/// smallest tip, [`twin_ball_mm`], about its seat) holds every pixel of
+/// `birth`; the lowest index when several do. The ball is the smallest the
+/// seat's demand allows, so a birth inside it is inside any ball the sizing
+/// later gives the arm.
+fn footprint_host(
+    clear: &DescentClearance<'_>,
+    cell_area_mm2: f64,
+    struts: &[SweepStrut],
+    layer: usize,
+    birth: &crate::births::Birth,
+) -> Option<usize> {
+    struts.iter().position(|strut| {
+        strut.kind == crate::StrutKind::Arm
+            && !strut.inserted_by_load
+            && strut.k_top == layer
+            && birth.inside_disc(
+                strut.center_mm,
+                twin_ball_mm(clear, strut.covered_demand.len(), cell_area_mm2),
+            )
+    })
 }
 
 /// `max(1, ⌈area / hex cell⌉)` for an island of `cells` cells.
@@ -2192,6 +2386,9 @@ fn commit_seat(
                         plate_z_mm: clearance.map_or(0.0, |clear| clear.plate_z_mm),
                         margin_mm: head_margin_mm,
                     }),
+                    // The post's foot passes at least the seat's own load:
+                    // the area law on what the seat covers, not the joint.
+                    lower_bound,
                 );
                 if post.clears == Clears::Neither && descent.clears != Clears::Neither {
                     scratch
@@ -2259,6 +2456,7 @@ fn commit_seat(
         radius_mm: Vec::new(),
         carried_mm2: Vec::new(),
         covered_demand: covered,
+        held_births: Vec::new(),
         twin_host: false,
         inserted_by_load: false,
         // Recorded ONLY for a leaned arm, and recorded NOW, because the column
@@ -2779,6 +2977,49 @@ pub(crate) fn deferred_path_mm(landing: Landing, k_bottom: usize, layer_height_m
     }
 }
 
+/// **What a headed post's landing on ANOTHER MEMBER still owes for its
+/// sideways offset** (`CHONKY.md` P1, 2026-10-12), in the same currency as
+/// [`deferred_path_mm`] and the lean law: mm of the arm's own section.
+///
+/// [`deferred_path_mm`] prices a landing on a member at zero further path:
+/// the host has already paid for its own way down. That holds for the AXIAL
+/// load only. The head's contact `D` carries its load down a vertical line;
+/// a post that lands on a host whose axis stands `e` sideways of `D` hands the
+/// host that load at a lever `e`, and with nothing holding the host's top
+/// sideways (the engine cannot claim the model does) the host carries the
+/// moment all the way to the plate. The engine's own stress form
+/// ([`crate::heads::section_radius_mm`], `r³ = r_a²·r + 4·r_t²·e`) gives the
+/// section that moment needs, so the host's extra material per mm of its
+/// remaining path, in units of the post's own axial section `π r_a²`, is
+/// `(r(e)² − r(e_K)²) / r_a²`: the lever the head ITSELF imposes, `e_K` (the
+/// horizontal offset of the joint `K` from `D`), is subtracted, because every
+/// post from `K`, a vertical drop to the plate included, carries it anyway.
+/// The host's remaining path is bounded below by the landing's own height,
+/// `k_bottom · h`, as [`deferred_path_mm`] bounds a model landing's.
+///
+/// `r_a` is the post's foot lower bound (the area law on what the seat
+/// covers; the tip at that bound is the same radius). A landing straight
+/// under `K` (`e = e_K`) owes nothing, so a vertical drop onto a host is
+/// priced as before; only a LEAN onto a host is charged, and by physics: a
+/// post that leans 3 mm onto a column instead of dropping clear to the plate
+/// pays for the column the lean makes fat. No constant is introduced.
+pub(crate) fn offset_moment_path_mm(
+    offset_mm: f64,
+    joint_offset_mm: f64,
+    axial_radius_mm: f64,
+    below_mm: f64,
+) -> f64 {
+    if !(axial_radius_mm > 0.0 && below_mm > 0.0 && offset_mm.is_finite() && joint_offset_mm.is_finite()) {
+        return 0.0;
+    }
+    let need = |lever_mm: f64| {
+        crate::heads::section_radius_mm(axial_radius_mm, axial_radius_mm, lever_mm.max(0.0))
+    };
+    let (at_landing, at_joint) = (need(offset_mm), need(joint_offset_mm));
+    let extra = (at_landing * at_landing - at_joint * at_joint) / (axial_radius_mm * axial_radius_mm);
+    below_mm * extra.max(0.0)
+}
+
 /// One candidate landing for a descent, priced but not yet path-checked.
 #[derive(Clone, Copy, Debug)]
 struct LeanCandidate {
@@ -2901,6 +3142,9 @@ fn descend_cleared(
         clearance,
         radius_lb_mm,
         None,
+        // A seat's own descent: its drawn lower bound IS the area law on what
+        // it covers, the least load its foot can pass.
+        radius_lb_mm,
     )
 }
 
@@ -2962,11 +3206,25 @@ impl PostPlane {
 /// [`strut_top_below`] and [`ColumnHistory::model_blocks`], which answer for
 /// the layers below the start only. The seat face is not read for such a
 /// start: a post's contact zone at its joint is zero.
+///
+/// **A MODEL LANDING MUST TAKE ITS WHOLE FOOT** (lane 2, 2026-10-12,
+/// `MODEL-FEET.md` F2): `foot_radius_mm` is a lower bound on the contact the
+/// arm's foot must deliver (the area law on what the seat covers), and a
+/// landing on the model is accepted only when that disc lies wholly on cured
+/// model ([`foot_on_model`]). A lean candidate whose foot does not fit is not
+/// a candidate. A straight descent whose foot does not fit is treated as one
+/// that does not clear: the search takes the cheapest candidate it priced
+/// that does fit (a costlier one is admitted, exactly as for a straight
+/// descent the drawn-solid test refuses), and where there is none the
+/// straight landing is kept with its own clearance verdict, counted, and
+/// warned on the finished field with the percent on the model. `0` tests the
+/// axis cell alone, which every model landing stands on by construction.
 #[expect(
     clippy::too_many_arguments,
     reason = "the descent reads the grid, the history, the keep-out, the law, its own start, \
-          the running layer, its search bound, the outcome it reports into, and the clearance \
-          with its radius; a struct would move the argument list rather than shorten it"
+          the running layer, its search bound, the outcome it reports into, the clearance \
+          with its radius, and its foot; a struct would move the argument list rather than \
+          shorten it"
 )]
 fn descend_cleared_from(
     grid: &Grid,
@@ -2983,10 +3241,23 @@ fn descend_cleared_from(
     clearance: Option<&DescentClearance<'_>>,
     radius_lb_mm: f64,
     post_plane: Option<&PostPlane>,
+    foot_radius_mm: f64,
 ) -> Descent {
     let from_joint = running_layer != layer;
+    // A head's post (P1): the contact `D` its load hangs from, and the lever
+    // the head itself puts between `D` and the joint, horizontally.
+    let offset_charge = post_plane.filter(|_| foot_radius_mm > 0.0).map(|plane| {
+        let (contact, joint) = (plane.contact_mm, plane.joint_mm);
+        (contact, (joint[0] - contact[0]).hypot(joint[1] - contact[1]))
+    });
     let (straight_landing, straight_bottom, straight_rooted, head_blocked) =
         descend_below(history, cell, layer, running_layer);
+    let foot_fits = |base_cell: usize, k_bottom: usize| {
+        let (on, total) = foot_on_model(grid, history, base_cell, k_bottom, foot_radius_mm);
+        on == total
+    };
+    let foot_misfit =
+        matches!(straight_landing, Landing::Model { .. }) && !foot_fits(cell, straight_bottom);
     let straight = |clears: Clears| Descent {
         landing: straight_landing,
         k_bottom: straight_bottom,
@@ -3099,9 +3370,11 @@ fn descend_cleared_from(
     // joinable top is refused, so it is not "clear" and a lean candidate is
     // taken instead. With none, the straight landing stands (the ledger reports
     // it as a join above the joint, never a refusal).
-    let straight_is_clear =
+    let straight_clear_but_foot =
         !head_blocked && straight_clears.is_none_or(|clears| clears != Clears::Neither);
+    let straight_is_clear = straight_clear_but_foot && !foot_misfit;
     if !law.leans() {
+        outcome.solid.foot_straight_kept += u64::from(foot_misfit);
         return straight(straight_clears.unwrap_or(Clears::Untested));
     }
 
@@ -3121,6 +3394,7 @@ fn descend_cleared_from(
     )]
     let radius_cells = (radius_mm / grid.pitch_mm()).floor().max(0.0) as usize;
     if radius_cells == 0 {
+        outcome.solid.foot_straight_kept += u64::from(foot_misfit);
         return straight(straight_clears.unwrap_or(Clears::Untested));
     }
     let cols = grid.cols();
@@ -3244,9 +3518,27 @@ fn descend_cleared_from(
             let Some(length_mm) = law.descent_cost_mm(descent_layers, lateral_mm) else {
                 continue;
             };
-            let cost_mm = length_mm + deferred_path_mm(landing, k_bottom, law.layer_height_mm());
+            let mut cost_mm = length_mm + deferred_path_mm(landing, k_bottom, law.layer_height_mm());
+            // A head's post that leans onto another member pays for the
+            // moment its sideways offset hands that member (P1).
+            if let (Landing::Strut { .. }, Some((contact, joint_offset_mm))) = (landing, offset_charge) {
+                let offset_mm = (grid.center_x_mm(grid.col_of(candidate)) - contact[0])
+                    .hypot(grid.center_y_mm(grid.row_of(candidate)) - contact[1]);
+                #[expect(clippy::cast_precision_loss, reason = "a layer index is exact in f64")]
+                let below_mm = k_bottom as f64 * law.layer_height_mm();
+                let owed = offset_moment_path_mm(offset_mm, joint_offset_mm, foot_radius_mm, below_mm);
+                if owed > 0.0 {
+                    outcome.solid.offset_charged += 1;
+                }
+                cost_mm += owed;
+            }
             outcome.lean_candidates_priced += 1;
             if straight_is_clear && cost_mm >= straight_cost {
+                continue;
+            }
+            // A model landing takes its whole foot or is not a candidate.
+            if matches!(landing, Landing::Model { .. }) && !foot_fits(candidate, k_bottom) {
+                outcome.solid.foot_candidates_refused += 1;
                 continue;
             }
             scratch.push(LeanCandidate {
@@ -3261,6 +3553,7 @@ fn descend_cleared_from(
         }
     }
     if scratch.is_empty() {
+        outcome.solid.foot_straight_kept += u64::from(foot_misfit);
         return straight(straight_clears.unwrap_or(Clears::Untested));
     }
     // Cheapest first; a tie goes to the merge, then to the model, then to the
@@ -3325,12 +3618,13 @@ fn descend_cleared_from(
                     outcome.junctions_mid_shaft += 1;
                 }
             }
-            if !straight_is_clear && clearance.is_some() {
+            if !straight_clear_but_foot && clearance.is_some() {
                 match tier {
                     Clears::FinalOnly => outcome.solid.at_final_gap_only += 1,
                     _ => outcome.solid.cleared_by_lean += 1,
                 }
             }
+            outcome.solid.foot_straight_replaced += u64::from(foot_misfit);
             return Descent {
                 landing: candidate.landing,
                 k_bottom: candidate.k_bottom,
@@ -3349,9 +3643,11 @@ fn descend_cleared_from(
     if path_blocked {
         outcome.lean_paths_blocked += 1;
     }
-    if head_blocked && straight_clears != Some(Clears::Neither) {
+    if (head_blocked || foot_misfit) && straight_clears != Some(Clears::Neither) {
         // No lean candidate either: the straight landing stands (its own
-        // clearance verdict), and the landing ledger names the join.
+        // clearance verdict), and the landing ledger names the join, or the
+        // finished field's foot census the share of the foot on the model.
+        outcome.solid.foot_straight_kept += u64::from(foot_misfit);
         return straight(straight_clears.unwrap_or(Clears::Untested));
     }
     if clearance.is_some() {
@@ -3585,6 +3881,82 @@ fn descend_below(
     }
     debug_assert!(start > 0, "a seat on layer 0 cannot descend to the plate");
     (Landing::Plate, 0, true, false)
+}
+
+/// **How much of a model foot's contact stands on cured model** (lane 2,
+/// 2026-10-12, `MODEL-FEET.md` F2): `(cells on the model, cells in the disc)`
+/// for the disc of `radius_mm` about `cell`'s centre at the landing `layer`,
+/// measured on the column history's cured runs, never assumed from the axis
+/// cell alone.
+///
+/// A cell is in the disc when its centre is (the axis cell always is; cells
+/// past the raster's edge count, and are never on the model). It is ON THE
+/// MODEL when it is cured at the landing layer or at the layer below: the
+/// foot ball is seated by the seat law at least one layer plus one pixel into
+/// the face (`contact::rasterisation_allowance_mm`), so a surface one layer
+/// lower than the axis's is still inside the seat. No band is added beyond
+/// the law's own layer term.
+///
+/// The ONE predicate the descent's candidate test, the lip-seat and
+/// clearance re-landings and the finished field's census all read, so "the
+/// search accepted it" and "the census says it fits" cannot disagree.
+#[must_use]
+pub(crate) fn foot_on_model(
+    grid: &Grid,
+    history: &ColumnHistory,
+    cell: usize,
+    layer: usize,
+    radius_mm: f64,
+) -> (usize, usize) {
+    let pitch = grid.pitch_mm();
+    let usable = radius_mm.is_finite() && radius_mm > 0.0 && pitch > 0.0;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a finite non-negative radius over the grid pitch, floored to a loop bound"
+    )]
+    let reach = if usable {
+        (radius_mm / pitch).floor() as usize
+    } else {
+        0
+    };
+    let on_model = |here: usize| {
+        history.model_blocks(here, layer)
+            || layer
+                .checked_sub(1)
+                .is_some_and(|below| history.model_blocks(here, below))
+    };
+    if reach == 0 {
+        return (usize::from(on_model(cell)), 1);
+    }
+    let (row, col) = (grid.row_of(cell), grid.col_of(cell));
+    // A relative part in a billion: a centre ON the circle is in the disc.
+    let limit = radius_mm * radius_mm * (1.0 + 1.0e-9);
+    let (mut on, mut total) = (0_usize, 0_usize);
+    for dr in 0..=2 * reach {
+        for dc in 0..=2 * reach {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a raster offset bounded by the disc's own cell reach is exact in f64"
+            )]
+            let (dy, dx) = (
+                (dr as f64 - reach as f64) * pitch,
+                (dc as f64 - reach as f64) * pitch,
+            );
+            if dx * dx + dy * dy > limit {
+                continue;
+            }
+            total += 1;
+            let (Some(r), Some(c)) = ((row + dr).checked_sub(reach), (col + dc).checked_sub(reach))
+            else {
+                continue;
+            };
+            if r < grid.rows() && c < grid.cols() && on_model(grid.index(r, c)) {
+                on += 1;
+            }
+        }
+    }
+    (on, total)
 }
 
 /// Record this layer's model cells in the column history, after the greedy has
@@ -4186,6 +4558,74 @@ mod descent_tests {
         }
     }
 
+    /// **ONE CONTACT, ONE ARM** (joint round 4, 2026-10-13, `LONG-ROD.md`).
+    /// Two births on one layer, nothing below, the second a pixel 0.03 mm from
+    /// the first's seat, inside the 0.05 mm planned tip ball: seated, the first
+    /// holds the second (`held` 1, one arm). CONTROL: the second 0.5 mm away
+    /// is outside every ball and gets an arm of its own (two arms, `held` 0).
+    /// The holder also covers the held birth's cell (the reach field and the
+    /// removal replay read it as a root). SABOTAGE (by hand, the footprint
+    /// test of `seat_births` removed): the near birth is seated, two arms.
+    #[test]
+    fn a_birth_inside_the_planned_tip_ball_of_a_seated_arm_is_held_not_seated() {
+        let grid = grid();
+        let law = LeanLaw::new(H, 45.0, 25.0);
+        let clear = two_tier(&law);
+        let layer = 5;
+        let first = grid.index(20, 20);
+        let (x0, y0) = (grid.center_x_mm(20), grid.center_y_mm(20));
+        let birth = |id: usize, cell: usize, x: f64| crate::births::Birth {
+            id,
+            cells: vec![cell],
+            pixels: vec![1],
+            extents: vec![[x, y0, x, y0]],
+        };
+        let run = |second: &crate::births::Birth| {
+            let cover = vec![true; grid.cells()];
+            let mut reach = crate::reach::ReachState::new(&grid);
+            let mut history = ColumnHistory::new(&grid);
+            let mut scratch = super::GreedyScratch::new(&grid, 4.0);
+            let mut struts = Vec::new();
+            let mut outcome = outcome();
+            let near_first = birth(0, first, x0);
+            let wanted = [&near_first, second];
+            let seats = super::seat_births(
+                &grid,
+                layer,
+                &cover,
+                &DrainKeepOut::none(),
+                &law,
+                true,
+                4.0,
+                &mut reach,
+                &mut history,
+                &mut scratch,
+                &mut struts,
+                100,
+                Some(&clear),
+                &wanted,
+                &mut outcome,
+            );
+            (seats, struts)
+        };
+        let (seats, struts) = run(&birth(1, grid.index(20, 21), x0 + 0.03));
+        assert_eq!((seats.held, seats.seated, seats.unseated), (1, 1, 0));
+        assert_eq!(struts.len(), 1, "one contact, one arm");
+        assert!(
+            struts[0].covered_demand.contains(&grid.index(20, 21)),
+            "the arm covers the cell of the birth it holds: {:?}",
+            struts[0].covered_demand
+        );
+        assert_eq!(
+            struts[0].held_births,
+            vec![(layer, 1)],
+            "the hold is recorded by the held birth's identity"
+        );
+        let (seats, struts) = run(&birth(1, grid.index(20, 30), x0 + 0.5));
+        assert_eq!((seats.held, seats.seated), (0, 2), "CONTROL: a birth outside the ball is seated");
+        assert_eq!(struts.len(), 2);
+    }
+
     /// THE MECHANISM (R1, `clearance-census-diagnosis.md` section 4), AND ITS
     /// SABOTAGE. A seat 200 layers up, a cured wall 0.35 mm beside its column
     /// from layer 10 to 199. Without the clearance (the retired centreline
@@ -4624,7 +5064,7 @@ mod head_first_tests {
         let mut counts = LayerOutcome::empty();
         let post = descend_cleared_from(
             &grid, &history, &keep_out, &law, true, 4.0, joint_cell, 100, 150, &mut scratch,
-            &mut counts, None, 0.0, None,
+            &mut counts, None, 0.0, None, 0.0,
         );
         assert_eq!(
             post.landing,
@@ -4723,6 +5163,71 @@ mod head_first_tests {
         assert_eq!(kept.landing, Landing::Strut { id: 7, layer: 190 });
         assert!(kept.path.is_empty());
     }
+
+    /// **P1 (`CHONKY.md`): a head's post that leans onto another member pays
+    /// for the moment its offset hands the host.** A joint at layer 100 over an
+    /// open plate, and a trunk 1 mm to one side whose top stands at layer 80:
+    /// the lean onto the trunk (about 2.7 mm of lean-law path) is cheaper than
+    /// the 5 mm drop to the plate, so with the offset free (SABOTAGE: no foot
+    /// radius, so no charge) the post leans onto the trunk. Charged, the trunk
+    /// would carry the contact's load at a 1 mm lever for 4 mm down, which the
+    /// stress form prices far over the drop: the post drops straight to the
+    /// plate, and the charged candidate is counted.
+    #[test]
+    fn a_head_post_pays_for_the_offset_it_hands_a_host_and_drops_clear_instead() {
+        use super::{offset_moment_path_mm, PostPlane};
+        let grid = grid();
+        let mut history = ColumnHistory::new(&grid);
+        let joint_cell = grid.index(150, 150);
+        let pitch = grid.pitch_mm();
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a small cell count")]
+        let cols = (1.0 / pitch).round() as usize;
+        let trunk_cell = grid.index(150, 150 + cols);
+        history.top_strut[trunk_cell] = 81;
+        history.top_strut_id[trunk_cell] = 3;
+        history.stamp_shaft(3, 0, 80, trunk_cell, &[]);
+        let law = LeanLaw::new(H, 45.0, 25.0);
+        let keep_out = DrainKeepOut::none();
+        let joint = [grid.center_x_mm(150), grid.center_y_mm(150), 100.0 * H];
+        let plane = PostPlane {
+            joint_mm: joint,
+            contact_mm: [joint[0], joint[1], joint[2] + 1.8],
+            unit: [0.0, 0.0, -1.0],
+            radius_mm: 0.2,
+            plate_z_mm: 0.0,
+            margin_mm: 0.07,
+        };
+        let descend = |foot_radius_mm: f64| {
+            let mut scratch = Vec::new();
+            let mut counts = LayerOutcome::empty();
+            let post = descend_cleared_from(
+                &grid, &history, &keep_out, &law, true, 4.0, joint_cell, 100, 150, &mut scratch,
+                &mut counts, None, 0.0, Some(&plane), foot_radius_mm,
+            );
+            (post, counts.solid.offset_charged)
+        };
+        let (free, charged_free) = descend(0.0);
+        assert_eq!(free.landing, Landing::Strut { id: 3, layer: 80 }, "SABOTAGE: with the offset free the post leans onto the trunk");
+        assert_eq!(charged_free, 0);
+        let (post, charged) = descend(0.1);
+        assert_eq!(post.landing, Landing::Plate, "charged for its offset the post drops clear to the plate");
+        assert!(post.path.is_empty(), "a straight drop");
+        assert!(charged > 0, "the lean onto the trunk was priced with the charge");
+
+        // The charge itself: zero straight under the joint, rising with the
+        // offset, and the stress form's section ratio over the host's path.
+        assert_eq!(offset_moment_path_mm(0.4, 0.4, 0.1, 4.0).to_bits(), 0.0_f64.to_bits());
+        assert_eq!(
+            offset_moment_path_mm(0.2, 0.4, 0.1, 4.0).to_bits(),
+            0.0_f64.to_bits(),
+            "nearer than the joint's own lever owes nothing"
+        );
+        let one = offset_moment_path_mm(1.0, 0.0, 0.1, 4.0);
+        let two = offset_moment_path_mm(2.0, 0.0, 0.1, 4.0);
+        assert!(one > 0.0 && two > one);
+        let r = crate::heads::section_radius_mm(0.1, 0.1, 1.0);
+        assert!((one - 4.0 * (r * r - 0.01) / 0.01).abs() < 1e-9);
+    }
 }
 
 #[cfg(test)]
@@ -4818,5 +5323,162 @@ mod head_skip_tests {
         assert_eq!(face, 0);
         assert!((normal[0] - sin).abs() < 1e-9 && (normal[2] + cos).abs() < 1e-9, "{normal:?}");
         assert_eq!(facet_skip(normal, &rule, 0.15), None, "the footprint query is asked");
+    }
+}
+
+/// **A model landing must take its whole foot** (lane 2, 2026-10-12,
+/// `MODEL-FEET.md` F2).
+#[cfg(test)]
+mod foot_fit_tests {
+    use super::{descend_cleared_from, foot_on_model, ColumnHistory, LayerOutcome};
+    use crate::drain::DrainKeepOut;
+    use crate::grid::plan_grid;
+    use crate::lean::LeanLaw;
+    use crate::Landing;
+
+    const H: f64 = 0.05;
+
+    /// Cure `cells` over layers `0..=top`, as `commit_layer_history` records
+    /// them layer by layer.
+    fn cure(history: &mut ColumnHistory, grid: &crate::grid::Grid, cells: &[usize], top: usize) {
+        for layer in 0..=top {
+            let mut cover = vec![false; grid.cells()];
+            for &cell in cells {
+                cover[cell] = true;
+            }
+            history.stamp_model(layer, &cover);
+            for &cell in cells {
+                history.top_model[cell] = u32::try_from(layer + 1).expect("a small layer");
+                history.top_model_rooted[cell] = true;
+            }
+        }
+    }
+
+    /// A one-cell-wide FIN (0.05 mm, a claw's edge) under the seat, and a wide
+    /// BLOCK 0.5 mm to one side, both topping out at layer 99; the seat at
+    /// layer 200.
+    fn fin_and_block() -> (crate::grid::Grid, ColumnHistory, usize, usize) {
+        let grid = plan_grid(0.0, 0.0, 8.0, 8.0, 400, H, 0.0, 1_000_000_000).0;
+        let mut history = ColumnHistory::new(&grid);
+        let fin: Vec<usize> = (60..101).map(|row| grid.index(row, 80)).collect();
+        let block: Vec<usize> = (60..101)
+            .flat_map(|row| (90..111).map(move |col| (row, col)))
+            .map(|(row, col)| grid.index(row, col))
+            .collect();
+        cure(&mut history, &grid, &fin, 99);
+        cure(&mut history, &grid, &block, 99);
+        let seat = grid.index(80, 80);
+        let block_cell = grid.index(80, 100);
+        (grid, history, seat, block_cell)
+    }
+
+    /// The census reads cured cells under the WHOLE disc, never the axis cell
+    /// alone: a 0.1 mm foot on the fin has its axis cell and the two along the
+    /// fin on the model, and the rest of its disc in the air; on the block it
+    /// is wholly on the model. A zero radius reads the axis cell only.
+    #[test]
+    fn the_foot_census_reads_the_whole_disc_on_the_cured_raster() {
+        let (grid, history, seat, block_cell) = fin_and_block();
+        let (on, total) = foot_on_model(&grid, &history, seat, 99, 0.1);
+        assert!(total > 3, "a 0.1 mm disc at a 0.05 mm pitch spans {total} cells");
+        assert_eq!(on, 5, "the axis cell and two cells each way along the fin");
+        assert_eq!(foot_on_model(&grid, &history, block_cell, 99, 0.1), (total, total));
+        assert_eq!(foot_on_model(&grid, &history, seat, 99, 0.0), (1, 1));
+        // A layer of the seat law's own depth: one layer lower is still in
+        // the seat, two are not.
+        assert_eq!(foot_on_model(&grid, &history, block_cell, 100, 0.1).0, total);
+        assert_eq!(foot_on_model(&grid, &history, block_cell, 101, 0.1).0, 0);
+    }
+
+    /// THE RULE, AND ITS SABOTAGE. The straight descent lands on the fin. With
+    /// a 0.1 mm foot it does not fit, so the search takes a candidate whose
+    /// foot does (the block, 0.5 mm aside), refusing every other fin cell it
+    /// prices on the way. SABOTAGE: a zero foot (the axis cell alone, the test
+    /// before 2026-10-12) lands straight on the fin and refuses nothing.
+    #[test]
+    fn a_foot_that_does_not_fit_on_a_fin_moves_to_a_landing_it_fits() {
+        let (grid, history, seat, block_cell) = fin_and_block();
+        let law = LeanLaw::new(H, 45.0, 25.0);
+        let descend = |foot_radius_mm: f64| {
+            let mut scratch = Vec::new();
+            let mut outcome = LayerOutcome::empty();
+            let descent = descend_cleared_from(
+                &grid,
+                &history,
+                &DrainKeepOut::none(),
+                &law,
+                true,
+                4.0,
+                seat,
+                200,
+                200,
+                &mut scratch,
+                &mut outcome,
+                None,
+                0.0,
+                None,
+                foot_radius_mm,
+            );
+            (descent, outcome)
+        };
+
+        let (sabotaged, counts) = descend(0.0);
+        assert_eq!(sabotaged.landing, Landing::Model { layer: 99 });
+        assert!(sabotaged.path.is_empty(), "straight down onto the fin");
+        assert_eq!(counts.solid.foot_candidates_refused, 0);
+        assert_eq!(counts.solid.foot_straight_replaced, 0);
+
+        let (fitted, counts) = descend(0.1);
+        let base = fitted.path.first().map_or(seat, |cell| *cell as usize);
+        assert_ne!(base, seat, "the foot left the fin");
+        assert_ne!(grid.col_of(base), 80, "no landing on the fin");
+        // The cheapest candidate that fits: the plate beside the fin (its
+        // straight 10 mm against the block's 5 mm lean plus the 5 mm the
+        // block still owes the plate), or the block itself; never the fin.
+        match fitted.landing {
+            Landing::Plate => {}
+            Landing::Model { layer } => {
+                let (on, total) = foot_on_model(&grid, &history, base, layer, 0.1);
+                assert_eq!(on, total, "the landing taken holds the whole foot");
+                assert!(
+                    (90..=110).contains(&grid.col_of(base)),
+                    "on the block (block cell {block_cell}, base {base})"
+                );
+            }
+            Landing::Strut { .. } => panic!("there is no arm to land on"),
+        }
+        assert_eq!(counts.solid.foot_straight_replaced, 1);
+        assert!(counts.solid.foot_candidates_refused > 0, "the other fin cells were priced");
+        assert_eq!(counts.solid.foot_straight_kept, 0);
+    }
+
+    /// EMIT AND WARN. With no lean at all (the law disabled) nothing can
+    /// replace the straight descent: it is kept, on the fin, and counted.
+    #[test]
+    fn a_foot_with_nowhere_else_to_go_keeps_its_landing_and_is_counted() {
+        let (grid, history, seat, _) = fin_and_block();
+        let law = LeanLaw::disabled(H);
+        let mut scratch = Vec::new();
+        let mut outcome = LayerOutcome::empty();
+        let descent = descend_cleared_from(
+            &grid,
+            &history,
+            &DrainKeepOut::none(),
+            &law,
+            true,
+            4.0,
+            seat,
+            200,
+            200,
+            &mut scratch,
+            &mut outcome,
+            None,
+            0.0,
+            None,
+            0.1,
+        );
+        assert_eq!(descent.landing, Landing::Model { layer: 99 });
+        assert!(descent.path.is_empty());
+        assert_eq!(outcome.solid.foot_straight_kept, 1);
     }
 }
