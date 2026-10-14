@@ -616,7 +616,11 @@ cases where it did not.
   there: it is a plateau (the joint-sized running maximum of a head the lowering cannot draw, 0.198 -> 0.233
   under a 0.067 mm ball, picture 31), and it is drawn as the owner's head cone, his `supporttiplength` at
   the neck's size (1.5 to 3.0 mm, `TipLengthProfiles`), from the neck to the section the shaft has that far
-  down. Any other first span that starts past the neck, and the post under a head leaving its joint
+  down. **A landing inside the cone ends it**: the cone replaces the tip's own head minimum, never the
+  section a landed member's load needs (`max(E, D)`). The shallowest member whose end stands in this
+  shaft's solid (`shallowest_landers`: distance to the axis at most the two sections, no tolerance) ends
+  the cone one layer under it, at the ledger's section there, and the ledger is drawn below unchanged.
+  Any other first span that starts past the neck, and the post under a head leaving its joint
   sphere, widens to the ledger over one layer (a cone widening going down prints at any slope). A span
   that already starts at the neck is untouched.
 - **A model foot is the owner's tail contact.** The foot's contact radius is the largest of the area
@@ -638,6 +642,14 @@ cases where it did not.
 - **Knees.** Where two chained frusta of a member turn by more than a pixel of their section, a sphere
   of the larger section sits at the vertex (`knee_spheres`). The sweep's clearance readers model a member
   as the tube about its axis, which already contains it.
+- **A lean is a solid, not a column.** The up-sweep's path test asks whether an arm stands in a cell of
+  the path; a shaft 0.12 mm off the path is in no cell and was gone through (round 6, Deinonychus: a 0.22
+  mm descent through a post, then 13 mm more to a trunk). A lean path is also refused where it comes
+  within (the descent's radius lower bound, the area law on what it covers) plus (the smallest tip) of an
+  arm's axis that the seat's own column is not already that close to (`path_goes_through_a_shaft`). Both
+  are lower bounds on the drawn radii, so a refused path touches in the file. The landing's own arm is
+  exempt. What it cannot see: the radius an EARLIER arm grows to after placement (only the minimum tip is
+  known for it), and straight descents.
 - **A second contact for a tip its feature leaves short.** The contact growth runs on the finished field, so
   the placement could not know what a feature gives. `run_sweep_with_second_contact` records, for each tip
   left short, the contact it really made, and runs the placement again with that contact as the load the
