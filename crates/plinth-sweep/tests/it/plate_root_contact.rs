@@ -467,7 +467,16 @@ fn a_landed_arm_keeps_its_own_landing_point_and_gets_no_pad() {
     let base_z = PLATE_Z_MM + 3.0;
     let lowered = lower(arm(PLATE_Z_MM + 6.0, base_z, SweepArmLanding::Landed, true));
     let (lowest_z, holder) = lowest(&lowered.primitives);
-    assert_eq!(holder.segment_kind, SupportSegmentKind::ContactTaper);
+    // The shaft holds the lowest point: one taper, or (round 6) the member under
+    // the owner's head cone that a plateau under the tip is drawn as.
+    assert!(
+        matches!(
+            holder.segment_kind,
+            SupportSegmentKind::ContactTaper | SupportSegmentKind::Member
+        ),
+        "{:?}",
+        holder.segment_kind
+    );
     assert!((lowest_z - base_z).abs() <= 1e-12, "lowest {lowest_z}");
     assert_eq!(lowered.raft_pads, 0);
     assert_eq!(lowered.raft_bridges, 0);
