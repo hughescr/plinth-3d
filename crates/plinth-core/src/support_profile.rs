@@ -187,6 +187,184 @@ fn ratio_by_diameter<P>(
     ratio(below) + t * (ratio(above) - ratio(below))
 }
 
+/// The owner's four profiles' foot contact, `(name, middle_support.
+/// supportmiddlediameter, bottom_support.supporttouchtaildiameter)` in mm
+/// DIAMETER, transcribed from `docs/evidence/chitubox-support-profiles-
+/// 2026-09-30.cfgx` (a test reads the export and compares).
+pub const CHITUBOX_TAIL_TOUCH_ROWS: [(&str, f64, f64); 4] = [
+    ("Light", 0.6, 0.35),
+    ("Middle", 1.2, 0.5),
+    ("Heavy", 1.5, 0.35),
+    ("Ultralight", 0.5, 0.25),
+];
+
+/// The owner's foot-contact table ([`CHITUBOX_TAIL_TOUCH_ROWS`]).
+///
+/// # Panics
+///
+/// Never for the committed rows (a test builds the table).
+#[must_use]
+pub fn chitubox_tail_touch_profiles() -> &'static TailContactProfiles {
+    static TABLE: std::sync::OnceLock<TailContactProfiles> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        TailContactProfiles::new(CHITUBOX_TAIL_TOUCH_ROWS)
+            .expect("the owner's committed tail rows are valid")
+    })
+}
+
+/// One ChituBox support profile's FOOT contact: the DIAMETER of the shaft the
+/// profile draws (`middle_support.supportmiddlediameter`) and the DIAMETER of
+/// the contact sphere its tail touches the model with
+/// (`bottom_support.supporttouchtaildiameter`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TailContactProfile {
+    name: String,
+    shaft_diameter_mm: f64,
+    tail_touch_diameter_mm: f64,
+}
+
+impl TailContactProfile {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// `middle_support.supportmiddlediameter`, a DIAMETER in mm.
+    #[must_use]
+    pub const fn shaft_diameter_mm(&self) -> f64 {
+        self.shaft_diameter_mm
+    }
+
+    /// `bottom_support.supporttouchtaildiameter`, a DIAMETER in mm.
+    #[must_use]
+    pub const fn tail_touch_diameter_mm(&self) -> f64 {
+        self.tail_touch_diameter_mm
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum TailContactProfilesError {
+    #[error("a tail-contact profile table needs at least one profile")]
+    Empty,
+    #[error("profile {name}: diameters must be finite and greater than zero")]
+    NonPositive { name: String },
+    #[error("profiles {first} and {second} share a shaft diameter; the table cannot be read by body size")]
+    DuplicateShaftSize { first: String, second: String },
+    #[error("a profile name must not be empty")]
+    EmptyName,
+}
+
+/// **The owner's foot contact, read by body size** (round 6, 2026-10-14).
+///
+/// A post that stands on the model touches it with the sphere of its tail:
+/// the owner's profile for a shaft of that size draws a contact of
+/// `supporttouchtaildiameter`. The diameter at a body of any size is linear in
+/// the body's DIAMETER between the two profiles whose own shaft diameters
+/// bracket it, and held at the end profile's own value outside the table (the
+/// same rule as [`TipContactProfiles`]; never extrapolated). The table is taken
+/// as the owner wrote it: it is not monotone (Heavy draws a smaller tail
+/// contact than Middle).
+///
+/// **UNITS.** Everything the owner wrote is a DIAMETER; the engine's neck is a
+/// RADIUS. A contact sphere of diameter `d` has radius `d / 2`, and the neck it
+/// stands on is `r_n = (d / 2) / f(r_n)` with `f` the tip table's ball factor
+/// read at the neck's OWN diameter `2 r_n` ([`Self::neck_radius_mm`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TailContactProfiles {
+    profiles: Vec<TailContactProfile>,
+}
+
+impl TailContactProfiles {
+    /// Build the table from `(name, shaft DIAMETER, tail touch DIAMETER)` rows
+    /// in any order; it is stored sorted by shaft diameter.
+    ///
+    /// # Errors
+    ///
+    /// An empty table, a non-finite or non-positive diameter, an empty name,
+    /// or two profiles at one shaft size.
+    pub fn new<I, S>(rows: I) -> Result<Self, TailContactProfilesError>
+    where
+        I: IntoIterator<Item = (S, f64, f64)>,
+        S: Into<String>,
+    {
+        let mut profiles = Vec::new();
+        for (name, shaft, tail) in rows {
+            let name = name.into();
+            if name.trim().is_empty() {
+                return Err(TailContactProfilesError::EmptyName);
+            }
+            if !(shaft.is_finite() && shaft > 0.0 && tail.is_finite() && tail > 0.0) {
+                return Err(TailContactProfilesError::NonPositive { name });
+            }
+            profiles.push(TailContactProfile {
+                name,
+                shaft_diameter_mm: shaft,
+                tail_touch_diameter_mm: tail,
+            });
+        }
+        if profiles.is_empty() {
+            return Err(TailContactProfilesError::Empty);
+        }
+        profiles.sort_by(|a, b| a.shaft_diameter_mm.total_cmp(&b.shaft_diameter_mm));
+        if let Some(pair) = profiles
+            .windows(2)
+            .find(|pair| pair[1].shaft_diameter_mm <= pair[0].shaft_diameter_mm)
+        {
+            return Err(TailContactProfilesError::DuplicateShaftSize {
+                first: pair[0].name.clone(),
+                second: pair[1].name.clone(),
+            });
+        }
+        Ok(Self { profiles })
+    }
+
+    /// The profiles, smallest shaft first.
+    #[must_use]
+    pub fn profiles(&self) -> &[TailContactProfile] {
+        &self.profiles
+    }
+
+    /// The tail contact sphere's DIAMETER for a body of `body_diameter_mm`
+    /// DIAMETER.
+    #[must_use]
+    pub fn tail_touch_diameter_mm(&self, body_diameter_mm: f64) -> f64 {
+        ratio_by_diameter(
+            &self.profiles,
+            body_diameter_mm,
+            TailContactProfile::shaft_diameter_mm,
+            TailContactProfile::tail_touch_diameter_mm,
+        )
+    }
+
+    /// **The neck RADIUS under the foot contact of a body of `body_radius_mm`
+    /// RADIUS**: the radius `r` with `r * f(r) = d / 2`, `d` the tail touch
+    /// DIAMETER read at the body's diameter and `f` the tip table's ball factor
+    /// at the neck's own diameter. `r * f(r)` rises with `r` over the owner's
+    /// table (its slope is `f + r f'`, and `f` never falls faster than `1 / r`
+    /// does), so the root is found by bisection on the bracket the factor's
+    /// own range gives.
+    #[must_use]
+    pub fn neck_radius_mm(&self, body_radius_mm: f64, tips: &TipContactProfiles) -> f64 {
+        let half_touch = 0.5 * self.tail_touch_diameter_mm(2.0 * body_radius_mm);
+        let (f_min, f_max) = tips
+            .profiles()
+            .iter()
+            .map(TipContactProfile::ball_factor)
+            .fold((f64::INFINITY, 0.0_f64), |(lo, hi), f| (lo.min(f), hi.max(f)));
+        // r = half_touch / f: the widest neck at the smallest factor.
+        let (mut low, mut high) = (half_touch / f_max, half_touch / f_min);
+        for _ in 0..60 {
+            let middle = 0.5 * (low + high);
+            if middle * tips.ball_factor(middle) < half_touch {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        0.5 * (low + high)
+    }
+}
+
 /// One ChituBox support profile's root boss: the DIAMETER of the shaft the
 /// boss stands under (`middle_support.supportmiddlediameter`) and the DIAMETER
 /// of the boss's foot on the raft (`support_general_para.diameterofbossbottom`).
@@ -354,6 +532,125 @@ mod tests {
         assert_eq!(heavy.name(), "Heavy");
         assert!((heavy.boss_factor() - 22.0 / 15.0).abs() < 1e-12);
     }
+
+    fn tail_table() -> &'static TailContactProfiles {
+        chitubox_tail_touch_profiles()
+    }
+
+    /// GOLDEN, all four tail rows: the owner's tail touch is a DIAMETER `d`; the
+    /// sphere's radius is `d / 2` and the neck under it `r_n = (d / 2) / f(r_n)`,
+    /// `f` read at the neck's own diameter. Not `d / f` (a diameter where a radius
+    /// belongs: 0.2625 for the Light row) and not `d / (2 * 1.3333)` (the factor
+    /// held where it is not: 0.1313).
+    #[test]
+    fn the_four_tail_rows_read_their_neck_radius_with_the_diameter_converted() {
+        let tips = TipContactProfiles::new(CHITUBOX_TIP_CONTACT_ROWS_FOR_TESTS).unwrap();
+        // (name, body DIAMETER = the row's shaft, tail touch DIAMETER, neck RADIUS)
+        let golden = [
+            ("Ultralight", 0.5, 0.25, 0.088_020),
+            ("Light", 0.6, 0.35, 0.120_871),
+            ("Middle", 1.2, 0.5, 0.200_000),
+            ("Heavy", 1.5, 0.35, 0.120_871),
+        ];
+        for (name, body_diameter, touch, neck) in golden {
+            let row = tail_table()
+                .profiles()
+                .iter()
+                .find(|row| row.name() == name)
+                .unwrap();
+            assert!((row.shaft_diameter_mm() - body_diameter).abs() < 1e-12, "{name}");
+            assert!((row.tail_touch_diameter_mm() - touch).abs() < 1e-12, "{name}");
+            let read = tail_table().tail_touch_diameter_mm(body_diameter);
+            assert!((read - touch).abs() < 1e-12, "{name}: tail touch {read}");
+            let r_n = tail_table().neck_radius_mm(0.5 * body_diameter, &tips);
+            assert!((r_n - neck).abs() < 2e-6, "{name}: neck {r_n} against {neck}");
+            // The defining identity, in radii: the ball's radius is the neck times
+            // the factor at the neck's own diameter, and is half the touch diameter.
+            assert!(
+                (r_n * tips.ball_factor(r_n) - 0.5 * touch).abs() < 1e-9,
+                "{name}: ball radius {} is not half of {touch}",
+                r_n * tips.ball_factor(r_n)
+            );
+            assert!((r_n - touch / tips.ball_factor(r_n)).abs() > 0.05, "{name}: d / f is the wrong conversion");
+        }
+    }
+
+    #[test]
+    fn the_tail_touch_is_linear_in_body_diameter_and_held_outside_the_table() {
+        let t = tail_table();
+        // Halfway between Light (0.6, 0.35) and Middle (1.2, 0.50).
+        assert!((t.tail_touch_diameter_mm(0.9) - 0.425).abs() < 1e-12);
+        assert!((t.tail_touch_diameter_mm(0.1) - 0.25).abs() < 1e-12);
+        assert!((t.tail_touch_diameter_mm(5.0) - 0.35).abs() < 1e-12);
+        assert!((t.tail_touch_diameter_mm(f64::NAN) - 0.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_tail_table_with_no_rows_a_bad_size_or_a_repeated_shaft_is_refused() {
+        assert!(matches!(
+            TailContactProfiles::new(Vec::<(&str, f64, f64)>::new()),
+            Err(TailContactProfilesError::Empty)
+        ));
+        assert!(matches!(
+            TailContactProfiles::new([("a", 0.0, 0.3)]),
+            Err(TailContactProfilesError::NonPositive { .. })
+        ));
+        assert!(matches!(
+            TailContactProfiles::new([("a", 0.6, 0.3), ("b", 0.6, 0.4)]),
+            Err(TailContactProfilesError::DuplicateShaftSize { .. })
+        ));
+        assert!(matches!(
+            TailContactProfiles::new([(" ", 0.6, 0.3)]),
+            Err(TailContactProfilesError::EmptyName)
+        ));
+    }
+
+    /// The rows are the owner's, read off the committed export by name, so a
+    /// re-export with other numbers turns this red until the rows are re-read.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the rows transcribe the export's decimal literals exactly; equality is the claim"
+    )]
+    fn the_tail_rows_equal_the_committed_profile_export() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("docs/evidence/chitubox-support-profiles-2026-09-30.cfgx");
+        let raw = std::fs::read_to_string(&path).expect("the committed export is readable");
+        let export: serde_json::Value = serde_json::from_str(&raw).expect("the export is JSON");
+        let profiles = export["support"].as_array().expect("a support array");
+        assert_eq!(profiles.len(), CHITUBOX_TAIL_TOUCH_ROWS.len());
+        for profile in profiles {
+            let name = profile["name"].as_str().expect("a name");
+            let row = tail_table()
+                .profiles()
+                .iter()
+                .find(|row| row.name() == name)
+                .unwrap_or_else(|| panic!("{name} is missing from the tail table"));
+            let field = |section: &str, key: &str| {
+                profile[section][key]["currentvalue"]
+                    .as_f64()
+                    .unwrap_or_else(|| panic!("{name} has no {section}.{key}"))
+            };
+            assert_eq!(
+                row.shaft_diameter_mm(),
+                field("middle_support", "supportmiddlediameter"),
+                "{name}: supportmiddlediameter"
+            );
+            assert_eq!(
+                row.tail_touch_diameter_mm(),
+                field("bottom_support", "supporttouchtaildiameter"),
+                "{name}: supporttouchtaildiameter"
+            );
+        }
+    }
+
+    const CHITUBOX_TIP_CONTACT_ROWS_FOR_TESTS: [(&str, f64, f64); 4] = [
+        ("Light", 0.2, 0.3),
+        ("Middle", 0.4, 0.5),
+        ("Heavy", 0.6, 0.8),
+        ("Ultralight", 0.15, 0.2),
+    ];
 
     #[test]
     fn a_boss_no_wider_than_its_shaft_a_non_positive_size_or_no_name_is_refused() {
