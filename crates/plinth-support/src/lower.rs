@@ -1297,6 +1297,9 @@ pub struct SweepLowering {
     /// column at the tip radius. Zero on every sweep field; a nonzero count is
     /// a caller defect, published rather than hidden.
     pub arms_without_profile: usize,
+    /// Knee spheres written where a member's chained frusta turn by more than
+    /// a pixel of their section ([`knee_spheres`], round 6).
+    pub knee_spheres: usize,
     /// **The support resin as EMITTED**, in mm³: the solid volume of every
     /// primitive written — tip balls (less the cap beyond their seat plane),
     /// tapers, chained members and root flares — each measured from its own
@@ -1815,6 +1818,14 @@ fn lower_sweep_arms_of(
             out.primitives = rebuilt;
         }
     }
+    // THE KNEES (round 6, 2026-10-14): a sphere at every vertex where two
+    // chained frusta of a member turn by more than a pixel of their section.
+    // After the junction pass (which draws the bends of landed junctions) and
+    // before the raft, so they are part of the arms' own solid for everything
+    // that reads the finished records.
+    let knees = knee_spheres(&out.primitives, config.pixel_pitch_mm);
+    out.knee_spheres = knees.len();
+    out.primitives.extend(knees);
     // THE RAFT (fix/sweep-raft, 2026-09-29): one pad under every plate foot,
     // MST bridges between the pads, planned ONCE for the whole field from the
     // feet the arms actually emitted, and appended after every support record
@@ -1892,6 +1903,89 @@ fn lower_hull_reference(
     }
     (out, reference_arms)
 }
+
+/// **The knees: a sphere where a member bends** (round 6, 2026-10-14; the owner
+/// on picture 28: "probably with a ball joint if the cones meet at an angle").
+///
+/// Two chained frusta of one member (the second a `Member`, ending where the first
+/// begins on the same point to a micron) that turn by `theta` leave the outer side
+/// of the bend open: their flat end rings meet at an angle. Where the section
+/// `r = max(r_end of the first, r_start of the second)` turns `r sin(theta)` over
+/// more than one registered XY pixel, the opening prints, and a sphere of radius
+/// `r` at the vertex closes it. The radius is the larger section there and
+/// nothing is chosen.
+///
+/// **It cannot reach anything the member's own tube does not.** The sweep's
+/// clearance readers model a member as the tube of radius `rho(t)` about its axis
+/// (distance to the axis minus the radius there), and the axis point at the
+/// vertex has radius `r` in both frusta, so a sphere of radius `r` about that
+/// point lies inside the tube the readers already checked. Pairs shorter than a
+/// pixel of axis are not bends, and records of different arms never share a
+/// vertex to a micron. One batched scan over the finished records.
+fn knee_spheres(primitives: &[SupportPrimitive], pixel_mm: f64) -> Vec<SupportPrimitive> {
+    let mut knees: Vec<SupportPrimitive> = Vec::new();
+    for pair in primitives.windows(2) {
+        let (a, b) = (&pair[0], &pair[1]);
+        if !(matches!(
+            a.segment_kind,
+            SupportSegmentKind::ContactTaper | SupportSegmentKind::Member
+        ) && b.segment_kind == SupportSegmentKind::Member)
+        {
+            continue;
+        }
+        let a_start = a.start_mm.map(Finite::get);
+        let a_end = a.end_mm.map(Finite::get);
+        let b_start = b.start_mm.map(Finite::get);
+        let b_end = b.end_mm.map(Finite::get);
+        if geom_kernel::vec3::norm(geom_kernel::vec3::sub(a_end, b_start)) > KNEE_JOIN_TOLERANCE_MM
+        {
+            continue;
+        }
+        let along_a = geom_kernel::vec3::sub(a_end, a_start);
+        let along_b = geom_kernel::vec3::sub(b_end, b_start);
+        let (length_a, length_b) = (
+            geom_kernel::vec3::norm(along_a),
+            geom_kernel::vec3::norm(along_b),
+        );
+        if !(length_a.is_finite()
+            && length_b.is_finite()
+            && length_a >= pixel_mm
+            && length_b >= pixel_mm)
+        {
+            continue;
+        }
+        let cosine = (geom_kernel::vec3::dot(along_a, along_b) / (length_a * length_b))
+            .clamp(-1.0, 1.0);
+        let radius = a.end_radius_mm.get().max(b.start_radius_mm.get());
+        let outer_offset = radius * cosine.acos().sin();
+        if outer_offset.is_nan() || outer_offset <= pixel_mm {
+            continue;
+        }
+        let geometry = SphereGeometry::joint(a.end_mm);
+        let Ok(sphere_radius) = positive(radius) else {
+            continue;
+        };
+        let Ok((start_mm, end_mm)) = geometry.canonical_poles(sphere_radius) else {
+            continue;
+        };
+        knees.push(SupportPrimitive {
+            segment_kind: SupportSegmentKind::JointSphere,
+            start_mm,
+            end_mm,
+            start_radius_mm: sphere_radius,
+            end_radius_mm: sphere_radius,
+            contact_depth_mm: None,
+            ring_normal: FrustumRingNormal::SegmentAxis,
+            sphere_geometry: Some(geometry),
+            seat_trim: None,
+        });
+    }
+    knees
+}
+
+/// Two records meet when their shared vertex agrees to this: a tenth of a micron,
+/// float noise of the one point both were cut at, never a physical allowance.
+const KNEE_JOIN_TOLERANCE_MM: f64 = 1.0e-4;
 
 /// The solid one emitted record encloses, in mm³, from its own fields.
 ///
@@ -2893,6 +2987,87 @@ fn drawn_chords(
         }
     }
     spans
+}
+
+/// The first slot boundary under `from_z` inside the shaft (the cut
+/// [`drawn_chords`] makes first), or `to_z` where there is none: where the head
+/// cone of [`lead_from_the_neck`] ends.
+fn first_slot_boundary_below(
+    slots: usize,
+    base_z: f64,
+    seat_z: f64,
+    from_z: f64,
+    to_z: f64,
+) -> f64 {
+    let rise = seat_z - base_z;
+    if slots == 0 || !rise.is_finite() || rise <= 0.0 {
+        return to_z;
+    }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a slot count bounded by the profile length is exact in f64"
+    )]
+    let slot_height = rise / slots as f64;
+    let first = ((from_z - base_z) / slot_height).floor();
+    let mut z = base_z + first * slot_height;
+    if z >= from_z - ZERO_LENGTH_MM {
+        z -= slot_height;
+    }
+    if z.is_finite() && z > to_z + ZERO_LENGTH_MM {
+        z
+    } else {
+        to_z
+    }
+}
+
+/// **THE NECK IS THE FIRST DRAWN RADIUS** (round 6, 2026-10-14; the owner's
+/// picture 31: a 0.067 mm ball on a much fatter flat-topped post). The shaft
+/// leaves its contact ball at the neck's radius `start_radius` AT the ball's
+/// centre. Where the ledger asks for more than the neck in the first slot (a
+/// lander in the head zone), the first span used to start at the ledger's value
+/// there, a flat top the ball sat on. It starts at the neck now and widens, going
+/// down, to the ledger's value over the first slot (`first_cut_z`, the first
+/// slot boundary below the top, or the shaft's end): a cone that faces up and
+/// prints at any slope, drawn along the member axis. The widening is all the
+/// first slot allows: the ledger's value is the radius the carried load needs
+/// from there down, and the neck is only the radius AT the centre (the head's
+/// design envelope is the cone, the carried load's minimum the floor under it;
+/// where the load asks for more, the load wins). A span that already starts at
+/// the neck is untouched, bit for bit.
+fn lead_from_the_neck(spans: &mut Vec<DrawnSpan>, start_radius: f64, first_cut_z: f64) {
+    let Some(first) = spans.first().copied() else {
+        return;
+    };
+    if !(start_radius.is_finite()
+        && start_radius > 0.0
+        && first.top_radius_mm > start_radius * (1.0 + PROFILE_RELATIVE_SLACK))
+    {
+        return;
+    }
+    let drop = first.top_z_mm - first.bottom_z_mm;
+    let to_cut = first.top_z_mm - first_cut_z;
+    if !drop.is_finite() || drop <= 0.0 || to_cut <= ZERO_LENGTH_MM || to_cut >= drop - ZERO_LENGTH_MM {
+        // One slot (or less) is the whole span: the cone is the span.
+        spans[0].top_radius_mm = start_radius;
+        return;
+    }
+    let radius_at_cut =
+        first.top_radius_mm + (first.bottom_radius_mm - first.top_radius_mm) * (to_cut / drop);
+    spans[0] = DrawnSpan {
+        top_z_mm: first_cut_z,
+        bottom_z_mm: first.bottom_z_mm,
+        top_radius_mm: radius_at_cut,
+        bottom_radius_mm: first.bottom_radius_mm,
+    };
+    spans.insert(
+        0,
+        DrawnSpan {
+            top_z_mm: first.top_z_mm,
+            bottom_z_mm: first_cut_z,
+            top_radius_mm: start_radius,
+            bottom_radius_mm: radius_at_cut,
+        },
+    );
 }
 
 /// The tip seat for one arm, by the law in `docs/physics.md` §9, bounded by
@@ -4621,7 +4796,7 @@ fn push_drawn_shaft(
 ) -> Option<usize> {
     let top_z = shaft.top[2].get();
     let bottom_z = shaft.bottom[2].get();
-    let spans = drawn_spans(
+    let mut spans = drawn_spans(
         &arm.radius_profile_mm,
         arm.base_mm[2],
         shaft.profile_top_z_mm,
@@ -4629,6 +4804,20 @@ fn push_drawn_shaft(
         bottom_z,
         shaft.tip_radius.get(),
         shaft.root_radius.get(),
+    );
+    // THE NECK IS THE FIRST DRAWN RADIUS (round 6): the sweep's readers keep
+    // reading the ledger's chords ([`drawn_spans`], conservative: the ledger's
+    // value is the wider); the file leaves the ball at the neck.
+    lead_from_the_neck(
+        &mut spans,
+        shaft.tip_radius.get(),
+        first_slot_boundary_below(
+            arm.radius_profile_mm.len(),
+            arm.base_mm[2],
+            shaft.profile_top_z_mm,
+            top_z,
+            bottom_z,
+        ),
     );
     // A point on the straight axis at height `z`, by the same parameter the
     // spans were cut at, so a shared end is the same number on both spans.
@@ -6898,5 +7087,127 @@ mod pole_collar_tests {
         let past = [3.0, 0.0, -1.0];
         let (_, steeper) = pole_collar(centre, 0.8947, &shaft(centre, past, 0.671)).expect("71.6 degrees");
         assert!(steeper);
+    }
+
+    /// Two chained frusta that meet at `(0, 0, 8)` and turn by `bend_deg`, the first
+    /// ending at radius `r_end` and the second starting at `r_start`.
+    fn bent(bend_deg: f64, r_end: f64, r_start: f64, length: f64) -> Vec<SupportPrimitive> {
+        let vertex = [0.0, 0.0, 8.0];
+        let turn = bend_deg.to_radians();
+        let after = [length * turn.sin(), 0.0, 8.0 - length * turn.cos()];
+        vec![
+            frustum(
+                SupportSegmentKind::ContactTaper,
+                finite3([0.0, 0.0, 8.0 + length]).unwrap(),
+                finite3(vertex).unwrap(),
+                positive(r_end).unwrap(),
+                positive(r_end).unwrap(),
+                None,
+                FrustumRingNormal::SegmentAxis,
+            ),
+            frustum(
+                SupportSegmentKind::Member,
+                finite3(vertex).unwrap(),
+                finite3(after).unwrap(),
+                positive(r_start).unwrap(),
+                positive(r_start).unwrap(),
+                None,
+                FrustumRingNormal::SegmentAxis,
+            ),
+        ]
+    }
+
+    /// **T4, the knees** (round 6): a bend that turns `r sin(turn)` over more than one
+    /// registered XY pixel gets a sphere at the vertex of radius the larger section
+    /// there (Bat_Cat_Owl recs 131 -> 132: r 0.504, 26 degrees). A straight run, a
+    /// bend under a pixel, and a pair too short to be a bend get none.
+    ///
+    /// SABOTAGE: removing the `knee_spheres` call before the raft (or its push)
+    /// leaves the first case with no sphere.
+    #[test]
+    fn a_bend_over_a_pixel_gets_a_knee_sphere_of_the_larger_section() {
+        let pixel = 0.0189;
+        let knees = knee_spheres(&bent(26.3, 0.5044, 0.5044, 1.0), pixel);
+        assert_eq!(knees.len(), 1, "{knees:?}");
+        assert_eq!(knees[0].segment_kind, SupportSegmentKind::JointSphere);
+        assert!((knees[0].start_radius_mm.get() - 0.5044).abs() < 1e-12);
+        let centre: [f64; 3] = std::array::from_fn(|axis| {
+            0.5 * (knees[0].start_mm[axis].get() + knees[0].end_mm[axis].get())
+        });
+        assert!(geom_kernel::vec3::dist(centre, [0.0, 0.0, 8.0]) < 1e-9, "{centre:?}");
+        // The larger of the two sections meeting there.
+        let wider_below = knee_spheres(&bent(26.3, 0.31, 0.5044, 1.0), pixel);
+        assert!((wider_below[0].start_radius_mm.get() - 0.5044).abs() < 1e-12);
+        let wider_above = knee_spheres(&bent(26.3, 0.5044, 0.31, 1.0), pixel);
+        assert!((wider_above[0].start_radius_mm.get() - 0.5044).abs() < 1e-12);
+        // Controls: no turn, a turn under a pixel of section, and pieces under a pixel long.
+        assert!(knee_spheres(&bent(0.0, 0.5, 0.5, 1.0), pixel).is_empty());
+        assert!(knee_spheres(&bent(2.0, 0.3, 0.3, 1.0), pixel).is_empty(), "0.3 sin(2 deg) = 0.0105 < 0.0189");
+        assert!(knee_spheres(&bent(40.0, 0.5, 0.5, 0.01), pixel).is_empty());
+        // Two arms never share a vertex: a gap in the chain is no knee.
+        let mut apart = bent(40.0, 0.5, 0.5, 1.0);
+        apart[1].start_mm = finite3([0.0, 0.0, 7.9]).unwrap();
+        assert!(knee_spheres(&apart, pixel).is_empty());
+    }
+
+    /// **A knee sphere stands inside the tube the clearance readers already check**
+    /// (`PROFILE-DESIGN.md` section 2 (3), challenger point 4). The sweep reads a
+    /// member as the tube of radius `rho(t)` about its axis, the distance to the
+    /// axis minus the radius there. The vertex is on both axes with radius `r` in
+    /// both frusta, so for any model point `P` the tube clearance is no more than
+    /// `|PV| - r`, the sphere's own: a joint the readers call clear cannot cross the
+    /// gap with its sphere. Checked on 3 sections and bends from 5 to 90 degrees,
+    /// 200 points each.
+    #[test]
+    fn a_knee_sphere_cannot_come_nearer_a_model_point_than_the_tube_already_checked() {
+        let vertex = [0.0, 0.0, 8.0];
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            #[expect(clippy::cast_precision_loss, reason = "a pseudo-random draw, not a measurement")]
+            let unit = (state >> 11) as f64 / (1_u64 << 53) as f64;
+            unit
+        };
+        for radius in [0.05, 0.3, 1.0] {
+            for bend in [5.0, 15.0, 26.3, 45.0, 70.0, 90.0] {
+                let pieces = bent(bend, radius, radius, 2.0);
+                let axes: Vec<([f64; 3], [f64; 3])> = pieces
+                    .iter()
+                    .map(|p| (p.start_mm.map(Finite::get), p.end_mm.map(Finite::get)))
+                    .collect();
+                let knee = knee_spheres(&pieces, 0.0189);
+                if knee.is_empty() {
+                    continue;
+                }
+                for _ in 0..200 {
+                    let point = [
+                        4.0 * next() - 2.0,
+                        4.0 * next() - 2.0,
+                        8.0 + 4.0 * next() - 2.0,
+                    ];
+                    let sphere = geom_kernel::vec3::dist(point, vertex) - radius;
+                    let tube = axes
+                        .iter()
+                        .map(|&(a, b)| {
+                            (0..=400)
+                                .map(|step| {
+                                    let t = f64::from(step) / 400.0;
+                                    let on_axis: [f64; 3] = std::array::from_fn(|axis| {
+                                        a[axis] + t * (b[axis] - a[axis])
+                                    });
+                                    geom_kernel::vec3::dist(point, on_axis) - radius
+                                })
+                                .fold(f64::INFINITY, f64::min)
+                        })
+                        .fold(f64::INFINITY, f64::min);
+                    assert!(
+                        tube <= sphere + 1e-9,
+                        "r {radius} bend {bend}: the tube reads {tube}, the sphere {sphere}"
+                    );
+                }
+            }
+        }
     }
 }

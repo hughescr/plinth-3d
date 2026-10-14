@@ -82,16 +82,6 @@ impl Birth {
         !self.extents.is_empty() && self.reach_from(centre_mm) <= radius_mm
     }
 
-    /// Whether the disc of `radius_mm` about `centre_mm` reaches at least one
-    /// pixel of the birth (read at the nearest point of each cell's pixel box).
-    pub(crate) fn touches_disc(&self, centre_mm: [f64; 2], radius_mm: f64) -> bool {
-        self.extents.iter().any(|&[min_x, min_y, max_x, max_y]| {
-            let near_x = (min_x - centre_mm[0]).max(centre_mm[0] - max_x).max(0.0);
-            let near_y = (min_y - centre_mm[1]).max(centre_mm[1] - max_y).max(0.0);
-            near_x.hypot(near_y) <= radius_mm
-        })
-    }
-
     /// The radius of the smallest disc about `centre_mm` that holds every
     /// pixel of the birth ([`Self::inside_disc`] at its limit), mm.
     pub(crate) fn reach_from(&self, centre_mm: [f64; 2]) -> f64 {

@@ -501,7 +501,6 @@ fn a_tip_is_grown_toward_its_loads_need_and_not_the_profile_disc() {
     let bounds = [TipBounds {
         need_mm2: Some(need),
         feature_chord_mm: None,
-        ..TipBounds::default()
     }];
     let (outcome, grown) = grow(&env, &one(&tip), &sites, &bounds, without_flat_gain_stop(2.0), PIXEL_AREA_MM2);
     println!("{outcome:?}");
@@ -514,7 +513,6 @@ fn a_tip_is_grown_toward_its_loads_need_and_not_the_profile_disc() {
     let big = [TipBounds {
         need_mm2: Some(100.0),
         feature_chord_mm: None,
-        ..TipBounds::default()
     }];
     let (capped, _) = grow(&env, &one(&tip), &sites, &big, without_flat_gain_stop(2.0), PIXEL_AREA_MM2);
     assert!((capped.planned_mm2 - 100.0).abs() < 1e-12, "the need is kept: {capped:?}");
@@ -580,7 +578,6 @@ fn a_ball_is_no_wider_than_the_feature_it_touches() {
     let bounds = [TipBounds {
         need_mm2: None,
         feature_chord_mm: Some(chord),
-        ..TipBounds::default()
     }];
     // The widest tip radius (and so the ratio ceiling) that leaves the
     // feature the binding ceiling.
@@ -609,74 +606,56 @@ fn a_ball_is_no_wider_than_the_feature_it_touches() {
     };
     let (outcome, grown) = grow(&env, &one(&wide), &sites, &bounds, limits, PIXEL_AREA_MM2);
     println!("{outcome:?}; drawn {grown:?}");
-    // The profile ball is past the edge: counted, and DRAWN SMALLER (the cap is
-    // on ungrown balls too, BALLS-FLARE A(2)), down to its shaft end, which is
-    // itself wider than this edge: named.
+    // The profile ball is past the edge: counted and warned, and KEPT. The
+    // owner's ball is the floor (round 6): it is never drawn smaller, so it is
+    // never drawn as wide as its own shaft end (the owner's picture 30), and it
+    // is not grown either (a ball past its feature gains nothing).
     let profile = plinth_support::tip_contact_discs(&one(&wide), &layers).expect("discs")[0]
         .expect("a disc")
         .ball_radius_mm;
     assert!(disc_width(None) > chord, "anti-vacuity: the profile disc is wider than the edge");
     assert_eq!(outcome.ungrown_over_feature, 1, "{outcome:?}");
-    assert_eq!(outcome.reduced, 1, "{outcome:?}");
-    let drawn = grown[0].expect("the profile ball is drawn smaller");
-    assert!(drawn < profile - 1e-9, "drawn {drawn} against the profile ball {profile}");
     assert!(
-        (drawn - wide.tip_radius_mm).abs() < 1e-12,
-        "never under the shaft end: {drawn} against {}",
+        grown[0].is_none(),
+        "the profile ball is neither reduced nor grown: {grown:?}"
+    );
+    let drawn = drawn_ball_pole(&SweepArm { contact_ball_radius_mm: grown[0], ..wide.clone() }, &layers).2;
+    assert!(
+        (drawn - profile).abs() < 1e-12,
+        "drawn {drawn} against the owner's ball {profile}"
+    );
+    assert!(
+        drawn > wide.tip_radius_mm * 1.2,
+        "the ball stays wider than its own shaft end ({drawn} against {}): the owner's ratios run 1.25-1.5",
         wide.tip_radius_mm
     );
     assert_eq!(outcome.over_feature.len(), 1, "still wider than the edge: {outcome:?}");
     assert_eq!(outcome.short.len(), 1, "{outcome:?}");
     assert_eq!(outcome.short[0].reason, ShortReason::FeatureWidth, "{outcome:?}");
     assert_eq!(outcome.feature_bound, 1, "{outcome:?}");
-    // A feature a little narrower than the profile disc, and wider than the
-    // shaft end's: the profile ball comes down to the chord, not past it.
+    // A feature a little narrower than the profile disc is the same: the ball
+    // is kept at the owner's size and the tip is warned, never shrunk.
     let narrower = 0.9 * disc_width(None);
-    assert!(disc_width(Some(wide.tip_radius_mm)) < narrower, "anti-vacuity: room under the profile ball");
-    let (reduced, reduced_grown) = grow(
+    let (kept, kept_grown) = grow(
         &env,
         &one(&wide),
         &sites,
         &[TipBounds {
             need_mm2: None,
             feature_chord_mm: Some(narrower),
-            ..TipBounds::default()
         }],
         limits,
         PIXEL_AREA_MM2,
     );
-    println!("{reduced:?}; drawn {reduced_grown:?}");
-    let radius = reduced_grown[0].expect("drawn smaller");
-    assert!(radius < profile - 1e-9, "{radius} against {profile}");
-    assert!(
-        disc_width(reduced_grown[0]) <= narrower + 1e-9,
-        "the reduced disc is {} wide on a {narrower} feature",
-        disc_width(reduced_grown[0])
-    );
-    assert!(reduced.over_feature.is_empty(), "{reduced:?}");
-    // A ball that holds a birth the placement left to it is not drawn under
-    // what reaches that birth's farthest pixel.
-    let (held, held_grown) = grow(
-        &env,
-        &one(&wide),
-        &sites,
-        &[TipBounds {
-            need_mm2: None,
-            feature_chord_mm: Some(narrower),
-            hold_floor_mm: Some(profile),
-        }],
-        limits,
-        PIXEL_AREA_MM2,
-    );
-    assert_eq!(held.reduced, 0, "{held:?}");
-    assert!(held_grown[0].is_none(), "{held_grown:?}");
+    println!("{kept:?}; drawn {kept_grown:?}");
+    assert!(kept_grown[0].is_none(), "{kept_grown:?}");
+    assert_eq!(kept.over_feature.len(), 1, "{kept:?}");
     // A feature wide enough to hold the profile disc and a bit more bounds the
     // growth at exactly the chord: the drawn disc is no wider than it.
     let wider = 1.4 * disc_width(None);
     let bounds = [TipBounds {
         need_mm2: None,
         feature_chord_mm: Some(wider),
-        ..TipBounds::default()
     }];
     let (outcome, grown) = grow(&env, &one(&wide), &sites, &bounds, limits, PIXEL_AREA_MM2);
     println!("{outcome:?}; drawn {grown:?}");
@@ -716,9 +695,7 @@ fn a_load_that_needs_more_than_the_profile_disc_is_reported_short() {
             &[Some(site)],
             &[TipBounds {
                 need_mm2: Some(need),
-                feature_chord_mm: None,
-                ..TipBounds::default()
-            }],
+                feature_chord_mm: None,            }],
             registered(2.0),
             PIXEL_AREA_MM2,
         )

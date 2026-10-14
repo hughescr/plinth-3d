@@ -204,6 +204,12 @@ pub struct SlendernessLaw {
     /// and every run is measured as before 2026-10-14 (the plate-only default
     /// of [`Self::new`]; the sweep sets it with [`Self::with_foot_sizing`]).
     x_allowed: f64,
+    /// Whether a model foot also takes the owner's foot rule (the neck under his
+    /// ChituBox tail contact, [`crate::model_feet::foot_radius_mm`]), as the
+    /// final measurement does. Off by default: a law built by [`Self::new`]
+    /// reads the area law's hairline foot of round 5. The sweep turns it on with
+    /// [`Self::with_owner_foot_rule`], so what it reads is what it measures.
+    owner_foot_rule: bool,
 }
 
 impl SlendernessLaw {
@@ -233,7 +239,17 @@ impl SlendernessLaw {
             r_max_mm,
             secant_sat: (1.0 + tangent * tangent).sqrt(),
             x_allowed: 0.0,
+            owner_foot_rule: false,
         }
+    }
+
+    /// The same law, reading a model foot's radius by the owner's foot rule as
+    /// well (round 6): the sweep's setting, so the structural reading and the
+    /// final measurement take the foot from one rule.
+    #[must_use]
+    pub const fn with_owner_foot_rule(mut self) -> Self {
+        self.owner_foot_rule = true;
+        self
     }
 
     /// The same law, reading model feet: `x_allowed` is the registered area-law
@@ -269,9 +285,21 @@ impl SlendernessLaw {
         let slope = self.cone_slope();
         let carried = strut.carried_mm2.first().copied()?.max(0.0);
         (slope > 0.0).then(|| {
-            let radius = (carried / self.x_allowed / core::f64::consts::PI)
-                .sqrt()
-                .clamp(self.r_min_mm, self.r_max_mm);
+            // THE ONE READER (round 6): the radius `model_feet::measure` and the
+            // lowering use, on the post's own state, including the radius the
+            // enlarge-foot rung stored on it.
+            let radius = crate::model_feet::foot_radius_mm(
+                carried,
+                self.x_allowed,
+                self.r_min_mm,
+                self.r_max_mm,
+                if self.owner_foot_rule {
+                    crate::model_feet::foot_body_radius_mm(strut)
+                } else {
+                    0.0
+                },
+                strut.foot_radius_mm,
+            );
             (radius, slope)
         })
     }
@@ -288,6 +316,7 @@ impl SlendernessLaw {
             r_max_mm: 0.0,
             secant_sat: 1.0,
             x_allowed: 0.0,
+            owner_foot_rule: false,
         }
     }
 
@@ -557,6 +586,16 @@ pub struct SlendernessOutcome {
     /// on to the other rungs and, if none holds it, is warned as
     /// `foot_neck_over_limit`.
     pub thicken_refused_neck: usize,
+    /// **Round 6, the enlarge-foot rung** ([`enlarge_foot`]): runs whose
+    /// neck-limited thickening was handed to the foot, and the feet it
+    /// enlarged (the contact radius stored on the post,
+    /// [`crate::SweepStrut::foot_radius_mm`], which the structural reading, the
+    /// final measurement and the drawing all read); and the runs no foot up to
+    /// the registered maximum radius could hold, which go on to the other rungs
+    /// and the warning.
+    pub foot_enlarge_tried: usize,
+    pub feet_enlarged: usize,
+    pub foot_enlarge_refused: usize,
     /// Thickenings written bay-local (ramp, root through the bay, nothing below)
     /// on a connected frame that held, and the ones that could have been and
     /// were raised from the foot as before because the frame did not hold.
@@ -4319,13 +4358,109 @@ fn thicken_to(
         }
         Some(Err(ThickenRefusal::Neck)) => {
             outcome.thicken_refused_neck += 1;
-            false
+            // THE FOOT, BEFORE THE WARNING (round 6, rung iv): no shaft width
+            // holds the run through this hairline neck, so the neck is what
+            // grows.
+            enlarge_foot(context, state, struts, run, fits, outcome)
         }
         Some(Ok(plan)) => {
             commit_thicken(state, struts, &plan, outcome);
             true
         }
     }
+}
+
+/// **The enlarge-foot rung** (round 6, 2026-10-14; `PROFILE-DESIGN.md` section 2
+/// (4) rung iv). The thicken rung refused `run` because the foot's neck and cone
+/// alone take the whole pixel: no shaft width holds a run through a hairline
+/// contact. The neck is what grows. The smallest foot contact radius at which the
+/// thickening finds a root that holds the run, read by the same
+/// [`plan_thicken`] (so the run is read through the very foot it will be drawn
+/// with: [`SweepStrut::foot_radius_mm`] is the one store every reader takes the
+/// foot from): the neck of least resin among those that hold, the foot ball
+/// counted (the least neck alone needs a body at the registered maximum radius;
+/// resin without the ball would run the contact scar up to the body's width). The
+/// radius is stored on the post, the
+/// plan committed, and nothing else changes; where no foot up to the registered
+/// maximum radius holds the run the store is put back and the run goes on to
+/// the other rungs and, last, the warning. The ball follows the neck by the
+/// owner's ratio, so a foot enlarged here is wider at its contact too.
+fn enlarge_foot(
+    context: &SlendernessContext<'_>,
+    state: &mut TieState,
+    struts: &mut [SweepStrut],
+    run: &UnbracedRun,
+    fits: &dyn Fn(&crate::foot_neck::Reading) -> bool,
+    outcome: &mut SlendernessOutcome,
+) -> bool {
+    let member = run.strut_id as usize;
+    let law = context.law;
+    let Some((current, _)) = struts.get(member).and_then(|strut| law.foot_contact(strut)) else {
+        return false;
+    };
+    outcome.foot_enlarge_tried += 1;
+    let original = struts[member].foot_radius_mm;
+    let top = law.max_radius_mm();
+    let plan_with = |struts: &mut [SweepStrut], neck: f64| -> Option<ThickenPlan> {
+        struts[member].foot_radius_mm = Some(neck);
+        match plan_thicken(context, state, struts, run, fits) {
+            Some(Ok(plan)) => Some(plan),
+            _ => None,
+        }
+    };
+    if current >= top || plan_with(struts, top).is_none() {
+        struts[member].foot_radius_mm = original;
+        outcome.foot_enlarge_refused += 1;
+        return false;
+    }
+    let (mut low, mut high) = (current, top);
+    for _ in 0..40 {
+        let middle = 0.5 * (low + high);
+        if plan_with(struts, middle).is_some() {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    // THE LEAST-RESIN NECK THAT HOLDS (the design's D5 rule): from the least neck
+    // that holds, in steps of a tenth, the plan's own resin plus the foot ball the
+    // neck carries (`4/3 pi (f r)^3`, the owner's ratio at that size). The ball's
+    // cube pays for the thinner body a bigger neck allows: the least neck alone
+    // needs a body at the registered maximum radius (12 mm3 a post measured on
+    // Deinonychus), and resin alone would run the neck up to the body's width and
+    // the contact scar with it (0.40 mm necks, 0.9 mm balls, measured). The
+    // search stops where the neck is as wide as the root it allows.
+    let ball_mm3 = |neck: f64| {
+        let ball = crate::model_feet::owner_ball_factor(neck) * neck;
+        4.0 / 3.0 * core::f64::consts::PI * ball * ball * ball
+    };
+    let mut best: Option<(f64, ThickenPlan, f64)> = None;
+    let mut neck = high;
+    for _ in 0..40 {
+        if let Some(plan) = plan_with(struts, neck) {
+            let cost = plan.added_mm3 + ball_mm3(neck);
+            let wider_than_its_root = neck >= plan.root;
+            if best.as_ref().is_none_or(|(_, _, kept)| cost < *kept - 1.0e-12) {
+                best = Some((neck, plan, cost));
+            }
+            if wider_than_its_root {
+                break;
+            }
+        }
+        if neck >= top {
+            break;
+        }
+        neck = (neck * 1.1).min(top);
+    }
+    let Some((neck, plan, _)) = best else {
+        struts[member].foot_radius_mm = original;
+        outcome.foot_enlarge_refused += 1;
+        return false;
+    };
+    struts[member].foot_radius_mm = Some(neck);
+    commit_thicken(state, struts, &plan, outcome);
+    outcome.feet_enlarged += 1;
+    true
 }
 
 /// Why the thicken rung refused a run.
@@ -5125,9 +5260,18 @@ fn plan_thicken(
     let enters = |plan: &ThickenPlan| {
         context.member_clearance && thickening_enters_the_gap(context, state, struts, plan)
     };
-    let eligible = bay_local_span(context, state, struts, run, root).is_some();
+    let eligible = bay_local_span(context, state, struts, run, root, true).is_some();
+    // THE LOWER CONE FIRST (round 6): one cone from the foot to the run's base.
+    // Where a cone that low enters the model's final gap (a wall beside the
+    // foot, as the old ramp's fixture has), the steepest ramp the permitted
+    // underside slope allows, higher up, is tried instead, as before.
     let local = if eligible {
-        bay_local_plan(context, state, struts, run, &plan).filter(|local| !enters(local))
+        bay_local_plan(context, state, struts, run, &plan, true)
+            .filter(|local| !enters(local))
+            .or_else(|| {
+                bay_local_plan(context, state, struts, run, &plan, false)
+                    .filter(|local| !enters(local))
+            })
     } else {
         None
     };
@@ -5166,9 +5310,10 @@ fn bay_local_plan(
     struts: &[SweepStrut],
     run: &UnbracedRun,
     base: &ThickenPlan,
+    lower_cone: bool,
 ) -> Option<ThickenPlan> {
     let trial = |root: f64| -> Option<ThickenPlan> {
-        let span = bay_local_span(context, state, struts, run, root)?;
+        let span = bay_local_span(context, state, struts, run, root, lower_cone)?;
         Some(ThickenPlan {
             root,
             local: Some(span),
@@ -5256,12 +5401,17 @@ fn commit_thicken(
 /// bottom, or lower where the bay is too shallow to hold it (the ramp is then
 /// extended below the bay, never cut short into a step), and the root runs from
 /// its apex to the run's base.
+///
+/// **The lower cone** (`lower_cone`, round 6): where the post's lower part is long
+/// enough, the ramp is ONE straight cone from the foot to the root at the run's
+/// base instead (see the comment at the cone's construction below).
 fn bay_local_span(
     context: &SlendernessContext<'_>,
     state: &TieState,
     struts: &[SweepStrut],
     run: &UnbracedRun,
     root: f64,
+    lower_cone: bool,
 ) -> Option<LocalSpan> {
     let index = run.strut_id as usize;
     let post = struts.get(index)?;
@@ -5288,6 +5438,33 @@ fn bay_local_span(
         reason = "a non-negative whole number of layers, bounded just above"
     )]
     let layers = wide as usize;
+    // THE LOWER CONE (round 6, 2026-10-14; the owner's picture 28: "two cones
+    // meeting at a shared base"). Where the lower part of the post is long enough,
+    // the post widens from its foot to `root` in ONE straight cone that meets the
+    // run's base at the root: not a hairline under a fat section with a few
+    // layers of steepest ramp over it (1074: a 0.05-0.09 mm rod for 4.4 mm under
+    // a 0.232 mm post). The gain per layer is the whole lower length's, never
+    // steeper than the permitted underside slope; where the lower length cannot
+    // hold that cone the steepest ramp stands, as before. Writes are minimums
+    // (`max` with what is drawn), so no lower run's own need is ever lowered.
+    let foot_layer = post.k_bottom + 1;
+    let at_the_foot = drawn_at(post, state.profiles.get(index)?, post.k_bottom).unwrap_or(below);
+    let apex = run.k_lo;
+    if lower_cone && apex > foot_layer {
+        let needed = ((root - at_the_foot) / gain).max(0.0).ceil();
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a layer count bounded by the plan's own layer count is exact in f64"
+        )]
+        let room = (apex - foot_layer) as f64;
+        if needed.is_finite() && needed >= 1.0 && room >= needed {
+            return Some(LocalSpan {
+                start: foot_layer,
+                apex,
+                gain_per_layer_mm: (root - at_the_foot) / room,
+            });
+        }
+    }
     let start = bay_bottom.min(run.k_lo.checked_sub(layers)?);
     (start > post.k_bottom).then_some(LocalSpan {
         start,
@@ -5886,7 +6063,7 @@ fn tie_by_mast(
         ],
         kind: StrutKind::Mast,
         min_radius_mm: radius_mm,
-        thickened_mm: Vec::new(),
+        thickened_mm: Vec::new(), foot_radius_mm: None,
         seat_on_strut: None,
         k_top: k,
         k_bottom: 0,
@@ -7162,7 +7339,7 @@ fn push_brace(
         ],
         kind: StrutKind::Brace,
         min_radius_mm: radius_mm,
-        thickened_mm: Vec::new(),
+        thickened_mm: Vec::new(), foot_radius_mm: None,
         seat_on_strut: Some(seat_on),
         k_top,
         k_bottom,
@@ -7699,7 +7876,7 @@ fn tie_member(grid: &Grid, id: u32, post: u32, plan: &TiePlan, radius_mm: f64) -
         ],
         kind: StrutKind::Tie,
         min_radius_mm: radius_mm,
-        thickened_mm: Vec::new(),
+        thickened_mm: Vec::new(), foot_radius_mm: None,
         seat_on_strut: None,
         k_top: plan.k_top,
         k_bottom: plan.k_bottom,
@@ -8302,7 +8479,7 @@ mod tests {
             center_mm: [grid.center_x_mm(col), grid.center_y_mm(row)],
             kind: crate::StrutKind::Arm,
             min_radius_mm: 0.0,
-            thickened_mm: Vec::new(),
+            thickened_mm: Vec::new(), foot_radius_mm: None,
             seat_on_strut: None,
             k_top: 80,
             k_bottom: 0,

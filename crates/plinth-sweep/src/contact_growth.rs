@@ -75,15 +75,17 @@
 //!   what each short tip really made and runs the placement again with that
 //!   as the load the tip may carry, and the warning is what remains.
 //!
-//! The ceilings bind the profile balls too (review 2026-10-14, BALLS-FLARE
-//! A(2)). The profile balls (factor × tip radius, a table of 1.25 to 1.5) are
-//! the owner's ChituBox balls for the tip size; one wider than its feature
-//! (or past the ratio) is counted ([`ContactOutcome::ungrown_over_feature`])
-//! and drawn at the ceiling ([`ContactOutcome::reduced`]), by the lowering's
-//! request below the profile ball (same deepest point), but never under the
-//! shaft end it stands on and never under what holds the births the placement
-//! left to it ([`TipBounds::hold_floor_mm`]). One still past its feature at
-//! that floor is warned ([`ContactOutcome::over_feature`]).
+//! **The owner's ball is the floor** (round 6, 2026-10-14). The profile balls
+//! (factor × tip radius, a table of 1.25 to 1.5) are the owner's ChituBox balls
+//! for the tip size, and a ball is never drawn smaller than its own: the
+//! ceilings above limit GROWTH only. Round 5 drew a profile ball at the
+//! feature's chord or the ratio ceiling, floored at the shaft end, which drew
+//! 12 of 35 Bat_Cat_Owl balls as wide as their shaft (the owner's picture 30).
+//! A profile ball past its feature or the ratio is counted
+//! ([`ContactOutcome::ungrown_over_feature`]) and warned
+//! ([`ContactOutcome::over_feature`]); it is the neck, not the ball, that
+//! follows the load, and a contact that stays short of the need is warned
+//! against that need, never fixed by shrinking either.
 //!
 //! # Tolerance and the search
 //!
@@ -168,13 +170,6 @@ pub struct TipBounds {
     /// The narrowest cured chord of the model section through the seat at the
     /// strike layer, mm ([`crate::feature_chord`]).
     pub feature_chord_mm: Option<f64>,
-    /// The smallest ball that still holds every birth this tip was seated to
-    /// hold, mm: the placement let this tip's contact ball stand for the
-    /// pieces of model whose every pixel lies inside it
-    /// ([`crate::SweepStrut::held_births`]), and a ball drawn smaller than
-    /// they reach leaves them with nothing under them. A ball is never
-    /// reduced below it.
-    pub hold_floor_mm: Option<f64>,
 }
 
 /// Why a tip's real contact is still short of its target after the growth.
@@ -327,18 +322,10 @@ pub struct ContactOutcome {
     /// whose ceiling is the feature's chord (the path hits of those rules).
     pub ratio_bound: usize,
     pub feature_bound: usize,
-    /// Profile balls (the owner's, before any reduction) past a ceiling: wider
-    /// than their feature's chord, and past the ball-to-shaft ratio.
+    /// Profile balls (the owner's, never reduced) past a ceiling: wider than
+    /// their feature's chord, and past the ball-to-shaft ratio.
     pub ungrown_over_feature: usize,
     pub ungrown_over_ratio: usize,
-    /// Profile balls drawn SMALLER than the owner's ball because they stood
-    /// past one of those ceilings (round 5 review, 2026-10-14): at the ceiling,
-    /// never under their shaft end.
-    pub reduced: usize,
-    /// Struts whose owner's ball a reduction would have left a birth
-    /// uncovered by, and which keep it (set by the caller that grades births,
-    /// `grow_contact_balls`; they are the tips a second contact is for).
-    pub kept_for_births: Vec<usize>,
     /// The balls as drawn that are still wider than their feature (the shaft
     /// end they stand on is wider than the feature), one row each.
     pub over_feature: Vec<ProfileOver>,
@@ -512,62 +499,14 @@ pub fn grow(
         .collect();
     let tip_sites: Vec<Option<TipSite>> = tips.iter().map(|&index| sites[index]).collect();
     let profile = measure(env, &working, &tip_sites);
-    // THE PROFILE BALLS UNDER A CEILING (round 5 review, 2026-10-14): a ball
-    // the owner's table draws wider than its feature (or past the top of his
-    // ratio range) is drawn at the ceiling, never under its shaft end
-    // (BALLS-FLARE A(2): the cap is on grown AND ungrown balls). One batched
-    // measurement of those balls at their reduced radius; every rule below then
-    // starts from the ball as drawn.
-    let mut reduced_to: Vec<Option<f64>> = profile
-        .iter()
-        .enumerate()
-        .map(|(position, answer)| {
-            let measured = (*answer)?;
-            let strut = tips[position];
-            let tip_bounds = bounds.get(strut).copied().unwrap_or_default();
-            let (ratio_cap, feature_cap, _) = ball_caps(
-                rule,
-                limits.max_ball_ratio,
-                arms[strut].tip_radius_mm,
-                tip_bounds.feature_chord_mm,
-                &measured,
-            );
-            let cap = feature_cap.min(ratio_cap);
-            if !(cap.is_finite() && measured.planned_ball_mm > cap * (1.0 + 1e-9)) {
-                return None;
-            }
-            // Never under the shaft end the ball stands on, nor under what
-            // holds the births the placement left to it.
-            let reduced = cap
-                .max(arms[strut].tip_radius_mm)
-                .max(tip_bounds.hold_floor_mm.unwrap_or(0.0));
-            (reduced < measured.planned_ball_mm * (1.0 - 1e-9)).then_some(reduced)
-        })
-        .collect();
-    let mut first = profile.clone();
-    let reduced_rows: Vec<usize> = (0..reduced_to.len())
-        .filter(|&at| reduced_to[at].is_some())
-        .collect();
-    if !reduced_rows.is_empty() {
-        let reduced_arms: Vec<SweepArm> = reduced_rows
-            .iter()
-            .map(|&at| SweepArm {
-                contact_ball_radius_mm: reduced_to[at],
-                ..working[at].clone()
-            })
-            .collect();
-        let reduced_sites: Vec<Option<TipSite>> =
-            reduced_rows.iter().map(|&at| tip_sites[at]).collect();
-        let answers = measure(env, &reduced_arms, &reduced_sites);
-        for (&at, answer) in reduced_rows.iter().zip(answers) {
-            match answer {
-                Some(measured) => first[at] = Some(measured),
-                // A tip whose reduced ball cannot be measured keeps the
-                // owner's ball (the side that changes nothing unread).
-                None => reduced_to[at] = None,
-            }
-        }
-    }
+    // THE OWNER'S BALL IS THE FLOOR (round 6, 2026-10-14): a ball is never drawn
+    // smaller than the owner's ChituBox ball for its neck (`f(r_n) r_n`, which is
+    // the profile ball this measurement starts from). Round 5 drew a profile
+    // ball at the feature-chord or ratio ceiling, floored at the shaft end, and
+    // 12 of 35 Bat_Cat_Owl balls came out exactly as wide as their shaft (Craig,
+    // picture 30: "rounded ends whose sphere diameter = the support diameter").
+    // The ceilings below limit GROWTH, and name a profile ball past them.
+    let first = profile.clone();
     // Per tip: target, ungrown radius, and the search state.
     struct Search {
         tip: usize,
@@ -626,9 +565,8 @@ pub fn grow(
             tip_bounds.feature_chord_mm,
             &profile_measured,
         );
-        // The profile balls past a ceiling are drawn at it (`reduced_to`); one
-        // still past it after that (its shaft end is wider than the ceiling)
-        // is named.
+        // A profile ball past a ceiling is kept (the owner's ball is the floor)
+        // and named.
         if profile_measured.planned_ball_mm > ratio_cap * (1.0 + 1e-9) {
             outcome.ungrown_over_ratio += 1;
         }
@@ -646,10 +584,6 @@ pub fn grow(
                     chord_mm: chord,
                 });
             }
-        }
-        if let Some(reduced) = reduced_to[position] {
-            outcome.reduced += 1;
-            grown[strut] = Some(reduced);
         }
         outcome.tips_measured += 1;
         outcome.planned_mm2 += need;

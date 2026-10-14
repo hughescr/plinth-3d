@@ -2380,7 +2380,7 @@ mod tests {
             center_mm: [1.5, 2.5],
             kind: crate::StrutKind::Arm,
             min_radius_mm: 0.0,
-            thickened_mm: Vec::new(),
+            thickened_mm: Vec::new(), foot_radius_mm: None,
             seat_on_strut: None,
             k_top,
             k_bottom,

@@ -2447,7 +2447,7 @@ fn commit_seat(
         ],
         kind: crate::StrutKind::Arm,
         min_radius_mm: 0.0,
-        thickened_mm: Vec::new(),
+        thickened_mm: Vec::new(), foot_radius_mm: None,
         seat_on_strut: None,
         k_top: layer,
         k_bottom,

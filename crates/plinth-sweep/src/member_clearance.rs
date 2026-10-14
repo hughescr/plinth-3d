@@ -1633,7 +1633,7 @@ mod census_tests {
             center_mm: xy,
             kind,
             min_radius_mm: r,
-            thickened_mm: Vec::new(),
+            thickened_mm: Vec::new(), foot_radius_mm: None,
             seat_on_strut: None,
             k_top,
             k_bottom,

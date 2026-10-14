@@ -595,12 +595,46 @@ bigger than the support column or the feature that is being supported").
   section through the seat at the strike layer (`plinth_sweep::feature_chord`: the cured joint is only as
   strong as its narrowest section, and past it the break moves into the model); and the shaft's own carry
   (above). A tip a ceiling leaves short of its need is warned with the shortfall and the reason.
-- **The ceilings bind the owner's profile ball too.** A profile ball wider than its feature (or past the
-  ratio) is drawn smaller, at the ceiling (`SweepArm::contact_ball_radius_mm` below the profile ball keeps
-  the same deepest point), counted in `ContactOutcome::reduced`. Three floors: the shaft end the ball stands
-  on (a ball thinner than its rod is no ball), and the smallest ball that still holds every birth the
-  placement left to this tip's ball (`SweepStrut::held_births`, `TipBounds::hold_floor_mm`). A ball still
-  past its feature at the floor is warned (`ContactOutcome::over_feature`).
+- **The owner's ball is the floor** (round 6, 2026-10-14). The ceilings limit GROWTH only; a ball is never
+  drawn smaller than the owner's ChituBox ball for its neck (`f(r_n) r_n`, `f` 1.25-1.5 by tip size). Round 5
+  drew a profile ball wider than its feature at the ceiling, floored at the shaft end, and 12 of 35
+  Bat_Cat_Owl balls came out as wide as their own shaft (owner, picture 30: "rounded ends whose sphere
+  diameter = the support diameter"). A profile ball past its feature or the ratio is counted and warned
+  (`ContactOutcome::over_feature`); a contact that stays short of the need is warned against that need
+  and the neck is never shrunk to the contact (the neck carries the demand; shrinking it would shrink
+  the ball with it and the contact again).
+
+### The member profile, head to foot (round 6, 2026-10-14)
+
+A member reads, from the model down: contact ball, neck, a cone widening to the body, the body, and
+(on a model foot) a cone narrowing to the foot's neck and ball. The owner's pictures 28, 30 and 31 are the
+cases where it did not.
+
+- **A ball is wider than its neck, and the shaft leaves it at the neck.** The first drawn radius is the
+  neck's, at the ball centre (`plinth_support::lower::lead_from_the_neck`); where the ledger asks for
+  more in the first slot the shaft widens, going down, over that slot (a cone that prints at any
+  slope). A head that the lowering cannot draw is given up as a straight tip and sized as one
+  (`downgrade_undrawable_heads`: the joint-sized running maximum of the head minimum, 0.198 -> 0.233 under
+  a 0.067 mm ball, is dropped; picture 31).
+- **A model foot is the owner's tail contact.** The foot's contact radius is the largest of the area
+  law's, the neck under the ChituBox tail contact of a body of this size (`TailContactProfiles::neck_radius_mm`:
+  the tail touch is a DIAMETER, the ball's radius half of it, the neck the ball over the tip table's
+  ratio at the neck's own size; never wider than the body), and the radius the enlarge-foot rung gave the
+  post. One reader (`model_feet::foot_radius_mm`) serves the structural reading, the final measurement,
+  the adapter and the lowering.
+- **Enlarge-foot rung.** A run whose neck and cone alone take the whole one-pixel budget cannot be held by
+  any shaft width. After bands and the thicken rung, the foot grows to the neck of least resin (the plan's
+  own and the foot ball's, `4/3 pi (f r)^3`) among those that let a root hold the run, read through that
+  very neck (`slenderness::enlarge_foot`); the least neck alone needs a body at the registered maximum
+  radius, and resin without the ball would run the neck up to the body's width. Where none up to the
+  registered maximum holds, the `foot_neck_over_limit` warning stands.
+- **Bay-local thickening is one lower cone.** The post widens from its foot to the root at the run's base
+  in one straight cone, no steeper than the permitted underside slope (not a hairline under a fat
+  section with a few layers of steepest ramp); a cone that enters the model's final gap falls back to the
+  steep ramp.
+- **Knees.** Where two chained frusta of a member turn by more than a pixel of their section, a sphere
+  of the larger section sits at the vertex (`knee_spheres`). The sweep's clearance readers model a member
+  as the tube about its axis, which already contains it.
 - **A second contact for a tip its feature leaves short.** The contact growth runs on the finished field, so
   the placement could not know what a feature gives. `run_sweep_with_second_contact` records, for each tip
   left short, the contact it really made, and runs the placement again with that contact as the load the
