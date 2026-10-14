@@ -147,3 +147,111 @@ fn a_shaft_as_wide_as_its_load_needs_is_its_own_neck() {
     assert!((shaft[0].start_radius_mm.get() - 0.1).abs() < 1e-12);
     assert!((shaft[0].end_radius_mm.get() - 0.1).abs() < 1e-12);
 }
+
+/// Two arms through the real lowering: a straight post `A` (seat z 3, base z 0,
+/// neck 0.05) and a landed arm `B` that ends on `A`'s axis `down_mm` under `A`'s
+/// seat. `A`'s ledger is `upper` for its top `upper_mm` and `lower` under it (the
+/// step the landing makes).
+fn post_with_a_lander(down_mm: f64, upper: f64, upper_mm: f64, lower: f64) -> Vec<SupportPrimitive> {
+    let slots = 60_usize;
+    let slot_mm = 3.0 / 60.0;
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a small positive slot count")]
+    let upper_slots = (upper_mm / slot_mm).round() as usize;
+    let profile: Vec<f64> = (0..slots)
+        .map(|slot| if slot >= slots - upper_slots { upper } else { lower })
+        .collect();
+    let host = straight(0.05, profile, None);
+    let lander = SweepArm {
+        seat_mm: [1.5, 0.0, 3.9],
+        base_mm: [0.0, 0.0, 3.0 - down_mm],
+        tip_radius_mm: 0.1,
+        radius_profile_mm: vec![0.1; 30],
+        seat_normal_mm: [0.0, 0.0, -1.0],
+        seat_face_point_mm: Some([1.5, 0.0, 3.9]),
+        landing: SweepArmLanding::Landed,
+        seats_into_model: true,
+        head: None,
+        contact_ball_radius_mm: None,
+    };
+    let layers = LayerPlan::new(PLATE, vec![H; 400]).expect("a uniform layer plan");
+    let frame = BuildFrame::new(
+        Finite::new(PLATE).expect("finite plate"),
+        PositiveFinite::new(5.0).expect("positive lift"),
+    );
+    lower_sweep_arms(&[host, lander], frame, &layers, 100_000, 1 << 30)
+        .expect("the lowering refuses only about the request")
+        .primitives
+}
+
+/// The widest section any frustum on the post's axis (x = y = 0, both ends) has at
+/// height `z`, or `None` where none stands.
+fn post_radius_at(primitives: &[SupportPrimitive], z: f64) -> Option<f64> {
+    primitives
+        .iter()
+        .filter(|p| {
+            matches!(p.segment_kind, SupportSegmentKind::ContactTaper | SupportSegmentKind::Member)
+                && p.start_mm[0].get().abs() < 1e-9
+                && p.start_mm[1].get().abs() < 1e-9
+                && p.end_mm[0].get().abs() < 1e-9
+                && p.end_mm[1].get().abs() < 1e-9
+        })
+        .filter_map(|p| {
+            let (z0, z1) = (p.start_mm[2].get(), p.end_mm[2].get());
+            let (hi, lo) = (z0.max(z1), z0.min(z1));
+            if z > hi + 1e-9 || z < lo - 1e-9 || hi - lo < 1e-9 {
+                return None;
+            }
+            let t = (z0 - z) / (z0 - z1);
+            Some(p.start_radius_mm.get() + (p.end_radius_mm.get() - p.start_radius_mm.get()) * t)
+        })
+        .reduce(f64::max)
+}
+
+/// **T3: the head cone never replaces the section a landed load needs** (round 6
+/// review). A 0.05 mm neck over a 0.100 mm ledger for the top 0.5 mm and 0.233 mm
+/// under a landing 0.5 mm down: the cone (1.5 mm long) used to run through the
+/// landing and read 0.123 mm at 0.6 mm down, 28 % of the section the landed load
+/// needs. The cone ends at the landing; the section at and under it is the ledger's.
+///
+/// SABOTAGE: `lander_z_mm` ignored by `head_cone_from_the_neck` (the old cone) fails
+/// the section assertion at 0.6 mm down.
+#[test]
+fn the_head_cone_ends_at_a_landing_and_the_ledger_stands_under_it() {
+    let primitives = post_with_a_lander(0.5, 0.1, 0.5, 0.233);
+    // Neck at the ball centre, still.
+    let neck = post_radius_at(&primitives, 2.999).expect("a section at the top");
+    assert!(neck < 0.06, "the shaft still leaves the ball at the neck: {neck}");
+    // From the landing's layer down the ledger (0.233) is the section, at every height.
+    for tenth_down in 6..=29 {
+        let z = 3.0 - f64::from(tenth_down) / 10.0;
+        let radius = post_radius_at(&primitives, z).expect("the post stands");
+        assert!(
+            radius >= 0.233 - 1e-6,
+            "{:.1} mm down the post is {radius} mm, the ledger under the landing is 0.233",
+            f64::from(tenth_down) / 10.0
+        );
+    }
+    // Above the landing it is still a cone from the neck to the ledger under the landing:
+    // narrower than that ledger at 0.2 mm down, wider than the neck.
+    let above = post_radius_at(&primitives, 2.8).expect("a section above the landing");
+    assert!(
+        above > 0.06 && above < 0.233 - 1e-3,
+        "a cone from the neck to the ledger stands above the landing: {above}"
+    );
+}
+
+/// CONTROL for T3: a landing deeper than the cone leaves the owner's 1.5 mm head cone
+/// as it was.
+#[test]
+fn a_landing_under_the_head_cone_leaves_the_cone_alone() {
+    let primitives = post_with_a_lander(2.0, 0.1, 2.0, 0.233);
+    let first = primitives
+        .iter()
+        .find(|p| p.segment_kind == SupportSegmentKind::ContactTaper)
+        .expect("the post's taper");
+    let length = geom_kernel::vec3::dist(
+        first.start_mm.map(Finite::get),
+        first.end_mm.map(Finite::get),
+    );
+    assert!((length - 1.5).abs() < 1e-6, "the owner's cone, 1.5 mm: {length}");
+}

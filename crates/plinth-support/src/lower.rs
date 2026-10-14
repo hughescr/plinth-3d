@@ -1637,9 +1637,10 @@ fn lower_sweep_arms_of(
     // Where each arm's records stand, for the junction pass below.
     let mut arm_ends: Vec<usize> = Vec::with_capacity(arms.len());
     let mut junction_arms: Vec<junction::JunctionArm> = Vec::with_capacity(arms.len());
-    for arm in arms {
+    let landers = shallowest_landers(arms);
+    for (index, arm) in arms.iter().enumerate() {
         let arm_start = out.primitives.len();
-        let lowered = lower_one_sweep_arm(arm, config, plate, &mut out.primitives);
+        let lowered = lower_one_sweep_arm(arm, config, plate, landers[index], &mut out.primitives);
         let emitted = !matches!(
             lowered.outcome,
             ArmOutcome::ZeroLength | ArmOutcome::InvalidGeometry
@@ -1878,10 +1879,12 @@ fn lower_hull_reference(
     let mut out: Vec<SupportPrimitive> = Vec::with_capacity(primitives.len());
     let mut reference_arms: Vec<junction::JunctionArm> = Vec::with_capacity(arms.len());
     let mut from = 0;
+    let landers = shallowest_landers(arms);
+    let reference_landers = shallowest_landers(reference);
     for (index, arm) in arms.iter().enumerate() {
         let end = arm_ends[index];
         let start = out.len();
-        if reference[index] == *arm {
+        if reference[index] == *arm && landers[index] == reference_landers[index] {
             out.extend_from_slice(&primitives[from..end]);
             reference_arms.push(junction::JunctionArm {
                 landed: junction_arms[index].landed,
@@ -1890,7 +1893,13 @@ fn lower_hull_reference(
                     .map(|(first, len)| (start + (first - from), len)),
             });
         } else {
-            let lowered = lower_one_sweep_arm(&reference[index], config, plate, &mut out);
+            let lowered = lower_one_sweep_arm(
+                &reference[index],
+                config,
+                plate,
+                reference_landers[index],
+                &mut out,
+            );
             let emitted = !matches!(
                 lowered.outcome,
                 ArmOutcome::ZeroLength | ArmOutcome::InvalidGeometry
@@ -3040,7 +3049,23 @@ fn drawn_chords(
 /// there: the top of a post carries almost none of its sway (the cantilever's
 /// weight is `(l - x)^3`), and nothing lands there. A span that already starts at
 /// the neck is untouched, bit for bit; a shaft shorter than the cone is one cone.
-fn head_cone_from_the_neck(spans: &mut Vec<DrawnSpan>, start_radius: f64, head_z_mm: f64) {
+///
+/// **A LOAD THAT LANDS INSIDE THE CONE ENDS IT** (round 6 review): the cone
+/// replaces only the minimum the tip's own head asked for, never the section a
+/// landed member's load needs. `lander_z_mm` is the height of the shallowest
+/// member that lands on this shaft; the cone ends one layer under it
+/// (`layer_height_mm`: the ledger's step begins in the layer the lander ends
+/// in), at the section the ledger has there, and the ledger is drawn below
+/// unchanged. The drawn section is therefore at least the ledger at and under
+/// every landing, whatever the cone does above it (`max(E, D)`: the head's own
+/// shape never lowers a carried load's section).
+fn head_cone_from_the_neck(
+    spans: &mut Vec<DrawnSpan>,
+    start_radius: f64,
+    head_z_mm: f64,
+    lander_z_mm: Option<f64>,
+    layer_height_mm: f64,
+) {
     let (Some(first), Some(last)) = (spans.first().copied(), spans.last().copied()) else {
         return;
     };
@@ -3053,7 +3078,10 @@ fn head_cone_from_the_neck(spans: &mut Vec<DrawnSpan>, start_radius: f64, head_z
         return;
     }
     let top_z = first.top_z_mm;
-    let cone_end_z = (top_z - head_z_mm).max(last.bottom_z_mm);
+    let mut cone_end_z = (top_z - head_z_mm).max(last.bottom_z_mm);
+    if let Some(lander_z) = lander_z_mm.filter(|z| z.is_finite()) {
+        cone_end_z = cone_end_z.max(lander_z - layer_height_mm.max(0.0));
+    }
     if top_z - cone_end_z <= ZERO_LENGTH_MM {
         return;
     }
@@ -3763,14 +3791,16 @@ pub fn tip_shaft_seat_bites(
     );
     let config = LoweringConfig::current(frame, layers, 1, 1)?.without_pole_collars();
     let mut scratch: Vec<SupportPrimitive> = Vec::new();
+    let landers = shallowest_landers(arms);
     Ok(arms
         .iter()
-        .map(|arm| {
+        .enumerate()
+        .map(|(index, arm)| {
             if !arm.seats_into_model {
                 return None;
             }
             scratch.clear();
-            let lowered = lower_one_sweep_arm(arm, config, plate_z, &mut scratch);
+            let lowered = lower_one_sweep_arm(arm, config, plate_z, landers[index], &mut scratch);
             let trim = lowered.seat.as_ref().and_then(|seat| seat.trim)?;
             shaft_seat_bite(arm, &scratch, trim, config)
         })
@@ -4018,10 +4048,92 @@ fn seat_angle_limit_deg(
     holds
 }
 
+/// **The height of the shallowest member that lands on each arm's shaft**
+/// (round 6 review), or `None`: the head cone ends above it
+/// ([`head_cone_from_the_neck`]), so a carried load's section is never replaced
+/// by the tip's own head.
+///
+/// A landed arm's end `P` lands on arm `A` when it stands inside `A`'s solid:
+/// its distance to `A`'s axis (the straight segment from `A`'s base to its seat,
+/// or to its joint for a headed arm) is at most `A`'s section at `P`'s height
+/// plus the lander's own end section. That is the solids touching, the one
+/// physical test; no tolerance is added.
+fn shallowest_landers(arms: &[SweepArm]) -> Vec<Option<f64>> {
+    let mut found: Vec<Option<f64>> = vec![None; arms.len()];
+    let landed: Vec<usize> = arms
+        .iter()
+        .enumerate()
+        .filter(|(_, arm)| arm.landing == SweepArmLanding::Landed)
+        .map(|(index, _)| index)
+        .collect();
+    if landed.is_empty() {
+        return found;
+    }
+    for (host_index, host) in arms.iter().enumerate() {
+        if host.radius_profile_mm.is_empty() {
+            continue;
+        }
+        let top = host.head.as_ref().map_or(host.seat_mm, |head| head.joint_mm);
+        let (z_low, z_high) = (host.base_mm[2], top[2]);
+        let rise = z_high - z_low;
+        if !(rise > ZERO_LENGTH_MM) {
+            continue;
+        }
+        let axis = geom_kernel::vec3::sub(host.base_mm, top);
+        let axis_len_sq = geom_kernel::vec3::dot(axis, axis);
+        if !(axis_len_sq > 0.0) {
+            continue;
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a profile's slot count is bounded by the layer count, exact in f64"
+        )]
+        let slots = host.radius_profile_mm.len() as f64;
+        let mut best: Option<f64> = None;
+        for &lander_index in &landed {
+            if lander_index == host_index {
+                continue;
+            }
+            let lander = &arms[lander_index];
+            let end = lander.base_mm;
+            // Strictly under the top (a landing on the top is no landing inside
+            // the cone) and not under the base.
+            if !(end[2] < z_high - ZERO_LENGTH_MM && end[2] >= z_low) {
+                continue;
+            }
+            let along = (geom_kernel::vec3::dot(geom_kernel::vec3::sub(end, top), axis)
+                / axis_len_sq)
+                .clamp(0.0, 1.0);
+            let nearest: [f64; 3] = std::array::from_fn(|index| top[index] + axis[index] * along);
+            let offset = geom_kernel::vec3::norm(geom_kernel::vec3::sub(end, nearest));
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a non-negative slot position floored to an index and clamped to the profile"
+            )]
+            let slot = (((end[2] - z_low) / rise * slots).floor().max(0.0) as usize)
+                .min(host.radius_profile_mm.len() - 1);
+            let host_radius = host.radius_profile_mm[slot];
+            let lander_radius = lander
+                .radius_profile_mm
+                .first()
+                .copied()
+                .unwrap_or(lander.tip_radius_mm)
+                .max(lander.tip_radius_mm);
+            if offset <= host_radius + lander_radius {
+                best = Some(best.map_or(end[2], |z| z.max(end[2])));
+            }
+        }
+        found[host_index] = best;
+    }
+    found
+}
+
 fn lower_one_sweep_arm(
     arm: &SweepArm,
     config: LoweringConfig,
     plate_z: f64,
+    lander_z_mm: Option<f64>,
     out: &mut Vec<SupportPrimitive>,
 ) -> ArmLowering {
     let delta: [f64; 3] = std::array::from_fn(|index| arm.base_mm[index] - arm.seat_mm[index]);
@@ -4203,6 +4315,7 @@ fn lower_one_sweep_arm(
                 ring_normal,
                 first_kind,
                 profile_top_z_mm: profile_top_z,
+                lander_z_mm,
             },
             config,
             staged,
@@ -4811,6 +4924,9 @@ struct DrawnShaft {
     /// The height the radius profile's top slot ends at: the seat for a
     /// straight arm, the joint for a headed one.
     profile_top_z_mm: f64,
+    /// The height of the shallowest member that lands on this shaft
+    /// ([`shallowest_landers`]), or `None`: the head cone ends above it.
+    lander_z_mm: Option<f64>,
 }
 
 /// Draw one member's shaft from `top` (the ball centre, or the seat of a member
@@ -4883,7 +4999,13 @@ fn push_drawn_shaft(
     } else {
         slot_z
     };
-    head_cone_from_the_neck(&mut spans, shaft.tip_radius.get(), head_z);
+    head_cone_from_the_neck(
+        &mut spans,
+        shaft.tip_radius.get(),
+        head_z,
+        shaft.lander_z_mm,
+        config.layer_height_mm.get(),
+    );
     // A point on the straight axis at height `z`, by the same parameter the
     // spans were cut at, so a shared end is the same number on both spans.
     let on_axis = |z: f64| -> Option<[Finite; 3]> {
@@ -5978,7 +6100,7 @@ mod headed_arm_tests {
         let layers = layers();
         let config = LoweringConfig::current(frame(), &layers, 1, 1).expect("config");
         let mut out = Vec::new();
-        let lowered = lower_one_sweep_arm(arm, config, 0.0, &mut out);
+        let lowered = lower_one_sweep_arm(arm, config, 0.0, None, &mut out);
         assert!(lowered.head.is_some(), "the head was drawn as a head");
         out
     }
@@ -6119,7 +6241,7 @@ mod headed_arm_tests {
         let layers = layers();
         let config = LoweringConfig::current(frame(), &layers, 1, 1).expect("config");
         let mut out = Vec::new();
-        let lowered = lower_one_sweep_arm(&arm, config, 0.0, &mut out);
+        let lowered = lower_one_sweep_arm(&arm, config, 0.0, None, &mut out);
         let drawn = lowered.head.expect("the head was drawn as a head");
         let joint_at = out
             .iter()

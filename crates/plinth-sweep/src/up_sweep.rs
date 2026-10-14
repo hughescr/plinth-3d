@@ -3595,6 +3595,11 @@ fn descend_cleared_from(
                 .is_some_and(|reach| crate::cell_distance_mm(grid, cell, candidate.cell) <= reach)
     };
 
+    // The least two shaft solids can be apart without touching, for the path test
+    // that reads the arms as solids ([`path_goes_through_a_shaft`]). Only where the
+    // drawn-solid test runs (it supplies the radii).
+    let solid_reach_mm = clearance.map(|clear| radius_lb_mm + clear.tip_radius_min_mm);
+
     let mut path_blocked = false;
     // Tiers, best first. Without the clearance there is the one pass this
     // search always made. With it, a pass takes only candidates that clear
@@ -3634,6 +3639,11 @@ fn descend_cleared_from(
                         candidate,
                         sharp_for(candidate),
                     )
+                    .filter(|path| {
+                        solid_reach_mm.is_none_or(|reach| {
+                            !path_goes_through_a_shaft(grid, history, layer, cell, candidate, path, reach)
+                        })
+                    })
                 })
                 .as_ref();
             let Some(path) = path else {
@@ -3820,6 +3830,102 @@ fn lean_path_from(
         path.push(u32::try_from(here_cell).unwrap_or(u32::MAX));
     }
     Some(path)
+}
+
+/// The ids of the arms whose axis stands within `reach_mm` of `cell`'s centre at
+/// `layer`, other than `except`, appended to `out` (sorted, once each).
+fn shafts_within(
+    grid: &Grid,
+    history: &ColumnHistory,
+    cell: usize,
+    layer: usize,
+    reach_mm: f64,
+    except: Option<u32>,
+    out: &mut Vec<u32>,
+) {
+    out.clear();
+    let pitch = grid.pitch_mm();
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a non-negative finite reach over the grid pitch, ceiled to a window half-width"
+    )]
+    let half = (reach_mm / pitch).ceil().max(0.0) as usize;
+    let (row, col) = (grid.row_of(cell), grid.col_of(cell));
+    let row_lo = row.saturating_sub(half);
+    let row_hi = (row + half).min(grid.rows() - 1);
+    let col_lo = col.saturating_sub(half);
+    let col_hi = (col + half).min(grid.cols() - 1);
+    for near_row in row_lo..=row_hi {
+        for near_col in col_lo..=col_hi {
+            #[expect(clippy::cast_precision_loss, reason = "a window offset bounded by the grid is exact in f64")]
+            let distance = pitch
+                * (row.abs_diff(near_row) as f64).hypot(col.abs_diff(near_col) as f64);
+            if distance > reach_mm {
+                continue;
+            }
+            let near = grid.index(near_row, near_col);
+            let mut slot = history.shaft_head.get(near).copied().unwrap_or(u32::MAX);
+            while slot != u32::MAX {
+                let span = history.shaft_spans[slot as usize];
+                slot = span.next;
+                if Some(span.id) != except
+                    && (span.k_bottom as usize) <= layer
+                    && layer <= span.k_top as usize
+                    && !out.contains(&span.id)
+                {
+                    out.push(span.id);
+                }
+            }
+        }
+    }
+}
+
+/// **A LEAN MUST NOT PASS THROUGH THE SOLID OF A SHAFT IT DOES NOT LAND ON**
+/// (round 6 review, P2). [`lean_path_from`] asks whether an arm is in the cell the
+/// descent crosses; an arm is a solid, not a column. A rod that went by a post
+/// 0.12 mm off its axis was clear to that test, and drawn at its real radii
+/// (0.22 and 0.10 mm) went through the post and on to a trunk 1 mm lower, 13 mm of
+/// shaft after its first contact (Deinonychus, the combined round 6 file).
+///
+/// `reach_mm` is the least the two solids can be apart without touching: the
+/// descent's own radius lower bound (the area law on what it covers) plus the
+/// smallest tip any shaft has. Both are lower bounds on the drawn radii, so a path
+/// refused here is touching in the file, never merely near. An arm that stands that
+/// close to the SEAT's own column at the same layer is not caused by this lean (the
+/// straight descent would stand just as close) and is not counted; the member the
+/// descent merges into is the landing, not an obstacle. Refused, the candidate is
+/// counted with the other blocked paths and the search takes the next.
+fn path_goes_through_a_shaft(
+    grid: &Grid,
+    history: &ColumnHistory,
+    layer: usize,
+    seat_cell: usize,
+    candidate: &LeanCandidate,
+    path: &[u32],
+    reach_mm: f64,
+) -> bool {
+    let parent = match candidate.landing {
+        Landing::Strut { id, .. } => Some(id),
+        Landing::Plate | Landing::Model { .. } => None,
+    };
+    let mut beside_path: Vec<u32> = Vec::new();
+    let mut beside_seat: Vec<u32> = Vec::new();
+    for (slot, &cell) in path.iter().enumerate().skip(1) {
+        let here = candidate.k_bottom + slot;
+        if here >= layer {
+            break;
+        }
+        shafts_within(grid, history, cell as usize, here, reach_mm, parent, &mut beside_path);
+        if beside_path.is_empty() {
+            continue;
+        }
+        shafts_within(grid, history, seat_cell, here, reach_mm, parent, &mut beside_seat);
+        if beside_path.iter().any(|id| !beside_seat.contains(id)) {
+            return true;
+        }
+    }
+    false
 }
 
 fn descend(history: &ColumnHistory, cell: usize, layer: usize) -> (Landing, usize, bool) {
@@ -4478,6 +4584,73 @@ mod descent_tests {
             lean_path(&grid, &blocked, &DrainKeepOut::none(), 200, seat, &candidate).is_none(),
             "a path that would tunnel through a THIRD arm must be refused"
         );
+    }
+
+    /// **A LEAN MUST NOT PASS THROUGH THE SOLID OF A SHAFT IT DOES NOT LAND ON**
+    /// (round 6 review, P2). The path test asks whether an arm is in the cell; a
+    /// third arm 0.15 mm beside the path is in no cell of it. At the lower bound of
+    /// the descent's radius (0.2 mm) plus the smallest tip (0.05 mm) the two solids
+    /// touch, so the path is refused; at a hairline's bound (0.05 mm) they are
+    /// apart and it stands (the control). An arm as close to the SEAT as to the path
+    /// is not caused by the lean and does not refuse it, and the parent is the
+    /// landing, never an obstacle.
+    ///
+    /// SABOTAGE: `path_goes_through_a_shaft` always false fails the first assertion.
+    #[test]
+    fn a_lean_that_passes_through_the_solid_of_a_shaft_beside_it_is_refused() {
+        let grid = grid();
+        let seat = grid.index(20, 20);
+        let neighbour = grid.index(20, 28);
+        let candidate = LeanCandidate {
+            cost_mm: 0.0,
+            class: 0,
+            cell: neighbour,
+            k_bottom: 194,
+            landing: Landing::Strut { id: 7, layer: 194 },
+            rooted: true,
+            at_parent_top: false,
+        };
+        let mut history = ColumnHistory::new(&grid);
+        straight_arm(&mut history, 7, neighbour, 0, 199);
+        // A third arm 3 rows off the path's row (0.15 mm), 0.335 mm from the seat.
+        straight_arm(&mut history, 9, grid.index(23, 26), 0, 210);
+        let path = lean_path(&grid, &history, &DrainKeepOut::none(), 200, seat, &candidate)
+            .expect("no arm is in a cell of the path");
+        assert!(
+            super::path_goes_through_a_shaft(&grid, &history, 200, seat, &candidate, &path, 0.25),
+            "a 0.2 mm descent 0.15 mm from another shaft's axis goes through it"
+        );
+        assert!(
+            !super::path_goes_through_a_shaft(&grid, &history, 200, seat, &candidate, &path, 0.1),
+            "CONTROL: two hairlines 0.15 mm apart are apart"
+        );
+        // The same arm as close to the SEAT (a column beside it): the straight descent
+        // stands as close, so the lean is not what put it there.
+        let mut inherited = ColumnHistory::new(&grid);
+        straight_arm(&mut inherited, 7, neighbour, 0, 199);
+        straight_arm(&mut inherited, 9, grid.index(23, 20), 0, 210);
+        straight_arm(&mut inherited, 11, grid.index(23, 26), 0, 210);
+        let path = lean_path(&grid, &inherited, &DrainKeepOut::none(), 200, seat, &candidate)
+            .expect("no arm is in a cell of the path");
+        assert!(
+            super::path_goes_through_a_shaft(&grid, &inherited, 200, seat, &candidate, &path, 0.25),
+            "arm 11 is new to the path even where arm 9 stands beside the seat"
+        );
+        let mut seat_only = ColumnHistory::new(&grid);
+        straight_arm(&mut seat_only, 7, neighbour, 0, 199);
+        straight_arm(&mut seat_only, 9, grid.index(22, 20), 0, 210);
+        let path = lean_path(&grid, &seat_only, &DrainKeepOut::none(), 200, seat, &candidate)
+            .expect("no arm is in a cell of the path");
+        assert!(
+            !super::path_goes_through_a_shaft(&grid, &seat_only, 200, seat, &candidate, &path, 0.25),
+            "an arm beside the seat, not met anew along the path, does not refuse the lean"
+        );
+        // The parent is the landing.
+        let mut parent_only = ColumnHistory::new(&grid);
+        straight_arm(&mut parent_only, 7, neighbour, 0, 199);
+        let path = lean_path(&grid, &parent_only, &DrainKeepOut::none(), 200, seat, &candidate)
+            .expect("a clear corridor");
+        assert!(!super::path_goes_through_a_shaft(&grid, &parent_only, 200, seat, &candidate, &path, 0.25));
     }
 
     /// **A COLUMN THAT HOLDS TWO ARMS OFFERS THE ONE THE LAW CAN REACH.**
