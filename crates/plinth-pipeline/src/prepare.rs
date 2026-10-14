@@ -3291,6 +3291,15 @@ fn print_sweep_disclosure(
                     String::new()
                 },
             );
+            for over in &contact.over_feature {
+                println!(
+                    "[sweep {model}] WARNING tip of arm {} draws the owner's profile ball ({:.4} mm \
+                     radius, a contact disc {:.4} mm wide) on a feature whose narrowest cured chord \
+                     at the strike layer is {:.4} mm: the ball is not grown, and not drawn smaller \
+                     than the owner's ball for its tip size",
+                    over.strut, over.ball_radius_mm, over.disc_width_mm, over.chord_mm,
+                );
+            }
             for short in &contact.short {
                 println!(
                     "[sweep {model}] WARNING tip of arm {} has {:.4} mm2 of real contact against \

@@ -230,6 +230,20 @@ pub struct ContactShort {
     pub reason: ShortReason,
 }
 
+/// One profile ball drawn past a ceiling it cannot be brought under (the
+/// lowering never draws a ball below the owner's profile ball).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProfileOver {
+    /// The strut index.
+    pub strut: usize,
+    /// The profile ball's radius, mm.
+    pub ball_radius_mm: f64,
+    /// The width of the contact disc that ball plans, mm.
+    pub disc_width_mm: f64,
+    /// The feature's narrowest cured chord at the strike layer, mm.
+    pub chord_mm: f64,
+}
+
 /// What the contact measurement and growth did on one field.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ContactOutcome {
@@ -267,6 +281,8 @@ pub struct ContactOutcome {
     /// than their feature's chord, and past the ball-to-shaft ratio.
     pub ungrown_over_feature: usize,
     pub ungrown_over_ratio: usize,
+    /// The profile balls counted in `ungrown_over_feature`, one row each.
+    pub over_feature: Vec<ProfileOver>,
     /// Tips still short after the growth, with why.
     pub short: Vec<ContactShort>,
     /// Per strut: `(real mm², target mm²)` at the drawn ball, `None` for a
@@ -463,6 +479,14 @@ pub fn grow(
         }
         if measured.planned_ball_mm > feature_cap * (1.0 + 1e-9) {
             outcome.ungrown_over_feature += 1;
+            if let Some(chord) = tip_bounds.feature_chord_mm {
+                outcome.over_feature.push(ProfileOver {
+                    strut,
+                    ball_radius_mm: measured.planned_ball_mm,
+                    disc_width_mm: 2.0 * measured.planned_disc_mm,
+                    chord_mm: chord,
+                });
+            }
         }
         outcome.tips_measured += 1;
         outcome.planned_mm2 += target;

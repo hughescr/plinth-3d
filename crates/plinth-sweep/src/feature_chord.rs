@@ -46,10 +46,9 @@ fn layer_edges(solids: &[SliceSolid]) -> Vec<Edge> {
         for ring in std::iter::once(solid.outer()).chain(solid.holes()) {
             let points = ring.points_xy_mm();
             for (index, &a) in points.iter().enumerate() {
+                // (A zero-length edge crosses no ray: both readers skip it.)
                 let b = points[(index + 1) % points.len()];
-                if a != b {
-                    edges.push(Edge { a, b });
-                }
+                edges.push(Edge { a, b });
             }
         }
     }
