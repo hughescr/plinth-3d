@@ -875,6 +875,7 @@ fn round_50_flipped_with(policy: &SweepPolicy) -> SweepPlan {
 /// with a reason; and the rule moved landers that were under the head, not at
 /// it, each clear of the model.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn on_round_50_no_lander_near_a_head_puts_the_sum_in_its_seat_zone() {
     let mesh = flipped(&mesh_for(&round_50()));
     let unruled = round_50_flipped_with(&production().without_head_join());
@@ -936,6 +937,7 @@ fn on_round_50_no_lander_near_a_head_puts_the_sum_in_its_seat_zone() {
 /// under the contact). That is the load path answering the new field, not
 /// the rule touching this head.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn a_head_that_already_clears_keeps_its_join() {
     // RE-SCOPED 2026-09-30 (fix/chitubox-geometry), measured: with the owner's
     // ChituBox ball ratios the production Round 25 flipped has no head that

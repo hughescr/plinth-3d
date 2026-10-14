@@ -226,6 +226,7 @@ fn the_brace_pair_census_matches_the_drawn_file() {
 /// stays, so branch 79 stays a warning) may still stand within the final gap,
 /// and the test lists what stands rather than hiding it.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn no_member_enters_the_overhang_table() {
     let mesh = plinth_mesh::make_overhang_table().expect("the overhang table");
     let plan = sweep_with(&mesh, 0.0, &policy());
@@ -274,6 +275,7 @@ fn no_member_enters_the_overhang_table() {
 /// A test that only asserted the clean census would pass on a census that
 /// never reads the walls.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn sabotage_without_the_drawn_solid_descent_a_member_enters_the_overhang_table() {
     let mesh = plinth_mesh::make_overhang_table().expect("the overhang table");
     // The re-route is off too: after the final sizing it would move a member
@@ -354,6 +356,7 @@ fn a_lander_never_joins_inside_its_hosts_contact() {
 ///
 /// RED before the pass existed: member 26 named at 0.2279 mm.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn a_post_grown_into_the_gap_by_the_sizing_is_re_routed_on_the_overhang_table() {
     let mesh = plinth_mesh::make_overhang_table().expect("the overhang table");
     let plan = sweep_with(&mesh, 0.0, &policy());
@@ -383,6 +386,7 @@ fn a_post_grown_into_the_gap_by_the_sizing_is_re_routed_on_the_overhang_table() 
 /// THE SABOTAGE of the test above: without the re-route the same table keeps
 /// post 26 inside the gap, and the pass reports it never ran.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn sabotage_without_the_clearance_reroute_the_post_stays_inside_the_gap() {
     let mesh = plinth_mesh::make_overhang_table().expect("the overhang table");
     let plan = sweep_with(&mesh, 0.0, &policy().without_clearance_reroute());
@@ -417,6 +421,7 @@ fn sabotage_without_the_clearance_reroute_the_post_stays_inside_the_gap() {
 /// report records its run, before and after. The path hit that the rule ran on
 /// the Cylinder is `retie_passes_after_reroute` / `retie_remedies_after_reroute`.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn a_rerouted_field_leaves_no_run_over_its_limit() {
     let mesh = plinth_mesh::make_overhang_table().expect("the overhang table");
     let plan = sweep_with(&mesh, 0.0, &policy());

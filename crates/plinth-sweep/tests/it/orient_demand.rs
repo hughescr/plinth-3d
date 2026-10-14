@@ -91,6 +91,7 @@ fn the_burden_is_the_arm_count_through_one_fixed_unit_bridge() {
 /// the registered working pitch. If they ever returned the same raster the
 /// caller's second stage would be paying for nothing.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn the_production_fidelity_sweeps_a_finer_raster_than_the_prefilter() {
     let mesh = make_overhang_table().expect("overhang table fixture");
     let poses = [UpDirection::MODEL_UP];
@@ -180,6 +181,7 @@ fn swept_at(mesh: &plinth_mesh::Mesh, candidate: UpDirection) -> SweepPlan {
 /// regression back to counting every strut (`plan.struts.len()`) could pass
 /// this test vacuously on a fixture that never grows a brace or a mast.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn the_burden_counts_arms_and_model_ties_only_on_a_fixture_that_also_places_braces_and_masts() {
     let mesh = make_tall_stilt_plate().expect("the tall stilt plate fixture");
     let table = scoring_table(&mesh);

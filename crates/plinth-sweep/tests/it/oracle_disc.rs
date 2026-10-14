@@ -39,6 +39,7 @@ fn round_50() -> plinth_mesh::Mesh {
 }
 
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn the_disc_is_supported_by_a_plate_rooted_field_at_the_measured_spacing() {
     let plan = sweep(&round_50(), 0.05);
     let report = &plan.report;
@@ -519,6 +520,7 @@ fn the_drafted_rim_costs_a_rim_strip_and_no_interior_arms() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn the_same_disc_triangulated_two_ways_gets_the_same_field() {
     // **Triangulation invariance — the death of RC3 and RC4 as a test.** The
     // two meshes bound the same solid and differ only in how many triangles

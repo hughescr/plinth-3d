@@ -557,6 +557,7 @@ fn thin_skin_seats_in_full_and_is_trimmed_to_its_underside() {
 /// Both populations are required to be non-empty, so neither half can pass by
 /// examining nothing.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn a_thick_disc_moves_only_by_the_allowance() {
     let mesh = flat_disc();
     let (plan, layers, frame, _) = plan_of(&mesh);

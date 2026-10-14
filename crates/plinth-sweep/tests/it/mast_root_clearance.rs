@@ -171,6 +171,7 @@ fn every_mast_clears_every_plate_root_on_the_brace_pair() {
 /// 2026-09-29 (six since the bracing lane), which is where the rule is
 /// actually load-bearing.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn every_mast_clears_every_plate_root_on_the_laid_tube() {
     let plan = sweep_with(&laid_tube(), 0.0, &policy());
     let placed = masts(&plan);
@@ -256,6 +257,7 @@ fn the_lonely_peak_publishes_the_mast_laps_its_sizing_pass_leaves() {
 /// cannot tell the two engines apart. That is reported rather than hidden. The
 /// laid tube can: 0 lapping mast pairs in force, 127 with the rule deleted.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn deleting_the_clearance_rule_brings_the_overlapping_masts_back() {
     // RE-SCOPED 2026-09-30 (fix/chitubox-geometry), measured: with the owner's
     // ChituBox ball ratios the production laid tube (X 18, thickening off)
@@ -392,6 +394,7 @@ fn deleting_the_clearance_rule_brings_the_overlapping_masts_back() {
 /// * **A RATCHET.** The count may not grow past `KNOWN_ROOT_LAP_PAIRS`. A
 ///   fix that lowers it should lower the pin with it.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn the_finished_laid_tube_publishes_its_drawn_root_laps_and_they_do_not_grow() {
     const RATIO_TOLERANCE: f64 = 0.01;
     /// The honest finished count at the review-fixes land (2026-09-29), with
@@ -496,6 +499,7 @@ fn the_finished_laid_tube_publishes_its_drawn_root_laps_and_they_do_not_grow() {
 /// discs into one another. The count is published either way — this asserts it
 /// is zero, and prints it when it is not so the number is never silent.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn the_flank_arms_leave_no_overlapping_root_once_the_field_is_sized() {
     let plan = sweep_with(&laid_tube(), 0.0, &policy());
     let lane = &plan.report.congestion_lane;
@@ -529,6 +533,7 @@ fn the_flank_arms_leave_no_overlapping_root_once_the_field_is_sized() {
 /// pre-descent number. A field with more members than the up-sweep placed must
 /// record at least as many spans as it has members.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn the_shaft_span_count_is_read_from_the_finished_field() {
     let plan = sweep_with(&laid_tube(), 0.0, &policy());
     let members = plan

@@ -588,6 +588,7 @@ fn degrees_off_the_flip(selection: &BaselineSelection) -> Option<f64> {
 /// What the search must still do for an UNMARKED disc — reach the flip and
 /// commit it (rule A) — is graded by that second test.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn round_bases_stay_flat_supported_and_land_glue_face_up() {
     let lattice_pitch_mm = 3.0_f64.sqrt() * lamina_reach_mm();
 
@@ -843,6 +844,7 @@ fn round_bases_stay_flat_supported_and_land_glue_face_up() {
 /// | the flat-face escort in `crates/plinth-orient/src/search.rs` is dropped (rule A reverted) | (2a) on Round 50 (measured 2026-09-28) |
 /// | `orient_as_drawn` applies any rotation but identity, or `turned_over` / the flip tool's map stops being the search's antipode rotation | the vertex identity |
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn an_unmarked_disc_is_still_searched_and_its_flip_is_the_as_drawn_pose() {
     let grid_settings = GridSettings::registered().expect("registered grid settings");
     let dedupe_tolerance_deg = grid_settings.dedupe_tolerance_deg();

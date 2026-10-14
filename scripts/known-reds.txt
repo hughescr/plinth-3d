@@ -15,7 +15,6 @@
 # semantics.
 
 # --- red in the default run (what scripts/test-fast.sh sees) --------------------------------------
-plinth-sweep::it::prefilter_no_brace::the_prefilter_measures_no_brace_mast_or_tie => path hit: the full coarse ladder placed 0 braces, 5 ties  # the coarse ladder places ties but no brace
 plinth-hollow::it::no_private_vector_algebra::crate_src_carries_no_private_vector_algebra => private vector-algebra sites found in plinth-hollow/src (scanned 7 file(s)) ;; `.mul_add(`  # source lint
 plinth-pipeline::it::no_private_vector_algebra::crate_src_carries_no_uncited_private_vector_algebra => private vector-algebra sites found in plinth-pipeline/src (scanned 4 file(s)) ;; src/coverage_evidence.rs  # mul_add in coverage_evidence.rs
 plinth-pipeline::it::dual_cavity_real_pipeline::at_bore_hollows_the_near_chamber_alone_after_the_real_preprocessing => AT_BORE handed 0 mm^3 back to solid, not the far chamber's 696.9099703213358 mm^3  # dual-chamber hollowing
@@ -34,6 +33,9 @@ plinth-orient::it::as_drawn::a_symlink_is_marked_by_the_tag_on_its_target_or_on_
 plinth-orient::it::as_drawn::the_finder_tag_on_the_owners_real_tagged_file_marks_it_as_drawn => the owner's tagged example ;; cube.stl is missing  # cube.stl
 
 # --- ignored by default; red when scripts/gate-full.sh runs them -----------------------------------
+# (plinth-sweep::it tests that are slow are not run by test-fast.sh either; `test-fast.sh --slow`
+# and gate-full.sh run them)
+plinth-sweep::it::prefilter_no_brace::the_prefilter_measures_no_brace_mast_or_tie => path hit: the full coarse ladder placed 0 braces, 5 ties  # slow (83 s); the coarse ladder places ties but no brace
 plinth-support::support_runner_integration::closure_repairs_censored_dust_because_that_repair_closes_a_real_hole => some committed step must close a FAILING patch  # deliberate red: reports FINDING 1; 496 s
 plinth-hollow::it::hollow_chain_end_to_end::legs_uneven_drain_planning_should_reach_both_legs_without_the_audit_rescue => drain planning must give each leg its own drain ;; left: 1 ;; right: 2  # ignored: fails until the drain-banding fix
 plinth-hollow::it::hollow_chain_end_to_end::thin_fin_bulk_should_reach_a_drilled_shell => SourceSurfaceCount { found: 3, expected: 2 }  # ignored: fails until the sub-voxel-pitch fix

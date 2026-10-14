@@ -10,11 +10,19 @@
 #                exit status 1
 #   FIXED-RED    a listed test that passes now: delete its line from known-reds.txt
 #
-# Slow legacy-runner tests are `#[ignore]`d and do not run here; scripts/gate-full.sh runs them.
+# Slow tests do not run here; scripts/gate-full.sh runs them, and so does --slow. Two kinds:
+#   - slow legacy-runner tests, `#[ignore]`d with a reason: they run only under gate-full.sh;
+#   - plinth-sweep's slow integration tests (heavy fixtures: the laid tube, the stilt plate, the
+#     Cylinder; about 130 of 276 in tests/it), ignored or not built unless PLINTH_SLOW_TESTS=1 is
+#     set, which this script does under --slow and gate-full.sh does always. See the header of
+#     crates/plinth-sweep/tests/it/main.rs. The rest of tests/it runs here in about a minute.
 # Wrap the call in the CPU lock like every other cargo command:
 #   cpu_lock_run <label> <cap-s> -- scripts/test-fast.sh [options] [crate ...] [-- libtest-args]
 #
 # Options:
+#   --slow            also run plinth-sweep's slow integration tests (the sweep suite takes about
+#                     20 minutes then); switching to or from --slow rebuilds plinth-sweep and what
+#                     depends on it once
 #   --no-dependents   test only the named / changed crates
 #   --all-features    add --all-features to the build and the test run
 #   --base REF        the ref "changed" is measured against (default: develop)
@@ -31,9 +39,10 @@ ROOT="$(cd "$HERE/.." && pwd)"
 cd "$ROOT" || exit 2
 
 DEPENDENTS=1; FEATURES=(); BASE=develop; JOBS=3; KNOWN="$HERE/known-reds.txt"
-CRATES=(); LIBTEST=()
+CRATES=(); LIBTEST=(); SLOW=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --slow) SLOW=1 ;;
     --no-dependents) DEPENDENTS=0 ;;
     --all-features) FEATURES=(--all-features) ;;
     --base) BASE="$2"; shift ;;
@@ -45,6 +54,10 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+# One value for every cargo call below (the build and each test program), so none of them rebuilds
+# plinth-sweep for a different setting. Set or cleared here, never inherited.
+if [ "$SLOW" = 1 ]; then export PLINTH_SLOW_TESTS=1; else unset PLINTH_SLOW_TESTS; fi
 
 OUT="${TEST_FAST_OUT:-$(mktemp -d "${TMPDIR:-/tmp}/test-fast.XXXXXX")}"
 mkdir -p "$OUT/logs"
@@ -88,6 +101,11 @@ if [ "$DEPENDENTS" = 1 ]; then
   while IFS= read -r c; do [ -n "$c" ] && CRATES+=("$c"); done <<<"$CLOSURE"
 fi
 echo "crates under test (${#CRATES[@]}): ${CRATES[*]}"
+if [ "$SLOW" = 1 ]; then
+  echo "slow tests: ON (--slow)"
+else
+  echo "slow tests: off (plinth-sweep's heavy-fixture tests are ignored or not built; --slow runs them)"
+fi
 
 PKG_ARGS=()
 for c in "${CRATES[@]}"; do PKG_ARGS+=(-p "$c"); done

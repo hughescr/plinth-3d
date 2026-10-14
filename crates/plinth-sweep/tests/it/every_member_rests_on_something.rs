@@ -307,6 +307,7 @@ fn raking_blade_has_no_member_resting_on_nothing() {
 /// their straight columns and left the children that had landed on their
 /// leaned shafts hanging 2.8-3.3 mm away.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn overhang_table_has_no_member_resting_on_nothing() {
     let mesh = plinth_mesh::make_overhang_table().expect("the overhang table fixture");
     let rooting = graded("make_overhang_table", &mesh);
@@ -319,6 +320,7 @@ fn overhang_table_has_no_member_resting_on_nothing() {
 /// children's tapers ended 3.15-3.34 mm from anything
 /// (`field-2026-09-28/trunk-thinner.md`, "Second, separate defect").
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn tall_stilt_plate_has_no_member_resting_on_nothing() {
     let mesh = plinth_mesh::make_tall_stilt_plate().expect("the tall stilt plate fixture");
     let rooting = graded("make_tall_stilt_plate", &mesh);
@@ -333,6 +335,7 @@ fn tall_stilt_plate_has_no_member_resting_on_nothing() {
 /// max over events keeps out of the plate reaction by design; it is read from
 /// the report, never recomputed here.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn laid_tube_rests_on_something_and_loses_no_load() {
     let mesh = plinth_mesh::make_laid_tube().expect("the laid tube fixture");
     let (mesh, plan) = swept(&mesh);
@@ -431,6 +434,7 @@ fn a_brace_hands_its_trunk_no_load() {
 /// not a re-derivation of the rule. Measured: 20 at 3.0-3.4 mm with the
 /// branches left behind, 0 now.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn every_landing_names_a_parent_standing_under_it_on_the_overhang_table() {
     let mesh = plinth_mesh::make_overhang_table().expect("the overhang table fixture");
     // Graded at the X this fixture was built at (12,

@@ -95,6 +95,7 @@ fn value_of(object: &str, label: &str) -> u64 {
 }
 
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn work_counters_are_equal_at_1_and_8_threads_and_fire() {
     let root = unique_directory("on");
     let mut works = Vec::new();
@@ -167,6 +168,7 @@ fn work_counters_are_equal_at_1_and_8_threads_and_fire() {
 /// With no `PLINTH_PERF_DIR` the child runs the same sweep with counting off
 /// (it asserts that itself) and the run still succeeds.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn counting_off_runs_the_same_sweep() {
     run_child(1, None);
 }

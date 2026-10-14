@@ -204,6 +204,7 @@ fn the_blade_up_pose_is_charged_for_every_seat_it_lands() {
 /// positive assertion "a production sweep ran and nothing it placed touched the
 /// model" — distinct from the `None` a pose nobody swept carries.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn a_disc_that_lands_entirely_on_the_plate_is_charged_no_landing_scar() {
     let mesh = plinth_mesh::make_recessed_disc(24.0, 25.0, 3.5, 2.5, 22.5, 128)
         .expect("the Round 50 profile");
@@ -236,6 +237,7 @@ fn a_disc_that_lands_entirely_on_the_plate_is_charged_no_landing_scar() {
 /// charged 0.0736 mm². That candidate is expected to move and is excluded by
 /// its own measurement, never by name.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn a_zero_landing_scar_changes_no_committed_number_on_a_disc() {
     let mesh = plinth_mesh::make_recessed_disc(24.0, 25.0, 3.5, 2.5, 22.5, 128)
         .expect("the Round 50 profile");
@@ -306,6 +308,7 @@ fn a_zero_landing_scar_changes_no_committed_number_on_a_disc() {
               and of nothing else. A tolerance would let a fourth, unnamed contribution hide \
               inside it, which is the defect this test exists to catch"
 )]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn the_scar_raw_is_exactly_its_three_named_halves() {
     let mesh = plinth_mesh::make_raking_blade().expect("the raking blade fixture");
     let request = SweepRequest::registered().expect("the registered sweep configuration");
@@ -381,6 +384,7 @@ fn the_scar_raw_is_exactly_its_three_named_halves() {
     reason = "the pinned pose is an exact axis direction, and the two poses' shifts are compared for \
               inequality: a tolerance would let two different charges pass as equal"
 )]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn withholding_the_landing_scar_moves_the_committed_numbers_but_not_this_pose() {
     let mesh = plinth_mesh::make_raking_blade().expect("the raking blade fixture");
     let request = SweepRequest::registered().expect("the registered sweep configuration");

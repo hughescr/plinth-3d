@@ -45,7 +45,8 @@ scripts/gate-full.sh                 # milestone: every test binary, ignored tes
   for the crates changed against `develop` (`--base REF` changes the reference; `--base HEAD` means
   only your uncommitted edits) plus every workspace crate that depends on them
   (`--no-dependents` leaves those out). Test binaries run three at a time. A change to the root
-  `Cargo.toml` or `Cargo.lock` counts as a change to every crate. Ignored tests do not run.
+  `Cargo.toml` or `Cargo.lock` counts as a change to every crate. Ignored tests do not run, and
+  neither do plinth-sweep's slow integration tests (below); `--slow` adds those.
 - **`scripts/gate-full.sh`** is the test half of the merge gate: every workspace test binary and
   doctest under `--profile gate` with `--include-ignored`, the separate `tools/plinth-audit`
   workspace (built `--release`: it has no gate profile), at most `-j` binaries at once. Use it at a
@@ -68,6 +69,18 @@ scripts/gate-full.sh                 # milestone: every test binary, ignored tes
 - **Slow legacy-runner tests are `#[ignore]`d** with the reason
   `slow legacy-runner test: run with scripts/gate-full.sh`. The legacy runner is not on the
   `--placement sweep` path; a regression in it shows at the milestone, not in the lane loop.
+- **plinth-sweep's slow integration tests run only at the milestone.** About 130 of the 276 tests
+  in `crates/plinth-sweep/tests/it` sweep a heavy fixture (the laid tube, the stilt plate, the
+  Cylinder, a dense orientation search); one sweep of the laid tube is 90 s on one core. They are
+  ignored (`#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: ...")]`) or, for a file that
+  is slow throughout, not built, unless `PLINTH_SLOW_TESTS=1` is set. `scripts/gate-full.sh`
+  always sets it, also under `--skip-ignored`; `scripts/test-fast.sh --slow` sets it for one run.
+  The remaining 142 run in about 70 s. Switching the variable rebuilds plinth-sweep and its
+  dependents once. A new test that sweeps a heavy fixture joins the slow set the same way (see
+  the header of `tests/it/main.rs`); a file that another test file imports from stays built and
+  ignores test by test. The fast set still runs every plinth-sweep unit test (`--lib`) and the
+  light integration tests: footprint, contact growth, head join and hookup, joint sizing on the
+  brace pair, discs and the round bases.
 - **plinth-sweep integration tests share their sweeps.** `tests/harness` computes each distinct
   sweep (same mesh, layer plan, policy and hole lists, compared by value) once per test program;
   `sweep`, `sweep_with`, `sweep_with_drains` and `memo_run_sweep` all go through it, and every
@@ -92,6 +105,7 @@ scripts/gate-full.sh                 # milestone: every test binary, ignored tes
 | edit `plinth-sweep/slenderness.rs` -> same build | 10.1 s | 2.8 s |
 | edit `plinth-support/lower/junction.rs` -> same build | 18.1 s | 3.1 s |
 | plinth-sweep `tests/it` under gate, test wall | 1565 s | 1142 s |
+| `test-fast.sh --no-dependents plinth-sweep`, wall (lib + `tests/it`; slow tests moved to the milestone) | 1,202 s | 68 s |
 | `test-fast.sh --base HEAD` after a `plinth-verify` edit | | 3 s (183 s with dependents: plinth-pipeline, plinth-cli) |
 | `gate-full.sh --skip-ignored` (72 test binaries, 2,748 tests) | about 6,550 s one binary at a time (release, 2026-10-08) | 1,456 s |
 | `gate-full.sh` with the ignored tests | | not finished in 140 min: `a_spec6_removal` alone needs 65-80 min on a quiet machine |

@@ -331,6 +331,7 @@ fn a_leaned_arm_that_catches_one_event_at_two_heights_carries_the_sum() {
 /// pass fired, and no member is sized above what the max field would have
 /// charged it except by a same-event sum the max field under-counted.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn every_peel_event_is_conserved_on_the_laid_tube() {
     let mesh = make_laid_tube().expect("the laid tube fixture");
     let policy = SweepPolicy::from_registry().expect("the registry");

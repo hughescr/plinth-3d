@@ -119,6 +119,7 @@ fn stilt_plate() -> plinth_mesh::Mesh {
 /// * whatever is left is NAMED as a warning, one per run, and no arm was
 ///   dropped or shortened to make the number look better.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn the_ladder_fires_on_the_stilt_plate_and_leaves_fewer_over_limit_runs_than_it_found() {
     let mesh = stilt_plate();
     let with = sweep_with(&mesh, 0.0, &policy());
@@ -161,6 +162,7 @@ fn the_ladder_fires_on_the_stilt_plate_and_leaves_fewer_over_limit_runs_than_it_
 /// and watching the next one take the work over. A test that only ran the
 /// production policy would be green if merging alone did everything.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn deleting_each_rung_hands_the_work_to_the_next_one_down() {
     let mesh = stilt_plate();
     let full = sweep_with(&mesh, 0.0, &policy());
@@ -268,6 +270,7 @@ fn deleting_each_rung_hands_the_work_to_the_next_one_down() {
 /// asserts that the field has runs the rung could hold, and then that with
 /// crosses deleted the rung holds some of them.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn with_bracing_deleted_thickening_takes_the_holdable_runs_first() {
     let mesh = stilt_plate();
     let at_50 = || harness::at_path_fixture_slenderness(policy());
@@ -469,6 +472,7 @@ fn every_mast_is_plate_rooted_braced_and_inside_its_own_slenderness_limit() {
 ///   there are exactly `merges_forced` of them;
 /// * no disc comes out with more over-limit runs than it went in with.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn a_flat_discs_arm_field_moves_only_where_the_lane_merged_it() {
     for (name, inner, outer, rim, floor_thickness) in [
         ("Round 25", 11.5, 12.5, 3.5, 2.5),
@@ -544,6 +548,7 @@ fn a_flat_discs_arm_field_moves_only_where_the_lane_merged_it() {
 /// the profile must never decrease downward. The same claim
 /// `shaft_landing.rs` makes about merges, made about the members this lane adds.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn force_crosses_every_brace_junction_and_no_profile_decreases_downward() {
     let mesh = stilt_plate();
     let plan = sweep_with(&mesh, 0.0, &policy());

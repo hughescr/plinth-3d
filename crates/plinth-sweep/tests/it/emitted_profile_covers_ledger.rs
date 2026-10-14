@@ -1013,6 +1013,7 @@ fn a_brace_raises_no_trunk_on_the_brace_pair() {
 /// fix/no-dangling with develop 4b58aeb: 155 members, 120 junctions graded,
 /// 0 detached, 0 inversions).
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn emitted_profile_covers_the_ledger_on_the_tall_stilt_plate() {
     grade(
         "make_tall_stilt_plate",

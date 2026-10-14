@@ -210,6 +210,7 @@ fn assert_no_overlapping_crosses(name: &str, plan: &SweepPlan) {
 }
 
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn no_two_crosses_on_one_pair_overlap_in_height_on_the_stilt_plate() {
     assert_no_overlapping_crosses("tall stilt plate", stilt());
 }
@@ -307,6 +308,7 @@ fn assert_every_cross_is_needed(name: &str, plan: &SweepPlan) {
 }
 
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn every_cross_is_needed_on_the_stilt_plate() {
     assert_every_cross_is_needed("tall stilt plate", stilt());
 }
@@ -419,6 +421,7 @@ fn the_brace_pair_places_no_redundant_mast() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn the_stilt_plate_places_no_redundant_mast() {
     assert_every_mast_is_needed("tall stilt plate", stilt());
 }
@@ -436,6 +439,7 @@ fn the_stilt_plate_places_no_redundant_mast() {
 /// WARNED (measured 2026-10-01); production is graded on that contract by
 /// `the_stilt_plate_warns_every_run_it_leaves_over_the_limit`.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn the_stilt_plate_leaves_no_unbraced_run() {
     let plan = stilt_at_s_50();
     let lane = &plan.report.slenderness_lane;
@@ -462,6 +466,7 @@ fn the_stilt_plate_leaves_no_unbraced_run() {
 /// limit is a published warning (emit and warn, nothing hidden), and each
 /// warned member is one the thicken rung refused past the maximum radius.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn the_stilt_plate_warns_every_run_it_leaves_over_the_limit() {
     let plan = stilt();
     let lane = &plan.report.slenderness_lane;
@@ -651,6 +656,7 @@ fn assert_unheld_ties_are_warned(name: &str, plan: &SweepPlan) {
 /// field places 4 masts and one post (11) is warned: 17 needed ties graded,
 /// 1 left unheld and warned (measured 2026-10-02).
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn every_needed_tie_holds_in_every_direction_on_the_stilt_plate() {
     assert_unheld_ties_are_warned("tall stilt plate", stilt());
     assert_ties_hold_in_every_direction(
@@ -661,6 +667,7 @@ fn every_needed_tie_holds_in_every_direction_on_the_stilt_plate() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn every_needed_tie_holds_in_every_direction_on_the_brace_pair() {
     // RE-SCOPED 2026-09-30 (fix/chitubox-geometry), measured. The strict
     // claim is graded WITH THE LIP-SEAT RULE OFF, as the head-join fixtures
@@ -717,6 +724,7 @@ fn every_needed_tie_holds_in_every_direction_on_the_brace_pair() {
 /// merged). Every id the lane publishes has to pass that test, and the two
 /// kinds are published apart.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: scripts/gate-full.sh runs it")]
 fn forced_merges_put_back_are_the_lanes_own_and_descent_merges_are_counted_apart() {
     // Graded at the X this fixture was built at (12): at the ruled 18 the stilt
     // plate forces 3 merges and puts none back (measured 2026-09-30), so both
