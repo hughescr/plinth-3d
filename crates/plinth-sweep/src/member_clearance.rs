@@ -796,6 +796,19 @@ pub(crate) fn model_clearance_census(
                 // exempt out to 3.0 mm and its 0.144 mm intrusion was never
                 // read). Any span wider than the tip, outside the ball, is
                 // always measured now.
+                //
+                // **A TIP WITH NO MEASURED FACE EXEMPTS ONLY ITS BALL** (round 6,
+                // 2026-10-14, `NUB-CLAW.md` part 2). The zone is read off the
+                // face the tip carries. Where the disc's plane is the raster
+                // seat's own (no face measured, or its plane passed clear of
+                // the ball), the plane says nothing about where the model is
+                // and the zone off it is a guess: Deinonychus arm 143's ball
+                // stood 0.137 mm inside the claw, the raster plane put the
+                // zone at 0.5 mm of axis, and 0.32 mm of shaft inside the
+                // claw was never measured. An unknown zone exempts nothing
+                // ([`contact_zone_mm`]): the shaft past the ball is measured
+                // and, inside the gap, warned.
+                Some(disc) if arm.seats_into_model && !disc.face_measured => disc.ball_radius_mm,
                 Some(disc) if arm.seats_into_model => disc.ball_radius_mm.max(contact_zone_mm(
                     Some(ContactFace {
                         point: disc.centre_mm,
