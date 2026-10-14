@@ -149,6 +149,24 @@
 //! * Unchanged: the brace angle (the saturated overhang angle, 57.5° from
 //!   vertical) and "every direction before seating".
 //!
+//! # The model foot (flare lane, 2026-10-14)
+//!
+//! A post that stands on the model ends in a hairline contact, a one-layer neck
+//! and a cone. A run that starts there is read THROUGH them ([`crate::foot_neck`]:
+//! the full one-pixel integral over the actual neck, cone and shaft, one routine
+//! for the measurement, the root search and the D9 probe). Where the neck and
+//! cone alone take the whole pixel no shaft width holds the run: the thicken rung
+//! is refused ([`ThickenRefusal::Neck`]) and the run goes to the bands, which are
+//! counted through panels that carry the foot ([`pair_panel`]), then to the other
+//! rungs and, last, a `foot_neck_over_limit` warning. A band that R2 would refuse
+//! because a model-footed post is narrower than its diagonal raises the post at
+//! the joint ([`joint_raise_plan`]). A model-footed post whose run starts at the
+//! top of an `|X|` band is thickened bay-local (ramp at the permitted underside
+//! slope, root through the bay, nothing below, no trunk raised) with the root the
+//! connected two-post frame needs ([`bay_local_plan`]); where the frame holds at
+//! no root the old carry-down stands. The guarantee is the print-time growing
+//! cantilever under the S-law drag, and nothing about the held phase.
+//!
 //! **Every remedy is attempted only for a run that is over the limit NOW.**
 //! The member's runs are re-measured from the live strut set after every
 //! remedy that touches it, so no partner builds a second cross on a pair an
