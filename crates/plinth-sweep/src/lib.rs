@@ -2083,6 +2083,7 @@ fn run_sweep_inner(
         preferred_gap_mm: policy.standoff_mm,
         final_gap_mm: policy.final_clearance_gap_mm,
         tip_radius_min_mm: policy.tip_radius_min_mm,
+        tip_radius_max_mm: policy.tip_radius_max_mm,
         x_allowed: policy.x_allowed,
         zone_factor: law.face_zone_factor(),
         surface: model_surface
