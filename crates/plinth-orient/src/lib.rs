@@ -309,6 +309,23 @@ fn selection_from_report(report: &JsonValue) -> Option<BaselineSelection> {
     }
     let orientation = object_field(stage_report, "orientation")?;
     let orientation = orientation.as_object()?;
+    // A searched pose has no axis-and-degrees form. A run that wants to replay one writes
+    // `"up": [x, y, z]` — the build-up direction in model frame, exactly as the run's log
+    // prints it under `rotation committed` — and the replay is bit for bit the searched pose.
+    if let Some(up) = object_field(orientation, "up") {
+        return match up.as_array()? {
+            [JsonValue::Number(x), JsonValue::Number(y), JsonValue::Number(z)] => {
+                Some(BaselineSelection::UpDirection {
+                    up_model_frame: [
+                        Finite::new(*x).ok()?,
+                        Finite::new(*y).ok()?,
+                        Finite::new(*z).ok()?,
+                    ],
+                })
+            }
+            _ => None,
+        };
+    }
     let axis = object_field(orientation, "axis")?.as_array()?;
     let axis = match axis {
         [JsonValue::Number(x), JsonValue::Number(y), JsonValue::Number(z)]
@@ -914,6 +931,25 @@ mod tests {
             .expect("fixture scale is in contract")
             .into_parts();
         audit
+    }
+
+    #[test]
+    fn a_pinned_report_can_replay_a_searched_up_direction_bit_for_bit() {
+        let report = br#"{"stages":[{"name":"hollow","status":"ok","report":{"oriented":true,"orientation":{"up":[-0.9949444714882141,-0.08012224773914275,-0.060546875]}}}]}"#;
+        let selection = decode_selection(report, Path::new("up.pipeline.json"))
+            .expect("an up-direction report decodes");
+        assert_eq!(
+            selection,
+            BaselineSelection::UpDirection {
+                up_model_frame: [
+                    Finite::new(-0.994_944_471_488_214_1).expect("finite"),
+                    Finite::new(-0.080_122_247_739_142_75).expect("finite"),
+                    Finite::new(-0.060_546_875).expect("finite"),
+                ],
+            }
+        );
+        let short = br#"{"stages":[{"name":"hollow","status":"ok","report":{"orientation":{"up":[0.0,1.0]}}}]}"#;
+        assert!(decode_selection(short, Path::new("short.pipeline.json")).is_err());
     }
 
     #[test]
