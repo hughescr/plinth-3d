@@ -2084,7 +2084,7 @@ pub fn run_sweep_with_holes(
             let roots: Vec<usize> = struts
                 .iter()
                 .filter(|strut| strut.k_top == layer)
-                .map(|strut| strut.cell)
+                .flat_map(births::root_cells)
                 .collect();
             outcome.residual_demand +=
                 births.unroot_unseated(layer, &bridged, &roots, &masks.cover, &mut reach);

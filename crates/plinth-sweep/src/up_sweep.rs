@@ -1157,7 +1157,8 @@ pub fn place_layer_cleared(
 /// What [`seat_births`] did on one layer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct BirthSeats {
-    /// Bridged births an arm of this layer already stood in.
+    /// Bridged births an arm of this layer already stood in, or whose pixels
+    /// all lay inside the planned tip ball of one.
     pub held: usize,
     /// Bridged births given an arm seated inside them.
     pub seated: usize,
@@ -1226,6 +1227,25 @@ pub(crate) fn seat_births(
             tally.held += 1;
             continue;
         }
+        // ONE CONTACT, ONE ARM (joint round 4, 2026-10-13, `LONG-ROD.md`): a
+        // birth whose pixels all lie inside the planned tip ball of an arm
+        // seated on this layer is held by that arm's contact. Bat_Cat_Owl
+        // seated four arms 0.05-0.1 mm apart under one ball; the third began
+        // as a one-layer stub on the second and leaned out as a 0.10 mm rod.
+        // The host covers the birth's cells from here on, which is how the
+        // reach field and the removal replay read it as held.
+        if let Some(clear) = clearance {
+            if let Some(host) = footprint_host(clear, grid.cell_area_mm2(), struts, layer, birth) {
+                let covered = &mut struts[host].covered_demand;
+                for &cell in &birth.cells {
+                    if cover[cell] && !covered.contains(&cell) {
+                        covered.push(cell);
+                    }
+                }
+                tally.held += 1;
+                continue;
+            }
+        }
         if struts.len() >= max_struts {
             tally.unseated += 1;
             continue;
@@ -1272,6 +1292,29 @@ pub(crate) fn seat_births(
         }
     }
     tally
+}
+
+/// The arm seated on `layer` whose planned tip ball (the contact ball of its
+/// smallest tip, [`twin_ball_mm`], about its seat) holds every pixel of
+/// `birth`; the lowest index when several do. The ball is the smallest the
+/// seat's demand allows, so a birth inside it is inside any ball the sizing
+/// later gives the arm.
+fn footprint_host(
+    clear: &DescentClearance<'_>,
+    cell_area_mm2: f64,
+    struts: &[SweepStrut],
+    layer: usize,
+    birth: &crate::births::Birth,
+) -> Option<usize> {
+    struts.iter().position(|strut| {
+        strut.kind == crate::StrutKind::Arm
+            && !strut.inserted_by_load
+            && strut.k_top == layer
+            && birth.inside_disc(
+                strut.center_mm,
+                twin_ball_mm(clear, strut.covered_demand.len(), cell_area_mm2),
+            )
+    })
 }
 
 /// `max(1, ⌈area / hex cell⌉)` for an island of `cells` cells.
@@ -4503,6 +4546,68 @@ mod descent_tests {
             surface: None,
             heads: None,
         }
+    }
+
+    /// **ONE CONTACT, ONE ARM** (joint round 4, 2026-10-13, `LONG-ROD.md`).
+    /// Two births on one layer, nothing below, the second a pixel 0.03 mm from
+    /// the first's seat, inside the 0.05 mm planned tip ball: seated, the first
+    /// holds the second (`held` 1, one arm). CONTROL: the second 0.5 mm away
+    /// is outside every ball and gets an arm of its own (two arms, `held` 0).
+    /// The holder also covers the held birth's cell (the reach field and the
+    /// removal replay read it as a root). SABOTAGE (by hand, the footprint
+    /// test of `seat_births` removed): the near birth is seated, two arms.
+    #[test]
+    fn a_birth_inside_the_planned_tip_ball_of_a_seated_arm_is_held_not_seated() {
+        let grid = grid();
+        let law = LeanLaw::new(H, 45.0, 25.0);
+        let clear = two_tier(&law);
+        let layer = 5;
+        let first = grid.index(20, 20);
+        let (x0, y0) = (grid.center_x_mm(20), grid.center_y_mm(20));
+        let birth = |cell: usize, x: f64| crate::births::Birth {
+            cells: vec![cell],
+            pixels: vec![1],
+            extents: vec![[x, y0, x, y0]],
+        };
+        let run = |second: &crate::births::Birth| {
+            let cover = vec![true; grid.cells()];
+            let mut reach = crate::reach::ReachState::new(&grid);
+            let mut history = ColumnHistory::new(&grid);
+            let mut scratch = super::GreedyScratch::new(&grid, 4.0);
+            let mut struts = Vec::new();
+            let mut outcome = outcome();
+            let near_first = birth(first, x0);
+            let wanted = [&near_first, second];
+            let seats = super::seat_births(
+                &grid,
+                layer,
+                &cover,
+                &DrainKeepOut::none(),
+                &law,
+                true,
+                4.0,
+                &mut reach,
+                &mut history,
+                &mut scratch,
+                &mut struts,
+                100,
+                Some(&clear),
+                &wanted,
+                &mut outcome,
+            );
+            (seats, struts)
+        };
+        let (seats, struts) = run(&birth(grid.index(20, 21), x0 + 0.03));
+        assert_eq!((seats.held, seats.seated, seats.unseated), (1, 1, 0));
+        assert_eq!(struts.len(), 1, "one contact, one arm");
+        assert!(
+            struts[0].covered_demand.contains(&grid.index(20, 21)),
+            "the arm covers the cell of the birth it holds: {:?}",
+            struts[0].covered_demand
+        );
+        let (seats, struts) = run(&birth(grid.index(20, 30), x0 + 0.5));
+        assert_eq!((seats.held, seats.seated), (0, 2), "CONTROL: a birth outside the ball is seated");
+        assert_eq!(struts.len(), 2);
     }
 
     /// THE MECHANISM (R1, `clearance-census-diagnosis.md` section 4), AND ITS

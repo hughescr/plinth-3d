@@ -1280,6 +1280,17 @@ fn lip_seat_passes(
     arm: &SweepStrut,
     passes: usize,
 ) -> (Vec<SweepStrut>, crate::lip_seat::LipSeatOutcome, usize) {
+    lip_seat_field_passes(mesh, law_s, std::slice::from_ref(arm), passes)
+}
+
+/// [`lip_seat_passes`] on a field of several members: the seat bite is read on
+/// the LAST one (the arm under test); the others stand as they are.
+fn lip_seat_field_passes(
+    mesh: &plinth_mesh::Mesh,
+    law_s: f64,
+    field: &[SweepStrut],
+    passes: usize,
+) -> (Vec<SweepStrut>, crate::lip_seat::LipSeatOutcome, usize) {
     let grid = grid();
     let history = ColumnHistory::new(&grid);
     let keep_out = crate::drain::DrainKeepOut::none();
@@ -1308,15 +1319,19 @@ fn lip_seat_passes(
     let mut last = Vec::new();
     let mut moved = 0;
     for _ in 0..passes {
-        let mut struts = vec![arm.clone()];
+        let mut struts = field.to_vec();
         let arms = tilted_arms(&grid, &mut struts);
+        let mut bites = vec![None; field.len()];
+        if let Some(last_bite) = bites.last_mut() {
+            *last_bite = Some(bite);
+        }
         moved = crate::lip_seat::apply(
             &joins,
             &plan,
             0.0,
             &mut struts,
             &arms,
-            &[Some(bite)],
+            &bites,
             crate::lip_seat::Trigger::SeatBite,
             &[],
             &mut outcome,
@@ -1367,6 +1382,65 @@ fn an_arm_floating_above_its_ground_is_not_kept_in_place_of_a_lean() {
     assert_eq!(outcome.slender_taken_kept_not_clear, 1, "PATH HIT: {outcome:?}");
     assert_eq!(outcome.candidates_refused_slender, 0, "{outcome:?}");
     assert!(taken[0].is_leaned(), "the arm leans to the plate");
+}
+
+/// **A ONE-LAYER STUB ON A ROOTED MEMBER IS A SUPPORT: ITS OVER-SLENDER LEAN
+/// IS REFUSED** (joint round 4, 2026-10-13, `joint/LONG-ROD.md`). Bat_Cat_Owl
+/// arm 33 stood one layer long on its sibling 32, whose chain reached the plate
+/// through the fat slanted post; the stub test took its 12 mm lean to the plate
+/// (a 0.10 mm rod, 5.4 times over `S * r`) as if it were a stub on the model
+/// wall. A member's chain carries it; only a stub on the MODEL has nothing
+/// to keep.
+///
+/// The fixture of `an_arm_floating_above_its_ground_is_not_kept_in_place_of_a_lean`
+/// (S = 50, a slab). TEST: the stub rests on post 0, a straight plate post:
+/// kept, its lean refused (path hit `candidates_refused_slender` 1, nothing
+/// taken for want of a support). CONTROLS: the same stub on the model is not
+/// kept (the lean is taken, as before), and the same stub on a post that
+/// floats above the plate is not kept (`rooted`). SABOTAGE (by hand, the
+/// `on_a_member` term of `kept_arm_is_a_support` removed, which restores the
+/// layer-count test): the TEST stub's lean is taken (`moved` 1).
+#[test]
+fn a_one_layer_stub_on_a_rooted_member_is_kept_in_place_of_a_lean() {
+    let mesh = boxes_mesh(&[([0.0, 0.0, 10.0], [15.0, 15.0, 12.0])]);
+    let grid = grid();
+    // The post stands one cell beside the stub's seat, as a sibling does; the
+    // stub reaches it by a one-layer lean (a landing on a member needs the
+    // member at the stub's base cell: `landing_check::stands_at`). Its own
+    // column is clear below, as the owl's was.
+    let post = straight(&grid, 0, 150, 151, 199, 0.1);
+    let post_cell = u32::try_from(post.cell).expect("a small cell");
+    let stub = |landing: Landing| {
+        let mut arm = straight(&grid, 1, 150, 150, 200, 0.1);
+        arm.k_bottom = 199;
+        arm.landing = landing;
+        if matches!(landing, Landing::Strut { .. }) {
+            arm.path = vec![post_cell, u32::try_from(arm.cell).expect("a small cell")];
+        }
+        arm.radius_mm = vec![0.1; 2];
+        arm.carried_mm2 = vec![0.0; 2];
+        arm
+    };
+    let on_post = Landing::Strut { id: 0, layer: 199 };
+    let (kept, outcome, moved) =
+        lip_seat_field_passes(&mesh, 50.0, &[post.clone(), stub(on_post)], 1);
+    assert_eq!(moved, 0, "the stub on a rooted member is kept: {outcome:?}");
+    assert_eq!(outcome.candidates_refused_slender, 1, "PATH HIT: {outcome:?}");
+    assert_eq!(outcome.kept_for_slenderness_ids, vec![1], "{outcome:?}");
+    assert_eq!(outcome.slender_taken_kept_not_clear, 0, "{outcome:?}");
+    assert_eq!(kept[1].landing, on_post, "it keeps its member");
+    let (taken, outcome, moved) =
+        lip_seat_field_passes(&mesh, 50.0, &[post.clone(), stub(Landing::Model { layer: 199 })], 1);
+    assert_eq!(moved, 1, "CONTROL: a stub on the model is not kept: {outcome:?}");
+    assert_eq!(outcome.slender_taken_kept_not_clear, 1, "{outcome:?}");
+    assert!(taken[1].is_leaned(), "the stub on the model leans to the plate");
+    let mut floating = post;
+    floating.k_bottom = 150;
+    floating.radius_mm = vec![0.1; 50];
+    floating.carried_mm2 = vec![0.0; 50];
+    let (_, outcome, moved) = lip_seat_field_passes(&mesh, 50.0, &[floating, stub(on_post)], 1);
+    assert_eq!(moved, 1, "CONTROL: a stub on a floating post is not kept: {outcome:?}");
+    assert_eq!(outcome.slender_taken_kept_not_clear, 1, "{outcome:?}");
 }
 
 /// **THE COUNT OF LEANS TAKEN FOR WANT OF A SUPPORT IS SUMMED OVER EVERY

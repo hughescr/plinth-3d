@@ -3421,7 +3421,8 @@ fn print_sweep_disclosure(
              the lowering's own measurement, {} by the solid's clearance from the model{}, {} by a \
              lean longer than the slenderness law holds at the thickest radius that keeps the \
              final gap while the arm as it stands is a support ({} such leans taken because it \
-             is not: a one-layer stub or a solid inside the model), {} by a new \
+             is not: a one-layer stub on the model, a solid inside the model, or an arm off its \
+             ground), {} by a new \
              plate root touching another, {} verified; put back once the field was sized: {} \
              whose host chain came out overloaded, {} whose root came to lap another ({} sized \
              checks; unexplained by any re-landing: {} newly overloaded members, {} new root \

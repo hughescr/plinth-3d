@@ -526,6 +526,19 @@ fn lean_too_slender(
     run_mm > law.max_unbraced_mm(fit_mm)
 }
 
+/// Whether the arm as it stands is a support the slenderness refusal may keep
+/// in place of a lean it cannot hold (see the comment at its call in
+/// [`apply`]): clear of the model (`clear_of_model`), standing on its ground
+/// (`rooted`), and either a shaft longer than one layer or a stub resting on
+/// another member. A stub on a rooted member hangs from that member's chain to
+/// the plate, as a support does; a stub on the MODEL wall (the Morel base's
+/// arm 44) is not one, and its lean is taken as before.
+fn kept_arm_is_a_support(standing: &SweepStrut, clear_of_model: bool, rooted: bool) -> bool {
+    let longer_than_a_layer = standing.k_top > standing.k_bottom.saturating_add(1);
+    let on_a_member = matches!(standing.landing, Landing::Strut { .. });
+    clear_of_model && rooted && (longer_than_a_layer || on_a_member)
+}
+
 /// One arm the finished field still has with its shaft cut by its seat trim.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LipSeatWarning {
@@ -678,8 +691,9 @@ pub struct LipSeatOutcome {
     /// last pass's list.
     pub kept_for_slenderness_ids: Vec<u32>,
     /// Leans the slenderness test refused that were TAKEN anyway, because the
-    /// arm as it stands is no support (a one-layer stub, or a solid inside the
-    /// model, or it floats above its ground): nothing better to keep (q12
+    /// arm as it stands is no support (a one-layer stub on the model, or a solid
+    /// inside the model, or it floats above its ground; a one-layer stub on a
+    /// rooted member IS a support, joint round 4): nothing better to keep (q12
     /// regressions, 2026-10-12). The path hit of that test. Summed over every
     /// pass, like [`Self::candidates_refused_slender`].
     pub slender_taken_kept_not_clear: usize,
@@ -1950,11 +1964,15 @@ pub(crate) fn apply(
             // call of its own; why not the thicken rung's taper, there).
             //
             // **AND ONLY WHERE THE ARM AS IT STANDS IS A SUPPORT** (q12
-            // regressions, 2026-10-12). The refusal trades the lean for the arm
-            // already there, so that arm must be one: a shaft longer than one
-            // layer, standing on its ground (`rooted`: the landing walk, so
-            // not floating above the plate or the model, nor resting on a
-            // member that is), whose solid does not enter the model
+            // regressions, 2026-10-12; [`kept_arm_is_a_support`]). The refusal
+            // trades the lean for the arm already there, so that arm must be
+            // one: a shaft longer than one layer, or a stub resting on another
+            // member (joint round 4, 2026-10-13: Bat_Cat_Owl arm 33, a stub on
+            // its sibling chain to the plate, leaned 4.8 mm as a 0.10 mm rod
+            // 5.4 times over the limit), standing on its ground (`rooted`:
+            // the landing walk, so not floating above the plate or the model,
+            // nor resting on a member that is), whose solid does not enter the
+            // model
             // (`standing_drawn`: the widest-radius reading of `before`, and
             // where that reads inside the model, the solid the file draws,
             // since a tapered arm's thinner shaft can clear a wall its widest
@@ -1991,11 +2009,13 @@ pub(crate) fn apply(
                 });
             if too_slender {
                 let standing = &struts[index_of];
-                let kept_is_a_support = standing_reads
-                    .drawn(index_of, struts)
-                    .is_none_or(|was| was >= -CLEARANCE_SLACK_MM)
-                    && standing.k_top > standing.k_bottom.saturating_add(1)
-                    && rooted[index_of];
+                let kept_is_a_support = kept_arm_is_a_support(
+                    standing,
+                    standing_reads
+                        .drawn(index_of, struts)
+                        .is_none_or(|was| was >= -CLEARANCE_SLACK_MM),
+                    rooted[index_of],
+                );
                 if kept_is_a_support {
                     outcome.candidates_refused_slender += 1;
                     // The cheapest admissible descent cannot be held: the arm
@@ -3692,6 +3712,51 @@ mod tests {
         assert!((thickest_radius_keeping_gap_mm(0.058, f64::INFINITY, 0.3, 1.0) - 1.0).abs() < 1e-12);
         // A drawn radius past the maximum is not shrunk.
         assert!((thickest_radius_keeping_gap_mm(1.2, 5.0, 0.3, 1.0) - 1.2).abs() < 1e-12);
+    }
+
+    /// **A STUB ON A ROOTED MEMBER IS A SUPPORT; A STUB ON THE MODEL IS NOT**
+    /// (joint round 4, 2026-10-13). The kept-arm test is the layer-count proxy
+    /// plus the landing: a shaft longer than one layer is a support, so is a
+    /// one-layer stub resting on another member; a one-layer stub on the model
+    /// wall (the Morel base's arm 44) and a stub off its ground or inside the
+    /// model are not. SABOTAGE (by hand, the `on_a_member` term removed): the
+    /// member stub reads as no support.
+    #[test]
+    fn a_one_layer_stub_on_a_member_is_a_support_and_one_on_the_model_is_not() {
+        use super::kept_arm_is_a_support;
+        use crate::{Landing, SeatFace, StrutKind, SweepStrut};
+        let arm = |k_bottom: usize, landing: Landing| SweepStrut {
+            id: 1,
+            cell: 0,
+            center_mm: [0.0, 0.0],
+            kind: StrutKind::Arm,
+            min_radius_mm: 0.0,
+            thickened_mm: Vec::new(),
+            seat_on_strut: None,
+            k_top: 200,
+            k_bottom,
+            landing,
+            interior: false,
+            radius_mm: Vec::new(),
+            carried_mm2: Vec::new(),
+            covered_demand: Vec::new(),
+            twin_host: false,
+            inserted_by_load: false,
+            path: Vec::new(),
+            straight_fallback: None,
+            fallback_path: Vec::new(),
+            head: None,
+            seat_face: SeatFace::default(),
+            seat_normal: [0.0; 3],
+        };
+        let on_member = Landing::Strut { id: 0, layer: 199 };
+        let on_model = Landing::Model { layer: 199 };
+        assert!(kept_arm_is_a_support(&arm(199, on_member), true, true), "a stub on a rooted member");
+        assert!(!kept_arm_is_a_support(&arm(199, on_model), true, true), "a stub on the model wall");
+        assert!(kept_arm_is_a_support(&arm(190, on_model), true, true), "a longer shaft");
+        assert!(!kept_arm_is_a_support(&arm(199, on_member), true, false), "a member stub off its ground");
+        assert!(!kept_arm_is_a_support(&arm(199, on_member), false, true), "a member stub inside the model");
+        assert!(!kept_arm_is_a_support(&arm(190, on_model), false, true), "a long shaft inside the model");
     }
 
     /// With S = 40 a 12.347 mm lean at 0.092 mm needs 0.309 mm: refused where

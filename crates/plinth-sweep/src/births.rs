@@ -28,9 +28,13 @@
 //! a potential at or under 1 before this layer's seats go in, which is
 //! exactly the case the cover joined to rooted material — the birth gets an
 //! arm seated INSIDE it ([`crate::up_sweep::seat_births`]) unless an arm of
-//! this layer already stands in one of its cells. A birth the reach field
-//! already leaves unrooted is demand and is seated by the placement as
-//! before; nothing changes for it.
+//! this layer already stands in one of its cells, or **already holds it**: all
+//! its pixels lie inside the planned tip ball of an arm seated on this layer
+//! (one contact touches them all; a second arm beside the first only adds a
+//! rod, joint round 4, 2026-10-13: Bat_Cat_Owl seated four arms 0.05-0.1 mm
+//! apart on one layer, and the third hung as a 0.10 mm rod 11 mm long). A
+//! birth the reach field already leaves unrooted is demand and is seated by
+//! the placement as before; nothing changes for it.
 //!
 //! The reach field reads the same rule wherever it is replayed
 //! ([`crate::demand_replay`]): a bridged birth with no arm of its layer
@@ -56,14 +60,40 @@ use crate::reach::ReachState;
 
 /// One birth: the working-raster cells its pixel centres fall in, and how
 /// many of its pixels each holds (parallel, sorted by cell).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Birth {
     pub cells: Vec<usize>,
     pub pixels: Vec<u32>,
+    /// The box (`[min x, min y, max x, max y]`, mm) of the pixel centres each
+    /// cell holds (parallel to `cells`): where in its cell the birth's pixels
+    /// are, which the cell alone does not say.
+    pub extents: Vec<[f64; 4]>,
+}
+
+impl Birth {
+    /// Whether every pixel of the birth lies inside the disc of `radius_mm`
+    /// about `centre_mm` (read at the corners of each cell's pixel box, so a
+    /// box inside the disc has all its pixels inside).
+    pub(crate) fn inside_disc(&self, centre_mm: [f64; 2], radius_mm: f64) -> bool {
+        !self.extents.is_empty()
+            && self.extents.iter().all(|&[min_x, min_y, max_x, max_y]| {
+                let far_x = (min_x - centre_mm[0]).abs().max((max_x - centre_mm[0]).abs());
+                let far_y = (min_y - centre_mm[1]).abs().max((max_y - centre_mm[1]).abs());
+                far_x.hypot(far_y) <= radius_mm
+            })
+    }
+}
+
+/// The cells an arm roots on its own layer: its seat cell and the cells it
+/// covers (the demand it rooted, and the births it holds by footprint,
+/// [`crate::up_sweep::seat_births`]). What [`Births::unroot_unseated`] reads as
+/// "a root of the layer stands in the birth".
+pub(crate) fn root_cells(strut: &crate::SweepStrut) -> impl Iterator<Item = usize> + '_ {
+    std::iter::once(strut.cell).chain(strut.covered_demand.iter().copied())
 }
 
 /// Every layer's births, found once for the whole stack.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Births {
     layers: Vec<Vec<Birth>>,
 }
@@ -194,8 +224,9 @@ impl Births {
     }
 
     /// Unroot every bridged birth of this layer that no root of the layer
-    /// stands in (`roots`: the cells of the arms seated on this layer, in any
-    /// order). Returns the cover cells so unrooted.
+    /// stands in (`roots`: the cells of the arms seated on this layer, with
+    /// the cells they cover ([`root_cells`]), in any order). Returns the cover
+    /// cells so unrooted.
     pub(crate) fn unroot_unseated(
         &self,
         layer: usize,
@@ -265,7 +296,7 @@ fn births_of(grid: &Grid, runs: &[Run], previous: &[Run], pitch_x_mm: f64, pitch
             false
         });
     }
-    let mut births: BTreeMap<usize, BTreeMap<usize, u32>> = BTreeMap::new();
+    let mut births: BTreeMap<usize, BTreeMap<usize, CellPixels>> = BTreeMap::new();
     for (index, &(row, first, end)) in runs.iter().enumerate() {
         let root = find(&mut parent, index);
         if carried.get(&root).copied().unwrap_or(true) {
@@ -277,12 +308,21 @@ fn births_of(grid: &Grid, runs: &[Run], previous: &[Run], pitch_x_mm: f64, pitch
     births
         .into_values()
         .filter(|cells| !cells.is_empty())
-        .map(|cells| {
-            let (cells, pixels) = cells.into_iter().unzip();
-            Birth { cells, pixels }
+        .map(|held| {
+            let mut birth = Birth::default();
+            for (cell, (pixels, extent)) in held {
+                birth.cells.push(cell);
+                birth.pixels.push(pixels);
+                birth.extents.push(extent);
+            }
+            birth
         })
         .collect()
 }
+
+/// A birth's pixels in one cell: how many, and the box of their centres
+/// (`[min x, min y, max x, max y]`, mm).
+type CellPixels = (u32, [f64; 4]);
 
 /// The root of a run's piece, halving the path as it goes.
 fn find(parent: &mut [usize], mut index: usize) -> usize {
@@ -308,7 +348,7 @@ fn add_run_cells(
     end: i64,
     pitch_x_mm: f64,
     pitch_y_mm: f64,
-    cells: &mut BTreeMap<usize, u32>,
+    cells: &mut BTreeMap<usize, CellPixels>,
 ) {
     let cell_row = grid.row_coord((row as f64 + 0.5) * pitch_y_mm).floor();
     if !(cell_row >= 0.0 && cell_row < grid.rows() as f64) {
@@ -325,7 +365,18 @@ fn add_run_cells(
         let next = ((next_edge / pitch_x_mm - 0.5).ceil() as i64).clamp(pixel + 1, end);
         if col >= 0.0 && col < grid.cols() as f64 {
             let count = u32::try_from(next - pixel).unwrap_or(u32::MAX);
-            *cells.entry(grid.index(cell_row, col as usize)).or_insert(0) += count;
+            let y = (row as f64 + 0.5) * pitch_y_mm;
+            let (first_x, last_x) = ((pixel as f64 + 0.5) * pitch_x_mm, ((next - 1) as f64 + 0.5) * pitch_x_mm);
+            let entry = cells
+                .entry(grid.index(cell_row, col as usize))
+                .or_insert((0, [first_x, y, last_x, y]));
+            entry.0 += count;
+            entry.1 = [
+                entry.1[0].min(first_x),
+                entry.1[1].min(y),
+                entry.1[2].max(last_x),
+                entry.1[3].max(y),
+            ];
         }
         pixel = next;
     }

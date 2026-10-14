@@ -327,7 +327,7 @@ fn replay_once(
         if !bridged_current.is_empty() {
             let roots: Vec<usize> = roots_by_layer[layer]
                 .iter()
-                .map(|&index| struts[index].cell)
+                .flat_map(|&index| crate::births::root_cells(&struts[index]))
                 .collect();
             context
                 .births
@@ -370,7 +370,7 @@ fn replay_once(
                 let roots: Vec<usize> = roots_by_layer[layer]
                     .iter()
                     .filter(|&&index| !doomed[index])
-                    .map(|&index| struts[index].cell)
+                    .flat_map(|&index| crate::births::root_cells(&struts[index]))
                     .collect();
                 context
                     .births

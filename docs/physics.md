@@ -299,10 +299,20 @@ posts; measured 2026-10-12), so it is counted
 run is longer than `S` times the thickest radius at which it keeps the final gap (the drawn radius
 grown by the spare gap measured for it, up to the registered maximum), the lean is refused and the arm
 keeps its seat with its seat-bite warning (Deinonychus arms 215 and 220). The refusal trades the lean
-for the arm as it stands, so that arm must be a support: a shaft longer than one layer whose solid
-does not enter the model. On the Morel base the kept arm (44) was a one-layer stub onto the model wall
-beside its seat, tip off its face; there the lean is taken. The test is arithmetic on the clearance
-the rule already reads for every proposal in one batched kernel call.
+for the arm as it stands, so that arm must be a support: standing on its ground, its solid not
+entering the model, and either a shaft longer than one layer or a one-layer stub resting on another
+member (joint round 4, 2026-10-13: Bat_Cat_Owl's stub on its sibling chain took a 4.8 mm lean as a
+0.10 mm rod 5.4 times over `S * r`; a member's chain carries a stub). On the Morel base the kept arm
+(44) was a one-layer stub onto the model wall beside its seat, tip off its face; there the lean is
+taken. The test is arithmetic on the clearance the rule already reads for every proposal in one
+batched kernel call.
+
+**One contact, one arm, at a first layer over nothing (joint round 4).** A birth the cover bridged to
+rooted material is given an arm only if no arm of its layer stands in it or holds it. An arm holds a
+birth when every pixel of the birth lies inside the arm's planned tip ball (the contact ball of its
+smallest tip): one contact touches them all. Bat_Cat_Owl seated four arms 0.05-0.1 mm apart on one
+layer, and the third hung as a long thin rod. The holder covers the held birth's cells, which is how
+the reach field and the removal replay read the birth as rooted.
 
 This reading is conservative and that is a known, open trade. A lean leaving its seat face reads its
 clearance at the gap itself (its seat zone ends where the solid first stands the gap clear of the seat
