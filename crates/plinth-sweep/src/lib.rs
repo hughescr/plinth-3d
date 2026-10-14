@@ -4421,8 +4421,9 @@ fn grow_contact_balls(
 
 /// **The tips whose reduced ball leaves a birth uncovered**, with the owner's
 /// ball radius each is to keep (see [`grow_contact_balls`]). A birth at layer
-/// `j` is covered by a ball when every one of its pixels lies in the ball's
-/// section at the lamina under it (`j - 1`), about the ball centre. One batched
+/// `j` is stood under by a ball when the ball's section at the lamina under it
+/// (`j - 1`), about the ball centre, reaches a pixel of it; the owner's ball
+/// reaches it and the reduced one does not. One batched
 /// disc call per ball size, then arithmetic over the births of the layers the
 /// owner's ball spans.
 fn births_lost_by_reduction(
@@ -4494,8 +4495,8 @@ fn births_lost_by_reduction(
                 continue;
             }
             for birth in births.at(layer) {
-                if birth.inside_disc(owner_centre, owner_reach)
-                    && !birth.inside_disc(drawn_centre, drawn_reach)
+                if birth.touches_disc(owner_centre, owner_reach)
+                    && !birth.touches_disc(drawn_centre, drawn_reach)
                 {
                     lost.push((row, profile.ball_radius_mm));
                     break 'layers;
