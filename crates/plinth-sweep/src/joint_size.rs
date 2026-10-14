@@ -70,7 +70,7 @@ fn mul(a: V3, k: f64) -> V3 {
     [a[0] * k, a[1] * k, a[2] * k]
 }
 fn dot(a: V3, b: V3) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    geom_kernel::vec3::dot(a, b)
 }
 fn norm(a: V3) -> f64 {
     dot(a, a).sqrt()
@@ -80,11 +80,7 @@ fn unit(a: V3) -> Option<V3> {
     (n > ZERO_LENGTH_MM && n.is_finite()).then(|| mul(a, 1.0 / n))
 }
 fn cross(a: V3, b: V3) -> V3 {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
+    geom_kernel::vec3::cross(a, b)
 }
 fn lerp(a: V3, b: V3, t: f64) -> V3 {
     add(a, mul(sub(b, a), t))
