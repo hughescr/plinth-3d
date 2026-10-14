@@ -124,7 +124,7 @@ fn a_model_landings_line_is_the_axis_the_lowering_draws() {
         Finite::new(PLATE).expect("finite plate"),
         PositiveFinite::new(5.0).expect("positive lift"),
     );
-    let lowered = lower_sweep_arms(&[arm.clone()], frame, &layers, 100_000, 1 << 30)
+    let lowered = lower_sweep_arms(std::slice::from_ref(&arm), frame, &layers, 100_000, 1 << 30)
         .expect("the lowering refuses only about the request");
     let drawn: Vec<_> = lowered
         .primitives
