@@ -3254,14 +3254,18 @@ fn print_sweep_disclosure(
         let contact = &report.seat_contact;
         if contact.enabled {
             println!(
-                "[sweep {model}] real contact: {} seated tips measured; planned {:.4} mm2, real \
-                 {:.4} mm2 at the ungrown ball ({} short of plan) and {:.4} mm2 at the drawn ball; \
-                 {} balls grown (largest x{:.3}, limit {:.4} mm radius) in {} round(s); {} held \
-                 below the limit so the ball's lowest point stays on its shaft ({} of them left \
-                 short by it); {} still short of plan; {} balls whose lowest point stood outside \
-                 their shaft as planned given a collar that holds it{}",
+                "[sweep {model}] real contact: {} seated tips measured; the load needs {:.4} mm2 \
+                 (the profile balls plan {:.4} mm2), real {:.4} mm2 at the ungrown ball ({} short \
+                 of the need) and {:.4} mm2 at the drawn ball; {} balls grown (largest x{:.3}, \
+                 limit {:.4} mm radius) in {} round(s); {} held below the limit so the ball's \
+                 lowest point stays on its shaft ({} of them left short by it); {} left short by \
+                 the ball-to-shaft ratio and {} by a feature narrower than the load's contact; \
+                 {} profile balls past their feature's chord and {} past the ratio (drawn as the \
+                 owner's profile ball); {} still short of the need; {} balls whose lowest point \
+                 stood outside their shaft as planned given a collar that holds it{}",
                 contact.tips_measured,
                 contact.planned_mm2,
+                contact.profile_disc_mm2,
                 contact.real_ungrown_mm2,
                 contact.short_ungrown,
                 contact.real_drawn_mm2,
@@ -3271,6 +3275,10 @@ fn print_sweep_disclosure(
                 contact.rounds,
                 contact.carried_bound,
                 contact.stopped_by_overhang,
+                contact.ratio_bound,
+                contact.feature_bound,
+                contact.ungrown_over_feature,
+                contact.ungrown_over_ratio,
                 contact.short.len(),
                 emission.tip_pole_collars,
                 if emission.tip_pole_collars_steeper_than_law > 0 {
@@ -3283,10 +3291,19 @@ fn print_sweep_disclosure(
                     String::new()
                 },
             );
+            for over in &contact.over_feature {
+                println!(
+                    "[sweep {model}] WARNING tip of arm {} draws the owner's profile ball ({:.4} mm \
+                     radius, a contact disc {:.4} mm wide) on a feature whose narrowest cured chord \
+                     at the strike layer is {:.4} mm: the ball is not grown, and not drawn smaller \
+                     than the owner's ball for its tip size",
+                    over.strut, over.ball_radius_mm, over.disc_width_mm, over.chord_mm,
+                );
+            }
             for short in &contact.short {
                 println!(
                     "[sweep {model}] WARNING tip of arm {} has {:.4} mm2 of real contact against \
-                     {:.4} mm2 planned ({:.1}%), ball {:.4} mm (planned {:.4} mm): {}",
+                     {:.4} mm2 needed ({:.1}%), ball {:.4} mm (profile ball {:.4} mm): {}",
                     short.strut,
                     short.real_mm2,
                     short.planned_mm2,

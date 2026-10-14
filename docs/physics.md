@@ -574,6 +574,29 @@ changes has its disc graded again and a disc now off its face is warned about. B
 `plinth_sweep::footprint_normal`
 (`tests/it/footprint_normal.rs`); never run in the orientation prefilter.
 
+### A tip ball is sized to the load and bounded by its shaft and its feature (round 5, 2026-10-14)
+
+The emitter cuts a tip ball to the model mesh, so a tip's contact is the model surface inside its drawn
+ball. The ball grows (`plinth_sweep::contact_growth`) only toward what the tip's load needs, and a grown ball
+is never a lump on its shaft or wider than the feature it seats on (owner, Bat_Cat_Owl: the balls were "much
+bigger than the support column or the feature that is being supported").
+
+- **The target is the load, not the profile disc.** `min(load need, planned disc)`: the need is the
+  down-sweep's carried load at the contact over `X_ALLOWED`, `π r_load²`, before the radius minimum and
+  clamps. A tip at the 0.05 mm minimum needs far less than its ball gives and is not grown.
+- **A step must pay for itself.** A face that is flat at the kept seat depth `δ` gains `2 π δ` of area per
+  mm of ball radius. A step that gains less only wraps the flanks (`ShortReason::FlankOnly`). On a convex
+  underside every step gains less, so such a ball keeps the owner's profile size.
+- **Three ceilings.** The ball-to-shaft ratio (the largest ball factor of the owner's profile table, 1.5,
+  times the shaft radius at the seat); a contact disc no wider than the narrowest cured chord of the model
+  section through the seat at the strike layer (`plinth_sweep::feature_chord`: the cured joint is only as
+  strong as its narrowest section, and past it the break moves into the model); and the shaft's own carry
+  (above). A tip a ceiling leaves short of its need is warned with the shortfall and the reason.
+- **Profile balls are not drawn smaller.** The lowering draws no ball below the owner's profile ball for the
+  tip size. One already wider than its feature is counted and warned
+  (`ContactOutcome::ungrown_over_feature`), not shrunk. The second contact along a feature too narrow for its
+  load's contact belongs to the placement, which has run before the field is final.
+
 ### Every change to a tip keeps layerwise support (joint review, 2026-10-12)
 
 A solid that is connected when finished can still start a layer with nothing under it, and the

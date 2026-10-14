@@ -44,6 +44,7 @@ mod drain_connectivity;
 mod drain_rim_routing;
 mod emitted_profile_covers_ledger;
 mod every_member_rests_on_something;
+mod feature_chord;
 #[cfg(feature = "slow-tests")]
 mod flank_relief;
 mod footprint_keeps_seat;

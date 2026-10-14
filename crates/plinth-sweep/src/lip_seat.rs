@@ -581,11 +581,13 @@ fn tips_seat(
         layer_plan,
     };
     let pixel_area_mm2 = context.grid.pitch_mm() * context.grid.pitch_mm();
-    let read = crate::contact_growth::measure(&env, &rows, &row_sites);    let seats = |row: Option<(f64, f64, f64)>| {
-        row.is_some_and(|(planned, real, _)| real > 0.0 && real + pixel_area_mm2 >= planned)
+    let read = crate::contact_growth::measure(&env, &rows, &row_sites);
+    let seats = |row: &Option<crate::contact_growth::Measured>| {
+        row.as_ref()
+            .is_some_and(|m| m.real_mm2 > 0.0 && m.real_mm2 + pixel_area_mm2 >= m.planned_mm2)
     };
     read.chunks(2)
-        .map(|both| (both.first().is_some_and(|&row| seats(row)), both.get(1).is_some_and(|&row| seats(row))))
+        .map(|both| (both.first().is_some_and(seats), both.get(1).is_some_and(seats)))
         .collect()
 }
 
