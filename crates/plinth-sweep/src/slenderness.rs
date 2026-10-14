@@ -181,6 +181,11 @@ pub struct SlendernessLaw {
     /// angle the overhang law admits. `√(1 + tan² θ_sat)`, written as the
     /// secant because that is what it is.
     secant_sat: f64,
+    /// `X_ALLOWED`, read only to size the CONTACT of a model foot from the
+    /// load it passes (the neck of [`crate::foot_neck`]). `0`: no foot is read
+    /// and every run is measured as before 2026-10-14 (the plate-only default
+    /// of [`Self::new`]; the sweep sets it with [`Self::with_foot_sizing`]).
+    x_allowed: f64,
 }
 
 impl SlendernessLaw {
@@ -209,7 +214,48 @@ impl SlendernessLaw {
             r_min_mm,
             r_max_mm,
             secant_sat: (1.0 + tangent * tangent).sqrt(),
+            x_allowed: 0.0,
         }
+    }
+
+    /// The same law, reading model feet: `x_allowed` is the registered area-law
+    /// ratio the foot's contact radius is sized by (`down_sweep::size_arm`).
+    #[must_use]
+    pub const fn with_foot_sizing(mut self, x_allowed: f64) -> Self {
+        self.x_allowed = x_allowed;
+        self
+    }
+
+    /// The radius a cone gains per mm of height at the overhang law's saturated
+    /// angle: `cot theta_sat`, the slope the foot cone is drawn at
+    /// (`plinth_support::lower`, `drawn_span_rules`).
+    #[must_use]
+    pub fn cone_slope(&self) -> f64 {
+        let tangent = (self.secant_sat * self.secant_sat - 1.0).max(0.0).sqrt();
+        if tangent > 0.0 {
+            1.0 / tangent
+        } else {
+            0.0
+        }
+    }
+
+    /// The contact radius and cone slope of the foot a MODEL-landed post stands
+    /// on, or `None` for any other member (or a law that reads no feet): the
+    /// area-law radius of the load the foot passes, as `model_feet` sizes it
+    /// (`size_arm` of the ledger's carried load at the landing layer, inside the
+    /// registered clamps).
+    pub(crate) fn foot_contact(&self, strut: &SweepStrut) -> Option<(f64, f64)> {
+        if !(self.binds() && self.x_allowed > 0.0) || !matches!(strut.landing, Landing::Model { .. }) {
+            return None;
+        }
+        let slope = self.cone_slope();
+        let carried = strut.carried_mm2.first().copied()?.max(0.0);
+        (slope > 0.0).then(|| {
+            let radius = (carried / self.x_allowed / core::f64::consts::PI)
+                .sqrt()
+                .clamp(self.r_min_mm, self.r_max_mm);
+            (radius, slope)
+        })
     }
 
     /// The law that constrains nothing. **Sabotage and comparison only**: with
@@ -223,6 +269,7 @@ impl SlendernessLaw {
             r_min_mm: 0.0,
             r_max_mm: 0.0,
             secant_sat: 1.0,
+            x_allowed: 0.0,
         }
     }
 
@@ -348,6 +395,22 @@ pub struct UnbracedRun {
     /// counting every landing and end, and each cross whose plane lies within
     /// 45° of that direction (`holds`).
     pub sway_deg: Option<f64>,
+    /// The same equivalent radius WITHOUT the model foot's neck and cone: the
+    /// shaft clamped at the contact. A beam model that builds the foot
+    /// explicitly ([`crate::frame_bands::Panel`]) takes this for its posts, so
+    /// the foot is counted once. Equal to [`Self::radius_mm`] for a run that
+    /// does not start on a model foot.
+    pub shaft_radius_mm: f64,
+    /// The share of the one pixel the foot's neck and cone use alone
+    /// (`(4 / S^4) * int_foot (l - x)^3 / r^4 dx`); `0` without a foot. At `1`
+    /// or more no shaft width can hold the run.
+    pub neck_share: f64,
+    /// The model foot the run starts on, if it starts on one.
+    pub foot: Option<crate::foot_neck::FootGeom>,
+    /// For a run whose base is the TOP of an `|X|` band: the band's bottom
+    /// layer, where the post below begins to carry the band's load. `None`
+    /// where the base is anything else (the foot, a landing branch, an end).
+    pub bay_bottom: Option<usize>,
 }
 
 impl UnbracedRun {
@@ -366,6 +429,10 @@ pub struct UnbracedWarning {
     pub k_top: usize,
     pub length_mm: f64,
     pub limit_mm: f64,
+    /// The share of the one pixel the run's model foot (neck and cone) uses
+    /// alone; `0` for a run that does not start on a foot. At `1` or more the
+    /// warning is a `foot_neck_over_limit`: no shaft width could hold the run.
+    pub neck_share: f64,
 }
 
 /// What one slenderness pass did.
@@ -463,6 +530,24 @@ pub struct SlendernessOutcome {
     /// trunk raised with it, would enter the model's final clearance gap where
     /// the solid as drawn now does not (R2, 2026-10-04). A path-hit witness.
     pub thicken_refused_model: usize,
+    /// **Flare lane (2026-10-14).** Runs that stood on a model foot and were
+    /// read through its neck and cone ([`crate::foot_neck`]), counted each time
+    /// the ladder took one up (a path-hit witness).
+    pub foot_runs_read_through_neck: usize,
+    /// Thickenings refused because the foot's neck and cone alone take the whole
+    /// pixel at the best root: no shaft width could hold the run. The run goes
+    /// on to the other rungs and, if none holds it, is warned as
+    /// `foot_neck_over_limit`.
+    pub thicken_refused_neck: usize,
+    /// Thickenings written bay-local (ramp, root through the bay, nothing below)
+    /// on a connected frame that held, and the ones that could have been and
+    /// were raised from the foot as before because the frame did not hold.
+    pub thicken_bay_local: usize,
+    pub carry_down_kept_frame: usize,
+    /// Model-footed posts widened at a band's joints to the diagonal's radius
+    /// (R2 would have refused the band: the post is narrower than its
+    /// diagonal), counted when the band is built.
+    pub posts_raised_at_a_joint: usize,
     /// The refusal's path hits (challenger round 3, 2026-10-05): raised slots
     /// the raster flagged within the gap, and of those the ones the census's
     /// predicate measured clear as committed, and the ones it proved inside
@@ -1446,7 +1531,15 @@ impl RunMeasure<'_> {
                 continue;
             }
             let length_mm = run_length(self.grid, strut, k_lo, k_top, self.layer_height_mm);
-            let radius_mm = run_radius(strut, self.thickened, self.profile, k_lo, k_top);
+            let env = ReadEnv {
+                grid: self.grid,
+                law: self.law,
+                layer_height_mm: self.layer_height_mm,
+            };
+            let reading = run_reading(env, strut, k_lo, k_top, length_mm, &|j| {
+                drawn_at_with(strut, self.thickened, self.profile, k_lo + j)
+            });
+            let radius_mm = reading.radius_mm;
             runs.push(UnbracedRun {
                 strut_id: strut.id,
                 k_lo,
@@ -1455,9 +1548,33 @@ impl RunMeasure<'_> {
                 radius_mm,
                 limit_mm: self.law.max_unbraced_mm(radius_mm),
                 sway_deg,
+                shaft_radius_mm: reading.shaft_radius_mm,
+                neck_share: reading.neck_share,
+                foot: reading.foot,
+                bay_bottom: bay_bottom_of(groups, k_lo),
             });
         }
     }
+}
+
+/// The bottom layer of the `|X|` band whose TOP is `base`, when a run's base is
+/// the top of a band: the lowest layer with a cross tie that holds from `base`
+/// (a band bottom holds from its band top), the layer at `base` being a pure
+/// cross tie too. `None` for any other base.
+fn bay_bottom_of(groups: &[LayerTies], base: usize) -> Option<usize> {
+    let top = groups.iter().find(|group| group.layer == base)?;
+    if top.all_from.is_some() || top.planes.is_empty() {
+        return None;
+    }
+    groups
+        .iter()
+        .filter(|group| {
+            group.layer < base
+                && group.all_from.is_none()
+                && group.planes.iter().any(|&(_, from)| from == base)
+        })
+        .map(|group| group.layer)
+        .min()
 }
 
 /// The drawn radius at an absolute layer, or the member's own minimum where
@@ -1487,51 +1604,72 @@ fn drawn_at_with(
 /// `r_eq` of `n` layers, bottom first, from a radius per layer: the uniform
 /// radius whose cantilever sways as far (see [`UnbracedRun::radius_mm`]).
 /// Layers with no radius are left out and the weights re-normalised.
+#[cfg(test)]
 fn equivalent_radius(n: usize, radius_at: impl Fn(usize) -> Option<f64>) -> Option<f64> {
-    if n == 0 {
-        return None;
-    }
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "layer counts bounded by the plan's own layer count are exact in f64"
-    )]
-    let n_f = n as f64;
-    let mut compliance = 0.0;
-    let mut weight = 0.0;
-    let (mut narrowest, mut widest) = (f64::INFINITY, 0.0_f64);
-    for j in 0..n {
-        let Some(radius) = radius_at(j) else {
-            continue;
-        };
-        narrowest = narrowest.min(radius);
-        widest = widest.max(radius);
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "a slot index bounded by the layer count is exact in f64"
-        )]
-        let (upper, lower) = (((n - j) as f64) / n_f, ((n - j - 1) as f64) / n_f);
-        let w = upper.powi(4) - lower.powi(4);
-        weight += w;
-        compliance += w / radius.powi(4);
-    }
     // A weighted power mean lies between its narrowest and widest input; the
     // clamp keeps float noise from reading a uniform post as a hair thinner
-    // than itself.
-    (compliance > 0.0 && weight > 0.0)
-        .then(|| (weight / compliance).powf(0.25).clamp(narrowest, widest))
+    // than itself. (The one body is `foot_neck::shaft_equivalent`.)
+    crate::foot_neck::shaft_equivalent(n, &radius_at)
 }
 
+/// What the grid, the law and the layer height give a run's reading: the
+/// context every caller of [`run_reading`] has.
+#[derive(Clone, Copy)]
+struct ReadEnv<'a> {
+    grid: &'a Grid,
+    law: &'a SlendernessLaw,
+    layer_height_mm: f64,
+}
+
+/// **The ONE reading of a run's compliance** (flare lane, 2026-10-14; the
+/// measurement, the root search of [`plan_thicken`] and the D9 probe all call
+/// it). A run that starts on a MODEL foot is read with the foot's neck and cone
+/// built from their coordinates ([`crate::foot_neck`]); any other run is read
+/// as before (a cantilever clamped at its base). `radius_at(j)` is the drawn
+/// radius of slot `j`, bottom first; `length_mm` the run's chord.
+fn run_reading(
+    env: ReadEnv<'_>,
+    strut: &SweepStrut,
+    k_lo: usize,
+    k_top: usize,
+    length_mm: f64,
+    radius_at: &dyn Fn(usize) -> Option<f64>,
+) -> crate::foot_neck::Reading {
+    let n = k_top.saturating_sub(k_lo);
+    let foot = if k_lo == strut.k_bottom {
+        env.law.foot_contact(strut)
+    } else {
+        None
+    };
+    crate::foot_neck::read(length_mm, n, env.law.ratio(), radius_at, foot).unwrap_or(
+        crate::foot_neck::Reading {
+            radius_mm: strut.tip_radius_mm(),
+            shaft_radius_mm: strut.tip_radius_mm(),
+            neck_share: 0.0,
+            foot: None,
+        },
+    )
+}
+
+/// [`run_reading`]'s neck-inclusive radius for the run `k_lo..k_top` of `strut`
+/// as drawn (`thickened` and `profile` as for [`drawn_at_with`]).
 fn run_radius(
+    env: ReadEnv<'_>,
     strut: &SweepStrut,
     thickened: &[f64],
     profile: &[f64],
     k_lo: usize,
     k_top: usize,
 ) -> f64 {
-    equivalent_radius(k_top.saturating_sub(k_lo), |j| {
+    let length = if live(strut) && k_top > k_lo {
+        run_length(env.grid, strut, k_lo, k_top, env.layer_height_mm)
+    } else {
+        0.0
+    };
+    run_reading(env, strut, k_lo, k_top, length, &|j| {
         drawn_at_with(strut, thickened, profile, k_lo + j)
     })
-    .unwrap_or_else(|| strut.tip_radius_mm())
+    .radius_mm
 }
 
 /// The length of one run along the member's own axis.
@@ -1959,6 +2097,7 @@ pub(crate) fn apply_ties_with_model(
                 let Some(run) = run else {
                     continue 'members;
                 };
+                outcome.foot_runs_read_through_neck += usize::from(run.foot.is_some());
                 // What the rungs have counted so far, so a run that no rung
                 // holds can say which refused it (log text only).
                 let tally_before = RungTally::of(outcome);
@@ -2155,7 +2294,16 @@ fn shared_tie_layer(
     let planned = planned?;
     let fits = |k_lo: usize, k_top: usize| {
         let length = run_length(grid, strut, k_lo, k_top, layer_height_mm);
-        length <= law.max_unbraced_mm(run_radius(strut, &strut.thickened_mm, profile, k_lo, k_top))
+        let env = ReadEnv { grid, law, layer_height_mm };
+        length
+            <= law.max_unbraced_mm(run_radius(
+                env,
+                strut,
+                &strut.thickened_mm,
+                profile,
+                k_lo,
+                k_top,
+            ))
     };
     let mut best: Option<usize> = None;
     for tie in ties {
@@ -2759,6 +2907,9 @@ struct CrossPlan {
     widened: bool,
     moved: bool,
     moved_off_the_plate: bool,
+    /// The joint raises of the band's model-footed posts ([`joint_raise_plan`]),
+    /// planned with the band, charged in `volume_mm3` and committed with it.
+    raises: Vec<ThickenPlan>,
 }
 
 /// Remedy 2: tie the run's member at layer `k` with ONE cross whose plane
@@ -2866,7 +3017,9 @@ fn tie_by_crosses(
                 if !context.thicken {
                     return None;
                 }
-                let fits = |radius: f64| run.length_mm <= context.law.max_unbraced_mm(radius);
+                let fits = |post: &crate::foot_neck::Reading| {
+                    run.length_mm <= context.law.max_unbraced_mm(post.radius_mm)
+                };
                 match plan_thicken(context, state, struts, run, &fits) {
                     Some(Ok(plan)) => Some(plan.added_mm3),
                     _ => None,
@@ -2976,9 +3129,10 @@ fn tie_by_band_set(
         let trial = tally.trial();
         let gap_mm = crate::cell_distance_mm(grid, here, cell);
         let depth = context.lean.layers_to_reach(gap_mm);
-        let Some(partner_mm) = partner_radius_over(state, struts, partner, run) else {
+        let Some(partner_read) = partner_reading(context, state, struts, partner, run) else {
             continue;
         };
+        let partner_mm = partner_read.0.radius_mm;
         if depth == 0 || gap_mm <= 0.0 {
             continue;
         }
@@ -3021,13 +3175,7 @@ fn tie_by_band_set(
             }
             beats
         };
-        let panel = Panel {
-            post_radius_mm: run.radius_mm,
-            partner_radius_mm: partner_mm,
-            gap_mm,
-            height_mm: run.length_mm,
-            bands: Vec::new(),
-        };
+        let panel = pair_panel(&reading_of(run), &partner_read, gap_mm, run.length_mm);
         let layout = |n: usize| {
             band_set_layers(run, n, depth, floor).map(|layers| panel_bands(run, &layers, brace_mm))
         };
@@ -3077,6 +3225,7 @@ fn tie_by_band_set(
                     partner,
                     gap_mm,
                     partner_mm,
+                    partner_read,
                     depth,
                     floor,
                     brace_mm,
@@ -3160,7 +3309,9 @@ fn tie_by_band_set(
                 if !context.thicken {
                     return None;
                 }
-                let fits = |radius: f64| run.length_mm <= context.law.max_unbraced_mm(radius);
+                let fits = |post: &crate::foot_neck::Reading| {
+                    run.length_mm <= context.law.max_unbraced_mm(post.radius_mm)
+                };
                 match plan_thicken(context, state, struts, run, &fits) {
                     Some(Ok(plan)) => Some(plan.added_mm3),
                     _ => None,
@@ -3246,13 +3397,7 @@ fn tie_by_band_set(
         let counted: Vec<(BandCount, crate::perf::FrameTally)> = batch
             .par_iter()
             .map(|pair| {
-                let panel = Panel {
-                    post_radius_mm: run.radius_mm,
-                    partner_radius_mm: pair.partner_mm,
-                    gap_mm: pair.gap_mm,
-                    height_mm: run.length_mm,
-                    bands: Vec::new(),
-                };
+                let panel = pair_panel(&reading_of(run), &pair.partner_read, pair.gap_mm, run.length_mm);
                 let layout = |n: usize| {
                     band_set_layers(run, n, pair.depth, pair.floor)
                         .map(|layers| panel_bands(run, &layers, pair.brace_mm))
@@ -3312,6 +3457,9 @@ struct DeferredPair {
     partner: u32,
     gap_mm: f64,
     partner_mm: f64,
+    /// The partner as read, foot included (flare lane): the deferred count
+    /// builds the same panel the normal count does.
+    partner_read: (crate::foot_neck::Reading, f64),
     depth: usize,
     floor: usize,
     brace_mm: f64,
@@ -3481,24 +3629,84 @@ fn panel_bands(
         .collect()
 }
 
-/// The partner's drawn equivalent radius over the part of `run` it stands
-/// beside, or `None` where it stands beside none of it.
-fn partner_radius_over(
+/// The partner's reading over the part of `run` it stands beside, or `None`
+/// where it stands beside none of it: its drawn equivalent radius (neck
+/// included), its shaft-only radius and the model foot it stands on, if it
+/// stands on one at its base (the partner's ACTUAL landing, flare lane,
+/// challenger 5), with the height of its clamp above the run's base.
+fn partner_reading(
+    context: &SlendernessContext<'_>,
     state: &TieState,
     struts: &[SweepStrut],
     partner: u32,
     run: &UnbracedRun,
-) -> Option<f64> {
+) -> Option<(crate::foot_neck::Reading, f64)> {
     let index = partner as usize;
     let other = struts.get(index)?;
     let profile = state.profiles.get(index)?;
     let lo = run.k_lo.max(other.k_bottom);
     let top = run.k_top.min(other.k_top);
-    (top > lo).then(|| run_radius(other, &other.thickened_mm, profile, lo, top))
+    if top <= lo {
+        return None;
+    }
+    let env = ReadEnv {
+        grid: context.grid,
+        law: context.law,
+        layer_height_mm: context.layer_height_mm,
+    };
+    let length = run_length(context.grid, other, lo, top, context.layer_height_mm);
+    let reading = run_reading(env, other, lo, top, length, &|j| {
+        drawn_at_with(other, &other.thickened_mm, profile, lo + j)
+    });
+    // Where the partner is clamped, above the run's base: its foot stands there,
+    // not at the panel's origin. Only a partner on a foot is placed (a plate
+    // partner is clamped at the origin, as the panel always has).
+    let base_mm = if reading.foot.is_some() && lo > run.k_lo {
+        height_in_run(run, lo)
+    } else {
+        0.0
+    };
+    Some((reading, base_mm))
 }
 
-/// Whether the FRAME holds `run` once its root is thickened to `radius_mm`,
-/// against the pair `past` with the bands that fit (R6 + D9, for
+/// **THE ONE BUILDER of the panel a pair's bands are counted through** (flare
+/// lane, challenger 5): the normal count, the deferred count, the
+/// actual-placement recheck and the D9 window probe all take their panel from
+/// here, so a model foot is in every one of them and nowhere twice. The posts
+/// are the SHAFTS (`shaft_radius_mm`, the neck-excluded reading); the foot of
+/// each, where it stands on one, is built from its coordinates and replaces the
+/// shaft over its extent.
+fn pair_panel(
+    post: &crate::foot_neck::Reading,
+    partner: &(crate::foot_neck::Reading, f64),
+    gap_mm: f64,
+    height_mm: f64,
+) -> crate::frame_bands::Panel {
+    crate::frame_bands::Panel {
+        post_radius_mm: post.shaft_radius_mm,
+        partner_radius_mm: partner.0.shaft_radius_mm,
+        gap_mm,
+        height_mm,
+        post_foot: post.foot,
+        partner_foot: partner.0.foot,
+        partner_base_mm: partner.1,
+        ..crate::frame_bands::Panel::default()
+    }
+}
+
+/// The reading a run was measured with, as a [`crate::foot_neck::Reading`].
+fn reading_of(run: &UnbracedRun) -> crate::foot_neck::Reading {
+    crate::foot_neck::Reading {
+        radius_mm: run.radius_mm,
+        shaft_radius_mm: run.shaft_radius_mm,
+        neck_share: run.neck_share,
+        foot: run.foot,
+    }
+}
+
+/// Whether the FRAME holds `run` once it is thickened to the candidate
+/// `post` (the reading of the candidate root: its shaft and the foot rebuilt
+/// for it), against the pair `past` with the bands that fit (R6 + D9, for
 /// [`thicken_into_the_window`]).
 fn frame_holds_at(
     context: &SlendernessContext<'_>,
@@ -3506,25 +3714,19 @@ fn frame_holds_at(
     struts: &[SweepStrut],
     run: &UnbracedRun,
     past: FramePast,
-    radius_mm: f64,
+    post: &crate::foot_neck::Reading,
 ) -> bool {
-    use crate::frame_bands::{count_bands, BandCount, Panel};
-    let Some(partner_mm) = partner_radius_over(state, struts, past.partner, run) else {
+    use crate::frame_bands::{count_bands, BandCount};
+    let Some(partner) = partner_reading(context, state, struts, past.partner, run) else {
         return false;
     };
+    let radius_mm = post.radius_mm;
     let thicker = UnbracedRun {
         radius_mm,
         limit_mm: context.law.max_unbraced_mm(radius_mm),
         ..*run
     };
-    let panel = Panel {
-        post_radius_mm: radius_mm,
-        partner_radius_mm: partner_mm,
-        gap_mm: past.gap_mm,
-        height_mm: run.length_mm,
-        bands: Vec::new(),
-    };
-    let layout = |n: usize| {
+    let panel = pair_panel(post, &partner, past.gap_mm, run.length_mm);    let layout = |n: usize| {
         band_set_layers(run, n, past.depth, past.floor)
             .map(|layers| panel_bands(run, &layers, past.brace_mm))
     };
@@ -3580,6 +3782,7 @@ struct RungTally {
     thicken_radius: usize,
     thicken_disc: usize,
     thicken_model: usize,
+    thicken_neck: usize,
     mast_cells: usize,
     mast_by_model: usize,
     mast_by_member: usize,
@@ -3602,6 +3805,7 @@ impl RungTally {
             thicken_radius: outcome.thicken_refused_radius,
             thicken_disc: outcome.thicken_refused_disc,
             thicken_model: outcome.thicken_refused_model,
+            thicken_neck: outcome.thicken_refused_neck,
             mast_cells: outcome.mast_cells_refused,
             mast_by_model: outcome.mast_cells_refused_by_model,
             mast_by_member: outcome.mast_cells_refused_by_member,
@@ -3668,6 +3872,7 @@ impl RungTally {
                 ("root past the maximum radius", d(after.thicken_radius, self.thicken_radius)),
                 ("new lap of a root", d(after.thicken_disc, self.thicken_disc)),
                 ("enters the model gap", d(after.thicken_model, self.thicken_model)),
+                ("foot neck takes the whole pixel", d(after.thicken_neck, self.thicken_neck)),
             ],
         );
         part(
@@ -3887,6 +4092,10 @@ fn commit_cross(
     } else if plan.moved {
         outcome.brace_bands_moved_above_flare += 1;
     }
+    // The posts' joint raises, planned with the band (flare lane).
+    for raise in &plan.raises {
+        commit_thicken(state, struts, raise, outcome);
+    }
     let (a, b, k, k_lo, radius, plane) = (
         plan.a,
         plan.b,
@@ -3997,7 +4206,7 @@ fn thicken(
     outcome: &mut SlendernessOutcome,
 ) -> bool {
     let law = context.law;
-    let fits = |radius: f64| run.length_mm <= law.max_unbraced_mm(radius);
+    let fits = |post: &crate::foot_neck::Reading| run.length_mm <= law.max_unbraced_mm(post.radius_mm);
     thicken_to(context, state, struts, run, &fits, outcome)
 }
 
@@ -4029,12 +4238,12 @@ fn thicken_into_the_window(
     let law = context.law;
     // Under R6 the window is where the FRAME holds the run with the bands
     // that fit it; otherwise the infinite-band composite ceiling.
-    let into = |radius: f64| match past.frame {
-        Some(frame) => frame_holds_at(context, state, struts, run, frame, radius),
+    let into = |post: &crate::foot_neck::Reading| match past.frame {
+        Some(frame) => frame_holds_at(context, state, struts, run, frame, post),
         None => {
             run.length_mm
-                <= law.max_unbraced_mm(radius)
-                    * pair_ceiling_ratio(radius, past.partner_mm, past.gap_mm)
+                <= law.max_unbraced_mm(post.radius_mm)
+                    * pair_ceiling_ratio(post.radius_mm, past.partner_mm, past.gap_mm)
         }
     };
     let Some(Ok(partial)) = plan_thicken(context, state, struts, run, &into) else {
@@ -4043,7 +4252,7 @@ fn thicken_into_the_window(
     if partial.added_mm3 <= 0.0 {
         return false;
     }
-    let full = |radius: f64| run.length_mm <= law.max_unbraced_mm(radius);
+    let full = |post: &crate::foot_neck::Reading| run.length_mm <= law.max_unbraced_mm(post.radius_mm);
     if let Some(Ok(whole)) = plan_thicken(context, state, struts, run, &full) {
         // The bands the run needs once it stands at the pair's ceiling.
         let at_ceiling = UnbracedRun {
@@ -4070,7 +4279,7 @@ fn thicken_to(
     state: &mut TieState,
     struts: &mut [SweepStrut],
     run: &UnbracedRun,
-    fits: &dyn Fn(f64) -> bool,
+    fits: &dyn Fn(&crate::foot_neck::Reading) -> bool,
     outcome: &mut SlendernessOutcome,
 ) -> bool {
     match plan_thicken(context, state, struts, run, fits) {
@@ -4090,6 +4299,10 @@ fn thicken_to(
             outcome.thicken_refused_model += 1;
             false
         }
+        Some(Err(ThickenRefusal::Neck)) => {
+            outcome.thicken_refused_neck += 1;
+            false
+        }
         Some(Ok(plan)) => {
             commit_thicken(state, struts, &plan, outcome);
             true
@@ -4107,6 +4320,9 @@ enum ThickenRefusal {
     /// The raised solid, of the member or of a trunk raised with it, would
     /// enter the model's final clearance gap where it does not now.
     Model,
+    /// The foot's neck and cone alone use the whole pixel at the best root: no
+    /// width of the shaft holds the run (flare lane, 2026-10-14).
+    Neck,
 }
 
 /// Whether raising the members of `plan` puts a raised stretch of any of them
@@ -4273,7 +4489,16 @@ fn thickening_enters_the_gap(
         let top_layer = upto - 1;
         // Piece boundaries, foot first.
         let mut cuts = vec![strut.k_bottom];
-        if position == 0 && plan.k_lo > strut.k_bottom && plan.k_lo < top_layer {
+        if let (0, Some(local)) = (position, plan.local) {
+            // A bay-local plan writes nothing below its ramp: the ramp, the
+            // constant root under the base and the taper are its pieces.
+            for cut in [local.start, local.apex] {
+                if cut > *cuts.last().unwrap_or(&strut.k_bottom) && cut < top_layer {
+                    cuts.push(cut);
+                }
+            }
+        }
+        if position == 0 && plan.k_lo > *cuts.last().unwrap_or(&strut.k_bottom) && plan.k_lo < top_layer {
             cuts.push(plan.k_lo);
         }
         if top_layer > *cuts.last().unwrap_or(&strut.k_bottom) {
@@ -4533,6 +4758,34 @@ struct ThickenPlan {
     admitted_on_drawn_feet: bool,
     /// The resin the thickening adds over the profiles as drawn now, mm³.
     added_mm3: f64,
+    /// **BAY-LOCAL** (flare lane): the member's first written layer is the
+    /// ramp's start, not its foot, and the ramp that widens the member up to
+    /// `root` is part of the plan. `None`: the member is raised from its own foot
+    /// at the constant root, as before 2026-10-14.
+    local: Option<LocalSpan>,
+    /// A bay-local plan was possible for this run and its connected frame did
+    /// not hold, so the member is raised from its foot as before
+    /// (`carry_down_kept_frame`).
+    kept_by_frame: bool,
+    /// The plan raises the posts of a band at its joints so the diagonals are
+    /// not thicker than the posts they join (R2), for a model-footed post
+    /// whose own width is the area law's (a cross builds it: see
+    /// [`joint_raise_plan`]).
+    joint_raise: bool,
+}
+
+/// The stretch a bay-local thickening writes below the run's base: a ramp that
+/// widens at the overhang law's permitted underside slope (the slope the foot
+/// cone is drawn at) up to the root, then the root to the base.
+#[derive(Clone, Copy, Debug)]
+struct LocalSpan {
+    /// The ramp's first layer: nothing below it is written.
+    start: usize,
+    /// The layer the root is reached at (`start + layers`); `start..apex`
+    /// is the ramp, `apex..k_lo` the constant root.
+    apex: usize,
+    /// The radius gained per layer along the ramp.
+    gain_per_layer_mm: f64,
 }
 
 impl ThickenPlan {
@@ -4546,8 +4799,30 @@ impl ThickenPlan {
             )]
             let t = ((layer - self.k_lo) as f64) / self.steps;
             self.root * (1.0 - t) + self.top * t
+        } else if let (0, Some(local)) = (position, self.local) {
+            if layer < local.start {
+                0.0
+            } else if layer >= local.apex {
+                self.root
+            } else {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "a slot index bounded by the layer count is exact in f64"
+                )]
+                let below = (local.apex - layer) as f64;
+                (self.root - local.gain_per_layer_mm * below).max(0.0)
+            }
         } else {
             self.root
+        }
+    }
+
+    /// The first layer the plan writes of the chain member at `position`
+    /// (whose own foot is `k_bottom`).
+    fn first(&self, position: usize, k_bottom: usize) -> usize {
+        match (position, self.local) {
+            (0, Some(local)) => local.start,
+            _ => k_bottom,
         }
     }
 
@@ -4571,7 +4846,7 @@ fn plan_thicken(
     state: &TieState,
     struts: &[SweepStrut],
     run: &UnbracedRun,
-    fits: &dyn Fn(f64) -> bool,
+    fits: &dyn Fn(&crate::foot_neck::Reading) -> bool,
 ) -> Option<Result<ThickenPlan, ThickenRefusal>> {
     let law = context.law;
     let grid = context.grid;
@@ -4614,17 +4889,55 @@ fn plan_thicken(
         let t = (j as f64) / steps;
         root * (1.0 - t) + top * t
     };
-    let holds = |root: f64| {
-        equivalent_radius(n, |j| {
+    // THE ONE READING OF A CANDIDATE ROOT (flare lane, challenger 4): the
+    // candidate's drawn profile over the run, read with the model foot it
+    // stands on, the cone rebuilt for THIS root, by the routine the
+    // measurement and the D9 probe use.
+    let env = ReadEnv {
+        grid,
+        law,
+        layer_height_mm: context.layer_height_mm,
+    };
+    let candidate_strut = struts.get(member)?;
+    let read_candidate = |root: f64| {
+        run_reading(env, candidate_strut, k_lo, k_top, run.length_mm, &|j| {
             let wanted = taper(root, j);
             Some(drawn[j].map_or(wanted, |here| here.max(wanted)))
         })
-        .is_some_and(fits)
     };
-    if !holds(law.r_max_mm) {
-        return Some(Err(ThickenRefusal::Radius));
+    let holds = |root: f64| fits(&read_candidate(root));
+    let lowest = top.min(law.r_max_mm);
+    // On a foot a bigger root also lengthens the cone, so the run's stiffness
+    // is not monotone in the root: find the root it is stiffest at first.
+    let best = if read_candidate(lowest).foot.is_some() {
+        let value = |root: f64| read_candidate(root).radius_mm;
+        let (mut a, mut b) = (lowest, law.r_max_mm);
+        for _ in 0..40 {
+            let (m1, m2) = (a + (b - a) / 3.0, b - (b - a) / 3.0);
+            if value(m1) < value(m2) {
+                a = m1;
+            } else {
+                b = m2;
+            }
+        }
+        [0.5 * (a + b), lowest, law.r_max_mm]
+            .into_iter()
+            .max_by(|x, y| value(*x).total_cmp(&value(*y)))
+            .unwrap_or(law.r_max_mm)
+    } else {
+        law.r_max_mm
+    };
+    if !holds(best) {
+        // No root holds the run. When the neck and cone alone take the whole
+        // pixel at the best root, no shaft width could: the foot, not the
+        // shaft, is what is wrong (`foot_neck_over_limit`).
+        return Some(Err(if read_candidate(best).neck_share >= 1.0 {
+            ThickenRefusal::Neck
+        } else {
+            ThickenRefusal::Radius
+        }));
     }
-    let (mut low, mut high) = (top.min(law.r_max_mm), law.r_max_mm);
+    let (mut low, mut high) = (lowest, best);
     for _ in 0..64 {
         let middle = 0.5 * (low + high);
         if holds(middle) {
@@ -4744,6 +5057,45 @@ fn plan_thicken(
         over_existing_lap,
         admitted_on_drawn_feet,
         added_mm3: 0.0,
+        local: None,
+        kept_by_frame: false,
+        joint_raise: false,
+    };
+    // **BAY-LOCAL, ONLY WHERE THE CONNECTED FRAME HOLDS** (flare lane,
+    // challengers 2 and 6). A model-footed post whose run starts at the top of
+    // an `|X|` band keeps its width in the bay and a ramp under it, not down to
+    // its foot, but only if the two-post frame, with the posts as they would be
+    // drawn (foot, neck, ramp, shaft), the bands cured before the run's top
+    // prints, and each post clamped at its own foot, holds the top within one
+    // pixel. Otherwise the member is raised from its foot as it always was.
+    //
+    // The root of a bay-local plan is NOT the local run's root: the local
+    // integral clamps the base, and a band is not a clamp, so the root is the
+    // smallest at which the connected frame holds ([`bay_local_plan`]). Where
+    // the frame holds at no admissible root, or the local solid would enter the
+    // model's final gap, the plan stays the old one, raised from the foot.
+    let height = context.layer_height_mm;
+    // THE RESIN IT ADDS: on every layer it raises, `π (wanted² − drawn²)`
+    // times that member's own length per layer (its chord, as `run_length`
+    // measures it). One pass over the layers the commit would write.
+    let price = |plan: &ThickenPlan| -> f64 {
+        let mut added = 0.0;
+        for (position, &(index, highest)) in plan.chain.iter().enumerate() {
+            let strut = &struts[index];
+            let per_layer_mm = if strut.k_top > strut.k_bottom {
+                run_length(grid, strut, strut.k_bottom, strut.k_bottom + 1, height)
+            } else {
+                height
+            };
+            for layer in plan.first(position, strut.k_bottom)..plan.upto(position, highest) {
+                let wanted = plan.wanted(position, layer);
+                let now = drawn_at(strut, &state.profiles[index], layer).unwrap_or(0.0);
+                if wanted > now {
+                    added += core::f64::consts::PI * (wanted * wanted - now * now) * per_layer_mm;
+                }
+            }
+        }
+        added
     };
     // **THICKENING MAY NOT PUSH A MEMBER INTO THE FINAL GAP** (R2 of
     // `clearance-census-diagnosis.md`, 2026-10-04). The root it needs was
@@ -4752,31 +5104,79 @@ fn plan_thicken(
     // it. A member, or a trunk raised with it, whose raised solid enters the
     // gap where its solid as drawn now does not, refuses the rung; the run
     // goes on to the cross, the mast, the model tie, then the warning.
-    if context.member_clearance && thickening_enters_the_gap(context, state, struts, &plan) {
-        return Some(Err(ThickenRefusal::Model));
-    }
-    // THE RESIN IT ADDS: on every layer it raises, `π (wanted² − drawn²)`
-    // times that member's own length per layer (its chord, as `run_length`
-    // measures it). One pass over the layers the commit would write.
-    let height = context.layer_height_mm;
-    let mut added = 0.0;
-    for (position, &(index, highest)) in plan.chain.iter().enumerate() {
-        let strut = &struts[index];
-        let per_layer_mm = if strut.k_top > strut.k_bottom {
-            run_length(grid, strut, strut.k_bottom, strut.k_bottom + 1, height)
-        } else {
-            height
-        };
-        for layer in strut.k_bottom..plan.upto(position, highest) {
-            let wanted = plan.wanted(position, layer);
-            let now = drawn_at(strut, &state.profiles[index], layer).unwrap_or(0.0);
-            if wanted > now {
-                added += core::f64::consts::PI * (wanted * wanted - now * now) * per_layer_mm;
+    let enters = |plan: &ThickenPlan| {
+        context.member_clearance && thickening_enters_the_gap(context, state, struts, plan)
+    };
+    let eligible = bay_local_span(context, state, struts, run, root).is_some();
+    let local = if eligible {
+        bay_local_plan(context, state, struts, run, &plan).filter(|local| !enters(local))
+    } else {
+        None
+    };
+    let legacy_enters = enters(&plan);
+    plan.added_mm3 = price(&plan);
+    plan.kept_by_frame = eligible && local.is_none();
+    match local {
+        Some(mut local) => {
+            local.added_mm3 = price(&local);
+            // The bay-local plan is taken when it is the cheaper of the two (it
+            // is validated; the old one is not) or the old one enters the gap.
+            if legacy_enters || local.added_mm3 <= plan.added_mm3 {
+                Some(Ok(local))
+            } else {
+                plan.kept_by_frame = true;
+                Some(Ok(plan))
             }
         }
+        None if legacy_enters => Some(Err(ThickenRefusal::Model)),
+        None => Some(Ok(plan)),
     }
-    plan.added_mm3 = added;
-    Some(Ok(plan))
+}
+
+/// **The bay-local plan whose connected frame holds** (flare lane, challengers
+/// 2 and 6): from `base` (the plan raised from the foot at the local run's
+/// root), the smallest root at which the two-post frame ([`local_frame_drag`])
+/// holds the run's top within one pixel with the posts drawn as the plan draws
+/// them, or `None` where no root up to the registered maximum does. The frame
+/// is stiffer in the root than the plan's own run, so the root only rises from
+/// `base.root`; the ramp is rebuilt for each root. Not assumed monotone beyond
+/// what the bisection needs: a root that holds is looked for from the maximum
+/// down.
+fn bay_local_plan(
+    context: &SlendernessContext<'_>,
+    state: &TieState,
+    struts: &[SweepStrut],
+    run: &UnbracedRun,
+    base: &ThickenPlan,
+) -> Option<ThickenPlan> {
+    let trial = |root: f64| -> Option<ThickenPlan> {
+        let span = bay_local_span(context, state, struts, run, root)?;
+        Some(ThickenPlan {
+            root,
+            local: Some(span),
+            ..base.clone()
+        })
+    };
+    let holds = |root: f64| {
+        trial(root).is_some_and(|plan| local_frame_holds(context, state, struts, run, &plan))
+    };
+    let top = context.law.max_radius_mm();
+    if !holds(top) {
+        return None;
+    }
+    let (mut low, mut high) = (base.root.min(top), top);
+    if holds(low) {
+        return trial(low);
+    }
+    for _ in 0..40 {
+        let middle = 0.5 * (low + high);
+        if holds(middle) {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    trial(high)
 }
 
 /// Apply a [`ThickenPlan`]: the minimum radius is written to each chain
@@ -4796,7 +5196,7 @@ fn commit_thicken(
             strut.thickened_mm.resize(upto, 0.0);
         }
         let mut raised = false;
-        for layer in k_bottom..upto {
+        for layer in plan.first(position, k_bottom)..upto {
             let wanted = plan.wanted(position, layer);
             let entry = &mut strut.thickened_mm[layer];
             *entry = entry.max(wanted);
@@ -4814,6 +5214,12 @@ fn commit_thicken(
     if let Some((slot, flared)) = plan.disc_growth {
         crate::congestion::grow_disc(&mut state.placed_roots, slot, flared, plan.root);
     }
+    if plan.joint_raise {
+        outcome.posts_raised_at_a_joint += 1;
+        return;
+    }
+    outcome.thicken_bay_local += usize::from(plan.local.is_some());
+    outcome.carry_down_kept_frame += usize::from(plan.kept_by_frame);
     if plan.admitted_on_drawn_feet {
         outcome.thicken_admitted_where_the_crowding_disc_laps += 1;
     }
@@ -4821,6 +5227,192 @@ fn commit_thicken(
         outcome.thicken_over_existing_lap += 1;
     }
     outcome.members_thickened += 1;
+}
+
+/// **The ramp and start of a bay-local thickening** for the run `run`, or `None`
+/// where the run is not eligible: only a model-footed post (a law that reads
+/// feet), whose run starts at the top of an `|X|` band, whose ramp starts above
+/// its foot. The ramp widens upward at the overhang law's permitted underside
+/// slope, the slope the foot cone is drawn at (`cone_slope` radius per mm of
+/// axis), from the radius drawn under the bay to `root`; it starts at the bay
+/// bottom, or lower where the bay is too shallow to hold it (the ramp is then
+/// extended below the bay, never cut short into a step), and the root runs from
+/// its apex to the run's base.
+fn bay_local_span(
+    context: &SlendernessContext<'_>,
+    state: &TieState,
+    struts: &[SweepStrut],
+    run: &UnbracedRun,
+    root: f64,
+) -> Option<LocalSpan> {
+    let index = run.strut_id as usize;
+    let post = struts.get(index)?;
+    let bay_bottom = run.bay_bottom?;
+    context.law.foot_contact(post)?;
+    if run.k_lo <= post.k_bottom + 1 || bay_bottom <= post.k_bottom {
+        return None;
+    }
+    // The radius one LAYER may overhang its neighbour below: the slope times the
+    // layer height (not the axial length per layer, which a leaning post has
+    // more of): the step the lowering and the load-step cones are drawn at.
+    let gain = context.law.cone_slope() * context.layer_height_mm;
+    if !(gain.is_finite() && gain > 0.0) {
+        return None;
+    }
+    let below = drawn_at(post, state.profiles.get(index)?, bay_bottom - 1)?;
+    let wide = ((root - below) / gain).max(0.0).ceil();
+    if !wide.is_finite() || wide > 1.0e6 {
+        return None;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a non-negative whole number of layers, bounded just above"
+    )]
+    let layers = wide as usize;
+    let start = bay_bottom.min(run.k_lo.checked_sub(layers)?);
+    (start > post.k_bottom).then_some(LocalSpan {
+        start,
+        apex: start + layers,
+        gain_per_layer_mm: gain,
+    })
+}
+
+/// **The connected-path check of a bay-local thickening** (flare lane,
+/// challenger 2): the two-post frame of the band's pair, each post clamped at
+/// its OWN foot (the plate boss; or the model contact with its neck and cone),
+/// the posts as `plan` would draw them (the shaft slot by slot, the ramp and
+/// the root in the bay), the bands of the pair that are cured before the run's
+/// top prints (their top below it) and no other tie, under the S-law's drag,
+/// must hold the run's top within one pixel. A band is not a clamp, and the
+/// posts below it, the necks and the partner are compliant, so this is the
+/// frame motion that the local integral omits; the integral is only necessary.
+fn local_frame_holds(
+    context: &SlendernessContext<'_>,
+    state: &TieState,
+    struts: &[SweepStrut],
+    run: &UnbracedRun,
+    plan: &ThickenPlan,
+) -> bool {
+    local_frame_drag(context, state, struts, run, plan)
+        .is_some_and(|drag| drag <= 1.0 + RATIO_NOISE)
+}
+
+/// [`local_frame_holds`]'s sway, in pixels (`None` where the pair, its bands or
+/// the frame cannot be built: the plan is then not validated).
+fn local_frame_drag(
+    context: &SlendernessContext<'_>,
+    state: &TieState,
+    struts: &[SweepStrut],
+    run: &UnbracedRun,
+    plan: &ThickenPlan,
+) -> Option<f64> {
+    use crate::frame_bands::{panel_drag, Panel, PanelBand};
+    let (grid, h, law) = (context.grid, context.layer_height_mm, context.law);
+    let id = run.strut_id;
+    let (Some(post), Some(profile)) = (struts.get(id as usize), state.profiles.get(id as usize))
+    else {
+        return None;
+    };
+    // The pair: the post a diagonal that seats on this post at the base lands on.
+    let partner = struts.iter().find_map(|s| {
+        match (s.kind, s.seat_on_strut, s.landing) {
+            (StrutKind::Brace, Some(on), Landing::Strut { id: other, .. })
+                if live(s) && on == id && s.k_top == run.k_lo =>
+            {
+                Some(other)
+            }
+            _ => None,
+        }
+    })?;
+    let (Some(mate), Some(mate_profile)) = (
+        struts.get(partner as usize),
+        state.profiles.get(partner as usize),
+    ) else {
+        return None;
+    };
+    if !live(post) || !live(mate) {
+        return None;
+    }
+    let origin = post.k_bottom.min(mate.k_bottom);
+    let per_layer_mm = run_length(grid, post, post.k_bottom, post.k_bottom + 1, h);
+    let at = |layer: usize| layer.saturating_sub(origin) as f64 * per_layer_mm;
+    let committed = |layer: usize| {
+        let drawn = drawn_at(post, profile, layer).unwrap_or(0.0);
+        if layer < plan.upto(0, 0) {
+            drawn.max(plan.wanted(0, layer))
+        } else {
+            drawn
+        }
+    };
+    // `(top mm above the post's own base, radius)` of the layers from `lo` to `hi`.
+    let steps = |lo: usize, hi: usize, radius: &dyn Fn(usize) -> f64| -> Vec<(f64, f64)> {
+        let mut out: Vec<(f64, f64)> = Vec::new();
+        for layer in lo..hi {
+            let (top, r) = ((layer + 1 - lo) as f64 * per_layer_mm, radius(layer));
+            match out.last_mut() {
+                Some(last) if (last.1 - r).abs() <= 1.0e-9 => last.0 = top,
+                _ => out.push((top, r)),
+            }
+        }
+        out
+    };
+    let top = run.k_top;
+    let mate_top = top.min(mate.k_top).max(mate.k_bottom + 1);
+    let mate_radius = |layer: usize| drawn_at(mate, mate_profile, layer).unwrap_or(0.0);
+    let post_steps = steps(post.k_bottom, top, &committed);
+    let partner_steps = steps(mate.k_bottom, mate_top, &mate_radius);
+    let (Some(post_shaft), Some(mate_shaft)) = (
+        post_steps.last().map(|s| s.1),
+        partner_steps.last().map(|s| s.1),
+    ) else {
+        return None;
+    };
+    let foot_of = |strut: &SweepStrut, root: f64| {
+        law.foot_contact(strut)
+            .and_then(|(neck, slope)| crate::foot_neck::FootGeom::new(neck, root, per_layer_mm, slope))
+    };
+    let bands: Vec<PanelBand> = struts
+        .iter()
+        .filter_map(|s| {
+            let Landing::Strut { id: on, layer } = s.landing else {
+                return None;
+            };
+            let cured = s.kind == StrutKind::Brace
+                && live(s)
+                && on == id
+                && s.seat_on_strut == Some(partner)
+                && s.k_top < top;
+            cured.then(|| PanelBand {
+                bottom_mm: at(layer),
+                top_mm: at(s.k_top),
+                brace_radius_mm: state
+                    .profiles
+                    .get(s.id as usize)
+                    .and_then(|p| p.iter().copied().reduce(f64::max))
+                    .unwrap_or(0.0)
+                    .max(s.min_radius_mm),
+            })
+        })
+        .collect();
+    let first_floor = at(post.k_bottom.max(mate.k_bottom));
+    if bands.is_empty() || bands.iter().any(|band| band.bottom_mm < first_floor) {
+        return None;
+    }
+    let panel = Panel {
+        post_radius_mm: post_shaft,
+        partner_radius_mm: mate_shaft,
+        gap_mm: crate::cell_distance_mm(grid, post.cell_at(run.k_lo), mate.cell_at(run.k_lo)),
+        height_mm: at(top),
+        bands,
+        post_foot: foot_of(post, committed(post.k_bottom)),
+        partner_foot: foot_of(mate, mate_radius(mate.k_bottom)),
+        post_steps,
+        partner_steps,
+        post_base_mm: at(post.k_bottom),
+        partner_base_mm: at(mate.k_bottom),
+    };
+    panel_drag(&panel, law.ratio())
 }
 
 /// How far an arm's top sways, in PIXELS, when a mast `gap_mm` away is joined
@@ -5466,7 +6058,8 @@ fn mast_tie_layer(
     let highest = tie_layer(run, wanted, wanted)?;
     let layer = (highest..run.k_top).find(|&k| {
         let piece_mm = run_length(grid, strut, k, run.k_top, layer_height_mm);
-        let radius_mm = run_radius(strut, &strut.thickened_mm, profile, k, run.k_top);
+        let env = ReadEnv { grid, law, layer_height_mm };
+        let radius_mm = run_radius(env, strut, &strut.thickened_mm, profile, k, run.k_top);
         piece_mm <= law.max_unbraced_mm(radius_mm)
     })?;
     Some(MastTie {
@@ -6205,15 +6798,36 @@ fn plan_cross(
     // used to make a post meet a thicker diagonal (a fat post with a thin
     // top) is never needed and is deleted. A design guard, not a strength
     // proof: the construction-stage check (R9) is what bounds the rest.
+    //
+    // **A MODEL-FOOTED POST IS RAISED AT THE JOINT INSTEAD OF REFUSING THE
+    // BAND** (flare lane, 2026-10-14; `FLARE-DESIGN.md` section 5, "posts
+    // raised to 0.071 at the joints"). A model-footed post drawn at its area-law
+    // width is narrower than the diagonal that would tie it, and until the flare
+    // lane the carrot hid that (the root was thick everywhere below the band).
+    // With no carrot the band would be refused for every such post, so the
+    // post is widened over the band (and under it, along a ramp at the permitted
+    // underside slope) to the diagonal's radius, the cost charged to the band.
+    // A post that is not model-footed is refused exactly as before.
+    let mut raises: Vec<ThickenPlan> = Vec::new();
     if context.brace_cap {
-        let thinner = [(a, k), (a, k_lo), (b, k), (b, k_lo)]
-            .into_iter()
-            .filter_map(|(post, layer)| {
-                let strut = struts.get(post as usize)?;
-                drawn_at(strut, state.profiles.get(post as usize)?, layer)
-            })
-            .fold(f64::INFINITY, f64::min);
-        if radius_mm > thinner {
+        let mut refused = false;
+        for post in [a, b] {
+            let at_joints = [k, k_lo]
+                .into_iter()
+                .filter_map(|layer| {
+                    let strut = struts.get(post as usize)?;
+                    drawn_at(strut, state.profiles.get(post as usize)?, layer)
+                })
+                .fold(f64::INFINITY, f64::min);
+            if radius_mm <= at_joints {
+                continue;
+            }
+            match joint_raise_plan(context, state, struts, post, k_lo, k, radius_mm) {
+                Some(raise) => raises.push(raise),
+                None => refused = true,
+            }
+        }
+        if refused {
             refuse(outcome, |why| &mut why.thicker_than_post);
             return None;
         }
@@ -6323,11 +6937,99 @@ fn plan_cross(
         first,
         second,
         plane: plane_between(grid, a_cell_top, b_cell_top),
-        volume_mm3: core::f64::consts::PI * radius_mm * radius_mm * (first_len + second_len),
+        volume_mm3: core::f64::consts::PI * radius_mm * radius_mm * (first_len + second_len)
+            + raises.iter().map(|raise| raise.added_mm3).sum::<f64>(),
         widened,
         moved,
         moved_off_the_plate,
+        raises,
     })
+}
+
+/// **The raise of a model-footed post at a band's joints** (flare lane): the
+/// post is widened to the diagonal's radius `radius_mm` over the band
+/// `k_lo..=k`, reaching it at the band's bottom along a ramp that widens
+/// upward at the overhang law's permitted underside slope (the slope the foot
+/// cone is drawn at), the ramp lying below the band on the post's own shaft.
+/// `None` for a post that is not model-footed (the band is refused for it, as
+/// before), a radius past the registered maximum, a ramp that would start in
+/// the foot, or a raise that would enter the model's final gap where the post
+/// as drawn does not. The plan carries its own cost, and is committed with the
+/// band that asked for it.
+fn joint_raise_plan(
+    context: &SlendernessContext<'_>,
+    state: &TieState,
+    struts: &[SweepStrut],
+    post: u32,
+    k_lo: usize,
+    k: usize,
+    radius_mm: f64,
+) -> Option<ThickenPlan> {
+    let index = post as usize;
+    let strut = struts.get(index)?;
+    context.law.foot_contact(strut)?;
+    if radius_mm > context.law.max_radius_mm() * (1.0 + RATIO_NOISE) || k >= strut.k_top {
+        return None;
+    }
+    let profile = state.profiles.get(index)?;
+    let per_layer_mm = run_length(
+        context.grid,
+        strut,
+        strut.k_bottom,
+        strut.k_bottom + 1,
+        context.layer_height_mm,
+    );
+    let gain = context.law.cone_slope() * context.layer_height_mm;
+    if !(gain.is_finite() && gain > 0.0) {
+        return None;
+    }
+    let below = drawn_at(strut, profile, k_lo.checked_sub(1)?)?;
+    let wide = ((radius_mm - below) / gain).max(0.0).ceil();
+    if !wide.is_finite() || wide > 1.0e6 {
+        return None;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a non-negative whole number of layers, bounded just above"
+    )]
+    let layers = wide as usize;
+    let start = k_lo.checked_sub(layers)?;
+    if start <= strut.k_bottom + 1 {
+        return None;
+    }
+    let mut plan = ThickenPlan {
+        k_lo: k + 1,
+        k_top: k + 1,
+        root: radius_mm,
+        top: radius_mm,
+        steps: 1.0,
+        chain: vec![(index, k + 1)],
+        disc_growth: None,
+        over_existing_lap: false,
+        admitted_on_drawn_feet: false,
+        added_mm3: 0.0,
+        local: Some(LocalSpan {
+            start,
+            apex: k_lo,
+            gain_per_layer_mm: gain,
+        }),
+        kept_by_frame: false,
+        joint_raise: true,
+    };
+    if context.member_clearance && thickening_enters_the_gap(context, state, struts, &plan) {
+        return None;
+    }
+    let mut added = 0.0;
+    for layer in start..=k {
+        let wanted = plan.wanted(0, layer);
+        let now = drawn_at(strut, profile, layer).unwrap_or(0.0);
+        if wanted > now {
+            added += core::f64::consts::PI * (wanted * wanted - now * now) * per_layer_mm;
+        }
+    }
+    plan.added_mm3 = added;
+    Some(plan)
 }
 
 /// **Member against member**: whether the solid of radius `radius_mm` about
@@ -6749,7 +7451,14 @@ fn tie_pieces_fit(
     let fits = |lo: usize, hi: usize| {
         hi > lo
             && run_length(grid, post, lo, hi, h)
-                <= law.max_unbraced_mm(run_radius(post, &post.thickened_mm, profile, lo, hi))
+                <= law.max_unbraced_mm(run_radius(
+                    ReadEnv { grid, law, layer_height_mm: h },
+                    post,
+                    &post.thickened_mm,
+                    profile,
+                    lo,
+                    hi,
+                ))
     };
     let mut lo = run.k_lo;
     for plan in plans {
@@ -7291,6 +8000,9 @@ fn commit_model_ties(
 }
 
 #[cfg(test)]
+mod flare_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{extra_ties, SlendernessLaw, UnbracedRun};
 
@@ -7476,6 +8188,10 @@ mod tests {
             radius_mm: 0.1,
             limit_mm: limit,
             sway_deg: None,
+            shaft_radius_mm: 0.1,
+            neck_share: 0.0,
+            foot: None,
+            bay_bottom: None,
         };
         assert_eq!(extra_ties(&run(4.0, 5.0)), 0);
         assert_eq!(extra_ties(&run(6.0, 5.0)), 1);
@@ -7663,6 +8379,7 @@ mod tests {
             widened: false,
             moved: false,
             moved_off_the_plate: false,
+            raises: Vec::new(),
         };
         let mut outcome = super::SlendernessOutcome::default();
         super::commit_cross(&context, &mut state, &mut struts, plan, &mut outcome);
@@ -7815,6 +8532,10 @@ mod tests {
             radius_mm: 0.2,
             limit_mm: 10.0,
             sway_deg: None,
+            shaft_radius_mm: 0.2,
+            neck_share: 0.0,
+            foot: None,
+            bay_bottom: None,
         };
         let depth = lean.layers_to_reach(1.0);
         // Topped 8 layers short of a band that would just clear the flare
@@ -8061,6 +8782,10 @@ mod tests {
             radius_mm: SHORT_POST_TIP_MM,
             limit_mm: 2.5,
             sway_deg: None,
+            shaft_radius_mm: SHORT_POST_TIP_MM,
+            neck_share: 0.0,
+            foot: None,
+            bay_bottom: None,
         };
         let depth = lean.layers_to_reach(0.8);
         let low = 30;
@@ -8364,6 +9089,10 @@ mod tests {
             radius_mm: 0.2,
             limit_mm: 10.0,
             sway_deg: None,
+            shaft_radius_mm: 0.2,
+            neck_share: 0.0,
+            foot: None,
+            bay_bottom: None,
         };
         let depth = lean.layers_to_reach(1.0);
         let plan = |struts: &[crate::SweepStrut], k: usize| {
@@ -8451,6 +9180,10 @@ mod tests {
             radius_mm: 0.2,
             limit_mm: 10.0,
             sway_deg: None,
+            shaft_radius_mm: 0.2,
+            neck_share: 0.0,
+            foot: None,
+            bay_bottom: None,
         };
         let state = super::TieState::build(&context, &posts);
         let try_at = |k: usize| {
@@ -8538,6 +9271,7 @@ mod tests {
             widened: false,
             moved: false,
             moved_off_the_plate: false,
+            raises: Vec::new(),
         };
         let mut outcome = super::SlendernessOutcome::default();
         super::commit_cross(&context, &mut state, &mut struts, plan, &mut outcome);
@@ -8779,6 +9513,9 @@ mod tests {
                 over_existing_lap: false,
                 admitted_on_drawn_feet: false,
                 added_mm3: 0.0,
+                local: None,
+                kept_by_frame: false,
+                joint_raise: false,
             };
             super::thickening_enters_the_gap(&context, &state, &struts, &plan)
         };
@@ -8873,6 +9610,9 @@ mod tests {
             over_existing_lap: false,
             admitted_on_drawn_feet: false,
             added_mm3: 0.0,
+            local: None,
+            kept_by_frame: false,
+            joint_raise: false,
         };
         let enters_with = |wall_from: f64, with_surface: bool| {
             let wall = ([cx + wall_from, cy - 0.5, 0.0], [cx + wall_from + 0.5, cy + 0.5, 0.2]);
@@ -8974,6 +9714,9 @@ mod tests {
             over_existing_lap: false,
             admitted_on_drawn_feet: false,
             added_mm3: 0.0,
+            local: None,
+            kept_by_frame: false,
+            joint_raise: false,
         };
         // A 0.01 mm bar centred on the cell centre `(dx, dy)` from the axis.
         let read = |dx: f64, dy: f64, with_surface: bool| {
@@ -9243,6 +9986,9 @@ mod tests {
             over_existing_lap: false,
             admitted_on_drawn_feet: false,
             added_mm3: 0.0,
+            local: None,
+            kept_by_frame: false,
+            joint_raise: false,
         };
         // (refused, the committed read of the wall's lowest slot, the reads).
         let read = |wall_from: f64, tilted: bool| {
@@ -9478,6 +10224,9 @@ mod tests {
             over_existing_lap: false,
             admitted_on_drawn_feet: false,
             added_mm3: 0.0,
+            local: None,
+            kept_by_frame: false,
+            joint_raise: false,
         };
         // (refused, members read as hidden, enclosed voxels of the map).
         let read = |map: Option<(f64, f64)>, root: f64| {

@@ -64,13 +64,37 @@ const LEVELS_PER_MM: f64 = 1000.0;
 /// One two-post panel: the run's post (`post`), its partner, the gap between
 /// their axes, the run's length above its base, and its bands, each as
 /// `(bottom, top)` heights above the base with the diagonal radius.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// **A post is a shaft plus, optionally, the foot it stands on** (flare lane,
+/// 2026-10-14). `post_radius_mm` is the SHAFT's radius (uniform, or the steps in
+/// `post_steps`); a `post_foot` is built explicitly from its coordinates
+/// ([`crate::foot_neck::FootGeom`]: a neck, then the cone, with the lowering's
+/// own slope) and REPLACES the shaft over its extent, clamped at the contact.
+/// Pass the shaft-only radius of a run read with its foot
+/// ([`crate::foot_neck::Reading::shaft_radius_mm`]) so the foot is counted once.
+/// Without a foot the post is clamped at the base, as before.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Panel {
     pub post_radius_mm: f64,
     pub partner_radius_mm: f64,
     pub gap_mm: f64,
     pub height_mm: f64,
     pub bands: Vec<PanelBand>,
+    /// The run's post stands on a model foot; the partner does.
+    pub post_foot: Option<crate::foot_neck::FootGeom>,
+    pub partner_foot: Option<crate::foot_neck::FootGeom>,
+    /// A shaft that is not uniform: `(top height mm above the base, radius)`
+    /// steps, bottom first. Above the last step, or when empty, the post's
+    /// uniform `post_radius_mm`. Used by the connected-path check of a
+    /// bay-local widening, where the post below a bay is thinner than in it.
+    pub post_steps: Vec<(f64, f64)>,
+    pub partner_steps: Vec<(f64, f64)>,
+    /// Where each post is clamped, mm above the panel's origin (`0`: both at
+    /// the origin, as every panel was before the flare lane). A foot and the
+    /// steps are measured from the post's own clamp; `height_mm`, the bands
+    /// and the tops are measured from the origin.
+    pub post_base_mm: f64,
+    pub partner_base_mm: f64,
 }
 
 /// One `|X|` band of a [`Panel`].
@@ -184,15 +208,42 @@ fn build(panel: &Panel, ratio: f64) -> Option<Built> {
         gap_mm: gap,
         height_mm: height,
         ref bands,
+        post_foot,
+        partner_foot,
+        ref post_steps,
+        ref partner_steps,
+        post_base_mm,
+        partner_base_mm,
     } = *panel;
     let sane = |v: f64| v.is_finite() && v > 0.0;
-    if !(sane(rp) && sane(rq) && sane(gap) && sane(height) && sane(ratio)) {
+    let base_ok = |v: f64| v.is_finite() && (0.0..height).contains(&v);
+    if !(sane(rp)
+        && sane(rq)
+        && sane(gap)
+        && sane(height)
+        && sane(ratio)
+        && base_ok(post_base_mm)
+        && base_ok(partner_base_mm))
+    {
         return None;
     }
-    let mut levels: Vec<f64> = vec![0.0, height];
+    let bases = [level(post_base_mm), level(partner_base_mm)];
+    let mut levels: Vec<f64> = vec![0.0, height, bases[0], bases[1]];
     for i in 1..POST_DIVISIONS {
         levels.push(level(height * f64::from(i) / f64::from(POST_DIVISIONS)));
     }
+    // The feet's own breakpoints, and the shafts' step tops: a member lies in
+    // one piece of either.
+    type FootSlices = Option<(f64, Vec<(f64, f64)>)>;
+    let feet: [FootSlices; 2] = [post_foot, partner_foot]
+        .map(|foot| foot.map(|foot| (foot.extent_mm(), foot.slices())));
+    for (which, foot) in feet.iter().enumerate() {
+        if let Some((_, slices)) = foot {
+            levels.extend(slices.iter().map(|&(top, _)| level(bases[which] + top)));
+        }
+    }
+    levels.extend(post_steps.iter().map(|&(top, _)| level(bases[0] + top)));
+    levels.extend(partner_steps.iter().map(|&(top, _)| level(bases[1] + top)));
     let mut ends: Vec<(f64, f64, f64, f64)> = Vec::with_capacity(bands.len());
     for band in bands {
         let (bottom, top) = (level(band.bottom_mm), level(band.top_mm));
@@ -218,16 +269,42 @@ fn build(panel: &Panel, ratio: f64) -> Option<Built> {
     levels.dedup();
     let mut frame = Frame::new();
     let mut columns: Vec<Vec<usize>> = Vec::with_capacity(2);
-    for (x, radius) in [(0.0, rp), (gap, rq)] {
+    for (which, (x, radius)) in [(0.0, rp), (gap, rq)].into_iter().enumerate() {
+        let (foot, steps) = if which == 0 {
+            (&feet[0], post_steps)
+        } else {
+            (&feet[1], partner_steps)
+        };
+        // The radius of the member between two levels: the foot's slice where
+        // the member lies in the foot, the shaft's step where it has one, else
+        // the shaft's uniform radius.
+        let base = bases[which];
+        let member_radius = |z0: f64, z1: f64| -> f64 {
+            let mid = 0.5 * (z0 + z1) - base;
+            if let Some((extent, slices)) = foot {
+                if mid < *extent {
+                    return slices
+                        .iter()
+                        .find(|&&(top, _)| top >= mid)
+                        .map_or(radius, |&(_, r)| r);
+                }
+            }
+            steps
+                .iter()
+                .find(|&&(top, _)| top >= mid)
+                .map_or(radius, |&(_, r)| r)
+        };
         let mut column = Vec::with_capacity(levels.len());
-        let mut previous = frame.node([x, 0.0, levels[0]], true);
+        let mut previous = frame.node([x, 0.0, base], true);
         column.push(previous);
-        for &z in &levels[1..] {
+        let mut previous_z = base;
+        for &z in levels.iter().filter(|&&z| z > base) {
             let node = frame.node([x, 0.0, z], false);
             if node == previous {
                 continue;
             }
-            frame.member(previous, node, radius);
+            frame.member(previous, node, member_radius(previous_z, z));
+            previous_z = z;
             column.push(node);
             previous = node;
         }
@@ -505,6 +582,12 @@ mod tests {
                 partner_radius_mm: radius,
                 gap_mm: gap,
                 height_mm: height,
+                post_foot: None,
+                partner_foot: None,
+                post_steps: Vec::new(),
+                partner_steps: Vec::new(),
+                post_base_mm: 0.0,
+                partner_base_mm: 0.0,
                 bands: study_bands(height, n, rise, gap, 40.0, 0.05),
             };
             let sway = panel_sway(&panel, 40.0).expect("every study cell fits");
@@ -577,6 +660,12 @@ mod tests {
             post_radius_mm: post,
             partner_radius_mm: rng.between(0.08, 0.8),
             gap_mm: rng.between(0.4, 6.0),
+            post_foot: None,
+            partner_foot: None,
+            post_steps: Vec::new(),
+            partner_steps: Vec::new(),
+            post_base_mm: 0.0,
+            partner_base_mm: 0.0,
             height_mm: height,
             bands: cuts
                 .chunks(2)
@@ -611,6 +700,12 @@ mod tests {
                         partner_radius_mm: radius,
                         gap_mm: gap,
                         height_mm: height,
+                        post_foot: None,
+                        partner_foot: None,
+                        post_steps: Vec::new(),
+                        partner_steps: Vec::new(),
+                        post_base_mm: 0.0,
+                        partner_base_mm: 0.0,
                         bands: study_bands(height, n, gap / tilt, gap, 40.0, 0.05),
                     },
                     40.0,
@@ -656,6 +751,12 @@ mod tests {
             post_radius_mm: 0.606_710_511_365_277_5,
             partner_radius_mm: 1.121_927_296_436_027_6,
             gap_mm: 0.595_982_447_632_242_8,
+            post_foot: None,
+            partner_foot: None,
+            post_steps: Vec::new(),
+            partner_steps: Vec::new(),
+            post_base_mm: 0.0,
+            partner_base_mm: 0.0,
             height_mm: 174.192_434_130_992_5,
             bands: vec![
                 band(8.460_097_110_442_05, 14.671_783_133_447_67),
@@ -712,6 +813,12 @@ mod tests {
                 post_radius_mm: post,
                 partner_radius_mm: rng.between(0.3, 1.5),
                 gap_mm: rng.between(0.4, 2.0),
+                post_foot: None,
+                partner_foot: None,
+                post_steps: Vec::new(),
+                partner_steps: Vec::new(),
+                post_base_mm: 0.0,
+                partner_base_mm: 0.0,
                 height_mm: height,
                 bands: cuts
                     .chunks(2)
@@ -759,6 +866,7 @@ mod tests {
                 gap_mm: gap,
                 height_mm: height,
                 bands: Vec::new(),
+                ..Panel::default()
             };
             let layout = |n: usize| {
                 u32::try_from(n)
@@ -775,6 +883,52 @@ mod tests {
             }
         }
         assert!(holds > 20 && past > 20, "both outcomes read: {holds} hold, {past} past");
+    }
+
+    /// **A panel on necks reads the neck** (flare lane, T4): two 0.4 mm shafts
+    /// 1.95 mm apart and 6 mm tall, each ending in a 0.05 mm contact under a
+    /// 0.23 mm cone. Clamped at the shaft (the panel as it was) the unbraced pair
+    /// holds, 0.02 of the pixel; stood on its necks it sways 3.2 pixels; and one
+    /// band whose top is low (1.4 mm) holds it again, 0.06, because the pair then
+    /// bends as one composite beam. The foot is counted once: the same panel with
+    /// the foot given as the first slice of an equal uniform shaft reads as the
+    /// shaft.
+    ///
+    /// SABOTAGE: clamp the base (ignore `post_foot`/`partner_foot`) and the
+    /// unbraced pair holds.
+    #[test]
+    fn a_panel_on_necks_reads_the_neck_and_a_low_band_holds_it() {
+        let foot = crate::foot_neck::FootGeom::new(0.05, 0.4, 0.05, 1.5697).expect("a foot");
+        let panel = |footed: bool, bands: Vec<PanelBand>| Panel {
+            post_radius_mm: 0.4,
+            partner_radius_mm: 0.4,
+            gap_mm: 1.95,
+            height_mm: 6.0,
+            bands,
+            post_foot: footed.then_some(foot),
+            partner_foot: footed.then_some(foot),
+            ..Panel::default()
+        };
+        let low = vec![PanelBand { bottom_mm: 0.1, top_mm: 1.4, brace_radius_mm: 0.058 }];
+        let clamped = panel_drag(&panel(false, Vec::new()), 40.0).expect("a panel");
+        let necks = panel_drag(&panel(true, Vec::new()), 40.0).expect("a panel");
+        let braced = panel_drag(&panel(true, low), 40.0).expect("a panel");
+        assert!(clamped < 0.05, "clamped at the shaft the pair holds: {clamped}");
+        assert!(necks > 1.0, "on its necks the unbraced pair does not: {necks}");
+        assert!(braced < 0.1, "a low band holds the pair on its necks: {braced}");
+        // A foot as wide as the shaft is the shaft.
+        let wide = crate::foot_neck::FootGeom::new(0.4, 0.4, 0.05, 1.5697).expect("a foot");
+        let same = panel_drag(
+            &Panel { post_foot: Some(wide), partner_foot: Some(wide), ..panel(false, Vec::new()) },
+            40.0,
+        )
+        .expect("a panel");
+        // (The foot adds a mesh level, which moves the lumped drag by parts in 10^5.)
+        assert!((same - clamped).abs() < 1.0e-4 * clamped, "{same} against {clamped}");
+        // A partner clamped higher than the post (its own foot higher up the
+        // panel) still builds and reads finite.
+        let higher = Panel { partner_base_mm: 0.5, ..panel(true, Vec::new()) };
+        assert!(panel_drag(&higher, 40.0).is_some_and(f64::is_finite));
     }
 
     /// The study's headline, read off the same table by the same rule the

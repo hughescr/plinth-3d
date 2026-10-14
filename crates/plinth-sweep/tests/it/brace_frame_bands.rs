@@ -150,6 +150,7 @@ fn tie_the_pair(lambda: f64, frame_bands: bool) -> Built {
             gap_mm: gap,
             height_mm: layers as f64 * H,
             bands: bands.clone(),
+            ..Panel::default()
         },
         S,
     )
@@ -232,6 +233,7 @@ fn the_fast_count_builds_the_bands_the_full_sway_counts_on_the_pair_fixtures() {
             gap_mm: gap,
             height_mm: height,
             bands: Vec::new(),
+            ..Panel::default()
         };
         let layout = |n: usize| {
             (n <= 12).then(|| {
