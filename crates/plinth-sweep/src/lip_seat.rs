@@ -526,17 +526,67 @@ fn lean_too_slender(
     run_mm > law.max_unbraced_mm(fit_mm)
 }
 
-/// Whether the arm as it stands is a support the slenderness refusal may keep
-/// in place of a lean it cannot hold (see the comment at its call in
-/// [`apply`]): clear of the model (`clear_of_model`), standing on its ground
-/// (`rooted`), and either a shaft longer than one layer or a stub resting on
-/// another member. A stub on a rooted member hangs from that member's chain to
-/// the plate, as a support does; a stub on the MODEL wall (the Morel base's
-/// arm 44) is not one, and its lean is taken as before.
-fn kept_arm_is_a_support(standing: &SweepStrut, clear_of_model: bool, rooted: bool) -> bool {
-    let longer_than_a_layer = standing.k_top > standing.k_bottom.saturating_add(1);
-    let on_a_member = matches!(standing.landing, Landing::Strut { .. });
-    clear_of_model && rooted && (longer_than_a_layer || on_a_member)
+/// Whether the slenderness refusal keeps the arm as it stands in place of a
+/// lean it cannot hold (see the comment at its call in [`apply`]).
+///
+/// The arm as it stands must be physically there to keep: clear of the model
+/// (`clear_of_model`) and standing on its ground (`rooted`). Then the lean the
+/// law cannot hold is taken in one case only: the lean's tip really seats on
+/// its face (`lean_seats`) and the standing arm's does not (`stands_seats`).
+/// Seating is the real contact the emitted file would have, read by the
+/// same measure that grows the balls ([`crate::contact_growth`]); a SHAPE of
+/// the standing arm (a one-layer stub on the model, say) says nothing about it
+/// (Bat_Cat_Owl arm 20, joint round 4: a stub on the claw's 0.018 mm edge with
+/// 0.0000 mm2 of contact, replaced by a 40 degree lean that touched nothing
+/// either and ran 3.4 times its limit).
+fn keeps_standing_arm(
+    clear_of_model: bool,
+    rooted: bool,
+    stands_seats: bool,
+    lean_seats: bool,
+) -> bool {
+    clear_of_model && rooted && !(lean_seats && !stands_seats)
+}
+
+/// For each `(standing arm, lean)` pair, whether its tip really seats on its
+/// face: `(the standing arm's, the lean's)`. Seating is the real contact (the
+/// model surface inside the drawn ball, measured exactly) reaching the planned
+/// contact to within one pixel of area, the test the ball growth uses, and
+/// above zero. Both arms of a pair seat on the same face (a lean moves the
+/// base, never the seat), found from the standing arm's seat-face point. One
+/// batched read for all the pairs ([`crate::contact_growth::measure`]); a tip
+/// with no seat face or no ball does not seat.
+fn tips_seat(
+    joins: &HeadJoinContext<'_>,
+    layer_plan: &LayerPlan,
+    pairs: &[(&SweepArm, &SweepArm)],
+) -> Vec<(bool, bool)> {
+    let context = joins.slender;
+    let points: Vec<Option<[f64; 3]>> = pairs.iter().map(|(stands, _)| stands.seat_face_point_mm).collect();
+    let sites = crate::footprint_normal::sites_at(joins.mesh, &points, context.seat_faces);
+    let mut rows: Vec<SweepArm> = Vec::with_capacity(2 * pairs.len());
+    let mut row_sites: Vec<Option<crate::footprint_normal::TipSite>> = Vec::with_capacity(2 * pairs.len());
+    for ((stands, lean), site) in pairs.iter().zip(&sites) {
+        for arm in [stands, lean] {
+            rows.push(SweepArm {
+                contact_ball_radius_mm: None,
+                ..(*arm).clone()
+            });
+            row_sites.push(*site);
+        }
+    }
+    let env = crate::footprint_normal::MeasureEnv {
+        mesh: joins.mesh,
+        surface: joins.surface(),
+        layer_plan,
+    };
+    let pixel_area_mm2 = context.grid.pitch_mm() * context.grid.pitch_mm();
+    let read = crate::contact_growth::measure(&env, &rows, &row_sites);    let seats = |row: Option<(f64, f64, f64)>| {
+        row.is_some_and(|(planned, real, _)| real > 0.0 && real + pixel_area_mm2 >= planned)
+    };
+    read.chunks(2)
+        .map(|both| (both.first().is_some_and(|&row| seats(row)), both.get(1).is_some_and(|&row| seats(row))))
+        .collect()
 }
 
 /// One arm the finished field still has with its shaft cut by its seat trim.
@@ -691,11 +741,11 @@ pub struct LipSeatOutcome {
     /// last pass's list.
     pub kept_for_slenderness_ids: Vec<u32>,
     /// Leans the slenderness test refused that were TAKEN anyway, because the
-    /// arm as it stands is no support (a one-layer stub on the model, or a solid
-    /// inside the model, or it floats above its ground; a one-layer stub on a
-    /// rooted member IS a support, joint round 4): nothing better to keep (q12
-    /// regressions, 2026-10-12). The path hit of that test. Summed over every
-    /// pass, like [`Self::candidates_refused_slender`].
+    /// arm as it stands is not there to keep (its solid is inside the model, or
+    /// it floats above its ground), or because the lean's tip really seats on
+    /// its face and the standing arm's does not (q12 regressions, 2026-10-12;
+    /// joint round 5, 2026-10-14). The path hit of that test. Summed over
+    /// every pass, like [`Self::candidates_refused_slender`].
     pub slender_taken_kept_not_clear: usize,
     /// Moved members (a mover, a follower) whose solid was NOT read against
     /// the final gap because it stands in a hidden cavity (Craig ruling
@@ -1812,7 +1862,47 @@ pub(crate) fn apply(
                 }
             }
         }
-        for ((proposal, &first), hidden_slots) in proposals.into_iter().zip(&first_of).zip(hidden_of) {
+        // **Whether the standing arm's tip and the lean's tip seat**, for
+        // each proposal the slenderness law refuses (the test in the loop
+        // below, evaluated here on the same inputs): one batched contact read
+        // for the round, as the seat bites above are one call.
+        let refused_lean: Vec<bool> = proposals
+            .iter()
+            .zip(&first_of)
+            .zip(&hidden_of)
+            .zip(&mover_clears)
+            .map(|(((proposal, &first), hidden_slots), &clears)| {
+                clears
+                    && !trigger.is_clearance()
+                    && !hidden_slots[0]
+                    && after[first].is_some_and(|now| {
+                        lean_too_slender(
+                            context,
+                            &struts[pending[proposal.slot].index],
+                            &proposal.candidate,
+                            &trial[first],
+                            now,
+                            tier,
+                        )
+                    })
+            })
+            .collect();
+        let mut seating: Vec<Option<(bool, bool)>> = vec![None; proposals.len()];
+        {
+            let asked: Vec<usize> = (0..proposals.len()).filter(|&at| refused_lean[at]).collect();
+            if !asked.is_empty() {
+                let pairs: Vec<(&SweepArm, &SweepArm)> = asked
+                    .iter()
+                    .map(|&at| (&arms[pending[proposals[at].slot].index], &trial[first_of[at]]))
+                    .collect();
+                for (&at, read) in asked.iter().zip(tips_seat(joins, layer_plan, &pairs)) {
+                    seating[at] = Some(read);
+                }
+            }
+        }
+        for (at_proposal, ((proposal, &first), hidden_slots)) in
+            proposals.into_iter().zip(&first_of).zip(hidden_of).enumerate()
+        {
             let index_of = pending[proposal.slot].index;
             // A mover that stands on a NEW root (the plate or the model)
             // must clear the gap outright; a mover joined to a member, and
@@ -1963,24 +2053,29 @@ pub(crate) fn apply(
             // arithmetic on this pass's batched clearance read, no kernel
             // call of its own; why not the thicken rung's taper, there).
             //
-            // **AND ONLY WHERE THE ARM AS IT STANDS IS A SUPPORT** (q12
-            // regressions, 2026-10-12; [`kept_arm_is_a_support`]). The refusal
-            // trades the lean for the arm already there, so that arm must be
-            // one: a shaft longer than one layer, or a stub resting on another
-            // member (joint round 4, 2026-10-13: Bat_Cat_Owl arm 33, a stub on
-            // its sibling chain to the plate, leaned 4.8 mm as a 0.10 mm rod
-            // 5.4 times over the limit), standing on its ground (`rooted`:
-            // the landing walk, so not floating above the plate or the model,
-            // nor resting on a member that is), whose solid does not enter the
-            // model
+            // **AND ONLY WHERE THE LEAN IS NO BETTER SEATED THAN THE ARM AS IT
+            // STANDS** (q12 regressions, 2026-10-12; joint round 5,
+            // 2026-10-14; [`keeps_standing_arm`]). The refusal trades the lean
+            // for the arm already there, so that arm must be there to keep:
+            // standing on its ground (`rooted`: the landing walk, so not
+            // floating above the plate or the model, nor resting on a member
+            // that is), whose solid does not enter the model
             // (`standing_drawn`: the widest-radius reading of `before`, and
             // where that reads inside the model, the solid the file draws,
             // since a tapered arm's thinner shaft can clear a wall its widest
-            // radius would enter; unmeasured is not proof of entry). The Morel
-            // base's arm 44 stood as a stub one layer long
-            // onto the model wall beside its seat, its tip off its face (Q12
-            // kept it in place of its 7.5 mm plate lean). There the lean is
-            // taken as before Q1 and left to the ladder.
+            // radius would enter; unmeasured is not proof of entry). The lean
+            // the law cannot hold is taken only where its tip really seats on
+            // its face and the standing arm's tip does not (`seating`: the
+            // real contact of both, one batched read for the round). A SHAPE
+            // test of the standing arm (a one-layer stub on the model is "no
+            // support") took Bat_Cat_Owl arm 20's 40 degree lean, a 0.10 mm
+            // rod 3.4 times over its limit, in place of a stub whose tip
+            // touched the claw's 0.018 mm edge: neither seated (0.0000 mm2),
+            // and the lean added the rod. The Morel base's arm 44 stood as a
+            // stub one layer long onto the model wall beside its seat, its
+            // tip off its face (Q12 kept it in place of its 7.5 mm plate
+            // lean); where the plate lean seats, it is taken as before Q1 and
+            // left to the ladder.
             //
             // This is the LAST test, after the plate, root, measured-section,
             // lock and live-path tests above: a descent one of those refuses
@@ -1994,29 +2089,21 @@ pub(crate) fn apply(
             // radius are the law's own. The clearance re-route is not asked
             // (it was sent for the gap itself), and a mover in a hidden
             // cavity, where the gap does not apply, is not asked either.
-            let too_slender = (!trigger.is_clearance() && !hidden(first))
-                .then_some(after[first])
-                .flatten()
-                .is_some_and(|now| {
-                    lean_too_slender(
-                        context,
-                        &struts[index_of],
-                        &proposal.candidate,
-                        &trial[first],
-                        now,
-                        tier,
-                    )
-                });
-            if too_slender {
-                let standing = &struts[index_of];
-                let kept_is_a_support = kept_arm_is_a_support(
-                    standing,
+            //
+            // The test itself ran with the round's batched reads (`refused_lean`
+            // above, on these same inputs); `seating` holds the contact reads
+            // of the tips it asked for.
+            if refused_lean[at_proposal] {
+                let (stands_seats, lean_seats) = seating[at_proposal].unwrap_or((false, false));
+                let keeps_arm = keeps_standing_arm(
                     standing_reads
                         .drawn(index_of, struts)
                         .is_none_or(|was| was >= -CLEARANCE_SLACK_MM),
                     rooted[index_of],
+                    stands_seats,
+                    lean_seats,
                 );
-                if kept_is_a_support {
+                if keeps_arm {
                     outcome.candidates_refused_slender += 1;
                     // The cheapest admissible descent cannot be held: the arm
                     // keeps its seat and does not walk the rest of its
@@ -2030,7 +2117,8 @@ pub(crate) fn apply(
                     continue;
                 }
                 // The path hit of the kept-arm test: a lean the law cannot
-                // hold, taken because the arm as it stands is no better.
+                // hold, taken because the arm as it stands is not there to
+                // keep, or because the lean seats where it does not.
                 outcome.slender_taken_kept_not_clear += 1;
             }
             outcome.candidates_verified += 1;
@@ -3714,50 +3802,24 @@ mod tests {
         assert!((thickest_radius_keeping_gap_mm(1.2, 5.0, 0.3, 1.0) - 1.2).abs() < 1e-12);
     }
 
-    /// **A STUB ON A ROOTED MEMBER IS A SUPPORT; A STUB ON THE MODEL IS NOT**
-    /// (joint round 4, 2026-10-13). The kept-arm test is the layer-count proxy
-    /// plus the landing: a shaft longer than one layer is a support, so is a
-    /// one-layer stub resting on another member; a one-layer stub on the model
-    /// wall (the Morel base's arm 44) and a stub off its ground or inside the
-    /// model are not. SABOTAGE (by hand, the `on_a_member` term removed): the
-    /// member stub reads as no support.
+    /// **THE STANDING ARM IS KEPT UNLESS THE LEAN SEATS WHERE IT DOES NOT**
+    /// (joint round 5, 2026-10-14; Bat_Cat_Owl arm 20). The arm must be there
+    /// to keep (clear of the model, rooted), and a lean the law cannot hold
+    /// replaces it only when the lean's tip seats and the standing arm's does
+    /// not. No SHAPE of the standing arm enters: a one-layer stub on the model
+    /// whose lean seats no better is kept. SABOTAGE (by hand, the shape test
+    /// back: a one-layer stub on the model is "no support"): the first row
+    /// fails, as it did on arm 20.
     #[test]
-    fn a_one_layer_stub_on_a_member_is_a_support_and_one_on_the_model_is_not() {
-        use super::kept_arm_is_a_support;
-        use crate::{Landing, SeatFace, StrutKind, SweepStrut};
-        let arm = |k_bottom: usize, landing: Landing| SweepStrut {
-            id: 1,
-            cell: 0,
-            center_mm: [0.0, 0.0],
-            kind: StrutKind::Arm,
-            min_radius_mm: 0.0,
-            thickened_mm: Vec::new(),
-            seat_on_strut: None,
-            k_top: 200,
-            k_bottom,
-            landing,
-            interior: false,
-            radius_mm: Vec::new(),
-            carried_mm2: Vec::new(),
-            covered_demand: Vec::new(),
-            held_births: Vec::new(),
-            twin_host: false,
-            inserted_by_load: false,
-            path: Vec::new(),
-            straight_fallback: None,
-            fallback_path: Vec::new(),
-            head: None,
-            seat_face: SeatFace::default(),
-            seat_normal: [0.0; 3],
-        };
-        let on_member = Landing::Strut { id: 0, layer: 199 };
-        let on_model = Landing::Model { layer: 199 };
-        assert!(kept_arm_is_a_support(&arm(199, on_member), true, true), "a stub on a rooted member");
-        assert!(!kept_arm_is_a_support(&arm(199, on_model), true, true), "a stub on the model wall");
-        assert!(kept_arm_is_a_support(&arm(190, on_model), true, true), "a longer shaft");
-        assert!(!kept_arm_is_a_support(&arm(199, on_member), true, false), "a member stub off its ground");
-        assert!(!kept_arm_is_a_support(&arm(199, on_member), false, true), "a member stub inside the model");
-        assert!(!kept_arm_is_a_support(&arm(190, on_model), false, true), "a long shaft inside the model");
+    fn the_standing_arm_is_kept_unless_the_lean_seats_where_it_does_not() {
+        use super::keeps_standing_arm;
+        // (clear, rooted, stands seats, lean seats) -> kept
+        assert!(keeps_standing_arm(true, true, false, false), "neither seats: the stub is kept");
+        assert!(keeps_standing_arm(true, true, true, true), "both seat: the arm is kept");
+        assert!(keeps_standing_arm(true, true, true, false), "only the arm seats: kept");
+        assert!(!keeps_standing_arm(true, true, false, true), "only the lean seats: the lean is taken");
+        assert!(!keeps_standing_arm(false, true, true, false), "inside the model: nothing to keep");
+        assert!(!keeps_standing_arm(true, false, true, false), "off its ground: nothing to keep");
     }
 
     /// With S = 40 a 12.347 mm lean at 0.092 mm needs 0.309 mm: refused where

@@ -159,7 +159,7 @@ pub struct ContactOutcome {
 /// disc call, one pairs query, one parallel footprint pass. `(planned mm²,
 /// real mm², drawn ball radius mm)`, `None` where the arm has no disc or no
 /// site.
-fn measure(
+pub(crate) fn measure(
     env: &MeasureEnv<'_>,
     arms: &[SweepArm],
     sites: &[Option<TipSite>],
