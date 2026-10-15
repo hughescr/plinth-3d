@@ -305,6 +305,9 @@ impl FaceTopology {
                 .capacity()
                 .checked_mul(std::mem::size_of::<u32>())?,
             self.mesh_fingerprint.capacity(),
+            // The digest owns its own hex string; `size_of::<Self>()` counts
+            // only its header.
+            self.content_digest.hex.capacity(),
             self.point_only_vertices
                 .capacity()
                 .checked_mul(std::mem::size_of::<PointOnlyVertex>())?,
@@ -1466,3 +1469,51 @@ fn hex_digest(hasher: Sha256) -> String {
 /// test oracle.
 #[cfg(test)]
 mod reference;
+
+#[cfg(test)]
+mod accounting_tests {
+    use super::*;
+
+    /// `allocated_bytes` is checked against a sum written out field by field
+    /// here, independent of the helper, including the digest's own string.
+    #[test]
+    fn allocated_bytes_counts_every_owned_buffer_including_the_digest_string() {
+        let mesh = crate::fixtures::make_box_default().expect("box");
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).expect("topology");
+        assert!(
+            !topology.content_digest.hex.is_empty(),
+            "the digest string must own an allocation for this test to mean anything"
+        );
+        let mut expected = std::mem::size_of::<FaceTopology>();
+        expected += topology.indptr.capacity() * 4;
+        expected += topology.indices.capacity() * 4;
+        expected += topology.component_ids.capacity() * 4;
+        expected += topology.cut_flags.capacity();
+        expected += topology.source_vertex_to_welded.capacity() * 4;
+        expected += topology.mesh_fingerprint.capacity();
+        expected += topology.content_digest.hex.capacity();
+        expected += topology.point_only_vertices.capacity()
+            * std::mem::size_of::<PointOnlyVertex>();
+        for vertex in &topology.point_only_vertices {
+            expected += vertex.fans.capacity() * std::mem::size_of::<Vec<u32>>();
+            expected += vertex.fans.iter().map(|fan| fan.capacity() * 4).sum::<usize>();
+        }
+        assert_eq!(topology.allocated_bytes(), Some(expected));
+
+        // The memo's figure is built from the same value plus the weld view,
+        // the fingerprint string and two Arc headers.
+        let memo = mesh.memo_allocated_bytes().expect("small mesh");
+        let weld = mesh.memo().exact_weld().get().expect("weld cached");
+        let kept = mesh.memo().exact_topology().get().expect("topology cached");
+        let fingerprint = mesh.memo().fingerprint().get().map_or(0, String::capacity);
+        let header = 2 * std::mem::size_of::<usize>();
+        assert_eq!(
+            memo,
+            fingerprint
+                + header
+                + kept.allocated_bytes().expect("small")
+                + header
+                + weld.allocated_bytes().expect("small")
+        );
+    }
+}
