@@ -107,13 +107,12 @@
 //! # Batching
 //!
 //! One collection pass over every strut, one parallel pass over the landing
-//! set against every face (`landings × faces`, identical shape to
-//! [`crate::model_landing::model_landing_scar`]), one serial sum. Nothing is
-//! built or read per arm. Skipped outright when a pose places no arms.
+//! set against the faces ([`nearest_faces`]: a bounding-box tree, the same
+//! answer as testing every `landings × faces` pair), one serial sum. Nothing
+//! is built or read per arm. Skipped outright when a pose places no arms.
 
 use geom_kernel::{closest_on_tri, vec3};
 use plinth_mesh::Mesh;
-use rayon::prelude::*;
 
 use crate::grid::Grid;
 use crate::{SweepPlan, SweepStrut};
@@ -572,40 +571,25 @@ pub(crate) fn triangles_of(mesh: &Mesh) -> Vec<[[f64; 3]; 3]> {
 
 /// The nearest face to each landing, and the distance to it, in landing order.
 ///
-/// One parallel pass over `landings × faces`. Shared by the tip SCAR and the
-/// tip SEAT so both are answered about the same face.
+/// One parallel pass over the landings, each answered through a bounding-box
+/// tree over the faces ([`geom_kernel::nearest::nearest_triangles`]; a batch
+/// too small to pay for the tree scans every face). The answer is the scan's,
+/// bit for bit: the lowest face id among equal squared distances. Shared by
+/// the tip SCAR and the tip SEAT so both are answered about the same face.
 pub(crate) fn nearest_faces(
     triangles: &[[[f64; 3]; 3]],
     landings: &[TipLanding],
 ) -> Vec<Option<(usize, f64)>> {
     crate::perf::add(crate::PerfWork::NearestTipRows, crate::perf::count(landings.len()));
-    crate::perf::add(
-        crate::PerfWork::NearestTipTrisTested,
-        crate::perf::count(landings.len()).saturating_mul(crate::perf::count(triangles.len())),
-    );
-    // Brute force: every row tests every face, so a batch has no row skew by
-    // construction. The row records its size and wall time beside the
-    // kernel's clearance batches (write-only; inert when counting is off).
+    // The row records its size and wall time beside the kernel's clearance
+    // batches (write-only; inert when counting is off).
     let _scan_span = crate::perf::span(crate::perf::Span::TipNearest);
     let scan_started = crate::perf::enabled().then(std::time::Instant::now);
-    let nearest = landings
-        .par_iter()
-        .map(|landing| {
-            let mut best_distance = f64::INFINITY;
-            let mut best_face: Option<usize> = None;
-            for (face, triangle) in triangles.iter().enumerate() {
-                let closest =
-                    closest_on_tri(landing.point_mm, triangle[0], triangle[1], triangle[2]);
-                let offset = vec3::sub(landing.point_mm, closest);
-                let distance = vec3::dot(offset, offset);
-                if distance < best_distance {
-                    best_distance = distance;
-                    best_face = Some(face);
-                }
-            }
-            best_face.map(|face| (face, best_distance.sqrt()))
-        })
-        .collect();
+    let points: Vec<[f64; 3]> = landings.iter().map(|landing| landing.point_mm).collect();
+    let answer = geom_kernel::nearest::nearest_triangles(triangles, &points);
+    // The faces actually measured, not `rows × faces`.
+    crate::perf::add(crate::PerfWork::NearestTipTrisTested, answer.tris_tested);
+    let nearest = answer.hits;
     if let Some(started) = scan_started {
         crate::perf::row(
             crate::perf::Rows::TipBatch,

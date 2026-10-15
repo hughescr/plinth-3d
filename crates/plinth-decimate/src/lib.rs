@@ -589,7 +589,7 @@ pub struct BudgetSearchTrace {
     /// Why no safely reduced mesh was authorized when this trace backs an
     /// [`BudgetSearchOutcome::AlreadyPrintScale`] result.
     pub reduction_refusals: Vec<ReductionRefusalReason>,
-    /// How many `NativeSurface`s the *search* built: exactly two per
+    /// How many `NativeSurface`s the *search* used: exactly two per
     /// [`probe_two_sided`] call (original and candidate), counted at each call
     /// site the search owns and never inferred from the trace's shape. The
     /// exact-identity probes build none — an identity's two directed distances
@@ -600,9 +600,10 @@ pub struct BudgetSearchTrace {
     /// backward error map, which happens before the search exists and is not
     /// counted here; the per-run total is therefore this value plus one on
     /// every path through [`run`], including the `ProtectionCap` short-circuit.
-    /// Ten of the Weeping Treant v1.2's twenty search-owned builds are
-    /// redundant rebuilds of the unchanged original — the batch-first repair
-    /// §6 Phase 4 describes, and this counter is how it would be measured.
+    /// Ten of the Weeping Treant v1.2's twenty counted surfaces are the
+    /// unchanged original; the search now builds that one once and a
+    /// candidate's once, so this value counts the surfaces probes used, not
+    /// the surfaces built.
     pub native_surface_builds: usize,
 }
 
@@ -1777,19 +1778,34 @@ fn run_budget_search(
         target_ratio: 0.0,
         vertex_locks: protected.to_vec(),
     };
+    // One original-side surface for the whole search, and the verification
+    // inputs of every sampled-safe candidate (`kept[i]` belongs to
+    // `trace.steps[i]`).
+    let mut original_surface = OriginalSurface::default();
+    let mut kept: Vec<Option<KeptCandidate>> = vec![None];
     let mut low = policy.ratio_low;
     let mut high = policy.ratio_high;
     for _ in 0..policy.bisections {
         let midpoint = (low + high) / 2.0;
         let step_mark = geom_kernel::perf::stage("decimate.bisection_step");
-        let sampled = sampled_step(original, &mut request, midpoint, budget.probe, error_budget);
+        let sampled = sampled_step(
+            original,
+            &mut request,
+            midpoint,
+            budget.probe,
+            error_budget,
+            &mut original_surface,
+        );
         drop(step_mark);
-        let step = match sampled
-            .map_err(|error| BudgetSearchError::SearchExecution {
-                phase: "ratio bisection",
-                message: error,
-            })? {
-            SampledStepOutcome::Candidate(step) => *step,
+        let sampled = sampled.map_err(|error| BudgetSearchError::SearchExecution {
+            phase: "ratio bisection",
+            message: error,
+        })?;
+        let (step, step_kept) = match sampled {
+            SampledStepOutcome::Candidate(sampled) => {
+                let SampledCandidate { step, kept } = *sampled;
+                (step, kept)
+            }
             // No candidate at this ratio is a fact about the ratio. Record it,
             // move the interval, and keep searching — the alternative, which
             // this branch replaces, was ending the whole run on one bad ratio
@@ -1831,14 +1847,16 @@ fn run_budget_search(
         }
         record_sampled_refusal(&mut trace, &step, original.tris().len(), error_budget);
         trace.steps.push(step);
+        kept.push(step_kept);
     }
 
     let mut candidates = trace
         .steps
         .iter()
-        .filter(|step| step.reduced && step.passed)
+        .enumerate()
+        .filter(|(_, step)| step.reduced && step.passed)
         .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| {
+    candidates.sort_by(|(_, left), (_, right)| {
         // Compare actual ratios without rounding, then requested target as a
         // deterministic tie-breaker.
         (left.output_face_count as u128 * original.tris().len() as u128)
@@ -1860,50 +1878,23 @@ fn run_budget_search(
     }
 
     let _final_mark = geom_kernel::perf::stage("decimate.final_verify");
-    for candidate in candidates {
-        request.target_ratio = candidate.ratio;
-        let final_outcome = match simplify_locked(original, &request) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                // The deterministic rebuild of a sampled-safe candidate found
-                // no candidate at all. That is a fact about this ratio, so the
-                // *next* candidate still gets its turn; before FU-43 it ended
-                // the run and discarded every denser candidate behind it.
-                let Some(cause) = candidate_free_cause(&error) else {
-                    return Err(verification_failed(
-                        trace.clone(),
-                        topology_before,
-                        None,
-                        None,
-                        VerificationFailureReason::FinalSimplify {
-                            message: error.to_string(),
-                        },
-                    ));
-                };
-                trace
-                    .reduction_refusals
-                    .push(ReductionRefusalReason::CandidateFree {
-                        requested_ratio: candidate.ratio,
-                        cause,
-                    });
-                continue;
-            }
-        };
-        let rebuilt_fingerprint = mesh_fingerprint(&final_outcome.mesh).map_err(|error| {
-            BudgetSearchError::SearchExecution {
-                phase: "final candidate fingerprint",
-                message: error.to_string(),
-            }
-        })?;
-        if rebuilt_fingerprint != candidate.candidate_fingerprint {
-            return Err(BudgetSearchError::SearchExecution {
-                phase: "final candidate deterministic rebuild",
-                message: format!(
-                    "requested ratio {} sampled fingerprint {} rebuilt as {}",
-                    candidate.ratio, candidate.candidate_fingerprint, rebuilt_fingerprint
-                ),
-            });
-        }
+    let loop_mark = geom_kernel::perf::stage("decimate.fv_loop");
+    for (step_index, candidate) in candidates {
+        // Verify the mesh the bisection already simplified at this ratio, with
+        // the surface it already built, instead of simplifying and indexing it
+        // again: simplification is deterministic, so the second build gave the
+        // same mesh (the old code checked that by fingerprint on every run; the
+        // `final_verification_reuses_the_bisection_mesh` test checks it now).
+        // The sampled step kept one for exactly the steps selected above.
+        let KeptCandidate {
+            outcome: final_outcome,
+            surface: mut candidate_surface,
+        } = kept[step_index]
+            .take()
+            .expect("a sampled-safe step kept its candidate");
+        // The mesh is the one that fingerprint was taken over.
+        let rebuilt_fingerprint = candidate.candidate_fingerprint.clone();
+        let topology_mark = geom_kernel::perf::stage("decimate.fv_topology");
         let topology_after = build_face_topology(&final_outcome.mesh, WeldPolicy::ExactBits)
             .map(|topology| topology.counts())
             .map_err(|error| {
@@ -1917,6 +1908,7 @@ fn run_budget_search(
                     },
                 )
             })?;
+        drop(topology_mark);
         if !topology_not_increased(topology_before, topology_after) {
             trace.final_attempts.push(FinalVerificationAttempt {
                 requested_ratio: candidate.ratio,
@@ -1938,13 +1930,17 @@ fn run_budget_search(
                 });
             continue;
         }
-        let final_probe = probe_two_sided(
+        let probe_mark = geom_kernel::perf::stage("decimate.fv_probe");
+        let final_probe = probe_two_sided_shared(
             original,
             &final_outcome.mesh,
             ProbePopulation::Full,
             budget.probe,
-        )
-        .map_err(|error| {
+            &mut original_surface,
+            &mut candidate_surface,
+        );
+        drop(probe_mark);
+        let final_probe = final_probe.map_err(|error| {
             verification_failed(
                 trace.clone(),
                 topology_before,
@@ -2012,6 +2008,11 @@ fn run_budget_search(
         }
     }
 
+    // Every kept candidate was consumed or refused; drop what is left (and the
+    // surfaces it holds) before the diagnostics build more.
+    drop(loop_mark);
+    drop(kept);
+    let adaptive_mark = geom_kernel::perf::stage("decimate.adaptive");
     run_adaptive_diagnostics(
         original,
         protected,
@@ -2019,7 +2020,9 @@ fn run_budget_search(
         topology_before,
         &policy,
         &mut trace,
+        &mut original_surface,
     )?;
+    drop(adaptive_mark);
 
     let geometrically_eligible_candidate_count = trace
         .final_attempts
@@ -2265,8 +2268,11 @@ fn new_budget_trace(
     }
 }
 
-/// Every [`probe_two_sided`] call builds two nearest surfaces: one over the
-/// original and one over the candidate.
+/// Every [`probe_two_sided`] call queries two nearest surfaces: one over the
+/// original and one over the candidate. The search counts both per probe; it
+/// builds the original's once ([`OriginalSurface`]) and a candidate's once
+/// however many probes it takes, so the counter is the figure the audit
+/// record has always carried, not a build count.
 const NATIVE_SURFACES_PER_TWO_SIDED_PROBE: usize = 2;
 
 /// Authorize the canonical input only after a strict audit and full, two-sided
@@ -2382,8 +2388,25 @@ fn exact_identity_probe(
 /// and a step the search takes, never the end of the run — see
 /// [`CandidateFreeCause`].
 enum SampledStepOutcome {
-    Candidate(Box<BudgetSearchStep>),
+    Candidate(Box<SampledCandidate>),
     CandidateFree(CandidateFreeCause),
+}
+
+/// One measured bisection candidate. When the sampled probe found it a real,
+/// budget-safe reduction it is also a final-verification candidate, and
+/// `kept` holds what verification needs: the simplified mesh and its surface.
+/// Simplification is deterministic in (original, locks, ratio), so rebuilding
+/// the mesh at verification time would reproduce these bytes (the fingerprint
+/// the step records says so; a test pins it) and a second surface over the
+/// same mesh would be the same surface.
+struct SampledCandidate {
+    step: BudgetSearchStep,
+    kept: Option<KeptCandidate>,
+}
+
+struct KeptCandidate {
+    outcome: SimplifyOutcome,
+    surface: Option<NativeSurface>,
 }
 
 fn sampled_step(
@@ -2392,6 +2415,7 @@ fn sampled_step(
     ratio: f64,
     probe_config: ProbeConfig,
     budget: ErrorBudget,
+    original_surface: &mut OriginalSurface,
 ) -> Result<SampledStepOutcome, String> {
     // `vertex_locks` is the caller's unchanged lock set for the whole
     // bisection; only the ratio moves per round, so only it is written here
@@ -2405,16 +2429,19 @@ fn sampled_step(
                 .ok_or_else(|| error.to_string())
         }
     };
-    let probe = probe_two_sided(
+    let mut candidate_surface = None;
+    let probe = probe_two_sided_shared(
         original,
         &outcome.mesh,
         ProbePopulation::Sampled,
         probe_config,
+        original_surface,
+        &mut candidate_surface,
     )
     .map_err(|error| error.to_string())?;
     let reduced = outcome.output_face_count < original.tris().len();
     let passed = reduced && within_budget(&probe, budget);
-    Ok(SampledStepOutcome::Candidate(Box::new(BudgetSearchStep {
+    let step = BudgetSearchStep {
         ratio,
         output_face_count: outcome.output_face_count,
         output_vertex_count: outcome.output_vertex_count,
@@ -2424,6 +2451,16 @@ fn sampled_step(
         zero_volume_repair: outcome.zero_volume_repair,
         reduced,
         passed,
+    };
+    // Only a candidate that can reach final verification is kept; every other
+    // mesh and surface is dropped here, as before.
+    let kept = (reduced && passed).then_some(KeptCandidate {
+        outcome,
+        surface: candidate_surface,
+    });
+    Ok(SampledStepOutcome::Candidate(Box::new(SampledCandidate {
+        step,
+        kept,
     })))
 }
 
@@ -2449,6 +2486,7 @@ fn run_adaptive_diagnostics(
     topology_before: TopologyCounts,
     policy: &SearchPolicy,
     trace: &mut BudgetSearchTrace,
+    original_surface: &mut OriginalSurface,
 ) -> Result<(), BudgetSearchError> {
     let input_faces = original.tris().len();
     let Some(first_target_faces) = trace
@@ -2550,11 +2588,15 @@ fn run_adaptive_diagnostics(
                 continue;
             }
         };
-        let sampled_probe = probe_two_sided(
+        // The sampled and the full probe of one candidate share its surface.
+        let mut candidate_surface = None;
+        let sampled_probe = probe_two_sided_shared(
             original,
             &outcome.mesh,
             ProbePopulation::Sampled,
             budget.probe,
+            original_surface,
+            &mut candidate_surface,
         )
         .map_err(|error| BudgetSearchError::SearchExecution {
             phase: "adaptive sampled probe",
@@ -2601,12 +2643,18 @@ fn run_adaptive_diagnostics(
             if !topology_not_increased(topology_before, topology_after) {
                 AdaptiveProbeResult::TopologyIncreased
             } else {
-                let full_probe =
-                    probe_two_sided(original, &outcome.mesh, ProbePopulation::Full, budget.probe)
-                        .map_err(|error| BudgetSearchError::SearchExecution {
-                        phase: "adaptive full probe",
-                        message: error.to_string(),
-                    })?;
+                let full_probe = probe_two_sided_shared(
+                    original,
+                    &outcome.mesh,
+                    ProbePopulation::Full,
+                    budget.probe,
+                    original_surface,
+                    &mut candidate_surface,
+                )
+                .map_err(|error| BudgetSearchError::SearchExecution {
+                    phase: "adaptive full probe",
+                    message: error.to_string(),
+                })?;
                 trace.native_surface_builds += NATIVE_SURFACES_PER_TWO_SIDED_PROBE;
                 let within = within_final_slack(&full_probe, trace.budget, policy.final_slack);
                 adaptive.full_probe = Some(full_probe);
@@ -2838,9 +2886,77 @@ pub fn probe_two_sided(
     population: ProbePopulation,
     config: ProbeConfig,
 ) -> Result<TwoSidedProbe, ProbeError> {
+    probe_two_sided_shared(
+        original,
+        candidate,
+        population,
+        config,
+        &mut OriginalSurface::default(),
+        &mut None,
+    )
+}
+
+/// The original mesh's nearest surface, built on first use and reused by every
+/// probe of one search. The search probes one fixed original dozens of times;
+/// the surface is a pure function of that mesh and `config.surface`, and a
+/// query only reads it, so a shared copy gives the same distances as a fresh
+/// one. A probe with a different surface configuration rebuilds it.
+#[derive(Default)]
+struct OriginalSurface {
+    built: Option<(NativeSurfaceConfig, NativeSurface)>,
+}
+
+impl OriginalSurface {
+    fn get(
+        &mut self,
+        original: &Mesh,
+        config: NativeSurfaceConfig,
+    ) -> Result<&NativeSurface, ProbeError> {
+        let current = self
+            .built
+            .as_ref()
+            .is_some_and(|(built_for, _)| *built_for == config);
+        if !current {
+            self.built = Some((config, surface(original, "original", config)?));
+        }
+        Ok(&self
+            .built
+            .as_ref()
+            .expect("the original surface was built just above")
+            .1)
+    }
+}
+
+/// [`probe_two_sided`] with the original-side surface shared across calls and
+/// the candidate-side surface optionally supplied.
+///
+/// `candidate_surface` must be `None` or the surface of exactly `candidate`
+/// under `config.surface`; when `None` it is built here and left in the slot,
+/// so a caller that probes one candidate twice (sampled, then full) builds it
+/// once. The audit, then the original surface, then the candidate surface run
+/// in the order `probe_two_sided` always used, so every failure is reported
+/// the same way.
+fn probe_two_sided_shared(
+    original: &Mesh,
+    candidate: &Mesh,
+    population: ProbePopulation,
+    config: ProbeConfig,
+    original_surface: &mut OriginalSurface,
+    candidate_surface: &mut Option<NativeSurface>,
+) -> Result<TwoSidedProbe, ProbeError> {
+    let audit_mark = geom_kernel::perf::stage("decimate.probe_audit");
     audit_probe_inputs(original, candidate, config)?;
-    let original_surface = surface(original, "original", config.surface)?;
-    let candidate_surface = surface(candidate, "candidate", config.surface)?;
+    drop(audit_mark);
+    let surfaces_mark = geom_kernel::perf::stage("decimate.probe_surfaces");
+    let original_surface = original_surface.get(original, config.surface)?;
+    if candidate_surface.is_none() {
+        *candidate_surface = Some(surface(candidate, "candidate", config.surface)?);
+    }
+    let candidate_surface = candidate_surface
+        .as_ref()
+        .expect("the candidate surface was built just above");
+    drop(surfaces_mark);
+    let query_mark = geom_kernel::perf::stage("decimate.probe_query");
     let all_forward = face_centres(candidate)?;
     let (forward_indices, forward) =
         select_points(all_forward.len(), population, FORWARD_CAP, FORWARD_SEED);
@@ -2859,13 +2975,13 @@ pub fn probe_two_sided(
         .map(|&index| original.verts()[index])
         .collect::<Vec<_>>();
     let mut distances = query_batch(
-        &original_surface,
+        original_surface,
         &forward_points,
         config.nearest_upper_bound_mm,
         "forward",
     )?;
     distances.extend(query_batch(
-        &candidate_surface,
+        candidate_surface,
         &backward_points,
         config.nearest_upper_bound_mm,
         "backward",
@@ -2878,6 +2994,7 @@ pub fn probe_two_sided(
     let p99_mm = linear_percentile(&sorted, 0.99)?;
     let p99_9_mm = linear_percentile(&sorted, 0.999)?;
     let max_mm = sorted.last().copied();
+    drop(query_mark);
     Ok(TwoSidedProbe {
         candidate_face_count: candidate.tris().len(),
         forward,
@@ -6494,6 +6611,84 @@ mod tests {
         assert_eq!(
             total.locked_vertices_dropped, 0,
             "an unlocked search cannot surrender a protected vertex"
+        );
+    }
+
+    /// Final verification judges the mesh the bisection kept, where it used to
+    /// simplify the ratio a second time and compare fingerprints on every run.
+    /// This is that comparison, moved here: for every final attempt the search
+    /// recorded, a fresh `simplify_locked` at the attempt's ratio reproduces the
+    /// fingerprint, face count and repair record the attempt published, and a
+    /// verified result's mesh is that rebuilt mesh.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "exact equality is the claim: the same deterministic simplification run twice must give the \
+              same ratio bit for bit"
+    )]
+    fn final_verification_reuses_the_bisection_mesh() {
+        let mut attempts_checked = 0;
+        let mut verified_checked = 0;
+        for (mesh, d2) in [
+            (plinth_mesh::make_dual_cavity_pawn().unwrap(), 19.0),
+            (torus(12, 6), 19.0),
+            (torus(200, 100), 1_000_000.0),
+        ] {
+            let locks = vec![false; mesh.verts().len()];
+            let outcome = run_budget_search(&mesh, &locks, d2_budget(d2)).unwrap();
+            let (verified, success) = match outcome {
+                BudgetSearchOutcome::Verified(success) => (true, success),
+                BudgetSearchOutcome::AlreadyPrintScale(success) => (false, success),
+                BudgetSearchOutcome::SkippedScaleSuspicious { .. } => {
+                    panic!("the fixture is print scale")
+                }
+            };
+            for attempt in &success.trace.final_attempts {
+                let rebuilt = simplify_locked(
+                    &mesh,
+                    &SimplifyRequest {
+                        target_ratio: attempt.requested_ratio,
+                        vertex_locks: locks.clone(),
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    mesh_fingerprint(&rebuilt.mesh).unwrap(),
+                    attempt.candidate_fingerprint,
+                    "the kept mesh at ratio {} is not what a rebuild gives",
+                    attempt.requested_ratio
+                );
+                assert_eq!(rebuilt.output_face_count, attempt.output_face_count);
+                assert_eq!(rebuilt.achieved_ratio, attempt.achieved_ratio);
+                assert_eq!(rebuilt.zero_volume_repair, attempt.zero_volume_repair);
+                attempts_checked += 1;
+            }
+            if verified {
+                let chosen = success
+                    .trace
+                    .final_attempts
+                    .last()
+                    .expect("a verified search recorded its winning attempt");
+                let rebuilt = simplify_locked(
+                    &mesh,
+                    &SimplifyRequest {
+                        target_ratio: chosen.requested_ratio,
+                        vertex_locks: locks.clone(),
+                    },
+                )
+                .unwrap();
+                assert_eq!(success.mesh, rebuilt.mesh);
+                assert_eq!(success.chosen_ratio, rebuilt.achieved_ratio);
+                verified_checked += 1;
+            }
+        }
+        assert!(
+            attempts_checked > 0,
+            "no fixture reached final verification, so the reuse was never exercised"
+        );
+        assert!(
+            verified_checked > 0,
+            "no fixture was verified, so the returned mesh was never compared"
         );
     }
 }

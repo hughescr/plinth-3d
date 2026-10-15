@@ -1113,6 +1113,7 @@ dependencies = [
  "plinth-orient",
  "plinth-solid",
  "plinth-support",
+ "rayon",
  "serde",
  "thiserror 1.0.69",
 ]

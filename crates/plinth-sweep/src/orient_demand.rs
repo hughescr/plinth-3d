@@ -147,19 +147,39 @@
 //! arms are not the emitted field's arms, so where they land or what they
 //! carry says nothing about where anything will land or carry. A prefilter
 //! row therefore carries a stated absence, not a zero.
+//!
+//! # A finalist that cannot win is stopped (perf lane B1, 2026-10-14)
+//!
+//! The finalists' production sweeps run in parallel and the batch used to
+//! return when the slowest finished, even when the slowest was already
+//! certain to lose. [`SupportDemandMeasurer::measure_production_race`] runs the
+//! same sweeps against a [`ProductionRace`]: the moment a pose finishes it
+//! tells the race, and the race sets the cancel token of every pose whose
+//! lower bound (`plinth_orient::search::TermsRecord::production_lower_bound`,
+//! proved there and in `plinth_orient::demand`) is STRICTLY above the finished
+//! score. A set token ends that pose's sweep at its next safe point
+//! ([`crate::cancel`]: before every down-sweep, between layers of the upward
+//! pass) and the pose is reported [`RaceOutcome::Stopped`] — with no score and
+//! no retained plan. The pose that decides the batch is never stopped, and a
+//! pose that is not stopped measures exactly what it measures without a race.
+//! This module decides nothing about WHICH pose may stop; it carries the
+//! token.
 
 use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
 use plinth_core::{m0_constants, LayerPlan};
 use plinth_mesh::Mesh;
-use plinth_orient::demand::{DemandFidelity, MeasuredSupportDemand, SupportDemandMeasurer};
+use plinth_orient::demand::{
+    DemandFidelity, MeasuredSupportDemand, ProductionRace, RaceOutcome, SupportDemandMeasurer,
+};
 use plinth_orient::{ObjectiveWeights, OrientFaceTable, UpDirection};
 use rayon::prelude::*;
 
 use crate::{
-    complete_for_emission, model_landing, perf, run_sweep, run_sweep_with_holes, tip_landing,
-    DrainSpec, StrutKind, SweepPlan, SweepPolicy,
+    complete_for_emission, model_landing, perf, run_sweep_in_token_scope,
+    run_sweep_with_holes_in_token_scope, tip_landing, DrainSpec, StrutKind, SweepPlan,
+    SweepPolicy,
 };
 
 /// See the module doc's "Two rasters" section.
@@ -517,6 +537,20 @@ impl RetainingSweepDemand {
     }
 }
 
+/// Why one pose has no measurement: it failed, or the race withdrew it.
+enum PoseError {
+    Failed(String),
+    /// The pose's cancel token was set ([`crate::cancel`]) and its sweep
+    /// returned at a safe point.
+    Stopped,
+}
+
+impl From<String> for PoseError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
 impl SweepDemand {
     /// One candidate, one sweep. The batch entry point owns the loop so a
     /// single failing pose cannot end the batch.
@@ -528,7 +562,7 @@ impl SweepDemand {
         settings: &DemandSettings,
         landing_scar: ModelLandingScarPolicy,
         tip_scar: TipContactScarPolicy,
-    ) -> Result<(MeasuredSupportDemand, Option<RetainedPlan>), String> {
+    ) -> Result<(MeasuredSupportDemand, Option<RetainedPlan>), PoseError> {
         // Oriented exactly as the eventual winner would be
         // (`plinth_orient::oriented_recentered_mesh` is the same
         // `transform_for`/`transform_mesh` pair `search_and_orient` applies
@@ -572,10 +606,15 @@ impl SweepDemand {
         });
         let started = Instant::now();
         let plan = match &settings.retained_policy {
-            Some(policy) => run_sweep_with_holes(&transformed, &layers, policy, &[], &[]),
-            None => run_sweep(&transformed, &layers, &settings.policy),
+            Some(policy) => {
+                run_sweep_with_holes_in_token_scope(&transformed, &layers, policy, &[], &[])
+            }
+            None => run_sweep_in_token_scope(&transformed, &layers, &settings.policy),
         }
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| match error {
+            crate::SweepError::Cancelled => PoseError::Stopped,
+            other => PoseError::Failed(other.to_string()),
+        })?;
         let sweep_seconds = started.elapsed().as_secs_f64();
 
         // The model-landing scar, on the PRODUCTION raster only. Two reasons
@@ -673,9 +712,10 @@ impl SweepDemand {
         candidates: &[UpDirection],
         fidelity: DemandFidelity,
         retain: bool,
-        landing_scar: ModelLandingScarPolicy,
-        tip_scar: TipContactScarPolicy,
-    ) -> (Vec<Result<MeasuredSupportDemand, String>>, Vec<RetainedPlan>) {
+        policies: Self,
+        race: Option<&ProductionRace>,
+    ) -> (Vec<RaceOutcome>, Vec<RetainedPlan>) {
+        let (landing_scar, tip_scar) = (policies.landing_scar, policies.tip_scar);
         let started = Instant::now();
         let settings = match DemandSettings::read(fidelity, retain) {
             Ok(settings) => settings,
@@ -683,7 +723,10 @@ impl SweepDemand {
             // keeps its proxy for all of them rather than the search refusing.
             Err(error) => {
                 return (
-                    candidates.iter().map(|_| Err(error.clone())).collect(),
+                    candidates
+                        .iter()
+                        .map(|_| RaceOutcome::Failed(error.clone()))
+                        .collect(),
                     Vec::new(),
                 )
             }
@@ -703,19 +746,49 @@ impl SweepDemand {
         // balance by stealing on any width instead of in fixed pairs. It
         // changes only how the range is split; the indexed collect keeps
         // candidate order.
-        let raw: Vec<Result<(MeasuredSupportDemand, Option<RetainedPlan>), String>> = candidates
+        //
+        // THE RACE (perf lane B1). With a `race`, a pose whose token is set
+        // is not started, or stops at its sweep's next safe point
+        // ([`crate::cancel`]); a pose that finishes tells the race, which may
+        // set other poses' tokens. Each pose's token is installed for that
+        // pose's own `measure_one` only, and nothing else about a pose's
+        // sweep changes, so a pose that is not stopped measures exactly what
+        // it measures without a race.
+        let raw: Vec<Result<(MeasuredSupportDemand, Option<RetainedPlan>), PoseError>> = candidates
             .par_iter()
+            .enumerate()
             .with_max_len(1)
-            .map(|candidate| {
-                Self::measure_one(
-                    mesh,
-                    table,
-                    *candidate,
-                    fidelity,
-                    &settings,
-                    landing_scar,
-                    tip_scar,
-                )
+            .map(|(index, candidate)| {
+                let measure = || {
+                    Self::measure_one(
+                        mesh,
+                        table,
+                        *candidate,
+                        fidelity,
+                        &settings,
+                        landing_scar,
+                        tip_scar,
+                    )
+                };
+                let Some((race, token)) = race.and_then(|race| race.token(index).map(|t| (race, t)))
+                else {
+                    // Not a race pose, so it runs with NO token. The token is a
+                    // thread-local, and this job may have been stolen by a
+                    // worker that is waiting inside a raced pose of another
+                    // search; it must not run under that pose's token.
+                    return crate::cancel::without_token(measure);
+                };
+                if race.is_stopped(index) {
+                    race.note_stopped(index);
+                    return Err(PoseError::Stopped);
+                }
+                let result = crate::cancel::with_token(token, measure);
+                match &result {
+                    Ok((one, _)) => race.finished(index, one),
+                    Err(PoseError::Stopped) => race.note_stopped(index),
+                    Err(PoseError::Failed(_)) => {}
+                }
+                result
             })
             .collect();
         // Split serially, in candidate order, so the kept plans have a fixed
@@ -725,15 +798,29 @@ impl SweepDemand {
         for result in raw {
             match result {
                 Ok((one, plan)) => {
-                    measured.push(Ok(one));
+                    measured.push(RaceOutcome::Measured(one));
                     retained.extend(plan);
                 }
-                Err(error) => measured.push(Err(error)),
+                Err(PoseError::Failed(error)) => measured.push(RaceOutcome::Failed(error)),
+                Err(PoseError::Stopped) => measured.push(RaceOutcome::Stopped),
             }
         }
         Self::log_batch(candidates, &measured, fidelity, started);
         (measured, retained)
     }
+}
+
+/// The plain batch result: no pose is withdrawn without a race, so a stop
+/// here cannot happen; it is reported as the failure it would be.
+fn plain(outcomes: Vec<RaceOutcome>) -> Vec<Result<MeasuredSupportDemand, String>> {
+    outcomes
+        .into_iter()
+        .map(|outcome| match outcome {
+            RaceOutcome::Measured(one) => Ok(one),
+            RaceOutcome::Failed(error) => Err(error),
+            RaceOutcome::Stopped => Err("the sweep was stopped without a race".to_owned()),
+        })
+        .collect()
 }
 
 /// The unit bridge from an arm count to the cm² the registered support weight
@@ -752,14 +839,35 @@ impl SupportDemandMeasurer for SweepDemand {
         candidates: &[UpDirection],
         fidelity: DemandFidelity,
     ) -> Vec<Result<MeasuredSupportDemand, String>> {
+        plain(
+            Self::measure_batch(
+                mesh,
+                table,
+                candidates,
+                fidelity,
+                false,
+                *self,
+                None,
+            )
+            .0,
+        )
+    }
+
+    fn measure_production_race(
+        &self,
+        mesh: &Mesh,
+        table: &OrientFaceTable,
+        candidates: &[UpDirection],
+        race: &ProductionRace,
+    ) -> Vec<RaceOutcome> {
         Self::measure_batch(
             mesh,
             table,
             candidates,
-            fidelity,
+            DemandFidelity::Production,
             false,
-            self.landing_scar,
-            self.tip_scar,
+            *self,
+            Some(race),
         )
         .0
     }
@@ -778,22 +886,17 @@ impl SupportDemandMeasurer for RetainingSweepDemand {
         candidates: &[UpDirection],
         fidelity: DemandFidelity,
     ) -> Vec<Result<MeasuredSupportDemand, String>> {
-        let retain = matches!(fidelity, DemandFidelity::Production);
-        let (measured, retained) = SweepDemand::measure_batch(
-            mesh,
-            table,
-            candidates,
-            fidelity,
-            retain,
-            self.inner.landing_scar,
-            self.inner.tip_scar,
-        );
-        // A production batch REPLACES what the previous one left; the
-        // prefilter keeps nothing and so leaves the store alone.
-        if retain {
-            *self.retained.lock().unwrap_or_else(PoisonError::into_inner) = retained;
-        }
-        measured
+        plain(self.measure(mesh, table, candidates, fidelity, None))
+    }
+
+    fn measure_production_race(
+        &self,
+        mesh: &Mesh,
+        table: &OrientFaceTable,
+        candidates: &[UpDirection],
+        race: &ProductionRace,
+    ) -> Vec<RaceOutcome> {
+        self.measure(mesh, table, candidates, DemandFidelity::Production, Some(race))
     }
 
     fn diagnostic_measurer(&self) -> Option<Box<dyn SupportDemandMeasurer>> {
@@ -804,11 +907,42 @@ impl SupportDemandMeasurer for RetainingSweepDemand {
     }
 }
 
+impl RetainingSweepDemand {
+    /// One batch, retaining the production plans of the poses that measured
+    /// to the end. A pose the race withdrew leaves no plan, and the winner
+    /// is never withdrawn, so the winner's plan is always here.
+    fn measure(
+        &self,
+        mesh: &Mesh,
+        table: &OrientFaceTable,
+        candidates: &[UpDirection],
+        fidelity: DemandFidelity,
+        race: Option<&ProductionRace>,
+    ) -> Vec<RaceOutcome> {
+        let retain = matches!(fidelity, DemandFidelity::Production);
+        let (measured, retained) = SweepDemand::measure_batch(
+            mesh,
+            table,
+            candidates,
+            fidelity,
+            retain,
+            self.inner,
+            race,
+        );
+        // A production batch REPLACES what the previous one left; the
+        // prefilter keeps nothing and so leaves the store alone.
+        if retain {
+            *self.retained.lock().unwrap_or_else(PoisonError::into_inner) = retained;
+        }
+        measured
+    }
+}
+
 impl SweepDemand {
     /// The one-line disclosure of a batch.
     fn log_batch(
         candidates: &[UpDirection],
-        measured: &[Result<MeasuredSupportDemand, String>],
+        measured: &[RaceOutcome],
         fidelity: DemandFidelity,
         started: Instant,
     ) {
@@ -822,7 +956,7 @@ impl SweepDemand {
             .map(|(candidate, result)| {
                 let up = candidate.get();
                 let (arms, stiffening, burden, landing, tip) = match result {
-                    Ok(one) => (
+                    RaceOutcome::Measured(one) => (
                         one.struts.to_string(),
                         // Published beside the arm count so the pose's
                         // stiffening cost is visible without being allowed to
@@ -846,12 +980,20 @@ impl SweepDemand {
                             |scar| format!("tip scar {scar:.5} mm2"),
                         ),
                     ),
-                    Err(_) => (
+                    RaceOutcome::Failed(_) => (
                         "err".to_owned(),
                         "err".to_owned(),
                         "err".to_owned(),
                         "err".to_owned(),
                         "err".to_owned(),
+                    ),
+                    // Withdrawn by the race (certified loser): no score.
+                    RaceOutcome::Stopped => (
+                        "stopped".to_owned(),
+                        "stopped".to_owned(),
+                        "stopped".to_owned(),
+                        "stopped".to_owned(),
+                        "stopped".to_owned(),
                     ),
                 };
                 format!(

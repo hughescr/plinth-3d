@@ -14,6 +14,9 @@ mod closest;
 mod consts;
 mod mesh;
 mod moller;
+/// Exact nearest triangle of an explicit triangle set through a bounding-box
+/// tree, bit-identical to the brute-force scan it replaces (tip landing).
+pub mod nearest;
 /// Deterministic rayon thread-pool cache (spec sec 4, Amendment A4).
 ///
 /// Public so a consumer that needs to run its own work under this kernel's
