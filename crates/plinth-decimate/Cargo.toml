@@ -15,6 +15,7 @@ plinth-core = { path = "../plinth-core" }
 plinth-mesh = { path = "../plinth-mesh" }
 rand_chacha = { workspace = true }
 rand_core = { workspace = true }
+rayon = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

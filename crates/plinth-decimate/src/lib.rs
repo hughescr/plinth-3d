@@ -38,6 +38,7 @@
 #![forbid(unsafe_code)]
 
 use std::mem::size_of;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use geom_kernel::{
     NativeSurface, NativeSurfaceConfig, PointCloudIndex, PointIndexBuildError, PointQueryError,
@@ -938,32 +939,85 @@ pub enum DecimationDisposition {
 ///     topology_after: todo!(),
 /// };
 /// ```
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 pub struct DecimationAudit {
     disposition: DecimationDisposition,
     input_faces: usize,
     output_faces: usize,
     chosen_ratio: f64,
-    trace: BudgetSearchTrace,
-    final_probe: TwoSidedProbe,
+    /// Known the moment the scale check passes, so a caller can name the
+    /// assumed print size without waiting for [`DeferredEvidence`].
+    scale: ScaleSanity,
+    /// The trace, the final probe and the final topology.  Complete from the
+    /// start on every path except [`run_deferred`]'s identity result, where the
+    /// adaptive diagnostics are still running; reading any of the three then
+    /// waits for them.
+    evidence: Arc<DeferredEvidence>,
     topology_before: TopologyCounts,
-    topology_after: TopologyCounts,
+}
+
+impl PartialEq for DecimationAudit {
+    fn eq(&self, other: &Self) -> bool {
+        self.disposition == other.disposition
+            && self.input_faces == other.input_faces
+            && self.output_faces == other.output_faces
+            && self.chosen_ratio == other.chosen_ratio
+            && self.topology_before == other.topology_before
+            && self.body() == other.body()
+    }
+}
+
+impl std::fmt::Debug for DecimationAudit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let body = self.body();
+        formatter
+            .debug_struct("DecimationAudit")
+            .field("disposition", &self.disposition)
+            .field("input_faces", &self.input_faces)
+            .field("output_faces", &self.output_faces)
+            .field("chosen_ratio", &self.chosen_ratio)
+            .field("trace", &body.trace)
+            .field("final_probe", &body.final_probe)
+            .field("topology_before", &self.topology_before)
+            .field("topology_after", &body.topology_after)
+            .finish()
+    }
 }
 
 impl DecimationAudit {
+    /// The completed evidence, waiting for it if the diagnostics are still
+    /// running.  Orientation never reads it; the pipeline joins the
+    /// diagnostics ([`DiagnosticsJoin::wait`]) and handles their error before
+    /// any report is built, so a failed diagnostic never reaches this point.
+    fn body(&self) -> &AuditBody {
+        match self.evidence.resolve() {
+            Ok(body) => body,
+            Err(error) => panic!(
+                "decimation diagnostics failed ({error}); \
+                 DiagnosticsJoin::wait must be handled before the audit is read"
+            ),
+        }
+    }
+
     #[must_use]
     pub const fn disposition(&self) -> DecimationDisposition {
         self.disposition
     }
 
+    /// The assumed print size, available without waiting for diagnostics.
     #[must_use]
-    pub const fn trace(&self) -> &BudgetSearchTrace {
-        &self.trace
+    pub const fn scale(&self) -> ScaleSanity {
+        self.scale
     }
 
     #[must_use]
-    pub const fn final_probe(&self) -> &TwoSidedProbe {
-        &self.final_probe
+    pub fn trace(&self) -> &BudgetSearchTrace {
+        &self.body().trace
+    }
+
+    #[must_use]
+    pub fn final_probe(&self) -> &TwoSidedProbe {
+        &self.body().final_probe
     }
 
     #[must_use]
@@ -972,8 +1026,8 @@ impl DecimationAudit {
     }
 
     #[must_use]
-    pub const fn topology_after(&self) -> TopologyCounts {
-        self.topology_after
+    pub fn topology_after(&self) -> TopologyCounts {
+        self.body().topology_after
     }
 
     /// Returns the stable summary projection without exposing writable fields.
@@ -1011,13 +1065,13 @@ impl DecimationReport<'_> {
     }
 
     #[must_use]
-    pub const fn p99_mm(self) -> f64 {
-        self.audit.final_probe.p99_mm
+    pub fn p99_mm(self) -> f64 {
+        self.audit.final_probe().p99_mm
     }
 
     #[must_use]
-    pub const fn p99_9_mm(self) -> f64 {
-        self.audit.final_probe.p99_9_mm
+    pub fn p99_9_mm(self) -> f64 {
+        self.audit.final_probe().p99_9_mm
     }
 }
 
@@ -1073,6 +1127,7 @@ impl BudgetSearchOutcome {
             .steps
             .first()
             .map_or(output_faces, |step| step.output_face_count);
+        let scale = trace.scale;
         Ok(DecimatedModel {
             mesh,
             audit: DecimationAudit {
@@ -1080,13 +1135,231 @@ impl BudgetSearchOutcome {
                 input_faces,
                 output_faces,
                 chosen_ratio,
-                trace,
-                final_probe,
+                scale,
+                evidence: DeferredEvidence::ready(AuditBody {
+                    trace,
+                    final_probe,
+                    topology_after,
+                }),
                 topology_before,
-                topology_after,
             },
         })
     }
+}
+
+/// The part of a [`DecimationAudit`] that the identity path finishes only
+/// after its adaptive diagnostics: the completed trace, the exact identity
+/// probe and the identity topology.
+#[derive(Clone, Debug, PartialEq)]
+struct AuditBody {
+    trace: BudgetSearchTrace,
+    final_probe: TwoSidedProbe,
+    topology_after: TopologyCounts,
+}
+
+type Evidence = Result<AuditBody, BudgetSearchError>;
+type EvidenceJob = Box<dyn FnOnce() -> Evidence + Send>;
+
+enum JobState {
+    Queued(EvidenceJob),
+    Running,
+    Finished,
+}
+
+/// Evidence that is either complete or being computed.  Whoever reaches the
+/// queued job first runs it, the pool worker or the thread that needs the
+/// answer, so a join can never wait on a pool that has no free worker.
+struct DeferredEvidence {
+    state: Mutex<JobState>,
+    finished: Condvar,
+    result: OnceLock<Evidence>,
+}
+
+impl DeferredEvidence {
+    fn ready(body: AuditBody) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(JobState::Finished),
+            finished: Condvar::new(),
+            result: OnceLock::from(Ok(body)),
+        })
+    }
+
+    fn queued(job: EvidenceJob) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(JobState::Queued(job)),
+            finished: Condvar::new(),
+            result: OnceLock::new(),
+        })
+    }
+
+    fn lock(&self) -> MutexGuard<'_, JobState> {
+        // A panicking job aborts the run; a poisoned flag carries no data here.
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn claim(&self) -> Option<EvidenceJob> {
+        let mut state = self.lock();
+        match std::mem::replace(&mut *state, JobState::Running) {
+            JobState::Queued(job) => Some(job),
+            other => {
+                *state = other;
+                None
+            }
+        }
+    }
+
+    fn finish(&self, result: Evidence) {
+        let _ = self.result.set(result);
+        *self.lock() = JobState::Finished;
+        self.finished.notify_all();
+    }
+
+    /// Runs the job here if nobody has started it, else waits for the worker
+    /// that did.
+    fn resolve(&self) -> &Evidence {
+        if let Some(result) = self.result.get() {
+            return result;
+        }
+        if let Some(job) = self.claim() {
+            self.finish(job());
+        }
+        let mut state = self.lock();
+        while self.result.get().is_none() {
+            state = self
+                .finished
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        drop(state);
+        self.result.get().expect("the loop above saw the result")
+    }
+
+    /// Starts the job on the shared pool.  Called from a pool worker (the
+    /// production case: the whole process body runs inside the budget pool)
+    /// it queues on that pool; from anywhere else it queues on the kernel's
+    /// cached pool, so the work never escapes onto rayon's global pool.
+    fn spawn_on_shared_pool(self: &Arc<Self>) {
+        let evidence = Arc::clone(self);
+        let launch = move || {
+            rayon::spawn(move || {
+                if let Some(job) = evidence.claim() {
+                    evidence.finish(job());
+                }
+            });
+        };
+        if rayon::current_thread_index().is_some() {
+            launch();
+        } else {
+            geom_kernel::par::run(launch);
+        }
+    }
+}
+
+/// Handle on the diagnostics [`run_deferred`] left running.  Waiting is the
+/// only way to learn whether they failed, and a failure surfaces exactly as
+/// [`run`] would have returned it, so the caller must wait, and handle the
+/// error, before it builds any report or writes any output.
+#[derive(Debug)]
+#[must_use = "an unjoined diagnostic can hide the error `run` would have returned"]
+pub struct DiagnosticsJoin {
+    evidence: Arc<DeferredEvidence>,
+}
+
+impl std::fmt::Debug for DeferredEvidence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DeferredEvidence")
+    }
+}
+
+impl DiagnosticsJoin {
+    /// Blocks until the diagnostics finish; the completed record is then in
+    /// the audit that went to orientation.
+    pub fn wait(self) -> Result<(), DecimationError> {
+        match self.evidence.resolve() {
+            Ok(_) => Ok(()),
+            Err(error) => Err(DecimationError::Budget(error.clone())),
+        }
+    }
+}
+
+/// The identity result with its diagnostics still running.  The mesh is the
+/// same clone [`already_print_scale`] would return; everything the diagnostics
+/// still owe is behind [`DiagnosticsJoin`].
+#[derive(Debug)]
+pub struct DeferredIdentity {
+    mesh: Mesh,
+    scale: ScaleSanity,
+    topology_before: TopologyCounts,
+    evidence: Arc<DeferredEvidence>,
+}
+
+impl DeferredIdentity {
+    fn into_decimated_model(self) -> (DecimatedModel, DiagnosticsJoin) {
+        let faces = self.mesh.tris().len();
+        let join = DiagnosticsJoin {
+            evidence: Arc::clone(&self.evidence),
+        };
+        let model = DecimatedModel {
+            mesh: self.mesh,
+            audit: DecimationAudit {
+                disposition: DecimationDisposition::AlreadyPrintScale,
+                input_faces: faces,
+                output_faces: faces,
+                chosen_ratio: 1.0,
+                scale: self.scale,
+                evidence: self.evidence,
+                topology_before: self.topology_before,
+            },
+        };
+        (model, join)
+    }
+
+    /// Waits and returns what [`run`] returns.
+    fn complete(self) -> Result<BudgetSearchOutcome, BudgetSearchError> {
+        let body = self.evidence.resolve().clone()?;
+        Ok(BudgetSearchOutcome::AlreadyPrintScale(Box::new(
+            BudgetSearchSuccess {
+                mesh: self.mesh,
+                chosen_ratio: 1.0,
+                trace: body.trace,
+                final_probe: body.final_probe,
+                topology_before: self.topology_before,
+                topology_after: body.topology_after,
+            },
+        )))
+    }
+}
+
+/// What [`run_deferred`] returns.
+#[derive(Debug)]
+pub enum DeferredDecimationOutcome {
+    /// Everything that finished inside the call: a reduced mesh, a scale skip,
+    /// or an identity result whose evidence was already complete.
+    Complete(BudgetSearchOutcome),
+    /// The identity result with its adaptive diagnostics running.
+    Deferred(Box<DeferredIdentity>),
+}
+
+impl DeferredDecimationOutcome {
+    /// [`BudgetSearchOutcome::into_decimated_model`], plus the join the caller
+    /// owes when diagnostics are still running.
+    pub fn into_decimated_model(
+        self,
+    ) -> Result<(DecimatedModel, Option<DiagnosticsJoin>), ScaleSanity> {
+        match self {
+            Self::Complete(outcome) => Ok((outcome.into_decimated_model()?, None)),
+            Self::Deferred(identity) => {
+                let (model, join) = identity.into_decimated_model();
+                Ok((model, Some(join)))
+            }
+        }
+    }
+}
+
+/// The result of one search before it is split into the public shapes.
+enum SearchFlow {
+    Complete(BudgetSearchOutcome),
+    Deferred(Box<DeferredIdentity>),
 }
 
 #[derive(Clone, Debug, Error, PartialEq)]
@@ -1298,6 +1571,39 @@ pub fn run(
     original: &Mesh,
     budget: DecimationBudget,
 ) -> Result<BudgetSearchOutcome, DecimationError> {
+    match run_flow(original, budget, false)? {
+        SearchFlow::Complete(outcome) => Ok(outcome),
+        // Unreachable with `defer == false`; completing keeps the answer right
+        // without a panic path if that ever changes.
+        SearchFlow::Deferred(identity) => Ok(identity.complete()?),
+    }
+}
+
+/// [`run`] without waiting for the adaptive diagnostics that follow a search
+/// in which no reduced candidate was authorized.
+///
+/// The identity mesh and the scale are available at once; the diagnostics, and
+/// every identity audit that [`run`] performs after them, run on the shared
+/// pool in the same order and write the same fields. [`DiagnosticsJoin::wait`]
+/// returns the error [`run`] would have returned, and the completed audit then
+/// equals the one [`run`] builds field for field. Every other outcome (a
+/// reduced mesh, a scale skip, an identity result from a path with no
+/// diagnostics) is the exact value [`run`] returns.
+pub fn run_deferred(
+    original: &Mesh,
+    budget: DecimationBudget,
+) -> Result<DeferredDecimationOutcome, DecimationError> {
+    Ok(match run_flow(original, budget, true)? {
+        SearchFlow::Complete(outcome) => DeferredDecimationOutcome::Complete(outcome),
+        SearchFlow::Deferred(identity) => DeferredDecimationOutcome::Deferred(identity),
+    })
+}
+
+fn run_flow(
+    original: &Mesh,
+    budget: DecimationBudget,
+    defer: bool,
+) -> Result<SearchFlow, DecimationError> {
     budget.validate_for_execution()?;
     // Scale is a named pre-search SKIP.  Do this before the feature probe so a
     // deliberately out-of-scale mesh cannot turn into an unrelated cap error.
@@ -1307,7 +1613,9 @@ pub fn run(
         || scale.longest_axis_mm < policy.scale_min_mm
         || scale.longest_axis_mm > policy.scale_max_mm
     {
-        return Ok(BudgetSearchOutcome::SkippedScaleSuspicious { scale });
+        return Ok(SearchFlow::Complete(
+            BudgetSearchOutcome::SkippedScaleSuspicious { scale },
+        ));
     }
 
     // Write-only stage marks (X0, 2026-10-10); inert unless `--perf` is on.
@@ -1317,7 +1625,7 @@ pub fn run(
     match protection {
         Ok((protected, _)) => {
             let _search_mark = geom_kernel::perf::stage("decimate.budget_search");
-            Ok(run_budget_search(original, &protected, budget)?)
+            Ok(run_budget_search_flow(original, &protected, budget, defer)?)
         }
         // A probe that produced no candidate is a refusal to reduce, not an
         // execution failure: the model is too coarse for the probe ratio to
@@ -1327,25 +1635,27 @@ pub fn run(
             probe_ratio, cause, ..
         }) => {
             let trace = new_budget_trace(scale, budget, &policy, 0);
-            Ok(already_print_scale(
+            Ok(SearchFlow::Complete(already_print_scale(
                 original,
                 budget.probe,
                 trace,
                 ReductionRefusalReason::FeatureProbeHasNoCandidate { probe_ratio, cause },
-            )?)
+                None,
+            )?))
         }
         Err(FeatureProtectionError::CapExceeded {
             trace: protection_trace,
         }) => {
             let trace = new_budget_trace(scale, budget, &policy, 0);
-            Ok(already_print_scale(
+            Ok(SearchFlow::Complete(already_print_scale(
                 original,
                 budget.probe,
                 trace,
                 ReductionRefusalReason::ProtectionCap {
                     trace: protection_trace,
                 },
-            )?)
+                None,
+            )?))
         }
         Err(error) => Err(error.into()),
     }
@@ -1717,18 +2027,35 @@ fn feature_protection_policy() -> Result<FeatureProtectionPolicy, FeatureProtect
 /// it candidate-free.  Every non-skip success owns exactly one final mesh;
 /// all failed paths retain only deterministic evidence, never an exportable
 /// candidate.
+#[cfg(test)]
 fn run_budget_search(
     original: &Mesh,
     protected: &[bool],
     budget: DecimationBudget,
 ) -> Result<BudgetSearchOutcome, BudgetSearchError> {
+    match run_budget_search_flow(original, protected, budget, false)? {
+        SearchFlow::Complete(outcome) => Ok(outcome),
+        SearchFlow::Deferred(identity) => identity.complete(),
+    }
+}
+
+/// [`run_budget_search`], optionally leaving the adaptive diagnostics and the
+/// identity audits behind them running on the shared pool (`defer`).
+fn run_budget_search_flow(
+    original: &Mesh,
+    protected: &[bool],
+    budget: DecimationBudget,
+    defer: bool,
+) -> Result<SearchFlow, BudgetSearchError> {
     let policy = search_policy()?;
     let scale = scale_sanity(original);
     if !scale.longest_axis_mm.is_finite()
         || scale.longest_axis_mm < policy.scale_min_mm
         || scale.longest_axis_mm > policy.scale_max_mm
     {
-        return Ok(BudgetSearchOutcome::SkippedScaleSuspicious { scale });
+        return Ok(SearchFlow::Complete(
+            BudgetSearchOutcome::SkippedScaleSuspicious { scale },
+        ));
     }
 
     let topology_before = build_face_topology(original, WeldPolicy::ExactBits)
@@ -1874,7 +2201,9 @@ fn run_budget_search(
                 input_face_count: original.tris().len(),
                 output_face_count: original.tris().len(),
             },
-        );
+            Some(topology_before),
+        )
+        .map(SearchFlow::Complete);
     }
 
     let _final_mark = geom_kernel::perf::stage("decimate.final_verify");
@@ -1980,15 +2309,15 @@ fn run_budget_search(
         match result {
             FinalVerificationResult::GeometricallyEligible => {
                 if let DownstreamUtilityEvidence::DownstreamUseful(_) = downstream_utility {
-                    return Ok(BudgetSearchOutcome::Verified(Box::new(
-                        BudgetSearchSuccess {
+                    return Ok(SearchFlow::Complete(BudgetSearchOutcome::Verified(
+                        Box::new(BudgetSearchSuccess {
                             mesh: final_outcome.mesh,
                             chosen_ratio: final_outcome.achieved_ratio,
                             trace,
                             final_probe,
                             topology_before,
                             topology_after,
-                        },
+                        }),
                     )));
                 }
             }
@@ -2012,6 +2341,48 @@ fn run_budget_search(
     // surfaces it holds) before the diagnostics build more.
     drop(loop_mark);
     drop(kept);
+    if defer {
+        // The diagnostics only record evidence: they never promote a
+        // candidate, and the result below is the original whatever they find.
+        // So the identity mesh is returned now and the same two steps, in the
+        // same order, run on the shared pool: the adaptive diagnostics, then
+        // the identity audits `already_print_scale` performs after them. An
+        // error from either surfaces at the join with the precedence it had.
+        let task_original = original.clone();
+        let task_protected = protected.to_vec();
+        let job: EvidenceJob = Box::new(move || {
+            let mut trace = trace;
+            let mut original_surface = original_surface;
+            let adaptive_mark = geom_kernel::perf::stage("decimate.adaptive");
+            run_adaptive_diagnostics(
+                &task_original,
+                &task_protected,
+                budget,
+                topology_before,
+                &policy,
+                &mut trace,
+                &mut original_surface,
+            )?;
+            drop(adaptive_mark);
+            let reason = no_downstream_utility_refusal(&trace);
+            identity_evidence(
+                &task_original,
+                budget.probe,
+                trace,
+                reason,
+                Some(topology_before),
+            )
+        });
+        let evidence = DeferredEvidence::queued(job);
+        evidence.spawn_on_shared_pool();
+        return Ok(SearchFlow::Deferred(Box::new(DeferredIdentity {
+            mesh: original.clone(),
+            scale,
+            topology_before,
+            evidence,
+        })));
+    }
+
     let adaptive_mark = geom_kernel::perf::stage("decimate.adaptive");
     run_adaptive_diagnostics(
         original,
@@ -2024,6 +2395,13 @@ fn run_budget_search(
     )?;
     drop(adaptive_mark);
 
+    let reason = no_downstream_utility_refusal(&trace);
+    already_print_scale(original, budget.probe, trace, reason, Some(topology_before))
+        .map(SearchFlow::Complete)
+}
+
+/// The refusal the identity result carries once the diagnostics have run.
+fn no_downstream_utility_refusal(trace: &BudgetSearchTrace) -> ReductionRefusalReason {
     let geometrically_eligible_candidate_count = trace
         .final_attempts
         .iter()
@@ -2035,14 +2413,9 @@ fn run_budget_search(
             .iter()
             .filter(|probe| probe.result == AdaptiveProbeResult::GeometricallyEligible)
             .count();
-    already_print_scale(
-        original,
-        budget.probe,
-        trace,
-        ReductionRefusalReason::NoDownstreamUtilityEvidence {
-            geometrically_eligible_candidate_count,
-        },
-    )
+    ReductionRefusalReason::NoDownstreamUtilityEvidence {
+        geometrically_eligible_candidate_count,
+    }
 }
 
 fn record_unexplored_dense_interval(input_faces: usize, trace: &mut BudgetSearchTrace) {
@@ -2281,21 +2654,55 @@ const NATIVE_SURFACES_PER_TWO_SIDED_PROBE: usize = 2;
 fn already_print_scale(
     original: &Mesh,
     probe_config: ProbeConfig,
+    trace: BudgetSearchTrace,
+    reason: ReductionRefusalReason,
+    known_topology: Option<TopologyCounts>,
+) -> Result<BudgetSearchOutcome, BudgetSearchError> {
+    let body = identity_evidence(original, probe_config, trace, reason, known_topology)?;
+    Ok(BudgetSearchOutcome::AlreadyPrintScale(Box::new(
+        BudgetSearchSuccess {
+            mesh: original.clone(),
+            chosen_ratio: 1.0,
+            trace: body.trace,
+            final_probe: body.final_probe,
+            topology_before: body.topology_after,
+            topology_after: body.topology_after,
+        },
+    )))
+}
+
+/// The audits behind [`already_print_scale`], without the mesh clone.
+///
+/// `known_topology` is the canonical counts of `original` when the caller has
+/// already computed them from this same mesh with the same weld policy
+/// ([`build_face_topology`] is deterministic, so recomputing them here would
+/// return the same value and could not fail once the first call succeeded).
+fn identity_evidence(
+    original: &Mesh,
+    probe_config: ProbeConfig,
     mut trace: BudgetSearchTrace,
     reason: ReductionRefusalReason,
-) -> Result<BudgetSearchOutcome, BudgetSearchError> {
+    known_topology: Option<TopologyCounts>,
+) -> Result<AuditBody, BudgetSearchError> {
+    #[cfg(test)]
+    if let Some(error) = fault::identity(&trace) {
+        return Err(error);
+    }
     original
         .audit_strict()
         .map_err(|error| BudgetSearchError::SearchExecution {
             phase: "canonical identity strict audit",
             message: error.to_string(),
         })?;
-    let topology = build_face_topology(original, WeldPolicy::ExactBits)
-        .map(|topology| topology.counts())
-        .map_err(|error| BudgetSearchError::SearchExecution {
-            phase: "canonical identity topology audit",
-            message: error.to_string(),
-        })?;
+    let topology = match known_topology {
+        Some(topology) => topology,
+        None => build_face_topology(original, WeldPolicy::ExactBits)
+            .map(|topology| topology.counts())
+            .map_err(|error| BudgetSearchError::SearchExecution {
+                phase: "canonical identity topology audit",
+                message: error.to_string(),
+            })?,
+    };
     let final_probe =
         exact_identity_probe(original, ProbePopulation::Full, probe_config).map_err(|error| {
             BudgetSearchError::SearchExecution {
@@ -2310,16 +2717,11 @@ fn already_print_scale(
         });
     }
     trace.reduction_refusals.push(reason);
-    Ok(BudgetSearchOutcome::AlreadyPrintScale(Box::new(
-        BudgetSearchSuccess {
-            mesh: original.clone(),
-            chosen_ratio: 1.0,
-            trace,
-            final_probe,
-            topology_before: topology,
-            topology_after: topology,
-        },
-    )))
+    Ok(AuditBody {
+        trace,
+        final_probe,
+        topology_after: topology,
+    })
 }
 
 fn canonical_identity_step(
@@ -2479,6 +2881,55 @@ fn ratio_for_integer_target(input_faces: usize, target_faces: usize) -> Result<f
     Ok(ratio)
 }
 
+/// Test-only fault injection for the diagnostics and the identity audits
+/// behind them, keyed on one unusual error budget so no other test is touched.
+#[cfg(test)]
+mod fault {
+    use super::{BudgetSearchError, BudgetSearchTrace};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    pub(super) struct Fault {
+        /// `trace.budget.p99_mm` of the one search to disturb, as bits.
+        pub p99_bits: u64,
+        pub adaptive: bool,
+        pub identity: bool,
+        pub delay: Duration,
+    }
+
+    pub(super) static FAULT: Mutex<Option<Fault>> = Mutex::new(None);
+
+    fn with<R>(trace: &BudgetSearchTrace, f: impl FnOnce(&Fault) -> R) -> Option<R> {
+        let guard = FAULT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard
+            .as_ref()
+            .filter(|fault| fault.p99_bits == trace.budget.p99_mm.to_bits())
+            .map(f)
+    }
+
+    pub(super) fn adaptive(trace: &BudgetSearchTrace) -> Option<BudgetSearchError> {
+        let delay = with(trace, |fault| fault.delay)?;
+        std::thread::sleep(delay);
+        with(trace, |fault| fault.adaptive)
+            .filter(|&on| on)
+            .map(|_| BudgetSearchError::SearchExecution {
+                phase: "adaptive simplification",
+                message: "injected adaptive fault".to_owned(),
+            })
+    }
+
+    pub(super) fn identity(trace: &BudgetSearchTrace) -> Option<BudgetSearchError> {
+        with(trace, |fault| fault.identity)
+            .filter(|&on| on)
+            .map(|_| BudgetSearchError::SearchExecution {
+                phase: "canonical identity strict audit",
+                message: "injected identity fault".to_owned(),
+            })
+    }
+}
+
 fn run_adaptive_diagnostics(
     original: &Mesh,
     protected: &[bool],
@@ -2488,6 +2939,10 @@ fn run_adaptive_diagnostics(
     trace: &mut BudgetSearchTrace,
     original_surface: &mut OriginalSurface,
 ) -> Result<(), BudgetSearchError> {
+    #[cfg(test)]
+    if let Some(error) = fault::adaptive(trace) {
+        return Err(error);
+    }
     let input_faces = original.tris().len();
     let Some(first_target_faces) = trace
         .final_attempts
@@ -6690,5 +7145,221 @@ mod tests {
             verified_checked > 0,
             "no fixture was verified, so the returned mesh was never compared"
         );
+    }
+
+    // ---- Deferred diagnostics (perf lane DD, 2026-10-15) -------------------
+
+    /// The one small fixture that reaches the adaptive stage: the dual-cavity
+    /// pawn at 19 um spends the whole adaptive budget (see
+    /// `the_adaptive_probe_budget_binds_simplifications_not_recorded_probes`).
+    /// The octahedron and every other small fixture exhaust the bisection
+    /// before it, take the no-diagnostics identity path, and are not deferred.
+    fn pawn_with_locks() -> (Mesh, Vec<bool>) {
+        let pawn = plinth_mesh::make_dual_cavity_pawn().unwrap();
+        let locks = vec![false; pawn.verts().len()];
+        (pawn, locks)
+    }
+
+    /// The error budget the fault-injection tests disturb: 19 um, nudged so no
+    /// other test shares it, and the tests that do share `FAULT_TESTS` so they
+    /// never overlap.
+    const FAULT_PIXEL_UM: f64 = 19.000_001;
+    static FAULT_TESTS: Mutex<()> = Mutex::new(());
+
+    /// Sets the fault for one test and clears it, panic or not.
+    struct FaultGuard {
+        _serial: MutexGuard<'static, ()>,
+    }
+
+    impl FaultGuard {
+        fn set(adaptive: bool, identity: bool, delay: std::time::Duration) -> Self {
+            let serial = FAULT_TESTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let p99 = FAULT_PIXEL_UM * search_policy().unwrap().p99_factor;
+            *fault::FAULT.lock().unwrap() = Some(fault::Fault {
+                p99_bits: p99.to_bits(),
+                adaptive,
+                identity,
+                delay,
+            });
+            Self { _serial: serial }
+        }
+    }
+
+    impl Drop for FaultGuard {
+        fn drop(&mut self) {
+            *fault::FAULT
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+    }
+
+    fn deferred_model(
+        mesh: &Mesh,
+        locks: &[bool],
+        budget: DecimationBudget,
+    ) -> (DecimatedModel, DiagnosticsJoin) {
+        match run_budget_search_flow(mesh, locks, budget, true).unwrap() {
+            SearchFlow::Deferred(identity) => identity.into_decimated_model(),
+            SearchFlow::Complete(_) => panic!("this fixture must reach the adaptive stage"),
+        }
+    }
+
+    /// The completed deferred record equals the synchronous one, field for
+    /// field: the mesh, the audit (`PartialEq`) and the whole `Debug` text of
+    /// the audit, which prints every field of the trace.
+    #[test]
+    fn deferred_diagnostics_complete_to_the_synchronous_record() {
+        let (mesh, locks) = pawn_with_locks();
+        let budget = d2_budget(19.0);
+        let synchronous = run_budget_search(&mesh, &locks, budget)
+            .unwrap()
+            .into_decimated_model()
+            .unwrap();
+        let (deferred, join) = deferred_model(&mesh, &locks, budget);
+        join.wait().unwrap();
+        assert_eq!(deferred.mesh(), synchronous.mesh());
+        assert_eq!(deferred.audit(), synchronous.audit());
+        assert_eq!(
+            format!("{:?}", deferred.audit()),
+            format!("{:?}", synchronous.audit())
+        );
+        assert_eq!(deferred.audit().scale(), synchronous.audit().scale());
+        let trace = deferred.audit().trace();
+        assert!(
+            trace.reduction_refusals.iter().any(|reason| matches!(
+                reason,
+                ReductionRefusalReason::NoDownstreamUtilityEvidence { .. }
+            )),
+            "the deferred record must carry the refusal the diagnostics end with"
+        );
+        assert!(
+            !trace.adaptive_exploration.probes.is_empty(),
+            "the fixture no longer exercises the adaptive diagnostics"
+        );
+    }
+
+    /// The public entry points agree end to end (feature protection included).
+    #[test]
+    fn run_deferred_matches_run_through_the_public_entry() {
+        let (pawn, _) = pawn_with_locks();
+        // `run` refuses the unbounded `usize::MAX` grid cap the probe helpers use.
+        let executable = ProbeConfig {
+            surface: NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: 64 * 1024 * 1024,
+            },
+            nearest_upper_bound_mm: 10_000.0,
+        };
+        let budget = DecimationBudget::new(PositiveFinite::new(19.0).unwrap(), executable);
+        let synchronous = run(&pawn, budget).unwrap().into_decimated_model().unwrap();
+        let (deferred, join) = run_deferred(&pawn, budget)
+            .unwrap()
+            .into_decimated_model()
+            .unwrap();
+        if let Some(join) = join {
+            join.wait().unwrap();
+        }
+        assert_eq!(deferred.mesh(), synchronous.mesh());
+        assert_eq!(deferred.audit(), synchronous.audit());
+        assert_eq!(
+            format!("{:?}", deferred.audit()),
+            format!("{:?}", synchronous.audit())
+        );
+    }
+
+    /// A diagnostics or identity-audit error reaches the join as the error the
+    /// synchronous run returns, and the diagnostics' error still wins when both
+    /// would have fired.
+    #[test]
+    fn deferred_errors_and_their_precedence_match_the_synchronous_run() {
+        let (mesh, locks) = pawn_with_locks();
+        let budget = d2_budget(FAULT_PIXEL_UM);
+        for (adaptive, identity, phase) in [
+            (true, false, "adaptive simplification"),
+            (false, true, "canonical identity strict audit"),
+            (true, true, "adaptive simplification"),
+        ] {
+            let _fault = FaultGuard::set(adaptive, identity, std::time::Duration::ZERO);
+            let synchronous = run_budget_search(&mesh, &locks, budget).unwrap_err();
+            let (_model, join) = deferred_model(&mesh, &locks, budget);
+            let deferred = join.wait().unwrap_err();
+            assert_eq!(
+                deferred,
+                DecimationError::Budget(synchronous.clone()),
+                "adaptive={adaptive} identity={identity}"
+            );
+            assert!(
+                matches!(&synchronous, BudgetSearchError::SearchExecution { phase: got, .. } if *got == phase),
+                "expected `{phase}`, got {synchronous:?}"
+            );
+        }
+    }
+
+    /// The search returns before the diagnostics finish, and `wait` does not
+    /// return until they have: a slow diagnostic holds the join, and the
+    /// completed record is in the audit afterwards.
+    #[test]
+    fn the_join_waits_for_a_slow_diagnostic() {
+        let (mesh, locks) = pawn_with_locks();
+        let budget = d2_budget(FAULT_PIXEL_UM);
+        let _fault = FaultGuard::set(false, false, std::time::Duration::from_millis(1500));
+        let (model, join) = deferred_model(&mesh, &locks, budget);
+        assert!(
+            model.audit().evidence.result.get().is_none(),
+            "the model must be handed over while the diagnostics still run"
+        );
+        let waiting = std::time::Instant::now();
+        join.wait().unwrap();
+        assert!(
+            model.audit().evidence.result.get().is_some(),
+            "wait returned before the diagnostics finished"
+        );
+        assert!(
+            waiting.elapsed() >= std::time::Duration::from_millis(500),
+            "the diagnostic sleeps 1.5 s and had run for well under one second; \
+             the join returned after {:?}",
+            waiting.elapsed()
+        );
+        assert!(!model.audit().trace().reduction_refusals.is_empty());
+    }
+
+    /// A job nobody started is run by the first thread that needs the answer,
+    /// and a job the pool started is waited for, exactly once either way.
+    #[test]
+    fn a_deferred_job_runs_exactly_once_whoever_asks() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (mesh, locks) = pawn_with_locks();
+        let body = run_budget_search(&mesh, &locks, d2_budget(19.0))
+            .unwrap()
+            .into_decimated_model()
+            .unwrap()
+            .audit()
+            .body()
+            .clone();
+        for on_pool in [false, true] {
+            let runs = Arc::new(AtomicUsize::new(0));
+            let job_runs = Arc::clone(&runs);
+            let job_body = body.clone();
+            let evidence = DeferredEvidence::queued(Box::new(move || {
+                job_runs.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                Ok(job_body)
+            }));
+            if on_pool {
+                evidence.spawn_on_shared_pool();
+            }
+            let askers = (0..4)
+                .map(|_| {
+                    let evidence = Arc::clone(&evidence);
+                    std::thread::spawn(move || evidence.resolve().is_ok())
+                })
+                .collect::<Vec<_>>();
+            for asker in askers {
+                assert!(asker.join().unwrap());
+            }
+            assert_eq!(runs.load(Ordering::SeqCst), 1, "on_pool={on_pool}");
+        }
     }
 }

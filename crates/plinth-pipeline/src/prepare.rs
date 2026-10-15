@@ -46,8 +46,11 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use plinth_core::{Finite, ModelId, PositiveFinite, PrinterProfile};
+#[cfg(test)]
+use plinth_decimate::run as run_decimation;
 use plinth_decimate::{
-    run as run_decimation, DecimatedModel, DecimationBudget, ProbeConfig, ScaleSanity,
+    run_deferred as run_decimation_deferred, DecimatedModel, DecimationBudget, ProbeConfig,
+    ScaleSanity,
 };
 use plinth_emit::EmitRequest;
 use plinth_hollow::{
@@ -1252,7 +1255,7 @@ fn prepare_one(
 
     set_phase(PerfPhase::Decimate);
     clock.entering("Decimation");
-    let outcome = match run_decimation(&mesh, policy.resources.decimation()) {
+    let outcome = match run_decimation_deferred(&mesh, policy.resources.decimation()) {
         Ok(outcome) => outcome,
         Err(source) => {
             return report(
@@ -1270,8 +1273,14 @@ fn prepare_one(
     // refused at. That is the whole point of surfacing it: "this model was
     // treated as 0.4 mm across" is the finding, and it is invisible in a bare
     // stage error.
-    let decimated = match outcome.into_decimated_model() {
-        Ok(decimated) => decimated,
+    // **The adaptive diagnostics run beside orientation.** An identity result
+    // is final the moment the search ends; the diagnostics that follow only
+    // complete its evidence record. `diagnostics_join` is waited on, and its
+    // error handled, before orientation's own result is looked at and before
+    // any report is built, so the failure a synchronous run would have raised
+    // here still wins, at the same precedence.
+    let (decimated, diagnostics_join) = match outcome.into_decimated_model() {
+        Ok(pair) => pair,
         Err(scale) => {
             return report(
                 &repair,
@@ -1283,8 +1292,20 @@ fn prepare_one(
             )
         }
     };
-    let assumed = Some(AssumedPrintSize::from(decimated.audit().trace().scale));
+    let assumed = Some(AssumedPrintSize::from(decimated.audit().scale()));
     if stop_after == Some(StageStop::Decimate) {
+        if let Some(join) = diagnostics_join {
+            if let Err(source) = join.wait() {
+                return report(
+                    &repair,
+                    None,
+                    failure(&ChainStop::new(PipelineError::Decimate {
+                        model: model.clone(),
+                        source,
+                    })),
+                );
+            }
+        }
         return report(
             &repair,
             assumed,
@@ -1322,7 +1343,7 @@ fn prepare_one(
     };
     drop(probe_mark);
     let orient_mark = plinth_sweep::perf::stage("orient.orient_model");
-    let (oriented, winner) = match orient_model(
+    let oriented_result = orient_model(
         model,
         decimated,
         &policy.orientation,
@@ -1330,7 +1351,22 @@ fn prepare_one(
         policy.resources.orient(),
         policy.placement,
         policy.winner_plan_reuse,
-    ) {
+    );
+    // Join before looking at orientation's result: a synchronous run would
+    // have stopped at the decimation error before orientation ever ran.
+    if let Some(join) = diagnostics_join {
+        if let Err(source) = join.wait() {
+            return report(
+                &repair,
+                None,
+                failure(&ChainStop::new(PipelineError::Decimate {
+                    model: model.clone(),
+                    source,
+                })),
+            );
+        }
+    }
+    let (oriented, winner) = match oriented_result {
         Ok(oriented) => oriented,
         Err(stop) => return report(&repair, assumed, failure(&stop)),
     };
