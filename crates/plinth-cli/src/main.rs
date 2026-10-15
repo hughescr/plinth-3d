@@ -2,7 +2,28 @@ use std::process::ExitCode;
 
 use plinth_cli::{execute::execute, parse_args, CliAction, PREPARE_USAGE, ROOT_USAGE};
 
+// Optional global allocator, chosen by cargo feature.  The binary only: the
+// library crates keep the system allocator.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[cfg(feature = "alloc-count")]
+mod alloc_count;
+#[cfg(feature = "alloc-count")]
+#[global_allocator]
+static GLOBAL: alloc_count::Counting = alloc_count::Counting;
+
 fn main() -> ExitCode {
+    #[cfg(feature = "alloc-count")]
+    alloc_count::start();
+    let code = run();
+    #[cfg(feature = "alloc-count")]
+    alloc_count::finish();
+    code
+}
+
+fn run() -> ExitCode {
     match parse_args(std::env::args_os().skip(1)) {
         Ok(CliAction::RootHelp) => {
             println!("plinth {}\n\n{ROOT_USAGE}", env!("CARGO_PKG_VERSION"));
