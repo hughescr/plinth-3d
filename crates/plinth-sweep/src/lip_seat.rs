@@ -981,11 +981,348 @@ struct Pending {
     refused_slender: bool,
     /// **The mover's own solid clearance, read ahead** ([`read_movers`]): by
     /// candidate index, the path the read was drawn on and the read.
-    ahead: std::collections::HashMap<usize, (Vec<u32>, Option<f64>)>,
+    ahead: std::collections::HashMap<usize, Ahead>,
+    /// **The path tests of candidates read ahead** ([`Tested`]), by candidate
+    /// index: a refused candidate as well as an admitted one, each valid for
+    /// the field generation it was asked at ([`StampedIndex::generation`]) and
+    /// no other. The round loop takes its candidate from here instead of
+    /// asking [`propose`] again.
+    tested: std::collections::HashMap<usize, Tested>,
     /// How many candidates the next read-ahead of this arm takes, from the
     /// one a round proposes (doubled at each read-ahead, up to
     /// [`READ_AHEAD_MAX`]).
     window: usize,
+    /// The bytes of `tested` and `ahead` entries charged to the pass's
+    /// [`Ledger`] for this arm.
+    retained: usize,
+}
+
+/// A path test that passed: the mover's new path and each child's
+/// ([`propose`]). Shared by the arm's `tested` and `ahead` entries for one
+/// candidate (one copy of the descendants' paths, not two).
+type Found = (Vec<u32>, Vec<Follow>);
+
+/// One candidate's path test, as [`propose`] answered it against the field at
+/// `generation` (`None` in `found`: refused).
+struct Tested {
+    generation: u64,
+    found: Option<std::rc::Rc<Found>>,
+    /// The bytes charged for this entry.
+    charged: usize,
+}
+
+/// **The bytes the read-ahead may hold** for one [`apply`] pass.
+///
+/// `READ_AHEAD_MAX` bounds the candidates an arm reads ahead, not their bytes:
+/// a trunk with hundreds of thousands of long descendants would keep every
+/// descendant's path for each of 64 candidates. The ledger counts the bytes of
+/// the descendant paths (and trial solids) a read-ahead retains, across all
+/// arms; a candidate that would take it past `limit` is not read ahead, and
+/// the round loop asks it when it gets there, as it did before the read-ahead
+/// existed. Whether the limit trips changes no answer: every stored result is
+/// a pure function of the candidate and the field, the same as the one
+/// asked on demand.
+struct Ledger {
+    retained: usize,
+    limit: usize,
+}
+
+impl Ledger {
+    fn new() -> Self {
+        Self {
+            retained: 0,
+            limit: read_ahead_limit_bytes(),
+        }
+    }
+
+    /// Whether `bytes` more may be retained.
+    const fn has_room(&self, bytes: usize) -> bool {
+        self.retained.saturating_add(bytes) <= self.limit
+    }
+}
+
+/// The bytes the read-ahead may retain in one pass; the working set of one
+/// read-ahead call (trial solids, groups) is held to a quarter of it.
+const READ_AHEAD_BYTES: usize = 256 << 20;
+
+/// [`READ_AHEAD_BYTES`], or `PLINTH_SWEEP_LIPSEAT_READ_AHEAD_BYTES` where set
+/// (a diagnostic: the output does not depend on it). Read once.
+fn read_ahead_limit_bytes() -> usize {
+    #[cfg(test)]
+    if let Some(limit) = TEST_BUDGET.with(std::cell::Cell::get) {
+        return limit;
+    }
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("PLINTH_SWEEP_LIPSEAT_READ_AHEAD_BYTES")
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(READ_AHEAD_BYTES)
+    })
+}
+
+/// The bytes a stored path test holds: its entry, and the descendants' paths.
+fn found_bytes(found: Option<&Found>) -> usize {
+    const ENTRY: usize = 64;
+    found.map_or(ENTRY, |(path, children)| {
+        ENTRY
+            + std::mem::size_of_val(path.as_slice())
+            + children
+                .iter()
+                .map(|(_, _, path)| std::mem::size_of::<Follow>() + std::mem::size_of_val(path.as_slice()))
+                .sum::<usize>()
+    })
+}
+
+impl Pending {
+    /// Store a path test for candidate `at`, charging the ledger.
+    fn store_tested(&mut self, ledger: &mut Ledger, at: usize, generation: u64, found: Option<std::rc::Rc<Found>>) {
+        let charged = found_bytes(found.as_deref());
+        if let Some(old) = self.tested.insert(at, Tested { generation, found, charged }) {
+            self.credit(ledger, old.charged);
+        }
+        self.charge(ledger, charged);
+    }
+
+    /// Take the stored path test of candidate `at`, crediting the ledger.
+    fn take_tested(&mut self, ledger: &mut Ledger, at: usize) -> Option<Tested> {
+        let tested = self.tested.remove(&at)?;
+        self.credit(ledger, tested.charged);
+        Some(tested)
+    }
+
+    /// Store a read-ahead of candidate `at`, charging the ledger `charged`.
+    fn store_ahead(&mut self, ledger: &mut Ledger, at: usize, ahead: Ahead) {
+        let charged = ahead.charged;
+        if let Some(old) = self.ahead.insert(at, ahead) {
+            self.credit(ledger, old.charged);
+        }
+        self.charge(ledger, charged);
+    }
+
+    /// Take the read-ahead of candidate `at`, crediting the ledger.
+    fn take_ahead(&mut self, ledger: &mut Ledger, at: usize) -> Option<Ahead> {
+        let ahead = self.ahead.remove(&at)?;
+        self.credit(ledger, ahead.charged);
+        Some(ahead)
+    }
+
+    /// The arm's job has ended: nothing it read ahead will be asked again.
+    fn release(&mut self, ledger: &mut Ledger) {
+        self.tested = std::collections::HashMap::new();
+        self.ahead = std::collections::HashMap::new();
+        ledger.retained = ledger.retained.saturating_sub(self.retained);
+        self.retained = 0;
+    }
+
+    fn charge(&mut self, ledger: &mut Ledger, bytes: usize) {
+        self.retained += bytes;
+        ledger.retained += bytes;
+    }
+
+    fn credit(&mut self, ledger: &mut Ledger, bytes: usize) {
+        self.retained = self.retained.saturating_sub(bytes);
+        ledger.retained = ledger.retained.saturating_sub(bytes);
+    }
+}
+
+/// **The column index of one [`apply`] pass, with the generation of the field
+/// it stands for.**
+///
+/// [`propose`] is a pure function of its arguments: the context (fixed for
+/// the pass), the candidate and the mover's children (fixed per job), the
+/// column index, and the struts it reads (the mover, its children, the member
+/// the candidate lands on, and the hosts a transitive follow walks). During a
+/// pass the index and those struts change in ONE place: the commit of a
+/// re-landing (`apply`'s round loop), which rewrites a member's landing,
+/// base layer or path and stamps it into the index. The generation counts
+/// the stamps, and [`StampedIndex::stamp_strut`] is the only way to stamp, so
+/// every mutation that can change a path test's answer bumps it in the
+/// mutator itself (it is bumped before the stamp, and a re-landing rewrites
+/// the struts only to stamp them next). A stored path test is reused only at
+/// the generation it was asked at; `PLINTH_SWEEP_VERIFY_LIPSEAT=1` recomputes
+/// every reuse and panics on a difference ([`verify_lip_seat`]).
+struct StampedIndex {
+    index: ColumnHistory,
+    generation: u64,
+}
+
+impl StampedIndex {
+    const fn new(index: ColumnHistory) -> Self {
+        Self {
+            index,
+            generation: 0,
+        }
+    }
+
+    const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Stamp `strut` as it stands now; every stored path test is stale after.
+    fn stamp_strut(&mut self, strut: &SweepStrut, layer_height_mm: f64) {
+        #[cfg(not(test))]
+        let skip = false;
+        // The sabotage drill skips the bump; the shadow check must catch it.
+        #[cfg(test)]
+        let skip = TEST_SKIP_BUMP.with(std::cell::Cell::get);
+        if !skip {
+            self.generation += 1;
+        }
+        self.index.stamp_strut(strut, layer_height_mm);
+    }
+}
+
+impl std::ops::Deref for StampedIndex {
+    type Target = ColumnHistory;
+
+    fn deref(&self) -> &ColumnHistory {
+        &self.index
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: skip the generation bump (sabotage) or force the shadow check on.
+    static TEST_SKIP_BUMP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TEST_VERIFY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Tests: the read-ahead's byte limit, and how many window candidates it
+    /// refused for want of room.
+    static TEST_BUDGET: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static TEST_REFUSED_FOR_ROOM: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// `PLINTH_SWEEP_VERIFY_LIPSEAT=1`: every stored path test the pass reuses is
+/// also asked of [`propose`] afresh and compared; any difference panics. For
+/// gate runs, not for production. Read once.
+fn verify_lip_seat() -> bool {
+    #[cfg(test)]
+    if TEST_VERIFY.with(std::cell::Cell::get) {
+        return true;
+    }
+    static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *VERIFY.get_or_init(|| {
+        std::env::var_os("PLINTH_SWEEP_VERIFY_LIPSEAT").is_some_and(|value| value == "1")
+    })
+}
+
+/// The path test of `job`'s candidate `at` for the round loop: the one the
+/// read-ahead stored at the field's current generation, else asked now.
+/// Either way the stored entry is spent (a stale one is dropped).
+fn take_path_test(
+    context: &SlendernessContext<'_>,
+    index: &StampedIndex,
+    struts: &[SweepStrut],
+    job: &mut Pending,
+    ledger: &mut Ledger,
+    at: usize,
+    clearance: bool,
+) -> Option<Found> {
+    let candidate = job.candidates[at];
+    let ask = |job: &Pending| {
+        propose(
+            context,
+            index,
+            struts,
+            job.index,
+            candidate,
+            &job.children,
+            clearance,
+        )
+    };
+    match job.take_tested(ledger, at) {
+        Some(tested) if tested.generation == index.generation() => {
+            if verify_lip_seat() {
+                verify_lip_seat_reuse("round", tested.found.as_deref(), ask(job).as_ref());
+            }
+            // The read-ahead may still hold the same path test.
+            tested
+                .found
+                .map(|found| std::rc::Rc::try_unwrap(found).unwrap_or_else(|shared| (*shared).clone()))
+        }
+        _ => ask(job),
+    }
+}
+
+/// What the read-ahead made of one window candidate's path test.
+enum Window {
+    /// The candidate is refused by the path test.
+    Refused,
+    /// The candidate passes; the answer is stored for the round loop.
+    Passed(std::rc::Rc<Found>),
+    /// The ledger has no room: the candidate (and the rest of the window) is
+    /// left for the round loop to ask when it gets there.
+    Full,
+}
+
+/// **The path test of window candidate `at`** for the read-ahead: the one
+/// stored at the field's current generation (a refusal too, so a refused
+/// candidate is asked once per generation, not once per overlapping window),
+/// else asked now and stored; or [`Window::Full`] where the byte limit
+/// ([`Ledger`]) leaves no room for it. Either way the round loop's answer
+/// for the candidate is the one the on-demand ask gives.
+fn window_path_test(
+    context: &SlendernessContext<'_>,
+    index: &StampedIndex,
+    struts: &[SweepStrut],
+    job: &mut Pending,
+    ledger: &mut Ledger,
+    at: usize,
+    clearance: bool,
+) -> Window {
+    // With no room for even an empty entry the candidate is left to the
+    // round loop.
+    if !ledger.has_room(2 * found_bytes(None)) {
+        refused_for_room();
+        return Window::Full;
+    }
+    let generation = index.generation();
+    let candidate = job.candidates[at];
+    let ask = |job: &Pending| {
+        propose(
+            context,
+            index,
+            struts,
+            job.index,
+            candidate,
+            &job.children,
+            clearance,
+        )
+    };
+    let stored = job
+        .tested
+        .get(&at)
+        .filter(|tested| tested.generation == generation)
+        .map(|tested| tested.found.clone());
+    let found = if let Some(found) = stored {
+        if verify_lip_seat() {
+            verify_lip_seat_reuse("read-ahead", found.as_deref(), ask(job).as_ref());
+        }
+        found
+    } else {
+        let found = ask(job).map(std::rc::Rc::new);
+        // A refusal is an empty entry; a pass keeps the descendants' paths,
+        // and is stored only where the ledger has room for it (twice: here
+        // and in the read-ahead entry).
+        if found
+            .as_deref()
+            .is_some_and(|found| !ledger.has_room(2 * found_bytes(Some(found))))
+        {
+            refused_for_room();
+            return Window::Full;
+        }
+        job.store_tested(ledger, at, generation, found.clone());
+        found
+    };
+    found.map_or(Window::Refused, Window::Passed)
+}
+
+/// The shadow check of one reused path test: `stored` against `fresh`.
+fn verify_lip_seat_reuse(what: &str, stored: Option<&Found>, fresh: Option<&Found>) {
+    assert!(
+        stored == fresh,
+        "PLINTH_SWEEP_VERIFY_LIPSEAT: a reused path test ({what}) differs from the fresh one\n stored {stored:?}\n fresh  {fresh:?}"
+    );
 }
 
 /// The most candidates one arm's read-ahead takes in one batch. A batch
@@ -1006,6 +1343,8 @@ struct Proposal {
     candidate: Candidate,
     path: Vec<u32>,
     children: Vec<Follow>,
+    /// The field generation the path test answered at.
+    generation: u64,
 }
 
 /// Where each child of a mover lands on its new axis, and the child's new
@@ -1357,7 +1696,7 @@ impl StandingReads {
 fn read_movers(
     frame: &ReadFrame<'_>,
     context: &SlendernessContext<'_>,
-    index: &ColumnHistory,
+    index: &StampedIndex,
     struts: &[SweepStrut],
     arms: &[SweepArm],
     pending: &mut [Pending],
@@ -1365,44 +1704,56 @@ fn read_movers(
     trial: &[SweepArm],
     first_of: &[usize],
     clearance: bool,
-    was: impl Fn(usize) -> Option<f64>,
+    standing_reads: &mut StandingReads,
+    ledger: &mut Ledger,
     after: &mut [Option<f64>],
-) {
+) -> Vec<Option<Prefetched>> {
     struct Row {
         slot: usize,
         at: usize,
-        path: Vec<u32>,
+        found: std::rc::Rc<Found>,
+        /// The first slot of the proposal's own trial members, for a row
+        /// that is this round's proposal (its members are drawn already).
+        own: Option<usize>,
         solid: SweepArm,
         on_model: bool,
         at_least: f64,
     }
+    // The working set of this call (the rows' trial solids, the groups and the
+    // follower solids cloned from them) is held to a quarter of the limit.
+    let call_limit = ledger.limit / 4;
+    let mut call_bytes = 0_usize;
     let plate_z_mm = frame.plate_z_mm;
-    let at_least = |member: usize, landing: Landing| {
+    let at_least = |standing_reads: &StandingReads, member: usize, landing: Landing| {
         admitted_at_least(
             clearance || !matches!(landing, Landing::Strut { .. }),
-            was(member),
+            standing_reads.before(member, struts),
             frame.tier,
         )
     };
     let mut rows: Vec<Row> = Vec::new();
     let mut ahead_hits = 0_usize;
     for (proposal, &first) in proposals.iter().zip(first_of) {
-        let job = &pending[proposal.slot];
+        let job = &mut pending[proposal.slot];
         if job
             .ahead
             .get(&proposal.at)
-            .is_some_and(|(path, _)| *path == proposal.path)
+            .is_some_and(|ahead| {
+                ahead.found.0 == proposal.path && ahead.found.1 == proposal.children
+            })
         {
             ahead_hits += 1;
             continue;
         }
+        call_bytes += trial_bytes(&trial[first]);
         rows.push(Row {
             slot: proposal.slot,
             at: proposal.at,
-            path: proposal.path.clone(),
+            found: std::rc::Rc::new((proposal.path.clone(), proposal.children.clone())),
+            own: Some(first),
             solid: trial[first].clone(),
             on_model: matches!(proposal.candidate.landing, Landing::Model { .. }),
-            at_least: at_least(job.index, proposal.candidate.landing),
+            at_least: at_least(standing_reads, job.index, proposal.candidate.landing),
         });
         let end = proposal.at.saturating_add(job.window).min(job.candidates.len());
         for at in proposal.at + 1..end {
@@ -1410,16 +1761,10 @@ fn read_movers(
                 continue;
             }
             let candidate = job.candidates[at];
-            let Some((path, _)) = propose(
-                context,
-                index,
-                struts,
-                job.index,
-                candidate,
-                &job.children,
-                clearance,
-            ) else {
-                continue;
+            let found = match window_path_test(context, index, struts, job, ledger, at, clearance) {
+                Window::Full => break,
+                Window::Refused => continue,
+                Window::Passed(found) => found,
             };
             let solid = trial_arm(
                 context,
@@ -1429,15 +1774,32 @@ fn read_movers(
                 job.index,
                 candidate.landing,
                 candidate.k_bottom,
-                &path,
+                &found.0,
             );
+            // The working set of the call: this row's solid, and the solids of
+            // the group the read of its children and bites will draw.
+            let row_bytes = trial_bytes(&solid)
+                + found
+                    .1
+                    .iter()
+                    .map(|(child, _, _)| {
+                        let strut = &struts[*child];
+                        8 * (strut.k_top.saturating_sub(strut.k_bottom) + 1) + TRIAL_ARM_BYTES
+                    })
+                    .sum::<usize>();
+            if call_bytes + row_bytes > call_limit {
+                refused_for_room();
+                break;
+            }
+            call_bytes += row_bytes;
             rows.push(Row {
                 slot: proposal.slot,
                 at,
-                path,
+                found,
+                own: None,
                 solid,
                 on_model: matches!(candidate.landing, Landing::Model { .. }),
-                at_least: at_least(job.index, candidate.landing),
+                at_least: at_least(standing_reads, job.index, candidate.landing),
             });
         }
         let job = &mut pending[proposal.slot];
@@ -1449,25 +1811,172 @@ fn read_movers(
         let mut solids: Vec<SweepArm> = Vec::with_capacity(rows.len());
         let mut on_model: Vec<bool> = Vec::with_capacity(rows.len());
         let mut bounds: Vec<f64> = Vec::with_capacity(rows.len());
-        let mut keys: Vec<(usize, usize, Vec<u32>)> = Vec::with_capacity(rows.len());
-        for row in rows {
-            solids.push(row.solid);
+        for row in &rows {
+            solids.push(row.solid.clone());
             on_model.push(row.on_model);
             bounds.push(row.at_least);
-            keys.push((row.slot, row.at, row.path));
         }
-        let _site = crate::perf::clear_site(crate::perf::ClearSite::LipReadAhead);
-        let reads = frame.solid_at_least(&solids, &on_model, &bounds);
-        for ((slot, at, path), read) in keys.into_iter().zip(reads) {
-            pending[slot].ahead.insert(at, (path, read));
+        let reads = {
+            let _site = crate::perf::clear_site(crate::perf::ClearSite::LipReadAhead);
+            frame.solid_at_least(&solids, &on_model, &bounds)
+        };
+        // **What the round asks next of a mover that clears**, read here for
+        // every row that clears, on the pool, so the round finds it done:
+        // each child's trial solid against what it stood at, and the seat
+        // bites of the mover and its children ([`Prefetched`]).
+        let clearing: Vec<usize> = (0..rows.len())
+            .filter(|&at| reads[at].is_some_and(|now| now >= bounds[at]))
+            .collect();
+        let mut prefetched: std::collections::HashMap<usize, Prefetched> =
+            std::collections::HashMap::with_capacity(clearing.len());
+        if !clearing.is_empty() {
+            // Each clearing row's group: the mover's trial solid, then its
+            // children's, in the order the round lays them out.
+            let groups: Vec<Vec<SweepArm>> = clearing
+                .iter()
+                .map(|&at| {
+                    let row = &rows[at];
+                    let mut group = Vec::with_capacity(1 + row.found.1.len());
+                    group.push(solids[at].clone());
+                    for (offset, (child, _, path)) in row.found.1.iter().enumerate() {
+                        group.push(row.own.map_or_else(
+                            || {
+                                let strut = &struts[*child];
+                                trial_arm(
+                                    context,
+                                    plate_z_mm,
+                                    struts,
+                                    arms,
+                                    *child,
+                                    strut.landing,
+                                    strut.k_bottom,
+                                    path,
+                                )
+                            },
+                            |first| trial[first + 1 + offset].clone(),
+                        ));
+                    }
+                    group
+                })
+                .collect();
+            // The children's solids against what each stood at, one kernel batch.
+            let members: Vec<usize> = clearing
+                .iter()
+                .flat_map(|&at| rows[at].found.1.iter().map(|(child, _, _)| *child))
+                .collect();
+            standing_reads.read(frame, arms, struts, &members, false);
+            let follower_arms: Vec<SweepArm> = groups
+                .iter()
+                .flat_map(|group| group[1..].iter().cloned())
+                .collect();
+            let follower_bounds: Vec<f64> = members
+                .iter()
+                .map(|&member| {
+                    admitted_at_least(false, standing_reads.before(member, struts), frame.tier)
+                })
+                .collect();
+            let follower_reads = if follower_arms.is_empty() {
+                Vec::new()
+            } else {
+                let _site = crate::perf::clear_site(crate::perf::ClearSite::LipFollowers);
+                frame.solid_at_least(
+                    &follower_arms,
+                    &vec![false; follower_arms.len()],
+                    &follower_bounds,
+                )
+            };
+            // Every group's seat bites, chunked across the pool.
+            let slices: Vec<&[SweepArm]> = groups.iter().map(Vec::as_slice).collect();
+            let bites = plinth_support::tip_shaft_seat_bite_groups(&slices, frame.layer_plan).ok();
+            let mut follower_reads = follower_reads.into_iter();
+            let mut bites = bites.map(IntoIterator::into_iter);
+            for (&at, group) in clearing.iter().zip(&groups) {
+                prefetched.insert(
+                    at,
+                    Prefetched {
+                        followers: follower_reads.by_ref().take(group.len() - 1).collect(),
+                        bites: bites.as_mut().and_then(Iterator::next),
+                    },
+                );
+            }
+        }
+        for (at, (row, read)) in rows.into_iter().zip(reads).enumerate() {
+            let prefetched = prefetched.remove(&at);
+            // A row that is this round's own proposal is spent before the
+            // call returns, so it is not charged; a candidate read ahead is.
+            let charged = if row.own.is_some() {
+                0
+            } else {
+                found_bytes(Some(&row.found)) + AHEAD_ENTRY_BYTES * (1 + row.found.1.len())
+            };
+            pending[row.slot].store_ahead(
+                ledger,
+                row.at,
+                Ahead {
+                    found: row.found,
+                    read,
+                    prefetched,
+                    charged,
+                },
+            );
         }
     }
-    for (proposal, &first) in proposals.iter().zip(first_of) {
-        after[first] = pending[proposal.slot]
-            .ahead
-            .remove(&proposal.at)
-            .and_then(|(_, read)| read);
-    }
+    proposals
+        .iter()
+        .zip(first_of)
+        .map(|(proposal, &first)| {
+            let ahead = pending[proposal.slot].take_ahead(ledger, proposal.at);
+            after[first] = ahead.as_ref().and_then(|ahead| ahead.read);
+            // The read-ahead's follower reads and bites stand for the round
+            // only for the children it drew them for.
+            ahead
+                .filter(|ahead| ahead.found.1 == proposal.children)
+                .and_then(|ahead| ahead.prefetched)
+        })
+        .collect()
+}
+
+/// **What the read-ahead measured of a candidate** (`Pending::ahead`), for the
+/// path it was drawn on and the children that follow it: the mover's trial
+/// read, and where that read clears, [`Prefetched`].
+struct Ahead {
+    found: std::rc::Rc<Found>,
+    read: Option<f64>,
+    prefetched: Option<Prefetched>,
+    /// The bytes charged for this entry.
+    charged: usize,
+}
+
+/// What an entry's follower reads and bites hold per member, in bytes.
+const AHEAD_ENTRY_BYTES: usize = 128;
+
+/// What a trial arm holds besides its radius profile, in bytes.
+const TRIAL_ARM_BYTES: usize = 256;
+
+/// The bytes a trial solid holds.
+fn trial_bytes(arm: &SweepArm) -> usize {
+    8 * arm.radius_profile_mm.len() + TRIAL_ARM_BYTES
+}
+
+/// Count a window candidate left for the round loop for want of room (tests).
+fn refused_for_room() {
+    #[cfg(test)]
+    TEST_REFUSED_FOR_ROOM.with(|cell| cell.set(cell.get() + 1));
+}
+
+/// What the round asks of a mover that clears, read ahead for every member of
+/// its group (the mover first, then its children as the proposal lays them
+/// out); each read is a pure function of the member's trial solid, so it
+/// stands for whichever batch the round would have carried it in, except the
+/// seat bites, which depend on the batch through the lander heights
+/// ([`plinth_support::tip_shaft_seat_bites_with`] checks them).
+struct Prefetched {
+    /// Each child's trial solid read against what it stood at
+    /// ([`admitted_at_least`]): one read per child, in order.
+    followers: Vec<Option<f64>>,
+    /// The group's seat bites, each with the lander height it was read with;
+    /// `None` when the lowering refused the request.
+    bites: Option<Vec<plinth_support::SeatBiteRead>>,
 }
 
 /// **Remedy 1: a smaller angle to the same seat.** Re-land every arm over its
@@ -1508,6 +2017,7 @@ pub(crate) fn apply(
     }
     let mut index = ColumnHistory::new(context.grid);
     crate::congestion::stamp_all(&mut index, struts, context.layer_height_mm);
+    let mut index = StampedIndex::new(index);
     // The roots on the plate, as the congestion census sizes them, on the
     // profiles the survey drew.
     let flare_factor = if context.flare_factor.is_finite() && context.flare_factor > 0.0 {
@@ -1721,7 +2231,9 @@ pub(crate) fn apply(
             children,
             refused_slender: false,
             ahead: std::collections::HashMap::new(),
+            tested: std::collections::HashMap::new(),
             window: 1,
+            retained: 0,
         });
     }
 
@@ -1730,6 +2242,7 @@ pub(crate) fn apply(
     let mut moved: Vec<Relanding> = Vec::new();
     let mut standing_reads = StandingReads::default();
     let mut standing_seats = StandingSeats::default();
+    let mut ledger = Ledger::new();
     let mut open: Vec<usize> = (0..pending.len()).collect();
     let mut done = vec![false; pending.len()];
     while !open.is_empty() {
@@ -1747,24 +2260,28 @@ pub(crate) fn apply(
                 continue;
             }
             while job.next < job.candidates.len() {
-                let candidate = job.candidates[job.next];
+                let at = job.next;
+                let candidate = job.candidates[at];
                 job.next += 1;
-                match propose(
+                // The path test the read-ahead stored at this very field
+                // generation, else asked now (a stale one is dropped).
+                match take_path_test(
                     context,
                     &index,
                     struts,
-                    job.index,
-                    candidate,
-                    &job.children,
+                    job,
+                    &mut ledger,
+                    at,
                     trigger.is_clearance(),
                 ) {
                     Some((path, children)) => {
                         proposals.push(Proposal {
                             slot,
-                            at: job.next - 1,
+                            at,
                             candidate,
                             path,
                             children,
+                            generation: index.generation(),
                         });
                         break;
                     }
@@ -1892,6 +2409,9 @@ pub(crate) fn apply(
         let rows = trial.len();
         let mut after: Vec<Option<f64>> = vec![None; rows];
         let mut before: Vec<Option<f64>> = vec![None; rows];
+        // What the read-ahead measured of each proposal's followers and bites
+        // ([`Prefetched`]), where it did.
+        let mut prefetched: Vec<Option<Prefetched>> = (0..proposals.len()).map(|_| None).collect();
         let mover_clears: Vec<bool> = match surface {
             None => vec![true; proposals.len()],
             Some(surface) => {
@@ -1911,7 +2431,7 @@ pub(crate) fn apply(
                 for (&member, &first) in movers.iter().zip(&first_of) {
                     before[first] = standing_reads.before(member, struts);
                 }
-                read_movers(
+                prefetched = read_movers(
                     &frame,
                     context,
                     &index,
@@ -1922,7 +2442,8 @@ pub(crate) fn apply(
                     &trial,
                     &first_of,
                     trigger.is_clearance(),
-                    |member| standing_reads.before(member, struts),
+                    &mut standing_reads,
+                    &mut ledger,
                     &mut after,
                 );
                 let clears: Vec<bool> = proposals
@@ -1959,19 +2480,63 @@ pub(crate) fn apply(
                     for (&slot, &member) in follower_slots.iter().zip(&followers) {
                         before[slot] = standing_reads.before(member, struts);
                     }
-                    let follower_arms: Vec<SweepArm> =
-                        follower_slots.iter().map(|&slot| trial[slot].clone()).collect();
-                    let bounds: Vec<f64> = follower_slots
+                    // The followers' solids, read in one batch: those the
+                    // read-ahead already read for these very children are
+                    // taken from it (a read is a pure function of the
+                    // member's trial solid and its bound), the rest here.
+                    let mut served = vec![false; rows];
+                    for (((proposal, &first), pre), &clear) in proposals
                         .iter()
-                        .map(|&slot| admitted_at_least(false, before[slot], tier))
+                        .zip(&first_of)
+                        .zip(&prefetched)
+                        .zip(&clears)
+                    {
+                        let Some(pre) = pre.as_ref().filter(|pre| clear && pre.followers.len() == proposal.children.len())
+                        else {
+                            continue;
+                        };
+                        for (offset, value) in pre.followers.iter().enumerate() {
+                            after[first + 1 + offset] = *value;
+                            served[first + 1 + offset] = true;
+                        }
+                    }
+                    let read_slots = |slots: &[usize]| -> Vec<Option<f64>> {
+                        if slots.is_empty() {
+                            return Vec::new();
+                        }
+                        let follower_arms: Vec<SweepArm> =
+                            slots.iter().map(|&slot| trial[slot].clone()).collect();
+                        let bounds: Vec<f64> = slots
+                            .iter()
+                            .map(|&slot| admitted_at_least(false, before[slot], tier))
+                            .collect();
+                        let _site = crate::perf::clear_site(crate::perf::ClearSite::LipFollowers);
+                        frame.solid_at_least(&follower_arms, &vec![false; follower_arms.len()], &bounds)
+                    };
+                    let todo: Vec<usize> = follower_slots
+                        .iter()
+                        .copied()
+                        .filter(|&slot| !served[slot])
                         .collect();
-                    let _site = crate::perf::clear_site(crate::perf::ClearSite::LipFollowers);
-                    let read = frame.solid_at_least(
-                        &follower_arms,
-                        &vec![false; follower_arms.len()],
-                        &bounds,
-                    );
-                    for (&slot, value) in follower_slots.iter().zip(read) {
+                    let read = read_slots(&todo);
+                    if verify_lip_seat() {
+                        // The shadow check: every served read, read the
+                        // round's own way.
+                        let taken: Vec<usize> = follower_slots
+                            .iter()
+                            .copied()
+                            .filter(|&slot| served[slot])
+                            .collect();
+                        let fresh = read_slots(&taken);
+                        for (&slot, fresh) in taken.iter().zip(fresh) {
+                            assert!(
+                                after[slot].map(f64::to_bits) == fresh.map(f64::to_bits),
+                                "PLINTH_SWEEP_VERIFY_LIPSEAT: a follower read ahead differs from the round's own\n slot {slot}: ahead {:?}, fresh {fresh:?}",
+                                after[slot]
+                            );
+                        }
+                    }
+                    for (&slot, value) in todo.iter().zip(read) {
                         after[slot] = value;
                     }
                 }
@@ -1991,8 +2556,31 @@ pub(crate) fn apply(
                 .collect();
             if !slots.is_empty() {
                 let arms_read: Vec<SweepArm> = slots.iter().map(|&slot| trial[slot].clone()).collect();
-                let bites = plinth_support::tip_shaft_seat_bites(&arms_read, layer_plan)
+                // The bites the read-ahead measured for these very groups
+                // stand where this batch gives each arm the lander height
+                // they were read with; the rest are read here.
+                let known: Vec<Option<plinth_support::SeatBiteRead>> = proposals
+                    .iter()
+                    .zip(&prefetched)
+                    .zip(&mover_clears)
+                    .filter(|(_, &clear)| clear)
+                    .flat_map(|((proposal, pre), _)| {
+                        let group = pre.as_ref().and_then(|pre| pre.bites.as_ref());
+                        (0..=proposal.children.len())
+                            .map(move |offset| group.and_then(|group| group.get(offset)).copied())
+                    })
+                    .collect();
+                let bites = plinth_support::tip_shaft_seat_bites_with(&arms_read, &known, layer_plan)
                     .unwrap_or_else(|_| vec![None; arms_read.len()]);
+                if verify_lip_seat() && known.iter().any(Option::is_some) {
+                    // The shadow check: the round's own call, compared.
+                    let fresh = plinth_support::tip_shaft_seat_bites(&arms_read, layer_plan)
+                        .unwrap_or_else(|_| vec![None; arms_read.len()]);
+                    assert!(
+                        bites == fresh,
+                        "PLINTH_SWEEP_VERIFY_LIPSEAT: seat bites taken from the read-ahead differ from the round's own call\n ahead {bites:?}\n fresh {fresh:?}"
+                    );
+                }
                 for (&slot, bite) in slots.iter().zip(bites) {
                     measured[slot] = bite;
                 }
@@ -2164,15 +2752,39 @@ pub(crate) fn apply(
             // that now crosses a member moved this round, sends the arm back
             // for its next candidate.
             let job = &pending[proposal.slot];
-            let again = propose(
-                context,
-                &index,
-                struts,
-                index_of,
-                proposal.candidate,
-                &job.children,
-                trigger.is_clearance(),
-            );
+            // With no move committed since the proposal was made (the field
+            // generation is the one it was asked at), the answer is the
+            // proposal itself.
+            let unchanged = proposal.generation == index.generation();
+            let again = if unchanged {
+                if verify_lip_seat() {
+                    let fresh = propose(
+                        context,
+                        &index,
+                        struts,
+                        index_of,
+                        proposal.candidate,
+                        &job.children,
+                        trigger.is_clearance(),
+                    );
+                    verify_lip_seat_reuse(
+                        "re-ask",
+                        Some(&(proposal.path.clone(), proposal.children.clone())),
+                        fresh.as_ref(),
+                    );
+                }
+                Some((proposal.path.clone(), proposal.children.clone()))
+            } else {
+                propose(
+                    context,
+                    &index,
+                    struts,
+                    index_of,
+                    proposal.candidate,
+                    &job.children,
+                    trigger.is_clearance(),
+                )
+            };
             let Some((path, children)) = again.filter(|(path, children)| {
                 *path == proposal.path && *children == proposal.children
             }) else {
@@ -2350,6 +2962,13 @@ pub(crate) fn apply(
             }
             moved.push(record);
             done[proposal.slot] = true;
+        }
+        // An arm whose job has ended asks nothing more: what was read ahead
+        // for it is released.
+        for &slot in &open {
+            if done[slot] || pending[slot].next >= pending[slot].candidates.len() {
+                pending[slot].release(&mut ledger);
+            }
         }
         open.retain(|slot| !done[*slot] && pending[*slot].next < pending[*slot].candidates.len());
     }
@@ -3950,6 +4569,246 @@ mod model_landing_tests {
             found.iter().all(|(landing, _)| *landing == Landing::Plate),
             "a model landing offered with no model"
         );
+    }
+
+    /// **A stored path test is reused only at the generation it was asked
+    /// at** (read-ahead reuse, 2026-10-15), and the shadow switch catches a
+    /// mutator that forgets to bump it.
+    ///
+    /// The mover's lean to the plate at column 66 is open; the read-ahead
+    /// stores it. A member then stands in column 63, across the lean: the
+    /// commit stamps it ([`StampedIndex::stamp_strut`], which bumps the
+    /// generation), and the round must ask afresh and find the lean blocked.
+    /// SABOTAGE INSIDE: with the bump skipped the stale `Some` is served
+    /// (visible with the shadow off) and the shadow panics with it on.
+    #[test]
+    fn a_stored_path_test_is_reused_only_at_its_generation_and_the_shadow_catches_a_missed_bump() {
+        use super::{
+            propose, take_path_test, Candidate, Ledger, Pending, StampedIndex, TEST_SKIP_BUMP,
+            TEST_VERIFY,
+        };
+        let grid = grid();
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
+        let law = crate::slenderness::SlendernessLaw::new(30.0, 0.05, 1.0, 32.5);
+        let bare = history(|_, _| false);
+        let context = crate::slenderness::SlendernessContext {
+            grid: &grid,
+            history: &bare,
+            keep_out: &keep_out,
+            lean: &lean,
+            law: &law,
+            layer_height_mm: H,
+            layers: 200,
+            flare_factor: 1.6,
+            mast_root_clearance: true,
+            final_clearance_mm: 0.3,
+            member_clearance: true,
+            model_surface: None,
+            plate_z_mm: 0.0,
+            shaft_landings: true,
+            merge: true,
+            brace: true,
+            thicken: true,
+            mast: true,
+            max_struts: 1_000,
+            x_allowed: 18.0,
+            seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
+            load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
+            brace_cap: true,
+            brace_window: true,
+            frame_bands: true,
+            frame_ledger: true,
+            model_tie: true,
+        };
+        let candidate = Candidate {
+            cost_mm: 1.0,
+            cell: 60 * SIDE + 66,
+            landing: Landing::Plate,
+            k_bottom: 0,
+        };
+        // Runs the scene: returns (stored-and-served answer after the commit,
+        // fresh answer after the commit), both `is_some`.
+        let scene = |skip_bump: bool, verify: bool| {
+            let mut struts = vec![
+                arm(Landing::Plate, 0),
+                member_in_column(1, StrutKind::Arm, 40, SEAT_LAYER),
+            ];
+            let mut raw = ColumnHistory::new(&grid);
+            crate::congestion::stamp_all(&mut raw, &struts, H);
+            let mut index = StampedIndex::new(raw);
+            let mut job = Pending {
+                index: 0,
+                candidates: vec![candidate],
+                next: 0,
+                children: Vec::new(),
+                refused_slender: false,
+                ahead: std::collections::HashMap::new(),
+                tested: std::collections::HashMap::new(),
+                window: 1,
+                retained: 0,
+            };
+            let mut ledger = Ledger::new();
+            let ask = |index: &StampedIndex, struts: &[SweepStrut]| {
+                propose(&context, index, struts, 0, candidate, &[], false)
+            };
+            let before = ask(&index, &struts);
+            assert!(before.is_some(), "the lean is open before the commit");
+            job.store_tested(
+                &mut ledger,
+                0,
+                index.generation(),
+                before.map(std::rc::Rc::new),
+            );
+            // The commit: member 1 comes to stand across the lean.
+            TEST_SKIP_BUMP.with(|cell| cell.set(skip_bump));
+            TEST_VERIFY.with(|cell| cell.set(verify));
+            struts[1].cell = 60 * SIDE + 63;
+            index.stamp_strut(&struts[1], H);
+            let fresh = ask(&index, &struts);
+            let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                take_path_test(&context, &index, &struts, &mut job, &mut ledger, 0, false)
+            }));
+            TEST_SKIP_BUMP.with(|cell| cell.set(false));
+            TEST_VERIFY.with(|cell| cell.set(false));
+            (served, fresh)
+        };
+        // With the bump: the stale answer is dropped and the lean reads blocked.
+        let (served, fresh) = scene(false, true);
+        assert!(fresh.is_none(), "the member across the lean blocks it");
+        assert_eq!(served.expect("no panic with the bump"), fresh);
+        // Sabotage, shadow off: the stale `Some` is served (the drill bites).
+        let (served, fresh) = scene(true, false);
+        assert!(fresh.is_none());
+        assert!(served.expect("no shadow, no panic").is_some(), "the skipped bump serves the stale answer");
+        // Sabotage, shadow on: the shadow panics.
+        let (served, _) = scene(true, true);
+        let payload = served.expect_err("the shadow check must catch the missed bump");
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|text| (*text).to_owned()))
+            .unwrap_or_default();
+        assert!(message.contains("PLINTH_SWEEP_VERIFY_LIPSEAT"), "{message}");
+    }
+
+    /// **The read-ahead's byte limit changes no answer** (2026-10-15). One
+    /// mover with forty plate descents to the right, ten open and thirty
+    /// across a member's column: the window is filled, then the round loop
+    /// takes every candidate in order. With the limit at its default every
+    /// candidate is read ahead; with a limit of two kilobytes the ledger
+    /// refuses most of the window, never holds more than the limit, and the
+    /// round loop asks the rest on demand. Both give, candidate by candidate,
+    /// the answer of the bare [`propose`]; the ledger reads zero once every
+    /// entry is spent, and a released job holds nothing.
+    #[test]
+    fn a_tiny_read_ahead_limit_gives_the_answers_of_no_limit() {
+        use super::{
+            propose, take_path_test, window_path_test, Candidate, Ledger, Pending, StampedIndex,
+            Window, TEST_BUDGET, TEST_REFUSED_FOR_ROOM,
+        };
+        let grid = grid();
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
+        let law = crate::slenderness::SlendernessLaw::new(30.0, 0.05, 1.0, 32.5);
+        let bare = history(|_, _| false);
+        let context = crate::slenderness::SlendernessContext {
+            grid: &grid,
+            history: &bare,
+            keep_out: &keep_out,
+            lean: &lean,
+            law: &law,
+            layer_height_mm: H,
+            layers: 200,
+            flare_factor: 1.6,
+            mast_root_clearance: true,
+            final_clearance_mm: 0.3,
+            member_clearance: true,
+            model_surface: None,
+            plate_z_mm: 0.0,
+            shaft_landings: true,
+            merge: true,
+            brace: true,
+            thicken: true,
+            mast: true,
+            max_struts: 1_000,
+            x_allowed: 18.0,
+            seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
+            load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
+            brace_cap: true,
+            brace_window: true,
+            frame_bands: true,
+            frame_ledger: true,
+            model_tie: true,
+        };
+        let candidates: Vec<Candidate> = (61..101)
+            .map(|col| Candidate {
+                cost_mm: f64::from(u32::try_from(col).expect("small")),
+                cell: 60 * SIDE + col,
+                landing: Landing::Plate,
+                k_bottom: 0,
+            })
+            .collect();
+        let struts = vec![
+            arm(Landing::Plate, 0),
+            member_in_column(1, StrutKind::Arm, 71, SEAT_LAYER),
+        ];
+        let mut raw = ColumnHistory::new(&grid);
+        crate::congestion::stamp_all(&mut raw, &struts, H);
+        let index = StampedIndex::new(raw);
+        let run = |limit: Option<usize>| {
+            TEST_BUDGET.with(|cell| cell.set(limit));
+            TEST_REFUSED_FOR_ROOM.with(|cell| cell.set(0));
+            let mut ledger = Ledger::new();
+            let mut job = Pending {
+                index: 0,
+                candidates: candidates.clone(),
+                next: 0,
+                children: Vec::new(),
+                refused_slender: false,
+                ahead: std::collections::HashMap::new(),
+                tested: std::collections::HashMap::new(),
+                window: 1,
+                retained: 0,
+            };
+            let mut read_ahead = 0_usize;
+            for at in 0..candidates.len() {
+                match window_path_test(&context, &index, &struts, &mut job, &mut ledger, at, false) {
+                    Window::Full => break,
+                    Window::Refused | Window::Passed(_) => read_ahead += 1,
+                }
+            }
+            let held = ledger.retained;
+            let limit_held = ledger.limit;
+            let answers: Vec<_> = (0..candidates.len())
+                .map(|at| take_path_test(&context, &index, &struts, &mut job, &mut ledger, at, false))
+                .collect();
+            let spent = ledger.retained;
+            job.release(&mut ledger);
+            let refused = TEST_REFUSED_FOR_ROOM.with(std::cell::Cell::get);
+            TEST_BUDGET.with(|cell| cell.set(None));
+            (answers, read_ahead, held, limit_held, spent, refused, ledger.retained)
+        };
+        let bare_answers: Vec<_> = candidates
+            .iter()
+            .map(|&candidate| propose(&context, &index, &struts, 0, candidate, &[], false))
+            .collect();
+        let passes = bare_answers.iter().filter(|answer| answer.is_some()).count();
+        assert!(
+            passes > 0 && passes < candidates.len(),
+            "anti-vacuity: some descents are open and some blocked ({passes} of {})",
+            candidates.len()
+        );
+        let (free, free_ahead, _, _, free_spent, free_refused, free_end) = run(None);
+        assert_eq!(free, bare_answers, "no limit: the on-demand answers");
+        assert_eq!(free_ahead, candidates.len(), "no limit: the whole window is read ahead");
+        assert_eq!(free_refused, 0);
+        assert_eq!((free_spent, free_end), (0, 0), "every entry is spent and credited");
+        let (tiny, tiny_ahead, tiny_held, tiny_limit, tiny_spent, tiny_refused, tiny_end) = run(Some(2000));
+        assert_eq!(tiny, bare_answers, "a tiny limit: the same answers");
+        assert!(tiny_ahead < candidates.len() && tiny_refused > 0, "the limit tripped: {tiny_ahead} read ahead");
+        assert!(tiny_held <= tiny_limit, "the ledger never passes its limit: {tiny_held} > {tiny_limit}");
+        assert_eq!((tiny_spent, tiny_end), (0, 0));
     }
 }
 
