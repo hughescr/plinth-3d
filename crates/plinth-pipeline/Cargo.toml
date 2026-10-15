@@ -46,6 +46,9 @@ chitubox_io = { path = "../../rust/chitubox_io" }
 # purpose; the injection hook exists only with this feature, which only
 # test builds of this crate turn on.
 plinth-decimate = { path = "../plinth-decimate", features = ["fault-injection"] }
+# The same for orientation: `tests/deferred_diagnostics_output.rs` fails the
+# orientation after its search to prove the search's `orient.json` survives.
+plinth-orient = { path = "../plinth-orient", features = ["fault-injection"] }
 
 # `tests/it/orient_as_drawn.rs` sets `user.xdg.tags` on a scratch file.
 [target.'cfg(target_os = "linux")'.dev-dependencies]

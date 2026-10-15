@@ -55,13 +55,17 @@ impl Scratch {
     /// The dual-cavity pawn reaches the adaptive diagnostics at the registered
     /// 19 um budget (see `plinth-decimate`'s deferred tests), so its decimation
     /// is deferred.
+    fn place_pawn(&self) {
+        let pawn = plinth_mesh::make_dual_cavity_pawn().expect("procedural pawn");
+        self.write_snapped(&pawn);
+    }
+
     #[expect(
         clippy::cast_possible_truncation,
         reason = "the fixture's coordinates are snapped to f32 because a binary STL stores f32; \
               see docs/evidence/remediation-2026-08-26/census/cast-audit.md"
     )]
-    fn place_pawn(&self) {
-        let pawn = plinth_mesh::make_dual_cavity_pawn().expect("procedural pawn");
+    fn write_snapped(&self, pawn: &plinth_mesh::Mesh) {
         let verts: Vec<[f64; 3]> = pawn
             .verts()
             .iter()
@@ -282,4 +286,90 @@ fn the_diagnostics_stages_are_decimate_whatever_the_scheduling_and_the_join_is_n
         "orient.orient_model ({orient_ms} ms) includes the wait for a job that slept {} ms",
         START_DELAY.as_millis()
     );
+}
+
+impl Scratch {
+    /// A small recessed disc: the dense orientation search over it takes
+    /// seconds, and it is too simple to reach the adaptive diagnostics, so its
+    /// decimation is not deferred.
+    fn place_disc(&self) {
+        let disc = plinth_mesh::make_recessed_disc(24.0, 25.0, 3.5, 2.5, 22.5, 128)
+            .expect("procedural disc");
+        self.write_snapped(&disc);
+    }
+
+    /// One dense run into `perf_dir`; the run lines come back with the report.
+    fn run_dense_into(&self, perf_dir: PathBuf) -> (PrepareReport, Vec<String>) {
+        plinth_sweep::perf::enable(perf_dir, Duration::from_secs(3600));
+        let capture = RunLogCapture::install();
+        let report = prepare(self.request(true)).expect("the folder is enumerable");
+        (report, capture.lines())
+    }
+}
+
+fn orient_json(dir: &Path) -> serde_json::Value {
+    let bytes = std::fs::read(dir.join(format!("{STEM}.orient.json")))
+        .expect("orient.json was written");
+    serde_json::from_slice(&bytes).expect("orient.json is json")
+}
+
+/// An orientation that fails AFTER its search (the transformed mesh is not
+/// finite) must still leave the `orient.json` the search wrote, byte-for-byte
+/// what the synchronous run wrote: a failure never destroys diagnostic
+/// evidence. The model still fails with the orientation error, and the
+/// Orientation stage line is still printed.
+fn orientation_failure_after_search_keeps_orient_json(label: &str, place: fn(&Scratch)) {
+    let scratch = Scratch::new(label);
+    place(&scratch);
+
+    let reference_dir = scratch.root.join("perf-reference");
+    let (reference, _) = scratch.run_dense_into(reference_dir.clone());
+    assert!(
+        matches!(
+            reference.models[0].outcome,
+            ModelPreparationOutcome::Stopped {
+                after: StageStop::Orient
+            }
+        ),
+        "the reference run must orient cleanly: {:?}",
+        reference.models[0].outcome
+    );
+
+    let failed_dir = scratch.root.join("perf-failed");
+    let _fault = plinth_orient::injection::fail_after_search();
+    let (failed, lines) = scratch.run_dense_into(failed_dir.clone());
+    let ModelPreparationOutcome::Failed { detail, .. } = &failed.models[0].outcome else {
+        panic!(
+            "the injected orientation failure must fail the model, got {:?}",
+            failed.models[0].outcome
+        );
+    };
+    assert!(
+        detail.contains("invalid production mesh"),
+        "the orientation error must be the one reported: {detail}"
+    );
+    assert_eq!(
+        orient_json(&failed_dir),
+        orient_json(&reference_dir),
+        "orient.json after a post-search failure must equal the synchronous run's"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("entering Orientation")),
+        "the synchronous run printed the Orientation line before the failure: {lines:?}"
+    );
+}
+
+/// The fast form: no deferred diagnostics, so the pending output is published
+/// at the same point a synchronous run published it.
+#[test]
+fn an_orientation_failure_after_its_search_keeps_orient_json() {
+    orientation_failure_after_search_keeps_orient_json("orient-fail", Scratch::place_disc);
+}
+
+/// The deferred form: the pawn's diagnostics run beside the search, succeed,
+/// and only then is the failed orientation's `orient.json` published.
+#[test]
+#[ignore = "about four minutes: two full dense orientation searches of the pawn"]
+fn an_orientation_failure_after_a_dense_search_keeps_orient_json_past_the_join() {
+    orientation_failure_after_search_keeps_orient_json("orient-fail-pawn", Scratch::place_pawn);
 }

@@ -1392,7 +1392,14 @@ fn prepare_one(
     }
     let (oriented, winner, pending_output) = match oriented_result {
         Ok(oriented) => oriented,
-        Err(stop) => return report(&repair, assumed, failure(&stop)),
+        // The diagnostics have joined, so a synchronous run got this far: it
+        // wrote `orient.json` in the search, before any failure after it, and a
+        // failure must not destroy that evidence. A failure before the search
+        // ended carries nothing to publish.
+        Err(OrientStop { stop, pending }) => {
+            pending.publish();
+            return report(&repair, assumed, failure(&stop));
+        }
     };
     pending_output.publish();
     // **The chosen orientation, read once and carried on every disposition
@@ -1600,22 +1607,23 @@ fn orient_model(
     limits: plinth_orient::OrientSearchLimits,
     placement: crate::Placement,
     reuse: WinnerPlanReuse,
-) -> Result<(OrientedModel, RetainedWinner, PendingOutput), ChainStop> {
+) -> Result<(OrientedModel, RetainedWinner, PendingOutput), OrientStop> {
     // Why no plan comes back from the arms that retain nothing.
     let absent = if reuse == WinnerPlanReuse::Disabled {
         plinth_sweep::orient_demand::ReuseMiss::Disabled
     } else {
         plinth_sweep::orient_demand::ReuseMiss::NotRetained
     };
+    let orient_error = |source| {
+        OrientStop::from(ChainStop::new(PipelineError::Orient {
+            model: model.clone(),
+            source,
+        }))
+    };
     if let Some(reason) = as_drawn {
         return plinth_orient::orient_as_drawn(decimated, reason)
             .map(|oriented| (oriented, Err(absent), PendingOutput::default()))
-            .map_err(|source| {
-                ChainStop::new(PipelineError::Orient {
-                    model: model.clone(),
-                    source,
-                })
-            });
+            .map_err(orient_error);
     }
     match policy {
         // Reached only when the caller did not pass the run-wide reason,
@@ -1626,20 +1634,11 @@ fn orient_model(
             plinth_orient::as_drawn::AsDrawnReason::OrientNone,
         )
         .map(|oriented| (oriented, Err(absent), PendingOutput::default()))
-        .map_err(|source| {
-            ChainStop::new(PipelineError::Orient {
-                model: model.clone(),
-                source,
-            })
-        }),
+        .map_err(orient_error),
         OrientationPolicy::DenseSweep => {
             let registry_mark = plinth_sweep::perf::stage("orient.registry_request");
-            let mut request = plinth_orient::registered_sweep_request().map_err(|source| {
-                ChainStop::new(PipelineError::Orient {
-                    model: model.clone(),
-                    source,
-                })
-            })?;
+            let mut request =
+                plinth_orient::registered_sweep_request().map_err(orient_error)?;
             drop(registry_mark);
             // The run's resource policy owns the work budget; the registry owns
             // every number that can change a score. Neither owns the other's.
@@ -1648,11 +1647,14 @@ fn orient_model(
             // orientation stage is shared by both `--placement` engines, so
             // wiring the real sweep-demand measurer here fixes the double-
             // charged-flat-pose defect for legacy and sweep placement alike.
-            let orient_error = |source| {
-                ChainStop::new(PipelineError::Orient {
-                    model: model.clone(),
-                    source,
-                })
+            // A failure after the search keeps the search's pending output
+            // (see `OrientStop`); one before it has none.
+            let after_search = |failure: plinth_orient::DeferredFailure| {
+                let (source, pending) = failure.into_parts();
+                OrientStop {
+                    pending,
+                    ..orient_error(source)
+                }
             };
             // THE WINNER'S PLAN (`r1-winner-reuse`): with the sweep engine and
             // reuse on, the finalists' production plans are kept, and the one
@@ -1663,7 +1665,7 @@ fn orient_model(
                 let demand = plinth_sweep::orient_demand::RetainingSweepDemand::production();
                 let (oriented, pending) =
                     plinth_orient::search_and_orient_deferred(decimated, &request, Some(&demand))
-                        .map_err(orient_error)?;
+                        .map_err(after_search)?;
                 let take_mark = plinth_sweep::perf::stage("orient.take_winner");
                 let winner = if reuse == WinnerPlanReuse::SabotageOtherPose {
                     demand.take_other_pose_relabelled(oriented.mesh())
@@ -1680,13 +1682,15 @@ fn orient_model(
             let demand = plinth_sweep::SweepDemand::production();
             plinth_orient::search_and_orient_deferred(decimated, &request, Some(&demand))
                 .map(|(oriented, pending)| (oriented, Err(absent), pending))
-                .map_err(orient_error)
+                .map_err(after_search)
         }
         OrientationPolicy::Pinned(baselines) => {
             let Some(pinned) = baselines.get(model.as_str()) else {
-                return Err(ChainStop::new(PipelineError::OrientationBaselineMissing {
-                    model: model.clone(),
-                }));
+                return Err(OrientStop::from(ChainStop::new(
+                    PipelineError::OrientationBaselineMissing {
+                        model: model.clone(),
+                    },
+                )));
             };
             run_orientation(
                 decimated,
@@ -1695,12 +1699,26 @@ fn orient_model(
                 },
             )
             .map(|oriented| (oriented, Err(absent), PendingOutput::default()))
-            .map_err(|source| {
-                ChainStop::new(PipelineError::Orient {
-                    model: model.clone(),
-                    source,
-                })
-            })
+            .map_err(orient_error)
+        }
+    }
+}
+
+/// An orientation failure, with the output the search had made ready before it
+/// failed. A failure before the search ended has none; a failure after it (a
+/// non-finite transformed mesh) still carries the `orient.json` the synchronous
+/// search wrote before failing, because a failure never destroys diagnostic
+/// evidence.
+struct OrientStop {
+    stop: ChainStop,
+    pending: PendingOutput,
+}
+
+impl From<ChainStop> for OrientStop {
+    fn from(stop: ChainStop) -> Self {
+        Self {
+            stop,
+            pending: PendingOutput::default(),
         }
     }
 }

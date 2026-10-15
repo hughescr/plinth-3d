@@ -8,6 +8,12 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+# Test-only. Exposes `injection`, which fails an orientation after its search so
+# another crate's tests can prove what the pipeline does then. Never enabled in
+# a production build (plinth-pipeline turns it on in dev-dependencies).
+fault-injection = []
+
 [dependencies]
 # The shared kernel is depended on for two things: `run_in_pool`, the single
 # `PLINTH_THREADS` pool authority every crate's batch calls share
