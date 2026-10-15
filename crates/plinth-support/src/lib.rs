@@ -170,7 +170,7 @@ pub use coverage_repair::{
     OwnContactNoWinnerStage, RepairGateVector, RepairPrescreenDisclosure, RepairRunReport,
     RepairStepOutcome, RepairTrailDisclosure, RepairTrialTrail, RepairVeto, RepairVetoClass,
     RepairVetoCounts, RepairVetoDisclosure, RepairVetoIndex, RouteDelta, StageClock,
-    TRIAL_TRAIL_DIR_ENV,
+    StageLine, TRIAL_TRAIL_DIR_ENV,
 };
 pub use initial::ContactConstructionLimits;
 /// The slice-sweep adapter's one geometry door — see `lower.rs`. The rest of

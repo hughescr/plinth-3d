@@ -15,7 +15,14 @@ plinth-core = { path = "../plinth-core" }
 plinth-mesh = { path = "../plinth-mesh" }
 rand_chacha = { workspace = true }
 rand_core = { workspace = true }
+rayon = { workspace = true }
 thiserror = { workspace = true }
+
+[features]
+# Test-only. Exposes `injection`, which disturbs a deferred diagnostic job so
+# another crate's tests can prove what the pipeline does when one fails. Never
+# enabled in a production build (plinth-pipeline turns it on in dev-dependencies).
+fault-injection = []
 
 [dev-dependencies]
 serde = { workspace = true }

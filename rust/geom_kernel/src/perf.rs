@@ -29,7 +29,9 @@
 //!   compared. A counter whose value depends on the thread count (speculative
 //!   work) is [`Class::Sched`] and is never compared across widths.
 //! * **Attribution.** The phase is one global byte, set by the pipeline's main
-//!   thread after a join only; a worker reads the phase of its batch.
+//!   thread after a join only; a worker reads the phase of its batch. A thread
+//!   running a job beside the pipeline's stages can charge its own phase
+//!   instead ([`scoped_phase`]).
 //!
 //! # Sidecar
 //!
@@ -843,8 +845,17 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 static PHASE: AtomicU8 = AtomicU8::new(Phase::Other as u8);
 static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
 static WARNED: AtomicBool = AtomicBool::new(false);
+/// Open [`hold_partial_sidecar`] guards; while any is open a phase change
+/// writes no partial sidecar.
+static HOLDS: AtomicUsize = AtomicUsize::new(0);
+
+/// No override: the thread charges the global phase.
+const NO_OVERRIDE: u8 = u8::MAX;
 
 thread_local! {
+    /// The phase this thread charges instead of the global one, while a
+    /// [`scoped_phase`] guard is open on it.
+    static PHASE_OVERRIDE: Cell<u8> = const { Cell::new(NO_OVERRIDE) };
     static MY_SHARD: Cell<usize> = const { Cell::new(usize::MAX) };
     /// `(solves, points)` while a [`capture_frames`] scope is open on this thread.
     static CAPTURE: Cell<Option<(u64, u64)>> = const { Cell::new(None) };
@@ -1333,6 +1344,62 @@ pub fn set_phase_quiet(phase: Phase) -> Phase {
     switch_phase(phase, false)
 }
 
+/// The phase a charge made on this thread lands in: the thread's
+/// [`scoped_phase`] if one is open, else the global phase.
+#[inline]
+fn charged_phase() -> u8 {
+    let over = PHASE_OVERRIDE.with(Cell::get);
+    if over == NO_OVERRIDE {
+        PHASE.load(Relax)
+    } else {
+        over
+    }
+}
+
+/// Makes every charge this thread makes (work, spans, stages, rows) land in
+/// `phase` until the guard drops, whatever the global phase is, and without
+/// touching the global phase or any phase wall time. For a job that runs
+/// beside the pipeline's own stages (the decimation diagnostics beside
+/// orientation) and so would otherwise be billed to whichever phase the main
+/// thread has reached. Charges made by other threads on the job's behalf (a
+/// nested parallel region's workers) still read the global phase. Scopes nest;
+/// the previous one comes back on drop.
+#[inline]
+#[must_use = "the phase holds until the guard drops"]
+pub fn scoped_phase(phase: Phase) -> PhaseScope {
+    PhaseScope(PHASE_OVERRIDE.with(|cell| cell.replace(phase as u8)))
+}
+
+/// Restores the previous per-thread phase on drop.
+#[must_use = "the phase holds until the guard drops"]
+pub struct PhaseScope(u8);
+
+impl Drop for PhaseScope {
+    fn drop(&mut self) {
+        PHASE_OVERRIDE.with(|cell| cell.set(self.0));
+    }
+}
+
+/// While the guard is open a phase change ([`set_phase`]) writes no partial
+/// sidecar, so work that must not publish anything yet (orientation running
+/// ahead of the diagnostics it overlaps) does not. The checkpoint ticks and
+/// [`end_model`] still write theirs.
+#[must_use = "partial sidecar writes resume when the guard drops"]
+pub fn hold_partial_sidecar() -> SidecarHold {
+    HOLDS.fetch_add(1, Relax);
+    SidecarHold(())
+}
+
+/// Releases a [`hold_partial_sidecar`] on drop.
+#[must_use = "partial sidecar writes resume when the guard drops"]
+pub struct SidecarHold(());
+
+impl Drop for SidecarHold {
+    fn drop(&mut self) {
+        HOLDS.fetch_sub(1, Relax);
+    }
+}
+
 fn switch_phase(phase: Phase, write: bool) -> Phase {
     let previous = Phase::from_index(PHASE.load(Relax));
     if !enabled() {
@@ -1346,7 +1413,7 @@ fn switch_phase(phase: Phase, write: bool) -> Phase {
                 slot.phase_wall_ns[previous.index()].saturating_add(spent);
             slot.phase_since = now;
             PHASE.store(phase as u8, Relax);
-            if write {
+            if write && HOLDS.load(Relax) == 0 {
                 write_sidecar(slot, true, now);
             }
         }
@@ -1414,7 +1481,7 @@ fn add_enabled(work: Work, n: u64) {
     if let Some(site) = work.size_span() {
         SITE.with(|cell| cell.set(site as u8 + 1));
     }
-    let phase = PHASE.load(Relax) as usize;
+    let phase = charged_phase() as usize;
     my_shard().work[phase.min(PHASE_N - 1)][work as usize].fetch_add(n, Relax);
 }
 
@@ -1430,7 +1497,7 @@ pub fn count(n: usize) -> u64 {
 #[inline]
 pub fn span(span: Span) -> SpanGuard {
     if ENABLED.load(Relax) {
-        let phase = Phase::from_index(PHASE.load(Relax));
+        let phase = Phase::from_index(charged_phase());
         let started = Instant::now();
         let start_ns = since_epoch(started);
         // The entry is visible at once, so a checkpoint taken while the span
@@ -1717,7 +1784,7 @@ pub fn row(kind: Rows, payload: &[u64]) {
     }
     let rec = RowRec {
         kind,
-        phase: Phase::from_index(PHASE.load(Relax)),
+        phase: Phase::from_index(charged_phase()),
         pose: current_pose(),
         cols,
     };
@@ -1731,7 +1798,7 @@ pub fn row(kind: Rows, payload: &[u64]) {
 #[must_use = "a stage mark measures until it is dropped"]
 pub fn stage(label: &'static str) -> StageGuard {
     if enabled() {
-        StageGuard(Some((label, Phase::from_index(PHASE.load(Relax)), Instant::now())))
+        StageGuard(Some((label, Phase::from_index(charged_phase()), Instant::now())))
     } else {
         StageGuard(None)
     }
@@ -2239,6 +2306,82 @@ mod tests {
         assert!(text.contains("{\"phase\":\"Diagnostic\""), "{text}");
         let diagnostic = text.split("{\"phase\":\"Diagnostic\"").nth(1).expect("the phase");
         assert!(diagnostic.contains("\"sweep.runs\":3"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_scoped_phase_charges_its_thread_to_its_phase_whatever_the_global_one_is() {
+        let _guard = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = scratch("scoped");
+        enable(dir.clone(), HOUR);
+        begin_model("scoped");
+        set_phase_quiet(Phase::OrientTable);
+        // The job thread charges Decimate; this thread (and any thread without
+        // a scope) charges the global OrientTable; the global phase never moves.
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let _phase = scoped_phase(Phase::Decimate);
+                add(Work::SweepRuns, 5);
+                drop(stage("job.stage"));
+                {
+                    // A nested scope comes back to the outer one.
+                    let _inner = scoped_phase(Phase::Diagnostic);
+                    add(Work::SweepRuns, 7);
+                }
+                add(Work::SweepRuns, 1);
+            });
+        });
+        add(Work::SweepRuns, 100);
+        drop(stage("main.stage"));
+        assert_eq!(Phase::from_index(PHASE.load(Relax)), Phase::OrientTable);
+        end_model();
+        let text = std::fs::read_to_string(dir.join("scoped.perf.json")).expect("final");
+        let work = |phase: &str| {
+            let row = text
+                .split(&format!("{{\"phase\":\"{phase}\",\"wall_ms\""))
+                .nth(1)
+                .expect("the phase row");
+            let row = row.split("\"sched\"").next().expect("work then sched");
+            row.split("\"sweep.runs\":")
+                .nth(1)
+                .map_or(0, |rest| {
+                    rest.split(|c: char| !c.is_ascii_digit())
+                        .next()
+                        .and_then(|digits| digits.parse::<u64>().ok())
+                        .expect("digits")
+                })
+        };
+        assert_eq!(work("Decimate"), 6, "{text}");
+        assert_eq!(work("Diagnostic"), 7, "{text}");
+        assert_eq!(work("OrientTable"), 100, "{text}");
+        assert!(
+            text.contains("{\"phase\":\"Decimate\",\"label\":\"job.stage\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("{\"phase\":\"OrientTable\",\"label\":\"main.stage\""),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sidecar_hold_suppresses_phase_change_writes_until_it_drops() {
+        let _guard = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = scratch("hold");
+        enable(dir.clone(), HOUR);
+        begin_model("hold");
+        let sidecar = dir.join("hold.perf.json");
+        let _ = std::fs::remove_file(&sidecar);
+        {
+            let _hold = hold_partial_sidecar();
+            set_phase(Phase::OrientTable);
+            set_phase(Phase::Prefilter);
+            assert!(!sidecar.exists(), "a held phase change must write nothing");
+        }
+        set_phase(Phase::Production);
+        assert!(sidecar.exists(), "the write resumes when the hold drops");
+        end_model();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

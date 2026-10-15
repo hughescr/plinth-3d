@@ -184,22 +184,139 @@ pub fn search_and_orient(
     request: &SweepRequest,
     demand: Option<&dyn demand::SupportDemandMeasurer>,
 ) -> Result<OrientedModel, OrientError> {
+    match search_and_orient_deferred(model, request, demand) {
+        Ok((oriented, pending)) => {
+            pending.publish();
+            Ok(oriented)
+        }
+        // The search finished and wrote its evidence before the transform
+        // failed; a failure must not destroy that evidence.
+        Err(failure) => {
+            let (error, pending) = failure.into_parts();
+            pending.publish();
+            Err(error)
+        }
+    }
+}
+
+/// A [`search_and_orient_deferred`] failure, with whatever the search had
+/// already made ready to publish.
+///
+/// A search that fails has nothing pending. A failure *after* the search (a
+/// non-finite transformed mesh) still carries the `orient.json` and digest line
+/// the search produced: the synchronous [`search_and_orient`] had written them
+/// before the failure, and a failure never destroys diagnostic evidence, so the
+/// caller publishes [`DeferredFailure::into_parts`]'s pending output unless an
+/// earlier failure of its own means a synchronous run would never have got here.
+#[derive(Debug)]
+#[must_use = "dropping a failure drops its pending output, which is never written"]
+pub struct DeferredFailure {
+    error: OrientError,
+    pending: diag::PendingOutput,
+}
+
+impl DeferredFailure {
+    fn without_output(error: OrientError) -> Self {
+        Self {
+            error,
+            pending: diag::PendingOutput::default(),
+        }
+    }
+
+    /// The error, which a failure carries whether or not it has output.
+    #[must_use]
+    pub const fn error(&self) -> &OrientError {
+        &self.error
+    }
+
+    /// The error and the output the search made ready before it failed.
+    pub fn into_parts(self) -> (OrientError, diag::PendingOutput) {
+        (self.error, self.pending)
+    }
+}
+
+/// [`search_and_orient`] that publishes nothing: the `orient.json` and digest
+/// line the search would have written come back as a [`diag::PendingOutput`].
+/// The caller publishes it once nothing else can fail the run any more; a run
+/// that stops first drops it and leaves no orientation output behind.
+///
+/// # Errors
+///
+/// As [`search_and_orient`]. A failure after the search (a non-finite
+/// transformed mesh) comes back as a [`DeferredFailure`] that still carries the
+/// pending output.
+pub fn search_and_orient_deferred(
+    model: DecimatedModel,
+    request: &SweepRequest,
+    demand: Option<&dyn demand::SupportDemandMeasurer>,
+) -> Result<(OrientedModel, diag::PendingOutput), DeferredFailure> {
     let (mesh, decimation) = model.into_parts();
-    let outcome = search::search(&mesh, request, demand).map_err(OrientError::Search)?;
-    let selection = outcome.winner().selection;
-    let transform = transform_for(selection)?;
-    let transform_mark = geom_kernel::perf::stage("orient.transform_mesh");
-    let (mesh, transform) = transform_mesh(mesh, transform)?;
-    drop(transform_mark);
-    let orientation = OrientationReport {
-        provenance: OrientationProvenance::DenseSweep(Box::new(outcome.into_record())),
-        selection,
-        transform,
-    };
-    Ok(OrientedModel {
-        mesh,
-        history: OrientationHistory::from_reports(decimation, orientation),
-    })
+    let (outcome, pending) = search::search_deferred(&mesh, request, demand)
+        .map_err(|error| DeferredFailure::without_output(OrientError::Search(error)))?;
+    // Everything below runs after the search has finished, so a failure here
+    // keeps `pending`.
+    let applied = (|| {
+        #[cfg(feature = "fault-injection")]
+        if injection::fail_after_search_armed() {
+            return Err(OrientError::InvalidTransformedMesh);
+        }
+        let selection = outcome.winner().selection;
+        let transform = transform_for(selection)?;
+        let transform_mark = geom_kernel::perf::stage("orient.transform_mesh");
+        let (mesh, transform) = transform_mesh(mesh, transform)?;
+        drop(transform_mark);
+        let orientation = OrientationReport {
+            provenance: OrientationProvenance::DenseSweep(Box::new(outcome.into_record())),
+            selection,
+            transform,
+        };
+        Ok(OrientedModel {
+            mesh,
+            history: OrientationHistory::from_reports(decimation, orientation),
+        })
+    })();
+    match applied {
+        Ok(oriented) => Ok((oriented, pending)),
+        Err(error) => Err(DeferredFailure { error, pending }),
+    }
+}
+
+/// Fault injection for other crates' tests, behind the `fault-injection`
+/// feature (never on in a release build): the orientation search runs to the
+/// end and then fails the way a non-finite transformed mesh does.
+#[cfg(feature = "fault-injection")]
+#[doc(hidden)]
+pub mod injection {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    static SERIAL: Mutex<()> = Mutex::new(());
+    static FAIL_AFTER_SEARCH: AtomicBool = AtomicBool::new(false);
+
+    /// Holds the injection until dropped, and a process-wide lock so two
+    /// injections never overlap.
+    #[must_use = "the injection ends when the guard drops"]
+    pub struct Injection {
+        _serial: MutexGuard<'static, ()>,
+    }
+
+    /// Makes every `search_and_orient_deferred` that gets past its search fail
+    /// with [`crate::OrientError::InvalidTransformedMesh`] until the guard drops.
+    pub fn fail_after_search() -> Injection {
+        let serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        FAIL_AFTER_SEARCH.store(true, Ordering::SeqCst);
+        Injection { _serial: serial }
+    }
+
+    impl Drop for Injection {
+        fn drop(&mut self) {
+            FAIL_AFTER_SEARCH.store(false, Ordering::SeqCst);
+        }
+    }
+
+    pub(crate) fn fail_after_search_armed() -> bool {
+        FAIL_AFTER_SEARCH.load(Ordering::SeqCst)
+    }
 }
 
 /// Uses the model exactly as drawn: identity rotation, then the same frame

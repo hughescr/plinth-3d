@@ -1248,6 +1248,24 @@ pub fn search(
     request: &SweepRequest,
     demand: Option<&dyn crate::demand::SupportDemandMeasurer>,
 ) -> Result<SweepOutcome, SearchError> {
+    let (outcome, pending) = search_deferred(mesh, request, demand)?;
+    pending.publish();
+    Ok(outcome)
+}
+
+/// [`search`] that publishes nothing: the `orient.json` it would have written
+/// and the digest line it would have printed come back as a
+/// [`crate::diag::PendingOutput`] for the caller to publish, or drop. The
+/// outcome is the one [`search`] returns.
+///
+/// # Errors
+///
+/// As [`search`].
+pub fn search_deferred(
+    mesh: &Mesh,
+    request: &SweepRequest,
+    demand: Option<&dyn crate::demand::SupportDemandMeasurer>,
+) -> Result<(SweepOutcome, crate::diag::PendingOutput), SearchError> {
     let switches = crate::diag::Switches::from_env();
     for warning in &switches.warnings {
         eprintln!("WARNING: PLINTH_ORIENT_DIAG: {warning}");
@@ -1282,13 +1300,25 @@ pub fn search(
              proxy tiers are retired (an experiment, not the recorded search; use --no-cache)"
         );
     }
-    // The `orient.json` write happens inside `search_core`, in the same
-    // diagnostic perf phase as the collection.
-    let (outcome, _) = search_core(mesh, request, demand, config.as_ref(), true, &ablation)?;
+    // `orient.json` is serialised inside `search_core`, in the same diagnostic
+    // perf phase as the collection, and handed back unwritten.
+    let mut held = None;
+    let (outcome, _) = search_core_into(
+        mesh,
+        request,
+        demand,
+        config.as_ref(),
+        JsonOut::Defer(&mut held),
+        &ablation,
+    )?;
+    let mut pending = held.unwrap_or_default();
     if switches.digest {
-        eprintln!("[orient] search_digest {}", outcome.record.search_digest);
+        pending = pending.with_digest_line(format!(
+            "[orient] search_digest {}",
+            outcome.record.search_digest
+        ));
     }
-    Ok(outcome)
+    Ok((outcome, pending))
 }
 
 /// [`search`] with the ablation given instead of read from the environment,
@@ -1342,6 +1372,33 @@ pub(crate) fn search_core(
     demand: Option<&dyn crate::demand::SupportDemandMeasurer>,
     diag: Option<&crate::diag::DiagnosticsConfig>,
     write_json: bool,
+    ablation: &crate::ablate::Ablation,
+) -> Result<(SweepOutcome, Option<crate::diag::SweepDiagnostics>), SearchError> {
+    let json = if write_json {
+        JsonOut::Write
+    } else {
+        JsonOut::Skip
+    };
+    search_core_into(mesh, request, demand, diag, json, ablation)
+}
+
+/// What [`search_core_into`] does with `orient.json`.
+pub(crate) enum JsonOut<'a> {
+    /// Does not serialise it.
+    Skip,
+    /// Serialises and writes it before returning.
+    Write,
+    /// Serialises it and leaves the unwritten output in the slot.
+    Defer(&'a mut Option<crate::diag::PendingOutput>),
+}
+
+/// [`search_core`], with the `orient.json` disposition spelled out.
+pub(crate) fn search_core_into(
+    mesh: &Mesh,
+    request: &SweepRequest,
+    demand: Option<&dyn crate::demand::SupportDemandMeasurer>,
+    diag: Option<&crate::diag::DiagnosticsConfig>,
+    write_json: JsonOut<'_>,
     ablation: &crate::ablate::Ablation,
 ) -> Result<(SweepOutcome, Option<crate::diag::SweepDiagnostics>), SearchError> {
     let mut fallbacks = Vec::new();
@@ -1846,8 +1903,12 @@ pub(crate) fn search_core(
                 record: &record,
             });
             drop(build_mark);
-            if write_json {
-                crate::diag::write_orient_json(&record, &diagnostics);
+            match write_json {
+                JsonOut::Skip => {}
+                JsonOut::Write => crate::diag::write_orient_json(&record, &diagnostics),
+                JsonOut::Defer(slot) => {
+                    *slot = Some(crate::diag::serialise_orient_json(&record, &diagnostics));
+                }
             }
             diagnostics
         })
