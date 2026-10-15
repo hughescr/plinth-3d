@@ -1096,7 +1096,11 @@ impl OrientationDisclosure {
                     format!("{axis:?} {:.3} deg", degrees.get())
                 }
                 plinth_orient::BaselineSelection::UpDirection { up_model_frame } => format!(
-                    "searched up-direction ({:.4}, {:.4}, {:.4}) in the model frame",
+                    "searched up-direction ({:.4}, {:.4}, {:.4}) in the model frame \
+                     (exact [{:?}, {:?}, {:?}])",
+                    up_model_frame[0].get(),
+                    up_model_frame[1].get(),
+                    up_model_frame[2].get(),
                     up_model_frame[0].get(),
                     up_model_frame[1].get(),
                     up_model_frame[2].get(),

@@ -132,6 +132,13 @@ fn resolve(selection: &PrepareSelection) -> Result<PrepareRequest, PipelineError
 /// is the same refusal it has always been: a pinned baseline is one mesh's
 /// rotation and is never applied to another model.
 ///
+/// A pinned report names either the legacy axis and degrees
+/// (`"orientation": {"axis": [1, 0, 0], "deg": -20}`) or a searched pose,
+/// `"orientation": {"up": [x, y, z]}`: the build-up direction in model frame,
+/// as the `rotation committed` line of an earlier run's log prints it (its
+/// `exact [...]` tail is the full-precision vector). A lane that re-runs one
+/// model many times pins the pose of its last search and skips the search.
+///
 /// An unreadable directory is a failure of the run, not of one model: every
 /// model in it would be refused for the same reason, and reporting that N times
 /// would bury the one thing wrong.

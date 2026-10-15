@@ -548,6 +548,54 @@ fn keeps_standing_arm(
     clear_of_model && rooted && !(lean_seats && !stands_seats)
 }
 
+/// What one tip really touches: whether it seats (see [`tips_seat`]) and the
+/// real contact it makes, `None` where the tip has no seat face or no ball to
+/// measure.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TipContact {
+    pub seats: bool,
+    pub real_mm2: Option<f64>,
+    /// One pixel of area, mm2: the contact below which the printer cannot
+    /// tell a touch from none (the same tolerance [`tips_seat`] seats by).
+    pub pixel_mm2: f64,
+}
+
+impl TipContact {
+    /// A tip measured to make less than one pixel of contact with the model.
+    /// An unmeasured tip is not proof of that. (Bat_Cat_Owl arm 20: 0.0000 mm2
+    /// for the stub, 0.00003 mm2 for the lean, against a pixel of 0.0025.)
+    fn touches_nothing(self) -> bool {
+        self.real_mm2.is_some_and(|real| real < self.pixel_mm2)
+    }
+}
+
+/// **An arm that holds nothing is not kept** (round 6, 2026-10-14,
+/// `NUB-CLAW.md` part 1). The kept-arm test keeps the standing arm when neither
+/// it nor the lean seats. Where the standing arm's tip makes under one pixel
+/// of real contact with the model (the tolerance [`tips_seat`] seats by) and
+/// the lean's does not either, the arm is a nub: Bat_Cat_Owl arm 20 was a
+/// 0.156 mm stub in an antler groove whose tip ball cleared the antler by
+/// 0.002 mm (0.0000 mm2; its lean 0.00003 mm2), put there for a birth of ONE
+/// printer pixel (0.0003 mm2) of a fin narrower than a pixel, the antler two
+/// pixels away. It holds nothing and the owner sees it as a stray lump.
+/// Dropped, with the birth's pixel area as a WARNING, and only where nothing
+/// rests on it. A tip with a pixel or more of contact, however short of its
+/// plan, is a support ("better than no support") and is kept as before.
+fn holds_nothing(stands: TipContact, lean: TipContact, carries_someone: bool) -> bool {
+    !carries_someone && stands.touches_nothing() && lean.touches_nothing()
+}
+
+/// An arm dropped because it held nothing ([`holds_nothing`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UnheldArm {
+    /// The arm's id when it was dropped (ids are renumbered by the drop).
+    pub arm: u32,
+    /// The load it was seated for, mm2 (the birth's own pixel area).
+    pub load_mm2: f64,
+    /// Where its tip stood, mm in the build frame.
+    pub seat_mm: [f64; 3],
+}
+
 /// For each `(standing arm, lean)` pair, whether its tip really seats on its
 /// face: `(the standing arm's, the lean's)`. Seating is the real contact (the
 /// model surface inside the drawn ball, measured exactly) reaching the planned
@@ -560,7 +608,7 @@ fn tips_seat(
     joins: &HeadJoinContext<'_>,
     layer_plan: &LayerPlan,
     pairs: &[(&SweepArm, &SweepArm)],
-) -> Vec<(bool, bool)> {
+) -> Vec<(TipContact, TipContact)> {
     let context = joins.slender;
     let points: Vec<Option<[f64; 3]>> = pairs.iter().map(|(stands, _)| stands.seat_face_point_mm).collect();
     let sites = crate::footprint_normal::sites_at(joins.mesh, &points, context.seat_faces);
@@ -582,12 +630,15 @@ fn tips_seat(
     };
     let pixel_area_mm2 = context.grid.pitch_mm() * context.grid.pitch_mm();
     let read = crate::contact_growth::measure(&env, &rows, &row_sites);
-    let seats = |row: &Option<crate::contact_growth::Measured>| {
-        row.as_ref()
-            .is_some_and(|m| m.real_mm2 > 0.0 && m.real_mm2 + pixel_area_mm2 >= m.planned_mm2)
+    let contact = |row: Option<&Option<crate::contact_growth::Measured>>| TipContact {
+        seats: row
+            .and_then(Option::as_ref)
+            .is_some_and(|m| m.real_mm2 > 0.0 && m.real_mm2 + pixel_area_mm2 >= m.planned_mm2),
+        real_mm2: row.and_then(Option::as_ref).map(|m| m.real_mm2),
+        pixel_mm2: pixel_area_mm2,
     };
     read.chunks(2)
-        .map(|both| (both.first().is_some_and(seats), both.get(1).is_some_and(seats)))
+        .map(|both| (contact(both.first()), contact(both.get(1))))
         .collect()
 }
 
@@ -742,6 +793,15 @@ pub struct LipSeatOutcome {
     /// The arms that had a lean refused for its slenderness (each once), the
     /// last pass's list.
     pub kept_for_slenderness_ids: Vec<u32>,
+    /// Arms found to hold nothing in this run, not yet dropped: their tip
+    /// touches the model nowhere and neither does their lean, and nothing
+    /// rests on them ([`holds_nothing`]). The caller drops them once the
+    /// passes are done and moves them to [`Self::unheld`].
+    pub unheld_pending: Vec<UnheldArm>,
+    /// The arms dropped for holding nothing, each with the load (the
+    /// birth's pixel area) it was seated for: a WARNING each on the emitted
+    /// file. That load is reported as not carried.
+    pub unheld: Vec<UnheldArm>,
     /// Leans the slenderness test refused that were TAKEN anyway, because the
     /// arm as it stands is not there to keep (its solid is inside the model, or
     /// it floats above its ground), or because the lean's tip really seats on
@@ -1889,7 +1949,7 @@ pub(crate) fn apply(
                     })
             })
             .collect();
-        let mut seating: Vec<Option<(bool, bool)>> = vec![None; proposals.len()];
+        let mut seating: Vec<Option<(TipContact, TipContact)>> = vec![None; proposals.len()];
         {
             let asked: Vec<usize> = (0..proposals.len()).filter(|&at| refused_lean[at]).collect();
             if !asked.is_empty() {
@@ -2096,15 +2156,43 @@ pub(crate) fn apply(
             // above, on these same inputs); `seating` holds the contact reads
             // of the tips it asked for.
             if refused_lean[at_proposal] {
-                let (stands_seats, lean_seats) = seating[at_proposal].unwrap_or((false, false));
+                let unread = TipContact {
+                    seats: false,
+                    real_mm2: None,
+                    pixel_mm2: 0.0,
+                };
+                let (stands, lean) = seating[at_proposal].unwrap_or((unread, unread));
                 let keeps_arm = keeps_standing_arm(
                     standing_reads
                         .drawn(index_of, struts)
                         .is_none_or(|was| was >= -CLEARANCE_SLACK_MM),
                     rooted[index_of],
-                    stands_seats,
-                    lean_seats,
+                    stands.seats,
+                    lean.seats,
                 );
+                if keeps_arm
+                    && holds_nothing(
+                        stands,
+                        lean,
+                        carries[index_of] || struts[index_of].twin_host,
+                    )
+                {
+                    // A NUB: the arm holds nothing and neither does its lean
+                    // (see [`holds_nothing`]). It is dropped once the pass has
+                    // run (the caller owns the member list), with a WARNING
+                    // naming the birth it was seated for.
+                    let id = struts[index_of].id;
+                    if !outcome.unheld_pending.iter().any(|unheld| unheld.arm == id) {
+                        outcome.unheld_pending.push(UnheldArm {
+                            arm: id,
+                            load_mm2: struts[index_of].tip_load_mm2(),
+                            seat_mm: arms[index_of].seat_mm,
+                        });
+                    }
+                    let job = &mut pending[proposal.slot];
+                    job.next = job.candidates.len();
+                    continue;
+                }
                 if keeps_arm {
                     outcome.candidates_refused_slender += 1;
                     // The cheapest admissible descent cannot be held: the arm
@@ -3822,6 +3910,37 @@ mod tests {
         assert!(!keeps_standing_arm(true, true, false, true), "only the lean seats: the lean is taken");
         assert!(!keeps_standing_arm(false, true, true, false), "inside the model: nothing to keep");
         assert!(!keeps_standing_arm(true, false, true, false), "off its ground: nothing to keep");
+    }
+
+    /// **An arm that holds nothing is dropped** (round 6, `NUB-CLAW.md` part
+    /// 1; Bat_Cat_Owl arm 20, a 0.156 mm stub with 0.0000 mm2 of contact and a
+    /// lean with 0.00003 mm2, against a pixel of 0.0025). Only a tip MEASURED
+    /// to make under one pixel of contact, whose lean makes under one pixel,
+    /// with nothing resting on it. A tip with a pixel or more of contact,
+    /// however short of its plan, is a support (arm 12 of the same file: 0.0061
+    /// and 0.0094 mm2, kept); an unmeasured tip is not proof of nothing.
+    /// SABOTAGE (by hand: the nub rule off, the stub kept as in round 5): the
+    /// first row fails.
+    #[test]
+    fn an_arm_is_dropped_only_where_it_and_its_lean_touch_nothing() {
+        use super::{holds_nothing, TipContact};
+        let touches = |real: Option<f64>| TipContact {
+            seats: false,
+            real_mm2: real,
+            pixel_mm2: 0.0025,
+        };
+        let nothing = touches(Some(0.0));
+        assert!(holds_nothing(nothing, nothing, false), "neither touches: a nub");
+        assert!(
+            holds_nothing(nothing, touches(Some(0.000_031)), false),
+            "a lean under one pixel of contact is none (arm 20)"
+        );
+        assert!(!holds_nothing(touches(Some(0.0061)), touches(Some(0.0094)), false), "arm 12");
+        assert!(!holds_nothing(touches(Some(0.01)), nothing, false), "the arm has some contact");
+        assert!(!holds_nothing(nothing, touches(Some(0.01)), false), "the lean has some contact");
+        assert!(!holds_nothing(touches(None), nothing, false), "an unmeasured tip is not proof");
+        assert!(!holds_nothing(nothing, touches(None), false), "an unmeasured lean is not proof");
+        assert!(!holds_nothing(nothing, nothing, true), "something rests on it");
     }
 
     /// With S = 40 a 12.347 mm lean at 0.092 mm needs 0.309 mm: refused where

@@ -60,6 +60,12 @@ pub struct SweepEmission {
     /// raster seat's because no face was measured.
     pub tips_trimmed_to_seat: usize,
     pub tips_trimmed_without_a_measured_face: usize,
+    /// Tips seated on their face's own point because the raster seat stood on
+    /// the model side of it by more than the ball radius, and tips whose ball
+    /// centre stands on the model side of the face's plane
+    /// ([`plinth_support::SweepLowering::tips_moved_onto_face`]).
+    pub tips_moved_onto_face: usize,
+    pub tips_ball_beyond_face: usize,
     /// Per-tip contact disc the trim leaves in the seat plane, and the raster
     /// seat's offset from that plane, in arm order
     /// ([`plinth_support::SweepLowering::tip_contact_disc_radius_mm`]).
@@ -236,6 +242,8 @@ pub fn to_primitives(
         arms_dropped_invalid_geometry,
         tips_trimmed_to_seat,
         tips_trimmed_without_a_measured_face,
+        tips_moved_onto_face,
+        tips_ball_beyond_face,
         tip_contact_disc_radius_mm,
         tip_raster_seat_offset_mm,
         tips_at_law_minimum,
@@ -289,6 +297,8 @@ pub fn to_primitives(
         arms_dropped_invalid_geometry,
         tips_trimmed_to_seat,
         tips_trimmed_without_a_measured_face,
+        tips_moved_onto_face,
+        tips_ball_beyond_face,
         tip_contact_disc_radius_mm,
         tip_raster_seat_offset_mm,
         tips_at_law_minimum,

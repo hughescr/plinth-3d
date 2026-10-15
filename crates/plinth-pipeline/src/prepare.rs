@@ -3225,7 +3225,9 @@ fn print_sweep_disclosure(
             "[sweep {model}] seat trim: {} tips (and their first shaft segments) cut to the \
              model mesh, and {} further Member spans of those shafts that reach the model side \
              of the seat plane, {} of them on the raster seat's plane for want of a measured \
-             face; PLANNED contact disc (the ungrown ball in the seat plane) min {:.4} p50 {:.4} \
+             face; {} tips seated on their face's own point because the raster seat stood on \
+             the model side of it by more than the ball radius, {} balls with their centre on \
+             the model side of the face's plane; PLANNED contact disc (the ungrown ball in the seat plane) min {:.4} p50 {:.4} \
              max {:.4} mm, {below_at_face} below its own tip radius; raster seat from the face \
              min {:+.4} p50 {:+.4} max {:+.4} mm (positive = below a down-facing face). \
              Footprint (graded on the real surface inside the drawn ball): {} discs graded, {} \
@@ -3241,6 +3243,8 @@ fn print_sweep_disclosure(
             emission.tips_trimmed_to_seat,
             emission.shaft_members_trimmed_to_seat,
             emission.tips_trimmed_without_a_measured_face,
+            emission.tips_moved_onto_face,
+            emission.tips_ball_beyond_face,
             disc.0,
             disc.1,
             disc.2,
@@ -3543,6 +3547,28 @@ fn print_sweep_disclosure(
             lip.arms_graded_after,
             lip.over_limit_after.len(),
         );
+        // ARMS THAT HELD NOTHING (round 6, 2026-10-14): dropped, never kept as a
+        // nub that touches nothing. The load they were seated for is not carried.
+        println!(
+            "[sweep {model}] unheld births: {} arms dropped because their tip touches the model \
+             nowhere, their lean's does not either and nothing rests on them; load seated for \
+             and not carried {:.6} mm2",
+            lip.unheld.len(),
+            lip.unheld.iter().map(|unheld| unheld.load_mm2).sum::<f64>(),
+        );
+        for unheld in &lip.unheld {
+            println!(
+                "[sweep {model}] WARNING arm {} dropped: a birth of {:.6} mm2 at \
+                 ({:.3}, {:.3}, {:.3}) is left unheld, because no contact its tip or its lean \
+                 could make reaches it (the tip touched the model nowhere); its load is not \
+                 carried",
+                unheld.arm,
+                unheld.load_mm2,
+                unheld.seat_mm[0],
+                unheld.seat_mm[1],
+                unheld.seat_mm[2],
+            );
+        }
         // THE DRAWN SOLID OF EVERY DESCENT (fix/drawn-solid-clearance,
         // 2026-10-04): path-hit witnesses that the up-sweep read each
         // descent's solid against the model, and that the test bit.

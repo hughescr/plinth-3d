@@ -1228,6 +1228,14 @@ pub struct SweepLowering {
     /// Of those, tips whose seat plane is the plane through the raster seat
     /// because no carried face was measured.
     pub tips_trimmed_without_a_measured_face: usize,
+    /// Tips whose raster seat stood on the model side of their measured face
+    /// by more than the ball radius, and were seated on the face's own point
+    /// (round 6; every one of them had its ball beyond the face before).
+    pub tips_moved_onto_face: usize,
+    /// Tips whose ball CENTRE stands on the model side of their measured
+    /// face's plane as drawn (a grazing axis can leave a ball partly under
+    /// the face it carries; one the move did not reach would be wholly so).
+    pub tips_ball_beyond_face: usize,
     /// Every tip's CONTACT DISC radius as the trim leaves it: the circle the
     /// seat plane cuts through the emitted ball, `sqrt(R² − d²)` for a ball
     /// centre `d` from the plane, in arm order. Zero where the ball does not
@@ -1691,6 +1699,8 @@ fn lower_sweep_arms_of(
                 .push(seat.raster_seat_offset_mm);
             out.tips_trimmed_to_seat += 1;
             out.tips_trimmed_without_a_measured_face += usize::from(!seat.face_measured);
+            out.tips_moved_onto_face += usize::from(seat.moved_onto_face);
+            out.tips_ball_beyond_face += usize::from(seat.ball_beyond_face);
             out.tips_at_law_minimum += usize::from(seat.at_law_minimum);
         }
         if let Some(foot) = lowered.model_foot {
@@ -2186,6 +2196,15 @@ struct TipSeat {
     /// measured.
     trim: Option<crate::SeatTrim>,
     face_measured: bool,
+    /// The raster seat stood on the model side of the measured face by more
+    /// than the ball radius, and the tip was seated on the face's own point
+    /// instead (`seat_tip`).
+    moved_onto_face: bool,
+    /// The ball's CENTRE stands on the model side of the measured face's
+    /// plane (a tip the move above did not reach, or a grazing axis whose
+    /// ball is partly under the face): counted so the owner can see how many
+    /// balls sit beyond the face they carry.
+    ball_beyond_face: bool,
     /// The PLANNED contact disc: the ungrown ball's section in the seat plane,
     /// the area the seat was sized for. Filled by the caller once the ball
     /// exists.
@@ -3260,14 +3279,6 @@ fn seat_tip(
     let axial_depth_mm = axial_mm * abs_cos;
     let normal_completion_mm = (target_depth_mm - axial_depth_mm).max(0.0);
     let depth_mm = axial_depth_mm + normal_completion_mm;
-    let seated = std::array::from_fn(|index| {
-        arm.seat_mm[index] - unit[index] * axial_mm - outward[index] * normal_completion_mm
-    });
-    // THE DELIVERED MINIMAL SEPARATING CUT at the seat plane — the disc the
-    // model surface actually takes through the emitted ball, which is what the
-    // area law has to be evaluated on. It is not `r_tip`, and it is measured
-    // here rather than assumed anywhere.
-    let cut_radius_mm = crate::contact::ball_cut_radius_mm(tip_radius_mm, depth_mm, ball_factor);
     // THE SEAT PLANE (fix/tip-trim, 2026-09-28): the carried face's own point
     // with the very normal the law just used, so the plane the ball is cut to
     // and the face the seat was measured against are one face, never two. The
@@ -3280,6 +3291,29 @@ fn seat_tip(
         .unwrap_or(arm.seat_mm);
     let trim = crate::SeatTrim::new(plane_point, outward).ok();
     let raster_seat_offset_mm = trim.map_or(0.0, |trim| trim.support_side_distance_mm(arm.seat_mm));
+    // **A TIP WHOSE RASTER SEAT STANDS ON THE MODEL SIDE OF ITS FACE BY MORE
+    // THAN ITS BALL RADIUS IS SEATED ON THE FACE** (round 6, 2026-10-14,
+    // `NUB-CLAW.md` part 2). The seat is a raster cell's centre at a layer's
+    // mid-plane; where the feature is narrower than a cell (the Deinonychus
+    // claw's tip, 0.245 mm thick over a 0.05 mm cell) the cell's column is
+    // not carried and the seat lands on the model's far side: arm 143's ball
+    // sat 0.137 mm INSIDE the claw, on its upper face, and its head cone ran
+    // 0.08 mm through it. The ball that seat law drives into the model from
+    // there is on the wrong side of the face (and `seated_ball` then dropped
+    // the face's plane for the raster plane, so nothing measured it). The tip
+    // is put on the face's own point instead, and the shaft runs from the
+    // ball to the base as ever, so the arm descends again from there.
+    let ball_radius_mm = ball_factor * tip_radius_mm;
+    let moved_onto_face = face_measured && raster_seat_offset_mm < -ball_radius_mm;
+    let origin = if moved_onto_face { plane_point } else { arm.seat_mm };
+    let seated = std::array::from_fn(|index| {
+        origin[index] - unit[index] * axial_mm - outward[index] * normal_completion_mm
+    });
+    // THE DELIVERED MINIMAL SEPARATING CUT at the seat plane — the disc the
+    // model surface actually takes through the emitted ball, which is what the
+    // area law has to be evaluated on. It is not `r_tip`, and it is measured
+    // here rather than assumed anywhere.
+    let cut_radius_mm = crate::contact::ball_cut_radius_mm(tip_radius_mm, depth_mm, ball_factor);
     (
         seated,
         TipSeat {
@@ -3289,9 +3323,11 @@ fn seat_tip(
             ball_factor,
             trim,
             face_measured,
+            moved_onto_face,
+            ball_beyond_face: false,
             contact_disc_radius_mm: 0.0,
             drawn_ball_radius_mm: 0.0,
-            raster_seat_offset_mm,
+            raster_seat_offset_mm: if moved_onto_face { 0.0 } else { raster_seat_offset_mm },
             // `law_depth_mm` is a `max` over three terms of which the
             // rasterisation allowance is one, so it can never be below the
             // allowance; `<=` is equality.
@@ -3335,6 +3371,8 @@ fn seated_ball(
     // would keep nothing or everything. Such a tip falls back to the raster
     // seat's own plane with the same normal, and is counted as unmeasured.
     if let Some(trim) = tip_seat.trim {
+        tip_seat.ball_beyond_face =
+            tip_seat.face_measured && trim.support_side_distance_mm(center) < 0.0;
         if trim.support_side_distance_mm(center).abs() >= ball_radius_mm && tip_seat.face_measured {
             tip_seat.trim = crate::SeatTrim::new(arm.seat_mm, trim.outward_normal()).ok();
             tip_seat.face_measured = false;
@@ -3474,6 +3512,13 @@ pub struct TipContactDisc {
     pub post_top_mm: [f64; 3],
     /// The head's joint radius, `None` for a straight arm.
     pub head_joint_radius_mm: Option<f64>,
+    /// Whether the seat plane above is the carried FACE's plane. `false`: no
+    /// face was measured, or its plane passed clear of the ball, and the plane
+    /// is the raster seat's own. Such a tip says nothing about where the
+    /// model's surface is, so a reader that exempts the stretch of shaft
+    /// within the face's gap exempts only the ball ([`crate::member_clearance`]
+    /// in the sweep: an unknown zone exempts nothing).
+    pub face_measured: bool,
 }
 
 /// **The contact disc every seated arm's tip will deliver**, computed by the
@@ -3536,6 +3581,7 @@ pub fn tip_contact_discs(
                 ball_centre_mm: center,
                 post_top_mm: headed.as_ref().map_or(center, |head| head.head.joint_mm),
                 head_joint_radius_mm: headed.as_ref().map(|head| head.head.joint_radius_mm),
+                face_measured: tip_seat.face_measured,
             })
         })
         .collect())
@@ -3722,6 +3768,7 @@ pub fn model_foot_discs(
                 ball_centre_mm: ball.centre,
                 post_top_mm: ball.centre,
                 head_joint_radius_mm: None,
+                face_measured: ball.seat.face_measured,
             })
         })
         .collect())
@@ -5600,6 +5647,67 @@ mod shaft_seat_bite_tests {
             .into_iter()
             .map(|bite| bite.expect("every arm seats into a measured face"))
             .collect()
+    }
+
+    /// **A tip whose raster seat stands on the model side of its face is
+    /// seated on the face** (round 6, 2026-10-14, `NUB-CLAW.md` part 2;
+    /// Deinonychus arm 143, the claw's tip: the ball sat 0.137 mm inside the
+    /// claw on its upper face and the shaft ran through it). A down-facing face
+    /// at z = 5 with the model above it; the raster seat 0.6 mm inside the
+    /// model (more than the 0.45 mm ball). TEST: the ball centre is on the
+    /// support side of the face (below it), the face is the one measured (not
+    /// the raster plane), and the tip is where the same arm seated on the face
+    /// puts it; the shaft leaves the ball downward, away from the model.
+    /// CONTROLS: a seat 0.2 mm inside (within the ball radius) is not moved,
+    /// and a seat on the face is not moved. SABOTAGE (the move off, the ball put
+    /// back at the raster seat): the ball centre is above the face and the face
+    /// is replaced by the raster plane.
+    #[test]
+    fn a_tip_seated_inside_the_model_is_seated_on_its_face() {
+        use super::tip_contact_discs;
+        let down = [0.0, 0.0, -1.0];
+        let face = [0.0, 0.0, 5.0];
+        let with_face = |seat: [f64; 3]| {
+            let mut arm = arm(seat, down, down);
+            arm.seat_face_point_mm = Some(face);
+            arm
+        };
+        let discs = tip_contact_discs(
+            &[
+                with_face([0.0, 0.0, 5.6]),
+                with_face([0.0, 0.0, 5.2]),
+                with_face(face),
+            ],
+            &layers(),
+        )
+        .expect("a valid request");
+        let [far, inside, on] = [0, 1, 2].map(|at| discs[at].expect("every arm seats"));
+        // Height of the ball centre on the support side of the face (down).
+        let support_side = |centre: [f64; 3]| face[2] - centre[2];
+        assert!(far.face_measured, "the face is the one measured, not the raster plane");
+        assert!(
+            support_side(far.ball_centre_mm) >= -1e-9,
+            "the ball centre is on the support side: {:?}",
+            far.ball_centre_mm
+        );
+        assert!(
+            (far.ball_centre_mm[2] - on.ball_centre_mm[2]).abs() < 1e-9,
+            "seated where the arm seated on the face is: {:?} against {:?}",
+            far.ball_centre_mm,
+            on.ball_centre_mm
+        );
+        assert!(
+            far.ball_centre_mm[2] <= far.centre_mm[2] + 1e-9,
+            "the ball centre is not above the seat plane, so the shaft that leaves it downward \
+             starts clear of the model"
+        );
+        // CONTROLS.
+        assert!(inside.face_measured && on.face_measured);
+        assert!(
+            (inside.ball_centre_mm[2] - (on.ball_centre_mm[2] + 0.2)).abs() < 1e-9,
+            "a seat within the ball radius of the face is not moved: {:?}",
+            inside.ball_centre_mm
+        );
     }
 
     /// Under a flat face a vertical arm keeps its whole section, and the
