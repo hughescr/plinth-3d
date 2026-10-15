@@ -266,10 +266,236 @@ pub struct ProfileOver {
     pub chord_mm: f64,
 }
 
+/// **How the second contact is made** ([`crate::SweepPolicy::second_contact_mode`],
+/// `SC-DESIGN.md` §3).
+///
+/// * `Replan` (the default): the placement runs again from the start with the
+///   short tips' contacts as their limit; the second plan is kept where it
+///   leaves the field nearer its loads' needs. The edit modes below do no work
+///   in this mode: the seed is not read, no layer cache is built for them.
+/// * `Edit`: the finished first plan is EDITED. The new supports are put in
+///   beside the short tips on the first plan's settled layout, the field is
+///   finished again and checked against the first plan on every final
+///   predicate; a new support that fails is withdrawn. Where the edit cannot
+///   be made safe, the first plan stands.
+/// * `EditThenReplan`: as `Edit`, and where the edit is thrown away, today's
+///   `Replan` runs and today's chooser decides (the first plan stands where it
+///   rejects), so no file gets less contact than `Replan` gives.
+///
+/// `Replan` is the default because on the real models the edit is always
+/// discarded (it skips the cleanup lanes the finished first plan went
+/// through; see [`EditReport`] and [`EditExit`]), so `EditThenReplan` only
+/// adds the edit's cost in front of the same re-plan. `Edit` and
+/// `EditThenReplan` stay selectable through [`SecondContactMode::ENV`] for
+/// experiments.
+///
+/// Nothing in any mode reads the model's name.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SecondContactMode {
+    #[default]
+    Replan,
+    Edit,
+    EditThenReplan,
+}
+
+impl SecondContactMode {
+    /// The environment variable that overrides the default mode for a run
+    /// (evidence and A/B runs): `replan`, `edit` or `edit-then-replan`. It is
+    /// read where the policy is built, so the orientation search and the
+    /// emission see the same mode and the winner-plan reuse key still matches.
+    pub const ENV: &'static str = "PLINTH_SECOND_CONTACT";
+
+    /// Parse the word of [`Self::ENV`].
+    ///
+    /// # Errors
+    ///
+    /// The unknown word, so a typo cannot silently run another mode.
+    pub fn parse(word: &str) -> Result<Self, String> {
+        match word {
+            "replan" => Ok(Self::Replan),
+            "edit" => Ok(Self::Edit),
+            "edit-then-replan" => Ok(Self::EditThenReplan),
+            other => Err(format!(
+                "{}={other:?} is not one of replan, edit, edit-then-replan",
+                Self::ENV
+            )),
+        }
+    }
+
+    /// The mode a run asks for: [`Self::ENV`] if set, else the default.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::parse`].
+    pub fn from_env() -> Result<Self, String> {
+        match std::env::var(Self::ENV) {
+            Ok(word) => Self::parse(word.trim()),
+            Err(_) => Ok(Self::default()),
+        }
+    }
+
+    /// The mode's word.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Replan => "replan",
+            Self::Edit => "edit",
+            Self::EditThenReplan => "edit-then-replan",
+        }
+    }
+}
+
+/// Why an edit of the first plan was thrown away, or that it was kept. One
+/// value per exit of the transaction (`SC-DESIGN.md` §3); every discard goes
+/// through the one fallback ([`SecondContactMode`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EditExit {
+    /// The edit was not tried (the mode is `Replan`, or no contact caps).
+    #[default]
+    NotTried,
+    /// The edited field was kept.
+    Kept,
+    /// The seed is not the first plan's (identity key, digest, or a capped
+    /// tip that is not where the first plan says), or there is none.
+    SeedMismatch,
+    /// The insertion phase placed no arm.
+    NoInsertion,
+    /// The insertion moved an old member's landing: the edit is not an edit
+    /// of the first plan.
+    OldLandingMoved,
+    /// A global quantity rose (load, overload, escape, conservation).
+    Global,
+    /// An old member got worse and no new arm is structurally linked to it.
+    Untraced,
+    /// Nothing regressed, but the edit does not bring the field nearer its
+    /// loads' needs (today's keep test, on the final predicates).
+    NoGain,
+    /// Withdrawing the blamed arms would take an old member's support with
+    /// them.
+    ClosureHitsOld,
+    /// Every new arm was blamed: nothing is left of the edit.
+    Empty,
+    /// The withdrawal rounds ended with the edit still regressing.
+    Budget,
+}
+
+impl EditExit {
+    /// A short word for the log.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::NotTried => "not tried",
+            Self::Kept => "kept",
+            Self::SeedMismatch => "seed mismatch",
+            Self::NoInsertion => "no insertion",
+            Self::OldLandingMoved => "old landing moved",
+            Self::Global => "global regression",
+            Self::Untraced => "untraced regression",
+            Self::NoGain => "no gain",
+            Self::ClosureHitsOld => "closure hits an old member",
+            Self::Empty => "no arm survives",
+            Self::Budget => "withdrawal budget",
+        }
+    }
+}
+
+/// Which plan the second contact finally returned.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SecondContactResult {
+    /// No second contact was attempted (no caps, or insertion off).
+    #[default]
+    NotAttempted,
+    /// The first plan stands (the edit discarded or `Edit` mode; or the
+    /// re-plan was rejected by its chooser).
+    First,
+    /// The edited first plan.
+    Edited,
+    /// A re-plan, kept by today's chooser.
+    Replanned,
+}
+
+/// What the edit transaction did, for the log and the report. Seconds are wall
+/// time; vectors hold one entry per trial.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EditReport {
+    /// Whether the transaction ran past the seed check.
+    pub attempted: bool,
+    /// How it ended.
+    pub exit: EditExit,
+    /// The trial that was kept, from 0.
+    pub kept_trial: Option<usize>,
+    /// Withdrawal rounds run (each is one re-size and one more finished trial).
+    pub rounds: usize,
+    /// Trials finished and judged.
+    pub trials: usize,
+    /// Arms the insertion phase placed.
+    pub inserted: usize,
+    /// Down-sweep passes of the insertion phase.
+    pub insertion_passes: usize,
+    /// Whether the insertion phase took its pass 1 from the seed's route log
+    /// (`valid`), or walked because the log was stale.
+    pub seeded_log_valid: bool,
+    pub seeded_log_stale: bool,
+    /// Triggers the geometry refused in the insertion phase.
+    pub refused: usize,
+    /// Arms at the checkpoint and at the end of the last trial.
+    pub arms_first: usize,
+    pub arms_edited: usize,
+    /// Tips short of their need and the summed shortfall (mm²), in the first
+    /// plan and in the last trial; unbraced runs (final predicates) likewise.
+    pub first_short: usize,
+    pub edited_short: usize,
+    pub first_shortfall_mm2: f64,
+    pub edited_shortfall_mm2: f64,
+    pub first_unbraced: usize,
+    pub edited_unbraced: usize,
+    /// Of those, runs at twice their limit or more, and the worst run's length
+    /// over its limit.
+    pub first_unbraced_ge2: usize,
+    pub edited_unbraced_ge2: usize,
+    pub first_unbraced_max: f64,
+    pub edited_unbraced_max: f64,
+    /// The keyed warnings of the first plan and of the last trial, by class
+    /// name (collisions, model clearance, landings, heads, contact, ...): the
+    /// quality table, measured on final predicates on both sides.
+    pub first_classes: std::collections::BTreeMap<String, usize>,
+    pub edited_classes: std::collections::BTreeMap<String, usize>,
+    /// Regressions of the last judged trial: global quantities that rose;
+    /// warnings on new arms; old-member regressions traced to a new arm and
+    /// untraced; by class (the warning class name).
+    pub global_regressions: Vec<String>,
+    pub new_arm_warnings: usize,
+    pub traced_by_class: std::collections::BTreeMap<String, usize>,
+    pub untraced_by_class: std::collections::BTreeMap<String, usize>,
+    /// Arms withdrawn, in all rounds, and by the class of the warning that
+    /// blamed them (an arm blamed by two classes counts under both).
+    pub withdrawn: usize,
+    pub withdrawn_by_class: std::collections::BTreeMap<String, usize>,
+    /// Seed bytes (estimate) and the layer cache rebuild.
+    pub seed_bytes: u64,
+    pub layer_cache_seconds: f64,
+    /// Seconds: the check of the first plan (`final_checks` and the census),
+    /// the insertion phase, and per trial the finish, the final checks and
+    /// the comparison; the whole transaction.
+    pub first_checks_seconds: f64,
+    pub insertion_seconds: f64,
+    pub withdraw_seconds: Vec<f64>,
+    pub finish_seconds: Vec<f64>,
+    pub checks_seconds: Vec<f64>,
+    pub compare_seconds: Vec<f64>,
+    pub total_seconds: f64,
+}
+
 /// What the second-contact attempt did ([`crate::run_sweep_with_second_contact`]).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SecondContactOutcome {
-    /// Whether a second run was made.
+    /// The mode the policy asked for.
+    pub mode: SecondContactMode,
+    /// Which plan came back.
+    pub result: SecondContactResult,
+    /// What the edit transaction did (default when it did not run).
+    pub edit: EditReport,
+    /// Whether a second plan (a re-plan, or the edited first plan) was made.
     pub attempted: bool,
     /// Tips of the first run whose real contact sized a second one.
     pub tips_capped: usize,

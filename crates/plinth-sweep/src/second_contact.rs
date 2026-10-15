@@ -1,11 +1,11 @@
 //! **The acceptance contract for editing a finished first plan** (SC-0,
 //! `SC-DESIGN.md` §4 and §6, with astra round 2 findings 1-3).
 //!
-//! Nothing in production calls this module yet: it is the contract the edit
-//! transaction (SC-3) will be held to, written first and tested alone, so that
-//! "keep the edit" can never mean "nobody measured what it did". Everything
-//! here is READ-ONLY on a finished field: it never alters the geometry the first
-//! plan (P1) emits.
+//! This is the contract the edit transaction ([`edit`], SC-3) is held to,
+//! written first and tested alone, so that "keep the edit" can never mean
+//! "nobody measured what it did". Everything in THIS file is READ-ONLY on a
+//! finished field: it never alters the geometry the first plan (P1) emits; the
+//! transaction in [`edit`] is the only code that edits.
 //!
 //! # What a finished field is compared on
 //!
@@ -249,8 +249,17 @@ impl Globals {
             ("route_not_converged", self.route_not_converged as f64, false),
             ("sweeps_disagree", flag(self.sweeps_disagree), false),
             ("unrooted_landings", self.unrooted_landings as f64, false),
-            ("insertion_rounds_exhausted", self.insertion_rounds_exhausted as f64, false),
-            ("insertion_geometry_exhausted", self.insertion_geometry_exhausted as f64, false),
+            // NOT compared: `insertion_rounds_exhausted` and
+            // `insertion_geometry_exhausted` count the triggers the insertion of
+            // the LAST down-sweep call could not relieve. P1 never ran under the
+            // contact caps, so any cap the geometry refused (a tip whose feature
+            // leaves no room beside it) would read as a regression of the edit,
+            // and the edit would be discarded in the very case it is made for.
+            // They are the attempt's own accounting: the tip stays short, which
+            // the keep test reads, and an arm left over the AREA law shows as an
+            // `Overload` row and in the load totals above (measured 2026-10-15:
+            // the Round 25 disc, 32 carriers placed, geometry exhausted on
+            // refused caps, nothing else regressed).
             ("drain_seat_refusals", self.drain_seat_refusals as f64, false),
             ("merges_kept_carrying", self.merges_kept_carrying as f64, false),
             ("still_congested", flag(self.still_congested), false),
@@ -1501,6 +1510,8 @@ pub fn baseline_census(
         final_seconds,
     }
 }
+
+pub(crate) mod edit;
 
 #[cfg(test)]
 mod tests;

@@ -2862,8 +2862,10 @@ fn sweep_and_emit(
     // its load needs (round 5 review, 2026-10-14): the placement runs again
     // with those tips' real contacts as their limit; kept where it leaves the
     // field nearer its loads' needs.
-    let plan = plinth_sweep::run_sweep_with_second_contact(
+    let second_started = std::time::Instant::now();
+    let plan = plinth_sweep::run_sweep_with_second_contact_seeded(
         plan,
+        seed.as_deref(),
         hollowed.mesh(),
         &sweep_layers,
         &policy,
@@ -2876,10 +2878,12 @@ fn sweep_and_emit(
             source,
         })
     })?;
-    // The seed is not consumed yet: it is released here so it never outlives
-    // the second contact into the emission.
+    let second_seconds = second_started.elapsed().as_secs_f64();
+    // The seed is consumed by the edit modes and released here, so it never
+    // outlives the second contact into the emission.
     drop(seed);
     let second = &plan.report.seat_second_contact;
+    print_second_contact_edit(model, second, second_seconds);
     if second.attempted {
         println!(
             "[sweep {model}] second contact: {} short tips sized a second contact from the \
@@ -3105,6 +3109,114 @@ fn sweep_and_emit(
         plate_z_mm: supported.plate_z_mm().get(),
         emit,
     }))
+}
+
+/// The log lines of the second contact's edit transaction (`SC-DESIGN.md` §3 and
+/// §5): what was tried, how it ended and why, what each step cost. Printed
+/// whenever the transaction ran; silent in mode `Replan` and where the
+/// second contact was not attempted.
+fn print_second_contact_edit(
+    model: &ModelId,
+    second: &plinth_sweep::contact_growth::SecondContactOutcome,
+    second_seconds: f64,
+) {
+    use plinth_sweep::contact_growth::{EditExit, SecondContactResult};
+    let edit = &second.edit;
+    if edit.exit == EditExit::NotTried {
+        if second.attempted {
+            println!(
+                "[sweep {model}] second contact stage: mode {}, {:.2} s",
+                second.mode.word(),
+                second_seconds
+            );
+        }
+        return;
+    }
+    let by_class = |classes: &std::collections::BTreeMap<String, usize>| -> String {
+        if classes.is_empty() {
+            "none".to_owned()
+        } else {
+            classes.iter().map(|(class, count)| format!("{class} {count}")).collect::<Vec<_>>().join(", ")
+        }
+    };
+    let result = match second.result {
+        SecondContactResult::NotAttempted => "not attempted",
+        SecondContactResult::First => "the first plan stands",
+        SecondContactResult::Edited => "the EDITED first plan is kept",
+        SecondContactResult::Replanned => "the re-plan is kept",
+    };
+    let secs = |values: &[f64]| -> String {
+        values.iter().map(|value| format!("{value:.2}")).collect::<Vec<_>>().join("/")
+    };
+    println!(
+        "[sweep {model}] second contact edit (mode {}): {} ({}); {result}; stage {:.2} s \
+         (edit {:.2} s)",
+        second.mode.word(),
+        edit.exit.word(),
+        edit.kept_trial.map_or_else(|| "no trial kept".to_owned(), |trial| format!("trial {trial}")),
+        second_seconds,
+        edit.total_seconds,
+    );
+    println!(
+        "[sweep {model}] second contact edit: {} arms inserted in {} passes (pass 1 from the \
+         seed's route log: {}, stale: {}), {} triggers refused; {} trials, {} withdrawal rounds, \
+         {} arms withdrawn",
+        edit.inserted,
+        edit.insertion_passes,
+        edit.seeded_log_valid,
+        edit.seeded_log_stale,
+        edit.refused,
+        edit.trials,
+        edit.rounds,
+        edit.withdrawn,
+    );
+    println!(
+        "[sweep {model}] second contact edit: arms {} -> {}; short tips {} -> {} and shortfall \
+         {:.4} -> {:.4} mm2; unbraced runs (final) {} -> {}",
+        edit.arms_first,
+        edit.arms_edited,
+        edit.first_short,
+        edit.edited_short,
+        edit.first_shortfall_mm2,
+        edit.edited_shortfall_mm2,
+        edit.first_unbraced,
+        edit.edited_unbraced,
+    );
+    println!(
+        "[sweep {model}] second contact edit quality (final predicates; first plan -> last trial): \
+         unbraced runs over limit {} -> {} (at 2x or more {} -> {}, worst L/limit {:.2} -> {:.2}); \
+         keyed warnings by class, first plan: {}; last trial: {}",
+        edit.first_unbraced,
+        edit.edited_unbraced,
+        edit.first_unbraced_ge2,
+        edit.edited_unbraced_ge2,
+        edit.first_unbraced_max,
+        edit.edited_unbraced_max,
+        by_class(&edit.first_classes),
+        by_class(&edit.edited_classes),
+    );
+    println!(
+        "[sweep {model}] second contact edit: last trial regressions: global [{}], warnings on \
+         new arms {}, traced to a new arm: {}, untraced: {}; withdrawn by class: {}",
+        edit.global_regressions.join(", "),
+        edit.new_arm_warnings,
+        by_class(&edit.traced_by_class),
+        by_class(&edit.untraced_by_class),
+        by_class(&edit.withdrawn_by_class),
+    );
+    println!(
+        "[sweep {model}] second contact edit seconds: layer cache {:.2}, insertion {:.2}, first \
+         plan's checks {:.2}; per trial finish {}, checks {}, compare {}; per withdrawal {}; seed \
+         {} bytes",
+        edit.layer_cache_seconds,
+        edit.insertion_seconds,
+        edit.first_checks_seconds,
+        secs(&edit.finish_seconds),
+        secs(&edit.checks_seconds),
+        secs(&edit.compare_seconds),
+        secs(&edit.withdraw_seconds),
+        edit.seed_bytes,
+    );
 }
 
 /// A stable `u64` view of the sweep's own content digest, so the run report's
