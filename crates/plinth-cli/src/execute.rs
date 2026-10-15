@@ -114,6 +114,7 @@ fn resolve(selection: &PrepareSelection) -> Result<PrepareRequest, PipelineError
         },
         support,
         no_cache: selection.cache.no_cache(),
+        exact_delicacy: selection.exact_delicacy,
         // `--stop-after` is not on the ratified command line. A stage stop is a
         // testing outcome; the CLI runs the whole chain or reports why it could
         // not.
@@ -237,6 +238,22 @@ fn print_report(selection: &PrepareSelection, report: &PrepareReport) {
             ),
         }
     );
+
+    // Which delicacy curvature the orientation table read. The protected proxy
+    // can pick a different pose than the full mesh on a dense model, so the
+    // run states which one it was (and how to ask for the other).
+    if matches!(selection.orientation, OrientSelection::Dense) {
+        println!(
+            "  delicacy     {}",
+            if selection.exact_delicacy {
+                "orientation table curvature on the full mesh (--exact-delicacy)"
+            } else {
+                "orientation table curvature on the protected proxy (default; \
+                 --exact-delicacy evaluates the full mesh, slower on a dense model, \
+                 and can pick a different pose)"
+            }
+        );
+    }
 
     for line in no_orient_lines(
         &selection.no_orient,

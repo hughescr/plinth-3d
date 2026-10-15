@@ -129,6 +129,39 @@ pub fn evaluate_delicacy(
     settings: DelicacySettings,
     config: DelicacyBuildConfig,
 ) -> Result<DelicacyField, DelicacyError> {
+    evaluate_delicacy_with(mesh, lod, settings, config, DelicacyEvaluation::Exact)
+}
+
+/// How the curvature spread of [`evaluate_delicacy_with`] is evaluated.
+///
+/// The thinness proxy is the same under both; only the curvature spread
+/// differs, and only on a mesh large enough for the difference to pay
+/// (see [`protected_proxy`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DelicacyEvaluation {
+    /// Every curved welded vertex is spread over its own ball. The reference
+    /// the registered tests and the recorded outputs were made with.
+    Exact,
+    /// Protected proxy (the production default, 2026-10-15): vertices that
+    /// carry real curvature are spread exactly; the many low-curvature vertices
+    /// of a dense mesh are merged into per-patch clusters first, so the walk
+    /// count falls by about the cluster size. Output-changing by design.
+    #[default]
+    ProtectedProxy,
+}
+
+/// [`evaluate_delicacy`], with the curvature evaluation named.
+///
+/// # Errors
+///
+/// As [`evaluate_delicacy`].
+pub fn evaluate_delicacy_with(
+    mesh: &Mesh,
+    lod: impl Into<String>,
+    settings: DelicacySettings,
+    config: DelicacyBuildConfig,
+    evaluation: DelicacyEvaluation,
+) -> Result<DelicacyField, DelicacyError> {
     config.validate()?;
     let denominator = settings.curvature_weight() + settings.thinness_weight();
     if !(denominator.is_finite() && denominator > 0.0) {
@@ -151,7 +184,8 @@ pub fn evaluate_delicacy(
     let geometry_mark = perf::stage("orient.delicacy.geometry");
     let geometry = FaceGeometryPass::run(mesh);
     drop(geometry_mark);
-    let (curvature, _counts) = curvature_by_face(mesh, &geometry, settings.thin_feature_mm())?;
+    let (curvature, _counts) =
+        curvature_by_face(mesh, &geometry, settings.thin_feature_mm(), evaluation)?;
     let thinness_mark = perf::stage("orient.delicacy.thinness");
     let thinness = thinness_by_face(mesh, &geometry, settings.thin_feature_mm(), config)?;
     drop(thinness_mark);
@@ -417,9 +451,13 @@ fn curvature_by_face(
     mesh: &Mesh,
     geometry: &FaceGeometryPass,
     radius_mm: f64,
+    evaluation: DelicacyEvaluation,
 ) -> Result<(Vec<f64>, CurvatureSpreadCounts), DelicacyError> {
     let _perf_span = perf::span(Span::Curvature);
-    let (by_face, spread) = curvature_parallel(mesh, geometry, radius_mm)?;
+    let (by_face, spread) = match evaluation {
+        DelicacyEvaluation::Exact => curvature_parallel(mesh, geometry, radius_mm)?,
+        DelicacyEvaluation::ProtectedProxy => curvature_proxy_parallel(mesh, geometry, radius_mm)?,
+    };
     // Write-only perf charge, once per spread (never read back).
     if perf::enabled() {
         let counts = spread.counts;
@@ -452,6 +490,182 @@ pub(crate) fn curvature_parallel(
         spread_all::<Exact>(&inputs, &SpreadPlan::PRODUCTION)
     })
     .map_err(|error| DelicacyError::Kernel(error.to_string()))?;
+    let by_face = charge_to_by_face(geometry, &spread.charge);
+    Ok((by_face, spread))
+}
+
+/// Cluster cell edge, in cells per spread radius. A cluster holds the
+/// low-curvature vertices of one cell that face the same way, so it spans at
+/// most `radius / CLUSTER_CELLS_PER_RADIUS` per axis.
+const CLUSTER_CELLS_PER_RADIUS: f64 = 4.0;
+
+/// Normalized angle defect at and above which a vertex is PROTECTED: it is
+/// never merged, so every tip, corner and sharp point of a delicate feature
+/// is spread from its own position exactly as in the exact evaluation.
+/// (0.1 is 0.63 rad of angle defect at one vertex: a cube corner reads 0.25.)
+const PROTECTED_DEFECT: f64 = 0.1;
+
+/// Fewer curved vertices than this and the exact walk is already cheap; the
+/// proxy does not engage, so small fixtures and minis stay exact.
+const PROXY_MIN_CURVED_VERTICES: usize = 20_000;
+
+/// The reduced walk list of the protected proxy: one item per cluster or
+/// protected vertex, in ascending representative-vertex order.
+struct ProxyItems {
+    value: Vec<f64>,
+    position: Vec<V3>,
+    offsets: Vec<usize>,
+    incident: Vec<usize>,
+}
+
+/// Which way a vertex faces, as one of six axis classes of the area-weighted
+/// sum of its incident face normals. Two vertices of one cell merge only when
+/// they face alike, so the two sides of a thin sheet, fin or blade (opposite
+/// normals, a fraction of a cell apart) are never merged into one walk that
+/// would bleed across the wall.
+fn facing_class(setup: &CurvatureSetup, geometry: &FaceGeometryPass, vertex: usize) -> u8 {
+    let mut sum = [0.0_f64; 3];
+    for &face in &setup.incident[setup.offsets[vertex]..setup.offsets[vertex + 1]] {
+        let weighted = scale(geometry.normals[face], geometry.areas_mm2[face]);
+        sum = add(sum, weighted);
+    }
+    let mut axis = 0_usize;
+    for candidate in 1..3 {
+        if sum[candidate].abs() > sum[axis].abs() {
+            axis = candidate;
+        }
+    }
+    // `axis < 3`, so the class is `< 6`.
+    u8::try_from(axis * 2 + usize::from(sum[axis] < 0.0)).unwrap_or(0)
+}
+
+/// Builds the protected-proxy walk list, or `None` when the mesh has too few
+/// curved vertices for the proxy to pay (the caller then walks exactly).
+///
+/// Every protected vertex (defect at or above [`PROTECTED_DEFECT`]) is one item
+/// at its own position with its own value. The rest are merged per
+/// `(cell, facing)` group: the group's value is the SUM of its members' values
+/// (the curvature mass is conserved), and it is spread once from the member
+/// nearest the value-weighted centroid, so the centre lies on the surface.
+/// Everything is serial and in ascending vertex order, so the list does not
+/// depend on a thread count.
+fn protected_proxy(
+    setup: &CurvatureSetup,
+    geometry: &FaceGeometryPass,
+    radius_mm: f64,
+) -> Option<ProxyItems> {
+    let curved = setup.vertex_curvature.iter().filter(|&&value| value > 0.0).count();
+    if curved < PROXY_MIN_CURVED_VERTICES {
+        return None;
+    }
+    let cell = radius_mm / CLUSTER_CELLS_PER_RADIUS;
+    let mut protected: Vec<(u32, f64)> = Vec::new();
+    let mut keyed: Vec<((i64, i64, i64, u8), u32)> = Vec::new();
+    for (vertex, &value) in setup.vertex_curvature.iter().enumerate() {
+        if value.is_nan() || value <= 0.0 {
+            continue;
+        }
+        // `welded_count < u32::MAX`, checked in `curvature_setup`.
+        let id = u32::try_from(vertex).unwrap_or(u32::MAX);
+        if value >= PROTECTED_DEFECT {
+            protected.push((id, value));
+            continue;
+        }
+        let at = setup.position[vertex];
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a cell index of a coordinate in mm divided by a cell edge of a fraction of a \
+                      mm; the cast saturates on a non-finite or absurd coordinate, which only \
+                      changes which cluster the vertex joins, never a value"
+        )]
+        let key = (
+            (at[0] / cell).floor() as i64,
+            (at[1] / cell).floor() as i64,
+            (at[2] / cell).floor() as i64,
+            facing_class(setup, geometry, vertex),
+        );
+        keyed.push((key, id));
+    }
+    keyed.sort_unstable();
+
+    let mut items: Vec<(u32, f64)> = protected;
+    let mut start = 0_usize;
+    while start < keyed.len() {
+        let mut end = start + 1;
+        while end < keyed.len() && keyed[end].0 == keyed[start].0 {
+            end += 1;
+        }
+        let group = &keyed[start..end];
+        let mut total = 0.0_f64;
+        let mut centroid = [0.0_f64; 3];
+        for &(_, id) in group {
+            let value = setup.vertex_curvature[id as usize];
+            total += value;
+            centroid = add(centroid, scale(setup.position[id as usize], value));
+        }
+        let centroid = scale(centroid, 1.0 / total);
+        let mut representative = group[0].1;
+        let mut nearest = f64::INFINITY;
+        for &(_, id) in group {
+            let offset = sub(setup.position[id as usize], centroid);
+            let distance = dot(offset, offset);
+            if distance < nearest {
+                nearest = distance;
+                representative = id;
+            }
+        }
+        items.push((representative, total));
+        start = end;
+    }
+    items.sort_unstable_by_key(|&(id, _)| id);
+
+    let mut value = Vec::with_capacity(items.len());
+    let mut position = Vec::with_capacity(items.len());
+    let mut offsets = Vec::with_capacity(items.len() + 1);
+    let mut incident = Vec::new();
+    offsets.push(0_usize);
+    for &(id, total) in &items {
+        let vertex = id as usize;
+        value.push(total);
+        position.push(setup.position[vertex]);
+        incident.extend_from_slice(
+            &setup.incident[setup.offsets[vertex]..setup.offsets[vertex + 1]],
+        );
+        offsets.push(incident.len());
+    }
+    Some(ProxyItems {
+        value,
+        position,
+        offsets,
+        incident,
+    })
+}
+
+/// The protected-proxy spread: the same walk and replay as
+/// [`curvature_parallel`], over the reduced item list.
+pub(crate) fn curvature_proxy_parallel(
+    mesh: &Mesh,
+    geometry: &FaceGeometryPass,
+    radius_mm: f64,
+) -> Result<(Vec<f64>, SpreadOutcome), DelicacyError> {
+    let setup = curvature_setup(mesh, geometry)?;
+    let radius_sq = radius_mm * radius_mm;
+    let reduced = protected_proxy(&setup, geometry, radius_mm);
+    let inputs = match &reduced {
+        Some(items) => CurvatureSpreadInputs {
+            mesh,
+            geometry,
+            topology: &setup.topology,
+            value: &items.value,
+            position: &items.position,
+            offsets: &items.offsets,
+            incident: &items.incident,
+            radius_sq,
+        },
+        None => setup.inputs(mesh, geometry, radius_sq),
+    };
+    let spread = geom_kernel::run_in_pool(|| spread_all::<Exact>(&inputs, &SpreadPlan::PRODUCTION))
+        .map_err(|error| DelicacyError::Kernel(error.to_string()))?;
     let by_face = charge_to_by_face(geometry, &spread.charge);
     Ok((by_face, spread))
 }
@@ -1290,7 +1504,8 @@ pub(crate) mod tests {
             let mesh = gridded_cube(n);
             let geometry = FaceGeometryPass::run(&mesh);
             let (curvature, counts) =
-                curvature_by_face(&mesh, &geometry, radius).expect("curvature");
+                curvature_by_face(&mesh, &geometry, radius, DelicacyEvaluation::Exact)
+                    .expect("curvature");
             // Only the 8 cube corners are curved; grid vertices on a face or
             // along an edge have zero defect up to the last bit of `acos`.
             assert!(
@@ -1551,10 +1766,172 @@ pub(crate) mod tests {
             let (serial, serial_counts) =
                 curvature_by_face_serial(&mesh, &geometry, radius).expect("serial oracle");
             let (parallel, counts) =
-                curvature_by_face(&mesh, &geometry, radius).expect("parallel spread");
+                curvature_by_face(&mesh, &geometry, radius, DelicacyEvaluation::Exact)
+                    .expect("parallel spread");
             assert_eq!(bits(&parallel), bits(&serial), "{name}");
             assert_eq!(counts, serial_counts, "{name}");
         }
+    }
+
+    /// A UV sphere of radius `radius` mm with `rings x segments` quads, each
+    /// ring's vertices nudged radially by a deterministic ripple so the angle
+    /// defects are noisy and positive and negative alike, like a decimated
+    /// dense scan. Closed, outward-wound.
+    fn rippled_sphere(rings: u32, segments: u32, radius: f64, ripple: f64) -> Mesh {
+        let mut verts: Vec<V3> = vec![[0.0, 0.0, radius]];
+        for ring in 1..rings {
+            let polar = std::f64::consts::PI * f64::from(ring) / f64::from(rings);
+            for segment in 0..segments {
+                let azimuth = std::f64::consts::TAU * f64::from(segment) / f64::from(segments);
+                let wobble = 1.0
+                    + ripple * (f64::from((ring * 31 + segment * 17) % 7) - 3.0) / 3.0;
+                let r = radius * wobble;
+                verts.push([
+                    r * polar.sin() * azimuth.cos(),
+                    r * polar.sin() * azimuth.sin(),
+                    r * polar.cos(),
+                ]);
+            }
+        }
+        verts.push([0.0, 0.0, -radius]);
+        let south = u32::try_from(verts.len() - 1).expect("small");
+        let at = |ring: u32, segment: u32| 1 + (ring - 1) * segments + segment % segments;
+        let mut tris: Vec<[u32; 3]> = Vec::new();
+        for segment in 0..segments {
+            tris.push([0, at(1, segment), at(1, segment + 1)]);
+        }
+        for ring in 1..rings - 1 {
+            for segment in 0..segments {
+                let (a, b) = (at(ring, segment), at(ring, segment + 1));
+                let (c, d) = (at(ring + 1, segment), at(ring + 1, segment + 1));
+                tris.push([a, c, b]);
+                tris.push([b, c, d]);
+            }
+        }
+        for segment in 0..segments {
+            tris.push([south, at(rings - 1, segment + 1), at(rings - 1, segment)]);
+        }
+        Mesh::new(verts, tris).expect("a closed sphere")
+    }
+
+    /// On a mesh too small to pay, the proxy does not engage and the field is
+    /// the exact field bit for bit.
+    #[test]
+    fn the_proxy_is_the_exact_field_on_a_small_mesh() {
+        for mesh in [gridded_cube(8), rippled_sphere(24, 48, 4.0, 0.002)] {
+            let exact = evaluate_delicacy_with(
+                &mesh,
+                "l",
+                settings(),
+                config(),
+                DelicacyEvaluation::Exact,
+            )
+            .expect("exact");
+            let proxy = evaluate_delicacy_with(
+                &mesh,
+                "l",
+                settings(),
+                config(),
+                DelicacyEvaluation::ProtectedProxy,
+            )
+            .expect("proxy");
+            assert_eq!(exact.digest(), proxy.digest());
+        }
+    }
+
+    /// The proxy engages on a dense mesh, merges the many small vertices into
+    /// few walks, conserves their curvature mass, keeps every protected
+    /// vertex as its own walk, and lands near the exact field.
+    #[test]
+    fn the_proxy_merges_small_vertices_keeps_the_sharp_ones_and_conserves_mass() {
+        let mesh = rippled_sphere(180, 360, 6.0, 0.0005);
+        let geometry = FaceGeometryPass::run(&mesh);
+        let setup = curvature_setup(&mesh, &geometry).expect("setup");
+        let radius = settings().thin_feature_mm();
+        let items = protected_proxy(&setup, &geometry, radius).expect("dense mesh engages the proxy");
+        let curved = setup.vertex_curvature.iter().filter(|&&v| v > 0.0).count();
+        assert!(curved >= PROXY_MIN_CURVED_VERTICES, "{curved}");
+        assert!(
+            items.value.len() * 3 < curved,
+            "{} items for {curved} curved vertices: the proxy merged almost nothing",
+            items.value.len()
+        );
+        let mass_before: f64 = setup.vertex_curvature.iter().sum();
+        let mass_after: f64 = items.value.iter().sum();
+        assert!(
+            (mass_before - mass_after).abs() <= 1e-9 * mass_before,
+            "{mass_before} vs {mass_after}"
+        );
+        // Every protected vertex is its own item with its own value.
+        let protected = setup
+            .vertex_curvature
+            .iter()
+            .filter(|&&v| v >= PROTECTED_DEFECT)
+            .count();
+        let own = items.value.iter().filter(|&&v| v >= PROTECTED_DEFECT).count();
+        assert!(protected > 0, "the ripple should leave some sharp vertices");
+        assert!(own >= protected, "{own} items at or above the protected defect for {protected} vertices");
+
+        let exact = evaluate_delicacy_with(&mesh, "l", settings(), config(), DelicacyEvaluation::Exact)
+            .expect("exact");
+        let proxy =
+            evaluate_delicacy_with(&mesh, "l", settings(), config(), DelicacyEvaluation::ProtectedProxy)
+                .expect("proxy");
+        let worst = exact
+            .face_values()
+            .iter()
+            .zip(proxy.face_values())
+            .map(|(a, b)| (a.curvature() - b.curvature()).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(worst < 0.15, "worst per-face curvature difference {worst}");
+    }
+
+    /// The proxy field does not depend on the thread count.
+    #[test]
+    fn the_proxy_field_is_bit_reproducible_across_thread_counts() {
+        let mesh = rippled_sphere(180, 360, 6.0, 0.0005);
+        let digest = |threads: usize| {
+            in_pool(threads, || {
+                evaluate_delicacy_with(
+                    &mesh,
+                    "l",
+                    settings(),
+                    config(),
+                    DelicacyEvaluation::ProtectedProxy,
+                )
+                .expect("proxy")
+                .digest()
+                .to_owned()
+            })
+        };
+        assert_eq!(digest(1), digest(5));
+    }
+
+    /// The two sides of a thin sheet face opposite ways, so they can never share
+    /// a cluster: a merged walk would otherwise bleed across the wall.
+    #[test]
+    fn opposite_faces_of_a_thin_sheet_get_different_facing_classes() {
+        let mesh = gridded_cube(8);
+        // Flatten the cube into a 0.05 mm sheet.
+        let flat: Vec<V3> = mesh.verts().iter().map(|v| [v[0], v[1], v[2] * 0.05 / 8.0]).collect();
+        let sheet = Mesh::new(flat, mesh.tris().to_vec()).expect("sheet");
+        let geometry = FaceGeometryPass::run(&sheet);
+        let setup = curvature_setup(&sheet, &geometry).expect("setup");
+        let mut top = None;
+        let mut bottom = None;
+        for (vertex, p) in setup.position.iter().enumerate() {
+            // Interior vertices of the two big faces.
+            if p[0] > 0.5 && p[0] < 7.5 && p[1] > 0.5 && p[1] < 7.5 {
+                if p[2] > 0.0 {
+                    top = Some(vertex);
+                } else {
+                    bottom = Some(vertex);
+                }
+            }
+        }
+        let top = facing_class(&setup, &geometry, top.expect("a top vertex"));
+        let bottom = facing_class(&setup, &geometry, bottom.expect("a bottom vertex"));
+        assert_ne!(top, bottom);
     }
 
     /// Path hits: the faces where order can matter exist on the fixture, and a

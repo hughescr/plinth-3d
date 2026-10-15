@@ -151,6 +151,7 @@ pub fn stage_policy() -> StagePolicy {
         .expect("production resource policy"),
         // The legacy engine reads no sweep plan, so there is nothing to reuse.
         winner_plan_reuse: plinth_pipeline::prepare::WinnerPlanReuse::Enabled,
+        exact_delicacy: false,
     }
 }
 

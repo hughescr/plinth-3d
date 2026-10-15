@@ -434,6 +434,10 @@ pub struct PrepareRequest {
     pub support: SupportRequest,
     /// The sole cache-bypass control, corresponding only to CLI `--no-cache`.
     pub no_cache: bool,
+    /// `--exact-delicacy`: evaluate the orientation table's delicacy curvature
+    /// on the full mesh (slower, the reference) instead of the protected proxy
+    /// that is the default since 2026-10-15. The proxy can move the chosen pose.
+    pub exact_delicacy: bool,
     pub stop_after: Option<StageStop>,
 }
 

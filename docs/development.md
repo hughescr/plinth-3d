@@ -693,6 +693,20 @@ and give the same bits at every thread count.
   applies the blocks in ascending order. A block that reaches its pair cap stops after a
   finished vertex and its remainder is replayed in place, so the cap changes only when an
   addend is computed, never the addend or its place.
+- **The protected proxy (default for the orientation table; `--exact-delicacy` opts out).**
+  `plinth prepare` evaluates the orientation table's delicacy curvature with
+  `DelicacyEvaluation::ProtectedProxy` unless `--exact-delicacy` is given (`PrepareRequest::exact_delicacy`,
+  `SweepRequest::delicacy`; `OrientFaceTable::build` and `evaluate_delicacy` stay exact). A mesh with
+  fewer than `PROXY_MIN_CURVED_VERTICES` (20 000) curved welded vertices is walked exactly. On a larger
+  mesh `protected_proxy` keeps every vertex whose normalized angle defect is at least 0.1 as its own walk,
+  and merges the rest per cell of `radius / 4` (0.375 mm) AND per facing (one of six axis classes of the
+  area-weighted vertex normal, so the two sides of a thin sheet never merge). A cluster is spread once,
+  from the member nearest its value-weighted centre, with the SUM of its members' values, so curvature
+  mass is conserved. The walk and the replay are the exact path's, over fewer items, so the field is
+  still bit-identical at every thread count; it is not equal to the exact field, so the chosen pose can
+  differ on a dense model. The thinness proxy and the display field are untouched (the display pass is a
+  per-face gather, not a vertex scatter, so the merge does not apply to it).
+  `examples/delicacy_proxy_probe.rs` prints the exact-versus-proxy difference on STL files.
 - **The display pass** is a gather (face `f` writes only its own slots), so fixed 1024-face
   blocks are concatenated in block order. Scratch is pooled per worker, and the visited stamps
   are keyed by the global face index, which is unique, so stale stamps never collide.
