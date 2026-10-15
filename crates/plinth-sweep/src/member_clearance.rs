@@ -1571,8 +1571,11 @@ fn overlap_beyond_joints(p: &Piece, q: &Piece, joints: &[([f64; 3], [f64; 3])]) 
 ///
 /// * a member that lands on another (`Landing::Strut`) meets it at its drawn
 ///   bottom, and one that seats on another (`seat_on_strut`) at its drawn top;
-/// * two members that land (or seat) on the same host meet each other near
-///   their own joints.
+/// * members within three hops of one another in the graph of those landings
+///   and seats (a child, its host, the host's host, and the host's other
+///   children) are a CLUSTER that meets at every joint point of the cluster
+///   ([`designed_joints`]); the two diagonals of an `|X|` also meet where their
+///   axes cross.
 ///
 /// The joint's ZONE is `1.25 (r_a + r_b) / sin(angle)` along each axis from the
 /// joint point (the lens two axes that cross at a planned joint overlap along),
@@ -1690,46 +1693,98 @@ pub(crate) fn member_collisions(
         })
         .collect()
 }
+/// How far apart in the graph of joined members (a member and the member it
+/// lands on or seats on) two members may stand and still be a cluster that
+/// meets at its planned joints: a child, its host, and the host's own host.
+/// Three hops reach a grandchild's sibling.
+const JOINT_CLUSTER_HOPS: usize = 3;
+
 /// The planned joints of the field, by member-index pair `(low, high)`: the
-/// joint point on each member of the pair. One pass over the members.
-fn designed_joints(
-    struts: &[crate::SweepStrut],
-    ends: &[ShaftEnds],
-) -> DesignedJoints {
-    let mut joints: DesignedJoints = std::collections::HashMap::new();
-    let mut push = |a: usize, at_a: [f64; 3], b: usize, at_b: [f64; 3]| {
-        if a == b {
-            return;
-        }
-        if a < b {
-            joints.entry((a, b)).or_default().push((at_a, at_b));
-        } else {
-            joints.entry((b, a)).or_default().push((at_b, at_a));
-        }
-    };
-    let mut landers: std::collections::BTreeMap<usize, Vec<(usize, [f64; 3])>> = std::collections::BTreeMap::new();
-    let mut seaters: std::collections::BTreeMap<usize, Vec<(usize, [f64; 3])>> = std::collections::BTreeMap::new();
+/// joint points of the pair. One pass over the members.
+///
+/// A member's OWN joint points are where it lands on a member (its drawn
+/// bottom) and where its top seats on one. Members that are RELATIVES, within
+/// [`JOINT_CLUSTER_HOPS`] of one another in the graph of those landings and
+/// seats, share every joint point of both: a grandchild lands on a child that
+/// lands on a trunk, and the three solids all meet where the grandchild's end
+/// is (Cylinder 85/88/113 on `a7ffbe3`: the 1.26 mm "collision" of a grandchild
+/// with its grandparent is the cluster's joint). The two diagonals of an `|X|`
+/// are relatives too (each lands on the post the other seats on) and also meet
+/// where their axes cross, which is a joint of the pair.
+///
+/// This makes a joint a place, not a licence: an overlap is excused only within
+/// the joint's zone ([`overlap_beyond_joints`]), on pieces of members that are
+/// joined to each other by plan.
+fn designed_joints(struts: &[crate::SweepStrut], ends: &[ShaftEnds]) -> DesignedJoints {
+    let count = struts.len();
+    let mut own: Vec<Vec<[f64; 3]>> = vec![Vec::new(); count];
+    let mut adjacent: Vec<std::collections::BTreeSet<usize>> = vec![std::collections::BTreeSet::new(); count];
     for (member, strut) in struts.iter().enumerate() {
         let Some((top, bottom)) = ends[member] else { continue };
         if let crate::Landing::Strut { id, .. } = strut.landing {
             let host = id as usize;
-            if host < struts.len() {
-                push(member, bottom, host, bottom);
-                landers.entry(host).or_default().push((member, bottom));
+            if host < count && host != member {
+                own[member].push(bottom);
+                adjacent[member].insert(host);
+                adjacent[host].insert(member);
             }
         }
         if let Some(host) = strut.seat_on_strut {
             let host = host as usize;
-            if host < struts.len() {
-                push(member, top, host, top);
-                seaters.entry(host).or_default().push((member, top));
+            if host < count && host != member {
+                own[member].push(top);
+                adjacent[member].insert(host);
+                adjacent[host].insert(member);
             }
         }
     }
-    for group in landers.values().chain(seaters.values()) {
-        for (at, &(a, at_a)) in group.iter().enumerate() {
-            for &(b, at_b) in &group[at + 1..] {
-                push(a, at_a, b, at_b);
+    let mut joints: DesignedJoints = std::collections::HashMap::new();
+    for first in 0..count {
+        // Breadth-first to the cluster's depth, in index order.
+        let mut seen: std::collections::BTreeSet<usize> = std::collections::BTreeSet::from([first]);
+        let mut frontier = vec![first];
+        for _ in 0..JOINT_CLUSTER_HOPS {
+            let mut next = Vec::new();
+            for &member in &frontier {
+                for &neighbour in &adjacent[member] {
+                    if seen.insert(neighbour) {
+                        next.push(neighbour);
+                    }
+                }
+            }
+            frontier = next;
+        }
+        for &second in seen.iter().filter(|&&other| other > first) {
+            let shared: Vec<([f64; 3], [f64; 3])> = own[first]
+                .iter()
+                .chain(&own[second])
+                .map(|&point| (point, point))
+                .collect();
+            if !shared.is_empty() {
+                joints.entry((first, second)).or_default().extend(shared);
+            }
+        }
+    }
+    // The `|X|`: braces whose landing and seat are each other's.
+    let mut by_posts: std::collections::BTreeMap<(u32, u32), Vec<usize>> = std::collections::BTreeMap::new();
+    for (member, strut) in struts.iter().enumerate() {
+        if let (crate::StrutKind::Brace, crate::Landing::Strut { id, .. }, Some(seat)) =
+            (strut.kind, strut.landing, strut.seat_on_strut)
+        {
+            by_posts.entry((id, seat)).or_default().push(member);
+        }
+    }
+    for (&(lands_on, seats_on), firsts) in &by_posts {
+        for &first in firsts {
+            for &second in by_posts.get(&(seats_on, lands_on)).map_or(&[][..], Vec::as_slice) {
+                if first >= second {
+                    continue;
+                }
+                if let (Some((top_a, bottom_a)), Some((top_b, bottom_b))) = (ends[first], ends[second]) {
+                    let (_, on_first, on_second) =
+                        segment_segment_distance_min(top_a, bottom_a, top_b, bottom_b);
+                    joints.entry((first, second)).or_default().push((on_first, on_second));
+                }
             }
         }
     }
@@ -2912,6 +2967,59 @@ mod census_tests {
             }
             assert!(gap <= brute + 1e-9 && brute - gap < 5e-3, "solver {gap} vs grid {brute}");
         }
+    }
+
+    /// **The two diagonals of an `|X|` are joined where they cross.** Posts 0
+    /// and 1 stand 2 mm apart; brace 2 lands on post 1 and seats on post 0,
+    /// brace 3 the reverse, so they cross at mid-height with 0.2 mm radii. The
+    /// pair is not a collision. The same two braces landed on the model
+    /// instead (nothing joins them) are: the crossing is excused by the plan
+    /// and by nothing else. (Cylinder `149-150`, `151-152`, `191-192` on the
+    /// first run of this census were exactly this.)
+    #[test]
+    fn the_two_diagonals_of_an_x_are_joined_where_they_cross() {
+        let field = |joined: bool| {
+            let post = |id: u32, x: f64| {
+                slanted(id, StrutKind::Arm, Landing::Model { layer: 20 }, [x, 0.0, -6.0], [x, 0.0, -1.0], 0.3)
+            };
+            let diagonal = |id: u32, from: [f64; 3], to: [f64; 3], lands: u32, seats: u32| {
+                let landing = if joined { Landing::Strut { id: lands, layer: 40 } } else { Landing::Model { layer: 40 } };
+                let (mut strut, arm) = slanted(id, StrutKind::Brace, landing, from, to, 0.2);
+                strut.seat_on_strut = joined.then_some(seats);
+                (strut, arm)
+            };
+            collisions_of(vec![
+                post(0, 0.0),
+                post(1, 2.0),
+                diagonal(2, [2.0, 0.0, -5.0], [0.0, 0.0, -2.0], 1, 0),
+                diagonal(3, [0.0, 0.0, -5.0], [2.0, 0.0, -2.0], 0, 1),
+            ])
+        };
+        let joined = field(true);
+        assert!(joined.iter().all(|c| (c.low, c.high) != (2, 3)), "the X crossing is a joint: {joined:?}");
+        let unjoined = field(false);
+        assert!(unjoined.iter().any(|c| (c.low, c.high) == (2, 3)), "anti-vacuity: {unjoined:?}");
+    }
+
+    /// **A cluster meets at its joints**: a grandchild lands on a child that
+    /// lands on a trunk, and the grandchild's end stands inside the trunk's
+    /// solid where the three meet (Cylinder 85 / 88 / 113). Its overlap with
+    /// the trunk is the cluster's joint and is not a collision; the same
+    /// grandchild landed on the plate (joined to nothing) overlaps the trunk
+    /// and IS.
+    #[test]
+    fn a_grandchild_ending_inside_its_grandparent_at_the_cluster_joint_is_not_a_collision() {
+        let field = |related: bool| {
+            let trunk = slanted(0, StrutKind::Arm, Landing::Model { layer: 20 }, [0.0, 0.0, -6.0], [0.0, 0.0, -1.0], 0.5);
+            let child = slanted(1, StrutKind::Arm, Landing::Strut { id: 0, layer: 40 }, [0.45, 0.0, -4.0], [3.0, 0.0, -1.5], 0.3);
+            let grand_landing = if related { Landing::Strut { id: 1, layer: 40 } } else { Landing::Model { layer: 40 } };
+            let grandchild = slanted(2, StrutKind::Arm, grand_landing, [0.2, 0.0, -3.9], [1.5, 0.0, -1.0], 0.2);
+            collisions_of(vec![trunk, child, grandchild])
+        };
+        let related = field(true);
+        assert!(related.iter().all(|c| (c.low, c.high) != (0, 2)), "the cluster's joint: {related:?}");
+        let stranger = field(false);
+        assert!(stranger.iter().any(|c| (c.low, c.high) == (0, 2)), "anti-vacuity: {stranger:?}");
     }
 
     /// **A tip BALL collides on its own** (the inventory, not the shaft): a

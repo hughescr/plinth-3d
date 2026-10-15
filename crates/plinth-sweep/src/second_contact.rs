@@ -1448,7 +1448,34 @@ pub fn baseline_census(
         deepest_collisions: deepest
             .iter()
             .take(8)
-            .map(|c| (c.low, c.high, c.depth_mm, format!("{:?}-{:?}", c.low_piece, c.high_piece)))
+            .map(|c| {
+                let who = |id: u32| {
+                    plan.struts.get(id as usize).map_or_else(String::new, |strut| {
+                        format!(
+                            "{:?} {:?} k{}-{} twin={} seat_on={:?} r0={:.3}",
+                            strut.kind,
+                            strut.landing,
+                            strut.k_bottom,
+                            strut.k_top,
+                            strut.twin_host,
+                            strut.seat_on_strut,
+                            strut.radius_mm.first().copied().unwrap_or(0.0)
+                        )
+                    })
+                };
+                (
+                    c.low,
+                    c.high,
+                    c.depth_mm,
+                    format!(
+                        "{:?}-{:?}; {} | {}",
+                        c.low_piece,
+                        c.high_piece,
+                        who(c.low),
+                        who(c.high)
+                    ),
+                )
+            })
             .collect(),
         collisions_by_pieces: by_pieces,
         overgrown_merges: census.overgrown.len(),
