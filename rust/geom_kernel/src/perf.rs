@@ -418,6 +418,18 @@ works! {
     /// Layers a pass could have skipped by resuming above the highest layer
     /// that differs from the previous pass (or run), summed.
     PassLayersReusable, "down.pass.layers_reusable", Work;
+    /// Perf lane D2: cells the down-sweep's loops visited (the sparse walk's
+    /// active cells; the dense walk's would be `sweep.down.cell_layers` for
+    /// each loop). The routing field: its initialisation and relax rounds.
+    SweepDownVisitRoute, "sweep.down.visit.route", Work;
+    /// ... the spread loop's source cells.
+    SweepDownVisitSpread, "sweep.down.visit.spread", Work;
+    /// ... the max loop's cells.
+    SweepDownVisitMax, "sweep.down.visit.max", Work;
+    /// ... every clear and reset of a per-layer raster.
+    SweepDownVisitFill, "sweep.down.visit.fill", Work;
+    /// ... the end-of-layer work (model-section check, next sources).
+    SweepDownVisitTail, "sweep.down.visit.tail", Work;
     /// Bytes (a lower-bound estimate) of the edit seeds kept at checkpoint C,
     /// summed over the sweeps that kept one.
     SeedBytes, "seed.bytes", Work;
@@ -863,11 +875,15 @@ pub enum Rows {
     /// One lip-seat round (one trip round the `'run` loop): sizings, undo
     /// sizings, moves put back, and whether the round was thrown away.
     LipRound,
+    /// One layer of one pass (perf lane D2, 2026-10-15): the cells each loop
+    /// VISITED, to read beside the eligible cells of the same
+    /// `(pass_id, layer)` in `down.layer`.
+    DownVisit,
 }
 
 /// The widest row payload.
 pub const ROW_WIDTH: usize = 16;
-const ROWS_N: usize = 9;
+const ROWS_N: usize = 10;
 
 impl Rows {
     /// Every kind.
@@ -881,6 +897,7 @@ impl Rows {
         Self::DownInsert,
         Self::DownRun,
         Self::LipRound,
+        Self::DownVisit,
     ];
 
     /// How many rows of this kind one model may store. Each kind has its own
@@ -894,7 +911,7 @@ impl Rows {
             Self::DownReuse | Self::TipBatch | Self::PartnerSearch => 200_000,
             Self::ClearBatch => 4_000_000,
             Self::DownPass | Self::DownRun | Self::LipRound => 200_000,
-            Self::DownLayer => 2_000_000,
+            Self::DownLayer | Self::DownVisit => 2_000_000,
             Self::DownInsert => 500_000,
         }
     }
@@ -916,6 +933,7 @@ impl Rows {
             Self::DownInsert => "down.insert",
             Self::DownRun => "down.run",
             Self::LipRound => "lip.round",
+            Self::DownVisit => "down.visit",
         }
     }
 
@@ -1028,6 +1046,15 @@ impl Rows {
                 "discarded",
                 "wall_ns",
                 "undo_ns",
+            ],
+            // Cells visited per loop in one layer of one pass, summed over its
+            // insertion rounds: `route` = the routing field's initialisation
+            // and relax rounds, `spread` / `max` = the two raster loops,
+            // `fill` = every clear and reset, `tail` = the end-of-layer
+            // model-section check and source list. The dense walk visits
+            // `cells` per loop pass (`down.pass.cells`).
+            Self::DownVisit => &[
+                "pass_id", "layer", "route", "spread", "max", "fill", "tail",
             ],
             Self::TipBatch => &["rows", "faces", "wall_ns"],
             Self::PartnerSearch => &[
