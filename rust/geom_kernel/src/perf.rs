@@ -418,6 +418,12 @@ works! {
     /// Layers a pass could have skipped by resuming above the highest layer
     /// that differs from the previous pass (or run), summed.
     PassLayersReusable, "down.pass.layers_reusable", Work;
+    /// Bytes (a lower-bound estimate) of the edit seeds kept at checkpoint C,
+    /// summed over the sweeps that kept one.
+    SeedBytes, "seed.bytes", Work;
+    /// Seeds offered for an edit and refused by their identity key (mesh,
+    /// layers, policy, holes, first plan); the fast set asserts zero.
+    SeedMismatch, "seed.mismatch", Work;
 }
 
 const WORK_N: usize = Work::ALL.len();
