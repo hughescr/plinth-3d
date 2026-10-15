@@ -1797,11 +1797,11 @@ fn run_budget_search(
             &mut original_surface,
         );
         drop(step_mark);
-        let (step, step_kept) = match sampled
-            .map_err(|error| BudgetSearchError::SearchExecution {
-                phase: "ratio bisection",
-                message: error,
-            })? {
+        let sampled = sampled.map_err(|error| BudgetSearchError::SearchExecution {
+            phase: "ratio bisection",
+            message: error,
+        })?;
+        let (step, step_kept) = match sampled {
             SampledStepOutcome::Candidate(sampled) => {
                 let SampledCandidate { step, kept } = *sampled;
                 (step, kept)
@@ -1878,6 +1878,7 @@ fn run_budget_search(
     }
 
     let _final_mark = geom_kernel::perf::stage("decimate.final_verify");
+    let loop_mark = geom_kernel::perf::stage("decimate.fv_loop");
     for (step_index, candidate) in candidates {
         // Verify the mesh the bisection already simplified at this ratio, with
         // the surface it already built, instead of simplifying and indexing it
@@ -1893,6 +1894,7 @@ fn run_budget_search(
             .expect("a sampled-safe step kept its candidate");
         // The mesh is the one that fingerprint was taken over.
         let rebuilt_fingerprint = candidate.candidate_fingerprint.clone();
+        let topology_mark = geom_kernel::perf::stage("decimate.fv_topology");
         let topology_after = build_face_topology(&final_outcome.mesh, WeldPolicy::ExactBits)
             .map(|topology| topology.counts())
             .map_err(|error| {
@@ -1906,6 +1908,7 @@ fn run_budget_search(
                     },
                 )
             })?;
+        drop(topology_mark);
         if !topology_not_increased(topology_before, topology_after) {
             trace.final_attempts.push(FinalVerificationAttempt {
                 requested_ratio: candidate.ratio,
@@ -1927,6 +1930,7 @@ fn run_budget_search(
                 });
             continue;
         }
+        let probe_mark = geom_kernel::perf::stage("decimate.fv_probe");
         let final_probe = probe_two_sided_shared(
             original,
             &final_outcome.mesh,
@@ -1934,8 +1938,9 @@ fn run_budget_search(
             budget.probe,
             &mut original_surface,
             &mut candidate_surface,
-        )
-        .map_err(|error| {
+        );
+        drop(probe_mark);
+        let final_probe = final_probe.map_err(|error| {
             verification_failed(
                 trace.clone(),
                 topology_before,
@@ -2005,7 +2010,9 @@ fn run_budget_search(
 
     // Every kept candidate was consumed or refused; drop what is left (and the
     // surfaces it holds) before the diagnostics build more.
+    drop(loop_mark);
     drop(kept);
+    let adaptive_mark = geom_kernel::perf::stage("decimate.adaptive");
     run_adaptive_diagnostics(
         original,
         protected,
@@ -2015,6 +2022,7 @@ fn run_budget_search(
         &mut trace,
         &mut original_surface,
     )?;
+    drop(adaptive_mark);
 
     let geometrically_eligible_candidate_count = trace
         .final_attempts
