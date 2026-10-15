@@ -938,9 +938,12 @@ fn fill_measured(
 /// Re-sorts and re-ranks the commit tier after a demand pass.
 ///
 /// The comparator is `score_tier`'s — score ascending, ties to the lower
-/// `CandidateId` — with ONE precedence in front of it: a candidate carrying a
-/// production-raster burden sorts ahead of one carrying only a prefilter
-/// burden, whatever the two scores say. That is `FidelityLedger`'s own
+/// `CandidateId` — with ONE precedence in front of it: the KNOWN class, a
+/// candidate carrying a production-raster burden or a certificate
+/// ([`CertifiedLoser`]), sorts ahead of one carrying only a prefilter burden,
+/// whatever the two numbers say. Inside the known class a certified loser,
+/// which has no production score, is read at its lower bound. That is
+/// `FidelityLedger`'s own
 /// doctrine (an exact number outranks a surrogate one) applied to the
 /// quantity the surrogate is measured to get wrong: the coarse raster ranks
 /// a disc's 180° flip backwards, so letting a coarse score beat a production

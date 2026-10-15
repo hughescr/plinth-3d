@@ -796,3 +796,87 @@ fn a_record_that_certified_nothing_is_byte_for_byte_the_old_record() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// The diagnostics read the certificate (review defect, gpt-sol-high).
+// ---------------------------------------------------------------------------
+
+fn diagnose(measurer: &Scripted) -> (DenseSweepRecord, crate::diag::SweepDiagnostics) {
+    let mesh = make_overhang_table().expect("overhang table fixture");
+    let request = SweepRequest::registered().expect("registered sweep configuration");
+    let (outcome, diagnostics) = crate::search::search_with_diagnostics(
+        &mesh,
+        &request,
+        Some(measurer),
+        &crate::diag::DiagnosticsConfig::default(),
+    )
+    .expect("a scorable fixture");
+    (outcome.into_record(), diagnostics)
+}
+
+#[test]
+fn a_certified_runner_up_keeps_its_certificate_in_the_diagnostics() {
+    use crate::diag::CutBasis;
+
+    let count = SweepRequest::registered()
+        .expect("registered")
+        .ladder
+        .commit_top_k();
+    let mut burden = vec![50.0; count];
+    burden[0] = 0.0;
+    let (record, d) = diagnose(&Scripted::new(burden, (0..count).collect(), true));
+    let runner_up = record.runner_up.as_ref().expect("a runner-up");
+    let loser = runner_up
+        .certified_loser
+        .expect("the runner-up is a certified loser");
+
+    // The after-production snapshot row keeps the certificate.
+    let after = d.snapshots.after_production.as_ref().expect("after production");
+    let row = after
+        .iter()
+        .find(|row| row.candidate == runner_up.candidate)
+        .expect("the runner-up is in the snapshot");
+    assert_eq!(row.certified_loser, Some(loser));
+    assert!(!row.measured_at_production, "its burden is the prefilter's");
+    assert!(after[0].certified_loser.is_none(), "the winner is not certified");
+
+    // C4 names the certificate, not production fidelity, and its gap is the
+    // bound over the winner's score, as `rerank_commit` compares them.
+    let c4 = d.cuts.iter().find(|cut| cut.name == "C4").expect("C4");
+    assert_eq!(c4.decided_by, CutBasis::CertifiedBound);
+    let rejected = c4.first_rejected.as_ref().expect("the runner-up");
+    assert_eq!(rejected.candidate, runner_up.candidate);
+    assert_eq!(rejected.certified_loser, Some(loser));
+    let gap = c4.score_gap.expect("a bound gap");
+    assert_eq!(
+        gap.to_bits(),
+        (loser.lower_bound_score.get() - record.winner.terms.score.get()).to_bits()
+    );
+    assert!(gap > 0.0, "a certificate is strictly above the winner");
+
+    // The serialized row carries the key only because it has the field.
+    let json = serde_json::to_string(rejected).expect("serializable");
+    assert!(json.contains("certified_loser"));
+    assert!(serde_json::to_string(c4.last_kept.as_ref().expect("winner"))
+        .is_ok_and(|winner| !winner.contains("certified_loser")));
+}
+
+#[test]
+fn diagnostics_of_a_search_that_certified_nothing_have_no_certified_key() {
+    // No measurer: no production batch, so nothing is certified.
+    let mesh = make_overhang_table().expect("overhang table fixture");
+    let request = SweepRequest::registered().expect("registered sweep configuration");
+    let (_, d) = crate::search::search_with_diagnostics(
+        &mesh,
+        &request,
+        None,
+        &crate::diag::DiagnosticsConfig::default(),
+    )
+    .expect("a scorable fixture");
+    assert!(!d.cuts.is_empty());
+    let json = serde_json::to_string(&d).expect("serializable");
+    assert!(
+        !json.contains("certified_loser"),
+        "no certificate means no new key"
+    );
+}

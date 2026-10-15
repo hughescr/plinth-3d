@@ -617,7 +617,9 @@ the stage that made it. It decides nothing.
   burden was measured at the production raster; the commit comparator puts production rows
   first before it reads a score, so a cut carries `score_gap` only when both rows are in one
   class (`decided_by: "score"`), and `decided_by: "production_fidelity"` with no gap when
-  precedence decided. Three full copies of the commit ranking (exact table, after the
+  precedence decided. A certified runner-up (below) keeps its certificate on its row and
+  gives `decided_by: "certified_bound"`, with `score_gap` its lower bound minus the winner's
+  score. Three full copies of the commit ranking (exact table, after the
   prefilter, after production), because the record reprices it in place.
 - **Certified losers (perf lane B1).** The finalists' production sweeps run as a race: when
   a finished pose scores strictly below another pose's lower bound, that pose cannot win or
