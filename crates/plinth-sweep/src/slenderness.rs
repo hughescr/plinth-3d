@@ -1291,6 +1291,77 @@ fn new_plane_holds(ties: &[Tie], layer: usize, plane: Plane, sway_deg: Option<f6
     joint_holds(&planes, sway)
 }
 
+/// [`new_plane_holds`] with everything that does not depend on the new plane
+/// done once: for one member, layer and sway, the distinct existing planes
+/// (in [`planes_at`]'s order), their joint verdict, and their `Σ cos²` prefix.
+/// A mast scan asks this about thousands of cells with those three fixed, and
+/// [`new_plane_holds`] would rebuild the list, re-deduplicate it and
+/// re-evaluate the trig of every existing plane for each cell.
+///
+/// Same answers, bit for bit: the existing planes keep their order, the new
+/// plane is the LAST term of the joint sum (as [`new_plane_holds`] appends
+/// it), a lone plane is judged by the strict-arc [`holds`], two or more by
+/// the `JOINT_NOISE` sum, and a plane parallel to a known one adds nothing.
+struct NewPlaneTest {
+    /// `None`: a run no cross ties yet, which any plane serves.
+    sway: Option<f64>,
+    existing: Vec<Plane>,
+    /// `joint_holds(existing, sway)`: the verdict for a plane parallel to a
+    /// known one.
+    existing_holds: bool,
+    /// `Σ cos²(sway − θ)` over `existing`, summed in order.
+    prefix_sum: f64,
+}
+
+impl NewPlaneTest {
+    fn new(ties: &[Tie], layer: usize, sway_deg: Option<f64>) -> Self {
+        let Some(sway) = sway_deg else {
+            return Self {
+                sway: None,
+                existing: Vec::new(),
+                existing_holds: true,
+                prefix_sum: 0.0,
+            };
+        };
+        let existing = planes_at(ties, layer);
+        let prefix_sum: f64 = existing
+            .iter()
+            .map(|plane| (sway - plane_deg(*plane)).to_radians().cos().powi(2))
+            .sum();
+        let existing_holds = joint_holds(&existing, sway);
+        Self {
+            sway: Some(sway),
+            existing,
+            existing_holds,
+            prefix_sum,
+        }
+    }
+
+    fn holds(&self, plane: Plane) -> bool {
+        let Some(sway) = self.sway else {
+            return true;
+        };
+        if self.existing.iter().any(|known| parallel(*known, plane)) {
+            return self.existing_holds;
+        }
+        if self.existing.is_empty() {
+            return holds(plane, sway);
+        }
+        let term = (sway - plane_deg(plane)).to_radians().cos().powi(2);
+        self.prefix_sum + term >= 0.5 - JOINT_NOISE
+    }
+}
+
+/// `PLINTH_SWEEP_VERIFY_NEW_PLANE=1`: the mast scan's prepared plane test is
+/// also answered by [`new_plane_holds`] and any difference panics. For gate
+/// runs, not for production. Read once.
+fn verify_new_plane() -> bool {
+    static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *VERIFY.get_or_init(|| {
+        std::env::var_os("PLINTH_SWEEP_VERIFY_NEW_PLANE").is_some_and(|value| value == "1")
+    })
+}
+
 /// One lateral tie on one member: the layer, and the plane it holds in
 /// (`None`: every direction, as a landing or the member's own end does).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5102,10 +5173,16 @@ fn plan_thicken(
     let (mut low, mut high) = (lowest, best);
     for _ in 0..64 {
         let middle = 0.5 * (low + high);
+        let before = (low.to_bits(), high.to_bits());
         if holds(middle) {
             high = middle;
         } else {
             low = middle;
+        }
+        // A complete iteration that moved neither end (the ends are adjacent
+        // floats) is a fixed point of the pure step: every later one repeats it.
+        if (low.to_bits(), high.to_bits()) == before {
+            break;
         }
     }
     let root = high;
@@ -5742,8 +5819,21 @@ fn tie_by_mast(
     let id = run.strut_id;
     let here = struts.get(id as usize)?.cell_at(k);
     let arm_ties = state.ties.get(id as usize).cloned().unwrap_or_default();
+    // The member's ties, layer and sway are fixed for the whole call: the
+    // existing-plane work is done once ([`NewPlaneTest`]).
+    let plane_test = NewPlaneTest::new(&arm_ties, k, run.sway_deg);
+    let verify_planes = verify_new_plane();
     let admissible = |plane: Option<Plane>| {
-        plane.is_some_and(|plane| new_plane_holds(&arm_ties, k, plane, run.sway_deg))
+        plane.is_some_and(|plane| {
+            let held = plane_test.holds(plane);
+            assert!(
+                !verify_planes || held == new_plane_holds(&arm_ties, k, plane, run.sway_deg),
+                "PLINTH_SWEEP_VERIFY_NEW_PLANE: the prepared test differs from new_plane_holds \
+                 for plane {plane:?} at layer {k} (sway {:?}, ties {arm_ties:?})",
+                run.sway_deg,
+            );
+            held
+        })
     };
     // A MAST IS A PARTNER, NOT A SECOND, STIFFER POST (fix/member-clearance,
     // 2026-09-29): it is never drawn thicker than the member it braces. The
@@ -5927,6 +6017,11 @@ fn tie_by_mast(
     let row0 = grid.row_of(here);
     let col0 = grid.col_of(here);
     let mut candidates: Vec<(f64, usize, f64)> = Vec::new();
+    // One verdict slot per plane `[dr, dc]` (`dr` in `0..=reach`, `dc` in
+    // `-reach..=reach`): 0 unknown, 1 holds, 2 does not.
+    let reach_i = i64::try_from(reach_cells).unwrap_or(i64::MAX / 4);
+    let plane_span = 2 * reach_cells + 1;
+    let mut plane_memo = vec![0_u8; (reach_cells + 1) * plane_span];
     for row in row0.saturating_sub(reach_cells)..=(row0 + reach_cells).min(grid.rows() - 1) {
         let base = row * cols;
         for col in col0.saturating_sub(reach_cells)..=(col0 + reach_cells).min(cols - 1) {
@@ -5946,11 +6041,33 @@ fn tie_by_mast(
             if state.index.shaft_head[cell] != u32::MAX {
                 continue;
             }
-            if !admissible(plane_between(grid, here, cell)) {
-                continue;
-            }
+            // The depth test has no side effect and `continue`s the same
+            // either way, so it runs first and the plane test (trig) only for
+            // the cells that are in reach.
             let depth = context.lean.layers_to_reach(distance_mm);
             if depth == 0 || depth > k {
+                continue;
+            }
+            // The plane verdict depends on the plane alone, and `plane_between`
+            // folds a plane and its reverse into one RAW integer pair, so each
+            // is judged once per scan.
+            let held = match plane_between(grid, here, cell) {
+                None => false,
+                Some(plane) => {
+                    let slot = usize::try_from(plane[0]).unwrap_or(0) * plane_span
+                        + usize::try_from(plane[1] + reach_i).unwrap_or(0);
+                    match plane_memo[slot] {
+                        1 => true,
+                        2 => false,
+                        _ => {
+                            let held = admissible(Some(plane));
+                            plane_memo[slot] = if held { 1 } else { 2 };
+                            held
+                        }
+                    }
+                }
+            };
+            if !held {
                 continue;
             }
             // THE MAST'S OWN RADIUS: `r_m = max(r_min, H / S)` over its WHOLE
@@ -6021,10 +6138,15 @@ fn tie_by_mast(
                 let (mut low, mut high) = (own_radius, ceiling);
                 for _ in 0..64 {
                     let middle = 0.5 * (low + high);
+                    let before = (low.to_bits(), high.to_bits());
                     if sway(middle) <= 1.0 {
                         high = middle;
                     } else {
                         low = middle;
+                    }
+                    // Fixed point of the pure step: every later iteration repeats it.
+                    if (low.to_bits(), high.to_bits()) == before {
+                        break;
                     }
                 }
                 high
@@ -8458,6 +8580,95 @@ mod tests {
             }),
             "two perpendicular planes hold every direction: {both:?}"
         );
+    }
+
+    /// The prepared plane test of the mast scan answers exactly what
+    /// `new_plane_holds` answers, for empty, singleton, duplicate-parallel and
+    /// many-plane lists, at sways on and around the 45 degree arc ends and the
+    /// `JOINT_NOISE` joint threshold, over every plane of a reach-6 window.
+    #[test]
+    fn the_prepared_plane_test_agrees_with_new_plane_holds() {
+        use super::{joint_breaks, plane_deg, planes_at, NewPlaneTest, Plane, Tie};
+        let tie = |layer: usize, plane: Option<Plane>| Tie {
+            layer,
+            from: layer,
+            plane,
+            band_top: false,
+        };
+        let pool: [Plane; 6] = [[0, 1], [1, 0], [1, 1], [1, -1], [2, 4], [3, 1]];
+        // Lists: empty; a landing (no plane); other-layer noise; one plane;
+        // duplicate and parallel planes; two to four distinct planes.
+        let mut lists: Vec<Vec<Tie>> = vec![
+            vec![],
+            vec![tie(5, None)],
+            vec![tie(4, Some([1, 0])), tie(6, Some([0, 1]))],
+        ];
+        for a in 0..pool.len() {
+            lists.push(vec![tie(5, Some(pool[a]))]);
+            lists.push(vec![tie(5, Some(pool[a])), tie(5, Some(pool[a])), tie(4, Some([1, 1]))]);
+            for b in 0..pool.len() {
+                lists.push(vec![tie(5, Some(pool[a])), tie(5, Some(pool[b]))]);
+                lists.push(vec![tie(5, Some(pool[a])), tie(5, None), tie(5, Some(pool[b]))]);
+                for c in 0..pool.len() {
+                    lists.push(vec![
+                        tie(5, Some(pool[a])),
+                        tie(5, Some(pool[b])),
+                        tie(5, Some(pool[c])),
+                    ]);
+                }
+            }
+        }
+        lists.push(vec![
+            tie(5, Some([1, 0])),
+            tie(5, Some([1, 1])),
+            tie(5, Some([0, 1])),
+            tie(5, Some([1, -1])),
+        ]);
+        let reach = 6_i64;
+        let candidates: Vec<Plane> = (0..=reach)
+            .flat_map(|dr| (-reach..=reach).map(move |dc| [dr, dc]))
+            .filter(|plane| *plane != [0, 0] && (plane[0] > 0 || plane[1] > 0))
+            .collect();
+        let mut checked = 0_usize;
+        for ties in &lists {
+            let existing = planes_at(ties, 5);
+            // Sways: a sweep, and every point where the joint verdict of the
+            // existing planes alone, or with one more plane, flips, with its
+            // neighbours a hair either side.
+            let mut sways: Vec<f64> = (0..360).map(|deg| f64::from(deg) * 0.5).collect();
+            let mut with_each: Vec<Vec<Plane>> = vec![existing.clone()];
+            for extra in &candidates {
+                let mut planes = existing.clone();
+                if !planes.iter().any(|known| super::parallel(*known, *extra)) {
+                    planes.push(*extra);
+                }
+                with_each.push(planes);
+            }
+            for planes in &with_each {
+                let mut breaks = joint_breaks(planes);
+                if let [one] = planes.as_slice() {
+                    let deg = plane_deg(*one);
+                    breaks.extend([deg - 45.0, deg + 45.0]);
+                }
+                for at in breaks {
+                    for nudge in [0.0, 1.0e-12, -1.0e-12, 1.0e-9, -1.0e-9, 1.0e-6, -1.0e-6] {
+                        sways.push((at + nudge).rem_euclid(180.0));
+                    }
+                }
+            }
+            for sway in sways.iter().map(|sway| Some(*sway)).chain([None]) {
+                let test = NewPlaneTest::new(ties, 5, sway);
+                for plane in &candidates {
+                    assert_eq!(
+                        test.holds(*plane),
+                        super::new_plane_holds(ties, 5, *plane, sway),
+                        "plane {plane:?}, sway {sway:?}, ties {ties:?}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 1_000_000, "the comparison ran: {checked}");
     }
 
     /// The port of the field report's panel frame reproduces the numbers that
