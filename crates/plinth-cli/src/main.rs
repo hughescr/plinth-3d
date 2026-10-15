@@ -28,7 +28,7 @@ fn main() -> ExitCode {
         Ok(CliAction::Prepare(selection)) => {
             let (code, budget) = geom_kernel::par::install_budget(move || execute(selection));
             if let Err(error) = budget {
-                println!(
+                eprintln!(
                     "[threads] WARNING budget pool not built ({error}); per-call pools were used"
                 );
             }
