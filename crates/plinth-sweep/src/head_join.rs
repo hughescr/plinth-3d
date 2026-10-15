@@ -135,7 +135,7 @@
 //! every candidate the plane holds, and one clearance batch per lander over
 //! all of its candidate joins.
 
-use std::cell::OnceCell;
+use std::sync::OnceLock;
 
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, SegmentClearanceClassified};
 use plinth_core::LayerPlan;
@@ -259,7 +259,7 @@ pub(crate) struct HeadJoinContext<'a> {
     pub surface_max_bytes: u64,
     /// The model surface, built on first need and kept for the run; `None`
     /// inside when it could not be built.
-    pub surface: &'a OnceCell<Option<NativeSurface>>,
+    pub surface: &'a OnceLock<Option<NativeSurface>>,
 }
 
 /// The model's surface index, or `None` when its memory estimate is over

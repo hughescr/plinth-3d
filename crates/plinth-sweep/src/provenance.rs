@@ -21,7 +21,7 @@ use crate::{Landing, SweepStrut};
 type Seat = (usize, usize, u8);
 
 /// The last pass that changed each member's descent.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Moves {
     seen: BTreeMap<Seat, (u64, &'static str)>,
 }

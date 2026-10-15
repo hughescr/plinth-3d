@@ -165,7 +165,7 @@
 //! This module decides nothing about WHICH pose may stop; it carries the
 //! token.
 
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use plinth_core::{m0_constants, LayerPlan};
@@ -178,8 +178,8 @@ use rayon::prelude::*;
 
 use crate::{
     complete_for_emission, model_landing, perf, run_sweep_in_token_scope,
-    run_sweep_with_holes_in_token_scope, tip_landing, DrainSpec, StrutKind, SweepPlan,
-    SweepPolicy,
+    run_sweep_with_holes_seeded_in_token_scope, tip_landing, DrainSpec, EditSeed, StrutKind,
+    SweepPlan, SweepPolicy,
 };
 
 /// See the module doc's "Two rasters" section.
@@ -383,6 +383,12 @@ pub struct RetainedPlan {
     pub policy: SweepPolicy,
     /// The plan, its shake check still deferred.
     pub plan: SweepPlan,
+    /// The sweep's state at checkpoint C, kept so the finished plan can be
+    /// edited without planning it again (SC-1; nothing reads it yet). Its
+    /// identity key is normalized with [`production_measurement_policy`] on both
+    /// sides, so a seed made here is valid for the emission policy the reuse
+    /// key accepts. A pose that loses the race drops its seed with its plan.
+    pub seed: Option<Arc<EditSeed>>,
     /// Wall seconds of the sweep. Evidence only; it is in no digest.
     pub sweep_seconds: f64,
 }
@@ -605,11 +611,14 @@ impl SweepDemand {
             format!("{} ({:+.4},{:+.4},{:+.4})", fidelity.label(), up[0], up[1], up[2])
         });
         let started = Instant::now();
-        let plan = match &settings.retained_policy {
+        // A RETAINED sweep keeps its state at checkpoint C beside the plan.
+        let (plan, seed) = match &settings.retained_policy {
             Some(policy) => {
-                run_sweep_with_holes_in_token_scope(&transformed, &layers, policy, &[], &[])
+                run_sweep_with_holes_seeded_in_token_scope(&transformed, &layers, policy, &[], &[])
+                    .map(|(plan, seed)| (plan, Some(seed)))
             }
-            None => run_sweep_in_token_scope(&transformed, &layers, &settings.policy),
+            None => run_sweep_in_token_scope(&transformed, &layers, &settings.policy)
+                .map(|plan| (plan, None)),
         }
         .map_err(|error| match error {
             crate::SweepError::Cancelled => PoseError::Stopped,
@@ -698,6 +707,7 @@ impl SweepDemand {
             layers,
             policy,
             plan,
+            seed,
             sweep_seconds,
         });
         Ok((measured, retained))

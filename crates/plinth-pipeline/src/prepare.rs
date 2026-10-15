@@ -2806,7 +2806,11 @@ fn sweep_and_emit(
             Err(miss)
         }
     };
-    let (plan, sweep_plan_source) = match reused {
+    // The plan, where it came from, and the sweep's state at checkpoint C (the
+    // edit seed; nothing consumes it yet). A reused plan brings the seed its
+    // pose's sweep kept; a plan made here keeps its own, and a miss (a hollowed
+    // or drilled shell) keeps that NEW seed, never the retained one.
+    let (plan, sweep_plan_source, seed) = match reused {
         Ok((plan, retained)) => {
             let up = retained.up.get();
             println!(
@@ -2814,11 +2818,11 @@ fn sweep_and_emit(
                  measurement of pose ({:+.4},{:+.4},{:+.4}), measured in {:.2} s",
                 up[0], up[1], up[2], retained.sweep_seconds,
             );
-            (plan, SweepPlanSource::Reused)
+            (plan, SweepPlanSource::Reused, retained.seed.clone())
         }
         Err(miss) => {
             println!("[sweep {model}] placement plan: planned (reason {miss:?})");
-            let plan = plinth_sweep::run_sweep_with_holes(
+            let (plan, seed) = plinth_sweep::run_sweep_with_holes_seeded(
                 hollowed.mesh(),
                 &sweep_layers,
                 &policy,
@@ -2831,9 +2835,29 @@ fn sweep_and_emit(
                     source,
                 })
             })?;
-            (plan, SweepPlanSource::Planned(miss))
+            (plan, SweepPlanSource::Planned(miss), Some(seed))
         }
     };
+    if let Some(seed) = &seed {
+        // The seed must belong to exactly this sweep: a miss here is a defect
+        // in the retention (counted, `seed.mismatch`; the fast set asserts 0).
+        let miss = seed.miss(
+            hollowed.mesh(),
+            &sweep_layers,
+            &policy,
+            &drains,
+            &vents,
+            &plan.report.sweep_digest,
+        );
+        if miss.is_some() {
+            plinth_sweep::perf::add(plinth_sweep::perf::Work::SeedMismatch, 1);
+        }
+        println!(
+            "[sweep {model}] edit seed kept at checkpoint C: {} bytes (estimate), key {}",
+            seed.approx_bytes(),
+            miss.map_or_else(|| "matches".to_owned(), |why| format!("MISMATCH ({why:?})")),
+        );
+    }
     // A SECOND CONTACT for every tip whose feature gave it less contact than
     // its load needs (round 5 review, 2026-10-14): the placement runs again
     // with those tips' real contacts as their limit; kept where it leaves the
@@ -2852,6 +2876,9 @@ fn sweep_and_emit(
             source,
         })
     })?;
+    // The seed is not consumed yet: it is released here so it never outlives
+    // the second contact into the emission.
+    drop(seed);
     let second = &plan.report.seat_second_contact;
     if second.attempted {
         println!(

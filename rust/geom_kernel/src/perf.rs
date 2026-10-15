@@ -430,6 +430,12 @@ works! {
     SweepDownVisitFill, "sweep.down.visit.fill", Work;
     /// ... the end-of-layer work (model-section check, next sources).
     SweepDownVisitTail, "sweep.down.visit.tail", Work;
+    /// Bytes (a lower-bound estimate) of the edit seeds kept at checkpoint C,
+    /// summed over the sweeps that kept one.
+    SeedBytes, "seed.bytes", Work;
+    /// Seeds offered for an edit and refused by their identity key (mesh,
+    /// layers, policy, holes, first plan); the fast set asserts zero.
+    SeedMismatch, "seed.mismatch", Work;
 }
 
 const WORK_N: usize = Work::ALL.len();

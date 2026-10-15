@@ -797,7 +797,7 @@ fn a_head_join_keeps_a_headed_lander_where_it_is() {
     let context = slender_context(&grid, &history, &keep_out, &lean, &law);
     let mesh = slab_mesh();
     let plan = plinth_core::LayerPlan::new(0.0, vec![H; 300]).expect("a uniform plan");
-    let surface = std::cell::OnceCell::new();
+    let surface = std::sync::OnceLock::new();
     let joins = crate::head_join::HeadJoinContext {
         slender: &context,
         mesh: &mesh,
@@ -896,7 +896,7 @@ fn the_lip_seat_pass_never_re_lands_a_headed_arm_on_either_trigger() {
     let context = slender_context(&grid, &history, &keep_out, &lean, &law);
     let mesh = box_mesh();
     let plan = plinth_core::LayerPlan::new(0.0, vec![H; 300]).expect("a uniform plan");
-    let surface = std::cell::OnceCell::new();
+    let surface = std::sync::OnceLock::new();
     assert!(surface.set(None).is_ok(), "a fresh cell");
     let joins = crate::head_join::HeadJoinContext {
         slender: &context,
@@ -976,7 +976,7 @@ fn the_standing_seat_read_is_a_memo_of_the_uncached_read() {
     let context = slender_context(&grid, &history, &keep_out, &lean, &law);
     let mesh = slab_mesh();
     let plan = plinth_core::LayerPlan::new(0.0, vec![H; 300]).expect("a uniform plan");
-    let surface = std::cell::OnceCell::new();
+    let surface = std::sync::OnceLock::new();
     let joins = crate::head_join::HeadJoinContext {
         slender: &context,
         mesh: &mesh,
@@ -1145,7 +1145,7 @@ fn an_inadmissible_cheapest_descent_does_not_end_the_slenderness_search() {
     // field, the outcome and the number of moves.
     let run = |law: &crate::slenderness::SlendernessLaw, root_col: Option<usize>| {
         let context = slender_context(&grid, &history, &keep_out, &lean, law);
-        let surface = std::cell::OnceCell::new();
+        let surface = std::sync::OnceLock::new();
         let joins = crate::head_join::HeadJoinContext {
             slender: &context,
             mesh: &mesh,
@@ -1273,7 +1273,7 @@ fn a_stub_is_kept_in_place_of_a_lean_unless_the_lean_seats_where_it_does_not() {
     };
     let run = |mesh: &plinth_mesh::Mesh, stub: bool| {
         let context = slender_context(&grid, &history, &keep_out, &lean, &law);
-        let surface = std::cell::OnceCell::new();
+        let surface = std::sync::OnceLock::new();
         let joins = crate::head_join::HeadJoinContext {
             slender: &context,
             mesh,
@@ -1392,7 +1392,7 @@ fn a_lean_only_the_taper_would_hold_is_refused_while_the_arm_stands() {
     };
     let run = |stub: bool| {
         let context = slender_context(&grid, &history, &keep_out, &lean, &law);
-        let surface = std::cell::OnceCell::new();
+        let surface = std::sync::OnceLock::new();
         let joins = crate::head_join::HeadJoinContext {
             slender: &context,
             mesh: if stub { &short } else { &wide },
@@ -1475,7 +1475,7 @@ fn lip_seat_field_passes(
         limit_deg: 20.0,
     };
     let context = slender_context(&grid, &history, &keep_out, &lean, &law);
-    let surface = std::cell::OnceCell::new();
+    let surface = std::sync::OnceLock::new();
     let joins = crate::head_join::HeadJoinContext {
         slender: &context,
         mesh,
@@ -2215,7 +2215,7 @@ mod graze_conversion {
         let law = crate::slenderness::SlendernessLaw::new(50.0, 0.05, 1.0, 32.5);
         let context = slender_context(grid, &history, &keep_out, &lean, &law);
         let plan = plinth_core::LayerPlan::new(0.0, vec![H; 300]).expect("a uniform plan");
-        let surface = std::cell::OnceCell::new();
+        let surface = std::sync::OnceLock::new();
         let joins = crate::head_join::HeadJoinContext {
             slender: &context,
             mesh,
