@@ -608,6 +608,10 @@ fn a_real_plan_classes_measures_and_compares_clean_with_itself() {
     let last: BTreeSet<u32> = census.finals.unbraced.iter().map(|run| run.member).collect();
     assert_eq!(history, last);
     assert!(!plan.struts.is_empty());
+    // The seated tips' balls, in member order.
+    let balls = super::contact_balls(&plan.struts, &crate::adapter::arms_of(&plan), &layers);
+    assert!(!balls.is_empty() && balls.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    assert!(balls.iter().all(|(_, ball)| ball.radius_mm > 0.0));
     // Keys are sorted.
     assert!(once.warnings.windows(2).all(|pair| pair[0].key < pair[1].key));
 }

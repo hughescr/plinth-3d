@@ -497,6 +497,22 @@ impl Census {
     }
 }
 
+/// The contact ball of every seated tip of a field, by member id, in member
+/// order: the input of [`ground_lost`] for the first plan and for the edit.
+#[must_use]
+pub(crate) fn contact_balls(
+    struts: &[SweepStrut],
+    arms: &[plinth_support::SweepArm],
+    layer_plan: &plinth_core::LayerPlan,
+) -> Vec<(u32, crate::footprint::ContactBall)> {
+    let discs = plinth_support::tip_contact_discs(arms, layer_plan).unwrap_or_default();
+    struts
+        .iter()
+        .zip(discs)
+        .filter_map(|(strut, disc)| Some((strut.id, crate::footprint::ContactBall::of(&disc?))))
+        .collect()
+}
+
 /// **The old tips that lost the ground their placed contact held**
 /// (`SC-DESIGN.md` §4): for every tip whose UNGROWN contact ball changed between
 /// the finished first plan and the edit, the cells the first ball held must
