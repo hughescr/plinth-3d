@@ -857,6 +857,9 @@ fn nearest_admitted_scan(
 /// A face's id and its outward unit normal.
 type NearestFace = (u32, [f64; 3]);
 
+/// Box-tree queries one pool task answers (about 10 microseconds each).
+const QUERIES_PER_TASK: usize = 256;
+
 /// [`nearest_admitted`] over a face table already built for the mesh.
 fn nearest_admitted_in(table: &FaceTable, queries: &[([f64; 3], f64)]) -> Vec<Option<(u32, [f64; 3])>> {
     let faces = &table.faces;
@@ -865,21 +868,33 @@ fn nearest_admitted_in(table: &FaceTable, queries: &[([f64; 3], f64)]) -> Vec<Op
         crate::PerfWork::NearestFootprintNormalRows,
         crate::perf::count(queries.len()),
     );
-    let answers: Vec<(Option<NearestFace>, u64)> = queries
-        .par_iter()
-        .map(|&(point, max_normal_z)| {
-            let (found, tested) = table.tree.nearest(faces, point, max_normal_z);
-            if verify {
-                let scanned = nearest_admitted_scan(faces, point, max_normal_z);
-                assert!(
-                    same_answer(found, scanned),
-                    "footprint box tree differs from the scan at {point:?} (threshold {max_normal_z}): \
-                     tree {found:?}, scan {scanned:?}"
-                );
-            }
-            (found, tested)
-        })
-        .collect();
+    let ask = |&(point, max_normal_z): &([f64; 3], f64)| {
+        let (found, tested) = table.tree.nearest(faces, point, max_normal_z);
+        if verify {
+            let scanned = nearest_admitted_scan(faces, point, max_normal_z);
+            assert!(
+                same_answer(found, scanned),
+                "footprint box tree differs from the scan at {point:?} (threshold {max_normal_z}): \
+                 tree {found:?}, scan {scanned:?}"
+            );
+        }
+        (found, tested)
+    };
+    // A tree query is microseconds, so a few queries cost more to hand to the
+    // pool than to answer (the scan this replaced was a whole mesh per query);
+    // split only a batch big enough, in chunks of `QUERIES_PER_TASK`.
+    let answers: Vec<(Option<NearestFace>, u64)> = if verify {
+        // The shadow check scans the whole mesh per query: worth splitting.
+        queries.par_iter().map(ask).collect()
+    } else if queries.len() >= 2 * QUERIES_PER_TASK {
+        queries
+            .par_iter()
+            .with_min_len(QUERIES_PER_TASK)
+            .map(ask)
+            .collect()
+    } else {
+        queries.iter().map(ask).collect()
+    };
     crate::perf::add(
         crate::PerfWork::NearestFootprintNormalTrisTested,
         answers.iter().map(|&(_, tested)| tested).sum(),
