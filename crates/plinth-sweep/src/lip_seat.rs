@@ -982,10 +982,145 @@ struct Pending {
     /// **The mover's own solid clearance, read ahead** ([`read_movers`]): by
     /// candidate index, the path the read was drawn on and the read.
     ahead: std::collections::HashMap<usize, (Vec<u32>, Option<f64>)>,
+    /// **The path tests of candidates read ahead** ([`Tested`]), by candidate
+    /// index: a refused candidate as well as an admitted one, each valid for
+    /// the field generation it was asked at ([`StampedIndex::generation`]) and
+    /// no other. The round loop takes its candidate from here instead of
+    /// asking [`propose`] again.
+    tested: std::collections::HashMap<usize, Tested>,
     /// How many candidates the next read-ahead of this arm takes, from the
     /// one a round proposes (doubled at each read-ahead, up to
     /// [`READ_AHEAD_MAX`]).
     window: usize,
+}
+
+/// One candidate's path test, as [`propose`] answered it against the field at
+/// `generation` (`None` in `found`: refused).
+struct Tested {
+    generation: u64,
+    found: Option<(Vec<u32>, Vec<Follow>)>,
+}
+
+/// **The column index of one [`apply`] pass, with the generation of the field
+/// it stands for.**
+///
+/// [`propose`] is a pure function of its arguments: the context (fixed for
+/// the pass), the candidate and the mover's children (fixed per job), the
+/// column index, and the struts it reads (the mover, its children, the member
+/// the candidate lands on, and the hosts a transitive follow walks). During a
+/// pass the index and those struts change in ONE place: the commit of a
+/// re-landing (`apply`'s round loop), which rewrites a member's landing,
+/// base layer or path and stamps it into the index. The generation counts
+/// the stamps, and [`StampedIndex::stamp_strut`] is the only way to stamp, so
+/// every mutation that can change a path test's answer bumps it in the
+/// mutator itself (it is bumped before the stamp, and a re-landing rewrites
+/// the struts only to stamp them next). A stored path test is reused only at
+/// the generation it was asked at; `PLINTH_SWEEP_VERIFY_LIPSEAT=1` recomputes
+/// every reuse and panics on a difference ([`verify_lip_seat`]).
+struct StampedIndex {
+    index: ColumnHistory,
+    generation: u64,
+}
+
+impl StampedIndex {
+    const fn new(index: ColumnHistory) -> Self {
+        Self {
+            index,
+            generation: 0,
+        }
+    }
+
+    const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Stamp `strut` as it stands now; every stored path test is stale after.
+    fn stamp_strut(&mut self, strut: &SweepStrut, layer_height_mm: f64) {
+        #[cfg(not(test))]
+        let skip = false;
+        // The sabotage drill skips the bump; the shadow check must catch it.
+        #[cfg(test)]
+        let skip = TEST_SKIP_BUMP.with(std::cell::Cell::get);
+        if !skip {
+            self.generation += 1;
+        }
+        self.index.stamp_strut(strut, layer_height_mm);
+    }
+}
+
+impl std::ops::Deref for StampedIndex {
+    type Target = ColumnHistory;
+
+    fn deref(&self) -> &ColumnHistory {
+        &self.index
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: skip the generation bump (sabotage) or force the shadow check on.
+    static TEST_SKIP_BUMP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TEST_VERIFY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `PLINTH_SWEEP_VERIFY_LIPSEAT=1`: every stored path test the pass reuses is
+/// also asked of [`propose`] afresh and compared; any difference panics. For
+/// gate runs, not for production. Read once.
+fn verify_lip_seat() -> bool {
+    #[cfg(test)]
+    if TEST_VERIFY.with(std::cell::Cell::get) {
+        return true;
+    }
+    static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *VERIFY.get_or_init(|| {
+        std::env::var_os("PLINTH_SWEEP_VERIFY_LIPSEAT").is_some_and(|value| value == "1")
+    })
+}
+
+/// The path test of `job`'s candidate `at` for the round loop: the one the
+/// read-ahead stored at the field's current generation, else asked now.
+/// Either way the stored entry is spent (a stale one is dropped).
+fn take_path_test(
+    context: &SlendernessContext<'_>,
+    index: &StampedIndex,
+    struts: &[SweepStrut],
+    job: &mut Pending,
+    at: usize,
+    clearance: bool,
+) -> Option<(Vec<u32>, Vec<Follow>)> {
+    let candidate = job.candidates[at];
+    let ask = |job: &Pending| {
+        propose(
+            context,
+            index,
+            struts,
+            job.index,
+            candidate,
+            &job.children,
+            clearance,
+        )
+    };
+    match job.tested.remove(&at) {
+        Some(tested) if tested.generation == index.generation() => {
+            if verify_lip_seat() {
+                verify_lip_seat_reuse("round", &tested.found, &ask(job));
+            }
+            tested.found
+        }
+        _ => ask(job),
+    }
+}
+
+/// The shadow check of one reused path test: `stored` against `fresh`.
+fn verify_lip_seat_reuse(
+    what: &str,
+    stored: &Option<(Vec<u32>, Vec<Follow>)>,
+    fresh: &Option<(Vec<u32>, Vec<Follow>)>,
+) {
+    assert!(
+        stored == fresh,
+        "PLINTH_SWEEP_VERIFY_LIPSEAT: a reused path test ({what}) differs from the fresh one\n stored {stored:?}\n fresh  {fresh:?}"
+    );
 }
 
 /// The most candidates one arm's read-ahead takes in one batch. A batch
@@ -1006,6 +1141,8 @@ struct Proposal {
     candidate: Candidate,
     path: Vec<u32>,
     children: Vec<Follow>,
+    /// The field generation the path test answered at.
+    generation: u64,
 }
 
 /// Where each child of a mover lands on its new axis, and the child's new
@@ -1357,7 +1494,7 @@ impl StandingReads {
 fn read_movers(
     frame: &ReadFrame<'_>,
     context: &SlendernessContext<'_>,
-    index: &ColumnHistory,
+    index: &StampedIndex,
     struts: &[SweepStrut],
     arms: &[SweepArm],
     pending: &mut [Pending],
@@ -1386,8 +1523,9 @@ fn read_movers(
     };
     let mut rows: Vec<Row> = Vec::new();
     let mut ahead_hits = 0_usize;
+    let generation = index.generation();
     for (proposal, &first) in proposals.iter().zip(first_of) {
-        let job = &pending[proposal.slot];
+        let job = &mut pending[proposal.slot];
         if job
             .ahead
             .get(&proposal.at)
@@ -1410,16 +1548,45 @@ fn read_movers(
                 continue;
             }
             let candidate = job.candidates[at];
-            let Some((path, _)) = propose(
-                context,
-                index,
-                struts,
-                job.index,
-                candidate,
-                &job.children,
-                clearance,
-            ) else {
-                continue;
+            // The path test: stored at this generation (a refusal too, so a
+            // refused candidate is asked once per generation, not once per
+            // overlapping window), or asked now and stored.
+            let path = match job.tested.get(&at).filter(|tested| tested.generation == generation) {
+                Some(tested) => {
+                    if verify_lip_seat() {
+                        let fresh = propose(
+                            context,
+                            index,
+                            struts,
+                            job.index,
+                            candidate,
+                            &job.children,
+                            clearance,
+                        );
+                        verify_lip_seat_reuse("read-ahead", &tested.found, &fresh);
+                    }
+                    let Some((path, _)) = &tested.found else {
+                        continue;
+                    };
+                    path.clone()
+                }
+                None => {
+                    let found = propose(
+                        context,
+                        index,
+                        struts,
+                        job.index,
+                        candidate,
+                        &job.children,
+                        clearance,
+                    );
+                    let path = found.as_ref().map(|(path, _)| path.clone());
+                    job.tested.insert(at, Tested { generation, found });
+                    let Some(path) = path else {
+                        continue;
+                    };
+                    path
+                }
             };
             let solid = trial_arm(
                 context,
@@ -1508,6 +1675,7 @@ pub(crate) fn apply(
     }
     let mut index = ColumnHistory::new(context.grid);
     crate::congestion::stamp_all(&mut index, struts, context.layer_height_mm);
+    let mut index = StampedIndex::new(index);
     // The roots on the plate, as the congestion census sizes them, on the
     // profiles the survey drew.
     let flare_factor = if context.flare_factor.is_finite() && context.flare_factor > 0.0 {
@@ -1721,6 +1889,7 @@ pub(crate) fn apply(
             children,
             refused_slender: false,
             ahead: std::collections::HashMap::new(),
+            tested: std::collections::HashMap::new(),
             window: 1,
         });
     }
@@ -1747,24 +1916,20 @@ pub(crate) fn apply(
                 continue;
             }
             while job.next < job.candidates.len() {
-                let candidate = job.candidates[job.next];
+                let at = job.next;
+                let candidate = job.candidates[at];
                 job.next += 1;
-                match propose(
-                    context,
-                    &index,
-                    struts,
-                    job.index,
-                    candidate,
-                    &job.children,
-                    trigger.is_clearance(),
-                ) {
+                // The path test the read-ahead stored at this very field
+                // generation, else asked now (a stale one is dropped).
+                match take_path_test(context, &index, struts, job, at, trigger.is_clearance()) {
                     Some((path, children)) => {
                         proposals.push(Proposal {
                             slot,
-                            at: job.next - 1,
+                            at,
                             candidate,
                             path,
                             children,
+                            generation: index.generation(),
                         });
                         break;
                     }
@@ -2164,15 +2329,39 @@ pub(crate) fn apply(
             // that now crosses a member moved this round, sends the arm back
             // for its next candidate.
             let job = &pending[proposal.slot];
-            let again = propose(
-                context,
-                &index,
-                struts,
-                index_of,
-                proposal.candidate,
-                &job.children,
-                trigger.is_clearance(),
-            );
+            // With no move committed since the proposal was made (the field
+            // generation is the one it was asked at), the answer is the
+            // proposal itself.
+            let unchanged = proposal.generation == index.generation();
+            let again = if unchanged {
+                if verify_lip_seat() {
+                    let fresh = propose(
+                        context,
+                        &index,
+                        struts,
+                        index_of,
+                        proposal.candidate,
+                        &job.children,
+                        trigger.is_clearance(),
+                    );
+                    verify_lip_seat_reuse(
+                        "re-ask",
+                        &Some((proposal.path.clone(), proposal.children.clone())),
+                        &fresh,
+                    );
+                }
+                Some((proposal.path.clone(), proposal.children.clone()))
+            } else {
+                propose(
+                    context,
+                    &index,
+                    struts,
+                    index_of,
+                    proposal.candidate,
+                    &job.children,
+                    trigger.is_clearance(),
+                )
+            };
             let Some((path, children)) = again.filter(|(path, children)| {
                 *path == proposal.path && *children == proposal.children
             }) else {
@@ -3950,6 +4139,126 @@ mod model_landing_tests {
             found.iter().all(|(landing, _)| *landing == Landing::Plate),
             "a model landing offered with no model"
         );
+    }
+
+    /// **A stored path test is reused only at the generation it was asked
+    /// at** (read-ahead reuse, 2026-10-15), and the shadow switch catches a
+    /// mutator that forgets to bump it.
+    ///
+    /// The mover's lean to the plate at column 66 is open; the read-ahead
+    /// stores it. A member then stands in column 63, across the lean: the
+    /// commit stamps it ([`StampedIndex::stamp_strut`], which bumps the
+    /// generation), and the round must ask afresh and find the lean blocked.
+    /// SABOTAGE INSIDE: with the bump skipped the stale `Some` is served
+    /// (visible with the shadow off) and the shadow panics with it on.
+    #[test]
+    fn a_stored_path_test_is_reused_only_at_its_generation_and_the_shadow_catches_a_missed_bump() {
+        use super::{
+            propose, take_path_test, Candidate, Pending, StampedIndex, Tested, TEST_SKIP_BUMP,
+            TEST_VERIFY,
+        };
+        let grid = grid();
+        let keep_out = crate::drain::DrainKeepOut::none();
+        let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
+        let law = crate::slenderness::SlendernessLaw::new(30.0, 0.05, 1.0, 32.5);
+        let bare = history(|_, _| false);
+        let context = crate::slenderness::SlendernessContext {
+            grid: &grid,
+            history: &bare,
+            keep_out: &keep_out,
+            lean: &lean,
+            law: &law,
+            layer_height_mm: H,
+            layers: 200,
+            flare_factor: 1.6,
+            mast_root_clearance: true,
+            final_clearance_mm: 0.3,
+            member_clearance: true,
+            model_surface: None,
+            plate_z_mm: 0.0,
+            shaft_landings: true,
+            merge: true,
+            brace: true,
+            thicken: true,
+            mast: true,
+            max_struts: 1_000,
+            x_allowed: 18.0,
+            seat_faces: crate::tip_landing::SeatFaceRule::from_overhang_band(45.0, 25.0),
+            load_step_taper: crate::adapter::LoadStepTaper::of(&lean),
+            brace_cap: true,
+            brace_window: true,
+            frame_bands: true,
+            frame_ledger: true,
+            model_tie: true,
+        };
+        let candidate = Candidate {
+            cost_mm: 1.0,
+            cell: 60 * SIDE + 66,
+            landing: Landing::Plate,
+            k_bottom: 0,
+        };
+        // Runs the scene: returns (stored-and-served answer after the commit,
+        // fresh answer after the commit), both `is_some`.
+        let scene = |skip_bump: bool, verify: bool| {
+            let mut struts = vec![
+                arm(Landing::Plate, 0),
+                member_in_column(1, StrutKind::Arm, 40, SEAT_LAYER),
+            ];
+            let mut raw = ColumnHistory::new(&grid);
+            crate::congestion::stamp_all(&mut raw, &struts, H);
+            let mut index = StampedIndex::new(raw);
+            let mut job = Pending {
+                index: 0,
+                candidates: vec![candidate],
+                next: 0,
+                children: Vec::new(),
+                refused_slender: false,
+                ahead: std::collections::HashMap::new(),
+                tested: std::collections::HashMap::new(),
+                window: 1,
+            };
+            let ask = |index: &StampedIndex, struts: &[SweepStrut]| {
+                propose(&context, index, struts, 0, candidate, &[], false)
+            };
+            let before = ask(&index, &struts);
+            assert!(before.is_some(), "the lean is open before the commit");
+            job.tested.insert(
+                0,
+                Tested {
+                    generation: index.generation(),
+                    found: before,
+                },
+            );
+            // The commit: member 1 comes to stand across the lean.
+            TEST_SKIP_BUMP.with(|cell| cell.set(skip_bump));
+            TEST_VERIFY.with(|cell| cell.set(verify));
+            struts[1].cell = 60 * SIDE + 63;
+            index.stamp_strut(&struts[1], H);
+            let fresh = ask(&index, &struts);
+            let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                take_path_test(&context, &index, &struts, &mut job, 0, false)
+            }));
+            TEST_SKIP_BUMP.with(|cell| cell.set(false));
+            TEST_VERIFY.with(|cell| cell.set(false));
+            (served, fresh)
+        };
+        // With the bump: the stale answer is dropped and the lean reads blocked.
+        let (served, fresh) = scene(false, true);
+        assert!(fresh.is_none(), "the member across the lean blocks it");
+        assert_eq!(served.expect("no panic with the bump"), fresh);
+        // Sabotage, shadow off: the stale `Some` is served (the drill bites).
+        let (served, fresh) = scene(true, false);
+        assert!(fresh.is_none());
+        assert!(served.expect("no shadow, no panic").is_some(), "the skipped bump serves the stale answer");
+        // Sabotage, shadow on: the shadow panics.
+        let (served, _) = scene(true, true);
+        let payload = served.expect_err("the shadow check must catch the missed bump");
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|text| (*text).to_owned()))
+            .unwrap_or_default();
+        assert!(message.contains("PLINTH_SWEEP_VERIFY_LIPSEAT"), "{message}");
     }
 }
 
