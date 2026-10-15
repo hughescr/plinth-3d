@@ -594,12 +594,14 @@ impl NativeSurface {
             .ok_or(SurfaceBuildError::MemoryEstimateOverflow {
                 section: "BVH nodes",
             })?;
+        // Retained BVH: nodes, the `order` face IDs, and one `LeafTri` per
+        // slot of `order` (an exact-size collect, so capacity == face count).
         let bvh_retained_bytes = bvh_node_count
             .checked_mul(std::mem::size_of::<bvh::Node>())
             .and_then(|bytes| {
                 faces_len
-                    .checked_mul(std::mem::size_of::<u32>())
-                    .and_then(|order| bytes.checked_add(order))
+                    .checked_mul(std::mem::size_of::<u32>() + std::mem::size_of::<bvh::LeafTri>())
+                    .and_then(|per_face| bytes.checked_add(per_face))
             })
             .ok_or(SurfaceBuildError::MemoryEstimateOverflow {
                 section: "BVH retained",
@@ -995,8 +997,13 @@ mod thread_tests {
         let mesh_face_ids = face_count * std::mem::size_of::<u32>();
         let bvh_nodes = (2 * face_count + 1) * std::mem::size_of::<bvh::Node>();
         let bvh_order = face_count * std::mem::size_of::<u32>();
-        let expected_retained =
-            geometry_arrays + mesh_face_ids + bvh_nodes + bvh_order + parity.retained_bytes;
+        let bvh_leaf_tris = face_count * std::mem::size_of::<bvh::LeafTri>();
+        let expected_retained = geometry_arrays
+            + mesh_face_ids
+            + bvh_nodes
+            + bvh_order
+            + bvh_leaf_tris
+            + parity.retained_bytes;
 
         let estimate =
             NativeSurface::estimate_index_memory_from_indexed(&vertices, &faces, pitch).unwrap();
@@ -1006,6 +1013,70 @@ mod thread_tests {
             mesh_face_ids + bvh_order,
             2 * face_count * std::mem::size_of::<u32>()
         );
+    }
+
+    /// Measured allocation of the BVH (Vec capacities, not lengths) plus the
+    /// retained estimate's other parts must not exceed the estimate.
+    fn assert_estimate_covers_measured_bvh(vertices: &[[f64; 3]], faces: &[[u32; 3]], pitch: f64) {
+        let mesh = mesh::Mesh::from_indexed(vertices, faces).unwrap();
+        let tree = bvh::Bvh::build(&mesh).unwrap();
+        let measured_bvh = tree.nodes.capacity() * std::mem::size_of::<bvh::Node>()
+            + tree.order.capacity() * std::mem::size_of::<u32>()
+            + tree.tris.capacity() * std::mem::size_of::<bvh::LeafTri>();
+
+        let bounds = Mesh::validate_indexed_bounds(vertices, faces).unwrap();
+        let parity = parity::estimate_indexed_memory(vertices, faces, bounds, pitch).unwrap();
+        let n = faces.len();
+        let face_store = n
+            * (7 * std::mem::size_of::<[f64; 3]>()
+                + std::mem::size_of::<f64>()
+                + std::mem::size_of::<mesh::FaceBounds>()
+                + std::mem::size_of::<u32>());
+        let estimate =
+            NativeSurface::estimate_index_memory_from_indexed(vertices, faces, pitch).unwrap();
+        let measured_retained = face_store + measured_bvh + parity.retained_bytes;
+        assert!(
+            estimate.retained_bytes() >= measured_retained,
+            "{n} faces: estimated retained {} < measured {measured_retained}",
+            estimate.retained_bytes()
+        );
+        // `tri_pad` is live next to the finished tree while `tris` is collected.
+        let measured_peak =
+            measured_retained - parity.retained_bytes + n * std::mem::size_of::<f64>();
+        assert!(estimate.peak_bytes() >= measured_peak);
+    }
+
+    #[test]
+    fn indexed_estimate_covers_measured_bvh_allocation_balanced_and_unbalanced() {
+        // balanced: a grid of separated small triangles
+        let mut vertices = Vec::new();
+        let mut faces = Vec::new();
+        for i in 0..40_u32 {
+            for j in 0..40_u32 {
+                let base = u32::try_from(vertices.len()).unwrap();
+                let (x, y) = (f64::from(i) * 2.0, f64::from(j) * 2.0);
+                vertices.extend([[x, y, 0.0], [x + 1.0, y, 0.0], [x, y + 1.0, 0.0]]);
+                faces.push([base, base + 1, base + 2]);
+            }
+        }
+        assert_estimate_covers_measured_bvh(&vertices, &faces, 1.0);
+
+        // unbalanced: 16 separated triangles at exponentially spaced X
+        let mut vertices = Vec::new();
+        let mut faces = Vec::new();
+        for i in 0..16_u32 {
+            let base = u32::try_from(vertices.len()).unwrap();
+            let x = f64::from(2_u32.pow(i)) * 4.0;
+            vertices.extend([[x, 0.0, 0.0], [x + 1.0, 0.0, 0.0], [x, 1.0, 0.0]]);
+            faces.push([base, base + 1, base + 2]);
+        }
+        assert_estimate_covers_measured_bvh(&vertices, &faces, 1.0);
+
+        // the unbalanced case really leaves node slack unused (the case the
+        // node allowance alone cannot be trusted to cover)
+        let mesh = mesh::Mesh::from_indexed(&vertices, &faces).unwrap();
+        let tree = bvh::Bvh::build(&mesh).unwrap();
+        assert!(tree.nodes.len() < 2 * faces.len() + 1);
     }
 
     #[test]
