@@ -1002,6 +1002,75 @@ fn plane_between(grid: &Grid, from: usize, to: usize) -> Option<Plane> {
     Some(plane)
 }
 
+/// The largest plane memo, in verdict slots (one byte each). A scan window
+/// that would need more is run without a memo: the verdicts are the same, only
+/// recomputed per cell.
+const PLANE_MEMO_MAX_SLOTS: usize = 1 << 24;
+
+/// A per-scan memo of plane verdicts, indexed by the RAW plane `[dr, dc]` that
+/// [`plane_between`] returns (`dr` in `0..=dr_max`, `dc` in `-dc_max..=dc_max`).
+/// The bounds are the grid-clipped search window, not the theoretical reach, so
+/// the table never exceeds `rows * (2 * cols - 1)` slots and is dropped (the
+/// direct test runs) when that exceeds [`PLANE_MEMO_MAX_SLOTS`].
+struct PlaneMemo {
+    /// 0 unknown, 1 holds, 2 does not. Empty when the memo is off.
+    slots: Vec<u8>,
+    dr_max: i64,
+    dc_max: i64,
+    span: usize,
+}
+
+impl PlaneMemo {
+    /// The memo for a scan of at most `reach_cells` cells each way on a
+    /// `rows` x `cols` grid. Checked arithmetic throughout.
+    fn new(rows: usize, cols: usize, reach_cells: usize) -> Self {
+        let dr = reach_cells.min(rows.saturating_sub(1));
+        let dc = reach_cells.min(cols.saturating_sub(1));
+        let slots = dc
+            .checked_mul(2)
+            .and_then(|twice| twice.checked_add(1))
+            .and_then(|span| dr.checked_add(1)?.checked_mul(span))
+            .filter(|&total| total <= PLANE_MEMO_MAX_SLOTS)
+            .map_or_else(Vec::new, |total| vec![0_u8; total]);
+        Self {
+            dr_max: i64::try_from(dr).unwrap_or(0),
+            dc_max: i64::try_from(dc).unwrap_or(0),
+            span: 2 * dc + 1,
+            slots,
+        }
+    }
+
+    /// The slot of `plane`, or `None` when the memo is off or the plane is
+    /// outside the window it was sized for.
+    fn slot(&self, plane: Plane) -> Option<usize> {
+        if self.slots.is_empty()
+            || !(0..=self.dr_max).contains(&plane[0])
+            || !(-self.dc_max..=self.dc_max).contains(&plane[1])
+        {
+            return None;
+        }
+        let row = usize::try_from(plane[0]).ok()?;
+        let col = usize::try_from(plane[1] + self.dc_max).ok()?;
+        Some(row * self.span + col)
+    }
+
+    /// The verdict of `judge` on `plane`, computed once per plane.
+    fn verdict(&mut self, plane: Plane, judge: impl FnOnce(Plane) -> bool) -> bool {
+        let Some(slot) = self.slot(plane) else {
+            return judge(plane);
+        };
+        match self.slots[slot] {
+            1 => true,
+            2 => false,
+            _ => {
+                let held = judge(plane);
+                self.slots[slot] = if held { 1 } else { 2 };
+                held
+            }
+        }
+    }
+}
+
 /// Exact integer test: two planes are the same line. Used only to list a
 /// member's distinct planes once.
 fn parallel(a: Plane, b: Plane) -> bool {
@@ -6019,12 +6088,14 @@ fn tie_by_mast(
     let mut candidates: Vec<(f64, usize, f64)> = Vec::new();
     // One verdict slot per plane `[dr, dc]` (`dr` in `0..=reach`, `dc` in
     // `-reach..=reach`): 0 unknown, 1 holds, 2 does not.
-    let reach_i = i64::try_from(reach_cells).unwrap_or(i64::MAX / 4);
-    let plane_span = 2 * reach_cells + 1;
-    let mut plane_memo = vec![0_u8; (reach_cells + 1) * plane_span];
-    for row in row0.saturating_sub(reach_cells)..=(row0 + reach_cells).min(grid.rows() - 1) {
+    // Sized by the grid-clipped window, not the theoretical reach.
+    let mut plane_memo = PlaneMemo::new(grid.rows(), cols, reach_cells);
+    for row in row0.saturating_sub(reach_cells)
+        ..=row0.saturating_add(reach_cells).min(grid.rows() - 1)
+    {
         let base = row * cols;
-        for col in col0.saturating_sub(reach_cells)..=(col0 + reach_cells).min(cols - 1) {
+        for col in col0.saturating_sub(reach_cells)..=col0.saturating_add(reach_cells).min(cols - 1)
+        {
             let cell = base + col;
             if cell == here {
                 continue;
@@ -6053,19 +6124,7 @@ fn tie_by_mast(
             // is judged once per scan.
             let held = match plane_between(grid, here, cell) {
                 None => false,
-                Some(plane) => {
-                    let slot = usize::try_from(plane[0]).unwrap_or(0) * plane_span
-                        + usize::try_from(plane[1] + reach_i).unwrap_or(0);
-                    match plane_memo[slot] {
-                        1 => true,
-                        2 => false,
-                        _ => {
-                            let held = admissible(Some(plane));
-                            plane_memo[slot] = if held { 1 } else { 2 };
-                            held
-                        }
-                    }
-                }
+                Some(plane) => plane_memo.verdict(plane, |plane| admissible(Some(plane))),
             };
             if !held {
                 continue;
@@ -8331,6 +8390,57 @@ mod flare_tests;
 #[cfg(test)]
 mod tests {
     use super::{extra_ties, SlendernessLaw, UnbracedRun};
+
+    /// A valid law with a huge brace reach on a small grid sizes the plane
+    /// memo by the grid window, not the reach; reaches that overflow the
+    /// arithmetic or exceed the cap turn the memo off instead of allocating.
+    #[test]
+    fn the_plane_memo_is_sized_by_the_grid_window_not_the_reach() {
+        let small = super::PlaneMemo::new(100, 100, 100_000);
+        assert_eq!(small.slots.len(), 100 * (2 * 99 + 1));
+        for reach in [usize::MAX, usize::MAX / 2, usize::MAX / 4 + 1] {
+            let huge = super::PlaneMemo::new(usize::MAX / 3, usize::MAX / 3, reach);
+            assert!(huge.slots.is_empty(), "reach {reach}: memo must be off");
+        }
+        let wide = super::PlaneMemo::new(1 << 13, 1 << 13, usize::MAX);
+        assert!(wide.slots.is_empty(), "a window over the cap runs unmemoised");
+        // Off, the verdict is still the direct one.
+        let mut off = super::PlaneMemo::new(1 << 13, 1 << 13, usize::MAX);
+        assert!(off.verdict([3, -2], |plane| plane == [3, -2]));
+        assert!(!off.verdict([3, -2], |_| false));
+    }
+
+    /// Over a full scan of a grid, the memoised verdict of every visited cell
+    /// equals the direct verdict, the judge runs once per distinct plane, and a
+    /// plane and its reverse share one slot.
+    #[test]
+    fn the_plane_memo_maps_each_visited_cells_plane_to_its_own_verdict() {
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.5, 23, 17);
+        let direct = |plane: super::Plane| (plane[0] * 7 + plane[1] * 3).rem_euclid(5) < 2;
+        for reach in [0_usize, 3, 9, 40] {
+            let mut memo = super::PlaneMemo::new(grid.rows(), grid.cols(), reach);
+            let mut calls = std::collections::BTreeSet::new();
+            let mut judged = 0_usize;
+            for here in [0_usize, 11, 17 * 23 / 2, 17 * 23 - 1, 5 * 23 + 20] {
+                let (row0, col0) = (grid.row_of(here), grid.col_of(here));
+                for row in row0.saturating_sub(reach)..=(row0 + reach).min(grid.rows() - 1) {
+                    for col in col0.saturating_sub(reach)..=(col0 + reach).min(grid.cols() - 1) {
+                        let cell = row * grid.cols() + col;
+                        let Some(plane) = super::plane_between(&grid, here, cell) else {
+                            continue;
+                        };
+                        let got = memo.verdict(plane, |plane| {
+                            judged += 1;
+                            direct(plane)
+                        });
+                        assert_eq!(got, direct(plane), "here {here} cell {cell} plane {plane:?}");
+                        calls.insert(plane);
+                    }
+                }
+            }
+            assert_eq!(judged, calls.len(), "reach {reach}: one judgement per plane");
+        }
+    }
 
     /// D9: the two-post ceiling reproduces the study's two pairs
     /// (`bracing-mechanics.md` §3: "3.8 for the thin pair and 3.5 for the mid
