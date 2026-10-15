@@ -604,42 +604,106 @@ pub struct UnheldArm {
 /// base, never the seat), found from the standing arm's seat-face point. One
 /// batched read for all the pairs ([`crate::contact_growth::measure`]); a tip
 /// with no seat face or no ball does not seat.
-fn tips_seat(
+///
+/// **The standing arm's half is read once per pass** (perf lane A1,
+/// 2026-10-14). The standing arm is `arms[index]`, fixed for the whole
+/// [`apply`] pass, and its seat site (the nearest admitted face to its seat-face
+/// point) and its contact at that site are pure functions of that arm, the
+/// mesh, the layer plan and the surface, none of which changes during the
+/// pass. The round loop asked the same question again each round: 539 017
+/// brute-force face scans over 117 199 faces on Deinonychus (62 % of the run).
+/// [`StandingSeats`] holds the answers by arm index; only the lean (which
+/// differs for every candidate) is read each round.
+pub(crate) fn tips_seat(
     joins: &HeadJoinContext<'_>,
     layer_plan: &LayerPlan,
-    pairs: &[(&SweepArm, &SweepArm)],
+    standing: &mut StandingSeats,
+    pairs: &[(usize, &SweepArm, &SweepArm)],
 ) -> Vec<(TipContact, TipContact)> {
     let context = joins.slender;
-    let points: Vec<Option<[f64; 3]>> = pairs.iter().map(|(stands, _)| stands.seat_face_point_mm).collect();
-    let sites = crate::footprint_normal::sites_at(joins.mesh, &points, context.seat_faces);
-    let mut rows: Vec<SweepArm> = Vec::with_capacity(2 * pairs.len());
-    let mut row_sites: Vec<Option<crate::footprint_normal::TipSite>> = Vec::with_capacity(2 * pairs.len());
-    for ((stands, lean), site) in pairs.iter().zip(&sites) {
-        for arm in [stands, lean] {
-            rows.push(SweepArm {
-                contact_ball_radius_mm: None,
-                ..(*arm).clone()
-            });
-            row_sites.push(*site);
-        }
-    }
     let env = crate::footprint_normal::MeasureEnv {
         mesh: joins.mesh,
         surface: joins.surface(),
         layer_plan,
     };
     let pixel_area_mm2 = context.grid.pitch_mm() * context.grid.pitch_mm();
-    let read = crate::contact_growth::measure(&env, &rows, &row_sites);
-    let contact = |row: Option<&Option<crate::contact_growth::Measured>>| TipContact {
-        seats: row
-            .and_then(Option::as_ref)
-            .is_some_and(|m| m.real_mm2 > 0.0 && m.real_mm2 + pixel_area_mm2 >= m.planned_mm2),
-        real_mm2: row.and_then(Option::as_ref).map(|m| m.real_mm2),
+    let contact = |row: Option<&crate::contact_growth::Measured>| TipContact {
+        seats: row.is_some_and(|m| m.real_mm2 > 0.0 && m.real_mm2 + pixel_area_mm2 >= m.planned_mm2),
+        real_mm2: row.map(|m| m.real_mm2),
         pixel_mm2: pixel_area_mm2,
     };
-    read.chunks(2)
-        .map(|both| (contact(both.first()), contact(both.get(1))))
+    let no_ball = |arm: &SweepArm| SweepArm {
+        contact_ball_radius_mm: None,
+        ..arm.clone()
+    };
+    // The standing arms not read yet, once each, in one batch.
+    let mut fresh: Vec<(usize, &SweepArm)> = pairs
+        .iter()
+        .filter(|(index, _, _)| !standing.reads.contains_key(index))
+        .map(|&(index, stands, _)| (index, stands))
+        .collect();
+    fresh.sort_unstable_by_key(|&(index, _)| index);
+    fresh.dedup_by_key(|&mut (index, _)| index);
+    if !fresh.is_empty() {
+        let table = standing
+            .table
+            .get_or_insert_with(|| crate::footprint_normal::FaceTable::of(joins.mesh));
+        let points: Vec<Option<[f64; 3]>> = fresh.iter().map(|(_, arm)| arm.seat_face_point_mm).collect();
+        let sites = crate::footprint_normal::sites_at(table, &points, context.seat_faces);
+        let rows: Vec<SweepArm> = fresh.iter().map(|(_, arm)| no_ball(arm)).collect();
+        let read = crate::contact_growth::measure(&env, &rows, &sites);
+        for (((index, _), site), measured) in fresh.iter().zip(sites).zip(read) {
+            standing.reads.insert(
+                *index,
+                StandingSeat {
+                    site,
+                    contact: contact(measured.as_ref()),
+                },
+            );
+        }
+    }
+    // The leans, on the site their standing arm seats on.
+    let rows: Vec<SweepArm> = pairs.iter().map(|(_, _, lean)| no_ball(lean)).collect();
+    let row_sites: Vec<Option<crate::footprint_normal::TipSite>> = pairs
+        .iter()
+        .map(|(index, _, _)| standing.reads.get(index).and_then(|read| read.site))
+        .collect();
+    let leans = crate::contact_growth::measure(&env, &rows, &row_sites);
+    pairs
+        .iter()
+        .zip(&leans)
+        .map(|((index, _, _), lean)| {
+            let stands = standing.reads.get(index).map_or_else(|| contact(None), |read| read.contact);
+            (stands, contact(lean.as_ref()))
+        })
         .collect()
+}
+
+/// One standing arm's seat site and the contact it makes there, as
+/// [`tips_seat`] reads them.
+#[derive(Clone, Copy)]
+struct StandingSeat {
+    site: Option<crate::footprint_normal::TipSite>,
+    contact: TipContact,
+}
+
+/// **The standing arms of one [`apply`] pass, seat-read once each**, by arm
+/// index (`arms` is fixed for the pass, so the index names the same arm in
+/// every round), and the mesh's face table the reads share. A new pass starts
+/// with a new value: nothing is kept between passes, so a changed field, mesh
+/// or layer plan can never meet a stale read.
+#[derive(Default)]
+pub(crate) struct StandingSeats {
+    table: Option<crate::footprint_normal::FaceTable>,
+    reads: std::collections::HashMap<usize, StandingSeat>,
+}
+
+#[cfg(test)]
+impl StandingSeats {
+    /// How many standing arms have been read.
+    pub(crate) fn arms_read(&self) -> usize {
+        self.reads.len()
+    }
 }
 
 /// One arm the finished field still has with its shaft cut by its seat trim.
@@ -1663,6 +1727,7 @@ pub(crate) fn apply(
     // path clears, then all of them measured by the lowering in one call.
     let mut moved: Vec<Relanding> = Vec::new();
     let mut standing_reads = StandingReads::default();
+    let mut standing_seats = StandingSeats::default();
     let mut open: Vec<usize> = (0..pending.len()).collect();
     let mut done = vec![false; pending.len()];
     while !open.is_empty() {
@@ -1953,11 +2018,17 @@ pub(crate) fn apply(
         {
             let asked: Vec<usize> = (0..proposals.len()).filter(|&at| refused_lean[at]).collect();
             if !asked.is_empty() {
-                let pairs: Vec<(&SweepArm, &SweepArm)> = asked
+                let pairs: Vec<(usize, &SweepArm, &SweepArm)> = asked
                     .iter()
-                    .map(|&at| (&arms[pending[proposals[at].slot].index], &trial[first_of[at]]))
+                    .map(|&at| {
+                        let index = pending[proposals[at].slot].index;
+                        (index, &arms[index], &trial[first_of[at]])
+                    })
                     .collect();
-                for (&at, read) in asked.iter().zip(tips_seat(joins, layer_plan, &pairs)) {
+                for (&at, read) in asked
+                    .iter()
+                    .zip(tips_seat(joins, layer_plan, &mut standing_seats, &pairs))
+                {
                     seating[at] = Some(read);
                 }
             }

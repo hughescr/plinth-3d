@@ -951,6 +951,119 @@ fn the_lip_seat_pass_never_re_lands_a_headed_arm_on_either_trigger() {
     }
 }
 
+/// **THE STANDING ARM'S SEAT READ IS A MEMO OF THE UNCACHED READ** (perf lane
+/// A1, 2026-10-14). `lip_seat::tips_seat` reads each pair's standing arm (its
+/// seat site and its contact there) once per pass, from `StandingSeats`, and
+/// only the lean every round. Over three rounds that mix new arms, arms seen
+/// before, an arm twice in one round and a different lean for an arm seen
+/// before, every row equals what the whole-pair read without a memo (the code
+/// before the lane, restated here) gives, bit for bit; each standing arm is
+/// read once. A NEW pass is a new `StandingSeats`: a changed arm at the same
+/// index is read afresh and again equals the uncached read (nothing is kept between
+/// passes).
+/// ANTI-VACUITY: at least one standing arm makes contact, so the equality is
+/// not two lists of `None`. SABOTAGE (by hand: the memo keyed by a constant
+/// instead of the arm index): the second round reads another arm's answer and
+/// the equality goes red.
+#[test]
+fn the_standing_seat_read_is_a_memo_of_the_uncached_read() {
+    use crate::lip_seat::{tips_seat, StandingSeats, TipContact};
+    let grid = grid();
+    let history = ColumnHistory::new(&grid);
+    let keep_out = crate::drain::DrainKeepOut::none();
+    let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
+    let law = crate::slenderness::SlendernessLaw::new(50.0, 0.05, 1.0, 32.5);
+    let context = slender_context(&grid, &history, &keep_out, &lean, &law);
+    let mesh = slab_mesh();
+    let plan = plinth_core::LayerPlan::new(0.0, vec![H; 300]).expect("a uniform plan");
+    let surface = std::cell::OnceCell::new();
+    let joins = crate::head_join::HeadJoinContext {
+        slender: &context,
+        mesh: &mesh,
+        layer_plan: &plan,
+        plate_z_mm: 0.0,
+        clearance_mm: 0.3,
+        standoff_mm: 0.6,
+        surface_pitch_mm: 0.5,
+        surface_max_bytes: 1 << 28,
+        surface: &surface,
+    };
+    // The code before the lane: one whole-pair read, no memo.
+    let uncached = |pairs: &[(usize, &plinth_support::SweepArm, &plinth_support::SweepArm)]| {
+        let points: Vec<Option<[f64; 3]>> = pairs.iter().map(|(_, stands, _)| stands.seat_face_point_mm).collect();
+        let table = crate::footprint_normal::FaceTable::of(&mesh);
+        let sites = crate::footprint_normal::sites_at(&table, &points, context.seat_faces);
+        let mut rows = Vec::new();
+        let mut row_sites = Vec::new();
+        for ((_, stands, lean), site) in pairs.iter().zip(&sites) {
+            for arm in [stands, lean] {
+                rows.push(plinth_support::SweepArm {
+                    contact_ball_radius_mm: None,
+                    ..(*arm).clone()
+                });
+                row_sites.push(*site);
+            }
+        }
+        let env = crate::footprint_normal::MeasureEnv {
+            mesh: &mesh,
+            surface: joins.surface(),
+            layer_plan: &plan,
+        };
+        let pixel = grid.pitch_mm() * grid.pitch_mm();
+        let read = crate::contact_growth::measure(&env, &rows, &row_sites);
+        let contact = |row: Option<&Option<crate::contact_growth::Measured>>| TipContact {
+            seats: row
+                .and_then(Option::as_ref)
+                .is_some_and(|m| m.real_mm2 > 0.0 && m.real_mm2 + pixel >= m.planned_mm2),
+            real_mm2: row.and_then(Option::as_ref).map(|m| m.real_mm2),
+            pixel_mm2: pixel,
+        };
+        read.chunks(2)
+            .map(|both| (contact(both.first()), contact(both.get(1))))
+            .collect::<Vec<_>>()
+    };
+    // Four standing arms over the slab at different cells and radii, and two
+    // different sets of leans (other arms, tilted the same way).
+    let arms_of = |radius: f64, col_shift: usize| {
+        let mut struts: Vec<SweepStrut> = (0..4)
+            .map(|k| straight(&grid, k, 150 + 7 * k as usize, 150 + col_shift + 11 * k as usize, 200, radius))
+            .collect();
+        tilted_arms(&grid, &mut struts)
+    };
+    let stands = arms_of(0.1, 0);
+    let leans_a = arms_of(0.15, 3);
+    let leans_b = arms_of(0.2, 5);
+    let rounds: [Vec<(usize, &plinth_support::SweepArm, &plinth_support::SweepArm)>; 3] = [
+        vec![(0, &stands[0], &leans_a[0]), (1, &stands[1], &leans_a[1])],
+        vec![
+            (2, &stands[2], &leans_a[2]),
+            (1, &stands[1], &leans_b[1]),
+            (0, &stands[0], &leans_b[0]),
+            (2, &stands[2], &leans_b[2]),
+        ],
+        vec![(3, &stands[3], &leans_a[3]), (0, &stands[0], &leans_a[1])],
+    ];
+    let mut memo = StandingSeats::default();
+    let mut any_contact = false;
+    for (round, pairs) in rounds.iter().enumerate() {
+        let got = tips_seat(&joins, &plan, &mut memo, pairs);
+        let want = uncached(pairs);
+        assert_eq!(got, want, "round {round}: the memoised read is the uncached read");
+        any_contact |= got.iter().any(|(stands, _)| stands.real_mm2.is_some_and(|real| real > 0.0));
+    }
+    assert!(any_contact, "anti-vacuity: some standing arm makes contact");
+    assert_eq!(memo.arms_read(), 4, "each standing arm is read once");
+    // A new pass, a changed arm at the same index: read afresh.
+    let moved = arms_of(0.1, 20);
+    let again = [(0, &moved[0], &leans_a[0]), (1, &moved[1], &leans_a[1])];
+    let mut fresh = StandingSeats::default();
+    assert_eq!(
+        tips_seat(&joins, &plan, &mut fresh, &again),
+        uncached(&again),
+        "a new pass reads its own arms"
+    );
+}
+
 /// Closed boxes `(min, max)` as one mesh: the slab the arm seats under, and a
 /// wall beside its shaft.
 fn boxes_mesh(boxes: &[([f64; 3], [f64; 3])]) -> plinth_mesh::Mesh {
