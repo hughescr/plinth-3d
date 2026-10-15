@@ -54,7 +54,7 @@ use plinth_support::perception::SliceSolid;
 
 use crate::drain::DrainKeepOut;
 use crate::grid::Grid;
-use crate::raster::{rasterize_into, LayerMasks, RasterScratch};
+use crate::layer_cache::{Components, LayerCache};
 use crate::report::{ModelSectionOverload, OverloadedStrut};
 use crate::{Landing, SweepStrut};
 
@@ -873,6 +873,31 @@ pub fn run(
     keep_out: &DrainKeepOut,
     unrooted: &UnrootedColumns,
 ) -> DownSweepOutcome {
+    // A caller with no plan-wide cache builds one for this call; every pass of
+    // this run still shares it. The plan's own driver builds one per plan and
+    // calls [`run_with`].
+    let layers = LayerCache::build(grid, slices);
+    run_with(&layers, struts, sizing, insertion, keep_out, unrooted)
+}
+
+/// [`run`] over a [`LayerCache`] built once for the plan: the layers' masks,
+/// cover clearance and model components are read from it, never recomputed.
+/// The result is the result of [`run`] on `layers.grid()` and `layers.slices()`
+/// to the bit.
+///
+/// # Panics
+///
+/// As [`run`].
+pub fn run_with(
+    layers: &LayerCache<'_>,
+    struts: &mut Vec<SweepStrut>,
+    sizing: SizingPolicy,
+    insertion: InsertionPolicy,
+    keep_out: &DrainKeepOut,
+    unrooted: &UnrootedColumns,
+) -> DownSweepOutcome {
+    let grid = layers.grid();
+    let slices = layers.slices();
     // Write-only `perf` marks (X0): the sizing site this run was called from
     // (named by the `sweep.down.calls.*` charge just before the call), the
     // run's own span, and the reuse probe's fingerprint of the members.
@@ -886,8 +911,7 @@ pub fn run(
     if !sizing.per_event {
         // SABOTAGE: today's order, max over events first and sum after.
         let outcome = sweep_pass(
-            grid,
-            slices,
+            layers,
             struts,
             sizing,
             insertion,
@@ -913,8 +937,7 @@ pub fn run(
         let mut log = crate::per_event::RouteLog::new(slices.len());
         let mut refused_here = Vec::new();
         let mut outcome = sweep_pass(
-            grid,
-            slices,
+            layers,
             struts,
             sizing,
             insertion,
@@ -1082,8 +1105,7 @@ fn apply_per_event_ledger(
           pass; a struct would move the argument list rather than shorten it"
 )]
 fn sweep_pass(
-    grid: &Grid,
-    slices: &[Vec<SliceSolid>],
+    layers: &LayerCache<'_>,
     struts: &mut Vec<SweepStrut>,
     sizing: SizingPolicy,
     insertion: InsertionPolicy,
@@ -1093,6 +1115,8 @@ fn sweep_pass(
     mut log: Option<&mut crate::per_event::RouteLog>,
     refused: &mut Vec<u64>,
 ) -> DownSweepOutcome {
+    let grid = layers.grid();
+    let slices = layers.slices();
     let cells = grid.cells();
     let area = grid.cell_area_mm2();
     crate::perf::add(crate::PerfWork::SweepDownPasses, 1);
@@ -1116,15 +1140,15 @@ fn sweep_pass(
         ..DownSweepOutcome::default()
     };
 
-    let mut scratch = RasterScratch::new(grid);
-    let mut masks = LayerMasks::default();
     let mut load_in = vec![0.0_f64; cells];
     let mut load_out = vec![0.0_f64; cells];
     let mut carriers = vec![false; cells];
     // Layer k+1's cover — the material the load actually travels through on
-    // its way down into layer k. All false above the top layer, where there is
-    // no load to route.
-    let mut cover_above = vec![false; cells];
+    // its way down into layer k — is `layers.cover_above(k)`, read from the
+    // plan's cache: all false above the top layer, where there is no load to
+    // route.
+    // Per-layer scratch of the model-section check's load sums.
+    let mut component_loads: Vec<f64> = Vec::new();
     // Layer k+1's CARRIERS, as opposed to its cover: model that carried plus every
     // arm alive there. Only the injection accounting reads it — see the max step.
     let mut carriers_above = vec![false; cells];
@@ -1164,7 +1188,6 @@ fn sweep_pass(
     let mut distance = vec![f32::INFINITY; cells];
     let mut distance_prev = vec![f32::INFINITY; cells];
     let mut route_anchor = vec![crate::reach::NO_ANCHOR; cells];
-    let mut route_clear: Vec<f32> = Vec::with_capacity(cells);
     // THE UNROOTED-COLUMN RULE's scratch ([`UnrootedColumns`]). Allocated only
     // when the up-sweep left something unrooted; on every other field the
     // rule reads nothing and the pass is the pass it always was.
@@ -1195,8 +1218,6 @@ fn sweep_pass(
     // that was put into the raster (arrived from above, or injected here), as
     // opposed to the arm's own non-injected per-layer duplicate. Allocated once.
     let mut peel_fed = vec![false; cells];
-    let mut labels = vec![u32::MAX; cells];
-    let mut parent = Vec::new();
     // Insertion scratch, allocated once. Arms this sweep adds are "growing"
     // until their column meets something: their landing is discovered by the
     // descent itself, which is the same "first thing you hit going down" rule
@@ -1239,11 +1260,11 @@ fn sweep_pass(
             t.layer_begin();
         }
         outcome.rasteriser_entries += 1;
-        {
-            let _prefix_span = crate::perf::span(crate::perf::Span::PassPrefix);
-            rasterize_into(grid, &slices[layer], &mut scratch, &mut masks);
-        }
-        let model_cells = masks.carrier_cells();
+        // The layer's masks, its cover one layer up and that cover's
+        // clearance come from the plan's cache (`layer_cache`), built once.
+        let masks = layers.masks(layer);
+        let cover_above = layers.cover_above(layer);
+        let model_cells = layers.carrier_cells(layer);
         let layer_area = model_cells as f64 * area;
         if model_cells > 0 {
             outcome.peak_layer_area_mm2 = outcome.peak_layer_area_mm2.max(layer_area);
@@ -1383,9 +1404,9 @@ fn sweep_pass(
         let mut reentered_here = 0.0_f64;
         let mut reentered_reads = 0_u64;
         let mut round = 0_usize;
-        // The routing field's clearance is built at most once per layer:
-        // `cover_above` does not change between the rounds below.
-        let mut route_clear_built = false;
+        // The routing field's clearance is `cover_above`'s, which does not
+        // change between the rounds below (nor between passes: it is cached).
+        let route_clear = layers.clearance_above(layer);
         // Per-event mode inserts at most once per layer per pass: the trigger
         // table was measured before this pass, so after an insertion only the
         // re-route below is needed, and the next pass re-measures.
@@ -1442,7 +1463,7 @@ fn sweep_pass(
             let route_span = crate::perf::span(crate::perf::Span::PassRoute);
             let route = route_within_cover(
                 grid,
-                &cover_above,
+                cover_above,
                 offered,
                 &tip_root,
                 if sizing.straight_reach {
@@ -1456,8 +1477,7 @@ fn sweep_pass(
                     via_tip: &mut via_tip,
                     previous: &mut distance_prev,
                     anchor: &mut route_anchor,
-                    clear: &mut route_clear,
-                    clear_built: &mut route_clear_built,
+                    clear: route_clear,
                 },
             );
             drop(route_span);
@@ -1769,7 +1789,7 @@ fn sweep_pass(
                 layer,
                 keep_out,
                 &masks.cover,
-                &cover_above,
+                cover_above,
                 &mut carriers,
                 &load_in,
                 &nearest,
@@ -2240,12 +2260,11 @@ fn sweep_pass(
         if model_cells > 0 {
             check_model_sections(
                 grid,
-                &masks.carry,
+                layers.components(layer),
                 &load_out,
                 layer,
                 sizing.x_allowed,
-                &mut labels,
-                &mut parent,
+                &mut component_loads,
                 &mut outcome.model_overload,
                 &mut outcome.model_section_max_x,
             );
@@ -2269,10 +2288,13 @@ fn sweep_pass(
                 (eligible, written)
             })
         });
-        // This layer's cover is the next iteration's "above".
+        // This layer's cover is the next iteration's "above": the cache hands
+        // it over with no copy. This layer's carriers are too, and `carriers`
+        // is re-filled from the next layer's mask before anything reads it,
+        // so the two buffers swap roles instead of one being copied into the
+        // other.
         let copy_started = trace.is_some().then(std::time::Instant::now);
-        cover_above.copy_from_slice(&masks.cover);
-        carriers_above.copy_from_slice(&carriers);
+        std::mem::swap(&mut carriers_above, &mut carriers);
         drop(end_span);
         if let (Some(t), Some(started), Some((eligible, written))) =
             (trace.as_mut(), copy_started, copy_cells)
@@ -2694,7 +2716,6 @@ fn route_within_cover(
         previous,
         anchor,
         clear,
-        clear_built,
     } = fields;
     let cols = grid.cols();
     let rows = grid.rows();
@@ -2769,12 +2790,6 @@ fn route_within_cover(
     } else {
         None
     };
-    if !*clear_built {
-        let _clearance_span = crate::perf::span(crate::perf::Span::PassClearance);
-        crate::reach::clearance_mm(grid, cover_above, clear);
-        *clear_built = true;
-    }
-    let clear: &[f32] = clear;
     // Write-only measurement (M0): relax calls and sweep rounds.
     let mut relax_calls = 0_u64;
     let mut rounds_run = 0_u64;
@@ -2912,11 +2927,9 @@ struct RouteFields<'a> {
     via_tip: &'a mut [bool],
     previous: &'a mut [f32],
     anchor: &'a mut [u32],
-    /// `cover_above`'s clearance field (`reach::clearance_mm`), built at most
-    /// once per layer, on the first round that needs it: the cover does not
-    /// change between rounds. The caller resets `clear_built` per layer.
-    clear: &'a mut Vec<f32>,
-    clear_built: &'a mut bool,
+    /// `cover_above`'s clearance field (`reach::clearance_mm`), from the
+    /// plan's layer cache: it is a function of the cover alone.
+    clear: &'a [f32],
 }
 
 /// What one layer's routing field cost to build.
@@ -2943,66 +2956,37 @@ struct RouteOutcome {
 /// the component and the realized `X`, on a file that is still emitted.
 #[expect(
     clippy::too_many_arguments,
-    reason = "a per-layer component check reads the grid, the mask, the load, its layer, the limit \
-          and two reusable scratch buffers, and writes one output list; a struct would move the \
-          list rather than shorten it"
+    reason = "a per-layer component check reads the grid, the layer's cached components, the load, \
+          its layer, the limit and a reusable scratch buffer, and writes one output list and one \
+          maximum; a struct would move the list rather than shorten it"
 )]
 fn check_model_sections(
     grid: &Grid,
-    model: &[bool],
+    components: &Components,
     load: &[f64],
     layer: usize,
     x_allowed: f64,
-    labels: &mut [u32],
-    parent: &mut Vec<u32>,
+    loads: &mut Vec<f64>,
     out: &mut Vec<ModelSectionOverload>,
     max_x: &mut f64,
 ) {
-    let cols = grid.cols();
-    let rows = grid.rows();
-    parent.clear();
-    labels.fill(u32::MAX);
-    for row in 0..rows {
-        for col in 0..cols {
-            let cell = row * cols + col;
-            if !model[cell] {
-                continue;
-            }
-            let left = (col > 0 && model[cell - 1]).then(|| labels[cell - 1]);
-            let up = (row > 0 && model[cell - cols]).then(|| labels[cell - cols]);
-            match (left, up) {
-                (Some(a), Some(b)) => {
-                    labels[cell] = find(parent, a);
-                    union(parent, a, b);
-                }
-                (Some(a), None) | (None, Some(a)) => labels[cell] = find(parent, a),
-                (None, None) => {
-                    let fresh = u32::try_from(parent.len()).unwrap_or(u32::MAX);
-                    parent.push(fresh);
-                    labels[cell] = fresh;
-                }
-            }
-        }
-    }
-    if parent.is_empty() {
+    // The components, their numbering and their cell counts are the layer
+    // cache's (a function of the model mask alone). What is left is the load
+    // sum: ascending cell order within each component, as it always was.
+    if components.counts.is_empty() {
         return;
     }
-    let mut counts = vec![0_u64; parent.len()];
-    let mut loads = vec![0.0_f64; parent.len()];
-    for cell in 0..grid.cells() {
-        if !model[cell] {
-            continue;
-        }
-        let root = find(parent, labels[cell]) as usize;
-        counts[root] += 1;
-        loads[root] += load[cell];
+    loads.clear();
+    loads.resize(components.counts.len(), 0.0);
+    for (&cell, &root) in components.cells.iter().zip(&components.roots) {
+        loads[root as usize] += load[cell as usize];
     }
     let area = grid.cell_area_mm2();
-    for component in 0..parent.len() {
-        if counts[component] == 0 {
+    for component in 0..components.counts.len() {
+        if components.counts[component] == 0 {
             continue;
         }
-        let component_area = counts[component] as f64 * area;
+        let component_area = components.counts[component] as f64 * area;
         let realized = loads[component] / component_area;
         *max_x = max_x.max(realized);
         if realized > x_allowed {
@@ -3016,20 +3000,169 @@ fn check_model_sections(
     }
 }
 
-fn find(parent: &mut [u32], mut node: u32) -> u32 {
-    while parent[node as usize] != node {
-        let grand = parent[parent[node as usize] as usize];
-        parent[node as usize] = grand;
-        node = grand;
-    }
-    node
-}
+#[cfg(test)]
+mod cached_components_tests {
+    //! The model-section check reads its components from the layer cache. The
+    //! ORACLE here is the check as it stood before the cache (labels, union-
+    //! find and load sums recomputed per call), copied unchanged; the cached
+    //! check must report the same overloads, in the same order, with the same
+    //! float bits, on masks with many components, holes and diagonals.
 
-fn union(parent: &mut [u32], a: u32, b: u32) {
-    let (ra, rb) = (find(parent, a), find(parent, b));
-    if ra != rb {
-        let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
-        parent[hi as usize] = lo;
+    use super::{check_model_sections, Components, ModelSectionOverload};
+    use crate::grid::{lay_out_at, Grid};
+
+    fn find(parent: &mut [u32], mut node: u32) -> u32 {
+        while parent[node as usize] != node {
+            let grand = parent[parent[node as usize] as usize];
+            parent[node as usize] = grand;
+            node = grand;
+        }
+        node
+    }
+
+    fn union(parent: &mut [u32], a: u32, b: u32) {
+        let (ra, rb) = (find(parent, a), find(parent, b));
+        if ra != rb {
+            let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
+            parent[hi as usize] = lo;
+        }
+    }
+
+    /// The pre-cache `check_model_sections`, verbatim.
+    fn oracle(
+        grid: &Grid,
+        model: &[bool],
+        load: &[f64],
+        layer: usize,
+        x_allowed: f64,
+        out: &mut Vec<ModelSectionOverload>,
+        max_x: &mut f64,
+    ) {
+        let cols = grid.cols();
+        let rows = grid.rows();
+        let mut parent: Vec<u32> = Vec::new();
+        let mut labels = vec![u32::MAX; grid.cells()];
+        for row in 0..rows {
+            for col in 0..cols {
+                let cell = row * cols + col;
+                if !model[cell] {
+                    continue;
+                }
+                let left = (col > 0 && model[cell - 1]).then(|| labels[cell - 1]);
+                let up = (row > 0 && model[cell - cols]).then(|| labels[cell - cols]);
+                match (left, up) {
+                    (Some(a), Some(b)) => {
+                        labels[cell] = find(&mut parent, a);
+                        union(&mut parent, a, b);
+                    }
+                    (Some(a), None) | (None, Some(a)) => labels[cell] = find(&mut parent, a),
+                    (None, None) => {
+                        let fresh = u32::try_from(parent.len()).unwrap_or(u32::MAX);
+                        parent.push(fresh);
+                        labels[cell] = fresh;
+                    }
+                }
+            }
+        }
+        if parent.is_empty() {
+            return;
+        }
+        let mut counts = vec![0_u64; parent.len()];
+        let mut loads = vec![0.0_f64; parent.len()];
+        for cell in 0..grid.cells() {
+            if !model[cell] {
+                continue;
+            }
+            let root = find(&mut parent, labels[cell]) as usize;
+            counts[root] += 1;
+            loads[root] += load[cell];
+        }
+        let area = grid.cell_area_mm2();
+        for component in 0..parent.len() {
+            if counts[component] == 0 {
+                continue;
+            }
+            let component_area = counts[component] as f64 * area;
+            let realized = loads[component] / component_area;
+            *max_x = max_x.max(realized);
+            if realized > x_allowed {
+                out.push(ModelSectionOverload {
+                    layer,
+                    component_area_mm2: component_area,
+                    carried_mm2: loads[component],
+                    realized_x: realized,
+                });
+            }
+        }
+    }
+
+    /// xorshift64*: deterministic masks and loads, no dependency.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn unit(&mut self) -> f64 {
+            (self.next() >> 11) as f64 / (1_u64 << 53) as f64
+        }
+    }
+
+    #[test]
+    fn cached_components_report_what_the_per_call_labelling_reported() {
+        let grid = lay_out_at(0.0, 0.0, 0.05, 61, 43);
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        let mut multi_component = 0_usize;
+        let mut overloads_seen = 0_usize;
+        for seed_density in [0.15, 0.3, 0.45, 0.55, 0.62, 0.8] {
+            for _ in 0..40 {
+                let model: Vec<bool> = (0..grid.cells()).map(|_| rng.unit() < seed_density).collect();
+                let load: Vec<f64> = (0..grid.cells())
+                    .map(|_| if rng.unit() < 0.4 { rng.unit() * 0.9 } else { 0.0 })
+                    .collect();
+                let mut labels = Vec::new();
+                let mut parent = Vec::new();
+                let components = Components::of(&grid, &model, &mut labels, &mut parent);
+                multi_component += usize::from(components.counts.iter().filter(|c| **c > 0).count() > 1);
+                let (mut want, mut want_max) = (Vec::new(), 0.0_f64);
+                oracle(&grid, &model, &load, 7, 0.5, &mut want, &mut want_max);
+                let (mut got, mut got_max) = (Vec::new(), 0.0_f64);
+                let mut scratch = Vec::new();
+                check_model_sections(&grid, &components, &load, 7, 0.5, &mut scratch, &mut got, &mut got_max);
+                assert_eq!(want.len(), got.len(), "overload count");
+                for (a, b) in want.iter().zip(&got) {
+                    assert_eq!(a.layer, b.layer);
+                    assert_eq!(a.component_area_mm2.to_bits(), b.component_area_mm2.to_bits());
+                    assert_eq!(a.carried_mm2.to_bits(), b.carried_mm2.to_bits());
+                    assert_eq!(a.realized_x.to_bits(), b.realized_x.to_bits());
+                }
+                assert_eq!(want_max.to_bits(), got_max.to_bits(), "max X");
+                overloads_seen += want.len();
+            }
+        }
+        // The comparison has teeth: many layers had several components and
+        // some reported overloads.
+        assert!(multi_component > 100, "{multi_component} multi-component masks");
+        assert!(overloads_seen > 100, "{overloads_seen} overloads");
+    }
+
+    #[test]
+    fn an_empty_mask_has_no_components_and_reports_nothing() {
+        let grid = lay_out_at(0.0, 0.0, 0.05, 8, 8);
+        let model = vec![false; grid.cells()];
+        let mut labels = Vec::new();
+        let mut parent = Vec::new();
+        let components = Components::of(&grid, &model, &mut labels, &mut parent);
+        assert!(components.counts.is_empty() && components.cells.is_empty());
+        let (mut out, mut max_x) = (Vec::new(), 0.0_f64);
+        let mut scratch = Vec::new();
+        check_model_sections(&grid, &components, &vec![1.0; grid.cells()], 0, 0.1, &mut scratch, &mut out, &mut max_x);
+        assert!(out.is_empty());
+        assert_eq!(max_x.to_bits(), 0.0_f64.to_bits());
     }
 }
 

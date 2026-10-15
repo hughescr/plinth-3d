@@ -68,6 +68,7 @@ pub(crate) mod joint_size;
 #[cfg(test)]
 mod joint_size_tests;
 pub mod landing_check;
+pub mod layer_cache;
 pub mod lean;
 pub mod limits;
 pub mod lip_seat;
@@ -116,7 +117,6 @@ pub use slenderness::{
 pub use tip_landing::{tip_contact_scar, tip_landings, TipCharge, TipContactScar, TipLanding};
 
 use grid::{plan_grid, Grid};
-use raster::{rasterize_into, LayerMasks, RasterScratch};
 use reach::ReachState;
 use up_sweep::{ColumnHistory, GreedyScratch};
 
@@ -1962,6 +1962,12 @@ fn run_sweep_inner(
     let slices = slice_stack(mesh, &planes, slice_limits(policy))
         .map_err(|error| SweepError::Slice(error.to_string()))?;
     cancel::checkpoint()?;
+    // THE PLAN'S LAYER CACHE (perf lane D1): every layer's masks, the clearance
+    // of its cover and its model components are functions of these slices and
+    // this grid alone, so they are built once here, in parallel across layers,
+    // and read by the up-sweep, every down-sweep and the removal replay.
+    let layer_cache = layer_cache::LayerCache::build(&grid, &slices);
+    cancel::checkpoint()?;
 
     // The drain keep-out is built BEFORE any arm is placed, because a keep-out
     // consulted after placement is a repair, and a repair that deletes arms
@@ -2017,8 +2023,6 @@ fn run_sweep_inner(
     } else {
         up_sweep::chamfer_hex_separation_mm(lamina_reach_mm)
     };
-    let mut scratch = RasterScratch::new(&grid);
-    let mut masks = LayerMasks::default();
     let mut struts: Vec<SweepStrut> = Vec::new();
     let mut unrooted = if policy.unrooted_routing {
         down_sweep::UnrootedColumns::with_layers(layers)
@@ -2199,11 +2203,11 @@ fn run_sweep_inner(
     };
 
     stage_span = perf::span(perf::Span::StageUp);
-    for (layer, solids) in slices.iter().enumerate().take(layers) {
+    for (layer, _) in slices.iter().enumerate().take(layers) {
         cancel::checkpoint()?;
         rasteriser_entries += 1;
-        rasterize_into(&grid, solids, &mut scratch, &mut masks);
-        if masks.cover.iter().all(|filled| !*filled) {
+        let masks = layer_cache.masks(layer);
+        if !layer_cache.cover_any(layer) {
             // No model here. Reset the potential so a column that restarts
             // higher up does not inherit a stale value across the gap.
             reach.u.fill(f32::INFINITY);
@@ -2354,9 +2358,8 @@ fn run_sweep_inner(
     };
     cancel::checkpoint()?;
     perf::add(PerfWork::SweepDownCallInitial, 1);
-    let mut outcome = down_sweep::run(
-        &grid,
-        &slices,
+    let mut outcome = down_sweep::run_with(
+        &layer_cache,
         &mut struts,
         sizing,
         insertion,
@@ -2386,6 +2389,7 @@ fn run_sweep_inner(
     let replay_context = demand_replay::ReplayContext {
         grid: &grid,
         slices: &slices,
+        layer_cache: Some(&layer_cache),
         planes: &planes,
         mesh,
         kappa: policy.kappa,
@@ -2460,9 +2464,8 @@ fn run_sweep_inner(
             }
             cancel::checkpoint()?;
             perf::add(PerfWork::SweepDownCallRemoval, 1);
-            outcome = down_sweep::run(
-                &grid,
-                &slices,
+            outcome = down_sweep::run_with(
+                &layer_cache,
                 &mut struts,
                 sizing,
                 insertion,
@@ -2531,9 +2534,8 @@ fn run_sweep_inner(
         merges_refused_by_radius += unmerged.undone;
         cancel::checkpoint()?;
         perf::add(PerfWork::SweepDownCallMergesUndone, 1);
-        outcome = down_sweep::run(
-            &grid,
-            &slices,
+        outcome = down_sweep::run_with(
+            &layer_cache,
             &mut struts,
             sizing,
             insertion,
@@ -2601,9 +2603,8 @@ fn run_sweep_inner(
             congestion_outcome.rounds_used += 1;
             cancel::checkpoint()?;
             perf::add(PerfWork::SweepDownCallCongestion, 1);
-            outcome = down_sweep::run(
-                &grid,
-                &slices,
+            outcome = down_sweep::run_with(
+                &layer_cache,
                 &mut struts,
                 sizing,
                 insertion,
@@ -2638,6 +2639,7 @@ fn run_sweep_inner(
             &grid,
             &history,
             &slices,
+            &layer_cache,
             &mut struts,
             sizing,
             insertion,
@@ -2781,9 +2783,8 @@ fn run_sweep_inner(
             stranded_branch_outcome.rounds += 1;
             cancel::checkpoint()?;
             perf::add(PerfWork::SweepDownCallStrandedRound, 1);
-            outcome = down_sweep::run(
-                &grid,
-                &slices,
+            outcome = down_sweep::run_with(
+                &layer_cache,
                 &mut struts,
                 sizing,
                 insertion,
@@ -2800,9 +2801,8 @@ fn run_sweep_inner(
             if undone > 0 {
                 cancel::checkpoint()?;
                 perf::add(PerfWork::SweepDownCallStrandedPutBack, 1);
-                outcome = down_sweep::run(
-                    &grid,
-                    &slices,
+                outcome = down_sweep::run_with(
+                    &layer_cache,
                     &mut struts,
                     sizing,
                     insertion,
@@ -2837,9 +2837,8 @@ fn run_sweep_inner(
         // field sizes it again.
         cancel::checkpoint()?;
         perf::add(PerfWork::SweepDownCallForcedMerges, 1);
-        outcome = down_sweep::run(
-            &grid,
-            &slices,
+        outcome = down_sweep::run_with(
+            &layer_cache,
             &mut struts,
             sizing,
             insertion,
@@ -2871,9 +2870,8 @@ fn run_sweep_inner(
             unmerged_after_merges += unmerged.undone;
             cancel::checkpoint()?;
             perf::add(PerfWork::SweepDownCallUnmergeAfterMerges, 1);
-            outcome = down_sweep::run(
-                &grid,
-                &slices,
+            outcome = down_sweep::run_with(
+                &layer_cache,
                 &mut struts,
                 sizing,
                 insertion,
@@ -2942,6 +2940,7 @@ fn run_sweep_inner(
         plan,
         plate_z,
         slices: &slices,
+        layer_cache: &layer_cache,
         sizing,
         insertion,
         keep_out: &keep_out,
@@ -3003,9 +3002,8 @@ fn run_sweep_inner(
         if graze::convert(&graze_env, &mut struts, &mut graze_outcome) > 0 {
             cancel::checkpoint()?;
             perf::add(PerfWork::SweepDownCallGraze, 1);
-            outcome = down_sweep::run(
-                &grid,
-                &slices,
+            outcome = down_sweep::run_with(
+                &layer_cache,
                 &mut struts,
                 sizing,
                 insertion,
@@ -3051,9 +3049,8 @@ fn run_sweep_inner(
             perf::add(PerfWork::SweepHeadJoinPasses, 1);
             cancel::checkpoint()?;
             perf::add(PerfWork::SweepDownCallHeadJoin, 1);
-            outcome = down_sweep::run(
-                &grid,
-                &slices,
+            outcome = down_sweep::run_with(
+                &layer_cache,
                 &mut struts,
                 sizing,
                 insertion,
@@ -3133,9 +3130,8 @@ fn run_sweep_inner(
         // every thickened root as a minimum beside the area law.
         cancel::checkpoint()?;
         perf::add(PerfWork::SweepDownCallTies, 1);
-        outcome = down_sweep::run(
-            &grid,
-            &slices,
+        outcome = down_sweep::run_with(
+            &layer_cache,
             &mut struts,
             sizing,
             insertion,
@@ -3187,9 +3183,8 @@ fn run_sweep_inner(
                 perf::add(PerfWork::SweepTiePasses, 1);
                 cancel::checkpoint()?;
                 perf::add(PerfWork::SweepDownCallModelTies, 1);
-                outcome = down_sweep::run(
-                    &grid,
-                    &slices,
+                outcome = down_sweep::run_with(
+                    &layer_cache,
                     &mut struts,
                     sizing,
                     insertion,
@@ -3375,9 +3370,8 @@ fn run_sweep_inner(
         if converted > 0 {
             cancel::checkpoint()?;
             perf::add(PerfWork::SweepDownCallGraze, 1);
-            outcome = down_sweep::run(
-                &grid,
-                &slices,
+            outcome = down_sweep::run_with(
+                &layer_cache,
                 &mut struts,
                 sizing,
                 insertion,
@@ -4616,6 +4610,9 @@ struct LipSeatRun<'a> {
     plan: &'a LayerPlan,
     plate_z: f64,
     slices: &'a [Vec<plinth_support::perception::SliceSolid>],
+    /// The plan's layer cache, offered to every re-size; used only when its
+    /// key matches the grid and `slices` at the call ([`layer_cache`]).
+    layer_cache: &'a layer_cache::LayerCache<'a>,
     sizing: down_sweep::SizingPolicy,
     insertion: down_sweep::InsertionPolicy<'a>,
     keep_out: &'a DrainKeepOut,
@@ -4876,9 +4873,9 @@ impl LipSeatRun<'_> {
         struts: &mut Vec<SweepStrut>,
     ) -> down_sweep::DownSweepOutcome {
         perf::add(PerfWork::SweepDownCallLipSeat, 1);
-        let sized = down_sweep::run(
-            context.grid,
-            self.slices,
+        let layers = layer_cache::LayerCache::resolve(Some(self.layer_cache), context.grid, self.slices);
+        let sized = down_sweep::run_with(
+            &layers,
             struts,
             self.sizing,
             self.insertion,
@@ -5185,6 +5182,7 @@ fn withdraw_idle_flank_arms(
     grid: &Grid,
     history: &ColumnHistory,
     slices: &[Vec<plinth_support::perception::SliceSolid>],
+    layers: &layer_cache::LayerCache<'_>,
     struts: &mut Vec<SweepStrut>,
     sizing: down_sweep::SizingPolicy,
     insertion: down_sweep::InsertionPolicy,
@@ -5228,8 +5226,9 @@ fn withdraw_idle_flank_arms(
         let mut trial = struts.clone();
         let remap = drop_members(&mut trial, doomed);
         perf::add(PerfWork::SweepDownCallCongestionTrial, 1);
-        let trial_outcome = down_sweep::run(
-            grid, slices, &mut trial, sizing, insertion, keep_out, unrooted,
+        let trial_layers = layer_cache::LayerCache::resolve(Some(layers), grid, slices);
+        let trial_outcome = down_sweep::run_with(
+            &trial_layers, &mut trial, sizing, insertion, keep_out, unrooted,
         );
         (trial, trial_outcome, remap)
     };

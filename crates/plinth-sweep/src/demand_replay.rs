@@ -60,7 +60,7 @@ use plinth_mesh::Mesh;
 use plinth_support::perception::SliceSolid;
 
 use crate::grid::Grid;
-use crate::raster::{rasterize_into, LayerMasks, RasterScratch};
+use crate::layer_cache::LayerCache;
 use crate::reach::{self, ReachState, SurfaceCreep};
 use crate::SweepStrut;
 
@@ -69,6 +69,10 @@ use crate::SweepStrut;
 pub(crate) struct ReplayContext<'a> {
     pub grid: &'a Grid,
     pub slices: &'a [Vec<SliceSolid>],
+    /// The plan's layer cache, when the caller has one. It is used only if
+    /// its key matches `grid` and `slices` ([`LayerCache::resolve`]); a
+    /// missing or mismatched cache is rebuilt here, never trusted.
+    pub layer_cache: Option<&'a LayerCache<'a>>,
     /// The slicing plane of each layer; a layer's material is born in
     /// `[plane - h, plane]`, exactly as the up-sweep loads the creep band.
     pub planes: &'a [f64],
@@ -256,8 +260,9 @@ fn replay_once(
     } else {
         SurfaceCreep::disabled(grid)
     };
-    let mut scratch = RasterScratch::new(grid);
-    let mut masks = LayerMasks::default();
+    // The layers' masks are the plan's cached ones (a function of the slices
+    // and the grid alone), not re-rasterised for every replay.
+    let layer_cache = LayerCache::resolve(context.layer_cache, grid, context.slices);
     // The up-sweep's own metric switch (`run_sweep`), applied to both sets.
     let new_state = || {
         let mut state = ReachState::new(grid);
@@ -290,8 +295,8 @@ fn replay_once(
         // Every exit below, a return or the end of the loop, has walked
         // exactly the layers counted here.
         outcome.layers_visited += 1;
-        rasterize_into(grid, &context.slices[layer], &mut scratch, &mut masks);
-        if masks.cover.iter().all(|filled| !*filled) {
+        let masks = layer_cache.masks(layer);
+        if !layer_cache.cover_any(layer) {
             // The up-sweep's own empty-layer reset, for both sets.
             current.u.fill(f32::INFINITY);
             reach::commit_layer(&mut current, &masks.carry);
@@ -550,6 +555,7 @@ mod tests {
         let context = ReplayContext {
             grid: &grid,
             slices: &slices,
+            layer_cache: None,
             planes: &planes,
             mesh,
             kappa: KAPPA,
@@ -643,6 +649,7 @@ mod tests {
         let context = ReplayContext {
             grid: &grid,
             slices: &slices,
+            layer_cache: None,
             planes: &planes,
             mesh: &mesh,
             kappa: KAPPA,
@@ -705,6 +712,7 @@ mod tests {
         let context = ReplayContext {
             grid: &grid,
             slices: &slices,
+            layer_cache: None,
             planes: &planes,
             mesh: &mesh,
             kappa: KAPPA,
@@ -845,6 +853,7 @@ mod tests {
         let context = ReplayContext {
             grid: &grid,
             slices: &slices,
+            layer_cache: None,
             planes: &planes,
             mesh: &mesh,
             kappa: KAPPA,
@@ -943,6 +952,7 @@ mod tests {
         let context = ReplayContext {
             grid: &grid,
             slices: &slices,
+            layer_cache: None,
             planes: &planes,
             mesh: &mesh,
             kappa: 42.6,
