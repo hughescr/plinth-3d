@@ -51,6 +51,7 @@ mod flank_relief;
 mod footprint_keeps_seat;
 mod footprint_moves_hold_the_rules;
 mod footprint_normal;
+mod footprint_threads;
 mod frame_ledger;
 #[cfg(feature = "slow-tests")]
 mod head_first;

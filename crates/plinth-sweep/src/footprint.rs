@@ -113,6 +113,7 @@ use geom_kernel::NativeSurface;
 use plinth_core::LayerPlan;
 use plinth_support::perception::SliceSolid;
 use plinth_support::{SweepArm, TipContactDisc};
+use rayon::prelude::*;
 
 use crate::drain::DrainKeepOut;
 use crate::grid::Grid;
@@ -395,6 +396,42 @@ struct Chord {
     origin: [f64; 3],
     inward: [f64; 3],
     length: f64,
+}
+
+/// How many searched tips (or proposals) a round needs before its per-tip
+/// work runs on the rayon pool. Each task is a whole tip (a candidate walk
+/// with its ground checks, or a verdict with its disc samples), not a cell or
+/// a sample; below this the hand-off costs more than the work.
+const PARALLEL_MIN_TIPS: usize = 4;
+
+/// One pending tip's walk down its candidate list in a round, read-only on
+/// the search state, applied in tip order afterwards.
+#[derive(Debug)]
+struct CandidateWalk {
+    slot: usize,
+    /// The index of the next candidate after the walk.
+    next: usize,
+    /// The first candidate that passed every prefilter.
+    proposal: Option<(i32, i32)>,
+    /// Candidates refused for the seat they were placed for, and (of those
+    /// counted) the ones refused by the ground check.
+    refused_off_seat: usize,
+    refused_off_ground: usize,
+}
+
+/// One proposal's verdict after the lowering re-derived its disc.
+#[derive(Debug)]
+enum Verdict {
+    /// Left out without a count (no disc, or no frame for it).
+    Skip,
+    /// Refused: the shaft is still cut at the moved seat.
+    Section,
+    /// Refused: the moved ball no longer holds the seat.
+    OffSeat,
+    /// Refused: the slide leaves ground over air.
+    OffGround,
+    /// Standing: the seat's shift and the samples of its real disc.
+    Verify { shift: [f64; 3], samples: Vec<Sample> },
 }
 
 /// A tip's disc plane and the lattice laid in it.
@@ -1602,11 +1639,14 @@ pub(crate) fn apply(
     while !pending.is_empty() {
         outcome.rounds += 1;
         let mut proposals: Vec<(usize, (i32, i32))> = Vec::new();
-        for &slot in &pending {
-            let search = &mut searches[slot];
-            let Some((frame, offsets, rim)) = &frames[search.arm] else {
-                continue;
-            };
+        // EACH PENDING TIP'S CANDIDATE WALK is a pure function of that tip's
+        // own search, the frozen lattice grade and its own ground window:
+        // read-only here, so the walks run side by side (one task per tip, a
+        // whole walk each) and their results are applied in `pending` order,
+        // the order the serial loop applied them in. The counters are sums.
+        let walk_of = |slot: usize| -> Option<CandidateWalk> {
+            let search = &searches[slot];
+            let (frame, offsets, rim) = frames[search.arm].as_ref()?;
             // The rim read back at its nearest search-lattice point: a
             // pruning prefilter only. The disc the move really gets is graded
             // exactly, lattice and rim, after the lowering re-derives it.
@@ -1619,9 +1659,16 @@ pub(crate) fn apply(
                 .map(|&(u, v)| (u.round() as i32, v.round() as i32))
                 .collect();
             let seat = arms[search.arm].seat_mm;
-            while search.next < search.candidates.len() {
-                let (i, j) = search.candidates[search.next];
-                search.next += 1;
+            let mut walk = CandidateWalk {
+                slot,
+                next: search.next,
+                proposal: None,
+                refused_off_seat: 0,
+                refused_off_ground: 0,
+            };
+            while walk.next < search.candidates.len() {
+                let (i, j) = search.candidates[walk.next];
+                walk.next += 1;
                 if !offsets
                     .iter()
                     .chain(&rim_cells)
@@ -1643,18 +1690,42 @@ pub(crate) fn apply(
                     ..search.slid
                 };
                 if !keeps_seat(seat, search.slid, rigid, pitch, height) {
-                    outcome.moves_refused_off_seat += 1;
-                    refused_by_limits[slot] = true;
+                    walk.refused_off_seat += 1;
                     continue;
                 }
                 if ground_of(slot).is_some_and(|ground| !keeps_ground(&ground, search.slid, rigid)) {
-                    outcome.moves_refused_off_seat += 1;
-                    outcome.moves_refused_off_ground += 1;
-                    refused_by_limits[slot] = true;
+                    walk.refused_off_seat += 1;
+                    walk.refused_off_ground += 1;
                     continue;
                 }
-                proposals.push((slot, (i, j)));
+                walk.proposal = Some((i, j));
                 break;
+            }
+            Some(walk)
+        };
+        let walks: Vec<Option<CandidateWalk>> = if pending.len() >= PARALLEL_MIN_TIPS {
+            pending.par_iter().map(|&slot| walk_of(slot)).collect()
+        } else {
+            pending.iter().map(|&slot| walk_of(slot)).collect()
+        };
+        if crate::footprint_normal::verify_footprint() {
+            // THE SHADOW CHECK (`PLINTH_SWEEP_VERIFY_FOOTPRINT=1`): the same
+            // walks, one after another in tip order.
+            let serial: Vec<Option<CandidateWalk>> =
+                pending.iter().map(|&slot| walk_of(slot)).collect();
+            assert_eq!(
+                format!("{walks:?}"),
+                format!("{serial:?}"),
+                "the candidate walks run side by side differ from the walks run in tip order"
+            );
+        }
+        for walk in walks.into_iter().flatten() {
+            searches[walk.slot].next = walk.next;
+            outcome.moves_refused_off_seat += walk.refused_off_seat;
+            outcome.moves_refused_off_ground += walk.refused_off_ground;
+            refused_by_limits[walk.slot] |= walk.refused_off_seat > 0;
+            if let Some(step) = walk.proposal {
+                proposals.push((walk.slot, step));
             }
         }
         if proposals.is_empty() {
@@ -1744,22 +1815,24 @@ pub(crate) fn apply(
         let mut verify: Vec<(usize, [f64; 3])> = Vec::with_capacity(proposals.len());
         let mut verify_samples: Vec<Sample> = Vec::new();
         let mut verify_span: Vec<(usize, usize)> = Vec::with_capacity(proposals.len());
-        for (((slot, _), (moved, disc)), moved_bite) in proposals
-            .iter()
-            .zip(moved_arms.iter().zip(&rederived))
-            .zip(&moved_bites)
-        {
-            let search = &searches[*slot];
+        // Each proposal's verdict (its refusals, the ground check, its disc's
+        // samples) is a pure function of that proposal and the frozen search
+        // state, so the verdicts are read side by side, one task per
+        // proposal, and applied in proposal order: the order the samples are
+        // laid out in, and the order the serial loop counted in.
+        let verdict_of = |at: usize| -> Verdict {
+            let (slot, _) = proposals[at];
+            let (moved, disc) = (&moved_arms[at], &rederived[at]);
+            let search = &searches[slot];
             // A tip searched for its section alone moves only onto a seat
             // where the shaft keeps it. Its refusal is its own count, never a
             // "refused by the limits" (that names the lean law, an unbraced
             // run or the drain keep-out, and this tip keeps its seat anyway).
-            if section_only[search.arm] && crate::lip_seat::cuts(moved_bite.as_ref()) {
-                outcome.moves_refused_section += 1;
-                continue;
+            if section_only[search.arm] && crate::lip_seat::cuts(moved_bites[at].as_ref()) {
+                return Verdict::Section;
             }
             let Some(disc) = disc.filter(|disc| disc.radius_mm > 0.0) else {
-                continue;
+                return Verdict::Skip;
             };
             // THE SEAT IT WAS PLACED FOR (joint review P2): the ball the file
             // will get at the moved seat must still hold the seat the reach
@@ -1773,34 +1846,64 @@ pub(crate) fn apply(
                 pitch,
                 height,
             ) {
-                outcome.moves_refused_off_seat += 1;
-                refused_by_limits[*slot] = true;
-                continue;
+                return Verdict::OffSeat;
             }
-            if ground_of(*slot)
+            if ground_of(slot)
                 .is_some_and(|ground| !keeps_ground(&ground, search.slid, Slid::of(&disc)))
             {
-                outcome.moves_refused_off_seat += 1;
-                outcome.moves_refused_off_ground += 1;
-                refused_by_limits[*slot] = true;
-                continue;
+                return Verdict::OffGround;
             }
             let Some(real) = Frame::of(&disc) else {
-                continue;
+                return Verdict::Skip;
             };
-            let first = verify_samples.len();
             let lattice = disc_offsets(disc.radius_mm / pitch)
                 .into_iter()
                 .map(|(u, v)| (f64::from(u), f64::from(v)));
-            for (u, v) in lattice.chain(rim_points(disc.radius_mm / pitch)) {
-                let p = real.point(pitch, u, v);
-                verify_samples.push(sample_at(grid, plate_z, height, layers, &real, p, true));
+            let samples: Vec<Sample> = lattice
+                .chain(rim_points(disc.radius_mm / pitch))
+                .map(|(u, v)| {
+                    let p = real.point(pitch, u, v);
+                    sample_at(grid, plate_z, height, layers, &real, p, true)
+                })
+                .collect();
+            Verdict::Verify {
+                shift: geom_kernel::vec3::sub(moved.seat_mm, arms[search.arm].seat_mm),
+                samples,
             }
-            verify_span.push((first, verify_samples.len()));
-            verify.push((
-                *slot,
-                geom_kernel::vec3::sub(moved.seat_mm, arms[search.arm].seat_mm),
-            ));
+        };
+        let verdicts: Vec<Verdict> = if proposals.len() >= PARALLEL_MIN_TIPS {
+            (0..proposals.len()).into_par_iter().map(verdict_of).collect()
+        } else {
+            (0..proposals.len()).map(verdict_of).collect()
+        };
+        if crate::footprint_normal::verify_footprint() {
+            let serial: Vec<Verdict> = (0..proposals.len()).map(verdict_of).collect();
+            assert_eq!(
+                format!("{verdicts:?}"),
+                format!("{serial:?}"),
+                "the verdicts read side by side differ from the verdicts read in proposal order"
+            );
+        }
+        for (&(slot, _), verdict) in proposals.iter().zip(verdicts) {
+            match verdict {
+                Verdict::Skip => {}
+                Verdict::Section => outcome.moves_refused_section += 1,
+                Verdict::OffSeat => {
+                    outcome.moves_refused_off_seat += 1;
+                    refused_by_limits[slot] = true;
+                }
+                Verdict::OffGround => {
+                    outcome.moves_refused_off_seat += 1;
+                    outcome.moves_refused_off_ground += 1;
+                    refused_by_limits[slot] = true;
+                }
+                Verdict::Verify { shift, samples } => {
+                    let first = verify_samples.len();
+                    verify_samples.extend(samples);
+                    verify_span.push((first, verify_samples.len()));
+                    verify.push((slot, shift));
+                }
+            }
         }
         outcome.verify_samples += verify_samples.len();
         let verify_hit = graded(

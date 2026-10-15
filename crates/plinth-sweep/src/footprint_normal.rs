@@ -111,6 +111,7 @@ use plinth_mesh::Mesh;
 use plinth_support::SweepArm;
 use rayon::prelude::*;
 
+use crate::face_tree::{AdmittedTree, FaceCornersNormal};
 use crate::grid::Grid;
 use crate::tip_landing::{CarriedFace, SeatFaceRule};
 use crate::{Footprint, StrutKind, SweepStrut};
@@ -752,35 +753,36 @@ pub fn measure_arms(
     Some(result)
 }
 
-/// One face's corners and outward unit normal; `None` for a face with a
-/// missing vertex or no normal (zero area).
-type FaceCornersNormal = Option<([[f64; 3]; 3], [f64; 3])>;
-
 /// The nearest admitted face to each query point, as the seat-face rule picks
-/// a tip's seat triangle: one parallel `points × faces` pass over the faces
-/// whose outward unit normal's `z` is below the query's own threshold, lowest
-/// face id on a tie. `(face id, its unit normal)`.
+/// a tip's seat triangle: the face whose outward unit normal's `z` is below
+/// the query's own threshold and nearest the point, lowest face id on a tie.
+/// `(face id, its unit normal)`.
+#[cfg(test)]
 fn nearest_admitted(mesh: &Mesh, queries: &[([f64; 3], f64)]) -> Vec<Option<(u32, [f64; 3])>> {
     nearest_admitted_in(&FaceTable::of(mesh), queries)
 }
 
-/// **Every face of a mesh with its corners and unit normal, read once.** The
-/// nearest-face scan ([`nearest_admitted_in`]) walks all faces for every
-/// query; a caller that asks many times of one mesh (the lip-seat round loop)
-/// builds this once instead of once per call (the normals were 196 of 489
-/// thread-seconds on Deinonychus, 2026-10-14). A pure function of the mesh.
+/// **Every face of a mesh with its corners and unit normal, read once, and the
+/// box tree over its down-facing faces.** The nearest-face question
+/// ([`nearest_admitted_in`]) is asked many times of one mesh (the lip-seat
+/// round loop, every footprint re-measurement); a caller builds this once
+/// instead of once per call (the normals were 196 of 489 thread-seconds on
+/// Deinonychus, 2026-10-14; the per-call rebuild was 138 of 778 samples of
+/// `footprint::apply` on Bat_Cat_Owl, 2026-10-15). A pure function of the mesh.
 pub(crate) struct FaceTable {
     faces: Vec<FaceCornersNormal>,
+    tree: AdmittedTree,
 }
 
 impl FaceTable {
     /// One read of every face's unit normal, in the spelling `seat_faces`
-    /// uses.
+    /// uses, and the tree over the down-facing ones.
     pub(crate) fn of(mesh: &Mesh) -> Self {
         let verts = mesh.verts();
         let tris = mesh.tris();
         let faces: Vec<FaceCornersNormal> = tris
-            .iter()
+            .par_iter()
+            .with_min_len(4096)
             .map(|tri| {
                 let a = *verts.get(tri[0] as usize)?;
                 let b = *verts.get(tri[1] as usize)?;
@@ -789,43 +791,111 @@ impl FaceTable {
                 Some(([a, b, c], unit))
             })
             .collect();
-        Self { faces }
+        Self::from_faces(faces)
+    }
+
+    /// The table over faces already read (the tree is built from them).
+    fn from_faces(faces: Vec<FaceCornersNormal>) -> Self {
+        let tree = AdmittedTree::of(&faces);
+        Self { faces, tree }
     }
 }
+
+/// **A face table built on first use** and kept: the footprint pass asks for
+/// it only when a tip slides, and every later ask of the same pass reads the
+/// one table ([`remeasure_slid_with`], [`remeasure_emitted_with`]). A new pass
+/// makes a new value, so a changed mesh can never meet a stale table.
+#[derive(Default)]
+pub(crate) struct LazyFaceTable {
+    cell: std::sync::OnceLock<FaceTable>,
+}
+
+impl LazyFaceTable {
+    /// The table of `mesh`, built by the first caller.
+    pub(crate) fn get(&self, mesh: &Mesh) -> &FaceTable {
+        self.cell.get_or_init(|| FaceTable::of(mesh))
+    }
+}
+
+/// `PLINTH_SWEEP_VERIFY_FOOTPRINT=1`: every nearest-admitted-face question is
+/// also answered by the scan over every face, and the two answers are
+/// compared by bits (face id and normal); any difference panics. For gate
+/// runs, not for production. Read once.
+pub(crate) fn verify_footprint() -> bool {
+    static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *VERIFY.get_or_init(|| {
+        std::env::var_os("PLINTH_SWEEP_VERIFY_FOOTPRINT").is_some_and(|value| value == "1")
+    })
+}
+
+/// The scan the box tree answers for: every face, lowest id on a tie. The
+/// definition of the answer; the tree is held to it by bits.
+fn nearest_admitted_scan(
+    faces: &[FaceCornersNormal],
+    point: [f64; 3],
+    max_normal_z: f64,
+) -> Option<(u32, [f64; 3])> {
+    let mut best = f64::INFINITY;
+    let mut found: Option<(u32, [f64; 3])> = None;
+    for (id, face) in faces.iter().enumerate() {
+        let Some(([a, b, c], unit)) = face else { continue };
+        if !(unit[2] < 0.0 && unit[2] < max_normal_z) {
+            continue;
+        }
+        let offset = vec3::sub(point, closest_on_tri(point, *a, *b, *c));
+        let distance = vec3::dot(offset, offset);
+        if distance < best {
+            if let Ok(id) = u32::try_from(id) {
+                best = distance;
+                found = Some((id, *unit));
+            }
+        }
+    }
+    found
+}
+
+/// A face's id and its outward unit normal.
+type NearestFace = (u32, [f64; 3]);
 
 /// [`nearest_admitted`] over a face table already built for the mesh.
 fn nearest_admitted_in(table: &FaceTable, queries: &[([f64; 3], f64)]) -> Vec<Option<(u32, [f64; 3])>> {
     let faces = &table.faces;
+    let verify = verify_footprint();
     crate::perf::add(
         crate::PerfWork::NearestFootprintNormalRows,
         crate::perf::count(queries.len()),
     );
-    crate::perf::add(
-        crate::PerfWork::NearestFootprintNormalTrisTested,
-        crate::perf::count(queries.len()).saturating_mul(crate::perf::count(faces.len())),
-    );
-    queries
+    let answers: Vec<(Option<NearestFace>, u64)> = queries
         .par_iter()
         .map(|&(point, max_normal_z)| {
-            let mut best = f64::INFINITY;
-            let mut found: Option<(u32, [f64; 3])> = None;
-            for (id, face) in faces.iter().enumerate() {
-                let Some(([a, b, c], unit)) = face else { continue };
-                if !(unit[2] < 0.0 && unit[2] < max_normal_z) {
-                    continue;
-                }
-                let offset = vec3::sub(point, closest_on_tri(point, *a, *b, *c));
-                let distance = vec3::dot(offset, offset);
-                if distance < best {
-                    if let Ok(id) = u32::try_from(id) {
-                        best = distance;
-                        found = Some((id, *unit));
-                    }
-                }
+            let (found, tested) = table.tree.nearest(faces, point, max_normal_z);
+            if verify {
+                let scanned = nearest_admitted_scan(faces, point, max_normal_z);
+                assert!(
+                    same_answer(found, scanned),
+                    "footprint box tree differs from the scan at {point:?} (threshold {max_normal_z}): \
+                     tree {found:?}, scan {scanned:?}"
+                );
             }
-            found
+            (found, tested)
         })
-        .collect()
+        .collect();
+    crate::perf::add(
+        crate::PerfWork::NearestFootprintNormalTrisTested,
+        answers.iter().map(|&(_, tested)| tested).sum(),
+    );
+    answers.into_iter().map(|(found, _)| found).collect()
+}
+
+/// Whether two answers are the same face with the same normal, bit for bit.
+fn same_answer(a: Option<(u32, [f64; 3])>, b: Option<(u32, [f64; 3])>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some((x, nx)), Some((y, ny))) => {
+            x == y && nx.iter().zip(&ny).all(|(p, q)| p.to_bits() == q.to_bits())
+        }
+        _ => false,
+    }
 }
 
 /// The sites of tips that SLID, re-derived at the slid seat: the seat triangle
@@ -837,12 +907,24 @@ fn nearest_admitted_in(table: &FaceTable, queries: &[([f64; 3], f64)]) -> Vec<Op
 ///
 /// One batched pass over the slid tips ([`nearest_admitted`]).
 #[must_use]
+pub fn reseat_sites(
+    mesh: &Mesh,
+    sites: &[Option<TipSite>],
+    shifts_mm: &[Option<[f64; 3]>],
+) -> Vec<Option<TipSite>> {
+    reseat_sites_with(&LazyFaceTable::default(), mesh, sites, shifts_mm)
+}
+
+/// [`reseat_sites`] over a face table kept by the caller: built on the first
+/// call that has a slid tip, read by every later one.
+#[must_use]
 #[expect(
     clippy::float_cmp,
     reason = "an exactly zero shift is a tip that did not move; any other shift, however small, \
               moved the seat, and its seat triangle is re-derived"
 )]
-pub fn reseat_sites(
+pub(crate) fn reseat_sites_with(
+    faces: &LazyFaceTable,
     mesh: &Mesh,
     sites: &[Option<TipSite>],
     shifts_mm: &[Option<[f64; 3]>],
@@ -862,7 +944,10 @@ pub fn reseat_sites(
             Some((vec3::add(site.landing_mm, shift), site.max_normal_z))
         })
         .collect();
-    for (&index, found) in slid.iter().zip(nearest_admitted(mesh, &queries)) {
+    for (&index, found) in slid
+        .iter()
+        .zip(nearest_admitted_in(faces.get(mesh), &queries))
+    {
         if let (Some(site), Some((face, facet_normal))) = (sites[index], found) {
             out[index] = Some(TipSite {
                 face,
@@ -1067,8 +1152,21 @@ pub fn remeasure_slid(
     moved: &[SweepArm],
     shifts_mm: &[[f64; 3]],
 ) -> Vec<[f64; 3]> {
+    remeasure_slid_with(env, &LazyFaceTable::default(), sites, moved, shifts_mm)
+}
+
+/// [`remeasure_slid`] over a face table the pass keeps: one table for every
+/// proposed slide of the pass, not one per call.
+#[must_use]
+pub(crate) fn remeasure_slid_with(
+    env: &MeasureEnv<'_>,
+    faces: &LazyFaceTable,
+    sites: &[Option<TipSite>],
+    moved: &[SweepArm],
+    shifts_mm: &[[f64; 3]],
+) -> Vec<[f64; 3]> {
     let shifts: Vec<Option<[f64; 3]>> = shifts_mm.iter().map(|&shift| Some(shift)).collect();
-    let sites = reseat_sites(env.mesh, sites, &shifts);
+    let sites = reseat_sites_with(faces, env.mesh, sites, &shifts);
     let measurement = measure_arms(env, moved, &sites);
     moved
         .iter()
@@ -1101,13 +1199,24 @@ pub struct EmittedRemeasure {
 /// drawn with. One more batched [`measure_arms`] call.
 ///
 /// `sites` is [`refine`]'s answer; `None` for a tip it did not measure.
+pub fn remeasure_emitted(
+    env: &MeasureEnv<'_>,
+    struts: &mut [SweepStrut],
+    emitted: &[SweepArm],
+    sites: &[Option<TipSite>],
+) -> EmittedRemeasure {
+    remeasure_emitted_with(env, &LazyFaceTable::default(), struts, emitted, sites)
+}
+
+/// [`remeasure_emitted`] over the face table the pass keeps.
 #[expect(
     clippy::float_cmp,
     reason = "identity, not closeness: a strut must carry exactly the normal measured on its \
               emitted ball, so any bit of difference is a change to write and to report"
 )]
-pub fn remeasure_emitted(
+pub(crate) fn remeasure_emitted_with(
     env: &MeasureEnv<'_>,
+    faces: &LazyFaceTable,
     struts: &mut [SweepStrut],
     emitted: &[SweepArm],
     sites: &[Option<TipSite>],
@@ -1119,7 +1228,7 @@ pub fn remeasure_emitted(
                 .then_some(strut.seat_face.shift_mm)
         })
         .collect();
-    let sites = reseat_sites(env.mesh, sites, &shifts);
+    let sites = reseat_sites_with(faces, env.mesh, sites, &shifts);
     let mut report = EmittedRemeasure::default();
     let Some(measurement) = measure_arms(env, emitted, &sites) else {
         return report;
@@ -1141,9 +1250,250 @@ pub fn remeasure_emitted(
 
 #[cfg(test)]
 mod face_table_tests {
-    use super::{nearest_admitted, sites_at, FaceTable};
+    use super::{
+        nearest_admitted, nearest_admitted_scan, reseat_sites, reseat_sites_with, same_answer, sites_at,
+        FaceCornersNormal, FaceTable, LazyFaceTable, TipSite,
+    };
     use crate::tip_landing::SeatFaceRule;
+    use geom_kernel::vec3;
     use plinth_mesh::Mesh;
+
+    /// A deterministic stream in `[0, 1)`.
+    fn next(state: &mut u64) -> f64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        #[expect(clippy::cast_precision_loss, reason = "53 bits fit f64 exactly")]
+        {
+            (*state >> 11) as f64 / (1_u64 << 53) as f64
+        }
+    }
+
+    /// One face the way [`FaceTable::of`] reads it.
+    fn face(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> FaceCornersNormal {
+        let unit = vec3::normalize(vec3::cross(vec3::sub(b, a), vec3::sub(c, a)))?;
+        Some(([a, b, c], unit))
+    }
+
+    /// A soup of `n` random triangles in a 20 mm cube (half of them on a 0.5
+    /// mm lattice, so distances tie exactly) plus the traps: zero-area faces,
+    /// slivers, exact duplicates (equal distance, different id), mirrored
+    /// copies (the same corners, the opposite winding: up-facing where the
+    /// original is down-facing), and a face of NaN corners that claims a
+    /// down-facing normal.
+    fn soup(n: usize, seed: u64) -> Vec<FaceCornersNormal> {
+        let mut state = seed;
+        let point = |state: &mut u64, lattice: bool| -> [f64; 3] {
+            std::array::from_fn(|_| {
+                let value = 20.0 * next(state);
+                if lattice {
+                    (value * 2.0).round() / 2.0
+                } else {
+                    value
+                }
+            })
+        };
+        let mut faces: Vec<FaceCornersNormal> = Vec::with_capacity(n + 200);
+        for index in 0..n {
+            let lattice = index % 2 == 0;
+            let centre = point(&mut state, lattice);
+            let corners: [[f64; 3]; 3] = std::array::from_fn(|_| {
+                let jitter = |state: &mut u64| {
+                    let step = (4.0 * next(state) - 2.0) * if lattice { 0.5 } else { 1.0 };
+                    if lattice {
+                        (step * 2.0).round() / 2.0
+                    } else {
+                        step
+                    }
+                };
+                [
+                    centre[0] + jitter(&mut state),
+                    centre[1] + jitter(&mut state),
+                    centre[2] + jitter(&mut state),
+                ]
+            });
+            faces.push(face(corners[0], corners[1], corners[2]));
+        }
+        for _ in 0..20 {
+            let a = point(&mut state, false);
+            let d = [next(&mut state), next(&mut state), next(&mut state)];
+            let b = vec3::add(a, d);
+            let c = vec3::add(a, vec3::scale(d, 2.0));
+            faces.push(face(a, b, c));
+            faces.push(face(a, a, b));
+        }
+        for _ in 0..20 {
+            let a = point(&mut state, false);
+            let b = vec3::add(a, [3.0, 0.0, 0.0]);
+            let c = vec3::add(a, [1.5, 1e-9, 1e-9]);
+            faces.push(face(a, b, c));
+            faces.push(face(a, c, b));
+        }
+        for index in 0..60 {
+            let copy = faces[(index * 7) % n];
+            faces.push(copy);
+            if let Some(([a, b, c], _)) = faces[(index * 11) % n] {
+                faces.push(face(a, c, b));
+            }
+        }
+        faces.push(Some(([[f64::NAN; 3]; 3], [0.0, 0.0, -1.0])));
+        faces
+    }
+
+    /// Query points: random, every corner of some faces (distance 0, a tie
+    /// between a face and its duplicates), lattice midpoints, and the
+    /// non-finite points.
+    fn queries_of(faces: &[FaceCornersNormal], count: usize, seed: u64) -> Vec<[f64; 3]> {
+        let mut state = seed;
+        let mut points: Vec<[f64; 3]> = (0..count)
+            .map(|_| std::array::from_fn(|_| 30.0 * next(&mut state) - 5.0))
+            .collect();
+        for face in faces.iter().step_by(37).flatten().take(60) {
+            points.extend(face.0);
+        }
+        points.extend((0..40).map(|_| std::array::from_fn(|_| (next(&mut state) * 40.0).round() / 2.0)));
+        points.push([f64::NAN, 1.0, 2.0]);
+        points.push([f64::INFINITY, 0.0, 0.0]);
+        points.push([1e6, -1e6, 5e5]);
+        points
+    }
+
+    const THRESHOLDS: [f64; 9] = [0.0, -0.0, -0.1, -0.5, -0.9, -1.0, f64::INFINITY, 5.0, f64::NAN];
+
+    /// What the oracle saw, to refuse a test that proved nothing.
+    #[derive(Default)]
+    struct Seen {
+        found: usize,
+        none: usize,
+        /// The nearest face among ALL down-facing faces was not the admitted
+        /// one: the threshold changed the answer.
+        filter_changed_answer: usize,
+        /// Another admitted face had exactly the winner's distance.
+        exact_ties: usize,
+    }
+
+    fn check_against_scan(faces: &[FaceCornersNormal], points: &[[f64; 3]]) -> Seen {
+        let table = FaceTable::from_faces(faces.to_vec());
+        let mut seen = Seen::default();
+        for &point in points {
+            for &threshold in &THRESHOLDS {
+                let (tree, _) = table.tree.nearest(&table.faces, point, threshold);
+                let scan = nearest_admitted_scan(&table.faces, point, threshold);
+                assert!(
+                    same_answer(tree, scan),
+                    "tree {tree:?} differs from the scan {scan:?} at {point:?}, threshold {threshold}"
+                );
+                match scan {
+                    None => seen.none += 1,
+                    Some((id, _)) => {
+                        seen.found += 1;
+                        let all_down = nearest_admitted_scan(&table.faces, point, f64::INFINITY);
+                        seen.filter_changed_answer += usize::from(all_down.is_some_and(|(other, _)| other != id));
+                        let distance_of = |(corners, _): &([[f64; 3]; 3], [f64; 3])| {
+                            let offset = vec3::sub(
+                                point,
+                                geom_kernel::closest_on_tri(point, corners[0], corners[1], corners[2]),
+                            );
+                            vec3::dot(offset, offset).to_bits()
+                        };
+                        let best = table.faces[id as usize].as_ref().map(distance_of);
+                        let tied = table
+                            .faces
+                            .iter()
+                            .flatten()
+                            .filter(|face| face.1[2] < 0.0 && face.1[2] < threshold)
+                            .filter(|face| Some(distance_of(face)) == best)
+                            .count();
+                        seen.exact_ties += usize::from(tied > 1);
+                    }
+                }
+            }
+        }
+        seen
+    }
+
+    /// **THE BOX TREE ANSWERS AS THE SCAN OVER EVERY FACE, BIT FOR BIT** (perf
+    /// lane FF, 2026-10-15): the same face id and the same normal bits, for
+    /// every query point of a soup full of traps (zero-area faces, slivers,
+    /// exact duplicates, mirrored copies that are up-facing, a NaN face) and
+    /// every threshold (including `-0.0`, a threshold no face is under, `+inf`
+    /// and NaN), points on a face's own corners, non-finite points.
+    /// ANTI-VACUITY: some answers are found and some are none; for some the
+    /// nearest of ALL down-facing faces is not the admitted one (so the filter
+    /// is what is being tested); some are exact ties among admitted faces (the
+    /// lowest id must win).
+    #[test]
+    fn the_box_tree_answers_as_the_scan_over_every_face() {
+        let faces = soup(3000, 0x00C0_FFEE);
+        let points = queries_of(&faces, 150, 7);
+        let seen = check_against_scan(&faces, &points);
+        assert!(seen.found > 1000 && seen.none > 100, "found {}, none {}", seen.found, seen.none);
+        assert!(seen.filter_changed_answer > 100, "the threshold never changed the answer");
+        assert!(seen.exact_ties > 30, "exact ties seen: {}", seen.exact_ties);
+    }
+
+    /// The same, over a soup large enough for the parallel build (the subtrees
+    /// are joined on the rayon pool), checked in pools of 1 and 12 threads:
+    /// the tree never depends on how it was built.
+    #[test]
+    fn the_box_tree_built_in_parallel_answers_as_the_scan() {
+        let faces = soup(20_000, 0xBEEF);
+        let points = queries_of(&faces, 20, 11);
+        for threads in [1_usize, 12] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("a rayon pool");
+            let seen = pool.install(|| check_against_scan(&faces, &points));
+            assert!(seen.found > 100 && seen.exact_ties > 10, "{threads} threads");
+        }
+    }
+
+    /// An empty table, a table of only up-facing and degenerate faces: the
+    /// scan finds nothing and so does the tree.
+    #[test]
+    fn a_table_with_no_down_facing_face_answers_none() {
+        let up = face([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        assert!(up.is_some_and(|(_, unit)| unit[2] > 0.0));
+        for faces in [Vec::new(), vec![up, None, face([0.0; 3], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0])]] {
+            let seen = check_against_scan(&faces, &[[0.5, 0.5, 0.5], [9.0, 9.0, 9.0]]);
+            assert_eq!(seen.found, 0);
+        }
+    }
+
+    /// **ONE LAZILY KEPT TABLE GIVES THE ANSWER OF A TABLE PER CALL** (perf
+    /// lane FF): `reseat_sites_with` over one [`LazyFaceTable`], asked three
+    /// times (and once with nothing slid, which builds nothing), equals
+    /// `reseat_sites`, which builds its own table each call. ANTI-VACUITY: the
+    /// kept table exists after the slid asks and not before, and the slid tip
+    /// stands on a floor face.
+    #[test]
+    fn a_kept_face_table_reseats_as_the_table_built_per_call() {
+        let mesh = box_mesh();
+        let rule = SeatFaceRule::from_overhang_band(45.0, 25.0);
+        let site = |point: [f64; 3]| {
+            sites_at(&FaceTable::of(&mesh), &[Some(point)], rule)[0].expect("a floor face")
+        };
+        let sites: Vec<Option<TipSite>> = vec![
+            Some(site([1.0, 1.0, 9.0])),
+            None,
+            Some(site([3.5, 0.5, 9.5])),
+        ];
+        let shifts: Vec<Option<[f64; 3]>> = vec![Some([0.0; 3]), Some([1.0, 0.0, 0.0]), Some([-0.5, 0.25, 0.0])];
+        let kept = LazyFaceTable::default();
+        let still = reseat_sites_with(&kept, &mesh, &sites, &[None, None, None]);
+        assert_eq!(still, sites);
+        assert!(kept.cell.get().is_none(), "nothing slid, so no table is built");
+        for _ in 0..3 {
+            assert_eq!(
+                reseat_sites_with(&kept, &mesh, &sites, &shifts),
+                reseat_sites(&mesh, &sites, &shifts)
+            );
+        }
+        assert!(kept.cell.get().is_some());
+        let moved = reseat_sites(&mesh, &sites, &shifts);
+        assert!(moved[2].is_some_and(|site| site.face <= 1), "the slid tip stands on a floor face");
+    }
 
     /// A closed box over `[0, 4] x [0, 4] x [10, 12]`.
     fn box_mesh() -> Mesh {

@@ -51,6 +51,7 @@ pub mod deferred_shake;
 pub(crate) mod demand_replay;
 pub mod down_sweep;
 pub mod drain;
+mod face_tree;
 pub mod feature_chord;
 pub mod foot_neck;
 pub mod footprint;
@@ -4238,6 +4239,9 @@ pub(crate) fn finish(
     };
     let mut slid_remeasured = 0_usize;
     let mut slid_max_change_deg = 0.0_f64;
+    // ONE face table for every re-measurement of this pass (each proposed
+    // slide's and the emitted field's), built on the first slid tip.
+    let seat_faces = footprint_normal::LazyFaceTable::default();
     let footprint = footprint::apply(
         &sweep_plan.grid,
         slices,
@@ -4254,7 +4258,13 @@ pub(crate) fn finish(
                 .iter()
                 .map(|&member| footprint_sites.get(member).copied().flatten())
                 .collect();
-            let normals = footprint_normal::remeasure_slid(&measure_env, &sites, moved, shifts);
+            let normals = footprint_normal::remeasure_slid_with(
+                &measure_env,
+                &seat_faces,
+                &sites,
+                moved,
+                shifts,
+            );
             for ((site, arm), normal) in sites.iter().zip(moved).zip(&normals) {
                 if site.is_some() {
                     slid_remeasured += 1;
@@ -4327,8 +4337,9 @@ pub(crate) fn finish(
     // and its disc is graded again on the ball it will be drawn with.
     if sweep_plan.report.seat_footprint_normal.enabled {
         let emitted = adapter::arms_of(&sweep_plan);
-        let remeasured = footprint_normal::remeasure_emitted(
+        let remeasured = footprint_normal::remeasure_emitted_with(
             &measure_env,
+            &seat_faces,
             &mut sweep_plan.struts,
             &emitted,
             &footprint_sites,
@@ -4376,7 +4387,8 @@ pub(crate) fn finish(
                     .then_some(strut.seat_face.shift_mm)
             })
             .collect();
-        let sites = footprint_normal::reseat_sites(mesh, &footprint_sites, &shifts);
+        let sites =
+            footprint_normal::reseat_sites_with(&seat_faces, mesh, &footprint_sites, &shifts);
         sweep_plan.report.seat_contact = grow_contact_balls(
             &measure_env,
             &mut sweep_plan,
