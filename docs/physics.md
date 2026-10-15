@@ -659,8 +659,10 @@ cases where it did not.
   Costs one more sweep; reported in the log (`second contact:` line) and `SweepRunReport::seat_second_contact`.
   A tip left short after it is warned as before.
   **How it is made** (`SweepPolicy::second_contact_mode`, env `PLINTH_SECOND_CONTACT=replan|edit|
-  edit-then-replan`; default `edit-then-replan`; design `SC-DESIGN.md` §3-§4). `replan` is the run
-  above. The two edit modes do not plan again: they take the sweep's state at checkpoint C (the start of
+  edit-then-replan`; design `SC-DESIGN.md` §3-§4). The default is `replan`, the run above: on the real
+  models the edit is always discarded (it skips the cleanup lanes the finished first plan went through;
+  see `EditReport`), so `edit-then-replan` only adds the edit's cost in front of the same re-plan. In
+  `replan` the seed is not read and no edit work runs. The two edit modes (experiments only) do not plan again: they take the sweep's state at checkpoint C (the start of
   `StageJoints`, kept as an `EditSeed`), run ONE insertion phase on a working copy W with the caps, finish
   a CLONE of W, and set that finished field against the finished first plan (P1) on predicates recomputed
   after the last mutation of both (`second_contact::final_checks`, the drawn-solid collision census, the

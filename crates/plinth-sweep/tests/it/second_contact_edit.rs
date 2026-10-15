@@ -115,15 +115,15 @@ fn members(plan: &SweepPlan) -> String {
 }
 
 #[test]
-fn the_policy_knob_parses_and_defaults_to_edit_then_replan() {
+fn the_policy_knob_parses_and_defaults_to_replan() {
     assert_eq!(SecondContactMode::parse("replan"), Ok(SecondContactMode::Replan));
     assert_eq!(SecondContactMode::parse("edit"), Ok(SecondContactMode::Edit));
     assert_eq!(SecondContactMode::parse("edit-then-replan"), Ok(SecondContactMode::EditThenReplan));
     assert!(SecondContactMode::parse("Edit").is_err(), "a typo does not silently pick a mode");
-    assert_eq!(SecondContactMode::default(), SecondContactMode::EditThenReplan);
+    assert_eq!(SecondContactMode::default(), SecondContactMode::Replan);
     if std::env::var_os(SecondContactMode::ENV).is_none() {
         let policy = SweepPolicy::from_registry().expect("the registry");
-        assert_eq!(policy.second_contact_mode, SecondContactMode::EditThenReplan);
+        assert_eq!(policy.second_contact_mode, SecondContactMode::Replan);
         assert_eq!(policy.second_contact_withdraw_rounds, 2);
     }
 }

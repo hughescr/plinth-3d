@@ -1111,9 +1111,11 @@ pub struct SweepPolicy {
     /// check never runs in the sweep.
     pub stage_shake_capture: bool,
     /// How the second contact is made ([`contact_growth::SecondContactMode`]):
-    /// `Replan` is today's way; `EditThenReplan` (the default) edits the
-    /// finished first plan and falls back to `Replan` where the edit is thrown
-    /// away; `Edit` falls back to the first plan.
+    /// `Replan` (the default) is today's way: on the real models the edit is
+    /// always discarded, so the edit modes only add cost. `EditThenReplan`
+    /// edits the finished first plan and falls back to `Replan` where the edit
+    /// is thrown away; `Edit` falls back to the first plan. The edit modes are
+    /// for experiments (`PLINTH_SECOND_CONTACT`).
     pub second_contact_mode: contact_growth::SecondContactMode,
     /// Withdrawal rounds the edit may spend (`SC-DESIGN.md` §3, `R`): each
     /// removes the new arms a failed trial is blamed on and finishes the field

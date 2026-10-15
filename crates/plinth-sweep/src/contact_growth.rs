@@ -269,24 +269,32 @@ pub struct ProfileOver {
 /// **How the second contact is made** ([`crate::SweepPolicy::second_contact_mode`],
 /// `SC-DESIGN.md` §3).
 ///
-/// * `Replan`: today's way. The placement runs again from the start with the
+/// * `Replan` (the default): the placement runs again from the start with the
 ///   short tips' contacts as their limit; the second plan is kept where it
-///   leaves the field nearer its loads' needs.
+///   leaves the field nearer its loads' needs. The edit modes below do no work
+///   in this mode: the seed is not read, no layer cache is built for them.
 /// * `Edit`: the finished first plan is EDITED. The new supports are put in
 ///   beside the short tips on the first plan's settled layout, the field is
 ///   finished again and checked against the first plan on every final
 ///   predicate; a new support that fails is withdrawn. Where the edit cannot
 ///   be made safe, the first plan stands.
-/// * `EditThenReplan` (the default): as `Edit`, and where the edit is thrown
-///   away, today's `Replan` runs and today's chooser decides (the first plan
-///   stands where it rejects), so no file gets less contact than today.
+/// * `EditThenReplan`: as `Edit`, and where the edit is thrown away, today's
+///   `Replan` runs and today's chooser decides (the first plan stands where it
+///   rejects), so no file gets less contact than `Replan` gives.
+///
+/// `Replan` is the default because on the real models the edit is always
+/// discarded (it skips the cleanup lanes the finished first plan went
+/// through; see [`EditReport`] and [`EditExit`]), so `EditThenReplan` only
+/// adds the edit's cost in front of the same re-plan. `Edit` and
+/// `EditThenReplan` stay selectable through [`SecondContactMode::ENV`] for
+/// experiments.
 ///
 /// Nothing in any mode reads the model's name.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SecondContactMode {
+    #[default]
     Replan,
     Edit,
-    #[default]
     EditThenReplan,
 }
 
