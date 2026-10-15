@@ -1354,7 +1354,7 @@ pub fn run_seeded(
     // same unrooted columns (what a walk reads besides the members, which the
     // pass compares one by one), and only when this call records and does not
     // take its pass 1 from a seed.
-    let run_key = run_key(sizing, unrooted, slices.len());
+    let run_key = run_key(sizing, insertion, keep_out, unrooted, slices.len());
     let mut stash_in = if insertion.enabled && usable_seed.is_none() {
         layers.take_stash().filter(|stash| stash.key == run_key)
     } else {
@@ -1394,7 +1394,7 @@ pub fn run_seeded(
                 trail.take().zip(carried_log.take())
             } else {
                 stash_in.take().and_then(|stash| {
-                    PassTrail::adopt(layers.pool(), stash.trail, stash.bytes).map(|adopted| {
+                    PassTrail::adopt(layers.pool(), stash.trail, stash.trail_bytes).map(|adopted| {
                         prev_sized = stash.sized;
                         (adopted, stash.log)
                     })
@@ -1560,11 +1560,17 @@ pub fn run_seeded(
                         + sized.as_ref().map_or(0, |(sized, prints)| {
                             approx_sized_bytes(sized) + (prints.len() * core::mem::size_of::<MemberPrint>()) as u64
                         });
+                    // CHARGED ONCE: the trail holds only its own bytes (an
+                    // adopted stash gave back its log and sizing bytes when it
+                    // left the cache, and the trail took only its own), so the
+                    // log and the sizing are added here and nowhere else.
+                    let trail_bytes = kept.bytes;
                     if kept.charge(extra) {
                         let (trail, bytes) = kept.into_data();
                         layers.put_stash(Stash {
                             key: run_key,
                             trail,
+                            trail_bytes,
                             bytes,
                             log: log.clone(),
                             sized,
@@ -2219,7 +2225,9 @@ impl<'p> PassTrail<'p> {
     /// A trail over `data` that the pool has agreed to hold `bytes` for;
     /// `None` when it will not.
     fn adopt(pool: &'p BytePool, data: TrailData, bytes: u64) -> Option<Self> {
-        pool.try_acquire(bytes).then_some(Self { data, pool, bytes })
+        // Lazy: a trail that was never charged must not exist, because its
+        // drop gives `bytes` back to the pool.
+        pool.try_acquire(bytes).then(|| Self { data, pool, bytes })
     }
 
     /// The contents and the bytes they were charged (given back to the pool
@@ -2302,17 +2310,36 @@ impl Drop for PassTrail<'_> {
 pub(crate) struct Stash {
     key: u64,
     trail: TrailData,
+    /// The bytes the trail alone holds (what an adopting call charges).
+    trail_bytes: u64,
     /// The bytes the trail, the log and the sizing hold (what the cache
-    /// charges its pool while it keeps them).
+    /// charges its pool while it keeps them); never less than `trail_bytes`.
     pub(crate) bytes: u64,
     log: crate::per_event::RouteLog,
     sized: Option<(crate::per_event::PerEventSizing, Vec<MemberPrint>)>,
 }
 
-/// What a walk reads besides the members and the layers: every field of the
-/// sizing policy (the destructuring names them all, so a new field fails to
-/// compile until it is hashed) and the unrooted columns.
-fn run_key(sizing: SizingPolicy, unrooted: &UnrootedColumns, layers: usize) -> u64 {
+/// What a pass reads besides the members and the layers: EVERY field of the
+/// sizing policy and of the insertion policy (the destructurings name them
+/// all, so a new field fails to compile until it is hashed), the contact caps
+/// by value (order-free over the tips: a map's iteration order is not an
+/// input), the drain keep-out (every word a placement reads) and the unrooted
+/// columns. A stash is used only against an equal key; when in doubt a field
+/// belongs here, because a missed field resumes a pass under inputs it was not
+/// walked under.
+fn run_key(
+    sizing: SizingPolicy,
+    insertion: InsertionPolicy,
+    keep_out: &DrainKeepOut,
+    unrooted: &UnrootedColumns,
+    layers: usize,
+) -> u64 {
+    let InsertionPolicy {
+        enabled,
+        max_struts,
+        max_rounds,
+        contact_caps,
+    } = insertion;
     let SizingPolicy {
         x_allowed,
         tip_radius_min_mm,
@@ -2343,6 +2370,21 @@ fn run_key(sizing: SizingPolicy, unrooted: &UnrootedColumns, layers: usize) -> u
     for flag in [straight_reach, tip_column_roots, per_event, handed_column_ledger] {
         hash = mix(hash, u64::from(flag));
     }
+    hash = mix(hash, u64::from(enabled));
+    hash = mix(hash, max_struts as u64);
+    hash = mix(hash, max_rounds as u64);
+    hash = match contact_caps {
+        None => mix(hash, 0),
+        Some(caps) => {
+            // A sum of per-tip hashes does not depend on the map's order.
+            let tips = caps.by_tip.iter().fold(0_u64, |sum, (&(cell, k_top), contact)| {
+                let tip = mix(mix(mix(0x3d3d_0002, cell as u64), k_top as u64), contact.to_bits());
+                sum.wrapping_add(tip)
+            });
+            mix(mix(mix(hash, 1), caps.by_tip.len() as u64), tips)
+        }
+    };
+    keep_out.digest_words(|word| hash = mix(hash, word));
     for layer in 0..layers {
         let cells = unrooted.at(layer);
         hash = mix(hash, cells.len() as u64);
@@ -5525,7 +5567,7 @@ mod sparse_walk_tests {
     use plinth_support::perception::{slice_stack, SliceSolid, SliceStackLimits};
 
     use super::{
-        pass_difference, sabotage, sweep_pass_in, DownSweepOutcome, DrainKeepOut, InsertionPolicy,
+        pass_difference, sabotage, sweep_pass_in, ContactCaps, DownSweepOutcome, DrainKeepOut, InsertionPolicy,
         PassCtl, PassMode, SizingPolicy, UnrootedColumns,
     };
     use crate::grid::{lay_out_at, Grid};
@@ -6674,6 +6716,276 @@ mod sparse_walk_tests {
         sabotage::set(0);
         println!("sabotage per-event reuse: {red} two-call chains differ");
         assert!(red > 0, "the shadow check cannot see a sizing reused over a changed log");
+    }
+
+    /// Everything a down-sweep call reads besides the members and the layers.
+    #[derive(Clone)]
+    struct Inputs {
+        sizing: SizingPolicy,
+        max_struts: usize,
+        max_rounds: usize,
+        caps: Option<ContactCaps>,
+        keep_out: DrainKeepOut,
+        unrooted: UnrootedColumns,
+    }
+
+    impl Inputs {
+        fn of(scene: &Scene) -> Self {
+            Self {
+                sizing: scene.sizing,
+                max_struts: 1000,
+                max_rounds: 4,
+                caps: None,
+                keep_out: DrainKeepOut::none(),
+                unrooted: scene.unrooted.clone(),
+            }
+        }
+
+        fn run(&self, cache: &LayerCache<'_>, struts: &mut Vec<SweepStrut>) -> super::DownSweepOutcome {
+            let mut insertion = InsertionPolicy::new(self.max_struts);
+            insertion.max_rounds = self.max_rounds;
+            if let Some(caps) = &self.caps {
+                insertion = insertion.with_contact_caps(caps);
+            }
+            super::run_with(cache, struts, self.sizing, insertion, &self.keep_out, &self.unrooted)
+        }
+    }
+
+    /// A cap of `contact_mm2` on every tip the members have.
+    fn caps_of(struts: &[SweepStrut], contact_mm2: f64) -> ContactCaps {
+        let mut caps = ContactCaps::default();
+        for strut in struts {
+            caps.insert(strut.cell, strut.k_top, contact_mm2);
+        }
+        caps
+    }
+
+    /// Two calls on ONE plan cache with different inputs, the members as the
+    /// first call left them; the second must equal the same call on a fresh
+    /// cache, by bits. Returns the arms the second call inserted.
+    fn two_inputs(seed: u64, label: &str, second: &dyn Fn(&Scene, &[SweepStrut]) -> Inputs) -> u64 {
+        let scene = random_scene(seed);
+        if !scene.insertion_on {
+            return 0;
+        }
+        let g = grid();
+        let cache = LayerCache::build(&g, &scene.slices);
+        let fresh_cache = LayerCache::build(&g, &scene.slices);
+        let mut struts = scene.struts.clone();
+        Inputs::of(&scene).run(&cache, &mut struts);
+        let inputs = second(&scene, &struts);
+        let mut for_fresh = struts.clone();
+        let reused = inputs.run(&cache, &mut struts);
+        let full = inputs.run(&fresh_cache, &mut for_fresh);
+        assert_eq!(format!("{reused:?}"), format!("{full:?}"), "{label} seed {seed}: outcome");
+        assert!(reused.route_log == full.route_log, "{label} seed {seed}: route log");
+        assert_eq!(struts.len(), for_fresh.len(), "{label} seed {seed}: members");
+        for (index, (a, b)) in struts.iter().zip(&for_fresh).enumerate() {
+            assert_eq!(format!("{a:?}"), format!("{b:?}"), "{label} seed {seed}: member {index}");
+        }
+        reused.arms_inserted_by_load
+    }
+
+    fn two_inputs_over_seeds(label: &str, second: &dyn Fn(&Scene, &[SweepStrut]) -> Inputs) -> u64 {
+        (0..60_u64).map(|seed| two_inputs(seed, label, second)).sum()
+    }
+
+    /// The review's case: no caps on the first call, a tip cap below its routed
+    /// load on the second. The second call must find the relief insertions a
+    /// fresh call finds.
+    #[test]
+    fn a_second_call_with_contact_caps_is_not_served_the_first_calls_sizing() {
+        let inserted = two_inputs_over_seeds("caps added", &|scene, struts| Inputs {
+            caps: Some(caps_of(struts, 1.0e-6)),
+            ..Inputs::of(scene)
+        });
+        assert!(inserted > 0, "no seed placed a relief arm under the caps: the test cannot see the bug");
+    }
+
+    #[test]
+    fn a_second_call_with_other_contact_cap_values_equals_a_fresh_cache() {
+        two_inputs_over_seeds("caps changed", &|scene, struts| Inputs {
+            caps: Some(caps_of(struts, 0.02)),
+            ..Inputs::of(scene)
+        });
+        // First tight, then loose: the second call must not keep the tight sizing.
+        for seed in 0..60_u64 {
+            let scene = random_scene(seed);
+            if !scene.insertion_on {
+                continue;
+            }
+            let g = grid();
+            let cache = LayerCache::build(&g, &scene.slices);
+            let fresh_cache = LayerCache::build(&g, &scene.slices);
+            let mut struts = scene.struts.clone();
+            let tight = Inputs { caps: Some(caps_of(&struts, 1.0e-6)), ..Inputs::of(&scene) };
+            tight.run(&cache, &mut struts);
+            let loose = Inputs { caps: Some(caps_of(&struts, 1.0e6)), ..Inputs::of(&scene) };
+            let mut for_fresh = struts.clone();
+            let reused = loose.run(&cache, &mut struts);
+            let full = loose.run(&fresh_cache, &mut for_fresh);
+            assert_eq!(format!("{reused:?}"), format!("{full:?}"), "tight then loose seed {seed}");
+            assert!(reused.route_log == full.route_log, "tight then loose seed {seed}: route log");
+        }
+    }
+
+    #[test]
+    fn a_second_call_with_another_sizing_policy_equals_a_fresh_cache() {
+        two_inputs_over_seeds("sizing", &|scene, _| {
+            let mut inputs = Inputs::of(scene);
+            inputs.sizing.x_allowed *= 0.5;
+            inputs
+        });
+    }
+
+    #[test]
+    fn a_second_call_with_other_insertion_limits_equals_a_fresh_cache() {
+        two_inputs_over_seeds("max_rounds", &|scene, _| Inputs { max_rounds: 1, ..Inputs::of(scene) });
+        two_inputs_over_seeds("max_struts", &|scene, struts| Inputs {
+            max_struts: struts.len(),
+            ..Inputs::of(scene)
+        });
+    }
+
+    #[test]
+    fn a_second_call_with_other_unrooted_columns_equals_a_fresh_cache() {
+        two_inputs_over_seeds("unrooted", &|scene, struts| {
+            let mut inputs = Inputs::of(scene);
+            let mut unrooted = UnrootedColumns::with_layers(LAYERS);
+            for strut in struts {
+                for layer in strut.k_bottom.min(LAYERS)..strut.k_top.min(LAYERS) {
+                    unrooted.by_layer[layer].push(strut.cell_at(layer) as u32);
+                    unrooted.total += 1;
+                }
+            }
+            inputs.unrooted = unrooted;
+            inputs
+        });
+    }
+
+    #[test]
+    fn a_second_call_with_a_drain_keep_out_equals_a_fresh_cache() {
+        two_inputs_over_seeds("keep-out", &|scene, struts| {
+            let g = grid();
+            let mut inputs = Inputs::of(scene);
+            // A drain mouth over the first member's seat column, running out below.
+            let at = struts.first().map_or(0, |strut| strut.cell);
+            let (row, col) = (at / g.cols(), at % g.cols());
+            let x = ORIGIN + (col as f64 + 0.5) * PITCH;
+            let y = ORIGIN + (row as f64 + 0.5) * PITCH;
+            let drain = crate::drain::DrainSpec {
+                outlet_mm: [x, y, H * LAYERS as f64],
+                outward_axis: [0.0, 0.0, -1.0],
+                radius_mm: 0.3,
+            };
+            inputs.keep_out = DrainKeepOut::build(&g, &[drain], 0.1, 0.5, LAYERS, 0.0, H);
+            inputs
+        });
+    }
+
+    /// Every field of the run key moves it (a field the key misses would
+    /// resume a pass under inputs it was not walked under).
+    #[test]
+    fn the_run_key_names_every_input() {
+        let scene = random_scene(3);
+        let base = Inputs::of(&scene);
+        let key = |inputs: &Inputs| {
+            let mut insertion = InsertionPolicy::new(inputs.max_struts);
+            insertion.max_rounds = inputs.max_rounds;
+            if let Some(caps) = &inputs.caps {
+                insertion = insertion.with_contact_caps(caps);
+            }
+            super::run_key(inputs.sizing, insertion, &inputs.keep_out, &inputs.unrooted, LAYERS)
+        };
+        let same = key(&base);
+        assert_eq!(same, key(&base.clone()));
+        let mut changed: Vec<(&str, Inputs)> = Vec::new();
+        changed.push(("max_struts", Inputs { max_struts: 7, ..base.clone() }));
+        changed.push(("max_rounds", Inputs { max_rounds: 1, ..base.clone() }));
+        changed.push(("caps", Inputs { caps: Some(caps_of(&scene.struts, 0.5)), ..base.clone() }));
+        let mut other_value = caps_of(&scene.struts, 0.5);
+        other_value.insert(scene.struts[0].cell, scene.struts[0].k_top, 0.25);
+        changed.push(("cap value", Inputs { caps: Some(other_value), ..base.clone() }));
+        let g = grid();
+        let drain = crate::drain::DrainSpec {
+            outlet_mm: [0.0, 0.0, 1.0],
+            outward_axis: [0.0, 0.0, -1.0],
+            radius_mm: 0.3,
+        };
+        changed.push((
+            "keep_out",
+            Inputs { keep_out: DrainKeepOut::build(&g, &[drain], 0.1, 0.5, LAYERS, 0.0, H), ..base.clone() },
+        ));
+        let mut unrooted = UnrootedColumns::with_layers(LAYERS);
+        unrooted.by_layer[2].push(5);
+        unrooted.total = 1;
+        changed.push(("unrooted", Inputs { unrooted, ..base.clone() }));
+        let mut sized = base.clone();
+        sized.sizing.alpha += 0.25;
+        changed.push(("sizing", sized));
+        for (name, inputs) in &changed {
+            assert_ne!(key(inputs), same, "the run key ignores {name}");
+        }
+        // The key of a cap set does not depend on the order the tips went in.
+        let tips: Vec<(usize, usize)> = scene.struts.iter().map(|s| (s.cell, s.k_top)).collect();
+        let mut forward = ContactCaps::default();
+        let mut backward = ContactCaps::default();
+        for &(cell, k_top) in &tips {
+            forward.insert(cell, k_top, 0.1);
+        }
+        for &(cell, k_top) in tips.iter().rev() {
+            backward.insert(cell, k_top, 0.1);
+        }
+        assert_eq!(
+            key(&Inputs { caps: Some(forward), ..base.clone() }),
+            key(&Inputs { caps: Some(backward), ..base })
+        );
+    }
+
+    /// A pool that refuses a trail's bytes must be left as it was: the trail
+    /// that was never charged must not give anything back.
+    #[test]
+    fn a_failed_adoption_leaves_the_pool_unchanged() {
+        let pool = crate::layer_cache::BytePool::new(100);
+        assert!(pool.try_acquire(60));
+        let before = pool.used();
+        assert!(PassTrail::adopt(&pool, super::TrailData::default(), 50).is_none());
+        assert_eq!(pool.used(), before, "a refused adoption changed the pool");
+        // And one that is taken is charged once and given back once.
+        let adopted = PassTrail::adopt(&pool, super::TrailData::default(), 40).expect("room for 40");
+        assert_eq!(pool.used(), before + 40);
+        drop(adopted);
+        assert_eq!(pool.used(), before);
+    }
+
+    /// N identical calls on one plan leave the pool charged the same after
+    /// each (the stash's bytes are charged once, not once more per reuse).
+    #[test]
+    fn identical_calls_charge_the_pool_once() {
+        let mut compared = 0_usize;
+        for seed in 0..40_u64 {
+            let scene = random_scene(seed);
+            if !scene.insertion_on {
+                continue;
+            }
+            let pool = crate::layer_cache::BytePool::new(u64::MAX / 4);
+            let g = grid();
+            let cache = LayerCache::build_in(&g, &scene.slices, &pool);
+            let mut struts = scene.struts.clone();
+            let inputs = Inputs::of(&scene);
+            inputs.run(&cache, &mut struts);
+            let mut charged = Vec::new();
+            for _ in 0..6 {
+                inputs.run(&cache, &mut struts);
+                charged.push(pool.used());
+            }
+            assert!(
+                charged.windows(2).all(|pair| pair[0] == pair[1]),
+                "seed {seed}: the pool charge moves across identical calls: {charged:?}"
+            );
+            compared += 1;
+        }
+        assert!(compared > 10, "{compared} seeds compared");
     }
 
     #[test]
