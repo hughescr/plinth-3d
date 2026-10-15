@@ -62,6 +62,8 @@ pub mod grid;
 pub mod head_join;
 #[cfg(test)]
 mod head_carrier_tests;
+#[cfg(test)]
+mod prefix_tests;
 pub mod heads;
 pub mod joint_cert;
 pub(crate) mod joint_size;
@@ -123,7 +125,7 @@ use std::sync::Arc;
 
 use grid::{plan_grid, Grid};
 use reach::ReachState;
-use sweep_state::{LaneState, SweepEnv};
+use sweep_state::{LaneState, Prefix, SweepEnv};
 use up_sweep::{ColumnHistory, GreedyScratch};
 
 pub use sweep_state::{EditSeed, SeedKey, SeedMiss};
@@ -1907,8 +1909,10 @@ pub fn run_sweep_with_second_contact(
 /// ([`contact_growth::SecondContactMode`]) need: the second contact is then made
 /// as a CHECKED EDIT of `first` (`SC-DESIGN.md` §3, [`second_contact::edit`]),
 /// and every exit where the edit is thrown away goes through ONE fallback. No
-/// seed is a seed mismatch. In mode `Replan` the seed is not read and the result
-/// is today's, byte for byte.
+/// seed is a seed mismatch. Every re-plan (mode `Replan`, and the edit modes'
+/// fallback) starts from the cap-independent prefix the seed kept when the
+/// seed's key and first plan are this request's (PX); with no seed, or any key
+/// miss, it runs the full sweep. Either way the result is today's, byte for byte.
 ///
 /// # Errors
 ///
@@ -1943,7 +1947,7 @@ pub fn run_sweep_with_second_contact_seeded(
     }
     let mode = policy.second_contact_mode;
     if mode == contact_growth::SecondContactMode::Replan {
-        return replan_and_choose(first, &caps, mesh, plan, policy, drains, vents, mode, None);
+        return replan_and_choose(first, seed, &caps, mesh, plan, policy, drains, vents, mode, None);
     }
     let edited = cancel::without_token(|| {
         second_contact::edit::run_edit(
@@ -1993,7 +1997,7 @@ pub fn run_sweep_with_second_contact_seeded(
                     Ok(chosen)
                 }
                 second_contact::edit::Fallback::Replan => {
-                    replan_and_choose(first, &caps, mesh, plan, policy, drains, vents, mode, Some(report))
+                    replan_and_choose(first, seed, &caps, mesh, plan, policy, drains, vents, mode, Some(report))
                 }
             }
         }
@@ -2009,6 +2013,7 @@ pub fn run_sweep_with_second_contact_seeded(
 #[expect(clippy::too_many_arguments, reason = "the sweep's own argument list, and the mode and report")]
 fn replan_and_choose(
     first: SweepPlan,
+    seed: Option<&EditSeed>,
     caps: &down_sweep::ContactCaps,
     mesh: &Mesh,
     plan: &LayerPlan,
@@ -2026,8 +2031,19 @@ fn replan_and_choose(
             .map(|short| (short.planned_mm2 - short.real_mm2).max(0.0))
             .sum()
     };
-    let second = cancel::without_token(|| {
-        run_sweep_inner(mesh, plan, policy, drains, vents, Some(caps))
+    // PX: a seed that is this request's own (key and first plan) kept the
+    // prefix the capped sweep would build again; start from it. Any miss runs
+    // today's full path.
+    let prefix_seed = seed.filter(|seed| {
+        let miss = seed.miss(mesh, plan, policy, drains, vents, &first.report.sweep_digest);
+        if miss.is_some() {
+            perf::add(PerfWork::PrefixMiss, 1);
+        }
+        miss.is_none()
+    });
+    let second = cancel::without_token(|| match prefix_seed {
+        Some(seed) => run_sweep_from_prefix(seed, mesh, plan, policy, drains, vents, caps),
+        None => run_sweep_inner(mesh, plan, policy, drains, vents, Some(caps)),
     })?;
     let outcome = contact_growth::SecondContactOutcome {
         mode,
@@ -2078,6 +2094,51 @@ fn run_sweep_inner(
     finish(&env, lane, mesh, plan, policy)
 }
 
+thread_local! {
+    /// How many capped re-plans this thread started from a seed's prefix. A
+    /// test witness (the perf counters are process-global and off by default):
+    /// a re-plan runs on its caller's thread, so a test reads the difference.
+    static PREFIX_STARTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The number of capped re-plans started from a seed's prefix on this thread
+/// since it began (a path-hit witness for tests; no sweep reads it).
+#[doc(hidden)]
+#[must_use]
+pub fn prefix_starts_on_this_thread() -> u64 {
+    PREFIX_STARTS.with(std::cell::Cell::get)
+}
+
+/// [`run_sweep_inner`] with contact caps, started from the cap-independent
+/// prefix a seed kept (PX): the same plan, bit for bit, as
+/// `run_sweep_inner(.., Some(caps))` on the request the seed's key names. The
+/// seed is read, never written: the remainder runs on a clone of its prefix.
+fn run_sweep_from_prefix(
+    seed: &EditSeed,
+    mesh: &Mesh,
+    plan: &LayerPlan,
+    policy: &SweepPolicy,
+    drains: &[DrainSpec],
+    vents: &[DrainSpec],
+    caps: &down_sweep::ContactCaps,
+) -> Result<SweepPlan, SweepError> {
+    let _perf_span = perf::span(perf::Span::SweepRun);
+    perf::add(PerfWork::SweepRuns, 1);
+    perf::add(PerfWork::PrefixReused, 1);
+    PREFIX_STARTS.with(|starts| starts.set(starts.get() + 1));
+    let (env, lane) = plan_after_prefix(
+        seed.prefix_clone(),
+        None,
+        mesh,
+        plan,
+        policy,
+        drains,
+        vents,
+        Some(caps),
+    )?;
+    finish(&env, lane, mesh, plan, policy)
+}
+
 /// [`run_sweep_inner`] that also keeps the state at checkpoint C as an
 /// [`EditSeed`], so the finished plan can be edited later without planning it
 /// again. The plan is the same plan, bit for bit: the seed is a clone of the
@@ -2090,7 +2151,23 @@ fn run_sweep_inner_seeded(
     vents: &[DrainSpec],
 ) -> Result<(SweepPlan, Arc<EditSeed>), SweepError> {
     let _perf_span = perf::span(perf::Span::SweepRun);
-    let (env, lane) = plan_to_c(mesh, plan, policy, drains, vents, None)?;
+    let (env, lane, held_prefix) =
+        plan_prefix(mesh, plan, policy, drains, vents, |prefix, layer_cache| {
+            // The cap-independent prefix is kept beside checkpoint C (PX): a
+            // clone, so the remainder runs on the same values a fresh sweep would.
+            let held_prefix = prefix.clone();
+            let (env, lane) = plan_after_prefix(
+                prefix,
+                Some(layer_cache),
+                mesh,
+                plan,
+                policy,
+                drains,
+                vents,
+                None,
+            )?;
+            Ok((env, lane, held_prefix))
+        })?;
     let held = lane.clone();
     let sweep_plan = finish(&env, lane, mesh, plan, policy)?;
     // The surface index `finish` read (built there if no earlier stage had),
@@ -2111,6 +2188,7 @@ fn run_sweep_inner_seeded(
     let seed = EditSeed::new(
         env,
         held,
+        held_prefix,
         sweep_state::SeedKey::of(mesh, plan, policy, drains, vents),
         sweep_plan.report.sweep_digest.clone(),
         surface_bytes,
@@ -2121,13 +2199,9 @@ fn run_sweep_inner_seeded(
 
 /// **The first half of a sweep, up to checkpoint C**: everything before the
 /// start of `Span::StageJoints`. Returns what [`finish`] reads: the immutable
-/// [`SweepEnv`] and the owned [`LaneState`] ([`sweep_state`]).
-#[expect(
-    unused_assignments,
-    unused_variables,
-    reason = "`stage_span` is a measurement marker: each assignment ends the previous stage's span \
-              (its drop) and starts the next; nothing reads it"
-)]
+/// [`SweepEnv`] and the owned [`LaneState`] ([`sweep_state`]). It is
+/// [`plan_prefix`] then [`plan_after_prefix`]; the contact caps are read only by
+/// the second.
 fn plan_to_c(
     mesh: &Mesh,
     plan: &LayerPlan,
@@ -2136,6 +2210,44 @@ fn plan_to_c(
     vents: &[DrainSpec],
     contact_caps: Option<&down_sweep::ContactCaps>,
 ) -> Result<(Arc<SweepEnv>, LaneState), SweepError> {
+    plan_prefix(mesh, plan, policy, drains, vents, |prefix, layer_cache| {
+        plan_after_prefix(
+            prefix,
+            Some(layer_cache),
+            mesh,
+            plan,
+            policy,
+            drains,
+            vents,
+            contact_caps,
+        )
+    })
+}
+
+/// **The cap-independent prefix of a sweep** (PX): the setup and the whole
+/// up-sweep, ending after the interior census of the up-sweep's members. The
+/// contact caps first act on the down-sweep's insertion policy, which is after
+/// this function, so the prefix is a function of the mesh, the layers, the
+/// policy and the holes alone ([`SeedKey`]). A second contact (`replan`) of a
+/// plan that kept its prefix starts from a clone of it
+/// ([`run_sweep_from_prefix`]) and runs exactly today's capped remainder.
+///
+/// `then` is handed the prefix and the layer cache this function built (it
+/// borrows this function's grid and slices, so it cannot be returned): the sweep
+/// that goes on reads it, and a kept prefix leaves it behind.
+#[expect(
+    unused_assignments,
+    reason = "`stage_span` is a measurement marker: each assignment ends the previous stage's span \
+              (its drop) and starts the next; the last one is dropped before `then` runs"
+)]
+fn plan_prefix<R>(
+    mesh: &Mesh,
+    plan: &LayerPlan,
+    policy: &SweepPolicy,
+    drains: &[DrainSpec],
+    vents: &[DrainSpec],
+    then: impl FnOnce(Prefix, &layer_cache::LayerCache<'_>) -> Result<R, SweepError>,
+) -> Result<R, SweepError> {
     // M0: the `Stage*` spans partition the sweep (each runs from its mark to
     // the next), so the pose's wall time has no unnamed region.
     let mut stage_span = perf::span(perf::Span::StageSetup);
@@ -2168,8 +2280,10 @@ fn plan_to_c(
     let planes: Vec<f64> = (0..layers)
         .map(|layer| plate_z + (layer as f64 + 0.5) * height)
         .collect();
-    let slices = slice_stack(mesh, &planes, slice_limits(policy))
-        .map_err(|error| SweepError::Slice(error.to_string()))?;
+    let slices = Arc::new(
+        slice_stack(mesh, &planes, slice_limits(policy))
+            .map_err(|error| SweepError::Slice(error.to_string()))?,
+    );
     cancel::checkpoint()?;
     // THE PLAN'S LAYER CACHE (perf lane D1): every layer's masks, the clearance
     // of its cover and its model components are functions of these slices and
@@ -2520,8 +2634,142 @@ fn plan_to_c(
     // pass knows how high each column's model reaches.
     set_interior(&mut struts, &history);
 
+    // ============================ THE CAP-INDEPENDENT PREFIX ENDS HERE ======
+    // Nothing above reads the contact caps (they first act on the down-sweep's
+    // insertion policy below), so two sweeps of equal keys have equal prefixes.
+    // The layer cache borrows this function's grid and slices, so it cannot
+    // leave with the prefix: the continuation is lent it (the sweep that goes on
+    // to its own remainder reads it, as before), and a prefix started later
+    // rebuilds it, a function of those two alone.
+    let greedy_separation_mm = greedy.separation_mm;
+    let prefix = Prefix {
+        grid,
+        coarsening_steps: grid_plan.coarsening_steps,
+        layers,
+        height,
+        plate_z,
+        planes,
+        slices: Arc::clone(&slices),
+        keep_out,
+        history: Arc::new(history),
+        reach: sweep_state::ReachSummary::of(&reach),
+        unrooted,
+        law,
+        surface_early: policy.drawn_solid_descent || thickening_reads_the_model,
+        model_surface: Arc::new(model_surface),
+        seat_face_rule,
+        head_registry,
+        struts,
+        births: Arc::new(births),
+        greedy: sweep_state::GreedyFinal::of(&mut greedy),
+        greedy_separation_mm,
+        demand_cells_total,
+        residual_demand_cells,
+        unrooted_landings,
+        keep_out_refusals,
+        arms_leaned,
+        arms_merged,
+        lean_paths_blocked,
+        junctions_mid_shaft_descent,
+        lean_candidates_priced,
+        rasteriser_entries,
+        lift_assertions,
+        descent_tally,
+        birth_tally,
+    };
+    // The up-sweep's stage ends here: what `then` runs is the remainder's own.
+    drop(stage_span);
+    then(prefix, &layer_cache)
+}
+
+/// **The second half of a sweep, from the end of the cap-independent prefix up
+/// to checkpoint C**: the down-sweep's first pass (the only reader of
+/// `contact_caps`) and every pass after it. `prefix` is taken BY VALUE; a
+/// caller that wants the same prefix run twice hands in two clones
+/// ([`Prefix`]'s `Clone` shares what the remainder never writes and copies
+/// what it does). `lent_cache` is the layer cache of the sweep that just built
+/// the prefix, if this is that sweep; else the remainder builds its own.
+#[expect(
+    unused_assignments,
+    unused_variables,
+    reason = "`stage_span` is a measurement marker: each assignment ends the previous stage's span \
+              (its drop) and starts the next; nothing reads it"
+)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the sweep's own argument list, the prefix and the lent layer cache"
+)]
+fn plan_after_prefix(
+    prefix: Prefix,
+    lent_cache: Option<&layer_cache::LayerCache<'_>>,
+    mesh: &Mesh,
+    plan: &LayerPlan,
+    policy: &SweepPolicy,
+    drains: &[DrainSpec],
+    vents: &[DrainSpec],
+    contact_caps: Option<&down_sweep::ContactCaps>,
+) -> Result<(Arc<SweepEnv>, LaneState), SweepError> {
+    let Prefix {
+        grid,
+        coarsening_steps,
+        layers,
+        height,
+        plate_z,
+        planes,
+        slices,
+        keep_out,
+        history,
+        reach,
+        unrooted,
+        law,
+        surface_early,
+        model_surface,
+        seat_face_rule,
+        head_registry,
+        mut struts,
+        births,
+        greedy: greedy_final,
+        greedy_separation_mm,
+        demand_cells_total,
+        residual_demand_cells,
+        unrooted_landings,
+        keep_out_refusals,
+        arms_leaned,
+        arms_merged,
+        lean_paths_blocked,
+        junctions_mid_shaft_descent,
+        lean_candidates_priced,
+        rasteriser_entries,
+        lift_assertions,
+        descent_tally,
+        birth_tally,
+    } = prefix;
+    let lamina_reach_mm = policy.kappa * height;
+    // The surface cell is shared only where the prefix built it (a finished
+    // plan's later stages may fill a cell the prefix left empty, and a context
+    // built over a filled cell reads it: the remainder must start from the cell
+    // the prefix left, not from what a sibling remainder built since).
+    let model_surface = if surface_early {
+        model_surface
+    } else {
+        Arc::new(std::sync::OnceLock::new())
+    };
+    // The layer cache is a function of the grid and the slices alone: the sweep
+    // that just built its prefix lends its own; a re-plan from a kept prefix
+    // builds it here.
+    let layer_cache = match lent_cache {
+        Some(cache) => layer_cache::Resolved::Offered(cache),
+        None => {
+            // The `Stage*` spans partition the sweep (`geom_kernel::perf`): this
+            // rebuild is what a scratch sweep charges to `stage.setup`, so it is
+            // charged there too, not to the run alone.
+            let _setup = perf::span(perf::Span::StageSetup);
+            layer_cache::Resolved::Built(Box::new(layer_cache::LayerCache::build(&grid, &slices)))
+        }
+    };
+    cancel::checkpoint()?;
+    let mut stage_span = perf::span(perf::Span::StageDownInitial);
     // -------------------------------------------------------------- downward
-    stage_span = perf::span(perf::Span::StageDownInitial);
     let sizing = down_sweep::SizingPolicy {
         x_allowed: policy.x_allowed,
         tip_radius_min_mm: policy.tip_radius_min_mm,
@@ -2793,7 +3041,7 @@ fn plan_to_c(
         layers,
         flare_factor: policy.flare_r_factor,
         tip_radius_min_mm: policy.tip_radius_min_mm,
-        hex_separation_mm: greedy.separation_mm,
+        hex_separation_mm: greedy_separation_mm,
         x_allowed: policy.x_allowed,
         outward_lean: policy.congestion_outward_lean,
         flank_arms: policy.congestion_flank_arms,
@@ -2972,7 +3220,7 @@ fn plan_to_c(
     // only the stranded members the lane left lapping. The ids are found here,
     // after the lane, because withdrawing idle flank arms renumbers members.
     stage_span = perf::span(perf::Span::StageStranded);
-    let mut stranded = stranded_branch::stranded_ids(&struts, &greedy.stranded_seat_cells);
+    let mut stranded = stranded_branch::stranded_ids(&struts, &greedy_final.stranded_seat_cells);
     let mut stranded_branch_outcome = stranded_branch::StrandedBranchOutcome {
         enabled: policy.stranded_branch,
         stranded_members: stranded.len(),
@@ -3616,14 +3864,15 @@ fn plan_to_c(
         }
     }
     // ==================================================== CHECKPOINT C ======
-    // Everything `finish` reads is handed over here. The layer cache borrows
-    // the grid and the slices the env takes, and it has a destructor, so it is
-    // dropped first; `finish` never reads it (an edit rebuilds it from the env).
+    // Everything `finish` reads is handed over here. A layer cache built here
+    // borrows the grid and the slices the env takes, and it has a destructor, so
+    // it is dropped first (a lent one borrows its lender's); `finish` never
+    // reads it (an edit rebuilds it from the env).
     drop(layer_cache);
     let drain_keep_out_refusals = keep_out.refusals();
     let env = SweepEnv {
         grid,
-        coarsening_steps: grid_plan.coarsening_steps,
+        coarsening_steps,
         layers,
         height,
         plate_z,
@@ -3633,7 +3882,7 @@ fn plan_to_c(
         history,
         drains: drains.to_vec(),
         vents: vents.to_vec(),
-        reach: sweep_state::ReachSummary::of(&reach),
+        reach,
         unrooted,
         sizing,
         law,
@@ -3644,7 +3893,7 @@ fn plan_to_c(
         // The slenderness context was built when the early build had already
         // happened iff this held (nothing else builds the surface before it);
         // `finish` rebuilds the context and must read the same.
-        surface_in_slenderness_context: policy.drawn_solid_descent || thickening_reads_the_model,
+        surface_in_slenderness_context: surface_early,
         model_surface,
     };
     let lane = LaneState {
@@ -3680,7 +3929,7 @@ fn plan_to_c(
         lift_assertions,
         descent_tally,
         birth_tally,
-        greedy: sweep_state::GreedyFinal::of(&mut greedy),
+        greedy: greedy_final,
         drain_keep_out_refusals,
     };
     Ok((Arc::new(env), lane))
