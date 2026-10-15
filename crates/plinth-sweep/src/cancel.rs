@@ -26,6 +26,11 @@
 //! "remove nothing", a cancelled tie pass must not answer "fixed point"). So a
 //! new poll belongs with a safe point after its caller.
 //!
+//! The `PLINTH_SWEEP_VERIFY_*` shadow checks that compare two walks of a
+//! polling loop (`SPARSE`, `INCREMENTAL`, `REPLAY`) skip the comparison once
+//! the flag is set: a stopped walk is a prefix of the whole one, not a
+//! difference.
+//!
 //! Inner `par_iter` regions never check the token: the check runs only on the
 //! driving thread, between regions. A pose that steals another pose's job
 //! while it waits on a region nests a second [`with_token`] scope; the guard

@@ -94,6 +94,43 @@ fn a_stop_during_the_sweep_returns_at_a_safe_point_not_at_the_end() {
 /// logic).
 #[test]
 fn a_stop_at_any_point_ends_stopped_or_measures_exactly_what_it_would_have() {
+    stop_at_every_point(15);
+}
+
+/// The shadow checks (`PLINTH_SWEEP_VERIFY_SPARSE`, `_INCREMENTAL`, `_REPLAY`)
+/// compare two walks of one pass; a stop that lands between their halves must
+/// skip the comparison and end the pose as `Stopped`, not panic on a prefix.
+/// Each switch is read once per process, so every one runs the stop sweep above
+/// (12 stop points) in a child of this test binary with the switch on.
+#[test]
+fn a_stop_under_each_shadow_check_ends_stopped_not_in_a_panic() {
+    for switch in [
+        "PLINTH_SWEEP_VERIFY_SPARSE",
+        "PLINTH_SWEEP_VERIFY_INCREMENTAL",
+        "PLINTH_SWEEP_VERIFY_REPLAY",
+    ] {
+        let status = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+            .arg("--exact")
+            .arg("cancel::a_stop_under_a_shadow_check_child")
+            .arg("--nocapture")
+            .env(switch, "1")
+            .env("PLINTH_CANCEL_SHADOW_CHILD", "1")
+            .status()
+            .expect("launch the child");
+        assert!(status.success(), "{switch}: the stop sweep failed: {status}");
+    }
+}
+
+/// The child of the test above: a no-op unless the parent launched it.
+#[test]
+fn a_stop_under_a_shadow_check_child() {
+    if std::env::var_os("PLINTH_CANCEL_SHADOW_CHILD").is_none() {
+        return;
+    }
+    stop_at_every_point(12);
+}
+
+fn stop_at_every_point(steps: u32) {
     let mesh = make_recessed_disc(11.5, 12.5, 3.5, 2.5, 10.0, 96).expect("the Round 25 profile");
     let table = OrientFaceTable::build(&mesh, "exact").expect("a closed fixture always scores");
     let measurer = SweepDemand::production();
@@ -105,10 +142,10 @@ fn a_stop_at_any_point_ends_stopped_or_measures_exactly_what_it_would_have() {
     let full = full[0].as_ref().expect("the fixture sweeps");
 
     let mut stopped = 0_usize;
-    for step in 1..=15_u32 {
+    for step in 1..=steps {
         let race = ProductionRace::never_stops(1);
         let token = std::sync::Arc::clone(race.token(0).expect("a token"));
-        let delay = whole.mul_f64(f64::from(step) / 16.0);
+        let delay = whole.mul_f64(f64::from(step) / f64::from(steps + 1));
         let setter = std::thread::spawn(move || {
             std::thread::sleep(delay);
             token.store(true, Ordering::Release);

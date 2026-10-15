@@ -1627,6 +1627,12 @@ fn verify_seeded_pass(
         &mut sink,
         &mut PassCtl::off(),
     );
+    // A cancelled pose's walk stopped at a layer boundary: its log is a prefix
+    // of the seed's, not a difference. The caller ends the pose at its next
+    // safe point.
+    if crate::cancel::cancelled() {
+        return;
+    }
     walked.per_event.worst_member_max_field_mm2 = copy
         .iter()
         .flat_map(|strut| strut.carried_mm2.iter().copied())
@@ -1786,6 +1792,13 @@ fn sweep_pass(
         refused,
         ctl,
     );
+    // A cancelled pose (`crate::cancel`) stopped one or both walks at a layer
+    // boundary: the two halves are not comparable and nothing reads them (the
+    // flag only ever goes from clear to set, so a clear flag here means both
+    // walks ran whole). The caller ends the pose at its next safe point.
+    if crate::cancel::cancelled() {
+        return resumed;
+    }
     if let Some(difference) = pass_difference(
         (&full, &full_struts, full_log.as_ref(), &full_refused),
         (&resumed, struts, log.as_deref(), refused),
@@ -1876,6 +1889,10 @@ fn sweep_pass_checked(
         refused,
         ctl,
     );
+    // See the resume shadow check: a cancelled pose's halves are not comparable.
+    if crate::cancel::cancelled() {
+        return sparse;
+    }
     if let Some(difference) = pass_difference(
         (&dense, &dense_struts, dense_log.as_ref(), &dense_refused),
         (&sparse, struts, sparse_log.as_deref(), refused),

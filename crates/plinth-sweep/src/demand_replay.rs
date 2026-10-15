@@ -660,10 +660,16 @@ pub(crate) fn refuse_unrooted_demand(
     struts: &[SweepStrut],
     doomed: &mut [bool],
 ) -> ReplayOutcome {
-    if verify_replay() {
+    if verify_replay() && !crate::cancel::cancelled() {
         let mut expected_doomed = doomed.to_vec();
         let expected = reference_refuse_unrooted_demand(context, struts, &mut expected_doomed);
         let got = refuse_counted(context, struts, doomed, BytePool::process());
+        // A cancelled pose (`crate::cancel`) truncated the cached replay at a
+        // layer boundary while the reference ran whole: they cannot agree and
+        // nothing reads the answer (the caller ends the pose at a safe point).
+        if crate::cancel::cancelled() {
+            return got.0;
+        }
         assert!(
             same_answer(&got.0, doomed, &got.2, &expected.0, &expected_doomed, &expected.1),
             "PLINTH_SWEEP_VERIFY_REPLAY: the cached replay differs from the reference\n\
