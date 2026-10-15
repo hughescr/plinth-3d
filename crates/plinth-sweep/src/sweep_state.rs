@@ -285,6 +285,9 @@ impl Prefix {
         bytes += (self.births.count() * std::mem::size_of::<births::Birth>()) as u64;
         bytes += 16 * self.greedy.stranded_seat_cells.len() as u64;
         bytes += (self.planes.len() * 8) as u64;
+        // The contact memo is shared by the clones of this prefix: each clone
+        // counts it, which only over-estimates.
+        bytes += self.contacts.approx_bytes();
         bytes
     }
 }

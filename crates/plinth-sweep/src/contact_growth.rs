@@ -644,6 +644,36 @@ pub(crate) struct MeasureMemo {
 }
 
 impl MeasureMemo {
+    /// The most entries one memo keeps. A plan asks about 88 k distinct balls
+    /// (Deinonychus, measured), so this is far above any real run; beyond it
+    /// a ball is read again each time it is asked, which is slower and gives
+    /// the same bits. About 90 bytes an entry, so the ceiling is near 360 MB.
+    const MAX_ENTRIES: usize = 4 << 20;
+
+    /// Keep `answered` areas under their `keys` (`indices` picks the pairs),
+    /// until the memo holds [`Self::MAX_ENTRIES`]. A poisoned lock only costs
+    /// the keeping: the caller has the answers in hand.
+    fn keep(&self, keys: &[BallKey], indices: &[usize], answered: &[f64]) {
+        let Ok(mut kept) = self.kept.lock() else {
+            return;
+        };
+        for (&index, &area) in indices.iter().zip(answered) {
+            if kept.len() >= Self::MAX_ENTRIES &&!kept.contains_key(&keys[index]) {
+                break;
+            }
+            kept.insert(keys[index], area);
+        }
+    }
+
+    /// The heap bytes the table holds (a close estimate: the slots it has
+    /// room for, each a key, an area and a control byte).
+    pub(crate) fn approx_bytes(&self) -> u64 {
+        let slot = std::mem::size_of::<(BallKey, f64)>() + 1;
+        self.kept
+            .lock()
+            .map_or(0, |kept| (kept.capacity() * slot) as u64)
+    }
+
     /// Entries kept (tests).
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
@@ -751,12 +781,7 @@ fn contact_areas(
     if !missing.is_empty() {
         let asked: Vec<FootprintBall> = missing.iter().map(|&index| balls[index]).collect();
         let answered = contact_areas_unmemoised(env, &asked)?;
-        // A poisoned lock only costs the keeping: the answers are in hand.
-        if let Ok(mut kept) = memo.kept.lock() {
-            for (&index, &area) in missing.iter().zip(&answered) {
-                kept.insert(keys[index], area);
-            }
-        }
+        memo.keep(&keys, &missing, &answered);
         for (&index, &area) in missing.iter().zip(&answered) {
             areas[index] = Some(area);
         }
@@ -1273,17 +1298,86 @@ mod memo_tests {
                 assert!(same_bits(&held, &want), "{name}: held");
                 assert_eq!(memo.len(), before + 1, "{name}: a repeat adds nothing");
             }
-            // A mixed batch (hits and misses, an order that differs from the
-            // order they were kept in, a ball twice) equals the unmemoised batch.
-            let batch: Vec<FootprintBall> = mutations
+            // A fully held batch (an order that differs from the order they
+            // were kept in, a ball twice) is all hits and equals the unmemoised
+            // batch.
+            let held_batch: Vec<FootprintBall> = mutations
                 .iter()
                 .rev()
                 .map(|(_, ball, _)| *ball)
                 .chain([base, base])
                 .collect();
-            let mixed = contact_areas(&env, Some(&memo), &batch).expect("a read");
-            assert!(same_bits(&mixed, &contact_areas_unmemoised(&env, &batch).expect("a read")));
+            let before = memo.len();
+            let held = contact_areas(&env, Some(&memo), &held_batch).expect("a read");
+            assert!(same_bits(&held, &contact_areas_unmemoised(&env, &held_batch).expect("a read")));
+            assert_eq!(memo.len(), before, "an all-hit batch adds nothing");
+
+            // A MIXED batch on a fresh, partly filled memo: held balls
+            // interleaved with two distinct balls the memo has not seen, one
+            // of them twice in the batch. The missing rows (1, 3, 4, 6) are
+            // not contiguous, so the compacted miss query and its scatter back
+            // to the original rows are both exercised.
+            let unseen_x = FootprintBall { centre_mm: [-0.3, 0.2, 0.3], radius_mm: 0.55, ..base };
+            let unseen_y = FootprintBall { centre_mm: [0.1, -0.4, 0.2], radius_mm: 0.45, ..base };
+            let held_a = mutations[0].1;
+            let held_b = mutations[3].1;
+            let fresh = MeasureMemo::default();
+            contact_areas(&env, Some(&fresh), &[base, held_a, held_b]).expect("a read");
+            assert_eq!(fresh.len(), 3);
+            let mixed_batch =
+                [base, unseen_x, held_a, unseen_y, unseen_x, held_b, unseen_y, base];
+            let want = contact_areas_unmemoised(&env, &mixed_batch).expect("a read");
+            // Anti-vacuity: the two unseen balls and the held ones all differ
+            // in answer, so a row scattered to the wrong index goes red.
+            let distinct: std::collections::HashSet<u64> =
+                [base, unseen_x, held_a, unseen_y, held_b]
+                    .iter()
+                    .map(|ball| {
+                        contact_areas_unmemoised(&env, &[*ball]).expect("a read")[0].to_bits()
+                    })
+                    .collect();
+            assert_eq!(distinct.len(), 5, "anti-vacuity: five balls, five answers");
+            let mixed = contact_areas(&env, Some(&fresh), &mixed_batch).expect("a read");
+            assert!(same_bits(&mixed, &want), "a mixed batch is the unmemoised batch");
+            assert_eq!(fresh.len(), 3 + 2, "two distinct unseen balls are kept, once each");
+            // And now every ball of it is held.
+            let again = contact_areas(&env, Some(&fresh), &mixed_batch).expect("a read");
+            assert!(same_bits(&again, &want));
+            assert_eq!(fresh.len(), 5, "a repeat adds nothing");
         }
+    }
+
+    /// The memo stops keeping at its entry budget and the answers stay the
+    /// unmemoised ones (a ball past the budget is read again each time).
+    #[test]
+    fn the_memo_stops_keeping_at_its_budget_and_stays_correct() {
+        let mesh = sheet();
+        let plan = LayerPlan::new(0.0, vec![0.05; 10]).expect("a uniform plan");
+        let env = MeasureEnv {
+            mesh: &mesh,
+            surface: None,
+            layer_plan: &plan,
+        };
+        let base = base_ball(&mesh);
+        let memo = MeasureMemo::default();
+        // Fill the table to the budget with filler keys, without 4 M reads.
+        {
+            let mut kept = memo.kept.lock().expect("an unpoisoned lock");
+            for index in 0..MeasureMemo::MAX_ENTRIES {
+                let mut ball = base;
+                #[expect(clippy::cast_precision_loss, reason = "a filler key, far below 2^53")]
+                {
+                    ball.radius_mm = 100.0 + index as f64;
+                }
+                kept.insert(super::BallKey::of(&ball), 0.0);
+            }
+        }
+        assert_eq!(memo.len(), MeasureMemo::MAX_ENTRIES);
+        assert!(memo.approx_bytes() > 0);
+        let batch = [base, FootprintBall { centre_mm: [-0.3, 0.2, 0.3], ..base }, base];
+        let got = contact_areas(&env, Some(&memo), &batch).expect("a read");
+        assert!(same_bits(&got, &contact_areas_unmemoised(&env, &batch).expect("a read")));
+        assert_eq!(memo.len(), MeasureMemo::MAX_ENTRIES, "nothing is kept past the budget");
     }
 
     /// A batch with a row the native query refuses (non-finite centre,
