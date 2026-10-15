@@ -1466,6 +1466,8 @@ fn sweep_pass(
                 let elapsed = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 t.cur.route_ns += elapsed.saturating_sub(route.counting_ns);
                 t.cur.count_ns += route.counting_ns;
+                t.cur.route_rounds += route.rounds;
+                t.cur.route_relax += route.relax_calls;
                 t.cur.route_elig += route.eligible;
                 t.cur.route_written += route.written;
             }
@@ -1785,6 +1787,11 @@ fn sweep_pass(
                 // the search found nowhere to put it -- a physical limit, not
                 // the round bound above. Emit and warn: the arms that remain
                 // over the limit are named one by one in `overloaded`.
+                if let Some(t) = trace.as_mut() {
+                    t.cur.exhausted += 1;
+                    t.cur.hosts += insert.hosts.len() as u64;
+                    t.cur.round = round as u64;
+                }
                 outcome.insertion_geometry_exhausted += 1;
                 refused.extend(insert.host_keys.iter().copied());
                 break;
@@ -2726,6 +2733,8 @@ fn route_within_cover(
             eligible: 0,
             written: 0,
             counting_ns: 0,
+            rounds: 0,
+            relax_calls: 0,
         };
     }
     // Nothing to route where every covered cell is already a root, and a
@@ -2739,6 +2748,8 @@ fn route_within_cover(
             eligible: 0,
             written: 0,
             counting_ns: 0,
+            rounds: 0,
+            relax_calls: 0,
         };
     }
     // Write-only measurement (M0): the cells the relax rounds can change, and
@@ -2764,12 +2775,16 @@ fn route_within_cover(
         *clear_built = true;
     }
     let clear: &[f32] = clear;
+    // Write-only measurement (M0): relax calls and sweep rounds.
+    let mut relax_calls = 0_u64;
+    let mut rounds_run = 0_u64;
     let mut relax = |cell: usize,
                      from: usize,
                      distance: &mut [f32],
                      nearest: &mut [u32],
                      via_tip: &mut [bool],
                      anchor: &mut [u32]| {
+        relax_calls += 1;
         if let Some((value, origin, source)) = crate::reach::any_angle_relax(
             cols,
             pitch,
@@ -2796,6 +2811,7 @@ fn route_within_cover(
     let mut converged = false;
     previous.copy_from_slice(distance);
     for _ in 0..MAX_SWEEP_ROUNDS {
+        rounds_run += 1;
         for row in 0..rows {
             for col in 0..cols {
                 let cell = row * cols + col;
@@ -2866,6 +2882,8 @@ fn route_within_cover(
         eligible,
         written,
         counting_ns,
+        rounds: rounds_run,
+        relax_calls,
     }
 }
 
@@ -2913,6 +2931,10 @@ struct RouteOutcome {
     written: u64,
     /// Time the measurement above took, in ns (zero with counting off).
     counting_ns: u64,
+    /// Sweep rounds run and relax calls made (counted always; two integer
+    /// adds beside the work each one stands for).
+    rounds: u64,
+    relax_calls: u64,
 }
 /// Per connected component of MODEL material, `X_model = Σ L / component area`.
 ///

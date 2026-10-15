@@ -859,7 +859,7 @@ pub enum Rows {
 }
 
 /// The widest row payload.
-pub const ROW_WIDTH: usize = 14;
+pub const ROW_WIDTH: usize = 16;
 const ROWS_N: usize = 9;
 
 impl Rows {
@@ -991,10 +991,16 @@ impl Rows {
                 "fill_elig",
                 "copy_elig",
                 "copy_written",
+                "route_rounds",
+                "route_relax",
             ],
-            Self::DownInsert => &["pass_id", "layer", "added", "hosts", "round"],
-            // `route_same` / `geom_same`: 1 = equal to the previous run's,
-            // 0 = different, 2 = no previous run in this pose.
+            // `exhausted`: insertion searches at the layer that found
+            // nowhere to put a carrier (`added` is then 0).
+            Self::DownInsert => &["pass_id", "layer", "added", "hosts", "round", "exhausted"],
+            // `route_same` / `geom_same` / `reads_same`: 1 = equal to the
+            // previous run's, 0 = different, 2 = no previous run in this
+            // pose. `route_same` compares where the load goes (the hops),
+            // `reads_same` who read which cell (it names members).
             Self::DownRun => &[
                 "site",
                 "run",
@@ -1004,6 +1010,7 @@ impl Rows {
                 "geom_same",
                 "inserted",
                 "layers",
+                "reads_same",
             ],
             Self::LipRound => &[
                 "round",

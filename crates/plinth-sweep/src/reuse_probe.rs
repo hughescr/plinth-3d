@@ -98,7 +98,7 @@ struct TraceState {
     geom_prev: Option<Vec<u64>>,
     geom_now: Vec<u64>,
     /// Route-log hash of the previous run's last pass.
-    route_prev: Option<u64>,
+    route_prev: Option<(u64, u64)>,
 }
 
 /// One pass's row, minus the member comparison.
@@ -447,6 +447,11 @@ pub(crate) struct LayerRec {
     pub(crate) inserted: u64,
     pub(crate) hosts: u64,
     pub(crate) round: u64,
+    /// Insertion searches at this layer that found nowhere to put a carrier.
+    pub(crate) exhausted: u64,
+    /// Route rounds and relax calls of the layer (summed over insertion rounds).
+    pub(crate) route_rounds: u64,
+    pub(crate) route_relax: u64,
     /// Fingerprint of what the layer hands down (load and carriers).
     pub(crate) fp: u64,
     /// Time the counting itself took inside this layer; taken out of `ns`.
@@ -554,14 +559,25 @@ impl PassTrace {
                         rec.fill_elig,
                         rec.copy_elig,
                         rec.copy_written,
+                        rec.route_rounds,
+                        rec.route_relax,
                     ],
                 );
-                if rec.inserted > 0 {
-                    hi_inserted = hi_inserted.max(layer as u64 + 1);
+                if rec.inserted > 0 || rec.exhausted > 0 {
+                    if rec.inserted > 0 {
+                        hi_inserted = hi_inserted.max(layer as u64 + 1);
+                    }
                     inserted += rec.inserted;
                     perf::row(
                         perf::Rows::DownInsert,
-                        &[pass_id, layer as u64, rec.inserted, rec.hosts, rec.round],
+                        &[
+                            pass_id,
+                            layer as u64,
+                            rec.inserted,
+                            rec.hosts,
+                            rec.round,
+                            rec.exhausted,
+                        ],
                     );
                 }
             }
@@ -637,20 +653,22 @@ pub(crate) fn pass_done(struts: &[SweepStrut]) {
     });
 }
 
-/// A hash of a run's final routing record, for the route-equality figure.
-pub(crate) fn route_hash(log: &crate::per_event::RouteLog) -> u64 {
-    let mut h = 0x20e7_0001_u64;
+/// Hashes of a run's final routing record, for the route-equality figures:
+/// where the load goes (`hops`) and who read which cell (`reads`; it names
+/// members, so it moves when a member is added or renumbered).
+pub(crate) fn route_hash(log: &crate::per_event::RouteLog) -> (u64, u64) {
+    let (mut hop_hash, mut read_hash) = (0x20e7_0001_u64, 0x20e7_0002_u64);
     for (layer, (hops, reads)) in log.hops.iter().zip(&log.reads).enumerate() {
-        h = mix(h, layer as u64);
+        hop_hash = mix(hop_hash, layer as u64);
         for &(a, b) in hops {
-            h = mix(mix(h, u64::from(a)), u64::from(b));
+            hop_hash = mix(mix(hop_hash, u64::from(a)), u64::from(b));
         }
-        h = mix(h, 0xBEEF);
+        read_hash = mix(read_hash, layer as u64);
         for &(a, b) in reads {
-            h = mix(mix(h, u64::from(a)), u64::from(b));
+            read_hash = mix(mix(read_hash, u64::from(a)), u64::from(b));
         }
     }
-    h
+    (hop_hash, read_hash)
 }
 
 /// The run is over: write its row (passes, wall time, whether its routing
@@ -667,7 +685,8 @@ pub(crate) fn run_end(passes: usize, inserted: u64, log: &crate::per_event::Rout
             stale.emit(0, 0);
         }
         let verdict = |same: Option<bool>| same.map_or(2, u64::from);
-        let route_same = verdict(trace.route_prev.map(|before| before == route));
+        let route_same = verdict(trace.route_prev.map(|before| before.0 == route.0));
+        let reads_same = verdict(trace.route_prev.map(|before| before.1 == route.1));
         let geom_same = verdict(
             trace
                 .geom_prev
@@ -692,6 +711,7 @@ pub(crate) fn run_end(passes: usize, inserted: u64, log: &crate::per_event::Rout
                 geom_same,
                 inserted,
                 trace.run_layers,
+                reads_same,
             ],
         );
     });
