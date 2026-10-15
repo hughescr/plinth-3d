@@ -238,7 +238,8 @@ works! {
     SegProveTrisTested, "kernel.seg_prove.tris_tested", Work;
     /// Tip landings put to the nearest-face scan (`tip_landing`).
     NearestTipRows, "nearest.tip.rows", Work;
-    /// Landing-times-face pairs of that scan (`rows * faces`).
+    /// Landing-face pairs the scan measured: `rows * faces` for a batch small
+    /// enough to scan, far fewer through the bounding-box tree.
     NearestTipTrisTested, "nearest.tip.tris_tested", Work;
     /// Rows of the model-landing scar's nearest-face scan.
     NearestModelLandingRows, "nearest.model_landing.rows", Work;
