@@ -22,6 +22,12 @@
 //! while it waits on a region nests a second [`with_token`] scope; the guard
 //! restores the outer token on exit, so each pose reads its own.
 //!
+//! A job that is NOT a race pose can be stolen the same way, and would start
+//! under the waiting pose's token. So no sweep reads a token it did not set:
+//! the public `run_sweep*` entries and the non-raced measurement run inside
+//! [`without_token`], which clears the thread's token for the call and
+//! restores it after.
+//!
 //! # What it does not do
 //!
 //! It decides nothing. Whether a pose may be stopped is the caller's proof
@@ -54,7 +60,28 @@ impl Drop for Scope {
 /// run inside it returns [`SweepError::Cancelled`] at the first safe point
 /// after the flag is set.
 pub fn with_token<R>(token: &Arc<AtomicBool>, work: impl FnOnce() -> R) -> R {
-    let previous = TOKEN.with(|slot| slot.borrow_mut().replace(Arc::clone(token)));
+    scoped(Some(Arc::clone(token)), work)
+}
+
+/// Runs `work` with NO cancel flag on this thread, whatever the thread
+/// carried in. Every sweep that is not part of a race runs inside this.
+///
+/// Why it is needed: the token is a thread-local, and a rayon worker that
+/// waits inside nested parallel work steals whatever job is queued, among them
+/// a plain measurement that belongs to an independent search. That job starts
+/// on the waiting worker's thread, under the token the worker's own raced
+/// pose installed. Without this scope, cancelling that pose would end the
+/// stolen sweep with [`SweepError::Cancelled`] and change the other search's
+/// result. A sweep therefore never reads a token it did not install itself:
+/// a raced pose installs its own ([`with_token`]), every other one clears.
+pub fn without_token<R>(work: impl FnOnce() -> R) -> R {
+    scoped(None, work)
+}
+
+/// Installs `token` (or none) for `work` and restores the previous value on
+/// every exit path, a panic included. Scopes nest as a stack.
+fn scoped<R>(token: Option<Arc<AtomicBool>>, work: impl FnOnce() -> R) -> R {
+    let previous = TOKEN.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), token));
     let _scope = Scope { previous };
     work()
 }
@@ -102,6 +129,39 @@ mod tests {
             assert!(matches!(checkpoint(), Err(SweepError::Cancelled)));
         });
         assert!(checkpoint().is_ok(), "the scope ended");
+    }
+
+    #[test]
+    fn a_cleared_scope_hides_a_cancelled_token_and_restores_it() {
+        let token = Arc::new(AtomicBool::new(true));
+        with_token(&token, || {
+            assert!(cancelled());
+            without_token(|| {
+                assert!(!cancelled(), "a stolen plain job must not see the token");
+                assert!(checkpoint().is_ok());
+            });
+            assert!(cancelled(), "the pose's own token is back");
+        });
+        assert!(!cancelled());
+    }
+
+    #[test]
+    fn scopes_restore_the_previous_token_when_the_work_panics() {
+        let outer = Arc::new(AtomicBool::new(true));
+        let inner = Arc::new(AtomicBool::new(false));
+        with_token(&outer, || {
+            let panicked = std::panic::catch_unwind(|| {
+                with_token(&inner, || panic!("inner work fails"));
+            });
+            assert!(panicked.is_err());
+            assert!(cancelled(), "the outer token is back after a panic in with_token");
+            let panicked = std::panic::catch_unwind(|| {
+                without_token(|| panic!("plain work fails"));
+            });
+            assert!(panicked.is_err());
+            assert!(cancelled(), "the outer token is back after a panic in without_token");
+        });
+        assert!(!cancelled(), "and nothing leaks past the outermost scope");
     }
 
     #[test]

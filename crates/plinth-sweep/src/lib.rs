@@ -1794,6 +1794,39 @@ pub fn run_sweep_with_holes(
     drains: &[DrainSpec],
     vents: &[DrainSpec],
 ) -> Result<SweepPlan, SweepError> {
+    // Not a race pose: a token this thread carries in (a job stolen while a
+    // raced pose waits) belongs to somebody else's sweep and must not stop
+    // this one ([`cancel::without_token`]).
+    cancel::without_token(|| run_sweep_inner(mesh, plan, policy, drains, vents, None))
+}
+
+/// [`run_sweep`] for the orientation search's own pose measurement, which
+/// decides the thread's cancel token itself (`orient_demand`: a raced pose
+/// installs its own, every other pose clears it), so this entry leaves the
+/// token alone.
+pub(crate) fn run_sweep_in_token_scope(
+    mesh: &Mesh,
+    plan: &LayerPlan,
+    policy: &SweepPolicy,
+) -> Result<SweepPlan, SweepError> {
+    let policy = SweepPolicy {
+        rigid_share_diagnostic: false,
+        stage_shake_diagnostic: false,
+        ..*policy
+    };
+    run_sweep_inner(mesh, plan, &policy, &[], &[], None)
+}
+
+/// [`run_sweep_with_holes`] for the orientation search's own pose
+/// measurement; leaves the cancel token as the caller set it (see
+/// [`run_sweep_in_token_scope`]).
+pub(crate) fn run_sweep_with_holes_in_token_scope(
+    mesh: &Mesh,
+    plan: &LayerPlan,
+    policy: &SweepPolicy,
+    drains: &[DrainSpec],
+    vents: &[DrainSpec],
+) -> Result<SweepPlan, SweepError> {
     run_sweep_inner(mesh, plan, policy, drains, vents, None)
 }
 
@@ -1850,7 +1883,9 @@ pub fn run_sweep_with_second_contact(
             .map(|short| (short.planned_mm2 - short.real_mm2).max(0.0))
             .sum()
     };
-    let second = run_sweep_inner(mesh, plan, policy, drains, vents, Some(&caps))?;
+    let second = cancel::without_token(|| {
+        run_sweep_inner(mesh, plan, policy, drains, vents, Some(&caps))
+    })?;
     let outcome = contact_growth::SecondContactOutcome {
         attempted: true,
         tips_capped: caps.len(),

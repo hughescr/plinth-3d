@@ -177,8 +177,9 @@ use plinth_orient::{ObjectiveWeights, OrientFaceTable, UpDirection};
 use rayon::prelude::*;
 
 use crate::{
-    complete_for_emission, model_landing, perf, run_sweep, run_sweep_with_holes, tip_landing,
-    DrainSpec, StrutKind, SweepPlan, SweepPolicy,
+    complete_for_emission, model_landing, perf, run_sweep_in_token_scope,
+    run_sweep_with_holes_in_token_scope, tip_landing, DrainSpec, StrutKind, SweepPlan,
+    SweepPolicy,
 };
 
 /// See the module doc's "Two rasters" section.
@@ -605,8 +606,10 @@ impl SweepDemand {
         });
         let started = Instant::now();
         let plan = match &settings.retained_policy {
-            Some(policy) => run_sweep_with_holes(&transformed, &layers, policy, &[], &[]),
-            None => run_sweep(&transformed, &layers, &settings.policy),
+            Some(policy) => {
+                run_sweep_with_holes_in_token_scope(&transformed, &layers, policy, &[], &[])
+            }
+            None => run_sweep_in_token_scope(&transformed, &layers, &settings.policy),
         }
         .map_err(|error| match error {
             crate::SweepError::Cancelled => PoseError::Stopped,
@@ -769,7 +772,11 @@ impl SweepDemand {
                 };
                 let Some((race, token)) = race.and_then(|race| race.token(index).map(|t| (race, t)))
                 else {
-                    return measure();
+                    // Not a race pose, so it runs with NO token. The token is a
+                    // thread-local, and this job may have been stolen by a
+                    // worker that is waiting inside a raced pose of another
+                    // search; it must not run under that pose's token.
+                    return crate::cancel::without_token(measure);
                 };
                 if race.is_stopped(index) {
                     race.note_stopped(index);

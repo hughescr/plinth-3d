@@ -83,3 +83,50 @@ fn a_stop_during_the_sweep_returns_at_a_safe_point_not_at_the_end() {
         "stopped after {stopped_after:?} of a {whole:?} sweep: it ran to the end"
     );
 }
+
+/// A token a different pose installed on this thread: set, and already
+/// cancelled. A rayon worker that steals a plain job while it waits inside a
+/// raced pose looks exactly like this.
+fn inherited_cancelled_token() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true))
+}
+
+#[test]
+fn a_plain_measurement_ignores_a_cancelled_token_it_did_not_set() {
+    let mesh = make_recessed_disc(11.5, 12.5, 3.5, 2.5, 10.0, 96).expect("the Round 25 profile");
+    let table = OrientFaceTable::build(&mesh, "exact").expect("a closed fixture always scores");
+    let measurer = SweepDemand::production();
+    let pose = [UpDirection::new([0.0625, 0.0, 0.9980]).expect("a valid direction")];
+
+    let clean = measurer.measure_support_demand(&mesh, &table, &pose, DemandFidelity::Production);
+    let token = inherited_cancelled_token();
+    let stolen = plinth_sweep::cancel::with_token(&token, || {
+        measurer.measure_support_demand(&mesh, &table, &pose, DemandFidelity::Production)
+    });
+    assert!(
+        stolen[0].is_ok(),
+        "a job stolen under another pose's cancelled token must complete: {:?}",
+        stolen[0]
+    );
+    assert_eq!(
+        stolen[0], clean[0],
+        "and measure exactly what it measures with no token on the thread"
+    );
+    assert!(
+        token.load(Ordering::Acquire),
+        "the pose's own token is untouched"
+    );
+}
+
+#[test]
+fn a_public_sweep_entry_ignores_a_cancelled_token_it_did_not_set() {
+    let mesh = make_recessed_disc(11.5, 12.5, 3.5, 2.5, 10.0, 96).expect("the Round 25 profile");
+    let policy = plinth_sweep::SweepPolicy::from_registry().expect("the registry supplies the sweep");
+    let token = inherited_cancelled_token();
+    // `sweep_with_uncached` always runs the sweep through `run_sweep_with_drains`,
+    // and panics on a refusal, which a `Cancelled` would be.
+    let plan = plinth_sweep::cancel::with_token(&token, || {
+        crate::harness::sweep_with_uncached(&mesh, &policy)
+    });
+    assert!(!plan.struts.is_empty(), "the sweep ran to the end");
+}
