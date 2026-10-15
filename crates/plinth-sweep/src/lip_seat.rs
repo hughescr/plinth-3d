@@ -1272,6 +1272,7 @@ impl StandingReads {
         if !keys.is_empty() {
             let standing: Vec<SweepArm> = keys.iter().map(|&(member, _)| arms[member].clone()).collect();
             let on_model: Vec<bool> = keys.iter().map(|&(_, on)| on).collect();
+            let _site = crate::perf::clear_site(crate::perf::ClearSite::LipBefore);
             for (key, value) in keys.into_iter().zip(frame.solid(&standing, &on_model)) {
                 self.before.insert(key, value);
             }
@@ -1300,6 +1301,7 @@ impl StandingReads {
         let doubtful_arms: Vec<SweepArm> =
             doubtful.iter().map(|&(member, _)| arms[member].clone()).collect();
         let doubtful_on_model: Vec<bool> = doubtful.iter().map(|&(_, on)| on).collect();
+        let _site = crate::perf::clear_site(crate::perf::ClearSite::LipDrawn);
         let read = drawn_solid_clearances(
             frame.surface,
             &doubtful_arms,
@@ -1459,6 +1461,7 @@ fn read_movers(
             bounds.push(row.at_least);
             keys.push((row.slot, row.at, row.path));
         }
+        let _site = crate::perf::clear_site(crate::perf::ClearSite::LipReadAhead);
         let reads = frame.solid_at_least(&solids, &on_model, &bounds);
         for ((slot, at, path), read) in keys.into_iter().zip(reads) {
             pending[slot].ahead.insert(at, (path, read));
@@ -1957,6 +1960,7 @@ pub(crate) fn apply(
                         .iter()
                         .map(|&slot| admitted_at_least(false, before[slot], tier))
                         .collect();
+                    let _site = crate::perf::clear_site(crate::perf::ClearSite::LipFollowers);
                     let read = frame.solid_at_least(
                         &follower_arms,
                         &vec![false; follower_arms.len()],

@@ -3142,6 +3142,7 @@ impl NativeSurface {
                     u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
                     ns_sum.load(relaxed),
                     ns_max.load(relaxed),
+                    crate::perf::current_clear_site(),
                 ],
             );
         }

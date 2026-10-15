@@ -952,6 +952,8 @@ pub fn run(
             l_max,
             &mut outcome.overloaded,
         );
+        // Write-only (M0): how many members' sized ledgers this pass changed.
+        crate::reuse_probe::pass_done(struts);
         outcome.per_event = sized.report;
         outcome.reached_by_event = sized.reached;
         outcome.per_event.passes = passes;
@@ -983,6 +985,8 @@ pub fn run(
             } else {
                 0
             };
+            // Write-only (M0): the run's row, with its routing's hash.
+            crate::reuse_probe::run_end(passes, inserted, &log);
             outcome.route_log = log;
             return outcome;
         }
@@ -1103,6 +1107,10 @@ fn sweep_pass(
     if probe_bands {
         crate::reuse_probe::begin_bands(slices.len(), cells, grid.cols());
     }
+    // M0 (2026-10-14): the pass trace (per layer: time, eligible and written
+    // cells per loop, what the layer hands down). `None`, and every use below
+    // a skipped branch, while `perf` counting is off.
+    let mut trace = crate::reuse_probe::PassTrace::begin(slices.len(), cells);
     let mut outcome = DownSweepOutcome {
         min_layer_area_mm2: f64::INFINITY,
         ..DownSweepOutcome::default()
@@ -1227,6 +1235,9 @@ fn sweep_pass(
     }
 
     for layer in (0..slices.len()).rev() {
+        if let Some(t) = trace.as_mut() {
+            t.layer_begin();
+        }
         outcome.rasteriser_entries += 1;
         {
             let _prefix_span = crate::perf::span(crate::perf::Span::PassPrefix);
@@ -1380,6 +1391,16 @@ fn sweep_pass(
         // re-route below is needed, and the next pass re-measures.
         let mut inserted_here = false;
         loop {
+            if let Some(t) = trace.as_mut() {
+                // The cells the clears below change.
+                t.counting(|rec| {
+                    rec.fill_elig += load_out
+                        .iter()
+                        .zip(peel_fed.iter())
+                        .filter(|(load, fed)| **load != 0.0 || **fed)
+                        .count() as u64;
+                });
+            }
             {
                 let _fill_span = crate::perf::span(crate::perf::Span::PassDense);
                 load_out.iter_mut().for_each(|value| *value = 0.0);
@@ -1417,6 +1438,7 @@ fn sweep_pass(
             } else {
                 &carriers
             };
+            let route_started = trace.is_some().then(std::time::Instant::now);
             let route_span = crate::perf::span(crate::perf::Span::PassRoute);
             let route = route_within_cover(
                 grid,
@@ -1439,6 +1461,16 @@ fn sweep_pass(
                 },
             );
             drop(route_span);
+            if let (Some(t), Some(started)) = (trace.as_mut(), route_started) {
+                // The counting inside the call is not route time.
+                let elapsed = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                t.cur.route_ns += elapsed.saturating_sub(route.counting_ns);
+                t.cur.count_ns += route.counting_ns;
+                t.cur.route_rounds += route.rounds;
+                t.cur.route_relax += route.relax_calls;
+                t.cur.route_elig += route.eligible;
+                t.cur.route_written += route.written;
+            }
             outcome.route_sightlines_clear += route.sightlines.clear;
             outcome.route_sightlines_blocked += route.sightlines.blocked;
             route_converged = route.converged;
@@ -1488,6 +1520,13 @@ fn sweep_pass(
                     }
                 }
             }
+            if let Some(t) = trace.as_mut() {
+                // The cells the spread loop acts on: those holding load.
+                t.counting(|rec| {
+                    rec.spread_elig += load_in.iter().filter(|load| **load > 0.0).count() as u64;
+                });
+            }
+            let loop_started = trace.is_some().then(std::time::Instant::now);
             let dense_span = crate::perf::span(crate::perf::Span::PassDense);
             for cell in 0..cells {
                 let load = load_in[cell];
@@ -1596,6 +1635,12 @@ fn sweep_pass(
             // counted injected peel. Only model columns: an arm reads its own
             // per-layer event as it always has.
             let own = own_peel;
+            // The max loop's field before it runs (write-only measurement).
+            if let (Some(t), Some(started)) = (trace.as_mut(), loop_started) {
+                t.cur.loop_ns += u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            }
+            let max_before: Option<Vec<f64>> = trace.as_mut().map(|t| t.counting(|_| load_out.clone()));
+            let max_started = trace.is_some().then(std::time::Instant::now);
             for cell in 0..cells {
                 if carriers[cell] {
                     let injects = !carriers_above[cell] && !continues_above[cell];
@@ -1633,7 +1678,22 @@ fn sweep_pass(
                     load_out[cell] = 0.0;
                 }
             }
+            if let (Some(t), Some(started)) = (trace.as_mut(), max_started) {
+                t.cur.loop_ns += u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            }
             drop(dense_span);
+            if let (Some(t), Some(before)) = (trace.as_mut(), max_before) {
+                // Eligible: a carrier, or a cell holding load (the loop clears
+                // load off a non-carrier). Written: the load changed.
+                t.counting(|rec| {
+                    for cell in 0..cells {
+                        let touched = carriers[cell] || before[cell] != 0.0;
+                        rec.max_elig += u64::from(touched);
+                        rec.max_written +=
+                            u64::from(before[cell].to_bits() != load_out[cell].to_bits());
+                    }
+                });
+            }
 
             if !insertion.enabled {
                 break;
@@ -1727,11 +1787,21 @@ fn sweep_pass(
                 // the search found nowhere to put it -- a physical limit, not
                 // the round bound above. Emit and warn: the arms that remain
                 // over the limit are named one by one in `overloaded`.
+                if let Some(t) = trace.as_mut() {
+                    t.cur.exhausted += 1;
+                    t.cur.hosts += insert.hosts.len() as u64;
+                    t.cur.round = round as u64;
+                }
                 outcome.insertion_geometry_exhausted += 1;
                 refused.extend(insert.host_keys.iter().copied());
                 break;
             }
             outcome.arms_inserted_by_load += added;
+            if let Some(t) = trace.as_mut() {
+                t.cur.inserted += added;
+                t.cur.hosts += insert.hosts.len() as u64;
+                t.cur.round = round as u64;
+            }
             inserted_here = triggers.is_some();
             round += 1;
         }
@@ -2161,7 +2231,11 @@ fn sweep_pass(
             crate::reuse_probe::layer_done(layer, grid.cols(), &load_out, &carriers, &arm_values);
         }
 
+        if let Some(t) = trace.as_mut() {
+            t.counting(|rec| rec.fp = crate::reuse_probe::layer_fingerprint(&load_out, &carriers));
+        }
         // --- the model's own section is checked, never resized --------------
+        let tail_started = trace.is_some().then(std::time::Instant::now);
         let end_span = crate::perf::span(crate::perf::Span::PassDense);
         if model_cells > 0 {
             check_model_sections(
@@ -2178,10 +2252,36 @@ fn sweep_pass(
         }
 
         std::mem::swap(&mut load_in, &mut load_out);
+        // The end-of-layer copies' cells (write-only measurement): eligible =
+        // set before or after, written = changed.
+        let tail_before = tail_started.map_or(0, |started| {
+            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+        });
+        let copy_cells = trace.as_mut().map(|t| {
+            t.counting(|_| {
+                let (mut eligible, mut written) = (0_u64, 0_u64);
+                for cell in 0..cells {
+                    let (cover_was, cover_is) = (cover_above[cell], masks.cover[cell]);
+                    let (carry_was, carry_is) = (carriers_above[cell], carriers[cell]);
+                    eligible += u64::from(cover_was || cover_is || carry_was || carry_is);
+                    written += u64::from(cover_was != cover_is || carry_was != carry_is);
+                }
+                (eligible, written)
+            })
+        });
         // This layer's cover is the next iteration's "above".
+        let copy_started = trace.is_some().then(std::time::Instant::now);
         cover_above.copy_from_slice(&masks.cover);
         carriers_above.copy_from_slice(&carriers);
         drop(end_span);
+        if let (Some(t), Some(started), Some((eligible, written))) =
+            (trace.as_mut(), copy_started, copy_cells)
+        {
+            t.cur.tail_ns = tail_before
+                + u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            t.cur.copy_elig += eligible;
+            t.cur.copy_written += written;
+        }
         if rule_active {
             handed_prev.clear();
             for &cell in unrooted_here {
@@ -2198,6 +2298,12 @@ fn sweep_pass(
             }
             growing_marked.clear();
         }
+        if let Some(t) = trace.as_mut() {
+            t.layer_end(layer);
+        }
+    }
+    if let Some(t) = trace.take() {
+        t.finish();
     }
 
     // Anything still in the raster at the bottom of the stack reached the
@@ -2624,6 +2730,11 @@ fn route_within_cover(
             any_root: false,
             converged: true,
             sightlines: sight,
+            eligible: 0,
+            written: 0,
+            counting_ns: 0,
+            rounds: 0,
+            relax_calls: 0,
         };
     }
     // Nothing to route where every covered cell is already a root, and a
@@ -2634,20 +2745,46 @@ fn route_within_cover(
             any_root: true,
             converged: true,
             sightlines: sight,
+            eligible: 0,
+            written: 0,
+            counting_ns: 0,
+            rounds: 0,
+            relax_calls: 0,
         };
     }
+    // Write-only measurement (M0): the cells the relax rounds can change, and
+    // the field they start from. Nothing is read or cloned with counting off;
+    // the time it takes is returned so the caller can leave it out of the
+    // route time.
+    let mut counting_ns = 0_u64;
+    let measured = if crate::perf::enabled() {
+        let _count_span = crate::perf::span(crate::perf::Span::CountOverhead);
+        let started = std::time::Instant::now();
+        let eligible = (0..grid.cells())
+            .filter(|&cell| cover_above[cell] && distance[cell] > 0.0)
+            .count() as u64;
+        let initial = distance.to_vec();
+        counting_ns += u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        Some((eligible, initial))
+    } else {
+        None
+    };
     if !*clear_built {
         let _clearance_span = crate::perf::span(crate::perf::Span::PassClearance);
         crate::reach::clearance_mm(grid, cover_above, clear);
         *clear_built = true;
     }
     let clear: &[f32] = clear;
+    // Write-only measurement (M0): relax calls and sweep rounds.
+    let mut relax_calls = 0_u64;
+    let mut rounds_run = 0_u64;
     let mut relax = |cell: usize,
                      from: usize,
                      distance: &mut [f32],
                      nearest: &mut [u32],
                      via_tip: &mut [bool],
                      anchor: &mut [u32]| {
+        relax_calls += 1;
         if let Some((value, origin, source)) = crate::reach::any_angle_relax(
             cols,
             pitch,
@@ -2674,6 +2811,7 @@ fn route_within_cover(
     let mut converged = false;
     previous.copy_from_slice(distance);
     for _ in 0..MAX_SWEEP_ROUNDS {
+        rounds_run += 1;
         for row in 0..rows {
             for col in 0..cols {
                 let cell = row * cols + col;
@@ -2726,10 +2864,26 @@ fn route_within_cover(
         }
         previous.copy_from_slice(distance);
     }
+    let (eligible, written) = measured.map_or((0, 0), |(eligible, initial)| {
+        let _count_span = crate::perf::span(crate::perf::Span::CountOverhead);
+        let started = std::time::Instant::now();
+        let written = initial
+            .iter()
+            .zip(distance.iter())
+            .filter(|(before, after)| before.to_bits() != after.to_bits())
+            .count() as u64;
+        counting_ns += u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        (eligible, written)
+    });
     RouteOutcome {
         any_root: true,
         converged,
         sightlines: sight,
+        eligible,
+        written,
+        counting_ns,
+        rounds: rounds_run,
+        relax_calls,
     }
 }
 
@@ -2770,6 +2924,17 @@ struct RouteOutcome {
     any_root: bool,
     converged: bool,
     sightlines: crate::reach::Sightlines,
+    /// Write-only measurement (M0, filled only while `perf` counting is on):
+    /// covered cells that are not roots (the cells the relax rounds visit),
+    /// and of those, the cells whose distance the rounds changed.
+    eligible: u64,
+    written: u64,
+    /// Time the measurement above took, in ns (zero with counting off).
+    counting_ns: u64,
+    /// Sweep rounds run and relax calls made (counted always; two integer
+    /// adds beside the work each one stands for).
+    rounds: u64,
+    relax_calls: u64,
 }
 /// Per connected component of MODEL material, `X_model = Σ L / component area`.
 ///

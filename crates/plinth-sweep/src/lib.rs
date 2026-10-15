@@ -1912,6 +1912,12 @@ pub fn run_sweep_with_second_contact(
     Ok(chosen)
 }
 
+#[expect(
+    unused_assignments,
+    unused_variables,
+    reason = "`stage_span` is a measurement marker: each assignment ends the previous stage's span \
+              (its drop) and starts the next; nothing reads it"
+)]
 fn run_sweep_inner(
     mesh: &Mesh,
     plan: &LayerPlan,
@@ -1921,6 +1927,9 @@ fn run_sweep_inner(
     contact_caps: Option<&down_sweep::ContactCaps>,
 ) -> Result<SweepPlan, SweepError> {
     let _perf_span = perf::span(perf::Span::SweepRun);
+    // M0: the `Stage*` spans partition this call (each runs from its mark to
+    // the next), so the pose's wall time has no unnamed region.
+    let mut stage_span = perf::span(perf::Span::StageSetup);
     perf::add(PerfWork::SweepRuns, 1);
     let (min_z, max_z, min_x, max_x, min_y, max_y) = bounds(mesh)?;
     let plate_z = plan.z0_mm();
@@ -2189,6 +2198,7 @@ fn run_sweep_inner(
         ..births::BirthTally::default()
     };
 
+    stage_span = perf::span(perf::Span::StageUp);
     for (layer, solids) in slices.iter().enumerate().take(layers) {
         cancel::checkpoint()?;
         rasteriser_entries += 1;
@@ -2292,6 +2302,7 @@ fn run_sweep_inner(
     set_interior(&mut struts, &history);
 
     // -------------------------------------------------------------- downward
+    stage_span = perf::span(perf::Span::StageDownInitial);
     let sizing = down_sweep::SizingPolicy {
         x_allowed: policy.x_allowed,
         tip_radius_min_mm: policy.tip_radius_min_mm,
@@ -2389,6 +2400,7 @@ fn run_sweep_inner(
         first_loss_ratio: policy.kappa_first_loss / policy.kappa,
         births: &births,
     };
+    stage_span = perf::span(perf::Span::StageRemoval);
     for _ in 0..policy.strut_removal_passes {
         // THE PASS IS UNDONE AS A WHOLE IF IT MAKES THE FIELD WORSE. The
         // span test and the replay below are coverage arguments over arms
@@ -2489,6 +2501,7 @@ fn run_sweep_inner(
     // giving the down-sweep a reason to know about the up-sweep's history.
     set_interior(&mut struts, &history);
 
+    stage_span = perf::span(perf::Span::StageUnmerge);
     // --- merges the trunk cannot carry are undone -------------------------
     //
     // A merge hands the parent the SUM of both loads, and the area law sizes
@@ -2541,6 +2554,7 @@ fn run_sweep_inner(
     // was there and never bit.
     set_interior(&mut struts, &history);
 
+    stage_span = perf::span(perf::Span::StageCongestion);
     // --- congestion: spread the footprint, then shed load to the flanks ----
     //
     // BEFORE the slenderness lane, deliberately. This lane MOVES a root
@@ -2740,6 +2754,7 @@ fn run_sweep_inner(
     // after, the lane first clears every leaf it can, and this rule branches
     // only the stranded members the lane left lapping. The ids are found here,
     // after the lane, because withdrawing idle flank arms renumbers members.
+    stage_span = perf::span(perf::Span::StageStranded);
     let mut stranded = stranded_branch::stranded_ids(&struts, &greedy.stranded_seat_cells);
     let mut stranded_branch_outcome = stranded_branch::StrandedBranchOutcome {
         enabled: policy.stranded_branch,
@@ -2808,6 +2823,7 @@ fn run_sweep_inner(
         stranded_branch::census(&slenderness_context, &struts, &stranded);
     stranded_branch_outcome.lapping_after = stranded_branch_outcome.lapping_ids_after.len();
 
+    stage_span = perf::span(perf::Span::StageForcedMerges);
     let (mut slenderness_outcome, forced_merges) =
         slenderness::apply_merges(&slenderness_context, &mut struts);
     landings.record("slenderness merges", &landing_check::check_landings(&struts, height));
@@ -2938,6 +2954,7 @@ fn run_sweep_inner(
     // Descents a sized field put back (arm id, base cell), refused for the
     // rest of the rule, both runs.
     let mut lip_seat_refused: Vec<(u32, usize)> = Vec::new();
+    stage_span = perf::span(perf::Span::StageLipSeatA);
     cancel::checkpoint()?;
     if let Some(sized) = lip_seat_run.run(
         &head_join_context,
@@ -2962,6 +2979,7 @@ fn run_sweep_inner(
             stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
         ));
     }
+    stage_span = perf::span(perf::Span::StageGraze);
     // --- graze heads: a head only where a straight shaft would graze --------
     //
     // Craig 2026-10-08. Steep faces got their heads at placement; a gentler
@@ -3011,6 +3029,7 @@ fn run_sweep_inner(
     // is followed by the same down-sweep that books the lander's load at its
     // new layer, and the rule runs again on the re-sized field until nothing
     // moves, bounded by the registered pass count the other loops use.
+    stage_span = perf::span(perf::Span::StageHeadJoin);
     let mut head_join_outcome = head_join::HeadJoinOutcome {
         enabled: policy.head_join,
         clearance_mm: policy.final_clearance_gap_mm,
@@ -3050,6 +3069,7 @@ fn run_sweep_inner(
             stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
         ));
     }
+    stage_span = perf::span(perf::Span::StageLipSeatB);
     // --- lip seats again, on the field the head-join rule left -----------
     //
     // A head join moves a lander down its trunk, and an arm that carried it
@@ -3092,6 +3112,7 @@ fn run_sweep_inner(
     // NO PASS AT ALL when `slenderness_ties` is off (the orientation search's
     // prefilter, Craig ruling 2026-10-04): the crosses' frame solves were the
     // prefilter's time, and it reads none of what the passes add.
+    stage_span = perf::span(perf::Span::StageTies);
     let tie_passes_allowed = if policy.slenderness_ties {
         policy.strut_removal_passes
     } else {
@@ -3133,6 +3154,7 @@ fn run_sweep_inner(
     // first need and shared with the head-join and lip-seat rules.
     // Only where a run is still over its limit (the surface is not built for
     // a field that has none).
+    stage_span = perf::span(perf::Span::StageModelTies);
     let runs_left = policy.slenderness_ties
         && policy.slenderness_model_tie
         && slenderness::unbraced_runs_drawn(&grid, &struts, height, &slenderness_law, load_step_taper)
@@ -3207,6 +3229,7 @@ fn run_sweep_inner(
     // lip-seat rule itself re-landed are left alone: Craig's ruling of
     // 2026-10-04 keeps that rule's gate ("no nearer than it stood"), so what
     // it admitted stays a WARNING.
+    stage_span = perf::span(perf::Span::StageReroute);
     let mut clearance_reroute_outcome = lip_seat::LipSeatOutcome {
         enabled: policy.clearance_reroute,
         ..lip_seat::LipSeatOutcome::default()
@@ -3320,6 +3343,7 @@ fn run_sweep_inner(
             moves.note("ties after the clearance re-route", &struts);
         }
     }
+    stage_span = perf::span(perf::Span::StageGrazeLate);
     // --- graze heads AGAIN, at the final radius (`MODEL-FEET.md` F3) -------
     //
     // The conversion above judged each straight tip on the field the lip
@@ -3400,6 +3424,7 @@ fn run_sweep_inner(
     // straight tip (the post keeps its route; the members joined to it follow
     // the line now drawn) and counted in the heads line.
     //
+    stage_span = perf::span(perf::Span::StageJoints);
     // **FIRST, EVERY HEAD IS SIZED FOR THE POST IT IS DRAWN WITH** (v19 fix,
     // 2026-10-07; Craig approved sizing for the ACTUAL lean, not the 57.5 degree
     // worst case). After the last pass that re-routes or re-lands, the head,
@@ -3692,6 +3717,7 @@ fn run_sweep_inner(
     // un-merging have settled the strut set, and never during a pass that is
     // still moving arms around. The lowering drives the tip ball into it and
     // trims the ball and the first shaft segment to its plane.
+    stage_span = perf::span(perf::Span::StageSeat);
     cancel::checkpoint()?;
     let (mut seat_faces, seat_face_hits, seat_triangles) =
         tip_landing::tip_seat_faces_counted_with_ids(mesh, &grid, &struts, plate_z, height, seat_face_rule);
@@ -4522,6 +4548,54 @@ struct Unmerged {
     stale_landings: usize,
 }
 
+/// One trip round the lip-seat `'run` loop, counted for the `lip.round` row
+/// (M0, 2026-10-14). Write-only: `None` while `perf` counting is off, and
+/// nothing reads what it holds.
+struct LipRoundTally {
+    started: std::time::Instant,
+    round: u64,
+    passes: u64,
+    sizings: u64,
+    undo_sizings: u64,
+    put_back_moves: u64,
+    undo_ns: u64,
+}
+
+impl LipRoundTally {
+    fn start(round: u32) -> Option<Self> {
+        perf::enabled().then(|| Self {
+            started: std::time::Instant::now(),
+            round: u64::from(round),
+            passes: 0,
+            sizings: 0,
+            undo_sizings: 0,
+            put_back_moves: 0,
+            undo_ns: 0,
+        })
+    }
+
+    /// Write the row; `discarded` when the round ends in a re-run or a
+    /// withdrawn run (its work is thrown away).
+    fn finish(self, discarded: bool) {
+        if discarded {
+            perf::add(PerfWork::LipSeatRoundsDiscarded, 1);
+        }
+        perf::row(
+            perf::Rows::LipRound,
+            &[
+                self.round,
+                self.passes,
+                self.sizings,
+                self.undo_sizings,
+                self.put_back_moves,
+                u64::from(discarded),
+                u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                self.undo_ns,
+            ],
+        );
+    }
+}
+
 /// Flag the arms whose scar nobody will ever see.
 ///
 /// **The question is asked at the LANDING, not at the seat**, and that is a
@@ -4622,6 +4696,7 @@ impl LipSeatRun<'_> {
         let mut start: Option<(Vec<SweepStrut>, lip_seat::LipSeatOutcome)> = None;
         let mut reruns: u32 = 0;
         'run: loop {
+            let mut tally = LipRoundTally::start(reruns);
             let mut sized: Option<down_sweep::DownSweepOutcome> = None;
             // Every move still standing, every pass's in order.
             let mut standing: Vec<lip_seat::Relanding> = Vec::new();
@@ -4680,6 +4755,9 @@ impl LipSeatRun<'_> {
                 }
                 outcome.passes += 1;
                 perf::add(PerfWork::LipSeatPasses, 1);
+                if let Some(t) = tally.as_mut() {
+                    t.passes += 1;
+                }
                 if !self.across_passes {
                     standing.clear();
                 }
@@ -4707,6 +4785,9 @@ impl LipSeatRun<'_> {
                 // the moves left stand on the sized field.
                 let sized_from = struts.len();
                 let mut now = self.size(context, struts);
+                if let Some(t) = tally.as_mut() {
+                    t.sizings += 1;
+                }
                 let field_after = loop {
                     let field_after = lip_seat::measure_sized(context, struts, &now);
                     outcome.sizing_checks += 1;
@@ -4736,6 +4817,9 @@ impl LipSeatRun<'_> {
                         outcome.moves_refused_across_passes = kept.0;
                         outcome.reruns = kept.1;
                         outcome.runs_withdrawn = kept.2;
+                        if let Some(t) = tally.take() {
+                            t.finish(true);
+                        }
                         if reruns < self.passes {
                             reruns += 1;
                             outcome.reruns += 1;
@@ -4745,20 +4829,41 @@ impl LipSeatRun<'_> {
                         outcome.runs_withdrawn += 1;
                         return None;
                     }
-                    lip_seat::put_back_all(
-                        struts,
-                        sized_from,
-                        &mut standing,
-                        &blamed,
-                        refused,
-                        outcome,
-                    );
-                    now = self.size(context, struts);
+                    let standing_before = standing.len();
+                    {
+                        let _put_back_span = perf::span(perf::Span::LipPutBack);
+                        lip_seat::put_back_all(
+                            struts,
+                            sized_from,
+                            &mut standing,
+                            &blamed,
+                            refused,
+                            outcome,
+                        );
+                    }
+                    let undo_started = tally.is_some().then(std::time::Instant::now);
+                    {
+                        let _undo_span = perf::span(perf::Span::LipUndoSizing);
+                        now = self.size(context, struts);
+                    }
+                    if let (Some(t), Some(started)) = (tally.as_mut(), undo_started) {
+                        let moves = perf::count(standing_before.saturating_sub(standing.len()));
+                        t.sizings += 1;
+                        t.undo_sizings += 1;
+                        t.put_back_moves += moves;
+                        t.undo_ns += u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                        perf::add(PerfWork::LipSeatPutBackRounds, 1);
+                        perf::add(PerfWork::LipSeatPutBackMoves, moves);
+                        perf::add(PerfWork::LipSeatUndoSizings, 1);
+                    }
                 };
                 if !self.across_passes {
                     previous = Some(field_after);
                 }
                 sized = Some(now);
+            }
+            if let Some(t) = tally.take() {
+                t.finish(false);
             }
             return sized;
         }

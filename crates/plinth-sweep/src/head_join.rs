@@ -498,6 +498,7 @@ fn sections_near_model(
     }
     let rows = starts.len();
     let zero = vec![0.0; rows];
+    let _site = crate::perf::clear_site(crate::perf::ClearSite::HeadJoin);
     match surface.segment_clearance_classified(&starts, &ends, &zero, &zero, 0.0, &zero, &zero) {
         Ok(found) => {
             for (row, &index) in found.into_iter().zip(&owner) {
@@ -1232,6 +1233,7 @@ fn solid_clearances(
                 .unwrap_or(f64::INFINITY)
         })
         .collect();
+    let _site = crate::perf::clear_site(crate::perf::ClearSite::HeadJoin);
     surface
         .segment_clearance_classified(&seats, bases, &radii, &radii, 0.0, &insets, &zero)
         .map_or_else(

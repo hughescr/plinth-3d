@@ -76,6 +76,17 @@
 //! * **`stages`**: [`stage`] times a named region of a stage (Decimate,
 //!   OrientTable, Hollow, Emit) by a static label.
 //!
+//! Each row kind has its own allowance ([`Rows::allowance`]): a kind that
+//! fills its own never drops another kind's rows. The sidecar reports
+//! `rows_dropped` (the total) and `row_kinds` (stored, allowance and dropped
+//! per kind); a run that is to be priced from its rows must show zero
+//! dropped. The `Stage*` spans partition one sweep run end to end, so the sum
+//! of a pose's `stage.*` spans is its wall time. [`clear_site`] names the call
+//! site of the batched clearance calls (the `site` column of `clear.batch`).
+//! The per-pass, per-layer and per-run rows (`down.pass`, `down.layer`,
+//! `down.insert`, `down.run`, `lip.round`) are written by `plinth-sweep`'s
+//! `reuse_probe` and `down_sweep`; the column notes are on [`Rows::cols`].
+//!
 //! # Adding a counter
 //!
 //! Append one line to `works!` below, then call [`add`] from a file that owns
@@ -392,6 +403,21 @@ works! {
     PartnerWins, "brace.partner_wins", Work;
     /// Sum of the winning candidates' ranks (0 = nearest).
     PartnerWinRankSum, "brace.partner_win_rank_sum", Work;
+    /// Lip-seat rounds put back after a sizing blamed a move
+    /// (`lip_seat::put_back_all`): the undo step.
+    LipSeatPutBackRounds, "lip_seat.put_back_rounds", Work;
+    /// Moves those rounds put back.
+    LipSeatPutBackMoves, "lip_seat.put_back_moves", Work;
+    /// Sizings run again after an undo (each one a whole `down_sweep::run`).
+    LipSeatUndoSizings, "lip_seat.undo_sizings", Work;
+    /// Lip-seat runs thrown away whole and started again (the re-run branch).
+    LipSeatRoundsDiscarded, "lip_seat.rounds_discarded", Work;
+    /// Layers of the down-sweep passes, summed (the denominator of the
+    /// per-pass dirty-layer rows).
+    PassLayers, "down.pass.layers", Work;
+    /// Layers a pass could have skipped by resuming above the highest layer
+    /// that differs from the previous pass (or run), summed.
+    PassLayersReusable, "down.pass.layers_reusable", Work;
 }
 
 const WORK_N: usize = Work::ALL.len();
@@ -503,9 +529,58 @@ pub enum Span {
     PartnerTrial,
     /// One tie pass of the slenderness lane (`apply_ties_with_model`).
     BraceLane,
+    /// The sizing a lip-seat round runs again after an undo.
+    LipUndoSizing,
+    /// `lip_seat::put_back_all`.
+    LipPutBack,
+    // The `Stage*` spans partition one `run_sweep_inner` call end to end (the
+    // pose's wall time), so the sum of the stage spans of a pose is its wall
+    // time and no region is left unnamed. Each one runs from its mark to the
+    // next mark; the label names the first thing that runs in it.
+    /// Bounds, grid, slicing, keep-out, hidden cavities, scratch.
+    StageSetup,
+    /// The up-sweep layer loop (placement, reach, greedy seating).
+    StageUp,
+    /// Sizing policy and the first down-sweep.
+    StageDownInitial,
+    /// The under-loaded removal loop.
+    StageRemoval,
+    /// Un-merging merges the trunk cannot carry.
+    StageUnmerge,
+    /// Congestion lane and flank-arm check.
+    StageCongestion,
+    /// Slenderness lane and stranded-branch rounds.
+    StageStranded,
+    /// Slenderness merges, forced merges and their re-size, and the
+    /// head-join context and surface index build.
+    StageForcedMerges,
+    /// The first lip-seat run.
+    StageLipSeatA,
+    /// Graze heads, early.
+    StageGraze,
+    /// Head joins.
+    StageHeadJoin,
+    /// The second lip-seat run.
+    StageLipSeatB,
+    /// Slenderness ties.
+    StageTies,
+    /// Model ties.
+    StageModelTies,
+    /// The clearance re-route.
+    StageReroute,
+    /// Graze heads, late.
+    StageGrazeLate,
+    /// Joint certificate, census, report build.
+    StageJoints,
+    /// Seat faces, footprint normals, contact growth, the plan hand-back.
+    StageSeat,
+    /// The cost of the counting itself: every measurement-only scan, clone,
+    /// hash and row write of the down-sweep trace runs inside this span, so
+    /// a pose's other spans can be read with it taken out.
+    CountOverhead,
 }
 
-const SPAN_N: usize = 38;
+const SPAN_N: usize = 59;
 
 impl Span {
     /// Every span.
@@ -548,6 +623,27 @@ impl Span {
         Self::PartnerSearch,
         Self::PartnerTrial,
         Self::BraceLane,
+        Self::LipUndoSizing,
+        Self::LipPutBack,
+        Self::StageSetup,
+        Self::StageUp,
+        Self::StageDownInitial,
+        Self::StageRemoval,
+        Self::StageUnmerge,
+        Self::StageCongestion,
+        Self::StageStranded,
+        Self::StageForcedMerges,
+        Self::StageLipSeatA,
+        Self::StageGraze,
+        Self::StageHeadJoin,
+        Self::StageLipSeatB,
+        Self::StageTies,
+        Self::StageModelTies,
+        Self::StageReroute,
+        Self::StageGrazeLate,
+        Self::StageJoints,
+        Self::StageSeat,
+        Self::CountOverhead,
     ];
 
     /// The sidecar label.
@@ -592,6 +688,27 @@ impl Span {
             Self::PartnerSearch => "brace.partner_search",
             Self::PartnerTrial => "brace.partner_trial",
             Self::BraceLane => "brace.lane",
+            Self::LipUndoSizing => "lip_seat.undo_sizing",
+            Self::LipPutBack => "lip_seat.put_back",
+            Self::StageSetup => "stage.setup",
+            Self::StageUp => "stage.up_sweep",
+            Self::StageDownInitial => "stage.down_initial",
+            Self::StageRemoval => "stage.removal",
+            Self::StageUnmerge => "stage.unmerge",
+            Self::StageCongestion => "stage.congestion",
+            Self::StageStranded => "stage.stranded_branch",
+            Self::StageForcedMerges => "stage.forced_merges",
+            Self::StageLipSeatA => "stage.lip_seat_a",
+            Self::StageGraze => "stage.graze",
+            Self::StageHeadJoin => "stage.head_join",
+            Self::StageLipSeatB => "stage.lip_seat_b",
+            Self::StageTies => "stage.ties",
+            Self::StageModelTies => "stage.model_ties",
+            Self::StageReroute => "stage.clearance_reroute",
+            Self::StageGrazeLate => "stage.graze_late",
+            Self::StageJoints => "stage.joints_report",
+            Self::StageSeat => "stage.seat_contact",
+            Self::CountOverhead => "perf.count_overhead",
         }
     }
 
@@ -725,11 +842,26 @@ pub enum Rows {
     TipBatch,
     /// One main brace partner search.
     PartnerSearch,
+    /// One down-sweep pass (M0, 2026-10-14): its layers, wall time, the
+    /// highest layer that differs from the previous pass or run, and the
+    /// highest layer it inserted at.
+    DownPass,
+    /// One layer of one pass: time and the per-loop eligible and written
+    /// cells.
+    DownLayer,
+    /// One layer of one pass that inserted carriers.
+    DownInsert,
+    /// One per-event `down_sweep::run`: its passes and whether its routing
+    /// and member geometry equal the previous run's.
+    DownRun,
+    /// One lip-seat round (one trip round the `'run` loop): sizings, undo
+    /// sizings, moves put back, and whether the round was thrown away.
+    LipRound,
 }
 
 /// The widest row payload.
-pub const ROW_WIDTH: usize = 12;
-const ROWS_N: usize = 4;
+pub const ROW_WIDTH: usize = 16;
+const ROWS_N: usize = 9;
 
 impl Rows {
     /// Every kind.
@@ -738,7 +870,32 @@ impl Rows {
         Self::ClearBatch,
         Self::TipBatch,
         Self::PartnerSearch,
+        Self::DownPass,
+        Self::DownLayer,
+        Self::DownInsert,
+        Self::DownRun,
+        Self::LipRound,
     ];
+
+    /// How many rows of this kind one model may store. Each kind has its own
+    /// allowance, so a kind that fills its own does not drop another's rows
+    /// (M0, 2026-10-14: one shared 1,000,000-row cap dropped 494,947 rows,
+    /// every second-contact `down.reuse` row among them). Rows past the
+    /// allowance are counted per kind and reported, never stored.
+    #[must_use]
+    pub const fn allowance(self) -> usize {
+        match self {
+            Self::DownReuse | Self::TipBatch | Self::PartnerSearch => 200_000,
+            Self::ClearBatch => 4_000_000,
+            Self::DownPass | Self::DownRun | Self::LipRound => 200_000,
+            Self::DownLayer => 2_000_000,
+            Self::DownInsert => 500_000,
+        }
+    }
+
+    const fn index(self) -> usize {
+        self as usize
+    }
 
     /// The sidecar label.
     #[must_use]
@@ -748,6 +905,11 @@ impl Rows {
             Self::ClearBatch => "clear.batch",
             Self::TipBatch => "tip.batch",
             Self::PartnerSearch => "brace.partner_search",
+            Self::DownPass => "down.pass",
+            Self::DownLayer => "down.layer",
+            Self::DownInsert => "down.insert",
+            Self::DownRun => "down.run",
+            Self::LipRound => "lip.round",
         }
     }
 
@@ -769,6 +931,7 @@ impl Rows {
                 "bands_total",
                 "bands_equal",
             ],
+            // `site` is a `ClearSite` code (see `clear_site`).
             Self::ClearBatch => &[
                 "rows",
                 "tris",
@@ -778,6 +941,87 @@ impl Rows {
                 "wall_ns",
                 "row_ns_sum",
                 "row_ns_max",
+                "site",
+            ],
+            // `cmp`: 0 = nothing to compare with (first pass of the first
+            // run in the pose), 1 = the previous pass of this run, 2 = the
+            // last pass of the previous run. `dirty` counts the layers from
+            // the bottom up to and including the highest layer whose state
+            // (load and carriers after the layer) differs from the compared
+            // pass; `layers - dirty` is the prefix above it that a resumed
+            // pass would skip, and `skip_ns` is that prefix's measured time.
+            // `hi_inserted` is the same count for the highest layer that
+            // inserted (0 = none). `members_changed` counts members whose
+            // sized ledger differs from the previous pass's.
+            Self::DownPass => &[
+                "site",
+                "run",
+                "pass_in_run",
+                "pass_id",
+                "layers",
+                "cells",
+                "wall_ns",
+                "cmp",
+                "dirty",
+                "hi_inserted",
+                "inserted",
+                "skip_ns",
+                "members_changed",
+                "members_total",
+            ],
+            // Time in ns; cells are per layer, summed over insertion rounds.
+            // `route_*` is `route_within_cover` (eligible = covered non-root
+            // cells, written = cells whose distance changed); `spread_elig`
+            // = cells with load; `max_elig` = carriers or loaded cells,
+            // `max_written` = cells whose load changed; `fill_elig` = cells
+            // the per-round clears actually change; `copy_*` the end-of-layer
+            // cover and carrier copies (eligible = set before or after,
+            // written = changed).
+            Self::DownLayer => &[
+                "pass_id",
+                "layer",
+                "ns",
+                "route_ns",
+                "loop_ns",
+                "tail_ns",
+                "route_elig",
+                "route_written",
+                "spread_elig",
+                "max_elig",
+                "max_written",
+                "fill_elig",
+                "copy_elig",
+                "copy_written",
+                "route_rounds",
+                "route_relax",
+            ],
+            // `exhausted`: insertion searches at the layer that found
+            // nowhere to put a carrier (`added` is then 0).
+            Self::DownInsert => &["pass_id", "layer", "added", "hosts", "round", "exhausted"],
+            // `route_same` / `geom_same` / `reads_same`: 1 = equal to the
+            // previous run's, 0 = different, 2 = no previous run in this
+            // pose. `route_same` compares where the load goes (the hops),
+            // `reads_same` who read which cell (it names members).
+            Self::DownRun => &[
+                "site",
+                "run",
+                "passes",
+                "wall_ns",
+                "route_same",
+                "geom_same",
+                "inserted",
+                "layers",
+                "reads_same",
+            ],
+            Self::LipRound => &[
+                "round",
+                "passes",
+                "sizings",
+                "undo_sizings",
+                "put_back_moves",
+                "discarded",
+                "wall_ns",
+                "undo_ns",
             ],
             Self::TipBatch => &["rows", "faces", "wall_ns"],
             Self::PartnerSearch => &[
@@ -810,11 +1054,64 @@ struct StageRec {
 }
 
 static POSES: Mutex<Vec<PoseRecord>> = Mutex::new(Vec::new());
-static ROW_STORE: Mutex<Vec<RowRec>> = Mutex::new(Vec::new());
-static ROWS_DROPPED: AtomicU64 = AtomicU64::new(0);
+/// The rows of one model, with one allowance per kind ([`Rows::allowance`]).
+struct RowStore {
+    rows: Vec<RowRec>,
+    /// Rows stored, per kind.
+    stored: [usize; ROWS_N],
+    /// Rows past the kind's allowance, per kind: counted, not stored.
+    dropped: [u64; ROWS_N],
+}
+
+impl RowStore {
+    const fn new() -> Self {
+        Self {
+            rows: Vec::new(),
+            stored: [0; ROWS_N],
+            dropped: [0; ROWS_N],
+        }
+    }
+
+    fn clear(&mut self) {
+        self.rows.clear();
+        self.stored = [0; ROWS_N];
+        self.dropped = [0; ROWS_N];
+    }
+
+    /// Store `rec` unless its kind already holds `allowances[kind]` rows.
+    /// Returns whether it was stored. A full kind never affects another.
+    fn push(&mut self, rec: RowRec, allowances: &[usize; ROWS_N]) -> bool {
+        let kind = rec.kind.index();
+        if self.stored[kind] < allowances[kind] {
+            self.stored[kind] += 1;
+            self.rows.push(rec);
+            true
+        } else {
+            self.dropped[kind] += 1;
+            false
+        }
+    }
+
+    fn dropped_total(&self) -> u64 {
+        self.dropped.iter().sum()
+    }
+}
+
+/// The allowance of every kind, in [`Rows::ALL`] order.
+const fn allowances() -> [usize; ROWS_N] {
+    let mut out = [0; ROWS_N];
+    let mut i = 0;
+    while i < ROWS_N {
+        out[i] = Rows::ALL[i].allowance();
+        i += 1;
+    }
+    out
+}
+
+const ALLOWANCES: [usize; ROWS_N] = allowances();
+
+static ROW_STORE: Mutex<RowStore> = Mutex::new(RowStore::new());
 static STAGES: Mutex<Vec<StageRec>> = Mutex::new(Vec::new());
-/// Row cap per model; rows past it are counted, not stored.
-const ROW_CAP: usize = 1_000_000;
 
 fn my_shard() -> &'static Shard {
     let slot = MY_SHARD.with(|cell| {
@@ -933,9 +1230,10 @@ pub fn begin_model(model: &str) {
             shard.zero();
         }
         lock_clear(&POSES);
-        lock_clear(&ROW_STORE);
+        if let Ok(mut store) = ROW_STORE.lock() {
+            store.clear();
+        }
         lock_clear(&STAGES);
-        ROWS_DROPPED.store(0, Relax);
         PHASE.store(Phase::Load as u8, Relax);
         let now = Instant::now();
         *slot = Some(ModelSlot {
@@ -1255,6 +1553,79 @@ pub fn walk_tris() -> u64 {
     WALK_TRIS.with(|cell| cell.replace(0))
 }
 
+/// The call site of a batched clearance call, as the `site` column of the
+/// `clear.batch` rows (M0). A caller names its site with [`clear_site`]; an
+/// unnamed call reads [`ClearSite::Other`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ClearSite {
+    /// No caller named a site.
+    Other = 0,
+    /// Lip-seat: the standing arms' "before" reading (`StandingReads::read`).
+    LipBefore = 1,
+    /// Lip-seat: the drawn-solid re-read of doubtful members.
+    LipDrawn = 2,
+    /// Lip-seat: the movers' read-ahead batch.
+    LipReadAhead = 3,
+    /// Lip-seat: the followers' batch.
+    LipFollowers = 4,
+    /// The descent's one-row drawn-segment test (`member_clearance`).
+    Descent = 5,
+    /// Head join: the lander / dependant tests.
+    HeadJoin = 6,
+    /// Graze heads.
+    Graze = 7,
+}
+
+impl ClearSite {
+    /// The names, in code order (for the report).
+    pub const NAMES: [&'static str; 8] = [
+        "other",
+        "lip.before",
+        "lip.drawn",
+        "lip.read_ahead",
+        "lip.followers",
+        "descent",
+        "head_join",
+        "graze",
+    ];
+}
+
+thread_local! {
+    /// The site the innermost [`clear_site`] guard on this thread named.
+    static CLEAR_SITE: Cell<u8> = const { Cell::new(0) };
+}
+
+/// Names `site` as the call site of the clearance calls this thread makes
+/// until the guard drops; the previous site comes back then. Inert (one
+/// `Relaxed` load) when counting is off.
+#[inline]
+#[must_use = "the site holds until the guard drops"]
+pub fn clear_site(site: ClearSite) -> ClearSiteGuard {
+    if !ENABLED.load(Relax) {
+        return ClearSiteGuard(None);
+    }
+    ClearSiteGuard(Some(CLEAR_SITE.with(|cell| cell.replace(site as u8))))
+}
+
+/// Restores the previous clearance call site on drop.
+#[must_use = "the site holds until the guard drops"]
+pub struct ClearSiteGuard(Option<u8>);
+
+impl Drop for ClearSiteGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.0.take() {
+            CLEAR_SITE.with(|cell| cell.set(previous));
+        }
+    }
+}
+
+/// The code of the site now named on this thread (for the row).
+#[must_use]
+pub fn current_clear_site() -> u64 {
+    u64::from(CLEAR_SITE.with(Cell::get))
+}
+
 // ------------------------------------------------------- rows and stages
 
 fn lock_clear<T>(store: &Mutex<Vec<T>>) {
@@ -1279,12 +1650,8 @@ pub fn row(kind: Rows, payload: &[u64]) {
         cols,
     };
     if let Ok(mut store) = ROW_STORE.lock() {
-        if store.len() < ROW_CAP {
-            store.push(rec);
-            return;
-        }
+        store.push(rec, &ALLOWANCES);
     }
-    ROWS_DROPPED.fetch_add(1, Relax);
 }
 
 /// Time a named region of a stage; charged when the guard drops. Inert when
@@ -1599,9 +1966,20 @@ fn extras_json() -> String {
         }
     }
     let mut kinds = Vec::new();
+    let mut dropped_total = 0_u64;
+    let mut dropped_kinds = Vec::new();
     if let Ok(store) = ROW_STORE.lock() {
+        dropped_total = store.dropped_total();
         for kind in Rows::ALL {
+            dropped_kinds.push(format!(
+                "{}:{{\"stored\":{},\"allowance\":{},\"dropped\":{}}}",
+                json_string(kind.label()),
+                store.stored[kind.index()],
+                kind.allowance(),
+                store.dropped[kind.index()]
+            ));
             let mut data: Vec<(usize, u64, [u64; ROW_WIDTH])> = store
+                .rows
                 .iter()
                 .filter(|r| r.kind == kind)
                 .map(|r| (r.phase.index(), r.pose, r.cols))
@@ -1635,12 +2013,13 @@ fn extras_json() -> String {
         }
     }
     format!(
-        "\"span_labels\":[{}],\"poses\":[{}],\"stages\":[{}],\"rows\":{{{}}},\"rows_dropped\":{}",
+        "\"span_labels\":[{}],\"poses\":[{}],\"stages\":[{}],\"rows\":{{{}}},\"rows_dropped\":{},\"row_kinds\":{{{}}}",
         labels.join(","),
         poses.join(","),
         stages.join(","),
         kinds.join(","),
-        ROWS_DROPPED.load(Relax)
+        dropped_total,
+        dropped_kinds.join(",")
     )
 }
 
@@ -2015,7 +2394,97 @@ mod tests {
         assert!(text.contains(&want), "{want} not in {text}");
         assert!(text.contains("\"tip.batch\":{\"cols\":[\"phase\",\"pose\",\"rows\",\"faces\",\"wall_ns\"]"), "{text}");
         assert!(text.contains("\"label\":\"test.stage\",\"calls\":1"), "{text}");
+        assert!(text.contains("\"row_kinds\":{"), "{text}");
+        assert!(text.contains("\"tip.batch\":{\"stored\":2,\"allowance\":"), "{text}");
         ENABLED.store(false, Relax);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn blank(kind: Rows) -> RowRec {
+        RowRec {
+            kind,
+            phase: Phase::Other,
+            pose: 0,
+            cols: [0; ROW_WIDTH],
+        }
+    }
+
+    /// One kind at its allowance drops only its own overflow: every other
+    /// kind still stores up to its own allowance (the M0 defect: one shared
+    /// cap let `clear.batch` starve the `down.reuse` rows).
+    #[test]
+    fn a_full_kind_does_not_drop_another_kinds_rows() {
+        let mut caps = [0_usize; ROWS_N];
+        caps[Rows::ClearBatch.index()] = 5;
+        caps[Rows::DownReuse.index()] = 2;
+        caps[Rows::DownLayer.index()] = 7;
+        let mut store = RowStore::new();
+        for _ in 0..20 {
+            store.push(blank(Rows::ClearBatch), &caps);
+        }
+        assert_eq!(store.stored[Rows::ClearBatch.index()], 5);
+        assert_eq!(store.dropped[Rows::ClearBatch.index()], 15);
+        for _ in 0..2 {
+            assert!(store.push(blank(Rows::DownReuse), &caps), "a full clear.batch must not refuse down.reuse");
+        }
+        for _ in 0..7 {
+            assert!(store.push(blank(Rows::DownLayer), &caps));
+        }
+        assert!(!store.push(blank(Rows::DownReuse), &caps), "its own allowance holds");
+        assert!(!store.push(blank(Rows::DownLayer), &caps));
+        assert_eq!(store.dropped[Rows::DownReuse.index()], 1);
+        assert_eq!(store.dropped[Rows::DownLayer.index()], 1);
+        assert_eq!(store.dropped_total(), 17);
+        assert_eq!(store.rows.len(), 5 + 2 + 7);
+        // A kind with allowance zero stores nothing and counts every row.
+        assert!(!store.push(blank(Rows::TipBatch), &caps));
+        assert_eq!(store.dropped[Rows::TipBatch.index()], 1);
+        store.clear();
+        assert_eq!((store.rows.len(), store.dropped_total()), (0, 0));
+        assert_eq!(store.stored, [0; ROWS_N]);
+    }
+
+    /// `Rows::ALL` is in discriminant order (the store indexes by it), every
+    /// kind has at least one payload column inside the row width, and the
+    /// allowances are positive.
+    #[test]
+    fn row_kinds_are_indexed_and_fit_the_row_width() {
+        for (position, kind) in Rows::ALL.iter().enumerate() {
+            assert_eq!(kind.index(), position, "{}", kind.label());
+            assert!(!kind.cols().is_empty() && kind.cols().len() <= ROW_WIDTH, "{}", kind.label());
+            assert!(kind.allowance() > 0, "{}", kind.label());
+            assert_eq!(ALLOWANCES[position], kind.allowance());
+        }
+        let mut labels: Vec<&str> = Rows::ALL.iter().map(|k| k.label()).collect();
+        labels.sort_unstable();
+        let before = labels.len();
+        labels.dedup();
+        assert_eq!(before, labels.len());
+        // The clearance rows carry the site column.
+        assert_eq!(Rows::ClearBatch.cols().last(), Some(&"site"));
+        assert_eq!(ClearSite::NAMES.len(), ClearSite::Graze as usize + 1);
+    }
+
+    #[test]
+    fn a_clear_site_guard_restores_the_previous_site() {
+        let _guard = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = scratch("clear-site");
+        enable(dir.clone(), HOUR);
+        assert_eq!(current_clear_site(), 0);
+        {
+            let _outer = clear_site(ClearSite::LipReadAhead);
+            assert_eq!(current_clear_site(), ClearSite::LipReadAhead as u64);
+            {
+                let _inner = clear_site(ClearSite::Descent);
+                assert_eq!(current_clear_site(), ClearSite::Descent as u64);
+            }
+            assert_eq!(current_clear_site(), ClearSite::LipReadAhead as u64);
+        }
+        assert_eq!(current_clear_site(), 0);
+        ENABLED.store(false, Relax);
+        // Off, the guard names nothing.
+        let _off = clear_site(ClearSite::Graze);
+        assert_eq!(current_clear_site(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
