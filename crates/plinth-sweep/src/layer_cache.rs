@@ -270,6 +270,24 @@ struct CachedLayer {
     /// streamed layer's on first read, as the down-sweep always built it.
     clearance: OnceLock<Vec<f32>>,
     components: Components,
+    /// The cells of `masks.cover` and of `masks.carry`, each in ascending cell
+    /// order (perf lane D2): the ACTIVE CELLS the down-sweep visits instead of
+    /// scanning the whole grid for them. About 4 % of the grid on a model.
+    cover_cells: Vec<u32>,
+    carry_cells: Vec<u32>,
+}
+
+/// The ascending indices of the `true` cells of `mask`, into `out` (sized
+/// exactly).
+fn fill_cells(mask: &[bool], out: &mut Vec<u32>) {
+    out.clear();
+    out.reserve_exact(mask.iter().filter(|filled| **filled).count());
+    out.extend(
+        mask.iter()
+            .enumerate()
+            .filter(|(_, filled)| **filled)
+            .map(|(cell, _)| u32::try_from(cell).unwrap_or(u32::MAX)),
+    );
 }
 
 /// Per-thread scratch for building one layer.
@@ -296,6 +314,8 @@ impl CachedLayer {
         rasterize_into(grid, solids, &mut scratch.raster, &mut self.masks);
         self.cover_any = self.masks.cover.iter().any(|filled| *filled);
         self.carrier_cells = self.masks.carrier_cells();
+        fill_cells(&self.masks.cover, &mut self.cover_cells);
+        fill_cells(&self.masks.carry, &mut self.carry_cells);
         self.clearance.take();
         if self.carrier_cells > 0 {
             self.components
@@ -331,6 +351,7 @@ impl CachedLayer {
         self.masks.cover.capacity()
             + self.masks.carry.capacity()
             + self.components.bytes()
+            + (self.cover_cells.capacity() + self.carry_cells.capacity()) * 4
             + self.clearance.get().map_or(0, |field| field.capacity() * 4)
     }
 }
@@ -338,13 +359,13 @@ impl CachedLayer {
 /// The most bytes one layer of `cells` cells can hold, clearance included.
 ///
 /// Two byte masks, a `f32` clearance field, a `u32` component per carrier cell
-/// (at most every cell) and a `u32` count per union-find node. A node is
-/// created only by a model cell with no model cell to its left or above, and
-/// two such cells are never 4-adjacent, so there are at most `ceil(cells / 2)`
-/// nodes.
+/// (at most every cell), a `u32` count per union-find node and the two `u32`
+/// active-cell lists (at most every cell each). A node is created only by a
+/// model cell with no model cell to its left or above, and two such cells are
+/// never 4-adjacent, so there are at most `ceil(cells / 2)` nodes.
 fn layer_bound(cells: usize) -> u64 {
     let cells = cells as u64;
-    cells * (2 + 4 + 4) + (cells / 2 + 1) * 4
+    cells * (2 + 4 + 4 + 8) + (cells / 2 + 1) * 4
 }
 
 /// What a cache is valid for: the grid and every coordinate of every slice.
@@ -623,6 +644,10 @@ impl<'a> LayerCache<'a> {
             "layer cache: carry of layer {layer} differs from a fresh raster"
         );
         assert!(
+            fresh.cover_cells == cached.cover_cells && fresh.carry_cells == cached.carry_cells,
+            "layer cache: active-cell lists of layer {layer} differ from a fresh raster"
+        );
+        assert!(
             fresh.cover_any == cached.cover_any && fresh.carrier_cells == cached.carrier_cells,
             "layer cache: cover or carrier count of layer {layer} differs from a fresh raster"
         );
@@ -796,6 +821,25 @@ impl LayerReader<'_, '_> {
         }
     }
 
+    /// The ascending cell indices of [`Self::cover_above`]'s `true` cells (the
+    /// active cells of the routing field); empty above the top layer. Needs
+    /// `prepare(layer, true)`.
+    #[must_use]
+    pub fn cover_cells_above(&self, layer: usize) -> &[u32] {
+        if layer + 1 < self.cache.layers.len() {
+            self.get(layer + 1).cover_cells.as_slice()
+        } else {
+            &[]
+        }
+    }
+
+    /// The ascending cell indices of the layer's `carry` mask (its model
+    /// cells).
+    #[must_use]
+    pub fn carry_cells(&self, layer: usize) -> &[u32] {
+        self.get(layer).carry_cells.as_slice()
+    }
+
     /// `clearance_mm` of [`Self::cover_above`]. Needs `prepare(layer, true)`.
     /// A streamed layer's field is built here, on the first read.
     #[must_use]
@@ -923,6 +967,37 @@ mod tests {
         assert!(reader.components(LAYERS / 2).counts.iter().any(|count| *count > 0));
         assert_eq!(reader.components(LAYERS / 2).roots.len(), reader.carrier_cells(LAYERS / 2));
         assert_eq!(cache.streamed_fills(), 0, "a whole cache streams nothing");
+    }
+
+    /// The active-cell lists (perf lane D2) are the ascending `true` cells of
+    /// the masks they stand for, cached or streamed, in either walk direction.
+    #[test]
+    fn the_active_cell_lists_are_the_true_cells_of_the_masks() {
+        let slices = awkward_stack();
+        let grid = grid_for(0.1);
+        for pool in [ample(), BytePool::new(0)] {
+            let cache = LayerCache::build_in(&grid, &slices, &pool);
+            let mut reader = cache.reader();
+            let mut nonempty = 0_usize;
+            for layer in (0..LAYERS).chain((0..LAYERS).rev()) {
+                reader.prepare(layer, true);
+                let cells = |mask: &[bool]| -> Vec<u32> {
+                    mask.iter()
+                        .enumerate()
+                        .filter(|(_, filled)| **filled)
+                        .map(|(cell, _)| u32::try_from(cell).expect("a small grid"))
+                        .collect()
+                };
+                assert_eq!(reader.carry_cells(layer), cells(&reader.masks(layer).carry).as_slice());
+                assert_eq!(reader.cover_cells_above(layer), cells(reader.cover_above(layer)).as_slice());
+                assert!(reader.carry_cells(layer).windows(2).all(|pair| pair[0] < pair[1]));
+                nonempty += usize::from(!reader.cover_cells_above(layer).is_empty());
+            }
+            assert!(nonempty >= LAYERS / 2, "{nonempty} layers had a cover above");
+            // Nothing above the top layer.
+            reader.prepare(LAYERS - 1, true);
+            assert!(reader.cover_cells_above(LAYERS - 1).is_empty());
+        }
     }
 
     #[test]

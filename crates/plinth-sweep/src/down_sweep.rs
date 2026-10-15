@@ -1623,9 +1623,281 @@ fn sweep_pass(
     keep_out: &DrainKeepOut,
     unrooted: &UnrootedColumns,
     triggers: Option<&HashMap<u64, f64>>,
+    log: Option<&mut crate::per_event::RouteLog>,
+    refused: &mut Vec<(u64, u64)>,
+) -> DownSweepOutcome {
+    if !verify_sparse() {
+        return sweep_pass_in(
+            PassMode::Sparse,
+            layers,
+            struts,
+            sizing,
+            insertion,
+            keep_out,
+            unrooted,
+            triggers,
+            log,
+            refused,
+        );
+    }
+    // THE SHADOW CHECK (`PLINTH_SWEEP_VERIFY_SPARSE=1`): the same pass walked
+    // dense on copies of everything the pass writes, then walked sparse for
+    // real; the outcome, the members, the route log and the refusals must
+    // agree by bits.
+    let mut dense_struts = struts.clone();
+    let mut dense_log = log.as_deref().map(|_| crate::per_event::RouteLog::new(layers.slices().len()));
+    let mut dense_refused = refused.clone();
+    let dense = sweep_pass_in(
+        PassMode::Dense,
+        layers,
+        &mut dense_struts,
+        sizing,
+        insertion,
+        keep_out,
+        unrooted,
+        triggers,
+        dense_log.as_mut(),
+        &mut dense_refused,
+    );
+    let log_given = log.is_some();
+    let mut sparse_log = log;
+    let sparse = sweep_pass_in(
+        PassMode::Sparse,
+        layers,
+        struts,
+        sizing,
+        insertion,
+        keep_out,
+        unrooted,
+        triggers,
+        sparse_log.as_deref_mut(),
+        refused,
+    );
+    if let Some(difference) = pass_difference(
+        (&dense, &dense_struts, dense_log.as_ref(), &dense_refused),
+        (&sparse, struts, sparse_log.as_deref(), refused),
+    ) {
+        panic!("sparse sweep pass differs from the dense pass (log given: {log_given}): {difference}");
+    }
+    sparse
+}
+
+/// `PLINTH_SWEEP_VERIFY_SPARSE=1`: every down-sweep pass is also walked dense,
+/// over every cell of every layer, and compared with the sparse walk by bits
+/// (outcome, members, route log, refusals); any difference panics. For gate
+/// runs, not for production. Read once.
+fn verify_sparse() -> bool {
+    static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *VERIFY.get_or_init(|| {
+        std::env::var_os("PLINTH_SWEEP_VERIFY_SPARSE").is_some_and(|value| value == "1")
+    })
+}
+
+/// What one pass leaves, for the comparison of two walks of it.
+type PassResult<'a> = (
+    &'a DownSweepOutcome,
+    &'a [SweepStrut],
+    Option<&'a crate::per_event::RouteLog>,
+    &'a [(u64, u64)],
+);
+
+/// The first difference between two walks of one pass, by bits: the complete
+/// `Debug` of the outcome and of every member (an `f64` prints its shortest
+/// round-trip form, so equal text is equal bits and `-0.0` differs from
+/// `0.0`), the route log by `==`, the refusals by `==`.
+fn pass_difference(a: PassResult<'_>, b: PassResult<'_>) -> Option<String> {
+    if format!("{:?}", a.0) != format!("{:?}", b.0) {
+        return Some("outcome".to_owned());
+    }
+    if a.1.len() != b.1.len() {
+        return Some(format!("member count {} vs {}", a.1.len(), b.1.len()));
+    }
+    for (index, (left, right)) in a.1.iter().zip(b.1).enumerate() {
+        if format!("{left:?}") != format!("{right:?}") {
+            return Some(format!("member {index}"));
+        }
+    }
+    if a.2 != b.2 {
+        return Some("route log".to_owned());
+    }
+    if a.3 != b.3 {
+        return Some("refused triggers".to_owned());
+    }
+    None
+}
+
+/// How a pass walks its cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PassMode {
+    /// Perf lane D2 (2026-10-15): every loop visits only the ACTIVE cells it
+    /// can act on, in ascending cell order (the order the dense walk visits
+    /// them in), and every clear touches only the cells that were set.
+    Sparse,
+    /// The walk as it stood before D2: every loop over every cell, every clear
+    /// a fill. The oracle the sparse walk is checked against.
+    Dense,
+}
+
+/// Cell classes the sabotage tests drop from the sparse walk's active sets
+/// (`cfg(test)`; a constant `false` otherwise), each of which must turn the
+/// sparse-equals-dense test red.
+#[cfg(test)]
+pub(crate) mod sabotage {
+    use std::cell::Cell;
+
+    /// A growing or newly inserted arm's cell is left out of the carrier list.
+    pub const EXTRA_CARRIERS: u8 = 1;
+    /// A tip-root column outside the cover is left out of the routing roots.
+    pub const TIP_CELLS: u8 = 2;
+    /// A handed column's re-entered peel is left out of the spread sources.
+    pub const REENTERED: u8 = 4;
+    /// A cell that holds load without being a carrier is left out of the next
+    /// layer's sources.
+    pub const ARM_CELLS: u8 = 8;
+    /// The last cover cell of every layer is left out of the routing sweeps.
+    pub const COVER_TAIL: u8 = 16;
+    /// The first carrier of every layer is left out of the carrier list.
+    pub const CARRIER_HEAD: u8 = 32;
+
+    thread_local! {
+        static DROPPED: Cell<u8> = const { Cell::new(0) };
+    }
+
+    pub fn set(mask: u8) {
+        DROPPED.with(|dropped| dropped.set(mask));
+    }
+
+    pub fn dropped(class: u8) -> bool {
+        DROPPED.with(|dropped| dropped.get() & class != 0)
+    }
+}
+
+#[cfg(not(test))]
+mod sabotage {
+    pub const EXTRA_CARRIERS: u8 = 0;
+    pub const TIP_CELLS: u8 = 0;
+    pub const REENTERED: u8 = 0;
+    pub const ARM_CELLS: u8 = 0;
+    pub const COVER_TAIL: u8 = 0;
+    pub const CARRIER_HEAD: u8 = 0;
+
+    #[inline(always)]
+    pub const fn dropped(_class: u8) -> bool {
+        false
+    }
+}
+
+/// The union of two ascending, duplicate-free lists of cells, ascending and
+/// duplicate-free, into `out`.
+fn union_into(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
+    out.clear();
+    out.reserve(a.len() + b.len());
+    let (mut i, mut j) = (0_usize, 0_usize);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            core::cmp::Ordering::Less => {
+                out.push(a[i]);
+                i += 1;
+            }
+            core::cmp::Ordering::Greater => {
+                out.push(b[j]);
+                j += 1;
+            }
+            core::cmp::Ordering::Equal => {
+                out.push(a[i]);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    out.extend_from_slice(&a[i..]);
+    out.extend_from_slice(&b[j..]);
+}
+
+/// Ascending and duplicate-free.
+fn sort_dedup(cells: &mut Vec<u32>) {
+    cells.sort_unstable();
+    cells.dedup();
+}
+
+/// A raster cell's load counts as live for the spread loop: anything the dense
+/// loop does not skip (`load <= 0.0`).
+#[inline]
+#[expect(
+    clippy::neg_cmp_op_on_partial_ord,
+    reason = "the exact negation of the dense loop's `load <= 0.0` skip, a NaN included"
+)]
+fn live(load: f64) -> bool {
+    !(load <= 0.0)
+}
+
+/// Cells the loops of a pass visited, by loop (perf lane D2's witness that the
+/// sparse walk fired: compare with `sweep.down.cell_layers`, what the dense
+/// walk visits per loop).
+#[derive(Clone, Copy, Debug, Default)]
+struct PassVisits {
+    /// The routing field: its initialisation and every relax round.
+    route: u64,
+    /// The spread loop's sources.
+    spread: u64,
+    /// The max loop's cells.
+    max: u64,
+    /// Every clear and reset (the load rasters, the per-layer masks, the
+    /// routing field).
+    fill: u64,
+    /// The end-of-layer work: the model-section check, the next layer's
+    /// sources.
+    tail: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The visits of the last pass this thread walked (tests read them).
+    static LAST_VISITS: std::cell::Cell<PassVisits> = const {
+        std::cell::Cell::new(PassVisits { route: 0, spread: 0, max: 0, fill: 0, tail: 0 })
+    };
+}
+
+impl PassVisits {
+    fn add(&mut self, other: &Self) {
+        self.route += other.route;
+        self.spread += other.spread;
+        self.max += other.max;
+        self.fill += other.fill;
+        self.tail += other.tail;
+    }
+
+    fn publish(&self) {
+        #[cfg(test)]
+        LAST_VISITS.with(|last| last.set(*self));
+        crate::perf::add(crate::PerfWork::SweepDownVisitRoute, self.route);
+        crate::perf::add(crate::PerfWork::SweepDownVisitSpread, self.spread);
+        crate::perf::add(crate::PerfWork::SweepDownVisitMax, self.max);
+        crate::perf::add(crate::PerfWork::SweepDownVisitFill, self.fill);
+        crate::perf::add(crate::PerfWork::SweepDownVisitTail, self.tail);
+    }
+}
+
+/// [`sweep_pass`] in the given mode.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the pass reads the grid, the slices, the policies and the keep-out it always read, \
+          plus the trigger table it is driven by and the two records it writes for the per-event \
+          pass; a struct would move the argument list rather than shorten it"
+)]
+fn sweep_pass_in(
+    mode: PassMode,
+    layers: &LayerCache<'_>,
+    struts: &mut Vec<SweepStrut>,
+    sizing: SizingPolicy,
+    insertion: InsertionPolicy,
+    keep_out: &DrainKeepOut,
+    unrooted: &UnrootedColumns,
+    triggers: Option<&HashMap<u64, f64>>,
     mut log: Option<&mut crate::per_event::RouteLog>,
     refused: &mut Vec<(u64, u64)>,
 ) -> DownSweepOutcome {
+    let dense = mode == PassMode::Dense;
     let grid = layers.grid();
     let slices = layers.slices();
     let cells = grid.cells();
@@ -1651,6 +1923,49 @@ fn sweep_pass(
         ..DownSweepOutcome::default()
     };
 
+    // THE ACTIVE CELLS (perf lane D2). The dense walk visits every cell of
+    // the grid in six loops per layer and clears four rasters with fills, while
+    // about 2 % of the cells can be acted on. In sparse mode every loop below
+    // walks an ASCENDING list of the cells it can act on (the order the dense
+    // loop visits them in, which fixes every float sum) and every clear walks
+    // the list of cells that were set. In dense mode `full` stands for every
+    // one of those lists, and every clear is a fill: that mode is the walk
+    // as it stood before the lists, the oracle for them.
+    let full: Vec<u32> = if dense {
+        (0..u32::try_from(cells).unwrap_or(u32::MAX)).collect()
+    } else {
+        Vec::new()
+    };
+    // Cells visited by each loop, over the pass (`sweep.down.visit.*`).
+    let mut visits = PassVisits::default();
+    // The cells of `load_in` that can hold load, ascending (the spread loop's
+    // sources); and, for each load raster, the cells that may be non-zero (what
+    // its clear must reach). The two rasters swap roles with their lists.
+    let mut sources: Vec<u32> = Vec::new();
+    let mut sources_next: Vec<u32> = Vec::new();
+    let mut dirty_in: Vec<u32> = Vec::new();
+    let mut dirty_out: Vec<u32> = Vec::new();
+    // Columns whose held peel re-entered the raster this layer (not yet in
+    // `sources`).
+    let mut reentered: Vec<u32> = Vec::new();
+    // Cells a load was deposited on that are not carriers (misrouted).
+    let mut stray: Vec<u32> = Vec::new();
+    let mut max_cells: Vec<u32> = Vec::new();
+    // Arms' own cells this layer, any kind, growing or fixed: where a landing
+    // can put load whether or not the cell is a carrier.
+    let mut arm_cells: Vec<u32> = Vec::new();
+    // Carrier cells: the model's (the layer's cache list) plus the arms' that
+    // stand outside it, ascending; one list per raster of `carriers` /
+    // `carriers_above`, which swap roles together.
+    let mut carrier_list: Vec<u32> = Vec::new();
+    let mut carrier_list_above: Vec<u32> = Vec::new();
+    let mut carrier_extras: Vec<u32> = Vec::new();
+    let mut extras_sorted: Vec<u32> = Vec::new();
+    // Cells set in the per-layer rasters below, so the next layer clears only
+    // those.
+    let mut continues_cells: Vec<u32> = Vec::new();
+    let mut landing_cells: Vec<u32> = Vec::new();
+    let mut tip_cells: Vec<u32> = Vec::new();
     let mut load_in = vec![0.0_f64; cells];
     let mut load_out = vec![0.0_f64; cells];
     let mut carriers = vec![false; cells];
@@ -1698,7 +2013,9 @@ fn sweep_pass(
     let mut via_tip = vec![false; cells];
     let mut nearest = vec![u32::MAX; cells];
     let mut distance = vec![f32::INFINITY; cells];
-    let mut distance_prev = vec![f32::INFINITY; cells];
+    // The dense walk's convergence snapshot; the sparse walk tracks whether a
+    // round improved anything instead, and needs no copy.
+    let mut distance_prev = vec![f32::INFINITY; if dense { cells } else { 0 }];
     let mut route_anchor = vec![crate::reach::NO_ANCHOR; cells];
     // THE UNROOTED-COLUMN RULE's scratch ([`UnrootedColumns`]). Allocated only
     // when the up-sweep left something unrooted; on every other field the
@@ -1786,10 +2103,51 @@ fn sweep_pass(
             outcome.min_layer_area_mm2 = outcome.min_layer_area_mm2.min(layer_area);
         }
 
-        carriers.copy_from_slice(&masks.carry);
-        continues_above.fill(false);
-        landing_target.fill(u32::MAX);
-        tip_root.fill(u32::MAX);
+        // The active lists this layer reads from the cache: the cells of the
+        // model (`carry`) here, and of the cover above (the routing field's
+        // domain).
+        let carry_cells: &[u32] = if dense { &full } else { reader.carry_cells(layer) };
+        let cover_cells_above: &[u32] = if dense {
+            &full
+        } else {
+            reader.cover_cells_above(layer)
+        };
+        let mut layer_visits = PassVisits::default();
+        if dense {
+            carriers.copy_from_slice(&masks.carry);
+            continues_above.fill(false);
+            landing_target.fill(u32::MAX);
+            tip_root.fill(u32::MAX);
+            layer_visits.fill += 4 * cells as u64;
+        } else {
+            // `carriers` holds the layer two up (the rasters swapped at the
+            // end of the last layer): clear what it set, set this layer's.
+            for &cell in &carrier_list {
+                carriers[cell as usize] = false;
+            }
+            for &cell in carry_cells {
+                carriers[cell as usize] = true;
+            }
+            for &cell in &continues_cells {
+                continues_above[cell as usize] = false;
+            }
+            for &cell in &landing_cells {
+                landing_target[cell as usize] = u32::MAX;
+            }
+            for &cell in &tip_cells {
+                tip_root[cell as usize] = u32::MAX;
+            }
+            layer_visits.fill += (carrier_list.len()
+                + carry_cells.len()
+                + continues_cells.len()
+                + landing_cells.len()
+                + tip_cells.len()) as u64;
+        }
+        carrier_list.clear();
+        carrier_extras.clear();
+        continues_cells.clear();
+        landing_cells.clear();
+        tip_cells.clear();
         for &id in &alive_by_layer[layer] {
             // The arm's cell AT THIS LAYER, not its seat cell: a leaned arm
             // occupies a different column at every layer it crosses, and
@@ -1808,6 +2166,9 @@ fn sweep_pass(
                 continue;
             }
             carriers[cell] = true;
+            if !masks.carry[cell] {
+                carrier_extras.push(cell as u32);
+            }
             // A LEANED ARM IS ONE MEMBER, NOT A NEW ONE PER COLUMN, AND THE
             // INJECTION GATE HAS TO KNOW IT. The gate below counts an event
             // only where the column did not carry one layer up, which is what
@@ -1826,6 +2187,7 @@ fn sweep_pass(
             let above = struts[id as usize].cell_at(layer + 1);
             if carriers_above[above] {
                 continues_above[cell] = true;
+                continues_cells.push(cell as u32);
             }
             // AND THE SAME CELL IS WHERE THIS ARM HOLDS SOMETHING UP. The
             // material at `above` on layer k+1 rests on this arm's own axis,
@@ -1834,6 +2196,7 @@ fn sweep_pass(
             // arm wins, in `alive_by_layer` order, which is arm id order.
             if sizing.tip_column_roots && above != cell && tip_root[above] == u32::MAX {
                 tip_root[above] = u32::try_from(cell).unwrap_or(u32::MAX);
+                tip_cells.push(above as u32);
                 outcome.tip_column_roots_offered += 1;
             }
             // What a growing arm lands ON if its column meets this one. Only
@@ -1841,6 +2204,7 @@ fn sweep_pass(
             // arm can never be one, because an insertion candidate must not be
             // a carrier and a growing arm's cell always is.
             landing_target[cell] = id;
+            landing_cells.push(cell as u32);
         }
         // Every arm still growing steps down one layer before this layer is
         // read. Straight down is the whole of the step today; the path exists
@@ -1852,7 +2216,11 @@ fn sweep_pass(
                 .push(u32::try_from(next).unwrap_or(u32::MAX));
         }
         for &index in &growing {
-            carriers[growing_cell(&struts[index])] = true;
+            let cell = growing_cell(&struts[index]);
+            carriers[cell] = true;
+            if !masks.carry[cell] {
+                carrier_extras.push(cell as u32);
+            }
         }
         // THE UNROOTED-COLUMN RULE: which model columns at this layer are not
         // routing roots. A column the up-sweep left unrooted here, holding no
@@ -1939,9 +2307,52 @@ fn sweep_pass(
             }
             {
                 let _fill_span = crate::perf::span(crate::perf::Span::PassDense);
-                load_out.iter_mut().for_each(|value| *value = 0.0);
-                peel_fed.fill(false);
+                if dense {
+                    load_out.iter_mut().for_each(|value| *value = 0.0);
+                    peel_fed.fill(false);
+                    layer_visits.fill += 2 * cells as u64;
+                } else if round == 0 {
+                    // `load_out` holds the raster two layers up and
+                    // `peel_fed` the flags the last layer's max loop set (its
+                    // carriers).
+                    for &cell in &dirty_out {
+                        load_out[cell as usize] = 0.0;
+                    }
+                    for &cell in &carrier_list_above {
+                        peel_fed[cell as usize] = false;
+                    }
+                    layer_visits.fill += (dirty_out.len() + carrier_list_above.len()) as u64;
+                    dirty_out.clear();
+                } else {
+                    // What the last round deposited on and flagged: its
+                    // carriers (the strays were zeroed by the max loop).
+                    for &cell in &carrier_list {
+                        load_out[cell as usize] = 0.0;
+                        peel_fed[cell as usize] = false;
+                    }
+                    layer_visits.fill += 2 * carrier_list.len() as u64;
+                }
             }
+            // THIS ROUND'S CARRIER LIST: the layer's model cells and the arms'
+            // cells that stand outside them, ascending.
+            if !dense {
+                extras_sorted.clear();
+                extras_sorted.extend(
+                    carrier_extras
+                        .iter()
+                        .copied()
+                        .filter(|&cell| !masks.carry[cell as usize]),
+                );
+                sort_dedup(&mut extras_sorted);
+                if sabotage::dropped(sabotage::EXTRA_CARRIERS) {
+                    extras_sorted.clear();
+                }
+                union_into(carry_cells, &extras_sorted, &mut carrier_list);
+                if sabotage::dropped(sabotage::CARRIER_HEAD) && !carrier_list.is_empty() {
+                    carrier_list.remove(0);
+                }
+            }
+            stray.clear();
             incoming = 0.0;
             placed = 0.0;
             lost = 0.0;
@@ -1960,8 +2371,15 @@ fn sweep_pass(
             // round can add carriers (the insertion below), so this is
             // rebuilt per round; it is the carrier raster itself wherever the
             // rule has nothing to refuse.
-            let offered: &[bool] = if rule_active && !unrooted_here.is_empty() {
-                roots.copy_from_slice(&carriers);
+            let roots_used = rule_active && !unrooted_here.is_empty();
+            let offered: &[bool] = if roots_used {
+                if dense {
+                    roots.copy_from_slice(&carriers);
+                } else {
+                    for &cell in &carrier_list {
+                        roots[cell as usize] = carriers[cell as usize];
+                    }
+                }
                 for &cell in unrooted_here {
                     let cell = cell as usize;
                     sent_sideways[cell] = false;
@@ -1981,6 +2399,15 @@ fn sweep_pass(
                 cover_above,
                 offered,
                 &tip_root,
+                RouteActive {
+                    cover_cells: cover_cells_above,
+                    tip_cells: if sabotage::dropped(sabotage::TIP_CELLS) {
+                        &[]
+                    } else {
+                        &tip_cells
+                    },
+                    dense,
+                },
                 if sizing.straight_reach {
                     (sizing.lamina_reach_mm + grid.pitch_mm()) as f32
                 } else {
@@ -1996,6 +2423,13 @@ fn sweep_pass(
                 },
             );
             drop(route_span);
+            if roots_used && !dense {
+                // The roots copy is scratch: leave it all false again.
+                for &cell in &carrier_list {
+                    roots[cell as usize] = false;
+                }
+            }
+            layer_visits.route += route.visited;
             if let (Some(t), Some(started)) = (trace.as_mut(), route_started) {
                 // The counting inside the call is not route time.
                 let elapsed = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
@@ -2052,8 +2486,18 @@ fn sweep_pass(
                         reentered_here += own_peel - load_in[cell];
                         reentered_reads += 1;
                         load_in[cell] = own_peel;
+                        reentered.push(cell as u32);
                     }
                 }
+            }
+            // A re-entered column may have held nothing: it is a source now.
+            if !reentered.is_empty() {
+                if !dense && !sabotage::dropped(sabotage::REENTERED) {
+                    sort_dedup(&mut reentered);
+                    union_into(&sources, &reentered, &mut sources_next);
+                    core::mem::swap(&mut sources, &mut sources_next);
+                }
+                reentered.clear();
             }
             if let Some(t) = trace.as_mut() {
                 // The cells the spread loop acts on: those holding load.
@@ -2063,7 +2507,10 @@ fn sweep_pass(
             }
             let loop_started = trace.is_some().then(std::time::Instant::now);
             let dense_span = crate::perf::span(crate::perf::Span::PassDense);
-            for cell in 0..cells {
+            let spread_cells: &[u32] = if dense { &full } else { &sources };
+            layer_visits.spread += spread_cells.len() as u64;
+            for &cell in spread_cells {
+                let cell = cell as usize;
                 let load = load_in[cell];
                 if load <= 0.0 {
                     continue;
@@ -2085,6 +2532,9 @@ fn sweep_pass(
                         unrooted_kept += load;
                         load_out[cell] += load;
                         placed += load;
+                        if !carriers[cell] {
+                            stray.push(cell as u32);
+                        }
                         continue;
                     }
                     sent_sideways[cell] = true;
@@ -2103,6 +2553,9 @@ fn sweep_pass(
                     let accumulated = area;
                     let weight = area / accumulated;
                     load_out[target as usize] += load * weight;
+                    if !carriers[target as usize] {
+                        stray.push(target);
+                    }
                     placed += load * weight;
                     if via_tip[cell] {
                         // The root this load found is a leaned arm's own axis
@@ -2176,7 +2629,20 @@ fn sweep_pass(
             }
             let max_before: Option<Vec<f64>> = trace.as_mut().map(|t| t.counting(|_| load_out.clone()));
             let max_started = trace.is_some().then(std::time::Instant::now);
-            for cell in 0..cells {
+            // The cells the max loop acts on: every carrier, and any other
+            // cell the spread put load on (it is zeroed and counted lost).
+            let max_list: &[u32] = if dense {
+                &full
+            } else if stray.is_empty() {
+                &carrier_list
+            } else {
+                sort_dedup(&mut stray);
+                union_into(&carrier_list, &stray, &mut max_cells);
+                &max_cells
+            };
+            layer_visits.max += max_list.len() as u64;
+            for &cell in max_list {
+                let cell = cell as usize;
                 if carriers[cell] {
                     let injects = !carriers_above[cell] && !continues_above[cell];
                     if rule_active && sizing.handed_column_ledger && !injects {
@@ -2307,6 +2773,7 @@ fn sweep_pass(
                 cover_above,
                 &mut carriers,
                 &load_in,
+                spread_cells,
                 &nearest,
                 &distance,
                 l_max,
@@ -2337,6 +2804,11 @@ fn sweep_pass(
                 );
                 break;
             }
+            // The arms just placed stand in cells that were not carriers: they
+            // are in the next round's carrier list.
+            for &index in growing.iter().rev().take(added as usize) {
+                carrier_extras.push(growing_cell(&struts[index]) as u32);
+            }
             outcome.arms_inserted_by_load += added;
             outcome.inserted_by.append(&mut insert.placed_by);
             if let Some(t) = trace.as_mut() {
@@ -2346,6 +2818,18 @@ fn sweep_pass(
             }
             inserted_here = triggers.is_some();
             round += 1;
+        }
+        if !dense {
+            // The routing field is scratch across layers: leave the cells it
+            // set at their defaults for the next layer's call.
+            for &cell in cover_cells_above.iter().chain(&tip_cells) {
+                let cell = cell as usize;
+                distance[cell] = f32::INFINITY;
+                nearest[cell] = u32::MAX;
+                via_tip[cell] = false;
+                route_anchor[cell] = crate::reach::NO_ANCHOR;
+            }
+            layer_visits.fill += (cover_cells_above.len() + tip_cells.len()) as u64;
         }
         if !route_converged {
             outcome.route_not_converged += 1;
@@ -2387,6 +2871,7 @@ fn sweep_pass(
         // `k_bottom`-upward layout every other reader expects the moment it
         // lands.
         layer_arms.clear();
+        arm_cells.clear();
         for &index in growing.iter().rev() {
             let strut = &struts[index];
             let cell = growing_cell(strut);
@@ -2521,6 +3006,9 @@ fn sweep_pass(
                 } else {
                     struts[index].cell_at(layer)
                 };
+                // The cell this member reads or lands in: load may sit there
+                // at the end of the layer, carrier or not.
+                arm_cells.push(cell as u32);
                 // TWO DIFFERENT QUANTITIES, AND FOLDING THEM TOGETHER WAS A
                 // DEFECT. `own` is what this layer's own peel event routes to
                 // this arm's cell -- one of a sequence of events the arm must
@@ -2783,6 +3271,7 @@ fn sweep_pass(
             check_model_sections(
                 grid,
                 &masks.carry,
+                carry_cells,
                 reader.components(layer),
                 &load_out,
                 layer,
@@ -2791,8 +3280,32 @@ fn sweep_pass(
                 &mut outcome.model_overload,
                 &mut outcome.model_section_max_x,
             );
+            layer_visits.tail += carry_cells.len() as u64;
         }
 
+        if !dense {
+            // WHERE THIS LAYER LEFT LOAD, for the next one: every carrier and
+            // every cell an arm reads or lands in. Nothing else holds load
+            // (the max loop zeroed the rest). `dirty_out` is empty here (the
+            // first round's clear emptied it); it becomes the list its raster
+            // is cleared by once the rasters swap, and the live cells of it
+            // the next layer's spread sources.
+            sort_dedup(&mut arm_cells);
+            if sabotage::dropped(sabotage::ARM_CELLS) {
+                arm_cells.retain(|&cell| carriers[cell as usize]);
+            }
+            union_into(&carrier_list, &arm_cells, &mut dirty_out);
+            sources_next.clear();
+            sources_next.extend(
+                dirty_out
+                    .iter()
+                    .copied()
+                    .filter(|&cell| live(load_out[cell as usize])),
+            );
+            layer_visits.tail += dirty_out.len() as u64;
+            core::mem::swap(&mut dirty_in, &mut dirty_out);
+            core::mem::swap(&mut sources, &mut sources_next);
+        }
         std::mem::swap(&mut load_in, &mut load_out);
         // The end-of-layer copies' cells (write-only measurement): eligible =
         // set before or after, written = changed.
@@ -2818,6 +3331,7 @@ fn sweep_pass(
         // other.
         let copy_started = trace.is_some().then(std::time::Instant::now);
         std::mem::swap(&mut carriers_above, &mut carriers);
+        core::mem::swap(&mut carrier_list_above, &mut carrier_list);
         drop(end_span);
         if let (Some(t), Some(started), Some((eligible, written))) =
             (trace.as_mut(), copy_started, copy_cells)
@@ -2843,17 +3357,30 @@ fn sweep_pass(
             }
             growing_marked.clear();
         }
+        visits.add(&layer_visits);
         if let Some(t) = trace.as_mut() {
+            t.cur.route_visit = layer_visits.route;
+            t.cur.spread_visit = layer_visits.spread;
+            t.cur.max_visit = layer_visits.max;
+            t.cur.fill_visit = layer_visits.fill;
+            t.cur.tail_visit = layer_visits.tail;
             t.layer_end(layer);
         }
     }
     if let Some(t) = trace.take() {
         t.finish();
     }
+    visits.publish();
 
     // Anything still in the raster at the bottom of the stack reached the
-    // plate through model material rather than through an arm.
-    outcome.plate_reaction_mm2 += load_in.iter().sum::<f64>();
+    // plate through model material rather than through an arm. In sparse mode
+    // the cells that can hold load are the live ones of `sources`; the cells
+    // left out hold zero, which adds nothing to the sum.
+    outcome.plate_reaction_mm2 += if dense {
+        load_in.iter().sum::<f64>()
+    } else {
+        sources.iter().map(|&cell| load_in[cell as usize]).sum::<f64>()
+    };
     if !outcome.min_layer_area_mm2.is_finite() {
         outcome.min_layer_area_mm2 = 0.0;
     }
@@ -2988,6 +3515,7 @@ fn insert_for_load(
     cover_above: &[bool],
     carriers: &mut [bool],
     load_in: &[f64],
+    load_cells: &[u32],
     nearest: &[u32],
     distance: &[f32],
     l_max: f64,
@@ -3016,7 +3544,11 @@ fn insert_for_load(
     if !any_overloaded {
         return 0;
     }
-    for cell in 0..grid.cells() {
+    // Only a cell holding load can be in a footprint: `load_cells` lists every
+    // such cell, ascending, so the footprints fill in the order the whole-grid
+    // scan filled them.
+    for &cell in load_cells {
+        let cell = cell as usize;
         if load_in[cell] <= 0.0 || carriers[cell] || !cover_above[cell] || cover_here[cell] {
             continue;
         }
@@ -3237,6 +3769,7 @@ fn route_within_cover(
     cover_above: &[bool],
     carriers: &[bool],
     tip_root: &[u32],
+    active: RouteActive<'_>,
     limit_mm: f32,
     fields: RouteFields<'_>,
 ) -> RouteOutcome {
@@ -3253,7 +3786,14 @@ fn route_within_cover(
     let pitch = grid.pitch_mm() as f32;
     let mut sight = crate::reach::Sightlines::default();
     let mut any_root = false;
-    for cell in 0..grid.cells() {
+    // One cell of the initialisation. The fields hold their defaults
+    // everywhere the caller has not set them (the sparse caller resets what it
+    // set after every layer; the dense walk re-initialises every cell here).
+    let mut init = |cell: usize,
+                    distance: &mut [f32],
+                    nearest: &mut [u32],
+                    via_tip: &mut [bool],
+                    anchor: &mut [u32]| {
         via_tip[cell] = false;
         anchor[cell] = crate::reach::NO_ANCHOR;
         if cover_above[cell] && carriers[cell] {
@@ -3276,7 +3816,28 @@ fn route_within_cover(
             distance[cell] = f32::INFINITY;
             nearest[cell] = u32::MAX;
         }
+    };
+    // THE CELLS THE FIELD CAN BE SET ON: a root is a covered carrier or a tip
+    // column, and a relaxed cell is covered. Every other cell keeps its
+    // default, so the sparse walk initialises these and nothing else.
+    let mut visited: u64;
+    if active.dense {
+        for cell in 0..grid.cells() {
+            init(cell, distance, nearest, via_tip, anchor);
+        }
+        visited = grid.cells() as u64;
+    } else {
+        for &cell in active.cover_cells.iter().chain(active.tip_cells) {
+            init(cell as usize, distance, nearest, via_tip, anchor);
+        }
+        visited = (active.cover_cells.len() + active.tip_cells.len()) as u64;
     }
+    // The covered cells the relax rounds walk, ascending.
+    let covered: &[u32] = if sabotage::dropped(sabotage::COVER_TAIL) && !active.cover_cells.is_empty() {
+        &active.cover_cells[..active.cover_cells.len() - 1]
+    } else {
+        active.cover_cells
+    };
     if !any_root {
         return RouteOutcome {
             any_root: false,
@@ -3287,12 +3848,17 @@ fn route_within_cover(
             counting_ns: 0,
             rounds: 0,
             relax_calls: 0,
+            visited,
         };
     }
     // Nothing to route where every covered cell is already a root, and a
     // root can never be improved on: the passes would change nothing, so they
     // are not run, and the clearance they would read is not built.
-    if !(0..grid.cells()).any(|cell| cover_above[cell] && distance[cell] > 0.0) {
+    visited += covered.len() as u64;
+    if !covered
+        .iter()
+        .any(|&cell| cover_above[cell as usize] && distance[cell as usize] > 0.0)
+    {
         return RouteOutcome {
             any_root: true,
             converged: true,
@@ -3302,6 +3868,7 @@ fn route_within_cover(
             counting_ns: 0,
             rounds: 0,
             relax_calls: 0,
+            visited,
         };
     }
     // Write-only measurement (M0): the cells the relax rounds can change, and
@@ -3324,12 +3891,16 @@ fn route_within_cover(
     // Write-only measurement (M0): relax calls and sweep rounds.
     let mut relax_calls = 0_u64;
     let mut rounds_run = 0_u64;
+    // Whether the call improved the cell's distance (a write is always a
+    // strict decrease: `any_angle_relax` answers only a price below the
+    // cell's current one).
     let mut relax = |cell: usize,
                      from: usize,
                      distance: &mut [f32],
                      nearest: &mut [u32],
                      via_tip: &mut [bool],
-                     anchor: &mut [u32]| {
+                     anchor: &mut [u32]|
+     -> bool {
         relax_calls += 1;
         if let Some((value, origin, source)) = crate::reach::any_angle_relax(
             cols,
@@ -3351,64 +3922,81 @@ fn route_within_cover(
             // tip-column root through the cover is counted as such and not only
             // the cell that sits directly on the arm.
             via_tip[cell] = via_tip[source];
+            true
+        } else {
+            false
         }
     };
     const MAX_SWEEP_ROUNDS: usize = 8;
     let mut converged = false;
-    previous.copy_from_slice(distance);
+    if active.dense {
+        previous.copy_from_slice(distance);
+    }
     for _ in 0..MAX_SWEEP_ROUNDS {
         rounds_run += 1;
-        for row in 0..rows {
-            for col in 0..cols {
-                let cell = row * cols + col;
-                // A root (distance 0) cannot be improved on.
-                if !cover_above[cell] || distance[cell] == 0.0 {
-                    continue;
+        visited += 2 * covered.len() as u64;
+        // The round's improvements: the sparse walk's stand-in for comparing
+        // the field with a snapshot of itself. Exact, because every write is a
+        // strict decrease: a cell that was written differs from its value at
+        // the start of the round, and a cell that was not is equal to it.
+        let mut improved = false;
+        // Forward: ascending cell order, which is the dense walk's row-major
+        // order; only covered cells do anything.
+        for &cell in covered {
+            let cell = cell as usize;
+            // A root (distance 0) cannot be improved on.
+            if !cover_above[cell] || distance[cell] == 0.0 {
+                continue;
+            }
+            let (row, col) = (cell / cols, cell % cols);
+            if col > 0 && cover_above[cell - 1] {
+                improved |= relax(cell, cell - 1, distance, nearest, via_tip, anchor);
+            }
+            if row > 0 {
+                if cover_above[cell - cols] {
+                    improved |= relax(cell, cell - cols, distance, nearest, via_tip, anchor);
                 }
-                if col > 0 && cover_above[cell - 1] {
-                    relax(cell, cell - 1, distance, nearest, via_tip, anchor);
+                if col > 0 && cover_above[cell - cols - 1] {
+                    improved |= relax(cell, cell - cols - 1, distance, nearest, via_tip, anchor);
                 }
-                if row > 0 {
-                    if cover_above[cell - cols] {
-                        relax(cell, cell - cols, distance, nearest, via_tip, anchor);
-                    }
-                    if col > 0 && cover_above[cell - cols - 1] {
-                        relax(cell, cell - cols - 1, distance, nearest, via_tip, anchor);
-                    }
-                    if col + 1 < cols && cover_above[cell - cols + 1] {
-                        relax(cell, cell - cols + 1, distance, nearest, via_tip, anchor);
-                    }
+                if col + 1 < cols && cover_above[cell - cols + 1] {
+                    improved |= relax(cell, cell - cols + 1, distance, nearest, via_tip, anchor);
                 }
             }
         }
-        for row in (0..rows).rev() {
-            for col in (0..cols).rev() {
-                let cell = row * cols + col;
-                // A root (distance 0) cannot be improved on.
-                if !cover_above[cell] || distance[cell] == 0.0 {
-                    continue;
+        for &cell in covered.iter().rev() {
+            let cell = cell as usize;
+            // A root (distance 0) cannot be improved on.
+            if !cover_above[cell] || distance[cell] == 0.0 {
+                continue;
+            }
+            let (row, col) = (cell / cols, cell % cols);
+            if col + 1 < cols && cover_above[cell + 1] {
+                improved |= relax(cell, cell + 1, distance, nearest, via_tip, anchor);
+            }
+            if row + 1 < rows {
+                if cover_above[cell + cols] {
+                    improved |= relax(cell, cell + cols, distance, nearest, via_tip, anchor);
                 }
-                if col + 1 < cols && cover_above[cell + 1] {
-                    relax(cell, cell + 1, distance, nearest, via_tip, anchor);
+                if col + 1 < cols && cover_above[cell + cols + 1] {
+                    improved |= relax(cell, cell + cols + 1, distance, nearest, via_tip, anchor);
                 }
-                if row + 1 < rows {
-                    if cover_above[cell + cols] {
-                        relax(cell, cell + cols, distance, nearest, via_tip, anchor);
-                    }
-                    if col + 1 < cols && cover_above[cell + cols + 1] {
-                        relax(cell, cell + cols + 1, distance, nearest, via_tip, anchor);
-                    }
-                    if col > 0 && cover_above[cell + cols - 1] {
-                        relax(cell, cell + cols - 1, distance, nearest, via_tip, anchor);
-                    }
+                if col > 0 && cover_above[cell + cols - 1] {
+                    improved |= relax(cell, cell + cols - 1, distance, nearest, via_tip, anchor);
                 }
             }
         }
-        if previous[..] == distance[..] {
+        if active.dense {
+            // The walk as it stood: compare the whole field with a snapshot.
+            if previous[..] == distance[..] {
+                converged = true;
+                break;
+            }
+            previous.copy_from_slice(distance);
+        } else if !improved {
             converged = true;
             break;
         }
-        previous.copy_from_slice(distance);
     }
     let (eligible, written) = measured.map_or((0, 0), |(eligible, initial)| {
         let _count_span = crate::perf::span(crate::perf::Span::CountOverhead);
@@ -3430,6 +4018,7 @@ fn route_within_cover(
         counting_ns,
         rounds: rounds_run,
         relax_calls,
+        visited,
     }
 }
 
@@ -3479,7 +4068,22 @@ struct RouteOutcome {
     /// adds beside the work each one stands for).
     rounds: u64,
     relax_calls: u64,
+    /// Cells the field's initialisation and relax rounds visited.
+    visited: u64,
 }
+
+/// The cells one routing call can act on (perf lane D2).
+#[derive(Clone, Copy)]
+struct RouteActive<'a> {
+    /// The ascending cells of `cover_above`.
+    cover_cells: &'a [u32],
+    /// The cells holding a tip-column root; they may lie outside the cover.
+    tip_cells: &'a [u32],
+    /// `cover_cells` lists every cell of the grid and `previous` holds the
+    /// whole field: the walk as it stood before the lists.
+    dense: bool,
+}
+
 /// Per connected component of MODEL material, `X_model = Σ L / component area`.
 ///
 /// **The model's own material is never sized.** The engine supports models; it
@@ -3494,6 +4098,7 @@ struct RouteOutcome {
 fn check_model_sections(
     grid: &Grid,
     model: &[bool],
+    cells: &[u32],
     components: &Components,
     load: &[f64],
     layer: usize,
@@ -3502,6 +4107,8 @@ fn check_model_sections(
     out: &mut Vec<ModelSectionOverload>,
     max_x: &mut f64,
 ) {
+    // `cells` lists the model cells (every cell of the grid, where the caller
+    // walks dense), ascending.
     // The components, their numbering and their cell counts are the layer
     // cache's (a function of the model mask alone): `roots` lists the
     // component of each model cell in ascending cell order, which is the order
@@ -3518,7 +4125,11 @@ fn check_model_sections(
         "one root per model cell"
     );
     let mut roots = components.roots.iter();
-    for (cell, _) in model.iter().enumerate().filter(|(_, filled)| **filled) {
+    for &cell in cells {
+        let cell = cell as usize;
+        if !model[cell] {
+            continue;
+        }
         let &root = roots.next().expect("one root per model cell");
         loads[root as usize] += load[cell];
     }
@@ -3673,7 +4284,18 @@ mod cached_components_tests {
                 oracle(&grid, &model, &load, 7, 0.5, &mut want, &mut want_max);
                 let (mut got, mut got_max) = (Vec::new(), 0.0_f64);
                 let mut scratch = Vec::new();
-                check_model_sections(&grid, &model, &components, &load, 7, 0.5, &mut scratch, &mut got, &mut got_max);
+                // Both walks of the model cells: all of them, and the listed ones.
+                let all: Vec<u32> = (0..grid.cells() as u32).collect();
+                let listed: Vec<u32> = (0..grid.cells() as u32).filter(|&c| model[c as usize]).collect();
+                let (mut listed_got, mut listed_max) = (Vec::new(), 0.0_f64);
+                check_model_sections(&grid, &model, &listed, &components, &load, 7, 0.5, &mut scratch, &mut listed_got, &mut listed_max);
+                assert_eq!(listed_got.len(), want.len(), "listed overload count");
+                for (a, b) in want.iter().zip(&listed_got) {
+                    assert_eq!(a.carried_mm2.to_bits(), b.carried_mm2.to_bits());
+                    assert_eq!(a.realized_x.to_bits(), b.realized_x.to_bits());
+                }
+                assert_eq!(want_max.to_bits(), listed_max.to_bits(), "listed max X");
+                check_model_sections(&grid, &model, &all, &components, &load, 7, 0.5, &mut scratch, &mut got, &mut got_max);
                 assert_eq!(want.len(), got.len(), "overload count");
                 for (a, b) in want.iter().zip(&got) {
                     assert_eq!(a.layer, b.layer);
@@ -3701,7 +4323,8 @@ mod cached_components_tests {
         assert!(components.counts.is_empty() && components.roots.is_empty());
         let (mut out, mut max_x) = (Vec::new(), 0.0_f64);
         let mut scratch = Vec::new();
-        check_model_sections(&grid, &model, &components, &vec![1.0; grid.cells()], 0, 0.1, &mut scratch, &mut out, &mut max_x);
+        let all: Vec<u32> = (0..grid.cells() as u32).collect();
+        check_model_sections(&grid, &model, &all, &components, &vec![1.0; grid.cells()], 0, 0.1, &mut scratch, &mut out, &mut max_x);
         assert!(out.is_empty());
         assert_eq!(max_x.to_bits(), 0.0_f64.to_bits());
     }
@@ -3785,6 +4408,813 @@ mod merge_load_tests {
             (0.0, 3.0, 90.0),
         ] {
             assert!(combine_carried(previous, own, merged) >= previous);
+        }
+    }
+}
+
+#[cfg(test)]
+mod sparse_walk_tests {
+    //! **The sparse walk equals the dense walk** (perf lane D2, 2026-10-15).
+    //!
+    //! `sweep_pass_in` walks a pass in two modes. DENSE is the pass as it stood
+    //! before the active-cell lists: every loop over every cell, every clear a
+    //! fill, the routing field converged against a snapshot of itself. SPARSE
+    //! visits only the cells each loop can act on and tracks the cells it
+    //! sets. The two must agree BY BITS on everything a pass leaves: the whole
+    //! outcome, every member (the complete `Debug`: an `f64` prints its
+    //! shortest round-trip form, so equal text is equal bits and `-0.0`
+    //! differs from `0.0`), the route log, the refused triggers.
+    //!
+    //! The fixtures are scenes of convex prisms (rotated rectangles, so
+    //! diagonals and corridors), arms straight and leaned, braces, columns the
+    //! up-sweep left unrooted, and three ways to drive insertion. 200 are
+    //! seeded at random; five are named. Each class of active cell has a
+    //! SABOTAGE: drop it from the sparse walk and the comparison must go red.
+
+    use std::collections::HashMap;
+
+    use plinth_mesh::Mesh;
+    use plinth_support::perception::{slice_stack, SliceSolid, SliceStackLimits};
+
+    use super::{
+        pass_difference, sabotage, sweep_pass_in, DownSweepOutcome, DrainKeepOut, InsertionPolicy,
+        PassMode, SizingPolicy, UnrootedColumns,
+    };
+    use crate::grid::{lay_out_at, Grid};
+    use crate::layer_cache::LayerCache;
+    use crate::per_event::{entry, RouteLog};
+    use crate::{Landing, SeatFace, StrutKind, SweepStrut};
+
+    const H: f64 = 0.05;
+    const PITCH: f64 = 0.1;
+    const SIDE: usize = 84;
+    const ORIGIN: f64 = -4.2;
+    const LAYERS: usize = 30;
+
+    /// xorshift64*: deterministic scenes, no dependency.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn unit(&mut self) -> f64 {
+            (self.next() >> 11) as f64 / (1_u64 << 53) as f64
+        }
+
+        fn range(&mut self, lo: f64, hi: f64) -> f64 {
+            lo + (hi - lo) * self.unit()
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    fn grid() -> Grid {
+        lay_out_at(ORIGIN, ORIGIN, PITCH, SIDE, SIDE)
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a coordinate inside the fixture grid"
+    )]
+    fn cell_at(x: f64, y: f64) -> usize {
+        let (col, row) = (((x - ORIGIN) / PITCH) as usize, ((y - ORIGIN) / PITCH) as usize);
+        grid().index(row.min(SIDE - 1), col.min(SIDE - 1))
+    }
+
+    /// A convex prism over a counter-clockwise polygon, outward-wound.
+    fn prism(poly: &[[f64; 2]], z0: f64, z1: f64) -> Mesh {
+        let n = poly.len();
+        let mut verts: Vec<[f64; 3]> = poly.iter().map(|p| [p[0], p[1], z0]).collect();
+        verts.extend(poly.iter().map(|p| [p[0], p[1], z1]));
+        let mut tris: Vec<[u32; 3]> = Vec::new();
+        for i in 1..n - 1 {
+            tris.push([0, (i + 1) as u32, i as u32]);
+            tris.push([n as u32, (n + i) as u32, (n + i + 1) as u32]);
+        }
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let (bi, bj, ti, tj) = (i as u32, j as u32, (n + i) as u32, (n + j) as u32);
+            tris.push([bi, bj, tj]);
+            tris.push([bi, tj, ti]);
+        }
+        Mesh::new(verts, tris).expect("a closed convex prism")
+    }
+
+    fn rectangle(cx: f64, cy: f64, half_a: f64, half_b: f64, angle: f64) -> Vec<[f64; 2]> {
+        let (s, c) = angle.sin_cos();
+        [[-half_a, -half_b], [half_a, -half_b], [half_a, half_b], [-half_a, half_b]]
+            .iter()
+            .map(|p| [cx + p[0] * c - p[1] * s, cy + p[0] * s + p[1] * c])
+            .collect()
+    }
+
+    /// One scene: what the pass reads.
+    struct Scene {
+        slices: Vec<Vec<SliceSolid>>,
+        struts: Vec<SweepStrut>,
+        unrooted: UnrootedColumns,
+        sizing: SizingPolicy,
+        /// 0: per-event with a table of hosts; 1: max-field insertion
+        /// (`triggers = None`); 2: per-event with an empty table.
+        drive: u8,
+        insertion_on: bool,
+        /// `(strut, layer)` entries the per-event table names.
+        hosts: Vec<(usize, usize)>,
+    }
+
+    fn sizing(x_allowed: f64) -> SizingPolicy {
+        SizingPolicy {
+            x_allowed,
+            tip_radius_min_mm: 0.05,
+            tip_radius_max_mm: 1.0,
+            owner_growth_ceiling_mm: 0.4,
+            alpha: 1.0,
+            lamina_reach_mm: 2.13,
+            straight_reach: true,
+            tip_column_roots: true,
+            per_event: true,
+            handed_column_ledger: true,
+            layer_height_mm: H,
+            plate_z_mm: 0.0,
+        }
+    }
+
+    fn strut(id: u32, kind: StrutKind, seat: usize, k_top: usize, path: Vec<u32>) -> SweepStrut {
+        SweepStrut {
+            id,
+            cell: seat,
+            center_mm: [0.0, 0.0],
+            kind,
+            min_radius_mm: if kind == StrutKind::Arm { 0.0 } else { 0.1 },
+            thickened_mm: Vec::new(),
+            foot_radius_mm: None,
+            seat_on_strut: None,
+            k_top,
+            k_bottom: 0,
+            landing: Landing::Plate,
+            interior: false,
+            radius_mm: Vec::new(),
+            carried_mm2: Vec::new(),
+            covered_demand: Vec::new(),
+            held_births: Vec::new(),
+            twin_host: false,
+            inserted_by_load: false,
+            path,
+            straight_fallback: None,
+            fallback_path: Vec::new(),
+            head: None,
+            seat_face: SeatFace::default(),
+            seat_normal: [0.0; 3],
+        }
+    }
+
+    /// An arm seated at `seat` under layer `k_top`, descending straight or by
+    /// a random walk of one-cell steps (`lean` = the chance of a step).
+    fn arm(rng: &mut Rng, id: u32, seat: usize, k_top: usize, lean: f64) -> SweepStrut {
+        let g = grid();
+        let mut path = Vec::new();
+        if lean > 0.0 {
+            let (mut row, mut col) = (g.row_of(seat), g.col_of(seat));
+            let mut walk = vec![0_u32; k_top];
+            for layer in (0..k_top).rev() {
+                if rng.unit() < lean {
+                    col = (col + 1 + rng.below(3)).saturating_sub(2).min(SIDE - 1);
+                    row = (row + 1 + rng.below(3)).saturating_sub(2).min(SIDE - 1);
+                }
+                walk[layer] = u32::try_from(g.index(row, col)).expect("a small grid");
+            }
+            path = walk;
+        }
+        strut(id, StrutKind::Arm, seat, k_top, path)
+    }
+
+    fn slices_of(prisms: &[(Vec<[f64; 2]>, usize, usize)]) -> Vec<Vec<SliceSolid>> {
+        let planes: Vec<f64> = (0..LAYERS).map(|l| (l as f64 + 0.5) * H).collect();
+        let mut slices: Vec<Vec<SliceSolid>> = vec![Vec::new(); LAYERS];
+        for (poly, z0_layer, z1_layer) in prisms {
+            let mesh = prism(poly, *z0_layer as f64 * H, *z1_layer as f64 * H);
+            let stack = slice_stack(&mesh, &planes, SliceStackLimits::production()).expect("slices");
+            for (layer, solids) in stack.into_iter().enumerate() {
+                slices[layer].extend(solids);
+            }
+        }
+        slices
+    }
+
+    /// A scene of 2-5 prisms in distinct tiles, arms under the overhanging
+    /// ones, and the random extras.
+    fn random_scene(seed: u64) -> Scene {
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15 ^ seed.wrapping_mul(0xD6E8_FEB8_6659_FD93).wrapping_add(1));
+        let mut tiles: Vec<(f64, f64)> = Vec::new();
+        for ix in -1..=1 {
+            for iy in -1..=1 {
+                tiles.push((f64::from(ix) * 2.4, f64::from(iy) * 2.4));
+            }
+        }
+        let count = 2 + rng.below(4);
+        let mut prisms = Vec::new();
+        let mut struts: Vec<SweepStrut> = Vec::new();
+        let mut hosts = Vec::new();
+        for _ in 0..count {
+            let (cx, cy) = tiles.swap_remove(rng.below(tiles.len()));
+            let (a, b) = (rng.range(0.25, 0.85), rng.range(0.15, 0.75));
+            let angle = rng.range(0.0, core::f64::consts::PI);
+            let z0 = if rng.unit() < 0.25 { 0 } else { 2 + rng.below(12) };
+            let z1 = (z0 + 3 + rng.below(12)).min(LAYERS - 1);
+            prisms.push((rectangle(cx, cy, a, b, angle), z0, z1));
+            if z0 >= 2 {
+                for _ in 0..1 + rng.below(3) {
+                    let (dx, dy) = (rng.range(-a, a) * 0.8, rng.range(-b, b) * 0.8);
+                    let (s, c) = angle.sin_cos();
+                    let (x, y) = (cx + dx * c - dy * s, cy + dx * s + dy * c);
+                    let lean = if rng.unit() < 0.4 { rng.range(0.1, 0.6) } else { 0.0 };
+                    let id = struts.len() as u32;
+                    let mut member = arm(&mut rng, id, cell_at(x, y), z0, lean);
+                    if rng.unit() < 0.15 {
+                        member.k_bottom = rng.below(z0.max(1));
+                        if member.k_bottom > 0 && !member.path.is_empty() {
+                            // A ledger-length path keeps `cell_at` honest.
+                            member.path = member.path[member.k_bottom..].to_vec();
+                        }
+                    }
+                    for layer in member.k_bottom..member.k_top {
+                        if rng.unit() < 0.15 {
+                            hosts.push((struts.len(), layer));
+                        }
+                    }
+                    struts.push(member);
+                }
+            }
+        }
+        // An arm in free space and a brace, now and then.
+        if rng.unit() < 0.5 {
+            let id = struts.len() as u32;
+            let seat = cell_at(rng.range(-3.5, 3.5), rng.range(-3.5, 3.5));
+            let k_top = 3 + rng.below(10);
+            struts.push(arm(&mut rng, id, seat, k_top, 0.0));
+        }
+        if rng.unit() < 0.4 {
+            let id = struts.len() as u32;
+            let seat = cell_at(rng.range(-3.0, 3.0), rng.range(-3.0, 3.0));
+            struts.push(strut(id, StrutKind::Brace, seat, 5 + rng.below(8), Vec::new()));
+        }
+        // Columns the up-sweep left unrooted, on a third of the layers.
+        let mut unrooted = UnrootedColumns::with_layers(LAYERS);
+        if rng.unit() < 0.6 {
+            for layer in 0..LAYERS {
+                if rng.unit() < 0.4 {
+                    let (x, y) = (rng.range(-3.0, 3.0), rng.range(-3.0, 3.0));
+                    let base = cell_at(x, y);
+                    let mut cells: Vec<u32> = (0..40)
+                        .map(|_| {
+                            let (dc, dr) = (rng.below(9), rng.below(9));
+                            u32::try_from(base + dr * SIDE + dc).expect("a small grid")
+                        })
+                        .filter(|&c| (c as usize) < SIDE * SIDE)
+                        .collect();
+                    cells.sort_unstable();
+                    cells.dedup();
+                    unrooted.total += cells.len();
+                    unrooted.by_layer[layer] = cells;
+                }
+            }
+        }
+        let mut sizing = sizing(rng.range(0.15, 3.0));
+        sizing.straight_reach = rng.unit() < 0.85;
+        sizing.tip_column_roots = rng.unit() < 0.85;
+        sizing.handed_column_ledger = rng.unit() < 0.85;
+        // A short reach loses the load that is too far from every arm.
+        if rng.unit() < 0.6 {
+            sizing.lamina_reach_mm = rng.range(0.3, 2.13);
+        }
+        Scene {
+            slices: slices_of(&prisms),
+            struts,
+            unrooted,
+            sizing,
+            drive: u8::try_from(rng.below(3)).expect("below 3"),
+            insertion_on: rng.unit() < 0.85,
+            hosts,
+        }
+    }
+
+    type Walk = (DownSweepOutcome, Vec<SweepStrut>, RouteLog, Vec<(u64, u64)>);
+
+    fn walk(mode: PassMode, scene: &Scene) -> Walk {
+        let g = grid();
+        let cache = LayerCache::build(&g, &scene.slices);
+        let mut struts = scene.struts.clone();
+        let mut log = RouteLog::new(LAYERS);
+        let mut refused = Vec::new();
+        let insertion = if scene.insertion_on {
+            InsertionPolicy::new(1000)
+        } else {
+            InsertionPolicy::disabled()
+        };
+        let table: HashMap<u64, f64> = match scene.drive {
+            0 => scene.hosts.iter().map(|&(m, l)| (entry(m, l), 1.0e3)).collect(),
+            _ => HashMap::new(),
+        };
+        let triggers = (scene.drive != 1).then_some(&table);
+        let outcome = sweep_pass_in(
+            mode,
+            &cache,
+            &mut struts,
+            scene.sizing,
+            insertion,
+            &DrainKeepOut::none(),
+            &scene.unrooted,
+            triggers,
+            (scene.drive != 1).then_some(&mut log),
+            &mut refused,
+        );
+        (outcome, struts, log, refused)
+    }
+
+    fn compare(scene: &Scene) -> Option<String> {
+        let dense = walk(PassMode::Dense, scene);
+        let sparse = walk(PassMode::Sparse, scene);
+        let given = scene.drive != 1;
+        pass_difference(
+            (&dense.0, &dense.1, given.then_some(&dense.2), &dense.3),
+            (&sparse.0, &sparse.1, given.then_some(&sparse.2), &sparse.3),
+        )
+    }
+
+    /// What a set of scenes exercised, summed over them.
+    #[derive(Default, Debug)]
+    struct Reach {
+        scenes: usize,
+        inserted: u64,
+        lost: usize,
+        tip_roots: u64,
+        refused_roots: u64,
+        handed_held: u64,
+        reentered: u64,
+        rerouted: usize,
+        multi_round: usize,
+        leaned: usize,
+        braces: usize,
+    }
+
+    fn reach_of(scene: &Scene, dense: &DownSweepOutcome, into: &mut Reach) {
+        into.scenes += 1;
+        into.inserted += dense.arms_inserted_by_load;
+        into.lost += usize::from(dense.uncarried_load_mm2 > 0.0);
+        into.tip_roots += dense.tip_column_roots_offered;
+        into.refused_roots += dense.unrooted_columns_refused;
+        into.handed_held += dense.handed_columns_held;
+        into.reentered += dense.handed_events_reentered;
+        into.rerouted += usize::from(dense.unrooted_load_rerouted_mm2 > 0.0);
+        into.multi_round += usize::from(dense.insertion_rounds > 1);
+        into.leaned += scene.struts.iter().filter(|s| s.is_leaned()).count();
+        into.braces += scene.struts.iter().filter(|s| s.kind != StrutKind::Arm).count();
+    }
+
+    #[test]
+    fn the_sparse_walk_equals_the_dense_walk_on_200_seeded_scenes() {
+        let mut reach = Reach::default();
+        for seed in 0..200_u64 {
+            let scene = random_scene(seed);
+            let dense = walk(PassMode::Dense, &scene);
+            let sparse = walk(PassMode::Sparse, &scene);
+            let given = scene.drive != 1;
+            if let Some(why) = pass_difference(
+                (&dense.0, &dense.1, given.then_some(&dense.2), &dense.3),
+                (&sparse.0, &sparse.1, given.then_some(&sparse.2), &sparse.3),
+            ) {
+                panic!("seed {seed}: sparse != dense: {why}");
+            }
+            reach_of(&scene, &dense.0, &mut reach);
+        }
+        println!("200 scenes reached {reach:?}");
+        // The comparison has teeth: the scenes exercised the paths the lists
+        // were written for.
+        assert!(reach.inserted > 50, "{reach:?}");
+        assert!(reach.lost > 20, "{reach:?}");
+        assert!(reach.tip_roots > 50, "{reach:?}");
+        assert!(reach.refused_roots > 100, "{reach:?}");
+        assert!(reach.handed_held > 20, "{reach:?}");
+        assert!(reach.reentered > 5, "{reach:?}");
+        assert!(reach.rerouted > 5, "{reach:?}");
+        assert!(reach.leaned > 50 && reach.braces > 20, "{reach:?}");
+    }
+
+    /// One long thin slab: load travels along a corridor to a single arm.
+    fn corridor_scene() -> Scene {
+        let slab = (rectangle(0.0, 0.0, 3.2, 0.3, 0.0), 8, 11);
+        let mut rng = Rng(7);
+        let struts = vec![arm(&mut rng, 0, cell_at(-3.0, 0.0), 8, 0.0)];
+        Scene {
+            slices: slices_of(&[slab]),
+            struts,
+            unrooted: UnrootedColumns::with_layers(LAYERS),
+            // A reach longer than the slab: the arm at one end collects it all.
+            sizing: SizingPolicy { lamina_reach_mm: 8.0, ..sizing(0.2) },
+            drive: 1,
+            insertion_on: true,
+            hosts: Vec::new(),
+        }
+    }
+
+    /// A thin slab on a 30 degree diagonal, an arm at one end: the cover is a
+    /// staircase a bounding box would be 20 times too wide for.
+    fn diagonal_scene() -> Scene {
+        let slab = (rectangle(0.0, 0.0, 3.0, 0.3, 0.55), 8, 11);
+        let mut rng = Rng(9);
+        let struts = vec![arm(&mut rng, 0, cell_at(-2.4, -1.4), 8, 0.0)];
+        Scene {
+            slices: slices_of(&[slab]),
+            struts,
+            unrooted: UnrootedColumns::with_layers(LAYERS),
+            sizing: SizingPolicy { lamina_reach_mm: 8.0, ..sizing(0.2) },
+            drive: 1,
+            insertion_on: true,
+            hosts: Vec::new(),
+        }
+    }
+
+    /// Two slabs that do not touch, one arm under each of three places.
+    fn disconnected_scene() -> Scene {
+        let slabs = [
+            (rectangle(-2.0, 0.0, 0.9, 0.7, 0.3), 6, 9),
+            (rectangle(2.0, 1.0, 0.8, 0.8, 1.1), 6, 10),
+        ];
+        let mut rng = Rng(11);
+        let struts = vec![
+            arm(&mut rng, 0, cell_at(-2.2, 0.1), 6, 0.0),
+            arm(&mut rng, 1, cell_at(2.2, 1.2), 6, 0.0),
+            arm(&mut rng, 2, cell_at(1.7, 0.6), 6, 0.0),
+        ];
+        Scene {
+            slices: slices_of(&slabs),
+            struts,
+            unrooted: UnrootedColumns::with_layers(LAYERS),
+            sizing: sizing(0.6),
+            drive: 1,
+            insertion_on: true,
+            hosts: Vec::new(),
+        }
+    }
+
+    /// A slab held by an arm that leans three cells over its descent, so its
+    /// body stands outside the slab's cover and the tip column is the root.
+    fn leaned_tip_scene() -> Scene {
+        let slab = (rectangle(0.0, 0.0, 1.2, 0.5, 0.0), 12, 15);
+        let g = grid();
+        let seat = cell_at(0.2, 0.0);
+        let (row, col) = (g.row_of(seat), g.col_of(seat));
+        let path: Vec<u32> = (0..12)
+            .map(|layer| {
+                let shift = (12 - layer).min(7);
+                u32::try_from(g.index(row + shift, col)).expect("a small grid")
+            })
+            .collect();
+        Scene {
+            slices: slices_of(&[slab]),
+            struts: vec![strut(0, StrutKind::Arm, seat, 12, path)],
+            unrooted: UnrootedColumns::with_layers(LAYERS),
+            sizing: sizing(1.0),
+            drive: 1,
+            insertion_on: true,
+            hosts: Vec::new(),
+        }
+    }
+
+    /// A slab with columns the up-sweep left unrooted: their load goes
+    /// sideways to the arm beside them, and their own peel is held out then
+    /// re-enters.
+    fn handed_column_scene() -> Scene {
+        let slab = (rectangle(0.0, 0.0, 1.0, 0.6, 0.0), 6, 16);
+        let mut rng = Rng(13);
+        let struts = vec![arm(&mut rng, 0, cell_at(0.8, 0.0), 6, 0.0)];
+        let mut unrooted = UnrootedColumns::with_layers(LAYERS);
+        for layer in 3..14 {
+            let cells: Vec<u32> = (0..SIDE * SIDE)
+                .filter(|&c| {
+                    let (x, y) = (
+                        ORIGIN + ((c % SIDE) as f64 + 0.5) * PITCH,
+                        ORIGIN + ((c / SIDE) as f64 + 0.5) * PITCH,
+                    );
+                    // Two bands that come and go with the layer.
+                    (x + 0.3 * (layer % 3) as f64) > -0.6 && x < -0.1 && y.abs() < 0.4
+                })
+                .map(|c| u32::try_from(c).expect("a small grid"))
+                .collect();
+            unrooted.total += cells.len();
+            unrooted.by_layer[layer] = cells;
+        }
+        Scene {
+            slices: slices_of(&[slab]),
+            struts,
+            unrooted,
+            sizing: sizing(0.8),
+            drive: 1,
+            insertion_on: true,
+            hosts: Vec::new(),
+        }
+    }
+
+    /// A child arm that lands on a BRACE standing in free space, which in turn
+    /// lands on the model: the child's load comes out of the brace's cell,
+    /// where no carrier stands, at the bottom of the stack.
+    fn brace_landing_scene() -> Scene {
+        let slab = (rectangle(0.0, 0.0, 1.0, 0.6, 0.0), 10, 13);
+        let mut rng = Rng(17);
+        let mut under_slab = arm(&mut rng, 0, cell_at(0.0, 0.0), 10, 0.0);
+        under_slab.landing = Landing::Plate;
+        // The child: alive on layers 3..7, hanging in free space, landing on
+        // the brace at layer 3.
+        let mut child = arm(&mut rng, 1, cell_at(2.5, 2.0), 7, 0.0);
+        child.k_bottom = 3;
+        child.landing = Landing::Strut { id: 2, layer: 3 };
+        // The brace: alive on 0..6 over a cell no model reaches, "landing" on
+        // the model at layer 0.
+        let mut brace = strut(2, StrutKind::Brace, cell_at(2.5, 2.0), 6, Vec::new());
+        brace.landing = Landing::Model { layer: 0 };
+        Scene {
+            slices: slices_of(&[slab]),
+            struts: vec![under_slab, child, brace],
+            unrooted: UnrootedColumns::with_layers(LAYERS),
+            sizing: sizing(2.0),
+            drive: 1,
+            insertion_on: false,
+            hosts: Vec::new(),
+        }
+    }
+
+    fn named() -> Vec<(&'static str, Scene)> {
+        vec![
+            ("corridor", corridor_scene()),
+            ("diagonal", diagonal_scene()),
+            ("disconnected", disconnected_scene()),
+            ("leaned tip", leaned_tip_scene()),
+            ("handed column", handed_column_scene()),
+            ("brace landing", brace_landing_scene()),
+        ]
+    }
+
+    #[test]
+    fn the_sparse_walk_equals_the_dense_walk_on_the_named_fixtures() {
+        for (name, scene) in named() {
+            let dense = walk(PassMode::Dense, &scene);
+            if let Some(why) = compare(&scene) {
+                panic!("{name}: sparse != dense: {why}");
+            }
+            let outcome = &dense.0;
+            println!(
+                "{name}: inserted {}, uncarried {:.3}, tip roots {}, refused {}, held {}, reentered {}, \
+                 rounds {}",
+                outcome.arms_inserted_by_load,
+                outcome.uncarried_load_mm2,
+                outcome.tip_column_roots_offered,
+                outcome.unrooted_columns_refused,
+                outcome.handed_columns_held,
+                outcome.handed_events_reentered,
+                outcome.insertion_rounds,
+            );
+            // Anti-vacuity: each fixture reaches what its name says.
+            match name {
+                "corridor" | "diagonal" => {
+                    assert!(outcome.spread_search_hits > 0, "{name}: nothing spread");
+                    assert!(outcome.arms_inserted_by_load > 0, "{name}: no insertion");
+                }
+                "disconnected" => assert!(outcome.spread_search_hits > 0, "{name}"),
+                "brace landing" => assert!(
+                    outcome.landing_injections >= 2 && outcome.plate_reaction_mm2 > 0.0,
+                    "{name}: the child's load did not reach the brace"
+                ),
+                "leaned tip" => assert!(
+                    outcome.tip_column_roots_offered > 0 && outcome.tip_column_root_load_mm2 > 0.0,
+                    "{name}: the tip column rooted nothing"
+                ),
+                "handed column" => assert!(
+                    outcome.unrooted_columns_refused > 0
+                        && outcome.unrooted_load_rerouted_mm2 > 0.0
+                        && outcome.handed_columns_held > 0,
+                    "{name}: no column was handed"
+                ),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    /// SABOTAGE. Leave a class of active cell out of the sparse walk and some
+    /// scene must come out different from the dense walk (or the walk must
+    /// trip its own conservation assertion): the comparison sees that class.
+    fn red_with(class: u8, label: &str) {
+        sabotage::set(class);
+        let mut seen = 0_usize;
+        let scenes = named()
+            .into_iter()
+            .map(|(_, scene)| scene)
+            .chain((0..200).map(random_scene));
+        for scene in scenes {
+            let dense = walk(PassMode::Dense, &scene);
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| walk(PassMode::Sparse, &scene)));
+            match outcome {
+                Err(_) => seen += 1,
+                Ok(sparse) => {
+                    let given = scene.drive != 1;
+                    seen += usize::from(
+                        pass_difference(
+                            (&dense.0, &dense.1, given.then_some(&dense.2), &dense.3),
+                            (&sparse.0, &sparse.1, given.then_some(&sparse.2), &sparse.3),
+                        )
+                        .is_some(),
+                    );
+                }
+            }
+        }
+        sabotage::set(0);
+        println!("sabotage {label}: {seen} scenes differ");
+        assert!(seen > 0, "dropping {label} did not change any scene: the comparison cannot see it");
+    }
+
+    #[test]
+    fn sabotage_dropping_the_arms_outside_the_model_from_the_carrier_list_is_red() {
+        red_with(sabotage::EXTRA_CARRIERS, "arm cells outside the model from the carrier list");
+    }
+
+    #[test]
+    fn sabotage_dropping_reentered_handed_columns_from_the_sources_is_red() {
+        red_with(sabotage::REENTERED, "re-entered handed columns from the spread sources");
+    }
+
+    #[test]
+    fn sabotage_dropping_the_last_cover_cell_from_the_routing_rounds_is_red() {
+        red_with(sabotage::COVER_TAIL, "the last covered cell from the routing rounds");
+    }
+
+    #[test]
+    fn sabotage_dropping_the_first_carrier_is_red() {
+        red_with(sabotage::CARRIER_HEAD, "the first carrier cell");
+    }
+
+    #[test]
+    fn sabotage_dropping_load_cells_that_are_not_carriers_from_the_next_sources_is_red() {
+        red_with(sabotage::ARM_CELLS, "arm cells that are not carriers from the next sources");
+    }
+
+    /// What one routing call leaves, as comparable bits.
+    #[derive(Debug, PartialEq)]
+    struct RouteBits {
+        distance: Vec<u32>,
+        nearest: Vec<u32>,
+        via_tip: Vec<bool>,
+        anchor: Vec<u32>,
+        any_root: bool,
+        converged: bool,
+        rounds: u64,
+        relax_calls: u64,
+        clear: u64,
+        blocked: u64,
+    }
+
+    /// One routing call on random masks, dense or sparse.
+    fn route_once(seed: u64, dense: bool) -> RouteBits {
+        use super::{route_within_cover, RouteActive, RouteFields};
+        let g = lay_out_at(0.0, 0.0, 0.1, 31, 23);
+        let cells = g.cells();
+        let mut rng = Rng(0xA5A5_5A5A_1234_5678 ^ seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        // A few random blobs and a corridor make the cover; holes in it.
+        let mut cover = vec![false; cells];
+        for _ in 0..1 + rng.below(4) {
+            let (r0, c0) = (rng.below(g.rows()), rng.below(g.cols()));
+            let (h, w) = (1 + rng.below(8), 1 + rng.below(14));
+            for r in r0..(r0 + h).min(g.rows()) {
+                for c in c0..(c0 + w).min(g.cols()) {
+                    cover[g.index(r, c)] = true;
+                }
+            }
+        }
+        for cell in 0..cells {
+            if cover[cell] && rng.unit() < 0.06 {
+                cover[cell] = false;
+            }
+        }
+        let mut carriers: Vec<bool> = (0..cells).map(|c| cover[c] && rng.unit() < 0.04).collect();
+        // Arm cells outside the cover also stand as carriers.
+        for _ in 0..rng.below(4) {
+            carriers[rng.below(cells)] = true;
+        }
+        // Tip roots: some inside the cover, some outside it.
+        let mut tip_root = vec![u32::MAX; cells];
+        let mut tip_cells = Vec::new();
+        for _ in 0..rng.below(5) {
+            let above = rng.below(cells);
+            if tip_root[above] == u32::MAX {
+                tip_root[above] = u32::try_from(rng.below(cells)).expect("a small grid");
+                tip_cells.push(u32::try_from(above).expect("a small grid"));
+            }
+        }
+        let mut clear = Vec::new();
+        if rng.unit() < 0.7 {
+            crate::reach::clearance_mm(&g, &cover, &mut clear);
+        }
+        let cover_cells: Vec<u32> =
+            (0..cells).filter(|&c| cover[c]).map(|c| u32::try_from(c).expect("a small grid")).collect();
+        let full: Vec<u32> = (0..u32::try_from(cells).expect("a small grid")).collect();
+        let mut distance = vec![f32::INFINITY; cells];
+        let mut nearest = vec![u32::MAX; cells];
+        let mut via_tip = vec![false; cells];
+        let mut anchor = vec![crate::reach::NO_ANCHOR; cells];
+        let mut previous = vec![f32::INFINITY; if dense { cells } else { 0 }];
+        let limit = if rng.unit() < 0.8 { rng.range(0.3, 3.0) as f32 } else { f32::NEG_INFINITY };
+        let outcome = route_within_cover(
+            &g,
+            &cover,
+            &carriers,
+            &tip_root,
+            RouteActive {
+                cover_cells: if dense { &full } else { &cover_cells },
+                tip_cells: if sabotage::dropped(sabotage::TIP_CELLS) { &[] } else { &tip_cells },
+                dense,
+            },
+            limit,
+            RouteFields {
+                distance: &mut distance,
+                nearest: &mut nearest,
+                via_tip: &mut via_tip,
+                previous: &mut previous,
+                anchor: &mut anchor,
+                clear: &clear,
+            },
+        );
+        RouteBits {
+            distance: distance.iter().map(|d| d.to_bits()).collect(),
+            nearest,
+            via_tip,
+            anchor,
+            any_root: outcome.any_root,
+            converged: outcome.converged,
+            rounds: outcome.rounds,
+            relax_calls: outcome.relax_calls,
+            clear: outcome.sightlines.clear,
+            blocked: outcome.sightlines.blocked,
+        }
+    }
+
+    /// 200 random masks: the routing field the sparse walk builds equals the
+    /// dense field on every cell, by bits, with the same rounds and relax calls.
+    #[test]
+    fn the_sparse_routing_field_equals_the_dense_field_on_200_random_masks() {
+        let (mut multi_round, mut tip_outside, mut rooted) = (0, 0, 0);
+        for seed in 0..200 {
+            let (dense, sparse) = (route_once(seed, true), route_once(seed, false));
+            assert_eq!(dense, sparse, "seed {seed}");
+            multi_round += usize::from(dense.rounds > 1);
+            rooted += usize::from(dense.any_root);
+            tip_outside += usize::from(dense.via_tip.iter().any(|&t| t));
+        }
+        assert!(multi_round > 100 && rooted > 150 && tip_outside > 40, "{multi_round} {rooted} {tip_outside}");
+    }
+
+    /// SABOTAGE: without its tip columns the sparse routing field is wrong
+    /// wherever a tip root stands outside the cover.
+    #[test]
+    fn sabotage_dropping_tip_roots_from_the_routing_field_is_red() {
+        sabotage::set(sabotage::TIP_CELLS);
+        let differing = (0..200).filter(|&seed| route_once(seed, true) != route_once(seed, false)).count();
+        sabotage::set(0);
+        assert!(differing > 10, "{differing} masks differ");
+    }
+
+    /// The sparse walk visits a small share of the cells the dense walk does,
+    /// and the counters say so (the witness that the sparse path fired).
+    #[test]
+    fn the_sparse_walk_visits_a_small_share_of_the_cells() {
+        for (name, scene) in named() {
+            let _ = walk(PassMode::Dense, &scene);
+            let dense = super::LAST_VISITS.with(std::cell::Cell::get);
+            let _ = walk(PassMode::Sparse, &scene);
+            let sparse = super::LAST_VISITS.with(std::cell::Cell::get);
+            println!("{name}: dense {dense:?} sparse {sparse:?}");
+            let cell_layers = (grid().cells() * LAYERS) as u64;
+            // Dense: the init plus every relax round walk every cell, and the
+            // spread and max loops walk every cell, once per insertion round.
+            assert!(dense.spread >= cell_layers && dense.max >= cell_layers, "{name}: {dense:?}");
+            assert!(dense.route >= cell_layers, "{name}: {dense:?}");
+            // Sparse: a few percent of that, loop by loop.
+            for (loop_name, sparse_visits, dense_visits) in [
+                ("route", sparse.route, dense.route),
+                ("spread", sparse.spread, dense.spread),
+                ("max", sparse.max, dense.max),
+                ("fill", sparse.fill, dense.fill),
+            ] {
+                assert!(
+                    sparse_visits * 5 < dense_visits,
+                    "{name}: sparse {loop_name} visited {sparse_visits} of the dense {dense_visits}"
+                );
+            }
         }
     }
 }

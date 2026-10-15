@@ -442,6 +442,12 @@ pub(crate) struct LayerRec {
     pub(crate) fill_elig: u64,
     pub(crate) copy_elig: u64,
     pub(crate) copy_written: u64,
+    /// Cells each loop VISITED this layer (perf lane D2; `down.visit` rows).
+    pub(crate) route_visit: u64,
+    pub(crate) spread_visit: u64,
+    pub(crate) max_visit: u64,
+    pub(crate) fill_visit: u64,
+    pub(crate) tail_visit: u64,
     /// Carriers this layer inserted, the trigger hosts that asked, and the
     /// insertion round (0-based) of the last insertion.
     pub(crate) inserted: u64,
@@ -561,6 +567,18 @@ impl PassTrace {
                         rec.copy_written,
                         rec.route_rounds,
                         rec.route_relax,
+                    ],
+                );
+                perf::row(
+                    perf::Rows::DownVisit,
+                    &[
+                        pass_id,
+                        layer as u64,
+                        rec.route_visit,
+                        rec.spread_visit,
+                        rec.max_visit,
+                        rec.fill_visit,
+                        rec.tail_visit,
                     ],
                 );
                 if rec.inserted > 0 || rec.exhausted > 0 {
