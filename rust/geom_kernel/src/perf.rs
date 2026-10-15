@@ -447,15 +447,10 @@ works! {
     /// Replays after the first of a call (restarts).
     ReplayRestarts, "replay.restarts", Work;
     /// Baseline layers a restart took from the call's cache instead of
-    /// recomputing, and trial layers it resumed past from a checkpoint.
+    /// recomputing.
     ReplayBaselineLayersReused, "replay.baseline_layers_reused", Work;
-    /// ... trial layers a restart did not walk because a checkpoint held them.
-    ReplayTrialLayersReused, "replay.trial_layers_reused", Work;
-    /// Bytes the call's baseline and checkpoint cache held at its peak, summed
-    /// over calls.
+    /// Bytes the call's baseline cache held at its peak, summed over calls.
     ReplayCacheBytes, "replay.cache_bytes", Work;
-    /// Restarts that resumed the proposed set from a checkpoint (or returned at one).
-    ReplayCheckpointResumes, "replay.checkpoint_resumes", Work;
 }
 
 const WORK_N: usize = Work::ALL.len();
