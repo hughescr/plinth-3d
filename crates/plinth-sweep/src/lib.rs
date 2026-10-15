@@ -1110,6 +1110,15 @@ pub struct SweepPolicy {
     /// Capture wins over [`Self::stage_shake_diagnostic`]: with capture on, the
     /// check never runs in the sweep.
     pub stage_shake_capture: bool,
+    /// How the second contact is made ([`contact_growth::SecondContactMode`]):
+    /// `Replan` is today's way; `EditThenReplan` (the default) edits the
+    /// finished first plan and falls back to `Replan` where the edit is thrown
+    /// away; `Edit` falls back to the first plan.
+    pub second_contact_mode: contact_growth::SecondContactMode,
+    /// Withdrawal rounds the edit may spend (`SC-DESIGN.md` §3, `R`): each
+    /// removes the new arms a failed trial is blamed on and finishes the field
+    /// again. The edit makes at most `R + 1` trials.
+    pub second_contact_withdraw_rounds: usize,
     pub limits: SweepLimits,
 }
 
@@ -1216,6 +1225,9 @@ impl SweepPolicy {
             rigid_share_diagnostic: true,
             stage_shake_diagnostic: true,
             stage_shake_capture: false,
+            second_contact_mode: contact_growth::SecondContactMode::from_env()
+                .map_err(SweepError::Registry)?,
+            second_contact_withdraw_rounds: 2,
             limits: SweepLimits {
                 cell_layer_budget: placeholders.sweep_cell_layer_budget().diagnostic().get(),
                 ..SweepLimits::production()
@@ -1885,6 +1897,30 @@ pub fn run_sweep_with_second_contact(
     drains: &[DrainSpec],
     vents: &[DrainSpec],
 ) -> Result<SweepPlan, SweepError> {
+    run_sweep_with_second_contact_seeded(first, None, mesh, plan, policy, drains, vents)
+}
+
+/// [`run_sweep_with_second_contact`] with the sweep's state at checkpoint C that
+/// finished into `first` (the [`EditSeed`]), which the edit modes
+/// ([`contact_growth::SecondContactMode`]) need: the second contact is then made
+/// as a CHECKED EDIT of `first` (`SC-DESIGN.md` §3, [`second_contact::edit`]),
+/// and every exit where the edit is thrown away goes through ONE fallback. No
+/// seed is a seed mismatch. In mode `Replan` the seed is not read and the result
+/// is today's, byte for byte.
+///
+/// # Errors
+///
+/// As [`run_sweep_with_holes`].
+pub fn run_sweep_with_second_contact_seeded(
+    first: SweepPlan,
+    seed: Option<&EditSeed>,
+    mesh: &Mesh,
+    plan: &LayerPlan,
+    policy: &SweepPolicy,
+    drains: &[DrainSpec],
+    vents: &[DrainSpec],
+) -> Result<SweepPlan, SweepError> {
+    // Today's exits, the same in every mode: not a discard of an edit.
     if !policy.insert_by_load {
         return Ok(first);
     }
@@ -1903,6 +1939,83 @@ pub fn run_sweep_with_second_contact(
     if caps.is_empty() {
         return Ok(first);
     }
+    let mode = policy.second_contact_mode;
+    if mode == contact_growth::SecondContactMode::Replan {
+        return replan_and_choose(first, &caps, mesh, plan, policy, drains, vents, mode, None);
+    }
+    let edited = cancel::without_token(|| {
+        second_contact::edit::run_edit(
+            &first,
+            seed,
+            &caps,
+            mesh,
+            plan,
+            policy,
+            drains,
+            vents,
+            second_contact::edit::Sabotage::NONE,
+        )
+    })?;
+    match edited {
+        second_contact::edit::EditResult::Kept(mut edited, report) => {
+            let outcome = contact_growth::SecondContactOutcome {
+                mode,
+                result: contact_growth::SecondContactResult::Edited,
+                attempted: true,
+                tips_capped: caps.len(),
+                first_short: report.first_short,
+                first_shortfall_mm2: report.first_shortfall_mm2,
+                first_arms: first.struts.len(),
+                second_short: report.edited_short,
+                second_shortfall_mm2: report.edited_shortfall_mm2,
+                second_arms: edited.struts.len(),
+                first_unbraced: report.first_unbraced,
+                second_unbraced: report.edited_unbraced,
+                kept_second: true,
+                edit: report,
+            };
+            edited.report.seat_second_contact = outcome;
+            Ok(*edited)
+        }
+        second_contact::edit::EditResult::Discarded(exit, report) => {
+            match second_contact::edit::fallback(mode, exit) {
+                second_contact::edit::Fallback::First => {
+                    let mut chosen = first;
+                    chosen.report.seat_second_contact = contact_growth::SecondContactOutcome {
+                        mode,
+                        result: contact_growth::SecondContactResult::First,
+                        tips_capped: caps.len(),
+                        edit: report,
+                        ..contact_growth::SecondContactOutcome::default()
+                    };
+                    Ok(chosen)
+                }
+                second_contact::edit::Fallback::Replan => {
+                    replan_and_choose(first, &caps, mesh, plan, policy, drains, vents, mode, Some(report))
+                }
+            }
+        }
+    }
+}
+
+/// **Today's second contact, verbatim**: the same sweep run again with the short
+/// tips' contacts as the load each may carry at its tip layer, kept where it
+/// leaves the field less short of its loads' needs (the summed shortfall in mm²)
+/// and with no more unbraced runs over their limit, else `first` stands. The
+/// chooser of mode `Replan`, and the re-plan half of `EditThenReplan` (where
+/// `edit` is the discarded edit's report).
+#[expect(clippy::too_many_arguments, reason = "the sweep's own argument list, and the mode and report")]
+fn replan_and_choose(
+    first: SweepPlan,
+    caps: &down_sweep::ContactCaps,
+    mesh: &Mesh,
+    plan: &LayerPlan,
+    policy: &SweepPolicy,
+    drains: &[DrainSpec],
+    vents: &[DrainSpec],
+    mode: contact_growth::SecondContactMode,
+    edit: Option<contact_growth::EditReport>,
+) -> Result<SweepPlan, SweepError> {
     let shortfall = |plan: &SweepPlan| -> f64 {
         plan.report
             .seat_contact
@@ -1912,9 +2025,12 @@ pub fn run_sweep_with_second_contact(
             .sum()
     };
     let second = cancel::without_token(|| {
-        run_sweep_inner(mesh, plan, policy, drains, vents, Some(&caps))
+        run_sweep_inner(mesh, plan, policy, drains, vents, Some(caps))
     })?;
     let outcome = contact_growth::SecondContactOutcome {
+        mode,
+        result: contact_growth::SecondContactResult::First,
+        edit: edit.unwrap_or_default(),
         attempted: true,
         tips_capped: caps.len(),
         first_short: first.report.seat_contact.short.len(),
@@ -1935,6 +2051,11 @@ pub fn run_sweep_with_second_contact(
     let mut chosen = if kept_second { second } else { first };
     chosen.report.seat_second_contact = contact_growth::SecondContactOutcome {
         kept_second,
+        result: if kept_second {
+            contact_growth::SecondContactResult::Replanned
+        } else {
+            contact_growth::SecondContactResult::First
+        },
         ..outcome
     };
     Ok(chosen)

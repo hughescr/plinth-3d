@@ -658,6 +658,22 @@ cases where it did not.
   routes between them. The second plan is kept only where it leaves the summed shortfall (mm²) smaller.
   Costs one more sweep; reported in the log (`second contact:` line) and `SweepRunReport::seat_second_contact`.
   A tip left short after it is warned as before.
+  **How it is made** (`SweepPolicy::second_contact_mode`, env `PLINTH_SECOND_CONTACT=replan|edit|
+  edit-then-replan`; default `edit-then-replan`; design `SC-DESIGN.md` §3-§4). `replan` is the run
+  above. The two edit modes do not plan again: they take the sweep's state at checkpoint C (the start of
+  `StageJoints`, kept as an `EditSeed`), run ONE insertion phase on a working copy W with the caps, finish
+  a CLONE of W, and set that finished field against the finished first plan (P1) on predicates recomputed
+  after the last mutation of both (`second_contact::final_checks`, the drawn-solid collision census, the
+  keyed per-member warnings, load and overload non-regression, the ground a shrunk contact keeps). A new
+  support that fails, or that a regression on an old support is structurally linked to, is withdrawn from
+  W with everything that rests on it (budget `second_contact_withdraw_rounds`, default 2; W is sized again
+  with insertion off), and a fresh clone is finished. The edit is kept only if nothing regressed and the
+  shortfall falls with no more unbraced runs (today's test, on final predicates). Every exit where it is
+  thrown away (seed mismatch, no insertion, global regression, untraced regression, no gain, closure
+  reaches an old support, nothing survives, budget) goes through ONE fallback: `edit` returns P1;
+  `edit-then-replan` runs the `replan` path and its chooser (P1 where that rejects). Nothing reads the
+  model's name. The log prints `second contact edit` lines (exit and reason, arms, regressions by class,
+  seconds per step); `SecondContactOutcome::edit` holds them.
 
 ### Every change to a tip keeps layerwise support (joint review, 2026-10-12)
 
