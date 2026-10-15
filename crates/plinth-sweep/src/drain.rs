@@ -411,6 +411,41 @@ impl DrainKeepOut {
         self.blocked_cells
     }
 
+    /// Every word a placement reads from this keep-out, in a fixed order, fed
+    /// to `feed`: the stamped raster (its non-empty cells, by cell), the
+    /// capsules it was stamped from and the frame. The refusal counter is not
+    /// read by a placement and is left out. Perf lane D3x keys a stashed pass
+    /// on this, so a pass resumed under another keep-out is refused.
+    pub(crate) fn digest_words(&self, mut feed: impl FnMut(u64)) {
+        let frame = self.frame;
+        for value in [
+            frame.plate_z_mm,
+            frame.layer_height_mm,
+            frame.top_z_mm,
+            frame.step_mm,
+            frame.max_arm_radius_mm,
+        ] {
+            feed(value.to_bits());
+        }
+        feed(frame.layers as u64);
+        feed(self.blocked_cells as u64);
+        feed(self.lowest_blocked.len() as u64);
+        for (cell, &lowest) in self.lowest_blocked.iter().enumerate() {
+            if lowest != u32::MAX {
+                feed(cell as u64);
+                feed(u64::from(lowest));
+            }
+        }
+        feed(self.capsules.len() as u64);
+        for capsule in &self.capsules {
+            for value in capsule.outlet_mm.iter().chain(&capsule.axis) {
+                feed(value.to_bits());
+            }
+            feed(capsule.samples as u64);
+            feed(capsule.clear_radius_mm.to_bits());
+        }
+    }
+
     /// How many placement candidates this keep-out has refused.
     #[must_use]
     pub fn refusals(&self) -> u64 {

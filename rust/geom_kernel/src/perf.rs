@@ -438,6 +438,29 @@ works! {
     /// Seeds offered for an edit and refused by their identity key (mesh,
     /// layers, policy, holes, first plan); the fast set asserts zero.
     SeedMismatch, "seed.mismatch", Work;
+    /// Perf lane D3x: layers a down-sweep pass walked, and layers it did not
+    /// (resumed from a checkpoint above them, or stopped on state equal to the
+    /// previous pass's below them). Their sum is `layers * sweep.down.passes`.
+    /// Every D3x counter is `Sched`: whether a pass resumes depends on whether
+    /// the plan's stash was free and the byte pool had room, never on a
+    /// result, which is the same either way.
+    SweepDownLayersWalked, "sweep.down.layers_walked", Sched;
+    /// ... the layers skipped.
+    SweepDownLayersSkipped, "sweep.down.layers_skipped", Sched;
+    /// ... passes that resumed from a checkpoint of the pass before.
+    SweepDownPassesResumed, "sweep.down.passes_resumed", Sched;
+    /// ... passes that stopped early on state equal to the previous pass's.
+    SweepDownPassesStopped, "sweep.down.passes_stopped", Sched;
+    /// ... passes whose inputs were the previous pass's to the bit, so the
+    /// previous result stood and nothing was walked.
+    SweepDownPassesSkipped, "sweep.down.passes_skipped", Sched;
+    /// ... per-event sizings reused from the previous pass (same routing log,
+    /// same members).
+    SweepDownPerEventReused, "sweep.down.per_event_reused", Sched;
+    /// ... bytes of pass checkpoints charged to the layer-cache byte pool.
+    SweepDownTrailBytes, "sweep.down.trail_bytes", Sched;
+    /// ... passes that left no trail (the pool refused the bytes).
+    SweepDownTrailRefused, "sweep.down.trail_refused", Sched;
     /// Capped re-plans that started from a seed's cap-independent prefix
     /// instead of setup and the up-sweep.
     PrefixReused, "prefix.reused", Work;
