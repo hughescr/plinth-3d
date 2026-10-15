@@ -1922,11 +1922,32 @@ impl StageClock {
 
     /// Announce that `stage` is being entered, with this clock's elapsed.
     pub fn entering(&self, stage: &str) {
+        self.entering_later(stage).emit();
+    }
+
+    /// [`Self::entering`], with the elapsed read now and the line held: for a
+    /// stage that starts running before it may be announced (its announcement
+    /// waits on a join that can still fail the run). The line carries the
+    /// elapsed of the moment the stage began, whenever it is emitted; dropping
+    /// it prints nothing.
+    pub fn entering_later(&self, stage: &str) -> StageLine {
         let elapsed_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        emit_run_line(&format!(
+        StageLine(format!(
             "stage: {} entering {stage} elapsed={elapsed_ms}ms",
             self.scope
-        ));
+        ))
+    }
+}
+
+/// A stage announcement read from a [`StageClock`] but not yet printed.
+#[derive(Debug)]
+#[must_use = "a held stage line that is dropped is never printed"]
+pub struct StageLine(String);
+
+impl StageLine {
+    /// Prints the line.
+    pub fn emit(self) {
+        emit_run_line(&self.0);
     }
 }
 

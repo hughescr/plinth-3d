@@ -42,6 +42,10 @@ thiserror = { workspace = true }
 # consults plinth-verify's coverage verdict before the library ever calls
 # plinth-emit, and `prepare` loads every source model through plinth-mesh.
 chitubox_io = { path = "../../rust/chitubox_io" }
+# `tests/deferred_diagnostics_output.rs` fails the decimation diagnostics on
+# purpose; the injection hook exists only with this feature, which only
+# test builds of this crate turn on.
+plinth-decimate = { path = "../plinth-decimate", features = ["fault-injection"] }
 
 # `tests/it/orient_as_drawn.rs` sets `user.xdg.tags` on a scratch file.
 [target.'cfg(target_os = "linux")'.dev-dependencies]

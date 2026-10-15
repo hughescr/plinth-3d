@@ -58,6 +58,7 @@ use plinth_hollow::{
     SolidDecisionReason,
 };
 use plinth_mesh::{load_binary_stl, WeldPolicy};
+use plinth_orient::diag::PendingOutput;
 use plinth_orient::{run as run_orientation, OrientRequest, OrientedModel};
 use plinth_support::{run_support, SupportRequest, SupportRunError};
 use plinth_sweep::perf::{set_phase, Phase as PerfPhase};
@@ -1315,8 +1316,24 @@ fn prepare_one(
         );
     }
 
+    // **Nothing orientation produces is published before the diagnostics have
+    // joined.** A synchronous run never reached orientation when the
+    // diagnostics failed, so no orientation output may exist then: the partial
+    // perf sidecar a phase change writes is held, the stage line is read now
+    // and printed after the join, and `orient.json` comes back unwritten from
+    // the search and is written after the join. Without a pending join all
+    // three happen at once, as they always did.
+    let sidecar_hold = diagnostics_join
+        .as_ref()
+        .map(|_| plinth_sweep::perf::hold_partial_sidecar());
     set_phase(PerfPhase::OrientTable);
-    clock.entering("Orientation");
+    let orientation_line = clock.entering_later("Orientation");
+    let orientation_line = if diagnostics_join.is_some() {
+        Some(orientation_line)
+    } else {
+        orientation_line.emit();
+        None
+    };
     // **As drawn?** (GitHub issue #1, owner spec 2026-10-01.) `--orient none`
     // marks every model; then the run's `--no-orient` list; otherwise this
     // model's own tag attribute or `<stem>.asdrawn` marker can. One reason is
@@ -1352,6 +1369,9 @@ fn prepare_one(
         policy.placement,
         policy.winner_plan_reuse,
     );
+    // The orient timer covers orientation's own compute; the wait below is not
+    // part of it (it is the diagnostics' tail, charged to their own stages).
+    drop(orient_mark);
     // Join before looking at orientation's result: a synchronous run would
     // have stopped at the decimation error before orientation ever ran.
     if let Some(join) = diagnostics_join {
@@ -1366,11 +1386,15 @@ fn prepare_one(
             );
         }
     }
-    let (oriented, winner) = match oriented_result {
+    drop(sidecar_hold);
+    if let Some(line) = orientation_line {
+        line.emit();
+    }
+    let (oriented, winner, pending_output) = match oriented_result {
         Ok(oriented) => oriented,
         Err(stop) => return report(&repair, assumed, failure(&stop)),
     };
-    drop(orient_mark);
+    pending_output.publish();
     // **The chosen orientation, read once and carried on every disposition
     // from here down.** The closure is SHADOWED rather than given a fourth
     // parameter so that the eleven call sites above and below stay as they
@@ -1576,7 +1600,7 @@ fn orient_model(
     limits: plinth_orient::OrientSearchLimits,
     placement: crate::Placement,
     reuse: WinnerPlanReuse,
-) -> Result<(OrientedModel, RetainedWinner), ChainStop> {
+) -> Result<(OrientedModel, RetainedWinner, PendingOutput), ChainStop> {
     // Why no plan comes back from the arms that retain nothing.
     let absent = if reuse == WinnerPlanReuse::Disabled {
         plinth_sweep::orient_demand::ReuseMiss::Disabled
@@ -1585,7 +1609,7 @@ fn orient_model(
     };
     if let Some(reason) = as_drawn {
         return plinth_orient::orient_as_drawn(decimated, reason)
-            .map(|oriented| (oriented, Err(absent)))
+            .map(|oriented| (oriented, Err(absent), PendingOutput::default()))
             .map_err(|source| {
                 ChainStop::new(PipelineError::Orient {
                     model: model.clone(),
@@ -1601,7 +1625,7 @@ fn orient_model(
             decimated,
             plinth_orient::as_drawn::AsDrawnReason::OrientNone,
         )
-        .map(|oriented| (oriented, Err(absent)))
+        .map(|oriented| (oriented, Err(absent), PendingOutput::default()))
         .map_err(|source| {
             ChainStop::new(PipelineError::Orient {
                 model: model.clone(),
@@ -1637,8 +1661,9 @@ fn orient_model(
             // reads a sweep plan, so it keeps the plain measurer.
             if placement == crate::Placement::Sweep && reuse != WinnerPlanReuse::Disabled {
                 let demand = plinth_sweep::orient_demand::RetainingSweepDemand::production();
-                let oriented = plinth_orient::search_and_orient(decimated, &request, Some(&demand))
-                    .map_err(orient_error)?;
+                let (oriented, pending) =
+                    plinth_orient::search_and_orient_deferred(decimated, &request, Some(&demand))
+                        .map_err(orient_error)?;
                 let take_mark = plinth_sweep::perf::stage("orient.take_winner");
                 let winner = if reuse == WinnerPlanReuse::SabotageOtherPose {
                     demand.take_other_pose_relabelled(oriented.mesh())
@@ -1646,11 +1671,15 @@ fn orient_model(
                     demand.take_winner(oriented.mesh())
                 };
                 drop(take_mark);
-                return Ok((oriented, winner.ok_or(plinth_sweep::orient_demand::ReuseMiss::NotRetained)));
+                return Ok((
+                    oriented,
+                    winner.ok_or(plinth_sweep::orient_demand::ReuseMiss::NotRetained),
+                    pending,
+                ));
             }
             let demand = plinth_sweep::SweepDemand::production();
-            plinth_orient::search_and_orient(decimated, &request, Some(&demand))
-                .map(|oriented| (oriented, Err(absent)))
+            plinth_orient::search_and_orient_deferred(decimated, &request, Some(&demand))
+                .map(|(oriented, pending)| (oriented, Err(absent), pending))
                 .map_err(orient_error)
         }
         OrientationPolicy::Pinned(baselines) => {
@@ -1665,7 +1694,7 @@ fn orient_model(
                     pinned: pinned.clone(),
                 },
             )
-            .map(|oriented| (oriented, Err(absent)))
+            .map(|oriented| (oriented, Err(absent), PendingOutput::default()))
             .map_err(|source| {
                 ChainStop::new(PipelineError::Orient {
                     model: model.clone(),

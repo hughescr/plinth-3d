@@ -184,8 +184,28 @@ pub fn search_and_orient(
     request: &SweepRequest,
     demand: Option<&dyn demand::SupportDemandMeasurer>,
 ) -> Result<OrientedModel, OrientError> {
+    let (oriented, pending) = search_and_orient_deferred(model, request, demand)?;
+    pending.publish();
+    Ok(oriented)
+}
+
+/// [`search_and_orient`] that publishes nothing: the `orient.json` and digest
+/// line the search would have written come back as a [`diag::PendingOutput`].
+/// The caller publishes it once nothing else can fail the run any more; a run
+/// that stops first drops it and leaves no orientation output behind.
+///
+/// # Errors
+///
+/// As [`search_and_orient`]; a failure after the search (a non-finite
+/// transformed mesh) drops the pending output with it.
+pub fn search_and_orient_deferred(
+    model: DecimatedModel,
+    request: &SweepRequest,
+    demand: Option<&dyn demand::SupportDemandMeasurer>,
+) -> Result<(OrientedModel, diag::PendingOutput), OrientError> {
     let (mesh, decimation) = model.into_parts();
-    let outcome = search::search(&mesh, request, demand).map_err(OrientError::Search)?;
+    let (outcome, pending) =
+        search::search_deferred(&mesh, request, demand).map_err(OrientError::Search)?;
     let selection = outcome.winner().selection;
     let transform = transform_for(selection)?;
     let transform_mark = geom_kernel::perf::stage("orient.transform_mesh");
@@ -196,10 +216,13 @@ pub fn search_and_orient(
         selection,
         transform,
     };
-    Ok(OrientedModel {
-        mesh,
-        history: OrientationHistory::from_reports(decimation, orientation),
-    })
+    Ok((
+        OrientedModel {
+            mesh,
+            history: OrientationHistory::from_reports(decimation, orientation),
+        },
+        pending,
+    ))
 }
 
 /// Uses the model exactly as drawn: identity rotation, then the same frame

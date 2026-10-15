@@ -1829,15 +1829,63 @@ pub fn orient_json(
 /// Serializing and writing are diagnostic work; the caller runs this inside
 /// [`in_diagnostic_phase`].
 pub(crate) fn write_orient_json(record: &DenseSweepRecord, diagnostics: &SweepDiagnostics) {
-    let bytes = match orient_json(record, diagnostics) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            eprintln!("WARNING: orient.json not written: {error}");
-            return;
+    serialise_orient_json(record, diagnostics).publish();
+}
+
+/// Serialises `orient.json` now (diagnostic work, charged to the diagnostic
+/// phase) and returns what writing it later needs; nothing is written.
+pub(crate) fn serialise_orient_json(
+    record: &DenseSweepRecord,
+    diagnostics: &SweepDiagnostics,
+) -> PendingOutput {
+    PendingOutput {
+        orient_json: Some(
+            orient_json(record, diagnostics).map_err(|error| error.to_string()),
+        ),
+        digest_line: None,
+    }
+}
+
+/// What an orientation search has made ready but not yet published: the
+/// `orient.json` side file and the `PLINTH_ORIENT_DIAG` digest line. A caller
+/// that runs the search beside work that can still fail (the decimation
+/// diagnostics) holds this until that work has succeeded, so a run that fails
+/// there leaves no orientation output behind. Dropping it publishes nothing.
+#[derive(Debug, Default)]
+#[must_use = "a pending output that is dropped is never written"]
+pub struct PendingOutput {
+    orient_json: Option<Result<Vec<u8>, String>>,
+    digest_line: Option<String>,
+}
+
+impl PendingOutput {
+    pub(crate) fn with_digest_line(mut self, line: String) -> Self {
+        self.digest_line = Some(line);
+        self
+    }
+
+    /// Whether anything is waiting to be published.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.orient_json.is_none() && self.digest_line.is_none()
+    }
+
+    /// Writes the held `orient.json` (a failure is a warning: a diagnostic
+    /// never fails a search) and prints the held digest line, in the order the
+    /// search itself used to.
+    pub fn publish(self) {
+        match self.orient_json {
+            Some(Ok(bytes)) => {
+                if let Err(error) = geom_kernel::perf::write_side_file("orient.json", &bytes) {
+                    eprintln!("WARNING: orient.json not written: {error}");
+                }
+            }
+            Some(Err(error)) => eprintln!("WARNING: orient.json not written: {error}"),
+            None => {}
         }
-    };
-    if let Err(error) = geom_kernel::perf::write_side_file("orient.json", &bytes) {
-        eprintln!("WARNING: orient.json not written: {error}");
+        if let Some(line) = self.digest_line {
+            eprintln!("{line}");
+        }
     }
 }
 

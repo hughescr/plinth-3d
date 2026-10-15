@@ -1169,18 +1169,29 @@ enum JobState {
 /// Evidence that is either complete or being computed.  Whoever reaches the
 /// queued job first runs it, the pool worker or the thread that needs the
 /// answer, so a join can never wait on a pool that has no free worker.
+///
+/// A job that panics never strands the cell: the panic is caught where the job
+/// runs (pool worker or inline claimant), its payload is parked here, the cell
+/// finishes with `None`, and the first reader re-raises that payload with
+/// [`resume_unwind`], so the panic reaches the caller exactly as it did when
+/// the diagnostics ran synchronously.
 struct DeferredEvidence {
     state: Mutex<JobState>,
     finished: Condvar,
-    result: OnceLock<Evidence>,
+    /// `None` means the job panicked; the payload is in `panic`.
+    result: OnceLock<Option<Evidence>>,
+    panic: Mutex<Option<PanicPayload>>,
 }
+
+type PanicPayload = Box<dyn std::any::Any + Send>;
 
 impl DeferredEvidence {
     fn ready(body: AuditBody) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(JobState::Finished),
             finished: Condvar::new(),
-            result: OnceLock::from(Ok(body)),
+            result: OnceLock::from(Some(Ok(body))),
+            panic: Mutex::new(None),
         })
     }
 
@@ -1189,12 +1200,26 @@ impl DeferredEvidence {
             state: Mutex::new(JobState::Queued(job)),
             finished: Condvar::new(),
             result: OnceLock::new(),
+            panic: Mutex::new(None),
         })
     }
 
     fn lock(&self) -> MutexGuard<'_, JobState> {
-        // A panicking job aborts the run; a poisoned flag carries no data here.
+        // The job runs under `catch_unwind`, so the lock is never held across a
+        // panic; a poisoned flag carries no data here.
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Runs a claimed job, catching a panic instead of letting it unwind into a
+    /// pool worker (which would abort the process) or strand the cell.
+    fn run(&self, job: EvidenceJob) {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)) {
+            Ok(result) => self.finish(Some(result)),
+            Err(payload) => {
+                *self.panic.lock().unwrap_or_else(PoisonError::into_inner) = Some(payload);
+                self.finish(None);
+            }
+        }
     }
 
     fn claim(&self) -> Option<EvidenceJob> {
@@ -1208,30 +1233,48 @@ impl DeferredEvidence {
         }
     }
 
-    fn finish(&self, result: Evidence) {
+    fn finish(&self, result: Option<Evidence>) {
         let _ = self.result.set(result);
         *self.lock() = JobState::Finished;
         self.finished.notify_all();
     }
 
     /// Runs the job here if nobody has started it, else waits for the worker
-    /// that did.
+    /// that did.  If the job panicked, re-raises its payload (the first reader
+    /// gets the original; later readers get a plain panic naming the cause).
     fn resolve(&self) -> &Evidence {
-        if let Some(result) = self.result.get() {
-            return result;
+        let slot = if let Some(slot) = self.result.get() {
+            slot
+        } else {
+            if let Some(job) = self.claim() {
+                self.run(job);
+            }
+            let mut state = self.lock();
+            while self.result.get().is_none() {
+                state = self
+                    .finished
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+            drop(state);
+            self.result.get().expect("the loop above saw the result")
+        };
+        match slot {
+            Some(evidence) => evidence,
+            None => {
+                let payload = self
+                    .panic
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take();
+                match payload {
+                    Some(payload) => std::panic::resume_unwind(payload),
+                    None => panic!(
+                        "decimation diagnostics panicked; the payload was already re-raised"
+                    ),
+                }
+            }
         }
-        if let Some(job) = self.claim() {
-            self.finish(job());
-        }
-        let mut state = self.lock();
-        while self.result.get().is_none() {
-            state = self
-                .finished
-                .wait(state)
-                .unwrap_or_else(PoisonError::into_inner);
-        }
-        drop(state);
-        self.result.get().expect("the loop above saw the result")
     }
 
     /// Starts the job on the shared pool.  Called from a pool worker (the
@@ -1243,7 +1286,7 @@ impl DeferredEvidence {
         let launch = move || {
             rayon::spawn(move || {
                 if let Some(job) = evidence.claim() {
-                    evidence.finish(job());
+                    evidence.run(job);
                 }
             });
         };
@@ -2351,6 +2394,14 @@ fn run_budget_search_flow(
         let task_original = original.clone();
         let task_protected = protected.to_vec();
         let job: EvidenceJob = Box::new(move || {
+            // The job runs beside the pipeline's next stages, on whichever
+            // thread gets there first (a pool worker, or the joiner), while the
+            // global perf phase has already moved on. A synchronous run charged
+            // all of this to Decimate, so the job does too, on this thread,
+            // whatever the global phase says.
+            let _phase = geom_kernel::perf::scoped_phase(geom_kernel::perf::Phase::Decimate);
+            #[cfg(any(test, feature = "fault-injection"))]
+            fault::job_start(&trace);
             let mut trace = trace;
             let mut original_surface = original_surface;
             let adaptive_mark = geom_kernel::perf::stage("decimate.adaptive");
@@ -2684,7 +2735,7 @@ fn identity_evidence(
     reason: ReductionRefusalReason,
     known_topology: Option<TopologyCounts>,
 ) -> Result<AuditBody, BudgetSearchError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fault-injection"))]
     if let Some(error) = fault::identity(&trace) {
         return Err(error);
     }
@@ -2883,7 +2934,7 @@ fn ratio_for_integer_target(input_faces: usize, target_faces: usize) -> Result<f
 
 /// Test-only fault injection for the diagnostics and the identity audits
 /// behind them, keyed on one unusual error budget so no other test is touched.
-#[cfg(test)]
+#[cfg(any(test, feature = "fault-injection"))]
 mod fault {
     use super::{BudgetSearchError, BudgetSearchTrace};
     use std::sync::Mutex;
@@ -2894,8 +2945,26 @@ mod fault {
         pub p99_bits: u64,
         pub adaptive: bool,
         pub identity: bool,
+        /// The adaptive diagnostics panic (with [`InjectedPanic`]) instead of
+        /// returning.
+        pub panic: bool,
         pub delay: Duration,
+        /// How long the deferred job sleeps after it starts and before it
+        /// opens its first stage, so a test can let the pipeline's global perf
+        /// phase move on first.
+        pub start_delay: Duration,
     }
+
+    /// Sleeps at the top of a deferred job (see [`Fault::start_delay`]).
+    pub(super) fn job_start(trace: &BudgetSearchTrace) {
+        if let Some(delay) = with(trace, |fault| fault.start_delay) {
+            std::thread::sleep(delay);
+        }
+    }
+
+    /// The payload of the injected panic, so a test can tell it from any other.
+    #[derive(Debug, PartialEq)]
+    pub(super) struct InjectedPanic(pub u32);
 
     pub(super) static FAULT: Mutex<Option<Fault>> = Mutex::new(None);
 
@@ -2912,6 +2981,10 @@ mod fault {
     pub(super) fn adaptive(trace: &BudgetSearchTrace) -> Option<BudgetSearchError> {
         let delay = with(trace, |fault| fault.delay)?;
         std::thread::sleep(delay);
+        // The lock is released before the panic, so the fault slot stays clean.
+        if with(trace, |fault| fault.panic) == Some(true) {
+            std::panic::panic_any(InjectedPanic(0xD1A6));
+        }
         with(trace, |fault| fault.adaptive)
             .filter(|&on| on)
             .map(|_| BudgetSearchError::SearchExecution {
@@ -2930,6 +3003,57 @@ mod fault {
     }
 }
 
+/// Fault injection for other crates' tests, behind the `fault-injection`
+/// feature (never on in a release build): the one search run with `budget` gets
+/// its deferred adaptive diagnostics disturbed.
+#[cfg(feature = "fault-injection")]
+#[doc(hidden)]
+pub mod injection {
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+    use std::time::Duration;
+
+    use super::{fault, search_policy, DecimationBudget};
+
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    /// Disturbs the searches run with the given budget until dropped; holds a
+    /// process-wide lock so two injections never overlap.
+    #[must_use = "the injection ends when the guard drops"]
+    pub struct Injection {
+        _serial: MutexGuard<'static, ()>,
+    }
+
+    /// `fail`: the adaptive diagnostics return an error instead of finishing.
+    /// `start_delay`: the deferred job sleeps this long before its first stage.
+    ///
+    /// # Panics
+    ///
+    /// If the registered search policy is unavailable.
+    pub fn inject(budget: DecimationBudget, fail: bool, start_delay: Duration) -> Injection {
+        let serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let p99 = budget.pixel_um.get() * search_policy().expect("registered policy").p99_factor;
+        *fault::FAULT
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(fault::Fault {
+            p99_bits: p99.to_bits(),
+            adaptive: fail,
+            identity: false,
+            panic: false,
+            delay: Duration::ZERO,
+            start_delay,
+        });
+        Injection { _serial: serial }
+    }
+
+    impl Drop for Injection {
+        fn drop(&mut self) {
+            *fault::FAULT
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = None;
+        }
+    }
+}
+
 fn run_adaptive_diagnostics(
     original: &Mesh,
     protected: &[bool],
@@ -2939,7 +3063,7 @@ fn run_adaptive_diagnostics(
     trace: &mut BudgetSearchTrace,
     original_surface: &mut OriginalSurface,
 ) -> Result<(), BudgetSearchError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fault-injection"))]
     if let Some(error) = fault::adaptive(trace) {
         return Err(error);
     }
@@ -7173,6 +7297,15 @@ mod tests {
 
     impl FaultGuard {
         fn set(adaptive: bool, identity: bool, delay: std::time::Duration) -> Self {
+            Self::set_with(adaptive, identity, false, delay)
+        }
+
+        /// The adaptive diagnostics panic with an [`fault::InjectedPanic`].
+        fn set_panic() -> Self {
+            Self::set_with(false, false, true, std::time::Duration::ZERO)
+        }
+
+        fn set_with(adaptive: bool, identity: bool, panic: bool, delay: std::time::Duration) -> Self {
             let serial = FAULT_TESTS
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -7181,7 +7314,9 @@ mod tests {
                 p99_bits: p99.to_bits(),
                 adaptive,
                 identity,
+                panic,
                 delay,
+                start_delay: std::time::Duration::ZERO,
             });
             Self { _serial: serial }
         }
@@ -7361,5 +7496,81 @@ mod tests {
             }
             assert_eq!(runs.load(Ordering::SeqCst), 1, "on_pool={on_pool}");
         }
+    }
+
+    /// Runs `body` on its own thread and fails the test, instead of hanging it,
+    /// if it has not finished in ten seconds.
+    fn finishes_promptly<R: Send + 'static>(body: impl FnOnce() -> R + Send + 'static) -> R {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(body());
+        });
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the join hung: the cell was stranded by a panicking job")
+    }
+
+    /// A job that panics is caught where it runs and re-raised at `wait`, with
+    /// the payload it panicked with, whether the pool worker or the waiting
+    /// thread ran it. The pool worker survives (the process would abort
+    /// otherwise), and the cell is never left running.
+    #[test]
+    fn a_panicking_job_resumes_its_panic_at_wait_and_never_strands_the_cell() {
+        for on_pool in [false, true] {
+            let evidence = DeferredEvidence::queued(Box::new(|| {
+                std::panic::panic_any(fault::InjectedPanic(7))
+            }));
+            if on_pool {
+                evidence.spawn_on_shared_pool();
+            }
+            let join = DiagnosticsJoin {
+                evidence: Arc::clone(&evidence),
+            };
+            let payload = finishes_promptly(move || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| join.wait()))
+                    .expect_err("wait must re-raise the job's panic")
+            });
+            assert_eq!(
+                payload.downcast_ref::<fault::InjectedPanic>(),
+                Some(&fault::InjectedPanic(7)),
+                "on_pool={on_pool}: the payload must be the job's own"
+            );
+            // The cell finished: nothing is waiting on it any more.
+            assert!(evidence.result.get().is_some(), "on_pool={on_pool}");
+            assert!(matches!(*evidence.lock(), JobState::Finished));
+            // A later reader panics too (the payload is gone) instead of hanging.
+            let later = finishes_promptly(move || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = evidence.resolve();
+                }))
+                .is_err()
+            });
+            assert!(later, "on_pool={on_pool}");
+        }
+    }
+
+    /// The same through the real search: the injected panic in the adaptive
+    /// diagnostics comes out of `wait` with its own payload, and the next
+    /// search on the same pool still works.
+    #[test]
+    fn a_panic_in_the_real_diagnostics_reaches_the_waiter_with_its_payload() {
+        let (mesh, locks) = pawn_with_locks();
+        let budget = d2_budget(FAULT_PIXEL_UM);
+        {
+            let _fault = FaultGuard::set_panic();
+            let (_model, join) = deferred_model(&mesh, &locks, budget);
+            let payload = finishes_promptly(move || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| join.wait()))
+                    .expect_err("the diagnostics panic must reach the waiter")
+            });
+            assert_eq!(
+                payload.downcast_ref::<fault::InjectedPanic>(),
+                Some(&fault::InjectedPanic(0xD1A6))
+            );
+        }
+        // The pool is intact: an undisturbed deferred search completes.
+        let _quiet = FaultGuard::set(false, false, std::time::Duration::ZERO);
+        let (_model, join) = deferred_model(&mesh, &locks, budget);
+        finishes_promptly(move || join.wait()).unwrap();
     }
 }
