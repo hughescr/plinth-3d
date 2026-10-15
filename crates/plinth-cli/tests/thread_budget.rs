@@ -72,7 +72,6 @@ fn thread_count(pid: u32) -> usize {
 }
 
 struct Run {
-    stdout: String,
     stderr: String,
     peak_threads: usize,
     artifact: Vec<u8>,
@@ -128,7 +127,6 @@ fn prepare(scratch: &Scratch, label: &str, threads: Option<&str>, rayon_threads:
     );
     let artifact = std::fs::read(out_dir.join("mini.chitubox")).expect("emitted artifact");
     Run {
-        stdout,
         stderr,
         peak_threads,
         artifact,
@@ -137,10 +135,10 @@ fn prepare(scratch: &Scratch, label: &str, threads: Option<&str>, rayon_threads:
 
 /// The `[threads]` line of a run, or a failure that shows the whole log.
 fn threads_line(run: &Run) -> &str {
-    run.stdout
+    run.stderr
         .lines()
         .find(|line| line.starts_with("[threads] "))
-        .unwrap_or_else(|| panic!("no [threads] line in: {}", run.stdout))
+        .unwrap_or_else(|| panic!("no [threads] line in: {}", run.stderr))
 }
 
 /// `inline N, cross C, cold D` from the line.
