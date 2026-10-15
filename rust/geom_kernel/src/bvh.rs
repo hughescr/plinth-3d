@@ -51,6 +51,90 @@ pub struct Bvh {
     /// Global face IDs, reordered by the build (leaf ranges index into this).
     pub order: Vec<u32>,
     pub depth: usize,
+    /// One record per slot of `order`, in the same order: the face's geometry
+    /// copied next to its neighbours', plus a bounding ball. A leaf scan reads
+    /// one contiguous run instead of three scattered per-face arrays.
+    pub tris: Vec<LeafTri>,
+}
+
+/// The kernel's slack, in mm, on top of every bounding-ball distance test
+/// (see [`LeafTri`]); the part that does not scale with the query.
+pub const BALL_SLACK_MM: f64 = 1e-7;
+/// A face whose `|e1 x e2|^2 / L^4` (`L` its longest edge) is below this gets
+/// no ball: it is a needle, on which `closest_on_tri`'s interior branch can
+/// return a point far outside the face (nearest.rs, `tri_is_well_conditioned`).
+const BALL_MIN_SHAPE: f64 = 1e-4;
+/// Coefficient of the rounding term of the ball slack, `k * D^2` mm for an
+/// endpoint at distance `D` from the face: about 100 times the measured
+/// worst-case position error `1e-16 * D^2 / (L * shape)` of the interior branch.
+const BALL_ROUNDING_COEF: f64 = 1e-13;
+
+/// One face, copied in leaf order.
+///
+/// `v0`, `e1`, `e2` are the mesh's own bits. `centre` and `radius` bound the
+/// face in a ball (`radius` is the largest centre-to-vertex distance, rounded
+/// UP by a relative `1e-12`). `rounding` is `BALL_ROUNDING_COEF * L^3 / |n|^2`:
+/// the per-`D^2` part of the slack that covers the interior branch of
+/// `closest_on_tri`, or infinity for a needle face, which switches the ball
+/// test off for that face (a NaN or infinite slack never skips anything).
+#[derive(Clone, Copy)]
+pub struct LeafTri {
+    pub v0: V3,
+    pub e1: V3,
+    pub e2: V3,
+    pub centre: V3,
+    pub radius: f64,
+    pub rounding: f64,
+}
+
+impl LeafTri {
+    pub(crate) fn new(v0: V3, e1: V3, e2: V3) -> Self {
+        let v1 = [v0[0] + e1[0], v0[1] + e1[1], v0[2] + e1[2]];
+        let v2 = [v0[0] + e2[0], v0[1] + e2[1], v0[2] + e2[2]];
+        let mut lo = v0;
+        let mut hi = v0;
+        for v in [v1, v2] {
+            for k in 0..3 {
+                lo[k] = lo[k].min(v[k]);
+                hi[k] = hi[k].max(v[k]);
+            }
+        }
+        let centre = [
+            0.5 * (lo[0] + hi[0]),
+            0.5 * (lo[1] + hi[1]),
+            0.5 * (lo[2] + hi[2]),
+        ];
+        let mut r2 = 0.0f64;
+        for v in [v0, v1, v2] {
+            let d = [v[0] - centre[0], v[1] - centre[1], v[2] - centre[2]];
+            r2 = r2.max(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        }
+        let radius = r2.sqrt() * (1.0 + 1e-12);
+        let cr = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+        let n2 = cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2];
+        let e12 = [e2[0] - e1[0], e2[1] - e1[1], e2[2] - e1[2]];
+        let l2 = (e1[0] * e1[0] + e1[1] * e1[1] + e1[2] * e1[2])
+            .max(e2[0] * e2[0] + e2[1] * e2[1] + e2[2] * e2[2])
+            .max(e12[0] * e12[0] + e12[1] * e12[1] + e12[2] * e12[2]);
+        // `shape = n2 / l2^2 >= BALL_MIN_SHAPE` also rejects NaN and zero.
+        let rounding = if n2 >= BALL_MIN_SHAPE * l2 * l2 && n2 > 0.0 && radius.is_finite() {
+            BALL_ROUNDING_COEF * l2 * l2.sqrt() / n2
+        } else {
+            f64::INFINITY
+        };
+        LeafTri {
+            v0,
+            e1,
+            e2,
+            centre,
+            radius,
+            rounding,
+        }
+    }
 }
 
 #[inline]
@@ -124,10 +208,19 @@ impl Bvh {
             depth_cap,
         )?;
 
+        let tris = order
+            .iter()
+            .map(|&face_id| {
+                let face = face_id as usize;
+                LeafTri::new(mesh.v0(face), mesh.e1(face), mesh.e2(face))
+            })
+            .collect();
+
         Ok(Bvh {
             nodes,
             order,
             depth: max_depth,
+            tris,
         })
     }
 }

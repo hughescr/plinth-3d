@@ -9,9 +9,9 @@ use std::sync::OnceLock;
 
 use rayon::prelude::*;
 
-use crate::bvh::Bvh;
-use crate::closest::{closest_on_tri, segment_segment_distance_min};
-use crate::consts::{DEDUP_LOC_MM, EPS, THRESHOLD_BAND_MM};
+use crate::bvh::{Bvh, LeafTri, BALL_SLACK_MM};
+use crate::closest::{closest_on_tri, closest_on_tri_edges, segment_segment_distance_min};
+use crate::consts::{DEDUP_LOC_MM, DET_EPS, EPS, THRESHOLD_BAND_MM};
 use crate::mesh::Mesh;
 use crate::moller::{dedup_loc_into, ray_triangle_classified, RayTriangleClass};
 use crate::par;
@@ -37,7 +37,193 @@ const GOLDEN_STEPS: usize = 60;
 
 thread_local! {
     static STACK: RefCell<Vec<i32>> = RefCell::new(Vec::with_capacity(128));
+    /// The distance walk's stack: a node and its distance to the segment's box,
+    /// so a node popped later is not measured a second time.
+    static WALK_STACK: RefCell<Vec<(i32, f64)>> = RefCell::new(Vec::with_capacity(128));
     static ZSCRATCH: RefCell<Vec<f64>> = RefCell::new(Vec::with_capacity(64));
+}
+
+/// Segment `[a, b]` and the two numbers every face test of one walk shares.
+#[derive(Clone, Copy)]
+pub(crate) struct SegPre {
+    a: V3,
+    b: V3,
+    /// `b - a`, the very vector [`seg_tri_dist_geom`] builds.
+    ab: V3,
+    len2: f64,
+}
+
+impl SegPre {
+    #[inline]
+    pub(crate) fn new(a: V3, b: V3) -> Self {
+        let ab = sub(b, a);
+        Self {
+            a,
+            b,
+            ab,
+            len2: dot(ab, ab),
+        }
+    }
+
+    /// Whether the face's bounding ball proves its distance from the segment
+    /// at least `bound`, so the face cannot take a strict minimum below `bound`
+    /// (the walk's `d < best_d`) nor enter a band that ends at `bound`.
+    ///
+    /// Every candidate [`seg_tri_candidates`] weighs is the distance between a
+    /// point on the segment and a point on the face (the endpoint terms pass
+    /// through `closest_on_tri`, the edge terms through
+    /// `segment_segment_distance_min`; both return points of their operands), so
+    /// each is at least `dist(segment, centre) - radius`. The test therefore
+    /// demands that distance exceed `bound` by the ball's slack: a fixed
+    /// [`BALL_SLACK_MM`] for rounding of the distances themselves, plus the
+    /// face's `rounding * D^2` for the interior branch of `closest_on_tri`
+    /// (`D` the largest endpoint-to-vertex distance, bounded as
+    /// `D^2 <= 2 (|end - centre|^2 + radius^2)`). A face that could tie `bound`
+    /// is never skipped. NaN anywhere makes the comparison false, so a
+    /// non-finite input is never skipped; a needle face carries an infinite
+    /// `rounding` and is never skipped either.
+    ///
+    /// The pierce candidate (distance 0) is NOT covered here: the caller
+    /// classifies the ray first and sends a `Hit` down the full path.
+    #[inline]
+    fn ball_clears(&self, tri: &LeafTri, bound: f64) -> bool {
+        let w = sub(tri.centre, self.a);
+        let s = if self.len2 > 0.0 {
+            (dot(w, self.ab) / self.len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let foot = add(self.a, scale(self.ab, s));
+        let off = sub(tri.centre, foot);
+        let dist2 = dot(off, off);
+        let wb = sub(tri.centre, self.b);
+        let far2 = dot(w, w).max(dot(wb, wb));
+        let slack =
+            BALL_SLACK_MM + tri.rounding * 2.0 * (far2 + tri.radius * tri.radius);
+        let reach = bound + tri.radius + slack;
+        reach >= 0.0 && dist2 > reach * reach * (1.0 + 1e-12)
+    }
+}
+
+/// The distance candidates of one segment against one face: the least of the
+/// two endpoint distances and the three edge distances, each as the
+/// `norm`/`dist` of two real points (see [`SegPre::ball_clears`]). The pierce
+/// candidate is [`seg_tri_dist_geom`]'s.
+#[inline]
+fn seg_tri_candidates(a: V3, b: V3, v0: V3, e1: V3, e2: V3) -> (f64, V3) {
+    let p = v0;
+    let q = add(v0, e1);
+    let r = add(v0, e2);
+    // The reconstructed edges (Amendment A6), once for both endpoints.
+    let ab = sub(q, p);
+    let ac = sub(r, p);
+    let mut best_d = f64::INFINITY;
+    let mut best_pt: V3 = [0.0; 3];
+    // (a) endpoints vs triangle
+    let cpa = closest_on_tri_edges(a, p, q, r, ab, ac);
+    let da = norm(sub(a, cpa));
+    if da < best_d {
+        best_d = da;
+        best_pt = cpa;
+    }
+    let cpb = closest_on_tri_edges(b, p, q, r, ab, ac);
+    let db = norm(sub(b, cpb));
+    if db < best_d {
+        best_d = db;
+        best_pt = cpb;
+    }
+    // (b) segment vs each triangle edge — complete minimisation, no epsilon
+    for &(x, y) in &[(p, q), (q, r), (r, p)] {
+        let (d, _c1, c2) = segment_segment_distance_min(a, b, x, y);
+        if d < best_d {
+            best_d = d;
+            best_pt = c2;
+        }
+    }
+    (best_d, best_pt)
+}
+
+/// [`ray_triangle_classified`] of the segment's ray (`t_max` 1) against the
+/// face, with the common answer reached early. A determinant above `DET_EPS` is
+/// `Hit` or `Miss` and nothing else, and `Hit` needs every one of `u`, `v`,
+/// `u + v` to pass; each is read from the same expression the full function
+/// reads, so a failure is the same `Miss` it would return. Anything not
+/// rejected here goes to the full function, so a `Hit`, and every non-valid
+/// determinant, are its bits.
+#[inline]
+fn seg_ray_class(o: V3, dv: V3, v0: V3, e1: V3, e2: V3) -> RayTriangleClass {
+    let pvec = cross(dv, e2);
+    let det = dot(e1, pvec);
+    if det.abs() > DET_EPS {
+        let inv = 1.0 / det;
+        let tvec = sub(o, v0);
+        let u = dot(tvec, pvec) * inv;
+        // Written as a conjunction that is false for NaN, like `hit` itself.
+        let passes = u >= -EPS && {
+            let qvec = cross(tvec, e1);
+            let v = dot(dv, qvec) * inv;
+            v >= -EPS && u + v <= 1.0 + EPS
+        };
+        if !passes {
+            return RayTriangleClass::Miss;
+        }
+    }
+    ray_triangle_classified(o, dv, v0, e1, e2, 1.0)
+}
+
+/// Segment `[a, b]` vs the face `(v0, e1, e2)`: see [`NativeSurface::seg_tri_dist`].
+#[inline]
+fn seg_tri_dist_geom(a: V3, b: V3, v0: V3, e1: V3, e2: V3) -> (f64, V3, bool) {
+    let (mut best_d, mut best_pt) = seg_tri_candidates(a, b, v0, e1, e2);
+    // (c) interior pierce -> distance 0 at crossing point
+    let dv = sub(b, a);
+    let mut near_parallel = false;
+    match seg_ray_class(a, dv, v0, e1, e2) {
+        RayTriangleClass::Hit(hit) => {
+            let pierce = add(a, scale(dv, hit.t));
+            if 0.0 < best_d {
+                best_d = 0.0;
+                best_pt = pierce;
+            }
+        }
+        // Undecidable: the segment MIGHT pass through this face's interior,
+        // in which case the true distance is 0 and everything above it is an
+        // overestimate. Claiming 0 would be inventing a crossing; staying
+        // silent is the defect being removed. So: keep the bound, flag it.
+        RayTriangleClass::NearParallel => {
+            near_parallel = true;
+            charge_near_parallel(NearParallelSite::SegTriPierce, 1);
+        }
+        RayTriangleClass::ExactParallel | RayTriangleClass::Miss => {}
+    }
+    (best_d, best_pt, near_parallel)
+}
+
+/// [`seg_tri_dist_geom`] for a caller that only needs the answer when it is
+/// below `bound` (a walk's least distance so far, or the edge of a band).
+///
+/// Returns the very triple `seg_tri_dist_geom` returns whenever that distance
+/// is below `bound`; when the face's ball proves the distance is not, the
+/// distance is `INFINITY` (a point of zeros) and the flag is still exact, so a
+/// caller that reads the triple only through `d < bound` / `d <= bound` and
+/// counts the flag for every face sees no difference. The pierce is decided
+/// first and a `Hit` takes the full path, so the ball only ever replaces the
+/// endpoint and edge candidates.
+#[inline]
+fn seg_tri_dist_ball(seg: &SegPre, tri: &LeafTri, bound: f64) -> (f64, V3, bool) {
+    let class = seg_ray_class(seg.a, seg.ab, tri.v0, tri.e1, tri.e2);
+    if matches!(class, RayTriangleClass::Hit(_)) {
+        return seg_tri_dist_geom(seg.a, seg.b, tri.v0, tri.e1, tri.e2);
+    }
+    let near_parallel = matches!(class, RayTriangleClass::NearParallel);
+    if near_parallel {
+        charge_near_parallel(NearParallelSite::SegTriPierce, 1);
+    }
+    if seg.ball_clears(tri, bound) {
+        return (f64::INFINITY, [0.0; 3], near_parallel);
+    }
+    let (d, pt) = seg_tri_candidates(seg.a, seg.b, tri.v0, tri.e1, tri.e2);
+    (d, pt, near_parallel)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2325,55 +2511,7 @@ impl NativeSurface {
     /// [`NearParallelSite::SegTriPierce`].
     #[inline]
     pub(crate) fn seg_tri_dist(&self, a: V3, b: V3, t: usize) -> (f64, V3, bool) {
-        let v0 = self.mesh.v0(t);
-        let p = v0;
-        let q = add(v0, self.mesh.e1(t));
-        let r = add(v0, self.mesh.e2(t));
-        let mut best_d = f64::INFINITY;
-        let mut best_pt: V3 = [0.0; 3];
-        // (a) endpoints vs triangle
-        let cpa = closest_on_tri(a, p, q, r);
-        let da = norm(sub(a, cpa));
-        if da < best_d {
-            best_d = da;
-            best_pt = cpa;
-        }
-        let cpb = closest_on_tri(b, p, q, r);
-        let db = norm(sub(b, cpb));
-        if db < best_d {
-            best_d = db;
-            best_pt = cpb;
-        }
-        // (b) segment vs each triangle edge — complete minimisation, no epsilon
-        for &(x, y) in &[(p, q), (q, r), (r, p)] {
-            let (d, _c1, c2) = segment_segment_distance_min(a, b, x, y);
-            if d < best_d {
-                best_d = d;
-                best_pt = c2;
-            }
-        }
-        // (c) interior pierce -> distance 0 at crossing point
-        let dv = sub(b, a);
-        let mut near_parallel = false;
-        match ray_triangle_classified(a, dv, v0, self.mesh.e1(t), self.mesh.e2(t), 1.0) {
-            RayTriangleClass::Hit(hit) => {
-                let pierce = add(a, scale(dv, hit.t));
-                if 0.0 < best_d {
-                    best_d = 0.0;
-                    best_pt = pierce;
-                }
-            }
-            // Undecidable: the segment MIGHT pass through this face's interior,
-            // in which case the true distance is 0 and everything above it is an
-            // overestimate. Claiming 0 would be inventing a crossing; staying
-            // silent is the defect being removed. So: keep the bound, flag it.
-            RayTriangleClass::NearParallel => {
-                near_parallel = true;
-                charge_near_parallel(NearParallelSite::SegTriPierce, 1);
-            }
-            RayTriangleClass::ExactParallel | RayTriangleClass::Miss => {}
-        }
-        (best_d, best_pt, near_parallel)
+        seg_tri_dist_geom(a, b, self.mesh.v0(t), self.mesh.e1(t), self.mesh.e2(t))
     }
 
     /// Segment `[a, b]` against one triangle, for a member whose radius runs
@@ -2494,9 +2632,10 @@ impl NativeSurface {
         b: V3,
         excluded: &[u32],
     ) -> (f64, V3, u32) {
+        let seg = SegPre::new(a, b);
         let (best_d, best_pt, near_parallel, _) =
-            self.seg_surface_walk_excluding(a, b, excluded, 0.0, |_| false, |tid| {
-                self.seg_tri_dist(a, b, tid)
+            self.seg_surface_walk_excluding(a, b, excluded, 0.0, |_| false, |_, slot, bound| {
+                seg_tri_dist_ball(&seg, &self.bvh.tris[slot], bound)
             });
         (best_d, best_pt, near_parallel)
     }
@@ -2520,15 +2659,6 @@ impl NativeSurface {
     /// below one it held for (a "below this bound" test) proves the full
     /// walk's answer lies there too. `|_| false` is the full walk, bit for
     /// bit: the prune and the faces tested do not depend on `stop`.
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_possible_wrap,
-        clippy::cast_sign_loss,
-        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
-              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
-              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
-              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
-    )]
     fn seg_surface_walk_excluding(
         &self,
         a: V3,
@@ -2536,8 +2666,43 @@ impl NativeSurface {
         excluded: &[u32],
         slack: f64,
         stop: impl Fn(f64) -> bool,
-        mut face_cost: impl FnMut(usize) -> (f64, V3, bool),
+        face_cost: impl FnMut(usize, usize, f64) -> (f64, V3, bool),
     ) -> (f64, V3, u32, bool) {
+        let (best_d, best_pt, near_parallel, stopped, [nodes_visited, nodes_pruned, tris_tested]) =
+            self.seg_surface_walk_core(a, b, excluded, slack, stop, face_cost);
+        if crate::perf::enabled() {
+            crate::perf::add(crate::perf::Work::SegWalkQueries, 1);
+            crate::perf::add(crate::perf::Work::SegWalkNodesVisited, nodes_visited);
+            crate::perf::add(crate::perf::Work::SegWalkNodesPruned, nodes_pruned);
+            crate::perf::add(crate::perf::Work::SegWalkTrisTested, tris_tested);
+            // The batch loop that called this walk reads it back (per-row
+            // share of the batch's faces); thread-local, so no row sees
+            // another's.
+            crate::perf::note_walk_tris(tris_tested);
+        }
+        (best_d, best_pt, near_parallel, stopped)
+    }
+
+    /// The walk itself, without the `perf` charge: the answer and the three
+    /// tallies `[nodes visited, nodes pruned, faces tested]`. The kernel oracle
+    /// (`kernel_speed_tests`) calls this, so its parallel tests never write the
+    /// process-global counters the `perf` unit tests sum.
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
+    fn seg_surface_walk_core(
+        &self,
+        a: V3,
+        b: V3,
+        excluded: &[u32],
+        slack: f64,
+        stop: impl Fn(f64) -> bool,
+        mut face_cost: impl FnMut(usize, usize, f64) -> (f64, V3, bool),
+    ) -> (f64, V3, u32, bool, [u64; 3]) {
         let smin = box_min(a, b);
         let smax = box_max(a, b);
         let mut best_d = f64::INFINITY;
@@ -2549,21 +2714,26 @@ impl NativeSurface {
         let mut nodes_visited = 0u64;
         let mut nodes_pruned = 0u64;
         let mut tris_tested = 0u64;
-        STACK.with(|s| {
+        WALK_STACK.with(|s| {
             let mut stack = s.borrow_mut();
             stack.clear();
-            stack.push(0);
-            while let Some(ni) = stack.pop() {
+            let root = &self.bvh.nodes[0];
+            stack.push((0, box_box_dist(smin, smax, root.bmin, root.bmax)));
+            // Each entry carries its node's distance from the segment's box,
+            // measured when it was pushed: the same call on the same operands
+            // the pop used to repeat, so the prune reads the same bits.
+            while let Some((ni, node_dist)) = stack.pop() {
                 nodes_visited += 1;
                 let node = &self.bvh.nodes[ni as usize];
-                if box_box_dist(smin, smax, node.bmin, node.bmax) - slack > best_d {
+                if node_dist - slack > best_d {
                     nodes_pruned += 1;
                     continue;
                 }
                 if node.leaf {
                     let start = node.a as usize;
                     let cnt = node.b as usize;
-                    for &tid in &self.bvh.order[start..start + cnt] {
+                    for slot in start..start + cnt {
+                        let tid = self.bvh.order[slot];
                         // `tid` IS the global face ID: leaf order carries global
                         // IDs even for a narrowed view (bvh.rs `build`), which is
                         // the same fact `seg_tri_dist` relies on one line below to
@@ -2575,7 +2745,10 @@ impl NativeSurface {
                             continue;
                         }
                         tris_tested += 1;
-                        let (d, pt, np) = face_cost(tid as usize);
+                        // The face test is told the least cost so far: a face it
+                        // can show is not below it may answer `INFINITY`, which
+                        // `d < best_d` rejects exactly as the true cost would.
+                        let (d, pt, np) = face_cost(tid as usize, slot, best_d);
                         if np {
                             near_parallel += 1;
                         }
@@ -2593,33 +2766,37 @@ impl NativeSurface {
                         break;
                     }
                 } else {
-                    let l = node.a as usize;
-                    let r = node.b as usize;
-                    let dl =
-                        box_box_dist(smin, smax, self.bvh.nodes[l].bmin, self.bvh.nodes[l].bmax);
-                    let dr =
-                        box_box_dist(smin, smax, self.bvh.nodes[r].bmin, self.bvh.nodes[r].bmax);
+                    let l = node.a;
+                    let r = node.b;
+                    let dl = box_box_dist(
+                        smin,
+                        smax,
+                        self.bvh.nodes[l as usize].bmin,
+                        self.bvh.nodes[l as usize].bmax,
+                    );
+                    let dr = box_box_dist(
+                        smin,
+                        smax,
+                        self.bvh.nodes[r as usize].bmin,
+                        self.bvh.nodes[r as usize].bmax,
+                    );
                     if dl <= dr {
-                        stack.push(r as i32);
-                        stack.push(l as i32);
+                        stack.push((r, dr));
+                        stack.push((l, dl));
                     } else {
-                        stack.push(l as i32);
-                        stack.push(r as i32);
+                        stack.push((l, dl));
+                        stack.push((r, dr));
                     }
                 }
             }
         });
-        if crate::perf::enabled() {
-            crate::perf::add(crate::perf::Work::SegWalkQueries, 1);
-            crate::perf::add(crate::perf::Work::SegWalkNodesVisited, nodes_visited);
-            crate::perf::add(crate::perf::Work::SegWalkNodesPruned, nodes_pruned);
-            crate::perf::add(crate::perf::Work::SegWalkTrisTested, tris_tested);
-            // The batch loop that called this walk reads it back (per-row
-            // share of the batch's faces); thread-local, so no row sees
-            // another's.
-            crate::perf::note_walk_tris(tris_tested);
-        }
-        (best_d, best_pt, near_parallel, stopped)
+        (
+            best_d,
+            best_pt,
+            near_parallel,
+            stopped,
+            [nodes_visited, nodes_pruned, tris_tested],
+        )
     }
 
     /// **Whether some face proves the capsule row `[a, b]` below its bound**:
@@ -2637,6 +2814,24 @@ impl NativeSurface {
     /// cannot hold a face within that distance; it stops at the first face
     /// that proves the row below. `false` proves nothing (the caller runs the
     /// full walk): finding no face is never read as a pass.
+    fn seg_face_below(&self, a: V3, b: V3, thresh: f64, at_least: f64) -> bool {
+        let Some((found, tris_tested)) = self.seg_face_below_core(a, b, thresh, at_least) else {
+            return false;
+        };
+        if crate::perf::enabled() {
+            crate::perf::add(crate::perf::Work::SegProveQueries, 1);
+            crate::perf::add(crate::perf::Work::SegProveRefused, u64::from(found));
+            crate::perf::add(crate::perf::Work::SegProveTrisTested, tris_tested);
+            if found {
+                crate::perf::note_walk_tris(tris_tested);
+            }
+        }
+        found
+    }
+
+    /// The search itself, without the `perf` charge: `None` when the bound or
+    /// the segment is unusable (no search ran, nothing to charge), else whether
+    /// a face proves the row below and how many faces it tested.
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_possible_wrap,
@@ -2645,16 +2840,28 @@ impl NativeSurface {
         reason = "a piece count of a finite segment over a positive length, clamped to 1..=u16::MAX; \
                   BVH node indices are 32-bit by the kernel's named limit, as in the walk"
     )]
-    fn seg_face_below(&self, a: V3, b: V3, thresh: f64, at_least: f64) -> bool {
+    fn seg_face_below_core(
+        &self,
+        a: V3,
+        b: V3,
+        thresh: f64,
+        at_least: f64,
+    ) -> Option<(bool, u64)> {
         let within = at_least + thresh;
         if !(within > 0.0 && within.is_finite()) {
-            return false;
+            return None;
         }
         let length = norm(sub(b, a));
         if !length.is_finite() {
-            return false;
+            return None;
         }
         let pieces = (length / within).ceil().clamp(1.0, f64::from(u16::MAX)) as usize;
+        // A face whose distance is at least `reach` reads `d - thresh >=
+        // at_least` (`reach` is `within` raised by 1e-12 of itself and 1e-12,
+        // far above the rounding of `within` and of the subtraction), so the
+        // ball test may answer `INFINITY` for it.
+        let seg = SegPre::new(a, b);
+        let reach = within * (1.0 + 1e-12) + 1e-12;
         let mut tris_tested = 0u64;
         let mut found = false;
         STACK.with(|s| {
@@ -2675,9 +2882,9 @@ impl NativeSurface {
                     if node.leaf {
                         let start = node.a as usize;
                         let cnt = node.b as usize;
-                        for &tid in &self.bvh.order[start..start + cnt] {
+                        for tri in &self.bvh.tris[start..start + cnt] {
                             tris_tested += 1;
-                            let (d, _, _) = self.seg_tri_dist(a, b, tid as usize);
+                            let (d, _, _) = seg_tri_dist_ball(&seg, tri, reach);
                             if d - thresh < at_least {
                                 found = true;
                                 break 'pieces;
@@ -2699,15 +2906,7 @@ impl NativeSurface {
                 }
             }
         });
-        if crate::perf::enabled() {
-            crate::perf::add(crate::perf::Work::SegProveQueries, 1);
-            crate::perf::add(crate::perf::Work::SegProveRefused, u64::from(found));
-            crate::perf::add(crate::perf::Work::SegProveTrisTested, tris_tested);
-            if found {
-                crate::perf::note_walk_tris(tris_tested);
-            }
-        }
-        found
+        Some((found, tris_tested))
     }
 
     /// One segment clearance. Tier-1 open-space branch is NOT reproduced
@@ -2802,13 +3001,14 @@ impl NativeSurface {
         }
         let (best_d, best_pt, near_parallel_faces, stopped) = if tapered {
             let (r_a, r_b) = (r_lo, r_hi);
-            self.seg_surface_walk_excluding(a, b, excluded, r_a.max(r_b), below, |tid| {
+            self.seg_surface_walk_excluding(a, b, excluded, r_a.max(r_b), below, |tid, _, _| {
                 self.seg_tri_frustum_cost(a, b, r_a, r_b, tid)
             })
         } else {
             // `seg_surface_min_excluding`'s walk, with the stop.
-            self.seg_surface_walk_excluding(a, b, excluded, 0.0, below, |tid| {
-                self.seg_tri_dist(a, b, tid)
+            let seg = SegPre::new(a, b);
+            self.seg_surface_walk_excluding(a, b, excluded, 0.0, below, |_, slot, bound| {
+                seg_tri_dist_ball(&seg, &self.bvh.tris[slot], bound)
             })
         };
         if stopped {
@@ -3282,6 +3482,7 @@ impl NativeSurface {
         let smax = box_max(a, b);
         let mut found: Vec<u32> = Vec::new();
         let mut near_parallel = 0u32;
+        let seg = SegPre::new(a, b);
         let mut stack: Vec<i32> = vec![0];
         while let Some(ni) = stack.pop() {
             let node = &self.bvh.nodes[ni as usize];
@@ -3291,8 +3492,12 @@ impl NativeSurface {
             if node.leaf {
                 let start = node.a as usize;
                 let cnt = node.b as usize;
-                for &tid in &self.bvh.order[start..start + cnt] {
-                    let (d, _, np) = self.seg_tri_dist(a, b, tid as usize);
+                for slot in start..start + cnt {
+                    let tid = self.bvh.order[slot];
+                    // A face the ball proves beyond the band answers `INFINITY`,
+                    // which `d <= within_mm` rejects as the true distance would;
+                    // its `np` flag is exact either way.
+                    let (d, _, np) = seg_tri_dist_ball(&seg, &self.bvh.tris[slot], within_mm);
                     if np {
                         // Counted, NOT admitted on the strength of the
                         // undecidable pierce: an exemption grows only on proof.
@@ -4563,3 +4768,9 @@ mod cardinal_trig_tests {
         }
     }
 }
+
+/// Kc: the faster segment-to-surface kernel against verbatim copies of the one
+/// it replaced (bit-exact distance, witness, tally, stop flag and winning face).
+#[cfg(all(test, feature = "testkit"))]
+#[path = "kernel_speed_tests.rs"]
+mod kernel_speed_tests;

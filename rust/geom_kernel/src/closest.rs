@@ -14,66 +14,73 @@ use crate::vec3::{add, dot, scale, sub, V3};
 /// E1/E2 (Amendment A6).
 #[inline]
 pub fn closest_on_tri(p: V3, a: V3, b: V3, cc: V3) -> V3 {
-    let ab = sub(b, a);
-    let ac = sub(cc, a);
+    closest_on_tri_edges(p, a, b, cc, sub(b, a), sub(cc, a))
+}
+
+/// [`closest_on_tri`] with the two edge vectors `ab = b - a` and `ac = cc - a`
+/// handed in, for a caller that tests several points against one triangle.
+/// They MUST be the reconstructed differences `sub(b, a)` and `sub(cc, a)`
+/// (Amendment A6), never the raw `e1` and `e2`.
+///
+/// Every output is the same f64 expression as the oracle's, evaluated in the
+/// same operand order; only the ORDER OF EVALUATION is lazy. The oracle builds
+/// all seven candidate points and then picks one by mask priority. Each mask is
+/// a pure function of the dot products, so this computes the masks first, in
+/// priority order, and builds only the winning point. A vertex region (the
+/// common case for a point far from a face) costs two to six dot products and no
+/// division at all.
+#[inline]
+pub(crate) fn closest_on_tri_edges(p: V3, a: V3, b: V3, cc: V3, ab: V3, ac: V3) -> V3 {
     let ap = sub(p, a);
     let d1 = dot(ab, ap);
     let d2 = dot(ac, ap);
+    // The oracle applies np.where in order base<-cBC<-cAC<-cAB<-C<-B<-A, so the
+    // LAST-applied mask (mA) wins: reversed priority mA > mB > mC > mAB > mAC >
+    // mBC > base.
+    if (d1 <= 0.0) && (d2 <= 0.0) {
+        return a;
+    }
     let bp = sub(p, b);
     let d3 = dot(ab, bp);
     let d4 = dot(ac, bp);
+    if (d3 >= 0.0) && (d4 <= d3) {
+        return b;
+    }
     let cp = sub(p, cc);
     let d5 = dot(ab, cp);
     let d6 = dot(ac, cp);
+    if (d6 >= 0.0) && (d5 <= d6) {
+        return cc;
+    }
     let vc = d1 * d4 - d3 * d2;
     let vb = d5 * d2 - d1 * d6;
     let va = d3 * d6 - d5 * d4;
+
+    // edge parameters with the oracle's `where((den)!=0, num/den, 0.0)` guard
+    if (vc <= 0.0) && (d1 >= 0.0) && (d3 <= 0.0) {
+        let den_ab = d1 - d3;
+        let t_ab = if den_ab != 0.0 { d1 / den_ab } else { 0.0 };
+        return add(a, scale(ab, t_ab));
+    }
+    if (vb <= 0.0) && (d2 >= 0.0) && (d6 <= 0.0) {
+        let den_ac = d2 - d6;
+        let t_ac = if den_ac != 0.0 { d2 / den_ac } else { 0.0 };
+        return add(a, scale(ac, t_ac));
+    }
+    if (va <= 0.0) && ((d4 - d3) >= 0.0) && ((d5 - d6) >= 0.0) {
+        let den_bc = (d4 - d3) + (d5 - d6);
+        let t_bc = if den_bc != 0.0 {
+            (d4 - d3) / den_bc
+        } else {
+            0.0
+        };
+        return add(b, scale(sub(cc, b), t_bc)); // B + (Cc - B)*tBC
+    }
     let denom = 1.0 / (va + vb + vc + CLOSEST_DENOM_REG);
     let v = vb * denom;
     let w = vc * denom;
     // base out = A + ab*v + ac*w  (association ((A + ab*v) + ac*w))
-    let base = add(add(a, scale(ab, v)), scale(ac, w));
-
-    // edge parameters with the oracle's `where((den)!=0, num/den, 0.0)` guard
-    let den_ab = d1 - d3;
-    let t_ab = if den_ab != 0.0 { d1 / den_ab } else { 0.0 };
-    let den_ac = d2 - d6;
-    let t_ac = if den_ac != 0.0 { d2 / den_ac } else { 0.0 };
-    let den_bc = (d4 - d3) + (d5 - d6);
-    let t_bc = if den_bc != 0.0 {
-        (d4 - d3) / den_bc
-    } else {
-        0.0
-    };
-    let c_ab = add(a, scale(ab, t_ab));
-    let c_ac = add(a, scale(ac, t_ac));
-    let c_bc = add(b, scale(sub(cc, b), t_bc)); // B + (Cc - B)*tBC
-
-    let m_bc = (va <= 0.0) && ((d4 - d3) >= 0.0) && ((d5 - d6) >= 0.0);
-    let m_ac = (vb <= 0.0) && (d2 >= 0.0) && (d6 <= 0.0);
-    let m_ab = (vc <= 0.0) && (d1 >= 0.0) && (d3 <= 0.0);
-    let m_c = (d6 >= 0.0) && (d5 <= d6);
-    let m_b = (d3 >= 0.0) && (d4 <= d3);
-    let m_a = (d1 <= 0.0) && (d2 <= 0.0);
-
-    // The oracle applies np.where in order base<-cBC<-cAC<-cAB<-C<-B<-A, so the
-    // LAST-applied mask (mA) wins: reversed priority mA > mB > mC > mAB > mAC >
-    // mBC > base.
-    if m_a {
-        a
-    } else if m_b {
-        b
-    } else if m_c {
-        cc
-    } else if m_ab {
-        c_ab
-    } else if m_ac {
-        c_ac
-    } else if m_bc {
-        c_bc
-    } else {
-        base
-    }
+    add(add(a, scale(ab, v)), scale(ac, w))
 }
 
 /// Closest distance between two 3D segments, plus the closest point on each.
