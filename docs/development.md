@@ -576,8 +576,9 @@ the row count when one is open.
 
 Measured 2026-10-15 on an Apple M3 Max, 12 threads, untraced, solo (`--timing` lock), Deinonychus
 and Bat_Cat_Owl (BCO) in the `perf-2026-10-09` input set, same session, against the plain
-`release` binary of the same commit. Every row gives the reference fingerprints: Bat_Cat_Owl
-`5132fb1a`, Cylinder `f442e573`, Deinonychus `d73742b2`.
+`release` binary of the same commit. Every run below produced the reference fingerprints
+(first 8 hex digits of the `.chitubox` sha256): Bat_Cat_Owl `5132fb1a`, Cylinder `f442e573`,
+Deinonychus `d73742b2`.
 
 | Build | Deinonychus s | BCO s | Cylinder peak RSS | Clean build s |
 |---|---|---|---|---|
@@ -585,6 +586,10 @@ and Bat_Cat_Owl (BCO) in the `perf-2026-10-09` input set, same session, against 
 | `release` + `target-cpu=apple-m3` (the default now) | 64.2 | 16.4 | | |
 | + mimalloc | 63.5 | 16.0 | 13.57 GB | |
 | + jemalloc | 65.0 | 15.4 | 13.41 GB | |
+| `release-max` (fat LTO, 1 codegen unit; M3, system allocator) | 64.2 | 15.7 | | 105 |
+| PGO on `release-max` (`scripts/build-pgo.sh`, trained on BCO and Deinonychus) | 57.5 / 58.1 | 14.6 | 13.76 GB | 584 (instrumented build, training, final build; shared machine) |
+
+Cylinder is not in the PGO training set: base 96.2 s, PGO 80.9 s (-16 %), same fingerprint.
 
 The run to run spread of one binary is about 0.6 s on Deinonychus (two base runs: 63.6 and
 64.2 s) and 0.5 s on BCO. A difference smaller than that is not a result.
@@ -616,6 +621,20 @@ The run to run spread of one binary is about 0.6 s on Deinonychus (two base runs
   are `lip_seat::apply`, `propose` and `trial_arm` (33 % of all bytes), `tip_landing::seat_faces`
   (6 %, 0.9 MB each) and `PointCloudIndex::radius_neighbors_batch` (5.5 %, 5.6 MB each). They are
   the candidates for reused buffers or arenas; the allocator is not the lever.
+- **Fat LTO.** `cargo build --profile release-max -p plinth-cli` (fat LTO, one codegen unit;
+  binary in `target/release-max/plinth`). It built in the same time as `release` here (105 s
+  against 102 s; both clean, shared machine) and gained nothing that shows (Deinonychus user
+  time -1 %). It is opt-in: it does no harm, and `scripts/build-pgo.sh` uses it as its base.
+  Check it again when the hot code changes shape, not on every build.
+- **Profile-guided optimization (PGO).** The one flag that pays. `scripts/build-pgo.sh --train DIR
+  [--train DIR ...]` builds an instrumented binary, runs the training models, merges the
+  profiles and rebuilds with `-Cprofile-use`; it needs `llvm-profdata` (rustup `llvm-tools`).
+  Trained on Bat_Cat_Owl and Deinonychus it retires 20 % fewer instructions on Deinonychus
+  (3042 G to 2431 G) and uses 7 % fewer cycles; wall time falls 9 % on Deinonychus (second
+  contact 31.6 to 28.0 s, production 25.3 to 22.9 s) and 8 % on BCO, and 16 % on Cylinder, which
+  the profile never saw. Output is byte-identical. Not the default build (a ten minute build
+  against under two); use it for a delivery run, and rebuild the profile after the hot code
+  changes much. Wrap the build in the CPU lock as one shared job.
 - **Where the time goes (Deinonychus).** Instructions and cycles come from the kernel's
   per-process counters (`proc_pid_rusage`, read every 0.5 s); the issue-slot split comes from
   Instruments "CPU Counters" (`xctrace record --template 'CPU Counters' --attach PID`, 15 s from
@@ -624,8 +643,8 @@ The run to run spread of one binary is about 0.6 s on Deinonychus (two base runs
   instructions in 196 G cycles (IPC 4.07) but keeps only 1.6 performance-core equivalents busy
   (46 s user and 9.6 s system CPU time in a 31.6 s stage). Production: IPC 4.25 on 3.9 cores.
   Prefilter: IPC 3.3 on 6.4 cores. An IPC of 3.4 to 4.3 is high for this core, so the code is
-  not waiting on memory. The issue-slot split of the second contact stage is back-end
-  processing 52 %, useful work 22 %, work discarded by mispredicted branches 19 %, instruction
+  not waiting on memory. The issue-slot split of the second contact stage (measured on the PGO
+  build) is back-end processing 52 %, useful work 22 %, work discarded by mispredicted branches 19 %, instruction
   delivery (front end) 6.5 %: **compute (back-end) bound, with mispredicts costing about a
   fifth of the slots, no front-end or memory wall.** Separate L1D and L2 miss rates and branch
   mispredict counts need a custom counter set that only the Instruments application can save,

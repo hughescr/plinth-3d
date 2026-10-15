@@ -36,6 +36,18 @@ opt-level = 2
 # Default codegen units; no target-cpu=native or fast-math.
 lto = "thin"
 
+# Opt-in whole-program build: fat LTO and one codegen unit.  Everyday builds keep
+# the `release` profile above, so lane iteration speed is unchanged.  Build it
+# with `cargo build --profile release-max -p plinth-cli`; the binary is
+# `target/release-max/plinth`.  Panic behaviour is unchanged (the code catches
+# panics, so NEVER set `panic = "abort"` here).  `scripts/build-pgo.sh` uses it
+# as the base of the profile-guided build.  Measurements and the reason it is
+# not the default: `docs/development.md`, "Build flags and allocator".
+[profile.release-max]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
 [profile.dev-opt]
 inherits = "dev"
 opt-level = 2
