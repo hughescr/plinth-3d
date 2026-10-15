@@ -346,6 +346,24 @@ impl ObjectiveWeights {
         self
     }
 
+    /// TEST ONLY: the support-area weight replaced, so a test can show the
+    /// early stop's lower bound is refused when a weight is not `>= 0`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn with_support_area_weight(mut self, weight: f64) -> Self {
+        self.support_area_cm2 = weight;
+        self
+    }
+
+    /// TEST ONLY: the scar weight replaced; see
+    /// [`Self::with_support_area_weight`].
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn with_scar_weight(mut self, weight: f64) -> Self {
+        self.scar = weight;
+        self
+    }
+
     #[must_use]
     pub const fn support_area_cm2(self) -> f64 {
         self.support_area_cm2

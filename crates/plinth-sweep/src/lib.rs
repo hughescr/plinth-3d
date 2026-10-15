@@ -43,6 +43,7 @@
 
 pub mod adapter;
 pub(crate) mod births;
+pub mod cancel;
 pub mod cavity;
 pub mod congestion;
 pub mod contact_growth;
@@ -647,6 +648,11 @@ pub enum SweepError {
     Slice(String),
     #[error("the model needs more than {limit} struts")]
     StrutLimit { limit: usize },
+    /// The caller withdrew this sweep at a safe point ([`cancel`]). Only a
+    /// run inside [`cancel::with_token`] can return it; the orientation
+    /// search's certified early stop is the one such caller.
+    #[error("the sweep was cancelled at a safe point")]
+    Cancelled,
 }
 
 /// How the removal pass decides that an under-loaded arm's demand is still
@@ -1788,6 +1794,39 @@ pub fn run_sweep_with_holes(
     drains: &[DrainSpec],
     vents: &[DrainSpec],
 ) -> Result<SweepPlan, SweepError> {
+    // Not a race pose: a token this thread carries in (a job stolen while a
+    // raced pose waits) belongs to somebody else's sweep and must not stop
+    // this one ([`cancel::without_token`]).
+    cancel::without_token(|| run_sweep_inner(mesh, plan, policy, drains, vents, None))
+}
+
+/// [`run_sweep`] for the orientation search's own pose measurement, which
+/// decides the thread's cancel token itself (`orient_demand`: a raced pose
+/// installs its own, every other pose clears it), so this entry leaves the
+/// token alone.
+pub(crate) fn run_sweep_in_token_scope(
+    mesh: &Mesh,
+    plan: &LayerPlan,
+    policy: &SweepPolicy,
+) -> Result<SweepPlan, SweepError> {
+    let policy = SweepPolicy {
+        rigid_share_diagnostic: false,
+        stage_shake_diagnostic: false,
+        ..*policy
+    };
+    run_sweep_inner(mesh, plan, &policy, &[], &[], None)
+}
+
+/// [`run_sweep_with_holes`] for the orientation search's own pose
+/// measurement; leaves the cancel token as the caller set it (see
+/// [`run_sweep_in_token_scope`]).
+pub(crate) fn run_sweep_with_holes_in_token_scope(
+    mesh: &Mesh,
+    plan: &LayerPlan,
+    policy: &SweepPolicy,
+    drains: &[DrainSpec],
+    vents: &[DrainSpec],
+) -> Result<SweepPlan, SweepError> {
     run_sweep_inner(mesh, plan, policy, drains, vents, None)
 }
 
@@ -1844,7 +1883,9 @@ pub fn run_sweep_with_second_contact(
             .map(|short| (short.planned_mm2 - short.real_mm2).max(0.0))
             .sum()
     };
-    let second = run_sweep_inner(mesh, plan, policy, drains, vents, Some(&caps))?;
+    let second = cancel::without_token(|| {
+        run_sweep_inner(mesh, plan, policy, drains, vents, Some(&caps))
+    })?;
     let outcome = contact_growth::SecondContactOutcome {
         attempted: true,
         tips_capped: caps.len(),
@@ -1911,6 +1952,7 @@ fn run_sweep_inner(
         .collect();
     let slices = slice_stack(mesh, &planes, slice_limits(policy))
         .map_err(|error| SweepError::Slice(error.to_string()))?;
+    cancel::checkpoint()?;
 
     // The drain keep-out is built BEFORE any arm is placed, because a keep-out
     // consulted after placement is a repair, and a repair that deletes arms
@@ -2148,6 +2190,7 @@ fn run_sweep_inner(
     };
 
     for (layer, solids) in slices.iter().enumerate().take(layers) {
+        cancel::checkpoint()?;
         rasteriser_entries += 1;
         rasterize_into(&grid, solids, &mut scratch, &mut masks);
         if masks.cover.iter().all(|filled| !*filled) {
@@ -2298,6 +2341,7 @@ fn run_sweep_inner(
     } else {
         down_sweep::InsertionPolicy::disabled()
     };
+    cancel::checkpoint()?;
     perf::add(PerfWork::SweepDownCallInitial, 1);
     let mut outcome = down_sweep::run(
         &grid,
@@ -2402,6 +2446,7 @@ fn run_sweep_inner(
                 rolled_back = attempt > 0;
                 break;
             }
+            cancel::checkpoint()?;
             perf::add(PerfWork::SweepDownCallRemoval, 1);
             outcome = down_sweep::run(
                 &grid,
@@ -2471,6 +2516,7 @@ fn run_sweep_inner(
             break;
         }
         merges_refused_by_radius += unmerged.undone;
+        cancel::checkpoint()?;
         perf::add(PerfWork::SweepDownCallMergesUndone, 1);
         outcome = down_sweep::run(
             &grid,
@@ -2539,6 +2585,7 @@ fn run_sweep_inner(
                 break;
             }
             congestion_outcome.rounds_used += 1;
+            cancel::checkpoint()?;
             perf::add(PerfWork::SweepDownCallCongestion, 1);
             outcome = down_sweep::run(
                 &grid,
@@ -2717,6 +2764,7 @@ fn run_sweep_inner(
                 break;
             }
             stranded_branch_outcome.rounds += 1;
+            cancel::checkpoint()?;
             perf::add(PerfWork::SweepDownCallStrandedRound, 1);
             outcome = down_sweep::run(
                 &grid,
@@ -2735,6 +2783,7 @@ fn run_sweep_inner(
                 &mut stranded_branch_outcome,
             );
             if undone > 0 {
+                cancel::checkpoint()?;
                 perf::add(PerfWork::SweepDownCallStrandedPutBack, 1);
                 outcome = down_sweep::run(
                     &grid,
@@ -2770,6 +2819,7 @@ fn run_sweep_inner(
     if slenderness_outcome.merges_forced > 0 {
         // A moved arm has a stale ledger; the same down-sweep that sized the
         // field sizes it again.
+        cancel::checkpoint()?;
         perf::add(PerfWork::SweepDownCallForcedMerges, 1);
         outcome = down_sweep::run(
             &grid,
@@ -2803,6 +2853,7 @@ fn run_sweep_inner(
             }
             merges_refused_by_radius += unmerged.undone;
             unmerged_after_merges += unmerged.undone;
+            cancel::checkpoint()?;
             perf::add(PerfWork::SweepDownCallUnmergeAfterMerges, 1);
             outcome = down_sweep::run(
                 &grid,
@@ -2887,6 +2938,7 @@ fn run_sweep_inner(
     // Descents a sized field put back (arm id, base cell), refused for the
     // rest of the rule, both runs.
     let mut lip_seat_refused: Vec<(u32, usize)> = Vec::new();
+    cancel::checkpoint()?;
     if let Some(sized) = lip_seat_run.run(
         &head_join_context,
         &mut struts,
@@ -2899,6 +2951,7 @@ fn run_sweep_inner(
         outcome = sized;
     }
     if drop_unheld(&mut struts, &mut lip_seat_outcome, &mut lip_seat_refused, &mut stranded) {
+        cancel::checkpoint()?;
         outcome = lip_seat_run.size(&slenderness_context, &mut struts);
     }
     if policy.lip_seat {
@@ -2930,6 +2983,7 @@ fn run_sweep_inner(
             slices: &slices,
         };
         if graze::convert(&graze_env, &mut struts, &mut graze_outcome) > 0 {
+            cancel::checkpoint()?;
             perf::add(PerfWork::SweepDownCallGraze, 1);
             outcome = down_sweep::run(
                 &grid,
@@ -2976,6 +3030,7 @@ fn run_sweep_inner(
                 break;
             }
             perf::add(PerfWork::SweepHeadJoinPasses, 1);
+            cancel::checkpoint()?;
             perf::add(PerfWork::SweepDownCallHeadJoin, 1);
             outcome = down_sweep::run(
                 &grid,
@@ -3002,6 +3057,7 @@ fn run_sweep_inner(
     // free to meet its face within its limit. Still before the ties: a tied
     // member never moves.
     if policy.lip_seat {
+        cancel::checkpoint()?;
         if let Some(sized) = lip_seat_run.run(
             &head_join_context,
             &mut struts,
@@ -3014,6 +3070,7 @@ fn run_sweep_inner(
             outcome = sized;
         }
         if drop_unheld(&mut struts, &mut lip_seat_outcome, &mut lip_seat_refused, &mut stranded) {
+            cancel::checkpoint()?;
             outcome = lip_seat_run.size(&slenderness_context, &mut struts);
         }
         landings.record(
@@ -3053,6 +3110,7 @@ fn run_sweep_inner(
         // down-sweep that sized the field sizes the braces and the masts,
         // splits both shafts at every junction the crosses made, and keeps
         // every thickened root as a minimum beside the area law.
+        cancel::checkpoint()?;
         perf::add(PerfWork::SweepDownCallTies, 1);
         outcome = down_sweep::run(
             &grid,
@@ -3105,6 +3163,7 @@ fn run_sweep_inner(
                 }
                 slenderness_outcome.tie_passes += 1;
                 perf::add(PerfWork::SweepTiePasses, 1);
+                cancel::checkpoint()?;
                 perf::add(PerfWork::SweepDownCallModelTies, 1);
                 outcome = down_sweep::run(
                     &grid,
@@ -3158,6 +3217,7 @@ fn run_sweep_inner(
             ..lip_seat_run
         };
         let mut refused: Vec<(u32, usize)> = Vec::new();
+        cancel::checkpoint()?;
         if let Some(sized) = reroute.run(
             &head_join_context,
             &mut struts,
@@ -3203,6 +3263,7 @@ fn run_sweep_inner(
                 slenderness_outcome.tie_passes += 1;
                 slenderness_outcome.retie_passes_after_reroute += 1;
                 slenderness_outcome.retie_remedies_after_reroute += applied;
+                cancel::checkpoint()?;
                 outcome = reroute.size(&slenderness_context, &mut struts);
             }
             let runs_left = policy.slenderness_model_tie
@@ -3241,6 +3302,7 @@ fn run_sweep_inner(
                         slenderness_outcome.tie_passes += 1;
                         slenderness_outcome.retie_passes_after_reroute += 1;
                         slenderness_outcome.retie_remedies_after_reroute += applied;
+                        cancel::checkpoint()?;
                         outcome = reroute.size(&slenderness_context, &mut struts);
                     }
                 }
@@ -3287,6 +3349,7 @@ fn run_sweep_inner(
         let mut late = heads::HeadsOutcome::default();
         let converted = graze::convert(&graze_env, &mut struts, &mut late);
         if converted > 0 {
+            cancel::checkpoint()?;
             perf::add(PerfWork::SweepDownCallGraze, 1);
             outcome = down_sweep::run(
                 &grid,
@@ -3629,6 +3692,7 @@ fn run_sweep_inner(
     // un-merging have settled the strut set, and never during a pass that is
     // still moving arms around. The lowering drives the tip ball into it and
     // trims the ball and the first shaft segment to its plane.
+    cancel::checkpoint()?;
     let (mut seat_faces, seat_face_hits, seat_triangles) =
         tip_landing::tip_seat_faces_counted_with_ids(mesh, &grid, &struts, plate_z, height, seat_face_rule);
     // THE FOOTPRINT NORMAL (Craig ruling 2026-10-05): every support arm's seat
@@ -4565,6 +4629,11 @@ impl LipSeatRun<'_> {
             // previous pass left, which each check judged against before.
             let mut previous: Option<lip_seat::SizedField> = None;
             for pass in 0..self.passes {
+                // A cancelled sweep stops trying: the caller's next safe
+                // point returns the cancellation, and the field is discarded.
+                if cancel::cancelled() {
+                    return None;
+                }
                 let (arms, bites) =
                     lip_seat::survey(self.mesh, context, self.plan, self.plate_z, struts);
                 // What sends an arm: the seat trim's bite (the lip-seat rule),

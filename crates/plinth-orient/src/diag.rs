@@ -65,7 +65,7 @@ use crate::grid::{
 use crate::score::{
     score_candidates, CandidateOutcome, ObjectiveWeights, OrientFaceTable, UpDirection,
 };
-use crate::search::{DenseSweepRecord, RankedCandidate, SweepRequest, TermsRecord, TierRecord};
+use crate::search::{CertifiedLoser, DenseSweepRecord, RankedCandidate, SweepRequest, TermsRecord, TierRecord};
 
 /// The diagnostics' own schema.
 pub const DIAGNOSTICS_SCHEMA_VERSION: u32 = 3;
@@ -329,6 +329,12 @@ pub struct KeyedRanked {
     /// every ranking that predates the production measurement.
     #[serde(default)]
     pub measured_at_production: bool,
+    /// `Some` when the production batch certified this candidate a loser: its
+    /// production score is UNKNOWN, `terms` is the price before production,
+    /// and the certificate's lower bound is the number the commit comparator
+    /// reads for it. Absent from every row of a search that stopped nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certified_loser: Option<CertifiedLoser>,
     pub terms: TermsRecord,
 }
 
@@ -493,6 +499,10 @@ pub enum CutBasis {
     /// The kept row is production-measured and the rejected one is not: the
     /// comparator put the kept row first before it looked at any score.
     ProductionFidelity,
+    /// The rejected row is a certified loser: its production score is unknown
+    /// and the comparator read its lower bound. `score_gap` is that bound
+    /// minus the kept row's score, a lower bound on the margin.
+    CertifiedBound,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -505,10 +515,11 @@ pub struct CutDiagnostics {
     pub ranked: usize,
     /// What put the last kept row ahead of the first rejected one.
     pub decided_by: CutBasis,
-    /// Score of the first rejected row minus the last kept row. `Some` only
-    /// when the two rows are in one fidelity class ([`CutBasis::Score`]); when
-    /// production precedence decided, a score difference is not the margin and
-    /// is not reported.
+    /// Score of the first rejected row minus the last kept row. `Some` when
+    /// the two rows are in one fidelity class ([`CutBasis::Score`]), and, for
+    /// a certified runner-up ([`CutBasis::CertifiedBound`]), its lower bound
+    /// minus the kept score; when production precedence decided, a score
+    /// difference is not the margin and is not reported.
     pub score_gap: Option<f64>,
     pub last_kept: Option<KeyedRanked>,
     pub first_rejected: Option<KeyedRanked>,
@@ -936,20 +947,40 @@ impl RowKeys<'_> {
             key: self.keys[entry.candidate],
             by_right: self.by_right.contains(&entry.candidate),
             measured_at_production: self.at_production.contains(&entry.candidate),
+            certified_loser: entry.certified_loser,
             terms: entry.terms,
         }
     }
 }
 
 /// What decided between a cut's last kept row and its first rejected one: the
-/// commit comparator sorts production-measured rows ahead of the rest before
-/// it reads a score, so the score difference is the margin only inside one
-/// fidelity class.
+/// commit comparator sorts the known class (production-measured rows and
+/// certified losers) ahead of the rest before it reads a number, so a number
+/// compares only inside one class. Inside the known class a certified loser
+/// is read at its lower bound, not at a score.
 fn cut_basis(kept: &KeyedRanked, rejected: &KeyedRanked) -> CutBasis {
-    if kept.measured_at_production == rejected.measured_at_production {
-        CutBasis::Score
-    } else {
+    let known = |row: &KeyedRanked| row.measured_at_production || row.certified_loser.is_some();
+    if known(kept) != known(rejected) {
         CutBasis::ProductionFidelity
+    } else if kept.certified_loser.is_some() || rejected.certified_loser.is_some() {
+        CutBasis::CertifiedBound
+    } else {
+        CutBasis::Score
+    }
+}
+
+/// The margin of a cut when it has one: a score difference inside one class,
+/// or a certified runner-up's lower bound over the kept row's score. `None`
+/// when precedence decided, or when the kept row is itself a certified loser
+/// (two bounds are not a margin).
+fn cut_gap(kept: &KeyedRanked, rejected: &KeyedRanked, basis: CutBasis) -> Option<f64> {
+    match basis {
+        CutBasis::Score => Some(rejected.terms.score.get() - kept.terms.score.get()),
+        CutBasis::CertifiedBound => match (kept.certified_loser, rejected.certified_loser) {
+            (None, Some(loser)) => Some(loser.lower_bound_score.get() - kept.terms.score.get()),
+            _ => None,
+        },
+        CutBasis::ProductionFidelity => None,
     }
 }
 
@@ -971,10 +1002,8 @@ fn cut(
         (Some(kept), Some(rejected)) => cut_basis(kept, rejected),
         _ => CutBasis::Score,
     };
-    let score_gap = match (&last_kept, &first_rejected, decided_by) {
-        (Some(kept), Some(rejected), CutBasis::Score) => {
-            Some(rejected.terms.score.get() - kept.terms.score.get())
-        }
+    let score_gap = match (&last_kept, &first_rejected) {
+        (Some(kept), Some(rejected)) => cut_gap(kept, rejected, decided_by),
         _ => None,
     };
     let next_rejected: Vec<KeyedRanked> = (k + 1..k + 1 + NEXT_REJECTED).filter_map(row).collect();

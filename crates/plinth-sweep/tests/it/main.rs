@@ -32,6 +32,7 @@ mod brace_to_model_tie;
 mod brace_window_cap;
 mod bracing;
 mod bracing_rework;
+mod cancel;
 mod chitubox_geometry;
 mod clearance_census;
 #[cfg(feature = "slow-tests")]
