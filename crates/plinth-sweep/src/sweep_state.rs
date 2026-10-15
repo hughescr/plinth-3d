@@ -142,8 +142,9 @@ impl SweepEnv {
 
     /// A LOWER-BOUND estimate of the env's heap bytes: the slices, the column
     /// history arrays and spans, the keep-out and unrooted tables. The model
-    /// surface index and the hidden-cavity lattice are not counted (their
-    /// types do not expose a size); the RSS of a run is the full measure.
+    /// surface index (see [`EditSeed::approx_bytes`]) and the hidden-cavity
+    /// lattice are not counted (their types do not expose a size); the RSS of
+    /// a run is the full measure.
     #[must_use]
     pub fn approx_bytes(&self) -> u64 {
         let mut bytes = std::mem::size_of::<Self>() as u64;
@@ -432,8 +433,17 @@ impl fmt::Debug for EditSeed {
 }
 
 impl EditSeed {
-    pub(crate) fn new(env: Arc<SweepEnv>, lane: LaneState, key: SeedKey, p1_digest: String) -> Self {
-        let bytes = env.approx_bytes() + lane.approx_bytes();
+    /// `surface_bytes` is the retained size of the model surface index if the
+    /// env holds one (its type exposes no size; the caller passes the
+    /// kernel's own estimate for the mesh and pitch it was built from).
+    pub(crate) fn new(
+        env: Arc<SweepEnv>,
+        lane: LaneState,
+        key: SeedKey,
+        p1_digest: String,
+        surface_bytes: u64,
+    ) -> Self {
+        let bytes = env.approx_bytes() + surface_bytes + lane.approx_bytes();
         Self {
             env,
             lane,
@@ -481,7 +491,9 @@ impl EditSeed {
         &self.p1_digest
     }
 
-    /// A lower-bound estimate of the seed's heap bytes ([`SweepEnv::approx_bytes`]).
+    /// An estimate of the seed's heap bytes: [`SweepEnv::approx_bytes`], the
+    /// lane's members and route log, and the model surface index (the
+    /// kernel's own retained-size estimate).
     #[must_use]
     pub const fn approx_bytes(&self) -> u64 {
         self.bytes

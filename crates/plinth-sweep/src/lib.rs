@@ -1970,11 +1970,27 @@ fn run_sweep_inner_seeded(
     let (env, lane) = plan_to_c(mesh, plan, policy, drains, vents, None)?;
     let held = lane.clone();
     let sweep_plan = finish(&env, lane, mesh, plan, policy)?;
+    // The surface index `finish` read (built there if no earlier stage had),
+    // at the size the kernel estimates for the mesh and pitch it was built from.
+    let surface_bytes = env
+        .model_surface
+        .get()
+        .and_then(Option::as_ref)
+        .and_then(|_| {
+            geom_kernel::NativeSurface::estimate_index_memory_from_indexed(
+                mesh.verts(),
+                mesh.tris(),
+                policy.surface_index_pitch_mm,
+            )
+            .ok()
+        })
+        .map_or(0, |estimate| estimate.retained_bytes() as u64);
     let seed = EditSeed::new(
         env,
         held,
         sweep_state::SeedKey::of(mesh, plan, policy, drains, vents),
         sweep_plan.report.sweep_digest.clone(),
+        surface_bytes,
     );
     perf::add(PerfWork::SeedBytes, seed.approx_bytes());
     Ok((sweep_plan, Arc::new(seed)))

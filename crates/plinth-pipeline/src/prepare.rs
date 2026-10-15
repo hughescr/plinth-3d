@@ -2853,7 +2853,7 @@ fn sweep_and_emit(
             plinth_sweep::perf::add(plinth_sweep::perf::Work::SeedMismatch, 1);
         }
         println!(
-            "[sweep {model}] edit seed kept at checkpoint C: {} bytes (lower bound), key {}",
+            "[sweep {model}] edit seed kept at checkpoint C: {} bytes (estimate), key {}",
             seed.approx_bytes(),
             miss.map_or_else(|| "matches".to_owned(), |why| format!("MISMATCH ({why:?})")),
         );
