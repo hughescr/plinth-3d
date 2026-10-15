@@ -402,7 +402,7 @@ struct Chord {
 /// work runs on the rayon pool. Each task is a whole tip (a candidate walk
 /// with its ground checks, or a verdict with its disc samples), not a cell or
 /// a sample; below this the hand-off costs more than the work.
-const PARALLEL_MIN_TIPS: usize = 4;
+const PARALLEL_MIN_TIPS: usize = 16;
 
 /// One pending tip's walk down its candidate list in a round, read-only on
 /// the search state, applied in tip order afterwards.
