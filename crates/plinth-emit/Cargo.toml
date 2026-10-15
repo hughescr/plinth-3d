@@ -17,6 +17,9 @@ plinth-mesh = { path = "../plinth-mesh" }
 # the model solid, in one batched Manifold call.
 plinth-solid = { path = "../plinth-solid" }
 plinth-support = { path = "../plinth-support" }
+# Record generation, seat-trim welds and the trim's native batches, record
+# encoding: index-parallel map-collect under geom_kernel::par (bytes unchanged).
+rayon = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 
