@@ -1184,6 +1184,57 @@ impl JointCertificate {
     }
 }
 
+/// What the joint certificate says about ONE drawn head
+/// ([`joint_certificate_rows`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum JointCertState {
+    /// Sized by the certificate: the worst certified demand over the drawn
+    /// chords, how many post slots are drawn under their own need, and the
+    /// worst `need / drawn` of them (`None` when none is).
+    Certified {
+        drawn_max: f64,
+        slots_under_need: usize,
+        worst_need_over_drawn: Option<f64>,
+    },
+    /// Stayed on the old law, and why.
+    OldLaw(OldLawReason),
+    /// Never reached by a sizing.
+    NotSized,
+}
+
+/// One drawn head and what the joint certificate says about it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct JointCertRow {
+    pub id: u32,
+    pub state: JointCertState,
+}
+
+/// **The joint certificate, keyed** (`SC-DESIGN.md` §4, astra round 2 finding
+/// 2): one row for every finished drawn head, in strut order, read off the same
+/// strut set and by the same rules as [`JointCertificate::of`] (whose counts
+/// and single worst member hide a head that changed while the counts did not).
+/// Read-only; one pass.
+#[must_use]
+pub fn joint_certificate_rows(struts: &[crate::SweepStrut]) -> Vec<JointCertRow> {
+    struts
+        .iter()
+        .filter(|strut| crate::slenderness::live(strut))
+        .filter_map(|strut| {
+            let head = strut.head.as_ref().filter(|head| !head.drawn_straight)?;
+            let state = match (&head.certified, head.old_law) {
+                (Some(c), _) => JointCertState::Certified {
+                    drawn_max: c.drawn_max,
+                    slots_under_need: c.slots_under_need,
+                    worst_need_over_drawn: c.worst_under_need.map(|(need, drawn)| need / drawn),
+                },
+                (None, Some(reason)) => JointCertState::OldLaw(reason),
+                (None, None) => JointCertState::NotSized,
+            };
+            Some(JointCertRow { id: strut.id, state })
+        })
+        .collect()
+}
+
 /// Why a grazing straight tip was left straight.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GrazeReason {

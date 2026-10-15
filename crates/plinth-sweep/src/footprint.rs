@@ -1129,6 +1129,95 @@ fn keeps_ground(ground: &Ground<'_>, placed: Slid, moved: Slid) -> bool {
     true
 }
 
+/// One contact ball as the ground check reads it: the drawn ball, its planned
+/// (ungrown) radius, and the seat plane's outward unit normal
+/// ([`contacts_keep_ground`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ContactBall {
+    pub centre_mm: [f64; 3],
+    pub radius_mm: f64,
+    pub planned_radius_mm: f64,
+    pub normal: [f64; 3],
+}
+
+impl ContactBall {
+    /// The ball of a tip's contact disc.
+    #[must_use]
+    pub(crate) fn of(disc: &TipContactDisc) -> Self {
+        Self {
+            centre_mm: disc.ball_centre_mm,
+            radius_mm: disc.ball_radius_mm,
+            planned_radius_mm: disc.planned_ball_radius_mm,
+            normal: disc.outward_normal,
+        }
+    }
+
+    fn slid(self) -> Slid {
+        Slid {
+            ball_centre: self.centre_mm,
+            ball_radius: self.radius_mm,
+            planned_ball_radius: self.planned_radius_mm,
+            disc_centre: self.centre_mm,
+            disc_radius: 0.0,
+            normal: self.normal,
+        }
+    }
+}
+
+/// **Whether each old tip keeps the ground its placed contact held**, for a
+/// whole field of tips whose contact ball changed (`SC-DESIGN.md` §4, "ground
+/// lost"): `pairs[i] = (before, after)` is the ball a tip had in the finished
+/// first plan and the ball it has in the edited field. The answer is
+/// [`keeps_ground`]'s, on the sweep's own two masks, for each pair: the cells
+/// the UNGROWN `before` ball held and the ungrown `after` ball does not must
+/// still join ground (an island a shrunk contact leaves over air is lost).
+///
+/// Batch-first: one window per CHANGED pair, every layer any window spans
+/// rasterised ONCE ([`ground_windows`]); a pair whose two balls are equal
+/// (nothing moved or shrank) is kept without a window.
+#[must_use]
+pub(crate) fn contacts_keep_ground(
+    grid: &Grid,
+    slices: &[Vec<SliceSolid>],
+    plate_z: f64,
+    height: f64,
+    pairs: &[(ContactBall, ContactBall)],
+) -> Vec<bool> {
+    let pitch = grid.pitch_mm();
+    let mut kept = vec![true; pairs.len()];
+    let changed: Vec<usize> = pairs
+        .iter()
+        .enumerate()
+        .filter(|(_, (before, after))| before != after)
+        .map(|(index, _)| index)
+        .collect();
+    if changed.is_empty() {
+        return kept;
+    }
+    let balls: Vec<([f64; 3], f64)> = changed.iter().map(|&i| pairs[i].0.slid().ungrown()).collect();
+    // The window `keeps_ground` reads is its own reach (both ungrown radii
+    // and the travel, plus two pitches) and the raster's two-cell edge.
+    let reach: Vec<f64> = changed
+        .iter()
+        .map(|&i| {
+            let (before, after) = (pairs[i].0.slid().ungrown(), pairs[i].1.slid().ungrown());
+            let travel = (after.0[0] - before.0[0]).hypot(after.0[1] - before.0[1]);
+            before.1 + after.1 + travel + 4.0 * pitch
+        })
+        .collect();
+    let windows = ground_windows(grid, slices, plate_z, height, &balls, &reach);
+    for (&index, window) in changed.iter().zip(&windows) {
+        let ground = Ground {
+            grid,
+            window,
+            plate_z,
+            height,
+        };
+        kept[index] = keeps_ground(&ground, pairs[index].0.slid(), pairs[index].1.slid());
+    }
+    kept
+}
+
 /// The integer lattice offsets inside a disc of `radius` pitches, centre first.
 #[expect(
     clippy::cast_possible_truncation,
@@ -2676,6 +2765,63 @@ mod move_check_tests {
             keep_out.refusals(),
             0,
             "the move check never counts a refusal"
+        );
+    }
+}
+
+/// [`contacts_keep_ground`] on real slices: the batched ground check of SC-0.
+#[cfg(test)]
+mod contacts_ground_tests {
+    use super::{contacts_keep_ground, ContactBall};
+    use crate::grid::lay_out_at;
+    use plinth_support::perception::{slice_stack, SliceStackLimits};
+
+    const H: f64 = 0.05;
+    const PITCH: f64 = 0.05;
+
+    /// A ball of radius `r` centred at `(x, y)`, 0.05 mm under the island's
+    /// underside at z = 1.0, looking down.
+    fn ball(x: f64, y: f64, r: f64) -> ContactBall {
+        ContactBall {
+            centre_mm: [x, y, 0.95],
+            radius_mm: r,
+            planned_radius_mm: r,
+            normal: [0.0, 0.0, -1.0],
+        }
+    }
+
+    fn verdicts(with_slab: bool, pairs: &[(ContactBall, ContactBall)]) -> Vec<bool> {
+        let mut boxes = vec![([0.0, 0.0, 1.0], [0.8, 0.8, 1.5])];
+        if with_slab {
+            boxes.push(([-0.5, -0.5, 0.0], [1.3, 1.3, 1.0]));
+        }
+        let (verts, tris) = crate::member_clearance::boxes_mesh(&boxes);
+        let mesh = plinth_mesh::Mesh::new(verts, tris).expect("closed boxes");
+        let planes: Vec<f64> = (0..40).map(|layer| (f64::from(layer) + 0.5) * H).collect();
+        let slices = slice_stack(&mesh, &planes, SliceStackLimits::production()).expect("slices");
+        let grid = lay_out_at(-1.0, -1.0, PITCH, 120, 120);
+        contacts_keep_ground(&grid, &slices, 0.0, H, pairs)
+    }
+
+    /// A floating island held by a 0.4 mm ball under its middle. Moving the
+    /// ball 3 mm away leaves the island's first laminae over air: ground
+    /// lost. The same move under an island that stands on a slab keeps it
+    /// (the slab carries it), and an unmoved ball, or a slightly smaller one
+    /// whose lost rim still joins the cells it holds, keeps it too. Pairs are
+    /// answered in one batch and in order.
+    #[test]
+    fn a_contact_moved_off_its_island_loses_the_ground_and_a_carried_one_does_not() {
+        let held = ball(0.4, 0.4, 0.4);
+        let pairs = [
+            (held, ball(3.0, 3.0, 0.4)),
+            (held, held),
+            (held, ball(0.4, 0.4, 0.38)),
+        ];
+        assert_eq!(verdicts(false, &pairs), vec![false, true, true]);
+        assert_eq!(
+            verdicts(true, &pairs),
+            vec![true, true, true],
+            "an island standing on a slab is carried from below"
         );
     }
 }
