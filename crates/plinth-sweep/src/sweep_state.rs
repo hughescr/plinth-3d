@@ -371,7 +371,10 @@ impl SeedKey {
     /// holes. The policy is normalized with
     /// [`orient_demand::production_measurement_policy`], so a seed made under
     /// the measurement policy (shake check deferred) and used under the
-    /// emission policy compare equal, as the winner-plan reuse key does.
+    /// emission policy compare equal, as the winner-plan reuse key does. The
+    /// second-contact knobs are normalized too: they are read only after the
+    /// state at C was made (by the edit that consumes the seed), so a seed made
+    /// under one mode is the same state under another.
     #[must_use]
     pub fn of(
         mesh: &Mesh,
@@ -383,7 +386,11 @@ impl SeedKey {
         Self {
             mesh: mesh_bits(mesh),
             layers: layer_bits(layers),
-            policy: orient_demand::production_measurement_policy(*policy),
+            policy: SweepPolicy {
+                second_contact_mode: crate::contact_growth::SecondContactMode::default(),
+                second_contact_withdraw_rounds: 0,
+                ..orient_demand::production_measurement_policy(*policy)
+            },
             drains: hole_bits(drains),
             vents: hole_bits(vents),
         }
