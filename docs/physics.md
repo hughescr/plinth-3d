@@ -662,7 +662,11 @@ cases where it did not.
   edit-then-replan`; design `SC-DESIGN.md` §3-§4). The default is `replan`, the run above: on the real
   models the edit is always discarded (it skips the cleanup lanes the finished first plan went through;
   see `EditReport`), so `edit-then-replan` only adds the edit's cost in front of the same re-plan. In
-  `replan` the seed is not read and no edit work runs. The two edit modes (experiments only) do not plan again: they take the sweep's state at checkpoint C (the start of
+  `replan` no edit work runs; the re-plan itself does not repeat the setup and the up-sweep: the sweep that
+  made the first plan kept their result (the cap-independent prefix, `sweep_state::Prefix`: everything
+  before the down-sweep's first insertion, the only reader of the caps) beside its seed, and the re-plan
+  runs the capped remainder on a clone of it when the seed's key (mesh, layers, policy, drains, vents) and
+  first plan are the request's, else the full sweep; the plan is the same bit for bit. The two edit modes (experiments only) do not plan again: they take the sweep's state at checkpoint C (the start of
   `StageJoints`, kept as an `EditSeed`), run ONE insertion phase on a working copy W with the caps, finish
   a CLONE of W, and set that finished field against the finished first plan (P1) on predicates recomputed
   after the last mutation of both (`second_contact::final_checks`, the drawn-solid collision census, the

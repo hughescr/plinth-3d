@@ -2807,7 +2807,8 @@ fn sweep_and_emit(
         }
     };
     // The plan, where it came from, and the sweep's state at checkpoint C (the
-    // edit seed; nothing consumes it yet). A reused plan brings the seed its
+    // edit seed, which also keeps the cap-independent prefix the second
+    // contact's re-plan starts from). A reused plan brings the seed its
     // pose's sweep kept; a plan made here keeps its own, and a miss (a hollowed
     // or drilled shell) keeps that NEW seed, never the retained one.
     let (plan, sweep_plan_source, seed) = match reused {
@@ -2853,8 +2854,10 @@ fn sweep_and_emit(
             plinth_sweep::perf::add(plinth_sweep::perf::Work::SeedMismatch, 1);
         }
         println!(
-            "[sweep {model}] edit seed kept at checkpoint C: {} bytes (estimate), key {}",
+            "[sweep {model}] edit seed kept at checkpoint C: {} bytes (estimate, {} of them the \
+             cap-independent prefix the re-plan starts from), key {}",
             seed.approx_bytes(),
+            seed.prefix_bytes(),
             miss.map_or_else(|| "matches".to_owned(), |why| format!("MISMATCH ({why:?})")),
         );
     }
