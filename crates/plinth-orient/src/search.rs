@@ -407,7 +407,86 @@ pub struct TermsRecord {
     pub score: Finite,
 }
 
+/// The scar term for a raw scar of `raw_mm2`: the one expression
+/// [`TermsRecord::repriced`] and [`TermsRecord::production_lower_bound`] both
+/// read, in the association `score::score_one` uses.
+fn scar_term_of(weights: ObjectiveWeights, raw_mm2: f64) -> f64 {
+    weights.scar() * raw_mm2 / 100.0
+}
+
+/// The commit-tier price of a candidate: the one expression
+/// [`TermsRecord::repriced`] (the full score) and
+/// [`TermsRecord::production_lower_bound`] (the bound) both evaluate, so the
+/// bound is the full score's own arithmetic with the measured terms set to
+/// zero and cannot drift from it.
+fn price(
+    weights: ObjectiveWeights,
+    support_area_cm2: f64,
+    peel_term: f64,
+    height_mm: f64,
+    scar_term: f64,
+) -> f64 {
+    ((weights.support_area_cm2() * support_area_cm2 + peel_term) + weights.height_mm() * height_mm)
+        + scar_term
+}
+
 impl TermsRecord {
+    /// A lower bound on this candidate's score after its production sweep
+    /// measures its burden `A` and its two scars `l`, `t` — or [`None`] when
+    /// the bound cannot be certified.
+    ///
+    /// # Why it is a lower bound, in the arithmetic of the score itself
+    ///
+    /// [`Self::repriced`] prices a finalist as
+    /// `price(w, A, peel_term, h, scar_term)` with
+    /// `scar_term = scar_term_of(w, scar_raw + (l + t))`, or keeps the
+    /// scorer's `scar_term` when neither scar was measured. The fixed parts
+    /// `peel_term` and `h` are known before the sweep; so is `scar_raw`.
+    /// Only `A`, `l` and `t` are measured, and each is a sum of products of
+    /// areas (`π r²`, a foot's contact area) and of field values, so `>= 0`;
+    /// `plinth_orient::demand::ProductionRace::finished` voids the certificate
+    /// if a finished pose ever reports otherwise. With the weights `w_a` and
+    /// `w_scar` non-negative and finite (checked here):
+    ///
+    /// * `w_a · A >= w_a · 0 = 0` and addition of a non-negative number never
+    ///   lowers an IEEE-754 sum, so `price(.., A, ..) >= price(.., 0, ..)`;
+    /// * `scar_raw + (l + t) >= scar_raw`, and `x ↦ w_scar · x / 100` is
+    ///   monotone for `w_scar >= 0`, so the measured scar term is at least
+    ///   `scar_term_of(w, scar_raw)`; when nothing was measured the term is
+    ///   `self.scar_term` itself. The bound takes the smaller of the two, so
+    ///   it holds on both branches even if the scorer's `scar_term` and
+    ///   `scar_term_of(scar_raw)` ever differ in the last bit;
+    /// * every fallback in [`Self::repriced`] (a non-finite measured value
+    ///   keeps the earlier field) returns a field of `self`, and `self`'s
+    ///   burden is checked `>= 0` here, so the fallback is at least the bound
+    ///   as well.
+    ///
+    /// `peel_force_n` is the corner the caller prices at (the primary corner
+    /// for the ranking, any one of the four for the robustness check).
+    #[must_use]
+    pub(crate) fn production_lower_bound(
+        &self,
+        weights: ObjectiveWeights,
+        peel_force_n: f64,
+    ) -> Option<f64> {
+        let w_a = weights.support_area_cm2();
+        let w_scar = weights.scar();
+        if !(w_a.is_finite() && w_a >= 0.0 && w_scar.is_finite() && w_scar >= 0.0) {
+            return None;
+        }
+        // `partial_cmp`, not `>= 0.0`: a NaN burden is not `>= 0`.
+        if self.support_area_cm2.get().partial_cmp(&0.0).is_none_or(std::cmp::Ordering::is_lt) {
+            return None;
+        }
+        let peel_term = weights.peel_points_per_newton() * peel_force_n;
+        let scar_floor = self
+            .scar_term
+            .get()
+            .min(scar_term_of(weights, self.scar_raw_mm2.get()));
+        let bound = price(weights, 0.0, peel_term, self.height_mm.get(), scar_floor);
+        bound.is_finite().then_some(bound)
+    }
+
     pub(crate) fn new(terms: CandidateTerms) -> Result<Self, SearchError> {
         Ok(Self {
             support_area_cm2: finite(terms.support_area_cm2)?,
@@ -473,7 +552,7 @@ impl TermsRecord {
         let (scar_raw_mm2, scar_term, landing, tip) = if landing.is_some() || tip.is_some() {
             let added = landing.map_or(0.0, Finite::get) + tip.map_or(0.0, Finite::get);
             let raw = self.scar_raw_mm2.get() + added;
-            let term = weights.scar() * raw / 100.0;
+            let term = scar_term_of(weights, raw);
             (
                 Finite::new(raw).unwrap_or(self.scar_raw_mm2),
                 Finite::new(term).unwrap_or(self.scar_term),
@@ -486,9 +565,13 @@ impl TermsRecord {
             // is emit-and-warn rather than a refusal.
             (self.scar_raw_mm2, self.scar_term, self.landing_scar_raw_mm2, self.tip_scar_raw_mm2)
         };
-        let score = ((weights.support_area_cm2() * support_area_cm2 + peel_term)
-            + weights.height_mm() * self.height_mm.get())
-            + scar_term.get();
+        let score = price(
+            weights,
+            support_area_cm2,
+            peel_term,
+            self.height_mm.get(),
+            scar_term.get(),
+        );
         Self {
             support_area_cm2: Finite::new(support_area_cm2).unwrap_or(self.support_area_cm2),
             peel_term: Finite::new(peel_term).unwrap_or(self.peel_term),
@@ -516,10 +599,36 @@ pub struct RankedCandidate {
     /// second implementation of the funnel standing between the record and
     /// its reader.
     pub up_model_frame: [Finite; 3],
+    /// For a [`CertifiedLoser`], `terms` is the price the candidate had BEFORE
+    /// its production sweep (prefilter fidelity, `score` included): its
+    /// production score is unknown and is not recorded. Every reader of
+    /// `terms.score` on a commit-tier row checks `certified_loser` first.
     pub terms: TermsRecord,
+    /// `Some` when the production batch certified this candidate a loser and
+    /// its production score is therefore UNKNOWN. Absent from the record of
+    /// every search that stopped nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certified_loser: Option<CertifiedLoser>,
 }
 
-/// A candidate excluded from ranking, and why.
+/// A finalist the production batch certified a loser (perf lane B1).
+///
+/// Its production sweep was stopped, or its result was set aside, because its
+/// score could not be as low as the winner's: the lower bound
+/// ([`TermsRecord::production_lower_bound`]) is strictly above the winner's
+/// score. The score itself is UNKNOWN; this record states that and nothing
+/// more. The set of certified losers is a function of the inputs alone (every
+/// finalist whose bound is strictly above the winner's score), never of which
+/// sweep a thread had already abandoned.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CertifiedLoser {
+    /// Strictly above the winner's score; the candidate's score is at least
+    /// this.
+    pub lower_bound_score: Finite,
+}
+
+///A candidate excluded from ranking, and why.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RefusalRecord {
@@ -650,6 +759,12 @@ pub struct CommitDemandRecord {
     pub prefilter_support_area_cm2: Option<Finite>,
     pub prefilter_struts: Option<usize>,
     pub measurement_error: Option<String>,
+    /// `Some` when this finalist was certified a loser: the row then keeps
+    /// its prefilter numbers (its production sweep contributes nothing) and
+    /// `fidelity` stays `"prefilter"`. Absent from every record that stopped
+    /// nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certified_loser: Option<CertifiedLoser>,
 }
 
 impl CommitDemandRecord {
@@ -671,6 +786,7 @@ impl CommitDemandRecord {
             prefilter_support_area_cm2: None,
             prefilter_struts: None,
             measurement_error: None,
+            certified_loser: None,
         }
     }
 
@@ -687,6 +803,116 @@ impl CommitDemandRecord {
 /// silently attributing one pose's sweep to another.
 const SHORT_DEMAND_BATCH: &str =
     "the demand measurer returned fewer measurements than candidates; this pose kept its proxy";
+
+/// What a row records when a pose came back stopped without a certificate.
+const UNCERTIFIED_STOP: &str =
+    "the production sweep of this pose was stopped without a certified lower bound; this pose kept its proxy";
+
+/// `true` when every delicacy and display value the production scars are
+/// priced by is finite and non-negative: the premise, with the registered
+/// weights, of [`TermsRecord::production_lower_bound`]. An empty field is a
+/// stated absence and reads as zero.
+fn fields_non_negative(table: &OrientFaceTable) -> bool {
+    let ok = |values: &[f64]| values.iter().all(|value| value.is_finite() && *value >= 0.0);
+    ok(table.delicacy()) && ok(table.display())
+}
+
+/// Which finalists the production batch certifies as losers.
+#[derive(Debug, PartialEq)]
+pub(crate) struct LoserVerdict {
+    /// Index (into the finalists) of the lowest finished score, ties to the
+    /// lower candidate id; `None` when no finalist finished.
+    pub(crate) winner: Option<usize>,
+    /// `Some(lower bound)` for each finalist certified a loser.
+    pub(crate) certified: Vec<Option<f64>>,
+    /// Finalists that finished with a score BELOW their own bound: the bound's
+    /// premise failed for them, so they are not certified.
+    pub(crate) violations: Vec<usize>,
+}
+
+/// The certified set, from the finished scores alone.
+///
+/// The winner is the lowest finished score (ties to the lower candidate id,
+/// the full ranking's own tie rule). A finalist is a certified loser exactly
+/// when it is not the winner and its lower bound is STRICTLY above the
+/// winner's score: its own score is then at least the bound, so it is
+/// strictly worse than the winner, with no tie to break. A bound that merely
+/// equals the winner's score certifies nothing. The set depends on the
+/// winner's score and the bounds only, so it is the same whichever sweeps a
+/// thread had already abandoned, and whether a candidate finished, failed or
+/// stopped does not change whether it is in it.
+pub(crate) fn certify_losers(
+    candidates: &[usize],
+    bounds: &[Option<f64>],
+    finished: &[Option<f64>],
+) -> LoserVerdict {
+    let winner = finished
+        .iter()
+        .enumerate()
+        .filter_map(|(index, score)| score.map(|score| (index, score)))
+        .min_by(|left, right| {
+            left.1
+                .total_cmp(&right.1)
+                .then(candidates[left.0].cmp(&candidates[right.0]))
+        });
+    let mut certified = vec![None; candidates.len()];
+    let mut violations = Vec::new();
+    if let Some((winner_index, winner_score)) = winner {
+        for (index, bound) in bounds.iter().enumerate().take(candidates.len()) {
+            let Some(bound) = *bound else { continue };
+            if index == winner_index || bound.partial_cmp(&winner_score) != Some(std::cmp::Ordering::Greater) {
+                continue;
+            }
+            if finished.get(index).copied().flatten().is_some_and(|score| score < bound) {
+                violations.push(index);
+            } else {
+                certified[index] = Some(bound);
+            }
+        }
+    }
+    LoserVerdict {
+        winner: winner.map(|(index, _)| index),
+        certified,
+        violations,
+    }
+}
+
+/// Disclosure of the stops, on stderr like the other `[orient]` lines. It
+/// reads the clock and is in no record or digest.
+fn report_certified_stops(
+    candidates: &[usize],
+    verdict: &LoserVerdict,
+    race: &crate::demand::ProductionRace,
+    produced: &[crate::demand::RaceOutcome],
+) {
+    let Some(winner) = verdict.winner else { return };
+    for (index, bound) in verdict.certified.iter().enumerate() {
+        let Some(bound) = bound else { continue };
+        let how = match produced.get(index) {
+            Some(crate::demand::RaceOutcome::Stopped) => "stopped before it finished",
+            Some(crate::demand::RaceOutcome::Failed(_)) => "failed before it could be stopped",
+            _ => "finished before the stop reached it; its score is set aside",
+        };
+        let at = race
+            .stop_log()
+            .into_iter()
+            .find(|(stopped, _, _)| *stopped == index)
+            .map_or_else(
+                || "no stop was requested".to_owned(),
+                |(_, requested, returned)| {
+                    format!(
+                        "stop requested at {requested:.1} s, returned at {}",
+                        returned.map_or_else(|| "never".to_owned(), |s| format!("{s:.1} s"))
+                    )
+                },
+            );
+        eprintln!(
+            "[orient] certified loser: candidate {} lower bound {bound:.5} is above candidate {}'s \
+             finished score; {how}; {at}",
+            candidates[index], candidates[winner]
+        );
+    }
+}
 
 /// Copies one measurement into its row. The prefilter fields are the
 /// caller's to set, because only the caller knows whether this measurement
@@ -727,10 +953,23 @@ fn rerank_commit(ranking: &mut [RankedCandidate], rows: &[CommitDemandRecord]) {
             .find(|row| row.candidate == candidate)
             .is_some_and(CommitDemandRecord::measured_at_production)
     };
+    // A certified loser has no production score. It ranks with the
+    // production-measured candidates, at the BEST score it could have (its
+    // lower bound), and never ahead of the winner, whose score is strictly
+    // below every certified bound. Where a known score and a bound meet, the
+    // order is the candidate id's, as for equal scores: the runner-up it
+    // yields is the best candidate that is not provably worse, which is the
+    // honest statement when one score is unknown.
+    let key = |entry: &RankedCandidate| -> f64 {
+        entry
+            .certified_loser
+            .map_or_else(|| entry.terms.score.get(), |loser| loser.lower_bound_score.get())
+    };
     ranking.sort_by(|left, right| {
-        production(right.candidate)
-            .cmp(&production(left.candidate))
-            .then(left.terms.score.get().total_cmp(&right.terms.score.get()))
+        let known = |entry: &RankedCandidate| production(entry.candidate) || entry.certified_loser.is_some();
+        known(right)
+            .cmp(&known(left))
+            .then(key(left).total_cmp(&key(right)))
             .then(left.candidate.cmp(&right.candidate))
     });
     for (rank, entry) in ranking.iter_mut().enumerate() {
@@ -760,12 +999,23 @@ fn rerank_commit(ranking: &mut [RankedCandidate], rows: &[CommitDemandRecord]) {
 #[serde(deny_unknown_fields)]
 pub struct PeelRobustnessRecord {
     /// `(corner label, winning candidate id)`, in the four-corner order
-    /// `PeelForceCorners::named` defines. `None` only when the commit tier
-    /// itself has no ranking, which `search` already refuses on.
+    /// `PeelForceCorners::named` defines. `None` when the commit tier
+    /// itself has no ranking (which `search` already refuses on), or when the
+    /// corner is listed in `undetermined_corners`.
     pub winner_at_each_corner: Vec<(String, Option<usize>)>,
+    /// `true` only when every corner NAMES the primary corner's winner; a
+    /// corner that could not be decided is not an agreement.
     pub agrees_at_every_corner: bool,
+    /// `true` only on a PROVEN disagreement, in `disagreeing_corners`. An
+    /// undetermined corner is not evidence either way.
     pub pose_choice_not_robust: bool,
     pub disagreeing_corners: Vec<String>,
+    /// Corners at which a certified loser (whose production score is unknown)
+    /// might still have won: its lower bound at that corner is not strictly
+    /// above the best known score there. Absent from every record that
+    /// stopped nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undetermined_corners: Vec<String>,
 }
 
 /// One weight's flip crossover between the commit-tier winner and runner-up
@@ -809,6 +1059,11 @@ pub struct FidelityLedger {
     /// on the production mesh. This is the number the decision was actually
     /// made by.
     pub winner_runner_up_margin: Option<Finite>,
+    /// Set only when the runner-up is a [`CertifiedLoser`]: its score is
+    /// unknown, `winner_runner_up_margin` is then `None`, and this is a lower
+    /// bound on the margin (its lower bound minus the winner's score).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub winner_runner_up_margin_lower_bound: Option<Finite>,
     /// The tier `winner_runner_up_margin` was measured at. Always
     /// [`SearchTier::Commit`]; stated so a reader never has to assume it.
     pub margin_tier: SearchTier,
@@ -1345,14 +1600,87 @@ pub(crate) fn search_core(
             .iter()
             .map(|entry| grid.candidates()[entry.candidate].direction)
             .collect();
+        // THE CERTIFIED EARLY STOP (perf lane B1). Each finalist's lower bound
+        // is known before any production sweep runs; the batch stops a sweep
+        // once a finished one scores strictly below that bound
+        // (`demand::ProductionRace`). The race owns WHEN a sweep stops; the
+        // certified set below owns what the record says, from the winner's
+        // score alone.
+        let weights = request.weights;
+        let bounds_allowed = fields_non_negative(&exact.table);
+        let finalist_terms: Vec<TermsRecord> =
+            commit_record.ranking[..finalists].iter().map(|entry| entry.terms).collect();
+        let bounds: Vec<Option<f64>> = finalist_terms
+            .iter()
+            .map(|terms| {
+                bounds_allowed
+                    .then(|| {
+                        terms.production_lower_bound(
+                            weights,
+                            terms.peel_force_n.low_pressure_low_exponent_n.get(),
+                        )
+                    })
+                    .flatten()
+            })
+            .collect();
+        let price_terms = finalist_terms.clone();
+        let race = crate::demand::ProductionRace::new(
+            bounds.clone(),
+            Box::new(move |index, measured| {
+                price_terms.get(index).map(|terms| {
+                    terms
+                        .repriced(
+                            weights,
+                            measured.support_area_cm2,
+                            terms.peel_force_n.low_pressure_low_exponent_n.get(),
+                            measured.landing_scar_raw_mm2,
+                            measured.tip_scar_raw_mm2,
+                        )
+                        .score
+                        .get()
+                })
+            }),
+        );
         let phase_before = geom_kernel::perf::set_phase(geom_kernel::perf::Phase::Production);
-        let produced = measurer.measure_support_demand(
+        let produced = measurer.measure_production_race(
             mesh,
             &exact.table,
             &finalist_directions,
-            crate::demand::DemandFidelity::Production,
+            &race,
         );
         geom_kernel::perf::set_phase(phase_before);
+        let finished_scores: Vec<Option<f64>> = finalist_terms
+            .iter()
+            .enumerate()
+            .map(|(index, terms)| match produced.get(index) {
+                Some(crate::demand::RaceOutcome::Measured(measured)) => Some(
+                    terms
+                        .repriced(
+                            weights,
+                            measured.support_area_cm2,
+                            terms.peel_force_n.low_pressure_low_exponent_n.get(),
+                            measured.landing_scar_raw_mm2,
+                            measured.tip_scar_raw_mm2,
+                        )
+                        .score
+                        .get(),
+                ),
+                _ => None,
+            })
+            .collect();
+        let candidate_ids: Vec<usize> = commit_record.ranking[..finalists]
+            .iter()
+            .map(|entry| entry.candidate)
+            .collect();
+        let verdict = certify_losers(&candidate_ids, &bounds, &finished_scores);
+        for &index in &verdict.violations {
+            eprintln!(
+                "WARNING: [orient] finalist {} scored below its own lower bound; its production \
+                 measurement is kept and the bound is not trusted for it",
+                candidate_ids[index]
+            );
+        }
+        report_certified_stops(&candidate_ids, &verdict, &race, &produced);
         for (index, entry) in commit_record.ranking[..finalists].iter_mut().enumerate() {
             let Some(row) = commit_tier_demand
                 .iter_mut()
@@ -1360,8 +1688,19 @@ pub(crate) fn search_core(
             else {
                 continue;
             };
+            if let Some(bound) = verdict.certified[index] {
+                // A certified loser: its production score is unknown and is
+                // not read, whether the sweep stopped, finished or failed.
+                // The row keeps its prefilter numbers and says why.
+                let loser = CertifiedLoser {
+                    lower_bound_score: finite(bound)?,
+                };
+                entry.certified_loser = Some(loser);
+                row.certified_loser = Some(loser);
+                continue;
+            }
             match produced.get(index) {
-                Some(Ok(measured)) => {
+                Some(crate::demand::RaceOutcome::Measured(measured)) => {
                     entry.terms = entry.terms.repriced(
                         request.weights,
                         measured.support_area_cm2,
@@ -1378,7 +1717,17 @@ pub(crate) fn search_core(
                     row.prefilter_support_area_cm2 = prefilter_area;
                     row.prefilter_struts = prefilter_struts;
                 }
-                Some(Err(error)) => row.measurement_error = Some(error.clone()),
+                Some(crate::demand::RaceOutcome::Failed(error)) => {
+                    row.measurement_error = Some(error.clone());
+                }
+                // A stop the certified set does not contain cannot happen
+                // (every stop is requested against a finished score, and the
+                // winner's is the lowest); if it ever does, the pose is a
+                // failed measurement, named, and keeps its prefilter price.
+                Some(crate::demand::RaceOutcome::Stopped) => {
+                    debug_assert!(false, "a stopped finalist was not certified a loser");
+                    row.measurement_error = Some(UNCERTIFIED_STOP.to_owned());
+                }
                 None => row.measurement_error = Some(SHORT_DEMAND_BATCH.to_owned()),
             }
         }
@@ -1420,7 +1769,17 @@ pub(crate) fn search_core(
     let runner_up = commit.ranking.get(1).cloned();
 
     let peel_robustness = peel_robustness(&commit.ranking, request.weights);
-    let weight_flips = weight_flips(&winner_rank.terms, runner_up.as_ref().map(|r| &r.terms), request.weights);
+    // A certified runner-up has no production score, so no crossover can be
+    // solved against it: its flips are absent, as for a search with no
+    // runner-up, and the runner-up row says why (`certified_loser`).
+    let weight_flips = weight_flips(
+        &winner_rank.terms,
+        runner_up
+            .as_ref()
+            .filter(|r| r.certified_loser.is_none())
+            .map(|r| &r.terms),
+        request.weights,
+    );
 
     let fidelity = ledger(&grid, &tiers, &winner_rank, runner_up.as_ref(), request)?;
 
@@ -1633,6 +1992,7 @@ fn score_tier(
                         finite(direction[2])?,
                     ],
                     terms: TermsRecord::new(*terms)?,
+                    certified_loser: None,
                 });
             }
             CandidateOutcome::Refused(refusal) => refusals.push(RefusalRecord {
@@ -1900,34 +2260,99 @@ fn peel_robustness(ranking: &[RankedCandidate], weights: ObjectiveWeights) -> Pe
             |c: PeelForceCornersRecord| c.high_pressure_high_exponent_n.get(),
         ),
     ];
-    let winners: Vec<(String, Option<usize>)> = corners
+    let decided: Vec<(String, CornerWinner)> = corners
         .iter()
         .map(|(label, read)| ((*label).to_owned(), corner_winner(ranking, weights, *read)))
         .collect();
-    let primary = winners.first().and_then(|(_, winner)| *winner);
-    let disagreeing_corners: Vec<String> = winners
+    let winners: Vec<(String, Option<usize>)> = decided
         .iter()
-        .filter(|(_, winner)| *winner != primary)
+        .map(|(label, winner)| {
+            (
+                label.clone(),
+                match winner {
+                    CornerWinner::Named(candidate) => *candidate,
+                    CornerWinner::Undetermined => None,
+                },
+            )
+        })
+        .collect();
+    let undetermined_corners: Vec<String> = decided
+        .iter()
+        .filter(|(_, winner)| *winner == CornerWinner::Undetermined)
+        .map(|(label, _)| label.clone())
+        .collect();
+    let primary = winners.first().and_then(|(_, winner)| *winner);
+    // A disagreement is PROVEN: a corner whose winner is named and differs.
+    let disagreeing_corners: Vec<String> = decided
+        .iter()
+        .filter(|(_, winner)| match winner {
+            CornerWinner::Named(candidate) => *candidate != primary,
+            CornerWinner::Undetermined => false,
+        })
         .map(|(label, _)| label.clone())
         .collect();
     PeelRobustnessRecord {
-        agrees_at_every_corner: disagreeing_corners.is_empty(),
+        agrees_at_every_corner: disagreeing_corners.is_empty() && undetermined_corners.is_empty(),
         pose_choice_not_robust: !disagreeing_corners.is_empty(),
         disagreeing_corners,
         winner_at_each_corner: winners,
+        undetermined_corners,
     }
+}
+
+/// A corner's winner, or the statement that a certified loser might have won
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CornerWinner {
+    Named(Option<usize>),
+    Undetermined,
 }
 
 /// The argmin candidate id under one peel-force corner, re-pricing every
 /// candidate's already-measured terms rather than re-scoring from the mesh —
 /// the corner choice changes nothing but the peel term.
+///
+/// A certified loser has no production score to re-price. It is held to its
+/// lower bound at THIS corner: when that bound is strictly above the best
+/// known score at the corner it cannot have won it and is left out; when it is
+/// not, the corner is [`CornerWinner::Undetermined`], because the unknown
+/// score might have been the lowest.
 fn corner_winner(
     ranking: &[RankedCandidate],
     weights: ObjectiveWeights,
     read_corner: fn(PeelForceCornersRecord) -> f64,
-) -> Option<usize> {
+) -> CornerWinner {
+    let best = corner_best(ranking, weights, read_corner, |entry| entry.certified_loser.is_none());
+    let Some((_, best_score)) = best else {
+        return CornerWinner::Named(None);
+    };
+    let might_have_won = ranking
+        .iter()
+        .filter(|entry| entry.certified_loser.is_some())
+        .any(|entry| {
+            let peel_force_n = read_corner(entry.terms.peel_force_n);
+            entry
+                .terms
+                .production_lower_bound(weights, peel_force_n)
+                .is_none_or(|bound| bound.partial_cmp(&best_score) != Some(std::cmp::Ordering::Greater))
+        });
+    if might_have_won {
+        CornerWinner::Undetermined
+    } else {
+        CornerWinner::Named(best.map(|(candidate, _)| candidate))
+    }
+}
+
+/// The lowest `(candidate, corner score)` among the entries `keep` admits.
+fn corner_best(
+    ranking: &[RankedCandidate],
+    weights: ObjectiveWeights,
+    read_corner: fn(PeelForceCornersRecord) -> f64,
+    keep: impl Fn(&RankedCandidate) -> bool,
+) -> Option<(usize, f64)> {
     ranking
         .iter()
+        .filter(|entry| keep(entry))
         .map(|entry| {
             let peel_force_n = read_corner(entry.terms.peel_force_n);
             let repriced = entry
@@ -1944,7 +2369,6 @@ fn corner_winner(
             (entry.candidate, repriced.score.get())
         })
         .min_by(|left, right| left.1.total_cmp(&right.1).then(left.0.cmp(&right.0)))
-        .map(|(candidate, _)| candidate)
 }
 
 /// D15: the value one weight would need, holding every other weight at its
@@ -2119,7 +2543,16 @@ fn ledger(
         let dot = vec3::dot(winner_direction, other).clamp(-1.0, 1.0);
         dot.acos().to_degrees()
     });
-    let margin = runner_up.map(|entry| entry.terms.score.get() - winner.terms.score.get());
+    // A certified runner-up has no production score: its margin is UNKNOWN,
+    // and only a lower bound on it is stated, beside it.
+    let margin = runner_up
+        .filter(|entry| entry.certified_loser.is_none())
+        .map(|entry| entry.terms.score.get() - winner.terms.score.get());
+    let margin_lower_bound = runner_up.and_then(|entry| {
+        entry
+            .certified_loser
+            .map(|loser| loser.lower_bound_score.get() - winner.terms.score.get())
+    });
 
     // The spread of coarse scores across the winner's own grid neighbours: if
     // the objective moves more between neighbours than the winner beat the
@@ -2167,6 +2600,7 @@ fn ledger(
         winner_runner_up_angle_deg: angle.map(finite).transpose()?,
         grid_spacing_deg: finite(spacing_deg)?,
         winner_runner_up_margin: margin.map(finite).transpose()?,
+        winner_runner_up_margin_lower_bound: margin_lower_bound.map(finite).transpose()?,
         margin_tier: SearchTier::Commit,
         decision_resolved: coarse_margin.map(|margin| margin >= spread),
         winner_runner_up_margin_at_spread_tier: coarse_margin.map(finite).transpose()?,

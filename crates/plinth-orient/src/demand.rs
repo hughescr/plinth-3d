@@ -46,6 +46,10 @@
 //! and the caller that wires the two together is `plinth-pipeline`, which
 //! already depends on both.
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Instant;
+
 use serde::{Deserialize, Serialize};
 
 use plinth_mesh::Mesh;
@@ -205,5 +209,228 @@ pub trait SupportDemandMeasurer {
     /// skip the extra production measurements and say so.
     fn diagnostic_measurer(&self) -> Option<Box<dyn SupportDemandMeasurer>> {
         None
+    }
+
+    /// The finalists' production batch, run as a [`ProductionRace`]: the same
+    /// measurements as `measure_support_demand(.., Production)`, except that
+    /// an implementation MAY stop a pose whose [`ProductionRace::is_stopped`]
+    /// flag is set, and MUST call [`ProductionRace::finished`] with each
+    /// pose's measurement the moment it has one.
+    ///
+    /// The default measures every pose and never stops one, which is what a
+    /// measurer that knows nothing of the race should do. The vector is
+    /// index-parallel with `candidates`. A pose reported
+    /// [`RaceOutcome::Stopped`] must have had its flag set first; the search
+    /// refuses to read a stop it did not certify.
+    fn measure_production_race(
+        &self,
+        mesh: &Mesh,
+        table: &OrientFaceTable,
+        candidates: &[UpDirection],
+        _race: &ProductionRace,
+    ) -> Vec<RaceOutcome> {
+        self.measure_support_demand(mesh, table, candidates, DemandFidelity::Production)
+            .into_iter()
+            .map(|result| match result {
+                Ok(measured) => RaceOutcome::Measured(measured),
+                Err(error) => RaceOutcome::Failed(error),
+            })
+            .collect()
+    }
+}
+
+/// What one finalist's production measurement came to in a [`ProductionRace`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum RaceOutcome {
+    /// Measured to the end.
+    Measured(MeasuredSupportDemand),
+    /// The measurement failed; the candidate keeps its prefilter price, as
+    /// in a batch without a race.
+    Failed(String),
+    /// Withdrawn at a safe point because the race certified it a loser. It
+    /// has NO production score; the search records it as stopped, with the
+    /// lower bound that certified it.
+    Stopped,
+}
+
+/// How a [`ProductionRace`] prices a finished pose: the search's own scoring
+/// call on the pose's measurement (pose index, measurement), or `None` when it
+/// cannot be priced.
+pub type RacePrice = Box<dyn Fn(usize, &MeasuredSupportDemand) -> Option<f64> + Send + Sync>;
+
+/// The certified early stop of the production batch (perf lane B1,
+/// 2026-10-14).
+///
+/// # Why a pose can be stopped, and only then
+///
+/// A finalist's final score is (`search::TermsRecord::repriced`)
+///
+/// ```text
+/// ((w_a·A + peel) + w_h·h) + scar_term(raw + l + t)
+/// ```
+///
+/// `peel`, `h` and `raw` are fixed before any production sweep runs (the
+/// exact table and the peel corner). `A`, `l` and `t` are the production
+/// sweep's measurements: the burden `A = arms·π·r²/100`, the model-landing
+/// scar `l = Σ A_contact·(fragility + display)` and the tip-contact scar
+/// `t = Σ π r_tip²·(fragility + display)`. Each is a sum of products of
+/// areas and of field values that the search checks are `>= 0`
+/// ([`crate::search::TermsRecord::production_lower_bound`] returns `None`
+/// otherwise), and each weight multiplying them is checked `>= 0` the same
+/// way. IEEE-754 addition of a non-negative term never lowers a sum, and
+/// multiplying or dividing by a non-negative or positive number is monotone,
+/// so the SAME arithmetic with `A = l = t = 0` is `<=` the full score, bit
+/// for bit: that is the candidate's **lower bound**, and the search computes
+/// it by calling the one scoring function with the measured terms zeroed, not
+/// by a second formula.
+///
+/// So when some finished pose's score is STRICTLY below a still-running
+/// pose's lower bound, the running pose scores strictly more than a finished
+/// one. It cannot win, and it cannot tie for the win, whatever the sweep
+/// would have measured. A pose whose bound merely EQUALS the best finished
+/// score is not stopped: it could tie, and ties go to the lower candidate id.
+///
+/// # Determinism
+///
+/// The race decides only WHEN a certified loser is stopped. The winner is the
+/// minimum over the poses that finish, and the minimum is never stopped
+/// (its bound is `<=` its score `<=` every other finished score, so its bound
+/// is never strictly above one). Which losers had stopped by the time the
+/// batch returned depends on timing, so the search does not record it: after
+/// the batch it recomputes the certified set from the final winner's score
+/// alone and records every candidate above it as a certified loser, whether
+/// that candidate stopped, finished or failed. The record and the winner are
+/// a function of the inputs, not of the thread count.
+pub struct ProductionRace {
+    // See [`RacePrice`] for `price`.
+    /// Index-parallel with the batch. `None`: this pose can never be stopped.
+    bounds: Vec<Option<f64>>,
+    /// The finished pose's score, by the search's own scoring call; `None`
+    /// when the measurement cannot be priced (it is then no leader).
+    price: RacePrice,
+    tokens: Vec<Arc<AtomicBool>>,
+    /// Lowest finished score so far.
+    leader: Mutex<Option<f64>>,
+    /// Set once a finished pose broke the non-negativity the bound rests on:
+    /// no stop is requested after that.
+    poisoned: AtomicBool,
+    started: Instant,
+    /// Milliseconds after `started` at which each pose's stop was requested;
+    /// [`u64::MAX`] for never. Disclosure only.
+    requested_ms: Vec<AtomicU64>,
+    stopped_ms: Vec<AtomicU64>,
+}
+
+impl ProductionRace {
+    /// A race over `bounds.len()` poses.
+    #[must_use]
+    pub fn new(bounds: Vec<Option<f64>>, price: RacePrice) -> Self {
+        let count = bounds.len();
+        Self {
+            bounds,
+            price,
+            tokens: (0..count).map(|_| Arc::new(AtomicBool::new(false))).collect(),
+            leader: Mutex::new(None),
+            poisoned: AtomicBool::new(false),
+            started: Instant::now(),
+            requested_ms: (0..count).map(|_| AtomicU64::new(u64::MAX)).collect(),
+            stopped_ms: (0..count).map(|_| AtomicU64::new(u64::MAX)).collect(),
+        }
+    }
+
+    /// A race in which nothing can be stopped.
+    #[must_use]
+    pub fn never_stops(count: usize) -> Self {
+        Self::new(vec![None; count], Box::new(|_, _| None))
+    }
+
+    /// The cancel flag of pose `index`; the measurer installs it for the
+    /// duration of that pose's sweep.
+    #[must_use]
+    pub fn token(&self, index: usize) -> Option<&Arc<AtomicBool>> {
+        self.tokens.get(index)
+    }
+
+    /// `true` once pose `index` has been certified a loser and told to stop.
+    #[must_use]
+    pub fn is_stopped(&self, index: usize) -> bool {
+        self.tokens
+            .get(index)
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+    }
+
+    /// Pose `index` returned [`RaceOutcome::Stopped`] now (disclosure).
+    pub fn note_stopped(&self, index: usize) {
+        if let Some(slot) = self.stopped_ms.get(index) {
+            slot.store(self.elapsed_ms(), Ordering::Relaxed);
+        }
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX - 1)
+    }
+
+    /// Pose `index` finished with `measured`. Updates the leader and stops
+    /// every pose whose lower bound is strictly above it.
+    pub fn finished(&self, index: usize, measured: &MeasuredSupportDemand) {
+        let usable = [
+            Some(measured.support_area_cm2),
+            measured.landing_scar_raw_mm2,
+            measured.tip_scar_raw_mm2,
+        ]
+        .into_iter()
+        .flatten()
+        .all(|value| value.is_finite() && value >= 0.0);
+        if !usable {
+            // The bound assumes these are non-negative and finite. One that
+            // is not voids the certificate for every pose: stop no more.
+            self.poisoned.store(true, Ordering::Release);
+            return;
+        }
+        let Some(score) = (self.price)(index, measured).filter(|score| score.is_finite()) else {
+            return;
+        };
+        let leader = {
+            let mut leader = self.leader.lock().unwrap_or_else(PoisonError::into_inner);
+            let best = leader.map_or(score, |best| best.min(score));
+            *leader = Some(best);
+            best
+        };
+        if self.poisoned.load(Ordering::Acquire) {
+            return;
+        }
+        for (other, bound) in self.bounds.iter().enumerate() {
+            if other != index && bound.is_some_and(|bound| bound > leader) {
+                let flag = &self.tokens[other];
+                if !flag.swap(true, Ordering::AcqRel) {
+                    self.requested_ms[other].store(self.elapsed_ms(), Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
+    /// Whether a finished pose broke the non-negativity the bound rests on.
+    #[must_use]
+    pub fn poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
+    }
+
+    /// Disclosure: `(pose index, seconds after the batch began when its stop
+    /// was requested, seconds when it actually returned)`, for every pose a
+    /// stop was requested for. The second is `None` for a pose that finished
+    /// or failed before it saw the flag.
+    #[must_use]
+    pub fn stop_log(&self) -> Vec<(usize, f64, Option<f64>)> {
+        let seconds = |slot: &AtomicU64| -> Option<f64> {
+            let ms = slot.load(Ordering::Relaxed);
+            (ms != u64::MAX).then(|| ms as f64 / 1000.0)
+        };
+        self.requested_ms
+            .iter()
+            .enumerate()
+            .filter_map(|(index, requested)| {
+                seconds(requested).map(|at| (index, at, seconds(&self.stopped_ms[index])))
+            })
+            .collect()
     }
 }

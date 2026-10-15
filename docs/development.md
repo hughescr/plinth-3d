@@ -619,6 +619,25 @@ the stage that made it. It decides nothing.
   class (`decided_by: "score"`), and `decided_by: "production_fidelity"` with no gap when
   precedence decided. Three full copies of the commit ranking (exact table, after the
   prefilter, after production), because the record reprices it in place.
+- **Certified losers (perf lane B1).** The finalists' production sweeps run as a race: when
+  a finished pose scores strictly below another pose's lower bound, that pose cannot win or
+  tie, and its sweep is stopped at its next safe point (`plinth_sweep::cancel`). The lower
+  bound is the full score's own arithmetic with the three measured terms (burden, landing
+  scar, tip scar) set to zero (`TermsRecord::production_lower_bound`); each is a sum of
+  areas times non-negative field values, so the bound is never above the real score. A
+  stopped pose has NO production score, and the record says so: its `RankedCandidate` and
+  its `commit_tier_demand` row carry `certified_loser: {lower_bound_score}`, the row stays at
+  `fidelity: "prefilter"`, and `terms` is the price before production. The set is recomputed
+  after the batch from the winner's score alone (every finalist whose bound is strictly above
+  it, whether its sweep stopped, finished or failed), so the record, the digest and the
+  winner do not depend on thread count or timing; only WHEN a loser stopped does, and that
+  is on stderr (`[orient] certified loser: …`), not in the record. Readers of a commit-tier
+  score check `certified_loser` first: `runner_up` may be a certified loser (then
+  `fidelity.winner_runner_up_margin` is `null` and `winner_runner_up_margin_lower_bound`
+  is set), `weight_flips` is empty for such a runner-up, and `peel_robustness` lists the
+  corners a certified loser might still have won in `undetermined_corners` (a corner it
+  could not have won is decided as before). A search that certified nothing serializes
+  exactly as before, `search_digest` included.
 - **Cost.** G1 and G2 are read off the grid's own binning pass through an observer, not
   rescanned; with the diagnostics off that pass carries no observer. The collection and the
   `orient.json` write run in the sidecar's `Diagnostic` phase (the `OrientTable` phase

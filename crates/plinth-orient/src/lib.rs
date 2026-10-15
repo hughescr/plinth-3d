@@ -32,6 +32,8 @@
 
 pub mod ablate;
 pub mod as_drawn;
+#[cfg(test)]
+mod certified_stop_tests;
 pub mod demand;
 pub mod diag;
 pub mod grid;
