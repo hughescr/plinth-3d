@@ -865,7 +865,9 @@ fn replay_once(
             );
             current_ready = true;
         }
-        layer_reader.prepare(layer, false);
+        // The layer below is prepared with this one above it: the recompute
+        // reads this layer's cell list and clearance as that layer's "above".
+        layer_reader.prepare(layer.saturating_sub(1), layer > 0);
         let masks = layer_reader.masks(layer);
         let carry_cells = layer_reader.carry_cells(layer);
         if !layer_reader.cover_any(layer) {
@@ -916,9 +918,10 @@ fn replay_once(
             } else {
                 crate::perf::Span::ReplayBaselineRestart
             });
-            reach::recompute_potential(
+            reach::recompute_potential_layer(
                 grid,
-                &masks.cover,
+                &layer_reader,
+                layer,
                 context.kappa,
                 context.layer_height_mm,
                 &[],
@@ -965,9 +968,10 @@ fn replay_once(
         outcome.trial_layers += 1;
         work.trial_computed += 1;
         let _trial_span = crate::perf::span(crate::perf::Span::ReplayTrial);
-        reach::recompute_potential(
+        reach::recompute_potential_layer(
             grid,
-            &masks.cover,
+            &layer_reader,
+            layer,
             context.kappa,
             context.layer_height_mm,
             &[],
