@@ -293,7 +293,9 @@ fn reference_replay_once(
         // Every exit below, a return or the end of the loop, has walked
         // exactly the layers counted here.
         outcome.layers_visited += 1;
-        layer_reader.prepare(layer, false);
+        // The layer below is prepared with this one above it: the recompute
+        // reads this layer's cell list and clearance as that layer's "above".
+        layer_reader.prepare(layer.saturating_sub(1), layer > 0);
         let masks = layer_reader.masks(layer);
         if !layer_reader.cover_any(layer) {
             // The up-sweep's own empty-layer reset, for both sets.
@@ -313,9 +315,10 @@ fn reference_replay_once(
             state.u_prev.copy_from_slice(&current.u_prev);
             proposed = Some(state);
         }
-        reach::recompute_potential(
+        reach::recompute_potential_layer(
             grid,
-            &masks.cover,
+            &layer_reader,
+            layer,
             context.kappa,
             context.layer_height_mm,
             &[],
@@ -350,9 +353,10 @@ fn reference_replay_once(
             continue;
         };
         outcome.trial_layers += 1;
-        reach::recompute_potential(
+        reach::recompute_potential_layer(
             grid,
-            &masks.cover,
+            &layer_reader,
+            layer,
             context.kappa,
             context.layer_height_mm,
             &[],
@@ -861,7 +865,9 @@ fn replay_once(
             );
             current_ready = true;
         }
-        layer_reader.prepare(layer, false);
+        // The layer below is prepared with this one above it: the recompute
+        // reads this layer's cell list and clearance as that layer's "above".
+        layer_reader.prepare(layer.saturating_sub(1), layer > 0);
         let masks = layer_reader.masks(layer);
         let carry_cells = layer_reader.carry_cells(layer);
         if !layer_reader.cover_any(layer) {
@@ -912,9 +918,10 @@ fn replay_once(
             } else {
                 crate::perf::Span::ReplayBaselineRestart
             });
-            reach::recompute_potential(
+            reach::recompute_potential_layer(
                 grid,
-                &masks.cover,
+                &layer_reader,
+                layer,
                 context.kappa,
                 context.layer_height_mm,
                 &[],
@@ -961,9 +968,10 @@ fn replay_once(
         outcome.trial_layers += 1;
         work.trial_computed += 1;
         let _trial_span = crate::perf::span(crate::perf::Span::ReplayTrial);
-        reach::recompute_potential(
+        reach::recompute_potential_layer(
             grid,
-            &masks.cover,
+            &layer_reader,
+            layer,
             context.kappa,
             context.layer_height_mm,
             &[],
