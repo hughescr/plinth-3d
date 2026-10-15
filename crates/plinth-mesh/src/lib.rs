@@ -108,6 +108,30 @@ impl MeshMemo {
     pub(crate) fn exact_topology(&self) -> &std::sync::OnceLock<std::sync::Arc<FaceTopology>> {
         &self.exact_topology
     }
+
+    /// Bytes the filled caches hold right now, from actual capacities. A clone
+    /// shares the same allocations, so each clone reports them in full: the
+    /// figure is an upper bound on one mesh's share, never an undercount.
+    /// `None` on arithmetic overflow.
+    fn allocated_bytes(&self) -> Option<usize> {
+        // The two reference counts an `Arc` allocation carries ahead of its value.
+        const ARC_HEADER: usize = 2 * std::mem::size_of::<usize>();
+        let mut total = 0usize;
+        if let Some(fingerprint) = self.fingerprint.get() {
+            total = total.checked_add(fingerprint.capacity())?;
+        }
+        if let Some(topology) = self.exact_topology.get() {
+            total = total
+                .checked_add(ARC_HEADER)?
+                .checked_add(topology.allocated_bytes()?)?;
+        }
+        if let Some(weld) = self.exact_weld.get() {
+            total = total
+                .checked_add(ARC_HEADER)?
+                .checked_add(weld.allocated_bytes()?)?;
+        }
+        Some(total)
+    }
 }
 
 impl Clone for MeshMemo {
@@ -191,12 +215,24 @@ impl Mesh {
         &self.tris
     }
 
-    /// Bytes reserved by this mesh's two owned buffers, measured from their
-    /// actual capacities rather than their logical lengths. Consumers that
-    /// enforce a process memory envelope must account for this retained
+    /// Bytes reserved by this mesh's two owned buffers plus whatever its
+    /// memo currently keeps (fingerprint, exact-bits topology and weld view),
+    /// measured from actual capacities rather than logical lengths. Consumers
+    /// that enforce a process memory envelope must account for this retained
     /// storage while they build additional working fields.
+    ///
+    /// The memo fills on first use, so the figure can grow between two calls
+    /// on one mesh: read it at the point of use, not once at admission. A
+    /// clone shares the memo's allocations and reports them in full, so a sum
+    /// over clones overcounts.
     #[must_use]
     pub fn retained_buffer_bytes(&self) -> Option<usize> {
+        self.source_buffer_bytes()?
+            .checked_add(self.memo.allocated_bytes()?)
+    }
+
+    /// The two source buffers alone, by capacity.
+    fn source_buffer_bytes(&self) -> Option<usize> {
         self.verts
             .capacity()
             .checked_mul(std::mem::size_of::<[f64; 3]>())
@@ -206,6 +242,11 @@ impl Mesh {
                     .checked_mul(std::mem::size_of::<[u32; 3]>())
                     .and_then(|triangles| vertices.checked_add(triangles))
             })
+    }
+
+    /// What the memo keeps right now (see [`Self::retained_buffer_bytes`]).
+    pub(crate) fn memo_allocated_bytes(&self) -> Option<usize> {
+        self.memo.allocated_bytes()
     }
 
     /// Audits geometry required by semantic consumers without changing this

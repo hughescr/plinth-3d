@@ -26,15 +26,6 @@ use crate::{SurfaceIndexKind, SurfaceSubsetError, SurfaceTriangleSoupDigest};
 /// the 1 um the emitted files can resolve.
 pub const TAPER_EPS_MM: f64 = 1e-12;
 
-/// Arc length past the ray origin beyond which a crossing cannot share an
-/// arc-location group with the origin's own face (whose crossing is at
-/// `t ~ 0`, the origin lying on it). Execution only: a crossing nearer than
-/// this does not end [`NativeSurface::rays_blocked_classified`]'s walk early,
-/// it takes the full pass, so the value moves cost, never a verdict. It must
-/// exceed the own face's `t`, `dist / cos`, which for a micrometre-scale
-/// triangle and a ray that clears the determinant floor is far below this.
-const BLOCK_EARLY_ARC_MM: f64 = 0.5;
-
 /// `(sqrt(5) - 1) / 2`, the golden-section ratio.
 const GOLDEN_INV: f64 = 0.618_033_988_749_894_9;
 
@@ -2519,10 +2510,15 @@ impl NativeSurface {
     /// containing the origin's own face, because that crossing's group is
     /// retained, is past `t = 0`, and is not the own face; whatever else the
     /// walk would have found (more crossings, a tally) leaves the ray blocked
-    /// either way. A crossing at less than [`BLOCK_EARLY_ARC_MM`] of arc, which
-    /// could share a group with the own face's crossing at `t ~ 0`, never ends
-    /// the walk: those rays take the full collect, sort and group pass, which
-    /// is the cast's own.
+    /// either way. The test never assumes where the own face crosses: the
+    /// method computes the own face's actual crossing `t_s` with the arithmetic
+    /// the walk uses. A crossing ends the walk only when it is past twice the
+    /// dedup window from `t = 0` (so its group's retained `t` is positive) and,
+    /// when the own face does cross, more than twice the window from `t_s` (so
+    /// the own face is not in its group and cannot make the group's minimum
+    /// face the own face). Any other ray takes the full collect, sort and group
+    /// pass, which is the cast's own. The verdict equals the ragged cast's for
+    /// every input, not only for rays that start on their own face.
     ///
     /// # Errors
     ///
@@ -2561,9 +2557,35 @@ impl NativeSurface {
         let dir_len = norm(d);
         let seg_len = dir_len * t_max;
         let dt = DEDUP_LOC_MM / seg_len.max(1e-9);
-        // See the method comment: a crossing past this parameter starts a group
-        // that cannot hold the own face's crossing at t ~ 0.
-        let early_t = dt + BLOCK_EARLY_ARC_MM / dir_len.max(1e-9);
+        // See the method comment. `sep` is twice the dedup window, so a crossing
+        // more than `sep` from another is certainly in a different group (the
+        // window test is on rounded differences; the factor two covers that),
+        // and a crossing past `sep` certainly starts, or sits in, a group whose
+        // retained `t` is positive. A window that is not finite disables the
+        // early exit: every such ray takes the exact pass.
+        let sep = 2.0 * dt;
+        let early_exit_ok = sep.is_finite();
+        // The own face's actual crossing, from the same arithmetic the walk uses.
+        // An own face that crosses nowhere (miss, parallel, an id past the mesh)
+        // can never share a group. A subset that lacks the own face only makes
+        // this conservative: such a ray sends crossings near `self_t` down the
+        // exact pass instead of ending early.
+        let self_t = if (self_face as usize) < self.mesh.global_nfaces() {
+            let s = self_face as usize;
+            match ray_triangle_classified(
+                o,
+                d,
+                self.mesh.v0(s),
+                self.mesh.e1(s),
+                self.mesh.e2(s),
+                t_max,
+            ) {
+                RayTriangleClass::Hit(hit) => Some(hit.t),
+                _ => None,
+            }
+        } else {
+            None
+        };
         STACK.with(|stack| {
             HITS.with(|hits| {
                 let stack = &mut *stack.borrow_mut();
@@ -2593,7 +2615,12 @@ impl NativeSurface {
                                 t_max,
                             ) {
                                 RayTriangleClass::Hit(hit) => {
-                                    if hit.t > early_t && tid != self_face {
+                                    if early_exit_ok
+                                        && tid != self_face
+                                        && hit.t.is_finite()
+                                        && hit.t > sep
+                                        && self_t.is_none_or(|s| s.is_finite() && (hit.t - s).abs() > sep)
+                                    {
                                         charge_near_parallel(
                                             NearParallelSite::CollectingWalk,
                                             u64::from(near_parallel),

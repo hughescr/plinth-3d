@@ -162,6 +162,35 @@ fn surface_area(mn: V3, mx: V3) -> f64 {
     2.0 * (dx * dy + dy * dz + dz * dx)
 }
 
+/// A mesh whose global face count is at most this many times its selected face
+/// count builds its pad table indexed by global id; a sparser subset does not.
+const DENSE_PAD_RATIO: usize = 8;
+
+/// Per-triangle Möller pads, by one of two layouts that return the same value
+/// for every selected face.
+enum PadTable {
+    /// One entry per GLOBAL face id; only selected faces are filled.
+    Global(Vec<f64>),
+    /// One entry per selected face, in the mesh's (sorted) selected order.
+    Selected(Vec<f64>),
+}
+
+impl PadTable {
+    #[inline]
+    fn get(&self, mesh: &Mesh, face_id: u32) -> f64 {
+        match self {
+            PadTable::Global(by_global) => by_global[face_id as usize],
+            PadTable::Selected(by_slot) => {
+                let slot = mesh
+                    .face_ids()
+                    .binary_search(&face_id)
+                    .expect("BVH order must contain only selected global face IDs");
+                by_slot[slot]
+            }
+        }
+    }
+}
+
 impl Bvh {
     pub fn build(mesh: &Mesh) -> Result<Bvh, String> {
         Self::build_with_cutoff(mesh, PARALLEL_MIN_FACES)
@@ -180,6 +209,17 @@ impl Bvh {
               docs/evidence/remediation-2026-08-26/census/cast-audit.md"
     )]
     pub(crate) fn build_with_cutoff(mesh: &Mesh, parallel_min: usize) -> Result<Bvh, String> {
+        Self::build_with_layout(mesh, parallel_min, None)
+    }
+
+    /// [`Self::build_with_cutoff`] with the pad table's layout chosen by the
+    /// caller (`Some(true)` global, `Some(false)` selected-order) instead of by
+    /// the subset's share of the surface. The tree is the same either way.
+    pub(crate) fn build_with_layout(
+        mesh: &Mesh,
+        parallel_min: usize,
+        force_dense: Option<bool>,
+    ) -> Result<Bvh, String> {
         BVH_BUILD_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
         let n = mesh.nfaces();
         if n > MAX_FACES {
@@ -190,17 +230,30 @@ impl Bvh {
         }
         // per-triangle Möller pad = 2*EPS*(||E1||_inf + ||E2||_inf) (A11)
         //
-        // Indexed by GLOBAL face id (selected faces only are filled), so the
-        // node pass below reads a face's pad directly instead of locating its
-        // slot among the selected ids with a binary search per face per level.
-        let mut tri_pad: Vec<f64> = vec![0.0; mesh.global_nfaces()];
-        for &face_id in mesh.face_ids() {
+        // A mesh that holds a sizeable share of the global faces indexes the
+        // table by GLOBAL face id (selected faces only are filled), so the node
+        // pass below reads a face's pad directly. A small subset of a large
+        // surface keeps one entry per selected face, in selected order, and
+        // finds a face's entry by binary search: scratch stays proportional to
+        // the subset. Either way the pad of a face is the same value.
+        let n_global = mesh.global_nfaces();
+        let dense = force_dense.unwrap_or(n_global <= n.saturating_mul(DENSE_PAD_RATIO));
+        let pad_of = |face_id: u32| {
             let e1 = mesh.e1(face_id as usize);
             let e2 = mesh.e2(face_id as usize);
             let ni = e1[0].abs().max(e1[1].abs()).max(e1[2].abs());
             let mi = e2[0].abs().max(e2[1].abs()).max(e2[2].abs());
-            tri_pad[face_id as usize] = 2.0 * EPS * (ni + mi);
-        }
+            2.0 * EPS * (ni + mi)
+        };
+        let tri_pad = if dense {
+            let mut by_global = vec![0.0; n_global];
+            for &face_id in mesh.face_ids() {
+                by_global[face_id as usize] = pad_of(face_id);
+            }
+            PadTable::Global(by_global)
+        } else {
+            PadTable::Selected(mesh.face_ids().iter().map(|&face_id| pad_of(face_id)).collect())
+        };
 
         // Leaf order carries global face IDs even for a narrowed mesh view.
         let mut order = mesh.face_ids().to_vec();
@@ -280,7 +333,7 @@ pub(crate) fn build_attempt_count() -> u64 {
 )]
 fn build_range(
     mesh: &Mesh,
-    tri_pad: &[f64],
+    tri_pad: &PadTable,
     // The slice of the whole face order that starts at index `base` of it;
     // `lo` and `hi` index this slice. Leaves record `base + lo`, so a range
     // built on its own slice writes the offsets the whole build would.
@@ -313,8 +366,9 @@ fn build_range(
         union_box(&mut bmin, &mut bmax, mesh.tri_min(pi), mesh.tri_max(pi));
         // `order` holds only selected global face ids (`tri_pad` is filled for
         // exactly those).
-        if tri_pad[pi] > pad {
-            pad = tri_pad[pi];
+        let face_pad = tri_pad.get(mesh, p);
+        if face_pad > pad {
+            pad = face_pad;
         }
     }
 
@@ -673,6 +727,48 @@ mod instrumentation_tests {
                         )
                     };
                     assert_eq!(bits(left), bits(right), "cutoff {cutoff}, leaf {index}");
+                }
+            }
+        }
+    }
+
+    /// A subset's tree does not depend on how the pad table is laid out: a
+    /// sparse subset (one face, a few, every seventh) built with the
+    /// selected-order table equals the same subset built with the global one,
+    /// and the default choice follows the subset's share of the surface.
+    #[test]
+    fn the_tree_is_the_same_for_both_pad_layouts_on_a_subset() {
+        let mut vertices = Vec::new();
+        let mut faces = Vec::new();
+        for face in 0..400_u32 {
+            let x = f64::from(face % 20);
+            let y = f64::from(face / 20);
+            let size = 0.25 + f64::from(face % 7) * 0.5;
+            vertices.push([x, y, 0.0]);
+            vertices.push([x + size, y, 0.1 * f64::from(face % 5)]);
+            vertices.push([x, y + size, 0.0]);
+            faces.push([3 * face, 3 * face + 1, 3 * face + 2]);
+        }
+        let whole = Mesh::from_indexed(&vertices, &faces).unwrap();
+        for selected in [
+            vec![17_u32],
+            vec![3, 4, 399],
+            (0..400).step_by(7).collect::<Vec<u32>>(),
+            (0..400).collect::<Vec<u32>>(),
+        ] {
+            let mesh = whole.subset(selected.clone());
+            let global = Bvh::build_with_layout(&mesh, usize::MAX, Some(true)).unwrap();
+            let slots = Bvh::build_with_layout(&mesh, usize::MAX, Some(false)).unwrap();
+            let default = Bvh::build_with_cutoff(&mesh, usize::MAX).unwrap();
+            for other in [&slots, &default] {
+                assert_eq!(other.depth, global.depth, "{} faces", selected.len());
+                assert_eq!(other.order, global.order, "{} faces", selected.len());
+                assert_eq!(other.nodes.len(), global.nodes.len());
+                for (left, right) in other.nodes.iter().zip(&global.nodes) {
+                    assert_eq!(left.pad.to_bits(), right.pad.to_bits());
+                    assert_eq!(left.bmin.map(f64::to_bits), right.bmin.map(f64::to_bits));
+                    assert_eq!(left.bmax.map(f64::to_bits), right.bmax.map(f64::to_bits));
+                    assert_eq!((left.a, left.b, left.leaf), (right.a, right.b, right.leaf));
                 }
             }
         }

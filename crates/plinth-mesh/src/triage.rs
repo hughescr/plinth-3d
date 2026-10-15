@@ -235,8 +235,19 @@ impl<'mesh> TriageTopologyAdmission<'mesh> {
         })?;
         let raw_vertices = mesh.verts().len();
         let raw_faces = mesh.tris().len();
+        // The source buffers by capacity plus what the mesh's memo keeps now
+        // (a mesh whose topology or weld an earlier stage built holds those
+        // too); admission measures at the moment it runs.
         let retained_source_buffer_bytes =
-            retained_source_buffer_bytes(mesh.verts.capacity(), mesh.tris.capacity())?;
+            retained_source_buffer_bytes(mesh.verts.capacity(), mesh.tris.capacity())?
+                .checked_add(mesh.memo_allocated_bytes().ok_or(
+                    TriageAdmissionError::ArithmeticOverflow {
+                        field: "retained source buffer bytes",
+                    },
+                )?)
+                .ok_or(TriageAdmissionError::ArithmeticOverflow {
+                    field: "retained source buffer bytes",
+                })?;
         let (edge_occurrences, vertex_incidences, containment_probe_slots) =
             triage_work_counts(raw_faces, settings.containment_samples())?;
 
@@ -1638,6 +1649,59 @@ mod tests {
             INPUT_PROPORTIONAL_TRIAGE_WORK_STARTED.load(Ordering::Relaxed),
             before + 1
         );
+    }
+
+    /// What the mesh memo keeps is retained storage: the mesh's own figure and
+    /// the independent admission figure both count it, they agree at every
+    /// moment, and a cache filled after one reading shows in the next.
+    #[test]
+    fn memoised_topology_and_weld_are_counted_as_retained_bytes() {
+        let _guard = global_counter_guard();
+        let mesh = crate::fixtures::make_box_default().expect("box");
+        let source_only = (mesh.verts().len() * std::mem::size_of::<[f64; 3]>())
+            + (mesh.tris().len() * std::mem::size_of::<[u32; 3]>());
+        let empty = mesh.retained_buffer_bytes().expect("small mesh");
+        assert!(empty >= source_only);
+
+        crate::topology::build_face_topology(&mesh, WeldPolicy::ExactBits).expect("topology");
+        let filled = mesh.retained_buffer_bytes().expect("small mesh");
+        assert!(
+            filled > empty,
+            "the cached topology and weld must be counted: {empty} -> {filled}"
+        );
+        // A clone shares the allocations and reports them in full.
+        assert_eq!(mesh.clone().retained_buffer_bytes(), Some(filled));
+
+        // Admission measures independently and must agree with the mesh.
+        let exact = exact_limits(&mesh);
+        let admission = TriageTopologyAdmission::from_raw_mesh(&mesh, exact)
+            .expect("the exact figure admits the mesh");
+        assert_eq!(admission.retained_source_buffer_bytes(), filled);
+        let one_short = TriageTopologyLimits::new(
+            usize::MAX,
+            usize::MAX,
+            filled - 1,
+            usize::MAX,
+            usize::MAX,
+            usize::MAX,
+        );
+        assert!(matches!(
+            TriageTopologyAdmission::from_raw_mesh(&mesh, one_short),
+            Err(TriageAdmissionError::LimitExceeded {
+                field: "retained source buffer bytes",
+                ..
+            })
+        ));
+        // The figure from before the caches filled no longer covers the mesh.
+        let stale = TriageTopologyLimits::new(
+            usize::MAX,
+            usize::MAX,
+            empty,
+            usize::MAX,
+            usize::MAX,
+            usize::MAX,
+        );
+        assert!(TriageTopologyAdmission::from_raw_mesh(&mesh, stale).is_err());
     }
 
     #[test]

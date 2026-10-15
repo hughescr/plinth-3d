@@ -290,6 +290,42 @@ pub struct FaceTopology {
     content_digest: TopologyDigest,
 }
 
+impl FaceTopology {
+    /// Bytes this value holds on the heap and inline, from the actual buffer
+    /// capacities: the struct itself, every vector, and the fingerprint
+    /// string. `None` on arithmetic overflow.
+    pub(crate) fn allocated_bytes(&self) -> Option<usize> {
+        let mut total = std::mem::size_of::<Self>();
+        for bytes in [
+            self.indptr.capacity().checked_mul(std::mem::size_of::<u32>())?,
+            self.indices.capacity().checked_mul(std::mem::size_of::<u32>())?,
+            self.component_ids.capacity().checked_mul(std::mem::size_of::<u32>())?,
+            self.cut_flags.capacity(),
+            self.source_vertex_to_welded
+                .capacity()
+                .checked_mul(std::mem::size_of::<u32>())?,
+            self.mesh_fingerprint.capacity(),
+            self.point_only_vertices
+                .capacity()
+                .checked_mul(std::mem::size_of::<PointOnlyVertex>())?,
+        ] {
+            total = total.checked_add(bytes)?;
+        }
+        for vertex in &self.point_only_vertices {
+            total = total.checked_add(
+                vertex
+                    .fans
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<Vec<u32>>())?,
+            )?;
+            for fan in &vertex.fans {
+                total = total.checked_add(fan.capacity().checked_mul(std::mem::size_of::<u32>())?)?;
+            }
+        }
+        Some(total)
+    }
+}
+
 /// One closed, consistently oriented face component certified from the
 /// canonical topology arrays.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1088,6 +1124,17 @@ impl WeldedView {
             }
             WeldPolicy::Epsilon(tolerance) => epsilon_weld(mesh.verts(), tolerance),
         }
+    }
+
+    /// Bytes this value holds, struct and buffers, from actual capacities.
+    pub(crate) fn allocated_bytes(&self) -> Option<usize> {
+        std::mem::size_of::<Self>()
+            .checked_add(
+                self.verts
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<[f64; 3]>())?,
+            )?
+            .checked_add(self.map.capacity().checked_mul(std::mem::size_of::<u32>())?)
     }
 
     /// Welded vertices in deterministic first-occurrence order.

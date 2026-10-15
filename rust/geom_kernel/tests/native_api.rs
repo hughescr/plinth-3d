@@ -177,6 +177,128 @@ fn rays_blocked_classified_equals_the_verdict_of_the_ragged_cast() {
     );
 }
 
+fn soup_surface(vertices: &[[f64; 3]], faces: &[[u32; 3]]) -> NativeSurface {
+    NativeSurface::from_indexed(
+        vertices,
+        faces,
+        NativeSurfaceConfig {
+            grid_pitch_mm: 2.0,
+            max_grid_bytes: usize::MAX,
+        },
+    )
+    .unwrap()
+}
+
+/// The own face need not cross at `t ~ 0`. Two coincident triangles 1 mm above
+/// the origin cross at the same `t`, the cast merges them and keeps the lower
+/// face id, which is the own face: the ray is NOT blocked, and an early exit
+/// that assumed the own face crosses at the origin said it was.
+#[test]
+fn rays_blocked_classified_own_face_not_at_the_origin_matches_the_ragged_cast() {
+    let vertices = [[0.0, 0.0, 1.0], [3.0, 0.0, 1.0], [0.0, 3.0, 1.0]];
+    let surface = soup_surface(&vertices, &[[0, 1, 2], [0, 1, 2]]);
+    let origins = [[1.0, 1.0, 0.0]; 3];
+    let dirs = [[0.0, 0.0, 1.0]; 3];
+    // Own face 0 (group minimum: not blocked), own face 1 (face 0 is then an
+    // occluder: blocked), an id that names no face (blocked).
+    let self_faces = [0_u32, 1, u32::MAX];
+    let expected = blocked_from_ragged_cast(&surface, &origins, &dirs, 2.0, &self_faces);
+    assert_eq!(expected, [false, true, true]);
+    assert_eq!(
+        surface
+            .rays_blocked_classified(&origins, &dirs, 2.0, &self_faces)
+            .unwrap(),
+        expected
+    );
+}
+
+/// A small deterministic generator for the property test below.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> f64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "the top 53 bits of a u64 fit an f64 exactly"
+        )]
+        let unit = (self.0 >> 11) as f64 / (1_u64 << 53) as f64;
+        unit
+    }
+}
+
+/// Soups of coincident, duplicated and slightly displaced triangles, rays from
+/// arbitrary points, centroids and the huge-coordinate versions of both, with
+/// own-face ids that are right, wrong and out of range: the any-hit verdict
+/// must equal the ragged cast's on every one.
+#[test]
+fn rays_blocked_classified_matches_the_ragged_cast_on_adversarial_soups() {
+    let mut rng = Lcg(0x5eed_1234_abcd_0001);
+    let mut checked = 0_usize;
+    let mut blocked_count = 0_usize;
+    for offset in [0.0, 1.0e6, 1.0e12] {
+        for round in 0..40 {
+            let layers = 2 + u32::try_from(round % 4).unwrap();
+            let mut vertices = Vec::new();
+            let mut faces: Vec<[u32; 3]> = Vec::new();
+            for layer in 0..layers {
+                // Triangles stacked at nearly the same height, half of them exact
+                // duplicates of an earlier one.
+                let z = f64::from(layer) * [0.0, 1e-9, 1e-4, 0.5][round % 4] + 1.0 + offset;
+                let base = [
+                    [0.0 + offset, 0.0 + offset, z],
+                    [3.0 + offset, 0.0 + offset, z],
+                    [0.0 + offset, 3.0 + offset, z],
+                ];
+                let copies = 1 + layer % 2;
+                for _ in 0..copies {
+                    let first = u32::try_from(vertices.len()).unwrap();
+                    vertices.extend(base);
+                    faces.push([first, first + 1, first + 2]);
+                }
+            }
+            let surface = soup_surface(&vertices, &faces);
+            let face_count = u32::try_from(faces.len()).unwrap();
+            let mut origins = Vec::new();
+            let mut dirs = Vec::new();
+            let mut self_faces = Vec::new();
+            for ray in 0..48 {
+                let x = 0.2 + 1.5 * rng.next() + offset;
+                let y = 0.2 + 1.5 * rng.next() + offset;
+                let below = [0.0, 0.5, 1.0e-7, 2.0][ray % 4];
+                let tilt = [0.0, 1e-7, 0.3][ray % 3];
+                origins.push([x, y, 1.0 + offset - below]);
+                dirs.push([tilt * rng.next(), tilt * rng.next(), 1.0]);
+                self_faces.push(match ray % 5 {
+                    0 => u32::MAX,
+                    1 => face_count + 3,
+                    _ => u32::try_from(ray).unwrap() % face_count,
+                });
+            }
+            for t_max in [0.4, 2.0, 1.0e6] {
+                let expected =
+                    blocked_from_ragged_cast(&surface, &origins, &dirs, t_max, &self_faces);
+                let actual = surface
+                    .rays_blocked_classified(&origins, &dirs, t_max, &self_faces)
+                    .unwrap();
+                assert_eq!(
+                    actual, expected,
+                    "offset {offset}, round {round}, t_max {t_max}"
+                );
+                checked += expected.len();
+                blocked_count += expected.iter().filter(|&&flag| flag).count();
+            }
+        }
+    }
+    assert!(
+        blocked_count > checked / 20 && blocked_count < checked * 19 / 20,
+        "both verdicts must be well represented: {blocked_count} of {checked}"
+    );
+}
+
 fn slice_limits() -> PlaneSliceLimits {
     PlaneSliceLimits {
         max_planes: usize::MAX,
