@@ -4076,12 +4076,12 @@ fn shallowest_landers(arms: &[SweepArm]) -> Vec<Option<f64>> {
         let top = host.head.as_ref().map_or(host.seat_mm, |head| head.joint_mm);
         let (z_low, z_high) = (host.base_mm[2], top[2]);
         let rise = z_high - z_low;
-        if !(rise > ZERO_LENGTH_MM) {
+        if rise.is_nan() || rise <= ZERO_LENGTH_MM {
             continue;
         }
         let axis = geom_kernel::vec3::sub(host.base_mm, top);
         let axis_len_sq = geom_kernel::vec3::dot(axis, axis);
-        if !(axis_len_sq > 0.0) {
+        if axis_len_sq.is_nan() || axis_len_sq <= 0.0 {
             continue;
         }
         #[expect(
