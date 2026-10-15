@@ -260,6 +260,12 @@ pub(crate) struct HeadJoinContext<'a> {
     /// The model surface, built on first need and kept for the run; `None`
     /// inside when it could not be built.
     pub surface: &'a OnceLock<Option<NativeSurface>>,
+    /// The real contact of every tip ball asked through this context, for
+    /// THIS `mesh` and `surface`. Read only by [`Self::measure_contacts`].
+    /// The owner passes a memo that holds only answers for this mesh and
+    /// surface: a fresh one, or the one the plan's [`crate::sweep_state::Prefix`]
+    /// carries (a prefix is consumed only with its own mesh).
+    pub contacts: &'a crate::contact_growth::MeasureMemo,
 }
 
 /// The model's surface index, or `None` when its memory estimate is over
@@ -294,6 +300,24 @@ impl HeadJoinContext<'_> {
         self.surface
             .get_or_init(|| build_surface(self.mesh, self.surface_pitch_mm, self.surface_max_bytes))
             .as_ref()
+    }
+
+    /// [`crate::contact_growth::measure`] of `arms` on this context's mesh and
+    /// surface, through its [`Self::contacts`] memo (same bits as the
+    /// unmemoised read). The only reader of the memo, so every entry belongs
+    /// to this mesh and surface.
+    pub(crate) fn measure_contacts(
+        &self,
+        layer_plan: &LayerPlan,
+        arms: &[plinth_support::SweepArm],
+        sites: &[Option<crate::footprint_normal::TipSite>],
+    ) -> Vec<Option<crate::contact_growth::Measured>> {
+        let env = crate::footprint_normal::MeasureEnv {
+            mesh: self.mesh,
+            surface: self.surface(),
+            layer_plan,
+        };
+        crate::contact_growth::measure_memoised(&env, Some(self.contacts), arms, sites)
     }
 }
 

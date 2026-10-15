@@ -621,11 +621,6 @@ pub(crate) fn tips_seat(
     pairs: &[(usize, &SweepArm, &SweepArm)],
 ) -> Vec<(TipContact, TipContact)> {
     let context = joins.slender;
-    let env = crate::footprint_normal::MeasureEnv {
-        mesh: joins.mesh,
-        surface: joins.surface(),
-        layer_plan,
-    };
     let pixel_area_mm2 = context.grid.pitch_mm() * context.grid.pitch_mm();
     let contact = |row: Option<&crate::contact_growth::Measured>| TipContact {
         seats: row.is_some_and(|m| m.real_mm2 > 0.0 && m.real_mm2 + pixel_area_mm2 >= m.planned_mm2),
@@ -651,7 +646,7 @@ pub(crate) fn tips_seat(
         let points: Vec<Option<[f64; 3]>> = fresh.iter().map(|(_, arm)| arm.seat_face_point_mm).collect();
         let sites = crate::footprint_normal::sites_at(table, &points, context.seat_faces);
         let rows: Vec<SweepArm> = fresh.iter().map(|(_, arm)| no_ball(arm)).collect();
-        let read = crate::contact_growth::measure(&env, &rows, &sites);
+        let read = joins.measure_contacts(layer_plan, &rows, &sites);
         for (((index, _), site), measured) in fresh.iter().zip(sites).zip(read) {
             standing.reads.insert(
                 *index,
@@ -668,7 +663,7 @@ pub(crate) fn tips_seat(
         .iter()
         .map(|(index, _, _)| standing.reads.get(index).and_then(|read| read.site))
         .collect();
-    let leans = crate::contact_growth::measure(&env, &rows, &row_sites);
+    let leans = joins.measure_contacts(layer_plan, &rows, &row_sites);
     pairs
         .iter()
         .zip(&leans)
