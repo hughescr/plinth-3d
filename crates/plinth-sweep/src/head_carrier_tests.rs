@@ -1456,8 +1456,8 @@ fn an_arm_floating_above_its_ground_is_not_kept_in_place_of_a_lean() {
 /// (S = 50, a slab). The stub rests on post 0, a straight plate post one cell
 /// beside its seat, so it leans 45 degrees onto the face. TEST: the slab
 /// begins past the seat, neither the stub's tip nor the lean's reaches the face:
-/// the stub is kept, its lean refused (path hit `candidates_refused_slender` 1,
-/// nothing taken). CONTROLS: under a wide slab the 45 degree stub does not
+/// the lean is refused (nothing taken) and, since round 6, the stub is not
+/// kept either: it holds nothing and is reported for dropping. CONTROLS: under a wide slab the 45 degree stub does not
 /// seat (0.0 of 0.034 mm2) and the plate lean does, so the lean is taken (a
 /// stub on a member has no shield but its contact); and the same stub on a
 /// post that floats above the plate is not kept (`rooted`), whatever seats.
@@ -1486,11 +1486,19 @@ fn a_one_layer_stub_on_a_rooted_member_is_kept_in_place_of_a_lean() {
     let on_post = Landing::Strut { id: 0, layer: 199 };
     let (kept, outcome, moved) =
         lip_seat_field_passes(&past, 50.0, &[post.clone(), stub(on_post)], 1);
-    assert_eq!(moved, 0, "the stub on a rooted member is kept: {outcome:?}");
-    assert_eq!(outcome.candidates_refused_slender, 1, "PATH HIT: {outcome:?}");
-    assert_eq!(outcome.kept_for_slenderness_ids, vec![1], "{outcome:?}");
+    // Round 6 (`NUB-CLAW.md` part 1): neither tip reaches the face (0.0 mm2
+    // for the stub, a lean under one pixel), so the stub holds nothing. Its
+    // over-slender lean is still not taken (`moved` 0, as in round 5), and
+    // the stub is no longer kept as a nub: it is reported for dropping, whatever
+    // member it rests on. SABOTAGE (the nub rule off): `unheld_pending` is
+    // empty and the stub is kept for its slenderness (`candidates_refused_slender`
+    // 1, `kept_for_slenderness_ids` `[1]`), as before.
+    assert_eq!(moved, 0, "the over-slender lean is not taken: {outcome:?}");
+    assert_eq!(outcome.unheld_pending.len(), 1, "PATH HIT: the stub holds nothing: {outcome:?}");
+    assert_eq!(outcome.unheld_pending[0].arm, 1, "{outcome:?}");
+    assert!(outcome.kept_for_slenderness_ids.is_empty(), "{outcome:?}");
     assert_eq!(outcome.slender_taken_kept_not_clear, 0, "{outcome:?}");
-    assert_eq!(kept[1].landing, on_post, "it keeps its member");
+    assert_eq!(kept[1].landing, on_post, "the caller drops it; until then it keeps its member");
     let (taken, outcome, moved) =
         lip_seat_field_passes(&mesh, 50.0, &[post.clone(), stub(on_post)], 1);
     assert_eq!(moved, 1, "CONTROL: a lean that seats replaces a stub that does not: {outcome:?}");
