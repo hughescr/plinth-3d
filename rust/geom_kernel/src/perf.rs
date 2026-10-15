@@ -573,9 +573,13 @@ pub enum Span {
     StageJoints,
     /// Seat faces, footprint normals, contact growth, the plan hand-back.
     StageSeat,
+    /// The cost of the counting itself: every measurement-only scan, clone,
+    /// hash and row write of the down-sweep trace runs inside this span, so
+    /// a pose's other spans can be read with it taken out.
+    CountOverhead,
 }
 
-const SPAN_N: usize = 58;
+const SPAN_N: usize = 59;
 
 impl Span {
     /// Every span.
@@ -638,6 +642,7 @@ impl Span {
         Self::StageGrazeLate,
         Self::StageJoints,
         Self::StageSeat,
+        Self::CountOverhead,
     ];
 
     /// The sidecar label.
@@ -702,6 +707,7 @@ impl Span {
             Self::StageGrazeLate => "stage.graze_late",
             Self::StageJoints => "stage.joints_report",
             Self::StageSeat => "stage.seat_contact",
+            Self::CountOverhead => "perf.count_overhead",
         }
     }
 

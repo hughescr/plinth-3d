@@ -986,9 +986,7 @@ pub fn run(
                 0
             };
             // Write-only (M0): the run's row, with its routing's hash.
-            if crate::perf::enabled() {
-                crate::reuse_probe::run_end(passes, inserted, crate::reuse_probe::route_hash(&log));
-            }
+            crate::reuse_probe::run_end(passes, inserted, &log);
             outcome.route_log = log;
             return outcome;
         }
@@ -1395,11 +1393,13 @@ fn sweep_pass(
         loop {
             if let Some(t) = trace.as_mut() {
                 // The cells the clears below change.
-                t.cur.fill_elig += load_out
-                    .iter()
-                    .zip(peel_fed.iter())
-                    .filter(|(load, fed)| **load != 0.0 || **fed)
-                    .count() as u64;
+                t.counting(|rec| {
+                    rec.fill_elig += load_out
+                        .iter()
+                        .zip(peel_fed.iter())
+                        .filter(|(load, fed)| **load != 0.0 || **fed)
+                        .count() as u64;
+                });
             }
             {
                 let _fill_span = crate::perf::span(crate::perf::Span::PassDense);
@@ -1462,7 +1462,10 @@ fn sweep_pass(
             );
             drop(route_span);
             if let (Some(t), Some(started)) = (trace.as_mut(), route_started) {
-                t.cur.route_ns += u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                // The counting inside the call is not route time.
+                let elapsed = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                t.cur.route_ns += elapsed.saturating_sub(route.counting_ns);
+                t.cur.count_ns += route.counting_ns;
                 t.cur.route_elig += route.eligible;
                 t.cur.route_written += route.written;
             }
@@ -1517,7 +1520,9 @@ fn sweep_pass(
             }
             if let Some(t) = trace.as_mut() {
                 // The cells the spread loop acts on: those holding load.
-                t.cur.spread_elig += load_in.iter().filter(|load| **load > 0.0).count() as u64;
+                t.counting(|rec| {
+                    rec.spread_elig += load_in.iter().filter(|load| **load > 0.0).count() as u64;
+                });
             }
             let loop_started = trace.is_some().then(std::time::Instant::now);
             let dense_span = crate::perf::span(crate::perf::Span::PassDense);
@@ -1632,7 +1637,7 @@ fn sweep_pass(
             if let (Some(t), Some(started)) = (trace.as_mut(), loop_started) {
                 t.cur.loop_ns += u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
             }
-            let max_before: Option<Vec<f64>> = trace.is_some().then(|| load_out.clone());
+            let max_before: Option<Vec<f64>> = trace.as_mut().map(|t| t.counting(|_| load_out.clone()));
             let max_started = trace.is_some().then(std::time::Instant::now);
             for cell in 0..cells {
                 if carriers[cell] {
@@ -1678,11 +1683,14 @@ fn sweep_pass(
             if let (Some(t), Some(before)) = (trace.as_mut(), max_before) {
                 // Eligible: a carrier, or a cell holding load (the loop clears
                 // load off a non-carrier). Written: the load changed.
-                for cell in 0..cells {
-                    let touched = carriers[cell] || before[cell] != 0.0;
-                    t.cur.max_elig += u64::from(touched);
-                    t.cur.max_written += u64::from(before[cell].to_bits() != load_out[cell].to_bits());
-                }
+                t.counting(|rec| {
+                    for cell in 0..cells {
+                        let touched = carriers[cell] || before[cell] != 0.0;
+                        rec.max_elig += u64::from(touched);
+                        rec.max_written +=
+                            u64::from(before[cell].to_bits() != load_out[cell].to_bits());
+                    }
+                });
             }
 
             if !insertion.enabled {
@@ -2217,7 +2225,7 @@ fn sweep_pass(
         }
 
         if let Some(t) = trace.as_mut() {
-            t.cur.fp = crate::reuse_probe::layer_fingerprint(&load_out, &carriers);
+            t.counting(|rec| rec.fp = crate::reuse_probe::layer_fingerprint(&load_out, &carriers));
         }
         // --- the model's own section is checked, never resized --------------
         let tail_started = trace.is_some().then(std::time::Instant::now);
@@ -2242,15 +2250,17 @@ fn sweep_pass(
         let tail_before = tail_started.map_or(0, |started| {
             u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
         });
-        let copy_cells = trace.is_some().then(|| {
-            let (mut eligible, mut written) = (0_u64, 0_u64);
-            for cell in 0..cells {
-                let (cover_was, cover_is) = (cover_above[cell], masks.cover[cell]);
-                let (carry_was, carry_is) = (carriers_above[cell], carriers[cell]);
-                eligible += u64::from(cover_was || cover_is || carry_was || carry_is);
-                written += u64::from(cover_was != cover_is || carry_was != carry_is);
-            }
-            (eligible, written)
+        let copy_cells = trace.as_mut().map(|t| {
+            t.counting(|_| {
+                let (mut eligible, mut written) = (0_u64, 0_u64);
+                for cell in 0..cells {
+                    let (cover_was, cover_is) = (cover_above[cell], masks.cover[cell]);
+                    let (carry_was, carry_is) = (carriers_above[cell], carriers[cell]);
+                    eligible += u64::from(cover_was || cover_is || carry_was || carry_is);
+                    written += u64::from(cover_was != cover_is || carry_was != carry_is);
+                }
+                (eligible, written)
+            })
         });
         // This layer's cover is the next iteration's "above".
         let copy_started = trace.is_some().then(std::time::Instant::now);
@@ -2715,6 +2725,7 @@ fn route_within_cover(
             sightlines: sight,
             eligible: 0,
             written: 0,
+            counting_ns: 0,
         };
     }
     // Nothing to route where every covered cell is already a root, and a
@@ -2727,16 +2738,26 @@ fn route_within_cover(
             sightlines: sight,
             eligible: 0,
             written: 0,
+            counting_ns: 0,
         };
     }
     // Write-only measurement (M0): the cells the relax rounds can change, and
-    // the field they start from. Nothing is read or cloned with counting off.
-    let measured = crate::perf::enabled().then(|| {
+    // the field they start from. Nothing is read or cloned with counting off;
+    // the time it takes is returned so the caller can leave it out of the
+    // route time.
+    let mut counting_ns = 0_u64;
+    let measured = if crate::perf::enabled() {
+        let _count_span = crate::perf::span(crate::perf::Span::CountOverhead);
+        let started = std::time::Instant::now();
         let eligible = (0..grid.cells())
             .filter(|&cell| cover_above[cell] && distance[cell] > 0.0)
             .count() as u64;
-        (eligible, distance.to_vec())
-    });
+        let initial = distance.to_vec();
+        counting_ns += u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        Some((eligible, initial))
+    } else {
+        None
+    };
     if !*clear_built {
         let _clearance_span = crate::perf::span(crate::perf::Span::PassClearance);
         crate::reach::clearance_mm(grid, cover_above, clear);
@@ -2828,11 +2849,14 @@ fn route_within_cover(
         previous.copy_from_slice(distance);
     }
     let (eligible, written) = measured.map_or((0, 0), |(eligible, initial)| {
+        let _count_span = crate::perf::span(crate::perf::Span::CountOverhead);
+        let started = std::time::Instant::now();
         let written = initial
             .iter()
             .zip(distance.iter())
             .filter(|(before, after)| before.to_bits() != after.to_bits())
             .count() as u64;
+        counting_ns += u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
         (eligible, written)
     });
     RouteOutcome {
@@ -2841,6 +2865,7 @@ fn route_within_cover(
         sightlines: sight,
         eligible,
         written,
+        counting_ns,
     }
 }
 
@@ -2886,6 +2911,8 @@ struct RouteOutcome {
     /// and of those, the cells whose distance the rounds changed.
     eligible: u64,
     written: u64,
+    /// Time the measurement above took, in ns (zero with counting off).
+    counting_ns: u64,
 }
 /// Per connected component of MODEL material, `X_model = Σ L / component area`.
 ///

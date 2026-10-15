@@ -82,6 +82,8 @@ struct TraceState {
     pass_seq: u64,
     pass_in_run: u64,
     run_started: Option<std::time::Instant>,
+    /// Counting time of this run's passes (taken out of the run's wall).
+    run_count_ns: u64,
     run_layers: u64,
     run_site: u64,
     /// Per-layer fingerprints of the last pass that ended: the base the next
@@ -242,12 +244,14 @@ pub(crate) fn begin(cells: usize, layers: usize, struts: &[SweepStrut], site: u6
             now.layer[layer] = now.layer[layer].wrapping_add(h);
         }
     }
+    let _count_span = perf::span(perf::Span::CountOverhead);
     let geoms: Vec<u64> = struts.iter().map(geom_print).collect();
     perf::with_pose_slot(|probe: &mut Probe| {
         let trace = &mut probe.trace;
         trace.run_seq += 1;
         trace.pass_in_run = 0;
         trace.run_started = Some(std::time::Instant::now());
+        trace.run_count_ns = 0;
         trace.run_layers = layers as u64;
         trace.run_site = site;
         trace.geom_now = geoms;
@@ -445,6 +449,8 @@ pub(crate) struct LayerRec {
     pub(crate) round: u64,
     /// Fingerprint of what the layer hands down (load and carriers).
     pub(crate) fp: u64,
+    /// Time the counting itself took inside this layer; taken out of `ns`.
+    pub(crate) count_ns: u64,
 }
 
 /// A pass's trace, built by `sweep_pass` only while counting is on.
@@ -478,8 +484,19 @@ impl PassTrace {
         self.layer_started = std::time::Instant::now();
     }
 
+    /// Run measurement-only work `f` on the current layer's record, charging
+    /// its time to the layer's `count_ns` and to [`perf::Span::CountOverhead`]
+    /// so that no time column includes it.
+    pub(crate) fn counting<R>(&mut self, f: impl FnOnce(&mut LayerRec) -> R) -> R {
+        let _span = perf::span(perf::Span::CountOverhead);
+        let started = std::time::Instant::now();
+        let out = f(&mut self.cur);
+        self.cur.count_ns += ns_since(started);
+        out
+    }
+
     pub(crate) fn layer_end(&mut self, layer: usize) {
-        self.cur.ns = ns_since(self.layer_started);
+        self.cur.ns = ns_since(self.layer_started).saturating_sub(self.cur.count_ns);
         if let Some(slot) = self.recs.get_mut(layer) {
             *slot = self.cur;
         }
@@ -490,9 +507,12 @@ impl PassTrace {
     /// ([`pass_done`]) completes it.
     pub(crate) fn finish(self) {
         let layers = self.recs.len();
-        let wall_ns = ns_since(self.started);
+        // The pass's wall time without the counting inside it.
+        let counted: u64 = self.recs.iter().map(|rec| rec.count_ns).sum();
+        let wall_ns = ns_since(self.started).saturating_sub(counted);
         let cells = self.cells as u64;
         let recs = self.recs;
+        let _count_span = perf::span(perf::Span::CountOverhead);
         perf::with_pose_slot(|probe: &mut Probe| {
             let trace = &mut probe.trace;
             if let Some(stale) = trace.pending_pass.take() {
@@ -500,6 +520,7 @@ impl PassTrace {
             }
             trace.pass_seq += 1;
             trace.pass_in_run += 1;
+            trace.run_count_ns += counted;
             let pass_id = trace.pass_seq;
             let fps: Vec<u64> = recs.iter().map(|rec| rec.fp).collect();
             let (cmp, dirty) = if trace.last_pass_fp.len() == layers && layers > 0 {
@@ -586,6 +607,10 @@ pub(crate) fn layer_fingerprint(load_out: &[f64], carriers: &[bool]) -> u64 {
 /// whose ledger differs from the previous pass's (or the previous run's last
 /// pass, for pass 1) and write the pass row.
 pub(crate) fn pass_done(struts: &[SweepStrut]) {
+    if !perf::enabled() {
+        return;
+    }
+    let _count_span = perf::span(perf::Span::CountOverhead);
     perf::with_pose_slot(|probe: &mut Probe| {
         let trace = &mut probe.trace;
         let Some(row) = trace.pending_pass.take() else {
@@ -630,7 +655,12 @@ pub(crate) fn route_hash(log: &crate::per_event::RouteLog) -> u64 {
 
 /// The run is over: write its row (passes, wall time, whether its routing
 /// and its member geometry equal the previous run's in this pose).
-pub(crate) fn run_end(passes: usize, inserted: u64, route: u64) {
+pub(crate) fn run_end(passes: usize, inserted: u64, log: &crate::per_event::RouteLog) {
+    if !perf::enabled() {
+        return;
+    }
+    let _count_span = perf::span(perf::Span::CountOverhead);
+    let route = route_hash(log);
     perf::with_pose_slot(|probe: &mut Probe| {
         let trace = &mut probe.trace;
         if let Some(stale) = trace.pending_pass.take() {
@@ -646,7 +676,11 @@ pub(crate) fn run_end(passes: usize, inserted: u64, route: u64) {
         );
         trace.route_prev = Some(route);
         trace.geom_prev = Some(std::mem::take(&mut trace.geom_now));
-        let wall = trace.run_started.take().map_or(0, ns_since);
+        let wall = trace
+            .run_started
+            .take()
+            .map_or(0, ns_since)
+            .saturating_sub(trace.run_count_ns);
         perf::row(
             perf::Rows::DownRun,
             &[
