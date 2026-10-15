@@ -1002,6 +1002,75 @@ fn plane_between(grid: &Grid, from: usize, to: usize) -> Option<Plane> {
     Some(plane)
 }
 
+/// The largest plane memo, in verdict slots (one byte each). A scan window
+/// that would need more is run without a memo: the verdicts are the same, only
+/// recomputed per cell.
+const PLANE_MEMO_MAX_SLOTS: usize = 1 << 24;
+
+/// A per-scan memo of plane verdicts, indexed by the RAW plane `[dr, dc]` that
+/// [`plane_between`] returns (`dr` in `0..=dr_max`, `dc` in `-dc_max..=dc_max`).
+/// The bounds are the grid-clipped search window, not the theoretical reach, so
+/// the table never exceeds `rows * (2 * cols - 1)` slots and is dropped (the
+/// direct test runs) when that exceeds [`PLANE_MEMO_MAX_SLOTS`].
+struct PlaneMemo {
+    /// 0 unknown, 1 holds, 2 does not. Empty when the memo is off.
+    slots: Vec<u8>,
+    dr_max: i64,
+    dc_max: i64,
+    span: usize,
+}
+
+impl PlaneMemo {
+    /// The memo for a scan of at most `reach_cells` cells each way on a
+    /// `rows` x `cols` grid. Checked arithmetic throughout.
+    fn new(rows: usize, cols: usize, reach_cells: usize) -> Self {
+        let dr = reach_cells.min(rows.saturating_sub(1));
+        let dc = reach_cells.min(cols.saturating_sub(1));
+        let slots = dc
+            .checked_mul(2)
+            .and_then(|twice| twice.checked_add(1))
+            .and_then(|span| dr.checked_add(1)?.checked_mul(span))
+            .filter(|&total| total <= PLANE_MEMO_MAX_SLOTS)
+            .map_or_else(Vec::new, |total| vec![0_u8; total]);
+        Self {
+            dr_max: i64::try_from(dr).unwrap_or(0),
+            dc_max: i64::try_from(dc).unwrap_or(0),
+            span: 2 * dc + 1,
+            slots,
+        }
+    }
+
+    /// The slot of `plane`, or `None` when the memo is off or the plane is
+    /// outside the window it was sized for.
+    fn slot(&self, plane: Plane) -> Option<usize> {
+        if self.slots.is_empty()
+            || !(0..=self.dr_max).contains(&plane[0])
+            || !(-self.dc_max..=self.dc_max).contains(&plane[1])
+        {
+            return None;
+        }
+        let row = usize::try_from(plane[0]).ok()?;
+        let col = usize::try_from(plane[1] + self.dc_max).ok()?;
+        Some(row * self.span + col)
+    }
+
+    /// The verdict of `judge` on `plane`, computed once per plane.
+    fn verdict(&mut self, plane: Plane, judge: impl FnOnce(Plane) -> bool) -> bool {
+        let Some(slot) = self.slot(plane) else {
+            return judge(plane);
+        };
+        match self.slots[slot] {
+            1 => true,
+            2 => false,
+            _ => {
+                let held = judge(plane);
+                self.slots[slot] = if held { 1 } else { 2 };
+                held
+            }
+        }
+    }
+}
+
 /// Exact integer test: two planes are the same line. Used only to list a
 /// member's distinct planes once.
 fn parallel(a: Plane, b: Plane) -> bool {
@@ -1289,6 +1358,77 @@ fn new_plane_holds(ties: &[Tie], layer: usize, plane: Plane, sway_deg: Option<f6
         planes.push(plane);
     }
     joint_holds(&planes, sway)
+}
+
+/// [`new_plane_holds`] with everything that does not depend on the new plane
+/// done once: for one member, layer and sway, the distinct existing planes
+/// (in [`planes_at`]'s order), their joint verdict, and their `Σ cos²` prefix.
+/// A mast scan asks this about thousands of cells with those three fixed, and
+/// [`new_plane_holds`] would rebuild the list, re-deduplicate it and
+/// re-evaluate the trig of every existing plane for each cell.
+///
+/// Same answers, bit for bit: the existing planes keep their order, the new
+/// plane is the LAST term of the joint sum (as [`new_plane_holds`] appends
+/// it), a lone plane is judged by the strict-arc [`holds`], two or more by
+/// the `JOINT_NOISE` sum, and a plane parallel to a known one adds nothing.
+struct NewPlaneTest {
+    /// `None`: a run no cross ties yet, which any plane serves.
+    sway: Option<f64>,
+    existing: Vec<Plane>,
+    /// `joint_holds(existing, sway)`: the verdict for a plane parallel to a
+    /// known one.
+    existing_holds: bool,
+    /// `Σ cos²(sway − θ)` over `existing`, summed in order.
+    prefix_sum: f64,
+}
+
+impl NewPlaneTest {
+    fn new(ties: &[Tie], layer: usize, sway_deg: Option<f64>) -> Self {
+        let Some(sway) = sway_deg else {
+            return Self {
+                sway: None,
+                existing: Vec::new(),
+                existing_holds: true,
+                prefix_sum: 0.0,
+            };
+        };
+        let existing = planes_at(ties, layer);
+        let prefix_sum: f64 = existing
+            .iter()
+            .map(|plane| (sway - plane_deg(*plane)).to_radians().cos().powi(2))
+            .sum();
+        let existing_holds = joint_holds(&existing, sway);
+        Self {
+            sway: Some(sway),
+            existing,
+            existing_holds,
+            prefix_sum,
+        }
+    }
+
+    fn holds(&self, plane: Plane) -> bool {
+        let Some(sway) = self.sway else {
+            return true;
+        };
+        if self.existing.iter().any(|known| parallel(*known, plane)) {
+            return self.existing_holds;
+        }
+        if self.existing.is_empty() {
+            return holds(plane, sway);
+        }
+        let term = (sway - plane_deg(plane)).to_radians().cos().powi(2);
+        self.prefix_sum + term >= 0.5 - JOINT_NOISE
+    }
+}
+
+/// `PLINTH_SWEEP_VERIFY_NEW_PLANE=1`: the mast scan's prepared plane test is
+/// also answered by [`new_plane_holds`] and any difference panics. For gate
+/// runs, not for production. Read once.
+fn verify_new_plane() -> bool {
+    static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *VERIFY.get_or_init(|| {
+        std::env::var_os("PLINTH_SWEEP_VERIFY_NEW_PLANE").is_some_and(|value| value == "1")
+    })
 }
 
 /// One lateral tie on one member: the layer, and the plane it holds in
@@ -2125,11 +2265,20 @@ pub(crate) fn apply_ties_with_model(
         let mut queue: VecDeque<u32> = first.into_iter().map(|(_, id)| id).collect();
         let mut exhausted: BTreeSet<RunKey> = BTreeSet::new();
         'members: while let Some(id) = queue.pop_front() {
+            // A cancelled pose (`crate::cancel`) stops between members. What
+            // it returns is half a pass, never read: every caller ends the
+            // pose at its next safe point before it looks at the count.
+            if crate::cancel::cancelled() {
+                return applied;
+            }
             let index = id as usize;
             if let Some(flag) = queued.get_mut(index) {
                 *flag = false;
             }
             for _attempt in 0..=context.max_struts {
+                if crate::cancel::cancelled() {
+                    return applied;
+                }
                 if struts.len() + 2 > context.max_struts {
                     break 'rounds;
                 }
@@ -5093,10 +5242,16 @@ fn plan_thicken(
     let (mut low, mut high) = (lowest, best);
     for _ in 0..64 {
         let middle = 0.5 * (low + high);
+        let before = (low.to_bits(), high.to_bits());
         if holds(middle) {
             high = middle;
         } else {
             low = middle;
+        }
+        // A complete iteration that moved neither end (the ends are adjacent
+        // floats) is a fixed point of the pure step: every later one repeats it.
+        if (low.to_bits(), high.to_bits()) == before {
+            break;
         }
     }
     let root = high;
@@ -5733,8 +5888,21 @@ fn tie_by_mast(
     let id = run.strut_id;
     let here = struts.get(id as usize)?.cell_at(k);
     let arm_ties = state.ties.get(id as usize).cloned().unwrap_or_default();
+    // The member's ties, layer and sway are fixed for the whole call: the
+    // existing-plane work is done once ([`NewPlaneTest`]).
+    let plane_test = NewPlaneTest::new(&arm_ties, k, run.sway_deg);
+    let verify_planes = verify_new_plane();
     let admissible = |plane: Option<Plane>| {
-        plane.is_some_and(|plane| new_plane_holds(&arm_ties, k, plane, run.sway_deg))
+        plane.is_some_and(|plane| {
+            let held = plane_test.holds(plane);
+            assert!(
+                !verify_planes || held == new_plane_holds(&arm_ties, k, plane, run.sway_deg),
+                "PLINTH_SWEEP_VERIFY_NEW_PLANE: the prepared test differs from new_plane_holds \
+                 for plane {plane:?} at layer {k} (sway {:?}, ties {arm_ties:?})",
+                run.sway_deg,
+            );
+            held
+        })
     };
     // A MAST IS A PARTNER, NOT A SECOND, STIFFER POST (fix/member-clearance,
     // 2026-09-29): it is never drawn thicker than the member it braces. The
@@ -5918,9 +6086,16 @@ fn tie_by_mast(
     let row0 = grid.row_of(here);
     let col0 = grid.col_of(here);
     let mut candidates: Vec<(f64, usize, f64)> = Vec::new();
-    for row in row0.saturating_sub(reach_cells)..=(row0 + reach_cells).min(grid.rows() - 1) {
+    // One verdict slot per plane `[dr, dc]` (`dr` in `0..=reach`, `dc` in
+    // `-reach..=reach`): 0 unknown, 1 holds, 2 does not.
+    // Sized by the grid-clipped window, not the theoretical reach.
+    let mut plane_memo = PlaneMemo::new(grid.rows(), cols, reach_cells);
+    for row in row0.saturating_sub(reach_cells)
+        ..=row0.saturating_add(reach_cells).min(grid.rows() - 1)
+    {
         let base = row * cols;
-        for col in col0.saturating_sub(reach_cells)..=(col0 + reach_cells).min(cols - 1) {
+        for col in col0.saturating_sub(reach_cells)..=col0.saturating_add(reach_cells).min(cols - 1)
+        {
             let cell = base + col;
             if cell == here {
                 continue;
@@ -5937,11 +6112,21 @@ fn tie_by_mast(
             if state.index.shaft_head[cell] != u32::MAX {
                 continue;
             }
-            if !admissible(plane_between(grid, here, cell)) {
-                continue;
-            }
+            // The depth test has no side effect and `continue`s the same
+            // either way, so it runs first and the plane test (trig) only for
+            // the cells that are in reach.
             let depth = context.lean.layers_to_reach(distance_mm);
             if depth == 0 || depth > k {
+                continue;
+            }
+            // The plane verdict depends on the plane alone, and `plane_between`
+            // folds a plane and its reverse into one RAW integer pair, so each
+            // is judged once per scan.
+            let held = match plane_between(grid, here, cell) {
+                None => false,
+                Some(plane) => plane_memo.verdict(plane, |plane| admissible(Some(plane))),
+            };
+            if !held {
                 continue;
             }
             // THE MAST'S OWN RADIUS: `r_m = max(r_min, H / S)` over its WHOLE
@@ -6012,10 +6197,15 @@ fn tie_by_mast(
                 let (mut low, mut high) = (own_radius, ceiling);
                 for _ in 0..64 {
                     let middle = 0.5 * (low + high);
+                    let before = (low.to_bits(), high.to_bits());
                     if sway(middle) <= 1.0 {
                         high = middle;
                     } else {
                         low = middle;
+                    }
+                    // Fixed point of the pure step: every later iteration repeats it.
+                    if (low.to_bits(), high.to_bits()) == before {
+                        break;
                     }
                 }
                 high
@@ -8201,6 +8391,57 @@ mod flare_tests;
 mod tests {
     use super::{extra_ties, SlendernessLaw, UnbracedRun};
 
+    /// A valid law with a huge brace reach on a small grid sizes the plane
+    /// memo by the grid window, not the reach; reaches that overflow the
+    /// arithmetic or exceed the cap turn the memo off instead of allocating.
+    #[test]
+    fn the_plane_memo_is_sized_by_the_grid_window_not_the_reach() {
+        let small = super::PlaneMemo::new(100, 100, 100_000);
+        assert_eq!(small.slots.len(), 100 * (2 * 99 + 1));
+        for reach in [usize::MAX, usize::MAX / 2, usize::MAX / 4 + 1] {
+            let huge = super::PlaneMemo::new(usize::MAX / 3, usize::MAX / 3, reach);
+            assert!(huge.slots.is_empty(), "reach {reach}: memo must be off");
+        }
+        let wide = super::PlaneMemo::new(1 << 13, 1 << 13, usize::MAX);
+        assert!(wide.slots.is_empty(), "a window over the cap runs unmemoised");
+        // Off, the verdict is still the direct one.
+        let mut off = super::PlaneMemo::new(1 << 13, 1 << 13, usize::MAX);
+        assert!(off.verdict([3, -2], |plane| plane == [3, -2]));
+        assert!(!off.verdict([3, -2], |_| false));
+    }
+
+    /// Over a full scan of a grid, the memoised verdict of every visited cell
+    /// equals the direct verdict, the judge runs once per distinct plane, and a
+    /// plane and its reverse share one slot.
+    #[test]
+    fn the_plane_memo_maps_each_visited_cells_plane_to_its_own_verdict() {
+        let grid = crate::grid::lay_out_at(0.0, 0.0, 0.5, 23, 17);
+        let direct = |plane: super::Plane| (plane[0] * 7 + plane[1] * 3).rem_euclid(5) < 2;
+        for reach in [0_usize, 3, 9, 40] {
+            let mut memo = super::PlaneMemo::new(grid.rows(), grid.cols(), reach);
+            let mut calls = std::collections::BTreeSet::new();
+            let mut judged = 0_usize;
+            for here in [0_usize, 11, 17 * 23 / 2, 17 * 23 - 1, 5 * 23 + 20] {
+                let (row0, col0) = (grid.row_of(here), grid.col_of(here));
+                for row in row0.saturating_sub(reach)..=(row0 + reach).min(grid.rows() - 1) {
+                    for col in col0.saturating_sub(reach)..=(col0 + reach).min(grid.cols() - 1) {
+                        let cell = row * grid.cols() + col;
+                        let Some(plane) = super::plane_between(&grid, here, cell) else {
+                            continue;
+                        };
+                        let got = memo.verdict(plane, |plane| {
+                            judged += 1;
+                            direct(plane)
+                        });
+                        assert_eq!(got, direct(plane), "here {here} cell {cell} plane {plane:?}");
+                        calls.insert(plane);
+                    }
+                }
+            }
+            assert_eq!(judged, calls.len(), "reach {reach}: one judgement per plane");
+        }
+    }
+
     /// D9: the two-post ceiling reproduces the study's two pairs
     /// (`bracing-mechanics.md` §3: "3.8 for the thin pair and 3.5 for the mid
     /// pair") and its equal-post closed form `(1 + s²/r²)^(1/4)`, grows with
@@ -8449,6 +8690,95 @@ mod tests {
             }),
             "two perpendicular planes hold every direction: {both:?}"
         );
+    }
+
+    /// The prepared plane test of the mast scan answers exactly what
+    /// `new_plane_holds` answers, for empty, singleton, duplicate-parallel and
+    /// many-plane lists, at sways on and around the 45 degree arc ends and the
+    /// `JOINT_NOISE` joint threshold, over every plane of a reach-6 window.
+    #[test]
+    fn the_prepared_plane_test_agrees_with_new_plane_holds() {
+        use super::{joint_breaks, plane_deg, planes_at, NewPlaneTest, Plane, Tie};
+        let tie = |layer: usize, plane: Option<Plane>| Tie {
+            layer,
+            from: layer,
+            plane,
+            band_top: false,
+        };
+        let pool: [Plane; 6] = [[0, 1], [1, 0], [1, 1], [1, -1], [2, 4], [3, 1]];
+        // Lists: empty; a landing (no plane); other-layer noise; one plane;
+        // duplicate and parallel planes; two to four distinct planes.
+        let mut lists: Vec<Vec<Tie>> = vec![
+            vec![],
+            vec![tie(5, None)],
+            vec![tie(4, Some([1, 0])), tie(6, Some([0, 1]))],
+        ];
+        for a in 0..pool.len() {
+            lists.push(vec![tie(5, Some(pool[a]))]);
+            lists.push(vec![tie(5, Some(pool[a])), tie(5, Some(pool[a])), tie(4, Some([1, 1]))]);
+            for b in 0..pool.len() {
+                lists.push(vec![tie(5, Some(pool[a])), tie(5, Some(pool[b]))]);
+                lists.push(vec![tie(5, Some(pool[a])), tie(5, None), tie(5, Some(pool[b]))]);
+                for c in 0..pool.len() {
+                    lists.push(vec![
+                        tie(5, Some(pool[a])),
+                        tie(5, Some(pool[b])),
+                        tie(5, Some(pool[c])),
+                    ]);
+                }
+            }
+        }
+        lists.push(vec![
+            tie(5, Some([1, 0])),
+            tie(5, Some([1, 1])),
+            tie(5, Some([0, 1])),
+            tie(5, Some([1, -1])),
+        ]);
+        let reach = 6_i64;
+        let candidates: Vec<Plane> = (0..=reach)
+            .flat_map(|dr| (-reach..=reach).map(move |dc| [dr, dc]))
+            .filter(|plane| *plane != [0, 0] && (plane[0] > 0 || plane[1] > 0))
+            .collect();
+        let mut checked = 0_usize;
+        for ties in &lists {
+            let existing = planes_at(ties, 5);
+            // Sways: a sweep, and every point where the joint verdict of the
+            // existing planes alone, or with one more plane, flips, with its
+            // neighbours a hair either side.
+            let mut sways: Vec<f64> = (0..360).map(|deg| f64::from(deg) * 0.5).collect();
+            let mut with_each: Vec<Vec<Plane>> = vec![existing.clone()];
+            for extra in &candidates {
+                let mut planes = existing.clone();
+                if !planes.iter().any(|known| super::parallel(*known, *extra)) {
+                    planes.push(*extra);
+                }
+                with_each.push(planes);
+            }
+            for planes in &with_each {
+                let mut breaks = joint_breaks(planes);
+                if let [one] = planes.as_slice() {
+                    let deg = plane_deg(*one);
+                    breaks.extend([deg - 45.0, deg + 45.0]);
+                }
+                for at in breaks {
+                    for nudge in [0.0, 1.0e-12, -1.0e-12, 1.0e-9, -1.0e-9, 1.0e-6, -1.0e-6] {
+                        sways.push((at + nudge).rem_euclid(180.0));
+                    }
+                }
+            }
+            for sway in sways.iter().map(|sway| Some(*sway)).chain([None]) {
+                let test = NewPlaneTest::new(ties, 5, sway);
+                for plane in &candidates {
+                    assert_eq!(
+                        test.holds(*plane),
+                        super::new_plane_holds(ties, 5, *plane, sway),
+                        "plane {plane:?}, sway {sway:?}, ties {ties:?}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 1_000_000, "the comparison ran: {checked}");
     }
 
     /// The port of the field report's panel frame reproduces the numbers that

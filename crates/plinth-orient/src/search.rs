@@ -64,7 +64,7 @@ use std::collections::BTreeSet;
 use geom_kernel::vec3;
 use plinth_core::{m0_constants, Fidelity, Finite};
 use plinth_decimate::{simplify_locked, SimplifyError, SimplifyRequest};
-use plinth_mesh::Mesh;
+use plinth_mesh::{DelicacyEvaluation, Mesh};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -229,6 +229,11 @@ pub struct SweepRequest {
     /// deliberately **not** derived from the mesh being scored: a cap computed
     /// from the counts it is then compared against can never fire.
     pub limits: OrientSearchLimits,
+    /// How the delicacy curvature of each rung's face table is evaluated.
+    /// Execution policy, not a registry number: the registered request defaults
+    /// to the protected proxy (2026-10-15); the exact full-mesh spread is the
+    /// opt-out (`--exact-delicacy`).
+    pub delicacy: DelicacyEvaluation,
 }
 
 impl SweepRequest {
@@ -245,6 +250,7 @@ impl SweepRequest {
             grid: GridSettings::registered()?,
             ladder: LadderSettings::registered()?,
             limits: OrientSearchLimits::production(),
+            delicacy: DelicacyEvaluation::default(),
         })
     }
 
@@ -1411,7 +1417,8 @@ pub(crate) fn search_core_into(
     // Write-only stage marks (X0, 2026-10-10): where the OrientTable phase
     // spends its time. Inert unless `--perf` is on.
     let exact_mark = geom_kernel::perf::stage("orient.rung_exact");
-    let exact = rung(mesh, EXACT_LOD, None, scar_free).map_err(|error| match error {
+    let delicacy = request.delicacy;
+    let exact = rung(mesh, EXACT_LOD, None, scar_free, delicacy).map_err(|error| match error {
         RungError::Score(error) => SearchError::ExactUnscorable(error),
         RungError::Simplify(_) | RungError::BelowFloor { .. } | RungError::NoCascadeSource => {
             SearchError::ExactUnscorable(ScoreError::Constants(
@@ -1436,6 +1443,7 @@ pub(crate) fn search_core_into(
             request.ladder.l1_ratio(),
             request.ladder,
             scar_free,
+            delicacy,
         );
         drop(l1_mark);
         let l1 = record_fallback(l1, L1_LOD, EXACT_LOD, &mut fallbacks);
@@ -1447,6 +1455,7 @@ pub(crate) fn search_core_into(
                 request.ladder.l2_of_l1_ratio(),
                 request.ladder,
                 scar_free,
+                delicacy,
             ),
             // No L1 means no cascade source. Coarsening the exact mesh directly
             // would produce an L2 that is not a coarsening of the L1 that is not
@@ -2185,12 +2194,13 @@ fn rung(
     lod: &'static str,
     proxy: Option<SearchProxy>,
     scar_free: bool,
+    delicacy: DelicacyEvaluation,
 ) -> Result<Rung, RungError> {
     let table_mark = geom_kernel::perf::stage("orient.face_table");
     let table = if scar_free {
         OrientFaceTable::without_delicacy(mesh, lod)
     } else {
-        OrientFaceTable::build(mesh, lod)
+        OrientFaceTable::build_with(mesh, lod, delicacy)
     }
     .map_err(RungError::Score)?;
     drop(table_mark);
@@ -2224,6 +2234,7 @@ fn build_proxy_rung(
     ratio: f64,
     ladder: LadderSettings,
     scar_free: bool,
+    delicacy: DelicacyEvaluation,
 ) -> Result<Rung, RungError> {
     let simplify_mark = geom_kernel::perf::stage("orient.simplify");
     let proxy = SearchProxy::simplify(source, ratio).map_err(RungError::Simplify)?;
@@ -2236,7 +2247,7 @@ fn build_proxy_rung(
         });
     }
     let mesh = proxy.mesh().clone();
-    rung(&mesh, lod, Some(proxy), scar_free)
+    rung(&mesh, lod, Some(proxy), scar_free, delicacy)
 }
 
 /// Turns a rung failure into a recorded fallback rather than a silent one.

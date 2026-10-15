@@ -69,7 +69,9 @@ fn main() {
             .expect("scale sanity must pass")
             .into_parts()
             .0;
-        let request = registered_sweep_request().expect("the registered sweep request");
+        let mut request = registered_sweep_request().expect("the registered sweep request");
+        // A reference probe: the exact field (the registered request defaults to the proxy).
+        request.delicacy = plinth_orient::DelicacyEvaluation::Exact;
         let demand = SweepDemand::production();
         let outcome = search(&decimated, &request, Some(&demand))
             .expect("the dense orientation search must not refuse");

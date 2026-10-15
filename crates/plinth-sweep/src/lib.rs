@@ -2832,6 +2832,9 @@ fn plan_after_prefix(
         &keep_out,
         &unrooted,
     );
+    // A cancelled down-sweep returns half a field; the safe point ends the
+    // pose before anything reads it (the same after every down-sweep below).
+    cancel::checkpoint()?;
     // SUPPORT COMES BEFORE WHAT RESTS ON IT. Every pass below that edits a
     // landing is followed by one landing-validity check of the whole field
     // (`landing_check`, `O(struts)`), so a pass that leaves a member standing
@@ -2924,6 +2927,10 @@ fn plan_after_prefix(
                 replayed.then_some(&replay_context),
                 &mut removal_coverage,
             );
+            // BEFORE the `removed == 0` exit below: a cancelled replay stops
+            // with the arms it had judged so far, and "nothing removed" would
+            // read as an answer (the pass ends, the stages after it run on).
+            cancel::checkpoint()?;
             if removed == 0 {
                 rolled_back = attempt > 0;
                 break;
@@ -2938,6 +2945,7 @@ fn plan_after_prefix(
                 &keep_out,
                 &unrooted,
             );
+            cancel::checkpoint()?;
             let more_uncarried = outcome.uncarried_load_mm2
                 > before_outcome.uncarried_load_mm2
                     + 1.0e-9 * before_outcome.uncarried_load_mm2.abs().max(1.0);
@@ -3008,6 +3016,7 @@ fn plan_after_prefix(
             &keep_out,
             &unrooted,
         );
+        cancel::checkpoint()?;
     }
     landings.record("un-merge", &landing_check::check_landings(&struts, height));
     moves.note("un-merge", &struts);
@@ -3077,6 +3086,7 @@ fn plan_after_prefix(
                 &keep_out,
                 &unrooted,
             );
+            cancel::checkpoint()?;
             set_interior(&mut struts, &history);
             // WHAT THE PRE-SIZING ESTIMATE GOT WRONG, measured rather than
             // assumed. A flank arm's plate cell is chosen against an ESTIMATE
@@ -3257,6 +3267,7 @@ fn plan_after_prefix(
                 &keep_out,
                 &unrooted,
             );
+            cancel::checkpoint()?;
             let undone = stranded_branch::put_back_overloaded(
                 &mut struts,
                 &made,
@@ -3275,6 +3286,7 @@ fn plan_after_prefix(
                     &keep_out,
                     &unrooted,
                 );
+                cancel::checkpoint()?;
             }
         }
         set_interior(&mut struts, &history);
@@ -3311,6 +3323,7 @@ fn plan_after_prefix(
             &keep_out,
             &unrooted,
         );
+        cancel::checkpoint()?;
         // AND THE SAME RADIUS CEILING THE OWNER RULED ON, APPLIED TO THE
         // MERGES THIS LANE FORCED. `unmerge_overgrown` ran before the lane, so
         // it never saw them; a forced merge hands its trunk the SUM of both
@@ -3344,6 +3357,7 @@ fn plan_after_prefix(
                 &keep_out,
                 &unrooted,
             );
+            cancel::checkpoint()?;
         }
         // WHICH OF THOSE WERE THE LANE'S OWN. A forced merge put back no
         // longer stands on the landing the lane gave it; every other un-merge
@@ -3433,9 +3447,13 @@ fn plan_after_prefix(
     ) {
         outcome = sized;
     }
+    // A cancelled run answers `None`, which the lines above read as "no new
+    // sizing"; the safe point ends the pose before anything else reads it.
+    cancel::checkpoint()?;
     if drop_unheld(&mut struts, &mut lip_seat_outcome, &mut lip_seat_refused, &mut stranded) {
         cancel::checkpoint()?;
         outcome = lip_seat_run.size(&slenderness_context, &mut struts);
+        cancel::checkpoint()?;
     }
     if policy.lip_seat {
         landings.record("lip seats", &landing_check::check_landings(&struts, height));
@@ -3477,6 +3495,7 @@ fn plan_after_prefix(
                 &keep_out,
                 &unrooted,
             );
+            cancel::checkpoint()?;
             set_interior(&mut struts, &history);
             landings.record("graze heads", &landing_check::check_landings(&struts, height));
             moves.note("graze heads", &struts);
@@ -3524,6 +3543,7 @@ fn plan_after_prefix(
                 &keep_out,
                 &unrooted,
             );
+            cancel::checkpoint()?;
             set_interior(&mut struts, &history);
         }
         landings.record("head joins", &landing_check::check_landings(&struts, height));
@@ -3553,9 +3573,11 @@ fn plan_after_prefix(
         ) {
             outcome = sized;
         }
+        cancel::checkpoint()?;
         if drop_unheld(&mut struts, &mut lip_seat_outcome, &mut lip_seat_refused, &mut stranded) {
             cancel::checkpoint()?;
             outcome = lip_seat_run.size(&slenderness_context, &mut struts);
+            cancel::checkpoint()?;
         }
         landings.record(
             "lip seats after head joins",
@@ -3585,6 +3607,9 @@ fn plan_after_prefix(
     for _ in 0..tie_passes_allowed {
         let applied =
             slenderness::apply_ties(&slenderness_context, &mut struts, &mut slenderness_outcome);
+        // BEFORE the `applied == 0` exit: a cancelled pass stops early with a
+        // count that must not read as "fixed point".
+        cancel::checkpoint()?;
         if applied == 0 {
             slenderness_outcome.fixed_point = true;
             break;
@@ -3605,6 +3630,7 @@ fn plan_after_prefix(
             &keep_out,
             &unrooted,
         );
+        cancel::checkpoint()?;
         set_interior(&mut struts, &history);
     }
     // D8 (Craig ruling 2026-10-03): THE LAST RUNG BEFORE A WARNING. Only once
@@ -3643,6 +3669,7 @@ fn plan_after_prefix(
                     &mut slenderness_outcome,
                     Some(&model),
                 );
+                cancel::checkpoint()?;
                 if applied == 0 {
                     break;
                 }
@@ -3658,6 +3685,7 @@ fn plan_after_prefix(
                     &keep_out,
                     &unrooted,
                 );
+                cancel::checkpoint()?;
                 set_interior(&mut struts, &history);
             }
         }
@@ -3716,6 +3744,7 @@ fn plan_after_prefix(
         ) {
             outcome = sized;
         }
+        cancel::checkpoint()?;
         landings.record(
             "clearance re-route",
             &landing_check::check_landings(&struts, height),
@@ -3742,6 +3771,7 @@ fn plan_after_prefix(
                     &mut struts,
                     &mut slenderness_outcome,
                 );
+                cancel::checkpoint()?;
                 if applied == 0 {
                     break;
                 }
@@ -3750,6 +3780,7 @@ fn plan_after_prefix(
                 slenderness_outcome.retie_remedies_after_reroute += applied;
                 cancel::checkpoint()?;
                 outcome = reroute.size(&slenderness_context, &mut struts);
+                cancel::checkpoint()?;
             }
             let runs_left = policy.slenderness_model_tie
                 && slenderness::unbraced_runs_drawn(
@@ -3781,6 +3812,7 @@ fn plan_after_prefix(
                             &mut slenderness_outcome,
                             Some(&model),
                         );
+                        cancel::checkpoint()?;
                         if applied == 0 {
                             break;
                         }
@@ -3789,6 +3821,7 @@ fn plan_after_prefix(
                         slenderness_outcome.retie_remedies_after_reroute += applied;
                         cancel::checkpoint()?;
                         outcome = reroute.size(&slenderness_context, &mut struts);
+                        cancel::checkpoint()?;
                     }
                 }
             }
@@ -3845,6 +3878,7 @@ fn plan_after_prefix(
                 &keep_out,
                 &unrooted,
             );
+            cancel::checkpoint()?;
             set_interior(&mut struts, &history);
             landings.record(
                 "graze heads at the final radius",
@@ -4124,6 +4158,9 @@ pub(crate) fn finish(
         })
     });
     let heads_downgraded = head_downgrades.downgraded;
+    // Safe points between the report's heavy steps: a pose cancelled while it
+    // reports ends here rather than after the whole report (read by nothing).
+    cancel::checkpoint()?;
     landings.finished = landing_check::check_landings(&struts, height);
     landings.load_gap_mm2 =
         outcome.injected_load_mm2 - outcome.plate_reaction_mm2 - outcome.uncarried_load_mm2;
@@ -4138,6 +4175,7 @@ pub(crate) fn finish(
     let finished_profiles = adapter::drawn_profiles(&struts, load_step_taper).0;
     slenderness_outcome.braces_thicker_than_a_post =
         slenderness::braces_thicker_than_a_post(&struts, &finished_profiles);
+    cancel::checkpoint()?;
     // R9 + D6 (Craig ruling 2026-10-03): the construction-stage shake check
     // on the finished field, at the stated brace peel pressure. A WARNING
     // only: it reads the field and changes nothing.
@@ -4172,6 +4210,7 @@ pub(crate) fn finish(
         };
         None
     };
+    cancel::checkpoint()?;
     slenderness_outcome.longest_run_mm = 0.0;
     slenderness_outcome.longest_run_limit_mm = 0.0;
     // WHAT THE MAST'S PLACEMENT-TIME RADIUS GOT WRONG, measured on the sized
@@ -4250,6 +4289,7 @@ pub(crate) fn finish(
     } else {
         rigid_share::RigidShareReport::default()
     };
+    cancel::checkpoint()?;
 
     // The escape check runs on the FINISHED field, struts and all, because a
     // check that ran before sizing would be answering about a field nobody
@@ -4265,6 +4305,7 @@ pub(crate) fn finish(
         policy.passage_voxel_pitch_mm,
         policy.tip_radius_max_mm,
     );
+    cancel::checkpoint()?;
 
     let mut report = build_report(
         &grid,
@@ -4389,6 +4430,9 @@ pub(crate) fn finish(
     cancel::checkpoint()?;
     let (mut seat_faces, seat_face_hits, seat_triangles) =
         tip_landing::tip_seat_faces_counted_with_ids(mesh, &grid, &struts, plate_z, height, seat_face_rule);
+    // Safe points between the seat stage's heavy steps (read by nothing when
+    // they fire: the pose is being discarded).
+    cancel::checkpoint()?;
     // THE FOOTPRINT NORMAL (Craig ruling 2026-10-05): every support arm's seat
     // normal is the area-weighted average over the patch its tip ball touches,
     // not the normal of the one nearest facet. The seat point stays the
@@ -4407,6 +4451,7 @@ pub(crate) fn finish(
         &mut seat_faces,
         &seat_triangles,
     );
+    cancel::checkpoint()?;
     report.seat_footprint_normal = footprint_normal_outcome;
     report.counters.seat_faces_measured = seat_face_hits.tips as u64;
     report.counters.seat_faces_steeper_passed_over = seat_face_hits.steeper_face_passed_over as u64;
@@ -4532,6 +4577,9 @@ pub(crate) fn finish(
             normals
         },
     );
+    // A cancelled `footprint::apply` leaves between its stages with a partial
+    // outcome; it must not reach the runs or the report below.
+    cancel::checkpoint()?;
     sweep_plan.report.seat_footprint_normal.slid_remeasured = slid_remeasured;
     sweep_plan.report.seat_footprint_normal.slid_max_change_deg = slid_max_change_deg;
     // THE RUNS AS THE FILE HAS THEM: a moved member's runs are shares of its
@@ -4572,6 +4620,7 @@ pub(crate) fn finish(
                 .joint_certificate
                 .then_some((&context, rule.allowance_mm - rule.layer_height_mm)),
         );
+        cancel::checkpoint()?;
         // THE CENSUS ON THE ROOTS THE FILE DRAWS (v20 milestone, 2026-10-08):
         // the census above was taken before this second sizing, and a headed
         // post's root is rebuilt here, so the published area described roots
@@ -4587,6 +4636,7 @@ pub(crate) fn finish(
             sweep_plan.report.congestion_lane.after = census;
         }
     }
+    cancel::checkpoint()?;
     // THE NORMAL ON THE EMITTED FIELD (`footprint_normal`, Craig ruling
     // 2026-10-05): the slides and the ends that follow them moved balls after
     // their normals were measured, so measure once more on the arms exactly as
@@ -5455,6 +5505,11 @@ impl LipSeatRun<'_> {
                     refused,
                     outcome,
                 );
+                // A cancelled `apply` stops between its rounds with whatever it
+                // had: nothing below may read that, so the run ends here.
+                if cancel::cancelled() {
+                    return None;
+                }
                 if moves.is_empty() {
                     break;
                 }
@@ -5471,6 +5526,9 @@ impl LipSeatRun<'_> {
                     t.sizings += 1;
                 }
                 let field_after = loop {
+                    if cancel::cancelled() {
+                        return None;
+                    }
                     let field_after = lip_seat::measure_sized(context, struts, &now);
                     outcome.sizing_checks += 1;
                     let base = previous.as_ref().unwrap_or(origin);
@@ -5922,6 +5980,12 @@ fn withdraw_idle_flank_arms(
         doomed[index] = true;
     }
     let (mut trial, mut trial_outcome, mut remap) = try_without(&doomed);
+    // A cancelled trial sizing is half a field: nothing below reads it, and the
+    // field and outcome stay as they were (the caller's next safe point ends
+    // the pose).
+    if cancel::cancelled() {
+        return 0;
+    }
     let without = measure(&trial, &trial_outcome);
     lane.flank_relief_evaluated = true;
     lane.flank_relief_with = [with.0, with.1 as f64, with.2];
@@ -5937,6 +6001,9 @@ fn withdraw_idle_flank_arms(
             return 0;
         }
         (trial, trial_outcome, remap) = try_without(&doomed);
+        if cancel::cancelled() {
+            return 0;
+        }
     }
     let withdrawn = doomed.iter().filter(|flag| **flag).count();
     *struts = trial;

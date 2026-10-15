@@ -1648,6 +1648,10 @@ pub(crate) fn apply(
         {
             continue;
         }
+        // A cancelled pose stops between arms; see the round loop below.
+        if crate::cancel::cancelled() {
+            return Vec::new();
+        }
         // A HEADED arm is sent but never re-landed: its head is frozen at
         // placement. Counted, and left where it is.
         if strut.head.is_some() {
@@ -1729,6 +1733,12 @@ pub(crate) fn apply(
     let mut open: Vec<usize> = (0..pending.len()).collect();
     let mut done = vec![false; pending.len()];
     while !open.is_empty() {
+        // A cancelled pose stops between rounds. The answer is read by nothing:
+        // the caller (`LipSeatRun::run`) checks the token right after this call
+        // and ends the pose, so the moves taken so far are never sized or kept.
+        if crate::cancel::cancelled() {
+            return moved;
+        }
         let mut proposals: Vec<Proposal> = Vec::new();
         for &slot in &open {
             let job = &mut pending[slot];

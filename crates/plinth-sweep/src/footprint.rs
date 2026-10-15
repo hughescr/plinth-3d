@@ -1436,6 +1436,12 @@ pub(crate) fn apply(
     }
     outcome.disc_samples = samples.len();
     let hit = graded(grid, slices, surface, &samples, &mut outcome.layers_rasterised);
+    // Cancelled poses (`crate::cancel`) leave between the stages with the
+    // outcome as it stands, before anything is moved; the caller ends the pose
+    // at its next safe point and reads none of it.
+    if crate::cancel::cancelled() {
+        return outcome;
+    }
     let mut on = vec![0_usize; arms.len()];
     let mut total = vec![0_usize; arms.len()];
     let mut lattice_missed = vec![false; arms.len()];
@@ -1571,6 +1577,9 @@ pub(crate) fn apply(
     }
     outcome.search_samples = lattice.len();
     let lattice_hit = graded(grid, slices, surface, &lattice, &mut outcome.layers_rasterised);
+    if crate::cancel::cancelled() {
+        return outcome;
+    }
     // THE GROUND EACH SEARCHED TIP HOLDS (`keeps_ground`): one window per
     // tip, wide enough for its ball moved anywhere the search may take it,
     // every layer rasterised once.
@@ -1637,6 +1646,9 @@ pub(crate) fn apply(
     let mut refused_by_limits = vec![false; searches.len()];
     let search_arms: Vec<usize> = searches.iter().map(|search| search.arm).collect();
     while !pending.is_empty() {
+        if crate::cancel::cancelled() {
+            return outcome;
+        }
         outcome.rounds += 1;
         let mut proposals: Vec<(usize, (i32, i32))> = Vec::new();
         // EACH PENDING TIP'S CANDIDATE WALK is a pure function of that tip's
