@@ -638,13 +638,17 @@ The run to run spread of one binary is about 0.6 s on Deinonychus (two base runs
   `--train` folders (training output goes to a scratch folder inside the run's own profile
   directory). Each run makes a fresh `<pgo-data>/run.XXXXXX` folder (default
   `<target-dir>/pgo`), holds the merged profile there, and deletes nothing it did not create
-  itself; remove old `run.*` folders by hand. Training must succeed: exit status 0, or 3 (the
-  pre-write gates refused a model; noted, profile still valid), and a new `.profraw` file per
-  training folder; any other status stops the script. **Compiler flags:** if `RUSTFLAGS` is set
-  the script uses it as given, as cargo does (for an older Mac: `RUSTFLAGS="-C
-  target-cpu=apple-m1" scripts/build-pgo.sh --train DIR`); otherwise it takes `target-cpu` from
-  `.cargo/config.toml`. It appends the `-Cprofile-generate` or `-Cprofile-use` flag (absolute
-  path) itself, and `--dry-run` prints the flags it chose.
+  itself; remove old `run.*` folders by hand. Training must succeed: every `--train` folder
+  must exit 0 (so it must hold only models that emit; exit 3 is not accepted, because a gate
+  refusal hides other models' failures in the exit code) and leave a new `.profraw` file; any
+  other status stops the script. **Compiler flags**, by cargo's precedence (a variable that is
+  set counts even when empty): `CARGO_ENCODED_RUSTFLAGS` (elements split on `\x1f`), else
+  `RUSTFLAGS` (split on whitespace; `RUSTFLAGS=''` means no flags and no config fallback; for an
+  older Mac: `RUSTFLAGS="-C target-cpu=apple-m1" scripts/build-pgo.sh --train DIR`), else
+  `target-cpu` from `.cargo/config.toml`. The script appends the `-Cprofile-generate` or
+  `-Cprofile-use` flag (absolute path) as one element and passes cargo the list in
+  `CARGO_ENCODED_RUSTFLAGS`, so a path with a space is safe. `--dry-run` prints the flags, one
+  bracket per argument.
 - **Feature combinations.** `mimalloc` and `alloc-count` each install a global allocator in
   `plinth-cli`'s binary; with both on (`--all-features`) `alloc-count` wins, so the all-features
   clippy and test gate compiles.

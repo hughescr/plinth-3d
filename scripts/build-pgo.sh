@@ -19,11 +19,12 @@
 # and inlining only, and the compiler never reassociates or fuses floating-point operations.
 # Check the three reference fingerprints on the result before using it.
 #
-# Training must succeed.  `plinth prepare` exits 0 (every model reached an artifact) or 3 (the
-# pre-write physics gates refused at least one model; the search still ran, so the profile is
-# still valid; the script prints a note).  Any other status (1 input, 2 hollow, 4 emit, 5 supports,
-# a usage error, a crash or a signal) stops the script, and so does a training run that leaves no
-# new .profraw file.  The exit codes are PipelineExitCode in crates/plinth-pipeline/src/lib.rs.
+# Training must succeed: `plinth prepare` must exit 0 (every model in the folder reached an
+# artifact) on every --train folder.  Any other status stops the script, and so does a training
+# run that leaves no new .profraw file.  Exit 3 (a gate refusal) is not accepted either: the
+# run's exit code gives a refusal precedence over other models' failures, so it cannot be told
+# apart from a failure.  Training folders must therefore hold only models that emit.  The exit
+# codes are PipelineExitCode in crates/plinth-pipeline/src/lib.rs.
 #
 # Train on models that look like the work.  A binary tuned on two models is slower on a model
 # unlike them only if the training was narrow; the lane measurement (docs/development.md,
@@ -34,14 +35,16 @@
 # (`rustup component add llvm-tools`) or Homebrew LLVM (`brew install llvm`).
 #
 # Compiler flags.  Both builds pass `--target <host triple>`, so the flags reach the plinth crates
-# and not build scripts or proc macros.  The base flags follow cargo's own rule: if RUSTFLAGS is
-# set in the caller's environment it is used as given (so `RUSTFLAGS="-C target-cpu=apple-m1"
-# scripts/build-pgo.sh ...` builds a PGO binary for an older Mac); otherwise the `-C target-cpu=`
-# value from `.cargo/config.toml` for the host triple is used.  The script appends its own
-# `-Cprofile-generate=...` or `-Cprofile-use=...` (absolute paths) to that.  The config's other
-# rustflags, if any are ever added, are not read by the script: put them in RUSTFLAGS.
-# CARGO_ENCODED_RUSTFLAGS is honoured the same way.  sccache is switched off: its cache key does
-# not cover the contents of a .profdata file.
+# and not build scripts or proc macros.  The base flags follow cargo's own precedence, and a
+# variable that is SET counts even when empty: CARGO_ENCODED_RUSTFLAGS (elements separated by
+# \x1f) first; else RUSTFLAGS (split on whitespace; RUSTFLAGS='' means no flags and no config
+# fallback), so `RUSTFLAGS="-C target-cpu=apple-m1" scripts/build-pgo.sh ...` builds a PGO binary
+# for an older Mac; else the `-C target-cpu=` value from `.cargo/config.toml` for the host triple.
+# The script appends its own `-Cprofile-generate=<abs path>` or `-Cprofile-use=<abs path>` as ONE
+# element, and hands cargo the list as CARGO_ENCODED_RUSTFLAGS (RUSTFLAGS is unset for the build),
+# so a path or linker argument with a space stays one argument.  The config's other rustflags, if
+# any are ever added, are not read by the script: put them in RUSTFLAGS.  sccache is switched
+# off: its cache key does not cover the contents of a .profdata file.
 #
 # The script does not take the CPU lock.  Wrap it:
 #   cpu_lock_run --shared <label> <cap-seconds> -- scripts/build-pgo.sh --train ...
@@ -97,21 +100,33 @@ out="$(cd "$(dirname "$out")" && pwd -P)/$(basename "$out")"
 host="$(rustc -vV | sed -n 's/^host: //p')"
 [ -n "$host" ] || die "cannot read the host triple from rustc -vV"
 
-# Base flags: the caller's RUSTFLAGS as given, else the config's target-cpu for this host.
-if [ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]; then
-  base_flags="$(printf '%s' "$CARGO_ENCODED_RUSTFLAGS" | tr '\037' ' ')"
+# Base flags, by cargo's own precedence (a variable that is SET wins even when empty):
+#   1. CARGO_ENCODED_RUSTFLAGS: elements separated by \x1f, used as given (empty elements dropped);
+#   2. RUSTFLAGS: split on whitespace, no config fallback (RUSTFLAGS='' means no flags at all);
+#   3. else the config's `-C target-cpu=...` for this host.
+# The list is kept as an array and handed to cargo as CARGO_ENCODED_RUSTFLAGS, so a flag that
+# contains a space (a path, a linker argument) stays one argument.
+sep=$'\037'
+base=()
+if [ "${CARGO_ENCODED_RUSTFLAGS+x}" = x ]; then
   flags_from="CARGO_ENCODED_RUSTFLAGS"
-elif [ -n "${RUSTFLAGS:-}" ]; then
-  base_flags="$RUSTFLAGS"
+  IFS="$sep" read -ra _els <<< "$CARGO_ENCODED_RUSTFLAGS" || true
+  for e in ${_els[@]+"${_els[@]}"}; do [ -n "$e" ] && base+=("$e"); done
+elif [ "${RUSTFLAGS+x}" = x ]; then
   flags_from="RUSTFLAGS"
+  read -ra _els <<< "$RUSTFLAGS" || true
+  base=(${_els[@]+"${_els[@]}"})
 else
-  base_flags=""
   flags_from=".cargo/config.toml"
   if [ -f .cargo/config.toml ]; then
     cpu="$(sed -n "/^\[target\.$host\]/,/^\[/{s/.*target-cpu=\([A-Za-z0-9._-]*\).*/\1/p;}" .cargo/config.toml | head -n1)"
-    [ -n "$cpu" ] && base_flags="-C target-cpu=$cpu"
+    [ -n "$cpu" ] && base=(-C "target-cpu=$cpu")
   fi
 fi
+# encode ELEMENT...: join with \x1f, no leading or trailing separator.
+encode() { local out="" e; for e in "$@"; do out="${out:+$out$sep}$e"; done; printf '%s' "$out"; }
+base_enc="$(encode ${base[@]+"${base[@]}"})"
+show_base="$(printf '[%s]' "${base_enc//$sep/] [}")"
 
 profdata=""
 for c in "$(rustc --print sysroot)/lib/rustlib/$host/bin/llvm-profdata" \
@@ -124,7 +139,9 @@ done
 bin="$target_dir/$host/$profile/plinth"
 
 if [ "$dry" = 1 ]; then
-  echo "host $host; base flags '$base_flags' (from $flags_from); profdata $profdata; profile $profile"
+  echo "host $host; base flags (one bracket per argument) $show_base (from $flags_from); profdata $profdata; profile $profile"
+  echo "profile flags: [-Cprofile-generate=$pgo_base/run.XXXXXX/raw] then [-Cprofile-use=$pgo_base/run.XXXXXX/merged.profdata]"
+  echo "cargo gets CARGO_ENCODED_RUSTFLAGS = $(printf '%s' "${base_enc:+$base_enc$sep}-Cprofile-generate=$pgo_base/run.XXXXXX/raw" | sed "s/$sep/<US>/g")"
   echo "target dir $target_dir; profile data parent $pgo_base; out $out"
   echo "train (read only): ${train_abs[*]}"
   exit 0
@@ -132,10 +149,10 @@ fi
 
 export CARGO_TARGET_DIR="$target_dir"
 export RUSTC_WRAPPER="" CARGO_BUILD_RUSTC_WRAPPER=""
-unset CARGO_ENCODED_RUSTFLAGS "CARGO_TARGET_$(echo "$host" | tr 'a-z-' 'A-Z_')_RUSTFLAGS" PLINTH_PERF_DIR
+unset RUSTFLAGS "CARGO_TARGET_$(echo "$host" | tr 'a-z-' 'A-Z_')_RUSTFLAGS" PLINTH_PERF_DIR
 
-build() { # $1 = extra rustflags
-  RUSTFLAGS="$base_flags $1" cargo build --locked --profile "$profile" --target "$host" -p plinth-cli
+build() { # $1 = one extra rustflag (kept as ONE argument, spaces and all)
+  CARGO_ENCODED_RUSTFLAGS="${base_enc:+$base_enc$sep}$1" cargo build --locked --profile "$profile" --target "$host" -p plinth-cli
 }
 
 # A fresh directory that this run owns.  Nothing outside it is ever deleted.
@@ -167,12 +184,10 @@ for d in "${train_abs[@]}"; do
   rc=0
   "$bin" prepare --input-models-dir "$d" --output saturn4-ultra --out-dir "$run_out" \
     --orient dense --placement sweep > "$log" 2>&1 || rc=$?
-  case "$rc" in
-    0) ;;
-    3) echo "  note: some models were refused by the pre-write gates (exit 3); the profile is still valid" ;;
-    *) tail -n 20 "$log" >&2
-       die "training on $d failed with exit status $rc (see $log)" ;;
-  esac
+  if [ "$rc" -ne 0 ]; then
+    tail -n 20 "$log" >&2
+    die "training on $d failed with exit status $rc (see $log)"
+  fi
   [ -n "$(find "$raw" -maxdepth 1 -name '*.profraw' -newer "$marker" | head -n1)" ] \
     || die "training on $d wrote no .profraw file under $raw (see $log)"
   rm -rf "$run_out"
