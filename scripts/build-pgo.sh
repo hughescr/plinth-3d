@@ -149,9 +149,12 @@ echo "== PGO 1/4: instrumented build"
 build "-Cprofile-generate=$raw"
 [ -x "$bin" ] || die "instrumented binary missing: $bin"
 "$bin" --version >/dev/null || die "the instrumented binary does not run: $bin"
+# The smoke run above wrote a profile too; clear it so only training counts.  A run of the same
+# binary updates the SAME .profraw file (its name carries the binary's hash, not the run), so
+# "a training run produced a profile" is tested by a file newer than a marker, not by a count.
+find "$raw" -maxdepth 1 -name '*.profraw' -delete
 
 echo "== PGO 2/4: training"
-count_raw() { find "$raw" -maxdepth 1 -name '*.profraw' | wc -l | tr -d ' '; }
 n=0
 for d in "${train_abs[@]}"; do
   n=$((n + 1))
@@ -159,7 +162,8 @@ for d in "${train_abs[@]}"; do
   run_out="$work/out-$n"
   mkdir -p "$run_out"
   log="$work/train-$n-$(basename "$d").log"
-  before="$(count_raw)"
+  marker="$work/marker-$n"
+  : > "$marker"
   rc=0
   "$bin" prepare --input-models-dir "$d" --output saturn4-ultra --out-dir "$run_out" \
     --orient dense --placement sweep > "$log" 2>&1 || rc=$?
@@ -169,8 +173,8 @@ for d in "${train_abs[@]}"; do
     *) tail -n 20 "$log" >&2
        die "training on $d failed with exit status $rc (see $log)" ;;
   esac
-  after="$(count_raw)"
-  [ "$after" -gt "$before" ] || die "training on $d wrote no .profraw file under $raw (see $log)"
+  [ -n "$(find "$raw" -maxdepth 1 -name '*.profraw' -newer "$marker" | head -n1)" ] \
+    || die "training on $d wrote no .profraw file under $raw (see $log)"
   rm -rf "$run_out"
 done
 
