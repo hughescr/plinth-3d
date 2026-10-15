@@ -1,0 +1,18 @@
+# Default build flags for this repository.
+#
+# Apple Silicon Macs build for the Apple M3 instruction set by default
+# (`-C target-cpu=apple-m3`: LSE atomics, dot-product, FP16, BF16, I8MM, and the
+# M3 scheduling model).  A binary built this way needs an M3-or-newer-compatible
+# CPU (M3, M4, M5 and later); it will fail with SIGILL on an M1 or M2.  To build
+# for an older Mac, override with an environment variable, which takes
+# precedence over this file:
+#
+#     RUSTFLAGS="-C target-cpu=apple-m1" cargo build --release
+#
+# Only the aarch64-apple-darwin target is changed; every other target keeps the
+# compiler defaults.  Do NOT use `target-cpu=native` (it silently follows the
+# host).  Results do not change: Rust never fuses `a * b + c` into an FMA unless
+# the code calls `mul_add`, so floating-point output is bit-identical.
+# See docs/development.md, "Build flags and allocator".
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "target-cpu=apple-m3"]

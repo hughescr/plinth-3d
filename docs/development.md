@@ -572,6 +572,103 @@ With the variable unset no file is opened and nothing is written — the trail i
 instrumentation, and it changes no verdict either way. The run summary names the file and
 the row count when one is open.
 
+## Build flags and allocator
+
+Measured 2026-10-15 on an Apple M3 Max, 12 threads, untraced, solo (`--timing` lock), Deinonychus
+and Bat_Cat_Owl (BCO) in the `perf-2026-10-09` input set, same session, against the plain
+`release` binary of the same commit. Every run below produced the reference fingerprints
+(first 8 hex digits of the `.chitubox` sha256): Bat_Cat_Owl `5132fb1a`, Cylinder `f442e573`,
+Deinonychus `d73742b2`.
+
+| Build | Deinonychus s | BCO s | Cylinder peak RSS | Clean build s |
+|---|---|---|---|---|
+| `release`, generic aarch64 (base) | 63.6 / 64.2 | 15.9 | 13.71 GB | 102 |
+| `release` + `target-cpu=apple-m3` (the default now) | 64.2 | 16.4 | | |
+| + mimalloc | 63.5 | 16.0 | 13.57 GB | |
+| + jemalloc | 65.0 | 15.4 | 13.41 GB | |
+| `release-max` (fat LTO, 1 codegen unit; M3, system allocator) | 64.2 | 15.7 | | 105 |
+| PGO on `release-max` (`scripts/build-pgo.sh`, trained on BCO and Deinonychus) | 57.5 / 58.1 | 14.6 | 13.76 GB | 584 (instrumented build, training, final build; shared machine) |
+
+Cylinder is not in the PGO training set: base 96.2 s, PGO 80.9 s (-16 %), same fingerprint.
+
+The run to run spread of one binary is about 0.6 s on Deinonychus (two base runs: 63.6 and
+64.2 s) and 0.5 s on BCO. A difference smaller than that is not a result.
+
+- **Target CPU.** `.cargo/config.toml` sets `-C target-cpu=apple-m3` for `aarch64-apple-darwin`
+  only, so every build on this Mac gets it and other targets are unchanged. Such a binary needs an
+  M3-or-newer-compatible CPU (M3, M4, M5, ...) and stops with an illegal-instruction signal on an
+  M1 or M2. For an older Mac set `RUSTFLAGS="-C target-cpu=apple-m1"`: the environment variable
+  replaces the file. Never use `target-cpu=native` (it follows the build host). Output bytes do
+  not change: Rust does not fuse `a * b + c` into a fused multiply-add unless the code calls
+  `mul_add`. Measured gain: none that shows above the spread; the hot code is scalar.
+- **Allocator.** The workload allocates a lot (Deinonychus: 386 M allocations, 153 GB, 94 s with
+  the counting build) but about 6 M per second over 12 threads, so allocator cost is a few
+  percent of the CPU time at most. `mimalloc` and `jemalloc` (`tikv-jemallocator`) changed user
+  time by about -1.5 % and wall time by nothing measurable, and mimalloc raised Deinonychus peak
+  RSS from 6.3 to 7.1 GB. The system allocator stays the default. The `mimalloc` feature of
+  `plinth-cli` stays as an opt-in for a later retest (`cargo build --release -p plinth-cli
+  --features mimalloc`); jemalloc was removed. Cylinder peak RSS (13.4 to 13.7 GB) is the same
+  under all three, below the 20 GB mark.
+- **Where the allocations are.** Build the counting binary and read its sites:
+  `scripts/alloc-profile.sh build`, then `scripts/alloc-profile.sh run BIN OUTDIR -- prepare ...`,
+  then `scripts/alloc-profile.sh report BIN OUTDIR/sites.tsv [FIRST_WINDOW LAST_WINDOW]`
+  (feature `alloc-count`; never time that binary). On Deinonychus the top small-allocation sites
+  are the lip-seat passes (`LipSeatRun::run`, `lip_seat::apply`, `trial_arm`, `propose`; 52 % of
+  all allocations together), `slenderness::new_plane_holds` (10 %, 64 B each), `finite_array`
+  (7 %, 32 B each), `NativeSurface::cast_rays_classified` (6 % on Deinonychus, 29 % on BCO: one
+  `Vec<f64>` and one `Vec<i64>` per ray), `orient_layers_batch` (3 %) and
+  `NativeSurface::collect_hits_with_stack` (3 %, 15 % on BCO). The sites that move the most bytes
+  are `lip_seat::apply`, `propose` and `trial_arm` (33 % of all bytes), `tip_landing::seat_faces`
+  (6 %, 0.9 MB each) and `PointCloudIndex::radius_neighbors_batch` (5.5 %, 5.6 MB each). They are
+  the candidates for reused buffers or arenas; the allocator is not the lever.
+- **Fat LTO.** `cargo build --profile release-max -p plinth-cli` (fat LTO, one codegen unit;
+  binary in `target/release-max/plinth`). It built in the same time as `release` here (105 s
+  against 102 s; both clean, shared machine) and gained nothing that shows (Deinonychus user
+  time -1 %). It is opt-in: it does no harm, and `scripts/build-pgo.sh` uses it as its base.
+  Check it again when the hot code changes shape, not on every build.
+- **Profile-guided optimization (PGO).** The one flag that pays. `scripts/build-pgo.sh --train DIR
+  [--train DIR ...]` builds an instrumented binary, runs the training models, merges the
+  profiles and rebuilds with `-Cprofile-use`; it needs `llvm-profdata` (rustup `llvm-tools`).
+  Trained on Bat_Cat_Owl and Deinonychus it retires 20 % fewer instructions on Deinonychus
+  (3042 G to 2431 G) and uses 7 % fewer cycles; wall time falls 9 % on Deinonychus (second
+  contact 31.6 to 28.0 s, production 25.3 to 22.9 s) and 8 % on BCO, and 16 % on Cylinder, which
+  the profile never saw. Output is byte-identical. Not the default build (a ten minute build
+  against under two); use it for a delivery run, and rebuild the profile after the hot code
+  changes much. Wrap the build in the CPU lock as one shared job. The script only reads the
+  `--train` folders (training output goes to a scratch folder inside the run's own profile
+  directory). Each run makes a fresh `<pgo-data>/run.XXXXXX` folder (default
+  `<target-dir>/pgo`), holds the merged profile there, and deletes nothing it did not create
+  itself; remove old `run.*` folders by hand. Training must succeed: every `--train` folder
+  must exit 0 (so it must hold only models that emit; exit 3 is not accepted, because a gate
+  refusal hides other models' failures in the exit code) and leave a new `.profraw` file; any
+  other status stops the script. **Compiler flags**, by cargo's precedence (a variable that is
+  set counts even when empty): `CARGO_ENCODED_RUSTFLAGS` (elements split on `\x1f`), else
+  `RUSTFLAGS` (split on whitespace; `RUSTFLAGS=''` means no flags and no config fallback; for an
+  older Mac: `RUSTFLAGS="-C target-cpu=apple-m1" scripts/build-pgo.sh --train DIR`), else
+  `target-cpu` from `.cargo/config.toml`. The script appends the `-Cprofile-generate` or
+  `-Cprofile-use` flag (absolute path) as one element and passes cargo the list in
+  `CARGO_ENCODED_RUSTFLAGS`, so a path with a space is safe. `--dry-run` prints the flags, one
+  bracket per argument.
+- **Feature combinations.** `mimalloc` and `alloc-count` each install a global allocator in
+  `plinth-cli`'s binary; with both on (`--all-features`) `alloc-count` wins, so the all-features
+  clippy and test gate compiles.
+- **Where the time goes (Deinonychus).** Instructions and cycles come from the kernel's
+  per-process counters (`proc_pid_rusage`, read every 0.5 s); the issue-slot split comes from
+  Instruments "CPU Counters" (`xctrace record --template 'CPU Counters' --attach PID`, 15 s from
+  the start of the second contact stage; a whole-run trace of Deinonychus is 37 GB and
+  `xctrace` crashes saving it). Second contact (31.7 to 63.2 s of 64 s) retires 798 G
+  instructions in 196 G cycles (IPC 4.07) but keeps only 1.6 performance-core equivalents busy
+  (46 s user and 9.6 s system CPU time in a 31.6 s stage). Production: IPC 4.25 on 3.9 cores.
+  Prefilter: IPC 3.3 on 6.4 cores. An IPC of 3.4 to 4.3 is high for this core, so the code is
+  not waiting on memory. The issue-slot split of the second contact stage (measured on the PGO
+  build) is back-end processing 52 %, useful work 22 %, work discarded by mispredicted branches 19 %, instruction
+  delivery (front end) 6.5 %: **compute (back-end) bound, with mispredicts costing about a
+  fifth of the slots, no front-end or memory wall.** Separate L1D and L2 miss rates and branch
+  mispredict counts need a custom counter set that only the Instruments application can save,
+  and were not measured. The binding fact is concurrency, not code generation: 31 s of the
+  64 s run use less than two cores. A change in how much of the second contact stage runs in
+  parallel is worth more than any compiler flag in the table.
+
 ## Measuring work: `--perf DIR`
 
 A speed change is judged by exact counts of the work it removes, because a wall-clock gain

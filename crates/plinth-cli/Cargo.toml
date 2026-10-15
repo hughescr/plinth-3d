@@ -12,7 +12,20 @@ workspace = true
 name = "plinth"
 path = "src/main.rs"
 
+[features]
+# Opt-in global allocator for the `plinth` binary only (never the library
+# crates, so test and library users keep the system allocator).  Measured with
+# no wall-time gain over the system allocator (docs/development.md, "Build flags
+# and allocator"), so it is not a default; the feature stays so that the
+# question can be asked again after the small-allocation sites are fixed.
+mimalloc = ["dep:mimalloc"]
+# Profiling build: counts allocations and samples their call sites
+# (`scripts/alloc-profile.sh`).  Slows the run; never time it.  Choose at most
+# one global-allocator feature.
+alloc-count = []
+
 [dependencies]
+mimalloc = { version = "=0.1.52", default-features = false, optional = true }
 # The near-parallel counters the run report prints at end of run
 # (`geom_kernel::telemetry`, `docs/specs/geometry-adjudication.md` §O4/§EXT-2).
 # This is a REPORTING dependency and nothing else: the CLI reads three atomics
