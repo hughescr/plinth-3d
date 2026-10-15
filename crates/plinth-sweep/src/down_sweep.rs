@@ -54,7 +54,7 @@ use plinth_support::perception::SliceSolid;
 
 use crate::drain::DrainKeepOut;
 use crate::grid::Grid;
-use crate::layer_cache::{Components, LayerCache};
+use crate::layer_cache::{BytePool, Components, LayerCache};
 use crate::report::{ModelSectionOverload, OverloadedStrut};
 use crate::{Landing, SweepStrut};
 
@@ -571,6 +571,10 @@ impl DownSweepOutcome {
 /// real on a copy of the members and compared (log and accounting by bits);
 /// any difference panics. For gate runs, not for production. Read once.
 fn verify_incremental() -> bool {
+    #[cfg(test)]
+    if TEST_VERIFY.with(std::cell::Cell::get) {
+        return true;
+    }
     static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *VERIFY.get_or_init(|| {
         std::env::var_os("PLINTH_SWEEP_VERIFY_INCREMENTAL").is_some_and(|value| value == "1")
@@ -1297,6 +1301,7 @@ pub fn run_seeded(
             None,
             None,
             &mut Vec::new(),
+            &mut PassCtl::off(),
         );
         for strut in struts.iter_mut() {
             apply_head_minimum(strut, sizing);
@@ -1337,12 +1342,31 @@ pub fn run_seeded(
     let mut evaluations = 0_u64;
     let mut passes = 0_usize;
     crate::reuse_probe::begin(grid.cells(), slices.len(), struts, site);
+    // PERF LANE D3x: what the pass before left for this one (its trail and
+    // its routing log) and the per-event sizing of its routing.
+    let mut trail: Option<PassTrail<'_>> = None;
+    let mut carried_log: Option<crate::per_event::RouteLog> = None;
+    // The sizing of the last pass's routing, with the members' prints it was
+    // sized for.
+    let mut prev_sized: Option<(crate::per_event::PerEventSizing, Vec<MemberPrint>)> = None;
+    // THE LAST CALL'S LAST PASS, from the plan's layer cache, for this call's
+    // first pass to resume from: only against the same sizing policy and the
+    // same unrooted columns (what a walk reads besides the members, which the
+    // pass compares one by one), and only when this call records and does not
+    // take its pass 1 from a seed.
+    let run_key = run_key(sizing, unrooted, slices.len());
+    let mut stash_in = if insertion.enabled && usable_seed.is_none() {
+        layers.take_stash().filter(|stash| stash.key == run_key)
+    } else {
+        None
+    };
     loop {
         let seeded_here = if passes == 0 { usable_seed } else { None };
         let mut log;
         let mut refused_here = Vec::new();
         let mut outcome;
         let worst_max_field;
+        let mut report = PassReport::default();
         if let Some((seed, accounting)) = seeded_here {
             // The walk's own first act on the members: every ledger cleared to
             // its length. The per-event rewrite below fills every slot.
@@ -1364,6 +1388,23 @@ pub fn run_seeded(
             worst_max_field = accounting.worst_max_field_mm2;
         } else {
             log = crate::per_event::RouteLog::new(slices.len());
+            // A pass after the first resumes from the trail of the one before
+            // it. Only a call that can have a next pass records one.
+            let base = if passes > 0 {
+                trail.take().zip(carried_log.take())
+            } else {
+                stash_in.take().and_then(|stash| {
+                    PassTrail::adopt(layers.pool(), stash.trail, stash.bytes).map(|adopted| {
+                        prev_sized = stash.sized;
+                        (adopted, stash.log)
+                    })
+                })
+            };
+            let mut ctl = if insertion.enabled {
+                PassCtl::recording(layers.pool(), base)
+            } else {
+                PassCtl::off()
+            };
             outcome = sweep_pass(
                 layers,
                 struts,
@@ -1374,7 +1415,10 @@ pub fn run_seeded(
                 Some(&triggers),
                 Some(&mut log),
                 &mut refused_here,
+                &mut ctl,
             );
+            trail = ctl.out.take();
+            report = ctl.report;
             worst_max_field = struts
                 .iter()
                 .flat_map(|strut| strut.carried_mm2.iter().copied())
@@ -1391,9 +1435,47 @@ pub fn run_seeded(
         let sized = {
             let _per_event_span = crate::perf::span(crate::perf::Span::PerEventSize);
             let members: &[SweepStrut] = struts;
-            crate::per_event::size(grid, slices, members, &log, sizing, &|member, layer| {
-                insertion.limit(&members[member], layer, l_max, sizing.x_allowed)
-            })
+            let size_now = || {
+                crate::per_event::size(grid, slices, members, &log, sizing, &|member, layer| {
+                    insertion.limit(&members[member], layer, l_max, sizing.x_allowed)
+                })
+            };
+            // THE SIZING FOLLOWS THE LOG AND THE MEMBERS' STRUCTURE, nothing
+            // else (`per_event::size` reads each member's extent, landing,
+            // kind, joint layer and cells, never its ledger). A pass that
+            // resumed from the pass before, placed no arm and recorded the
+            // log that pass recorded, to the bit, has the same members and the
+            // same log: its sizing is the pass before's.
+            let prints_now: Vec<MemberPrint> = if insertion.enabled {
+                members.iter().map(|strut| member_print(strut, slices.len())).collect()
+            } else {
+                Vec::new()
+            };
+            let same_input = (report.log_unchanged
+                || sabotage::dropped(sabotage::REUSE_LOG)
+                    && (report.resumed_at.is_some() || report.skipped_all))
+                && report.placed_nothing;
+            let sabotaged = sabotage::dropped(sabotage::REUSE_LOG);
+            let sized = match prev_sized
+                .take()
+                .filter(|(_, prints)| same_input && (sabotaged || *prints == prints_now))
+            {
+                Some((previous, _)) => {
+                    if verify_incremental() {
+                        let fresh = size_now();
+                        if let Some(why) = sized_difference(&previous, &fresh) {
+                            panic!("reused per-event sizing differs from a fresh one: {why}");
+                        }
+                    }
+                    crate::perf::add(crate::PerfWork::SweepDownPerEventReused, 1);
+                    previous
+                }
+                None => size_now(),
+            };
+            if insertion.enabled {
+                prev_sized = Some((sized.clone(), prints_now));
+            }
+            sized
         };
         outcome.overloaded.clear();
         let (worst, worst_id) = apply_per_event_ledger(
@@ -1470,9 +1552,30 @@ pub fn run_seeded(
             // What the next call on this field takes its pass 1 from: this
             // pass's accounting, taken before anything else changes it.
             outcome.accounting = (!last_pass_inserted).then(|| DownSweepAccounting::of(&outcome));
+            // Leave the last pass for the next call on this plan.
+            if insertion.enabled {
+                if let Some(mut kept) = trail.take() {
+                    let sized = prev_sized.take();
+                    let extra = approx_log_bytes(&log)
+                        + sized.as_ref().map_or(0, |(sized, prints)| {
+                            approx_sized_bytes(sized) + (prints.len() * core::mem::size_of::<MemberPrint>()) as u64
+                        });
+                    if kept.charge(extra) {
+                        let (trail, bytes) = kept.into_data();
+                        layers.put_stash(Stash {
+                            key: run_key,
+                            trail,
+                            bytes,
+                            log: log.clone(),
+                            sized,
+                        });
+                    }
+                }
+            }
             outcome.route_log = log;
             return outcome;
         }
+        carried_log = Some(log);
         triggers = open;
     }
 }
@@ -1511,6 +1614,7 @@ fn verify_seeded_pass(
         Some(&HashMap::new()),
         Some(&mut log),
         &mut sink,
+        &mut PassCtl::off(),
     );
     walked.per_event.worst_member_max_field_mm2 = copy
         .iter()
@@ -1623,8 +1727,93 @@ fn sweep_pass(
     keep_out: &DrainKeepOut,
     unrooted: &UnrootedColumns,
     triggers: Option<&HashMap<u64, f64>>,
+    mut log: Option<&mut crate::per_event::RouteLog>,
+    refused: &mut Vec<(u64, u64)>,
+    ctl: &mut PassCtl<'_>,
+) -> DownSweepOutcome {
+    if !(verify_incremental() && ctl.base.is_some()) {
+        let outcome = sweep_pass_checked(
+            layers, struts, sizing, insertion, keep_out, unrooted, triggers, log, refused, ctl,
+        );
+        #[cfg(test)]
+        TEST_REPORTS.with(|reports| reports.borrow_mut().push(ctl.report));
+        return outcome;
+    }
+    // THE SHADOW CHECK OF A RESUMED PASS (`PLINTH_SWEEP_VERIFY_INCREMENTAL=1`):
+    // the whole pass walked from the top on copies of everything it writes,
+    // recording its own trail, then the resumed pass for real. The outcome,
+    // the members (ledgers included), the route log, the refusals and the
+    // trail they leave must agree by bits.
+    let pool = ctl.pool.expect("a pass that resumes also records");
+    let mut full_struts = struts.clone();
+    let mut full_log = log
+        .as_deref()
+        .map(|_| crate::per_event::RouteLog::new(layers.slices().len()));
+    let mut full_refused = refused.clone();
+    let mut full_ctl = PassCtl::recording(pool, None);
+    let full = sweep_pass_checked(
+        layers,
+        &mut full_struts,
+        sizing,
+        insertion,
+        keep_out,
+        unrooted,
+        triggers,
+        full_log.as_mut(),
+        &mut full_refused,
+        &mut full_ctl,
+    );
+    let resumed = sweep_pass_checked(
+        layers,
+        struts,
+        sizing,
+        insertion,
+        keep_out,
+        unrooted,
+        triggers,
+        log.as_deref_mut(),
+        refused,
+        ctl,
+    );
+    if let Some(difference) = pass_difference(
+        (&full, &full_struts, full_log.as_ref(), &full_refused),
+        (&resumed, struts, log.as_deref(), refused),
+    ) {
+        panic!("resumed sweep pass differs from the full pass: {difference}");
+    }
+    match (&full_ctl.out, &ctl.out) {
+        (Some(a), Some(b)) => {
+            if let Some(why) = a.difference(b) {
+                panic!("resumed sweep pass left another trail than the full pass: {why}");
+            }
+        }
+        (None, None) => {}
+        _ => panic!("resumed sweep pass and full pass disagree on whether they left a trail"),
+    }
+    #[cfg(test)]
+    TEST_REPORTS.with(|reports| reports.borrow_mut().push(ctl.report));
+    resumed
+}
+
+/// [`sweep_pass`] without the resume shadow check: the sparse walk, or under
+/// `PLINTH_SWEEP_VERIFY_SPARSE=1` the dense and the sparse walk compared.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the pass reads the grid, the slices, the policies and the keep-out it always read, \
+          plus the trigger table it is driven by and the records it writes; a struct would move \
+          the argument list rather than shorten it"
+)]
+fn sweep_pass_checked(
+    layers: &LayerCache<'_>,
+    struts: &mut Vec<SweepStrut>,
+    sizing: SizingPolicy,
+    insertion: InsertionPolicy,
+    keep_out: &DrainKeepOut,
+    unrooted: &UnrootedColumns,
+    triggers: Option<&HashMap<u64, f64>>,
     log: Option<&mut crate::per_event::RouteLog>,
     refused: &mut Vec<(u64, u64)>,
+    ctl: &mut PassCtl<'_>,
 ) -> DownSweepOutcome {
     if !verify_sparse() {
         return sweep_pass_in(
@@ -1638,6 +1827,7 @@ fn sweep_pass(
             triggers,
             log,
             refused,
+            ctl,
         );
     }
     // THE SHADOW CHECK (`PLINTH_SWEEP_VERIFY_SPARSE=1`): the same pass walked
@@ -1658,6 +1848,7 @@ fn sweep_pass(
         triggers,
         dense_log.as_mut(),
         &mut dense_refused,
+        &mut PassCtl::off(),
     );
     let log_given = log.is_some();
     let mut sparse_log = log;
@@ -1672,6 +1863,7 @@ fn sweep_pass(
         triggers,
         sparse_log.as_deref_mut(),
         refused,
+        ctl,
     );
     if let Some(difference) = pass_difference(
         (&dense, &dense_struts, dense_log.as_ref(), &dense_refused),
@@ -1726,6 +1918,519 @@ fn pass_difference(a: PassResult<'_>, b: PassResult<'_>) -> Option<String> {
     None
 }
 
+// ---------------------------------------------------------------------------
+// PERF LANE D3x (2026-10-15): RESUMABLE PASSES.
+//
+// A pass walks the layers from the top and, on a plan's second and later passes
+// of a call, most of that walk re-computes what the pass before it computed:
+// the passes differ only where the trigger table asks for an insertion and
+// where the arms the pass before inserted now stand. Everything ABOVE the
+// highest such layer is the same walk, to the bit, and everything BELOW the
+// lowest such layer is the same walk again once the walk's state has come back
+// to the one the pass before had there.
+//
+// So a pass that is told to record leaves a TRAIL: the complete state it
+// handed from layer to layer at every `CHECKPOINT_STRIDE`-th boundary, the
+// members' ledgers as the walk left them, and its accounting. The next pass
+// resumes from the lowest checkpoint at or above the highest layer whose
+// inputs changed, walks on, and stops at the first checkpoint boundary below
+// every changed layer whose state equals the trail's, taking everything below
+// from the trail. A pass whose inputs are the trail's to the bit walks
+// nothing. Everything is exact by construction and checked by shadow
+// (`PLINTH_SWEEP_VERIFY_INCREMENTAL=1`): the full pass is walked on a copy and
+// compared with the resumed one, outcome, members, log, refusals and trail, by
+// bits.
+// ---------------------------------------------------------------------------
+
+/// Layers between two checkpoints of a pass. Not a physical quantity: it
+/// trades the bytes and the time of recording a checkpoint against the layers
+/// a resumed pass re-walks above its first changed layer and below its last,
+/// and no result depends on it.
+const CHECKPOINT_STRIDE: usize = 16;
+
+#[cfg(test)]
+thread_local! {
+    /// Tests drive the checkpoint stride, force the resume shadow check on,
+    /// and read what each pass reported.
+    static TEST_STRIDE: std::cell::Cell<usize> = const { std::cell::Cell::new(CHECKPOINT_STRIDE) };
+    static TEST_VERIFY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TEST_REPORTS: std::cell::RefCell<Vec<PassReport>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn checkpoint_stride() -> usize {
+    TEST_STRIDE.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+const fn checkpoint_stride() -> usize {
+    CHECKPOINT_STRIDE
+}
+
+/// Everything the walk reads of one member, as one hash: the identity, kind,
+/// extent, landing, joint layer, the cell of every layer it stands on, and the
+/// two minima the raw radius takes. Two passes whose member `i` has the same
+/// print walk it the same way. The ledger is not in it (the walk writes it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MemberPrint {
+    hash: u64,
+    k_top: usize,
+    k_bottom: usize,
+}
+
+fn member_print(strut: &SweepStrut, layers: usize) -> MemberPrint {
+    let mut hash = mix(0x3d3d_0003, u64::from(strut.id));
+    hash = mix(hash, strut.kind as u64);
+    hash = mix(hash, strut.cell as u64);
+    hash = mix(hash, strut.k_top as u64);
+    hash = mix(hash, strut.k_bottom as u64);
+    hash = match strut.landing {
+        Landing::Plate => mix(hash, 1),
+        Landing::Model { layer } => mix(mix(hash, 2), layer as u64),
+        Landing::Strut { id, layer } => mix(mix(mix(hash, 3), u64::from(id)), layer as u64),
+    };
+    hash = mix(hash, strut.joint_hold_layer().map_or(u64::MAX, |layer| layer as u64));
+    hash = mix(hash, strut.min_radius_mm.to_bits());
+    hash = mix(hash, strut.thickened_mm.len() as u64);
+    for radius in &strut.thickened_mm {
+        hash = mix(hash, radius.to_bits());
+    }
+    if strut.k_bottom != usize::MAX {
+        for layer in strut.k_bottom..=strut.k_top.min(layers) {
+            hash = mix(hash, strut.cell_at(layer) as u64);
+        }
+    }
+    MemberPrint {
+        hash,
+        k_top: strut.k_top,
+        k_bottom: strut.k_bottom,
+    }
+}
+
+/// The accounting of a walk with the counters an insertion ATTEMPT moves
+/// cleared. An attempt that places nothing changes no state the walk carries
+/// (it reads the layer and writes scratch), and moves exactly these two
+/// counters and the caller's refusal list; a trail holds the accounting of a
+/// walk that placed nothing, so the counters are the attempts' alone, and the
+/// next pass's own attempts are its own.
+fn pure_outcome(outcome: &DownSweepOutcome) -> DownSweepOutcome {
+    let mut pure = outcome.clone();
+    pure.insertion_geometry_exhausted = 0;
+    pure.insertion_rounds_exhausted = 0;
+    pure
+}
+
+/// The pending loads without their trailing zeros: members a pass inserts are
+/// appended to the list, with nothing pending, so two passes' lists agree on
+/// the members they share whatever their lengths.
+fn trimmed(pending: &[f64]) -> &[f64] {
+    let end = pending.iter().rposition(|load| load.to_bits() != 0).map_or(0, |last| last + 1);
+    &pending[..end]
+}
+
+/// The per-event sizing difference of two sizings of one field, by bits.
+fn sized_difference(
+    a: &crate::per_event::PerEventSizing,
+    b: &crate::per_event::PerEventSizing,
+) -> Option<String> {
+    if format!("{:?}", a.best) != format!("{:?}", b.best) {
+        return Some("best".to_owned());
+    }
+    let sorted = |sizing: &crate::per_event::PerEventSizing| {
+        let mut triggers: Vec<(u64, u64)> =
+            sizing.triggers.iter().map(|(key, load)| (*key, load.to_bits())).collect();
+        triggers.sort_unstable();
+        triggers
+    };
+    if sorted(a) != sorted(b) {
+        return Some("triggers".to_owned());
+    }
+    if format!("{:?}", a.report) != format!("{:?}", b.report) {
+        return Some("report".to_owned());
+    }
+    if a.reached != b.reached {
+        return Some("reached".to_owned());
+    }
+    None
+}
+
+/// The state a pass hands from one layer to the next, at the boundary before
+/// layer `at` is processed: the live cells of the load raster and their loads,
+/// the layer above's carriers, the layer above's handed columns, the loads
+/// children handed to parents that have not read them yet, and the accounting
+/// so far. Taken only while the pass has placed nothing, so no arm is growing
+/// and the member list is the pass's start list. Every other buffer the walk
+/// keeps across layers is either cleared before it is read (the second load
+/// raster, the carrier flags two layers up, the per-layer scratch) or reset at
+/// the end of the layer that set it.
+struct Checkpoint {
+    at: usize,
+    sources: Vec<(u32, f64)>,
+    carriers: Vec<u32>,
+    handed: Vec<usize>,
+    pending: Vec<f64>,
+    outcome: DownSweepOutcome,
+}
+
+impl Checkpoint {
+    fn take(
+        at: usize,
+        sources: &[u32],
+        load_in: &[f64],
+        carriers: &[u32],
+        handed: &[usize],
+        pending: &[f64],
+        outcome: &DownSweepOutcome,
+    ) -> Self {
+        Self {
+            at,
+            sources: sources.iter().map(|&cell| (cell, load_in[cell as usize])).collect(),
+            carriers: carriers.to_vec(),
+            handed: handed.to_vec(),
+            pending: trimmed(pending).to_vec(),
+            outcome: pure_outcome(outcome),
+        }
+    }
+
+    /// An estimate of the bytes this checkpoint holds.
+    fn bytes(&self) -> u64 {
+        let outcome = core::mem::size_of::<DownSweepOutcome>()
+            + self.outcome.overloaded.len() * core::mem::size_of::<OverloadedStrut>()
+            + self.outcome.model_overload.len() * core::mem::size_of::<ModelSectionOverload>()
+            + self.outcome.inserted_by.len() * core::mem::size_of::<(u32, u64)>();
+        (core::mem::size_of::<Self>()
+            + self.sources.len() * core::mem::size_of::<(u32, f64)>()
+            + self.carriers.len() * 4
+            + self.handed.len() * core::mem::size_of::<usize>()
+            + self.pending.len() * 8
+            + outcome) as u64
+    }
+
+    /// Whether the walk's state now is this checkpoint's, bit for bit.
+    fn matches(
+        &self,
+        sources: &[u32],
+        load_in: &[f64],
+        carriers: &[u32],
+        handed: &[usize],
+        pending: &[f64],
+        outcome: &DownSweepOutcome,
+    ) -> bool {
+        self.sources.len() == sources.len()
+            && self
+                .sources
+                .iter()
+                .zip(sources)
+                .all(|(&(cell, load), &now)| cell == now && load.to_bits() == load_in[now as usize].to_bits())
+            && self.carriers == carriers
+            && self.handed == handed
+            && self.pending.len() == trimmed(pending).len()
+            && self.pending.iter().zip(pending).all(|(a, b)| a.to_bits() == b.to_bits())
+            && format!("{:?}", self.outcome) == format!("{:?}", pure_outcome(outcome))
+    }
+
+    /// The first difference between two checkpoints, for the shadow check.
+    fn difference(&self, other: &Self) -> Option<String> {
+        if self.at != other.at {
+            return Some(format!("at {} vs {}", self.at, other.at));
+        }
+        let same = self.sources.len() == other.sources.len()
+            && self
+                .sources
+                .iter()
+                .zip(&other.sources)
+                .all(|(a, b)| a.0 == b.0 && a.1.to_bits() == b.1.to_bits());
+        if !same {
+            return Some(format!("sources at {}", self.at));
+        }
+        if self.carriers != other.carriers {
+            return Some(format!("carriers at {}", self.at));
+        }
+        if self.handed != other.handed {
+            return Some(format!("handed at {}", self.at));
+        }
+        let pending = self.pending.len() == other.pending.len()
+            && self.pending.iter().zip(&other.pending).all(|(a, b)| a.to_bits() == b.to_bits());
+        if !pending {
+            return Some(format!("pending at {}", self.at));
+        }
+        if format!("{:?}", self.outcome) != format!("{:?}", other.outcome) {
+            return Some(format!("outcome at {}", self.at));
+        }
+        None
+    }
+}
+
+/// What a recording pass leaves for the walk after it. Holds its bytes in the
+/// layer cache's pool (the pool's limit is the budget: a trail the pool will
+/// not take is not kept, and the next pass walks in full) and gives them back
+/// when it is dropped.
+pub(crate) struct PassTrail<'p> {
+    data: TrailData,
+    pool: &'p BytePool,
+    bytes: u64,
+}
+
+/// A trail's contents, with no claim on the pool (the layer cache keeps one
+/// between calls, charged by the cache itself).
+#[derive(Default)]
+pub(crate) struct TrailData {
+    layers: usize,
+    cells: usize,
+    /// The walk print of every member as the pass started.
+    prints: Vec<MemberPrint>,
+    /// Checkpoints, highest layer first.
+    checkpoints: Vec<Checkpoint>,
+    /// Every member's ledger, `(carried, radius)`, as the walk left it (before
+    /// the per-event rewrite), the members the pass ended with.
+    raw: Vec<(Vec<f64>, Vec<f64>)>,
+    /// The accounting the walk ended with, when it placed nothing (attempt
+    /// counters cleared, [`pure_outcome`]).
+    end: Option<DownSweepOutcome>,
+}
+
+impl core::ops::Deref for PassTrail<'_> {
+    type Target = TrailData;
+
+    fn deref(&self) -> &TrailData {
+        &self.data
+    }
+}
+
+impl core::ops::DerefMut for PassTrail<'_> {
+    fn deref_mut(&mut self) -> &mut TrailData {
+        &mut self.data
+    }
+}
+
+impl<'p> PassTrail<'p> {
+    fn new(pool: &'p BytePool, layers: usize, cells: usize) -> Self {
+        Self {
+            data: TrailData {
+                layers,
+                cells,
+                ..TrailData::default()
+            },
+            pool,
+            bytes: 0,
+        }
+    }
+
+    /// A trail over `data` that the pool has agreed to hold `bytes` for;
+    /// `None` when it will not.
+    fn adopt(pool: &'p BytePool, data: TrailData, bytes: u64) -> Option<Self> {
+        pool.try_acquire(bytes).then_some(Self { data, pool, bytes })
+    }
+
+    /// The contents and the bytes they were charged (given back to the pool
+    /// as the trail goes).
+    fn into_data(mut self) -> (TrailData, u64) {
+        (core::mem::take(&mut self.data), self.bytes)
+    }
+
+    /// Take `bytes` from the pool for this trail; `false` (and nothing held)
+    /// when the pool will not give them.
+    fn charge(&mut self, bytes: u64) -> bool {
+        if self.pool.try_acquire(bytes) {
+            self.bytes += bytes;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn refund(&mut self, bytes: u64) {
+        let bytes = bytes.min(self.bytes);
+        self.bytes -= bytes;
+        self.pool.release(bytes);
+    }
+
+    /// The bytes a sealed trail holds beyond its checkpoints: the ledgers and
+    /// the end accounting.
+    fn sealed_bytes(raw: &[(Vec<f64>, Vec<f64>)]) -> u64 {
+        raw.iter().map(|(c, r)| ((c.len() + r.len()) * 8 + 48) as u64).sum::<u64>()
+            + core::mem::size_of::<DownSweepOutcome>() as u64
+    }
+}
+
+impl TrailData {
+    /// The first difference between two trails, for the shadow check.
+    fn difference(&self, other: &Self) -> Option<String> {
+        if self.prints != other.prints {
+            return Some("member prints".to_owned());
+        }
+        if self.checkpoints.len() != other.checkpoints.len() {
+            return Some(format!(
+                "{} checkpoints vs {}",
+                self.checkpoints.len(),
+                other.checkpoints.len()
+            ));
+        }
+        for (a, b) in self.checkpoints.iter().zip(&other.checkpoints) {
+            if let Some(why) = a.difference(b) {
+                return Some(why);
+            }
+        }
+        let raw = self.raw.len() == other.raw.len()
+            && self.raw.iter().zip(&other.raw).all(|(a, b)| {
+                a.0.len() == b.0.len()
+                    && a.1.len() == b.1.len()
+                    && a.0.iter().zip(&b.0).all(|(x, y)| x.to_bits() == y.to_bits())
+                    && a.1.iter().zip(&b.1).all(|(x, y)| x.to_bits() == y.to_bits())
+            });
+        if !raw {
+            return Some("raw ledgers".to_owned());
+        }
+        if format!("{:?}", self.end) != format!("{:?}", other.end) {
+            return Some("end accounting".to_owned());
+        }
+        None
+    }
+}
+
+impl Drop for PassTrail<'_> {
+    fn drop(&mut self) {
+        self.pool.release(self.bytes);
+    }
+}
+
+/// What a down-sweep call leaves its plan's layer cache: its last pass's trail
+/// and routing log, and the per-event sizing of that routing with the prints of
+/// the members it was sized for. `key` says which sizing policy and unrooted
+/// columns the pass walked under; the next call uses the stash only against
+/// the same key, and compares its members with the trail's one by one.
+pub(crate) struct Stash {
+    key: u64,
+    trail: TrailData,
+    /// The bytes the trail, the log and the sizing hold (what the cache
+    /// charges its pool while it keeps them).
+    pub(crate) bytes: u64,
+    log: crate::per_event::RouteLog,
+    sized: Option<(crate::per_event::PerEventSizing, Vec<MemberPrint>)>,
+}
+
+/// What a walk reads besides the members and the layers: every field of the
+/// sizing policy (the destructuring names them all, so a new field fails to
+/// compile until it is hashed) and the unrooted columns.
+fn run_key(sizing: SizingPolicy, unrooted: &UnrootedColumns, layers: usize) -> u64 {
+    let SizingPolicy {
+        x_allowed,
+        tip_radius_min_mm,
+        tip_radius_max_mm,
+        owner_growth_ceiling_mm,
+        alpha,
+        lamina_reach_mm,
+        straight_reach,
+        tip_column_roots,
+        per_event,
+        handed_column_ledger,
+        layer_height_mm,
+        plate_z_mm,
+    } = sizing;
+    let mut hash = mix(0x3d3d_0001, layers as u64);
+    for value in [
+        x_allowed,
+        tip_radius_min_mm,
+        tip_radius_max_mm,
+        owner_growth_ceiling_mm,
+        alpha,
+        lamina_reach_mm,
+        layer_height_mm,
+        plate_z_mm,
+    ] {
+        hash = mix(hash, value.to_bits());
+    }
+    for flag in [straight_reach, tip_column_roots, per_event, handed_column_ledger] {
+        hash = mix(hash, u64::from(flag));
+    }
+    for layer in 0..layers {
+        let cells = unrooted.at(layer);
+        hash = mix(hash, cells.len() as u64);
+        for &cell in cells {
+            hash = mix(hash, u64::from(cell));
+        }
+    }
+    hash
+}
+
+/// An estimate of the bytes of a routing log.
+fn approx_log_bytes(log: &crate::per_event::RouteLog) -> u64 {
+    log.hops
+        .iter()
+        .chain(&log.reads)
+        .map(|entries| (entries.len() * 8 + 24) as u64)
+        .sum()
+}
+
+/// An estimate of the bytes of a per-event sizing.
+fn approx_sized_bytes(sized: &crate::per_event::PerEventSizing) -> u64 {
+    (sized.best.iter().map(|slots| slots.len() * 8 + 24).sum::<usize>()
+        + sized.reached.len()
+        + sized.triggers.len() * 24
+        + core::mem::size_of::<crate::per_event::PerEventReport>()) as u64
+}
+
+/// What a resumed pass did, for the counters and for the caller's own reuse
+/// decisions.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PassReport {
+    /// The layer whose checkpoint the walk started from.
+    pub(crate) resumed_at: Option<usize>,
+    /// The layer boundary the walk stopped at, on state equal to the base's.
+    pub(crate) stopped_at: Option<usize>,
+    /// Nothing differed from the base: no layer was walked.
+    pub(crate) skipped_all: bool,
+    pub(crate) walked: u64,
+    pub(crate) layers: u64,
+    /// The routing log is the base's, to the bit (a resumed pass only).
+    pub(crate) log_unchanged: bool,
+    /// The pass placed no arm: the members it ends with are the ones it began
+    /// with.
+    pub(crate) placed_nothing: bool,
+}
+
+/// How a pass records and resumes. [`PassCtl::off`] is the pass as it always
+/// was.
+pub(crate) struct PassCtl<'p> {
+    /// `Some` records a trail for the next pass.
+    pool: Option<&'p BytePool>,
+    /// The trail of the pass before, and that pass's routing log, to resume from.
+    base: Option<(PassTrail<'p>, crate::per_event::RouteLog)>,
+    /// The trail this pass left.
+    out: Option<PassTrail<'p>>,
+    report: PassReport,
+}
+
+impl<'p> PassCtl<'p> {
+    pub(crate) const fn off() -> Self {
+        Self {
+            pool: None,
+            base: None,
+            out: None,
+            report: PassReport {
+                resumed_at: None,
+                stopped_at: None,
+                skipped_all: false,
+                walked: 0,
+                layers: 0,
+                log_unchanged: false,
+                placed_nothing: false,
+            },
+        }
+    }
+
+    pub(crate) fn recording(
+        pool: &'p BytePool,
+        base: Option<(PassTrail<'p>, crate::per_event::RouteLog)>,
+    ) -> Self {
+        Self {
+            pool: Some(pool),
+            base,
+            ..Self::off()
+        }
+    }
+}
+
 /// How a pass walks its cells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PassMode {
@@ -1746,43 +2451,75 @@ pub(crate) mod sabotage {
     use std::cell::Cell;
 
     /// A growing or newly inserted arm's cell is left out of the carrier list.
-    pub const EXTRA_CARRIERS: u8 = 1;
+    pub const EXTRA_CARRIERS: u16 = 1;
     /// A tip-root column outside the cover is left out of the routing roots.
-    pub const TIP_CELLS: u8 = 2;
+    pub const TIP_CELLS: u16 = 2;
     /// A handed column's re-entered peel is left out of the spread sources.
-    pub const REENTERED: u8 = 4;
+    pub const REENTERED: u16 = 4;
     /// A cell that holds load without being a carrier is left out of the next
     /// layer's sources.
-    pub const ARM_CELLS: u8 = 8;
+    pub const ARM_CELLS: u16 = 8;
     /// The last cover cell of every layer is left out of the routing sweeps.
-    pub const COVER_TAIL: u8 = 16;
+    pub const COVER_TAIL: u16 = 16;
     /// The first carrier of every layer is left out of the carrier list.
-    pub const CARRIER_HEAD: u8 = 32;
+    pub const CARRIER_HEAD: u16 = 32;
+    // Perf lane D3x: each invalidation rule of the resumed walk, dropped.
+    /// The trigger table's layers do not bound where a resumed walk starts.
+    pub const RESUME_TRIGGERS: u16 = 64;
+    /// A changed or new member's layers do not bound where a resumed walk starts.
+    pub const RESUME_MEMBERS: u16 = 128;
+    /// The pending loads handed to a parent are not restored.
+    pub const RESUME_PENDING: u16 = 256;
+    /// The handed columns of the layer above are not restored.
+    pub const RESUME_HANDED: u16 = 512;
+    /// The early stop does not compare the walk's state with the base's.
+    pub const RESUME_STOP_UNCHECKED: u16 = 1024;
+    /// The members' ledgers above the start are not restored.
+    pub const RESUME_LEDGER: u16 = 2048;
+    /// The previous pass's per-event sizing is reused whatever the log and the
+    /// members say.
+    pub const REUSE_LOG: u16 = 4096; // sic: the sizing's whole reuse guard (log and member prints)
+    /// The early stop ignores the lowest layer a difference touches.
+    pub const RESUME_STOP_LOWEST: u16 = 8192;
+    /// The restored outcome accumulators are fresh, not the checkpoint's.
+    pub const RESUME_OUTCOME: u16 = 16384;
+    /// The early stop does not watch the walk's ledger writes.
+    pub const RESUME_STOP_LEDGER: u16 = 32768;
 
     thread_local! {
-        static DROPPED: Cell<u8> = const { Cell::new(0) };
+        static DROPPED: Cell<u16> = const { Cell::new(0) };
     }
 
-    pub fn set(mask: u8) {
+    pub fn set(mask: u16) {
         DROPPED.with(|dropped| dropped.set(mask));
     }
 
-    pub fn dropped(class: u8) -> bool {
+    pub fn dropped(class: u16) -> bool {
         DROPPED.with(|dropped| dropped.get() & class != 0)
     }
 }
 
 #[cfg(not(test))]
 mod sabotage {
-    pub const EXTRA_CARRIERS: u8 = 0;
-    pub const TIP_CELLS: u8 = 0;
-    pub const REENTERED: u8 = 0;
-    pub const ARM_CELLS: u8 = 0;
-    pub const COVER_TAIL: u8 = 0;
-    pub const CARRIER_HEAD: u8 = 0;
+    pub const EXTRA_CARRIERS: u16 = 0;
+    pub const TIP_CELLS: u16 = 0;
+    pub const REENTERED: u16 = 0;
+    pub const ARM_CELLS: u16 = 0;
+    pub const COVER_TAIL: u16 = 0;
+    pub const CARRIER_HEAD: u16 = 0;
+    pub const RESUME_TRIGGERS: u16 = 0;
+    pub const RESUME_MEMBERS: u16 = 0;
+    pub const RESUME_PENDING: u16 = 0;
+    pub const RESUME_HANDED: u16 = 0;
+    pub const RESUME_STOP_UNCHECKED: u16 = 0;
+    pub const RESUME_LEDGER: u16 = 0;
+    pub const REUSE_LOG: u16 = 0;
+    pub const RESUME_STOP_LOWEST: u16 = 0;
+    pub const RESUME_OUTCOME: u16 = 0;
+    pub const RESUME_STOP_LEDGER: u16 = 0;
 
     #[inline(always)]
-    pub const fn dropped(_class: u8) -> bool {
+    pub const fn dropped(_class: u16) -> bool {
         false
     }
 }
@@ -1885,7 +2622,7 @@ impl PassVisits {
           plus the trigger table it is driven by and the two records it writes for the per-event \
           pass; a struct would move the argument list rather than shorten it"
 )]
-fn sweep_pass_in(
+fn sweep_pass_in<'p>(
     mode: PassMode,
     layers: &LayerCache<'_>,
     struts: &mut Vec<SweepStrut>,
@@ -1896,6 +2633,7 @@ fn sweep_pass_in(
     triggers: Option<&HashMap<u64, f64>>,
     mut log: Option<&mut crate::per_event::RouteLog>,
     refused: &mut Vec<(u64, u64)>,
+    ctl: &mut PassCtl<'p>,
 ) -> DownSweepOutcome {
     let dense = mode == PassMode::Dense;
     let grid = layers.grid();
@@ -2084,7 +2822,239 @@ fn sweep_pass_in(
         strut.carried_mm2.resize(span, 0.0);
     }
 
-    for layer in (0..slices.len()).rev() {
+    // ---- D3x: the trail of the pass before, and the trail this pass leaves.
+    let record_pool = ctl.pool.filter(|_| !dense);
+    let tracked = record_pool.is_some();
+    let prints: Vec<MemberPrint> = if tracked {
+        struts.iter().map(|strut| member_print(strut, layer_count)).collect()
+    } else {
+        Vec::new()
+    };
+    let n_start = struts.len();
+    let mut trail: Option<PassTrail<'p>> =
+        record_pool.map(|pool| PassTrail::new(pool, layer_count, cells));
+    // Where the walk starts, the base checkpoints below that (candidates for
+    // the early stop), the base's ledgers and accounting, which members read
+    // the same as the base's, and the lowest layer any difference touches.
+    let mut resumed_at: Option<usize> = None;
+    let mut lower: Vec<Checkpoint> = Vec::new();
+    let mut lower_next = 0_usize;
+    let mut base_raw: Vec<(Vec<f64>, Vec<f64>)> = Vec::new();
+    let mut base_end: Option<DownSweepOutcome> = None;
+    let mut same: Vec<bool> = Vec::new();
+    let mut lowest_diff = usize::MAX;
+    let mut stop_open = false;
+    let mut ledger_clean = true;
+    let mut log_dirty = false;
+    let mut stopped_at: Option<usize> = None;
+    if let (Some(_), Some((mut base, base_log))) = (record_pool, ctl.base.take()) {
+        let usable = !probe_bands
+            && triggers.is_some()
+            && log.is_some()
+            && base.layers == layer_count
+            && base.cells == cells
+            && base_log.hops.len() == layer_count
+            && base_log.reads.len() == layer_count;
+        if usable {
+            // THE LAYERS THE INPUTS DIFFER ON: where the trigger table asks for
+            // an insertion (every entry, whether or not it is over its limit
+            // now), and where a member is not the base's member (new, gone or
+            // changed in any way the walk reads). The walk above the highest of
+            // them is the base's walk.
+            let mut highest: Option<usize> = None;
+            let mut lowest = usize::MAX;
+            let top_layer = layer_count.saturating_sub(1);
+            let mut touch = |top: usize, bottom: usize| {
+                let top = top.min(top_layer);
+                highest = Some(highest.map_or(top, |h| h.max(top)));
+                lowest = lowest.min(bottom.min(top));
+            };
+            if let Some(table) = triggers {
+                if !sabotage::dropped(sabotage::RESUME_TRIGGERS) {
+                    for &key in table.keys() {
+                        let layer = crate::per_event::unpack(key).1;
+                        touch(layer, layer);
+                    }
+                }
+            }
+            same = (0..struts.len())
+                .map(|member| {
+                    member < base.prints.len()
+                        && prints[member] == base.prints[member]
+                        && base.raw.get(member).is_some_and(|(carried, radius)| {
+                            carried.len() == struts[member].carried_mm2.len()
+                                && radius.len() == struts[member].radius_mm.len()
+                        })
+                })
+                .collect();
+            if !sabotage::dropped(sabotage::RESUME_MEMBERS) {
+                for member in 0..struts.len().max(base.prints.len()) {
+                    let (old, new) = (base.prints.get(member), prints.get(member));
+                    if old.is_some() && old == new {
+                        continue;
+                    }
+                    for print in [old, new].into_iter().flatten() {
+                        touch(
+                            print.k_top,
+                            if print.k_bottom == usize::MAX { 0 } else { print.k_bottom },
+                        );
+                    }
+                }
+            }
+            match highest {
+                None => {
+                    // Nothing differs: the base's pass is this pass. Walk
+                    // nothing; take its accounting and ledgers; keep its trail.
+                    if let Some(end) = base.end.take() {
+                        if same.iter().all(|&same| same) && base.raw.len() == struts.len() {
+                            for (strut, (carried, radius)) in struts.iter_mut().zip(&base.raw) {
+                                strut.carried_mm2.copy_from_slice(carried);
+                                strut.radius_mm.copy_from_slice(radius);
+                            }
+                            if let Some(into) = log.as_deref_mut() {
+                                *into = base_log;
+                            }
+                            let done = end.clone();
+                            base.end = Some(end);
+                            ctl.out = Some(base);
+                            ctl.report = PassReport {
+                                skipped_all: true,
+                                layers: layer_count as u64,
+                                log_unchanged: true,
+                                placed_nothing: true,
+                                ..PassReport::default()
+                            };
+                            if let Some(t) = trace.take() {
+                                t.finish();
+                            }
+                            crate::perf::add(crate::PerfWork::SweepDownLayersSkipped, layer_count as u64);
+                            crate::perf::add(crate::PerfWork::SweepDownPassesSkipped, 1);
+                            return done;
+                        }
+                        base.end = Some(end);
+                    }
+                }
+                Some(top) => {
+                    if let Some(index) = base.checkpoints.iter().rposition(|cp| cp.at >= top) {
+                        lower = base.checkpoints.split_off(index + 1);
+                        let lower_bytes: u64 = lower.iter().map(Checkpoint::bytes).sum();
+                        base.refund(lower_bytes);
+                        let cp = &base.checkpoints[index];
+                        resumed_at = Some(cp.at);
+                        for &(cell, load) in &cp.sources {
+                            load_in[cell as usize] = load;
+                            sources.push(cell);
+                        }
+                        union_into(&cp.carriers, &sources, &mut dirty_in);
+                        for &cell in &cp.carriers {
+                            carriers_above[cell as usize] = true;
+                        }
+                        carrier_list_above.extend_from_slice(&cp.carriers);
+                        if !sabotage::dropped(sabotage::RESUME_HANDED) {
+                            handed_prev.extend_from_slice(&cp.handed);
+                        }
+                        if !sabotage::dropped(sabotage::RESUME_PENDING) {
+                            let held = cp.pending.len().min(pending.len());
+                            pending[..held].copy_from_slice(&cp.pending[..held]);
+                        }
+                        if !sabotage::dropped(sabotage::RESUME_OUTCOME) {
+                            outcome = cp.outcome.clone();
+                        }
+                        base_raw = core::mem::take(&mut base.raw);
+                        base.refund(PassTrail::sealed_bytes(&base_raw));
+                        base_end = base.end.take();
+                        if !sabotage::dropped(sabotage::RESUME_LEDGER) {
+                            for (member, (carried, radius)) in base_raw.iter().enumerate() {
+                                if same.get(member).copied().unwrap_or(false) {
+                                    struts[member].carried_mm2.copy_from_slice(carried);
+                                    struts[member].radius_mm.copy_from_slice(radius);
+                                }
+                            }
+                        }
+                        base.prints.clone_from(&prints);
+                        lowest_diff = if sabotage::dropped(sabotage::RESUME_STOP_LOWEST) {
+                            usize::MAX
+                        } else {
+                            lowest
+                        };
+                        stop_open = base_end.is_some() && !lower.is_empty();
+                        if let Some(into) = log.as_deref_mut() {
+                            *into = base_log;
+                        }
+                        trail = Some(base);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(trail) = trail.as_mut() {
+        trail.prints.clone_from(&prints);
+    }
+    let track_ledger = stop_open && !sabotage::dropped(sabotage::RESUME_STOP_LEDGER);
+    let first_layer = resumed_at.map_or(layer_count, |at| at + 1);
+    let mut recording = trail.is_some();
+    let mut walked = 0_u64;
+    let stride = checkpoint_stride();
+
+    for layer in (0..first_layer).rev() {
+        walked += 1;
+        if tracked {
+            // A checkpoint boundary: the state this pass hands to `layer`.
+            let boundary =
+                layer > 0 && layer % stride == 0 && layer + 1 < layer_count;
+            let placed_nothing =
+                growing.is_empty() && struts.len() == n_start && outcome.arms_inserted_by_load == 0;
+            if boundary && stop_open && placed_nothing && layer < lowest_diff
+                && (ledger_clean || !track_ledger)
+            {
+                while lower_next < lower.len() && lower[lower_next].at > layer {
+                    lower_next += 1;
+                }
+                if lower_next < lower.len()
+                    && lower[lower_next].at == layer
+                    && (sabotage::dropped(sabotage::RESUME_STOP_UNCHECKED)
+                        || lower[lower_next].matches(
+                            &sources,
+                            &load_in,
+                            &carrier_list_above,
+                            &handed_prev,
+                            &pending,
+                            &outcome,
+                        ))
+                {
+                    stopped_at = Some(layer);
+                    walked -= 1;
+                    break;
+                }
+            }
+            if boundary && recording && resumed_at != Some(layer) {
+                if let Some(trail) = trail.as_mut().filter(|_| placed_nothing) {
+                    let checkpoint = Checkpoint::take(
+                        layer,
+                        &sources,
+                        &load_in,
+                        &carrier_list_above,
+                        &handed_prev,
+                        &pending,
+                        &outcome,
+                    );
+                    if trail.charge(checkpoint.bytes()) {
+                        trail.checkpoints.push(checkpoint);
+                    } else {
+                        recording = false;
+                    }
+                } else {
+                    recording = false;
+                }
+            }
+        }
+        let layer_log_before = match (resumed_at, log.as_deref_mut()) {
+            (Some(_), Some(log)) => Some((
+                core::mem::take(&mut log.hops[layer]),
+                core::mem::take(&mut log.reads[layer]),
+            )),
+            _ => None,
+        };
         if let Some(t) = trace.as_mut() {
             t.layer_begin();
         }
@@ -3171,6 +4141,15 @@ fn sweep_pass_in(
                     }
                 }
                 peel_fed[cell] = false;
+                // D3x: a member the base walked the same way must write the
+                // ledger the base wrote, or the base's tail is not this walk's.
+                if track_ledger
+                    && !arm.is_growing
+                    && same.get(index).copied().unwrap_or(false)
+                    && struts[index].carried_mm2[slot].to_bits() != carried.to_bits()
+                {
+                    ledger_clean = false;
+                }
                 struts[index].carried_mm2[slot] = carried;
                 // THE AREA LAW SIZES AN ARM; A BRACE AND A MAST ARE SIZED BY THEIR
                 // OWN STRAIGHTNESS. `min_radius_mm` is zero for every support
@@ -3190,6 +4169,13 @@ fn sweep_pass_in(
                 let radius = size_arm(carried, sizing)
                     .max(struts[index].min_radius_mm)
                     .max(thickened);
+                if track_ledger
+                    && !arm.is_growing
+                    && same.get(index).copied().unwrap_or(false)
+                    && struts[index].radius_mm[slot].to_bits() != radius.to_bits()
+                {
+                    ledger_clean = false;
+                }
                 struts[index].radius_mm[slot] = radius;
                 if carried > sizing.x_allowed * core::f64::consts::PI * sizing.tip_radius_max_mm
                     * sizing.tip_radius_max_mm
@@ -3357,6 +4343,11 @@ fn sweep_pass_in(
             }
             growing_marked.clear();
         }
+        if let (Some((old_hops, old_reads)), Some(log)) = (layer_log_before, log.as_deref()) {
+            if log.hops[layer] != old_hops || log.reads[layer] != old_reads {
+                log_dirty = true;
+            }
+        }
         visits.add(&layer_visits);
         if let Some(t) = trace.as_mut() {
             t.cur.route_visit = layer_visits.route;
@@ -3371,6 +4362,58 @@ fn sweep_pass_in(
         t.finish();
     }
     visits.publish();
+    crate::perf::add(crate::PerfWork::SweepDownLayersWalked, walked);
+    crate::perf::add(
+        crate::PerfWork::SweepDownLayersSkipped,
+        (layer_count as u64).saturating_sub(walked),
+    );
+
+    if let Some(stop) = stopped_at {
+        // THE EARLY STOP. The state at this boundary is the base's, and no
+        // layer below it differs in its inputs, so the walk below it is the
+        // base's walk: its ledgers, its routing log (this pass never touched
+        // the layers below, so the log still holds it) and its accounting. Only
+        // the insertion attempts' counters are this pass's own.
+        for (member, (carried, radius)) in base_raw.iter().enumerate() {
+            if !same.get(member).copied().unwrap_or(false) {
+                continue;
+            }
+            let strut = &mut struts[member];
+            let slots = if strut.k_bottom == usize::MAX {
+                0
+            } else {
+                stop.saturating_sub(strut.k_bottom)
+            }
+            .min(strut.carried_mm2.len());
+            strut.carried_mm2[..slots].copy_from_slice(&carried[..slots]);
+            strut.radius_mm[..slots].copy_from_slice(&radius[..slots]);
+        }
+        let end = base_end.take().expect("a pass that can stop has the base's accounting");
+        let mut done = end.clone();
+        done.insertion_geometry_exhausted = outcome.insertion_geometry_exhausted;
+        done.insertion_rounds_exhausted = outcome.insertion_rounds_exhausted;
+        if let Some(mut sealed) = trail.take() {
+            for checkpoint in lower.drain(lower_next..) {
+                if !sealed.charge(checkpoint.bytes()) {
+                    break;
+                }
+                sealed.checkpoints.push(checkpoint);
+            }
+            ctl.out = seal_trail(sealed, struts, Some(end));
+        }
+        ctl.report = PassReport {
+            resumed_at,
+            stopped_at,
+            skipped_all: false,
+            walked,
+            layers: layer_count as u64,
+            log_unchanged: !log_dirty,
+            placed_nothing: true,
+        };
+        crate::perf::add(crate::PerfWork::SweepDownPassesResumed, 1);
+        crate::perf::add(crate::PerfWork::SweepDownPassesStopped, 1);
+        return done;
+    }
 
     // Anything still in the raster at the bottom of the stack reached the
     // plate through model material rather than through an arm. In sparse mode
@@ -3384,7 +4427,50 @@ fn sweep_pass_in(
     if !outcome.min_layer_area_mm2.is_finite() {
         outcome.min_layer_area_mm2 = 0.0;
     }
+    if tracked {
+        let placed_nothing = struts.len() == n_start && outcome.arms_inserted_by_load == 0;
+        if let Some(sealed) = trail.take() {
+            let end = placed_nothing.then(|| pure_outcome(&outcome));
+            ctl.out = seal_trail(sealed, struts, end);
+            if ctl.out.is_none() {
+                crate::perf::add(crate::PerfWork::SweepDownTrailRefused, 1);
+            }
+        }
+        ctl.report = PassReport {
+            resumed_at,
+            stopped_at: None,
+            skipped_all: false,
+            walked,
+            layers: layer_count as u64,
+            log_unchanged: resumed_at.is_some() && !log_dirty,
+            placed_nothing,
+        };
+        if resumed_at.is_some() {
+            crate::perf::add(crate::PerfWork::SweepDownPassesResumed, 1);
+        }
+    }
     outcome
+}
+
+/// Seal a recording pass's trail: the members' ledgers as the walk left them
+/// and the accounting it ended with (`None` when it placed an arm). `None`
+/// when the pool will not take the ledgers' bytes.
+fn seal_trail<'p>(
+    mut trail: PassTrail<'p>,
+    struts: &[SweepStrut],
+    end: Option<DownSweepOutcome>,
+) -> Option<PassTrail<'p>> {
+    let raw: Vec<(Vec<f64>, Vec<f64>)> = struts
+        .iter()
+        .map(|strut| (strut.carried_mm2.clone(), strut.radius_mm.clone()))
+        .collect();
+    if !trail.charge(PassTrail::sealed_bytes(&raw)) {
+        return None;
+    }
+    crate::perf::add(crate::PerfWork::SweepDownTrailBytes, trail.bytes);
+    trail.raw = raw;
+    trail.end = end;
+    Some(trail)
 }
 
 /// The cell a still-growing arm occupies at the layer it has just stepped to.
@@ -4438,7 +5524,7 @@ mod sparse_walk_tests {
 
     use super::{
         pass_difference, sabotage, sweep_pass_in, DownSweepOutcome, DrainKeepOut, InsertionPolicy,
-        PassMode, SizingPolicy, UnrootedColumns,
+        PassCtl, PassMode, SizingPolicy, UnrootedColumns,
     };
     use crate::grid::{lay_out_at, Grid};
     use crate::layer_cache::LayerCache;
@@ -4735,6 +5821,7 @@ mod sparse_walk_tests {
             triggers,
             (scene.drive != 1).then_some(&mut log),
             &mut refused,
+            &mut PassCtl::off(),
         );
         (outcome, struts, log, refused)
     }
@@ -5010,7 +6097,7 @@ mod sparse_walk_tests {
     /// SABOTAGE. Leave a class of active cell out of the sparse walk and some
     /// scene must come out different from the dense walk (or the walk must
     /// trip its own conservation assertion): the comparison sees that class.
-    fn red_with(class: u8, label: &str) {
+    fn red_with(class: u16, label: &str) {
         sabotage::set(class);
         let mut seen = 0_usize;
         let scenes = named()
@@ -5216,5 +6303,496 @@ mod sparse_walk_tests {
                 );
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // PERF LANE D3x: a resumed pass equals the full pass.
+    //
+    // Each scene is walked as a CHAIN of passes the way a call walks them:
+    // pass 1 with an empty trigger table (recording a trail), then pass 2 and 3
+    // with trigger tables, each resumed from the trail of the pass before. With
+    // the shadow check forced on, every resumed pass is also walked in full on a
+    // copy and the two must agree by bits on the outcome, every member (ledgers
+    // included), the route log, the refusals and the trail they leave. Between
+    // pass 1 and pass 2 the members may be EDITED the way a caller edits them
+    // between calls (a tip moved, an arm added mid-stack, a member removed and
+    // the ids remapped, a minimum raised, a tip lowered). Every invalidation
+    // rule has a SABOTAGE.
+    // -----------------------------------------------------------------------
+
+    use super::{PassReport, PassTrail, TEST_REPORTS, TEST_STRIDE, TEST_VERIFY};
+    use crate::layer_cache::BytePool;
+
+    type Base = Option<(PassTrail<'static>, RouteLog)>;
+
+    /// One pass of `scene`'s field over `struts`, driven by `table`, resumed
+    /// from `base` and leaving the trail the next pass resumes from.
+    fn chain_pass(
+        cache: &LayerCache<'_>,
+        scene: &Scene,
+        struts: &mut Vec<SweepStrut>,
+        table: &HashMap<u64, f64>,
+        base: &mut Base,
+    ) -> DownSweepOutcome {
+        let mut log = RouteLog::new(LAYERS);
+        let mut refused = Vec::new();
+        let insertion = if scene.insertion_on {
+            InsertionPolicy::new(1000)
+        } else {
+            InsertionPolicy::disabled()
+        };
+        let mut ctl = super::PassCtl::recording(BytePool::process(), base.take());
+        let outcome = super::sweep_pass(
+            cache,
+            struts,
+            scene.sizing,
+            insertion,
+            &DrainKeepOut::none(),
+            &scene.unrooted,
+            Some(table),
+            Some(&mut log),
+            &mut refused,
+            &mut ctl,
+        );
+        if let Some(trail) = ctl.out.take() {
+            *base = Some((trail, log));
+        }
+        outcome
+    }
+
+    /// A trigger table over `hosts`, each far over any limit.
+    fn table_of(hosts: &[(usize, usize)]) -> HashMap<u64, f64> {
+        hosts.iter().map(|&(member, layer)| (entry(member, layer), 1.0e3)).collect()
+    }
+
+    /// What the caller may do to the members between two calls.
+    fn edit(struts: &mut Vec<SweepStrut>, kind: usize, rng: &mut Rng) {
+        if struts.is_empty() {
+            return;
+        }
+        let at = rng.below(struts.len());
+        match kind {
+            // A tip moved one column over, seat and descent.
+            1 => {
+                let g = grid();
+                let shift = |cell: usize| g.index(g.row_of(cell), (g.col_of(cell) + 1).min(SIDE - 1));
+                let member = &mut struts[at];
+                member.cell = shift(member.cell);
+                for cell in &mut member.path {
+                    *cell = u32::try_from(shift(*cell as usize)).expect("a small grid");
+                }
+            }
+            // An arm added mid-stack.
+            2 => {
+                let id = u32::try_from(struts.len()).expect("a few members");
+                let seat = cell_at(rng.range(-3.0, 3.0), rng.range(-3.0, 3.0));
+                let k_top = 2 + rng.below(LAYERS - 4);
+                struts.push(arm(rng, id, seat, k_top, 0.0));
+            }
+            // A member removed, the ids after it remapped.
+            3 => {
+                struts.remove(at);
+                for (index, member) in struts.iter_mut().enumerate() {
+                    member.id = u32::try_from(index).expect("a few members");
+                }
+            }
+            // A minimum raised: the raw radius changes, the routing does not.
+            4 => struts[at].min_radius_mm = 0.3,
+            // A tip lowered one layer: its alias one layer up moves.
+            5 => {
+                let member = &mut struts[at];
+                if member.k_top > member.k_bottom.saturating_add(2) && member.k_bottom != usize::MAX {
+                    member.k_top -= 1;
+                }
+            }
+            // A thickened member.
+            6 => struts[at].thickened_mm = vec![0.2; LAYERS],
+            _ => {}
+        }
+    }
+
+    /// What a set of chains exercised, summed over them.
+    #[derive(Default, Debug)]
+    struct Resumed {
+        chains: usize,
+        passes: usize,
+        resumed: usize,
+        stopped: usize,
+        skipped: usize,
+        walked: u64,
+        layers: u64,
+        placed_after_resume: u64,
+        log_unchanged: usize,
+    }
+
+    /// The hosts of `scene`, a random subset.
+    fn some_hosts(scene: &Scene, struts: &[SweepStrut], rng: &mut Rng) -> Vec<(usize, usize)> {
+        let mut hosts: Vec<(usize, usize)> =
+            scene.hosts.iter().copied().filter(|_| rng.unit() < 0.5).collect();
+        // And a few alive (member, layer) pairs the scene did not name.
+        for _ in 0..rng.below(4) {
+            if struts.is_empty() {
+                break;
+            }
+            let member = rng.below(struts.len());
+            let strut = &struts[member];
+            if strut.k_bottom != usize::MAX && strut.k_top > strut.k_bottom {
+                hosts.push((member, strut.k_bottom + rng.below(strut.k_top - strut.k_bottom)));
+            }
+        }
+        hosts
+    }
+
+    /// Walk one scene as a chain of three passes, an edit before the second,
+    /// under the shadow check. Panics where a resumed pass differs.
+    fn chain_scene(seed: u64, stride: usize, into: &mut Resumed) {
+        let scene = random_scene(seed);
+        let mut rng = Rng(0xD3D3_0000 ^ seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let g = grid();
+        let cache = LayerCache::build(&g, &scene.slices);
+        let mut struts = scene.struts.clone();
+        let mut base: Base = None;
+        TEST_STRIDE.with(|cell| cell.set(stride));
+        TEST_VERIFY.with(|cell| cell.set(true));
+        TEST_REPORTS.with(|reports| reports.borrow_mut().clear());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            chain_pass(&cache, &scene, &mut struts, &HashMap::new(), &mut base);
+            // Pass 2: edited members (often none), a table (often empty).
+            let kind = if rng.unit() < 0.5 { 0 } else { 1 + rng.below(6) };
+            edit(&mut struts, kind, &mut rng);
+            let table = if rng.unit() < 0.25 {
+                HashMap::new()
+            } else {
+                table_of(&some_hosts(&scene, &struts, &mut rng))
+            };
+            let second = chain_pass(&cache, &scene, &mut struts, &table, &mut base);
+            // Pass 3: a table over the members as pass 2 left them.
+            let table = table_of(&some_hosts(&scene, &struts, &mut rng));
+            let third = chain_pass(&cache, &scene, &mut struts, &table, &mut base);
+            (second.arms_inserted_by_load, third.arms_inserted_by_load)
+        }));
+        TEST_STRIDE.with(|cell| cell.set(super::CHECKPOINT_STRIDE));
+        TEST_VERIFY.with(|cell| cell.set(false));
+        let reports: Vec<PassReport> = TEST_REPORTS.with(|reports| reports.borrow().clone());
+        match result {
+            Err(payload) => std::panic::resume_unwind(payload),
+            Ok(_) => {
+                into.chains += 1;
+                for report in reports {
+                    into.passes += 1;
+                    into.resumed += usize::from(report.resumed_at.is_some());
+                    into.stopped += usize::from(report.stopped_at.is_some());
+                    into.skipped += usize::from(report.skipped_all);
+                    into.walked += report.walked;
+                    into.layers += report.layers;
+                    into.log_unchanged += usize::from(report.log_unchanged);
+                    into.placed_after_resume +=
+                        u64::from(report.resumed_at.is_some() && !report.placed_nothing);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_resumed_pass_equals_the_full_pass_on_200_seeded_chains() {
+        let mut total = Resumed::default();
+        for seed in 0..200_u64 {
+            chain_scene(seed, 3, &mut total);
+        }
+        println!("200 chains reached {total:?}");
+        // The comparison has teeth: the chains resumed, stopped early, skipped
+        // whole passes, and inserted arms from a resumed walk.
+        assert!(total.resumed > 150, "{total:?}");
+        assert!(total.stopped > 10, "{total:?}");
+        assert!(total.skipped > 5, "{total:?}");
+        assert!(total.placed_after_resume > 20, "{total:?}");
+        assert!(total.log_unchanged > 20, "{total:?}");
+        assert!(total.walked * 10 < total.layers * 9, "{total:?}");
+    }
+
+    #[test]
+    fn a_resumed_pass_equals_the_full_pass_at_every_stride() {
+        for stride in [1, 2, 5, 16] {
+            let mut total = Resumed::default();
+            for seed in 200..240_u64 {
+                chain_scene(seed, stride, &mut total);
+            }
+            println!("stride {stride}: {total:?}");
+            assert!(total.resumed > 0, "stride {stride}: {total:?}");
+        }
+    }
+
+    /// A child arm lands on the CONTACT slot of its parent: the load waits in
+    /// `pending` for the layer below, across a checkpoint boundary.
+    fn pending_scene() -> Scene {
+        let slab = (rectangle(0.0, 0.0, 1.4, 0.8, 0.0), 10, 15);
+        let mut rng = Rng(21);
+        let parent = arm(&mut rng, 0, cell_at(-0.8, 0.0), 10, 0.0);
+        let mut child = arm(&mut rng, 1, cell_at(0.6, 0.1), 10, 0.0);
+        child.k_bottom = 9;
+        child.landing = Landing::Strut { id: 0, layer: 9 };
+        Scene {
+            slices: slices_of(&[slab]),
+            struts: vec![parent, child],
+            unrooted: UnrootedColumns::with_layers(LAYERS),
+            sizing: sizing(0.5),
+            drive: 0,
+            insertion_on: true,
+            hosts: Vec::new(),
+        }
+    }
+
+    /// Run the named scene as a chain with these hosts in pass 2, at a stride
+    /// of 1 (a boundary before every layer).
+    fn named_chain(scene: &Scene, hosts: &[(usize, usize)]) -> Resumed {
+        let g = grid();
+        let cache = LayerCache::build(&g, &scene.slices);
+        let mut struts = scene.struts.clone();
+        let mut base: Base = None;
+        TEST_STRIDE.with(|cell| cell.set(1));
+        TEST_VERIFY.with(|cell| cell.set(true));
+        TEST_REPORTS.with(|reports| reports.borrow_mut().clear());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            chain_pass(&cache, scene, &mut struts, &HashMap::new(), &mut base);
+            chain_pass(&cache, scene, &mut struts, &table_of(hosts), &mut base);
+            chain_pass(&cache, scene, &mut struts, &table_of(hosts), &mut base);
+        }));
+        TEST_STRIDE.with(|cell| cell.set(super::CHECKPOINT_STRIDE));
+        TEST_VERIFY.with(|cell| cell.set(false));
+        let reports: Vec<PassReport> = TEST_REPORTS.with(|reports| reports.borrow().clone());
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+        let mut total = Resumed::default();
+        for report in reports {
+            total.passes += 1;
+            total.resumed += usize::from(report.resumed_at.is_some());
+            total.stopped += usize::from(report.stopped_at.is_some());
+            total.skipped += usize::from(report.skipped_all);
+        }
+        total
+    }
+
+    /// Two calls on one plan, members edited between them, the second resuming
+    /// from the plan's stash under the shadow check; and the same second call
+    /// on a plan with no stash. They must agree by bits on everything.
+    fn two_calls(seed: u64, stride: usize, into: &mut Resumed) {
+        let scene = random_scene(seed);
+        if !scene.insertion_on {
+            return;
+        }
+        let mut rng = Rng(0xCA11_0000 ^ seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let g = grid();
+        let cache = LayerCache::build(&g, &scene.slices);
+        let fresh_cache = LayerCache::build(&g, &scene.slices);
+        let mut struts = scene.struts.clone();
+        let run = |cache: &LayerCache<'_>, struts: &mut Vec<SweepStrut>| {
+            super::run_with(
+                cache,
+                struts,
+                scene.sizing,
+                InsertionPolicy::new(1000),
+                &DrainKeepOut::none(),
+                &scene.unrooted,
+            )
+        };
+        TEST_STRIDE.with(|cell| cell.set(stride));
+        TEST_VERIFY.with(|cell| cell.set(true));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run(&cache, &mut struts);
+            let kind = if rng.unit() < 0.3 { 0 } else { 1 + rng.below(6) };
+            edit(&mut struts, kind, &mut rng);
+            let mut for_fresh = struts.clone();
+            TEST_REPORTS.with(|reports| reports.borrow_mut().clear());
+            let resumed = run(&cache, &mut struts);
+            let reports: Vec<PassReport> = TEST_REPORTS.with(|reports| reports.borrow().clone());
+            // The same call with no stash to resume from.
+            TEST_VERIFY.with(|cell| cell.set(false));
+            let full = run(&fresh_cache, &mut for_fresh);
+            assert_eq!(format!("{resumed:?}"), format!("{full:?}"), "seed {seed}: outcome");
+            assert!(resumed.route_log == full.route_log, "seed {seed}: route log");
+            assert_eq!(struts.len(), for_fresh.len(), "seed {seed}: members");
+            for (index, (a, b)) in struts.iter().zip(&for_fresh).enumerate() {
+                assert_eq!(format!("{a:?}"), format!("{b:?}"), "seed {seed}: member {index}");
+            }
+            reports
+        }));
+        TEST_STRIDE.with(|cell| cell.set(super::CHECKPOINT_STRIDE));
+        TEST_VERIFY.with(|cell| cell.set(false));
+        match result {
+            Err(payload) => std::panic::resume_unwind(payload),
+            Ok(reports) => {
+                into.chains += 1;
+                for report in reports {
+                    into.passes += 1;
+                    into.resumed += usize::from(report.resumed_at.is_some());
+                    into.stopped += usize::from(report.stopped_at.is_some());
+                    into.skipped += usize::from(report.skipped_all);
+                    into.walked += report.walked;
+                    into.layers += report.layers;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_second_call_resumes_from_the_first_calls_last_pass() {
+        let mut total = Resumed::default();
+        for seed in 0..150_u64 {
+            two_calls(seed, 3, &mut total);
+        }
+        println!("150 two-call chains reached {total:?}");
+        assert!(total.resumed > 60, "{total:?}");
+        assert!(total.skipped > 3, "{total:?}");
+        assert!(total.walked * 10 < total.layers * 9, "{total:?}");
+    }
+
+    #[test]
+    fn sabotage_stopping_above_the_second_calls_lowest_edit_is_red() {
+        sabotage::set(sabotage::RESUME_STOP_LOWEST);
+        let mut red = 0_usize;
+        for seed in 0..150_u64 {
+            if std::panic::catch_unwind(|| two_calls(seed, 3, &mut Resumed::default())).is_err() {
+                red += 1;
+            }
+        }
+        sabotage::set(0);
+        assert!(red > 0, "the two-call comparison cannot see a stop above an edit");
+    }
+
+    #[test]
+    fn sabotage_reusing_the_sizing_whatever_the_log_says_is_red() {
+        sabotage::set(sabotage::REUSE_LOG);
+        let mut red = 0_usize;
+        for seed in 0..150_u64 {
+            if std::panic::catch_unwind(|| two_calls(seed, 3, &mut Resumed::default())).is_err() {
+                red += 1;
+            }
+        }
+        sabotage::set(0);
+        println!("sabotage per-event reuse: {red} two-call chains differ");
+        assert!(red > 0, "the shadow check cannot see a sizing reused over a changed log");
+    }
+
+    #[test]
+    fn a_pending_child_load_survives_the_checkpoint() {
+        let scene = pending_scene();
+        // Pass 1 puts the child's load in the parent's pending slot at layer 9,
+        // where it waits across the boundary before layer 8; a trigger at 8
+        // resumes exactly there.
+        let total = named_chain(&scene, &[(0, 8)]);
+        assert!(total.resumed >= 1, "{total:?}");
+    }
+
+    #[test]
+    fn handed_and_leaned_fixtures_resume_exactly() {
+        for (name, scene) in named() {
+            if scene.struts.is_empty() {
+                continue;
+            }
+            for layer in [1, 3, 5, 6, 8] {
+                let member = scene.struts.iter().position(|s| s.k_bottom <= layer && layer < s.k_top);
+                if let Some(member) = member {
+                    let total = named_chain(&scene, &[(member, layer)]);
+                    assert!(total.passes == 3, "{name}: {total:?}");
+                }
+            }
+        }
+    }
+
+    /// SABOTAGE: drop one invalidation or restore rule and some chain must come
+    /// out different from the full pass (the shadow check panics).
+    fn chain_red_with(class: u16, label: &str) {
+        let red = chain_reds(class);
+        println!("sabotage {label}: {red} chains differ");
+        assert!(red > 0, "dropping {label} did not change any chain: the shadow check cannot see it");
+    }
+
+    /// The chains (of the seeded and the named) the shadow check calls
+    /// different with `class` dropped.
+    fn chain_reds(class: u16) -> usize {
+        sabotage::set(class);
+        let mut red = 0_usize;
+        let mut differs = |run: &dyn Fn()| {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).is_err() {
+                red += 1;
+            }
+        };
+        for seed in 0..120_u64 {
+            differs(&|| chain_scene(seed, 2, &mut Resumed::default()));
+        }
+        differs(&|| {
+            named_chain(&pending_scene(), &[(0, 8)]);
+        });
+        for (_, scene) in named() {
+            for layer in [3, 5, 6] {
+                if let Some(member) =
+                    scene.struts.iter().position(|s| s.k_bottom <= layer && layer < s.k_top)
+                {
+                    differs(&|| {
+                        named_chain(&scene, &[(member, layer)]);
+                    });
+                }
+            }
+        }
+        sabotage::set(0);
+        red
+    }
+
+    #[test]
+    fn sabotage_ignoring_the_trigger_layers_is_red() {
+        chain_red_with(sabotage::RESUME_TRIGGERS, "the trigger table's layers");
+    }
+
+    #[test]
+    fn sabotage_ignoring_the_changed_members_is_red() {
+        chain_red_with(sabotage::RESUME_MEMBERS, "the changed members' layers");
+    }
+
+    #[test]
+    fn sabotage_dropping_the_pending_loads_is_red() {
+        chain_red_with(sabotage::RESUME_PENDING, "the pending loads");
+    }
+
+    #[test]
+    fn sabotage_dropping_the_handed_columns_is_red() {
+        chain_red_with(sabotage::RESUME_HANDED, "the handed columns");
+    }
+
+    #[test]
+    fn sabotage_stopping_without_comparing_the_state_is_red() {
+        chain_red_with(sabotage::RESUME_STOP_UNCHECKED, "the stop's state comparison");
+    }
+
+    #[test]
+    fn sabotage_dropping_the_restored_ledgers_is_red() {
+        chain_red_with(sabotage::RESUME_LEDGER, "the restored ledgers");
+    }
+
+    #[test]
+    fn sabotage_stopping_above_the_lowest_changed_layer_is_red() {
+        chain_red_with(sabotage::RESUME_STOP_LOWEST, "the lowest changed layer");
+    }
+
+    #[test]
+    fn sabotage_dropping_the_restored_accounting_is_red() {
+        chain_red_with(sabotage::RESUME_OUTCOME, "the restored accounting");
+    }
+
+    #[test]
+    fn the_ledger_watch_is_defence_in_depth_and_no_result_leans_on_it() {
+        // HONEST LIMIT: the ledger watch is the stop's third guard, behind the
+        // state comparison and the trigger and member bounds, and no fixture
+        // here (seeded chains, two-call chains, the named scenes) makes it the
+        // only thing standing between a stop and a wrong tail: a stop needs the
+        // load rasters, the carriers, the handed and pending loads and every
+        // accounting sum equal to the base's, and an arm whose carried load
+        // differs while all of those agree has not been built. So this test
+        // cannot be red; it records that dropping the watch changes no chain,
+        // which is the evidence that it is defence in depth and not a rule
+        // the results lean on.
+        let unwatched = chain_reds(sabotage::RESUME_STOP_LEDGER);
+        println!("stop without the ledger watch: {unwatched} chains differ");
+        assert_eq!(unwatched, 0, "the ledger watch now decides a result: give it a sabotage test");
     }
 }

@@ -463,6 +463,7 @@ impl Queue<'_> {
 }
 
 /// The per-event design loads of one field.
+#[derive(Clone)]
 pub(crate) struct PerEventSizing {
     /// Per member, per ledger slot: the largest cumulative force any single
     /// event puts there. Not yet the suffix maximum.

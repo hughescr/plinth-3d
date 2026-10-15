@@ -429,6 +429,23 @@ pub struct LayerCache<'a> {
     held_bytes: u64,
     /// Layers a reader has computed on demand.
     streamed: AtomicU64,
+    /// What the last down-sweep call on this plan left for the next one
+    /// (perf lane D3x): the trail of its last pass, with that pass's routing
+    /// log and per-event sizing. Its bytes are charged to `pool`; it is
+    /// released with the cache.
+    stash: StashSlot,
+}
+
+/// The slot a down-sweep call leaves its last pass in, for the next call on
+/// the same plan to resume from. A call takes it out before it uses it and
+/// puts its own back at the end, so two calls that overlap never share one
+/// (the second finds it empty and walks in full).
+struct StashSlot(std::sync::Mutex<Option<crate::down_sweep::Stash>>);
+
+impl core::fmt::Debug for StashSlot {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("StashSlot")
+    }
 }
 
 /// Whether `PLINTH_SWEEP_VERIFY_CACHE` asks for the shadow check (read once).
@@ -522,6 +539,7 @@ impl<'a> LayerCache<'a> {
             pool,
             held_bytes: actual,
             streamed: AtomicU64::new(0),
+            stash: StashSlot(std::sync::Mutex::new(None)),
         };
         let kept = cache.cached_layers();
         if kept < cache.len() {
@@ -549,6 +567,39 @@ impl<'a> LayerCache<'a> {
     #[must_use]
     pub const fn key(&self) -> &LayerKey {
         &self.key
+    }
+
+    /// The byte pool this cache draws from. A pass trail
+    /// ([`crate::down_sweep`], perf lane D3x) charges its checkpoints to the
+    /// same pool, so the caches and the trails alive together can never hold
+    /// more than the pool's limit between them.
+    #[must_use]
+    pub(crate) const fn pool(&self) -> &'a BytePool {
+        self.pool
+    }
+
+    /// Take the last down-sweep call's stash out of the cache (`None` when
+    /// there is none, or another call holds it).
+    #[must_use]
+    pub(crate) fn take_stash(&self) -> Option<crate::down_sweep::Stash> {
+        let stash = self.stash.0.lock().ok()?.take()?;
+        self.pool.release(stash.bytes);
+        Some(stash)
+    }
+
+    /// Leave `stash` for the next down-sweep call on this plan, if the pool
+    /// will hold its bytes (it is dropped otherwise, and the next call walks).
+    pub(crate) fn put_stash(&self, stash: crate::down_sweep::Stash) {
+        if !self.pool.try_acquire(stash.bytes) {
+            return;
+        }
+        let Ok(mut slot) = self.stash.0.lock() else {
+            self.pool.release(stash.bytes);
+            return;
+        };
+        if let Some(old) = slot.replace(stash) {
+            self.pool.release(old.bytes);
+        }
     }
 
     #[must_use]
@@ -695,6 +746,11 @@ impl Drop for LayerCache<'_> {
     /// already have panicked).
     fn drop(&mut self) {
         self.pool.release(self.held_bytes);
+        if let Ok(slot) = self.stash.0.get_mut() {
+            if let Some(stash) = slot.take() {
+                self.pool.release(stash.bytes);
+            }
+        }
         if self.verify {
             let verified = self
                 .verified
