@@ -60,7 +60,7 @@ use plinth_mesh::Mesh;
 use plinth_support::perception::SliceSolid;
 
 use crate::grid::Grid;
-use crate::layer_cache::LayerCache;
+use crate::layer_cache::{BytePool, LayerCache};
 use crate::reach::{self, ReachState, SurfaceCreep};
 use crate::SweepStrut;
 
@@ -147,17 +147,18 @@ pub struct ReplayOutcome {
     pub layers_visited: u64,
 }
 
-/// Restore every tentatively doomed arm whose removal would leave a demand
-/// cell unrooted that the current field roots. `doomed` is edited in place;
-/// what is still doomed on return passed a replay of the whole model.
-pub(crate) fn refuse_unrooted_demand(
+/// The reference implementation: every replay of a call starts from layer 0
+/// and recomputes both potentials, as the replay did before lane RP
+/// (2026-10-15). It is the oracle [`refuse_unrooted_demand`] is held to (the
+/// tests, and `PLINTH_SWEEP_VERIFY_REPLAY=1` in a run) and charges no counter.
+fn reference_refuse_unrooted_demand(
     context: &ReplayContext<'_>,
     struts: &[SweepStrut],
     doomed: &mut [bool],
-) -> ReplayOutcome {
+) -> (ReplayOutcome, Vec<f32>) {
     let mut outcome = ReplayOutcome::default();
     if context.layers == 0 || !doomed.iter().any(|flag| *flag) {
-        return outcome;
+        return (outcome, Vec::new());
     }
     // Every arm is a root at its seat layer and seat cell, which is exactly
     // where the up-sweep relaxed it (`up_sweep::place_layer`). Load-placed arms
@@ -174,7 +175,7 @@ pub(crate) fn refuse_unrooted_demand(
     let mut verified = false;
     for restart in 0..=context.max_restarts {
         outcome.replays += 1;
-        let pass = replay_once(
+        let pass = reference_replay_once(
             context,
             struts,
             &roots_by_layer,
@@ -193,16 +194,12 @@ pub(crate) fn refuse_unrooted_demand(
         restore_all(doomed, &mut blame_u, &mut outcome);
         outcome.exhausted = true;
     }
-    crate::perf::add(
-        crate::PerfWork::ReplayCellLayers,
-        replay_cell_layers(context.grid.cells(), outcome.layers_visited),
-    );
     let ratio = context.first_loss_ratio as f32;
     outcome.refused_within_first_loss = blame_u
         .iter()
         .filter(|u| u.is_finite() && **u <= ratio)
         .count() as u64;
-    outcome
+    (outcome, blame_u)
 }
 
 /// The `replay.cell_layers` charge: the cells of the grid times the layers the
@@ -226,7 +223,7 @@ enum Pass {
     Restart,
 }
 
-fn replay_once(
+fn reference_replay_once(
     context: &ReplayContext<'_>,
     struts: &[SweepStrut],
     roots_by_layer: &[Vec<usize>],
@@ -248,7 +245,6 @@ fn replay_once(
         return Pass::Verified;
     };
     let highest = doomed_layers().max().unwrap_or(lowest);
-    crate::perf::add(crate::PerfWork::ReplayCalls, 1);
     let mut creep = if context.creep_weight {
         SurfaceCreep::new(
             context.mesh,
@@ -462,6 +458,784 @@ fn replay_once(
     Pass::Verified
 }
 
+// ---------------------------------------------------------------------------
+// The call's reuse (lane RP, 2026-10-15)
+// ---------------------------------------------------------------------------
+//
+// One call replays the same arm set over and over: the CURRENT set's potential
+// (the baseline) does not depend on which arms are doomed, and a restart that
+// restores an arm seated at layer `s` leaves every layer below `s` exactly as
+// the replay before it computed them. So a call keeps, per layer, what the
+// baseline left (the rooted cells and the carry), and, from its first replay,
+// the proposed set's carry after each layer. A restart then
+//
+// * skips every baseline layer already computed (a cached layer costs a read,
+//   a layer past the cache is computed and appended);
+// * starts the proposed set from the checkpoint just below the LOWEST seat of
+//   any arm restored so far (`V`), not from the lowest doomed seat, and not
+//   from the layer that found the unrooted cell.
+//
+// Why `V` is the right bound: the replays differ only in which arms are
+// doomed, and an arm matters from its seat layer upward. Every arm restored in
+// this call, in place or by a restart, is seated at `V` or above, so below `V`
+// every replay roots the same arms in the same order and no cell was found
+// unrooted (a found cell restores an arm at or below its layer, which would
+// have lowered `V`). The checkpoints are taken in the first replay only, and
+// only until the first restoration, so each one is the state a fresh replay of
+// the present doomed set reaches at that layer, bit for bit.
+//
+// What a fresh replay does below the resume layer is not only compute: it also
+// tests, at every layer from the highest doomed seat, whether the two carries
+// agree, and returns there if they do. The checkpoints keep that test
+// answerable (each holds the carry and whether the layer had cover), so a
+// resumed replay returns at exactly the layer a fresh one would, and the
+// logical counts (`layers_visited`, `trial_layers`) are what a fresh replay
+// reports. What the reuse saved is told apart in [`ReplayWork`].
+//
+// Every kept byte is drawn from the process-wide layer-cache pool
+// ([`BytePool::process`]). When the pool refuses a baseline layer the call's
+// cache is switched off and every later replay of the call is a fresh one; a
+// refused checkpoint ends the checkpoint chain. Nothing here changes a result
+// at any budget. `PLINTH_SWEEP_VERIFY_REPLAY=1` runs the reference alongside
+// every call and panics on any difference.
+
+/// What the call's cache saved and what it still computed (the physical work,
+/// as against [`ReplayOutcome`]'s logical counts, which equal a fresh replay's).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ReplayWork {
+    /// Layers whose baseline potential was computed here.
+    pub baseline_computed: u64,
+    /// ... of those, in replays after the first.
+    pub baseline_computed_restart: u64,
+    /// Baseline layers a replay walked or skipped without computing.
+    pub baseline_reused: u64,
+    /// Layers whose proposed potential was computed here.
+    pub trial_computed: u64,
+    /// Proposed layers a restart took from a checkpoint instead of computing.
+    pub trial_reused: u64,
+    /// Restarts that resumed from a checkpoint (or returned at one).
+    pub checkpoint_resumes: u64,
+    /// Bytes the call's cache held at its end.
+    pub cache_bytes: u64,
+}
+
+/// One layer of the CURRENT arm set's potential, as later replays need it.
+struct BaselineLayer {
+    /// Bit `c` is set where `c` is cover and the potential there is at most 1:
+    /// the cells the proposed set is held against. Empty for a layer with no
+    /// cover.
+    rooted: Vec<u64>,
+    /// The potential carried up from this layer, at its carry cells (ascending,
+    /// as [`crate::layer_cache::LayerReader::carry_cells`]); infinity elsewhere.
+    carry: Vec<f32>,
+}
+
+impl BaselineLayer {
+    fn bytes(&self) -> u64 {
+        (std::mem::size_of::<Self>() + self.rooted.capacity() * 8 + self.carry.capacity() * 4) as u64
+    }
+}
+
+/// The proposed set's carry after one layer of the first replay.
+struct Checkpoint {
+    /// As [`BaselineLayer::carry`]; empty when the layer had no cover.
+    carry: Vec<f32>,
+    /// Whether the layer had cover (the carry test is made only on such layers).
+    cover_any: bool,
+    /// Layers of the first replay's proposed set computed up to and including
+    /// this one: the part of `trial_layers` a resume skips.
+    trial_layers: u64,
+}
+
+impl Checkpoint {
+    fn bytes(&self) -> u64 {
+        (std::mem::size_of::<Self>() + self.carry.capacity() * 4) as u64
+    }
+}
+
+/// The bytes one call holds from the process pool.
+struct Budget {
+    pool: &'static BytePool,
+    held: u64,
+}
+
+impl Budget {
+    /// Take `bytes`; `false` when the pool is full.
+    fn take(&mut self, bytes: u64) -> bool {
+        let granted = self.pool.try_acquire(bytes);
+        if granted {
+            self.held += bytes;
+        }
+        granted
+    }
+}
+
+impl Drop for Budget {
+    fn drop(&mut self) {
+        self.pool.release(self.held);
+    }
+}
+
+/// The first replay's checkpoints, for layers `from..from + points.len()`.
+struct Chain {
+    points: Vec<Checkpoint>,
+    from: usize,
+    /// Whether the first replay is still taking checkpoints.
+    capturing: bool,
+}
+
+impl Chain {
+    /// Keep the first replay's proposed carry after `layer`, if the pool allows.
+    /// The chain is contiguous from the lowest doomed seat, so a gap or a
+    /// refusal ends it.
+    fn capture(&mut self, budget: &mut Budget, lowest: usize, layer: usize, point: Checkpoint) {
+        if self.points.is_empty() {
+            self.from = lowest;
+        }
+        if layer != self.from + self.points.len() || !budget.take(point.bytes()) {
+            self.capturing = false;
+            return;
+        }
+        self.points.push(point);
+    }
+}
+
+/// Everything one call keeps across its replays.
+struct CallCache {
+    budget: Budget,
+    /// Off after the pool refused a baseline layer: every replay is then fresh.
+    enabled: bool,
+    /// Layers `0..base.len()` of the baseline, in order.
+    base: Vec<BaselineLayer>,
+    chain: Chain,
+    /// The lowest seat of any arm restored in this call (`V`).
+    min_restored: usize,
+    /// Whether the replay about to run is the call's first.
+    first: bool,
+    work: ReplayWork,
+}
+
+impl CallCache {
+    fn new(pool: &'static BytePool) -> Self {
+        Self {
+            budget: Budget { pool, held: 0 },
+            enabled: true,
+            base: Vec::new(),
+            chain: Chain {
+                points: Vec::new(),
+                from: 0,
+                capturing: true,
+            },
+            min_restored: usize::MAX,
+            first: true,
+            work: ReplayWork::default(),
+        }
+    }
+
+    /// The last layer a restart may resume AFTER (its checkpoint is the proposed
+    /// carry there), if there is one: below `V`, inside the first replay's chain.
+    fn resume_boundary(&self, lowest: usize) -> Option<usize> {
+        if !self.enabled || self.chain.points.is_empty() || self.chain.from != lowest {
+            return None;
+        }
+        let end = (self.chain.from + self.chain.points.len()).min(self.base.len());
+        end.min(self.min_restored)
+            .checked_sub(1)
+            .filter(|&boundary| boundary >= lowest)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only fault injection: 1 resumes one layer late, 2 reads a stale
+    /// baseline, 3 skips the carry test below the resume layer. 0 is production.
+    static SABOTAGE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn sabotage() -> u8 {
+    SABOTAGE.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+const fn sabotage() -> u8 {
+    0
+}
+
+/// Whether `PLINTH_SWEEP_VERIFY_REPLAY=1`: run the reference alongside every
+/// call and panic on any difference (for the gate runs, not for production).
+fn verify_replay() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PLINTH_SWEEP_VERIFY_REPLAY").is_ok_and(|value| value.trim() == "1")
+    })
+}
+
+/// The set bits of `words`, ascending.
+fn set_bits(words: &[u64]) -> impl Iterator<Item = usize> + '_ {
+    words.iter().enumerate().flat_map(|(word, &bits)| {
+        let mut rest = bits;
+        std::iter::from_fn(move || {
+            if rest == 0 {
+                return None;
+            }
+            let bit = rest.trailing_zeros() as usize;
+            rest &= rest - 1;
+            Some(word * 64 + bit)
+        })
+    })
+}
+
+/// The rooted set of a layer: cover cells at a potential of at most 1. With
+/// `unrooted`, also counts the cover cells above 1 (the placement's residual).
+fn rooted_words(cover: &[bool], u: &[f32], mut unrooted: Option<&mut u64>) -> Vec<u64> {
+    let mut words = Vec::with_capacity(cover.len().div_ceil(64));
+    for (cover, u) in cover.chunks(64).zip(u.chunks(64)) {
+        let mut bits = 0_u64;
+        for (bit, (filled, u)) in cover.iter().zip(u).enumerate() {
+            if !*filled {
+                continue;
+            }
+            if *u <= 1.0 {
+                bits |= 1 << bit;
+            } else if *u > 1.0 {
+                if let Some(count) = unrooted.as_deref_mut() {
+                    *count += 1;
+                }
+            }
+        }
+        words.push(bits);
+    }
+    words
+}
+
+/// The potential carried up from the layer, at its carry cells.
+fn carry_values(state: &ReachState, carry_cells: &[u32]) -> Vec<f32> {
+    carry_cells.iter().map(|&cell| state.u_prev[cell as usize]).collect()
+}
+
+/// Put `carry` (at `carry_cells`) into a fresh state's carried potential.
+fn scatter_carry(state: &mut ReachState, carry_cells: &[u32], carry: &[f32]) {
+    for (&cell, &value) in carry_cells.iter().zip(carry) {
+        state.u_prev[cell as usize] = value;
+    }
+}
+
+/// Restore every tentatively doomed arm whose removal would leave a demand
+/// cell unrooted that the current field roots. `doomed` is edited in place;
+/// what is still doomed on return passed a replay of the whole model.
+///
+/// Every replay of the call after the first reuses what the call already
+/// computed (see the section comment above); the answer is the one a fresh
+/// replay of every restart would give.
+pub(crate) fn refuse_unrooted_demand(
+    context: &ReplayContext<'_>,
+    struts: &[SweepStrut],
+    doomed: &mut [bool],
+) -> ReplayOutcome {
+    if verify_replay() {
+        let mut expected_doomed = doomed.to_vec();
+        let expected = reference_refuse_unrooted_demand(context, struts, &mut expected_doomed);
+        let got = refuse_counted(context, struts, doomed, BytePool::process());
+        assert!(
+            same_answer(&got.0, doomed, &got.2, &expected.0, &expected_doomed, &expected.1),
+            "PLINTH_SWEEP_VERIFY_REPLAY: the cached replay differs from the reference\n\
+             cached    {:?} {doomed:?}\nreference {:?} {expected_doomed:?}",
+            got.0,
+            expected.0
+        );
+        return got.0;
+    }
+    refuse_counted(context, struts, doomed, BytePool::process()).0
+}
+
+/// Whether two calls answered alike: the outcome, the doomed flags and the
+/// blame potentials by bits.
+fn same_answer(
+    outcome: &ReplayOutcome,
+    doomed: &[bool],
+    blame: &[f32],
+    expected: &ReplayOutcome,
+    expected_doomed: &[bool],
+    expected_blame: &[f32],
+) -> bool {
+    outcome == expected
+        && doomed == expected_doomed
+        && blame.len() == expected_blame.len()
+        && blame
+            .iter()
+            .zip(expected_blame)
+            .all(|(a, b)| a.to_bits() == b.to_bits())
+}
+
+/// [`refuse_unrooted_demand`] with its cache drawn from `pool`, returning the
+/// physical work it did and the blame potentials as well.
+fn refuse_counted(
+    context: &ReplayContext<'_>,
+    struts: &[SweepStrut],
+    doomed: &mut [bool],
+    pool: &'static BytePool,
+) -> (ReplayOutcome, ReplayWork, Vec<f32>) {
+    let mut outcome = ReplayOutcome::default();
+    if context.layers == 0 || !doomed.iter().any(|flag| *flag) {
+        return (outcome, ReplayWork::default(), Vec::new());
+    }
+    let _call_span = crate::perf::span(crate::perf::Span::ReplayCall);
+    let mut roots_by_layer: Vec<Vec<usize>> = vec![Vec::new(); context.layers];
+    for (index, strut) in struts.iter().enumerate() {
+        if strut.kind == crate::StrutKind::Arm && strut.k_top < context.layers {
+            roots_by_layer[strut.k_top].push(index);
+        }
+    }
+    let mut blame_u = vec![f32::NEG_INFINITY; struts.len()];
+    let mut cache = CallCache::new(pool);
+    let mut verified = false;
+    for restart in 0..=context.max_restarts {
+        outcome.replays += 1;
+        cache.first = restart == 0;
+        let pass = replay_once(
+            context,
+            struts,
+            &roots_by_layer,
+            doomed,
+            &mut blame_u,
+            &mut outcome,
+            &mut cache,
+        );
+        if matches!(pass, Pass::Verified) || !doomed.iter().any(|flag| *flag) {
+            verified = true;
+            break;
+        }
+    }
+    if !verified {
+        // Out of restarts: keep everything. Over-support, never a bare cell.
+        restore_all(doomed, &mut blame_u, &mut outcome);
+        outcome.exhausted = true;
+    }
+    cache.work.cache_bytes = cache.budget.held;
+    let work = cache.work;
+    crate::perf::add(
+        crate::PerfWork::ReplayCellLayers,
+        replay_cell_layers(context.grid.cells(), outcome.layers_visited),
+    );
+    crate::perf::add(crate::PerfWork::ReplayBaselineLayers, work.baseline_computed);
+    crate::perf::add(
+        crate::PerfWork::ReplayBaselineLayersRestart,
+        work.baseline_computed_restart,
+    );
+    crate::perf::add(crate::PerfWork::ReplayBaselineLayersReused, work.baseline_reused);
+    crate::perf::add(crate::PerfWork::ReplayTrialLayers, work.trial_computed);
+    crate::perf::add(crate::PerfWork::ReplayTrialLayersReused, work.trial_reused);
+    crate::perf::add(crate::PerfWork::ReplayRestarts, outcome.replays.saturating_sub(1));
+    crate::perf::add(crate::PerfWork::ReplayCacheBytes, work.cache_bytes);
+    crate::perf::add(crate::PerfWork::ReplayCheckpointResumes, work.checkpoint_resumes);
+    let ratio = context.first_loss_ratio as f32;
+    outcome.refused_within_first_loss = blame_u
+        .iter()
+        .filter(|u| u.is_finite() && **u <= ratio)
+        .count() as u64;
+    (outcome, work, blame_u)
+}
+
+/// One replay of the call. The same walk as [`reference_replay_once`], with the
+/// baseline taken from the call's cache where it holds it and the proposed
+/// set resumed from a checkpoint where one is valid.
+fn replay_once(
+    context: &ReplayContext<'_>,
+    struts: &[SweepStrut],
+    roots_by_layer: &[Vec<usize>],
+    doomed: &mut [bool],
+    blame_u: &mut [f32],
+    outcome: &mut ReplayOutcome,
+    cache: &mut CallCache,
+) -> Pass {
+    let ratio = context.first_loss_ratio as f32;
+    let grid = context.grid;
+    let doomed_layers = || {
+        doomed
+            .iter()
+            .enumerate()
+            .filter(|(_, flag)| **flag)
+            .map(|(index, _)| struts[index].k_top)
+    };
+    let Some(lowest) = doomed_layers().min() else {
+        return Pass::Verified;
+    };
+    let highest = doomed_layers().max().unwrap_or(lowest);
+    crate::perf::add(crate::PerfWork::ReplayCalls, 1);
+    let first = cache.first;
+    let resume = if first { None } else { cache.resume_boundary(lowest) };
+    let layer_cache = LayerCache::resolve(context.layer_cache, grid, context.slices);
+    let mut layer_reader = layer_cache.reader();
+    let new_state = || {
+        let mut state = ReachState::new(grid);
+        if !context.straight_reach {
+            state.straight_limit = f32::NEG_INFINITY;
+        }
+        state
+    };
+    let metric = crate::ReachMetric {
+        reach_mm: context.kappa * context.layer_height_mm,
+        straight: context.straight_reach,
+    };
+    let CallCache {
+        budget,
+        enabled,
+        base,
+        chain,
+        min_restored,
+        work,
+        ..
+    } = cache;
+    let mut proposed: Option<ReachState> = None;
+    let mut run_trial_layers = 0_u64;
+    let mut start = 0_usize;
+    if *enabled && !first {
+        // Below the lowest doomed seat the two sets are the same set and the
+        // baseline is cached (when the cache reaches that far).
+        start = lowest.min(base.len());
+        if let Some(boundary) = resume {
+            // A fresh replay would test the carries at every layer from the
+            // highest doomed seat; the checkpoints answer that test.
+            if sabotage() != 3 {
+                for layer in highest.max(lowest)..=boundary {
+                    let point = &chain.points[layer - chain.from];
+                    if point.cover_any && point.carry == base[layer].carry {
+                        outcome.layers_visited += layer as u64 + 1;
+                        outcome.trial_layers += point.trial_layers;
+                        work.trial_reused += point.trial_layers;
+                        work.baseline_reused += layer as u64 + 1;
+                        work.checkpoint_resumes += 1;
+                        return Pass::Verified;
+                    }
+                }
+            }
+            let point = &chain.points[boundary - chain.from];
+            let mut state = new_state();
+            if point.cover_any {
+                layer_reader.prepare(boundary, false);
+                scatter_carry(&mut state, layer_reader.carry_cells(boundary), &point.carry);
+            }
+            proposed = Some(state);
+            run_trial_layers = point.trial_layers;
+            outcome.trial_layers += point.trial_layers;
+            work.trial_reused += point.trial_layers;
+            work.checkpoint_resumes += 1;
+            start = boundary + 1;
+            if sabotage() == 1 && start < base.len() {
+                // Sabotage: resume one layer late, skipping the layer the
+                // restored arm is seated on.
+                start += 1;
+            }
+        } else if start == lowest && start > 0 {
+            let mut state = new_state();
+            layer_reader.prepare(start - 1, false);
+            scatter_carry(&mut state, layer_reader.carry_cells(start - 1), &base[start - 1].carry);
+            proposed = Some(state);
+        } else if start == lowest {
+            proposed = Some(new_state());
+        }
+        work.baseline_reused += start as u64;
+        outcome.layers_visited += start as u64;
+    }
+    let mut creep = if context.creep_weight {
+        SurfaceCreep::new(
+            context.mesh,
+            grid,
+            context.overhang_centre_deg,
+            context.overhang_transition_deg,
+            context.creep_overhang_cut,
+        )
+    } else {
+        SurfaceCreep::disabled(grid)
+    };
+    // The current set's carried potential up to the layer being walked: set at
+    // layer 0, and rebuilt from the cache where a walk joins the baseline
+    // partway.
+    let mut current = new_state();
+    let mut current_ready = start == 0;
+    let mut trial_done = false;
+    let mut queue = Vec::new();
+    let mut touched = Vec::new();
+    let mut fresh = Vec::new();
+    let relax = |state: &mut ReachState,
+                 cover: &[bool],
+                 cell: usize,
+                 queue: &mut Vec<usize>,
+                 touched: &mut Vec<usize>| {
+        touched.clear();
+        reach::relax_from_root(grid, cover, context.kappa, cell, state, queue, touched);
+    };
+
+    for layer in start..context.layers {
+        outcome.layers_visited += 1;
+        let cached = *enabled && layer < base.len();
+        if !cached && !current_ready {
+            assert!(
+                *enabled && layer == base.len() && layer > 0,
+                "the replay joined the baseline at layer {layer} with {} layers cached",
+                base.len()
+            );
+            layer_reader.prepare(layer - 1, false);
+            scatter_carry(
+                &mut current,
+                layer_reader.carry_cells(layer - 1),
+                &base[layer - 1].carry,
+            );
+            current_ready = true;
+        }
+        layer_reader.prepare(layer, false);
+        let masks = layer_reader.masks(layer);
+        let carry_cells = layer_reader.carry_cells(layer);
+        if !layer_reader.cover_any(layer) {
+            // The up-sweep's own empty-layer reset, for both sets.
+            if !cached {
+                current.u.fill(f32::INFINITY);
+                reach::commit_layer(&mut current, &masks.carry);
+                let empty = BaselineLayer {
+                    rooted: Vec::new(),
+                    carry: vec![f32::INFINITY; carry_cells.len()],
+                };
+                if *enabled && layer == base.len() {
+                    if budget.take(empty.bytes()) {
+                        base.push(empty);
+                    } else {
+                        *enabled = false;
+                    }
+                }
+                work.baseline_computed += 1;
+                work.baseline_computed_restart += u64::from(!first);
+            } else {
+                work.baseline_reused += 1;
+            }
+            if let Some(state) = proposed.as_mut() {
+                state.u.fill(f32::INFINITY);
+                reach::commit_layer(state, &masks.carry);
+            }
+            if first && chain.capturing && *enabled && *min_restored == usize::MAX && layer >= lowest {
+                chain.capture(
+                    budget,
+                    lowest,
+                    layer,
+                    Checkpoint {
+                        carry: Vec::new(),
+                        cover_any: false,
+                        trial_layers: run_trial_layers,
+                    },
+                );
+            }
+            continue;
+        }
+        creep.load_layer(grid, context.planes[layer] - context.layer_height_mm, context.planes[layer]);
+        // Below the lowest doomed seat the two sets are the same set, so the
+        // proposed one is only started there, from the current one's carry.
+        if proposed.is_none() && !trial_done && layer >= lowest {
+            assert!(current_ready, "the proposed set starts from a baseline that was not walked");
+            let mut state = new_state();
+            state.u_prev.copy_from_slice(&current.u_prev);
+            proposed = Some(state);
+        }
+        let local;
+        let base_layer: &BaselineLayer = if cached {
+            work.baseline_reused += 1;
+            &base[layer]
+        } else {
+            work.baseline_computed += 1;
+            work.baseline_computed_restart += u64::from(!first);
+            let _baseline_span = crate::perf::span(if first {
+                crate::perf::Span::ReplayBaseline
+            } else {
+                crate::perf::Span::ReplayBaselineRestart
+            });
+            reach::recompute_potential(
+                grid,
+                &masks.cover,
+                context.kappa,
+                context.layer_height_mm,
+                &[],
+                &creep,
+                &mut current,
+            );
+            // The up-sweep's bridged births, read where it read them: before any
+            // root of this layer relaxes.
+            let bridged_current = context.births.bridged(layer, &masks.cover, &current);
+            for &index in &roots_by_layer[layer] {
+                relax(&mut current, &masks.cover, struts[index].cell, &mut queue, &mut touched);
+            }
+            if !bridged_current.is_empty() {
+                let roots = crate::births::BirthRoots::of(
+                    layer,
+                    roots_by_layer[layer].iter().map(|&index| &struts[index]),
+                );
+                context
+                    .births
+                    .unroot_unseated(layer, &bridged_current, &roots, &masks.cover, &mut current);
+            }
+            let rooted = rooted_words(
+                &masks.cover,
+                &current.u,
+                first.then_some(&mut outcome.baseline_unrooted_cells),
+            );
+            reach::commit_layer(&mut current, &masks.carry);
+            let record = BaselineLayer {
+                rooted,
+                carry: carry_values(&current, carry_cells),
+            };
+            if *enabled && layer == base.len() && budget.take(record.bytes()) {
+                base.push(record);
+                local = None;
+            } else {
+                *enabled = false;
+                local = Some(record);
+            }
+            local.as_ref().unwrap_or_else(|| &base[layer])
+        };
+        let Some(trial) = proposed.as_mut() else {
+            continue;
+        };
+        outcome.trial_layers += 1;
+        run_trial_layers += 1;
+        work.trial_computed += 1;
+        let _trial_span = crate::perf::span(crate::perf::Span::ReplayTrial);
+        reach::recompute_potential(
+            grid,
+            &masks.cover,
+            context.kappa,
+            context.layer_height_mm,
+            &[],
+            &creep,
+            trial,
+        );
+        let bridged_trial = context.births.bridged(layer, &masks.cover, trial);
+        for &index in &roots_by_layer[layer] {
+            if !doomed[index] {
+                relax(trial, &masks.cover, struts[index].cell, &mut queue, &mut touched);
+            }
+        }
+        // The cells the current set roots (`rooted`); a stale baseline is the
+        // sabotage that reads none.
+        let every_cell;
+        let rooted: &[u64] = if sabotage() == 2 && cached {
+            // Sabotage: a stale baseline that claims every cell rooted.
+            let cells = trial.u.len();
+            every_cell = (0..base_layer.rooted.len())
+                .map(|word| match cells.saturating_sub(word * 64).min(64) {
+                    64 => u64::MAX,
+                    left => (1_u64 << left) - 1,
+                })
+                .collect::<Vec<u64>>();
+            &every_cell
+        } else {
+            &base_layer.rooted
+        };
+        // Every cell the current set roots and the proposed one does not
+        // restores the nearest doomed arm that could have rooted it.
+        loop {
+            // A bridged birth no surviving arm of this layer stands in is
+            // unrooted, however a relax reached it (again after a restore).
+            if !bridged_trial.is_empty() {
+                let roots = crate::births::BirthRoots::of(
+                    layer,
+                    roots_by_layer[layer]
+                        .iter()
+                        .filter(|&&index| !doomed[index])
+                        .map(|&index| &struts[index]),
+                );
+                context
+                    .births
+                    .unroot_unseated(layer, &bridged_trial, &roots, &masks.cover, trial);
+            }
+            fresh.clear();
+            fresh.extend(set_bits(rooted).filter(|&cell| trial.u[cell] > 1.0));
+            if fresh.is_empty() {
+                break;
+            }
+            outcome.newly_unrooted_cells += fresh.len() as u64;
+            for &cell in &fresh {
+                let u = trial.u[cell];
+                if u.is_finite() {
+                    outcome.newly_unrooted_max_u = outcome.newly_unrooted_max_u.max(f64::from(u));
+                    if u <= ratio {
+                        outcome.newly_unrooted_within_first_loss += 1;
+                    }
+                }
+            }
+            let mut restart = false;
+            let mut restored_any = false;
+            for &cell in &fresh {
+                let u = trial.u[cell];
+                if u <= 1.0 {
+                    // Rooted by an arm restored earlier in this sweep of `fresh`.
+                    continue;
+                }
+                let blamed = doomed
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, flag)| **flag && struts[*index].k_top <= layer)
+                    .map(|(index, _)| (metric.distance_mm(grid, cell, struts[index].cell), index))
+                    .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+                let Some((_, index)) = blamed else {
+                    continue;
+                };
+                doomed[index] = false;
+                *min_restored = (*min_restored).min(struts[index].k_top);
+                // A non-finite `u` (no root reaches the cell at all) is kept
+                // as infinity, which no bracket contains.
+                blame_u[index] = blame_u[index].max(u);
+                outcome.refused += 1;
+                restored_any = true;
+                if struts[index].k_top == layer {
+                    relax(trial, &masks.cover, struts[index].cell, &mut queue, &mut touched);
+                } else {
+                    restart = true;
+                }
+            }
+            if restart {
+                return Pass::Restart;
+            }
+            if !restored_any {
+                // No doomed arm at or below this layer is left to blame, yet
+                // the proposed set roots less than the current one. Nothing
+                // proposed can be trusted: keep every arm.
+                restore_all(doomed, blame_u, outcome);
+                return Pass::Verified;
+            }
+        }
+        reach::commit_layer(trial, &masks.carry);
+        if first && chain.capturing && *enabled && *min_restored == usize::MAX {
+            chain.capture(
+                budget,
+                lowest,
+                layer,
+                Checkpoint {
+                    carry: carry_values(trial, carry_cells),
+                    cover_any: true,
+                    trial_layers: run_trial_layers,
+                },
+            );
+        }
+        // Above the highest doomed seat the two sets place the same roots, so
+        // once the two carries agree every layer above agrees too. The first
+        // replay still walks the current set to the top, so the residual it
+        // reports is the whole model's and can be held against the placement's.
+        if layer >= highest
+            && carry_cells
+                .iter()
+                .zip(&base_layer.carry)
+                // Exact equality, as the reference's `Vec<f32> ==`.
+                .all(|(&cell, value)| trial.u_prev[cell as usize].eq(value))
+        {
+            if !first {
+                return Pass::Verified;
+            }
+            proposed = None;
+            trial_done = true;
+            chain.capturing = false;
+        }
+    }
+    Pass::Verified
+}
+
 #[cfg(test)]
 mod tests {
     //! Hand-derived geometry. A slab `S1` 4 mm long (x 0..4), 1 mm wide
@@ -638,7 +1412,7 @@ mod tests {
     /// model, so only the early exit tells the two charges apart.
     #[test]
     fn a_replay_that_exits_early_is_charged_only_for_the_layers_it_walked() {
-        use super::{replay_cell_layers, replay_once, Pass, ReplayOutcome};
+        use super::{replay_cell_layers, replay_once, CallCache, Pass, ReplayOutcome};
         let mesh = fixture(false);
         let (grid, _) = plan_grid(0.0, -0.5, 4.0, 0.5, LAYERS, H, 1.0, u64::MAX);
         let planes: Vec<f64> = (0..LAYERS).map(|l| (l as f64 + 0.5) * H).collect();
@@ -672,7 +1446,9 @@ mod tests {
         let mut doomed = vec![false, false, true, false];
         let mut blame = vec![f32::NEG_INFINITY; struts.len()];
         let mut outcome = ReplayOutcome::default();
-        let pass = replay_once(&context, &struts, &roots, &mut doomed, &mut blame, &mut outcome, false);
+        let mut cache = CallCache::new(crate::layer_cache::BytePool::process());
+        cache.first = false;
+        let pass = replay_once(&context, &struts, &roots, &mut doomed, &mut blame, &mut outcome, &mut cache);
         assert!(matches!(pass, Pass::Verified));
         assert_eq!(outcome.layers_visited, 21, "layers 0..=20 were walked: {outcome:?}");
         let cells = grid.cells() as u64;
@@ -1005,5 +1781,276 @@ mod tests {
         let outcome = run(&mesh, &place, &mut doomed);
         assert_eq!(doomed, vec![false, true, false], "{outcome:?}");
         assert_eq!(outcome.refused, 1);
+    }
+
+    // ---- lane RP: the call's reuse is held to the reference ----------------
+
+    use super::{refuse_counted, reference_refuse_unrooted_demand, same_answer};
+    use crate::births::Births;
+    use crate::layer_cache::BytePool;
+
+    /// Three boxes stacked as a staircase, each overlapping the one below by
+    /// 0.05 mm and reaching further out than it, so every step is an overhang
+    /// wider than one lamina's reach (2.13 mm): its far end is rooted only by
+    /// an arm seated on the step's own layers or above the first layer.
+    fn staircase() -> Mesh {
+        let parts = [
+            make_box([2.0, 1.0, 0.55], [1.0, 0.0, 1.0]).expect("lower"),
+            make_box([4.6, 1.0, 0.55], [2.3, 0.0, 1.5]).expect("middle"),
+            make_box([7.0, 1.0, 0.5], [3.5, 0.0, 2.0]).expect("upper"),
+        ];
+        let (mut verts, mut tris) = (Vec::new(), Vec::new());
+        for part in &parts {
+            let offset = u32::try_from(verts.len()).expect("small");
+            verts.extend_from_slice(part.verts());
+            tris.extend(part.tris().iter().map(|t| t.map(|v| v + offset)));
+        }
+        Mesh::new(verts, tris).expect("a stacked staircase")
+    }
+
+    /// A small deterministic generator (an LCG), so a failing scenario is
+    /// reproducible from its number.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: u64) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 33) % n
+        }
+    }
+
+    /// What a sweep over many scenarios saw.
+    #[derive(Default, Debug)]
+    struct Sweep {
+        scenarios: usize,
+        mismatches: usize,
+        restarts: u64,
+        resumes: u64,
+        trial_reused: u64,
+        baseline_reused: u64,
+        accounting_breaks: usize,
+        layers_saved: u64,
+        /// The first scenario whose answer differed, for pinning.
+        example: String,
+    }
+
+    /// Run `scenarios` random fields and doomed sets through the cached call and
+    /// the reference, under each setting, and count the answers that differ.
+    fn sweep(scenarios: usize, seed: u64, pool: &'static BytePool, stop_at_first: bool) -> Sweep {
+        let mesh = staircase();
+        let (grid, _) = plan_grid(0.0, -0.5, 7.0, 0.5, LAYERS, H, 1.0, u64::MAX);
+        let planes: Vec<f64> = (0..LAYERS).map(|l| (l as f64 + 0.5) * H).collect();
+        let slices = slice_stack(&mesh, &planes, SliceStackLimits::production()).expect("slices");
+        let births = Births::none();
+        let mut rng = Rng(seed);
+        let mut tally = Sweep::default();
+        let xs = [0.4, 1.2, 2.2, 3.0, 3.8, 4.6, 5.4, 6.2];
+        let layers = [20, 22, 24, 26, 29, 30, 31, 33, 36, 39, 40, 42, 44, 46, 48];
+        for _ in 0..scenarios {
+            if stop_at_first && tally.mismatches > 0 {
+                break;
+            }
+            let count = 5 + rng.below(8) as usize;
+            let mut struts = vec![arm(&grid, 0, 0.4, 20)];
+            for id in 1..count {
+                let x = xs[rng.below(xs.len() as u64) as usize];
+                let layer = layers[rng.below(layers.len() as u64) as usize];
+                struts.push(arm(&grid, id as u32, x, layer));
+            }
+            let mut doomed: Vec<bool> = (0..count).map(|i| i > 0 && rng.below(2) == 0).collect();
+            if !doomed.iter().any(|flag| *flag) {
+                doomed[count - 1] = true;
+            }
+            for (creep, straight, restarts) in [(false, true, 4), (true, false, 1), (true, true, 6)] {
+                let context = ReplayContext {
+                    grid: &grid,
+                    slices: &slices,
+                    layer_cache: None,
+                    planes: &planes,
+                    mesh: &mesh,
+                    kappa: KAPPA,
+                    layer_height_mm: H,
+                    layers: LAYERS,
+                    straight_reach: straight,
+                    creep_weight: creep,
+                    creep_overhang_cut: true,
+                    overhang_centre_deg: 45.0,
+                    overhang_transition_deg: 25.0,
+                    max_restarts: restarts,
+                    first_loss_ratio: 2.592 / 2.130,
+                    births: &births,
+                };
+                let mut expected_doomed = doomed.clone();
+                let (expected, expected_blame) =
+                    reference_refuse_unrooted_demand(&context, &struts, &mut expected_doomed);
+                let mut got_doomed = doomed.clone();
+                let (outcome, work, blame) = refuse_counted(&context, &struts, &mut got_doomed, pool);
+                tally.scenarios += 1;
+                if !same_answer(&outcome, &got_doomed, &blame, &expected, &expected_doomed, &expected_blame) {
+                    tally.mismatches += 1;
+                    if tally.example.is_empty() {
+                        let arms: Vec<(f64, usize)> = struts
+                            .iter()
+                            .map(|s| (s.center_mm[0], s.k_top))
+                            .collect();
+                        tally.example = format!(
+                            "arms {arms:?} doomed {doomed:?} setting {:?}",
+                            (creep, straight, restarts)
+                        );
+                    }
+                }
+                tally.restarts += outcome.replays.saturating_sub(1);
+                tally.resumes += work.checkpoint_resumes;
+                tally.trial_reused += work.trial_reused;
+                tally.baseline_reused += work.baseline_reused;
+                if work.baseline_computed + work.baseline_reused != outcome.layers_visited
+                    || work.trial_computed + work.trial_reused != outcome.trial_layers
+                {
+                    tally.accounting_breaks += 1;
+                }
+                tally.layers_saved += work.baseline_reused + work.trial_reused;
+            }
+        }
+        tally
+    }
+
+    /// Sets the fault injection for one scope and puts production back.
+    struct Sabotaged;
+
+    impl Sabotaged {
+        fn with(kind: u8) -> Self {
+            super::SABOTAGE.with(|cell| cell.set(kind));
+            Self
+        }
+    }
+
+    impl Drop for Sabotaged {
+        fn drop(&mut self) {
+            super::SABOTAGE.with(|cell| cell.set(0));
+        }
+    }
+
+    fn pool_of(limit: u64) -> &'static BytePool {
+        Box::leak(Box::new(BytePool::new(limit)))
+    }
+
+    /// THE ORACLE. On random fields over a staircase with overhangs wider than
+    /// one lamina's reach, with random doomed sets and three settings (creep
+    /// on or off, chamfer or straight reach, one to six restarts), the call
+    /// that reuses its baseline and resumes from checkpoints gives, by value,
+    /// the reference's answer: the doomed flags, the outcome (refusals,
+    /// newly unrooted cells and their worst potential, the residual, the
+    /// layers visited, the trial layers, exhaustion) and the blame potentials
+    /// by bits. The same sweep must have exercised the reuse: restarts, a
+    /// checkpoint resume, and trial layers skipped.
+    #[test]
+    fn a_cached_call_gives_the_reference_answer() {
+        let tally = sweep(100, 7, pool_of(u64::MAX / 2), false);
+        assert_eq!(tally.mismatches, 0, "{tally:?}");
+        assert!(tally.restarts > 0, "no scenario restarted: {tally:?}");
+        assert!(tally.baseline_reused > 0, "the baseline was never reused: {tally:?}");
+        assert!(tally.resumes > 0 && tally.trial_reused > 0, "no checkpoint resume: {tally:?}");
+    }
+
+    /// A pool that refuses (nothing, a few layers' bytes, all of it) changes no
+    /// answer: the cache switches itself off, or ends its chain, and the call
+    /// is a fresh one.
+    #[test]
+    fn a_cache_the_pool_refuses_changes_no_answer() {
+        for limit in [0, 600, 40_000, 400_000, u64::MAX / 2] {
+            let tally = sweep(30, 11, pool_of(limit), false);
+            assert_eq!(tally.mismatches, 0, "limit {limit}: {tally:?}");
+            if limit == 0 {
+                assert_eq!(tally.baseline_reused + tally.resumes, 0, "{tally:?}");
+            }
+        }
+    }
+
+    /// One field on the staircase, one doomed set, both engines: the cached
+    /// call's answer and work, and whether it equals the reference's.
+    fn staircase_case(arms: &[(f64, usize)], doomed: &[bool]) -> (super::ReplayOutcome, super::ReplayWork, Vec<bool>, bool) {
+        let mesh = staircase();
+        let (grid, _) = plan_grid(0.0, -0.5, 7.0, 0.5, LAYERS, H, 1.0, u64::MAX);
+        let planes: Vec<f64> = (0..LAYERS).map(|l| (l as f64 + 0.5) * H).collect();
+        let slices = slice_stack(&mesh, &planes, SliceStackLimits::production()).expect("slices");
+        let births = Births::none();
+        let struts: Vec<SweepStrut> = arms
+            .iter()
+            .enumerate()
+            .map(|(id, &(x, layer))| arm(&grid, id as u32, x, layer))
+            .collect();
+        let context = ReplayContext {
+            grid: &grid,
+            slices: &slices,
+            layer_cache: None,
+            planes: &planes,
+            mesh: &mesh,
+            kappa: KAPPA,
+            layer_height_mm: H,
+            layers: LAYERS,
+            straight_reach: true,
+            creep_weight: false,
+            creep_overhang_cut: true,
+            overhang_centre_deg: 45.0,
+            overhang_transition_deg: 25.0,
+            max_restarts: 4,
+            first_loss_ratio: 2.592 / 2.130,
+            births: &births,
+        };
+        let mut expected_doomed = doomed.to_vec();
+        let (expected, expected_blame) =
+            reference_refuse_unrooted_demand(&context, &struts, &mut expected_doomed);
+        let mut got_doomed = doomed.to_vec();
+        let (outcome, work, blame) =
+            refuse_counted(&context, &struts, &mut got_doomed, pool_of(u64::MAX / 2));
+        let same = same_answer(&outcome, &got_doomed, &blame, &expected, &expected_doomed, &expected_blame);
+        (outcome, work, got_doomed, same)
+    }
+
+    /// A restart that restores an arm seated far below the layer that found
+    /// the cells. `A` (x 4.0, layer 31) lowers the carried potential at the
+    /// middle step's edge, so the upper step's overhang at layer 40 is rooted
+    /// out to x 6.1 with it and 5.1 without it; layer 40 finds the cells
+    /// between unrooted and blames `A`, nine layers below. Every fresh cell
+    /// restores one doomed arm, so `Q` (which `H` makes redundant) is restored
+    /// too and the call ends after one replay: the cached call and the
+    /// reference agree on that, by value.
+    #[test]
+    fn a_far_restoration_is_answered_as_the_reference_answers_it() {
+        let arms = [(0.4, 20), (1.2, 20), (3.0, 30), (4.0, 31)];
+        let (outcome, _, doomed, same) = staircase_case(&arms, &[false, true, false, true]);
+        assert!(same, "cached and reference differ: {outcome:?} {doomed:?}");
+        assert_eq!(outcome.refused, 2, "{outcome:?}");
+        assert_eq!(doomed, vec![false; 4], "{outcome:?}");
+    }
+
+    /// SABOTAGE. Each fault, injected in the cached path, must turn the oracle
+    /// sweep red that is green without it: a resume one layer late, which skips
+    /// the restored arm's own seat layer (1); a stale baseline that claims
+    /// every cell rooted (2); no carry test below the resume layer, so a replay
+    /// that a fresh one ends early walks on (3).
+    #[test]
+    fn the_oracle_goes_red_under_each_sabotage() {
+        let clean = sweep(60, 99, pool_of(u64::MAX / 2), false);
+        assert_eq!(clean.mismatches, 0, "{clean:?}");
+        for kind in 1..=3 {
+            let _fault = Sabotaged::with(kind);
+            let broken = sweep(300, 99, pool_of(u64::MAX / 2), true);
+            assert!(broken.mismatches > 0, "sabotage {kind} was not caught: {broken:?}");
+        }
+    }
+
+    /// The work counters account for every logical layer exactly once: each
+    /// layer the reference would walk was either computed or reused (baseline),
+    /// and each trial layer either computed or skipped by a checkpoint; and a
+    /// call with restarts computed fewer layers than the fresh replays it equals.
+    #[test]
+    fn the_work_counters_account_for_every_layer() {
+        let tally = sweep(60, 7, pool_of(u64::MAX / 2), false);
+        assert_eq!(tally.accounting_breaks, 0, "{tally:?}");
+        assert!(tally.layers_saved > 0, "a restart saved nothing: {tally:?}");
     }
 }

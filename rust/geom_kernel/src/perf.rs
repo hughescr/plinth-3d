@@ -436,6 +436,26 @@ works! {
     /// Seeds offered for an edit and refused by their identity key (mesh,
     /// layers, policy, holes, first plan); the fast set asserts zero.
     SeedMismatch, "seed.mismatch", Work;
+    /// Perf lane RP: layers on which a replay computed the BASELINE (current
+    /// arm set) potential, summed over every replay.
+    ReplayBaselineLayers, "replay.baseline_layers", Work;
+    /// ... of those, the layers of replays after the first of a call (a restart
+    /// recomputing a baseline the call already had).
+    ReplayBaselineLayersRestart, "replay.baseline_layers_restart", Work;
+    /// Layers on which a replay computed the TRIAL (proposed arm set) potential.
+    ReplayTrialLayers, "replay.trial_layers", Work;
+    /// Replays after the first of a call (restarts).
+    ReplayRestarts, "replay.restarts", Work;
+    /// Baseline layers a restart took from the call's cache instead of
+    /// recomputing, and trial layers it resumed past from a checkpoint.
+    ReplayBaselineLayersReused, "replay.baseline_layers_reused", Work;
+    /// ... trial layers a restart did not walk because a checkpoint held them.
+    ReplayTrialLayersReused, "replay.trial_layers_reused", Work;
+    /// Bytes the call's baseline and checkpoint cache held at its peak, summed
+    /// over calls.
+    ReplayCacheBytes, "replay.cache_bytes", Work;
+    /// Restarts that resumed the proposed set from a checkpoint (or returned at one).
+    ReplayCheckpointResumes, "replay.checkpoint_resumes", Work;
 }
 
 const WORK_N: usize = Work::ALL.len();
@@ -596,9 +616,17 @@ pub enum Span {
     /// hash and row write of the down-sweep trace runs inside this span, so
     /// a pose's other spans can be read with it taken out.
     CountOverhead,
+    /// Perf lane RP: one whole `refuse_unrooted_demand` call, every replay in it.
+    ReplayCall,
+    /// The baseline (current arm set) potential of one layer of a first replay.
+    ReplayBaseline,
+    /// The baseline potential of one layer of a restart.
+    ReplayBaselineRestart,
+    /// The trial (proposed arm set) potential and its unrooted-cell check of one layer.
+    ReplayTrial,
 }
 
-const SPAN_N: usize = 59;
+const SPAN_N: usize = 63;
 
 impl Span {
     /// Every span.
@@ -662,6 +690,10 @@ impl Span {
         Self::StageJoints,
         Self::StageSeat,
         Self::CountOverhead,
+        Self::ReplayCall,
+        Self::ReplayBaseline,
+        Self::ReplayBaselineRestart,
+        Self::ReplayTrial,
     ];
 
     /// The sidecar label.
@@ -727,6 +759,10 @@ impl Span {
             Self::StageJoints => "stage.joints_report",
             Self::StageSeat => "stage.seat_contact",
             Self::CountOverhead => "perf.count_overhead",
+            Self::ReplayCall => "replay.call",
+            Self::ReplayBaseline => "replay.baseline",
+            Self::ReplayBaselineRestart => "replay.baseline_restart",
+            Self::ReplayTrial => "replay.trial",
         }
     }
 
