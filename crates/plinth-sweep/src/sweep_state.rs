@@ -178,6 +178,14 @@ pub(crate) struct Prefix {
     /// a late cell is built by whoever needs it first, in its own run.
     pub(crate) surface_early: bool,
     pub(crate) model_surface: Arc<OnceLock<Option<NativeSurface>>>,
+    /// The real contact of every tip ball the lip-seat rule has asked, for
+    /// THIS mesh and its surface index. SHARED by every clone of the prefix
+    /// (the capped re-plans start from clones, and ask most of the same
+    /// balls again), and sound because a prefix is only ever consumed with
+    /// the mesh it was built from: [`EditSeed::miss`] refuses a seed whose
+    /// key (mesh content, layers, policy incl. the surface pitch and cap,
+    /// holes) is not the request's before any re-plan starts from it.
+    pub(crate) contacts: Arc<crate::contact_growth::MeasureMemo>,
     pub(crate) seat_face_rule: SeatFaceRule,
     pub(crate) head_registry: Option<(&'static TipContactProfiles, HeadRule)>,
     pub(crate) struts: Vec<SweepStrut>,

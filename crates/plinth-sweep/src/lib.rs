@@ -2658,6 +2658,7 @@ fn plan_prefix<R>(
         law,
         surface_early: policy.drawn_solid_descent || thickening_reads_the_model,
         model_surface: Arc::new(model_surface),
+        contacts: Arc::default(),
         seat_face_rule,
         head_registry,
         struts,
@@ -2725,6 +2726,7 @@ fn plan_after_prefix(
         law,
         surface_early,
         model_surface,
+        contacts,
         seat_face_rule,
         head_registry,
         mut struts,
@@ -3394,6 +3396,7 @@ fn plan_after_prefix(
         surface_pitch_mm: policy.surface_index_pitch_mm,
         surface_max_bytes: policy.surface_index_max_bytes,
         surface: &model_surface,
+        contacts: &contacts,
     };
     let mut lip_seat_outcome = lip_seat::LipSeatOutcome {
         enabled: policy.lip_seat,
@@ -4062,6 +4065,8 @@ pub(crate) fn finish(
         surface_pitch_mm: policy.surface_index_pitch_mm,
         surface_max_bytes: policy.surface_index_max_bytes,
         surface: model_surface,
+        // `finish` asks no tip ball: an empty memo of its own.
+        contacts: &contact_growth::MeasureMemo::default(),
     };
 
     // The finished field's own check, and the load it lost if any landing is
