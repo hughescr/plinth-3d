@@ -503,10 +503,6 @@ impl Mesh {
         self.face_ids.binary_search(&face_id).is_ok()
     }
     #[inline]
-    pub(crate) fn face_slot(&self, face_id: u32) -> Option<usize> {
-        self.face_ids.binary_search(&face_id).ok()
-    }
-    #[inline]
     pub(crate) fn nfaces(&self) -> usize {
         self.face_ids.len()
     }

@@ -180,6 +180,16 @@ pub enum TopologyValidationError {
 /// digests retain signed-zero bits; topology is the sole exception because a
 /// sign-bit-only seam must not fragment face adjacency.
 pub fn mesh_fingerprint(mesh: &Mesh) -> Result<String, TopologyError> {
+    // Kept on the mesh: the mesh cannot change, so a repeat is the same string.
+    if let Some(kept) = mesh.memo().fingerprint().get() {
+        return Ok(kept.clone());
+    }
+    let fingerprint = compute_mesh_fingerprint(mesh)?;
+    let _ = mesh.memo().fingerprint().set(fingerprint.clone());
+    Ok(fingerprint)
+}
+
+fn compute_mesh_fingerprint(mesh: &Mesh) -> Result<String, TopologyError> {
     let mut hasher = Sha256::new();
     hash_tagged_bytes(
         &mut hasher,
@@ -189,28 +199,45 @@ pub fn mesh_fingerprint(mesh: &Mesh) -> Result<String, TopologyError> {
     // The byte stream is the same as feeding the hasher one value at a time;
     // it is staged in blocks only because a `Sha256::update` call per eight
     // bytes costs more than the hashing does.
-    let mut block = HashBlock::new();
-    for (vertex, point) in mesh.verts().iter().enumerate() {
-        for (axis, coordinate) in point.iter().enumerate() {
-            if !coordinate.is_finite() {
-                return Err(TopologyError::NonFiniteVertex { vertex, axis });
+    // Whole chunks are written into one fixed buffer with fixed-width stores
+    // and handed to the hasher in one `update` each; the bytes are the same
+    // stream, in the same order, as the value-at-a-time form.
+    const VERTICES_PER_CHUNK: usize = 256;
+    const TRIANGLES_PER_CHUNK: usize = 512;
+    let mut bytes = [0_u8; VERTICES_PER_CHUNK * 24];
+    for (chunk_index, chunk) in mesh.verts().chunks(VERTICES_PER_CHUNK).enumerate() {
+        let mut used = 0_usize;
+        for (offset, point) in chunk.iter().enumerate() {
+            for (axis, coordinate) in point.iter().enumerate() {
+                if !coordinate.is_finite() {
+                    return Err(TopologyError::NonFiniteVertex {
+                        vertex: chunk_index * VERTICES_PER_CHUNK + offset,
+                        axis,
+                    });
+                }
+                let canonical = if *coordinate == 0.0 { 0.0 } else { *coordinate };
+                bytes[used..used + 8].copy_from_slice(&canonical.to_bits().to_le_bytes());
+                used += 8;
             }
-            let canonical = if *coordinate == 0.0 { 0.0 } else { *coordinate };
-            block.push(&mut hasher, &canonical.to_bits().to_le_bytes());
         }
+        hasher.update(&bytes[..used]);
     }
-    block.flush(&mut hasher);
     hash_tagged_bytes(
         &mut hasher,
         b"triangles",
         &(mesh.tris().len() as u64).to_le_bytes(),
     );
-    for triangle in mesh.tris() {
-        for index in triangle {
-            block.push(&mut hasher, &index.to_le_bytes());
+    let mut bytes = [0_u8; TRIANGLES_PER_CHUNK * 12];
+    for chunk in mesh.tris().chunks(TRIANGLES_PER_CHUNK) {
+        let mut used = 0_usize;
+        for triangle in chunk {
+            for index in triangle {
+                bytes[used..used + 4].copy_from_slice(&index.to_le_bytes());
+                used += 4;
+            }
         }
+        hasher.update(&bytes[..used]);
     }
-    block.flush(&mut hasher);
     Ok(hex_digest(hasher))
 }
 
@@ -385,6 +412,27 @@ impl FaceTopology {
 
 /// Build the topology once.  The returned view records, and genuinely applies,
 /// the supplied welding policy; the source mesh is left unchanged.
+pub fn build_face_topology(
+    mesh: &Mesh,
+    weld_policy: WeldPolicy,
+) -> Result<FaceTopology, TopologyError> {
+    // The exact-bits topology of a mesh is a pure function of its arrays and a
+    // mesh cannot change, so it is built once and each later call takes a copy
+    // of the kept value (a few flat vectors) instead of building it again.
+    if weld_policy != WeldPolicy::ExactBits {
+        return build_face_topology_uncached(mesh, weld_policy);
+    }
+    if let Some(kept) = mesh.memo().exact_topology().get() {
+        return Ok(FaceTopology::clone(kept));
+    }
+    let built = build_face_topology_uncached(mesh, weld_policy)?;
+    let _ = mesh
+        .memo()
+        .exact_topology()
+        .set(std::sync::Arc::new(built.clone()));
+    Ok(built)
+}
+
 #[expect(
     clippy::cast_possible_truncation,
     reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged as a \
@@ -392,7 +440,7 @@ impl FaceTopology {
           width) is now a named, enforced limit. TODO(cast-width-audit): retire site by site.  See \
           docs/evidence/remediation-2026-08-26/census/cast-audit.md"
 )]
-pub fn build_face_topology(
+fn build_face_topology_uncached(
     mesh: &Mesh,
     weld_policy: WeldPolicy,
 ) -> Result<FaceTopology, TopologyError> {
@@ -1025,7 +1073,19 @@ impl WeldedView {
                     map,
                 })
             }
-            WeldPolicy::ExactBits => exact_weld(mesh.verts()),
+            WeldPolicy::ExactBits => {
+                // Pure function of the vertex array, which a mesh cannot
+                // change: built once, later calls copy the kept view.
+                if let Some(kept) = mesh.memo().exact_weld().get() {
+                    return Ok(WeldedView::clone(kept));
+                }
+                let built = exact_weld(mesh.verts())?;
+                let _ = mesh
+                    .memo()
+                    .exact_weld()
+                    .set(std::sync::Arc::new(built.clone()));
+                Ok(built)
+            }
             WeldPolicy::Epsilon(tolerance) => epsilon_weld(mesh.verts(), tolerance),
         }
     }

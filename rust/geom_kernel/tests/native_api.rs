@@ -79,6 +79,104 @@ fn cube_surface() -> NativeSurface {
     cubes_surface(&[[0.0; 3]])
 }
 
+/// `rays_blocked_classified` is the verdict a caller derives from the ragged
+/// cast: a ray with an undecidable crossing, or with a retained crossing at
+/// `t > 0` of a face other than its own, is blocked.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "test-local arithmetic and exact pins over hand-written, bounded fixture values. See \
+          docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+)]
+fn blocked_from_ragged_cast(
+    surface: &NativeSurface,
+    origins: &[[f64; 3]],
+    dirs: &[[f64; 3]],
+    t_max: f64,
+    self_faces: &[u32],
+) -> Vec<bool> {
+    let cast = surface.cast_rays_classified(origins, dirs, t_max).unwrap();
+    (0..origins.len())
+        .map(|row| {
+            if cast.near_parallel[row] > 0 {
+                return true;
+            }
+            (cast.offsets[row] as usize..cast.offsets[row + 1] as usize).any(|hit| {
+                let t = cast.t_all[hit];
+                t.is_finite()
+                    && t > 0.0
+                    && cast.face_all[hit] != i64::from(self_faces[row])
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn rays_blocked_classified_equals_the_verdict_of_the_ragged_cast() {
+    // Several cubes, so rays meet zero, one or several crossings, plus rays that
+    // start on a face, on an edge, on a corner and inside a cube.
+    let surface = cubes_surface(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 3.0, 0.5]]);
+    let coordinates = [-0.5, 0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0];
+    let mut directions = vec![[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]];
+    for index in 0..37_u32 {
+        // A golden-angle lattice over the whole sphere.
+        let z = 1.0 - (f64::from(index) + 0.5) * 2.0 / 37.0;
+        let radius = (1.0 - z * z).sqrt();
+        let angle = f64::from(index) * 2.399_963_229_728_653;
+        directions.push([radius * angle.cos(), radius * angle.sin(), z]);
+    }
+    let mut origins = Vec::new();
+    let mut dirs = Vec::new();
+    let mut self_faces = Vec::new();
+    for &x in &coordinates {
+        for &y in &coordinates {
+            for &z in &coordinates {
+                for (slot, &direction) in directions.iter().enumerate() {
+                    origins.push([x, y, z]);
+                    dirs.push(direction);
+                    self_faces.push(u32::try_from((origins.len() + slot) % 40).unwrap());
+                }
+            }
+        }
+    }
+    // A proper subset too: face ids stay global, and the verdict still follows
+    // the ids the cast reports.
+    let selected: Vec<u32> = (0..36).filter(|face| face % 3 != 1).collect();
+    let subset = surface.subset(&selected).unwrap();
+    for t_max in [0.75, 6.0] {
+        let expected = blocked_from_ragged_cast(&subset, &origins, &dirs, t_max, &self_faces);
+        assert_eq!(
+            subset
+                .rays_blocked_classified(&origins, &dirs, t_max, &self_faces)
+                .unwrap(),
+            expected,
+            "subset, t_max {t_max}"
+        );
+    }
+    for t_max in [0.75, 6.0] {
+        let expected = blocked_from_ragged_cast(&surface, &origins, &dirs, t_max, &self_faces);
+        let actual = surface
+            .rays_blocked_classified(&origins, &dirs, t_max, &self_faces)
+            .unwrap();
+        assert_eq!(actual, expected, "t_max {t_max}");
+        let blocked = expected.iter().filter(|&&flag| flag).count();
+        assert!(
+            blocked > expected.len() / 50 && blocked < expected.len() * 9 / 10,
+            "both verdicts must be well represented: {blocked} of {}",
+            expected.len()
+        );
+    }
+    assert_eq!(
+        surface.rays_blocked_classified(&origins[..3], &dirs[..2], 1.0, &self_faces[..3]),
+        Err(BatchInputError {
+            operation: "rays_blocked",
+            field: "dirs",
+            expected: 3,
+            actual: 2,
+        })
+    );
+}
+
 fn slice_limits() -> PlaneSliceLimits {
     PlaneSliceLimits {
         max_planes: usize::MAX,

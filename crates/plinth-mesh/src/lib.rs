@@ -78,6 +78,64 @@ pub struct Mesh {
     verts: Vec<[f64; 3]>,
     tris: Vec<[u32; 3]>,
     weld_policy: WeldPolicy,
+    memo: MeshMemo,
+}
+
+/// Pure functions of a mesh's immutable arrays, computed once and kept.
+///
+/// A mesh has no mutator, so the content fingerprint and the exact-bits face
+/// topology are fixed for its whole life; the orientation table alone asked for
+/// each of them eight and three times on the same mesh. Both are deterministic
+/// functions of `verts` and `tris`, so a kept value is the value a fresh call
+/// would return, bit for bit. A clone shares what was computed. The memo is not
+/// part of a mesh's identity: it never takes part in equality.
+#[derive(Default)]
+struct MeshMemo {
+    fingerprint: std::sync::OnceLock<String>,
+    exact_topology: std::sync::OnceLock<std::sync::Arc<FaceTopology>>,
+    exact_weld: std::sync::OnceLock<std::sync::Arc<WeldedView>>,
+}
+
+impl MeshMemo {
+    pub(crate) fn exact_weld(&self) -> &std::sync::OnceLock<std::sync::Arc<WeldedView>> {
+        &self.exact_weld
+    }
+
+    pub(crate) fn fingerprint(&self) -> &std::sync::OnceLock<String> {
+        &self.fingerprint
+    }
+
+    pub(crate) fn exact_topology(&self) -> &std::sync::OnceLock<std::sync::Arc<FaceTopology>> {
+        &self.exact_topology
+    }
+}
+
+impl Clone for MeshMemo {
+    fn clone(&self) -> Self {
+        let copy = Self::default();
+        if let Some(fingerprint) = self.fingerprint.get() {
+            let _ = copy.fingerprint.set(fingerprint.clone());
+        }
+        if let Some(topology) = self.exact_topology.get() {
+            let _ = copy.exact_topology.set(std::sync::Arc::clone(topology));
+        }
+        if let Some(weld) = self.exact_weld.get() {
+            let _ = copy.exact_weld.set(std::sync::Arc::clone(weld));
+        }
+        copy
+    }
+}
+
+impl std::fmt::Debug for MeshMemo {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("MeshMemo")
+    }
+}
+
+impl PartialEq for MeshMemo {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
 }
 
 impl Mesh {
@@ -95,6 +153,7 @@ impl Mesh {
             verts,
             tris,
             weld_policy: WeldPolicy::None,
+            memo: MeshMemo::default(),
         })
     }
 
@@ -112,7 +171,12 @@ impl Mesh {
             verts,
             tris,
             weld_policy,
+            memo: MeshMemo::default(),
         })
+    }
+
+    pub(crate) fn memo(&self) -> &MeshMemo {
+        &self.memo
     }
 
     /// Borrow source-order vertices without permitting mutation.

@@ -14,6 +14,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static BVH_BUILD_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 
 pub const LEAF_MAX: usize = 8;
+/// Face count at and above which a BVH range builds its two halves side by
+/// side. Execution only: the tree is the same at every value, so this moves
+/// time, never a node. Below it a range is too small for the hand-off to pay.
+const PARALLEL_MIN_FACES: usize = 8192;
 const N_BINS: usize = 16;
 
 /// The largest face count `Bvh::build` can represent, DERIVED from the storage
@@ -159,6 +163,14 @@ fn surface_area(mn: V3, mx: V3) -> f64 {
 }
 
 impl Bvh {
+    pub fn build(mesh: &Mesh) -> Result<Bvh, String> {
+        Self::build_with_cutoff(mesh, PARALLEL_MIN_FACES)
+    }
+
+    /// [`Self::build`] with the face count at and above which a range builds
+    /// its two halves side by side. The cutoff only chooses who does the work;
+    /// the tree is the same for every value (the tests build one mesh at
+    /// several and compare every field).
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -167,7 +179,7 @@ impl Bvh {
               before the cast or clamped into range after it (read site by site, 2026-08-26). See \
               docs/evidence/remediation-2026-08-26/census/cast-audit.md"
     )]
-    pub fn build(mesh: &Mesh) -> Result<Bvh, String> {
+    pub(crate) fn build_with_cutoff(mesh: &Mesh, parallel_min: usize) -> Result<Bvh, String> {
         BVH_BUILD_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
         let n = mesh.nfaces();
         if n > MAX_FACES {
@@ -177,17 +189,18 @@ impl Bvh {
             ));
         }
         // per-triangle Möller pad = 2*EPS*(||E1||_inf + ||E2||_inf) (A11)
-        let tri_pad: Vec<f64> = mesh
-            .face_ids()
-            .iter()
-            .map(|&face_id| {
-                let e1 = mesh.e1(face_id as usize);
-                let e2 = mesh.e2(face_id as usize);
-                let ni = e1[0].abs().max(e1[1].abs()).max(e1[2].abs());
-                let mi = e2[0].abs().max(e2[1].abs()).max(e2[2].abs());
-                2.0 * EPS * (ni + mi)
-            })
-            .collect();
+        //
+        // Indexed by GLOBAL face id (selected faces only are filled), so the
+        // node pass below reads a face's pad directly instead of locating its
+        // slot among the selected ids with a binary search per face per level.
+        let mut tri_pad: Vec<f64> = vec![0.0; mesh.global_nfaces()];
+        for &face_id in mesh.face_ids() {
+            let e1 = mesh.e1(face_id as usize);
+            let e2 = mesh.e2(face_id as usize);
+            let ni = e1[0].abs().max(e1[1].abs()).max(e1[2].abs());
+            let mi = e2[0].abs().max(e2[1].abs()).max(e2[2].abs());
+            tri_pad[face_id as usize] = 2.0 * EPS * (ni + mi);
+        }
 
         // Leaf order carries global face IDs even for a narrowed mesh view.
         let mut order = mesh.face_ids().to_vec();
@@ -195,18 +208,41 @@ impl Bvh {
         let mut max_depth = 0usize;
         let depth_cap = (2.0 * (n as f64).log2()).ceil() as usize + 64;
 
-        // Recursive build over order[lo..hi]; returns node index.
-        build_range(
-            mesh,
-            &tri_pad,
-            &mut order,
-            0,
-            n,
-            0,
-            &mut nodes,
-            &mut max_depth,
-            depth_cap,
-        )?;
+        // Recursive build over order[lo..hi]; returns node index. A large range
+        // builds its two halves on the kernel pool and splices their node
+        // lists after its own node, left then right: the numbering of a
+        // preorder walk, which is what the serial recursion produces.
+        if n >= parallel_min.max(2) {
+            crate::par::run(|| {
+                build_range(
+                    mesh,
+                    &tri_pad,
+                    &mut order,
+                    0,
+                    0,
+                    n,
+                    0,
+                    &mut nodes,
+                    &mut max_depth,
+                    depth_cap,
+                    parallel_min,
+                )
+            })?;
+        } else {
+            build_range(
+                mesh,
+                &tri_pad,
+                &mut order,
+                0,
+                0,
+                n,
+                0,
+                &mut nodes,
+                &mut max_depth,
+                depth_cap,
+                usize::MAX,
+            )?;
+        }
 
         let tris = order
             .iter()
@@ -245,13 +281,18 @@ pub(crate) fn build_attempt_count() -> u64 {
 fn build_range(
     mesh: &Mesh,
     tri_pad: &[f64],
-    order: &mut Vec<u32>,
+    // The slice of the whole face order that starts at index `base` of it;
+    // `lo` and `hi` index this slice. Leaves record `base + lo`, so a range
+    // built on its own slice writes the offsets the whole build would.
+    order: &mut [u32],
+    base: usize,
     lo: usize,
     hi: usize,
     depth: usize,
     nodes: &mut Vec<Node>,
     max_depth: &mut usize,
     depth_cap: usize,
+    parallel_min: usize,
 ) -> Result<usize, String> {
     if depth > *max_depth {
         *max_depth = depth;
@@ -270,11 +311,10 @@ fn build_range(
     for &p in &order[lo..hi] {
         let pi = p as usize;
         union_box(&mut bmin, &mut bmax, mesh.tri_min(pi), mesh.tri_max(pi));
-        let slot = mesh
-            .face_slot(p)
-            .expect("BVH order must contain only selected global face IDs");
-        if tri_pad[slot] > pad {
-            pad = tri_pad[slot];
+        // `order` holds only selected global face ids (`tri_pad` is filled for
+        // exactly those).
+        if tri_pad[pi] > pad {
+            pad = tri_pad[pi];
         }
     }
 
@@ -298,7 +338,7 @@ fn build_range(
             reason = "bounded by MAX_FACES, enforced at the Bvh::build boundary"
         )]
         {
-            nodes[node_idx].a = lo as i32;
+            nodes[node_idx].a = (base + lo) as i32;
             nodes[node_idx].b = count as i32;
         }
         nodes[node_idx].leaf = true;
@@ -453,28 +493,91 @@ fn build_range(
         split_pos = lo + count / 2;
     }
 
-    let left = build_range(
-        mesh,
-        tri_pad,
-        order,
-        lo,
-        split_pos,
-        depth + 1,
-        nodes,
-        max_depth,
-        depth_cap,
-    )?;
-    let right = build_range(
-        mesh,
-        tri_pad,
-        order,
-        split_pos,
-        hi,
-        depth + 1,
-        nodes,
-        max_depth,
-        depth_cap,
-    )?;
+    let (left, right) = if count >= parallel_min {
+        // The two halves own disjoint slices of `order` and build into node
+        // lists of their own (indices relative to each list's first node, which
+        // is the numbering the serial recursion gives that subtree), then the
+        // lists are appended here, left first, with child indices moved to
+        // where the lists land: the serial numbering of the whole tree.
+        let (left_order, right_order) = order[lo..hi].split_at_mut(split_pos - lo);
+        let (left_len, right_len) = (left_order.len(), right_order.len());
+        let half = |half_order: &mut [u32], half_base: usize, half_len: usize| {
+            let mut half_nodes: Vec<Node> = Vec::new();
+            let mut half_depth = 0usize;
+            build_range(
+                mesh,
+                tri_pad,
+                half_order,
+                half_base,
+                0,
+                half_len,
+                depth + 1,
+                &mut half_nodes,
+                &mut half_depth,
+                depth_cap,
+                parallel_min,
+            )
+            .map(|_| (half_nodes, half_depth))
+        };
+        let (left_result, right_result) = rayon::join(
+            || half(left_order, base + lo, left_len),
+            || half(right_order, base + split_pos, right_len),
+        );
+        // The serial walk reports the left half's refusal first.
+        let (left_nodes, left_depth) = left_result?;
+        let (right_nodes, right_depth) = right_result?;
+        if left_depth.max(right_depth) > *max_depth {
+            *max_depth = left_depth.max(right_depth);
+        }
+        let mut splice = |half_nodes: Vec<Node>| -> usize {
+            let first = nodes.len();
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_possible_wrap,
+                reason = "bounded by MAX_FACES, enforced at the Bvh::build boundary"
+            )]
+            let shift = first as i32;
+            nodes.extend(half_nodes.into_iter().map(|mut node| {
+                if !node.leaf {
+                    node.a += shift;
+                    node.b += shift;
+                }
+                node
+            }));
+            first
+        };
+        let left = splice(left_nodes);
+        let right = splice(right_nodes);
+        (left, right)
+    } else {
+        let left = build_range(
+            mesh,
+            tri_pad,
+            order,
+            base,
+            lo,
+            split_pos,
+            depth + 1,
+            nodes,
+            max_depth,
+            depth_cap,
+            parallel_min,
+        )?;
+        let right = build_range(
+            mesh,
+            tri_pad,
+            order,
+            base,
+            split_pos,
+            hi,
+            depth + 1,
+            nodes,
+            max_depth,
+            depth_cap,
+            parallel_min,
+        )?;
+        (left, right)
+    };
     // Child node indices are `< nodes.len() <= 2n - 1 <= i32::MAX`, which
     // `Bvh::build`'s MAX_FACES refusal is exactly what bounds.
     #[expect(
@@ -493,6 +596,87 @@ fn build_range(
 #[cfg(test)]
 mod instrumentation_tests {
     use super::*;
+
+    /// The tree does not depend on the face count at which halves are built
+    /// side by side: one mesh at several cutoffs (serial, every range, and in
+    /// between) gives the same nodes, leaf order, depth and leaf records, bit
+    /// for bit. A cloud of random triangles (SAH splits) and a mesh of many
+    /// coincident triangles (the index-median fallback) are both covered.
+    #[test]
+    fn the_tree_is_the_same_at_every_parallel_cutoff() {
+        fn lcg(state: &mut u64) -> f64 {
+            *state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (*state >> 11) as f64 / (1_u64 << 53) as f64
+        }
+        let mut state = 0x5EED_B0B5_u64;
+        let mut cloud_vertices = Vec::new();
+        let mut cloud_faces = Vec::new();
+        for face in 0..6000_u32 {
+            let centre = [
+                lcg(&mut state) * 40.0,
+                lcg(&mut state) * 40.0,
+                lcg(&mut state) * 40.0,
+            ];
+            for _ in 0..3 {
+                cloud_vertices.push([
+                    centre[0] + lcg(&mut state),
+                    centre[1] + lcg(&mut state),
+                    centre[2] + lcg(&mut state),
+                ]);
+            }
+            cloud_faces.push([3 * face, 3 * face + 1, 3 * face + 2]);
+        }
+        let mut stack_vertices = Vec::new();
+        let mut stack_faces = Vec::new();
+        for face in 0..3000_u32 {
+            // Many faces on the same three points: equal centroids everywhere.
+            let lift = f64::from(face % 3);
+            stack_vertices.push([0.0, 0.0, lift]);
+            stack_vertices.push([1.0, 0.0, lift]);
+            stack_vertices.push([0.0, 1.0, lift]);
+            stack_faces.push([3 * face, 3 * face + 1, 3 * face + 2]);
+        }
+        for (vertices, faces) in [(cloud_vertices, cloud_faces), (stack_vertices, stack_faces)] {
+            let mesh = Mesh::from_indexed(&vertices, &faces).unwrap();
+            let serial = Bvh::build_with_cutoff(&mesh, usize::MAX).unwrap();
+            for cutoff in [1, 9, 100, 1500, 4000] {
+                let parallel = Bvh::build_with_cutoff(&mesh, cutoff).unwrap();
+                assert_eq!(parallel.depth, serial.depth, "cutoff {cutoff}");
+                assert_eq!(parallel.order, serial.order, "cutoff {cutoff}");
+                assert_eq!(parallel.nodes.len(), serial.nodes.len(), "cutoff {cutoff}");
+                for (index, (left, right)) in
+                    parallel.nodes.iter().zip(&serial.nodes).enumerate()
+                {
+                    let bits = |node: &Node| {
+                        (
+                            node.bmin.map(f64::to_bits),
+                            node.bmax.map(f64::to_bits),
+                            node.pad.to_bits(),
+                            node.a,
+                            node.b,
+                            node.leaf,
+                        )
+                    };
+                    assert_eq!(bits(left), bits(right), "cutoff {cutoff}, node {index}");
+                }
+                for (index, (left, right)) in parallel.tris.iter().zip(&serial.tris).enumerate() {
+                    let bits = |tri: &LeafTri| {
+                        (
+                            tri.v0.map(f64::to_bits),
+                            tri.e1.map(f64::to_bits),
+                            tri.e2.map(f64::to_bits),
+                            tri.centre.map(f64::to_bits),
+                            tri.radius.to_bits(),
+                            tri.rounding.to_bits(),
+                        )
+                    };
+                    assert_eq!(bits(left), bits(right), "cutoff {cutoff}, leaf {index}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn direct_build_crosses_attempt_boundary() {

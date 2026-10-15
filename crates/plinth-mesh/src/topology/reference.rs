@@ -575,3 +575,84 @@ fn a_vertex_with_two_hundred_thousand_fans_builds_in_linear_time() {
         "building a 200000-fan vertex took {elapsed:?}"
     );
 }
+
+/// The kept fingerprint and exact-bits topology of a mesh are the values a
+/// fresh computation gives, on the first call, on a repeat and on a clone, and
+/// the keeping never crosses from one mesh to another.
+#[test]
+fn the_kept_fingerprint_and_topology_equal_fresh_computations() {
+    let mut rng = Lcg(0x5EED_0A11);
+    // Block boundaries of the chunked fingerprint: vertex and triangle counts
+    // just under, at and over its chunk sizes.
+    for (vertex_count, face_count) in [
+        (3_usize, 1_usize),
+        (255, 170),
+        (256, 171),
+        (257, 512),
+        (1024, 1025),
+    ] {
+        let verts: Vec<[f64; 3]> = (0..vertex_count)
+            .map(|_| {
+                [
+                    rng.next(64) as f64 * 0.25,
+                    if rng.next(2) == 0 { -0.0 } else { 0.0 },
+                    rng.next(64) as f64 * 0.5 - 8.0,
+                ]
+            })
+            .collect();
+        let tris: Vec<[u32; 3]> = (0..face_count)
+            .map(|_| {
+                [
+                    rng.next(vertex_count as u64) as u32,
+                    rng.next(vertex_count as u64) as u32,
+                    rng.next(vertex_count as u64) as u32,
+                ]
+            })
+            .collect();
+        let mesh = Mesh::new(verts, tris).expect("indices are in range");
+        let fresh_fingerprint = reference_fingerprint(&mesh);
+        let fresh = reference_build(&mesh).expect("reference builds");
+        for call in 0..3 {
+            assert_eq!(
+                super::mesh_fingerprint(&mesh).expect("fingerprint"),
+                fresh_fingerprint,
+                "{vertex_count} vertices, call {call}"
+            );
+            assert_eq!(
+                super::build_face_topology(&mesh, WeldPolicy::ExactBits).expect("topology"),
+                fresh,
+                "{vertex_count} vertices, call {call}"
+            );
+            assert_eq!(
+                WeldedView::build(&mesh, WeldPolicy::ExactBits).expect("weld"),
+                reference_exact_weld(mesh.verts()),
+                "{vertex_count} vertices, call {call}"
+            );
+        }
+        let copy = mesh.clone();
+        assert_eq!(copy, mesh);
+        assert_eq!(
+            super::build_face_topology(&copy, WeldPolicy::ExactBits).expect("copy topology"),
+            fresh
+        );
+        // A different mesh does not see this one's kept values.
+        let mut other_verts = mesh.verts().to_vec();
+        other_verts[0][0] += 1.0;
+        let other = Mesh::new(other_verts, mesh.tris().to_vec()).expect("same indices");
+        assert_ne!(
+            super::mesh_fingerprint(&other).expect("fingerprint"),
+            fresh_fingerprint
+        );
+        assert_eq!(
+            super::build_face_topology(&other, WeldPolicy::ExactBits).expect("topology"),
+            reference_build(&other).expect("reference builds")
+        );
+        // A policy other than exact bits is never served from the kept value.
+        assert_eq!(
+            super::build_face_topology(&mesh, WeldPolicy::None)
+                .expect("soup topology")
+                .weld_policy(),
+            WeldPolicy::None
+        );
+    }
+}

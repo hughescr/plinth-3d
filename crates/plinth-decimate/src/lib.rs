@@ -3569,7 +3569,16 @@ fn probe_two_sided_shared(
         return Err(ProbeError::EmptyPopulation);
     }
     let mut sorted = distances.clone();
-    sorted.sort_by(f64::total_cmp);
+    // `total_cmp` equal means equal bits, so an unstable sort (here on the
+    // kernel pool) returns the very sequence a stable one does.
+    let pooled = geom_kernel::run_in_pool(|| {
+        use rayon::slice::ParallelSliceMut;
+        sorted.par_sort_unstable_by(f64::total_cmp);
+    });
+    if pooled.is_err() {
+        // No pool: the same sequence, one thread.
+        sorted.sort_unstable_by(f64::total_cmp);
+    }
     let p99_mm = linear_percentile(&sorted, 0.99)?;
     let p99_9_mm = linear_percentile(&sorted, 0.999)?;
     let max_mm = sorted.last().copied();

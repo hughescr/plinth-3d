@@ -284,7 +284,6 @@ fn visibility_by_face(
         },
     )
     .map_err(|error| DisplayError::Kernel(error.to_string()))?;
-    let face_ids = surface.face_ids();
 
     // The ray length is the model's own bounding-box diagonal: the longest
     // straight line that can stay inside the model, so nothing that could
@@ -320,10 +319,12 @@ fn visibility_by_face(
     let mut origins: Vec<V3> = Vec::with_capacity(face_count);
     let mut rays: Vec<V3> = Vec::with_capacity(face_count);
     let mut rows: Vec<usize> = Vec::with_capacity(face_count);
+    let mut self_faces: Vec<u32> = Vec::with_capacity(face_count);
     for direction in &directions {
         origins.clear();
         rays.clear();
         rows.clear();
+        self_faces.clear();
         for face in 0..face_count {
             if geometry.degenerate[face] {
                 continue;
@@ -332,6 +333,10 @@ fn visibility_by_face(
                 origins.push(geometry.centroids[face]);
                 rays.push(*direction);
                 rows.push(face);
+                // The surface is the whole mesh, so a face's global id is its
+                // index; `u32::MAX` on overflow names no face and blocks
+                // nothing it should not (the kernel's index width is u32).
+                self_faces.push(u32::try_from(face).unwrap_or(u32::MAX));
             }
         }
         if rows.is_empty() {
@@ -339,43 +344,17 @@ fn visibility_by_face(
         }
         // The single batched call for this direction: one cast for every face
         // that could see it, not one call per face.
-        let cast = surface
-            .cast_rays_classified(&origins, &rays, t_max)
+        // The kernel's blocked-ray verdict, which is the rule below stated once
+        // for the batch: a ray with an undecidable crossing, or with any
+        // retained crossing at `t > 0` of a face other than its own, is blocked
+        // and contributes nothing. It stops each ray at its first sure
+        // occluder and allocates nothing per ray; the ragged cast it replaces
+        // listed every crossing of every ray.
+        let blocked = surface
+            .rays_blocked_classified(&origins, &rays, t_max, &self_faces)
             .map_err(|error| DisplayError::Kernel(error.to_string()))?;
-        for (row, &face) in rows.iter().enumerate() {
-            if cast.near_parallel[row] > 0 {
-                continue;
-            }
-            // `try_from`, not `as`: the kernel's offsets are `i64` and a
-            // negative or oversized one is a kernel defect, which must surface
-            // as "this ray contributed nothing" rather than as a wrapped index.
-            let (Ok(start), Ok(end)) = (
-                usize::try_from(cast.offsets[row]),
-                usize::try_from(cast.offsets[row + 1]),
-            ) else {
-                continue;
-            };
-            let mut occluded = false;
-            for hit in start..end {
-                let distance = cast.t_all[hit];
-                if !distance.is_finite() || distance <= 0.0 {
-                    continue;
-                }
-                let internal = cast.face_all[hit];
-                if internal < 0 {
-                    continue;
-                }
-                let Some(&global) = face_ids.get(usize::try_from(internal).unwrap_or(usize::MAX))
-                else {
-                    continue;
-                };
-                if global as usize == face {
-                    continue;
-                }
-                occluded = true;
-                break;
-            }
-            if !occluded {
+        for (&face, &is_blocked) in rows.iter().zip(&blocked) {
+            if !is_blocked {
                 numerator[face] += dot(geometry.normals[face], *direction);
             }
         }
@@ -713,6 +692,7 @@ fn neighbourhood_blocks<W: WalkHooks + Sync>(
     assert!(block_faces >= 1, "a block holds at least one face");
     let face_count = inp.geometry.normals.len();
     let pool = ScratchPool::<WalkScratch>::new();
+    let forward = ForwardFolds::build(inp);
     let blocks: Vec<Range<usize>> = (0..face_count)
         .step_by(block_faces)
         .map(|start| start..face_count.min(start + block_faces))
@@ -727,7 +707,7 @@ fn neighbourhood_blocks<W: WalkHooks + Sync>(
                 visited: Vec::new(),
                 members: Vec::new(),
             });
-            let out = neighbourhood_block::<W>(inp, block.clone(), &mut scratch);
+            let out = neighbourhood_block::<W>(inp, &forward, block.clone(), &mut scratch);
             pool.put(scratch);
             out
         })
@@ -745,17 +725,80 @@ fn neighbourhood_blocks<W: WalkHooks + Sync>(
     (Neighbourhood { detail, curvature }, counts)
 }
 
-/// The per-face walk of the serial body, verbatim, for the faces of `faces`.
+/// One fold as a walk reads it: the other face and the three weighted terms of
+/// [`spread_of_folds`]'s sums, each computed ONCE here instead of once per
+/// neighbourhood that contains the fold (about 1,700 of them per face on
+/// production meshes). Every term is the same single expression the walk used
+/// to evaluate in place, so the bits are the same.
+#[derive(Clone, Copy)]
+struct ForwardFold {
+    other: u32,
+    angle: f64,
+    /// `length * angle`.
+    weight: f64,
+    /// `weight * angle`.
+    weighted_angle: f64,
+    /// `weight * angle.ln()`.
+    weighted_log: f64,
+}
+
+/// For each face, the folds the walk can ever count from it: those to a
+/// higher-indexed face and above the change resolution, in the face's own
+/// adjacency order. The two filters are the ones the walk applied per member
+/// per walk (`other <= member`, `angle <= resolution`), here applied once, so
+/// a member's folds are visited in the same order with the same survivors.
+struct ForwardFolds {
+    start: Vec<u32>,
+    folds: Vec<ForwardFold>,
+}
+
+impl ForwardFolds {
+    fn build(inp: &NeighbourhoodInputs<'_>) -> Self {
+        let indptr = inp.topology.indptr();
+        let indices = inp.topology.indices();
+        let face_count = inp.geometry.normals.len();
+        let mut start = Vec::with_capacity(face_count + 1);
+        let mut folds = Vec::new();
+        start.push(0_u32);
+        for member in 0..face_count {
+            if let (Some(&first), Some(&end)) = (indptr.get(member), indptr.get(member + 1)) {
+                let range = first as usize..end as usize;
+                for ((&other, &angle), &length) in indices[range.clone()]
+                    .iter()
+                    .zip(&inp.folds.angle[range.clone()])
+                    .zip(&inp.folds.length[range])
+                {
+                    // Written as the walk's own `<=` skip, not as `>`: a NaN
+                    // angle passed that skip and must pass here.
+                    if other as usize <= member || angle <= inp.resolution {
+                        continue;
+                    }
+                    let weight = length * angle;
+                    folds.push(ForwardFold {
+                        other,
+                        angle,
+                        weight,
+                        weighted_angle: weight * angle,
+                        weighted_log: weight * angle.ln(),
+                    });
+                }
+            }
+            start.push(u32::try_from(folds.len()).unwrap_or(u32::MAX));
+        }
+        Self { start, folds }
+    }
+}
+
+/// The per-face walk of the serial body, for the faces of `faces`, with the
+/// per-fold terms read from `forward` instead of recomputed.
 fn neighbourhood_block<W: WalkHooks>(
     inp: &NeighbourhoodInputs<'_>,
+    forward: &ForwardFolds,
     faces: Range<usize>,
     scratch: &mut WalkScratch,
 ) -> NeighbourhoodBlock {
     let geometry = inp.geometry;
     let topology = inp.topology;
-    let folds = inp.folds;
-    let indptr = topology.indptr();
-    let indices = topology.indices();
     let WalkScratch {
         stamp,
         inside_stamp,
@@ -828,28 +871,20 @@ fn neighbourhood_block<W: WalkHooks>(
         // its lower-indexed face), above the change resolution.
         let mut sums = (0.0_f64, 0.0_f64, 0.0_f64, f64::INFINITY, 0.0_f64);
         for &member in members.iter() {
-            let (Some(&start), Some(&end)) = (indptr.get(member), indptr.get(member + 1)) else {
+            let (Some(&start), Some(&end)) =
+                (forward.start.get(member), forward.start.get(member + 1))
+            else {
                 continue;
             };
-            let range = start as usize..end as usize;
-            for ((&other, &angle), &length) in indices[range.clone()]
-                .iter()
-                .zip(&folds.angle[range.clone()])
-                .zip(&folds.length[range])
-            {
-                let other = other as usize;
-                if other <= member || inside_stamp.get(other) != Some(&seed) {
+            for fold in &forward.folds[start as usize..end as usize] {
+                if inside_stamp.get(fold.other as usize) != Some(&seed) {
                     continue;
                 }
-                if angle <= inp.resolution {
-                    continue;
-                }
-                let weight = length * angle;
-                sums.0 += weight;
-                sums.1 += weight * angle;
-                sums.2 += weight * angle.ln();
-                sums.3 = sums.3.min(angle);
-                sums.4 = sums.4.max(angle);
+                sums.0 += fold.weight;
+                sums.1 += fold.weighted_angle;
+                sums.2 += fold.weighted_log;
+                sums.3 = sums.3.min(fold.angle);
+                sums.4 = sums.4.max(fold.angle);
             }
         }
         detail.push(spread_of_folds(sums) * inp.band_fraction[face]);

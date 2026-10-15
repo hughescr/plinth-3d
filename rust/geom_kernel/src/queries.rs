@@ -26,6 +26,15 @@ use crate::{SurfaceIndexKind, SurfaceSubsetError, SurfaceTriangleSoupDigest};
 /// the 1 um the emitted files can resolve.
 pub const TAPER_EPS_MM: f64 = 1e-12;
 
+/// Arc length past the ray origin beyond which a crossing cannot share an
+/// arc-location group with the origin's own face (whose crossing is at
+/// `t ~ 0`, the origin lying on it). Execution only: a crossing nearer than
+/// this does not end [`NativeSurface::rays_blocked_classified`]'s walk early,
+/// it takes the full pass, so the value moves cost, never a verdict. It must
+/// exceed the own face's `t`, `dist / cos`, which for a micrometre-scale
+/// triangle and a ray that clears the determinant floor is far below this.
+const BLOCK_EARLY_ARC_MM: f64 = 0.5;
+
 /// `(sqrt(5) - 1) / 2`, the golden-section ratio.
 const GOLDEN_INV: f64 = 0.618_033_988_749_894_9;
 
@@ -1536,9 +1545,21 @@ impl NativeSurface {
         grid_pitch_mm: f64,
         max_grid_bytes: usize,
     ) -> Result<NativeSurface, ParityBuildError> {
-        let source_triangle_soup_digest = mesh.triangle_soup_digest();
-        let bvh = Bvh::build(&mesh).map_err(ParityBuildError::Other)?;
-        let pv = ParityVote::build(&mesh, grid_pitch_mm, max_grid_bytes)?;
+        // The content digest hashes every face (about a fifth of a build) and
+        // reads nothing the two indexes write, so it runs beside them. The BVH
+        // and the parity grid stay one after the other: the memory estimate
+        // bills their scratch as the larger of the two, not the sum.
+        let (source_triangle_soup_digest, indexes) = par::run(|| {
+            rayon::join(
+                || mesh.triangle_soup_digest(),
+                || -> Result<(Bvh, ParityVote), ParityBuildError> {
+                    let bvh = Bvh::build(&mesh).map_err(ParityBuildError::Other)?;
+                    let pv = ParityVote::build(&mesh, grid_pitch_mm, max_grid_bytes)?;
+                    Ok((bvh, pv))
+                },
+            )
+        });
+        let (bvh, pv) = indexes?;
         Ok(NativeSurface {
             mesh,
             bvh,
@@ -2477,6 +2498,146 @@ impl NativeSurface {
             t_all,
             face_all: f_all,
             near_parallel,
+        })
+    }
+
+    /// Batched "is this ray blocked" test, exactly the verdict a caller derives
+    /// from [`Self::cast_rays_classified`] and its own face-identity rule, with
+    /// no per-ray allocation and an early exit.
+    ///
+    /// Ray `i` is BLOCKED when either
+    ///
+    /// * its undecidable-face tally is nonzero, or
+    /// * after the cast's arc-location dedup, some retained crossing has a
+    ///   finite `t > 0` and its (group-minimum) face's global id (the id the
+    ///   cast reports in `face_all`) differs from `self_faces[i]`.
+    ///
+    /// That is what a visibility caller computes from the ragged cast: it
+    /// skips a ray with a tally, skips crossings at `t <= 0` and crossings of
+    /// the ray's own face, and treats any other crossing as an occluder. Here
+    /// the walk stops at the first crossing that CANNOT be merged into a group
+    /// containing the origin's own face, because that crossing's group is
+    /// retained, is past `t = 0`, and is not the own face; whatever else the
+    /// walk would have found (more crossings, a tally) leaves the ray blocked
+    /// either way. A crossing at less than [`BLOCK_EARLY_ARC_MM`] of arc, which
+    /// could share a group with the own face's crossing at `t ~ 0`, never ends
+    /// the walk: those rays take the full collect, sort and group pass, which
+    /// is the cast's own.
+    ///
+    /// # Errors
+    ///
+    /// [`BatchInputError`] when the three slices differ in length.
+    pub fn rays_blocked_classified(
+        &self,
+        origins: &[V3],
+        dirs: &[V3],
+        t_max: f64,
+        self_faces: &[u32],
+    ) -> Result<Vec<bool>, BatchInputError> {
+        let n = origins.len();
+        BatchInputError::require_len("rays_blocked", "dirs", n, dirs.len())?;
+        BatchInputError::require_len("rays_blocked", "self_faces", n, self_faces.len())?;
+        let mut blocked = vec![false; n];
+        par::run(|| {
+            (0..n)
+                .into_par_iter()
+                .map(|i| self.ray_blocked_one(origins[i], dirs[i], t_max, self_faces[i]))
+                .collect_into_vec(&mut blocked);
+        });
+        Ok(blocked)
+    }
+
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "integer-width casts in mesh/voxel index arithmetic, NOT individually audited -- triaged \
+              as a class, and the one architecture item the class carried (geom_kernel's 32-bit BVH \
+              index width) is now a named, enforced limit. TODO(cast-width-audit): retire site by \
+              site.  See docs/evidence/remediation-2026-08-26/census/cast-audit.md"
+    )]
+    fn ray_blocked_one(&self, o: V3, d: V3, t_max: f64, self_face: u32) -> bool {
+        thread_local! {
+            static HITS: RefCell<Vec<(f64, u32)>> = RefCell::new(Vec::with_capacity(64));
+        }
+        let dir_len = norm(d);
+        let seg_len = dir_len * t_max;
+        let dt = DEDUP_LOC_MM / seg_len.max(1e-9);
+        // See the method comment: a crossing past this parameter starts a group
+        // that cannot hold the own face's crossing at t ~ 0.
+        let early_t = dt + BLOCK_EARLY_ARC_MM / dir_len.max(1e-9);
+        STACK.with(|stack| {
+            HITS.with(|hits| {
+                let stack = &mut *stack.borrow_mut();
+                let hits = &mut *hits.borrow_mut();
+                hits.clear();
+                stack.clear();
+                stack.push(0);
+                let t0 = -EPS;
+                let t1 = t_max + EPS;
+                let mut near_parallel = 0u32;
+                while let Some(ni) = stack.pop() {
+                    let node = &self.bvh.nodes[ni as usize];
+                    if !ray_box(o, d, node.bmin, node.bmax, node.pad, t0, t1) {
+                        continue;
+                    }
+                    if node.leaf {
+                        let start = node.a as usize;
+                        let cnt = node.b as usize;
+                        for &tid in &self.bvh.order[start..start + cnt] {
+                            let t = tid as usize;
+                            match ray_triangle_classified(
+                                o,
+                                d,
+                                self.mesh.v0(t),
+                                self.mesh.e1(t),
+                                self.mesh.e2(t),
+                                t_max,
+                            ) {
+                                RayTriangleClass::Hit(hit) => {
+                                    if hit.t > early_t && tid != self_face {
+                                        charge_near_parallel(
+                                            NearParallelSite::CollectingWalk,
+                                            u64::from(near_parallel),
+                                        );
+                                        return true;
+                                    }
+                                    hits.push((hit.t, tid));
+                                }
+                                RayTriangleClass::NearParallel => near_parallel += 1,
+                                RayTriangleClass::ExactParallel | RayTriangleClass::Miss => {}
+                            }
+                        }
+                    } else {
+                        stack.push(node.a);
+                        stack.push(node.b);
+                    }
+                }
+                charge_near_parallel(NearParallelSite::CollectingWalk, u64::from(near_parallel));
+                if near_parallel > 0 {
+                    return true;
+                }
+                if hits.is_empty() {
+                    return false;
+                }
+                // The cast's own dedup, streamed: groups of crossings within
+                // `dt` of the group's first, keeping the first `t` and the
+                // smallest face; blocked when a retained group is an occluder.
+                hits.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+                let occludes = |t: f64, face: u32| t.is_finite() && t > 0.0 && face != self_face;
+                let mut group_kept = hits[0].0;
+                let mut group_min_face = hits[0].1;
+                for &(t, f) in hits.iter().skip(1) {
+                    if t - group_kept > dt {
+                        if occludes(group_kept, group_min_face) {
+                            return true;
+                        }
+                        group_kept = t;
+                        group_min_face = f;
+                    } else if f < group_min_face {
+                        group_min_face = f;
+                    }
+                }
+                occludes(group_kept, group_min_face)
+            })
         })
     }
 
