@@ -796,6 +796,19 @@ pub(crate) fn model_clearance_census(
                 // exempt out to 3.0 mm and its 0.144 mm intrusion was never
                 // read). Any span wider than the tip, outside the ball, is
                 // always measured now.
+                //
+                // **A TIP WITH NO MEASURED FACE EXEMPTS ONLY ITS BALL** (round 6,
+                // 2026-10-14, `NUB-CLAW.md` part 2). The zone is read off the
+                // face the tip carries. Where the disc's plane is the raster
+                // seat's own (no face measured, or its plane passed clear of
+                // the ball), the plane says nothing about where the model is
+                // and the zone off it is a guess: Deinonychus arm 143's ball
+                // stood 0.137 mm inside the claw, the raster plane put the
+                // zone at 0.5 mm of axis, and 0.32 mm of shaft inside the
+                // claw was never measured. An unknown zone exempts nothing
+                // ([`contact_zone_mm`]): the shaft past the ball is measured
+                // and, inside the gap, warned.
+                Some(disc) if arm.seats_into_model && !disc.face_measured => disc.ball_radius_mm,
                 Some(disc) if arm.seats_into_model => disc.ball_radius_mm.max(contact_zone_mm(
                     Some(ContactFace {
                         point: disc.centre_mm,
@@ -1633,7 +1646,7 @@ mod census_tests {
             center_mm: xy,
             kind,
             min_radius_mm: r,
-            thickened_mm: Vec::new(),
+            thickened_mm: Vec::new(), foot_radius_mm: None,
             seat_on_strut: None,
             k_top,
             k_bottom,
@@ -1881,6 +1894,59 @@ mod census_tests {
         assert!(
             thin.within_gap.is_empty(),
             "a tip-sized shaft on the same lean is inside its contact zone only: {thin:?}"
+        );
+    }
+
+    /// **A tip with no measured face exempts only its ball** (round 6,
+    /// 2026-10-14, `NUB-CLAW.md` part 2; Deinonychus arm 143). The same lean
+    /// as the test above with a tip-sized shaft: seated on a MEASURED face its
+    /// first stretch is a legitimate contact zone and stays unnamed (the
+    /// control above); with no face measured the disc's plane is the raster
+    /// seat's, which says nothing about where the model is, so the zone is the
+    /// ball and the shaft just past it, standing within the gap of the
+    /// model, is named. SABOTAGE: take the `face_measured` arm out of the
+    /// seat zone and the unmeasured tip is unnamed too.
+    #[test]
+    fn a_tip_with_no_measured_face_exempts_only_its_ball() {
+        let surface = block();
+        let layers = plinth_core::LayerPlan::new(PLATE, vec![H; 400]).expect("a uniform plan");
+        let nowhere = crate::cavity::HiddenCavity::none();
+        let (sin, cos) = (0.819_f64, 0.574_f64);
+        let census = |face: Option<[f64; 3]>| {
+            let (mut strut, mut arm) = member(
+                0,
+                StrutKind::Arm,
+                Landing::Strut { id: 9, layer: 0 },
+                [0.0, 0.0],
+                -2.565,
+                0.0,
+                0.2,
+            );
+            arm.base_mm = [5.0 * sin, 0.0, -5.0 * cos];
+            arm.seat_normal_mm = [0.0, 0.0, -1.0];
+            arm.seat_face_point_mm = face;
+            arm.seats_into_model = true;
+            arm.tip_radius_mm = 0.2;
+            arm.radius_profile_mm = vec![0.2; arm.radius_profile_mm.len()];
+            strut.radius_mm = arm.radius_profile_mm.clone();
+            model_clearance_census(
+                Some(&surface),
+                &[strut],
+                &[arm],
+                &layers,
+                PLATE,
+                GAP,
+                ZONE,
+                &nowhere,
+            )
+        };
+        let measured = census(Some([0.0, 0.0, 0.0]));
+        assert!(measured.within_gap.is_empty(), "a measured face: contact zone only: {measured:?}");
+        let unmeasured = census(None);
+        assert_eq!(
+            unmeasured.within_gap.len(),
+            1,
+            "no measured face: only the ball is exempt, the shaft past it is read: {unmeasured:?}"
         );
     }
 

@@ -63,7 +63,9 @@ pub use provenance::{
 };
 pub use stage::Stage;
 pub use support_profile::{
-    RootBossProfile, RootBossProfileError, TipContactProfile, TipContactProfiles,
-    TipContactProfilesError,
+    chitubox_tail_touch_profiles, chitubox_tip_length_profiles, RootBossProfile,
+    RootBossProfileError, TailContactProfile, TailContactProfiles, TailContactProfilesError,
+    TipContactProfile, TipContactProfiles, TipContactProfilesError, TipLengthProfiles,
+    TipLengthProfilesError, CHITUBOX_TAIL_TOUCH_ROWS, CHITUBOX_TIP_LENGTH_ROWS,
 };
 pub use violation::ViolationKind;

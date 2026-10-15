@@ -294,18 +294,21 @@ headed hosts restores them but brings Deinonychus defects back (2 thin unbraced 
 posts; measured 2026-10-12), so it is counted
 (`twin_seats_headed_host`) and left open (`q12/REGRESSIONS.md`).
 
-**A lean the slenderness law cannot hold is not taken, where the arm already stands as a support
-(quality lane Q1, refined 2026-10-12).** The lip-seat rule leans a whole arm along one axis. Where its
-run is longer than `S` times the thickest radius at which it keeps the final gap (the drawn radius
-grown by the spare gap measured for it, up to the registered maximum), the lean is refused and the arm
-keeps its seat with its seat-bite warning (Deinonychus arms 215 and 220). The refusal trades the lean
-for the arm as it stands, so that arm must be a support: standing on its ground, its solid not
-entering the model, and either a shaft longer than one layer or a one-layer stub resting on another
-member (joint round 4, 2026-10-13: Bat_Cat_Owl's stub on its sibling chain took a 4.8 mm lean as a
-0.10 mm rod 5.4 times over `S * r`; a member's chain carries a stub). On the Morel base the kept arm
-(44) was a one-layer stub onto the model wall beside its seat, tip off its face; there the lean is
-taken. The test is arithmetic on the clearance the rule already reads for every proposal in one
-batched kernel call.
+**A lean the slenderness law cannot hold is taken only where its tip seats and the standing arm's
+does not (quality lane Q1, refined 2026-10-12 and 2026-10-14).** The lip-seat rule leans a whole arm
+along one axis. Where its run is longer than `S` times the thickest radius at which it keeps the final
+gap (the drawn radius grown by the spare gap measured for it, up to the registered maximum), the lean
+is refused and the arm keeps its seat with its seat-bite warning (Deinonychus arms 215 and 220). The
+refusal trades the lean for the arm as it stands, so that arm must be there to keep: standing on its
+ground, its solid not entering the model. Then the lean replaces it only if the lean's tip really
+seats on its face and the standing arm's tip does not. Seating is the real contact (the model surface
+inside the drawn ball, measured exactly) reaching the planned contact to within one pixel of area, the
+ball growth's own test, read for both tips in one batched call per round. The shape of the standing
+arm decides nothing: a shape test ("a one-layer stub on the model is no support") took Bat_Cat_Owl
+arm 20's 40 degree lean, a 0.10 mm rod 3.4 times over `S * r`, in place of a stub on the claw's
+0.018 mm edge; both tips had 0.0000 mm2 of contact, so the lean added a rod and no seat (joint round 5,
+`CLAW-POST.md`). The slenderness test itself is arithmetic on the clearance the rule already reads for
+every proposal in one batched kernel call.
 
 **One contact, one arm, at a first layer over nothing (joint round 4).** A birth the cover bridged to
 rooted material is given an arm only if no arm of its layer stands in it or holds it. An arm holds a
@@ -570,6 +573,91 @@ the emitted field (seat slides and followers' ends applied) is measured once mor
 changes has its disc graded again and a disc now off its face is warned about. Built in
 `plinth_sweep::footprint_normal`
 (`tests/it/footprint_normal.rs`); never run in the orientation prefilter.
+
+### A tip ball is sized to the load and bounded by its shaft and its feature (round 5, 2026-10-14)
+
+The emitter cuts a tip ball to the model mesh, so a tip's contact is the model surface inside its drawn
+ball. The ball grows (`plinth_sweep::contact_growth`) only toward what the tip's load needs, and a grown ball
+is never a lump on its shaft or wider than the feature it seats on (owner, Bat_Cat_Owl: the balls were "much
+bigger than the support column or the feature that is being supported").
+
+- **The target is the load, not the profile disc.** The need is the down-sweep's carried load at the
+  contact over `X_ALLOWED`, `π r_load²`, before the radius minimum and clamps. A tip at the 0.05 mm minimum
+  needs far less than its ball gives and is not grown. The growth aims at `min(need, planned disc)`, but the
+  tip is graded and warned against the whole need: where a radius clamp or the seat geometry leaves the
+  profile disc smaller than the load, the tip is reported short (`ShortReason::BeyondProfileDisc`), not
+  sufficient.
+- **A step must pay for itself.** A face that is flat at the kept seat depth `δ` gains `2 π δ` of area per
+  mm of ball radius. A step that gains less only wraps the flanks (`ShortReason::FlankOnly`). On a convex
+  underside every step gains less, so such a ball keeps the owner's profile size.
+- **Three ceilings.** The ball-to-shaft ratio (the largest ball factor of the owner's profile table, 1.5,
+  times the shaft radius at the seat); a contact disc no wider than the narrowest cured chord of the model
+  section through the seat at the strike layer (`plinth_sweep::feature_chord`: the cured joint is only as
+  strong as its narrowest section, and past it the break moves into the model); and the shaft's own carry
+  (above). A tip a ceiling leaves short of its need is warned with the shortfall and the reason.
+- **The owner's ball is the floor** (round 6, 2026-10-14). The ceilings limit GROWTH only; a ball is never
+  drawn smaller than the owner's ChituBox ball for its neck (`f(r_n) r_n`, `f` 1.25-1.5 by tip size). Round 5
+  drew a profile ball wider than its feature at the ceiling, floored at the shaft end, and 12 of 35
+  Bat_Cat_Owl balls came out as wide as their own shaft (owner, picture 30: "rounded ends whose sphere
+  diameter = the support diameter"). A profile ball past its feature or the ratio is counted and warned
+  (`ContactOutcome::over_feature`); a contact that stays short of the need is warned against that need
+  and the neck is never shrunk to the contact (the neck carries the demand; shrinking it would shrink
+  the ball with it and the contact again).
+
+### The member profile, head to foot (round 6, 2026-10-14)
+
+A member reads, from the model down: contact ball, neck, a cone widening to the body, the body, and
+(on a model foot) a cone narrowing to the foot's neck and ball. The owner's pictures 28, 30 and 31 are the
+cases where it did not.
+
+- **A ball is wider than its neck, and the shaft leaves it at the neck.** The first drawn radius is the
+  neck's, at the ball centre (`plinth_support::lower::head_cone_from_the_neck`). A tip whose first span
+  stands past the top of the owner's ball-to-neck table (1.5) times the neck is not carrying its own load
+  there: it is a plateau (the joint-sized running maximum of a head the lowering cannot draw, 0.198 -> 0.233
+  under a 0.067 mm ball, picture 31), and it is drawn as the owner's head cone, his `supporttiplength` at
+  the neck's size (1.5 to 3.0 mm, `TipLengthProfiles`), from the neck to the section the shaft has that far
+  down. **A landing inside the cone ends it**: the cone replaces the tip's own head minimum, never the
+  section a landed member's load needs (`max(E, D)`). The shallowest member whose end stands in this
+  shaft's solid (`shallowest_landers`: distance to the axis at most the two sections, no tolerance) ends
+  the cone one layer under it, at the ledger's section there, and the ledger is drawn below unchanged.
+  Any other first span that starts past the neck, and the post under a head leaving its joint
+  sphere, widens to the ledger over one layer (a cone widening going down prints at any slope). A span
+  that already starts at the neck is untouched.
+- **A model foot is the owner's tail contact.** The foot's contact radius is the largest of the area
+  law's, the neck under the ChituBox tail contact of a body of this size (`TailContactProfiles::neck_radius_mm`:
+  the tail touch is a DIAMETER, the ball's radius half of it, the neck the ball over the tip table's
+  ratio at the neck's own size; never wider than the body), and the radius the enlarge-foot rung gave the
+  post. One reader (`model_feet::foot_radius_mm`) serves the structural reading, the final measurement,
+  the adapter and the lowering.
+- **Enlarge-foot rung.** A run whose neck and cone alone take the whole one-pixel budget cannot be held by
+  any shaft width. After bands and the thicken rung, the foot grows to the neck of least resin (the plan's
+  own and the foot ball's, `4/3 pi (f r)^3`) among those that let a root hold the run, read through that
+  very neck (`slenderness::enlarge_foot`); the least neck alone needs a body at the registered maximum
+  radius, and resin without the ball would run the neck up to the body's width. Where none up to the
+  registered maximum holds, the `foot_neck_over_limit` warning stands.
+- **Bay-local thickening is one lower cone.** The post widens from its foot to the root at the run's base
+  in one straight cone, no steeper than the permitted underside slope (not a hairline under a fat
+  section with a few layers of steepest ramp); a cone that enters the model's final gap falls back to the
+  steep ramp.
+- **Knees.** Where two chained frusta of a member turn by more than a pixel of their section, a sphere
+  of the larger section sits at the vertex (`knee_spheres`). The sweep's clearance readers model a member
+  as the tube about its axis, which already contains it.
+- **A lean is a solid, not a column.** The up-sweep's path test asks whether an arm stands in a cell of
+  the path; a shaft 0.12 mm off the path is in no cell and was gone through (round 6, Deinonychus: a 0.22
+  mm descent through a post, then 13 mm more to a trunk). A lean path is also refused where it comes
+  within (the descent's radius lower bound, the area law on what it covers) plus (the smallest tip) of an
+  arm's axis that the seat's own column is not already that close to (`path_goes_through_a_shaft`). Both
+  are lower bounds on the drawn radii, so a refused path touches in the file. The landing's own arm is
+  exempt. What it cannot see: the radius an EARLIER arm grows to after placement (only the minimum tip is
+  known for it), and straight descents.
+- **A second contact for a tip its feature leaves short.** The contact growth runs on the finished field, so
+  the placement could not know what a feature gives. `run_sweep_with_second_contact` records, for each tip
+  left short, the contact it really made, and runs the placement again with that contact as the load the
+  tip may carry at its tip layer (`down_sweep::ContactCaps`): the load-driven insertion that relieves an
+  arm over the area law's maximum then seats a carrier beside the tip on the same underside and the load
+  routes between them. The second plan is kept only where it leaves the summed shortfall (mm²) smaller.
+  Costs one more sweep; reported in the log (`second contact:` line) and `SweepRunReport::seat_second_contact`.
+  A tip left short after it is warned as before.
 
 ### Every change to a tip keeps layerwise support (joint review, 2026-10-12)
 

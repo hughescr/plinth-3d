@@ -785,6 +785,11 @@ pub struct DescentClearance<'a> {
     pub final_gap_mm: f64,
     /// The registered minimum tip radius: no arm is drawn thinner.
     pub tip_radius_min_mm: f64,
+    /// The registered maximum tip radius: no shaft is drawn wider, whatever
+    /// the area law later sizes it to. It bounds how far from a shaft's axis
+    /// the shaft's solid can reach, so it bounds which landings a descent can
+    /// MEET (`descend_cleared_from`, `sharp_for`).
+    pub tip_radius_max_mm: f64,
     /// `X_ALLOWED`: the area law's ratio of carried area to arm section.
     pub x_allowed: f64,
     /// [`crate::lean::LeanLaw::face_zone_factor`]: the longest zone a shaft
@@ -2447,7 +2452,7 @@ fn commit_seat(
         ],
         kind: crate::StrutKind::Arm,
         min_radius_mm: 0.0,
-        thickened_mm: Vec::new(),
+        thickened_mm: Vec::new(), foot_radius_mm: None,
         seat_on_strut: None,
         k_top: layer,
         k_bottom,
@@ -3566,6 +3571,35 @@ fn descend_cleared_from(
             .then_with(|| a.cell.cmp(&b.cell))
     });
 
+    // THE MODEL TEST A PATH IS HELD TO (round 6, Craig's picture 29).
+    //
+    // A descent MEETS a shaft when that shaft's solid can reach it: the
+    // landing column lies within the descent's own radius plus the widest
+    // arm any shaft can be drawn at (the registered maximum tip radius; no
+    // member is wider, whatever the area law later sizes it to). For such a
+    // landing the path is asked whether the model stands at each layer it
+    // crosses ([`ColumnHistory::model_blocks`]). The coarse question, "is the
+    // column cured here or anywhere higher", refused every landing in a
+    // column with model overhead — which is every post a seat hangs from — so
+    // a 0.06 mm rod ran 9 mm to the plate through the solid of a trunk it
+    // touched in its first millimetre (Deinonychus, `29-rod-should-merge-into-
+    // trunk.png`: 600 of the 601 path refusals logged for the cheapest merge
+    // candidates of that field were the model overhead). A landing the descent cannot meet
+    // keeps the coarse question: the up-sweep's choice among far merges is
+    // not changed here. A head's post (a start under the running layer) is
+    // always sharp.
+    let sharp_reach_mm = clearance.map(|clear| clear.tip_radius_max_mm + radius_lb_mm);
+    let sharp_for = |candidate: &LeanCandidate| {
+        from_joint
+            || sharp_reach_mm
+                .is_some_and(|reach| crate::cell_distance_mm(grid, cell, candidate.cell) <= reach)
+    };
+
+    // The least two shaft solids can be apart without touching, for the path test
+    // that reads the arms as solids ([`path_goes_through_a_shaft`]). Only where the
+    // drawn-solid test runs (it supplies the radii).
+    let solid_reach_mm = clearance.map(|clear| radius_lb_mm + clear.tip_radius_min_mm);
+
     let mut path_blocked = false;
     // Tiers, best first. Without the clearance there is the one pass this
     // search always made. With it, a pass takes only candidates that clear
@@ -3596,7 +3630,20 @@ fn descend_cleared_from(
             }
             let path = paths[index]
                 .get_or_insert_with(|| {
-                    lean_path_from(grid, history, keep_out, layer, running_layer, cell, candidate)
+                    lean_path_from(
+                        grid,
+                        history,
+                        keep_out,
+                        layer,
+                        cell,
+                        candidate,
+                        sharp_for(candidate),
+                    )
+                    .filter(|path| {
+                        solid_reach_mm.is_none_or(|reach| {
+                            !path_goes_through_a_shaft(grid, history, layer, cell, candidate, path, reach)
+                        })
+                    })
                 })
                 .as_ref();
             let Some(path) = path else {
@@ -3675,22 +3722,30 @@ fn lean_path(
     seat_cell: usize,
     candidate: &LeanCandidate,
 ) -> Option<Vec<u32>> {
-    lean_path_from(grid, history, keep_out, layer, layer, seat_cell, candidate)
+    lean_path_from(grid, history, keep_out, layer, seat_cell, candidate, false)
 }
 
-/// [`lean_path`] from a start `(seat_cell, layer)` under a running history at
-/// `running_layer` (see [`descend_cleared_from`]). At the running layer the
-/// model test is the running `top_model` ("cured at or above here"); under a
-/// lower start, where `top_model` also holds material ABOVE the start, it is
-/// the sharp question [`ColumnHistory::model_blocks`] ("cured exactly here").
+/// [`lean_path`] from a start `(seat_cell, layer)` (see
+/// [`descend_cleared_from`]).
+///
+/// `sharp` picks the model test. Sharp is [`ColumnHistory::model_blocks`]:
+/// is the column cured AT THIS LAYER. Not sharp is the running `top_model`:
+/// is it cured here OR ANYWHERE HIGHER, which refuses every path through a
+/// column that has model overhead, whether or not that model is in the way.
+/// A start under the running layer (the post of an articulated head) is always
+/// sharp, because there `top_model` also holds the model between the joint and
+/// the seat. A seat's own descent is sharp for a landing whose shaft the
+/// descent can meet ([`DescentClearance::tip_radius_max_mm`], `descend_cleared_from`)
+/// and not sharp for a landing further away, where the up-sweep keeps the
+/// refusal it always made.
 fn lean_path_from(
     grid: &Grid,
     history: &ColumnHistory,
     keep_out: &DrainKeepOut,
     layer: usize,
-    running_layer: usize,
     seat_cell: usize,
     candidate: &LeanCandidate,
+    sharp: bool,
 ) -> Option<Vec<u32>> {
     let cols = grid.cols();
     let span = layer - candidate.k_bottom;
@@ -3747,13 +3802,18 @@ fn lean_path_from(
             return None;
         }
         if slot > 0 {
-            // No model may already stand at this layer or above it in this
-            // column: `top_model` holds layer + 1 of the topmost model cell, so
-            // `> here` is exactly "cured at or above here".
-            let in_model = if layer == running_layer {
-                history.top_model[here_cell] as usize > here
-            } else {
+            // Model: "cured at this layer" where the caller says sharp, "cured
+            // at or above this layer" (`top_model` holds layer + 1 of the
+            // topmost model cell, so `> here`) where it does not. The two
+            // differ exactly where supports stand: in the air under an
+            // overhang, whose model sits some layers above. Every layer of a
+            // descent is below the layers already committed to the model spans
+            // ([`commit_layer_history`] stamps them before a layer is placed),
+            // so the spans answer for the running state exactly.
+            let in_model = if sharp {
                 history.model_blocks(here_cell, here)
+            } else {
+                history.top_model[here_cell] as usize > here
             };
             if in_model {
                 return None;
@@ -3770,6 +3830,102 @@ fn lean_path_from(
         path.push(u32::try_from(here_cell).unwrap_or(u32::MAX));
     }
     Some(path)
+}
+
+/// The ids of the arms whose axis stands within `reach_mm` of `cell`'s centre at
+/// `layer`, other than `except`, appended to `out` (sorted, once each).
+fn shafts_within(
+    grid: &Grid,
+    history: &ColumnHistory,
+    cell: usize,
+    layer: usize,
+    reach_mm: f64,
+    except: Option<u32>,
+    out: &mut Vec<u32>,
+) {
+    out.clear();
+    let pitch = grid.pitch_mm();
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a non-negative finite reach over the grid pitch, ceiled to a window half-width"
+    )]
+    let half = (reach_mm / pitch).ceil().max(0.0) as usize;
+    let (row, col) = (grid.row_of(cell), grid.col_of(cell));
+    let row_lo = row.saturating_sub(half);
+    let row_hi = (row + half).min(grid.rows() - 1);
+    let col_lo = col.saturating_sub(half);
+    let col_hi = (col + half).min(grid.cols() - 1);
+    for near_row in row_lo..=row_hi {
+        for near_col in col_lo..=col_hi {
+            #[expect(clippy::cast_precision_loss, reason = "a window offset bounded by the grid is exact in f64")]
+            let distance = pitch
+                * (row.abs_diff(near_row) as f64).hypot(col.abs_diff(near_col) as f64);
+            if distance > reach_mm {
+                continue;
+            }
+            let near = grid.index(near_row, near_col);
+            let mut slot = history.shaft_head.get(near).copied().unwrap_or(u32::MAX);
+            while slot != u32::MAX {
+                let span = history.shaft_spans[slot as usize];
+                slot = span.next;
+                if Some(span.id) != except
+                    && (span.k_bottom as usize) <= layer
+                    && layer <= span.k_top as usize
+                    && !out.contains(&span.id)
+                {
+                    out.push(span.id);
+                }
+            }
+        }
+    }
+}
+
+/// **A LEAN MUST NOT PASS THROUGH THE SOLID OF A SHAFT IT DOES NOT LAND ON**
+/// (round 6 review, P2). [`lean_path_from`] asks whether an arm is in the cell the
+/// descent crosses; an arm is a solid, not a column. A rod that went by a post
+/// 0.12 mm off its axis was clear to that test, and drawn at its real radii
+/// (0.22 and 0.10 mm) went through the post and on to a trunk 1 mm lower, 13 mm of
+/// shaft after its first contact (Deinonychus, the combined round 6 file).
+///
+/// `reach_mm` is the least the two solids can be apart without touching: the
+/// descent's own radius lower bound (the area law on what it covers) plus the
+/// smallest tip any shaft has. Both are lower bounds on the drawn radii, so a path
+/// refused here is touching in the file, never merely near. An arm that stands that
+/// close to the SEAT's own column at the same layer is not caused by this lean (the
+/// straight descent would stand just as close) and is not counted; the member the
+/// descent merges into is the landing, not an obstacle. Refused, the candidate is
+/// counted with the other blocked paths and the search takes the next.
+fn path_goes_through_a_shaft(
+    grid: &Grid,
+    history: &ColumnHistory,
+    layer: usize,
+    seat_cell: usize,
+    candidate: &LeanCandidate,
+    path: &[u32],
+    reach_mm: f64,
+) -> bool {
+    let parent = match candidate.landing {
+        Landing::Strut { id, .. } => Some(id),
+        Landing::Plate | Landing::Model { .. } => None,
+    };
+    let mut beside_path: Vec<u32> = Vec::new();
+    let mut beside_seat: Vec<u32> = Vec::new();
+    for (slot, &cell) in path.iter().enumerate().skip(1) {
+        let here = candidate.k_bottom + slot;
+        if here >= layer {
+            break;
+        }
+        shafts_within(grid, history, cell as usize, here, reach_mm, parent, &mut beside_path);
+        if beside_path.is_empty() {
+            continue;
+        }
+        shafts_within(grid, history, seat_cell, here, reach_mm, parent, &mut beside_seat);
+        if beside_path.iter().any(|id| !beside_seat.contains(id)) {
+            return true;
+        }
+    }
+    false
 }
 
 fn descend(history: &ColumnHistory, cell: usize, layer: usize) -> (Landing, usize, bool) {
@@ -4430,6 +4586,73 @@ mod descent_tests {
         );
     }
 
+    /// **A LEAN MUST NOT PASS THROUGH THE SOLID OF A SHAFT IT DOES NOT LAND ON**
+    /// (round 6 review, P2). The path test asks whether an arm is in the cell; a
+    /// third arm 0.15 mm beside the path is in no cell of it. At the lower bound of
+    /// the descent's radius (0.2 mm) plus the smallest tip (0.05 mm) the two solids
+    /// touch, so the path is refused; at a hairline's bound (0.05 mm) they are
+    /// apart and it stands (the control). An arm as close to the SEAT as to the path
+    /// is not caused by the lean and does not refuse it, and the parent is the
+    /// landing, never an obstacle.
+    ///
+    /// SABOTAGE: `path_goes_through_a_shaft` always false fails the first assertion.
+    #[test]
+    fn a_lean_that_passes_through_the_solid_of_a_shaft_beside_it_is_refused() {
+        let grid = grid();
+        let seat = grid.index(20, 20);
+        let neighbour = grid.index(20, 28);
+        let candidate = LeanCandidate {
+            cost_mm: 0.0,
+            class: 0,
+            cell: neighbour,
+            k_bottom: 194,
+            landing: Landing::Strut { id: 7, layer: 194 },
+            rooted: true,
+            at_parent_top: false,
+        };
+        let mut history = ColumnHistory::new(&grid);
+        straight_arm(&mut history, 7, neighbour, 0, 199);
+        // A third arm 3 rows off the path's row (0.15 mm), 0.335 mm from the seat.
+        straight_arm(&mut history, 9, grid.index(23, 26), 0, 210);
+        let path = lean_path(&grid, &history, &DrainKeepOut::none(), 200, seat, &candidate)
+            .expect("no arm is in a cell of the path");
+        assert!(
+            super::path_goes_through_a_shaft(&grid, &history, 200, seat, &candidate, &path, 0.25),
+            "a 0.2 mm descent 0.15 mm from another shaft's axis goes through it"
+        );
+        assert!(
+            !super::path_goes_through_a_shaft(&grid, &history, 200, seat, &candidate, &path, 0.1),
+            "CONTROL: two hairlines 0.15 mm apart are apart"
+        );
+        // The same arm as close to the SEAT (a column beside it): the straight descent
+        // stands as close, so the lean is not what put it there.
+        let mut inherited = ColumnHistory::new(&grid);
+        straight_arm(&mut inherited, 7, neighbour, 0, 199);
+        straight_arm(&mut inherited, 9, grid.index(23, 20), 0, 210);
+        straight_arm(&mut inherited, 11, grid.index(23, 26), 0, 210);
+        let path = lean_path(&grid, &inherited, &DrainKeepOut::none(), 200, seat, &candidate)
+            .expect("no arm is in a cell of the path");
+        assert!(
+            super::path_goes_through_a_shaft(&grid, &inherited, 200, seat, &candidate, &path, 0.25),
+            "arm 11 is new to the path even where arm 9 stands beside the seat"
+        );
+        let mut seat_only = ColumnHistory::new(&grid);
+        straight_arm(&mut seat_only, 7, neighbour, 0, 199);
+        straight_arm(&mut seat_only, 9, grid.index(22, 20), 0, 210);
+        let path = lean_path(&grid, &seat_only, &DrainKeepOut::none(), 200, seat, &candidate)
+            .expect("no arm is in a cell of the path");
+        assert!(
+            !super::path_goes_through_a_shaft(&grid, &seat_only, 200, seat, &candidate, &path, 0.25),
+            "an arm beside the seat, not met anew along the path, does not refuse the lean"
+        );
+        // The parent is the landing.
+        let mut parent_only = ColumnHistory::new(&grid);
+        straight_arm(&mut parent_only, 7, neighbour, 0, 199);
+        let path = lean_path(&grid, &parent_only, &DrainKeepOut::none(), 200, seat, &candidate)
+            .expect("a clear corridor");
+        assert!(!super::path_goes_through_a_shaft(&grid, &parent_only, 200, seat, &candidate, &path, 0.25));
+    }
+
     /// **A COLUMN THAT HOLDS TWO ARMS OFFERS THE ONE THE LAW CAN REACH.**
     /// `top_strut` is one `u32` per column, so a leaned arm crossing high above
     /// a straight trunk hid that trunk completely: the column answered "an arm
@@ -4551,6 +4774,7 @@ mod descent_tests {
             preferred_gap_mm: 0.6,
             final_gap_mm: 0.3,
             tip_radius_min_mm: 0.05,
+            tip_radius_max_mm: 1.0,
             x_allowed: 18.0,
             zone_factor: law.face_zone_factor(),
             surface: None,
@@ -4689,6 +4913,82 @@ mod descent_tests {
                 "layer {layer}: the path is {nearest} mm from the wall (wall x {sx})"
             );
         }
+    }
+
+    /// **A DESCENT THAT MEETS A SHAFT LANDS ON IT, ALSO WHEN THE SHAFT'S COLUMN
+    /// HAS MODEL OVERHEAD** (round 6, `29-rod-should-merge-into-trunk.png`).
+    ///
+    /// A post a seat hangs from stands in air with the model above it, so its
+    /// column's `top_model` is above every layer of the shaft. The coarse path
+    /// test ("cured here or anywhere higher") refused every landing there, and
+    /// a rod whose descent touched such a post ran on to the plate beside it.
+    /// Here the trunk's top is at layer 40 and the model that carries it
+    /// stands over layers 197 to 199 of the same column (inside the seat's own
+    /// zone, so the straight descent clears the model); the seat is at layer
+    /// 200, 0.15 mm (three cells) from the trunk's axis. The path stands in air
+    /// at every layer it crosses, so the rod lands on the trunk.
+    ///
+    /// The control is the same trunk 1.5 mm away, which no solid of radius
+    /// `tip_radius_max_mm + r` reaches: the descent does not meet it, the coarse
+    /// refusal stands, and the rod goes to the plate as before. The sabotage is
+    /// the coarse test itself (`sharp` false): the near landing's path is
+    /// refused, the sharp one admitted, on the same history.
+    #[test]
+    fn a_descent_that_meets_a_post_under_model_overhead_lands_on_it() {
+        let grid = plan_grid(0.0, 0.0, 8.0, 8.0, 400, H, 0.0, 1_000_000_000).0;
+        let law = LeanLaw::new(H, 45.0, 25.0);
+        let clear = two_tier(&law);
+        let seat = grid.index(80, 80);
+        let build = |trunk_col: usize| {
+            let mut history = ColumnHistory::new(&grid);
+            let trunk = grid.index(80, trunk_col);
+            straight_arm(&mut history, 7, trunk, 20, 40);
+            // The model over the trunk: the ceiling it hangs from.
+            cure_wall(&mut history, &grid, &[trunk], 197, 199);
+            (history, trunk)
+        };
+        let mut scratch = Vec::new();
+
+        // Near: three cells, 0.15 mm.
+        let (history, trunk) = build(83);
+        let mut counts = outcome();
+        let descent = super::descend_cleared(
+            &grid, &history, &DrainKeepOut::none(), &law, true, 4.0, seat, 200, &mut scratch, &mut counts,
+            Some(&clear), 0.05,
+        );
+        assert_eq!(
+            descent.landing,
+            Landing::Strut { id: 7, layer: 40 },
+            "the rod lands on the post it meets: {counts:?}"
+        );
+        assert!(!descent.path.is_empty() && counts.arms_merged == 1, "{counts:?}");
+        let candidate = super::LeanCandidate {
+            cost_mm: 0.0,
+            class: 0,
+            cell: trunk,
+            k_bottom: 40,
+            landing: Landing::Strut { id: 7, layer: 40 },
+            rooted: true,
+            at_parent_top: true,
+        };
+        assert!(
+            super::lean_path_from(&grid, &history, &DrainKeepOut::none(), 200, seat, &candidate, true).is_some(),
+            "the path stands in air at every layer it crosses"
+        );
+        assert!(
+            super::lean_path_from(&grid, &history, &DrainKeepOut::none(), 200, seat, &candidate, false).is_none(),
+            "SABOTAGE: the coarse test refuses it for the model overhead of the landing column"
+        );
+
+        // Far: 30 cells, 1.5 mm. Not met, so the coarse refusal stands.
+        let (history, _) = build(110);
+        let mut counts = outcome();
+        let descent = super::descend_cleared(
+            &grid, &history, &DrainKeepOut::none(), &law, true, 4.0, seat, 200, &mut scratch, &mut counts,
+            Some(&clear), 0.05,
+        );
+        assert_eq!(descent.landing, Landing::Plate, "a shaft the descent does not meet: {counts:?}");
+        assert_eq!(counts.arms_merged, 0);
     }
 
     /// **PREFERRED CANNOT BYPASS THE FINAL GAP** (challenger round 2,

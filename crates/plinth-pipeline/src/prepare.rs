@@ -2834,6 +2834,43 @@ fn sweep_and_emit(
             (plan, SweepPlanSource::Planned(miss))
         }
     };
+    // A SECOND CONTACT for every tip whose feature gave it less contact than
+    // its load needs (round 5 review, 2026-10-14): the placement runs again
+    // with those tips' real contacts as their limit; kept where it leaves the
+    // field nearer its loads' needs.
+    let plan = plinth_sweep::run_sweep_with_second_contact(
+        plan,
+        hollowed.mesh(),
+        &sweep_layers,
+        &policy,
+        &drains,
+        &vents,
+    )
+    .map_err(|source| {
+        ChainStop::new(PipelineError::Sweep {
+            model: model.clone(),
+            source,
+        })
+    })?;
+    let second = &plan.report.seat_second_contact;
+    if second.attempted {
+        println!(
+            "[sweep {model}] second contact: {} short tips sized a second contact from the \
+             contact they really made; placement run again: {} arms and {} tips short by {:.4} \
+             mm2 ({} unbraced runs over their limit) against {} arms and {} short by {:.4} mm2 \
+             ({} such runs) before; the {} plan is kept",
+            second.tips_capped,
+            second.second_arms,
+            second.second_short,
+            second.second_shortfall_mm2,
+            second.second_unbraced,
+            second.first_arms,
+            second.first_short,
+            second.first_shortfall_mm2,
+            second.first_unbraced,
+            if second.kept_second { "second" } else { "first" },
+        );
+    }
     let sweep_seconds = started.elapsed().as_secs_f64();
 
     let frame = plinth_support::BuildFrame::new(
@@ -3188,7 +3225,9 @@ fn print_sweep_disclosure(
             "[sweep {model}] seat trim: {} tips (and their first shaft segments) cut to the \
              model mesh, and {} further Member spans of those shafts that reach the model side \
              of the seat plane, {} of them on the raster seat's plane for want of a measured \
-             face; PLANNED contact disc (the ungrown ball in the seat plane) min {:.4} p50 {:.4} \
+             face; {} tips seated on their face's own point because the raster seat stood on \
+             the model side of it by more than the ball radius, {} balls with their centre on \
+             the model side of the face's plane; PLANNED contact disc (the ungrown ball in the seat plane) min {:.4} p50 {:.4} \
              max {:.4} mm, {below_at_face} below its own tip radius; raster seat from the face \
              min {:+.4} p50 {:+.4} max {:+.4} mm (positive = below a down-facing face). \
              Footprint (graded on the real surface inside the drawn ball): {} discs graded, {} \
@@ -3204,6 +3243,8 @@ fn print_sweep_disclosure(
             emission.tips_trimmed_to_seat,
             emission.shaft_members_trimmed_to_seat,
             emission.tips_trimmed_without_a_measured_face,
+            emission.tips_moved_onto_face,
+            emission.tips_ball_beyond_face,
             disc.0,
             disc.1,
             disc.2,
@@ -3254,14 +3295,19 @@ fn print_sweep_disclosure(
         let contact = &report.seat_contact;
         if contact.enabled {
             println!(
-                "[sweep {model}] real contact: {} seated tips measured; planned {:.4} mm2, real \
-                 {:.4} mm2 at the ungrown ball ({} short of plan) and {:.4} mm2 at the drawn ball; \
-                 {} balls grown (largest x{:.3}, limit {:.4} mm radius) in {} round(s); {} held \
-                 below the limit so the ball's lowest point stays on its shaft ({} of them left \
-                 short by it); {} still short of plan; {} balls whose lowest point stood outside \
-                 their shaft as planned given a collar that holds it{}",
+                "[sweep {model}] real contact: {} seated tips measured; the load needs {:.4} mm2 \
+                 (the profile balls plan {:.4} mm2), real {:.4} mm2 at the ungrown ball ({} short \
+                 of the need) and {:.4} mm2 at the drawn ball; {} balls grown (largest x{:.3}, \
+                 limit {:.4} mm radius) in {} round(s); {} held below the limit so the ball's \
+                 lowest point stays on its shaft ({} of them left short by it); {} left short by \
+                 the ball-to-shaft ratio and {} by a feature narrower than the load's contact; \
+                 {} profile balls past their feature's chord and {} past the ratio (kept at the \
+                 owner's size: no ball is drawn under it); {} still short of \
+                 the need; {} balls whose lowest point \
+                 stood outside their shaft as planned given a collar that holds it{}",
                 contact.tips_measured,
                 contact.planned_mm2,
+                contact.profile_disc_mm2,
                 contact.real_ungrown_mm2,
                 contact.short_ungrown,
                 contact.real_drawn_mm2,
@@ -3271,6 +3317,10 @@ fn print_sweep_disclosure(
                 contact.rounds,
                 contact.carried_bound,
                 contact.stopped_by_overhang,
+                contact.ratio_bound,
+                contact.feature_bound,
+                contact.ungrown_over_feature,
+                contact.ungrown_over_ratio,
                 contact.short.len(),
                 emission.tip_pole_collars,
                 if emission.tip_pole_collars_steeper_than_law > 0 {
@@ -3283,10 +3333,19 @@ fn print_sweep_disclosure(
                     String::new()
                 },
             );
+            for over in &contact.over_feature {
+                println!(
+                    "[sweep {model}] WARNING tip of arm {} draws a ball of {:.4} mm radius (a \
+                     contact disc {:.4} mm wide) on a feature whose narrowest cured chord at the \
+                     strike layer is {:.4} mm: the ball is the owner's ball for its neck, the \
+                     smallest it is drawn",
+                    over.strut, over.ball_radius_mm, over.disc_width_mm, over.chord_mm,
+                );
+            }
             for short in &contact.short {
                 println!(
                     "[sweep {model}] WARNING tip of arm {} has {:.4} mm2 of real contact against \
-                     {:.4} mm2 planned ({:.1}%), ball {:.4} mm (planned {:.4} mm): {}",
+                     {:.4} mm2 needed ({:.1}%), ball {:.4} mm (profile ball {:.4} mm): {}",
                     short.strut,
                     short.real_mm2,
                     short.planned_mm2,
@@ -3488,6 +3547,28 @@ fn print_sweep_disclosure(
             lip.arms_graded_after,
             lip.over_limit_after.len(),
         );
+        // ARMS THAT HELD NOTHING (round 6, 2026-10-14): dropped, never kept as a
+        // nub that touches nothing. The load they were seated for is not carried.
+        println!(
+            "[sweep {model}] unheld births: {} arms dropped because their tip touches the model \
+             nowhere, their lean's does not either and nothing rests on them; load seated for \
+             and not carried {:.6} mm2",
+            lip.unheld.len(),
+            lip.unheld.iter().map(|unheld| unheld.load_mm2).sum::<f64>(),
+        );
+        for unheld in &lip.unheld {
+            println!(
+                "[sweep {model}] WARNING arm {} dropped: a birth of {:.6} mm2 at \
+                 ({:.3}, {:.3}, {:.3}) is left unheld, because no contact its tip or its lean \
+                 could make reaches it (the tip touched the model nowhere); its load is not \
+                 carried",
+                unheld.arm,
+                unheld.load_mm2,
+                unheld.seat_mm[0],
+                unheld.seat_mm[1],
+                unheld.seat_mm[2],
+            );
+        }
         // THE DRAWN SOLID OF EVERY DESCENT (fix/drawn-solid-clearance,
         // 2026-10-04): path-hit witnesses that the up-sweep read each
         // descent's solid against the model, and that the test bit.
@@ -4197,13 +4278,23 @@ fn print_sweep_disclosure(
     );
     for warning in lane.warnings.iter().take(20) {
         println!(
-            "[sweep {model}]   unbraced_run_over_limit: arm {} layers {}..{} runs {:.3} mm \
-             against a limit of {:.3} mm; refused by: {}; descent last changed by: {}",
+            "[sweep {model}]   {}: arm {} layers {}..{} runs {:.3} mm \
+             against a limit of {:.3} mm{}; refused by: {}; descent last changed by: {}",
+            if warning.neck_share >= 1.0 {
+                "foot_neck_over_limit"
+            } else {
+                "unbraced_run_over_limit"
+            },
             warning.strut_id,
             warning.k_lo,
             warning.k_top,
             warning.length_mm,
             warning.limit_mm,
+            if warning.neck_share > 0.0 {
+                format!(" (the model foot's neck and cone alone use {:.2} of the pixel)", warning.neck_share)
+            } else {
+                String::new()
+            },
             lane.refusal_notes.get(&warning.strut_id).map_or_else(
                 || {
                     "no rung recorded a refusal (the ladder saw it within its limit or ended \
@@ -4224,6 +4315,21 @@ fn print_sweep_disclosure(
                 .unwrap_or("not recorded"),
         );
     }
+    println!(
+        "[sweep {model}] model feet read through their neck: {} foot runs taken up by the ladder; \
+         {} thickenings refused because the neck and cone take the whole pixel; {} thickenings \
+         written bay-local on a connected frame that held; {} kept raised from the foot because \
+         the frame did not hold; {} posts widened at a band's joints to the diagonal's radius; \
+         enlarge-foot rung: {} runs handed to the foot, {} feet enlarged, {} runs no foot held",
+        lane.foot_runs_read_through_neck,
+        lane.thicken_refused_neck,
+        lane.thicken_bay_local,
+        lane.carry_down_kept_frame,
+        lane.posts_raised_at_a_joint,
+        lane.foot_enlarge_tried,
+        lane.feet_enlarged,
+        lane.foot_enlarge_refused,
+    );
     println!(
         "[sweep {model}] slenderness p50 {:.1}:1 max {:.1}:1; overloaded arms {}; \
          model sections over X_ALLOWED {}; peel field {:?} (area {:?}, tilt {:?}); \

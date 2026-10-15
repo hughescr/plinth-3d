@@ -1150,8 +1150,11 @@ pub struct SweepArm {
     /// owner's ChituBox ball for this tip size (`ball factor × tip radius`).
     /// A value above that ball draws a larger ball with the SAME deepest
     /// point along the seat normal, so the seat depth does not change: the
-    /// new ball contains the old one and is tangent to it there. A value at or
-    /// below it is ignored. The sweep measures the model surface inside the
+    /// new ball contains the old one and is tangent to it there. A value
+    /// BELOW it (round 5, 2026-10-14) draws a smaller ball with the same
+    /// deepest point, down to the tip radius (a value under the tip radius is
+    /// ignored): the sweep asks for it where the owner's ball is wider than the
+    /// feature it touches. The sweep measures the model surface inside the
     /// ball and sets this (`plinth_sweep::contact_growth`); the planned
     /// contact ([`TipContactDisc::radius_mm`]) is always the ungrown ball's.
     pub contact_ball_radius_mm: Option<f64>,
@@ -1225,6 +1228,14 @@ pub struct SweepLowering {
     /// Of those, tips whose seat plane is the plane through the raster seat
     /// because no carried face was measured.
     pub tips_trimmed_without_a_measured_face: usize,
+    /// Tips whose raster seat stood on the model side of their measured face
+    /// by more than the ball radius, and were seated on the face's own point
+    /// (round 6; every one of them had its ball beyond the face before).
+    pub tips_moved_onto_face: usize,
+    /// Tips whose ball CENTRE stands on the model side of their measured
+    /// face's plane as drawn (a grazing axis can leave a ball partly under
+    /// the face it carries; one the move did not reach would be wholly so).
+    pub tips_ball_beyond_face: usize,
     /// Every tip's CONTACT DISC radius as the trim leaves it: the circle the
     /// seat plane cuts through the emitted ball, `sqrt(R² − d²)` for a ball
     /// centre `d` from the plane, in arm order. Zero where the ball does not
@@ -1294,6 +1305,9 @@ pub struct SweepLowering {
     /// column at the tip radius. Zero on every sweep field; a nonzero count is
     /// a caller defect, published rather than hidden.
     pub arms_without_profile: usize,
+    /// Knee spheres written where a member's chained frusta turn by more than
+    /// a pixel of their section ([`knee_spheres`], round 6).
+    pub knee_spheres: usize,
     /// **The support resin as EMITTED**, in mm³: the solid volume of every
     /// primitive written — tip balls (less the cap beyond their seat plane),
     /// tapers, chained members and root flares — each measured from its own
@@ -1631,9 +1645,10 @@ fn lower_sweep_arms_of(
     // Where each arm's records stand, for the junction pass below.
     let mut arm_ends: Vec<usize> = Vec::with_capacity(arms.len());
     let mut junction_arms: Vec<junction::JunctionArm> = Vec::with_capacity(arms.len());
-    for arm in arms {
+    let landers = shallowest_landers(arms);
+    for (index, arm) in arms.iter().enumerate() {
         let arm_start = out.primitives.len();
-        let lowered = lower_one_sweep_arm(arm, config, plate, &mut out.primitives);
+        let lowered = lower_one_sweep_arm(arm, config, plate, landers[index], &mut out.primitives);
         let emitted = !matches!(
             lowered.outcome,
             ArmOutcome::ZeroLength | ArmOutcome::InvalidGeometry
@@ -1684,6 +1699,8 @@ fn lower_sweep_arms_of(
                 .push(seat.raster_seat_offset_mm);
             out.tips_trimmed_to_seat += 1;
             out.tips_trimmed_without_a_measured_face += usize::from(!seat.face_measured);
+            out.tips_moved_onto_face += usize::from(seat.moved_onto_face);
+            out.tips_ball_beyond_face += usize::from(seat.ball_beyond_face);
             out.tips_at_law_minimum += usize::from(seat.at_law_minimum);
         }
         if let Some(foot) = lowered.model_foot {
@@ -1812,6 +1829,16 @@ fn lower_sweep_arms_of(
             out.primitives = rebuilt;
         }
     }
+    // THE KNEES (round 6, 2026-10-14): a sphere at every vertex where two
+    // chained frusta of a member turn by more than a pixel of their section.
+    // After the junction pass (which draws the bends of landed junctions) and
+    // before the raft, so they are part of the arms' own solid for everything
+    // that reads the finished records.
+    let knees = knees_after(&out.primitives, config.pixel_pitch_mm);
+    out.knee_spheres = knees.len();
+    if !knees.is_empty() {
+        out.primitives = insert_knees(std::mem::take(&mut out.primitives), knees);
+    }
     // THE RAFT (fix/sweep-raft, 2026-09-29): one pad under every plate foot,
     // MST bridges between the pads, planned ONCE for the whole field from the
     // feet the arms actually emitted, and appended after every support record
@@ -1862,10 +1889,12 @@ fn lower_hull_reference(
     let mut out: Vec<SupportPrimitive> = Vec::with_capacity(primitives.len());
     let mut reference_arms: Vec<junction::JunctionArm> = Vec::with_capacity(arms.len());
     let mut from = 0;
+    let landers = shallowest_landers(arms);
+    let reference_landers = shallowest_landers(reference);
     for (index, arm) in arms.iter().enumerate() {
         let end = arm_ends[index];
         let start = out.len();
-        if reference[index] == *arm {
+        if reference[index] == *arm && landers[index] == reference_landers[index] {
             out.extend_from_slice(&primitives[from..end]);
             reference_arms.push(junction::JunctionArm {
                 landed: junction_arms[index].landed,
@@ -1874,7 +1903,13 @@ fn lower_hull_reference(
                     .map(|(first, len)| (start + (first - from), len)),
             });
         } else {
-            let lowered = lower_one_sweep_arm(&reference[index], config, plate, &mut out);
+            let lowered = lower_one_sweep_arm(
+                &reference[index],
+                config,
+                plate,
+                reference_landers[index],
+                &mut out,
+            );
             let emitted = !matches!(
                 lowered.outcome,
                 ArmOutcome::ZeroLength | ArmOutcome::InvalidGeometry
@@ -1889,6 +1924,119 @@ fn lower_hull_reference(
     }
     (out, reference_arms)
 }
+
+/// **The knees: a sphere where a member bends** (round 6, 2026-10-14; the owner
+/// on picture 28: "probably with a ball joint if the cones meet at an angle").
+///
+/// Two chained frusta of one member (the second a `Member`, ending where the first
+/// begins on the same point to a micron) that turn by `theta` leave the outer side
+/// of the bend open: their flat end rings meet at an angle. Where the section
+/// `r = max(r_end of the first, r_start of the second)` turns `r sin(theta)` over
+/// more than one registered XY pixel, the opening prints, and a sphere of radius
+/// `r` at the vertex closes it. The radius is the larger section there and
+/// nothing is chosen.
+///
+/// **It cannot reach anything the member's own tube does not.** The sweep's
+/// clearance readers model a member as the tube of radius `rho(t)` about its axis
+/// (distance to the axis minus the radius there), and the axis point at the
+/// vertex has radius `r` in both frusta, so a sphere of radius `r` about that
+/// point lies inside the tube the readers already checked. Pairs shorter than a
+/// pixel of axis are not bends, and records of different arms never share a
+/// vertex to a micron. One batched scan over the finished records.
+fn knee_spheres(primitives: &[SupportPrimitive], pixel_mm: f64) -> Vec<SupportPrimitive> {
+    knees_after(primitives, pixel_mm)
+        .into_iter()
+        .map(|(_, sphere)| sphere)
+        .collect()
+}
+
+/// The knee spheres with the index of the record each stands after (the first of
+/// the two frusta that meet at it), so [`insert_knees`] writes each one into its
+/// own member's run of records, as a head's joint sphere is: a reader that takes
+/// a member as the records from its ball to its foot sees the knee in it.
+fn knees_after(primitives: &[SupportPrimitive], pixel_mm: f64) -> Vec<(usize, SupportPrimitive)> {
+    let mut knees: Vec<(usize, SupportPrimitive)> = Vec::new();
+    for (index, pair) in primitives.windows(2).enumerate() {
+        let (a, b) = (&pair[0], &pair[1]);
+        if !(matches!(
+            a.segment_kind,
+            SupportSegmentKind::ContactTaper | SupportSegmentKind::Member
+        ) && b.segment_kind == SupportSegmentKind::Member)
+        {
+            continue;
+        }
+        let a_start = a.start_mm.map(Finite::get);
+        let a_end = a.end_mm.map(Finite::get);
+        let b_start = b.start_mm.map(Finite::get);
+        let b_end = b.end_mm.map(Finite::get);
+        if geom_kernel::vec3::norm(geom_kernel::vec3::sub(a_end, b_start)) > KNEE_JOIN_TOLERANCE_MM
+        {
+            continue;
+        }
+        let along_a = geom_kernel::vec3::sub(a_end, a_start);
+        let along_b = geom_kernel::vec3::sub(b_end, b_start);
+        let (length_a, length_b) = (
+            geom_kernel::vec3::norm(along_a),
+            geom_kernel::vec3::norm(along_b),
+        );
+        if !(length_a.is_finite()
+            && length_b.is_finite()
+            && length_a >= pixel_mm
+            && length_b >= pixel_mm)
+        {
+            continue;
+        }
+        let cosine = (geom_kernel::vec3::dot(along_a, along_b) / (length_a * length_b))
+            .clamp(-1.0, 1.0);
+        let radius = a.end_radius_mm.get().max(b.start_radius_mm.get());
+        let outer_offset = radius * cosine.acos().sin();
+        if outer_offset.is_nan() || outer_offset <= pixel_mm {
+            continue;
+        }
+        let geometry = SphereGeometry::joint(a.end_mm);
+        let Ok(sphere_radius) = positive(radius) else {
+            continue;
+        };
+        let Ok((start_mm, end_mm)) = geometry.canonical_poles(sphere_radius) else {
+            continue;
+        };
+        knees.push((
+            index,
+            SupportPrimitive {
+                segment_kind: SupportSegmentKind::JointSphere,
+                start_mm,
+                end_mm,
+                start_radius_mm: sphere_radius,
+                end_radius_mm: sphere_radius,
+                contact_depth_mm: None,
+                ring_normal: FrustumRingNormal::SegmentAxis,
+                sphere_geometry: Some(geometry),
+                seat_trim: None,
+            },
+        ));
+    }
+    knees
+}
+
+/// Write each knee sphere into `primitives` straight after the record it stands
+/// after ([`knees_after`]), keeping the order of everything else.
+fn insert_knees(primitives: Vec<SupportPrimitive>, knees: Vec<(usize, SupportPrimitive)>) -> Vec<SupportPrimitive> {
+    let mut rebuilt = Vec::with_capacity(primitives.len() + knees.len());
+    let mut knees = knees.into_iter().peekable();
+    for (index, primitive) in primitives.into_iter().enumerate() {
+        rebuilt.push(primitive);
+        while knees.peek().is_some_and(|(after, _)| *after == index) {
+            if let Some((_, sphere)) = knees.next() {
+                rebuilt.push(sphere);
+            }
+        }
+    }
+    rebuilt
+}
+
+/// Two records meet when their shared vertex agrees to this: a tenth of a micron,
+/// float noise of the one point both were cut at, never a physical allowance.
+const KNEE_JOIN_TOLERANCE_MM: f64 = 1.0e-4;
 
 /// The solid one emitted record encloses, in mm³, from its own fields.
 ///
@@ -2048,6 +2196,15 @@ struct TipSeat {
     /// measured.
     trim: Option<crate::SeatTrim>,
     face_measured: bool,
+    /// The raster seat stood on the model side of the measured face by more
+    /// than the ball radius, and the tip was seated on the face's own point
+    /// instead (`seat_tip`).
+    moved_onto_face: bool,
+    /// The ball's CENTRE stands on the model side of the measured face's
+    /// plane (a tip the move above did not reach, or a grazing axis whose
+    /// ball is partly under the face): counted so the owner can see how many
+    /// balls sit beyond the face they carry.
+    ball_beyond_face: bool,
     /// The PLANNED contact disc: the ungrown ball's section in the seat plane,
     /// the area the seat was sized for. Filled by the caller once the ball
     /// exists.
@@ -2892,6 +3049,106 @@ fn drawn_chords(
     spans
 }
 
+/// **THE NECK IS THE FIRST DRAWN RADIUS, AND A HEAD CONE CARRIES IT TO THE SHAFT**
+/// (round 6, 2026-10-14; the owner's picture 31: a 0.067 mm ball on a much
+/// fatter flat-topped post, and picture 28's "tapering as they head up/down").
+///
+/// The shaft leaves its contact ball at the neck's radius `start_radius` AT the
+/// ball's centre. Where the first span starts wider than the neck (the section
+/// asked for at the very top of the post stands above the tip's own: a head
+/// minimum, a slenderness width, the joint-sized running maximum of a head the
+/// lowering cannot draw: no load lands in the first layer, whose carried load is
+/// the tip's own), that wider value used to be drawn as a flat top the ball
+/// stood on. It is drawn as the head cone of the owner's profile instead: from
+/// the neck, linear in the axis, to the section the shaft has `head_z_mm` of
+/// height down (his `supporttiplength` at the neck's size, 1.5 to 3.0 mm, taken
+/// along the axis), and the shaft is unchanged from there. A cone widening going
+/// down faces up and prints at any slope. Between the centre and the cone's end
+/// the section is the cone's, narrower than the section the first span asked for
+/// there: the top of a post carries almost none of its sway (the cantilever's
+/// weight is `(l - x)^3`), and nothing lands there. A span that already starts at
+/// the neck is untouched, bit for bit; a shaft shorter than the cone is one cone.
+///
+/// **A LOAD THAT LANDS INSIDE THE CONE ENDS IT** (round 6 review): the cone
+/// replaces only the minimum the tip's own head asked for, never the section a
+/// landed member's load needs. `lander_z_mm` is the height of the shallowest
+/// member that lands on this shaft; the cone ends one layer under it
+/// (`layer_height_mm`: the ledger's step begins in the layer the lander ends
+/// in), at the section the ledger has there, and the ledger is drawn below
+/// unchanged. The drawn section is therefore at least the ledger at and under
+/// every landing, whatever the cone does above it (`max(E, D)`: the head's own
+/// shape never lowers a carried load's section).
+fn head_cone_from_the_neck(
+    spans: &mut Vec<DrawnSpan>,
+    start_radius: f64,
+    head_z_mm: f64,
+    lander_z_mm: Option<f64>,
+    layer_height_mm: f64,
+) {
+    let (Some(first), Some(last)) = (spans.first().copied(), spans.last().copied()) else {
+        return;
+    };
+    if !(start_radius.is_finite()
+        && start_radius > 0.0
+        && head_z_mm.is_finite()
+        && head_z_mm > ZERO_LENGTH_MM
+        && first.top_radius_mm > start_radius * (1.0 + PROFILE_RELATIVE_SLACK))
+    {
+        return;
+    }
+    let top_z = first.top_z_mm;
+    let mut cone_end_z = (top_z - head_z_mm).max(last.bottom_z_mm);
+    if let Some(lander_z) = lander_z_mm.filter(|z| z.is_finite()) {
+        cone_end_z = cone_end_z.max(lander_z - layer_height_mm.max(0.0));
+    }
+    if top_z - cone_end_z <= ZERO_LENGTH_MM {
+        return;
+    }
+    // The wider section any span has at the cone's end (a shoulder there reads the
+    // wide side: the cone must not end under what stands below it).
+    let radius_at = |z: f64| -> f64 {
+        spans
+            .iter()
+            .filter(|span| z <= span.top_z_mm + ZERO_LENGTH_MM && z >= span.bottom_z_mm - ZERO_LENGTH_MM)
+            .map(|span| {
+                let drop = span.top_z_mm - span.bottom_z_mm;
+                if drop <= ZERO_LENGTH_MM {
+                    span.top_radius_mm.max(span.bottom_radius_mm)
+                } else {
+                    span.top_radius_mm
+                        + (span.bottom_radius_mm - span.top_radius_mm) * ((span.top_z_mm - z) / drop)
+                }
+            })
+            .fold(0.0_f64, f64::max)
+    };
+    let end_radius = radius_at(cone_end_z).max(start_radius);
+    let mut drawn = vec![DrawnSpan {
+        top_z_mm: top_z,
+        bottom_z_mm: cone_end_z,
+        top_radius_mm: start_radius,
+        bottom_radius_mm: end_radius,
+    }];
+    for span in spans.iter() {
+        if span.bottom_z_mm >= cone_end_z - ZERO_LENGTH_MM {
+            continue;
+        }
+        if span.top_z_mm > cone_end_z + ZERO_LENGTH_MM {
+            let drop = span.top_z_mm - span.bottom_z_mm;
+            let at_cut = span.top_radius_mm
+                + (span.bottom_radius_mm - span.top_radius_mm) * ((span.top_z_mm - cone_end_z) / drop);
+            drawn.push(DrawnSpan {
+                top_z_mm: cone_end_z,
+                bottom_z_mm: span.bottom_z_mm,
+                top_radius_mm: at_cut,
+                bottom_radius_mm: span.bottom_radius_mm,
+            });
+        } else {
+            drawn.push(*span);
+        }
+    }
+    *spans = drawn;
+}
+
 /// The tip seat for one arm, by the law in `docs/physics.md` §9, bounded by
 /// the material that is actually there.
 ///
@@ -3022,14 +3279,6 @@ fn seat_tip(
     let axial_depth_mm = axial_mm * abs_cos;
     let normal_completion_mm = (target_depth_mm - axial_depth_mm).max(0.0);
     let depth_mm = axial_depth_mm + normal_completion_mm;
-    let seated = std::array::from_fn(|index| {
-        arm.seat_mm[index] - unit[index] * axial_mm - outward[index] * normal_completion_mm
-    });
-    // THE DELIVERED MINIMAL SEPARATING CUT at the seat plane — the disc the
-    // model surface actually takes through the emitted ball, which is what the
-    // area law has to be evaluated on. It is not `r_tip`, and it is measured
-    // here rather than assumed anywhere.
-    let cut_radius_mm = crate::contact::ball_cut_radius_mm(tip_radius_mm, depth_mm, ball_factor);
     // THE SEAT PLANE (fix/tip-trim, 2026-09-28): the carried face's own point
     // with the very normal the law just used, so the plane the ball is cut to
     // and the face the seat was measured against are one face, never two. The
@@ -3042,6 +3291,29 @@ fn seat_tip(
         .unwrap_or(arm.seat_mm);
     let trim = crate::SeatTrim::new(plane_point, outward).ok();
     let raster_seat_offset_mm = trim.map_or(0.0, |trim| trim.support_side_distance_mm(arm.seat_mm));
+    // **A TIP WHOSE RASTER SEAT STANDS ON THE MODEL SIDE OF ITS FACE BY MORE
+    // THAN ITS BALL RADIUS IS SEATED ON THE FACE** (round 6, 2026-10-14,
+    // `NUB-CLAW.md` part 2). The seat is a raster cell's centre at a layer's
+    // mid-plane; where the feature is narrower than a cell (the Deinonychus
+    // claw's tip, 0.245 mm thick over a 0.05 mm cell) the cell's column is
+    // not carried and the seat lands on the model's far side: arm 143's ball
+    // sat 0.137 mm INSIDE the claw, on its upper face, and its head cone ran
+    // 0.08 mm through it. The ball that seat law drives into the model from
+    // there is on the wrong side of the face (and `seated_ball` then dropped
+    // the face's plane for the raster plane, so nothing measured it). The tip
+    // is put on the face's own point instead, and the shaft runs from the
+    // ball to the base as ever, so the arm descends again from there.
+    let ball_radius_mm = ball_factor * tip_radius_mm;
+    let moved_onto_face = face_measured && raster_seat_offset_mm < -ball_radius_mm;
+    let origin = if moved_onto_face { plane_point } else { arm.seat_mm };
+    let seated = std::array::from_fn(|index| {
+        origin[index] - unit[index] * axial_mm - outward[index] * normal_completion_mm
+    });
+    // THE DELIVERED MINIMAL SEPARATING CUT at the seat plane — the disc the
+    // model surface actually takes through the emitted ball, which is what the
+    // area law has to be evaluated on. It is not `r_tip`, and it is measured
+    // here rather than assumed anywhere.
+    let cut_radius_mm = crate::contact::ball_cut_radius_mm(tip_radius_mm, depth_mm, ball_factor);
     (
         seated,
         TipSeat {
@@ -3051,9 +3323,11 @@ fn seat_tip(
             ball_factor,
             trim,
             face_measured,
+            moved_onto_face,
+            ball_beyond_face: false,
             contact_disc_radius_mm: 0.0,
             drawn_ball_radius_mm: 0.0,
-            raster_seat_offset_mm,
+            raster_seat_offset_mm: if moved_onto_face { 0.0 } else { raster_seat_offset_mm },
             // `law_depth_mm` is a `max` over three terms of which the
             // rasterisation allowance is one, so it can never be below the
             // allowance; `<=` is equality.
@@ -3097,6 +3371,8 @@ fn seated_ball(
     // would keep nothing or everything. Such a tip falls back to the raster
     // seat's own plane with the same normal, and is counted as unmeasured.
     if let Some(trim) = tip_seat.trim {
+        tip_seat.ball_beyond_face =
+            tip_seat.face_measured && trim.support_side_distance_mm(center) < 0.0;
         if trim.support_side_distance_mm(center).abs() >= ball_radius_mm && tip_seat.face_measured {
             tip_seat.trim = crate::SeatTrim::new(arm.seat_mm, trim.outward_normal()).ok();
             tip_seat.face_measured = false;
@@ -3113,10 +3389,17 @@ fn seated_ball(
     // seat plane: it contains the ungrown ball and is tangent to it there. The
     // planned disc above stays the ungrown ball's: it is the area the seat was
     // sized for, and the sweep grows the ball until the real contact reaches it.
+    //
+    // THE REDUCED BALL (round 5, 2026-10-14): a request BELOW the owner's ball
+    // keeps the same deepest point and draws the smaller ball, so the contact
+    // disc it cuts in the seat plane is narrower; the sweep asks for it where
+    // the owner's ball is wider than the feature it touches. It is never
+    // narrower than its own shaft end (`tip_radius_mm`): a ball thinner than
+    // the rod under it is no ball.
     tip_seat.drawn_ball_radius_mm = ball_radius_mm;
-    let grown = arm
-        .contact_ball_radius_mm
-        .filter(|grown| grown.is_finite() && *grown > ball_radius_mm);
+    let grown = arm.contact_ball_radius_mm.filter(|grown| {
+        grown.is_finite() && *grown >= tip_radius_mm && (*grown - ball_radius_mm).abs() > 1e-12
+    });
     let center = match grown {
         Some(grown) => {
             let normal = tip_seat.trim.map_or(unit, |trim| trim.outward_normal());
@@ -3229,6 +3512,13 @@ pub struct TipContactDisc {
     pub post_top_mm: [f64; 3],
     /// The head's joint radius, `None` for a straight arm.
     pub head_joint_radius_mm: Option<f64>,
+    /// Whether the seat plane above is the carried FACE's plane. `false`: no
+    /// face was measured, or its plane passed clear of the ball, and the plane
+    /// is the raster seat's own. Such a tip says nothing about where the
+    /// model's surface is, so a reader that exempts the stretch of shaft
+    /// within the face's gap exempts only the ball ([`crate::member_clearance`]
+    /// in the sweep: an unknown zone exempts nothing).
+    pub face_measured: bool,
 }
 
 /// **The contact disc every seated arm's tip will deliver**, computed by the
@@ -3291,6 +3581,7 @@ pub fn tip_contact_discs(
                 ball_centre_mm: center,
                 post_top_mm: headed.as_ref().map_or(center, |head| head.head.joint_mm),
                 head_joint_radius_mm: headed.as_ref().map(|head| head.head.joint_radius_mm),
+                face_measured: tip_seat.face_measured,
             })
         })
         .collect())
@@ -3477,6 +3768,7 @@ pub fn model_foot_discs(
                 ball_centre_mm: ball.centre,
                 post_top_mm: ball.centre,
                 head_joint_radius_mm: None,
+                face_measured: ball.seat.face_measured,
             })
         })
         .collect())
@@ -3546,14 +3838,16 @@ pub fn tip_shaft_seat_bites(
     );
     let config = LoweringConfig::current(frame, layers, 1, 1)?.without_pole_collars();
     let mut scratch: Vec<SupportPrimitive> = Vec::new();
+    let landers = shallowest_landers(arms);
     Ok(arms
         .iter()
-        .map(|arm| {
+        .enumerate()
+        .map(|(index, arm)| {
             if !arm.seats_into_model {
                 return None;
             }
             scratch.clear();
-            let lowered = lower_one_sweep_arm(arm, config, plate_z, &mut scratch);
+            let lowered = lower_one_sweep_arm(arm, config, plate_z, landers[index], &mut scratch);
             let trim = lowered.seat.as_ref().and_then(|seat| seat.trim)?;
             shaft_seat_bite(arm, &scratch, trim, config)
         })
@@ -3801,10 +4095,92 @@ fn seat_angle_limit_deg(
     holds
 }
 
+/// **The height of the shallowest member that lands on each arm's shaft**
+/// (round 6 review), or `None`: the head cone ends above it
+/// ([`head_cone_from_the_neck`]), so a carried load's section is never replaced
+/// by the tip's own head.
+///
+/// A landed arm's end `P` lands on arm `A` when it stands inside `A`'s solid:
+/// its distance to `A`'s axis (the straight segment from `A`'s base to its seat,
+/// or to its joint for a headed arm) is at most `A`'s section at `P`'s height
+/// plus the lander's own end section. That is the solids touching, the one
+/// physical test; no tolerance is added.
+fn shallowest_landers(arms: &[SweepArm]) -> Vec<Option<f64>> {
+    let mut found: Vec<Option<f64>> = vec![None; arms.len()];
+    let landed: Vec<usize> = arms
+        .iter()
+        .enumerate()
+        .filter(|(_, arm)| arm.landing == SweepArmLanding::Landed)
+        .map(|(index, _)| index)
+        .collect();
+    if landed.is_empty() {
+        return found;
+    }
+    for (host_index, host) in arms.iter().enumerate() {
+        if host.radius_profile_mm.is_empty() {
+            continue;
+        }
+        let top = host.head.as_ref().map_or(host.seat_mm, |head| head.joint_mm);
+        let (z_low, z_high) = (host.base_mm[2], top[2]);
+        let rise = z_high - z_low;
+        if rise.is_nan() || rise <= ZERO_LENGTH_MM {
+            continue;
+        }
+        let axis = geom_kernel::vec3::sub(host.base_mm, top);
+        let axis_len_sq = geom_kernel::vec3::dot(axis, axis);
+        if axis_len_sq.is_nan() || axis_len_sq <= 0.0 {
+            continue;
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a profile's slot count is bounded by the layer count, exact in f64"
+        )]
+        let slots = host.radius_profile_mm.len() as f64;
+        let mut best: Option<f64> = None;
+        for &lander_index in &landed {
+            if lander_index == host_index {
+                continue;
+            }
+            let lander = &arms[lander_index];
+            let end = lander.base_mm;
+            // Strictly under the top (a landing on the top is no landing inside
+            // the cone) and not under the base.
+            if !(end[2] < z_high - ZERO_LENGTH_MM && end[2] >= z_low) {
+                continue;
+            }
+            let along = (geom_kernel::vec3::dot(geom_kernel::vec3::sub(end, top), axis)
+                / axis_len_sq)
+                .clamp(0.0, 1.0);
+            let nearest: [f64; 3] = std::array::from_fn(|index| top[index] + axis[index] * along);
+            let offset = geom_kernel::vec3::norm(geom_kernel::vec3::sub(end, nearest));
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a non-negative slot position floored to an index and clamped to the profile"
+            )]
+            let slot = (((end[2] - z_low) / rise * slots).floor().max(0.0) as usize)
+                .min(host.radius_profile_mm.len() - 1);
+            let host_radius = host.radius_profile_mm[slot];
+            let lander_radius = lander
+                .radius_profile_mm
+                .first()
+                .copied()
+                .unwrap_or(lander.tip_radius_mm)
+                .max(lander.tip_radius_mm);
+            if offset <= host_radius + lander_radius {
+                best = Some(best.map_or(end[2], |z| z.max(end[2])));
+            }
+        }
+        found[host_index] = best;
+    }
+    found
+}
+
 fn lower_one_sweep_arm(
     arm: &SweepArm,
     config: LoweringConfig,
     plate_z: f64,
+    lander_z_mm: Option<f64>,
     out: &mut Vec<SupportPrimitive>,
 ) -> ArmLowering {
     let delta: [f64; 3] = std::array::from_fn(|index| arm.base_mm[index] - arm.seat_mm[index]);
@@ -3986,6 +4362,7 @@ fn lower_one_sweep_arm(
                 ring_normal,
                 first_kind,
                 profile_top_z_mm: profile_top_z,
+                lander_z_mm,
             },
             config,
             staged,
@@ -4594,6 +4971,9 @@ struct DrawnShaft {
     /// The height the radius profile's top slot ends at: the seat for a
     /// straight arm, the joint for a headed one.
     profile_top_z_mm: f64,
+    /// The height of the shallowest member that lands on this shaft
+    /// ([`shallowest_landers`]), or `None`: the head cone ends above it.
+    lander_z_mm: Option<f64>,
 }
 
 /// Draw one member's shaft from `top` (the ball centre, or the seat of a member
@@ -4611,7 +4991,7 @@ fn push_drawn_shaft(
 ) -> Option<usize> {
     let top_z = shaft.top[2].get();
     let bottom_z = shaft.bottom[2].get();
-    let spans = drawn_spans(
+    let mut spans = drawn_spans(
         &arm.radius_profile_mm,
         arm.base_mm[2],
         shaft.profile_top_z_mm,
@@ -4619,6 +4999,59 @@ fn push_drawn_shaft(
         bottom_z,
         shaft.tip_radius.get(),
         shaft.root_radius.get(),
+    );
+    // THE NECK IS THE FIRST DRAWN RADIUS (round 6): the sweep's readers keep
+    // reading the ledger's chords ([`drawn_spans`], conservative: the ledger's
+    // value is the wider); the file leaves the ball at the neck.
+    //
+    // * A TIP whose first span stands past the owner's ball-to-neck range (more
+    //   than the top of his table, 1.5, times the neck) is not carrying its own
+    //   load there: it is a plateau (a head minimum, a slenderness width, the
+    //   joint-sized running maximum of a head the lowering cannot draw), and it is
+    //   drawn as the owner's head cone, his `supporttiplength` at the neck's size
+    //   (1.5 to 3.0 mm along the axis; the spans are in height).
+    // * Any other first span that starts past the neck widens to the ledger over
+    //   one layer, so the shaft still leaves the ball at the neck. The post under a
+    //   head leaves the certified joint sphere the same way (its neck is the
+    //   joint's radius, and the sphere is never narrower than what leaves it by
+    //   more than one layer), and is never given the owner's head cone: its
+    //   section is a real part of a load path.
+    let slot_z = if arm.radius_profile_mm.is_empty() {
+        0.0
+    } else {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a slot count bounded by the profile length is exact in f64"
+        )]
+        let slots = arm.radius_profile_mm.len() as f64;
+        (shaft.profile_top_z_mm - arm.base_mm[2]) / slots
+    };
+    let max_ratio = config
+        .tip_contact_profiles
+        .profiles()
+        .iter()
+        .map(plinth_core::TipContactProfile::ball_factor)
+        .fold(0.0_f64, f64::max);
+    let plateau = spans.first().map_or(0.0, |span| span.top_radius_mm);
+    let head_z = if shaft.first_kind == SupportSegmentKind::ContactTaper
+        && plateau > max_ratio * shaft.tip_radius.get()
+    {
+        let along = geom_kernel::vec3::norm(geom_kernel::vec3::sub(
+            shaft.top.map(Finite::get),
+            shaft.bottom.map(Finite::get),
+        ));
+        let axial_per_height = if top_z > bottom_z { along / (top_z - bottom_z) } else { 1.0 };
+        plinth_core::chitubox_tip_length_profiles().tip_length_mm(2.0 * shaft.tip_radius.get())
+            / axial_per_height.max(1.0)
+    } else {
+        slot_z
+    };
+    head_cone_from_the_neck(
+        &mut spans,
+        shaft.tip_radius.get(),
+        head_z,
+        shaft.lander_z_mm,
+        config.layer_height_mm.get(),
     );
     // A point on the straight axis at height `z`, by the same parameter the
     // spans were cut at, so a shared end is the same number on both spans.
@@ -5216,6 +5649,67 @@ mod shaft_seat_bite_tests {
             .collect()
     }
 
+    /// **A tip whose raster seat stands on the model side of its face is
+    /// seated on the face** (round 6, 2026-10-14, `NUB-CLAW.md` part 2;
+    /// Deinonychus arm 143, the claw's tip: the ball sat 0.137 mm inside the
+    /// claw on its upper face and the shaft ran through it). A down-facing face
+    /// at z = 5 with the model above it; the raster seat 0.6 mm inside the
+    /// model (more than the 0.45 mm ball). TEST: the ball centre is on the
+    /// support side of the face (below it), the face is the one measured (not
+    /// the raster plane), and the tip is where the same arm seated on the face
+    /// puts it; the shaft leaves the ball downward, away from the model.
+    /// CONTROLS: a seat 0.2 mm inside (within the ball radius) is not moved,
+    /// and a seat on the face is not moved. SABOTAGE (the move off, the ball put
+    /// back at the raster seat): the ball centre is above the face and the face
+    /// is replaced by the raster plane.
+    #[test]
+    fn a_tip_seated_inside_the_model_is_seated_on_its_face() {
+        use super::tip_contact_discs;
+        let down = [0.0, 0.0, -1.0];
+        let face = [0.0, 0.0, 5.0];
+        let with_face = |seat: [f64; 3]| {
+            let mut arm = arm(seat, down, down);
+            arm.seat_face_point_mm = Some(face);
+            arm
+        };
+        let discs = tip_contact_discs(
+            &[
+                with_face([0.0, 0.0, 5.6]),
+                with_face([0.0, 0.0, 5.2]),
+                with_face(face),
+            ],
+            &layers(),
+        )
+        .expect("a valid request");
+        let [far, inside, on] = [0, 1, 2].map(|at| discs[at].expect("every arm seats"));
+        // Height of the ball centre on the support side of the face (down).
+        let support_side = |centre: [f64; 3]| face[2] - centre[2];
+        assert!(far.face_measured, "the face is the one measured, not the raster plane");
+        assert!(
+            support_side(far.ball_centre_mm) >= -1e-9,
+            "the ball centre is on the support side: {:?}",
+            far.ball_centre_mm
+        );
+        assert!(
+            (far.ball_centre_mm[2] - on.ball_centre_mm[2]).abs() < 1e-9,
+            "seated where the arm seated on the face is: {:?} against {:?}",
+            far.ball_centre_mm,
+            on.ball_centre_mm
+        );
+        assert!(
+            far.ball_centre_mm[2] <= far.centre_mm[2] + 1e-9,
+            "the ball centre is not above the seat plane, so the shaft that leaves it downward \
+             starts clear of the model"
+        );
+        // CONTROLS.
+        assert!(inside.face_measured && on.face_measured);
+        assert!(
+            (inside.ball_centre_mm[2] - (on.ball_centre_mm[2] + 0.2)).abs() < 1e-9,
+            "a seat within the ball radius of the face is not moved: {:?}",
+            inside.ball_centre_mm
+        );
+    }
+
     /// Under a flat face a vertical arm keeps its whole section, and the
     /// derived limit is the angle the measured cut starts at: one degree
     /// inside it nothing outside the ball is cut, one degree past it the plane
@@ -5714,7 +6208,7 @@ mod headed_arm_tests {
         let layers = layers();
         let config = LoweringConfig::current(frame(), &layers, 1, 1).expect("config");
         let mut out = Vec::new();
-        let lowered = lower_one_sweep_arm(arm, config, 0.0, &mut out);
+        let lowered = lower_one_sweep_arm(arm, config, 0.0, None, &mut out);
         assert!(lowered.head.is_some(), "the head was drawn as a head");
         out
     }
@@ -5855,7 +6349,7 @@ mod headed_arm_tests {
         let layers = layers();
         let config = LoweringConfig::current(frame(), &layers, 1, 1).expect("config");
         let mut out = Vec::new();
-        let lowered = lower_one_sweep_arm(&arm, config, 0.0, &mut out);
+        let lowered = lower_one_sweep_arm(&arm, config, 0.0, None, &mut out);
         let drawn = lowered.head.expect("the head was drawn as a head");
         let joint_at = out
             .iter()
@@ -6650,6 +7144,109 @@ mod model_foot_tests {
         assert_eq!(none.model_feet_flat, 1);
         assert_eq!(none.arms_dropped_invalid_geometry, 0, "the arm still emits");
     }
+
+    /// The Member frusta of a lowered arm, bottom first, as
+    /// `(z bottom, z top, radius at the bottom, radius at the top)`.
+    fn member_spans(lowered: &SweepLowering) -> Vec<(f64, f64, f64, f64)> {
+        let mut spans: Vec<(f64, f64, f64, f64)> = lowered
+            .primitives
+            .iter()
+            .filter(|p| p.segment_kind == SupportSegmentKind::Member)
+            .map(|p| {
+                let (s, e) = (p.start_mm[2].get(), p.end_mm[2].get());
+                if s < e {
+                    (s, e, p.start_radius_mm.get(), p.end_radius_mm.get())
+                } else {
+                    (e, s, p.end_radius_mm.get(), p.start_radius_mm.get())
+                }
+            })
+            .filter(|span| span.1 - span.0 > 1.0e-9)
+            .collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        spans
+    }
+
+    /// The first downward-facing annular step in `spans` that the printer
+    /// cannot bridge: two frusta that meet at a plane where the upper one starts
+    /// wider than the lower one ends by MORE than `max_step_mm`, the radius one
+    /// layer may overhang its neighbour below (the lean law's `h * cot(theta_sat)`,
+    /// the step the load-step cones are drawn at). A staircase of steps no larger
+    /// than that is a cone to the printer.
+    fn first_downward_step(
+        spans: &[(f64, f64, f64, f64)],
+        max_step_mm: f64,
+    ) -> Option<(f64, f64, f64)> {
+        spans.windows(2).find_map(|pair| {
+            let (low, up) = (pair[0], pair[1]);
+            ((up.0 - low.1).abs() < 1.0e-9 && up.2 > low.3 + max_step_mm * (1.0 + 1.0e-6))
+                .then_some((up.0, up.2, low.3))
+        })
+    }
+
+    /// **A bay-local widening is drawn as a cone, never as a step** (flare lane,
+    /// challenger 7). A post that is thin under a bay and wide through it (0.06
+    /// mm below layer 30, 0.30 mm from the bay, narrowing again above) is lowered
+    /// by the production `drawn_chords`, `merge_short_spans` and
+    /// `cone_the_shoulders`: when the profile widens by a RAMP at the permitted
+    /// underside slope, every widening is a frustum no steeper than the lean
+    /// law's slope and no two frusta meet in a downward-facing step. The same
+    /// post with the bay's width written as a bare step (no ramp) is the profile
+    /// the challenger reproduced, and the lowering draws the step there: the
+    /// check below finds it, so it is a check that can fail.
+    #[test]
+    fn a_widening_under_a_bay_is_drawn_as_a_cone_and_a_bare_step_is_found() {
+        let slope = drawn_span_rules().expect("the registry").cone_slope;
+        let per_layer = (6.0 - 1.0) / 100.0;
+        let gain = slope * per_layer;
+        // (a handful of layers: the cast is exact)
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let ramp_layers = ((0.30_f64 - 0.06) / gain).ceil() as usize;
+        let with_ramp: Vec<f64> = (0..100)
+            .map(|j| {
+                let tip = 0.1;
+                if j < 30 {
+                    0.06
+                } else if j < 30 + ramp_layers {
+                    (0.06 + gain * (j - 30 + 1) as f64).min(0.30)
+                } else if j < 70 {
+                    0.30
+                } else {
+                    0.30 + (tip - 0.30) * (j - 70) as f64 / 29.0
+                }
+            })
+            .collect();
+        let bare: Vec<f64> = (0..100)
+            .map(|j| if j < 30 { 0.06 } else if j < 70 { 0.30 } else { 0.1 })
+            .collect();
+        let draw = |profile: Vec<f64>| {
+            let mut arm = landed_arm(foot());
+            arm.radius_profile_mm = profile;
+            member_spans(&lower(&[arm]))
+        };
+        let ramped = draw(with_ramp);
+        let max_step = gain;
+        assert!(
+            first_downward_step(&ramped, max_step).is_none(),
+            "the ramped widening has a downward-facing step past one layer's overhang: {:?}",
+            first_downward_step(&ramped, max_step)
+        );
+        for span in &ramped {
+            let rise = span.1 - span.0;
+            assert!(
+                (span.3 - span.2) / rise <= slope * (1.0 + 1.0e-6),
+                "a frustum widens upward faster than the permitted underside slope {slope}: {span:?}"
+            );
+        }
+        assert!(
+            ramped.iter().any(|span| span.2.max(span.3) > 0.29),
+            "anti-vacuity: the bay's width is drawn"
+        );
+        let stepped = draw(bare);
+        assert!(
+            first_downward_step(&stepped, max_step).is_some(),
+            "the check finds the bare step the lowering draws for it: {stepped:?}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -6785,5 +7382,142 @@ mod pole_collar_tests {
         let past = [3.0, 0.0, -1.0];
         let (_, steeper) = pole_collar(centre, 0.8947, &shaft(centre, past, 0.671)).expect("71.6 degrees");
         assert!(steeper);
+    }
+
+    /// Two chained frusta that meet at `(0, 0, 8)` and turn by `bend_deg`, the first
+    /// ending at radius `r_end` and the second starting at `r_start`.
+    fn bent(bend_deg: f64, r_end: f64, r_start: f64, length: f64) -> Vec<SupportPrimitive> {
+        let vertex = [0.0, 0.0, 8.0];
+        let turn = bend_deg.to_radians();
+        let after = [length * turn.sin(), 0.0, 8.0 - length * turn.cos()];
+        vec![
+            frustum(
+                SupportSegmentKind::ContactTaper,
+                finite3([0.0, 0.0, 8.0 + length]).unwrap(),
+                finite3(vertex).unwrap(),
+                positive(r_end).unwrap(),
+                positive(r_end).unwrap(),
+                None,
+                FrustumRingNormal::SegmentAxis,
+            ),
+            frustum(
+                SupportSegmentKind::Member,
+                finite3(vertex).unwrap(),
+                finite3(after).unwrap(),
+                positive(r_start).unwrap(),
+                positive(r_start).unwrap(),
+                None,
+                FrustumRingNormal::SegmentAxis,
+            ),
+        ]
+    }
+
+    /// **T4, the knees** (round 6): a bend that turns `r sin(turn)` over more than one
+    /// registered XY pixel gets a sphere at the vertex of radius the larger section
+    /// there (Bat_Cat_Owl recs 131 -> 132: r 0.504, 26 degrees). A straight run, a
+    /// bend under a pixel, and a pair too short to be a bend get none.
+    ///
+    /// SABOTAGE: removing the `knee_spheres` call before the raft (or its push)
+    /// leaves the first case with no sphere.
+    #[test]
+    fn a_bend_over_a_pixel_gets_a_knee_sphere_of_the_larger_section() {
+        let pixel = 0.0189;
+        let knees = knee_spheres(&bent(26.3, 0.5044, 0.5044, 1.0), pixel);
+        assert_eq!(knees.len(), 1, "{knees:?}");
+        assert_eq!(knees[0].segment_kind, SupportSegmentKind::JointSphere);
+        assert!((knees[0].start_radius_mm.get() - 0.5044).abs() < 1e-12);
+        let centre: [f64; 3] = std::array::from_fn(|axis| {
+            0.5 * (knees[0].start_mm[axis].get() + knees[0].end_mm[axis].get())
+        });
+        assert!(geom_kernel::vec3::dist(centre, [0.0, 0.0, 8.0]) < 1e-9, "{centre:?}");
+        // The larger of the two sections meeting there.
+        let wider_below = knee_spheres(&bent(26.3, 0.31, 0.5044, 1.0), pixel);
+        assert!((wider_below[0].start_radius_mm.get() - 0.5044).abs() < 1e-12);
+        let wider_above = knee_spheres(&bent(26.3, 0.5044, 0.31, 1.0), pixel);
+        assert!((wider_above[0].start_radius_mm.get() - 0.5044).abs() < 1e-12);
+        // The sphere is written between the two frusta of its own member, as a head's
+        // joint sphere is, and nothing else moves.
+        let pieces = bent(26.3, 0.5044, 0.5044, 1.0);
+        let placed = insert_knees(pieces.clone(), knees_after(&pieces, pixel));
+        let kinds: Vec<SupportSegmentKind> = placed.iter().map(|p| p.segment_kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                SupportSegmentKind::ContactTaper,
+                SupportSegmentKind::JointSphere,
+                SupportSegmentKind::Member
+            ]
+        );
+        assert_eq!(placed[0], pieces[0]);
+        assert_eq!(placed[2], pieces[1]);
+        // Controls: no turn, a turn under a pixel of section, and pieces under a pixel long.
+        assert!(knee_spheres(&bent(0.0, 0.5, 0.5, 1.0), pixel).is_empty());
+        assert!(knee_spheres(&bent(2.0, 0.3, 0.3, 1.0), pixel).is_empty(), "0.3 sin(2 deg) = 0.0105 < 0.0189");
+        assert!(knee_spheres(&bent(40.0, 0.5, 0.5, 0.01), pixel).is_empty());
+        // Two arms never share a vertex: a gap in the chain is no knee.
+        let mut apart = bent(40.0, 0.5, 0.5, 1.0);
+        apart[1].start_mm = finite3([0.0, 0.0, 7.9]).unwrap();
+        assert!(knee_spheres(&apart, pixel).is_empty());
+    }
+
+    /// **A knee sphere stands inside the tube the clearance readers already check**
+    /// (`PROFILE-DESIGN.md` section 2 (3), challenger point 4). The sweep reads a
+    /// member as the tube of radius `rho(t)` about its axis, the distance to the
+    /// axis minus the radius there. The vertex is on both axes with radius `r` in
+    /// both frusta, so for any model point `P` the tube clearance is no more than
+    /// `|PV| - r`, the sphere's own: a joint the readers call clear cannot cross the
+    /// gap with its sphere. Checked on 3 sections and bends from 5 to 90 degrees,
+    /// 200 points each.
+    #[test]
+    fn a_knee_sphere_cannot_come_nearer_a_model_point_than_the_tube_already_checked() {
+        let vertex = [0.0, 0.0, 8.0];
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            #[expect(clippy::cast_precision_loss, reason = "a pseudo-random draw, not a measurement")]
+            let unit = (state >> 11) as f64 / (1_u64 << 53) as f64;
+            unit
+        };
+        for radius in [0.05, 0.3, 1.0] {
+            for bend in [5.0, 15.0, 26.3, 45.0, 70.0, 90.0] {
+                let pieces = bent(bend, radius, radius, 2.0);
+                let axes: Vec<([f64; 3], [f64; 3])> = pieces
+                    .iter()
+                    .map(|p| (p.start_mm.map(Finite::get), p.end_mm.map(Finite::get)))
+                    .collect();
+                let knee = knee_spheres(&pieces, 0.0189);
+                if knee.is_empty() {
+                    continue;
+                }
+                for _ in 0..200 {
+                    let point = [
+                        4.0 * next() - 2.0,
+                        4.0 * next() - 2.0,
+                        8.0 + 4.0 * next() - 2.0,
+                    ];
+                    let sphere = geom_kernel::vec3::dist(point, vertex) - radius;
+                    let tube = axes
+                        .iter()
+                        .map(|&(a, b)| {
+                            (0..=400)
+                                .map(|step| {
+                                    let t = f64::from(step) / 400.0;
+                                    let on_axis: [f64; 3] = std::array::from_fn(|axis| {
+                                        a[axis] + t * (b[axis] - a[axis])
+                                    });
+                                    geom_kernel::vec3::dist(point, on_axis) - radius
+                                })
+                                .fold(f64::INFINITY, f64::min)
+                        })
+                        .fold(f64::INFINITY, f64::min);
+                    assert!(
+                        tube <= sphere + 1e-9,
+                        "r {radius} bend {bend}: the tube reads {tube}, the sphere {sphere}"
+                    );
+                }
+            }
+        }
     }
 }

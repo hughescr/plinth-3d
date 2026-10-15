@@ -493,7 +493,7 @@ pub(crate) fn size(
     struts: &[SweepStrut],
     log: &RouteLog,
     sizing: SizingPolicy,
-    l_max: f64,
+    limit: &dyn Fn(usize, usize) -> f64,
 ) -> PerEventSizing {
     let layers = slices.len();
     let members = struts.len();
@@ -633,7 +633,7 @@ pub(crate) fn size(
                     routed_total += routed_here;
                     routed_largest = routed_largest.max(routed_here);
                 }
-                if routed_here > l_max {
+                if routed_here > limit(member, layer) {
                     let slot = triggers.entry(entry(member, layer)).or_insert(0.0);
                     *slot = slot.max(routed_here);
                 }

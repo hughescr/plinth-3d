@@ -46,7 +46,7 @@ pub(crate) fn straight(
         center_mm: [grid.center_x_mm(col), grid.center_y_mm(row)],
         kind: StrutKind::Arm,
         min_radius_mm: 0.0,
-        thickened_mm: Vec::new(),
+        thickened_mm: Vec::new(), foot_radius_mm: None,
         seat_on_strut: None,
         k_top,
         k_bottom: 0,
@@ -1103,42 +1103,67 @@ fn an_inadmissible_cheapest_descent_does_not_end_the_slenderness_search() {
     assert!(moved_to[0].is_leaned(), "the arm leans to its new root");
 }
 
-/// **THE SLENDERNESS REFUSAL KEEPS AN ARM ONLY WHERE THAT ARM IS A SUPPORT**
-/// (q12 regressions, 2026-10-12, `q12/REGRESSIONS.md`). The refusal trades
-/// the lean for the arm as it stands. On the Morel base that arm (44) was a
-/// stub one layer long onto the model wall beside its seat, tip off its face,
-/// and Q12 kept it in place of a 7.5 mm lean to the plate that the ladder had
-/// held before.
+/// The slab over the arm of the kept-arm tests (its underside at 10 mm, the
+/// arm's seat at (7.525, 7.525)) cut short at `x_max_mm`: the tip ball of a
+/// stub seated there overhangs the edge by a part of its disc, and a lean that
+/// tilts the ball back over the slab seats where the stub does not.
+fn slab_ending_at(x_max_mm: f64) -> plinth_mesh::Mesh {
+    boxes_mesh(&[([0.0, 0.0, 10.0], [x_max_mm, 15.0, 12.0])])
+}
+
+/// The edge at which the lean's tip seats (real contact within a pixel of its
+/// plan) and the stub's does not: 0.12 mm past the seat, on the side the lean
+/// tilts from. Read by the fixture's own contact reads (stub 0.0640 of 0.0679
+/// mm2, lean 0.0590 of 0.0604, a pixel 0.0025).
+const LEAN_SEATS_EDGE_MM: f64 = 7.645;
+
+/// **THE SLENDERNESS REFUSAL KEEPS THE STANDING ARM UNLESS THE LEAN SEATS WHERE
+/// THE ARM DOES NOT** (q12 regressions, 2026-10-12; joint round 5, 2026-10-14,
+/// `joint/CLAW-POST.md`). The refusal trades the lean for the arm as it
+/// stands. A SHAPE test of that arm (a one-layer stub on the model is "no
+/// support") took Bat_Cat_Owl arm 20's 40 degree lean, a 0.10 mm rod 3.4 times
+/// over its limit, in place of a stub whose tip touched the claw's 0.018 mm
+/// edge: the stub's contact was 0.0000 mm2 and so was the lean's.
 ///
 /// The configuration of the test above (law S = 95, the wall 0.305 mm from
-/// the cheapest descent, whose run trips the law). CONTROL: the arm stands as
-/// a straight post to the plate, and is kept, its lean refused. TEST: the same
-/// seat stands as a one-layer stub onto the model; the lean is taken, counted
-/// as taken for want of a support to keep. SABOTAGE (run by hand, 2026-10-12:
-/// refuse whenever `lean_too_slender`): the stub is kept (`moved` 0).
+/// the cheapest descent, whose run trips the law). CONTROLS: the arm stands as
+/// a straight post to the plate, and is kept, its lean refused; and the same
+/// seat stands as a one-layer stub onto the model, the tip seated on a wide
+/// slab: kept, its lean refused (the stub is a support by its contact, not
+/// by its length). TEST 1: the slab ends 0.12 mm past the seat, the stub's
+/// ball overhangs and the lean's seats: the lean is taken, counted as taken.
+/// TEST 2: the slab begins past the seat, neither tip reaches the face (arm
+/// 20): the stub is kept (a graze of the slab's edge is some contact). TEST 3
+/// (round 6): the slab begins out of reach of both balls, the stub touches
+/// nothing and so does the lean, so it is reported as holding nothing and is
+/// dropped by the caller (not kept as a nub). SABOTAGE (by hand, 2026-10-14: the shape test back, a one-layer stub on the
+/// model "is no support"): the stub CONTROL and TEST 2 lose the stub (`moved`
+/// 1); (2026-10-12: refuse whenever `lean_too_slender`) TEST 1 is kept (`moved`
+/// 0); (round 6: the nub rule off) TEST 3 reports nothing unheld.
 #[test]
-fn a_one_layer_stub_is_not_kept_in_place_of_a_lean() {
+fn a_stub_is_kept_in_place_of_a_lean_unless_the_lean_seats_where_it_does_not() {
     let grid = grid();
     let history = ColumnHistory::new(&grid);
     let keep_out = crate::drain::DrainKeepOut::none();
     let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
     let law = crate::slenderness::SlendernessLaw::new(95.0, 0.05, 1.0, 32.5);
-    let mesh = boxes_mesh(&[
-        ([0.0, 0.0, 10.0], [15.0, 15.0, 12.0]),
-        ([2.0, 7.93, 0.5], [13.0, 8.93, 3.0]),
-    ]);
+    let wall = ([2.0, 7.93, 0.5], [13.0, 8.93, 3.0]);
+    let wide = boxes_mesh(&[([0.0, 0.0, 10.0], [15.0, 15.0, 12.0]), wall]);
+    let short = boxes_mesh(&[([0.0, 0.0, 10.0], [LEAN_SEATS_EDGE_MM, 15.0, 12.0]), wall]);
+    let past = boxes_mesh(&[([7.63, 0.0, 10.0], [15.0, 15.0, 12.0]), wall]);
+    let gone = boxes_mesh(&[([8.2, 0.0, 10.0], [15.0, 15.0, 12.0]), wall]);
     let plan = plinth_core::LayerPlan::new(0.0, vec![H; 300]).expect("a uniform plan");
     let bite = plinth_support::ShaftSeatBite {
         bite_mm: 0.2,
         approach_deg: 60.0,
         limit_deg: 20.0,
     };
-    let run = |stub: bool| {
+    let run = |mesh: &plinth_mesh::Mesh, stub: bool| {
         let context = slender_context(&grid, &history, &keep_out, &lean, &law);
         let surface = std::cell::OnceCell::new();
         let joins = crate::head_join::HeadJoinContext {
             slender: &context,
-            mesh: &mesh,
+            mesh,
             layer_plan: &plan,
             plate_z_mm: 0.0,
             clearance_mm: 0.3,
@@ -1170,13 +1195,43 @@ fn a_one_layer_stub_is_not_kept_in_place_of_a_lean() {
         );
         (struts, outcome, moves.len())
     };
-    let (kept, outcome, moved) = run(false);
+    let (kept, outcome, moved) = run(&wide, false);
     assert_eq!(moved, 0, "CONTROL: the straight post is kept: {outcome:?}");
     assert_eq!(outcome.kept_for_slenderness_ids, vec![0], "{outcome:?}");
     assert_eq!(outcome.slender_taken_kept_not_clear, 0, "{outcome:?}");
     assert_eq!(kept[0].k_bottom, 0);
-    let (taken, outcome, moved) = run(true);
-    assert_eq!(moved, 1, "the stub is not kept in place of the lean: {outcome:?}");
+    let (kept, outcome, moved) = run(&wide, true);
+    assert_eq!(moved, 0, "CONTROL: a stub whose tip seats is kept: {outcome:?}");
+    assert_eq!(outcome.candidates_refused_slender, 1, "PATH HIT: {outcome:?}");
+    assert_eq!(outcome.kept_for_slenderness_ids, vec![0], "{outcome:?}");
+    assert_eq!(outcome.slender_taken_kept_not_clear, 0, "{outcome:?}");
+    assert_eq!(kept[0].k_bottom, 199, "it keeps its one-layer stub");
+    assert!(outcome.unheld_pending.is_empty(), "CONTROL: a stub that seats holds something");
+    let (kept, outcome, moved) = run(&past, true);
+    assert_eq!(moved, 0, "TEST 2: neither tip seats, the stub is kept: {outcome:?}");
+    assert_eq!(outcome.candidates_refused_slender, 1, "PATH HIT: {outcome:?}");
+    assert_eq!(outcome.slender_taken_kept_not_clear, 0, "{outcome:?}");
+    assert_eq!(kept[0].k_bottom, 199, "it keeps its one-layer stub");
+    // A tip that grazes the slab's edge (0.0057 mm2 of real contact, its lean
+    // 0.0022) holds a little: "better than no support", so it is KEPT, not
+    // dropped as a nub.
+    assert!(outcome.unheld_pending.is_empty(), "a tip with some contact is a support: {outcome:?}");
+    // **THE NUB IS NOT KEPT** (round 6, `NUB-CLAW.md` part 1). Bat_Cat_Owl arm
+    // 20 was a one-layer stub whose tip touched the model nowhere (0.0000 mm2),
+    // and the lean touched nothing either. TEST 3: the slab begins 0.7 mm past
+    // the seat, out of reach of the stub's ball and of the lean's. Neither
+    // holds anything: the stub is reported for dropping, with the load it was
+    // seated for, and the arm is not counted as kept for its slenderness.
+    // SABOTAGE (the old rule, `!(lean_seats && !stands_seats)` alone):
+    // `unheld_pending` stays empty and `kept_for_slenderness_ids` is `[0]`.
+    let (kept, outcome, moved) = run(&gone, true);
+    assert_eq!(moved, 0, "TEST 3: no lean is taken: {outcome:?}");
+    assert_eq!(outcome.unheld_pending.len(), 1, "the nub is reported: {outcome:?}");
+    assert_eq!(outcome.unheld_pending[0].arm, 0);
+    assert!(outcome.kept_for_slenderness_ids.is_empty(), "{outcome:?}");
+    assert_eq!(kept[0].k_bottom, 199, "the stub is left for the caller to drop");
+    let (taken, outcome, moved) = run(&short, true);
+    assert_eq!(moved, 1, "TEST 1: the lean seats where the stub does not: {outcome:?}");
     assert_eq!(outcome.slender_taken_kept_not_clear, 1, "PATH HIT: {outcome:?}");
     assert_eq!(outcome.candidates_refused_slender, 0, "{outcome:?}");
     assert!(outcome.kept_for_slenderness_ids.is_empty(), "{outcome:?}");
@@ -1199,7 +1254,8 @@ fn a_one_layer_stub_is_not_kept_in_place_of_a_lean() {
 /// with no wall the taper stands clear of the slab, the fixture on which
 /// `ff2e64c` took the lean). TEST: the arm stands as a straight post to the
 /// plate, a support, and is kept, its lean refused. CONTROL: the same seat
-/// stands as a one-layer stub onto the model; the lean is taken (the kept-arm
+/// stands as a one-layer stub under a slab cut short, where the lean seats and
+/// the stub does not; the lean is taken (the kept-arm
 /// test), so the refusal above is the slenderness test's and not a fixture
 /// with no admissible lean. SABOTAGE: the taper admission (`ff2e64c`
 /// `lean_too_slender` stage 2) takes the TEST lean, which that commit's own
@@ -1211,7 +1267,10 @@ fn a_lean_only_the_taper_would_hold_is_refused_while_the_arm_stands() {
     let keep_out = crate::drain::DrainKeepOut::none();
     let lean = crate::lean::LeanLaw::new(H, 45.0, 25.0);
     let law = crate::slenderness::SlendernessLaw::new(50.0, 0.05, 1.0, 32.5);
-    let mesh = boxes_mesh(&[([0.0, 0.0, 10.0], [15.0, 15.0, 12.0])]);
+    // The post stands under a wide slab; the CONTROL stub under a slab cut at
+    // `LEAN_SEATS_EDGE_MM`, where its lean seats and it does not.
+    let wide = boxes_mesh(&[([0.0, 0.0, 10.0], [15.0, 15.0, 12.0])]);
+    let short = slab_ending_at(LEAN_SEATS_EDGE_MM);
     let plan = plinth_core::LayerPlan::new(0.0, vec![H; 300]).expect("a uniform plan");
     let bite = plinth_support::ShaftSeatBite {
         bite_mm: 0.2,
@@ -1223,7 +1282,7 @@ fn a_lean_only_the_taper_would_hold_is_refused_while_the_arm_stands() {
         let surface = std::cell::OnceCell::new();
         let joins = crate::head_join::HeadJoinContext {
             slender: &context,
-            mesh: &mesh,
+            mesh: if stub { &short } else { &wide },
             layer_plan: &plan,
             plate_z_mm: 0.0,
             clearance_mm: 0.3,
@@ -1263,7 +1322,7 @@ fn a_lean_only_the_taper_would_hold_is_refused_while_the_arm_stands() {
     assert_eq!(kept[0].base_cell(), kept[0].cell, "the arm keeps its seat");
     assert_eq!(kept[0].k_bottom, 0, "and its post to the plate");
     let (taken, outcome, moved) = run(true);
-    assert_eq!(moved, 1, "CONTROL: a lean exists and a stub does not keep it out: {outcome:?}");
+    assert_eq!(moved, 1, "CONTROL: a lean exists and a stub whose tip misses its face does not keep it out: {outcome:?}");
     assert_eq!(outcome.slender_taken_kept_not_clear, 1, "{outcome:?}");
     assert!(taken[0].is_leaned(), "the arm leans to the plate");
     assert_eq!(taken[0].landing, Landing::Plate);
@@ -1384,25 +1443,28 @@ fn an_arm_floating_above_its_ground_is_not_kept_in_place_of_a_lean() {
     assert!(taken[0].is_leaned(), "the arm leans to the plate");
 }
 
-/// **A ONE-LAYER STUB ON A ROOTED MEMBER IS A SUPPORT: ITS OVER-SLENDER LEAN
-/// IS REFUSED** (joint round 4, 2026-10-13, `joint/LONG-ROD.md`). Bat_Cat_Owl
-/// arm 33 stood one layer long on its sibling 32, whose chain reached the plate
-/// through the fat slanted post; the stub test took its 12 mm lean to the plate
-/// (a 0.10 mm rod, 5.4 times over `S * r`) as if it were a stub on the model
-/// wall. A member's chain carries it; only a stub on the MODEL has nothing
-/// to keep.
+/// **A ONE-LAYER STUB ON A ROOTED MEMBER IS KEPT WHERE ITS LEAN SEATS NO
+/// BETTER: ITS OVER-SLENDER LEAN IS REFUSED** (joint round 4, 2026-10-13,
+/// `joint/LONG-ROD.md`; joint round 5, 2026-10-14). Bat_Cat_Owl arm 33 stood
+/// one layer long on its sibling 32, whose chain reached the plate through the
+/// fat slanted post; a shape test took its 12 mm lean to the plate (a 0.10 mm
+/// rod, 5.4 times over `S * r`) as if it were a stub on the model wall. A
+/// member's chain carries it. The test is now the tips' real contact, not the
+/// stub's shape or its landing.
 ///
 /// The fixture of `an_arm_floating_above_its_ground_is_not_kept_in_place_of_a_lean`
-/// (S = 50, a slab). TEST: the stub rests on post 0, a straight plate post:
-/// kept, its lean refused (path hit `candidates_refused_slender` 1, nothing
-/// taken for want of a support). CONTROLS: the same stub on the model is not
-/// kept (the lean is taken, as before), and the same stub on a post that
-/// floats above the plate is not kept (`rooted`). SABOTAGE (by hand, the
-/// `on_a_member` term of `kept_arm_is_a_support` removed, which restores the
-/// layer-count test): the TEST stub's lean is taken (`moved` 1).
+/// (S = 50, a slab). The stub rests on post 0, a straight plate post one cell
+/// beside its seat, so it leans 45 degrees onto the face. TEST: the slab
+/// begins past the seat, neither the stub's tip nor the lean's reaches the face:
+/// the lean is refused (nothing taken) and, since round 6, the stub is not
+/// kept either: it holds nothing and is reported for dropping. CONTROLS: under a wide slab the 45 degree stub does not
+/// seat (0.0 of 0.034 mm2) and the plate lean does, so the lean is taken (a
+/// stub on a member has no shield but its contact); and the same stub on a
+/// post that floats above the plate is not kept (`rooted`), whatever seats.
 #[test]
 fn a_one_layer_stub_on_a_rooted_member_is_kept_in_place_of_a_lean() {
     let mesh = boxes_mesh(&[([0.0, 0.0, 10.0], [15.0, 15.0, 12.0])]);
+    let past = boxes_mesh(&[([7.63, 0.0, 10.0], [15.0, 15.0, 12.0])]);
     let grid = grid();
     // The post stands one cell beside the stub's seat, as a sibling does; the
     // stub reaches it by a one-layer lean (a landing on a member needs the
@@ -1423,22 +1485,30 @@ fn a_one_layer_stub_on_a_rooted_member_is_kept_in_place_of_a_lean() {
     };
     let on_post = Landing::Strut { id: 0, layer: 199 };
     let (kept, outcome, moved) =
-        lip_seat_field_passes(&mesh, 50.0, &[post.clone(), stub(on_post)], 1);
-    assert_eq!(moved, 0, "the stub on a rooted member is kept: {outcome:?}");
-    assert_eq!(outcome.candidates_refused_slender, 1, "PATH HIT: {outcome:?}");
-    assert_eq!(outcome.kept_for_slenderness_ids, vec![1], "{outcome:?}");
+        lip_seat_field_passes(&past, 50.0, &[post.clone(), stub(on_post)], 1);
+    // Round 6 (`NUB-CLAW.md` part 1): neither tip reaches the face (0.0 mm2
+    // for the stub, a lean under one pixel), so the stub holds nothing. Its
+    // over-slender lean is still not taken (`moved` 0, as in round 5), and
+    // the stub is no longer kept as a nub: it is reported for dropping, whatever
+    // member it rests on. SABOTAGE (the nub rule off): `unheld_pending` is
+    // empty and the stub is kept for its slenderness (`candidates_refused_slender`
+    // 1, `kept_for_slenderness_ids` `[1]`), as before.
+    assert_eq!(moved, 0, "the over-slender lean is not taken: {outcome:?}");
+    assert_eq!(outcome.unheld_pending.len(), 1, "PATH HIT: the stub holds nothing: {outcome:?}");
+    assert_eq!(outcome.unheld_pending[0].arm, 1, "{outcome:?}");
+    assert!(outcome.kept_for_slenderness_ids.is_empty(), "{outcome:?}");
     assert_eq!(outcome.slender_taken_kept_not_clear, 0, "{outcome:?}");
-    assert_eq!(kept[1].landing, on_post, "it keeps its member");
+    assert_eq!(kept[1].landing, on_post, "the caller drops it; until then it keeps its member");
     let (taken, outcome, moved) =
-        lip_seat_field_passes(&mesh, 50.0, &[post.clone(), stub(Landing::Model { layer: 199 })], 1);
-    assert_eq!(moved, 1, "CONTROL: a stub on the model is not kept: {outcome:?}");
+        lip_seat_field_passes(&mesh, 50.0, &[post.clone(), stub(on_post)], 1);
+    assert_eq!(moved, 1, "CONTROL: a lean that seats replaces a stub that does not: {outcome:?}");
     assert_eq!(outcome.slender_taken_kept_not_clear, 1, "{outcome:?}");
-    assert!(taken[1].is_leaned(), "the stub on the model leans to the plate");
+    assert!(taken[1].is_leaned(), "the stub leans to the plate");
     let mut floating = post;
     floating.k_bottom = 150;
     floating.radius_mm = vec![0.1; 50];
     floating.carried_mm2 = vec![0.0; 50];
-    let (_, outcome, moved) = lip_seat_field_passes(&mesh, 50.0, &[floating, stub(on_post)], 1);
+    let (_, outcome, moved) = lip_seat_field_passes(&past, 50.0, &[floating, stub(on_post)], 1);
     assert_eq!(moved, 1, "CONTROL: a stub on a floating post is not kept: {outcome:?}");
     assert_eq!(outcome.slender_taken_kept_not_clear, 1, "{outcome:?}");
 }
@@ -1448,11 +1518,12 @@ fn a_one_layer_stub_on_a_rooted_member_is_kept_in_place_of_a_lean() {
 /// several times (the pass, its fixed point, the pass after the head joins)
 /// with one outcome, and the count was reset at the start of each call, so
 /// the final disclosure read only the last call's. Two passes on the one-layer
-/// stub of `a_one_layer_stub_is_not_kept_in_place_of_a_lean`, each taking its
-/// lean, count 2. SABOTAGE (by hand, the reset restored): the count reads 1.
+/// stub of `a_stub_is_kept_in_place_of_a_lean_unless_the_lean_seats_where_it_does_not`
+/// (TEST 1, the slab cut short), each taking its lean, count 2. SABOTAGE (by
+/// hand, the reset restored): the count reads 1.
 #[test]
 fn the_count_of_leans_taken_for_want_of_a_support_sums_over_passes() {
-    let mesh = boxes_mesh(&[([0.0, 0.0, 10.0], [15.0, 15.0, 12.0])]);
+    let mesh = slab_ending_at(LEAN_SEATS_EDGE_MM);
     let stub = short_arm(Landing::Model { layer: 199 }, 199);
     let (_, outcome, moved) = lip_seat_passes(&mesh, 50.0, &stub, 1);
     assert_eq!((moved, outcome.slender_taken_kept_not_clear), (1, 1), "{outcome:?}");

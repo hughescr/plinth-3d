@@ -95,7 +95,7 @@ fn member(
         } else {
             0.0
         },
-        thickened_mm: Vec::new(),
+        thickened_mm: Vec::new(), foot_radius_mm: None,
         seat_on_strut: None,
         k_top,
         k_bottom,

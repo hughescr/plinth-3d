@@ -353,7 +353,7 @@ mod tests {
             center_mm: [0.0, 0.0],
             kind: StrutKind::Arm,
             min_radius_mm: 0.0,
-            thickened_mm: Vec::new(),
+            thickened_mm: Vec::new(), foot_radius_mm: None,
             seat_on_strut: None,
             k_top,
             k_bottom,

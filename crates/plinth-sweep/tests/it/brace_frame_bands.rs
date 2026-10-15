@@ -60,7 +60,7 @@ fn post(grid: &Grid, id: u32, col: usize, layers: usize) -> SweepStrut {
         center_mm: [grid.center_x_mm(col), grid.center_y_mm(row)],
         kind: StrutKind::Arm,
         min_radius_mm: 0.0,
-        thickened_mm: Vec::new(),
+        thickened_mm: Vec::new(), foot_radius_mm: None,
         seat_on_strut: None,
         k_top: layers,
         k_bottom: 0,
@@ -150,6 +150,7 @@ fn tie_the_pair(lambda: f64, frame_bands: bool) -> Built {
             gap_mm: gap,
             height_mm: layers as f64 * H,
             bands: bands.clone(),
+            ..Panel::default()
         },
         S,
     )
@@ -232,6 +233,7 @@ fn the_fast_count_builds_the_bands_the_full_sway_counts_on_the_pair_fixtures() {
             gap_mm: gap,
             height_mm: height,
             bands: Vec::new(),
+            ..Panel::default()
         };
         let layout = |n: usize| {
             (n <= 12).then(|| {

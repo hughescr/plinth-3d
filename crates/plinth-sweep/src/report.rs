@@ -356,6 +356,9 @@ pub struct SweepRunReport {
     /// planned disc, the balls grown until it reaches plan, and the tips a
     /// limit left short.
     pub seat_contact: crate::contact_growth::ContactOutcome,
+    /// The second contact attempted for the tips the growth left short of
+    /// their load's need ([`crate::run_sweep_with_second_contact`]).
+    pub seat_second_contact: crate::contact_growth::SecondContactOutcome,
     /// The MODEL FEET (lane 2, 2026-10-12, `MODEL-FEET.md`): every arm that
     /// lands on the model, its load-sized contact, how much of it stands on
     /// the model, its real contact against its load's need, and what the

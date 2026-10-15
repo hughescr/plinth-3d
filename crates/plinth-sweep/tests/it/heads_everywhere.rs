@@ -101,7 +101,7 @@ fn arm(id: u32, cell: usize, center: [f64; 2]) -> SweepStrut {
         center_mm: center,
         kind: StrutKind::Arm,
         min_radius_mm: 0.0,
-        thickened_mm: Vec::new(),
+        thickened_mm: Vec::new(), foot_radius_mm: None,
         seat_on_strut: None,
         k_top: K_TOP,
         k_bottom: 0,

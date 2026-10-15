@@ -50,6 +50,8 @@ pub mod deferred_shake;
 pub(crate) mod demand_replay;
 pub mod down_sweep;
 pub mod drain;
+pub mod feature_chord;
+pub mod foot_neck;
 pub mod footprint;
 pub mod footprint_normal;
 pub(crate) mod frame;
@@ -222,6 +224,18 @@ pub struct SweepStrut {
     /// member some load reaches still grows under the law. Keyed by absolute
     /// layer so it survives a re-run that re-sizes the ledger.
     pub thickened_mm: Vec<f64>,
+    /// **The foot contact radius this model-landed post was given** (round 6,
+    /// 2026-10-14), the one authoritative store: the enlarge-foot rung of the
+    /// slenderness lane writes it where a run cannot hold through the area
+    /// law's hairline neck, and [`model_feet::foot_radius_mm`] (the ONE reader)
+    /// takes the larger of it and the owner's foot rule. The structural reading
+    /// ([`slenderness::SlendernessLaw::foot_contact`]: candidate sizing,
+    /// `run_reading`, the frame checks), the final foot measurement
+    /// ([`model_feet::measure`]), the adapter and the lowering all read the
+    /// foot through that reader, so a foot enlarged here is the foot that is
+    /// checked and the foot that is drawn. `None`: the rule's own radius. It
+    /// only ever raises a foot; a later measurement cannot overwrite it.
+    pub foot_radius_mm: Option<f64>,
     /// For a brace, the arm its TOP seats on. `None` for everything else.
     ///
     /// The bottom end of a brace is its `landing`, which the ledger already
@@ -779,6 +793,13 @@ pub struct SweepPolicy {
     /// 2026-09-30), rather than the nearest face with any downward component.
     /// **On in production.** Sabotage and comparison only.
     pub seat_face_band: bool,
+    /// Which rules bound the growth of a tip ball for its real contact
+    /// ([`contact_growth`], round 5, 2026-10-14): the load's need as the
+    /// target, the feature and ball-to-shaft ceilings, and the flat-face gain
+    /// test. [`contact_growth::GrowthRule::REGISTERED`] in production; the
+    /// growth as it was on 2026-10-12 is the sabotage form
+    /// ([`SweepPolicy::with_plan_target_growth`]).
+    pub contact_growth: contact_growth::GrowthRule,
     /// Whether a support arm's seat normal is the area-weighted average over
     /// its contact footprint (`footprint_normal`, Craig ruling 2026-10-05)
     /// rather than the normal of one seat triangle. **On in production.** The
@@ -1130,6 +1151,7 @@ impl SweepPolicy {
             straight_reach: true,
             island_seating: true,
             seat_face_band: true,
+            contact_growth: contact_growth::GrowthRule::REGISTERED,
             footprint_normal: true,
             heads: true,
             shaft_landings: true,
@@ -1376,6 +1398,16 @@ impl SweepPolicy {
     #[must_use]
     pub const fn without_straight_reach(mut self) -> Self {
         self.straight_reach = false;
+        self
+    }
+
+    /// Grow tip balls as on 2026-10-12: toward the profile ball's disc, to
+    /// the registry's ceiling, stopping only at zero gain. **Sabotage and
+    /// comparison only** (`tests/it/contact_growth.rs`): with it set, Bat_Cat_Owl
+    /// has six balls over 1.5 times their shaft.
+    #[must_use]
+    pub const fn with_plan_target_growth(mut self) -> Self {
+        self.contact_growth = contact_growth::GrowthRule::PLAN_TARGET;
         self
     }
 
@@ -1756,6 +1788,97 @@ pub fn run_sweep_with_holes(
     drains: &[DrainSpec],
     vents: &[DrainSpec],
 ) -> Result<SweepPlan, SweepError> {
+    run_sweep_inner(mesh, plan, policy, drains, vents, None)
+}
+
+/// **A SECOND CONTACT for every tip whose feature gives it less contact than
+/// its load needs** (round 5 review, 2026-10-14, `BALLS-FLARE.md` A(4)).
+///
+/// The contact growth runs on the finished field; whatever contact a tip can
+/// make there ([`contact_growth`]) is final, and the placement that ran before
+/// it could not know. `first` is a finished plan of `mesh`. Each tip it left
+/// short of its load's need is recorded with the contact it really made
+/// ([`down_sweep::ContactCaps`]), and the same sweep is run again with those
+/// contacts as the load each of those tips may carry at its tip layer: the
+/// down-sweep's own load-driven insertion that relieves an arm over the area
+/// law's maximum then places a carrier beside the tip, on the same model
+/// surface, and the load routes between them. The second plan is taken only
+/// where it leaves the field less short of its loads' needs (the summed
+/// shortfall in mm²); otherwise `first` stands. Returns `first` untouched when
+/// no tip is short or none made any contact to size a second one from.
+///
+/// # Errors
+///
+/// As [`run_sweep_with_holes`].
+pub fn run_sweep_with_second_contact(
+    first: SweepPlan,
+    mesh: &Mesh,
+    plan: &LayerPlan,
+    policy: &SweepPolicy,
+    drains: &[DrainSpec],
+    vents: &[DrainSpec],
+) -> Result<SweepPlan, SweepError> {
+    if !policy.insert_by_load {
+        return Ok(first);
+    }
+    let pixel_mm2 = first.grid.pitch_mm() * first.grid.pitch_mm();
+    let mut caps = down_sweep::ContactCaps::default();
+    for short in &first.report.seat_contact.short {
+        let Some(strut) = first.struts.get(short.strut) else {
+            continue;
+        };
+        // A tip with no contact at all is a placement of its seat, not a
+        // capacity; a second contact is sized from a contact that exists.
+        if short.real_mm2 >= pixel_mm2 {
+            caps.insert(strut.cell, strut.k_top, short.real_mm2);
+        }
+    }
+    if caps.is_empty() {
+        return Ok(first);
+    }
+    let shortfall = |plan: &SweepPlan| -> f64 {
+        plan.report
+            .seat_contact
+            .short
+            .iter()
+            .map(|short| (short.planned_mm2 - short.real_mm2).max(0.0))
+            .sum()
+    };
+    let second = run_sweep_inner(mesh, plan, policy, drains, vents, Some(&caps))?;
+    let outcome = contact_growth::SecondContactOutcome {
+        attempted: true,
+        tips_capped: caps.len(),
+        first_short: first.report.seat_contact.short.len(),
+        first_shortfall_mm2: shortfall(&first),
+        first_arms: first.struts.len(),
+        second_short: second.report.seat_contact.short.len(),
+        second_shortfall_mm2: shortfall(&second),
+        second_arms: second.struts.len(),
+        first_unbraced: first.report.slenderness_lane.warnings.len(),
+        second_unbraced: second.report.slenderness_lane.warnings.len(),
+        kept_second: false,
+    };
+    // Nearer the loads' needs, and no more unbraced runs over their own limit
+    // than the first plan has: a second contact that is a thin rod the
+    // slenderness law cannot hold is not a gain.
+    let kept_second = outcome.second_shortfall_mm2 < outcome.first_shortfall_mm2
+        && outcome.second_unbraced <= outcome.first_unbraced;
+    let mut chosen = if kept_second { second } else { first };
+    chosen.report.seat_second_contact = contact_growth::SecondContactOutcome {
+        kept_second,
+        ..outcome
+    };
+    Ok(chosen)
+}
+
+fn run_sweep_inner(
+    mesh: &Mesh,
+    plan: &LayerPlan,
+    policy: &SweepPolicy,
+    drains: &[DrainSpec],
+    vents: &[DrainSpec],
+    contact_caps: Option<&down_sweep::ContactCaps>,
+) -> Result<SweepPlan, SweepError> {
     let _perf_span = perf::span(perf::Span::SweepRun);
     perf::add(PerfWork::SweepRuns, 1);
     let (min_z, max_z, min_x, max_x, min_y, max_y) = bounds(mesh)?;
@@ -1972,6 +2095,7 @@ pub fn run_sweep_with_holes(
         preferred_gap_mm: policy.standoff_mm,
         final_gap_mm: policy.final_clearance_gap_mm,
         tip_radius_min_mm: policy.tip_radius_min_mm,
+        tip_radius_max_mm: policy.tip_radius_max_mm,
         x_allowed: policy.x_allowed,
         zone_factor: law.face_zone_factor(),
         surface: model_surface
@@ -2166,7 +2290,11 @@ pub fn run_sweep_with_holes(
     // and `InsertionPolicy::max_rounds`, and hitting either bound is reported
     // (`insertion_rounds_exhausted`), not hidden.
     let insertion = if policy.insert_by_load {
-        down_sweep::InsertionPolicy::new(policy.limits.max_struts)
+        let by_load = down_sweep::InsertionPolicy::new(policy.limits.max_struts);
+        match contact_caps {
+            Some(caps) => by_load.with_contact_caps(caps),
+            None => by_load,
+        }
     } else {
         down_sweep::InsertionPolicy::disabled()
     };
@@ -2501,6 +2629,8 @@ pub fn run_sweep_with_holes(
             policy.tip_radius_max_mm,
             policy.overhang_centre_deg - 0.5 * policy.overhang_transition_deg,
         )
+        .with_foot_sizing(policy.x_allowed)
+        .with_owner_foot_rule()
     } else {
         slenderness::SlendernessLaw::disabled()
     };
@@ -2563,7 +2693,7 @@ pub fn run_sweep_with_holes(
     // after, the lane first clears every leaf it can, and this rule branches
     // only the stranded members the lane left lapping. The ids are found here,
     // after the lane, because withdrawing idle flank arms renumbers members.
-    let stranded = stranded_branch::stranded_ids(&struts, &greedy.stranded_seat_cells);
+    let mut stranded = stranded_branch::stranded_ids(&struts, &greedy.stranded_seat_cells);
     let mut stranded_branch_outcome = stranded_branch::StrandedBranchOutcome {
         enabled: policy.stranded_branch,
         stranded_members: stranded.len(),
@@ -2768,6 +2898,9 @@ pub fn run_sweep_with_holes(
     ) {
         outcome = sized;
     }
+    if drop_unheld(&mut struts, &mut lip_seat_outcome, &mut lip_seat_refused, &mut stranded) {
+        outcome = lip_seat_run.size(&slenderness_context, &mut struts);
+    }
     if policy.lip_seat {
         landings.record("lip seats", &landing_check::check_landings(&struts, height));
         moves.note("lip seats", &struts);
@@ -2879,6 +3012,9 @@ pub fn run_sweep_with_holes(
             &mut lip_seat_refused,
         ) {
             outcome = sized;
+        }
+        if drop_unheld(&mut struts, &mut lip_seat_outcome, &mut lip_seat_refused, &mut stranded) {
+            outcome = lip_seat_run.size(&slenderness_context, &mut struts);
         }
         landings.record(
             "lip seats after head joins",
@@ -3554,12 +3690,21 @@ pub fn run_sweep_with_holes(
         .seat_footprint_normal
         .enabled
         .then(|| {
-            contact_ball_limit_mm(policy.owner_growth_ceiling_mm.min(policy.tip_radius_max_mm))
+            contact_growth_limits(
+                policy.owner_growth_ceiling_mm.min(policy.tip_radius_max_mm),
+                policy.contact_growth,
+            )
         })
         .flatten();
-    if let Some(limit_mm) = contact_limit_mm {
-        sweep_plan.report.seat_contact =
-            grow_contact_balls(&measure_env, &mut sweep_plan, &footprint_sites, limit_mm);
+    if let Some(limits) = contact_limit_mm {
+        sweep_plan.report.seat_contact = grow_contact_balls(
+            &measure_env,
+            &mut sweep_plan,
+            &footprint_sites,
+            &slices,
+            policy.x_allowed,
+            limits,
+        );
     }
     // THE FOOTPRINT RULE (fix/tip-trim, 2026-09-28): every tip's contact disc,
     // as the lowering will deliver it, graded against the REAL model surface
@@ -3722,7 +3867,7 @@ pub fn run_sweep_with_holes(
     // more, so every seated tip's real contact is measured again on the arms
     // exactly as the lowering gets them (the seat triangle re-derived where a
     // tip slid) and every ball short of plan is grown from the ungrown one.
-    if let Some(limit_mm) = contact_limit_mm {
+    if let Some(limits) = contact_limit_mm {
         let shifts: Vec<Option<[f64; 3]>> = sweep_plan
             .struts
             .iter()
@@ -3732,8 +3877,14 @@ pub fn run_sweep_with_holes(
             })
             .collect();
         let sites = footprint_normal::reseat_sites(mesh, &footprint_sites, &shifts);
-        sweep_plan.report.seat_contact =
-            grow_contact_balls(&measure_env, &mut sweep_plan, &sites, limit_mm);
+        sweep_plan.report.seat_contact = grow_contact_balls(
+            &measure_env,
+            &mut sweep_plan,
+            &sites,
+            &slices,
+            policy.x_allowed,
+            limits,
+        );
     }
     finish_heads(&mut sweep_plan);
     // THE MODEL FEET ON THE FINISHED FIELD (lane 2, 2026-10-12,
@@ -3962,6 +4113,7 @@ fn publish_runs(
                 k_top: run.k_top,
                 length_mm: run.length_mm,
                 limit_mm: run.limit_mm,
+                neck_share: run.neck_share,
             });
         }
     }
@@ -4151,35 +4303,104 @@ fn unmerge_overgrown(struts: &mut [SweepStrut], tip_radius_max_mm: f64) -> Unmer
 /// `TIP_RADIUS_MAX_LEGACY_MM`. A ball the load law already drew larger is not
 /// grown at all. `None` where the registry cannot be read: no ball is grown,
 /// and the contact is not measured.
-fn contact_ball_limit_mm(tip_radius_max_mm: f64) -> Option<f64> {
+///
+/// Also the top of the owner's ball-to-shaft ratio range: the largest ball
+/// factor of his profile table (1.5), the ceiling on how much wider than its
+/// shaft any ball may be drawn (round 5, 2026-10-14).
+fn contact_growth_limits(
+    tip_radius_max_mm: f64,
+    rule: contact_growth::GrowthRule,
+) -> Option<contact_growth::GrowthLimits> {
     let constants = m0_constants().ok()?;
-    let factor = constants
-        .evidence()
-        .chitubox_tip_contact_profiles()
-        .value()
-        .ball_factor(tip_radius_max_mm);
-    let limit = factor * tip_radius_max_mm;
-    (limit.is_finite() && limit > 0.0).then_some(limit)
+    let profiles = constants.evidence().chitubox_tip_contact_profiles();
+    let table = profiles.value();
+    let limit = table.ball_factor(tip_radius_max_mm) * tip_radius_max_mm;
+    let max_ratio = table
+        .profiles()
+        .iter()
+        .map(plinth_core::TipContactProfile::ball_factor)
+        .fold(0.0_f64, f64::max);
+    (limit.is_finite() && limit > 0.0 && max_ratio.is_finite() && max_ratio > 1.0).then_some(
+        contact_growth::GrowthLimits {
+            ball_radius_mm: limit,
+            max_ball_ratio: max_ratio,
+            rule,
+        },
+    )
+}
+
+/// **What the field knows about each seated tip's load and feature**
+/// ([`contact_growth::TipBounds`]), in strut order: the contact the load needs
+/// (the down-sweep's carried load at the contact over `X_ALLOWED`, before the
+/// radius clamps), and the narrowest cured chord of the model section through
+/// the arm's seat at its strike layer ([`feature_chord`]). One batched pass.
+fn tip_bounds(
+    plan: &SweepPlan,
+    arms: &[plinth_support::SweepArm],
+    slices: &[Vec<plinth_support::perception::SliceSolid>],
+    x_allowed: f64,
+    reach_mm: f64,
+) -> Vec<contact_growth::TipBounds> {
+    let height = plan.layer_height_mm;
+    let points: Vec<Option<(usize, [f64; 2])>> = arms
+        .iter()
+        .map(|arm| {
+            if !arm.seats_into_model || height <= 0.0 {
+                return None;
+            }
+            // The layer the seat stands on: the first cured lamina over it.
+            let layer = ((arm.seat_mm[2] - plan.plate_z_mm) / height).round();
+            (layer >= 0.0).then(|| {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "a non-negative rounded layer index of a bounded layer count"
+                )]
+                let layer = layer as usize;
+                (layer, [arm.seat_mm[0], arm.seat_mm[1]])
+            })
+        })
+        .collect();
+    let chords = feature_chord::narrowest_chords_mm(slices, &points, reach_mm);
+    plan.struts
+        .iter()
+        .zip(chords)
+        .map(|(strut, chord)| contact_growth::TipBounds {
+            need_mm2: (x_allowed > 0.0)
+                .then(|| strut.carried_mm2.last().copied())
+                .flatten()
+                .map(|carried| carried.max(0.0) / x_allowed),
+            feature_chord_mm: chord,
+        })
+        .collect()
 }
 
 /// **Measure every seated tip's real contact and grow the short balls**
 /// ([`contact_growth::grow`]) from the UNGROWN ball, and write the radius each
 /// ball is drawn at onto its strut. `sites` are the footprint sites in strut
 /// order (re-derived where a tip slid). "Reaches plan" is to within one pixel
-/// of area: the grid pitch squared.
+/// of area: the grid pitch squared. The target is the load's need and the
+/// feature bounds the ball ([`tip_bounds`], [`contact_growth`]).
 fn grow_contact_balls(
     env: &footprint_normal::MeasureEnv<'_>,
     plan: &mut SweepPlan,
     sites: &[Option<footprint_normal::TipSite>],
-    limit_ball_radius_mm: f64,
+    slices: &[Vec<plinth_support::perception::SliceSolid>],
+    x_allowed: f64,
+    limits: contact_growth::GrowthLimits,
 ) -> contact_growth::ContactOutcome {
     for strut in &mut plan.struts {
         strut.seat_face.contact_ball_radius_mm = None;
     }
     let arms = adapter::arms_of(plan);
     let pixel_area_mm2 = plan.grid.pitch_mm() * plan.grid.pitch_mm();
-    let (outcome, grown) =
-        contact_growth::grow(env, &arms, sites, limit_ball_radius_mm, pixel_area_mm2);
+    // A chord wider than twice the largest ball can bound no ball: the window
+    // the section is read in is that wide on each side.
+    let bounds = tip_bounds(plan, &arms, slices, x_allowed, 2.0 * limits.ball_radius_mm);
+    // NO BALL IS DRAWN SMALLER THAN THE OWNER'S (round 6, 2026-10-14), so every
+    // birth the owner's ball stood under is still stood under: the round-5
+    // reduction and its births guard are gone, and so is the second grading.
+    let (outcome, grown) = contact_growth::grow(env, &arms, sites, &bounds, limits, pixel_area_mm2);
     for (strut, radius) in plan.struts.iter_mut().zip(grown) {
         strut.seat_face.contact_ball_radius_mm = radius;
     }
@@ -4258,7 +4479,7 @@ struct LipSeatRun<'a> {
     plate_z: f64,
     slices: &'a [Vec<plinth_support::perception::SliceSolid>],
     sizing: down_sweep::SizingPolicy,
-    insertion: down_sweep::InsertionPolicy,
+    insertion: down_sweep::InsertionPolicy<'a>,
     keep_out: &'a DrainKeepOut,
     unrooted: &'a down_sweep::UnrootedColumns,
     passes: u32,
@@ -4656,6 +4877,47 @@ fn remove_under_loaded(
     }
     drop_members(struts, &doomed);
     doomed.iter().filter(|flag| **flag).count()
+}
+
+/// **Drop the arms the lip-seat run found to hold nothing**
+/// ([`lip_seat::holds_nothing`]): their tip touches the model nowhere, neither
+/// does their lean, and nothing rests on them. The ids after them are
+/// renumbered, so the id lists the sweep keeps across the lip-seat stage
+/// (`refused`, `stranded`) are re-pointed. Returns whether any arm went, in
+/// which case the caller sizes the field again.
+fn drop_unheld(
+    struts: &mut Vec<SweepStrut>,
+    outcome: &mut lip_seat::LipSeatOutcome,
+    refused: &mut Vec<(u32, usize)>,
+    stranded: &mut Vec<u32>,
+) -> bool {
+    if outcome.unheld_pending.is_empty() {
+        return false;
+    }
+    let pending = std::mem::take(&mut outcome.unheld_pending);
+    let mut doomed = vec![false; struts.len()];
+    for unheld in &pending {
+        if let Some(flag) = doomed.get_mut(unheld.arm as usize) {
+            *flag = true;
+        }
+    }
+    let remap = drop_members(struts, &doomed);
+    let mapped = |id: u32| {
+        remap
+            .get(id as usize)
+            .copied()
+            .filter(|fresh| *fresh != u32::MAX)
+    };
+    refused.retain_mut(|(id, _)| mapped(*id).is_some_and(|fresh| {
+        *id = fresh;
+        true
+    }));
+    stranded.retain_mut(|id| mapped(*id).is_some_and(|fresh| {
+        *id = fresh;
+        true
+    }));
+    outcome.unheld.extend(pending);
+    true
 }
 
 /// Remove the doomed members and renumber the rest, re-pointing every landing
@@ -5160,6 +5422,7 @@ fn build_report(
         seat_footprint: crate::footprint::FootprintOutcome::default(),
         seat_footprint_normal: crate::footprint_normal::FootprintNormalOutcome::default(),
         seat_contact: crate::contact_growth::ContactOutcome::default(),
+        seat_second_contact: crate::contact_growth::SecondContactOutcome::default(),
         model_feet: crate::model_feet::ModelFeetOutcome::default(),
         head_join: crate::head_join::HeadJoinOutcome::default(),
         per_event: outcome.per_event.clone(),
@@ -5392,7 +5655,7 @@ fn digest(struts: &[SweepStrut]) -> String {
 
 #[cfg(test)]
 mod removal_tests {
-    use super::{plan_grid, unmerge_overgrown, Landing, SweepStrut};
+    use super::{drop_unheld, lip_seat, plan_grid, unmerge_overgrown, Landing, SweepStrut};
 
     /// The screen and the span test alone, as these fixtures have always been
     /// graded. The multi-layer replay needs a mesh and its slices, so it is
@@ -5427,7 +5690,7 @@ mod removal_tests {
             center_mm: [0.0, 0.0],
             kind: crate::StrutKind::Arm,
             min_radius_mm: 0.0,
-            thickened_mm: Vec::new(),
+            thickened_mm: Vec::new(), foot_radius_mm: None,
             seat_on_strut: None,
             k_top,
             k_bottom,
@@ -5595,7 +5858,7 @@ mod removal_tests {
             center_mm: [0.0, 0.0],
             kind: crate::StrutKind::Arm,
             min_radius_mm: 0.0,
-            thickened_mm: Vec::new(),
+            thickened_mm: Vec::new(), foot_radius_mm: None,
             seat_on_strut: None,
             k_top: 5,
             k_bottom: 0,
@@ -5642,7 +5905,7 @@ mod removal_tests {
             center_mm: [0.0, 0.0],
             kind: crate::StrutKind::Arm,
             min_radius_mm: 0.0,
-            thickened_mm: Vec::new(),
+            thickened_mm: Vec::new(), foot_radius_mm: None,
             seat_on_strut: None,
             k_top: 5,
             k_bottom,
@@ -5662,6 +5925,42 @@ mod removal_tests {
         // The candidate reads below the minimum load; the neighbour reads well
         // above it, so only one of the two is ever a candidate.
         vec![bare(0, 0, 0, 0.5), bare(1, 1, neighbour_bottom, 10.0)]
+    }
+
+    /// **Dropping an arm that holds nothing renumbers the rest and every id
+    /// list the sweep keeps** (round 6, `NUB-CLAW.md` part 1): a member that
+    /// landed on a later one lands on its new id, and the lists of ids the
+    /// lip-seat stage carries (`refused`, `stranded`) follow, the dropped
+    /// arm's entries going with it. The warning keeps the arm's old id.
+    #[test]
+    fn dropping_an_unheld_arm_renumbers_the_ids_the_sweep_keeps() {
+        let mut struts = removal_pair(0);
+        let mut lander = struts[1].clone();
+        lander.id = 2;
+        lander.landing = Landing::Strut { id: 1, layer: 3 };
+        struts.push(lander);
+        let mut outcome = lip_seat::LipSeatOutcome::default();
+        outcome.unheld_pending.push(lip_seat::UnheldArm {
+            arm: 0,
+            load_mm2: 0.0003,
+            seat_mm: [1.0, 2.0, 3.0],
+        });
+        let mut refused = vec![(0_u32, 5_usize), (1, 7), (2, 9)];
+        let mut stranded = vec![0_u32, 1, 2];
+
+        assert!(drop_unheld(&mut struts, &mut outcome, &mut refused, &mut stranded));
+
+        assert_eq!(struts.iter().map(|strut| strut.id).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(struts[1].landing, Landing::Strut { id: 0, layer: 3 });
+        assert_eq!(refused, vec![(0, 7), (1, 9)]);
+        assert_eq!(stranded, vec![0, 1]);
+        assert!(outcome.unheld_pending.is_empty());
+        assert_eq!(outcome.unheld.len(), 1);
+        assert_eq!(outcome.unheld[0].arm, 0, "the warning names the arm as it was");
+        assert!(
+            !drop_unheld(&mut struts, &mut outcome, &mut refused, &mut stranded),
+            "nothing pending: nothing dropped"
+        );
     }
 
     /// The counterpart: a REACH-placed arm (`inserted_by_load: false`) below

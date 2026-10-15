@@ -527,18 +527,31 @@ fn a_stranded_seat_lands_on_the_root_it_laps_instead_of_standing_beside_it() {
             member.k_top, member.landing, member.center_mm[0], member.center_mm[1], resting
         );
     }
+    // RE-PINNED PREMISE (round 6, 2026-10-14): since the up-sweep lands a descent on the
+    // post it meets under model overhead, the later lanes leave no stranded member on a
+    // lapped root on this tube's finished field, with the rule or without it
+    // (`finished [] / []`). The defect is read where the rule reads it: the census when
+    // the rule begins (`lapping_before`, 2 either way) and where the rule leaves the field
+    // (`lapping_after`: 0 with the rule, 2 without it).
     assert!(
-        s.counters.stranded_seats > 0 && s.stranded_branch.lapping_on_finished_field > 0,
-        "premise: without the rule a stranded-seat member must stand on a lapped root, or this \
-         fixture cannot see the rule"
+        s.counters.stranded_seats > 0 && s.stranded_branch.lapping_before > 0,
+        "premise: without the rule a stranded-seat member must stand on a lapped root when the \
+         rule would run, or this fixture cannot see the rule"
     );
     assert!(
         !s.stranded_branch.enabled && s.stranded_branch.branches_made == 0,
         "the knob must switch the rule off"
     );
     assert!(
-        b.stranded_branch.lapping_on_finished_field < s.stranded_branch.lapping_on_finished_field,
-        "the rule must leave fewer stranded-seat members on a lapped root: {:?} against {:?}",
+        b.stranded_branch.lapping_after < s.stranded_branch.lapping_after,
+        "the rule must leave fewer stranded-seat members on a lapped root where it finishes: {} \
+         against {}",
+        b.stranded_branch.lapping_after,
+        s.stranded_branch.lapping_after
+    );
+    assert!(
+        b.stranded_branch.lapping_on_finished_field <= s.stranded_branch.lapping_on_finished_field,
+        "and on the finished field no more than without it: {:?} against {:?}",
         b.stranded_branch.lapping_ids_on_finished_field,
         s.stranded_branch.lapping_ids_on_finished_field
     );
