@@ -1396,7 +1396,8 @@ fn prepare_one(
         // wrote `orient.json` in the search, before any failure after it, and a
         // failure must not destroy that evidence. A failure before the search
         // ended carries nothing to publish.
-        Err(OrientStop { stop, pending }) => {
+        Err(failed) => {
+            let OrientStop { stop, pending } = *failed;
             pending.publish();
             return report(&repair, assumed, failure(&stop));
         }
@@ -1607,7 +1608,7 @@ fn orient_model(
     limits: plinth_orient::OrientSearchLimits,
     placement: crate::Placement,
     reuse: WinnerPlanReuse,
-) -> Result<(OrientedModel, RetainedWinner, PendingOutput), OrientStop> {
+) -> Result<(OrientedModel, RetainedWinner, PendingOutput), Box<OrientStop>> {
     // Why no plan comes back from the arms that retain nothing.
     let absent = if reuse == WinnerPlanReuse::Disabled {
         plinth_sweep::orient_demand::ReuseMiss::Disabled
@@ -1615,7 +1616,7 @@ fn orient_model(
         plinth_sweep::orient_demand::ReuseMiss::NotRetained
     };
     let orient_error = |source| {
-        OrientStop::from(ChainStop::new(PipelineError::Orient {
+        Box::<OrientStop>::from(ChainStop::new(PipelineError::Orient {
             model: model.clone(),
             source,
         }))
@@ -1651,10 +1652,9 @@ fn orient_model(
             // (see `OrientStop`); one before it has none.
             let after_search = |failure: plinth_orient::DeferredFailure| {
                 let (source, pending) = failure.into_parts();
-                OrientStop {
-                    pending,
-                    ..orient_error(source)
-                }
+                let mut stop = orient_error(source);
+                stop.pending = pending;
+                stop
             };
             // THE WINNER'S PLAN (`r1-winner-reuse`): with the sweep engine and
             // reuse on, the finalists' production plans are kept, and the one
@@ -1686,7 +1686,7 @@ fn orient_model(
         }
         OrientationPolicy::Pinned(baselines) => {
             let Some(pinned) = baselines.get(model.as_str()) else {
-                return Err(OrientStop::from(ChainStop::new(
+                return Err(Box::<OrientStop>::from(ChainStop::new(
                     PipelineError::OrientationBaselineMissing {
                         model: model.clone(),
                     },
@@ -1714,12 +1714,12 @@ struct OrientStop {
     pending: PendingOutput,
 }
 
-impl From<ChainStop> for OrientStop {
+impl From<ChainStop> for Box<OrientStop> {
     fn from(stop: ChainStop) -> Self {
-        Self {
+        Box::new(OrientStop {
             stop,
             pending: PendingOutput::default(),
-        }
+        })
     }
 }
 
