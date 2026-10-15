@@ -2417,7 +2417,9 @@ fn plan_to_c(
         cancel::checkpoint()?;
         rasteriser_entries += 1;
         // A layer the cache's byte budget did not keep is computed on demand.
-        layer_reader.prepare(layer, false);
+        // The layer below is prepared with this one above it: the recompute
+        // reads this layer's cell list and clearance as that layer's "above".
+        layer_reader.prepare(layer.saturating_sub(1), layer > 0);
         let masks = layer_reader.masks(layer);
         if !layer_reader.cover_any(layer) {
             // No model here. Reset the potential so a column that restarts
@@ -2430,9 +2432,10 @@ fn plan_to_c(
         // The band this layer's material is born in: from the slicing plane
         // below to its own.
         creep.load_layer(&grid, planes[layer] - height, planes[layer]);
-        reach::recompute_potential(
+        reach::recompute_potential_layer(
             &grid,
-            &masks.cover,
+            &layer_reader,
+            layer,
             policy.kappa,
             height,
             &[],

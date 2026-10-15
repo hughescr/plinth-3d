@@ -186,6 +186,15 @@ pub struct ReachState {
     /// on the cover the potential was last recomputed on (it always does: the
     /// greedy seats on the layer it was handed).
     pub clear_mm: Vec<f32>,
+    /// The cover cells of the last [`recompute_potential_sparse`], ascending.
+    /// Outside this list (and [`Self::stray_cells`]) `u` is `+∞`, `anchor` is
+    /// [`NO_ANCHOR`] and `clear_mm` is zero, so the next recompute resets and
+    /// refills only these cells instead of every cell of the grid.
+    live_cells: Vec<u32>,
+    /// Cells OUTSIDE the last cover that a root wrote ([`recompute_potential`]'s
+    /// `roots`, [`relax_from_root`]); empty in production, where a seat is
+    /// always in the cover.
+    stray_cells: Vec<u32>,
 }
 
 /// "No path reaches this cell", for [`ReachState::anchor`].
@@ -221,7 +230,21 @@ impl ReachState {
             journal: Vec::new(),
             straight_limit: U_LIMIT,
             clear_mm: Vec::new(),
+            live_cells: Vec::new(),
+            stray_cells: Vec::new(),
         }
+    }
+
+    /// Every cell back to its fresh value (`u` infinite, no anchor, no
+    /// clearance), whatever was written to the public fields since the last
+    /// recompute. The sparse recompute trusts [`Self::live_cells`]; a caller
+    /// that wrote `u` or `anchor` itself starts from here.
+    fn reset_fields(&mut self) {
+        self.u.fill(f32::INFINITY);
+        self.anchor.fill(NO_ANCHOR);
+        self.clear_mm.fill(0.0);
+        self.live_cells.clear();
+        self.stray_cells.clear();
     }
 
     #[must_use]
@@ -261,6 +284,12 @@ impl ReachState {
     }
 
     fn write(&mut self, cell: usize, value: f32, anchor: u32) {
+        if self.live_cells.is_empty() {
+            // No recompute has listed a cover yet, so nothing says this cell
+            // will be reset: list it (a state relaxed before any recompute is a
+            // test's; production recomputes first).
+            self.stray_cells.push(u32::try_from(cell).unwrap_or(u32::MAX));
+        }
         if self.journaling {
             self.journal.push((
                 u32::try_from(cell).unwrap_or(u32::MAX),
@@ -350,11 +379,26 @@ pub fn advance_thickness(
     }
 }
 
+/// One layer's cover as the recompute reads it: the mask, its ascending cell
+/// list, and its clearance field ([`clearance_mm`] of the mask). All three come
+/// from the layer cache; nothing here is recomputed per call.
+#[derive(Clone, Copy, Debug)]
+pub struct LayerCover<'a> {
+    pub cover: &'a [bool],
+    /// The `true` cells of `cover`, ascending.
+    pub cells: &'a [u32],
+    pub clearance: &'a [f32],
+}
+
 /// Recompute `U` over the current layer.
 ///
 /// `roots` names cells whose potential is zero — strut centre columns at every
 /// layer they occupy, which is the only true root; **model material is never a
 /// root by itself.**
+///
+/// This form takes only the mask, so it finds the cover's cells and clearance
+/// itself and starts from a fully reset state: whole-grid work, for tests and
+/// one-off callers. The sweeps call [`recompute_potential_layer`].
 pub fn recompute_potential(
     grid: &Grid,
     cover: &[bool],
@@ -364,16 +408,175 @@ pub fn recompute_potential(
     creep: &SurfaceCreep<'_>,
     state: &mut ReachState,
 ) {
+    let cells = active_cells(cover);
+    let mut clearance = Vec::new();
+    clearance_mm(grid, cover, &mut clearance);
+    state.reset_fields();
+    let layer = LayerCover {
+        cover,
+        cells: &cells,
+        clearance: &clearance,
+    };
+    recompute_potential_sparse(grid, layer, kappa, layer_height_mm, roots, creep, state);
+}
+
+/// The ascending indices of the `true` cells of `mask`.
+fn active_cells(mask: &[bool]) -> Vec<u32> {
+    mask.iter()
+        .enumerate()
+        .filter(|(_, filled)| **filled)
+        .map(|(cell, _)| u32::try_from(cell).unwrap_or(u32::MAX))
+        .collect()
+}
+
+/// [`recompute_potential_sparse`] on `layer`'s cached cover, cells and
+/// clearance. The reader must have been prepared with `prepare(layer - 1,
+/// true)` (or `prepare(0, false)` for layer 0): the layer's own cell list and
+/// clearance are the "above" fields of the layer below it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "`recompute_potential`'s seven (grid, kappa, layer height, roots, creep, state and the \
+          cover) with the reader and the layer index standing for the cover; a struct would move \
+          the list rather than shorten it"
+)]
+pub fn recompute_potential_layer(
+    grid: &Grid,
+    reader: &crate::layer_cache::LayerReader<'_, '_>,
+    layer: usize,
+    kappa: f64,
+    layer_height_mm: f64,
+    roots: &[usize],
+    creep: &SurfaceCreep<'_>,
+    state: &mut ReachState,
+) {
+    if let Some(below) = layer.checked_sub(1) {
+        let cover = LayerCover {
+            cover: reader.cover_above(below),
+            cells: reader.cover_cells_above(below),
+            clearance: reader.clearance_above(below),
+        };
+        recompute_potential_sparse(grid, cover, kappa, layer_height_mm, roots, creep, state);
+    } else {
+        // Layer 0 has no layer below to hold its fields: build them here, once.
+        let cover = &reader.masks(0).cover;
+        let cells = active_cells(cover);
+        let mut clearance = Vec::new();
+        clearance_mm(grid, cover, &mut clearance);
+        let layer = LayerCover {
+            cover,
+            cells: &cells,
+            clearance: &clearance,
+        };
+        recompute_potential_sparse(grid, layer, kappa, layer_height_mm, roots, creep, state);
+    }
+}
+
+/// `PLINTH_SWEEP_VERIFY_REACH=1`: every sparse recompute is also run by the
+/// dense reference ([`recompute_dense_reference`]) on a copy of the state, and
+/// the two fields, counters and clearance are compared by bits.
+fn verify_reach() -> bool {
+    static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *VERIFY.get_or_init(|| {
+        std::env::var_os("PLINTH_SWEEP_VERIFY_REACH").is_some_and(|value| value == "1")
+    })
+}
+
+/// Recompute `U` over the current layer from the layer's cached cover.
+///
+/// The same field, bit for bit, as the dense recompute
+/// ([`recompute_dense_reference`]): the passes visit the cover cells in the
+/// order the row-major scan met them, in the same neighbour order, with the
+/// same expressions. What changes is only what is NOT visited: a cell outside
+/// the cover is `+∞` with no anchor and zero clearance before and after, and
+/// every one of them is skipped, not reset.
+///
+/// `state` must have been produced by this function, [`relax_from_root`] on
+/// the same cover, [`ReachState::new`] or [`recompute_potential`] since any
+/// direct write to its `u` or `anchor` outside the last cover (the sweep's
+/// empty-layer `u.fill(∞)` is fine: it writes the fresh value).
+pub fn recompute_potential_sparse(
+    grid: &Grid,
+    layer: LayerCover<'_>,
+    kappa: f64,
+    layer_height_mm: f64,
+    roots: &[usize],
+    creep: &SurfaceCreep<'_>,
+    state: &mut ReachState,
+) {
+    if verify_reach() {
+        let mut dense = state.clone();
+        recompute_dense_reference(grid, layer.cover, kappa, layer_height_mm, roots, creep, &mut dense);
+        recompute_sparse_core(grid, layer, kappa, layer_height_mm, roots, creep, state);
+        assert_fields_equal(&dense, state);
+    } else {
+        recompute_sparse_core(grid, layer, kappa, layer_height_mm, roots, creep, state);
+    }
+}
+
+/// Panics unless the sparse and dense recomputes left `sparse` and `dense`
+/// bit-identical: both potential rasters, both anchors, the clearance and every
+/// counter the recompute touches.
+fn assert_fields_equal(dense: &ReachState, sparse: &ReachState) {
+    let same_bits = |a: &[f32], b: &[f32]| {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
+    };
+    assert!(same_bits(&dense.u, &sparse.u), "reach: sparse U differs from the dense recompute");
+    assert!(dense.anchor == sparse.anchor, "reach: sparse anchors differ from the dense recompute");
+    assert!(
+        same_bits(&dense.clear_mm, &sparse.clear_mm),
+        "reach: sparse clearance differs from the dense clearance"
+    );
+    assert!(
+        dense.u_from_vertical_max.to_bits() == sparse.u_from_vertical_max.to_bits()
+            && dense.vertical_inheritance_hits == sparse.vertical_inheritance_hits
+            && dense.reach_tests == sparse.reach_tests
+            && dense.chamfer_not_converged == sparse.chamfer_not_converged
+            && dense.sightlines_clear == sparse.sightlines_clear
+            && dense.sightlines_blocked == sparse.sightlines_blocked
+            && dense.creep_cells_weighted == sparse.creep_cells_weighted
+            && dense.creep_steps_taken == sparse.creep_steps_taken
+            && dense.creep_cells_free == sparse.creep_cells_free
+            && dense.lamina_mm.to_bits() == sparse.lamina_mm.to_bits(),
+        "reach: a sparse recompute counter differs from the dense recompute"
+    );
+}
+
+fn recompute_sparse_core(
+    grid: &Grid,
+    layer: LayerCover<'_>,
+    kappa: f64,
+    layer_height_mm: f64,
+    roots: &[usize],
+    creep: &SurfaceCreep<'_>,
+    state: &mut ReachState,
+) {
     let cells = grid.cells();
+    let cover = layer.cover;
+    debug_assert!(layer.clearance.len() == cells && cover.len() == cells);
     // The one lamina every step cost is denominated in. Set here as well as in
     // `advance_thickness` so a caller that only recomputes the potential (the
     // unit tests, and `relax_from_root` through them) cannot read a zero.
     state.lamina_mm = layer_height_mm as f32;
-    // This layer's clearance field, for the sightline shortcut here and in
-    // every `relax_from_root` on this layer (which runs on the same cover).
-    let mut clear = std::mem::take(&mut state.clear_mm);
-    clearance_mm(grid, cover, &mut clear);
-    state.clear_mm = clear;
+    // Take the previous layer's cells back to fresh, and give this layer's
+    // clearance to the sightline shortcut here and in every `relax_from_root`
+    // on this layer (which runs on the same cover): a copy of the cached field
+    // at the cover's cells only, because it is zero everywhere else.
+    if state.clear_mm.len() != cells {
+        state.clear_mm.clear();
+        state.clear_mm.resize(cells, 0.0);
+    }
+    for &cell in state.live_cells.iter().chain(&state.stray_cells) {
+        let cell = cell as usize;
+        state.u[cell] = f32::INFINITY;
+        state.anchor[cell] = NO_ANCHOR;
+        state.clear_mm[cell] = 0.0;
+    }
+    state.stray_cells.clear();
+    for &cell in layer.cells {
+        state.clear_mm[cell as usize] = layer.clearance[cell as usize];
+    }
+    state.live_cells.clear();
+    state.live_cells.extend_from_slice(layer.cells);
     // Step 1 — vertical inheritance, carried FORWARD and not charged:
     // `U[c] = U_prev[c]`.
     //
@@ -432,12 +635,11 @@ pub fn recompute_potential(
     // survival of the contradiction, and `oracle_ramp` is the sloped fixture
     // that exercises it — the flat oracles cannot, because on them a demand
     // cell's lateral run is zero.
-    for cell in 0..cells {
-        state.anchor[cell] = NO_ANCHOR;
-        if !cover[cell] {
-            state.u[cell] = f32::INFINITY;
-            continue;
-        }
+    //
+    // A cell outside the cover is already `u = +∞`, no anchor (reset above),
+    // which is all the dense form wrote there.
+    for &cell in layer.cells {
+        let cell = cell as usize;
         // `u_prev` is `+∞` wherever layer k−1 did not CARRY (see
         // [`commit_layer`]), so this is "carried below AND that material was
         // itself rooted".
@@ -462,6 +664,9 @@ pub fn recompute_potential(
     for &root in roots {
         state.u[root] = 0.0;
         state.anchor[root] = u32::try_from(root).unwrap_or(NO_ANCHOR);
+        if !cover[root] {
+            state.stray_cells.push(u32::try_from(root).unwrap_or(u32::MAX));
+        }
     }
 
     // Step 2 — any-angle sweeps until the field stops moving.
@@ -498,17 +703,22 @@ pub fn recompute_potential(
     // otherwise. Every value is still the length of a real path through the
     // cover, so the field can only be too HIGH, never too low; in open cover
     // it is the Euclidean distance exactly.
+    //
+    // "The field stopped moving" is "no cell was written in the round": a
+    // write needs a STRICT improvement (`any_angle_relax` returns a value only
+    // below the cell's current one, and no field value is NaN because every
+    // price is a finite length or `+∞`), so one write is one cell whose bits
+    // differ from the round's start, and a round with none left every bit as it
+    // was. That is the test the dense form made by cloning `U` and comparing.
     const MAX_SWEEP_ROUNDS: usize = 8;
-    let mut before = state.u.clone();
     let mut converged = false;
     for _ in 0..MAX_SWEEP_ROUNDS {
-        any_angle_forward(grid, cover, kappa, state);
-        any_angle_reverse(grid, cover, kappa, state);
-        if state.u == before {
+        let written = any_angle_forward(grid, layer, kappa, state)
+            + any_angle_reverse(grid, layer, kappa, state);
+        if written == 0 {
             converged = true;
             break;
         }
-        before.copy_from_slice(&state.u);
     }
     if !converged {
         state.chamfer_not_converged += 1;
@@ -526,6 +736,65 @@ pub fn recompute_potential(
     creep_step(grid, cover, kappa, creep, state);
 
     // Step 3 is the caller's `is_rooted`.
+    state.reach_tests += 1;
+}
+
+/// The dense recompute, kept verbatim as the oracle for
+/// [`recompute_potential_sparse`] (the `PLINTH_SWEEP_VERIFY_REACH` shadow and
+/// the oracle tests): it recomputes the clearance from the cover, initialises
+/// every cell, sweeps the whole grid and detects convergence by cloning `U`.
+pub(crate) fn recompute_dense_reference(
+    grid: &Grid,
+    cover: &[bool],
+    kappa: f64,
+    layer_height_mm: f64,
+    roots: &[usize],
+    creep: &SurfaceCreep<'_>,
+    state: &mut ReachState,
+) {
+    let cells = grid.cells();
+    state.lamina_mm = layer_height_mm as f32;
+    let mut clear = std::mem::take(&mut state.clear_mm);
+    clearance_mm(grid, cover, &mut clear);
+    state.clear_mm = clear;
+    for cell in 0..cells {
+        state.anchor[cell] = NO_ANCHOR;
+        if !cover[cell] {
+            state.u[cell] = f32::INFINITY;
+            continue;
+        }
+        if state.u_prev[cell] <= 1.0 {
+            let below = state.u_prev[cell];
+            state.u[cell] = below;
+            state.anchor[cell] = u32::try_from(cell).unwrap_or(NO_ANCHOR);
+            state.vertical_inheritance_hits += 1;
+            if f64::from(below) > state.u_from_vertical_max {
+                state.u_from_vertical_max = f64::from(below);
+            }
+        } else {
+            state.u[cell] = f32::INFINITY;
+        }
+    }
+    for &root in roots {
+        state.u[root] = 0.0;
+        state.anchor[root] = u32::try_from(root).unwrap_or(NO_ANCHOR);
+    }
+    const MAX_SWEEP_ROUNDS: usize = 8;
+    let mut before = state.u.clone();
+    let mut converged = false;
+    for _ in 0..MAX_SWEEP_ROUNDS {
+        dense_forward(grid, cover, kappa, state);
+        dense_reverse(grid, cover, kappa, state);
+        if state.u == before {
+            converged = true;
+            break;
+        }
+        before.copy_from_slice(&state.u);
+    }
+    if !converged {
+        state.chamfer_not_converged += 1;
+    }
+    creep_step(grid, cover, kappa, creep, state);
     state.reach_tests += 1;
 }
 
@@ -1314,7 +1583,115 @@ pub(crate) fn clearance_mm(grid: &Grid, cover: &[bool], out: &mut Vec<f32>) {
 /// The largest potential a rootedness decision reads.
 const U_LIMIT: f32 = 1.0;
 
-fn any_angle_forward(grid: &Grid, cover: &[bool], kappa: f64, state: &mut ReachState) {
+/// The forward pass over the cover's cells, ascending: the order the dense
+/// row-major scan met them in. Returns the number of cells it wrote.
+fn any_angle_forward(grid: &Grid, layer: LayerCover<'_>, kappa: f64, state: &mut ReachState) -> usize {
+    let cols = grid.cols();
+    let cover = layer.cover;
+    let pitch = grid.pitch_mm() as f32;
+    let w = weight(state, kappa, 0);
+    let mut sight = Sightlines::default();
+    let mut written = 0;
+    for &cell in layer.cells {
+        let cell = cell as usize;
+        let (row, col) = (cell / cols, cell % cols);
+        let mut from = [usize::MAX; 4];
+        if col > 0 {
+            from[0] = cell - 1;
+        }
+        if row > 0 {
+            from[1] = cell - cols;
+            if col > 0 {
+                from[2] = cell - cols - 1;
+            }
+            if col + 1 < cols {
+                from[3] = cell - cols + 1;
+            }
+        }
+        for near in from {
+            if near == usize::MAX || !cover[near] {
+                continue;
+            }
+            if let Some((value, anchor, _)) = any_angle_relax(
+                cols,
+                pitch,
+                cover,
+                &state.clear_mm,
+                &state.u,
+                &state.anchor,
+                cell,
+                near,
+                w,
+                state.straight_limit,
+                &mut sight,
+            ) {
+                state.u[cell] = value;
+                state.anchor[cell] = anchor;
+                written += 1;
+            }
+        }
+    }
+    state.sightlines_clear += sight.clear;
+    state.sightlines_blocked += sight.blocked;
+    written
+}
+
+/// The reverse pass over the cover's cells, descending. Returns the number of
+/// cells it wrote.
+fn any_angle_reverse(grid: &Grid, layer: LayerCover<'_>, kappa: f64, state: &mut ReachState) -> usize {
+    let cols = grid.cols();
+    let rows = grid.rows();
+    let cover = layer.cover;
+    let pitch = grid.pitch_mm() as f32;
+    let w = weight(state, kappa, 0);
+    let mut sight = Sightlines::default();
+    let mut written = 0;
+    for &cell in layer.cells.iter().rev() {
+        let cell = cell as usize;
+        let (row, col) = (cell / cols, cell % cols);
+        let mut from = [usize::MAX; 4];
+        if col + 1 < cols {
+            from[0] = cell + 1;
+        }
+        if row + 1 < rows {
+            from[1] = cell + cols;
+            if col + 1 < cols {
+                from[2] = cell + cols + 1;
+            }
+            if col > 0 {
+                from[3] = cell + cols - 1;
+            }
+        }
+        for near in from {
+            if near == usize::MAX || !cover[near] {
+                continue;
+            }
+            if let Some((value, anchor, _)) = any_angle_relax(
+                cols,
+                pitch,
+                cover,
+                &state.clear_mm,
+                &state.u,
+                &state.anchor,
+                cell,
+                near,
+                w,
+                state.straight_limit,
+                &mut sight,
+            ) {
+                state.u[cell] = value;
+                state.anchor[cell] = anchor;
+                written += 1;
+            }
+        }
+    }
+    state.sightlines_clear += sight.clear;
+    state.sightlines_blocked += sight.blocked;
+    written
+}
+
+/// The dense forward pass, the oracle's ([`recompute_dense_reference`]).
+fn dense_forward(grid: &Grid, cover: &[bool], kappa: f64, state: &mut ReachState) {
     let cols = grid.cols();
     let pitch = grid.pitch_mm() as f32;
     let w = weight(state, kappa, 0);
@@ -1365,7 +1742,8 @@ fn any_angle_forward(grid: &Grid, cover: &[bool], kappa: f64, state: &mut ReachS
     state.sightlines_blocked += sight.blocked;
 }
 
-fn any_angle_reverse(grid: &Grid, cover: &[bool], kappa: f64, state: &mut ReachState) {
+/// The dense reverse pass, the oracle's.
+fn dense_reverse(grid: &Grid, cover: &[bool], kappa: f64, state: &mut ReachState) {
     let cols = grid.cols();
     let rows = grid.rows();
     let pitch = grid.pitch_mm() as f32;
@@ -1437,6 +1815,11 @@ pub fn relax_from_root(
     let w = weight(state, kappa, root);
     let mut sight = Sightlines::default();
     queue.clear();
+    if !cover[root] {
+        // Never in production (a seat is in the cover); the next recompute
+        // still takes the cell back to fresh.
+        state.stray_cells.push(u32::try_from(root).unwrap_or(u32::MAX));
+    }
     state.write(root, 0.0, u32::try_from(root).unwrap_or(NO_ANCHOR));
     touched.push(root);
     queue.push(root);
@@ -1973,5 +2356,449 @@ mod relax_tests {
             rooted as f64 > 0.85 * ideal,
             "one insertion rooted {rooted} cells against a reach disc of {ideal:.0}"
         );
+    }
+}
+
+/// The sparse recompute against its dense oracle ([`recompute_dense_reference`]):
+/// the whole potential, anchor and clearance fields and every counter, by bits,
+/// layer by layer on states that carry across layers.
+#[cfg(test)]
+mod sparse_tests {
+    #![allow(clippy::cast_possible_truncation)]
+
+    use super::*;
+    use crate::grid::plan_grid;
+
+    const KAPPA: f64 = 42.600_645;
+    const HEIGHT: f64 = 0.05;
+
+    /// One layer of a fixture, as the sweep sees it.
+    struct Layer {
+        cover: Vec<bool>,
+        carry: Vec<bool>,
+        roots: Vec<usize>,
+        /// Seats relaxed after the recompute, in order.
+        relax: Vec<usize>,
+        /// Creep weights `(cell, ω)` laid on the layer's band.
+        creep: Vec<(usize, f32)>,
+    }
+
+    impl Layer {
+        fn new(cover: Vec<bool>) -> Self {
+            Self {
+                carry: cover.clone(),
+                cover,
+                roots: Vec::new(),
+                relax: Vec::new(),
+                creep: Vec::new(),
+            }
+        }
+    }
+
+    /// What the oracle saw, so a green run can say it exercised each path.
+    #[derive(Default)]
+    struct Witness {
+        recomputes: usize,
+        inherited: u64,
+        clear: u64,
+        blocked: u64,
+        creep_steps: u64,
+        unrooted_cells: usize,
+        stray_roots: usize,
+        unconverged: u64,
+    }
+
+    fn small_grid() -> Grid {
+        plan_grid(0.0, 0.0, 4.0, 4.0, 1, 0.1, 0.0, 2_000_000_000).0
+    }
+
+    fn rect(grid: &Grid, rows: std::ops::Range<usize>, cols: std::ops::Range<usize>) -> Vec<bool> {
+        let mut mask = vec![false; grid.cells()];
+        for row in rows {
+            for col in cols.clone() {
+                mask[grid.index(row, col)] = true;
+            }
+        }
+        mask
+    }
+
+    fn union(a: &[bool], b: &[bool]) -> Vec<bool> {
+        a.iter().zip(b).map(|(x, y)| *x || *y).collect()
+    }
+
+    /// Run `layers` through the dense oracle and the sparse recompute side by
+    /// side, comparing after every step.
+    fn compare(grid: &Grid, layers: &[Layer], kappa: f64, straight: bool) -> Witness {
+        let mut witness = Witness::default();
+        let mut dense = ReachState::new(grid);
+        let mut sparse = ReachState::new(grid);
+        if !straight {
+            dense.straight_limit = f32::NEG_INFINITY;
+            sparse.straight_limit = f32::NEG_INFINITY;
+        }
+        let (mut queue, mut touched) = (Vec::new(), Vec::new());
+        for layer in layers {
+            if !layer.cover.iter().any(|c| *c) {
+                // The sweep's empty-layer reset, for both.
+                dense.u.fill(f32::INFINITY);
+                sparse.u.fill(f32::INFINITY);
+                commit_layer(&mut dense, &layer.carry);
+                commit_layer(&mut sparse, &layer.carry);
+                continue;
+            }
+            let mut creep = SurfaceCreep::disabled(grid);
+            if !layer.creep.is_empty() {
+                creep.weight = vec![UNTOUCHED; grid.cells()];
+                for &(cell, weight) in &layer.creep {
+                    creep.weight[cell] = weight;
+                    creep.weight_touched.push(u32::try_from(cell).expect("small grid"));
+                }
+            }
+            recompute_dense_reference(grid, &layer.cover, kappa, HEIGHT, &layer.roots, &creep, &mut dense);
+            let cells = active_cells(&layer.cover);
+            let mut clearance = Vec::new();
+            clearance_mm(grid, &layer.cover, &mut clearance);
+            let cached = LayerCover {
+                cover: &layer.cover,
+                cells: &cells,
+                clearance: &clearance,
+            };
+            recompute_potential_sparse(grid, cached, kappa, HEIGHT, &layer.roots, &creep, &mut sparse);
+            assert_fields_equal(&dense, &sparse);
+            witness.recomputes += 1;
+            witness.stray_roots += layer.roots.iter().filter(|r| !layer.cover[**r]).count();
+            for &seat in &layer.relax {
+                for state in [&mut dense, &mut sparse] {
+                    // A trial seat, undone, then the real one: the journal's
+                    // cells must be among the tracked ones too.
+                    state.begin_journal();
+                    relax_from_root(grid, &layer.cover, kappa, seat, state, &mut queue, &mut touched);
+                    state.undo_journal();
+                    relax_from_root(grid, &layer.cover, kappa, seat, state, &mut queue, &mut touched);
+                }
+                assert_fields_equal(&dense, &sparse);
+            }
+            witness.inherited = sparse.vertical_inheritance_hits;
+            witness.clear = sparse.sightlines_clear;
+            witness.blocked = sparse.sightlines_blocked;
+            witness.creep_steps = sparse.creep_steps_taken;
+            witness.unconverged = sparse.chamfer_not_converged;
+            witness.unrooted_cells += (0..grid.cells())
+                .filter(|c| layer.cover[*c] && sparse.u[*c] > 1.0)
+                .count();
+            commit_layer(&mut dense, &layer.carry);
+            commit_layer(&mut sparse, &layer.carry);
+            assert!(
+                dense.u_prev.iter().zip(&sparse.u_prev).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "reach: committed potentials differ"
+            );
+        }
+        witness
+    }
+
+    #[test]
+    fn a_corridor_with_a_bend_matches_the_dense_recompute() {
+        let grid = small_grid();
+        // A one-cell corridor along a row, a 3-cell bend down a column.
+        let a = rect(&grid, 10..11, 2..36);
+        let b = rect(&grid, 10..30, 35..37);
+        let cover = union(&a, &b);
+        let mut layers = Vec::new();
+        for k in 0..4 {
+            let mut layer = Layer::new(cover.clone());
+            if k == 0 {
+                layer.roots = vec![grid.index(10, 3)];
+            }
+            layer.relax = vec![grid.index(10, 20 + k)];
+            layers.push(layer);
+        }
+        let w = compare(&grid, &layers, KAPPA, true);
+        assert!(w.recomputes == 4 && w.blocked + w.clear > 0 && w.inherited > 0, "witness");
+        assert!(w.unrooted_cells > 0, "the far end of the corridor must be out of reach");
+    }
+
+    #[test]
+    fn a_diagonal_band_matches_the_dense_recompute() {
+        let grid = small_grid();
+        let mut cover = vec![false; grid.cells()];
+        for step in 0..34 {
+            for width in 0..3 {
+                cover[grid.index(2 + step, 2 + step + width)] = true;
+            }
+        }
+        let mut layer = Layer::new(cover.clone());
+        layer.roots = vec![grid.index(3, 3)];
+        let mut next = Layer::new(cover);
+        next.relax = vec![grid.index(18, 19)];
+        let w = compare(&grid, &[layer, next], 12.0, true);
+        assert!(w.clear + w.blocked > 0);
+    }
+
+    #[test]
+    fn disconnected_cover_matches_the_dense_recompute() {
+        let grid = small_grid();
+        let left = rect(&grid, 5..20, 3..15);
+        let right = rect(&grid, 8..25, 22..37);
+        let cover = union(&left, &right);
+        let mut first = Layer::new(cover.clone());
+        first.roots = vec![grid.index(10, 5)];
+        let mut second = Layer::new(cover);
+        second.relax = vec![grid.index(10, 8)];
+        let w = compare(&grid, &[first, second], KAPPA, true);
+        // The island with no root stays unreachable in both.
+        assert!(w.unrooted_cells > 0);
+    }
+
+    #[test]
+    fn distant_anchors_through_an_obstacle_match_the_dense_recompute() {
+        let grid = small_grid();
+        // A wide open sheet with a square hole in it: sightlines are long,
+        // and the ones across the hole bend round it.
+        let mut cover = rect(&grid, 2..38, 2..38);
+        for row in 16..24 {
+            for col in 18..26 {
+                cover[grid.index(row, col)] = false;
+            }
+        }
+        let mut first = Layer::new(cover.clone());
+        first.roots = vec![grid.index(20, 10)];
+        let mut second = Layer::new(cover.clone());
+        second.relax = vec![grid.index(35, 35), grid.index(5, 30)];
+        let third = Layer::new(cover);
+        let w = compare(&grid, &[first, second, third], 40.0, true);
+        assert!(w.clear > 0 && w.blocked > 0, "long sightlines must both clear and block");
+        // And the chamfer form (sabotage S-straight): no sightline taken.
+        let (r0, r1) = (grid.index(5, 5), grid.index(30, 30));
+        let mut a = Layer::new(rect(&grid, 2..38, 2..38));
+        a.roots = vec![r0];
+        a.relax = vec![r1];
+        let _ = compare(&grid, &[a], 20.0, false);
+    }
+
+    #[test]
+    fn empty_layers_between_covers_match_the_dense_recompute() {
+        let grid = small_grid();
+        let cover = rect(&grid, 8..20, 8..20);
+        let other = rect(&grid, 12..30, 15..30);
+        let mut layers = vec![Layer::new(cover.clone())];
+        layers[0].roots = vec![grid.index(9, 9)];
+        layers.push(Layer::new(vec![false; grid.cells()]));
+        layers.push(Layer::new(other.clone()));
+        layers.push(Layer::new(cover));
+        layers.push(Layer::new(vec![false; grid.cells()]));
+        layers.push(Layer::new(vec![false; grid.cells()]));
+        layers.push(Layer::new(other));
+        let w = compare(&grid, &layers, KAPPA, true);
+        assert_eq!(w.recomputes, 4);
+    }
+
+    /// A root outside the cover (never in production) and a creep step: the
+    /// stray cell is taken back to fresh by the next recompute, the weighted
+    /// creep lowers the same cells.
+    #[test]
+    fn a_root_outside_the_cover_and_a_creep_match_the_dense_recompute() {
+        let grid = small_grid();
+        let cover = rect(&grid, 10..20, 10..20);
+        let carried = rect(&grid, 10..20, 10..16);
+        let mut first = Layer::new(cover.clone());
+        first.roots = vec![grid.index(2, 2), grid.index(12, 12)];
+        first.carry = carried;
+        let mut second = Layer::new(rect(&grid, 10..20, 10..22));
+        second.creep = vec![(grid.index(14, 16), 0.006), (grid.index(14, 17), 0.3)];
+        second.relax = vec![grid.index(25, 25)];
+        let third = Layer::new(cover);
+        let w = compare(&grid, &[first, second, third], KAPPA, true);
+        assert!(w.stray_roots >= 1);
+        assert!(w.creep_steps > 0, "the creep step must have lowered a cell");
+    }
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+
+        fn chance(&mut self, percent: usize) -> bool {
+            self.below(100) < percent
+        }
+    }
+
+    fn random_cover(grid: &Grid, rng: &mut Rng, density: usize, block: usize) -> Vec<bool> {
+        let mut mask = vec![false; grid.cells()];
+        for row in 0..grid.rows() {
+            for col in 0..grid.cols() {
+                // Blocks make connected regions with holes and gaps.
+                let seed = (row / block) * 7919 + (col / block) * 104_729;
+                let mixed = (seed as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ rng.0;
+                mask[grid.index(row, col)] = (mixed >> 33) as usize % 100 < density;
+            }
+        }
+        mask
+    }
+
+    #[test]
+    fn two_hundred_random_masks_match_the_dense_recompute() {
+        let grid = small_grid();
+        let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+        let mut total = Witness::default();
+        for case in 0..200 {
+            let kappa = [KAPPA, 12.0, 4.0][case % 3];
+            let density = [35, 60, 85, 97][rng.below(4)];
+            let block = [1, 2, 3, 5][rng.below(4)];
+            let layer_count = 1 + rng.below(4);
+            let mut layers = Vec::new();
+            let mut cover = random_cover(&grid, &mut rng, density, block);
+            for index in 0..layer_count {
+                if index > 0 {
+                    // The next layer keeps most of the cover and moves some.
+                    let fresh = random_cover(&grid, &mut rng, density, block);
+                    cover = cover
+                        .iter()
+                        .zip(&fresh)
+                        .map(|(old, new)| if rng.chance(85) { *old } else { *new })
+                        .collect();
+                    if rng.chance(10) {
+                        cover.fill(false);
+                    }
+                }
+                let live: Vec<usize> = (0..grid.cells()).filter(|c| cover[*c]).collect();
+                let mut layer = Layer::new(cover.clone());
+                layer.carry = cover.iter().map(|c| *c && rng.chance(80)).collect();
+                if !live.is_empty() {
+                    for _ in 0..rng.below(4) {
+                        layer.relax.push(live[rng.below(live.len())]);
+                    }
+                    if index == 0 || rng.chance(30) {
+                        for _ in 0..1 + rng.below(3) {
+                            // One root in ten is outside the cover.
+                            layer.roots.push(if rng.chance(10) {
+                                rng.below(grid.cells())
+                            } else {
+                                live[rng.below(live.len())]
+                            });
+                        }
+                    }
+                    if rng.chance(25) {
+                        for _ in 0..1 + rng.below(6) {
+                            let cell = live[rng.below(live.len())];
+                            if !layer.creep.iter().any(|(c, _)| *c == cell) {
+                                layer.creep.push((cell, [0.0, 0.006, 0.4, 0.9][rng.below(4)]));
+                            }
+                        }
+                        layer.creep.sort_by_key(|(cell, _)| *cell);
+                    }
+                }
+                layers.push(layer);
+            }
+            let w = compare(&grid, &layers, kappa, case % 5 != 0);
+            total.recomputes += w.recomputes;
+            total.inherited += w.inherited;
+            total.clear += w.clear;
+            total.blocked += w.blocked;
+            total.creep_steps += w.creep_steps;
+            total.unrooted_cells += w.unrooted_cells;
+            total.stray_roots += w.stray_roots;
+            total.unconverged += w.unconverged;
+        }
+        // The paths the oracle must have taken, or green means nothing.
+        assert!(total.recomputes > 300, "recomputes {}", total.recomputes);
+        assert!(total.inherited > 0 && total.clear > 0 && total.blocked > 0);
+        assert!(total.creep_steps > 0, "no creep step ever fired");
+        assert!(total.unrooted_cells > 0 && total.stray_roots > 0);
+    }
+
+    /// Sabotage 1: the cell list drops a cover cell. The sweep never visits it,
+    /// so the field differs from the dense one: the oracle must go red.
+    #[test]
+    #[should_panic(expected = "reach: sparse")]
+    fn sabotage_a_dropped_cover_cell_is_caught() {
+        let grid = small_grid();
+        let cover = rect(&grid, 10..14, 10..30);
+        let mut cells = active_cells(&cover);
+        cells.remove(cells.len() / 2);
+        let mut clearance = Vec::new();
+        clearance_mm(&grid, &cover, &mut clearance);
+        let root = [grid.index(10, 10)];
+        let flat = SurfaceCreep::disabled(&grid);
+        let mut dense = ReachState::new(&grid);
+        recompute_dense_reference(&grid, &cover, KAPPA, HEIGHT, &root, &flat, &mut dense);
+        let mut sparse = ReachState::new(&grid);
+        let layer = LayerCover {
+            cover: &cover,
+            cells: &cells,
+            clearance: &clearance,
+        };
+        recompute_sparse_core(&grid, layer, KAPPA, HEIGHT, &root, &flat, &mut sparse);
+        assert_fields_equal(&dense, &sparse);
+    }
+
+    /// Sabotage 2: the reset class. The state forgets which cells the last
+    /// layer's cover held, so a cell the next cover does not hold keeps its old
+    /// potential, anchor and clearance.
+    #[test]
+    #[should_panic(expected = "reach: sparse")]
+    fn sabotage_a_forgotten_reset_is_caught() {
+        let grid = small_grid();
+        let first = rect(&grid, 10..14, 10..30);
+        let second = rect(&grid, 10..14, 10..20);
+        let flat = SurfaceCreep::disabled(&grid);
+        let mut dense = ReachState::new(&grid);
+        let mut sparse = ReachState::new(&grid);
+        let root = [grid.index(10, 10)];
+        for (index, cover) in [first, second].iter().enumerate() {
+            let cells = active_cells(cover);
+            let mut clearance = Vec::new();
+            clearance_mm(&grid, cover, &mut clearance);
+            recompute_dense_reference(&grid, cover, KAPPA, HEIGHT, &root, &flat, &mut dense);
+            if index == 1 {
+                sparse.live_cells.clear();
+            }
+            let layer = LayerCover {
+                cover,
+                cells: &cells,
+                clearance: &clearance,
+            };
+            recompute_sparse_core(&grid, layer, KAPPA, HEIGHT, &root, &flat, &mut sparse);
+            assert_fields_equal(&dense, &sparse);
+        }
+    }
+
+    /// Sabotage 3: a clearance field of another cover. The shortcut then
+    /// accepts sightlines that cross the cover's holes (or refuses clear
+    /// ones), changing counters and values.
+    #[test]
+    #[should_panic(expected = "reach: sparse")]
+    fn sabotage_a_stale_clearance_is_caught() {
+        let grid = small_grid();
+        let mut cover = rect(&grid, 2..38, 2..38);
+        for row in 16..24 {
+            for col in 18..26 {
+                cover[grid.index(row, col)] = false;
+            }
+        }
+        let cells = active_cells(&cover);
+        let open = rect(&grid, 2..38, 2..38);
+        let mut wrong = Vec::new();
+        clearance_mm(&grid, &open, &mut wrong);
+        let root = [grid.index(20, 10)];
+        let flat = SurfaceCreep::disabled(&grid);
+        let mut dense = ReachState::new(&grid);
+        recompute_dense_reference(&grid, &cover, 40.0, HEIGHT, &root, &flat, &mut dense);
+        let mut sparse = ReachState::new(&grid);
+        let layer = LayerCover {
+            cover: &cover,
+            cells: &cells,
+            clearance: &wrong,
+        };
+        recompute_sparse_core(&grid, layer, 40.0, HEIGHT, &root, &flat, &mut sparse);
+        assert_fields_equal(&dense, &sparse);
     }
 }
