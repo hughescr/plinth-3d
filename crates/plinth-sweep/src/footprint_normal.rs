@@ -761,19 +761,41 @@ type FaceCornersNormal = Option<([[f64; 3]; 3], [f64; 3])>;
 /// whose outward unit normal's `z` is below the query's own threshold, lowest
 /// face id on a tie. `(face id, its unit normal)`.
 fn nearest_admitted(mesh: &Mesh, queries: &[([f64; 3], f64)]) -> Vec<Option<(u32, [f64; 3])>> {
-    let verts = mesh.verts();
-    let tris = mesh.tris();
-    // One read of every face's unit normal, in the spelling `seat_faces` uses.
-    let faces: Vec<FaceCornersNormal> = tris
-        .iter()
-        .map(|tri| {
-            let a = *verts.get(tri[0] as usize)?;
-            let b = *verts.get(tri[1] as usize)?;
-            let c = *verts.get(tri[2] as usize)?;
-            let unit = vec3::normalize(vec3::cross(vec3::sub(b, a), vec3::sub(c, a)))?;
-            Some(([a, b, c], unit))
-        })
-        .collect();
+    nearest_admitted_in(&FaceTable::of(mesh), queries)
+}
+
+/// **Every face of a mesh with its corners and unit normal, read once.** The
+/// nearest-face scan ([`nearest_admitted_in`]) walks all faces for every
+/// query; a caller that asks many times of one mesh (the lip-seat round loop)
+/// builds this once instead of once per call (the normals were 196 of 489
+/// thread-seconds on Deinonychus, 2026-10-14). A pure function of the mesh.
+pub(crate) struct FaceTable {
+    faces: Vec<FaceCornersNormal>,
+}
+
+impl FaceTable {
+    /// One read of every face's unit normal, in the spelling `seat_faces`
+    /// uses.
+    pub(crate) fn of(mesh: &Mesh) -> Self {
+        let verts = mesh.verts();
+        let tris = mesh.tris();
+        let faces: Vec<FaceCornersNormal> = tris
+            .iter()
+            .map(|tri| {
+                let a = *verts.get(tri[0] as usize)?;
+                let b = *verts.get(tri[1] as usize)?;
+                let c = *verts.get(tri[2] as usize)?;
+                let unit = vec3::normalize(vec3::cross(vec3::sub(b, a), vec3::sub(c, a)))?;
+                Some(([a, b, c], unit))
+            })
+            .collect();
+        Self { faces }
+    }
+}
+
+/// [`nearest_admitted`] over a face table already built for the mesh.
+fn nearest_admitted_in(table: &FaceTable, queries: &[([f64; 3], f64)]) -> Vec<Option<(u32, [f64; 3])>> {
+    let faces = &table.faces;
     crate::perf::add(
         crate::PerfWork::NearestFootprintNormalRows,
         crate::perf::count(queries.len()),
@@ -862,7 +884,7 @@ pub fn reseat_sites(
 /// second only over those the rule found no face for.
 #[must_use]
 pub(crate) fn sites_at(
-    mesh: &Mesh,
+    table: &FaceTable,
     points_mm: &[Option<[f64; 3]>],
     rule: SeatFaceRule,
 ) -> Vec<Option<TipSite>> {
@@ -875,14 +897,14 @@ pub(crate) fn sites_at(
         .iter()
         .filter_map(|&index| points_mm[index].map(|point| (point, rule.max_normal_z())))
         .collect();
-    let mut found = nearest_admitted(mesh, &queries);
+    let mut found = nearest_admitted_in(table, &queries);
     let missing: Vec<usize> = (0..found.len()).filter(|&row| found[row].is_none()).collect();
     if !missing.is_empty() {
         let again: Vec<([f64; 3], f64)> = missing
             .iter()
             .map(|&row| (queries[row].0, any_down.max_normal_z()))
             .collect();
-        for (&row, answer) in missing.iter().zip(nearest_admitted(mesh, &again)) {
+        for (&row, answer) in missing.iter().zip(nearest_admitted_in(table, &again)) {
             found[row] = answer;
         }
     }
@@ -1115,4 +1137,92 @@ pub fn remeasure_emitted(
         }
     }
     report
+}
+
+#[cfg(test)]
+mod face_table_tests {
+    use super::{nearest_admitted, sites_at, FaceTable};
+    use crate::tip_landing::SeatFaceRule;
+    use plinth_mesh::Mesh;
+
+    /// A closed box over `[0, 4] x [0, 4] x [10, 12]`.
+    fn box_mesh() -> Mesh {
+        let verts: Vec<[f64; 3]> = (0..8)
+            .map(|corner| {
+                [
+                    f64::from(corner & 1) * 4.0,
+                    f64::from((corner >> 1) & 1) * 4.0,
+                    10.0 + f64::from((corner >> 2) & 1) * 2.0,
+                ]
+            })
+            .collect();
+        let tris: Vec<[u32; 3]> = vec![
+            [0, 2, 1],
+            [1, 2, 3],
+            [4, 5, 6],
+            [5, 7, 6],
+            [0, 1, 4],
+            [1, 5, 4],
+            [2, 6, 3],
+            [3, 6, 7],
+            [0, 4, 2],
+            [2, 4, 6],
+            [1, 3, 5],
+            [3, 7, 5],
+        ];
+        Mesh::new(verts, tris).expect("a closed box")
+    }
+
+    /// **THE FACE TABLE BUILT ONCE GIVES THE ANSWER OF THE TABLE BUILT PER
+    /// CALL** (perf lane A1, 2026-10-14). `sites_at` over one shared
+    /// [`FaceTable`], asked in several calls, equals `nearest_admitted` (which
+    /// builds its own table each call) on every point: same face id, same
+    /// normal bit for bit, including points under the floor (admitted faces
+    /// 0 and 1, a tie on the diagonal: the lowest id) and a missing point.
+    /// ANTI-VACUITY: every pointed query finds a face, and it is a floor face.
+    /// The memo's own sabotage lives in
+    /// `head_carrier_tests::the_standing_seat_read_is_a_memo_of_the_uncached_read`.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "identity, not closeness: the two tables are built by the same code from the same mesh, \
+                  so the normals must agree bit for bit"
+    )]
+    fn a_shared_face_table_answers_as_the_table_built_per_call() {
+        let mesh = box_mesh();
+        let table = FaceTable::of(&mesh);
+        let rule = SeatFaceRule::from_overhang_band(45.0, 25.0);
+        let points: Vec<Option<[f64; 3]>> = vec![
+            Some([1.0, 1.0, 9.0]),
+            Some([2.0, 2.0, 10.0]),
+            None,
+            Some([3.5, 0.5, 9.5]),
+            Some([-1.0, 5.0, 11.0]),
+        ];
+        let queries: Vec<([f64; 3], f64)> = points
+            .iter()
+            .flatten()
+            .map(|&point| (point, rule.max_normal_z()))
+            .collect();
+        let per_call = nearest_admitted(&mesh, &queries);
+        // Asked in two calls over the one table, as the round loop does.
+        for split in [1, 2] {
+            let first = sites_at(&table, &points[..split], rule);
+            let second = sites_at(&table, &points[split..], rule);
+            let sites: Vec<_> = first.into_iter().chain(second).collect();
+            let mut found = per_call.iter();
+            for (site, point) in sites.iter().zip(&points) {
+                match (site, point) {
+                    (None, None) => {}
+                    (Some(site), Some(_)) => {
+                        let (face, normal) = found.next().copied().flatten().expect("the floor is admitted");
+                        assert_eq!(site.face, face);
+                        assert_eq!(site.facet_normal, normal);
+                        assert!(face <= 1, "the floor faces (ids 0 and 1) are the admitted ones: {face}");
+                    }
+                    other => panic!("a site where there is no point, or none where there is: {other:?}"),
+                }
+            }
+        }
+    }
 }
