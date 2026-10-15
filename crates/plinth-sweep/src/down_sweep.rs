@@ -1417,6 +1417,11 @@ pub fn run_seeded(
                 &mut refused_here,
                 &mut ctl,
             );
+            // A pass that stopped for a cancel (`sweep_pass_in`) left half a
+            // field: neither the per-event sizing nor the stash may read it.
+            if crate::cancel::cancelled() {
+                return outcome;
+            }
             trail = ctl.out.take();
             report = ctl.report;
             worst_max_field = struts
@@ -1436,7 +1441,7 @@ pub fn run_seeded(
             let _per_event_span = crate::perf::span(crate::perf::Span::PerEventSize);
             let members: &[SweepStrut] = struts;
             let size_now = || {
-                crate::per_event::size(grid, slices, members, &log, sizing, &|member, layer| {
+                crate::per_event::size(layers, members, &log, sizing, &|member, layer| {
                     insertion.limit(&members[member], layer, l_max, sizing.x_allowed)
                 })
             };
@@ -1470,7 +1475,26 @@ pub fn run_seeded(
                     crate::perf::add(crate::PerfWork::SweepDownPerEventReused, 1);
                     previous
                 }
-                None => size_now(),
+                None => {
+                    let fresh = size_now();
+                    if verify_incremental() {
+                        // The cached layer walk against every layer
+                        // rasterised and scanned afresh.
+                        let reference = crate::per_event::size_rasterized(
+                            layers,
+                            members,
+                            &log,
+                            sizing,
+                            &|member, layer| {
+                                insertion.limit(&members[member], layer, l_max, sizing.x_allowed)
+                            },
+                        );
+                        if let Some(why) = sized_difference(&reference, &fresh) {
+                            panic!("cached per-event walk differs from a rasterised one: {why}");
+                        }
+                    }
+                    fresh
+                }
             };
             if insertion.enabled {
                 prev_sized = Some((sized.clone(), prints_now));
@@ -1622,6 +1646,12 @@ fn verify_seeded_pass(
         &mut sink,
         &mut PassCtl::off(),
     );
+    // A cancelled pose's walk stopped at a layer boundary: its log is a prefix
+    // of the seed's, not a difference. The caller ends the pose at its next
+    // safe point.
+    if crate::cancel::cancelled() {
+        return;
+    }
     walked.per_event.worst_member_max_field_mm2 = copy
         .iter()
         .flat_map(|strut| strut.carried_mm2.iter().copied())
@@ -1781,6 +1811,13 @@ fn sweep_pass(
         refused,
         ctl,
     );
+    // A cancelled pose (`crate::cancel`) stopped one or both walks at a layer
+    // boundary: the two halves are not comparable and nothing reads them (the
+    // flag only ever goes from clear to set, so a clear flag here means both
+    // walks ran whole). The caller ends the pose at its next safe point.
+    if crate::cancel::cancelled() {
+        return resumed;
+    }
     if let Some(difference) = pass_difference(
         (&full, &full_struts, full_log.as_ref(), &full_refused),
         (&resumed, struts, log.as_deref(), refused),
@@ -1871,6 +1908,10 @@ fn sweep_pass_checked(
         refused,
         ctl,
     );
+    // See the resume shadow check: a cancelled pose's halves are not comparable.
+    if crate::cancel::cancelled() {
+        return sparse;
+    }
     if let Some(difference) = pass_difference(
         (&dense, &dense_struts, dense_log.as_ref(), &dense_refused),
         (&sparse, struts, sparse_log.as_deref(), refused),
@@ -3041,6 +3082,14 @@ fn sweep_pass_in<'p>(
     let stride = checkpoint_stride();
 
     for layer in (0..first_layer).rev() {
+        // A cancelled pose (`crate::cancel`) leaves the walk here, at a layer
+        // boundary, with an empty outcome and the members half written. Its
+        // callers read none of it: `run_seeded` returns at once, and every
+        // down-sweep call site ends the pose at its next safe point. The
+        // trail and the stash are dropped unsealed, which refunds their bytes.
+        if crate::cancel::cancelled() {
+            return DownSweepOutcome::default();
+        }
         walked += 1;
         if tracked {
             // A checkpoint boundary: the state this pass hands to `layer`.

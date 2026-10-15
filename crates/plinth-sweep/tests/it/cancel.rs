@@ -84,6 +84,86 @@ fn a_stop_during_the_sweep_returns_at_a_safe_point_not_at_the_end() {
     );
 }
 
+/// A stop can land inside ANY stage (a down-sweep layer walk, a lip-seat round,
+/// the removal replay, a tie pass, the seat stage), so every stage that polls
+/// the token returns half a result when it sees it set. This sweeps the stop
+/// point across the whole sweep: each run must end as `Stopped` (or as the
+/// finished measurement when the stop came too late), never panic on a
+/// half-written field, and never return a measurement that differs from the
+/// untouched one (a cancelled computation must not leak a value into live
+/// logic).
+#[test]
+fn a_stop_at_any_point_ends_stopped_or_measures_exactly_what_it_would_have() {
+    stop_at_every_point(15);
+}
+
+/// The shadow checks (`PLINTH_SWEEP_VERIFY_SPARSE`, `_INCREMENTAL`, `_REPLAY`)
+/// compare two walks of one pass; a stop that lands between their halves must
+/// skip the comparison and end the pose as `Stopped`, not panic on a prefix.
+/// Each switch is read once per process, so every one runs the stop sweep above
+/// (12 stop points) in a child of this test binary with the switch on.
+#[test]
+fn a_stop_under_each_shadow_check_ends_stopped_not_in_a_panic() {
+    for switch in [
+        "PLINTH_SWEEP_VERIFY_SPARSE",
+        "PLINTH_SWEEP_VERIFY_INCREMENTAL",
+        "PLINTH_SWEEP_VERIFY_REPLAY",
+    ] {
+        let status = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+            .arg("--exact")
+            .arg("cancel::a_stop_under_a_shadow_check_child")
+            .arg("--nocapture")
+            .env(switch, "1")
+            .env("PLINTH_CANCEL_SHADOW_CHILD", "1")
+            .status()
+            .expect("launch the child");
+        assert!(status.success(), "{switch}: the stop sweep failed: {status}");
+    }
+}
+
+/// The child of the test above: a no-op unless the parent launched it.
+#[test]
+fn a_stop_under_a_shadow_check_child() {
+    if std::env::var_os("PLINTH_CANCEL_SHADOW_CHILD").is_none() {
+        return;
+    }
+    stop_at_every_point(12);
+}
+
+fn stop_at_every_point(steps: u32) {
+    let mesh = make_recessed_disc(11.5, 12.5, 3.5, 2.5, 10.0, 96).expect("the Round 25 profile");
+    let table = OrientFaceTable::build(&mesh, "exact").expect("a closed fixture always scores");
+    let measurer = SweepDemand::production();
+    let pose = [UpDirection::new([0.0625, 0.0, 0.9980]).expect("a valid direction")];
+
+    let whole = Instant::now();
+    let full = measurer.measure_support_demand(&mesh, &table, &pose, DemandFidelity::Production);
+    let whole = whole.elapsed();
+    let full = full[0].as_ref().expect("the fixture sweeps");
+
+    let mut stopped = 0_usize;
+    for step in 1..=steps {
+        let race = ProductionRace::never_stops(1);
+        let token = std::sync::Arc::clone(race.token(0).expect("a token"));
+        let delay = whole.mul_f64(f64::from(step) / f64::from(steps + 1));
+        let setter = std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            token.store(true, Ordering::Release);
+        });
+        let outcome = measurer.measure_production_race(&mesh, &table, &pose, &race);
+        setter.join().expect("the setter ran");
+        match &outcome[0] {
+            RaceOutcome::Stopped => stopped += 1,
+            RaceOutcome::Measured(measured) => assert_eq!(
+                measured, full,
+                "a stop that came too late must leave the measurement untouched (step {step})"
+            ),
+            other => panic!("a stop must end as Stopped, got {other:?} (step {step})"),
+        }
+    }
+    assert!(stopped > 0, "no stop landed inside the sweep: the sweep is too short to test");
+}
+
 /// A token a different pose installed on this thread: set, and already
 /// cancelled. A rayon worker that steals a plain job while it waits inside a
 /// raced pose looks exactly like this.

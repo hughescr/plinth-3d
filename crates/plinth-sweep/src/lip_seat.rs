@@ -621,11 +621,6 @@ pub(crate) fn tips_seat(
     pairs: &[(usize, &SweepArm, &SweepArm)],
 ) -> Vec<(TipContact, TipContact)> {
     let context = joins.slender;
-    let env = crate::footprint_normal::MeasureEnv {
-        mesh: joins.mesh,
-        surface: joins.surface(),
-        layer_plan,
-    };
     let pixel_area_mm2 = context.grid.pitch_mm() * context.grid.pitch_mm();
     let contact = |row: Option<&crate::contact_growth::Measured>| TipContact {
         seats: row.is_some_and(|m| m.real_mm2 > 0.0 && m.real_mm2 + pixel_area_mm2 >= m.planned_mm2),
@@ -651,7 +646,7 @@ pub(crate) fn tips_seat(
         let points: Vec<Option<[f64; 3]>> = fresh.iter().map(|(_, arm)| arm.seat_face_point_mm).collect();
         let sites = crate::footprint_normal::sites_at(table, &points, context.seat_faces);
         let rows: Vec<SweepArm> = fresh.iter().map(|(_, arm)| no_ball(arm)).collect();
-        let read = crate::contact_growth::measure(&env, &rows, &sites);
+        let read = joins.measure_contacts(layer_plan, &rows, &sites);
         for (((index, _), site), measured) in fresh.iter().zip(sites).zip(read) {
             standing.reads.insert(
                 *index,
@@ -668,7 +663,7 @@ pub(crate) fn tips_seat(
         .iter()
         .map(|(index, _, _)| standing.reads.get(index).and_then(|read| read.site))
         .collect();
-    let leans = crate::contact_growth::measure(&env, &rows, &row_sites);
+    let leans = joins.measure_contacts(layer_plan, &rows, &row_sites);
     pairs
         .iter()
         .zip(&leans)
@@ -1653,6 +1648,10 @@ pub(crate) fn apply(
         {
             continue;
         }
+        // A cancelled pose stops between arms; see the round loop below.
+        if crate::cancel::cancelled() {
+            return Vec::new();
+        }
         // A HEADED arm is sent but never re-landed: its head is frozen at
         // placement. Counted, and left where it is.
         if strut.head.is_some() {
@@ -1734,6 +1733,12 @@ pub(crate) fn apply(
     let mut open: Vec<usize> = (0..pending.len()).collect();
     let mut done = vec![false; pending.len()];
     while !open.is_empty() {
+        // A cancelled pose stops between rounds. The answer is read by nothing:
+        // the caller (`LipSeatRun::run`) checks the token right after this call
+        // and ends the pose, so the moves taken so far are never sized or kept.
+        if crate::cancel::cancelled() {
+            return moved;
+        }
         let mut proposals: Vec<Proposal> = Vec::new();
         for &slot in &open {
             let job = &mut pending[slot];

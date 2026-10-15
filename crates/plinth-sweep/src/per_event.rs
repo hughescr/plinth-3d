@@ -74,6 +74,7 @@ use rayon::prelude::*;
 
 use crate::down_sweep::SizingPolicy;
 use crate::grid::Grid;
+use crate::layer_cache::{LayerCache, LayerReader};
 use crate::raster::{rasterize_into, LayerMasks, RasterScratch};
 use crate::{Landing, StrutKind, SweepStrut};
 
@@ -209,9 +210,13 @@ pub struct PerEventReport {
 pub(crate) struct LayerView<'a> {
     pub(crate) layer: usize,
     pub(crate) masks: &'a LayerMasks,
-    /// The cells whose destination is set: every carrier cell of this layer
-    /// and every cell a member read here.
-    pub(crate) touched: &'a [usize],
+    /// The destinations of this layer's carrier cells, as `(key, count)` runs
+    /// in the order the walk met them: neighbouring cells mostly share one
+    /// destination, so the runs are far fewer than the cells. A key may recur.
+    /// A key's cell count is the sum of its runs' counts.
+    pub(crate) runs: &'a [(u64, u32)],
+    /// The number of this layer's carrier cells (the runs' counts summed).
+    pub(crate) carried: usize,
     /// Final destination of the load at each cell of THIS layer (valid for
     /// carry cells and read cells; `LOST` elsewhere).
     pub(crate) dest: &'a [u64],
@@ -221,6 +226,15 @@ pub(crate) struct LayerView<'a> {
     /// Where a cell of this layer steps to on the layer below: the target cell,
     /// or `None` when it is lost. Straight down unless recorded.
     pub(crate) hop: &'a dyn Fn(usize) -> Option<usize>,
+}
+
+/// Count one carrier cell of destination `key` into the layer's runs.
+fn count_run(runs: &mut Vec<(u64, u32)>, carried: &mut usize, key: u64) {
+    *carried += 1;
+    match runs.last_mut() {
+        Some((last, count)) if *last == key => *count += 1,
+        _ => runs.push((key, 1)),
+    }
 }
 
 /// Layers rasterised together, in parallel, ahead of the sequential
@@ -274,21 +288,117 @@ pub(crate) fn walk(
     struts: &[SweepStrut],
     log: &RouteLog,
     cont: &mut [u64],
-    mut observe: impl FnMut(&LayerView<'_>, &[u64]),
+    observe: impl FnMut(&LayerView<'_>, &[u64]),
 ) {
-    let cells = grid.cells();
     let layers = slices.len().min(log.hops.len());
     // The masks are rasterised a chunk of layers at a time, in parallel: each
     // layer's masks depend on that layer's slices alone, so the result is the
     // same whatever the thread count, and the composition below — which does
     // depend on order — stays sequential.
-    let mut chunk: Vec<(RasterScratch, LayerMasks)> = (0..RASTER_CHUNK_LAYERS.min(layers.max(1)))
-        .map(|_| (RasterScratch::new(grid), LayerMasks::default()))
-        .collect();
+    let mut source = Rasterized {
+        grid,
+        slices,
+        chunk: (0..RASTER_CHUNK_LAYERS.min(layers.max(1)))
+            .map(|_| (RasterScratch::new(grid), LayerMasks::default()))
+            .collect(),
+        layers,
+    };
+    walk_core(grid, slices, struts, log, cont, &mut source, observe);
+}
+
+/// [`walk`] over the plan's [`LayerCache`]: the masks and the ascending carry
+/// cells of every layer are read from the cache the down-sweep already built,
+/// not rasterised and scanned again for each sizing.
+pub(crate) fn walk_cached(
+    layers: &LayerCache<'_>,
+    struts: &[SweepStrut],
+    log: &RouteLog,
+    cont: &mut [u64],
+    observe: impl FnMut(&LayerView<'_>, &[u64]),
+) {
+    let mut source = Cached {
+        reader: layers.reader(),
+    };
+    walk_core(layers.grid(), layers.slices(), struts, log, cont, &mut source, observe);
+}
+
+/// Where the walk gets a layer's masks.
+trait LayerSource {
+    /// Make `layer`'s masks readable; called once per layer, in ascending order.
+    fn prepare(&mut self, layer: usize);
+    fn masks(&self, layer: usize) -> &LayerMasks;
+    /// The layer's `carry` cells in ascending order, when the source holds
+    /// them; `None` when the walk must find them in the mask.
+    fn carry_cells(&self, layer: usize) -> Option<&[u32]>;
+}
+
+/// Masks rasterised here, a chunk of layers at a time.
+struct Rasterized<'a> {
+    grid: &'a Grid,
+    slices: &'a [Vec<SliceSolid>],
+    chunk: Vec<(RasterScratch, LayerMasks)>,
+    layers: usize,
+}
+
+impl LayerSource for Rasterized<'_> {
+    fn prepare(&mut self, layer: usize) {
+        if !layer.is_multiple_of(RASTER_CHUNK_LAYERS) {
+            return;
+        }
+        let end = (layer + RASTER_CHUNK_LAYERS).min(self.layers);
+        let grid = self.grid;
+        self.chunk[..end - layer]
+            .par_iter_mut()
+            .zip(&self.slices[layer..end])
+            .for_each(|((scratch, masks), solids)| {
+                rasterize_into(grid, solids, scratch, masks);
+            });
+    }
+
+    fn masks(&self, layer: usize) -> &LayerMasks {
+        &self.chunk[layer % RASTER_CHUNK_LAYERS].1
+    }
+
+    fn carry_cells(&self, _layer: usize) -> Option<&[u32]> {
+        None
+    }
+}
+
+/// Masks and carry cells read from the plan's layer cache.
+struct Cached<'c, 'a> {
+    reader: LayerReader<'c, 'a>,
+}
+
+impl LayerSource for Cached<'_, '_> {
+    fn prepare(&mut self, layer: usize) {
+        self.reader.prepare(layer, false);
+    }
+
+    fn masks(&self, layer: usize) -> &LayerMasks {
+        self.reader.masks(layer)
+    }
+
+    fn carry_cells(&self, layer: usize) -> Option<&[u32]> {
+        Some(self.reader.carry_cells(layer))
+    }
+}
+
+fn walk_core(
+    grid: &Grid,
+    slices: &[Vec<SliceSolid>],
+    struts: &[SweepStrut],
+    log: &RouteLog,
+    cont: &mut [u64],
+    source: &mut impl LayerSource,
+    mut observe: impl FnMut(&LayerView<'_>, &[u64]),
+) {
+    let cells = grid.cells();
+    let layers = slices.len().min(log.hops.len());
     let mut dest_prev = vec![LOST; cells];
     let mut dest_cur = vec![LOST; cells];
     let mut touched_prev: Vec<usize> = Vec::new();
     let mut touched_cur: Vec<usize> = Vec::new();
+    let mut runs: Vec<(u64, u32)> = Vec::new();
     let mut first_reader = vec![0_u32; cells];
     let mut reader_stamp = vec![0_u32; cells];
     let mut hop_target = vec![0_u32; cells];
@@ -301,17 +411,8 @@ pub(crate) fn walk(
         }
     }
     for layer in 0..layers {
-        let within = layer % RASTER_CHUNK_LAYERS;
-        if within == 0 {
-            let end = (layer + RASTER_CHUNK_LAYERS).min(layers);
-            chunk[..end - layer]
-                .par_iter_mut()
-                .zip(&slices[layer..end])
-                .for_each(|((scratch, masks), solids)| {
-                    rasterize_into(grid, solids, scratch, masks);
-                });
-        }
-        let masks = &chunk[within].1;
+        source.prepare(layer);
+        let masks = source.masks(layer);
         let stamp = layer as u32 + 1;
         for &(cell, tag) in &log.reads[layer] {
             let cell = cell as usize;
@@ -342,22 +443,44 @@ pub(crate) fn walk(
             }
         };
         touched_cur.clear();
+        runs.clear();
+        let mut carried = 0_usize;
         // Read cells first (few: one per member alive here), then the carrier
-        // cells, looked for only inside this layer's own bounding box.
+        // cells, looked for only inside this layer's own bounding box. Every
+        // carrier cell's destination is also counted into `runs` here.
         for &(cell, _) in &log.reads[layer] {
             let cell = cell as usize;
             if reader_stamp[cell] == stamp && dest_cur[cell] == LOST {
-                dest_cur[cell] = entry(first_reader[cell] as usize, layer);
+                let key = entry(first_reader[cell] as usize, layer);
+                dest_cur[cell] = key;
                 touched_cur.push(cell);
+                if masks.carry[cell] {
+                    count_run(&mut runs, &mut carried, key);
+                }
             }
         }
-        if let Some((rows, cols)) = layer_box(grid, &slices[layer]) {
+        if let Some(list) = source.carry_cells(layer) {
+            // The same cells, in the same ascending order, as the box scan
+            // below: a carrier cell is wholly inside a solid, so inside the
+            // box of the solids' outer loops.
+            for &cell in list {
+                let cell = cell as usize;
+                if reader_stamp[cell] != stamp {
+                    let key = below(cell);
+                    dest_cur[cell] = key;
+                    touched_cur.push(cell);
+                    count_run(&mut runs, &mut carried, key);
+                }
+            }
+        } else if let Some((rows, cols)) = layer_box(grid, &slices[layer]) {
             for row in rows {
                 let base = row * grid.cols();
                 for cell in base + cols.start..base + cols.end {
                     if masks.carry[cell] && reader_stamp[cell] != stamp {
-                        dest_cur[cell] = below(cell);
+                        let key = below(cell);
+                        dest_cur[cell] = key;
                         touched_cur.push(cell);
+                        count_run(&mut runs, &mut carried, key);
                     }
                 }
             }
@@ -393,7 +516,8 @@ pub(crate) fn walk(
         let view = LayerView {
             layer,
             masks,
-            touched: &touched_cur,
+            runs: &runs,
+            carried,
             dest: &dest_cur,
             dest_below: &dest_prev,
             hop: &hop,
@@ -489,14 +613,38 @@ pub(crate) fn ledger_len(strut: &SweepStrut, layers: usize) -> usize {
 /// On a per-event conservation residual above 1e-9 relative: a defect in this
 /// code, not a statement about a model.
 pub(crate) fn size(
-    grid: &Grid,
-    slices: &[Vec<SliceSolid>],
+    layer_cache: &LayerCache<'_>,
     struts: &[SweepStrut],
     log: &RouteLog,
     sizing: SizingPolicy,
     limit: &dyn Fn(usize, usize) -> f64,
 ) -> PerEventSizing {
-    let layers = slices.len();
+    size_from(layer_cache, true, struts, log, sizing, limit)
+}
+
+/// [`size`] with every layer rasterised and scanned afresh instead of read
+/// from the layer cache: the shadow check's reference for the cached walk
+/// (`PLINTH_SWEEP_VERIFY_INCREMENTAL=1`).
+pub(crate) fn size_rasterized(
+    layer_cache: &LayerCache<'_>,
+    struts: &[SweepStrut],
+    log: &RouteLog,
+    sizing: SizingPolicy,
+    limit: &dyn Fn(usize, usize) -> f64,
+) -> PerEventSizing {
+    size_from(layer_cache, false, struts, log, sizing, limit)
+}
+
+fn size_from(
+    layer_cache: &LayerCache<'_>,
+    cached: bool,
+    struts: &[SweepStrut],
+    log: &RouteLog,
+    sizing: SizingPolicy,
+    limit: &dyn Fn(usize, usize) -> f64,
+) -> PerEventSizing {
+    let grid = layer_cache.grid();
+    let layers = layer_cache.slices().len();
     let members = struts.len();
     let unit = grid.cell_area_mm2() * sizing.alpha;
     let mut best: Vec<Vec<f64>> = struts
@@ -549,7 +697,7 @@ pub(crate) fn size(
     };
     let mut triggers: HashMap<u64, f64> = HashMap::new();
     let mut cont = vec![LOST; members];
-    let mut keys: Vec<u64> = Vec::new();
+    let mut keys: Vec<(u64, u32)> = Vec::new();
     // Per member, this event's inputs: (layer, load, arrived by routing).
     let mut inputs: Vec<Vec<(u32, f64, bool)>> = vec![Vec::new(); members];
     let mut queued = vec![false; members];
@@ -560,18 +708,18 @@ pub(crate) fn size(
     let mut touched: Vec<usize> = Vec::new();
     let mut reached = vec![false; members];
 
-    walk(grid, slices, struts, log, &mut cont, |view, cont| {
-        keys.clear();
-        for &cell in view.touched {
-            if view.masks.carry[cell] {
-                keys.push(view.dest[cell]);
-            }
-        }
-        if keys.is_empty() {
+    let mut observe = |view: &LayerView<'_>, cont: &[u64]| {
+        // The destinations of the layer's carrier cells as `(key, count)`
+        // runs: neighbouring cells mostly share one destination, so the sort
+        // below is over runs, not cells. A key's load is its cell count times
+        // `unit`, whichever way the count was gathered.
+        if view.runs.is_empty() {
             return;
         }
-        keys.sort_unstable();
-        let event_area = keys.len() as f64 * unit;
+        keys.clear();
+        keys.extend_from_slice(view.runs);
+        keys.sort_unstable_by_key(|run| run.0);
+        let event_area = view.carried as f64 * unit;
         report.events += 1;
         report.max_event_mm2 = report.max_event_mm2.max(event_area);
         let mut plate = 0.0;
@@ -584,12 +732,14 @@ pub(crate) fn size(
         };
         let mut start = 0;
         while start < keys.len() {
-            let key = keys[start];
+            let key = keys[start].0;
             let mut end = start + 1;
-            while end < keys.len() && keys[end] == key {
+            let mut count = keys[start].1 as usize;
+            while end < keys.len() && keys[end].0 == key {
+                count += keys[end].1 as usize;
                 end += 1;
             }
-            let load = (end - start) as f64 * unit;
+            let load = count as f64 * unit;
             match key {
                 PLATE => plate += load,
                 LOST => lost += load,
@@ -711,7 +861,12 @@ pub(crate) fn size(
         report.conservation_residual = report.conservation_residual.max(residual / event_area);
         report.max_event_plate_mm2 = report.max_event_plate_mm2.max(plate);
         report.max_event_uncarried_mm2 = report.max_event_uncarried_mm2.max(lost);
-    });
+    };
+    if cached {
+        walk_cached(layer_cache, struts, log, &mut cont, &mut observe);
+    } else {
+        walk(grid, layer_cache.slices(), struts, log, &mut cont, &mut observe);
+    }
     report.triggers_over_limit = triggers.len();
     PerEventSizing {
         best,

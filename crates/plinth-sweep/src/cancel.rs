@@ -11,11 +11,25 @@
 //! A pose's measurement runs its whole sweep on one thread (`measure_one`),
 //! so the token is a thread-local, installed for the duration of that call by
 //! [`with_token`]. The sweep driver reads it at its **safe points**
-//! ([`checkpoint`]): between layers of the upward pass, before every
-//! down-sweep (the stage that takes seconds), and before each of the larger
-//! passes. A safe point returns [`SweepError::Cancelled`] and the driver
-//! unwinds through its ordinary `?` path, so nothing is half-written and no
-//! state outlives the call.
+//! ([`checkpoint`]): between layers of the upward pass, before and after every
+//! down-sweep, and between the steps of the larger passes. A safe point
+//! returns [`SweepError::Cancelled`] and the driver unwinds through its
+//! ordinary `?` path, so nothing is half-written and no state outlives the
+//! call.
+//!
+//! The loops that run for seconds inside one stage poll the flag directly
+//! ([`cancelled`]): the down-sweep's layer walk, the lip-seat rounds, the
+//! removal replay's layer walk, the tie rounds, the seat stage's rounds and
+//! the joint report's steps. A poll that finds the flag set makes the loop
+//! return early with half a result, and the caller ends the pose with a
+//! safe point BEFORE it reads that result (a cancelled replay must not answer
+//! "remove nothing", a cancelled tie pass must not answer "fixed point"). So a
+//! new poll belongs with a safe point after its caller.
+//!
+//! The `PLINTH_SWEEP_VERIFY_*` shadow checks that compare two walks of a
+//! polling loop (`SPARSE`, `INCREMENTAL`, `REPLAY`) skip the comparison once
+//! the flag is set: a stopped walk is a prefix of the whole one, not a
+//! difference.
 //!
 //! Inner `par_iter` regions never check the token: the check runs only on the
 //! driving thread, between regions. A pose that steals another pose's job

@@ -158,8 +158,8 @@
 //! lower bound (`plinth_orient::search::TermsRecord::production_lower_bound`,
 //! proved there and in `plinth_orient::demand`) is STRICTLY above the finished
 //! score. A set token ends that pose's sweep at its next safe point
-//! ([`crate::cancel`]: before every down-sweep, between layers of the upward
-//! pass) and the pose is reported [`RaceOutcome::Stopped`] — with no score and
+//! ([`crate::cancel`]: between layers of the upward pass and of every
+//! down-sweep, between the rounds of the long stages) and the pose is reported [`RaceOutcome::Stopped`] — with no score and
 //! no retained plan. The pose that decides the batch is never stopped, and a
 //! pose that is not stopped measures exactly what it measures without a race.
 //! This module decides nothing about WHICH pose may stop; it carries the

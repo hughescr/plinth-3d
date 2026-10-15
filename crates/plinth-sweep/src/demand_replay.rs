@@ -221,6 +221,12 @@ fn restore_all(doomed: &mut [bool], blame_u: &mut [f32], outcome: &mut ReplayOut
 enum Pass {
     Verified,
     Restart,
+    /// The pose's cancel token was set ([`crate::cancel`]): the walk stopped
+    /// at a layer boundary and `doomed` holds a half-judged answer. Only a
+    /// pose that is being discarded can see this, and its caller
+    /// (`remove_under_loaded`'s stage) ends the pose at the next safe point
+    /// before anything reads the answer.
+    Cancelled,
 }
 
 fn reference_replay_once(
@@ -654,10 +660,16 @@ pub(crate) fn refuse_unrooted_demand(
     struts: &[SweepStrut],
     doomed: &mut [bool],
 ) -> ReplayOutcome {
-    if verify_replay() {
+    if verify_replay() && !crate::cancel::cancelled() {
         let mut expected_doomed = doomed.to_vec();
         let expected = reference_refuse_unrooted_demand(context, struts, &mut expected_doomed);
         let got = refuse_counted(context, struts, doomed, BytePool::process());
+        // A cancelled pose (`crate::cancel`) truncated the cached replay at a
+        // layer boundary while the reference ran whole: they cannot agree and
+        // nothing reads the answer (the caller ends the pose at a safe point).
+        if crate::cancel::cancelled() {
+            return got.0;
+        }
         assert!(
             same_answer(&got.0, doomed, &got.2, &expected.0, &expected_doomed, &expected.1),
             "PLINTH_SWEEP_VERIFY_REPLAY: the cached replay differs from the reference\n\
@@ -723,7 +735,7 @@ fn refuse_counted(
             &mut outcome,
             &mut cache,
         );
-        if matches!(pass, Pass::Verified) || !doomed.iter().any(|flag| *flag) {
+        if matches!(pass, Pass::Verified | Pass::Cancelled) || !doomed.iter().any(|flag| *flag) {
             verified = true;
             break;
         }
@@ -849,6 +861,10 @@ fn replay_once(
     };
 
     for layer in start..context.layers {
+        // One thread-local read per layer (a layer is the unit of work here).
+        if crate::cancel::cancelled() {
+            return Pass::Cancelled;
+        }
         outcome.layers_visited += 1;
         let cached = *enabled && layer < base.len();
         if !cached && !current_ready {

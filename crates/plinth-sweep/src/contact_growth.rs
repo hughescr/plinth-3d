@@ -584,11 +584,122 @@ pub(crate) fn measure(
     arms: &[SweepArm],
     sites: &[Option<TipSite>],
 ) -> Vec<Option<Measured>> {
+    measure_memoised(env, None, arms, sites)
+}
+
+/// The key of one footprint question: every input bit of the ball the pairs
+/// query and the footprint walk read. Built by exhaustive destructuring of
+/// [`FootprintBall`], so a new field there stops compiling until it is keyed
+/// here. The mesh, its surface index and the face table are NOT in the key:
+/// they are the owner's (see [`MeasureMemo`]).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct BallKey {
+    centre_mm: [u64; 3],
+    radius_mm: u64,
+    seat_face: u32,
+    facet_normal: [u64; 3],
+    max_normal_z: u64,
+    min_normal_z: u64,
+}
+
+impl BallKey {
+    fn of(ball: &FootprintBall) -> Self {
+        let FootprintBall {
+            centre_mm,
+            radius_mm,
+            seat_face,
+            facet_normal,
+            max_normal_z,
+            min_normal_z,
+        } = *ball;
+        Self {
+            centre_mm: centre_mm.map(f64::to_bits),
+            radius_mm: radius_mm.to_bits(),
+            seat_face,
+            facet_normal: facet_normal.map(f64::to_bits),
+            max_normal_z: max_normal_z.to_bits(),
+            min_normal_z: min_normal_z.to_bits(),
+        }
+    }
+}
+
+/// **The real contact of balls already asked, for ONE mesh and surface index**
+/// (perf lane cg, 2026-10-15). The lip-seat rule re-asks the same tip balls
+/// in every [`crate::lip_seat::apply`] call of a plan (about 6 of them), and
+/// each ask was one native pairs query and one footprint pass: 866 k rows in
+/// 706 k calls on Deinonychus, 12.5 s. A ball's contact area is a pure
+/// function of the ball ([`BallKey`]), the mesh and the surface index, so the
+/// answer is kept by the ball's bits.
+///
+/// **Identity is structural, not an address.** The memo is a field of
+/// [`crate::head_join::HeadJoinContext`], which also holds the mesh and the
+/// surface index every read through it uses, and it is read only through
+/// [`crate::head_join::HeadJoinContext::measure_contacts`], which builds the
+/// [`MeasureEnv`] from those same fields. It lives as long as that context
+/// (one plan): no pointer is compared, so a reused address can never meet
+/// another run's entries.
+#[derive(Default)]
+pub(crate) struct MeasureMemo {
+    kept: std::sync::Mutex<std::collections::HashMap<BallKey, f64>>,
+}
+
+impl MeasureMemo {
+    /// The most entries one memo keeps. A plan asks about 88 k distinct balls
+    /// (Deinonychus, measured), so this is far above any real run; beyond it
+    /// a ball is read again each time it is asked, which is slower and gives
+    /// the same bits. About 90 bytes an entry, so the ceiling is near 360 MB.
+    const MAX_ENTRIES: usize = 4 << 20;
+
+    /// Keep `answered` areas under their `keys` (`indices` picks the pairs),
+    /// until the memo holds [`Self::MAX_ENTRIES`]. A poisoned lock only costs
+    /// the keeping: the caller has the answers in hand.
+    fn keep(&self, keys: &[BallKey], indices: &[usize], answered: &[f64]) {
+        let Ok(mut kept) = self.kept.lock() else {
+            return;
+        };
+        for (&index, &area) in indices.iter().zip(answered) {
+            if kept.len() >= Self::MAX_ENTRIES &&!kept.contains_key(&keys[index]) {
+                break;
+            }
+            kept.insert(keys[index], area);
+        }
+    }
+
+    /// The heap bytes the table holds (a close estimate: the slots it has
+    /// room for, each a key, an area and a control byte).
+    pub(crate) fn approx_bytes(&self) -> u64 {
+        let slot = std::mem::size_of::<(BallKey, f64)>() + 1;
+        self.kept
+            .lock()
+            .map_or(0, |kept| (kept.capacity() * slot) as u64)
+    }
+
+    /// Entries kept (tests).
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.kept.lock().map_or(0, |kept| kept.len())
+    }
+}
+
+/// [`measure`], reading and filling `memo` for the balls it has seen. The
+/// answer is the same bits with or without it: a ball's contact area is read
+/// through the same two passes, only for the balls the memo does not hold, in
+/// one batch.
+///
+/// The memo is bypassed for a call that has a ball the native query refuses
+/// as a row (a non-finite centre or a non-finite or negative radius): the
+/// refusal falls the WHOLE batch back to the scan, so such a ball can change
+/// the path every other row of its batch takes.
+pub(crate) fn measure_memoised(
+    env: &MeasureEnv<'_>,
+    memo: Option<&MeasureMemo>,
+    arms: &[SweepArm],
+    sites: &[Option<TipSite>],
+) -> Vec<Option<Measured>> {
     let Ok(discs) = plinth_support::tip_contact_discs(arms, env.layer_plan) else {
         return vec![None; arms.len()];
     };
     let mut rows: Vec<usize> = Vec::with_capacity(arms.len());
-    let mut centres: Vec<[f64; 3]> = Vec::with_capacity(arms.len());
     let mut radii: Vec<f64> = Vec::with_capacity(arms.len());
     let mut balls: Vec<FootprintBall> = Vec::with_capacity(arms.len());
     for (row, (disc, site)) in discs.iter().zip(sites).enumerate() {
@@ -596,7 +707,6 @@ pub(crate) fn measure(
             continue;
         };
         rows.push(row);
-        centres.push(disc.ball_centre_mm);
         radii.push(disc.ball_radius_mm);
         balls.push(FootprintBall {
             centre_mm: disc.ball_centre_mm,
@@ -608,14 +718,11 @@ pub(crate) fn measure(
         });
     }
     let mut out = vec![None; arms.len()];
-    let Some(pairs) = footprint_pairs(env.mesh, env.surface, &centres, &radii) else {
+    let Some(areas) = contact_areas(env, memo, &balls) else {
         return out;
     };
-    let found = footprint_normals(env.mesh, &pairs, &balls);
-    for ((&row, answer), &radius) in rows.iter().zip(&found).zip(&radii) {
+    for ((&row, &real), &radius) in rows.iter().zip(&areas).zip(&radii) {
         let Some(disc) = discs[row] else { continue };
-        // No connected, admitted area in the ball is no contact.
-        let real = answer.map_or(0.0, |found| found.contact_area_mm2);
         out[row] = Some(Measured {
             planned_mm2: std::f64::consts::PI * disc.radius_mm * disc.radius_mm,
             real_mm2: real,
@@ -625,6 +732,61 @@ pub(crate) fn measure(
         });
     }
     out
+}
+
+/// The real contact of every ball, mm², in ball order, from ONE pairs query
+/// and ONE footprint pass over all of them. `None` only as
+/// [`footprint_pairs`] (unusable input). No connected, admitted area in the
+/// ball is no contact: `0.0`.
+fn contact_areas_unmemoised(env: &MeasureEnv<'_>, balls: &[FootprintBall]) -> Option<Vec<f64>> {
+    let centres: Vec<[f64; 3]> = balls.iter().map(|ball| ball.centre_mm).collect();
+    let radii: Vec<f64> = balls.iter().map(|ball| ball.radius_mm).collect();
+    let pairs = footprint_pairs(env.mesh, env.surface, &centres, &radii)?;
+    Some(
+        footprint_normals(env.mesh, &pairs, balls)
+            .iter()
+            .map(|answer| answer.map_or(0.0, |found| found.contact_area_mm2))
+            .collect(),
+    )
+}
+
+/// [`contact_areas_unmemoised`] through `memo`: the balls it holds are read
+/// from it, the rest in one batch, whose answers it then keeps.
+fn contact_areas(
+    env: &MeasureEnv<'_>,
+    memo: Option<&MeasureMemo>,
+    balls: &[FootprintBall],
+) -> Option<Vec<f64>> {
+    let Some(memo) = memo else {
+        return contact_areas_unmemoised(env, balls);
+    };
+    // A row the native query refuses falls its whole batch back to the scan:
+    // leave such a batch to the unmemoised path, whole.
+    let every_row_valid = balls.iter().all(|ball| {
+        ball.centre_mm.iter().all(|component| component.is_finite())
+            && ball.radius_mm.is_finite()
+            && ball.radius_mm >= 0.0
+    });
+    if !every_row_valid {
+        return contact_areas_unmemoised(env, balls);
+    }
+    let keys: Vec<BallKey> = balls.iter().map(BallKey::of).collect();
+    let mut areas: Vec<Option<f64>> = {
+        let Ok(kept) = memo.kept.lock() else {
+            return contact_areas_unmemoised(env, balls);
+        };
+        keys.iter().map(|key| kept.get(key).copied()).collect()
+    };
+    let missing: Vec<usize> = (0..areas.len()).filter(|&index| areas[index].is_none()).collect();
+    if !missing.is_empty() {
+        let asked: Vec<FootprintBall> = missing.iter().map(|&index| balls[index]).collect();
+        let answered = contact_areas_unmemoised(env, &asked)?;
+        memo.keep(&keys, &missing, &answered);
+        for (&index, &area) in missing.iter().zip(&answered) {
+            areas[index] = Some(area);
+        }
+    }
+    areas.into_iter().collect()
 }
 
 /// **The seat depth of the planned ball**, mm: how far the ungrown ball's
@@ -1013,4 +1175,234 @@ pub fn grow(
         }
     }
     (outcome, grown)
+}
+
+#[cfg(test)]
+mod memo_tests {
+    use super::{contact_areas, contact_areas_unmemoised, MeasureMemo};
+    use crate::footprint_normal::{FootprintBall, MeasureEnv};
+    use plinth_core::LayerPlan;
+    use plinth_mesh::Mesh;
+
+    /// A down-facing sheet `z = 0` over `[-1, 1]²`, 4 × 4 cells.
+    fn sheet() -> Mesh {
+        let cells = 4_usize;
+        let mut verts = Vec::new();
+        for j in 0..=cells {
+            for i in 0..=cells {
+                #[expect(clippy::cast_precision_loss, reason = "tiny grid")]
+                verts.push([-1.0 + 0.5 * i as f64, -1.0 + 0.5 * j as f64, 0.0]);
+            }
+        }
+        let id = |i: usize, j: usize| u32::try_from(j * (cells + 1) + i).expect("tiny mesh");
+        let mut tris = Vec::new();
+        for j in 0..cells {
+            for i in 0..cells {
+                // Wound so the outward normal points down (-z).
+                tris.push([id(i, j), id(i, j + 1), id(i + 1, j)]);
+                tris.push([id(i + 1, j), id(i, j + 1), id(i + 1, j + 1)]);
+            }
+        }
+        Mesh::new(verts, tris).expect("a valid sheet")
+    }
+
+    /// The id of the face of `mesh` nearest `point`.
+    fn face_near(mesh: &Mesh, point: [f64; 3]) -> u32 {
+        let verts = mesh.verts();
+        let mut best = (f64::INFINITY, 0_u32);
+        for (id, tri) in mesh.tris().iter().enumerate() {
+            let [a, b, c] = tri.map(|v| verts[v as usize]);
+            let distance = geom_kernel::vec3::dist(point, geom_kernel::closest_on_tri(point, a, b, c));
+            if distance < best.0 {
+                best = (distance, u32::try_from(id).expect("tiny mesh"));
+            }
+        }
+        best.1
+    }
+
+    /// A ball whose disc lies wholly on the sheet.
+    fn base_ball(mesh: &Mesh) -> FootprintBall {
+        FootprintBall {
+            centre_mm: [0.3, 0.0, 0.3],
+            radius_mm: 0.5,
+            seat_face: face_near(mesh, [0.3, 0.0, 0.0]),
+            facet_normal: [0.0, 0.0, -1.0],
+            max_normal_z: -0.5,
+            min_normal_z: f64::NEG_INFINITY,
+        }
+    }
+
+    fn same_bits(a: &[f64], b: &[f64]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
+    }
+
+    /// **The memo is keyed by every input bit of a ball.** Each field of the
+    /// ball is mutated in turn from a ball the memo holds: the mutated ball is
+    /// a MISS (a new entry; never the base ball's answer), and the memoised
+    /// answer equals the unmemoised one, bit for bit. A repeat of any ball
+    /// already asked is a hit (no new entry). Both the surface index path and
+    /// the scan fallback.
+    /// ANTI-VACUITY: every mutation except the facet normal (which the area
+    /// does not read, so the key holds it for safety, not for the answer)
+    /// changes the answer, so a key that dropped the field would hand back the
+    /// base ball's area and the equality would go red; the facet normal is
+    /// held by the entry count. SABOTAGE (by hand): dropping any one field
+    /// from `BallKey` turns this test red (see the lane report).
+    #[test]
+    fn the_memo_misses_on_every_mutated_input_and_equals_the_unmemoised_read() {
+        let mesh = sheet();
+        let plan = LayerPlan::new(0.0, vec![0.05; 10]).expect("a uniform plan");
+        let surface = crate::head_join::build_surface(&mesh, 0.5, 1 << 28);
+        assert!(surface.is_some(), "the surface path is exercised");
+        let base = base_ball(&mesh);
+        let far_face = face_near(&mesh, [-0.9, -0.9, 0.0]);
+        assert_ne!(far_face, base.seat_face);
+        let mutations: Vec<(&str, FootprintBall, bool)> = vec![
+            ("centre x", FootprintBall { centre_mm: [0.8, 0.0, 0.3], ..base }, true),
+            ("centre y", FootprintBall { centre_mm: [0.3, 0.8, 0.3], ..base }, true),
+            ("centre z", FootprintBall { centre_mm: [0.3, 0.0, 0.1], ..base }, true),
+            ("radius", FootprintBall { radius_mm: 0.6, ..base }, true),
+            ("seat face", FootprintBall { seat_face: far_face, ..base }, true),
+            ("facet normal", FootprintBall { facet_normal: [0.0, 0.6, -0.8], ..base }, false),
+            ("max normal z", FootprintBall { max_normal_z: -1.0, ..base }, true),
+            ("min normal z", FootprintBall { min_normal_z: 0.0, ..base }, true),
+        ];
+        for surface in [surface.as_ref(), None] {
+            let env = MeasureEnv {
+                mesh: &mesh,
+                surface,
+                layer_plan: &plan,
+            };
+            let memo = MeasureMemo::default();
+            let first = contact_areas(&env, Some(&memo), &[base]).expect("a read");
+            assert!(first[0] > 0.0, "anti-vacuity: the base ball makes contact");
+            assert_eq!(memo.len(), 1);
+            assert!(same_bits(&first, &contact_areas_unmemoised(&env, &[base]).expect("a read")));
+            // A repeat is a hit.
+            let again = contact_areas(&env, Some(&memo), &[base]).expect("a read");
+            assert!(same_bits(&again, &first));
+            assert_eq!(memo.len(), 1, "a repeat adds nothing");
+            for (name, ball, answer_changes) in &mutations {
+                let before = memo.len();
+                let got = contact_areas(&env, Some(&memo), &[*ball]).expect("a read");
+                assert_eq!(memo.len(), before + 1, "{name}: a mutated input is a miss");
+                let want = contact_areas_unmemoised(&env, &[*ball]).expect("a read");
+                assert!(same_bits(&got, &want), "{name}: the memoised answer is the unmemoised one");
+                assert_eq!(
+                    got[0].to_bits() != first[0].to_bits(),
+                    *answer_changes,
+                    "{name}: the mutation changes the answer as designed"
+                );
+                // And it is now held: asked again, a hit with the same bits.
+                let held = contact_areas(&env, Some(&memo), &[*ball]).expect("a read");
+                assert!(same_bits(&held, &want), "{name}: held");
+                assert_eq!(memo.len(), before + 1, "{name}: a repeat adds nothing");
+            }
+            // A fully held batch (an order that differs from the order they
+            // were kept in, a ball twice) is all hits and equals the unmemoised
+            // batch.
+            let held_batch: Vec<FootprintBall> = mutations
+                .iter()
+                .rev()
+                .map(|(_, ball, _)| *ball)
+                .chain([base, base])
+                .collect();
+            let before = memo.len();
+            let held = contact_areas(&env, Some(&memo), &held_batch).expect("a read");
+            assert!(same_bits(&held, &contact_areas_unmemoised(&env, &held_batch).expect("a read")));
+            assert_eq!(memo.len(), before, "an all-hit batch adds nothing");
+
+            // A MIXED batch on a fresh, partly filled memo: held balls
+            // interleaved with two distinct balls the memo has not seen, one
+            // of them twice in the batch. The missing rows (1, 3, 4, 6) are
+            // not contiguous, so the compacted miss query and its scatter back
+            // to the original rows are both exercised.
+            let unseen_x = FootprintBall { centre_mm: [-0.3, 0.2, 0.3], radius_mm: 0.55, ..base };
+            let unseen_y = FootprintBall { centre_mm: [0.1, -0.4, 0.2], radius_mm: 0.45, ..base };
+            let held_a = mutations[0].1;
+            let held_b = mutations[3].1;
+            let fresh = MeasureMemo::default();
+            contact_areas(&env, Some(&fresh), &[base, held_a, held_b]).expect("a read");
+            assert_eq!(fresh.len(), 3);
+            let mixed_batch =
+                [base, unseen_x, held_a, unseen_y, unseen_x, held_b, unseen_y, base];
+            let want = contact_areas_unmemoised(&env, &mixed_batch).expect("a read");
+            // Anti-vacuity: the two unseen balls and the held ones all differ
+            // in answer, so a row scattered to the wrong index goes red.
+            let distinct: std::collections::HashSet<u64> =
+                [base, unseen_x, held_a, unseen_y, held_b]
+                    .iter()
+                    .map(|ball| {
+                        contact_areas_unmemoised(&env, &[*ball]).expect("a read")[0].to_bits()
+                    })
+                    .collect();
+            assert_eq!(distinct.len(), 5, "anti-vacuity: five balls, five answers");
+            let mixed = contact_areas(&env, Some(&fresh), &mixed_batch).expect("a read");
+            assert!(same_bits(&mixed, &want), "a mixed batch is the unmemoised batch");
+            assert_eq!(fresh.len(), 3 + 2, "two distinct unseen balls are kept, once each");
+            // And now every ball of it is held.
+            let again = contact_areas(&env, Some(&fresh), &mixed_batch).expect("a read");
+            assert!(same_bits(&again, &want));
+            assert_eq!(fresh.len(), 5, "a repeat adds nothing");
+        }
+    }
+
+    /// The memo stops keeping at its entry budget and the answers stay the
+    /// unmemoised ones (a ball past the budget is read again each time).
+    #[test]
+    fn the_memo_stops_keeping_at_its_budget_and_stays_correct() {
+        let mesh = sheet();
+        let plan = LayerPlan::new(0.0, vec![0.05; 10]).expect("a uniform plan");
+        let env = MeasureEnv {
+            mesh: &mesh,
+            surface: None,
+            layer_plan: &plan,
+        };
+        let base = base_ball(&mesh);
+        let memo = MeasureMemo::default();
+        // Fill the table to the budget with filler keys, without 4 M reads.
+        {
+            let mut kept = memo.kept.lock().expect("an unpoisoned lock");
+            for index in 0..MeasureMemo::MAX_ENTRIES {
+                let mut ball = base;
+                #[expect(clippy::cast_precision_loss, reason = "a filler key, far below 2^53")]
+                {
+                    ball.radius_mm = 100.0 + index as f64;
+                }
+                kept.insert(super::BallKey::of(&ball), 0.0);
+            }
+        }
+        assert_eq!(memo.len(), MeasureMemo::MAX_ENTRIES);
+        assert!(memo.approx_bytes() > 0);
+        let batch = [base, FootprintBall { centre_mm: [-0.3, 0.2, 0.3], ..base }, base];
+        let got = contact_areas(&env, Some(&memo), &batch).expect("a read");
+        assert!(same_bits(&got, &contact_areas_unmemoised(&env, &batch).expect("a read")));
+        assert_eq!(memo.len(), MeasureMemo::MAX_ENTRIES, "nothing is kept past the budget");
+    }
+
+    /// A batch with a row the native query refuses (non-finite centre,
+    /// negative radius) is left to the unmemoised path, whole, and keeps
+    /// nothing: the refusal moves every row of its batch to the scan, so no
+    /// row of it may be filed under a key the memo's other batches would use.
+    #[test]
+    fn a_batch_with_a_refused_row_bypasses_the_memo() {
+        let mesh = sheet();
+        let plan = LayerPlan::new(0.0, vec![0.05; 10]).expect("a uniform plan");
+        let surface = crate::head_join::build_surface(&mesh, 0.5, 1 << 28);
+        let env = MeasureEnv {
+            mesh: &mesh,
+            surface: surface.as_ref(),
+            layer_plan: &plan,
+        };
+        let base = base_ball(&mesh);
+        let nan = FootprintBall { centre_mm: [f64::NAN, 0.0, 0.3], ..base };
+        let negative = FootprintBall { radius_mm: -0.5, ..base };
+        for bad in [nan, negative] {
+            let memo = MeasureMemo::default();
+            let batch = [base, bad];
+            let got = contact_areas(&env, Some(&memo), &batch).expect("a read");
+            assert!(same_bits(&got, &contact_areas_unmemoised(&env, &batch).expect("a read")));
+            assert_eq!(memo.len(), 0, "a refused-row batch keeps nothing");
+        }
+    }
 }

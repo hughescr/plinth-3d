@@ -808,6 +808,7 @@ fn a_head_join_keeps_a_headed_lander_where_it_is() {
         surface_pitch_mm: 0.5,
         surface_max_bytes: 1 << 28,
         surface: &surface,
+        contacts: &crate::contact_growth::MeasureMemo::default(),
     };
     let build = |headed_lander: bool| {
         let mut host = straight(&grid, 0, 150, 150, 200, 0.4);
@@ -908,6 +909,7 @@ fn the_lip_seat_pass_never_re_lands_a_headed_arm_on_either_trigger() {
         surface_pitch_mm: 0.5,
         surface_max_bytes: 1 << 20,
         surface: &surface,
+        contacts: &crate::contact_growth::MeasureMemo::default(),
     };
     let bite = plinth_support::ShaftSeatBite {
         bite_mm: 0.2,
@@ -977,6 +979,7 @@ fn the_standing_seat_read_is_a_memo_of_the_uncached_read() {
     let mesh = slab_mesh();
     let plan = plinth_core::LayerPlan::new(0.0, vec![H; 300]).expect("a uniform plan");
     let surface = std::sync::OnceLock::new();
+    let contacts = crate::contact_growth::MeasureMemo::default();
     let joins = crate::head_join::HeadJoinContext {
         slender: &context,
         mesh: &mesh,
@@ -987,6 +990,7 @@ fn the_standing_seat_read_is_a_memo_of_the_uncached_read() {
         surface_pitch_mm: 0.5,
         surface_max_bytes: 1 << 28,
         surface: &surface,
+        contacts: &contacts,
     };
     // The code before the lane: one whole-pair read, no memo.
     let uncached = |pairs: &[(usize, &plinth_support::SweepArm, &plinth_support::SweepArm)]| {
@@ -1053,6 +1057,20 @@ fn the_standing_seat_read_is_a_memo_of_the_uncached_read() {
     }
     assert!(any_contact, "anti-vacuity: some standing arm makes contact");
     assert_eq!(memo.arms_read(), 4, "each standing arm is read once");
+    // The balls of the context's memo (the contact memo across passes): a
+    // second pass, with its own standing-seat memo, asks the same balls again.
+    // It equals the unmemoised read and adds no entry.
+    let kept = contacts.len();
+    assert!(kept > 0, "the context's memo holds the balls asked");
+    let mut second_pass = StandingSeats::default();
+    for (round, pairs) in rounds.iter().enumerate() {
+        assert_eq!(
+            tips_seat(&joins, &plan, &mut second_pass, pairs),
+            uncached(pairs),
+            "round {round}, second pass: the context's memoised read is the uncached read"
+        );
+    }
+    assert_eq!(contacts.len(), kept, "a second pass over the same balls adds no entry");
     // A new pass, a changed arm at the same index: read afresh.
     let moved = arms_of(0.1, 20);
     let again = [(0, &moved[0], &leans_a[0]), (1, &moved[1], &leans_a[1])];
@@ -1156,6 +1174,7 @@ fn an_inadmissible_cheapest_descent_does_not_end_the_slenderness_search() {
             surface_pitch_mm: 0.1,
             surface_max_bytes: 1 << 28,
             surface: &surface,
+            contacts: &crate::contact_growth::MeasureMemo::default(),
         };
         let mut struts = vec![straight(&grid, 0, 150, 150, 200, 0.1)];
         if let Some(col) = root_col {
@@ -1284,6 +1303,7 @@ fn a_stub_is_kept_in_place_of_a_lean_unless_the_lean_seats_where_it_does_not() {
             surface_pitch_mm: 0.1,
             surface_max_bytes: 1 << 28,
             surface: &surface,
+            contacts: &crate::contact_growth::MeasureMemo::default(),
         };
         let mut arm = straight(&grid, 0, 150, 150, 200, 0.1);
         if stub {
@@ -1403,6 +1423,7 @@ fn a_lean_only_the_taper_would_hold_is_refused_while_the_arm_stands() {
             surface_pitch_mm: 0.1,
             surface_max_bytes: 1 << 28,
             surface: &surface,
+            contacts: &crate::contact_growth::MeasureMemo::default(),
         };
         let mut arm = straight(&grid, 0, 150, 150, 200, 0.1);
         if stub {
@@ -1486,6 +1507,7 @@ fn lip_seat_field_passes(
         surface_pitch_mm: 0.1,
         surface_max_bytes: 1 << 28,
         surface: &surface,
+        contacts: &crate::contact_growth::MeasureMemo::default(),
     };
     let mut outcome = crate::lip_seat::LipSeatOutcome::default();
     let mut last = Vec::new();
@@ -2226,6 +2248,7 @@ mod graze_conversion {
             surface_pitch_mm: 0.5,
             surface_max_bytes: 1 << 28,
             surface: &surface,
+            contacts: &crate::contact_growth::MeasureMemo::default(),
         };
         let constants = plinth_core::m0_constants().expect("the registry");
         let profiles = constants.evidence().chitubox_tip_contact_profiles().value();
