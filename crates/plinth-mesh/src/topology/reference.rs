@@ -509,3 +509,69 @@ fn a_soup_with_every_corner_listed_separately_builds_the_same_topology() {
     }
     assert!(reached.welded_apart > 0, "no coincident vertices reached");
 }
+
+/// One welded vertex shared by `fan_count` fans that touch nowhere else: fan
+/// `k` is a strip of `1 + k % 3` faces around the centre over rim vertices of
+/// its own, so its faces share edges with each other and with no other fan.
+/// Faces are emitted round-robin across the fans, so a fan's faces are not
+/// adjacent in face order.
+fn many_fan_star(fan_count: usize) -> Mesh {
+    let mut verts: Vec<[f64; 3]> = vec![[0.0, 0.0, 0.0]];
+    let mut rims: Vec<Vec<u32>> = Vec::with_capacity(fan_count);
+    for fan in 0..fan_count {
+        let rim: Vec<u32> = (0..2 + fan % 3)
+            .map(|_| {
+                let id = verts.len() as u32;
+                verts.push([f64::from(id), f64::from(id % 97), 1.0]);
+                id
+            })
+            .collect();
+        rims.push(rim);
+    }
+    let mut tris: Vec<[u32; 3]> = Vec::new();
+    for round in 0..3 {
+        for rim in &rims {
+            if round + 1 < rim.len() {
+                tris.push([0, rim[round], rim[round + 1]]);
+            }
+        }
+    }
+    Mesh::new(verts, tris).expect("indices are in range")
+}
+
+#[test]
+fn a_vertex_with_many_fans_builds_the_same_topology_as_the_ordered_map_builder() {
+    let mesh = many_fan_star(300);
+    let production =
+        super::build_face_topology(&mesh, WeldPolicy::ExactBits).expect("production builds");
+    let centre = production
+        .point_only_vertices
+        .first()
+        .expect("the shared vertex is a pinch");
+    assert_eq!(centre.fans.len(), 300);
+    // Fans ascend by smallest face, members ascending.
+    assert!(centre.fans.windows(2).all(|pair| pair[0][0] < pair[1][0]));
+    assert!(centre
+        .fans
+        .iter()
+        .all(|fan| fan.windows(2).all(|pair| pair[0] < pair[1])));
+    agree(&mesh, "many-fan star", &mut Reached::default());
+}
+
+/// The fan materialization must be linear in the faces at a vertex: a scan of
+/// every earlier fan per face costs about 2e10 comparisons at this size,
+/// which is tens of seconds; the table lookup takes milliseconds.  The bound is
+/// loose enough for a loaded machine and tight enough to catch the quadratic.
+#[test]
+fn a_vertex_with_two_hundred_thousand_fans_builds_in_linear_time() {
+    let mesh = many_fan_star(200_000);
+    let start = std::time::Instant::now();
+    let topology =
+        super::build_face_topology(&mesh, WeldPolicy::ExactBits).expect("production builds");
+    let elapsed = start.elapsed();
+    assert_eq!(topology.point_only_vertices[0].fans.len(), 200_000);
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "building a 200000-fan vertex took {elapsed:?}"
+    );
+}

@@ -657,18 +657,24 @@ pub fn build_face_topology(
         // answers "is this a pinch"; a repair additionally has to know which
         // faces belong to which sheet, and deriving that a second time
         // elsewhere is exactly the duplicated-capability hazard O-5 forbids.
-        let mut fan_roots: Vec<usize> = Vec::with_capacity(fan_count);
+        //
+        // A root always lies in this vertex's own slot range (edges only
+        // union slots of one vertex), so `root - first_slot` indexes a lookup
+        // table of one entry per slot.  A linear scan over the roots seen so
+        // far would be quadratic in the fan count on a vertex with many fans.
+        let first_slot = slots.start;
+        let mut fan_of_root: Vec<u32> = vec![u32::MAX; slots.len()];
         let mut fans: Vec<Vec<u32>> = Vec::with_capacity(fan_count);
         for slot in slots {
             let face = faces_at[slot];
             cut_flags[face as usize] |= TOPOLOGY_CUT_POINT_ONLY;
             let root = find(&mut parent, slot);
-            match fan_roots.iter().position(|known| *known == root) {
-                Some(index) => fans[index].push(face),
-                None => {
-                    fan_roots.push(root);
-                    fans.push(vec![face]);
-                }
+            let entry = &mut fan_of_root[root - first_slot];
+            if *entry == u32::MAX {
+                *entry = fans.len() as u32;
+                fans.push(vec![face]);
+            } else {
+                fans[*entry as usize].push(face);
             }
         }
         point_only_vertices.push(PointOnlyVertex {

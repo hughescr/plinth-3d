@@ -1912,6 +1912,13 @@ pub fn create_shell_recording_repair(
     // queries. (The one difference: a resource-limit failure of that exact
     // pass no longer takes precedence over a bulk refusal it could not have
     // changed.)
+    //
+    // INTENDED ORDERING EXCEPTION: for a solid that is both below the bulk
+    // minimum and over `max_cavity_distance_index_bytes`, the typed outcome
+    // is now `IneligibleBelowBulk`, where it used to be
+    // `CavityDistanceIndexLimitExceeded`. A resource-limit error must not
+    // pre-empt a refusal that the resource spend could not have changed.
+    // Pinned by `a_below_bulk_solid_is_refused_as_bulk_before_the_distance_index_limit_applies`.
     let prefilter_bulk_mm = 2.0 * edt.iter().copied().fold(0.0_f64, f64::max);
     if prefilter_bulk_mm.is_finite() && prefilter_bulk_mm < settings.bulk_min_mm.get() {
         return Err(HollowError::IneligibleBelowBulk.into());
@@ -6521,6 +6528,31 @@ mod fu53_exact_cavity_distance {
             error,
             HollowError::CavityDistanceIndexLimitExceeded { bytes, max_bytes: 1 }
                 if bytes > 1
+        ));
+    }
+
+    /// The ordering exception of the early bulk refusal. A solid whose EDT
+    /// bound already proves it below the bulk minimum is refused as
+    /// `IneligibleBelowBulk` before the exact-distance index is estimated, so
+    /// a 1-byte `max_cavity_distance_index_bytes` does NOT turn it into
+    /// `CavityDistanceIndexLimitExceeded` (the exact pass could not have
+    /// changed the refusal). A solid that is bulky enough still reaches the
+    /// admission check and trips the limit.
+    #[test]
+    fn a_below_bulk_solid_is_refused_as_bulk_before_the_distance_index_limit_applies() {
+        let mut limits = H0AdmissionLimits::production();
+        limits.max_cavity_distance_index_bytes = 1;
+
+        let small = make_box([6.0, 6.0, 6.0], [0.0, 0.0, 0.0]).expect("6 mm box");
+        assert!(matches!(
+            create_shell_with_admission_limits(small, registered_settings(), limits),
+            Err(HollowError::IneligibleBelowBulk)
+        ));
+
+        let large = make_box([30.0, 30.0, 30.0], [0.0, 0.0, 0.0]).expect("30 mm box");
+        assert!(matches!(
+            create_shell_with_admission_limits(large, registered_settings(), limits),
+            Err(HollowError::CavityDistanceIndexLimitExceeded { max_bytes: 1, .. })
         ));
     }
 }
