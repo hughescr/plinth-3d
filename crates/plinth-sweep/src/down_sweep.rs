@@ -1436,7 +1436,7 @@ pub fn run_seeded(
             let _per_event_span = crate::perf::span(crate::perf::Span::PerEventSize);
             let members: &[SweepStrut] = struts;
             let size_now = || {
-                crate::per_event::size(grid, slices, members, &log, sizing, &|member, layer| {
+                crate::per_event::size(layers, members, &log, sizing, &|member, layer| {
                     insertion.limit(&members[member], layer, l_max, sizing.x_allowed)
                 })
             };
@@ -1470,7 +1470,26 @@ pub fn run_seeded(
                     crate::perf::add(crate::PerfWork::SweepDownPerEventReused, 1);
                     previous
                 }
-                None => size_now(),
+                None => {
+                    let fresh = size_now();
+                    if verify_incremental() {
+                        // The cached layer walk against every layer
+                        // rasterised and scanned afresh.
+                        let reference = crate::per_event::size_rasterized(
+                            layers,
+                            members,
+                            &log,
+                            sizing,
+                            &|member, layer| {
+                                insertion.limit(&members[member], layer, l_max, sizing.x_allowed)
+                            },
+                        );
+                        if let Some(why) = sized_difference(&reference, &fresh) {
+                            panic!("cached per-event walk differs from a rasterised one: {why}");
+                        }
+                    }
+                    fresh
+                }
             };
             if insertion.enabled {
                 prev_sized = Some((sized.clone(), prints_now));
