@@ -2125,11 +2125,20 @@ pub(crate) fn apply_ties_with_model(
         let mut queue: VecDeque<u32> = first.into_iter().map(|(_, id)| id).collect();
         let mut exhausted: BTreeSet<RunKey> = BTreeSet::new();
         'members: while let Some(id) = queue.pop_front() {
+            // A cancelled pose (`crate::cancel`) stops between members. What
+            // it returns is half a pass, never read: every caller ends the
+            // pose at its next safe point before it looks at the count.
+            if crate::cancel::cancelled() {
+                return applied;
+            }
             let index = id as usize;
             if let Some(flag) = queued.get_mut(index) {
                 *flag = false;
             }
             for _attempt in 0..=context.max_struts {
+                if crate::cancel::cancelled() {
+                    return applied;
+                }
                 if struts.len() + 2 > context.max_struts {
                     break 'rounds;
                 }

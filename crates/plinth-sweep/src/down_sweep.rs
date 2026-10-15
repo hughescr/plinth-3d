@@ -1417,6 +1417,11 @@ pub fn run_seeded(
                 &mut refused_here,
                 &mut ctl,
             );
+            // A pass that stopped for a cancel (`sweep_pass_in`) left half a
+            // field: neither the per-event sizing nor the stash may read it.
+            if crate::cancel::cancelled() {
+                return outcome;
+            }
             trail = ctl.out.take();
             report = ctl.report;
             worst_max_field = struts
@@ -3041,6 +3046,14 @@ fn sweep_pass_in<'p>(
     let stride = checkpoint_stride();
 
     for layer in (0..first_layer).rev() {
+        // A cancelled pose (`crate::cancel`) leaves the walk here, at a layer
+        // boundary, with an empty outcome and the members half written. Its
+        // callers read none of it: `run_seeded` returns at once, and every
+        // down-sweep call site ends the pose at its next safe point. The
+        // trail and the stash are dropped unsealed, which refunds their bytes.
+        if crate::cancel::cancelled() {
+            return DownSweepOutcome::default();
+        }
         walked += 1;
         if tracked {
             // A checkpoint boundary: the state this pass hands to `layer`.

@@ -1071,7 +1071,15 @@ pub fn diagnose(
     }
     let net = build_net(grid, struts);
     let walked = walk_events(grid, slices, struts, log, &net);
+    // A cancelled pose (`crate::cancel`) leaves between the steps with an empty
+    // report; `finish` ends the pose at its next safe point, before it is read.
+    if crate::cancel::cancelled() {
+        return report;
+    }
     let compliance = seg_compliance(grid, struts, &net, layer_height_mm);
+    if crate::cancel::cancelled() {
+        return report;
+    }
     let (design, arg_event) = evaluate(struts, &net, &walked, &compliance, &mut report);
     report.ran = true;
     report.members = net.members.len();
