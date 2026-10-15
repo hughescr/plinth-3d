@@ -634,7 +634,20 @@ The run to run spread of one binary is about 0.6 s on Deinonychus (two base runs
   contact 31.6 to 28.0 s, production 25.3 to 22.9 s) and 8 % on BCO, and 16 % on Cylinder, which
   the profile never saw. Output is byte-identical. Not the default build (a ten minute build
   against under two); use it for a delivery run, and rebuild the profile after the hot code
-  changes much. Wrap the build in the CPU lock as one shared job.
+  changes much. Wrap the build in the CPU lock as one shared job. The script only reads the
+  `--train` folders (training output goes to a scratch folder inside the run's own profile
+  directory). Each run makes a fresh `<pgo-data>/run.XXXXXX` folder (default
+  `<target-dir>/pgo`), holds the merged profile there, and deletes nothing it did not create
+  itself; remove old `run.*` folders by hand. Training must succeed: exit status 0, or 3 (the
+  pre-write gates refused a model; noted, profile still valid), and a new `.profraw` file per
+  training folder; any other status stops the script. **Compiler flags:** if `RUSTFLAGS` is set
+  the script uses it as given, as cargo does (for an older Mac: `RUSTFLAGS="-C
+  target-cpu=apple-m1" scripts/build-pgo.sh --train DIR`); otherwise it takes `target-cpu` from
+  `.cargo/config.toml`. It appends the `-Cprofile-generate` or `-Cprofile-use` flag (absolute
+  path) itself, and `--dry-run` prints the flags it chose.
+- **Feature combinations.** `mimalloc` and `alloc-count` each install a global allocator in
+  `plinth-cli`'s binary; with both on (`--all-features`) `alloc-count` wins, so the all-features
+  clippy and test gate compiles.
 - **Where the time goes (Deinonychus).** Instructions and cycles come from the kernel's
   per-process counters (`proc_pid_rusage`, read every 0.5 s); the issue-slot split comes from
   Instruments "CPU Counters" (`xctrace record --template 'CPU Counters' --attach PID`, 15 s from

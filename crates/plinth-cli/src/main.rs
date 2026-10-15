@@ -3,8 +3,10 @@ use std::process::ExitCode;
 use plinth_cli::{execute::execute, parse_args, CliAction, PREPARE_USAGE, ROOT_USAGE};
 
 // Optional global allocator, chosen by cargo feature.  The binary only: the
-// library crates keep the system allocator.
-#[cfg(feature = "mimalloc")]
+// library crates keep the system allocator.  `alloc-count` wins when both
+// features are on (so `--all-features` builds): the counting allocator wraps
+// the system allocator.
+#[cfg(all(feature = "mimalloc", not(feature = "alloc-count")))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

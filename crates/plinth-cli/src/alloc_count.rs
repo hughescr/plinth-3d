@@ -26,7 +26,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -86,6 +86,9 @@ struct Site {
 type SiteKey = (u64, [usize; DEPTH]);
 static SITES: Mutex<Option<HashMap<SiteKey, Site>>> = Mutex::new(None);
 static START: Mutex<Option<Instant>> = Mutex::new(None);
+/// Asks the logger thread to stop; `LOGGER` holds its handle for `finish` to join.
+static STOP: AtomicBool = AtomicBool::new(false);
+static LOGGER: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
 
 fn class_of(size: usize) -> usize {
     CLASS_LIMITS.iter().position(|&l| size <= l).unwrap_or(CLASSES - 1)
@@ -268,11 +271,20 @@ pub fn start() {
     if log.is_none() && sites.is_none() {
         return;
     }
-    let _ = std::thread::Builder::new().name("alloc-count".into()).spawn(move || {
+    let spawned = std::thread::Builder::new().name("alloc-count".into()).spawn(move || {
         let mut lines = String::new();
         let mut tick = 0u64;
-        loop {
-            std::thread::sleep(Duration::from_secs(1));
+        'ticks: loop {
+            // Sleep one second in short slices so `finish` can stop us promptly.
+            for _ in 0..50 {
+                if STOP.load(Relaxed) {
+                    break 'ticks;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if STOP.load(Relaxed) {
+                break;
+            }
             IN_HOOK.with(|f| f.set(true));
             lines.push_str(&snapshot_line(started.elapsed()));
             lines.push('\n');
@@ -288,10 +300,21 @@ pub fn start() {
             }
         }
     });
+    if let Ok(handle) = spawned {
+        if let Ok(mut g) = LOGGER.lock() {
+            *g = Some(handle);
+        }
+    }
 }
 
-/// Final dump at exit.
+/// Final dump at exit.  Stops and joins the logger thread first, so it cannot
+/// be mid-write on the files this function reads and rewrites.
 pub fn finish() {
+    STOP.store(true, Relaxed);
+    let handle = LOGGER.lock().ok().and_then(|mut g| g.take());
+    if let Some(handle) = handle {
+        let _ = handle.join();
+    }
     IN_HOOK.with(|f| f.set(true));
     let started = START.lock().ok().and_then(|g| *g);
     if let (Ok(p), Some(s)) = (std::env::var("PLINTH_ALLOC_LOG"), started) {
