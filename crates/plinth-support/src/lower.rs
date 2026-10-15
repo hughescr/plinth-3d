@@ -5783,6 +5783,48 @@ mod shaft_seat_bite_tests {
             .collect()
     }
 
+    /// **The grouped read through its parallel chunks equals the per-group
+    /// calls.** Twenty groups of three arms (sixty, past the one-chunk limit
+    /// of `tip_shaft_seat_bite_groups`, so the work is cut into parallel
+    /// chunks that cross group boundaries), each arm leaned differently and
+    /// every third group holding a lander on its first arm: each group's
+    /// bites and lander heights equal `tip_shaft_seat_bites` of the group
+    /// alone, in order.
+    #[test]
+    fn grouped_bites_across_parallel_chunks_equal_the_per_group_calls() {
+        use super::tip_shaft_seat_bite_groups;
+        let down = [0.0, 0.0, -1.0];
+        let groups: Vec<Vec<SweepArm>> = (0..20_u32)
+            .map(|group| {
+                (0..3_u32)
+                    .map(|member| {
+                        let deg = f64::from(group * 3 + member) * 1.1;
+                        let seat = [f64::from(group), f64::from(member), 5.0];
+                        let mut leaning = arm(seat, down, leaned(deg));
+                        if member == 1 && group % 3 == 0 {
+                            // Lands inside the first member's shaft.
+                            leaning.base_mm = [seat[0], seat[1] - 1.0, 3.5];
+                        }
+                        leaning
+                    })
+                    .collect()
+            })
+            .collect();
+        let slices: Vec<&[SweepArm]> = groups.iter().map(Vec::as_slice).collect();
+        assert!(slices.iter().map(|group| group.len()).sum::<usize>() > 32);
+        let grouped = tip_shaft_seat_bite_groups(&slices, &layers()).expect("a valid request");
+        assert_eq!(grouped.len(), groups.len());
+        let mut some = 0;
+        for (read, group) in grouped.iter().zip(&groups) {
+            let alone = tip_shaft_seat_bites(group, &layers()).expect("a valid request");
+            let bites: Vec<Option<ShaftSeatBite>> = read.iter().map(|read| read.bite).collect();
+            assert_eq!(bites, alone);
+            assert_eq!(read.len(), group.len());
+            some += bites.iter().flatten().count();
+        }
+        assert!(some > 0, "anti-vacuity: the arms are measured");
+    }
+
     /// **A group's read stands for a batch only where the batch gives each arm
     /// the same lander height** (lip-seat read-ahead, 2026-10-15). A host and
     /// an arm that lands on its shaft: read as a group of the host alone, the
