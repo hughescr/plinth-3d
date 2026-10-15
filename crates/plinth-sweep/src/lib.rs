@@ -90,6 +90,7 @@ pub mod second_contact;
 pub mod slenderness;
 pub mod stage_shake;
 pub mod stranded_branch;
+pub mod sweep_state;
 pub mod tip_landing;
 pub mod up_sweep;
 
@@ -118,9 +119,14 @@ pub use slenderness::{
 };
 pub use tip_landing::{tip_contact_scar, tip_landings, TipCharge, TipContactScar, TipLanding};
 
+use std::sync::Arc;
+
 use grid::{plan_grid, Grid};
 use reach::ReachState;
+use sweep_state::{LaneState, SweepEnv};
 use up_sweep::{ColumnHistory, GreedyScratch};
+
+pub use sweep_state::{EditSeed, SeedKey, SeedMiss};
 
 /// Where a strut's bottom sits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1821,15 +1827,35 @@ pub(crate) fn run_sweep_in_token_scope(
 
 /// [`run_sweep_with_holes`] for the orientation search's own pose
 /// measurement; leaves the cancel token as the caller set it (see
-/// [`run_sweep_in_token_scope`]).
-pub(crate) fn run_sweep_with_holes_in_token_scope(
+/// [`run_sweep_in_token_scope`]). It also keeps the sweep's state at
+/// checkpoint C as an [`EditSeed`]; the plan is the plan the sweep alone
+/// returns, bit for bit.
+pub(crate) fn run_sweep_with_holes_seeded_in_token_scope(
     mesh: &Mesh,
     plan: &LayerPlan,
     policy: &SweepPolicy,
     drains: &[DrainSpec],
     vents: &[DrainSpec],
-) -> Result<SweepPlan, SweepError> {
-    run_sweep_inner(mesh, plan, policy, drains, vents, None)
+) -> Result<(SweepPlan, Arc<EditSeed>), SweepError> {
+    run_sweep_inner_seeded(mesh, plan, policy, drains, vents)
+}
+
+/// [`run_sweep_with_holes`] that also keeps the sweep's state at checkpoint C
+/// as an [`EditSeed`] (identity key: mesh, layer plan, policy, drains, vents),
+/// so a finished plan can be edited without planning it again. The plan is the
+/// plan [`run_sweep_with_holes`] returns, bit for bit.
+///
+/// # Errors
+///
+/// As [`run_sweep_with_holes`].
+pub fn run_sweep_with_holes_seeded(
+    mesh: &Mesh,
+    plan: &LayerPlan,
+    policy: &SweepPolicy,
+    drains: &[DrainSpec],
+    vents: &[DrainSpec],
+) -> Result<(SweepPlan, Arc<EditSeed>), SweepError> {
+    cancel::without_token(|| run_sweep_inner_seeded(mesh, plan, policy, drains, vents))
 }
 
 /// **A SECOND CONTACT for every tip whose feature gives it less contact than
@@ -1914,12 +1940,8 @@ pub fn run_sweep_with_second_contact(
     Ok(chosen)
 }
 
-#[expect(
-    unused_assignments,
-    unused_variables,
-    reason = "`stage_span` is a measurement marker: each assignment ends the previous stage's span \
-              (its drop) and starts the next; nothing reads it"
-)]
+/// One sweep: [`plan_to_c`] then [`finish`], equal by bits to the single
+/// function this was before the split (`tests/it/seed_split.rs`).
 fn run_sweep_inner(
     mesh: &Mesh,
     plan: &LayerPlan,
@@ -1929,7 +1951,69 @@ fn run_sweep_inner(
     contact_caps: Option<&down_sweep::ContactCaps>,
 ) -> Result<SweepPlan, SweepError> {
     let _perf_span = perf::span(perf::Span::SweepRun);
-    // M0: the `Stage*` spans partition this call (each runs from its mark to
+    let (env, lane) = plan_to_c(mesh, plan, policy, drains, vents, contact_caps)?;
+    finish(&env, lane, mesh, plan, policy)
+}
+
+/// [`run_sweep_inner`] that also keeps the state at checkpoint C as an
+/// [`EditSeed`], so the finished plan can be edited later without planning it
+/// again. The plan is the same plan, bit for bit: the seed is a clone of the
+/// state `finish` is handed.
+fn run_sweep_inner_seeded(
+    mesh: &Mesh,
+    plan: &LayerPlan,
+    policy: &SweepPolicy,
+    drains: &[DrainSpec],
+    vents: &[DrainSpec],
+) -> Result<(SweepPlan, Arc<EditSeed>), SweepError> {
+    let _perf_span = perf::span(perf::Span::SweepRun);
+    let (env, lane) = plan_to_c(mesh, plan, policy, drains, vents, None)?;
+    let held = lane.clone();
+    let sweep_plan = finish(&env, lane, mesh, plan, policy)?;
+    // The surface index `finish` read (built there if no earlier stage had),
+    // at the size the kernel estimates for the mesh and pitch it was built from.
+    let surface_bytes = env
+        .model_surface
+        .get()
+        .and_then(Option::as_ref)
+        .and_then(|_| {
+            geom_kernel::NativeSurface::estimate_index_memory_from_indexed(
+                mesh.verts(),
+                mesh.tris(),
+                policy.surface_index_pitch_mm,
+            )
+            .ok()
+        })
+        .map_or(0, |estimate| estimate.retained_bytes() as u64);
+    let seed = EditSeed::new(
+        env,
+        held,
+        sweep_state::SeedKey::of(mesh, plan, policy, drains, vents),
+        sweep_plan.report.sweep_digest.clone(),
+        surface_bytes,
+    );
+    perf::add(PerfWork::SeedBytes, seed.approx_bytes());
+    Ok((sweep_plan, Arc::new(seed)))
+}
+
+/// **The first half of a sweep, up to checkpoint C**: everything before the
+/// start of `Span::StageJoints`. Returns what [`finish`] reads: the immutable
+/// [`SweepEnv`] and the owned [`LaneState`] ([`sweep_state`]).
+#[expect(
+    unused_assignments,
+    unused_variables,
+    reason = "`stage_span` is a measurement marker: each assignment ends the previous stage's span \
+              (its drop) and starts the next; nothing reads it"
+)]
+fn plan_to_c(
+    mesh: &Mesh,
+    plan: &LayerPlan,
+    policy: &SweepPolicy,
+    drains: &[DrainSpec],
+    vents: &[DrainSpec],
+    contact_caps: Option<&down_sweep::ContactCaps>,
+) -> Result<(Arc<SweepEnv>, LaneState), SweepError> {
+    // M0: the `Stage*` spans partition the sweep (each runs from its mark to
     // the next), so the pose's wall time has no unnamed region.
     let mut stage_span = perf::span(perf::Span::StageSetup);
     perf::add(PerfWork::SweepRuns, 1);
@@ -2057,8 +2141,8 @@ fn run_sweep_inner(
     // before any arm stands, only when the descent test or the thickening
     // refusal will read it: both confirm what the raster flags against the
     // surface and take each contact zone from the face's own normal.
-    let model_surface: std::cell::OnceCell<Option<geom_kernel::NativeSurface>> =
-        std::cell::OnceCell::new();
+    let model_surface: std::sync::OnceLock<Option<geom_kernel::NativeSurface>> =
+        std::sync::OnceLock::new();
     let thickening_reads_the_model = policy.slenderness
         && policy.slenderness_ties
         && policy.slenderness_thicken
@@ -3405,6 +3489,205 @@ fn run_sweep_inner(
             graze_outcome.refusals.entry(reason).or_default().extend(ids);
         }
     }
+    // ==================================================== CHECKPOINT C ======
+    // Everything `finish` reads is handed over here. The layer cache borrows
+    // the grid and the slices the env takes, and it has a destructor, so it is
+    // dropped first; `finish` never reads it (an edit rebuilds it from the env).
+    drop(layer_cache);
+    let drain_keep_out_refusals = keep_out.refusals();
+    let env = SweepEnv {
+        grid,
+        coarsening_steps: grid_plan.coarsening_steps,
+        layers,
+        height,
+        plate_z,
+        planes,
+        slices,
+        keep_out,
+        history,
+        drains: drains.to_vec(),
+        vents: vents.to_vec(),
+        reach: sweep_state::ReachSummary::of(&reach),
+        unrooted,
+        sizing,
+        law,
+        slenderness_law,
+        load_step_taper,
+        seat_face_rule,
+        head_registry,
+        // The slenderness context was built when the early build had already
+        // happened iff this held (nothing else builds the surface before it);
+        // `finish` rebuilds the context and must read the same.
+        surface_in_slenderness_context: policy.drawn_solid_descent || thickening_reads_the_model,
+        model_surface,
+    };
+    let lane = LaneState {
+        struts,
+        outcome,
+        landings,
+        moves,
+        removal_coverage,
+        removals,
+        removals_refused_by_span,
+        removal_passes_rolled_back,
+        merges_refused_by_radius,
+        merges_kept_carrying,
+        merges_moved_with_trunk,
+        unmerge_stale_landings,
+        slenderness_outcome,
+        congestion_outcome,
+        stranded_branch_outcome,
+        graze_outcome,
+        head_join_outcome,
+        lip_seat_outcome,
+        clearance_reroute_outcome,
+        demand_cells_total,
+        residual_demand_cells,
+        unrooted_landings,
+        keep_out_refusals,
+        arms_leaned,
+        arms_merged,
+        lean_paths_blocked,
+        junctions_mid_shaft_descent,
+        lean_candidates_priced,
+        rasteriser_entries,
+        lift_assertions,
+        descent_tally,
+        birth_tally,
+        greedy: sweep_state::GreedyFinal::of(&mut greedy),
+        drain_keep_out_refusals,
+    };
+    Ok((Arc::new(env), lane))
+}
+
+/// **The second half of a sweep, from checkpoint C**: the head sizing and the
+/// joint certificate, the report, the seat faces, the footprint rule, the real
+/// contact, the model feet and every census of the finished field.
+///
+/// `env` is shared and never written (the model surface cell builds on first
+/// need, to the same bits whoever builds it). `lane` is taken BY VALUE, so a
+/// caller that needs the same state finished twice hands in two clones; the
+/// original is never touched. `mesh`, `plan` and `policy` are the sweep's own
+/// arguments ([`plan_to_c`]).
+///
+/// # Errors
+///
+/// A cancelled run ([`cancel`]).
+#[expect(
+    unused_assignments,
+    unused_variables,
+    reason = "`stage_span` is a measurement marker: each assignment ends the previous stage's span \
+              (its drop) and starts the next; nothing reads it"
+)]
+pub(crate) fn finish(
+    env: &SweepEnv,
+    lane: LaneState,
+    mesh: &Mesh,
+    plan: &LayerPlan,
+    policy: &SweepPolicy,
+) -> Result<SweepPlan, SweepError> {
+    let mut stage_span = perf::span(perf::Span::StageJoints);
+    let grid = env.grid;
+    let layers = env.layers;
+    let height = env.height;
+    let plate_z = env.plate_z;
+    let slices = &env.slices;
+    let keep_out = &env.keep_out;
+    let history = &env.history;
+    let drains = &env.drains[..];
+    let reach = &env.reach;
+    let unrooted = &env.unrooted;
+    let sizing = env.sizing;
+    let law = env.law;
+    let slenderness_law = env.slenderness_law;
+    let load_step_taper = env.load_step_taper;
+    let seat_face_rule = env.seat_face_rule;
+    let head_registry = env.head_registry;
+    let model_surface = &env.model_surface;
+    let LaneState {
+        mut struts,
+        outcome,
+        mut landings,
+        moves,
+        removal_coverage,
+        removals,
+        removals_refused_by_span,
+        removal_passes_rolled_back,
+        merges_refused_by_radius,
+        merges_kept_carrying,
+        merges_moved_with_trunk,
+        unmerge_stale_landings,
+        mut slenderness_outcome,
+        mut congestion_outcome,
+        mut stranded_branch_outcome,
+        graze_outcome,
+        head_join_outcome,
+        mut lip_seat_outcome,
+        clearance_reroute_outcome,
+        demand_cells_total,
+        residual_demand_cells,
+        unrooted_landings,
+        keep_out_refusals,
+        arms_leaned,
+        arms_merged,
+        lean_paths_blocked,
+        junctions_mid_shaft_descent,
+        lean_candidates_priced,
+        rasteriser_entries,
+        lift_assertions,
+        descent_tally,
+        birth_tally,
+        greedy,
+        drain_keep_out_refusals,
+    } = lane;
+    // The borrowing views, rebuilt from the env exactly as `plan_to_c` built
+    // them (the same field for field; `tests/it/seed_split.rs` holds the two
+    // equal by bits).
+    let slenderness_context = slenderness::SlendernessContext {
+        grid: &grid,
+        history,
+        keep_out,
+        lean: &law,
+        law: &slenderness_law,
+        shaft_landings: policy.shaft_landings,
+        layer_height_mm: height,
+        layers,
+        merge: policy.slenderness_merge,
+        brace: policy.slenderness_brace,
+        thicken: policy.slenderness_thicken,
+        mast: policy.slenderness_mast,
+        flare_factor: policy.flare_r_factor,
+        mast_root_clearance: policy.slenderness_mast_root_clearance,
+        final_clearance_mm: policy.final_clearance_gap_mm,
+        member_clearance: policy.member_clearance,
+        model_surface: if env.surface_in_slenderness_context {
+            model_surface.get().and_then(Option::as_ref)
+        } else {
+            None
+        },
+        plate_z_mm: plate_z,
+        max_struts: policy.limits.max_struts,
+        x_allowed: policy.x_allowed,
+        seat_faces: seat_face_rule,
+        load_step_taper,
+        brace_cap: policy.slenderness_brace_cap,
+        brace_window: policy.slenderness_brace_window,
+        frame_bands: policy.slenderness_frame_bands,
+        frame_ledger: policy.slenderness_frame_ledger,
+        model_tie: policy.slenderness_model_tie,
+    };
+    let head_join_context = head_join::HeadJoinContext {
+        slender: &slenderness_context,
+        mesh,
+        layer_plan: plan,
+        plate_z_mm: plate_z,
+        clearance_mm: policy.final_clearance_gap_mm,
+        standoff_mm: policy.standoff_mm,
+        surface_pitch_mm: policy.surface_index_pitch_mm,
+        surface_max_bytes: policy.surface_index_max_bytes,
+        surface: model_surface,
+    };
+
     // The finished field's own check, and the load it lost if any landing is
     // broken: the down-sweep hands a child's load to its named parent at the
     // landing layer, and a parent that does not stand there never picks it
@@ -3423,7 +3706,7 @@ fn run_sweep_inner(
     // straight tip (the post keeps its route; the members joined to it follow
     // the line now drawn) and counted in the heads line.
     //
-    stage_span = perf::span(perf::Span::StageJoints);
+    // (The `StageJoints` span opened at the top of this function.)
     // **FIRST, EVERY HEAD IS SIZED FOR THE POST IT IS DRAWN WITH** (v19 fix,
     // 2026-10-07; Craig approved sizing for the ACTUAL lean, not the 57.5 degree
     // worst case). After the last pass that re-routes or re-lands, the head,
@@ -3524,7 +3807,7 @@ fn run_sweep_inner(
     slenderness_outcome.mast_roots_overlapping_after_sizing =
         congestion::roots_overlapping_after_sizing(
             &grid,
-            &history,
+            history,
             &struts,
             policy.flare_r_factor,
             &mast_ids,
@@ -3546,7 +3829,7 @@ fn run_sweep_inner(
     // footprint this file actually lays on the plate rather than the one the
     // lane left mid-iterate. The load the flank arms moved is read the same
     // way: their own carried ledger where they meet the plate.
-    congestion_outcome.after = congestion::measure(&grid, &history, &struts, policy.flare_r_factor);
+    congestion_outcome.after = congestion::measure(&grid, history, &struts, policy.flare_r_factor);
     congestion_outcome.still_congested = congestion_outcome.after.all.congested();
     congestion_outcome.flank_load_still_at_plate_mm2 = congestion_outcome
         .inserted_ids
@@ -3573,7 +3856,7 @@ fn run_sweep_inner(
     let rigid_share = if policy.rigid_share_diagnostic {
         rigid_share::diagnose(
             &grid,
-            &slices,
+            slices,
             &struts,
             &outcome.route_log,
             height,
@@ -3593,7 +3876,7 @@ fn run_sweep_inner(
     // arm and never refuses a model.
     let escape = drain::check_escape(
         &grid,
-        &slices,
+        slices,
         &struts,
         drains,
         plate_z,
@@ -3605,9 +3888,9 @@ fn run_sweep_inner(
     let mut report = build_report(
         &grid,
         layers,
-        grid_plan.coarsening_steps,
+        env.coarsening_steps,
         policy,
-        &reach,
+        reach,
         &struts,
         &outcome,
         demand_cells_total,
@@ -3622,7 +3905,7 @@ fn run_sweep_inner(
     report.removal_coverage = removal_coverage;
     report.unrooted_routing.recorded_cells = u64::try_from(unrooted.total()).unwrap_or(u64::MAX);
     report.drain_keep_out_cells = keep_out.blocked_cells();
-    report.drain_keep_out_refusals = keep_out.refusals();
+    report.drain_keep_out_refusals = drain_keep_out_refusals;
     report.drain_seat_refusals = keep_out_refusals;
     report.escape = escape;
     report.rigid_share = rigid_share;
@@ -3694,7 +3977,12 @@ fn run_sweep_inner(
     report.counters.births_seated = birth_tally.seated as u64;
     report.counters.births_unseated = birth_tally.unseated as u64;
     report.counters.island_hex_bound = greedy.island_hex_bound;
-    greedy.heads.publish(&mut report.heads);
+    up_sweep::HeadsState {
+        accepted: Vec::new(),
+        outcome: greedy.heads,
+        residuals_deg: greedy.residuals_deg,
+    }
+    .publish(&mut report.heads);
     // The heads the graze conversion added (Craig 2026-10-08) join the
     // placement count; its refusals join the placement refusals by reason.
     report.heads.built += graze_outcome.built;
@@ -3790,7 +4078,7 @@ fn run_sweep_inner(
             &measure_env,
             &mut sweep_plan,
             &footprint_sites,
-            &slices,
+            slices,
             policy.x_allowed,
             limits,
         );
@@ -3823,13 +4111,13 @@ fn run_sweep_inner(
             0.0
         },
         chord_slack,
-        keep_out: &keep_out,
+        keep_out,
     };
     let mut slid_remeasured = 0_usize;
     let mut slid_max_change_deg = 0.0_f64;
     let footprint = footprint::apply(
         &sweep_plan.grid,
-        &slices,
+        slices,
         measure_env.surface,
         &mut sweep_plan.struts,
         &arms,
@@ -3901,7 +4189,7 @@ fn run_sweep_inner(
         if sweep_plan.report.heads.resized_after_moves > 0 {
             let census = congestion::measure(
                 &sweep_plan.grid,
-                &history,
+                history,
                 &sweep_plan.struts,
                 policy.flare_r_factor,
             );
@@ -3927,7 +4215,7 @@ fn run_sweep_inner(
             let final_arms = adapter::arms_of(&sweep_plan);
             off_face = footprint::regrade(
                 &sweep_plan.grid,
-                &slices,
+                slices,
                 measure_env.surface,
                 &sweep_plan.struts,
                 &final_arms,
@@ -3970,7 +4258,7 @@ fn run_sweep_inner(
             &measure_env,
             &mut sweep_plan,
             &sites,
-            &slices,
+            slices,
             policy.x_allowed,
             limits,
         );
@@ -3986,7 +4274,7 @@ fn run_sweep_inner(
     // beside the landing check.
     {
         let descent = std::mem::take(&mut sweep_plan.report.model_feet);
-        let mut feet = model_feet::measure(&measure_env, &mut sweep_plan, &history, sizing);
+        let mut feet = model_feet::measure(&measure_env, &mut sweep_plan, history, sizing);
         feet.descent_candidates_refused = descent.descent_candidates_refused;
         feet.descent_straight_replaced = descent.descent_straight_replaced;
         feet.descent_straight_kept = descent.descent_straight_kept;
@@ -5478,7 +5766,7 @@ fn build_report(
     layers: usize,
     coarsening_steps: u32,
     policy: &SweepPolicy,
-    reach: &ReachState,
+    reach: &sweep_state::ReachSummary,
     struts: &[SweepStrut],
     outcome: &down_sweep::DownSweepOutcome,
     demand_cells_total: usize,
