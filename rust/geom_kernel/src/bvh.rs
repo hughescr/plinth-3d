@@ -200,6 +200,13 @@ impl Bvh {
     /// its two halves side by side. The cutoff only chooses who does the work;
     /// the tree is the same for every value (the tests build one mesh at
     /// several and compare every field).
+    pub(crate) fn build_with_cutoff(mesh: &Mesh, parallel_min: usize) -> Result<Bvh, String> {
+        Self::build_with_layout(mesh, parallel_min, None)
+    }
+
+    /// [`Self::build_with_cutoff`] with the pad table's layout chosen by the
+    /// caller (`Some(true)` global, `Some(false)` selected-order) instead of by
+    /// the subset's share of the surface. The tree is the same either way.
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -208,13 +215,6 @@ impl Bvh {
               before the cast or clamped into range after it (read site by site, 2026-08-26). See \
               docs/evidence/remediation-2026-08-26/census/cast-audit.md"
     )]
-    pub(crate) fn build_with_cutoff(mesh: &Mesh, parallel_min: usize) -> Result<Bvh, String> {
-        Self::build_with_layout(mesh, parallel_min, None)
-    }
-
-    /// [`Self::build_with_cutoff`] with the pad table's layout chosen by the
-    /// caller (`Some(true)` global, `Some(false)` selected-order) instead of by
-    /// the subset's share of the surface. The tree is the same either way.
     pub(crate) fn build_with_layout(
         mesh: &Mesh,
         parallel_min: usize,

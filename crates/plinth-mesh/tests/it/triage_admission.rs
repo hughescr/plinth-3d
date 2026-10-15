@@ -81,7 +81,12 @@ fn every_exact_cap_runs_and_cap_minus_one_refuses_the_actual_admitted_path() {
         "fixture must prove capacity, not length, controls retained bytes"
     );
 
-    for (field, exact) in caps.fields() {
+    for (index, _) in caps.fields().into_iter().enumerate() {
+        // Triage fills the mesh's memo (topology, weld), which is retained
+        // storage the byte figure counts, so each round measures the mesh as
+        // it stands: a figure taken before the memo filled no longer covers it.
+        let caps = RawCaps::measure(&mesh);
+        let (field, exact) = caps.fields()[index];
         let admission = TriageTopologyAdmission::from_raw_mesh(&mesh, caps.only(field, exact))
             .unwrap_or_else(|error| panic!("exact {field} cap rejected: {error}"));
         let triaged = triage_components(admission, WeldPolicy::ExactBits)

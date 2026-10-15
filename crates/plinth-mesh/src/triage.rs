@@ -1658,8 +1658,8 @@ mod tests {
     fn memoised_topology_and_weld_are_counted_as_retained_bytes() {
         let _guard = global_counter_guard();
         let mesh = crate::fixtures::make_box_default().expect("box");
-        let source_only = (mesh.verts().len() * std::mem::size_of::<[f64; 3]>())
-            + (mesh.tris().len() * std::mem::size_of::<[u32; 3]>());
+        let source_only =
+            std::mem::size_of_val(mesh.verts()) + std::mem::size_of_val(mesh.tris());
         let empty = mesh.retained_buffer_bytes().expect("small mesh");
         assert!(empty >= source_only);
 
