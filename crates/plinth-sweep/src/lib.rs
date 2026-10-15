@@ -2756,7 +2756,13 @@ fn plan_after_prefix(
     // builds it here.
     let layer_cache = match lent_cache {
         Some(cache) => layer_cache::Resolved::Offered(cache),
-        None => layer_cache::Resolved::Built(Box::new(layer_cache::LayerCache::build(&grid, &slices))),
+        None => {
+            // The `Stage*` spans partition the sweep (`geom_kernel::perf`): this
+            // rebuild is what a scratch sweep charges to `stage.setup`, so it is
+            // charged there too, not to the run alone.
+            let _setup = perf::span(perf::Span::StageSetup);
+            layer_cache::Resolved::Built(Box::new(layer_cache::LayerCache::build(&grid, &slices)))
+        }
     };
     cancel::checkpoint()?;
     let mut stage_span = perf::span(perf::Span::StageDownInitial);

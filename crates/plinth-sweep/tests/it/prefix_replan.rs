@@ -557,3 +557,83 @@ fn sabotage_the_comparison_sees_one_ulp() {
     assert_eq!(fewer.report.seat_second_contact.tips_capped, 2);
     assert!(!same(&fewer, &plan), "two caps are not six caps");
 }
+
+// ------------------------------------------------- the Stage* partition (perf)
+
+const SPANS_CHILD_MODE: &str = "PLINTH_PREFIX_SPANS_CHILD";
+const SPANS_CHILD_TEST: &str = "prefix_replan::child_runs_a_seeded_replan";
+
+/// Not a test of its own: the body the parent launches in a fresh process (the
+/// perf counters are process-global). One seeded sweep, then one re-plan from
+/// its prefix, with counting on. Without the marker variable it returns at once.
+#[test]
+fn child_runs_a_seeded_replan() {
+    let Some(dir) = std::env::var_os(SPANS_CHILD_MODE) else {
+        return;
+    };
+    plinth_sweep::perf::enable(
+        std::path::PathBuf::from(dir),
+        plinth_sweep::perf::DEFAULT_CHECKPOINT,
+    );
+    plinth_sweep::perf::begin_model("prefix-spans");
+    let fixture = disc();
+    let (_, starts) = replan_of(fixture, Some(&fixture.seed));
+    assert_eq!(starts, 1, "the re-plan started from the prefix");
+    plinth_sweep::perf::end_model();
+}
+
+/// The total of `"<label>":{"calls":N` over every phase of a sidecar.
+fn calls_of(text: &str, label: &str) -> u64 {
+    let needle = format!("\"{label}\":{{\"calls\":");
+    text.match_indices(&needle)
+        .map(|(at, _)| {
+            text[at + needle.len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse::<u64>()
+                .expect("a count")
+        })
+        .sum()
+}
+
+/// **The `Stage*` spans partition every sweep run, a re-plan from a kept prefix
+/// included** (`geom_kernel::perf`). The re-plan rebuilds the layer cache the
+/// prefix did not keep; a scratch sweep charges that to `stage.setup`, so the
+/// re-plan must too. Each run opens one `stage.setup` and one `stage.down_initial`
+/// span, and a run that charges its rebuild to no stage opens fewer setups than
+/// it has runs.
+#[test]
+fn a_seeded_replan_charges_its_layer_cache_rebuild_to_a_stage() {
+    let dir = std::env::temp_dir().join(format!("plinth-prefix-spans-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let status = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .arg("--exact")
+        .arg(SPANS_CHILD_TEST)
+        .arg("--nocapture")
+        .env(SPANS_CHILD_MODE, &dir)
+        .status()
+        .expect("launch the child");
+    assert!(status.success(), "child failed: {status}");
+    let text = std::fs::read_to_string(dir.join("prefix-spans.perf.json")).expect("final sidecar");
+    assert!(text.contains("\"partial\":false"), "{text}");
+    // The phases come before `totals`; the pose and stage tables after it repeat
+    // the same spans.
+    let text = &text[..text.find("\"totals\"").expect("totals")];
+    let runs = calls_of(text, "sweep.run");
+    // Anti-vacuity: the seeded sweep and the prefix re-plan both ran.
+    assert!(runs >= 2, "{runs} sweep runs: the re-plan from the prefix did not run");
+    assert_eq!(
+        calls_of(text, "stage.down_initial"),
+        runs,
+        "every run opens its initial down-sweep stage"
+    );
+    // The seeded sweep opens one setup; the re-plan from the prefix opens one
+    // for the layer-cache rebuild.
+    assert_eq!(
+        calls_of(text, "stage.setup"),
+        runs,
+        "a run's layer-cache rebuild is outside every stage span"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
