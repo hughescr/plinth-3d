@@ -2371,8 +2371,10 @@ fn approx_sized_bytes(sized: &crate::per_event::PerEventSizing) -> u64 {
 }
 
 /// What a resumed pass did, for the counters and for the caller's own reuse
-/// decisions.
+/// decisions. The tests read every field; the production caller reads the
+/// ones it decides on.
 #[derive(Clone, Copy, Debug, Default)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct PassReport {
     /// The layer whose checkpoint the walk started from.
     pub(crate) resumed_at: Option<usize>,
