@@ -1634,11 +1634,35 @@ fn trim_chunk_count(pieces: usize, threads: usize) -> usize {
 /// calls run side by side: piece `i` goes to chunk `i % chunks`, every chunk is
 /// one native call against the same model solid, and every result returns to
 /// the slot of its own piece. A piece's result is a function of that piece and
-/// the model alone, so the answer does not depend on `chunks`. With several
-/// failing chunks the lowest chunk's error is returned.
+/// the model alone, so the answer does not depend on `chunks`.
+///
+/// If ANY chunk fails, every chunk result is discarded and the whole batch is
+/// replayed as the one unchunked call it always was: a native error names the
+/// piece by its index in the batch it rode in, and which piece fails first is
+/// a property of the whole batch, so only the replay gives the error text,
+/// index and outcome that do not depend on `chunks`.
 ///
 /// Callers hold a [`geom_kernel::par`] pool.
 fn trim_and_subtract_chunked(
+    solid: &plinth_solid::Mesh,
+    pieces: &[plinth_solid::Mesh],
+    keep: &[plinth_solid::KeepHalfSpace],
+    chunks: usize,
+) -> Result<Vec<plinth_solid::TrimmedPiece>, plinth_solid::SolidError> {
+    try_trim_and_subtract_chunked(solid, pieces, keep, chunks).or_else(|_| {
+        plinth_solid::ManifoldBackend.trim_and_subtract_each(
+            solid,
+            pieces,
+            keep,
+            plinth_solid::BooleanLimits::UNLIMITED,
+        )
+    })
+}
+
+/// The dealt calls of [`trim_and_subtract_chunked`] with no replay: a failing
+/// chunk's error here is chunk-local (its piece indices count within the chunk),
+/// so a caller reports it only after the replay.
+fn try_trim_and_subtract_chunked(
     solid: &plinth_solid::Mesh,
     pieces: &[plinth_solid::Mesh],
     keep: &[plinth_solid::KeepHalfSpace],
@@ -1710,7 +1734,7 @@ fn run_trim_batches(
         let keep: Vec<plinth_solid::KeepHalfSpace> =
             trim.keep.iter().chain(&intrusion.keep).copied().collect();
         let chunks = trim_chunk_count(pieces.len(), threads);
-        if let Ok(mut results) = trim_and_subtract_chunked(solid, &pieces, &keep, chunks) {
+        if let Ok(mut results) = try_trim_and_subtract_chunked(solid, &pieces, &keep, chunks) {
             let intrusion_results = results.split_off(trim.pieces.len());
             return (Some(Ok(results)), Some(Ok(intrusion_results)));
         }
@@ -3573,6 +3597,92 @@ mod tests {
             })
             .expect("the chunked call");
             assert_eq!(dealt, single, "{chunks} chunks differ from the single call");
+        }
+    }
+
+    /// Sixteen welded balls cut by a slab; with `bad` set, that piece is one
+    /// open triangle, which `Mesh::new` accepts and the native backend rejects.
+    fn sixteen_pieces(bad: Option<usize>) -> PieceBatch {
+        let mut soups: Vec<Vec<SoupTriangle>> = (0..16_u32)
+            .map(|k| {
+                let t = f64::from(k);
+                sphere_triangles(
+                    [(t * 0.37).sin() * 4.0, (t * 0.53).cos() * 4.0, -0.2 + 0.03 * t],
+                    0.3,
+                )
+                .unwrap()
+            })
+            .collect();
+        wind_outward(&mut soups).unwrap();
+        let indices: Vec<usize> = (0..soups.len()).collect();
+        let mut batch = PieceBatch::default();
+        for (index, welded) in weld_pieces(&soups, &indices).into_iter().enumerate() {
+            let (piece, keep) = welded.expect("a sphere welds");
+            batch.indices.push(index);
+            if bad == Some(index) {
+                batch.pieces.push(
+                    plinth_solid::Mesh::new(
+                        vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                        vec![[0, 1, 2]],
+                    )
+                    .expect("the open triangle is accepted by the mesh constructor"),
+                );
+            } else {
+                batch.pieces.push(piece);
+            }
+            batch.keep.push(keep);
+        }
+        batch
+    }
+
+    /// THE REPLAY ORACLE (review of T3, 2026-10-15). A batch of sixteen pieces
+    /// whose second piece the backend rejects must report the SAME error at
+    /// every thread count, the one the old single native call gave
+    /// (`mesh 2`, counted from one in the whole batch, not in a chunk), with
+    /// and without an intrusion batch riding beside it; and the other batch's
+    /// result must be the one its own single call gives.
+    #[test]
+    fn a_failing_piece_reports_the_unchunked_error_at_every_thread_count() {
+        let model = plinth_mesh::make_box([10.0, 10.0, 1.0], [0.0, 0.0, 0.0]).unwrap();
+        let solid = weld_model(&model, [0.0; 3]).expect("the slab welds");
+        let single = |batch: &PieceBatch| {
+            plinth_solid::ManifoldBackend.trim_and_subtract_each(
+                &solid,
+                &batch.pieces,
+                &batch.keep,
+                plinth_solid::BooleanLimits::UNLIMITED,
+            )
+        };
+        let bad_trim = sixteen_pieces(Some(1));
+        let good_intrusion = sixteen_pieces(None);
+        let bad_message = single(&bad_trim).expect_err("the open triangle is rejected").to_string();
+        assert!(
+            bad_message.contains("mesh 2"),
+            "the unchunked error names the second piece: {bad_message}"
+        );
+        let good_single = single(&good_intrusion).expect("the good batch runs");
+        for threads in [1, 2, 12] {
+            for with_intrusion in [false, true] {
+                let intrusion = with_intrusion.then_some(&good_intrusion);
+                let (trim_outcome, intrusion_outcome) = geom_kernel::par::run(|| {
+                    run_trim_batches(&solid, Some(&bad_trim), intrusion, threads)
+                });
+                let error = trim_outcome
+                    .expect("the trim batch ran")
+                    .expect_err("the trim batch fails");
+                assert_eq!(
+                    error.to_string(),
+                    bad_message,
+                    "{threads} threads, intrusion {with_intrusion}"
+                );
+                if with_intrusion {
+                    assert_eq!(
+                        intrusion_outcome.expect("the intrusion batch ran").expect("it succeeds"),
+                        good_single,
+                        "{threads} threads: the intrusion result is its own batch's"
+                    );
+                }
+            }
         }
     }
 
