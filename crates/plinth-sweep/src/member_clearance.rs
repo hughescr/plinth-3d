@@ -948,6 +948,77 @@ struct Span {
     bottom_radius_mm: f64,
 }
 
+/// A member's drawn shaft ends, `(top, bottom)`.
+type ShaftEnds = Option<([f64; 3], [f64; 3])>;
+
+/// One frustum of a head's chain: from, to, radius at from, radius at to.
+type HeadFrustum = ([f64; 3], [f64; 3], f64, f64);
+
+/// The planned joints of a field by member-index pair: the joint point on each
+/// member of the pair ([`designed_joints`]).
+type DesignedJoints = std::collections::HashMap<(usize, usize), Vec<([f64; 3], [f64; 3])>>;
+
+/// Every member's drawn shaft spans, and each member's drawn `(top, bottom)`.
+struct FieldSpans {
+    spans: Vec<Span>,
+    /// By member index: the drawn shaft's top and bottom, `None` for a member
+    /// with no drawable shaft (dead, or a plate member whose boss cannot be
+    /// derived, or no rise).
+    ends: Vec<ShaftEnds>,
+}
+
+/// The spans the file draws every member's shaft as: ONE pass over the field,
+/// shared by [`tips_inside_members`] and [`member_collisions`].
+fn field_spans(
+    struts: &[crate::SweepStrut],
+    arms: &[plinth_support::SweepArm],
+    discs: &[Option<plinth_support::TipContactDisc>],
+    flare: Option<&plinth_support::SweepRootFlare>,
+    plate_z_mm: f64,
+) -> FieldSpans {
+    let mut spans: Vec<Span> = Vec::new();
+    let mut ends: Vec<ShaftEnds> = vec![None; struts.len()];
+    for (index, (strut, arm)) in struts.iter().zip(arms).enumerate() {
+        if strut.k_bottom == usize::MAX || strut.k_top <= strut.k_bottom {
+            continue;
+        }
+        let disc = discs.get(index).copied().flatten();
+        let Some((top, bottom, post_start_radius)) =
+            drawn_shaft_ends(strut, arm, disc, flare, plate_z_mm)
+        else {
+            continue;
+        };
+        let rise = top[2] - bottom[2];
+        if !(rise.is_finite() && rise > 0.0) {
+            continue;
+        }
+        ends[index] = Some((top, bottom));
+        let root = plinth_support::drawn_root_radius_mm(&arm.radius_profile_mm, arm.tip_radius_mm);
+        let at = |z: f64| -> [f64; 3] {
+            let t = ((top[2] - z) / rise).clamp(0.0, 1.0);
+            std::array::from_fn(|axis| top[axis] + t * (bottom[axis] - top[axis]))
+        };
+        for span in plinth_support::drawn_spans(
+            &arm.radius_profile_mm,
+            arm.base_mm[2],
+            arm.seat_mm[2],
+            top[2],
+            bottom[2],
+            post_start_radius,
+            root,
+        ) {
+            spans.push(Span {
+                member: index,
+                top: at(span.top_z_mm),
+                bottom: at(span.bottom_z_mm),
+                top_radius_mm: span.top_radius_mm.max(0.0),
+                bottom_radius_mm: span.bottom_radius_mm.max(0.0),
+            });
+        }
+    }
+    FieldSpans { spans, ends }
+}
+
 /// **No tip or head lies inside another member's drawn solid** (`MODEL-FEET.md`
 /// F4, 2026-10-12). Deinonychus, `for-craig-joint`: tip 145's 0.13 mm ball and
 /// its whole head stood inside column 142 (82 % of the ball's surface inside
@@ -985,44 +1056,7 @@ pub(crate) fn tips_inside_members(
     let flare = plinth_support::SweepRootFlare::registered(height).ok();
     let discs = plinth_support::tip_contact_discs(arms, layer_plan)
         .unwrap_or_else(|_| vec![None; arms.len()]);
-    let mut spans: Vec<Span> = Vec::new();
-    for (index, (strut, arm)) in struts.iter().zip(arms).enumerate() {
-        if strut.k_bottom == usize::MAX || strut.k_top <= strut.k_bottom {
-            continue;
-        }
-        let disc = discs.get(index).copied().flatten();
-        let Some((top, bottom, post_start_radius)) =
-            drawn_shaft_ends(strut, arm, disc, flare.as_ref(), plate_z_mm)
-        else {
-            continue;
-        };
-        let rise = top[2] - bottom[2];
-        if !(rise.is_finite() && rise > 0.0) {
-            continue;
-        }
-        let root = plinth_support::drawn_root_radius_mm(&arm.radius_profile_mm, arm.tip_radius_mm);
-        let at = |z: f64| -> [f64; 3] {
-            let t = ((top[2] - z) / rise).clamp(0.0, 1.0);
-            std::array::from_fn(|axis| top[axis] + t * (bottom[axis] - top[axis]))
-        };
-        for span in plinth_support::drawn_spans(
-            &arm.radius_profile_mm,
-            arm.base_mm[2],
-            arm.seat_mm[2],
-            top[2],
-            bottom[2],
-            post_start_radius,
-            root,
-        ) {
-            spans.push(Span {
-                member: index,
-                top: at(span.top_z_mm),
-                bottom: at(span.bottom_z_mm),
-                top_radius_mm: span.top_radius_mm.max(0.0),
-                bottom_radius_mm: span.bottom_radius_mm.max(0.0),
-            });
-        }
-    }
+    let spans = field_spans(struts, arms, &discs, flare.as_ref(), plate_z_mm).spans;
     #[expect(
         clippy::cast_possible_truncation,
         reason = "a bucket index of a model-scale coordinate over a 1 mm bucket"
@@ -1093,6 +1127,669 @@ pub(crate) fn tips_inside_members(
 /// Float noise on "the tip's axis is inside the span": the segment distance
 /// read against a radius on the same numbers, and nothing more.
 const CONTAINMENT_SLACK_MM: f64 = 1.0e-9;
+
+/// The kinds of drawn piece the lowering emits for one member
+/// (`plinth-support/src/lower.rs`, `lower_one_sweep_arm`): the order is the
+/// order of a tie-break and nothing else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PieceKind {
+    /// A shaft span: the taper and the chained members ([`plinth_support::drawn_spans`]).
+    Shaft,
+    /// A head's neck and cone, ball centre to joint.
+    Head,
+    /// The tip's contact sphere.
+    Ball,
+    /// A head's joint sphere.
+    Joint,
+    /// A plate root's boss (the `RootFlare` record).
+    Boss,
+    /// A model-landed arm's foot ball.
+    Foot,
+}
+
+/// Two member solids that overlap on the finished field
+/// ([`member_collisions`]), the lower member id first.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MemberCollision {
+    pub low: u32,
+    pub high: u32,
+    /// The deepest overlap of the two drawn solids, mm: the sum of the two
+    /// drawn radii at the nearest pair of axis points less the distance
+    /// between them, minimised over BOTH axes ([`piece_gap`]).
+    pub depth_mm: f64,
+    /// The kinds of the two pieces that overlap deepest, `low`'s first.
+    pub low_piece: PieceKind,
+    pub high_piece: PieceKind,
+}
+
+/// The sine of the smallest angle between two axes a planned joint is
+/// excused at (5 degrees). Two axes closer to parallel than this make a lens
+/// the joint rule does not excuse beyond [`JOINT_ZONE_CAP`].
+const JOINT_SIN_FLOOR: f64 = 0.087_155_742_747_658_17;
+
+/// A planned joint excuses the pieces within this many times `r_a + r_b` of
+/// the joint point at most (the lens of two axes at 14.5 degrees).
+const JOINT_ZONE_CAP: f64 = 4.0;
+
+/// The margin on a joint's zone: the lens two axes make at a planned joint is
+/// `(r_a + r_b) / sin(angle)` long on a joint point that sits on both axes.
+/// The joint point of a lander on its host is the lander's end, which stands
+/// up to the host's radius off the host's axis, and a piece's end sphere
+/// reaches a radius past the cut, so the zone is a quarter longer.
+const JOINT_ZONE_MARGIN: f64 = 1.25;
+
+/// One piece the file draws, as the swept-sphere solid that encloses it: the
+/// segment `a`-`b` with a radius running linearly from `ra` to `rb`. A sphere
+/// is a piece with `a == b`.
+#[derive(Clone, Copy, Debug)]
+struct Piece {
+    member: usize,
+    kind: PieceKind,
+    a: [f64; 3],
+    b: [f64; 3],
+    ra: f64,
+    rb: f64,
+}
+
+impl Piece {
+    fn sphere(member: usize, kind: PieceKind, centre: [f64; 3], radius: f64) -> Self {
+        Self {
+            member,
+            kind,
+            a: centre,
+            b: centre,
+            ra: radius,
+            rb: radius,
+        }
+    }
+
+    fn is_sphere(&self) -> bool {
+        self.length_of() <= 0.0
+    }
+
+    fn at(&self, t: f64) -> [f64; 3] {
+        std::array::from_fn(|axis| self.a[axis] + t * (self.b[axis] - self.a[axis]))
+    }
+
+    fn radius(&self, t: f64) -> f64 {
+        self.ra + t * (self.rb - self.ra)
+    }
+
+    fn reach(&self) -> f64 {
+        self.ra.max(self.rb)
+    }
+
+    fn length_of(&self) -> f64 {
+        geom_kernel::vec3::dist(self.a, self.b)
+    }
+}
+
+/// The smallest `distance - r_p(s) - r_q(t)` of two pieces over the parameter
+/// rectangle `s` x `t`, and where: the NEGATIVE of the deepest overlap of the
+/// two swept-sphere solids.
+///
+/// **Sound for tapers** (astra round 2, finding 1): the function is jointly
+/// convex in `(s, t)` (a norm of an affine map less two linear radii), so its
+/// minimum is the overlap, whatever the radii do. The radii at the closest
+/// AXIS points are not the answer: a thin end can stand nearest while the thick
+/// end of the other member is what collides (the module doc, and
+/// `a_tapered_thick_end_collides_away_from_the_closest_axis_points`). The inner
+/// minimum over `t` is closed-form (a hyperbola's vertex, clamped to the
+/// segment; a radius that changes faster than the length is monotone and takes
+/// an end); the outer is a 60-step ternary search on a convex function, which
+/// errs only by leaving the minimum a few nanometres high (a depth a few
+/// nanometres short, never an overlap invented).
+///
+/// A swept sphere encloses the file's frustum (a frustum's section at each axis
+/// point lies inside the sphere of that radius there), so this is a
+/// CONSERVATIVE enclosing test: it can flag a thin sliver at a flat end cap and
+/// never miss an overlap of the drawn solids.
+fn piece_gap(p: &Piece, q: &Piece, s: (f64, f64), t: (f64, f64)) -> (f64, f64, f64) {
+    use geom_kernel::vec3;
+    // The best `t` for one `s`, and its value.
+    let inner = |s: f64| -> (f64, f64) {
+        let point = p.at(s);
+        let radius_p = p.radius(s);
+        let value = |t: f64| vec3::dist(point, q.at(t)) - radius_p - q.radius(t);
+        let length = q.length_of();
+        if q.is_sphere() || length <= 0.0 {
+            return (t.0, value(t.0));
+        }
+        let slope = (q.rb - q.ra) / length;
+        if slope.abs() >= 1.0 {
+            let (low, high) = (value(t.0), value(t.1));
+            return if low <= high { (t.0, low) } else { (t.1, high) };
+        }
+        let direction = vec3::scale(vec3::sub(q.b, q.a), 1.0 / length);
+        let offset = vec3::sub(point, q.a);
+        let along = vec3::dot(offset, direction);
+        let perpendicular = (vec3::dot(offset, offset) - along * along).max(0.0).sqrt();
+        let vertex = along + slope * perpendicular / (1.0 - slope * slope).sqrt();
+        let at = (vertex / length).clamp(t.0, t.1);
+        (at, value(at))
+    };
+    if p.is_sphere() || s.1 <= s.0 {
+        let (at, value) = inner(s.0);
+        return (value, s.0, at);
+    }
+    let (mut low, mut high) = s;
+    for _ in 0..60 {
+        let third = (high - low) / 3.0;
+        let (m1, m2) = (low + third, high - third);
+        if inner(m1).1 <= inner(m2).1 {
+            high = m2;
+        } else {
+            low = m1;
+        }
+    }
+    let mid = 0.5 * (low + high);
+    let best = [s.0, mid, s.1]
+        .into_iter()
+        .map(|at| (inner(at), at))
+        .min_by(|x, y| x.0 .1.total_cmp(&y.0 .1))
+        .expect("three candidates");
+    ((best.0).1, best.1, (best.0).0)
+}
+
+/// The head of a headed arm as the chain of straight frusta the lowering draws
+/// from the contact ball to the carried joint `K` (`push_head_segment` and
+/// `push_head_chain`, `lower.rs`), as `(from, to, radius from, radius to)`.
+/// The joint SPHERE at `K` is drawn by the caller. The three ways the lowering
+/// cuts the chain are the three branches here (a certified link, a link, the
+/// clipped polyline with its pixel merge); `None` where the lowering draws the
+/// arm straight.
+fn head_chain(
+    arm: &plinth_support::SweepArm,
+    disc: &plinth_support::TipContactDisc,
+    pixel_pitch_mm: f64,
+) -> Option<Vec<HeadFrustum>> {
+    use geom_kernel::vec3;
+    /// `LINK_MIN_LENGTH_MM` in the lowering.
+    const LINK_MIN_MM: f64 = 1.0e-6;
+    let head = arm.head.as_ref()?;
+    let unit = vec3::normalize(head.unit)?;
+    if unit[2] >= 0.0 {
+        return None;
+    }
+    let knots = &head.profile_knots_mm;
+    let length = knots.last()?[0];
+    let centre = disc.ball_centre_mm;
+    let ball = disc.ball_radius_mm;
+    let centre_s = vec3::dot(unit, vec3::sub(centre, head.contact_mm));
+    // Where the head starts: the ball centre, or the contact disc's centre on
+    // the seat plane where the centre stands under it.
+    let start: [f64; 3] = if centre_s < 0.0 {
+        std::array::from_fn(|axis| centre[axis] - centre_s * unit[axis])
+    } else {
+        centre
+    };
+    let s_start = vec3::dot(unit, vec3::sub(start, head.contact_mm)).max(0.0);
+    if s_start.partial_cmp(&length) != Some(std::cmp::Ordering::Less) {
+        return None;
+    }
+    let chain: Vec<[f64; 2]> = if head.certified
+        && head.link_mm > 0.0
+        && head.link_radius_mm > 0.0
+        && knots.first().is_some_and(|knot| knot[0] > s_start + LINK_MIN_MM)
+    {
+        std::iter::once([s_start, head.link_radius_mm]).chain(knots.iter().copied()).collect()
+    } else if head.link_mm > 0.0 && head.link_radius_mm > 0.0 {
+        let link = head.link_radius_mm;
+        let exit = (ball * ball - link * link).max(0.0).sqrt();
+        let link_end = (centre_s + exit + head.link_mm)
+            .max(s_start + LINK_MIN_MM)
+            .min(length - LINK_MIN_MM);
+        let cone = knots.get(1..).filter(|cone| !cone.is_empty())?;
+        let first = cone
+            .partition_point(|knot| knot[0] < link_end + pixel_pitch_mm)
+            .min(cone.len() - 1);
+        [[s_start, link], [link_end, link]]
+            .into_iter()
+            .chain(cone[first..].iter().copied())
+            .collect()
+    } else {
+        let past = knots
+            .partition_point(|knot| knot[0] <= s_start + 1.0e-6)
+            .min(knots.len() - 1);
+        let first_radius = match past.checked_sub(1).map(|index| knots[index]) {
+            Some(below) => {
+                let above = knots.get(past).copied().unwrap_or(below);
+                let t = (s_start - below[0]) / (above[0] - below[0]).max(f64::MIN_POSITIVE);
+                below[1] + (above[1] - below[1]) * t.clamp(0.0, 1.0)
+            }
+            None => knots[0][1],
+        };
+        let merged = knots
+            .partition_point(|knot| knot[0] < s_start + pixel_pitch_mm)
+            .min(knots.len() - 1)
+            .max(past);
+        let first_radius = knots[past..merged]
+            .iter()
+            .fold(first_radius, |widest, knot| widest.max(knot[1]));
+        std::iter::once([s_start, first_radius]).chain(knots[merged..].iter().copied()).collect()
+    };
+    let joint = head.joint_mm;
+    let on_axis = |s: f64| -> [f64; 3] {
+        let t = ((s - s_start) / (length - s_start)).clamp(0.0, 1.0);
+        std::array::from_fn(|axis| start[axis] + (joint[axis] - start[axis]) * t)
+    };
+    Some(
+        chain
+            .windows(2)
+            .map(|pair| (on_axis(pair[0][0]), on_axis(pair[1][0]), pair[0][1], pair[1][1]))
+            .collect(),
+    )
+}
+
+/// **Every piece the lowering draws for every member**, as swept spheres, and
+/// each member's drawn shaft ends. The inventory matches `lower_one_sweep_arm`
+/// piece for piece: the shaft's spans (taper and chained members), the tip's
+/// contact ball, a head's frusta and joint sphere, a plate root's boss, and a
+/// model-landed arm's foot ball (its foot cone is inside the shaft's span to
+/// the foot, which is drawn to the full section: an enclosing piece). The one
+/// piece NOT listed is a landed junction's hull, which exists only at a planned
+/// joint and lies inside the joint's zone ([`member_collisions`]).
+fn drawn_pieces(
+    struts: &[crate::SweepStrut],
+    arms: &[plinth_support::SweepArm],
+    layer_plan: &plinth_core::LayerPlan,
+    plate_z_mm: f64,
+    pixel_pitch_mm: f64,
+) -> (Vec<Piece>, Vec<ShaftEnds>) {
+    let height = layer_plan.heights_mm().first().copied().unwrap_or(0.0);
+    let flare = plinth_support::SweepRootFlare::registered(height).ok();
+    let boss = plinth_support::RootBoss::registered().ok();
+    let discs = plinth_support::tip_contact_discs(arms, layer_plan)
+        .unwrap_or_else(|_| vec![None; arms.len()]);
+    let feet = plinth_support::model_foot_discs(arms, layer_plan)
+        .unwrap_or_else(|_| vec![None; arms.len()]);
+    let field = field_spans(struts, arms, &discs, flare.as_ref(), plate_z_mm);
+    let mut pieces: Vec<Piece> = Vec::with_capacity(field.spans.len() + 3 * struts.len());
+    for span in &field.spans {
+        pieces.push(Piece {
+            member: span.member,
+            kind: PieceKind::Shaft,
+            a: span.top,
+            b: span.bottom,
+            ra: span.top_radius_mm,
+            rb: span.bottom_radius_mm,
+        });
+    }
+    for (index, (strut, arm)) in struts.iter().zip(arms).enumerate() {
+        if strut.k_bottom == usize::MAX || strut.k_top <= strut.k_bottom {
+            continue;
+        }
+        let disc = discs.get(index).copied().flatten();
+        if let Some(disc) = disc.filter(|_| arm.seats_into_model) {
+            pieces.push(Piece::sphere(index, PieceKind::Ball, disc.ball_centre_mm, disc.ball_radius_mm));
+            if let (Some(head), Some(_)) = (arm.head.as_ref(), disc.head_joint_radius_mm) {
+                if let Some(chain) = head_chain(arm, &disc, pixel_pitch_mm) {
+                    for (a, b, ra, rb) in chain {
+                        pieces.push(Piece {
+                            member: index,
+                            kind: PieceKind::Head,
+                            a,
+                            b,
+                            ra,
+                            rb,
+                        });
+                    }
+                    pieces.push(Piece::sphere(index, PieceKind::Joint, head.joint_mm, head.joint_radius_mm));
+                }
+            }
+        }
+        if let Some(foot) = feet.get(index).copied().flatten() {
+            pieces.push(Piece::sphere(index, PieceKind::Foot, foot.ball_centre_mm, foot.ball_radius_mm));
+        }
+        if let (Some(flare), Some(boss)) = (flare.as_ref(), boss) {
+            if let Some((_, bottom)) = flare.plate_shaft_of(arm, plate_z_mm) {
+                let foot_z = plate_z_mm + flare.raft_top_above_plate_mm()
+                    - plinth_support::NATIVE_FOOT_PAD_OVERLAP_MM;
+                if strut.landing == crate::Landing::Plate && bottom[2] > foot_z + 1.0e-9 {
+                    let root = plinth_support::drawn_root_radius_mm(&arm.radius_profile_mm, arm.tip_radius_mm);
+                    pieces.push(Piece {
+                        member: index,
+                        kind: PieceKind::Boss,
+                        a: bottom,
+                        b: [arm.base_mm[0], arm.base_mm[1], foot_z],
+                        ra: root,
+                        rb: boss.foot_radius_mm(root),
+                    });
+                }
+            }
+        }
+    }
+    (pieces, field.ends)
+}
+
+/// The parameter interval of the piece within `zone` of `joint`, or `None`.
+fn near_interval(piece: &Piece, joint: [f64; 3], zone: f64) -> Option<(f64, f64)> {
+    use geom_kernel::vec3;
+    if piece.is_sphere() {
+        return (vec3::dist(piece.a, joint) <= zone).then_some((0.0, 1.0));
+    }
+    let direction = vec3::sub(piece.b, piece.a);
+    let offset = vec3::sub(piece.a, joint);
+    let a = vec3::dot(direction, direction);
+    let b = vec3::dot(direction, offset);
+    let c = vec3::dot(offset, offset) - zone * zone;
+    let discriminant = b.powi(2) - a * c;
+    if discriminant < 0.0 || a <= 0.0 {
+        return None;
+    }
+    let root = discriminant.sqrt();
+    let (low, high) = (((-b - root) / a).max(0.0), ((-b + root) / a).min(1.0));
+    (low <= high).then_some((low, high))
+}
+
+/// The radius of the piece at the axis point nearest `point`.
+fn radius_near(piece: &Piece, point: [f64; 3]) -> f64 {
+    use geom_kernel::vec3;
+    let direction = vec3::sub(piece.b, piece.a);
+    let length_sq = vec3::dot(direction, direction);
+    if length_sq <= 0.0 {
+        return piece.ra;
+    }
+    let t = (vec3::dot(vec3::sub(point, piece.a), direction) / length_sq).clamp(0.0, 1.0);
+    piece.radius(t)
+}
+
+/// The deepest overlap of two pieces of two members joined by PLANNED joints,
+/// with the allowed overlap at each joint taken out: the parameter rectangle is
+/// cut at the edges of every joint's zone on both pieces, and every cell that is
+/// not wholly inside one joint's zone on BOTH pieces is measured. Pieces keep
+/// every part away from the joint, and a part of one inside the zone is still
+/// measured against the parts of the other outside it.
+fn overlap_beyond_joints(p: &Piece, q: &Piece, joints: &[([f64; 3], [f64; 3])]) -> (f64, f64, f64) {
+    use geom_kernel::vec3;
+    let sine = if p.is_sphere() || q.is_sphere() {
+        1.0
+    } else {
+        match (
+            vec3::normalize(vec3::sub(p.b, p.a)),
+            vec3::normalize(vec3::sub(q.b, q.a)),
+        ) {
+            (Some(x), Some(y)) => vec3::norm(vec3::cross(x, y)),
+            _ => 1.0,
+        }
+    };
+    let mut s_cuts = vec![0.0, 1.0];
+    let mut t_cuts = vec![0.0, 1.0];
+    let mut blocks: Vec<((f64, f64), (f64, f64))> = Vec::new();
+    for &(at_p, at_q) in joints {
+        let sum = radius_near(p, at_p) + radius_near(q, at_q);
+        let zone = (JOINT_ZONE_MARGIN * sum / sine.max(JOINT_SIN_FLOOR)).min(JOINT_ZONE_CAP * sum);
+        if let (Some(ns), Some(nt)) = (near_interval(p, at_p, zone), near_interval(q, at_q, zone)) {
+            s_cuts.extend([ns.0, ns.1]);
+            t_cuts.extend([nt.0, nt.1]);
+            blocks.push((ns, nt));
+        }
+    }
+    let cells = |cuts: &mut Vec<f64>, sphere: bool| -> Vec<(f64, f64)> {
+        cuts.sort_by(f64::total_cmp);
+        cuts.dedup();
+        if sphere {
+            return vec![(0.0, 0.0)];
+        }
+        cuts.windows(2).map(|pair| (pair[0], pair[1])).collect()
+    };
+    let s_cells = cells(&mut s_cuts, p.is_sphere());
+    let t_cells = cells(&mut t_cuts, q.is_sphere());
+    let mut deepest = (f64::INFINITY, 0.0, 0.0);
+    for &s in &s_cells {
+        for &t in &t_cells {
+            let (mid_s, mid_t) = (0.5 * (s.0 + s.1), 0.5 * (t.0 + t.1));
+            let allowed = blocks.iter().any(|(ns, nt)| {
+                ns.0 <= mid_s && mid_s <= ns.1 && nt.0 <= mid_t && mid_t <= nt.1
+            });
+            if allowed {
+                continue;
+            }
+            let found = piece_gap(p, q, s, t);
+            if found.0 < deepest.0 {
+                deepest = found;
+            }
+        }
+    }
+    deepest
+}
+
+/// **No two members' drawn solids overlap** (`SC-DESIGN.md` §4, G3), over
+/// every pair of members of every kind (arm, brace, mast, tie), on the whole
+/// drawn inventory of each ([`drawn_pieces`]): shaft spans, tip balls, head
+/// frusta and joint spheres, root bosses, model feet. The existing
+/// [`tips_inside_members`] reads only a tip's ball-centre-to-post-top segment
+/// against the other shafts, so a straight arm that crosses a brace mid-shaft,
+/// or a head whose joint sphere stands in a neighbour, passes it; this census
+/// reads the solids.
+///
+/// A pair of pieces collides where the swept-sphere solids overlap by more than
+/// [`CONTAINMENT_SLACK_MM`] ([`piece_gap`]: sound for tapers, conservative at
+/// flat end caps). A PLANNED JOINT allows an overlap only NEAR the joint, never
+/// along a whole member (the rule `member_solids_clear` reads: the trunk under a
+/// post is not exempt):
+///
+/// * a member that lands on another (`Landing::Strut`) meets it at its drawn
+///   bottom, and one that seats on another (`seat_on_strut`) at its drawn top;
+/// * members within three hops of one another in the graph of those landings
+///   and seats (a child, its host, the host's host, and the host's other
+///   children) are a CLUSTER that meets at every joint point of the cluster
+///   ([`designed_joints`]); the two diagonals of an `|X|` also meet where their
+///   axes cross.
+///
+/// The joint's ZONE is `1.25 (r_a + r_b) / sin(angle)` along each axis from the
+/// joint point (the lens two axes that cross at a planned joint overlap along),
+/// at most [`JOINT_ZONE_CAP`] times `r_a + r_b` ([`overlap_beyond_joints`]).
+/// Beyond it the overlap is a collision, which is how a lander that crosses its
+/// host 3 mm above its joint is named.
+///
+/// Batch-first: ONE inventory for the field, the pieces bucketed once on a plan
+/// grid, an exact axis-distance bound before any solve, and every candidate
+/// pair tested once, in the lowest bucket the two share. Sorted by
+/// `(low, high)`, so the answer does not depend on thread count or hash order.
+#[must_use]
+pub(crate) fn member_collisions(
+    struts: &[crate::SweepStrut],
+    arms: &[plinth_support::SweepArm],
+    layer_plan: &plinth_core::LayerPlan,
+    plate_z_mm: f64,
+    pixel_pitch_mm: f64,
+) -> Vec<MemberCollision> {
+    /// The bucket side, mm: a packing size and nothing else.
+    const BUCKET_MM: f64 = 1.0;
+    let (pieces, ends) = drawn_pieces(struts, arms, layer_plan, plate_z_mm, pixel_pitch_mm);
+    let joints = designed_joints(struts, &ends);
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a bucket index of a model-scale coordinate over a 1 mm bucket"
+    )]
+    let bucket = |value: f64| (value / BUCKET_MM).floor() as i64;
+    // Each piece's bucket rectangle `(bx0, bx1, by0, by1)` and z range.
+    let extents: Vec<(i64, i64, i64, i64)> = pieces
+        .iter()
+        .map(|piece| {
+            let reach = piece.reach();
+            (
+                bucket(piece.a[0].min(piece.b[0]) - reach),
+                bucket(piece.a[0].max(piece.b[0]) + reach),
+                bucket(piece.a[1].min(piece.b[1]) - reach),
+                bucket(piece.a[1].max(piece.b[1]) + reach),
+            )
+        })
+        .collect();
+    let z_range = |piece: &Piece| {
+        let reach = piece.reach();
+        (
+            piece.a[2].min(piece.b[2]) - reach,
+            piece.a[2].max(piece.b[2]) + reach,
+        )
+    };
+    let mut buckets: std::collections::BTreeMap<(i64, i64), Vec<usize>> = std::collections::BTreeMap::new();
+    for (slot, &(x0, x1, y0, y1)) in extents.iter().enumerate() {
+        for bx in x0..=x1 {
+            for by in y0..=y1 {
+                buckets.entry((bx, by)).or_default().push(slot);
+            }
+        }
+    }
+    let mut found: std::collections::BTreeMap<(u32, u32), (f64, PieceKind, PieceKind)> =
+        std::collections::BTreeMap::new();
+    for (&cell, list) in &buckets {
+        for (at, &i) in list.iter().enumerate() {
+            for &j in &list[at + 1..] {
+                let (first, second) = (&pieces[i], &pieces[j]);
+                if first.member == second.member {
+                    continue;
+                }
+                // Test the pair once, in the lowest bucket the two share.
+                let (ei, ej) = (extents[i], extents[j]);
+                if (ei.0.max(ej.0), ei.2.max(ej.2)) != cell {
+                    continue;
+                }
+                let (zi, zj) = (z_range(first), z_range(second));
+                if zi.1 < zj.0 || zj.1 < zi.0 {
+                    continue;
+                }
+                // Exact bound: no solid can reach further than its widest end
+                // from its axis.
+                let (axes, _, _) = segment_segment_distance_min(first.a, first.b, second.a, second.b);
+                if axes - first.reach() - second.reach() >= -CONTAINMENT_SLACK_MM {
+                    continue;
+                }
+                let (p, q) = if first.member < second.member {
+                    (first, second)
+                } else {
+                    (second, first)
+                };
+                let measured = match joints.get(&(p.member, q.member)) {
+                    Some(planned) => overlap_beyond_joints(p, q, planned),
+                    None => piece_gap(p, q, (0.0, 1.0), (0.0, 1.0)),
+                };
+                let depth = -measured.0;
+                if depth <= CONTAINMENT_SLACK_MM {
+                    continue;
+                }
+                let key = (struts[p.member].id, struts[q.member].id);
+                let entry = found.entry(key).or_insert((depth, p.kind, q.kind));
+                let deeper = match depth.total_cmp(&entry.0) {
+                    std::cmp::Ordering::Greater => true,
+                    std::cmp::Ordering::Equal => (p.kind, q.kind) < (entry.1, entry.2),
+                    std::cmp::Ordering::Less => false,
+                };
+                if deeper {
+                    *entry = (depth, p.kind, q.kind);
+                }
+            }
+        }
+    }
+    found
+        .into_iter()
+        .map(|((low, high), (depth_mm, low_piece, high_piece))| MemberCollision {
+            low,
+            high,
+            depth_mm,
+            low_piece,
+            high_piece,
+        })
+        .collect()
+}
+/// How far apart in the graph of joined members (a member and the member it
+/// lands on or seats on) two members may stand and still be a cluster that
+/// meets at its planned joints: a child, its host, and the host's own host.
+/// Three hops reach a grandchild's sibling.
+const JOINT_CLUSTER_HOPS: usize = 3;
+
+/// The planned joints of the field, by member-index pair `(low, high)`: the
+/// joint points of the pair. One pass over the members.
+///
+/// A member's OWN joint points are where it lands on a member (its drawn
+/// bottom) and where its top seats on one. Members that are RELATIVES, within
+/// [`JOINT_CLUSTER_HOPS`] of one another in the graph of those landings and
+/// seats, share every joint point of both: a grandchild lands on a child that
+/// lands on a trunk, and the three solids all meet where the grandchild's end
+/// is (Cylinder 85/88/113 on `a7ffbe3`: the 1.26 mm "collision" of a grandchild
+/// with its grandparent is the cluster's joint). The two diagonals of an `|X|`
+/// are relatives too (each lands on the post the other seats on) and also meet
+/// where their axes cross, which is a joint of the pair.
+///
+/// This makes a joint a place, not a licence: an overlap is excused only within
+/// the joint's zone ([`overlap_beyond_joints`]), on pieces of members that are
+/// joined to each other by plan.
+fn designed_joints(struts: &[crate::SweepStrut], ends: &[ShaftEnds]) -> DesignedJoints {
+    let count = struts.len();
+    let mut own: Vec<Vec<[f64; 3]>> = vec![Vec::new(); count];
+    let mut adjacent: Vec<std::collections::BTreeSet<usize>> = vec![std::collections::BTreeSet::new(); count];
+    for (member, strut) in struts.iter().enumerate() {
+        let Some((top, bottom)) = ends[member] else { continue };
+        if let crate::Landing::Strut { id, .. } = strut.landing {
+            let host = id as usize;
+            if host < count && host != member {
+                own[member].push(bottom);
+                adjacent[member].insert(host);
+                adjacent[host].insert(member);
+            }
+        }
+        if let Some(host) = strut.seat_on_strut {
+            let host = host as usize;
+            if host < count && host != member {
+                own[member].push(top);
+                adjacent[member].insert(host);
+                adjacent[host].insert(member);
+            }
+        }
+    }
+    let mut joints: DesignedJoints = std::collections::HashMap::new();
+    for first in 0..count {
+        // Breadth-first to the cluster's depth, in index order.
+        let mut seen: std::collections::BTreeSet<usize> = std::collections::BTreeSet::from([first]);
+        let mut frontier = vec![first];
+        for _ in 0..JOINT_CLUSTER_HOPS {
+            let mut next = Vec::new();
+            for &member in &frontier {
+                for &neighbour in &adjacent[member] {
+                    if seen.insert(neighbour) {
+                        next.push(neighbour);
+                    }
+                }
+            }
+            frontier = next;
+        }
+        for &second in seen.iter().filter(|&&other| other > first) {
+            let shared: Vec<([f64; 3], [f64; 3])> = own[first]
+                .iter()
+                .chain(&own[second])
+                .map(|&point| (point, point))
+                .collect();
+            if !shared.is_empty() {
+                joints.entry((first, second)).or_default().extend(shared);
+            }
+        }
+    }
+    // The `|X|`: braces whose landing and seat are each other's.
+    let mut by_posts: std::collections::BTreeMap<(u32, u32), Vec<usize>> = std::collections::BTreeMap::new();
+    for (member, strut) in struts.iter().enumerate() {
+        if let (crate::StrutKind::Brace, crate::Landing::Strut { id, .. }, Some(seat)) =
+            (strut.kind, strut.landing, strut.seat_on_strut)
+        {
+            by_posts.entry((id, seat)).or_default().push(member);
+        }
+    }
+    for (&(lands_on, seats_on), firsts) in &by_posts {
+        for &first in firsts {
+            for &second in by_posts.get(&(seats_on, lands_on)).map_or(&[][..], Vec::as_slice) {
+                if first >= second {
+                    continue;
+                }
+                if let (Some((top_a, bottom_a)), Some((top_b, bottom_b))) = (ends[first], ends[second]) {
+                    let (_, on_first, on_second) =
+                        segment_segment_distance_min(top_a, bottom_a, top_b, bottom_b);
+                    joints.entry((first, second)).or_default().push((on_first, on_second));
+                }
+            }
+        }
+    }
+    joints
+}
 
 /// One straight tip whose shaft grazes the model ([`graze_census`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2113,6 +2810,380 @@ mod census_tests {
         assert!(touching.is_empty(), "the ball's surface overlaps, its centre is outside: {touching:?}");
         let joined = field(0.5, true);
         assert!(joined.is_empty(), "a member landed on the tip's own arm is joined by plan: {joined:?}");
+    }
+
+    /// A straight member between two 3D points, as both the plan and the
+    /// lowering hold it (`member` with its two ends overridden).
+    fn slanted(
+        id: u32,
+        kind: StrutKind,
+        landing: Landing,
+        base: [f64; 3],
+        top: [f64; 3],
+        r: f64,
+    ) -> (SweepStrut, SweepArm) {
+        let (strut, mut arm) = member(id, kind, landing, [base[0], base[1]], base[2], top[2], r);
+        arm.base_mm = base;
+        arm.seat_mm = top;
+        (strut, arm)
+    }
+
+    fn collisions_of(members: Vec<(SweepStrut, SweepArm)>) -> Vec<super::MemberCollision> {
+        let (struts, arms): (Vec<SweepStrut>, Vec<SweepArm>) = members.into_iter().unzip();
+        let layers = plinth_core::LayerPlan::new(PLATE, vec![H; 400]).expect("a uniform plan");
+        super::member_collisions(&struts, &arms, &layers, PLATE, 0.05)
+    }
+
+    /// A seated tip: a straight arm of radius `r` seated into a flat
+    /// down-facing face at `top_z`, its shaft running to `base_z` below.
+    fn seated_tip(id: u32, xy: [f64; 2], top_z: f64, base_z: f64, r: f64) -> (SweepStrut, SweepArm) {
+        let (mut strut, mut arm) = member(id, StrutKind::Arm, Landing::Model { layer: 20 }, xy, base_z, top_z, r);
+        arm.seats_into_model = true;
+        arm.seat_normal_mm = [0.0, 0.0, -1.0];
+        arm.seat_face_point_mm = Some(arm.seat_mm);
+        strut.seat_normal = [0.0, 0.0, -1.0];
+        (strut, arm)
+    }
+
+    /// A bare piece for the solver tests.
+    fn piece(a: [f64; 3], b: [f64; 3], ra: f64, rb: f64) -> super::Piece {
+        super::Piece {
+            member: 0,
+            kind: super::PieceKind::Shaft,
+            a,
+            b,
+            ra,
+            rb,
+        }
+    }
+
+    /// **G3 is sound for tapers** (astra round 2, finding 1;
+    /// `member_clearance.rs` module doc: the radii at the closest AXIS points
+    /// are not the closest solids when the radius varies). A 10 mm post stands
+    /// from 0.05 mm radius at z = 0 to 0.60 mm at z = 10. A 0.1 mm rod runs
+    /// from (0.25, 0, 0), 0.25 from the post's axis beside its THIN end, to
+    /// (0.60, 0, 10), exactly the post's thick radius off the axis plus nothing
+    /// to spare. The axes are nearest at z = 0, where 0.05 + 0.1 < 0.25: the
+    /// closest-axis rule says clear. At z = 10 the post is 0.60 wide and the
+    /// rod's surface reaches 0.50 from the axis: they overlap by 0.10 mm. The
+    /// solver finds that end; a brute-force grid agrees with it.
+    #[test]
+    fn a_tapered_thick_end_collides_away_from_the_closest_axis_points() {
+        let post = piece([0.0, 0.0, 0.0], [0.0, 0.0, 10.0], 0.05, 0.60);
+        let rod = piece([0.25, 0.0, 0.0], [0.60, 0.0, 10.0], 0.1, 0.1);
+        let (axes, on_post, on_rod) =
+            geom_kernel::segment_segment_distance_min(post.a, post.b, rod.a, rod.b);
+        let at_nearest = post.radius(on_post[2] / 10.0) + rod.radius(on_rod[2] / 10.0) - axes;
+        assert!(at_nearest < 0.0, "the closest-axis rule sees a gap: {at_nearest}");
+        let (gap, s, t) = super::piece_gap(&post, &rod, (0.0, 1.0), (0.0, 1.0));
+        // The swept sphere is a hair wider than the frustum at a slope (a
+        // 0.0004 mm bulge here): an enclosure, never a miss.
+        assert!((gap + 0.10).abs() < 1e-3, "the thick end overlaps by 0.10 mm: {gap}");
+        assert!(s > 0.99 && t > 0.99, "at the thick ends: ({s}, {t})");
+        // The brute-force grid never beats the solver (convex, so the grid's
+        // best is an upper bound on the minimum) and comes within a hair of it.
+        let mut brute = f64::INFINITY;
+        for i in 0..=200 {
+            for j in 0..=200 {
+                let (s, t) = (f64::from(i) / 200.0, f64::from(j) / 200.0);
+                let (p, q) = (post.at(s), rod.at(t));
+                brute = brute.min(geom_kernel::vec3::dist(p, q) - post.radius(s) - rod.radius(t));
+            }
+        }
+        assert!(gap <= brute + 1e-12 && brute - gap < 1e-3, "solver {gap} vs grid {brute}");
+        // The same rod ending 0.15 mm further out clears the thick end.
+        let clear = piece([0.25, 0.0, 0.0], [0.75, 0.0, 10.0], 0.1, 0.1);
+        let (gap, _, _) = super::piece_gap(&post, &clear, (0.0, 1.0), (0.0, 1.0));
+        assert!(gap > 0.0, "no overlap: {gap}");
+    }
+
+    /// The same defect through the census, on members as the sweep holds them:
+    /// a 5 mm post drawn 0.05 mm wide at its top (z = -1) and 0.60 mm at its
+    /// root (z = -6), and a 0.1 mm brace from (0.25, 0, -1), beside the thin
+    /// top, to (0.60, 0, -6), at the thick root's radius. The axes are nearest
+    /// at the top, where 0.05 + 0.1 < 0.25; the drawn solids overlap by about
+    /// 0.1 mm low on the post. SABOTAGE: reading the radii at the closest axis
+    /// points in `member_collisions` (the retired rule) turns this red.
+    #[test]
+    fn a_tapered_post_and_a_brace_collide_low_on_the_post_in_the_census() {
+        let field = |brace_end_x: f64| {
+            let (mut post, mut post_arm) =
+                slanted(0, StrutKind::Arm, Landing::Model { layer: 20 }, [0.0, 0.0, -6.0], [0.0, 0.0, -1.0], 0.05);
+            let n = post_arm.radius_profile_mm.len();
+            let profile: Vec<f64> = (0..n)
+                .map(|slot| 0.60 - 0.55 * (slot as f64 + 0.5) / n as f64)
+                .collect();
+            post_arm.radius_profile_mm.clone_from(&profile);
+            post.radius_mm = profile;
+            let brace = slanted(
+                1,
+                StrutKind::Brace,
+                Landing::Model { layer: 20 },
+                [brace_end_x, 0.0, -6.0],
+                [0.25, 0.0, -1.0],
+                0.1,
+            );
+            collisions_of(vec![(post, post_arm), brace])
+        };
+        let hit = field(0.60);
+        assert_eq!(hit.len(), 1, "{hit:?}");
+        // About 0.1 mm at the root's radius; the drawn spans stand on or above
+        // the profile, a little wider than the line through it.
+        assert!(hit[0].depth_mm > 0.05 && hit[0].depth_mm < 0.25, "{hit:?}");
+        let clear = field(0.90);
+        assert!(clear.is_empty(), "a brace 0.3 mm further out clears the root: {clear:?}");
+    }
+
+    /// The solver against a brute-force grid on a few tilted tapered pairs,
+    /// radii growing and shrinking: the minimum is the grid's to a hair.
+    #[test]
+    fn the_piece_gap_solver_matches_a_brute_force_grid() {
+        let cases = [
+            (
+                piece([0.0, 0.0, 0.0], [1.0, 0.5, 4.0], 0.3, 0.1),
+                piece([0.9, -1.0, 1.0], [0.2, 1.0, 3.0], 0.05, 0.4),
+            ),
+            (
+                piece([0.0, 0.0, 0.0], [0.0, 0.0, 3.0], 0.1, 0.9),
+                piece([0.5, 0.5, 2.5], [-2.0, 0.0, 0.5], 0.2, 0.2),
+            ),
+            (
+                piece([0.0, 0.0, 0.0], [3.0, 0.0, 0.0], 0.2, 0.2),
+                piece([1.0, 0.6, 0.0], [1.0, 0.6, 0.0], 0.3, 0.3),
+            ),
+        ];
+        for (p, q) in cases {
+            let (gap, _, _) = super::piece_gap(&p, &q, (0.0, 1.0), (0.0, 1.0));
+            let mut brute = f64::INFINITY;
+            for i in 0..=300 {
+                for j in 0..=300 {
+                    let (s, t) = (f64::from(i) / 300.0, f64::from(j) / 300.0);
+                    brute = brute.min(
+                        geom_kernel::vec3::dist(p.at(s), q.at(if q.is_sphere() { 0.0 } else { t }))
+                            - p.radius(s)
+                            - q.radius(t),
+                    );
+                }
+            }
+            assert!(gap <= brute + 1e-9 && brute - gap < 5e-3, "solver {gap} vs grid {brute}");
+        }
+    }
+
+    /// **The two diagonals of an `|X|` are joined where they cross.** Posts 0
+    /// and 1 stand 2 mm apart; brace 2 lands on post 1 and seats on post 0,
+    /// brace 3 the reverse, so they cross at mid-height with 0.2 mm radii. The
+    /// pair is not a collision. The same two braces landed on the model
+    /// instead (nothing joins them) are: the crossing is excused by the plan
+    /// and by nothing else. (Cylinder `149-150`, `151-152`, `191-192` on the
+    /// first run of this census were exactly this.)
+    #[test]
+    fn the_two_diagonals_of_an_x_are_joined_where_they_cross() {
+        let field = |joined: bool| {
+            let post = |id: u32, x: f64| {
+                slanted(id, StrutKind::Arm, Landing::Model { layer: 20 }, [x, 0.0, -6.0], [x, 0.0, -1.0], 0.3)
+            };
+            let diagonal = |id: u32, from: [f64; 3], to: [f64; 3], lands: u32, seats: u32| {
+                let landing = if joined { Landing::Strut { id: lands, layer: 40 } } else { Landing::Model { layer: 40 } };
+                let (mut strut, arm) = slanted(id, StrutKind::Brace, landing, from, to, 0.2);
+                strut.seat_on_strut = joined.then_some(seats);
+                (strut, arm)
+            };
+            collisions_of(vec![
+                post(0, 0.0),
+                post(1, 2.0),
+                diagonal(2, [2.0, 0.0, -5.0], [0.0, 0.0, -2.0], 1, 0),
+                diagonal(3, [0.0, 0.0, -5.0], [2.0, 0.0, -2.0], 0, 1),
+            ])
+        };
+        let joined = field(true);
+        assert!(joined.iter().all(|c| (c.low, c.high) != (2, 3)), "the X crossing is a joint: {joined:?}");
+        let unjoined = field(false);
+        assert!(unjoined.iter().any(|c| (c.low, c.high) == (2, 3)), "anti-vacuity: {unjoined:?}");
+    }
+
+    /// **A cluster meets at its joints**: a grandchild lands on a child that
+    /// lands on a trunk, and the grandchild's end stands inside the trunk's
+    /// solid where the three meet (Cylinder 85 / 88 / 113). Its overlap with
+    /// the trunk is the cluster's joint and is not a collision; the same
+    /// grandchild landed on the plate (joined to nothing) overlaps the trunk
+    /// and IS.
+    #[test]
+    fn a_grandchild_ending_inside_its_grandparent_at_the_cluster_joint_is_not_a_collision() {
+        let field = |related: bool| {
+            let trunk = slanted(0, StrutKind::Arm, Landing::Model { layer: 20 }, [0.0, 0.0, -6.0], [0.0, 0.0, -1.0], 0.5);
+            let child = slanted(1, StrutKind::Arm, Landing::Strut { id: 0, layer: 40 }, [0.45, 0.0, -4.0], [3.0, 0.0, -1.5], 0.3);
+            let grand_landing = if related { Landing::Strut { id: 1, layer: 40 } } else { Landing::Model { layer: 40 } };
+            let grandchild = slanted(2, StrutKind::Arm, grand_landing, [0.2, 0.0, -3.9], [1.5, 0.0, -1.0], 0.2);
+            collisions_of(vec![trunk, child, grandchild])
+        };
+        let related = field(true);
+        assert!(related.iter().all(|c| (c.low, c.high) != (0, 2)), "the cluster's joint: {related:?}");
+        let stranger = field(false);
+        assert!(stranger.iter().any(|c| (c.low, c.high) == (0, 2)), "anti-vacuity: {stranger:?}");
+    }
+
+    /// **A tip BALL collides on its own** (the inventory, not the shaft): a
+    /// 0.2 mm tip's contact ball is 0.25 mm (the owner's ratio), wider than the
+    /// 0.2 mm post under it, and a 0.05 mm rod 0.27 mm beside the tip clears the
+    /// post (0.25 needed) and stands inside the ball (0.30 needed). The deepest
+    /// piece pair is the ball against the rod. The rod stood 0.45 mm off clears
+    /// both.
+    #[test]
+    fn a_tip_ball_collides_though_the_post_under_it_is_clear() {
+        let field = |offset: f64| {
+            collisions_of(vec![
+                seated_tip(0, [0.0, 0.0], -1.0, -4.0, 0.2),
+                member(1, StrutKind::Mast, Landing::Plate, [offset, 0.0], PLATE, -0.8, 0.05),
+            ])
+        };
+        let near = field(0.27);
+        assert_eq!(near.len(), 1, "{near:?}");
+        assert_eq!((near[0].low_piece, near[0].high_piece), (super::PieceKind::Ball, super::PieceKind::Shaft));
+        assert!(near[0].depth_mm > 0.0 && near[0].depth_mm < 0.3, "{near:?}");
+        let far = field(0.45);
+        assert!(far.is_empty(), "{far:?}");
+    }
+
+    /// **A head collides on its own**: a headed arm's post starts at the joint
+    /// `K` (z = -1.7); the head's neck runs from the contact ball (z = -1.15)
+    /// down to it, 0.07 mm wide at the ball and 0.22 mm at `K`. A 0.05 mm rod
+    /// standing 0.18 mm off the axis between z = -1.45 and z = -0.9 clears the
+    /// post, the joint sphere and the ball (all further than their radii) and
+    /// stands inside the neck. The post-only inventory sees nothing.
+    #[test]
+    fn a_head_collides_though_the_post_under_it_is_clear() {
+        let (mut strut, mut arm) = seated_tip(0, [0.0, 0.0], -1.0, -4.0, 0.12);
+        strut.head = Some(crate::heads::Head {
+            contact_mm: [0.0, 0.0, -1.0],
+            unit: [0.0, 0.0, -1.0],
+            joint_mm: [0.0, 0.0, -1.7],
+            k_joint: 4,
+            joint_cell: 0,
+            joint_radius_mm: 0.22,
+            planned_tip_radius_mm: 0.12,
+            gap_mm: GAP,
+            cos_lean_max: 0.5373,
+            cells: Vec::new(),
+            ball_allowance_mm: 0.0,
+            link_mm: 0.0,
+            drawn_straight: false,
+            law_planned: crate::heads::HeadLaw::envelope(0.5373),
+            law_drawn: None,
+            ledger_radius_mm: Vec::new(),
+            certified: None,
+            old_law: None,
+        });
+        arm.head = Some(plinth_support::SweepHead {
+            contact_mm: [0.0, 0.0, -1.0],
+            unit: [0.0, 0.0, -1.0],
+            joint_mm: [0.0, 0.0, -1.7],
+            joint_radius_mm: 0.22,
+            gap_mm: GAP,
+            profile_knots_mm: vec![[0.0, 0.07], [0.7, 0.22]],
+            link_mm: 0.0,
+            link_radius_mm: 0.0,
+            certified: false,
+        });
+        let rod = |offset: f64| {
+            member(1, StrutKind::Mast, Landing::Model { layer: 20 }, [offset, 0.0], -1.45, -0.9, 0.05)
+        };
+        let near = collisions_of(vec![(strut.clone(), arm.clone()), rod(0.18)]);
+        assert_eq!(near.len(), 1, "{near:?}");
+        assert_ne!(near[0].low_piece, super::PieceKind::Shaft, "the head's pieces, not the post: {near:?}");
+        let far = collisions_of(vec![(strut, arm), rod(0.40)]);
+        assert!(far.is_empty(), "{far:?}");
+    }
+
+    /// **A plate root's boss collides on its own**: two 0.2 mm posts 0.45 mm
+    /// apart have shafts that clear (0.40 needed), and their bosses, 1.47 times
+    /// the root at the foot, overlap near the plate.
+    #[test]
+    fn a_root_boss_collides_though_the_shafts_are_clear() {
+        let post = |id: u32, x: f64| member(id, StrutKind::Arm, Landing::Plate, [x, 0.0], PLATE, -1.0, 0.2);
+        let close = collisions_of(vec![post(0, 0.0), post(1, 0.45)]);
+        assert_eq!(close.len(), 1, "{close:?}");
+        assert_eq!((close[0].low_piece, close[0].high_piece), (super::PieceKind::Boss, super::PieceKind::Boss));
+        let apart = collisions_of(vec![post(0, 0.0), post(1, 0.75)]);
+        assert!(apart.is_empty(), "{apart:?}");
+    }
+
+    /// **G3 sees a mid-shaft crossing that `tips_inside_members` cannot**
+    /// (SC-DESIGN §4, astra finding 4). A straight arm seated into the model
+    /// at z = -1 stands in the x = 0 plane; a brace runs from (-1, 0, -3.5) to
+    /// (1, 0, -1.5) and passes THROUGH the arm's shaft at z = -2.5, nowhere
+    /// near the arm's tip. `tips_inside_members` reads only the ball-to-post-
+    /// top segment against the other shafts and names nothing (the documented
+    /// hole); `member_collisions` names the pair, 0.35 mm deep (0.2 + 0.15
+    /// radii on a zero axis distance). The same brace moved 1 mm out of the
+    /// arm's plane is not a collision.
+    #[test]
+    fn a_straight_arm_crossing_a_brace_mid_shaft_is_a_collision_the_tip_census_misses() {
+        let layers = plinth_core::LayerPlan::new(PLATE, vec![H; 400]).expect("a uniform plan");
+        let field = |brace_y: f64| {
+            let (mut strut, mut arm) = slanted(
+                0,
+                StrutKind::Arm,
+                Landing::Model { layer: 20 },
+                [0.0, 0.0, -4.0],
+                [0.0, 0.0, -1.0],
+                0.2,
+            );
+            arm.seats_into_model = true;
+            arm.seat_normal_mm = [0.0, 0.0, -1.0];
+            arm.seat_face_point_mm = Some(arm.seat_mm);
+            strut.seat_normal = [0.0, 0.0, -1.0];
+            let brace = slanted(
+                1,
+                StrutKind::Brace,
+                Landing::Model { layer: 20 },
+                [-1.0, brace_y, -3.5],
+                [1.0, brace_y, -1.5],
+                0.15,
+            );
+            [(strut, arm), brace]
+        };
+        let (struts, arms): (Vec<SweepStrut>, Vec<SweepArm>) = field(0.0).into_iter().unzip();
+        assert!(
+            super::tips_inside_members(&struts, &arms, &layers, PLATE).is_empty(),
+            "the hole: the tip census does not see a mid-shaft crossing"
+        );
+        let crossing = collisions_of(field(0.0).into());
+        assert_eq!(crossing.len(), 1, "{crossing:?}");
+        assert_eq!((crossing[0].low, crossing[0].high), (0, 1));
+        assert!((crossing[0].depth_mm - 0.35).abs() < 1e-6, "{crossing:?}");
+        let clear = collisions_of(field(1.0).into());
+        assert!(clear.is_empty(), "a brace 1 mm out of the plane clears the arm: {clear:?}");
+    }
+
+    /// **A planned joint excuses the pieces near it, not the whole member.** A
+    /// 0.3 mm host stands at x = 0 from z = -4 to 4. A 0.2 mm lander landing
+    /// on it, with its foot ON the host's axis at z = -1 and climbing at 45
+    /// degrees, overlaps the host only in the lens at its joint: not a
+    /// collision. A lander whose foot is 0.35 mm off the axis at the same
+    /// height and that climbs steeply back across the axis 3 mm above its
+    /// joint, at 6.7 degrees (well past the joint's zone), IS: it is landed
+    /// on the host by plan, and still drawn through it.
+    #[test]
+    fn a_lander_at_its_joint_is_clear_and_the_same_lander_crossing_its_host_above_the_joint_is_not() {
+        let host = || {
+            slanted(0, StrutKind::Arm, Landing::Model { layer: 20 }, [0.0, 0.0, -4.0], [0.0, 0.0, 4.0], 0.3)
+        };
+        let lander = |foot: [f64; 3], top: [f64; 3]| {
+            slanted(1, StrutKind::Arm, Landing::Strut { id: 0, layer: 80 }, foot, top, 0.2)
+        };
+        let at_joint = collisions_of(vec![host(), lander([0.0, 0.0, -1.0], [3.0, 0.0, 2.0])]);
+        assert!(at_joint.is_empty(), "a lander at its joint is excused: {at_joint:?}");
+        let crossing = collisions_of(vec![host(), lander([0.35, 0.0, -1.0], [-0.0, 0.0, 2.0])]);
+        assert_eq!(crossing.len(), 1, "a lander drawn through its host above the joint: {crossing:?}");
+        assert_eq!((crossing[0].low, crossing[0].high), (0, 1));
+        // The control that keeps the crossing from being the host's own
+        // footprint: the same lander NOT landed on the host (no planned joint)
+        // is a collision at its joint too.
+        let unplanned = collisions_of(vec![
+            host(),
+            slanted(1, StrutKind::Arm, Landing::Model { layer: 20 }, [0.0, 0.0, -1.0], [3.0, 0.0, 2.0], 0.2),
+        ]);
+        assert_eq!(unplanned.len(), 1, "no planned joint, no excuse: {unplanned:?}");
     }
 }
 

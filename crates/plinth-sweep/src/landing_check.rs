@@ -107,6 +107,51 @@ impl LandingCheck {
             && self.heads_not_intact.is_empty()
             && self.joins_above_joint.is_empty()
     }
+
+    /// **Every defect this check found, keyed by member** (`SC-DESIGN.md` §4,
+    /// astra round 2 finding 2): `(class, member id, detail)`, sorted and
+    /// without duplicates, so two checks of two fields compare by WHO is
+    /// defective and not by how many are (an equal count can hide a new
+    /// detached support). `detail` is the tenths of a percent of a partial
+    /// model foot's contact that stands on the model, and `0` for every other
+    /// class. Read-only.
+    #[must_use]
+    pub fn keyed(&self) -> Vec<(LandingDefect, u32, u32)> {
+        let mut rows: Vec<(LandingDefect, u32, u32)> = Vec::new();
+        for (class, ids) in [
+            (LandingDefect::ParentAbsent, &self.parent_absent),
+            (LandingDefect::ParentElsewhere, &self.parent_elsewhere),
+            (LandingDefect::GroundShort, &self.ground_short),
+            (LandingDefect::BraceTopDetached, &self.brace_tops_detached),
+            (LandingDefect::Unrooted, &self.unrooted),
+            (LandingDefect::HeadNotIntact, &self.heads_not_intact),
+            (LandingDefect::JoinAboveJoint, &self.joins_above_joint),
+        ] {
+            rows.extend(ids.iter().map(|&id| (class, id, 0)));
+        }
+        rows.extend(
+            self.model_feet_partial
+                .iter()
+                .map(|&(id, tenths)| (LandingDefect::FootPartial, id, tenths)),
+        );
+        rows.sort_by(|x, y| (x.0, x.1).cmp(&(y.0, y.1)).then(x.2.cmp(&y.2)));
+        rows.dedup_by(|later, earlier| (later.0, later.1) == (earlier.0, earlier.1));
+        rows
+    }
+}
+
+/// The class of one keyed landing defect ([`LandingCheck::keyed`]). The order
+/// is the sort order of a keyed list and nothing else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LandingDefect {
+    ParentAbsent,
+    ParentElsewhere,
+    GroundShort,
+    BraceTopDetached,
+    Unrooted,
+    HeadNotIntact,
+    JoinAboveJoint,
+    FootPartial,
 }
 
 /// The check after one named pass.
