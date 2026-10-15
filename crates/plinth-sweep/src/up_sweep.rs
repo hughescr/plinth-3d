@@ -121,6 +121,17 @@ pub struct ColumnHistory {
     pub shaft_head: Vec<u32>,
     /// Every `(arm, column run)` occupancy interval, in one flat arena.
     pub shaft_spans: Vec<ShaftSpan>,
+    /// Per grid row, the ascending columns whose [`Self::shaft_head`] is not
+    /// `u32::MAX`: the occupied-column index that lets [`shafts_within`] visit
+    /// only columns an arm crosses instead of every cell of a radius square.
+    /// Kept in step with `shaft_head` by [`Self::push_span`] (a column joins
+    /// when its first span lands) and [`Self::unstamp_straight_shaft`] (it
+    /// leaves when its last span is taken back); no other code writes
+    /// `shaft_head`.
+    occupied_cols: Vec<Vec<u32>>,
+    /// Grid width, to split a cell index into row and column for
+    /// [`Self::occupied_cols`].
+    grid_cols: usize,
     /// Per headed arm id, the highest layer another member may join it at
     /// (`k_joint - ceil(r_K / h)`; `None` where the joint stands too low for
     /// any join). Filled by [`Self::stamp_strut`]; the producer lane reads it.
@@ -140,6 +151,8 @@ impl ColumnHistory {
             hidden: crate::cavity::HiddenCavity::none(),
             shaft_head: vec![u32::MAX; cells],
             shaft_spans: Vec::new(),
+            occupied_cols: vec![Vec::new(); grid.rows()],
+            grid_cols: grid.cols(),
             model_head: vec![u32::MAX; cells],
             model_spans: Vec::new(),
             joinable_tops: BTreeMap::new(),
@@ -240,6 +253,35 @@ impl ColumnHistory {
             next,
             landable_end,
         });
+        if next == u32::MAX {
+            self.occupy_column(cell);
+        }
+    }
+
+    /// Add `cell`'s column to the occupied-column index, keeping its row's
+    /// list ascending. A column already listed is left alone.
+    fn occupy_column(&mut self, cell: usize) {
+        let (row, col) = (cell / self.grid_cols, cell % self.grid_cols);
+        let Some(cols) = self.occupied_cols.get_mut(row) else {
+            return;
+        };
+        let col = u32::try_from(col).unwrap_or(u32::MAX);
+        if let Err(at) = cols.binary_search(&col) {
+            cols.insert(at, col);
+        }
+    }
+
+    /// Take `cell`'s column out of the occupied-column index (its last span
+    /// was taken back).
+    fn vacate_column(&mut self, cell: usize) {
+        let (row, col) = (cell / self.grid_cols, cell % self.grid_cols);
+        let Some(cols) = self.occupied_cols.get_mut(row) else {
+            return;
+        };
+        let col = u32::try_from(col).unwrap_or(u32::MAX);
+        if let Ok(at) = cols.binary_search(&col) {
+            cols.remove(at);
+        }
     }
 
     /// Raise the top of arm `id`'s span in `cell` from `from_k_top` to
@@ -285,6 +327,9 @@ impl ColumnHistory {
             );
             if let Some(head) = self.shaft_head.get_mut(cell) {
                 *head = span.next;
+            }
+            if span.next == u32::MAX {
+                self.vacate_column(cell);
             }
         }
     }
@@ -3833,8 +3878,123 @@ fn lean_path_from(
 }
 
 /// The ids of the arms whose axis stands within `reach_mm` of `cell`'s centre at
-/// `layer`, other than `except`, appended to `out` (sorted, once each).
+/// `layer`, other than `except`, in the order the radius square's row-major
+/// visitation first meets them (once each); `out` is cleared first.
+///
+/// Only the columns an arm crosses are visited, through
+/// [`ColumnHistory::occupied_cols`] in the same row-then-column order the full
+/// square walk ([`shafts_within_square`]) uses, with the same distance test and
+/// span rules, so the answer and its order are the square walk's.
+/// `PLINTH_SWEEP_VERIFY_NEIGHBOURS=1` runs the square walk beside it and
+/// panics on any difference (for gate runs, not for production).
 fn shafts_within(
+    grid: &Grid,
+    history: &ColumnHistory,
+    cell: usize,
+    layer: usize,
+    reach_mm: f64,
+    except: Option<u32>,
+    out: &mut Vec<u32>,
+) {
+    shafts_within_indexed(grid, history, cell, layer, reach_mm, except, out);
+    if verify_neighbours() {
+        let mut square = Vec::new();
+        shafts_within_square(grid, history, cell, layer, reach_mm, except, &mut square);
+        assert_eq!(
+            *out, square,
+            "indexed shaft-neighbour query differs from the square walk at cell {cell}, layer {layer}"
+        );
+    }
+}
+
+/// `PLINTH_SWEEP_VERIFY_NEIGHBOURS=1`: every [`shafts_within`] is also answered
+/// by the full square walk and compared (ids and order); any difference
+/// panics. Read once.
+fn verify_neighbours() -> bool {
+    static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *VERIFY.get_or_init(|| {
+        std::env::var_os("PLINTH_SWEEP_VERIFY_NEIGHBOURS").is_some_and(|value| value == "1")
+    })
+}
+
+/// The window [`shafts_within`] searches: the cell's row and column, the
+/// inclusive row and column bounds.
+fn neighbour_window(grid: &Grid, cell: usize, reach_mm: f64) -> (usize, usize, (usize, usize), (usize, usize)) {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a non-negative finite reach over the grid pitch, ceiled to a window half-width"
+    )]
+    let half = (reach_mm / grid.pitch_mm()).ceil().max(0.0) as usize;
+    let (row, col) = (grid.row_of(cell), grid.col_of(cell));
+    (
+        row,
+        col,
+        (row.saturating_sub(half), (row + half).min(grid.rows() - 1)),
+        (col.saturating_sub(half), (col + half).min(grid.cols() - 1)),
+    )
+}
+
+/// Append to `out` the ids of the spans of column `near` that hold `layer`,
+/// except `except`'s, that `out` does not already hold.
+fn push_shafts_at(
+    history: &ColumnHistory,
+    near: usize,
+    layer: usize,
+    except: Option<u32>,
+    out: &mut Vec<u32>,
+) {
+    let mut slot = history.shaft_head.get(near).copied().unwrap_or(u32::MAX);
+    while slot != u32::MAX {
+        let span = history.shaft_spans[slot as usize];
+        slot = span.next;
+        if Some(span.id) != except
+            && (span.k_bottom as usize) <= layer
+            && layer <= span.k_top as usize
+            && !out.contains(&span.id)
+        {
+            out.push(span.id);
+        }
+    }
+}
+
+fn shafts_within_indexed(
+    grid: &Grid,
+    history: &ColumnHistory,
+    cell: usize,
+    layer: usize,
+    reach_mm: f64,
+    except: Option<u32>,
+    out: &mut Vec<u32>,
+) {
+    out.clear();
+    let pitch = grid.pitch_mm();
+    let (row, col, (row_lo, row_hi), (col_lo, col_hi)) = neighbour_window(grid, cell, reach_mm);
+    for near_row in row_lo..=row_hi {
+        let Some(columns) = history.occupied_cols.get(near_row) else {
+            continue;
+        };
+        let first = columns.partition_point(|&occupied| (occupied as usize) < col_lo);
+        for &occupied in &columns[first..] {
+            let near_col = occupied as usize;
+            if near_col > col_hi {
+                break;
+            }
+            #[expect(clippy::cast_precision_loss, reason = "a window offset bounded by the grid is exact in f64")]
+            let distance = pitch
+                * (row.abs_diff(near_row) as f64).hypot(col.abs_diff(near_col) as f64);
+            if distance > reach_mm {
+                continue;
+            }
+            push_shafts_at(history, grid.index(near_row, near_col), layer, except, out);
+        }
+    }
+}
+
+/// The full radius-square walk: every cell, empty columns included. The
+/// reference [`shafts_within_indexed`] must equal; kept for the
+/// `PLINTH_SWEEP_VERIFY_NEIGHBOURS` shadow and the oracle tests.
+fn shafts_within_square(
     grid: &Grid,
     history: &ColumnHistory,
     cell: usize,
@@ -5527,6 +5687,167 @@ mod head_first_tests {
         assert!(one > 0.0 && two > one);
         let r = crate::heads::section_radius_mm(0.1, 0.1, 1.0);
         assert!((one - 4.0 * (r * r - 0.01) / 0.01).abs() < 1e-9);
+    }
+}
+
+/// The occupied-column index must answer [`shafts_within`] exactly as the full
+/// square walk does: same ids, same order.
+#[cfg(test)]
+mod neighbour_index_tests {
+    use super::{shafts_within_indexed, shafts_within_square, ColumnHistory};
+    use crate::grid::{plan_grid, Grid};
+
+    /// A deterministic xorshift stream, so a failure replays.
+    struct Stream(u64);
+
+    impl Stream {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        /// A value in `0..n`.
+        fn below(&mut self, n: usize) -> usize {
+            usize::try_from(self.next() % (n as u64)).expect("a value below a usize bound")
+        }
+    }
+
+    /// A non-square grid (more columns than rows) at the corpus pitch.
+    fn grid() -> Grid {
+        plan_grid(0.0, 0.0, 2.4, 1.6, 100, 0.05, 0.0, 1_000_000_000).0
+    }
+
+    /// The occupied-column index lists exactly the columns whose head is set,
+    /// ascending, once each.
+    fn assert_index_matches_heads(history: &ColumnHistory, grid: &Grid) {
+        for row in 0..grid.rows() {
+            let expected: Vec<u32> = (0..grid.cols())
+                .filter(|&col| history.shaft_head[grid.index(row, col)] != u32::MAX)
+                .map(|col| u32::try_from(col).expect("a small column"))
+                .collect();
+            assert_eq!(history.occupied_cols[row], expected, "row {row}");
+        }
+    }
+
+    /// One random arm: straight, or leaned along a random walk of cells (so it
+    /// crosses several columns), headed (a landable end) or not.
+    fn stamp_random_arm(history: &mut ColumnHistory, grid: &Grid, rng: &mut Stream, id: u32) -> (usize, usize) {
+        let k_bottom = rng.below(40);
+        let k_top = k_bottom + rng.below(30);
+        let (mut row, mut col) = (rng.below(grid.rows()), rng.below(grid.cols()));
+        let leaned = rng.below(3) != 0;
+        let mut path = Vec::new();
+        if leaned {
+            for _ in k_bottom..k_top {
+                path.push(u32::try_from(grid.index(row, col)).expect("a small cell"));
+                // Step 0 or 1 cell in each axis, at most one column change per
+                // layer pair, so runs of equal cells and column crossings mix.
+                if rng.below(3) == 0 {
+                    row = (row + rng.below(3) + grid.rows() - 1) % grid.rows();
+                    col = (col + rng.below(3) + grid.cols() - 1) % grid.cols();
+                }
+            }
+        }
+        let seat = grid.index(row, col);
+        let landable_end = if rng.below(4) == 0 {
+            u32::try_from(k_bottom + rng.below(k_top - k_bottom + 1)).expect("a small layer")
+        } else {
+            u32::MAX
+        };
+        history.stamp_runs(id, k_bottom, k_top, seat, &path, landable_end);
+        (k_bottom, k_top)
+    }
+
+    /// 200 random histories' worth of queries: leaned multi-column shafts,
+    /// several spans and repeated ids in one column, every layer including each
+    /// span's inclusive ends, every `except`, a reach from zero to several
+    /// columns, and host-seat raises between rounds.
+    #[test]
+    fn indexed_query_equals_the_square_walk_on_random_histories() {
+        let grid = grid();
+        let reaches = [0.0, 0.04, 0.05, 0.0707, 0.12, 0.3, 0.7, 1.3];
+        let mut rng = Stream(0x9E37_79B9_7F4A_7C15);
+        let mut compared = 0_usize;
+        let mut nonempty = 0_usize;
+        for round in 0..200_u32 {
+            let mut history = ColumnHistory::new(&grid);
+            let arms = 1 + rng.below(40);
+            let mut ends = Vec::new();
+            for arm in 0..arms {
+                // Repeat ids now and then: one id may own several spans.
+                let id = if rng.below(5) == 0 { u32::try_from(arm / 2).expect("a small id") } else { u32::try_from(arm).expect("a small id") };
+                ends.push((id, stamp_random_arm(&mut history, &grid, &mut rng, id)));
+            }
+            // A host-seat raise moves a span's top without changing occupancy.
+            for &(id, (_, k_top)) in ends.iter().take(5) {
+                let cell = rng.below(grid.cells());
+                history.raise_shaft_top(id, cell, k_top, k_top + 2);
+            }
+            assert_index_matches_heads(&history, &grid);
+            for _ in 0..60 {
+                let cell = rng.below(grid.cells());
+                let reach = reaches[rng.below(reaches.len())];
+                let except = match rng.below(3) {
+                    0 => None,
+                    _ => Some(u32::try_from(rng.below(arms)).expect("a small id")),
+                };
+                for layer in 0..75 {
+                    let (mut square, mut indexed) = (Vec::new(), Vec::new());
+                    shafts_within_square(&grid, &history, cell, layer, reach, except, &mut square);
+                    shafts_within_indexed(&grid, &history, cell, layer, reach, except, &mut indexed);
+                    assert_eq!(indexed, square, "round {round}, cell {cell}, layer {layer}, reach {reach}");
+                    compared += 1;
+                    nonempty += usize::from(!square.is_empty());
+                }
+            }
+        }
+        assert!(compared > 100_000);
+        assert!(nonempty > 5_000, "the random histories must actually produce neighbours ({nonempty})");
+    }
+
+    /// Straight stamps taken back leave the index as it was, and a column that
+    /// is emptied leaves the index while one that still holds a span stays.
+    #[test]
+    fn unstamping_vacates_a_column_only_when_its_last_span_goes() {
+        let grid = grid();
+        let mut history = ColumnHistory::new(&grid);
+        let cell = grid.index(5, 7);
+        history.stamp_shaft(1, 0, 10, cell, &[]);
+        assert_index_matches_heads(&history, &grid);
+        let before = history.shaft_spans.len();
+        history.stamp_shaft(2, 3, 8, cell, &[]);
+        assert_index_matches_heads(&history, &grid);
+        history.unstamp_straight_shaft(cell, before);
+        assert_eq!(history.occupied_cols[5], vec![7]);
+        history.unstamp_straight_shaft(cell, 0);
+        assert!(history.occupied_cols[5].is_empty());
+        assert_index_matches_heads(&history, &grid);
+        let mut out = Vec::new();
+        shafts_within_indexed(&grid, &history, cell, 5, 1.0, None, &mut out);
+        assert!(out.is_empty());
+        // A fresh stamp after the vacate is found again.
+        history.stamp_shaft(3, 0, 10, cell, &[]);
+        shafts_within_indexed(&grid, &history, cell, 5, 1.0, None, &mut out);
+        assert_eq!(out, vec![3]);
+    }
+
+    /// Sabotage: a stale index (one occupied column forgotten) must be caught by
+    /// the comparison, so the oracle above is not vacuous.
+    #[test]
+    fn a_stale_index_is_caught_by_the_comparison() {
+        let grid = grid();
+        let mut history = ColumnHistory::new(&grid);
+        let cell = grid.index(6, 9);
+        history.stamp_shaft(1, 0, 10, cell, &[]);
+        history.stamp_shaft(2, 0, 10, grid.index(6, 10), &[]);
+        history.occupied_cols[6].retain(|&col| col != 10);
+        let (mut square, mut indexed) = (Vec::new(), Vec::new());
+        shafts_within_square(&grid, &history, cell, 4, 0.3, None, &mut square);
+        shafts_within_indexed(&grid, &history, cell, 4, 0.3, None, &mut indexed);
+        assert_eq!(square, vec![1, 2]);
+        assert_ne!(indexed, square);
     }
 }
 
