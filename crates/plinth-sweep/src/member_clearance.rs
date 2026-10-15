@@ -437,6 +437,7 @@ impl ShaftRead<'_> {
             (radius, radius),
             gap,
         )?;
+        let _site = crate::perf::clear_site(crate::perf::ClearSite::Descent);
         let verdict = surface
             .segment_clearance_classified(
                 &[self.kernel_point(top)],

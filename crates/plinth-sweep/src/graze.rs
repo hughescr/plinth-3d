@@ -542,6 +542,7 @@ fn choose_post(
             .collect();
         let radii = vec![head.joint_radius_mm; batch.len()];
         let zero = vec![0.0; batch.len()];
+        let _site = crate::perf::clear_site(crate::perf::ClearSite::Graze);
         let found = field
             .surface
             .segment_clearance_classified(&starts, &ends, &radii, &radii, 0.0, &zero, &zero)

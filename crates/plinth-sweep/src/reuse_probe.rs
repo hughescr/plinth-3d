@@ -70,6 +70,73 @@ pub(crate) struct Probe {
     cur_bands: Vec<u64>,
     bands: usize,
     pending: Option<Pending>,
+    /// M0 (2026-10-14): pass- and run-level state, kept across the runs of
+    /// the pose frame.
+    trace: TraceState,
+}
+
+/// What the pass trace remembers between passes and runs of one pose frame.
+#[derive(Default)]
+struct TraceState {
+    run_seq: u64,
+    pass_seq: u64,
+    pass_in_run: u64,
+    run_started: Option<std::time::Instant>,
+    run_layers: u64,
+    run_site: u64,
+    /// Per-layer fingerprints of the last pass that ended: the base the next
+    /// pass compares with (this run's previous pass, or the previous run's
+    /// last).
+    last_pass_fp: Vec<u64>,
+    /// Per-member ledger fingerprints after the last per-event step.
+    prev_ledger: Vec<u64>,
+    /// The pass row, waiting for the member comparison that follows the pass.
+    pending_pass: Option<PassRow>,
+    /// Member geometry prints of the previous run, and of this run.
+    geom_prev: Option<Vec<u64>>,
+    geom_now: Vec<u64>,
+    /// Route-log hash of the previous run's last pass.
+    route_prev: Option<u64>,
+}
+
+/// One pass's row, minus the member comparison.
+struct PassRow {
+    site: u64,
+    run: u64,
+    pass_in_run: u64,
+    pass_id: u64,
+    layers: u64,
+    cells: u64,
+    wall_ns: u64,
+    cmp: u64,
+    dirty: u64,
+    hi_inserted: u64,
+    inserted: u64,
+    skip_ns: u64,
+}
+
+impl PassRow {
+    fn emit(&self, members_changed: u64, members_total: u64) {
+        perf::row(
+            perf::Rows::DownPass,
+            &[
+                self.site,
+                self.run,
+                self.pass_in_run,
+                self.pass_id,
+                self.layers,
+                self.cells,
+                self.wall_ns,
+                self.cmp,
+                self.dirty,
+                self.hi_inserted,
+                self.inserted,
+                self.skip_ns,
+                members_changed,
+                members_total,
+            ],
+        );
+    }
 }
 
 /// What `begin` worked out, until pass 1 ends and the row can be written.
@@ -105,6 +172,33 @@ fn member_print(strut: &SweepStrut) -> u64 {
     }
     for radius in &strut.thickened_mm {
         h = mix(h, radius.to_bits());
+    }
+    h
+}
+
+/// A member's GEOMETRY print: what routing reads (kind, position, extent,
+/// landing, path, insertion flag), without the sizing inputs
+/// (`min_radius_mm`, `thickened_mm`). Two runs whose members have equal
+/// geometry prints can differ only in sizing.
+fn geom_print(strut: &SweepStrut) -> u64 {
+    let mut h = mix(0x6e0_6e0, strut.kind as u64);
+    for value in [
+        strut.cell as u64,
+        strut.k_top as u64,
+        strut.k_bottom as u64,
+        u64::from(strut.seat_on_strut.unwrap_or(u32::MAX)),
+        u64::from(strut.inserted_by_load),
+        strut.joint_hold_layer().map_or(u64::MAX, |layer| layer as u64),
+    ] {
+        h = mix(h, value);
+    }
+    h = match strut.landing {
+        crate::Landing::Plate => mix(h, 1),
+        crate::Landing::Model { layer } => mix(mix(h, 2), layer as u64),
+        crate::Landing::Strut { id, layer } => mix(mix(mix(h, 3), u64::from(id)), layer as u64),
+    };
+    for cell in &strut.path {
+        h = mix(h, u64::from(*cell));
     }
     h
 }
@@ -148,7 +242,15 @@ pub(crate) fn begin(cells: usize, layers: usize, struts: &[SweepStrut], site: u6
             now.layer[layer] = now.layer[layer].wrapping_add(h);
         }
     }
+    let geoms: Vec<u64> = struts.iter().map(geom_print).collect();
     perf::with_pose_slot(|probe: &mut Probe| {
+        let trace = &mut probe.trace;
+        trace.run_seq += 1;
+        trace.pass_in_run = 0;
+        trace.run_started = Some(std::time::Instant::now());
+        trace.run_layers = layers as u64;
+        trace.run_site = site;
+        trace.geom_now = geoms;
         probe.bands_on.get_or_insert_with(|| {
             std::env::var_os("PLINTH_PERF_BANDS").is_some_and(|value| value == "1")
         });
@@ -309,9 +411,261 @@ pub(crate) fn end_first_pass() {
     });
 }
 
+// ------------------------------------------------------------ pass trace
+//
+// M0 (2026-10-14): per pass and per layer, what a resumed or windowed
+// down-sweep could skip. Write-only like the rest of this file: nothing here
+// changes a member, a field or a decision, every entry point returns at once
+// when `perf` counting is off, and the product never reads what it stores.
+
+fn ns_since(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// One layer of one pass: time and the per-loop eligible and written cells
+/// (see the `down.layer` column notes in `geom_kernel::perf`).
+#[derive(Clone, Copy, Default)]
+pub(crate) struct LayerRec {
+    pub(crate) ns: u64,
+    pub(crate) route_ns: u64,
+    pub(crate) loop_ns: u64,
+    pub(crate) tail_ns: u64,
+    pub(crate) route_elig: u64,
+    pub(crate) route_written: u64,
+    pub(crate) spread_elig: u64,
+    pub(crate) max_elig: u64,
+    pub(crate) max_written: u64,
+    pub(crate) fill_elig: u64,
+    pub(crate) copy_elig: u64,
+    pub(crate) copy_written: u64,
+    /// Carriers this layer inserted, the trigger hosts that asked, and the
+    /// insertion round (0-based) of the last insertion.
+    pub(crate) inserted: u64,
+    pub(crate) hosts: u64,
+    pub(crate) round: u64,
+    /// Fingerprint of what the layer hands down (load and carriers).
+    pub(crate) fp: u64,
+}
+
+/// A pass's trace, built by `sweep_pass` only while counting is on.
+pub(crate) struct PassTrace {
+    /// The layer being walked.
+    pub(crate) cur: LayerRec,
+    recs: Vec<LayerRec>,
+    cells: usize,
+    started: std::time::Instant,
+    layer_started: std::time::Instant,
+}
+
+impl PassTrace {
+    /// `None` when counting is off.
+    pub(crate) fn begin(layers: usize, cells: usize) -> Option<Self> {
+        if !perf::enabled() {
+            return None;
+        }
+        let now = std::time::Instant::now();
+        Some(Self {
+            cur: LayerRec::default(),
+            recs: vec![LayerRec::default(); layers],
+            cells,
+            started: now,
+            layer_started: now,
+        })
+    }
+
+    pub(crate) fn layer_begin(&mut self) {
+        self.cur = LayerRec::default();
+        self.layer_started = std::time::Instant::now();
+    }
+
+    pub(crate) fn layer_end(&mut self, layer: usize) {
+        self.cur.ns = ns_since(self.layer_started);
+        if let Some(slot) = self.recs.get_mut(layer) {
+            *slot = self.cur;
+        }
+    }
+
+    /// The pass is over: write the layer rows, compare with the base pass,
+    /// and park the pass row until the member comparison
+    /// ([`pass_done`]) completes it.
+    pub(crate) fn finish(self) {
+        let layers = self.recs.len();
+        let wall_ns = ns_since(self.started);
+        let cells = self.cells as u64;
+        let recs = self.recs;
+        perf::with_pose_slot(|probe: &mut Probe| {
+            let trace = &mut probe.trace;
+            if let Some(stale) = trace.pending_pass.take() {
+                stale.emit(0, 0);
+            }
+            trace.pass_seq += 1;
+            trace.pass_in_run += 1;
+            let pass_id = trace.pass_seq;
+            let fps: Vec<u64> = recs.iter().map(|rec| rec.fp).collect();
+            let (cmp, dirty) = if trace.last_pass_fp.len() == layers && layers > 0 {
+                let dirty = (0..layers)
+                    .rev()
+                    .find(|&layer| trace.last_pass_fp[layer] != fps[layer])
+                    .map_or(0, |layer| layer + 1);
+                (if trace.pass_in_run > 1 { 1 } else { 2 }, dirty)
+            } else {
+                (0, layers)
+            };
+            // The prefix above the highest differing layer, in measured time.
+            let skip_ns: u64 = recs.iter().skip(dirty).map(|rec| rec.ns).sum();
+            let mut hi_inserted = 0_u64;
+            let mut inserted = 0_u64;
+            for (layer, rec) in recs.iter().enumerate() {
+                perf::row(
+                    perf::Rows::DownLayer,
+                    &[
+                        pass_id,
+                        layer as u64,
+                        rec.ns,
+                        rec.route_ns,
+                        rec.loop_ns,
+                        rec.tail_ns,
+                        rec.route_elig,
+                        rec.route_written,
+                        rec.spread_elig,
+                        rec.max_elig,
+                        rec.max_written,
+                        rec.fill_elig,
+                        rec.copy_elig,
+                        rec.copy_written,
+                    ],
+                );
+                if rec.inserted > 0 {
+                    hi_inserted = hi_inserted.max(layer as u64 + 1);
+                    inserted += rec.inserted;
+                    perf::row(
+                        perf::Rows::DownInsert,
+                        &[pass_id, layer as u64, rec.inserted, rec.hosts, rec.round],
+                    );
+                }
+            }
+            perf::add(perf::Work::PassLayers, layers as u64);
+            if cmp > 0 {
+                perf::add(perf::Work::PassLayersReusable, (layers - dirty) as u64);
+            }
+            trace.last_pass_fp = fps;
+            trace.pending_pass = Some(PassRow {
+                site: trace.run_site,
+                run: trace.run_seq,
+                pass_in_run: trace.pass_in_run,
+                pass_id,
+                layers: layers as u64,
+                cells,
+                wall_ns,
+                cmp,
+                dirty: dirty as u64,
+                hi_inserted,
+                inserted,
+                skip_ns,
+            });
+        });
+    }
+}
+
+/// Fingerprint of what a layer hands to the one below it: the cells that
+/// carry load (with the load's bits) and the carrier cells.
+pub(crate) fn layer_fingerprint(load_out: &[f64], carriers: &[bool]) -> u64 {
+    let mut h = 0x1a7e_4f1d_u64;
+    for (cell, (&load, &carrier)) in load_out.iter().zip(carriers).enumerate() {
+        if load != 0.0 {
+            h = mix(mix(h, cell as u64), load.to_bits());
+        }
+        if carrier {
+            h = mix(h, cell as u64 ^ 0xC0DE);
+        }
+    }
+    h
+}
+
+/// The per-event step has rewritten the members' ledgers: count the members
+/// whose ledger differs from the previous pass's (or the previous run's last
+/// pass, for pass 1) and write the pass row.
+pub(crate) fn pass_done(struts: &[SweepStrut]) {
+    perf::with_pose_slot(|probe: &mut Probe| {
+        let trace = &mut probe.trace;
+        let Some(row) = trace.pending_pass.take() else {
+            return;
+        };
+        let now: Vec<u64> = struts
+            .iter()
+            .map(|strut| {
+                let mut h = mix(0x1ed6e4, strut.radius_mm.len() as u64);
+                for value in strut.radius_mm.iter().chain(&strut.carried_mm2) {
+                    h = mix(h, value.to_bits());
+                }
+                h
+            })
+            .collect();
+        let changed = now
+            .iter()
+            .enumerate()
+            .filter(|(index, print)| trace.prev_ledger.get(*index) != Some(*print))
+            .count() as u64;
+        let total = now.len() as u64;
+        trace.prev_ledger = now;
+        row.emit(changed, total);
+    });
+}
+
+/// A hash of a run's final routing record, for the route-equality figure.
+pub(crate) fn route_hash(log: &crate::per_event::RouteLog) -> u64 {
+    let mut h = 0x20e7_0001_u64;
+    for (layer, (hops, reads)) in log.hops.iter().zip(&log.reads).enumerate() {
+        h = mix(h, layer as u64);
+        for &(a, b) in hops {
+            h = mix(mix(h, u64::from(a)), u64::from(b));
+        }
+        h = mix(h, 0xBEEF);
+        for &(a, b) in reads {
+            h = mix(mix(h, u64::from(a)), u64::from(b));
+        }
+    }
+    h
+}
+
+/// The run is over: write its row (passes, wall time, whether its routing
+/// and its member geometry equal the previous run's in this pose).
+pub(crate) fn run_end(passes: usize, inserted: u64, route: u64) {
+    perf::with_pose_slot(|probe: &mut Probe| {
+        let trace = &mut probe.trace;
+        if let Some(stale) = trace.pending_pass.take() {
+            stale.emit(0, 0);
+        }
+        let verdict = |same: Option<bool>| same.map_or(2, u64::from);
+        let route_same = verdict(trace.route_prev.map(|before| before == route));
+        let geom_same = verdict(
+            trace
+                .geom_prev
+                .as_ref()
+                .map(|before| *before == trace.geom_now),
+        );
+        trace.route_prev = Some(route);
+        trace.geom_prev = Some(std::mem::take(&mut trace.geom_now));
+        let wall = trace.run_started.take().map_or(0, ns_since);
+        perf::row(
+            perf::Rows::DownRun,
+            &[
+                trace.run_site,
+                trace.run_seq,
+                passes as u64,
+                wall,
+                route_same,
+                geom_same,
+                inserted,
+                trace.run_layers,
+            ],
+        );
+    });
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{member_print, mix};
+    use super::{layer_fingerprint, member_print, mix};
     use crate::{Landing, SeatFace, StrutKind, SweepStrut};
 
     fn strut(id: u32, k_top: usize) -> SweepStrut {
@@ -359,5 +713,22 @@ mod tests {
         thick.thickened_mm = vec![0.2; 4];
         assert_ne!(member_print(&base), member_print(&thick));
         assert_ne!(mix(1, 2), mix(2, 1));
+    }
+
+    /// The layer fingerprint sees a load moved one cell, a load changed by
+    /// one bit and a carrier added, and nothing else.
+    #[test]
+    fn a_layer_fingerprint_moves_with_load_and_carriers() {
+        let load = [0.0, 1.5, 0.0, 2.0];
+        let carriers = [false, true, false, false];
+        let base = layer_fingerprint(&load, &carriers);
+        assert_eq!(base, layer_fingerprint(&load, &carriers));
+        assert_ne!(base, layer_fingerprint(&[0.0, 0.0, 1.5, 2.0], &carriers));
+        assert_ne!(base, layer_fingerprint(&[0.0, 1.5 + f64::EPSILON, 0.0, 2.0], &carriers));
+        assert_ne!(base, layer_fingerprint(&load, &[false, true, true, false]));
+        assert_ne!(
+            layer_fingerprint(&[0.0; 4], &[false; 4]),
+            layer_fingerprint(&[0.0; 4], &[true, false, false, false])
+        );
     }
 }
