@@ -700,9 +700,13 @@ and give the same bits at every thread count.
   fewer than `PROXY_MIN_CURVED_VERTICES` (20 000) curved welded vertices is walked exactly. On a larger
   mesh `protected_proxy` keeps every vertex whose normalized angle defect is at least 0.1 as its own walk,
   and merges the rest per cell of `radius / 4` (0.375 mm) AND per facing (one of six axis classes of the
-  area-weighted vertex normal, so the two sides of a thin sheet never merge). A cluster is spread once,
-  from the member nearest its value-weighted centre, with the SUM of its members' values, so curvature
-  mass is conserved. The walk and the replay are the exact path's, over fewer items, so the field is
+  area-weighted vertex normal, so the two sides of a thin sheet never merge) AND per locally connected
+  piece (union-find over the mesh edges whose both endpoints are members of the same cell-and-facing
+  group, so two nearby fins that are not edge-connected inside the cell keep one walk each; a global
+  component label would not do, since two members of one component can be linked only by a remote
+  path). A piece is spread once, from the member nearest its value-weighted centre, with the SUM of its
+  members' values, so curvature mass is conserved. `SweepRequest::registered()` defaults to the proxy;
+  a diagnostic that compares against the exact field sets `request.delicacy = DelicacyEvaluation::Exact`. The walk and the replay are the exact path's, over fewer items, so the field is
   still bit-identical at every thread count; it is not equal to the exact field, so the chosen pose can
   differ on a dense model. The thinness proxy and the display field are untouched (the display pass is a
   per-face gather, not a vertex scatter, so the merge does not apply to it).

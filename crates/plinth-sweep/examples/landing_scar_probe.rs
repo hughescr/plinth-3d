@@ -102,7 +102,9 @@ fn main() {
         println!("  blade faces (12..24) fragility {}", blade_fragility.join(" "));
     }
 
-    let request = SweepRequest::registered().expect("registered");
+    let mut request = SweepRequest::registered().expect("registered");
+    // A reference probe: the exact field (the registered request defaults to the proxy).
+    request.delicacy = plinth_orient::DelicacyEvaluation::Exact;
     for (label, demand) in [
         ("landing scar ON ", SweepDemand::production()),
         ("landing scar OFF", SweepDemand::without_model_landing_scar()),
