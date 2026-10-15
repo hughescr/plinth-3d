@@ -384,7 +384,8 @@ pub struct RetainedPlan {
     /// The plan, its shake check still deferred.
     pub plan: SweepPlan,
     /// The sweep's state at checkpoint C, kept so the finished plan can be
-    /// edited without planning it again (SC-1; nothing reads it yet). Its
+    /// edited, or re-planned with contact caps from its cap-independent prefix
+    /// (SC-1, PX), without planning it again. Its
     /// identity key is normalized with [`production_measurement_policy`] on both
     /// sides, so a seed made here is valid for the emission policy the reuse
     /// key accepts. A pose that loses the race drops its seed with its plan.

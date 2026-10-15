@@ -436,6 +436,14 @@ works! {
     /// Seeds offered for an edit and refused by their identity key (mesh,
     /// layers, policy, holes, first plan); the fast set asserts zero.
     SeedMismatch, "seed.mismatch", Work;
+    /// Capped re-plans that started from a seed's cap-independent prefix
+    /// instead of setup and the up-sweep.
+    PrefixReused, "prefix.reused", Work;
+    /// Seeds offered for a prefix start and refused by their identity key.
+    PrefixMiss, "prefix.miss", Work;
+    /// Bytes (a lower-bound estimate) of the cap-independent prefixes kept
+    /// beside the edit seeds, beyond the state they share with the seed's env.
+    PrefixBytes, "prefix.bytes", Work;
     /// Perf lane RP: layers on which a replay computed the BASELINE (current
     /// arm set) potential, summed over every replay.
     ReplayBaselineLayers, "replay.baseline_layers", Work;

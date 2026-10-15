@@ -23,14 +23,20 @@
 //!   heads' outcome); the scratch buffers themselves are lane-internal and die
 //!   at C.
 //!
-//! Not carried, on purpose: the layer cache (it borrows its grid and slices, so
-//! it cannot live beside them; `finish` never reads it, and the edit rebuilds it
-//! from the env), `GreedyScratch` buffers, `replay_context`, the births, the
-//! lip-seat refusals and the lip and tie locks.
+//! Not carried at C, on purpose: the layer cache (it borrows its grid and
+//! slices, so it cannot live beside them; `finish` never reads it, and the edit
+//! rebuilds it from the env), `GreedyScratch` buffers, `replay_context`, the
+//! births, the lip-seat refusals and the lip and tie locks.
 //!
-//! An [`EditSeed`] is an env, the lane state AT C, an identity key and the
-//! digest of the plan the seed finished into. Nothing consumes it yet; the edit
-//! transaction (SC-3) will, and refuses it on any key mismatch ([`SeedMiss`]).
+//! A second, earlier snapshot is kept beside C (PX): the [`Prefix`], the state
+//! after setup and the up-sweep and before the down-sweep's first pass, which is
+//! the first reader of the second contact's caps. The capped re-plan starts from
+//! a clone of it and so skips setup and the up-sweep.
+//!
+//! An [`EditSeed`] is an env, the lane state AT C, the prefix, an identity key
+//! and the digest of the plan the seed finished into. The edit transaction
+//! (SC-3) and the capped re-plan consume it, and both refuse it on any key
+//! mismatch ([`SeedMiss`]).
 
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;
@@ -102,9 +108,11 @@ pub struct SweepEnv {
     pub(crate) height: f64,
     pub(crate) plate_z: f64,
     pub(crate) planes: Vec<f64>,
-    pub(crate) slices: Vec<Vec<SliceSolid>>,
+    /// Shared with the [`Prefix`] this env's sweep started from (or kept): the
+    /// slices and the column history are written by nothing after the up-sweep.
+    pub(crate) slices: Arc<Vec<Vec<SliceSolid>>>,
     pub(crate) keep_out: DrainKeepOut,
-    pub(crate) history: ColumnHistory,
+    pub(crate) history: Arc<ColumnHistory>,
     /// The raw drain and vent specs the sweep ran with: the escape check reads
     /// the drains at the end, and the identity key compares both.
     pub(crate) drains: Vec<DrainSpec>,
@@ -124,7 +132,153 @@ pub struct SweepEnv {
     pub(crate) surface_in_slenderness_context: bool,
     /// The model's surface index, built on first need by whoever reads it
     /// first (`None` inside when it could not be built).
-    pub(crate) model_surface: OnceLock<Option<NativeSurface>>,
+    ///
+    /// Shared with the [`Prefix`] only where the prefix built it (see
+    /// [`Prefix::surface_early`]); otherwise this env's own, so a cell a later
+    /// stage filled is never seen by a sibling run that must start empty.
+    pub(crate) model_surface: Arc<OnceLock<Option<NativeSurface>>>,
+}
+
+/// **The cap-independent prefix of a sweep** (PX): the state after setup and
+/// the whole up-sweep, which is everything the contact caps do not touch. The
+/// capped remainder ([`crate::plan_after_prefix`]) starts from a clone.
+///
+/// What is here is what the remainder reads of the prefix, by compile-checked
+/// destructuring in `plan_after_prefix`:
+///
+/// * shared by `Arc`, because the remainder never writes it: the slices, the
+///   column history (with its hidden cavities), the births, the model surface
+///   cell (only when `surface_early`);
+/// * copied on clone, because the remainder writes it or counts into it: the
+///   members, the drain keep-out (its refusal counter is read at C), the
+///   unrooted columns, and the scalars and tallies;
+/// * the greedy scratch is not here: the remainder reads its separation, the
+///   stranded seat cells and the final tallies ([`GreedyFinal`]) and nothing
+///   else, and the scratch buffers die with the up-sweep;
+/// * the reach state's per-cell arrays are not here: the remainder reads only
+///   the scalars in [`ReachSummary`] (the replay builds its own field);
+/// * the layer cache is not here (it borrows the grid and slices): it is
+///   rebuilt, a function of those two alone.
+#[derive(Clone)]
+pub(crate) struct Prefix {
+    pub(crate) grid: Grid,
+    pub(crate) coarsening_steps: u32,
+    pub(crate) layers: usize,
+    pub(crate) height: f64,
+    pub(crate) plate_z: f64,
+    pub(crate) planes: Vec<f64>,
+    pub(crate) slices: Arc<Vec<Vec<SliceSolid>>>,
+    pub(crate) keep_out: DrainKeepOut,
+    pub(crate) history: Arc<ColumnHistory>,
+    pub(crate) reach: ReachSummary,
+    pub(crate) unrooted: UnrootedColumns,
+    pub(crate) law: LeanLaw,
+    /// Whether the model surface was built before the up-sweep (the descent
+    /// test or the thickening refusal asks for it): the early cell is shared,
+    /// a late cell is built by whoever needs it first, in its own run.
+    pub(crate) surface_early: bool,
+    pub(crate) model_surface: Arc<OnceLock<Option<NativeSurface>>>,
+    pub(crate) seat_face_rule: SeatFaceRule,
+    pub(crate) head_registry: Option<(&'static TipContactProfiles, HeadRule)>,
+    pub(crate) struts: Vec<SweepStrut>,
+    pub(crate) births: Arc<births::Births>,
+    pub(crate) greedy: GreedyFinal,
+    pub(crate) greedy_separation_mm: f64,
+    pub(crate) demand_cells_total: usize,
+    pub(crate) residual_demand_cells: usize,
+    pub(crate) unrooted_landings: usize,
+    pub(crate) keep_out_refusals: usize,
+    pub(crate) arms_leaned: usize,
+    pub(crate) arms_merged: usize,
+    pub(crate) lean_paths_blocked: usize,
+    pub(crate) junctions_mid_shaft_descent: usize,
+    pub(crate) lean_candidates_priced: u64,
+    pub(crate) rasteriser_entries: u64,
+    pub(crate) lift_assertions: u64,
+    pub(crate) descent_tally: DescentTally,
+    pub(crate) birth_tally: births::BirthTally,
+}
+
+impl Prefix {
+    /// A hash of the complete content (every member, tally, table and history
+    /// array) for tests that prove a re-plan left the kept prefix as it was.
+    pub(crate) fn fingerprint(&self) -> u64 {
+        let history = &*self.history;
+        let text = format!(
+            "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            self.struts,
+            self.keep_out,
+            self.unrooted,
+            self.greedy,
+            self.births,
+            self.reach,
+            self.descent_tally,
+            self.birth_tally,
+            self.planes,
+            history.top_model,
+            history.top_model_rooted,
+            history.top_strut,
+            history.top_strut_id,
+            history.column_max_model,
+            history.hidden,
+            history.model_head,
+            history.model_spans,
+            history.shaft_head,
+            history.shaft_spans,
+            history.joinable_tops,
+            (
+                self.grid,
+                self.coarsening_steps,
+                self.layers,
+                self.height.to_bits(),
+                self.plate_z.to_bits(),
+                self.greedy_separation_mm.to_bits(),
+                self.slices.len(),
+                self.surface_early,
+                self.model_surface.get().is_some(),
+                (
+                    self.demand_cells_total,
+                    self.residual_demand_cells,
+                    self.unrooted_landings,
+                    self.keep_out_refusals,
+                    self.arms_leaned,
+                    self.arms_merged,
+                    self.lean_paths_blocked,
+                    self.junctions_mid_shaft_descent,
+                    self.lean_candidates_priced,
+                    self.rasteriser_entries,
+                    self.lift_assertions,
+                ),
+            ),
+        );
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// A LOWER-BOUND estimate of the heap bytes this prefix holds BEYOND what it
+    /// shares with the env of the sweep that kept it (the slices, the history
+    /// and the surface are counted by [`SweepEnv::approx_bytes`] and the
+    /// seed's surface estimate): the members, the keep-out and unrooted tables,
+    /// the births and the greedy leftovers.
+    pub(crate) fn approx_bytes(&self) -> u64 {
+        let mut bytes = std::mem::size_of::<Self>() as u64;
+        for strut in &self.struts {
+            bytes += std::mem::size_of::<SweepStrut>() as u64
+                + 8 * (strut.path.len()
+                    + strut.radius_mm.len()
+                    + strut.carried_mm2.len()
+                    + strut.thickened_mm.len()) as u64;
+        }
+        if self.keep_out.blocked_cells() > 0 {
+            bytes += self.grid.cells() as u64 * 4;
+        }
+        bytes += (self.unrooted.total() * 4) as u64;
+        bytes += (self.births.count() * std::mem::size_of::<births::Birth>()) as u64;
+        bytes += 16 * self.greedy.stranded_seat_cells.len() as u64;
+        bytes += (self.planes.len() * 8) as u64;
+        bytes
+    }
 }
 
 impl SweepEnv {
@@ -148,7 +302,7 @@ impl SweepEnv {
     #[must_use]
     pub fn approx_bytes(&self) -> u64 {
         let mut bytes = std::mem::size_of::<Self>() as u64;
-        for layer in &self.slices {
+        for layer in self.slices.iter() {
             bytes += (layer.capacity() * std::mem::size_of::<SliceSolid>()) as u64;
             for solid in layer {
                 bytes += (solid.outer().points_xy_mm().len() * 16) as u64;
@@ -423,6 +577,8 @@ impl SeedKey {
 pub struct EditSeed {
     env: Arc<SweepEnv>,
     lane: LaneState,
+    /// The cap-independent prefix (PX), cloned for each capped re-plan.
+    prefix: Prefix,
     key: SeedKey,
     /// The `sweep_digest` of the plan this seed finished into.
     p1_digest: String,
@@ -446,14 +602,18 @@ impl EditSeed {
     pub(crate) fn new(
         env: Arc<SweepEnv>,
         lane: LaneState,
+        prefix: Prefix,
         key: SeedKey,
         p1_digest: String,
         surface_bytes: u64,
     ) -> Self {
-        let bytes = env.approx_bytes() + surface_bytes + lane.approx_bytes();
+        let bytes =
+            env.approx_bytes() + surface_bytes + lane.approx_bytes() + prefix.approx_bytes();
+        crate::perf::add(crate::PerfWork::PrefixBytes, prefix.approx_bytes());
         Self {
             env,
             lane,
+            prefix,
             key,
             p1_digest,
             bytes,
@@ -476,6 +636,28 @@ impl EditSeed {
     #[must_use]
     pub fn lane_clone(&self) -> LaneState {
         self.lane.clone()
+    }
+
+    /// A clone of the cap-independent prefix: the working state of a capped
+    /// re-plan. The seed's own prefix is never mutated.
+    #[must_use]
+    pub(crate) fn prefix_clone(&self) -> Prefix {
+        self.prefix.clone()
+    }
+
+    /// A hash of the kept prefix's complete content: equal before and after any
+    /// number of capped re-plans (they run on clones). For tests.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn prefix_fingerprint(&self) -> u64 {
+        self.prefix.fingerprint()
+    }
+
+    /// The heap bytes the kept prefix holds beyond what it shares with the
+    /// seed's env (a lower bound; included in [`Self::approx_bytes`]).
+    #[must_use]
+    pub fn prefix_bytes(&self) -> u64 {
+        self.prefix.approx_bytes()
     }
 
     /// The routing of the last pass before C, as the seed the next sizing of
