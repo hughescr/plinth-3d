@@ -112,7 +112,9 @@ fn the_morel_base_lands_textured_top_up_by_more_than_its_supports_can_move() {
         .expect("scale sanity must pass")
         .into_parts()
         .0;
-    let request = registered_sweep_request().expect("the registered sweep request");
+    let mut request = registered_sweep_request().expect("the registered sweep request");
+    // This test pins the pose of the exact field (the registered request defaults to the proxy).
+    request.delicacy = plinth_orient::DelicacyEvaluation::Exact;
     let demand = SweepDemand::production();
     let outcome = search(&decimated, &request, Some(&demand))
         .expect("the dense orientation search must not refuse");

@@ -187,6 +187,8 @@ counts and asserts the outputs are *identical*, not close.
 the process holds `k` workers plus the sleeping main thread. `k` is `PLINTH_THREADS` when set to
 a positive integer; otherwise it is detected, never hard-coded: on macOS the performance-core
 count (`sysctl hw.perflevel0.physicalcpu`), elsewhere or on failure `available_parallelism`.
-`RAYON_NUM_THREADS` is ignored by the binary. The run log ends with
+`RAYON_NUM_THREADS` is ignored by the binary. The run ends with a stderr line
 `[threads] budget k (source): inline N, cross C, cold D`; `cross` and `cold` count kernel
-batches that left the budget pool and read zero in a normal run.
+batches that left the budget pool and read zero in a normal run. `inline` counts kernel batch
+calls and varies between runs of one folder (racing searches cancel each other), so the line is
+stderr telemetry and is not part of the byte-identical stdout report.

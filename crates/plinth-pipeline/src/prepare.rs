@@ -901,6 +901,9 @@ pub struct StagePolicy {
     /// Whether the winning pose's production plan, measured by the orientation
     /// search, may be emitted instead of being planned again.
     pub winner_plan_reuse: WinnerPlanReuse,
+    /// `--exact-delicacy`: the orientation table's delicacy curvature is
+    /// evaluated on the full mesh rather than by the protected proxy.
+    pub exact_delicacy: bool,
 }
 
 /// Whether the plan the orientation search measured for the winning pose may be
@@ -958,6 +961,7 @@ impl StagePolicy {
             } else {
                 WinnerPlanReuse::Enabled
             },
+            exact_delicacy: request.exact_delicacy,
         })
     }
 }
@@ -1368,6 +1372,7 @@ fn prepare_one(
         policy.resources.orient(),
         policy.placement,
         policy.winner_plan_reuse,
+        policy.exact_delicacy,
     );
     // The orient timer covers orientation's own compute; the wait below is not
     // part of it (it is the diagnostics' tail, charged to their own stages).
@@ -1600,6 +1605,11 @@ fn failure(stop: &ChainStop) -> ModelPreparationOutcome {
 /// [`plinth_sweep::orient_demand::RetainingSweepDemand`] and the plan of the
 /// pose that won comes back with the model (`r1-winner-reuse`). `Err` says why
 /// there is none; the seal then plans the field as it always did.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is one field of the run's StagePolicy or one per-model fact, read \
+              once at the single call site; a bundling struct would only rename them"
+)]
 fn orient_model(
     model: &ModelId,
     decimated: DecimatedModel,
@@ -1608,6 +1618,7 @@ fn orient_model(
     limits: plinth_orient::OrientSearchLimits,
     placement: crate::Placement,
     reuse: WinnerPlanReuse,
+    exact_delicacy: bool,
 ) -> Result<(OrientedModel, RetainedWinner, PendingOutput), Box<OrientStop>> {
     // Why no plan comes back from the arms that retain nothing.
     let absent = if reuse == WinnerPlanReuse::Disabled {
@@ -1644,6 +1655,11 @@ fn orient_model(
             // The run's resource policy owns the work budget; the registry owns
             // every number that can change a score. Neither owns the other's.
             request.limits = limits;
+            // The orientation table's delicacy curvature: the protected proxy is
+            // the registered default; `--exact-delicacy` asks for the full mesh.
+            if exact_delicacy {
+                request.delicacy = plinth_orient::DelicacyEvaluation::Exact;
+            }
             // LANE 3 (docs/plans/slice-sweep-core-2026-09-02.md §12): the
             // orientation stage is shared by both `--placement` engines, so
             // wiring the real sweep-demand measurer here fixes the double-

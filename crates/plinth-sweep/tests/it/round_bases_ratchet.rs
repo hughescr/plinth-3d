@@ -458,7 +458,9 @@ fn orient_dense(mesh: &Mesh, name: &str) -> OrientedModel {
         .into_decimated_model()
         .unwrap_or_else(|scale| panic!("{name}: scale sanity must pass: {scale:?}"));
 
-    let request = registered_sweep_request().expect("the registered sweep request");
+    let mut request = registered_sweep_request().expect("the registered sweep request");
+    // The ratchet's recorded poses are those of the exact field (the registered request defaults to the proxy).
+    request.delicacy = plinth_orient::DelicacyEvaluation::Exact;
     let demand = SweepDemand::production();
     search_and_orient(decimated, &request, Some(&demand))
         .unwrap_or_else(|error| panic!("{name}: the dense orientation search must not refuse: {error}"))

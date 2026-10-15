@@ -118,6 +118,7 @@ impl Scratch {
                 .expect("registered wall"),
             support: registered_support_request(&printer).expect("registered lift"),
             no_cache: false,
+            exact_delicacy: false,
             stop_after: Some(StageStop::Orient),
         }
     }
