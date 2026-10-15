@@ -6,7 +6,8 @@
 //! estimates and that derived map: schema v4 identifies the four topology
 //! arrays plus the canonical mesh fingerprint, and nothing else.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::hash::{BuildHasherDefault, Hasher};
 
 use geom_kernel::vec3::{cross, dot, norm, sub};
 use sha2::{Digest, Sha256};
@@ -185,15 +186,20 @@ pub fn mesh_fingerprint(mesh: &Mesh) -> Result<String, TopologyError> {
         b"vertices",
         &(mesh.verts().len() as u64).to_le_bytes(),
     );
+    // The byte stream is the same as feeding the hasher one value at a time;
+    // it is staged in blocks only because a `Sha256::update` call per eight
+    // bytes costs more than the hashing does.
+    let mut block = HashBlock::new();
     for (vertex, point) in mesh.verts().iter().enumerate() {
         for (axis, coordinate) in point.iter().enumerate() {
             if !coordinate.is_finite() {
                 return Err(TopologyError::NonFiniteVertex { vertex, axis });
             }
             let canonical = if *coordinate == 0.0 { 0.0 } else { *coordinate };
-            hasher.update(canonical.to_bits().to_le_bytes());
+            block.push(&mut hasher, &canonical.to_bits().to_le_bytes());
         }
     }
+    block.flush(&mut hasher);
     hash_tagged_bytes(
         &mut hasher,
         b"triangles",
@@ -201,9 +207,10 @@ pub fn mesh_fingerprint(mesh: &Mesh) -> Result<String, TopologyError> {
     );
     for triangle in mesh.tris() {
         for index in triangle {
-            hasher.update(index.to_le_bytes());
+            block.push(&mut hasher, &index.to_le_bytes());
         }
     }
+    block.flush(&mut hasher);
     Ok(hex_digest(hasher))
 }
 
@@ -409,23 +416,37 @@ pub fn build_face_topology(
     // more faces sharing a welded vertex triple.  Everything that must not
     // depend on iteration order reads this frozen snapshot rather than
     // `cut_flags`, which the edge pass below is still writing.
-    let mut triangles_by_key: BTreeMap<[u32; 3], Vec<usize>> = BTreeMap::new();
-    for (face, triangle) in canonical_faces.iter().enumerate() {
-        let mut key = *triangle;
-        key.sort_unstable();
-        triangles_by_key.entry(key).or_default().push(face);
-    }
+    //
+    // Grouping is a sort of `(unordered vertex triple, face)` pairs.  Nothing
+    // below reads the groups in a particular order: each adds to a count or
+    // sets a flag.
+    let mut triangles_by_key: Vec<([u32; 3], usize)> = canonical_faces
+        .iter()
+        .enumerate()
+        .map(|(face, triangle)| {
+            let mut key = *triangle;
+            key.sort_unstable();
+            (key, face)
+        })
+        .collect();
+    triangles_by_key.sort_unstable();
     let mut duplicate_face = vec![false; n_faces];
     let mut counts = TopologyCounts::default();
-    for faces in triangles_by_key.values() {
+    let mut group_start = 0;
+    while group_start < triangles_by_key.len() {
+        let key = triangles_by_key[group_start].0;
+        let group_end = group_start
+            + triangles_by_key[group_start..].partition_point(|(other, _)| *other == key);
+        let faces = &triangles_by_key[group_start..group_end];
         if faces.len() > 1 {
             counts.duplicate_face_groups += 1;
             counts.duplicate_faces += faces.len();
-            for &face in faces {
+            for &(_, face) in faces {
                 duplicate_face[face] = true;
                 cut_flags[face] |= TOPOLOGY_CUT_DUPLICATE;
             }
         }
+        group_start = group_end;
     }
 
     #[derive(Clone, Copy)]
@@ -434,23 +455,51 @@ pub fn build_face_topology(
         forward: bool,
         degenerate: bool,
     }
-    let mut edges: BTreeMap<(u32, u32), Vec<EdgeOccurrence>> = BTreeMap::new();
+    // Every edge occurrence, grouped by undirected edge in ascending
+    // `(low, high)` key order, each group in the order its occurrences were
+    // met (face order, then edge order within a face).  That is the order the
+    // two passes below visit edges in, and the first pass's flag propagation
+    // depends on it, so the sort carries the occurrence's position as the
+    // final key.
+    let mut keyed_occurrences: Vec<((u32, u32), usize, EdgeOccurrence)> =
+        Vec::with_capacity(n_faces * 3);
     for (face, triangle) in canonical_faces.iter().enumerate() {
         for (a, b) in [
             (triangle[0], triangle[1]),
             (triangle[1], triangle[2]),
             (triangle[2], triangle[0]),
         ] {
-            edges
-                .entry((a.min(b), a.max(b)))
-                .or_default()
-                .push(EdgeOccurrence {
+            keyed_occurrences.push((
+                (a.min(b), a.max(b)),
+                keyed_occurrences.len(),
+                EdgeOccurrence {
                     face,
                     forward: a < b,
                     degenerate: a == b,
-                });
+                },
+            ));
         }
     }
+    keyed_occurrences.sort_unstable_by_key(|(key, position, _)| (*key, *position));
+    let sorted_occurrences: Vec<EdgeOccurrence> = keyed_occurrences
+        .iter()
+        .map(|(_, _, occurrence)| *occurrence)
+        .collect();
+    let mut edge_groups: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut group_start = 0;
+    while group_start < keyed_occurrences.len() {
+        let key = keyed_occurrences[group_start].0;
+        let group_end = group_start
+            + keyed_occurrences[group_start..].partition_point(|(other, _, _)| *other == key);
+        edge_groups.push(group_start..group_end);
+        group_start = group_end;
+    }
+    drop(keyed_occurrences);
+    let edges = || {
+        edge_groups
+            .iter()
+            .map(|range| &sorted_occurrences[range.clone()])
+    };
 
     // First pass: cut flags and adjacency.  A face that meets a duplicate
     // across one edge is itself cut there, and `cut_flags` carries that
@@ -461,7 +510,7 @@ pub fn build_face_topology(
     // why the counting pass below reads `duplicate_face` instead.
     let mut adjacency = vec![Vec::<u32>::new(); n_faces];
     let mut accepted_edges = Vec::<(usize, usize)>::new();
-    for occurrences in edges.values() {
+    for occurrences in edges() {
         let degenerate = occurrences.iter().any(|occurrence| occurrence.degenerate);
         let duplicate = occurrences
             .iter()
@@ -517,7 +566,7 @@ pub fn build_face_topology(
     // and a duplicate face each carry their own named cut, and duplicate faces
     // are counted in this same struct — so excluding them from
     // `nonmanifold_edges` no longer hides them.
-    for occurrences in edges.values() {
+    for occurrences in edges() {
         let degenerate = occurrences.iter().any(|occurrence| occurrence.degenerate);
         let duplicate = occurrences
             .iter()
@@ -532,63 +581,100 @@ pub fn build_face_topology(
 
     // An accepted manifold edge connects the two incident face nodes at both
     // endpoint fans.  More than one local fan at a vertex is a point-only cut.
-    let mut incidence: BTreeMap<u32, BTreeMap<usize, BTreeSet<usize>>> = BTreeMap::new();
-    for (face, triangle) in canonical_faces.iter().enumerate() {
-        for vertex in triangle {
-            incidence
-                .entry(*vertex)
-                .or_default()
-                .entry(face)
-                .or_default();
+    //
+    // Fans are the connected components of the faces around one welded vertex
+    // under the accepted edges that both contain that vertex.  They are found
+    // with a union-find over one slot per (vertex, face) pair, laid out as a
+    // CSR keyed by welded vertex with each vertex's faces ascending.  Vertices
+    // are visited in ascending id and a vertex's fans in ascending smallest
+    // face, with ascending members: the order the earlier ordered-map walk
+    // produced.
+    let welded_vertex_total = welded.vertex_count as usize;
+    let mut face_start = vec![0_usize; welded_vertex_total + 1];
+    for triangle in &canonical_faces {
+        for (corner, vertex) in triangle.iter().enumerate() {
+            if !triangle[..corner].contains(vertex) {
+                face_start[*vertex as usize + 1] += 1;
+            }
         }
     }
+    for vertex in 0..welded_vertex_total {
+        face_start[vertex + 1] += face_start[vertex];
+    }
+    let mut faces_at = vec![0_u32; face_start[welded_vertex_total]];
+    let mut fill = face_start.clone();
+    for (face, triangle) in canonical_faces.iter().enumerate() {
+        for (corner, vertex) in triangle.iter().enumerate() {
+            if !triangle[..corner].contains(vertex) {
+                faces_at[fill[*vertex as usize]] = face as u32;
+                fill[*vertex as usize] += 1;
+            }
+        }
+    }
+    drop(fill);
+    let slot_of = |vertex: u32, face: usize| -> usize {
+        let start = face_start[vertex as usize];
+        let end = face_start[vertex as usize + 1];
+        start
+            + faces_at[start..end]
+                .binary_search(&(face as u32))
+                .expect("face incidence inserted")
+    };
+    fn find(parent: &mut [u32], mut slot: usize) -> usize {
+        while parent[slot] as usize != slot {
+            let grandparent = parent[parent[slot] as usize];
+            parent[slot] = grandparent;
+            slot = grandparent as usize;
+        }
+        slot
+    }
+    let mut parent: Vec<u32> = (0..faces_at.len() as u32).collect();
     for (a, b) in &accepted_edges {
         let ta = canonical_faces[*a];
         let tb = canonical_faces[*b];
         for vertex in [ta[0], ta[1], ta[2]] {
             if tb.contains(&vertex) {
-                let fan = incidence.get_mut(&vertex).expect("face incidence inserted");
-                fan.get_mut(a).expect("face incidence inserted").insert(*b);
-                fan.get_mut(b).expect("face incidence inserted").insert(*a);
+                let root_a = find(&mut parent, slot_of(vertex, *a));
+                let root_b = find(&mut parent, slot_of(vertex, *b));
+                if root_a != root_b {
+                    parent[root_a.max(root_b)] = root_a.min(root_b) as u32;
+                }
             }
         }
     }
     let mut point_only_vertices = Vec::new();
-    for (vertex, fan) in &incidence {
-        let mut unseen: BTreeSet<usize> = fan.keys().copied().collect();
+    for vertex in 0..welded_vertex_total {
+        let slots = face_start[vertex]..face_start[vertex + 1];
+        // A slot is the root of its fan exactly when it is its own parent.
+        let fan_count = slots
+            .clone()
+            .filter(|slot| parent[*slot] as usize == *slot)
+            .count();
+        if fan_count <= 1 {
+            continue;
+        }
         // The fans are materialized rather than merely counted. Counting
         // answers "is this a pinch"; a repair additionally has to know which
         // faces belong to which sheet, and deriving that a second time
         // elsewhere is exactly the duplicated-capability hazard O-5 forbids.
-        let mut fans: Vec<Vec<u32>> = Vec::new();
-        while let Some(&start) = unseen.iter().next() {
-            let mut members = Vec::new();
-            let mut queue = VecDeque::from([start]);
-            unseen.remove(&start);
-            while let Some(face) = queue.pop_front() {
-                members.push(face as u32);
-                for neighbor in &fan[&face] {
-                    if unseen.remove(neighbor) {
-                        queue.push_back(*neighbor);
-                    }
+        let mut fan_roots: Vec<usize> = Vec::with_capacity(fan_count);
+        let mut fans: Vec<Vec<u32>> = Vec::with_capacity(fan_count);
+        for slot in slots {
+            let face = faces_at[slot];
+            cut_flags[face as usize] |= TOPOLOGY_CUT_POINT_ONLY;
+            let root = find(&mut parent, slot);
+            match fan_roots.iter().position(|known| *known == root) {
+                Some(index) => fans[index].push(face),
+                None => {
+                    fan_roots.push(root);
+                    fans.push(vec![face]);
                 }
             }
-            members.sort_unstable();
-            fans.push(members);
         }
-        if fans.len() > 1 {
-            for face in fan.keys() {
-                cut_flags[*face] |= TOPOLOGY_CUT_POINT_ONLY;
-            }
-            // `unseen` is a `BTreeSet`, so the fans are already discovered in
-            // ascending smallest-face order; sorting says so rather than
-            // relying on it.
-            fans.sort_by(|left, right| left[0].cmp(&right[0]));
-            point_only_vertices.push(PointOnlyVertex {
-                welded_vertex: *vertex,
-                fans,
-            });
-        }
+        point_only_vertices.push(PointOnlyVertex {
+            welded_vertex: vertex as u32,
+            fans,
+        });
     }
 
     // Third pass: the per-class face counts, taken once, after the point-only
@@ -965,7 +1051,43 @@ impl WeldedView {
           docs/evidence/remediation-2026-08-26/census/cast-audit.md"
 )]
 fn exact_weld(points: &[[f64; 3]]) -> Result<WeldedView, TopologyError> {
-    let mut ids = BTreeMap::<[u64; 3], u32>::new();
+    /// Multiply-xor mixing over the three words of a coordinate key.  A weld
+    /// table needs speed and spread, not collision resistance: the keys are
+    /// the mesh's own coordinates.
+    #[derive(Default)]
+    struct WeldKeyHasher(u64);
+
+    impl Hasher for WeldKeyHasher {
+        fn finish(&self) -> u64 {
+            self.0
+        }
+
+        fn write(&mut self, bytes: &[u8]) {
+            // A `[u64; 3]` key reaches here as one 24-byte slice.
+            let mut words = bytes.chunks_exact(8);
+            for word in words.by_ref() {
+                let mut buffer = [0_u8; 8];
+                buffer.copy_from_slice(word);
+                self.write_u64(u64::from_le_bytes(buffer));
+            }
+            for byte in words.remainder() {
+                self.write_u64(u64::from(*byte));
+            }
+        }
+
+        fn write_u64(&mut self, word: u64) {
+            let mixed = (self.0 ^ word).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            self.0 = mixed ^ (mixed >> 29);
+        }
+    }
+
+    // Only `get` and `insert` touch this map and ids are handed out in
+    // first-occurrence order, so the result does not depend on the hasher.
+    let mut ids =
+        HashMap::<[u64; 3], u32, BuildHasherDefault<WeldKeyHasher>>::with_capacity_and_hasher(
+            points.len() / 4,
+            BuildHasherDefault::default(),
+        );
     let mut verts = Vec::new();
     let mut map = Vec::with_capacity(points.len());
     for point in points {
@@ -1170,11 +1292,43 @@ fn topology_digest(topology: &FaceTopology) -> TopologyDigest {
     }
 }
 
+/// A fixed staging buffer in front of a [`Sha256`]: the digest sees the same
+/// bytes in the same order, in few large `update` calls instead of many tiny
+/// ones.
+struct HashBlock {
+    bytes: [u8; 8192],
+    used: usize,
+}
+
+impl HashBlock {
+    const fn new() -> Self {
+        Self {
+            bytes: [0; 8192],
+            used: 0,
+        }
+    }
+
+    fn push(&mut self, hasher: &mut Sha256, piece: &[u8]) {
+        if self.used + piece.len() > self.bytes.len() {
+            self.flush(hasher);
+        }
+        self.bytes[self.used..self.used + piece.len()].copy_from_slice(piece);
+        self.used += piece.len();
+    }
+
+    fn flush(&mut self, hasher: &mut Sha256) {
+        hasher.update(&self.bytes[..self.used]);
+        self.used = 0;
+    }
+}
+
 fn hash_u32_array(hasher: &mut Sha256, values: &[u32]) {
     hasher.update((values.len() as u64).to_le_bytes());
+    let mut block = HashBlock::new();
     for value in values {
-        hasher.update(value.to_le_bytes());
+        block.push(hasher, &value.to_le_bytes());
     }
+    block.flush(hasher);
 }
 fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update((bytes.len() as u64).to_le_bytes());
@@ -1194,3 +1348,8 @@ fn hex_digest(hasher: Sha256) -> String {
     }
     output
 }
+
+/// The ordered-map builder this file's production builder replaced, as its
+/// test oracle.
+#[cfg(test)]
+mod reference;

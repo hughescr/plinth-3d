@@ -1023,12 +1023,13 @@ pub fn run(
     ) {
         Ok(candidate) => candidate,
         Err(failure) => {
+            let _convert_mark = geom_kernel::perf::stage("hollow.convert_to_solid");
             return convert_shell_failure_to_solid(
                 solid,
                 orientation,
                 failure,
                 settings.wall_thickness_mm(),
-            )
+            );
         }
     };
     drop(shell_mark);
@@ -1850,17 +1851,23 @@ pub fn create_shell_recording_repair(
     let retained_raw_source_buffer_bytes = input
         .retained_buffer_bytes()
         .ok_or(HollowError::ResourceAccountingOverflow)?;
+    let triage_mark = geom_kernel::perf::stage("hollow.shell.triage");
     let admission = TriageTopologyAdmission::from_raw_mesh(
         &input,
         limits.triage_topology_limits(retained_raw_source_buffer_bytes),
     )
     .map_err(HollowError::from)?;
+    drop(triage_mark);
     let retained_raw_source_buffer_bytes = admission.retained_source_buffer_bytes();
+    let triage_mark = geom_kernel::perf::stage("hollow.shell.triage_weld");
     let triaged = admission
         .triage(WeldPolicy::ExactBits)
         .map_err(HollowError::from)?;
     let source = triaged.into_mesh();
+    drop(triage_mark);
+    let validate_mark = geom_kernel::perf::stage("hollow.shell.validate");
     let source_volume_mm3 = validate_oriented_solid(&source)?;
+    drop(validate_mark);
     let spec = grid_spec(&source, settings.voxel_pitch_mm.get())?;
     if spec.count > limits.max_voxel_cells {
         return Err(HollowError::VoxelCellLimitExceeded {
@@ -1869,14 +1876,18 @@ pub fn create_shell_recording_repair(
         }
         .into());
     }
+    let voxel_mark = geom_kernel::perf::stage("hollow.shell.voxelize");
     let raster_work_items = raster_work_item_count(&source, spec, limits.max_raster_work_items)?;
     let grid = voxelize_filled(&source, spec, raster_work_items)?;
+    drop(voxel_mark);
     let VoxelGrid {
         origin: grid_origin,
         pitch: grid_pitch,
         material,
     } = grid;
+    let edt_mark = geom_kernel::perf::stage("hollow.shell.edt");
     let edt = frozen_distance_transform(&material, grid_pitch)?;
+    drop(edt_mark);
     // FU-53. `edt` is a SOUND PREFILTER, never the selection authority: the
     // module doc's lemma above `frozen_distance_transform` proves
     // `edt(v) >= d_true(v)` for every material voxel, so `{d_true > t}` is a
@@ -1892,6 +1903,20 @@ pub fn create_shell_recording_repair(
     if !candidate_threshold_mm.is_finite() {
         return Err(HollowError::InvalidArithmetic.into());
     }
+    // Early bulk refusal. The lemma above makes `edt` an upper bound on the
+    // exact distance, and `exact_cavity_distance` only ever lowers a value
+    // (`.min`), so `2 * max(edt)` here is at least the bulk figure the gate
+    // below would measure. When even that bound is under the minimum the gate
+    // below must refuse, with this same error, whatever the exact pass would
+    // have returned — so refuse now and skip the surface index and the exact
+    // queries. (The one difference: a resource-limit failure of that exact
+    // pass no longer takes precedence over a bulk refusal it could not have
+    // changed.)
+    let prefilter_bulk_mm = 2.0 * edt.iter().copied().fold(0.0_f64, f64::max);
+    if prefilter_bulk_mm.is_finite() && prefilter_bulk_mm < settings.bulk_min_mm.get() {
+        return Err(HollowError::IneligibleBelowBulk.into());
+    }
+    let exact_mark = geom_kernel::perf::stage("hollow.shell.exact_distance");
     let (edt, cavity_distance_index_bytes, cavity_distance_exact_query_points, distance_surface) =
         exact_cavity_distance(
             &source,
@@ -1901,6 +1926,7 @@ pub fn create_shell_recording_repair(
             candidate_threshold_mm,
             limits,
         )?;
+    drop(exact_mark);
     // Honest bulk figure: `edt` is now exact everywhere a voxel could
     // plausibly be the true interior maximum (every voxel with
     // `edt > candidate_threshold_mm`, which by construction covers every
@@ -1953,6 +1979,7 @@ pub fn create_shell_recording_repair(
     // back to solid in `drilling.rs` and its volume is reported, so this
     // never ships a sealed void.
     let throat_r_mm = flow::registered_throat_radius_mm()?;
+    let flow_mark = geom_kernel::perf::stage("hollow.shell.flow_select");
     let selected = match flow::select_all_flow_components(&cavity_mask, grid_pitch, throat_r_mm)? {
         Some((selected, _stats)) => selected,
         None => {
@@ -1963,6 +1990,8 @@ pub fn create_shell_recording_repair(
         }
     };
     drop(cavity_mask);
+    drop(flow_mark);
+    let wc_mark = geom_kernel::perf::stage("hollow.shell.well_composed");
     // The extractor emits one vertex per lattice cell, which is only enough
     // where the mask is well-composed. Repair it here, before anything measures
     // or marches it, so the cavity volume the savings gate weighs is the cavity
@@ -2032,6 +2061,7 @@ pub fn create_shell_recording_repair(
         }
         Err(error) => return Err(error.into()),
     };
+    drop(wc_mark);
     let repair_evidence = CavityRepairEvidence {
         critical_cells: well_composed_repair.critical_cells(),
         repaired_voxels: well_composed_repair.removed_voxels()
