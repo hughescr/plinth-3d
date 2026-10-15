@@ -230,6 +230,351 @@ pub struct DownSweepOutcome {
     /// The peel those re-entries put back into the raster, mm². Part of
     /// `injected_load_mm2`.
     pub handed_reentered_mm2: f64,
+    /// The triggers the geometry refused, as `(per_event::entry(member,
+    /// layer), limit bits)`: the area-law limit the search was asked to relieve
+    /// them above. Sorted. Includes the refusals a seed carried in, so the next
+    /// run on the same field inherits all of them ([`RunSeed`]). A trigger is
+    /// carried only against the very limit it was refused at: a refusal at the
+    /// area law's `ℓ_max` says nothing about the same tip under a contact cap.
+    pub refused: Vec<(u64, u64)>,
+    /// Which trigger placed each arm this call inserted: `(arm id,
+    /// per_event::entry(host, layer))`, in insertion order. Empty under the
+    /// sabotage knob (its trigger is no per-event entry; it reads `u64::MAX`).
+    pub inserted_by: Vec<(u32, u64)>,
+    /// The digest of the field this call left and of everything its first
+    /// pass reads ([`GeometryDigest`]). `None` under the sabotage knob.
+    pub geometry_digest: Option<GeometryDigest>,
+    /// The accounting of the pass that logged [`Self::route_log`], for a
+    /// seeded run to take its pass 1 from ([`RunSeed`]). `None` under the
+    /// sabotage knob.
+    pub accounting: Option<DownSweepAccounting>,
+    /// Whether this call took its pass 1 from a [`RunSeed`] instead of
+    /// walking the layers. The path-hit witness for the seeded pass.
+    pub seeded_pass: bool,
+    /// Whether a seed was offered and refused (stale digest, no accounting
+    /// snapshot or no log), so pass 1 walked the layers as it always did.
+    pub seed_stale: bool,
+    /// Triggers a carried refusal kept this call from re-trying.
+    pub refusals_carried_skipped: u64,
+}
+
+/// What the layers' first pass reads, so a seed can be told from a stale one:
+/// the layer cache's key (grid and every slice coordinate), and a digest of
+/// the members (kind, extent, landing, joint layer, the cell of every layer
+/// they stand on), of the unrooted columns and of the sizing fields the pass
+/// reads. A radius, a minimum radius or a thickened layer is NOT in it: pass 1
+/// routes and counts without them, and the per-event rewrite applies the
+/// caller's own.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GeometryDigest {
+    layers: crate::layer_cache::LayerKey,
+    field: u64,
+}
+
+fn mix(hash: u64, word: u64) -> u64 {
+    (hash.rotate_left(5) ^ word).wrapping_mul(0x517c_c1b7_2722_0a95)
+}
+
+/// The digest of the field and routing inputs pass 1 reads. `O(sum of the
+/// members' layers)`, a few hundred thousand mixes on the largest model.
+fn field_digest(
+    layers: &LayerCache<'_>,
+    struts: &[SweepStrut],
+    sizing: SizingPolicy,
+    unrooted: &UnrootedColumns,
+) -> GeometryDigest {
+    let layer_count = layers.slices().len();
+    let mut hash = mix(0, struts.len() as u64);
+    for strut in struts {
+        hash = mix(hash, u64::from(strut.id));
+        hash = mix(hash, strut.kind as u64);
+        hash = mix(hash, strut.cell as u64);
+        hash = mix(hash, strut.k_top as u64);
+        hash = mix(hash, strut.k_bottom as u64);
+        hash = match strut.landing {
+            Landing::Plate => mix(hash, 1),
+            Landing::Model { layer } => mix(mix(hash, 2), layer as u64),
+            Landing::Strut { id, layer } => mix(mix(mix(hash, 3), u64::from(id)), layer as u64),
+        };
+        hash = mix(hash, strut.joint_hold_layer().map_or(u64::MAX, |layer| layer as u64));
+        if strut.k_bottom != usize::MAX {
+            // The cell at `layer + 1` is read too, for the top layer.
+            for layer in strut.k_bottom..=strut.k_top.min(layer_count) {
+                hash = mix(hash, strut.cell_at(layer) as u64);
+            }
+        }
+    }
+    for layer in 0..layer_count {
+        let cells = unrooted.at(layer);
+        hash = mix(hash, cells.len() as u64);
+        for &cell in cells {
+            hash = mix(hash, u64::from(cell));
+        }
+    }
+    for value in [sizing.x_allowed, sizing.alpha, sizing.lamina_reach_mm] {
+        hash = mix(hash, value.to_bits());
+    }
+    for flag in [
+        sizing.straight_reach,
+        sizing.tip_column_roots,
+        sizing.handed_column_ledger,
+        sizing.per_event,
+    ] {
+        hash = mix(hash, u64::from(flag));
+    }
+    GeometryDigest {
+        layers: *layers.key(),
+        field: hash,
+    }
+}
+
+/// The accounting of one top-down pass: every field of [`DownSweepOutcome`]
+/// that pass 1 computes and that is not recomputed by the per-event rewrite
+/// that follows it, plus the max-field ledger's worst load (which pass 1
+/// reads from the members before the rewrite overwrites it).
+///
+/// Taken from the pass that logged the route ([`RunSeed`]); a seeded pass 1
+/// puts it back. The destructuring in [`Self::of`] names every field of the
+/// outcome without `..`, so a new field fails to compile until it is classed
+/// as a snapshot field or as recomputed.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DownSweepAccounting {
+    plate_reaction_mm2: f64,
+    uncarried_load_mm2: f64,
+    injected_load_mm2: f64,
+    absorbed_event_load_mm2: f64,
+    absorbed_event_reads: u64,
+    peak_layer_area_mm2: f64,
+    model_section_max_x: f64,
+    min_layer_area_mm2: f64,
+    conservation_residual: f64,
+    model_overload: Vec<ModelSectionOverload>,
+    spread_search_hits: u64,
+    strut_share_reads: u64,
+    uncarried_lowest_layer: Option<usize>,
+    uncarried_worst_gap_mm: f64,
+    landing_injections: u64,
+    max_combine_hits: u64,
+    rasteriser_entries: u64,
+    route_not_converged: u64,
+    route_sightlines_clear: u64,
+    route_sightlines_blocked: u64,
+    merge_order_cycles: u64,
+    contact_merges_moved_below: u64,
+    contact_merge_load_moved_mm2: f64,
+    head_span_merges_held_to_joint: u64,
+    head_span_load_held_mm2: f64,
+    contact_merges_kept_at_single_slot: u64,
+    tip_column_roots_offered: u64,
+    tip_column_root_load_mm2: f64,
+    misrouted_load_mm2: f64,
+    unrooted_columns_refused: u64,
+    unrooted_load_rerouted_mm2: f64,
+    unrooted_load_kept_mm2: f64,
+    handed_columns_held: u64,
+    handed_own_withheld_mm2: f64,
+    handed_events_reentered: u64,
+    handed_reentered_mm2: f64,
+    /// The largest ledger load any member held after the pass, before the
+    /// per-event rewrite.
+    worst_max_field_mm2: f64,
+}
+
+impl DownSweepAccounting {
+    /// The snapshot of `outcome`, whose `per_event.worst_member_max_field_mm2`
+    /// must already hold the pass's max-field worst load.
+    fn of(outcome: &DownSweepOutcome) -> Self {
+        let DownSweepOutcome {
+            plate_reaction_mm2,
+            uncarried_load_mm2,
+            injected_load_mm2,
+            absorbed_event_load_mm2,
+            absorbed_event_reads,
+            peak_layer_area_mm2,
+            model_section_max_x,
+            min_layer_area_mm2,
+            conservation_residual,
+            overloaded: _,
+            model_overload,
+            spread_search_hits,
+            strut_share_reads,
+            uncarried_lowest_layer,
+            uncarried_worst_gap_mm,
+            landing_injections,
+            max_combine_hits,
+            rasteriser_entries,
+            route_not_converged,
+            route_sightlines_clear,
+            route_sightlines_blocked,
+            arms_inserted_by_load: _,
+            insertion_rounds_exhausted: _,
+            insertion_geometry_exhausted: _,
+            merge_order_cycles,
+            contact_merges_moved_below,
+            contact_merge_load_moved_mm2,
+            head_span_merges_held_to_joint,
+            head_span_load_held_mm2,
+            contact_merges_kept_at_single_slot,
+            insertion_rounds: _,
+            tip_column_roots_offered,
+            tip_column_root_load_mm2,
+            misrouted_load_mm2,
+            per_event,
+            route_log: _,
+            reached_by_event: _,
+            unrooted_columns_refused,
+            unrooted_load_rerouted_mm2,
+            unrooted_load_kept_mm2,
+            handed_columns_held,
+            handed_own_withheld_mm2,
+            handed_events_reentered,
+            handed_reentered_mm2,
+            refused: _,
+            inserted_by: _,
+            geometry_digest: _,
+            accounting: _,
+            seeded_pass: _,
+            seed_stale: _,
+            refusals_carried_skipped: _,
+        } = outcome;
+        Self {
+            plate_reaction_mm2: *plate_reaction_mm2,
+            uncarried_load_mm2: *uncarried_load_mm2,
+            injected_load_mm2: *injected_load_mm2,
+            absorbed_event_load_mm2: *absorbed_event_load_mm2,
+            absorbed_event_reads: *absorbed_event_reads,
+            peak_layer_area_mm2: *peak_layer_area_mm2,
+            model_section_max_x: *model_section_max_x,
+            min_layer_area_mm2: *min_layer_area_mm2,
+            conservation_residual: *conservation_residual,
+            model_overload: model_overload.clone(),
+            spread_search_hits: *spread_search_hits,
+            strut_share_reads: *strut_share_reads,
+            uncarried_lowest_layer: *uncarried_lowest_layer,
+            uncarried_worst_gap_mm: *uncarried_worst_gap_mm,
+            landing_injections: *landing_injections,
+            max_combine_hits: *max_combine_hits,
+            rasteriser_entries: *rasteriser_entries,
+            route_not_converged: *route_not_converged,
+            route_sightlines_clear: *route_sightlines_clear,
+            route_sightlines_blocked: *route_sightlines_blocked,
+            merge_order_cycles: *merge_order_cycles,
+            contact_merges_moved_below: *contact_merges_moved_below,
+            contact_merge_load_moved_mm2: *contact_merge_load_moved_mm2,
+            head_span_merges_held_to_joint: *head_span_merges_held_to_joint,
+            head_span_load_held_mm2: *head_span_load_held_mm2,
+            contact_merges_kept_at_single_slot: *contact_merges_kept_at_single_slot,
+            tip_column_roots_offered: *tip_column_roots_offered,
+            tip_column_root_load_mm2: *tip_column_root_load_mm2,
+            misrouted_load_mm2: *misrouted_load_mm2,
+            unrooted_columns_refused: *unrooted_columns_refused,
+            unrooted_load_rerouted_mm2: *unrooted_load_rerouted_mm2,
+            unrooted_load_kept_mm2: *unrooted_load_kept_mm2,
+            handed_columns_held: *handed_columns_held,
+            handed_own_withheld_mm2: *handed_own_withheld_mm2,
+            handed_events_reentered: *handed_events_reentered,
+            handed_reentered_mm2: *handed_reentered_mm2,
+            worst_max_field_mm2: per_event.worst_member_max_field_mm2,
+        }
+    }
+
+    /// Write the snapshot's fields into a fresh pass-1 outcome.
+    fn to_outcome(&self) -> DownSweepOutcome {
+        DownSweepOutcome {
+            plate_reaction_mm2: self.plate_reaction_mm2,
+            uncarried_load_mm2: self.uncarried_load_mm2,
+            injected_load_mm2: self.injected_load_mm2,
+            absorbed_event_load_mm2: self.absorbed_event_load_mm2,
+            absorbed_event_reads: self.absorbed_event_reads,
+            peak_layer_area_mm2: self.peak_layer_area_mm2,
+            model_section_max_x: self.model_section_max_x,
+            min_layer_area_mm2: self.min_layer_area_mm2,
+            conservation_residual: self.conservation_residual,
+            model_overload: self.model_overload.clone(),
+            spread_search_hits: self.spread_search_hits,
+            strut_share_reads: self.strut_share_reads,
+            uncarried_lowest_layer: self.uncarried_lowest_layer,
+            uncarried_worst_gap_mm: self.uncarried_worst_gap_mm,
+            landing_injections: self.landing_injections,
+            max_combine_hits: self.max_combine_hits,
+            rasteriser_entries: self.rasteriser_entries,
+            route_not_converged: self.route_not_converged,
+            route_sightlines_clear: self.route_sightlines_clear,
+            route_sightlines_blocked: self.route_sightlines_blocked,
+            merge_order_cycles: self.merge_order_cycles,
+            contact_merges_moved_below: self.contact_merges_moved_below,
+            contact_merge_load_moved_mm2: self.contact_merge_load_moved_mm2,
+            head_span_merges_held_to_joint: self.head_span_merges_held_to_joint,
+            head_span_load_held_mm2: self.head_span_load_held_mm2,
+            contact_merges_kept_at_single_slot: self.contact_merges_kept_at_single_slot,
+            tip_column_roots_offered: self.tip_column_roots_offered,
+            tip_column_root_load_mm2: self.tip_column_root_load_mm2,
+            misrouted_load_mm2: self.misrouted_load_mm2,
+            unrooted_columns_refused: self.unrooted_columns_refused,
+            unrooted_load_rerouted_mm2: self.unrooted_load_rerouted_mm2,
+            unrooted_load_kept_mm2: self.unrooted_load_kept_mm2,
+            handed_columns_held: self.handed_columns_held,
+            handed_own_withheld_mm2: self.handed_own_withheld_mm2,
+            handed_events_reentered: self.handed_events_reentered,
+            handed_reentered_mm2: self.handed_reentered_mm2,
+            ..DownSweepOutcome::default()
+        }
+    }
+}
+
+/// What a finished call hands to the next call on the same field, so that
+/// call's first pass need not walk the layers again (SC-2).
+///
+/// * `log` — the routing the finished call's last pass recorded.
+/// * `accounting` — that pass's [`DownSweepAccounting`]. The log holds hops and
+///   reads only; the outcome's scalar accounting (loads, overloads, route
+///   counters) is not derivable from it, so it travels with it.
+/// * `refused` — the triggers the geometry refused, with the limit each was
+///   refused at.
+/// * `geometry_digest` — what the log and the accounting are valid for.
+///
+/// A seed whose digest does not equal the digest of the field it is offered to,
+/// or that holds no accounting or no log, is STALE: the call walks pass 1 for
+/// real and says so (`DownSweepOutcome::seed_stale`). A seeded pass 1 is equal
+/// by bits, whole outcome and every member, to the pass 1 it replaces.
+///
+/// A call whose last pass PLACED arms leaves no accounting: that pass read its
+/// growing arms first in each layer, so its log orders the reads differently
+/// from a walk of the finished field, and the per-event sizing takes the first
+/// reader of a cell. Its seed is stale by construction and the next call walks.
+#[derive(Clone, Debug)]
+pub struct RunSeed {
+    pub log: crate::per_event::RouteLog,
+    pub accounting: Option<DownSweepAccounting>,
+    pub refused: Vec<(u64, u64)>,
+    pub geometry_digest: Option<GeometryDigest>,
+}
+
+impl DownSweepOutcome {
+    /// The seed this call leaves for the next call on the same field, or
+    /// `None` where it left no log (the sabotage knob).
+    #[must_use]
+    pub fn seed(&self) -> Option<RunSeed> {
+        if self.route_log.is_empty() {
+            return None;
+        }
+        Some(RunSeed {
+            log: self.route_log.clone(),
+            accounting: self.accounting.clone(),
+            refused: self.refused.clone(),
+            geometry_digest: self.geometry_digest,
+        })
+    }
+}
+
+/// `PLINTH_SWEEP_VERIFY_INCREMENTAL=1`: every seeded pass 1 is also walked for
+/// real on a copy of the members and compared (log and accounting by bits);
+/// any difference panics. For gate runs, not for production. Read once.
+fn verify_incremental() -> bool {
+    static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *VERIFY.get_or_init(|| {
+        std::env::var_os("PLINTH_SWEEP_VERIFY_INCREMENTAL").is_some_and(|value| value == "1")
+    })
 }
 
 /// The model columns the up-sweep left UNROOTED, layer by layer, and the rule
@@ -896,6 +1241,38 @@ pub fn run_with(
     keep_out: &DrainKeepOut,
     unrooted: &UnrootedColumns,
 ) -> DownSweepOutcome {
+    run_seeded(layers, struts, sizing, insertion, keep_out, unrooted, None)
+}
+
+/// [`run_with`] that may take its pass 1 from the [`RunSeed`] a finished call
+/// on the same field left ([`DownSweepOutcome::seed`]).
+///
+/// Pass 1 inserts nothing (its trigger table is empty): it only routes, counts
+/// and records the log the per-event sizing follows. On a field and inputs
+/// equal to the seed's ([`GeometryDigest`]) that work is already done, so a
+/// seeded pass 1 clears the members' ledgers as the walk does, takes its
+/// accounting from the seed's snapshot and its routing from the seed's log, and
+/// goes straight to the per-event sizing. The outcome, the members and the
+/// triggers it hands to pass 2 equal those of the walked pass 1 to the bit.
+/// Insertion off (`InsertionPolicy::disabled()`) makes the whole call that one
+/// pass.
+///
+/// The seed's refusals are carried: a trigger the geometry refused in the
+/// seeded call, at the same limit, is not re-tried here
+/// (`refusals_carried_skipped`). A stale seed carries nothing.
+///
+/// # Panics
+///
+/// As [`run`].
+pub fn run_seeded(
+    layers: &LayerCache<'_>,
+    struts: &mut Vec<SweepStrut>,
+    sizing: SizingPolicy,
+    insertion: InsertionPolicy,
+    keep_out: &DrainKeepOut,
+    unrooted: &UnrootedColumns,
+    seed: Option<&RunSeed>,
+) -> DownSweepOutcome {
     let grid = layers.grid();
     let slices = layers.slices();
     // Write-only `perf` marks (X0): the sizing site this run was called from
@@ -926,38 +1303,91 @@ pub fn run_with(
         }
         return outcome;
     }
+    // A SEED IS USED ONLY AGAINST THE FIELD IT WAS MADE ON. Anything short of
+    // that -- no accounting snapshot, a log of another depth, a digest that
+    // differs -- is stale: pass 1 walks, and nothing is carried.
+    let usable_seed = seed.and_then(|seed| {
+        let accounting = seed.accounting.as_ref()?;
+        let fits = seed.log.hops.len() == slices.len()
+            && seed.log.reads.len() == slices.len()
+            && seed.geometry_digest == Some(field_digest(layers, struts, sizing, unrooted));
+        fits.then_some((seed, accounting))
+    });
+    let seed_stale = seed.is_some() && usable_seed.is_none();
     let mut triggers: HashMap<u64, f64> = HashMap::new();
-    let mut refused: HashSet<u64> = HashSet::new();
+    // Refused triggers and the limit each was refused at. The carried ones are
+    // kept apart so a skipped re-try can be counted.
+    let mut refused: HashMap<u64, u64> = HashMap::new();
+    let mut carried: HashMap<u64, u64> = HashMap::new();
+    if let Some((seed, _)) = usable_seed {
+        for &(key, limit_bits) in &seed.refused {
+            let (member, layer) = crate::per_event::unpack(key);
+            let same_limit = struts.get(member).is_some_and(|strut| {
+                insertion.limit(strut, layer, l_max, sizing.x_allowed).to_bits() == limit_bits
+            });
+            if same_limit {
+                carried.insert(key, limit_bits);
+            }
+        }
+    }
+    let mut skipped = 0_u64;
     let mut inserted = 0_u64;
+    let mut inserted_by: Vec<(u32, u64)> = Vec::new();
     let mut geometry_exhausted = 0_u64;
     let mut evaluations = 0_u64;
     let mut passes = 0_usize;
     crate::reuse_probe::begin(grid.cells(), slices.len(), struts, site);
     loop {
-        let mut log = crate::per_event::RouteLog::new(slices.len());
+        let seeded_here = if passes == 0 { usable_seed } else { None };
+        let mut log;
         let mut refused_here = Vec::new();
-        let mut outcome = sweep_pass(
-            layers,
-            struts,
-            sizing,
-            insertion,
-            keep_out,
-            unrooted,
-            Some(&triggers),
-            Some(&mut log),
-            &mut refused_here,
-        );
+        let mut outcome;
+        let worst_max_field;
+        if let Some((seed, accounting)) = seeded_here {
+            // The walk's own first act on the members: every ledger cleared to
+            // its length. The per-event rewrite below fills every slot.
+            let layer_count = slices.len();
+            if verify_incremental() {
+                verify_seeded_pass(
+                    layers, struts, sizing, insertion, keep_out, unrooted, seed, accounting,
+                );
+            }
+            for strut in struts.iter_mut() {
+                let span = ledger_len(strut, layer_count);
+                strut.radius_mm.clear();
+                strut.carried_mm2.clear();
+                strut.radius_mm.resize(span, 0.0);
+                strut.carried_mm2.resize(span, 0.0);
+            }
+            log = seed.log.clone();
+            outcome = accounting.to_outcome();
+            worst_max_field = accounting.worst_max_field_mm2;
+        } else {
+            log = crate::per_event::RouteLog::new(slices.len());
+            outcome = sweep_pass(
+                layers,
+                struts,
+                sizing,
+                insertion,
+                keep_out,
+                unrooted,
+                Some(&triggers),
+                Some(&mut log),
+                &mut refused_here,
+            );
+            worst_max_field = struts
+                .iter()
+                .flat_map(|strut| strut.carried_mm2.iter().copied())
+                .fold(0.0_f64, f64::max);
+        }
         passes += 1;
         if passes == 1 {
             crate::reuse_probe::end_first_pass();
         }
         inserted += outcome.arms_inserted_by_load;
+        inserted_by.append(&mut outcome.inserted_by);
         geometry_exhausted += outcome.insertion_geometry_exhausted;
         refused.extend(refused_here);
-        let worst_max_field = struts
-            .iter()
-            .flat_map(|strut| strut.carried_mm2.iter().copied())
-            .fold(0.0_f64, f64::max);
         let sized = {
             let _per_event_span = crate::perf::span(crate::perf::Span::PerEventSize);
             let members: &[SweepStrut] = struts;
@@ -988,14 +1418,41 @@ pub fn run_with(
         }
         // A trigger the geometry already refused is not re-tried: the search
         // found nowhere to put a carrier, and it would find nowhere again.
+        // That holds across calls too, for a refusal at the same limit that a
+        // seed carried in.
         let open: HashMap<u64, f64> = sized
             .triggers
             .into_iter()
-            .filter(|(key, _)| !refused.contains(key))
+            .filter(|(key, _)| {
+                if refused.contains_key(key) {
+                    return false;
+                }
+                if carried.contains_key(key) {
+                    skipped += 1;
+                    return false;
+                }
+                true
+            })
             .collect();
         let done = !insertion.enabled || open.is_empty();
         let exhausted = !done && passes > insertion.max_rounds;
         if done || exhausted {
+            // A pass that PLACED arms read its growing arms first in each
+            // layer, where a walk of the finished field reads them by id: the
+            // same reads, in another order. The per-event sizing takes the
+            // first reader of a cell, so that order is part of the log, and
+            // such a log is not the pass 1 of a walk on the field it left.
+            // It leaves no accounting snapshot, and the next call walks.
+            let last_pass_inserted = outcome.arms_inserted_by_load > 0;
+            outcome.inserted_by = inserted_by;
+            outcome.refusals_carried_skipped = skipped;
+            outcome.seeded_pass = usable_seed.is_some();
+            outcome.seed_stale = seed_stale;
+            let mut all_refused = carried;
+            all_refused.extend(refused);
+            outcome.refused = all_refused.into_iter().collect();
+            outcome.refused.sort_unstable();
+            outcome.geometry_digest = Some(field_digest(layers, struts, sizing, unrooted));
             outcome.arms_inserted_by_load = inserted;
             outcome.insertion_geometry_exhausted = geometry_exhausted;
             outcome.insertion_rounds = evaluations;
@@ -1010,11 +1467,65 @@ pub fn run_with(
             };
             // Write-only (M0): the run's row, with its routing's hash.
             crate::reuse_probe::run_end(passes, inserted, &log);
+            // What the next call on this field takes its pass 1 from: this
+            // pass's accounting, taken before anything else changes it.
+            outcome.accounting = (!last_pass_inserted).then(|| DownSweepAccounting::of(&outcome));
             outcome.route_log = log;
             return outcome;
         }
         triggers = open;
     }
+}
+
+/// The shadow check of a seeded pass 1 (`PLINTH_SWEEP_VERIFY_INCREMENTAL=1`):
+/// walk pass 1 for real on a copy of the members and require its log and its
+/// accounting to equal the seed's, by bits.
+///
+/// # Panics
+///
+/// On any difference.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the walk's own inputs plus the seed under check"
+)]
+fn verify_seeded_pass(
+    layers: &LayerCache<'_>,
+    struts: &[SweepStrut],
+    sizing: SizingPolicy,
+    insertion: InsertionPolicy,
+    keep_out: &DrainKeepOut,
+    unrooted: &UnrootedColumns,
+    seed: &RunSeed,
+    accounting: &DownSweepAccounting,
+) {
+    let mut copy = struts.to_vec();
+    let mut log = crate::per_event::RouteLog::new(layers.slices().len());
+    let mut sink = Vec::new();
+    let mut walked = sweep_pass(
+        layers,
+        &mut copy,
+        sizing,
+        insertion,
+        keep_out,
+        unrooted,
+        Some(&HashMap::new()),
+        Some(&mut log),
+        &mut sink,
+    );
+    walked.per_event.worst_member_max_field_mm2 = copy
+        .iter()
+        .flat_map(|strut| strut.carried_mm2.iter().copied())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        log == seed.log,
+        "seeded pass 1: the walked route log differs from the seed's"
+    );
+    let walked = DownSweepAccounting::of(&walked);
+    assert_eq!(
+        format!("{walked:?}"),
+        format!("{accounting:?}"),
+        "seeded pass 1: the walked accounting differs from the seed's"
+    );
 }
 
 /// Rewrite every member's ledger with its per-event design load, and name the
@@ -1113,7 +1624,7 @@ fn sweep_pass(
     unrooted: &UnrootedColumns,
     triggers: Option<&HashMap<u64, f64>>,
     mut log: Option<&mut crate::per_event::RouteLog>,
-    refused: &mut Vec<u64>,
+    refused: &mut Vec<(u64, u64)>,
 ) -> DownSweepOutcome {
     let grid = layers.grid();
     let slices = layers.slices();
@@ -1817,10 +2328,17 @@ fn sweep_pass(
                     t.cur.round = round as u64;
                 }
                 outcome.insertion_geometry_exhausted += 1;
-                refused.extend(insert.host_keys.iter().copied());
+                refused.extend(
+                    insert
+                        .host_keys
+                        .iter()
+                        .zip(&insert.host_limit)
+                        .map(|(key, limit)| (*key, limit.to_bits())),
+                );
                 break;
             }
             outcome.arms_inserted_by_load += added;
+            outcome.inserted_by.append(&mut insert.placed_by);
             if let Some(t) = trace.as_mut() {
                 t.cur.inserted += added;
                 t.cur.hosts += insert.hosts.len() as u64;
@@ -2389,6 +2907,9 @@ struct InsertScratch {
     host_slot: Vec<u32>,
     buckets: Vec<Vec<usize>>,
     accepted: Vec<usize>,
+    /// `(arm id, trigger key)` of the arms the last [`insert_for_load`] call
+    /// placed, in order; `u64::MAX` where there is no per-event key.
+    placed_by: Vec<(u32, u64)>,
 }
 
 impl InsertScratch {
@@ -2401,6 +2922,7 @@ impl InsertScratch {
             host_slot: vec![u32::MAX; cells],
             buckets: Vec::new(),
             accepted: Vec::new(),
+            placed_by: Vec::new(),
         }
     }
 }
@@ -2476,6 +2998,7 @@ fn insert_for_load(
     pending: &mut Vec<f64>,
     scratch: &mut InsertScratch,
 ) -> u64 {
+    scratch.placed_by.clear();
     if l_max <= 0.0 {
         return 0;
     }
@@ -2609,6 +3132,9 @@ fn insert_for_load(
                 fallback_path: Vec::new(),
                 head: None,
             });
+            scratch
+                .placed_by
+                .push((id, scratch.host_keys.get(slot).copied().unwrap_or(u64::MAX)));
             growing.push(struts.len() - 1);
             pending.push(0.0);
             carriers[cell] = true;
