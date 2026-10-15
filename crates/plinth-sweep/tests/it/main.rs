@@ -61,6 +61,7 @@ mod high_poly_keeps_every_rung;
 #[cfg(feature = "slow-tests")]
 mod joint_certificate;
 mod lattice_align;
+mod layer_cache_budget;
 #[cfg(feature = "slow-tests")]
 mod lip_seat_sized;
 mod load_insertion;

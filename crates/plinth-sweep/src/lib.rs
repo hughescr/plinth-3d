@@ -2203,11 +2203,14 @@ fn run_sweep_inner(
     };
 
     stage_span = perf::span(perf::Span::StageUp);
+    let mut layer_reader = layer_cache.reader();
     for (layer, _) in slices.iter().enumerate().take(layers) {
         cancel::checkpoint()?;
         rasteriser_entries += 1;
-        let masks = layer_cache.masks(layer);
-        if !layer_cache.cover_any(layer) {
+        // A layer the cache's byte budget did not keep is computed on demand.
+        layer_reader.prepare(layer, false);
+        let masks = layer_reader.masks(layer);
+        if !layer_reader.cover_any(layer) {
             // No model here. Reset the potential so a column that restarts
             // higher up does not inherit a stale value across the gap.
             reach.u.fill(f32::INFINITY);

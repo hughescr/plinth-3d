@@ -262,7 +262,9 @@ fn replay_once(
     };
     // The layers' masks are the plan's cached ones (a function of the slices
     // and the grid alone), not re-rasterised for every replay.
+    // (A layer the cache's byte budget did not keep is computed on demand.)
     let layer_cache = LayerCache::resolve(context.layer_cache, grid, context.slices);
+    let mut layer_reader = layer_cache.reader();
     // The up-sweep's own metric switch (`run_sweep`), applied to both sets.
     let new_state = || {
         let mut state = ReachState::new(grid);
@@ -295,8 +297,9 @@ fn replay_once(
         // Every exit below, a return or the end of the loop, has walked
         // exactly the layers counted here.
         outcome.layers_visited += 1;
-        let masks = layer_cache.masks(layer);
-        if !layer_cache.cover_any(layer) {
+        layer_reader.prepare(layer, false);
+        let masks = layer_reader.masks(layer);
+        if !layer_reader.cover_any(layer) {
             // The up-sweep's own empty-layer reset, for both sets.
             current.u.fill(f32::INFINITY);
             reach::commit_layer(&mut current, &masks.carry);

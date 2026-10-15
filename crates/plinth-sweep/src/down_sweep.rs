@@ -1149,6 +1149,7 @@ fn sweep_pass(
     // route.
     // Per-layer scratch of the model-section check's load sums.
     let mut component_loads: Vec<f64> = Vec::new();
+    let mut reader = layers.reader();
     // Layer k+1's CARRIERS, as opposed to its cover: model that carried plus every
     // arm alive there. Only the injection accounting reads it — see the max step.
     let mut carriers_above = vec![false; cells];
@@ -1262,9 +1263,12 @@ fn sweep_pass(
         outcome.rasteriser_entries += 1;
         // The layer's masks, its cover one layer up and that cover's
         // clearance come from the plan's cache (`layer_cache`), built once.
-        let masks = layers.masks(layer);
-        let cover_above = layers.cover_above(layer);
-        let model_cells = layers.carrier_cells(layer);
+        // A layer the cache's byte budget did not keep is computed here, on
+        // demand, into the reader's slots (same values, same order).
+        reader.prepare(layer, true);
+        let masks = reader.masks(layer);
+        let cover_above = reader.cover_above(layer);
+        let model_cells = reader.carrier_cells(layer);
         let layer_area = model_cells as f64 * area;
         if model_cells > 0 {
             outcome.peak_layer_area_mm2 = outcome.peak_layer_area_mm2.max(layer_area);
@@ -1406,7 +1410,7 @@ fn sweep_pass(
         let mut round = 0_usize;
         // The routing field's clearance is `cover_above`'s, which does not
         // change between the rounds below (nor between passes: it is cached).
-        let route_clear = layers.clearance_above(layer);
+        let route_clear = reader.clearance_above(layer);
         // Per-event mode inserts at most once per layer per pass: the trigger
         // table was measured before this pass, so after an insertion only the
         // re-route below is needed, and the next pass re-measures.
@@ -2260,7 +2264,8 @@ fn sweep_pass(
         if model_cells > 0 {
             check_model_sections(
                 grid,
-                layers.components(layer),
+                &masks.carry,
+                reader.components(layer),
                 &load_out,
                 layer,
                 sizing.x_allowed,
@@ -2962,6 +2967,7 @@ struct RouteOutcome {
 )]
 fn check_model_sections(
     grid: &Grid,
+    model: &[bool],
     components: &Components,
     load: &[f64],
     layer: usize,
@@ -2971,15 +2977,24 @@ fn check_model_sections(
     max_x: &mut f64,
 ) {
     // The components, their numbering and their cell counts are the layer
-    // cache's (a function of the model mask alone). What is left is the load
-    // sum: ascending cell order within each component, as it always was.
+    // cache's (a function of the model mask alone): `roots` lists the
+    // component of each model cell in ascending cell order, which is the order
+    // the mask is walked here. What is left is the load sum: ascending cell
+    // order within each component, as it always was.
     if components.counts.is_empty() {
         return;
     }
     loads.clear();
     loads.resize(components.counts.len(), 0.0);
-    for (&cell, &root) in components.cells.iter().zip(&components.roots) {
-        loads[root as usize] += load[cell as usize];
+    debug_assert_eq!(
+        components.roots.len(),
+        model.iter().filter(|filled| **filled).count(),
+        "one root per model cell"
+    );
+    let mut roots = components.roots.iter();
+    for (cell, _) in model.iter().enumerate().filter(|(_, filled)| **filled) {
+        let &root = roots.next().expect("one root per model cell");
+        loads[root as usize] += load[cell];
     }
     let area = grid.cell_area_mm2();
     for component in 0..components.counts.len() {
@@ -3132,7 +3147,7 @@ mod cached_components_tests {
                 oracle(&grid, &model, &load, 7, 0.5, &mut want, &mut want_max);
                 let (mut got, mut got_max) = (Vec::new(), 0.0_f64);
                 let mut scratch = Vec::new();
-                check_model_sections(&grid, &components, &load, 7, 0.5, &mut scratch, &mut got, &mut got_max);
+                check_model_sections(&grid, &model, &components, &load, 7, 0.5, &mut scratch, &mut got, &mut got_max);
                 assert_eq!(want.len(), got.len(), "overload count");
                 for (a, b) in want.iter().zip(&got) {
                     assert_eq!(a.layer, b.layer);
@@ -3157,10 +3172,10 @@ mod cached_components_tests {
         let mut labels = Vec::new();
         let mut parent = Vec::new();
         let components = Components::of(&grid, &model, &mut labels, &mut parent);
-        assert!(components.counts.is_empty() && components.cells.is_empty());
+        assert!(components.counts.is_empty() && components.roots.is_empty());
         let (mut out, mut max_x) = (Vec::new(), 0.0_f64);
         let mut scratch = Vec::new();
-        check_model_sections(&grid, &components, &vec![1.0; grid.cells()], 0, 0.1, &mut scratch, &mut out, &mut max_x);
+        check_model_sections(&grid, &model, &components, &vec![1.0; grid.cells()], 0, 0.1, &mut scratch, &mut out, &mut max_x);
         assert!(out.is_empty());
         assert_eq!(max_x.to_bits(), 0.0_f64.to_bits());
     }
