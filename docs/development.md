@@ -143,6 +143,16 @@ they were. Before adding a test that sets environment variables, changes the wor
 installs a panic hook or a global allocator, or times itself, keep it separate the same way:
 every test in `it` shares one process with the rest of the crate's tests.
 
+The clearance kernel has two checks of its own. `geom_kernel/src/kernel_speed_tests.rs` holds
+verbatim copies of the code the 2026-10-15 speed lane replaced (eager `closest_on_tri`, the
+stack walk, `seg_tri_dist`, the band walk, `seg_face_below`) and compares the live kernel with
+them by `to_bits()`, winning face included; `KC_ORACLE_SEGMENTS` sets the segments per mesh,
+`KC_STL` adds a binary STL, and `cargo test --profile gate -p geom_kernel --lib
+kernel_speed_tests::million -- --ignored` runs a million segments. Keep those copies as they
+are: they are the definition of the answer. `geom_kernel/tests/kc_clearance_bench.rs` times
+the batched clearance entry points on public API only (`-- --ignored --nocapture`, run it solo
+under the CPU lock); its `checksum` must be equal between revisions.
+
 ## The gate: five commands, all of them, every time
 
 ```sh
