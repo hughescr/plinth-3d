@@ -179,8 +179,9 @@ pub use initial::ContactConstructionLimits;
 pub use lower::{
     carried_ball_radii_mm, drawn_root_radius_mm, drawn_spans, lower_sweep_arms,
     lower_sweep_arms_with_hull_reference,
-    model_foot_discs, tip_contact_discs, tip_shaft_seat_bites,
-    DrawnSpan, ModelFoot, RootBoss, ShaftSeatBite, SweepArm, SweepArmLanding, SweepLowering,
+    model_foot_discs, tip_contact_discs, tip_shaft_seat_bite_groups, tip_shaft_seat_bites,
+    tip_shaft_seat_bites_with,
+    DrawnSpan, ModelFoot, RootBoss, SeatBiteRead, ShaftSeatBite, SweepArm, SweepArmLanding, SweepLowering,
     SweepHead, SweepLoweringError, SweepRootFlare, TipContactDisc, NATIVE_FOOT_PAD_OVERLAP_MM,
 };
 pub use hull::{convex_hull, frustum_ring, ConvexHull};

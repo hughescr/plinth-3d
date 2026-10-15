@@ -6,6 +6,8 @@
 
 use std::mem::size_of;
 
+use rayon::prelude::*;
+
 use plinth_core::{
     m0_constants, ContentDigest, Finite, LayerPlan, M0Constants, PositiveFinite, TipContactProfiles,
 };
@@ -3831,27 +3833,159 @@ pub fn tip_shaft_seat_bites(
     arms: &[SweepArm],
     layers: &LayerPlan,
 ) -> Result<Vec<Option<ShaftSeatBite>>, SweepLoweringError> {
+    let (plate_z, config) = seat_bite_config(layers)?;
+    let mut scratch: Vec<SupportPrimitive> = Vec::new();
+    let landers = shallowest_landers(arms);
+    Ok(arms
+        .iter()
+        .zip(&landers)
+        .map(|(arm, &lander)| lower_seat_bite(arm, lander, config, plate_z, &mut scratch))
+        .collect())
+}
+
+/// The plate height and the lowering configuration every seat bite is read
+/// with ([`tip_shaft_seat_bites`]).
+fn seat_bite_config(layers: &LayerPlan) -> Result<(f64, LoweringConfig), SweepLoweringError> {
     let plate_z = layers.z0_mm();
     let frame = BuildFrame::new(
         Finite::new(plate_z).map_err(|_| SweepLoweringError::MissingLayerHeight)?,
         PositiveFinite::new(1.0).map_err(|_| SweepLoweringError::InvalidLimits)?,
     );
     let config = LoweringConfig::current(frame, layers, 1, 1)?.without_pole_collars();
+    Ok((plate_z, config))
+}
+
+/// One arm's [`ShaftSeatBite`] by the production lowering, given the height
+/// of the shallowest member landed on it (`None` for an arm that seats into
+/// nothing, carries no seat plane, or cannot be lowered). A pure function of
+/// the arm, the lander height, the plate height and the registered constants.
+fn lower_seat_bite(
+    arm: &SweepArm,
+    lander: Option<f64>,
+    config: LoweringConfig,
+    plate_z: f64,
+    scratch: &mut Vec<SupportPrimitive>,
+) -> Option<ShaftSeatBite> {
+    if !arm.seats_into_model {
+        return None;
+    }
+    scratch.clear();
+    let lowered = lower_one_sweep_arm(arm, config, plate_z, lander, scratch);
+    let trim = lowered.seat.as_ref().and_then(|seat| seat.trim)?;
+    shaft_seat_bite(arm, scratch, trim, config)
+}
+
+/// One arm's seat bite with the height of the shallowest member landed on it
+/// that the read used ([`tip_shaft_seat_bite_groups`]).
+///
+/// A bite is a pure function of the arm and that height, but the height
+/// depends on the BATCH the arm is read in ([`shallowest_landers`]: the other
+/// arms of the batch that land on it), so a read made in one batch stands for
+/// another only where the other batch gives the arm the same height
+/// ([`tip_shaft_seat_bites_with`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SeatBiteRead {
+    pub lander_mm: Option<f64>,
+    pub bite: Option<ShaftSeatBite>,
+}
+
+/// Arms per parallel task of [`tip_shaft_seat_bite_groups`]: each arm is a few
+/// microseconds of lowering, so a task is hundreds of microseconds.
+const SEAT_BITE_CHUNK_ARMS: usize = 32;
+
+/// [`tip_shaft_seat_bites`] of several GROUPS of arms at once, each group read
+/// exactly as `tip_shaft_seat_bites(group)` reads it (the landers are found
+/// within the group only), in order, with the lander height each arm was read
+/// with. All the groups' arms are cut into chunks of [`SEAT_BITE_CHUNK_ARMS`]
+/// that run in parallel when there are more than one chunk of them; every
+/// arm is its own pure read, so the answers do not depend on the chunking.
+///
+/// # Errors
+///
+/// Only about the request, as [`tip_shaft_seat_bites`].
+pub fn tip_shaft_seat_bite_groups(
+    groups: &[&[SweepArm]],
+    layers: &LayerPlan,
+) -> Result<Vec<Vec<SeatBiteRead>>, SweepLoweringError> {
+    let (plate_z, config) = seat_bite_config(layers)?;
+    let landers: Vec<Option<f64>> = groups
+        .iter()
+        .flat_map(|group| shallowest_landers(group))
+        .collect();
+    let flat: Vec<&SweepArm> = groups.iter().flat_map(|group| group.iter()).collect();
+    let chunk_of = |(arms, landers): (&[&SweepArm], &[Option<f64>])| -> Vec<Option<ShaftSeatBite>> {
+        let mut scratch: Vec<SupportPrimitive> = Vec::new();
+        arms.iter()
+            .zip(landers)
+            .map(|(arm, &lander)| lower_seat_bite(arm, lander, config, plate_z, &mut scratch))
+            .collect()
+    };
+    let bites: Vec<Option<ShaftSeatBite>> = if flat.len() <= SEAT_BITE_CHUNK_ARMS {
+        chunk_of((&flat, &landers))
+    } else {
+        let chunks: Vec<Vec<Option<ShaftSeatBite>>> = flat
+            .par_chunks(SEAT_BITE_CHUNK_ARMS)
+            .zip(landers.par_chunks(SEAT_BITE_CHUNK_ARMS))
+            .map(chunk_of)
+            .collect();
+        chunks.into_iter().flatten().collect()
+    };
+    let mut reads = landers
+        .into_iter()
+        .zip(bites)
+        .map(|(lander_mm, bite)| SeatBiteRead { lander_mm, bite });
+    Ok(groups
+        .iter()
+        .map(|group| reads.by_ref().take(group.len()).collect())
+        .collect())
+}
+
+/// [`tip_shaft_seat_bites`] of `arms` taking each arm's read from `known`
+/// where it stands for this batch: the arm's `known` read is used when its
+/// lander height equals the one this batch gives the arm (bit for bit), else
+/// the arm is lowered here with the batch's height. The answers are the ones
+/// `tip_shaft_seat_bites(arms)` gives.
+///
+/// # Errors
+///
+/// Only about the request, as [`tip_shaft_seat_bites`].
+pub fn tip_shaft_seat_bites_with(
+    arms: &[SweepArm],
+    known: &[Option<SeatBiteRead>],
+    layers: &LayerPlan,
+) -> Result<Vec<Option<ShaftSeatBite>>, SweepLoweringError> {
+    let (plate_z, config) = seat_bite_config(layers)?;
     let mut scratch: Vec<SupportPrimitive> = Vec::new();
     let landers = shallowest_landers(arms);
     Ok(arms
         .iter()
+        .zip(&landers)
         .enumerate()
-        .map(|(index, arm)| {
-            if !arm.seats_into_model {
-                return None;
+        .map(|(at, (arm, &lander))| {
+            match known.get(at).copied().flatten() {
+                Some(read) if lander_unchanged(read.lander_mm, lander) => read.bite,
+                _ => lower_seat_bite(arm, lander, config, plate_z, &mut scratch),
             }
-            scratch.clear();
-            let lowered = lower_one_sweep_arm(arm, config, plate_z, landers[index], &mut scratch);
-            let trim = lowered.seat.as_ref().and_then(|seat| seat.trim)?;
-            shaft_seat_bite(arm, &scratch, trim, config)
         })
         .collect())
+}
+
+/// Whether a read made with lander height `read` stands for a batch that
+/// gives `batch`.
+fn lander_unchanged(read: Option<f64>, batch: Option<f64>) -> bool {
+    #[cfg(test)]
+    if tests_skip_lander_check::SKIP.with(std::cell::Cell::get) {
+        return true;
+    }
+    read.map(f64::to_bits) == batch.map(f64::to_bits)
+}
+
+/// The sabotage drill's switch: the lander check off.
+#[cfg(test)]
+mod tests_skip_lander_check {
+    thread_local! {
+        pub(super) static SKIP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
 }
 
 /// One arm's [`ShaftSeatBite`] from its own lowered primitives.
@@ -5647,6 +5781,65 @@ mod shaft_seat_bite_tests {
             .into_iter()
             .map(|bite| bite.expect("every arm seats into a measured face"))
             .collect()
+    }
+
+    /// **A group's read stands for a batch only where the batch gives each arm
+    /// the same lander height** (lip-seat read-ahead, 2026-10-15). A host and
+    /// an arm that lands on its shaft: read as a group of the host alone, the
+    /// host has no lander; read in a batch with the lander, it has one. The
+    /// grouped reads equal the per-group calls; `tip_shaft_seat_bites_with`
+    /// takes the host's alone-read only for a batch that gives it no lander,
+    /// and lowers it afresh for the batch that does. SABOTAGE INSIDE: with the
+    /// check off the stale (here, marked) read is served for the batch that
+    /// changes the lander.
+    #[test]
+    fn a_group_read_is_reused_only_where_the_batch_gives_the_same_lander() {
+        use super::{
+            tests_skip_lander_check, tip_shaft_seat_bite_groups, tip_shaft_seat_bites_with,
+        };
+        let seat = [0.0, 0.0, 5.0];
+        let down = [0.0, 0.0, -1.0];
+        let host = arm(seat, down, down);
+        // An arm whose base stands inside the host's shaft, half way down.
+        let mut lander = arm([1.0, 0.0, 4.0], down, down);
+        lander.base_mm = [0.0, 0.0, 3.5];
+        let layers = layers();
+        let batch = [host.clone(), lander.clone()];
+        let together = tip_shaft_seat_bites(&batch, &layers).expect("a valid request");
+        // The grouped reads are the per-group calls, read together or apart.
+        let groups = tip_shaft_seat_bite_groups(&[&batch[..1], &batch[1..]], &layers)
+            .expect("a valid request");
+        let apart = [
+            tip_shaft_seat_bites(&batch[..1], &layers).expect("a valid request"),
+            tip_shaft_seat_bites(&batch[1..], &layers).expect("a valid request"),
+        ];
+        assert_eq!(groups[0].len(), 1);
+        assert_eq!(groups[0][0].bite, apart[0][0]);
+        assert_eq!(groups[1][0].bite, apart[1][0]);
+        assert_eq!(groups[0][0].lander_mm, None, "alone, nothing lands on the host");
+        // The batch does give the host a lander: the alone-read does not stand.
+        let landers = super::shallowest_landers(&batch);
+        assert!(landers[0].is_some(), "the lander stands inside the host's shaft: {landers:?}");
+        // A marked stand-in for the host's alone-read, to see which one is served.
+        let mut marked = groups[0][0];
+        marked.bite = Some(ShaftSeatBite {
+            bite_mm: 123.0,
+            approach_deg: 0.0,
+            limit_deg: 0.0,
+        });
+        let known = [Some(marked), Some(groups[1][0])];
+        let with = tip_shaft_seat_bites_with(&batch, &known, &layers).expect("a valid request");
+        assert_eq!(with, together, "the changed lander is read afresh, the unchanged one reused");
+        // Control: a batch that gives the host no lander serves the stored read.
+        let alone = tip_shaft_seat_bites_with(&batch[..1], &[Some(marked)], &layers)
+            .expect("a valid request");
+        assert_eq!(alone[0], marked.bite, "an unchanged lander reuses the read");
+        // SABOTAGE: the check off serves the stale read for the changed batch.
+        tests_skip_lander_check::SKIP.with(|cell| cell.set(true));
+        let sabotaged = tip_shaft_seat_bites_with(&batch, &known, &layers).expect("a valid request");
+        tests_skip_lander_check::SKIP.with(|cell| cell.set(false));
+        assert_eq!(sabotaged[0], marked.bite, "the drill bites: the stale read is served");
+        assert_ne!(sabotaged, together);
     }
 
     /// **A tip whose raster seat stands on the model side of its face is

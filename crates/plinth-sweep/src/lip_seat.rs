@@ -981,7 +981,7 @@ struct Pending {
     refused_slender: bool,
     /// **The mover's own solid clearance, read ahead** ([`read_movers`]): by
     /// candidate index, the path the read was drawn on and the read.
-    ahead: std::collections::HashMap<usize, (Vec<u32>, Option<f64>)>,
+    ahead: std::collections::HashMap<usize, Ahead>,
     /// **The path tests of candidates read ahead** ([`Tested`]), by candidate
     /// index: a refused candidate as well as an admitted one, each valid for
     /// the field generation it was asked at ([`StampedIndex::generation`]) and
@@ -1502,22 +1502,26 @@ fn read_movers(
     trial: &[SweepArm],
     first_of: &[usize],
     clearance: bool,
-    was: impl Fn(usize) -> Option<f64>,
+    standing_reads: &mut StandingReads,
     after: &mut [Option<f64>],
-) {
+) -> Vec<Option<Prefetched>> {
     struct Row {
         slot: usize,
         at: usize,
         path: Vec<u32>,
+        children: Vec<Follow>,
+        /// The first slot of the proposal's own trial members, for a row
+        /// that is this round's proposal (its members are drawn already).
+        own: Option<usize>,
         solid: SweepArm,
         on_model: bool,
         at_least: f64,
     }
     let plate_z_mm = frame.plate_z_mm;
-    let at_least = |member: usize, landing: Landing| {
+    let at_least = |standing_reads: &StandingReads, member: usize, landing: Landing| {
         admitted_at_least(
             clearance || !matches!(landing, Landing::Strut { .. }),
-            was(member),
+            standing_reads.before(member, struts),
             frame.tier,
         )
     };
@@ -1529,7 +1533,7 @@ fn read_movers(
         if job
             .ahead
             .get(&proposal.at)
-            .is_some_and(|(path, _)| *path == proposal.path)
+            .is_some_and(|ahead| ahead.path == proposal.path)
         {
             ahead_hits += 1;
             continue;
@@ -1538,9 +1542,11 @@ fn read_movers(
             slot: proposal.slot,
             at: proposal.at,
             path: proposal.path.clone(),
+            children: proposal.children.clone(),
+            own: Some(first),
             solid: trial[first].clone(),
             on_model: matches!(proposal.candidate.landing, Landing::Model { .. }),
-            at_least: at_least(job.index, proposal.candidate.landing),
+            at_least: at_least(standing_reads, job.index, proposal.candidate.landing),
         });
         let end = proposal.at.saturating_add(job.window).min(job.candidates.len());
         for at in proposal.at + 1..end {
@@ -1551,7 +1557,7 @@ fn read_movers(
             // The path test: stored at this generation (a refusal too, so a
             // refused candidate is asked once per generation, not once per
             // overlapping window), or asked now and stored.
-            let path = match job.tested.get(&at).filter(|tested| tested.generation == generation) {
+            let (path, children) = match job.tested.get(&at).filter(|tested| tested.generation == generation) {
                 Some(tested) => {
                     if verify_lip_seat() {
                         let fresh = propose(
@@ -1565,10 +1571,10 @@ fn read_movers(
                         );
                         verify_lip_seat_reuse("read-ahead", &tested.found, &fresh);
                     }
-                    let Some((path, _)) = &tested.found else {
+                    let Some(found) = &tested.found else {
                         continue;
                     };
-                    path.clone()
+                    found.clone()
                 }
                 None => {
                     let found = propose(
@@ -1580,12 +1586,17 @@ fn read_movers(
                         &job.children,
                         clearance,
                     );
-                    let path = found.as_ref().map(|(path, _)| path.clone());
-                    job.tested.insert(at, Tested { generation, found });
-                    let Some(path) = path else {
+                    job.tested.insert(
+                        at,
+                        Tested {
+                            generation,
+                            found: found.clone(),
+                        },
+                    );
+                    let Some(found) = found else {
                         continue;
                     };
-                    path
+                    found
                 }
             };
             let solid = trial_arm(
@@ -1602,9 +1613,11 @@ fn read_movers(
                 slot: proposal.slot,
                 at,
                 path,
+                children,
+                own: None,
                 solid,
                 on_model: matches!(candidate.landing, Landing::Model { .. }),
-                at_least: at_least(job.index, candidate.landing),
+                at_least: at_least(standing_reads, job.index, candidate.landing),
             });
         }
         let job = &mut pending[proposal.slot];
@@ -1616,25 +1629,146 @@ fn read_movers(
         let mut solids: Vec<SweepArm> = Vec::with_capacity(rows.len());
         let mut on_model: Vec<bool> = Vec::with_capacity(rows.len());
         let mut bounds: Vec<f64> = Vec::with_capacity(rows.len());
-        let mut keys: Vec<(usize, usize, Vec<u32>)> = Vec::with_capacity(rows.len());
-        for row in rows {
-            solids.push(row.solid);
+        for row in &rows {
+            solids.push(row.solid.clone());
             on_model.push(row.on_model);
             bounds.push(row.at_least);
-            keys.push((row.slot, row.at, row.path));
         }
-        let _site = crate::perf::clear_site(crate::perf::ClearSite::LipReadAhead);
-        let reads = frame.solid_at_least(&solids, &on_model, &bounds);
-        for ((slot, at, path), read) in keys.into_iter().zip(reads) {
-            pending[slot].ahead.insert(at, (path, read));
+        let reads = {
+            let _site = crate::perf::clear_site(crate::perf::ClearSite::LipReadAhead);
+            frame.solid_at_least(&solids, &on_model, &bounds)
+        };
+        // **What the round asks next of a mover that clears**, read here for
+        // every row that clears, on the pool, so the round finds it done:
+        // each child's trial solid against what it stood at, and the seat
+        // bites of the mover and its children ([`Prefetched`]).
+        let clearing: Vec<usize> = (0..rows.len())
+            .filter(|&at| reads[at].is_some_and(|now| now >= bounds[at]))
+            .collect();
+        let mut prefetched: std::collections::HashMap<usize, Prefetched> =
+            std::collections::HashMap::with_capacity(clearing.len());
+        if !clearing.is_empty() {
+            // Each clearing row's group: the mover's trial solid, then its
+            // children's, in the order the round lays them out.
+            let groups: Vec<Vec<SweepArm>> = clearing
+                .iter()
+                .map(|&at| {
+                    let row = &rows[at];
+                    let mut group = Vec::with_capacity(1 + row.children.len());
+                    group.push(solids[at].clone());
+                    for (offset, (child, _, path)) in row.children.iter().enumerate() {
+                        group.push(row.own.map_or_else(
+                            || {
+                                let strut = &struts[*child];
+                                trial_arm(
+                                    context,
+                                    plate_z_mm,
+                                    struts,
+                                    arms,
+                                    *child,
+                                    strut.landing,
+                                    strut.k_bottom,
+                                    path,
+                                )
+                            },
+                            |first| trial[first + 1 + offset].clone(),
+                        ));
+                    }
+                    group
+                })
+                .collect();
+            // The children's solids against what each stood at, one kernel batch.
+            let members: Vec<usize> = clearing
+                .iter()
+                .flat_map(|&at| rows[at].children.iter().map(|(child, _, _)| *child))
+                .collect();
+            standing_reads.read(frame, arms, struts, &members, false);
+            let follower_arms: Vec<SweepArm> = groups
+                .iter()
+                .flat_map(|group| group[1..].iter().cloned())
+                .collect();
+            let follower_bounds: Vec<f64> = members
+                .iter()
+                .map(|&member| {
+                    admitted_at_least(false, standing_reads.before(member, struts), frame.tier)
+                })
+                .collect();
+            let follower_reads = if follower_arms.is_empty() {
+                Vec::new()
+            } else {
+                let _site = crate::perf::clear_site(crate::perf::ClearSite::LipFollowers);
+                frame.solid_at_least(
+                    &follower_arms,
+                    &vec![false; follower_arms.len()],
+                    &follower_bounds,
+                )
+            };
+            // Every group's seat bites, chunked across the pool.
+            let slices: Vec<&[SweepArm]> = groups.iter().map(Vec::as_slice).collect();
+            let bites = plinth_support::tip_shaft_seat_bite_groups(&slices, frame.layer_plan).ok();
+            let mut follower_reads = follower_reads.into_iter();
+            let mut bites = bites.map(IntoIterator::into_iter);
+            for (&at, group) in clearing.iter().zip(&groups) {
+                prefetched.insert(
+                    at,
+                    Prefetched {
+                        followers: follower_reads.by_ref().take(group.len() - 1).collect(),
+                        bites: bites.as_mut().and_then(Iterator::next),
+                    },
+                );
+            }
+        }
+        for (at, (row, read)) in rows.into_iter().zip(reads).enumerate() {
+            let prefetched = prefetched.remove(&at);
+            pending[row.slot].ahead.insert(
+                row.at,
+                Ahead {
+                    path: row.path,
+                    children: row.children,
+                    read,
+                    prefetched,
+                },
+            );
         }
     }
-    for (proposal, &first) in proposals.iter().zip(first_of) {
-        after[first] = pending[proposal.slot]
-            .ahead
-            .remove(&proposal.at)
-            .and_then(|(_, read)| read);
-    }
+    proposals
+        .iter()
+        .zip(first_of)
+        .map(|(proposal, &first)| {
+            let ahead = pending[proposal.slot].ahead.remove(&proposal.at);
+            after[first] = ahead.as_ref().and_then(|ahead| ahead.read);
+            // The read-ahead's follower reads and bites stand for the round
+            // only for the children it drew them for.
+            ahead
+                .filter(|ahead| ahead.children == proposal.children)
+                .and_then(|ahead| ahead.prefetched)
+        })
+        .collect()
+}
+
+/// **What the read-ahead measured of a candidate** (`Pending::ahead`), for the
+/// path it was drawn on and the children that follow it: the mover's trial
+/// read, and where that read clears, [`Prefetched`].
+struct Ahead {
+    path: Vec<u32>,
+    children: Vec<Follow>,
+    read: Option<f64>,
+    prefetched: Option<Prefetched>,
+}
+
+/// What the round asks of a mover that clears, read ahead for every member of
+/// its group (the mover first, then its children as the proposal lays them
+/// out); each read is a pure function of the member's trial solid, so it
+/// stands for whichever batch the round would have carried it in, except the
+/// seat bites, which depend on the batch through the lander heights
+/// ([`plinth_support::tip_shaft_seat_bites_with`] checks them).
+struct Prefetched {
+    /// Each child's trial solid read against what it stood at
+    /// ([`admitted_at_least`]): one read per child, in order.
+    followers: Vec<Option<f64>>,
+    /// The group's seat bites, each with the lander height it was read with;
+    /// `None` when the lowering refused the request.
+    bites: Option<Vec<plinth_support::SeatBiteRead>>,
 }
 
 /// **Remedy 1: a smaller angle to the same seat.** Re-land every arm over its
@@ -2057,6 +2191,9 @@ pub(crate) fn apply(
         let rows = trial.len();
         let mut after: Vec<Option<f64>> = vec![None; rows];
         let mut before: Vec<Option<f64>> = vec![None; rows];
+        // What the read-ahead measured of each proposal's followers and bites
+        // ([`Prefetched`]), where it did.
+        let mut prefetched: Vec<Option<Prefetched>> = (0..proposals.len()).map(|_| None).collect();
         let mover_clears: Vec<bool> = match surface {
             None => vec![true; proposals.len()],
             Some(surface) => {
@@ -2076,7 +2213,7 @@ pub(crate) fn apply(
                 for (&member, &first) in movers.iter().zip(&first_of) {
                     before[first] = standing_reads.before(member, struts);
                 }
-                read_movers(
+                prefetched = read_movers(
                     &frame,
                     context,
                     &index,
@@ -2087,7 +2224,7 @@ pub(crate) fn apply(
                     &trial,
                     &first_of,
                     trigger.is_clearance(),
-                    |member| standing_reads.before(member, struts),
+                    &mut standing_reads,
                     &mut after,
                 );
                 let clears: Vec<bool> = proposals
@@ -2124,19 +2261,63 @@ pub(crate) fn apply(
                     for (&slot, &member) in follower_slots.iter().zip(&followers) {
                         before[slot] = standing_reads.before(member, struts);
                     }
-                    let follower_arms: Vec<SweepArm> =
-                        follower_slots.iter().map(|&slot| trial[slot].clone()).collect();
-                    let bounds: Vec<f64> = follower_slots
+                    // The followers' solids, read in one batch: those the
+                    // read-ahead already read for these very children are
+                    // taken from it (a read is a pure function of the
+                    // member's trial solid and its bound), the rest here.
+                    let mut served = vec![false; rows];
+                    for (((proposal, &first), pre), &clear) in proposals
                         .iter()
-                        .map(|&slot| admitted_at_least(false, before[slot], tier))
+                        .zip(&first_of)
+                        .zip(&prefetched)
+                        .zip(&clears)
+                    {
+                        let Some(pre) = pre.as_ref().filter(|pre| clear && pre.followers.len() == proposal.children.len())
+                        else {
+                            continue;
+                        };
+                        for (offset, value) in pre.followers.iter().enumerate() {
+                            after[first + 1 + offset] = *value;
+                            served[first + 1 + offset] = true;
+                        }
+                    }
+                    let read_slots = |slots: &[usize]| -> Vec<Option<f64>> {
+                        if slots.is_empty() {
+                            return Vec::new();
+                        }
+                        let follower_arms: Vec<SweepArm> =
+                            slots.iter().map(|&slot| trial[slot].clone()).collect();
+                        let bounds: Vec<f64> = slots
+                            .iter()
+                            .map(|&slot| admitted_at_least(false, before[slot], tier))
+                            .collect();
+                        let _site = crate::perf::clear_site(crate::perf::ClearSite::LipFollowers);
+                        frame.solid_at_least(&follower_arms, &vec![false; follower_arms.len()], &bounds)
+                    };
+                    let todo: Vec<usize> = follower_slots
+                        .iter()
+                        .copied()
+                        .filter(|&slot| !served[slot])
                         .collect();
-                    let _site = crate::perf::clear_site(crate::perf::ClearSite::LipFollowers);
-                    let read = frame.solid_at_least(
-                        &follower_arms,
-                        &vec![false; follower_arms.len()],
-                        &bounds,
-                    );
-                    for (&slot, value) in follower_slots.iter().zip(read) {
+                    let read = read_slots(&todo);
+                    if verify_lip_seat() {
+                        // The shadow check: every served read, read the
+                        // round's own way.
+                        let taken: Vec<usize> = follower_slots
+                            .iter()
+                            .copied()
+                            .filter(|&slot| served[slot])
+                            .collect();
+                        let fresh = read_slots(&taken);
+                        for (&slot, fresh) in taken.iter().zip(fresh) {
+                            assert!(
+                                after[slot].map(f64::to_bits) == fresh.map(f64::to_bits),
+                                "PLINTH_SWEEP_VERIFY_LIPSEAT: a follower read ahead differs from the round's own\n slot {slot}: ahead {:?}, fresh {fresh:?}",
+                                after[slot]
+                            );
+                        }
+                    }
+                    for (&slot, value) in todo.iter().zip(read) {
                         after[slot] = value;
                     }
                 }
@@ -2156,8 +2337,31 @@ pub(crate) fn apply(
                 .collect();
             if !slots.is_empty() {
                 let arms_read: Vec<SweepArm> = slots.iter().map(|&slot| trial[slot].clone()).collect();
-                let bites = plinth_support::tip_shaft_seat_bites(&arms_read, layer_plan)
+                // The bites the read-ahead measured for these very groups
+                // stand where this batch gives each arm the lander height
+                // they were read with; the rest are read here.
+                let known: Vec<Option<plinth_support::SeatBiteRead>> = proposals
+                    .iter()
+                    .zip(&prefetched)
+                    .zip(&mover_clears)
+                    .filter(|(_, &clear)| clear)
+                    .flat_map(|((proposal, pre), _)| {
+                        let group = pre.as_ref().and_then(|pre| pre.bites.as_ref());
+                        (0..=proposal.children.len())
+                            .map(move |offset| group.and_then(|group| group.get(offset)).copied())
+                    })
+                    .collect();
+                let bites = plinth_support::tip_shaft_seat_bites_with(&arms_read, &known, layer_plan)
                     .unwrap_or_else(|_| vec![None; arms_read.len()]);
+                if verify_lip_seat() && known.iter().any(Option::is_some) {
+                    // The shadow check: the round's own call, compared.
+                    let fresh = plinth_support::tip_shaft_seat_bites(&arms_read, layer_plan)
+                        .unwrap_or_else(|_| vec![None; arms_read.len()]);
+                    assert!(
+                        bites == fresh,
+                        "PLINTH_SWEEP_VERIFY_LIPSEAT: seat bites taken from the read-ahead differ from the round's own call\n ahead {bites:?}\n fresh {fresh:?}"
+                    );
+                }
                 for (&slot, bite) in slots.iter().zip(bites) {
                     measured[slot] = bite;
                 }
