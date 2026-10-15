@@ -85,7 +85,7 @@ pub mod report;
 mod reuse_probe;
 pub mod rigid_share;
 #[allow(dead_code, reason = "SC-0 lands the acceptance contract before SC-3 calls it")]
-mod second_contact;
+pub mod second_contact;
 pub mod slenderness;
 pub mod stage_shake;
 pub mod stranded_branch;

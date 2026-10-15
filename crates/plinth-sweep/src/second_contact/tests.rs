@@ -574,6 +574,20 @@ fn slab_plan() -> (crate::SweepPlan, plinth_core::LayerPlan, crate::SweepPolicy)
     (plan, layers, policy)
 }
 
+/// The baseline census of the slab plan runs, agrees with the report on a
+/// field no late mutation touched, and prints.
+#[test]
+fn the_baseline_census_of_a_real_plan_agrees_with_its_history() {
+    let (plan, layers, policy) = slab_plan();
+    let summary = super::baseline_census(&plan, &layers, &policy, true);
+    assert_eq!(summary.members, plan.struts.len());
+    assert_eq!((summary.unbraced_final_only, summary.unbraced_history_only), (0, 0), "{summary}");
+    assert_eq!(summary.landings_invalid_final, summary.landings_invalid_history);
+    assert_eq!(summary.landings_unrooted_final, summary.landings_unrooted_history);
+    assert!(summary.shake_over_pixel_final.is_some());
+    assert!(summary.to_string().contains("G3 collisions"));
+}
+
 fn blank_report() -> crate::report::SweepRunReport {
     slab_plan().0.report
 }

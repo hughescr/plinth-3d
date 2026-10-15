@@ -1285,5 +1285,179 @@ pub(crate) fn remap_refused(refused: &[(u32, usize)], remap: &[u32]) -> Vec<(u32
     out
 }
 
+// ------------------------------------------------------- baseline census
+
+/// What the acceptance contract finds on ONE finished plan, as plain numbers
+/// for a log line: how much of the defect the first plan itself already carries
+/// (`SC-DESIGN.md` §5: the baseline the edit is held to). Read-only.
+#[derive(Clone, Debug, Default)]
+pub struct CensusSummary {
+    pub members: usize,
+    /// Pairs of members whose drawn solids overlap beyond a planned joint.
+    pub collisions: usize,
+    /// The deepest of them: `(low, high, depth mm, pieces)`, deepest first.
+    pub deepest_collisions: Vec<(u32, u32, f64, String)>,
+    /// Collisions by the pair of piece kinds.
+    pub collisions_by_pieces: BTreeMap<String, usize>,
+    /// Arms merged into a trunk at the radius ceiling.
+    pub overgrown_merges: usize,
+    /// The inserted ones among them.
+    pub overgrown_inserted: usize,
+    /// Warnings by class, over the whole keyed list.
+    pub warnings_by_class: BTreeMap<String, usize>,
+    /// Unbraced runs over their limit: the report's history and the final.
+    pub unbraced_history: usize,
+    pub unbraced_final: usize,
+    /// Members whose final unbraced warning is not in the history, and the
+    /// reverse: what a late mutation moved.
+    pub unbraced_final_only: usize,
+    pub unbraced_history_only: usize,
+    pub braces_thicker_history: usize,
+    pub braces_thicker_final: usize,
+    pub landings_invalid_final: usize,
+    pub landings_unrooted_final: usize,
+    pub landings_invalid_history: usize,
+    pub landings_unrooted_history: usize,
+    pub shake_over_pixel_history: usize,
+    pub shake_over_pixel_final: Option<usize>,
+    /// Seconds: the collision census, and all the final predicates.
+    pub collision_seconds: f64,
+    pub final_seconds: f64,
+}
+
+impl std::fmt::Display for CensusSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "members {}", self.members)?;
+        writeln!(
+            f,
+            "G3 collisions {} (by pieces {:?}); overgrown merges {} ({} inserted)",
+            self.collisions, self.collisions_by_pieces, self.overgrown_merges, self.overgrown_inserted
+        )?;
+        for (low, high, depth, pieces) in &self.deepest_collisions {
+            writeln!(f, "  collision {low}-{high}: {depth:.4} mm ({pieces})")?;
+        }
+        writeln!(
+            f,
+            "unbraced runs over limit: history {} / final {} (final only {}, history only {}); \
+             braces thicker than a post: history {} / final {}",
+            self.unbraced_history,
+            self.unbraced_final,
+            self.unbraced_final_only,
+            self.unbraced_history_only,
+            self.braces_thicker_history,
+            self.braces_thicker_final
+        )?;
+        writeln!(
+            f,
+            "landings: invalid history {} / final {}; unrooted history {} / final {}; \
+             shake stages over a pixel: history {} / final {:?}",
+            self.landings_invalid_history,
+            self.landings_invalid_final,
+            self.landings_unrooted_history,
+            self.landings_unrooted_final,
+            self.shake_over_pixel_history,
+            self.shake_over_pixel_final
+        )?;
+        writeln!(f, "warnings by class {:?}", self.warnings_by_class)?;
+        write!(
+            f,
+            "seconds: collision census {:.3}, final predicates {:.3}",
+            self.collision_seconds, self.final_seconds
+        )
+    }
+}
+
+/// **The baseline census of a finished plan**: the member-collision census, the
+/// overgrown-merge capacity predicate, the joint certificate row by row and the
+/// final predicates, set beside the report's history counters. Not called by
+/// production; a diagnostic for the log and for SC-3's acceptance. The escape
+/// flood is not run (it needs the slices and the drains): its history verdict
+/// stands. `with_shake` runs the construction-stage shake as a final predicate.
+#[must_use]
+pub fn baseline_census(
+    plan: &SweepPlan,
+    layer_plan: &plinth_core::LayerPlan,
+    policy: &SweepPolicy,
+    with_shake: bool,
+) -> CensusSummary {
+    let mut env = FinalEnv::of_plan(plan, policy, None);
+    if !with_shake {
+        env.shake_pressure_kpa = None;
+    }
+    let arms = crate::adapter::arms_of(plan);
+    let started = std::time::Instant::now();
+    let collisions = crate::member_clearance::member_collisions(
+        &plan.struts,
+        &arms,
+        layer_plan,
+        plan.plate_z_mm,
+        plan.grid.pitch_mm(),
+    );
+    let collision_seconds = started.elapsed().as_secs_f64();
+    let started = std::time::Instant::now();
+    let finals = final_checks(&env, &plan.struts);
+    let final_seconds = started.elapsed().as_secs_f64();
+    let census = Census {
+        collisions,
+        overgrown: overgrown_merges(&plan.struts, policy.tip_radius_max_mm),
+        joint_rows: crate::heads::joint_certificate_rows(&plan.struts),
+        finals,
+        ground_lost: Vec::new(),
+    };
+    let finished = Finished::of(&plan.report, &plan.struts, &census);
+    let history: BTreeSet<u32> = plan
+        .report
+        .slenderness_lane
+        .warnings
+        .iter()
+        .map(|warning| warning.strut_id)
+        .collect();
+    let last: BTreeSet<u32> = census.finals.unbraced.iter().map(|run| run.member).collect();
+    let mut by_pieces: BTreeMap<String, usize> = BTreeMap::new();
+    for collision in &census.collisions {
+        *by_pieces
+            .entry(format!("{:?}-{:?}", collision.low_piece, collision.high_piece))
+            .or_default() += 1;
+    }
+    let mut deepest: Vec<&MemberCollision> = census.collisions.iter().collect();
+    deepest.sort_by(|x, y| y.depth_mm.total_cmp(&x.depth_mm).then((x.low, x.high).cmp(&(y.low, y.high))));
+    let mut classes: BTreeMap<String, usize> = BTreeMap::new();
+    for warning in &finished.warnings {
+        *classes.entry(format!("{:?}", warning.key.class)).or_default() += 1;
+    }
+    let ledger = &plan.report.landing_check.finished;
+    CensusSummary {
+        members: plan.struts.len(),
+        collisions: census.collisions.len(),
+        deepest_collisions: deepest
+            .iter()
+            .take(8)
+            .map(|c| (c.low, c.high, c.depth_mm, format!("{:?}-{:?}", c.low_piece, c.high_piece)))
+            .collect(),
+        collisions_by_pieces: by_pieces,
+        overgrown_merges: census.overgrown.len(),
+        overgrown_inserted: census
+            .overgrown
+            .iter()
+            .filter(|merge| plan.struts.get(merge.child as usize).is_some_and(|s| s.inserted_by_load))
+            .count(),
+        warnings_by_class: classes,
+        unbraced_history: plan.report.slenderness_lane.warnings.len(),
+        unbraced_final: census.finals.unbraced.len(),
+        unbraced_final_only: last.difference(&history).count(),
+        unbraced_history_only: history.difference(&last).count(),
+        braces_thicker_history: plan.report.slenderness_lane.braces_thicker_than_a_post,
+        braces_thicker_final: census.finals.braces_thicker_than_a_post,
+        landings_invalid_final: census.finals.landings.invalid_landings(),
+        landings_unrooted_final: census.finals.landings.unrooted.len(),
+        landings_invalid_history: ledger.invalid_landings(),
+        landings_unrooted_history: ledger.unrooted.len(),
+        shake_over_pixel_history: plan.report.slenderness_lane.stage_shake.stages_over_pixel,
+        shake_over_pixel_final: census.finals.shake.as_ref().map(|shake| shake.stages_over_pixel),
+        collision_seconds,
+        final_seconds,
+    }
+}
+
 #[cfg(test)]
 mod tests;
