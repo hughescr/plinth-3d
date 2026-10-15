@@ -94,7 +94,9 @@ fn main() {
         }
     }
 
-    let request = SweepRequest::registered().expect("registered");
+    let mut request = SweepRequest::registered().expect("registered");
+    // A reference probe: the exact field (the registered request defaults to the proxy).
+    request.delicacy = plinth_orient::DelicacyEvaluation::Exact;
     for (label, demand) in [
         ("tip scar ON ", SweepDemand::production()),
         ("tip scar OFF", SweepDemand::without_tip_contact_scar()),
