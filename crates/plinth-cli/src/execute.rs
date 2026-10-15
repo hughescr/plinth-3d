@@ -114,6 +114,7 @@ fn resolve(selection: &PrepareSelection) -> Result<PrepareRequest, PipelineError
         },
         support,
         no_cache: selection.cache.no_cache(),
+        exact_delicacy: selection.exact_delicacy,
         // `--stop-after` is not on the ratified command line. A stage stop is a
         // testing outcome; the CLI runs the whole chain or reports why it could
         // not.
@@ -238,6 +239,22 @@ fn print_report(selection: &PrepareSelection, report: &PrepareReport) {
         }
     );
 
+    // Which delicacy curvature the orientation table read. The protected proxy
+    // can pick a different pose than the full mesh on a dense model, so the
+    // run states which one it was (and how to ask for the other).
+    if matches!(selection.orientation, OrientSelection::Dense) {
+        println!(
+            "  delicacy     {}",
+            if selection.exact_delicacy {
+                "orientation table curvature on the full mesh (--exact-delicacy)"
+            } else {
+                "orientation table curvature on the protected proxy (default; \
+                 --exact-delicacy evaluates the full mesh, slower on a dense model, \
+                 and can pick a different pose)"
+            }
+        );
+    }
+
     for line in no_orient_lines(
         &selection.no_orient,
         &selection.input_models_dir,
@@ -299,7 +316,11 @@ fn print_report(selection: &PrepareSelection, report: &PrepareReport) {
     for line in near_parallel_lines(near_parallel_counts()) {
         println!("{line}");
     }
-    println!("{}", thread_budget_line(budget_counts(), resolve_threads()));
+    // STDERR, not the report: `inline` counts kernel batch calls, and how many
+    // calls a run makes depends on how racing searches cancel each other, so it
+    // differs between two runs of one folder. The stdout report is
+    // byte-identical across invocations; this telemetry must not break that.
+    eprintln!("{}", thread_budget_line(budget_counts(), resolve_threads()));
 }
 
 /// The `[threads]` run-log line: the thread count, where it came from, and how
@@ -309,7 +330,8 @@ fn print_report(selection: &PrepareSelection, report: &PrepareReport) {
 /// the installed one and `cross` / `cold` should read zero: every batch ran
 /// `inline` in the one pool. Without it (a test calling [`execute`] directly,
 /// or the pool failed to build) the line says so and shows what the next batch
-/// WOULD use. Telemetry only: never sealed, never read back.
+/// WOULD use. Telemetry only: never sealed, never read back, and printed on
+/// stderr because the counts are scheduling-dependent.
 fn thread_budget_line(counts: BudgetCounts, resolved: Budget) -> String {
     let paths = format!(
         "inline {}, cross {}, cold {}",

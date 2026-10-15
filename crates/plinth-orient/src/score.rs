@@ -142,9 +142,10 @@
 use geom_kernel::vec3;
 use plinth_core::m0_constants;
 use plinth_mesh::{
-    build_face_topology, evaluate_delicacy, evaluate_display, mesh_fingerprint,
-    DelicacyBuildConfig, DelicacyError, DelicacyField, DelicacySettings, DisplayBuildConfig,
-    DisplayError, DisplayField, DisplaySettings, Mesh, TopologyError, WeldPolicy,
+    build_face_topology, evaluate_delicacy_with, evaluate_display, mesh_fingerprint,
+    DelicacyBuildConfig, DelicacyError, DelicacyEvaluation, DelicacyField, DelicacySettings,
+    DisplayBuildConfig, DisplayError, DisplayField, DisplaySettings, Mesh, TopologyError,
+    WeldPolicy,
 };
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -919,11 +920,26 @@ impl OrientFaceTable {
     /// the welded mesh is not closed, which the exact section solver requires;
     /// [`ScoreError::Topology`] when the mesh cannot be welded at all.
     pub fn build(mesh: &Mesh, lod: impl Into<String>) -> Result<Self, ScoreError> {
+        Self::build_with(mesh, lod, DelicacyEvaluation::Exact)
+    }
+
+    /// [`Self::build`], with the delicacy curvature evaluation named: the exact
+    /// full-mesh spread, or the protected proxy the production sweep uses by
+    /// default (`SweepRequest::delicacy`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::build`].
+    pub fn build_with(
+        mesh: &Mesh,
+        lod: impl Into<String>,
+        evaluation: DelicacyEvaluation,
+    ) -> Result<Self, ScoreError> {
         let lod = lod.into();
         let settings = DelicacySettings::production().map_err(ScoreError::Delicacy)?;
         let config = DelicacyBuildConfig::production(mesh.tris().len());
-        let fragility =
-            evaluate_delicacy(mesh, lod.clone(), settings, config).map_err(ScoreError::Delicacy)?;
+        let fragility = evaluate_delicacy_with(mesh, lod.clone(), settings, config, evaluation)
+            .map_err(ScoreError::Delicacy)?;
         // The display-face field is measured HERE, on the same `(mesh, LOD)`
         // pair, in the mesh's AUTHORED frame — this table is orientation
         // invariant and the sweep never rotates a mesh (D-4), so "the frame
@@ -1858,7 +1874,8 @@ mod tests {
         let mesh = make_box_default().expect("cube fixture");
         let settings = DelicacySettings::production().expect("production settings");
         let config = DelicacyBuildConfig::production(mesh.tris().len());
-        let field = evaluate_delicacy(&mesh, "l1", settings, config).expect("delicacy field");
+        let field =
+            plinth_mesh::evaluate_delicacy(&mesh, "l1", settings, config).expect("delicacy field");
 
         assert!(matches!(
             OrientFaceTable::with_delicacy(&mesh, "l2", &field),

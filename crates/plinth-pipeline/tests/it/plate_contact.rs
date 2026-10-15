@@ -151,6 +151,7 @@ fn sweep_request(scratch: &Scratch) -> PrepareRequest {
             .expect("registered wall"),
         support: registered_support_request(&printer).expect("registered lift"),
         no_cache: true,
+        exact_delicacy: false,
         stop_after: None,
     }
 }

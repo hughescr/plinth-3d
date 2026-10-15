@@ -49,6 +49,7 @@ pub use score::{
     ORIENT_SCAR_WEIGHT_ID, ORIENT_WEIGHT_HEIGHT_MM_ID, ORIENT_WEIGHT_PEAK_XSEC_CM2_ID,
     ORIENT_WEIGHT_SUPPORT_AREA_CM2_ID, OVERHANG_ANGLE_DEG_ID,
 };
+pub use plinth_mesh::DelicacyEvaluation;
 pub use search::{DenseSweepRecord, LodRecord, SearchError, SweepOutcome, SweepRequest, EXACT_LOD};
 
 use plinth_core::Finite;

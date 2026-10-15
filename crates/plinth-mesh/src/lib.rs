@@ -23,7 +23,7 @@ pub use delicacy::{
     DelicacyBuildConfig, DelicacyError, DelicacyFaceValue, DelicacyField, DelicacySettings,
     FaceTable, DELICACY_FIELD_SCHEMA, DELICACY_FIELD_SCHEMA_VERSION,
 };
-pub use delicacy_eval::evaluate_delicacy;
+pub use delicacy_eval::{evaluate_delicacy, evaluate_delicacy_with, DelicacyEvaluation};
 pub use display::{
     DisplayBuildConfig, DisplayError, DisplayFaceValue, DisplayField, DisplaySettings,
     DISPLAY_FIELD_SCHEMA, DISPLAY_FIELD_SCHEMA_VERSION,
