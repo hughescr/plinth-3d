@@ -92,6 +92,7 @@ mod rigid_share_diagnostic;
 mod pose_demand_probe;
 #[cfg(feature = "slow-tests")]
 mod prefilter_no_brace;
+mod prefix_replan;
 mod root_disc_as_drawn;
 mod round_bases_ratchet;
 mod sabotage;

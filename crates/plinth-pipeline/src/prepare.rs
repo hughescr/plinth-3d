@@ -46,8 +46,11 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use plinth_core::{Finite, ModelId, PositiveFinite, PrinterProfile};
+#[cfg(test)]
+use plinth_decimate::run as run_decimation;
 use plinth_decimate::{
-    run as run_decimation, DecimatedModel, DecimationBudget, ProbeConfig, ScaleSanity,
+    run_deferred as run_decimation_deferred, DecimatedModel, DecimationBudget, ProbeConfig,
+    ScaleSanity,
 };
 use plinth_emit::EmitRequest;
 use plinth_hollow::{
@@ -55,6 +58,7 @@ use plinth_hollow::{
     SolidDecisionReason,
 };
 use plinth_mesh::{load_binary_stl, WeldPolicy};
+use plinth_orient::diag::PendingOutput;
 use plinth_orient::{run as run_orientation, OrientRequest, OrientedModel};
 use plinth_support::{run_support, SupportRequest, SupportRunError};
 use plinth_sweep::perf::{set_phase, Phase as PerfPhase};
@@ -1252,7 +1256,7 @@ fn prepare_one(
 
     set_phase(PerfPhase::Decimate);
     clock.entering("Decimation");
-    let outcome = match run_decimation(&mesh, policy.resources.decimation()) {
+    let outcome = match run_decimation_deferred(&mesh, policy.resources.decimation()) {
         Ok(outcome) => outcome,
         Err(source) => {
             return report(
@@ -1270,8 +1274,14 @@ fn prepare_one(
     // refused at. That is the whole point of surfacing it: "this model was
     // treated as 0.4 mm across" is the finding, and it is invisible in a bare
     // stage error.
-    let decimated = match outcome.into_decimated_model() {
-        Ok(decimated) => decimated,
+    // **The adaptive diagnostics run beside orientation.** An identity result
+    // is final the moment the search ends; the diagnostics that follow only
+    // complete its evidence record. `diagnostics_join` is waited on, and its
+    // error handled, before orientation's own result is looked at and before
+    // any report is built, so the failure a synchronous run would have raised
+    // here still wins, at the same precedence.
+    let (decimated, diagnostics_join) = match outcome.into_decimated_model() {
+        Ok(pair) => pair,
         Err(scale) => {
             return report(
                 &repair,
@@ -1283,8 +1293,20 @@ fn prepare_one(
             )
         }
     };
-    let assumed = Some(AssumedPrintSize::from(decimated.audit().trace().scale));
+    let assumed = Some(AssumedPrintSize::from(decimated.audit().scale()));
     if stop_after == Some(StageStop::Decimate) {
+        if let Some(join) = diagnostics_join {
+            if let Err(source) = join.wait() {
+                return report(
+                    &repair,
+                    None,
+                    failure(&ChainStop::new(PipelineError::Decimate {
+                        model: model.clone(),
+                        source,
+                    })),
+                );
+            }
+        }
         return report(
             &repair,
             assumed,
@@ -1294,8 +1316,24 @@ fn prepare_one(
         );
     }
 
+    // **Nothing orientation produces is published before the diagnostics have
+    // joined.** A synchronous run never reached orientation when the
+    // diagnostics failed, so no orientation output may exist then: the partial
+    // perf sidecar a phase change writes is held, the stage line is read now
+    // and printed after the join, and `orient.json` comes back unwritten from
+    // the search and is written after the join. Without a pending join all
+    // three happen at once, as they always did.
+    let sidecar_hold = diagnostics_join
+        .as_ref()
+        .map(|_| plinth_sweep::perf::hold_partial_sidecar());
     set_phase(PerfPhase::OrientTable);
-    clock.entering("Orientation");
+    let orientation_line = clock.entering_later("Orientation");
+    let orientation_line = if diagnostics_join.is_some() {
+        Some(orientation_line)
+    } else {
+        orientation_line.emit();
+        None
+    };
     // **As drawn?** (GitHub issue #1, owner spec 2026-10-01.) `--orient none`
     // marks every model; then the run's `--no-orient` list; otherwise this
     // model's own tag attribute or `<stem>.asdrawn` marker can. One reason is
@@ -1322,7 +1360,7 @@ fn prepare_one(
     };
     drop(probe_mark);
     let orient_mark = plinth_sweep::perf::stage("orient.orient_model");
-    let (oriented, winner) = match orient_model(
+    let oriented_result = orient_model(
         model,
         decimated,
         &policy.orientation,
@@ -1330,11 +1368,41 @@ fn prepare_one(
         policy.resources.orient(),
         policy.placement,
         policy.winner_plan_reuse,
-    ) {
-        Ok(oriented) => oriented,
-        Err(stop) => return report(&repair, assumed, failure(&stop)),
-    };
+    );
+    // The orient timer covers orientation's own compute; the wait below is not
+    // part of it (it is the diagnostics' tail, charged to their own stages).
     drop(orient_mark);
+    // Join before looking at orientation's result: a synchronous run would
+    // have stopped at the decimation error before orientation ever ran.
+    if let Some(join) = diagnostics_join {
+        if let Err(source) = join.wait() {
+            return report(
+                &repair,
+                None,
+                failure(&ChainStop::new(PipelineError::Decimate {
+                    model: model.clone(),
+                    source,
+                })),
+            );
+        }
+    }
+    drop(sidecar_hold);
+    if let Some(line) = orientation_line {
+        line.emit();
+    }
+    let (oriented, winner, pending_output) = match oriented_result {
+        Ok(oriented) => oriented,
+        // The diagnostics have joined, so a synchronous run got this far: it
+        // wrote `orient.json` in the search, before any failure after it, and a
+        // failure must not destroy that evidence. A failure before the search
+        // ended carries nothing to publish.
+        Err(failed) => {
+            let OrientStop { stop, pending } = *failed;
+            pending.publish();
+            return report(&repair, assumed, failure(&stop));
+        }
+    };
+    pending_output.publish();
     // **The chosen orientation, read once and carried on every disposition
     // from here down.** The closure is SHADOWED rather than given a fourth
     // parameter so that the eleven call sites above and below stay as they
@@ -1540,22 +1608,23 @@ fn orient_model(
     limits: plinth_orient::OrientSearchLimits,
     placement: crate::Placement,
     reuse: WinnerPlanReuse,
-) -> Result<(OrientedModel, RetainedWinner), ChainStop> {
+) -> Result<(OrientedModel, RetainedWinner, PendingOutput), Box<OrientStop>> {
     // Why no plan comes back from the arms that retain nothing.
     let absent = if reuse == WinnerPlanReuse::Disabled {
         plinth_sweep::orient_demand::ReuseMiss::Disabled
     } else {
         plinth_sweep::orient_demand::ReuseMiss::NotRetained
     };
+    let orient_error = |source| {
+        Box::<OrientStop>::from(ChainStop::new(PipelineError::Orient {
+            model: model.clone(),
+            source,
+        }))
+    };
     if let Some(reason) = as_drawn {
         return plinth_orient::orient_as_drawn(decimated, reason)
-            .map(|oriented| (oriented, Err(absent)))
-            .map_err(|source| {
-                ChainStop::new(PipelineError::Orient {
-                    model: model.clone(),
-                    source,
-                })
-            });
+            .map(|oriented| (oriented, Err(absent), PendingOutput::default()))
+            .map_err(orient_error);
     }
     match policy {
         // Reached only when the caller did not pass the run-wide reason,
@@ -1565,21 +1634,12 @@ fn orient_model(
             decimated,
             plinth_orient::as_drawn::AsDrawnReason::OrientNone,
         )
-        .map(|oriented| (oriented, Err(absent)))
-        .map_err(|source| {
-            ChainStop::new(PipelineError::Orient {
-                model: model.clone(),
-                source,
-            })
-        }),
+        .map(|oriented| (oriented, Err(absent), PendingOutput::default()))
+        .map_err(orient_error),
         OrientationPolicy::DenseSweep => {
             let registry_mark = plinth_sweep::perf::stage("orient.registry_request");
-            let mut request = plinth_orient::registered_sweep_request().map_err(|source| {
-                ChainStop::new(PipelineError::Orient {
-                    model: model.clone(),
-                    source,
-                })
-            })?;
+            let mut request =
+                plinth_orient::registered_sweep_request().map_err(orient_error)?;
             drop(registry_mark);
             // The run's resource policy owns the work budget; the registry owns
             // every number that can change a score. Neither owns the other's.
@@ -1588,11 +1648,13 @@ fn orient_model(
             // orientation stage is shared by both `--placement` engines, so
             // wiring the real sweep-demand measurer here fixes the double-
             // charged-flat-pose defect for legacy and sweep placement alike.
-            let orient_error = |source| {
-                ChainStop::new(PipelineError::Orient {
-                    model: model.clone(),
-                    source,
-                })
+            // A failure after the search keeps the search's pending output
+            // (see `OrientStop`); one before it has none.
+            let after_search = |failure: plinth_orient::DeferredFailure| {
+                let (source, pending) = failure.into_parts();
+                let mut stop = orient_error(source);
+                stop.pending = pending;
+                stop
             };
             // THE WINNER'S PLAN (`r1-winner-reuse`): with the sweep engine and
             // reuse on, the finalists' production plans are kept, and the one
@@ -1601,8 +1663,9 @@ fn orient_model(
             // reads a sweep plan, so it keeps the plain measurer.
             if placement == crate::Placement::Sweep && reuse != WinnerPlanReuse::Disabled {
                 let demand = plinth_sweep::orient_demand::RetainingSweepDemand::production();
-                let oriented = plinth_orient::search_and_orient(decimated, &request, Some(&demand))
-                    .map_err(orient_error)?;
+                let (oriented, pending) =
+                    plinth_orient::search_and_orient_deferred(decimated, &request, Some(&demand))
+                        .map_err(after_search)?;
                 let take_mark = plinth_sweep::perf::stage("orient.take_winner");
                 let winner = if reuse == WinnerPlanReuse::SabotageOtherPose {
                     demand.take_other_pose_relabelled(oriented.mesh())
@@ -1610,18 +1673,24 @@ fn orient_model(
                     demand.take_winner(oriented.mesh())
                 };
                 drop(take_mark);
-                return Ok((oriented, winner.ok_or(plinth_sweep::orient_demand::ReuseMiss::NotRetained)));
+                return Ok((
+                    oriented,
+                    winner.ok_or(plinth_sweep::orient_demand::ReuseMiss::NotRetained),
+                    pending,
+                ));
             }
             let demand = plinth_sweep::SweepDemand::production();
-            plinth_orient::search_and_orient(decimated, &request, Some(&demand))
-                .map(|oriented| (oriented, Err(absent)))
-                .map_err(orient_error)
+            plinth_orient::search_and_orient_deferred(decimated, &request, Some(&demand))
+                .map(|(oriented, pending)| (oriented, Err(absent), pending))
+                .map_err(after_search)
         }
         OrientationPolicy::Pinned(baselines) => {
             let Some(pinned) = baselines.get(model.as_str()) else {
-                return Err(ChainStop::new(PipelineError::OrientationBaselineMissing {
-                    model: model.clone(),
-                }));
+                return Err(Box::<OrientStop>::from(ChainStop::new(
+                    PipelineError::OrientationBaselineMissing {
+                        model: model.clone(),
+                    },
+                )));
             };
             run_orientation(
                 decimated,
@@ -1629,14 +1698,28 @@ fn orient_model(
                     pinned: pinned.clone(),
                 },
             )
-            .map(|oriented| (oriented, Err(absent)))
-            .map_err(|source| {
-                ChainStop::new(PipelineError::Orient {
-                    model: model.clone(),
-                    source,
-                })
-            })
+            .map(|oriented| (oriented, Err(absent), PendingOutput::default()))
+            .map_err(orient_error)
         }
+    }
+}
+
+/// An orientation failure, with the output the search had made ready before it
+/// failed. A failure before the search ended has none; a failure after it (a
+/// non-finite transformed mesh) still carries the `orient.json` the synchronous
+/// search wrote before failing, because a failure never destroys diagnostic
+/// evidence.
+struct OrientStop {
+    stop: ChainStop,
+    pending: PendingOutput,
+}
+
+impl From<ChainStop> for Box<OrientStop> {
+    fn from(stop: ChainStop) -> Self {
+        Box::new(OrientStop {
+            stop,
+            pending: PendingOutput::default(),
+        })
     }
 }
 
@@ -2807,7 +2890,8 @@ fn sweep_and_emit(
         }
     };
     // The plan, where it came from, and the sweep's state at checkpoint C (the
-    // edit seed; nothing consumes it yet). A reused plan brings the seed its
+    // edit seed, which also keeps the cap-independent prefix the second
+    // contact's re-plan starts from). A reused plan brings the seed its
     // pose's sweep kept; a plan made here keeps its own, and a miss (a hollowed
     // or drilled shell) keeps that NEW seed, never the retained one.
     let (plan, sweep_plan_source, seed) = match reused {
@@ -2853,8 +2937,10 @@ fn sweep_and_emit(
             plinth_sweep::perf::add(plinth_sweep::perf::Work::SeedMismatch, 1);
         }
         println!(
-            "[sweep {model}] edit seed kept at checkpoint C: {} bytes (estimate), key {}",
+            "[sweep {model}] edit seed kept at checkpoint C: {} bytes (estimate, {} of them the \
+             cap-independent prefix the re-plan starts from), key {}",
             seed.approx_bytes(),
+            seed.prefix_bytes(),
             miss.map_or_else(|| "matches".to_owned(), |why| format!("MISMATCH ({why:?})")),
         );
     }
