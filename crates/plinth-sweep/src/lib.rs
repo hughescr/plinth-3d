@@ -2873,8 +2873,12 @@ fn plan_after_prefix(
         first_loss_ratio: policy.kappa_first_loss / policy.kappa,
         births: &births,
     };
+    s0_member_prints(1, &struts);
     stage_span = perf::span(perf::Span::StageRemoval);
-    for _ in 0..policy.strut_removal_passes {
+    for s0_pass in 0..policy.strut_removal_passes {
+        // S0 (measurement only): the pass's clock, read by the rows below.
+        let s0_pass = usize::try_from(s0_pass).unwrap_or(usize::MAX);
+        let s0_pass_started = perf::enabled().then(std::time::Instant::now);
         // THE PASS IS UNDONE AS A WHOLE IF IT MAKES THE FIELD WORSE. The
         // span test and the replay below are coverage arguments over arms
         // alone; the down-sweep is the only thing that actually knows what
@@ -2912,6 +2916,8 @@ fn plan_after_prefix(
                 outcome = before_outcome.clone();
                 removal_coverage.retried_with_span_proxy += 1;
             }
+            let s0_last = attempt + 1 == span_attempts.len();
+            let s0_replay_started = s0_pass_started.map(|_| std::time::Instant::now());
             let removed = remove_under_loaded(
                 &grid,
                 &mut struts,
@@ -2931,12 +2937,15 @@ fn plan_after_prefix(
             // with the arms it had judged so far, and "nothing removed" would
             // read as an answer (the pass ends, the stages after it run on).
             cancel::checkpoint()?;
+            let s0_replay_ns = s0_replay_started.map_or(0, s0_elapsed_ns);
             if removed == 0 {
                 rolled_back = attempt > 0;
+                s0_removal_row([s0_pass, attempt, 0, 0], s0_replay_ns, 0, s0_pass_started);
                 break;
             }
             cancel::checkpoint()?;
             perf::add(PerfWork::SweepDownCallRemoval, 1);
+            let s0_size_started = s0_pass_started.map(|_| std::time::Instant::now());
             outcome = down_sweep::run_with(
                 &layer_cache,
                 &mut struts,
@@ -2946,6 +2955,7 @@ fn plan_after_prefix(
                 &unrooted,
             );
             cancel::checkpoint()?;
+            let s0_size_ns = s0_size_started.map_or(0, s0_elapsed_ns);
             let more_uncarried = outcome.uncarried_load_mm2
                 > before_outcome.uncarried_load_mm2
                     + 1.0e-9 * before_outcome.uncarried_load_mm2.abs().max(1.0);
@@ -2955,8 +2965,15 @@ fn plan_after_prefix(
                     removal_coverage.rolled_back_for_overload += 1;
                 }
                 rolled_back = true;
+                s0_removal_row(
+                    [s0_pass, attempt, removed, 2],
+                    s0_replay_ns,
+                    s0_size_ns,
+                    s0_pass_started.filter(|_| s0_last),
+                );
                 continue;
             }
+            s0_removal_row([s0_pass, attempt, removed, 1], s0_replay_ns, s0_size_ns, s0_pass_started);
             accepted = removed;
             rolled_back = false;
             break;
@@ -2978,6 +2995,7 @@ fn plan_after_prefix(
     // giving the down-sweep a reason to know about the up-sweep's history.
     set_interior(&mut struts, &history);
 
+    s0_member_prints(2, &struts);
     stage_span = perf::span(perf::Span::StageUnmerge);
     // --- merges the trunk cannot carry are undone -------------------------
     //
@@ -3434,6 +3452,7 @@ fn plan_after_prefix(
     // Descents a sized field put back (arm id, base cell), refused for the
     // rest of the rule, both runs.
     let mut lip_seat_refused: Vec<(u32, usize)> = Vec::new();
+    s0_member_prints(3, &struts);
     stage_span = perf::span(perf::Span::StageLipSeatA);
     cancel::checkpoint()?;
     if let Some(sized) = lip_seat_run.run(
@@ -3463,6 +3482,7 @@ fn plan_after_prefix(
             stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
         ));
     }
+    s0_member_prints(4, &struts);
     stage_span = perf::span(perf::Span::StageGraze);
     // --- graze heads: a head only where a straight shaft would graze --------
     //
@@ -3553,6 +3573,7 @@ fn plan_after_prefix(
             stranded_branch::census(&slenderness_context, &struts, &stranded).len(),
         ));
     }
+    s0_member_prints(5, &struts);
     stage_span = perf::span(perf::Span::StageLipSeatB);
     // --- lip seats again, on the field the head-join rule left -----------
     //
@@ -3598,6 +3619,7 @@ fn plan_after_prefix(
     // NO PASS AT ALL when `slenderness_ties` is off (the orientation search's
     // prefilter, Craig ruling 2026-10-04): the crosses' frame solves were the
     // prefilter's time, and it reads none of what the passes add.
+    s0_member_prints(6, &struts);
     stage_span = perf::span(perf::Span::StageTies);
     let tie_passes_allowed = if policy.slenderness_ties {
         policy.strut_removal_passes
@@ -3719,6 +3741,7 @@ fn plan_after_prefix(
     // lip-seat rule itself re-landed are left alone: Craig's ruling of
     // 2026-10-04 keeps that rule's gate ("no nearer than it stood"), so what
     // it admitted stays a WARNING.
+    s0_member_prints(7, &struts);
     stage_span = perf::span(perf::Span::StageReroute);
     let mut clearance_reroute_outcome = lip_seat::LipSeatOutcome {
         enabled: policy.clearance_reroute,
@@ -3838,6 +3861,7 @@ fn plan_after_prefix(
             moves.note("ties after the clearance re-route", &struts);
         }
     }
+    s0_member_prints(8, &struts);
     stage_span = perf::span(perf::Span::StageGrazeLate);
     // --- graze heads AGAIN, at the final radius (`MODEL-FEET.md` F3) -------
     //
@@ -3906,6 +3930,7 @@ fn plan_after_prefix(
     // borrows the grid and the slices the env takes, and it has a destructor, so
     // it is dropped first (a lent one borrows its lender's); `finish` never
     // reads it (an edit rebuilds it from the env).
+    s0_member_prints(9, &struts);
     drop(layer_cache);
     let drain_keep_out_refusals = keep_out.refusals();
     let env = SweepEnv {
@@ -4593,6 +4618,8 @@ pub(crate) fn finish(
             &scale,
         );
     }
+    // S0 (measurement only): what a chooser early exit would skip.
+    let _s0_after_publish = perf::span(perf::Span::S0AfterPublish);
     sweep_plan.report.seat_footprint = footprint;
     // **HEADS ARE SIZED FOR THE FINAL POST** (v19 fix, 2026-10-07): the first
     // sizing above ran before this rule created its seat moves, and the adapter
@@ -5791,6 +5818,66 @@ fn remove_under_loaded(
     }
     drop_members(struts, &doomed);
     doomed.iter().filter(|flag| **flag).count()
+}
+
+/// S0 (p2design, measurement only): nanoseconds since `since`.
+fn s0_elapsed_ns(since: std::time::Instant) -> u64 {
+    u64::try_from(since.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// S0: one `s0.removal.attempt` row, `[pass, attempt, removed, outcome]`
+/// (outcome 0 nothing removed, 1 accepted, 2 rolled back), the removal call's
+/// and the re-sizing's time, and the whole pass's where `pass_started` is
+/// given (the attempt that ends the pass).
+fn s0_removal_row(head: [usize; 4], replay_ns: u64, size_ns: u64, pass_started: Option<std::time::Instant>) {
+    if !perf::enabled() {
+        return;
+    }
+    let [pass, attempt, removed, result] = head.map(perf::count);
+    perf::row(
+        perf::Rows::RemovalAttempt,
+        &[
+            pass,
+            attempt,
+            removed,
+            result,
+            replay_ns,
+            size_ns,
+            pass_started.map_or(0, s0_elapsed_ns),
+        ],
+    );
+}
+
+/// S0, traced runs only: one `s0.member.print` row per member at stage mark
+/// `stage` of a sweep (see `perf::Rows::MemberPrint`), so the members a
+/// second-contact re-plan changes against the winner can be counted offline.
+fn s0_member_prints(stage: u64, struts: &[SweepStrut]) {
+    use std::hash::{Hash, Hasher};
+    if !perf::traced() {
+        return;
+    }
+    for strut in struts {
+        let mut place = std::collections::hash_map::DefaultHasher::new();
+        std::mem::discriminant(&strut.kind).hash(&mut place);
+        (strut.cell, strut.k_top, strut.k_bottom, &strut.path).hash(&mut place);
+        match strut.landing {
+            Landing::Plate => 0_u8.hash(&mut place),
+            Landing::Model { layer } => (1_u8, layer).hash(&mut place),
+            Landing::Strut { id, layer } => {
+                let host = struts.get(id as usize).map(|host| (host.cell, host.k_top));
+                (2_u8, layer, host).hash(&mut place);
+            }
+        }
+        let place = place.finish();
+        let mut sized = std::collections::hash_map::DefaultHasher::new();
+        place.hash(&mut sized);
+        for radius in strut.radius_mm.iter().chain(&strut.thickened_mm) {
+            radius.to_bits().hash(&mut sized);
+        }
+        strut.min_radius_mm.to_bits().hash(&mut sized);
+        strut.foot_radius_mm.map(f64::to_bits).hash(&mut sized);
+        perf::row(perf::Rows::MemberPrint, &[stage, place, sized.finish()]);
+    }
 }
 
 /// **Drop the arms the lip-seat run found to hold nothing**

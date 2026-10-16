@@ -19,6 +19,14 @@
 //!   flag. Nothing is written, no thread starts and no clock is read until
 //!   [`enable`] is called, which only the CLI does, from `--perf DIR` or
 //!   `PLINTH_PERF_DIR`.
+//! * **Light mode** (`PLINTH_PERF_LIGHT=1` beside `--perf`, S0 2026-10-15):
+//!   counters, spans, pose frames, stage marks and the light row kinds
+//!   ([`Rows::light`]) are on, every work total included ([`enabled`] is
+//!   the counting gate); [`traced`] reads false, so every measurement-only
+//!   scan, per-batch or per-row clock, trace row and the orientation
+//!   diagnostics stay off. That trace is what makes a full `--perf` run
+//!   ~2.7x slower in the sizing; light mode prices the stages at
+//!   near-untraced speed.
 //! * **Batch-first charging.** A kernel counts into local integers and calls
 //!   [`add`] once per query, call or batch, never inside a per-triangle or
 //!   per-cell loop. A brute-force scan is charged as `rows * faces` before its
@@ -652,9 +660,13 @@ pub enum Span {
     ReplayBaselineRestart,
     /// The trial (proposed arm set) potential and its unrooted-cell check of one layer.
     ReplayTrial,
+    /// S0: `finish` from just after the last writer of the unbraced runs
+    /// (`publish_runs` after the footprint) to its end: what a chooser early
+    /// exit (P2 design S7) would skip.
+    S0AfterPublish,
 }
 
-const SPAN_N: usize = 63;
+const SPAN_N: usize = 64;
 
 impl Span {
     /// Every span.
@@ -722,6 +734,7 @@ impl Span {
         Self::ReplayBaseline,
         Self::ReplayBaselineRestart,
         Self::ReplayTrial,
+        Self::S0AfterPublish,
     ];
 
     /// The sidecar label.
@@ -791,6 +804,7 @@ impl Span {
             Self::ReplayBaseline => "replay.baseline",
             Self::ReplayBaselineRestart => "replay.baseline_restart",
             Self::ReplayTrial => "replay.trial",
+            Self::S0AfterPublish => "s0.finish_after_publish",
         }
     }
 
@@ -865,6 +879,10 @@ impl Shard {
 
 static TABLE: [Shard; SHARDS] = [const { Shard::new() }; SHARDS];
 static ENABLED: AtomicBool = AtomicBool::new(false);
+/// Light mode (`PLINTH_PERF_LIGHT=1` when [`enable`] runs): counters, spans,
+/// pose frames, stage marks and the S0 rows, without the per-batch and
+/// per-layer trace ([`enabled`] reads false).
+static LIGHT: AtomicBool = AtomicBool::new(false);
 static PHASE: AtomicU8 = AtomicU8::new(Phase::Other as u8);
 static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
 static WARNED: AtomicBool = AtomicBool::new(false);
@@ -952,11 +970,32 @@ pub enum Rows {
     /// VISITED, to read beside the eligible cells of the same
     /// `(pass_id, layer)` in `down.layer`.
     DownVisit,
+    // S0 (p2design, 2026-10-15): the measurements the P2 design's stages are
+    // priced from. Few rows per pose, so they are stored in light mode too.
+    /// One `lip_seat::apply` call: its jobs, rounds and commits and the
+    /// driver thread's time by part.
+    LipApply,
+    /// One `lip_seat::apply` call: what the stored path tests and the
+    /// boundary-2 tests did, and the round's batch reads.
+    LipApplyB,
+    /// One `lip_seat::apply` call: rounds and driver time by how many jobs
+    /// were open in the round.
+    LipApplyOpen,
+    /// One attempt of one removal pass (`lib.rs` removal block).
+    RemovalAttempt,
+    /// One tie pass (`slenderness::apply_ties_with_model`): rounds, members
+    /// judged and how many of them read a member changed earlier in the
+    /// same round. Traced runs only (the dry read set costs a scan).
+    TiePass,
+    /// One member at one stage mark of a sweep: its placement print and its
+    /// sized print (no ids), to diff the second-contact re-plan against the
+    /// winner offline. Traced runs only.
+    MemberPrint,
 }
 
 /// The widest row payload.
 pub const ROW_WIDTH: usize = 16;
-const ROWS_N: usize = 10;
+const ROWS_N: usize = 16;
 
 impl Rows {
     /// Every kind.
@@ -971,7 +1010,24 @@ impl Rows {
         Self::DownRun,
         Self::LipRound,
         Self::DownVisit,
+        Self::LipApply,
+        Self::LipApplyB,
+        Self::LipApplyOpen,
+        Self::RemovalAttempt,
+        Self::TiePass,
+        Self::MemberPrint,
     ];
+
+    /// Whether this kind is stored in light mode (`PLINTH_PERF_LIGHT=1`): the
+    /// S0 kinds, a few rows per pose, are; the per-batch and per-layer trace
+    /// kinds, whose writing is the cost light mode leaves out, are not.
+    #[must_use]
+    pub const fn light(self) -> bool {
+        matches!(
+            self,
+            Self::LipApply | Self::LipApplyB | Self::LipApplyOpen | Self::RemovalAttempt
+        )
+    }
 
     /// How many rows of this kind one model may store. Each kind has its own
     /// allowance, so a kind that fills its own does not drop another's rows
@@ -986,6 +1042,10 @@ impl Rows {
             Self::DownPass | Self::DownRun | Self::LipRound => 200_000,
             Self::DownLayer | Self::DownVisit => 2_000_000,
             Self::DownInsert => 500_000,
+            Self::LipApply | Self::LipApplyB | Self::LipApplyOpen | Self::RemovalAttempt | Self::TiePass => {
+                50_000
+            }
+            Self::MemberPrint => 1_000_000,
         }
     }
 
@@ -1007,6 +1067,12 @@ impl Rows {
             Self::DownRun => "down.run",
             Self::LipRound => "lip.round",
             Self::DownVisit => "down.visit",
+            Self::LipApply => "s0.lip.apply",
+            Self::LipApplyB => "s0.lip.apply_b",
+            Self::LipApplyOpen => "s0.lip.apply_open",
+            Self::RemovalAttempt => "s0.removal.attempt",
+            Self::TiePass => "s0.tie.pass",
+            Self::MemberPrint => "s0.member.print",
         }
     }
 
@@ -1129,6 +1195,102 @@ impl Rows {
             Self::DownVisit => &[
                 "pass_id", "layer", "route", "spread", "max", "fill", "tail",
             ],
+            // Driver-thread time of one `apply` call by part (`*_ns`; the
+            // parts partition `wall_ns` but for the call's own set-up):
+            // `price` stage 1, `b1` the round's proposals (path tests asked
+            // live or taken from the store), `trial` the trial solids and
+            // hidden-cavity reads, `b2` the ordered commits. The rest are in
+            // `s0.lip.apply_b`. `longest_*`: the job with the most candidates,
+            // and the index of the candidate it moved to plus one (0: none).
+            Self::LipApply => &[
+                "clearance",
+                "jobs",
+                "rounds",
+                "proposals",
+                "commits",
+                "b1_refused",
+                "cand_total",
+                "longest_cands",
+                "longest_accept_plus1",
+                "propose_calls",
+                "propose_ns",
+                "wall_ns",
+                "price_ns",
+                "b1_ns",
+                "trial_ns",
+                "b2_ns",
+            ],
+            // `standing` the movers' standing reads, `ahead` the read-ahead
+            // call (window path tests and trial solids on the driver,
+            // `window_ns`, and its kernel batches), `follow` / `bites` /
+            // `seats` the round's follower reads, seat bites and tip-contact
+            // reads. `stale_today`: stored path tests taken at boundary 1 at
+            // a generation other than the field's (asked again today);
+            // `stale_fine`: of those, the ones a per-cell / per-member tag
+            // (S2's read set) would also call stale; `stored_valid`: taken as
+            // stored. `b2_lock` / `b2_reask` / `b2_reask_refused`: boundary-2
+            // lock refusals, live re-asks, re-asks that refused.
+            // `seat_pairs`: standing-seat (tip contact) pairs read.
+            // `bite_arms` / `bite_known`: arms in the round's bite call and
+            // those the read-ahead had read. `ahead_rows`: rows the
+            // read-ahead sent to the kernel.
+            Self::LipApplyB => &[
+                "standing_ns",
+                "ahead_ns",
+                "window_ns",
+                "follow_ns",
+                "bites_ns",
+                "seats_ns",
+                "stale_today",
+                "stale_fine",
+                "stored_valid",
+                "b2_lock",
+                "b2_reask",
+                "b2_reask_refused",
+                "seat_pairs",
+                "bite_arms",
+                "bite_known",
+                "ahead_rows",
+            ],
+            // Rounds and their driver time by the number of open jobs at the
+            // round's start (1, 2-3, 4-11, 12 or more), the boundary-2
+            // refusals by kind (deltas over the call) and the nubs dropped.
+            Self::LipApplyOpen => &[
+                "rounds_1",
+                "rounds_2_3",
+                "rounds_4_11",
+                "rounds_12",
+                "ns_1",
+                "ns_2_3",
+                "ns_4_11",
+                "ns_12",
+                "ref_clearance",
+                "ref_plate",
+                "ref_roots",
+                "ref_measured",
+                "ref_slender",
+                "nubs",
+            ],
+            // `pass` and `attempt` from 0; `removed` arms the attempt took;
+            // `outcome`: 0 nothing removed (the pass ends), 1 accepted, 2
+            // rolled back; `replay_ns` the removal call (replay included),
+            // `size_ns` the re-sizing after it; `pass_ns` the whole pass
+            // (written on its last attempt only, else 0).
+            Self::RemovalAttempt => &["pass", "attempt", "removed", "outcome", "replay_ns", "size_ns", "pass_ns"],
+            // `judged`: members whose first attempt of a round reached a tie
+            // layer; `conflicts`: of them, those whose read set (the member,
+            // its landing chain, every shaft within the thickest brace's
+            // reach at the tie layer) holds a member changed or added earlier
+            // in the same round; `applied`: remedies applied.
+            Self::TiePass => &["rounds", "judged", "conflicts", "applied", "members", "wall_ns"],
+            // `stage`: 1 after the first down-sweep (the capped insertion),
+            // 2 after removal, 3 before the first lip-seat run, 4 after it,
+            // 5 after head joins, 6 after the second lip-seat run, 7 after
+            // the ties, 8 after the clearance re-route, 9 at the end of the
+            // lanes. `place` hashes kind, cells, layers, landing (a member
+            // landing named by its host's cell and top) and path; `sized`
+            // adds the drawn radii.
+            Self::MemberPrint => &["stage", "place", "sized"],
             Self::TipBatch => &["rows", "faces", "wall_ns"],
             Self::PartnerSearch => &[
                 "kind",
@@ -1274,6 +1436,10 @@ pub fn enable(dir: PathBuf, checkpoint: Duration) {
     epoch();
     let period = u64::try_from(checkpoint.as_millis()).unwrap_or(u64::MAX).max(1);
     CHECKPOINT_MS.store(period, Relax);
+    LIGHT.store(
+        std::env::var_os("PLINTH_PERF_LIGHT").is_some_and(|value| value == "1"),
+        Relax,
+    );
     ENABLED.store(true, Relax);
     TICKER.call_once(|| {
         let started = std::thread::Builder::new()
@@ -1314,11 +1480,25 @@ fn checkpoint_now() {
     }
 }
 
-/// Whether counting is on. One `Relaxed` load.
+/// Whether counting is on, light mode included: the gate of every counter,
+/// span, pose frame, stage mark and light row kind ([`Rows::light`]). One
+/// `Relaxed` load.
 #[inline]
 #[must_use]
 pub fn enabled() -> bool {
     ENABLED.load(Relax)
+}
+
+/// Whether the full trace is on: counting is on and light mode is not. The
+/// gate of the measurement-only work light mode leaves out: the per-batch and
+/// per-row clocks, the trace row kinds' scans and hashes, the reuse probe,
+/// the pose-search diagnostics. An ordinary counter add is gated on
+/// [`enabled`], never on this, so light mode keeps every work total. Two
+/// `Relaxed` loads.
+#[inline]
+#[must_use]
+pub fn traced() -> bool {
+    ENABLED.load(Relax) && !LIGHT.load(Relax)
 }
 
 /// Start a model: zero every counter, enter [`Phase::Load`], name the sidecar.
@@ -1659,7 +1839,7 @@ fn charge_frame(span: Span, ns: u64) {
 /// it with `T::default()` on first use. `None` when counting is off or this
 /// thread has no frame. `f` must not open or drop a span.
 pub fn with_pose_slot<T: Any + Default, R>(f: impl FnOnce(&mut T) -> R) -> Option<R> {
-    if !enabled() {
+    if !traced() {
         return None;
     }
     FRAMES
@@ -1798,7 +1978,7 @@ fn lock_clear<T>(store: &Mutex<Vec<T>>) {
 
 /// Store one row of `kind`. `payload` longer than [`ROW_WIDTH`] is cut.
 pub fn row(kind: Rows, payload: &[u64]) {
-    if !enabled() {
+    if !enabled() || (LIGHT.load(Relax) && !kind.light()) {
         return;
     }
     let mut cols = [0_u64; ROW_WIDTH];
@@ -2064,10 +2244,11 @@ fn serialise(slot: &ModelSlot, partial: bool, now: Instant) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
     format!(
-        "{{\"schema\":\"plinth-perf/1\",\"model\":{},\"partial\":{partial},\"threads\":{},\
+        "{{\"schema\":\"plinth-perf/1\",\"model\":{},\"partial\":{partial},\"light\":{},\"threads\":{},\
          \"checkpoint_unix_ms\":{unix_ms},\"active_phase\":{},\"wall_ms\":{},\"phases\":[{}],\
          \"totals\":{{\"work\":{},\"sched\":{}}},{}}}\n",
         json_string(&slot.model),
+        LIGHT.load(Relax),
         crate::par::current_threads(),
         json_string(active.label()),
         ms(ns_between(slot.started, now)),
@@ -2636,6 +2817,42 @@ mod tests {
         assert!(text.contains("\"tip.batch\":{\"stored\":2,\"allowance\":"), "{text}");
         ENABLED.store(false, Relax);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Light mode (S0): counters (every work total), spans, frames and the
+    /// light row kinds are on; the full trace (`traced`, the trace row kinds,
+    /// the pose slot) is off.
+    #[test]
+    fn light_mode_keeps_counters_spans_and_s0_rows_and_drops_the_trace() {
+        let _guard = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = scratch("light");
+        enable(dir.clone(), HOUR);
+        LIGHT.store(true, Relax);
+        assert!(enabled(), "counting is on in light mode");
+        assert!(!traced(), "the full trace is off in light mode");
+        begin_model("lt");
+        set_phase(Phase::FinalSweep);
+        pose_label(|| "p2".to_owned());
+        {
+            let _run = span(Span::SweepRun);
+            add(Work::SweepRuns, 3);
+            assert!(with_pose_slot(|n: &mut u32| *n += 1).is_none(), "no pose slot in light mode");
+            row(Rows::TipBatch, &[7, 9, 11]);
+            row(Rows::LipApply, &[1, 2, 3]);
+            row(Rows::TiePass, &[4, 5, 6]);
+        }
+        end_model();
+        let text = std::fs::read_to_string(dir.join("lt.perf.json")).expect("final");
+        LIGHT.store(false, Relax);
+        ENABLED.store(false, Relax);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(text.contains("\"light\":true"), "{text}");
+        assert!(text.contains("\"sweep.runs\":3"), "the work total is kept: {text}");
+        assert!(text.contains("\"label\":\"p2\""), "{text}");
+        assert!(text.contains(&format!("[8,{},1,2,3", pose_id("p2"))), "{text}");
+        assert!(text.contains("\"tip.batch\":{\"stored\":0,"), "{text}");
+        assert!(text.contains("\"s0.tie.pass\":{\"stored\":0,"), "{text}");
+        assert!(text.contains("\"s0.lip.apply\":{\"stored\":1,"), "{text}");
     }
 
     fn blank(kind: Rows) -> RowRec {
