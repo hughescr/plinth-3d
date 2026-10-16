@@ -531,6 +531,10 @@ fn layers_bit_equal(left: &LayerPlan, right: &LayerPlan) -> bool {
 pub struct RetainingSweepDemand {
     inner: SweepDemand,
     retained: Mutex<Vec<RetainedPlan>>,
+    /// **Sabotage tests only.** When set, the production batch ignores the
+    /// search's race, so no finalist is withdrawn and every finalist keeps its
+    /// plan. Never set on a real run.
+    keep_every_finalist: bool,
 }
 
 impl RetainingSweepDemand {
@@ -540,6 +544,25 @@ impl RetainingSweepDemand {
         Self {
             inner: SweepDemand::production(),
             retained: Mutex::new(Vec::new()),
+            keep_every_finalist: false,
+        }
+    }
+
+    /// **Sabotage tests only.** [`Self::production`], except that the
+    /// certified early stop is off: every finalist is measured to the end and
+    /// keeps its plan, whatever order they finish in. Which certified losers
+    /// the race has withdrawn by the time the batch returns depends on thread
+    /// timing; the sabotage needs a loser's plan to exist, so it must not
+    /// depend on that. The numbers measured and the winner are unchanged (the
+    /// search recomputes its certified set from the winner's score alone), so
+    /// the emitted file is the same as with the race on.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn production_keeping_every_finalist() -> Self {
+        Self {
+            inner: SweepDemand::production(),
+            retained: Mutex::new(Vec::new()),
+            keep_every_finalist: true,
         }
     }
 
@@ -937,6 +960,11 @@ impl SupportDemandMeasurer for RetainingSweepDemand {
         candidates: &[UpDirection],
         race: &ProductionRace,
     ) -> Vec<RaceOutcome> {
+        if self.keep_every_finalist {
+            // A race in which nothing can be stopped (sabotage tests only).
+            let calm = ProductionRace::never_stops(candidates.len());
+            return self.measure(mesh, table, candidates, DemandFidelity::Production, Some(&calm));
+        }
         self.measure(mesh, table, candidates, DemandFidelity::Production, Some(race))
     }
 

@@ -1678,7 +1678,15 @@ fn orient_model(
             // otherwise plan the same field again. The legacy engine never
             // reads a sweep plan, so it keeps the plain measurer.
             if placement == crate::Placement::Sweep && reuse != WinnerPlanReuse::Disabled {
-                let demand = plinth_sweep::orient_demand::RetainingSweepDemand::production();
+                // The sabotage needs a second finalist's plan, and the race
+                // withdraws certified losers in whatever order the threads
+                // finish, so it runs with the early stop off. The winner and
+                // the emitted file do not depend on the stop.
+                let demand = if reuse == WinnerPlanReuse::SabotageOtherPose {
+                    plinth_sweep::orient_demand::RetainingSweepDemand::production_keeping_every_finalist()
+                } else {
+                    plinth_sweep::orient_demand::RetainingSweepDemand::production()
+                };
                 let (oriented, pending) =
                     plinth_orient::search_and_orient_deferred(decimated, &request, Some(&demand))
                         .map_err(after_search)?;
