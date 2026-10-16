@@ -29,3 +29,4 @@ mod ray_class;
 mod segseg_min;
 mod tapered_clearance;
 mod walk_classified;
+mod worker_stack;
